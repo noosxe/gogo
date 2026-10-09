@@ -87,6 +87,7 @@ time-limited, so they are never cached or persisted:
 
 ```
 open {dest}.part, set_len(total_size)                 # preallocate
+sync_all()   # durable file size (metadata) before any chunk is claimed done
 for each worker (download.workers, default 3):
     own File handle; loop { chunk = jobs.recv() or done }
     per chunk:
@@ -96,7 +97,7 @@ for each worker (download.workers, default 3):
             limiter.until_n_ready(buf.len()).await          # global bytes/s bucket
             if cancelled: flush sidecar; exit 130
             file.write_all_at(pos, buf); md5.update(buf); pos += buf.len()
-        digest == chunk.md5 ? mark done + save sidecar
+        digest == chunk.md5 ? sync_data(); mark done + save sidecar
                              : retry same Range (≤3) else FileFailed (exit 5)
 all chunks done → finalize
 ```
@@ -109,11 +110,19 @@ all chunks done → finalize
   under limiting.
 - Sidecar saved after every chunk completion (atomic tmp+rename; small JSON). Crash window =
   one chunk of lost progress.
-
+- **Durability ordering (power-loss safe):** a chunk's bytes are made durable
+  (`sync_data`) **before** the sidecar rename records the chunk done — a durable sidecar
+  never claims non-durable bytes. The preallocation `sync_all` makes the file size durable
+  up front, so per-chunk `sync_data` suffices. Cost ≈ 1 fsync per 10 MiB chunk (~100/GiB)
+  — noise against the transfer itself.
 ## 5. Stage: resume state — sidecar
 
 `{dest}.part` holds the bytes; `{dest}.part.json` holds the plan state. **No URLs in the
 sidecar** (tokens never touch disk; re-resolution at startup is one cheap API call).
+
+Done-bits are durable claims (04 §4 ordering): a chunk is recorded done only after its
+bytes are fsynced, so **resume never re-verifies completed chunks** — no re-read, no
+re-download, even after a power cut.
 
 ```json
 {
@@ -144,7 +153,10 @@ Orphaned `.part` files (no sidecar, or sidecar for a different product) are repo
 1. All chunks `done` → verify count + `pos == total_size` for each.
 2. Optional whole-file check: if root `md5` present and chunks were verified individually,
    skip the full re-read (per-chunk md5 over the same spans is equivalent evidence).
-3. `rename({dest}.part, {dest})` — POSIX rename within one directory (atomic on Linux/macOS).
+3. `sync_all()` on the `.part` handle (covers the no-chunks stream path too), then
+   `rename({dest}.part, {dest})` — POSIX rename within one directory (atomic on
+   Linux/macOS); best-effort fsync of the destination directory makes the new name itself
+   durable (same pattern as 06 §2).
 4. Append `InstallRecord` to state (06 §3), delete sidecar, emit `FileDone`.
 
 ## 7. Edge cases

@@ -99,8 +99,11 @@ straight → `FileFailed` with "gave up, rerun to resume" (sidecar keeps all com
 
 ## 6. Crash-safety summary (invariants)
 
-1. A file in the download dir **with its final name** is complete and verified — guaranteed by
-   `.part` + atomic rename (04 §6).
-2. Any interruption loses at most one chunk of progress (sidecar per chunk).
+1. A file in the download dir **with its final name** is complete, verified, and durable —
+   `.part` + fsync-before-rename + atomic rename (04 §6). This holds for process crashes
+   **and power loss**.
+2. Any interruption — crash, Ctrl-C, power cut — loses at most one chunk of progress:
+   chunk bytes are fsynced *before* the sidecar rename claims them (04 §4), so a durable
+   sidecar never claims non-durable bytes.
 3. `state.json` is never half-written (tmp+fsync+rename, 06 §2).
 4. Two concurrent gogo processes cannot corrupt state (advisory lock, 06 §1).
