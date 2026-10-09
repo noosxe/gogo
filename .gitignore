@@ -3,7 +3,7 @@
 /gogo-probe/
 
 # --- Local tooling state ---
-/.pi/
+/.pi/tasks/
 
 # --- Rust build (crate lands in implementation phase; Cargo.lock gets committed then) ---
 /target/
