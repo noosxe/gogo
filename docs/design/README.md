@@ -79,3 +79,7 @@ live-verified API model (`docs/04`, `docs/11`, verified 2026-10-08) and the scop
 
 Design phase. Discovery is complete (docs/09 closed; live verification 2026-10-08 recorded in
 docs/11). These documents are the implementation contract for v1.
+
+A critique pass over these docs — incorrect assumptions, contradictions, smells — is recorded
+in [review-2026-10-09](review-2026-10-09.md). Its A/B findings are contract bugs; they are
+fixed in docs and code together (lockstep), starting with the A block.
