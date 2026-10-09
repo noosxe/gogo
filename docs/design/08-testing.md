@@ -23,7 +23,7 @@ structure, replace values (tokens/ids/md5s) before committing anything.
 
 | Module | Cases |
 |---|---|
-| `gog::checksum` | parse fixture; attribute order variance; missing chunks element; whitespace/text-content md5; BOM; `total_size`/`chunks` count mismatch → warn field |
+| `gog::checksum` | parse fixture; attribute order variance; missing chunks element; whitespace/text-content md5; BOM; `total_size`/`chunks` count mismatch → warn field; `available="false"` + `notavailablemsg` → skip outcome (review A2) |
 | `engine::chunk` | planner invariants: contiguity, coverage 0..total_size-1, last partial, size < 1 chunk, exact multiple (property-based via `proptest` — ~1 dep, worth it) |
 | `config` | 4-layer precedence matrix; rate grammar (accept/reject table); env parse errors; validation ranges; unknown TOML key → warning |
 | `state::records` | build-id parse from filename; version equality; outdated() cheap vs strict; adopt-path decision table (04 §2 rules 1–5) |
@@ -41,21 +41,22 @@ One mock server stands in for api.gog.com + CDN (Range support, scriptable statu
 2. **Resume**: drop connection after k chunks (wiremock can close mid-body); rerun;
    assert only remaining chunks requested (Range assertions on the mock), same final bytes.
 3. **Corrupt chunk**: first GET of chunk 2 returns wrong bytes, retry returns right bytes;
-   assert one retry, final md5 ok, sidecar `attempts` recorded.
-4. **Persistent corruption**: always-wrong chunk → exit 5, `.part` + sidecar remain.
+   assert one retry (observed via Warn/event counters — attempts are in-memory, review C6), final md5 ok.
+4. **Persistent corruption**: always-wrong chunk → exit 5, `.part` + both sidecars remain.
 5. **416 / URL expiry**: 403 on first CDN call → re-resolve (assert 2nd downlink call) → OK.
 6. **Extras 403**: bonus_content downlink 403 → Warn event, other files complete, exit 0.
 7. **API 5xx then success**: backoff path (shrunk delays via config), one retry, success.
 8. **401 → refresh → 200**: mock token refresh endpoint; bearer header updated (asserted).
-9. **Disk full**: preflight sees tiny free space (mock via fs4 abstraction seam or a tiny
-   tmpfs mount on Linux CI) → exit 6, nothing written.
-10. **Rate limit**: `limit = 1 MiB/s`, 4 MiB file, assert elapsed ≥ ~4 s ± tolerance and all
-    chunks verified.
+9. **Disk full**: preflight sees tiny free space (mock `FreeSpace` impl — the fs4 call sits
+   behind our trait, review D4) → exit 6, nothing written.
+10. **Rate limit**: `limit = 1 MiB/s`, 4 MiB file, governor's injected clock (fake clock
+    advances the limiter, wall-clock stays fast — review D5) → assert ≥ 4 s accumulated
+    limiter wait; all chunks verified.
 
 ## 4. Property/soak extras
 
 - Chunk planner vs random sizes: total spans always == [0, total_size).
-- Sidecar round-trip: save → load → identical plan (incl. partial completion states).
+- Sidecar round-trip: plan + bitmap save → load → identical state (incl. partial completion).
 
 ## 5. Live smoke (manual, opt-in)
 

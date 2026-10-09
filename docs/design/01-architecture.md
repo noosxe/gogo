@@ -36,7 +36,7 @@ crates/gogo-core/src/
 │   ├── library.rs       # library list: getFilteredProducts (mediaType=1, paged), games only
 │   ├── catalog.rs       # products batch ?ids=… (50/call); Product/Downloads types
 │   ├── downlink.rs      # files[].downlink → { downlink, checksum }
-│   ├── checksum.rs      # quick-xml → ChecksumDoc { name, total_size, chunks[] }
+│   ├── checksum.rs      # quick-xml → ChecksumDoc { name, available, notavailablemsg, md5, total_size, chunks[] }
 │   └── error.rs         # ApiError taxonomy (07 §2)
 ├── engine/
 │   ├── mod.rs           # plan() → execute() orchestration; owns event channel
@@ -45,10 +45,10 @@ crates/gogo-core/src/
 │   ├── chunk.rs         # chunk plan, Range math, completion bitmap
 │   ├── worker.rs        # per-chunk downloader (Range GET → write_at → md5)
 │   ├── limiter.rs       # governor bytes/s bucket, one Arc shared by everything
-│   ├── sidecar.rs       # .part.json load/save (atomic)
+│   ├── sidecar.rs       # .part.json (plan, once) + .part.bitmap (done-bits) — atomic
 │   └── events.rs        # ProgressEvent enum + broadcast channel
 └── state/
-    ├── mod.rs           # state.json load/save (atomic, fsync, fs4 lock)
+    ├── mod.rs           # state.json load/save (atomic, fsync, short-held state lock — 06 §1)
     ├── records.rs       # InstallRecord; version/build comparison (06 §4)
     └── cache.rs         # catalog cache files (06 §3)
 
@@ -105,6 +105,9 @@ contained to two files.
 - Cancellation: `tokio_util::sync::CancellationToken`, fed by `tokio::signal::ctrl_c()`. Workers
   stop at chunk/read boundaries, the sidecar is flushed, exit code 130 (03 §5).
 
+- Deliberate (review D1): workers do blocking `write_all_at` + inline md5 on the runtime
+  threads — at ≤ 16 workers × 10 MiB chunks the blocking windows are noise against the
+  network; revisit only if profiling disagrees.
 ## 4. Engine event channel
 
 The engine talks to frontends **only** through typed events — the v2 TUI consumes the same
@@ -114,7 +117,7 @@ stream the CLI renders:
 pub enum ProgressEvent {
     PlanReady  { files: u32, total_bytes: u64, skipped_bytes: u64 },
     FileStart  { id: Uuid, name: String, total_bytes: u64 },
-    ChunkDone  { id: Uuid, chunk: u32, bytes: u32, md5_ok: bool },
+    ChunkDone  { id: Uuid, chunk: u32, bytes: u32, file_bytes: u64, md5_ok: bool }, // file_bytes cumulative (lag self-heal — D2)
     FileDone   { id: Uuid, path: PathBuf },
     FileFailed { id: Uuid, error: String },
     Warn       { message: String },            // e.g. "bonus content 403 → skipped (bundled)"
@@ -124,6 +127,10 @@ pub enum ProgressEvent {
 
 Transport: `tokio::sync::broadcast`. CLI renders via indicatif (07 §5); `--json-progress`
 prints the same events as NDJSON.
+
+Broadcast lag must be handled (review D2): a consumer that sees `RecvError::Lagged` re-syncs
+from the next event — `ChunkDone.file_bytes` is cumulative for exactly that — so the NDJSON
+stream and the TUI self-heal instead of silently dropping progress.
 
 ## 5. Dependencies
 
@@ -146,14 +153,16 @@ re-verify at implementation time.
 | | url | 2.5.8 | code extraction, redaction |
 | | uuid | ~1 | FileTask ids (v4, `fast-rng` off) |
 | Errors/secrets | thiserror / anyhow | 2.0.21 / 1.0.104 | lib errors / app errors |
-| | keyring | 4.2.0 | token storage |
+| | keyring | 4.2.0 | token storage; features `apple-native` + `sync-secret-service` — no backend compiled ⇒ loud failure by design (02 §3, D6) |
 | | zeroize | 1.9.1 | scrub token strings |
 | Dirs/UX | dirs | 7.0.0 | config/data/cache/download dirs |
 | | indicatif, console | 0.18.6 / 0.16.6 | progress |
 | | dialoguer | 0.12.0 | login paste, ambiguous-game prompt |
 | | comfy-table | 8.0.1 | list/info tables |
 | | bytesize | 2.7.0 | human sizes |
-| Disk | fs4 | 1.1.0 | free-space preflight, state.json advisory lock |
+| Disk | fs4 | 1.1.0 | free-space preflight behind our `FreeSpace` trait (04 §9, D4); state locks (06 §1) |
+| Config edit | toml_edit | ~0.23 | comment-preserving `config set` round-trip (gogo-cli — D7) |
+| Tests (dev) | wiremock · proptest · tempfile | re-verify at impl | mock GOG (08 §3); planner properties (08 §4); temp dirs |
 | Logging | tracing, tracing-subscriber | ~0.1 / ~0.3 | |
 | GOG | gog-warp | git rev-pin | auth/token/user data only (library list is ours — review A1) |
 
@@ -167,6 +176,10 @@ uuid, thiserror, keyring, zeroize, dirs, fs4, tracing, bytesize, gog-warp. **gog
 clap, clap_complete, indicatif, console, dialoguer, comfy-table, tracing-subscriber (anyhow
 and tokio land in both). Versions are pinned once in the root `[workspace.dependencies]`;
 member manifests only say `dep.workspace = true`.
+
+Note (review D10): gog-warp's `Core` ships its own reqwest client (10 s timeouts,
+docs/10 §2) alongside ours (`network.timeout_secs`) — two pools by design; unifying would
+mean forking gog-warp. Auth-adjacent calls are small and rare, so the split is harmless.
 
 ## 6. Data flow (download, happy path)
 

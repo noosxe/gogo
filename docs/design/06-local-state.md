@@ -27,8 +27,12 @@ both standards: the XDG base-directory spec on Linux (`config_dir`, `cache_dir`,
   `$GOGO_HOME/`. Purpose: tests, portable/USB setups, containers. It never touches
   `download.dir` (data stays where the user chose it).
 
-Locking: an advisory `fs4` lock file `state.lock` guards state.json against two concurrent
-gogo processes (second process exits 1 with a clear message).
+Locking (two levels, review B5): an advisory `fs4` lock `state.lock` guards each state.json
+read-modify-write — held only for the short write window, taken briefly by readers too, so
+`gogo list` never fails because a download is running. Download exclusivity is
+per-destination: an flock on `{dest}.part` (created if absent). A second gogo process that
+finds a destination locked **skips that file with a `Warn`** and continues the batch; it
+exits 1 only if every planned target is locked.
 
 ## 2. Atomicity rules
 
@@ -68,9 +72,11 @@ next run. Same procedure for sidecars (04 §5) and the catalog cache.
 ```
 
 - Record identity: `(product_id, dlc_id, file_id)`. `build` is parsed from the filename
-  `…_(<build>).exe` at download time (also stored in `path`, so it's auditable).
-- `verify-cache/{product_id}-{file_id}.xml` keeps the last checksum doc so `gogo verify`
-  works offline; re-resolved from the API when missing.
+  `…_(<build>).exe` best-effort at download time (non-fatal on parse failure — review C7);
+  primary change evidence is the checksum `timestamp` (`checksum_ts`).
+- `verify-cache/{product_id}-{dlc_id|base}-{file_id}.xml` keeps the last checksum doc so
+  `gogo verify` works offline; keyed like records — dlc id included (review A5);
+  re-resolved from the API when missing.
 
 ### `catalog-{locale}.json`
 
@@ -100,7 +106,7 @@ cheap path (default):
      or entry.version != record.version
 
 strict path (--strict, one checksum resolution per file):
-  additionally compares build id (filename `_(N)`) and checksum `timestamp`
+  additionally compares checksum `timestamp` (primary) and build id when parseable (best-effort — review C7)
 ```
 
 - `gogo update` (no args) lists outdated games; `gogo update <games…>` downloads their outdated
@@ -114,4 +120,4 @@ strict path (--strict, one checksum resolution per file):
 
 State is per-machine by design (paths differ). `gogo verify --rebuild` walks the download dir
 and adopts existing verified files into records (fresh state or new machine with copied
-files) — reuses the plan-stage "adopt" path (04 §2 rule 4).
+files) — reuses the execute-stage "adopt" path (04 §2 rule 4).

@@ -31,6 +31,7 @@ pub enum DownloadError {
     #[error("checksum mismatch in {file} (chunk {chunk})")] ChunkMismatch { file: String, chunk: u32 },
     #[error("retries exhausted: {url_redacted}")] RetriesExhausted { url_redacted: String },
     #[error("insufficient disk space: need {need}, have {have}")] DiskSpace { need: u64, have: u64 },
+    #[error("io: {0}")] Io(#[from] std::io::Error),   // ENOSPC maps to DiskSpace/exit 6 (review C1)
     #[error("aborted")] Aborted,
 }
 ```
@@ -47,10 +48,12 @@ redaction can't be forgotten at the log site (04 §5 / 07 §4).
 | `DownloadError::ChunkMismatch` (and verify failures) | 5 |
 | `DownloadError::RetriesExhausted` / `ApiError` after backoff | 4 |
 | `DownloadError::DiskSpace` | 6 |
+| `DownloadError::Io` | 6 for ENOSPC, else 1 |
 | cancellation | 130 |
 | anything else | 1 |
 
-Batch: collect per-file outcomes; exit with the **highest** failed class.
+Batch: collect per-file outcomes; exit with the **highest** failed class — numeric order is
+outcome severity, 3 < 4 < 5 < 6 (rationale in 03 §5, review C1).
 
 ## 3. Retry / backoff matrix
 
@@ -67,12 +70,15 @@ One shared policy implementation (`engine::retry`), parameterized per class. Bac
 | checksum XML | 5xx/network | retry with backoff |
 | CDN chunk | 5xx, timeout, truncated, reset | retry same Range with backoff |
 | CDN chunk | 416 | if sidecar marks span done → done; else re-resolve URL once → retry → fail |
-| CDN | 403 (URL expired) | re-resolve downlink once, rebuild URL, continue remaining chunks |
+| CDN | 403 (URL expired) | re-resolve downlink (bounded: `network.retries`, budget resets on chunk progress — review B3), rebuild URL, continue remaining chunks |
+| CDN chunk | 404 | re-resolve once → `FileFailed` — link revoked / file replaced; no retry loop (review C5) |
 | CDN chunk | md5 mismatch | retry chunk ≤3 (fresh GET each time); then `ChunkMismatch`, exit 5 |
 | any | cancel token | stop gracefully, flush, exit 130 |
 
-Per-file retry budget is also bounded by wall clock: a file retried for more than 30 min
-straight → `FileFailed` with "gave up, rerun to resume" (sidecar keeps all completed chunks).
+Per-file retry budget: 30 min counted as **time in retry backoff / no progress** (review
+B6) — steady transfer never counts, however slow (a rate-limited 60 GiB file at 2 MiB/s is
+progress, not retrying), and any progress resets the timer. Exceeded → `FileFailed` with
+"gave up, rerun to resume" (sidecars keep all completed chunks).
 
 ## 4. Logging & redaction
 
@@ -94,7 +100,7 @@ straight → `FileFailed` with "gave up, rerun to resume" (sidecar keeps all com
   - one bar per active file (default 1): `⟨bar⟩ setup_hot_brass…  512/691 MiB  chunk 49/70`
 - Non-TTY: no bars; a `Warn`-level line per file completion on stderr.
 - `--json-progress`: every `ProgressEvent` (01 §4) as one NDJSON line on stdout, e.g.
-  `{"type":"chunk_done","id":"…","chunk":49,"bytes":10485760,"md5_ok":true}`; final
+  `{"type":"chunk_done","id":"…","chunk":49,"bytes":10485760,"file_bytes":51380224,"md5_ok":true}`; final
   `{"type":"done",…}`. Consumers can reconstruct full state from events alone (TUI does).
 
 ## 6. Crash-safety summary (invariants)
@@ -106,4 +112,5 @@ straight → `FileFailed` with "gave up, rerun to resume" (sidecar keeps all com
    chunk bytes are fsynced *before* the sidecar rename claims them (04 §4), so a durable
    sidecar never claims non-durable bytes.
 3. `state.json` is never half-written (tmp+fsync+rename, 06 §2).
-4. Two concurrent gogo processes cannot corrupt state (advisory lock, 06 §1).
+4. Two concurrent gogo processes cannot corrupt state (short-held state lock) or write the
+   same destination twice (per-destination `.part` lock — 06 §1, review B5).

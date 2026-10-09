@@ -33,7 +33,7 @@ download task** (multi-part installers = `en1installer0`, `en1installer1`, … a
 ## 2. Stage: plan
 
 For every task compute: destination path, current status (new / resumable / already-present /
-outdated), and byte totals. Destination:
+outdated / pending-adoption — rule 4 below), and byte totals. Destination:
 
 ```
 {download.dir}/{sanitized title}/            # DLCs: {dir}/{title}/{dlc title}/
@@ -42,10 +42,12 @@ outdated), and byte totals. Destination:
 
 - `sanitized title`: strip filesystem-hostile characters (slash, backslash, colon, asterisk,
   question mark, quote, angle brackets, pipe) plus control chars, collapse whitespace.
-  Collision-proof by keeping the product id in the state record (dir name stays pretty).
+  Paths may collide benignly when two products share a title (filenames differ); the record's product id disambiguates (dir name stays pretty).
 - The **save filename is the checksum XML `name` attribute** (live-verified canonical form:
   `setup_<slug>_<version>_(<buildid>).exe`) — not the API's per-file id.
-- Extras keep their server-provided filename likewise (from their checksum doc when available).
+- Extras filenames resolve in a fixed chain (review C4): checksum XML `name` →
+  `Content-Disposition` filename → sanitized entry `name` + `-{file_id}` (warn when the
+  last link is used). `Content-Disposition` shape is unverified — probe item (docs/12).
 
 Skip logic (in order):
 
@@ -53,12 +55,17 @@ Skip logic (in order):
    file exists, and its size matches → **skip** (`↷ already present`) unless `--force`.
 2. A record exists but catalog shows a newer `version`/`build` → redownload (04 §8 overwrite).
 3. `{dest}.part` + valid sidecar exists → **resume** (04 §5).
-4. `{dest}` exists with no record → verify against checksum doc now (cheap, local);
-   match → adopt as record + skip; mismatch → re-download over it (warn).
+4. `{dest}` exists with no record → **pending-adoption**: no checksum fetch, no file read at
+   plan time. The execute stage resolves the checksum, verifies the local file (read +
+   md5), then adopts it as a record + skips — or re-downloads over it (warn). Plan stays
+   O(1) per task (review B4: no API calls or hours of disk I/O before the confirmation).
 5. else → download.
 
 Plan emits `PlanReady { files, total_bytes, skipped_bytes }` and a human/JSON plan table
 (`--dry-run` stops here).
+
+Plan totals may overstate while `pending-adoption` tasks await verification — accepted
+(review B4); the end-of-run summary reports actuals.
 
 ## 3. Stage: resolve (per task, just before its download starts)
 
@@ -69,7 +76,7 @@ time-limited, so they are never cached or persisted:
 1. GET api.gog.com/products/{pid}/downlink/installer/{file_id}   (Bearer)
    → 200 { "downlink": <cdn url>, "checksum": <xml url> }
 2. GET {checksum}   (no auth, small)
-   → ChecksumDoc { name, md5, chunks, timestamp, total_size, chunks: [ {id, from, to, md5} ] }
+   → ChecksumDoc { name, available, notavailablemsg, md5, timestamp, total_size, chunks: [ {id, from, to, md5} ] }
 ```
 
 - `ChecksumDoc` is authoritative: size = `total_size`; layout = `chunks[]` (10 MiB spans,
@@ -77,6 +84,9 @@ time-limited, so they are never cached or persisted:
   docs/11) → trust the XML, log a debug note.
 - No-chunks case (some extras): single whole-file stream; verify via root `md5` if present,
   else size-only (warn).
+- `available="false"` (review A2): the checksum doc itself says the file is not
+  downloadable — `Warn` carrying `notavailablemsg`, skip the file; never treated as the
+  no-chunks case.
 - Layout validation on resume: sidecar's `total_size` + chunk count + `from/to` spans must
   match the fresh `ChecksumDoc`; mismatch means GOG replaced the file → discard sidecar,
   restart (warn).
@@ -95,9 +105,9 @@ for each worker (download.workers, default 3):
         md5 = Md5::new(); pos = from
         while let Some(buf) = resp.chunk().await:           # 32–64 KiB reads
             limiter.until_n_ready(buf.len()).await          # global bytes/s bucket
-            if cancelled: flush sidecar; exit 130
+            if cancelled: flush bitmap; exit 130
             file.write_all_at(pos, buf); md5.update(buf); pos += buf.len()
-        digest == chunk.md5 ? sync_data(); mark done + save sidecar
+        digest == chunk.md5 ? sync_data(); mark done + save bitmap
                              : retry same Range (≤3) else FileFailed (exit 5)
 all chunks done → finalize
 ```
@@ -105,24 +115,34 @@ all chunks done → finalize
 - Workers write disjoint offsets via their own handles — no locks on the data file.
 - The rate limiter is **global** (all files, all workers): one `governor` direct limiter with
   `Quota::per_second(bytes_per_sec)`; burst = min(1 MiB, limit). `limit = 0` → no limiter
-  object at all (zero overhead path).
+  object at all (zero overhead path). Asks are split so a single call never exceeds burst
+  capacity (governor rejects larger asks with `InsufficientCapacity` — review A4): a read
+  buffer is consumed in ≤ burst-sized slices, so the configured rate holds exactly, even at
+  the 32 KiB/s floor (05 §3).
 - Progress accounting happens on **written** bytes (not requested), which keeps bars/ETA honest
   under limiting.
-- Sidecar saved after every chunk completion (atomic tmp+rename; small JSON). Crash window =
-  one chunk of lost progress.
+- Progress (done-bits) persists after every chunk completion to `{dest}.part.bitmap`
+  (atomic tmp+rename; ~1 bit per chunk — review C6). Crash window = one chunk of lost
+  progress.
 - **Durability ordering (power-loss safe):** a chunk's bytes are made durable
-  (`sync_data`) **before** the sidecar rename records the chunk done — a durable sidecar
+  (`sync_data`) **before** the `.part.bitmap` rename records the chunk done — a durable
   never claims non-durable bytes. The preallocation `sync_all` makes the file size durable
   up front, so per-chunk `sync_data` suffices. Cost ≈ 1 fsync per 10 MiB chunk (~100/GiB)
   — noise against the transfer itself.
 ## 5. Stage: resume state — sidecar
 
-`{dest}.part` holds the bytes; `{dest}.part.json` holds the plan state. **No URLs in the
-sidecar** (tokens never touch disk; re-resolution at startup is one cheap API call).
+`{dest}.part` holds the bytes; two sidecars hold the state (review C6): `{dest}.part.json`
+is the **plan** (metadata + chunk table, written once at resolve, rewritten only on layout
+change) and `{dest}.part.bitmap` is the **progress** (done-bits, ~1 bit per chunk, atomic
+tmp+rename per completion — a 6k-chunk file updates ~750 B, not ~600 KB of JSON).
+**No URLs in either** (tokens never touch disk; re-resolution is one cheap API call).
 
 Done-bits are durable claims (04 §4 ordering): a chunk is recorded done only after its
 bytes are fsynced, so **resume never re-verifies completed chunks** — no re-read, no
 re-download, even after a power cut.
+
+Per-run retry `attempts` live in memory only (budgets reset on resume); done-bits are the
+only persisted progress.
 
 ```json
 {
@@ -139,8 +159,8 @@ re-download, even after a power cut.
   "total_size": 724243232,
   "whole_md5": "…",
   "chunks": [
-    { "id": 0, "from": 0, "to": 10485759, "md5": "…", "done": true,  "attempts": 1 },
-    { "id": 1, "from": 10485760, "to": 20971519, "md5": "…", "done": false, "attempts": 0 }
+    { "id": 0, "from": 0, "to": 10485759, "md5": "…" },
+    { "id": 1, "from": 10485760, "to": 20971519, "md5": "…" }
   ]
 }
 ```
@@ -157,13 +177,13 @@ Orphaned `.part` files (no sidecar, or sidecar for a different product) are repo
    `rename({dest}.part, {dest})` — POSIX rename within one directory (atomic on
    Linux/macOS); best-effort fsync of the destination directory makes the new name itself
    durable (same pattern as 06 §2).
-4. Append `InstallRecord` to state (06 §3), delete sidecar, emit `FileDone`.
+4. Append `InstallRecord` to state (06 §3), delete both sidecars (`.json` + `.bitmap`), emit `FileDone`.
 
 ## 7. Edge cases
 
 | Case | Handling |
 |---|---|
-| CDN 403 mid-download (URL expired) | re-resolve downlink once, rebuild URL, continue remaining chunks (done chunks are URL-independent) |
+| CDN 403 mid-download (URL expired) | re-resolve downlink (bounded: `network.retries`, budget resets on chunk progress — review B3), rebuild URL, continue remaining chunks (done chunks are URL-independent) |
 | 416 on a Range | treat as "span already satisfied" → mark chunk done only if sidecar says so; else re-resolve once, then fail |
 | Zero-length body / truncated stream | chunk retry (attempts+1); after retries → FileFailed |
 | `total_size` API ≠ XML | XML wins (04 §3); recorded in the record for forensics |
@@ -171,6 +191,7 @@ Orphaned `.part` files (no sidecar, or sidecar for a different product) are repo
 | Filename changes between runs (new build) | old file remains (user may keep versions); record links to new path; `update` output shows both |
 | Very small file (< 1 chunk) | single chunk task; workers idle |
 | Extras without checksum XML | whole-file stream, size-only verify, `Warn` in summary |
+| Checksum root `available="false"` | `Warn` with `notavailablemsg`, skip the file (04 §3, review A2) |
 
 ## 8. Overwrite & version policy
 
@@ -186,3 +207,6 @@ Orphaned `.part` files (no sidecar, or sidecar for a different product) are repo
 Before executing: `fs4::available_space(dest volume)` vs Σ(remaining bytes of planned tasks +
 100 MiB margin). Insufficient → list shortfall, exit 6, download nothing. `--no-disk-check`
 skips (for exotic filesystems where the call lies).
+
+The `available_space` call sits behind a small `FreeSpace` trait (fs4 impl in production,
+mock impl in tests — review D4).

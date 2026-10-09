@@ -12,18 +12,18 @@ existing session.
 
 ### `gogo logout`
 Delete stored tokens. `--all-stores` clear keyring + file · `--purge-state` also remove
-state.json + catalog cache.
+state.json + catalog cache + verify-cache (06 §3).
 
 ### `gogo whoami`
 Username, user id, country, wallet balance, counts. `--json`.
 
 ### `gogo list`
-Owned games table: `ID  TITLE  OS  INSTALLERS  SIZE  INSTALLED(✓ version | –)`.
+Owned games table: `ID  TITLE  OS  INSTALLERS  SIZE  DOWNLOADED(✓ version | –)`.
 Sorted by title. Sources: library list (`getFilteredProducts` `mediaType=1`, always live,
 paged — **games only**) + catalog cache (sizes, versions). DLCs are part of their game:
 indented rows via `--with-dlcs`, never library entries. `--refresh` also busts the product
 cache.
-`--search <text>` title substring · `--os <windows|mac|linux>` filter · `--with-dlcs` include
+`--search <text>` title substring · `--os <windows|mac|linux|all>` filter · `--with-dlcs` include
 DLC rows (indented) · `--refresh` bypass catalog cache · `--json`.
 
 `--json` shape:
@@ -70,10 +70,13 @@ Behavior flags:
 | `--yes` / `-y` | off | skip confirmation prompts |
 | `--limit <rate>` | `download.limit` | per-run rate override (05 §3 grammar) |
 | `--workers <n>` | `download.workers` | per-run parallelism override |
+| `--parallel-files <n>` | `download.parallel_files` | simultaneous files (1..=4) |
 | `--no-disk-check` | off | skip free-space preflight |
 
 Game selectors accept **id**, **slug**, or case-insensitive title substring. Ambiguous →
 interactive pick (dialoguer) or, non-TTY, exit 2 with the candidate list. Unknown → exit 2.
+A DLC id/slug as a selector resolves to its **parent game** (with a notice); DLC content
+itself is selected via `--with-dlcs` (A1).
 
 Exit summary (human): per-file lines `✓ name (size, elapsed)` / `↷ skipped (already present)` /
 `! failed (reason)` + totals. `--json` adds a machine summary with the same facts.
@@ -83,15 +86,18 @@ Detect outdated downloads (06 §4: catalog `version` vs record; `--strict` addit
 compares checksum-XML build id + timestamp) and run the download pipeline for exactly those
 files. With no args: interactive picker of outdated games (non-TTY: all outdated).
 
-### `gogo verify [<game>…] | --all | --path <file>…`
+### `gogo verify [<game>…] | --all | --path <file>… | --rebuild`
 Recompute per-chunk MD5 of downloaded files against their checksum docs (cached in state;
 re-resolved if missing). Read-only, no rate limit. Prints ok/corrupt per file; exit 5 if any
 corrupt. `--fix` re-downloads corrupt files (aliases into the download pipeline).
 
+`--rebuild` walks the download dir and adopts verified files into records (fresh state or a
+new machine with copied files — 06 §5).
+
 ### `gogo config <subcommand>`
 `path` — print the config file location (creating nothing).
 `get <key>` / `set <key> <value>` — read/write the TOML file (set creates dirs, keeps
-comments via toml_edit-style round-trip if the `toml_edit` crate is pulled in, else rewrites).
+comments preserved via a `toml_edit` round-trip — decided, review D7).
 `edit` — open `$EDITOR`.
 
 ## 2. Global flags
@@ -111,7 +117,9 @@ comments via toml_edit-style round-trip if the `toml_edit` crate is pulled in, e
 
 - Never prompt when stdin/stdout is not a TTY (except `login`, which is inherently
   interactive and says so).
-- `download --all` without `--yes` shows the plan table + total size and asks for confirmation.
+- `download --all` without `--yes` shows the plan table + total size and asks for
+  confirmation (TTY). Non-TTY without `--yes`: print the plan and abort, exit 2 — a bulk
+  run never starts silently (review B1).
 - Disk full, checksum mismatch, auth failure: fail fast with a specific exit code; other files
   in the batch continue (failures collected, summary at the end).
 
@@ -136,14 +144,16 @@ comments via toml_edit-style round-trip if the `toml_edit` crate is pulled in, e
 | 130 | interrupted (Ctrl-C), state flushed, resumable |
 
 Batch semantics: if any file fails with code-class X and none with a higher class, exit with
-the highest failed class (e.g. one corrupt file → 5 even if others succeeded).
+the highest failed class (e.g. one corrupt file → 5 even if others succeeded). Numeric order
+is **outcome severity** (auth 3 < network 4 < data-integrity 5 < disk 6 — review C1): a
+batch reports the worst thing that happened, so automation always sees it.
 
 ## 6. Examples
 
 ```
 $ gogo login            # browser opens, paste redirect URL back
 $ gogo list --search brass
-  ID          TITLE     OS                 SIZE     INSTALLED
+  ID          TITLE     OS                 SIZE     DOWNLOADED
   1075439258  Hot Brass win mac linux      691 MiB  ✓ 2.2.2
 
 $ gogo download Hot Brass --with-dlcs --limit 4MiB/s --dry-run

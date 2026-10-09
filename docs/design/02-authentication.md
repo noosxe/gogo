@@ -17,6 +17,12 @@ scope         = (empty — the Galaxy client requests no scoped subset)
 The token exchange itself happens inside gog-warp (`get_token_with_code`); we never implement
 the token endpoint call.
 
+Both constants are public, not secrets (05 §6 untouched): they stay overridable via optional
+`[auth] client_id` / `client_secret` config keys (05 §3, review C3) so a GOG-side rotation
+doesn't require a binary update. Implementation note: gog-warp's `Core` pins its own
+constants — if it can't take injected ones, vendor the two files we use (09 §4) or
+hand-roll the exchange behind `Session`; decide at implementation time.
+
 ## 2. Login flow (`gogo login`)
 
 1. Build the authorize URL (query-encoded):
@@ -59,9 +65,12 @@ pub trait TokenStore: Send + Sync {
 Backends, selected by `auth.token_store`:
 
 - **`keyring`** (default): service `"gogo"`, account = `user_id` or `"default"` before we know
-  it. If the platform secret service is unavailable (headless Linux without Secret Service),
-  warn once and transparently fall back to the file store for this run; the config stays
-  `keyring`.
+  it. **No silent fallback** (review A6, owner decision): the config decides where tokens
+  live, and that decision is honored exactly. If the platform secret service is unavailable
+  (headless Linux without Secret Service), fail loudly — `AuthError::Store`, exit 3 — with
+  the fix in the message: `gogo config set auth.token_store file`. `gogo login` probes the
+  store *before* opening the browser, so a broken store can't waste a login. Switching
+  `token_store` never migrates tokens: re-login on the new backend.
 - **`file`**: `$XDG_STATE_HOME/gogo/tokens.json` (platform dirs per 06 §1) — tokens are
   machine-managed, non-portable state, not user-edited config; the XDG basedir spec lists
   credentials under state, and they sit next to `state.json`. Created `0600`,
@@ -72,17 +81,19 @@ In-memory handling: the blob and extracted tokens are kept in zeroize-on-drop ne
 `Debug`/`Display` impls on anything token-bearing; JSON dumps of API types are produced from
 structs that never include token fields.
 
-`gogo logout` → `TokenStore::clear()` on the active backend; `--all-stores` clears both
-backends defensively; `--purge-state` also deletes `state.json` and the catalog cache (06 §2).
+`gogo logout` → `TokenStore::clear()` on the **configured** backend; `--all-stores` clears
+both (defensive, e.g. after switching backends); `--purge-state` also deletes `state.json`,
+the catalog cache, and `verify-cache/` (06 §3).
 
 ## 4. Session lifecycle
 
 - Every command that needs auth: `Session::restore(store)`. Failure → exit 3 with the hint
   *"not logged in — run `gogo login`"*. Commands that don't need auth (`config path`,
   `--help`, `login`, `--version`) work without a session.
-- `bearer()` is called once per command start (not per request): `obtain_galaxy_token()`
-  returns a valid access token, refreshing lazily inside gog-warp when
-  `login_time + expires_in` has passed (live: `expires_in = 3600` exactly).
+- `bearer()` is called **per API request** (not cached by us — review B2): gog-warp caches
+  the token and refreshes lazily inside `obtain_galaxy_token()` when `login_time +
+  expires_in` has passed (live: `expires_in = 3600` exactly), so multi-hour runs refresh
+  transparently. The 401 path below stays a safety net (clock skew, revocation).
 - After any refresh, compare `serialize_tokens()` with the stored snapshot; changed → re-save.
   Live finding: the refresh_token does **not** rotate (docs/11), but this handles rotation
   should GOG change it.

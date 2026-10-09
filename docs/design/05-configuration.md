@@ -30,7 +30,9 @@ parallel_files = 1            # simultaneous files (1..=4)
 limit = 0                     # bytes/sec; 0 = unlimited (see grammar below)
 
 [auth]
-token_store = "keyring"       # "keyring" | "file"
+token_store = "keyring"       # "keyring" | "file" — where tokens live; no silent fallback (02 §3, review A6)
+# client_id / client_secret: optional overrides of the Galaxy public client — public
+# values, not secrets (review C3); unset = built-in defaults (02 §1)
 
 [gog]
 language = "en"               # preferred installer language (fallback chain: 04 §1)
@@ -55,17 +57,20 @@ catalog_ttl_hours = 24        # catalog cache freshness (06 §3)
 
 Examples: `--limit 4MiB/s`, `--limit 500kib`, `--limit 10485760`. Bare numbers are bytes/sec.
 Rejected: sub-32 KiB/s values (pointless, invites stalls) with a clear usage error (exit 2).
-Internally: `u64` bytes/sec.
+Internally: `u64` bytes/sec. At the floor the limiter splits read buffers so a single ask
+never exceeds burst capacity (04 §4, review A4).
 
 ## 4. Env overlay
 
-Rule: `GOGO_<SECTION>_<KEY>` (uppercase, `_` joins sections), same parse rules as TOML values:
+Rule: **flattened** `GOGO_<NAME>` (one prefix, no mechanical section join — review C2; this
+table is normative). Same parse rules as TOML values:
 
 | Env | Key |
 |---|---|
 | `GOGO_DOWNLOAD_DIR` | `download.dir` |
 | `GOGO_WORKERS` | `download.workers` |
 | `GOGO_LIMIT` | `download.limit` |
+| `GOGO_PARALLEL_FILES` | `download.parallel_files` |
 | `GOGO_TOKEN_STORE` | `auth.token_store` |
 | `GOGO_LANGUAGE` / `GOGO_PLATFORM` / `GOGO_LOCALE` | `gog.*` |
 | `GOGO_RETRIES` | `network.retries` |
@@ -77,9 +82,10 @@ offending name (env mistakes should be loud, not silently ignored).
 
 ## 5. CLI overlay
 
-`cli.rs` holds `Option<T>` mirrors of override-able keys (`--dir`, `--workers`, `--limit`,
-`--language`, `--os`, `--retries`); `Some(_)` wins over every other layer. This is the whole
-merge surface — no hidden interactions.
+`cli.rs` holds `Option<T>` mirrors of override-able keys (`--dir`, `--workers`,
+`--parallel-files`, `--limit`, `--language`, `--os` → overlays `gog.platform`, `--retries`);
+`Some(_)` wins over every other layer. This is the whole merge surface — no hidden
+interactions.
 
 ## 6. Validation & path handling
 
