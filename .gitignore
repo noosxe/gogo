@@ -4,6 +4,7 @@
 
 # --- Local tooling state ---
 /.pi/tasks/
+/.direnv/
 
 # --- Rust build (crate lands in implementation phase; Cargo.lock gets committed then) ---
 /target/
