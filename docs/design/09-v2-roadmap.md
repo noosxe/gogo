@@ -24,7 +24,7 @@ Approach:
 
 ## 2. ratatui TUI
 
-- New crate/binary `gogo-tui` (workspace split happens then; lib extraction is mechanical).
+- Crate `crates/gogo-tui` — workspace member already reserved (01 §1); add ratatui/crossterm deps and the screen code.
 - Consumes `gogo_core`: same plan/execute APIs and the `ProgressEvent` broadcast stream —
   no engine changes required (this was the point of the event channel, 01 §4).
 - Screens (sketch):

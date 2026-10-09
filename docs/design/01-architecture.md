@@ -1,10 +1,21 @@
 # 01 — Architecture
 
-## 1. Crate shape
+**Cargo workspace, three members** (decided 2026-10-09, course-corrected before any engine
+code lands — a split is only cheap while the surface is small):
 
-One package (`gogo`), two targets: the **library** is the product, the CLI binary is a thin
-frontend. When the v2 TUI arrives it becomes a second bin/crate in a workspace depending on the
-same lib — moving to a workspace later is a cheap, mechanical change, so we don't pay for it now.
+- `crates/gogo-core` — the product: config, auth, GOG clients, engine, state. Frontend-agnostic library; the lib name stays `gogo`.
+- `crates/gogo-cli` — thin clap frontend; produces the `gogo` binary. Parsing, prompts, progress bars, tables. No domain logic.
+- `crates/gogo-tui` — v2 ratatui frontend; workspace member reserved now, implemented in v2 (09 §2).
+
+Rules that keep the frontends interchangeable:
+
+- `gogo-core` depends on **no frontend**, ever. Its frontend interface is the library API
+  plus the typed `ProgressEvent` broadcast stream (§4) — both CLI and TUI consume exactly that.
+- Frontends never depend on each other; no domain logic in a frontend, no rendering in core.
+- Every shared dependency version is declared once, in the root `[workspace.dependencies]`;
+  members inherit with `dep.workspace = true` — one place to bump and audit pins.
+- Pure formatting helpers (human sizes) live in core (`fmt`) so both frontends render sizes
+  identically; anything with color, tables, or prompts is a frontend concern.
 
 **Supported platforms: Linux and macOS only.** Windows is explicitly out of scope (README
 non-goals): no Windows path handling, and POSIX semantics are assumed throughout —
@@ -12,12 +23,11 @@ non-goals): no Windows path handling, and POSIX semantics are assumed throughout
 (06 §1).
 
 ```
-src/
-├── main.rs              # clap parsing, AppContext build, exit-code mapping (no logic)
-├── cli.rs               # clap derive types; args → Config overlay (05 §4)
-├── lib.rs               # pub mod exports; prelude
+crates/gogo-core/src/
+├── lib.rs               # pub mod exports; prelude (lib name: gogo)
 ├── config.rs            # schema, layering merge, env overlay, validation (doc 05)
 ├── app.rs               # AppContext { cfg, http, session, state, limiter, events, cancel }
+├── fmt.rs               # pure formatting shared by frontends (human sizes)
 ├── auth/
 │   ├── mod.rs           # Session: gog-warp Core wrapper; login, restore, bearer()
 │   └── store.rs         # TokenStore trait + KeyringStore + FileStore (doc 02 §3)
@@ -37,12 +47,18 @@ src/
 │   ├── limiter.rs       # governor bytes/s bucket, one Arc shared by everything
 │   ├── sidecar.rs       # .part.json load/save (atomic)
 │   └── events.rs        # ProgressEvent enum + broadcast channel
-├── state/
-│   ├── mod.rs           # state.json load/save (atomic, fsync, fs4 lock)
-│   ├── records.rs       # InstallRecord; version/build comparison (06 §4)
-│   └── cache.rs         # catalog cache files (06 §3)
-└── output.rs            # human tables / JSON rendering, size formatting
-```
+└── state/
+    ├── mod.rs           # state.json load/save (atomic, fsync, fs4 lock)
+    ├── records.rs       # InstallRecord; version/build comparison (06 §4)
+    └── cache.rs         # catalog cache files (06 §3)
+
+crates/gogo-cli/src/
+├── main.rs              # clap parsing, AppContext build, exit-code mapping (no logic)
+├── cli.rs               # clap derive types; args → Config overlay (05 §4)
+└── output.rs            # tables / JSON rendering (comfy-table), prompts
+
+crates/gogo-tui/src/
+└── lib.rs               # v2 placeholder — ratatui frontend (09 §2)
 
 ## 2. The one real seam: `TokenProvider`
 
@@ -141,6 +157,13 @@ re-verify at implementation time.
 **Not used in v1**: async-compression (depot-only), crossterm, rpassword, `ctrlc`
 (`tokio::signal` covers it), figment/config (hand-rolled 3-step merge is ~60 lines and fully
 testable — see 05 §4).
+
+Where each dependency lives (workspace members, §1): **gogo-core** gets tokio, reqwest,
+futures, tokio-util, async-trait, governor, serde/serde_json, toml, quick-xml, md-5, url,
+uuid, thiserror, keyring, zeroize, dirs, fs4, tracing, bytesize, gog-warp. **gogo-cli** gets
+clap, clap_complete, indicatif, console, dialoguer, comfy-table, tracing-subscriber (anyhow
+and tokio land in both). Versions are pinned once in the root `[workspace.dependencies]`;
+member manifests only say `dep.workspace = true`.
 
 ## 6. Data flow (download, happy path)
 

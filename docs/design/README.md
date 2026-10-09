@@ -40,8 +40,8 @@ live-verified API model (`docs/04`, `docs/11`, verified 2026-10-08) and the scop
   command and it continues at chunk granularity.
 - **Polite client.** Identifying User-Agent, conservative concurrency defaults, exponential
   backoff with jitter, no retries on 416/404, skip-not-fail for bundled extras (403).
-- **The core is a library.** The `gogo` binary is a thin clap frontend over the library; the v2
-  ratatui TUI plugs into the same core (plan → progress events → records).
+- **The core is a library.** The `gogo` binary (`crates/gogo-cli`) is a thin clap frontend over `gogo-core`; the v2
+  ratatui TUI (`crates/gogo-tui`) plugs into the same core (plan → progress events → records).
 - **No secrets in output.** Tokens, codes, and CDN URL token paths are redacted at every log
   level (see 07 §4).
 

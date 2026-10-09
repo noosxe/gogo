@@ -67,5 +67,6 @@ harness if GOG changes the API.
 
 - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`
 - `cargo nextest run` (unit + integration; wiremock binds 127.0.0.1 — no network needed)
+- All commands run at the workspace root (01 §1); integration tests live in `crates/gogo-core/tests/` — the CLI is too thin to warrant its own suite, the TUI mirrors `list`/`info` rendering through core APIs.
 - `cargo deny` (licenses/advisories; gog-warp git dep noted as Apache-2.0)
 - Coverage informational (target: `engine` + `gog` ≥ 80% line coverage)
