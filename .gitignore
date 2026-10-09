@@ -1,0 +1,20 @@
+# --- Secrets / personal data ---
+# Live-verification probe outputs contain OAuth tokens & account data — never commit
+/gogo-probe/
+
+# --- Local tooling state ---
+/.pi/
+
+# --- Rust build (crate lands in implementation phase; Cargo.lock gets committed then) ---
+/target/
+
+# --- Environment ---
+.env
+.env.*
+
+# --- OS / editor noise ---
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
