@@ -6,8 +6,8 @@ gogo keeps four classes of local data. Paths resolve via `dirs` (platform table 
 
 | Class | Linux (XDG base dirs) | macOS (`~/Library`) | Contents |
 |---|---|---|---|
-| config | `$XDG_CONFIG_HOME/gogo`, else `~/.config/gogo` | `~/Library/Application Support/gogo` | `config.toml`, optionally `tokens.json` (file store) |
-| state | `$XDG_STATE_HOME/gogo`, else `~/.local/state/gogo` | `~/Library/Application Support/gogo` | `state.json` (install records), `verify-cache/` |
+| config | `$XDG_CONFIG_HOME/gogo`, else `~/.config/gogo` | `~/Library/Application Support/gogo` | `config.toml` (the only user-edited file) |
+| state | `$XDG_STATE_HOME/gogo`, else `~/.local/state/gogo` | `~/Library/Application Support/gogo` | `state.json` (install records), `tokens.json` (file store), `verify-cache/` |
 | cache | `$XDG_CACHE_HOME/gogo`, else `~/.cache/gogo` | `~/Library/Caches/gogo` | `catalog-{locale}.json` |
 | data | user-chosen `download.dir` (default under the XDG download dir, 05 §3) | same | `{Title}/setup_….exe`, `.part` + sidecars while running |
 

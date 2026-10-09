@@ -62,7 +62,9 @@ Backends, selected by `auth.token_store`:
   it. If the platform secret service is unavailable (headless Linux without Secret Service),
   warn once and transparently fall back to the file store for this run; the config stays
   `keyring`.
-- **`file`**: `$XDG_CONFIG_HOME/gogo/tokens.json` (platform dirs per 06 §1). Created `0600`,
+- **`file`**: `$XDG_STATE_HOME/gogo/tokens.json` (platform dirs per 06 §1) — tokens are
+  machine-managed, non-portable state, not user-edited config; the XDG basedir spec lists
+  credentials under state, and they sit next to `state.json`. Created `0600`,
   parent dirs `0700`. Before writing: if the existing file's permissions are wider than 0600,
   tighten and warn.
 

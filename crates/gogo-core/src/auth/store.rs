@@ -31,8 +31,9 @@ impl TokenStore for KeyringStore {
     }
 }
 
-/// `tokens.json` under the config dir: created `0600`, parents `0700`; wider existing
-/// permissions are tightened (with a warning) before writing.
+/// `tokens.json` under the state dir (`$XDG_STATE_HOME/gogo`, macOS falls back to
+/// Application Support — 06 §1): machine-managed state, not config; created `0600`,
+/// parents `0700`; wider existing permissions are tightened (with a warning) before writing.
 pub struct FileStore;
 
 #[async_trait::async_trait]
