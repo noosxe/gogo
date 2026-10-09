@@ -1167,23 +1167,33 @@ dependencies = [
 ]
 
 [[package]]
-name = "gogo"
+name = "gogo-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
- "bytesize",
  "clap",
  "clap_complete",
  "comfy-table",
  "console",
  "dialoguer",
+ "gogo-core",
+ "indicatif",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "gogo-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytesize",
  "dirs",
  "fs4",
  "futures",
  "gog-warp",
  "governor",
- "indicatif",
  "keyring",
  "md-5 0.11.0",
  "quick-xml",
@@ -1196,12 +1206,15 @@ dependencies = [
  "tokio-util",
  "toml",
  "tracing",
- "tracing-subscriber",
  "url",
  "uuid",
  "wiremock",
  "zeroize",
 ]
+
+[[package]]
+name = "gogo-tui"
+version = "0.1.0"
 
 [[package]]
 name = "governor"

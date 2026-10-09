@@ -1,0 +1,22 @@
+[package]
+name = "gogo-cli"
+description = "Command-line frontend for gogo-core (binary: gogo)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "gogo"
+path = "src/main.rs"
+
+[dependencies]
+gogo-core.workspace = true
+clap.workspace = true
+clap_complete.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+indicatif.workspace = true
+console.workspace = true
+dialoguer.workspace = true
+comfy-table.workspace = true
+tracing-subscriber.workspace = true

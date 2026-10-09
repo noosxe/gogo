@@ -1,0 +1,9 @@
+[package]
+name = "gogo-tui"
+description = "ratatui terminal frontend for gogo-core (v2 — member reserved, not implemented yet)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+# v2: ratatui, crossterm, and gogo-core land here (docs/design/09 §2).
