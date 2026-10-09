@@ -19,7 +19,10 @@ Username, user id, country, wallet balance, counts. `--json`.
 
 ### `gogo list`
 Owned games table: `ID  TITLE  OS  INSTALLERS  SIZE  INSTALLED(✓ version | –)`.
-Sorted by title. Sources: owned ids (always live, 1 call) + catalog cache.
+Sorted by title. Sources: library list (`getFilteredProducts` `mediaType=1`, always live,
+paged — **games only**) + catalog cache (sizes, versions). DLCs are part of their game:
+indented rows via `--with-dlcs`, never library entries. `--refresh` also busts the product
+cache.
 `--search <text>` title substring · `--os <windows|mac|linux>` filter · `--with-dlcs` include
 DLC rows (indented) · `--refresh` bypass catalog cache · `--json`.
 
@@ -36,8 +39,9 @@ entry (kind, os, language, version, size, files count), DLC tree, extras list wi
 `--json` dumps the raw product JSON (as stored in cache, minus nothing — it has no secrets).
 
 ### `gogo download <game>… | --all`
-The main event. Selector `--all` means every owned game (with `--yes` or a confirmation
-prompt listing totals).
+The main event. Selector `--all` means every game in the library list (games only; DLCs
+enter exclusively via `--with-dlcs` from their parent game) with `--yes` or a confirmation
+prompt listing totals.
 
 Content selection flags (all combinable):
 

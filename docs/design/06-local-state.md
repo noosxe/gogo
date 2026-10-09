@@ -75,14 +75,17 @@ next run. Same procedure for sidecars (04 §5) and the catalog cache.
 ### `catalog-{locale}.json`
 
 ```json
-{ "fetched_at": "2026-10-08T11:00:00Z", "owned_ids_fetched_at": "…", "products": { "1075439258": { …raw product JSON… } } }
+{ "fetched_at": "2026-10-08T11:00:00Z", "products": { "1075439258": { …raw product JSON… } } }
 ```
 
 - Products fetched in 50-id batches (`?ids=…`), stored raw (serde passthrough) — rendering and
   filtering happen over typed views built from it.
-- **Owned ids are never cached** — `list`/`download` always fetch `/user/data/games` (one cheap
-  call) so new purchases appear instantly; the per-product cache has TTL
-  `state.catalog_ttl_hours` and `--refresh` bypasses it.
+- Products are fetched for **game ids only** — DLC data arrives embedded in the parent's
+  `expanded_dlcs` and is never cached as a separate product.
+- **The library list is never cached** — `list`/`download` always fetch
+  `getFilteredProducts` (live, paged, games only — review A1) so new purchases appear
+  instantly; the per-product cache has TTL `state.catalog_ttl_hours` and `--refresh`
+  bypasses it.
 - Cache is disposable at any time; corruption → rebuild silently.
 
 ## 4. Update detection

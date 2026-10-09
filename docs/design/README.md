@@ -63,7 +63,8 @@ live-verified API model (`docs/04`, `docs/11`, verified 2026-10-08) and the scop
 
 | Decision | Rationale / source |
 |---|---|
-| gog-warp for auth + token lifecycle + owned ids | Apache-2.0, source-verified API (docs/10 §2); not on crates.io → git rev-pin |
+| gog-warp for auth + token lifecycle + user data | Apache-2.0, source-verified API (docs/10 §2); not on crates.io → git rev-pin |
+| getFilteredProducts (mediaType=1) is the library | /user/data/games mixes DLC/bundle/movie ids into the game list (live: 146 ids vs 83 products, docs/11) — review A1 |
 | Own catalog/downlink/checksum/download engine | Nothing in Rust covers Model A (docs/08 gap table) |
 | Browser paste-code OAuth | GOG blocks custom redirect URIs; no local server; 2FA/CAPTCHA work naturally (docs/02) |
 | Checksum XML authoritative | API `total_size` disagrees with XML `total_size` (live, docs/11); XML carries per-chunk MD5 |

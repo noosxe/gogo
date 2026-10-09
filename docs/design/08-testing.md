@@ -13,7 +13,7 @@ sizes, ids, urls) is fake:
 | `checksum.xml` | live Hot Brass checksum doc (70-chunk layout shrunk to 4 chunks) | checksum parser, engine |
 | `product.json` | products API entry with downloads/expanded_dlcs | catalog client |
 | `downlink.json` | `{downlink, checksum}` response | downlink client |
-| `library.json` | owned-ids array | library client |
+| `library.json` | getFilteredProducts page (games-only product list) | library client |
 | `sidecar-v1.json` | sidecar example (04 §5) | resume tests |
 
 Regeneration note: `probe.sh` artifacts in `gogo-probe/` are the reference shapes — copy

@@ -33,7 +33,7 @@ crates/gogo-core/src/
 │   └── store.rs         # TokenStore trait + KeyringStore + FileStore (doc 02 §3)
 ├── gog/                 # GOG API clients; all serde types live here
 │   ├── mod.rs           # http() client factory: UA, timeouts, rustls, no gzip
-│   ├── library.rs       # owned ids (embed /user/data/games), getFilteredProducts paging
+│   ├── library.rs       # library list: getFilteredProducts (mediaType=1, paged), games only
 │   ├── catalog.rs       # products batch ?ids=… (50/call); Product/Downloads types
 │   ├── downlink.rs      # files[].downlink → { downlink, checksum }
 │   ├── checksum.rs      # quick-xml → ChecksumDoc { name, total_size, chunks[] }
@@ -82,8 +82,11 @@ The live impl `Session` wraps `gog_warp::Core`:
 - after a refresh: `core.serialize_tokens()` vs stored snapshot — if different, re-save via
   `TokenStore` (handles rotation even though live refresh tokens turned out to be stable)
 
-**gog-warp scope in v1**: token exchange, refresh, owned-product ids (`get_owned_products()`),
-user data (`get_user_data()`). Model B machinery (`get_builds`, `get_manifest`, its downloader)
+**gog-warp scope in v1**: token exchange, refresh, user data (`get_user_data()`). The
+owned-ids endpoint (`get_owned_products()`) is unused for library membership: it mixes
+DLC/bundle/movie ids in with games (live: 146 ids vs 83 products, docs/11) — `gog::library`
+lists via `getFilteredProducts` instead (review A1). Model B machinery (`get_builds`,
+`get_manifest`, its downloader)
 is unused. gog-warp stays behind `TokenProvider` + `auth::store`, so an upstream API break is
 contained to two files.
 
@@ -152,7 +155,7 @@ re-verify at implementation time.
 | | bytesize | 2.7.0 | human sizes |
 | Disk | fs4 | 1.1.0 | free-space preflight, state.json advisory lock |
 | Logging | tracing, tracing-subscriber | ~0.1 / ~0.3 | |
-| GOG | gog-warp | git rev-pin | auth/token/owned-ids only |
+| GOG | gog-warp | git rev-pin | auth/token/user data only (library list is ours — review A1) |
 
 **Not used in v1**: async-compression (depot-only), crossterm, rpassword, `ctrlc`
 (`tokio::signal` covers it), figment/config (hand-rolled 3-step merge is ~60 lines and fully
