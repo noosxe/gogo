@@ -124,11 +124,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
         } => list(search, os, json, color).await,
         Command::Info { game, json } => info(game, json).await,
         Command::Download(args) => download(args).await,
-        Command::Update {
-            games,
-            all,
-            strict: _,
-        } => update(games, all).await,
+        Command::Update { games, all, strict } => update(games, all, strict).await,
         Command::Verify {
             games,
             all,
@@ -399,7 +395,7 @@ async fn download(args: cli::DownloadArgs) -> Result<i32, AppError> {
         workers,
         parallel_files,
         limit,
-        force: _,
+        force,
         no_disk_check,
         json_progress: _,
         json: _,
@@ -470,7 +466,7 @@ async fn download(args: cli::DownloadArgs) -> Result<i32, AppError> {
         products.push(detail);
     }
 
-    let tasks = engine::plan(&ctx, &products, &filters).await;
+    let tasks = engine::plan(&ctx, &products, &filters, force).await;
     print_plan(&tasks);
 
     if dry_run {
@@ -572,7 +568,7 @@ fn print_plan(tasks: &[gogo::engine::task::FileTask]) {
 
 // — update: plan, keep only outdated tasks, execute —
 
-async fn update(games: Vec<String>, all: bool) -> Result<i32, AppError> {
+async fn update(games: Vec<String>, all: bool, strict: bool) -> Result<i32, AppError> {
     let ctx = session_ctx().await?;
     let token = bearer(&ctx).await?;
     let selected = if all {
@@ -593,8 +589,20 @@ async fn update(games: Vec<String>, all: bool) -> Result<i32, AppError> {
     for game in &selected {
         products.push(gogo::gog::catalog::detail(&ctx.http, &token, game.id).await?);
     }
-    let tasks: Vec<_> = engine::plan(&ctx, &products, &filters)
-        .await
+    let mut tasks = engine::plan(&ctx, &products, &filters, false).await;
+    // 06 §4 strict path: version-equal files may still have drifted — compare
+    // checksum timestamp (primary) and build id via one resolution each.
+    if strict {
+        for task in tasks
+            .iter_mut()
+            .filter(|t| matches!(t.status, gogo::engine::task::Status::Present))
+        {
+            if engine::strict_outdated(&ctx, &token, task).await {
+                task.status = gogo::engine::task::Status::Outdated;
+            }
+        }
+    }
+    let tasks: Vec<_> = tasks
         .into_iter()
         .filter(|t| matches!(t.status, gogo::engine::task::Status::Outdated))
         .collect();

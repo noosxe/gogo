@@ -61,14 +61,19 @@ enum Outcome {
 /// (`docs/design/04` §2). Review B4: O(1) per task — no checksum fetches, no file
 /// reads (a `stat` for skip-rule 1 is metadata only). Plan totals may overstate while
 /// `pending-adoption` tasks await verification — accepted; execute reports actuals.
-pub async fn plan(ctx: &Arc<AppContext>, products: &[Product], filters: &Filters) -> Vec<FileTask> {
+pub async fn plan(
+    ctx: &Arc<AppContext>,
+    products: &[Product],
+    filters: &Filters,
+    force: bool,
+) -> Vec<FileTask> {
     let root = download_root(ctx);
     let mut tasks = Vec::new();
     for product in products {
         tasks.extend(select::for_product(product, filters, &root));
     }
     for task in &mut tasks {
-        task.status = classify(task, &ctx.state, &root);
+        task.status = classify(task, &ctx.state, &root, force);
     }
 
     let files = tasks
@@ -96,7 +101,12 @@ pub async fn plan(ctx: &Arc<AppContext>, products: &[Product], filters: &Filters
 /// Plan-time skip logic (`docs/design/04` §2 rules 1–5). The save name is only known
 /// after resolve, so resume/adoption detection is approximate here and authoritative
 /// at execute time.
-fn classify(task: &FileTask, state: &Mutex<crate::state::State>, root: &Path) -> Status {
+fn classify(
+    task: &FileTask,
+    state: &Mutex<crate::state::State>,
+    root: &Path,
+    force: bool,
+) -> Status {
     let state = state.lock().expect("state lock");
     let record = state.installs.iter().find(|r| {
         r.product_id == task.product_id && r.dlc_id == task.dlc_id && r.file_id == task.file.id
@@ -104,6 +114,12 @@ fn classify(task: &FileTask, state: &Mutex<crate::state::State>, root: &Path) ->
     if let Some(record) = record {
         if crate::state::records::is_outdated(record, task.entry.version.as_deref(), None, false) {
             return Status::Outdated;
+        }
+        // `--force` bypasses ONLY the "already present" skip (04 §5): the file is
+        // redownloaded fresh. Returning here (not falling through) matters — the
+        // adoption rule below would re-adopt the very file being forced.
+        if force {
+            return Status::New;
         }
         // Rule 1: record + file present + size matches → skip.
         if let Ok(meta) = std::fs::metadata(root.join(&record.path))
@@ -120,6 +136,75 @@ fn classify(task: &FileTask, state: &Mutex<crate::state::State>, root: &Path) ->
         return Status::PendingAdoption;
     }
     Status::New
+}
+
+/// C7 strict comparison (06 §4): checksum `timestamp` is primary; build id is
+/// compared best-effort when both sides parse (record ts absent → only build).
+pub fn strict_outdated_doc(
+    record: &InstallRecord,
+    doc: &crate::gog::checksum::ChecksumDoc,
+) -> bool {
+    if record.checksum_ts.is_some() && record.checksum_ts != doc.timestamp {
+        return true;
+    }
+    if let (Some(record_build), Some(doc_build)) = (
+        &record.build_id,
+        crate::state::records::parse_build(&doc.name),
+    ) && record_build != &doc_build
+    {
+        return true;
+    }
+    false
+}
+
+/// `update --strict` probe: one downlink + checksum resolution per PRESENT task
+/// (the sanctioned B4 exception, 06 §4). Resolve failures degrade to "not
+/// outdated" — the cheap path already vouched for the version.
+pub async fn strict_outdated(ctx: &Arc<AppContext>, bearer: &str, task: &FileTask) -> bool {
+    let record = {
+        let state = ctx.state.lock().expect("state lock");
+        state
+            .installs
+            .iter()
+            .find(|r| {
+                r.product_id == task.product_id
+                    && r.dlc_id == task.dlc_id
+                    && r.file_id == task.file.id
+            })
+            .cloned()
+    };
+    let Some(record) = record else {
+        return false;
+    };
+    let dl = match crate::gog::downlink::resolve(&ctx.http, bearer, &task.file.downlink).await {
+        Ok(dl) => dl,
+        Err(e) => {
+            let _ = ctx.events.send(ProgressEvent::Warn {
+                message: format!("strict check skipped (resolve): {e}"),
+            });
+            return false;
+        }
+    };
+    let raw = match crate::gog::checksum::fetch_raw(&ctx.http, &dl.checksum).await {
+        Ok(raw) => raw,
+        Err(e) => {
+            let _ = ctx.events.send(ProgressEvent::Warn {
+                message: format!("strict check skipped (checksum): {e}"),
+            });
+            return false;
+        }
+    };
+    // A5: keep the cache warm — a later `verify` works offline.
+    let _ = crate::state::cache::save_checksum(task.product_id, task.dlc_id, &task.file.id, &raw);
+    match crate::gog::checksum::parse(&raw) {
+        Ok(doc) => strict_outdated_doc(&record, &doc),
+        Err(e) => {
+            let _ = ctx.events.send(ProgressEvent::Warn {
+                message: format!("strict check skipped (parse): {e}"),
+            });
+            false
+        }
+    }
 }
 
 fn dir_contains(dir: &Path, suffix: &str) -> bool {

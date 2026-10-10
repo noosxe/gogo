@@ -455,3 +455,89 @@ async fn present_task_counts_as_skipped_without_calls() {
     assert_eq!(summary.skipped, 1);
     assert!(root.path().read_dir().unwrap().next().is_none());
 }
+
+#[test]
+fn strict_outdated_doc_timestamp_primary_then_build() {
+    use crate::engine::strict_outdated_doc;
+    use crate::gog::checksum::ChecksumDoc;
+    use crate::state::records::InstallRecord;
+
+    let rec: InstallRecord = serde_json::from_value(serde_json::json!({
+        "product_id": 1, "dlc_id": null, "file_id": "f", "entry_id": "en1installer0",
+        "kind": "installer", "version": "1.0", "size": 10, "path": "Game/f",
+        "build_id": "7", "checksum_ts": 100, "installed_at": "2026-10-10T00:00:00Z"
+    }))
+    .unwrap();
+    let same = ChecksumDoc {
+        timestamp: Some(100),
+        name: "setup_g_(7).exe".into(),
+        ..Default::default()
+    };
+    assert!(!strict_outdated_doc(&rec, &same));
+
+    let ts_drift = ChecksumDoc {
+        timestamp: Some(101),
+        name: "setup_g_(7).exe".into(),
+        ..Default::default()
+    };
+    assert!(strict_outdated_doc(&rec, &ts_drift), "timestamp is primary");
+
+    let build_drift = ChecksumDoc {
+        timestamp: Some(100),
+        name: "setup_g_(8).exe".into(),
+        ..Default::default()
+    };
+    assert!(strict_outdated_doc(&rec, &build_drift));
+
+    let legacy = ChecksumDoc {
+        timestamp: Some(999),
+        name: "no_build.exe".into(),
+        ..Default::default()
+    };
+    // ts absent in record: only build compared — unparseable build never flags.
+    let mut legacy_rec = rec.clone();
+    legacy_rec.checksum_ts = None;
+    legacy_rec.build_id = None;
+    assert!(!strict_outdated_doc(&legacy_rec, &legacy));
+}
+
+#[tokio::test]
+async fn force_redownloads_instead_of_present_skip() {
+    let _env = TestEnv::new();
+    let root = tempfile::tempdir().unwrap();
+    let ctx = test_ctx(root.path()).await;
+    let task = task_for("http://unused".into(), 5);
+
+    // Record + on-disk file with matching size → Present without force.
+    let dest = root.path().join("Game").join("f");
+    std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+    std::fs::write(&dest, vec![0u8; 5]).unwrap();
+    {
+        let mut state = ctx.state.lock().unwrap();
+        state.installs.push(crate::state::records::InstallRecord {
+            product_id: task.product_id,
+            product_title: Some("Game".into()),
+            file_id: task.file.id.clone(),
+            entry_id: task.entry.id.clone(),
+            kind: "installer".into(),
+            version: task.entry.version.clone(),
+            size: 5,
+            path: "Game/f".into(),
+            dlc_id: None,
+            build_id: None,
+            checksum_ts: None,
+            installed_at: "2026-10-10T00:00:00Z".into(),
+        });
+    }
+    let root_path = root.path().to_path_buf();
+    assert!(matches!(
+        crate::engine::classify(&task, &ctx.state, &root_path, false),
+        Status::Present
+    ));
+    // --force bypasses ONLY the present skip (04 §5): fresh New task, never an
+    // adoption of the very file being forced.
+    assert!(matches!(
+        crate::engine::classify(&task, &ctx.state, &root_path, true),
+        Status::New
+    ));
+}
