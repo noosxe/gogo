@@ -33,6 +33,29 @@ pub enum ApiError {
     Other(String),
 }
 
+impl ApiError {
+    /// Shared response-status → taxonomy mapping (`docs/design/07` §3).
+    /// 2xx passes through; 401/403/404/429 map to their variants (the retry layer keys
+    /// off `Status`/`RateLimited`).
+    pub async fn check(resp: reqwest::Response) -> Result<reqwest::Response, ApiError> {
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(resp);
+        }
+        let reason = status.canonical_reason().unwrap_or("unknown").to_string();
+        Err(match status.as_u16() {
+            401 => ApiError::Unauthorized,
+            403 => ApiError::Forbidden(reason),
+            404 => ApiError::NotFound(reason),
+            429 => ApiError::RateLimited { status: 429 },
+            _ => ApiError::Status {
+                status: status.as_u16(),
+                message: reason,
+            },
+        })
+    }
+}
+
 /// Auth-layer errors (`docs/design/02`, exit code 3).
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {

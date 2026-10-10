@@ -1,7 +1,7 @@
 //! GOG API clients; all serde types live here (`docs/design/01` §1).
 //!
 //! Endpoints (live-verified 2026-10-08, docs/11):
-//! - embed API: `https://embed.gog.com` (Bearer) — owned ids, user data, downlink
+//! - embed API: `https://embed.gog.com` (Bearer) — games library (`getFilteredProducts`)
 //! - catalog:   `https://api.gog.com/products?ids=…` (Bearer) — batch product JSON
 //! - checksum:  public CDN XML — no auth (`docs/design/04` §2)
 
