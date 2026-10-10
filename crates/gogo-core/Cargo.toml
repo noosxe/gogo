@@ -24,6 +24,7 @@ quick-xml.workspace = true
 md-5.workspace = true
 url.workspace = true
 uuid.workspace = true
+chrono.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 keyring.workspace = true
@@ -37,3 +38,4 @@ gog-warp.workspace = true
 [dev-dependencies]
 wiremock.workspace = true
 tempfile.workspace = true
+proptest.workspace = true

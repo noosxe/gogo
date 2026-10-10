@@ -57,3 +57,68 @@ impl CompletionBitmap {
         (0..self.done.len()).filter_map(|i| (!self.done[i]).then_some(i as u32))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plan_basics() {
+        let specs = plan(0);
+        assert!(specs.is_empty());
+
+        let specs = plan(CHUNK_SIZE);
+        assert_eq!(specs.len(), 1);
+        assert_eq!(
+            specs[0],
+            ChunkSpec {
+                index: 0,
+                start: 0,
+                end: CHUNK_SIZE - 1
+            }
+        );
+
+        let specs = plan(CHUNK_SIZE + 1);
+        assert_eq!(specs.len(), 2);
+        assert_eq!(
+            specs[1].end, CHUNK_SIZE,
+            "one byte tail: second chunk covers exactly one byte"
+        );
+    }
+
+    #[test]
+    fn bitmap_counts_and_completes() {
+        let mut bm = CompletionBitmap::new(4);
+        assert!(!bm.is_complete());
+        bm.mark_done(2);
+        assert!(bm.is_done(2));
+        assert_eq!(bm.remaining().collect::<Vec<_>>(), vec![0, 1, 3]);
+        bm.mark_done(0);
+        bm.mark_done(1);
+        bm.mark_done(3);
+        assert!(bm.is_complete());
+    }
+
+    use proptest::prelude::*;
+
+    proptest::proptest! {
+        /// 08 §4 planner invariants: coverage, contiguity, span bounds.
+        #[test]
+        fn plan_covers_exactly(total_size in 0u64..(5 * CHUNK_SIZE)) {
+            let specs = plan(total_size);
+            let expected_count = total_size.div_ceil(CHUNK_SIZE) as usize;
+            prop_assert_eq!(specs.len(), expected_count);
+            let covered: u64 = specs.iter().map(|s| s.end - s.start + 1).sum();
+            prop_assert_eq!(covered, total_size);
+            for pair in specs.windows(2) {
+                prop_assert_eq!(pair[1].start, pair[0].end + 1);
+            }
+            for spec in &specs {
+                prop_assert!(spec.end - spec.start < CHUNK_SIZE || (spec.end - spec.start + 1) == CHUNK_SIZE);
+            }
+            if let Some(last) = specs.last() {
+                prop_assert_eq!(last.end + 1, total_size);
+            }
+        }
+    }
+}

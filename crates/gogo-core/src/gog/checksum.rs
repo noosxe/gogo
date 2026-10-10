@@ -51,10 +51,15 @@ pub struct Chunk {
     pub md5: String,
 }
 
-/// Fetch + parse the checksum XML (public CDN, no auth) — tiny docs, buffered.
-pub async fn fetch(http: &reqwest::Client, checksum_url: &str) -> Result<ChecksumDoc, ApiError> {
+/// Fetch the raw checksum XML (public CDN, no auth) — kept by the verify-cache (A5).
+pub async fn fetch_raw(http: &reqwest::Client, checksum_url: &str) -> Result<String, ApiError> {
     let resp = ApiError::check(http.get(checksum_url).send().await?).await?;
-    parse(&resp.text().await?)
+    Ok(resp.text().await?)
+}
+
+/// Fetch + parse the checksum XML (tiny docs, buffered).
+pub async fn fetch(http: &reqwest::Client, checksum_url: &str) -> Result<ChecksumDoc, ApiError> {
+    parse(&fetch_raw(http, checksum_url).await?)
 }
 
 /// Parse the checksum XML (BOM-tolerant, attribute-order agnostic).

@@ -6,6 +6,18 @@ pub fn human_size(bytes: u64) -> String {
     bytesize::ByteSize::b(bytes).to_string()
 }
 
+/// Lowercase hex of an md5 digest (no `hex` dep; a `{:02x}` fold).
+pub fn md5_hex(hasher: md5::Md5) -> String {
+    use md5::Digest;
+    use std::fmt::Write as _;
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::human_size;
