@@ -499,7 +499,8 @@ pub fn verify_against(dest: &Path, doc: &crate::gog::checksum::ChecksumDoc) -> b
         };
     }
     doc.chunks.iter().all(|chunk| {
-        md5_file(&file, chunk.from, chunk.to + 1, &mut buf)
+        let len = chunk.to + 1 - chunk.from; // inclusive end -> span length
+        md5_file(&file, chunk.from, len, &mut buf)
             .is_some_and(|d| d.eq_ignore_ascii_case(&chunk.md5))
     })
 }
@@ -569,5 +570,44 @@ fn append_record(
         if let Err(e) = state.save() {
             tracing::error!("state save failed: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod verify_tests {
+    use super::verify_against;
+    use crate::gog::checksum::parse;
+    use md5::Digest;
+
+    #[test]
+    fn verify_against_checks_every_chunk_span() {
+        // Two spans; the second one catches the end-vs-length regression (chunk 0
+        // verified by coincidence under the old bug, chunk 1 never did).
+        let left = vec![b'a'; 30];
+        let right = vec![b'b'; 20];
+        let md5s = [
+            crate::fmt::md5_hex(md5::Md5::new_with_prefix(&left)),
+            crate::fmt::md5_hex(md5::Md5::new_with_prefix(&right)),
+        ];
+        let xml = format!(
+            r#"<file name="x.bin" total_size="50" chunks="2">
+	<chunk id="0" from="0" to="29" method="md5">{}</chunk>
+	<chunk id="1" from="30" to="49" method="md5">{}</chunk>
+</file>"#,
+            md5s[0], md5s[1]
+        );
+        let doc = parse(&xml).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("x.bin");
+        std::fs::write(&dest, [left.as_slice(), right.as_slice()].concat()).unwrap();
+        assert!(verify_against(&dest, &doc), "intact file verifies");
+
+        let mut corrupted = std::fs::read(&dest).unwrap();
+        corrupted[45] = b'c'; // inside chunk 1 only
+        std::fs::write(&dest, corrupted).unwrap();
+        assert!(
+            !verify_against(&dest, &doc),
+            "corrupt chunk 1 fails the file"
+        );
     }
 }

@@ -127,7 +127,13 @@ pub async fn download_file(job: Job) -> Result<(), DownloadError> {
     if let Some(parent) = part.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    if !part.is_file() {
+    // Preallocate whenever the SIZE does not match — the B5 destination lock
+    // pre-creates `.part` (0 bytes), so a mere existence check would skip A3's
+    // set_len + sync_all (found live: .part grew organically, never pre-sized).
+    let needs_prealloc = std::fs::metadata(&part)
+        .map(|m| m.len() != job.total_size)
+        .unwrap_or(true);
+    if needs_prealloc {
         let file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false) // preallocate-only: set_len below sizes the file
