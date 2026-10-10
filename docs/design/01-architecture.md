@@ -153,7 +153,7 @@ re-verify at implementation time.
 | | url | 2.5.8 | code extraction, redaction |
 | | uuid | ~1 | FileTask ids (v4, `fast-rng` off) |
 | Errors/secrets | thiserror / anyhow | 2.0.21 / 1.0.104 | lib errors / app errors |
-| | keyring | 4.2.0 | token storage; features `apple-native` + `sync-secret-service` — no backend compiled ⇒ loud failure by design (02 §3, D6) |
+| | keyring | 4.2.0 | token storage; features `v1` + `apple-native-keyring-store` + `zbus-secret-service-keyring-store` (pure-Rust, no libdbus) — no backend compiled ⇒ loud failure by design (02 §3, D6) |
 | | zeroize | 1.9.1 | scrub token strings |
 | Dirs/UX | dirs | 7.0.0 | config/data/cache/download dirs |
 | | indicatif, console | 0.18.6 / 0.16.6 | progress |

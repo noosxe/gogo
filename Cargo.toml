@@ -33,7 +33,8 @@ uuid = { version = "1", features = ["v4"] }
 # — errors / secrets —
 thiserror = "2.0.21"
 anyhow = "1.0.104"
-keyring = "4.2.0"
+# Platform stores (design 01 §5, review D6): macOS native / Linux secret-service (sync).
+keyring = { version = "4.2.0", features = ["v1", "apple-native-keyring-store", "zbus-secret-service-keyring-store"] }
 zeroize = "1.9.1"
 
 # — dirs / UX —

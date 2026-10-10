@@ -73,6 +73,18 @@ pub enum AuthError {
 
     #[error("network error during auth: {0}")]
     Http(#[from] reqwest::Error),
+
+    #[error("gog-warp: {0}")]
+    Upstream(String),
+}
+
+impl From<gog_warp::Error> for AuthError {
+    fn from(err: gog_warp::Error) -> Self {
+        match err.kind() {
+            gog_warp::errors::ErrorKind::NotLoggedIn => Self::Unauthorized,
+            _ => Self::Upstream(err.to_string()),
+        }
+    }
 }
 
 impl From<AuthError> for ApiError {

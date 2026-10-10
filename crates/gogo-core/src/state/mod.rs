@@ -7,6 +7,20 @@ use crate::state::records::InstallRecord;
 pub mod cache;
 pub mod records;
 
+/// Base dir for machine state (`docs/design/06` §1): `$XDG_STATE_HOME/gogo` on Linux,
+/// `~/Library/Application Support/gogo` on macOS; `GOGO_HOME` collapses everything.
+pub fn state_dir() -> std::path::PathBuf {
+    if let Some(home) = std::env::var_os("GOGO_HOME") {
+        return std::path::PathBuf::from(home);
+    }
+    if let Some(dir) = dirs::state_dir() {
+        return dir.join("gogo");
+    }
+    match dirs::data_dir() {
+        Some(dir) => dir.join("gogo"),
+        None => std::path::PathBuf::from(".gogo"),
+    }
+}
 /// Local install state (`docs/design/06` §3).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct State {
