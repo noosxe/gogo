@@ -550,10 +550,17 @@ fn print_plan(tasks: &[gogo::engine::task::FileTask]) {
             .name
             .clone()
             .unwrap_or_else(|| task.file.id.clone());
+        // Multi-part installers split into several `files[]` — show the part id.
+        let part = if task.entry.files.len() > 1 {
+            format!(" [{}]", task.file.id)
+        } else {
+            String::new()
+        };
         println!(
-            "  {status:<8} {:<12} {} ({})",
+            "  {status:<8} {:<12} {}{} ({})",
             task.kind.as_str(),
             name,
+            part,
             gogo::fmt::human_size(task.total_size)
         );
         if !matches!(task.status, Status::Present) {

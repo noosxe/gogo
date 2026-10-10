@@ -13,6 +13,9 @@ downloads = { installers[], patches[], bonus_content[], language_packs[] }
 entry     = { id, name, os, language, language_full, version, total_size,
               files: [ { id, size, downlink } ] }
 expanded_dlcs[] = same shape per DLC
+(entry ids are strings for installers/patches/language_packs but **numbers** for DLC
+`bonus_content` — live-verified 2026-10-10 during the first live plan run; normalized to
+strings at parse time)
 ```
 
 Filter rules:

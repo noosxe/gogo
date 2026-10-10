@@ -34,10 +34,36 @@ pub struct Downloads {
     pub language_packs: Vec<InstallerEntry>,
 }
 
+/// GOG ids are strings for installers/patches/language_packs but **numbers** for DLC
+/// `bonus_content` entries (live-verified, gogo-probe capture). Normalize to String.
+fn string_or_number<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct V;
+    impl serde::de::Visitor<'_> for V {
+        type Value = String;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a string or a number")
+        }
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<String, E> {
+            Ok(v.to_owned())
+        }
+        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+        fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<String, E> {
+            Ok(v.to_string())
+        }
+    }
+    deserializer.deserialize_any(V)
+}
+
 /// One `downloads.*[]` entry: `en1installer0`-style id + metadata + parts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct InstallerEntry {
+    #[serde(deserialize_with = "string_or_number")]
     pub id: String,
     pub name: Option<String>,
     pub os: Option<Os>,
@@ -54,6 +80,7 @@ pub struct InstallerEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct FileEntry {
+    #[serde(deserialize_with = "string_or_number")]
     pub id: String,
     pub size: u64,
     /// API path — resolve through [`crate::gog::downlink`] to get the CDN URL
@@ -102,7 +129,7 @@ pub(crate) async fn batch_at(
             .join(",");
         let url = format!("{base}/products?ids={ids}");
         let resp = ApiError::check(http.get(&url).bearer_auth(bearer).send().await?).await?;
-        let page: Vec<Product> = resp.json().await.map_err(ApiError::from)?;
+        let page: Vec<Product> = resp.json().await.map_err(ApiError::decode)?;
         out.extend(page);
     }
     Ok(out)
@@ -116,7 +143,7 @@ pub(crate) async fn detail_at(
 ) -> Result<Product, ApiError> {
     let url = format!("{base}/products/{product_id}?expand=downloads,expanded_dlcs");
     let resp = ApiError::check(http.get(&url).bearer_auth(bearer).send().await?).await?;
-    resp.json().await.map_err(ApiError::from)
+    resp.json().await.map_err(ApiError::decode)
 }
 
 #[cfg(test)]
@@ -181,5 +208,29 @@ mod tests {
             detail_at(&http, "t", 9, &server.uri()).await,
             Err(ApiError::NotFound(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod live_capture_tests {
+    use super::Product;
+
+    /// Parses the real capture from gogo-probe/product.json when present (gitignored;
+    /// skips silently otherwise). This is the exact live detail shape.
+    #[test]
+    fn parses_live_detail_capture() {
+        let Ok(raw) = std::fs::read_to_string("../../gogo-probe/product.json") else {
+            return;
+        };
+        let p: Product = serde_json::from_str(&raw).unwrap();
+        let dl = p.downloads.expect("downloads present in capture");
+        assert!(!dl.installers.is_empty());
+        // The DLC's bonus_content ids arrive as numbers and normalize to strings.
+        assert_eq!(p.expanded_dlcs.len(), 1);
+        let dlc = &p.expanded_dlcs[0];
+        let bonus = &dlc.downloads.as_ref().unwrap().bonus_content;
+        assert!(!bonus.is_empty());
+        assert_eq!(bonus[0].id, "100897");
+        assert_eq!(bonus[0].files[0].id, "100897");
     }
 }

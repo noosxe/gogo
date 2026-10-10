@@ -34,6 +34,19 @@ pub enum ApiError {
 }
 
 impl ApiError {
+    /// reqwest's Display hides the serde detail ("error decoding response body");
+    /// walk the source chain so payload mismatches are debuggable.
+    pub fn decode(e: reqwest::Error) -> ApiError {
+        let mut msg = e.to_string();
+        let mut src = std::error::Error::source(&e);
+        while let Some(s) = src {
+            msg.push_str(": ");
+            msg.push_str(&s.to_string());
+            src = s.source();
+        }
+        ApiError::Other(msg)
+    }
+
     /// Shared response-status → taxonomy mapping (`docs/design/07` §3).
     /// 2xx passes through; 401/403/404/429 map to their variants (the retry layer keys
     /// off `Status`/`RateLimited`).

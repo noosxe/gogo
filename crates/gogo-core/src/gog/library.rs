@@ -60,7 +60,7 @@ pub(crate) async fn list_games_at(
         let url =
             format!("{base}/account/getFilteredProducts?mediaType=1&sortBy=title&page={page}");
         let resp = ApiError::check(http.get(url).bearer_auth(bearer).send().await?).await?;
-        let parsed: LibraryPage = resp.json().await.map_err(ApiError::from)?;
+        let parsed: LibraryPage = resp.json().await.map_err(ApiError::decode)?;
 
         // Default query excludes hidden games; filter defensively anyway (A1 decision).
         all.extend(parsed.products.into_iter().filter(|p| !p.is_hidden));
