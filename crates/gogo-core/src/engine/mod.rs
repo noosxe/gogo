@@ -618,7 +618,7 @@ fn record_of(ctx: &Arc<AppContext>, task: &FileTask) -> Option<InstallRecord> {
         .cloned()
 }
 
-fn append_record(
+pub fn append_record(
     ctx: &Arc<AppContext>,
     task: &FileTask,
     doc: &crate::gog::checksum::ChecksumDoc,

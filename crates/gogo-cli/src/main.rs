@@ -923,26 +923,23 @@ async fn verify(
     fix: bool,
     rebuild: bool,
 ) -> Result<i32, AppError> {
-    if !path.is_empty() || fix || rebuild {
-        eprintln!("gogo: --path/--fix/--rebuild land with the catalog-backed verify pass");
+    // A5: verify is offline-first — only --fix (which re-downloads) needs a session.
+    let cfg = load_config_from_env()?;
+    let root = std::path::PathBuf::from(cfg.download.dir.clone().unwrap_or_default());
+
+    if !path.is_empty() {
+        return verify_paths(&path);
+    }
+    if rebuild {
+        return rebuild_records(&cfg, &root);
+    }
+
+    if games.is_empty() && !all {
+        eprintln!("gogo: verify needs a game, --all, --path, or --rebuild");
         return Ok(cli::exit::USAGE);
     }
-    let root = std::path::PathBuf::from(
-        load_config_from_env()?
-            .download
-            .dir
-            .clone()
-            .unwrap_or_default(),
-    );
-    let ctx = session_ctx().await?;
-    if all {
-        // verify everything recorded
-    } else if games.is_empty() {
-        eprintln!("gogo: verify needs a game, --all, or --path");
-        return Ok(cli::exit::USAGE);
-    }
-    let state = ctx.state.lock().unwrap().clone();
-    let records: Vec<_> = state
+    let state = gogo::state::State::load().unwrap_or_default();
+    let mut records: Vec<gogo::state::records::InstallRecord> = state
         .installs
         .iter()
         .filter(|r| {
@@ -953,36 +950,408 @@ async fn verify(
                         .is_some_and(|t| t.to_lowercase().contains(&g.to_lowercase()))
             })
         })
+        .cloned()
         .collect();
+    records.sort_by(|a, b| a.path.cmp(&b.path));
 
-    let mut failed = 0;
+    let mut failed_paths: Vec<gogo::state::records::InstallRecord> = Vec::new();
+    let mut missing: Vec<gogo::state::records::InstallRecord> = Vec::new();
     let mut ok = 0;
-    for record in records {
-        let Some(xml) =
+    for record in &records {
+        let doc =
             gogo::state::cache::load_checksum(record.product_id, record.dlc_id, &record.file_id)
-        else {
-            println!(
-                "  ? {} (no cached checksum — skipped)",
-                record.path.display()
-            );
+                .and_then(|xml| gogo::gog::checksum::parse(&xml).ok());
+        let Some(doc) = doc else {
+            missing.push(record.clone());
             continue;
         };
-        let doc = gogo::gog::checksum::parse(&xml)?;
         let dest = root.join(&record.path);
         if gogo::engine::verify_against(&dest, &doc) {
             println!("  ok {}", record.path.display());
             ok += 1;
         } else {
             println!("  FAIL {}", record.path.display());
-            failed += 1;
+            failed_paths.push(record.clone());
         }
     }
-    println!("{ok} verified, {failed} failed");
+
+    // 03 §1: missing docs are re-resolved from the API when a session is at hand;
+    // offline (no keychain answer / no network) they stay skipped with `?` (A5).
+    if !missing.is_empty() {
+        if let Ok(ctx) = session_ctx().await
+            && let Ok(token) = bearer(&ctx).await
+        {
+            for record in &missing {
+                if let Some(doc) = re_resolve_doc(&ctx, &token, record).await {
+                    let dest = root.join(&record.path);
+                    if gogo::engine::verify_against(&dest, &doc) {
+                        println!("  ok {} (re-resolved)", record.path.display());
+                        ok += 1;
+                    } else {
+                        println!("  FAIL {} (re-resolved)", record.path.display());
+                        failed_paths.push(record.clone());
+                    }
+                } else {
+                    println!("  ? {} (no checksum — skipped)", record.path.display());
+                }
+            }
+        } else {
+            eprintln!(
+                "warn: offline — {} files skipped (no session)",
+                missing.len()
+            );
+        }
+    }
+
+    // --fix: re-download the corrupt files through the normal pipeline (03 §1).
+    let mut fixed = 0u32;
+    let mut fix_class: Option<i32> = None;
+    if fix && !failed_paths.is_empty() {
+        let ctx = session_ctx().await?;
+        let token = bearer(&ctx).await?;
+        let product_ids: Vec<u64> = {
+            let mut ids: Vec<u64> = failed_paths.iter().map(|r| r.product_id).collect();
+            ids.sort_unstable();
+            ids.dedup();
+            ids
+        };
+        let mut products = Vec::new();
+        for id in &product_ids {
+            match gogo::gog::catalog::detail(&ctx.http, &token, *id).await {
+                Ok(p) => products.push(p),
+                Err(e) => eprintln!("warn: catalog fetch failed for {id}: {e}"),
+            }
+        }
+        let filters = Filters {
+            os: None,
+            language: Some(ctx.cfg.gog.language.clone()),
+            kinds: Vec::new(),
+            // Corrupt DLC files need their DLC planned too (A1: DLCs via parent).
+            with_dlcs: true,
+        };
+        // force=true: bypass the present-skip so the corrupt file is replaced.
+        let tasks: Vec<_> = engine::plan(&ctx, &products, &filters, true)
+            .await
+            .into_iter()
+            .filter(|t| {
+                failed_paths.iter().any(|r| {
+                    r.product_id == t.product_id && r.dlc_id == t.dlc_id && r.file_id == t.file.id
+                })
+            })
+            .collect();
+        if tasks.is_empty() {
+            eprintln!("gogo: --fix found no downloadable replacement for the corrupt files");
+        } else {
+            let summary = engine::execute(&ctx, tasks).await;
+            fixed = summary.ok;
+            println!(
+                "fixed: {} ok, {} skipped, {} failed",
+                summary.ok, summary.skipped, summary.failed
+            );
+            fix_class = summary.worst_exit_class.map(i32::from);
+        }
+    }
+
+    let failed = failed_paths.len() as u32;
+    println!("{ok} verified, {failed} failed, {fixed} fixed");
+    // C1 ordering: a still-corrupt file (fix failed or not requested) is 5;
+    // otherwise the fix run's own worst class decides.
+    if failed > fixed {
+        return Ok(cli::exit::CORRUPT);
+    }
+    Ok(if failed > 0 {
+        fix_class.unwrap_or(cli::exit::OK)
+    } else {
+        cli::exit::OK
+    })
+}
+
+/// `verify --path`: arbitrary files against the verify-cache, matched by the
+/// checksum doc's `name` — offline, no records touched (03 §1).
+fn verify_paths(paths: &[std::path::PathBuf]) -> Result<i32, AppError> {
+    let index = checksum_index();
+    let mut ok = 0;
+    let mut failed = 0;
+    let mut unknown = 0;
+    for path in paths {
+        let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        match index.get(&name) {
+            None => {
+                println!("  ? {} (no cached checksum)", path.display());
+                unknown += 1;
+            }
+            Some((_, _, _, doc)) => {
+                if gogo::engine::verify_against(path, doc) {
+                    println!("  ok {}", path.display());
+                    ok += 1;
+                } else {
+                    println!("  FAIL {}", path.display());
+                    failed += 1;
+                }
+            }
+        }
+    }
+    println!("{ok} verified, {failed} failed, {unknown} unknown");
     Ok(if failed > 0 {
         cli::exit::CORRUPT
     } else {
         cli::exit::OK
     })
+}
+
+/// Fetch a record's checksum doc from the API (via the cached product's
+/// downlink), refreshing the A5 verify-cache. `None` = not resolvable now.
+async fn re_resolve_doc(
+    ctx: &Arc<AppContext>,
+    token: &str,
+    record: &gogo::state::records::InstallRecord,
+) -> Option<gogo::gog::checksum::ChecksumDoc> {
+    let product = gogo::state::cache::load_product(record.product_id)
+        .ok()
+        .flatten()?;
+    let scopes: Vec<&gogo::gog::catalog::Downloads> = match record.dlc_id {
+        None => product.downloads.iter().collect(),
+        Some(dlc) => product
+            .expanded_dlcs
+            .iter()
+            .find(|d| d.id == dlc)
+            .map(|d| d.downloads.iter())
+            .into_iter()
+            .flatten()
+            .collect(),
+    };
+    let downlink = scopes.iter().find_map(|downloads| {
+        downloads
+            .installers
+            .iter()
+            .chain(&downloads.patches)
+            .chain(&downloads.bonus_content)
+            .chain(&downloads.language_packs)
+            .find(|e| e.id == record.file_id || e.files.iter().any(|f| f.id == record.file_id))?
+            .files
+            .iter()
+            .find(|f| f.id == record.file_id)
+            .map(|f| f.downlink.clone())
+    })?;
+    let dl = gogo::gog::downlink::resolve(&ctx.http, token, &downlink)
+        .await
+        .ok()?;
+    let raw = gogo::gog::checksum::fetch_raw(&ctx.http, &dl.checksum)
+        .await
+        .ok()?;
+    let _ =
+        gogo::state::cache::save_checksum(record.product_id, record.dlc_id, &record.file_id, &raw);
+    gogo::gog::checksum::parse(&raw).ok()
+}
+
+/// Index the verify-cache by the checksum doc's `name` attribute:
+/// `name → (product_id, dlc_id, file_id, ChecksumDoc)` (A5 keying, offline).
+fn checksum_index()
+-> std::collections::HashMap<String, (u64, Option<u64>, String, gogo::gog::checksum::ChecksumDoc)> {
+    let mut index = std::collections::HashMap::new();
+    let dir = gogo::state::cache::cache_dir().join("verify-cache");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return index;
+    };
+    for entry in entries.flatten() {
+        let stem = entry
+            .path()
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if stem.is_empty() {
+            continue;
+        }
+        // `{product_id}-{dlc_id|base}-{file_id}` — ids never contain '-'.
+        let Some((head, file_id)) = stem.rsplit_once('-') else {
+            continue;
+        };
+        let (product_id, dlc_id) = if let Some(pid) = head.strip_suffix("-base") {
+            (pid.parse::<u64>(), None)
+        } else {
+            match head.rsplit_once('-') {
+                Some((pid, dlc)) => (pid.parse::<u64>(), dlc.parse::<u64>().ok()),
+                None => (head.parse::<u64>(), None),
+            }
+        };
+        let Ok(product_id) = product_id else {
+            continue;
+        };
+        let Ok(xml) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let Ok(doc) = gogo::gog::checksum::parse(&xml) else {
+            continue;
+        };
+        index.insert(
+            doc.name.clone(),
+            (product_id, dlc_id, file_id.to_string(), doc),
+        );
+    }
+    index
+}
+
+/// `verify --rebuild` (06 §5): walk the download dir and adopt verified files
+/// into records — fresh state or a new machine with copied files. Offline: the
+/// checksum docs come from the verify-cache, entry metadata best-effort from the
+/// cached products.
+fn rebuild_records(cfg: &gogo::config::Config, root: &std::path::Path) -> Result<i32, AppError> {
+    let index = checksum_index();
+    let state = gogo::state::State::load().unwrap_or_default();
+    // Sessionless context: append_record needs only cfg-root + state (A5 offline).
+    let http = gogo::gog::http().map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+    let ctx = std::sync::Arc::new(
+        AppContext::assemble(cfg.clone(), http, None)
+            .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?,
+    );
+
+    // Collect candidate files (skip in-flight sidecars and hidden entries).
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if name.starts_with('.') {
+                continue;
+            }
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if name.ends_with(".part")
+                || name.ends_with(".part.json")
+                || name.ends_with(".part.bitmap")
+                || name.ends_with(".tmp")
+            {
+                continue;
+            }
+            files.push(path);
+        }
+    }
+    files.sort();
+
+    let mut adopted = 0;
+    let mut already = 0;
+    let mut failed = 0;
+    let mut unknown = 0;
+    for path in files {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let Some((product_id, dlc_id, file_id, doc)) = index.get(&name).cloned() else {
+            println!("  ? {} (no cached checksum)", path.display());
+            unknown += 1;
+            continue;
+        };
+        let recorded = state
+            .installs
+            .iter()
+            .any(|r| r.product_id == product_id && r.dlc_id == dlc_id && r.file_id == file_id);
+        if recorded {
+            println!("  = {} (already recorded)", path.display());
+            already += 1;
+            continue;
+        }
+        if !gogo::engine::verify_against(&path, &doc) {
+            println!("  FAIL {} (not adopted)", path.display());
+            failed += 1;
+            continue;
+        }
+        let (version, kind, product_title) = entry_metadata(product_id, dlc_id, &file_id);
+        let task = gogo::engine::task::FileTask {
+            id: uuid::Uuid::new_v4(),
+            product_id,
+            dlc_id,
+            product_title,
+            kind: match kind.as_deref() {
+                Some("patch") => gogo::engine::task::Kind::Patch,
+                Some("bonus_content") => gogo::engine::task::Kind::BonusContent,
+                Some("language_pack") => gogo::engine::task::Kind::LanguagePack,
+                _ => gogo::engine::task::Kind::Installer,
+            },
+            entry: gogo::gog::catalog::InstallerEntry {
+                id: file_id.clone(),
+                name: Some(doc.name.clone()),
+                os: None,
+                language: None,
+                language_full: None,
+                version,
+                total_size: Some(doc.total_size),
+                files: Vec::new(),
+            },
+            file: gogo::gog::catalog::FileEntry {
+                id: file_id,
+                size: doc.total_size,
+                downlink: String::new(),
+            },
+            dir: path.parent().map(|p| p.to_path_buf()).unwrap_or_default(),
+            save_name: Some(doc.name.clone()),
+            status: gogo::engine::task::Status::New,
+            total_size: doc.total_size,
+            url: None,
+            checksum: Some(doc),
+        };
+        gogo::engine::append_record(&ctx, &task, &task.checksum.clone().unwrap(), &path);
+        println!("  + {} (adopted)", path.display());
+        adopted += 1;
+    }
+    println!("{adopted} adopted, {already} already recorded, {failed} failed, {unknown} unknown");
+    Ok(if failed > 0 {
+        cli::exit::CORRUPT
+    } else {
+        cli::exit::OK
+    })
+}
+
+/// Best-effort (version, kind, title) for an adopted file from the cached
+/// product JSON — absent cache entries simply yield (None, None, None).
+fn entry_metadata(
+    product_id: u64,
+    dlc_id: Option<u64>,
+    file_id: &str,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let Some(product) = gogo::state::cache::load_product(product_id).unwrap_or(None) else {
+        return (None, None, None);
+    };
+    let title = product.title.clone();
+    let scopes: Vec<&gogo::gog::catalog::Downloads> = match dlc_id {
+        None => product.downloads.iter().collect(),
+        Some(dlc) => product
+            .expanded_dlcs
+            .iter()
+            .find(|d| d.id == dlc)
+            .map(|d| d.downloads.iter())
+            .into_iter()
+            .flatten()
+            .collect(),
+    };
+    for downloads in scopes {
+        let groups: [(&Vec<gogo::gog::catalog::InstallerEntry>, &str); 4] = [
+            (&downloads.installers, "installer"),
+            (&downloads.patches, "patch"),
+            (&downloads.bonus_content, "bonus_content"),
+            (&downloads.language_packs, "language_pack"),
+        ];
+        for (entries, kind) in groups {
+            if let Some(entry) = entries
+                .iter()
+                .find(|e| e.id == file_id || e.files.iter().any(|f| f.id == file_id))
+            {
+                return (entry.version.clone(), Some(kind.to_string()), title);
+            }
+        }
+    }
+    (None, None, None)
 }
 
 // — config (D7: toml_edit round-trip preserves comments) —

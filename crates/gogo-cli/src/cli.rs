@@ -114,7 +114,7 @@ pub enum Command {
         #[arg(long)]
         all: bool,
         /// Verify these files directly instead of by game.
-        #[arg(long, value_name = "FILE")]
+        #[arg(long, value_name = "FILE", num_args = 1..)]
         path: Vec<std::path::PathBuf>,
         /// Re-download corrupt files.
         #[arg(long)]
