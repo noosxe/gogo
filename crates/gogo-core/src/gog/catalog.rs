@@ -1,13 +1,13 @@
 //! Products: batch `?ids=…` (50/call) + detail with `expand=downloads,expanded_dlcs`
 //! (`docs/design/03`; shapes live-verified in `docs/04`/`docs/11`).
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::gog::API_BASE;
 use crate::gog::error::ApiError;
 
 /// One product from the catalog. Unknown/extra fields are tolerated.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Product {
     pub id: u64,
@@ -21,7 +21,7 @@ pub struct Product {
 }
 
 /// `downloads` — live-verified top-level shape.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct Downloads {
     #[serde(default)]
@@ -35,7 +35,7 @@ pub struct Downloads {
 }
 
 /// One `downloads.*[]` entry: `en1installer0`-style id + metadata + parts.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct InstallerEntry {
     pub id: String,
@@ -51,7 +51,7 @@ pub struct InstallerEntry {
 }
 
 /// One downloadable part (`files[]`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct FileEntry {
     pub id: String,
@@ -61,7 +61,7 @@ pub struct FileEntry {
     pub downlink: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Os {
     Windows,

@@ -12,6 +12,14 @@ pub mod fmt;
 pub mod gog;
 pub mod state;
 
+#[cfg(test)]
+pub(crate) mod test_util {
+    /// Serializes tests that mutate process env (`GOGO_HOME`).
+    pub fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
 /// Convenience re-exports for consumers of the library.
 pub mod prelude {
     pub use crate::app::AppContext;
