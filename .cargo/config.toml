@@ -1,0 +1,16 @@
+# Local cargo configuration.
+#
+# macOS dev signing (live finding 2026-10-10): debug builds are ad-hoc signed
+# with a per-build hash, so every rebuild looks like a new app to the keychain
+# and gogo re-prompts for token-store authorization after each rebuild. The
+# runner re-signs `cargo run`/`cargo test` binaries with a stable identity
+# (Apple Development cert; GOGO_CODESIGN_IDENTITY overrides), so one keychain
+# "Always Allow" persists across rebuilds. Best-effort: without an identity
+# (Linux, CI) it just execs the binary. For direct invocation of
+# target/debug/gogo, run scripts/dev-sign.sh once.
+
+[target.aarch64-apple-darwin]
+runner = ["scripts/dev-run.sh"]
+
+[target.x86_64-apple-darwin]
+runner = ["scripts/dev-run.sh"]

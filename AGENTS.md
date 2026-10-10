@@ -24,6 +24,11 @@ tools, or binaries from the host system — no exceptions.**
   are wrong. If a tool is missing, add it to the flake (pinned), not via ad-hoc installs.
 - Toolchain/input bumps are deliberate commits: update the hash/version in `flake.nix`,
   re-run `nix flake lock`, verify, commit both files together.
+- **macOS dev signing**: debug builds are ad-hoc signed per build, so the keychain
+  re-prompts after every rebuild. `.cargo/config.toml` installs a `runner` that re-signs
+  `cargo run`/`cargo test` binaries with a stable identity (Apple Development cert;
+  `GOGO_CODESIGN_IDENTITY` overrides) — one "Always Allow" survives rebuilds. For direct
+  `target/debug/gogo` runs, `scripts/dev-sign.sh` once. Best-effort: no identity → plain exec.
 
 ## Canonical checks (run inside the shell)
 
