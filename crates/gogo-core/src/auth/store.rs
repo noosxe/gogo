@@ -161,6 +161,29 @@ impl TokenStore for FileStore {
     }
 }
 
+/// OS keychain reads can block indefinitely waiting for user authorization —
+/// observed live on macOS (2026-10-10): an unattended Security Agent prompt left
+/// `find_generic_password` parked forever on a worker thread, hanging the whole
+/// command. A batch CLI must fail loudly instead: bound the synchronous read and
+/// explain the way out.
+pub async fn load_guarded(
+    store: std::sync::Arc<dyn TokenStore>,
+    timeout: std::time::Duration,
+) -> Result<Option<String>, AuthError> {
+    match tokio::time::timeout(timeout, tokio::task::spawn_blocking(move || store.load())).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(join)) => Err(AuthError::Store(format!(
+            "token store read panicked: {join}"
+        ))),
+        Err(_) => Err(AuthError::Store(
+            "token store read still pending — the OS credential store is likely waiting \
+             for user authorization (unlock the keychain / answer the prompt), or switch \
+             backends: gogo config set auth.token_store file"
+                .into(),
+        )),
+    }
+}
+
 /// Selected by `auth.token_store` — and ONLY by that (A6: no probing, no fallback).
 pub fn open(kind: crate::config::TokenStoreKind) -> std::sync::Arc<dyn TokenStore> {
     match kind {
@@ -219,5 +242,58 @@ mod tests {
         // explicitly (A6), never at open() time.
         let _ = open(crate::config::TokenStoreKind::Keyring);
         let _ = open(crate::config::TokenStoreKind::File);
+    }
+}
+
+#[cfg(test)]
+mod guarded_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    struct HangingStore;
+    impl TokenStore for HangingStore {
+        fn load(&self) -> Result<Option<String>, AuthError> {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            Ok(None)
+        }
+        fn save(&self, _blob: &str) -> Result<(), AuthError> {
+            Ok(())
+        }
+        fn clear(&self) -> Result<(), AuthError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn guarded_read_fails_loudly_when_store_never_answers() {
+        let err = load_guarded(Arc::new(HangingStore), std::time::Duration::from_millis(50))
+            .await
+            .unwrap_err();
+        match err {
+            AuthError::Store(msg) => assert!(msg.contains("user authorization"), "{msg}"),
+            other => panic!("expected Store error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn guarded_read_passes_through_within_budget() {
+        struct OkStore;
+        impl TokenStore for OkStore {
+            fn load(&self) -> Result<Option<String>, AuthError> {
+                Ok(Some("blob".into()))
+            }
+            fn save(&self, _blob: &str) -> Result<(), AuthError> {
+                Ok(())
+            }
+            fn clear(&self) -> Result<(), AuthError> {
+                Ok(())
+            }
+        }
+        assert_eq!(
+            load_guarded(Arc::new(OkStore), std::time::Duration::from_secs(5))
+                .await
+                .unwrap(),
+            Some("blob".into())
+        );
     }
 }

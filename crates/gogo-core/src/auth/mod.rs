@@ -50,8 +50,11 @@ impl Session {
 
     /// Restore from a [`store::TokenStore`] blob (`deserialize_tokens` — 02 §4).
     /// Nothing stored → `Unauthorized` ("run gogo login").
-    pub async fn restore(store: &dyn store::TokenStore) -> Result<Self, AuthError> {
-        let blob = store.load()?.ok_or(AuthError::Unauthorized)?;
+    pub async fn restore(store: std::sync::Arc<dyn store::TokenStore>) -> Result<Self, AuthError> {
+        // 20s bound: an OS keychain waiting on a user must not hang the command.
+        let blob = store::load_guarded(store, std::time::Duration::from_secs(20))
+            .await?
+            .ok_or(AuthError::Unauthorized)?;
         let core = gog_warp::Core::new();
         core.deserialize_tokens(&blob)
             .map_err(|e| AuthError::Deserialize(e.to_string()))?;
@@ -148,7 +151,7 @@ mod tests {
             blob: std::sync::Mutex::new(None),
         };
         assert!(matches!(
-            Session::restore(&store).await,
+            Session::restore(std::sync::Arc::new(store)).await,
             Err(AuthError::Unauthorized)
         ));
     }
@@ -162,7 +165,7 @@ mod tests {
         // gog-warp tolerates arbitrary strings into its map, so this documents the
         // boundary: a syntactically-loadable-but-bogus blob surfaces later as
         // Unauthorized/Upstream on first use, not as a crash here.
-        let result = Session::restore(&store).await;
+        let result = Session::restore(std::sync::Arc::new(store)).await;
         assert!(result.is_ok() || matches!(result, Err(AuthError::Deserialize(_))));
     }
 }

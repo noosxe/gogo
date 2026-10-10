@@ -40,9 +40,7 @@ impl AppContext {
         let http = crate::gog::http()?;
         let session: Option<Arc<dyn crate::auth::TokenProvider>> = if with_session {
             let store = crate::auth::store::open(cfg.auth.token_store);
-            Some(Arc::new(
-                crate::auth::Session::restore(store.as_ref()).await?,
-            ))
+            Some(Arc::new(crate::auth::Session::restore(store).await?))
         } else {
             None
         };

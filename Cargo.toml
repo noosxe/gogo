@@ -14,7 +14,7 @@ publish = false
 gogo-core = { path = "crates/gogo-core", version = "0.1.0" }
 
 # — async / HTTP (rustls only: one TLS stack shared with gog-warp; no gzip) —
-tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "signal", "fs", "io-util"] }
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "signal", "fs", "io-util", "time"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 futures = "0.3.34"
 tokio-util = "0.7.20"

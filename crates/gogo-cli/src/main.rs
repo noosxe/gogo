@@ -242,7 +242,7 @@ async fn session_ctx() -> Result<Arc<AppContext>, AppError> {
     // A6: restore from the configured backend — unavailable keyring fails here,
     // loudly, as class 3 with the switch hint.
     let store = gogo::auth::store::open(cfg.auth.token_store);
-    let session = gogo::auth::Session::restore(store.as_ref()).await?;
+    let session = gogo::auth::Session::restore(store.clone()).await?;
     let ctx = AppContext::assemble(cfg, http, Some(Arc::new(session)))
         .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
     Ok(Arc::new(ctx))
@@ -428,7 +428,7 @@ async fn download(
 
     let http = gogo::gog::http().map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
     let store = gogo::auth::store::open(load_config_from_env()?.auth.token_store);
-    let session = gogo::auth::Session::restore(store.as_ref()).await?;
+    let session = gogo::auth::Session::restore(store.clone()).await?;
     let mut built = AppContext::assemble(cfg, http, Some(Arc::new(session)))
         .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
     if no_disk_check {
