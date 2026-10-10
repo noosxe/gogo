@@ -17,7 +17,7 @@ use gogo::gog::library;
 
 use crate::cli::{Cli, ColorWhen, Command, OsFilter};
 
-fn main() -> std::process::ExitCode {
+fn main() {
     let cli = Cli::parse();
     init_tracing(&cli);
 
@@ -26,27 +26,32 @@ fn main() -> std::process::ExitCode {
         .build()
         .expect("tokio runtime");
 
-    match rt.block_on(run(cli)) {
-        Ok(code) => std::process::ExitCode::from(code as u8),
+    let code: i32 = match rt.block_on(run(cli)) {
+        Ok(code) => code,
         // C1: the error type carries the class; auth 3 < network 4 < config-usage 2.
         Err(AppError::Config(e)) => {
             eprintln!("gogo: {e}");
-            std::process::ExitCode::from(cli::exit::USAGE as u8)
+            cli::exit::USAGE
         }
         Err(AppError::Auth(e)) => {
             eprintln!("gogo: {e}");
-            std::process::ExitCode::from(cli::exit::AUTH as u8)
+            cli::exit::AUTH
         }
         Err(AppError::Api(e)) => {
             eprintln!("gogo: {e}");
-            std::process::ExitCode::from(cli::exit::NETWORK as u8)
+            cli::exit::NETWORK
         }
         Err(AppError::Io(e)) => {
             eprintln!("gogo: {e}");
-            std::process::ExitCode::from(cli::exit::FAILED as u8)
+            cli::exit::FAILED
         }
-        Err(AppError::Usage) => std::process::ExitCode::from(cli::exit::USAGE as u8),
-    }
+        Err(AppError::Usage) => cli::exit::USAGE,
+    };
+    // Exit explicitly — never through `rt` teardown: Runtime::drop JOINS blocking
+    // threads, and an OS keychain read parked on an unattended user prompt never
+    // returns, hanging the process after the error was already printed
+    // (live finding 2026-10-10). The parked thread dies with the process.
+    std::process::exit(code);
 }
 
 /// Typed top-level error → exit class (03 §5, review C1).
