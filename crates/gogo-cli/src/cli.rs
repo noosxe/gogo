@@ -15,6 +15,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub quiet: bool,
 
+    /// No progress bars (auto when stderr is not a terminal)
+    #[arg(long, global = true)]
+    pub no_progress: bool,
+
     /// Config file path override (GOGO_CONFIG also works).
     #[arg(long, global = true)]
     pub config: Option<std::path::PathBuf>,

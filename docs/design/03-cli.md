@@ -132,6 +132,11 @@ comments preserved via a `toml_edit` round-trip — decided, review D7).
 | Stream | Contents |
 |---|---|
 | stdout | tables (list/info), `--json` results, `--json-progress` NDJSON |
+
+`--json-progress` emits one externally-tagged JSON object per event per line
+(e.g. `{"ChunkDone":{…}}`), flushed per line; `PlanReady` fires during planning
+(so `--dry-run` still yields one event) and `Done` is terminal. The same stream
+feeds the v2 TUI (`docs/design/01` §4).
 | stderr | progress bars, warnings, log output, prompts |
 
 ## 5. Exit codes

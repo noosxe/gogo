@@ -45,12 +45,14 @@ fn main() -> std::process::ExitCode {
             eprintln!("gogo: {e}");
             std::process::ExitCode::from(cli::exit::FAILED as u8)
         }
+        Err(AppError::Usage) => std::process::ExitCode::from(cli::exit::USAGE as u8),
     }
 }
 
 /// Typed top-level error → exit class (03 §5, review C1).
 enum AppError {
     Config(ConfigError),
+    Usage,
     Auth(AuthError),
     Api(ApiError),
     Io(std::io::Error),
@@ -123,7 +125,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
             refresh: _,
         } => list(search, os, json, color).await,
         Command::Info { game, json } => info(game, json).await,
-        Command::Download(args) => download(args).await,
+        Command::Download(args) => download(args, cli.no_progress, cli.quiet).await,
         Command::Update { games, all, strict } => update(games, all, strict).await,
         Command::Verify {
             games,
@@ -380,7 +382,11 @@ async fn resolve_games(
 
 // — download —
 
-async fn download(args: cli::DownloadArgs) -> Result<i32, AppError> {
+async fn download(
+    args: cli::DownloadArgs,
+    no_progress: bool,
+    quiet: bool,
+) -> Result<i32, AppError> {
     let cli::DownloadArgs {
         games,
         all,
@@ -397,8 +403,8 @@ async fn download(args: cli::DownloadArgs) -> Result<i32, AppError> {
         limit,
         force,
         no_disk_check,
-        json_progress: _,
-        json: _,
+        json_progress,
+        json,
         dry_run,
     } = args;
     let mut cfg = load_config_from_env()?;
@@ -430,6 +436,18 @@ async fn download(args: cli::DownloadArgs) -> Result<i32, AppError> {
         built.disk_check = false;
     }
     let ctx = Arc::new(built);
+    // 03 §4 progress consumers: NDJSON on stdout for --json-progress, indicatif
+    // bars on stderr for humans with a TTY; nothing on --no-progress/--quiet or
+    // pipes. Subscribed BEFORE planning so PlanReady is captured (dry-run too).
+    let machine = json || json_progress;
+    let bars_on =
+        !machine && !no_progress && !quiet && std::io::IsTerminal::is_terminal(&std::io::stderr());
+    let rx = if json_progress || bars_on {
+        Some(ctx.events.subscribe())
+    } else {
+        None
+    };
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
 
     let token = bearer(&ctx).await?;
     let selected = if all {
@@ -466,44 +484,77 @@ async fn download(args: cli::DownloadArgs) -> Result<i32, AppError> {
         products.push(detail);
     }
 
-    let tasks = engine::plan(&ctx, &products, &filters, force).await;
-    print_plan(&tasks);
-
-    if dry_run {
-        return Ok(cli::exit::OK);
-    }
-
-    // B1: `--all` without `--yes` requires a TTY confirmation; non-TTY aborts with
-    // the plan printed (exit 2) — a bulk run never starts silently.
-    if all && !yes {
-        if console::Term::stdout().features().is_attended() {
-            let confirmed = dialoguer::Confirm::new()
-                .with_prompt("download the plan above?")
-                .default(false)
-                .interact()
-                .unwrap_or(false);
-            if !confirmed {
-                println!("aborted");
-                return Ok(cli::exit::OK);
-            }
+    let inner = async {
+        let tasks = engine::plan(&ctx, &products, &filters, force).await;
+        if machine {
+            print_plan_json(&tasks);
         } else {
-            eprintln!("gogo: `--all` needs `--yes` when not attached to a terminal");
-            return Ok(cli::exit::USAGE);
+            print_plan(&tasks);
         }
+
+        if dry_run {
+            return Ok(None);
+        }
+
+        // B1: `--all` without `--yes` requires a TTY confirmation; non-TTY aborts
+        // with the plan printed (exit 2) — a bulk run never starts silently.
+        if all && !yes {
+            if console::Term::stdout().features().is_attended() {
+                let confirmed = dialoguer::Confirm::new()
+                    .with_prompt("download the plan above?")
+                    .default(false)
+                    .interact()
+                    .unwrap_or(false);
+                if !confirmed {
+                    println!("aborted");
+                    return Ok(None);
+                }
+            } else {
+                eprintln!("gogo: `--all` needs `--yes` when not attached to a terminal");
+                return Err(AppError::Usage);
+            }
+        }
+
+        // Ctrl-C → cancel token; workers stop at chunk boundaries (exit 130).
+        let cancel_src = ctx.cancel.clone();
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            cancel_src.cancel();
+        });
+
+        Ok(Some(engine::execute(&ctx, tasks).await))
+    };
+    // Every exit path (including `?` short-circuits above) releases the renderer.
+    let work = async {
+        let result = inner.await;
+        let _ = done_tx.send(());
+        result
+    };
+    let summary = match (rx, bars_on) {
+        (Some(rx), false) => {
+            let (result, ()) = tokio::join!(work, render_ndjson(rx, done_rx));
+            result?
+        }
+        (Some(rx), true) => {
+            let (result, ()) = tokio::join!(work, render_bars(rx, done_rx));
+            result?
+        }
+        (None, _) => work.await?,
+    };
+    let Some(summary) = summary else {
+        return Ok(cli::exit::OK); // dry-run / aborted
+    };
+    if machine {
+        println!(
+            "{}",
+            serde_json::json!({"ok": summary.ok, "failed": summary.failed, "skipped": summary.skipped})
+        );
+    } else {
+        println!(
+            "done: {} ok, {} skipped, {} failed",
+            summary.ok, summary.skipped, summary.failed
+        );
     }
-
-    // Ctrl-C → cancel token; workers stop at chunk boundaries (exit 130).
-    let cancel_src = ctx.cancel.clone();
-    tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        cancel_src.cancel();
-    });
-
-    let summary = engine::execute(&ctx, tasks).await;
-    println!(
-        "done: {} ok, {} skipped, {} failed",
-        summary.ok, summary.skipped, summary.failed
-    );
     if ctx.cancel.is_cancelled() {
         return Ok(cli::exit::SIGINT);
     }
@@ -528,6 +579,101 @@ fn host_or_configured_os() -> Option<gogo::gog::catalog::Os> {
             gogo::gog::catalog::Os::Windows
         }),
     }
+}
+
+/// `--json`/`--json-progress` plan summary — same shape as the PlanReady event.
+fn print_plan_json(tasks: &[gogo::engine::task::FileTask]) {
+    use gogo::engine::task::Status;
+    let files = tasks
+        .iter()
+        .filter(|t| !matches!(t.status, Status::Present))
+        .count() as u32;
+    let total_bytes = tasks
+        .iter()
+        .filter(|t| !matches!(t.status, Status::Present))
+        .map(|t| t.total_size)
+        .sum::<u64>();
+    let skipped_bytes = tasks
+        .iter()
+        .filter(|t| matches!(t.status, Status::Present))
+        .map(|t| t.total_size)
+        .sum::<u64>();
+    println!(
+        "{}",
+        serde_json::json!({"files": files, "total_bytes": total_bytes, "skipped_bytes": skipped_bytes})
+    );
+}
+
+/// NDJSON progress on stdout: one externally-tagged JSON object per line,
+/// flushed per event (03 §4).
+async fn render_ndjson(
+    rx: tokio::sync::broadcast::Receiver<gogo::engine::events::ProgressEvent>,
+    done: tokio::sync::oneshot::Receiver<()>,
+) {
+    use std::io::Write;
+    gogo::engine::events::render(rx, done, |ev| {
+        let mut out = std::io::stdout().lock();
+        if serde_json::to_writer(&mut out, ev).is_ok() {
+            let _ = out.write_all(b"\n");
+        }
+        let _ = out.flush();
+    })
+    .await;
+}
+
+/// indicatif bars on stderr: one bar per in-flight file (03 §1 example shape).
+async fn render_bars(
+    rx: tokio::sync::broadcast::Receiver<gogo::engine::events::ProgressEvent>,
+    done: tokio::sync::oneshot::Receiver<()>,
+) {
+    use gogo::engine::events::ProgressEvent;
+    use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+    use std::collections::HashMap;
+    use uuid::Uuid;
+
+    let _mp = MultiProgress::new();
+    let mut bars: HashMap<Uuid, ProgressBar> = HashMap::new();
+    let style = ProgressStyle::with_template(
+        "{spinner:.green} {msg} {bytes}/{total_bytes} ({bytes_per_sec}, eta {eta})",
+    )
+    .expect("static indicatif template");
+    let target = _mp.clone();
+    gogo::engine::events::render(rx, done, move |ev| match ev {
+        ProgressEvent::FileStart {
+            id,
+            name,
+            total_bytes,
+        } => {
+            let bar = target.add(ProgressBar::new(*total_bytes));
+            bar.set_style(style.clone());
+            bar.set_message(name.clone());
+            bars.insert(*id, bar);
+        }
+        ProgressEvent::ChunkDone { id, file_bytes, .. } => {
+            // D2: file_bytes is cumulative — no delta accumulation needed.
+            if let Some(bar) = bars.get(id) {
+                bar.set_position(*file_bytes);
+            }
+        }
+        ProgressEvent::FileDone { id, .. } => {
+            if let Some(bar) = bars.remove(id) {
+                bar.finish_with_message("done");
+            }
+        }
+        ProgressEvent::FileFailed { id, error } => {
+            if let Some(bar) = bars.remove(id) {
+                bar.finish_with_message(format!("failed: {error}"));
+            }
+        }
+        ProgressEvent::FileSkipped { reason, .. } => {
+            let _ = target.println(format!("skipped: {reason}"));
+        }
+        ProgressEvent::Warn { message } => {
+            let _ = target.println(format!("warn: {message}"));
+        }
+        ProgressEvent::PlanReady { .. } | ProgressEvent::Done { .. } => {}
+    })
+    .await;
 }
 
 fn print_plan(tasks: &[gogo::engine::task::FileTask]) {
