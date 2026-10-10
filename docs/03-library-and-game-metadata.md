@@ -37,8 +37,10 @@ Response (from gogapidocs listing.html):
 ```
 
 Parameters: `mediaType` (1=games, 2=movies), `search`, `sortBy`, `page`, `system`, `language`,
-`tags`, `hiddenFlag`, `totalPages`. This is how the GOG website renders the library; gives
-titles/slugs/covers without per-ID round trips.
+`tags`. Response carries `totalPages`/`totalProducts`, `hasHiddenProducts`, and per-product
+`isHidden`/`isHidingDisabled` (2026-10-09 re-verification: no `hiddenFlag` field exists).
+This is how the GOG website renders the library; gives titles/slugs/covers without per-ID
+round trips.
 
 ### c) Galaxy 2.x library sync (modern, what the Galaxy client uses)
 

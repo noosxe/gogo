@@ -88,6 +88,53 @@ echo "== Q8: movies in library =="
 curl -s -H "$AUTH" -o movies.json -w 'getFilteredProducts mediaType=2 -> %{http_code}\n' 'https://embed.gog.com/account/getFilteredProducts?mediaType=2&page=1'
 python3 -c "import json;d=json.load(open('movies.json'));print('movies totalProducts:',d.get('totalProducts'))" 2>/dev/null || true
 
+echo "== Q10 (A1): hidden-game semantics (isHidden / hasHiddenProducts) =="
+python3 - <<'PY'
+import json
+d = json.load(open('gfp.json'))
+hid = [p for p in d['products'] if p.get('isHidden')]
+print('page1: %d products, isHidden=true: %d, hasHiddenProducts: %s'
+      % (len(d['products']), len(hid), d.get('hasHiddenProducts')))
+PY
+echo "-- trying params that might surface hidden products:"
+for q in 'hidden=1' 'hidden=true' 'showHidden=1' 'isHidden=1' 'hideHidden=0' 'filter=hidden'; do
+  curl -s -H "$AUTH" -o gfp_h.json "https://embed.gog.com/account/getFilteredProducts?mediaType=1&$q"
+  python3 -c "import json;d=json.load(open('gfp_h.json'));hid=[p for p in d.get('products',[]) if p.get('isHidden')];print('  %-14s -> totalProducts=%s isHidden-in-page=%d hasHiddenProducts=%s' % ('$q', d.get('totalProducts'), len(hid), d.get('hasHiddenProducts')))" 2>/dev/null || echo "  $q -> unparseable response"
+done
+
+echo "== Q11 (C4): extras (bonus_content) filename sources =="
+XDL=""; XGID=""
+for gid in $(python3 -c "import json;print(' '.join(map(str,json.load(open('owned.json'))['owned'][:15])))"); do
+  curl -s -H "$AUTH" -o "prod_$gid.json" "https://api.gog.com/products/$gid?expand=downloads"
+  XDL=$(python3 -c "import json;d=json.load(open('prod_$gid.json'));bc=d.get('downloads',{}).get('bonus_content',[]);print(bc[0].get('galaxy_downlink_json_url','') if bc else '')")
+  if [ -n "$XDL" ]; then XGID=$gid; echo "bonus_content found on game $gid"; break; fi
+  sleep 0.3
+done
+if [ -n "$XDL" ]; then
+  echo "-- bonus_content entry keys: $(python3 -c "import json;d=json.load(open('prod_$XGID.json'));print(sorted(d['downloads']['bonus_content'][0].keys()))")"
+  curl -s -H "$AUTH" -o extras_downlink.json "$XDL"
+  python3 - <<'PY'
+import json
+d = json.load(open('extras_downlink.json'))
+print('-- extras downlink keys:', sorted(d.keys()))
+open('x_cdn.txt', 'w').write(d.get('downlink', ''))
+open('x_cks.txt', 'w').write(d.get('checksum', ''))
+PY
+  XCDN=$(cat x_cdn.txt 2>/dev/null); XCKS=$(cat x_cks.txt 2>/dev/null)
+  echo "-- CDN response headers (1-byte Range GET, no auth — URL is pre-tokenized):"
+  if [ -n "$XCDN" ]; then
+    curl -s -D - -o /dev/null -r 0-0 "$XCDN" | tr -d '\r' | grep -iE '^(HTTP/|content-disposition|content-type|content-length)'
+  fi
+  if [ -n "$XCKS" ]; then
+    echo "-- checksum XML present; first 300 B (looking for name= attr):"
+    curl -s "$XCKS" | head -c 300; echo
+  else
+    echo "-- NO checksum url for this extra: filename must come from Content-Disposition or entry name"
+  fi
+else
+  echo "no bonus_content found in first 15 owned games — bump the limit or set the id manually"
+fi
+
 echo "== Token refresh rotation =="
 RT=$(python3 -c "import json;print(json.load(open('token.json'))['refresh_token'])")
 curl -sG 'https://auth.gog.com/token' \
