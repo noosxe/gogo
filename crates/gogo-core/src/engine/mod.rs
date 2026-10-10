@@ -478,7 +478,9 @@ fn chunk_works(doc: &crate::gog::checksum::ChecksumDoc) -> Vec<ChunkWork> {
 }
 
 /// B4 adoption check: per-chunk md5 of the local file against the fresh doc.
-fn verify_against(dest: &Path, doc: &crate::gog::checksum::ChecksumDoc) -> bool {
+/// Verify a local file against a checksum doc (per-chunk md5; size-only when
+/// the doc has neither chunks nor a root md5). Public for `gogo verify`.
+pub fn verify_against(dest: &Path, doc: &crate::gog::checksum::ChecksumDoc) -> bool {
     let Ok(file) = std::fs::File::open(dest) else {
         return false;
     };

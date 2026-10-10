@@ -10,7 +10,7 @@
 
 use uuid::Uuid;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub enum ProgressEvent {
     PlanReady {
         files: u32,

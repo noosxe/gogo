@@ -15,6 +15,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub quiet: bool,
 
+    /// Config file path override (GOGO_CONFIG also works).
+    #[arg(long, global = true)]
+    pub config: Option<std::path::PathBuf>,
+
     /// When to colorize output.
     #[arg(long, global = true, value_enum, default_value_t = ColorWhen::Auto)]
     pub color: ColorWhen,
@@ -74,6 +78,9 @@ pub enum Command {
         /// Machine-readable output.
         #[arg(long)]
         json: bool,
+        /// Bypass the catalog cache.
+        #[arg(long)]
+        refresh: bool,
     },
     /// Show one game's full catalog entry.
     Info {
@@ -84,32 +91,8 @@ pub enum Command {
         json: bool,
     },
     /// Download offline installers (the main event).
-    Download {
-        /// Game(s) by id, slug, or fuzzy title — or use --all.
-        #[arg(value_name = "GAME")]
-        games: Vec<String>,
-        /// Every owned game (with --yes, else a confirmation prompt).
-        #[arg(long)]
-        all: bool,
-        /// Skip the --all confirmation prompt.
-        #[arg(long)]
-        yes: bool,
-        /// OS filter (default: host OS, falling back to windows).
-        #[arg(long, value_enum)]
-        os: Option<OsFilter>,
-        /// Language filter.
-        #[arg(long)]
-        language: Option<String>,
-        /// Progress events as NDJSON on stdout.
-        #[arg(long)]
-        json_progress: bool,
-        /// Machine-readable summary.
-        #[arg(long)]
-        json: bool,
-        /// Plan and print, touch nothing.
-        #[arg(long)]
-        dry_run: bool,
-    },
+    Download(DownloadArgs),
+
     /// Detect and download updates.
     Update {
         #[arg(value_name = "GAME")]
@@ -132,6 +115,9 @@ pub enum Command {
         /// Re-download corrupt files.
         #[arg(long)]
         fix: bool,
+        /// Walk the download dir and adopt verified files into records (06 §5).
+        #[arg(long)]
+        rebuild: bool,
     },
     /// Config file management.
     Config {
@@ -157,6 +143,7 @@ pub enum OsFilter {
     Windows,
     Mac,
     Linux,
+    All,
 }
 
 /// Stable exit codes (`docs/design/03-cli.md` §5).
@@ -172,8 +159,67 @@ pub mod exit {
     pub const NETWORK: i32 = 4;
     /// Corrupt download (checksum mismatch).
     pub const CORRUPT: i32 = 5;
-    /// Invalid configuration.
-    pub const CONFIG: i32 = 6;
+    /// Insufficient disk space.
+    pub const DISK: i32 = 6;
     /// Interrupted (SIGINT); sidecars flushed, safe to resume.
     pub const SIGINT: i32 = 130;
+}
+
+/// Field bag for [`Command::Download`] (03 §3 content-selection + overrides).
+#[derive(Debug, clap::Args)]
+pub struct DownloadArgs {
+    /// Game(s) by id, slug, or fuzzy title — or use --all.
+    #[arg(value_name = "GAME")]
+    pub games: Vec<String>,
+    /// Every owned game (with --yes, else a confirmation prompt).
+    #[arg(long)]
+    pub all: bool,
+    /// Skip the --all confirmation prompt.
+    #[arg(long)]
+    pub yes: bool,
+    /// OS filter (default: host OS, falling back to windows).
+    #[arg(long, value_enum)]
+    pub os: Option<OsFilter>,
+    /// Language filter.
+    #[arg(long)]
+    pub language: Option<String>,
+    /// Include DLC installers (DLCs enter only via their parent game, A1).
+    #[arg(long)]
+    pub with_dlcs: bool,
+    /// Include bonus content (extras).
+    #[arg(long)]
+    pub extras: bool,
+    /// Include patches.
+    #[arg(long)]
+    pub patches: bool,
+    /// Include language packs.
+    #[arg(long)]
+    pub lang_packs: bool,
+    /// Download root override (download.dir).
+    #[arg(long)]
+    pub dir: Option<String>,
+    /// Chunk workers per file (download.workers).
+    #[arg(long)]
+    pub workers: Option<u32>,
+    /// Simultaneous files (download.parallel_files).
+    #[arg(long, value_name = "N")]
+    pub parallel_files: Option<u32>,
+    /// Global rate limit, e.g. 4MiB/s (download.limit grammar, 05 §3).
+    #[arg(long)]
+    pub limit: Option<String>,
+    /// Redownload even if recorded as present.
+    #[arg(long)]
+    pub force: bool,
+    /// Skip the free-space preflight.
+    #[arg(long)]
+    pub no_disk_check: bool,
+    /// Progress events as NDJSON on stdout.
+    #[arg(long)]
+    pub json_progress: bool,
+    /// Machine-readable summary.
+    #[arg(long)]
+    pub json: bool,
+    /// Plan and print, touch nothing.
+    #[arg(long)]
+    pub dry_run: bool,
 }

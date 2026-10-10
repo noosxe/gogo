@@ -46,6 +46,16 @@ impl AppContext {
         } else {
             None
         };
+        Self::assemble(cfg, http, session)
+    }
+
+    /// Assemble from parts (frontends that restore the session themselves keep typed
+    /// auth errors instead of an `anyhow` wash).
+    pub fn assemble(
+        cfg: Config,
+        http: reqwest::Client,
+        session: Option<Arc<dyn crate::auth::TokenProvider>>,
+    ) -> anyhow::Result<Self> {
         let state = crate::state::State::load()?;
         let limiter = Arc::new(GlobalLimiter::new(cfg.download.limit));
         let (events, _rx) = crate::engine::events::channel();
