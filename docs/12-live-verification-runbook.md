@@ -3,9 +3,15 @@
 A single read-only probe script that answers everything still needing a real account
 (companion to `11-open-questions-status.md`). It only calls endpoints your browser also calls,
 downloads at most ~1 KB of a file, and writes everything to `./gogo-probe/` — **delete that
-**Status: executed 2026-10-08 against a real account (library n=146). Results folded into
-`11-open-questions-status.md`; `token.json`/`refresh.json` deleted from the output folder.**
 folder when done, it contains your tokens**.
+
+**Status: executed 2026-10-08 against a real account (library n=146); results folded into
+`11-open-questions-status.md`. Re-run 2026-10-09 with Q10/Q11 (design-review follow-ups):
+Q10 — no candidate param surfaces hidden games (default query is the listing); Q11 — no
+`bonus_content` in the first 15 owned games (Q11_SCAN now defaults to the whole library);
+refresh-token non-rotation reconfirmed. `token.json`/`refresh.json` deleted after each
+run. The embedded script below is the original Q1–Q9 snapshot; `scripts/probe.sh` is
+canonical.**
 
 ## How to run
 

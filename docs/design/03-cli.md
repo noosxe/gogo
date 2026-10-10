@@ -43,6 +43,10 @@ The main event. Selector `--all` means every game in the library list (games onl
 enter exclusively via `--with-dlcs` from their parent game) with `--yes` or a confirmation
 prompt listing totals.
 
+Hidden games are excluded: the default `getFilteredProducts` query returns only visible
+products (live-checked 2026-10-09 — six candidate surfacing params were all no-ops), so
+the listing matches the GOG web default view. Surfacing them is v2 (09 §3).
+
 Content selection flags (all combinable):
 
 | Flag | Default | Meaning |

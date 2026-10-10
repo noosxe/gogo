@@ -41,6 +41,9 @@ Approach:
 
 - `--prune-versions N` cleanup for stacked installer versions (04 §8)
 - Library export/import (`gogo export > library.json`) for sync between machines
+- Hidden games: surface products the default library query excludes (`isHidden` metadata
+  ships with every page; needs endpoint/param research — the 2026-10-08 capture recorded an
+  unverified `hiddenFlag` query param worth one more try)
 - Extras type filtering (soundtrack/artwork/manual via bonus_content names)
 - Hash cache for `verify` (store per-chunk verified-at timestamps to skip unchanged files)
 - Post-download hand-off hints: detect Lutris/Bottles/Steam compatdata prefixes and print (or

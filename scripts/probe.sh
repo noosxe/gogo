@@ -97,14 +97,14 @@ print('page1: %d products, isHidden=true: %d, hasHiddenProducts: %s'
       % (len(d['products']), len(hid), d.get('hasHiddenProducts')))
 PY
 echo "-- trying params that might surface hidden products:"
-for q in 'hidden=1' 'hidden=true' 'showHidden=1' 'isHidden=1' 'hideHidden=0' 'filter=hidden'; do
+for q in 'hidden=1' 'hidden=true' 'showHidden=1' 'isHidden=1' 'hideHidden=0' 'filter=hidden' 'hiddenFlag=1' 'hiddenFlag=true'; do
   curl -s -H "$AUTH" -o gfp_h.json "https://embed.gog.com/account/getFilteredProducts?mediaType=1&$q"
   python3 -c "import json;d=json.load(open('gfp_h.json'));hid=[p for p in d.get('products',[]) if p.get('isHidden')];print('  %-14s -> totalProducts=%s isHidden-in-page=%d hasHiddenProducts=%s' % ('$q', d.get('totalProducts'), len(hid), d.get('hasHiddenProducts')))" 2>/dev/null || echo "  $q -> unparseable response"
 done
 
 echo "== Q11 (C4): extras (bonus_content) filename sources =="
 XDL=""; XGID=""
-for gid in $(python3 -c "import json;print(' '.join(map(str,json.load(open('owned.json'))['owned'][:15])))"); do
+for gid in $(python3 -c "import json,os;print(' '.join(map(str,json.load(open('owned.json'))['owned'][:int(os.environ.get('Q11_SCAN','200'))])))"); do
   curl -s -H "$AUTH" -o "prod_$gid.json" "https://api.gog.com/products/$gid?expand=downloads"
   XDL=$(python3 -c "import json;d=json.load(open('prod_$gid.json'));bc=d.get('downloads',{}).get('bonus_content',[]);print(bc[0].get('galaxy_downlink_json_url','') if bc else '')")
   if [ -n "$XDL" ]; then XGID=$gid; echo "bonus_content found on game $gid"; break; fi
@@ -132,7 +132,7 @@ PY
     echo "-- NO checksum url for this extra: filename must come from Content-Disposition or entry name"
   fi
 else
-  echo "no bonus_content found in first 15 owned games — bump the limit or set the id manually"
+  echo "no bonus_content found in the scanned games (Q11_SCAN=${Q11_SCAN:-200}) — the library may have none; C4 falls back to the designed chain"
 fi
 
 echo "== Token refresh rotation =="
