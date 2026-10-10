@@ -80,6 +80,10 @@ time-limited, so they are never cached or persisted:
    → 200 { "downlink": <cdn url>, "checksum": <xml url> }
 2. GET {checksum}   (no auth, small)
    → ChecksumDoc { name, available, notavailablemsg, md5, timestamp, total_size, chunks: [ {id, from, to, md5} ] }
+   (live shape, corrected 2026-10-10: `<chunk>` elements are DIRECT children of `<file>` —
+   there is **no `<chunks>` wrapper element**; the root carries a `chunks="N"` count attr,
+   `available="1"`, and `timestamp="YYYY-MM-DD HH:MM:SS"` (naive datetime, parsed to unix
+   for `checksum_ts`; the wrapped and unix-timestamp forms stay tolerated))
 ```
 
 - `ChecksumDoc` is authoritative: size = `total_size`; layout = `chunks[]` (10 MiB spans,

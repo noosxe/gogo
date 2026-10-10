@@ -163,11 +163,9 @@ mod tests {
 
     fn doc() -> ChecksumDoc {
         crate::gog::checksum::parse(
-            r#"<file name="setup_g_(1).exe" total_size="10485760">
- <chunks>
-  <chunk id="0" from="0" to="5242879" method="md5">aa</chunk>
-  <chunk id="1" from="5242880" to="10485759" method="md5">bb</chunk>
- </chunks>
+            r#"<file name="setup_g_(1).exe" total_size="10485760" chunks="2">
+	<chunk id="0" from="0" to="5242879" method="md5">aa</chunk>
+	<chunk id="1" from="5242880" to="10485759" method="md5">bb</chunk>
 </file>"#,
         )
         .unwrap()

@@ -91,11 +91,10 @@ fn checksum_xml(name: &str, chunks: &[(&str, u64, u64)]) -> String {
         .join("\n ");
     let total = chunks.last().map(|c| c.2 + 1).unwrap_or(0);
     format!(
-        r#"<file name="{name}" available="true" total_size="{total}">
- <chunks>
-  {body}
- </chunks>
-</file>"#
+        r#"<file name="{name}" available="1" chunks="{}" total_size="{total}">
+	{body}
+</file>"#,
+        chunks.len()
     )
 }
 

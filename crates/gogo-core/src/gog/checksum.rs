@@ -77,7 +77,6 @@ pub fn parse(xml: &str) -> Result<ChecksumDoc, ApiError> {
         ..ChecksumDoc::default()
     };
     let mut buf = Vec::new();
-    let mut in_chunks = false;
     let mut cur: Option<Chunk> = None;
 
     loop {
@@ -87,13 +86,13 @@ pub fn parse(xml: &str) -> Result<ChecksumDoc, ApiError> {
         match ev {
             Event::Start(e) => match e.name().as_ref() {
                 "file" => file_attrs(&e, &mut doc)?,
-                "chunks" => in_chunks = true,
-                "chunk" if in_chunks => cur = Some(chunk_attrs(&e)),
+                "chunks" => {}
+                "chunk" => cur = Some(chunk_attrs(&e)),
                 _ => {}
             },
             Event::Empty(e) => match e.name().as_ref() {
                 "file" => file_attrs(&e, &mut doc)?,
-                "chunk" if in_chunks => doc.chunks.push(chunk_attrs(&e)),
+                "chunk" => doc.chunks.push(chunk_attrs(&e)),
                 _ => {}
             },
             Event::Text(t) => {
@@ -101,15 +100,11 @@ pub fn parse(xml: &str) -> Result<ChecksumDoc, ApiError> {
                     chunk.md5 = t.xml10_content().into_owned();
                 }
             }
-            Event::End(e) => match e.name().as_ref() {
-                "chunk" => {
-                    if let Some(chunk) = cur.take() {
-                        doc.chunks.push(chunk);
-                    }
+            Event::End(e) if e.name().as_ref() == "chunk" => {
+                if let Some(chunk) = cur.take() {
+                    doc.chunks.push(chunk);
                 }
-                "chunks" => in_chunks = false,
-                _ => {}
-            },
+            }
             Event::Eof => break,
             _ => {}
         }
@@ -139,15 +134,26 @@ fn file_attrs(e: &BytesStart<'_>, doc: &mut ChecksumDoc) -> Result<(), ApiError>
     doc.name =
         attr(e, "name").ok_or_else(|| ApiError::Other("checksum XML: root has no name".into()))?;
     if let Some(v) = attr(e, "available") {
-        doc.available = !v.eq_ignore_ascii_case("false");
+        doc.available = !matches!(v.as_str(), "false" | "0");
     }
     doc.notavailablemsg = attr(e, "notavailablemsg");
     doc.md5 = attr(e, "md5");
-    doc.timestamp = attr(e, "timestamp").and_then(|v| v.parse().ok());
+    doc.timestamp = attr(e, "timestamp").and_then(parse_timestamp);
     doc.total_size = attr(e, "total_size")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
     Ok(())
+}
+
+/// Live shape: `timestamp="2026-03-13 08:45:39"` (naive datetime, as GOG serves it);
+/// a bare unix number stays accepted for forward compatibility.
+fn parse_timestamp(v: String) -> Option<u64> {
+    if let Ok(secs) = v.parse::<u64>() {
+        return Some(secs);
+    }
+    chrono::NaiveDateTime::parse_from_str(&v, "%Y-%m-%d %H:%M:%S")
+        .ok()
+        .map(|t| t.and_utc().timestamp().max(0) as u64)
 }
 
 fn chunk_attrs(e: &BytesStart<'_>) -> Chunk {
@@ -193,14 +199,13 @@ fn validate(doc: &mut ChecksumDoc) {
 mod tests {
     use super::*;
 
-    const SAMPLE: &str = r#"<?xml version="1.0" encoding="utf-8"?>
-<file name="setup_game_2.0.0.1_(12345).exe" available="true"
-      md5="0f3e5a9b8c7d6e2f1a4b5c6d7e8f9012" timestamp="1760000000"
+    // Live shape (probe capture + 2026-10-10 live run): bare <chunk> children with NO
+    // <chunks> wrapper; available="1"; timestamp is a naive datetime.
+    const SAMPLE: &str = r#"<file name="setup_game_2.0.0.1_(12345).exe" available="1"
+      md5="0f3e5a9b8c7d6e2f1a4b5c6d7e8f9012" chunks="2" timestamp="2025-10-09 12:00:00"
       total_size="20971520">
- <chunks>
-  <chunk id="0" from="0" to="10485759" method="md5"> a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6 </chunk>
-  <chunk id="1" from="10485760" to="20971519" method="md5">0f1e2d3c4b5a69788796a5b4c3d2e1f0</chunk>
- </chunks>
+	<chunk id="0" from="0" to="10485759" method="md5"> a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6 </chunk>
+	<chunk id="1" from="10485760" to="20971519" method="md5">0f1e2d3c4b5a69788796a5b4c3d2e1f0</chunk>
 </file>"#;
 
     #[test]
@@ -209,7 +214,7 @@ mod tests {
         assert_eq!(doc.name, "setup_game_2.0.0.1_(12345).exe");
         assert!(doc.available);
         assert_eq!(doc.notavailablemsg, None);
-        assert_eq!(doc.timestamp, Some(1_760_000_000));
+        assert_eq!(doc.timestamp, Some(1_760_011_200)); // 2025-10-09 12:00:00 UTC
         assert_eq!(doc.total_size, 20_971_520);
         assert_eq!(doc.chunks.len(), 2);
         // Whitespace inside the text node is trimmed.
@@ -227,6 +232,11 @@ mod tests {
 </file>"#,
         )
         .unwrap();
+        assert_eq!(
+            doc.timestamp,
+            Some(99),
+            "bare unix timestamps stay accepted"
+        );
         assert_eq!(doc.name, "x.bin");
         assert_eq!(doc.total_size, 100);
         assert_eq!(doc.chunks[0].md5, "bb");
