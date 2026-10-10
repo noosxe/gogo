@@ -99,6 +99,33 @@ fn checksum_xml(name: &str, chunks: &[(&str, u64, u64)]) -> String {
     )
 }
 
+/// Isolates GOGO_HOME per test (state.json, caches) under the shared env mutex —
+/// engine tests must never touch the user's real state/cache dirs.
+struct TestEnv {
+    _guard: std::sync::MutexGuard<'static, ()>,
+    _dir: tempfile::TempDir,
+}
+
+impl TestEnv {
+    fn new() -> Self {
+        let guard = crate::test_util::env_lock();
+        let dir = tempfile::tempdir().unwrap();
+        // SAFETY: env mutation under the shared env mutex (see test_util).
+        unsafe { std::env::set_var("GOGO_HOME", dir.path()) };
+        Self {
+            _guard: guard,
+            _dir: dir,
+        }
+    }
+}
+
+impl Drop for TestEnv {
+    fn drop(&mut self) {
+        // SAFETY: same mutex.
+        unsafe { std::env::remove_var("GOGO_HOME") };
+    }
+}
+
 /// Wiremock responder with per-call bodies (corrupt-then-good, always-corrupt).
 struct Sequence {
     bodies: Mutex<Vec<Vec<u8>>>,
@@ -159,6 +186,7 @@ async fn cdn_hits(server: &wiremock::MockServer, range: Option<&str>) -> usize {
 
 #[tokio::test]
 async fn happy_path_downloads_verifies_and_records() {
+    let _env = TestEnv::new();
     let root = tempfile::tempdir().unwrap();
     let ctx = test_ctx(root.path()).await;
     let server = MockServer::start().await;
@@ -207,6 +235,7 @@ async fn happy_path_downloads_verifies_and_records() {
 
 #[tokio::test]
 async fn resume_skips_completed_chunks() {
+    let _env = TestEnv::new();
     let root = tempfile::tempdir().unwrap();
     let ctx = test_ctx(root.path()).await;
     let server = MockServer::start().await;
@@ -268,6 +297,7 @@ async fn resume_skips_completed_chunks() {
 
 #[tokio::test]
 async fn corrupt_chunk_retries_then_succeeds() {
+    let _env = TestEnv::new();
     let root = tempfile::tempdir().unwrap();
     let ctx = test_ctx(root.path()).await;
     let server = MockServer::start().await;
@@ -295,6 +325,7 @@ async fn corrupt_chunk_retries_then_succeeds() {
 
 #[tokio::test]
 async fn persistent_corruption_fails_class_5_and_keeps_sidecars() {
+    let _env = TestEnv::new();
     let root = tempfile::tempdir().unwrap();
     let ctx = test_ctx(root.path()).await;
     let server = MockServer::start().await;
@@ -328,6 +359,7 @@ async fn persistent_corruption_fails_class_5_and_keeps_sidecars() {
 
 #[tokio::test]
 async fn unavailable_doc_skips_with_reason() {
+    let _env = TestEnv::new();
     let root = tempfile::tempdir().unwrap();
     let ctx = test_ctx(root.path()).await;
     let server = MockServer::start().await;
@@ -355,6 +387,7 @@ async fn unavailable_doc_skips_with_reason() {
 
 #[tokio::test]
 async fn unrecorded_matching_file_is_adopted() {
+    let _env = TestEnv::new();
     let root = tempfile::tempdir().unwrap();
     let ctx = test_ctx(root.path()).await;
     let server = MockServer::start().await;
@@ -389,6 +422,7 @@ async fn unrecorded_matching_file_is_adopted() {
 
 #[tokio::test]
 async fn disk_preflight_fails_class_6_nothing_written() {
+    let _env = TestEnv::new();
     let root = tempfile::tempdir().unwrap();
     let mut ctx = AppContext {
         cfg: Config::default(),
@@ -413,6 +447,7 @@ async fn disk_preflight_fails_class_6_nothing_written() {
 
 #[tokio::test]
 async fn present_task_counts_as_skipped_without_calls() {
+    let _env = TestEnv::new();
     let root = tempfile::tempdir().unwrap();
     let ctx = test_ctx(root.path()).await;
     let mut task = task_for("http://unused".into(), 5);
