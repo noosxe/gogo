@@ -120,10 +120,10 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
         Command::List {
             search,
             os,
-            with_dlcs: _,
+            with_dlcs,
             json,
-            refresh: _,
-        } => list(search, os, json, color).await,
+            refresh,
+        } => list(search, os, with_dlcs, json, refresh, color).await,
         Command::Info { game, json } => info(game, json).await,
         Command::Download(args) => download(args, cli.no_progress, cli.quiet).await,
         Command::Update { games, all, strict } => update(games, all, strict).await,
@@ -279,44 +279,190 @@ async fn library_products(
 async fn list(
     search: Option<String>,
     os: Option<OsFilter>,
+    with_dlcs: bool,
     json: bool,
+    refresh: bool,
     color: ColorWhen,
 ) -> Result<i32, AppError> {
+    use gogo::gog::catalog::Product;
+
     let ctx = session_ctx().await?;
     let mut games = library_products(&ctx).await?;
     if let Some(needle) = &search {
         let needle = needle.to_lowercase();
         games.retain(|g| g.title.to_lowercase().contains(&needle));
     }
-    let os = os_filter_to_catalog(os);
+
+    // 03 §1: the library list is always live; catalog data (os, sizes, versions)
+    // comes from the product cache, fetched live on a miss or with --refresh.
+    // A failed fetch degrades the row (empty os/size), never the command.
+    let token = bearer(&ctx).await?;
+    let mut products: Vec<Product> = Vec::with_capacity(games.len());
+    for game in &games {
+        let cached = if refresh {
+            None
+        } else {
+            gogo::state::cache::load_product(game.id).unwrap_or(None)
+        };
+        let product = match cached {
+            Some(p) => p,
+            None => match gogo::gog::catalog::detail(&ctx.http, &token, game.id).await {
+                Ok(p) => {
+                    if let Err(e) = gogo::state::cache::save_product(&p) {
+                        eprintln!("warn: catalog cache write failed: {e}");
+                    }
+                    p
+                }
+                Err(e) => {
+                    eprintln!("warn: catalog fetch failed for {}: {e}", game.title);
+                    Product {
+                        id: game.id,
+                        title: Some(game.title.clone()),
+                        slug: game.slug.clone(),
+                        downloads: None,
+                        expanded_dlcs: Vec::new(),
+                    }
+                }
+            },
+        };
+        products.push(product);
+    }
+
+    let os_filter = os_filter_to_catalog(os);
+    // --os filters on what the catalog says the game delivers; rows with unknown
+    // os data (fetch degraded) survive the filter rather than vanishing.
+    if let Some(want) = os_filter {
+        products.retain(|p| {
+            let os_list = product_os(p);
+            os_list.is_empty() || os_list.contains(&want)
+        });
+    }
+
+    let state = ctx.state.lock().unwrap().clone();
+    let downloaded = |product_id: u64, dlc_id: Option<u64>| {
+        state
+            .installs
+            .iter()
+            .find(|r| r.product_id == product_id && r.dlc_id == dlc_id)
+            .and_then(|r| r.version.clone())
+    };
+
+    let mut rows: Vec<gogo::state::records::ListRow> = Vec::new();
+    for product in &products {
+        rows.push(gogo::state::records::ListRow {
+            id: product.id,
+            title: product
+                .title
+                .clone()
+                .unwrap_or_else(|| product.id.to_string()),
+            os: product_os(product),
+            installers: entry_count(product),
+            total_size: product_size(product),
+            installed_version: downloaded(product.id, None),
+            depth: 0,
+        });
+        if with_dlcs {
+            for dlc in &product.expanded_dlcs {
+                rows.push(gogo::state::records::ListRow {
+                    id: dlc.id,
+                    title: dlc.title.clone().unwrap_or_else(|| dlc.id.to_string()),
+                    os: product_os(dlc),
+                    installers: entry_count(dlc),
+                    total_size: product_size(dlc),
+                    installed_version: downloaded(product.id, Some(dlc.id)),
+                    depth: 1,
+                });
+            }
+        }
+    }
 
     if json {
-        let out: Vec<serde_json::Value> = games
+        let out: Vec<serde_json::Value> = products
             .iter()
-            .map(|g| serde_json::json!({"id": g.id, "title": g.title, "slug": g.slug}))
+            .map(|p| {
+                let mut v = serde_json::json!({
+                    "id": p.id,
+                    "title": p.title,
+                    "slug": p.slug,
+                    "os": product_os(p),
+                    "installers": entry_count(p),
+                    "size": product_size(p),
+                });
+                if with_dlcs && !p.expanded_dlcs.is_empty() {
+                    v["dlcs"] = serde_json::json!(
+                        p.expanded_dlcs
+                            .iter()
+                            .map(|d| serde_json::json!({
+                                "id": d.id,
+                                "title": d.title,
+                                "os": product_os(d),
+                                "size": product_size(d),
+                            }))
+                            .collect::<Vec<_>>()
+                    );
+                }
+                v
+            })
             .collect();
         println!("{}", serde_json::to_string(&out).unwrap());
         return Ok(cli::exit::OK);
     }
 
-    let state = ctx.state.lock().unwrap().clone();
-    let rows: Vec<gogo::state::records::ListRow> = games
-        .iter()
-        .map(|g| gogo::state::records::ListRow {
-            id: g.id,
-            title: g.title.clone(),
-            os,
-            installers: 0,
-            total_size: 0,
-            installed_version: state
-                .installs
-                .iter()
-                .find(|r| r.product_id == g.id)
-                .and_then(|r| r.version.clone()),
-        })
-        .collect();
     println!("{}", output::list_table(&rows, color));
     Ok(cli::exit::OK)
+}
+
+/// Distinct platforms a product (or DLC) delivers, in win → mac → linux order.
+fn product_os(product: &gogo::gog::catalog::Product) -> Vec<gogo::gog::catalog::Os> {
+    let Some(downloads) = &product.downloads else {
+        return Vec::new();
+    };
+    let mut os = Vec::new();
+    let mut push = |entry: &gogo::gog::catalog::InstallerEntry| {
+        if let Some(o) = entry.os
+            && !os.contains(&o)
+        {
+            os.push(o);
+        }
+    };
+    for entry in &downloads.installers {
+        push(entry);
+    }
+    for entry in downloads
+        .bonus_content
+        .iter()
+        .chain(&downloads.language_packs)
+    {
+        push(entry);
+    }
+    use gogo::gog::catalog::Os;
+    os.sort_by_key(|o| match o {
+        Os::Windows => 0,
+        Os::Mac => 1,
+        Os::Linux => 2,
+    });
+    os
+}
+
+/// Deliverable-entry count (installers for games; bonus content counts for DLCs).
+fn entry_count(product: &gogo::gog::catalog::Product) -> u32 {
+    let Some(downloads) = &product.downloads else {
+        return 0;
+    };
+    (downloads.installers.len() + downloads.bonus_content.len()) as u32
+}
+
+/// Sum of entry sizes (whole entries — multi-part totals live on the entry).
+fn product_size(product: &gogo::gog::catalog::Product) -> u64 {
+    let Some(downloads) = &product.downloads else {
+        return 0;
+    };
+    downloads
+        .installers
+        .iter()
+        .chain(&downloads.bonus_content)
+        .filter_map(|e| e.total_size)
+        .sum()
 }
 
 async fn info(game: String, json: bool) -> Result<i32, AppError> {

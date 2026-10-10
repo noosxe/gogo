@@ -89,10 +89,13 @@ pub fn is_outdated(
 pub struct ListRow {
     pub id: u64,
     pub title: String,
-    pub os: Option<crate::gog::catalog::Os>,
+    /// Available platforms (deduped, win → mac → linux); empty = unknown.
+    pub os: Vec<crate::gog::catalog::Os>,
     pub installers: u32,
     pub total_size: u64,
     pub installed_version: Option<String>,
+    /// 0 = game row; 1 = DLC row (indented under its game, `--with-dlcs`).
+    pub depth: u8,
 }
 
 #[cfg(test)]
