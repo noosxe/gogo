@@ -1,0 +1,48 @@
+# Dependabot: weekly checks, one grouped PR per ecosystem.
+#
+# - Rust: minor/patch only — majors are deliberate upgrades by hand (breaking
+#   changes, MSRV risk). The CI gate compiles everything on the pinned Rust
+#   1.99.0, so any bump that raises MSRV fails the required checks.
+# - Actions: all updates, majors included — that is how action fixes ship.
+# - The rust-toolchain ecosystem is deliberately NOT configured: the 1.99.0
+#   pin must move together with flake.nix (AGENTS.md), never alone.
+
+version: 2
+
+updates:
+  # Rust crates — the root manifest covers the whole workspace.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    # App, never published (publish = false): bump Cargo.lock only; manifest
+    # version ranges stay loose, no churn in the workspace Cargo.toml.
+    versioning-strategy: lockfile-only
+    groups:
+      # One PR for all rust minor/patch updates each week.
+      rust:
+        patterns: ["*"]
+    ignore:
+      # Hold majors back for the cargo ecosystem only.
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+      # gog-warp is rev-pinned BY DESIGN (docs/design/01 §2): its hash is not
+      # verified by cargo-deny for git deps, so a rev bump is exactly when the
+      # deny.toml clarify entry must be re-read for upstream re-licensing.
+      # Never auto-bump it.
+      - dependency-name: "gog-warp"
+    commit-message:
+      prefix: "chore(deps)"
+
+  # Actions referenced from .github/workflows/.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      # One PR for all action updates each week.
+      github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "chore(ci)"
