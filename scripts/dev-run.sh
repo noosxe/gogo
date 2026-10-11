@@ -16,6 +16,15 @@
 set -eu
 BIN="$1"; shift
 
+# Never re-sign test binaries (target/**/deps/*): cargo-nextest runs ONE process
+# per test, re-invoking this runner each time, and codesigning a file that backs
+# a still-running process makes the kernel SIGKILL that process (found live
+# 2026-10-11: escalating SIGKILL test failures). Tests never touch the keychain
+# (GOGO_HOME isolation), so they need no stable identity.
+case "$BIN" in
+    */deps/*) exec "$BIN" "$@" ;;
+esac
+
 if command -v codesign >/dev/null 2>&1; then
     IDENT="${GOGO_CODESIGN_IDENTITY:-}"
     if [ -z "$IDENT" ]; then
