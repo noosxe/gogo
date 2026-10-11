@@ -1,0 +1,6 @@
+# Toolchain for rustup-based environments (CI, contributors without nix).
+# The nix devshell does NOT read this file — it pins the same version in
+# flake.nix; the two must be bumped together.
+[toolchain]
+channel = "1.99.0"
+components = ["clippy", "rustfmt"]
