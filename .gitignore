@@ -1,6 +1,8 @@
 # --- Secrets / personal data ---
-# Live-verification probe outputs contain OAuth tokens & account data — never commit
-/gogo-probe/
+# Live-verification probe outputs contain OAuth tokens & account data — never
+# commit. Unanchored: matches at ANY depth (a stray scripts/gogo-probe/ copy was
+# once committed and had to be purged from history before the first push).
+gogo-probe/
 
 # --- Local tooling state ---
 /.pi/tasks/
