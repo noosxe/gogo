@@ -5,6 +5,11 @@ members = ["crates/gogo-core", "crates/gogo-cli", "crates/gogo-tui"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+authors = ["Levon Kirakosyan"]
+# Dual-licensed (ecosystem standard: Apache-2.0 adds the explicit patent grant,
+# MIT stays GPLv2-compatible). Copyright 2026 Levon Kirakosyan.
+# Distribution is GitHub-only (git + releases) — crates.io is deliberately out.
+license = "MIT OR Apache-2.0"
 publish = false
 
 # Every shared dependency is pinned HERE, once (docs/design/01 §1).

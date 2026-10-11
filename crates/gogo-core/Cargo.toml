@@ -4,6 +4,7 @@ description = "Frontend-agnostic core: GOG auth, catalog, download engine, local
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 # The lib name stays `gogo` so all core-internal and frontend code paths read `gogo::…`.
 [lib]
