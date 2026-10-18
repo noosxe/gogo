@@ -79,8 +79,8 @@ section when implemented):
 | mode | source | notes |
 |---|---|---|
 | `brew` | `$(brew --prefix)/opt/wine/bin/wine` | LGPL wine-crossover; **gogo's recommended default** — redistributable-clean (13 §3) |
-| `gptk` | user-provided mount/dir via `--runtime-path` | Apple EULA is the user's; gogo never downloads or bundles it (13 §3) |
 | `path` | any dir containing `bin/wine*` via `--runtime-path` | escape hatch; probed, fail-loud if `wine` doesn't run |
+| `gptk` | user-supplied wine tree **with GPTK libs already overlaid** via `--runtime-path` (live finding, docs/13 §6.2: the raw Apple dmg ships no Wine — only D3DMetal + DX overlay libs) | Apple EULA is the user's; gogo never downloads or bundles it (13 §3) |
 | `auto` | `brew` if present, else a mounted GPTK volume, else error | error message names all three remedies |
 
 Resolution records which runtime was used into `Resources/runtime.txt` —
