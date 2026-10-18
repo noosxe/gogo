@@ -114,6 +114,16 @@ the script pipes cleanly into an install. Install paths (bash): file-based
 Known quirk: macOS system bash 3.2 can garble `source <(gogo completions bash)` FIFO
 sourcing for any multi-write producer — use the file or eval path there.
 
+### `gogo mac-app <installer-path>`
+Convert a downloaded Windows offline installer into a self-contained macOS
+`.app` (double-click launch, drag to Applications). Silent Inno Setup install
+into a bundled WINEPREFIX; Wine runtime resolved per design 10 §3 (`auto` /
+`brew` / `gptk` / `path`), copied into the bundle; ad-hoc codesigned. macOS
+only (exit 2 elsewhere). Full spec: **design 10**; discovery: docs/13.
+Exit 7 on conversion failures. Names/flags: `--name`, `--runtime`,
+`--runtime-path`, `--out`, `--json`, `--yes`.
+
+
 ## 2. Global flags
 
 | Flag | Env | Meaning |
@@ -160,6 +170,7 @@ feeds the v2 TUI (`docs/design/01` §4).
 | 4 | network: retries exhausted on API/CDN |
 | 5 | verification failure: checksum mismatch (download or `verify`) |
 | 6 | disk: insufficient space or unwritable destination |
+| 7 | mac-app conversion failure: runtime missing/invalid, installer exit ≠ 0, no entry point, codesign failure (design 10 §4) |
 | 130 | interrupted (Ctrl-C), state flushed, resumable |
 
 Batch semantics: if any file fails with code-class X and none with a higher class, exit with

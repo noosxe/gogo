@@ -4,9 +4,10 @@
 installers you own — with checksum verification, resumable transfers, per-second bandwidth
 limits, and automation-friendly output.
 
-Everything here builds on the discovery research in `docs/01`–`docs/12`, in particular the
-live-verified API model (`docs/04`, `docs/11`, verified 2026-10-08) and the scope baseline
-(`docs/10 §1`).
+Everything here builds on the discovery research in `docs/01`–`docs/13`, in
+particular the live-verified API model (`docs/04`, `docs/11`, verified
+2026-10-08) and the scope baseline (`docs/10 §1`); the macOS bundle research
+in `docs/13` grounds design 10.
 
 ## Goals (v1)
 
@@ -25,7 +26,9 @@ live-verified API model (`docs/04`, `docs/11`, verified 2026-10-08) and the scop
 ## Non-goals (v1)
 
 - Depot/chunked content system (Model B) — v2, together with the TUI
-- Installing games into a library / launching them (we produce installers, not installs)
+- Installing games into a managed library or launching them (we produce
+  installers — plus, since design 10, one-shot conversion of an installer into
+  a self-contained macOS `.app`; no library tracking, no launch management)
 - Cloud saves, wishlist, friends, movies
 - Windows support — the *binary* targets **Linux and macOS only** (downloading Windows
   installers on Linux is first-class, though — they're just files; 03 §1)
@@ -57,8 +60,9 @@ live-verified API model (`docs/04`, `docs/11`, verified 2026-10-08) and the scop
 | [06-local-state](06-local-state.md) | paths, state/record schema, catalog cache, update detection |
 | [07-errors-and-observability](07-errors-and-observability.md) | error taxonomy, retry/backoff matrix, logging, redaction, progress events |
 | [08-testing](08-testing.md) | unit/integration strategy, fixtures, mock GOG, live smoke |
+| [08-testing](08-testing.md) | unit/integration strategy, fixtures, mock GOG, live smoke |
 | [09-v2-roadmap](09-v2-roadmap.md) | depots (Model B), ratatui TUI |
-
+| [10-macos-app-bundles](10-macos-app-bundles.md) | `gogo mac-app`: installer → self-contained .app (Wine runtime resolution, silent install, codesign) |
 ## Key decisions (traceability)
 
 | Decision | Rationale / source |
@@ -75,6 +79,7 @@ live-verified API model (`docs/04`, `docs/11`, verified 2026-10-08) and the scop
 | Default download dir under the user's Downloads dir | visible + conventional (`dirs::download_dir()`); configurable |
 | Linux + macOS only (no Windows) | directories follow XDG base dirs (Linux) and `~/Library` (macOS) — 06 §1 |
 | `.part` + sidecar JSON, atomic rename on completion | resume is data-only (offsets/md5), CDN URLs are never persisted |
+| macOS bundles: gogo assembles the `.app` itself, headlessly | No headless API in Porting Kit/Sikarugir; CrossOver proprietary; GPTK not redistributable; Wine is LGPL + scriptable (docs/13) |
 
 ## Status
 
