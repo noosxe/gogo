@@ -103,7 +103,6 @@ pub fn plan(
     let install = installer::plan(&opts.installer)?;
 
     let bundle = bundle::layout(&opts.out_dir, &display);
-    let bundle = bundle::layout(&opts.out_dir, &display);
     if bundle.root.exists() {
         if !opts.overwrite {
             return Err(MacAppError::BundleExists {
