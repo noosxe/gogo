@@ -273,21 +273,27 @@ pub fn strip_detritus(bundle: &Path, policy: CodesignPolicy) -> Result<(), MacAp
     if policy == CodesignPolicy::Skip || !Path::new("/usr/bin/xattr").exists() {
         return Ok(());
     }
-    let status = super::installer::run_with_timeout(
-        Command::new("/usr/bin/xattr").arg("-cr").arg(bundle),
-        Duration::from_secs(60),
-    );
-    match status {
-        Some(s) if s.success() => Ok(()),
-        other => Err(MacAppError::Codesign {
-            stderr: format!(
-                "xattr -cr failed ({}) — bundle metadata could not be cleared",
-                other
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| "timeout".into())
-            ),
-        }),
+    // Delete only the seal-breaking classes. NOT `xattr -cr`: it also targets
+    // SIP-protected com.apple.provenance, which cannot be removed (exit 1) and
+    // which codesign tolerates anyway (live finding 2026-10-18, third run).
+    for attr in [
+        "com.apple.FinderInfo",
+        "com.apple.ResourceFork",
+        "com.apple.quarantine",
+    ] {
+        let status = super::installer::run_with_timeout(
+            Command::new("/usr/bin/xattr")
+                .args(["-dr", attr])
+                .arg(bundle),
+            Duration::from_secs(120),
+        );
+        if status.is_none() {
+            return Err(MacAppError::Codesign {
+                stderr: format!("xattr -dr {attr} timed out — bundle metadata not cleared"),
+            });
+        }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -455,7 +461,7 @@ mod bundle_tests {
         let f = b.resources.join("x.bin");
         std::fs::write(&f, b"data").unwrap();
         let set = std::process::Command::new("/usr/bin/xattr")
-            .args(["-w", "com.apple.metadata:kMDItemWhereFroms", "junk"])
+            .args(["-wx", "com.apple.ResourceFork", "41424344"])
             .arg(&f)
             .output()
             .unwrap();
@@ -469,10 +475,7 @@ mod bundle_tests {
         let list = String::from_utf8_lossy(&out.stdout);
         // SIP-protected com.apple.provenance is auto-re-added and codesign
         // tolerates it — the seal-breaking classes must be gone.
-        assert!(
-            !list.contains("kMDItemWhereFroms"),
-            "detritus remains: {list}"
-        );
+        assert!(!list.contains("ResourceFork"), "detritus remains: {list}");
         assert!(!list.contains("FinderInfo"), "detritus remains: {list}");
         assert!(!list.contains("ResourceFork"), "detritus remains: {list}");
     }
