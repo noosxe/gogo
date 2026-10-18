@@ -84,9 +84,14 @@ bundling/fetching GPTK (Apple license).
 
 1. Do all *currently sold* GOG Windows installers honor `/VERYSILENT`?
    (spot-check across old titles during implementation — fail-loud otherwise).
-2. Exact Wine binary name per runtime (`wine` vs `wine64`) across
-   wine-crossover / GPTK versions — resolve at runtime-detection time, don't
-   hardcode.
+2. ~~Exact Wine binary name per runtime~~ **answered (live, 2026-10-18, GPTK 4.0
+   beta 3)**: GPTK's "Evaluation environment" dmg ships **no Wine at all** —
+   `redist/lib/` holds only D3DMetal.framework + d3d/dxgi `.so` overlays + wine
+   PE builtins (69 MB, zero executables). The runnable base is wine-crossover
+   (Homebrew `wine` cask); GPTK libs are overlaid onto it. So `brew` is the
+   primary mode and `gptk --runtime-path` expects a *wine tree with GPTK libs
+   already overlaid*, not the raw Apple dmg. `wine` vs `wine64` name sniffing
+   stays (older trees differ).
 3. Nested codesigning quirks: GPTK's D3DM frameworks inside a user bundle —
    `codesign --deep --force --sign -` covers it (verify on first GPTK bundle).
 4. Does the resulting bundle launch cleanly from `/Applications` given
