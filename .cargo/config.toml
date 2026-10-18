@@ -12,5 +12,3 @@
 [target.aarch64-apple-darwin]
 runner = ["scripts/dev-run.sh"]
 
-[target.x86_64-apple-darwin]
-runner = ["scripts/dev-run.sh"]
