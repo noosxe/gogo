@@ -38,7 +38,7 @@ pub enum ColorWhen {
     Never,
 }
 
-/// The ten commands (`docs/design/03-cli.md` §1).
+/// The eleven commands (`docs/design/03-cli.md` §1).
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Interactive browser paste-code login (docs/design/02 §2).
@@ -124,9 +124,38 @@ pub enum Command {
         rebuild: bool,
     },
     /// Config file management.
+    /// Config file management.
     Config {
         #[command(subcommand)]
         sub: ConfigSub,
+    },
+    /// Convert a downloaded Windows installer into a self-contained macOS .app
+    /// (docs/design/10).
+    MacApp {
+        /// Path to the GOG setup .exe (.bin siblings are picked up automatically).
+        #[arg(value_name = "INSTALLER")]
+        installer: std::path::PathBuf,
+        /// Bundle title (default: derived from the installer file name).
+        #[arg(long)]
+        name: Option<String>,
+        /// Wine runtime source (docs/design/10 §3).
+        #[arg(long, value_enum)]
+        runtime: Option<RuntimeSource>,
+        /// Runtime directory for --runtime gptk|path.
+        #[arg(long, value_name = "DIR")]
+        runtime_path: Option<std::path::PathBuf>,
+        /// Output directory for <name>.app (default: current directory).
+        #[arg(long, value_name = "DIR")]
+        out: Option<std::path::PathBuf>,
+        /// Skip the size confirmation; overwrite an existing bundle.
+        #[arg(long)]
+        yes: bool,
+        /// Progress events as NDJSON on stdout.
+        #[arg(long)]
+        json_progress: bool,
+        /// Machine-readable summary.
+        #[arg(long)]
+        json: bool,
     },
     /// Print a shell completion script to stdout.
     Completions {
@@ -155,6 +184,30 @@ pub enum OsFilter {
     Linux,
     All,
 }
+/// CLI mirror of [`gogo::macapp::RuntimeMode`] (foreign enum — clap's
+/// `ValueEnum` can't be implemented on it here).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum RuntimeSource {
+    /// brew wine if installed, else a mounted GPTK volume.
+    Auto,
+    /// Homebrew wine-crossover.
+    Brew,
+    /// User-supplied GPTK mount (user accepted Apple's terms).
+    Gptk,
+    /// Explicit directory containing bin/wine.
+    Path,
+}
+
+impl From<RuntimeSource> for gogo::macapp::RuntimeMode {
+    fn from(s: RuntimeSource) -> Self {
+        match s {
+            RuntimeSource::Auto => gogo::macapp::RuntimeMode::Auto,
+            RuntimeSource::Brew => gogo::macapp::RuntimeMode::Brew,
+            RuntimeSource::Gptk => gogo::macapp::RuntimeMode::Gptk,
+            RuntimeSource::Path => gogo::macapp::RuntimeMode::Path,
+        }
+    }
+}
 
 /// Stable exit codes (`docs/design/03-cli.md` §5).
 // dead_code: the table is a stable published contract — codes no command raises yet
@@ -174,6 +227,9 @@ pub mod exit {
     pub const CORRUPT: i32 = 5;
     /// Insufficient disk space.
     pub const DISK: i32 = 6;
+    /// mac-app conversion failure (runtime missing/invalid, installer exit ≠ 0,
+    /// no entry point, codesign failure) — docs/design/10 §4.
+    pub const MACAPP: i32 = 7;
     /// Interrupted (SIGINT); sidecars flushed, safe to resume.
     pub const SIGINT: i32 = 130;
 }

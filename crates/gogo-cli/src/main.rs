@@ -40,6 +40,15 @@ fn main() {
             eprintln!("gogo: {e}");
             cli::exit::NETWORK
         }
+        Err(AppError::MacApp(e)) => {
+            eprintln!("gogo: {e}");
+            // UnsupportedPlatform is a usage error (exit 2); the rest of the
+            // taxonomy is conversion failure (exit 7) — docs/design/10 §4.
+            match e {
+                gogo::macapp::MacAppError::UnsupportedPlatform => cli::exit::USAGE,
+                _ => cli::exit::MACAPP,
+            }
+        }
         Err(AppError::Io(e)) => {
             eprintln!("gogo: {e}");
             cli::exit::FAILED
@@ -54,12 +63,20 @@ fn main() {
 }
 
 /// Typed top-level error → exit class (03 §5, review C1).
+/// Typed top-level error → exit class (03 §5, review C1).
 enum AppError {
     Config(ConfigError),
     Usage,
     Auth(AuthError),
     Api(ApiError),
+    MacApp(gogo::macapp::MacAppError),
     Io(std::io::Error),
+}
+
+impl From<gogo::macapp::MacAppError> for AppError {
+    fn from(e: gogo::macapp::MacAppError) -> Self {
+        Self::MacApp(e)
+    }
 }
 
 impl From<ConfigError> for AppError {
@@ -139,6 +156,28 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
             rebuild,
         } => verify(games, all, path, fix, rebuild).await,
         Command::Config { sub } => config_cmd(sub),
+        Command::MacApp {
+            installer,
+            name,
+            runtime,
+            runtime_path,
+            out,
+            yes,
+            json_progress,
+            json,
+        } => {
+            mac_app(
+                installer,
+                name,
+                runtime,
+                runtime_path,
+                out,
+                yes,
+                json_progress,
+                json,
+            )
+            .await
+        }
         Command::Completions { shell } => completions(shell),
     }
 }
@@ -823,6 +862,8 @@ async fn render_bars(
             let _ = target.println(format!("warn: {message}"));
         }
         ProgressEvent::PlanReady { .. } | ProgressEvent::Done { .. } => {}
+        // mac-app events never flow through the download bars renderer.
+        _ => {}
     })
     .await;
 }
@@ -1460,6 +1501,148 @@ fn write_completions(
     cmd.build();
     clap_complete::Generator::try_generate(&shell, &cmd, out).map_err(AppError::Io)?;
     Ok(cli::exit::OK)
+}
+
+// — mac-app (docs/design/10): installer → self-contained macOS .app —
+
+/// `gogo mac-app` — convert one downloaded Windows installer into a
+/// self-contained `.app`. The pipeline is synchronous (child processes + fs
+/// copies), so it runs on blocking threads; events render exactly like the
+/// download engine's (NDJSON on stdout for `--json-progress`, one-liners on
+/// stderr otherwise, 03 §4).
+#[allow(clippy::too_many_arguments)]
+async fn mac_app(
+    installer: std::path::PathBuf,
+    name: Option<String>,
+    runtime: Option<crate::cli::RuntimeSource>,
+    runtime_path: Option<std::path::PathBuf>,
+    out: Option<std::path::PathBuf>,
+    yes: bool,
+    json_progress: bool,
+    json: bool,
+) -> Result<i32, AppError> {
+    if !cfg!(target_os = "macos") {
+        // Design 10: macOS-only for now; fail fast with the remedy (exit 2).
+        return Err(AppError::MacApp(
+            gogo::macapp::MacAppError::UnsupportedPlatform,
+        ));
+    }
+
+    let opts = gogo::macapp::MacAppOptions {
+        installer,
+        name,
+        mode: runtime.map(Into::into).unwrap_or_default(),
+        runtime_path,
+        out_dir: out.unwrap_or_else(|| {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        }),
+        overwrite: yes,
+    };
+
+    // Plan: resolve + probe the runtime, validate the installer, size things up.
+    let plan = {
+        let opts = opts.clone();
+        let jp = json_progress;
+        tokio::task::spawn_blocking(move || {
+            gogo::macapp::plan(&opts, &mut |ev| emit_macapp_event(ev, jp))
+        })
+        .await
+        .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))??
+    };
+
+    // Confirmation mirrors `download --all` (03 §3): on a TTY ask, non-TTY
+    // without --yes print the plan and abort — a conversion never starts
+    // silently, and hundreds-of-MB bundles deserve the pause (docs/13 §4).
+    if !yes {
+        eprintln!(
+            "converting:\n  installer: {}\n  bundle:    {}\n  runtime:   {} ({})\n  est. size: {}",
+            plan.installer.installer.display(),
+            plan.bundle_path.display(),
+            plan.runtime.version,
+            plan.runtime.kind,
+            gogo::fmt::human_size(plan.estimated_bytes),
+        );
+        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            eprintln!("gogo: non-interactive without --yes — aborting (plan above)");
+            return Ok(cli::exit::USAGE);
+        }
+        print!("proceed? [y/N]: ");
+        {
+            use std::io::Write as _;
+            std::io::stdout().flush().ok();
+        }
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        if !line.trim().eq_ignore_ascii_case("y") {
+            eprintln!("gogo: aborted");
+            return Ok(cli::exit::USAGE);
+        }
+    }
+
+    let bytes = {
+        let plan = plan.clone();
+        let jp = json_progress;
+        tokio::task::spawn_blocking(move || {
+            let policy = if cfg!(target_os = "macos") {
+                gogo::macapp::bundle::CodesignPolicy::Adhoc
+            } else {
+                gogo::macapp::bundle::CodesignPolicy::Skip
+            };
+            gogo::macapp::execute(&plan, policy, &mut |ev| emit_macapp_event(ev, jp))
+        })
+        .await
+        .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))??
+    };
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "bundle": plan.bundle_path,
+                "name": plan.display,
+                "slug": plan.slug,
+                "runtime": {
+                    "kind": plan.runtime.kind,
+                    "version": plan.runtime.version,
+                    "wine": plan.runtime.wine,
+                },
+                "bytes": bytes,
+            })
+        );
+    } else {
+        println!(
+            "created {} ({}) — drag it into /Applications and double-click to play",
+            plan.bundle_path.display(),
+            gogo::fmt::human_size(bytes),
+        );
+    }
+    Ok(cli::exit::OK)
+}
+
+/// mac-app events → NDJSON (`--json-progress`) or compact stderr one-liners.
+fn emit_macapp_event(ev: &gogo::engine::events::ProgressEvent, json_progress: bool) {
+    if json_progress {
+        if let Ok(line) = serde_json::to_string(ev) {
+            println!("{line}");
+        }
+        return;
+    }
+    use gogo::engine::events::ProgressEvent as Ev;
+    let line = match ev {
+        Ev::RuntimeResolved { kind, path } => Some(format!("runtime: {kind} ({path})")),
+        Ev::PrefixStaged => Some("prefix staged".into()),
+        Ev::InstallStarted => Some("installing silently…".into()),
+        Ev::InstallFinished { bytes } => {
+            Some(format!("installer finished ({bytes} B of installers)"))
+        }
+        Ev::BundleAssembled => Some("bundle assembled".into()),
+        Ev::Codesigned => Some("codesigned (ad-hoc)".into()),
+        Ev::Warn { message } => Some(format!("note: {message}")),
+        _ => None,
+    };
+    if let Some(l) = line {
+        eprintln!("gogo: {l}");
+    }
 }
 
 /// Smoke tests for the completion generation (08 §2: thin frontend gets smoke tests):

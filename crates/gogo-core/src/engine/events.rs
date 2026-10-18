@@ -51,6 +51,24 @@ pub enum ProgressEvent {
         failed: u32,
         skipped: u32,
     },
+    /// `mac-app`: Wine runtime resolved (design 10 §6).
+    RuntimeResolved {
+        /// "brew" | "gptk" | "path".
+        kind: String,
+        path: String,
+    },
+    /// `mac-app`: WINEPREFIX initialized inside the bundle.
+    PrefixStaged,
+    /// `mac-app`: silent installer started.
+    InstallStarted,
+    /// `mac-app`: silent installer finished.
+    InstallFinished {
+        bytes: u64,
+    },
+    /// `mac-app`: launcher + plist + notices written.
+    BundleAssembled,
+    /// `mac-app`: ad-hoc codesign done.
+    Codesigned,
 }
 
 /// Drive a consumer over the event stream until the engine's terminal `Done`
@@ -106,6 +124,12 @@ mod render_tests {
             ProgressEvent::FileFailed { .. } => "FileFailed",
             ProgressEvent::Warn { .. } => "Warn",
             ProgressEvent::Done { .. } => "Done",
+            ProgressEvent::RuntimeResolved { .. } => "RuntimeResolved",
+            ProgressEvent::PrefixStaged => "PrefixStaged",
+            ProgressEvent::InstallStarted => "InstallStarted",
+            ProgressEvent::InstallFinished { .. } => "InstallFinished",
+            ProgressEvent::BundleAssembled => "BundleAssembled",
+            ProgressEvent::Codesigned => "Codesigned",
         }
     }
 
