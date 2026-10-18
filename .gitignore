@@ -11,6 +11,10 @@ gogo-probe/
 # --- Rust build (crate lands in implementation phase; Cargo.lock gets committed then) ---
 /target/
 
+
+# --- Nix ---
+# `nix build` result symlinks.
+/result
 # --- Environment ---
 .env
 .env.*
