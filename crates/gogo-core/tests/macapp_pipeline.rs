@@ -39,6 +39,26 @@ exit 0
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::write(bin.join("wine"), script).unwrap();
+    // wineserver: logs, terminates on -k, reports "not running" on -p.
+    let ws = format!(
+        r#"#!/bin/sh
+echo "wineserver $*" >> "{log}"
+if [ "$1" = "-k" ]; then exit 0; fi
+if [ "$1" = "-p" ]; then exit 3; fi
+exit 0
+"#,
+        log = log_path.display()
+    );
+    std::fs::write(bin.join("wineserver"), ws).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            bin.join("wineserver"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -120,6 +140,7 @@ fn full_pipeline_with_fake_runtime() {
     // silent Inno Setup invocation with the deterministic Windows target.
     let logged = std::fs::read_to_string(&log).unwrap();
     assert!(logged.contains("wineboot -u"), "{logged}");
+    assert!(logged.contains("wineserver -k"), "{logged}");
     assert!(
         logged.contains(&installer.display().to_string()),
         "{logged}"
