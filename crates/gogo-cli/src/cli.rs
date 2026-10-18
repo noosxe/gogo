@@ -38,7 +38,7 @@ pub enum ColorWhen {
     Never,
 }
 
-/// The nine commands (`docs/design/03-cli.md` §1).
+/// The ten commands (`docs/design/03-cli.md` §1).
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Interactive browser paste-code login (docs/design/02 §2).
@@ -128,6 +128,12 @@ pub enum Command {
         #[command(subcommand)]
         sub: ConfigSub,
     },
+    /// Print a shell completion script to stdout.
+    Completions {
+        /// Shell to generate the script for.
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -151,6 +157,9 @@ pub enum OsFilter {
 }
 
 /// Stable exit codes (`docs/design/03-cli.md` §5).
+// dead_code: the table is a stable published contract — codes no command raises yet
+// (DISK: engine reports disk-full as FAILED today) stay defined on purpose.
+#[allow(dead_code)]
 pub mod exit {
     pub const OK: i32 = 0;
     /// Generic failure.
