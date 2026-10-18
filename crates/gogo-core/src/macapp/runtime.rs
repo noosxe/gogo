@@ -104,10 +104,23 @@ fn resolve_brew() -> Result<Runtime, MacAppError> {
             reason: format!("`brew --prefix` exited {}", out.status),
         });
     }
-    let prefix = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let root = PathBuf::from(prefix).join("opt/wine");
-    find_wine_in(&root, RuntimeMode::Brew, "brew")
-        .map_err(|reason| MacAppError::RuntimeInvalid { path: root, reason })
+    let prefix = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
+    // Two layouts, probed in order (live finding 2026-10-18, design 10 §3):
+    // - legacy `opt/wine` (formula-era layout);
+    // - cask-linked binaries in `$(brew --prefix)/bin` — e.g. the
+    //   `gcenx/wine/game-porting-toolkit` cask (WineHQ casks were disabled
+    //   2026-09-01 over Gatekeeper; `wine` cask no longer exists).
+    let mut last_reason = String::new();
+    for root in [prefix.join("opt/wine"), prefix.clone()] {
+        match find_wine_in(&root, RuntimeMode::Brew, "brew") {
+            Ok(rt) => return Ok(rt),
+            Err(reason) => last_reason = format!("{}: {reason}", root.display()),
+        }
+    }
+    Err(MacAppError::RuntimeInvalid {
+        path: prefix,
+        reason: last_reason,
+    })
 }
 
 /// GPTK mount / explicit path: `<dir>/bin/{wine64,wine}` (probed, never assumed).
