@@ -103,10 +103,16 @@ pub fn plan(
     let install = installer::plan(&opts.installer)?;
 
     let bundle = bundle::layout(&opts.out_dir, &display);
-    if bundle.root.exists() && !opts.overwrite {
-        return Err(MacAppError::BundleExists {
-            path: bundle.root.clone(),
-        });
+    let bundle = bundle::layout(&opts.out_dir, &display);
+    if bundle.root.exists() {
+        if !opts.overwrite {
+            return Err(MacAppError::BundleExists {
+                path: bundle.root.clone(),
+            });
+        }
+        // Overwrite confirmed (--yes): clear the stale bundle so execute()
+        // starts from a clean root instead of refusing it.
+        std::fs::remove_dir_all(&bundle.root)?;
     }
 
     let estimated_bytes = dir_size(&runtime.root)?
@@ -182,6 +188,10 @@ pub fn execute(
         &win_target,
         &plan.bundle_path,
     )?;
+    // Quiesce the prefix before sealing: a lingering wineserver keeps writing
+    // into it (registry flushes, temp cleanup) — which broke `codesign
+    // --verify` mid-seal (live finding 2026-10-18, "sealed resource missing").
+    installer::stop_wineserver(&plan.runtime, &plan.bundle.prefix)?;
     emit(&ProgressEvent::InstallFinished {
         bytes: installer_bytes,
     });

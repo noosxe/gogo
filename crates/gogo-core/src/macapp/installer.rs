@@ -106,6 +106,38 @@ pub fn stage_prefix(runtime: &Runtime, prefix: &Path) -> Result<(), MacAppError>
     }
 }
 
+/// Terminate the prefix's wineserver and wait for it to exit.
+///
+/// Live finding 2026-10-18: `wine <installer>` returns while its wineserver
+/// stays alive in the background, and the server keeps touching prefix files
+/// (registry flushes, temp cleanup) — which broke `codesign --verify` mid-seal
+/// ("a sealed resource is missing or invalid"). Quiesce the prefix before the
+/// bundle is sealed. Best-effort: no server (`-k` exits non-zero) and a
+/// missing `bin/wineserver` (fake runtimes) are both fine.
+pub fn stop_wineserver(runtime: &Runtime, prefix: &Path) -> Result<(), MacAppError> {
+    let server = runtime.root.join("bin/wineserver");
+    if !server.is_file() {
+        return Ok(());
+    }
+    let _ = Command::new(&server)
+        .arg("-k")
+        .env("WINEPREFIX", prefix)
+        .status();
+    // Ping until the server is gone (`-p` exits non-zero when not running), so
+    // no writes race the seal. Capped at ~5s — then proceed best-effort.
+    for _ in 0..50 {
+        match Command::new(&server)
+            .arg("-p")
+            .env("WINEPREFIX", prefix)
+            .status()
+        {
+            Ok(s) if s.success() => std::thread::sleep(std::time::Duration::from_millis(100)),
+            _ => return Ok(()),
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod installer_tests {
     use super::*;
