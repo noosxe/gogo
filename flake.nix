@@ -1,5 +1,5 @@
 {
-  description = "gogo — GOG.com offline-installer downloader (Rust CLI) development environment";
+  description = "gogo — GOG.com offline-installer downloader (Rust CLI): dev environment + installable package";
 
   inputs = {
     # Pinned by full commit hash: nixos-unstable branch, fetched 2026-10-09.
@@ -24,17 +24,34 @@
       systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
 
-      # Shell content lives in ./nix/devshell.nix; this is only the per-system
-      # pkgs assembly — overlay wiring is a flake-level concern.
-      mkDevShell = system:
-        import ./nix/devshell.nix {
-          pkgs = import nixpkgs {
-            inherit system;
-            overlays = [ rust-overlay.overlays.default ];
-          };
+      # Per-system pkgs assembly shared by the dev shell and the app — overlay
+      # wiring is a flake-level concern; shell/package content lives in nix/.
+      pkgsFor = system:
+        import nixpkgs {
+          inherit system;
+          overlays = [ rust-overlay.overlays.default ];
         };
+
+      mkDevShell = system:
+        import ./nix/devshell.nix { pkgs = pkgsFor system; };
+
+      packageFor = system:
+        import ./nix/app.nix { pkgs = pkgsFor system; };
     in
     {
       devShells = forAllSystems (system: { default = mkDevShell system; });
+
+      packages = forAllSystems (system: rec {
+        default = packageFor system;
+        gogo = default;
+      });
+
+      # `nix run .` / `nix run github:noosxe/gogo`
+      apps = forAllSystems (system: {
+        default = {
+          type = "app";
+          program = "${packageFor system}/bin/gogo";
+        };
+      });
     };
 }
