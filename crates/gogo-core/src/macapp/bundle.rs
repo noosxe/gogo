@@ -4,6 +4,8 @@
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
 
 use super::error::MacAppError;
 use super::runtime::Runtime;
@@ -262,6 +264,32 @@ pub fn codesign_adhoc(bundle: &Path, policy: CodesignPolicy) -> Result<(), MacAp
     Ok(())
 }
 
+/// Strip macOS metadata "detritus" (resource forks, FinderInfo, provenance,
+/// quarantine) from every file in the bundle — `codesign` refuses to seal a
+/// bundle whose files carry them (live finding 2026-10-18, GPTK runtime files
+/// copied from a quarantined app). No-op when codesign is skipped. Best-effort
+/// on hosts without `/usr/bin/xattr` (non-mac).
+pub fn strip_detritus(bundle: &Path, policy: CodesignPolicy) -> Result<(), MacAppError> {
+    if policy == CodesignPolicy::Skip || !Path::new("/usr/bin/xattr").exists() {
+        return Ok(());
+    }
+    let status = super::installer::run_with_timeout(
+        Command::new("/usr/bin/xattr").arg("-cr").arg(bundle),
+        Duration::from_secs(60),
+    );
+    match status {
+        Some(s) if s.success() => Ok(()),
+        other => Err(MacAppError::Codesign {
+            stderr: format!(
+                "xattr -cr failed ({}) — bundle metadata could not be cleared",
+                other
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "timeout".into())
+            ),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod bundle_tests {
     use super::*;
@@ -416,5 +444,36 @@ mod bundle_tests {
         assert!(dest.join("bin/wine").is_file());
         assert!(dest.join("share.txt").is_file());
         assert!(!dest.join("bin/wine64").exists(), "symlinks are skipped");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn strip_detritus_clears_file_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let b = layout(tmp.path(), "G");
+        create_layout(&b).unwrap();
+        let f = b.resources.join("x.bin");
+        std::fs::write(&f, b"data").unwrap();
+        let set = std::process::Command::new("/usr/bin/xattr")
+            .args(["-w", "com.apple.metadata:kMDItemWhereFroms", "junk"])
+            .arg(&f)
+            .output()
+            .unwrap();
+        assert!(set.status.success());
+        strip_detritus(&b.root, CodesignPolicy::Adhoc).unwrap();
+        let out = std::process::Command::new("/usr/bin/xattr")
+            .arg("-l")
+            .arg(&f)
+            .output()
+            .unwrap();
+        let list = String::from_utf8_lossy(&out.stdout);
+        // SIP-protected com.apple.provenance is auto-re-added and codesign
+        // tolerates it — the seal-breaking classes must be gone.
+        assert!(
+            !list.contains("kMDItemWhereFroms"),
+            "detritus remains: {list}"
+        );
+        assert!(!list.contains("FinderInfo"), "detritus remains: {list}");
+        assert!(!list.contains("ResourceFork"), "detritus remains: {list}");
     }
 }

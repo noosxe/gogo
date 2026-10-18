@@ -210,6 +210,9 @@ pub fn execute(
     bundle::write_runtime_marker(&plan.bundle, &plan.runtime)?;
     emit(&ProgressEvent::BundleAssembled);
 
+    // Seal-blocking metadata must go before signing (live finding 2026-10-18:
+    // GPTK files carry FinderInfo/resource forks from the quarantined app).
+    bundle::strip_detritus(&plan.bundle.root, codesign)?;
     bundle::codesign_adhoc(&plan.bundle.root, codesign)?;
     emit(&ProgressEvent::Codesigned);
 

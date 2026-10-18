@@ -25,3 +25,6 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/
+
+# --- macOS app bundles (gogo mac-app output; never commit game content) ---
+*.app/

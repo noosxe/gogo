@@ -130,7 +130,10 @@ pub fn stop_wineserver(runtime: &Runtime, prefix: &Path) -> Result<(), MacAppErr
 
 /// Spawn, wait up to `timeout`, kill on expiry. Stdio is nulled so background
 /// daemons can never inherit and hold the caller's pipes open.
-fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Option<std::process::ExitStatus> {
+pub(crate) fn run_with_timeout(
+    cmd: &mut Command,
+    timeout: Duration,
+) -> Option<std::process::ExitStatus> {
     cmd.stdout(Stdio::null())
         .stderr(Stdio::null())
         .stdin(Stdio::null());
