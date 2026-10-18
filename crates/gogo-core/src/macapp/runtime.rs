@@ -70,10 +70,14 @@ pub fn resolve(opts: &RuntimeOptions) -> Result<Runtime, MacAppError> {
             resolve_explicit(opts.runtime_path.as_deref(), "path", RuntimeMode::Path)
         }
         RuntimeMode::Auto => {
-            if let Ok(rt) = resolve_brew() {
-                return Ok(rt);
+            match resolve_brew() {
+                Ok(rt) => return Ok(rt),
+                // Surface WHY brew probing failed, not just that it did.
+                Err(MacAppError::RuntimeInvalid { reason, .. }) => {
+                    tried.push(format!("brew: {reason}"))
+                }
+                Err(_) => tried.push("brew wine (not installed)".to_string()),
             }
-            tried.push("brew wine (not installed)".to_string());
             for candidate in mounted_gptk_candidates() {
                 match probe(candidate.clone(), RuntimeMode::Gptk, "gptk") {
                     Ok(rt) => return Ok(rt),

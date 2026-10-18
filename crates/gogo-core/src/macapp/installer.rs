@@ -3,7 +3,8 @@
 //! /SUPPRESSMSGBOXES /NORESTART /DIR=` runs the whole wizard unattended.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use super::error::MacAppError;
 use super::runtime::Runtime;
@@ -106,36 +107,48 @@ pub fn stage_prefix(runtime: &Runtime, prefix: &Path) -> Result<(), MacAppError>
     }
 }
 
-/// Terminate the prefix's wineserver and wait for it to exit.
+/// Terminate the prefix's wineserver and give it a moment to die.
 ///
-/// Live finding 2026-10-18: `wine <installer>` returns while its wineserver
-/// stays alive in the background, and the server keeps touching prefix files
-/// (registry flushes, temp cleanup) — which broke `codesign --verify` mid-seal
-/// ("a sealed resource is missing or invalid"). Quiesce the prefix before the
-/// bundle is sealed. Best-effort: no server (`-k` exits non-zero) and a
-/// missing `bin/wineserver` (fake runtimes) are both fine.
+/// Live findings 2026-10-18: `wine <installer>` returns while its wineserver
+/// stays alive and keeps writing into the prefix — which broke `codesign
+/// --verify` mid-seal ("a sealed resource is missing or invalid"). Worse,
+/// `wineserver -p` means "persistent mode", not "ping": probing with it
+/// daemonizes a never-exiting server that inherits (and holds) the caller's
+/// stdio pipes. So: `-k` only, null stdio, hard timeout, short settle sleep.
 pub fn stop_wineserver(runtime: &Runtime, prefix: &Path) -> Result<(), MacAppError> {
     let server = runtime.root.join("bin/wineserver");
     if !server.is_file() {
         return Ok(());
     }
-    let _ = Command::new(&server)
-        .arg("-k")
-        .env("WINEPREFIX", prefix)
-        .status();
-    // Ping until the server is gone (`-p` exits non-zero when not running), so
-    // no writes race the seal. Capped at ~5s — then proceed best-effort.
-    for _ in 0..50 {
-        match Command::new(&server)
-            .arg("-p")
-            .env("WINEPREFIX", prefix)
-            .status()
-        {
-            Ok(s) if s.success() => std::thread::sleep(std::time::Duration::from_millis(100)),
-            _ => return Ok(()),
+    let _ = run_with_timeout(
+        Command::new(&server).arg("-k").env("WINEPREFIX", prefix),
+        Duration::from_secs(5),
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    Ok(())
+}
+
+/// Spawn, wait up to `timeout`, kill on expiry. Stdio is nulled so background
+/// daemons can never inherit and hold the caller's pipes open.
+fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Option<std::process::ExitStatus> {
+    cmd.stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .stdin(Stdio::null());
+    let mut child = cmd.spawn().ok()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]
