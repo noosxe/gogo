@@ -1,7 +1,6 @@
 //! clap parsing, tracing setup, exit-code mapping — no business logic (`docs/design/01` §1).
 //! This crate is a thin shell over `gogo-core`; everything domain lives there.
 
-#[allow(dead_code)] // clap_complete wires in with shell-completion generation (03 §6)
 mod cli;
 mod output;
 
@@ -140,6 +139,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
             rebuild,
         } => verify(games, all, path, fix, rebuild).await,
         Command::Config { sub } => config_cmd(sub),
+        Command::Completions { shell } => completions(shell),
     }
 }
 
@@ -1435,4 +1435,80 @@ fn toml_value(raw: &str) -> toml_edit::Value {
         return bool.into();
     }
     raw.into()
+}
+
+// — completions (clap_complete → stdout; 03 §1) —
+
+/// `gogo completions <shell>`: print the completion script to stdout. Pure output —
+/// no config, no session, no network, nothing on stderr, so the script pipes cleanly
+/// into `source`/`eval`-style installs.
+fn completions(shell: clap_complete::Shell) -> Result<i32, AppError> {
+    write_completions(shell, &mut std::io::stdout())
+}
+
+fn write_completions(
+    shell: clap_complete::Shell,
+    out: &mut dyn std::io::Write,
+) -> Result<i32, AppError> {
+    use clap::CommandFactory;
+
+    // Fallible `Generator::try_generate` instead of the panicking free `generate`:
+    // a closed pipe (`gogo completions bash | head`) is a normal CLI event and must
+    // exit cleanly, not unwind. Same wiring as `generate()` — bin name + build.
+    let mut cmd = Cli::command();
+    cmd.set_bin_name(cmd.get_name().to_string());
+    cmd.build();
+    clap_complete::Generator::try_generate(&shell, &cmd, out).map_err(AppError::Io)?;
+    Ok(cli::exit::OK)
+}
+
+/// Smoke tests for the completion generation (08 §2: thin frontend gets smoke tests):
+/// every shell yields a script naming the binary, with the shell's load-bearing
+/// marker present.
+#[cfg(test)]
+mod completions_tests {
+    use super::write_completions;
+    use clap_complete::Shell;
+
+    fn script(shell: Shell) -> String {
+        let mut buf = Vec::new();
+        let exit = match write_completions(shell, &mut buf) {
+            Ok(code) => code,
+            Err(_) => panic!("completion generation cannot fail"),
+        };
+        assert_eq!(exit, crate::cli::exit::OK);
+        String::from_utf8(buf).expect("completion script is UTF-8")
+    }
+
+    #[test]
+    fn every_shell_generates_a_script_naming_gogo() {
+        for shell in [
+            Shell::Bash,
+            Shell::Zsh,
+            Shell::Fish,
+            Shell::Elvish,
+            Shell::PowerShell,
+        ] {
+            let out = script(shell);
+            assert!(!out.trim().is_empty(), "{shell:?}: empty script");
+            assert!(out.contains("gogo"), "{shell:?}: binary name missing");
+        }
+    }
+
+    #[test]
+    fn bash_script_registers_the_completions() {
+        let out = script(Shell::Bash);
+        assert!(out.contains("_gogo()"), "missing completion function");
+        assert!(out.contains("complete "), "missing complete registration");
+    }
+
+    #[test]
+    fn zsh_script_starts_with_compdef() {
+        assert!(script(Shell::Zsh).starts_with("#compdef gogo"));
+    }
+
+    #[test]
+    fn fish_script_completes_the_gogo_command() {
+        assert!(script(Shell::Fish).contains("complete -c gogo"));
+    }
 }

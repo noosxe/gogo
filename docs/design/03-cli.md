@@ -104,6 +104,16 @@ new machine with copied files — 06 §5).
 comments preserved via a `toml_edit` round-trip — decided, review D7).
 `edit` — open `$EDITOR`.
 
+### `gogo completions <shell>`
+Print the completion script to stdout — `bash` · `zsh` · `fish` (clap_complete; also
+`elvish` · `powershell`). Pure output: no config read, no session, nothing on stderr, so
+the script pipes cleanly into an install. Install paths (bash): file-based
+(`gogo completions bash > ~/.local/share/bash-completion/completions/gogo`) or
+`eval "$(gogo completions bash)"` in `~/.bashrc`; zsh: dump to a `fpath` dir as `_gogo`
+(`compinit` picks it up); fish: `gogo completions fish > ~/.config/fish/completions/gogo.fish`.
+Known quirk: macOS system bash 3.2 can garble `source <(gogo completions bash)` FIFO
+sourcing for any multi-write producer — use the file or eval path there.
+
 ## 2. Global flags
 
 | Flag | Env | Meaning |
