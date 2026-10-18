@@ -43,6 +43,10 @@ cargo deny check               # licenses + advisories
 
 - **Conventional commits** (`feat:`, `fix:`, `docs:`, `chore:`, `build:`, `test:`, `ci:`),
   imperative subject, body for context.
+- **PRs are opened, never merged, by agents**: `main` is rule-protected (changes must
+  land through a PR with all required checks green). An agent's job ends at opening the
+  PR and verifying CI — merging is always a human decision. Never run `gh pr merge`,
+  enable auto-merge, or merge on the user's behalf.
 - Secrets and personal data never enter git: `gogo-probe/` (probe output — OAuth tokens,
   account data) is gitignored by design; never print or commit token/code values; URLs in
   logs are redacted (see `docs/design/07-errors-and-observability.md` §4).
