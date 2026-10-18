@@ -18,8 +18,10 @@
 
   outputs = { self, nixpkgs, rust-overlay }:
     let
-      # Supported platforms per docs/design/README.md: Linux + macOS only, no Windows.
-      systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" "x86_64-darwin" ];
+      # Supported platforms: Linux (x86_64 + aarch64) and macOS (Apple silicon
+      # only — x86_64-darwin dropped 2026-10-18: nixpkgs 26.11 drops the
+      # platform and there are no Intel-mac users). No Windows (AGENTS.md).
+      systems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
 
       # Shell content lives in ./nix/devshell.nix; this is only the per-system
