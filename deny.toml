@@ -16,6 +16,15 @@ ignore = [
     # rev-pin), no safe upgrade available. Unmaintained-only — not a vulnerability.
     # Revisit when gog-warp drops bincode or we vendor its two files (design 09 §4).
     "RUSTSEC-2025-0141",
+    # zbus 5 stack unmaintained (RUSTSEC-2026-0370 zvariant, -0371 zbus_names,
+    # -0372 zvariant_derive): all merged into zbus 6.0.0. Transitive via keyring →
+    # zbus-secret-service-keyring-store → secret-service 5.2.0, which is semver-
+    # pinned to zbus 5 — no safe upgrade on our side. Unmaintained-only — not a
+    # vulnerability. Revisit when the keyring ecosystem lands zbus 6 (secret-service
+    # or zbus-secret-service-keyring-store major bump).
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0372",
 ]
 
 [licenses]
