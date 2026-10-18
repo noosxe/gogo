@@ -49,11 +49,13 @@ redaction can't be forgotten at the log site (04 §5 / 07 §4).
 | `DownloadError::RetriesExhausted` / `ApiError` after backoff | 4 |
 | `DownloadError::DiskSpace` | 6 |
 | `DownloadError::Io` | 6 for ENOSPC, else 1 |
+| `MacAppError::*` (design 10 §4) | 7 |
+| usage errors in `mac-app` (bad flags, non-macOS) | 2 |
 | cancellation | 130 |
 | anything else | 1 |
 
 Batch: collect per-file outcomes; exit with the **highest** failed class — numeric order is
-outcome severity, 3 < 4 < 5 < 6 (rationale in 03 §5, review C1).
+outcome severity, 3 < 4 < 5 < 6 < 7 (rationale in 03 §5, review C1).
 
 ## 3. Retry / backoff matrix
 

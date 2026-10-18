@@ -51,6 +51,13 @@ crates/gogo-core/src/
     ├── mod.rs           # state.json load/save (atomic, fsync, short-held state lock — 06 §1)
     ├── records.rs       # InstallRecord; version/build comparison (06 §4)
     └── cache.rs         # catalog cache files (06 §3)
+├── macapp/              # installer → self-contained macOS .app (design 10, macOS only)
+│   ├── mod.rs           # pipeline: runtime → prefix → silent install → bundle → codesign
+│   ├── runtime.rs       # Wine runtime resolution/probe (brew, gptk mount, path)
+│   ├── installer.rs     # silent InnoSetup invocation; .bin sibling detection
+│   ├── info.rs          # goggame-*.info parsing → entry point
+│   ├── bundle.rs        # .app layout, Info.plist, launcher stub, launch.conf
+│   └── error.rs         # MacAppError taxonomy (exit 7)
 
 crates/gogo-cli/src/
 ├── main.rs              # clap parsing, AppContext build, exit-code mapping (no logic)
