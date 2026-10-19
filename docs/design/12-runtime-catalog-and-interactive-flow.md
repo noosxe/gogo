@@ -93,6 +93,16 @@ mount registration, custom path. Apple-Silicon hosts get a Rosetta presence chec
 a one-line remedy; Intel hosts see no GPTK entries. GPTK downloads only on explicit
 consent (EULA notice, D9); registering a user mount stays available.
 
+> **Amended 2026-10-19** (post-v1 field feedback): interactively the runtime
+> menu is **mandatory** — the §5 ladder now only computes the preselected
+> "· easy" default (the pick gogo would have used: cached recommendation →
+> cached staging → brew); the menu itself always runs and lists *every*
+> option: cached flavors (✓), locally installed lanes (brew / GPTK, probed
+> version), downloadable flavors with arch tags, GPTK behind the D9 consent
+> gate, and the custom-path lane. Headless runs keep the Phase-3 behavior
+> (easy pick, else download the recommendation). `PromptSpec` gained a
+> `default: usize` field (§9 contract) so renderers preselect the easy entry.
+
 ## 6. Pipeline restructure (recipe-first)
 
 `plan()`:

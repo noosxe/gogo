@@ -35,6 +35,13 @@ gogo recipes show <installer-slug|file>  # the execution plan: applied vs skippe
   `goggame-<id>.info` → Lutris game → its community installers (runner,
   version, author, updated_at, rating) → **prompt the user to pick one**
   (rendering the ranked list; `1/n/none`). `--recipe <installer-slug>` skips
+
+> **Amended 2026-10-19** (post-v1 field feedback): interactively the recipe
+> picker is **mandatory** — applying community patches is the user's decision
+> every time, single candidate included; the renderer always offers `none`
+> (recipe-less conversion, no tricks installed) and free-text (slug/path).
+> Headless and flag-driven runs (`--recipe …`, `--json`, CI) keep the
+> ranked-best behavior.
   the prompt (scripting); `none` disables lookup entirely; `--recipe <file>`
   applies a downloaded script JSON offline; `--json` prints the candidate
   list as JSON instead of prompting.

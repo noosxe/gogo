@@ -277,11 +277,11 @@ fn select_recipe(
                     return Ok(None);
                 }
                 Ok(candidates) => {
-                    // §9: the picker runs only when ambiguous (design 11 §1);
-                    // headless runs take the ranked best.
-                    if candidates.len() > 1
-                        && let Some(p) = prompt
-                    {
+                    // §1 (amended 2026-10-19): interactively the picker is
+                    // mandatory — applying community patches is the user's
+                    // decision every time, single candidate included ("none"
+                    // is always offered); headless runs take the ranked best.
+                    if let Some(p) = prompt {
                         match choose_recipe(&candidates, display, p)? {
                             Some(RecipePick::Installer(inst)) => (inst, true),
                             Some(RecipePick::Choice(RecipeChoice::None)) => return Ok(None),
@@ -356,6 +356,7 @@ fn choose_recipe(
             .collect(),
         allow_other: true,
         allow_none: true,
+        default: 0,
     };
     let Some(answer) = prompt(&spec) else {
         return Ok(None);
@@ -473,26 +474,37 @@ fn resolve_runtime(
     if !lanes.contains(&"wine-staging") {
         lanes.push("wine-staging");
     }
-    for id in lanes {
+    // §5 (amended 2026-10-19): the ladder only computes the "easy" default
+    // now — interactively the runtime menu is MANDATORY and lists every
+    // option (cached, locally installed, downloadable) with the easy pick
+    // preselected; headless runs keep the Phase-3 behavior.
+    let mut easy: Option<(runtime::Runtime, String)> = None;
+    'ladder: for id in lanes {
         if let Some((m, _)) = store::installed(id, None) {
             match runtime::from_store(&m) {
-                Ok(rt) => return Ok((rt, None)),
+                Ok(rt) => {
+                    easy = Some((rt, format!("{}@{}", m.id, m.version)));
+                    break 'ladder;
+                }
                 Err(e) => emit(&ProgressEvent::Warn {
                     message: format!("cached {id} unusable: {e} — trying next source"),
                 }),
             }
         }
     }
-    if let Ok(rt) = runtime::resolve(&runtime::RuntimeOptions {
-        mode: RuntimeMode::Brew,
-        ..Default::default()
-    }) {
-        return Ok((rt, None));
+    if easy.is_none()
+        && let Ok(rt) = runtime::resolve(&runtime::RuntimeOptions {
+            mode: RuntimeMode::Brew,
+            ..Default::default()
+        })
+    {
+        easy = Some((rt, "brew".into()));
     }
-    // Ladder tail: interactive menu when a renderer is present (§5/§9);
-    // headless runs download the recommendation (Phase 3 behavior).
     if let Some(prompt) = prompt {
-        return choose_runtime(prompt, emit);
+        return choose_runtime(prompt, easy, emit);
+    }
+    if let Some((rt, _)) = easy {
+        return Ok((rt, None));
     }
     let id = rec.as_ref().map(|r| r.id).unwrap_or("wine-staging");
     let (m, downloaded) = catalog_lane(id, None, false, emit)?;
@@ -500,12 +512,16 @@ fn resolve_runtime(
     Ok((rt, downloaded.then(|| (m.id.clone(), m.version.clone()))))
 }
 
-/// The §5 runtime menu (interactive ladder tail): cached flavors first
-/// (✓ cached), downloadable flavors with arch tags, GPTK behind the D9
-/// consent gate (Apple Silicon hosts only — Intel hosts never see it),
-/// a custom path lane with re-prompt on invalid input (§9), and cancel.
+/// The §5 runtime menu — MANDATORY in interactive runs (amended
+/// 2026-10-19): every option is listed, cached flavors first (✓ cached),
+/// locally installed lanes (brew / GPTK) with their probed version,
+/// downloadable flavors with arch tags, GPTK downloads behind the D9
+/// consent gate (Apple Silicon hosts only), a custom path lane with
+/// re-prompt on invalid input (§9), and cancel. The ladder's pick arrives
+/// as `easy` and is preselected (spec.default + "· easy" marker).
 fn choose_runtime(
     prompt: &prompt::PromptFn,
+    easy: Option<(runtime::Runtime, String)>,
     emit: &mut dyn FnMut(&ProgressEvent),
 ) -> Result<(runtime::Runtime, Option<(String, String)>), MacAppError> {
     use prompt::{PromptAnswer, PromptKind, PromptSpec};
@@ -516,12 +532,10 @@ fn choose_runtime(
     let rosetta_missing =
         cfg!(target_arch = "aarch64") && !rosetta_present() && !cfg!(target_os = "linux");
 
-    // Lanes: cached flavors first, then downloadable ones in catalog order.
+    // Lanes: cached flavors, then locally installed (brew, GPTK), then
+    // downloadable ones in catalog order.
     let manifest = store::load_manifest();
-    let mut cached_lanes: Vec<(&'static catalog::CatalogEntry, Option<store::ManifestEntry>)> =
-        Vec::new();
-    let mut fresh_lanes: Vec<(&'static catalog::CatalogEntry, Option<store::ManifestEntry>)> =
-        Vec::new();
+    let mut lanes: Vec<MenuLane> = Vec::new();
     for entry in catalog::entries() {
         if !matches!(entry.kind, catalog::Kind::Wine) {
             continue;
@@ -532,81 +546,132 @@ fn choose_runtime(
         if !selectable {
             continue;
         }
-        let hit = manifest.iter().find(|m| m.id == entry.id).cloned();
-        if hit.is_some() {
-            cached_lanes.push((entry, hit));
+        if let Some(m) = manifest.iter().find(|m| m.id == entry.id).cloned() {
+            lanes.push(MenuLane::Cached(entry, m));
         } else {
-            fresh_lanes.push((entry, None));
+            lanes.push(MenuLane::Fresh(entry));
         }
     }
-    let lanes = [cached_lanes, fresh_lanes].concat();
+    // Locally installed lanes: the ladder may have probed brew already;
+    // GPTK gets its own probe. Both are listed only when actually present.
+    let mut local = |key: &str, probed: Option<runtime::Runtime>| {
+        if let Some(rt) = probed {
+            lanes.push(MenuLane::Local {
+                label: format!("{key} {} (installed)", rt.version),
+                key: key.to_string(),
+                rt,
+            });
+        }
+    };
+    let brew = match &easy {
+        Some((rt, key)) if key == "brew" => Some(rt.clone()),
+        _ => runtime::resolve(&runtime::RuntimeOptions {
+            mode: RuntimeMode::Brew,
+            ..Default::default()
+        })
+        .ok(),
+    };
+    local("brew", brew);
+    local(
+        "gptk",
+        runtime::resolve(&runtime::RuntimeOptions {
+            mode: RuntimeMode::Gptk,
+            ..Default::default()
+        })
+        .ok(),
+    );
+
+    // The easy default: the ladder pick if it maps to a lane, else the
+    // staging recommendation.
+    let default_idx = match &easy {
+        Some((_, key)) => lanes.iter().position(|l| match (l, key.as_str()) {
+            (MenuLane::Cached(_, m), k) => format!("{}@{}", m.id, m.version) == k,
+            (MenuLane::Local { key, .. }, k) => key == k,
+            _ => false,
+        }),
+        None => lanes
+            .iter()
+            .position(|l| matches!(l, MenuLane::Fresh(e) if e.id == "wine-staging")),
+    }
+    .unwrap_or(0);
 
     let items: Vec<String> = lanes
         .iter()
-        .map(|(entry, cached)| match cached {
-            Some(m) => format!("{} {} (✓ cached)", entry.id, m.version),
-            None => {
-                let mut line = format!("download {} — {}", entry.id, entry.arch);
-                if entry.id == "wine-staging" {
-                    line.push_str(" · recommended");
+        .enumerate()
+        .map(|(i, lane)| {
+            let mut line = match lane {
+                MenuLane::Cached(entry, m) => format!("{} {} (✓ cached)", entry.id, m.version),
+                MenuLane::Local { label, .. } => label.clone(),
+                MenuLane::Fresh(entry) => {
+                    let mut line = format!("download {} — {}", entry.id, entry.arch);
+                    if entry.id == "wine-staging" {
+                        line.push_str(" · recommended");
+                    }
+                    if rosetta_missing && entry.arch.starts_with("x86_64") {
+                        line.push_str(" — Rosetta missing: softwareupdate --install-rosetta");
+                    }
+                    if matches!(entry.status, catalog::Status::ConsentRequired) {
+                        line.push_str(" (Apple EULA consent)");
+                    }
+                    line
                 }
-                if rosetta_missing && entry.arch.starts_with("x86_64") {
-                    line.push_str(" — Rosetta missing: softwareupdate --install-rosetta");
-                }
-                if matches!(entry.status, catalog::Status::ConsentRequired) {
-                    line.push_str(" (Apple EULA consent)");
-                }
-                line
+            };
+            if i == default_idx {
+                line.push_str(" · easy");
             }
+            line
         })
         .collect();
 
     let spec = PromptSpec {
         kind: PromptKind::Select,
-        title: "which wine runtime? (nothing usable cached, no brew wine found)".into(),
+        title: "which wine runtime? (the · easy entry is gogo's default pick)".into(),
         items,
         // "other…" = a custom runtime path (directory containing bin/wine).
         allow_other: true,
         allow_none: false,
+        default: default_idx,
     };
     let Some(answer) = prompt(&spec) else {
         return Err(cancelled());
     };
     match answer {
-        PromptAnswer::Index(i) => {
-            let Some((entry, cached)) = lanes.get(i) else {
-                return Err(cancelled());
-            };
-            if let Some(m) = cached {
+        PromptAnswer::Index(i) => match lanes.get(i) {
+            Some(MenuLane::Cached(_, m)) => {
                 let rt = runtime::from_store(m)?;
-                return Ok((rt, None));
+                Ok((rt, None))
             }
-            // D9: GPTK downloads only on explicit consent with the EULA
-            // notice in front of the user.
-            let consented = if matches!(entry.status, catalog::Status::ConsentRequired) {
-                let consent = prompt(&PromptSpec {
-                    kind: PromptKind::Confirm { default: false },
-                    title: format!(
-                        "{} is covered by Apple's evaluation EULA; gogo downloads it into \
-                         your local runtime store and never redistributes it inside bundles. \
-                         Download it now?",
-                        entry.id
-                    ),
-                    items: vec![],
-                    allow_other: false,
-                    allow_none: false,
-                });
-                matches!(consent, Some(PromptAnswer::Confirmed(true)))
-            } else {
-                true
-            };
-            if !consented {
-                return Err(cancelled());
+            Some(MenuLane::Local { rt, .. }) => Ok((rt.clone(), None)),
+            Some(MenuLane::Fresh(entry)) => {
+                // D9: GPTK downloads only on explicit consent with the EULA
+                // notice in front of the user.
+                let consented = if matches!(entry.status, catalog::Status::ConsentRequired) {
+                    let consent = prompt(&PromptSpec {
+                        kind: PromptKind::Confirm { default: false },
+                        title: format!(
+                            "{} is covered by Apple's evaluation EULA; gogo downloads it into \
+                             your local runtime store and never redistributes it inside bundles. \
+                             Download it now?",
+                            entry.id
+                        ),
+                        items: vec![],
+                        allow_other: false,
+                        allow_none: false,
+                        default: 0,
+                    });
+                    matches!(consent, Some(PromptAnswer::Confirmed(true)))
+                } else {
+                    true
+                };
+                if !consented {
+                    return Err(cancelled());
+                }
+                let (m, downloaded) = catalog_lane(entry.id, None, consented, emit)?;
+                let rt = runtime::from_store(&m)?;
+                Ok((rt, downloaded.then(|| (m.id.clone(), m.version.clone()))))
             }
-            let (m, downloaded) = catalog_lane(entry.id, None, consented, emit)?;
-            let rt = runtime::from_store(&m)?;
-            Ok((rt, downloaded.then(|| (m.id.clone(), m.version.clone()))))
-        }
+            None => Err(cancelled()),
+        },
         PromptAnswer::Other(text) => {
             // Custom path with re-prompt on invalid input (§9), max 3 tries.
             let mut path = text.trim().to_string();
@@ -626,6 +691,7 @@ fn choose_runtime(
                             items: vec![],
                             allow_other: true,
                             allow_none: false,
+                            default: 0,
                         });
                         match again {
                             Some(PromptAnswer::Other(t)) if !t.trim().is_empty() => {
@@ -641,6 +707,20 @@ fn choose_runtime(
         }
         PromptAnswer::NoneSelected | PromptAnswer::Confirmed(_) => Err(cancelled()),
     }
+}
+
+/// One selectable row of the §5 runtime menu.
+enum MenuLane {
+    /// A catalog flavor already in the local store.
+    Cached(&'static catalog::CatalogEntry, store::ManifestEntry),
+    /// A locally installed runtime found by host probe (brew, GPTK).
+    Local {
+        label: String,
+        key: String,
+        rt: runtime::Runtime,
+    },
+    /// A downloadable catalog flavor.
+    Fresh(&'static catalog::CatalogEntry),
 }
 
 /// Rosetta 2 presence (Apple Silicon hosts): best-effort marker files.
