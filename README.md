@@ -6,8 +6,10 @@ convert a downloaded Windows installer into a self-contained `.app`, applying
 community fixes (Lutris recipes) along the way.
 
 - **Platforms:** Linux and macOS. `mac-app` is macOS-only.
-- **No Wine bundled:** `mac-app` uses a runtime you install (Homebrew
-  wine-crossover or Apple's Game Porting Toolkit). Same for `winetricks`.
+- **Wine runtimes:** `mac-app` resolves a runtime you already have (Homebrew cask
+  or Apple's Game Porting Toolkit) today; downloading + caching official WineHQ mac
+  builds (and auto-provisioned `winetricks`) is landing next — see
+  [`docs/design/12`](docs/design/12-runtime-catalog-and-interactive-flow.md).
 - **Unofficial APIs:** gogo uses the same undocumented web/Galaxy APIs as every
   third-party GOG client. See [`docs/01`](docs/01-gog-platform-and-apis.md).
 - **License:** MIT OR Apache-2.0.
@@ -61,15 +63,17 @@ Wine runtime inside, and ad-hoc codesigns the bundle. The result needs nothing
 else installed.
 
 ```sh
-brew install --cask game-porting-toolkit     # or: brew install wine-crossover / winetricks
-gogo mac-app ~/Downloads/setup_pharaoh_gold_2.1.0.15.exe --runtime brew
+brew install --cask wine-stable              # or: --cask game-porting-toolkit (GPTK)
+gogo mac-app ~/Downloads/setup_pharaoh_gold_2.1.0.15.exe \
+  --runtime path --runtime-path "/Applications/Wine Stable.app/Contents/Resources/wine"
 open Pharaoh.app
 ```
 
-`--runtime` picks the Wine source: `brew` (wine-crossover), `gptk` (a mounted
-Game Porting Toolkit volume — implies you accept Apple's license), `auto`, or an
-explicit `--runtime-path <DIR>` with a `bin/wine` inside. Pass `--out` for the
-output directory, `--name` to override the bundle title.
+`--runtime` picks the Wine source: `brew`, `gptk` (a mounted Game Porting Toolkit
+volume — implies you accept Apple's license), `path` with `--runtime-path <DIR>` (a
+dir with `bin/wine` inside), or `auto`. Catalog ids (`staging` / `devel` / `stable`)
+with download + cache land next (design 12). Pass `--out` for the output directory,
+`--name` to override the bundle title.
 
 ### Recipes
 

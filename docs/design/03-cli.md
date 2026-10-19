@@ -117,13 +117,21 @@ sourcing for any multi-write producer — use the file or eval path there.
 ### `gogo mac-app <installer-path>`
 Convert a downloaded Windows offline installer into a self-contained macOS
 `.app` (double-click launch, drag to Applications). Silent Inno Setup install
-into a bundled WINEPREFIX; Wine runtime resolved per design 10 §3 (`auto` /
-`brew` / `gptk` / `path`), copied into the bundle; ad-hoc codesigned. macOS
-only (exit 2 elsewhere). Full spec: **design 10**; discovery: docs/13.
+into a bundled WINEPREFIX; Wine runtime resolved per design 10 §3 + design 12
+(`auto` / `brew` / `gptk` / `path` / catalog ids `staging`·`devel`·`stable` with
+download + cache), copied into the bundle; ad-hoc codesigned. macOS only (exit 2
+elsewhere). Full specs: **design 10**, **design 12**; discovery: docs/13, docs/15.
 Exit 7 on conversion failures. Names/flags: `--name`, `--runtime`,
-`--runtime-path`, `--out`, `--recipe`, `--json`, `--yes`. Per-game fixes
+`--runtime-version`, `--runtime-path`, `--out`, `--recipe`, `--json-progress`,
+`--json`, `--yes`. Per-game fixes
 (registry tweaks, extra installer flags, entry-point override) come from
 community recipes — design 11.
+
+### `gogo runtimes <list|install|prune>`
+Manage the Wine runtime store (design 12 §4): `list` (cached + catalog, `--json`),
+`install <id> [--version]` (download → probe → cache), `prune [--all | <id>]`.
+Catalog entries are live-probed (docs/15); GPTK installs require explicit consent
+(Apple EULA, design 12 D9).
 
 ### `gogo recipes show [<query>]`
 Print the recipe plan gogo would apply for a game: the Lutris installer

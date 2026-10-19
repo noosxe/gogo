@@ -82,10 +82,11 @@ produces a `RecipePlan` before anything runs: `gogo recipes show` renders it
 |---|---|
 | `files: {id: <url>}` | **download** into the recipe cache via the existing chunk-verified downloader (04); checksum if the script carries one (rare); `N/A:` user-prompt files → skipped (no interactive file picking in automation) |
 | `task: {name: wineexec, executable: <id>, args, prefix, arch}` | run the downloaded/installed exe **through the resolved runtime** with `WINEPREFIX=$PREFIX`, argv logged, timeout guard (10 §2) — this is how scripts drive the GOG setup and apply patch installers |
-| `task: {name: winetricks, app: <verbs>}` | **bridged**: executed through a user-installed `winetricks` binary (`brew install winetricks`) with `WINEPREFIX=$PREFIX`, one verb per call, argv logged; binary absent → `RecipeSkipped { reason: "requires winetricks: <verbs>" }` + warn. gogo never downloads winetricks or its packages — the user's binary does |
-| `extract: {file: <id>, dst, ...}` | zip / tar / tar.gz / tar.xz into `dst` (crates: `zip`, `tar`, `flate2`, `xz2`); rar/7z → skipped-loud (v2) |
+| `task: {name: winetricks, app: <verbs>}` | **vendored + shimmed** (design 12 §8, amends the bridge posture): a pinned, sha256-verified winetricks from the runtime store runs with `WINEPREFIX=$PREFIX`, one verb per call, argv logged; Rust-made `cabextract`/`7z` shims are PATH-scoped to the invocation (zero host installs). A user-installed binary (`WINETRICKS` / PATH) overrides; still nothing → `RecipeSkipped { reason: "requires winetricks: <verbs>" }` + warn |
+| `extract: {file: <id>, dst, ...}` | zip / tar / tar.gz / tar.xz into `dst` (crates: `zip`, `tar`, `flate2`, `xz2`); 7z via the same readers as the shims (design 12 D5); rar → skipped-loud (v2) |
 | `merge`/`copy`, `move`, `write_file`, `write_config`, `chmodx`, `mkdir` | applied via std::fs after substitution + scope validation |
 | `wine.overrides: {ddraw: "native,builtin"}` | `wine reg.exe add` under `HKCU\Software\Wine\DllOverrides` through the resolved runtime — no shell, argv logged |
+| `wine: {version}` (plus `dxvk` / `dxvk_version` / `esync`) | **advisory** (design 12 §7, D6): `version` maps through catalog data to a runtime recommendation (Linux-only pins → `wine-staging` + notice); toggles honored with notices; never a blocker |
 | `game.exe`, `game.args` | entry-point override (skips the `goggame-*.info` scan) and launcher args |
 | `system.env: {K: V}` | env merged into `launch.conf` |
 | `task: {name: wineexec, args}` on the script's **GOG setup** file | the setup is not re-run (gogo already installed); its `args` are **harvested** into our silent Inno flag list (captures `/NOGUI`-class lore) |
@@ -215,9 +216,10 @@ warn, pipeline continues recipe-less.
 ```
 
 CLI: `MacApp` gains `--recipe`; new `recipes list|show`. Dependencies:
-`zip`, `tar`, `flate2`, `xz2` (extract); `serde_json` only for the script
-itself — no YAML. winetricks is never bundled: a user-installed binary is
-required for bridged steps (loud skip otherwise).
+`zip`, `tar`, `flate2`, `xz2` (extract; 7z via the shim readers, design 12 D5);
+`serde_json` only for the script itself — no YAML. winetricks posture amended
+2026-10-19 (design 12 D4/D5): pinned vendored download + Rust extractor shims; a
+user-installed binary overrides; loud skip stays the floor.
 
 ## 10. Future (explicitly out of scope here)
 
