@@ -3,6 +3,7 @@
 
 mod cli;
 mod output;
+mod prompt;
 
 use std::sync::Arc;
 
@@ -1540,29 +1541,16 @@ async fn mac_app(
         .as_deref()
         .map(gogo::macapp::RecipeChoice::parse)
         .unwrap_or_default();
-    // Interactive selection (design 11 §1): a TTY prompt over the ranked
-    // candidates; non-TTY runs take the ranked best.
-    let on_select: Option<std::sync::Arc<gogo::macapp::SelectFn>> =
-        if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-            Some(std::sync::Arc::new(|lines: &[String]| -> Option<usize> {
-                eprintln!("recipes available on lutris.net:");
-                for (i, line) in lines.iter().enumerate() {
-                    eprintln!("  {}. {line}", i + 1);
-                }
-                eprint!("apply which? [1-{}, none] ", lines.len());
-                use std::io::Write as _;
-                std::io::stderr().flush().ok();
-                let mut ans = String::new();
-                std::io::stdin().read_line(&mut ans).ok()?;
-                let t = ans.trim();
-                if t.eq_ignore_ascii_case("none") {
-                    return None;
-                }
-                t.parse::<usize>()
-                    .ok()
-                    .filter(|n| (1..=lines.len()).contains(n))
-                    .map(|n| n - 1)
-            }))
+    // Interactive flow (design 12 §9): the dialoguer renderer on a TTY;
+    // --json / --json-progress imply non-interactive; non-TTY runs take the
+    // ranked best (recipes) or the headless ladder (runtimes).
+    let prompter: Option<std::sync::Arc<gogo::macapp::PromptFn>> =
+        if std::io::IsTerminal::is_terminal(&std::io::stdin())
+            && std::io::IsTerminal::is_terminal(&std::io::stderr())
+            && !json
+            && !json_progress
+        {
+            Some(prompt::renderer())
         } else {
             None
         };
@@ -1585,9 +1573,9 @@ async fn mac_app(
     let plan = {
         let opts = opts.clone();
         let jp = json_progress;
-        let sel = on_select.clone();
+        let p = prompter.clone();
         tokio::task::spawn_blocking(move || {
-            gogo::macapp::plan(&opts, sel.as_deref(), &mut |ev| emit_macapp_event(ev, jp))
+            gogo::macapp::plan(&opts, p.as_deref(), &mut |ev| emit_macapp_event(ev, jp))
         })
         .await
         .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))??
@@ -1627,14 +1615,30 @@ async fn mac_app(
             eprintln!("gogo: non-interactive without --yes — aborting (plan above)");
             return Ok(cli::exit::USAGE);
         }
-        print!("proceed? [y/N]: ");
-        {
-            use std::io::Write as _;
-            std::io::stdout().flush().ok();
-        }
-        let mut line = String::new();
-        std::io::stdin().read_line(&mut line)?;
-        if !line.trim().eq_ignore_ascii_case("y") {
+        // §9: final Confirm via the renderer when interactive; the plain
+        // y/N read otherwise (json implies non-interactive, gated above).
+        let go_ahead = match &prompter {
+            Some(p) => {
+                p(&gogo::macapp::PromptSpec {
+                    kind: gogo::macapp::PromptKind::Confirm { default: false },
+                    title: "proceed with the conversion?".into(),
+                    items: vec![],
+                    allow_other: false,
+                    allow_none: false,
+                }) == Some(gogo::macapp::PromptAnswer::Confirmed(true))
+            }
+            None => {
+                print!("proceed? [y/N]: ");
+                {
+                    use std::io::Write as _;
+                    std::io::stdout().flush().ok();
+                }
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line)?;
+                line.trim().eq_ignore_ascii_case("y")
+            }
+        };
+        if !go_ahead {
             eprintln!("gogo: aborted");
             return Ok(cli::exit::USAGE);
         }
@@ -1789,6 +1793,7 @@ async fn runtimes_cmd(args: crate::cli::RuntimesArgs) -> Result<i32, AppError> {
                 version.as_deref(),
                 &http,
                 catalog::GITHUB_API,
+                false,
                 &mut |ev| {
                     emit_macapp_event(ev, false);
                 },
