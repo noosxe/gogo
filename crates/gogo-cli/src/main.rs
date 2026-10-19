@@ -50,6 +50,18 @@ fn main() {
                 _ => cli::exit::MACAPP,
             }
         }
+        Err(AppError::Depot(e)) => match e {
+            gogo::gog::depot::DepotError::UnsupportedPlatform(_)
+            | gogo::gog::depot::DepotError::NoCacheDir => {
+                eprintln!("gogo: {e}");
+                cli::exit::USAGE
+            }
+            _ => {
+                // Debug, not Display: gog-warp's io variants hide their source
+                eprintln!("gogo: depot: {e:?}");
+                cli::exit::DEPOT
+            }
+        },
         Err(AppError::Io(e)) => {
             eprintln!("gogo: {e}");
             cli::exit::FAILED
@@ -71,12 +83,19 @@ enum AppError {
     Auth(AuthError),
     Api(ApiError),
     MacApp(gogo::macapp::MacAppError),
+    Depot(gogo::gog::depot::DepotError),
     Io(std::io::Error),
 }
 
 impl From<gogo::macapp::MacAppError> for AppError {
     fn from(e: gogo::macapp::MacAppError) -> Self {
         Self::MacApp(e)
+    }
+}
+
+impl From<gogo::gog::depot::DepotError> for AppError {
+    fn from(e: gogo::gog::depot::DepotError) -> Self {
+        Self::Depot(e)
     }
 }
 
@@ -148,6 +167,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
         } => list(search, os, with_dlcs, json, refresh, color).await,
         Command::Info { game, json } => info(game, json).await,
         Command::Download(args) => download(args, cli.no_progress, cli.quiet).await,
+        Command::Depot(args) => depot_cmd(args).await,
         Command::Update { games, all, strict } => update(games, all, strict).await,
         Command::Verify {
             games,
@@ -583,6 +603,186 @@ async fn resolve_games(
 }
 
 // — download —
+
+/// `gogo depot <GAME>` — Model B lane (docs/design/14): resolve the latest
+/// public Windows build and materialize it into the user cache directory.
+/// macOS-only materialization (D7); resolve+plan works everywhere.
+async fn depot_cmd(args: cli::DepotArgs) -> Result<i32, AppError> {
+    use gogo::gog::depot::{DepotEvent, DepotOptions};
+
+    let built = AppContext::build(load_config_from_env()?, true)
+        .await
+        .map_err(|e| {
+            eprintln!("gogo: {e}");
+            AppError::Usage
+        })?;
+    let ctx = std::sync::Arc::new(built);
+    let machine = args.json || args.json_progress;
+
+    let token = bearer(&ctx).await?;
+    let session = ctx
+        .session
+        .as_ref()
+        .and_then(|p| p.gog_warp_core())
+        .ok_or(AppError::Usage)?;
+    let _ = token; // bearer() above validates the session cheaply
+
+    let selected = resolve_games(&ctx, &token, std::slice::from_ref(&args.game)).await?;
+    let Some(game) = selected.first() else {
+        eprintln!("gogo: no owned game matches {}", args.game);
+        return Ok(cli::exit::USAGE);
+    };
+
+    let limit = match &args.limit {
+        Some(spec) => Some(gogo::config::parse_rate(spec)?),
+        None => None,
+    };
+    let opts = DepotOptions {
+        language: args.language.clone(),
+        with_dlcs: args.with_dlcs,
+        password: args.password.clone(),
+        dir: args.dir.clone(),
+        limit,
+        disk_check: !args.no_disk_check,
+        dry_run: args.dry_run,
+    };
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DepotEvent>();
+    // Ctrl-C → cancel token; the depot driver links it to the downloader.
+    let cancel_src = ctx.cancel.clone();
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        cancel_src.cancel();
+    });
+
+    let title = game.title.clone();
+    let runner = gogo::gog::depot::run(
+        session,
+        game.id,
+        &title,
+        &opts,
+        &tx,
+        &ctx.cancel,
+        ctx.free_space.as_ref(),
+    );
+    tokio::pin!(runner);
+
+    let mut last_dl: Option<(u64, u64)> = None;
+    let install_dir = loop {
+        tokio::select! {
+            res = &mut runner => break res?,
+            maybe = rx.recv() => {
+                if let Some(e) = maybe {
+                    render_depot_event(&e, machine, &mut last_dl);
+                }
+            }
+        }
+    };
+    // The runner may out-race the last events in the channel; drain in order
+    // before the summary.
+    while let Ok(e) = rx.try_recv() {
+        render_depot_event(&e, machine, &mut last_dl);
+    }
+    if !machine {
+        // final newline after the \r counter line
+        if last_dl.is_some() {
+            println!();
+        }
+    }
+
+    if args.json {
+        let summary = serde_json::json!({
+            "productId": game.id,
+            "title": title,
+            "installDir": install_dir,
+            "dryRun": args.dry_run,
+        });
+        println!("{}", serde_json::to_string(&summary).unwrap());
+    } else if !machine {
+        // --json-progress keeps stdout pure NDJSON
+        println!(
+            "gogo: {} {}",
+            if args.dry_run {
+                "planned"
+            } else {
+                "downloaded to"
+            },
+            install_dir.display()
+        );
+    }
+    Ok(cli::exit::OK)
+}
+
+/// One depot event → NDJSON (machine) or human lines with a \r byte counter
+/// for the download phase (design 14 D4).
+fn render_depot_event(
+    event: &gogo::gog::depot::DepotEvent,
+    machine: bool,
+    last_dl: &mut Option<(u64, u64)>,
+) {
+    use gogo::gog::depot::DepotEvent::*;
+    if machine {
+        println!("{}", serde_json::to_string(event).unwrap());
+        return;
+    }
+    match event {
+        Resolved {
+            title,
+            version,
+            generation,
+            ..
+        } => {
+            println!("gogo: {title} build {version} (generation {generation})")
+        }
+        Plan {
+            install_dir,
+            download_size,
+            disk_size,
+            language,
+            dlcs,
+        } => {
+            println!(
+                "gogo: plan {} (download {}, disk {}, {}{})",
+                install_dir.display(),
+                gogo::fmt::human_size(*download_size),
+                gogo::fmt::human_size(*disk_size),
+                language,
+                if dlcs.is_empty() {
+                    String::new()
+                } else {
+                    format!(" +{} dlcs", dlcs.len())
+                }
+            );
+        }
+        Preparing => println!("gogo: preparing"),
+        Allocating { fraction } | Verifying { fraction } => {
+            print!(
+                "\r{}: {:.0}%",
+                if matches!(event, Allocating { .. }) {
+                    "allocating"
+                } else {
+                    "verifying"
+                },
+                fraction * 100.0
+            );
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+        }
+        Downloading {
+            downloaded,
+            total_download,
+            ..
+        } => {
+            *last_dl = Some((*downloaded, *total_download));
+            print!(
+                "\rdownloading {} / {}",
+                gogo::fmt::human_size(*downloaded),
+                gogo::fmt::human_size(*total_download)
+            );
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+        }
+        Finished { .. } => {}
+    }
+}
 
 async fn download(
     args: cli::DownloadArgs,

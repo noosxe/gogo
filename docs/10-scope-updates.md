@@ -7,7 +7,10 @@ Decisions from the project owner, recorded so the design phase starts from the s
 1. **CLI first.** The initial deliverable is a command-line app.
 2. **Use gog-warp** for whatever it covers (auth, token lifecycle, owned-products, user data).
 3. **Model A only in v1** — offline installers. No depot downloads initially.
-4. **Later phase:** depot downloads (Model B) ship together with a **ratatui TUI**.
+4. ~~**Later phase:** depot downloads (Model B) ship together with a **ratatui TUI**.~~
+   Amended 2026-10-20 (docs/17, design 14): Model B ships as a CLI lane first
+   (`gogo depot`), motivated by mac-app consuming depot trees instead of running
+   installers under wine. The TUI follows whenever it comes.
 5. **Dual interface long-term:** CLI = automation/scripting; TUI = human consumption. Same core,
    two front-ends.
 
@@ -57,7 +60,9 @@ Nothing below exists in gog-warp — this is the actual gap:
 
 ## 5. Explicitly deferred (not v1)
 
-- Depot downloads (builds/manifests/secure links/xdelta3/dependencies) — v2
+- ~~Depot downloads (builds/manifests/secure links/xdelta3/dependencies) — v2~~
+  Shipped 2026-10-20 via gog-warp's downloader (`gogo depot`, design 14);
+  xdelta3 upgrade/patch lane still deferred
 - ratatui TUI — ships with v2
 - Cloud saves, wishlist, friends — not planned
 - Movies — technically supported by the same installer path (`downloads` entries with

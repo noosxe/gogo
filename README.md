@@ -30,6 +30,7 @@ cargo install --locked --git https://github.com/noosxe/gogo
 gogo login            # sign in: browser + paste-code, tokens in the OS keychain
 gogo list             # your library (id, title, platforms)
 gogo download <GAME>  # offline installers, chunk-verified and resumable
+gogo depot <GAME>      # straight from GOG's depot into the user cache dir
 gogo mac-app <EXE>    # macOS: installer -> .app (with a Lutris recipe)
 gogo runtimes list    # macOS: Wine catalog + what's cached locally
 gogo recipes show <slug>  # what a Lutris recipe would do, step by step
@@ -46,6 +47,8 @@ gogo download pharaoh                          # fuzzy title match
 gogo download 1207658916 --with-dlcs           # by id, include DLCs
 gogo download --all --yes --os windows         # everything, Windows installers
 gogo download "hot brass" --extras --patches   # + bonus content and patches
+gogo depot pharaoh --dry-run                   # plan a depot (Model B) download
+gogo depot 1207658916 --with-dlcs              # materialize game files to ~/Library/Caches
 ```
 
 Useful flags: `--dir`, `--workers`, `--parallel-files`, `--limit 4MiB/s` (rate

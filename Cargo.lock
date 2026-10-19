@@ -1242,7 +1242,7 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 [[package]]
 name = "gog-warp"
 version = "0.1.0"
-source = "git+https://github.com/playtron-os/gog-warp?rev=55ddb010be07d41357144440be3fda65fbb8993a#55ddb010be07d41357144440be3fda65fbb8993a"
+source = "git+https://github.com/noosxe/gog-warp?rev=30a8303b303fb19105439731ddd7d558b615241e#30a8303b303fb19105439731ddd7d558b615241e"
 dependencies = [
  "async-compression",
  "bincode",
