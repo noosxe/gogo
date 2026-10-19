@@ -154,6 +154,12 @@ pub fn state_event(s: DownloadState) -> Option<DepotEvent> {
     }
 }
 
+/// The user-level cache base (`~/Library/Caches` on macOS; XDG on Linux),
+/// or `None` where the platform has none.
+pub fn default_cache_dir() -> Option<PathBuf> {
+    dirs::cache_dir()
+}
+
 /// Cache roots (design 14 D2): `(install_root, support_root, global_deps_root)`.
 /// `None` when no user cache directory exists on this platform.
 pub fn cache_roots(

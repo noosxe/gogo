@@ -41,8 +41,13 @@ pub struct MacAppPlan {
     pub display: String,
     pub slug: String,
     pub runtime: runtime::Runtime,
-    pub installer: installer::InstallPlan,
-    /// Estimated final size: runtime tree + installer + `.bin` parts.
+    /// `None` in the depot lane (design 15 D3: the tree replaces the install).
+    pub installer: Option<installer::InstallPlan>,
+    /// Depot lane: the source tree and its size on disk.
+    pub game_tree: Option<PathBuf>,
+    pub game_tree_bytes: u64,
+    /// Estimated final size: runtime tree + installer parts (offline lane) or
+    /// runtime + tree (depot lane).
     pub estimated_bytes: u64,
     /// The recipe choice carried to `execute` (resolved post-install).
     /// The recipe selected at plan time (§6 step 2); applied post-install.
@@ -59,7 +64,11 @@ pub struct MacAppPlan {
 /// Conversion inputs (CLI flags, design 10 §1).
 #[derive(Debug, Clone, Default)]
 pub struct MacAppOptions {
-    pub installer: PathBuf,
+    /// Offline installer lane input (design 10). Exactly one of
+    /// `installer` / `game_tree` is set (design 15 D2).
+    pub installer: Option<PathBuf>,
+    /// Depot lane input: an already-materialized game tree (design 15).
+    pub game_tree: Option<PathBuf>,
     pub name: Option<String>,
     pub mode: RuntimeMode,
     pub runtime_path: Option<PathBuf>,
@@ -755,12 +764,31 @@ pub fn plan(
     prompt: Option<&prompt::PromptFn>,
     emit: &mut dyn FnMut(&ProgressEvent),
 ) -> Result<MacAppPlan, MacAppError> {
-    let display = display_name(&opts.installer, opts.name.as_deref());
+    assert!(
+        opts.installer.is_some() ^ opts.game_tree.is_some(),
+        "exactly one source: installer or game_tree (design 15 D2)"
+    );
+    // Design 15 §1: depot display name prefers the goggame info's own name.
+    let display = match (opts.game_tree.as_ref(), opts.name.as_deref()) {
+        (Some(_), Some(n)) => n.to_string(),
+        (Some(tree), None) => info::game_name(tree).unwrap_or_else(|| {
+            tree.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Game".to_string())
+        }),
+        (None, _) => display_name(opts.installer.as_ref().unwrap(), opts.name.as_deref()),
+    };
     let slug = slugify(&display);
 
     // §6 step 2: recipe discovery + selection precede the runtime — a wine
-    // pin feeds the recommendation (D2: flag > recipe > default).
-    let recipe = select_recipe(opts, &display, prompt, emit)?;
+    // pin feeds the recommendation (D2: flag > recipe > default). Depot mode
+    // skips recipes wholesale (design 15 D6): Lutris scripts are
+    // installer-shaped and the tree already is the installed artifact.
+    let recipe = if opts.game_tree.is_some() {
+        None
+    } else {
+        select_recipe(opts, &display, prompt, emit)?
+    };
 
     // Design 13 D1: the wrapper decision sits between recipe and runtime —
     // it composes with the recipe (D4: never over its ddraw.dll) and is a
@@ -792,7 +820,15 @@ pub fn plan(
     let wine = runtime.wine.display().to_string();
     emit(&ProgressEvent::RuntimeResolved { kind, path: wine });
 
-    let install = installer::plan(&opts.installer)?;
+    let install = opts
+        .installer
+        .as_ref()
+        .map(|p| installer::plan(p))
+        .transpose()?;
+    let game_tree_bytes = match &opts.game_tree {
+        Some(tree) => dir_size(tree)?,
+        None => 0,
+    };
 
     let bundle = bundle::layout(&opts.out_dir, &display);
     if bundle.root.exists() {
@@ -807,12 +843,18 @@ pub fn plan(
     }
 
     let estimated_bytes = dir_size(&runtime.root)?
-        + file_size(&install.installer)?
-        + install
-            .bin_parts
-            .iter()
-            .filter_map(|p| file_size(p).ok())
-            .sum::<u64>();
+        + match (&install, &opts.game_tree) {
+            (Some(install), _) => {
+                file_size(&install.installer)?
+                    + install
+                        .bin_parts
+                        .iter()
+                        .filter_map(|p| file_size(p).ok())
+                        .sum::<u64>()
+            }
+            (None, Some(_)) => game_tree_bytes,
+            (None, None) => unreachable!("asserted above"),
+        };
 
     Ok(MacAppPlan {
         bundle_path: bundle.root.clone(),
@@ -820,6 +862,8 @@ pub fn plan(
         slug,
         runtime,
         installer: install,
+        game_tree: opts.game_tree.clone(),
+        game_tree_bytes,
         estimated_bytes,
         recipe,
         runtime_downloaded,
@@ -827,6 +871,92 @@ pub fn plan(
         ddraw,
         bundle,
     })
+}
+
+/// Write the `HKLM\Software\GOG.com\Games\<id>` key (32-bit view) that GOG
+/// installers create and GOG support installers check as a prerequisite
+/// (design 15 D3 amendment: fresh depot prefixes lack it, so the support
+/// installer "fails to initialize" — live finding 2026-10-20, exit 1 under
+/// both GPTK and wine-staging). Values mirror the offline installer's output.
+fn write_gog_game_key(
+    bundled_wine: &Path,
+    prefix: &Path,
+    id: &str,
+    name: &str,
+    win_path: &str,
+    exe_file: &str,
+) -> Result<(), MacAppError> {
+    let key = format!(r"Software\GOG.com\Games\{id}");
+    let exe = format!(r"{win_path}\{exe_file}");
+    let dll = format!("goggame-{id}.dll");
+    let values: [(&str, String); 11] = [
+        ("gameID", id.to_string()),
+        ("GAMENAME", name.to_string()),
+        ("PATH", win_path.to_string()),
+        ("EXE", exe.clone()),
+        ("EXEFILE", exe_file.to_string()),
+        ("GOGGAMEDLL", dll),
+        ("LAUNCHCOMMAND", format!("{exe} ")),
+        ("LAUNCHPARAM", String::new()),
+        ("SAVEGAMEFOLDER", format!(r"{win_path}\")),
+        ("DEPENDSON", String::new()),
+        ("DLC", String::new()),
+    ];
+    for (value, data) in values {
+        let argv = vec![
+            "reg".to_string(),
+            "add".to_string(),
+            format!(r"HKLM\{key}"),
+            "/v".to_string(),
+            value.to_string(),
+            "/t".to_string(),
+            "REG_SZ".to_string(),
+            "/d".to_string(),
+            data,
+            "/f".to_string(),
+            "/reg:32".to_string(),
+        ];
+        interpret::run_in_prefix(
+            bundled_wine,
+            prefix,
+            &argv,
+            std::time::Duration::from_secs(60),
+        )
+        .map_err(|e| MacAppError::Recipe(format!("gog registry: {e}")))?;
+    }
+    Ok(())
+}
+
+/// The depot cache's GOG support installer (`gog-support/**/galaxy_*.exe`,
+/// sibling of the install tree): writes the config/registry side artifacts
+/// the game exe needs at startup (design 15 D3, amended 2026-10-20 — live
+/// finding: `Pharaoh.ini`'s `CDDrive` hint; without it the exe stalls in its
+/// CD check: black screen, no audio, no crash).
+pub fn locate_support_installer(tree: &Path) -> Option<PathBuf> {
+    let support_root = tree.parent()?.join("gog-support");
+    fn walk(dir: &Path, out: &mut Option<PathBuf>) {
+        if out.is_some() {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                let lower = name.to_ascii_lowercase();
+                if lower.starts_with("galaxy") && lower.ends_with(".exe") {
+                    *out = Some(path);
+                    return;
+                }
+            }
+        }
+    }
+    let mut found = None;
+    walk(&support_root, &mut found);
+    found
 }
 
 /// Run the conversion. `codesign` is [`CodesignPolicy::Adhoc`] on macOS hosts,
@@ -871,31 +1001,98 @@ pub fn execute(
     emit(&ProgressEvent::PrefixStaged);
     installer::stage_prefix(&plan.runtime, &plan.bundle.prefix)?;
 
-    let win_target = format!("C:\\GOG\\{}", plan.slug);
-    emit(&ProgressEvent::InstallStarted);
-    let installer_bytes = file_size(&plan.installer.installer)?
-        + plan
-            .installer
-            .bin_parts
-            .iter()
-            .filter_map(|p| file_size(p).ok())
-            .sum::<u64>();
-    installer::run_silent(
-        &plan.runtime,
-        &plan.installer,
-        &plan.bundle.prefix,
-        &win_target,
-        &plan.bundle_path,
-    )?;
-    // Quiesce the prefix before sealing: a lingering wineserver keeps writing
-    // into it (registry flushes, temp cleanup) — which broke `codesign
-    // --verify` mid-seal (live finding 2026-10-18, "sealed resource missing").
-    installer::stop_wineserver(&plan.runtime, &plan.bundle.prefix)?;
-    emit(&ProgressEvent::InstallFinished {
-        bytes: installer_bytes,
-    });
-
-    let install_dir = plan.bundle.prefix.join("drive_c/GOG").join(&plan.slug);
+    // Design 15 D3: the depot lane swaps exactly this step — a tree clone
+    // instead of a silent installer run. Layout is identical afterwards
+    // (drive_c/GOG/<name>, docs/18 §5).
+    let install_dir = if let Some(install) = &plan.installer {
+        let win_target = format!("C:\\GOG\\{}", plan.slug);
+        emit(&ProgressEvent::InstallStarted);
+        let installer_bytes = file_size(&install.installer)?
+            + install
+                .bin_parts
+                .iter()
+                .filter_map(|p| file_size(p).ok())
+                .sum::<u64>();
+        installer::run_silent(
+            &plan.runtime,
+            install,
+            &plan.bundle.prefix,
+            &win_target,
+            &plan.bundle_path,
+        )?;
+        // Quiesce the prefix before sealing: a lingering wineserver keeps
+        // writing into it (registry flushes, temp cleanup) — which broke
+        // `codesign --verify` mid-seal (live finding 2026-10-18, "sealed
+        // resource missing").
+        installer::stop_wineserver(&plan.runtime, &plan.bundle.prefix)?;
+        emit(&ProgressEvent::InstallFinished {
+            bytes: installer_bytes,
+        });
+        plan.bundle.prefix.join("drive_c/GOG").join(&plan.slug)
+    } else {
+        let tree = plan.game_tree.as_ref().expect("one source asserted");
+        let name = tree
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| plan.slug.clone());
+        let dst = plan.bundle.prefix.join("drive_c/GOG").join(&name);
+        emit(&ProgressEvent::InstallStarted);
+        bundle::clone_tree(tree, &dst)?;
+        // D3 amendment (2026-10-20): GOG's support installer writes the
+        // startup config + registry into the clone. Fatal when present but
+        // failing — without it the game stalls at its first media check.
+        if let Some(support) = locate_support_installer(tree) {
+            // Bootstrap the registry prerequisite the support installer checks
+            // (the offline lane's main installer normally writes it).
+            if let Some(id) = info::gog_game_ids(tree).first() {
+                let entry = info::find_entry_point(tree).ok();
+                let exe_file = entry
+                    .as_ref()
+                    .and_then(|e| e.file_name().map(|n| n.to_string_lossy().into_owned()))
+                    .unwrap_or_else(|| "game.exe".to_string());
+                let win_path = format!("C:\\GOG\\{name}");
+                write_gog_game_key(
+                    &bundled_wine,
+                    &plan.bundle.prefix,
+                    id,
+                    &name,
+                    &win_path,
+                    &exe_file,
+                )?;
+            }
+            emit(&ProgressEvent::Warn {
+                message: "running GOG support installer into the clone".into(),
+            });
+            let support_plan = installer::plan(&support)?;
+            let win_target = format!("C:\\GOG\\{name}");
+            // Best-effort (docs/18 §5): this Inno build's InitializeSetup
+            // declines even against a fully-synthesized GOG registry key and
+            // under two independent wines — the gate is internal GOG script
+            // logic. Failing loudly-but-softly keeps self-contained games
+            // perfect while flagging the install-config class.
+            if installer::run_silent(
+                &plan.runtime,
+                &support_plan,
+                &plan.bundle.prefix,
+                &win_target,
+                &plan.bundle_path,
+            )
+            .is_err()
+            {
+                emit(&ProgressEvent::Warn {
+                    message: "GOG support installer declined (install-time config \
+                              not written) — if the game stalls at launch, re-run \
+                              mac-app with the offline installer lane"
+                        .into(),
+                });
+            }
+        }
+        installer::stop_wineserver(&plan.runtime, &plan.bundle.prefix)?;
+        emit(&ProgressEvent::InstallFinished {
+            bytes: plan.game_tree_bytes,
+        });
+        dst
+    };
 
     // Recipe phase (design 11 §5): live search + selection + steps. A
     // search-discovered recipe is an advisory enhancement — a hard failure

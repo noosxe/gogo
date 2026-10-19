@@ -21,6 +21,9 @@ printf 'CWD:%s\n' "$(pwd)" >> "{log}"
 if [ "$1" = "--version" ]; then echo "wine-9.0-fake"; exit 0; fi
 if [ "$1" = "wineboot" ]; then exit 0; fi
 case "$1" in
+  *fail_support.exe) exit 1;;
+esac
+case "$1" in
   *.exe)
     TARGET=""
     for a in "$@"; do
@@ -84,7 +87,8 @@ fn full_pipeline_with_fake_runtime() {
 
     let out = tmp.path().join("out");
     let opts = MacAppOptions {
-        installer: installer.clone(),
+        installer: Some(installer.clone()),
+        game_tree: None,
         name: Some("Test Game".into()),
         mode: RuntimeMode::Path,
         runtime_path: Some(runtime_dir.clone()),
@@ -114,7 +118,7 @@ fn full_pipeline_with_fake_runtime() {
     assert_eq!(plan.display, "Test Game");
     assert_eq!(plan.slug, "test-game");
     assert_eq!(plan.runtime.version, "wine-9.0-fake");
-    assert_eq!(plan.installer.bin_parts.len(), 1);
+    assert_eq!(plan.installer.as_ref().unwrap().bin_parts.len(), 1);
 
     let bytes = macapp::execute(&plan, CodesignPolicy::Skip, &mut emit).expect("execute");
     assert!(bytes > 0);
@@ -188,7 +192,8 @@ fn execute_refuses_to_clobber_existing_bundle() {
     std::fs::write(&installer, b"MZ").unwrap();
 
     let opts = MacAppOptions {
-        installer,
+        installer: Some(installer),
+        game_tree: None,
         name: Some("Test Game".into()),
         mode: RuntimeMode::Path,
         runtime_path: Some(runtime_dir),
@@ -261,7 +266,8 @@ fn winetricks_verbs_run_with_wine_shims_and_notice() {
     let installer = tmp.path().join("setup_testgame_1.0.exe");
     std::fs::write(&installer, b"MZ").unwrap();
     let opts = MacAppOptions {
-        installer,
+        installer: Some(installer),
+        game_tree: None,
         name: Some("Test Game".into()),
         mode: RuntimeMode::Path,
         runtime_path: Some(runtime_dir),
@@ -350,7 +356,8 @@ fn recipe_wine_pin_recommends_cached_catalog_runtime() {
     .unwrap();
 
     let opts = MacAppOptions {
-        installer,
+        installer: Some(installer),
+        game_tree: None,
         name: Some("Test Game".into()),
         mode: RuntimeMode::Auto,
         runtime_path: None,
@@ -460,7 +467,8 @@ fn auto_recipe_discovery_and_gogid_crosscheck() {
     });
 
     let opts = MacAppOptions {
-        installer,
+        installer: Some(installer),
+        game_tree: None,
         name: Some("Test Game".into()),
         mode: RuntimeMode::Path,
         runtime_path: Some(runtime_dir),
@@ -565,7 +573,8 @@ fn runtime_menu_offers_cached_and_custom_path_lanes() {
         });
 
     let opts = MacAppOptions {
-        installer,
+        installer: Some(installer),
+        game_tree: None,
         name: Some("Test Game".into()),
         mode: RuntimeMode::Auto,
         runtime_path: None,
@@ -720,7 +729,8 @@ fn recipe_picker_index_and_free_text_lanes() {
     });
 
     let opts = MacAppOptions {
-        installer,
+        installer: Some(installer),
+        game_tree: None,
         name: Some("Test Game".into()),
         mode: RuntimeMode::Path,
         runtime_path: Some(runtime_dir),
@@ -994,7 +1004,8 @@ fn search_recipe_failure_degrades_pinned_stays_fatal() {
 
     // Search-discovered (Auto): degrade to a complete, recipe-less bundle.
     let opts = MacAppOptions {
-        installer: installer.clone(),
+        installer: Some(installer.clone()),
+        game_tree: None,
         name: Some("Test Game".into()),
         mode: RuntimeMode::Path,
         runtime_path: Some(runtime_dir.clone()),
@@ -1040,7 +1051,8 @@ fn search_recipe_failure_degrades_pinned_stays_fatal() {
     )
     .unwrap();
     let opts = MacAppOptions {
-        installer,
+        installer: Some(installer),
+        game_tree: None,
         name: Some("Test Game".into()),
         mode: RuntimeMode::Path,
         runtime_path: Some(runtime_dir),
@@ -1100,7 +1112,8 @@ fn runtime_menu_is_mandatory_with_easy_default() {
         });
 
     let opts = MacAppOptions {
-        installer,
+        installer: Some(installer),
+        game_tree: None,
         name: Some("Test Game".into()),
         mode: RuntimeMode::Auto,
         runtime_path: None,
@@ -1208,7 +1221,8 @@ fn recipe_picker_is_mandatory_for_single_candidate() {
         });
 
     let mk_opts = |out: &std::path::Path| MacAppOptions {
-        installer: installer.clone(),
+        installer: Some(installer.clone()),
+        game_tree: None,
         name: Some("Test Game".into()),
         mode: RuntimeMode::Path,
         runtime_path: Some(runtime_dir.clone()),
@@ -1271,7 +1285,8 @@ fn produced_launcher_execs_wine_with_contents_relative_paths() {
     std::fs::write(&installer, b"MZ").unwrap();
 
     let opts = MacAppOptions {
-        installer,
+        installer: Some(installer),
+        game_tree: None,
         name: Some("Test Game".into()),
         mode: RuntimeMode::Path,
         runtime_path: Some(runtime_dir),
@@ -1351,7 +1366,8 @@ fn ddraw_wrapper_application_lanes() {
     std::fs::write(store.join("Shaders/one.fx"), b"shader").unwrap();
 
     let mk = |out: &std::path::Path, ddraw: macapp::DdrawChoice| MacAppOptions {
-        installer: installer.clone(),
+        installer: Some(installer.clone()),
+        game_tree: None,
         name: Some("Test Game".into()),
         mode: RuntimeMode::Path,
         runtime_path: Some(runtime_dir.clone()),
@@ -1423,4 +1439,159 @@ fn ddraw_wrapper_application_lanes() {
         std::env::remove_var("GOGO_HOME");
     }
     drop(guard);
+}
+
+#[test]
+fn macapp_from_depot_executes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let runtime_dir = tmp.path().join("runtime");
+    let log = tmp.path().join("wine.log");
+    fake_runtime(&runtime_dir, &log);
+
+    // A fake depot tree (design 15 §7): goggame info + exe + nested data to
+    // prove a deep clone — exactly what `gogo depot` materializes (docs/18).
+    let tree = tmp.path().join("tree").join("Pharaoh Gold");
+    std::fs::create_dir_all(tree.join("Data")).unwrap();
+    std::fs::write(
+        tree.join("goggame-1207659046.info"),
+        r#"{"name":"Pharaoh Gold","playTasks":[{"type":"FileTask","category":"game","path":"Pharaoh.exe","isPrimary":true}]}"#,
+    )
+    .unwrap();
+    std::fs::write(tree.join("Pharaoh.exe"), b"MZ").unwrap();
+    std::fs::write(tree.join("Data").join("kings.dat"), b"ramses").unwrap();
+
+    // Cache-layout sibling (design 14 D2): GOG's support installer. The fake
+    // wine treats any `*.exe` with /DIR= as an installer that drops
+    // `goggame-1.info` + `game.exe` into the target — asserting it ran into
+    // the clone (D3 amendment).
+    let support = tmp
+        .path()
+        .join("tree")
+        .join("gog-support")
+        .join("galaxy_pharaoh_2.1.0.15.exe");
+    std::fs::create_dir_all(support.parent().unwrap()).unwrap();
+    std::fs::write(&support, b"MZ support").unwrap();
+
+    let out = tmp.path().join("out");
+    let opts = MacAppOptions {
+        installer: None,
+        game_tree: Some(tree.clone()),
+        name: None,
+        mode: RuntimeMode::Path,
+        runtime_path: Some(runtime_dir.clone()),
+        out_dir: out.clone(),
+        overwrite: true,
+        recipe: Default::default(),
+        runtime_version: None,
+        lutris_base: None,
+        ddraw: macapp::DdrawChoice::Off,
+    };
+
+    let mut emit = |_ev: &ProgressEvent| {};
+    let plan = macapp::plan(&opts, None, &mut emit).expect("plan");
+    // Display name comes from the goggame info (design 15 D1).
+    assert_eq!(plan.display, "Pharaoh Gold");
+    assert_eq!(plan.slug, "pharaoh-gold");
+    assert!(plan.installer.is_none());
+    assert!(plan.game_tree_bytes > 0);
+
+    let bytes = macapp::execute(&plan, CodesignPolicy::Skip, &mut emit).expect("execute");
+    assert!(bytes > 0);
+
+    // The tree is cloned into drive_c/GOG/<tree-name> (design 15 D3).
+    let game_dir = out.join("Pharaoh Gold.app/Contents/Resources/prefix/drive_c/GOG/Pharaoh Gold");
+    assert!(game_dir.join("Pharaoh.exe").is_file());
+    assert!(game_dir.join("Data/kings.dat").is_file());
+    assert!(game_dir.join("goggame-1207659046.info").is_file());
+    // The support installer ran into the clone (fake wine wrote its files).
+    assert!(game_dir.join("goggame-1.info").is_file());
+
+    // Entry discovery ran inside the cloned tree; conf points at it.
+    let conf = std::fs::read_to_string(out.join("Pharaoh Gold.app/Contents/Resources/launch.conf"))
+        .unwrap();
+    assert!(
+        conf.contains("drive_c/GOG/Pharaoh Gold/Pharaoh.exe"),
+        "conf GAME points into the cloned tree: {conf}"
+    );
+
+    // The produced launcher runs end-to-end: fake wine logs its argv.
+    std::fs::write(&log, b"").unwrap();
+    let status =
+        std::process::Command::new(out.join("Pharaoh Gold.app/Contents/MacOS/Pharaoh Gold"))
+            .status()
+            .unwrap();
+    assert!(status.success());
+    let logged = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        logged.contains("Pharaoh.exe"),
+        "launcher execs the cloned exe: {logged}"
+    );
+    assert!(
+        logged.contains("drive_c/GOG/Pharaoh Gold"),
+        "cwd is the game dir: {logged}"
+    );
+}
+
+#[test]
+fn depot_support_decline_degrades_to_warn() {
+    let tmp = tempfile::tempdir().unwrap();
+    let runtime_dir = tmp.path().join("runtime");
+    let log = tmp.path().join("wine.log");
+    fake_runtime(&runtime_dir, &log);
+
+    let tree = tmp.path().join("tree").join("Declined Game");
+    std::fs::create_dir_all(&tree).unwrap();
+    std::fs::write(
+        tree.join("goggame-7.info"),
+        r#"{"name":"Declined Game","playTasks":[{"type":"FileTask","category":"game","path":"game.exe","isPrimary":true}]}"#,
+    )
+    .unwrap();
+    std::fs::write(tree.join("game.exe"), b"MZ").unwrap();
+    // Support installer that declines (fake wine exits 1 for *fail_support.exe).
+    let support = tmp
+        .path()
+        .join("tree")
+        .join("gog-support")
+        .join("galaxy_fail_support.exe");
+    std::fs::create_dir_all(support.parent().unwrap()).unwrap();
+    std::fs::write(&support, b"MZ").unwrap();
+
+    let out = tmp.path().join("out");
+    let opts = MacAppOptions {
+        installer: None,
+        game_tree: Some(tree.clone()),
+        name: None,
+        mode: RuntimeMode::Path,
+        runtime_path: Some(runtime_dir),
+        out_dir: out.clone(),
+        overwrite: true,
+        recipe: Default::default(),
+        runtime_version: None,
+        lutris_base: None,
+        ddraw: macapp::DdrawChoice::Off,
+    };
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = events.clone();
+    let mut emit = move |ev: &ProgressEvent| {
+        if let ProgressEvent::Warn { message } = ev {
+            sink.lock().unwrap().push(message.clone());
+        }
+    };
+    let plan = macapp::plan(&opts, None, &mut emit).expect("plan");
+    macapp::execute(&plan, CodesignPolicy::Skip, &mut emit).expect("execute despite decline");
+
+    // The bundle assembled and the decline was loud + actionable (design 15).
+    assert!(
+        out.join("Declined Game.app/Contents/Resources/launch.conf")
+            .is_file()
+    );
+    let warns = events.lock().unwrap().join("\n");
+    assert!(
+        warns.contains("support installer declined"),
+        "decline warn: {warns}"
+    );
+    // No support-written files (the fake wine fails before writing).
+    let game = out.join("Declined Game.app/Contents/Resources/prefix/drive_c/GOG/Declined Game");
+    assert!(game.join("game.exe").is_file());
+    assert!(!game.join("goggame-1.info").is_file());
 }

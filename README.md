@@ -31,6 +31,7 @@ gogo login            # sign in: browser + paste-code, tokens in the OS keychain
 gogo list             # your library (id, title, platforms)
 gogo download <GAME>  # offline installers, chunk-verified and resumable
 gogo depot <GAME>      # straight from GOG's depot into the user cache dir
+gogo mac-app --from-depot <GAME>  # wrap the depot tree (no installer run)
 gogo mac-app <EXE>    # macOS: installer -> .app (with a Lutris recipe)
 gogo runtimes list    # macOS: Wine catalog + what's cached locally
 gogo recipes show <slug>  # what a Lutris recipe would do, step by step
