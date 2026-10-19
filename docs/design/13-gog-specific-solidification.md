@@ -30,10 +30,13 @@ today only through Lutris CD-recipes whose paths don't match our GOG layout
   + `gogo runtimes list` visibility for free.
 - **D3 — application.** After the recipe phase and entry resolution (install
   dir known): copy `ddraw.dll` + `Shaders/` from the store tree into the game
-  dir; write a gogo-authored `ddraw.ini` — `[ddraw]
-  fullscreen=true / maintas=true / windowed=true` (the live-proven set).
-  Game-dir placement only; no registry dll-overrides (PE loader search order
-  finds the local dll first — live-proven).
+  dir; write a gogo-authored `ddraw.ini` (`renderer=gdi` pinned for
+  determinism, `fullscreen/maintas/windowed=true`); and set the per-prefix
+  DllOverrides `ddraw = n,b` via the bundled wine. The override is the
+  load-order half — wine's default for ddraw is builtin-first, so the
+  game-dir dll is silently ignored without it (live finding 2026-10-19:
+  `builtin` vs `native` in `+loaddll` traces decided working vs black-screen;
+  winetricks' cnc-ddraw verb and Lutris `wine.overrides` do exactly this).
 - **D4 — never fight the recipe.** If the recipe phase already placed a
   `ddraw.dll` in the game dir, skip with a loud `Warn` instead of overwriting.
 - **D5 — notices + events.** `Contents/Resources/LICENSE-cnc-ddraw.txt` (MIT

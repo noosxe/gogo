@@ -16,8 +16,11 @@ pub const CNC_DDRAW_ID: &str = "cnc-ddraw";
 /// ratio inside a window — renders everywhere the mac driver cannot match
 /// legacy exclusive modes.
 pub const DDRAW_INI: &str = "; gogo: DirectDraw wrapper config (design 13 D3)\n\
+     ; renderer=gdi is pinned for determinism (cnc-ddraw's GL path is not\n\
+     ; needed for classic GOG titles); flip to `auto` for shader scaling.\n\
      ; generated — edit freely; see https://github.com/FunkyFr3sh/cnc-ddraw\n\
      [ddraw]\n\
+     renderer=gdi\n\
      fullscreen=true\n\
      maintas=true\n\
      windowed=true\n";
@@ -94,6 +97,33 @@ pub fn apply(store_tree: &Path, game_dir: &Path) -> Result<Applied, MacAppError>
     Ok(Applied::Applied { shaders })
 }
 
+/// Set the per-prefix DllOverrides entry `ddraw = n,b` (native, builtin)
+/// with the bundled wine — the missing half of the wrapper (live finding
+/// 2026-10-19: wine's default load order for draw is builtin-first, so the
+/// game-dir dll is silently ignored; winetricks' cnc-ddraw verb and Lutris
+/// `wine.overrides` both do exactly this).
+pub fn register_override(bundled_wine: &Path, prefix: &Path) -> Result<(), MacAppError> {
+    let argv = vec![
+        "reg".to_string(),
+        "add".to_string(),
+        r"HKCU\Software\Wine\DllOverrides".to_string(),
+        "/v".to_string(),
+        "ddraw".to_string(),
+        "/t".to_string(),
+        "REG_SZ".to_string(),
+        "/d".to_string(),
+        "n,b".to_string(),
+        "/f".to_string(),
+    ];
+    crate::macapp::interpret::run_in_prefix(
+        bundled_wine,
+        prefix,
+        &argv,
+        std::time::Duration::from_secs(60),
+    )
+    .map_err(|e| MacAppError::Recipe(format!("ddraw override: {e}")))
+}
+
 fn copy_dir(src: &Path, dst: &Path, count: &mut usize) -> Result<(), MacAppError> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
@@ -134,7 +164,9 @@ mod tests {
         }
         assert_eq!(std::fs::read(game.join("ddraw.dll")).unwrap(), b"MZ-dll");
         let ini = std::fs::read_to_string(game.join("ddraw.ini")).unwrap();
-        assert!(ini.contains("maintas=true") && ini.contains("[ddraw]"));
+        assert!(
+            ini.contains("renderer=gdi") && ini.contains("maintas=true") && ini.contains("[ddraw]")
+        );
         assert!(game.join("Shaders/xbr/one.fxc").is_file());
         // Everything else in the store tree stays out of the game dir (D3).
         assert!(!game.join("cnc-ddraw config.exe").exists());

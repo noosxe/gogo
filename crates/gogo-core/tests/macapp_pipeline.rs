@@ -1402,6 +1402,13 @@ fn ddraw_wrapper_application_lanes() {
         steps.iter().any(|v| v.starts_with("cnc-ddraw")),
         "RecipeStep event: {steps:?}"
     );
+    // The load-order half (design 13 D3): the bundled wine must have set the
+    // per-prefix DllOverrides entry — the fake runtime logged its argv.
+    let logged = std::fs::read_to_string(&log).unwrap();
+    assert!(
+        logged.contains("DllOverrides") && logged.contains("n,b"),
+        "override registered via reg add: {logged}"
+    );
 
     // (b) headless Auto: off, nothing applied.
     let opts = mk(&tmp.path().join("out-auto"), macapp::DdrawChoice::Auto);
