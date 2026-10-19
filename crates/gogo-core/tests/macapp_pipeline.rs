@@ -912,3 +912,131 @@ fn recipe_discovery_trims_version_and_falls_back_to_shorter_queries() {
     assert_eq!(candidates[0].slug, "pharaoh-cd-cnc-ddraw");
     drop(guard);
 }
+
+#[test]
+fn search_recipe_failure_degrades_pinned_stays_fatal() {
+    // Design 11 §7 (amended): a recipe step escaping both the bundle and the
+    // cache fails the phase. Search-discovered → loud warn + recipe-less
+    // finalize (the bundle still gets a launcher + Info.plist); pinned → Err.
+    // Regression shape of the live 2026-10-19 pharaoh incident, where the
+    // same abort left a "damaged or incomplete" half-bundle behind.
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let runtime_dir = tmp.path().join("runtime");
+    let log = tmp.path().join("wine.log");
+    fake_runtime(&runtime_dir, &log);
+    let installer = tmp.path().join("setup_testgame_1.0.exe");
+    std::fs::write(&installer, b"MZ").unwrap();
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let server =
+        rt.block_on(async {
+            use wiremock::matchers::{method, path, query_param};
+            use wiremock::{Mock, ResponseTemplate};
+            let server = wiremock::MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api/games"))
+                .and(query_param("search", "Test Game"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "count": 1,
+                    "results": [{
+                        "id": 1, "slug": "test-game", "name": "Test Game",
+                        "provider_games": [{"slug": "1", "service": "gog"}]
+                    }]
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/games/test-game"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(
+                    r#"<a href="/api/installers/test-game-gog?format=json">x</a>"#,
+                ))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/api/installers/test-game-gog"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "count": 1,
+                    "results": [{
+                        "slug": "test-game-gog", "game_slug": "test-game",
+                        "name": "Test Game", "version": "1.0", "runner": "wine",
+                        "user": "alice", "updated_at": "2026-01-01", "gogid": 1,
+                        "script": {
+                            "files": [],
+                            "installer": [
+                                {"write_file": {"file": "$CACHE/../../escaped.txt",
+                                                "content": "pwned"}}
+                            ]
+                        }
+                    }]
+                })))
+                .mount(&server)
+                .await;
+            server
+        });
+
+    // Search-discovered (Auto): degrade to a complete, recipe-less bundle.
+    let opts = MacAppOptions {
+        installer: installer.clone(),
+        name: Some("Test Game".into()),
+        mode: RuntimeMode::Path,
+        runtime_path: Some(runtime_dir.clone()),
+        out_dir: tmp.path().join("out-auto"),
+        overwrite: true,
+        recipe: gogo::macapp::RecipeChoice::Auto,
+        runtime_version: None,
+        lutris_base: Some(server.uri()),
+    };
+    let mut warns = Vec::new();
+    let mut record = |ev: &ProgressEvent| {
+        if let ProgressEvent::Warn { message } = ev {
+            warns.push(message.clone());
+        }
+    };
+    let plan = macapp::plan(&opts, None, &mut record).unwrap();
+    macapp::execute(&plan, CodesignPolicy::Skip, &mut record).unwrap();
+    let root = plan.bundle_path.clone();
+    assert!(
+        root.join("Contents/MacOS/Test Game").exists(),
+        "no launcher"
+    );
+    assert!(root.join("Contents/Info.plist").exists(), "no Info.plist");
+    assert!(
+        warns
+            .iter()
+            .any(|w| w.contains("recipe test-game-gog failed")),
+        "no degrade warn: {warns:?}"
+    );
+    assert!(
+        !tmp.path().join("escaped.txt").exists(),
+        "escaping write must not land"
+    );
+
+    // Pinned (--recipe <file>): the same failure is fatal (design 11 §7).
+    let script = tmp.path().join("escape.yml");
+    std::fs::write(
+        &script,
+        r#"{"files": [], "installer": [
+            {"write_file": {"file": "$CACHE/../../escaped.txt", "content": "pwned"}}
+        ]}"#,
+    )
+    .unwrap();
+    let opts = MacAppOptions {
+        installer,
+        name: Some("Test Game".into()),
+        mode: RuntimeMode::Path,
+        runtime_path: Some(runtime_dir),
+        out_dir: tmp.path().join("out-pinned"),
+        overwrite: true,
+        recipe: gogo::macapp::RecipeChoice::File(script.clone()),
+        runtime_version: None,
+        lutris_base: Some(server.uri()),
+    };
+    let mut sink = |_ev: &ProgressEvent| {};
+    let plan = macapp::plan(&opts, None, &mut sink).unwrap();
+    assert!(macapp::execute(&plan, CodesignPolicy::Skip, &mut sink).is_err());
+    drop(guard);
+}
