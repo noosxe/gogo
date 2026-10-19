@@ -89,6 +89,8 @@ fn full_pipeline_with_fake_runtime() {
         out_dir: out.clone(),
         overwrite: true,
         recipe: Default::default(),
+        runtime_version: None,
+        lutris_base: None,
     };
 
     let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -105,13 +107,13 @@ fn full_pipeline_with_fake_runtime() {
         });
     };
 
-    let plan = macapp::plan(&opts, &mut emit).expect("plan");
+    let plan = macapp::plan(&opts, None, &mut emit).expect("plan");
     assert_eq!(plan.display, "Test Game");
     assert_eq!(plan.slug, "test-game");
     assert_eq!(plan.runtime.version, "wine-9.0-fake");
     assert_eq!(plan.installer.bin_parts.len(), 1);
 
-    let bytes = macapp::execute(&plan, CodesignPolicy::Skip, None, &mut emit).expect("execute");
+    let bytes = macapp::execute(&plan, CodesignPolicy::Skip, &mut emit).expect("execute");
     assert!(bytes > 0);
 
     // Bundle layout (design 10 §2.5–2.7).
@@ -190,11 +192,13 @@ fn execute_refuses_to_clobber_existing_bundle() {
         out_dir: tmp.path().to_path_buf(),
         overwrite: true,
         recipe: Default::default(),
+        runtime_version: None,
+        lutris_base: None,
     };
-    let plan = macapp::plan(&opts, &mut |_| {}).expect("plan");
+    let plan = macapp::plan(&opts, None, &mut |_| {}).expect("plan");
     // Pre-create the bundle root: execute must refuse.
     std::fs::create_dir_all(&plan.bundle.root).unwrap();
-    let err = macapp::execute(&plan, CodesignPolicy::Skip, None, &mut |_| {}).unwrap_err();
+    let err = macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).unwrap_err();
     assert!(matches!(
         err,
         gogo::macapp::MacAppError::BundleExists { .. }
@@ -205,7 +209,7 @@ fn execute_refuses_to_clobber_existing_bundle() {
         overwrite: false,
         ..opts
     };
-    let err = macapp::plan(&opts2, &mut |_| {}).unwrap_err();
+    let err = macapp::plan(&opts2, None, &mut |_| {}).unwrap_err();
     assert!(matches!(
         err,
         gogo::macapp::MacAppError::BundleExists { .. }
@@ -260,6 +264,8 @@ fn winetricks_verbs_run_with_wine_shims_and_notice() {
         out_dir: tmp.path().to_path_buf(),
         overwrite: true,
         recipe: gogo::macapp::RecipeChoice::File(recipe),
+        runtime_version: None,
+        lutris_base: None,
     };
 
     // Sandbox the store (shims materialize under state_dir) + override the
@@ -270,8 +276,8 @@ fn winetricks_verbs_run_with_wine_shims_and_notice() {
         std::env::set_var("GOGO_HOME", tmp.path().join("home"));
         std::env::set_var("WINETRICKS", &wt);
     }
-    let plan = macapp::plan(&opts, &mut |_| {}).expect("plan");
-    macapp::execute(&plan, CodesignPolicy::Skip, None, &mut |_| {}).expect("execute");
+    let plan = macapp::plan(&opts, None, &mut |_| {}).expect("plan");
+    macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).expect("execute");
     // SAFETY: restore.
     unsafe {
         std::env::remove_var("WINETRICKS");
@@ -296,4 +302,202 @@ fn winetricks_verbs_run_with_wine_shims_and_notice() {
             .join("Contents/Resources/LICENSE-winetricks.txt")
             .is_file()
     );
+}
+
+#[test]
+fn recipe_wine_pin_recommends_cached_catalog_runtime() {
+    // Design 12 §6-§7: a recipe's wine pin (D6 advisory) drives the auto
+    // runtime ladder to the recommendation; a cached store entry satisfies
+    // it without brew or network.
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    // A fake installer + runtime for the pipeline inputs.
+    let runtime_dir = tmp.path().join("runtime");
+    let log = tmp.path().join("wine.log");
+    fake_runtime(&runtime_dir, &log);
+    let installer = tmp.path().join("setup_testgame_1.0.exe");
+    std::fs::write(&installer, b"MZ").unwrap();
+
+    // A cached wine-staging store entry (manifest + probeable tree).
+    let home = tmp.path().join("home");
+    let tree = home.join("runtimes/wine-staging/11.0/bin");
+    std::fs::create_dir_all(&tree).unwrap();
+    std::fs::write(tree.join("wine"), "#!/bin/sh\necho wine-11.0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(tree.join("wine"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+    }
+    std::fs::create_dir_all(home.join("runtimes")).unwrap();
+    std::fs::write(
+        home.join("runtimes/manifest.json"),
+        r#"[{"id":"wine-staging","version":"11.0","sha256":"0","fetched_at":"2026-01-01T00:00:00Z","upstream_url":"x","entry_rel":"bin/wine","bytes":16}]"#,
+    )
+    .unwrap();
+
+    // The recipe fixture with a Linux wine pin (design 11 §8 shape).
+    let recipe = tmp.path().join("recipe.json");
+    std::fs::write(
+        &recipe,
+        r#"{"files": [], "installer": [], "wine": {"version": "lutris-7.2-2"}}"#,
+    )
+    .unwrap();
+
+    let opts = MacAppOptions {
+        installer,
+        name: Some("Test Game".into()),
+        mode: RuntimeMode::Auto,
+        runtime_path: None,
+        out_dir: tmp.path().to_path_buf(),
+        overwrite: true,
+        recipe: gogo::macapp::RecipeChoice::File(recipe),
+        runtime_version: None,
+        lutris_base: None,
+    };
+
+    let mut warns: Vec<String> = Vec::new();
+    // SAFETY: env mutation under ENV_LOCK (established pattern above).
+    unsafe {
+        std::env::set_var("GOGO_HOME", &home);
+    }
+    let plan = macapp::plan(&opts, None, &mut |ev| {
+        if let ProgressEvent::Warn { message } = ev {
+            warns.push(message.clone());
+        }
+    })
+    .expect("plan");
+    // SAFETY: restore.
+    unsafe {
+        std::env::remove_var("GOGO_HOME");
+    }
+    drop(guard);
+
+    let sel = plan.recipe.as_ref().expect("recipe selected at plan time");
+    assert_eq!(sel.wine_version.as_deref(), Some("lutris-7.2-2"));
+    assert!(!sel.from_search, "file recipes are pinned, not searched");
+    // The ladder: recommendation (staging) satisfied from the store cache.
+    assert_eq!(plan.runtime.version, "wine-11.0");
+    assert_eq!(
+        plan.runtime.mode,
+        RuntimeMode::Catalog("wine-staging".into())
+    );
+    assert_eq!(plan.runtime_downloaded, None);
+    assert!(
+        warns
+            .iter()
+            .any(|w| w.contains("recipe wine pin") && w.contains("Linux")),
+        "advisory notice missing: {warns:?}"
+    );
+}
+
+#[test]
+fn auto_recipe_discovery_and_gogid_crosscheck() {
+    // Design 12 §6: auto discovery at plan time (search by display name),
+    // then the authoritative gogid cross-check post-install — a mismatching
+    // pre-selected script downgrades to RecipeMiss + recipe-less continuation.
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let runtime_dir = tmp.path().join("runtime");
+    let log = tmp.path().join("wine.log");
+    fake_runtime(&runtime_dir, &log);
+    let installer = tmp.path().join("setup_testgame_1.0.exe");
+    std::fs::write(&installer, b"MZ").unwrap();
+
+    // One runtime keeps the wiremock server alive across plan+execute.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let server = rt.block_on(async {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, ResponseTemplate};
+        let server = wiremock::MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/games"))
+            .and(query_param("search", "Test Game"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "count": 1,
+                "results": [{
+                    "id": 1, "slug": "test-game", "name": "Test Game",
+                    "provider_games": [{"slug": "1", "service": "gog"}]
+                }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/games/test-game"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"<a href="/api/installers/test-game-gog?format=json">Download script</a>"#,
+            ))
+            .mount(&server)
+            .await;
+        // gogid 999 mismatches the installed game's goggame-1.info (id 1).
+        Mock::given(method("GET"))
+            .and(path("/api/installers/test-game-gog"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "count": 1,
+                "results": [{
+                    "slug": "test-game-gog", "game_slug": "test-game",
+                    "name": "Test Game", "version": "1.0", "runner": "wine",
+                    "user": "alice", "updated_at": "2026-01-01", "gogid": 999,
+                    "script": {
+                        "files": [],
+                        "installer": [],
+                        "game": {"exe": "drive_c/GOG/test-game/other.exe"}
+                    }
+                }]
+            })))
+            .mount(&server)
+            .await;
+        server
+    });
+
+    let opts = MacAppOptions {
+        installer,
+        name: Some("Test Game".into()),
+        mode: RuntimeMode::Path,
+        runtime_path: Some(runtime_dir),
+        out_dir: tmp.path().to_path_buf(),
+        overwrite: true,
+        recipe: gogo::macapp::RecipeChoice::Auto,
+        runtime_version: None,
+        lutris_base: Some(server.uri()),
+    };
+
+    let mut tags: Vec<&'static str> = Vec::new();
+    let mut miss_keys: Vec<String> = Vec::new();
+    let mut record = |ev: &ProgressEvent| match ev {
+        ProgressEvent::RecipeResolved { .. } => tags.push("RecipeResolved"),
+        ProgressEvent::RecipeMiss { key } => miss_keys.push(key.clone()),
+        _ => {}
+    };
+    let plan = macapp::plan(&opts, None, &mut record).expect("plan");
+    let sel = plan
+        .recipe
+        .as_ref()
+        .expect("auto discovery selected a script");
+    assert!(sel.from_search);
+    assert_eq!(sel.installer.slug, "test-game-gog");
+    macapp::execute(&plan, CodesignPolicy::Skip, &mut record).expect("execute");
+    drop(record);
+    assert!(
+        tags.contains(&"RecipeResolved"),
+        "plan-time resolution: {tags:?}"
+    );
+    assert!(
+        miss_keys
+            .iter()
+            .any(|k| k.contains("999") && k.contains("1")),
+        "gogid mismatch must downgrade: {miss_keys:?}"
+    );
+    // Recipe-less continuation: the default entry point, not the recipe's exe.
+    let conf = std::fs::read_to_string(
+        tmp.path()
+            .join("Test Game.app/Contents/Resources/launch.conf"),
+    )
+    .unwrap();
+    assert!(conf.contains("game.exe"), "{conf}");
+    assert!(!conf.contains("other.exe"), "{conf}");
+    drop(guard);
 }

@@ -390,9 +390,10 @@ mod bundle_tests {
     use crate::macapp::runtime::RuntimeMode;
 
     fn runtime_stub(mode: RuntimeMode) -> Runtime {
+        let kind = mode.as_str();
         Runtime {
             mode,
-            kind: mode.as_str(),
+            kind,
             root: PathBuf::from("/tmp/rt"),
             wine: PathBuf::from("/tmp/rt/bin/wine"),
             version: "wine-9.0".into(),

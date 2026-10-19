@@ -163,6 +163,79 @@ pub fn find(id: &str) -> Option<&'static CatalogEntry> {
     ENTRIES.iter().find(|e| e.id == id)
 }
 
+/// A recipe-driven runtime recommendation (design 12 §7).
+#[derive(Debug, Clone, PartialEq)]
+pub struct WineRecommendation {
+    pub id: &'static str,
+    /// Advisory only (D6): rendered as a warning event, never a blocker.
+    pub notice: Option<&'static str>,
+}
+
+/// The §7 table as data: recipe `wine.version` prefixes → macOS action.
+/// Order matters; the first matching prefix wins.
+const WINE_PREFIX_MAP: &[(&[&str], &str, Option<&str>)] = &[
+    // Linux runner builds — everything Lutris pins on Linux falls here.
+    (
+        &["lutris-", "ge-proton", "ge-"],
+        "wine-staging",
+        Some("recipe targets a Linux wine build; using the closest macOS equivalent"),
+    ),
+    // Crossover line: upstream is gone (docs/15 §1 tombstone).
+    (
+        &["wine-crossover", "cx"],
+        "wine-staging",
+        Some(
+            "recipe targets wine-crossover, which is gone upstream since 2026-10-19 \
+             (docs/15 §1); using wine-staging",
+        ),
+    ),
+];
+
+/// Map a recipe's `wine.version` pin to a catalog id (design 12 §7, D6).
+/// Absent / `system` → staging, no notice; exact mac-servable ids → that id;
+/// Linux runner and crossover pins → staging + notice; anything else →
+/// staging + notice. `gptk` is deliberately excluded: consent downloads are
+/// opt-in (D9), never a recipe side effect.
+pub fn recommend_for_wine(v: Option<&str>) -> WineRecommendation {
+    let linux_fallback = WineRecommendation {
+        id: "wine-staging",
+        notice: Some(
+            "recipe targets a Linux runner; using wine-staging (closest macOS equivalent)",
+        ),
+    };
+    let Some(v) = v.map(str::trim).filter(|v| !v.is_empty()) else {
+        return WineRecommendation {
+            id: "wine-staging",
+            notice: None,
+        };
+    };
+    if v.eq_ignore_ascii_case("system") {
+        return WineRecommendation {
+            id: "wine-staging",
+            notice: None,
+        };
+    }
+    // Exact catalog id — only freely-downloadable wine entries.
+    if let Some(e) = entries().iter().find(|e| {
+        e.id == v && matches!(e.kind, Kind::Wine) && matches!(e.status, Status::Available)
+    }) {
+        return WineRecommendation {
+            id: e.id,
+            notice: None,
+        };
+    }
+    let lower = v.to_ascii_lowercase();
+    for (prefixes, id, notice) in WINE_PREFIX_MAP {
+        if prefixes.iter().any(|p| lower.starts_with(p)) {
+            return WineRecommendation {
+                id,
+                notice: *notice,
+            };
+        }
+    }
+    linux_fallback
+}
+
 /// A probed, downloadable release artifact.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RemoteRelease {
@@ -595,5 +668,45 @@ mod catalog_tests {
         ));
         assert!(!find("gptk").unwrap().redistributable);
         assert!(find("wine-staging").unwrap().redistributable);
+    }
+
+    #[test]
+    fn wine_recommendation_table() {
+        // Design 12 §7 — every row of the mapping, as data.
+        let staging_plain = WineRecommendation {
+            id: "wine-staging",
+            notice: None,
+        };
+        assert_eq!(recommend_for_wine(None), staging_plain);
+        assert_eq!(recommend_for_wine(Some("")), staging_plain);
+        assert_eq!(recommend_for_wine(Some("  ")), staging_plain);
+        assert_eq!(recommend_for_wine(Some("system")), staging_plain);
+        // Exact mac-servable ids pass through untouched.
+        assert_eq!(recommend_for_wine(Some("wine-staging")), staging_plain);
+        assert_eq!(
+            recommend_for_wine(Some("wine-stable")),
+            WineRecommendation {
+                id: "wine-stable",
+                notice: None
+            }
+        );
+        // Linux runner pins → staging + notice.
+        for v in ["lutris-7.2-2", "GE-Proton9-20", "ge-8-26"] {
+            let r = recommend_for_wine(Some(v));
+            assert_eq!(r.id, "wine-staging", "{v}");
+            assert!(r.notice.is_some(), "{v}");
+        }
+        // Crossover pins → staging + tombstone notice.
+        let r = recommend_for_wine(Some("wine-crossover-22.1.1"));
+        assert_eq!(r.id, "wine-staging");
+        assert!(r.notice.is_some_and(|n| n.contains("gone upstream")));
+        // gptk is never a recipe side effect (D9 consent lane).
+        let r = recommend_for_wine(Some("gptk"));
+        assert_eq!(r.id, "wine-staging");
+        assert!(r.notice.is_some());
+        // Unknown ids → the Linux fallback (staging + notice).
+        let r = recommend_for_wine(Some("some-future-runner-1.0"));
+        assert_eq!(r.id, "wine-staging");
+        assert!(r.notice.is_some());
     }
 }

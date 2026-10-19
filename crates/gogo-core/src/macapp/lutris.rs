@@ -299,6 +299,32 @@ pub fn match_gog_game<'a>(games: &'a [LutrisGame], gog_ids: &[String]) -> Option
         .find(|g| g.gog_ids.iter().any(|id| gog_ids.contains(id)))
 }
 
+/// The recipe's `wine.version` pin, if any (design 11 §2 `wine:` block) —
+/// advisory on macOS (design 12 D6).
+pub fn wine_version(script: &Value) -> Option<String> {
+    script
+        .get("wine")?
+        .get("version")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Best game for a pre-install search (design 12 §6 step 2): exact
+/// case-insensitive name, then slug equality, then the first hit. The
+/// authoritative gogid cross-check runs post-install and downgrades a wrong
+/// pick to `RecipeMiss`, so a best-effort choice here is safe.
+pub fn pick_game<'a>(games: &'a [LutrisGame], name: &str) -> Option<&'a LutrisGame> {
+    let lower = name.to_lowercase();
+    games
+        .iter()
+        .find(|g| g.name.to_lowercase() == lower)
+        .or_else(|| {
+            let slug = lower.replace([' ', '_'], "-");
+            games.iter().find(|g| g.slug == slug)
+        })
+        .or_else(|| games.first())
+}
+
 /// Extract installer slugs from a game page: `Download script` anchors of the
 /// form `/api/installers/<slug>?format=json`. Deliberately narrow — anything
 /// else on the page is prose.
@@ -417,5 +443,34 @@ mod tests {
         let client = LutrisClient::new(&server.uri()).unwrap();
         let err = client.search("x").await.unwrap_err();
         assert!(err.to_string().contains("lutris unreachable"), "{err}");
+    }
+
+    #[test]
+    fn wine_version_extraction() {
+        let script = serde_json::json!({"wine": {"version": "lutris-7.2-2", "esync": true}});
+        assert_eq!(wine_version(&script).as_deref(), Some("lutris-7.2-2"));
+        assert_eq!(wine_version(&serde_json::json!({})), None);
+        assert_eq!(
+            wine_version(&serde_json::json!({"wine": {"esync": true}})),
+            None
+        );
+    }
+
+    #[test]
+    fn pick_game_prefers_exact_name_then_slug_then_first() {
+        let mk = |slug: &str, name: &str| LutrisGame {
+            gog_ids: vec![],
+            lutris_id: 0,
+            slug: slug.into(),
+            name: name.into(),
+        };
+        let games = vec![mk("other", "Unrelated"), mk("test-game", "Test Game")];
+        assert_eq!(pick_game(&games, "Test Game").unwrap().slug, "test-game");
+        assert_eq!(pick_game(&games, "test GAME").unwrap().slug, "test-game");
+        // No name hit: slug equality beats list order.
+        assert_eq!(pick_game(&games, "Test-Game").unwrap().slug, "test-game");
+        // Nothing matches: first result (post-install cross-check guards).
+        assert_eq!(pick_game(&games, "zzz").unwrap().slug, "other");
+        assert!(pick_game(&[], "anything").is_none());
     }
 }

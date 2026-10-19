@@ -42,7 +42,13 @@ pub struct MacAppPlan {
     /// Estimated final size: runtime tree + installer + `.bin` parts.
     pub estimated_bytes: u64,
     /// The recipe choice carried to `execute` (resolved post-install).
-    pub recipe: RecipeChoice,
+    /// The recipe selected at plan time (§6 step 2); applied post-install.
+    pub recipe: Option<SelectedRecipe>,
+    /// `(id, version)` when `plan` downloaded a catalog runtime into the
+    /// store (§6 step 3) — shown on the confirmation screen.
+    pub runtime_downloaded: Option<(String, String)>,
+    /// Lutris API base override (tests; see `MacAppOptions::lutris_base`).
+    pub lutris_base: Option<String>,
 }
 
 /// Conversion inputs (CLI flags, design 10 §1).
@@ -52,11 +58,16 @@ pub struct MacAppOptions {
     pub name: Option<String>,
     pub mode: RuntimeMode,
     pub runtime_path: Option<PathBuf>,
+    /// `--runtime-version`: pin a catalog release tag (catalog mode only).
+    pub runtime_version: Option<String>,
     pub out_dir: PathBuf,
     /// Overwrite an existing bundle (CLI `--yes`).
     pub overwrite: bool,
     /// Lutris recipe selection (design 11).
     pub recipe: RecipeChoice,
+    /// Lutris API base override (tests pin a wiremock server; the CLI never
+    /// sets it).
+    pub lutris_base: Option<String>,
 }
 
 /// Interactive selection callback: one rendered line per candidate, returns
@@ -131,19 +142,223 @@ pub fn slugify(display: &str) -> String {
     slug.trim_matches('-').to_string()
 }
 
+/// A recipe selected during planning (design 12 §6 step 2): the fetched
+/// installer script plus the context needed to apply it post-install.
+#[derive(Debug, Clone)]
+pub struct SelectedRecipe {
+    pub installer: lutris::LutrisInstaller,
+    /// `wine.version` pin (advisory, D6) — feeds the runtime recommendation.
+    pub wine_version: Option<String>,
+    /// Discovered via live search: the post-install gogid cross-check applies
+    /// (design 11 §2). Explicit slugs/files are trusted as pinned.
+    pub from_search: bool,
+}
+
+/// §6 step 2: resolve the recipe choice to a script, or `None`. Auto-mode
+/// trouble is never fatal: `RecipeMiss` + recipe-less continuation. Slug/file
+/// errors stay fatal — the user pinned them explicitly.
+fn select_recipe(
+    opts: &MacAppOptions,
+    display: &str,
+    on_select: Option<&SelectFn>,
+    emit: &mut dyn FnMut(&ProgressEvent),
+) -> Result<Option<SelectedRecipe>, MacAppError> {
+    let client =
+        lutris::LutrisClient::new(opts.lutris_base.as_deref().unwrap_or(lutris::DEFAULT_BASE))?;
+    let (inst, from_search) = match &opts.recipe {
+        RecipeChoice::None => return Ok(None),
+        RecipeChoice::Slug(slug) => (lutris::block_on_detached(client.installer(slug))?, false),
+        RecipeChoice::File(path) => {
+            let v: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(path)
+                    .map_err(|e| MacAppError::Recipe(format!("script {}: {e}", path.display())))?,
+            )
+            .map_err(|e| MacAppError::Recipe(format!("script parse: {e}")))?;
+            (
+                lutris::LutrisInstaller {
+                    slug: path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    game_slug: String::new(),
+                    name: String::new(),
+                    version: "local file".into(),
+                    runner: "wine".into(),
+                    author: "local file".into(),
+                    updated_at: String::new(),
+                    gogid: None,
+                    script: v,
+                },
+                false,
+            )
+        }
+        RecipeChoice::Auto => {
+            // Pre-install search by display name (§6): pick the best game,
+            // list its installers, rank, select. The authoritative gogid
+            // cross-check runs post-install and downgrades wrong picks.
+            let discovery = {
+                let client = &client;
+                async move {
+                    let games: Vec<lutris::LutrisGame> =
+                        client.search(display).await.unwrap_or_default();
+                    let Some(game) = lutris::pick_game(&games, display) else {
+                        return Ok::<Vec<lutris::LutrisInstaller>, MacAppError>(Vec::new());
+                    };
+                    let mut candidates = client.installers_for(&game.slug).await?;
+                    candidates.retain(|i| i.runner == "wine");
+                    lutris::rank(&mut candidates);
+                    Ok(candidates)
+                }
+            };
+            match lutris::block_on_detached(discovery) {
+                Ok(candidates) if candidates.is_empty() => {
+                    emit(&ProgressEvent::RecipeMiss {
+                        key: display.to_string(),
+                    });
+                    return Ok(None);
+                }
+                Ok(candidates) => {
+                    let picked = match (candidates.len(), on_select) {
+                        (1, _) => 0,
+                        (_, Some(select)) => {
+                            let lines: Vec<String> = candidates
+                                .iter()
+                                .map(|c| format!("{} — {} ({})", c.slug, c.version, c.author))
+                                .collect();
+                            select(&lines).unwrap_or(0)
+                        }
+                        _ => 0,
+                    };
+                    (
+                        candidates
+                            .into_iter()
+                            .nth(picked)
+                            .ok_or_else(|| MacAppError::Recipe("selection out of range".into()))?,
+                        true,
+                    )
+                }
+                Err(e) => {
+                    emit(&ProgressEvent::RecipeMiss { key: e.to_string() });
+                    return Ok(None);
+                }
+            }
+        }
+    };
+
+    let wine_version = lutris::wine_version(&inst.script);
+    emit(&ProgressEvent::RecipeResolved {
+        installer_slug: inst.slug.clone(),
+        version: inst.version.clone(),
+        author: inst.author.clone(),
+    });
+    Ok(Some(SelectedRecipe {
+        installer: inst,
+        wine_version,
+        from_search,
+    }))
+}
+
+/// A catalog lane hit: the manifest entry plus whether it was downloaded
+/// just now (false = satisfied from the store cache).
+fn catalog_lane(
+    id: &str,
+    version: Option<&str>,
+    emit: &mut dyn FnMut(&ProgressEvent),
+) -> Result<(store::ManifestEntry, bool), MacAppError> {
+    if let Some((m, _)) = store::installed(id, version) {
+        return Ok((m, false));
+    }
+    let entry = catalog::find(id).ok_or_else(|| MacAppError::RuntimeNotFound {
+        tried: format!("unknown catalog id '{id}' (see `gogo runtimes list`)"),
+    })?;
+    let http = catalog::http_client()?;
+    let m = lutris::block_on_detached(store::install(
+        entry,
+        version,
+        &http,
+        catalog::GITHUB_API,
+        emit,
+    ))?;
+    Ok((m, true))
+}
+
+/// §6 step 3 + §5: runtime resolution. Explicit flags win (D2 precedence);
+/// `auto` prefers cached runtimes (the recipe recommendation first, then the
+/// staging default), then brew, then downloads the recommendation into the
+/// store (network exception D8). Not in runtime.rs: this needs the catalog +
+/// store (network), and runtime.rs stays pure fs/exec.
+fn resolve_runtime(
+    opts: &MacAppOptions,
+    recipe: Option<&SelectedRecipe>,
+    emit: &mut dyn FnMut(&ProgressEvent),
+) -> Result<(runtime::Runtime, Option<(String, String)>), MacAppError> {
+    if let RuntimeMode::Catalog(id) = &opts.mode {
+        let (m, downloaded) = catalog_lane(id, opts.runtime_version.as_deref(), emit)?;
+        let rt = runtime::from_store(&m)?;
+        return Ok((rt, downloaded.then(|| (m.id.clone(), m.version.clone()))));
+    }
+    if opts.mode != RuntimeMode::Auto || opts.runtime_path.is_some() {
+        // Flag precedence (D2): brew/gptk/path resolve exactly as before.
+        let rt = runtime::resolve(&runtime::RuntimeOptions {
+            mode: opts.mode.clone(),
+            runtime_path: opts.runtime_path.clone(),
+            version: opts.runtime_version.clone(),
+        })?;
+        return Ok((rt, None));
+    }
+
+    // `auto` (§5 ladder): cached(recipe-recommended) → cached(staging) →
+    // brew → download the recommendation.
+    let rec = recipe
+        .and_then(|r| r.wine_version.as_deref())
+        .map(|v| catalog::recommend_for_wine(Some(v)));
+    if let Some(notice) = rec.as_ref().and_then(|r| r.notice) {
+        emit(&ProgressEvent::Warn {
+            message: format!("recipe wine pin: {notice}"),
+        });
+    }
+    let mut lanes: Vec<&str> = rec.as_ref().map(|r| r.id).into_iter().collect();
+    if !lanes.contains(&"wine-staging") {
+        lanes.push("wine-staging");
+    }
+    for id in lanes {
+        if let Some((m, _)) = store::installed(id, None) {
+            match runtime::from_store(&m) {
+                Ok(rt) => return Ok((rt, None)),
+                Err(e) => emit(&ProgressEvent::Warn {
+                    message: format!("cached {id} unusable: {e} — trying next source"),
+                }),
+            }
+        }
+    }
+    if let Ok(rt) = runtime::resolve(&runtime::RuntimeOptions {
+        mode: RuntimeMode::Brew,
+        ..Default::default()
+    }) {
+        return Ok((rt, None));
+    }
+    let id = rec.as_ref().map(|r| r.id).unwrap_or("wine-staging");
+    let (m, downloaded) = catalog_lane(id, None, emit)?;
+    let rt = runtime::from_store(&m)?;
+    Ok((rt, downloaded.then(|| (m.id.clone(), m.version.clone()))))
+}
+
 /// Resolve everything up-front: names, runtime (probed), installer (validated),
 /// sizes. Emits `RuntimeResolved`. No bundle dirs are created yet.
 pub fn plan(
     opts: &MacAppOptions,
+    on_select: Option<&SelectFn>,
     emit: &mut dyn FnMut(&ProgressEvent),
 ) -> Result<MacAppPlan, MacAppError> {
     let display = display_name(&opts.installer, opts.name.as_deref());
     let slug = slugify(&display);
 
-    let runtime = runtime::resolve(&RuntimeOptions {
-        mode: opts.mode,
-        runtime_path: opts.runtime_path.clone(),
-    })?;
+    // §6 step 2: recipe discovery + selection precede the runtime — a wine
+    // pin feeds the recommendation (D2: flag > recipe > default).
+    let recipe = select_recipe(opts, &display, on_select, emit)?;
+
+    // §6 step 3: runtime resolution — may download into the store (events).
+    let (runtime, runtime_downloaded) = resolve_runtime(opts, recipe.as_ref(), emit)?;
     let kind = runtime.mode.as_str().to_string();
     let wine = runtime.wine.display().to_string();
     emit(&ProgressEvent::RuntimeResolved { kind, path: wine });
@@ -177,7 +392,9 @@ pub fn plan(
         runtime,
         installer: install,
         estimated_bytes,
-        recipe: opts.recipe.clone(),
+        recipe,
+        runtime_downloaded,
+        lutris_base: opts.lutris_base.clone(),
         bundle,
     })
 }
@@ -188,7 +405,6 @@ pub fn plan(
 pub fn execute(
     plan: &MacAppPlan,
     codesign: CodesignPolicy,
-    on_select: Option<&SelectFn>,
     emit: &mut dyn FnMut(&ProgressEvent),
 ) -> Result<u64, MacAppError> {
     // A concurrent conversion writing into the same bundle is a clobber race.
@@ -252,7 +468,7 @@ pub fn execute(
     let install_dir = plan.bundle.prefix.join("drive_c/GOG").join(&plan.slug);
 
     // Recipe phase (design 11 §5): live search + selection + steps.
-    let recipe = run_recipe_phase(plan, &bundled_wine, &install_dir, on_select, emit)?;
+    let recipe = run_recipe_phase(plan, &bundled_wine, &install_dir, emit)?;
     let entry = match &recipe {
         Some(outcome) if outcome.exe.is_some() => outcome.exe.clone().unwrap(),
         _ => info::find_entry_point(&install_dir)?,
@@ -327,100 +543,43 @@ pub struct RecipeOutcome {
     pub winetricks_used: bool,
 }
 
-/// The recipe phase (design 11 §5): discover + select the script, download
-/// its `files:` into a per-run temp working set, plan, and execute the steps.
-/// Auto-mode trouble is never fatal: `RecipeMiss` + recipe-less continuation.
+/// The recipe phase (design 11 §5, restructured by design 12 §6): the script
+/// was selected at plan time; this applies it post-install — `files:` into a
+/// per-run temp working set, then the planned steps. The authoritative gogid
+/// cross-check runs here, against the pre-selected script.
 fn run_recipe_phase(
     plan: &MacAppPlan,
     bundled_wine: &Path,
     install_dir: &Path,
-    on_select: Option<&SelectFn>,
     emit: &mut dyn FnMut(&ProgressEvent),
 ) -> Result<Option<RecipeOutcome>, MacAppError> {
     use std::time::Duration;
 
-    if matches!(plan.recipe, RecipeChoice::None) {
+    let Some(sel) = &plan.recipe else {
         return Ok(None);
-    }
-    let client = lutris::LutrisClient::new(lutris::DEFAULT_BASE)?;
-
-    let inst: lutris::LutrisInstaller = match &plan.recipe {
-        RecipeChoice::None => return Ok(None),
-        RecipeChoice::Slug(slug) => lutris::block_on_detached(client.installer(slug))?,
-        RecipeChoice::File(path) => {
-            let v: serde_json::Value = serde_json::from_str(
-                &std::fs::read_to_string(path)
-                    .map_err(|e| MacAppError::Recipe(format!("script {}: {e}", path.display())))?,
-            )
-            .map_err(|e| MacAppError::Recipe(format!("script parse: {e}")))?;
-            lutris::LutrisInstaller {
-                slug: path
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-                game_slug: String::new(),
-                name: String::new(),
-                version: "local file".into(),
-                runner: "wine".into(),
-                author: "local file".into(),
-                updated_at: String::new(),
-                gogid: None,
-                script: v,
-            }
-        }
-        RecipeChoice::Auto => {
-            let ids = info::gog_game_ids(install_dir);
-            let name = info::game_name(install_dir);
-            let discovery = {
-                let client = &client;
-                let ids = ids.clone();
-                async move {
-                    let games: Vec<lutris::LutrisGame> = match &name {
-                        Some(n) => client.search(n).await.unwrap_or_default(),
-                        None => vec![],
-                    };
-                    let Some(game) = lutris::match_gog_game(&games, &ids).cloned() else {
-                        return Ok::<Vec<lutris::LutrisInstaller>, MacAppError>(Vec::new());
-                    };
-                    let mut candidates = client.installers_for(&game.slug).await?;
-                    candidates.retain(|i| i.runner == "wine");
-                    lutris::rank(&mut candidates);
-                    Ok(candidates)
-                }
-            };
-            match lutris::block_on_detached(discovery) {
-                Ok(candidates) if candidates.is_empty() => {
-                    emit(&ProgressEvent::RecipeMiss { key: ids.join(",") });
-                    return Ok(None);
-                }
-                Ok(candidates) => {
-                    let picked = match (candidates.len(), on_select) {
-                        (1, _) => 0,
-                        (_, Some(select)) => {
-                            let lines: Vec<String> = candidates
-                                .iter()
-                                .map(|c| format!("{} — {} ({})", c.slug, c.version, c.author))
-                                .collect();
-                            select(&lines).unwrap_or(0)
-                        }
-                        _ => 0,
-                    };
-                    candidates.into_iter().nth(picked)
-                }
-                Err(e) => {
-                    emit(&ProgressEvent::RecipeMiss { key: e.to_string() });
-                    return Ok(None);
-                }
-            }
-            .ok_or_else(|| MacAppError::Recipe("selection out of range".into()))?
-        }
     };
+    let inst = &sel.installer;
 
-    emit(&ProgressEvent::RecipeResolved {
-        installer_slug: inst.slug.clone(),
-        version: inst.version.clone(),
-        author: inst.author.clone(),
-    });
+    // Cross-check (design 11 §2, moved post-install by design 12 §6): the
+    // pre-selected script's gogid must agree with the installed game's ids.
+    // Search-discovered scripts only — explicit slugs/files are trusted as
+    // pinned. Mismatch → RecipeMiss warn + recipe-less continuation.
+    if sel.from_search {
+        let ids = info::gog_game_ids(install_dir);
+        if let Some(gogid) = inst
+            .gogid
+            .as_deref()
+            .filter(|g| !ids.is_empty() && !ids.iter().any(|i| i == g))
+        {
+            emit(&ProgressEvent::RecipeMiss {
+                key: format!("gogid {gogid} ≠ installed {}", ids.join(",")),
+            });
+            return Ok(None);
+        }
+    }
+
+    let client =
+        lutris::LutrisClient::new(plan.lutris_base.as_deref().unwrap_or(lutris::DEFAULT_BASE))?;
 
     // Per-run temp working set (design 11 §4): removed at the end, whatever
     // the outcome.

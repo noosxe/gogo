@@ -13,7 +13,7 @@ use serde::Deserialize;
 use super::error::MacAppError;
 
 /// Where the Wine runtime comes from (`--runtime`, config `mac_app.runtime`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RuntimeMode {
     #[default]
@@ -21,15 +21,19 @@ pub enum RuntimeMode {
     Brew,
     Gptk,
     Path,
+    /// A catalog id (`wine-staging`/`wine-devel`/`wine-stable`) resolved from
+    /// the store, or downloaded into it (design 12 §5).
+    Catalog(String),
 }
 
 impl RuntimeMode {
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             RuntimeMode::Auto => "auto",
             RuntimeMode::Brew => "brew",
             RuntimeMode::Gptk => "gptk",
             RuntimeMode::Path => "path",
+            RuntimeMode::Catalog(_) => "catalog",
         }
     }
 }
@@ -56,6 +60,8 @@ pub struct Runtime {
 pub struct RuntimeOptions {
     pub mode: RuntimeMode,
     pub runtime_path: Option<PathBuf>,
+    /// `--runtime-version`: pin a catalog release tag (catalog mode only).
+    pub version: Option<String>,
 }
 
 /// Resolve + probe a runtime. Pure fs/exec — no network, no config access.
@@ -66,6 +72,7 @@ pub fn resolve(opts: &RuntimeOptions) -> Result<Runtime, MacAppError> {
         RuntimeOptions {
             mode: RuntimeMode::Path,
             runtime_path: opts.runtime_path.clone(),
+            version: opts.version.clone(),
         }
     } else {
         opts.clone()
@@ -79,6 +86,15 @@ pub fn resolve(opts: &RuntimeOptions) -> Result<Runtime, MacAppError> {
         RuntimeMode::Path => {
             resolve_explicit(opts.runtime_path.as_deref(), "path", RuntimeMode::Path)
         }
+        // Catalog resolution needs the store + network: it lives in
+        // `macapp::resolve_runtime`, not this pure fs/exec module. Reaching
+        // this arm means a direct `resolve` caller passed a catalog mode.
+        RuntimeMode::Catalog(id) => Err(MacAppError::RuntimeNotFound {
+            tried: format!(
+                "catalog '{id}' runtimes resolve through the pipeline (`gogo mac-app`), \
+                 not a direct path probe"
+            ),
+        }),
         RuntimeMode::Auto => {
             match resolve_brew() {
                 Ok(rt) => return Ok(rt),
@@ -173,6 +189,29 @@ fn find_wine_in(root: &Path, mode: RuntimeMode, kind: &'static str) -> Result<Ru
 /// Probe by executing `wine --version` — a runtime we cannot run is a
 /// `RuntimeInvalid`, never a silent assumption (design 10 §2.1).
 /// Probe an extracted wine tree by executing `<wine> --version` — used by the
+/// Build a `Runtime` from a cached store entry (design 12 §4): the manifest's
+/// `entry_rel` is the probed wine binary. Catalog metadata supplies
+/// `min_macos`. Pure fs/exec like the rest of this module.
+pub fn from_store(m: &super::store::ManifestEntry) -> Result<Runtime, MacAppError> {
+    let root = super::store::tree_root(m);
+    let wine = root.join(&m.entry_rel);
+    if !wine.is_file() {
+        return Err(MacAppError::RuntimeInvalid {
+            path: wine,
+            reason: "cached runtime missing its wine binary — prune and reinstall".into(),
+        });
+    }
+    let version = probe_tree(&wine)?;
+    Ok(Runtime {
+        mode: RuntimeMode::Catalog(m.id.clone()),
+        kind: "catalog",
+        root,
+        wine,
+        version,
+        min_macos: super::catalog::find(&m.id).and_then(|e| e.min_macos),
+    })
+}
+
 /// runtime store after extraction (design 12 §4): a tree we cannot run is a
 /// `RuntimeInvalid`, never a silent assumption. No `RuntimeMode`: store trees
 /// are not one of the resolution lanes (Phase 3 wires them in).
@@ -309,6 +348,7 @@ mod runtime_tests {
         let rt = resolve(&RuntimeOptions {
             mode: RuntimeMode::Auto,
             runtime_path: Some(tmp.path().to_path_buf()),
+            version: None,
         })
         .unwrap();
         assert_eq!(rt.kind, "path");
@@ -346,6 +386,7 @@ mod runtime_tests {
         let err = resolve(&RuntimeOptions {
             mode: RuntimeMode::Gptk,
             runtime_path: None,
+            version: None,
         })
         .unwrap_err();
         match err {

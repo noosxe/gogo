@@ -144,6 +144,9 @@ pub enum Command {
         /// Runtime directory for --runtime gptk|path.
         #[arg(long, value_name = "DIR")]
         runtime_path: Option<std::path::PathBuf>,
+        /// Pin a catalog release tag (`--runtime staging|devel|stable`).
+        #[arg(long, value_name = "TAG", requires = "runtime")]
+        runtime_version: Option<String>,
         /// Output directory for <name>.app (default: current directory).
         #[arg(long, value_name = "DIR")]
         out: Option<std::path::PathBuf>,
@@ -206,10 +209,17 @@ pub enum OsFilter {
 /// `ValueEnum` can't be implemented on it here).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum RuntimeSource {
-    /// brew wine if installed, else a mounted GPTK volume.
+    /// Recipe-recommended or cached runtime, else brew, else download
+    /// (design 12 §5).
     Auto,
     /// Homebrew wine-crossover.
     Brew,
+    /// Cached/downloaded wine-staging (design 12 catalog).
+    Staging,
+    /// Cached/downloaded wine-devel.
+    Devel,
+    /// Cached/downloaded wine-stable.
+    Stable,
     /// User-supplied GPTK mount (user accepted Apple's terms).
     Gptk,
     /// Explicit directory containing bin/wine.
@@ -221,6 +231,9 @@ impl From<RuntimeSource> for gogo::macapp::RuntimeMode {
         match s {
             RuntimeSource::Auto => gogo::macapp::RuntimeMode::Auto,
             RuntimeSource::Brew => gogo::macapp::RuntimeMode::Brew,
+            RuntimeSource::Staging => gogo::macapp::RuntimeMode::Catalog("wine-staging".into()),
+            RuntimeSource::Devel => gogo::macapp::RuntimeMode::Catalog("wine-devel".into()),
+            RuntimeSource::Stable => gogo::macapp::RuntimeMode::Catalog("wine-stable".into()),
             RuntimeSource::Gptk => gogo::macapp::RuntimeMode::Gptk,
             RuntimeSource::Path => gogo::macapp::RuntimeMode::Path,
         }
