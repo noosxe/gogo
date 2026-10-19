@@ -55,6 +55,7 @@ Community-contributed YAML scripts (`docs/installers.rst` in the Lutris repo):
 | Game page `lutris.net/games/<slug>` | Lists community installers with **`Download script: /api/installers/<installer-slug>?format=json`** links; Pharaoh has exactly one: `pharaoh-cd-cnc-ddraw` (Wine + cnc-ddraw — the ddraw-override failure class of §1). Also a `lutris:gog:<gogid>` auto-GOG entry, which is Lutris' own gogdl flow — gogo already does that natively |
 | `GET /api/installers?game=…` / `?game_slug=…` / `?gogid=…` | **Filters ignored** — returns the whole corpus (15592 records). No server-side game→installers filter exists |
 | `GET /api/installers/game/<slug>` (client `INSTALLER_URL % game_slug`) | HTTP 200 with `count: 0` for game slugs (`quake`, `pharaoh`) — resolves installer slugs only (`quake-darkplaces` → 1) |
+| `GET /api/installers/cuphead-gog` | The corpus encodes exactly the per-game knowledge gogo needs: a `task: wineexec` step carrying the GOG installer flags (`/SP- /NOCANCEL /SUPPRESSMSGBOXES /NOGUI`) **and** a `task: winetricks` step with `app: corefonts` — winetricks requirements are first-class script steps, GOG-id-keyed (`gogid: 1963513391`) |
 
 **Consequence for gogo:** discovery = name search + `provider_games` GOG-id
 match; enumeration = the game page's `Download script` links (stable,
@@ -63,22 +64,40 @@ machine-parseable hrefs); fetch = `GET /api/installers/<installer-slug>`.
 ### 2.2 Winetricks
 
 The canonical per-game fix database; each verb is a **shell function** —
-arbitrary code by construction. Do not adopt the format. Do steal the
-taxonomy (`dlls`, `fonts`, `runtimes`, `settings`): Lutris scripts call
-winetricks by name, and a future gogo can bridge those verbs to a
-user-installed winetricks (opt-in; gogo never ships it — docs/13 §3).
+arbitrary code by construction. Do not adopt the format. Do adopt the
+bridge: Lutris scripts invoke winetricks per game (`task: winetricks` with
+verbs such as `corefonts` — live-verified on cuphead-gog), so gogo executes
+those verbs through a **user-installed** winetricks binary (brew install
+winetricks), one verb per call with the prefix staged. gogo never ships or
+downloads winetricks itself (docs/13 §3); when the binary is absent the
+step is skipped with a loud, named requirement.
 
-### 2.3 Bottles dependency manifests
+### 2.3 PCGamingWiki (demoted: not machine-readable)
+
+PCGamingWiki documents per-game fixes richly, but its API rejects arbitrary
+Cargo queries (`permissiondenied`, live-verified 2026-10-19) — fixes live in
+prose. Supplementary human reference, not a gogo source.
+
+### 2.4 Porting Kit (demoted: no public API)
+
+PK's useful per-game knowledge (winetricks list, Windows-version override,
+engine choice) is locked inside downloaded wrappers on the user's disk
+(`winetricks.log`, `Info.plist`) — readable only by cracking one open; there
+is no API. PK validated that **runtime compatibility is recipe data**
+(Pharaoh: Wine-CX works, GPTK 1.1 crashes the game) but the knowledge source
+of record stays Lutris.
+
+### 2.5 Bottles dependency manifests
 
 `bottlesdevs/dependencies`: per-component JSON manifests, pinned URL +
 checksum, interpreted client-side. **Relevant later**: when gogo grows
 redistributable steps (`vcrun2019` etc.), this is the pattern to copy.
 
-### 2.4 PlayOnLinux / Phoenicis, Porting Kit, CrossOver
+### 2.6 PlayOnLinux / Phoenicis, CrossOver
 
 Repo-of-per-app-files shape with an arbitrary-code script engine (POL/Phoenicis),
-opaque GUI wrappers (Porting Kit), proprietary XML recipes (CrossOver
-CrossTies). Nothing to adopt; they validate the per-game-recipe premise.
+proprietary XML recipes (CrossOver CrossTies). Nothing to adopt; they validate
+the per-game-recipe premise.
 
 ## 3. Decision: consume Lutris, interpret a declarative subset
 
