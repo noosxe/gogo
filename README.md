@@ -6,10 +6,10 @@ convert a downloaded Windows installer into a self-contained `.app`, applying
 community fixes (Lutris recipes) along the way.
 
 - **Platforms:** Linux and macOS. `mac-app` is macOS-only.
-- **Wine runtimes:** `mac-app` resolves a runtime you already have (Homebrew cask
-  or Apple's Game Porting Toolkit) today; downloading + caching official WineHQ mac
-  builds (and auto-provisioned `winetricks`) is landing next — see
-  [`docs/design/12`](docs/design/12-runtime-catalog-and-interactive-flow.md).
+- **Wine runtimes:** `gogo runtimes` downloads, verifies, and caches official
+  macOS Wine builds (staging/devel/stable) plus a pinned `winetricks` —
+  `mac-app` picks one interactively or via `--runtime`, no Homebrew required —
+  see [`docs/design/12`](docs/design/12-runtime-catalog-and-interactive-flow.md).
 - **Unofficial APIs:** gogo uses the same undocumented web/Galaxy APIs as every
   third-party GOG client. See [`docs/01`](docs/01-gog-platform-and-apis.md).
 - **License:** MIT OR Apache-2.0.
@@ -31,6 +31,8 @@ gogo login            # sign in: browser + paste-code, tokens in the OS keychain
 gogo list             # your library (id, title, platforms)
 gogo download <GAME>  # offline installers, chunk-verified and resumable
 gogo mac-app <EXE>    # macOS: installer -> .app (with a Lutris recipe)
+gogo runtimes list    # macOS: Wine catalog + what's cached locally
+gogo recipes show <slug>  # what a Lutris recipe would do, step by step
 ```
 
 `<GAME>` takes a numeric id, a slug, or a fuzzy title; `gogo download --all` grabs
@@ -63,38 +65,51 @@ Wine runtime inside, and ad-hoc codesigns the bundle. The result needs nothing
 else installed.
 
 ```sh
-brew install --cask wine-stable              # or: --cask game-porting-toolkit (GPTK)
-gogo mac-app ~/Downloads/setup_pharaoh_gold_2.1.0.15.exe \
-  --runtime path --runtime-path "/Applications/Wine Stable.app/Contents/Resources/wine"
+gogo mac-app ~/Downloads/setup_pharaoh_gold_2.1.0.15.exe   # interactive: recipe + runtime
 open Pharaoh.app
 ```
 
-`--runtime` picks the Wine source: `brew`, `gptk` (a mounted Game Porting Toolkit
-volume — implies you accept Apple's license), `path` with `--runtime-path <DIR>` (a
-dir with `bin/wine` inside), or `auto`. Catalog ids (`staging` / `devel` / `stable`)
-with download + cache land next (design 12). Pass `--out` for the output directory,
-`--name` to override the bundle title.
+On a terminal it asks interactively — which Lutris recipe to apply (if any), then
+which Wine runtime: cached ones first, then catalog downloads (recommended
+`wine-staging` first, sizes and arch shown), Homebrew, GPTK (Apple Silicon, after
+an EULA consent), or a custom path. Non-interactive use pins everything:
+`--recipe none|<slug>|<file>`, and `--runtime auto|brew|gptk|path|staging|devel|stable`
+(`--runtime staging` downloads + caches on first use; `--runtime path` needs
+`--runtime-path <DIR>` with `bin/wine` inside; `--runtime-version` pins a release
+tag). Pass `--out` for the output directory, `--name` to override the bundle title.
+
+Runtimes are managed explicitly too:
+
+```sh
+gogo runtimes list                  # catalog (live-probed) + cached versions
+gogo runtimes install wine-staging  # download → probe → cache, reused by every bundle
+gogo runtimes prune --all
+```
 
 ### Recipes
 
 GOG Windows titles are the community's Wine-testing corpus: most games already
 have a Lutris install script encoding the fixes (DLL overrides, winetricks
-verbs, patches, launch flags). At the end of a conversion, gogo live-searches
-[lutris.net](https://lutris.net) for the game and, when scripts exist, shows the
-ranked list and asks which to apply:
+verbs, patches, launch flags). During planning, gogo live-searches
+[lutris.net](https://lutris.net) for the game and, when several scripts exist,
+offers a fuzzy-searchable picker (version, author, updated shown); a script's
+`wine.version` pin maps to a runtime recommendation — advisory, never a blocker.
 
-```
-recipes available on lutris.net:
-  1. pharaoh-cd-cnc-ddraw — CD + cnc-ddraw (legluondunet)
-apply which? [1-2, none]: 1
+Inspect the corpus without converting anything:
+
+```sh
+gogo recipes list --name "warcraft-ii-battlenet-edition"   # ranked candidates
+gogo recipes show warcraft-ii-battlenet-edition-cd          # the plan, step by step
 ```
 
 Applied steps are reported; unsupported steps are skipped loudly, never
 silently. Nothing is stored — the next conversion searches again. For
 scripting: `--recipe none` to disable, `--recipe <slug>` to pick one, or
-`--recipe file.json` to apply a downloaded script verbatim. Host-shell steps in
-scripts are skipped by default; `winetricks` steps use your installed
-`winetricks` binary (skipped with a note if absent).
+`--recipe file.json` to apply a downloaded script verbatim. Host-shell steps
+in scripts are skipped by default; `winetricks` steps run a pinned,
+sha256-verified winetricks provisioned from the runtime store, with Rust-made
+`cabextract`/`7z` shims scoped to the invocation (a user-installed binary
+overrides; still nothing → skipped with a note).
 
 ### completions
 

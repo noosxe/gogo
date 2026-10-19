@@ -133,13 +133,16 @@ Manage the Wine runtime store (design 12 §4): `list` (cached + catalog, `--json
 Catalog entries are live-probed (docs/15); GPTK installs require explicit consent
 (Apple EULA, design 12 D9).
 
-### `gogo recipes show [<query>]`
-Print the recipe plan gogo would apply for a game: the Lutris installer
-selected for it, each mapped action, and each skipped script step with its
-reason. Accepts a game name/slug, a pinned Lutris installer slug, or a
-local script JSON path (the `/api/installers/<slug>?format=json` download).
-gogo consumes Lutris scripts — it hosts no recipes of its own.
-Full spec: **design 11**.
+### `gogo recipes <list|show>`
+Inspect the Lutris corpus without converting anything (design 11 §1).
+`list <installer-path>` (or `--name <game>`) searches lutris.net for the
+game and prints its ranked `runner: wine` installers (slug, version, author,
+updated, wine pin); `show <installer-slug>` live-fetches that script (or
+reads a local script JSON file) and prints the execution plan: applied steps
+vs skipped-with-reasons, harvested setup flags, the launch override, and the
+wine pin's runtime recommendation (design 12 §7). `--json` on both; a hidden
+`--lutris-base` exists for tests/mirrors. gogo consumes Lutris scripts — it
+hosts no recipes of its own. Full spec: **design 11**.
 
 
 ## 2. Global flags

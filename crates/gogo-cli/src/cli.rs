@@ -168,6 +168,9 @@ pub enum Command {
     /// Manage Wine runtimes: list the catalog + cache, install, prune
     /// (design 12 §10).
     Runtimes(RuntimesArgs),
+    /// Inspect Lutris community recipes for a game (design 11 §1): list the
+    /// ranked candidates, or show one recipe's execution plan.
+    Recipes(RecipesArgs),
     /// Internal: extractor shims materialized for winetricks (design 12 D5).
     /// Double-underscore name keeps it out of help and completion output.
     #[command(hide = true, name = "__shim")]
@@ -278,6 +281,47 @@ pub enum RuntimesCmd {
         /// Remove one catalog id.
         #[arg(value_name = "ID")]
         id: Option<String>,
+    },
+}
+
+/// Field bag for [`Command::Recipes`] (design 11 §1, carried debt resolved
+/// in design 12 §12 phase 5).
+#[derive(Debug, clap::Args)]
+pub struct RecipesArgs {
+    #[command(subcommand)]
+    pub cmd: RecipesCmd,
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub enum RecipesCmd {
+    /// List the ranked Lutris installers for a game (searched by installer
+    /// filename or --name).
+    List {
+        /// GOG offline installer path; its derived name seeds the search.
+        #[arg(value_name = "INSTALLER")]
+        installer: Option<String>,
+        /// Search by game name instead of the installer filename.
+        #[arg(long, conflicts_with = "installer")]
+        name: Option<String>,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+        /// Lutris API base override (tests, mirrors).
+        #[arg(long, hide = true)]
+        lutris_base: Option<String>,
+    },
+    /// Show a recipe's execution plan: applied steps vs skipped, with
+    /// reasons (design 11 §3). Nothing is executed.
+    Show {
+        /// Installer slug (live fetch) or a local script JSON file.
+        #[arg(value_name = "SLUG|FILE")]
+        recipe: String,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+        /// Lutris API base override (tests, mirrors).
+        #[arg(long, hide = true)]
+        lutris_base: Option<String>,
     },
 }
 

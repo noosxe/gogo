@@ -184,6 +184,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
             .await
         }
         Command::Runtimes(args) => runtimes_cmd(args).await,
+        Command::Recipes(args) => recipes_cmd(args),
         Command::Shim { tool, args } => Ok(gogo_shims::run_tool(&tool, &args)),
         Command::Completions { shell } => completions(shell),
     }
@@ -1846,6 +1847,259 @@ async fn runtimes_cmd(args: crate::cli::RuntimesArgs) -> Result<i32, AppError> {
             }
             Ok(cli::exit::OK)
         }
+    }
+}
+
+// — recipes (design 11 §1: corpus inspection, nothing applied or stored) —
+
+fn recipes_cmd(args: crate::cli::RecipesArgs) -> Result<i32, AppError> {
+    use gogo::macapp::{self, catalog, interpret, lutris};
+
+    match args.cmd {
+        crate::cli::RecipesCmd::List {
+            installer,
+            name,
+            json,
+            lutris_base,
+        } => {
+            let display = match (name, installer) {
+                (Some(n), _) => n,
+                (None, Some(p)) => macapp::display_name(std::path::Path::new(&p), None),
+                (None, None) => {
+                    eprintln!("error: recipes list needs <INSTALLER> or --name <game>");
+                    return Ok(cli::exit::USAGE);
+                }
+            };
+            let candidates = macapp::recipe_candidates(lutris_base.as_deref(), &display)?;
+            if json {
+                let rows: Vec<serde_json::Value> = candidates.iter().map(installer_json).collect();
+                println!("{}", serde_json::to_string(&rows).unwrap());
+                return Ok(cli::exit::OK);
+            }
+            if candidates.is_empty() {
+                eprintln!("no Lutris recipes found for {display:?}");
+                return Ok(cli::exit::OK);
+            }
+            println!("Lutris recipes for {display} (ranked):");
+            let mut table = comfy_table::Table::new();
+            table.set_header(vec![
+                "#", "SLUG", "VERSION", "AUTHOR", "UPDATED", "WINE PIN",
+            ]);
+            for (i, inst) in candidates.iter().enumerate() {
+                table.add_row(vec![
+                    (i + 1).to_string(),
+                    inst.slug.clone(),
+                    inst.version.clone(),
+                    inst.author.clone(),
+                    inst.updated_at.clone(),
+                    lutris::wine_version(&inst.script).unwrap_or_else(|| "-".into()),
+                ]);
+            }
+            println!("{table}");
+            println!("inspect one: gogo recipes show <slug>");
+            Ok(cli::exit::OK)
+        }
+        crate::cli::RecipesCmd::Show {
+            recipe,
+            json,
+            lutris_base,
+        } => {
+            let path = std::path::Path::new(&recipe);
+            let inst = if path.is_file() {
+                macapp::parse_script_file(path)?
+            } else {
+                macapp::recipe_by_slug(lutris_base.as_deref(), &recipe)?
+            };
+            let pin = lutris::wine_version(&inst.script);
+            let rec = catalog::recommend_for_wine(pin.as_deref());
+            let ctx = macapp::inspection_ctx(&inst.script);
+            let plan = interpret::plan(&inst.script, &ctx);
+
+            if json {
+                let steps: Vec<serde_json::Value> = plan
+                    .steps
+                    .iter()
+                    .map(|(i, s)| {
+                        serde_json::json!({
+                            "index": i,
+                            "auto": *i == usize::MAX,
+                            "applied": true,
+                            "verb": step_verb(s),
+                            "detail": step_detail(s),
+                        })
+                    })
+                    .collect();
+                let skipped: Vec<serde_json::Value> = plan
+                    .skipped
+                    .iter()
+                    .map(|s| {
+                        serde_json::json!({
+                            "index": s.index,
+                            "applied": false,
+                            "verb": s.verb,
+                            "reason": s.reason,
+                        })
+                    })
+                    .collect();
+                let out = serde_json::json!({
+                    "installer": installer_json(&inst),
+                    "wine_pin": pin,
+                    "runtime_recommendation": {
+                        "id": rec.id,
+                        "notice": rec.notice,
+                    },
+                    "installer_args": plan.installer_args,
+                    "steps": steps,
+                    "skipped": skipped,
+                    "launch_exe": plan.launch_exe,
+                    "launch_args": plan.launch_args,
+                });
+                println!("{}", serde_json::to_string_pretty(&out).unwrap());
+                return Ok(cli::exit::OK);
+            }
+
+            println!(
+                "recipe {} — {} v{} (by {}, {})",
+                inst.slug, inst.name, inst.version, inst.author, inst.updated_at
+            );
+            match &pin {
+                Some(p) => println!(
+                    "wine pin: {p} → {id}{notice}",
+                    id = rec.id,
+                    notice = rec
+                        .notice
+                        .as_ref()
+                        .map(|n| format!(" ({n})"))
+                        .unwrap_or_default()
+                ),
+                None => println!("wine pin: none → default wine-staging"),
+            }
+            if !plan.installer_args.is_empty() {
+                println!("harvested setup flags: {}", plan.installer_args.join(" "));
+            }
+            if !plan.steps.is_empty() {
+                println!("\nplanned steps (applied):");
+                let mut table = comfy_table::Table::new();
+                table.set_header(vec!["#", "STEP", "DETAIL"]);
+                for (i, s) in &plan.steps {
+                    // usize::MAX marks auto-appended steps (wine.overrides).
+                    let idx = if *i == usize::MAX {
+                        "-".to_string()
+                    } else {
+                        i.to_string()
+                    };
+                    table.add_row(vec![idx, step_verb(s), step_detail(s)]);
+                }
+                println!("{table}");
+            }
+            if !plan.skipped.is_empty() {
+                println!("\nskipped (with reasons):");
+                let mut table = comfy_table::Table::new();
+                table.set_header(vec!["#", "STEP", "REASON"]);
+                for s in &plan.skipped {
+                    table.add_row(vec![s.index.to_string(), s.verb.clone(), s.reason.clone()]);
+                }
+                println!("{table}");
+            }
+            if let Some(exe) = &plan.launch_exe {
+                println!("\nlaunch: {exe} {}", plan.launch_args.join(" "));
+            }
+            if plan.is_empty() {
+                println!("\n(no installer steps in this script)");
+            }
+            Ok(cli::exit::OK)
+        }
+    }
+}
+
+fn installer_json(inst: &gogo::macapp::lutris::LutrisInstaller) -> serde_json::Value {
+    use gogo::macapp::lutris;
+    serde_json::json!({
+        "slug": inst.slug,
+        "game_slug": inst.game_slug,
+        "name": inst.name,
+        "version": inst.version,
+        "runner": inst.runner,
+        "author": inst.author,
+        "updated_at": inst.updated_at,
+        "gogid": inst.gogid,
+        "wine_pin": lutris::wine_version(&inst.script),
+    })
+}
+
+fn step_verb(step: &gogo::macapp::interpret::Step) -> String {
+    use gogo::macapp::interpret::Step;
+    match step {
+        Step::HarvestInstallerArgs { .. } => "harvest-setup-args".into(),
+        Step::Wineexec { .. } => "wineexec".into(),
+        Step::Winetricks { .. } => "winetricks".into(),
+        Step::Download { .. } => "download".into(),
+        Step::Extract { .. } => "extract".into(),
+        Step::Merge { .. } => "merge".into(),
+        Step::Move { .. } => "move".into(),
+        Step::WriteFile { .. } => "write-file".into(),
+        Step::WriteConfig { .. } => "write-config".into(),
+        Step::Chmodx { .. } => "chmodx".into(),
+        Step::Mkdir { .. } => "mkdir".into(),
+        Step::Registry { .. } => "registry".into(),
+        Step::Launch { .. } => "launch".into(),
+    }
+}
+
+fn step_detail(step: &gogo::macapp::interpret::Step) -> String {
+    use gogo::macapp::interpret::Step;
+    match step {
+        Step::HarvestInstallerArgs { args } => {
+            format!("silent flags: {args}")
+        }
+        Step::Wineexec { exe, args } => format!(
+            "run {} {}",
+            exe.display(),
+            if args.is_empty() {
+                String::new()
+            } else {
+                format!("\"{args}\"")
+            }
+        ),
+        Step::Winetricks { verbs } => verbs.join(" "),
+        Step::Download { id, url } => format!("{id} ← {url}"),
+        Step::Extract { file, dst } => format!("{} → {}", file.display(), dst.display()),
+        Step::Merge { src, dst } => format!("{} → {}", src.display(), dst.display()),
+        Step::Move { src, dst } => format!("{} → {}", src.display(), dst.display()),
+        Step::WriteFile { file, .. } => file.display().to_string(),
+        Step::WriteConfig {
+            file,
+            section,
+            values,
+        } => format!(
+            "{} [{}] {}",
+            file.display(),
+            section,
+            values
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Step::Chmodx { file } => file.display().to_string(),
+        Step::Mkdir { dirs } => dirs
+            .iter()
+            .map(|d| d.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+        Step::Registry { key, values } => format!(
+            "{key}: {}",
+            values
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        Step::Launch { exe, args, .. } => format!(
+            "{} {}",
+            exe.as_deref().unwrap_or("(default entry point)"),
+            args.join(" ")
+        ),
     }
 }
 

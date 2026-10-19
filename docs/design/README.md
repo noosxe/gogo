@@ -63,7 +63,7 @@ in `docs/13` grounds design 10.
 | [09-v2-roadmap](09-v2-roadmap.md) | depots (Model B), ratatui TUI |
 | [10-macos-app-bundles](10-macos-app-bundles.md) | `gogo mac-app`: installer → self-contained .app (Wine runtime resolution, silent install, codesign) |
 | [11-recipes](11-recipes.md) | per-game fixes for `mac-app` by consuming Lutris installer scripts (discovery, declarative-subset interpreter) |
-| [12-runtime-catalog-and-interactive-flow](12-runtime-catalog-and-interactive-flow.md) | runtime catalog + store, recipe-first interactive selection, winetricks provisioning + Rust shims — plan of action (input: docs/15) |
+| [12-runtime-catalog-and-interactive-flow](12-runtime-catalog-and-interactive-flow.md) | runtime catalog + store, recipe-first interactive selection, winetricks provisioning + Rust shims — implemented (input: docs/15) |
 ## Key decisions (traceability)
 
 | Decision | Rationale / source |

@@ -727,3 +727,109 @@ fn recipe_picker_index_and_free_text_lanes() {
     assert!(!sel.from_search, "free-text file picks are pinned");
     assert_eq!(sel.wine_version.as_deref(), Some("wine-stable"));
 }
+
+#[test]
+fn recipes_list_and_show_inspection_path() {
+    // Design 11 §1/§3 (design 12 §12 phase 5): recipe_candidates ranks the
+    // corpus for a game name; recipe_by_slug fetches one record; the
+    // inspection ctx + interpret::plan classify it without touching the
+    // filesystem (nominal paths — classification is pure).
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+    let script = serde_json::json!({
+        "wine": {"version": "lutris-ge-proton9-20"},
+        "files": [
+            {"gog": "N/A:Select the GOG offline installer"},
+            {"patch": "https://example.com/patch.zip"}
+        ],
+        "installer": [
+            {"task": {"name": "wineexec", "executable": "gog", "args": "/NOGUI /SUPPRESSMSGBOXES"}},
+            {"task": {"name": "winetricks", "app": ["corefonts", "ddraw"]}},
+            {"execute": {"file": "patch", "args": "/q"}}
+        ]
+    });
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let server = rt.block_on(async {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, ResponseTemplate};
+        let server = wiremock::MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/games"))
+            .and(query_param("search", "Test Game"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "count": 1,
+                "results": [{
+                    "id": 1, "slug": "test-game", "name": "Test Game",
+                    "provider_games": [{"slug": "1", "service": "gog"}]
+                }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/games/test-game"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"<a href="/api/installers/gog-a?format=json">Download script</a>"#,
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/installers/gog-a"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "count": 1,
+                "results": [{
+                    "slug": "gog-a", "game_slug": "test-game", "name": "Test Game",
+                    "version": "1.0", "runner": "wine", "user": "alice",
+                    "updated_at": "2026-01-02", "gogid": 1,
+                    "script": script
+                }]
+            })))
+            .mount(&server)
+            .await;
+        // A second, stale installer proves ranking (newer first).
+        Mock::given(method("GET"))
+            .and(path("/games/older-game"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(""))
+            .mount(&server)
+            .await;
+        server
+    });
+
+    // list: ranked candidates for the game name (recipes list).
+    let candidates =
+        macapp::recipe_candidates(Some(&server.uri()), "Test Game").expect("candidates");
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].slug, "gog-a");
+    assert_eq!(candidates[0].runner, "wine");
+
+    // show: fetch by slug, classify with the inspection ctx.
+    let inst = macapp::recipe_by_slug(Some(&server.uri()), "gog-a").expect("record");
+    assert_eq!(inst.slug, "gog-a");
+    let pin = gogo::macapp::lutris::wine_version(&inst.script);
+    assert_eq!(pin.as_deref(), Some("lutris-ge-proton9-20"));
+    let rec = gogo::macapp::catalog::recommend_for_wine(pin.as_deref());
+    assert_eq!(rec.id, "wine-staging");
+    assert!(rec.notice.is_some(), "Linux-only pin carries the notice");
+
+    let ctx = macapp::inspection_ctx(&inst.script);
+    let plan = gogo::macapp::interpret::plan(&inst.script, &ctx);
+    use gogo::macapp::interpret::Step;
+    assert!(plan.steps.iter().any(|(i, s)| {
+        matches!(s, Step::HarvestInstallerArgs { args } if args.contains("/NOGUI") && *i == 0)
+    }));
+    assert!(
+        plan.steps.iter().any(
+            |(_, s)| matches!(s, Step::Winetricks { verbs } if verbs == &["corefonts", "ddraw"])
+        )
+    );
+    assert!(
+        plan.skipped
+            .iter()
+            .any(|s| s.verb == "execute" && s.reason.to_lowercase().contains("shell"))
+    );
+    assert!(plan.installer_args.iter().any(|a| a == "/NOGUI"));
+    drop(guard);
+}
