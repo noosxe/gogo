@@ -937,8 +937,12 @@ pub fn execute(
         match ddraw::resolve_or_provision(emit) {
             Some(tree) => match ddraw::apply(&tree, &install_dir)? {
                 ddraw::Applied::Applied { shaders } => {
+                    // The load-order half (live finding 2026-10-19): without
+                    // `ddraw=n,b` wine prefers its builtin and the game-dir
+                    // dll is silently ignored.
+                    ddraw::register_override(&bundled_wine, &plan.bundle.prefix)?;
                     emit(&ProgressEvent::RecipeStep {
-                        verb: format!("cnc-ddraw (dll + ini, {shaders} shaders)"),
+                        verb: format!("cnc-ddraw (dll + ini + override, {shaders} shaders)"),
                     });
                     bundle::write_ddraw_notice(&plan.bundle)?;
                 }
