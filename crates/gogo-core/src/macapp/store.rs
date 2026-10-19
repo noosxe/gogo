@@ -138,11 +138,18 @@ pub async fn install(
 
     std::fs::create_dir_all(tmp_dir())?;
     let gz = rel.asset_name.ends_with(".tar.gz") || rel.asset_name.ends_with(".tgz");
+    let zip = rel.asset_name.ends_with(".zip");
     let part = tmp_dir().join(format!(
         "{}-{}.{}",
         entry.id,
         rel.tag,
-        if gz { "tar.gz.part" } else { "tar.xz.part" }
+        if gz {
+            "tar.gz.part"
+        } else if zip {
+            "zip.part"
+        } else {
+            "tar.xz.part"
+        }
     ));
     download_with_retry(http, &rel.asset_url, &part).await?;
 
@@ -168,14 +175,37 @@ pub async fn install(
     let extract_dir2 = extract_dir.clone();
     let bytes = tokio::task::spawn_blocking(move || -> Result<u64, MacAppError> {
         let file = std::fs::File::open(&archive)?;
-        let decoder: Box<dyn std::io::Read> = if gz {
-            Box::new(flate2::read::GzDecoder::new(file))
+        if zip {
+            // Tool zips (design 13 D2: cnc-ddraw) unpack entry-by-entry;
+            // `enclosed_name` keeps members inside the extract dir.
+            let zip_err = |e: zip::result::ZipError| MacAppError::Recipe(format!("zip: {e}"));
+            let mut zip = zip::ZipArchive::new(file).map_err(zip_err)?;
+            for i in 0..zip.len() {
+                let mut entry = zip.by_index(i).map_err(zip_err)?;
+                let Some(rel_path) = entry.enclosed_name() else {
+                    continue;
+                };
+                let out = extract_dir2.join(rel_path);
+                if entry.is_dir() {
+                    std::fs::create_dir_all(&out)?;
+                } else {
+                    if let Some(parent) = out.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    let mut out_file = std::fs::File::create(&out)?;
+                    std::io::copy(&mut entry, &mut out_file)?;
+                }
+            }
         } else {
-            Box::new(xz2::read::XzDecoder::new(file))
-        };
-        let mut tar = tar::Archive::new(decoder);
-        tar.set_preserve_permissions(true);
-        tar.unpack(&extract_dir2)?;
+            let decoder: Box<dyn std::io::Read> = if gz {
+                Box::new(flate2::read::GzDecoder::new(file))
+            } else {
+                Box::new(xz2::read::XzDecoder::new(file))
+            };
+            let mut tar = tar::Archive::new(decoder);
+            tar.set_preserve_permissions(true);
+            tar.unpack(&extract_dir2)?;
+        }
         dir_size(&extract_dir2)
     })
     .await
@@ -194,19 +224,21 @@ pub async fn install(
                 .to_string_lossy()
                 .into_owned()
         }
-        catalog::Kind::Tool => {
-            let f = locate_named_file(&extract_dir, "winetricks").ok_or_else(|| {
+        catalog::Kind::Tool { payload } => {
+            let f = locate_named_file(&extract_dir, payload).ok_or_else(|| {
                 MacAppError::RuntimeInvalid {
                     path: extract_dir.clone(),
-                    reason: "archive contains no 'winetricks' script".into(),
+                    reason: format!("archive contains no '{payload}'"),
                 }
             })?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt as _;
-                let mut perm = std::fs::metadata(&f)?.permissions();
-                perm.set_mode(0o755);
-                std::fs::set_permissions(&f, perm)?;
+            if payload == "winetricks" {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    let mut perm = std::fs::metadata(&f)?.permissions();
+                    perm.set_mode(0o755);
+                    std::fs::set_permissions(&f, perm)?;
+                }
             }
             f.strip_prefix(&extract_dir)
                 .expect("payload inside the extract dir")
@@ -238,7 +270,7 @@ pub async fn install(
     manifest.push(m.clone());
     save_manifest(&manifest)?;
 
-    if matches!(entry.kind, catalog::Kind::Tool) {
+    if matches!(entry.kind, catalog::Kind::Tool { .. }) {
         emit(&ProgressEvent::ToolProvisioned {
             id: entry.id.into(),
             version: rel.tag.clone(),

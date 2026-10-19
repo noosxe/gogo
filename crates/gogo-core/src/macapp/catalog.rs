@@ -17,7 +17,11 @@ const UA: &str = concat!("gogo/", env!("CARGO_PKG_VERSION"), " (runtime catalog)
 /// Entry kind: a Wine runtime or a tool provisioned alongside one.
 pub enum Kind {
     Wine,
-    Tool,
+    /// A tool payload; `payload` names the file that proves the extract
+    /// (design 13 D2: `winetricks` script vs `cnc-ddraw`'s `ddraw.dll`).
+    Tool {
+        payload: &'static str,
+    },
 }
 
 /// Static claim about an entry; the live probe refines availability.
@@ -139,7 +143,9 @@ static ENTRIES: &[CatalogEntry] = &[
     },
     CatalogEntry {
         id: "winetricks",
-        kind: Kind::Tool,
+        kind: Kind::Tool {
+            payload: "winetricks",
+        },
         status: Status::Tool,
         discovery: Some(Discovery::GitHubReleases {
             repo: "Winetricks/winetricks",
@@ -151,6 +157,25 @@ static ENTRIES: &[CatalogEntry] = &[
         min_macos: None,
         arch: "any",
         note: "GitHub release tarball (digest-pinned); the script is located post-extract",
+    },
+    CatalogEntry {
+        id: "cnc-ddraw",
+        kind: Kind::Tool {
+            payload: "ddraw.dll",
+        },
+        status: Status::Tool,
+        discovery: Some(Discovery::GitHubReleases {
+            repo: "FunkyFr3sh/cnc-ddraw",
+            asset_prefix: "cnc-ddraw",
+            asset_suffix: ".zip",
+        }),
+        license: "MIT",
+        redistributable: true,
+        min_macos: None,
+        arch: "any",
+        note: "DirectDraw wrapper (design 13): game-dir drop-in cures black-screen \
+               classics; MIT; applied after the recipe phase, never over a recipe's \
+               own ddraw.dll",
     },
 ];
 
@@ -661,7 +686,13 @@ mod catalog_tests {
     fn entries_and_statuses() {
         assert!(find("wine-staging").is_some());
         assert!(find("nope").is_none());
-        assert_eq!(entries().len(), 6);
+        assert_eq!(entries().len(), 7);
+        assert!(matches!(
+            find("cnc-ddraw").unwrap().kind,
+            Kind::Tool {
+                payload: "ddraw.dll"
+            }
+        ));
         assert!(matches!(
             find("wine-crossover").unwrap().status,
             Status::Gone { .. }

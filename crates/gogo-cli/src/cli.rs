@@ -155,6 +155,13 @@ pub enum Command {
         /// (docs/design/11 §1).
         #[arg(long)]
         recipe: Option<String>,
+        /// Apply the cnc-ddraw DirectDraw wrapper (design 13; black-screen
+        /// classics). Default: ask interactively, off headless.
+        #[arg(long, conflicts_with = "no_ddraw_wrapper")]
+        ddraw_wrapper: bool,
+        /// Never apply the cnc-ddraw wrapper.
+        #[arg(long)]
+        no_ddraw_wrapper: bool,
         /// Skip the size confirmation; overwrite an existing bundle.
         #[arg(long)]
         yes: bool,

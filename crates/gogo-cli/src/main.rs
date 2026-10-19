@@ -164,6 +164,8 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
             runtime_path,
             runtime_version,
             recipe,
+            ddraw_wrapper,
+            no_ddraw_wrapper,
             out,
             yes,
             json_progress,
@@ -176,6 +178,8 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
                 runtime_path,
                 runtime_version,
                 recipe,
+                ddraw_wrapper,
+                no_ddraw_wrapper,
                 out,
                 yes,
                 json_progress,
@@ -1526,6 +1530,8 @@ async fn mac_app(
     runtime_path: Option<std::path::PathBuf>,
     runtime_version: Option<String>,
     recipe: Option<String>,
+    ddraw_wrapper: bool,
+    no_ddraw_wrapper: bool,
     out: Option<std::path::PathBuf>,
     yes: bool,
     json_progress: bool,
@@ -1568,6 +1574,13 @@ async fn mac_app(
         overwrite: yes,
         recipe,
         lutris_base: None,
+        ddraw: if ddraw_wrapper {
+            gogo::macapp::DdrawChoice::On
+        } else if no_ddraw_wrapper {
+            gogo::macapp::DdrawChoice::Off
+        } else {
+            gogo::macapp::DdrawChoice::Auto
+        },
     };
 
     // Plan: resolve + probe the runtime, validate the installer, size things up.

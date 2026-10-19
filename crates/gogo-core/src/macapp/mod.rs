@@ -15,6 +15,7 @@ pub mod interpret;
 use serde_json::Value;
 use std::process::Command;
 pub mod catalog;
+pub mod ddraw;
 pub mod lutris;
 pub mod prompt;
 pub mod runtime;
@@ -51,6 +52,8 @@ pub struct MacAppPlan {
     pub runtime_downloaded: Option<(String, String)>,
     /// Lutris API base override (tests; see `MacAppOptions::lutris_base`).
     pub lutris_base: Option<String>,
+    /// Resolved cnc-ddraw wrapper choice (design 13 D1).
+    pub ddraw: bool,
 }
 
 /// Conversion inputs (CLI flags, design 10 §1).
@@ -70,6 +73,18 @@ pub struct MacAppOptions {
     /// Lutris API base override (tests pin a wiremock server; the CLI never
     /// sets it).
     pub lutris_base: Option<String>,
+    /// Native cnc-ddraw wrapper (design 13 D1).
+    pub ddraw: DdrawChoice,
+}
+
+/// `--ddraw-wrapper` / `--no-ddraw-wrapper` (design 13 D1): `Auto` asks
+/// interactively (default **true**) and is headless-`Off`.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub enum DdrawChoice {
+    #[default]
+    Auto,
+    On,
+    Off,
 }
 
 /// `--recipe auto|none|<installer-slug>|<script-file>` (design 11 §1).
@@ -747,6 +762,30 @@ pub fn plan(
     // pin feeds the recommendation (D2: flag > recipe > default).
     let recipe = select_recipe(opts, &display, prompt, emit)?;
 
+    // Design 13 D1: the wrapper decision sits between recipe and runtime —
+    // it composes with the recipe (D4: never over its ddraw.dll) and is a
+    // yes/no the user answers before any download happens.
+    let ddraw = match opts.ddraw {
+        DdrawChoice::On => true,
+        DdrawChoice::Off => false,
+        DdrawChoice::Auto => match prompt {
+            Some(p) => {
+                let spec = prompt::PromptSpec {
+                    kind: prompt::PromptKind::Confirm { default: true },
+                    title: "apply the cnc-ddraw DirectDraw wrapper? (fixes black-screen \
+                            classics; MIT, ~2 MiB, cached)"
+                        .into(),
+                    items: vec![],
+                    allow_other: false,
+                    allow_none: false,
+                    default: 0,
+                };
+                matches!(p(&spec), Some(prompt::PromptAnswer::Confirmed(true)))
+            }
+            None => false,
+        },
+    };
+
     // §6 step 3: runtime resolution — may download into the store (events).
     let (runtime, runtime_downloaded) = resolve_runtime(opts, recipe.as_ref(), prompt, emit)?;
     let kind = runtime.mode.as_str().to_string();
@@ -785,6 +824,7 @@ pub fn plan(
         recipe,
         runtime_downloaded,
         lutris_base: opts.lutris_base.clone(),
+        ddraw,
         bundle,
     })
 }
@@ -890,6 +930,29 @@ pub fn execute(
         .as_ref()
         .map(|o| (o.env.clone(), o.args.clone()))
         .unwrap_or_default();
+
+    // Native cnc-ddraw (design 13 D3/D4): after the recipe phase so a
+    // recipe's own wrapper (if any) wins; game-dir placement, no registry.
+    if plan.ddraw {
+        match ddraw::resolve_or_provision(emit) {
+            Some(tree) => match ddraw::apply(&tree, &install_dir)? {
+                ddraw::Applied::Applied { shaders } => {
+                    emit(&ProgressEvent::RecipeStep {
+                        verb: format!("cnc-ddraw (dll + ini, {shaders} shaders)"),
+                    });
+                    bundle::write_ddraw_notice(&plan.bundle)?;
+                }
+                ddraw::Applied::AlreadyPresent => emit(&ProgressEvent::Warn {
+                    message: "ddraw.dll already present (recipe-placed) — gogo wrapper                               skipped"
+                        .into(),
+                }),
+            },
+            None => emit(&ProgressEvent::Warn {
+                message: "cnc-ddraw unavailable (provisioning failed) — DirectDraw games                           may black-screen"
+                    .into(),
+            }),
+        }
+    }
 
     bundle::write_launch_conf(
         &plan.bundle,

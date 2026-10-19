@@ -93,6 +93,7 @@ fn full_pipeline_with_fake_runtime() {
         recipe: Default::default(),
         runtime_version: None,
         lutris_base: None,
+        ddraw: macapp::DdrawChoice::Auto,
     };
 
     let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -196,6 +197,7 @@ fn execute_refuses_to_clobber_existing_bundle() {
         recipe: Default::default(),
         runtime_version: None,
         lutris_base: None,
+        ddraw: macapp::DdrawChoice::Auto,
     };
     let plan = macapp::plan(&opts, None, &mut |_| {}).expect("plan");
     // Pre-create the bundle root: execute must refuse.
@@ -268,6 +270,7 @@ fn winetricks_verbs_run_with_wine_shims_and_notice() {
         recipe: gogo::macapp::RecipeChoice::File(recipe),
         runtime_version: None,
         lutris_base: None,
+        ddraw: macapp::DdrawChoice::Auto,
     };
 
     // Sandbox the store (shims materialize under state_dir) + override the
@@ -356,6 +359,7 @@ fn recipe_wine_pin_recommends_cached_catalog_runtime() {
         recipe: gogo::macapp::RecipeChoice::File(recipe),
         runtime_version: None,
         lutris_base: None,
+        ddraw: macapp::DdrawChoice::Auto,
     };
 
     let mut warns: Vec<String> = Vec::new();
@@ -465,6 +469,7 @@ fn auto_recipe_discovery_and_gogid_crosscheck() {
         recipe: gogo::macapp::RecipeChoice::Auto,
         runtime_version: None,
         lutris_base: Some(server.uri()),
+        ddraw: macapp::DdrawChoice::Auto,
     };
 
     let mut tags: Vec<&'static str> = Vec::new();
@@ -552,6 +557,9 @@ fn runtime_menu_offers_cached_and_custom_path_lanes() {
                 gogo::macapp::PromptKind::Input => Some(gogo::macapp::PromptAnswer::Other(
                     valid.display().to_string(),
                 )),
+                gogo::macapp::PromptKind::Confirm { .. } => {
+                    Some(gogo::macapp::PromptAnswer::Confirmed(false))
+                }
                 _ => None,
             }
         });
@@ -566,6 +574,7 @@ fn runtime_menu_offers_cached_and_custom_path_lanes() {
         recipe: gogo::macapp::RecipeChoice::None,
         runtime_version: None,
         lutris_base: None,
+        ddraw: macapp::DdrawChoice::Auto,
     };
 
     let old_path = std::env::var("PATH").unwrap_or_default();
@@ -593,44 +602,40 @@ fn runtime_menu_offers_cached_and_custom_path_lanes() {
         canon.display()
     );
     let specs = seen.lock().unwrap();
+    let menu = specs
+        .iter()
+        .find(|sp| matches!(sp.kind, gogo::macapp::PromptKind::Select))
+        .expect("menu prompted");
+    assert!(menu.allow_other, "custom-path entry offered");
+    assert!(!menu.allow_none);
     assert!(
-        matches!(specs[0].kind, gogo::macapp::PromptKind::Select),
-        "menu first: {:?}",
-        specs[0].kind
-    );
-    assert!(specs[0].allow_other, "custom-path entry offered");
-    assert!(!specs[0].allow_none);
-    assert!(
-        specs[0]
-            .items
+        menu.items
             .iter()
             .any(|i| i.contains("wine-devel 1.2 (✓ cached)")),
         "cached flavors lead the menu: {:?}",
-        specs[0].items
+        menu.items
     );
     assert!(
-        specs[0]
-            .items
+        menu.items
             .iter()
             .any(|i| i.starts_with("download wine-staging")),
         "downloadable flavors offered: {:?}",
-        specs[0].items
+        menu.items
     );
     assert!(
-        specs[0]
-            .items
+        menu.items
             .iter()
             .any(|i| i.starts_with("download wine-staging") && i.contains("recommended")),
         "staging is marked recommended"
     );
+    let reprompt = specs
+        .iter()
+        .find(|sp| matches!(sp.kind, gogo::macapp::PromptKind::Input))
+        .expect("re-prompt");
     assert!(
-        matches!(specs[1].kind, gogo::macapp::PromptKind::Input),
-        "re-prompt"
-    );
-    assert!(
-        specs[1].title.contains("invalid runtime path"),
+        reprompt.title.contains("invalid runtime path"),
         "{}",
-        specs[1].title
+        reprompt.title
     );
 }
 
@@ -656,10 +661,16 @@ fn recipe_picker_index_and_free_text_lanes() {
 
     let path_answer = recipe_file.display().to_string();
     let prompter: std::sync::Arc<gogo::macapp::PromptFn> =
-        std::sync::Arc::new(move |spec: &gogo::macapp::PromptSpec| {
-            assert!(matches!(spec.kind, gogo::macapp::PromptKind::Fuzzy));
-            assert!(spec.allow_other && spec.allow_none);
-            Some(gogo::macapp::PromptAnswer::Other(path_answer.clone()))
+        std::sync::Arc::new(move |spec: &gogo::macapp::PromptSpec| match spec.kind {
+            gogo::macapp::PromptKind::Fuzzy => {
+                assert!(spec.allow_other && spec.allow_none);
+                Some(gogo::macapp::PromptAnswer::Other(path_answer.clone()))
+            }
+            // The ddraw Confirm follows the picker (design 13 D1); decline.
+            gogo::macapp::PromptKind::Confirm { .. } => {
+                Some(gogo::macapp::PromptAnswer::Confirmed(false))
+            }
+            _ => None,
         });
 
     // Wiremock Lutris with two installers (newer first after ranking).
@@ -718,6 +729,7 @@ fn recipe_picker_index_and_free_text_lanes() {
         recipe: gogo::macapp::RecipeChoice::Auto,
         runtime_version: None,
         lutris_base: Some(server.uri()),
+        ddraw: macapp::DdrawChoice::Auto,
     };
     let plan = macapp::plan(&opts, Some(prompter.as_ref()), &mut |_| {}).expect("plan");
     drop(guard);
@@ -991,6 +1003,7 @@ fn search_recipe_failure_degrades_pinned_stays_fatal() {
         recipe: gogo::macapp::RecipeChoice::Auto,
         runtime_version: None,
         lutris_base: Some(server.uri()),
+        ddraw: macapp::DdrawChoice::Auto,
     };
     let mut warns = Vec::new();
     let mut record = |ev: &ProgressEvent| {
@@ -1036,6 +1049,7 @@ fn search_recipe_failure_degrades_pinned_stays_fatal() {
         recipe: gogo::macapp::RecipeChoice::File(script.clone()),
         runtime_version: None,
         lutris_base: Some(server.uri()),
+        ddraw: macapp::DdrawChoice::Auto,
     };
     let mut sink = |_ev: &ProgressEvent| {};
     let plan = macapp::plan(&opts, None, &mut sink).unwrap();
@@ -1095,6 +1109,7 @@ fn runtime_menu_is_mandatory_with_easy_default() {
         recipe: gogo::macapp::RecipeChoice::None,
         runtime_version: None,
         lutris_base: None,
+        ddraw: macapp::DdrawChoice::Auto,
     };
 
     let old_path = std::env::var("PATH").unwrap_or_default();
@@ -1111,16 +1126,20 @@ fn runtime_menu_is_mandatory_with_easy_default() {
     drop(guard);
 
     let specs = seen.lock().unwrap();
+    let menu = specs
+        .iter()
+        .find(|sp| matches!(sp.kind, gogo::macapp::PromptKind::Select))
+        .expect("menu prompted");
     assert!(
-        matches!(specs[0].kind, gogo::macapp::PromptKind::Select),
-        "menu must be the first prompt even with a ladder hit: {:?}",
-        specs[0].kind
+        specs.len() <= 2,
+        "ddraw Confirm then the menu only: {:?}",
+        specs.iter().map(|s| &s.title).collect::<Vec<_>>()
     );
-    assert_eq!(specs[0].default, 0, "easy pick preselected");
+    assert_eq!(menu.default, 0, "easy pick preselected");
     assert!(
-        specs[0].items[0].contains("wine-staging") && specs[0].items[0].contains("· easy"),
+        menu.items[0].contains("wine-staging") && menu.items[0].contains("· easy"),
         "easy marker on the ladder pick: {:?}",
-        specs[0].items[0]
+        menu.items[0]
     );
     // from_store keeps the literal GOGO_HOME path (no canonicalization).
     let store_root = home.join("runtimes/wine-staging/9.0");
@@ -1198,6 +1217,7 @@ fn recipe_picker_is_mandatory_for_single_candidate() {
         recipe: gogo::macapp::RecipeChoice::Auto,
         runtime_version: None,
         lutris_base: Some(server.uri()),
+        ddraw: macapp::DdrawChoice::Auto,
     };
 
     // (a) pick the candidate.
@@ -1260,6 +1280,7 @@ fn produced_launcher_execs_wine_with_contents_relative_paths() {
         recipe: gogo::macapp::RecipeChoice::None,
         runtime_version: None,
         lutris_base: None,
+        ddraw: macapp::DdrawChoice::Auto,
     };
     let plan = macapp::plan(&opts, None, &mut |_| {}).unwrap();
     let _bytes = macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).unwrap();
@@ -1308,5 +1329,91 @@ fn produced_launcher_execs_wine_with_contents_relative_paths() {
         logged.contains("drive_c/GOG/test-game/game.exe"),
         "wine argv must carry the entry exe: {logged}"
     );
+    drop(guard);
+}
+
+#[test]
+fn ddraw_wrapper_application_lanes() {
+    // Design 13: On applies dll+ini+shaders+MIT notice into the detected game
+    // dir via the GOGO_CNC_DDRAW_DIR override (WINETRICKS-style); headless
+    // Auto stays off — no wrapper, no notice.
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let runtime_dir = tmp.path().join("runtime");
+    let log = tmp.path().join("wine.log");
+    fake_runtime(&runtime_dir, &log);
+    let installer = tmp.path().join("setup_testgame_1.0.exe");
+    std::fs::write(&installer, b"MZ").unwrap();
+
+    let store = tmp.path().join("ddraw-tree");
+    std::fs::create_dir_all(store.join("Shaders")).unwrap();
+    std::fs::write(store.join("ddraw.dll"), b"MZ-ddraw").unwrap();
+    std::fs::write(store.join("Shaders/one.fx"), b"shader").unwrap();
+
+    let mk = |out: &std::path::Path, ddraw: macapp::DdrawChoice| MacAppOptions {
+        installer: installer.clone(),
+        name: Some("Test Game".into()),
+        mode: RuntimeMode::Path,
+        runtime_path: Some(runtime_dir.clone()),
+        out_dir: out.to_path_buf(),
+        overwrite: true,
+        recipe: gogo::macapp::RecipeChoice::None,
+        runtime_version: None,
+        lutris_base: None,
+        ddraw,
+    };
+
+    // SAFETY: env mutation under ENV_LOCK (established pattern above).
+    unsafe {
+        std::env::set_var("GOGO_HOME", tmp.path().join("home"));
+        std::env::set_var("GOGO_CNC_DDRAW_DIR", &store);
+    }
+    // (a) On: applied.
+    let opts = mk(&tmp.path().join("out-on"), macapp::DdrawChoice::On);
+    let plan = macapp::plan(&opts, None, &mut |_| {}).unwrap();
+    assert!(plan.ddraw);
+    let mut steps = Vec::new();
+    let mut record = |ev: &ProgressEvent| {
+        if let ProgressEvent::RecipeStep { verb } = ev {
+            steps.push(verb.clone());
+        }
+    };
+    let _ = macapp::execute(&plan, CodesignPolicy::Skip, &mut record).unwrap();
+    let game = plan.bundle.prefix.join("drive_c/GOG/test-game");
+    assert_eq!(
+        std::fs::read(game.join("ddraw.dll")).unwrap(),
+        b"MZ-ddraw",
+        "wrapper dll in the game dir"
+    );
+    assert!(
+        std::fs::read_to_string(game.join("ddraw.ini"))
+            .unwrap()
+            .contains("maintas=true")
+    );
+    assert!(game.join("Shaders/one.fx").is_file());
+    assert!(
+        plan.bundle
+            .resources
+            .join("LICENSE-cnc-ddraw.txt")
+            .is_file(),
+        "MIT notice (design 13 D5)"
+    );
+    assert!(
+        steps.iter().any(|v| v.starts_with("cnc-ddraw")),
+        "RecipeStep event: {steps:?}"
+    );
+
+    // (b) headless Auto: off, nothing applied.
+    let opts = mk(&tmp.path().join("out-auto"), macapp::DdrawChoice::Auto);
+    let plan = macapp::plan(&opts, None, &mut |_| {}).unwrap();
+    assert!(!plan.ddraw, "headless Auto resolves Off (D1)");
+    let _ = macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).unwrap();
+    let game = plan.bundle.prefix.join("drive_c/GOG/test-game");
+    assert!(!game.join("ddraw.dll").exists());
+    assert!(!plan.bundle.resources.join("LICENSE-cnc-ddraw.txt").exists());
+    unsafe {
+        std::env::remove_var("GOGO_CNC_DDRAW_DIR");
+        std::env::remove_var("GOGO_HOME");
+    }
     drop(guard);
 }
