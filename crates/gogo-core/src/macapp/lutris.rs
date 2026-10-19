@@ -322,7 +322,42 @@ pub fn pick_game<'a>(games: &'a [LutrisGame], name: &str) -> Option<&'a LutrisGa
             let slug = lower.replace([' ', '_'], "-");
             games.iter().find(|g| g.slug == slug)
         })
-        .or_else(|| games.first())
+        .or_else(|| {
+            // No exact hit: score by token overlap (normalized — punctuation
+            // like "Pharaoh: A New Era" must not hide its "pharaoh"), prefer
+            // GOG-linked games, then the shortest name: the trimmed product
+            // title. Live example: "Pharaoh gold" over 20 loose matches →
+            // "Pharaoh" (slug `pharaoh`, carries `pharaoh-cd-cnc-ddraw`) —
+            // the old `.first()` grabbed "Arizona Rose and the Pharaohs'
+            // Riddles". The post-install gogid cross-check still guards.
+            let query: Vec<String> = norm_tokens(name);
+            games.iter().max_by_key(|g| {
+                let hits = norm_tokens(&g.name)
+                    .iter()
+                    .filter(|t| query.contains(t))
+                    .count();
+                let gog_linked = i32::from(!g.gog_ids.is_empty());
+                (hits, gog_linked, std::cmp::Reverse(g.name.chars().count()))
+            })
+        })
+}
+
+/// Lowercased alphanumeric runs: `"Pharaoh: A New Era"` →
+/// `["pharaoh", "a", "new", "era"]`.
+fn norm_tokens(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for ch in s.chars() {
+        if ch.is_alphanumeric() {
+            cur.push(ch.to_lowercase().next().unwrap_or(ch));
+        } else if !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
 }
 
 /// Extract installer slugs from a game page: `Download script` anchors of the
@@ -457,20 +492,51 @@ mod tests {
     }
 
     #[test]
-    fn pick_game_prefers_exact_name_then_slug_then_first() {
-        let mk = |slug: &str, name: &str| LutrisGame {
-            gog_ids: vec![],
+    fn pick_game_prefers_exact_name_then_slug_then_token_overlap() {
+        let mk = |slug: &str, name: &str, gog: &[&str]| LutrisGame {
+            gog_ids: gog.iter().map(|s| s.to_string()).collect(),
             lutris_id: 0,
             slug: slug.into(),
             name: name.into(),
         };
-        let games = vec![mk("other", "Unrelated"), mk("test-game", "Test Game")];
+        let games = vec![
+            mk("other", "Unrelated", &[]),
+            mk("test-game", "Test Game", &[]),
+        ];
         assert_eq!(pick_game(&games, "Test Game").unwrap().slug, "test-game");
         assert_eq!(pick_game(&games, "test GAME").unwrap().slug, "test-game");
         // No name hit: slug equality beats list order.
         assert_eq!(pick_game(&games, "Test-Game").unwrap().slug, "test-game");
-        // Nothing matches: first result (post-install cross-check guards).
-        assert_eq!(pick_game(&games, "zzz").unwrap().slug, "other");
         assert!(pick_game(&[], "anything").is_none());
+
+        // Live shape (2026-10-19): search "pharaoh" returns 20 loose matches;
+        // the query is the trimmed "Pharaoh gold". Token overlap + GOG link +
+        // shortest name must land on the real game, not "Arizona Rose…".
+        let live = vec![
+            mk(
+                "arizona-rose-and-the-pharaohs-riddles",
+                "Arizona Rose and the Pharaohs' Riddles",
+                &[],
+            ),
+            mk("pharaoh-a-new-era", "Pharaoh: A New Era", &["1207659027"]),
+            mk(
+                "pharaoh-plus-cleopatra",
+                "Pharaoh + Cleopatra",
+                &["1207659027"],
+            ),
+            mk("pharaoh", "Pharaoh", &["1207659017"]),
+        ];
+        assert_eq!(pick_game(&live, "Pharaoh gold").unwrap().slug, "pharaoh");
+
+        // Same overlap, no GOG link anywhere: shortest name wins.
+        let no_gog = vec![
+            mk(
+                "luxor-pharaohs-challenge",
+                "Luxor: Pharaoh's Challenge",
+                &[],
+            ),
+            mk("pharaoh", "Pharaoh", &[]),
+        ];
+        assert_eq!(pick_game(&no_gog, "pharaoh").unwrap().slug, "pharaoh");
     }
 }

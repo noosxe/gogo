@@ -833,3 +833,82 @@ fn recipes_list_and_show_inspection_path() {
     assert!(plan.installer_args.iter().any(|a| a == "/NOGUI"));
     drop(guard);
 }
+
+#[test]
+fn recipe_discovery_trims_version_and_falls_back_to_shorter_queries() {
+    // Live-verified shapes (2026-10-19): "Pharaoh gold 2 1 0 15" must first
+    // lose the GOG version tail (display_name), then the strict Lutris search
+    // must fall back "Pharaoh gold" → "Pharaoh", and pick_game must land on
+    // the token-overlapping GOG-linked game — not the alphabetically-first
+    // loose match.
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let display = macapp::display_name(
+        std::path::Path::new("/x/setup_pharaoh_gold_2.1.0.15.exe"),
+        None,
+    );
+    assert_eq!(display, "Pharaoh gold");
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let server = rt.block_on(async {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, ResponseTemplate};
+        let server = wiremock::MockServer::start().await;
+        // Strict search: the full name answers nothing…
+        Mock::given(method("GET"))
+            .and(path("/api/games"))
+            .and(query_param("search", "Pharaoh gold"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "count": 0, "results": []
+            })))
+            .mount(&server)
+            .await;
+        // …the trimmed name answers the loose 20-match page (subset here).
+        Mock::given(method("GET"))
+            .and(path("/api/games"))
+            .and(query_param("search", "Pharaoh"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "count": 20,
+                "results": [
+                    {"id": 1, "slug": "arizona-rose-and-the-pharaohs-riddles",
+                     "name": "Arizona Rose and the Pharaohs' Riddles",
+                     "provider_games": []},
+                    {"id": 2, "slug": "pharaoh-a-new-era", "name": "Pharaoh: A New Era",
+                     "provider_games": [{"slug": "1207659027", "service": "gog"}]},
+                    {"id": 3, "slug": "pharaoh", "name": "Pharaoh",
+                     "provider_games": [{"slug": "1207659017", "service": "gog"}]}
+                ]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/games/pharaoh"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"<a href="/api/installers/pharaoh-cd-cnc-ddraw?format=json">x</a>"#,
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/installers/pharaoh-cd-cnc-ddraw"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "count": 1,
+                "results": [{
+                    "slug": "pharaoh-cd-cnc-ddraw", "game_slug": "pharaoh",
+                    "name": "Pharaoh", "version": "CD + cnc-ddraw", "runner": "wine",
+                    "user": "legluondunet", "updated_at": "2024-06-01",
+                    "gogid": 1207659017,
+                    "script": {"files": [], "installer": []}
+                }]
+            })))
+            .mount(&server)
+            .await;
+        server
+    });
+
+    let candidates = macapp::recipe_candidates(Some(&server.uri()), &display).unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].slug, "pharaoh-cd-cnc-ddraw");
+    drop(guard);
+}

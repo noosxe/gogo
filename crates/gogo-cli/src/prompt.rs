@@ -19,12 +19,9 @@ pub fn renderer() -> std::sync::Arc<PromptFn> {
 
 fn render(spec: &PromptSpec) -> Option<PromptAnswer> {
     use dialoguer::{Confirm, FuzzySelect, Input, Select};
-    use std::io::Write as _;
 
-    let mut term = std::io::stderr();
-    let _ = writeln!(term, "{}", console::style(&spec.title).bold());
-    let _ = term.flush();
-
+    // dialoguer renders the prompt (the spec title) itself on stderr —
+    // printing it here too duplicates every question line.
     match spec.kind {
         PromptKind::Fuzzy | PromptKind::Select => {
             let mut items = spec.items.clone();
