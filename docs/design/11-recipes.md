@@ -1,6 +1,7 @@
 # 11 — Recipes: Lutris installer scripts for `gogo mac-app`
 
-**Status:** proposed contract (design phase; no implementation yet)
+**Status:** implemented — phased with design 12 §12: selection + parity
+executor shipped (PR #30), `gogo recipes list|show` inspection in phase 5
 **Depends on:** design 10 (`gogo mac-app`), 07 (events/errors), 06 (paths), 04 (downloader)
 **Research:** docs/14 (systems survey + live Lutris API probes, 2026-10-19)
 **Acceptance bar:** the user can choose from the Lutris installers relevant to

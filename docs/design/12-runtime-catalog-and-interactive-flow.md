@@ -1,6 +1,8 @@
 # 12 — Runtime catalog, store & interactive mac-app flow
 
-**Status:** proposed — formalized plan of action (agreed 2026-10-19)
+**Status:** implemented — phases 0–5 shipped (PRs #27–#31 + the phase-5 PR;
+PR #31's merge landed its commit on main server-side but never flipped the PR
+state — closed manually, content verified identical)
 **Research:** docs/15 (live-verified 2026-10-19)
 **Amends:** design 10 §3 (runtime resolution), §8 (network-after-staging exception),
 §10 (shared runtimes: the *download store* moves from future work into v1; bundles stay
@@ -157,8 +159,11 @@ code change.
   new `--runtime-version <ver>`; `--recipe` unchanged.
 - New command: `gogo runtimes list [--json]`, `gogo runtimes install <id> [--version]`,
   `gogo runtimes prune [--all | <id>]`.
-- Carried debt (design 11 §1, still unimplemented): `gogo recipes list/show` —
-  scheduled Phase 5.
+- Carried debt (design 11 §1): `gogo recipes list|show` — resolved in Phase 5:
+  `recipes list <installer-path> | --name <game>` prints the ranked
+  `runner: wine` installers; `recipes show <installer-slug|file>` prints the
+  classified plan (applied vs skipped-with-reasons) plus the wine pin's §7
+  runtime recommendation. Nothing is executed or stored.
 - Errors: `MacAppError` gains `CatalogUnreachable`, `RuntimeDownloadFailed`,
   `RuntimeChecksumMismatch` (all exit 7). Events: `RuntimeDownloadStarted` /
   `RuntimeDownloadFinished`, `ToolProvisioned`.
@@ -187,9 +192,12 @@ code change.
 Canonical checks for every phase: `cargo fmt --check`,
 `cargo clippy --all-targets -- -D warnings`, `cargo nextest run`, `cargo deny check`.
 
+Status: 0 → PR #27, 1 → PR #28, 2 → PR #29, 3 → PR #30, 4 → PR #31 (see the
+status header), 5 → this PR (recipes list/show + docs sync).
+
 ## 13. Open items
 
-- Audits docs/15 §8: §8.1–8.4 resolved 2026-10-19 (results recorded there); §8.5–8.6 land with Phase 2.
+- Audits docs/15 §8: §8.1–8.4 resolved 2026-10-19 (results recorded there); §8.5–8.6 resolved with Phase 2.
 - Mythic Engine artifacts as an optional second GPTK lane — deferred until demanded.
 - Shared-reference bundles (no per-app runtime copy) — remains design 10 §10 future
   work; revisit after the store proves itself.

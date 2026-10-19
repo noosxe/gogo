@@ -153,6 +153,66 @@ pub struct SelectedRecipe {
     pub from_search: bool,
 }
 
+/// Ranked recipe candidates for a game name (design 11 §2, shared by
+/// `mac-app` auto mode and `gogo recipes list`): search → best game → its
+/// `runner: wine` installers, ranked. Nothing is stored.
+pub fn recipe_candidates(
+    base: Option<&str>,
+    display: &str,
+) -> Result<Vec<lutris::LutrisInstaller>, MacAppError> {
+    let client = lutris::LutrisClient::new(base.unwrap_or(lutris::DEFAULT_BASE))?;
+    let discovery = {
+        let client = &client;
+        async move {
+            let games: Vec<lutris::LutrisGame> = client.search(display).await.unwrap_or_default();
+            let Some(game) = lutris::pick_game(&games, display) else {
+                return Ok::<Vec<lutris::LutrisInstaller>, MacAppError>(Vec::new());
+            };
+            let mut candidates = client.installers_for(&game.slug).await?;
+            candidates.retain(|i| i.runner == "wine");
+            lutris::rank(&mut candidates);
+            Ok(candidates)
+        }
+    };
+    lutris::block_on_detached(discovery)
+}
+
+/// Fetch one installer record by slug (live; `gogo recipes show`).
+pub fn recipe_by_slug(
+    base: Option<&str>,
+    slug: &str,
+) -> Result<lutris::LutrisInstaller, MacAppError> {
+    let client = lutris::LutrisClient::new(base.unwrap_or(lutris::DEFAULT_BASE))?;
+    lutris::block_on_detached(client.installer(slug))
+}
+
+/// Inspection-only planning context (`gogo recipes show`, design 11 §3):
+/// classification is pure — paths are substituted and displayed but never
+/// touched — so the nominal root stands in for the not-yet-built bundle.
+/// The 1920x1080 stand-in matches `run_recipe_phase`.
+pub fn inspection_ctx(script: &serde_json::Value) -> interpret::RecipeCtx {
+    let nominal = PathBuf::from("/gogo-recipes-show");
+    interpret::RecipeCtx {
+        wine: nominal.join("wine"),
+        prefix: nominal.join("prefix"),
+        install_dir: nominal.join("prefix/drive_c/GOG"),
+        bundle: nominal.clone(),
+        cache: nominal.join("cache"),
+        user: "user".into(),
+        width: 1920,
+        height: 1080,
+        vars: script
+            .get("variables")
+            .and_then(serde_json::Value::as_object)
+            .map(|o| {
+                o.iter()
+                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
+}
+
 /// §6 step 2: resolve the recipe choice to a script, or `None`. Auto-mode
 /// trouble is never fatal: `RecipeMiss` + recipe-less continuation. Slug/file
 /// errors stay fatal — the user pinned them explicitly.
@@ -172,21 +232,7 @@ fn select_recipe(
             // Pre-install search by display name (§6): pick the best game,
             // list its installers, rank, select. The authoritative gogid
             // cross-check runs post-install and downgrades wrong picks.
-            let discovery = {
-                let client = &client;
-                async move {
-                    let games: Vec<lutris::LutrisGame> =
-                        client.search(display).await.unwrap_or_default();
-                    let Some(game) = lutris::pick_game(&games, display) else {
-                        return Ok::<Vec<lutris::LutrisInstaller>, MacAppError>(Vec::new());
-                    };
-                    let mut candidates = client.installers_for(&game.slug).await?;
-                    candidates.retain(|i| i.runner == "wine");
-                    lutris::rank(&mut candidates);
-                    Ok(candidates)
-                }
-            };
-            match lutris::block_on_detached(discovery) {
+            match recipe_candidates(opts.lutris_base.as_deref(), display) {
                 Ok(candidates) if candidates.is_empty() => {
                     emit(&ProgressEvent::RecipeMiss {
                         key: display.to_string(),
@@ -300,7 +346,9 @@ fn choose_recipe(
 }
 
 /// Parse a downloaded script JSON into a record (the `--recipe <file>` lane).
-fn parse_script_file(path: &Path) -> Result<lutris::LutrisInstaller, MacAppError> {
+/// Parse a local script JSON into an installer record (`recipes show <file>`
+/// and `--recipe <file>`): slug from the file stem, pinned semantics.
+pub fn parse_script_file(path: &Path) -> Result<lutris::LutrisInstaller, MacAppError> {
     let v: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(path)
             .map_err(|e| MacAppError::Recipe(format!("script {}: {e}", path.display())))?,
