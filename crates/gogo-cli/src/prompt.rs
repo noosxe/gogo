@@ -33,9 +33,15 @@ fn render(spec: &PromptSpec) -> Option<PromptAnswer> {
             }
             let real_len = spec.items.len();
             let picked = if spec.kind == PromptKind::Fuzzy {
-                FuzzySelect::new().items(&items).default(0).interact_opt()
+                FuzzySelect::new()
+                    .items(&items)
+                    .default(spec.default)
+                    .interact_opt()
             } else {
-                Select::new().items(&items).default(0).interact_opt()
+                Select::new()
+                    .items(&items)
+                    .default(spec.default)
+                    .interact_opt()
             };
             match picked.unwrap_or_else(|e| cancel(&e)) {
                 None => cancel("cancelled"),

@@ -1040,3 +1040,194 @@ fn search_recipe_failure_degrades_pinned_stays_fatal() {
     assert!(macapp::execute(&plan, CodesignPolicy::Skip, &mut sink).is_err());
     drop(guard);
 }
+
+#[test]
+fn runtime_menu_is_mandatory_with_easy_default() {
+    // §5 (amended 2026-10-19): the ladder hit (cached wine-staging) no longer
+    // bypasses the menu — interactively the selection is mandatory, the easy
+    // pick is preselected (spec.default + "· easy"), and choosing it resolves
+    // from the store.
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let installer = tmp.path().join("setup_testgame_1.0.exe");
+    std::fs::write(&installer, b"MZ").unwrap();
+
+    let home = tmp.path().join("home");
+    let tree = home.join("runtimes/wine-staging/9.0/bin");
+    std::fs::create_dir_all(&tree).unwrap();
+    std::fs::write(tree.join("wine"), "#!/bin/sh\necho wine-9.0-staging\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(tree.join("wine"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+    }
+    std::fs::create_dir_all(home.join("runtimes")).unwrap();
+    std::fs::write(
+        home.join("runtimes/manifest.json"),
+        r#"[{"id":"wine-staging","version":"9.0","sha256":"0","fetched_at":"2026-01-01T00:00:00Z","upstream_url":"x","entry_rel":"bin/wine","bytes":16}]"#,
+    )
+    .unwrap();
+
+    let seen: std::sync::Arc<std::sync::Mutex<Vec<gogo::macapp::PromptSpec>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen2 = seen.clone();
+    let prompter: std::sync::Arc<gogo::macapp::PromptFn> =
+        std::sync::Arc::new(move |spec: &gogo::macapp::PromptSpec| {
+            seen2.lock().unwrap().push(spec.clone());
+            match spec.kind {
+                gogo::macapp::PromptKind::Select => {
+                    Some(gogo::macapp::PromptAnswer::Index(spec.default))
+                }
+                _ => None,
+            }
+        });
+
+    let opts = MacAppOptions {
+        installer,
+        name: Some("Test Game".into()),
+        mode: RuntimeMode::Auto,
+        runtime_path: None,
+        out_dir: tmp.path().to_path_buf(),
+        overwrite: true,
+        recipe: gogo::macapp::RecipeChoice::None,
+        runtime_version: None,
+        lutris_base: None,
+    };
+
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    // SAFETY: env mutation under ENV_LOCK (established pattern above).
+    unsafe {
+        std::env::set_var("GOGO_HOME", &home);
+        std::env::set_var("PATH", "/usr/bin:/bin"); // hide brew
+    }
+    let plan = macapp::plan(&opts, Some(prompter.as_ref()), &mut |_| {}).expect("plan");
+    unsafe {
+        std::env::set_var("PATH", &old_path);
+        std::env::remove_var("GOGO_HOME");
+    }
+    drop(guard);
+
+    let specs = seen.lock().unwrap();
+    assert!(
+        matches!(specs[0].kind, gogo::macapp::PromptKind::Select),
+        "menu must be the first prompt even with a ladder hit: {:?}",
+        specs[0].kind
+    );
+    assert_eq!(specs[0].default, 0, "easy pick preselected");
+    assert!(
+        specs[0].items[0].contains("wine-staging") && specs[0].items[0].contains("· easy"),
+        "easy marker on the ladder pick: {:?}",
+        specs[0].items[0]
+    );
+    // from_store keeps the literal GOGO_HOME path (no canonicalization).
+    let store_root = home.join("runtimes/wine-staging/9.0");
+    assert!(
+        plan.runtime.wine.starts_with(&store_root),
+        "default choice resolves to the cached staging tree: {}",
+        plan.runtime.wine.display()
+    );
+}
+
+#[test]
+fn recipe_picker_is_mandatory_for_single_candidate() {
+    // §1 (amended 2026-10-19): even a single candidate is the user's decision
+    // interactively — the picker runs with "none" offered; picking it yields
+    // a recipe-less plan, picking the candidate selects it.
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let runtime_dir = tmp.path().join("runtime");
+    let log = tmp.path().join("wine.log");
+    fake_runtime(&runtime_dir, &log);
+    let installer = tmp.path().join("setup_testgame_1.0.exe");
+    std::fs::write(&installer, b"MZ").unwrap();
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let server =
+        rt.block_on(async {
+            use wiremock::matchers::{method, path, query_param};
+            use wiremock::{Mock, ResponseTemplate};
+            let server = wiremock::MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api/games"))
+                .and(query_param("search", "Test Game"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "count": 1,
+                    "results": [{
+                        "id": 1, "slug": "test-game", "name": "Test Game",
+                        "provider_games": [{"slug": "1", "service": "gog"}]
+                    }]
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/games/test-game"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(
+                    r#"<a href="/api/installers/test-game-gog?format=json">x</a>"#,
+                ))
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/api/installers/test-game-gog"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "count": 1,
+                    "results": [{
+                        "slug": "test-game-gog", "game_slug": "test-game",
+                        "name": "Test Game", "version": "1.0", "runner": "wine",
+                        "user": "alice", "updated_at": "2026-01-01", "gogid": 1,
+                        "script": {"files": [], "installer": []}
+                    }]
+                })))
+                .mount(&server)
+                .await;
+            server
+        });
+
+    let mk_opts = |out: &std::path::Path| MacAppOptions {
+        installer: installer.clone(),
+        name: Some("Test Game".into()),
+        mode: RuntimeMode::Path,
+        runtime_path: Some(runtime_dir.clone()),
+        out_dir: out.to_path_buf(),
+        overwrite: true,
+        recipe: gogo::macapp::RecipeChoice::Auto,
+        runtime_version: None,
+        lutris_base: Some(server.uri()),
+    };
+
+    // (a) pick the candidate.
+    let seen: std::sync::Arc<std::sync::Mutex<Vec<gogo::macapp::PromptSpec>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen2 = seen.clone();
+    let pick: std::sync::Arc<gogo::macapp::PromptFn> = std::sync::Arc::new(move |spec| {
+        seen2.lock().unwrap().push(spec.clone());
+        match spec.kind {
+            gogo::macapp::PromptKind::Fuzzy | gogo::macapp::PromptKind::Select => {
+                Some(gogo::macapp::PromptAnswer::Index(0))
+            }
+            _ => None,
+        }
+    });
+    let opts = mk_opts(&tmp.path().join("out-a"));
+    let plan = macapp::plan(&opts, Some(pick.as_ref()), &mut |_| {}).expect("plan");
+    assert_eq!(
+        plan.recipe.as_ref().unwrap().installer.slug,
+        "test-game-gog"
+    );
+
+    // (b) opt out via "none".
+    let none: std::sync::Arc<gogo::macapp::PromptFn> =
+        std::sync::Arc::new(|spec| match spec.kind {
+            gogo::macapp::PromptKind::Fuzzy | gogo::macapp::PromptKind::Select => {
+                Some(gogo::macapp::PromptAnswer::NoneSelected)
+            }
+            _ => None,
+        });
+    let opts = mk_opts(&tmp.path().join("out-b"));
+    let plan = macapp::plan(&opts, Some(none.as_ref()), &mut |_| {}).expect("plan");
+    assert!(plan.recipe.is_none(), "none must yield a recipe-less plan");
+    drop(guard);
+}

@@ -36,6 +36,9 @@ pub struct PromptSpec {
     pub allow_other: bool,
     /// Offer a "none" entry (skip / opt out).
     pub allow_none: bool,
+    /// Preselected entry (rendered as the "easy" default by Select/Fuzzy
+    /// renderers). Advisory: Input/Confirm kinds ignore it.
+    pub default: usize,
 }
 
 /// The renderer's answer.

@@ -1626,6 +1626,7 @@ async fn mac_app(
                     items: vec![],
                     allow_other: false,
                     allow_none: false,
+                    default: 0,
                 }) == Some(gogo::macapp::PromptAnswer::Confirmed(true))
             }
             None => {
