@@ -272,8 +272,12 @@ pub fn rank(candidates: &mut [LutrisInstaller]) {
             .any(|(_, url)| url.to_lowercase().contains("gog"))
     };
     candidates.sort_by(|a, b| {
-        gog_file(b)
-            .cmp(&gog_file(a))
+        // Design 13 D6: a record carrying the GOG id outranks everything —
+        // our flow is GOG-specific and those scripts cross-check cleanly.
+        b.gogid
+            .is_some()
+            .cmp(&a.gogid.is_some())
+            .then(gog_file(b).cmp(&gog_file(a)))
             .then(b.updated_at.cmp(&a.updated_at))
     });
 }
@@ -538,5 +542,48 @@ mod tests {
             mk("pharaoh", "Pharaoh", &[]),
         ];
         assert_eq!(pick_game(&no_gog, "pharaoh").unwrap().slug, "pharaoh");
+    }
+}
+
+#[cfg(test)]
+mod rank_tests {
+    use super::*;
+
+    fn rec(slug: &str, gogid: Option<&str>, updated: &str, file_url: &str) -> LutrisInstaller {
+        LutrisInstaller {
+            gogid: gogid.map(String::from),
+            slug: slug.into(),
+            game_slug: "game".into(),
+            name: slug.into(),
+            version: "1.0".into(),
+            runner: "wine".into(),
+            author: "u".into(),
+            updated_at: updated.into(),
+            script: serde_json::json!({
+                "files": [{"f": file_url}],
+                "installer": []
+            }),
+        }
+    }
+
+    #[test]
+    fn gogid_outranks_everything() {
+        // Design 13 D6: a record carrying the GOG id sorts first — ahead of
+        // the gog-file heuristic and recency.
+        let mut candidates = vec![
+            rec("no-id-but-gog-file", None, "2026-10-01", "http://gog.com/x"),
+            rec(
+                "gog-tagged-older",
+                Some("1207659046"),
+                "2020-01-01",
+                "http://cdn/x",
+            ),
+            rec("no-id-newer", None, "2026-10-19", "http://cdn/y"),
+        ];
+        rank(&mut candidates);
+        assert_eq!(candidates[0].slug, "gog-tagged-older");
+        // The gog-file heuristic still orders the rest.
+        assert_eq!(candidates[1].slug, "no-id-but-gog-file");
+        assert_eq!(candidates[2].slug, "no-id-newer");
     }
 }

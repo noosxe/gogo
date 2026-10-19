@@ -167,6 +167,18 @@ exec "$DIR/$WINE" "$DIR/$GAME" ${RECIPE_ARGS:-} "$@"
     Ok(path)
 }
 
+/// cnc-ddraw MIT notice (design 13 D5) — written only when the wrapper was
+/// applied to this bundle.
+pub fn write_ddraw_notice(bundle: &Bundle) -> Result<(), MacAppError> {
+    std::fs::write(
+        bundle.resources.join("LICENSE-cnc-ddraw.txt"),
+        "This application bundles cnc-ddraw (https://github.com/FunkyFr3sh/cnc-ddraw),\n\
+         licensed under the MIT License. Copyright (c) FunkyFr3sh and the\n\
+         cnc-ddraw contributors. Applied locally by `gogo mac-app`.\n",
+    )?;
+    Ok(())
+}
+
 /// Licensing notices inside the bundle (design 10 §8): Wine LGPL pointer for
 /// every bundle; an extra GPTK EULA warning when the runtime came from a
 /// user-supplied GPTK mount.
