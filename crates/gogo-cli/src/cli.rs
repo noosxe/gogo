@@ -162,6 +162,9 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Manage Wine runtimes: list the catalog + cache, install, prune
+    /// (design 12 §10).
+    Runtimes(RuntimesArgs),
     /// Print a shell completion script to stdout.
     Completions {
         /// Shell to generate the script for.
@@ -212,6 +215,47 @@ impl From<RuntimeSource> for gogo::macapp::RuntimeMode {
             RuntimeSource::Path => gogo::macapp::RuntimeMode::Path,
         }
     }
+}
+
+/// Field bag for [`Command::Runtimes`] (design 12 §10).
+#[derive(Debug, clap::Args)]
+pub struct RuntimesArgs {
+    #[command(subcommand)]
+    pub cmd: RuntimesCmd,
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub enum RuntimesCmd {
+    /// List catalog entries (live-probed) and cached runtimes.
+    List {
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+        /// Skip live catalog probes.
+        #[arg(long)]
+        offline: bool,
+    },
+    /// Download, verify, and cache a catalog runtime (macOS only).
+    Install {
+        /// Catalog id (see `runtimes list`).
+        #[arg(value_name = "ID")]
+        id: String,
+        /// Pin a release tag (default: latest).
+        #[arg(long)]
+        version: Option<String>,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove cached runtimes from the store.
+    Prune {
+        /// Remove every cached runtime.
+        #[arg(long)]
+        all: bool,
+        /// Remove one catalog id.
+        #[arg(value_name = "ID")]
+        id: Option<String>,
+    },
 }
 
 /// Stable exit codes (`docs/design/03-cli.md` §5).

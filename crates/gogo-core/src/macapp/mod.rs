@@ -14,8 +14,10 @@ pub mod interpret;
 
 use serde_json::Value;
 use std::process::Command;
+pub mod catalog;
 pub mod lutris;
 pub mod runtime;
+pub mod store;
 
 use std::path::{Path, PathBuf};
 

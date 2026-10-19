@@ -84,6 +84,18 @@ pub enum ProgressEvent {
         verb: String,
     },
     /// `mac-app --recipe`: a step was skipped, with the reason.
+    /// `runtimes install`: archive download started (design 12 §10).
+    RuntimeDownloadStarted {
+        id: String,
+        version: String,
+        bytes: u64,
+    },
+    /// `runtimes install`: archive downloaded, verified, extracted, probed,
+    /// and committed to the store.
+    RuntimeDownloadFinished {
+        id: String,
+        version: String,
+    },
     RecipeSkipped {
         verb: String,
         reason: String,
@@ -153,6 +165,8 @@ mod render_tests {
             ProgressEvent::RecipeMiss { .. } => "RecipeMiss",
             ProgressEvent::RecipeStep { .. } => "RecipeStep",
             ProgressEvent::RecipeSkipped { .. } => "RecipeSkipped",
+            ProgressEvent::RuntimeDownloadStarted { .. } => "RuntimeDownloadStarted",
+            ProgressEvent::RuntimeDownloadFinished { .. } => "RuntimeDownloadFinished",
         }
     }
 

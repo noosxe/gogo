@@ -180,6 +180,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
             )
             .await
         }
+        Command::Runtimes(args) => runtimes_cmd(args).await,
         Command::Completions { shell } => completions(shell),
     }
 }
@@ -1657,6 +1658,162 @@ async fn mac_app(
     Ok(cli::exit::OK)
 }
 
+// — runtimes (design 12 §4/§10): Wine runtime catalog + store management —
+
+/// `gogo runtimes list|install|prune`. `list` live-probes available catalog
+/// entries with a short client timeout (`--offline` skips); `install` is
+/// macOS-only — runtimes exist to feed `mac-app`.
+async fn runtimes_cmd(args: crate::cli::RuntimesArgs) -> Result<i32, AppError> {
+    use gogo::macapp::{catalog, store};
+
+    match args.cmd {
+        crate::cli::RuntimesCmd::List { json, offline } => {
+            let cached = store::load_manifest();
+            let http = if offline {
+                None
+            } else {
+                catalog::http_client().ok()
+            };
+            let mut json_rows: Vec<serde_json::Value> = Vec::new();
+            let mut table = comfy_table::Table::new();
+            table.set_header(vec!["ID", "STATUS", "LATEST", "SIZE", "ARCH", "CACHED"]);
+            for entry in catalog::entries() {
+                let latest = match &http {
+                    Some(http) if entry.discovery.is_some() => {
+                        catalog::probe(entry, None, http, catalog::GITHUB_API)
+                            .await
+                            .ok()
+                    }
+                    _ => None,
+                };
+                let status = match &entry.status {
+                    catalog::Status::Available => "available".to_string(),
+                    catalog::Status::ConsentRequired => "consent (Apple EULA)".to_string(),
+                    catalog::Status::Tool => "tool (design 12 §8)".to_string(),
+                    catalog::Status::Gone { since, .. } => format!("gone since {since}"),
+                };
+                let mine: Vec<&store::ManifestEntry> =
+                    cached.iter().filter(|m| m.id == entry.id).collect();
+                let cached_col = if mine.is_empty() {
+                    "-".to_string()
+                } else {
+                    mine.iter()
+                        .map(|m| m.version.clone())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                table.add_row(vec![
+                    entry.id.to_string(),
+                    status.clone(),
+                    latest
+                        .as_ref()
+                        .map(|l| l.tag.clone())
+                        .unwrap_or_else(|| "-".into()),
+                    latest
+                        .as_ref()
+                        .map(|l| gogo::fmt::human_size(l.size))
+                        .unwrap_or_else(|| "-".into()),
+                    entry.arch.to_string(),
+                    cached_col,
+                ]);
+                json_rows.push(serde_json::json!({
+                    "id": entry.id,
+                    "status": status,
+                    "license": entry.license,
+                    "arch": entry.arch,
+                    "latest": latest.as_ref().map(|l| serde_json::json!({
+                        "tag": l.tag,
+                        "bytes": l.size,
+                    })),
+                    "cached": mine.iter().map(|m| serde_json::json!({
+                        "version": m.version,
+                        "bytes": m.bytes,
+                        "fetched_at": m.fetched_at,
+                    })).collect::<Vec<_>>(),
+                }));
+                if let catalog::Status::Gone { story, .. } = &entry.status {
+                    eprintln!("note: {}: {story}", entry.id);
+                }
+            }
+            if json {
+                println!("{}", serde_json::json!({ "entries": json_rows }));
+            } else {
+                println!("{table}");
+            }
+            Ok(cli::exit::OK)
+        }
+        crate::cli::RuntimesCmd::Install { id, version, json } => {
+            if !cfg!(target_os = "macos") {
+                eprintln!(
+                    "gogo: `gogo runtimes install` is macOS-only — runtimes feed `gogo mac-app`"
+                );
+                return Ok(cli::exit::USAGE);
+            }
+            let Some(entry) = catalog::find(&id) else {
+                eprintln!("gogo: unknown runtime id '{id}' — see `gogo runtimes list`");
+                return Ok(cli::exit::USAGE);
+            };
+            let http = catalog::http_client()?;
+            let m = store::install(
+                entry,
+                version.as_deref(),
+                &http,
+                catalog::GITHUB_API,
+                &mut |ev| {
+                    emit_macapp_event(ev, false);
+                },
+            )
+            .await?;
+            let root = store::tree_root(&m);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "id": m.id,
+                        "version": m.version,
+                        "sha256": m.sha256,
+                        "bytes": m.bytes,
+                        "path": root,
+                    })
+                );
+            } else {
+                println!(
+                    "cached {} {} ({}) at {}",
+                    m.id,
+                    m.version,
+                    gogo::fmt::human_size(m.bytes),
+                    root.display()
+                );
+            }
+            Ok(cli::exit::OK)
+        }
+        crate::cli::RuntimesCmd::Prune { all, id } => {
+            let ids: Vec<String> = if all {
+                store::load_manifest()
+                    .iter()
+                    .map(|m| m.id.clone())
+                    .collect()
+            } else {
+                match id {
+                    Some(i) => vec![i],
+                    None => {
+                        eprintln!("gogo: `gogo runtimes prune` needs an <id> or --all");
+                        return Ok(cli::exit::USAGE);
+                    }
+                }
+            };
+            if ids.is_empty() {
+                println!("nothing to prune");
+                return Ok(cli::exit::OK);
+            }
+            for path in store::prune(&ids)? {
+                println!("pruned {}", path.display());
+            }
+            Ok(cli::exit::OK)
+        }
+    }
+}
+
 /// mac-app events → NDJSON (`--json-progress`) or compact stderr one-liners.
 fn emit_macapp_event(ev: &gogo::engine::events::ProgressEvent, json_progress: bool) {
     if json_progress {
@@ -1676,6 +1833,11 @@ fn emit_macapp_event(ev: &gogo::engine::events::ProgressEvent, json_progress: bo
         Ev::BundleAssembled => Some("bundle assembled".into()),
         Ev::Codesigned => Some("codesigned (ad-hoc)".into()),
         Ev::Warn { message } => Some(format!("note: {message}")),
+        Ev::RuntimeDownloadStarted { id, version, bytes } => Some(format!(
+            "downloading {id} {version} ({})",
+            gogo::fmt::human_size(*bytes)
+        )),
+        Ev::RuntimeDownloadFinished { id, version } => Some(format!("{id} {version} cached")),
         _ => None,
     };
     if let Some(l) = line {
