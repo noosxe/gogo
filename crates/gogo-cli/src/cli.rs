@@ -147,6 +147,11 @@ pub enum Command {
         /// Output directory for <name>.app (default: current directory).
         #[arg(long, value_name = "DIR")]
         out: Option<std::path::PathBuf>,
+        /// Lutris recipe: auto (default; live search + selection), none,
+        /// a Lutris installer slug, or a downloaded script JSON path
+        /// (docs/design/11 §1).
+        #[arg(long)]
+        recipe: Option<String>,
         /// Skip the size confirmation; overwrite an existing bundle.
         #[arg(long)]
         yes: bool,

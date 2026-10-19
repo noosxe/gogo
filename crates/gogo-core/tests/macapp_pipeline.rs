@@ -88,6 +88,7 @@ fn full_pipeline_with_fake_runtime() {
         runtime_path: Some(runtime_dir.clone()),
         out_dir: out.clone(),
         overwrite: true,
+        recipe: Default::default(),
     };
 
     let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -110,7 +111,7 @@ fn full_pipeline_with_fake_runtime() {
     assert_eq!(plan.runtime.version, "wine-9.0-fake");
     assert_eq!(plan.installer.bin_parts.len(), 1);
 
-    let bytes = macapp::execute(&plan, CodesignPolicy::Skip, &mut emit).expect("execute");
+    let bytes = macapp::execute(&plan, CodesignPolicy::Skip, None, &mut emit).expect("execute");
     assert!(bytes > 0);
 
     // Bundle layout (design 10 §2.5–2.7).
@@ -188,11 +189,12 @@ fn execute_refuses_to_clobber_existing_bundle() {
         runtime_path: Some(runtime_dir),
         out_dir: tmp.path().to_path_buf(),
         overwrite: true,
+        recipe: Default::default(),
     };
     let plan = macapp::plan(&opts, &mut |_| {}).expect("plan");
     // Pre-create the bundle root: execute must refuse.
     std::fs::create_dir_all(&plan.bundle.root).unwrap();
-    let err = macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).unwrap_err();
+    let err = macapp::execute(&plan, CodesignPolicy::Skip, None, &mut |_| {}).unwrap_err();
     assert!(matches!(
         err,
         gogo::macapp::MacAppError::BundleExists { .. }

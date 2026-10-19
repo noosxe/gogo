@@ -36,6 +36,31 @@ pub struct GogTask {
 /// Find the exe to launch: scan `dir` (and one nested level, for DLC roots)
 /// for `goggame-*.info`, pick the primary game `FileTask`, resolve relative to
 /// the info file, and require the target to exist on disk.
+/// All GOG game ids found in `goggame-<id>.info` file names (base + DLCs).
+pub fn gog_game_ids(dir: &Path) -> Vec<String> {
+    let mut ids = collect_info_files(dir, 0)
+        .iter()
+        .filter_map(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_prefix("goggame-"))
+                .and_then(|n| n.strip_suffix(".info"))
+                .map(str::to_string)
+        })
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// The `gameName` from any `goggame-*.info` in `dir` (first hit).
+pub fn game_name(dir: &Path) -> Option<String> {
+    collect_info_files(dir, 0).iter().find_map(|p| {
+        let info: GogGameInfo = serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()?;
+        info.name
+    })
+}
+
 pub fn find_entry_point(dir: &Path) -> Result<PathBuf, MacAppError> {
     let infos = collect_info_files(dir, 0);
     if infos.is_empty() {
