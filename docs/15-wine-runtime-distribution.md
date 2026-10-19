@@ -126,6 +126,7 @@ Repo: `https://github.com/Gcenx/macOS_Wine_builds` — "Official Winehq macOS Pa
 | 2026-09-25 | macOS_Wine_builds tag 11.18 published |
 | 2026-10-18 | GPTK 4.0 beta 3 dmg analysis — no wine inside |
 | 2026-10-19 | wine-crossover repo + releases 404; tap narrowed to GPTK-only cask |
+| 2026-10-19 | Gcenx 11.x staging + stable (new WOW64: `i386-windows` fakes, no 32on64 modules): **32-bit GOG installers crash under Rosetta** — `err:virtual:virtual_setup_exception stack overflow`, verified standalone with `setup_pharaoh_gold_2.1.0.15.exe` (PE32/i386) on both builds; plain 32-bit PE (`syswow64/cmd.exe`) runs fine, so it is the InnoSetup-under-new-WOW64-on-Rosetta path. GPTK (CrossOver `x86_32on64-unix` modules) installs the same installer without issue — the CrossOver lineage stays the 32-bit lane |
 
 ## 8. Audits — status (2026-10-19)
 

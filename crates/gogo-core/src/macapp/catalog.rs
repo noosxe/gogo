@@ -74,7 +74,7 @@ static ENTRIES: &[CatalogEntry] = &[
         redistributable: true,
         min_macos: None,
         arch: "x86_64 (Rosetta 2 on Apple Silicon)",
-        note: "recommended default — gaming patches; WoW64 runs 32+64-bit; gecko+mono bundled",
+        note: "recommended default — gaming patches; gecko+mono bundled. Live                2026-10-19: 32-bit GOG installers (InnoSetup PE32) crash under                Rosetta new-WOW64 (virtual_setup_exception stack overflow); use                the GPTK lane for those",
     },
     CatalogEntry {
         id: "wine-devel",
@@ -89,7 +89,7 @@ static ENTRIES: &[CatalogEntry] = &[
         redistributable: true,
         min_macos: None,
         arch: "x86_64 (Rosetta 2 on Apple Silicon)",
-        note: "WineHQ devel train",
+        note: "WineHQ devel train. Live 2026-10-19: 32-bit GOG installers crash                under Rosetta new-WOW64; use the GPTK lane for those",
     },
     CatalogEntry {
         id: "wine-stable",
