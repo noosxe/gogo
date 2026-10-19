@@ -777,8 +777,31 @@ pub fn execute(
 
     let install_dir = plan.bundle.prefix.join("drive_c/GOG").join(&plan.slug);
 
-    // Recipe phase (design 11 §5): live search + selection + steps.
-    let recipe = run_recipe_phase(plan, &bundled_wine, &install_dir, emit)?;
+    // Recipe phase (design 11 §5): live search + selection + steps. A
+    // search-discovered recipe is an advisory enhancement — a hard failure
+    // after the game installed downgrades to a loud warn + recipe-less
+    // continuation instead of aborting into a launcher-less half-bundle
+    // (live finding 2026-10-19: "damaged or incomplete" .app). Pinned
+    // recipes stay fatal (design 11 §7).
+    let pinned = plan.recipe.as_ref().is_some_and(|sel| !sel.from_search);
+    let recipe = match run_recipe_phase(plan, &bundled_wine, &install_dir, emit) {
+        Ok(outcome) => outcome,
+        Err(e) if !pinned => {
+            let slug = plan
+                .recipe
+                .as_ref()
+                .map(|sel| sel.installer.slug.clone())
+                .unwrap_or_default();
+            emit(&ProgressEvent::Warn {
+                message: format!(
+                    "recipe {slug} failed: {e} — continuing without it \
+                     (game installed, community patches not applied)"
+                ),
+            });
+            None
+        }
+        Err(e) => return Err(e),
+    };
     let entry = match &recipe {
         Some(outcome) if outcome.exe.is_some() => outcome.exe.clone().unwrap(),
         _ => info::find_entry_point(&install_dir)?,

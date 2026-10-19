@@ -152,7 +152,13 @@ impl RecipeCtx {
         out
     }
 
-    /// Canonicalise and require the path to stay inside the bundle.
+    /// Canonicalise and require the path to stay inside the bundle **or the
+    /// per-run recipe cache**. `$CACHE` is a first-class working root that
+    /// deliberately lives outside the bundle (design 11 §4: `files:` download
+    /// → `extract` next to the source → `merge` into the game dir) — the
+    /// bundle-only check broke exactly that flow (live finding 2026-10-19:
+    /// `pharaoh-cd-cnc-ddraw` aborting the conversion after a successful
+    /// install, leaving a launcher-less half-bundle macOS calls "damaged").
     pub fn scope(&self, p: &Path) -> Result<PathBuf, String> {
         let canon = p
             .canonicalize()
@@ -162,14 +168,18 @@ impl RecipeCtx {
             .canonicalize()
             .map_err(|e| format!("cannot resolve bundle: {e}"))?;
         if canon.starts_with(&bundle) {
-            Ok(canon)
-        } else {
-            Err(format!(
-                "path escapes the bundle: {} (bundle: {})",
-                canon.display(),
-                bundle.display()
-            ))
+            return Ok(canon);
         }
+        if let Ok(cache) = self.cache.canonicalize()
+            && canon.starts_with(&cache)
+        {
+            return Ok(canon);
+        }
+        Err(format!(
+            "path escapes the bundle and recipe cache: {} (bundle: {})",
+            canon.display(),
+            bundle.display()
+        ))
     }
 }
 
@@ -580,42 +590,102 @@ impl Executor<'_> {
 pub fn extract_archive(archive: &Path, dst: &Path) -> Result<(), MacAppError> {
     std::fs::create_dir_all(dst)?;
     let name = archive.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    let lower = name.to_lowercase();
     let err = |what: &str, e: String| MacAppError::Recipe(format!("extract {what}: {e}"));
-    if lower.ends_with(".zip") {
-        let file = std::fs::File::open(archive).map_err(|e| err("zip", e.to_string()))?;
-        let mut zip = zip::ZipArchive::new(file).map_err(|e| err("zip", e.to_string()))?;
-        for i in 0..zip.len() {
-            let mut entry = zip.by_index(i).map_err(|e| err("zip", e.to_string()))?;
-            let Some(rel) = entry.enclosed_name() else {
-                return Err(err("zip", "unsafe entry path".into()));
-            };
-            let out = dst.join(rel);
-            if entry.is_dir() {
-                std::fs::create_dir_all(&out)?;
-            } else {
-                if let Some(parent) = out.parent() {
-                    std::fs::create_dir_all(parent)?;
+    // Recipe-cache downloads are stored under their bare `files:` id
+    // (`$CACHE/update`), so the filename carries no extension — sniff the
+    // container by magic bytes first, keep the extension as fallback
+    // (live finding 2026-10-19: pharaoh-cd-cnc-ddraw patch chain).
+    let kind = match sniff_kind(archive) {
+        Some(k) => k,
+        None => ext_kind(name),
+    };
+    match kind {
+        ArchiveKind::Zip => {
+            let file = std::fs::File::open(archive).map_err(|e| err("zip", e.to_string()))?;
+            let mut zip = zip::ZipArchive::new(file).map_err(|e| err("zip", e.to_string()))?;
+            for i in 0..zip.len() {
+                let mut entry = zip.by_index(i).map_err(|e| err("zip", e.to_string()))?;
+                let Some(rel) = entry.enclosed_name() else {
+                    return Err(err("zip", "unsafe entry path".into()));
+                };
+                let out = dst.join(rel);
+                if entry.is_dir() {
+                    std::fs::create_dir_all(&out)?;
+                } else {
+                    if let Some(parent) = out.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    let mut out_file = std::fs::File::create(&out)?;
+                    std::io::copy(&mut entry, &mut out_file)?;
                 }
-                let mut out_file = std::fs::File::create(&out)?;
-                std::io::copy(&mut entry, &mut out_file)?;
             }
+            Ok(())
         }
-        Ok(())
-    } else if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
-        extract_tar(archive, dst, Some(flate2::read::GzDecoder::new))
-    } else if lower.ends_with(".tar.xz") {
-        extract_tar(archive, dst, Some(xz2::read::XzDecoder::new))
-    } else if lower.ends_with(".tar") {
-        extract_tar(archive, dst, None::<fn(std::fs::File) -> std::fs::File>)
-    } else if lower.ends_with(".7z") {
-        gogo_shims::extract_7z(archive, dst, &[]).map_err(|e| err("7z", e))?;
-        Ok(())
-    } else {
-        Err(MacAppError::Recipe(format!(
+        ArchiveKind::TarGz => extract_tar(archive, dst, Some(flate2::read::GzDecoder::new)),
+        ArchiveKind::TarXz => extract_tar(archive, dst, Some(xz2::read::XzDecoder::new)),
+        ArchiveKind::Tar => extract_tar(archive, dst, None::<fn(std::fs::File) -> std::fs::File>),
+        ArchiveKind::SevenZ => {
+            gogo_shims::extract_7z(archive, dst, &[]).map_err(|e| err("7z", e))?;
+            Ok(())
+        }
+        ArchiveKind::Unknown => Err(MacAppError::Recipe(format!(
             "extract: unsupported archive format '{name}' (zip/tar/7z; rar stays v2)"
-        )))
+        ))),
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArchiveKind {
+    Zip,
+    TarGz,
+    TarXz,
+    Tar,
+    SevenZ,
+    Unknown,
+}
+
+fn ext_kind(name: &str) -> ArchiveKind {
+    let lower = name.to_lowercase();
+    if lower.ends_with(".zip") {
+        ArchiveKind::Zip
+    } else if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
+        ArchiveKind::TarGz
+    } else if lower.ends_with(".tar.xz") {
+        ArchiveKind::TarXz
+    } else if lower.ends_with(".tar") {
+        ArchiveKind::Tar
+    } else if lower.ends_with(".7z") {
+        ArchiveKind::SevenZ
+    } else {
+        ArchiveKind::Unknown
+    }
+}
+
+/// Container detection by leading magic bytes (and `ustar` at offset 257 for
+/// plain tar). Returns `None` when the bytes match nothing known — the caller
+/// falls back to the filename extension.
+fn sniff_kind(archive: &Path) -> Option<ArchiveKind> {
+    use std::io::Read as _;
+    let mut f = std::fs::File::open(archive).ok()?;
+    let mut head = [0u8; 262];
+    let n = f.read(&mut head).ok()?;
+    let h = &head[..n];
+    if h.starts_with(b"PK\x03\x04") || h.starts_with(b"PK\x05\x06") {
+        return Some(ArchiveKind::Zip);
+    }
+    if h.starts_with(b"7z\xBC\xAF\x27\x1C") {
+        return Some(ArchiveKind::SevenZ);
+    }
+    if h.starts_with(b"\x1F\x8B") {
+        return Some(ArchiveKind::TarGz);
+    }
+    if h.starts_with(b"\xFD7zXZ\x00") {
+        return Some(ArchiveKind::TarXz);
+    }
+    if h.len() >= 262 && &h[257..262] == b"ustar" {
+        return Some(ArchiveKind::Tar);
+    }
+    None
 }
 
 fn extract_tar<R: std::io::Read + 'static>(
@@ -825,7 +895,7 @@ mod tests {
     }
 
     #[test]
-    fn scope_rejects_bundle_escapes() {
+    fn scope_rejects_escapes_but_allows_the_recipe_cache() {
         let tmp = tempfile::tempdir().unwrap();
         let c = ctx(tmp.path());
         let outside = tmp.path().join("outside.txt");
@@ -834,6 +904,33 @@ mod tests {
         let inside = c.bundle.join("Resources/prefix/drive_c/GOG/game/f.txt");
         std::fs::write(&inside, b"x").unwrap();
         assert!(c.scope(&inside).is_ok());
+        // $CACHE is a legal working root outside the bundle (design 11 §4):
+        // extract-then-merge flows target it.
+        std::fs::create_dir_all(&c.cache).unwrap();
+        let cached = c.cache.join("cnc-ddraw.zip");
+        std::fs::write(&cached, b"x").unwrap();
+        assert!(c.scope(&cached).is_ok());
+        assert!(c.scope(&c.cache).is_ok());
+    }
+
+    #[test]
+    fn extract_sniffs_extensionless_cache_downloads() {
+        // files: ids land in the cache with no extension (live finding
+        // 2026-10-19): the container must be detected by magic bytes.
+        let tmp = tempfile::tempdir().unwrap();
+        let c = ctx(tmp.path());
+        std::fs::create_dir_all(&c.cache).unwrap();
+        let src_zip = c.cache.join("update"); // bare files: id, no .zip
+        let file = File::create(&src_zip).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        use std::io::Write as _;
+        zip.start_file("enhancepack.exe", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(b"MZ").unwrap();
+        zip.finish().unwrap();
+        let dst = c.cache.join("out");
+        extract_archive(&src_zip, &dst).unwrap();
+        assert_eq!(std::fs::read(dst.join("enhancepack.exe")).unwrap(), b"MZ");
     }
 
     #[test]

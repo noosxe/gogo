@@ -189,8 +189,15 @@ warn, pipeline continues recipe-less.
 - **No host shell by default**: `execute` steps are skipped and counted;
   `--allow-recipe-exec` unlocks them (v1.1). Every other step runs through
   typed executors (runtime argv, winetricks argv, std::fs, downloader).
-- **Bundle-scoped filesystem**: canonicalised paths checked against
-  `$BUNDLE`; `..` and symlink escapes skip the step (fatal when pinned).
+- **Rooted filesystem**: canonicalised paths checked against `$BUNDLE` ∪
+  `$CACHE` — the per-run recipe cache is a first-class working root outside
+  the bundle by §4 (`files:` download → `extract` → `merge`); escapes past
+  both roots fail the step (fatal when pinned).
+- **Advisory recipes degrade, pinned recipes abort** (amended 2026-10-19):
+  a hard failure in the recipe phase *after* the game installed downgrades
+  to a loud `Warn` + recipe-less continuation for search-discovered recipes
+  — never a launcher-less half-bundle (macOS reads those as "damaged").
+  Pinned (`--recipe`) failures stay fatal per the contract above.
 - **Downloads** go to the gogo cache (never executed from there except by
   wineexec through the runtime) and carry the script's checksum when present.
 - Registry writes are prefix-local by mechanism (`WINEPREFIX=$PREFIX`).
