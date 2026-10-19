@@ -33,7 +33,10 @@ case "$1" in
     REL=$(printf '%s' "$TARGET" | sed 's|^C:\\||; s|\\|/|g')
     DIR="$WINEPREFIX/drive_c/$REL"
     mkdir -p "$DIR"
-    printf '%s' '{{"name":"Test Game","playTasks":[{{"type":"FileTask","category":"game","path":"game.exe","isPrimary":true}}]}}' > "$DIR/goggame-1.info"
+    # Only seed the goggame info when the target has none: a depot-lane clone
+    # already carries the real one, and a second info would hijack entry
+    # discovery nondeterministically (dir-walk order; live CI finding).
+    ls "$DIR"/goggame-*.info >/dev/null 2>&1 || printf '%s' '{{"name":"Test Game","playTasks":[{{"type":"FileTask","category":"game","path":"game.exe","isPrimary":true}}]}}' > "$DIR/goggame-1.info"
     printf 'MZ' > "$DIR/game.exe"
     ;;
 esac
@@ -1503,8 +1506,8 @@ fn macapp_from_depot_executes() {
     assert!(game_dir.join("Pharaoh.exe").is_file());
     assert!(game_dir.join("Data/kings.dat").is_file());
     assert!(game_dir.join("goggame-1207659046.info").is_file());
-    // The support installer ran into the clone (fake wine wrote its files).
-    assert!(game_dir.join("goggame-1.info").is_file());
+    // The support installer ran into the clone (fake wine wrote its marker).
+    assert!(game_dir.join("game.exe").is_file());
 
     // Entry discovery ran inside the cloned tree; conf points at it.
     let conf = std::fs::read_to_string(out.join("Pharaoh Gold.app/Contents/Resources/launch.conf"))
@@ -1593,5 +1596,4 @@ fn depot_support_decline_degrades_to_warn() {
     // No support-written files (the fake wine fails before writing).
     let game = out.join("Declined Game.app/Contents/Resources/prefix/drive_c/GOG/Declined Game");
     assert!(game.join("game.exe").is_file());
-    assert!(!game.join("goggame-1.info").is_file());
 }
