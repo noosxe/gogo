@@ -1,13 +1,14 @@
-# 14 — Recipe Systems (per-game community knowledge for making games run)
+# 14 — Recipe Sources (per-game community knowledge for making games run)
 
-**Research date:** 2026-10-19
+**Research date:** 2026-10-19 (Lutris API live-probed same day)
 **Method:** Primary documentation and source review of the established per-game
-configuration systems: Lutris installer scripts, Winetricks verbs, Bottles
-dependency manifests, PlayOnLinux/Phoenicis scripts, Porting Kit wrappers and
-CrossOver CrossTies. Follow-up to docs/13 (macOS app bundles): `gogo mac-app`
-works end-to-end for well-behaved titles (live-verified with Pharaoh Gold,
-2026-10-18); this doc surveys how the community encodes the knowledge that
-makes *everything else* work, and what gogo should adopt.
+configuration systems (Lutris installer scripts, Winetricks verbs, Bottles
+dependency manifests, PlayOnLinux/Phoenicis scripts, Porting Kit wrappers,
+CrossOver CrossTies) **plus live probes of the lutris.net REST API**. Follow-up
+to docs/13 (macOS app bundles): `gogo mac-app` works end-to-end for
+well-behaved titles (live-verified with Pharaoh Gold, 2026-10-18); this doc
+establishes that gogo should **consume the existing Lutris installer corpus**
+rather than invent a recipe format of its own.
 
 ## 1. The problem: installers succeed, games still fail
 
@@ -16,118 +17,104 @@ does not get right, for a large fraction of the Windows catalogue:
 
 | Failure class | Typical fix | Example |
 |---|---|---|
-| Old DirectDraw/renderer engines | `ddraw.dll` override (`native,builtin`) or registry renderer pin | 1997–2003 isometric titles |
-| Installer dies silently under `/VERYSILENT` | add undocumented GOG flag `/NOGUI`, use `/SILENT` | Cuphead, SW: Battlefront II (encoded in Lutris GOG scripts) |
+| Old DirectDraw/renderer engines | `ddraw.dll` override (`native,builtin`) or a wrapper like cnc-ddraw | 1997–2003 isometric titles |
+| Installer dies silently under `/VERYSILENT` | undocumented GOG flag `/NOGUI`, use `/SILENT` | Cuphead, SW: Battlefront II (encoded in Lutris GOG scripts) |
 | Wrong default resolution / windowed | registry values under the game's `HKCU` key | Impressions games (Pharaoh/Caesar), LucasArts |
 | Needs a newer C runtime / d3dcompiler | `vcrun2019`, `d3dx9` redistribute | post-2015 titles |
 | Launcher stub exits instead of game | launch the real exe with args | GOG Galaxy-dependent launchers |
-| ESYNC/Msync, GPU quirks | env vars (`WINEESYNC`, `MESA_*,` `__GL_*`) | varied |
+| ESYNC/Msync, GPU quirks | env vars (`WINEESYNC`, `MESA_*`, `__GL_*`) | varied |
 
-None of this is expressible today: `gogo mac-app` has exactly one strategy.
-The knowledge exists — it lives in per-game community databases. The question
-is which encoding and distribution model gogo should reuse.
+The community has already encoded most of this knowledge — per game — in
+Lutris installer scripts. gogo should read it, not rebuild it.
 
 ## 2. Systems survey
 
-### 2.1 Lutris installer scripts (the corpus leader)
+### 2.1 Lutris installer scripts (the corpus to consume)
 
-Lutris games are configured by community-contributed YAML scripts
-(`docs/installers.rst` in the Lutris repo, read 2026-10-19):
+Community-contributed YAML scripts (`docs/installers.rst` in the Lutris repo):
 
-- **Sections:** `game` (exe, args, prefix, arch, working_dir), `files`
-  (download/user-supplied inputs), `installer` (ordered steps), `wine`
-  (prefix options, `overrides`), `system` (env vars).
-- **Step vocabulary (declarative):** `task` (runner tasks: `wineexec`,
-  `create_prefix`, …), `execute`, `extract`, `merge`/`copy`, `move`,
-  `write_file`, `write_config`, `chmodx`, `insert_disc`, … — plus arbitrary
+- **Sections:** `game` (exe, args, prefix, arch), `files` (download /
+  user-supplied inputs), `installer` (ordered steps), `wine` (prefix options,
+  `overrides`), `system` (env), `variables` (custom substitutions).
+- **Step vocabulary:** `task` (runner tasks: `wineexec`, `create_prefix`,
+  `winetricks`, …), `execute`, `extract`, `merge`/`copy`, `move`,
+  `write_file`, `write_config`, `chmodx`, … — plus arbitrary
   `execute: command:` shell.
 - **Variables:** `$GAMEDIR`, `$CACHE`, `$USER`, `$RESOLUTION[_WIDTH|_HEIGHT]`,
-  `$WINEBIN`, `$INPUT_*`, script-defined `variables:`, `$SCRIPTDIR`.
-- **Distribution:** lutris.net API serves installers by slug; the client fetches
-  and runs them. Thousands of GOG games have scripts; the GOG ones drive GOG's
-  own offline installers through `wineexec` and encode the `/NOGUI`-class flags.
-- **Trust model: none.** Scripts are arbitrary YAML-embedded commands running
-  with user privileges. Lutris is a GUI app where users accept this; a CLI
-  copying that model wholesale would be a remote-code-execution channel.
+  `$WINEBIN`, `$INPUT_*`, `$SCRIPTDIR`.
+- **Distribution:** lutris.net API + website; thousands of GOG games have
+  scripts driving GOG's own offline installers, including the `/NOGUI`-class
+  flag lore.
 
-**Takeaways:** the YAML shape, the variable substitution model, and the
-per-GOG-installer flag lore are exactly right; the arbitrary-shell escape
-hatch is exactly wrong for gogo.
+#### 2.1.1 Live API verification (2026-10-19)
+
+| Probe | Result |
+|---|---|
+| `GET /api/games?search=pharaoh&with-installers=True` | Filtered results (client's own discovery call, `lutris/api.py::search_games`); records carry `provider_games[]` with `{"service": "gog", "slug": "<GOG product id>"}` — Pharaoh → `1207659046` |
+| `GET /api/installers/<installer-slug>` | Full record: `script` as a **JSON object** (not YAML string), plus `runner`, `version`, `gogid`, `gogslug`, `published`, `updated_at` — verified with `quake-darkplaces` |
+| Game page `lutris.net/games/<slug>` | Lists community installers with **`Download script: /api/installers/<installer-slug>?format=json`** links; Pharaoh has exactly one: `pharaoh-cd-cnc-ddraw` (Wine + cnc-ddraw — the ddraw-override failure class of §1). Also a `lutris:gog:<gogid>` auto-GOG entry, which is Lutris' own gogdl flow — gogo already does that natively |
+| `GET /api/installers?game=…` / `?game_slug=…` / `?gogid=…` | **Filters ignored** — returns the whole corpus (15592 records). No server-side game→installers filter exists |
+| `GET /api/installers/game/<slug>` (client `INSTALLER_URL % game_slug`) | HTTP 200 with `count: 0` for game slugs (`quake`, `pharaoh`) — resolves installer slugs only (`quake-darkplaces` → 1) |
+
+**Consequence for gogo:** discovery = name search + `provider_games` GOG-id
+match; enumeration = the game page's `Download script` links (stable,
+machine-parseable hrefs); fetch = `GET /api/installers/<installer-slug>`.
 
 ### 2.2 Winetricks
 
-The canonical per-game fix database. Each verb is a **shell function**
-(`w_metadata` + `w_<verb>_load`) in one giant script — arbitrary code by
-construction, executed inside the user's prefix.
+The canonical per-game fix database; each verb is a **shell function** —
+arbitrary code by construction. Do not adopt the format. Do steal the
+taxonomy (`dlls`, `fonts`, `runtimes`, `settings`): Lutris scripts call
+winetricks by name, and a future gogo can bridge those verbs to a
+user-installed winetricks (opt-in; gogo never ships it — docs/13 §3).
 
-- **Takeaway:** do not adopt the format. Do steal the *taxonomy*: winetricks
-  verbs are effectively the industry-standard names for "what a game needs"
-  (`dlls`, `fonts`, `runtimes`, `settings`). A gogo recipe should be able to
-  express the same needs declaratively; bridging to the real winetricks
-  binary (when the user has it) is a future opt-in, not a v1 dependency
-  (gogo never ships or downloads winetricks — licensing stance of docs/13 §3).
+### 2.3 Bottles dependency manifests
 
-### 2.3 Bottles dependency manifests (closest distribution model)
+`bottlesdevs/dependencies`: per-component JSON manifests, pinned URL +
+checksum, interpreted client-side. **Relevant later**: when gogo grows
+redistributable steps (`vcrun2019` etc.), this is the pattern to copy.
 
-`bottlesdevs/dependencies` is a community GitHub repo of per-component JSON
-manifests (`Name`, `Version`, `Executable`, `Steps`, …). The Bottles client
-fetches the repo and installs components by pinned URL + checksum. No shell —
-the client interprets a small step vocabulary, and binary downloads are
-checksum-pinned.
+### 2.4 PlayOnLinux / Phoenicis, Porting Kit, CrossOver
 
-- **Takeaways:** GitHub-repo-as-registry with client-side interpretation is a
-  proven, low-infrastructure model (no API to run, forks/PRs for review, full
-  history). Checksum-pinned binary fetching is the right pattern for the
-  eventual redistributable support — deferred in v1 (see §4).
+Repo-of-per-app-files shape with an arbitrary-code script engine (POL/Phoenicis),
+opaque GUI wrappers (Porting Kit), proprietary XML recipes (CrossOver
+CrossTies). Nothing to adopt; they validate the per-game-recipe premise.
 
-### 2.4 PlayOnLinux / Phoenicis scripts
-
-Per-app scripts in a community git repo, but the script *engine* is a
-JS/DSL-like interpreter — arbitrary logic again, plus tight coupling to the
-GUI wizard model. Nothing to adopt beyond the "repo of per-app files" shape.
-
-### 2.5 Porting Kit wrappers / CrossOver CrossTies
-
-Porting Kit distributes opaque per-game wrapper "ports" (closed format, GUI
-install — docs/13 §1). CrossOver's CrossTies are per-application XML install
-recipes with a versioned, undocumented-ish vocabulary, proprietary and tied to
-CrossOver's runtime. Not usable, but they validate the premise: the commercial
-standard is exactly "per-game declarative recipe interpreted by the client".
-
-## 3. What gogo adopts
+## 3. Decision: consume Lutris, interpret a declarative subset
 
 | Aspect | Choice | Source |
 |---|---|---|
-| Format | YAML, `schema: gogo-recipe/1`, one file per game | Lutris (2.1) |
-| Key | **GOG game id** (from `goggame-<id>.info`, which gogo already parses — design 10 §2); slug as informational fallback | gogo-native |
-| Vocabulary | small whitelisted verb set (registry, file ops, env/args/exe, installer flags) — **no arbitrary command execution in v1** | Bottles model, not Lutris's `execute` |
-| Variables | `$PREFIX`, `$INSTALL`, `$BUNDLE`, `$SLUG` | Lutris, reduced to prefix-scoped reality |
-| Distribution | community git repo (`noosxe/gogo-recipes`), fetched as a branch tarball into a local cache; local config dir overrides for authoring | Bottles (2.3) |
-| Binary downloads | **out of scope v1** (no third-party fetches); when added: pinned URL + sha256 + explicit license note per Bottles | docs/13 §3 licensing stance |
-| Exec verb | out of scope v1; future, gated behind `--allow-recipe-exec` | trust model |
-| Wine runtime needs | advisory `runtime:` section (min version, DX backend hint) — gogo never downloads runtimes (13 §3) | gogo design 10 §3 |
+| Source | **lutris.net installer scripts** — no new format, no gogo recipe repo | §2.1 |
+| Key | GOG product id (from `goggame-<id>.info` and the library record) matched against `provider_games[service=gog].slug`; installer records also carry `gogid`/`gogslug` for cross-checking | §2.1.1 |
+| Interpretation | **Data-only subset** of the script: `wine.overrides` → DLL-overrides registry; `game` → entry point/args; `system.env` → launch env; `installer` steps limited to `merge`/`copy`/`move`/`write_file`/`write_config`/`chmodx` inside the game dir; `task: wineexec` **args on the GOG setup** → extra installer flags (captures `/NOGUI` lore). Everything else (`execute`, `files:` downloads, `winetricks`, unknown tasks) is **skipped with a loud warning**, never executed | trust model |
+| Parsing | `script` arrives as JSON — serde_json only; no YAML dependency. `--recipe <file>` accepts the same `?format=json` download | §2.1.1 |
+| Trust | We do not fully trust Lutris scripts either: arbitrary-code steps are skipped, paths must stay inside the bundle; the interpreted plan is printable (`gogo recipes show`) | §4 |
+| Redistributables | Out of scope v1 (`files:` steps skipped); Bottles' pinned-URL+checksum pattern is the designated v2 shape | §2.3 |
 
 Full contract: **design 11** (`docs/design/11-recipes.md`).
 
 ## 4. Trust and licensing notes
 
-- Recipes are **data, not code**: gogo interprets a closed verb set; a recipe
-  cannot run a shell command in v1. Path traversal out of the bundle is a
-  validation error, not a behaviour.
-- The recipes repo is reviewed like any code PR; recipe files carry a
-  `revision:` and `notes:` so `gogo recipes show` can present provenance.
-- gogo ships no binaries and the v1 recipe vocabulary performs no network
-  fetches, so the docs/13 §3 licensing matrix is unaffected.
-- Windows-redistributable steps (`vcrun2019`, `d3dx9`) are the known v2 gap;
-  the Bottles pattern (pinned URL + checksum + license field) is the
-  designated shape when added.
+- gogo is a **consumer**, not a publisher: recipe content stays on lutris.net
+  (CC-BY-type community content, upstream's problem to review).
+- The interpreter executes **nothing arbitrary**: no shell, no downloads, no
+  unknown task types. A Lutris script can at most: set registry keys inside
+  the staged prefix, rearrange files inside the produced bundle, and adjust
+  the launch line. Anything else is a warning event.
+- gogo ships no binaries and performs no recipe-driven network fetches —
+  the docs/13 §3 licensing matrix is unaffected.
+- Windows-redistributable support (`vcrun2019`, `d3dx9`) remains the known
+  v2 gap (design 11 §9).
 
 ## 5. Open questions carried into design 11
 
-1. Fetch mechanics without adding a git dependency → branch tarball over the
-   existing HTTP stack, revision-keyed cache (11 §3).
-2. Registry writes without a shell → `wine reg.exe` invocation through the
-   resolved runtime (fake-runtime testable, 11 §7).
-3. Entry-point override vs `goggame-*.info` → recipe `launch.exe` wins (11 §5).
-4. YAML crate choice — `serde_yaml` is unmaintained (archived 2024); use the
-   maintained fork `serde-yaml-ng` unless cargo-deny objects (11 §8).
+1. Game→installer-slug enumeration has no server-side filter (§2.1.1) →
+   game-page `Download script` hrefs are the enumeration surface; `--recipe
+   <installer-slug>` and `--recipe <file>` are the pinned/manual paths.
+2. Multiple installers per game (Wine CD vs GOG vs cnc-ddraw variants) →
+   prefer scripts whose `files:` reference a GOG installer, then newest
+   `updated_at`; user pins with `--recipe <slug>` when in doubt (11 §2).
+3. `$USER` / prefix-username mapping for Lutris paths (`drive_c/users/$USER`)
+   → resolve against the actual staged prefix layout (11 §3).
+4. win32-prefix scripts → warn: gogo stages win64, and the GPTK runtime is
+   wine64-only anyway (11 §3).

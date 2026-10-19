@@ -145,7 +145,8 @@ terminal.
 │   ├── installer.rs     # silent InnoSetup invocation, .bin sibling check
 │   ├── info.rs          # goggame-*.info parsing → entry point
 │   ├── bundle.rs        # .app layout, Info.plist, launcher stub, launch.conf
-│   ├── recipe.rs        # community per-game recipes: schema + closed verb set (design 11)
+│   ├── lutris.rs        # consume Lutris installer scripts: client + cache (design 11)
+│   ├── interpret.rs     # script JSON → declarative plan (overrides, file ops, flags)
 │   └── error.rs         # MacAppError taxonomy (exit 7)
 ```
 

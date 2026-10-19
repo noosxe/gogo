@@ -125,11 +125,13 @@ Exit 7 on conversion failures. Names/flags: `--name`, `--runtime`,
 (registry tweaks, extra installer flags, entry-point override) come from
 community recipes — design 11.
 
-### `gogo recipes <list|show|update>`
-Inspect/manage the local recipe cache used by `mac-app --recipe auto`:
-`list` (cached + override recipes), `show <game-id|slug|name>` (metadata,
-notes, steps), `update` (force re-fetch of the recipe repo tarball).
-Offline except `update`. Full spec: **design 11**.
+### `gogo recipes show [<query>]`
+Print the recipe plan gogo would apply for a game: the Lutris installer
+selected for it, each mapped action, and each skipped script step with its
+reason. Accepts a game name/slug, a pinned Lutris installer slug, or a
+local script JSON path (the `/api/installers/<slug>?format=json` download).
+gogo consumes Lutris scripts — it hosts no recipes of its own.
+Full spec: **design 11**.
 
 
 ## 2. Global flags

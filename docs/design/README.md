@@ -62,7 +62,7 @@ in `docs/13` grounds design 10.
 | [08-testing](08-testing.md) | unit/integration strategy, fixtures, mock GOG, live smoke |
 | [09-v2-roadmap](09-v2-roadmap.md) | depots (Model B), ratatui TUI |
 | [10-macos-app-bundles](10-macos-app-bundles.md) | `gogo mac-app`: installer → self-contained .app (Wine runtime resolution, silent install, codesign) |
-| [11-recipes](11-recipes.md) | community per-game recipes for `mac-app`: schema, repo distribution, closed verb set |
+| [11-recipes](11-recipes.md) | per-game fixes for `mac-app` by consuming Lutris installer scripts (discovery, declarative-subset interpreter) |
 ## Key decisions (traceability)
 
 | Decision | Rationale / source |
