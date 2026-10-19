@@ -8,6 +8,10 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum MacAppError {
+    /// Recipe-consumption failure (design 11): discovery/selection issues in
+    /// pinned mode, applied-step failures, unfetchable pinned slugs.
+    #[error("recipe: {0}")]
+    Recipe(String),
     #[error(
         "no usable Wine runtime found (tried: {tried}); remedies: `brew install wine`, \
          or mount the GPTK dmg and pass `--runtime gptk --runtime-path <dir>`, \

@@ -69,6 +69,25 @@ pub enum ProgressEvent {
     BundleAssembled,
     /// `mac-app`: ad-hoc codesign done.
     Codesigned,
+    /// `mac-app --recipe`: a Lutris script was resolved (design 11).
+    RecipeResolved {
+        installer_slug: String,
+        version: String,
+        author: String,
+    },
+    /// `mac-app --recipe`: no applicable script (never fatal).
+    RecipeMiss {
+        key: String,
+    },
+    /// `mac-app --recipe`: an applied step finished.
+    RecipeStep {
+        verb: String,
+    },
+    /// `mac-app --recipe`: a step was skipped, with the reason.
+    RecipeSkipped {
+        verb: String,
+        reason: String,
+    },
 }
 
 /// Drive a consumer over the event stream until the engine's terminal `Done`
@@ -130,6 +149,10 @@ mod render_tests {
             ProgressEvent::InstallFinished { .. } => "InstallFinished",
             ProgressEvent::BundleAssembled => "BundleAssembled",
             ProgressEvent::Codesigned => "Codesigned",
+            ProgressEvent::RecipeResolved { .. } => "RecipeResolved",
+            ProgressEvent::RecipeMiss { .. } => "RecipeMiss",
+            ProgressEvent::RecipeStep { .. } => "RecipeStep",
+            ProgressEvent::RecipeSkipped { .. } => "RecipeSkipped",
         }
     }
 

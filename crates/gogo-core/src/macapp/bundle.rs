@@ -105,19 +105,31 @@ fn sh_quote(s: &str) -> String {
 /// `Resources/launch.conf` — paths **relative to the bundle root** the
 /// launcher resolves against `$DIR` (design 10 §2.4). Absolute build-time
 /// paths broke the moment the bundle was moved (live finding 2026-10-19).
-pub fn write_launch_conf(bundle: &Bundle, wine: &Path, game: &Path) -> Result<(), MacAppError> {
+pub fn write_launch_conf(
+    bundle: &Bundle,
+    wine: &Path,
+    game: &Path,
+    recipe_env: &str,
+    recipe_args: &str,
+) -> Result<(), MacAppError> {
     let rel = |p: &Path| -> String {
         p.strip_prefix(&bundle.root)
             .unwrap_or(p)
             .to_string_lossy()
             .into_owned()
     };
-    let conf = format!(
+    let mut conf = format!(
         "WINE={}\nPREFIX={}\nGAME={}\nFRAMEWORKS=Resources/wine-frameworks\n",
         sh_quote(&rel(wine)),
         sh_quote(&rel(&bundle.prefix)),
         sh_quote(&rel(game)),
     );
+    if !recipe_env.is_empty() {
+        conf += &format!("RECIPE_ENV={}\n", sh_quote(recipe_env));
+    }
+    if !recipe_args.is_empty() {
+        conf += &format!("RECIPE_ARGS={}\n", sh_quote(recipe_args));
+    }
     std::fs::write(bundle.resources.join("launch.conf"), conf)?;
     Ok(())
 }
@@ -134,9 +146,11 @@ DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "$DIR/Resources/launch.conf"
 export DYLD_FALLBACK_LIBRARY_PATH="$DIR/$FRAMEWORKS:${DYLD_FALLBACK_LIBRARY_PATH:-}"
 export WINEPREFIX="$DIR/$PREFIX"
+# Recipe launch env/args (design 11): K=V pairs + word-split args.
+for pair in ${RECIPE_ENV:-}; do export "${pair%%=*}=${pair#*=}"; done
 # Old installers resolve data files relative to the working directory.
 cd "$(dirname "$DIR/$GAME")"
-exec "$DIR/$WINE" "$DIR/$GAME" "$@"
+exec "$DIR/$WINE" "$DIR/$GAME" ${RECIPE_ARGS:-} "$@"
 "#;
     let mut file = std::fs::File::create(&path)?;
     file.write_all(script.as_bytes())?;
@@ -434,7 +448,14 @@ mod bundle_tests {
         let tmp = tempfile::tempdir().unwrap();
         let b = layout(tmp.path(), "X");
         create_layout(&b).unwrap();
-        write_launch_conf(&b, Path::new("/o'/wine"), Path::new("/p/game exe.exe")).unwrap();
+        write_launch_conf(
+            &b,
+            Path::new("/o'/wine"),
+            Path::new("/p/game exe.exe"),
+            "",
+            "",
+        )
+        .unwrap();
         let conf = std::fs::read_to_string(b.resources.join("launch.conf")).unwrap();
         assert!(conf.contains(r"WINE='/o'\''/wine'"), "{conf}");
         assert!(conf.contains(r"GAME='/p/game exe.exe'"), "{conf}");
@@ -447,7 +468,7 @@ mod bundle_tests {
         create_layout(&b).unwrap();
         let wine = b.root.join("Resources/wine/bin/wine");
         let game = b.prefix.join("drive_c/GOG/g/game.exe");
-        write_launch_conf(&b, &wine, &game).unwrap();
+        write_launch_conf(&b, &wine, &game, "", "").unwrap();
         let conf = std::fs::read_to_string(b.resources.join("launch.conf")).unwrap();
         assert!(conf.contains("WINE='Resources/wine/bin/wine'"), "{conf}");
         assert!(

@@ -161,6 +161,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
             name,
             runtime,
             runtime_path,
+            recipe,
             out,
             yes,
             json_progress,
@@ -171,6 +172,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
                 name,
                 runtime,
                 runtime_path,
+                recipe,
                 out,
                 yes,
                 json_progress,
@@ -1516,6 +1518,7 @@ async fn mac_app(
     name: Option<String>,
     runtime: Option<crate::cli::RuntimeSource>,
     runtime_path: Option<std::path::PathBuf>,
+    recipe: Option<String>,
     out: Option<std::path::PathBuf>,
     yes: bool,
     json_progress: bool,
@@ -1528,6 +1531,37 @@ async fn mac_app(
         ));
     }
 
+    let recipe = recipe
+        .as_deref()
+        .map(gogo::macapp::RecipeChoice::parse)
+        .unwrap_or_default();
+    // Interactive selection (design 11 §1): a TTY prompt over the ranked
+    // candidates; non-TTY runs take the ranked best.
+    let on_select: Option<std::sync::Arc<gogo::macapp::SelectFn>> =
+        if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            Some(std::sync::Arc::new(|lines: &[String]| -> Option<usize> {
+                eprintln!("recipes available on lutris.net:");
+                for (i, line) in lines.iter().enumerate() {
+                    eprintln!("  {}. {line}", i + 1);
+                }
+                eprint!("apply which? [1-{}, none] ", lines.len());
+                use std::io::Write as _;
+                std::io::stderr().flush().ok();
+                let mut ans = String::new();
+                std::io::stdin().read_line(&mut ans).ok()?;
+                let t = ans.trim();
+                if t.eq_ignore_ascii_case("none") {
+                    return None;
+                }
+                t.parse::<usize>()
+                    .ok()
+                    .filter(|n| (1..=lines.len()).contains(n))
+                    .map(|n| n - 1)
+            }))
+        } else {
+            None
+        };
+
     let opts = gogo::macapp::MacAppOptions {
         installer,
         name,
@@ -1537,6 +1571,7 @@ async fn mac_app(
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
         }),
         overwrite: yes,
+        recipe,
     };
 
     // Plan: resolve + probe the runtime, validate the installer, size things up.
@@ -1582,13 +1617,16 @@ async fn mac_app(
     let bytes = {
         let plan = plan.clone();
         let jp = json_progress;
+        let sel = on_select.clone();
         tokio::task::spawn_blocking(move || {
             let policy = if cfg!(target_os = "macos") {
                 gogo::macapp::bundle::CodesignPolicy::Adhoc
             } else {
                 gogo::macapp::bundle::CodesignPolicy::Skip
             };
-            gogo::macapp::execute(&plan, policy, &mut |ev| emit_macapp_event(ev, jp))
+            gogo::macapp::execute(&plan, policy, sel.as_deref(), &mut |ev| {
+                emit_macapp_event(ev, jp)
+            })
         })
         .await
         .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))??
