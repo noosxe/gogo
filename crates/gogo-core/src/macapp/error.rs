@@ -46,6 +46,24 @@ pub enum MacAppError {
     )]
     UnsupportedPlatform,
 
+    /// Runtime catalog probe/discovery failure (design 12 §3): API unreachable
+    /// after retries, unparseable, or entry not downloadable.
+    #[error("runtime catalog unreachable: {detail}")]
+    CatalogUnreachable { detail: String },
+
+    #[error("runtime download failed: {url}: {reason}")]
+    RuntimeDownloadFailed { url: String, reason: String },
+
+    #[error(
+        "runtime {id} checksum mismatch — expected sha256:{expected}, got sha256:{actual}; \
+         the archive was discarded (retry, or pin a version with --runtime-version)"
+    )]
+    RuntimeChecksumMismatch {
+        id: String,
+        expected: String,
+        actual: String,
+    },
+
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }

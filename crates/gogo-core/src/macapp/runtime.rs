@@ -172,6 +172,28 @@ fn find_wine_in(root: &Path, mode: RuntimeMode, kind: &'static str) -> Result<Ru
 
 /// Probe by executing `wine --version` — a runtime we cannot run is a
 /// `RuntimeInvalid`, never a silent assumption (design 10 §2.1).
+/// Probe an extracted wine tree by executing `<wine> --version` — used by the
+/// runtime store after extraction (design 12 §4): a tree we cannot run is a
+/// `RuntimeInvalid`, never a silent assumption. No `RuntimeMode`: store trees
+/// are not one of the resolution lanes (Phase 3 wires them in).
+pub fn probe_tree(wine: &Path) -> Result<String, MacAppError> {
+    let out =
+        Command::new(wine)
+            .arg("--version")
+            .output()
+            .map_err(|e| MacAppError::RuntimeInvalid {
+                path: wine.to_path_buf(),
+                reason: format!("cannot execute: {e}"),
+            })?;
+    if !out.status.success() {
+        return Err(MacAppError::RuntimeInvalid {
+            path: wine.to_path_buf(),
+            reason: format!("`wine --version` exited {}", out.status),
+        });
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 fn probe(wine: PathBuf, mode: RuntimeMode, kind: &'static str) -> Result<Runtime, String> {
     // Resolve symlinks first: cask runtimes install `$(brew --prefix)/bin/wine64`
     // as a symlink into the real tree (e.g. Game Porting Toolkit.app). Deriving
