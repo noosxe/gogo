@@ -121,7 +121,15 @@ into a bundled WINEPREFIX; Wine runtime resolved per design 10 §3 (`auto` /
 `brew` / `gptk` / `path`), copied into the bundle; ad-hoc codesigned. macOS
 only (exit 2 elsewhere). Full spec: **design 10**; discovery: docs/13.
 Exit 7 on conversion failures. Names/flags: `--name`, `--runtime`,
-`--runtime-path`, `--out`, `--json`, `--yes`.
+`--runtime-path`, `--out`, `--recipe`, `--json`, `--yes`. Per-game fixes
+(registry tweaks, extra installer flags, entry-point override) come from
+community recipes — design 11.
+
+### `gogo recipes <list|show|update>`
+Inspect/manage the local recipe cache used by `mac-app --recipe auto`:
+`list` (cached + override recipes), `show <game-id|slug|name>` (metadata,
+notes, steps), `update` (force re-fetch of the recipe repo tarball).
+Offline except `update`. Full spec: **design 11**.
 
 
 ## 2. Global flags
@@ -170,7 +178,7 @@ feeds the v2 TUI (`docs/design/01` §4).
 | 4 | network: retries exhausted on API/CDN |
 | 5 | verification failure: checksum mismatch (download or `verify`) |
 | 6 | disk: insufficient space or unwritable destination |
-| 7 | mac-app conversion failure: runtime missing/invalid, installer exit ≠ 0, no entry point, codesign failure (design 10 §4) |
+| 7 | mac-app conversion failure: runtime missing/invalid, installer exit ≠ 0, no entry point, codesign failure, recipe error (design 10 §4, design 11 §5) |
 | 130 | interrupted (Ctrl-C), state flushed, resumable |
 
 Batch semantics: if any file fails with code-class X and none with a higher class, exit with
