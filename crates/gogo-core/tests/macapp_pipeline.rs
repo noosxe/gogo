@@ -16,6 +16,8 @@ fn fake_runtime(root: &std::path::Path, log_path: &std::path::Path) {
     let script = format!(
         r#"#!/bin/sh
 printf '%s\n' "$*" >> "{log}"
+printf 'ENV:%s\n' "$WINEPREFIX" >> "{log}"
+printf 'CWD:%s\n' "$(pwd)" >> "{log}"
 if [ "$1" = "--version" ]; then echo "wine-9.0-fake"; exit 0; fi
 if [ "$1" = "wineboot" ]; then exit 0; fi
 case "$1" in
@@ -1229,5 +1231,82 @@ fn recipe_picker_is_mandatory_for_single_candidate() {
     let opts = mk_opts(&tmp.path().join("out-b"));
     let plan = macapp::plan(&opts, Some(none.as_ref()), &mut |_| {}).expect("plan");
     assert!(plan.recipe.is_none(), "none must yield a recipe-less plan");
+    drop(guard);
+}
+
+#[test]
+fn produced_launcher_execs_wine_with_contents_relative_paths() {
+    // Regression (2026-10-19, live "app doesn't run"): launch.conf paths were
+    // bundle-root-relative (`Contents/Resources/...`) while the launcher
+    // resolves every conf value against its own `..` (= `Contents`), doubling
+    // the segment — `cd` failed and `set -e` killed the launch before wine
+    // ever ran. Execute the produced stub end-to-end and check the wine
+    // invocation's argv, WINEPREFIX, and working directory.
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let runtime_dir = tmp.path().join("runtime");
+    let log = tmp.path().join("wine.log");
+    fake_runtime(&runtime_dir, &log);
+    let installer = tmp.path().join("setup_testgame_1.0.exe");
+    std::fs::write(&installer, b"MZ").unwrap();
+
+    let opts = MacAppOptions {
+        installer,
+        name: Some("Test Game".into()),
+        mode: RuntimeMode::Path,
+        runtime_path: Some(runtime_dir),
+        out_dir: tmp.path().to_path_buf(),
+        overwrite: true,
+        recipe: gogo::macapp::RecipeChoice::None,
+        runtime_version: None,
+        lutris_base: None,
+    };
+    let plan = macapp::plan(&opts, None, &mut |_| {}).unwrap();
+    let _bytes = macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).unwrap();
+
+    // The conf itself must be Contents-relative.
+    let conf = std::fs::read_to_string(plan.bundle.resources.join("launch.conf")).unwrap();
+    assert!(
+        conf.contains("WINE='Resources/wine"),
+        "conf wine path Contents-relative: {conf}"
+    );
+    assert!(
+        !conf.contains("Contents/Contents"),
+        "doubled segment: {conf}"
+    );
+
+    // Execute the stub like Finder would.
+    let out = std::process::Command::new(plan.bundle.macos.join("Test Game"))
+        .env_remove("WINEPREFIX")
+        .output()
+        .expect("run launcher");
+    assert!(out.status.success(), "launcher failed: {out:?}");
+    let logged = std::fs::read_to_string(&log).unwrap();
+    let env_line = logged
+        .lines()
+        .filter(|l| l.starts_with("ENV:"))
+        .map(|l| l.to_string())
+        .collect::<Vec<_>>()
+        .pop()
+        .unwrap();
+    assert!(
+        env_line.contains(&*plan.bundle.prefix.to_string_lossy()),
+        "WINEPREFIX wrong: {env_line}"
+    );
+    let cwd_line = logged
+        .lines()
+        .filter(|l| l.starts_with("CWD:"))
+        .map(|l| l.to_string())
+        .collect::<Vec<_>>()
+        .pop()
+        .unwrap();
+    assert!(
+        cwd_line.ends_with("drive_c/GOG/test-game"),
+        "wine cwd must be the game dir: {cwd_line}"
+    );
+    assert!(
+        logged.contains("drive_c/GOG/test-game/game.exe"),
+        "wine argv must carry the entry exe: {logged}"
+    );
     drop(guard);
 }

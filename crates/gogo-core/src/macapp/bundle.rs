@@ -112,11 +112,16 @@ pub fn write_launch_conf(
     recipe_env: &str,
     recipe_args: &str,
 ) -> Result<(), MacAppError> {
+    // Paths relative to `Contents` — the launcher resolves every conf value
+    // against its own `..` (= `Contents`), not the bundle root. Root-relative
+    // values doubled the segment (`Contents/Contents/...`) and killed every
+    // launch at the `cd` (live finding 2026-10-19: "app doesn't run").
     let rel = |p: &Path| -> String {
-        p.strip_prefix(&bundle.root)
-            .unwrap_or(p)
-            .to_string_lossy()
-            .into_owned()
+        let stripped = match p.strip_prefix(&bundle.contents) {
+            Ok(rel) => rel,
+            Err(_) => p.strip_prefix(&bundle.root).unwrap_or(p),
+        };
+        stripped.to_string_lossy().into_owned()
     };
     let mut conf = format!(
         "WINE={}\nPREFIX={}\nGAME={}\nFRAMEWORKS=Resources/wine-frameworks\n",
