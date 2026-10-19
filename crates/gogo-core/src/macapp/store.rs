@@ -97,6 +97,7 @@ pub async fn install(
     version: Option<&str>,
     http: &reqwest::Client,
     api_base: &str,
+    consent: bool,
     emit: &mut dyn FnMut(&ProgressEvent),
 ) -> Result<ManifestEntry, MacAppError> {
     match &entry.status {
@@ -107,12 +108,15 @@ pub async fn install(
                 reason: format!("upstream gone since {since} — {story}"),
             });
         }
+        // D9: consent downloads only through the interactive EULA prompt
+        // (mac-app runtime menu); `consent` records that it happened.
+        Status::ConsentRequired if consent => {}
         Status::ConsentRequired => {
             return Err(MacAppError::RuntimeDownloadFailed {
                 url: entry.id.into(),
-                reason: "consent-download (Apple EULA, design 12 D9) lands with the \
-                         interactive selection; meanwhile register a mount via `mac-app \
-                         --runtime gptk --runtime-path <dir>`"
+                reason: "consent-download (Apple EULA, design 12 D9) requires the \
+                         interactive runtime selection; meanwhile register a mount via \
+                         `mac-app --runtime gptk --runtime-path <dir>`"
                     .into(),
             });
         }
@@ -499,7 +503,6 @@ mod store_tests {
                 "/download/wine-staging-11.18-osx64.tar.xz",
             ))
             .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(body.to_vec()))
-            .expect(1)
             .mount(&server)
             .await;
         server
@@ -517,7 +520,7 @@ mod store_tests {
         let entry = catalog::find("wine-staging").unwrap();
         let http = catalog::http_client().unwrap();
 
-        let m = install(entry, None, &http, &server.uri(), &mut |_| {})
+        let m = install(entry, None, &http, &server.uri(), false, &mut |_| {})
             .await
             .unwrap();
         assert_eq!(m.version, "11.18");
@@ -530,7 +533,7 @@ mod store_tests {
         assert_eq!(m.sha256, sha256_hex(&body));
 
         // Reuse: a second install must not hit the download URL again.
-        let m2 = install(entry, None, &http, &server.uri(), &mut |_| {})
+        let m2 = install(entry, None, &http, &server.uri(), false, &mut |_| {})
             .await
             .unwrap();
         assert_eq!(m2.version, "11.18");
@@ -555,7 +558,7 @@ mod store_tests {
         let server = mock_github(&body, "sha256:deadbeef").await;
         let entry = catalog::find("wine-staging").unwrap();
         let http = catalog::http_client().unwrap();
-        let err = install(entry, None, &http, &server.uri(), &mut |_| {})
+        let err = install(entry, None, &http, &server.uri(), false, &mut |_| {})
             .await
             .unwrap_err();
         assert!(matches!(err, MacAppError::RuntimeChecksumMismatch { .. }));
@@ -575,6 +578,7 @@ mod store_tests {
             None,
             &http,
             &server.uri(),
+            false,
             &mut |_| {},
         )
         .await
@@ -587,6 +591,7 @@ mod store_tests {
             None,
             &http,
             &server.uri(),
+            false,
             &mut |_| {},
         )
         .await
@@ -597,11 +602,59 @@ mod store_tests {
             None,
             &http,
             &server.uri(),
+            false,
             &mut |_| {},
         )
         .await
         .unwrap_err();
         assert!(err.to_string().contains("gone since 2026-10-19"));
+    }
+
+    #[tokio::test]
+    // Same env-guard-spanning-await justification as above.
+    #[allow(clippy::await_holding_lock)]
+    async fn gptk_consent_flag_enables_download() {
+        // D9: the interactive EULA Confirm records consent; install then
+        // proceeds like any Available entry.
+        let home = tempfile::tempdir().unwrap();
+        let _g = env_home(home.path());
+        let body = fake_wrapper_tar();
+        let server = mock_github(&body, &format!("sha256:{}", sha256_hex(&body))).await;
+        // gptk lives in its own repo: serve that release path too.
+        let gptk_url = format!("{}/download/game-porting-toolkit-3.0.tar.xz", server.uri());
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/repos/Gcenx/game-porting-toolkit/releases/latest",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "tag_name": "3.0",
+                    "prerelease": false,
+                    "published_at": "2026-09-25T15:27:03Z",
+                    "assets": [{
+                        "name": "game-porting-toolkit-3.0.tar.xz",
+                        "size": body.len(),
+                        "browser_download_url": gptk_url,
+                        "digest": format!("sha256:{}", sha256_hex(&body)),
+                    }],
+                })),
+            )
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/download/game-porting-toolkit-3.0.tar.xz",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(body.to_vec()))
+            .mount(&server)
+            .await;
+        let entry = catalog::find("gptk").unwrap();
+        let http = catalog::http_client().unwrap();
+        let m = install(entry, None, &http, &server.uri(), true, &mut |_| {})
+            .await
+            .unwrap();
+        assert_eq!(m.id, "gptk");
+        assert!(installed("gptk", None).is_some());
     }
 
     #[tokio::test]
@@ -660,7 +713,7 @@ mod store_tests {
         let entry = catalog::find("winetricks").unwrap();
         let http = catalog::http_client().unwrap();
         let mut events: Vec<&'static str> = Vec::new();
-        let m = install(entry, None, &http, &server.uri(), &mut |ev| {
+        let m = install(entry, None, &http, &server.uri(), false, &mut |ev| {
             use crate::engine::events::ProgressEvent as Ev;
             let name = match ev {
                 Ev::RuntimeDownloadStarted { .. } => "started",
@@ -682,7 +735,7 @@ mod store_tests {
             assert!(wt.metadata().unwrap().permissions().mode() & 0o111 != 0);
         }
         // Reuse: a second install must not re-download.
-        let m2 = install(entry, None, &http, &server.uri(), &mut |_| {})
+        let m2 = install(entry, None, &http, &server.uri(), false, &mut |_| {})
             .await
             .unwrap();
         assert_eq!(m2.version, "20260125");

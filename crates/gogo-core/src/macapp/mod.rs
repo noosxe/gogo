@@ -16,6 +16,7 @@ use serde_json::Value;
 use std::process::Command;
 pub mod catalog;
 pub mod lutris;
+pub mod prompt;
 pub mod runtime;
 pub mod store;
 pub mod tools;
@@ -25,6 +26,7 @@ use std::path::{Path, PathBuf};
 use crate::engine::events::ProgressEvent;
 
 pub use error::MacAppError;
+pub use prompt::{PromptAnswer, PromptFn, PromptKind, PromptSpec};
 pub use runtime::{RuntimeMode, RuntimeOptions};
 
 use bundle::{Bundle, CodesignPolicy};
@@ -70,14 +72,11 @@ pub struct MacAppOptions {
     pub lutris_base: Option<String>,
 }
 
-/// Interactive selection callback: one rendered line per candidate, returns
-/// the chosen index. Invoked only when >1 candidates (design 11 §1).
-pub type SelectFn = dyn Fn(&[String]) -> Option<usize> + Send + Sync;
-
 /// `--recipe auto|none|<installer-slug>|<script-file>` (design 11 §1).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum RecipeChoice {
-    /// Live search + rank; the user is asked via `on_select` when ambiguous.
+    /// Live search + rank; the user picks via the injected prompt renderer
+    /// when ambiguous (design 11 §1, design 12 §9).
     #[default]
     Auto,
     /// No recipe lookup.
@@ -160,7 +159,7 @@ pub struct SelectedRecipe {
 fn select_recipe(
     opts: &MacAppOptions,
     display: &str,
-    on_select: Option<&SelectFn>,
+    prompt: Option<&prompt::PromptFn>,
     emit: &mut dyn FnMut(&ProgressEvent),
 ) -> Result<Option<SelectedRecipe>, MacAppError> {
     let client =
@@ -168,30 +167,7 @@ fn select_recipe(
     let (inst, from_search) = match &opts.recipe {
         RecipeChoice::None => return Ok(None),
         RecipeChoice::Slug(slug) => (lutris::block_on_detached(client.installer(slug))?, false),
-        RecipeChoice::File(path) => {
-            let v: serde_json::Value = serde_json::from_str(
-                &std::fs::read_to_string(path)
-                    .map_err(|e| MacAppError::Recipe(format!("script {}: {e}", path.display())))?,
-            )
-            .map_err(|e| MacAppError::Recipe(format!("script parse: {e}")))?;
-            (
-                lutris::LutrisInstaller {
-                    slug: path
-                        .file_stem()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                    game_slug: String::new(),
-                    name: String::new(),
-                    version: "local file".into(),
-                    runner: "wine".into(),
-                    author: "local file".into(),
-                    updated_at: String::new(),
-                    gogid: None,
-                    script: v,
-                },
-                false,
-            )
-        }
+        RecipeChoice::File(path) => (parse_script_file(path)?, false),
         RecipeChoice::Auto => {
             // Pre-install search by display name (§6): pick the best game,
             // list its installers, rank, select. The authoritative gogid
@@ -218,24 +194,34 @@ fn select_recipe(
                     return Ok(None);
                 }
                 Ok(candidates) => {
-                    let picked = match (candidates.len(), on_select) {
-                        (1, _) => 0,
-                        (_, Some(select)) => {
-                            let lines: Vec<String> = candidates
-                                .iter()
-                                .map(|c| format!("{} — {} ({})", c.slug, c.version, c.author))
-                                .collect();
-                            select(&lines).unwrap_or(0)
+                    // §9: the picker runs only when ambiguous (design 11 §1);
+                    // headless runs take the ranked best.
+                    if candidates.len() > 1
+                        && let Some(p) = prompt
+                    {
+                        match choose_recipe(&candidates, display, p)? {
+                            Some(RecipePick::Installer(inst)) => (inst, true),
+                            Some(RecipePick::Choice(RecipeChoice::None)) => return Ok(None),
+                            Some(RecipePick::Choice(RecipeChoice::Slug(slug))) => {
+                                (lutris::block_on_detached(client.installer(&slug))?, false)
+                            }
+                            Some(RecipePick::Choice(RecipeChoice::File(path))) => {
+                                (parse_script_file(&path)?, false)
+                            }
+                            Some(RecipePick::Choice(RecipeChoice::Auto)) => {
+                                unreachable!("resolved by choose_recipe")
+                            }
+                            None => return Ok(None),
                         }
-                        _ => 0,
-                    };
-                    (
-                        candidates
-                            .into_iter()
-                            .nth(picked)
-                            .ok_or_else(|| MacAppError::Recipe("selection out of range".into()))?,
-                        true,
-                    )
+                    } else {
+                        (
+                            candidates
+                                .into_iter()
+                                .next()
+                                .ok_or_else(|| MacAppError::Recipe("no candidates".into()))?,
+                            true,
+                        )
+                    }
                 }
                 Err(e) => {
                     emit(&ProgressEvent::RecipeMiss { key: e.to_string() });
@@ -258,11 +244,90 @@ fn select_recipe(
     }))
 }
 
+/// A recipe-picker outcome: a ranked candidate, or a choice derived from
+/// free text (§9: slug first, then local script path).
+enum RecipePick {
+    Installer(lutris::LutrisInstaller),
+    Choice(RecipeChoice),
+}
+
+/// §9 recipe picker: FuzzySelect over the ranked candidates with trailing
+/// custom/none entries. Cancel (renderer `None`) opts out of the recipe.
+fn choose_recipe(
+    candidates: &[lutris::LutrisInstaller],
+    display: &str,
+    prompt: &prompt::PromptFn,
+) -> Result<Option<RecipePick>, MacAppError> {
+    use prompt::{PromptAnswer, PromptKind, PromptSpec};
+    let spec = PromptSpec {
+        kind: PromptKind::Fuzzy,
+        title: format!("apply a Lutris recipe for \u{201c}{display}\u{201d}?"),
+        items: candidates
+            .iter()
+            .map(|c| {
+                format!(
+                    "{} — {} ({}, updated {})",
+                    c.slug, c.version, c.author, c.updated_at
+                )
+            })
+            .collect(),
+        allow_other: true,
+        allow_none: true,
+    };
+    let Some(answer) = prompt(&spec) else {
+        return Ok(None);
+    };
+    let pick = match answer {
+        PromptAnswer::Index(i) => candidates.get(i).cloned().map(RecipePick::Installer),
+        PromptAnswer::NoneSelected | PromptAnswer::Confirmed(_) => None,
+        PromptAnswer::Other(text) => {
+            let t = text.trim();
+            if t.is_empty() {
+                None
+            } else {
+                // Free text: a Lutris installer slug first, then a local
+                // script file path (§9).
+                let p = Path::new(t);
+                Some(RecipePick::Choice(if p.exists() || t.ends_with(".json") {
+                    RecipeChoice::File(p.to_path_buf())
+                } else {
+                    RecipeChoice::Slug(t.to_string())
+                }))
+            }
+        }
+    };
+    Ok(pick)
+}
+
+/// Parse a downloaded script JSON into a record (the `--recipe <file>` lane).
+fn parse_script_file(path: &Path) -> Result<lutris::LutrisInstaller, MacAppError> {
+    let v: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(path)
+            .map_err(|e| MacAppError::Recipe(format!("script {}: {e}", path.display())))?,
+    )
+    .map_err(|e| MacAppError::Recipe(format!("script parse: {e}")))?;
+    Ok(lutris::LutrisInstaller {
+        slug: path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        game_slug: String::new(),
+        name: String::new(),
+        version: "local file".into(),
+        runner: "wine".into(),
+        author: "local file".into(),
+        updated_at: String::new(),
+        gogid: None,
+        script: v,
+    })
+}
+
 /// A catalog lane hit: the manifest entry plus whether it was downloaded
 /// just now (false = satisfied from the store cache).
 fn catalog_lane(
     id: &str,
     version: Option<&str>,
+    consent: bool,
     emit: &mut dyn FnMut(&ProgressEvent),
 ) -> Result<(store::ManifestEntry, bool), MacAppError> {
     if let Some((m, _)) = store::installed(id, version) {
@@ -277,6 +342,7 @@ fn catalog_lane(
         version,
         &http,
         catalog::GITHUB_API,
+        consent,
         emit,
     ))?;
     Ok((m, true))
@@ -290,10 +356,11 @@ fn catalog_lane(
 fn resolve_runtime(
     opts: &MacAppOptions,
     recipe: Option<&SelectedRecipe>,
+    prompt: Option<&prompt::PromptFn>,
     emit: &mut dyn FnMut(&ProgressEvent),
 ) -> Result<(runtime::Runtime, Option<(String, String)>), MacAppError> {
     if let RuntimeMode::Catalog(id) = &opts.mode {
-        let (m, downloaded) = catalog_lane(id, opts.runtime_version.as_deref(), emit)?;
+        let (m, downloaded) = catalog_lane(id, opts.runtime_version.as_deref(), false, emit)?;
         let rt = runtime::from_store(&m)?;
         return Ok((rt, downloaded.then(|| (m.id.clone(), m.version.clone()))));
     }
@@ -337,17 +404,175 @@ fn resolve_runtime(
     }) {
         return Ok((rt, None));
     }
+    // Ladder tail: interactive menu when a renderer is present (§5/§9);
+    // headless runs download the recommendation (Phase 3 behavior).
+    if let Some(prompt) = prompt {
+        return choose_runtime(prompt, emit);
+    }
     let id = rec.as_ref().map(|r| r.id).unwrap_or("wine-staging");
-    let (m, downloaded) = catalog_lane(id, None, emit)?;
+    let (m, downloaded) = catalog_lane(id, None, false, emit)?;
     let rt = runtime::from_store(&m)?;
     Ok((rt, downloaded.then(|| (m.id.clone(), m.version.clone()))))
+}
+
+/// The §5 runtime menu (interactive ladder tail): cached flavors first
+/// (✓ cached), downloadable flavors with arch tags, GPTK behind the D9
+/// consent gate (Apple Silicon hosts only — Intel hosts never see it),
+/// a custom path lane with re-prompt on invalid input (§9), and cancel.
+fn choose_runtime(
+    prompt: &prompt::PromptFn,
+    emit: &mut dyn FnMut(&ProgressEvent),
+) -> Result<(runtime::Runtime, Option<(String, String)>), MacAppError> {
+    use prompt::{PromptAnswer, PromptKind, PromptSpec};
+
+    let cancelled = || MacAppError::RuntimeNotFound {
+        tried: "runtime selection cancelled".into(),
+    };
+    let rosetta_missing =
+        cfg!(target_arch = "aarch64") && !rosetta_present() && !cfg!(target_os = "linux");
+
+    // Lanes: cached flavors first, then downloadable ones in catalog order.
+    let manifest = store::load_manifest();
+    let mut cached_lanes: Vec<(&'static catalog::CatalogEntry, Option<store::ManifestEntry>)> =
+        Vec::new();
+    let mut fresh_lanes: Vec<(&'static catalog::CatalogEntry, Option<store::ManifestEntry>)> =
+        Vec::new();
+    for entry in catalog::entries() {
+        if !matches!(entry.kind, catalog::Kind::Wine) {
+            continue;
+        }
+        let selectable = matches!(entry.status, catalog::Status::Available)
+            || (matches!(entry.status, catalog::Status::ConsentRequired)
+                && cfg!(target_arch = "aarch64"));
+        if !selectable {
+            continue;
+        }
+        let hit = manifest.iter().find(|m| m.id == entry.id).cloned();
+        if hit.is_some() {
+            cached_lanes.push((entry, hit));
+        } else {
+            fresh_lanes.push((entry, None));
+        }
+    }
+    let lanes = [cached_lanes, fresh_lanes].concat();
+
+    let items: Vec<String> = lanes
+        .iter()
+        .map(|(entry, cached)| match cached {
+            Some(m) => format!("{} {} (✓ cached)", entry.id, m.version),
+            None => {
+                let mut line = format!("download {} — {}", entry.id, entry.arch);
+                if entry.id == "wine-staging" {
+                    line.push_str(" · recommended");
+                }
+                if rosetta_missing && entry.arch.starts_with("x86_64") {
+                    line.push_str(" — Rosetta missing: softwareupdate --install-rosetta");
+                }
+                if matches!(entry.status, catalog::Status::ConsentRequired) {
+                    line.push_str(" (Apple EULA consent)");
+                }
+                line
+            }
+        })
+        .collect();
+
+    let spec = PromptSpec {
+        kind: PromptKind::Select,
+        title: "which wine runtime? (nothing usable cached, no brew wine found)".into(),
+        items,
+        // "other…" = a custom runtime path (directory containing bin/wine).
+        allow_other: true,
+        allow_none: false,
+    };
+    let Some(answer) = prompt(&spec) else {
+        return Err(cancelled());
+    };
+    match answer {
+        PromptAnswer::Index(i) => {
+            let Some((entry, cached)) = lanes.get(i) else {
+                return Err(cancelled());
+            };
+            if let Some(m) = cached {
+                let rt = runtime::from_store(m)?;
+                return Ok((rt, None));
+            }
+            // D9: GPTK downloads only on explicit consent with the EULA
+            // notice in front of the user.
+            let consented = if matches!(entry.status, catalog::Status::ConsentRequired) {
+                let consent = prompt(&PromptSpec {
+                    kind: PromptKind::Confirm { default: false },
+                    title: format!(
+                        "{} is covered by Apple's evaluation EULA; gogo downloads it into \
+                         your local runtime store and never redistributes it inside bundles. \
+                         Download it now?",
+                        entry.id
+                    ),
+                    items: vec![],
+                    allow_other: false,
+                    allow_none: false,
+                });
+                matches!(consent, Some(PromptAnswer::Confirmed(true)))
+            } else {
+                true
+            };
+            if !consented {
+                return Err(cancelled());
+            }
+            let (m, downloaded) = catalog_lane(entry.id, None, consented, emit)?;
+            let rt = runtime::from_store(&m)?;
+            Ok((rt, downloaded.then(|| (m.id.clone(), m.version.clone()))))
+        }
+        PromptAnswer::Other(text) => {
+            // Custom path with re-prompt on invalid input (§9), max 3 tries.
+            let mut path = text.trim().to_string();
+            for attempt in 0..3 {
+                match runtime::resolve(&runtime::RuntimeOptions {
+                    mode: RuntimeMode::Path,
+                    runtime_path: Some(PathBuf::from(&path)),
+                    ..Default::default()
+                }) {
+                    Ok(rt) => return Ok((rt, None)),
+                    Err(e) if attempt < 2 => {
+                        let again = prompt(&PromptSpec {
+                            kind: PromptKind::Input,
+                            title: format!(
+                                "invalid runtime path ({e}) — directory containing bin/wine:"
+                            ),
+                            items: vec![],
+                            allow_other: true,
+                            allow_none: false,
+                        });
+                        match again {
+                            Some(PromptAnswer::Other(t)) if !t.trim().is_empty() => {
+                                path = t.trim().to_string();
+                            }
+                            _ => return Err(cancelled()),
+                        }
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            unreachable!("re-prompt loop exits via return")
+        }
+        PromptAnswer::NoneSelected | PromptAnswer::Confirmed(_) => Err(cancelled()),
+    }
+}
+
+/// Rosetta 2 presence (Apple Silicon hosts): best-effort marker files.
+fn rosetta_present() -> bool {
+    [
+        "/Library/Apple/usr/share/rosetta/rosetta",
+        "/usr/libexec/rosetta/oahd",
+    ]
+    .iter()
+    .any(|p| Path::new(p).exists())
 }
 
 /// Resolve everything up-front: names, runtime (probed), installer (validated),
 /// sizes. Emits `RuntimeResolved`. No bundle dirs are created yet.
 pub fn plan(
     opts: &MacAppOptions,
-    on_select: Option<&SelectFn>,
+    prompt: Option<&prompt::PromptFn>,
     emit: &mut dyn FnMut(&ProgressEvent),
 ) -> Result<MacAppPlan, MacAppError> {
     let display = display_name(&opts.installer, opts.name.as_deref());
@@ -355,10 +580,10 @@ pub fn plan(
 
     // §6 step 2: recipe discovery + selection precede the runtime — a wine
     // pin feeds the recommendation (D2: flag > recipe > default).
-    let recipe = select_recipe(opts, &display, on_select, emit)?;
+    let recipe = select_recipe(opts, &display, prompt, emit)?;
 
     // §6 step 3: runtime resolution — may download into the store (events).
-    let (runtime, runtime_downloaded) = resolve_runtime(opts, recipe.as_ref(), emit)?;
+    let (runtime, runtime_downloaded) = resolve_runtime(opts, recipe.as_ref(), prompt, emit)?;
     let kind = runtime.mode.as_str().to_string();
     let wine = runtime.wine.display().to_string();
     emit(&ProgressEvent::RuntimeResolved { kind, path: wine });

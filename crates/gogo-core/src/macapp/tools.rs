@@ -86,6 +86,7 @@ pub fn resolve_or_provision_winetricks(emit: &mut dyn FnMut(&ProgressEvent)) -> 
         None,
         &http,
         catalog::GITHUB_API,
+        false,
         emit,
     ));
     match outcome {
