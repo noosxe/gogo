@@ -135,8 +135,17 @@ pub enum Command {
     /// (docs/design/10).
     MacApp {
         /// Path to the GOG setup .exe (.bin siblings are picked up automatically).
-        #[arg(value_name = "INSTALLER")]
-        installer: std::path::PathBuf,
+        #[arg(
+            value_name = "INSTALLER",
+            required_unless_present = "from_depot",
+            conflicts_with = "from_depot"
+        )]
+        installer: Option<std::path::PathBuf>,
+        /// Build from a depot (Model B) game tree instead of running an
+        /// installer: an existing directory, or a game selector resolved
+        /// against the local depot cache (docs/design/15).
+        #[arg(long, value_name = "GAME|PATH")]
+        from_depot: Option<String>,
         /// Bundle title (default: derived from the installer file name).
         #[arg(long)]
         name: Option<String>,

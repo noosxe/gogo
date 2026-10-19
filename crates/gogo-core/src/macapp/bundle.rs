@@ -401,6 +401,54 @@ pub fn strip_detritus(bundle: &Path, policy: CodesignPolicy) -> Result<(), MacAp
     Ok(())
 }
 
+/// Clone a game tree into the bundle (design 15 D4). Tries APFS
+/// copy-on-write first (`cp -c` → clonefile(2)) — instant and space-free
+/// until divergence — and falls back to a plain recursive copy for other
+/// filesystems. `dst` must not exist yet; parents are created.
+pub fn clone_tree(src: &Path, dst: &Path) -> Result<(), MacAppError> {
+    if !src.is_dir() {
+        return Err(MacAppError::Io(std::io::Error::other(format!(
+            "game tree {} is not a directory",
+            src.display()
+        ))));
+    }
+    if dst.exists() {
+        return Err(MacAppError::Io(std::io::Error::other(format!(
+            "clone destination {} already exists",
+            dst.display()
+        ))));
+    }
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if std::process::Command::new("/bin/cp")
+            .arg("-cRp")
+            .arg(src)
+            .arg(dst)
+            .status()?
+            .success()
+        {
+            return Ok(());
+        }
+    }
+    let plain = std::process::Command::new("/bin/cp")
+        .arg("-Rp")
+        .arg(src)
+        .arg(dst)
+        .status()?;
+    if plain.success() {
+        Ok(())
+    } else {
+        Err(MacAppError::Io(std::io::Error::other(format!(
+            "copying game tree {} -> {} failed",
+            src.display(),
+            dst.display()
+        ))))
+    }
+}
+
 #[cfg(test)]
 mod bundle_tests {
     use super::*;

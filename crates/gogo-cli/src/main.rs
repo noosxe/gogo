@@ -179,6 +179,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
         Command::Config { sub } => config_cmd(sub),
         Command::MacApp {
             installer,
+            from_depot,
             name,
             runtime,
             runtime_path,
@@ -193,6 +194,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
         } => {
             mac_app(
                 installer,
+                from_depot,
                 name,
                 runtime,
                 runtime_path,
@@ -1723,8 +1725,135 @@ fn write_completions(
 /// download engine's (NDJSON on stdout for `--json-progress`, one-liners on
 /// stderr otherwise, 03 §4).
 #[allow(clippy::too_many_arguments)]
+/// Resolve `--from-depot`'s value (design 15 §1): an existing directory is
+/// used directly (local, auth-free); otherwise a game selector resolves
+/// against the depot cache, with an optional auto-download (cold cache +
+/// `--yes` or an interactive confirm).
+async fn resolve_depot_tree(
+    selector: &str,
+    auto: bool,
+    machine: bool,
+) -> Result<std::path::PathBuf, AppError> {
+    let direct = std::path::Path::new(selector);
+    if direct.is_dir() {
+        return Ok(direct.to_path_buf());
+    }
+
+    let built = AppContext::build(load_config_from_env()?, true)
+        .await
+        .map_err(|e| {
+            eprintln!("gogo: {e}");
+            AppError::Usage
+        })?;
+    let ctx = std::sync::Arc::new(built);
+    let token = bearer(&ctx).await?;
+    let session = ctx
+        .session
+        .as_ref()
+        .and_then(|p| p.gog_warp_core())
+        .ok_or(AppError::Usage)?;
+    let sel = selector.to_string();
+    let selected = resolve_games(&ctx, &token, std::slice::from_ref(&sel)).await?;
+    let Some(game) = selected.first() else {
+        eprintln!("gogo: no owned game matches {selector}");
+        return Err(AppError::Usage);
+    };
+    let title = game.title.clone();
+    let Some((root, _, _)) = gogo::gog::depot::cache_roots(
+        gogo::gog::depot::default_cache_dir().as_deref(),
+        game.id,
+        None,
+    ) else {
+        return Err(AppError::Depot(gogo::gog::depot::DepotError::NoCacheDir));
+    };
+
+    if let Some(tree) = find_game_tree(&root) {
+        return Ok(tree);
+    }
+
+    // Cold cache: auto-download with consent (--yes headless, confirm on TTY).
+    let mut go = auto;
+    if !go
+        && std::io::IsTerminal::is_terminal(&std::io::stdin())
+        && std::io::IsTerminal::is_terminal(&std::io::stderr())
+        && !machine
+    {
+        go = dialoguer::Confirm::new()
+            .with_prompt(format!(
+                "depot cache empty for {title} — download it now? (gogo depot, design 14)"
+            ))
+            .default(true)
+            .interact()
+            .unwrap_or(false);
+    }
+    if !go {
+        eprintln!(
+            "gogo: no depot cache for {title} — run `gogo depot {selector}` first \
+             (or pass --yes to download here)"
+        );
+        return Err(AppError::Usage);
+    }
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<gogo::gog::depot::DepotEvent>();
+    let opts = gogo::gog::depot::DepotOptions::default();
+    // Reuse the command context's cancellation (ctrl-c wiring is upstream).
+    let cancel = ctx.cancel.clone();
+    let runner = gogo::gog::depot::run(
+        session,
+        game.id,
+        &title,
+        &opts,
+        &tx,
+        &cancel,
+        ctx.free_space.as_ref(),
+    );
+    tokio::pin!(runner);
+    let result = loop {
+        tokio::select! {
+            res = &mut runner => break res,
+            maybe = rx.recv() => {
+                if let (Some(gogo::gog::depot::DepotEvent::Plan { download_size, .. }), false) =
+                    (maybe, machine)
+                {
+                    println!(
+                        "gogo: downloading {title} via depot ({})",
+                        gogo::fmt::human_size(download_size)
+                    );
+                }
+            }
+        }
+    };
+    result.map_err(AppError::Depot)?;
+    find_game_tree(&root).ok_or_else(|| {
+        eprintln!(
+            "gogo: depot download finished but no game tree found under {}",
+            root.display()
+        );
+        AppError::Usage
+    })
+}
+
+/// The install tree inside a depot cache root: a single child directory, or
+/// the child carrying a `goggame-*.info` (DLC-capable roots may hold more).
+fn find_game_tree(root: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut dirs: Vec<std::path::PathBuf> = std::fs::read_dir(root)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .map(|e| e.path())
+        .filter(|p| !p.file_name().is_some_and(|n| n == "gog-support"))
+        .collect();
+    if dirs.len() == 1 {
+        return dirs.pop();
+    }
+    dirs.into_iter()
+        .find(|d| !gogo::macapp::info::gog_game_ids(d).is_empty())
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn mac_app(
-    installer: std::path::PathBuf,
+    installer: Option<std::path::PathBuf>,
+    from_depot: Option<String>,
     name: Option<String>,
     runtime: Option<crate::cli::RuntimeSource>,
     runtime_path: Option<std::path::PathBuf>,
@@ -1744,10 +1873,42 @@ async fn mac_app(
         ));
     }
 
-    let recipe = recipe
+    // Design 15 §1: exactly one source — the positional installer or a depot
+    // tree (path or game selector resolved against the local depot cache).
+    let machine = json || json_progress;
+    let (installer, game_tree) = match from_depot {
+        Some(sel) => {
+            let tree = resolve_depot_tree(&sel, yes, machine).await?;
+            (None, Some(tree))
+        }
+        None => match installer {
+            Some(p) => (Some(p), None),
+            None => {
+                eprintln!("gogo: mac-app needs an INSTALLER path or --from-depot");
+                return Ok(cli::exit::USAGE);
+            }
+        },
+    };
+
+    let mut recipe = recipe
         .as_deref()
         .map(gogo::macapp::RecipeChoice::parse)
         .unwrap_or_default();
+    if game_tree.is_some() {
+        // Recipes are installer-shaped (design 15 D6); the tree already is
+        // the installed artifact their steps produce.
+        if !matches!(
+            recipe,
+            gogo::macapp::RecipeChoice::Auto | gogo::macapp::RecipeChoice::None
+        ) {
+            eprintln!(
+                "gogo: --recipe is installer-lane only; depot mode bundles the \
+                 tree as-is (docs/design/15 D6)"
+            );
+            return Ok(cli::exit::USAGE);
+        }
+        recipe = gogo::macapp::RecipeChoice::None;
+    }
     // Interactive flow (design 12 §9): the dialoguer renderer on a TTY;
     // --json / --json-progress imply non-interactive; non-TTY runs take the
     // ranked best (recipes) or the headless ladder (runtimes).
@@ -1764,6 +1925,7 @@ async fn mac_app(
 
     let opts = gogo::macapp::MacAppOptions {
         installer,
+        game_tree,
         name,
         mode: runtime.map(Into::into).unwrap_or_default(),
         runtime_path,
@@ -1815,9 +1977,19 @@ async fn mac_app(
             .as_ref()
             .map(|(id, v)| format!("\n  downloaded during planning: {id} {v}"))
             .unwrap_or_default();
+        let source_line = plan
+            .installer
+            .as_ref()
+            .map(|i| i.installer.display().to_string())
+            .or_else(|| {
+                plan.game_tree
+                    .as_ref()
+                    .map(|t| format!("{} (depot)", t.display()))
+            })
+            .unwrap_or_default();
         eprintln!(
-            "converting:\n  installer: {}\n  bundle:    {}\n  recipe:    {}\n  runtime:   {} ({}){}\n  est. size: {}",
-            plan.installer.installer.display(),
+            "converting:\n  source:    {}\n  bundle:    {}\n  recipe:    {}\n  runtime:   {} ({}){}\n  est. size: {}",
+            source_line,
             plan.bundle_path.display(),
             recipe_line,
             plan.runtime.version,
