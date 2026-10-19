@@ -123,7 +123,9 @@ pub enum Command {
         #[arg(long)]
         rebuild: bool,
     },
-    /// Config file management.
+    /// Download a game straight from GOG's content system (depot / Model B)
+    /// into the user cache directory (docs/design/14). macOS only for now.
+    Depot(DepotArgs),
     /// Config file management.
     Config {
         #[command(subcommand)]
@@ -194,6 +196,40 @@ pub enum Command {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
+}
+
+#[derive(Debug, clap::Args)]
+pub struct DepotArgs {
+    /// One game by id, slug, or fuzzy title.
+    #[arg(value_name = "GAME")]
+    pub game: String,
+    /// Content language code (v2 manifests; v1 names are derived).
+    #[arg(long, default_value = "en-US")]
+    pub language: String,
+    /// Include DLC depots.
+    #[arg(long)]
+    pub with_dlcs: bool,
+    /// Password for password-protected builds.
+    #[arg(long)]
+    pub password: Option<String>,
+    /// Install root override (default: user cache dir, design 14 D2).
+    #[arg(long, value_name = "DIR")]
+    pub dir: Option<std::path::PathBuf>,
+    /// Global rate limit, e.g. 4MiB/s (download.limit grammar, 05 §3).
+    #[arg(long)]
+    pub limit: Option<String>,
+    /// Skip the free-space preflight.
+    #[arg(long)]
+    pub no_disk_check: bool,
+    /// Resolve and print the plan, touch nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Progress events as NDJSON on stdout.
+    #[arg(long)]
+    pub json_progress: bool,
+    /// Machine-readable summary.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -353,6 +389,9 @@ pub mod exit {
     /// mac-app conversion failure (runtime missing/invalid, installer exit ≠ 0,
     /// no entry point, codesign failure) — docs/design/10 §4.
     pub const MACAPP: i32 = 7;
+    /// Depot (Model B) conversion/download failures share the conversion class
+    /// with mac-app (design 14 §1).
+    pub const DEPOT: i32 = 7;
     /// Interrupted (SIGINT); sidecars flushed, safe to resume.
     pub const SIGINT: i32 = 130;
 }
@@ -414,4 +453,40 @@ pub struct DownloadArgs {
     /// Plan and print, touch nothing.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn depot_parses_defaults_and_overrides() {
+        let d = Cli::try_parse_from(["gogo", "depot", "pharaoh"]).unwrap();
+        let Command::Depot(a) = d.command else {
+            panic!("expected Depot");
+        };
+        assert_eq!(a.game, "pharaoh");
+        assert_eq!(a.language, "en-US");
+        assert!(!a.with_dlcs && !a.dry_run && !a.json);
+
+        let d = Cli::try_parse_from([
+            "gogo",
+            "depot",
+            "1207659046",
+            "--with-dlcs",
+            "--language",
+            "fr-FR",
+            "--limit",
+            "4MiB/s",
+            "--dry-run",
+            "--json-progress",
+        ])
+        .unwrap();
+        let Command::Depot(a) = d.command else {
+            panic!("expected Depot")
+        };
+        assert!(a.with_dlcs && a.dry_run && a.json_progress);
+        assert_eq!(a.language, "fr-FR");
+        assert_eq!(a.limit.as_deref(), Some("4MiB/s"));
+    }
 }

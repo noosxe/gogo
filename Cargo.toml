@@ -77,7 +77,10 @@ clap = { version = "4.6.7", features = ["derive"] }
 clap_complete = "4.6.11"
 
 # — GOG auth/tokens/owned-ids (docs/10: not on crates.io — rev-pinned, scope per docs/design/01 §2) —
-gog-warp = { git = "https://github.com/playtron-os/gog-warp", rev = "55ddb010be07d41357144440be3fda65fbb8993a" }
+# Fork of playtron-os/gog-warp rev-pinned: adds macOS file pre-allocation
+# (upstream's allocate() is Linux-only; docs/17 §5, design 14). Track the
+# upstream PR and return to playtron-os when it lands.
+gog-warp = { git = "https://github.com/noosxe/gog-warp", rev = "30a8303b303fb19105439731ddd7d558b615241e" }
 
 # — dev —
 wiremock = "0.6"

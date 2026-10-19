@@ -52,5 +52,7 @@ cargo deny check               # licenses + advisories
   logs are redacted (see `docs/design/07-errors-and-observability.md` §4).
 - Scope: **Linux + macOS only, no Windows** target — but downloading Windows installers
   (for Wine/Proton use) is a first-class use case.
-- Dependencies: gog-warp is a git rev-pin, not on crates.io; reqwest stays on the 0.12
+- Dependencies: gog-warp is a git rev-pin (currently the `noosxe/gog-warp` fork —
+  macOS pre-allocation, see playtron-os/gog-warp#5; return to playtron-os when
+  merged), not on crates.io; reqwest stays on the 0.12
   series to match it (one TLS stack). Crate-version table: `docs/design/01-architecture.md`.

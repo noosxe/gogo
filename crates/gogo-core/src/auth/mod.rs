@@ -22,6 +22,12 @@ pub trait TokenProvider: Send + Sync {
     /// Always-fresh access token.
     async fn bearer(&self) -> Result<String, AuthError>;
     fn user_id(&self) -> Option<u64>;
+    /// The wrapped gog-warp `Core`, when this provider is the live session —
+    /// the depot lane needs the content-system API (design 14 §5). Test
+    /// providers return `None` and depot commands refuse them.
+    fn gog_warp_core(&self) -> Option<&gog_warp::Core> {
+        None
+    }
 }
 
 /// Live impl wrapping `gog_warp::Core` (scope per docs/design/01 §2: token exchange,
@@ -87,6 +93,10 @@ impl Session {
 
 #[async_trait::async_trait]
 impl TokenProvider for Session {
+    fn gog_warp_core(&self) -> Option<&gog_warp::Core> {
+        Some(&self.core)
+    }
+
     async fn bearer(&self) -> Result<String, AuthError> {
         let token = self.core.obtain_galaxy_token().await?;
         Ok(token.access_token().clone())
