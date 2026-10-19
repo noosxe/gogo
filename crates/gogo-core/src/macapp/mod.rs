@@ -159,6 +159,10 @@ pub fn execute(
         ),
     });
     let runtime_bytes = bundle::copy_runtime(&plan.runtime, &plan.bundle.resources.join("wine"))?;
+    bundle::copy_runtime_dylibs(
+        &plan.runtime,
+        &plan.bundle.resources.join("wine-frameworks"),
+    )?;
 
     // In-bundle wine path = the runtime binary's own relative position.
     let rel = plan

@@ -60,6 +60,16 @@ pub struct RuntimeOptions {
 
 /// Resolve + probe a runtime. Pure fs/exec — no network, no config access.
 pub fn resolve(opts: &RuntimeOptions) -> Result<Runtime, MacAppError> {
+    // A supplied --runtime-path implies path mode (live finding 2026-10-19:
+    // silently ignoring it in auto mode produced a brew-runtime bundle).
+    let opts = if opts.mode == RuntimeMode::Auto && opts.runtime_path.is_some() {
+        RuntimeOptions {
+            mode: RuntimeMode::Path,
+            runtime_path: opts.runtime_path.clone(),
+        }
+    } else {
+        opts.clone()
+    };
     let mut tried: Vec<String> = Vec::new();
     match opts.mode {
         RuntimeMode::Brew => resolve_brew(),
@@ -163,6 +173,11 @@ fn find_wine_in(root: &Path, mode: RuntimeMode, kind: &'static str) -> Result<Ru
 /// Probe by executing `wine --version` — a runtime we cannot run is a
 /// `RuntimeInvalid`, never a silent assumption (design 10 §2.1).
 fn probe(wine: PathBuf, mode: RuntimeMode, kind: &'static str) -> Result<Runtime, String> {
+    // Resolve symlinks first: cask runtimes install `$(brew --prefix)/bin/wine64`
+    // as a symlink into the real tree (e.g. Game Porting Toolkit.app). Deriving
+    // `root` from the symlink path bundles the wrong directory entirely — live
+    // finding 2026-10-19: brew mode copied all of /opt/homebrew into a bundle.
+    let wine = wine.canonicalize().unwrap_or_else(|_| wine.clone());
     let out = Command::new(&wine)
         .arg("--version")
         .output()
@@ -242,8 +257,40 @@ mod runtime_tests {
         let rt = probe(tmp.path().join("bin/wine"), RuntimeMode::Path, "path").unwrap();
         assert_eq!(rt.version, "wine-9.0-test");
         assert_eq!(rt.kind, "path");
-        assert_eq!(rt.root, tmp.path());
+        // probe canonicalizes the binary, so root is canonical too (/tmp is
+        // a symlink to /private/tmp on macOS).
+        assert_eq!(rt.root, tmp.path().canonicalize().unwrap());
         assert_eq!(rt.min_macos, None);
+    }
+
+    #[test]
+    fn probe_follows_symlinked_binary_to_the_real_tree() {
+        // Cask layout: $(brew --prefix)/bin/wine64 is a symlink into the real
+        // runtime tree; root must be the real tree (2026-10-19: brew mode
+        // bundled /opt/homebrew instead of the wine tree).
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("App.app/Contents/Resources/wine");
+        fake_runtime(&real, "#!/bin/sh\necho wine-8.0.1-test\n");
+        let link_bin = tmp.path().join("link/bin");
+        std::fs::create_dir_all(&link_bin).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(real.join("bin/wine"), link_bin.join("wine")).unwrap();
+        let rt = probe(link_bin.join("wine"), RuntimeMode::Brew, "brew").unwrap();
+        assert_eq!(rt.root, real.canonicalize().unwrap());
+        assert!(rt.wine.starts_with(real.canonicalize().unwrap()));
+    }
+
+    #[test]
+    fn runtime_path_implies_path_mode_in_auto() {
+        let tmp = tempfile::tempdir().unwrap();
+        fake_runtime(tmp.path(), "#!/bin/sh\necho wine-8.0.1-test\n");
+        let rt = resolve(&RuntimeOptions {
+            mode: RuntimeMode::Auto,
+            runtime_path: Some(tmp.path().to_path_buf()),
+        })
+        .unwrap();
+        assert_eq!(rt.kind, "path");
+        assert_eq!(rt.root, tmp.path().canonicalize().unwrap());
     }
 
     #[test]

@@ -102,15 +102,21 @@ fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// `Resources/launch.conf` — the absolute-in-bundle paths the launcher sources
-/// (design 10 §2.4). The bundle is only ever *moved*, never rebuilt, so paths
-/// written at conversion time stay valid (docs/13 §6.4).
+/// `Resources/launch.conf` — paths **relative to the bundle root** the
+/// launcher resolves against `$DIR` (design 10 §2.4). Absolute build-time
+/// paths broke the moment the bundle was moved (live finding 2026-10-19).
 pub fn write_launch_conf(bundle: &Bundle, wine: &Path, game: &Path) -> Result<(), MacAppError> {
+    let rel = |p: &Path| -> String {
+        p.strip_prefix(&bundle.root)
+            .unwrap_or(p)
+            .to_string_lossy()
+            .into_owned()
+    };
     let conf = format!(
-        "WINE={}\nPREFIX={}\nGAME={}\n",
-        sh_quote(&wine.to_string_lossy()),
-        sh_quote(&bundle.prefix.to_string_lossy()),
-        sh_quote(&game.to_string_lossy()),
+        "WINE={}\nPREFIX={}\nGAME={}\nFRAMEWORKS=Resources/wine-frameworks\n",
+        sh_quote(&rel(wine)),
+        sh_quote(&rel(&bundle.prefix)),
+        sh_quote(&rel(game)),
     );
     std::fs::write(bundle.resources.join("launch.conf"), conf)?;
     Ok(())
@@ -126,8 +132,11 @@ set -e
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=launch.conf
 source "$DIR/Resources/launch.conf"
-export WINEPREFIX="$PREFIX"
-exec "$WINE" "$GAME" "$@"
+export DYLD_FALLBACK_LIBRARY_PATH="$DIR/$FRAMEWORKS:${DYLD_FALLBACK_LIBRARY_PATH:-}"
+export WINEPREFIX="$DIR/$PREFIX"
+# Old installers resolve data files relative to the working directory.
+cd "$(dirname "$DIR/$GAME")"
+exec "$DIR/$WINE" "$DIR/$GAME" "$@"
 "#;
     let mut file = std::fs::File::create(&path)?;
     file.write_all(script.as_bytes())?;
@@ -185,7 +194,57 @@ pub fn write_runtime_marker(bundle: &Bundle, runtime: &Runtime) -> Result<(), Ma
 /// Copy the runtime tree into `Resources/wine` — the self-contained price
 /// (hundreds of MB, docs/13 §4). Returns the copied byte total.
 pub fn copy_runtime(runtime: &Runtime, dest: &Path) -> Result<u64, MacAppError> {
-    copy_tree(&runtime.root, dest)
+    let bytes = copy_tree(&runtime.root, dest)?;
+    // Post-copy validation: a bundle whose launcher cannot exec its wine is
+    // dead on arrival (live finding 2026-10-19 — symlinked wine binaries were
+    // silently skipped and the bundle reported success).
+    let wine = dest.join(
+        runtime
+            .wine
+            .strip_prefix(&runtime.root)
+            .unwrap_or_else(|_| Path::new("bin/wine")),
+    );
+    if !wine.is_file() {
+        return Err(MacAppError::RuntimeInvalid {
+            path: dest.to_path_buf(),
+            reason: format!("wine binary missing after runtime copy: {}", wine.display()),
+        });
+    }
+    Ok(bytes)
+}
+
+/// Runtimes that live inside a `.app` (Wineskin/CX wrappers) link their wine
+/// binaries against dylibs in the wrapper's `Contents/Frameworks`. Copy the
+/// top-level `.dylib` files into `Resources/wine-frameworks` so the launcher
+/// can point `DYLD_FALLBACK_LIBRARY_PATH` at them (live finding 2026-10-19:
+/// `Library not loaded: @rpath/libinotify.0.dylib` on first launch).
+pub fn copy_runtime_dylibs(runtime: &Runtime, dest: &Path) -> Result<Option<u64>, MacAppError> {
+    let mut anc = runtime.root.parent();
+    let frameworks = loop {
+        match anc {
+            Some(dir) => {
+                if dir.ends_with("Contents") {
+                    break dir.join("Frameworks");
+                }
+                anc = dir.parent();
+            }
+            None => return Ok(None),
+        }
+    };
+    if !frameworks.is_dir() {
+        return Ok(None);
+    }
+    std::fs::create_dir_all(dest)?;
+    let mut total = 0u64;
+    for entry in std::fs::read_dir(&frameworks)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "dylib") && path.is_file() {
+            total += std::fs::metadata(&path)?.len();
+            std::fs::copy(&path, dest.join(entry.file_name()))?;
+        }
+    }
+    Ok(Some(total))
 }
 
 fn copy_tree(src: &Path, dest: &Path) -> Result<u64, MacAppError> {
@@ -379,6 +438,92 @@ mod bundle_tests {
         let conf = std::fs::read_to_string(b.resources.join("launch.conf")).unwrap();
         assert!(conf.contains(r"WINE='/o'\''/wine'"), "{conf}");
         assert!(conf.contains(r"GAME='/p/game exe.exe'"), "{conf}");
+    }
+
+    #[test]
+    fn launch_conf_and_launcher_are_bundle_relative_and_launch_ready() {
+        let tmp = tempfile::tempdir().unwrap();
+        let b = layout(tmp.path(), "G");
+        create_layout(&b).unwrap();
+        let wine = b.root.join("Resources/wine/bin/wine");
+        let game = b.prefix.join("drive_c/GOG/g/game.exe");
+        write_launch_conf(&b, &wine, &game).unwrap();
+        let conf = std::fs::read_to_string(b.resources.join("launch.conf")).unwrap();
+        assert!(conf.contains("WINE='Resources/wine/bin/wine'"), "{conf}");
+        assert!(
+            !conf.contains(&tmp.path().to_string_lossy().to_string()),
+            "{conf}"
+        );
+        let launcher = write_launcher(&b, "G").unwrap();
+        let sh = std::fs::read_to_string(launcher).unwrap();
+        assert!(
+            sh.contains("DYLD_FALLBACK_LIBRARY_PATH=\"$DIR/$FRAMEWORKS"),
+            "{sh}"
+        );
+        assert!(sh.contains("cd \"$(dirname \"$DIR/$GAME\")\""), "{sh}");
+        assert!(sh.contains("exec \"$DIR/$WINE\""), "{sh}");
+    }
+
+    #[test]
+    fn copy_runtime_fails_when_wine_binary_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("rt");
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        let runtime = Runtime {
+            mode: RuntimeMode::Path,
+            kind: "path",
+            root: root.clone(),
+            wine: root.join("bin/wine"),
+            version: "test".into(),
+            min_macos: None,
+        };
+        let dest = tmp.path().join("out");
+        let err = copy_runtime(&runtime, &dest).unwrap_err();
+        assert!(
+            err.to_string().contains("missing after runtime copy"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn dylib_sidecar_copies_dylibs_from_wrapper_frameworks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("W.app/Contents/SharedSupport/wine");
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        let fw = tmp.path().join("W.app/Contents/Frameworks");
+        std::fs::create_dir_all(&fw).unwrap();
+        std::fs::write(fw.join("libinotify.0.dylib"), b"dylib").unwrap();
+        std::fs::write(fw.join("libfreetype.dylib"), b"dylib").unwrap();
+        std::fs::create_dir_all(fw.join("GStreamer.framework")).unwrap();
+        let runtime = Runtime {
+            mode: RuntimeMode::Path,
+            kind: "path",
+            root,
+            wine: tmp
+                .path()
+                .join("W.app/Contents/SharedSupport/wine/bin/wine"),
+            version: "test".into(),
+            min_macos: None,
+        };
+        let dest = tmp.path().join("sidecar");
+        let total = copy_runtime_dylibs(&runtime, &dest).unwrap().unwrap();
+        assert_eq!(total, 10); // two 5-byte dylibs
+        assert!(dest.join("libinotify.0.dylib").is_file());
+        assert!(!dest.join("GStreamer.framework").exists());
+        // a runtime outside any .app has no sidecar
+        let bare = Runtime {
+            root: tmp.path().join("bare"),
+            wine: tmp.path().join("bare/bin/wine"),
+            mode: RuntimeMode::Path,
+            kind: "path",
+            version: "t".into(),
+            min_macos: None,
+        };
+        assert!(
+            copy_runtime_dylibs(&bare, &tmp.path().join("s2"))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
