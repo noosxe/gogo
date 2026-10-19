@@ -70,6 +70,23 @@ Cross-check: the fetched record's `gogid`/`gogslug` must agree with our gog
 id (string compare); on mismatch → `RecipeMiss` + warn (matched a different
 edition).
 
+Name-derived discovery hardening (live findings 2026-10-19, shipped with the
+phase-5 follow-up):
+
+- **Version-tail strip**: GOG installers are `setup_<name>_<major.minor…>.exe`;
+  the display name drops the trailing underscore-delimited dotted version
+  (`setup_pharaoh_gold_2.1.0.15.exe` → "Pharaoh gold"). Multi-part dotted
+  numbers only — "Portal 2"-style titles keep their trailing token.
+- **Query fallback**: Lutris search is strict ("pharaoh gold" → 0 results while
+  the game is listed as "Pharaoh"); the search drops trailing tokens until
+  something answers (never below one token).
+- **Overlap pick**: `pick_game` keeps exact-name → slug, then scores by
+  normalized token overlap (GOG-linked first, shortest name as tie-break)
+  instead of blindly taking the first result — "Pharaoh gold" over the 20
+  loose "pharaoh" matches lands on `pharaoh` (carries
+  `pharaoh-cd-cnc-ddraw`), not "Arizona Rose and the Pharaohs' Riddles".
+  The post-install gogid cross-check still guards the pick.
+
 ## 3. Interpretation — the parity executor
 
 The script is JSON (`serde_json`; **no YAML dependency**). Interpretation

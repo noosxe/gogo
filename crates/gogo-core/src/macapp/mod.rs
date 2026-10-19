@@ -117,12 +117,36 @@ pub fn display_name(installer: &Path, name: Option<&str>) -> String {
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "game".to_string());
     let stem = stem.strip_prefix("setup_").unwrap_or(&stem).to_string();
+    let stem = strip_version_tail(&stem).to_string();
     let spaced = stem.replace(['_', '-', '.'], " ");
     let spaced = spaced.trim().to_string();
     let mut chars = spaced.chars();
     match chars.next() {
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
         None => "Game".to_string(),
+    }
+}
+
+/// GOG offline installers are `setup_<name>_<major.minor.patch…>.exe`: drop
+/// the trailing underscore-delimited **dotted** version so the display name
+/// (bundle title + Lutris search query) is the product name —
+/// `setup_pharaoh_gold_2.1.0.15.exe` → "Pharaoh gold", not
+/// "Pharaoh gold 2 1 0 15". Only multi-part dotted numbers count: titles like
+/// "Portal 2" or "Heroes3 Gold" keep their trailing tokens.
+fn strip_version_tail(stem: &str) -> &str {
+    let Some(pos) = stem.rfind('_') else {
+        return stem;
+    };
+    let tail = &stem[pos + 1..];
+    let parts = tail.split('.');
+    let all_numeric = parts
+        .clone()
+        .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    let multi_part = parts.count() >= 2;
+    if all_numeric && multi_part {
+        &stem[..pos]
+    } else {
+        stem
     }
 }
 
@@ -164,7 +188,20 @@ pub fn recipe_candidates(
     let discovery = {
         let client = &client;
         async move {
-            let games: Vec<lutris::LutrisGame> = client.search(display).await.unwrap_or_default();
+            // Lutris search is strict: "pharaoh gold" answers 0 results
+            // while the game is listed as "Pharaoh" (live-verified
+            // 2026-10-19). Drop trailing tokens until something answers.
+            let mut query = display.to_string();
+            let games: Vec<lutris::LutrisGame> = loop {
+                let found = client.search(&query).await.unwrap_or_default();
+                if !found.is_empty() || !query.contains(' ') {
+                    break found;
+                }
+                query = query
+                    .rsplit_once(' ')
+                    .map(|(head, _)| head.to_string())
+                    .unwrap_or_default();
+            };
             let Some(game) = lutris::pick_game(&games, display) else {
                 return Ok::<Vec<lutris::LutrisInstaller>, MacAppError>(Vec::new());
             };
@@ -1029,6 +1066,21 @@ mod pipeline_tests {
             "Heroes3 gold"
         );
         assert_eq!(display_name(Path::new("/x/game-v2.exe"), None), "Game v2");
+        // GOG version tails (dotted, multi-part) are stripped — the display
+        // name feeds both the bundle title and the Lutris search query.
+        assert_eq!(
+            display_name(Path::new("/x/setup_pharaoh_gold_2.1.0.15.exe"), None),
+            "Pharaoh gold"
+        );
+        // Titles with plain trailing numbers keep them (no dotted tail).
+        assert_eq!(
+            display_name(Path::new("/x/setup_portal_2_2.1.0.4.exe"), None),
+            "Portal 2"
+        );
+        assert_eq!(
+            display_name(Path::new("/x/setup_bejeweled_3_1.0.exe"), None),
+            "Bejeweled 3"
+        );
         assert_eq!(
             display_name(Path::new("/x/setup_alpha.exe"), Some("  My Name ")),
             "My Name"
