@@ -181,6 +181,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
             .await
         }
         Command::Runtimes(args) => runtimes_cmd(args).await,
+        Command::Shim { tool, args } => Ok(gogo_shims::run_tool(&tool, &args)),
         Command::Completions { shell } => completions(shell),
     }
 }
@@ -1838,6 +1839,7 @@ fn emit_macapp_event(ev: &gogo::engine::events::ProgressEvent, json_progress: bo
             gogo::fmt::human_size(*bytes)
         )),
         Ev::RuntimeDownloadFinished { id, version } => Some(format!("{id} {version} cached")),
+        Ev::ToolProvisioned { id, version } => Some(format!("{id} {version} provisioned")),
         _ => None,
     };
     if let Some(l) = line {

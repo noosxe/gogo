@@ -38,9 +38,9 @@ pub struct ManifestEntry {
     /// RFC 3339.
     pub fetched_at: String,
     pub upstream_url: String,
-    /// Wine binary path relative to the tree root (audit §8.1: the archive
-    /// root is an app wrapper, the tree is `Contents/Resources/wine`).
-    pub wine_rel: String,
+    /// Payload path relative to the tree root: the wine binary (audit §8.1
+    /// app-wrapper layout) or the tool script (winetricks).
+    pub entry_rel: String,
     pub bytes: u64,
 }
 
@@ -83,7 +83,7 @@ pub fn installed(id: &str, version: Option<&str>) -> Option<(ManifestEntry, Path
         .collect();
     hits.sort_by(|a, b| b.fetched_at.cmp(&a.fetched_at));
     hits.into_iter()
-        .find(|m| tree_root(m).join(&m.wine_rel).is_file())
+        .find(|m| tree_root(m).join(&m.entry_rel).is_file())
         .map(|m| {
             let root = tree_root(&m);
             (m, root)
@@ -100,13 +100,7 @@ pub async fn install(
     emit: &mut dyn FnMut(&ProgressEvent),
 ) -> Result<ManifestEntry, MacAppError> {
     match &entry.status {
-        Status::Available => {}
-        Status::Tool => {
-            return Err(MacAppError::RuntimeDownloadFailed {
-                url: entry.id.into(),
-                reason: "tool provisioning lands with design 12 §8 (Phase 2)".into(),
-            });
-        }
+        Status::Available | Status::Tool => {}
         Status::Gone { since, story } => {
             return Err(MacAppError::RuntimeDownloadFailed {
                 url: entry.id.into(),
@@ -139,7 +133,13 @@ pub async fn install(
     });
 
     std::fs::create_dir_all(tmp_dir())?;
-    let part = tmp_dir().join(format!("{}-{}.tar.xz.part", entry.id, rel.tag));
+    let gz = rel.asset_name.ends_with(".tar.gz") || rel.asset_name.ends_with(".tgz");
+    let part = tmp_dir().join(format!(
+        "{}-{}.{}",
+        entry.id,
+        rel.tag,
+        if gz { "tar.gz.part" } else { "tar.xz.part" }
+    ));
     download_with_retry(http, &rel.asset_url, &part).await?;
 
     // Verify against the upstream digest when present; always record the hash.
@@ -155,7 +155,8 @@ pub async fn install(
         });
     }
 
-    // Extract to a temp dir, then locate + probe the wine tree (blocking work).
+    // Extract to a temp dir (decoder by archive extension), then locate +
+    // probe the payload — blocking work.
     let extract_dir = tmp_dir().join(format!("{}-{}", entry.id, rel.tag));
     let _ = std::fs::remove_dir_all(&extract_dir);
     std::fs::create_dir_all(&extract_dir)?;
@@ -163,7 +164,12 @@ pub async fn install(
     let extract_dir2 = extract_dir.clone();
     let bytes = tokio::task::spawn_blocking(move || -> Result<u64, MacAppError> {
         let file = std::fs::File::open(&archive)?;
-        let mut tar = tar::Archive::new(xz2::read::XzDecoder::new(file));
+        let decoder: Box<dyn std::io::Read> = if gz {
+            Box::new(flate2::read::GzDecoder::new(file))
+        } else {
+            Box::new(xz2::read::XzDecoder::new(file))
+        };
+        let mut tar = tar::Archive::new(decoder);
         tar.set_preserve_permissions(true);
         tar.unpack(&extract_dir2)?;
         dir_size(&extract_dir2)
@@ -174,13 +180,36 @@ pub async fn install(
         reason: format!("extract task: {e}"),
     })??;
 
-    // Locate the wine tree and prove it runs BEFORE committing anything.
-    let (wine, _version) = locate_and_probe(&extract_dir)?;
-    let wine_rel = wine
-        .strip_prefix(&extract_dir)
-        .expect("wine path is inside the extract dir")
-        .to_string_lossy()
-        .into_owned();
+    // Locate the payload and prove it BEFORE committing anything: wine trees
+    // must run; tool scripts must exist and be made executable.
+    let entry_rel = match entry.kind {
+        catalog::Kind::Wine => {
+            let (wine, _version) = locate_and_probe(&extract_dir)?;
+            wine.strip_prefix(&extract_dir)
+                .expect("payload inside the extract dir")
+                .to_string_lossy()
+                .into_owned()
+        }
+        catalog::Kind::Tool => {
+            let f = locate_named_file(&extract_dir, "winetricks").ok_or_else(|| {
+                MacAppError::RuntimeInvalid {
+                    path: extract_dir.clone(),
+                    reason: "archive contains no 'winetricks' script".into(),
+                }
+            })?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let mut perm = std::fs::metadata(&f)?.permissions();
+                perm.set_mode(0o755);
+                std::fs::set_permissions(&f, perm)?;
+            }
+            f.strip_prefix(&extract_dir)
+                .expect("payload inside the extract dir")
+                .to_string_lossy()
+                .into_owned()
+        }
+    };
 
     // Commit: rename into place, drop the archive, update the manifest.
     let dest = runtimes_dir().join(entry.id).join(&rel.tag);
@@ -195,7 +224,7 @@ pub async fn install(
         sha256: actual,
         fetched_at: Utc::now().to_rfc3339(),
         upstream_url: rel.asset_url.clone(),
-        wine_rel,
+        entry_rel,
         bytes,
     };
     let mut manifest: Vec<ManifestEntry> = load_manifest()
@@ -205,10 +234,17 @@ pub async fn install(
     manifest.push(m.clone());
     save_manifest(&manifest)?;
 
-    emit(&ProgressEvent::RuntimeDownloadFinished {
-        id: entry.id.into(),
-        version: rel.tag.clone(),
-    });
+    if matches!(entry.kind, catalog::Kind::Tool) {
+        emit(&ProgressEvent::ToolProvisioned {
+            id: entry.id.into(),
+            version: rel.tag.clone(),
+        });
+    } else {
+        emit(&ProgressEvent::RuntimeDownloadFinished {
+            id: entry.id.into(),
+            version: rel.tag.clone(),
+        });
+    }
     Ok(m)
 }
 
@@ -252,6 +288,32 @@ fn locate_and_probe(dir: &Path) -> Result<(PathBuf, String), MacAppError> {
         path: dir.to_path_buf(),
         reason: "archive has no bin/wine{,64} (bare or *.app/Contents/Resources/wine)".into(),
     })
+}
+
+/// Find a named file in an extracted tool archive (bounded depth 3, shallowest
+/// match wins — release tarballs put `winetricks` at root or one level down).
+fn locate_named_file(dir: &Path, name: &str) -> Option<PathBuf> {
+    let mut best: Option<(usize, PathBuf)> = None;
+    let mut stack = vec![(0usize, dir.to_path_buf())];
+    while let Some((depth, d)) = stack.pop() {
+        if depth > 3 {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push((depth + 1, p));
+            } else if p.file_name().and_then(|n| n.to_str()) == Some(name)
+                && best.as_ref().is_none_or(|(bd, _)| depth < *bd)
+            {
+                best = Some((depth, p));
+            }
+        }
+    }
+    best.map(|(_, p)| p)
 }
 
 fn wine_in(bin: &Path) -> Option<PathBuf> {
@@ -460,11 +522,11 @@ mod store_tests {
             .unwrap();
         assert_eq!(m.version, "11.18");
         assert_eq!(
-            m.wine_rel,
+            m.entry_rel,
             "Wine Staging.app/Contents/Resources/wine/bin/wine"
         );
         let root = tree_root(&m);
-        assert!(root.join(&m.wine_rel).is_file());
+        assert!(root.join(&m.entry_rel).is_file());
         assert_eq!(m.sha256, sha256_hex(&body));
 
         // Reuse: a second install must not hit the download URL again.
@@ -518,6 +580,8 @@ mod store_tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("consent"));
+        // Tools are no longer hard-gated: with an unreachable catalog the
+        // install fails as a catalog error instead.
         let err = install(
             catalog::find("winetricks").unwrap(),
             None,
@@ -527,7 +591,7 @@ mod store_tests {
         )
         .await
         .unwrap_err();
-        assert!(err.to_string().contains("Phase 2"));
+        assert!(matches!(err, MacAppError::CatalogUnreachable { .. }));
         let err = install(
             catalog::find("wine-crossover").unwrap(),
             None,
@@ -538,6 +602,91 @@ mod store_tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("gone since 2026-10-19"));
+    }
+
+    #[tokio::test]
+    // The env guard must span install's awaits: GOGO_HOME is read throughout.
+    // Safe: the test runtime is single-threaded and no other task touches env.
+    #[allow(clippy::await_holding_lock)]
+    async fn winetricks_provisioning_round_trip() {
+        let home = tempfile::tempdir().unwrap();
+        let _g = env_home(home.path());
+        // A release tarball carrying an executable `winetricks` script.
+        let mut tar_buf = Vec::new();
+        {
+            let mut t = tar::Builder::new(&mut tar_buf);
+            let script = b"#!/bin/sh\nWINETRICKS_VERSION=20260125-test\n";
+            let mut h = tar::Header::new_gnu();
+            h.set_size(script.len() as u64);
+            h.set_mode(0o755);
+            h.set_cksum();
+            t.append_data(&mut h, "winetricks", &script[..]).unwrap();
+            t.finish().unwrap();
+        }
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        use std::io::Write as _;
+        gz.write_all(&tar_buf).unwrap();
+        let body = gz.finish().unwrap();
+        let digest = format!("sha256:{}", sha256_hex(&body));
+
+        let server = wiremock::MockServer::start().await;
+        let asset_url = format!("{}/download/20260125.tar.gz", server.uri());
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/repos/Winetricks/winetricks/releases/latest",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "tag_name": "20260125",
+                    "prerelease": false,
+                    "published_at": "2026-01-25T00:00:00Z",
+                    "assets": [{
+                        "name": "20260125.tar.gz",
+                        "size": body.len(),
+                        "browser_download_url": asset_url,
+                        "digest": digest,
+                    }],
+                })),
+            )
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/download/20260125.tar.gz"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(body))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let entry = catalog::find("winetricks").unwrap();
+        let http = catalog::http_client().unwrap();
+        let mut events: Vec<&'static str> = Vec::new();
+        let m = install(entry, None, &http, &server.uri(), &mut |ev| {
+            use crate::engine::events::ProgressEvent as Ev;
+            let name = match ev {
+                Ev::RuntimeDownloadStarted { .. } => "started",
+                Ev::ToolProvisioned { .. } => "provisioned",
+                _ => "other",
+            };
+            events.push(name);
+        })
+        .await
+        .unwrap();
+        assert_eq!(m.version, "20260125");
+        assert_eq!(m.entry_rel, "winetricks");
+        assert_eq!(events, vec!["started", "provisioned"]);
+        let wt = tree_root(&m).join(&m.entry_rel);
+        assert!(wt.is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert!(wt.metadata().unwrap().permissions().mode() & 0o111 != 0);
+        }
+        // Reuse: a second install must not re-download.
+        let m2 = install(entry, None, &http, &server.uri(), &mut |_| {})
+            .await
+            .unwrap();
+        assert_eq!(m2.version, "20260125");
+        server.verify().await;
     }
 
     #[test]
@@ -551,7 +700,7 @@ mod store_tests {
             sha256: "abc".into(),
             fetched_at: "2026-10-19T00:00:00Z".into(),
             upstream_url: "http://x".into(),
-            wine_rel: "bin/wine".into(),
+            entry_rel: "bin/wine".into(),
             bytes: 1,
         };
         save_manifest(std::slice::from_ref(&m)).unwrap();

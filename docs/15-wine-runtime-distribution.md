@@ -154,7 +154,13 @@ Repo: `https://github.com/Gcenx/macOS_Wine_builds` — "Official Winehq macOS Pa
    (registry — already implemented) carry gogo actions; `dxvk*` / `esync` are
    toggles honored with notices (DXVK on mac needs MoltenVK — future work,
    design 10 §10).
-5. **winetricks tool-check block** — the script's exact presence checks and fallback
-   order for cabextract vs 7z; shim names/flags must match what it actually invokes.
-6. **Shim crate licenses** — `cab` (MS-CAB read) and `sevenz-rust` (7z read): license
-   and maturity review for the `gogo-shims` crate (design 12 D5).
+5. ✅ **winetricks tool-check block** (resolved from the live script): `w_try_cabextract`
+   invokes `cabextract` with `-d DIR` / `--directory=DIR`, `-F PAT`, `-L`, `-q` in
+   **varying order**, on files that are often self-extracting exes (embedded MSCF
+   cabinets — `vcrun*`, `corefonts`); `w_try_7z` invokes `7z x FILE -oDIR
+   [FILENAMES…] -y` and, absent host 7z, falls back to installing Windows 7-Zip
+   *inside the prefix* (slow — the shim exists to short-circuit that). The shim CLI
+   surface in `gogo-shims` is derived from these exact shapes.
+6. ✅ **Shim crate licenses** (resolved): `cab` 0.6.0 — MIT, pure-Rust CAB read+write,
+   actively maintained (2026-08); `sevenz-rust` 0.6.1 — Apache-2.0, pure Rust. Both
+   compatible with gogo's MIT/Apache-2.0 dual licensing and the shim crate.

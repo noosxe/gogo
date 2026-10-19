@@ -44,8 +44,6 @@ pub enum Discovery {
         asset_prefix: &'static str,
         asset_suffix: &'static str,
     },
-    /// Fixed URL, pinned by sha256 at provisioning time (winetricks, §8).
-    RawUrl { url: &'static str },
 }
 
 /// One catalog entry (design 12 §3 schema, trimmed to v1 needs).
@@ -143,14 +141,16 @@ static ENTRIES: &[CatalogEntry] = &[
         id: "winetricks",
         kind: Kind::Tool,
         status: Status::Tool,
-        discovery: Some(Discovery::RawUrl {
-            url: "https://raw.githubusercontent.com/Winetricks/winetricks/master/src/winetricks",
+        discovery: Some(Discovery::GitHubReleases {
+            repo: "Winetricks/winetricks",
+            asset_prefix: "",
+            asset_suffix: ".tar.gz",
         }),
         license: "LGPL-2.1+",
         redistributable: true,
         min_macos: None,
         arch: "any",
-        note: "pinned-sha256 provisioning lands with design 12 §8 (Phase 2)",
+        note: "GitHub release tarball (digest-pinned); the script is located post-extract",
     },
 ];
 
@@ -224,12 +224,7 @@ pub async fn probe(
         repo,
         asset_prefix,
         asset_suffix,
-    } = disc
-    else {
-        return Err(MacAppError::CatalogUnreachable {
-            detail: format!("{} is not release-discovered", entry.id),
-        });
-    };
+    } = disc;
     let matches_asset =
         |a: &AssetDoc| a.name.starts_with(asset_prefix) && a.name.ends_with(asset_suffix);
 

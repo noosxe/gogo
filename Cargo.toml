@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/gogo-core", "crates/gogo-cli", "crates/gogo-tui"]
+members = [
+    "crates/gogo-core",
+    "crates/gogo-cli",
+    "crates/gogo-shims",
+    "crates/gogo-tui",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -17,6 +22,7 @@ publish = false
 [workspace.dependencies]
 # — internal —
 gogo-core = { path = "crates/gogo-core", version = "0.1.0" }
+gogo-shims = { path = "crates/gogo-shims", version = "0.1.0" }
 
 # — async / HTTP (rustls only: one TLS stack shared with gog-warp; no gzip) —
 tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "signal", "fs", "io-util", "time"] }
@@ -39,6 +45,8 @@ toml_edit = "0.25"
 quick-xml = "0.42.0"
 md-5 = "0.11.0"
 sha2 = "0.10"
+cab = "0.6"
+sevenz-rust2 = "0.24"
 url = "2.5.8"
 # RFC 3339 timestamps in InstallRecord (already in-tree via gog-warp).
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

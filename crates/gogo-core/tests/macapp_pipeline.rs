@@ -211,3 +211,89 @@ fn execute_refuses_to_clobber_existing_bundle() {
         gogo::macapp::MacAppError::BundleExists { .. }
     ));
 }
+
+/// Env-mutation lock for tests that set GOGO_HOME/WINETRICKS (integration
+/// tests cannot reach the core crate's env mutex).
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[test]
+fn winetricks_verbs_run_with_wine_shims_and_notice() {
+    // Design 12 §8 composition: a recipe winetricks verb runs through the
+    // preference chain with WINE=<bundled wine>, the shim dir prepended to
+    // PATH (child-scoped), and produces the bundle's LGPL notice.
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let runtime_dir = tmp.path().join("runtime");
+    let log = tmp.path().join("wine.log");
+    fake_runtime(&runtime_dir, &log);
+    let wt_log = tmp.path().join("winetricks.log");
+    let wt = tmp.path().join("fake-winetricks");
+    std::fs::write(
+        &wt,
+        format!(
+            "#!/bin/sh\nprintf 'argv: %s\\nWINE=%s\\nPATH=%s\\n' \"$*\" \"$WINE\" \"$PATH\" >> \"{}\"\nexit 0\n",
+            wt_log.display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&wt, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    // A recipe file whose only step is a winetricks verb (design 11 §3.1).
+    let recipe = tmp.path().join("recipe.json");
+    std::fs::write(
+        &recipe,
+        r#"{"files": [], "installer": [{"task": {"name": "winetricks", "app": "corefonts"}}]}"#,
+    )
+    .unwrap();
+
+    let installer = tmp.path().join("setup_testgame_1.0.exe");
+    std::fs::write(&installer, b"MZ").unwrap();
+    let opts = MacAppOptions {
+        installer,
+        name: Some("Test Game".into()),
+        mode: RuntimeMode::Path,
+        runtime_path: Some(runtime_dir),
+        out_dir: tmp.path().to_path_buf(),
+        overwrite: true,
+        recipe: gogo::macapp::RecipeChoice::File(recipe),
+    };
+
+    // Sandbox the store (shims materialize under state_dir) + override the
+    // winetricks resolution with our fake.
+    // SAFETY: env mutation under ENV_LOCK; no other test in this binary
+    // reads GOGO_HOME/WINETRICKS concurrently.
+    unsafe {
+        std::env::set_var("GOGO_HOME", tmp.path().join("home"));
+        std::env::set_var("WINETRICKS", &wt);
+    }
+    let plan = macapp::plan(&opts, &mut |_| {}).expect("plan");
+    macapp::execute(&plan, CodesignPolicy::Skip, None, &mut |_| {}).expect("execute");
+    // SAFETY: restore.
+    unsafe {
+        std::env::remove_var("WINETRICKS");
+        std::env::remove_var("GOGO_HOME");
+    }
+    drop(guard);
+
+    let logged = std::fs::read_to_string(&wt_log).expect("fake winetricks ran");
+    assert!(logged.contains("argv: -q corefonts"), "{logged}");
+    assert!(
+        logged.contains("Resources/wine/bin/wine"),
+        "WINE must be the bundled wine: {logged}"
+    );
+    assert!(
+        logged.contains("tools/shims"),
+        "shim dir must be PATH-prepended: {logged}"
+    );
+    // The LGPL notice lands in the bundle (design 12 §8).
+    let bundle = tmp.path().join("Test Game.app");
+    assert!(
+        bundle
+            .join("Contents/Resources/LICENSE-winetricks.txt")
+            .is_file()
+    );
+}

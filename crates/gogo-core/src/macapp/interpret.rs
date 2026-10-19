@@ -576,7 +576,7 @@ impl Executor<'_> {
     }
 }
 
-/// zip / tar / tar.gz / tar.xz; rar/7z are rejected loudly (design 11 §3.1).
+/// zip / tar / tar.gz / tar.xz / 7z (via the shim readers, design 12 D5); rar
 pub fn extract_archive(archive: &Path, dst: &Path) -> Result<(), MacAppError> {
     std::fs::create_dir_all(dst)?;
     let name = archive.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -608,9 +608,12 @@ pub fn extract_archive(archive: &Path, dst: &Path) -> Result<(), MacAppError> {
         extract_tar(archive, dst, Some(xz2::read::XzDecoder::new))
     } else if lower.ends_with(".tar") {
         extract_tar(archive, dst, None::<fn(std::fs::File) -> std::fs::File>)
+    } else if lower.ends_with(".7z") {
+        gogo_shims::extract_7z(archive, dst, &[]).map_err(|e| err("7z", e))?;
+        Ok(())
     } else {
         Err(MacAppError::Recipe(format!(
-            "extract: unsupported archive format '{name}' (zip/tar only)"
+            "extract: unsupported archive format '{name}' (zip/tar/7z; rar stays v2)"
         )))
     }
 }

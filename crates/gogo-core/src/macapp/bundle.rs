@@ -190,6 +190,21 @@ pub fn write_notices(bundle: &Bundle, runtime: &Runtime) -> Result<(), MacAppErr
     Ok(())
 }
 
+/// `LICENSE-winetricks.txt` — written when recipe verbs ran through
+/// winetricks (design 12 §8): the tool is LGPL-2.1+; components it installs
+/// were fetched during conversion into the user's prefix — gogo ships none.
+pub fn write_winetricks_notice(bundle: &Bundle) -> Result<(), MacAppError> {
+    std::fs::write(
+        bundle.resources.join("LICENSE-winetricks.txt"),
+        "This application's game prefix was configured with winetricks\n\
+         (https://github.com/Winetricks/winetricks), licensed under the GNU\n\
+         LGPL v2.1-or-later. Components it installs (fonts, runtimes) were\n\
+         downloaded during conversion on the user's machine and live in the\n\
+         user's prefix; gogo itself ships no such components.\n",
+    )?;
+    Ok(())
+}
+
 /// `Resources/runtime.txt` — which runtime was used, for support honesty
 /// (design 10 §3).
 pub fn write_runtime_marker(bundle: &Bundle, runtime: &Runtime) -> Result<(), MacAppError> {
