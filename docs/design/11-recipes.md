@@ -14,9 +14,12 @@ Every one of those ingredients is already encoded in community **Lutris
 installer scripts**, keyed by GOG id (live-verified: `cuphead-gog` carries
 the `/NOGUI` installer flags *and* `task: winetricks app=corefonts`; the
 Pharaoh fix chain maps row-for-row onto script steps). gogo **consumes**
-Lutris: it lists the scripts relevant to the game, the user chooses, and
-gogo interprets the script through a bounded executor. gogo hosts no recipe
-content and defines no format — it is a consumer, not a publisher.
+Lutris **live**: during `mac-app` it searches lutris.net for the game, shows
+the candidate scripts, and **asks the user which one to apply**. Nothing is
+stored on gogo's side — no recipe cache, no corpus, no freshness state. The
+fetched script and its downloaded files live in a per-run temp working set
+and are deleted when the conversion ends. gogo hosts no recipe content and
+defines no format — it is a transient client of the corpus, not a publisher.
 
 ## 1. CLI surface (03 §1 carries the user-facing summary)
 
@@ -26,15 +29,18 @@ gogo recipes list <installer-path>       # the relevant Lutris installers for th
 gogo recipes show <installer-slug|file>  # the execution plan: applied vs skipped, with reasons
 ```
 
-- **Selection** (what `lutris.net/games/<slug>` shows, but in the terminal):
-  resolve the GOG id from `goggame-<id>.info` → Lutris game → its community
-  installers (runner, version, author, updated_at, rating). `auto` picks by
-  the §2 ranking and proceeds; **interactive TTY + ambiguous candidates →
-  prompt**; `--json` prints the candidate list instead of prompting; `none`
-  disables; `<installer-slug>` pins (fatal if unfetchable); `<file>` applies
-  a downloaded script JSON offline.
-- `gogo recipes list` is the discovery command (network, cache-backed);
-  `show` renders the plan from cache/`<file>` (offline).
+- **Selection is the default behaviour** (what `lutris.net/games/<slug>`
+  shows, but in the terminal): during `mac-app`, resolve the GOG id from
+  `goggame-<id>.info` → Lutris game → its community installers (runner,
+  version, author, updated_at, rating) → **prompt the user to pick one**
+  (rendering the ranked list; `1/n/none`). `--recipe <installer-slug>` skips
+  the prompt (scripting); `none` disables lookup entirely; `--recipe <file>`
+  applies a downloaded script JSON offline; `--json` prints the candidate
+  list as JSON instead of prompting.
+- After the pick, the fetched script is **planned and shown** (applied steps
+  vs skipped-with-reasons) before execution — `gogo recipes show
+  <installer-slug|file>` is that inspection standalone (live fetch, nothing
+  cached).
 
 ## 2. Discovery & selection (live-verified, docs/14 §2.1.1)
 
@@ -116,16 +122,17 @@ Six ingredients, every one already encoded by the community — zero
 hand-derived game knowledge, and with §3.1's parity executor, all but the
 runtime choice are expressible in v1.
 
-## 4. Cache & fetch (06 §1 paths; 07 retry rules)
+## 4. Fetch & ephemeral working set (07 retry rules)
 
 - Endpoint base `https://lutris.net` (config override `recipes.lutris_base`,
-  05 §schema).
-- Cached under `~/Library/Caches/gogo/recipes/lutris/`: game resolution
-  (`<gogid>.json`), scripts (`<installer-slug>.json`), downloaded files
-  (`cache/<id>`) — 24 h freshness for `auto`; `list`/`show` use the cache;
-  pinned slugs refetch on `--refresh`.
-- `GET` only, polite UA, 07 §retry matrix (backoff on 5xx; 404 → clean
-  `RecipeMiss` in auto mode).
+  05 §schema, for mirrors).
+- **No recipe storage.** Each conversion fetches the game resolution, the
+  chosen script, and its `files:` into a per-run temp working set
+  (`$(tempdir)/gogo-recipe-<pid>/`), which is removed when the conversion
+  ends — success, failure, or interrupt. Nothing recipe-related persists
+  between runs; re-running re-searches and re-asks.
+- `GET` only, polite UA, 07 §retry matrix (backoff on 5xx; a Lutris outage
+  degrades to "no recipes available" — the pipeline continues recipe-less).
 
 ## 5. Pipeline integration (10 §2 annotated)
 
@@ -195,7 +202,8 @@ warn, pipeline continues recipe-less.
     sequence identical to the no-recipe baseline;
   - pinned slug, unreachable network → exit 7 (`Unresolvable`).
 - **HTTP** behind a `LutrisClient` trait; tests use in-memory fixtures; no
-  network in CI.
+  network in CI. Working-set teardown (temp dir removed on success/failure/
+  interrupt) is asserted explicitly.
 
 ## 9. gogo-core layout (01 §1 tree gains)
 

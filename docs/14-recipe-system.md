@@ -105,10 +105,12 @@ the per-game-recipe premise.
 |---|---|---|
 | Source | **lutris.net installer scripts** — no new format, no gogo recipe repo | §2.1 |
 | Key | GOG product id (from `goggame-<id>.info` and the library record) matched against `provider_games[service=gog].slug`; installer records also carry `gogid`/`gogslug` for cross-checking | §2.1.1 |
-| Interpretation | **Data-only subset** of the script: `wine.overrides` → DLL-overrides registry; `game` → entry point/args; `system.env` → launch env; `installer` steps limited to `merge`/`copy`/`move`/`write_file`/`write_config`/`chmodx` inside the game dir; `task: wineexec` **args on the GOG setup** → extra installer flags (captures `/NOGUI` lore). Everything else (`execute`, `files:` downloads, `winetricks`, unknown tasks) is **skipped with a loud warning**, never executed | trust model |
+| Selection | **live search during `mac-app` + the user picks** the script to apply; `--recipe <slug>` for scripting; nothing stored between runs | Lutris parity | 
+| Interpretation | **Parity executor** for what wine-game scripts use (design 11 §3.1): `files:` downloads via the gogo downloader, `extract` (zip/tar), `wineexec` through the resolved runtime, `task: winetricks` bridged to a user-installed binary, `merge`/`move`/`write_file`/`write_config`/`chmodx`, `wine.overrides` → registry, `game`/`system.env` → launch. Skipped with loud warnings: host-shell `execute` (opt-in v1.1), `insert_disc`, unknown tasks | Lutris parity |
 | Parsing | `script` arrives as JSON — serde_json only; no YAML dependency. `--recipe <file>` accepts the same `?format=json` download | §2.1.1 |
-| Trust | We do not fully trust Lutris scripts either: arbitrary-code steps are skipped, paths must stay inside the bundle; the interpreted plan is printable (`gogo recipes show`) | §4 |
-| Redistributables | Out of scope v1 (`files:` steps skipped); Bottles' pinned-URL+checksum pattern is the designated v2 shape | §2.3 |
+| Storage | **none** — per-run temp working set, deleted when the conversion ends; re-running re-searches and re-asks | ephemeral client |
+| Trust | The **user is the trust anchor** (they pick the script; the plan is shown before execution); host-shell steps skipped by default; paths must stay inside the bundle | §4 |
+| Binary downloads | recipe-chosen `files:` downloads are v1 (the corpus's patch/wrapper URLs — how Pharaoh's exe swap would apply), fetched per-run into the temp working set; redistributables beyond winetricks stay v2 (Bottles-style pinned URL + sha256) | §2.5 |
 
 Full contract: **design 11** (`docs/design/11-recipes.md`).
 
