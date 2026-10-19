@@ -52,6 +52,7 @@ A Rust CLI app that:
 | [13-macos-app-bundles.md](13-macos-app-bundles.md) | macOS wrapper landscape (Whisky/Porting Kit/CrossOver/GPTK), installer mechanics, licensing matrix |
 | [14-recipe-system.md](14-recipe-system.md) | Per-game recipe systems surveyed (Lutris/Winetricks/Bottles), live Lutris API probes, gogo consumes Lutris |
 | [15-wine-runtime-distribution.md](15-wine-runtime-distribution.md) | Live-verified macOS Wine runtime distribution: macOS_Wine_builds (primary), winetricks, GPTK constraints, wine-crossover EOL tombstone, deprecations, audits |
+| [16-gog-specific-solidification.md](16-gog-specific-solidification.md) | GOG-specific findings: cnc-ddraw as ecosystem default (Sikarugir/winetricks/GOG forums), ScummVM/DOSBox native lane, recommendation backlog S1–S5 |
 
 ➡️ **Design phase:** [`docs/design/`](design/README.md) — architecture, auth, CLI spec,
 download pipeline, config, state, errors, testing, and the v2 (depots + TUI) roadmap.
