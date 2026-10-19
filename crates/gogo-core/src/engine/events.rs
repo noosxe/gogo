@@ -96,6 +96,11 @@ pub enum ProgressEvent {
         id: String,
         version: String,
     },
+    /// `runtimes install` of a tool (winetricks): provisioned and ready.
+    ToolProvisioned {
+        id: String,
+        version: String,
+    },
     RecipeSkipped {
         verb: String,
         reason: String,
@@ -167,6 +172,7 @@ mod render_tests {
             ProgressEvent::RecipeSkipped { .. } => "RecipeSkipped",
             ProgressEvent::RuntimeDownloadStarted { .. } => "RuntimeDownloadStarted",
             ProgressEvent::RuntimeDownloadFinished { .. } => "RuntimeDownloadFinished",
+            ProgressEvent::ToolProvisioned { .. } => "ToolProvisioned",
         }
     }
 

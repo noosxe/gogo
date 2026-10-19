@@ -45,6 +45,12 @@ allow = [
     # option-ext (via dirs): file-level copyleft; does not affect linking or the
     # license of the larger work.
     "MPL-2.0",
+    # libbz2-rs-sys (via bzip2 → sevenz-rust2, gogo-shims): the bzip2 license
+    # is a permissive BSD-style license with attribution — linking-safe.
+    "bzip2-1.0.6",
+    # ppmd-rust (via sevenz-rust2): satisfied by MIT-0 (MIT, no attribution
+    # requirement) out of its "CC0-1.0 OR MIT-0" expression.
+    "MIT-0",
 ]
 
 # gog-warp (git rev-pin) ships Apache-2.0 in its LICENSE but has no `license` field in

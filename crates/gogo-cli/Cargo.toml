@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 gogo-core.workspace = true
+gogo-shims.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
 toml_edit.workspace = true

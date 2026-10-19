@@ -28,6 +28,7 @@ flate2.workspace = true
 xz2.workspace = true
 md-5.workspace = true
 sha2.workspace = true
+gogo-shims.workspace = true
 url.workspace = true
 uuid.workspace = true
 chrono.workspace = true

@@ -165,6 +165,16 @@ pub enum Command {
     /// Manage Wine runtimes: list the catalog + cache, install, prune
     /// (design 12 §10).
     Runtimes(RuntimesArgs),
+    /// Internal: extractor shims materialized for winetricks (design 12 D5).
+    /// Double-underscore name keeps it out of help and completion output.
+    #[command(hide = true, name = "__shim")]
+    Shim {
+        tool: String,
+        /// Flags pass through verbatim (`-d`, `-F`, `-o…`) — clap must not
+        /// intercept them.
+        #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
+        args: Vec<String>,
+    },
     /// Print a shell completion script to stdout.
     Completions {
         /// Shell to generate the script for.

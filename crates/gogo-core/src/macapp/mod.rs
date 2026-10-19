@@ -18,6 +18,7 @@ pub mod catalog;
 pub mod lutris;
 pub mod runtime;
 pub mod store;
+pub mod tools;
 
 use std::path::{Path, PathBuf};
 
@@ -276,6 +277,9 @@ pub fn execute(
         plan.runtime.min_macos,
     )?;
     bundle::write_notices(&plan.bundle, &plan.runtime)?;
+    if recipe.as_ref().is_some_and(|o| o.winetricks_used) {
+        bundle::write_winetricks_notice(&plan.bundle)?;
+    }
     bundle::write_runtime_marker(&plan.bundle, &plan.runtime)?;
     emit(&ProgressEvent::BundleAssembled);
 
@@ -318,6 +322,9 @@ pub struct RecipeOutcome {
     pub env: String,
     /// Extra launcher args (word-split by the stub).
     pub args: String,
+    /// Whether any recipe verb ran through the winetricks chain (design 12
+    /// §8 — drives the bundle's LGPL notice).
+    pub winetricks_used: bool,
 }
 
 /// The recipe phase (design 11 §5): discover + select the script, download
@@ -507,22 +514,36 @@ fn run_recipe_phase(
                 Duration::from_secs(600),
             )
         };
+
+        // Tracks whether any verb ran through the winetricks chain (notice).
+        let mut winetricks_used = false;
         let mut run_winetricks = |verbs: &[String]| -> Result<bool, MacAppError> {
-            if which("winetricks").is_none() {
+            // Preference chain (design 12 §8): vendored/auto-provisioned →
+            // WINETRICKS/PATH override → skip-loud. The bundled wine drives
+            // the script; extractor shims are PATH-scoped to this child only.
+            let Some(wt) = tools::resolve_or_provision_winetricks(&mut |ev: &ProgressEvent| {
+                emit(ev);
+            }) else {
                 emit(&ProgressEvent::RecipeSkipped {
                     verb: "winetricks".into(),
                     reason: format!(
-                        "requires winetricks: {} (brew install winetricks)",
+                        "requires winetricks: {} (auto-provision failed; set WINETRICKS or \
+                         `brew install winetricks`)",
                         verbs.join(", ")
                     ),
                 });
                 return Ok(false);
-            }
-            let mut cmd = Command::new("winetricks");
-            cmd.args(verbs)
+            };
+            let shims_path = tools::path_with_shims()?;
+            let mut cmd = Command::new(&wt);
+            cmd.arg("-q")
+                .args(verbs)
+                .env("WINE", bundled_wine)
                 .env("WINEPREFIX", &plan.bundle.prefix)
+                .env("PATH", shims_path)
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
+            winetricks_used = true;
             match installer::run_with_timeout(&mut cmd, Duration::from_secs(1800)) {
                 Some(s) if s.success() => Ok(true),
                 Some(s) => Err(MacAppError::Recipe(format!("winetricks exited {s}"))),
@@ -530,19 +551,19 @@ fn run_recipe_phase(
             }
         };
 
-        let outcome = RecipeOutcome {
-            exe: script_plan
-                .launch_exe
-                .as_ref()
-                .map(|w| interpret::windows_to_posix(&plan.bundle.prefix, w)),
-            env: script_plan
-                .launch_env
-                .iter()
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect::<Vec<_>>()
-                .join(" "),
-            args: script_plan.launch_args.join(" "),
-        };
+        // Hoisted: the outcome is built AFTER the executor runs, so the
+        // winetricks-used flag is final (the closure borrow ends with it).
+        let exe = script_plan
+            .launch_exe
+            .as_ref()
+            .map(|w| interpret::windows_to_posix(&plan.bundle.prefix, w));
+        let env = script_plan
+            .launch_env
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let args = script_plan.launch_args.join(" ");
 
         interpret::Executor {
             ctx: &ctx,
@@ -551,6 +572,13 @@ fn run_recipe_phase(
         }
         .run(&script_plan)?;
 
+        let outcome = RecipeOutcome {
+            exe,
+            env,
+            args,
+            winetricks_used,
+        };
+
         Ok(outcome)
     })();
 
@@ -558,13 +586,6 @@ fn run_recipe_phase(
     result.map(Some)
 }
 
-/// Minimal `which`: first PATH entry holding an executable file.
-fn which(bin: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(bin))
-        .find(|p| p.is_file())
-}
 #[cfg(test)]
 mod pipeline_tests {
     use super::*;

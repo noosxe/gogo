@@ -1,0 +1,17 @@
+[package]
+name = "gogo-shims"
+description = "Rust-made cabextract/7z extractor shims for winetricks (design 12 D5)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lib]
+name = "gogo_shims"
+
+[dependencies]
+cab.workspace = true
+sevenz-rust2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
