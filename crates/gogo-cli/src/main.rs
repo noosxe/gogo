@@ -161,6 +161,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
             name,
             runtime,
             runtime_path,
+            runtime_version,
             recipe,
             out,
             yes,
@@ -172,6 +173,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
                 name,
                 runtime,
                 runtime_path,
+                runtime_version,
                 recipe,
                 out,
                 yes,
@@ -1520,6 +1522,7 @@ async fn mac_app(
     name: Option<String>,
     runtime: Option<crate::cli::RuntimeSource>,
     runtime_path: Option<std::path::PathBuf>,
+    runtime_version: Option<String>,
     recipe: Option<String>,
     out: Option<std::path::PathBuf>,
     yes: bool,
@@ -1569,19 +1572,22 @@ async fn mac_app(
         name,
         mode: runtime.map(Into::into).unwrap_or_default(),
         runtime_path,
+        runtime_version,
         out_dir: out.unwrap_or_else(|| {
             std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
         }),
         overwrite: yes,
         recipe,
+        lutris_base: None,
     };
 
     // Plan: resolve + probe the runtime, validate the installer, size things up.
     let plan = {
         let opts = opts.clone();
         let jp = json_progress;
+        let sel = on_select.clone();
         tokio::task::spawn_blocking(move || {
-            gogo::macapp::plan(&opts, &mut |ev| emit_macapp_event(ev, jp))
+            gogo::macapp::plan(&opts, sel.as_deref(), &mut |ev| emit_macapp_event(ev, jp))
         })
         .await
         .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))??
@@ -1591,12 +1597,30 @@ async fn mac_app(
     // without --yes print the plan and abort — a conversion never starts
     // silently, and hundreds-of-MB bundles deserve the pause (docs/13 §4).
     if !yes {
+        let recipe_line = match &plan.recipe {
+            Some(r) => format!(
+                "{} — {} ({})",
+                r.installer.slug, r.installer.version, r.installer.author
+            ),
+            None => "none".to_string(),
+        };
+        let runtime_kind = match &plan.runtime.mode {
+            gogo::macapp::RuntimeMode::Catalog(id) => format!("catalog:{id}"),
+            m => m.as_str().to_string(),
+        };
+        let download_line = plan
+            .runtime_downloaded
+            .as_ref()
+            .map(|(id, v)| format!("\n  downloaded during planning: {id} {v}"))
+            .unwrap_or_default();
         eprintln!(
-            "converting:\n  installer: {}\n  bundle:    {}\n  runtime:   {} ({})\n  est. size: {}",
+            "converting:\n  installer: {}\n  bundle:    {}\n  recipe:    {}\n  runtime:   {} ({}){}\n  est. size: {}",
             plan.installer.installer.display(),
             plan.bundle_path.display(),
+            recipe_line,
             plan.runtime.version,
-            plan.runtime.kind,
+            runtime_kind,
+            download_line,
             gogo::fmt::human_size(plan.estimated_bytes),
         );
         if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
@@ -1619,16 +1643,13 @@ async fn mac_app(
     let bytes = {
         let plan = plan.clone();
         let jp = json_progress;
-        let sel = on_select.clone();
         tokio::task::spawn_blocking(move || {
             let policy = if cfg!(target_os = "macos") {
                 gogo::macapp::bundle::CodesignPolicy::Adhoc
             } else {
                 gogo::macapp::bundle::CodesignPolicy::Skip
             };
-            gogo::macapp::execute(&plan, policy, sel.as_deref(), &mut |ev| {
-                emit_macapp_event(ev, jp)
-            })
+            gogo::macapp::execute(&plan, policy, &mut |ev| emit_macapp_event(ev, jp))
         })
         .await
         .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))??
@@ -1641,12 +1662,20 @@ async fn mac_app(
                 "bundle": plan.bundle_path,
                 "name": plan.display,
                 "slug": plan.slug,
+                "recipe": plan.recipe.as_ref().map(|r| serde_json::json!({
+                    "slug": r.installer.slug,
+                    "version": r.installer.version,
+                    "author": r.installer.author,
+                    "wine_version": r.wine_version,
+                    "from_search": r.from_search,
+                })),
                 "runtime": {
                     "kind": plan.runtime.kind,
                     "version": plan.runtime.version,
                     "wine": plan.runtime.wine,
+                    "downloaded": plan.runtime_downloaded.as_ref()
+                        .map(|(id, v)| serde_json::json!({"id": id, "version": v})),
                 },
-                "bytes": bytes,
             })
         );
     } else {
