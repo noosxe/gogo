@@ -73,12 +73,20 @@ resolve runtime → stage prefix → silent install → locate entry point
 
 ## 3. Runtime resolution
 
+> **Amended 2026-10-19 (design 12):** runtime resolution grows a **catalog + store**
+> layer — `--runtime` accepts catalog ids (`staging` / `devel` / `stable`),
+> downloads are cached under `~/Library/Application Support/gogo/runtimes/`, and
+> selection is interactive and recipe-aware (recipe `wine.version` is advisory,
+> design 12 §6–§7). The table below remains the contract for **local** resolution
+> (brew / gptk / path), now the fallback lanes; `brew`'s "recommended default"
+> status passed to `wine-staging` (catalog, docs/15 §2).
+
 `--runtime` (default `auto`; config `mac_app.runtime`, 06 gains a `[mac_app]`
 section when implemented):
 
 | mode | source | notes |
 |---|---|---|
-| `brew` | `$(brew --prefix)/opt/wine/bin` (legacy) **or** `$(brew --prefix)/bin` (cask-linked — `gcenx/wine/game-porting-toolkit` is the 2026 install path; WineHQ casks disabled 2026-09-01, Gatekeeper; live finding, docs/13 §6.2) | LGPL wine-crossover base; **recommended default** — redistributable-clean (13 §3) |
+| `brew` | `$(brew --prefix)/opt/wine/bin` (legacy) **or** `$(brew --prefix)/bin` (cask-linked — `gcenx/wine/game-porting-toolkit` is the 2026 install path; WineHQ casks disabled 2026-09-01, Gatekeeper; live finding, docs/13 §6.2) | fallback lane (design 12 §5); wine-crossover casks are gone (docs/15 §1) — 2026-10-19 |
 | `path` | any dir containing `bin/wine*` via `--runtime-path` | escape hatch; probed, fail-loud if `wine` doesn't run |
 | `gptk` | user-supplied wine tree **with GPTK libs already overlaid** via `--runtime-path` (live finding, docs/13 §6.2: the raw Apple dmg ships no Wine — only D3DMetal + DX overlay libs) | Apple EULA is the user's; gogo never downloads or bundles it (13 §3) |
 | `auto` | `brew` if present, else a mounted GPTK volume, else error | error message names all three remedies |
@@ -133,8 +141,9 @@ terminal.
 - GPTK-based bundles get an extra `README-GPTK.txt`: Apple's EULA applies to
   the embedded runtime; redistribute at your own risk (it is the user's
   copy of a user-downloaded artifact).
-- No telemetry, no network after installer staging; the installer itself is
-  offline.
+- No telemetry. Network after installer staging is limited to the **named
+  exceptions** (design 12 D8): runtime/tool downloads, recipe `files:`, and
+  winetricks verb fetches; the installer itself is offline.
 
 ## 9. gogo-core layout (01 §1 tree gains)
 
@@ -157,8 +166,8 @@ logic in the frontend.
 
 - Per-game recipes (registry tweaks, installer flags, entry-point
   overrides from a community repo) — now designed in **design 11**.
-- Shared-runtime bundles (tiny `.app` + runtimes under
-  `~/Library/Application Support/gogo/runtimes/`).
+- Shared-runtime bundles (tiny `.app` referencing the store) — the **download
+  store** itself is now v1 (design 12 §4); reference-style bundles remain future.
 - DXVK/MoltenVK toggle for non-GPTK runtimes (licenses permit; 13 §3).
 - MojoSetup branch for mac-native installers (13 §2) — extraction-only, no
   Wine.
