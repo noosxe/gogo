@@ -145,6 +145,7 @@ terminal.
 │   ├── installer.rs     # silent InnoSetup invocation, .bin sibling check
 │   ├── info.rs          # goggame-*.info parsing → entry point
 │   ├── bundle.rs        # .app layout, Info.plist, launcher stub, launch.conf
+│   ├── recipe.rs        # community per-game recipes: schema + closed verb set (design 11)
 │   └── error.rs         # MacAppError taxonomy (exit 7)
 ```
 
@@ -153,6 +154,8 @@ logic in the frontend.
 
 ## 10. Future (explicitly out of scope here)
 
+- Per-game recipes (registry tweaks, installer flags, entry-point
+  overrides from a community repo) — now designed in **design 11**.
 - Shared-runtime bundles (tiny `.app` + runtimes under
   `~/Library/Application Support/gogo/runtimes/`).
 - DXVK/MoltenVK toggle for non-GPTK runtimes (licenses permit; 13 §3).

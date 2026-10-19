@@ -49,6 +49,8 @@ A Rust CLI app that:
 | [10-scope-updates.md](10-scope-updates.md) | Owner decisions: CLI-first, gog-warp dependency, installers-only v1, ratatui TUI later |
 | [11-open-questions-status.md](11-open-questions-status.md) | Resolution matrix for the open questions (most resolved from sources) + new findings |
 | [12-live-verification-runbook.md](12-live-verification-runbook.md) | Live API probe script (`scripts/probe.sh`) for the account-dependent checks |
+| [13-macos-app-bundles.md](13-macos-app-bundles.md) | macOS wrapper landscape (Whisky/Porting Kit/CrossOver/GPTK), installer mechanics, licensing matrix |
+| [14-recipe-system.md](14-recipe-system.md) | Per-game community recipe systems (Lutris/Winetricks/Bottles), what gogo adopts, trust model |
 
 ➡️ **Design phase:** [`docs/design/`](design/README.md) — architecture, auth, CLI spec,
 download pipeline, config, state, errors, testing, and the v2 (depots + TUI) roadmap.
