@@ -27,7 +27,7 @@ rustPlatform.buildRustPackage {
   cargoLock = {
     lockFile = ../Cargo.lock;
     outputHashes = {
-      "gog-warp-0.1.0" = "sha256-skdvHnh6Y1BSLEbaP/ckVH1c4l49gLZk8DGXD8vJwkw=";
+      "gog-warp-0.1.0" = "sha256-oBxFYqMpcQ2rGCMd3aMf7YdqUcQ+k2tuzbw3G0y034o=";
     };
   };
 
