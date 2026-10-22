@@ -21,6 +21,8 @@ pkgs.mkShell {
     pkgs.just               # task runner (smoke scripts, CI shorthands)
     pkgs.pkg-config
     pkgs.stdenv.cc          # C compiler for ring/asm builds — from nixpkgs, never system
+    pkgs.jq                 # scripts/vm-test.sh JSON (tart list, run summary)
+    pkgs.shellcheck         # lint for scripts/*.sh
   ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
     pkgs.libiconv           # some crates still want it on macOS
   ];
