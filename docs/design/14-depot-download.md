@@ -92,9 +92,8 @@ resolve game → token → get_builds → pick_build (pure) → get_manifest
   → emit Finished{install_dir}
 ```
 
-- **gog-warp pin = `noosxe/gog-warp` rev `30a8303b`** (docs/17 §5): adds the
-  macOS pre-allocation arm upstream lacks; revert to playtron-os when
-  playtron-os/gog-warp#5 lands.
+- **gog-warp pin = `playtron-os/gog-warp` rev `26c9e671`** (docs/17 §5): the
+  merge of playtron-os/gog-warp#5, which adds the macOS pre-allocation arm.
 - `Session::core()` — new read-only accessor (`&gog_warp::Core`); the auth surface
   otherwise untouched (C3 stays).
 - Cancellation: existing ctrl-c wiring cancels `ctx.cancel`; depot driver links it to
