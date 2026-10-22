@@ -30,6 +30,10 @@ tools, or binaries from the host system — no exceptions.**
   `GOGO_CODESIGN_IDENTITY` overrides) — one "Always Allow" survives rebuilds. For direct
   `target/debug/gogo` runs, `scripts/dev-sign.sh` once. Best-effort: no identity → plain exec.
 
+- **Launch-testing `.app` bundles / games**: never `open` them on the host (it steals the
+  user's focus). Use `scripts/vm-test.sh run <X.app> [--secs N]` (Tart VM; how-to in
+  `docs/vm-testing.md`) and read the summary JSON it prints.
+
 ## Canonical checks (run inside the shell)
 
 ```sh
