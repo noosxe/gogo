@@ -135,7 +135,6 @@ pub fn v1_language(code: &str) -> String {
     .to_string()
 }
 
-/// Pure: `DownloadState` → `DepotEvent` (design 14 D4).
 /// Pure: `DownloadState` → `DepotEvent` (design 14 D4). The library's own
 /// `Finished` is skipped — we emit ours (with the install dir) after
 /// `download()` resolves.
@@ -143,7 +142,11 @@ pub fn state_event(s: DownloadState) -> Option<DepotEvent> {
     match s {
         DownloadState::Preparing => Some(DepotEvent::Preparing),
         DownloadState::Allocating(f) => Some(DepotEvent::Allocating { fraction: f }),
-        DownloadState::Verifying(f) => Some(DepotEvent::Verifying { fraction: f }),
+        // gog-warp's units differ: `Allocating` is a 0..=1 fraction but
+        // `Verifying` is a 0..=100 percentage. `DepotEvent` fractions are 0..=1.
+        DownloadState::Verifying(p) => Some(DepotEvent::Verifying {
+            fraction: p / 100.0,
+        }),
         DownloadState::Downloading(p) => Some(DepotEvent::Downloading {
             downloaded: p.downloaded,
             written: p.written,
@@ -402,5 +405,23 @@ mod tests {
             cache_roots(Some(Path::new("/C")), 42, Some(Path::new("/D/here"))).unwrap();
         assert_eq!(install, Path::new("/D/here"));
         assert!(cache_roots(None, 42, None).is_none());
+    }
+
+    #[test]
+    fn state_event_normalizes_progress_to_fractions() {
+        // Pins gog-warp's units: a bump that changes them must fail here.
+        assert!(matches!(
+            state_event(DownloadState::Allocating(0.5)),
+            Some(DepotEvent::Allocating { fraction }) if fraction == 0.5
+        ));
+        assert!(matches!(
+            state_event(DownloadState::Verifying(50.0)),
+            Some(DepotEvent::Verifying { fraction }) if fraction == 0.5
+        ));
+        assert!(matches!(
+            state_event(DownloadState::Verifying(100.0)),
+            Some(DepotEvent::Verifying { fraction }) if fraction == 1.0
+        ));
+        assert!(state_event(DownloadState::Finished).is_none());
     }
 }
