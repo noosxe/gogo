@@ -80,7 +80,7 @@ clap_complete = "4.6.11"
 # Fork of playtron-os/gog-warp rev-pinned: adds macOS file pre-allocation
 # (upstream's allocate() is Linux-only; docs/17 §5, design 14). Track the
 # upstream PR and return to playtron-os when it lands.
-gog-warp = { git = "https://github.com/noosxe/gog-warp", rev = "30a8303b303fb19105439731ddd7d558b615241e" }
+gog-warp = { git = "https://github.com/noosxe/gog-warp", rev = "f8071bf4e1ad7206b1fae0ada5a7cd3d518c9e18" }
 
 # — dev —
 wiremock = "0.6"

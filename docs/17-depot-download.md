@@ -111,6 +111,7 @@ Finished`.
 - **macOS pre-allocation (live finding 2026-10-20):** upstream's `allocate()`
   (`downloader/utils.rs`) is `#[cfg(target_os = "linux")]`-only; on macOS it
   returns `pre allocation not implemented` before any byte moves. Fixed in our
-  fork `noosxe/gog-warp` rev `30a8303b` (F_PREALLOCATE → F_ALLOCATEALL →
-  `set_len` ladder), offered upstream as playtron-os/gog-warp#5. gogo pins the
-  fork until that lands; the pin stays a deliberate-commit git rev either way.
+  fork `noosxe/gog-warp` rev `f8071bf4` (F_PREALLOCATE contiguous → any-space,
+  then `ftruncate` to the target size, matching Linux `fallocate`), offered
+  upstream as playtron-os/gog-warp#5. gogo pins the fork until that lands;
+  the pin stays a deliberate-commit git rev either way.

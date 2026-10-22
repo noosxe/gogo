@@ -92,7 +92,7 @@ resolve game → token → get_builds → pick_build (pure) → get_manifest
   → emit Finished{install_dir}
 ```
 
-- **gog-warp pin = `noosxe/gog-warp` rev `30a8303b`** (docs/17 §5): adds the
+- **gog-warp pin = `noosxe/gog-warp` rev `f8071bf4`** (docs/17 §5): adds the
   macOS pre-allocation arm upstream lacks; revert to playtron-os when
   playtron-os/gog-warp#5 lands.
 - `Session::core()` — new read-only accessor (`&gog_warp::Core`); the auth surface

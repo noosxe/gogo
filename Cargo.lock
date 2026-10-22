@@ -1242,7 +1242,7 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 [[package]]
 name = "gog-warp"
 version = "0.1.0"
-source = "git+https://github.com/noosxe/gog-warp?rev=30a8303b303fb19105439731ddd7d558b615241e#30a8303b303fb19105439731ddd7d558b615241e"
+source = "git+https://github.com/noosxe/gog-warp?rev=f8071bf4e1ad7206b1fae0ada5a7cd3d518c9e18#f8071bf4e1ad7206b1fae0ada5a7cd3d518c9e18"
 dependencies = [
  "async-compression",
  "bincode",
@@ -3102,7 +3102,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
