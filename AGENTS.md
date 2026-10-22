@@ -61,3 +61,21 @@ cargo deny check               # licenses + advisories
   series to match it (one TLS stack). The `noosxe/gog-warp` fork is kept in sync with
   upstream for future patches: pin it only while an upstream PR is pending, then
   switch back to playtron-os once it merges. Crate-version table: `docs/design/01-architecture.md`.
+
+## Issue tracking
+
+- Every issue gets one or two `type:` labels (bug, feature, docs, chore, ci, release, research)
+  and one or more `area:` labels (auth, library, downloads, depot, mac-app, wine-runtime, cli,
+  tui, packaging, licensing). Add `phase:v1` / `phase:v2` only for roadmap-scoped items (design 09).
+- Work is grouped under `epic` issues using GitHub's native sub-issues (not task lists):
+  v0.1.0 release (#49), mac-app & Wine runtime (#50), docs/research/hygiene (#51),
+  depot downloads (#10), TUI (#11), v2 backlog (#12). File the issue, then link it:
+
+  ```sh
+  p=$(gh api repos/noosxe/gogo/issues/<epic> --jq .node_id)
+  c=$(gh api repos/noosxe/gogo/issues/<N> --jq .node_id)
+  gh api graphql -f query='mutation($p:ID!,$c:ID!){addSubIssue(input:{issueId:$p,subIssueId:$c}){subIssue{number}}}' -f p=$p -f c=$c
+  ```
+
+- `dependencies` / `rust` belong to Dependabot; leave them alone. Agents may label issues,
+  but ask before closing issues or deleting labels.
