@@ -71,6 +71,10 @@ pub enum DepotEvent {
 - `--json-progress`: one NDJSON line per event (camelCase keys like the installer lane).
 - Human mode: plain `gogo:` lines for discrete states, a single `\r`-updated byte
   counter line for `Downloading` (indicatif not needed for one aggregate bar).
+- Progress units: `DepotEvent` fractions are always `0.0..=1.0`. gog-warp is not
+  consistent — `DownloadState::Allocating(f32)` is a fraction in `0..=1`, but
+  `DownloadState::Verifying(f32)` is a percentage in `0..=100` — so the mapping divides
+  `Verifying` by 100 (issue #46).
 - `DownloadState` → `DepotEvent` is a pure function (unit-tested); `Resolved`/`Plan`
   are emitted by the driver after manifest resolution using
   `Manifest::install_directory()` + `install_size()`.
