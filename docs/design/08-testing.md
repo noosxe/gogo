@@ -64,6 +64,18 @@ One mock server stands in for api.gog.com + CDN (Range support, scriptable statu
 `list`), real account. Never in CI, never writes. Mirrors `scripts/probe.sh` coverage as a regression
 harness if GOG changes the API.
 
+### 5.1 Launch tests in a VM (`mac-app` bundles, manual, opt-in)
+
+Anything that **launches** a built `.app` or game runs in a throwaway Tart macOS VM,
+never on the developer's Mac (launches steal focus): `scripts/vm-test.sh run X.app`
+clones the `gog-golden` image, copies the bundle in, quarantines it like a browser
+download, records `codesign --verify` / `spctl` verdicts, opens it via LaunchServices,
+and after `--secs N` collects a screenshot, window list, Wine stdout/stderr, prefix logs
+and the guest's Gatekeeper log, then deletes the clone. The guest has none of the
+host's tools (no Homebrew, no Wine, Rosetta only because the golden image installs it),
+so a pass also proves the bundle is self-contained. How-to, result layout and VM limits:
+[docs/vm-testing.md](../vm-testing.md). Never in CI (needs Apple Silicon + a 25 GB image).
+
 ## 6. CI shape
 
 - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`
