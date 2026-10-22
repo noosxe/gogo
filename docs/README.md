@@ -53,6 +53,7 @@ A Rust CLI app that:
 | [14-recipe-system.md](14-recipe-system.md) | Per-game recipe systems surveyed (Lutris/Winetricks/Bottles), live Lutris API probes, gogo consumes Lutris |
 | [15-wine-runtime-distribution.md](15-wine-runtime-distribution.md) | Live-verified macOS Wine runtime distribution: macOS_Wine_builds (primary), winetricks, GPTK constraints, wine-crossover EOL tombstone, deprecations, audits |
 | [16-gog-specific-solidification.md](16-gog-specific-solidification.md) | GOG-specific findings: cnc-ddraw as ecosystem default (Sikarugir/winetricks/GOG forums), ScummVM/DOSBox native lane, recommendation backlog S1–S5 |
+| [19-mac-app-compatibility-strategy.md](19-mac-app-compatibility-strategy.md) | Why mac-app games fail (renderer layer, runtime lineage, bundle model) and the layered fix: CX-lineage runtime by reference, auto renderer from PE imports, GOG-native fixes, GOG-id compat DB; host + VM test matrix; macOS 28 Rosetta risk |
 
 🧪 **Launch-testing bundles:** [vm-testing.md](vm-testing.md) — Tart VM workflow
 (`scripts/vm-test.sh`), result format, VM limitations.
