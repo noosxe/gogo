@@ -1,0 +1,10 @@
+# Carmageddon TDR 2000 (DirectDraw + Direct3D 6/7, 32-bit): wined3d (L1).
+# Needs the depot's gog-support overlay (ASSETS/options.txt, L2), which gogo
+# applies. In the VM it reaches its first-run "Hardware Capabilities" dialog;
+# past it the game dies on FindDepthBufferFormat because the guest has no
+# OpenGL, so the 3D path is unjudged until a host pass.
+title  = "Carmageddon TDR 2000"
+status = "boots"
+notes  = "VM: reaches its first-run dialog; the 3D path past it needs a host pass (no OpenGL in the VM)"
+tested = [{ runtime = "winecx/24.0.7_7", host = "vm/macos-27.0", date = 2026-10-23 }]
+source = "gogo-vm"

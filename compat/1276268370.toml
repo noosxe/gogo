@@ -1,0 +1,7 @@
+# Snake Core (Java/libGDX, bundled JRE, 64-bit): draws with native OpenGL, so
+# the renderer (wined3d label) doesn't matter. The VM has no GL context.
+title  = "Snake Core"
+status = "plays"
+notes  = "host pass, eyes on: fullscreen, renders, input and audio fine (not played through)"
+tested = [{ runtime = "winecx/24.0.7_7", host = "m4pro/macos-27.0.1", date = 2026-10-23 }]
+source = "gogo-host"

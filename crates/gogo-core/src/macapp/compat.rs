@@ -670,6 +670,42 @@ replace_command = { from = "GoGLauncher.exe", to = "RebelGalaxyGOG.exe" }
         }
     }
 
+    /// The repo's `compat/` itself (#75): only `<gogid>.toml` entries plus
+    /// docs, every entry says where it came from, and a status other than
+    /// `unknown` is backed by at least one `tested` run.
+    #[test]
+    fn compat_dir_entries_are_sourced_and_tested() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compat");
+        let mut entries = 0;
+        for f in std::fs::read_dir(&dir).unwrap() {
+            let path = f.unwrap().path();
+            let name = path.file_name().unwrap().to_str().unwrap().to_string();
+            if name == "README.md" || name.starts_with("NOTICE-") {
+                continue;
+            }
+            let id = name
+                .strip_suffix(".toml")
+                .unwrap_or_else(|| panic!("compat/{name}: not a <gogid>.toml"));
+            validate_gogid(id).unwrap_or_else(|_| panic!("compat/{name}: not a GOG id"));
+            let raw = std::fs::read_to_string(&path).unwrap();
+            let p = parse(&raw).unwrap_or_else(|e| panic!("compat/{name}: {e}"));
+            assert!(p.warnings.is_empty(), "compat/{name}: {:?}", p.warnings);
+            let e = p.entry;
+            assert!(
+                e.source.as_deref().is_some_and(|s| !s.is_empty()),
+                "compat/{name}: no source"
+            );
+            if e.status.unwrap_or_default() != Status::Unknown {
+                assert!(
+                    e.tested.as_ref().is_some_and(|t| !t.is_empty()),
+                    "compat/{name}: status without a tested run"
+                );
+            }
+            entries += 1;
+        }
+        assert_eq!(entries, db_len(), "every entry is compiled in");
+    }
+
     const ALL: [Layer; 6] = [
         Layer::Default,
         Layer::Auto,

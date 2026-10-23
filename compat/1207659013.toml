@@ -1,0 +1,8 @@
+# Treasure Adventure Game (GameMaker, legacy Direct3D, 32-bit): wined3d (L1).
+# VM smoke runs (depot-lane, runtime-cx24, renderer-l1-wined3d) show its
+# title menu; input and audio were not judged (the VM runs with audio off).
+title  = "Treasure Adventure Game"
+status = "boots"
+notes  = "VM: title menu renders on wined3d; input and audio not judged"
+tested = [{ runtime = "winecx/24.0.7_7", host = "vm/macos-27.0", date = 2026-10-23 }]
+source = "gogo-vm"

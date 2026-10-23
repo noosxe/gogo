@@ -1,0 +1,5 @@
+# Stronghold Crusader HD. Not run by gogo yet.
+# umu-protonfixes installs directplay for multiplayer.
+title  = "Stronghold Crusader HD"
+verbs  = ["directplay"]
+source = "umu-protonfixes:gamefixes-steam/40970.py@3603ccbbc20de88c2878306acdfdd4e9a07fc8c4"

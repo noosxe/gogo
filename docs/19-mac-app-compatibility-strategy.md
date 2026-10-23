@@ -219,6 +219,10 @@ copy + DXMT DLLs".
 
 ## 5. Results (live, 2026-10-22/23)
 
+The 2026-10-23 host pass of real v2 bundles (§5.3) supersedes the earlier host
+rows below where they disagree; the compat DB (`compat/`, #75) records §5.3 and
+the VM smoke runs.
+
 Two test beds:
 
 - **Host**: the developer Mac (M4 Pro, macOS 27.0.1), `bin/try.sh`-style harness
@@ -249,7 +253,7 @@ window, logs show the renderer initialised, no screenshot (host). Blank = not ru
 | **Carmageddon TDR 2000** (DDraw + D3D7, 32), raw depot | host: "Application Exception" — `Abort at File.cpp:73` (missing `ASSETS/options.txt`) | host: no output | | | |
 | Carmageddon + `gog-support` overlay | | | host: first-run "Hardware Capabilities" message box · **VM: same** (game's normal first-run flow; not clicked through) | host: same | |
 | **Pharaoh** (DDraw 2D, 32) depot + cnc-ddraw | (#54: black + 11×58 px dialog) | | **VM: renders** dialog text: *"Please insert your Cleopatra CD."* — the depot install-config gap (docs/18 §5), now legible | | |
-| **Rebel Galaxy** (D3D11 + `D3DCOMPILER_43`, 32) | host: exits — OGRE "Named constants have not been initialised" | host: crash (stack limits) | host: same shader error | host: **starts** (1600×928 window) but vkd3d-shader rejects HLSL (`E5017: Uniform initializer`) ×480. **+ native `d3dcompiler_43` + `d3dx11_43`** (2026-10-23): **starts clean**. 0 compile errors, no OGRE exception, alive at 60 s with its window on screen, 650 KB compiled-shader cache written; DXMT logs 162 × `Class linkage not supported` (not judged by eye) | host: exits (D3DMetal is 64-bit only) |
+| **Rebel Galaxy** (D3D11 + `D3DCOMPILER_43`, 32) | host: exits — OGRE "Named constants have not been initialised" | host: crash (stack limits) | host: same shader error | host: **starts** (1600×928 window) but vkd3d-shader rejects HLSL (`E5017: Uniform initializer`) ×480. **+ native `d3dcompiler_43` + `d3dx11_43`** (2026-10-23): **starts clean**. 0 compile errors, no OGRE exception, alive at 60 s with its window on screen, 650 KB compiled-shader cache written; DXMT logs 162 × `Class linkage not supported` (not judged by eye). **Host pass of the real bundle (§5.3): not playable**: ~4 min load on every launch, then a slideshow (32-bit on WoW64) | host: exits (D3DMetal is 64-bit only) |
 | **Neo Cab** (Unity D3D11, 64) | host: `d3d11: failed to create device` · VM: same (`failed to create factory`) | host: **starts** (D3D11 FL 11.1, "AMD Compatibility Mode") | host: d3d11 device fail | host: **runs** (DXMT, FL 11.1, "Apple M4 Pro"; re-run 2026-10-23 for 60 s and seen running by the user on screen) · VM: device FL 11.0 on Paravirtual, then "Failed to get metal layer", no window | host: **runs** (FL 11.1, "AMD Compatibility Mode"; re-run 2026-10-23 for 60 s and seen running by the user, same session as the DXMT run) |
 | **Snake Core** (Java/libGDX OpenGL, 64) | host: crash — "OpenGL 2.0 or higher with the FBO extension is required. OpenGL version: 2.1 Metal" · VM: no GL context | host: dyld failure (bad test, ignore) | host: **starts** ("Snake Core - v1.6.1" fullscreen) · VM: no GL context (VM limit) | | |
 
@@ -290,8 +294,9 @@ Other observations, all **verified**:
 
 1. **The renderer decides D3D10/11 games**: Neo Cab fails on every wined3d
    runtime and starts on both Metal translators. Rebel Galaxy needs DXMT *and*
-   a native `d3dcompiler_43`/`d3dx11_43` — two independent, data-driven fixes,
-   and with both it gets through (verified 2026-10-23).
+   a native `d3dcompiler_43`/`d3dx11_43` — two independent, data-driven fixes.
+   With both it starts, but the host pass (§5.3) found it unplayable: DXMT on a
+   32-bit exe is too slow, so starting is not the same as running.
 2. **The CX lineage is the better default engine**: with the right renderer per
    title it is the only engine on which every title reached its own UI or
    first-run dialog, its OpenGL is usable (Snake Core), its
@@ -302,6 +307,47 @@ Other observations, all **verified**:
 4. **"Everything on" is harmful**: D9VK on MoltenVK killed a game wined3d runs.
 5. **GOG's own data fixes what Lutris could not**: the `gog-support` overlay
    turned Carmageddon from a crash into its normal first-run flow.
+
+### 5.3 Host pass of v2 bundles (2026-10-23, run by the user)
+
+Real `gogo mac-app` bundles on the developer Mac (M4 Pro, macOS 27.0.1) with
+`scripts/host-pass.sh` (docs/vm-testing.md "Host pass"), `--runtime winecx`
+(24.0.7_7), renderer from L1 unless named. The user watched each run and judged
+rendering, input and audio. Record and every `summary.json`: PR #124's
+[host pass comment](https://github.com/noosxe/gogo/pull/124#issuecomment-6371238076).
+
+| Game | Renderer (runtime) | Result | Eyes on (render / input / audio) |
+|---|---|---|---|
+| Neo Cab | DXMT v0.80 (`winecx/24.0.7_7+dxmt-v0.80`), the L1 pick | runs 90 s; FL 11_1, Unity `Renderer: Apple M4 Pro` | ✓ / ✓ / ✓ |
+| Neo Cab | D3DMetal 4.0b3 (`winecx/24.0.7_7+d3dmetal-4.0b3`) | runs 90 s; Unity FL 11.1, `Renderer: AMD Compatibility Mode` | ✓ / ✓ / ✓ |
+| Snake Core | native OpenGL (`winecx/24.0.7_7`) | runs 90 s fullscreen, no `err:` lines | ✓ / ✓ / ✓ |
+| Rebel Galaxy | DXMT v0.80, the L1 pick; verbs `d3dcompiler_43 d3dx11_43 d3dx9_43 xinput` | FL 11_0, 326× `Class linkage not supported`; menu after ~4 min; user quit at 269 s | slideshow / – / ✓ |
+| Rebel Galaxy | wined3d (`winecx/24.0.7_7`), same verbs | menu quickly, good frame rate; 9888× `GL_INVALID_OPERATION from glUseProgram` | ✗ garbled 3D / – / – |
+
+What it adds to §5.1–§5.2:
+
+1. **DXMT on a 32-bit game is not playable here.** Rebel Galaxy's exe runs in
+   CX24's *experimental* WoW64 mode (`init_peb … in experimental wow64 mode`).
+   On DXMT every launch spends ~4 minutes compiling shaders before the menu,
+   since no shader cache survives between runs, and the menu then draws at a
+   slideshow frame rate. The 64-bit Neo Cab on the same DXMT runs smoothly, so
+   the cost is the 32-bit path (thunking and/or the 32-bit DXMT build), not
+   DXMT as such. Not yet narrowed down; whether the slow path is DXMT's or
+   Wine's is open (§8.2). Any report to DXMT upstream is filed by a human
+   (§3.2).
+2. **wined3d is no fallback for D3D11 on macOS GL 4.1.** It reaches Rebel
+   Galaxy's menu fast, but its GLSL programs fail to link: there's no
+   `GL_ARB_uniform_buffer_object` or `GL_EXT_texture_array`, and `glUseProgram`
+   raises `GL_INVALID_OPERATION`, so the 3D geometry is garbled.
+3. **Rebel Galaxy is known broken on a Mac** (`compat/1435582019.toml`,
+   `status = "broken"`): play it elsewhere. Neo Cab and Snake Core are
+   `plays` on CX24. For Neo Cab that holds with DXMT and with D3DMetal.
+
+The compat DB (#75) records these runs as `source = "gogo-host"`. The VM smoke
+runs (PR #109: TAG, Carmageddon to its first-run dialog, Pharaoh's CD prompt)
+are `source = "gogo-vm"`, and none of them claims a Metal or OpenGL path works.
+A `tested` row has no renderer field, so the derived runtime id
+(`winecx/24.0.7_7+dxmt-v0.80`) names the renderer it ran with.
 
 ## 6. Recommendation
 
@@ -357,7 +403,7 @@ every DLL next to it (Rebel Galaxy's D3D11 dependency is in
 |---|---|---|
 | `ddraw` only, no `d3d*` device use, 32-bit | cnc-ddraw in the game dir + `ddraw=n,b` | Pharaoh (docs/16, live), Stronghold class |
 | `ddraw` + Direct3D ≤ 7, `d3d8`, `d3d9` | wined3d (builtin) | TAG renders on wined3d; D9VK on MoltenVK **crashed** TAG (needs Vulkan 1.3) |
-| `d3d10*`/`d3d11`/`dxgi`, 32-bit | DXMT | Rebel Galaxy window up on DXMT; D3DMetal exits (64-bit only) |
+| `d3d10*`/`d3d11`/`dxgi`, 32-bit | DXMT | Rebel Galaxy window up on DXMT, but unplayably slow on a 32-bit exe (§5.3); D3DMetal exits (64-bit only) |
 | `d3d11`/`dxgi`, 64-bit | DXMT default, D3DMetal on consent | Neo Cab FL 11.1 on both; plain wined3d fails |
 | `d3d12`, 64-bit | D3DMetal (consent, asked once; #71) | not tested. 32-bit `d3d12`: wined3d + warning (D3DMetal is 64-bit only) |
 | `opengl32` only | wined3d-free; CX lineage | Snake Core runs on CX24, not staging |
@@ -528,9 +574,10 @@ as *self-contained on this Mac* rather than *copy the engine into every app*.
    this on macOS 26+ — untested.
 7. **Rendering correctness and input/audio** were not judged by screenshot. The
    VM cannot run Metal 3 paths, and the host session cannot capture the screen.
-   Neo Cab on DXMT/D3DMetal was seen running by the user. Rebel Galaxy's
-   in-game image after the shader fix (and DXMT's `Class linkage not supported`
-   warnings) still needs a human look.
+   The 2026-10-23 host pass (§5.3) settled Neo Cab, Snake Core and Rebel
+   Galaxy by eye. Still open: why DXMT is so slow on a 32-bit exe (no shader
+   cache across runs, slideshow frame rate), and whether DXMT's
+   `Class linkage not supported` warnings matter.
 8. Carmageddon past its first-run hardware dialog (needs a click; the VM
    harness can drive it with `osascript`).
 
