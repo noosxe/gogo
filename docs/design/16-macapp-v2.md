@@ -116,7 +116,7 @@ command substitution and no code, only assignments.
 *#70 (renderers):*
 
 - `renderer` is a ref `<id>[/<ver>]`: `wined3d`, `dxmt/v0.80`, `cnc-ddraw/7.1.0.0`,
-  `d3dmetal` (#71). A ref without a version means the catalog's pinned one.
+  `d3dmetal/4.0b3` (#71). A ref without a version means the catalog's pinned one.
 - `runtime` stays the **base** runtime. The derived runtime a DXMT game runs from
   (§3) appears only in the state `launch.conf` (`RUNTIME_DIR`, `RUNTIME`) and in
   `state.toml`'s `runtime`, so a later switch away from DXMT needs no rebuild.
@@ -211,7 +211,7 @@ take different paths into the prefix.
   cnc-ddraw → `ddraw.dll` + gogo's `ddraw.ini` in the game dir and `ddraw=n,b`;
   wined3d → nothing. Moving off cnc-ddraw removes gogo's `ddraw.dll`/`ddraw.ini`
   again (only when the ini is gogo's). A renderer that can't be set up (no CX
-  engine for DXMT, a `path:` runtime, a failed download, D3DMetal before #71)
+  engine for DXMT, a `path:` runtime, a failed download, D3DMetal without consent)
   falls back to wined3d with a warning: a launch never fails on the renderer
   alone. `RENDERER` in the state `launch.conf` is what was actually applied.
   The runtime #72 compares for verb re-runs is the one actually run, so a switch
@@ -275,8 +275,8 @@ DXMT from outside its tree.
 
 **Rule:**
 
-- A renderer is either an **engine overlay** (it replaces Wine builtins: DXMT, and
-  D3DMetal later) or **game-local** (cnc-ddraw: a DLL in the game dir +
+- A renderer is either an **engine overlay** (it replaces Wine builtins: DXMT and
+  D3DMetal) or **game-local** (cnc-ddraw: a DLL in the game dir +
   `dll_overrides`). wined3d is the engine itself and needs nothing.
 - An engine-overlay renderer is installed as a **derived runtime**
   `runtimes/<id>/<ver>+<renderer>-<rver>/engine`. gogo builds it by `clonefile`ing the
@@ -297,6 +297,17 @@ DXMT from outside its tree.
   None)`) never pick a derived version. Its `NOTICES.txt` is the base's plus the
   renderer's. DXMT is overlaid only onto a CrossOver-source engine (the
   `winemac.drv` hook, docs/19 §3.2); another engine falls back to wined3d.
+- *#71 (D3DMetal):* the same mechanism. The payload is the Sikarugir Template's
+  kit (below). Its `wine/x86_64-{unix,windows}` go over `lib/wine/` like DXMT's
+  arch dirs. Its `external/` (`D3DMetal.framework`, `libd3dshared.dylib`) goes into
+  `lib/wine/x86_64-unix/` as well: `d3d11.so`/`d3d12.so`/`dxgi.so` link
+  `@rpath/libd3dshared.dylib` with an rpath of `@loader_path`, and
+  `libd3dshared.dylib` links `@rpath/D3DMetal.framework/D3DMetal` the same way
+  (verified with `otool -l`). So dyld finds both without `DYLD_*` variables, and the
+  launcher stays unchanged. (Sikarugir and the docs/19 host harness used
+  `lib/external` + `DYLD_FALLBACK_LIBRARY_PATH` instead.) The overlay keeps symlinks
+  (the framework's `Versions/Current -> A`). The result is
+  `winecx/24.0.7_7+d3dmetal-4.0b3`.
 - *#70:* fat (`--portable`) bundles can't carry a derived runtime: DXMT there
   falls back to wined3d with a warning. cnc-ddraw keeps design 13's build-time
   path (game dir + a registry `ddraw=n,b`).
@@ -584,7 +595,9 @@ up does nothing.
   same way.
 - A `current` outside the order (L3, L4 or a build flag) starts the order from the
   top.
-- D3DMetal is skipped unless `renderer::d3dmetal_available()`, the #71 consent hook.
+- D3DMetal is skipped unless `renderer::d3dmetal_available()`: a stored
+  `[mac_app] d3dmetal = "yes"` (#71, below). The launcher's dialog runs headless,
+  so it never asks. Without a yes, D3DMetal isn't in the order at all.
 
 Before showing the dialog, the launcher asks `next-renderer --dry-run`. If that comes
 back empty ("no more renderers", or no gogo, as in the VM guest), the dialog says
@@ -597,6 +610,45 @@ ends: each switch moves forward in a finite order, and every step is the user's 
 | Direct3D 10/11 | DXMT → (D3DMetal, 64-bit with consent) → wined3d |
 | Direct3D 12, 64-bit, with consent | D3DMetal → DXMT → wined3d |
 | everything else | wined3d |
+
+*D3DMetal consent (#71, docs/19 §3.2).* D3DMetal is Apple software under the Game
+Porting Toolkit licence (EA18380). The licence allows distribution only for
+non-commercial purposes, with Apple's notices kept (§2A(iii), §2C). gogo fetches it
+only after the user agreed, and asks once:
+
+- **Source.** Catalog entry `d3dmetal` (status `ConsentRequired`): the
+  `renderer/d3dmetal` directory of the Sikarugir `Template-1.0.24.tar.xz`, pinned by
+  sha256. It is the same asset and digest as winecx's `Frameworks/` set (96 MB
+  download, 24 MB kept). Only that directory is extracted. It holds D3DMetal 4.0b3,
+  its Wine-side `d3d11`/`d3d12`/`d3d12core`/`dxgi`/`nvapi64`/`nvngx`, and Apple's
+  `License.rtf`, `Acknowledgements.rtf` and `Read Me.rtf`. This kit is the one that
+  ran Neo Cab on the default CX24 engine (docs/19 §5). Gcenx's GPTK 3.0-3 pairs
+  D3DMetal 3.0 with Wine 7.7 builtins, and gogo keeps it as a separate runtime
+  (`gptk`).
+- **The answer** lives in gogo's config: `[mac_app] d3dmetal = "yes"|"no"` (design
+  05 §3). It is written with `toml_edit`, so the rest of the file is kept.
+- **When it is asked**: at build time (`mac-app` plan, depot lane), for a **64-bit**
+  game whose scan says Direct3D 12, or for `--renderer d3dmetal`. `--retarget
+  --renderer d3dmetal` asks too. It is a Confirm prompt, default no, that names
+  Apple's licence and the download size. The answer is stored either way.
+  Cancelling stores nothing. A stored answer is never asked again. The installer
+  lane scans only after installing, so it asks only for `--renderer d3dmetal` (at
+  plan time), and a D3D12 game there uses the stored answer.
+- **Headless with no answer** (no TTY, `--json`, the launcher's setup): no
+  download. A warning names the config key, and the pick falls back (D3D12 →
+  wined3d with the "likely broken" warning).
+- **Never for 32-bit games**: no prompt, no D3DMetal in the L1 order, and
+  `--renderer d3dmetal` on a 32-bit game warns and keeps the automatic choice.
+  (A hand-written L4 `renderer = "d3dmetal"` is the user's own choice and is
+  applied as written.)
+- **Where it is used.** With a yes: the L1 pick for 64-bit D3D12, and the
+  alternative after DXMT for 64-bit D3D11 ("Try next renderer"). DXMT stays the
+  default there. `apply` without a yes falls back to wined3d before any download.
+  `gogo runtimes install d3dmetal` works only with a yes.
+- **Notices.** The store's `NOTICES.txt` carries the licence line and Apple's notice,
+  and so does the derived runtime's (`LICENSE-runtime.txt` in bundles). A bundle
+  whose baked renderer *or* "Try next renderer" alternative is D3DMetal gets
+  `LICENSE-d3dmetal.txt` with the same notice.
 
 Tests replace the dialog with `GOGO_LAUNCHER_DIALOG=<cmd>`. The command gets the
 title, the message and the button labels, and prints the label it chose.
@@ -616,6 +668,13 @@ title, the message and the button labels, and prints the label it chose.
   and Wine on it, and the second dialog offers Close, then "Copy report" fills the
   (stub) clipboard (#78). Unit: the next-renderer walk per API class, ending in "no more
   renderers".
+- Unit (#71): D3DMetal consent with fake TTY prompts (yes and no are stored and never
+  asked again, cancel stores nothing), headless with no answer (warns, writes nothing,
+  falls back), a stored answer respected headless and on a TTY, no prompt and no
+  D3DMetal for 32-bit games or for 64-bit D3D11 without the flag. Also the
+  Template-subdir install (refused without consent, only the kit extracted, Apple's
+  files and notice kept) and the derived runtime (host libs next to the unix libs,
+  symlinks kept).
 - VM (#68): `scripts/vm-test.sh` gains a store and state-dir seeding step, since a v2
   bundle alone isn't enough to launch.
 
@@ -628,9 +687,9 @@ title, the message and the button labels, and prints the label it chose.
    allow being cloned with files added (sealed resources). If so, an engine-overlay
    renderer has to come from the vendor's own build. Re-check when such a runtime exists
    (#82).
-3. **D3DMetal as a derived runtime** (#71): expected to use the same mechanism. Not
-   tested yet. *#70 hook:* `renderer::d3dmetal_available()` (false until #71) gates
-   the D3DMetal rows of the L1 table, and `apply` falls back to wined3d for it.
+3. **D3DMetal as a derived runtime** (#71): *implemented* with the same mechanism
+   (§3), unit-tested against a fake engine. Whether the derived CX24 runtime starts
+   Neo Cab on real hardware is the host pass in #80 (the VM has no Metal 3).
 4. **The `C:\GOG\<name>` symlink** to `games/<gogid>/game`: Wine follows it, but games that
    canonicalize their own path (and installers run into it) should be checked in the VM
    during #67. *#67:* Treasure Adventure Game (CX24) starts from it in the VM. Wine runs

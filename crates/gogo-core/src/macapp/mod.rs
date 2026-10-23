@@ -8,6 +8,7 @@
 
 pub mod bundle;
 pub mod compat;
+pub mod d3dmetal;
 pub mod error;
 pub mod info;
 pub mod installer;
@@ -939,14 +940,21 @@ pub fn plan(
         (Some(scan), false) => Some(auto_verbs(scan, emit)),
         _ => None,
     };
+    // The installer lane scans only after installing, with no terminal:
+    // an explicit `--renderer d3dmetal` gets its consent question now (#71).
+    if opts.game_tree.is_none() && opts.renderer == RendererChoice::Force(Renderer::D3dMetal) {
+        d3dmetal::ensure("--renderer d3dmetal was asked for", prompt, emit);
+    }
     let renderer = opts
         .game_tree
         .as_ref()
         .zip(scan.as_ref())
         .map(|(tree, scan)| {
+            // D3DMetal consent (#71) is asked here, once, on a terminal.
+            let d3dmetal = renderer::ask_d3dmetal(scan, opts.renderer, prompt, emit);
             let sel = renderer::select(
                 info::root_game_id(tree).as_deref(),
-                renderer::pick(scan),
+                renderer::pick_with(scan, d3dmetal),
                 opts.renderer,
             );
             emit_selection(&sel, emit);
@@ -1391,9 +1399,12 @@ pub fn execute(
         (Some(sel), _) => sel.clone(),
         (None, scan) => {
             let scan = scan.as_ref().expect("scanned when not planned");
+            // No terminal here: a D3D12 game uses the stored D3DMetal
+            // answer; `--renderer d3dmetal` was asked about at plan time.
+            let d3dmetal = renderer::ask_d3dmetal(scan, plan.renderer_choice, None, emit);
             let sel = renderer::select(
                 info::root_game_id(&install_dir).as_deref(),
-                renderer::pick(scan),
+                renderer::pick_with(scan, d3dmetal),
                 plan.renderer_choice,
             );
             emit_selection(&sel, emit);
@@ -1605,6 +1616,15 @@ fn finish_v2(
     )?;
     bundle::write_launcher_notices(&plan.bundle, &plan.runtime)?;
     bundle::write_renderer_notice(&plan.bundle, &selection.renderer.value)?;
+    // D3DMetal as "Try next renderer" carries Apple's notice too (#71).
+    if selection.l1.alternatives.contains(&Renderer::D3dMetal)
+        && !selection
+            .renderer
+            .value
+            .starts_with(Renderer::D3dMetal.id())
+    {
+        bundle::write_renderer_notice(&plan.bundle, Renderer::D3dMetal.id())?;
+    }
     if winetricks_used {
         bundle::write_winetricks_notice(&plan.bundle)?;
     }

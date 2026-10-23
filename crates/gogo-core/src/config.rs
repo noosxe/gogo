@@ -19,6 +19,7 @@ pub struct Config {
     pub network: NetworkConfig,
     pub download: DownloadConfig,
     pub state: StateConfig,
+    pub mac_app: MacAppConfig,
 }
 
 /// No silent fallback (review A6): keyring configured but unavailable fails loudly in
@@ -94,6 +95,33 @@ pub struct DownloadConfig {
 pub struct StateConfig {
     /// Catalog cache freshness (06 §3).
     pub catalog_ttl_hours: u32,
+}
+
+/// `[mac_app]`: answers `gogo mac-app` asks for once and keeps (design 16).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct MacAppConfig {
+    /// Consent to download D3DMetal under Apple's Game Porting Toolkit
+    /// licence (#71, docs/19 §3.2). Unset: asked on a terminal the first
+    /// time a game needs it; headless builds fall back without it.
+    pub d3dmetal: Option<Consent>,
+}
+
+/// A stored yes/no answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Consent {
+    Yes,
+    No,
+}
+
+impl Consent {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Consent::Yes => "yes",
+            Consent::No => "no",
+        }
+    }
 }
 
 impl Default for AuthConfig {
@@ -215,7 +243,7 @@ pub fn parse_rate(input: &str) -> Result<u64, ConfigError> {
 impl Config {
     /// defaults < file < env, from the real environment (05 §1, §4).
     pub fn load() -> Result<Loaded, ConfigError> {
-        let path = Self::env_config_path().unwrap_or_else(Self::default_path);
+        let path = Self::path();
         Self::load_from(&path, |k| std::env::var(k).ok())
     }
 
@@ -245,6 +273,12 @@ impl Config {
             warnings,
             path: path.to_path_buf(),
         })
+    }
+
+    /// The config file [`Config::load`] reads: `GOGO_CONFIG`, else the
+    /// platform default.
+    pub fn path() -> PathBuf {
+        Self::env_config_path().unwrap_or_else(Self::default_path)
     }
 
     /// `GOGO_CONFIG` if set (05 §2).
@@ -403,6 +437,7 @@ fn unknown_keys(table: &toml::Table) -> Vec<String> {
         ),
         ("download", &["dir", "workers", "parallel_files", "limit"]),
         ("state", &["catalog_ttl_hours"]),
+        ("mac_app", &["d3dmetal"]),
     ];
     let mut out = Vec::new();
     for (section, value) in table {
@@ -514,6 +549,21 @@ mod tests {
         assert_eq!(loaded.config.download.workers, 4);
         assert!(loaded.warnings.contains(&"download.future_key".to_string()));
         assert!(loaded.warnings.contains(&"future_section".to_string()));
+    }
+
+    #[test]
+    fn mac_app_d3dmetal_consent_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let loaded = Config::load_from(&path, no_env).unwrap();
+        assert_eq!(loaded.config.mac_app.d3dmetal, None);
+        std::fs::write(&path, "[mac_app]\nd3dmetal = \"yes\"\n").unwrap();
+        let loaded = Config::load_from(&path, no_env).unwrap();
+        assert_eq!(loaded.config.mac_app.d3dmetal, Some(Consent::Yes));
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        std::fs::write(&path, "[mac_app]\nd3dmetal = \"no\"\n").unwrap();
+        let loaded = Config::load_from(&path, no_env).unwrap();
+        assert_eq!(loaded.config.mac_app.d3dmetal, Some(Consent::No));
     }
 
     #[test]
