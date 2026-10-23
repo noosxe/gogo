@@ -24,6 +24,8 @@
 #                       override and store runtime(s) seeded into the guest by
 #                       default, derived from gogo-launch.toml; this skips that
 #                       (--state forces it). v1 self-contained bundles: none.
+#   --audio             give the guest a sound device wired to the host (off by
+#                       default; also for smoke and shell)
 #   --runtimes share|copy  store runtimes as read-only virtiofs shares (default,
 #                       nothing copied) or streamed with tar like the game state
 #   --kill term|kill    #42 teardown check: after --secs, signal the launcher,
@@ -35,7 +37,8 @@
 #                       counts towards neither --secs)
 #
 # smoke options: --bundles DIR (default $GOGO_VM_BUNDLES or <repo>/target/v2),
-#   --out DIR, --only case1,case2
+#   --out DIR, --only case1,case2, --audio
+# Every VM runs with --no-audio --no-clipboard (tart) unless --audio is given.
 #
 # Output (machine-readable): the LAST stdout line of `run` is the summary JSON
 # path (of `smoke`: smoke.json); the summary is printed to stdout before it.
@@ -61,6 +64,10 @@ KEY="$STATE/id_ed25519"
 LOCK="$STATE/slot.lock"
 MAX_VMS=2 # Apple's macOS-guest licence/Virtualization.framework limit
 PREFIX_CLONE="gog-test-"
+# Tart wires the guest's sound device to the host's speakers and microphone
+# by default: game audio on the user's speakers, and on winecx a guest
+# "Allow 'wine' to access your microphone?" prompt. Off unless --audio.
+VM_AUDIO=0
 
 log() { printf '[vm-test] %s\n' "$*" >&2; }
 die() { log "error: $*"; exit "${2:-3}"; }
@@ -139,11 +146,12 @@ release_slot() { rm -rf "$LOCK"; }
 # Start <name> headless in the background; returns once it has an IP.
 # Caller holds the slot lock; it's released once the VM counts as running.
 start_vm() { # name logfile [tart run args…]
-    local n="$1" logf="$2" try; shift 2
+    local n="$1" logf="$2" try dev=(--no-clipboard); shift 2
+    [ "$VM_AUDIO" = 1 ] || dev+=(--no-audio)
     # Virtualization.framework sometimes refuses a start right after another
     # VM stopped ("VZErrorDomain Code=1 … failed to start"); retry a few times.
     for try in 1 2 3; do
-        nohup "$TART" run "$n" --no-graphics "$@" >>"$logf" 2>&1 &
+        nohup "$TART" run "$n" --no-graphics "${dev[@]}" "$@" >>"$logf" 2>&1 &
         for _ in $(seq 30); do vm_running "$n" && break; sleep 1; done
         vm_running "$n" && break
         log "boot attempt $try of $n failed: $(tail -1 "$logf")"
@@ -271,7 +279,9 @@ JSON.stringify(ws.filter(w => (w.kCGWindowLayer < 1000 || /wine/i.test(w.kCGWind
 '
 
 # The host's gogo state dir (design 16 §0); a v2 bundle needs parts of it.
-HOST_STATE="${GOGO_VM_HOST_STATE:-$HOME/Library/Application Support/gogo}"
+# GOGO_VM_HOST_STATE or GOGO_HOME (gogo's own override, = the state dir) win;
+# otherwise cmd_run takes the `[gogo] state` the bundle recorded at build.
+HOST_STATE="${GOGO_VM_HOST_STATE:-${GOGO_HOME:-}}"
 # shellcheck disable=SC2016 # expanded by the guest shell
 GUEST_STATE='$HOME/Library/Application Support/gogo'
 SHARES="/Volumes/My Shared Files"
@@ -288,7 +298,7 @@ toml_str() { # file key → first string value (gogo writes 'x' or "x")
 # With mode=share a store unit is the whole <id> dir, so a derived runtime
 # (<ver>+<renderer>-<rver>) and the base its Frameworks link to resolve alike.
 state_units() { # app mode
-    local toml="$1/Contents/Resources/gogo-launch.toml" mode="$2" gogid rt p kind rest id ver
+    local toml="$1/Contents/Resources/gogo-launch.toml" mode="$2" gogid rt p kind rest id ver l t
     gogid="$(toml_str "$toml" gogid)"
     [ -n "$gogid" ] && [ -d "$HOST_STATE/games/$gogid" ] || return 1
     echo "copy games/$gogid"
@@ -310,7 +320,15 @@ state_units() { # app mode
             /*) echo "abs $p" ;;
             runtimes/*|renderers/*)
                 kind="${p%%/*}"; rest="${p#*/}"; id="${rest%%/*}"; rest="${rest#*/}"; ver="${rest%%/*}"
-                if [ "$mode" = share ]; then echo "store $kind/$id"; else echo "store $kind/$id/$ver"; fi ;;
+                if [ "$mode" = share ]; then echo "store $kind/$id"; continue; fi
+                echo "store $kind/$id/$ver"
+                # A derived runtime may share its base's Frameworks/ through a
+                # relative link (../<base>/Frameworks): copy the base too.
+                find "$HOST_STATE/$kind/$id/$ver" -maxdepth 1 -type l -lname '../*' -print 2>/dev/null \
+                    | while IFS= read -r l; do
+                        t="$(readlink "$l")"; t="${t#../}"
+                        echo "store $kind/$id/${t%%/*}"
+                    done ;;
         esac
     done | sort -u
 }
@@ -329,6 +347,7 @@ cmd_run() {
             --wait-secs) waits="$2"; shift 2 ;;
             --state) state=1; shift ;;
             --no-state) state=0; shift ;;
+            --audio) VM_AUDIO=1; shift ;;
             --runtimes) rtmode="$2"; shift 2 ;;
             --kill) kill_sig="$(printf '%s' "$2" | tr '[:lower:]' '[:upper:]')"; shift 2 ;;
             --kill-wait) kill_wait="$2"; shift 2 ;;
@@ -359,12 +378,16 @@ cmd_run() {
     local toml="$app/Contents/Resources/gogo-launch.toml" model=v1 gogid="" runtime=""
     if [ -f "$toml" ] && [ ! -d "$app/Contents/Resources/wine" ]; then
         model=v2; gogid="$(toml_str "$toml" gogid)"; runtime="$(toml_str "$toml" runtime)"
+        if [ -z "$HOST_STATE" ]; then
+            HOST_STATE="$(toml_str "$toml" state)"
+            [ -d "$HOST_STATE" ] || HOST_STATE="$HOME/Library/Application Support/gogo"
+        fi
     fi
     [ "$state" = auto ] && { [ "$model" = v2 ] && state=1 || state=0; }
 
     # Everything below writes into the result dir; summary assembled at the end.
     local status="infra_error" exit_code=3 ip="" gk_block=false gatekeeper="not_quarantined" spctl_rc="" cs_rc=""
-    local launched=false alive=false windows="[]" note="" cs_after_rc="" modified="null" gk_left="null"
+    local launched=false alive=false windows="[]" note="" cs_after_rc="" modified="null" gk_left="null" tcc_left="null"
     local units=() teardown="null"
     # shellcheck disable=SC2329 # invoked by the EXIT trap
     finish() {
@@ -376,36 +399,42 @@ cmd_run() {
               --arg vm "$name" --arg ip "$ip" --argjson secs "$secs" \
               --argjson quarantined "$([ "$quar" = 1 ] && echo true || echo false)" \
               --argjson gatekeeper_blocked "$gk_block" --arg gatekeeper "$gatekeeper" \
-              --argjson gk_left "$gk_left" \
+              --argjson gk_left "$gk_left" --argjson tcc_left "$tcc_left" \
+              --argjson audio "$([ "$VM_AUDIO" = 1 ] && echo true || echo false)" \
               --arg spctl_rc "$spctl_rc" --arg codesign_rc "$cs_rc" --arg cs_after "$cs_after_rc" \
               --argjson modified "$modified" \
               --argjson launched "$launched" --argjson running "$alive" \
               --argjson windows "$windows" --argjson processes "$procs" \
               --argjson missing "$(lines "$res/missing-libs.txt")" \
               --argjson outside "$(lines "$res/writes-outside-gogo.txt")" \
+              --argjson nogl "$(lines "$res/vm-no-gl.txt")" \
               --argjson grep "$(lines "$res/log-grep.txt")" \
               --argjson units "$(printf '%s\n' ${units[@]+"${units[@]}"} | jq -R -s 'split("\n") | map(select(length>0))')" \
-              --arg rtmode "$([ "$state" = 1 ] && echo "$rtmode")" \
+              --arg rtmode "$([ "$state" = 1 ] && echo "$rtmode")" --arg host_state "$([ "$state" = 1 ] && echo "$HOST_STATE")" \
               --argjson teardown "$teardown" \
               --arg note "$note" --arg dir "$res" \
               --arg screenshot "$([ -s "$res/screenshot.png" ] && echo "$res/screenshot.png")" \
               '{status:$status, exit_code:$exit, app:$app, model:$model, gogid:$gogid, runtime:$runtime,
                 vm:$vm, ip:$ip, secs:$secs,
-                state:{units:$units, runtimes:$rtmode},
+                state:{host:$host_state, units:$units, runtimes:$rtmode},
                 quarantined:$quarantined, gatekeeper:$gatekeeper, gatekeeper_blocked:$gatekeeper_blocked,
-                gatekeeper_dialog_left:$gk_left,
+                gatekeeper_dialog_left:$gk_left, audio:$audio, tcc_prompt_left:$tcc_left,
                 codesign_verify_rc:$codesign_rc, codesign_strict_rc:$cs_after, spctl_rc:$spctl_rc,
                 bundle_modified:$modified,
                 gatekeeper_screenshot:(if $gatekeeper_blocked then $dir+"/gatekeeper.png" else "" end),
                 launched:$launched, running_after_secs:$running, windows:$windows,
                 processes:$processes, missing_libs:$missing, writes_outside_gogo:$outside,
+                vm_no_gl:$nogl,
                 log_grep:$grep, teardown:$teardown,
                 note:$note, results_dir:$dir, screenshot:$screenshot,
                 files:{codesign:($dir+"/codesign.txt"), spctl:($dir+"/spctl.txt"),
                        stdout:($dir+"/wine-stdout.log"), stderr:($dir+"/wine-stderr.log"),
                        launcher_logs:($dir+"/launcher-logs"),
                        prefix_logs:($dir+"/prefix-logs"), system_log:($dir+"/system.log"),
-                       vm_log:($dir+"/tart-run.log")}}' >"$res/summary.json"
+                       vm_log:($dir+"/tart-run.log")}}' >"$res/summary.json" \
+            || jq -n --arg app "$app" --arg dir "$res" \
+                '{status:"infra_error", exit_code:3, app:$app, results_dir:$dir,
+                  note:"summary assembly failed (harness bug)"}' >"$res/summary.json"
         if [ "$keep" = 1 ]; then "$TART" stop "$name" --timeout 20 >/dev/null 2>&1 || true
         else stop_delete "$name"; fi
         cat "$res/summary.json"
@@ -558,6 +587,7 @@ cmd_run() {
     windows="$(vssh "$ip" "osascript -l JavaScript -e '$GUEST_PROBE'" 2>/dev/null || echo '[]')"
     echo "$windows" | jq -e . >/dev/null 2>&1 || windows="[]"
     all_windows >"$res/windows-all.json"
+    tcc_left="$(jq 'any(.[]; .owner == "UserNotificationCenter")' "$res/windows-all.json" 2>/dev/null || echo null)"
     if [ "$gk_block" = true ]; then
         gk_left="$(jq 'any(.[]; .owner == "CoreServicesUIAgent")' "$res/windows-all.json" 2>/dev/null || echo null)"
     fi
@@ -591,7 +621,7 @@ cmd_run() {
         mkdir -p "$res/launcher-logs"
         vssh "$ip" "tar -C ~/Library/Logs/gogo/$gogid -cf - . 2>/dev/null" | tar -C "$res/launcher-logs" -xf - 2>/dev/null || true
     fi
-    vssh "$ip" "/usr/bin/log show --style compact --start '$since' --predicate 'process == \"syspolicyd\" OR process == \"XprotectService\" OR process CONTAINS[c] \"wine\" OR eventMessage CONTAINS[c] \"$base\"'" \
+    vssh "$ip" "/usr/bin/log show --style compact --start '$since' --predicate 'process == \"syspolicyd\" OR process == \"XprotectService\" OR process CONTAINS[c] \"wine\" OR (process == \"tccd\" AND eventMessage CONTAINS[c] \"microphone\") OR eventMessage CONTAINS[c] \"$base\"'" \
         >"$res/system.log" 2>&1 || true
     vssh "$ip" "ls ~/Library/Logs/DiagnosticReports/ 2>/dev/null | grep -i -E 'wine|exe' | head -5 | while read f; do cat ~/Library/Logs/DiagnosticReports/\"\$f\"; done" \
         >"$res/crash-reports.txt" 2>/dev/null || true
@@ -600,6 +630,10 @@ cmd_run() {
     # Self-containment and seal evidence (#68).
     local wlogs=("$res/wine-stderr.log" "$res/wine-stdout.log")
     [ -f "$res/launcher-logs/wine.log" ] && wlogs+=("$res/launcher-logs/wine.log")
+    # wined3d without a GL context: the guest has no OpenGL, so a D3D-on-
+    # wined3d title may never show a window here although it would on a Mac.
+    cat "${wlogs[@]}" 2>/dev/null | grep -E 'wined3d_adapter_gl_init|Failed to create internal global context|Failed to get a GL context' \
+        | LC_ALL=C sort -u | head -5 >"$res/vm-no-gl.txt" || true
     cat "${wlogs[@]}" 2>/dev/null | grep -E -i 'cannot find|Library not loaded|image not found' \
         | LC_ALL=C sort -u | head -20 >"$res/missing-libs.txt" || true
     if [ -n "$grep_re" ]; then
@@ -655,13 +689,14 @@ OUTSIDE_SKIP='^(gogo-test/|Applications/|Library/(Application Support/gogo|Logs/
 # run each, and judge each summary with the case's jq check. Prints a table and
 # writes smoke.json; exit 0 = all pass, 1 = a case failed, 3 = infra.
 cmd_smoke() {
-    local manifest="$REPO/scripts/vm-smoke.txt" out="$REPO/target/vm-test" only="" bundles
+    local manifest="$REPO/scripts/vm-smoke.txt" out="$REPO/target/vm-test" only="" extra="" bundles
     bundles="${GOGO_VM_BUNDLES:-$REPO/target/v2}"
     while [ $# -gt 0 ]; do
         case "$1" in
             --bundles) bundles="$2"; shift 2 ;;
             --out) out="$2"; shift 2 ;;
             --only) only="$2"; shift 2 ;;
+            --audio) extra="--audio"; shift ;;
             -*) die "unknown option $1" 2 ;;
             *) manifest="$1"; shift ;;
         esac
@@ -685,11 +720,15 @@ cmd_smoke() {
         else
             log "case $case ($layer): $bundle $opts"
             # shellcheck disable=SC2086 # opts is a word list from the manifest
-            summary="$(cmd_run_sub "$bundles/$bundle" --out "$dir/$case" $opts </dev/null | tail -1)" || rc=$?
+            summary="$(cmd_run_sub "$bundles/$bundle" --out "$dir/$case" $opts $extra </dev/null | tail -1)" || rc=$?
             if [ -f "$summary" ]; then
                 sj="$(cat "$summary")"
                 if [ "$rc" = 3 ]; then verdict="infra"
                 elif jq -e "$check" "$summary" >/dev/null 2>&1; then verdict="pass"
+                # No window while wined3d had no GL context: the VM's limit
+                # (no OpenGL), judge it on the host (#80), not a failure here.
+                elif jq -e '.status == "running_no_window" and (.vm_no_gl | length) > 0' "$summary" >/dev/null 2>&1; then
+                    verdict="vm-limit"
                 else verdict="fail"; fi
             else
                 verdict="infra"
@@ -705,12 +744,17 @@ cmd_smoke() {
     done <"$manifest"
     jq -s '{cases: ., pass: (map(select(.verdict == "pass")) | length),
             fail: (map(select(.verdict == "fail" or .verdict == "missing")) | length),
-            infra: (map(select(.verdict == "infra")) | length)}' "$results" >"$dir/smoke.json"
+            infra: (map(select(.verdict == "infra")) | length),
+            vm_limit: (map(select(.verdict == "vm-limit")) | length)}' "$results" >"$dir/smoke.json"
     # Table (markdown, ready for a PR) and a ready-to-paste compat line.
     {
         echo "| case | layer | verdict | status | gatekeeper | missing libs | teardown |"
         echo "|---|---|---|---|---|---|---|"
         jq -r '.cases[] | "| \(.case) | \(.layer) | **\(.verdict)** | \(.status // "-") | \(.gatekeeper // "-") | \(.missing_libs) | \(if .teardown_ok == null then "-" else .teardown_ok end) |"' "$dir/smoke.json"
+        if [ "$(jq .vm_limit "$dir/smoke.json")" -gt 0 ]; then
+            echo
+            echo "vm-limit: no window while wined3d had no GL context (the VM has no OpenGL); re-check on the host (#80)."
+        fi
     } | tee "$dir/table.md"
     local first host
     first="$(jq -r '[.cases[] | select(.summary != "") | .summary][0] // ""' "$dir/smoke.json")"
@@ -733,7 +777,8 @@ cmd_run_sub() { "$0" run "$@"; }
 
 # ----------------------------------------------------------------- shell ----
 cmd_shell() {
-    local app="${1:-}"
+    local app=""
+    for a in "$@"; do case "$a" in --audio) VM_AUDIO=1 ;; *) app="$a" ;; esac; done
     vm_exists "$GOLDEN" || die "no $GOLDEN image; run: scripts/vm-test.sh golden"
     local name; name="${PREFIX_CLONE}shell-$(date +%Y%m%d-%H%M%S)"
     "$TART" clone "$GOLDEN" "$name"
@@ -768,5 +813,5 @@ case "${1:-}" in
     shell) shift; cmd_shell "$@" ;;
     cleanup) cmd_cleanup ;;
     status) cmd_status ;;
-    *) sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+    *) sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
