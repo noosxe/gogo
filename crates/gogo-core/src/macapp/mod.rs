@@ -959,6 +959,35 @@ pub fn locate_support_installer(tree: &Path) -> Option<PathBuf> {
     found
 }
 
+/// The depot cache's GOG support overlays: `gog-support/<id>/<id>/app/`
+/// (sibling of the install tree, one per product id that carries one),
+/// files Galaxy merges into the install dir (design 15 §3, docs/19 §1 item
+/// 4: Carmageddon TDR 2000 aborts at `File.cpp:73` without the overlay's
+/// `ASSETS/options.txt`). Sorted for a stable merge order.
+pub fn locate_support_overlays(tree: &Path) -> Vec<PathBuf> {
+    let Some(support_root) = tree.parent().map(|p| p.join("gog-support")) else {
+        return Vec::new();
+    };
+    let subdirs = |dir: &Path| -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.is_dir())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut found: Vec<PathBuf> = subdirs(&support_root)
+        .iter()
+        .flat_map(|outer| subdirs(outer))
+        .map(|inner| inner.join("app"))
+        .filter(|app| app.is_dir())
+        .collect();
+    found.sort();
+    found
+}
+
 /// Run the conversion. `codesign` is [`CodesignPolicy::Adhoc`] on macOS hosts,
 /// [`CodesignPolicy::Skip`] elsewhere/tests (design 10 §2.7). Emits the §6
 /// event sequence. Returns the final bundle size in bytes.
@@ -1038,6 +1067,28 @@ pub fn execute(
         let dst = plan.bundle.prefix.join("drive_c/GOG").join(&name);
         emit(&ProgressEvent::InstallStarted);
         bundle::clone_tree(tree, &dst)?;
+        // GOG's support overlay (design 15 §3): files Galaxy merges into the
+        // install dir, missing from the depot manifest itself.
+        for overlay in locate_support_overlays(tree) {
+            let merged = bundle::merge_overlay(&overlay, &dst)?;
+            if !merged.is_empty() {
+                let mut names: Vec<String> = merged
+                    .iter()
+                    .take(5)
+                    .map(|p| p.display().to_string())
+                    .collect();
+                if merged.len() > names.len() {
+                    names.push("…".into());
+                }
+                emit(&ProgressEvent::Warn {
+                    message: format!(
+                        "merged GOG support overlay into the game dir: {} file(s) ({})",
+                        merged.len(),
+                        names.join(", ")
+                    ),
+                });
+            }
+        }
         // D3 amendment (2026-10-20): GOG's support installer writes the
         // startup config + registry into the clone. Fatal when present but
         // failing — without it the game stalls at its first media check.

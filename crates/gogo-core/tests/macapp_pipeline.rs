@@ -1597,3 +1597,75 @@ fn depot_support_decline_degrades_to_warn() {
     let game = out.join("Declined Game.app/Contents/Resources/prefix/drive_c/GOG/Declined Game");
     assert!(game.join("game.exe").is_file());
 }
+
+#[test]
+fn depot_support_overlay_merges_into_game_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let runtime_dir = tmp.path().join("runtime");
+    let log = tmp.path().join("wine.log");
+    fake_runtime(&runtime_dir, &log);
+
+    // Carmageddon's depot shape (docs/19 §1 item 4): the manifest lacks
+    // ASSETS/options.txt; GOG ships it in the sibling support overlay.
+    let tree = tmp.path().join("tree").join("Carmageddon TDR2K");
+    std::fs::create_dir_all(tree.join("ASSETS")).unwrap();
+    std::fs::write(
+        tree.join("goggame-1146738698.info"),
+        r#"{"name":"Carmageddon TDR 2000","playTasks":[{"type":"FileTask","category":"game","path":"TDR2000.exe","isPrimary":true}]}"#,
+    )
+    .unwrap();
+    std::fs::write(tree.join("TDR2000.exe"), b"MZ").unwrap();
+    std::fs::write(tree.join("config.ini"), b"depot").unwrap();
+    let app = tmp
+        .path()
+        .join("tree/gog-support/1146738698/1146738698/app");
+    std::fs::create_dir_all(app.join("ASSETS")).unwrap();
+    std::fs::write(app.join("ASSETS/options.txt"), b"Resolution 640x480").unwrap();
+    std::fs::write(app.join("config.ini"), b"overlay").unwrap();
+
+    let out = tmp.path().join("out");
+    let opts = MacAppOptions {
+        installer: None,
+        game_tree: Some(tree.clone()),
+        name: None,
+        mode: RuntimeMode::Path,
+        runtime_path: Some(runtime_dir),
+        out_dir: out.clone(),
+        overwrite: true,
+        recipe: Default::default(),
+        runtime_version: None,
+        lutris_base: None,
+        ddraw: macapp::DdrawChoice::Off,
+    };
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = events.clone();
+    let mut emit = move |ev: &ProgressEvent| {
+        if let ProgressEvent::Warn { message } = ev {
+            sink.lock().unwrap().push(message.clone());
+        }
+    };
+    let plan = macapp::plan(&opts, None, &mut emit).expect("plan");
+    macapp::execute(&plan, CodesignPolicy::Skip, &mut emit).expect("execute");
+
+    let game = out
+        .join("Carmageddon TDR 2000.app/Contents/Resources/prefix/drive_c/GOG/Carmageddon TDR2K");
+    assert_eq!(
+        std::fs::read(game.join("ASSETS/options.txt")).unwrap(),
+        b"Resolution 640x480"
+    );
+    assert_eq!(
+        std::fs::read(game.join("config.ini")).unwrap(),
+        b"overlay",
+        "overlay files win"
+    );
+    // The depot cache itself is untouched.
+    assert_eq!(std::fs::read(tree.join("config.ini")).unwrap(), b"depot");
+    assert!(!tree.join("ASSETS/options.txt").exists());
+
+    let warns = events.lock().unwrap().join("\n");
+    assert!(
+        warns.contains("merged GOG support overlay into the game dir: 2 file(s)")
+            && warns.contains("ASSETS/options.txt"),
+        "overlay merge is reported: {warns}"
+    );
+}
