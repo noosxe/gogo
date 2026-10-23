@@ -133,7 +133,10 @@ pub enum Command {
     },
     /// Convert a downloaded Windows installer into a self-contained macOS .app
     /// (docs/design/10).
+    #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
     MacApp {
+        #[command(subcommand)]
+        sub: Option<MacAppSub>,
         /// Path to the GOG setup .exe (.bin siblings are picked up automatically).
         #[arg(
             value_name = "INSTALLER",
@@ -218,6 +221,21 @@ pub enum Command {
         /// Shell to generate the script for.
         #[arg(value_enum)]
         shell: clap_complete::Shell,
+    },
+}
+
+/// `gogo mac-app <sub>`: per-game commands next to the build itself.
+#[derive(Debug, Subcommand)]
+pub enum MacAppSub {
+    /// Print a game's effective compat config and the layer each field came
+    /// from (design 16 decision 5).
+    Compat {
+        /// GOG product id.
+        #[arg(value_name = "GOGID")]
+        gogid: String,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
     },
 }
 
