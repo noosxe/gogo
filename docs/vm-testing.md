@@ -329,8 +329,10 @@ selection or the runtime pin runs all four.
 | `rebel-galaxy-dxmt` | Rebel Galaxy (1435582019), OGRE, 32-bit D3D11 | `"$G" mac-app 1435582019 --runtime winecx --renderer dxmt --out "$GOGO_HOME/apps/rebel-galaxy" --yes` | `verbs` holds the L1 verbs (`d3dcompiler_43 d3dx11_43 d3dx9_43 xinput`), and `markers.graphics_dlls` shows `d3dcompiler_43.dll: native` (the verb took); `markers.ogre` shows the D3D11 render system and no `OGRE EXCEPTION`; `markers.feature_level` is non-empty; the in-game image is right, not only the menu (docs/19 §8.2 Q7). A loading screen that never ends still reads `ok`: check `log_quiet_secs` and your own eyes. Record the `class_linkage` count, since DXMT's `Class linkage not supported` warnings are part of Q7 |
 | `snake-core-gl` | Snake Core (1276268370), Java/libGDX, OpenGL | `"$G" mac-app 1276268370 --runtime winecx --out "$GOGO_HOME/apps/snake-core" --yes` (renderer auto) | `runtime` is `winecx/…` with no derived runtime. `renderer` reads `wined3d`, gogo's label for anything that isn't D3D10/11; an OpenGL game makes no D3D calls, so wined3d isn't used. `markers.graphics_dlls` shows `opengl32.dll: builtin` and no `d3d*`/`dxgi`. The game has no engine log and logs no `err:` lines on a good run. The window ("Snake Core - v1.6.1") is up and playable, with no `OpenGL 2.0 or higher with the FBO extension is required` (that's the wine-staging failure, docs/19 §5) |
 
-Each game builds into its own `apps/<game>/` dir, so the `*.app` glob below matches one
-bundle. Neo Cab's two cases share that bundle: build, pass, then rebuild with the other
+The builds pin `--runtime winecx` because these cases are about that runtime; the auto
+pick would choose it too. Each game builds into its own `apps/<game>/` dir, so the
+`*.app` glob below matches one bundle. Neo Cab's two cases share that bundle: build,
+pass, then rebuild with the other
 `--renderer` (`--yes` overwrites) and pass again.
 
 ### Running it
