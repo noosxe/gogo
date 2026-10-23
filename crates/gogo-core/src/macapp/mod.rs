@@ -21,6 +21,7 @@ pub mod lutris;
 pub mod pe;
 pub mod prompt;
 pub mod runtime;
+pub mod setup;
 pub mod store;
 pub mod tools;
 
@@ -1090,6 +1091,16 @@ pub fn execute(
                 plan.bundle.prefix.display()
             ),
         });
+        // Build steps run unix-path installers through z:, which the last
+        // setup dropped; `finish_v2` drops it again.
+        let z = plan.bundle.prefix.join("dosdevices/z:");
+        if z.symlink_metadata().is_err() {
+            #[cfg(unix)]
+            std::os::unix::fs::symlink("/", &z)?;
+        }
+    } else if plan.state.is_some() {
+        // Design 16 decision 4 (#67): no links into the builder's home.
+        setup::create_prefix(&plan.runtime, &plan.bundle.prefix)?;
     } else {
         installer::stage_prefix(&plan.runtime, &plan.bundle.prefix)?;
     }
@@ -1137,7 +1148,7 @@ pub fn execute(
                     std::fs::remove_dir_all(&dirs.game)?;
                 }
                 bundle::clone_tree(tree, &dirs.game)?;
-                launch::link_game(dirs, &name)?
+                setup::link_game(dirs, &name)?
             }
             None => {
                 let dst = plan.bundle.prefix.join("drive_c/GOG").join(&name);
@@ -1347,9 +1358,10 @@ fn finish_v2(
     codesign: CodesignPolicy,
     emit: &mut dyn FnMut(&ProgressEvent),
 ) -> Result<u64, MacAppError> {
-    // Build steps ran unix-path installers through z:; nothing needs it now.
+    // Build steps ran unix-path installers through z:; nothing needs it now,
+    // nor the builder's other volumes (decision 4).
     installer::stop_wineserver(&plan.runtime, &dirs.prefix)?;
-    launch::drop_z_drive(&dirs.prefix)?;
+    setup::localize(&dirs.prefix)?;
 
     let exe = launch::unix_to_windows(&dirs.prefix, entry).ok_or_else(|| {
         MacAppError::EntryPointNotFound {
@@ -1434,7 +1446,7 @@ fn finish_v2(
     bundle::codesign_and_verify(&plan.bundle.root, codesign, true)?;
     emit(&ProgressEvent::Codesigned);
 
-    let outcome = launch::setup(&gogid, Some(&plan.bundle.root))?;
+    let outcome = setup::setup(&gogid, Some(&plan.bundle.root))?;
     for message in outcome.warnings {
         emit(&ProgressEvent::Warn { message });
     }

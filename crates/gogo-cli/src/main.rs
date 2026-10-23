@@ -1977,7 +1977,7 @@ fn mac_app_sub(sub: crate::cli::MacAppSub) -> Result<i32, AppError> {
             bundle,
             json,
         } => {
-            let out = gogo::macapp::launch::setup(&gogid, bundle.as_deref())?;
+            let out = gogo::macapp::setup::setup(&gogid, bundle.as_deref())?;
             for w in &out.warnings {
                 eprintln!("warning: {w}");
             }
@@ -1991,12 +1991,18 @@ fn mac_app_sub(sub: crate::cli::MacAppSub) -> Result<i32, AppError> {
                         "renderer": out.state.renderer,
                         "stamp": out.state.stamp,
                         "prefix_created": out.prefix_created,
+                        "runtime_installed": out.runtime_installed,
                     })
                 );
             } else {
                 println!(
-                    "{gogid}: runtime {}, renderer {}{}",
+                    "{gogid}: runtime {}{}, renderer {}{}",
                     out.state.runtime,
+                    if out.runtime_installed.is_some() {
+                        " (installed into the store)"
+                    } else {
+                        ""
+                    },
                     out.state.renderer,
                     if out.prefix_created {
                         ", prefix created"

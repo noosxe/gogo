@@ -23,6 +23,12 @@ if [ "$1" = "wineboot" ]; then
   mkdir -p "$WINEPREFIX/drive_c" "$WINEPREFIX/dosdevices"
   ln -sfn ../drive_c "$WINEPREFIX/dosdevices/c:"
   ln -sfn / "$WINEPREFIX/dosdevices/z:"
+  # What real Wine adds (#55): home links into the builder's $HOME and a
+  # drive letter per mounted volume.
+  mkdir -p "$WINEPREFIX/drive_c/users/${{USER:-u}}/AppData/Roaming"
+  ln -sfn "$HOME/Documents" "$WINEPREFIX/drive_c/users/${{USER:-u}}/Documents"
+  ln -sfn "$HOME/Templates" "$WINEPREFIX/drive_c/users/${{USER:-u}}/AppData/Roaming/Templates"
+  ln -sfn /Volumes/Other "$WINEPREFIX/dosdevices/d:"
   exit 0
 fi
 case "$1" in
@@ -1994,7 +2000,7 @@ fn v2_real_setup_applies_l4_and_restamps() {
     // A deleted prefix is recreated (wineboot through the bundle's runtime),
     // re-linked, and z:-free.
     std::fs::remove_dir_all(g.join("prefix")).unwrap();
-    let out = macapp::launch::setup("1207659013", None).unwrap();
+    let out = macapp::setup::setup("1207659013", None).unwrap();
     assert!(out.prefix_created);
     assert!(
         g.join("prefix/drive_c/GOG/Treasure Adventure Game/Game.exe")
@@ -2013,6 +2019,111 @@ fn v2_real_setup_applies_l4_and_restamps() {
     let logged = std::fs::read_to_string(&wine_log).unwrap();
     assert!(logged.contains("DLLOV:d3d9=n,b"), "{logged}");
     assert!(logged.contains("Game.exe -windowed"), "{logged}");
+    unsafe { std::env::remove_var("GOGO_HOME") };
+    drop(guard);
+}
+
+/// #67 / #55: the prefix holds no link out of the state dir after a build
+/// or a setup, L4 registry values and verbs are applied (verbs with `z:`
+/// back for the run only), and a runtime gogo can't install names the fix.
+#[test]
+fn v2_setup_localizes_prefix_and_applies_registry_and_verbs() {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    unsafe { std::env::set_var("GOGO_HOME", &home) };
+    let opts = v2_opts(tmp.path(), &tmp.path().join("no-such-gogo"));
+    let plan = macapp::plan(&opts, None, &mut |_| {}).unwrap();
+    macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).unwrap();
+    let g = home.join("games/1207659013");
+
+    fn absolute_links(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let ty = e.file_type().unwrap();
+            if ty.is_symlink() {
+                if std::fs::read_link(e.path()).unwrap().is_absolute() {
+                    out.push(e.path());
+                }
+            } else if ty.is_dir() {
+                absolute_links(&e.path(), out);
+            }
+        }
+    }
+    let check = |when: &str| {
+        let mut abs = Vec::new();
+        absolute_links(&g.join("prefix"), &mut abs);
+        assert!(abs.is_empty(), "{when}: {abs:?}");
+        let user = std::env::var("USER").unwrap_or_else(|_| "u".into());
+        let docs = g.join(format!("prefix/drive_c/users/{user}/Documents"));
+        assert!(docs.is_dir(), "{when}: {}", docs.display());
+        let mut drives: Vec<String> = std::fs::read_dir(g.join("prefix/dosdevices"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        drives.sort();
+        assert_eq!(drives, ["c:"], "{when}");
+    };
+    check("after build");
+
+    // L4: registry + a verb, through a fake winetricks.
+    let wt_log = tmp.path().join("winetricks.log");
+    let wt = tmp.path().join("winetricks");
+    std::fs::write(
+        &wt,
+        format!(
+            "#!/bin/sh\nprintf '%s|%s|%s\\n' \"$*\" \"$WINE\" \"$(readlink \"$WINEPREFIX/dosdevices/z:\")\" >> '{}'\n",
+            wt_log.display()
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&wt, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    unsafe { std::env::set_var("WINETRICKS", &wt) };
+    std::fs::create_dir_all(home.join("compat")).unwrap();
+    std::fs::write(
+        home.join("compat/1207659013.toml"),
+        "verbs = [\"d3dx9\"]\n\n[[registry]]\nkey = 'HKCU\\Software\\Wine\\Direct3D'\nname = \"csmt\"\ntype = \"REG_DWORD\"\ndata = \"0\"\n",
+    )
+    .unwrap();
+    let wine_log = tmp.path().join("wine.log");
+    std::fs::write(&wine_log, "").unwrap();
+    let out = macapp::setup::setup("1207659013", None).unwrap();
+    unsafe { std::env::remove_var("WINETRICKS") };
+    assert!(!out.prefix_created);
+    let logged = std::fs::read_to_string(&wine_log).unwrap();
+    assert!(
+        logged.contains(r"reg add HKCU\Software\Wine\Direct3D /v csmt /t REG_DWORD /d 0 /f"),
+        "{logged}"
+    );
+    let tricks = std::fs::read_to_string(&wt_log).unwrap();
+    assert!(tricks.starts_with("-q d3dx9|"), "{tricks}");
+    assert!(
+        tricks.contains("runtime/bin/wine|/"),
+        "z: during verbs: {tricks}"
+    );
+    check("after setup with verbs");
+
+    // A deleted prefix comes back localized too.
+    std::fs::remove_file(home.join("compat/1207659013.toml")).unwrap();
+    std::fs::remove_dir_all(g.join("prefix")).unwrap();
+    assert!(
+        macapp::setup::setup("1207659013", None)
+            .unwrap()
+            .prefix_created
+    );
+    check("after re-creating the prefix");
+
+    // A runtime that isn't in the store and isn't in the catalog: the error
+    // says how to install one.
+    std::fs::write(
+        home.join("compat/1207659013.toml"),
+        "runtime = \"no-such-runtime/1.0\"\n",
+    )
+    .unwrap();
+    let err = macapp::setup::setup("1207659013", None).unwrap_err();
+    assert!(err.to_string().contains("gogo runtimes install"), "{err}");
     unsafe { std::env::remove_var("GOGO_HOME") };
     drop(guard);
 }

@@ -249,9 +249,10 @@ pub enum MacAppSub {
         json: bool,
     },
     /// Bring a game's state dir up to date with its bundle and override
-    /// file: resolve the runtime, create a missing prefix, write the
-    /// effective launch config (design 16 §2.2). The launcher runs this
-    /// when its config stamp is stale.
+    /// file: resolve the runtime (installing a missing catalog runtime),
+    /// create a missing prefix with no links out of the state dir, apply
+    /// registry values and verbs, write the effective launch config (design
+    /// 16 §2.2). The launcher runs this when its config stamp is stale.
     Setup {
         /// GOG product id.
         #[arg(value_name = "GOGID")]
