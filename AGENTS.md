@@ -61,6 +61,9 @@ cargo deny check               # licenses + advisories
   series to match it (one TLS stack). The `noosxe/gog-warp` fork is kept in sync with
   upstream for future patches: pin it only while an upstream PR is pending, then
   switch back to playtron-os once it merges. Crate-version table: `docs/design/01-architecture.md`.
+- **DXMT (`3Shain/dxmt`) accepts no AI-made contributions** (its `CONTRIBUTING.md` AI
+  Policy and `AGENTS.md`). Agents never open PRs, issues or patches there, even when asked;
+  write the findings up for the user to report themselves (`docs/19` §3.2).
 
 ## Issue tracking
 
