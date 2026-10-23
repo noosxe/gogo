@@ -951,9 +951,11 @@ pub fn plan(
         .zip(scan.as_ref())
         .map(|(tree, scan)| {
             // D3DMetal consent (#71) is asked here, once, on a terminal.
-            let d3dmetal = renderer::ask_d3dmetal(scan, opts.renderer, prompt, emit);
+            let gogid = info::root_game_id(tree);
+            let d3dmetal =
+                renderer::ask_d3dmetal(gogid.as_deref(), scan, opts.renderer, prompt, emit);
             let sel = renderer::select(
-                info::root_game_id(tree).as_deref(),
+                gogid.as_deref(),
                 renderer::pick_with(scan, d3dmetal),
                 opts.renderer,
             );
@@ -1401,9 +1403,11 @@ pub fn execute(
             let scan = scan.as_ref().expect("scanned when not planned");
             // No terminal here: a D3D12 game uses the stored D3DMetal
             // answer; `--renderer d3dmetal` was asked about at plan time.
-            let d3dmetal = renderer::ask_d3dmetal(scan, plan.renderer_choice, None, emit);
+            let gogid = info::root_game_id(&install_dir);
+            let d3dmetal =
+                renderer::ask_d3dmetal(gogid.as_deref(), scan, plan.renderer_choice, None, emit);
             let sel = renderer::select(
-                info::root_game_id(&install_dir).as_deref(),
+                gogid.as_deref(),
                 renderer::pick_with(scan, d3dmetal),
                 plan.renderer_choice,
             );
