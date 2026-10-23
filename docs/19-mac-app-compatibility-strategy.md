@@ -1,12 +1,12 @@
 # 19 — Making `mac-app` bundles actually run: runtime, renderers, per-game data
 
-**Research date:** 2026-10-22/23 (landscape probes, host test runs on 2026-10-22, VM test
-runs on 2026-10-23)
+**Research date:** 2026-10-22/23 (landscape probes, host test runs on 2026-10-22 plus a
+short host pass on 2026-10-23, VM test runs on 2026-10-23)
 **Test beds:** host Apple Silicon M4 Pro, macOS 27.0.1, Rosetta 2; clean macOS 27.0 Tart
 guest via `scripts/vm-test.sh` (docs/vm-testing.md)
 **Builds on:** docs/13 (wrapper landscape), docs/14 (Lutris recipes), docs/15 (runtime
 distribution), docs/16 (GOG solidification), docs/18 (depot lane); designs 10, 11, 12, 15;
-issues #53–#56 (epic #50).
+issues #53–#56 and #59 (epic #50).
 **Status:** research + recommendation. No code changed. Facts are marked
 **verified** (checked live: a probe, an API call, a binary inspection or a test run) or
 **reported** (consistent public sources, not re-checked).
@@ -249,11 +249,26 @@ window, logs show the renderer initialised, no screenshot (host). Blank = not ru
 | **Carmageddon TDR 2000** (DDraw + D3D7, 32), raw depot | host: "Application Exception" — `Abort at File.cpp:73` (missing `ASSETS/options.txt`) | host: no output | | | |
 | Carmageddon + `gog-support` overlay | | | host: first-run "Hardware Capabilities" message box · **VM: same** (game's normal first-run flow; not clicked through) | host: same | |
 | **Pharaoh** (DDraw 2D, 32) depot + cnc-ddraw | (#54: black + 11×58 px dialog) | | **VM: renders** dialog text: *"Please insert your Cleopatra CD."* — the depot install-config gap (docs/18 §5), now legible | | |
-| **Rebel Galaxy** (D3D11 + `D3DCOMPILER_43`, 32) | host: exits — OGRE "Named constants have not been initialised" | host: crash (stack limits) | host: same shader error | host: **starts** (1600×928 window) but vkd3d-shader rejects HLSL (`E5017: Uniform initializer`) ×480 | host: exits (D3DMetal is 64-bit only) |
-| **Neo Cab** (Unity D3D11, 64) | host: `d3d11: failed to create device` · VM: same (`failed to create factory`) | host: **starts** (D3D11 FL 11.1, "AMD Compatibility Mode") | host: d3d11 device fail | host: **starts** (DXMT, FL 11.1, "Apple M4 Pro") · VM: device FL 11.0 on Paravirtual, then "Failed to get metal layer", no window | host: **starts** (FL 11.1) |
+| **Rebel Galaxy** (D3D11 + `D3DCOMPILER_43`, 32) | host: exits — OGRE "Named constants have not been initialised" | host: crash (stack limits) | host: same shader error | host: **starts** (1600×928 window) but vkd3d-shader rejects HLSL (`E5017: Uniform initializer`) ×480. **+ native `d3dcompiler_43` + `d3dx11_43`** (2026-10-23): **starts clean**. 0 compile errors, no OGRE exception, alive at 60 s with its window on screen, 650 KB compiled-shader cache written; DXMT logs 162 × `Class linkage not supported` (not judged by eye) | host: exits (D3DMetal is 64-bit only) |
+| **Neo Cab** (Unity D3D11, 64) | host: `d3d11: failed to create device` · VM: same (`failed to create factory`) | host: **starts** (D3D11 FL 11.1, "AMD Compatibility Mode") | host: d3d11 device fail | host: **runs** (DXMT, FL 11.1, "Apple M4 Pro"; re-run 2026-10-23 for 60 s and seen running by the user on screen) · VM: device FL 11.0 on Paravirtual, then "Failed to get metal layer", no window | host: **runs** (FL 11.1, "AMD Compatibility Mode"; re-run 2026-10-23 for 60 s and seen running by the user, same session as the DXMT run) |
 | **Snake Core** (Java/libGDX OpenGL, 64) | host: crash — "OpenGL 2.0 or higher with the FBO extension is required. OpenGL version: 2.1 Metal" · VM: no GL context | host: dyld failure (bad test, ignore) | host: **starts** ("Snake Core - v1.6.1" fullscreen) · VM: no GL context (VM limit) | | |
 
+Host screenshots were not possible: this session has no Screen Recording
+permission, so the 2026-10-23 host pass relies on engine logs, window lists, and
+the user watching the screen. Both Neo Cab runs (DXMT, then D3DMetal) ran
+back to back, and the user confirmed Neo Cab running on the host without
+telling them apart.
+
 Other observations, all **verified**:
+
+- **winetricks DirectX-redist verbs fail with gogo's own `cabextract` shim**
+  (`gogo-shims: no files extracted` on `directx_Jun2010_redist.exe`, a checksum
+  error in a nested cabinet), filed as #59. The Rebel Galaxy pass used nixpkgs
+  `cabextract` for the test only.
+- **The CX24 prefix links `drive_c/users/crossover/Documents` to the builder's real
+  `~/Documents`**, so Rebel Galaxy wrote its logs and shader cache into the host's
+  `~/Documents/My Games/`. This is #55's mechanism seen from the other side: test
+  runs and bundles leak writes into the user's home folders.
 
 - **Gatekeeper in the VM** with a *valid* ad-hoc signature + quarantine: "*Apple
   could not verify … is free of malware*" with *Move to Trash / Done* (the
@@ -275,7 +290,8 @@ Other observations, all **verified**:
 
 1. **The renderer decides D3D10/11 games**: Neo Cab fails on every wined3d
    runtime and starts on both Metal translators. Rebel Galaxy needs DXMT *and*
-   a native `d3dcompiler_43` — two independent, data-driven fixes.
+   a native `d3dcompiler_43`/`d3dx11_43` — two independent, data-driven fixes,
+   and with both it gets through (verified 2026-10-23).
 2. **The CX lineage is the better default engine**: with the right renderer per
    title it is the only engine on which every title reached its own UI or
    first-run dialog, its OpenGL is usable (Snake Core), its
@@ -345,7 +361,7 @@ every DLL next to it (Rebel Galaxy's D3D11 dependency is in
 | `d3d11`/`dxgi`, 64-bit | DXMT default, D3DMetal on consent | Neo Cab FL 11.1 on both; plain wined3d fails |
 | `d3d12` | D3DMetal (consent) | not tested |
 | `opengl32` only | wined3d-free; CX lineage | Snake Core runs on CX24, not staging |
-| `d3dcompiler_4x`, `d3dx9_*`, `d3dx10_*`, `d3dx11_*`, `xinput*`, `xact*` | add the matching winetricks verb (native MS dll) | Rebel's shaders fail in vkd3d-shader (`E5017 … Uniform initializer`); `d3dcompiler_47/43` are also the top two protonfixes verbs |
+| `d3dcompiler_4x`, `d3dx9_*`, `d3dx10_*`, `d3dx11_*`, `xinput*`, `xact*` | add the matching winetricks verb (native MS dll) | Rebel's shaders fail in vkd3d-shader (`E5017 … Uniform initializer`) and compile with native `d3dcompiler_43` + `d3dx11_43`; `d3dcompiler_47/43` are also the top two protonfixes verbs. Needs #59 fixed first |
 
 Global "turn every layer on" (Sikarugir's defaults) is wrong for gogo: it broke
 TAG. Per-game selection is cheap because the imports are on disk at build time.
@@ -486,6 +502,7 @@ as *self-contained on this Mac* rather than *copy the engine into every app*.
 | #53 signature invalid after build | Reproduced on 4/9 builds, both runtimes; a valid ad-hoc seal still gets "could not verify … Move to Trash / Done" under quarantine | Never write into the bundle after signing: prefix out of the bundle (§6.5). Ad-hoc + quarantine will always need the System Settings bypass; only Developer ID + notarisation removes it. |
 | #54 FreeType missing on a clean Mac | Staging bundle: FreeType errors in the guest. CX24 bundle with the engine at `Contents/Frameworks/wswine.bundle` + Template `Frameworks/`: **no FreeType errors**, and Pharaoh's "blank" dialog shows its text ("Please insert your Cleopatra CD.") | Runtime self-containment is a property of the runtime *package* (engine + its dylib closure), so the store entry must carry its `Frameworks/`. Pharaoh's stall is the depot install-config gap, not only fonts. |
 | #55 builder-home symlinks | Same on CX24 builds | Create the prefix on first launch as the real user (§6.5). |
+| #59 `cabextract` shim vs DirectX redist | Found in the host pass: winetricks `d3dcompiler_43`/`d3dx11_43` extract nothing through the shim | L1's verb row (§6.2) depends on it; fix before shipping auto verbs. |
 | #56 installer-lane stack overflow | CX24 runs 32-bit Inno code without the overflow (Pharaoh support installer runs and declines by its own logic; Stronghold HD's offline installer exits 1, no overflow, cause not investigated) | Depot lane as default (§6.3); offline-installer lane on the CX track needs its own investigation. |
 
 ### 8.2 Open questions
@@ -508,9 +525,11 @@ as *self-contained on this Mac* rather than *copy the engine into every app*.
 6. **D9VK on macOS**: needs Vulkan 1.3; MoltenVK in the Template does not
    provide it. Sikarugir also ships a KosmicKrisp (Mesa) ICD, which may change
    this on macOS 26+ — untested.
-7. **Rendering correctness and input/audio** were not judged; the VM cannot run
-   Metal 3 paths. Rebel Galaxy with native `d3dcompiler_43` and every DXMT /
-   D3DMetal case needs a short real-hardware pass.
+7. **Rendering correctness and input/audio** were not judged by screenshot. The
+   VM cannot run Metal 3 paths, and the host session cannot capture the screen.
+   Neo Cab on DXMT/D3DMetal was seen running by the user. Rebel Galaxy's
+   in-game image after the shader fix (and DXMT's `Class linkage not supported`
+   warnings) still needs a human look.
 8. Carmageddon past its first-run hardware dialog (needs a click; the VM
    harness can drive it with `osascript`).
 
