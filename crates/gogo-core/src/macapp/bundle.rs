@@ -193,13 +193,24 @@ pub fn write_launcher_notices(bundle: &Bundle, runtime: &Runtime) -> Result<(), 
 }
 
 fn write_wine_notice(bundle: &Bundle, runtime: &Runtime, bundled: bool) -> Result<(), MacAppError> {
+    // Store entries with a Frameworks set carry per-dylib licence notes (#62).
+    let notices = runtime.root.join("NOTICES.txt");
+    if notices.is_file() {
+        std::fs::copy(&notices, bundle.resources.join("LICENSE-runtime.txt"))?;
+    }
+    let source = if runtime.is_crossover() {
+        "Source: CrossOver's Wine sources, https://www.codeweavers.com/crossover/source\n\
+         (engine build: https://github.com/Sikarugir-App/Engines)"
+    } else {
+        "Source: https://github.com/wine-mirror/wine"
+    };
     if !bundled {
         std::fs::write(
             bundle.resources.join("LICENSE-wine.txt"),
             format!(
                 "This application runs Wine ({}), licensed under the GNU LGPL v2.1, from\n\
                  gogo's local runtime store on this Mac. It contains no Wine binaries itself.\n\
-                 Source: https://github.com/wine-mirror/wine\n\
+                 {source}\n\
                  Wine is copyright the Wine project authors. Built by `gogo mac-app` on the\n\
                  user's machine; gogo itself ships no Wine binaries.\n",
                 runtime.version
@@ -219,7 +230,7 @@ fn write_wine_notice(bundle: &Bundle, runtime: &Runtime, bundled: bool) -> Resul
         bundle.resources.join("LICENSE-wine.txt"),
         format!(
             "This application bundles Wine ({}), licensed under the GNU LGPL v2.1.\n\
-             Source: https://github.com/wine-mirror/wine\n\
+             {source}\n\
              Wine is copyright the Wine project authors. This bundle was produced by\n\
              `gogo mac-app` on the user's machine from the user's own runtime copy;\n\
              gogo itself ships no Wine binaries.\n",
@@ -292,26 +303,15 @@ pub fn copy_runtime(runtime: &Runtime, dest: &Path) -> Result<u64, MacAppError> 
 }
 
 /// Runtimes that live inside a `.app` (Wineskin/CX wrappers) link their wine
-/// binaries against dylibs in the wrapper's `Contents/Frameworks`. Copy the
+/// binaries against dylibs in the wrapper's `Contents/Frameworks`, and store
+/// engines with a `Frameworks/` set (design 16 decision 6) against that. Copy the
 /// top-level `.dylib` files into `Resources/wine-frameworks` so the launcher
 /// can point `DYLD_FALLBACK_LIBRARY_PATH` at them (live finding 2026-10-19:
 /// `Library not loaded: @rpath/libinotify.0.dylib` on first launch).
 pub fn copy_runtime_dylibs(runtime: &Runtime, dest: &Path) -> Result<Option<u64>, MacAppError> {
-    let mut anc = runtime.root.parent();
-    let frameworks = loop {
-        match anc {
-            Some(dir) => {
-                if dir.ends_with("Contents") {
-                    break dir.join("Frameworks");
-                }
-                anc = dir.parent();
-            }
-            None => return Ok(None),
-        }
-    };
-    if !frameworks.is_dir() {
+    let Some(frameworks) = super::runtime::frameworks_for(&runtime.wine) else {
         return Ok(None);
-    }
+    };
     std::fs::create_dir_all(dest)?;
     let mut total = 0u64;
     for entry in std::fs::read_dir(&frameworks)? {

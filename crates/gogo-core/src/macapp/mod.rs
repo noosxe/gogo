@@ -15,7 +15,6 @@ pub mod interpret;
 pub mod launch;
 
 use serde_json::Value;
-use std::process::Command;
 pub mod catalog;
 pub mod ddraw;
 pub mod lutris;
@@ -479,7 +478,7 @@ fn catalog_lane(
 
 /// §6 step 3 + §5: runtime resolution. Explicit flags win (D2 precedence);
 /// `auto` prefers cached runtimes (the recipe recommendation first, then the
-/// staging default), then brew, then downloads the recommendation into the
+/// default track, `winecx`), then brew, then downloads the recommendation into the
 /// store (network exception D8). Not in runtime.rs: this needs the catalog +
 /// store (network), and runtime.rs stays pure fs/exec.
 fn resolve_runtime(
@@ -503,7 +502,7 @@ fn resolve_runtime(
         return Ok((rt, None));
     }
 
-    // `auto` (§5 ladder): cached(recipe-recommended) → cached(staging) →
+    // `auto` (§5 ladder): cached(recipe-recommended) → cached(default) →
     // brew → download the recommendation.
     let rec = recipe
         .and_then(|r| r.wine_version.as_deref())
@@ -514,8 +513,8 @@ fn resolve_runtime(
         });
     }
     let mut lanes: Vec<&str> = rec.as_ref().map(|r| r.id).into_iter().collect();
-    if !lanes.contains(&"wine-staging") {
-        lanes.push("wine-staging");
+    if !lanes.contains(&catalog::DEFAULT_RUNTIME) {
+        lanes.push(catalog::DEFAULT_RUNTIME);
     }
     // §5 (amended 2026-10-19): the ladder only computes the "easy" default
     // now — interactively the runtime menu is MANDATORY and lists every
@@ -549,7 +548,10 @@ fn resolve_runtime(
     if let Some((rt, _)) = easy {
         return Ok((rt, None));
     }
-    let id = rec.as_ref().map(|r| r.id).unwrap_or("wine-staging");
+    let id = rec
+        .as_ref()
+        .map(|r| r.id)
+        .unwrap_or(catalog::DEFAULT_RUNTIME);
     let (m, downloaded) = catalog_lane(id, None, false, emit)?;
     let rt = runtime::from_store(&m)?;
     Ok((rt, downloaded.then(|| (m.id.clone(), m.version.clone()))))
@@ -625,7 +627,7 @@ fn choose_runtime(
     );
 
     // The easy default: the ladder pick if it maps to a lane, else the
-    // staging recommendation.
+    // default-track recommendation.
     let default_idx = match &easy {
         Some((_, key)) => lanes.iter().position(|l| match (l, key.as_str()) {
             (MenuLane::Cached(_, m), k) => format!("{}@{}", m.id, m.version) == k,
@@ -634,7 +636,7 @@ fn choose_runtime(
         }),
         None => lanes
             .iter()
-            .position(|l| matches!(l, MenuLane::Fresh(e) if e.id == "wine-staging")),
+            .position(|l| matches!(l, MenuLane::Fresh(e) if e.id == catalog::DEFAULT_RUNTIME)),
     }
     .unwrap_or(0);
 
@@ -647,7 +649,7 @@ fn choose_runtime(
                 MenuLane::Local { label, .. } => label.clone(),
                 MenuLane::Fresh(entry) => {
                     let mut line = format!("download {} — {}", entry.id, entry.arch);
-                    if entry.id == "wine-staging" {
+                    if entry.id == catalog::DEFAULT_RUNTIME {
                         line.push_str(" · recommended");
                     }
                     if rosetta_missing && entry.arch.starts_with("x86_64") {
@@ -1624,7 +1626,7 @@ fn run_recipe_phase(
                 return Ok(false);
             };
             let shims_path = tools::path_with_shims()?;
-            let mut cmd = Command::new(&wt);
+            let mut cmd = runtime::wine_cmd(&wt, bundled_wine);
             cmd.arg("-q")
                 .args(verbs)
                 .env("WINE", bundled_wine)

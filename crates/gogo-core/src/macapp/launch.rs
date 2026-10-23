@@ -370,14 +370,10 @@ pub fn engine_root(rt: &Runtime) -> PathBuf {
         .unwrap_or_else(|| rt.root.clone())
 }
 
-/// Wrapper runtimes (`Foo.app/Contents/Resources/wine`) link against dylibs in
-/// the wrapper's `Contents/Frameworks`.
+/// The dylib dir the launcher puts on `DYLD_FALLBACK_LIBRARY_PATH`: the store
+/// entry's `Frameworks/` or a wrapper's `Contents/Frameworks`.
 pub fn frameworks_of(rt: &Runtime) -> Option<PathBuf> {
-    rt.wine
-        .ancestors()
-        .find(|d| d.ends_with("Contents"))
-        .map(|c| c.join("Frameworks"))
-        .filter(|f| f.is_dir())
+    runtime::frameworks_for(&rt.wine)
 }
 
 /// A path for the state `launch.conf`: relative to the state root when under

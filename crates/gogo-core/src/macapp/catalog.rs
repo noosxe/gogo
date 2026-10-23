@@ -48,6 +48,34 @@ pub enum Discovery {
         asset_prefix: &'static str,
         asset_suffix: &'static str,
     },
+    /// One exact asset, pinned by sha256 (docs/19 §6.1). Sikarugir publishes
+    /// every engine under a single `v1.0` release, so neither the tag nor
+    /// "latest" says anything about the version: the asset name does.
+    Pinned(PinnedAsset),
+}
+
+/// An exact GitHub release asset and the sha256 gogo expects. GitHub's own
+/// asset digest, when present, must agree with it.
+pub struct PinnedAsset {
+    pub repo: &'static str,
+    pub tag: &'static str,
+    pub asset: &'static str,
+    /// The store version this asset installs as (`runtimes/<id>/<version>`).
+    pub version: &'static str,
+    pub sha256: &'static str,
+}
+
+/// The dylib closure an engine is not standalone without (#62): the
+/// top-level `*.dylib` files (and their symlinks) under `dir` inside `asset`,
+/// installed as `runtimes/<id>/<ver>/Frameworks/`. Frameworks bundles
+/// (`GStreamer.framework`, …) under `dir` are left out.
+pub struct FrameworksSet {
+    pub asset: PinnedAsset,
+    pub dir: &'static str,
+    /// `(file-name prefix, component and licence)`, for the store entry's
+    /// `NOTICES.txt` and the bundles that use it. gogo downloads these on the
+    /// user's machine; it doesn't redistribute them.
+    pub notices: &'static [(&'static str, &'static str)],
 }
 
 /// One catalog entry (design 12 §3 schema, trimmed to v1 needs).
@@ -62,9 +90,111 @@ pub struct CatalogEntry {
     pub min_macos: Option<&'static str>,
     pub arch: &'static str,
     pub note: &'static str,
+    /// Engines that need a dylib set beside them (`Frameworks/`).
+    pub frameworks: Option<FrameworksSet>,
 }
 
+/// The default runtime track (docs/19 §6.1, #62): the CrossOver-source
+/// engine. `wine-staging` stays selectable as the alternate.
+pub const DEFAULT_RUNTIME: &str = "winecx";
+
+/// Licence notes for the Sikarugir Template `Frameworks/` dylibs (Template
+/// 1.0.24 ships none of its own). Matched by file-name prefix, longest first.
+const CX_FRAMEWORKS_NOTICES: &[(&str, &str)] = &[
+    (
+        "libMoltenVK",
+        "MoltenVK — Apache-2.0 (KhronosGroup/MoltenVK)",
+    ),
+    ("libMVK", "MoltenVK — Apache-2.0 (KhronosGroup/MoltenVK)"),
+    (
+        "libvulkan_kosmickrisp",
+        "KosmicKrisp Vulkan driver (Mesa) — MIT",
+    ),
+    (
+        "libvulkan",
+        "Vulkan loader — Apache-2.0 (KhronosGroup/Vulkan-Loader)",
+    ),
+    ("libSDL", "SDL — zlib (libsdl.org)"),
+    ("libbrotli", "Brotli — MIT (google/brotli)"),
+    ("libbz2", "bzip2 — bzip2 licence (sourceware.org/bzip2)"),
+    (
+        "libcharset",
+        "libcharset (GNU libiconv) — LGPL-2.1-or-later",
+    ),
+    ("libiconv", "GNU libiconv — LGPL-2.1-or-later"),
+    ("libexslt", "libxslt/libexslt — MIT (gnome.org)"),
+    ("libxslt", "libxslt — MIT (gnome.org)"),
+    ("libxml2", "libxml2 — MIT (gnome.org)"),
+    ("libffi", "libffi — MIT"),
+    (
+        "libfreetype",
+        "FreeType — FreeType License (FTL) or GPL-2.0, at the user's choice",
+    ),
+    ("libgmpxx", "GNU MP — LGPL-3.0-or-later or GPL-2.0-or-later"),
+    ("libgmp", "GNU MP — LGPL-3.0-or-later or GPL-2.0-or-later"),
+    (
+        "libgnutls-openssl",
+        "GnuTLS OpenSSL compatibility layer — GPL-3.0-or-later",
+    ),
+    ("libgnutls", "GnuTLS — LGPL-2.1-or-later"),
+    (
+        "libhogweed",
+        "Nettle (hogweed) — LGPL-3.0-or-later or GPL-2.0-or-later",
+    ),
+    (
+        "libnettle",
+        "Nettle — LGPL-3.0-or-later or GPL-2.0-or-later",
+    ),
+    ("libicu", "ICU — Unicode License v3 (unicode-org/icu)"),
+    ("libidn2", "libidn2 — LGPL-3.0-or-later or GPL-2.0-or-later"),
+    ("libinotify", "libinotify-kqueue — MIT"),
+    ("libintl", "GNU gettext libintl — LGPL-2.1-or-later"),
+    ("liblz4", "LZ4 library — BSD-2-Clause"),
+    ("liblzma", "XZ Utils liblzma — 0BSD"),
+    ("libp11-kit", "p11-kit — BSD-3-Clause"),
+    ("p11-kit", "p11-kit — BSD-3-Clause"),
+    ("libpcap", "libpcap — BSD-3-Clause (tcpdump.org)"),
+    ("libpng", "libpng — libpng License"),
+    ("libtasn1", "GNU libtasn1 — LGPL-2.1-or-later"),
+    (
+        "libunistring",
+        "GNU libunistring — LGPL-3.0-or-later or GPL-2.0-or-later",
+    ),
+    ("libz.", "zlib — zlib License"),
+    ("libzstd", "Zstandard — BSD-3-Clause or GPL-2.0"),
+];
+
 static ENTRIES: &[CatalogEntry] = &[
+    CatalogEntry {
+        id: "winecx",
+        kind: Kind::Wine,
+        status: Status::Available,
+        discovery: Some(Discovery::Pinned(PinnedAsset {
+            repo: "Sikarugir-App/Engines",
+            tag: "v1.0",
+            asset: "WS12WineCX24.0.7_7.tar.xz",
+            version: "24.0.7_7",
+            sha256: "203f9e9fd6c2cc77e6525d798a434ced326145db34a356355e05659d3445fd1c",
+        })),
+        license: "LGPL-2.1 (Wine; CrossOver 24.0.7 sources by CodeWeavers, built by Gcenx/Sikarugir)",
+        redistributable: true,
+        min_macos: None,
+        arch: "x86_64 (Rosetta 2 on Apple Silicon)",
+        note: "default track (docs/19 §6.1): CrossOver-24-source engine (Wine 9.0). Runs \
+               32-bit Inno code without #56's overflow, usable OpenGL, FreeType from its \
+               own Frameworks/ (#54)",
+        frameworks: Some(FrameworksSet {
+            asset: PinnedAsset {
+                repo: "Sikarugir-App/Template",
+                tag: "v1.0",
+                asset: "Template-1.0.24.tar.xz",
+                version: "1.0.24",
+                sha256: "4b5f89eeb9ef139936bdfad33d9b420b05ea4597cb7d63376674f7a8e171321c",
+            },
+            dir: "Template-1.0.24.app/Contents/Frameworks",
+            notices: CX_FRAMEWORKS_NOTICES,
+        }),
+    },
     CatalogEntry {
         id: "wine-staging",
         kind: Kind::Wine,
@@ -78,7 +208,8 @@ static ENTRIES: &[CatalogEntry] = &[
         redistributable: true,
         min_macos: None,
         arch: "x86_64 (Rosetta 2 on Apple Silicon)",
-        note: "recommended default — gaming patches; gecko+mono bundled. Live                2026-10-19: 32-bit GOG installers (InnoSetup PE32) crash under                Rosetta new-WOW64 (virtual_setup_exception stack overflow); use                the GPTK lane for those",
+        note: "alternate track (the default is winecx) — gaming patches; gecko+mono bundled. Live                2026-10-19: 32-bit GOG installers (InnoSetup PE32) crash under                Rosetta new-WOW64 (virtual_setup_exception stack overflow); use                the GPTK lane for those",
+        frameworks: None,
     },
     CatalogEntry {
         id: "wine-devel",
@@ -94,6 +225,7 @@ static ENTRIES: &[CatalogEntry] = &[
         min_macos: None,
         arch: "x86_64 (Rosetta 2 on Apple Silicon)",
         note: "WineHQ devel train. Live 2026-10-19: 32-bit GOG installers crash                under Rosetta new-WOW64; use the GPTK lane for those",
+        frameworks: None,
     },
     CatalogEntry {
         id: "wine-stable",
@@ -109,6 +241,7 @@ static ENTRIES: &[CatalogEntry] = &[
         min_macos: None,
         arch: "x86_64 (Rosetta 2 on Apple Silicon)",
         note: "WineHQ stable train; tags may carry _N suffixes (docs/15 §8.2)",
+        frameworks: None,
     },
     CatalogEntry {
         id: "gptk",
@@ -124,6 +257,7 @@ static ENTRIES: &[CatalogEntry] = &[
         min_macos: Some("14.0"),
         arch: "aarch64",
         note: "D3DMetal DX11/12→Metal; consent-download (D9); never redistributed",
+        frameworks: None,
     },
     CatalogEntry {
         id: "wine-crossover",
@@ -140,6 +274,7 @@ static ENTRIES: &[CatalogEntry] = &[
         min_macos: None,
         arch: "x86_64",
         note: "tombstone — cached copies stay usable via `mac-app --runtime path`",
+        frameworks: None,
     },
     CatalogEntry {
         id: "winetricks",
@@ -157,6 +292,7 @@ static ENTRIES: &[CatalogEntry] = &[
         min_macos: None,
         arch: "any",
         note: "GitHub release tarball (digest-pinned); the script is located post-extract",
+        frameworks: None,
     },
     CatalogEntry {
         id: "cnc-ddraw",
@@ -176,6 +312,7 @@ static ENTRIES: &[CatalogEntry] = &[
         note: "DirectDraw wrapper (design 13): game-dir drop-in cures black-screen \
                classics; MIT; applied after the recipe phase, never over a recipe's \
                own ddraw.dll",
+        frameworks: None,
     },
 ];
 
@@ -202,43 +339,33 @@ const WINE_PREFIX_MAP: &[(&[&str], &str, Option<&str>)] = &[
     // Linux runner builds — everything Lutris pins on Linux falls here.
     (
         &["lutris-", "ge-proton", "ge-"],
-        "wine-staging",
-        Some("recipe targets a Linux wine build; using the closest macOS equivalent"),
+        DEFAULT_RUNTIME,
+        Some("recipe targets a Linux wine build; using the default macOS runtime"),
     ),
-    // Crossover line: upstream is gone (docs/15 §1 tombstone).
-    (
-        &["wine-crossover", "cx"],
-        "wine-staging",
-        Some(
-            "recipe targets wine-crossover, which is gone upstream since 2026-10-19 \
-             (docs/15 §1); using wine-staging",
-        ),
-    ),
+    // Crossover line: the old wine-crossover repo is gone (docs/15 §1), and
+    // the CX-source engine is the default track now (docs/19 §6.1).
+    (&["wine-crossover", "cx"], DEFAULT_RUNTIME, None),
 ];
 
 /// Map a recipe's `wine.version` pin to a catalog id (design 12 §7, D6).
-/// Absent / `system` → staging, no notice; exact mac-servable ids → that id;
-/// Linux runner and crossover pins → staging + notice; anything else →
-/// staging + notice. `gptk` is deliberately excluded: consent downloads are
+/// Absent / `system` → the default track, no notice; exact mac-servable ids
+/// → that id; crossover pins → the default (CX) track, no notice; Linux
+/// runner pins and anything else → the default track + notice. `gptk` is deliberately excluded: consent downloads are
 /// opt-in (D9), never a recipe side effect.
 pub fn recommend_for_wine(v: Option<&str>) -> WineRecommendation {
     let linux_fallback = WineRecommendation {
-        id: "wine-staging",
-        notice: Some(
-            "recipe targets a Linux runner; using wine-staging (closest macOS equivalent)",
-        ),
+        id: DEFAULT_RUNTIME,
+        notice: Some("recipe targets a Linux runner; using the default macOS runtime"),
+    };
+    let default = WineRecommendation {
+        id: DEFAULT_RUNTIME,
+        notice: None,
     };
     let Some(v) = v.map(str::trim).filter(|v| !v.is_empty()) else {
-        return WineRecommendation {
-            id: "wine-staging",
-            notice: None,
-        };
+        return default;
     };
     if v.eq_ignore_ascii_case("system") {
-        return WineRecommendation {
-            id: "wine-staging",
-            notice: None,
-        };
+        return default;
     }
     // Exact catalog id — only freely-downloadable wine entries.
     if let Some(e) = entries().iter().find(|e| {
@@ -318,11 +445,25 @@ pub async fn probe(
         .ok_or_else(|| MacAppError::CatalogUnreachable {
             detail: format!("{} has no downloadable artifact ({})", entry.id, entry.note),
         })?;
-    let Discovery::GitHubReleases {
-        repo,
-        asset_prefix,
-        asset_suffix,
-    } = disc;
+    let (repo, asset_prefix, asset_suffix) = match disc {
+        Discovery::GitHubReleases {
+            repo,
+            asset_prefix,
+            asset_suffix,
+        } => (repo, asset_prefix, asset_suffix),
+        Discovery::Pinned(pin) => {
+            if let Some(v) = version.filter(|v| *v != pin.version) {
+                return Err(MacAppError::RuntimeDownloadFailed {
+                    url: format!("{api_base}/repos/{}/releases/tags/{}", pin.repo, pin.tag),
+                    reason: format!(
+                        "{} is pinned to {} (no other version is catalogued, not '{v}')",
+                        entry.id, pin.version
+                    ),
+                });
+            }
+            return probe_pinned(pin, http, api_base).await;
+        }
+    };
     let matches_asset =
         |a: &AssetDoc| a.name.starts_with(asset_prefix) && a.name.ends_with(asset_suffix);
 
@@ -376,6 +517,47 @@ pub async fn probe(
             reason: format!("no asset matching {asset_prefix}…{asset_suffix}"),
         })?;
     Ok(remote_release(&chosen, asset))
+}
+
+/// Probe one pinned asset: it must exist in its release, and GitHub's digest
+/// (when it publishes one) must match the pin. The result carries the pinned
+/// version and sha256, which the download is then verified against.
+pub async fn probe_pinned(
+    pin: &PinnedAsset,
+    http: &reqwest::Client,
+    api_base: &str,
+) -> Result<RemoteRelease, MacAppError> {
+    let url = format!("{api_base}/repos/{}/releases/tags/{}", pin.repo, pin.tag);
+    let doc = get_json_opt(http, &url)
+        .await?
+        .as_ref()
+        .and_then(parse_release)
+        .ok_or_else(|| MacAppError::CatalogUnreachable {
+            detail: format!("{url}: not found"),
+        })?;
+    let asset = doc
+        .assets
+        .iter()
+        .find(|a| a.name == pin.asset)
+        .ok_or_else(|| MacAppError::RuntimeDownloadFailed {
+            url: url.clone(),
+            reason: format!("release {} has no asset {}", pin.tag, pin.asset),
+        })?;
+    let mut rel = remote_release(&doc, asset);
+    if let Some(upstream) = &rel.sha256
+        && !upstream.eq_ignore_ascii_case(pin.sha256)
+    {
+        return Err(MacAppError::CatalogUnreachable {
+            detail: format!(
+                "{}: upstream digest {upstream} differs from the pinned {} — \
+                 the asset was replaced; refusing it",
+                pin.asset, pin.sha256
+            ),
+        });
+    }
+    rel.tag = pin.version.to_string();
+    rel.sha256 = Some(pin.sha256.to_string());
+    Ok(rel)
 }
 
 fn remote_release(doc: &ReleaseDoc, asset: &AssetDoc) -> RemoteRelease {
@@ -682,11 +864,102 @@ mod catalog_tests {
         assert!(err.to_string().contains("no release carries"));
     }
 
+    async fn mock_engines(server: &wiremock::MockServer, digest: Option<&str>) {
+        let mut asset = serde_json::json!({
+            "name": "WS12WineCX24.0.7_7.tar.xz",
+            "size": 172348356,
+            "browser_download_url": "http://x/WS12WineCX24.0.7_7.tar.xz",
+        });
+        if let Some(d) = digest {
+            asset["digest"] = d.into();
+        }
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/repos/Sikarugir-App/Engines/releases/tags/v1.0",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "tag_name": "v1.0", "prerelease": false,
+                    "published_at": "2024-10-03T20:04:52Z",
+                    "assets": [
+                        {"name": "WS12WineCX24.0.7_6.tar.xz", "size": 1,
+                         "browser_download_url": "http://x/6"},
+                        asset,
+                    ]
+                })),
+            )
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn pinned_engine_probes_exact_asset_and_version() {
+        let server = wiremock::MockServer::start().await;
+        let Some(Discovery::Pinned(pin)) = &find("winecx").unwrap().discovery else {
+            panic!("winecx is pinned");
+        };
+        mock_engines(&server, Some(&format!("sha256:{}", pin.sha256))).await;
+        let entry = find("winecx").unwrap();
+        let http = http_client().unwrap();
+        let rel = probe(entry, None, &http, &server.uri()).await.unwrap();
+        assert_eq!(rel.tag, "24.0.7_7");
+        assert_eq!(rel.asset_name, "WS12WineCX24.0.7_7.tar.xz");
+        assert_eq!(rel.sha256.as_deref(), Some(pin.sha256));
+        // The pinned version is the only one.
+        let rel = probe(entry, Some("24.0.7_7"), &http, &server.uri())
+            .await
+            .unwrap();
+        assert_eq!(rel.tag, "24.0.7_7");
+        let err = probe(entry, Some("24.0.7_6"), &http, &server.uri())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("pinned to 24.0.7_7"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn pinned_engine_without_upstream_digest_still_carries_the_pin() {
+        let server = wiremock::MockServer::start().await;
+        mock_engines(&server, None).await;
+        let http = http_client().unwrap();
+        let rel = probe(find("winecx").unwrap(), None, &http, &server.uri())
+            .await
+            .unwrap();
+        assert!(rel.sha256.is_some_and(|d| d.starts_with("203f9e9f")));
+    }
+
+    #[tokio::test]
+    async fn replaced_upstream_asset_is_refused() {
+        let server = wiremock::MockServer::start().await;
+        mock_engines(&server, Some("sha256:00ff")).await;
+        let http = http_client().unwrap();
+        let err = probe(find("winecx").unwrap(), None, &http, &server.uri())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MacAppError::CatalogUnreachable { .. }));
+        assert!(err.to_string().contains("differs from the pinned"), "{err}");
+    }
+
     #[test]
     fn entries_and_statuses() {
         assert!(find("wine-staging").is_some());
         assert!(find("nope").is_none());
-        assert_eq!(entries().len(), 7);
+        assert_eq!(entries().len(), 8);
+        // The default track is the pinned CX engine with its Frameworks set.
+        let cx = find(DEFAULT_RUNTIME).unwrap();
+        assert_eq!(cx.id, "winecx");
+        assert!(matches!(cx.status, Status::Available));
+        assert!(matches!(cx.discovery, Some(Discovery::Pinned(_))));
+        let fw = cx.frameworks.as_ref().unwrap();
+        assert_eq!(fw.dir, "Template-1.0.24.app/Contents/Frameworks");
+        for lib in ["libfreetype", "libinotify", "libgnutls", "libMoltenVK"] {
+            assert!(fw.notices.iter().any(|(p, _)| *p == lib), "{lib}");
+        }
+        assert!(
+            entries()
+                .iter()
+                .filter(|e| e.id != "winecx")
+                .all(|e| e.frameworks.is_none())
+        );
         assert!(matches!(
             find("cnc-ddraw").unwrap().kind,
             Kind::Tool {
@@ -703,41 +976,42 @@ mod catalog_tests {
 
     #[test]
     fn wine_recommendation_table() {
-        // Design 12 §7 — every row of the mapping, as data.
-        let staging_plain = WineRecommendation {
-            id: "wine-staging",
+        // Design 12 §7 — every row of the mapping, as data. The default
+        // track is winecx (docs/19 §6.1).
+        let default_plain = WineRecommendation {
+            id: "winecx",
             notice: None,
         };
-        assert_eq!(recommend_for_wine(None), staging_plain);
-        assert_eq!(recommend_for_wine(Some("")), staging_plain);
-        assert_eq!(recommend_for_wine(Some("  ")), staging_plain);
-        assert_eq!(recommend_for_wine(Some("system")), staging_plain);
+        assert_eq!(recommend_for_wine(None), default_plain);
+        assert_eq!(recommend_for_wine(Some("")), default_plain);
+        assert_eq!(recommend_for_wine(Some("  ")), default_plain);
+        assert_eq!(recommend_for_wine(Some("system")), default_plain);
         // Exact mac-servable ids pass through untouched.
-        assert_eq!(recommend_for_wine(Some("wine-staging")), staging_plain);
-        assert_eq!(
-            recommend_for_wine(Some("wine-stable")),
-            WineRecommendation {
-                id: "wine-stable",
-                notice: None
-            }
-        );
-        // Linux runner pins → staging + notice.
+        assert_eq!(recommend_for_wine(Some("winecx")), default_plain);
+        for id in ["wine-staging", "wine-stable"] {
+            assert_eq!(
+                recommend_for_wine(Some(id)),
+                WineRecommendation { id, notice: None }
+            );
+        }
+        // Linux runner pins → the default + notice.
         for v in ["lutris-7.2-2", "GE-Proton9-20", "ge-8-26"] {
             let r = recommend_for_wine(Some(v));
-            assert_eq!(r.id, "wine-staging", "{v}");
+            assert_eq!(r.id, "winecx", "{v}");
             assert!(r.notice.is_some(), "{v}");
         }
-        // Crossover pins → staging + tombstone notice.
-        let r = recommend_for_wine(Some("wine-crossover-22.1.1"));
-        assert_eq!(r.id, "wine-staging");
-        assert!(r.notice.is_some_and(|n| n.contains("gone upstream")));
+        // Crossover pins → the CX track, no notice.
+        assert_eq!(
+            recommend_for_wine(Some("wine-crossover-22.1.1")),
+            default_plain
+        );
         // gptk is never a recipe side effect (D9 consent lane).
         let r = recommend_for_wine(Some("gptk"));
-        assert_eq!(r.id, "wine-staging");
+        assert_eq!(r.id, "winecx");
         assert!(r.notice.is_some());
-        // Unknown ids → the Linux fallback (staging + notice).
+        // Unknown ids → the Linux fallback (default + notice).
         let r = recommend_for_wine(Some("some-future-runner-1.0"));
-        assert_eq!(r.id, "wine-staging");
+        assert_eq!(r.id, "winecx");
         assert!(r.notice.is_some());
     }
 }

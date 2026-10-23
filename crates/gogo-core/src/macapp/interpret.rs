@@ -768,7 +768,7 @@ fn write_ini(
 
 /// Wine invocation with the staged prefix (timeout + null stdio, 10 §2).
 pub fn wine_command(wine: &Path, prefix: &Path, argv: &[String]) -> Command {
-    let mut cmd = Command::new(wine);
+    let mut cmd = super::runtime::wine_cmd(wine, wine);
     cmd.args(argv)
         .env("WINEPREFIX", prefix)
         .stdout(std::process::Stdio::null())

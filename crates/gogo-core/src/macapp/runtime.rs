@@ -21,7 +21,7 @@ pub enum RuntimeMode {
     Brew,
     Gptk,
     Path,
-    /// A catalog id (`wine-staging`/`wine-devel`/`wine-stable`) resolved from
+    /// A catalog id (`winecx`/`wine-staging`/`wine-devel`/`wine-stable`) resolved from
     /// the store, or downloaded into it (design 12 §5).
     Catalog(String),
 }
@@ -186,9 +186,6 @@ fn find_wine_in(root: &Path, mode: RuntimeMode, kind: &'static str) -> Result<Ru
     ))
 }
 
-/// Probe by executing `wine --version` — a runtime we cannot run is a
-/// `RuntimeInvalid`, never a silent assumption (design 10 §2.1).
-/// Probe an extracted wine tree by executing `<wine> --version` — used by the
 /// Build a `Runtime` from a cached store entry (design 12 §4): the manifest's
 /// `entry_rel` is the probed wine binary. Catalog metadata supplies
 /// `min_macos`. Pure fs/exec like the rest of this module.
@@ -212,18 +209,18 @@ pub fn from_store(m: &super::store::ManifestEntry) -> Result<Runtime, MacAppErro
     })
 }
 
+/// Probe an extracted wine tree by executing `<wine> --version` — used by the
 /// runtime store after extraction (design 12 §4): a tree we cannot run is a
 /// `RuntimeInvalid`, never a silent assumption. No `RuntimeMode`: store trees
 /// are not one of the resolution lanes (Phase 3 wires them in).
 pub fn probe_tree(wine: &Path) -> Result<String, MacAppError> {
-    let out =
-        Command::new(wine)
-            .arg("--version")
-            .output()
-            .map_err(|e| MacAppError::RuntimeInvalid {
-                path: wine.to_path_buf(),
-                reason: format!("cannot execute: {e}"),
-            })?;
+    let out = wine_cmd(wine, wine)
+        .arg("--version")
+        .output()
+        .map_err(|e| MacAppError::RuntimeInvalid {
+            path: wine.to_path_buf(),
+            reason: format!("cannot execute: {e}"),
+        })?;
     if !out.status.success() {
         return Err(MacAppError::RuntimeInvalid {
             path: wine.to_path_buf(),
@@ -233,13 +230,60 @@ pub fn probe_tree(wine: &Path) -> Result<String, MacAppError> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// The dylib dir a wine binary needs on `DYLD_FALLBACK_LIBRARY_PATH`:
+/// `<ver>/Frameworks` next to `<ver>/engine` (store layout, design 16
+/// decision 6), else a wrapper's `Contents/Frameworks` (`Foo.app/Contents/
+/// Resources/wine`). The CX engine needs it twice over: its unix libs link
+/// `@rpath/libinotify.0.dylib` with an rpath of `bin/../../`, and win32u
+/// `dlopen`s FreeType by leaf name, which only the fallback path finds
+/// (#54; verified 2026-10-23 without the fallback: "Wine cannot find the
+/// FreeType font library").
+pub fn frameworks_for(wine: &Path) -> Option<PathBuf> {
+    let engine = wine.parent().and_then(Path::parent)?;
+    let beside = engine.parent().map(|p| p.join("Frameworks"));
+    let wrapper = wine
+        .ancestors()
+        .find(|d| d.ends_with("Contents"))
+        .map(|c| c.join("Frameworks"));
+    [beside, wrapper].into_iter().flatten().find(|f| f.is_dir())
+}
+
+/// `Command` for `program` (wine, wineserver, winetricks…) driving `wine`:
+/// the engine's `Frameworks/` goes first on `DYLD_FALLBACK_LIBRARY_PATH`, so
+/// nothing is picked up from the host (no Homebrew, #54).
+pub fn wine_cmd(program: &Path, wine: &Path) -> Command {
+    let mut cmd = Command::new(program);
+    if let Some(fw) = frameworks_for(wine) {
+        let mut path = fw.into_os_string();
+        if let Some(old) = std::env::var_os("DYLD_FALLBACK_LIBRARY_PATH").filter(|v| !v.is_empty())
+        {
+            path.push(":");
+            path.push(old);
+        }
+        cmd.env("DYLD_FALLBACK_LIBRARY_PATH", path);
+    }
+    cmd
+}
+
+impl Runtime {
+    /// A CrossOver-source engine (`wine-9.0 (SikarugirCX 24.0.7)`, CodeWeavers'
+    /// own builds): its `wineboot` loops on a failing wine-mono MSI (err 1603)
+    /// unless `mscoree` is disabled while the prefix is staged (docs/19 §8.2 Q5).
+    pub fn is_crossover(&self) -> bool {
+        let v = self.version.to_ascii_lowercase();
+        v.contains("crossover")
+            || v.split(|c: char| !c.is_ascii_alphanumeric())
+                .any(|w| w.ends_with("cx"))
+    }
+}
+
 fn probe(wine: PathBuf, mode: RuntimeMode, kind: &'static str) -> Result<Runtime, String> {
     // Resolve symlinks first: cask runtimes install `$(brew --prefix)/bin/wine64`
     // as a symlink into the real tree (e.g. Game Porting Toolkit.app). Deriving
     // `root` from the symlink path bundles the wrong directory entirely — live
     // finding 2026-10-19: brew mode copied all of /opt/homebrew into a bundle.
     let wine = wine.canonicalize().unwrap_or_else(|_| wine.clone());
-    let out = Command::new(&wine)
+    let out = wine_cmd(&wine, &wine)
         .arg("--version")
         .output()
         .map_err(|e| format!("cannot execute: {e}"))?;
@@ -379,6 +423,64 @@ mod runtime_tests {
         std::fs::write(bin.join("wine64"), "#!/bin/sh\necho wine-8\n").unwrap();
         let rt = find_wine_in(tmp.path(), RuntimeMode::Path, "path").unwrap();
         assert!(rt.wine.ends_with("bin/wine"));
+    }
+
+    #[test]
+    fn frameworks_found_beside_the_engine_or_in_the_wrapper() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Store layout: `<ver>/{engine,Frameworks}`.
+        let store = tmp.path().join("winecx/24.0.7_7");
+        let wine = fake_runtime(&store.join("engine"), "#!/bin/sh\n");
+        assert_eq!(frameworks_for(&wine), None);
+        std::fs::create_dir_all(store.join("Frameworks")).unwrap();
+        assert_eq!(frameworks_for(&wine), Some(store.join("Frameworks")));
+        // Wrapper layout: `Foo.app/Contents/{Resources/wine,Frameworks}`.
+        let app = tmp.path().join("Foo.app/Contents");
+        let wine = fake_runtime(&app.join("Resources/wine"), "#!/bin/sh\n");
+        std::fs::create_dir_all(app.join("Frameworks")).unwrap();
+        assert_eq!(frameworks_for(&wine), Some(app.join("Frameworks")));
+        // A bare tree has none.
+        let bare = fake_runtime(&tmp.path().join("bare"), "#!/bin/sh\n");
+        assert_eq!(frameworks_for(&bare), None);
+    }
+
+    #[test]
+    fn wine_cmd_puts_frameworks_first_on_the_fallback_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().join("winecx/24.0.7_7");
+        let wine = fake_runtime(&store.join("engine"), "#!/bin/sh\n");
+        std::fs::create_dir_all(store.join("Frameworks")).unwrap();
+        let cmd = wine_cmd(&wine.with_file_name("wineserver"), &wine);
+        let dyld: Vec<_> = cmd
+            .get_envs()
+            .filter(|(k, _)| *k == "DYLD_FALLBACK_LIBRARY_PATH")
+            .filter_map(|(_, v)| v)
+            .collect();
+        assert_eq!(dyld.len(), 1);
+        let v = dyld[0].to_string_lossy();
+        assert!(
+            v.starts_with(&*store.join("Frameworks").to_string_lossy()),
+            "{v}"
+        );
+        // No Frameworks: the environment is left alone.
+        let bare = fake_runtime(&tmp.path().join("bare"), "#!/bin/sh\n");
+        assert_eq!(wine_cmd(&bare, &bare).get_envs().count(), 0);
+    }
+
+    #[test]
+    fn crossover_engines_are_recognised_by_version() {
+        let rt = |v: &str| Runtime {
+            mode: RuntimeMode::Path,
+            kind: "path",
+            root: PathBuf::from("/x"),
+            wine: PathBuf::from("/x/bin/wine"),
+            version: v.into(),
+            min_macos: None,
+        };
+        assert!(rt("wine-9.0 (SikarugirCX 24.0.7)").is_crossover());
+        assert!(rt("wine-8.0.1 (CrossOver FOSS 23.7.1)").is_crossover());
+        assert!(!rt("wine-11.18 (Staging)").is_crossover());
+        assert!(!rt("wine-11.0").is_crossover());
     }
 
     #[test]

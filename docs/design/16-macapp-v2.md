@@ -198,8 +198,9 @@ DXMT from outside its tree.
 - An engine-overlay renderer is installed as a **derived runtime**
   `runtimes/<id>/<ver>+<renderer>-<rver>/engine`. gogo builds it by `clonefile`ing the
   base engine and copying the renderer's `<arch>-windows`/`<arch>-unix` dirs over
-  `lib/wine/`. `Frameworks/` is shared with the base (symlink or clone, whichever the
-  engine's `@rpath` needs; #62 decides). Measured cost: 0.75 s and ~1 MB of metadata for
+  `lib/wine/`. `Frameworks/` is shared with the base: a relative symlink, since the
+  engine reaches it through `DYLD_FALLBACK_LIBRARY_PATH`, not its `@rpath` (#62,
+  decision 6). Measured cost: 0.75 s and ~1 MB of metadata for
   the 503 MB CX24 engine, plus the renderer's files once (~51 MB for DXMT), shared by every
   game that uses the same pair.
 - The base runtime is **never modified**. A derived runtime is immutable once built:
@@ -272,6 +273,26 @@ games/<gogid>/{prefix,game,state.toml,launch.conf}
   rule is left for the GC work.
 - Today's flat entries (`runtimes/wine-staging/11.18/…`, design 12 §4) stay readable:
   an entry without `engine/` is treated as an engine with no `Frameworks/`.
+- *#62 (the CX engine, `winecx/24.0.7_7`):* the entry is
+  `runtimes/winecx/24.0.7_7/{engine,Frameworks,NOTICES.txt}`. `engine/` is the
+  contents of Sikarugir's `wswine.bundle`. `Frameworks/` holds the top-level `*.dylib`s
+  (symlinks kept) of Sikarugir Template 1.0.24's `Contents/Frameworks`;
+  `GStreamer.framework` is left out. `NOTICES.txt` holds the engine's licence and one
+  licence line per dylib, and builds copy it into the bundle as `LICENSE-runtime.txt`.
+  Both archives are pinned by sha256 in the catalog, and GitHub's asset digest must
+  agree. Sikarugir publishes every engine under a single `v1.0` release, so the pin
+  names the asset, not the tag. The install is probed with `wine --version` and
+  `wineserver --version` (wineserver links `libinotify`).
+- *#62, how the engine finds `Frameworks/`:* through `DYLD_FALLBACK_LIBRARY_PATH`,
+  set by gogo on every Wine call (probe, `wineboot`, `reg`, installers, winetricks) and
+  by the launcher from `FRAMEWORKS`. Mimicking the wrapper's
+  `Contents/Frameworks/wswine.bundle` layout isn't enough: the rpath
+  (`bin/../../`) would find the dylibs, but win32u `dlopen`s FreeType by leaf name,
+  which only the fallback path finds. Without it, "Wine cannot find the FreeType
+  font library" appears even in that layout (tested 2026-10-23). With the fallback
+  path set, the layout doesn't matter, so decision 6's `{engine,Frameworks}` is
+  kept as written. For §3's derived runtimes this means `Frameworks` is a relative
+  symlink to the base entry's `Frameworks/`, and nothing is copied.
 
 **Why:** one copy of each engine per Mac (bundles today carry 0.5–0.85 GiB of runtime
 each, docs/19 §5), runtimes swappable in place (the macOS 28 path, docs/19 §7.3), and
