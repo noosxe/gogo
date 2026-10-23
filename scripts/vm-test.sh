@@ -376,11 +376,21 @@ cmd_run() {
     # v2 bundle (design 16): only a launcher plus gogo-launch.toml. A v1
     # self-contained bundle carries its engine in Resources/wine.
     local toml="$app/Contents/Resources/gogo-launch.toml" model=v1 gogid="" runtime=""
+    local renderer="" runtime_dir=""
     if [ -f "$toml" ] && [ ! -d "$app/Contents/Resources/wine" ]; then
         model=v2; gogid="$(toml_str "$toml" gogid)"; runtime="$(toml_str "$toml" runtime)"
         if [ -z "$HOST_STATE" ]; then
             HOST_STATE="$(toml_str "$toml" state)"
             [ -d "$HOST_STATE" ] || HOST_STATE="$HOME/Library/Application Support/gogo"
+        fi
+        # What setup applied (#70): the effective renderer and the runtime
+        # dir it runs from (a derived <ver>+<renderer>-<rver> for DXMT).
+        local conf="$HOST_STATE/games/$gogid/launch.conf"
+        if [ -f "$conf" ]; then
+            renderer="$( # shellcheck source=/dev/null
+                source "$conf"; printf '%s' "${RENDERER:-}")"
+            runtime_dir="$( # shellcheck source=/dev/null
+                source "$conf"; printf '%s' "${RUNTIME_DIR:-}")"
         fi
     fi
     [ "$state" = auto ] && { [ "$model" = v2 ] && state=1 || state=0; }
@@ -396,6 +406,7 @@ cmd_run() {
         lines() { if [ -s "$1" ]; then jq -R -s 'split("\n") | map(select(length>0))' "$1"; else echo '[]'; fi; }
         jq -n --arg status "$status" --argjson exit "$exit_code" --arg app "$app" \
               --arg model "$model" --arg gogid "$gogid" --arg runtime "$runtime" \
+              --arg renderer "$renderer" --arg runtime_dir "$runtime_dir" \
               --arg vm "$name" --arg ip "$ip" --argjson secs "$secs" \
               --argjson quarantined "$([ "$quar" = 1 ] && echo true || echo false)" \
               --argjson gatekeeper_blocked "$gk_block" --arg gatekeeper "$gatekeeper" \
@@ -415,6 +426,7 @@ cmd_run() {
               --arg note "$note" --arg dir "$res" \
               --arg screenshot "$([ -s "$res/screenshot.png" ] && echo "$res/screenshot.png")" \
               '{status:$status, exit_code:$exit, app:$app, model:$model, gogid:$gogid, runtime:$runtime,
+                renderer:$renderer, runtime_dir:$runtime_dir,
                 vm:$vm, ip:$ip, secs:$secs,
                 state:{host:$host_state, units:$units, runtimes:$rtmode},
                 quarantined:$quarantined, gatekeeper:$gatekeeper, gatekeeper_blocked:$gatekeeper_blocked,
@@ -741,6 +753,7 @@ cmd_smoke() {
             '{case:$case, layer:$layer, bundle:$bundle, opts:$opts, check:$check, proves:$proves,
               verdict:$verdict, summary:$summary, status:($s.status // null),
               gatekeeper:($s.gatekeeper // null), runtime:($s.runtime // null), gogid:($s.gogid // null),
+              renderer:($s.renderer // null), log_grep:(($s.log_grep // []) | length),
               missing_libs:(($s.missing_libs // []) | length), teardown_ok:$s.teardown.ok}' >>"$results"
     done <"$manifest"
     jq -s '{cases: ., pass: (map(select(.verdict == "pass")) | length),
@@ -749,9 +762,9 @@ cmd_smoke() {
             vm_limit: (map(select(.verdict == "vm-limit")) | length)}' "$results" >"$dir/smoke.json"
     # Table (markdown, ready for a PR) and a ready-to-paste compat line.
     {
-        echo "| case | layer | verdict | status | gatekeeper | missing libs | teardown |"
-        echo "|---|---|---|---|---|---|---|"
-        jq -r '.cases[] | "| \(.case) | \(.layer) | **\(.verdict)** | \(.status // "-") | \(.gatekeeper // "-") | \(.missing_libs) | \(if .teardown_ok == null then "-" else .teardown_ok end) |"' "$dir/smoke.json"
+        echo "| case | layer | verdict | status | renderer | gatekeeper | missing libs | teardown |"
+        echo "|---|---|---|---|---|---|---|---|"
+        jq -r '.cases[] | "| \(.case) | \(.layer) | **\(.verdict)** | \(.status // "-") | \(if (.renderer // "") == "" then "-" else .renderer end) | \(.gatekeeper // "-") | \(.missing_libs) | \(if .teardown_ok == null then "-" else .teardown_ok end) |"' "$dir/smoke.json"
         if [ "$(jq .vm_limit "$dir/smoke.json")" -gt 0 ]; then
             echo
             echo "vm-limit: no window while wined3d had no GL context (the VM has no OpenGL); re-check on the host (#80)."
