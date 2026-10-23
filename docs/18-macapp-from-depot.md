@@ -13,8 +13,12 @@ Verified against the live cache (779 MiB):
 - **`goggame-1207659046.info` sits in the tree root**, alongside `.dll/.ico/.script/
   .hashdb` siblings. Our existing `macapp/info.rs` (`find_entry_point`, `game_name`,
   primary-`FileTask` selection, relative-path resolution) works on it as-is.
-- Sibling to the game dir: `gog-support/1207659046/…` (Galaxy support files) — not
-  needed for launching; ignored.
+- Sibling to the game dir: `gog-support/1207659046/…` (Galaxy support files).
+  ~~Not needed for launching; ignored.~~ **Corrected 2026-10-23 (docs/19 §1 item 4):**
+  needed for some games. `gog-support/<id>/<id>/app/**` holds files Galaxy merges into
+  the install dir, and without them Carmageddon TDR 2000 aborts at `File.cpp:73`
+  (missing `ASSETS/options.txt`). The support installer `galaxy_*.exe` (design 15 D3)
+  lives in the same tree. The overlay is merged by #64 (design 15 §3).
 
 Consequence: a `--from-depot` bundle lane can reuse the entire post-install half of
 the mac-app pipeline (entry discovery, recipe-scope conventions, cnc-ddraw placement,

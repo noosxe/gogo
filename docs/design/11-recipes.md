@@ -36,6 +36,12 @@ gogo recipes show <installer-slug|file>  # the execution plan: applied vs skippe
   version, author, updated_at, rating) → **prompt the user to pick one**
   (rendering the ranked list; `1/n/none`). `--recipe <installer-slug>` skips
 
+> **Amended 2026-10-23 (design 16, docs/19 §2):** the Lutris picker is **no longer
+> part of `mac-app`**. Lutris scripts encode installer logistics, not macOS
+> compatibility; per-game fixes come from GOG's own data (L2) and the gogo compat DB
+> (L3) instead. `gogo recipes list|show` stays as an optional hint. The mandatory-picker
+> note below is superseded.
+>
 > **Amended 2026-10-19** (post-v1 field feedback): interactively the recipe
 > picker is **mandatory** — applying community patches is the user's decision
 > every time, single candidate included; the renderer always offers `none`

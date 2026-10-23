@@ -64,6 +64,7 @@ in `docs/13` grounds design 10.
 | [10-macos-app-bundles](10-macos-app-bundles.md) | `gogo mac-app`: installer → self-contained .app (Wine runtime resolution, silent install, codesign) |
 | [11-recipes](11-recipes.md) | per-game fixes for `mac-app` by consuming Lutris installer scripts (discovery, declarative-subset interpreter) |
 | [12-runtime-catalog-and-interactive-flow](12-runtime-catalog-and-interactive-flow.md) | runtime catalog + store, recipe-first interactive selection, winetricks provisioning + Rust shims — implemented (input: docs/15) |
+| [16-macapp-v2](16-macapp-v2.md) | mac-app v2 contract: layers L0–L4, immutable launcher bundle, store-referenced runtime, per-game state dir (input: docs/19, #94) |
 ## Key decisions (traceability)
 
 | Decision | Rationale / source |
