@@ -126,6 +126,7 @@ fn full_pipeline_with_fake_runtime() {
         out_dir: out.clone(),
         overwrite: true,
         recipe: Default::default(),
+        runtime_menu: false,
         runtime_version: None,
         lutris_base: None,
         renderer: macapp::RendererChoice::Auto,
@@ -233,6 +234,7 @@ fn execute_refuses_to_clobber_existing_bundle() {
         out_dir: tmp.path().to_path_buf(),
         overwrite: true,
         recipe: Default::default(),
+        runtime_menu: false,
         runtime_version: None,
         lutris_base: None,
         renderer: macapp::RendererChoice::Auto,
@@ -309,6 +311,7 @@ fn winetricks_verbs_run_with_wine_shims_and_notice() {
         out_dir: tmp.path().to_path_buf(),
         overwrite: true,
         recipe: gogo::macapp::RecipeChoice::File(recipe),
+        runtime_menu: false,
         runtime_version: None,
         lutris_base: None,
         renderer: macapp::RendererChoice::Auto,
@@ -407,6 +410,7 @@ fn recipe_wine_pin_recommends_cached_catalog_runtime() {
         out_dir: tmp.path().to_path_buf(),
         overwrite: true,
         recipe: gogo::macapp::RecipeChoice::File(recipe),
+        runtime_menu: false,
         runtime_version: None,
         lutris_base: None,
         renderer: macapp::RendererChoice::Auto,
@@ -522,6 +526,7 @@ fn auto_recipe_discovery_and_gogid_crosscheck() {
         out_dir: tmp.path().to_path_buf(),
         overwrite: true,
         recipe: gogo::macapp::RecipeChoice::Auto,
+        runtime_menu: false,
         runtime_version: None,
         lutris_base: Some(server.uri()),
         renderer: macapp::RendererChoice::Auto,
@@ -630,6 +635,7 @@ fn runtime_menu_offers_cached_and_custom_path_lanes() {
         out_dir: tmp.path().to_path_buf(),
         overwrite: true,
         recipe: gogo::macapp::RecipeChoice::None,
+        runtime_menu: true,
         runtime_version: None,
         lutris_base: None,
         renderer: macapp::RendererChoice::Auto,
@@ -788,6 +794,7 @@ fn recipe_picker_index_and_free_text_lanes() {
         out_dir: tmp.path().to_path_buf(),
         overwrite: true,
         recipe: gogo::macapp::RecipeChoice::Auto,
+        runtime_menu: false,
         runtime_version: None,
         lutris_base: Some(server.uri()),
         renderer: macapp::RendererChoice::Auto,
@@ -1065,6 +1072,7 @@ fn search_recipe_failure_degrades_pinned_stays_fatal() {
         out_dir: tmp.path().join("out-auto"),
         overwrite: true,
         recipe: gogo::macapp::RecipeChoice::Auto,
+        runtime_menu: false,
         runtime_version: None,
         lutris_base: Some(server.uri()),
         renderer: macapp::RendererChoice::Auto,
@@ -1114,6 +1122,7 @@ fn search_recipe_failure_degrades_pinned_stays_fatal() {
         out_dir: tmp.path().join("out-pinned"),
         overwrite: true,
         recipe: gogo::macapp::RecipeChoice::File(script.clone()),
+        runtime_menu: false,
         runtime_version: None,
         lutris_base: Some(server.uri()),
         renderer: macapp::RendererChoice::Auto,
@@ -1127,12 +1136,12 @@ fn search_recipe_failure_degrades_pinned_stays_fatal() {
 }
 
 #[test]
-fn runtime_menu_is_mandatory_with_easy_default() {
-    // §5 (amended 2026-10-19): the ladder hit (cached winecx, the default
-    // track; a cached wine-staging is listed but not picked) no longer
-    // bypasses the menu — interactively the selection is mandatory, the easy
-    // pick is preselected (spec.default + "· easy"), and choosing it resolves
-    // from the store.
+fn runtime_menu_is_opt_in_with_easy_default() {
+    // §5 (amended 2026-10-23, #76): without the menu flag an interactive run
+    // takes the ladder hit (cached winecx, the default track; a cached
+    // wine-staging is not picked) with no prompt. With it, the menu lists
+    // every option, the easy pick is preselected (spec.default + "· easy"),
+    // and choosing it resolves from the store.
     let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let tmp = tempfile::tempdir().unwrap();
     let installer = tmp.path().join("setup_testgame_1.0.exe");
@@ -1178,7 +1187,7 @@ fn runtime_menu_is_mandatory_with_easy_default() {
             }
         });
 
-    let opts = MacAppOptions {
+    let mut opts = MacAppOptions {
         installer: Some(installer),
         game_tree: None,
         name: Some("Test Game".into()),
@@ -1187,6 +1196,7 @@ fn runtime_menu_is_mandatory_with_easy_default() {
         out_dir: tmp.path().to_path_buf(),
         overwrite: true,
         recipe: gogo::macapp::RecipeChoice::None,
+        runtime_menu: false,
         runtime_version: None,
         lutris_base: None,
         renderer: macapp::RendererChoice::Auto,
@@ -1200,6 +1210,14 @@ fn runtime_menu_is_mandatory_with_easy_default() {
         std::env::set_var("GOGO_HOME", &home);
         std::env::set_var("PATH", "/usr/bin:/bin"); // hide brew
     }
+    let quiet = macapp::plan(&opts, Some(prompter.as_ref()), &mut |_| {}).expect("plan");
+    let no_menu = !seen
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|sp| matches!(sp.kind, gogo::macapp::PromptKind::Select));
+    seen.lock().unwrap().clear();
+    opts.runtime_menu = true;
     let plan = macapp::plan(&opts, Some(prompter.as_ref()), &mut |_| {}).expect("plan");
     unsafe {
         std::env::set_var("PATH", &old_path);
@@ -1207,6 +1225,13 @@ fn runtime_menu_is_mandatory_with_easy_default() {
     }
     drop(guard);
 
+    assert!(no_menu, "no runtime menu unless asked for");
+    let store_root = home.join("runtimes/winecx/24.0.7_7");
+    assert!(
+        quiet.runtime.wine.starts_with(&store_root),
+        "the ladder picks the cached default track: {}",
+        quiet.runtime.wine.display()
+    );
     let specs = seen.lock().unwrap();
     let menu = specs
         .iter()
@@ -1231,7 +1256,6 @@ fn runtime_menu_is_mandatory_with_easy_default() {
         menu.items
     );
     // from_store keeps the literal GOGO_HOME path (no canonicalization).
-    let store_root = home.join("runtimes/winecx/24.0.7_7");
     assert!(
         plan.runtime.wine.starts_with(&store_root),
         "default choice resolves to the cached winecx tree: {}",
@@ -1240,10 +1264,12 @@ fn runtime_menu_is_mandatory_with_easy_default() {
 }
 
 #[test]
-fn recipe_picker_is_mandatory_for_single_candidate() {
-    // §1 (amended 2026-10-19): even a single candidate is the user's decision
-    // interactively — the picker runs with "none" offered; picking it yields
-    // a recipe-less plan, picking the candidate selects it.
+fn recipe_picker_is_opt_in_and_asks_for_single_candidate() {
+    // §1 (amended 2026-10-23, #76): the default recipe is `none`, so an
+    // interactive run shows no picker. Asked for (`auto`), even a single
+    // candidate is the user's decision — the picker runs with "none"
+    // offered; picking it yields a recipe-less plan, picking the candidate
+    // selects it.
     let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let tmp = tempfile::tempdir().unwrap();
     let runtime_dir = tmp.path().join("runtime");
@@ -1305,6 +1331,7 @@ fn recipe_picker_is_mandatory_for_single_candidate() {
         out_dir: out.to_path_buf(),
         overwrite: true,
         recipe: gogo::macapp::RecipeChoice::Auto,
+        runtime_menu: false,
         runtime_version: None,
         lutris_base: Some(server.uri()),
         renderer: macapp::RendererChoice::Auto,
@@ -1343,6 +1370,23 @@ fn recipe_picker_is_mandatory_for_single_candidate() {
     let opts = mk_opts(&tmp.path().join("out-b"));
     let plan = macapp::plan(&opts, Some(none.as_ref()), &mut |_| {}).expect("plan");
     assert!(plan.recipe.is_none(), "none must yield a recipe-less plan");
+
+    // (c) the default (`none`): no picker, no recipe.
+    seen.lock().unwrap().clear();
+    let opts = MacAppOptions {
+        recipe: Default::default(),
+        ..mk_opts(&tmp.path().join("out-c"))
+    };
+    let plan = macapp::plan(&opts, Some(pick.as_ref()), &mut |_| {}).expect("plan");
+    assert!(plan.recipe.is_none(), "no recipe by default");
+    assert!(
+        !seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|sp| matches!(sp.kind, gogo::macapp::PromptKind::Fuzzy)),
+        "no recipe picker by default"
+    );
     drop(guard);
 }
 
@@ -1371,6 +1415,7 @@ fn produced_launcher_execs_wine_with_contents_relative_paths() {
         out_dir: tmp.path().to_path_buf(),
         overwrite: true,
         recipe: gogo::macapp::RecipeChoice::None,
+        runtime_menu: false,
         runtime_version: None,
         lutris_base: None,
         renderer: macapp::RendererChoice::Auto,
@@ -1456,6 +1501,7 @@ fn ddraw_wrapper_application_lanes() {
         out_dir: out.to_path_buf(),
         overwrite: true,
         recipe: gogo::macapp::RecipeChoice::None,
+        runtime_menu: false,
         runtime_version: None,
         lutris_base: None,
         renderer,
@@ -1571,6 +1617,7 @@ fn macapp_from_depot_executes() {
         out_dir: out.clone(),
         overwrite: true,
         recipe: Default::default(),
+        runtime_menu: false,
         runtime_version: None,
         lutris_base: None,
         renderer: macapp::RendererChoice::Auto,
@@ -1657,6 +1704,7 @@ fn depot_support_decline_degrades_to_warn() {
         out_dir: out.clone(),
         overwrite: true,
         recipe: Default::default(),
+        runtime_menu: false,
         runtime_version: None,
         lutris_base: None,
         renderer: macapp::RendererChoice::Auto,
@@ -1723,6 +1771,7 @@ fn depot_support_overlay_merges_into_game_dir() {
         out_dir: out.clone(),
         overwrite: true,
         recipe: Default::default(),
+        runtime_menu: false,
         runtime_version: None,
         lutris_base: None,
         renderer: macapp::RendererChoice::Auto,
@@ -1788,6 +1837,7 @@ fn v2_opts(tmp: &std::path::Path, gogo_path: &std::path::Path) -> MacAppOptions 
         out_dir: tmp.join("out"),
         overwrite: true,
         recipe: Default::default(),
+        runtime_menu: false,
         runtime_version: None,
         lutris_base: None,
         renderer: macapp::RendererChoice::Auto,
@@ -2853,6 +2903,7 @@ fn d3d11_game_runs_from_a_derived_dxmt_runtime() {
         out_dir: tmp.path().join("out"),
         overwrite: true,
         recipe: Default::default(),
+        runtime_menu: false,
         runtime_version: None,
         lutris_base: None,
         renderer: macapp::RendererChoice::Auto,
@@ -2971,6 +3022,7 @@ fn ddraw_game_gets_cnc_ddraw_until_l4_says_otherwise() {
         out_dir: tmp.path().join("out"),
         overwrite: true,
         recipe: Default::default(),
+        runtime_menu: false,
         runtime_version: None,
         lutris_base: None,
         renderer: macapp::RendererChoice::Auto,
@@ -3094,6 +3146,7 @@ tested   = [{ runtime = "winecx-24.0.7_7", date = 2026-10-22 }]
         out_dir: tmp.path().join("out"),
         overwrite: true,
         recipe: Default::default(),
+        runtime_menu: false,
         runtime_version: None,
         lutris_base: None,
         renderer: macapp::RendererChoice::Auto,
@@ -3188,6 +3241,7 @@ fn compat_runtime_pins_the_auto_ladder() {
         out_dir: tmp.path().join("out"),
         overwrite: true,
         recipe: Default::default(),
+        runtime_menu: false,
         runtime_version: None,
         lutris_base: None,
         renderer: macapp::RendererChoice::Auto,
@@ -3253,6 +3307,7 @@ fn retarget_moves_a_game_to_another_runtime_without_touching_the_bundle() {
         out_dir: tmp.path().join("out"),
         overwrite: true,
         recipe: Default::default(),
+        runtime_menu: false,
         runtime_version: None,
         lutris_base: None,
         renderer: macapp::RendererChoice::Auto,

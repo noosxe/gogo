@@ -36,6 +36,12 @@ gogo recipes show <installer-slug|file>  # the execution plan: applied vs skippe
   version, author, updated_at, rating) → **prompt the user to pick one**
   (rendering the ranked list; `1/n/none`). `--recipe <installer-slug>` skips
 
+> **Amended 2026-10-23 (#76):** `--recipe` defaults to **`none`**, on a terminal and
+> headless alike, so `mac-app` shows no picker. The picker comes back with `--recipe`
+> without a value (= `auto`), `--recipe auto`, or `--interactive` (runtime menu too);
+> headless, `auto` still takes the ranked best. `--recipe <installer-slug|file>` pins
+> one with no prompt. Depot builds take no recipe (design 15 D6).
+>
 > **Amended 2026-10-23 (design 16, docs/19 §2):** the Lutris picker is **no longer
 > part of `mac-app`**. Lutris scripts encode installer logistics, not macOS
 > compatibility; per-game fixes come from GOG's own data (L2) and the gogo compat DB

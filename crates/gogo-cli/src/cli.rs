@@ -163,9 +163,11 @@ pub enum Command {
         /// installer file name).
         #[arg(long)]
         name: Option<String>,
-        /// Wine runtime source (docs/design/10 §3).
-        #[arg(long, value_enum)]
-        runtime: Option<RuntimeSource>,
+        /// Wine runtime source (docs/design/10 §3). Default: the game's
+        /// override or compat entry, else the default track. Without a
+        /// value, pick it from a menu (#76).
+        #[arg(long, value_enum, num_args = 0..=1, value_name = "RUNTIME")]
+        runtime: Option<Option<RuntimeSource>>,
         /// Runtime directory for --runtime gptk|path.
         #[arg(long, value_name = "DIR")]
         runtime_path: Option<std::path::PathBuf>,
@@ -175,11 +177,16 @@ pub enum Command {
         /// Output directory for <name>.app (default: current directory).
         #[arg(long, value_name = "DIR")]
         out: Option<std::path::PathBuf>,
-        /// Lutris recipe: auto (default; live search + selection), none,
-        /// a Lutris installer slug, or a downloaded script JSON path
-        /// (docs/design/11 §1).
-        #[arg(long)]
+        /// Lutris recipe: none (default), auto (live search: a picker on a
+        /// terminal, the ranked best otherwise), a Lutris installer slug, or
+        /// a downloaded script JSON path (docs/design/11 §1). Without a
+        /// value: auto.
+        #[arg(long, num_args = 0..=1, default_missing_value = "auto", value_name = "RECIPE")]
         recipe: Option<String>,
+        /// Ask for the recipe and the runtime in menus (a terminal only;
+        /// flags with a value still win). Same as bare `--recipe --runtime`.
+        #[arg(long, conflicts_with = "retarget")]
+        interactive: bool,
         /// Renderer (#70): `auto` (default) picks it from the game's PE
         /// imports (D3D10/11 → dxmt, D3D9 and older → wined3d, 2D DirectDraw
         /// → cnc-ddraw) unless gogo's compat DB or your override file says
