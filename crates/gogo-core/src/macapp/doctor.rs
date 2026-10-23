@@ -143,14 +143,17 @@ pub fn doctor(target: &str, opts: &DoctorOptions) -> Result<Report, MacAppError>
     let state = GameState::load(&dirs.state_toml);
     let mut f = Vec::new();
 
-    // The bundle and what it baked.
-    let bundle = given_bundle.or_else(|| {
-        state
-            .as_ref()
-            .ok()
-            .and_then(Option::as_ref)
-            .map(|s| s.bundle.clone())
-    });
+    // The bundle and what it baked: the one given, the one setup recorded,
+    // or the portable bundle (#84) whose launcher set the prefix up.
+    let bundle = given_bundle
+        .or_else(|| {
+            state
+                .as_ref()
+                .ok()
+                .and_then(Option::as_ref)
+                .map(|s| s.bundle.clone())
+        })
+        .or_else(|| super::portable::marker(&gogid).map(|m| m.bundle));
     let toml_raw = bundle
         .as_ref()
         .map(|b| b.join("Contents/Resources/gogo-launch.toml"))
@@ -196,6 +199,16 @@ pub fn doctor(target: &str, opts: &DoctorOptions) -> Result<Report, MacAppError>
     };
     if let (Some(b), Some(_)) = (&bundle, &baked) {
         f.push(check_codesign(&opts.host, b, &gogid));
+    }
+    if let (Some(b), Some((t, raw))) = (&bundle, &baked)
+        && let Some(p) = &t.portable
+    {
+        portable_checks(b, t, p, raw, &dirs, &gogid, opts, &mut f);
+        return Ok(Report {
+            gogid,
+            bundle,
+            findings: f,
+        });
     }
     f.push(check_compat(&gogid));
 
@@ -266,6 +279,142 @@ pub fn doctor(target: &str, opts: &DoctorOptions) -> Result<Report, MacAppError>
         bundle,
         findings: f,
     })
+}
+
+/// A portable bundle (#84) carries its runtime and renderer and sets its
+/// own prefix up at launch, so the store and setup checks don't apply: the
+/// bundled Wine probes, the renderer's files are in the bundle, and the
+/// prefix (if there is one yet) was set up from this build of it.
+#[allow(clippy::too_many_arguments)]
+fn portable_checks(
+    bundle: &Path,
+    t: &LaunchToml,
+    p: &launch::Portable,
+    raw: &[u8],
+    dirs: &GameDirs,
+    gogid: &str,
+    opts: &DoctorOptions,
+    f: &mut Vec<Finding>,
+) {
+    let res = bundle.join("Contents/Resources");
+    let rebuild = format!("rebuild it: gogo mac-app {gogid} --portable --yes");
+    let mut compat = check_compat(gogid);
+    compat.message.push_str(
+        " (portable: the compat DB and your override were baked in at build; a change to \
+         either needs a rebuild)",
+    );
+    f.push(compat);
+
+    let wine = res.join(&p.wine);
+    if wine.is_file() {
+        let mut cmd = Command::new(&wine);
+        cmd.arg("--version");
+        if let Some(fw) = &p.frameworks {
+            cmd.env("DYLD_FALLBACK_LIBRARY_PATH", res.join(fw));
+        }
+        match cmd.output() {
+            Ok(out) if out.status.success() => {
+                let v = String::from_utf8_lossy(&out.stdout);
+                f.push(Finding::ok(
+                    "runtime",
+                    format!(
+                        "bundled {} ({})",
+                        t.runtime,
+                        v.lines().next().unwrap_or("").trim()
+                    ),
+                ));
+            }
+            Ok(out) => f.push(Finding::fail(
+                "runtime",
+                format!(
+                    "the bundled Wine doesn't run (`wine --version` exited {}): {}",
+                    out.status,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
+                rebuild.clone(),
+            )),
+            Err(e) => f.push(Finding::fail(
+                "runtime",
+                format!("cannot run the bundled Wine {}: {e}", wine.display()),
+                rebuild.clone(),
+            )),
+        }
+    } else {
+        f.push(Finding::fail(
+            "runtime",
+            format!("the bundled Wine {} is missing", wine.display()),
+            "copy the bundle again, or rebuild it",
+        ));
+    }
+
+    match RendererRef::parse(&t.renderer).map(|r| r.renderer) {
+        Ok(Renderer::Wined3d) => f.push(Finding::ok("renderer", "wined3d (built into Wine)")),
+        Ok(Renderer::CncDdraw) if res.join(&p.game).join("ddraw.dll").is_file() => f.push(
+            Finding::ok("renderer", "cnc-ddraw: ddraw.dll in the bundled game dir"),
+        ),
+        Ok(Renderer::CncDdraw) => f.push(Finding::fail(
+            "renderer",
+            "cnc-ddraw: no ddraw.dll in the bundled game dir",
+            rebuild.clone(),
+        )),
+        Ok(Renderer::Dxmt) => {
+            let overlay = Path::new(&p.wine)
+                .parent()
+                .and_then(Path::parent)
+                .map(|e| res.join(e).join("lib/wine/x86_64-unix/winemetal.so"));
+            match overlay {
+                Some(o) if o.is_file() => f.push(Finding::ok(
+                    "renderer",
+                    "dxmt: the bundled engine has x86_64-unix/winemetal.so",
+                )),
+                _ => f.push(Finding::fail(
+                    "renderer",
+                    "dxmt: the bundled engine lacks lib/wine/x86_64-unix/winemetal.so",
+                    rebuild.clone(),
+                )),
+            }
+        }
+        Ok(Renderer::D3dMetal) => f.push(Finding::fail(
+            "renderer",
+            "d3dmetal in a portable bundle: gogo never puts D3DMetal into one",
+            format!("{rebuild} --renderer dxmt"),
+        )),
+        Err(e) => f.push(Finding::fail("renderer", e, rebuild.clone())),
+    }
+
+    let launch_it = "launch the game: its launcher sets the prefix up".to_string();
+    f.push(if !dirs.prefix.is_dir() {
+        Finding::ok(
+            "stamp",
+            "no prefix yet: the first launch creates it with the bundled Wine",
+        )
+    } else {
+        match super::portable::marker(gogid) {
+            Some(m) if m.stamp == launch::stamp(raw, None) => {
+                Finding::ok("stamp", "prefix set up from this bundle")
+            }
+            Some(m) => Finding::warn(
+                "stamp",
+                format!(
+                    "prefix set up from another build of this game ({}): the next launch \
+                     applies this one's verbs and registry values",
+                    m.bundle.display()
+                ),
+                launch_it,
+            ),
+            None => Finding::warn(
+                "stamp",
+                "the prefix exists, but this bundle never set it up (a gogo install of the \
+                 same game, or a first launch that didn't finish): the next launch applies \
+                 its verbs and registry values",
+                launch_it,
+            ),
+        }
+    });
+    f.push(check_links(dirs, gogid));
+    f.push(check_rosetta(&opts.host));
+    f.push(check_processes(dirs, None, opts.stop_leftovers, gogid));
+    f.push(check_log(&opts.host.logs.join(gogid)));
 }
 
 fn is_gogid(s: &str) -> bool {

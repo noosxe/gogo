@@ -199,6 +199,13 @@ pub enum Command {
         /// Like `--renderer auto`, but never cnc-ddraw (wined3d instead).
         #[arg(long, conflicts_with = "renderer")]
         no_ddraw_wrapper: bool,
+        /// Self-contained bundle for another Mac (#84): the runtime, the
+        /// renderer, the verbs' files and the game go inside the .app, and
+        /// its launcher creates the prefix on the Mac it runs on (no gogo
+        /// needed there). Can't be retargeted in place; D3DMetal and the GPTK
+        /// are refused (Apple's licence).
+        #[arg(long, conflicts_with = "retarget")]
+        portable: bool,
         /// Skip the size confirmation; overwrite an existing bundle.
         #[arg(long)]
         yes: bool,

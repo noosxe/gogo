@@ -157,14 +157,14 @@ fn full_pipeline_with_fake_runtime() {
     let bytes = macapp::execute(&plan, CodesignPolicy::Skip, &mut emit).expect("execute");
     assert!(bytes > 0);
 
-    // Bundle layout (design 10 §2.5–2.7).
+    // Bundle layout (design 10 §2.5–2.7; portable, #84).
     let bundle = out.join("Test Game.app");
     assert!(bundle.join("Contents/MacOS/Test Game").is_file());
     assert!(bundle.join("Contents/Info.plist").is_file());
     assert!(bundle.join("Contents/Resources/launch.conf").is_file());
+    assert!(bundle.join("Contents/Resources/gogo-launch.toml").is_file());
     assert!(bundle.join("Contents/Resources/wine/bin/wine").is_file());
     assert!(bundle.join("Contents/Resources/LICENSE-wine.txt").is_file());
-    assert!(bundle.join("Contents/Resources/runtime.txt").is_file());
     assert!(!bundle.join("Contents/Resources/README-GPTK.txt").exists());
 
     // Plist identity: slug in the identifier, display name in Executable.
@@ -173,12 +173,12 @@ fn full_pipeline_with_fake_runtime() {
     assert!(plist.contains("<key>CFBundleExecutable</key>"));
     assert!(plist.contains("<string>Test Game</string>"));
 
-    // launch.conf points inside the bundle (wine binary + staged prefix + exe).
+    // launch.conf points inside the bundle (wine binary + game tree), and
+    // the exe is the installed game's Windows path.
     let conf = std::fs::read_to_string(bundle.join("Contents/Resources/launch.conf")).unwrap();
-    let wine_line = conf.lines().find(|l| l.starts_with("WINE=")).unwrap();
-    assert!(wine_line.contains("Resources/wine/bin/wine"), "{conf}");
-    assert!(conf.contains("Resources/prefix"), "{conf}");
-    assert!(conf.contains("drive_c/GOG/test-game/game.exe"), "{conf}");
+    assert!(conf.contains("WINE='wine/bin/wine'"), "{conf}");
+    assert!(conf.contains("GAME_SRC='game/test-game'"), "{conf}");
+    assert!(conf.contains(r"EXE='C:\GOG\test-game\game.exe'"), "{conf}");
 
     // Installer argv exactness (design 10 §2.3): wineboot first, then the
     // silent Inno Setup invocation with the deterministic Windows target.
@@ -194,12 +194,20 @@ fn full_pipeline_with_fake_runtime() {
     assert!(logged.contains("/NORESTART"), "{logged}");
     assert!(logged.contains(r"/DIR=C:\GOG\test-game"), "{logged}");
 
-    // The game landed in the bundled prefix via the fake installer.
+    // The game the fake installer laid down is in the bundle; no prefix is,
+    // and the staging dir it was installed into is gone.
     assert!(
         bundle
-            .join("Contents/Resources/prefix/drive_c/GOG/test-game/game.exe")
+            .join("Contents/Resources/game/test-game/game.exe")
             .is_file()
     );
+    assert!(!bundle.join("Contents/Resources/prefix").exists());
+    let left: Vec<_> = std::fs::read_dir(&out)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+    assert_eq!(left, [std::ffi::OsString::from("Test Game.app")]);
 
     // Event sequence (design 10 §6).
     let seen = events.lock().unwrap();
@@ -269,7 +277,7 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[test]
 fn winetricks_verbs_run_with_wine_shims_and_notice() {
     // Design 12 §8 composition: a recipe winetricks verb runs through the
-    // preference chain with WINE=<bundled wine>, the shim dir prepended to
+    // preference chain with WINE=<the build's wine>, the shim dir prepended to
     // PATH (child-scoped), and produces the bundle's LGPL notice.
     let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let tmp = tempfile::tempdir().unwrap();
@@ -339,8 +347,8 @@ fn winetricks_verbs_run_with_wine_shims_and_notice() {
     let logged = std::fs::read_to_string(&wt_log).expect("fake winetricks ran");
     assert!(logged.contains("argv: -q corefonts"), "{logged}");
     assert!(
-        logged.contains("Resources/wine/bin/wine"),
-        "WINE must be the bundled wine: {logged}"
+        logged.contains("WINE=") && logged.contains("runtime/bin/wine"),
+        "WINE must be the build's wine: {logged}"
     );
     assert!(
         logged.contains("tools/shims"),
@@ -1511,23 +1519,28 @@ fn produced_launcher_execs_wine_with_contents_relative_paths() {
     let plan = macapp::plan(&opts, None, &mut |_| {}).unwrap();
     let _bytes = macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).unwrap();
 
-    // The conf itself must be Contents-relative.
+    // The conf itself must be Resources-relative (portable, #84).
     let conf = std::fs::read_to_string(plan.bundle.resources.join("launch.conf")).unwrap();
     assert!(
-        conf.contains("WINE='Resources/wine"),
-        "conf wine path Contents-relative: {conf}"
+        conf.contains("WINE='wine/bin/wine'"),
+        "conf wine path Resources-relative: {conf}"
     );
     assert!(
-        !conf.contains("Contents/Contents"),
-        "doubled segment: {conf}"
+        !conf.contains("Contents/"),
+        "no bundle-root-relative segment: {conf}"
     );
 
-    // Execute the stub like Finder would.
+    // Execute the stub like Finder would, as a user whose state dir is
+    // under a scratch home: the prefix is created there.
+    let home = tmp.path().join("player");
     let out = std::process::Command::new(plan.bundle.macos.join("Test Game"))
         .env_remove("WINEPREFIX")
+        .env("HOME", &home)
+        .env("GOGO_LAUNCHER_NO_DIALOG", "1")
         .output()
         .expect("run launcher");
     assert!(out.status.success(), "launcher failed: {out:?}");
+    let prefix = home.join("Library/Application Support/gogo/games/1/prefix");
     let logged = std::fs::read_to_string(&log).unwrap();
     let env_line = logged
         .lines()
@@ -1537,7 +1550,7 @@ fn produced_launcher_execs_wine_with_contents_relative_paths() {
         .pop()
         .unwrap();
     assert!(
-        env_line.contains(&*plan.bundle.prefix.to_string_lossy()),
+        env_line.ends_with(&*prefix.to_string_lossy()),
         "WINEPREFIX wrong: {env_line}"
     );
     let cwd_line = logged
@@ -1552,7 +1565,7 @@ fn produced_launcher_execs_wine_with_contents_relative_paths() {
         "wine cwd must be the game dir: {cwd_line}"
     );
     assert!(
-        logged.contains("drive_c/GOG/test-game/game.exe"),
+        logged.contains(r"C:\GOG\test-game\game.exe"),
         "wine argv must carry the entry exe: {logged}"
     );
     drop(guard);
@@ -1560,8 +1573,8 @@ fn produced_launcher_execs_wine_with_contents_relative_paths() {
 
 #[test]
 fn ddraw_wrapper_application_lanes() {
-    // Design 13 (fat bundles): `--renderer cnc-ddraw` applies dll+ini+
-    // shaders+MIT notice into the detected game dir via the
+    // Design 13 (portable bundles, #84): `--renderer cnc-ddraw` applies
+    // dll+ini+shaders+MIT notice into the bundled game dir via the
     // GOGO_CNC_DDRAW_DIR override (WINETRICKS-style); Auto on a game with no
     // DirectDraw imports (the fake exe isn't a PE) picks wined3d — no
     // wrapper, no notice.
@@ -1617,7 +1630,7 @@ fn ddraw_wrapper_application_lanes() {
         }
     };
     let _ = macapp::execute(&plan, CodesignPolicy::Skip, &mut record).unwrap();
-    let game = plan.bundle.prefix.join("drive_c/GOG/test-game");
+    let game = plan.bundle.resources.join("game/test-game");
     assert_eq!(
         std::fs::read(game.join("ddraw.dll")).unwrap(),
         b"MZ-ddraw",
@@ -1640,19 +1653,17 @@ fn ddraw_wrapper_application_lanes() {
         steps.iter().any(|v| v.starts_with("cnc-ddraw")),
         "RecipeStep event: {steps:?}"
     );
-    // The load-order half (design 13 D3): the bundled wine must have set the
-    // per-prefix DllOverrides entry — the fake runtime logged its argv.
-    let logged = std::fs::read_to_string(&log).unwrap();
-    assert!(
-        logged.contains("DllOverrides") && logged.contains("n,b"),
-        "override registered via reg add: {logged}"
-    );
+    // The load-order half (design 13 D3): `ddraw=n,b` is baked into the
+    // launch config the launcher exports as WINEDLLOVERRIDES.
+    let conf = std::fs::read_to_string(plan.bundle.resources.join("launch.conf")).unwrap();
+    assert!(conf.contains("DLL_OVERRIDES='ddraw=n,b'"), "{conf}");
 
     // (b) Auto with nothing DirectDraw in the imports: wined3d.
     let opts = mk(&tmp.path().join("out-auto"), macapp::RendererChoice::Auto);
     let plan = macapp::plan(&opts, None, &mut |_| {}).unwrap();
     let _ = macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).unwrap();
-    let game = plan.bundle.prefix.join("drive_c/GOG/test-game");
+    let game = plan.bundle.resources.join("game/test-game");
+    assert!(game.join("game.exe").is_file());
     assert!(!game.join("ddraw.dll").exists());
     assert!(!plan.bundle.resources.join("LICENSE-cnc-ddraw.txt").exists());
     unsafe {
@@ -1722,8 +1733,9 @@ fn macapp_from_depot_executes() {
     let bytes = macapp::execute(&plan, CodesignPolicy::Skip, &mut emit).expect("execute");
     assert!(bytes > 0);
 
-    // The tree is cloned into drive_c/GOG/<tree-name> (design 15 D3).
-    let game_dir = out.join("Pharaoh Gold.app/Contents/Resources/prefix/drive_c/GOG/Pharaoh Gold");
+    // The tree is cloned into drive_c/GOG/<tree-name> (design 15 D3) of the
+    // staging prefix, and from there into the portable bundle (#84).
+    let game_dir = out.join("Pharaoh Gold.app/Contents/Resources/game/Pharaoh Gold");
     assert!(game_dir.join("Pharaoh.exe").is_file());
     assert!(game_dir.join("Data/kings.dat").is_file());
     assert!(game_dir.join("goggame-1207659046.info").is_file());
@@ -1734,14 +1746,16 @@ fn macapp_from_depot_executes() {
     let conf = std::fs::read_to_string(out.join("Pharaoh Gold.app/Contents/Resources/launch.conf"))
         .unwrap();
     assert!(
-        conf.contains("drive_c/GOG/Pharaoh Gold/Pharaoh.exe"),
-        "conf GAME points into the cloned tree: {conf}"
+        conf.contains(r"EXE='C:\GOG\Pharaoh Gold\Pharaoh.exe'"),
+        "conf EXE points into the cloned tree: {conf}"
     );
 
     // The produced launcher runs end-to-end: fake wine logs its argv.
     std::fs::write(&log, b"").unwrap();
     let status =
         std::process::Command::new(out.join("Pharaoh Gold.app/Contents/MacOS/Pharaoh Gold"))
+            .env("HOME", tmp.path().join("player"))
+            .env("GOGO_LAUNCHER_NO_DIALOG", "1")
             .status()
             .unwrap();
     assert!(status.success());
@@ -1818,7 +1832,7 @@ fn depot_support_decline_degrades_to_warn() {
         "decline warn: {warns}"
     );
     // No support-written files (the fake wine fails before writing).
-    let game = out.join("Declined Game.app/Contents/Resources/prefix/drive_c/GOG/Declined Game");
+    let game = out.join("Declined Game.app/Contents/Resources/game/Declined Game");
     assert!(game.join("game.exe").is_file());
 }
 
@@ -1874,8 +1888,7 @@ fn depot_support_overlay_merges_into_game_dir() {
     let plan = macapp::plan(&opts, None, &mut emit).expect("plan");
     macapp::execute(&plan, CodesignPolicy::Skip, &mut emit).expect("execute");
 
-    let game = out
-        .join("Carmageddon TDR 2000.app/Contents/Resources/prefix/drive_c/GOG/Carmageddon TDR2K");
+    let game = out.join("Carmageddon TDR 2000.app/Contents/Resources/game/Carmageddon TDR2K");
     assert_eq!(
         std::fs::read(game.join("ASSETS/options.txt")).unwrap(),
         b"Resolution 640x480"
@@ -4487,6 +4500,302 @@ fn doctor_reports_and_stops_leftover_wine_processes() {
     unsafe {
         std::env::remove_var("GOGO_HOME");
         std::env::remove_var("GOGO_CONFIG");
+    }
+    drop(guard);
+}
+
+// — portable bundles (#84) —
+
+/// `--portable`: the engine, its dylibs, the game (with cnc-ddraw in it),
+/// the files the game's verb installed and the effective config (flags over
+/// L4, the GOG.com key and L4's registry value baked) are inside the bundle,
+/// and nothing of the builder's state dir or paths is. Its launcher, on a
+/// Mac with no gogo, creates the prefix in that user's state dir (wineboot,
+/// localized, the game as a writable clone, the verb files, `reg add`s),
+/// runs the game, and leaves the bundle byte-for-byte as built; a second
+/// launch only runs the game. `doctor` checks it as a portable bundle, and
+/// `--retarget`, `next-renderer` and `setup` refuse it, as does a portable
+/// `--renderer d3dmetal` at plan time.
+#[test]
+fn portable_bundle_carries_everything_and_sets_up_outside() {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let builder = tmp.path().join("builder");
+    let log = tmp.path().join("wine.log");
+    let runtime_dir = tmp.path().join("runtime");
+    fake_runtime(&runtime_dir, &log);
+    // A 32-bit DirectDraw game that imports d3dx9_43 (L1 verb).
+    let gogid = "1000000084";
+    let tree = depot_game(
+        tmp.path(),
+        gogid,
+        "Pharaoh Gold",
+        false,
+        &["ddraw.dll", "d3dx9_43.dll"],
+    );
+    let ddraw = tmp.path().join("ddraw-tree");
+    std::fs::create_dir_all(&ddraw).unwrap();
+    std::fs::write(ddraw.join("ddraw.dll"), b"MZ-ddraw").unwrap();
+    // winetricks: drops the verb's DLL and its override, like the real one.
+    let wt = tmp.path().join("fake-winetricks");
+    write_exec(
+        &wt,
+        &format!(
+            "#!/bin/sh\necho \"winetricks $*\" >> \"{}\"\n\
+             mkdir -p \"$WINEPREFIX/drive_c/windows/syswow64\"\n\
+             printf 'MZ-d3dx9' > \"$WINEPREFIX/drive_c/windows/syswow64/d3dx9_43.dll\"\n\
+             printf '\\n[Software\\\\\\\\Wine\\\\\\\\DllOverrides] 1\\n\"*d3dx9_43\"=\"native\"\\n' \
+             >> \"$WINEPREFIX/user.reg\"\n",
+            log.display()
+        ),
+    );
+    // The builder's L4: an env and a registry value (baked), a renderer
+    // (beaten by the build's --renderer flag).
+    std::fs::create_dir_all(builder.join("compat")).unwrap();
+    std::fs::write(
+        builder.join(format!("compat/{gogid}.toml")),
+        "renderer = \"wined3d\"\nenv = { PHARAOH = \"1\" }\n\
+         [[registry]]\nkey = 'HKCU\\Software\\Impressions'\nname = \"Mode\"\ndata = \"window\"\n",
+    )
+    .unwrap();
+    // SAFETY: env mutation under ENV_LOCK.
+    unsafe {
+        std::env::set_var("GOGO_HOME", &builder);
+        std::env::set_var("WINETRICKS", &wt);
+        std::env::set_var("GOGO_CNC_DDRAW_DIR", &ddraw);
+    }
+    let out = tmp.path().join("out");
+    let mut opts = MacAppOptions {
+        installer: None,
+        game_tree: Some(tree.clone()),
+        name: None,
+        mode: RuntimeMode::Path,
+        runtime_path: Some(runtime_dir.clone()),
+        out_dir: out.clone(),
+        overwrite: true,
+        recipe: Default::default(),
+        runtime_menu: false,
+        runtime_version: None,
+        lutris_base: None,
+        renderer: macapp::RendererChoice::Force(macapp::Renderer::D3dMetal),
+        portable: true,
+        gogo_path: None,
+    };
+    let e = macapp::plan(&opts, None, &mut |_| {}).unwrap_err();
+    assert!(
+        e.to_string()
+            .contains("D3DMetal can't go into a portable bundle"),
+        "{e}"
+    );
+    opts.renderer = macapp::RendererChoice::Force(macapp::Renderer::CncDdraw);
+    let plan = macapp::plan(&opts, None, &mut |_| {}).expect("plan");
+    assert!(plan.portable);
+    macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).expect("execute");
+
+    // The layout: everything inside, no prefix, nothing left beside it.
+    let app = out.join("Pharaoh Gold.app");
+    let res = app.join("Contents/Resources");
+    for f in [
+        "wine/bin/wine",
+        "wine/bin/wineserver",
+        "game/Pharaoh Gold/Game.exe",
+        "game/Pharaoh Gold/goggame-1000000084.info",
+        "game/Pharaoh Gold/ddraw.dll",
+        "verbs/syswow64/d3dx9_43.dll",
+        "gogo-launch.toml",
+        "launch.conf",
+        "LICENSE-wine.txt",
+        "LICENSE-cnc-ddraw.txt",
+        "LICENSE-verbs.txt",
+        "LICENSE-winetricks.txt",
+    ] {
+        assert!(res.join(f).is_file(), "{f} in the bundle");
+    }
+    let names: Vec<String> = tree_digest(&app).into_iter().map(|(n, _)| n).collect();
+    assert!(
+        !names
+            .iter()
+            .any(|n| n.contains("prefix") || n.contains("drive_c")),
+        "{names:?}"
+    );
+    assert_eq!(
+        std::fs::read_dir(&out).unwrap().count(),
+        1,
+        "the staging dir is gone"
+    );
+    assert!(!builder.join("games").exists(), "builder's state untouched");
+    let raw = std::fs::read_to_string(res.join("gogo-launch.toml")).unwrap();
+    assert!(!raw.contains(&*tmp.path().to_string_lossy()), "{raw}");
+    let t = macapp::launch::LaunchToml::parse(&raw, std::path::Path::new("t")).unwrap();
+    assert_eq!(t.gogid, gogid);
+    assert!(t.renderer.starts_with("cnc-ddraw"), "flag beats L4: {raw}");
+    assert_eq!(t.runtime, "wine-9.0-fake");
+    assert_eq!(t.verbs, ["d3dx9_43"]);
+    assert_eq!(t.env["PHARAOH"], "1");
+    assert_eq!(t.dll_overrides["ddraw"], "n,b");
+    assert_eq!(t.dll_overrides["d3dx9_43"], "native");
+    let p = t.portable.as_ref().expect("[portable]");
+    assert_eq!(p.wine, "wine/bin/wine");
+    assert_eq!(p.game, "game/Pharaoh Gold");
+    assert_eq!(p.windows.as_deref(), Some("verbs"));
+    let gog = p
+        .registry
+        .iter()
+        .find(|r| r.name.as_deref() == Some("PATH"))
+        .unwrap();
+    assert_eq!(gog.key, r"HKLM\Software\GOG.com\Games\1000000084");
+    assert_eq!(gog.data, r"C:\GOG\Pharaoh Gold");
+    assert!(gog.wow32);
+    assert!(
+        p.registry
+            .iter()
+            .any(|r| r.key == r"HKCU\Software\Impressions" && r.data == "window"),
+        "{raw}"
+    );
+    let built = std::fs::read_to_string(&log).unwrap();
+    assert!(built.contains("winetricks -q d3dx9_43"), "{built}");
+
+    // First launch on a Mac with no gogo (another user's home).
+    let player = tmp.path().join("player");
+    let state = player.join("Library/Application Support/gogo");
+    let game = state.join(format!("games/{gogid}"));
+    let before = tree_digest(&app);
+    let launch = || {
+        std::fs::write(&log, "").unwrap();
+        let out = std::process::Command::new(app.join("Contents/MacOS/Pharaoh Gold"))
+            .env_clear()
+            .env("HOME", &player)
+            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .env("GOGO_LAUNCHER_NO_DIALOG", "1")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "launcher: {}\n{}",
+            String::from_utf8_lossy(&out.stderr),
+            std::fs::read_to_string(player.join(format!("Library/Logs/gogo/{gogid}/launch.log")))
+                .unwrap_or_default()
+        );
+        std::fs::read_to_string(&log).unwrap()
+    };
+    let logged = launch();
+    let prefix = game.join("prefix");
+    assert!(logged.contains("wineboot -u"), "{logged}");
+    assert!(
+        logged.contains(&format!("ENV:{}", prefix.display())),
+        "{logged}"
+    );
+    assert!(
+        logged.contains(r"reg add HKLM\Software\GOG.com\Games\1000000084 /v PATH /t REG_SZ /d C:\GOG\Pharaoh Gold /f /reg:32"),
+        "{logged}"
+    );
+    assert!(
+        logged.contains(r"reg add HKCU\Software\Impressions /v Mode /t REG_SZ /d window /f"),
+        "{logged}"
+    );
+    assert!(logged.contains(r"C:\GOG\Pharaoh Gold\Game.exe"), "{logged}");
+    let dllov = logged.lines().find(|l| l.starts_with("DLLOV:")).unwrap();
+    assert!(
+        dllov.contains("ddraw=n,b") && dllov.contains("d3dx9_43=native"),
+        "{dllov}"
+    );
+    assert!(!logged.contains("winetricks"), "no winetricks at launch");
+    // The prefix: outside the bundle, localized, the game a writable clone.
+    assert!(
+        prefix
+            .join("drive_c/windows/syswow64/d3dx9_43.dll")
+            .is_file()
+    );
+    let link = prefix.join("drive_c/GOG/Pharaoh Gold");
+    assert_eq!(
+        std::fs::read_link(&link).unwrap(),
+        std::path::Path::new("../../../game")
+    );
+    assert!(link.join("ddraw.dll").is_file());
+    std::fs::write(link.join("save.sav"), b"saved").expect("the game dir is writable");
+    let drives: Vec<_> = std::fs::read_dir(prefix.join("dosdevices"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+    assert_eq!(drives, [std::ffi::OsString::from("c:")]);
+    let users = prefix.join("drive_c/users");
+    for e in std::fs::read_dir(&users).unwrap().flatten() {
+        let docs = e.path().join("Documents");
+        if docs.symlink_metadata().is_ok() {
+            assert!(!docs.symlink_metadata().unwrap().is_symlink(), "{docs:?}");
+        }
+    }
+    let marker = std::fs::read_to_string(game.join("portable")).unwrap();
+    let stamp = macapp::launch::stamp(raw.as_bytes(), None);
+    assert!(marker.contains(&format!("stamp={stamp}")), "{marker}");
+    assert_eq!(before, tree_digest(&app), "the bundle is unchanged");
+
+    // Second launch: set up already, so only the game runs.
+    let logged = launch();
+    assert!(!logged.contains("wineboot"), "{logged}");
+    assert!(!logged.contains("reg add"), "{logged}");
+    assert!(logged.contains(r"C:\GOG\Pharaoh Gold\Game.exe"), "{logged}");
+    assert_eq!(std::fs::read(link.join("save.sav")).unwrap(), b"saved");
+    assert_eq!(before, tree_digest(&app), "still unchanged");
+
+    // gogo on the player's Mac: doctor checks it as portable (by bundle and
+    // by gogid), and nothing retargets it.
+    unsafe { std::env::set_var("GOGO_HOME", &state) };
+    let host = macapp::doctor::Host {
+        codesign: None,
+        rosetta: None,
+        logs: player.join("Library/Logs/gogo"),
+    };
+    for target in [app.to_string_lossy().into_owned(), gogid.to_string()] {
+        let report = macapp::doctor::doctor(
+            &target,
+            &macapp::doctor::DoctorOptions {
+                host: host.clone(),
+                stop_leftovers: false,
+            },
+        )
+        .unwrap();
+        let bad: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|f| f.level != macapp::doctor::Level::Ok)
+            .collect();
+        assert!(bad.is_empty(), "{target}: {bad:?}");
+        let msg = |check: &str| {
+            report
+                .findings
+                .iter()
+                .find(|f| f.check == check)
+                .map(|f| f.message.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(msg("stamp"), "prefix set up from this bundle");
+        assert!(
+            msg("runtime").contains("wine-9.0-fake"),
+            "{}",
+            msg("runtime")
+        );
+        assert!(msg("renderer").contains("ddraw.dll"), "{}", msg("renderer"));
+        assert!(msg("compat").contains("portable"), "{}", msg("compat"));
+    }
+    let refused = |e: macapp::MacAppError| {
+        let s = e.to_string();
+        assert!(s.contains("is a portable bundle"), "{s}");
+        assert!(s.contains("rebuild it"), "{s}");
+    };
+    refused(macapp::setup::retarget(gogid, &[("renderer", Some("wined3d"))]).unwrap_err());
+    refused(macapp::setup::next_renderer(gogid, true).unwrap_err());
+    refused(macapp::setup::setup(gogid, Some(&app)).unwrap_err());
+    assert!(
+        !state.join(format!("compat/{gogid}.toml")).exists(),
+        "a refused retarget writes no L4"
+    );
+
+    unsafe {
+        std::env::remove_var("GOGO_HOME");
+        std::env::remove_var("WINETRICKS");
+        std::env::remove_var("GOGO_CNC_DDRAW_DIR");
     }
     drop(guard);
 }

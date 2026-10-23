@@ -219,6 +219,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
             renderer,
             ddraw_wrapper,
             no_ddraw_wrapper,
+            portable,
             out,
             yes,
             json_progress,
@@ -244,6 +245,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
                 runtime_path,
                 runtime_version,
                 renderer,
+                portable,
                 out,
                 yes,
                 json_progress,
@@ -2027,8 +2029,16 @@ fn mac_app_sub(sub: crate::cli::MacAppSub) -> Result<i32, AppError> {
             let mut variants: Vec<serde_json::Value> = Vec::new();
             let mut variant_error = None;
             let dirs = gogo::macapp::launch::GameDirs::for_game(&gogid)?;
-            if let Some(state) = gogo::macapp::launch::GameState::load(&dirs.state_toml)? {
-                let toml = state.bundle.join("Contents/Resources/gogo-launch.toml");
+            // The bundle setup recorded, else a portable one (#84) whose
+            // launcher set this game up: its config was baked whole at
+            // build, so L3/L4 edits since then don't reach it.
+            let portable = gogo::macapp::portable::portable_target(&gogid);
+            let source = match gogo::macapp::launch::GameState::load(&dirs.state_toml)? {
+                Some(state) => Some((state.bundle, Some(state.renderer))),
+                None => portable.clone().map(|b| (b, None)),
+            };
+            if let Some((bundle, applied)) = source {
+                let toml = bundle.join("Contents/Resources/gogo-launch.toml");
                 if let Ok(raw) = std::fs::read_to_string(&toml)
                     && let Ok(baked) = gogo::macapp::launch::LaunchToml::parse(&raw, &toml)
                 {
@@ -2036,16 +2046,26 @@ fn mac_app_sub(sub: crate::cli::MacAppSub) -> Result<i32, AppError> {
                         .tree_name()
                         .map(|n| dirs.prefix.join("drive_c/GOG").join(n));
                     let exe = gogo::macapp::launch::windows_to_unix(&dirs.prefix, &baked.exe);
-                    let (r, why) = gogo::macapp::renderer::explain(
-                        &gogid,
-                        &baked.renderer,
-                        game.as_deref().filter(|g| g.is_dir()),
-                        exe.as_deref().filter(|e| e.is_file()),
-                    );
-                    eff.renderer = Some(r);
-                    renderer_why = Some((why, state.renderer.clone()));
+                    match &applied {
+                        Some(applied) => {
+                            let (r, why) = gogo::macapp::renderer::explain(
+                                &gogid,
+                                &baked.renderer,
+                                game.as_deref().filter(|g| g.is_dir()),
+                                exe.as_deref().filter(|e| e.is_file()),
+                            );
+                            eff.renderer = Some(r);
+                            renderer_why = Some((why, applied.clone()));
+                        }
+                        None => {
+                            renderer_why = Some((
+                                format!("{} (baked into the portable bundle)", baked.renderer),
+                                baked.renderer.clone(),
+                            ));
+                        }
+                    }
                     let default = baked.default_variant().map(|v| v.name.clone());
-                    let selected = match &eff.variant {
+                    let selected = match eff.variant.as_ref().filter(|_| applied.is_some()) {
                         Some(name) => match baked.select_variant(&name.value) {
                             Ok(_) => Some(name.value.clone()),
                             Err(e) => {
@@ -2081,6 +2101,7 @@ fn mac_app_sub(sub: crate::cli::MacAppSub) -> Result<i32, AppError> {
                     "renderer_applied": renderer_why.as_ref().map(|(_, a)| a),
                     "variants": variants,
                     "variant_error": variant_error,
+                    "portable_bundle": portable,
                     "warnings": warnings,
                 });
                 println!("{out}");
@@ -2089,10 +2110,21 @@ fn mac_app_sub(sub: crate::cli::MacAppSub) -> Result<i32, AppError> {
             for w in &warnings {
                 eprintln!("warning: {w}");
             }
+            if let Some(b) = &portable {
+                println!(
+                    "portable bundle: {} (its config was baked whole at build; the L3/L4 \
+                     lines below are what a rebuild would use, not what it runs)",
+                    b.display()
+                );
+            }
             let lines = eff.display_lines();
             println!("status: {}", eff.status_line());
-            if let Some((why, applied)) = &renderer_why {
-                println!("renderer: {why}; last applied by setup: {applied}");
+            match (&renderer_why, &portable) {
+                (Some((why, _)), Some(_)) => println!("renderer: {why}"),
+                (Some((why, applied)), None) => {
+                    println!("renderer: {why}; last applied by setup: {applied}")
+                }
+                (None, _) => {}
             }
             if lines.is_empty() {
                 println!(
@@ -2264,6 +2296,7 @@ fn mac_app_retarget(
         return Ok(cli::exit::USAGE);
     }
 
+    gogo::macapp::portable::refuse(&target, "--retarget")?;
     let gogid = gogo::macapp::setup::target_gogid(&target)?;
     let with_version = |id: &str| match &runtime_version {
         Some(v) => format!("{id}/{v}"),
@@ -2416,6 +2449,7 @@ async fn mac_app(
     runtime_path: Option<std::path::PathBuf>,
     runtime_version: Option<String>,
     renderer: gogo::macapp::RendererChoice,
+    portable: bool,
     out: Option<std::path::PathBuf>,
     yes: bool,
     json_progress: bool,
@@ -2490,7 +2524,7 @@ async fn mac_app(
         runtime_menu: menus.runtime_menu,
         lutris_base: None,
         renderer,
-        portable: false,
+        portable,
         gogo_path: invoked_path(),
     };
 
@@ -2536,13 +2570,10 @@ async fn mac_app(
                     .map(|t| format!("{} (depot)", t.display()))
             })
             .unwrap_or_default();
-        let verbs_line = match &plan.state {
-            Some(_) => format!(
-                "\n  verbs:     {}",
-                gogo::macapp::verbs::summary(plan.gogid.as_deref(), plan.auto_verbs.as_deref())
-            ),
-            None => String::new(),
-        };
+        let verbs_line = format!(
+            "\n  verbs:     {}",
+            gogo::macapp::verbs::summary(plan.gogid.as_deref(), plan.auto_verbs.as_deref())
+        );
         let renderer_line = match &plan.renderer {
             Some(sel) => sel.describe(),
             None => match plan.renderer_choice {
@@ -2556,10 +2587,17 @@ async fn mac_app(
             .as_ref()
             .map(|c| format!("\n  compat:    {}", c.status_line()))
             .unwrap_or_default();
+        let portable_line = if plan.portable {
+            "\n  portable:  runtime, renderer, verb files and game inside the bundle; its \
+             launcher creates the prefix on the Mac it runs on"
+        } else {
+            ""
+        };
         eprintln!(
-            "converting:\n  source:    {}\n  bundle:    {}{}\n  recipe:    {}\n  runtime:   {} ({}){}\n  renderer:  {}{}\n  est. size: {}",
+            "converting:\n  source:    {}\n  bundle:    {}{}{}\n  recipe:    {}\n  runtime:   {} ({}){}\n  renderer:  {}{}\n  est. size: {}",
             source_line,
             plan.bundle_path.display(),
+            portable_line,
             compat_line,
             recipe_line,
             plan.runtime.version,
@@ -2646,7 +2684,9 @@ async fn mac_app(
             serde_json::json!({
                 "bundle": plan.bundle_path,
                 "gogid": plan.gogid,
-                "state_dir": plan.gogid.as_ref().map(|id| gogo::macapp::launch::games_dir().join(id)),
+                "portable": plan.portable,
+                "state_dir": plan.gogid.as_ref().filter(|_| !plan.portable)
+                    .map(|id| gogo::macapp::launch::games_dir().join(id)),
                 "name": plan.display,
                 "slug": plan.slug,
                 "recipe": plan.recipe.as_ref().map(|r| serde_json::json!({
@@ -2678,10 +2718,18 @@ async fn mac_app(
             plan.bundle_path.display(),
             gogo::fmt::human_size(bytes),
         );
-        println!(
-            "game files, prefix and saves: {}",
-            gogo::macapp::launch::games_dir().display()
-        );
+        if plan.portable {
+            println!(
+                "portable: copy it to any Mac; on first launch it creates the prefix and \
+                 saves under ~/Library/Application Support/gogo/games/ there (no gogo needed). \
+                 It can't be retargeted: rebuild it to change its runtime or renderer"
+            );
+        } else {
+            println!(
+                "game files, prefix and saves: {}",
+                gogo::macapp::launch::games_dir().display()
+            );
+        }
     }
     Ok(cli::exit::OK)
 }

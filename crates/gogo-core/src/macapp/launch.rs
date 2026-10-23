@@ -42,9 +42,14 @@ pub struct LaunchToml {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub dll_overrides: BTreeMap<String, String>,
-    /// winetricks verbs; applied by setup, never by the launcher.
+    /// winetricks verbs; applied by setup, never by the launcher. A
+    /// portable bundle lists the verbs whose files it carries.
     #[serde(default)]
     pub verbs: Vec<String>,
+    /// `[portable]`: a self-contained bundle (#84). Absent in a v2 bundle,
+    /// so its bytes and stamp don't change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portable: Option<Portable>,
     pub gogo: GogoRef,
     /// `[[variant]]`: the game's runnable `playTasks` (#85). The top-level
     /// `exe`/`workdir`/`args` are what runs by default; setup switches to
@@ -63,6 +68,83 @@ pub struct Variant {
     pub workdir: String,
     #[serde(default)]
     pub args: Vec<String>,
+}
+
+/// `[portable]` of a `--portable` bundle (#84, docs/19 §6.1): the engine,
+/// its dylibs, the game tree and the files the verbs installed are inside
+/// the bundle, and the launcher builds the prefix from them on first launch,
+/// on whatever Mac it runs on, with no gogo there. Paths are relative to
+/// `Contents/Resources`. The rest of the TOML is the effective config as
+/// the build resolved it (flags, L4, L3, L2, L1): nothing is applied later.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Portable {
+    /// The bundled engine's wine binary (`wine/bin/wine`).
+    pub wine: String,
+    /// The dylib dir for `DYLD_FALLBACK_LIBRARY_PATH`, when the engine has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frameworks: Option<String>,
+    /// The game tree (`game/<name>`); the launcher clones it to
+    /// `games/<gogid>/game`, where the game may write.
+    pub game: String,
+    /// What the build's winetricks run added under `drive_c/windows`
+    /// (`verbs`, laid out like that dir); copied into the prefix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows: Option<String>,
+    /// Registry values the launcher writes into a new prefix: the GOG.com
+    /// key (L2), then L3 and L4's `registry`.
+    #[serde(rename = "registry", default, skip_serializing_if = "Vec::is_empty")]
+    pub registry: Vec<RegValue>,
+}
+
+/// One `[[portable.registry]]` value, a `reg add` the launcher runs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegValue {
+    pub key: String,
+    /// Absent: the key's default value (`/ve`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub data: String,
+    /// `/reg:32`, the view GOG's 32-bit installers write.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub wow32: bool,
+}
+
+impl RegValue {
+    /// The `reg add …` argv (after `wine`).
+    pub fn argv(&self) -> Vec<String> {
+        let mut argv = vec!["reg".to_string(), "add".to_string(), self.key.clone()];
+        match &self.name {
+            Some(name) => argv.extend(["/v".to_string(), name.clone()]),
+            None => argv.push("/ve".to_string()),
+        }
+        argv.extend([
+            "/t".to_string(),
+            self.kind.clone(),
+            "/d".to_string(),
+            self.data.clone(),
+            "/f".to_string(),
+        ]);
+        if self.wow32 {
+            argv.push("/reg:32".to_string());
+        }
+        argv
+    }
+}
+
+impl From<&compat::RegistryValue> for RegValue {
+    fn from(v: &compat::RegistryValue) -> RegValue {
+        RegValue {
+            key: v.key.clone(),
+            name: v.name.clone(),
+            kind: v.kind.clone().unwrap_or_else(|| "REG_SZ".to_string()),
+            data: v.data.clone(),
+            wow32: false,
+        }
+    }
 }
 
 /// `[gogo]`: where the launcher finds gogo and its state dir.
@@ -284,6 +366,44 @@ pub fn to_launch_conf(t: &LaunchToml, extra: &[(&str, String)]) -> String {
     kv("VERBS", sh_array(t.verbs.iter().cloned()));
     kv("GOGO_PATH", sh_quote(&t.gogo.path.to_string_lossy()));
     kv("GOGO_STATE", sh_quote(&t.gogo.state.to_string_lossy()));
+    // #84: what the launcher sets up a prefix from, relative to Resources.
+    // `REG` is five words per value: key, name (empty: the default value),
+    // type, data, view (`32` or empty).
+    if let Some(p) = &t.portable {
+        let wine = Path::new(&p.wine);
+        let engine = wine
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or(Path::new(""));
+        kv("PORTABLE", sh_quote("1"));
+        kv("WINE", sh_quote(&p.wine));
+        kv(
+            "WINESERVER",
+            sh_quote(&wine.with_file_name("wineserver").to_string_lossy()),
+        );
+        kv("RUNTIME_DIR", sh_quote(&engine.to_string_lossy()));
+        kv(
+            "FRAMEWORKS",
+            sh_quote(p.frameworks.as_deref().unwrap_or_default()),
+        );
+        kv("GAME_SRC", sh_quote(&p.game));
+        kv(
+            "WINDOWS_SRC",
+            sh_quote(p.windows.as_deref().unwrap_or_default()),
+        );
+        kv(
+            "REG",
+            sh_array(p.registry.iter().flat_map(|r| {
+                [
+                    r.key.clone(),
+                    r.name.clone().unwrap_or_default(),
+                    r.kind.clone(),
+                    r.data.clone(),
+                    if r.wow32 { "32".into() } else { String::new() },
+                ]
+            })),
+        );
+    }
     for (k, v) in extra {
         kv(k, sh_quote(v));
     }
@@ -469,18 +589,23 @@ pub fn write_bundle_config(resources: &Path, t: &LaunchToml) -> Result<(), MacAp
 pub const LAUNCHER: &str = r#"#!/bin/bash
 # Generated by `gogo mac-app` (design 16 §8). An immutable launcher: it only
 # reads files gogo wrote, never writes inside this bundle, and runs Wine from
-# gogo's runtime store against this game's prefix in the state dir.
+# gogo's runtime store against this game's prefix in the state dir. A
+# portable bundle (#84, PORTABLE=1) runs the Wine inside it instead, and
+# sets the prefix up itself: the Mac it runs on may have no gogo.
 set -u
 # The environment as started, for "Try next renderer"'s relaunch (#78):
 # the exports below must not stack up across relaunches.
 ENV0="$(export -p)"
 CONTENTS="$(cd "$(dirname "$0")/.." && pwd)"
 RES="$CONTENTS/Resources"
+# Only a portable bundle's launch.conf sets it, never the environment.
+PORTABLE=""
 # shellcheck source=/dev/null
 source "$RES/launch.conf"
 STAMP=""
 STATE_ROOT="$GOGO_STATE"
-[ -d "$STATE_ROOT" ] || STATE_ROOT="$HOME/Library/Application Support/gogo"
+# A portable bundle was built on another Mac: the state dir is this user's.
+[ -z "$PORTABLE" ] && [ -d "$STATE_ROOT" ] || STATE_ROOT="$HOME/Library/Application Support/gogo"
 GAME_STATE="$STATE_ROOT/games/$GOGID"
 LOG_DIR="${GOGO_LOG_DIR:-$HOME/Library/Logs/gogo/$GOGID}"
 mkdir -p "$LOG_DIR"
@@ -499,10 +624,12 @@ load_state() {
     # shellcheck source=/dev/null
     if [ -f "$GAME_STATE/launch.conf" ]; then source "$GAME_STATE/launch.conf"; fi
 }
-# Design 16 §2.1: sha256 over the bundle TOML, then the L4 file if any.
+# Design 16 §2.1: sha256 over the bundle TOML, then the L4 file if any (a
+# portable bundle baked L4 at build: its stamp is the TOML's alone).
 current_stamp() {
     local l4="$STATE_ROOT/compat/$GOGID.toml" sum
-    sum="$( { cat "$RES/gogo-launch.toml"; if [ -f "$l4" ]; then cat "$l4"; fi; } | /usr/bin/shasum -a 256)"
+    [ -z "$PORTABLE" ] || l4=""
+    sum="$( { cat "$RES/gogo-launch.toml"; if [ -n "$l4" ] && [ -f "$l4" ]; then cat "$l4"; fi; } | /usr/bin/shasum -a 256)"
     printf '%s' "${sum%% *}"
 }
 find_gogo() {
@@ -510,36 +637,137 @@ find_gogo() {
     command -v gogo 2>/dev/null || true
 }
 
+# #84: a portable bundle's prefix setup, done here because gogo may not be
+# on this Mac: `wineboot -u` with the bundled Wine for a new prefix, no
+# links out of the state dir (design 16 decision 4), a writable clone of the
+# bundled game as games/<gogid>/game (reached as C:\GOG\<name>), and,
+# whenever the prefix is new or was set up from another build of this
+# bundle, the files the build's verbs installed and the baked registry
+# values. games/<gogid>/portable records the stamp it applied.
+localize_prefix() {
+    local l
+    if [ -d "$PREFIX/drive_c/users" ]; then
+        find "$PREFIX/drive_c/users" -type l 2>/dev/null | while IFS= read -r l; do
+            case "$(readlink "$l")" in /*) rm -f "$l" && mkdir -p "$l" ;; esac
+        done
+    fi
+    for l in "$PREFIX/dosdevices"/*; do
+        [ -L "$l" ] || continue
+        [ "${l##*/}" = "c:" ] || rm -f "$l"
+    done
+}
+# A command with this prefix and the bundle's dylibs (assignments, not
+# /usr/bin/env: SIP would drop DYLD_* there).
+pwine() {
+    if [ -n "$FRAMEWORKS" ]; then
+        WINEPREFIX="$PREFIX" DYLD_FALLBACK_LIBRARY_PATH="$FRAMEWORKS${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}" "$@"
+    else
+        WINEPREFIX="$PREFIX" "$@"
+    fi
+}
+portable_init() {
+    local want="$1" mark="$GAME_STATE/portable" have="" fresh="" tree link i n=0
+    WINE="$RES/$WINE"
+    WINESERVER="$RES/$WINESERVER"
+    RUNTIME_DIR="$RES/$RUNTIME_DIR"
+    if [ -n "$FRAMEWORKS" ]; then FRAMEWORKS="$RES/$FRAMEWORKS"; fi
+    PREFIX="$GAME_STATE/prefix"
+    STAMP="$want"
+    if [ -f "$mark" ]; then have="$(sed -n 's/^stamp=//p' "$mark")"; fi
+    if [ -f "$GAME_STATE/state.toml" ]; then
+        log "portable: $GAME_STATE is also set up by gogo; sharing its prefix and game files"
+    fi
+    mkdir -p "$GAME_STATE" || return 1
+    if [ ! -d "$PREFIX" ]; then
+        log "portable: creating the prefix $PREFIX with the bundle's Wine"
+        mkdir -p "$PREFIX"
+        # No wine-mono install (a CX engine loops on it; nobody to click
+        # through it elsewhere), as gogo's own builds do.
+        if ! WINEDLLOVERRIDES="mscoree=" pwine "$WINE" wineboot -u >>"$LOG" 2>&1; then
+            log "portable: wineboot -u failed"
+            rm -rf "$PREFIX"
+            return 1
+        fi
+        pwine "$WINESERVER" -w >/dev/null 2>&1
+        fresh=1
+    fi
+    if [ ! -d "$GAME_STATE/game" ]; then
+        log "portable: copying the game files to $GAME_STATE/game"
+        rm -rf "$GAME_STATE/game.tmp"
+        if ! cp -cRp "$RES/$GAME_SRC" "$GAME_STATE/game.tmp" 2>/dev/null; then
+            rm -rf "$GAME_STATE/game.tmp"
+            cp -Rp "$RES/$GAME_SRC" "$GAME_STATE/game.tmp" || return 1
+        fi
+        chmod -R u+w "$GAME_STATE/game.tmp"
+        mv "$GAME_STATE/game.tmp" "$GAME_STATE/game" || return 1
+    fi
+    tree="${GAME_SRC##*/}"
+    link="$PREFIX/drive_c/GOG/$tree"
+    mkdir -p "$PREFIX/drive_c/GOG"
+    if [ -L "$link" ] || [ ! -e "$link" ]; then ln -sfn ../../../game "$link"; fi
+    if [ -n "$fresh" ] || [ "$have" != "$want" ]; then
+        log "portable: applying the bundle's verbs and registry (${have:-none} -> $want)"
+        if [ -n "$WINDOWS_SRC" ] && [ -d "$RES/$WINDOWS_SRC" ]; then
+            mkdir -p "$PREFIX/drive_c/windows"
+            cp -Rpf "$RES/$WINDOWS_SRC/." "$PREFIX/drive_c/windows/" || return 1
+            chmod -R u+w "$PREFIX/drive_c/windows"
+        fi
+        [ -z "${REG[*]+x}" ] || n=${#REG[@]}
+        i=0
+        while [ "$i" -lt "$n" ]; do
+            set -- reg add "${REG[$i]}"
+            if [ -n "${REG[$((i + 1))]}" ]; then set -- "$@" /v "${REG[$((i + 1))]}"; else set -- "$@" /ve; fi
+            set -- "$@" /t "${REG[$((i + 2))]}" /d "${REG[$((i + 3))]}" /f
+            if [ -n "${REG[$((i + 4))]}" ]; then set -- "$@" "/reg:${REG[$((i + 4))]}"; fi
+            pwine "$WINE" "$@" >>"$LOG" 2>&1 || log "portable: reg add ${REG[$i]} failed"
+            i=$((i + 5))
+        done
+        pwine "$WINESERVER" -w >/dev/null 2>&1
+        printf 'stamp=%s\nbundle=%s\n' "$want" "$(dirname "$CONTENTS")" >"$mark.tmp" && mv "$mark.tmp" "$mark"
+    fi
+    # Last: wineboot or a reg write may have linked out again.
+    localize_prefix
+    return 0
+}
+
 log "launch $TITLE ($GOGID) from $CONTENTS"
-load_state
 want="$(current_stamp)"
 # Why this run isn't on the config asked for (a retarget to a runtime that
 # isn't in the store, #69): for the run log's header.
 SETUP_ERR=""
-if [ ! -d "$GAME_STATE/prefix" ] || [ "$want" != "$STAMP" ]; then
-    gogo="$(find_gogo)"
-    if [ -n "$gogo" ]; then
-        log "prefix missing or config stale (${STAMP:-none} -> $want): $gogo mac-app setup $GOGID"
-        setup_out="$("$gogo" mac-app setup "$GOGID" --bundle "$(dirname "$CONTENTS")" 2>&1)"
-        setup_rc=$?
-        [ -n "$setup_out" ] && printf '%s\n' "$setup_out" >>"$LOG"
-        if [ "$setup_rc" -eq 0 ]; then
-            load_state
-        else
-            SETUP_ERR="$(printf '%s' "$setup_out" | grep -v '^warning:' | tail -n 1 | cut -c1-300)"
-            SETUP_ERR="setup failed (exit $setup_rc): ${SETUP_ERR:-no output}; running the last applied config"
-            log "$SETUP_ERR"
-        fi
-    else
-        log "prefix missing or config stale, and no gogo found (GOGO_PATH=$GOGO_PATH)"
+if [ -n "$PORTABLE" ]; then
+    if ! portable_init "$want"; then
+        log "portable: could not set up $GAME_STATE: not launching"
+        dialog "This game could not set up its Wine prefix in $GAME_STATE. The details are in $LOG"
+        exit 1
     fi
-fi
-# Design 16 Open 1: with no prefix, Wine would create a default one (home
-# symlinks, z:), so stop and say why instead.
-if [ ! -d "$GAME_STATE/prefix" ] || [ ! -f "$GAME_STATE/launch.conf" ]; then
-    log "no prefix at $GAME_STATE/prefix: not launching"
-    dialog "This game's Wine prefix is missing ($GAME_STATE/prefix) and gogo could not set it up. Install gogo and run: gogo mac-app setup $GOGID"
-    exit 1
+else
+    load_state
+    if [ ! -d "$GAME_STATE/prefix" ] || [ "$want" != "$STAMP" ]; then
+        gogo="$(find_gogo)"
+        if [ -n "$gogo" ]; then
+            log "prefix missing or config stale (${STAMP:-none} -> $want): $gogo mac-app setup $GOGID"
+            setup_out="$("$gogo" mac-app setup "$GOGID" --bundle "$(dirname "$CONTENTS")" 2>&1)"
+            setup_rc=$?
+            [ -n "$setup_out" ] && printf '%s\n' "$setup_out" >>"$LOG"
+            if [ "$setup_rc" -eq 0 ]; then
+                load_state
+            else
+                SETUP_ERR="$(printf '%s' "$setup_out" | grep -v '^warning:' | tail -n 1 | cut -c1-300)"
+                SETUP_ERR="setup failed (exit $setup_rc): ${SETUP_ERR:-no output}; running the last applied config"
+                log "$SETUP_ERR"
+            fi
+        else
+            log "prefix missing or config stale, and no gogo found (GOGO_PATH=$GOGO_PATH)"
+        fi
+    fi
+    # Design 16 Open 1: with no prefix, Wine would create a default one (home
+    # symlinks, z:), so stop and say why instead.
+    if [ ! -d "$GAME_STATE/prefix" ] || [ ! -f "$GAME_STATE/launch.conf" ]; then
+        log "no prefix at $GAME_STATE/prefix: not launching"
+        dialog "This game's Wine prefix is missing ($GAME_STATE/prefix) and gogo could not set it up. Install gogo and run: gogo mac-app setup $GOGID"
+        exit 1
+    fi
 fi
 
 export WINEPREFIX
@@ -815,7 +1043,8 @@ early_exit() {
         return 0
     fi
     gogo="$(find_gogo)"
-    if [ -n "$gogo" ]; then
+    # A portable bundle's renderer is inside it: a rebuild picks another.
+    if [ -n "$gogo" ] && [ -z "$PORTABLE" ]; then
         next="$("$gogo" mac-app next-renderer "$GOGID" --dry-run 2>>"$LOG")" || next=""
     fi
     log "early exit: code $rc after ${RUN_SECS}s on $RENDERER; next renderer: ${next:-none}"
@@ -827,6 +1056,9 @@ $(last_errors "$log")
     if [ -n "$next" ]; then
         choice="$(ask "${msg}Try next renderer switches to $next and starts the game again." \
             "Copy report" "Open log" "Try next renderer")"
+    elif [ -n "$PORTABLE" ]; then
+        choice="$(ask "${msg}This is a portable bundle: its renderer is built in. Another one needs a rebuild (gogo mac-app --portable --renderer ...)." \
+            "Copy report" "Open log" "Close")"
     else
         choice="$(ask "${msg}There are no more renderers to try for this game." \
             "Copy report" "Open log" "Close")"
@@ -851,6 +1083,13 @@ $(last_errors "$log")
 start_run_log "$@"
 # The runtime the last setup applied must still be in the store (#69: a
 # prune, or a retarget whose setup failed, can leave it missing).
+if [ ! -x "$WINE_BIN" ] && [ -n "$PORTABLE" ]; then
+    printf 'gogo: the Wine inside this bundle is missing (%s): copy the bundle again\n' "$WINE_BIN" >&2
+    log "bundled Wine $WINE_BIN is missing: not launching"
+    end_run_log 127 "runtime missing"
+    dialog "The Wine inside this bundle is missing ($WINE_BIN). The bundle is damaged: copy it again."
+    exit 1
+fi
 if [ ! -x "$WINE_BIN" ]; then
     msg="runtime $RUNTIME is not in the runtime store ($WINE_BIN is missing)"
     printf 'gogo: %s; reinstall it with `gogo runtimes install %s` or pick another with `gogo mac-app --retarget %s --runtime …`\n' \
@@ -917,6 +1156,7 @@ mod launch_tests {
                 state: "/Users/me/Library/Application Support/gogo".into(),
             },
             variants: vec![],
+            portable: None,
         }
     }
 
@@ -987,6 +1227,62 @@ mod launch_tests {
         );
         let e = sample().effective(&none, &l4).unwrap_err();
         assert!(e.contains("has no variants"), "{e}");
+    }
+
+    /// #84: `[portable]` round-trips, stays out of a v2 bundle's TOML, and
+    /// its mirror sources in bash with `REG` five words per value.
+    #[test]
+    fn portable_table_round_trips_and_mirrors() {
+        let mut t = sample();
+        t.portable = Some(Portable {
+            wine: "wine/bin/wine".into(),
+            frameworks: Some("wine-frameworks".into()),
+            game: "game/Carmageddon TDR 2000".into(),
+            windows: None,
+            registry: vec![
+                RegValue {
+                    key: r"HKLM\Software\GOG.com\Games\1".into(),
+                    name: Some("PATH".into()),
+                    kind: "REG_SZ".into(),
+                    data: r"C:\GOG\It's".into(),
+                    wow32: true,
+                },
+                RegValue {
+                    key: r"HKCU\Software\Game".into(),
+                    name: None,
+                    kind: "REG_SZ".into(),
+                    data: "x".into(),
+                    wow32: false,
+                },
+            ],
+        });
+        let raw = t.to_toml();
+        assert!(
+            raw.contains("[portable]") && raw.contains("[[portable.registry]]"),
+            "{raw}"
+        );
+        assert_eq!(LaunchToml::parse(&raw, Path::new("x")).unwrap(), t);
+        assert!(!sample().to_toml().contains("portable"));
+        assert!(!to_launch_conf(&sample(), &[]).contains("PORTABLE"));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let conf = tmp.path().join("launch.conf");
+        std::fs::write(&conf, to_launch_conf(&t, &[])).unwrap();
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(
+                r#"source "$1"; printf '%s|' "$PORTABLE" "$WINE" "$WINESERVER" "$RUNTIME_DIR" \
+                   "$FRAMEWORKS" "$GAME_SRC" "$WINDOWS_SRC" "${#REG[@]}" "${REG[3]}" "${REG[4]}" \
+                   "${REG[6]}""#,
+            )
+            .arg("x")
+            .arg(&conf)
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            r"1|wine/bin/wine|wine/bin/wineserver|wine|wine-frameworks|game/Carmageddon TDR 2000||10|C:\GOG\It's|32||"
+        );
     }
 
     #[test]
