@@ -72,7 +72,8 @@ pub enum Status {
 /// default) or by running GOG's offline installer. An entry's `lane` says
 /// which one its `status` / `notes` / `tested` were seen on; some games
 /// differ (Pharaoh asks for its CD from the depot, not once installed).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// `[lanes.<lane>]` gives one lane a status of its own ([`LaneStatus`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Lane {
     Depot,
@@ -87,6 +88,27 @@ impl Lane {
             Lane::Installer => "the offline installer",
         }
     }
+
+    /// The schema spelling: `depot`, `installer`.
+    pub fn key(self) -> &'static str {
+        match self {
+            Lane::Depot => "depot",
+            Lane::Installer => "installer",
+        }
+    }
+}
+
+/// `[lanes.<lane>]`: the status of a bundle built from that lane, for a game
+/// that differs between them. It wins over the top-level `status`, `notes`
+/// and `tested` for that lane only.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LaneStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<Status>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tested: Option<Vec<Tested>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
 }
 
 /// One registry value to set in the prefix (`reg add` shape).
@@ -183,6 +205,9 @@ pub struct CompatEntry {
     /// both (#56).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lane: Option<Lane>,
+    /// `[lanes.<lane>]`: a status of that lane's own, over the top-level one.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub lanes: BTreeMap<Lane, LaneStatus>,
     /// Provenance: `gogo-vm`, `umu-protonfixes:<file>@<sha>`, …
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
@@ -209,6 +234,7 @@ const KNOWN_KEYS: &[&str] = &[
     "tested",
     "notes",
     "lane",
+    "lanes",
     "source",
 ];
 
@@ -223,15 +249,25 @@ pub struct Parsed {
     pub warnings: Vec<String>,
 }
 
-/// Parse one entry. Unknown keys (top level, and inside `tested` /
-/// `registry` items) are reported as warnings, never errors: an older gogo
-/// must still read a newer DB.
+/// Parse one entry. Unknown keys (top level, inside `tested` / `registry`
+/// items and `[lanes.<lane>]` tables) are reported as warnings, never
+/// errors: an older gogo must still read a newer DB.
 pub fn parse(raw: &str) -> Result<Parsed, String> {
     let table: toml::Table = toml::from_str(raw).map_err(|e| e.to_string())?;
     let mut warnings = Vec::new();
     for (key, value) in &table {
         if !KNOWN_KEYS.contains(&key.as_str()) {
             warnings.push(key.clone());
+            continue;
+        }
+        if key == "lanes" {
+            for (lane, t) in value.as_table().into_iter().flatten() {
+                for k in t.as_table().into_iter().flat_map(|t| t.keys()) {
+                    if !["status", "tested", "notes"].contains(&k.as_str()) {
+                        warnings.push(format!("lanes.{lane}.{k}"));
+                    }
+                }
+            }
             continue;
         }
         let item_keys: &[&str] = match key.as_str() {
@@ -453,6 +489,10 @@ pub struct Effective {
     /// Goes with `status`: a layer that sets one sets both (#56).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lane: Option<Sourced<Lane>>,
+    /// Per lane, whole: a higher layer's `[lanes.<lane>]` replaces a lower
+    /// one's, and a layer that sets the top-level `status` drops them all.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub lanes: BTreeMap<Lane, Sourced<LaneStatus>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<Sourced<String>>,
 }
@@ -513,9 +553,19 @@ pub fn merge(layers: &[(Layer, &CompatEntry)]) -> Effective {
         take(&mut out.replace_command, &e.replace_command, layer);
         if e.status.is_some() {
             out.lane = None;
+            out.lanes.clear();
         }
         take(&mut out.status, &e.status, layer);
         take(&mut out.lane, &e.lane, layer);
+        for (lane, s) in &e.lanes {
+            out.lanes.insert(
+                *lane,
+                Sourced {
+                    value: s.clone(),
+                    layer,
+                },
+            );
+        }
         take(&mut out.tested, &e.tested, layer);
         take(&mut out.notes, &e.notes, layer);
         take(&mut out.source, &e.source, layer);
@@ -580,6 +630,19 @@ impl Effective {
         }
         line(&mut out, "notes", &self.notes);
         line(&mut out, "lane", &self.lane);
+        for (lane, s) in &self.lanes {
+            let at = s.layer.describe();
+            let lane = lane.key();
+            if let Some(v) = &s.value.status {
+                out.push(format!("lanes.{lane}.status = {v:?}  ({at})"));
+            }
+            if let Some(t) = &s.value.tested {
+                out.push(format!("lanes.{lane}.tested = {} run(s)  ({at})", t.len()));
+            }
+            if let Some(n) = &s.value.notes {
+                out.push(format!("lanes.{lane}.notes = {n:?}  ({at})"));
+            }
+        }
         line(&mut out, "source", &self.source);
         out
     }
@@ -592,10 +655,14 @@ impl Effective {
         self.status_line_for(None)
     }
 
-    /// The status as it applies to a bundle built from `lane` (#56): one
-    /// seen on the other lane doesn't count for it, so it reads "untested"
-    /// with the other lane's line in brackets. `None` = any lane.
+    /// The status as it applies to a bundle built from `lane` (#56): its
+    /// `[lanes.<lane>]` status if it has one, else the top-level one unless
+    /// that was seen on the other lane ("untested", with what the other
+    /// lane saw in brackets). `None` = any lane: the top-level status.
     pub fn status_for(&self, lane: Option<Lane>) -> Status {
+        if let Some(s) = lane.and_then(|l| self.lane_status(l)) {
+            return s.status.unwrap_or_default();
+        }
         match (self.lane.as_ref().map(|l| l.value), lane) {
             (Some(seen), Some(built)) if seen != built => Status::Unknown,
             _ => self.status.as_ref().map_or(Status::Unknown, |s| s.value),
@@ -604,47 +671,106 @@ impl Effective {
 
     /// [`status_line`](Self::status_line) for a bundle built from `lane`.
     pub fn status_line_for(&self, lane: Option<Lane>) -> String {
-        let line = self.lane_free_line();
         let seen = self.lane.as_ref().map(|l| l.value);
-        match (seen, lane) {
-            _ if self.status_for(None) == Status::Unknown => line,
-            (Some(seen), Some(built)) if seen != built => format!(
-                "untested from {} ({}: {line})",
-                built.describe(),
-                seen.describe()
-            ),
-            (Some(seen), None) => format!("{line} (from {})", seen.describe()),
-            _ => line,
+        let Some(built) = lane else {
+            // Every lane: the top-level line, then each lane's own.
+            let mut parts = Vec::new();
+            if self.status_for(None) != Status::Unknown {
+                parts.push(match seen {
+                    Some(seen) => format!("{} (from {})", self.top_line(), seen.describe()),
+                    None => self.top_line(),
+                });
+            }
+            for (l, s) in self.lanes_with_status() {
+                parts.push(format!("{}: {}", l.describe(), lane_line(s)));
+            }
+            return if parts.is_empty() {
+                "untested".into()
+            } else {
+                parts.join("; ")
+            };
+        };
+        if let Some(s) = self.lane_status(built) {
+            return lane_line(s);
+        }
+        if self.status_for(Some(built)) != Status::Unknown {
+            return self.top_line();
+        }
+        // Nothing seen on this lane: quote what the other lane saw.
+        let mut other = Vec::new();
+        if let Some(seen) = seen.filter(|s| *s != built)
+            && self.status_for(None) != Status::Unknown
+        {
+            other.push(format!("{}: {}", seen.describe(), self.top_line()));
+        }
+        for (l, s) in self.lanes_with_status().filter(|(l, _)| *l != built) {
+            other.push(format!("{}: {}", l.describe(), lane_line(s)));
+        }
+        if other.is_empty() {
+            "untested".into()
+        } else {
+            format!("untested from {} ({})", built.describe(), other.join("; "))
         }
     }
 
-    fn lane_free_line(&self) -> String {
-        let status = self.status.as_ref().map_or(Status::Unknown, |s| s.value);
-        let verb = match status {
-            Status::Unknown => return "untested".into(),
-            Status::Broken => {
-                return match &self.notes {
-                    Some(n) => format!("known broken: {}", n.value),
-                    None => "known broken".into(),
-                };
-            }
-            Status::Boots => "boot",
-            Status::Plays => "play",
-        };
-        let latest = self.tested.as_ref().and_then(|t| {
-            t.value
-                .iter()
-                .enumerate()
-                .max_by_key(|(i, t)| (t.date.map(|d| d.to_string()), *i))
-                .map(|(_, t)| t)
-        });
-        match latest {
-            Some(t) => match t.date {
-                Some(d) => format!("known to {verb} on {} ({d})", t.runtime),
-                None => format!("known to {verb} on {}", t.runtime),
-            },
-            None => format!("known to {verb}"),
+    /// `[lanes.<lane>]`, if it sets a status.
+    fn lane_status(&self, lane: Lane) -> Option<&LaneStatus> {
+        self.lanes
+            .get(&lane)
+            .map(|s| &s.value)
+            .filter(|s| s.status.is_some())
+    }
+
+    fn lanes_with_status(&self) -> impl Iterator<Item = (Lane, &LaneStatus)> {
+        self.lanes
+            .keys()
+            .filter_map(|l| self.lane_status(*l).map(|s| (*l, s)))
+    }
+
+    fn top_line(&self) -> String {
+        status_text(
+            self.status.as_ref().map_or(Status::Unknown, |s| s.value),
+            self.notes.as_ref().map(|n| n.value.as_str()),
+            self.tested.as_ref().map(|t| t.value.as_slice()),
+        )
+    }
+}
+
+fn lane_line(s: &LaneStatus) -> String {
+    status_text(
+        s.status.unwrap_or_default(),
+        s.notes.as_deref(),
+        s.tested.as_deref(),
+    )
+}
+
+/// `known to boot on <runtime> (<date>)`, `known broken: <notes>`,
+/// `untested`. The runtime is the most recent `tested` run (the last one
+/// when none carries a date).
+fn status_text(status: Status, notes: Option<&str>, tested: Option<&[Tested]>) -> String {
+    let verb = match status {
+        Status::Unknown => return "untested".into(),
+        Status::Broken => {
+            return match notes {
+                Some(n) => format!("known broken: {n}"),
+                None => "known broken".into(),
+            };
         }
+        Status::Boots => "boot",
+        Status::Plays => "play",
+    };
+    let latest = tested.and_then(|t| {
+        t.iter()
+            .enumerate()
+            .max_by_key(|(i, t)| (t.date.map(|d| d.to_string()), *i))
+            .map(|(_, t)| t)
+    });
+    match latest {
+        Some(t) => match t.date {
+            Some(d) => format!("known to {verb} on {} ({d})", t.runtime),
+            None => format!("known to {verb} on {}", t.runtime),
+        },
+        None => format!("known to {verb}"),
     }
 }
 
@@ -829,6 +955,15 @@ replace_command = { from = "GoGLauncher.exe", to = "RebelGalaxyGOG.exe" }
                     "compat/{name}: status without a tested run"
                 );
             }
+            for (lane, s) in &e.lanes {
+                if s.status.unwrap_or_default() != Status::Unknown {
+                    assert!(
+                        s.tested.as_ref().is_some_and(|t| !t.is_empty()),
+                        "compat/{name}: lanes.{} status without a tested run",
+                        lane.key()
+                    );
+                }
+            }
             entries += 1;
         }
         assert_eq!(entries, db_len(), "every entry is compiled in");
@@ -1001,6 +1136,71 @@ replace_command = { from = "GoGLauncher.exe", to = "RebelGalaxyGOG.exe" }
             "untested"
         );
         assert!(parse("lane = \"floppy\"").is_err());
+    }
+
+    #[test]
+    fn lanes_give_each_build_lane_its_own_status() {
+        let eff = |db: &str, user: &str| {
+            let db = parse(db).unwrap().entry;
+            let user = parse(user).unwrap().entry;
+            merge(&[(Layer::Db, &db), (Layer::User, &user)])
+        };
+        let pharaoh = r#"
+status = "broken"
+notes = "asks for the CD"
+lane = "depot"
+tested = [{ runtime = "winecx/24.0.7_7", date = 2026-10-23 }]
+
+[lanes.installer]
+status = "plays"
+tested = [{ runtime = "winecx/24.0.7_7", host = "m4pro/macos-27.0.1", date = 2026-10-23 }]
+"#;
+        let e = eff(pharaoh, "");
+        assert_eq!(e.status_for(Some(Lane::Depot)), Status::Broken);
+        assert_eq!(e.status_for(Some(Lane::Installer)), Status::Plays);
+        assert_eq!(
+            e.status_line_for(Some(Lane::Depot)),
+            "known broken: asks for the CD"
+        );
+        assert_eq!(
+            e.status_line_for(Some(Lane::Installer)),
+            "known to play on winecx/24.0.7_7 (2026-10-23)"
+        );
+        assert_eq!(
+            e.status_line(),
+            "known broken: asks for the CD (from the depot build); \
+             the offline installer: known to play on winecx/24.0.7_7 (2026-10-23)"
+        );
+        assert!(
+            e.display_lines()
+                .contains(&"lanes.installer.status = Plays  (L3 compat DB)".to_string())
+        );
+
+        // Only a lane entry: the other lane is untested, and says so.
+        let only = "[lanes.installer]\nstatus = \"boots\"";
+        assert_eq!(
+            eff(only, "").status_line_for(Some(Lane::Depot)),
+            "untested from the depot build (the offline installer: known to boot)"
+        );
+
+        // L4 replaces one lane whole and keeps the other.
+        let e = eff(pharaoh, "[lanes.installer]\nstatus = \"boots\"");
+        assert_eq!(e.status_for(Some(Lane::Installer)), Status::Boots);
+        assert_eq!(e.status_for(Some(Lane::Depot)), Status::Broken);
+        assert_eq!(e.lanes[&Lane::Installer].layer, Layer::User);
+
+        // An L4 top-level status drops L3's lanes with its lane.
+        let e = eff(pharaoh, "status = \"plays\"");
+        assert!(e.lanes.is_empty());
+        assert_eq!(e.status_for(Some(Lane::Depot)), Status::Plays);
+
+        assert_eq!(
+            parse("[lanes.depot]\nstatus = \"plays\"\nfoo = 1")
+                .unwrap()
+                .warnings,
+            ["lanes.depot.foo"]
+        );
+        assert!(parse("[lanes.floppy]\nstatus = \"plays\"").is_err());
     }
 
     #[test]

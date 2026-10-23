@@ -53,6 +53,25 @@ offline installer (the depot build: known broken: …)`). Without `lane` the
 status counts for both. A layer that sets `status` sets `lane` with it, so an
 L4 `status` without one drops L3's.
 
+`[lanes.<lane>]` (`depot` or `installer`) gives one lane a `status`, `notes`
+and `tested` of its own, so both lanes can have one: Pharaoh's top-level
+status is the depot build's `broken`, its `[lanes.installer]` says `plays`.
+A lane's table wins over the top level for bundles from that lane; with no
+lane given (`gogo mac-app compat`) the line shows both. Across layers each
+lane's table is replaced whole, and a layer that sets the top-level `status`
+drops the lower layers' lane tables too.
+
+```toml
+status = "broken"
+lane   = "depot"
+notes  = "asks for the CD"
+tested = [{ runtime = "winecx/24.0.7_7", host = "vm/macos-27.0", date = 2026-10-23 }]
+
+[lanes.installer]
+status = "plays"
+tested = [{ runtime = "winecx/24.0.7_7", host = "m4pro/macos-27.0.1", date = 2026-10-23 }]
+```
+
 Seed (#75), see docs/19 §5:
 
 - `source = "gogo-host"`: a human-watched host pass of a real bundle
