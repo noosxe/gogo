@@ -1549,6 +1549,20 @@ fn finish_v2(
             dir: install_dir.to_path_buf(),
         }
     })?;
+    // Every runnable `playTasks` entry, as `[[variant]]`s (#85); computed
+    // before the installer lane moves the prefix.
+    let tasks: Vec<(launch::Variant, bool)> = info::play_variants(install_dir)
+        .into_iter()
+        .filter_map(|v| {
+            let variant = launch::Variant {
+                exe: launch::unix_to_windows(&dirs.prefix, &v.exe)?,
+                workdir: launch::unix_to_windows(&dirs.prefix, &v.workdir)?,
+                name: v.name,
+                args: v.args,
+            };
+            Some((variant, v.is_primary))
+        })
+        .collect();
     let gogid = match &plan.gogid {
         Some(id) => id.clone(),
         None => info::root_game_id(install_dir).ok_or_else(|| MacAppError::EntryPointNotFound {
@@ -1584,9 +1598,19 @@ fn finish_v2(
     // recipe's) and `env` (per key over the recipe's); L4 is setup's.
     let db = compat::db_entry(&gogid).entry;
     let dll_overrides = db.dll_overrides;
-    let args = db
-        .args
-        .unwrap_or_else(|| recipe_args.split_whitespace().map(str::to_string).collect());
+    // Args: L3's, else the recipe's, else the chosen task's own (`-f`,
+    // #85) when the entry point is a `playTasks` exe (the primary first).
+    let task_args = tasks
+        .iter()
+        .filter(|(v, _)| v.exe == exe)
+        .min_by_key(|(_, primary)| !primary)
+        .map(|(v, _)| v.args.clone())
+        .unwrap_or_default();
+    let variants = tasks.into_iter().map(|(v, _)| v).collect();
+    let args = db.args.unwrap_or_else(|| {
+        let recipe: Vec<String> = recipe_args.split_whitespace().map(str::to_string).collect();
+        if recipe.is_empty() { task_args } else { recipe }
+    });
     let mut env: std::collections::BTreeMap<String, String> = recipe_env
         .split_whitespace()
         .filter_map(|kv| kv.split_once('='))
@@ -1613,6 +1637,7 @@ fn finish_v2(
             path: plan.gogo_path.clone(),
             state: crate::state::state_dir(),
         },
+        variants,
     };
     launch::write_bundle_config(&plan.bundle.resources, &toml)?;
     launch::write_launcher(&plan.bundle.macos, &plan.display)?;

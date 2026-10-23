@@ -2022,6 +2022,10 @@ fn mac_app_sub(sub: crate::cli::MacAppSub) -> Result<i32, AppError> {
             // bundle baked, traced back to its layer.
             let mut eff = eff;
             let mut renderer_why = None;
+            // The bundle's `[[variant]]`s (#85): which one runs, and an
+            // unknown `variant` name (setup refuses it).
+            let mut variants: Vec<serde_json::Value> = Vec::new();
+            let mut variant_error = None;
             let dirs = gogo::macapp::launch::GameDirs::for_game(&gogid)?;
             if let Some(state) = gogo::macapp::launch::GameState::load(&dirs.state_toml)? {
                 let toml = state.bundle.join("Contents/Resources/gogo-launch.toml");
@@ -2040,6 +2044,31 @@ fn mac_app_sub(sub: crate::cli::MacAppSub) -> Result<i32, AppError> {
                     );
                     eff.renderer = Some(r);
                     renderer_why = Some((why, state.renderer.clone()));
+                    let default = baked.default_variant().map(|v| v.name.clone());
+                    let selected = match &eff.variant {
+                        Some(name) => match baked.select_variant(&name.value) {
+                            Ok(_) => Some(name.value.clone()),
+                            Err(e) => {
+                                variant_error = Some(e);
+                                None
+                            }
+                        },
+                        None => default.clone(),
+                    };
+                    variants = baked
+                        .variants
+                        .iter()
+                        .map(|v| {
+                            serde_json::json!({
+                                "name": v.name,
+                                "exe": v.exe,
+                                "workdir": v.workdir,
+                                "args": v.args,
+                                "default": default.as_deref() == Some(v.name.as_str()),
+                                "selected": selected.as_deref() == Some(v.name.as_str()),
+                            })
+                        })
+                        .collect();
                 }
             }
             if json {
@@ -2050,6 +2079,8 @@ fn mac_app_sub(sub: crate::cli::MacAppSub) -> Result<i32, AppError> {
                     "status_line": eff.status_line(),
                     "renderer_reason": renderer_why.as_ref().map(|(w, _)| w),
                     "renderer_applied": renderer_why.as_ref().map(|(_, a)| a),
+                    "variants": variants,
+                    "variant_error": variant_error,
                     "warnings": warnings,
                 });
                 println!("{out}");
@@ -2071,6 +2102,38 @@ fn mac_app_sub(sub: crate::cli::MacAppSub) -> Result<i32, AppError> {
                 for line in lines {
                     println!("{line}");
                 }
+            }
+            if !variants.is_empty() {
+                println!(
+                    "variants (`*` runs; pick one with `variant = \"<name>\"` in the L4 file):"
+                );
+                for v in &variants {
+                    let args: Vec<&str> = v["args"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|a| a.as_str())
+                        .collect();
+                    println!(
+                        "  {} {:?}  {}{}{}",
+                        if v["selected"] == true { "*" } else { " " },
+                        v["name"].as_str().unwrap_or_default(),
+                        v["exe"].as_str().unwrap_or_default(),
+                        if args.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" {}", args.join(" "))
+                        },
+                        if v["default"] == true {
+                            "  (default)"
+                        } else {
+                            ""
+                        },
+                    );
+                }
+            }
+            if let Some(e) = &variant_error {
+                eprintln!("error: {e}");
             }
             println!(
                 "L4 override file: {}\n(L0–L2 are computed when the bundle is built; L1 verbs \

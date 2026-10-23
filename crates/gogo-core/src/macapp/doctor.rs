@@ -209,9 +209,22 @@ pub fn doctor(target: &str, opts: &DoctorOptions) -> Result<Report, MacAppError>
             format!("fix or remove {}", compat::user_path(&gogid).display()),
         ));
     }
-    let eff = baked
-        .as_ref()
-        .map(|(t, _)| t.with_override(&l4.as_ref().map(|p| p.entry.clone()).unwrap_or_default()));
+    let l4_entry = l4.as_ref().map(|p| p.entry.clone()).unwrap_or_default();
+    let eff = baked.as_ref().map(|(t, _)| {
+        // An unknown `variant` (#85) fails setup; check the rest as if unset.
+        t.effective(&compat::db_entry(&gogid).entry, &l4_entry)
+            .unwrap_or_else(|reason| {
+                f.push(Finding::fail(
+                    "variant",
+                    reason,
+                    format!(
+                        "fix `variant` in {} (`gogo mac-app compat {gogid}` lists them)",
+                        compat::user_path(&gogid).display()
+                    ),
+                ));
+                t.with_override(&l4_entry)
+            })
+    });
     let state = match state {
         Ok(s) => s,
         Err(e) => {

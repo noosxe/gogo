@@ -17,6 +17,7 @@ dll_overrides = { ddraw = "n,b" }
 env      = { WINEMSYNC = "1" }
 registry = [{ key = 'HKCU\Software\Wine\Direct3D', name = "renderer", type = "REG_SZ", data = "gl" }]
 args     = ["-windowed"]
+variant  = "Rebel Galaxy (safe mode)" # a goggame playTasks name; see below
 replace_command = { from = "GoGLauncher.exe", to = "RebelGalaxyGOG.exe" }
 status   = "boots"                    # unknown | broken | boots | plays
 notes    = "boots to the main menu"   # one line; shown as "known broken: <notes>"
@@ -30,6 +31,18 @@ auto verbs picked from the game's imports (in order, no duplicates). To take
 one away write `-<verb>` (`verbs = ["-xinput"]`), and `-*` drops all of them
 (`verbs = ["-*", "d3dx9"]` = exactly `d3dx9`). The same goes for L4 over L3.
 `gogo mac-app compat <gogid>` shows each verb with the layer that added it.
+
+`variant` (#85) picks one of the game's runnable `goggame-*.info` `playTasks`
+(TDR 2000's `-f` / `-s`, an alternate exe, a settings tool) instead of the
+default one. The build bakes them into the bundle's `gogo-launch.toml` as
+`[[variant]]`s; `gogo mac-app compat <gogid>` lists them and marks the one
+that runs. Setup resolves it, like every other L4 value: an edit restamps,
+so the next launch runs setup, which swaps in that variant's exe, working
+dir and args. An `exe` / `args` in L4 still win over a variant. An unknown
+name is an error that lists the names there are (setup fails, and the
+launcher logs it and runs the last applied config), never a silent fallback
+to the default. It is meant for L4; an L3 `variant` works the same way, below
+L4's.
 
 Seed (#75), see docs/19 §5:
 

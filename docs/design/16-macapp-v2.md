@@ -137,7 +137,37 @@ primary launcher stays the pick only when no game task exists on disk; with no
 primary at all, the first runnable task is used. GOG ships `GoGLauncher.exe` as the
 primary task for some games (Rebel Galaxy, 1435582019) and it needs MFC runtimes a
 fresh prefix lacks (`mfc110u.dll`, exit 53), while the game exe runs. `workdir`
-follows the chosen exe's directory; `args` are not taken from `playTasks` yet.
+follows the chosen exe's directory. (#85: `args` now come from that task's
+`arguments` when neither L3 nor a recipe sets them.)
+
+*#85 (launch variants):* every runnable `playTasks` entry of the base game (the
+same rules as the entry point: a `FileTask` to an `.exe` that exists; URL, `.lnk`
+and DLC tasks skipped) is baked as a `[[variant]]` with `name`, `exe`, `workdir`
+and `args` (`arguments` split on whitespace, double quotes grouping; `workingDir`
+when the task has one, else the exe's directory). Names are made unique (a
+duplicate gets ` (<exe>)` appended). The top-level `exe`/`workdir`/`args` stay the
+default; a bundle with no variants writes no `[[variant]]`, so its bytes and
+stamp don't change. `schema` stays 1: an older gogo refuses the new key as
+unknown rather than half-reading it.
+
+```toml
+[[variant]]
+name    = "Carmageddon TDR 2000 (safe mode)"
+exe     = 'C:\GOG\Carmageddon TDR 2000\TDR2000.exe'
+workdir = 'C:\GOG\Carmageddon TDR 2000'
+args    = ["-s"]
+```
+
+The choice is **resolved by setup, not by the launcher**, like every other L4
+value: an L4 `variant = "<name>"` (else L3's) replaces the baked exe, workdir and
+args, then L4's own `exe`/`args` apply on top (`LaunchToml::effective`). Editing
+it changes the L4 bytes, so the stamp goes stale and the next launch runs setup;
+the launcher still only sources `launch.conf`. An unknown name fails setup with
+the available names (`unknown variant "Turbo"; available: …`); the launcher then
+logs that and runs the last applied config (§8, #69), `doctor` reports it as a
+`variant` failure, and `gogo mac-app compat` prints it. `gogo mac-app compat
+<gogid>` lists the variants, marking the one that runs (`*`) and the default
+(`variants` in `--json`, each with `default` and `selected`).
 
 ## 2. Decision 2: gogo builds the prefix; the launcher re-runs setup only when stale
 
@@ -417,6 +447,7 @@ beats the import heuristic because it comes from the vendor.
   |---|---|---|
   | `exe` | L3 replaces the `info.rs` / recipe entry point (warns and keeps it when the file isn't there); `workdir` follows | L4 over the baked one (`with_override`) |
   | `args` | L3 replaces the recipe's | L4 |
+  | `variant` (#85) | not baked (the TOML bakes every `[[variant]]`) | L4, else L3: switches exe/workdir/args, under L4's `exe`/`args` |
   | `env`, `dll_overrides` | L3 per key over the recipe's | L4 per key; renderer overrides only fill gaps |
   | `renderer` | L3 in `renderer::select` (#70) | L4 |
   | `runtime` | L3 pins the `auto` ladder (cached → used; headless and not cached → downloaded; interactive → the menu, with a warning); flags still win | L4 (installed if missing) |
