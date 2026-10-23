@@ -1,7 +1,7 @@
 # 16 — mac-app v2: layered compatibility, launcher bundle, store-referenced runtime
 
-**Status:** contract (2026-10-23). Nothing implemented yet; the work is tracked under
-epic #50 (sub-epics #86–#93).
+**Status:** contract (2026-10-23). Partly implemented (#62, #63, #65–#68, #70; the
+notes in *italics* say how); the rest is tracked under epic #50 (sub-epics #86–#93).
 **Research:** docs/19 (strategy, §5 test matrix, §6 recommendation, §7 macOS 28 risk);
 #94 (where DXMT's `winemetal.so` can live, tested 2026-10-23).
 **Decisions:** issue #61, settled by the owner on 2026-10-23 (1, 2, 4–7) and by #94 (3).
@@ -113,6 +113,21 @@ command substitution and no code, only assignments.
   `--retarget` writes L4 (§7), so a build never creates an override file the user
   didn't ask for.
 
+*#70 (renderers):*
+
+- `renderer` is a ref `<id>[/<ver>]`: `wined3d`, `dxmt/v0.80`, `cnc-ddraw/7.1.0.0`,
+  `d3dmetal` (#71). A ref without a version means the catalog's pinned one.
+- `runtime` stays the **base** runtime. The derived runtime a DXMT game runs from
+  (§3) appears only in the state `launch.conf` (`RUNTIME_DIR`, `RUNTIME`) and in
+  `state.toml`'s `runtime`, so a later switch away from DXMT needs no rebuild.
+  (#70's text had the TOML name the derived id; this keeps decision 3's "the
+  launcher doesn't know about derivation".)
+- The renderer's own overrides (`ddraw=n,b`) are **not** baked into
+  `dll_overrides`: setup adds them for the effective renderer, and an explicit
+  `dll_overrides` entry (baked or L4) for the same DLL wins. So the §1.1 example's
+  `dll_overrides = { ddraw = "n,b" }` is what the state `launch.conf` ends up with,
+  not the bundle TOML.
+
 ## 2. Decision 2: gogo builds the prefix; the launcher re-runs setup only when stale
 
 **Settled:** gogo creates and populates the prefix **at build time**, into
@@ -180,7 +195,20 @@ take different paths into the prefix.
   `gogo-launch.toml` has no `registry` field), then the effective `verbs` through
   winetricks and gogo's shims. winetricks skips verbs that are already installed.
   Verbs run their downloads by unix path, so `z:` is restored for the winetricks
-  run and removed after it. Renderer files are left to #70/#74.
+  run and removed after it.
+- *#70:* the effective renderer is applied on every run, before registry and
+  verbs: DXMT → the derived runtime (installed from the renderer store, built
+  if missing) becomes the runtime for the rest of setup and for the launcher;
+  cnc-ddraw → `ddraw.dll` + gogo's `ddraw.ini` in the game dir and `ddraw=n,b`;
+  wined3d → nothing. Moving off cnc-ddraw removes gogo's `ddraw.dll`/`ddraw.ini`
+  again (only when the ini is gogo's). A renderer that can't be set up (no CX
+  engine for DXMT, a `path:` runtime, a failed download, D3DMetal before #71)
+  falls back to wined3d with a warning: a launch never fails on the renderer
+  alone. `RENDERER` in the state `launch.conf` is what was actually applied.
+  The runtime #72 compares for verb re-runs is the one actually run, so a switch
+  onto or off DXMT re-runs winetricks once (it skips installed verbs), and the
+  wrappers for a derived runtime are its own. One import scan feeds both L1
+  fields (renderer and verbs) per build.
 
 *Verbs, #72 (`macapp/verbs.rs`):*
 
@@ -254,6 +282,15 @@ DXMT from outside its tree.
 - The launcher doesn't know about derivation. The state `launch.conf` carries the
   resolved `RUNTIME_DIR`.
 - No prefix copies and no `n,b` overrides for engine-overlay renderers.
+- *#70:* the derived runtime is a normal entry in the runtime manifest
+  (version `<ver>+dxmt-v0.80`, `upstream_url = derived:<base>+<renderer>`), so
+  `resolve_ref` and `runtimes list` see it. Unpinned lookups (`installed(id,
+  None)`) never pick a derived version. Its `NOTICES.txt` is the base's plus the
+  renderer's. DXMT is overlaid only onto a CrossOver-source engine (the
+  `winemac.drv` hook, docs/19 §3.2); another engine falls back to wined3d.
+- *#70:* fat (`--portable`) bundles can't carry a derived runtime: DXMT there
+  falls back to wined3d with a warning. cnc-ddraw keeps design 13's build-time
+  path (game dir + a registry `ddraw=n,b`).
 - **arm64ec:** the overlay copies whatever `<arch>-*` dirs the renderer release ships
   (`aarch64-windows`/`aarch64-unix` for an ARM64EC DXMT), and the loader rule doesn't
   depend on arch. See §Open for entitlement-signed runtimes.
@@ -307,6 +344,12 @@ beats the import heuristic because it comes from the vendor.
   has to **persist** (`--renderer`, `--runtime`) is written into L4 (§7); a flag that
   doesn't is used for that run only. This keeps "flags > L4" true without a sixth
   persistent layer, and it's what decision 7 already does for `--retarget`.
+- *#70, as implemented:* the build bakes `flags > L3 > L2 > L1 > L0` into the bundle
+  (§1.1: only `--retarget` writes L4), and setup applies L4 on top. So a build-time
+  `--renderer` loses to an existing L4 `renderer`; the build warns and points at
+  `--retarget <gogid> --renderer …`, which writes L4. `gogo mac-app compat <gogid>`
+  traces the renderer back to its layer (a baked value that L0–L3 don't produce is
+  reported as a build flag).
 - gogo edits only the keys it owns in the L4 file (`toml_edit`, so the user's comments
   survive) and reports what it changed.
 - `gogo mac-app doctor` (#79) shows the winning layer for each field.
@@ -321,6 +364,18 @@ runtimes/<id>/<ver>+<renderer>-<rver>/engine      derived runtimes (§3)
 renderers/<id>/<ver>/<arch>/                      renderer payloads, <arch> = runtime arch (x86_64, arm64ec)
 games/<gogid>/{prefix,game,state.toml,launch.conf}
 ```
+
+- *#70:* renderers have their own `renderers/manifest.json` (same record as the
+  runtime manifest). `<arch>` holds the archive as downloaded (DXMT:
+  `x86_64/v0.80/{x86_64-windows,i386-windows,x86_64-unix}`; cnc-ddraw: the zip's
+  files) plus a `NOTICES.txt`. Only `x86_64` exists today. Both entries are pinned
+  by sha256 (`dxmt-v0.80-builtin.tar.gz`; cnc-ddraw `v7.1.0.0`, whose release has
+  no GitHub digest). cnc-ddraw moved here from `runtimes/cnc-ddraw/`: the old
+  cached copy is ignored (re-downloaded once, 2.6 MB) and `gogo runtimes prune
+  cnc-ddraw` removes both.
+- *#70:* `prune` checks `state.toml`'s `renderer` as well as its `runtime`; `runtime`
+  there is the runtime actually run, so a game on DXMT protects
+  `<id>/<ver>+dxmt-<rver>` (and, through the shared id dir, its base).
 
 - `state.toml` records the bundle path, the runtime and renderer refs in use, the applied
   stamp, and gogo's version. It's the store's **reference list**.
@@ -426,7 +481,8 @@ the store.
    renderer has to come from the vendor's own build. Re-check when such a runtime exists
    (#82).
 3. **D3DMetal as a derived runtime** (#71): expected to use the same mechanism. Not
-   tested yet.
+   tested yet. *#70 hook:* `renderer::d3dmetal_available()` (false until #71) gates
+   the D3DMetal rows of the L1 table, and `apply` falls back to wined3d for it.
 4. **The `C:\GOG\<name>` symlink** to `games/<gogid>/game`: Wine follows it, but games that
    canonicalize their own path (and installers run into it) should be checked in the VM
    during #67. *#67:* Treasure Adventure Game (CX24) starts from it in the VM. Wine runs
