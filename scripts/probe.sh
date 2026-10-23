@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # gogo live-API probe — READ-ONLY. Outputs to ./gogo-probe (contains tokens; delete after).
 set -uo pipefail
-cd "$(dirname "$0")"; OUT=gogo-probe; mkdir -p "$OUT"; cd "$OUT"
+cd "$(dirname "$0")" || exit 1; OUT=gogo-probe; mkdir -p "$OUT"; cd "$OUT" || exit 1
 CID=46899977096215655
 CSECRET=9d85c43b1482497dbbce61f6e4aa173a433796eeae2ca8c5f6129f2dc4de46d9
 REDIRECT='https://embed.gog.com/on_login_success?origin=client'
@@ -81,7 +81,7 @@ fi
 
 echo "== Q6: gentle rate probe (10 HEADs, 0.5s apart; watch for 429/5xx) =="
 if [ -n "$CDN" ]; then
-  for i in $(seq 1 10); do curl -s -o /dev/null -w '%{http_code} ' -r 0-0 "$CDN"; sleep 0.5; done; echo
+  for _ in $(seq 1 10); do curl -s -o /dev/null -w '%{http_code} ' -r 0-0 "$CDN"; sleep 0.5; done; echo
 fi
 
 echo "== Q8: movies in library =="
