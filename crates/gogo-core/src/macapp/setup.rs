@@ -188,6 +188,47 @@ pub fn setup(gogid: &str, bundle: Option<&Path>) -> Result<SetupOutcome, MacAppE
 /// the store (design 16 §2.2, network allowed under design 12 D8). Anything
 /// that can't be installed this way (a `path:` runtime, a consent download)
 /// fails with how to install it by hand.
+/// `gogo mac-app next-renderer <gogid>` (#78): the renderer the launcher's
+/// "Try next renderer" switches to, after the one the last setup applied
+/// ([`renderer::next_after`] over this game's L1 order). Unless `dry_run`,
+/// it is written to L4 as `renderer = "<ref>"`, so the next launch sees a
+/// stale stamp and setup applies it. `Ok(None)`: no more renderers.
+pub fn next_renderer(gogid: &str, dry_run: bool) -> Result<Option<String>, MacAppError> {
+    let dirs = GameDirs::for_game(gogid)?;
+    let state = GameState::load(&dirs.state_toml)?.ok_or_else(|| MacAppError::Compat {
+        path: dirs.state_toml.clone(),
+        reason: format!("no state for {gogid}: build the bundle first"),
+    })?;
+    let toml_path = state.bundle.join("Contents/Resources/gogo-launch.toml");
+    let raw = std::fs::read_to_string(&toml_path).map_err(|e| MacAppError::Compat {
+        path: toml_path.clone(),
+        reason: e.to_string(),
+    })?;
+    let eff = LaunchToml::parse(&raw, &toml_path)?.with_override(&compat::load_user(gogid)?.entry);
+    let game = eff
+        .tree_name()
+        .map(|n| dirs.prefix.join("drive_c/GOG").join(n))
+        .filter(|g| g.is_dir());
+    let exe = super::launch::windows_to_unix(&dirs.prefix, &eff.exe).filter(|e| e.is_file());
+    let pick = match &game {
+        Some(dir) => renderer::auto(dir, exe.as_deref()),
+        None => renderer::pick(&Err(super::pe::ScanError::NoExecutable {
+            dir: dirs.game.clone(),
+        })),
+    };
+    // What actually ran: setup's applied renderer (a failed DXMT install
+    // falls back to wined3d, and retrying DXMT would fail the same way).
+    let Some(next) = renderer::next_after(&pick, &state.renderer, renderer::d3dmetal_available())
+    else {
+        return Ok(None);
+    };
+    let next = next.default_ref();
+    if !dry_run {
+        compat::set_user_keys(gogid, &[("renderer", Some(&next))])?;
+    }
+    Ok(Some(next))
+}
+
 fn resolve_or_install(r: &str) -> Result<(Runtime, Option<String>), MacAppError> {
     let err = match resolve_ref(r) {
         Ok(rt) => return Ok((rt, None)),
