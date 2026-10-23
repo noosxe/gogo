@@ -3478,7 +3478,17 @@ fn build_flags_replace_existing_l4_values() {
         &home.join("runtimes/wine-devel/11.19"),
         &tmp.path().join("b.log"),
     );
-    macapp::store::save_manifest(&[m("wine-staging", "11.18"), m("wine-devel", "11.19")]).unwrap();
+    // The default track cached too, so the `auto` ladder never downloads.
+    fake_runtime(
+        &home.join("runtimes/winecx/24.0.7_7"),
+        &tmp.path().join("cx.log"),
+    );
+    macapp::store::save_manifest(&[
+        m("wine-staging", "11.18"),
+        m("wine-devel", "11.19"),
+        m("winecx", "24.0.7_7"),
+    ])
+    .unwrap();
 
     let gogid = "1207659014";
     let tree = depot_game(tmp.path(), gogid, "Flag Game", false, &["kernel32.dll"]);
@@ -3503,6 +3513,10 @@ fn build_flags_replace_existing_l4_values() {
         let sets = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = sets.clone();
         let mut emit = move |ev: &ProgressEvent| {
+            assert!(
+                !matches!(ev, ProgressEvent::RuntimeDownloadStarted { .. }),
+                "hermetic: {ev:?}"
+            );
             if let ProgressEvent::UserOverrideSet { key, old, new, .. } = ev {
                 sink.lock()
                     .unwrap()
