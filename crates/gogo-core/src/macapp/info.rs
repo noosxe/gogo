@@ -15,6 +15,8 @@ use super::error::MacAppError;
 pub struct GogGameInfo {
     #[serde(default)]
     pub name: Option<String>,
+    #[serde(rename = "rootGameId", default)]
+    pub root_game_id: Option<String>,
     #[serde(rename = "playTasks", default)]
     pub play_tasks: Vec<GogTask>,
 }
@@ -51,6 +53,18 @@ pub fn gog_game_ids(dir: &Path) -> Vec<String> {
     ids.sort();
     ids.dedup();
     ids
+}
+
+/// The base game's product id: `rootGameId` from the infos (shared by the
+/// base game and its DLCs), else the lowest id found. Keys the v2 state dir.
+pub fn root_game_id(dir: &Path) -> Option<String> {
+    collect_info_files(dir, 0)
+        .iter()
+        .find_map(|p| {
+            let info: GogGameInfo = serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()?;
+            info.root_game_id
+        })
+        .or_else(|| gog_game_ids(dir).into_iter().next())
 }
 
 /// The `gameName` from any `goggame-*.info` in `dir` (first hit).

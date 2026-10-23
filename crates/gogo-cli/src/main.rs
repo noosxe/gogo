@@ -179,7 +179,16 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
         Command::Config { sub } => config_cmd(sub),
         Command::MacApp { sub: Some(sub), .. } => mac_app_sub(sub),
         Command::MacApp {
+            retarget: Some(target),
+            runtime: Some(runtime),
+            runtime_path,
+            runtime_version,
+            json,
+            ..
+        } => mac_app_retarget(target, runtime, runtime_path, runtime_version, json),
+        Command::MacApp {
             sub: None,
+            retarget: _,
             installer,
             from_depot,
             name,
@@ -1963,7 +1972,144 @@ fn mac_app_sub(sub: crate::cli::MacAppSub) -> Result<i32, AppError> {
             );
             Ok(cli::exit::OK)
         }
+        crate::cli::MacAppSub::Setup {
+            gogid,
+            bundle,
+            json,
+        } => {
+            let out = gogo::macapp::launch::setup(&gogid, bundle.as_deref())?;
+            for w in &out.warnings {
+                eprintln!("warning: {w}");
+            }
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "gogid": out.state.gogid,
+                        "bundle": out.state.bundle,
+                        "runtime": out.state.runtime,
+                        "renderer": out.state.renderer,
+                        "stamp": out.state.stamp,
+                        "prefix_created": out.prefix_created,
+                    })
+                );
+            } else {
+                println!(
+                    "{gogid}: runtime {}, renderer {}{}",
+                    out.state.runtime,
+                    out.state.renderer,
+                    if out.prefix_created {
+                        ", prefix created"
+                    } else {
+                        ""
+                    }
+                );
+            }
+            Ok(cli::exit::OK)
+        }
     }
+}
+
+/// `gogo mac-app --retarget <bundle|gogid> --runtime <src>` (design 16
+/// decision 7): write the runtime choice into L4; the bundle stays sealed.
+fn mac_app_retarget(
+    target: String,
+    runtime: crate::cli::RuntimeSource,
+    runtime_path: Option<std::path::PathBuf>,
+    runtime_version: Option<String>,
+    json: bool,
+) -> Result<i32, AppError> {
+    use crate::cli::RuntimeSource as R;
+    use gogo::macapp::{compat, launch, store};
+
+    let gogid = if target.bytes().all(|b| b.is_ascii_digit()) {
+        target
+    } else {
+        let toml = std::path::Path::new(&target).join("Contents/Resources/gogo-launch.toml");
+        let raw = std::fs::read_to_string(&toml).map_err(|e| {
+            AppError::MacApp(gogo::macapp::MacAppError::Compat {
+                path: toml.clone(),
+                reason: format!("not a gogo v2 bundle: {e}"),
+            })
+        })?;
+        launch::LaunchToml::parse(&raw, &toml)?.gogid
+    };
+    let with_version = |id: &str| match &runtime_version {
+        Some(v) => format!("{id}/{v}"),
+        None => id.to_string(),
+    };
+    let new = match runtime {
+        R::Auto => None,
+        R::Staging => Some(with_version("wine-staging")),
+        R::Devel => Some(with_version("wine-devel")),
+        R::Stable => Some(with_version("wine-stable")),
+        R::Brew | R::Gptk | R::Path => {
+            let rt = gogo::macapp::runtime::resolve(&gogo::macapp::RuntimeOptions {
+                mode: gogo::macapp::RuntimeMode::from(runtime),
+                runtime_path,
+                version: runtime_version.clone(),
+            })?;
+            Some(launch::runtime_ref(&rt))
+        }
+    };
+    if let Some(r) = &new
+        && !r.starts_with("path:")
+    {
+        let (id, ver) = r
+            .split_once('/')
+            .map_or((r.as_str(), None), |(i, v)| (i, Some(v)));
+        if store::installed(id, ver).is_none() {
+            eprintln!(
+                "warning: {r} is not in the runtime store yet — `gogo runtimes install {id}` \
+                 before the next launch"
+            );
+        }
+    }
+    let changes = compat::set_user_keys(&gogid, &[("runtime", new.as_deref())])?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "gogid": gogid,
+                "file": compat::user_path(&gogid),
+                "changes": changes,
+            })
+        );
+    } else if changes.is_empty() {
+        println!(
+            "{gogid}: runtime already {}",
+            new.as_deref().unwrap_or("the bundle's")
+        );
+    } else {
+        for c in &changes {
+            println!(
+                "{gogid}: {} {} -> {} ({})",
+                c.key,
+                c.old.as_deref().unwrap_or("(bundle default)"),
+                c.new.as_deref().unwrap_or("(bundle default)"),
+                compat::user_path(&gogid).display()
+            );
+        }
+        println!("the next launch applies it");
+    }
+    Ok(cli::exit::OK)
+}
+
+/// The path gogo was invoked as, for the launcher (design 16 decision 2):
+/// a profile symlink like `~/.nix-profile/bin/gogo` survives upgrades, the
+/// resolved store path doesn't, so this never canonicalizes.
+fn invoked_path() -> Option<std::path::PathBuf> {
+    let argv0 = std::path::PathBuf::from(std::env::args_os().next()?);
+    if argv0.components().count() > 1 {
+        return Some(if argv0.is_absolute() {
+            argv0
+        } else {
+            std::env::current_dir().ok()?.join(argv0)
+        });
+    }
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join(&argv0))
+        .find(|p| p.is_file())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2059,6 +2205,8 @@ async fn mac_app(
         } else {
             gogo::macapp::DdrawChoice::Auto
         },
+        portable: false,
+        gogo_path: invoked_path(),
     };
 
     // Plan: resolve + probe the runtime, validate the installer, size things up.
@@ -2167,6 +2315,8 @@ async fn mac_app(
             "{}",
             serde_json::json!({
                 "bundle": plan.bundle_path,
+                "gogid": plan.gogid,
+                "state_dir": plan.gogid.as_ref().map(|id| gogo::macapp::launch::games_dir().join(id)),
                 "name": plan.display,
                 "slug": plan.slug,
                 "recipe": plan.recipe.as_ref().map(|r| serde_json::json!({
@@ -2190,6 +2340,10 @@ async fn mac_app(
             "created {} ({}) — drag it into /Applications and double-click to play",
             plan.bundle_path.display(),
             gogo::fmt::human_size(bytes),
+        );
+        println!(
+            "game files, prefix and saves: {}",
+            gogo::macapp::launch::games_dir().display()
         );
     }
     Ok(cli::exit::OK)
@@ -2340,6 +2494,22 @@ async fn runtimes_cmd(args: crate::cli::RuntimesArgs) -> Result<i32, AppError> {
                     }
                 }
             };
+            // Design 16 decision 6: never prune a runtime a game still uses.
+            let refs = gogo::macapp::launch::referenced_runtimes();
+            let ids: Vec<String> = ids
+                .into_iter()
+                .filter(|id| {
+                    let users: Vec<&str> = refs
+                        .iter()
+                        .filter(|(_, r)| r == id || r.starts_with(&format!("{id}/")))
+                        .map(|(g, _)| g.as_str())
+                        .collect();
+                    if !users.is_empty() {
+                        eprintln!("gogo: keeping {id}: used by game(s) {}", users.join(", "));
+                    }
+                    users.is_empty()
+                })
+                .collect();
             if ids.is_empty() {
                 println!("nothing to prune");
                 return Ok(cli::exit::OK);

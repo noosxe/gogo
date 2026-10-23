@@ -18,6 +18,9 @@
 #                       (default: record the block, strip quarantine, launch again)
 #   --keep              leave the clone stopped-but-present for inspection
 #   --wait-secs N       how long to queue for a free VM slot (default 1800)
+#   --state             v2 bundle (design 16): also copy the game's state dir,
+#                       its L4 override and its store runtime from the host's
+#                       ~/Library/Application Support/gogo (minimal; #68)
 #
 # Output (machine-readable): the LAST stdout line of `run` is the summary JSON
 # path; the summary is also printed to stdout as one JSON object before it.
@@ -241,7 +244,7 @@ JSON.stringify(out);
 '
 
 cmd_run() {
-    local app="" secs=30 out="$REPO/target/vm-test" name="" quar=1 strict=0 keep=0 waits=1800
+    local app="" secs=30 out="$REPO/target/vm-test" name="" quar=1 strict=0 keep=0 waits=1800 state=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --secs) secs="$2"; shift 2 ;;
@@ -251,6 +254,7 @@ cmd_run() {
             --strict-gatekeeper) strict=1; shift ;;
             --keep) keep=1; shift ;;
             --wait-secs) waits="$2"; shift 2 ;;
+            --state) state=1; shift ;;
             -*) die "unknown option $1" 2 ;;
             *) app="$1"; shift ;;
         esac
@@ -316,6 +320,23 @@ cmd_run() {
     # zip/dmg download would, and lands on a local volume Wine can write to.
     tar -C "$(dirname "$app")" -cf - "$base" | vssh "$ip" "mkdir -p ~/Applications && tar -C ~/Applications -xf -" \
         || { note="copy into VM failed"; exit 3; }
+    # v2 bundles hold only a launcher: seed games/<gogid>, compat/<gogid>.toml
+    # and the runtime state.toml references (store-relative paths, so they
+    # land under the guest user's own Application Support).
+    local gogid=""
+    if [ "$state" = 1 ]; then
+        local host_state="$HOME/Library/Application Support/gogo"
+        gogid="$(sed -n 's/^gogid *= *"\([0-9]*\)"/\1/p' "$app/Contents/Resources/gogo-launch.toml")"
+        [ -n "$gogid" ] && [ -d "$host_state/games/$gogid" ] || { note="--state: no games/<gogid> for $base"; exit 3; }
+        local rt; rt="$(sed -n 's/^runtime *= *"\(.*\)"/\1/p' "$host_state/games/$gogid/state.toml")"
+        local seed=("games/$gogid")
+        [ -f "$host_state/compat/$gogid.toml" ] && seed+=("compat/$gogid.toml")
+        case "$rt" in path:*|"") log "runtime '$rt' is outside the store; not copied" ;; *) seed+=("runtimes/$rt") ;; esac
+        log "seeding guest state: ${seed[*]}"
+        tar -C "$host_state" -cf - "${seed[@]}" \
+            | vssh "$ip" "mkdir -p ~/Library/Application\\ Support/gogo && tar -C ~/Library/Application\\ Support/gogo -xf -" \
+            || { note="state copy into VM failed"; exit 3; }
+    fi
     if [ "$quar" = 1 ]; then
         vssh "$ip" "xattr -w com.apple.quarantine \"0081;\$(printf %x \$(date +%s));Safari;\" \"$dst\""
     fi
@@ -378,6 +399,10 @@ cmd_run() {
     mkdir -p "$res/prefix-logs"
     vssh "$ip" "cd \"$dst/Contents/Resources\" 2>/dev/null && find . -path ./wine -prune -o -type f \\( -iname '*.log' -o -iname '*.err' -o -iname 'ddraw.ini' -o -iname 'launch.conf' \\) -size -5M -print0 | xargs -0 tar cf - 2>/dev/null" \
         | tar -C "$res/prefix-logs" -xf - 2>/dev/null || true
+    if [ -n "$gogid" ]; then
+        mkdir -p "$res/launcher-logs"
+        vssh "$ip" "tar -C ~/Library/Logs/gogo/$gogid -cf - . 2>/dev/null" | tar -C "$res/launcher-logs" -xf - 2>/dev/null || true
+    fi
     vssh "$ip" "/usr/bin/log show --style compact --start '$since' --predicate 'process == \"syspolicyd\" OR process == \"XprotectService\" OR process CONTAINS[c] \"wine\" OR eventMessage CONTAINS[c] \"$base\"'" \
         >"$res/system.log" 2>&1 || true
     vssh "$ip" "ls ~/Library/Logs/DiagnosticReports/ 2>/dev/null | grep -i -E 'wine|exe' | head -5 | while read f; do cat ~/Library/Logs/DiagnosticReports/\"\$f\"; done" \

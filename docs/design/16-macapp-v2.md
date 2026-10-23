@@ -96,6 +96,23 @@ The launcher sources the bundle copy first, then the state copy if it exists. Va
 POSIX single-quoted by the same `sh_quote` the current `bundle.rs` uses. No
 command substitution and no code, only assignments.
 
+*Implemented in #66 (`macapp/launch.rs`), with these details:*
+
+- Lists are bash arrays (`ARGS=('-f')`, `ENV=('K=V')`, `VERBS=()`);
+  `DLL_OVERRIDES` is Wine's own `k=v;k2=v2` string.
+- The state copy also carries `WINE`, `WINESERVER` and `FRAMEWORKS`, next to
+  `RUNTIME_DIR`, `PREFIX` and `STAMP`.
+- Paths under the state dir are written **relative to it**
+  (`PREFIX='games/<gogid>/prefix'`), not absolute, and the launcher resolves them
+  against the state dir it finds: `gogo.state` if that directory exists, else
+  `~/Library/Application Support/gogo`. A state dir copied to another account (the VM
+  harness, a new Mac) then works unchanged. Runtimes outside the store stay absolute.
+- A runtime outside the store (brew, a GPTK mount, `--runtime path`) is referenced as
+  `runtime = "path:<root>"`. It works, but it can't be swapped or GC-tracked.
+- Build flags are baked into the bundle TOML (this table's first row). Only
+  `--retarget` writes L4 (§7), so a build never creates an override file the user
+  didn't ask for.
+
 ## 2. Decision 2: gogo builds the prefix; the launcher re-runs setup only when stale
 
 **Settled:** gogo creates and populates the prefix **at build time**, into
@@ -134,7 +151,7 @@ built `--portable`).
 
 - `STAMP` = sha256 over the **inputs** of the effective config, in a fixed order: the
   bundle's `gogo-launch.toml` bytes, then the L4 file's bytes (or an empty marker when
-  there is none). The launcher can compute exactly this with `/usr/bin/shasum -a 256`
+  there is none; #66 uses zero bytes, so a missing and an empty L4 file stamp alike). The launcher can compute exactly this with `/usr/bin/shasum -a 256`
   and nothing else.
 - `setup` records the stamp it applied in `games/<gogid>/launch.conf` (`STAMP=`) and in
   `state.toml`.
@@ -247,6 +264,12 @@ games/<gogid>/{prefix,game,state.toml,launch.conf}
   (N-1) of each runtime id for rollback. There is **no automatic prune**.
 - `games/<gogid>/` is removed only by an explicit command (it holds saves). A rebuild of
   the same game re-clones `game/` and keeps `prefix/`.
+  *#66:* the installer lane learns the gogid only after installing, so it builds in
+  `games/.build-<slug>-<pid>/` and then moves the result into place. If an older
+  `prefix/` exists for that game, it's renamed to `prefix.old-<timestamp>`, never
+  deleted. The depot lane keys the dir by `rootGameId` from `goggame-*.info`.
+  `gogo runtimes prune` already refuses ids that a `state.toml` references. The N-1
+  rule is left for the GC work.
 - Today's flat entries (`runtimes/wine-staging/11.18/…`, design 12 §4) stay readable:
   an entry without `engine/` is treated as an engine with no `Frameworks/`.
 
@@ -277,6 +300,23 @@ In order, in bash, with no other dependencies than `/usr/bin/shasum` and `osascr
 4. Early-exit dialog and "try next renderer" are #78. They write L4 through gogo, never
    directly.
 
+*As implemented in #66:*
+
+- Setup is called as `gogo mac-app setup <gogid> --bundle <this .app>`, so a bundle
+  the user moved to `/Applications` updates `state.toml`.
+- The launcher stays Wine's parent (it doesn't `exec`), so it can tear down.
+- After Wine exits, the launcher waits on `wineserver -w`, because a launcher exe may
+  have started the real game and exited.
+- On `INT`/`TERM`/`HUP` it tears down (#42). It sends `TERM` to the game's process
+  group, then runs the store runtime's `wineserver -k` with this prefix. If this
+  prefix's wineserver is still alive after 5 s, it gets `SIGKILL`. That server is
+  found by its cwd, `/tmp/.wine-<uid>/server-<dev>-<ino>` of the prefix: Wine's
+  services `setsid()` into their own groups, so the process group can't be used to
+  find them. What's left of the game's group also gets `SIGKILL`, and the launcher
+  logs it.
+- A `SIGKILL` of the launcher itself can't be trapped.
+- Logs go to `~/Library/Logs/gogo/<gogid>/{launch,wine}.log`; #77 refines them.
+
 The launcher never writes inside the bundle, never runs winetricks, and never modifies
 the store.
 
@@ -293,10 +333,9 @@ the store.
 
 ## Open
 
-1. **Missing prefix and no gogo.** "Launches as-is" lets Wine auto-create a default
-   prefix with the home symlinks and `z:` that decision 4 removes. Proposal for #66: show
-   a dialog and stop in that one case, and launch as-is only when the prefix exists but is
-   stale.
+1. ~~**Missing prefix and no gogo.**~~ *Settled in #66 as proposed:* with no prefix and
+   no gogo, the launcher shows a dialog and stops. It launches as-is only when the prefix
+   exists but is stale.
 2. **Entitlement-signed runtimes** (docs/19 §7.2): a vendor-signed ARM64 runtime may not
    allow being cloned with files added (sealed resources). If so, an engine-overlay
    renderer has to come from the vendor's own build. Re-check when such a runtime exists

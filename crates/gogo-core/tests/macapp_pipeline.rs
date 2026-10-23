@@ -19,9 +19,24 @@ printf '%s\n' "$*" >> "{log}"
 printf 'ENV:%s\n' "$WINEPREFIX" >> "{log}"
 printf 'CWD:%s\n' "$(pwd)" >> "{log}"
 if [ "$1" = "--version" ]; then echo "wine-9.0-fake"; exit 0; fi
-if [ "$1" = "wineboot" ]; then exit 0; fi
+if [ "$1" = "wineboot" ]; then
+  mkdir -p "$WINEPREFIX/drive_c" "$WINEPREFIX/dosdevices"
+  ln -sfn ../drive_c "$WINEPREFIX/dosdevices/c:"
+  ln -sfn / "$WINEPREFIX/dosdevices/z:"
+  exit 0
+fi
 case "$1" in
   *fail_support.exe) exit 1;;
+  # A v2 launcher run (a Windows path). FAKE_WINE_HANG=<pidfile>: hang, with
+  # a TERM-ignoring child in the game's process group (#42 teardown test).
+  C:*)
+    printf 'DLLOV:%s\n' "${{WINEDLLOVERRIDES:-}}" >> "{log}"
+    if [ -n "${{FAKE_WINE_HANG:-}}" ]; then
+      (trap '' TERM; exec sleep 300) &
+      echo $! > "$FAKE_WINE_HANG"
+      sleep 300
+    fi
+    exit 0;;
 esac
 case "$1" in
   *.exe)
@@ -101,6 +116,8 @@ fn full_pipeline_with_fake_runtime() {
         runtime_version: None,
         lutris_base: None,
         ddraw: macapp::DdrawChoice::Auto,
+        portable: true,
+        gogo_path: None,
     };
 
     let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -206,6 +223,8 @@ fn execute_refuses_to_clobber_existing_bundle() {
         runtime_version: None,
         lutris_base: None,
         ddraw: macapp::DdrawChoice::Auto,
+        portable: true,
+        gogo_path: None,
     };
     let plan = macapp::plan(&opts, None, &mut |_| {}).expect("plan");
     // Pre-create the bundle root: execute must refuse.
@@ -280,6 +299,8 @@ fn winetricks_verbs_run_with_wine_shims_and_notice() {
         runtime_version: None,
         lutris_base: None,
         ddraw: macapp::DdrawChoice::Auto,
+        portable: true,
+        gogo_path: None,
     };
 
     // Sandbox the store (shims materialize under state_dir) + override the
@@ -370,6 +391,8 @@ fn recipe_wine_pin_recommends_cached_catalog_runtime() {
         runtime_version: None,
         lutris_base: None,
         ddraw: macapp::DdrawChoice::Auto,
+        portable: true,
+        gogo_path: None,
     };
 
     let mut warns: Vec<String> = Vec::new();
@@ -481,6 +504,8 @@ fn auto_recipe_discovery_and_gogid_crosscheck() {
         runtime_version: None,
         lutris_base: Some(server.uri()),
         ddraw: macapp::DdrawChoice::Auto,
+        portable: true,
+        gogo_path: None,
     };
 
     let mut tags: Vec<&'static str> = Vec::new();
@@ -587,6 +612,8 @@ fn runtime_menu_offers_cached_and_custom_path_lanes() {
         runtime_version: None,
         lutris_base: None,
         ddraw: macapp::DdrawChoice::Auto,
+        portable: true,
+        gogo_path: None,
     };
 
     let old_path = std::env::var("PATH").unwrap_or_default();
@@ -743,6 +770,8 @@ fn recipe_picker_index_and_free_text_lanes() {
         runtime_version: None,
         lutris_base: Some(server.uri()),
         ddraw: macapp::DdrawChoice::Auto,
+        portable: true,
+        gogo_path: None,
     };
     let plan = macapp::plan(&opts, Some(prompter.as_ref()), &mut |_| {}).expect("plan");
     drop(guard);
@@ -1018,6 +1047,8 @@ fn search_recipe_failure_degrades_pinned_stays_fatal() {
         runtime_version: None,
         lutris_base: Some(server.uri()),
         ddraw: macapp::DdrawChoice::Auto,
+        portable: true,
+        gogo_path: None,
     };
     let mut warns = Vec::new();
     let mut record = |ev: &ProgressEvent| {
@@ -1065,6 +1096,8 @@ fn search_recipe_failure_degrades_pinned_stays_fatal() {
         runtime_version: None,
         lutris_base: Some(server.uri()),
         ddraw: macapp::DdrawChoice::Auto,
+        portable: true,
+        gogo_path: None,
     };
     let mut sink = |_ev: &ProgressEvent| {};
     let plan = macapp::plan(&opts, None, &mut sink).unwrap();
@@ -1126,6 +1159,8 @@ fn runtime_menu_is_mandatory_with_easy_default() {
         runtime_version: None,
         lutris_base: None,
         ddraw: macapp::DdrawChoice::Auto,
+        portable: true,
+        gogo_path: None,
     };
 
     let old_path = std::env::var("PATH").unwrap_or_default();
@@ -1235,6 +1270,8 @@ fn recipe_picker_is_mandatory_for_single_candidate() {
         runtime_version: None,
         lutris_base: Some(server.uri()),
         ddraw: macapp::DdrawChoice::Auto,
+        portable: true,
+        gogo_path: None,
     };
 
     // (a) pick the candidate.
@@ -1299,6 +1336,8 @@ fn produced_launcher_execs_wine_with_contents_relative_paths() {
         runtime_version: None,
         lutris_base: None,
         ddraw: macapp::DdrawChoice::Auto,
+        portable: true,
+        gogo_path: None,
     };
     let plan = macapp::plan(&opts, None, &mut |_| {}).unwrap();
     let _bytes = macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).unwrap();
@@ -1380,6 +1419,8 @@ fn ddraw_wrapper_application_lanes() {
         runtime_version: None,
         lutris_base: None,
         ddraw,
+        portable: true,
+        gogo_path: None,
     };
 
     // SAFETY: env mutation under ENV_LOCK (established pattern above).
@@ -1488,6 +1529,8 @@ fn macapp_from_depot_executes() {
         runtime_version: None,
         lutris_base: None,
         ddraw: macapp::DdrawChoice::Off,
+        portable: true,
+        gogo_path: None,
     };
 
     let mut emit = |_ev: &ProgressEvent| {};
@@ -1572,6 +1615,8 @@ fn depot_support_decline_degrades_to_warn() {
         runtime_version: None,
         lutris_base: None,
         ddraw: macapp::DdrawChoice::Off,
+        portable: true,
+        gogo_path: None,
     };
     let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let sink = events.clone();
@@ -1636,6 +1681,8 @@ fn depot_support_overlay_merges_into_game_dir() {
         runtime_version: None,
         lutris_base: None,
         ddraw: macapp::DdrawChoice::Off,
+        portable: true,
+        gogo_path: None,
     };
     let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let sink = events.clone();
@@ -1668,4 +1715,387 @@ fn depot_support_overlay_merges_into_game_dir() {
             && warns.contains("ASSETS/options.txt"),
         "overlay merge is reported: {warns}"
     );
+}
+
+// — v2 launcher bundles (design 16, #66) —
+
+/// A depot tree for game 1207659013 plus a fake runtime; returns the plan
+/// options for a v2 (non-portable) build. GOGO_HOME must already point into
+/// `tmp`.
+fn v2_opts(tmp: &std::path::Path, gogo_path: &std::path::Path) -> MacAppOptions {
+    let runtime_dir = tmp.join("runtime");
+    fake_runtime(&runtime_dir, &tmp.join("wine.log"));
+    let tree = tmp.join("depot").join("Treasure Adventure Game");
+    std::fs::create_dir_all(tree.join("data")).unwrap();
+    std::fs::write(
+        tree.join("goggame-1207659013.info"),
+        r#"{"name":"Treasure Adventure Game","rootGameId":"1207659013","playTasks":[{"type":"FileTask","category":"game","path":"Game.exe","isPrimary":true}]}"#,
+    )
+    .unwrap();
+    std::fs::write(tree.join("Game.exe"), b"MZ").unwrap();
+    std::fs::write(tree.join("data/level1.dat"), b"x").unwrap();
+    MacAppOptions {
+        installer: None,
+        game_tree: Some(tree),
+        name: None,
+        mode: RuntimeMode::Path,
+        runtime_path: Some(runtime_dir),
+        out_dir: tmp.join("out"),
+        overwrite: true,
+        recipe: Default::default(),
+        runtime_version: None,
+        lutris_base: None,
+        ddraw: macapp::DdrawChoice::Off,
+        portable: false,
+        gogo_path: Some(gogo_path.to_path_buf()),
+    }
+}
+
+/// Every path + file content under `dir` (symlinks by target), sorted: a
+/// stand-in for `codesign --verify` on hosts without codesign.
+fn tree_digest(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    fn walk(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<(String, Vec<u8>)>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            let rel = p.strip_prefix(root).unwrap().display().to_string();
+            let ty = e.file_type().unwrap();
+            if ty.is_symlink() {
+                out.push((
+                    rel,
+                    std::fs::read_link(&p)
+                        .unwrap()
+                        .display()
+                        .to_string()
+                        .into_bytes(),
+                ));
+            } else if ty.is_dir() {
+                out.push((rel + "/", Vec::new()));
+                walk(root, &p, out);
+            } else {
+                out.push((rel, std::fs::read(&p).unwrap()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, dir, &mut out);
+    out.sort();
+    out
+}
+
+/// Run the generated launcher with a clean env (no gogo on PATH).
+fn run_launcher(
+    app: &std::path::Path,
+    home: &std::path::Path,
+    extra_env: &[(&str, &std::path::Path)],
+) -> std::process::Output {
+    let launcher = app.join("Contents/MacOS/Treasure Adventure Game");
+    let mut cmd = std::process::Command::new(&launcher);
+    cmd.env_clear()
+        .env("HOME", home)
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .env("GOGO_LAUNCHER_NO_DIALOG", "1");
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    cmd.output().unwrap()
+}
+
+#[test]
+fn v2_bundle_is_launcher_only_and_never_written() {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    // SAFETY: env mutation under ENV_LOCK.
+    unsafe { std::env::set_var("GOGO_HOME", &home) };
+    let opts = v2_opts(tmp.path(), &tmp.path().join("no-such-gogo"));
+    let plan = macapp::plan(&opts, None, &mut |_| {}).expect("plan");
+    assert_eq!(plan.gogid.as_deref(), Some("1207659013"));
+    macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).expect("execute");
+
+    // The bundle holds the launcher, the TOML + mirror, the plist and the
+    // notice: nothing else (design 16 §0).
+    let app = tmp.path().join("out/Treasure Adventure Game.app");
+    let names: Vec<String> = tree_digest(&app).into_iter().map(|(n, _)| n).collect();
+    assert_eq!(
+        names,
+        [
+            "Contents/",
+            "Contents/Info.plist",
+            "Contents/MacOS/",
+            "Contents/MacOS/Treasure Adventure Game",
+            "Contents/Resources/",
+            "Contents/Resources/LICENSE-wine.txt",
+            "Contents/Resources/gogo-launch.toml",
+            "Contents/Resources/launch.conf",
+        ]
+    );
+    let toml = std::fs::read_to_string(app.join("Contents/Resources/gogo-launch.toml")).unwrap();
+    let t = macapp::launch::LaunchToml::parse(&toml, std::path::Path::new("t")).unwrap();
+    assert_eq!(t.gogid, "1207659013");
+    assert_eq!(t.exe, r"C:\GOG\Treasure Adventure Game\Game.exe");
+    assert_eq!(t.workdir, r"C:\GOG\Treasure Adventure Game");
+    assert!(t.runtime.starts_with("path:"), "{}", t.runtime);
+    assert_eq!(t.gogo.state, home);
+
+    // State dir: prefix, game clone, state.toml, effective launch.conf.
+    let g = home.join("games/1207659013");
+    assert!(g.join("game/data/level1.dat").is_file());
+    let link = g.join("prefix/drive_c/GOG/Treasure Adventure Game");
+    assert_eq!(
+        std::fs::read_link(&link).unwrap(),
+        std::path::Path::new("../../../game")
+    );
+    assert!(link.join("Game.exe").is_file());
+    assert!(g.join("prefix/dosdevices/c:").symlink_metadata().is_ok());
+    assert!(
+        g.join("prefix/dosdevices/z:").symlink_metadata().is_err(),
+        "z: dropped"
+    );
+    let state = std::fs::read_to_string(g.join("state.toml")).unwrap();
+    assert!(state.contains(&*app.to_string_lossy()), "{state}");
+    let conf = std::fs::read_to_string(g.join("launch.conf")).unwrap();
+    assert!(conf.contains("PREFIX='games/1207659013/prefix'"), "{conf}");
+    let stamp = macapp::launch::stamp(toml.as_bytes(), None);
+    assert!(conf.contains(&format!("STAMP='{stamp}'")), "{conf}");
+
+    // Run the launcher against the fake wine: Wine gets the Windows path,
+    // starts in the game dir, uses the state prefix; the bundle is unchanged.
+    let before = tree_digest(&app);
+    let wine_log = tmp.path().join("wine.log");
+    std::fs::write(&wine_log, "").unwrap();
+    let out = run_launcher(&app, &home, &[]);
+    assert!(
+        out.status.success(),
+        "launcher: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let logged = std::fs::read_to_string(&wine_log).unwrap();
+    assert!(
+        logged.contains(r"C:\GOG\Treasure Adventure Game\Game.exe"),
+        "{logged}"
+    );
+    assert!(
+        logged.contains(&format!("ENV:{}", g.join("prefix").display())),
+        "{logged}"
+    );
+    assert!(
+        logged.contains("CWD:") && logged.contains("drive_c/GOG/Treasure Adventure Game"),
+        "{logged}"
+    );
+    assert_eq!(
+        before,
+        tree_digest(&app),
+        "nothing under the bundle changed"
+    );
+    let launch_log =
+        std::fs::read_to_string(home.join("Library/Logs/gogo/1207659013/launch.log")).unwrap();
+    assert!(
+        !launch_log.contains("mac-app setup"),
+        "stamp fresh, no setup: {launch_log}"
+    );
+    unsafe { std::env::remove_var("GOGO_HOME") };
+    drop(guard);
+}
+
+#[test]
+fn v2_launcher_runs_setup_once_after_l4_edit() {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    unsafe { std::env::set_var("GOGO_HOME", &home) };
+    // A fake gogo: logs its argv and does what setup does to the stamp.
+    let gogo = tmp.path().join("fake-gogo");
+    let calls = tmp.path().join("gogo-calls.log");
+    std::fs::write(
+        &gogo,
+        format!(
+            r#"#!/bin/bash
+echo "$*" >> "{calls}"
+g="{home}/games/$3"
+new="$(cat "$5/Contents/Resources/gogo-launch.toml" "{home}/compat/$3.toml" 2>/dev/null | /usr/bin/shasum -a 256)"
+grep -v '^STAMP=' "$g/launch.conf" > "$g/launch.conf.new"
+echo "STAMP='${{new%% *}}'" >> "$g/launch.conf.new"
+mv "$g/launch.conf.new" "$g/launch.conf"
+"#,
+            calls = calls.display(),
+            home = home.display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&gogo, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let opts = v2_opts(tmp.path(), &gogo);
+    let plan = macapp::plan(&opts, None, &mut |_| {}).unwrap();
+    macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).unwrap();
+    let app = tmp.path().join("out/Treasure Adventure Game.app");
+
+    // Fresh: no setup.
+    assert!(run_launcher(&app, &home, &[]).status.success());
+    assert!(!calls.exists());
+    // Edit L4 (what `--retarget` does): stale, setup runs exactly once.
+    macapp::compat::set_user_keys("1207659013", &[("renderer", Some("dxmt"))]).unwrap();
+    assert!(run_launcher(&app, &home, &[]).status.success());
+    assert!(run_launcher(&app, &home, &[]).status.success());
+    let logged = std::fs::read_to_string(&calls).unwrap();
+    assert_eq!(logged.lines().count(), 1, "{logged}");
+    assert_eq!(
+        logged.trim(),
+        format!("mac-app setup 1207659013 --bundle {}", app.display())
+    );
+    unsafe { std::env::remove_var("GOGO_HOME") };
+    drop(guard);
+}
+
+#[test]
+fn v2_real_setup_applies_l4_and_restamps() {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    unsafe { std::env::set_var("GOGO_HOME", &home) };
+    let opts = v2_opts(tmp.path(), &tmp.path().join("no-such-gogo"));
+    let plan = macapp::plan(&opts, None, &mut |_| {}).unwrap();
+    macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).unwrap();
+    let g = home.join("games/1207659013");
+
+    std::fs::create_dir_all(home.join("compat")).unwrap();
+    std::fs::write(
+        home.join("compat/1207659013.toml"),
+        "# mine\ndll_overrides = { d3d9 = \"n,b\" }\nargs = [\"-windowed\"]\n",
+    )
+    .unwrap();
+    // A deleted prefix is recreated (wineboot through the bundle's runtime),
+    // re-linked, and z:-free.
+    std::fs::remove_dir_all(g.join("prefix")).unwrap();
+    let out = macapp::launch::setup("1207659013", None).unwrap();
+    assert!(out.prefix_created);
+    assert!(
+        g.join("prefix/drive_c/GOG/Treasure Adventure Game/Game.exe")
+            .is_file()
+    );
+    assert!(g.join("prefix/dosdevices/z:").symlink_metadata().is_err());
+    let conf = std::fs::read_to_string(g.join("launch.conf")).unwrap();
+    assert!(conf.contains("ARGS=('-windowed')"), "{conf}");
+    assert!(conf.contains("DLL_OVERRIDES='d3d9=n,b'"), "{conf}");
+
+    // The launcher sees a fresh stamp and exports the override.
+    let wine_log = tmp.path().join("wine.log");
+    std::fs::write(&wine_log, "").unwrap();
+    let app = tmp.path().join("out/Treasure Adventure Game.app");
+    assert!(run_launcher(&app, &home, &[]).status.success());
+    let logged = std::fs::read_to_string(&wine_log).unwrap();
+    assert!(logged.contains("DLLOV:d3d9=n,b"), "{logged}");
+    assert!(logged.contains("Game.exe -windowed"), "{logged}");
+    unsafe { std::env::remove_var("GOGO_HOME") };
+    drop(guard);
+}
+
+#[test]
+fn v2_missing_prefix_without_gogo_refuses_to_launch() {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    unsafe { std::env::set_var("GOGO_HOME", &home) };
+    let opts = v2_opts(tmp.path(), &tmp.path().join("no-such-gogo"));
+    let plan = macapp::plan(&opts, None, &mut |_| {}).unwrap();
+    macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).unwrap();
+    std::fs::remove_dir_all(home.join("games/1207659013/prefix")).unwrap();
+    let wine_log = tmp.path().join("wine.log");
+    std::fs::write(&wine_log, "").unwrap();
+    let app = tmp.path().join("out/Treasure Adventure Game.app");
+    let out = run_launcher(&app, &home, &[]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        !std::fs::read_to_string(&wine_log).unwrap().contains("C:"),
+        "wine never ran"
+    );
+    let launch_log =
+        std::fs::read_to_string(home.join("Library/Logs/gogo/1207659013/launch.log")).unwrap();
+    assert!(launch_log.contains("no gogo found"), "{launch_log}");
+    assert!(launch_log.contains("not launching"), "{launch_log}");
+    unsafe { std::env::remove_var("GOGO_HOME") };
+    drop(guard);
+}
+
+/// #42: SIGTERM to the launcher runs `wineserver -k` against this prefix and
+/// SIGKILLs what's left of the game's process group; an unrelated process
+/// stays alive.
+#[test]
+fn v2_launcher_teardown_reaps_its_own_prefix_only() {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    unsafe { std::env::set_var("GOGO_HOME", &home) };
+    let opts = v2_opts(tmp.path(), &tmp.path().join("no-such-gogo"));
+    let plan = macapp::plan(&opts, None, &mut |_| {}).unwrap();
+    macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).unwrap();
+    let app = tmp.path().join("out/Treasure Adventure Game.app");
+    let wine_log = tmp.path().join("wine.log");
+    std::fs::write(&wine_log, "").unwrap();
+
+    let mut unrelated = std::process::Command::new("sleep")
+        .arg("300")
+        .spawn()
+        .unwrap();
+    let pidfile = tmp.path().join("daemon.pid");
+    let mut launcher =
+        std::process::Command::new(app.join("Contents/MacOS/Treasure Adventure Game"))
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .env("FAKE_WINE_HANG", &pidfile)
+            .env("GOGO_LAUNCHER_NO_DIALOG", "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !pidfile.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let daemon: i32 = std::fs::read_to_string(&pidfile)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let alive = |pid: i32| {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    };
+    assert!(alive(daemon));
+    std::process::Command::new("kill")
+        .args(["-TERM", &launcher.id().to_string()])
+        .status()
+        .unwrap();
+    let status = launcher.wait().unwrap();
+    assert_eq!(status.code(), Some(143));
+    // The TERM-ignoring child is gone (zombie at most, reaped by init).
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let ps = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &daemon.to_string()])
+        .output()
+        .unwrap();
+    let stat = String::from_utf8_lossy(&ps.stdout);
+    assert!(
+        stat.trim().is_empty() || stat.contains('Z'),
+        "daemon {daemon} still {stat}"
+    );
+    assert!(
+        unrelated.try_wait().unwrap().is_none(),
+        "unrelated process untouched"
+    );
+    unrelated.kill().ok();
+    let logged = std::fs::read_to_string(&wine_log).unwrap();
+    assert!(logged.contains("wineserver -k"), "{logged}");
+    let launch_log =
+        std::fs::read_to_string(home.join("Library/Logs/gogo/1207659013/launch.log")).unwrap();
+    assert!(launch_log.contains("got SIGTERM"), "{launch_log}");
+    assert!(launch_log.contains("reaped (SIGKILL)"), "{launch_log}");
+    unsafe { std::env::remove_var("GOGO_HOME") };
+    drop(guard);
 }
