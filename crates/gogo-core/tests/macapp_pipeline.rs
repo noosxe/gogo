@@ -42,6 +42,12 @@ case "$1" in
       echo $! > "$FAKE_WINE_HANG"
       sleep 300
     fi
+    # FAKE_WINE_EXIT=<n>: chatter on both streams, then exit n (#77 run log).
+    if [ -n "${{FAKE_WINE_EXIT:-}}" ]; then
+      echo "fake-wine stdout line"
+      echo "fake-wine stderr line" >&2
+      exit "$FAKE_WINE_EXIT"
+    fi
     exit 0;;
 esac
 case "$1" in
@@ -2323,6 +2329,81 @@ fn v2_launcher_teardown_reaps_its_own_prefix_only() {
         std::fs::read_to_string(home.join("Library/Logs/gogo/1207659013/launch.log")).unwrap();
     assert!(launch_log.contains("got SIGTERM"), "{launch_log}");
     assert!(launch_log.contains("reaped (SIGKILL)"), "{launch_log}");
+    let run_log =
+        std::fs::read_to_string(home.join("Library/Logs/gogo/1207659013/latest.log")).unwrap();
+    assert!(run_log.contains("# exit: 143 (SIGTERM)\n"), "{run_log}");
+    unsafe { std::env::remove_var("GOGO_HOME") };
+    drop(guard);
+}
+
+/// #77: each launcher run writes `<ts>-<pid>.log` under the game's log dir
+/// (header, Wine's output, exit code and duration), `latest.log` points at
+/// it, and only the newest 10 run logs are kept.
+#[test]
+fn v2_launcher_writes_a_rotated_run_log() {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    unsafe { std::env::set_var("GOGO_HOME", &home) };
+    let opts = v2_opts(tmp.path(), &tmp.path().join("no-such-gogo"));
+    let plan = macapp::plan(&opts, None, &mut |_| {}).unwrap();
+    macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).unwrap();
+    let app = tmp.path().join("out/Treasure Adventure Game.app");
+    let logs = home.join("Library/Logs/gogo/1207659013");
+    // Twelve older runs: after this one, the oldest three are gone.
+    std::fs::create_dir_all(&logs).unwrap();
+    for i in 0..12 {
+        std::fs::write(logs.join(format!("20000101-0000{i:02}-1.log")), "old").unwrap();
+    }
+
+    let out = run_launcher(
+        &app,
+        &home,
+        &[("FAKE_WINE_EXIT", std::path::Path::new("3"))],
+    );
+    assert_eq!(out.status.code(), Some(3));
+    // Teed: the launcher's own streams still carry Wine's output.
+    assert!(String::from_utf8_lossy(&out.stdout).contains("fake-wine stdout line"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("fake-wine stderr line"));
+
+    let mut runs: Vec<String> = std::fs::read_dir(&logs)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.as_bytes()[0].is_ascii_digit() && n.ends_with(".log"))
+        .collect();
+    runs.sort();
+    assert_eq!(runs.len(), 10, "{runs:?}");
+    assert_eq!(runs[0], "20000101-000003-1.log", "{runs:?}");
+    let newest = runs.last().unwrap();
+    assert_eq!(
+        std::fs::read_link(logs.join("latest.log")).unwrap(),
+        std::path::Path::new(newest)
+    );
+    let log = std::fs::read_to_string(logs.join(newest)).unwrap();
+    for want in [
+        "# gogo run log: Treasure Adventure Game (1207659013)\n",
+        "# runtime: path:",
+        "# renderer: ",
+        "# verbs: ",
+        "# stamp: ",
+        "# macos: ",
+        "# exe: C:\\GOG\\Treasure Adventure Game\\Game.exe\n",
+        "fake-wine stdout line\n",
+        "fake-wine stderr line\n",
+        "# exit: 3\n",
+        "# duration: ",
+    ] {
+        assert!(log.contains(want), "{want:?} in:\n{log}");
+    }
+    let stamp = macapp::launch::stamp(
+        &std::fs::read(app.join("Contents/Resources/gogo-launch.toml")).unwrap(),
+        None,
+    );
+    assert!(log.contains(&format!("# stamp: {stamp}\n")), "{log}");
+    // The footer comes after everything Wine wrote.
+    assert!(log.find("# exit: 3").unwrap() > log.find("fake-wine stderr line").unwrap());
+    let launch_log = std::fs::read_to_string(logs.join("launch.log")).unwrap();
+    assert!(launch_log.contains(newest.as_str()), "{launch_log}");
     unsafe { std::env::remove_var("GOGO_HOME") };
     drop(guard);
 }

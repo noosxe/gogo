@@ -464,10 +464,69 @@ In order, in bash, with no other dependencies than `/usr/bin/shasum` and `osascr
   find them. What's left of the game's group also gets `SIGKILL`, and the launcher
   logs it.
 - A `SIGKILL` of the launcher itself can't be trapped.
-- Logs go to `~/Library/Logs/gogo/<gogid>/{launch,wine}.log`; #77 refines them.
+- Logs go to `~/Library/Logs/gogo/<gogid>/`: `launch.log` and one run log per launch
+  (§8.1, #77).
 
 The launcher never writes inside the bundle, never runs winetricks, and never modifies
 the store.
+
+### 8.1 Logs (#77)
+
+`~/Library/Logs/gogo/<gogid>/` (`GOGO_LOG_DIR` overrides) holds two kinds of file:
+
+- `launch.log`: the launcher's own journal, appended across runs. It records the
+  launch, stamp checks, setup and its output, the `exec` line (which names the run
+  log), Wine's exit, teardown reaps, and dialogs. It also covers launches that never
+  reach Wine (no prefix, missing workdir).
+- `<YYYYmmdd-HHMMSS>-<pid>.log`: one per Wine run, with `latest.log` a symlink to the
+  newest. Only the newest 10 are kept: the launcher prunes by name (oldest first)
+  each time it opens a new one.
+
+A run log is a `# key: value` header, then Wine's stdout and stderr, then a footer:
+
+```text
+# gogo run log: Treasure Adventure Game (1207659013)
+# started: 2026-10-23 14:25:01 +0200
+# runtime: winecx/24.0.7_7
+# runtime_dir: runtimes/winecx/24.0.7_7+dxmt-v0.80/…
+# renderer: dxmt
+# verbs: vcrun2019
+# stamp: 3f0c…
+# macos: 15.1 (24B83) arm64
+# exe: C:\GOG\Treasure Adventure Game\Game.exe
+# args: -windowed
+# wine: /Users/me/Library/Application Support/gogo/runtimes/…/bin/wine
+# prefix: /Users/me/Library/Application Support/gogo/games/1207659013/prefix
+# ---
+…Wine output…
+# ---
+# exit: 3
+# duration: 2s
+# ended: 2026-10-23 14:25:03 +0200
+```
+
+The header shows the effective config, i.e. the state `launch.conf` after setup, so it
+includes L4. `runtime` is the reference and `runtime_dir` the engine Wine runs from (a
+derived runtime for DXMT, §3). `exit` is Wine's exit code, or `<code> (SIG<name>)` when a signal
+ended the run (`130`/`143`/`129`). `duration` runs from Wine's start until
+`wineserver -w` returns. #78's early-exit dialog reads `exit` and `duration`. A
+launcher killed with `SIGKILL` leaves no footer.
+
+*Why per run and not one appended `wine.log`.* #66 teed Wine's output into an
+unbounded `wine.log` and kept launcher events in `launch.log`. #77 replaces
+`wine.log` with run logs rather than adding a second copy of the same output, and
+keeps `launch.log` for what happens outside a Wine run. "The log for this run" is
+then one self-describing file that a user can attach to a report, and that #78 and
+`vm-test.sh` (`files.run_log`) can find without parsing timestamps.
+
+*Tee mechanics.* Wine's stdout and stderr each pass through a FIFO into a `tee -a`
+of the run log, so a terminal launch still shows both streams separately. The tees
+ignore `INT`/`TERM`/`HUP`, so a Ctrl-C doesn't cut the tail of the log. Process
+substitution won't do here: bash 3.2 can't `wait` for it, and the footer has to come
+after everything Wine wrote. Before writing the footer, the launcher closes its ends
+and waits up to 2 s for the tees to see EOF; an orphan still holding Wine's output
+open can't stall the exit. If `mkfifo` fails, output is appended to the run log
+directly, without the tee.
 
 ## 9. Testing (08 conventions)
 
@@ -476,7 +535,9 @@ the store.
   derived-runtime overlay against a fake engine tree.
 - Integration (`macapp_pipeline.rs`): build with a fake runtime → assert nothing under
   `Foo.app` changes after signing; edit the L4 file → the launcher (run against a fake
-  `gogo`) calls setup exactly once.
+  `gogo`) calls setup exactly once. A fake Wine that prints on both streams and exits 3
+  leaves a run log with the header, its output and `# exit: 3`, and only 10 run logs
+  remain (#77).
 - VM (#68): `scripts/vm-test.sh` gains a store and state-dir seeding step, since a v2
   bundle alone isn't enough to launch.
 

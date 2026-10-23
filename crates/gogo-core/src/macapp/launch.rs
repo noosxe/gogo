@@ -551,15 +551,99 @@ teardown() {
     fi
     log "teardown done"
 }
-on_signal() { log "got SIG$1"; teardown; exit "$2"; }
+on_signal() { log "got SIG$1"; teardown; end_run_log "$2" "SIG$1"; exit "$2"; }
 trap 'on_signal INT 130' INT
 trap 'on_signal TERM 143' TERM
 trap 'on_signal HUP 129' HUP
 
-exec > >(tee -a "$LOG_DIR/wine.log") 2> >(tee -a "$LOG_DIR/wine.log" >&2)
-log "exec $WINE_BIN $EXE (runtime $RUNTIME, prefix $WINEPREFIX)"
+# #77: one log per run, <LOG_DIR>/<YYYYmmdd-HHMMSS>-<pid>.log (the last
+# KEEP_RUNS kept, latest.log -> the newest): a header naming the effective
+# config, Wine's stdout and stderr (teed, so a terminal still sees them),
+# then exit code and duration. launch.log stays the launcher's own journal.
+KEEP_RUNS=10
+RUN_LOG=""
+RUN_T0=0
+TEE_PIDS=""
+macos_version() {
+    if [ -x /usr/bin/sw_vers ]; then
+        printf '%s (%s) %s' "$(/usr/bin/sw_vers -productVersion)" "$(/usr/bin/sw_vers -buildVersion)" "$(uname -m)"
+    else
+        uname -srm
+    fi
+}
+prune_runs() {
+    local runs=("$LOG_DIR"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-*.log) i=0
+    [ -e "${runs[0]}" ] || return 0
+    while [ $((${#runs[@]} - i)) -gt "$KEEP_RUNS" ]; do
+        rm -f "${runs[$i]}"
+        i=$((i + 1))
+    done
+}
+start_run_log() {
+    RUN_LOG="$LOG_DIR/$(date '+%Y%m%d-%H%M%S')-$$.log"
+    RUN_T0=$SECONDS
+    {
+        printf '# gogo run log: %s (%s)\n' "$TITLE" "$GOGID"
+        printf '# started: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
+        printf '# runtime: %s\n' "$RUNTIME"
+        printf '# runtime_dir: %s\n' "${RUNTIME_DIR:-}"
+        printf '# renderer: %s\n' "$RENDERER"
+        printf '# verbs: %s\n' "${VERBS[*]+${VERBS[*]}}"
+        printf '# stamp: %s\n' "$STAMP"
+        printf '# macos: %s\n' "$(macos_version)"
+        printf '# exe: %s\n' "$EXE"
+        printf '# args: %s\n' "${ARGS[*]+${ARGS[*]}}${*:+ $*}"
+        printf '# wine: %s\n' "$WINE_BIN"
+        printf '# prefix: %s\n' "$WINEPREFIX"
+        printf '# ---\n'
+    } >"$RUN_LOG"
+    ln -sfn "$(basename "$RUN_LOG")" "$LOG_DIR/latest.log"
+    prune_runs
+    # tee through FIFOs (not process substitution) so the launcher can wait
+    # for them to drain before it writes the footer. They ignore the signals
+    # the launcher traps, so they outlive a Ctrl-C long enough to flush.
+    local fifo="$LOG_DIR/.run-$$"
+    rm -f "$fifo.out" "$fifo.err"
+    exec 3>&1 4>&2
+    if mkfifo "$fifo.out" "$fifo.err" 2>/dev/null; then
+        (trap '' INT TERM HUP; exec tee -a "$RUN_LOG") <"$fifo.out" &
+        TEE_PIDS="$!"
+        (trap '' INT TERM HUP; exec tee -a "$RUN_LOG" >&2) <"$fifo.err" &
+        TEE_PIDS="$TEE_PIDS $!"
+        exec >"$fifo.out" 2>"$fifo.err"
+        rm -f "$fifo.out" "$fifo.err"
+    else
+        exec >>"$RUN_LOG" 2>&1
+    fi
+}
+# Footer: exit code (and the signal, if one ended the run) and duration.
+end_run_log() {
+    [ -n "$RUN_LOG" ] || return 0
+    local run="$RUN_LOG"
+    RUN_LOG=""
+    exec >&3 2>&4
+    if [ -n "$TEE_PIDS" ]; then
+        # A straggler still holding Wine's output open must not hold the
+        # launcher: give the tees 2s to see EOF.
+        # shellcheck disable=SC2086
+        ( sleep 2; kill $TEE_PIDS ) >/dev/null 2>&1 &
+        local dog=$!
+        # shellcheck disable=SC2086
+        wait $TEE_PIDS 2>/dev/null
+        kill "$dog" 2>/dev/null
+    fi
+    {
+        printf '# ---\n'
+        printf '# exit: %s%s\n' "$1" "${2:+ ($2)}"
+        printf '# duration: %ss\n' "$((SECONDS - RUN_T0))"
+        printf '# ended: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
+    } >>"$run"
+}
+
+start_run_log "$@"
+log "exec $WINE_BIN $EXE (runtime $RUNTIME, prefix $WINEPREFIX, log $RUN_LOG)"
 set -m
-"$WINE_BIN" "$EXE" ${ARGS[@]+"${ARGS[@]}"} "$@" &
+"$WINE_BIN" "$EXE" ${ARGS[@]+"${ARGS[@]}"} "$@" 3>&- 4>&- &
 WPID=$!
 set +m
 wait "$WPID"
@@ -570,6 +654,7 @@ log "wine exited $rc; waiting for the prefix's wineserver"
 "$WINESERVER_BIN" -w >/dev/null 2>&1 &
 wait $!
 log "prefix idle"
+end_run_log "$rc"
 exit "$rc"
 "#;
 
