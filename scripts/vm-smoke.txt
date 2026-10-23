@@ -16,6 +16,6 @@ signing | launcher seal / Gatekeeper | Treasure Adventure Game.app | --strict-ga
 teardown-term | launcher teardown (#42) | Treasure Adventure Game.app | --secs 45 --kill term | .teardown.ok == true | SIGTERM to the launcher reaps the prefix's wineserver, services and the game: no wine* process left after 15 s
 teardown-kill | launcher teardown (#42) | Treasure Adventure Game.app | --secs 45 --kill kill | .teardown.launcher_pid != "" | SIGKILL can't be trapped (design 16 §8): records what is left behind, informational
 # Placeholders: fill in bundle + check when the work lands.
-runtime-cx24 | L0 runtime CX24 (#62) | Treasure Adventure Game.app | --secs 45 | .status == "ok" and (.runtime | startswith("winecx/")) and .missing_libs == [] and .tcc_prompt_left == false | the default winecx engine + its Frameworks/ from the store start the game in a clean guest: no missing dylibs (FreeType etc.), no microphone prompt with the VM's audio off
+runtime-cx24 | L0 runtime CX24 (#62) | Treasure Adventure Game.app | --secs 45 | .status == "ok" and .runtime[0:7] == "winecx/" and .missing_libs == [] and .tcc_prompt_left == false | the default winecx engine + its Frameworks/ from the store start the game in a clean guest: no missing dylibs (FreeType etc.), no microphone prompt with the VM's audio off
 prefix-setup | per-user prefix (#67) | - | | .status == "ok" | prefix built for the guest user on first launch, no builder-home leak
 renderer-l1 | L1 auto renderer (#70) | - | | .status == "ok" | the renderer L1 picks from PE imports starts (start-up only in the VM)
