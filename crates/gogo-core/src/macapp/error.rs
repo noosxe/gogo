@@ -23,10 +23,20 @@ pub enum MacAppError {
     RuntimeInvalid { path: PathBuf, reason: String },
 
     #[error(
-        "installer exited {exit} — partial bundle kept at {bundle} for diagnosis \
-         (installer stderr was not silenced; re-run with -v for detail)"
+        "installer exited {exit} — partial bundle kept at {bundle}; Inno's log \
+         ({inno}) and Wine's ({wine}) are in {logs}{last}",
+        inno = super::installer::INNO_LOG,
+        wine = super::installer::WINE_LOG,
+        last = last_lines(.tail)
     )]
-    InstallerFailed { exit: i32, bundle: PathBuf },
+    InstallerFailed {
+        exit: i32,
+        bundle: PathBuf,
+        /// `run_silent`'s log dir (#56).
+        logs: PathBuf,
+        /// The Inno log's last lines ("" without one).
+        tail: String,
+    },
 
     #[error(
         "no launchable entry point under {dir}: no goggame-*.info with a runnable \
@@ -79,4 +89,13 @@ pub enum MacAppError {
 
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// The Inno log tail of [`MacAppError::InstallerFailed`], on its own lines.
+fn last_lines(tail: &str) -> String {
+    if tail.is_empty() {
+        String::new()
+    } else {
+        format!("\nlast lines of the Inno log:\n{tail}")
+    }
 }

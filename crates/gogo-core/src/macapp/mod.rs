@@ -1202,6 +1202,10 @@ pub fn locate_support_overlays(tree: &Path) -> Vec<PathBuf> {
     found
 }
 
+/// `games/<gogid>/install/`: the installer's logs ([`installer::run_silent`],
+/// #56), `support/` for the depot lane's GOG support installer.
+pub const INSTALL_LOGS: &str = "install";
+
 /// Run the conversion. `codesign` is [`CodesignPolicy::Adhoc`] on macOS hosts,
 /// [`CodesignPolicy::Skip`] elsewhere/tests (design 10 §2.7). Emits the §6
 /// event sequence. Returns the final bundle size in bytes.
@@ -1276,6 +1280,7 @@ fn execute_into(
             &plan.bundle.prefix,
             &win_target,
             &plan.bundle_path,
+            &plan.state.root.join(INSTALL_LOGS),
         )?;
         // Quiesce the prefix before sealing: a lingering wineserver keeps
         // writing into it (registry flushes, temp cleanup) — which broke
@@ -1355,20 +1360,24 @@ fn execute_into(
             // under two independent wines — the gate is internal GOG script
             // logic. Failing loudly-but-softly keeps self-contained games
             // perfect while flagging the install-config class.
+            let logs = plan.state.root.join(INSTALL_LOGS).join("support");
             if installer::run_silent(
                 &plan.runtime,
                 &support_plan,
                 &plan.bundle.prefix,
                 &win_target,
                 &plan.bundle_path,
+                &logs,
             )
             .is_err()
             {
                 emit(&ProgressEvent::Warn {
-                    message: "GOG support installer declined (install-time config \
-                              not written) — if the game stalls at launch, re-run \
-                              mac-app with the offline installer lane"
-                        .into(),
+                    message: format!(
+                        "GOG support installer declined (install-time config \
+                         not written; logs in {}) — if the game stalls at launch, \
+                         re-run mac-app with the offline installer lane",
+                        logs.display()
+                    ),
                 });
             }
         }
@@ -1593,6 +1602,7 @@ fn finish_v2(
         },
         variants,
         portable: None,
+        lane: plan.installer.is_some().then_some(compat::Lane::Installer),
     };
     // #84: everything into the bundle, the effective config baked.
     if plan.portable {
@@ -1623,6 +1633,12 @@ fn finish_v2(
             });
         }
         std::fs::rename(&dirs.prefix, &target.prefix)?;
+        // The installer's logs (#56) go along, replacing an older build's.
+        let logs = target.root.join(INSTALL_LOGS);
+        if dirs.root.join(INSTALL_LOGS).is_dir() {
+            std::fs::remove_dir_all(&logs).ok();
+            std::fs::rename(dirs.root.join(INSTALL_LOGS), &logs)?;
+        }
         std::fs::remove_dir_all(&dirs.root).ok();
     }
     launch::write_bundle_config(&plan.bundle.resources, &toml)?;

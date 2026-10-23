@@ -56,6 +56,10 @@ pub struct LaunchToml {
     /// one of these when L4 (or L3) names it in `variant`.
     #[serde(rename = "variant", default, skip_serializing_if = "Vec::is_empty")]
     pub variants: Vec<Variant>,
+    /// `lane = "installer"`: built by running GOG's offline installer (#56).
+    /// Absent = from the depot build, so a depot bundle's bytes don't change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<compat::Lane>,
 }
 
 /// One `[[variant]]` of `gogo-launch.toml` (#85), from a `playTasks` entry.
@@ -157,6 +161,11 @@ pub struct GogoRef {
 }
 
 impl LaunchToml {
+    /// The lane the bundle was built from: `lane`, else the depot build.
+    pub fn built_from(&self) -> compat::Lane {
+        self.lane.unwrap_or(compat::Lane::Depot)
+    }
+
     /// Parse, refusing a newer `schema` outright rather than half-reading it.
     pub fn parse(raw: &str, path: &Path) -> Result<LaunchToml, MacAppError> {
         let err = |reason: String| MacAppError::Compat {
@@ -1157,6 +1166,7 @@ mod launch_tests {
             },
             variants: vec![],
             portable: None,
+            lane: None,
         }
     }
 

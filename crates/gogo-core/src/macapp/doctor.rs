@@ -210,7 +210,10 @@ pub fn doctor(target: &str, opts: &DoctorOptions) -> Result<Report, MacAppError>
             findings: f,
         });
     }
-    f.push(check_compat(&gogid));
+    f.push(check_compat(
+        &gogid,
+        baked.as_ref().map(|(t, _)| t.built_from()),
+    ));
 
     // The effective config, as setup resolves it (bundle, then L4).
     let l4_raw = std::fs::read(compat::user_path(&gogid)).ok();
@@ -301,7 +304,7 @@ fn portable_checks(
 ) {
     let res = bundle.join("Contents/Resources");
     let rebuild = format!("rebuild it: gogo mac-app {gogid} --portable --yes");
-    let mut compat = check_compat(gogid);
+    let mut compat = check_compat(gogid, Some(t.built_from()));
     compat.message.push_str(
         " (portable: the compat DB and your override were baked in at build; a change to \
          either needs a rebuild)",
@@ -457,11 +460,13 @@ fn check_codesign(host: &Host, bundle: &Path, gogid: &str) -> Finding {
     }
 }
 
-fn check_compat(gogid: &str) -> Finding {
+/// The compat status for the lane the bundle was built from (#56); `None`
+/// (no readable bundle) = whatever lane the entry was seen on.
+fn check_compat(gogid: &str, lane: Option<compat::Lane>) -> Finding {
     let (eff, _) = compat::db_and_user(gogid);
-    let line = eff.status_line();
-    match eff.status.as_ref().map(|s| s.value) {
-        Some(compat::Status::Broken) => Finding::warn(
+    let line = eff.status_line_for(lane);
+    match eff.status_for(lane) {
+        compat::Status::Broken => Finding::warn(
             "compat",
             line,
             format!("see `gogo mac-app compat {gogid}`; it may not run at all"),

@@ -349,6 +349,46 @@ are `source = "gogo-vm"`, and none of them claims a Metal or OpenGL path works.
 A `tested` row has no renderer field, so the derived runtime id
 (`winecx/24.0.7_7+dxmt-v0.80`) names the renderer it ran with.
 
+### 5.4 The offline-installer lane on CX24 (#56, 2026-10-23)
+
+Built on the host (M4 Pro, macOS 27.0.1) with `gogo mac-app <setup_*.exe>` into a
+scratch `GOGO_HOME`, default runtime `winecx/24.0.7_7`, `--recipe none`:
+
+| installer | result |
+|---|---|
+| `setup_pharaoh_gold_2.1.0.15.exe` | exit 0, ~1 min. Inno log: 6.8k lines, no errors or exceptions; copies `Pharaoh.ini` (`CDDrive=G`, the file the depot tree lacks, docs/18 §5) and writes the `HKLM\Software\WOW6432Node\GOG.com\Games\1207659046` key. cnc-ddraw (L1). `doctor`: all ok |
+| same, v2 bundle (state seeded) | **VM: renders** the intro video (Bink, 1024×768 `Pharaoh.exe` window) at 90 s, no CD prompt |
+| same, `--portable` | exit 0, 1.6 GiB bundle. **VM: renders** the *Pharaoh: Cleopatra* "Click to Start" title screen (1024×768 window, `Pharaoh.exe`), no CD prompt. First launch takes ~80 s in the guest (prefix creation, copying the game, 11 `reg add`s) before the game starts |
+| `setup_zeus_and_poseidon_2.1.0.10.exe` | exit 0; cnc-ddraw (L1) |
+
+What made the difference against #56's runs is the runtime, not anything in
+the lane: the overflow was wine-staging/stable's 32-bit-on-Rosetta path, and
+CX24 doesn't have it. gogo's prefix creation already disables `mscoree` for
+CX24's `wineboot` (§8.2 Q5); the installer itself didn't need it.
+
+Stronghold HD's exit 1 (§8.1) wasn't re-run: that installer isn't cached here.
+The lane now runs Inno with `/LOG` and keeps Wine's output in a file
+(`games/<gogid>/install/`, design 10 §2.3), so its next failure names the
+failing step instead of a bare exit code.
+
+**Unpacking instead of running (innoextract).** Lutris and minigalaxy unpack
+GOG's Inno installers with `innoextract` and never run them. Not adopted here:
+
+- the installer under Wine now works on the default runtime, so the
+  problem it would route around is gone for both cached installers;
+- it would carry Pharaoh's fix too (`Pharaoh.ini`, `CDDrive=G`, is a plain file
+  in the installer: the Inno log copies it like any other), but not what the
+  installer's `[Registry]`/`[Code]` sections do. gogo synthesizes the GOG.com key
+  already; anything else a game's script writes would be lost silently;
+- innoextract is a C++ program (zlib licence) with no Rust port, so gogo would
+  have to ship or download a binary for users, not only add it to the dev
+  shell;
+- its output (`app/`, `__support/`, `tmp/`) is the depot lane's input plus an
+  overlay, which the depot lane already covers where a depot build exists.
+
+It remains a fallback worth having if a future runtime breaks 32-bit Inno
+again (§7: Rosetta's end), not a replacement.
+
 ## 6. Recommendation
 
 One strategy, five layers. Each layer is data the next one can override; nothing
@@ -422,7 +462,8 @@ TAG. Per-game selection is cheap because the imports are on disk at build time.
 - Honour every `playTasks` entry (args such as TDR's `-f` / `-s`) as launch
   variants, not just the primary.
 - The **depot lane becomes the default** whenever a depot build exists: it needs
-  no 32-bit Inno run, which is exactly what fails on the host today (#56).
+  no 32-bit Inno run, which failed on the host under staging/stable (#56; it runs
+  on CX24, §5.4).
 
 ### 6.4 L3 — gogo compat DB (GOG-id keyed, declarative)
 
@@ -553,7 +594,7 @@ as *self-contained on this Mac* rather than *copy the engine into every app*.
 | #54 FreeType missing on a clean Mac | Staging bundle: FreeType errors in the guest. CX24 bundle with the engine at `Contents/Frameworks/wswine.bundle` + Template `Frameworks/`: **no FreeType errors**, and Pharaoh's "blank" dialog shows its text ("Please insert your Cleopatra CD.") | Runtime self-containment is a property of the runtime *package* (engine + its dylib closure), so the store entry must carry its `Frameworks/`. Pharaoh's stall is the depot install-config gap, not only fonts. |
 | #55 builder-home symlinks | Same on CX24 builds | Create the prefix on first launch as the real user (§6.5). |
 | #59 `cabextract` shim vs DirectX redist | Found in the host pass: winetricks `d3dcompiler_43`/`d3dx11_43` extract nothing through the shim | L1's verb row (§6.2) depends on it; fix before shipping auto verbs. |
-| #56 installer-lane stack overflow | CX24 runs 32-bit Inno code without the overflow (Pharaoh support installer runs and declines by its own logic; Stronghold HD's offline installer exits 1, no overflow, cause not investigated) | Depot lane as default (§6.3); offline-installer lane on the CX track needs its own investigation. |
+| #56 installer-lane stack overflow | CX24 runs 32-bit Inno code without the overflow (Pharaoh support installer runs and declines by its own logic; Stronghold HD's offline installer exits 1, no overflow, cause not investigated). **2026-10-23 (§5.4):** on the default `winecx/24.0.7_7`, with the prefix gogo now creates, Pharaoh Gold and Zeus & Poseidon install silently, exit 0, and the portable Pharaoh renders its title screen in the VM | Depot lane stays the default (§6.3); the installer lane works on CX24 and is the way to a playable Pharaoh. Failures now carry Inno's `/LOG` (§5.4). |
 
 ### 8.2 Open questions
 

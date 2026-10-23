@@ -58,9 +58,15 @@ resolve runtime → stage prefix → silent install → locate entry point
 2. **Stage prefix** — fresh `WINEPREFIX` at
    `Title.app/Contents/Resources/prefix`; `wineboot -u` initializes it.
 3. **Silent install** — `wine <installer> /VERYSILENT /SUPPRESSMSGBOXES
-   /NORESTART /DIR="C:\\GOG\\<name>"` with the staged prefix. Installer exit
-   code non-zero → fail loud (exit 7, `InstallerFailed`, keep partial bundle
-   for diagnosis, say so in the error).
+   /NORESTART /SP- /DIR="C:\\GOG\\<name>" /LOG=Z:\\…\\inno.log` with the staged
+   prefix. Installer exit code non-zero → fail loud (exit 7, `InstallerFailed`,
+   keep partial bundle for diagnosis, say so in the error).
+   *#56:* the logs go into the build's state dir, `install/` (moved to
+   `games/<gogid>/install/` with the prefix): `inno.log` is Inno's own `/LOG`, the
+   only record of *which* step failed, and `wine.log` takes Wine's stdout and
+   stderr, which no longer flood the terminal. `InstallerFailed` names the dir and
+   quotes the Inno log's last 8 lines. The depot lane's support installer logs to
+   `install/support/`.
 4. **Entry point** — parse `goggame-*.info` under
    `prefix/drive_c/GOG/<name>/`, prefer `primaryTask`/first `gameTask`
    `.exe` path (`.lnk` is resolved to its target via prefix scan; if nothing
