@@ -26,3 +26,6 @@ console.workspace = true
 dialoguer.workspace = true
 comfy-table.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
