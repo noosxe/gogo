@@ -144,6 +144,11 @@ pub struct CompatEntry {
     pub registry: Option<Vec<RegistryValue>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<String>>,
+    /// Which `[[variant]]` of the bundle to run (a `playTasks` name, #85),
+    /// instead of the default. Setup applies it over the baked `exe`/`args`;
+    /// an L4 `exe`/`args` still win over it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replace_command: Option<ReplaceCommand>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -173,6 +178,7 @@ const KNOWN_KEYS: &[&str] = &[
     "env",
     "registry",
     "args",
+    "variant",
     "replace_command",
     "status",
     "tested",
@@ -409,6 +415,8 @@ pub struct Effective {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub args: Option<Sourced<Vec<String>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub variant: Option<Sourced<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub replace_command: Option<Sourced<ReplaceCommand>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<Sourced<Status>>,
@@ -472,6 +480,7 @@ pub fn merge(layers: &[(Layer, &CompatEntry)]) -> Effective {
         take_map(&mut out.env, &e.env, layer);
         take(&mut out.registry, &e.registry, layer);
         take(&mut out.args, &e.args, layer);
+        take(&mut out.variant, &e.variant, layer);
         take(&mut out.replace_command, &e.replace_command, layer);
         take(&mut out.status, &e.status, layer);
         take(&mut out.tested, &e.tested, layer);
@@ -526,6 +535,7 @@ impl Effective {
         map(&mut out, "env", &self.env);
         line(&mut out, "registry", &self.registry);
         line(&mut out, "args", &self.args);
+        line(&mut out, "variant", &self.variant);
         line(&mut out, "replace_command", &self.replace_command);
         line(&mut out, "status", &self.status);
         if let Some(t) = &self.tested {
@@ -650,6 +660,25 @@ replace_command = { from = "GoGLauncher.exe", to = "RebelGalaxyGOG.exe" }
             p.warnings,
             vec!["future".to_string(), "tested[0].gpu".into()]
         );
+    }
+
+    #[test]
+    fn variant_is_a_known_key_and_merges_l4_over_l3() {
+        let l3 = parse("variant = \"Settings\"\n").unwrap();
+        assert!(l3.warnings.is_empty(), "{:?}", l3.warnings);
+        let l4 = parse("variant = \"Carmageddon TDR 2000 (safe mode)\"\n").unwrap();
+        let eff = merge(&[(Layer::Db, &l3.entry), (Layer::User, &l4.entry)]);
+        let v = eff.variant.as_ref().unwrap();
+        assert_eq!(v.value, "Carmageddon TDR 2000 (safe mode)");
+        assert_eq!(v.layer, Layer::User);
+        assert!(
+            eff.display_lines().contains(
+                &"variant = \"Carmageddon TDR 2000 (safe mode)\"  (L4 user override)".into()
+            ),
+            "{:?}",
+            eff.display_lines()
+        );
+        assert!(parse("variant = [\"a\"]").is_err());
     }
 
     #[test]

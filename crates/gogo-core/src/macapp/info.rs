@@ -5,6 +5,9 @@
 //! a `game` task over a primary `launcher` one — #107), relative to the info
 //! file's directory. `.lnk`-only games are rejected loudly
 //! — parsing Windows shortcuts is out of scope for v1 (design 10 §2.4).
+//!
+//! Every runnable task of the base game is also a launch variant (#85,
+//! docs/19 §6.3): name, exe, args, working dir ([`play_variants`]).
 
 use std::path::{Path, PathBuf};
 
@@ -14,6 +17,8 @@ use super::error::MacAppError;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct GogGameInfo {
+    #[serde(rename = "gameId", default)]
+    pub game_id: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(rename = "rootGameId", default)]
@@ -33,6 +38,25 @@ pub struct GogTask {
     #[serde(default)]
     pub path: Option<String>,
     #[serde(rename = "isPrimary", default)]
+    pub is_primary: bool,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// One command-line string (`"-f"`, `"-window -nosound"`).
+    #[serde(default)]
+    pub arguments: Option<String>,
+    /// Relative to the info file's directory, like `path`.
+    #[serde(rename = "workingDir", default)]
+    pub working_dir: Option<String>,
+}
+
+/// One runnable `playTasks` entry (#85): what a launch variant runs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlayVariant {
+    /// The task's `name`, made unique across the game's variants.
+    pub name: String,
+    pub exe: PathBuf,
+    pub workdir: PathBuf,
+    pub args: Vec<String>,
     pub is_primary: bool,
 }
 
@@ -106,7 +130,7 @@ pub fn find_entry_point(dir: &Path) -> Result<PathBuf, MacAppError> {
             let Some(rel) = task.path.as_deref() else {
                 continue;
             };
-            let candidate = base.join(rel);
+            let candidate = base.join(rel.replace('\\', "/"));
             if !candidate.is_file() {
                 continue;
             }
@@ -129,6 +153,106 @@ pub fn find_entry_point(dir: &Path) -> Result<PathBuf, MacAppError> {
     fallback.ok_or(MacAppError::EntryPointNotFound {
         dir: dir.to_path_buf(),
     })
+}
+
+/// Every runnable `playTasks` entry of the base game, in info order (#85):
+/// the same rules as [`find_entry_point`] (a `FileTask` to an `.exe` that
+/// exists on disk; URL and `.lnk` tasks are skipped), and no DLC's tasks (an
+/// info whose `gameId` isn't the `rootGameId`). Duplicate names get the exe
+/// name appended (Rebel Galaxy names its launcher and its game alike).
+pub fn play_variants(dir: &Path) -> Vec<PlayVariant> {
+    let mut infos = collect_info_files(dir, 0);
+    infos.sort();
+    let mut out: Vec<PlayVariant> = Vec::new();
+    for info_path in &infos {
+        let Ok(raw) = std::fs::read_to_string(info_path) else {
+            continue;
+        };
+        let Ok(info) = serde_json::from_str::<GogGameInfo>(&raw) else {
+            continue;
+        };
+        if let (Some(id), Some(root)) = (&info.game_id, &info.root_game_id)
+            && id != root
+        {
+            continue;
+        }
+        let base = info_path.parent().unwrap_or(dir);
+        for task in &info.play_tasks {
+            if !is_runnable_file_task(task) {
+                continue;
+            }
+            let Some(rel) = task.path.as_deref() else {
+                continue;
+            };
+            let exe = base.join(rel.replace('\\', "/"));
+            if !exe.is_file() {
+                continue;
+            }
+            let file = exe
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let mut name = task
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .unwrap_or(&file)
+                .to_string();
+            if out.iter().any(|v| v.name == name) {
+                name = format!("{name} ({file})");
+            }
+            let mut n = 2;
+            let stem = name.clone();
+            while out.iter().any(|v| v.name == name) {
+                name = format!("{stem} #{n}");
+                n += 1;
+            }
+            let workdir = match task.working_dir.as_deref().filter(|w| !w.is_empty()) {
+                Some(w) => base.join(w.replace('\\', "/")),
+                None => exe.parent().unwrap_or(base).to_path_buf(),
+            };
+            out.push(PlayVariant {
+                name,
+                exe,
+                workdir,
+                args: split_args(task.arguments.as_deref().unwrap_or_default()),
+                is_primary: task.is_primary,
+            });
+        }
+    }
+    out
+}
+
+/// A `playTasks` `arguments` string as argv: split on whitespace, with
+/// double quotes grouping (`-cfg "my file.ini"`). No other escapes.
+pub fn split_args(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    let mut started = false;
+    for c in raw.chars() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                started = true;
+            }
+            c if c.is_whitespace() && !quoted => {
+                if started {
+                    out.push(std::mem::take(&mut cur));
+                    started = false;
+                }
+            }
+            c => {
+                cur.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        out.push(cur);
+    }
+    out
 }
 
 fn is_runnable_file_task(task: &GogTask) -> bool {
@@ -298,5 +422,120 @@ mod info_tests {
         std::fs::write(tmp.path().join("GoGLauncher.exe"), b"MZ").unwrap();
         let entry = find_entry_point(tmp.path()).unwrap();
         assert_eq!(entry, tmp.path().join("GoGLauncher.exe"));
+    }
+
+    /// Carmageddon TDR 2000 (1146738698)-like tasks: one exe with `-f` /
+    /// `-s`, an alternate exe, a settings tool, plus what must be skipped.
+    fn tdr_like(root: &Path) {
+        write_info(
+            root,
+            "1146738698",
+            r#"{"gameId":"1146738698","rootGameId":"1146738698","name":"Carmageddon TDR 2000",
+              "playTasks":[
+                {"category":"game","isPrimary":true,"name":"Carmageddon TDR 2000",
+                 "path":"TDR2000.exe","arguments":"-f","type":"FileTask"},
+                {"category":"game","name":"Carmageddon TDR 2000 (safe mode)",
+                 "path":"TDR2000.exe","arguments":"-s","type":"FileTask"},
+                {"category":"game","name":"Carmageddon TDR 2000 (3dfx)",
+                 "path":"bin\\TDR2000_3dfx.exe","workingDir":".","type":"FileTask"},
+                {"category":"tool","name":"Settings","path":"Setup.exe",
+                 "arguments":"-cfg \"tdr settings.ini\"","type":"FileTask"},
+                {"category":"tool","name":"Editor","path":"ghost.exe","type":"FileTask"},
+                {"category":"document","name":"Manual","path":"manual.pdf","type":"FileTask"},
+                {"category":"other","name":"Support","link":"https://gog.com","type":"URLTask"}
+              ]}"#,
+        );
+        write_info(
+            &root.join("dlc"),
+            "1207000001",
+            r#"{"gameId":"1207000001","rootGameId":"1146738698",
+              "playTasks":[{"category":"game","name":"DLC","path":"dlc.exe","type":"FileTask"}]}"#,
+        );
+        for f in [
+            "TDR2000.exe",
+            "bin/TDR2000_3dfx.exe",
+            "Setup.exe",
+            "manual.pdf",
+            "dlc/dlc.exe",
+        ] {
+            let p = root.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, b"MZ").unwrap();
+        }
+    }
+
+    #[test]
+    fn play_tasks_become_variants() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        tdr_like(root);
+        let v = play_variants(root);
+        let names: Vec<&str> = v.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "Carmageddon TDR 2000",
+                "Carmageddon TDR 2000 (safe mode)",
+                "Carmageddon TDR 2000 (3dfx)",
+                "Settings"
+            ]
+        );
+        assert!(v[0].is_primary && !v[1].is_primary);
+        assert_eq!(v[0].exe, root.join("TDR2000.exe"));
+        assert_eq!(v[0].args, ["-f"]);
+        assert_eq!(v[0].workdir, root);
+        assert_eq!(v[1].exe, root.join("TDR2000.exe"));
+        assert_eq!(v[1].args, ["-s"]);
+        assert_eq!(v[2].exe, root.join("bin/TDR2000_3dfx.exe"));
+        assert!(v[2].args.is_empty());
+        // An explicit `workingDir` wins over the exe's directory.
+        assert_eq!(v[2].workdir, root.join("."));
+        assert_eq!(v[3].exe, root.join("Setup.exe"));
+        assert_eq!(v[3].args, ["-cfg", "tdr settings.ini"]);
+        // The primary pick is unchanged and is one of the variants.
+        assert_eq!(find_entry_point(root).unwrap(), v[0].exe);
+    }
+
+    #[test]
+    fn duplicate_task_names_are_made_unique() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_info(
+            tmp.path(),
+            "1435582019",
+            r#"{"playTasks":[
+                {"category":"launcher","isPrimary":true,"name":"Rebel Galaxy",
+                 "path":"GoGLauncher.exe","type":"FileTask"},
+                {"category":"game","isHidden":true,"name":"Rebel Galaxy",
+                 "path":"RebelGalaxyGOG.exe","type":"FileTask"},
+                {"category":"game","name":"Rebel Galaxy","path":"RebelGalaxyGOG.exe",
+                 "arguments":"-safe","type":"FileTask"},
+                {"category":"game","path":"Nameless.exe","type":"FileTask"}
+            ]}"#,
+        );
+        for f in ["GoGLauncher.exe", "RebelGalaxyGOG.exe", "Nameless.exe"] {
+            std::fs::write(tmp.path().join(f), b"MZ").unwrap();
+        }
+        let names: Vec<String> = play_variants(tmp.path())
+            .into_iter()
+            .map(|v| v.name)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "Rebel Galaxy",
+                "Rebel Galaxy (RebelGalaxyGOG.exe)",
+                "Rebel Galaxy (RebelGalaxyGOG.exe) #2",
+                "Nameless.exe"
+            ]
+        );
+    }
+
+    #[test]
+    fn arguments_split_like_a_command_line() {
+        assert!(split_args("").is_empty());
+        assert!(split_args("   ").is_empty());
+        assert_eq!(split_args(" -f  -w "), ["-f", "-w"]);
+        assert_eq!(split_args(r#"-cfg "a b.ini" x"#), ["-cfg", "a b.ini", "x"]);
+        assert_eq!(split_args(r#""""#), [""]);
     }
 }

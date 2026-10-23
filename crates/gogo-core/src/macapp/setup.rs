@@ -85,7 +85,13 @@ pub fn setup(gogid: &str, bundle: Option<&Path>) -> Result<SetupOutcome, MacAppE
         .iter()
         .map(|w| format!("{}: unknown key {w}", l4_path.display()))
         .collect();
-    let mut eff = baked.with_override(&l4.entry);
+    let db = compat::db_entry(gogid);
+    let mut eff = baked
+        .effective(&db.entry, &l4.entry)
+        .map_err(|reason| MacAppError::Compat {
+            path: l4_path.clone(),
+            reason,
+        })?;
     let (rt, runtime_installed) = resolve_or_install(&eff.runtime)?;
 
     let prefix_created = !dirs.prefix.is_dir();
@@ -130,7 +136,6 @@ pub fn setup(gogid: &str, bundle: Option<&Path>) -> Result<SetupOutcome, MacAppE
 
     // Registry values the bundle TOML can't carry: L3, then L4 per field
     // (decision 5). The rest of L3 is #74.
-    let db = compat::db_entry(gogid);
     let registry = compat::merge(&[(Layer::Db, &db.entry), (Layer::User, &l4.entry)])
         .registry
         .map(|r| r.value)
@@ -263,7 +268,15 @@ pub fn next_renderer(gogid: &str, dry_run: bool) -> Result<Option<String>, MacAp
         path: toml_path.clone(),
         reason: e.to_string(),
     })?;
-    let eff = LaunchToml::parse(&raw, &toml_path)?.with_override(&compat::load_user(gogid)?.entry);
+    let eff = LaunchToml::parse(&raw, &toml_path)?
+        .effective(
+            &compat::db_entry(gogid).entry,
+            &compat::load_user(gogid)?.entry,
+        )
+        .map_err(|reason| MacAppError::Compat {
+            path: compat::user_path(gogid),
+            reason,
+        })?;
     let game = eff
         .tree_name()
         .map(|n| dirs.prefix.join("drive_c/GOG").join(n))

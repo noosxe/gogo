@@ -3499,6 +3499,125 @@ tested   = [{ runtime = "winecx-24.0.7_7", date = 2026-10-22 }]
     drop(guard);
 }
 
+// — playTasks as launch variants (#85) —
+
+/// A TDR-like game: every runnable `playTasks` entry is baked as a
+/// `[[variant]]`, the primary's `-f` becomes the default args, and an L4
+/// `variant` makes setup switch exe, workdir and args. An unknown name
+/// fails setup with the names listed and leaves the applied config alone.
+#[test]
+fn l4_variant_switches_exe_and_args() {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let db = tmp.path().join("compat-db");
+    std::fs::create_dir_all(&db).unwrap();
+    // SAFETY: env mutation under ENV_LOCK.
+    unsafe {
+        std::env::set_var("GOGO_HOME", &home);
+        std::env::set_var("GOGO_COMPAT_DIR", &db);
+    }
+    let runtime_dir = tmp.path().join("runtime");
+    fake_runtime(&runtime_dir, &tmp.path().join("wine.log"));
+    let gogid = "1146738698";
+    let tree = depot_game(
+        tmp.path(),
+        gogid,
+        "Carmageddon TDR 2000",
+        false,
+        &["kernel32.dll"],
+    );
+    std::fs::write(
+        tree.join(format!("goggame-{gogid}.info")),
+        r#"{"gameId":"1146738698","rootGameId":"1146738698","name":"Carmageddon TDR 2000",
+          "playTasks":[
+            {"category":"game","isPrimary":true,"name":"Carmageddon TDR 2000",
+             "path":"Game.exe","arguments":"-f","type":"FileTask"},
+            {"category":"game","name":"Carmageddon TDR 2000 (safe mode)",
+             "path":"Game.exe","arguments":"-s","type":"FileTask"},
+            {"category":"tool","name":"Settings","path":"tools\\Setup.exe","type":"FileTask"},
+            {"category":"document","name":"Manual","path":"manual.pdf","type":"FileTask"},
+            {"category":"other","name":"Support","link":"https://gog.com","type":"URLTask"}
+          ]}"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(tree.join("tools")).unwrap();
+    std::fs::write(tree.join("tools/Setup.exe"), b"MZ").unwrap();
+    let opts = MacAppOptions {
+        installer: None,
+        game_tree: Some(tree),
+        name: None,
+        mode: RuntimeMode::Path,
+        runtime_path: Some(runtime_dir),
+        out_dir: tmp.path().join("out"),
+        overwrite: true,
+        recipe: Default::default(),
+        runtime_menu: false,
+        runtime_version: None,
+        lutris_base: None,
+        renderer: macapp::RendererChoice::Auto,
+        portable: false,
+        gogo_path: Some(tmp.path().join("no-such-gogo")),
+    };
+    let plan = macapp::plan(&opts, None, &mut |_| {}).expect("plan");
+    macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).expect("execute");
+
+    let app = tmp.path().join("out/Carmageddon TDR 2000.app");
+    let toml = std::fs::read_to_string(app.join("Contents/Resources/gogo-launch.toml")).unwrap();
+    let baked = macapp::launch::LaunchToml::parse(&toml, std::path::Path::new("t")).unwrap();
+    let dir = r"C:\GOG\Carmageddon TDR 2000";
+    assert_eq!(baked.exe, format!(r"{dir}\Game.exe"), "{toml}");
+    assert_eq!(baked.args, ["-f"]);
+    let names: Vec<&str> = baked.variants.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "Carmageddon TDR 2000",
+            "Carmageddon TDR 2000 (safe mode)",
+            "Settings"
+        ],
+        "{toml}"
+    );
+    assert_eq!(baked.variants[2].exe, format!(r"{dir}\tools\Setup.exe"));
+    assert_eq!(baked.variants[2].workdir, format!(r"{dir}\tools"));
+    let conf_path = home.join(format!("games/{gogid}/launch.conf"));
+    let conf = std::fs::read_to_string(&conf_path).unwrap();
+    assert!(conf.contains(&format!("EXE='{dir}\\Game.exe'")), "{conf}");
+    assert!(conf.contains("ARGS=('-f')"), "{conf}");
+
+    let l4 = home.join(format!("compat/{gogid}.toml"));
+    std::fs::create_dir_all(l4.parent().unwrap()).unwrap();
+    std::fs::write(&l4, "variant = \"Carmageddon TDR 2000 (safe mode)\"\n").unwrap();
+    macapp::setup::setup(gogid, None).expect("setup with a variant");
+    let conf = std::fs::read_to_string(&conf_path).unwrap();
+    assert!(conf.contains(&format!("EXE='{dir}\\Game.exe'")), "{conf}");
+    assert!(conf.contains("ARGS=('-s')"), "{conf}");
+
+    std::fs::write(&l4, "variant = \"Settings\"\n").unwrap();
+    macapp::setup::setup(gogid, None).expect("setup with a variant");
+    let conf = std::fs::read_to_string(&conf_path).unwrap();
+    assert!(
+        conf.contains(&format!("EXE='{dir}\\tools\\Setup.exe'")),
+        "{conf}"
+    );
+    assert!(conf.contains(&format!("WORKDIR='{dir}\\tools'")), "{conf}");
+    assert!(conf.contains("ARGS=()"), "{conf}");
+
+    std::fs::write(&l4, "variant = \"Turbo\"\n").unwrap();
+    let err = macapp::setup::setup(gogid, None).unwrap_err().to_string();
+    assert!(
+        err.contains(r#"unknown variant "Turbo"; available: "Carmageddon TDR 2000", "Carmageddon TDR 2000 (safe mode)", "Settings""#),
+        "{err}"
+    );
+    assert_eq!(std::fs::read_to_string(&conf_path).unwrap(), conf);
+
+    unsafe {
+        std::env::remove_var("GOGO_COMPAT_DIR");
+        std::env::remove_var("GOGO_HOME");
+    }
+    drop(guard);
+}
+
 /// An L3 `runtime` pins the auto ladder to that store runtime, even when a
 /// newer one of the same lane is cached (#74).
 #[test]

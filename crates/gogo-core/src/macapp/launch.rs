@@ -46,6 +46,23 @@ pub struct LaunchToml {
     #[serde(default)]
     pub verbs: Vec<String>,
     pub gogo: GogoRef,
+    /// `[[variant]]`: the game's runnable `playTasks` (#85). The top-level
+    /// `exe`/`workdir`/`args` are what runs by default; setup switches to
+    /// one of these when L4 (or L3) names it in `variant`.
+    #[serde(rename = "variant", default, skip_serializing_if = "Vec::is_empty")]
+    pub variants: Vec<Variant>,
+}
+
+/// One `[[variant]]` of `gogo-launch.toml` (#85), from a `playTasks` entry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Variant {
+    pub name: String,
+    /// Windows path, like the top-level `exe`.
+    pub exe: String,
+    pub workdir: String,
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 /// `[gogo]`: where the launcher finds gogo and its state dir.
@@ -93,6 +110,55 @@ impl LaunchToml {
     pub fn tree_name(&self) -> Option<String> {
         let parts: Vec<&str> = self.exe.split('\\').collect();
         (parts.len() >= 4 && parts[1].eq_ignore_ascii_case("GOG")).then(|| parts[2].to_string())
+    }
+
+    /// The variant the bundle runs by default: the one whose exe and args
+    /// are the top-level ones (else the first with that exe). `None` when
+    /// an L3 `exe` or a recipe replaced the info file's pick.
+    pub fn default_variant(&self) -> Option<&Variant> {
+        self.variants
+            .iter()
+            .find(|v| v.exe == self.exe && v.args == self.args)
+            .or_else(|| self.variants.iter().find(|v| v.exe == self.exe))
+    }
+
+    /// This TOML running the variant `name` instead of its default (#85).
+    /// An unknown name is an error listing the ones there are: a variant
+    /// never falls back to the default silently.
+    pub fn select_variant(&self, name: &str) -> Result<LaunchToml, String> {
+        let Some(v) = self.variants.iter().find(|v| v.name == name) else {
+            if self.variants.is_empty() {
+                return Err(format!(
+                    "variant {name:?}: this bundle has no variants (rebuild it with this gogo)"
+                ));
+            }
+            let names: Vec<String> = self
+                .variants
+                .iter()
+                .map(|v| format!("{:?}", v.name))
+                .collect();
+            return Err(format!(
+                "unknown variant {name:?}; available: {}",
+                names.join(", ")
+            ));
+        };
+        let mut out = self.clone();
+        out.exe = v.exe.clone();
+        out.workdir = v.workdir.clone();
+        out.args = v.args.clone();
+        Ok(out)
+    }
+
+    /// What setup runs (#85): the `variant` L4 names (else L3's) switches
+    /// exe, workdir and args, then [`Self::with_override`] applies L4. So
+    /// an L4 `exe`/`args` beat any variant, and a variant beats the baked
+    /// (L3) `exe`/`args`. An unknown variant is an error.
+    pub fn effective(&self, db: &CompatEntry, l4: &CompatEntry) -> Result<LaunchToml, String> {
+        let base = match l4.variant.as_deref().or(db.variant.as_deref()) {
+            Some(name) => self.select_variant(name)?,
+            None => self.clone(),
+        };
+        Ok(base.with_override(l4))
     }
 
     /// This entry as a compat layer (what the bundle baked: L0–L3 + flags).
@@ -850,7 +916,77 @@ mod launch_tests {
                 path: "/Users/me/.nix-profile/bin/gogo".into(),
                 state: "/Users/me/Library/Application Support/gogo".into(),
             },
+            variants: vec![],
         }
+    }
+
+    /// `sample()` with TDR-like `[[variant]]`s (#85).
+    fn with_variants() -> LaunchToml {
+        let dir = r"C:\GOG\Carmageddon TDR 2000";
+        let v = |name: &str, exe: &str, args: &[&str]| Variant {
+            name: name.into(),
+            exe: format!(r"{dir}\{exe}"),
+            workdir: dir.into(),
+            args: args.iter().map(|a| a.to_string()).collect(),
+        };
+        LaunchToml {
+            variants: vec![
+                v("Carmageddon TDR 2000", "TDR2000.exe", &["-f"]),
+                v("Carmageddon TDR 2000 (safe mode)", "TDR2000.exe", &["-s"]),
+                v("Settings", "Setup.exe", &[]),
+            ],
+            ..sample()
+        }
+    }
+
+    #[test]
+    fn variants_round_trip_and_stay_out_when_empty() {
+        let t = with_variants();
+        let raw = t.to_toml();
+        assert!(raw.contains("[[variant]]"), "{raw}");
+        assert_eq!(LaunchToml::parse(&raw, Path::new("x")).unwrap(), t);
+        assert!(!sample().to_toml().contains("variant"));
+        let bad = format!("{raw}bogus = 1\n");
+        assert!(LaunchToml::parse(&bad, Path::new("x")).is_err());
+    }
+
+    #[test]
+    fn variant_switches_exe_and_args() {
+        let t = with_variants();
+        assert_eq!(t.default_variant().unwrap().name, "Carmageddon TDR 2000");
+        let none = CompatEntry::default();
+        assert_eq!(t.effective(&none, &none).unwrap(), t);
+
+        let l4 = compat::parse("variant = \"Settings\"\n").unwrap().entry;
+        let eff = t.effective(&none, &l4).unwrap();
+        assert_eq!(eff.exe, r"C:\GOG\Carmageddon TDR 2000\Setup.exe");
+        assert_eq!(eff.workdir, r"C:\GOG\Carmageddon TDR 2000");
+        assert!(eff.args.is_empty());
+
+        // L4 over L3; an L4 `args` beats the variant's.
+        let l3 = compat::parse("variant = \"Settings\"\n").unwrap().entry;
+        let l4 = compat::parse(
+            "variant = \"Carmageddon TDR 2000 (safe mode)\"\nargs = [\"-s\", \"-w\"]\n",
+        )
+        .unwrap()
+        .entry;
+        let eff = t.effective(&l3, &l4).unwrap();
+        assert_eq!(eff.exe, r"C:\GOG\Carmageddon TDR 2000\TDR2000.exe");
+        assert_eq!(eff.args, ["-s", "-w"]);
+    }
+
+    #[test]
+    fn unknown_variant_fails_and_lists_the_names() {
+        let l4 = compat::parse("variant = \"Turbo\"\n").unwrap().entry;
+        let none = CompatEntry::default();
+        let e = with_variants().effective(&none, &l4).unwrap_err();
+        assert_eq!(
+            e,
+            "unknown variant \"Turbo\"; available: \"Carmageddon TDR 2000\", \
+             \"Carmageddon TDR 2000 (safe mode)\", \"Settings\""
+        );
+        let e = sample().effective(&none, &l4).unwrap_err();
+        assert!(e.contains("has no variants"), "{e}");
     }
 
     #[test]
