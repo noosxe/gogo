@@ -56,6 +56,7 @@ scripts/vm-test.sh run Game.app --no-quarantine     # skip the download simulati
 scripts/vm-test.sh run Game.app --keep              # keep the stopped clone for poking
 scripts/vm-test.sh run Game.app --kill term         # #42: kill the launcher, assert no Wine left
 scripts/vm-test.sh run Game.app --runtimes copy     # copy store runtimes instead of sharing them
+scripts/vm-test.sh run Game.app --audio             # give the guest a sound device (off by default)
 scripts/vm-test.sh run Game.app --osascript scripts/vm-hooks/press-return.applescript --hook-delay 25
 scripts/vm-test.sh smoke                            # per-layer smoke set (below)
 scripts/vm-test.sh shell [Game.app]                 # interactive clone, deleted on exit
@@ -66,7 +67,7 @@ scripts/vm-test.sh cleanup                          # stop + delete every gog-te
 What `run` does:
 
 1. `tart clone gog-golden gog-test-<slug>-<ts>`, then boot it headless with the results
-   dir shared as `/Volumes/My Shared Files/out`.
+   dir shared as `/Volumes/My Shared Files/out`, with `--no-audio --no-clipboard` (below).
 2. Copies the bundle to `~/Applications` by streaming `tar` over SSH. A virtiofs
    share + `ditto` doesn't work: Wine prefixes contain absolute symlinks (`dosdevices/z:`
    → `/`, `drive_c/users/<you>/Desktop` → `/Users/<you>/Desktop`), and virtiofs fails
@@ -95,6 +96,21 @@ What `run` does:
 lock (`~/.local/state/gogo-vm/slot.lock`) and *queue* for up to `--wait-secs` (default 1800)
 while two `tart run` processes exist. Linux VMs (Docker Desktop) don't count.
 
+## Audio and clipboard are off
+
+Every VM the script boots (golden, `run`, `smoke`, `shell`) gets `tart run --no-audio
+--no-clipboard`. By default Tart connects the guest's sound device to the host both ways,
+so game audio played on your speakers while you worked, and the guest microphone was the
+host's real one. On `winecx` that link is also what made the guest ask *"Allow 'wine' to
+access your microphone?"*: the CX engine opens CoreAudio input, and the game waited
+behind the prompt (`running_no_window`). With `--no-audio` the prompt is gone (TAG on
+winecx 24.0.7_7, 2026-10-23). `tcc_prompt_left` in the summary still records any
+permission prompt on screen at the end.
+
+**Caveat:** with no audio device, some games may fail to start, or log Wine audio
+errors, only in the VM. Re-run with `--audio` (also accepted by `smoke` and `shell`;
+the summary records `"audio": true`) before treating that as a real failure.
+
 ## v2 bundles: seeding the state dir (design 16)
 
 A v2 `.app` is only a ~10 KiB launcher. The prefix, game files and effective config live
@@ -102,6 +118,12 @@ in `~/Library/Application Support/gogo/games/<gogid>/`, and Wine comes from gogo
 runtime store. So for any bundle with `Contents/Resources/gogo-launch.toml` (and no
 `Resources/wine`), `run` seeds the guest by default (`--no-state` skips it, old
 self-contained bundles are left as they were). What to seed is derived, not hand-picked:
+
+The host state dir is `GOGO_VM_HOST_STATE` or `GOGO_HOME` (gogo's own override, which
+is the state dir itself), else the `[gogo] state` the bundle recorded when it was built,
+else `~/Library/Application Support/gogo`. So a bundle built with an isolated
+`GOGO_HOME` is seeded from there without extra flags. `state.host` in the summary says
+which dir was used.
 
 | From | Seeded | How |
 |---|---|---|
@@ -119,8 +141,11 @@ found" and launch as-is.
 **Runtimes are shared, not copied.** A store runtime is 0.5–1 GB and never written,
 so by default each `runtimes/<id>` dir is mounted read-only (`tart run --dir`) and
 nothing is copied, however many runs use it. Store runtimes contain only relative
-symlinks, so virtiofs's ELOOP problem doesn't apply. `--runtimes copy` streams them with
-`tar` instead (the earlier behaviour), for when you suspect the share itself. The
+symlinks (`winecx`'s `Frameworks/` dylib links, a derived runtime's `Frameworks` →
+`../<base>/Frameworks`), so virtiofs's ELOOP problem doesn't apply. Both modes keep
+symlinks as symlinks. `--runtimes copy` streams them with `tar` instead, for when you
+suspect the share itself. It copies `runtimes/<id>/<ver>` per referenced version, plus
+the base a derived runtime links to. The
 launcher's logs come back in `launcher-logs/`; the summary lists what was seeded under
 `state.units`.
 
@@ -164,8 +189,13 @@ item (#80), not a bundle bug.
 one VM run each, against bundles in `target/v2` (`--bundles DIR` or `GOGO_VM_BUNDLES`).
 Each case is a line with its layer, bundle, run options, a `jq` check on `summary.json`
 and what it proves. `--only a,b` runs a subset. It prints a markdown table, the
-`tested = [...]` compat line for each passing case, and the path of `smoke.json`
+`tested = [...]` compat line for each game that started, and the path of `smoke.json`
 (exit 0 all pass, 1 a case failed, 3 infra).
+
+A case whose check fails with `running_no_window` while Wine logged that wined3d got no
+GL context is reported as **`vm-limit`**, not `fail`, and doesn't fail the set. The guest
+has no OpenGL, so a D3D-on-wined3d title can be fine on a Mac and windowless here. The
+summary's `vm_no_gl` holds the log lines; judge such titles on the host (#80).
 
 | Case | Layer | What it proves |
 |---|---|---|
@@ -174,7 +204,8 @@ and what it proves. `--only a,b` runs a subset. It prints a markdown table, the
 | `signing` | launcher seal, Gatekeeper | the launcher verifies `--deep --strict` in the guest and a quarantined launch gets the "could not verify" prompt, not "damaged" (#53) |
 | `teardown-term` | launcher teardown (#42) | `SIGTERM` to the launcher leaves no Wine process behind |
 | `teardown-kill` | launcher teardown (#42) | informational: what a `SIGKILL` (untrappable) leaves |
-| `runtime-cx24`, `prefix-setup`, `renderer-l1` | #62, #67, #70 | placeholders (`-` bundle): fill in the bundle and check when those land |
+| `runtime-cx24` | L0 runtime (#62) | the default `winecx` engine and its `Frameworks/` start TAG in a clean guest: no missing dylibs, no microphone prompt |
+| `prefix-setup`, `renderer-l1` | #67, #70 | placeholders (`-` bundle): fill in the bundle and check when those land |
 
 Build the bundles first:
 
