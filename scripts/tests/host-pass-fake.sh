@@ -10,13 +10,31 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HP="$REPO/scripts/host-pass.sh"
 command -v jq >/dev/null 2>&1 || { echo "needs jq (nix develop)" >&2; exit 3; }
 T="$(mktemp -d "${TMPDIR:-/tmp}/host-pass-fake.XXXXXX")"
+# Every process this test starts, still alive: the stubs (their command line
+# holds $T) and the detached fake games (argv[0] replaced, so by pid file).
+stub_pids() {
+    pgrep -f "$T/" 2>/dev/null || true
+    local f p
+    for f in "$T"/*.pid "$T"/*/*.pid; do
+        [ -f "$f" ] || continue
+        p="$(cat "$f")"
+        if kill -0 "$p" 2>/dev/null; then echo "$p"; fi
+    done
+}
+# Reap everything, on success, failure or interrupt alike. Every fake process
+# also ends by itself within LIFETIME seconds, should this never run (the
+# test itself SIGKILLed).
 cleanup() {
-    pkill -f "$T/" 2>/dev/null || true
-    # The detached fake games don't carry $T in their command line.
-    cat "$T"/*/*.pid "$T"/decoy.pid 2>/dev/null | xargs kill -KILL 2>/dev/null || true
+    local left
+    left="$(stub_pids)"
+    # shellcheck disable=SC2086 # pids
+    if [ -n "$left" ]; then kill -KILL $left 2>/dev/null || true; fi
     [ -n "${KEEP:-}" ] || rm -rf "$T"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+LIFETIME=60
 GOGID=1669531175
 # The fake Wine processes: an ad-hoc signed copy of /bin/sleep. macOS hides
 # the environment of Apple-signed binaries from `ps -E` (Wine isn't one), and
@@ -37,6 +55,8 @@ check() { # name jq-expr summary
 #   good      runs until SIGTERM, then stops its game and exits 143
 #   stubborn  ignores SIGTERM, and so does its game: only wineserver -k ends it
 #   quits     the game exits 0 by itself after 1 s
+#   d3dmetal  like good, on D3DMetal (Unity reports "AMD Compatibility Mode"),
+#             and the game keeps logging (good goes silent after start-up)
 # good and stubborn start the game the way winecx does, outside the
 # launcher's process tree: one process with WINEPREFIX=<prefix> in its
 # environment, one whose argv[0] is the exe's Windows path. An older run's
@@ -76,22 +96,35 @@ EOF
 MODE='$mode'
 mkdir -p "\$GOGO_LOG_DIR"
 RUN="\$GOGO_LOG_DIR/\$(date +%Y%m%d-%H%M%S)-\$\$.log"
-printf '# gogo run log: Fake Game ($GOGID)\n# renderer: dxmt/v0.80\n# ---\n' >"\$RUN"
+if [ "\$MODE" = d3dmetal ]; then
+    # Header lines name D3DMetal too: they must not count as evidence.
+    printf '# gogo run log: Fake Game ($GOGID)\n# renderer: d3dmetal/4.0b3\n# runtime_dir: D3DMetal-4.0b3\n# ---\n' >"\$RUN"
+    gpu='AMD Compatibility Mode (ID=0x66af)'
+else
+    printf '# gogo run log: Fake Game ($GOGID)\n# renderer: dxmt/v0.80\n# ---\n' >"\$RUN"
+    gpu='Apple M4 Pro (ID=0x0)'
+fi
 echo "\$(date) [\$\$] launch Fake Game" >>"\$GOGO_LOG_DIR/launch.log"
 pl="$st/games/$GOGID/prefix/drive_c/users/crossover/AppData/LocalLow/Chance/Neo Cab/Player.log"
-printf 'Direct3D:\r\n    Version:  Direct3D 11.0 [level 11.1]\r\n    Renderer: Apple M4 Pro (ID=0x0)\r\n' >"\$pl"
+printf 'Direct3D:\r\n    Version:  Direct3D 11.0 [level 11.1]\r\n    Renderer: %s\r\n' "\$gpu" >"\$pl"
 echo 'Creating D3D11 RenderSystem' >"$st/games/$GOGID/game/ogre.log"
 { echo 'info:dxmt: Using feature level D3D_FEATURE_LEVEL_11_1'
   echo '0124:err:combase:RoGetActivationFactory Failed to find library for L"Windows.System.DispatcherQueue"'; } | tee -a "\$RUN"
 if [ "\$MODE" = quits ]; then sleep 1; printf '# ---\n# exit: 0\n' >>"\$RUN"; exit 0; fi
 ign=:
 if [ "\$MODE" = stubborn ]; then trap '' TERM; ign="trap '' TERM"; fi
-( (eval "\$ign"; export WINEPREFIX="$st/games/$GOGID/prefix"; exec "$WINEPROC" 300) & echo \$! >"$T/$name/game.pid" )
-( (eval "\$ign"; exec -a 'C:\GOG\Fake Game\Fake.exe' "$WINEPROC" 300) & echo \$! >"$T/$name/exe.pid" )
-if [ "\$MODE" != stubborn ]; then
-    trap 'kill \$(cat "$T/$name/game.pid" "$T/$name/exe.pid"); printf "# ---\n# exit: 143 (SIGTERM)\n" >>"\$RUN"; exit 143' TERM
+( (eval "\$ign"; export WINEPREFIX="$st/games/$GOGID/prefix"; exec "$WINEPROC" $LIFETIME) & echo \$! >"$T/$name/game.pid" )
+( (eval "\$ign"; exec -a 'C:\GOG\Fake Game\Fake.exe' "$WINEPROC" $LIFETIME) & echo \$! >"$T/$name/exe.pid" )
+TICK=""
+if [ "\$MODE" = d3dmetal ]; then
+    (for _ in \$(seq \$((2 * $LIFETIME))); do echo "0130:fixme:tick"; echo tick >>"\$pl"; sleep 0.5; done) | tee -a "\$RUN" &
+    TICK=\$!
 fi
-while :; do sleep 1; done
+if [ "\$MODE" != stubborn ]; then
+    trap 'pkill -P \$\$; kill \$(cat "$T/$name/game.pid" "$T/$name/exe.pid") \$TICK; printf "# ---\n# exit: 143 (SIGTERM)\n" >>"\$RUN"; exit 143' TERM
+fi
+# Idle, not spinning; gone after LIFETIME seconds even if nobody stops it.
+for _ in \$(seq $LIFETIME); do sleep 1; done
 EOF
     chmod +x "$app/Contents/MacOS/Fake Game" "$st/runtimes/fake/engine/bin/wineserver"
 }
@@ -123,7 +156,7 @@ has_pids() { # name summary jq-path files…
 
 # Another Wine game (another prefix and folder), outside every tree: never
 # counted, never stopped.
-( (export WINEPREFIX="$T/other/prefix"; exec -a 'C:\GOG\Other Game\Other.exe' "$WINEPROC" 300) & echo $! >"$T/decoy.pid" )
+( (export WINEPREFIX="$T/other/prefix"; exec -a 'C:\GOG\Other Game\Other.exe' "$WINEPROC" $LIFETIME) & echo $! >"$T/decoy.pid" )
 
 # 1. Cooperative launcher: SIGTERM teardown, logs collected.
 fake_bundle good good
@@ -148,6 +181,8 @@ if grep -q -F "$HOME/" "$s"; then bad "good: summary contains \$HOME"; else ok "
 if [ -f "$(dirname "$s")/launcher-logs/launch.log" ]; then ok "good: launch.log copied"; else bad "good: launch.log missing"; fi
 has_pids "good: detached game found (WINEPREFIX, exe path)" "$s" .processes good/game.pid good/exe.pid
 has_pids "good: another prefix's game not counted" "$s" .processes --not decoy.pid
+check "good: silent after start-up shows in log_quiet_secs" \
+    '.log_quiet_secs >= 2 and .engine_log_quiet_secs >= 2 and .markers.d3dmetal == []' "$s"
 check "good: only this run's engine logs, no CRs" \
     '(.engine_logs | any(test("Player-prev")) | not) and (.markers.unity | any(test("AMD")) | not) and ([.markers[][]] | any(test("\r")) | not)' "$s"
 if alive "$(pid_of good/game.pid)" || alive "$(pid_of good/exe.pid)"; then bad "good: detached game left running"; else ok "good: detached game stopped"; fi
@@ -170,10 +205,10 @@ if pgrep -f "$T/stubborn/" >/dev/null; then bad "stubborn: processes left"; else
 
 # 3. The game quits by itself before --secs.
 fake_bundle quits quits
-s="$(run_hp quits)"
+s="$(run_hp quits --secs 6)"
 [ -f "$s" ] || { bad "quits: no summary"; s=/dev/null; }
 check "quits: exited early, exit code from the run log" \
-    '.status == "exited" and .exited_after_secs != null and .exited_after_secs < 3 and .run_exit == "0" and .teardown.ok' "$s"
+    '.status == "exited" and .exited_after_secs != null and .exited_after_secs < 6 and .run_exit == "0" and .teardown.ok' "$s"
 
 # 4. --dry-run launches nothing.
 fake_bundle dry good
@@ -189,7 +224,23 @@ mkdir -p "$T/notgogo.app"
 rc=0; "$HP" "$T/notgogo.app" >/dev/null 2>&1 || rc=$?
 if [ "$rc" = 2 ]; then ok "usage: not a gogo bundle → 2"; else bad "usage: rc $rc"; fi
 
+# 4. D3DMetal: its marker comes from Unity's renderer line, not from the run
+# log's header; a game that keeps logging isn't quiet.
+fake_bundle d3dm d3dmetal
+s="$(run_hp d3dm)"
+[ -f "$s" ] || { bad "d3dmetal: no summary ($(cat "$T/d3dm/stderr"))"; s=/dev/null; }
+check "d3dmetal: marker from Unity's renderer, none from the header" \
+    '(.markers.d3dmetal | length > 0) and (.markers.d3dmetal | all(test("AMD Compatibility Mode")))
+     and ([.markers[][]] | any(test("^[0-9]+ # ")) | not)' "$s"
+check "d3dmetal: logs not quiet, clean teardown" \
+    '.log_quiet_secs <= 1 and .engine_log_quiet_secs <= 1 and .teardown.ok' "$s"
+
 if alive "$(pid_of decoy.pid)"; then ok "decoy: the other game survived"; else bad "decoy: the other game was stopped"; fi
+kill -KILL "$(pid_of decoy.pid)" 2>/dev/null || true
+sleep 1
+left="$(stub_pids)"
+if [ -z "$left" ]; then ok "nothing this test started is still running"
+else bad "still running: $(tr "\n" " " <<<"$left")"; fi
 
 if [ "$fails" != 0 ]; then echo "$fails failed"; exit 1; fi
 echo "all host-pass fake cases pass"
