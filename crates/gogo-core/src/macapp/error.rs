@@ -72,6 +72,11 @@ pub enum MacAppError {
     #[error("--portable: {0}")]
     Portable(String),
 
+    /// A runtime or renderer of the wrong architecture for this Mac or for
+    /// each other (#82).
+    #[error("{0}")]
+    Arch(String),
+
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }

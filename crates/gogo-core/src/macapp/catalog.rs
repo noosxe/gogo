@@ -135,10 +135,124 @@ pub struct CatalogEntry {
     /// May gogo redistribute this inside produced artifacts? (GPTK: never.)
     pub redistributable: bool,
     pub min_macos: Option<&'static str>,
-    pub arch: &'static str,
+    /// What the entry's code runs as; `None`: arch-independent (a script).
+    pub arch: Option<Arch>,
+    /// Used in place from the store, as its vendor shipped it: never
+    /// copied into a bundle (`--portable`), cloned into a derived runtime
+    /// or re-signed. An entitlement-signed ARM64 engine (docs/19 §7.2)
+    /// stops working once re-signed; GPTK is kept as shipped too.
+    pub vendor_signed: bool,
     pub note: &'static str,
     /// Engines that need a dylib set beside them (`Frameworks/`).
     pub frameworks: Option<FrameworksSet>,
+}
+
+impl CatalogEntry {
+    /// Does this entry's code need Rosetta 2 on Apple Silicon?
+    pub fn needs_rosetta(&self) -> bool {
+        self.arch.is_some_and(Arch::needs_rosetta)
+    }
+
+    /// `arch` for menus and listings.
+    pub fn arch_label(&self) -> &'static str {
+        self.arch.map_or("any", Arch::label)
+    }
+}
+
+/// The architecture an entry's code runs as (#82, docs/19 §6.1, §7). Every
+/// entry is x86_64 under Rosetta today; an ARM64 Wine (+ FEX) runtime and
+/// ARM64EC renderer builds are new catalog entries, not a redesign.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arch {
+    /// x86_64 Mach-O: native on an Intel Mac, Rosetta 2 on Apple Silicon.
+    X86_64Rosetta,
+    /// A native arm64 runtime.
+    Arm64,
+    /// ARM64EC Windows code: a renderer build for an `Arm64` runtime.
+    Arm64ec,
+}
+
+impl Arch {
+    /// The `<arch>` level of `renderers/<id>/<ver>/<arch>/` (design 16).
+    pub fn dir(self) -> &'static str {
+        match self {
+            Arch::X86_64Rosetta => "x86_64",
+            Arch::Arm64 => "arm64",
+            Arch::Arm64ec => "arm64ec",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Arch::X86_64Rosetta => "x86_64 (Rosetta 2 on Apple Silicon)",
+            Arch::Arm64 => "arm64",
+            Arch::Arm64ec => "arm64ec",
+        }
+    }
+
+    pub fn needs_rosetta(self) -> bool {
+        self == Arch::X86_64Rosetta
+    }
+
+    /// Can a renderer built for `self` run in a runtime of `runtime`?
+    /// x86_64 with x86_64; an arm64 runtime takes arm64 or ARM64EC builds.
+    pub fn renders_for(self, runtime: Arch) -> bool {
+        match runtime {
+            Arch::X86_64Rosetta => self == Arch::X86_64Rosetta,
+            Arch::Arm64 | Arch::Arm64ec => matches!(self, Arch::Arm64 | Arch::Arm64ec),
+        }
+    }
+}
+
+/// The Mac gogo runs on, as far as runtime arch goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostArch {
+    Intel,
+    AppleSilicon { rosetta: bool },
+}
+
+/// What [`runs_on`] says for an x86_64 runtime on an Apple Silicon Mac
+/// without Rosetta: said up front instead of a dyld "bad CPU type".
+pub const NO_ROSETTA: &str = "Rosetta-only runtime on a Mac without Rosetta: install it with \
+     `softwareupdate --install-rosetta --agree-to-license`";
+
+/// Does a runtime of `arch` run on `host`?
+pub fn runs_on(arch: Arch, host: HostArch) -> Result<(), String> {
+    match (arch.needs_rosetta(), host) {
+        (true, HostArch::AppleSilicon { rosetta: false }) => Err(NO_ROSETTA.into()),
+        (false, HostArch::Intel) => Err(format!(
+            "{} runtime on an Intel Mac: it runs on Apple Silicon only",
+            arch.dir()
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// The arch of a runtime reference (`<id>/<ver>`, a derived `<ver>+…` one,
+/// `path:<dir>`, or a bare catalog id). A host Wine (`path:`, brew) is
+/// x86_64: every macOS Wine build is today.
+pub fn runtime_arch(r: &str) -> Arch {
+    r.split('/')
+        .next()
+        .filter(|_| !r.starts_with("path:"))
+        .and_then(find)
+        .and_then(|e| e.arch)
+        .unwrap_or(Arch::X86_64Rosetta)
+}
+
+/// Refuse a renderer whose build doesn't match the runtime's arch.
+pub fn check_renderer_arch(runtime: Arch, renderer: &CatalogEntry) -> Result<(), String> {
+    match renderer.arch {
+        Some(a) if !a.renders_for(runtime) => Err(format!(
+            "renderer {} is built for {}, the runtime is {}: pick a {} build of it or \
+             another runtime",
+            renderer.id,
+            a.dir(),
+            runtime.dir(),
+            runtime.dir()
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// The default runtime track (docs/19 §6.1, #62): the CrossOver-source
@@ -226,7 +340,8 @@ static ENTRIES: &[CatalogEntry] = &[
         license: "LGPL-2.1 (Wine; CrossOver 24.0.7 sources by CodeWeavers, built by Gcenx/Sikarugir)",
         redistributable: true,
         min_macos: None,
-        arch: "x86_64 (Rosetta 2 on Apple Silicon)",
+        arch: Some(Arch::X86_64Rosetta),
+        vendor_signed: false,
         note: "default track (docs/19 §6.1): CrossOver-24-source engine (Wine 9.0). Runs \
                32-bit Inno code without #56's overflow, usable OpenGL, FreeType from its \
                own Frameworks/ (#54)",
@@ -254,7 +369,8 @@ static ENTRIES: &[CatalogEntry] = &[
         license: "LGPL-2.1 (Wine)",
         redistributable: true,
         min_macos: None,
-        arch: "x86_64 (Rosetta 2 on Apple Silicon)",
+        arch: Some(Arch::X86_64Rosetta),
+        vendor_signed: false,
         note: "alternate track (the default is winecx) — gaming patches; gecko+mono bundled. Live                2026-10-19: 32-bit GOG installers (InnoSetup PE32) crash under                Rosetta new-WOW64 (virtual_setup_exception stack overflow); use                the GPTK lane for those",
         frameworks: None,
     },
@@ -270,7 +386,8 @@ static ENTRIES: &[CatalogEntry] = &[
         license: "LGPL-2.1 (Wine)",
         redistributable: true,
         min_macos: None,
-        arch: "x86_64 (Rosetta 2 on Apple Silicon)",
+        arch: Some(Arch::X86_64Rosetta),
+        vendor_signed: false,
         note: "WineHQ devel train. Live 2026-10-19: 32-bit GOG installers crash                under Rosetta new-WOW64; use the GPTK lane for those",
         frameworks: None,
     },
@@ -286,7 +403,8 @@ static ENTRIES: &[CatalogEntry] = &[
         license: "LGPL-2.1 (Wine)",
         redistributable: true,
         min_macos: None,
-        arch: "x86_64 (Rosetta 2 on Apple Silicon)",
+        arch: Some(Arch::X86_64Rosetta),
+        vendor_signed: false,
         note: "WineHQ stable train; tags may carry _N suffixes (docs/15 §8.2)",
         frameworks: None,
     },
@@ -302,7 +420,11 @@ static ENTRIES: &[CatalogEntry] = &[
         license: "Apple evaluation EULA",
         redistributable: false,
         min_macos: Some("14.0"),
-        arch: "aarch64",
+        // GPTK's Wine and D3DMetal are x86_64 (docs/19 §7.2). Used where it
+        // is, as shipped: never derived (not a CrossOver-source engine),
+        // never copied into a bundle (#84) or re-signed.
+        arch: Some(Arch::X86_64Rosetta),
+        vendor_signed: true,
         note: "D3DMetal DX11/12→Metal; consent-download (D9); never redistributed",
         frameworks: None,
     },
@@ -319,7 +441,8 @@ static ENTRIES: &[CatalogEntry] = &[
         license: "LGPL-2.1 (Wine)",
         redistributable: true,
         min_macos: None,
-        arch: "x86_64",
+        arch: Some(Arch::X86_64Rosetta),
+        vendor_signed: false,
         note: "tombstone — cached copies stay usable via `mac-app --runtime path`",
         frameworks: None,
     },
@@ -342,7 +465,8 @@ static ENTRIES: &[CatalogEntry] = &[
         license: "LGPL-2.1+",
         redistributable: true,
         min_macos: None,
-        arch: "any",
+        arch: None,
+        vendor_signed: false,
         note: "src/winetricks at a release tag (sha256-pinned)",
         frameworks: None,
     },
@@ -367,7 +491,8 @@ static ENTRIES: &[CatalogEntry] = &[
         license: "MIT (Copyright (c) FunkyFr3sh and the cnc-ddraw contributors)",
         redistributable: true,
         min_macos: None,
-        arch: "x86_64",
+        arch: Some(Arch::X86_64Rosetta),
+        vendor_signed: false,
         note: "renderer: DirectDraw wrapper (design 13) for 2D DirectDraw games, dropped \
                into the game dir with ddraw=n,b; never over a game's or recipe's own \
                ddraw.dll",
@@ -394,7 +519,8 @@ static ENTRIES: &[CatalogEntry] = &[
         license: "LGPL-2.1 (DXMT, https://github.com/3Shain/dxmt)",
         redistributable: true,
         min_macos: None,
-        arch: "x86_64",
+        arch: Some(Arch::X86_64Rosetta),
+        vendor_signed: false,
         note: "renderer: D3D10/11 to Metal (docs/19 §6.2). Replaces the engine's \
                d3d11/dxgi/d3d10core/winemetal, so it runs from a derived runtime \
                (design 16 decision 3); needs a CrossOver-source engine (winecx) and a \
@@ -428,7 +554,8 @@ static ENTRIES: &[CatalogEntry] = &[
                   distribution with Apple's notices; D3DMetal.framework © Apple Inc.",
         redistributable: false,
         min_macos: Some("14.0"),
-        arch: "x86_64 (64-bit games only)",
+        arch: Some(Arch::X86_64Rosetta),
+        vendor_signed: false,
         note: "renderer: D3D11/12 to Metal (docs/19 §6.2), on consent. The default for \
                64-bit Direct3D 12 games and the alternative to DXMT for 64-bit D3D11. \
                Replaces the engine's d3d11/d3d12/dxgi, so it runs from a derived runtime; \
@@ -1278,6 +1405,55 @@ mod catalog_tests {
         ));
         assert!(!find("gptk").unwrap().redistributable);
         assert!(find("wine-staging").unwrap().redistributable);
+    }
+
+    #[test]
+    fn every_entry_is_x86_64_under_rosetta_and_only_gptk_is_kept_as_shipped() {
+        for e in entries() {
+            match e.id {
+                "winetricks" => assert_eq!((e.arch, e.needs_rosetta()), (None, false)),
+                _ => assert_eq!(e.arch, Some(Arch::X86_64Rosetta), "{}", e.id),
+            }
+            assert_eq!(e.vendor_signed, e.id == "gptk", "{}", e.id);
+        }
+        assert_eq!(find("dxmt").unwrap().arch.unwrap().dir(), "x86_64");
+    }
+
+    #[test]
+    fn runtime_resolution_per_host_arch() {
+        use Arch::*;
+        let intel = HostArch::Intel;
+        let rosetta = HostArch::AppleSilicon { rosetta: true };
+        let bare = HostArch::AppleSilicon { rosetta: false };
+        // Today's runtimes: anywhere but an Apple Silicon Mac without Rosetta.
+        assert!(runs_on(X86_64Rosetta, intel).is_ok());
+        assert!(runs_on(X86_64Rosetta, rosetta).is_ok());
+        let err = runs_on(X86_64Rosetta, bare).unwrap_err();
+        assert!(err.starts_with("Rosetta-only runtime on a Mac without Rosetta"));
+        // An ARM64 runtime (post-Rosetta): Apple Silicon only, Rosetta or not.
+        assert!(runs_on(Arm64, rosetta).is_ok());
+        assert!(runs_on(Arm64, bare).is_ok());
+        assert!(runs_on(Arm64, intel).unwrap_err().contains("Intel Mac"));
+
+        // Refs: catalog ids (derived versions too); host Wines are x86_64.
+        assert_eq!(runtime_arch("winecx/24.0.7_7+dxmt-v0.80"), X86_64Rosetta);
+        assert_eq!(runtime_arch("gptk"), X86_64Rosetta);
+        assert_eq!(runtime_arch("path:/opt/wine"), X86_64Rosetta);
+        assert_eq!(runtime_arch("no-such/1"), X86_64Rosetta);
+    }
+
+    #[test]
+    fn mismatched_runtime_and_renderer_arch_is_refused() {
+        use Arch::*;
+        let dxmt = find("dxmt").unwrap();
+        assert!(check_renderer_arch(X86_64Rosetta, dxmt).is_ok());
+        let err = check_renderer_arch(Arm64, dxmt).unwrap_err();
+        assert!(
+            err.contains("dxmt is built for x86_64, the runtime is arm64"),
+            "{err}"
+        );
+        assert!(Arm64ec.renders_for(Arm64) && Arm64.renders_for(Arm64));
+        assert!(!Arm64ec.renders_for(X86_64Rosetta));
     }
 
     #[test]

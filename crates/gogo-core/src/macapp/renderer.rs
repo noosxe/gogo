@@ -512,6 +512,14 @@ pub fn apply(renderer: &str, rt: Runtime, game_dir: Option<&Path>) -> Applied {
         out.notes
             .push("removed gogo's cnc-ddraw from the game dir".into());
     }
+    // #82: a renderer build for another arch than the runtime's.
+    let arch = catalog::runtime_arch(&super::launch::runtime_ref(&out.runtime));
+    if let Some(Err(e)) =
+        catalog::find(r.renderer.id()).map(|e| catalog::check_renderer_arch(arch, e))
+    {
+        out.warnings.push(format!("{e}: using wined3d"));
+        return out;
+    }
     match r.renderer {
         Renderer::Wined3d => {}
         Renderer::D3dMetal if !d3dmetal_available() => out.warnings.push(format!(

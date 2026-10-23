@@ -43,10 +43,14 @@ fn renderer_manifest_path() -> PathBuf {
     renderers_dir().join("manifest.json")
 }
 
-/// The `<arch>` level of `renderers/<id>/<ver>/<arch>/`: the runtime arch a
-/// payload is for. Every runtime is x86_64 (Rosetta) today; arm64ec joins
-/// it with an ARM64 runtime.
-pub const RENDERER_ARCH: &str = "x86_64";
+/// The `<arch>` level of `renderers/<id>/<ver>/<arch>/`: the arch of the
+/// catalog's build of `id` (#82). x86_64 for every renderer today; an
+/// ARM64EC build (`arm64ec`) joins as its own catalog entry.
+pub fn renderer_arch(id: &str) -> catalog::Arch {
+    catalog::find(id)
+        .and_then(|e| e.arch)
+        .unwrap_or(catalog::Arch::X86_64Rosetta)
+}
 
 /// Is `id` a renderer catalog entry (stored under `renderers/`)?
 pub fn is_renderer(id: &str) -> bool {
@@ -76,17 +80,36 @@ pub struct ManifestEntry {
     pub bytes: u64,
 }
 
-/// Tree root of a cached entry: `<runtimes>/<id>/<version>/`, or
+/// Where an entry installs: `<runtimes>/<id>/<version>/`, or
 /// `<renderers>/<id>/<version>/<arch>/` for a renderer.
-pub fn tree_root(m: &ManifestEntry) -> PathBuf {
+fn store_root(m: &ManifestEntry) -> PathBuf {
     if is_renderer(&m.id) {
         renderers_dir()
             .join(&m.id)
             .join(&m.version)
-            .join(RENDERER_ARCH)
+            .join(renderer_arch(&m.id).dir())
     } else {
         runtimes_dir().join(&m.id).join(&m.version)
     }
+}
+
+/// Tree root of a cached entry ([`store_root`]). An x86_64 renderer stored
+/// without the `<arch>` level is read where it is, as x86_64 (#82):
+/// `renderers/<id>/<ver>/`, or `runtimes/<id>/<ver>/` from before the
+/// renderer store (#70; cnc-ddraw). Nothing is moved or re-downloaded.
+pub fn tree_root(m: &ManifestEntry) -> PathBuf {
+    let root = store_root(m);
+    if !is_renderer(&m.id)
+        || renderer_arch(&m.id) != catalog::Arch::X86_64Rosetta
+        || root.join(&m.entry_rel).is_file()
+    {
+        return root;
+    }
+    [renderers_dir(), runtimes_dir()]
+        .into_iter()
+        .map(|d| d.join(&m.id).join(&m.version))
+        .find(|r| r.join(&m.entry_rel).is_file())
+        .unwrap_or(root)
 }
 
 /// Is `version` a derived runtime (`<ver>+<renderer>-<rver>`, decision 3)?
@@ -141,7 +164,13 @@ fn save_manifest_at(path: &Path, entries: &[ManifestEntry]) -> Result<(), MacApp
 /// still exist on disk. Unpinned lookups never pick a derived runtime: those
 /// are reached only by their full `<ver>+<renderer>-<rver>` version.
 pub fn installed(id: &str, version: Option<&str>) -> Option<(ManifestEntry, PathBuf)> {
-    let mut hits: Vec<ManifestEntry> = load_manifest_at(&manifest_path_for(id))
+    let mut all = load_manifest_at(&manifest_path_for(id));
+    if is_renderer(id) {
+        // A renderer installed before the renderer store (#70) is in the
+        // runtime manifest; [`tree_root`] finds it as x86_64.
+        all.extend(load_manifest());
+    }
+    let mut hits: Vec<ManifestEntry> = all
         .into_iter()
         .filter(|m| {
             m.id == id
@@ -371,7 +400,7 @@ pub async fn install(
         entry_rel,
         bytes,
     };
-    let dest = tree_root(&m);
+    let dest = store_root(&m);
     std::fs::create_dir_all(dest.parent().expect("dest has a parent"))?;
     let _ = std::fs::remove_dir_all(&dest);
     std::fs::rename(&extract_dir, &dest)?;
@@ -435,6 +464,21 @@ pub fn derive(
         path: path.to_path_buf(),
         reason,
     };
+    if catalog::find(&base.id).is_some_and(|e| e.vendor_signed) {
+        return Err(invalid(
+            &base_root,
+            format!(
+                "{} is used as its vendor shipped it: gogo never clones it into a \
+                 derived runtime",
+                base.id
+            ),
+        ));
+    }
+    // #82: an overlay built for another arch than the base engine's.
+    if let Some(entry) = catalog::find(&renderer.id) {
+        catalog::check_renderer_arch(catalog::runtime_arch(&base.id), entry)
+            .map_err(|e| invalid(&base_root, e))?;
+    }
     if !base.entry_rel.starts_with("engine/") {
         return Err(invalid(
             &base_root,
@@ -1377,6 +1421,7 @@ pub(crate) mod store_tests {
             redistributable: true,
             min_macos: None,
             arch: real.arch,
+            vendor_signed: false,
             note: "test",
             frameworks: None,
         }));
@@ -1586,6 +1631,7 @@ pub(crate) mod store_tests {
             redistributable: true,
             min_macos: None,
             arch: real.arch,
+            vendor_signed: false,
             note: "test",
             frameworks: Some(catalog::FrameworksSet {
                 asset: pin(
@@ -1752,6 +1798,7 @@ pub(crate) mod store_tests {
             redistributable: false,
             min_macos: None,
             arch: real.arch,
+            vendor_signed: false,
             note: "test",
             frameworks: None,
         }));
@@ -1937,6 +1984,49 @@ pub(crate) mod store_tests {
         let dxmt = entry("dxmt", "v0.80", "v0.80/x86_64-unix/winemetal.so");
         let err = derive(&base, &dxmt).unwrap_err();
         assert!(err.to_string().contains("{engine,Frameworks}"), "{err}");
+    }
+
+    #[test]
+    fn a_vendor_signed_runtime_is_never_cloned_into_a_derived_one() {
+        let home = tempfile::tempdir().unwrap();
+        let _g = env_home(home.path());
+        // Even in the engine layout, GPTK stays as shipped.
+        let base = entry("gptk", "3.0-3", "engine/bin/wine");
+        write_exec(&tree_root(&base).join(&base.entry_rel), "#!/bin/sh\n");
+        let dxmt = entry("dxmt", "v0.80", "v0.80/x86_64-unix/winemetal.so");
+        let err = derive(&base, &dxmt).unwrap_err().to_string();
+        assert!(err.contains("as its vendor shipped it"), "{err}");
+        assert!(!runtimes_dir().join("gptk/3.0-3+dxmt-v0.80").exists());
+        assert!(!tmp_dir().exists());
+    }
+
+    #[test]
+    fn renderers_stored_without_the_arch_level_resolve_in_place_as_x86_64() {
+        let home = tempfile::tempdir().unwrap();
+        let _g = env_home(home.path());
+        // cnc-ddraw from before the renderer store (#70): the runtime
+        // manifest, `runtimes/cnc-ddraw/<ver>/`.
+        let ddraw = entry("cnc-ddraw", "v7.1.0.0", "ddraw.dll");
+        let old = runtimes_dir().join("cnc-ddraw/v7.1.0.0");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("ddraw.dll"), "dll").unwrap();
+        save_manifest(std::slice::from_ref(&ddraw)).unwrap();
+        // DXMT at `renderers/dxmt/<ver>/`, no `<arch>` level.
+        let dxmt = entry("dxmt", "v0.80", "v0.80/x86_64-unix/winemetal.so");
+        let flat = renderers_dir().join("dxmt/v0.80");
+        write_exec(&flat.join(&dxmt.entry_rel), "metal");
+        save_renderer_manifest(std::slice::from_ref(&dxmt)).unwrap();
+
+        assert_eq!(installed("cnc-ddraw", None).unwrap().1, old);
+        assert_eq!(installed("dxmt", Some("v0.80")).unwrap().1, flat);
+        // Nothing moved; a fresh install still goes to the arch level, and
+        // then wins over the old copy.
+        assert!(old.join("ddraw.dll").is_file());
+        assert_eq!(store_root(&dxmt), renderers_dir().join("dxmt/v0.80/x86_64"));
+        write_exec(&store_root(&dxmt).join(&dxmt.entry_rel), "metal");
+        assert_eq!(tree_root(&dxmt), store_root(&dxmt));
+        // A runtime is never looked up anywhere else.
+        assert_eq!(installed("winecx", None), None);
     }
 
     #[test]

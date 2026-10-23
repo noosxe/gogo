@@ -481,9 +481,18 @@ games/<gogid>/{prefix,game,state.toml,launch.conf}
   `x86_64/v0.80/{x86_64-windows,i386-windows,x86_64-unix}`; cnc-ddraw: the zip's
   files) plus a `NOTICES.txt`. Only `x86_64` exists today. Both entries are pinned
   by sha256 (`dxmt-v0.80-builtin.tar.gz`; cnc-ddraw `v7.1.0.0`, whose release has
-  no GitHub digest). cnc-ddraw moved here from `runtimes/cnc-ddraw/`: the old
-  cached copy is ignored (re-downloaded once, 2.6 MB) and `gogo runtimes prune
-  cnc-ddraw` removes both.
+  no GitHub digest). cnc-ddraw moved here from `runtimes/cnc-ddraw/`, and
+  `gogo runtimes prune cnc-ddraw` removes both.
+- *#82:* the catalog says each entry's arch (`X86_64Rosetta`, `Arm64`, `Arm64ec`;
+  every entry is x86_64 today) and `<arch>` is that build's `Arch::dir()`.
+  Old layouts are read in place as x86_64, never moved or re-downloaded: a
+  renderer at `renderers/<id>/<ver>/` without the `<arch>` level, and a pre-#70
+  `runtimes/cnc-ddraw/<ver>/` in the runtime manifest. New installs always go
+  to `<arch>/`. A renderer build for another arch than the runtime's is
+  refused (a forced `--renderer` at build; a wined3d fallback with the reason
+  at setup and in `derive`). A `vendor_signed` runtime (GPTK today; an
+  entitlement-signed ARM64 engine later) is used in place: `derive`,
+  `--portable` and the portable engine copy refuse it.
 - *#70:* `prune` checks `state.toml`'s `renderer` as well as its `runtime`; `runtime`
   there is the runtime actually run, so a game on DXMT protects
   `<id>/<ver>+dxmt-<rver>` (and, through the shared id dir, its base).

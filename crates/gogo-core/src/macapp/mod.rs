@@ -613,8 +613,7 @@ fn choose_runtime(
     let cancelled = || MacAppError::RuntimeNotFound {
         tried: "runtime selection cancelled".into(),
     };
-    let rosetta_missing =
-        cfg!(target_arch = "aarch64") && !rosetta_present() && !cfg!(target_os = "linux");
+    let rosetta_missing = host_arch() == catalog::HostArch::AppleSilicon { rosetta: false };
 
     // Lanes: cached flavors, then locally installed (brew, GPTK), then
     // downloadable ones in catalog order.
@@ -691,11 +690,11 @@ fn choose_runtime(
                 MenuLane::Cached(entry, m) => format!("{} {} (✓ cached)", entry.id, m.version),
                 MenuLane::Local { label, .. } => label.clone(),
                 MenuLane::Fresh(entry) => {
-                    let mut line = format!("download {} — {}", entry.id, entry.arch);
+                    let mut line = format!("download {} — {}", entry.id, entry.arch_label());
                     if entry.id == catalog::DEFAULT_RUNTIME {
                         line.push_str(" · recommended");
                     }
-                    if rosetta_missing && entry.arch.starts_with("x86_64") {
+                    if rosetta_missing && entry.needs_rosetta() {
                         line.push_str(" — Rosetta missing: softwareupdate --install-rosetta");
                     }
                     if matches!(entry.status, catalog::Status::ConsentRequired) {
@@ -811,6 +810,19 @@ enum MenuLane {
     Fresh(&'static catalog::CatalogEntry),
 }
 
+/// This Mac, for [`catalog::runs_on`]: Apple Silicon with or without
+/// Rosetta, or anything else (an Intel Mac; Linux, where mac-app refuses
+/// anyway).
+pub fn host_arch() -> catalog::HostArch {
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        catalog::HostArch::AppleSilicon {
+            rosetta: rosetta_present(),
+        }
+    } else {
+        catalog::HostArch::Intel
+    }
+}
+
 /// Rosetta 2 presence (Apple Silicon hosts): best-effort marker files.
 fn rosetta_present() -> bool {
     [
@@ -891,9 +903,28 @@ pub fn plan(
     let runtime_flag =
         opts.mode != RuntimeMode::Auto || opts.runtime_path.is_some() || menu.is_some();
     let (runtime, runtime_downloaded) =
-        resolve_runtime(opts, recipe.as_ref(), pin.as_deref(), menu, emit)?;
+        resolve_runtime(opts, recipe.as_ref(), pin.as_deref(), menu, emit).map_err(|e| {
+            // #82: a Rosetta-only runtime on a Mac without Rosetta fails its
+            // probe with a dyld "bad CPU type"; say why instead.
+            let wanted = match &opts.mode {
+                RuntimeMode::Catalog(id) => id.as_str(),
+                RuntimeMode::Gptk => "gptk",
+                _ => pin.as_deref().unwrap_or(catalog::DEFAULT_RUNTIME),
+            };
+            match catalog::runs_on(catalog::runtime_arch(wanted), host_arch()) {
+                Err(reason) => MacAppError::Arch(format!("{reason} ({e})")),
+                Ok(()) => e,
+            }
+        })?;
     if opts.portable {
         portable::check_runtime(&runtime)?;
+    }
+    // #82: a forced renderer must be a build for the runtime's arch.
+    if let RendererChoice::Force(r) = opts.renderer
+        && let Some(entry) = catalog::find(r.id())
+    {
+        let arch = catalog::runtime_arch(&launch::runtime_ref(&runtime));
+        catalog::check_renderer_arch(arch, entry).map_err(MacAppError::Arch)?;
     }
     let kind = runtime.mode.as_str().to_string();
     let wine = runtime.wine.display().to_string();

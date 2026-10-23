@@ -44,30 +44,33 @@ pub const D3DMETAL: &str = "D3DMetal can't go into a portable bundle: it is Appl
      store, after your consent, and never redistributes inside bundles; pick another \
      `--renderer` (dxmt, wined3d)";
 
-/// Can `rt` go inside a bundle someone else gets? Not Apple's GPTK and not
-/// a catalog runtime whose download is consent-gated: gogo promised never to
-/// redistribute those. #82's vendor-signed runtimes belong here too, once
-/// they exist: an entitlement-signed engine can't be copied into another
-/// signed bundle either.
-pub(super) fn check_runtime(rt: &Runtime) -> Result<(), MacAppError> {
-    let gated = match &rt.mode {
-        RuntimeMode::Gptk => true,
+/// The catalog entry `rt` was resolved from: a GPTK mount is the `gptk`
+/// entry; a host Wine (`path:`, brew) has none.
+fn catalog_entry(rt: &Runtime) -> Option<&'static catalog::CatalogEntry> {
+    match &rt.mode {
+        RuntimeMode::Gptk => catalog::find("gptk"),
         _ => {
             let r = launch::runtime_ref(rt);
             r.split_once('/')
                 .filter(|_| !r.starts_with("path:"))
                 .and_then(|(id, _)| catalog::find(id))
-                .is_some_and(|e| matches!(e.status, catalog::Status::ConsentRequired))
         }
-    };
-    if gated {
-        return Err(MacAppError::Portable(format!(
-            "runtime {} is consent-gated (Apple's Game Porting Toolkit licence): gogo \
-             doesn't redistribute it inside bundles; pick another `--runtime` (winecx)",
-            rt.version
-        )));
     }
-    Ok(())
+}
+
+/// Can `rt` be copied into a bundle (#82)? Not a `vendor_signed` runtime:
+/// it is used in place, as its vendor shipped it. An entitlement-signed
+/// engine stops working once re-signed into another bundle; Apple's GPTK
+/// is one gogo promised never to redistribute.
+pub(super) fn check_runtime(rt: &Runtime) -> Result<(), MacAppError> {
+    match catalog_entry(rt) {
+        Some(e) if e.vendor_signed => Err(MacAppError::Portable(format!(
+            "runtime {} ({}) is used in place, as its vendor shipped it ({}): gogo never \
+             copies or re-signs it into a bundle; pick another `--runtime` (winecx)",
+            rt.version, e.id, e.license
+        ))),
+        _ => Ok(()),
+    }
 }
 
 /// `games/<gogid>/portable`, which a portable bundle's launcher writes once
@@ -329,6 +332,7 @@ pub(super) fn finish(
 /// links, D3DMetal's framework) and the dylibs it loads into
 /// `Resources/wine-frameworks`. Returns the TOML's `wine` and `frameworks`.
 fn copy_engine(rt: &Runtime, res: &Path) -> Result<(String, Option<String>), MacAppError> {
+    check_runtime(rt)?;
     let engine = launch::engine_root(rt).canonicalize()?;
     bundle::clone_tree(&engine, &res.join(WINE_DIR))?;
     // A link out of the bundle fails `codesign --strict` and points at
@@ -563,6 +567,39 @@ mod portable_tests {
             Path::new("libinotify.0.dylib")
         );
         assert!(!res.join("wine-frameworks/GStreamer.framework").exists());
+    }
+
+    fn runtime(mode: RuntimeMode, root: &Path) -> Runtime {
+        Runtime {
+            mode,
+            kind: "test",
+            root: root.to_path_buf(),
+            wine: root.join("engine/bin/wine"),
+            version: "wine-7.7".into(),
+            min_macos: None,
+        }
+    }
+
+    #[test]
+    fn a_vendor_signed_runtime_is_never_copied() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("engine/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("wine"), b"wine").unwrap();
+        assert!(catalog::find("gptk").unwrap().vendor_signed);
+        let gptk = runtime(RuntimeMode::Gptk, tmp.path());
+        let err = check_runtime(&gptk).unwrap_err().to_string();
+        assert!(err.contains("as its vendor shipped it"), "{err}");
+        assert!(err.contains("Apple evaluation EULA"), "{err}");
+        // The copier refuses it too, before writing anything.
+        let res = tmp.path().join("Resources");
+        assert!(matches!(
+            copy_engine(&gptk, &res),
+            Err(MacAppError::Portable(_))
+        ));
+        assert!(!res.exists());
+        // A host Wine is not a catalog entry: copied as before.
+        assert!(check_runtime(&runtime(RuntimeMode::Path, tmp.path())).is_ok());
     }
 
     #[test]
