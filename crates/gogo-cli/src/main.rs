@@ -2793,7 +2793,7 @@ async fn runtimes_cmd(args: crate::cli::RuntimesArgs) -> Result<i32, AppError> {
                         .as_ref()
                         .map(|l| gogo::fmt::human_size(l.size))
                         .unwrap_or_else(|| "-".into()),
-                    entry.arch.to_string(),
+                    entry.arch_label().to_string(),
                     cached_col,
                 ]);
                 json_rows.push(serde_json::json!({
@@ -2801,7 +2801,8 @@ async fn runtimes_cmd(args: crate::cli::RuntimesArgs) -> Result<i32, AppError> {
                     "default": entry.id == catalog::DEFAULT_RUNTIME,
                     "status": status,
                     "license": entry.license,
-                    "arch": entry.arch,
+                    "arch": entry.arch_label(),
+                    "vendor_signed": entry.vendor_signed,
                     "latest": latest.as_ref().map(|l| serde_json::json!({
                         "tag": l.tag,
                         "bytes": l.size,

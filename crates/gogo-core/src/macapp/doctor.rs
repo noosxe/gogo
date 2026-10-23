@@ -17,7 +17,7 @@ use super::compat;
 use super::error::MacAppError;
 use super::launch::{self, GameDirs, GameState, LaunchToml};
 use super::renderer::{self, Renderer, RendererRef};
-use super::{d3dmetal, installer, store};
+use super::{catalog, d3dmetal, installer, store};
 
 /// How bad a finding is. Only [`Level::Fail`] fails the command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -265,7 +265,10 @@ pub fn doctor(target: &str, opts: &DoctorOptions) -> Result<Report, MacAppError>
         ));
     }
     f.push(check_links(&dirs, &gogid));
-    f.push(check_rosetta(&opts.host));
+    f.push(check_rosetta(
+        &opts.host,
+        eff.as_ref().map(|e| e.runtime.as_str()),
+    ));
     f.push(check_processes(
         &dirs,
         state.as_ref(),
@@ -412,7 +415,7 @@ fn portable_checks(
         }
     });
     f.push(check_links(dirs, gogid));
-    f.push(check_rosetta(&opts.host));
+    f.push(check_rosetta(&opts.host, None));
     f.push(check_processes(dirs, None, opts.stop_leftovers, gogid));
     f.push(check_log(&opts.host.logs.join(gogid)));
 }
@@ -806,15 +809,27 @@ fn normalize(p: &Path) -> PathBuf {
     out
 }
 
-fn check_rosetta(host: &Host) -> Finding {
-    match &host.rosetta {
-        None => Finding::ok("rosetta", "not needed on this host"),
-        Some(p) if p.exists() => Finding::ok("rosetta", "installed"),
-        Some(_) => Finding::fail(
+/// Rosetta for the game's runtime (#82, [`catalog::runs_on`]); a portable
+/// bundle's (`None`) is x86_64 like every runtime today.
+fn check_rosetta(host: &Host, runtime: Option<&str>) -> Finding {
+    let host = match &host.rosetta {
+        None => return Finding::ok("rosetta", "not needed on this host"),
+        Some(p) => catalog::HostArch::AppleSilicon {
+            rosetta: p.exists(),
+        },
+    };
+    let arch = runtime.map_or(catalog::Arch::X86_64Rosetta, catalog::runtime_arch);
+    let which = runtime.unwrap_or("the bundled runtime");
+    match (catalog::runs_on(arch, host), host) {
+        (Err(e), _) => Finding::fail(
             "rosetta",
-            "Rosetta 2 is not installed: Wine runtimes are x86_64",
+            format!("{which}: {e}"),
             "softwareupdate --install-rosetta --agree-to-license",
         ),
+        (Ok(()), catalog::HostArch::AppleSilicon { rosetta: true }) => {
+            Finding::ok("rosetta", "installed")
+        }
+        (Ok(()), _) => Finding::ok("rosetta", format!("not needed by {which}")),
     }
 }
 

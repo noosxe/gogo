@@ -4147,6 +4147,79 @@ fn doctor_game(tmp: &std::path::Path, home: &std::path::Path) -> std::path::Path
     tmp.join("out/Rebel.app")
 }
 
+/// #82: a store and state dir from before the arch-keyed catalog — DXMT
+/// at `renderers/dxmt/<ver>/` with no `<arch>` level, cnc-ddraw where it
+/// lived before the renderer store (`runtimes/cnc-ddraw/<ver>/`, in the
+/// runtime manifest) — still pass doctor, re-derive at setup and retarget,
+/// read in place as x86_64 with nothing downloaded.
+#[test]
+fn doctor_setup_and_retarget_work_on_a_store_from_before_arch_keys() {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let t = tmp.path();
+    let home = t.join("home");
+    // SAFETY: env mutation under ENV_LOCK.
+    unsafe {
+        std::env::set_var("GOGO_HOME", &home);
+        std::env::set_var("GOGO_CONFIG", t.join("config.toml"));
+        std::env::remove_var("GOGO_COMPAT_DIR");
+        std::env::remove_var("GOGO_CNC_DDRAW_DIR");
+    }
+    doctor_game(t, &home);
+    let host = doctor_host(t, true);
+    let gogid = "1000000001";
+
+    // The old layouts.
+    let dxmt = home.join("renderers/dxmt/v0.80");
+    std::fs::rename(dxmt.join("x86_64/v0.80"), t.join("dxmt-aside")).unwrap();
+    std::fs::remove_dir(dxmt.join("x86_64")).unwrap();
+    std::fs::rename(t.join("dxmt-aside"), dxmt.join("v0.80")).unwrap();
+    let ddraw = home.join("runtimes/cnc-ddraw/v7.1.0.0");
+    std::fs::create_dir_all(&ddraw).unwrap();
+    std::fs::write(ddraw.join("ddraw.dll"), "cnc-ddraw").unwrap();
+    let mut manifest = macapp::store::load_manifest();
+    manifest.push(macapp::store::ManifestEntry {
+        id: "cnc-ddraw".into(),
+        version: "v7.1.0.0".into(),
+        sha256: "0".into(),
+        fetched_at: "2026-10-19T00:00:00Z".into(),
+        upstream_url: "http://x".into(),
+        entry_rel: "ddraw.dll".into(),
+        bytes: 1,
+    });
+    macapp::store::save_manifest(&manifest).unwrap();
+
+    assert!(not_ok(gogid, &host).is_empty());
+
+    // Setup's stamp: a derived runtime gone is rebuilt from the flat DXMT.
+    let derived = home.join("runtimes/winecx/24.0.7_7+dxmt-v0.80");
+    std::fs::remove_dir_all(&derived).unwrap();
+    let out = macapp::setup::setup(gogid, None).unwrap();
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert_eq!(out.state.renderer, "dxmt/v0.80");
+    assert!(
+        derived
+            .join("engine/lib/wine/x86_64-unix/winemetal.so")
+            .is_file()
+    );
+    assert!(not_ok(gogid, &host).is_empty());
+
+    // --retarget to cnc-ddraw: the pre-#70 copy, not a download.
+    let r = macapp::setup::retarget(gogid, &[("renderer", Some("cnc-ddraw"))]).unwrap();
+    let out = r.setup.expect("setup ran").unwrap();
+    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert!(
+        out.state.renderer.starts_with("cnc-ddraw"),
+        "{}",
+        out.state.renderer
+    );
+    assert!(!home.join("renderers/cnc-ddraw").exists());
+    assert!(not_ok(gogid, &host).is_empty());
+
+    unsafe { std::env::remove_var("GOGO_HOME") };
+    drop(guard);
+}
+
 /// A host whose codesign is a stub (`ok` or not), with Rosetta "installed".
 fn doctor_host(tmp: &std::path::Path, codesign_ok: bool) -> macapp::doctor::Host {
     let codesign = tmp.join(if codesign_ok {
@@ -4270,6 +4343,22 @@ fn doctor_all_green_then_each_check_fails_in_turn() {
     let mut no_rosetta = host.clone();
     no_rosetta.rosetta = Some(t.join("no-rosetta"));
     assert_eq!(not_ok(gogid, &no_rosetta), [("rosetta", Level::Fail)]);
+    let r = macapp::doctor::doctor(
+        gogid,
+        &DoctorOptions {
+            host: no_rosetta,
+            stop_leftovers: false,
+        },
+    )
+    .unwrap();
+    let rosetta = r.findings.iter().find(|f| f.check == "rosetta").unwrap();
+    assert!(
+        rosetta
+            .message
+            .contains("winecx/24.0.7_7: Rosetta-only runtime on a Mac without Rosetta"),
+        "{}",
+        rosetta.message
+    );
 
     let base = home.join("runtimes/winecx/24.0.7_7");
     std::fs::rename(&base, t.join("aside")).unwrap();
