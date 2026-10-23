@@ -416,7 +416,12 @@ L0  runtime            one curated, pinned engine track, referenced (not frozen)
 - **Watch items**: a CX 25/26-source engine from Gcenx/Sikarugir (newer Wine 11
   base), Heroic's `Wine-Crossover` mirror as a second source, and the
   `WineSikarugir11` engine (fails `wineboot` outside its own launcher on macOS
-  27.0.1 — **verified**; needs investigation before use).
+  27.0.1 — **verified**; needs investigation before use). **Update 2026-10-24
+  (#83, [docs/20](20-newer-cx-engine.md)):** no Gcenx/Sikarugir CX 25/26 engine exists
+  yet; Highball's `highball-engine` builds CX 26.3 (Wine 11.0) from CodeWeavers' LGPL
+  sources and is the candidate to test; Heroic's mirror only carries CX 23.7.1, so it is
+  no second source for our pin; `WineSikarugir11` exits on purpose unless its launcher's
+  `SikarugirAppWine11` variable is set, and gogo should not bypass that.
 - **Post-Rosetta (§7)**: an ARM64 Wine + FEX runtime from whoever ships it signed
   with the restricted entitlements (CrossOver 27 for its own users; an open
   build once Shanks' MRs land and FEX gains Darwin support). This is a new
@@ -609,7 +614,10 @@ as *self-contained on this Mac* rather than *copy the engine into every app*.
    part of the classic catalogue.
 4. **Newer CX-source engine**: CX 24.0.7 is Wine 9.0. The `WineSikarugir11.0`
    engine failed `wineboot` outside its launcher (child process exits after
-   apiset load) — find out what its launcher sets.
+   apiset load) — find out what its launcher sets. **Answered in
+   [docs/20](20-newer-cx-engine.md) §2:** its `ntdll.so` calls `exit(1)` unless
+   `SikarugirAppWine11` is set (a deliberate launcher gate); CX 26.3 from
+   `highball-engine` is the newer CX-source candidate (§1.2).
 5. **CX24 build-time quirks**: `wineboot` loops on wine-mono (MSI 1603) during
    gogo's prefix staging; we used `WINEDLLOVERRIDES=mscoree=`. Moot once the
    prefix is created at first launch, but the root cause is unknown.

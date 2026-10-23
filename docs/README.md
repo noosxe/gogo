@@ -54,6 +54,7 @@ A Rust CLI app that:
 | [15-wine-runtime-distribution.md](15-wine-runtime-distribution.md) | Live-verified macOS Wine runtime distribution: macOS_Wine_builds (primary), winetricks, GPTK constraints, wine-crossover EOL tombstone, deprecations, audits |
 | [16-gog-specific-solidification.md](16-gog-specific-solidification.md) | GOG-specific findings: cnc-ddraw as ecosystem default (Sikarugir/winetricks/GOG forums), ScummVM/DOSBox native lane, recommendation backlog S1–S5 |
 | [19-mac-app-compatibility-strategy.md](19-mac-app-compatibility-strategy.md) | Why mac-app games fail (renderer layer, runtime lineage, bundle model) and the layered fix: CX-lineage runtime by reference, auto renderer from PE imports, GOG-native fixes, GOG-id compat DB; host + VM test matrix; macOS 28 Rosetta risk |
+| [20-newer-cx-engine.md](20-newer-cx-engine.md) | #83: newer CrossOver-source engines (none from Sikarugir; Highball's CX 26.3 build is the candidate), Heroic mirror as second source (no), and why `WineSikarugir11` exits outside its launcher (a deliberate env-var gate) |
 
 🧪 **Launch-testing bundles:** [vm-testing.md](vm-testing.md) — Tart VM workflow
 (`scripts/vm-test.sh`), result format, VM limitations.
