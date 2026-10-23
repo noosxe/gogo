@@ -20,6 +20,7 @@ pub mod ddraw;
 pub mod lutris;
 pub mod pe;
 pub mod prompt;
+pub mod renderer;
 pub mod runtime;
 pub mod setup;
 pub mod store;
@@ -32,6 +33,7 @@ use crate::engine::events::ProgressEvent;
 
 pub use error::MacAppError;
 pub use prompt::{PromptAnswer, PromptFn, PromptKind, PromptSpec};
+pub use renderer::{Renderer, RendererChoice};
 pub use runtime::{RuntimeMode, RuntimeOptions};
 
 use bundle::{Bundle, CodesignPolicy};
@@ -61,8 +63,13 @@ pub struct MacAppPlan {
     pub runtime_downloaded: Option<(String, String)>,
     /// Lutris API base override (tests; see `MacAppOptions::lutris_base`).
     pub lutris_base: Option<String>,
-    /// Resolved cnc-ddraw wrapper choice (design 13 D1).
-    pub ddraw: bool,
+    /// `--renderer` as given; applied at plan time (depot lane) or after
+    /// the install (installer lane).
+    pub renderer_choice: RendererChoice,
+    /// The renderer the bundle will bake (#70), when the game files are
+    /// known at plan time (depot lane). The installer lane decides after the
+    /// install and reports it as a `RendererSelected` event.
+    pub renderer: Option<renderer::Selection>,
     /// v2 bundles (design 16): the per-game state dirs the build writes
     /// into. The depot lane knows its gogid up front; the installer lane
     /// builds in a staging dir and moves it to `games/<gogid>/` once the
@@ -98,8 +105,8 @@ pub struct MacAppOptions {
     /// Lutris API base override (tests pin a wiremock server; the CLI never
     /// sets it).
     pub lutris_base: Option<String>,
-    /// Native cnc-ddraw wrapper (design 13 D1).
-    pub ddraw: DdrawChoice,
+    /// `--renderer` (`--ddraw-wrapper` / `--no-ddraw-wrapper` are aliases).
+    pub renderer: RendererChoice,
     /// Build today's fat bundle (runtime, prefix and game inside the `.app`)
     /// instead of a v2 launcher bundle. Kept as the basis for `--portable`
     /// (#84); not exposed on the CLI yet.
@@ -107,16 +114,6 @@ pub struct MacAppOptions {
     /// The path gogo was invoked as, recorded in the bundle for the
     /// launcher (design 16 decision 2). `None` = the current executable.
     pub gogo_path: Option<PathBuf>,
-}
-
-/// `--ddraw-wrapper` / `--no-ddraw-wrapper` (design 13 D1): `Auto` asks
-/// interactively (default **true**) and is headless-`Off`.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub enum DdrawChoice {
-    #[default]
-    Auto,
-    On,
-    Off,
 }
 
 /// `--recipe auto|none|<installer-slug>|<script-file>` (design 11 §1).
@@ -816,30 +813,6 @@ pub fn plan(
         select_recipe(opts, &display, prompt, emit)?
     };
 
-    // Design 13 D1: the wrapper decision sits between recipe and runtime —
-    // it composes with the recipe (D4: never over its ddraw.dll) and is a
-    // yes/no the user answers before any download happens.
-    let ddraw = match opts.ddraw {
-        DdrawChoice::On => true,
-        DdrawChoice::Off => false,
-        DdrawChoice::Auto => match prompt {
-            Some(p) => {
-                let spec = prompt::PromptSpec {
-                    kind: prompt::PromptKind::Confirm { default: true },
-                    title: "apply the cnc-ddraw DirectDraw wrapper? (fixes black-screen \
-                            classics; MIT, ~2 MiB, cached)"
-                        .into(),
-                    items: vec![],
-                    allow_other: false,
-                    allow_none: false,
-                    default: 0,
-                };
-                matches!(p(&spec), Some(prompt::PromptAnswer::Confirmed(true)))
-            }
-            None => false,
-        },
-    };
-
     // §6 step 3: runtime resolution — may download into the store (events).
     let (runtime, runtime_downloaded) = resolve_runtime(opts, recipe.as_ref(), prompt, emit)?;
     let kind = runtime.mode.as_str().to_string();
@@ -902,10 +875,27 @@ pub fn plan(
             (None, None) => unreachable!("asserted above"),
         };
 
-    let auto_verbs = match (&opts.game_tree, opts.portable) {
-        (Some(tree), false) => Some(auto_verbs(tree, emit)),
+    // One import scan (#63) feeds both L1 fields of the depot lane: the
+    // renderer (#70) and the winetricks verbs (#72). The tree is the
+    // installed game, so both show up in the confirmation summary.
+    let scan = opts.game_tree.as_ref().map(|tree| pe::scan(tree));
+    let auto_verbs = match (&scan, opts.portable) {
+        (Some(scan), false) => Some(auto_verbs(scan, emit)),
         _ => None,
     };
+    let renderer = opts
+        .game_tree
+        .as_ref()
+        .zip(scan.as_ref())
+        .map(|(tree, scan)| {
+            let sel = renderer::select(
+                info::root_game_id(tree).as_deref(),
+                renderer::pick(scan),
+                opts.renderer,
+            );
+            emit_selection(&sel, emit);
+            sel
+        });
 
     Ok(MacAppPlan {
         auto_verbs,
@@ -920,7 +910,8 @@ pub fn plan(
         recipe,
         runtime_downloaded,
         lutris_base: opts.lutris_base.clone(),
-        ddraw,
+        renderer_choice: opts.renderer,
+        renderer,
         bundle,
         state,
         gogid,
@@ -933,17 +924,34 @@ pub fn plan(
     })
 }
 
-/// L1 verbs for a game tree; a tree the PE scan can't read gets none (with
-/// a warning), since verbs are an improvement, not a requirement.
-fn auto_verbs(tree: &Path, emit: &mut dyn FnMut(&ProgressEvent)) -> Vec<verbs::AutoVerb> {
-    match pe::scan(tree) {
-        Ok(scan) => verbs::for_scan(&scan),
+/// L1 verbs from an import scan; a tree the scan couldn't read gets none
+/// (with a warning), since verbs are an improvement, not a requirement.
+fn auto_verbs(
+    scan: &Result<pe::PeScan, pe::ScanError>,
+    emit: &mut dyn FnMut(&ProgressEvent),
+) -> Vec<verbs::AutoVerb> {
+    match scan {
+        Ok(scan) => verbs::for_scan(scan),
         Err(e) => {
             emit(&ProgressEvent::Warn {
                 message: format!("import scan failed ({e}); no automatic winetricks verbs"),
             });
             Vec::new()
         }
+    }
+}
+
+/// Report a renderer selection: the event, plus its warnings.
+fn emit_selection(sel: &renderer::Selection, emit: &mut dyn FnMut(&ProgressEvent)) {
+    emit(&ProgressEvent::RendererSelected {
+        renderer: sel.renderer.value.clone(),
+        layer: sel.renderer.layer.describe().to_string(),
+        reason: sel.reason.clone(),
+    });
+    for message in &sel.warnings {
+        emit(&ProgressEvent::Warn {
+            message: message.clone(),
+        });
     }
 }
 
@@ -1292,10 +1300,35 @@ pub fn execute(
         .map(|o| (o.env.clone(), o.args.clone()))
         .unwrap_or_default();
 
-    // Native cnc-ddraw (design 13 D3/D4): after the recipe phase so a
-    // recipe's own wrapper (if any) wins; game-dir placement, no registry.
-    let mut ddraw_applied = false;
-    if plan.ddraw {
+    // The renderer (#70): the depot lane chose it at plan time; the
+    // installer lane scans what it just installed, once, for the renderer
+    // and the verbs (#72).
+    let lane_scan = plan
+        .renderer
+        .is_none()
+        .then(|| pe::scan_exe(&install_dir, &entry));
+    let selection = match (&plan.renderer, &lane_scan) {
+        (Some(sel), _) => sel.clone(),
+        (None, scan) => {
+            let scan = scan.as_ref().expect("scanned when not planned");
+            let sel = renderer::select(
+                info::root_game_id(&install_dir).as_deref(),
+                renderer::pick(scan),
+                plan.renderer_choice,
+            );
+            emit_selection(&sel, emit);
+            sel
+        }
+    };
+
+    // Fat bundles apply cnc-ddraw at build (design 13 D3/D4), after the
+    // recipe phase so a recipe's own wrapper wins. v2 bundles leave every
+    // renderer to setup, which runs at the end of the build and again
+    // whenever the config changes.
+    let wanted = renderer::RendererRef::parse(&selection.renderer.value)
+        .map(|r| r.renderer)
+        .unwrap_or(Renderer::Wined3d);
+    if plan.state.is_none() && wanted == Renderer::CncDdraw {
         match ddraw::resolve_or_provision(emit) {
             Some(tree) => match ddraw::apply(&tree, &install_dir)? {
                 ddraw::Applied::Applied { shaders } => {
@@ -1303,22 +1336,31 @@ pub fn execute(
                     // `ddraw=n,b` wine prefers its builtin and the game-dir
                     // dll is silently ignored.
                     ddraw::register_override(&bundled_wine, &plan.bundle.prefix)?;
-                    ddraw_applied = true;
                     emit(&ProgressEvent::RecipeStep {
                         verb: format!("cnc-ddraw (dll + ini + override, {shaders} shaders)"),
                     });
                     bundle::write_ddraw_notice(&plan.bundle)?;
                 }
                 ddraw::Applied::AlreadyPresent => emit(&ProgressEvent::Warn {
-                    message: "ddraw.dll already present (recipe-placed) — gogo wrapper                               skipped"
+                    message: "ddraw.dll already present (recipe-placed) — gogo wrapper \
+                              skipped"
                         .into(),
                 }),
             },
             None => emit(&ProgressEvent::Warn {
-                message: "cnc-ddraw unavailable (provisioning failed) — DirectDraw games                           may black-screen"
+                message: "cnc-ddraw unavailable (provisioning failed) — DirectDraw games \
+                          may black-screen"
                     .into(),
             }),
         }
+    } else if plan.state.is_none() && matches!(wanted, Renderer::Dxmt | Renderer::D3dMetal) {
+        emit(&ProgressEvent::Warn {
+            message: format!(
+                "{} needs a derived store runtime, which a self-contained bundle can't \
+                 carry: using wined3d",
+                wanted.id()
+            ),
+        });
     }
 
     if let Some(dirs) = &plan.state {
@@ -1329,7 +1371,7 @@ pub fn execute(
             &install_dir,
             &entry,
             (&recipe_env, &recipe_args),
-            ddraw_applied,
+            (&selection, lane_scan.as_ref()),
             winetricks_used,
             codesign,
             emit,
@@ -1377,7 +1419,10 @@ fn finish_v2(
     install_dir: &Path,
     entry: &Path,
     (recipe_env, recipe_args): (&str, &str),
-    ddraw_applied: bool,
+    (selection, lane_scan): (
+        &renderer::Selection,
+        Option<&Result<pe::PeScan, pe::ScanError>>,
+    ),
     winetricks_used: bool,
     codesign: CodesignPolicy,
     emit: &mut dyn FnMut(&ProgressEvent),
@@ -1421,21 +1466,15 @@ fn finish_v2(
         .rsplit_once('\\')
         .map(|(head, _)| head.to_string())
         .unwrap_or_else(|| exe.clone());
-    let mut dll_overrides = std::collections::BTreeMap::new();
-    if ddraw_applied {
-        dll_overrides.insert("ddraw".to_string(), "n,b".to_string());
-    }
+    // Renderer overrides (`ddraw=n,b`) are setup's: they follow the
+    // effective renderer, so an L4 switch takes them away again.
+    let dll_overrides = std::collections::BTreeMap::new();
     let toml = launch::LaunchToml {
         schema: launch::SCHEMA,
         gogid: gogid.clone(),
         title: plan.display.clone(),
         runtime: launch::runtime_ref(&plan.runtime),
-        renderer: if ddraw_applied {
-            "cnc-ddraw"
-        } else {
-            "wined3d"
-        }
-        .to_string(),
+        renderer: selection.renderer.value.clone(),
         exe,
         workdir,
         args: recipe_args.split_whitespace().map(str::to_string).collect(),
@@ -1446,12 +1485,10 @@ fn finish_v2(
             .collect(),
         dll_overrides,
         // L1 only; setup layers L3 and L4 over it (verbs::effective).
-        verbs: verbs::names(
-            &plan
-                .auto_verbs
-                .clone()
-                .unwrap_or_else(|| auto_verbs(install_dir, emit)),
-        ),
+        verbs: verbs::names(&plan.auto_verbs.clone().unwrap_or_else(|| match lane_scan {
+            Some(scan) => auto_verbs(scan, emit),
+            None => auto_verbs(&pe::scan(install_dir), emit),
+        })),
         gogo: launch::GogoRef {
             path: plan.gogo_path.clone(),
             state: crate::state::state_dir(),
@@ -1466,6 +1503,7 @@ fn finish_v2(
         plan.runtime.min_macos,
     )?;
     bundle::write_launcher_notices(&plan.bundle, &plan.runtime)?;
+    bundle::write_renderer_notice(&plan.bundle, &selection.renderer.value)?;
     if winetricks_used {
         bundle::write_winetricks_notice(&plan.bundle)?;
     }
@@ -1477,6 +1515,9 @@ fn finish_v2(
     emit(&ProgressEvent::Codesigned);
 
     let outcome = setup::setup(&gogid, Some(&plan.bundle.root))?;
+    for verb in outcome.notes {
+        emit(&ProgressEvent::RecipeStep { verb });
+    }
     for message in outcome.warnings {
         emit(&ProgressEvent::Warn { message });
     }

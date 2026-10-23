@@ -105,6 +105,13 @@ pub enum ProgressEvent {
         verb: String,
         reason: String,
     },
+    /// `mac-app`: the renderer the bundle bakes, the layer that chose it and
+    /// why (#70, design 16 decision 5).
+    RendererSelected {
+        renderer: String,
+        layer: String,
+        reason: String,
+    },
 }
 
 /// Drive a consumer over the event stream until the engine's terminal `Done`
@@ -173,6 +180,7 @@ mod render_tests {
             ProgressEvent::RuntimeDownloadStarted { .. } => "RuntimeDownloadStarted",
             ProgressEvent::RuntimeDownloadFinished { .. } => "RuntimeDownloadFinished",
             ProgressEvent::ToolProvisioned { .. } => "ToolProvisioned",
+            ProgressEvent::RendererSelected { .. } => "RendererSelected",
         }
     }
 

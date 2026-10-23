@@ -14,13 +14,23 @@ pub const GITHUB_API: &str = "https://api.github.com";
 
 const UA: &str = concat!("gogo/", env!("CARGO_PKG_VERSION"), " (runtime catalog)");
 
-/// Entry kind: a Wine runtime or a tool provisioned alongside one.
+/// Entry kind: a Wine runtime, a tool provisioned alongside one, or a
+/// renderer payload.
 pub enum Kind {
     Wine,
     /// A tool payload; `payload` names the file that proves the extract
-    /// (design 13 D2: `winetricks` script vs `cnc-ddraw`'s `ddraw.dll`).
+    /// (design 13 D2: the `winetricks` script).
     Tool {
         payload: &'static str,
+    },
+    /// A renderer (design 16 decisions 3 and 6), stored as downloaded under
+    /// `renderers/<id>/<ver>/<arch>/`. `payload` proves the extract like a
+    /// tool's. `overlay`: it replaces Wine builtins and is installed as a
+    /// derived runtime (DXMT); otherwise it goes into the game dir
+    /// (cnc-ddraw).
+    Renderer {
+        payload: &'static str,
+        overlay: bool,
     },
 }
 
@@ -296,22 +306,53 @@ static ENTRIES: &[CatalogEntry] = &[
     },
     CatalogEntry {
         id: "cnc-ddraw",
-        kind: Kind::Tool {
+        kind: Kind::Renderer {
             payload: "ddraw.dll",
+            overlay: false,
         },
-        status: Status::Tool,
-        discovery: Some(Discovery::GitHubReleases {
+        status: Status::Available,
+        // The release publishes no asset digest: the pin is the sha256 of
+        // the live-proven v7.1.0.0 download (2026-10-19, re-checked 2026-10-23).
+        discovery: Some(Discovery::Pinned(PinnedAsset {
             repo: "FunkyFr3sh/cnc-ddraw",
-            asset_prefix: "cnc-ddraw",
-            asset_suffix: ".zip",
-        }),
-        license: "MIT",
+            tag: "v7.1.0.0",
+            asset: "cnc-ddraw.zip",
+            version: "7.1.0.0",
+            sha256: "0b13ab89a64c9918189b1dadd449ef6ed3cb3b7b19cabd96d8adbd95505bb908",
+        })),
+        license: "MIT (Copyright (c) FunkyFr3sh and the cnc-ddraw contributors)",
         redistributable: true,
         min_macos: None,
-        arch: "any",
-        note: "DirectDraw wrapper (design 13): game-dir drop-in cures black-screen \
-               classics; MIT; applied after the recipe phase, never over a recipe's \
-               own ddraw.dll",
+        arch: "x86_64",
+        note: "renderer: DirectDraw wrapper (design 13) for 2D DirectDraw games, dropped \
+               into the game dir with ddraw=n,b; never over a game's or recipe's own \
+               ddraw.dll",
+        frameworks: None,
+    },
+    CatalogEntry {
+        id: "dxmt",
+        kind: Kind::Renderer {
+            payload: "winemetal.so",
+            overlay: true,
+        },
+        status: Status::Available,
+        // v0.80 ships only the builtin flavour. DXMT accepts no AI-made
+        // contributions: a downloaded dependency only (docs/19 §3.2).
+        discovery: Some(Discovery::Pinned(PinnedAsset {
+            repo: "3Shain/dxmt",
+            tag: "v0.80",
+            asset: "dxmt-v0.80-builtin.tar.gz",
+            version: "v0.80",
+            sha256: "8f260e36b5739e68f3bad613381441385c4dc7b85b78ba8de653d5a6a264529d",
+        })),
+        license: "LGPL-2.1 (DXMT, https://github.com/3Shain/dxmt)",
+        redistributable: true,
+        min_macos: None,
+        arch: "x86_64",
+        note: "renderer: D3D10/11 to Metal (docs/19 §6.2). Replaces the engine's \
+               d3d11/dxgi/d3d10core/winemetal, so it runs from a derived runtime \
+               (design 16 decision 3); needs a CrossOver-source engine (winecx) and a \
+               Metal 3 GPU",
         frameworks: None,
     },
 ];
@@ -943,7 +984,7 @@ mod catalog_tests {
     fn entries_and_statuses() {
         assert!(find("wine-staging").is_some());
         assert!(find("nope").is_none());
-        assert_eq!(entries().len(), 8);
+        assert_eq!(entries().len(), 9);
         // The default track is the pinned CX engine with its Frameworks set.
         let cx = find(DEFAULT_RUNTIME).unwrap();
         assert_eq!(cx.id, "winecx");
@@ -960,12 +1001,29 @@ mod catalog_tests {
                 .filter(|e| e.id != "winecx")
                 .all(|e| e.frameworks.is_none())
         );
+        // Renderers (#70): pinned, game-dir vs engine overlay.
         assert!(matches!(
             find("cnc-ddraw").unwrap().kind,
-            Kind::Tool {
-                payload: "ddraw.dll"
+            Kind::Renderer {
+                payload: "ddraw.dll",
+                overlay: false
             }
         ));
+        let dxmt = find("dxmt").unwrap();
+        assert!(matches!(
+            dxmt.kind,
+            Kind::Renderer {
+                payload: "winemetal.so",
+                overlay: true
+            }
+        ));
+        assert!(dxmt.license.starts_with("LGPL-2.1"));
+        for id in ["cnc-ddraw", "dxmt"] {
+            assert!(
+                matches!(find(id).unwrap().discovery, Some(Discovery::Pinned(_))),
+                "{id}"
+            );
+        }
         assert!(matches!(
             find("wine-crossover").unwrap().status,
             Status::Gone { .. }

@@ -180,12 +180,20 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
         Command::MacApp { sub: Some(sub), .. } => mac_app_sub(sub),
         Command::MacApp {
             retarget: Some(target),
-            runtime: Some(runtime),
+            runtime,
+            renderer,
             runtime_path,
             runtime_version,
             json,
             ..
-        } => mac_app_retarget(target, runtime, runtime_path, runtime_version, json),
+        } => mac_app_retarget(
+            target,
+            runtime,
+            renderer,
+            runtime_path,
+            runtime_version,
+            json,
+        ),
         Command::MacApp {
             sub: None,
             retarget: _,
@@ -196,6 +204,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
             runtime_path,
             runtime_version,
             recipe,
+            renderer,
             ddraw_wrapper,
             no_ddraw_wrapper,
             out,
@@ -203,6 +212,24 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
             json_progress,
             json,
         } => {
+            let renderer = match (renderer, ddraw_wrapper, no_ddraw_wrapper) {
+                (_, true, _) => {
+                    gogo::macapp::RendererChoice::Force(gogo::macapp::Renderer::CncDdraw)
+                }
+                (_, _, true) => gogo::macapp::RendererChoice::AutoNoDdraw,
+                (Some(r), _, _) => match r.renderer() {
+                    Some(gogo::macapp::Renderer::D3dMetal) => {
+                        eprintln!(
+                            "gogo: --renderer d3dmetal isn't available yet (#71: consent \
+                             download); use dxmt for D3D10/11"
+                        );
+                        return Ok(cli::exit::USAGE);
+                    }
+                    Some(r) => gogo::macapp::RendererChoice::Force(r),
+                    None => gogo::macapp::RendererChoice::Auto,
+                },
+                (None, _, _) => gogo::macapp::RendererChoice::Auto,
+            };
             mac_app(
                 installer,
                 from_depot,
@@ -211,8 +238,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
                 runtime_path,
                 runtime_version,
                 recipe,
-                ddraw_wrapper,
-                no_ddraw_wrapper,
+                renderer,
                 out,
                 yes,
                 json_progress,
@@ -1952,11 +1978,37 @@ fn mac_app_sub(sub: crate::cli::MacAppSub) -> Result<i32, AppError> {
                         format!("{}: unknown key {w}", compat::user_path(&gogid).display())
                     }))
                     .collect();
+            // The renderer setup applies and why (#70): L4, else what the
+            // bundle baked, traced back to its layer.
+            let mut eff = eff;
+            let mut renderer_why = None;
+            let dirs = gogo::macapp::launch::GameDirs::for_game(&gogid)?;
+            if let Some(state) = gogo::macapp::launch::GameState::load(&dirs.state_toml)? {
+                let toml = state.bundle.join("Contents/Resources/gogo-launch.toml");
+                if let Ok(raw) = std::fs::read_to_string(&toml)
+                    && let Ok(baked) = gogo::macapp::launch::LaunchToml::parse(&raw, &toml)
+                {
+                    let game = baked
+                        .tree_name()
+                        .map(|n| dirs.prefix.join("drive_c/GOG").join(n));
+                    let exe = gogo::macapp::launch::windows_to_unix(&dirs.prefix, &baked.exe);
+                    let (r, why) = gogo::macapp::renderer::explain(
+                        &gogid,
+                        &baked.renderer,
+                        game.as_deref().filter(|g| g.is_dir()),
+                        exe.as_deref().filter(|e| e.is_file()),
+                    );
+                    eff.renderer = Some(r);
+                    renderer_why = Some((why, state.renderer.clone()));
+                }
+            }
             if json {
                 let out = serde_json::json!({
                     "gogid": gogid,
                     "user_file": compat::user_path(&gogid),
                     "effective": eff,
+                    "renderer_reason": renderer_why.as_ref().map(|(w, _)| w),
+                    "renderer_applied": renderer_why.as_ref().map(|(_, a)| a),
                     "warnings": warnings,
                 });
                 println!("{out}");
@@ -1966,6 +2018,9 @@ fn mac_app_sub(sub: crate::cli::MacAppSub) -> Result<i32, AppError> {
                 eprintln!("warning: {w}");
             }
             let lines = eff.display_lines();
+            if let Some((why, applied)) = &renderer_why {
+                println!("renderer: {why}; last applied by setup: {applied}");
+            }
             if lines.is_empty() {
                 println!(
                     "no compat data for {gogid} (no L1 verbs, L3 DB and L4 override are empty)"
@@ -1977,7 +2032,7 @@ fn mac_app_sub(sub: crate::cli::MacAppSub) -> Result<i32, AppError> {
             }
             println!(
                 "L4 override file: {}\n(L0–L2 are computed when the bundle is built; L1 verbs \
-                 show once it is)",
+                 show once it is, and the renderer line traces the bundle's choice)",
                 compat::user_path(&gogid).display()
             );
             Ok(cli::exit::OK)
@@ -2026,17 +2081,24 @@ fn mac_app_sub(sub: crate::cli::MacAppSub) -> Result<i32, AppError> {
     }
 }
 
-/// `gogo mac-app --retarget <bundle|gogid> --runtime <src>` (design 16
-/// decision 7): write the runtime choice into L4; the bundle stays sealed.
+/// `gogo mac-app --retarget <bundle|gogid> --runtime <src> --renderer <r>`
+/// (design 16 decision 7): write the choices into L4; the bundle stays
+/// sealed.
 fn mac_app_retarget(
     target: String,
-    runtime: crate::cli::RuntimeSource,
+    runtime: Option<crate::cli::RuntimeSource>,
+    renderer: Option<crate::cli::RendererArg>,
     runtime_path: Option<std::path::PathBuf>,
     runtime_version: Option<String>,
     json: bool,
 ) -> Result<i32, AppError> {
     use crate::cli::RuntimeSource as R;
     use gogo::macapp::{compat, launch, store};
+
+    if runtime.is_none() && renderer.is_none() {
+        eprintln!("gogo: --retarget needs --runtime and/or --renderer");
+        return Ok(cli::exit::USAGE);
+    }
 
     let gogid = if target.bytes().all(|b| b.is_ascii_digit()) {
         target
@@ -2054,13 +2116,20 @@ fn mac_app_retarget(
         Some(v) => format!("{id}/{v}"),
         None => id.to_string(),
     };
+    let mut updates: Vec<(&str, Option<String>)> = Vec::new();
+    if let Some(r) = renderer {
+        // `auto` drops the override; a version-less id is written with the
+        // catalog's pinned version.
+        updates.push(("renderer", r.renderer().map(|r| r.default_ref())));
+    }
     let new = match runtime {
-        R::Auto => None,
-        R::Winecx => Some(with_version("winecx")),
-        R::Staging => Some(with_version("wine-staging")),
-        R::Devel => Some(with_version("wine-devel")),
-        R::Stable => Some(with_version("wine-stable")),
-        R::Brew | R::Gptk | R::Path => {
+        None => None,
+        Some(R::Auto) => None,
+        Some(R::Winecx) => Some(with_version("winecx")),
+        Some(R::Staging) => Some(with_version("wine-staging")),
+        Some(R::Devel) => Some(with_version("wine-devel")),
+        Some(R::Stable) => Some(with_version("wine-stable")),
+        Some(runtime @ (R::Brew | R::Gptk | R::Path)) => {
             let rt = gogo::macapp::runtime::resolve(&gogo::macapp::RuntimeOptions {
                 mode: gogo::macapp::RuntimeMode::from(runtime),
                 runtime_path,
@@ -2082,7 +2151,12 @@ fn mac_app_retarget(
             );
         }
     }
-    let changes = compat::set_user_keys(&gogid, &[("runtime", new.as_deref())])?;
+    if runtime.is_some() {
+        updates.push(("runtime", new.clone()));
+    }
+    let updates: Vec<(&str, Option<&str>)> =
+        updates.iter().map(|(k, v)| (*k, v.as_deref())).collect();
+    let changes = compat::set_user_keys(&gogid, &updates)?;
     if json {
         println!(
             "{}",
@@ -2093,10 +2167,7 @@ fn mac_app_retarget(
             })
         );
     } else if changes.is_empty() {
-        println!(
-            "{gogid}: runtime already {}",
-            new.as_deref().unwrap_or("the bundle's")
-        );
+        println!("{gogid}: nothing to change (the override file already says so)");
     } else {
         for c in &changes {
             println!(
@@ -2138,8 +2209,7 @@ async fn mac_app(
     runtime_path: Option<std::path::PathBuf>,
     runtime_version: Option<String>,
     recipe: Option<String>,
-    ddraw_wrapper: bool,
-    no_ddraw_wrapper: bool,
+    renderer: gogo::macapp::RendererChoice,
     out: Option<std::path::PathBuf>,
     yes: bool,
     json_progress: bool,
@@ -2215,13 +2285,7 @@ async fn mac_app(
         overwrite: yes,
         recipe,
         lutris_base: None,
-        ddraw: if ddraw_wrapper {
-            gogo::macapp::DdrawChoice::On
-        } else if no_ddraw_wrapper {
-            gogo::macapp::DdrawChoice::Off
-        } else {
-            gogo::macapp::DdrawChoice::Auto
-        },
+        renderer,
         portable: false,
         gogo_path: invoked_path(),
     };
@@ -2275,14 +2339,22 @@ async fn mac_app(
             ),
             None => String::new(),
         };
+        let renderer_line = match &plan.renderer {
+            Some(sel) => sel.describe(),
+            None => match plan.renderer_choice {
+                gogo::macapp::RendererChoice::Force(r) => format!("{} (flags)", r.default_ref()),
+                _ => "auto (picked from the installed files)".to_string(),
+            },
+        };
         eprintln!(
-            "converting:\n  source:    {}\n  bundle:    {}\n  recipe:    {}\n  runtime:   {} ({}){}{}\n  est. size: {}",
+            "converting:\n  source:    {}\n  bundle:    {}\n  recipe:    {}\n  runtime:   {} ({}){}\n  renderer:  {}{}\n  est. size: {}",
             source_line,
             plan.bundle_path.display(),
             recipe_line,
             plan.runtime.version,
             runtime_kind,
             download_line,
+            renderer_line,
             verbs_line,
             gogo::fmt::human_size(plan.estimated_bytes),
         );
@@ -2320,16 +2392,38 @@ async fn mac_app(
         }
     }
 
+    let selected = std::sync::Arc::new(std::sync::Mutex::new(plan.renderer.as_ref().map(|s| {
+        serde_json::json!({
+            "renderer": s.renderer.value,
+            "layer": s.renderer.layer.describe(),
+            "reason": s.reason,
+            "alternatives": s.l1.alternatives.iter().map(|r| r.id()).collect::<Vec<_>>(),
+        })
+    })));
     let bytes = {
         let plan = plan.clone();
         let jp = json_progress;
+        let selected = selected.clone();
         tokio::task::spawn_blocking(move || {
             let policy = if cfg!(target_os = "macos") {
                 gogo::macapp::bundle::CodesignPolicy::Adhoc
             } else {
                 gogo::macapp::bundle::CodesignPolicy::Skip
             };
-            gogo::macapp::execute(&plan, policy, &mut |ev| emit_macapp_event(ev, jp))
+            gogo::macapp::execute(&plan, policy, &mut |ev| {
+                if let gogo::engine::events::ProgressEvent::RendererSelected {
+                    renderer,
+                    layer,
+                    reason,
+                } = ev
+                    && plan.renderer.is_none()
+                {
+                    *selected.lock().unwrap() = Some(serde_json::json!({
+                        "renderer": renderer, "layer": layer, "reason": reason,
+                    }));
+                }
+                emit_macapp_event(ev, jp)
+            })
         })
         .await
         .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))??
@@ -2352,6 +2446,7 @@ async fn mac_app(
                     "from_search": r.from_search,
                 })),
                 "auto_verbs": plan.auto_verbs,
+                "renderer": selected.lock().unwrap().clone(),
                 "runtime": {
                     "kind": plan.runtime.kind,
                     "version": plan.runtime.version,
@@ -2385,7 +2480,8 @@ async fn runtimes_cmd(args: crate::cli::RuntimesArgs) -> Result<i32, AppError> {
 
     match args.cmd {
         crate::cli::RuntimesCmd::List { json, offline } => {
-            let cached = store::load_manifest();
+            let mut cached = store::load_manifest();
+            cached.extend(store::load_renderer_manifest());
             let http = if offline {
                 None
             } else {
@@ -2511,10 +2607,14 @@ async fn runtimes_cmd(args: crate::cli::RuntimesArgs) -> Result<i32, AppError> {
         }
         crate::cli::RuntimesCmd::Prune { all, id } => {
             let ids: Vec<String> = if all {
-                store::load_manifest()
+                let mut ids: Vec<String> = store::load_manifest()
                     .iter()
+                    .chain(store::load_renderer_manifest().iter())
                     .map(|m| m.id.clone())
-                    .collect()
+                    .collect();
+                ids.sort();
+                ids.dedup();
+                ids
             } else {
                 match id {
                     Some(i) => vec![i],
@@ -2524,8 +2624,10 @@ async fn runtimes_cmd(args: crate::cli::RuntimesArgs) -> Result<i32, AppError> {
                     }
                 }
             };
-            // Design 16 decision 6: never prune a runtime a game still uses.
-            let refs = gogo::macapp::launch::referenced_runtimes();
+            // Design 16 decision 6: never prune a runtime (base or derived)
+            // or a renderer a game still uses.
+            let mut refs = gogo::macapp::launch::referenced_runtimes();
+            refs.extend(gogo::macapp::launch::referenced_renderers());
             let ids: Vec<String> = ids
                 .into_iter()
                 .filter(|id| {
@@ -2833,6 +2935,12 @@ fn emit_macapp_event(ev: &gogo::engine::events::ProgressEvent, json_progress: bo
         )),
         Ev::RuntimeDownloadFinished { id, version } => Some(format!("{id} {version} cached")),
         Ev::ToolProvisioned { id, version } => Some(format!("{id} {version} provisioned")),
+        Ev::RendererSelected {
+            renderer,
+            layer,
+            reason,
+        } => Some(format!("renderer: {renderer} ({layer}: {reason})")),
+        Ev::RecipeStep { verb } => Some(format!("applied {verb}")),
         _ => None,
     };
     if let Some(l) = line {

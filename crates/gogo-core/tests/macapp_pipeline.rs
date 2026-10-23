@@ -121,7 +121,7 @@ fn full_pipeline_with_fake_runtime() {
         recipe: Default::default(),
         runtime_version: None,
         lutris_base: None,
-        ddraw: macapp::DdrawChoice::Auto,
+        renderer: macapp::RendererChoice::Auto,
         portable: true,
         gogo_path: None,
     };
@@ -228,7 +228,7 @@ fn execute_refuses_to_clobber_existing_bundle() {
         recipe: Default::default(),
         runtime_version: None,
         lutris_base: None,
-        ddraw: macapp::DdrawChoice::Auto,
+        renderer: macapp::RendererChoice::Auto,
         portable: true,
         gogo_path: None,
     };
@@ -304,7 +304,7 @@ fn winetricks_verbs_run_with_wine_shims_and_notice() {
         recipe: gogo::macapp::RecipeChoice::File(recipe),
         runtime_version: None,
         lutris_base: None,
-        ddraw: macapp::DdrawChoice::Auto,
+        renderer: macapp::RendererChoice::Auto,
         portable: true,
         gogo_path: None,
     };
@@ -402,7 +402,7 @@ fn recipe_wine_pin_recommends_cached_catalog_runtime() {
         recipe: gogo::macapp::RecipeChoice::File(recipe),
         runtime_version: None,
         lutris_base: None,
-        ddraw: macapp::DdrawChoice::Auto,
+        renderer: macapp::RendererChoice::Auto,
         portable: true,
         gogo_path: None,
     };
@@ -517,7 +517,7 @@ fn auto_recipe_discovery_and_gogid_crosscheck() {
         recipe: gogo::macapp::RecipeChoice::Auto,
         runtime_version: None,
         lutris_base: Some(server.uri()),
-        ddraw: macapp::DdrawChoice::Auto,
+        renderer: macapp::RendererChoice::Auto,
         portable: true,
         gogo_path: None,
     };
@@ -625,7 +625,7 @@ fn runtime_menu_offers_cached_and_custom_path_lanes() {
         recipe: gogo::macapp::RecipeChoice::None,
         runtime_version: None,
         lutris_base: None,
-        ddraw: macapp::DdrawChoice::Auto,
+        renderer: macapp::RendererChoice::Auto,
         portable: true,
         gogo_path: None,
     };
@@ -783,7 +783,7 @@ fn recipe_picker_index_and_free_text_lanes() {
         recipe: gogo::macapp::RecipeChoice::Auto,
         runtime_version: None,
         lutris_base: Some(server.uri()),
-        ddraw: macapp::DdrawChoice::Auto,
+        renderer: macapp::RendererChoice::Auto,
         portable: true,
         gogo_path: None,
     };
@@ -1060,7 +1060,7 @@ fn search_recipe_failure_degrades_pinned_stays_fatal() {
         recipe: gogo::macapp::RecipeChoice::Auto,
         runtime_version: None,
         lutris_base: Some(server.uri()),
-        ddraw: macapp::DdrawChoice::Auto,
+        renderer: macapp::RendererChoice::Auto,
         portable: true,
         gogo_path: None,
     };
@@ -1109,7 +1109,7 @@ fn search_recipe_failure_degrades_pinned_stays_fatal() {
         recipe: gogo::macapp::RecipeChoice::File(script.clone()),
         runtime_version: None,
         lutris_base: Some(server.uri()),
-        ddraw: macapp::DdrawChoice::Auto,
+        renderer: macapp::RendererChoice::Auto,
         portable: true,
         gogo_path: None,
     };
@@ -1182,7 +1182,7 @@ fn runtime_menu_is_mandatory_with_easy_default() {
         recipe: gogo::macapp::RecipeChoice::None,
         runtime_version: None,
         lutris_base: None,
-        ddraw: macapp::DdrawChoice::Auto,
+        renderer: macapp::RendererChoice::Auto,
         portable: true,
         gogo_path: None,
     };
@@ -1300,7 +1300,7 @@ fn recipe_picker_is_mandatory_for_single_candidate() {
         recipe: gogo::macapp::RecipeChoice::Auto,
         runtime_version: None,
         lutris_base: Some(server.uri()),
-        ddraw: macapp::DdrawChoice::Auto,
+        renderer: macapp::RendererChoice::Auto,
         portable: true,
         gogo_path: None,
     };
@@ -1366,7 +1366,7 @@ fn produced_launcher_execs_wine_with_contents_relative_paths() {
         recipe: gogo::macapp::RecipeChoice::None,
         runtime_version: None,
         lutris_base: None,
-        ddraw: macapp::DdrawChoice::Auto,
+        renderer: macapp::RendererChoice::Auto,
         portable: true,
         gogo_path: None,
     };
@@ -1422,9 +1422,11 @@ fn produced_launcher_execs_wine_with_contents_relative_paths() {
 
 #[test]
 fn ddraw_wrapper_application_lanes() {
-    // Design 13: On applies dll+ini+shaders+MIT notice into the detected game
-    // dir via the GOGO_CNC_DDRAW_DIR override (WINETRICKS-style); headless
-    // Auto stays off — no wrapper, no notice.
+    // Design 13 (fat bundles): `--renderer cnc-ddraw` applies dll+ini+
+    // shaders+MIT notice into the detected game dir via the
+    // GOGO_CNC_DDRAW_DIR override (WINETRICKS-style); Auto on a game with no
+    // DirectDraw imports (the fake exe isn't a PE) picks wined3d — no
+    // wrapper, no notice.
     let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let tmp = tempfile::tempdir().unwrap();
     let runtime_dir = tmp.path().join("runtime");
@@ -1438,7 +1440,7 @@ fn ddraw_wrapper_application_lanes() {
     std::fs::write(store.join("ddraw.dll"), b"MZ-ddraw").unwrap();
     std::fs::write(store.join("Shaders/one.fx"), b"shader").unwrap();
 
-    let mk = |out: &std::path::Path, ddraw: macapp::DdrawChoice| MacAppOptions {
+    let mk = |out: &std::path::Path, renderer: macapp::RendererChoice| MacAppOptions {
         installer: Some(installer.clone()),
         game_tree: None,
         name: Some("Test Game".into()),
@@ -1449,7 +1451,7 @@ fn ddraw_wrapper_application_lanes() {
         recipe: gogo::macapp::RecipeChoice::None,
         runtime_version: None,
         lutris_base: None,
-        ddraw,
+        renderer,
         portable: true,
         gogo_path: None,
     };
@@ -1460,9 +1462,15 @@ fn ddraw_wrapper_application_lanes() {
         std::env::set_var("GOGO_CNC_DDRAW_DIR", &store);
     }
     // (a) On: applied.
-    let opts = mk(&tmp.path().join("out-on"), macapp::DdrawChoice::On);
+    let opts = mk(
+        &tmp.path().join("out-on"),
+        macapp::RendererChoice::Force(macapp::Renderer::CncDdraw),
+    );
     let plan = macapp::plan(&opts, None, &mut |_| {}).unwrap();
-    assert!(plan.ddraw);
+    assert!(
+        plan.renderer.is_none(),
+        "installer lane: decided after the install"
+    );
     let mut steps = Vec::new();
     let mut record = |ev: &ProgressEvent| {
         if let ProgressEvent::RecipeStep { verb } = ev {
@@ -1501,10 +1509,9 @@ fn ddraw_wrapper_application_lanes() {
         "override registered via reg add: {logged}"
     );
 
-    // (b) headless Auto: off, nothing applied.
-    let opts = mk(&tmp.path().join("out-auto"), macapp::DdrawChoice::Auto);
+    // (b) Auto with nothing DirectDraw in the imports: wined3d.
+    let opts = mk(&tmp.path().join("out-auto"), macapp::RendererChoice::Auto);
     let plan = macapp::plan(&opts, None, &mut |_| {}).unwrap();
-    assert!(!plan.ddraw, "headless Auto resolves Off (D1)");
     let _ = macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).unwrap();
     let game = plan.bundle.prefix.join("drive_c/GOG/test-game");
     assert!(!game.join("ddraw.dll").exists());
@@ -1559,7 +1566,7 @@ fn macapp_from_depot_executes() {
         recipe: Default::default(),
         runtime_version: None,
         lutris_base: None,
-        ddraw: macapp::DdrawChoice::Off,
+        renderer: macapp::RendererChoice::Auto,
         portable: true,
         gogo_path: None,
     };
@@ -1645,7 +1652,7 @@ fn depot_support_decline_degrades_to_warn() {
         recipe: Default::default(),
         runtime_version: None,
         lutris_base: None,
-        ddraw: macapp::DdrawChoice::Off,
+        renderer: macapp::RendererChoice::Auto,
         portable: true,
         gogo_path: None,
     };
@@ -1711,7 +1718,7 @@ fn depot_support_overlay_merges_into_game_dir() {
         recipe: Default::default(),
         runtime_version: None,
         lutris_base: None,
-        ddraw: macapp::DdrawChoice::Off,
+        renderer: macapp::RendererChoice::Auto,
         portable: true,
         gogo_path: None,
     };
@@ -1776,7 +1783,7 @@ fn v2_opts(tmp: &std::path::Path, gogo_path: &std::path::Path) -> MacAppOptions 
         recipe: Default::default(),
         runtime_version: None,
         lutris_base: None,
-        ddraw: macapp::DdrawChoice::Off,
+        renderer: macapp::RendererChoice::Auto,
         portable: false,
         gogo_path: Some(gogo_path.to_path_buf()),
     }
@@ -2317,5 +2324,379 @@ fn v2_launcher_teardown_reaps_its_own_prefix_only() {
     assert!(launch_log.contains("got SIGTERM"), "{launch_log}");
     assert!(launch_log.contains("reaped (SIGKILL)"), "{launch_log}");
     unsafe { std::env::remove_var("GOGO_HOME") };
+    drop(guard);
+}
+
+// — L1 renderer selection (#70) —
+
+/// A minimal PE32/PE32+ image importing `imports` (one `.rdata` section with
+/// the import descriptors and names): enough for the import scanner.
+fn pe_with_imports(pe64: bool, imports: &[&str]) -> Vec<u8> {
+    const RVA: u32 = 0x1000;
+    const OFF: usize = 0x200;
+    let imp_len = 20 * (imports.len() + 1);
+    let thunk = imp_len;
+    let names_off = thunk + 8;
+    let mut names = Vec::new();
+    let mut name_rvas = Vec::new();
+    for n in imports {
+        name_rvas.push(RVA + (names_off + names.len()) as u32);
+        names.extend_from_slice(n.as_bytes());
+        names.push(0);
+    }
+    let mut sec = Vec::new();
+    for name in &name_rvas {
+        for v in [RVA + thunk as u32, 0, 0, *name, RVA + thunk as u32] {
+            sec.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    sec.extend_from_slice(&[0; 20 + 8]);
+    sec.extend_from_slice(&names);
+    let raw = sec.len().next_multiple_of(0x200);
+    sec.resize(raw, 0);
+
+    let mut w = Vec::new();
+    let u16le = |w: &mut Vec<u8>, v: u16| w.extend_from_slice(&v.to_le_bytes());
+    let u32le = |w: &mut Vec<u8>, v: u32| w.extend_from_slice(&v.to_le_bytes());
+    w.extend_from_slice(b"PE\0\0");
+    let (machine, opt, chars) = if pe64 {
+        (0x8664u16, 240u16, 0x0022u16)
+    } else {
+        (0x014C, 224, 0x0102)
+    };
+    u16le(&mut w, machine);
+    u16le(&mut w, 1);
+    w.extend_from_slice(&[0; 12]);
+    u16le(&mut w, opt);
+    u16le(&mut w, chars);
+    u16le(&mut w, if pe64 { 0x20B } else { 0x10B });
+    w.extend_from_slice(&[0, 0]);
+    for v in [0, raw as u32, 0, 0, RVA] {
+        u32le(&mut w, v);
+    }
+    if pe64 {
+        w.extend_from_slice(&0x1_4000_0000u64.to_le_bytes());
+    } else {
+        u32le(&mut w, 0);
+        u32le(&mut w, 0x40_0000);
+    }
+    u32le(&mut w, 0x1000);
+    u32le(&mut w, 0x200);
+    for v in [6u16, 0, 0, 0, 6, 0] {
+        u16le(&mut w, v);
+    }
+    for v in [
+        0,
+        RVA + (raw as u32).next_multiple_of(0x1000),
+        OFF as u32,
+        0,
+    ] {
+        u32le(&mut w, v);
+    }
+    u16le(&mut w, 2);
+    u16le(&mut w, 0);
+    w.extend(std::iter::repeat_n(0, 4 * if pe64 { 8 } else { 4 }));
+    u32le(&mut w, 0);
+    u32le(&mut w, 16);
+    for i in 0..16 {
+        let (va, size) = if i == 1 {
+            (RVA, imp_len as u32)
+        } else {
+            (0, 0)
+        };
+        u32le(&mut w, va);
+        u32le(&mut w, size);
+    }
+    w.extend_from_slice(b".rdata\0\0");
+    for v in [
+        sec.len() as u32,
+        RVA,
+        raw as u32,
+        OFF as u32,
+        0,
+        0,
+        0,
+        0x4000_0040,
+    ] {
+        u32le(&mut w, v);
+    }
+    let mut h = vec![0u8; OFF];
+    h[0..2].copy_from_slice(b"MZ");
+    h[0x3C..0x40].copy_from_slice(&0x40u32.to_le_bytes());
+    h[0x40..0x40 + w.len()].copy_from_slice(&w);
+    h.extend_from_slice(&sec);
+    h
+}
+
+/// A depot tree for `gogid` whose `Game.exe` imports `imports`.
+fn depot_game(
+    dir: &std::path::Path,
+    gogid: &str,
+    name: &str,
+    pe64: bool,
+    imports: &[&str],
+) -> std::path::PathBuf {
+    let tree = dir.join("depot").join(name);
+    std::fs::create_dir_all(&tree).unwrap();
+    std::fs::write(
+        tree.join(format!("goggame-{gogid}.info")),
+        format!(
+            r#"{{"name":"{name}","rootGameId":"{gogid}","playTasks":[{{"type":"FileTask","category":"game","path":"Game.exe","isPrimary":true}}]}}"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(tree.join("Game.exe"), pe_with_imports(pe64, imports)).unwrap();
+    tree
+}
+
+fn renderer_events(
+    sink: &std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) -> impl FnMut(&ProgressEvent) + use<> {
+    let sink = sink.clone();
+    move |ev| {
+        if let ProgressEvent::RendererSelected {
+            renderer, layer, ..
+        } = ev
+        {
+            sink.lock().unwrap().push(format!("{renderer} {layer}"));
+        }
+    }
+}
+
+#[test]
+fn d3d11_game_runs_from_a_derived_dxmt_runtime() {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    // SAFETY: env mutation under ENV_LOCK.
+    unsafe { std::env::set_var("GOGO_HOME", &home) };
+
+    // The default engine in the store (a fake that reports a CX version),
+    // with the builtins DXMT replaces …
+    let base = home.join("runtimes/winecx/24.0.7_7");
+    fake_runtime(&base.join("engine"), &tmp.path().join("wine.log"));
+    let wine = base.join("engine/bin/wine");
+    let script = std::fs::read_to_string(&wine)
+        .unwrap()
+        .replace("wine-9.0-fake", "wine-9.0 (SikarugirCX 24.0.7)");
+    std::fs::write(&wine, script).unwrap();
+    let lib = base.join("engine/lib/wine");
+    for arch in ["x86_64-windows", "i386-windows", "x86_64-unix"] {
+        std::fs::create_dir_all(lib.join(arch)).unwrap();
+    }
+    std::fs::write(lib.join("i386-windows/d3d11.dll"), "wined3d").unwrap();
+    std::fs::create_dir_all(base.join("Frameworks")).unwrap();
+    let m = |id: &str, version: &str, entry_rel: &str| macapp::store::ManifestEntry {
+        id: id.into(),
+        version: version.into(),
+        sha256: "0".into(),
+        fetched_at: "2026-10-23T00:00:00Z".into(),
+        upstream_url: "http://x".into(),
+        entry_rel: entry_rel.into(),
+        bytes: 1,
+    };
+    macapp::store::save_manifest(&[m("winecx", "24.0.7_7", "engine/bin/wine")]).unwrap();
+    // … and DXMT in the renderer store, as downloaded.
+    let dxmt = home.join("renderers/dxmt/v0.80/x86_64/v0.80");
+    for (rel, body) in [
+        ("i386-windows/d3d11.dll", "dxmt"),
+        ("x86_64-windows/d3d11.dll", "dxmt"),
+        ("x86_64-unix/winemetal.so", "metal"),
+    ] {
+        std::fs::create_dir_all(dxmt.join(rel).parent().unwrap()).unwrap();
+        std::fs::write(dxmt.join(rel), body).unwrap();
+    }
+    macapp::store::save_renderer_manifest(&[m("dxmt", "v0.80", "v0.80/x86_64-unix/winemetal.so")])
+        .unwrap();
+
+    // Rebel Galaxy's shape: a 32-bit exe importing d3d11.
+    let tree = depot_game(
+        tmp.path(),
+        "1435582019",
+        "Rebel",
+        false,
+        &["kernel32.dll", "d3d11.dll", "dxgi.dll"],
+    );
+    let opts = MacAppOptions {
+        installer: None,
+        game_tree: Some(tree),
+        name: None,
+        mode: RuntimeMode::Catalog("winecx".into()),
+        runtime_path: None,
+        out_dir: tmp.path().join("out"),
+        overwrite: true,
+        recipe: Default::default(),
+        runtime_version: None,
+        lutris_base: None,
+        renderer: macapp::RendererChoice::Auto,
+        portable: false,
+        gogo_path: Some(tmp.path().join("no-such-gogo")),
+    };
+    let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let plan = macapp::plan(&opts, None, &mut renderer_events(&events)).expect("plan");
+    let sel = plan
+        .renderer
+        .as_ref()
+        .expect("depot lane decides at plan time");
+    assert_eq!(sel.renderer.value, "dxmt/v0.80");
+    assert_eq!(sel.renderer.layer, macapp::compat::Layer::Auto);
+    assert!(
+        sel.describe().contains("imports d3d11, dxgi"),
+        "{}",
+        sel.describe()
+    );
+    assert_eq!(*events.lock().unwrap(), ["dxmt/v0.80 L1 auto"]);
+    macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).expect("execute");
+
+    let app = tmp.path().join("out/Rebel.app");
+    let toml = std::fs::read_to_string(app.join("Contents/Resources/gogo-launch.toml")).unwrap();
+    let t = macapp::launch::LaunchToml::parse(&toml, std::path::Path::new("t")).unwrap();
+    assert_eq!(
+        t.runtime, "winecx/24.0.7_7",
+        "the bundle names the base runtime"
+    );
+    assert_eq!(t.renderer, "dxmt/v0.80");
+    assert!(t.dll_overrides.is_empty(), "no n,b for an engine overlay");
+    let notice = std::fs::read_to_string(app.join("Contents/Resources/LICENSE-dxmt.txt")).unwrap();
+    assert!(
+        notice.contains("LGPL-2.1") && notice.contains("3Shain/dxmt"),
+        "{notice}"
+    );
+
+    // Setup ran the game on the derived runtime; the base is unchanged.
+    let derived = home.join("runtimes/winecx/24.0.7_7+dxmt-v0.80");
+    assert_eq!(
+        std::fs::read_to_string(derived.join("engine/lib/wine/i386-windows/d3d11.dll")).unwrap(),
+        "dxmt"
+    );
+    assert!(
+        derived
+            .join("engine/lib/wine/x86_64-unix/winemetal.so")
+            .is_file()
+    );
+    assert_eq!(
+        std::fs::read_to_string(lib.join("i386-windows/d3d11.dll")).unwrap(),
+        "wined3d"
+    );
+    assert!(!lib.join("x86_64-unix/winemetal.so").exists());
+    let g = home.join("games/1435582019");
+    let conf = std::fs::read_to_string(g.join("launch.conf")).unwrap();
+    assert!(
+        conf.contains("RUNTIME_DIR='runtimes/winecx/24.0.7_7+dxmt-v0.80/engine'"),
+        "{conf}"
+    );
+    assert!(
+        conf.contains("FRAMEWORKS='runtimes/winecx/24.0.7_7+dxmt-v0.80/Frameworks'"),
+        "{conf}"
+    );
+    assert!(conf.contains("DLL_OVERRIDES=''"), "{conf}");
+    let state = macapp::launch::GameState::load(&g.join("state.toml"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(state.runtime, "winecx/24.0.7_7+dxmt-v0.80");
+    assert_eq!(state.renderer, "dxmt/v0.80");
+    // The store's reference list keeps both from `prune`.
+    assert!(
+        macapp::launch::referenced_runtimes()
+            .iter()
+            .any(|(_, r)| r == "winecx/24.0.7_7+dxmt-v0.80")
+    );
+    assert!(
+        macapp::launch::referenced_renderers()
+            .iter()
+            .any(|(_, r)| r == "dxmt/v0.80")
+    );
+
+    // An L4 switch to wined3d moves the game back to the base runtime.
+    macapp::compat::set_user_keys("1435582019", &[("renderer", Some("wined3d"))]).unwrap();
+    let out = macapp::setup::setup("1435582019", None).unwrap();
+    assert_eq!(out.state.runtime, "winecx/24.0.7_7");
+    assert_eq!(out.state.renderer, "wined3d");
+    unsafe { std::env::remove_var("GOGO_HOME") };
+    drop(guard);
+}
+
+#[test]
+fn ddraw_game_gets_cnc_ddraw_until_l4_says_otherwise() {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let wrapper = tmp.path().join("cnc-ddraw");
+    std::fs::create_dir_all(&wrapper).unwrap();
+    std::fs::write(wrapper.join("ddraw.dll"), b"MZ-ddraw").unwrap();
+    // SAFETY: env mutation under ENV_LOCK.
+    unsafe {
+        std::env::set_var("GOGO_HOME", &home);
+        std::env::set_var("GOGO_CNC_DDRAW_DIR", &wrapper);
+    }
+    let runtime_dir = tmp.path().join("runtime");
+    fake_runtime(&runtime_dir, &tmp.path().join("wine.log"));
+    // Pharaoh's shape: a 32-bit exe importing only ddraw.
+    let tree = depot_game(
+        tmp.path(),
+        "1207659013",
+        "Pharaoh",
+        false,
+        &["kernel32.dll", "ddraw.dll"],
+    );
+    let opts = MacAppOptions {
+        installer: None,
+        game_tree: Some(tree),
+        name: None,
+        mode: RuntimeMode::Path,
+        runtime_path: Some(runtime_dir),
+        out_dir: tmp.path().join("out"),
+        overwrite: true,
+        recipe: Default::default(),
+        runtime_version: None,
+        lutris_base: None,
+        renderer: macapp::RendererChoice::Auto,
+        portable: false,
+        gogo_path: Some(tmp.path().join("no-such-gogo")),
+    };
+    let plan = macapp::plan(&opts, None, &mut |_| {}).expect("plan");
+    assert_eq!(
+        plan.renderer.as_ref().unwrap().renderer.value,
+        "cnc-ddraw/7.1.0.0"
+    );
+    let mut steps = Vec::new();
+    macapp::execute(&plan, CodesignPolicy::Skip, &mut |ev| {
+        if let ProgressEvent::RecipeStep { verb } = ev {
+            steps.push(verb.clone());
+        }
+    })
+    .expect("execute");
+    assert!(
+        steps.iter().any(|s| s.starts_with("cnc-ddraw")),
+        "{steps:?}"
+    );
+
+    let app = tmp.path().join("out/Pharaoh.app");
+    assert!(
+        app.join("Contents/Resources/LICENSE-cnc-ddraw.txt")
+            .is_file()
+    );
+    let g = home.join("games/1207659013");
+    assert_eq!(
+        std::fs::read(g.join("game/ddraw.dll")).unwrap(),
+        b"MZ-ddraw"
+    );
+    assert!(g.join("game/ddraw.ini").is_file());
+    let conf = std::fs::read_to_string(g.join("launch.conf")).unwrap();
+    assert!(conf.contains("DLL_OVERRIDES='ddraw=n,b'"), "{conf}");
+    assert!(conf.contains("RENDERER='cnc-ddraw/7.1.0.0'"), "{conf}");
+
+    // `--no-ddraw-wrapper` semantics at the layer level: L4 → wined3d
+    // removes gogo's wrapper and its override again.
+    macapp::compat::set_user_keys("1207659013", &[("renderer", Some("wined3d"))]).unwrap();
+    let out = macapp::setup::setup("1207659013", None).unwrap();
+    assert_eq!(out.state.renderer, "wined3d");
+    assert!(!g.join("game/ddraw.dll").exists());
+    let conf = std::fs::read_to_string(g.join("launch.conf")).unwrap();
+    assert!(conf.contains("DLL_OVERRIDES=''"), "{conf}");
+    unsafe {
+        std::env::remove_var("GOGO_CNC_DDRAW_DIR");
+        std::env::remove_var("GOGO_HOME");
+    }
     drop(guard);
 }

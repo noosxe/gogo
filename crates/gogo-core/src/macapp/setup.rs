@@ -18,10 +18,10 @@ use super::error::MacAppError;
 use super::installer;
 use super::launch::{
     GameDirs, GameState, LaunchToml, SCHEMA, absolute, engine_root, frameworks_of, resolve_ref,
-    stamp, state_rel, to_launch_conf, wineserver_of, write_atomic,
+    runtime_ref, stamp, state_rel, to_launch_conf, wineserver_of, write_atomic,
 };
 use super::runtime::{Runtime, wine_cmd};
-use super::{catalog, lutris, store, tools, verbs};
+use super::{catalog, lutris, renderer, store, tools, verbs};
 
 /// What [`setup`] did.
 #[derive(Debug, Clone)]
@@ -30,6 +30,8 @@ pub struct SetupOutcome {
     pub prefix_created: bool,
     /// Runtime `<id>/<ver>` installed into the store on the way.
     pub runtime_installed: Option<String>,
+    /// What the renderer step did (#70), for the build log.
+    pub notes: Vec<String>,
     pub warnings: Vec<String>,
 }
 
@@ -98,8 +100,22 @@ pub fn setup(gogid: &str, bundle: Option<&Path>) -> Result<SetupOutcome, MacAppE
         link_game(&dirs, &name)?;
     }
 
+    // The renderer (#70, decision 3): an engine overlay (DXMT) runs from its
+    // derived runtime, a game-local one (cnc-ddraw) goes into the game dir.
+    let game_dir = eff
+        .tree_name()
+        .map(|n| dirs.prefix.join("drive_c/GOG").join(n));
+    let applied = renderer::apply(&eff.renderer, rt, game_dir.as_deref());
+    warnings.extend(applied.warnings);
+    let rt = applied.runtime;
+    for (k, v) in applied.dll_overrides {
+        eff.dll_overrides.entry(k).or_insert(v);
+    }
+    eff.renderer = applied.renderer;
+    eff.runtime = runtime_ref(&rt);
+
     // Registry values the bundle TOML can't carry: L3, then L4 per field
-    // (decision 5). Renderer files and the rest of L3 are #70/#74.
+    // (decision 5). The rest of L3 is #74.
     let db = compat::db_entry(gogid);
     let registry = compat::merge(&[(Layer::Db, &db.entry), (Layer::User, &l4.entry)])
         .registry
@@ -163,6 +179,7 @@ pub fn setup(gogid: &str, bundle: Option<&Path>) -> Result<SetupOutcome, MacAppE
         state,
         prefix_created,
         runtime_installed,
+        notes: applied.notes,
         warnings,
     })
 }

@@ -170,6 +170,19 @@ pub fn unix_to_windows(prefix: &Path, path: &Path) -> Option<String> {
     Some(format!("C:\\{}", parts.join("\\")))
 }
 
+/// The unix path of a `C:\…` path inside `prefix` (the inverse of
+/// [`unix_to_windows`]); `None` for other drives.
+pub fn windows_to_unix(prefix: &Path, path: &str) -> Option<PathBuf> {
+    let rest = path
+        .strip_prefix("C:\\")
+        .or_else(|| path.strip_prefix("c:\\"))?;
+    Some(
+        rest.split('\\')
+            .filter(|p| !p.is_empty())
+            .fold(prefix.join("drive_c"), |acc, p| acc.join(p)),
+    )
+}
+
 /// POSIX single-quote (the same quoting the fat bundle's `launch.conf` uses).
 fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
@@ -327,6 +340,19 @@ pub fn referenced_runtimes() -> Vec<(String, String)> {
         .flatten()
         .filter_map(|e| GameState::load(&e.path().join("state.toml")).ok().flatten())
         .map(|s| (s.gogid, s.runtime))
+        .collect();
+    out.sort();
+    out
+}
+
+/// `(gogid, renderer ref)` for every `games/*/state.toml` (decision 6).
+pub fn referenced_renderers() -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = std::fs::read_dir(games_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| GameState::load(&e.path().join("state.toml")).ok().flatten())
+        .map(|s| (s.gogid, s.renderer))
         .collect();
     out.sort();
     out
@@ -687,6 +713,18 @@ mod launch_tests {
         assert_eq!(eff.env.len(), 2);
         assert_eq!(eff.dll_overrides["ddraw"], "n,b");
         assert_eq!(t.with_override(&CompatEntry::default()), t);
+    }
+
+    #[test]
+    fn windows_to_unix_inverts() {
+        let p = Path::new("/s/prefix");
+        let u = windows_to_unix(p, r"C:\GOG\Neo Cab\Neo Cab.exe").unwrap();
+        assert_eq!(u, Path::new("/s/prefix/drive_c/GOG/Neo Cab/Neo Cab.exe"));
+        assert_eq!(
+            unix_to_windows(p, &u).unwrap(),
+            r"C:\GOG\Neo Cab\Neo Cab.exe"
+        );
+        assert!(windows_to_unix(p, r"D:\x.exe").is_none());
     }
 
     #[test]
