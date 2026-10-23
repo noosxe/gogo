@@ -7,6 +7,8 @@
 # winecx; an isolated GOGO_HOME works, the harness follows the bundle's state):
 #   gogo mac-app --from-depot 1207659013 --out target/v2 --yes   # Treasure Adventure Game
 #   gogo mac-app --from-depot 1146738698 --out target/v2 --yes   # Carmageddon TDR 2000
+#   gogo mac-app --from-depot 1207659046 --out target/v2 --yes   # Pharaoh Gold
+#   gogo mac-app --from-depot 1669531175 --out target/v2 --yes   # Neo Cab
 # The VM GPU has no Metal 3 and no OpenGL: renderer cases only prove start-up
 # here; DXMT/D3DMetal/OpenGL rendering is a host pass (#80).
 
@@ -18,4 +20,6 @@ teardown-kill | launcher teardown (#42) | Treasure Adventure Game.app | --secs 4
 # Placeholders: fill in bundle + check when the work lands.
 runtime-cx24 | L0 runtime CX24 (#62) | Treasure Adventure Game.app | --secs 45 | .status == "ok" and .runtime[0:7] == "winecx/" and .missing_libs == [] and .tcc_prompt_left == false | the default winecx engine + its Frameworks/ from the store start the game in a clean guest: no missing dylibs (FreeType etc.), no microphone prompt with the VM's audio off
 prefix-setup | per-user prefix (#67) | - | | .status == "ok" | prefix built for the guest user on first launch, no builder-home leak
-renderer-l1 | L1 auto renderer (#70) | - | | .status == "ok" | the renderer L1 picks from PE imports starts (start-up only in the VM)
+renderer-l1-ddraw | L1 auto renderer (#70): 2D DirectDraw | Pharaoh Gold.app | --secs 45 | .status == "ok" and contains({renderer: "cnc-ddraw/"}) and .missing_libs == [] | Pharaoh's ddraw-only imports pick cnc-ddraw: setup put ddraw.dll in the game dir with ddraw=n,b, and the game's dialog is on screen
+renderer-l1-wined3d | L1 auto renderer (#70): D3D9 and older | Treasure Adventure Game.app | --secs 45 | .status == "ok" and .renderer == "wined3d" and contains({runtime_dir: "runtimes/winecx/24.0.7_7/"}) | TAG's legacy Direct3D imports keep the engine's wined3d on the base runtime (no D9VK, docs/19 §5.2)
+renderer-l1-dxmt | L1 auto renderer (#70): D3D10/11 | Neo Cab.app | --secs 60 --grep D3D_FEATURE_LEVEL_1 | contains({renderer: "dxmt/", runtime_dir: "+dxmt-"}) and .log_grep != [] and .missing_libs == [] | Neo Cab (Unity, 64-bit, d3d11 loaded at runtime) runs from the derived winecx+dxmt runtime and DXMT creates a D3D11 device; no window is expected (no Metal 3 in the VM: "Failed to get metal layer"), rendering is the host pass (#80)
