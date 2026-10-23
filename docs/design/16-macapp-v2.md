@@ -109,9 +109,11 @@ command substitution and no code, only assignments.
   harness, a new Mac) then works unchanged. Runtimes outside the store stay absolute.
 - A runtime outside the store (brew, a GPTK mount, `--runtime path`) is referenced as
   `runtime = "path:<root>"`. It works, but it can't be swapped or GC-tracked.
-- Build flags are baked into the bundle TOML (this table's first row). Only
-  `--retarget` writes L4 (§7), so a build never creates an override file the user
-  didn't ask for.
+- Build flags are baked into the bundle TOML (this table's first row). L4 is written
+  by `--retarget` (§7), the early-exit dialog's "Try next renderer" (§8.2), the user,
+  and a build whose `--renderer` / `--runtime` meets an L4 value for the same key
+  (decision 5, #110). A build never creates an override file the user didn't ask
+  for.
 
 *#70 (renderers):*
 
@@ -366,12 +368,23 @@ beats the import heuristic because it comes from the vendor.
   has to **persist** (`--renderer`, `--runtime`) is written into L4 (§7); a flag that
   doesn't is used for that run only. This keeps "flags > L4" true without a sixth
   persistent layer, and it's what decision 7 already does for `--retarget`.
-- *#70, as implemented:* the build bakes `flags > L3 > L2 > L1 > L0` into the bundle
-  (§1.1: only `--retarget` writes L4), and setup applies L4 on top. So a build-time
-  `--renderer` loses to an existing L4 `renderer`; the build warns and points at
-  `--retarget <gogid> --renderer …`, which writes L4. `gogo mac-app compat <gogid>`
-  traces the renderer back to its layer (a baked value that L0–L3 don't produce is
-  reported as a build flag).
+- *#70, as implemented:* the build bakes `flags > L3 > L2 > L1 > L0` into the bundle,
+  and setup applies L4 on top. `gogo mac-app compat <gogid>` traces the renderer back
+  to its layer (a baked value that L0–L3 don't produce is reported as a build flag).
+- *#110, as implemented:* baking alone would let an existing L4 value beat a build
+  flag, and L4 is written by `--retarget` and "Try next renderer", so after one use a
+  later build flag would silently lose. So when a build-time `--renderer` or
+  `--runtime` is given **and** the L4 file already sets that key, the build also
+  writes the flag's value there (`toml_edit`, just before the build's setup run) and
+  reports it like `--retarget` does (`<gogid>: renderer dxmt/v0.80 -> wined3d
+  (<path>)`; a `UserOverrideSet` event under `--json-progress`). A key L4 doesn't
+  set, or no L4 file at all, gets nothing written: the flag is only baked. What counts
+  as the flag: `--renderer <r>` when it actually won the merge (a `--renderer
+  d3dmetal` that the #71 gate sets aside, 32-bit or no consent, writes nothing;
+  `--no-ddraw-wrapper` never does), and `--runtime <src>` or a pick in the bare
+  `--runtime` / `--interactive` menu (#76), written as the resolved ref
+  (`wine-devel/11.19`, `path:<root>`). The `auto` ladder writes nothing, so an L4
+  `runtime` keeps winning there.
 - gogo edits only the keys it owns in the L4 file (`toml_edit`, so the user's comments
   survive) and reports what it changed.
 - *#74 (compat entries at build and setup), as implemented:* `plan` merges L3 and L4

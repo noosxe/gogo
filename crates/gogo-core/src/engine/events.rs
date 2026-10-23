@@ -112,6 +112,16 @@ pub enum ProgressEvent {
         layer: String,
         reason: String,
     },
+    /// `mac-app`: a build flag replaced a key in the game's L4 override file
+    /// (`compat/<gogid>.toml`), so the flag wins at launch (#110, design 16
+    /// decision 5).
+    UserOverrideSet {
+        gogid: String,
+        key: String,
+        old: Option<String>,
+        new: Option<String>,
+        path: std::path::PathBuf,
+    },
 }
 
 /// Drive a consumer over the event stream until the engine's terminal `Done`
@@ -181,6 +191,7 @@ mod render_tests {
             ProgressEvent::RuntimeDownloadFinished { .. } => "RuntimeDownloadFinished",
             ProgressEvent::ToolProvisioned { .. } => "ToolProvisioned",
             ProgressEvent::RendererSelected { .. } => "RendererSelected",
+            ProgressEvent::UserOverrideSet { .. } => "UserOverrideSet",
         }
     }
 

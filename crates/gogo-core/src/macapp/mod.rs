@@ -62,6 +62,9 @@ pub struct MacAppPlan {
     /// `(id, version)` when `plan` downloaded a catalog runtime into the
     /// store (§6 step 3) — shown on the confirmation screen.
     pub runtime_downloaded: Option<(String, String)>,
+    /// The runtime came from `--runtime` (a value, or a pick in its menu),
+    /// not the `auto` ladder: it replaces an L4 `runtime` (#110).
+    pub runtime_flag: bool,
     /// Lutris API base override (tests; see `MacAppOptions::lutris_base`).
     pub lutris_base: Option<String>,
     /// `--renderer` as given; applied at plan time (depot lane) or after
@@ -874,6 +877,8 @@ pub fn plan(
     // §6 step 3: runtime resolution — may download into the store (events).
     // The menu is opt-in (#76); without it the ladder's pick stands.
     let menu = prompt.filter(|_| opts.runtime_menu);
+    let runtime_flag =
+        opts.mode != RuntimeMode::Auto || opts.runtime_path.is_some() || menu.is_some();
     let (runtime, runtime_downloaded) =
         resolve_runtime(opts, recipe.as_ref(), pin.as_deref(), menu, emit)?;
     let kind = runtime.mode.as_str().to_string();
@@ -981,6 +986,7 @@ pub fn plan(
         estimated_bytes,
         recipe,
         runtime_downloaded,
+        runtime_flag,
         lutris_base: opts.lutris_base.clone(),
         renderer_choice: opts.renderer,
         renderer,
@@ -1644,6 +1650,7 @@ fn finish_v2(
     bundle::codesign_and_verify(&plan.bundle.root, codesign, true)?;
     emit(&ProgressEvent::Codesigned);
 
+    persist_flags(plan, &gogid, selection, emit)?;
     let outcome = setup::setup(&gogid, Some(&plan.bundle.root))?;
     for verb in outcome.notes {
         emit(&ProgressEvent::RecipeStep { verb });
@@ -1652,6 +1659,45 @@ fn finish_v2(
         emit(&ProgressEvent::Warn { message });
     }
     dir_size(&plan.bundle.root)
+}
+
+/// Flags > L4 (design 16 decision 5, #110): a build-time `--renderer` /
+/// `--runtime` is baked into the bundle, and where the game's L4 file
+/// already sets that key (a `--retarget`, "Try next renderer", the user),
+/// the flag's value is written there too, or L4 would win at launch. With
+/// no L4 value nothing is written. A `--renderer` the D3DMetal gate set
+/// aside (#71) is not the flag's layer, so it writes nothing either.
+fn persist_flags(
+    plan: &MacAppPlan,
+    gogid: &str,
+    selection: &renderer::Selection,
+    emit: &mut dyn FnMut(&ProgressEvent),
+) -> Result<(), MacAppError> {
+    let l4 = compat::load_user(gogid)?.entry;
+    let runtime = launch::runtime_ref(&plan.runtime);
+    let mut updates = Vec::new();
+    if l4.renderer.is_some()
+        && matches!(plan.renderer_choice, RendererChoice::Force(_))
+        && selection.renderer.layer == compat::Layer::Flags
+    {
+        updates.push(("renderer", Some(selection.renderer.value.as_str())));
+    }
+    if l4.runtime.is_some() && plan.runtime_flag {
+        updates.push(("runtime", Some(runtime.as_str())));
+    }
+    if updates.is_empty() {
+        return Ok(());
+    }
+    for c in compat::set_user_keys(gogid, &updates)? {
+        emit(&ProgressEvent::UserOverrideSet {
+            gogid: gogid.to_string(),
+            key: c.key,
+            old: c.old,
+            new: c.new,
+            path: compat::user_path(gogid),
+        });
+    }
+    Ok(())
 }
 
 fn file_size(p: &Path) -> Result<u64, MacAppError> {

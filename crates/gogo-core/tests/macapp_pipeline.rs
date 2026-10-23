@@ -3447,3 +3447,188 @@ fn retarget_moves_a_game_to_another_runtime_without_touching_the_bundle() {
     unsafe { std::env::remove_var("GOGO_HOME") };
     drop(guard);
 }
+
+/// #110, design 16 decision 5 (`flags > L4`): a build-time `--renderer` /
+/// `--runtime` replaces an existing L4 value for its key (the rest of the
+/// file is kept, comments included) and is reported; a key L4 doesn't set,
+/// or no L4 file at all, gets nothing written. A `--renderer d3dmetal` the
+/// #71 gate sets aside (32-bit, no consent) leaves L4 alone, and a pick in
+/// the bare `--runtime` menu (#76) counts as the flag.
+#[test]
+fn build_flags_replace_existing_l4_values() {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    // SAFETY: env mutation under ENV_LOCK.
+    unsafe { std::env::set_var("GOGO_HOME", &home) };
+    let m = |id: &str, version: &str| macapp::store::ManifestEntry {
+        id: id.into(),
+        version: version.into(),
+        sha256: "0".into(),
+        fetched_at: "2026-10-23T00:00:00Z".into(),
+        upstream_url: "http://x".into(),
+        entry_rel: "bin/wine".into(),
+        bytes: 1,
+    };
+    fake_runtime(
+        &home.join("runtimes/wine-staging/11.18"),
+        &tmp.path().join("a.log"),
+    );
+    fake_runtime(
+        &home.join("runtimes/wine-devel/11.19"),
+        &tmp.path().join("b.log"),
+    );
+    macapp::store::save_manifest(&[m("wine-staging", "11.18"), m("wine-devel", "11.19")]).unwrap();
+
+    let gogid = "1207659014";
+    let tree = depot_game(tmp.path(), gogid, "Flag Game", false, &["kernel32.dll"]);
+    let opts = MacAppOptions {
+        installer: None,
+        game_tree: Some(tree),
+        name: None,
+        mode: RuntimeMode::Catalog("wine-devel".into()),
+        runtime_path: None,
+        out_dir: tmp.path().join("out"),
+        overwrite: true,
+        recipe: Default::default(),
+        runtime_menu: false,
+        runtime_version: None,
+        lutris_base: None,
+        renderer: macapp::RendererChoice::Force(macapp::Renderer::Wined3d),
+        portable: false,
+        gogo_path: Some(tmp.path().join("fake-gogo")),
+    };
+    let l4_path = home.join("compat").join(format!("{gogid}.toml"));
+    let build = |opts: &MacAppOptions, prompt: Option<&gogo::macapp::PromptFn>| {
+        let sets = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = sets.clone();
+        let mut emit = move |ev: &ProgressEvent| {
+            if let ProgressEvent::UserOverrideSet { key, old, new, .. } = ev {
+                sink.lock()
+                    .unwrap()
+                    .push((key.clone(), old.clone(), new.clone()));
+            }
+        };
+        let plan = macapp::plan(opts, prompt, &mut emit).expect("plan");
+        macapp::execute(&plan, CodesignPolicy::Skip, &mut emit).expect("execute");
+        let state =
+            macapp::launch::GameState::load(&home.join("games").join(gogid).join("state.toml"))
+                .unwrap()
+                .unwrap();
+        let sets = sets.lock().unwrap().clone();
+        (state, sets)
+    };
+    let s = |v: &str| Some(v.to_string());
+
+    // No L4: the flags are baked, no file appears.
+    let (state, sets) = build(&opts, None);
+    assert!(sets.is_empty(), "{sets:?}");
+    assert!(!l4_path.exists(), "a build never creates an override file");
+    assert_eq!(
+        (state.runtime.as_str(), state.renderer.as_str()),
+        ("wine-devel/11.19", "wined3d")
+    );
+
+    // L4 sets both keys (a retarget, "Try next renderer"): the flags replace
+    // them, the user's other keys and comments stay, and setup applies them.
+    std::fs::create_dir_all(l4_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &l4_path,
+        "# my notes\nruntime = \"wine-staging/11.18\"\nrenderer = \"dxmt/v0.80\"\n\
+         env = { FOO = \"1\" }\n",
+    )
+    .unwrap();
+    let (state, sets) = build(&opts, None);
+    assert_eq!(
+        sets,
+        vec![
+            ("renderer".into(), s("dxmt/v0.80"), s("wined3d")),
+            (
+                "runtime".into(),
+                s("wine-staging/11.18"),
+                s("wine-devel/11.19")
+            ),
+        ]
+    );
+    let l4 = std::fs::read_to_string(&l4_path).unwrap();
+    assert!(l4.contains("# my notes"), "{l4}");
+    assert!(l4.contains("runtime = \"wine-devel/11.19\""), "{l4}");
+    assert!(l4.contains("renderer = \"wined3d\""), "{l4}");
+    assert!(l4.contains("env = { FOO = \"1\" }"), "{l4}");
+    assert_eq!(
+        (state.runtime.as_str(), state.renderer.as_str()),
+        ("wine-devel/11.19", "wined3d")
+    );
+
+    // A key L4 doesn't set gets nothing, even with its flag given.
+    std::fs::write(&l4_path, "runtime = \"wine-staging/11.18\"\n").unwrap();
+    let (_, sets) = build(&opts, None);
+    assert_eq!(
+        sets,
+        vec![(
+            "runtime".into(),
+            s("wine-staging/11.18"),
+            s("wine-devel/11.19")
+        )]
+    );
+    assert!(
+        !std::fs::read_to_string(&l4_path)
+            .unwrap()
+            .contains("renderer")
+    );
+
+    // `--renderer d3dmetal` on a 32-bit game is set aside (#71): L4 keeps
+    // its renderer.
+    std::fs::write(&l4_path, "renderer = \"wined3d\"\n").unwrap();
+    let d3dmetal = MacAppOptions {
+        renderer: macapp::RendererChoice::Force(macapp::Renderer::D3dMetal),
+        ..opts.clone()
+    };
+    let (state, sets) = build(&d3dmetal, None);
+    assert!(sets.is_empty(), "{sets:?}");
+    assert_eq!(
+        std::fs::read_to_string(&l4_path).unwrap(),
+        "renderer = \"wined3d\"\n"
+    );
+    assert_eq!(state.renderer, "wined3d");
+
+    // Bare `--runtime` (#76): the menu pick is the flag.
+    std::fs::write(&l4_path, "runtime = \"wine-staging/11.18\"\n").unwrap();
+    let pick: std::sync::Arc<gogo::macapp::PromptFn> =
+        std::sync::Arc::new(|spec: &gogo::macapp::PromptSpec| match spec.kind {
+            gogo::macapp::PromptKind::Select => spec
+                .items
+                .iter()
+                .position(|i| i.starts_with("wine-devel 11.19"))
+                .map(gogo::macapp::PromptAnswer::Index),
+            _ => None,
+        });
+    let menu = MacAppOptions {
+        mode: RuntimeMode::Auto,
+        runtime_menu: true,
+        renderer: macapp::RendererChoice::Auto,
+        ..opts.clone()
+    };
+    let (state, sets) = build(&menu, Some(pick.as_ref()));
+    assert_eq!(
+        sets,
+        vec![(
+            "runtime".into(),
+            s("wine-staging/11.18"),
+            s("wine-devel/11.19")
+        )]
+    );
+    assert_eq!(state.runtime, "wine-devel/11.19");
+    // Without a flag or a menu, L4 stays and wins at setup.
+    let ladder = MacAppOptions {
+        runtime_menu: false,
+        ..menu
+    };
+    std::fs::write(&l4_path, "runtime = \"wine-staging/11.18\"\n").unwrap();
+    let (state, sets) = build(&ladder, None);
+    assert!(sets.is_empty(), "{sets:?}");
+    assert_eq!(state.runtime, "wine-staging/11.18");
+
+    unsafe { std::env::remove_var("GOGO_HOME") };
+    drop(guard);
+}
