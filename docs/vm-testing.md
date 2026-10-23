@@ -56,7 +56,7 @@ scripts/vm-test.sh run Game.app --no-quarantine     # skip the download simulati
 scripts/vm-test.sh run Game.app --keep              # keep the stopped clone for poking
 scripts/vm-test.sh run Game.app --kill term         # #42: kill the launcher, assert no Wine left
 scripts/vm-test.sh run Game.app --runtimes copy     # copy store runtimes instead of sharing them
-scripts/vm-test.sh run Game.app --click 512,400     # click past a first-run dialog (also --osascript F)
+scripts/vm-test.sh run Game.app --osascript scripts/vm-hooks/press-return.applescript --hook-delay 25
 scripts/vm-test.sh smoke                            # per-layer smoke set (below)
 scripts/vm-test.sh shell [Game.app]                 # interactive clone, deleted on exit
 scripts/vm-test.sh status                           # golden, clones, running count (JSON)
@@ -138,7 +138,25 @@ runs nothing else Wine, so every match belongs to this game's prefix. The result
 
 A non-empty `leftovers` turns an `ok` run into `teardown_leftovers` (exit 1).
 `--kill kill` sends `SIGKILL`, which the launcher can't trap (design 16 §8), so it only
-records what stays behind.
+records what stays behind. Measured 2026-10-23 on TAG: after `SIGTERM` nothing is left
+(the launcher logs `got SIGTERM` and `teardown done`); after `SIGKILL` the game, its
+`wineserver` and all services keep running, along with the launcher's two `tee`
+subshells.
+
+## First-run dialogs (`--click`, `--osascript`)
+
+Some games stop at their own dialog on first launch (docs/19 §8.2 Q8). Hooks run once,
+`--hook-delay` seconds (default 10) after the launch is up: each `--click X,Y` (screen
+points of the 1024×768 display) through System Events, then the `--osascript` file. Output
+lands in `hooks.txt`.
+
+A synthetic `click at` reaches Wine's window but didn't press its button (Carmageddon,
+2026-10-23). Bringing `wine` to the front and pressing Return does, which is what
+[`scripts/vm-hooks/press-return.applescript`](../scripts/vm-hooks/press-return.applescript)
+does. Carmageddon needs `--hook-delay 25`: its "Hardware Capabilities" dialog takes about
+20 s to appear. Past it, the game switches to 640×480 and stops at `FAILED:
+FindDepthBufferFormat`, because the guest has no OpenGL for wined3d. That's a host-pass
+item (#80), not a bundle bug.
 
 ## Smoke set
 

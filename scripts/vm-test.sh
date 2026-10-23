@@ -31,6 +31,8 @@
 #   --grep REGEX        record matching wine/launcher log lines as log_grep
 #   --click X,Y         click there (System Events) after launch; repeatable
 #   --osascript FILE    run this AppleScript in the guest after launch
+#   --hook-delay N      seconds after launch before the hooks run (default 10;
+#                       counts towards neither --secs)
 #
 # smoke options: --bundles DIR (default $GOGO_VM_BUNDLES or <repo>/target/v2),
 #   --out DIR, --only case1,case2
@@ -249,9 +251,10 @@ const sys = ["Finder","Dock","SystemUIServer","Control Center","Window Server",
   "Wallpaper","CoreServicesUIAgent","universalAccessAuthWarn","Siri"];
 const raw = $.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, 0);
 const ws = ObjC.deepUnwrap(ObjC.castRefToObject(raw)) || [];
-// Wine puts fullscreen games (and their dialogs) on layers 25-27, not 0.
+// Wine puts fullscreen games (and their dialogs) on layers 25-27, not 0, and
+// a game that captured the display (mode change) on the shielding layer.
 const out = ws.filter(w => !sys.includes(w.kCGWindowOwnerName) &&
-    (w.kCGWindowLayer === 0 || (/wine|\.exe/i.test(w.kCGWindowOwnerName) && w.kCGWindowLayer < 1000)))
+    (w.kCGWindowLayer === 0 || /wine|\.exe/i.test(w.kCGWindowOwnerName)))
   .map(w => ({owner: w.kCGWindowOwnerName, pid: w.kCGWindowOwnerPID, layer: w.kCGWindowLayer,
               w: Math.round(w.kCGWindowBounds.Width), h: Math.round(w.kCGWindowBounds.Height)}));
 JSON.stringify(out);
@@ -261,7 +264,7 @@ GUEST_PROBE_ALL='
 ObjC.import("CoreGraphics");
 const raw = $.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, 0);
 const ws = ObjC.deepUnwrap(ObjC.castRefToObject(raw)) || [];
-JSON.stringify(ws.filter(w => w.kCGWindowLayer < 1000 && w.kCGWindowBounds.Width > 40 &&
+JSON.stringify(ws.filter(w => (w.kCGWindowLayer < 1000 || /wine/i.test(w.kCGWindowOwnerName)) && w.kCGWindowBounds.Width > 40 &&
     !["Window Server","Dock","Wallpaper","SystemUIServer","Control Center"].includes(w.kCGWindowOwnerName))
   .map(w => ({owner: w.kCGWindowOwnerName, pid: w.kCGWindowOwnerPID, layer: w.kCGWindowLayer,
               w: Math.round(w.kCGWindowBounds.Width), h: Math.round(w.kCGWindowBounds.Height)})));
@@ -314,7 +317,7 @@ state_units() { # app mode
 
 cmd_run() {
     local app="" secs=30 out="$REPO/target/vm-test" name="" quar=1 strict=0 keep=0 waits=1800
-    local state=auto rtmode=share kill_sig="" kill_wait=15 grep_re="" hook_osa="" clicks=()
+    local state=auto rtmode=share kill_sig="" kill_wait=15 grep_re="" hook_osa="" hook_delay=10 clicks=()
     while [ $# -gt 0 ]; do
         case "$1" in
             --secs) secs="$2"; shift 2 ;;
@@ -332,6 +335,7 @@ cmd_run() {
             --grep) grep_re="$2"; shift 2 ;;
             --click) clicks+=("$2"); shift 2 ;;
             --osascript) hook_osa="$2"; shift 2 ;;
+            --hook-delay) hook_delay="$2"; shift 2 ;;
             -*) die "unknown option $1" 2 ;;
             *) app="$1"; shift ;;
         esac
@@ -534,7 +538,7 @@ cmd_run() {
     [ "$(n_live)" -gt 0 ] && launched=true
     # First-run dialogs the game itself shows (docs/19 §8.2 Q8).
     if [ "${#clicks[@]}" -gt 0 ] || [ -n "$hook_osa" ]; then
-        sleep 5
+        sleep "$hook_delay"
         local c
         for c in ${clicks[@]+"${clicks[@]}"}; do
             log "click at $c"
@@ -696,8 +700,8 @@ cmd_smoke() {
             --argjson s "$sj" \
             '{case:$case, layer:$layer, bundle:$bundle, opts:$opts, check:$check, proves:$proves,
               verdict:$verdict, summary:$summary, status:($s.status // null),
-              gatekeeper:($s.gatekeeper // null), runtime:($s.runtime // null),
-              missing_libs:(($s.missing_libs // []) | length), teardown_ok:($s.teardown.ok // null)}' >>"$results"
+              gatekeeper:($s.gatekeeper // null), runtime:($s.runtime // null), gogid:($s.gogid // null),
+              missing_libs:(($s.missing_libs // []) | length), teardown_ok:$s.teardown.ok}' >>"$results"
     done <"$manifest"
     jq -s '{cases: ., pass: (map(select(.verdict == "pass")) | length),
             fail: (map(select(.verdict == "fail" or .verdict == "missing")) | length),
@@ -706,15 +710,17 @@ cmd_smoke() {
     {
         echo "| case | layer | verdict | status | gatekeeper | missing libs | teardown |"
         echo "|---|---|---|---|---|---|---|"
-        jq -r '.cases[] | "| \(.case) | \(.layer) | **\(.verdict)** | \(.status // "-") | \(.gatekeeper // "-") | \(.missing_libs) | \(.teardown_ok // "-") |"' "$dir/smoke.json"
+        jq -r '.cases[] | "| \(.case) | \(.layer) | **\(.verdict)** | \(.status // "-") | \(.gatekeeper // "-") | \(.missing_libs) | \(if .teardown_ok == null then "-" else .teardown_ok end) |"' "$dir/smoke.json"
     } | tee "$dir/table.md"
     local first host
     first="$(jq -r '[.cases[] | select(.summary != "") | .summary][0] // ""' "$dir/smoke.json")"
     host="vm/macos-$( [ -n "$first" ] && sed -n 's/^ProductVersion:[[:space:]]*//p' "$(dirname "$first")/guest-info.txt" 2>/dev/null)"
+    # One compat line per game that started (status ok) in some case.
     jq -r --arg host "$host" --arg date "$(date +%Y-%m-%d)" \
-        '.cases[] | select(.verdict == "pass" and .runtime != null and .runtime != "") |
-         "# \(.case): tested = [{ runtime = \"\(.runtime)\", host = \"\($host)\", date = \($date) }]"' \
-        "$dir/smoke.json" | sort -u
+        '[.cases[] | select(.verdict == "pass" and .status == "ok" and (.gogid // "") != "")]
+         | unique_by(.gogid)[]
+         | "# compat/\(.gogid).toml: tested = [{ runtime = \"\(.runtime)\", host = \"\($host)\", date = \($date) }]"' \
+        "$dir/smoke.json"
     echo "$dir/smoke.json"
     local f i
     f="$(jq '.fail' "$dir/smoke.json")"; i="$(jq '.infra' "$dir/smoke.json")"
