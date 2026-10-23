@@ -12,7 +12,7 @@ title    = "Rebel Galaxy"
 exe      = "RebelGalaxyGOG.exe"
 renderer = "dxmt"                     # wined3d | dxmt[/ver] | cnc-ddraw[/ver] | d3dmetal[/ver]
 runtime  = "winecx/24.0.7_7"          # store <id>[/<ver>]
-verbs    = ["d3dcompiler_43"]         # winetricks verbs
+verbs    = ["d3dcompiler_43"]         # winetricks verbs, added to the L1 auto ones
 dll_overrides = { ddraw = "n,b" }
 env      = { WINEMSYNC = "1" }
 registry = [{ key = 'HKCU\Software\Wine\Direct3D', name = "renderer", type = "REG_SZ", data = "gl" }]
@@ -25,8 +25,11 @@ source   = "gogo-host"                # gogo-vm, or "umu-protonfixes:<file>@<sha
 ```
 
 Maps (`env`, `dll_overrides`) merge per key across layers; every other field
-is replaced whole, so an entry's `verbs` replace the L1 auto verbs (repeat
-them if the game needs both).
+is replaced whole, except `verbs` (#128): an entry's verbs **add** to the L1
+auto verbs picked from the game's imports (in order, no duplicates). To take
+one away write `-<verb>` (`verbs = ["-xinput"]`), and `-*` drops all of them
+(`verbs = ["-*", "d3dx9"]` = exactly `d3dx9`). The same goes for L4 over L3.
+`gogo mac-app compat <gogid>` shows each verb with the layer that added it.
 
 Seed (#75), see docs/19 §5:
 

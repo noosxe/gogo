@@ -6,7 +6,8 @@
 //! pipeline and fed in as [`CompatEntry`] values of their own.
 //!
 //! [`merge`] applies `flags > L4 > L3 > L2 > L1 > L0` field by field and
-//! keeps the winning layer of every field, so `gogo mac-app compat` (and
+//! keeps the winning layer of every field (of every key or verb for the
+//! fields that combine across layers), so `gogo mac-app compat` (and
 //! later `doctor`, #79) can show where a value came from. The build and
 //! setup apply the result (#74, design 16 §5); this module only parses,
 //! merges and writes.
@@ -115,8 +116,8 @@ fn ser_datetime<S: serde::Serializer>(
 }
 
 /// One layer's worth of compat data. Every field is optional: absent means
-/// "this layer has no opinion". Maps are merged per key, everything else is
-/// replaced whole (so L4 `verbs = []` really clears L3's verbs).
+/// "this layer has no opinion". Maps are merged per key, `verbs` edit the
+/// list below them (#128, [`VERBS_CLEAR`]), everything else is replaced whole.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CompatEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -130,7 +131,9 @@ pub struct CompatEntry {
     /// Store runtime `<id>[/<ver>]` (design 16 decision 6).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
-    /// winetricks verbs (applied by setup, never by the launcher).
+    /// winetricks verbs (applied by setup, never by the launcher). They add
+    /// to the lower layers' verbs; `-<verb>` removes one, `-*` all of them
+    /// (see [`merge`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verbs: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -154,6 +157,10 @@ pub struct CompatEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
 }
+
+/// In a `verbs` list: drop every verb the layers below (and the entries
+/// before it) added. `["-*", "d3dx9"]` replaces the list whole.
+pub const VERBS_CLEAR: &str = "-*";
 
 /// Top-level keys of the schema (unknown ones warn, like the config loader).
 const KNOWN_KEYS: &[&str] = &[
@@ -382,7 +389,7 @@ pub struct Sourced<T> {
 }
 
 /// The merged config of every layer, with the winning layer per field (per
-/// key for the maps).
+/// key for the maps, per verb for `verbs`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Effective {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -393,8 +400,8 @@ pub struct Effective {
     pub renderer: Option<Sourced<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<Sourced<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub verbs: Option<Sourced<Vec<String>>>,
+    /// In order, each with the layer that added it.
+    pub verbs: Vec<Sourced<String>>,
     pub dll_overrides: BTreeMap<String, Sourced<String>>,
     pub env: BTreeMap<String, Sourced<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -416,6 +423,12 @@ pub struct Effective {
 /// Merge layers by precedence (design 16 decision 5), field by field. The
 /// input order doesn't matter; two entries for the same layer apply in input
 /// order (the later wins).
+///
+/// `verbs` combine instead (#128): each layer's list applies in order to the
+/// list the layers below built. `<verb>` adds it unless it's there already
+/// (it keeps its place and the layer that added it first), `-<verb>`
+/// removes it, [`VERBS_CLEAR`] removes all. winetricks options start with
+/// `-` too, so no real verb is lost to the prefix.
 pub fn merge(layers: &[(Layer, &CompatEntry)]) -> Effective {
     let mut sorted: Vec<&(Layer, &CompatEntry)> = layers.iter().collect();
     sorted.sort_by_key(|(layer, _)| *layer);
@@ -450,7 +463,11 @@ pub fn merge(layers: &[(Layer, &CompatEntry)]) -> Effective {
         take(&mut out.exe, &e.exe, layer);
         take(&mut out.renderer, &e.renderer, layer);
         take(&mut out.runtime, &e.runtime, layer);
-        take(&mut out.verbs, &e.verbs, layer);
+        apply_verbs(
+            &mut out.verbs,
+            e.verbs.as_deref().unwrap_or_default(),
+            layer,
+        );
         take_map(&mut out.dll_overrides, &e.dll_overrides, layer);
         take_map(&mut out.env, &e.env, layer);
         take(&mut out.registry, &e.registry, layer);
@@ -462,6 +479,22 @@ pub fn merge(layers: &[(Layer, &CompatEntry)]) -> Effective {
         take(&mut out.source, &e.source, layer);
     }
     out
+}
+
+/// One layer's `verbs` applied to the list below it (see [`merge`]).
+fn apply_verbs(list: &mut Vec<Sourced<String>>, edits: &[String], layer: Layer) {
+    for edit in edits {
+        if edit == VERBS_CLEAR {
+            list.clear();
+        } else if let Some(verb) = edit.strip_prefix('-') {
+            list.retain(|s| s.value != verb);
+        } else if !list.iter().any(|s| &s.value == edit) {
+            list.push(Sourced {
+                value: edit.clone(),
+                layer,
+            });
+        }
+    }
 }
 
 impl Effective {
@@ -486,7 +519,9 @@ impl Effective {
         line(&mut out, "exe", &self.exe);
         line(&mut out, "renderer", &self.renderer);
         line(&mut out, "runtime", &self.runtime);
-        line(&mut out, "verbs", &self.verbs);
+        for s in &self.verbs {
+            out.push(format!("verbs += {:?}  ({})", s.value, s.layer.describe()));
+        }
         map(&mut out, "dll_overrides", &self.dll_overrides);
         map(&mut out, "env", &self.env);
         line(&mut out, "registry", &self.registry);
@@ -758,7 +793,7 @@ replace_command = { from = "GoGLauncher.exe", to = "RebelGalaxyGOG.exe" }
     fn merge_is_field_by_field() {
         let db = parse(REBEL_GALAXY).unwrap().entry;
         let user = parse(
-            "renderer = \"wined3d\"\nverbs = []\nenv = { DXVK_HUD = \"1\", WINEMSYNC = \"0\" }\n",
+            "renderer = \"wined3d\"\nverbs = [\"-d3dx11_43\", \"xinput\"]\nenv = { DXVK_HUD = \"1\", WINEMSYNC = \"0\" }\n",
         )
         .unwrap()
         .entry;
@@ -773,9 +808,13 @@ replace_command = { from = "GoGLauncher.exe", to = "RebelGalaxyGOG.exe" }
         ]);
         let r = eff.renderer.as_ref().unwrap();
         assert_eq!((r.value.as_str(), r.layer), ("wined3d", Layer::User));
-        // An explicit empty list replaces the lower layer's list.
-        let v = eff.verbs.as_ref().unwrap();
-        assert_eq!((v.value.len(), v.layer), (0, Layer::User));
+        // Verbs edit the lower layer's list (#128).
+        let v: Vec<(&str, Layer)> = eff
+            .verbs
+            .iter()
+            .map(|s| (s.value.as_str(), s.layer))
+            .collect();
+        assert_eq!(v, [("d3dcompiler_43", Layer::Db), ("xinput", Layer::User)]);
         assert_eq!(eff.exe.as_ref().unwrap().layer, Layer::Db);
         assert_eq!(eff.runtime.as_ref().unwrap().layer, Layer::Default);
         // Maps merge per key.
@@ -785,8 +824,11 @@ replace_command = { from = "GoGLauncher.exe", to = "RebelGalaxyGOG.exe" }
         assert_eq!(eff.dll_overrides["ddraw"].layer, Layer::Db);
         let lines = eff.display_lines();
         assert!(lines.contains(&"renderer = \"wined3d\"  (L4 user override)".to_string()));
+        assert!(lines.contains(&"verbs += \"xinput\"  (L4 user override)".to_string()));
         let json = serde_json::to_value(&eff).unwrap();
         assert_eq!(json["renderer"]["layer"], "L4");
+        assert_eq!(json["verbs"][1]["value"], "xinput");
+        assert_eq!(json["verbs"][1]["layer"], "L4");
         assert_eq!(json["tested"]["value"][0]["date"], "2026-10-22");
     }
 

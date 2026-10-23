@@ -135,9 +135,7 @@ impl LaunchToml {
         if let Some(a) = eff.args {
             out.args = a.value;
         }
-        if let Some(v) = eff.verbs {
-            out.verbs = v.value;
-        }
+        out.verbs = eff.verbs.into_iter().map(|s| s.value).collect();
         out.env = eff.env.into_iter().map(|(k, s)| (k, s.value)).collect();
         out.dll_overrides = eff
             .dll_overrides

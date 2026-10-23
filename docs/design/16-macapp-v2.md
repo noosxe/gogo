@@ -238,13 +238,22 @@ take different paths into the prefix.
   the imports behind it and its layer. The installer lane decides its verbs
   after the install.
 - **Where each layer lives.** The bundle TOML's `verbs` holds **L1 only**; it is
-  the build's list, so it is part of the stamp. Setup merges L3 (the compat DB,
-  read live, like `registry`) and then L4 over it, each replacing the list
-  whole. `gogo mac-app compat <gogid>` shows the winner with its layer, and it
-  reads L1 from the built bundle.
+  the build's list, so it is part of the stamp. Setup applies L3 (the compat DB,
+  read live, like `registry`) and then L4 to it; since #128 their verbs **add**
+  to the list below (decision 5). `gogo mac-app compat <gogid>` shows each
+  effective verb with the layer that added it (`verbs += "directplay"  (L3 compat
+  DB)`; `effective.verbs` in `--json` is a list of `{value, layer}`), and it
+  reads L1 from the built bundle. The pre-confirm `verbs:` line says the same
+  (`d3dx11_43 (L1 auto: d3dx11_43.dll), directplay (L3 compat DB)`), and the
+  build's `--json` has the list as `verbs` next to `auto_verbs`.
 - **Re-runs.** winetricks runs only when the effective list differs from the one
   `state.toml` recorded (`verbs`), when the runtime changed, or when the prefix
-  is new. A stale stamp alone (an L4 `env` edit) doesn't re-run it.
+  is new. A stale stamp alone (an L4 `env` edit) doesn't re-run it. So a change
+  to the *effective* list re-runs it at the next setup whatever caused it: an
+  L4 edit (which also restamps, so the next launch runs setup), a rebuild, or a
+  gogo whose compat DB or merge rule changed. The last reaches an existing game
+  only at its next setup (§2.1): the launcher can't see it. #128's switch from
+  "L3/L4 replace" to "L3/L4 add" is such a change.
 - **SIP and winetricks.** winetricks is a `/bin/sh` script and calls wine through
   `/usr/bin/env`. SIP drops `DYLD_*` whenever a protected binary starts, so an
   inherited `DYLD_FALLBACK_LIBRARY_PATH` never reaches a CX24 wine. So `WINE` and
@@ -357,8 +366,18 @@ Windows path stays `C:\GOG\<tree-name>` as in design 15, and registry keys and
 ## 5. Decision 5: precedence
 
 **Settled:** `flags > L4 > L3 > L2 > L1 auto > L0 default`, field by field.
-Maps (`env`, `dll_overrides`) merge per key; every other field, lists included, is
-replaced whole, so an L4 `verbs = []` clears L3's verbs (#65, `macapp/compat.rs`).
+Maps (`env`, `dll_overrides`) merge per key; `verbs` combine (below); every other
+field, lists included, is replaced whole (#65, `macapp/compat.rs`).
+
+*Verbs, #128:* each layer's `verbs` edit the list the layers below built, entry by
+entry in order: `<verb>` adds it (a verb already there keeps its place and its
+layer), `-<verb>` removes it, `-*` removes them all. So L3 and L4 verbs add to the
+L1 auto verbs, an L4 `["-d3dx11_43"]` drops one auto verb, `["-*"]` really clears,
+and `["-*", "d3dx9"]` is the old replace. An empty list has nothing to add.
+Additive is the default because the sources of L3 verbs are fix lists (umu-protonfixes'
+`protontricks` calls, a host pass that needed one more verb): none of them means "and
+drop what the imports call for". The prefix is free: winetricks options start with
+`-`, so no verb does.
 
 **Why:** the closer a source is to the user's explicit intent, the more it wins. Curated
 data (L3) beats heuristics (L1) because it records an observed result. GOG's own data (L2)
@@ -401,7 +420,7 @@ beats the import heuristic because it comes from the vendor.
   | `env`, `dll_overrides` | L3 per key over the recipe's | L4 per key; renderer overrides only fill gaps |
   | `renderer` | L3 in `renderer::select` (#70) | L4 |
   | `runtime` | L3 pins the `auto` ladder (cached → used; headless and not cached → downloaded; interactive → the menu, with a warning); flags still win | L4 (installed if missing) |
-  | `verbs` | not baked (the TOML keeps L1) | L3 then L4 replace L1 whole, via winetricks |
+  | `verbs` | not baked (the TOML keeps L1) | L3 then L4 add to L1 (`-<verb>` / `-*` remove, #128), via winetricks |
   | `registry` | not baked | L3 then L4, `reg add` through `interpret::run_in_prefix` |
 
   DLL overrides stay a launch-time `WINEDLLOVERRIDES` (§1.1), not registry writes, so
