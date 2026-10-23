@@ -28,6 +28,9 @@ use super::{catalog, lutris, renderer, store, tools, verbs};
 pub struct SetupOutcome {
     pub state: GameState,
     pub prefix_created: bool,
+    /// The prefix was brought up to a new engine (`wineboot -u` after a
+    /// retarget, #69).
+    pub prefix_updated: bool,
     /// Runtime `<id>/<ver>` installed into the store on the way.
     pub runtime_installed: Option<String>,
     /// What the renderer step did (#70), for the build log.
@@ -88,6 +91,17 @@ pub fn setup(gogid: &str, bundle: Option<&Path>) -> Result<SetupOutcome, MacAppE
     let prefix_created = !dirs.prefix.is_dir();
     if prefix_created {
         create_prefix(&rt, &dirs.prefix)?;
+    }
+    // A new engine (a retarget, a new pin) updates the prefix it inherits:
+    // `wineboot -u`, as Wine does itself when it notices, but here, before
+    // the game runs (#69). A renderer switch on the same engine doesn't.
+    let engine = |r: &str| r.split_once('+').map_or(r, |(b, _)| b).to_string();
+    let prefix_updated = !prefix_created
+        && prior
+            .as_ref()
+            .is_some_and(|s| engine(&s.runtime) != engine(&runtime_ref(&rt)));
+    if prefix_updated {
+        installer::stage_prefix(&rt, &dirs.prefix)?;
     }
     if let Some(name) = eff.tree_name().filter(|_| dirs.game.is_dir())
         && dirs
@@ -178,16 +192,57 @@ pub fn setup(gogid: &str, bundle: Option<&Path>) -> Result<SetupOutcome, MacAppE
     Ok(SetupOutcome {
         state,
         prefix_created,
+        prefix_updated,
         runtime_installed,
         notes: applied.notes,
         warnings,
     })
 }
 
-/// Resolve a runtime reference, installing a missing catalog runtime into
-/// the store (design 16 §2.2, network allowed under design 12 D8). Anything
-/// that can't be installed this way (a `path:` runtime, a consent download)
-/// fails with how to install it by hand.
+/// What [`retarget`] did.
+#[derive(Debug)]
+pub struct RetargetOutcome {
+    pub gogid: String,
+    /// The L4 keys that changed.
+    pub changes: Vec<compat::Change>,
+    /// The setup run that applied them: `None` when nothing changed or the
+    /// game has no state yet (its first launch sets it up). A failed setup
+    /// leaves the L4 file written; the next launch tries again.
+    pub setup: Option<Result<SetupOutcome, MacAppError>>,
+}
+
+/// The gogid a `--retarget` target names: a gogid as is, or a v2 bundle's
+/// (read from its `gogo-launch.toml`).
+pub fn target_gogid(target: &str) -> Result<String, MacAppError> {
+    if !target.is_empty() && target.bytes().all(|b| b.is_ascii_digit()) {
+        return Ok(target.to_string());
+    }
+    let toml = Path::new(target).join("Contents/Resources/gogo-launch.toml");
+    let raw = std::fs::read_to_string(&toml).map_err(|e| MacAppError::Compat {
+        path: toml.clone(),
+        reason: format!("not a gogo v2 bundle: {e}"),
+    })?;
+    Ok(LaunchToml::parse(&raw, &toml)?.gogid)
+}
+
+/// `gogo mac-app --retarget` (design 16 decision 7, #69): write `updates`
+/// (`runtime`, `renderer`; `None` drops a key) into the game's L4 file, then
+/// run [`setup`] so the prefix is ready for the new engine before the next
+/// launch. The signed bundle is never touched.
+pub fn retarget(
+    gogid: &str,
+    updates: &[(&str, Option<&str>)],
+) -> Result<RetargetOutcome, MacAppError> {
+    let changes = compat::set_user_keys(gogid, updates)?;
+    let has_state = GameDirs::for_game(gogid)?.state_toml.is_file();
+    let setup = (!changes.is_empty() && has_state).then(|| setup(gogid, None));
+    Ok(RetargetOutcome {
+        gogid: gogid.to_string(),
+        changes,
+        setup,
+    })
+}
+
 /// `gogo mac-app next-renderer <gogid>` (#78): the renderer the launcher's
 /// "Try next renderer" switches to, after the one the last setup applied
 /// ([`renderer::next_after`] over this game's L1 order). Unless `dry_run`,
@@ -229,6 +284,10 @@ pub fn next_renderer(gogid: &str, dry_run: bool) -> Result<Option<String>, MacAp
     Ok(Some(next))
 }
 
+/// Resolve a runtime reference, installing a missing catalog runtime into
+/// the store (design 16 §2.2, network allowed under design 12 D8). Anything
+/// that can't be installed this way (a `path:` runtime, a consent download)
+/// fails with how to install it by hand.
 fn resolve_or_install(r: &str) -> Result<(Runtime, Option<String>), MacAppError> {
     let err = match resolve_ref(r) {
         Ok(rt) => return Ok((rt, None)),

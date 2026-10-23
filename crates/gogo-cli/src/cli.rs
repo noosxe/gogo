@@ -146,8 +146,9 @@ pub enum Command {
         installer: Option<std::path::PathBuf>,
         /// Point an existing game at another runtime or renderer without
         /// rebuilding: writes `--runtime` / `--renderer` into the game's user
-        /// override file (L4, design 16 decision 7); the next launch applies
-        /// it. `auto` drops the override.
+        /// override file (L4, design 16 decision 7), then sets the game up on
+        /// it (installing the runtime, `wineboot -u` for a new engine). The
+        /// signed bundle is untouched. `auto` drops the override.
         #[arg(long, value_name = "BUNDLE|GOGID", conflicts_with = "from_depot")]
         retarget: Option<String>,
         /// Build from a depot (Model B) game tree instead of running an
@@ -434,11 +435,13 @@ pub enum RuntimesCmd {
     /// Remove cached runtimes and renderers from the store (never one a
     /// game still uses).
     Prune {
-        /// Remove every cached runtime and renderer.
+        /// Remove every cached runtime and renderer no game uses, but the
+        /// newest two versions of each (the previous one, to roll back to).
         #[arg(long)]
         all: bool,
-        /// Remove one catalog id.
-        #[arg(value_name = "ID")]
+        /// Remove one catalog id (every version), or one version as
+        /// `<id>/<version>` (with the derived runtimes built on it).
+        #[arg(value_name = "ID[/VERSION]")]
         id: Option<String>,
     },
 }

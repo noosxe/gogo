@@ -329,34 +329,8 @@ pub(super) fn write_atomic(path: &Path, contents: &str) -> Result<(), MacAppErro
     Ok(())
 }
 
-// — runtime references (design 16 decision 6) —
-
-/// `(gogid, runtime ref)` for every `games/*/state.toml`: the store's
-/// reference list. Unreadable entries are skipped.
-pub fn referenced_runtimes() -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = std::fs::read_dir(games_dir())
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| GameState::load(&e.path().join("state.toml")).ok().flatten())
-        .map(|s| (s.gogid, s.runtime))
-        .collect();
-    out.sort();
-    out
-}
-
-/// `(gogid, renderer ref)` for every `games/*/state.toml` (decision 6).
-pub fn referenced_renderers() -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = std::fs::read_dir(games_dir())
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| GameState::load(&e.path().join("state.toml")).ok().flatten())
-        .map(|s| (s.gogid, s.renderer))
-        .collect();
-    out.sort();
-    out
-}
+// — runtime references (design 16 decision 6; the GC side is
+// `store::references`) —
 
 /// How the bundle names its runtime: `<id>/<ver>` when it lives in the store,
 /// else `path:<root>` (brew, a GPTK mount, `--runtime path`), which can't be
@@ -475,14 +449,22 @@ find_gogo() {
 log "launch $TITLE ($GOGID) from $CONTENTS"
 load_state
 want="$(current_stamp)"
+# Why this run isn't on the config asked for (a retarget to a runtime that
+# isn't in the store, #69): for the run log's header.
+SETUP_ERR=""
 if [ ! -d "$GAME_STATE/prefix" ] || [ "$want" != "$STAMP" ]; then
     gogo="$(find_gogo)"
     if [ -n "$gogo" ]; then
         log "prefix missing or config stale (${STAMP:-none} -> $want): $gogo mac-app setup $GOGID"
-        if "$gogo" mac-app setup "$GOGID" --bundle "$(dirname "$CONTENTS")" >>"$LOG" 2>&1; then
+        setup_out="$("$gogo" mac-app setup "$GOGID" --bundle "$(dirname "$CONTENTS")" 2>&1)"
+        setup_rc=$?
+        [ -n "$setup_out" ] && printf '%s\n' "$setup_out" >>"$LOG"
+        if [ "$setup_rc" -eq 0 ]; then
             load_state
         else
-            log "setup failed; launching with the last applied config"
+            SETUP_ERR="$(printf '%s' "$setup_out" | grep -v '^warning:' | tail -n 1 | cut -c1-300)"
+            SETUP_ERR="setup failed (exit $setup_rc): ${SETUP_ERR:-no output}; running the last applied config"
+            log "$SETUP_ERR"
         fi
     else
         log "prefix missing or config stale, and no gogo found (GOGO_PATH=$GOGO_PATH)"
@@ -590,6 +572,7 @@ start_run_log() {
     {
         printf '# gogo run log: %s (%s)\n' "$TITLE" "$GOGID"
         printf '# started: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
+        if [ -n "$SETUP_ERR" ]; then printf '# setup: %s\n' "$SETUP_ERR"; fi
         printf '# runtime: %s\n' "$RUNTIME"
         printf '# runtime_dir: %s\n' "${RUNTIME_DIR:-}"
         printf '# renderer: %s\n' "$RENDERER"
@@ -671,7 +654,7 @@ last_errors() {
 # Copy report: what a bug report needs, no home paths.
 report() {
     printf 'gogo launch report: %s (%s)\n' "$TITLE" "$GOGID"
-    grep -E '^# (runtime|runtime_dir|renderer|verbs|stamp|macos|exe|args|exit|duration):' "$1"
+    grep -E '^# (setup|runtime|runtime_dir|renderer|verbs|stamp|macos|exe|args|exit|duration):' "$1"
     printf -- '--- last 40 log lines ---\n'
     run_output "$1" | tail -n 40
 }
@@ -716,6 +699,17 @@ $(last_errors "$log")
 }
 
 start_run_log "$@"
+# The runtime the last setup applied must still be in the store (#69: a
+# prune, or a retarget whose setup failed, can leave it missing).
+if [ ! -x "$WINE_BIN" ]; then
+    msg="runtime $RUNTIME is not in the runtime store ($WINE_BIN is missing)"
+    printf 'gogo: %s; reinstall it with `gogo runtimes install %s` or pick another with `gogo mac-app --retarget %s --runtime …`\n' \
+        "$msg" "${RUNTIME%%/*}" "$GOGID" >&2
+    log "$msg: not launching"
+    end_run_log 127 "runtime missing"
+    dialog "This game's Wine runtime ($RUNTIME) is not installed. Run: gogo runtimes install ${RUNTIME%%/*}"
+    exit 1
+fi
 log "exec $WINE_BIN $EXE (runtime $RUNTIME, prefix $WINEPREFIX, log $RUN_LOG)"
 set -m
 "$WINE_BIN" "$EXE" ${ARGS[@]+"${ARGS[@]}"} "$@" 3>&- 4>&- &
