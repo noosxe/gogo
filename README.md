@@ -77,7 +77,9 @@ files come straight from GOG's depot (downloaded into the cache on first use)
 and no installer runs. Games without a depot build fall back to their downloaded
 offline installer, with a notice. `--from-depot <GAME|DIR>` forces the depot
 lane (no fallback) and also takes a game tree directory. Given a `setup_*.exe`
-path, it takes the **installer lane** and runs the installer silently. Without
+path, it takes the **installer lane** and runs the installer silently (its Inno
+and Wine logs land in `games/<gogid>/install/`). Some games only work this way:
+the depot Pharaoh asks for its CD, the installed one doesn't. Without
 `--yes` it prints the plan (source, compat status, runtime, renderer, verbs,
 size) and asks first; without a terminal it prints the plan and stops.
 

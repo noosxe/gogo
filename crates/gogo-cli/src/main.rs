@@ -2581,11 +2581,17 @@ async fn mac_app(
                 _ => "auto (picked from the installed files)".to_string(),
             },
         };
-        // #74: what gogo knows about this game, before the long part.
+        // #74: what gogo knows about this game, before the long part (only
+        // the depot lane knows the id this early).
         let compat_line = plan
             .compat
             .as_ref()
-            .map(|c| format!("\n  compat:    {}", c.status_line()))
+            .map(|c| {
+                format!(
+                    "\n  compat:    {}",
+                    c.status_line_for(Some(gogo::macapp::compat::Lane::Depot))
+                )
+            })
             .unwrap_or_default();
         let portable_line = if plan.portable {
             "\n  portable:  runtime, renderer, verb files and game inside the bundle; its \
@@ -2701,7 +2707,7 @@ async fn mac_app(
                 "verbs": plan.auto_verbs.as_deref().map(|a| {
                     gogo::macapp::verbs::for_plan(plan.gogid.as_deref(), a)
                 }),
-                "compat_status": plan.compat.as_ref().map(|c| c.status_line()),
+                "compat_status": plan.compat.as_ref().map(|c| c.status_line_for(Some(gogo::macapp::compat::Lane::Depot))),
                 "renderer": selected.lock().unwrap().clone(),
                 "runtime": {
                     "kind": plan.runtime.kind,

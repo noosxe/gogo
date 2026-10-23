@@ -31,8 +31,18 @@ if [ "$1" = "wineboot" ]; then
   ln -sfn /Volumes/Other "$WINEPREFIX/dosdevices/d:"
   exit 0
 fi
+# Inno's /LOG=Z:\path (#56): write a log where gogo asked for it.
+INNO_LOG=""
+for a in "$@"; do
+  case "$a" in /LOG=Z:*) INNO_LOG=$(printf '%s' "${{a#/LOG=Z:}}" | tr '\\' '/');; esac
+done
+[ -n "$INNO_LOG" ] && printf 'Log opened.\nSetup version: Inno Setup 5.6.1 (u)\n' > "$INNO_LOG"
 case "$1" in
   *fail_support.exe) exit 1;;
+  *fail_inno.exe)
+    printf 'Creating directory: C:\\GOG\\x\nException message:\nFake failure in the [Code] section.\n' >> "$INNO_LOG"
+    echo "fake inno stderr" >&2
+    exit 1;;
   # A v2 launcher run (a Windows path). FAKE_WINE_HANG=<pidfile>: hang, with
   # a TERM-ignoring child in the game's process group (#42 teardown test).
   C:*)
@@ -66,6 +76,7 @@ case "$1" in
     # discovery nondeterministically (dir-walk order; live CI finding).
     ls "$DIR"/goggame-*.info >/dev/null 2>&1 || printf '%s' '{{"name":"Test Game","playTasks":[{{"type":"FileTask","category":"game","path":"game.exe","isPrimary":true}}]}}' > "$DIR/goggame-1.info"
     printf 'MZ' > "$DIR/game.exe"
+    echo "fake inno stderr" >&2
     ;;
 esac
 exit 0
@@ -193,6 +204,8 @@ fn full_pipeline_with_fake_runtime() {
     assert!(logged.contains("/SUPPRESSMSGBOXES"), "{logged}");
     assert!(logged.contains("/NORESTART"), "{logged}");
     assert!(logged.contains(r"/DIR=C:\GOG\test-game"), "{logged}");
+    assert!(logged.contains("/SP-"), "{logged}");
+    assert!(logged.contains(r"\install\inno.log"), "{logged}");
 
     // The game the fake installer laid down is in the bundle; no prefix is,
     // and the staging dir it was installed into is gone.
@@ -4885,6 +4898,169 @@ fn portable_bundle_carries_everything_and_sets_up_outside() {
         std::env::remove_var("GOGO_HOME");
         std::env::remove_var("WINETRICKS");
         std::env::remove_var("GOGO_CNC_DDRAW_DIR");
+    }
+    drop(guard);
+}
+
+/// The installer-lane fake: `setup_<name>.exe` in its own dir.
+fn fake_installer(tmp: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let dir = tmp.join("installers");
+    std::fs::create_dir_all(&dir).unwrap();
+    let installer = dir.join(name);
+    std::fs::write(&installer, b"MZ fake").unwrap();
+    installer
+}
+
+/// `opts` for a v2 (not portable) build from an offline installer.
+fn installer_opts(tmp: &std::path::Path, installer: std::path::PathBuf) -> MacAppOptions {
+    let runtime_dir = tmp.join("runtime");
+    fake_runtime(&runtime_dir, &tmp.join("wine.log"));
+    MacAppOptions {
+        installer: Some(installer),
+        game_tree: None,
+        name: Some("Test Game".into()),
+        mode: RuntimeMode::Path,
+        runtime_path: Some(runtime_dir),
+        out_dir: tmp.join("out"),
+        overwrite: true,
+        recipe: Default::default(),
+        runtime_menu: false,
+        runtime_version: None,
+        lutris_base: None,
+        renderer: macapp::RendererChoice::Auto,
+        portable: false,
+        gogo_path: Some(tmp.join("gogo")),
+    }
+}
+
+#[test]
+fn installer_lane_keeps_its_logs_and_records_the_lane() {
+    // #56: the installer runs with Inno's /LOG and Wine's output in a file,
+    // both kept in games/<gogid>/install/; the bundle says it came from the
+    // installer, so a depot-only compat status doesn't apply to it.
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let t = tmp.path();
+    let home = t.join("home");
+    let compat_dir = t.join("compat");
+    std::fs::create_dir_all(&compat_dir).unwrap();
+    let entry = |lane: &str| {
+        format!(
+            "status = \"broken\"\nlane = \"{lane}\"\nnotes = \"asks for the CD\"\n\
+             tested = [{{ runtime = \"winecx/24.0.7_7\" }}]\nsource = \"gogo-vm\"\n"
+        )
+    };
+    std::fs::write(compat_dir.join("1.toml"), entry("depot")).unwrap();
+    // SAFETY: env mutation under ENV_LOCK.
+    unsafe {
+        std::env::set_var("GOGO_HOME", &home);
+        std::env::set_var("GOGO_CONFIG", t.join("config.toml"));
+        std::env::set_var("GOGO_COMPAT_DIR", &compat_dir);
+    }
+    let opts = installer_opts(t, fake_installer(t, "setup_testgame_1.0.exe"));
+    let plan = macapp::plan(&opts, None, &mut |_| {}).expect("plan");
+    macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).expect("execute");
+
+    let logs = home.join("games/1").join(macapp::INSTALL_LOGS);
+    let inno = std::fs::read_to_string(logs.join("inno.log")).unwrap();
+    assert!(inno.starts_with("Log opened."), "{inno}");
+    let wine = std::fs::read_to_string(logs.join("wine.log")).unwrap();
+    assert!(wine.contains("fake inno stderr"), "{wine}");
+    let left: Vec<_> = std::fs::read_dir(home.join("games"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+    assert_eq!(left, [std::ffi::OsString::from("1")], "staging dir left");
+
+    let toml =
+        std::fs::read_to_string(t.join("out/Test Game.app/Contents/Resources/gogo-launch.toml"))
+            .unwrap();
+    assert!(toml.contains("lane = \"installer\""), "{toml}");
+
+    let compat = |host: &macapp::doctor::Host| {
+        let r = macapp::doctor::doctor(
+            "1",
+            &macapp::doctor::DoctorOptions {
+                host: host.clone(),
+                stop_leftovers: false,
+            },
+        )
+        .unwrap();
+        let f = r
+            .findings
+            .into_iter()
+            .find(|f| f.check == "compat")
+            .unwrap();
+        (f.level, f.message)
+    };
+    let host = doctor_host(t, true);
+    assert_eq!(
+        compat(&host),
+        (
+            macapp::doctor::Level::Ok,
+            "untested from the offline installer (the depot build: known broken: \
+             asks for the CD)"
+                .to_string()
+        )
+    );
+    std::fs::write(compat_dir.join("1.toml"), entry("installer")).unwrap();
+    assert_eq!(
+        compat(&host),
+        (
+            macapp::doctor::Level::Warn,
+            "known broken: asks for the CD".to_string()
+        )
+    );
+
+    unsafe {
+        std::env::remove_var("GOGO_HOME");
+        std::env::remove_var("GOGO_CONFIG");
+        std::env::remove_var("GOGO_COMPAT_DIR");
+    }
+    drop(guard);
+}
+
+#[test]
+fn installer_failure_reports_the_inno_log() {
+    // #56: a failing installer names its log dir and quotes Inno's last
+    // lines, which say what failed (the exit code alone never did).
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let t = tmp.path();
+    let home = t.join("home");
+    // SAFETY: env mutation under ENV_LOCK.
+    unsafe {
+        std::env::set_var("GOGO_HOME", &home);
+        std::env::set_var("GOGO_CONFIG", t.join("config.toml"));
+    }
+    let opts = installer_opts(t, fake_installer(t, "setup_fail_inno.exe"));
+    let plan = macapp::plan(&opts, None, &mut |_| {}).expect("plan");
+    let err = macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).unwrap_err();
+    let gogo::macapp::MacAppError::InstallerFailed {
+        exit, logs, tail, ..
+    } = &err
+    else {
+        panic!("{err}");
+    };
+    assert_eq!(*exit, 1);
+    assert_eq!(logs, &plan.state.root.join(macapp::INSTALL_LOGS));
+    assert!(logs.join("wine.log").is_file());
+    assert!(
+        tail.ends_with("Exception message:\nFake failure in the [Code] section."),
+        "{tail}"
+    );
+    let msg = err.to_string();
+    assert!(msg.contains("installer exited 1"), "{msg}");
+    assert!(msg.contains(&logs.display().to_string()), "{msg}");
+    assert!(
+        msg.ends_with(&format!("\nlast lines of the Inno log:\n{tail}")),
+        "{msg}"
+    );
+
+    unsafe {
+        std::env::remove_var("GOGO_HOME");
+        std::env::remove_var("GOGO_CONFIG");
     }
     drop(guard);
 }

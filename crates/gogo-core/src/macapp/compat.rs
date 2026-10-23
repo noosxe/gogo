@@ -68,6 +68,27 @@ pub enum Status {
     Plays,
 }
 
+/// How a bundle got its game (#56): from the depot build (design 15, the
+/// default) or by running GOG's offline installer. An entry's `lane` says
+/// which one its `status` / `notes` / `tested` were seen on; some games
+/// differ (Pharaoh asks for its CD from the depot, not once installed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Lane {
+    Depot,
+    Installer,
+}
+
+impl Lane {
+    /// For human output: "the depot build", "the offline installer".
+    pub fn describe(self) -> &'static str {
+        match self {
+            Lane::Depot => "the depot build",
+            Lane::Installer => "the offline installer",
+        }
+    }
+}
+
 /// One registry value to set in the prefix (`reg add` shape).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegistryValue {
@@ -158,6 +179,10 @@ pub struct CompatEntry {
     /// One line on why the game has its `status` (what breaks, what works).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    /// The build lane `status`, `notes` and `tested` were seen on; absent =
+    /// both (#56).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<Lane>,
     /// Provenance: `gogo-vm`, `umu-protonfixes:<file>@<sha>`, …
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
@@ -183,6 +208,7 @@ const KNOWN_KEYS: &[&str] = &[
     "status",
     "tested",
     "notes",
+    "lane",
     "source",
 ];
 
@@ -424,6 +450,9 @@ pub struct Effective {
     pub tested: Option<Sourced<Vec<Tested>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<Sourced<String>>,
+    /// Goes with `status`: a layer that sets one sets both (#56).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lane: Option<Sourced<Lane>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<Sourced<String>>,
 }
@@ -482,7 +511,11 @@ pub fn merge(layers: &[(Layer, &CompatEntry)]) -> Effective {
         take(&mut out.args, &e.args, layer);
         take(&mut out.variant, &e.variant, layer);
         take(&mut out.replace_command, &e.replace_command, layer);
+        if e.status.is_some() {
+            out.lane = None;
+        }
         take(&mut out.status, &e.status, layer);
+        take(&mut out.lane, &e.lane, layer);
         take(&mut out.tested, &e.tested, layer);
         take(&mut out.notes, &e.notes, layer);
         take(&mut out.source, &e.source, layer);
@@ -546,6 +579,7 @@ impl Effective {
             ));
         }
         line(&mut out, "notes", &self.notes);
+        line(&mut out, "lane", &self.lane);
         line(&mut out, "source", &self.source);
         out
     }
@@ -555,6 +589,36 @@ impl Effective {
     /// The runtime is the most recent `tested` run (the last one when none
     /// carries a date).
     pub fn status_line(&self) -> String {
+        self.status_line_for(None)
+    }
+
+    /// The status as it applies to a bundle built from `lane` (#56): one
+    /// seen on the other lane doesn't count for it, so it reads "untested"
+    /// with the other lane's line in brackets. `None` = any lane.
+    pub fn status_for(&self, lane: Option<Lane>) -> Status {
+        match (self.lane.as_ref().map(|l| l.value), lane) {
+            (Some(seen), Some(built)) if seen != built => Status::Unknown,
+            _ => self.status.as_ref().map_or(Status::Unknown, |s| s.value),
+        }
+    }
+
+    /// [`status_line`](Self::status_line) for a bundle built from `lane`.
+    pub fn status_line_for(&self, lane: Option<Lane>) -> String {
+        let line = self.lane_free_line();
+        let seen = self.lane.as_ref().map(|l| l.value);
+        match (seen, lane) {
+            _ if self.status_for(None) == Status::Unknown => line,
+            (Some(seen), Some(built)) if seen != built => format!(
+                "untested from {} ({}: {line})",
+                built.describe(),
+                seen.describe()
+            ),
+            (Some(seen), None) => format!("{line} (from {})", seen.describe()),
+            _ => line,
+        }
+    }
+
+    fn lane_free_line(&self) -> String {
         let status = self.status.as_ref().map_or(Status::Unknown, |s| s.value);
         let verb = match status {
             Status::Unknown => return "untested".into(),
@@ -901,6 +965,42 @@ replace_command = { from = "GoGLauncher.exe", to = "RebelGalaxyGOG.exe" }
             ),
             "known to boot on b"
         );
+    }
+
+    #[test]
+    fn lane_scopes_the_status_to_one_build_lane() {
+        let eff = |db: &str, user: &str| {
+            let db = parse(db).unwrap().entry;
+            let user = parse(user).unwrap().entry;
+            merge(&[(Layer::Db, &db), (Layer::User, &user)])
+        };
+        let pharaoh = "status = \"broken\"\nnotes = \"asks for the CD\"\nlane = \"depot\"";
+        let e = eff(pharaoh, "");
+        assert_eq!(e.status_for(Some(Lane::Depot)), Status::Broken);
+        assert_eq!(e.status_for(Some(Lane::Installer)), Status::Unknown);
+        assert_eq!(e.status_for(None), Status::Broken);
+        assert_eq!(
+            e.status_line_for(Some(Lane::Depot)),
+            "known broken: asks for the CD"
+        );
+        assert_eq!(
+            e.status_line_for(Some(Lane::Installer)),
+            "untested from the offline installer (the depot build: known broken: asks for the CD)"
+        );
+        assert_eq!(
+            e.status_line(),
+            "known broken: asks for the CD (from the depot build)"
+        );
+        // An L4 status without a lane takes L3's lane with it.
+        let e = eff(pharaoh, "status = \"plays\"");
+        assert!(e.lane.is_none());
+        assert_eq!(e.status_for(Some(Lane::Installer)), Status::Plays);
+        // No status: the lane changes nothing.
+        assert_eq!(
+            eff("lane = \"installer\"", "").status_line_for(Some(Lane::Depot)),
+            "untested"
+        );
+        assert!(parse("lane = \"floppy\"").is_err());
     }
 
     #[test]

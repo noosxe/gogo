@@ -21,6 +21,7 @@ variant  = "Rebel Galaxy (safe mode)" # a goggame playTasks name; see below
 replace_command = { from = "GoGLauncher.exe", to = "RebelGalaxyGOG.exe" }
 status   = "boots"                    # unknown | broken | boots | plays
 notes    = "boots to the main menu"   # one line; shown as "known broken: <notes>"
+lane     = "depot"                    # depot | installer: the build lane status/notes/tested were seen on
 tested   = [{ runtime = "winecx/24.0.7_7+dxmt-v0.80", host = "m4pro/macos-27.0.1", date = 2026-10-22 }]
 source   = "gogo-host"                # gogo-vm, or "umu-protonfixes:<file>@<sha>"
 ```
@@ -43,6 +44,14 @@ name is an error that lists the names there are (setup fails, and the
 launcher logs it and runs the last applied config), never a silent fallback
 to the default. It is meant for L4; an L3 `variant` works the same way, below
 L4's.
+
+`lane` (#56) scopes `status`, `notes` and `tested` to one build lane, for a
+game that differs between them: Pharaoh asks for its CD when built from the
+depot and doesn't when built from the offline installer. On a bundle from the
+other lane `doctor` reads it as untested and quotes it (`untested from the
+offline installer (the depot build: known broken: …)`). Without `lane` the
+status counts for both. A layer that sets `status` sets `lane` with it, so an
+L4 `status` without one drops L3's.
 
 Seed (#75), see docs/19 §5:
 

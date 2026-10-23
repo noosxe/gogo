@@ -122,8 +122,11 @@ the prefix logs are collected from the guest's `games/<gogid>/`, which its launc
 created.
 
 ```sh
-scripts/vm-test.sh run "target/portable/Pharaoh Gold.app" --no-state --secs 60
+scripts/vm-test.sh run "target/portable/Pharaoh Gold.app" --no-state --secs 240
 ```
+
+A portable bundle's first launch builds its prefix in the guest before the game starts:
+~80 s for Pharaoh (#56), so `--secs 60` judges it mid-setup (no window yet).
 
 A v2 `.app` is only a ~10 KiB launcher. The prefix, game files and effective config live
 in `~/Library/Application Support/gogo/games/<gogid>/`, and Wine comes from gogo's

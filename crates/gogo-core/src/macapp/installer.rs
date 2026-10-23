@@ -56,34 +56,68 @@ pub fn plan(installer: &Path) -> Result<InstallPlan, MacAppError> {
 
 /// Run the installer silently into `prefix`, installing to `win_target`
 /// (e.g. `C:\GOG\heroes3-gold`). Fail loud on non-zero exit (design 10 §2.3).
+///
+/// Everything goes to `log_dir` (#56): Inno's own `/LOG` as [`INNO_LOG`] (it
+/// names the step that failed, which the exit code never does) and Wine's
+/// stdout/stderr as [`WINE_LOG`], instead of the terminal. A failure carries
+/// the dir and the Inno log's last lines.
 pub fn run_silent(
     runtime: &Runtime,
     plan: &InstallPlan,
     prefix: &Path,
     win_target: &str,
     bundle: &Path,
+    log_dir: &Path,
 ) -> Result<(), MacAppError> {
+    let log_dir = super::launch::absolute(log_dir);
+    std::fs::create_dir_all(&log_dir)?;
+    let inno_log = log_dir.join(INNO_LOG);
+    let wine_log = std::fs::File::create(log_dir.join(WINE_LOG))?;
     let status = wine_cmd(&runtime.wine, &runtime.wine)
         .arg(&plan.installer)
-        .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
+        .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-"])
         .arg(format!("/DIR={win_target}"))
+        .arg(format!("/LOG={}", z_path(&inno_log)))
         .env("WINEPREFIX", prefix)
+        .stdin(Stdio::null())
+        .stdout(wine_log.try_clone()?)
+        .stderr(wine_log)
         .status()
         .map_err(|e| MacAppError::RuntimeInvalid {
             path: runtime.wine.clone(),
             reason: format!("cannot execute wine for install: {e}"),
         })?;
-    match status.code() {
-        Some(0) => Ok(()),
-        Some(code) => Err(MacAppError::InstallerFailed {
-            exit: code,
-            bundle: bundle.to_path_buf(),
-        }),
-        None => Err(MacAppError::InstallerFailed {
-            exit: -1,
-            bundle: bundle.to_path_buf(),
-        }),
+    if status.success() {
+        return Ok(());
     }
+    Err(MacAppError::InstallerFailed {
+        exit: status.code().unwrap_or(-1),
+        bundle: bundle.to_path_buf(),
+        tail: log_tail(&inno_log, 8),
+        logs: log_dir,
+    })
+}
+
+/// Inno Setup's own log in a [`run_silent`] log dir.
+pub const INNO_LOG: &str = "inno.log";
+/// Wine's stdout + stderr in a [`run_silent`] log dir.
+pub const WINE_LOG: &str = "wine.log";
+
+/// A host path as Wine sees it through `z:` (the build prefix keeps that
+/// drive until `setup::localize` drops it).
+pub fn z_path(path: &Path) -> String {
+    format!("Z:{}", path.display()).replace('/', "\\")
+}
+
+/// The last `n` non-empty lines of `path` (Inno writes UTF-8 or the ANSI
+/// code page; lossy is enough for a hint), or "" when there is no log.
+fn log_tail(path: &Path, n: usize) -> String {
+    let Ok(raw) = std::fs::read(path) else {
+        return String::new();
+    };
+    let text = String::from_utf8_lossy(&raw);
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    lines[lines.len().saturating_sub(n)..].join("\n")
 }
 
 /// Initialize a fresh WINEPREFIX (`wine wineboot -u`, design 10 §2.2).
@@ -192,6 +226,24 @@ mod installer_tests {
         let tmp = tempfile::tempdir().unwrap();
         let err = plan(&tmp.path().join("nope.exe")).unwrap_err();
         assert!(matches!(err, MacAppError::Io(_)));
+    }
+
+    #[test]
+    fn z_path_maps_through_the_z_drive() {
+        assert_eq!(
+            z_path(Path::new("/Users/me/gogo/install/inno.log")),
+            r"Z:\Users\me\gogo\install\inno.log"
+        );
+    }
+
+    #[test]
+    fn log_tail_keeps_the_last_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("inno.log");
+        std::fs::write(&log, "a\n\nb\nc\n").unwrap();
+        assert_eq!(log_tail(&log, 2), "b\nc");
+        assert_eq!(log_tail(&log, 9), "a\nb\nc");
+        assert_eq!(log_tail(&tmp.path().join("none.log"), 3), "");
     }
 
     #[test]
