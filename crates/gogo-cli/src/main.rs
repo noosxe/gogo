@@ -218,13 +218,6 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
                 }
                 (_, _, true) => gogo::macapp::RendererChoice::AutoNoDdraw,
                 (Some(r), _, _) => match r.renderer() {
-                    Some(gogo::macapp::Renderer::D3dMetal) => {
-                        eprintln!(
-                            "gogo: --renderer d3dmetal isn't available yet (#71: consent \
-                             download); use dxmt for D3D10/11"
-                        );
-                        return Ok(cli::exit::USAGE);
-                    }
                     Some(r) => gogo::macapp::RendererChoice::Force(r),
                     None => gogo::macapp::RendererChoice::Auto,
                 },
@@ -2138,6 +2131,19 @@ fn mac_app_retarget(
         // `auto` drops the override; a version-less id is written with the
         // catalog's pinned version.
         updates.push(("renderer", r.renderer().map(|r| r.default_ref())));
+        // D3DMetal (#71): asked once on a terminal; without a yes, setup
+        // falls back to wined3d and says so.
+        if r.renderer() == Some(gogo::macapp::Renderer::D3dMetal) {
+            let tty = std::io::IsTerminal::is_terminal(&std::io::stdin())
+                && std::io::IsTerminal::is_terminal(&std::io::stderr())
+                && !json;
+            let p = tty.then(prompt::renderer);
+            gogo::macapp::d3dmetal::ensure(
+                &format!("--renderer d3dmetal was asked for {gogid}"),
+                p.as_deref(),
+                &mut |ev| emit_macapp_event(ev, false),
+            );
+        }
     }
     let new = match runtime {
         None => None,
@@ -2595,13 +2601,16 @@ async fn runtimes_cmd(args: crate::cli::RuntimesArgs) -> Result<i32, AppError> {
                 eprintln!("gogo: unknown runtime id '{id}' — see `gogo runtimes list`");
                 return Ok(cli::exit::USAGE);
             };
+            // D3DMetal (#71) installs here only with the stored consent.
+            let consent =
+                id == gogo::macapp::Renderer::D3dMetal.id() && gogo::macapp::d3dmetal::available();
             let http = catalog::http_client()?;
             let m = store::install(
                 entry,
                 version.as_deref(),
                 &http,
                 catalog::GITHUB_API,
-                false,
+                consent,
                 &mut |ev| {
                     emit_macapp_event(ev, false);
                 },

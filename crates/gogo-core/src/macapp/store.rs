@@ -181,6 +181,19 @@ pub async fn install(
         // D9: consent downloads only through the interactive EULA prompt
         // (mac-app runtime menu); `consent` records that it happened.
         Status::ConsentRequired if consent => {}
+        Status::ConsentRequired if matches!(entry.kind, catalog::Kind::Renderer { .. }) => {
+            return Err(MacAppError::RuntimeDownloadFailed {
+                url: entry.id.into(),
+                reason: format!(
+                    "{} needs your consent first ({}): `gogo mac-app` asks on a terminal, \
+                     or set {} = \"yes\" in {}",
+                    entry.id,
+                    entry.license,
+                    super::d3dmetal::KEY,
+                    super::d3dmetal::config_path().display()
+                ),
+            });
+        }
         Status::ConsentRequired => {
             return Err(MacAppError::RuntimeDownloadFailed {
                 url: entry.id.into(),
@@ -246,8 +259,21 @@ pub async fn install(
     let fw_job = frameworks_part
         .clone()
         .zip(entry.frameworks.as_ref().map(|f| f.dir));
+    let subdir = match entry.kind {
+        catalog::Kind::Renderer { subdir, .. } => subdir,
+        _ => None,
+    };
     let bytes = tokio::task::spawn_blocking(move || -> Result<u64, MacAppError> {
         match fw_job {
+            None if subdir.is_some() => {
+                let dir = subdir.expect("checked");
+                if unpack_subtree(&archive, dir, &extract_dir2)? == 0 {
+                    return Err(MacAppError::RuntimeInvalid {
+                        path: archive.clone(),
+                        reason: format!("nothing under {dir}"),
+                    });
+                }
+            }
             None => unpack(&archive, &asset_name, &extract_dir2)?,
             Some((fw_archive, fw_dir)) => {
                 let raw = extract_dir2.join(".raw");
@@ -319,14 +345,18 @@ pub async fn install(
         }
     };
 
-    if matches!(entry.kind, catalog::Kind::Renderer { .. }) {
+    if let catalog::Kind::Renderer { notice, .. } = entry.kind {
         // The bundles that use it copy this (design 10 §8, as for runtimes).
         std::fs::write(
             extract_dir.join("NOTICES.txt"),
             format!(
                 "{} {} — {}\n  {}\n\nDownloaded by gogo on this Mac from the upstream \
-                 release; gogo doesn't redistribute it.\n",
-                entry.id, rel.tag, entry.license, rel.asset_url
+                 release; gogo doesn't redistribute it.\n{}",
+                entry.id,
+                rel.tag,
+                entry.license,
+                rel.asset_url,
+                notice.map(|n| format!("\n{n}")).unwrap_or_default()
             ),
         )?;
     }
@@ -449,6 +479,20 @@ pub fn derive(
         let dst = lib_wine.join(dir.file_name().expect("arch dir has a name"));
         bytes += overlay(dir, &dst)?;
     }
+    // Host libraries the unix side loads by `@rpath` = `@loader_path`
+    // (D3DMetal: `d3d11.so` → `libd3dshared.dylib` →
+    // `D3DMetal.framework`) go next to the unix libs, so dyld finds them
+    // with no `DYLD_*` help.
+    let external = overlay_src.parent().map(|p| p.join("external"));
+    if let Some(external) = external.filter(|e| e.is_dir()) {
+        for dir in arch_dirs
+            .iter()
+            .filter(|d| d.to_string_lossy().ends_with("-unix"))
+        {
+            let dst = lib_wine.join(dir.file_name().expect("arch dir has a name"));
+            bytes += overlay(&external, &dst)?;
+        }
+    }
     if base_root.join("Frameworks").is_dir() {
         #[cfg(unix)]
         std::os::unix::fs::symlink(
@@ -491,19 +535,26 @@ pub fn derive(
 
 /// Copy `src`'s files over `dst` (recursively), replacing what is there.
 /// A replaced file is unlinked first, so the copy never writes through into
-/// an inode it might share with the base. Returns the bytes copied.
+/// an inode it might share with the base. Symlinks are copied as symlinks
+/// (a framework's `Versions/Current -> A`). Returns the bytes copied.
 fn overlay(src: &Path, dst: &Path) -> Result<u64, MacAppError> {
     std::fs::create_dir_all(dst)?;
     let mut bytes = 0;
     for e in std::fs::read_dir(src)? {
         let e = e?;
         let to = dst.join(e.file_name());
-        if e.file_type()?.is_dir() {
+        let kind = e.file_type()?;
+        if kind.is_dir() {
             bytes += overlay(&e.path(), &to)?;
+            continue;
+        }
+        if to.symlink_metadata().is_ok() {
+            std::fs::remove_file(&to)?;
+        }
+        if kind.is_symlink() {
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(std::fs::read_link(e.path())?, &to)?;
         } else {
-            if to.symlink_metadata().is_ok() {
-                std::fs::remove_file(&to)?;
-            }
             bytes += std::fs::copy(e.path(), &to)?;
         }
     }
@@ -583,6 +634,39 @@ fn unpack(archive: &Path, asset_name: &str, dest: &Path) -> Result<(), MacAppErr
         }
     }
     Ok(())
+}
+
+/// Unpack the members under `dir` inside a tar.xz into `dest`, `dir`
+/// stripped (files, dirs and symlinks as they are); returns how many.
+/// Members whose rest of the path isn't plain names are skipped.
+fn unpack_subtree(archive: &Path, dir: &str, dest: &Path) -> Result<usize, MacAppError> {
+    std::fs::create_dir_all(dest)?;
+    let decoder = xz2::read::XzDecoder::new(std::fs::File::open(archive)?);
+    let mut tar = tar::Archive::new(decoder);
+    tar.set_preserve_permissions(true);
+    let dir = Path::new(dir);
+    let mut n = 0;
+    for entry in tar.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?.into_owned();
+        let Ok(rest) = path.strip_prefix(dir) else {
+            continue;
+        };
+        if rest.as_os_str().is_empty()
+            || !rest
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_)))
+        {
+            continue;
+        }
+        let out = dest.join(rest);
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        entry.unpack(&out)?;
+        n += 1;
+    }
+    Ok(n)
 }
 
 /// Unpack only the top-level `*.dylib` members (files and symlinks) of `dir`
@@ -1376,6 +1460,169 @@ mod store_tests {
             .await
             .unwrap();
         server.verify().await;
+    }
+
+    // As above: the env guard spans install's awaits on a single thread.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn d3dmetal_installs_from_the_template_subdir_on_consent_and_derives() {
+        let home = tempfile::tempdir().unwrap();
+        let _g = env_home(home.path());
+        let sub = catalog::D3DMETAL_SUBDIR;
+        let template = tar_xz(|t| {
+            add_file(
+                t,
+                "Template-1.0.24.app/Contents/Frameworks/libz.1.dylib",
+                b"z",
+                0o755,
+            );
+            add_file(t, &format!("{sub}/License.rtf"), b"EA18380", 0o644);
+            add_file(t, &format!("{sub}/Acknowledgements.rtf"), b"ack", 0o644);
+            add_file(
+                t,
+                &format!("{sub}/wine/x86_64-unix/d3d12.so"),
+                b"d3d12",
+                0o755,
+            );
+            add_file(
+                t,
+                &format!("{sub}/wine/x86_64-unix/d3d11.so"),
+                b"d3d11",
+                0o755,
+            );
+            add_file(
+                t,
+                &format!("{sub}/wine/x86_64-windows/d3d11.dll"),
+                b"gptk-64",
+                0o644,
+            );
+            add_file(
+                t,
+                &format!("{sub}/external/libd3dshared.dylib"),
+                b"shared",
+                0o755,
+            );
+            let fw = format!("{sub}/external/D3DMetal.framework");
+            add_file(t, &format!("{fw}/Versions/A/D3DMetal"), b"metal", 0o755);
+            add_symlink(t, &format!("{fw}/Versions/Current"), "A");
+            add_symlink(t, &format!("{fw}/D3DMetal"), "Versions/Current/D3DMetal");
+            add_file(
+                t,
+                "Template-1.0.24.app/Contents/SharedSupport/renderer/dxmt/LICENSE",
+                b"no",
+                0o644,
+            );
+        });
+        let server = wiremock::MockServer::start().await;
+        let name = "Template-1.0.24.tar.xz";
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/repos/Sikarugir-App/Template/releases/tags/v1.0",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "tag_name": "v1.0", "prerelease": false,
+                    "published_at": "2026-10-17T13:10:02Z",
+                    "assets": [{
+                        "name": name,
+                        "size": template.len(),
+                        "browser_download_url": format!("{}/dl/{name}", server.uri()),
+                        "digest": format!("sha256:{}", sha256_hex(&template)),
+                    }],
+                })),
+            )
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(format!("/dl/{name}")))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(template.clone()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let real = catalog::find("d3dmetal").unwrap();
+        let entry: &'static CatalogEntry = Box::leak(Box::new(CatalogEntry {
+            id: "d3dmetal",
+            kind: catalog::Kind::Renderer {
+                payload: "d3d12.so",
+                overlay: true,
+                subdir: Some(sub),
+                notice: Some(catalog::D3DMETAL_NOTICE),
+            },
+            status: Status::ConsentRequired,
+            discovery: Some(catalog::Discovery::Pinned(catalog::PinnedAsset {
+                repo: "Sikarugir-App/Template",
+                tag: "v1.0",
+                asset: name,
+                version: "4.0b3",
+                sha256: leak(sha256_hex(&template)),
+            })),
+            license: real.license,
+            redistributable: false,
+            min_macos: None,
+            arch: real.arch,
+            note: "test",
+            frameworks: None,
+        }));
+        let http = catalog::http_client().unwrap();
+
+        // No consent: refused before any download, naming the config key.
+        let err = install(entry, None, &http, &server.uri(), false, &mut |_| {})
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("[mac_app] d3dmetal"), "{err}");
+        let m = install(entry, None, &http, &server.uri(), true, &mut |_| {})
+            .await
+            .unwrap();
+        server.verify().await;
+        assert_eq!(m.version, "4.0b3");
+        assert_eq!(m.entry_rel, "wine/x86_64-unix/d3d12.so");
+        let r = tree_root(&m);
+        assert_eq!(r, renderers_dir().join("d3dmetal/4.0b3/x86_64"));
+        // Only the kit: Apple's files kept, nothing else from the Template.
+        assert!(r.join("License.rtf").is_file() && r.join("Acknowledgements.rtf").is_file());
+        assert!(!r.join("Template-1.0.24.app").exists() && !r.join("libz.1.dylib").exists());
+        assert_eq!(
+            std::fs::read_link(r.join("external/D3DMetal.framework/Versions/Current")).unwrap(),
+            Path::new("A")
+        );
+        let notices = std::fs::read_to_string(r.join("NOTICES.txt")).unwrap();
+        assert!(
+            notices.contains("EA18380") && notices.contains("Apple Inc."),
+            "{notices}"
+        );
+
+        // Derived from a CX-layout base: wine dirs over lib/wine, the host
+        // libs next to the unix libs (`@loader_path`), symlinks kept.
+        let base = self::entry("winecx", "24.0.7_7", "engine/bin/wine");
+        let root = tree_root(&base);
+        write_exec(
+            &root.join("engine/bin/wine"),
+            "#!/bin/sh\necho 'wine-9.0 (SikarugirCX 24.0.7)'\n",
+        );
+        let lib = root.join("engine/lib/wine");
+        std::fs::create_dir_all(lib.join("x86_64-windows")).unwrap();
+        std::fs::write(lib.join("x86_64-windows/d3d11.dll"), "wined3d-64").unwrap();
+        std::fs::create_dir_all(lib.join("x86_64-unix")).unwrap();
+        save_manifest(std::slice::from_ref(&base)).unwrap();
+        let d = derive(&base, &m).unwrap();
+        assert_eq!(d.version, "24.0.7_7+d3dmetal-4.0b3");
+        let dunix = tree_root(&d).join("engine/lib/wine/x86_64-unix");
+        let read = |p: PathBuf| std::fs::read_to_string(p).unwrap();
+        assert_eq!(read(dunix.join("d3d11.so")), "d3d11");
+        assert_eq!(read(dunix.join("libd3dshared.dylib")), "shared");
+        assert_eq!(read(dunix.join("D3DMetal.framework/D3DMetal")), "metal");
+        assert!(
+            dunix
+                .join("D3DMetal.framework/Versions/Current")
+                .is_symlink()
+        );
+        assert_eq!(
+            read(tree_root(&d).join("engine/lib/wine/x86_64-windows/d3d11.dll")),
+            "gptk-64"
+        );
+        assert!(!lib.join("x86_64-unix/libd3dshared.dylib").exists());
+        assert!(read(tree_root(&d).join("NOTICES.txt")).contains("EA18380"));
     }
 
     fn write_exec(path: &Path, body: &str) {

@@ -7,8 +7,12 @@
 //!   `ddraw=n,b`.
 //! - **DXMT** is an engine overlay: it replaces Wine builtins, so the game
 //!   runs from a derived runtime (`store::derive`).
-//! - **D3DMetal** is #71 (consent download). Until then it is never picked,
-//!   and an explicit request for it falls back to wined3d with a warning.
+//! - **D3DMetal** (#71) is an engine overlay like DXMT, from Apple's Game
+//!   Porting Toolkit, so it is used only with the user's consent
+//!   ([`super::d3dmetal`], asked once). It is 64-bit only: the default for
+//!   64-bit Direct3D 12, the alternative after DXMT for 64-bit D3D11, and
+//!   never offered to a 32-bit game. Without consent it is skipped, and an
+//!   explicit request for it falls back with a warning.
 //!
 //! The build bakes `flags > L3 > L2 > L1 > L0` into `gogo-launch.toml`;
 //! `setup` applies L4 on top and installs what the result needs ([`apply`]).
@@ -22,7 +26,7 @@ use super::compat::{self, CompatEntry, Layer, Sourced};
 use super::error::MacAppError;
 use super::pe::{self, Bitness, GraphicsApi, GraphicsSource, PeScan};
 use super::runtime::Runtime;
-use super::{catalog, ddraw, lutris, store};
+use super::{catalog, d3dmetal, ddraw, lutris, store};
 
 /// One renderer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -54,6 +58,16 @@ impl Renderer {
 
     pub fn from_id(id: &str) -> Option<Renderer> {
         Renderer::ALL.into_iter().find(|r| r.id() == id)
+    }
+
+    /// The name in messages.
+    pub fn name(self) -> &'static str {
+        match self {
+            Renderer::Wined3d => "wined3d",
+            Renderer::Dxmt => "DXMT",
+            Renderer::CncDdraw => "cnc-ddraw",
+            Renderer::D3dMetal => "D3DMetal",
+        }
     }
 
     /// The ref this renderer is written as when no version is asked for:
@@ -124,13 +138,42 @@ pub struct Pick {
     pub reason: String,
     /// Set when the pick is known to be a poor fit (D3D12 without D3DMetal).
     pub warning: Option<String>,
+    /// The game is 64-bit (D3DMetal is x86_64 only).
+    pub x86_64: bool,
+    /// D3DMetal consent this pick was made with (#71).
+    pub d3dmetal: bool,
 }
 
-/// D3DMetal is consent-gated and not installable yet (#71). This is the
-/// hook: once it returns true, [`from_scan`] picks D3DMetal where docs/19
-/// §6.2 says so.
+/// May D3DMetal be used (#71)? Only with a stored yes in gogo's config;
+/// this never prompts ([`ask_d3dmetal`] does, at build time).
 pub fn d3dmetal_available() -> bool {
-    false
+    d3dmetal::available()
+}
+
+/// The build-time consent question (#71, asked once): for a 64-bit game
+/// that imports `d3d12`, or one built with `--renderer d3dmetal`. Any other
+/// game just uses the stored answer, and a 32-bit game never gets D3DMetal.
+/// `prompt` is `None` headless: no answer stored → a warning, and `false`.
+pub fn ask_d3dmetal(
+    scan: &Result<PeScan, pe::ScanError>,
+    choice: RendererChoice,
+    prompt: Option<&super::prompt::PromptFn>,
+    emit: &mut dyn FnMut(&super::ProgressEvent),
+) -> bool {
+    let Ok(scan) = scan else {
+        return false;
+    };
+    if scan.bitness != Bitness::X86_64 {
+        return false;
+    }
+    let why = if scan.graphics == GraphicsApi::D3d12 {
+        format!("{} uses Direct3D 12", scan.main_exe)
+    } else if choice == RendererChoice::Force(Renderer::D3dMetal) {
+        format!("--renderer d3dmetal was asked for {}", scan.main_exe)
+    } else {
+        return d3dmetal_available();
+    };
+    d3dmetal::ensure(&why, prompt, emit)
 }
 
 /// The docs/19 §6.2 table:
@@ -162,13 +205,23 @@ pub fn from_scan(scan: &PeScan, d3dmetal: bool) -> Pick {
         GraphicsApi::D3d12 if bits64 && d3dmetal => {
             (D3dMetal, vec![Dxmt, Wined3d], "Direct3D 12", None)
         }
+        GraphicsApi::D3d12 if bits64 => (
+            Wined3d,
+            vec![],
+            "Direct3D 12",
+            Some(format!(
+                "Direct3D 12 needs D3DMetal, which needs your consent ({} = \"yes\"): the \
+                 game is likely broken on wined3d",
+                d3dmetal::KEY
+            )),
+        ),
         GraphicsApi::D3d12 => (
             Wined3d,
             vec![],
             "Direct3D 12",
             Some(
-                "Direct3D 12 needs D3DMetal (#71, not available yet): the game is likely \
-                 broken on wined3d"
+                "Direct3D 12 on a 32-bit game: D3DMetal is 64-bit only, so the game is \
+                 likely broken on wined3d"
                     .to_string(),
             ),
         ),
@@ -203,6 +256,8 @@ pub fn from_scan(scan: &PeScan, d3dmetal: bool) -> Pick {
         alternatives,
         reason,
         warning,
+        x86_64: bits64,
+        d3dmetal,
     }
 }
 
@@ -226,22 +281,30 @@ pub fn next_after(pick: &Pick, current: &str, d3dmetal: bool) -> Option<Renderer
     }
 }
 
-/// L1 from an import scan; a failed scan picks wined3d. A cnc-ddraw gogo
-/// placed on an earlier setup isn't counted as the game's own wrapper.
+/// L1 from an import scan with the stored D3DMetal answer; a failed scan
+/// picks wined3d. A cnc-ddraw gogo placed on an earlier setup isn't counted
+/// as the game's own wrapper.
 pub fn pick(scan: &Result<PeScan, pe::ScanError>) -> Pick {
+    pick_with(scan, d3dmetal_available())
+}
+
+/// [`pick`] with the D3DMetal answer given ([`ask_d3dmetal`]'s).
+pub fn pick_with(scan: &Result<PeScan, pe::ScanError>, d3dmetal: bool) -> Pick {
     match scan {
         Ok(scan) => {
             let mut scan = scan.clone();
             if ddraw::is_gogo(&scan.root) {
                 scan.local_overrides.remove("ddraw.dll");
             }
-            from_scan(&scan, d3dmetal_available())
+            from_scan(&scan, d3dmetal)
         }
         Err(e) => Pick {
             renderer: Renderer::Wined3d,
             alternatives: vec![],
             reason: format!("import scan failed ({e})"),
             warning: None,
+            x86_64: false,
+            d3dmetal: false,
         },
     }
 }
@@ -307,6 +370,19 @@ pub fn select(gogid: Option<&str>, l1: Pick, choice: RendererChoice) -> Selectio
     let mut flag_reason = String::new();
     match choice {
         RendererChoice::Auto => {}
+        // D3DMetal only for a 64-bit game with consent; otherwise the
+        // layers below decide.
+        RendererChoice::Force(Renderer::D3dMetal) if !l1.x86_64 => warnings.push(
+            "--renderer d3dmetal: D3DMetal is 64-bit only and this game is 32-bit; \
+             keeping the automatic choice"
+                .into(),
+        ),
+        RendererChoice::Force(Renderer::D3dMetal) if !l1.d3dmetal => warnings.push(format!(
+            "--renderer d3dmetal: no consent to download D3DMetal ({} = \"yes\" in {}); \
+             keeping the automatic choice",
+            d3dmetal::KEY,
+            d3dmetal::config_path().display()
+        )),
         RendererChoice::Force(r) => {
             flag_entry = CompatEntry {
                 renderer: Some(r.default_ref()),
@@ -344,8 +420,11 @@ pub fn select(gogid: Option<&str>, l1: Pick, choice: RendererChoice) -> Selectio
         Layer::Flags => flag_reason,
         Layer::Gog | Layer::User => String::new(),
     };
-    if renderer.value.starts_with(Renderer::D3dMetal.id()) {
-        warnings.push("D3DMetal isn't available yet (#71): setup falls back to wined3d".into());
+    if renderer.value.starts_with(Renderer::D3dMetal.id()) && !l1.d3dmetal {
+        warnings.push(format!(
+            "D3DMetal has no consent ({} = \"yes\"): setup falls back to wined3d",
+            d3dmetal::KEY
+        ));
     }
     Selection {
         renderer,
@@ -372,7 +451,8 @@ pub struct Applied {
 }
 
 /// Install and wire up `renderer` for one game (setup, design 16 §2.2):
-/// DXMT → the derived runtime for `rt` (built once, shared); cnc-ddraw →
+/// DXMT or D3DMetal (with consent) → the derived runtime for `rt` (built
+/// once, shared); cnc-ddraw →
 /// `ddraw.dll` + ini in `game_dir` and `ddraw=n,b`; wined3d → nothing, and a
 /// cnc-ddraw gogo placed earlier is removed again. Anything that can't be
 /// set up falls back to wined3d with a warning, so a launch never fails on
@@ -401,9 +481,11 @@ pub fn apply(renderer: &str, rt: Runtime, game_dir: Option<&Path>) -> Applied {
     }
     match r.renderer {
         Renderer::Wined3d => {}
-        Renderer::D3dMetal => out
-            .warnings
-            .push("D3DMetal isn't available yet (#71): using wined3d".into()),
+        Renderer::D3dMetal if !d3dmetal_available() => out.warnings.push(format!(
+            "D3DMetal: no consent to download it ({} = \"yes\" in {}): using wined3d",
+            d3dmetal::KEY,
+            d3dmetal::config_path().display()
+        )),
         Renderer::CncDdraw => {
             let Some(dir) = game_dir.filter(|d| d.is_dir()) else {
                 out.warnings
@@ -438,23 +520,26 @@ pub fn apply(renderer: &str, rt: Runtime, game_dir: Option<&Path>) -> Applied {
             out.dll_overrides.insert("ddraw".into(), "n,b".into());
             out.renderer = r.renderer.default_ref();
         }
-        Renderer::Dxmt => match derive_for(&r, &out.runtime) {
+        Renderer::Dxmt | Renderer::D3dMetal => match derive_for(&r, &out.runtime) {
             Ok((derived, rref)) => {
                 out.notes.push(format!(
-                    "DXMT: runtime {}",
+                    "{}: runtime {}",
+                    r.renderer.name(),
                     super::launch::runtime_ref(&derived)
                 ));
                 out.runtime = derived;
                 out.renderer = rref;
             }
-            Err(e) => out.warnings.push(format!("DXMT: {e}: using wined3d")),
+            Err(e) => out
+                .warnings
+                .push(format!("{}: {e}: using wined3d", r.renderer.name())),
         },
     }
     out
 }
 
-/// The derived runtime for `rt` × DXMT (`r`'s version), installing DXMT
-/// into the renderer store first if it's missing.
+/// The derived runtime for `rt` × an overlay renderer (`r`'s version),
+/// installing the renderer into the store first if it's missing.
 fn derive_for(r: &RendererRef, rt: &Runtime) -> Result<(Runtime, String), String> {
     if !rt.is_crossover() {
         return Err(format!(
@@ -477,7 +562,7 @@ fn derive_for(r: &RendererRef, rt: &Runtime) -> Result<(Runtime, String), String
 }
 
 /// A renderer payload from the store, downloading it (pinned, sha256
-/// checked) when it isn't there.
+/// checked) when it isn't there. D3DMetal downloads only with a stored yes.
 pub fn ensure_installed(
     id: &str,
     version: Option<&str>,
@@ -488,13 +573,14 @@ pub fn ensure_installed(
     let entry = catalog::find(id).ok_or_else(|| MacAppError::CatalogUnreachable {
         detail: format!("{id} is not in the catalog"),
     })?;
+    let consent = id == Renderer::D3dMetal.id() && d3dmetal_available();
     let http = catalog::http_client()?;
     lutris::block_on_detached(store::install(
         entry,
         version,
         &http,
         catalog::GITHUB_API,
-        false,
+        consent,
         &mut |_| {},
     ))
 }
@@ -524,6 +610,8 @@ pub fn explain(
             alternatives: vec![],
             reason: "game dir not found".into(),
             warning: None,
+            x86_64: false,
+            d3dmetal: false,
         },
     };
     let sel = select(Some(gogid), l1, RendererChoice::Auto);
@@ -717,8 +805,11 @@ mod tests {
             p.reason,
             "Direct3D 10/11: imports d3d11, dxgi (32-bit Game.exe)"
         );
-        // The D3DMetal hook stays closed until #71.
-        assert!(!d3dmetal_available());
+        // D3D12 on a 32-bit game: no D3DMetal, even with consent.
+        let p = from_scan(&scan(A::D3d12, I386, &[G::D3d12]), true);
+        assert_eq!((p.renderer, p.alternatives.as_slice()), (Wined3d, &[][..]));
+        assert!(p.warning.as_deref().unwrap().contains("64-bit only"));
+        assert!(!p.x86_64 && p.d3dmetal);
     }
 
     #[test]
@@ -748,7 +839,7 @@ mod tests {
         assert_eq!(Renderer::Wined3d.default_ref(), "wined3d");
         assert_eq!(Renderer::Dxmt.default_ref(), "dxmt/v0.80");
         assert_eq!(Renderer::CncDdraw.default_ref(), "cnc-ddraw/7.1.0.0");
-        assert_eq!(Renderer::D3dMetal.default_ref(), "d3dmetal");
+        assert_eq!(Renderer::D3dMetal.default_ref(), "d3dmetal/4.0b3");
         let r = RendererRef::parse("dxmt").unwrap();
         assert_eq!(r.renderer, Renderer::Dxmt);
         assert_eq!(r.version().as_deref(), Some("v0.80"));
@@ -763,6 +854,8 @@ mod tests {
             alternatives: vec![],
             reason: "test".into(),
             warning: None,
+            x86_64: true,
+            d3dmetal: false,
         }
     }
 
@@ -802,13 +895,38 @@ mod tests {
         );
         let s = select(Some("1"), pick(Renderer::Dxmt), RendererChoice::AutoNoDdraw);
         assert_eq!(s.renderer.layer, Layer::Auto);
-        // D3DMetal can be asked for, with a warning.
+        // --renderer d3dmetal (#71): only with consent, only for 64-bit.
+        let force = RendererChoice::Force(Renderer::D3dMetal);
+        let s = select(Some("1"), pick(Renderer::Dxmt), force);
+        assert_eq!(
+            (s.renderer.value.as_str(), s.renderer.layer),
+            ("dxmt/v0.80", Layer::Auto)
+        );
+        assert!(
+            s.warnings.iter().any(|w| w.contains("no consent")),
+            "{:?}",
+            s.warnings
+        );
+        let consented = Pick {
+            d3dmetal: true,
+            ..pick(Renderer::Dxmt)
+        };
+        let s = select(Some("1"), consented.clone(), force);
+        assert_eq!(
+            (s.renderer.value.as_str(), s.renderer.layer),
+            ("d3dmetal/4.0b3", Layer::Flags)
+        );
+        assert!(s.warnings.is_empty(), "{:?}", s.warnings);
         let s = select(
             Some("1"),
-            pick(Renderer::Dxmt),
-            RendererChoice::Force(Renderer::D3dMetal),
+            Pick {
+                x86_64: false,
+                ..consented
+            },
+            force,
         );
-        assert!(s.warnings.iter().any(|w| w.contains("#71")));
+        assert_eq!(s.renderer.layer, Layer::Auto);
+        assert!(s.warnings.iter().any(|w| w.contains("64-bit only")));
 
         // L4 is reported, not baked; with a flag it is a warning.
         compat::set_user_keys("1", &[("renderer", Some("wined3d"))]).unwrap();
@@ -832,6 +950,102 @@ mod tests {
         let (r, _) = explain("1", "wined3d", None, None);
         assert_eq!(r.layer, Layer::Auto);
         unsafe { std::env::remove_var("GOGO_HOME") };
+    }
+
+    /// #71: who gets asked. Fake TTY prompts count their calls; the answer
+    /// lands in `$GOGO_HOME/config.toml`.
+    #[test]
+    fn d3dmetal_consent_is_asked_for_64_bit_d3d12_and_never_for_32_bit() {
+        use Bitness::*;
+        use GraphicsApi as A;
+        use GraphicsImport as G;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let home = tempfile::tempdir().unwrap();
+        let _g = crate::test_util::env_lock();
+        // SAFETY: env mutation under the shared env mutex.
+        unsafe {
+            std::env::set_var("GOGO_HOME", home.path());
+            std::env::remove_var("GOGO_CONFIG");
+        }
+        let asked = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = asked.clone();
+        let yes = move |_: &super::super::prompt::PromptSpec| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Some(super::super::prompt::PromptAnswer::Confirmed(true))
+        };
+        let ok = |a, b, i: &[G]| Ok(scan(a, b, i));
+        let auto = RendererChoice::Auto;
+        let force = RendererChoice::Force(Renderer::D3dMetal);
+        let warns = std::cell::RefCell::new(Vec::<String>::new());
+        let mut emit = |e: &super::super::ProgressEvent| {
+            if let super::super::ProgressEvent::Warn { message } = e {
+                warns.borrow_mut().push(message.clone());
+            }
+        };
+
+        // 32-bit: never asked, whatever it imports or asks for.
+        for (api, i, c) in [
+            (A::D3d12, &[G::D3d12][..], auto),
+            (A::D3d11, &[G::D3d11][..], force),
+        ] {
+            assert!(!ask_d3dmetal(&ok(api, I386, i), c, Some(&yes), &mut emit));
+        }
+        // 64-bit D3D11 without the flag: DXMT's game, not asked.
+        assert!(!ask_d3dmetal(
+            &ok(A::D3d11, X86_64, &[G::D3d11]),
+            auto,
+            Some(&yes),
+            &mut emit
+        ));
+        assert_eq!(asked.load(Ordering::SeqCst), 0);
+        assert!(warns.borrow().is_empty() && !home.path().join("config.toml").exists());
+        // Headless 64-bit D3D12, no answer: warned, not stored, falls back.
+        let d3d12 = ok(A::D3d12, X86_64, &[G::D3d12]);
+        assert!(!ask_d3dmetal(&d3d12, auto, None, &mut emit));
+        assert_eq!(warns.borrow().len(), 1, "{warns:?}");
+        assert_eq!(pick_with(&d3d12, false).renderer, Renderer::Wined3d);
+        // TTY: asked once, stored, then the stored answer serves everyone.
+        assert!(ask_d3dmetal(&d3d12, auto, Some(&yes), &mut emit));
+        assert!(ask_d3dmetal(&d3d12, auto, None, &mut emit));
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+        assert!(d3dmetal_available());
+        assert_eq!(super::pick(&d3d12).renderer, Renderer::D3dMetal);
+        // … including 64-bit D3D11's alternatives and "Try next renderer".
+        let d3d11 = super::pick(&ok(A::D3d11, X86_64, &[G::D3d11]));
+        assert_eq!(d3d11.renderer, Renderer::Dxmt);
+        assert_eq!(
+            next_after(&d3d11, "dxmt/v0.80", d3dmetal_available()),
+            Some(Renderer::D3dMetal)
+        );
+        // A stored no is respected the same way, and never re-asked.
+        crate::macapp::d3dmetal::store(crate::config::Consent::No).unwrap();
+        assert!(!ask_d3dmetal(&d3d12, auto, Some(&yes), &mut emit));
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            next_after(&d3d11, "dxmt/v0.80", d3dmetal_available()),
+            Some(Renderer::Wined3d)
+        );
+        // apply() without consent falls back before touching the network.
+        let a = apply("d3dmetal/4.0b3", fake_runtime(), None);
+        assert_eq!(a.renderer, "wined3d");
+        assert!(
+            a.warnings.iter().any(|w| w.contains("no consent")),
+            "{:?}",
+            a.warnings
+        );
+        assert_eq!(warns.borrow().len(), 1, "{warns:?}");
+        unsafe { std::env::remove_var("GOGO_HOME") };
+    }
+
+    fn fake_runtime() -> Runtime {
+        Runtime {
+            mode: super::super::runtime::RuntimeMode::Path,
+            kind: "path",
+            root: "/rt".into(),
+            wine: "/rt/bin/wine".into(),
+            version: "wine-9.0".into(),
+            min_macos: None,
+        }
     }
 
     #[test]

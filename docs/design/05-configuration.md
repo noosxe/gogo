@@ -47,6 +47,12 @@ api_parallel = 4              # concurrent catalog/downlink/checksum fetches
 
 [state]
 catalog_ttl_hours = 24        # catalog cache freshness (06 §3)
+
+[mac_app]
+# d3dmetal = "yes" | "no"     # consent to fetch D3DMetal under Apple's Game Porting
+#                             # Toolkit licence (#71, design 16 §3). Unset: `gogo mac-app`
+#                             # asks once on a terminal and writes the answer here;
+#                             # headless builds fall back without it.
 ```
 
 ### Rate value grammar (`--limit`, `download.limit`)

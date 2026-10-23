@@ -196,13 +196,20 @@ pub fn write_renderer_notice(bundle: &Bundle, renderer: &str) -> Result<(), MacA
         ),
         _ => String::new(),
     };
+    let notice = match entry.kind {
+        super::catalog::Kind::Renderer {
+            notice: Some(n), ..
+        } => format!("\n{n}"),
+        _ => String::new(),
+    };
     std::fs::write(
         bundle.resources.join(format!("LICENSE-{}.txt", entry.id)),
         format!(
             "This application runs {} {}, licensed {}, from gogo's local renderer\n\
              store on this Mac. It contains no {} files itself.\n\
              Source: {source}\n\
-             Downloaded by `gogo mac-app` on the user's machine; gogo itself ships none.\n",
+             Downloaded by `gogo mac-app` on the user's machine; gogo itself ships none.\n\
+             {notice}",
             entry.id,
             r.version().unwrap_or_default(),
             entry.license,

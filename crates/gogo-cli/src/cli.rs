@@ -343,7 +343,8 @@ pub enum RendererArg {
     /// DirectDraw wrapper for 2D classics.
     #[value(name = "cnc-ddraw")]
     CncDdraw,
-    /// Apple's D3D11/12 translator (#71, not available yet).
+    /// Apple's D3D11/12 translator, 64-bit games only; downloaded on consent
+    /// (asked once on a terminal, kept as `[mac_app] d3dmetal` in the config).
     D3dmetal,
 }
 

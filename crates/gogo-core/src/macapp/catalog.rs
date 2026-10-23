@@ -26,11 +26,16 @@ pub enum Kind {
     /// A renderer (design 16 decisions 3 and 6), stored as downloaded under
     /// `renderers/<id>/<ver>/<arch>/`. `payload` proves the extract like a
     /// tool's. `overlay`: it replaces Wine builtins and is installed as a
-    /// derived runtime (DXMT); otherwise it goes into the game dir
-    /// (cnc-ddraw).
+    /// derived runtime (DXMT, D3DMetal); otherwise it goes into the game
+    /// dir (cnc-ddraw). `subdir`: only this directory of the archive is the
+    /// renderer (D3DMetal inside the Sikarugir Template). `notice`: extra
+    /// licence text for the store's `NOTICES.txt` and the bundles that use
+    /// it.
     Renderer {
         payload: &'static str,
         overlay: bool,
+        subdir: Option<&'static str>,
+        notice: Option<&'static str>,
     },
 }
 
@@ -38,7 +43,8 @@ pub enum Kind {
 pub enum Status {
     /// Downloadable, license-clean.
     Available,
-    /// Download gated behind explicit consent (GPTK / Apple EULA — D9).
+    /// Download gated behind explicit consent (GPTK / Apple EULA — D9;
+    /// D3DMetal — `[mac_app] d3dmetal`, #71).
     ConsentRequired,
     /// Tool provisioning (design 12 §8) — lands with the shims phase.
     Tool,
@@ -309,6 +315,8 @@ static ENTRIES: &[CatalogEntry] = &[
         kind: Kind::Renderer {
             payload: "ddraw.dll",
             overlay: false,
+            subdir: None,
+            notice: None,
         },
         status: Status::Available,
         // The release publishes no asset digest: the pin is the sha256 of
@@ -334,6 +342,8 @@ static ENTRIES: &[CatalogEntry] = &[
         kind: Kind::Renderer {
             payload: "winemetal.so",
             overlay: true,
+            subdir: None,
+            notice: None,
         },
         status: Status::Available,
         // v0.80 ships only the builtin flavour. DXMT accepts no AI-made
@@ -355,7 +365,63 @@ static ENTRIES: &[CatalogEntry] = &[
                Metal 3 GPU",
         frameworks: None,
     },
+    CatalogEntry {
+        id: "d3dmetal",
+        kind: Kind::Renderer {
+            payload: "d3d12.so",
+            overlay: true,
+            subdir: Some(D3DMETAL_SUBDIR),
+            notice: Some(D3DMETAL_NOTICE),
+        },
+        // #71: Apple's licence allows non-commercial distribution with its
+        // notices, on the user's consent (`[mac_app] d3dmetal`). The
+        // Template's kit (D3DMetal 4.0b3 + its Wine-side d3d11/d3d12/dxgi)
+        // is the one live-proven on the default CX24 engine (docs/19 §5:
+        // Neo Cab runs); Gcenx's GPTK 3.0-3 pairs D3DMetal 3.0 with Wine
+        // 7.7 builtins and is a separate runtime (`gptk`). Same asset and
+        // digest as winecx's Frameworks set.
+        status: Status::ConsentRequired,
+        discovery: Some(Discovery::Pinned(PinnedAsset {
+            repo: "Sikarugir-App/Template",
+            tag: "v1.0",
+            asset: "Template-1.0.24.tar.xz",
+            version: "4.0b3",
+            sha256: "4b5f89eeb9ef139936bdfad33d9b420b05ea4597cb7d63376674f7a8e171321c",
+        })),
+        license: "Apple Game Porting Toolkit licence (EA18380): non-commercial \
+                  distribution with Apple's notices; D3DMetal.framework © Apple Inc.",
+        redistributable: false,
+        min_macos: Some("14.0"),
+        arch: "x86_64 (64-bit games only)",
+        note: "renderer: D3D11/12 to Metal (docs/19 §6.2), on consent. The default for \
+               64-bit Direct3D 12 games and the alternative to DXMT for 64-bit D3D11. \
+               Replaces the engine's d3d11/d3d12/dxgi, so it runs from a derived runtime; \
+               needs a CrossOver-source engine (winecx) and a Metal 3 GPU",
+        frameworks: None,
+    },
 ];
+
+/// Where the Template keeps its D3DMetal kit: `wine/x86_64-{unix,windows}`
+/// (overlaid on the engine's `lib/wine/`), `external/` (`D3DMetal.framework`
+/// and `libd3dshared.dylib`, which the unix libs load via `@loader_path`)
+/// and Apple's `License.rtf`, `Acknowledgements.rtf`, `Read Me.rtf`.
+pub const D3DMETAL_SUBDIR: &str = "Template-1.0.24.app/Contents/SharedSupport/renderer/d3dmetal";
+
+/// Apple's notice for D3DMetal (store `NOTICES.txt`, bundle
+/// `LICENSE-d3dmetal.txt`).
+pub const D3DMETAL_NOTICE: &str = "\
+D3DMetal (D3DMetal.framework, libd3dshared.dylib and its Wine-side
+d3d11/d3d12/d3d12core/dxgi/nvapi64/nvngx) is Apple Software from Apple's Game
+Porting Toolkit, Copyright © Apple Inc. All rights reserved. It is licensed
+under the Apple Software License Agreement for Game Porting Toolkit (EA18380),
+which permits distribution solely for non-commercial purposes (§2A(iii), §2C)
+and use only on Apple-branded systems. The full licence, Apple's
+acknowledgements of third-party components and Apple's read-me are kept next
+to it in gogo's renderer store (License.rtf, Acknowledgements.rtf,
+Read Me.rtf). gogo fetched it on this Mac, with the user's consent
+([mac_app] d3dmetal = \"yes\"), from the Sikarugir Template release; gogo
+doesn't modify or sell it.
+";
 
 /// The static catalog (design 12 D1: data, probed at use time).
 pub fn entries() -> &'static [CatalogEntry] {
@@ -984,7 +1050,7 @@ mod catalog_tests {
     fn entries_and_statuses() {
         assert!(find("wine-staging").is_some());
         assert!(find("nope").is_none());
-        assert_eq!(entries().len(), 9);
+        assert_eq!(entries().len(), 10);
         // The default track is the pinned CX engine with its Frameworks set.
         let cx = find(DEFAULT_RUNTIME).unwrap();
         assert_eq!(cx.id, "winecx");
@@ -1006,7 +1072,9 @@ mod catalog_tests {
             find("cnc-ddraw").unwrap().kind,
             Kind::Renderer {
                 payload: "ddraw.dll",
-                overlay: false
+                overlay: false,
+                subdir: None,
+                ..
             }
         ));
         let dxmt = find("dxmt").unwrap();
@@ -1014,11 +1082,34 @@ mod catalog_tests {
             dxmt.kind,
             Kind::Renderer {
                 payload: "winemetal.so",
-                overlay: true
+                overlay: true,
+                subdir: None,
+                ..
             }
         ));
         assert!(dxmt.license.starts_with("LGPL-2.1"));
-        for id in ["cnc-ddraw", "dxmt"] {
+        // D3DMetal (#71): consent-gated, the Template's kit, Apple's notice,
+        // the same pinned asset as winecx's Frameworks set.
+        let d3dm = find("d3dmetal").unwrap();
+        assert!(matches!(d3dm.status, Status::ConsentRequired));
+        assert!(!d3dm.redistributable);
+        let Kind::Renderer {
+            overlay: true,
+            subdir: Some(sub),
+            notice: Some(notice),
+            ..
+        } = d3dm.kind
+        else {
+            panic!("d3dmetal is an overlay renderer with a subdir and a notice");
+        };
+        assert!(sub.ends_with("/renderer/d3dmetal"));
+        assert!(notice.contains("Apple Inc.") && notice.contains("non-commercial"));
+        let (Some(Discovery::Pinned(pin)), Some(fw)) = (&d3dm.discovery, &cx.frameworks) else {
+            panic!("pinned");
+        };
+        assert_eq!((pin.asset, pin.sha256), (fw.asset.asset, fw.asset.sha256));
+        assert!(sub.starts_with(fw.dir.trim_end_matches("/Frameworks")));
+        for id in ["cnc-ddraw", "dxmt", "d3dmetal"] {
             assert!(
                 matches!(find(id).unwrap().discovery, Some(Discovery::Pinned(_))),
                 "{id}"
