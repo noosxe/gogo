@@ -492,8 +492,9 @@ fn catalog_lane(
 
 /// §6 step 3 + §5: runtime resolution. Explicit flags win (D2 precedence);
 /// `auto` prefers cached runtimes (the recipe recommendation first, then the
-/// default track, `winecx`), then brew, then downloads the recommendation into the
-/// store (network exception D8). Not in runtime.rs: this needs the catalog +
+/// default track, `winecx`), then downloads the recommendation into the store
+/// (network exception D8). A host wine (brew, GPTK) is never picked
+/// implicitly (#125): only by flag or from the menu. Not in runtime.rs: this needs the catalog +
 /// store (network), and runtime.rs stays pure fs/exec.
 fn resolve_runtime(
     opts: &MacAppOptions,
@@ -518,7 +519,7 @@ fn resolve_runtime(
     }
 
     // `auto` (§5 ladder): cached(compat pin) → cached(recipe-recommended) →
-    // cached(default) → brew → download the pin, else the recommendation.
+    // cached(default) → download the pin, else the recommendation.
     // An L3 `runtime` (#74) is a store ref `<id>[/<ver>]`; headless, a pin
     // that isn't cached is downloaded rather than passed over.
     let pin = pin.map(|r| r.split_once('/').map_or((r, None), |(i, v)| (i, Some(v))));
@@ -574,14 +575,6 @@ fn resolve_runtime(
                 }),
             }
         }
-    }
-    if easy.is_none()
-        && let Ok(rt) = runtime::resolve(&runtime::RuntimeOptions {
-            mode: RuntimeMode::Brew,
-            ..Default::default()
-        })
-    {
-        easy = Some((rt, "brew".into()));
     }
     if let Some(prompt) = prompt {
         return choose_runtime(prompt, easy, emit);
@@ -643,8 +636,8 @@ fn choose_runtime(
             lanes.push(MenuLane::Fresh(entry));
         }
     }
-    // Locally installed lanes: the ladder may have probed brew already;
-    // GPTK gets its own probe. Both are listed only when actually present.
+    // Locally installed lanes (brew, GPTK), each probed here and listed only
+    // when actually present; never the preselected pick (#125).
     let mut local = |key: &str, probed: Option<runtime::Runtime>| {
         if let Some(rt) = probed {
             lanes.push(MenuLane::Local {
@@ -654,15 +647,14 @@ fn choose_runtime(
             });
         }
     };
-    let brew = match &easy {
-        Some((rt, key)) if key == "brew" => Some(rt.clone()),
-        _ => runtime::resolve(&runtime::RuntimeOptions {
+    local(
+        "brew",
+        runtime::resolve(&runtime::RuntimeOptions {
             mode: RuntimeMode::Brew,
             ..Default::default()
         })
         .ok(),
-    };
-    local("brew", brew);
+    );
     local(
         "gptk",
         runtime::resolve(&runtime::RuntimeOptions {
