@@ -386,7 +386,7 @@ GOG product id, fetched pinned to a commit and cached:
 ```toml
 # compat/1435582019.toml — Rebel Galaxy
 title    = "Rebel Galaxy"
-exe      = "RebelGalaxyGOG.exe"        # skip GoGLauncher.exe
+exe      = "RebelGalaxyGOG.exe"        # skip GoGLauncher.exe (automatic since #107)
 renderer = "dxmt"
 verbs    = ["d3dcompiler_43", "d3dx11_43"]
 status   = "boots"                      # unknown | broken | boots | plays
