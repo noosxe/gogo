@@ -555,13 +555,17 @@ fn overlay(src: &Path, dst: &Path) -> Result<u64, MacAppError> {
     Ok(bytes)
 }
 
+/// The decoder for an asset, by name; `file` is a bare payload (a pinned
+/// repository file, #106), stored as it is.
 fn archive_ext(name: &str) -> &'static str {
     if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
         "tar.gz"
     } else if name.ends_with(".zip") {
         "zip"
-    } else {
+    } else if name.ends_with(".tar.xz") || name.ends_with(".txz") {
         "tar.xz"
+    } else {
+        "file"
     }
 }
 
@@ -589,11 +593,22 @@ async fn download_verified(
     Ok(actual)
 }
 
-/// Unpack a tar.xz / tar.gz / zip into `dest` (decoder by asset name).
+/// Unpack a tar.xz / tar.gz / zip into `dest` (decoder by asset name); a
+/// bare file is copied in under its own name.
 fn unpack(archive: &Path, asset_name: &str, dest: &Path) -> Result<(), MacAppError> {
     std::fs::create_dir_all(dest)?;
     let file = std::fs::File::open(archive)?;
     match archive_ext(asset_name) {
+        "file" => {
+            let name =
+                Path::new(asset_name)
+                    .file_name()
+                    .ok_or_else(|| MacAppError::RuntimeInvalid {
+                        path: archive.to_path_buf(),
+                        reason: format!("asset name '{asset_name}' is not a file name"),
+                    })?;
+            std::fs::copy(archive, dest.join(name))?;
+        }
         "zip" => {
             // Tool zips (design 13 D2: cnc-ddraw) unpack entry-by-entry;
             // `enclosed_name` keeps members inside the extract dir.
@@ -1068,7 +1083,7 @@ fn dir_size(p: &Path) -> Result<u64, MacAppError> {
 }
 
 #[cfg(test)]
-mod store_tests {
+pub(crate) mod store_tests {
     use super::*;
 
     /// Point GOGO_HOME at `dir` for the test's lifetime (env mutex held).
@@ -1303,6 +1318,71 @@ mod store_tests {
         assert!(installed("gptk", None).is_some());
     }
 
+    /// A winetricks entry pinned (#106) to `body` as `version`, and
+    /// wiremock answering for it the GitHub way: the contents API, then the
+    /// raw file, which expects exactly `hits` downloads.
+    pub(crate) async fn mock_winetricks(
+        body: &[u8],
+        version: &'static str,
+        hits: u64,
+    ) -> (wiremock::MockServer, &'static CatalogEntry) {
+        mock_winetricks_serving(body, body, version, hits).await
+    }
+
+    /// [`mock_winetricks`], but the raw file serves `served`.
+    async fn mock_winetricks_serving(
+        body: &[u8],
+        served: &[u8],
+        version: &'static str,
+        hits: u64,
+    ) -> (wiremock::MockServer, &'static CatalogEntry) {
+        let server = wiremock::MockServer::start().await;
+        let raw = format!("/raw/{version}/src/winetricks");
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/repos/Winetricks/winetricks/contents/src/winetricks",
+            ))
+            .and(wiremock::matchers::query_param("ref", version))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "type": "file", "name": "winetricks", "sha": "test-blob",
+                    "size": body.len(),
+                    "download_url": format!("{}{raw}", server.uri()),
+                })),
+            )
+            .mount(&server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(raw))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(served.to_vec()))
+            .expect(hits)
+            .mount(&server)
+            .await;
+        let real = catalog::find("winetricks").unwrap();
+        let entry: &'static CatalogEntry = Box::leak(Box::new(CatalogEntry {
+            id: real.id,
+            kind: catalog::Kind::Tool {
+                payload: "winetricks",
+            },
+            status: Status::Tool,
+            discovery: Some(catalog::Discovery::PinnedFile(catalog::PinnedFile {
+                repo: "Winetricks/winetricks",
+                tag: version,
+                path: "src/winetricks",
+                version,
+                git_sha: "test-blob",
+                sha256: leak(sha256_hex(body)),
+            })),
+            license: real.license,
+            redistributable: true,
+            min_macos: None,
+            arch: real.arch,
+            note: "test",
+            frameworks: None,
+        }));
+        (server, entry)
+    }
+
     #[tokio::test]
     // The env guard must span install's awaits: GOGO_HOME is read throughout.
     // Safe: the test runtime is single-threaded and no other task touches env.
@@ -1310,53 +1390,9 @@ mod store_tests {
     async fn winetricks_provisioning_round_trip() {
         let home = tempfile::tempdir().unwrap();
         let _g = env_home(home.path());
-        // A release tarball carrying an executable `winetricks` script.
-        let mut tar_buf = Vec::new();
-        {
-            let mut t = tar::Builder::new(&mut tar_buf);
-            let script = b"#!/bin/sh\nWINETRICKS_VERSION=20260125-test\n";
-            let mut h = tar::Header::new_gnu();
-            h.set_size(script.len() as u64);
-            h.set_mode(0o755);
-            h.set_cksum();
-            t.append_data(&mut h, "winetricks", &script[..]).unwrap();
-            t.finish().unwrap();
-        }
-        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        use std::io::Write as _;
-        gz.write_all(&tar_buf).unwrap();
-        let body = gz.finish().unwrap();
-        let digest = format!("sha256:{}", sha256_hex(&body));
-
-        let server = wiremock::MockServer::start().await;
-        let asset_url = format!("{}/download/20260125.tar.gz", server.uri());
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path(
-                "/repos/Winetricks/winetricks/releases/latest",
-            ))
-            .respond_with(
-                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "tag_name": "20260125",
-                    "prerelease": false,
-                    "published_at": "2026-01-25T00:00:00Z",
-                    "assets": [{
-                        "name": "20260125.tar.gz",
-                        "size": body.len(),
-                        "browser_download_url": asset_url,
-                        "digest": digest,
-                    }],
-                })),
-            )
-            .mount(&server)
-            .await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/download/20260125.tar.gz"))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(body))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let entry = catalog::find("winetricks").unwrap();
+        // The bare script, as raw.githubusercontent.com serves it.
+        let body = b"#!/bin/sh\nWINETRICKS_VERSION=20260125\n";
+        let (server, entry) = mock_winetricks(body, "20260125", 1).await;
         let http = catalog::http_client().unwrap();
         let mut events: Vec<&'static str> = Vec::new();
         let m = install(entry, None, &http, &server.uri(), false, &mut |ev| {
@@ -1372,20 +1408,39 @@ mod store_tests {
         .unwrap();
         assert_eq!(m.version, "20260125");
         assert_eq!(m.entry_rel, "winetricks");
+        assert_eq!(m.sha256, sha256_hex(body));
         assert_eq!(events, vec!["started", "provisioned"]);
         let wt = tree_root(&m).join(&m.entry_rel);
-        assert!(wt.is_file());
+        assert_eq!(std::fs::read(&wt).unwrap(), body);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
             assert!(wt.metadata().unwrap().permissions().mode() & 0o111 != 0);
         }
+        // No partial file is left behind.
+        assert_eq!(std::fs::read_dir(tmp_dir()).unwrap().count(), 0);
         // Reuse: a second install must not re-download.
         let m2 = install(entry, None, &http, &server.uri(), false, &mut |_| {})
             .await
             .unwrap();
         assert_eq!(m2.version, "20260125");
         server.verify().await;
+    }
+
+    #[tokio::test]
+    // Same env-guard-spanning-await justification as above.
+    #[allow(clippy::await_holding_lock)]
+    async fn tampered_pinned_file_is_refused() {
+        let home = tempfile::tempdir().unwrap();
+        let _g = env_home(home.path());
+        let (server, entry) =
+            mock_winetricks_serving(b"#!/bin/sh\n", b"tampered", "20260125", 1).await;
+        let http = catalog::http_client().unwrap();
+        let err = install(entry, None, &http, &server.uri(), false, &mut |_| {})
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MacAppError::RuntimeChecksumMismatch { .. }));
+        assert!(installed("winetricks", None).is_none());
     }
 
     fn tar_xz(build: impl FnOnce(&mut tar::Builder<&mut Vec<u8>>)) -> Vec<u8> {

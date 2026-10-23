@@ -68,6 +68,12 @@ pub enum Discovery {
     /// every engine under a single `v1.0` release, so neither the tag nor
     /// "latest" says anything about the version: the asset name does.
     Pinned(PinnedAsset),
+    /// One file of a repository at a tag, pinned by sha256 (#106). For
+    /// projects whose releases carry no binary asset: Winetricks uploads
+    /// only `<tag>.tar.gz.asc` since 20220411, signing GitHub's generated
+    /// source archive, which is not byte-stable. A file at a tag is: the
+    /// raw download is the git blob itself.
+    PinnedFile(PinnedFile),
 }
 
 /// An exact GitHub release asset and the sha256 gogo expects. GitHub's own
@@ -79,6 +85,31 @@ pub struct PinnedAsset {
     /// The store version this asset installs as (`runtimes/<id>/<version>`).
     pub version: &'static str,
     pub sha256: &'static str,
+}
+
+/// A repository file at a tag and the digests gogo expects. `git_sha` is
+/// the blob id the contents API reports for it, checked at probe time (as
+/// a release asset's digest is); `sha256` checks the download.
+pub struct PinnedFile {
+    pub repo: &'static str,
+    pub tag: &'static str,
+    /// Path inside the repository; its file name is the payload's.
+    pub path: &'static str,
+    /// The store version this file installs as (`runtimes/<id>/<version>`).
+    pub version: &'static str,
+    pub git_sha: &'static str,
+    pub sha256: &'static str,
+}
+
+impl Discovery {
+    /// The one version a pinned entry installs; `None` for a release feed.
+    pub fn pinned_version(&self) -> Option<&'static str> {
+        match self {
+            Discovery::GitHubReleases { .. } => None,
+            Discovery::Pinned(pin) => Some(pin.version),
+            Discovery::PinnedFile(pin) => Some(pin.version),
+        }
+    }
 }
 
 /// The dylib closure an engine is not standalone without (#62): the
@@ -298,16 +329,21 @@ static ENTRIES: &[CatalogEntry] = &[
             payload: "winetricks",
         },
         status: Status::Tool,
-        discovery: Some(Discovery::GitHubReleases {
+        // Releases since 20220411 carry no tarball asset (#106): the script
+        // itself, at the release tag, live-checked 2026-10-23.
+        discovery: Some(Discovery::PinnedFile(PinnedFile {
             repo: "Winetricks/winetricks",
-            asset_prefix: "",
-            asset_suffix: ".tar.gz",
-        }),
+            tag: "20260125",
+            path: "src/winetricks",
+            version: "20260125",
+            git_sha: "d31a93d6ee22af49b3d42fdad99a3ce3cec76e77",
+            sha256: "431f82fc74000e6c864409f1d8fb495d696c03928808e3e8acffc45179312a7b",
+        })),
         license: "LGPL-2.1+",
         redistributable: true,
         min_macos: None,
         arch: "any",
-        note: "GitHub release tarball (digest-pinned); the script is located post-extract",
+        note: "src/winetricks at a release tag (sha256-pinned)",
         frameworks: None,
     },
     CatalogEntry {
@@ -571,6 +607,18 @@ pub async fn probe(
             }
             return probe_pinned(pin, http, api_base).await;
         }
+        Discovery::PinnedFile(pin) => {
+            if let Some(v) = version.filter(|v| *v != pin.version) {
+                return Err(MacAppError::RuntimeDownloadFailed {
+                    url: format!("{api_base}/repos/{}/contents/{}", pin.repo, pin.path),
+                    reason: format!(
+                        "{} is pinned to {} (no other version is catalogued, not '{v}')",
+                        entry.id, pin.version
+                    ),
+                });
+            }
+            return probe_pinned_file(pin, http, api_base).await;
+        }
     };
     let matches_asset =
         |a: &AssetDoc| a.name.starts_with(asset_prefix) && a.name.ends_with(asset_suffix);
@@ -666,6 +714,49 @@ pub async fn probe_pinned(
     rel.tag = pin.version.to_string();
     rel.sha256 = Some(pin.sha256.to_string());
     Ok(rel)
+}
+
+/// Probe one pinned repository file through the contents API: it must exist
+/// at the tag with the pinned blob id. The download URL is the raw file;
+/// the result carries the pinned version and sha256.
+pub async fn probe_pinned_file(
+    pin: &PinnedFile,
+    http: &reqwest::Client,
+    api_base: &str,
+) -> Result<RemoteRelease, MacAppError> {
+    let url = format!(
+        "{api_base}/repos/{}/contents/{}?ref={}",
+        pin.repo, pin.path, pin.tag
+    );
+    let v = get_json_opt(http, &url)
+        .await?
+        .ok_or_else(|| MacAppError::CatalogUnreachable {
+            detail: format!("{url}: not found"),
+        })?;
+    let field = |k: &str| v.get(k).and_then(Value::as_str);
+    let (Some(name), Some(sha), Some(download)) =
+        (field("name"), field("sha"), field("download_url"))
+    else {
+        return Err(MacAppError::CatalogUnreachable {
+            detail: format!("{url}: not a file"),
+        });
+    };
+    if !sha.eq_ignore_ascii_case(pin.git_sha) {
+        return Err(MacAppError::CatalogUnreachable {
+            detail: format!(
+                "{} at {}: upstream blob {sha} differs from the pinned {} — \
+                 the tag was moved; refusing it",
+                pin.path, pin.tag, pin.git_sha
+            ),
+        });
+    }
+    Ok(RemoteRelease {
+        tag: pin.version.to_string(),
+        asset_name: name.to_string(),
+        asset_url: download.to_string(),
+        size: v.get("size").and_then(Value::as_u64).unwrap_or(0),
+        sha256: Some(pin.sha256.to_string()),
+    })
 }
 
 fn remote_release(doc: &ReleaseDoc, asset: &AssetDoc) -> RemoteRelease {
@@ -1045,6 +1136,71 @@ mod catalog_tests {
             .unwrap_err();
         assert!(matches!(err, MacAppError::CatalogUnreachable { .. }));
         assert!(err.to_string().contains("differs from the pinned"), "{err}");
+    }
+
+    /// The contents API answer for `src/winetricks` at the pinned tag.
+    async fn mock_winetricks_file(server: &wiremock::MockServer, blob: &str) {
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/repos/Winetricks/winetricks/contents/src/winetricks",
+            ))
+            .and(wiremock::matchers::query_param("ref", "20260125"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "type": "file", "name": "winetricks", "path": "src/winetricks",
+                    "sha": blob, "size": 830687,
+                    "download_url": "https://raw.githubusercontent.com/Winetricks/\
+                                     winetricks/20260125/src/winetricks",
+                })),
+            )
+            .mount(server)
+            .await;
+    }
+
+    /// #106: winetricks releases carry only a signature since 20220411, so
+    /// the catalog pins the script at the latest tag instead of taking the
+    /// newest release with a tarball (20210206).
+    #[tokio::test]
+    async fn pinned_file_probes_the_tag_and_carries_the_pin() {
+        let server = wiremock::MockServer::start().await;
+        let entry = find("winetricks").unwrap();
+        let Some(Discovery::PinnedFile(pin)) = &entry.discovery else {
+            panic!("winetricks is a pinned file");
+        };
+        assert_eq!((pin.tag, pin.path), ("20260125", "src/winetricks"));
+        mock_winetricks_file(&server, pin.git_sha).await;
+        let http = http_client().unwrap();
+        let rel = probe(entry, None, &http, &server.uri()).await.unwrap();
+        assert_eq!(rel.tag, "20260125");
+        assert_eq!(rel.asset_name, "winetricks");
+        assert!(rel.asset_url.ends_with("/20260125/src/winetricks"));
+        assert_eq!(rel.size, 830687);
+        assert_eq!(rel.sha256.as_deref(), Some(pin.sha256));
+        assert_eq!(
+            probe(entry, Some("20260125"), &http, &server.uri())
+                .await
+                .unwrap(),
+            rel
+        );
+        let err = probe(entry, Some("20210206"), &http, &server.uri())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("pinned to 20260125"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn moved_tag_is_refused_and_a_missing_file_unreachable() {
+        let server = wiremock::MockServer::start().await;
+        mock_winetricks_file(&server, "00ff").await;
+        let http = http_client().unwrap();
+        let entry = find("winetricks").unwrap();
+        let err = probe(entry, None, &http, &server.uri()).await.unwrap_err();
+        assert!(matches!(err, MacAppError::CatalogUnreachable { .. }));
+        assert!(err.to_string().contains("tag was moved"), "{err}");
+
+        let empty = wiremock::MockServer::start().await;
+        let err = probe(entry, None, &http, &empty.uri()).await.unwrap_err();
+        assert!(err.to_string().contains("not found"), "{err}");
     }
 
     #[test]

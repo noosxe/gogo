@@ -159,6 +159,20 @@ code change.
 - Provisioning: manifest-driven — download the pinned raw URL → sha256 verify →
   install under `tools/`. LGPL notice written into produced bundles alongside
   `LICENSE-wine.txt`.
+- Source (#106): `Discovery::PinnedFile` — `src/winetricks` at a release tag
+  (20260125). Since 20220411 Winetricks releases upload only `<tag>.tar.gz.asc`, a
+  signature over GitHub's generated source archive; that archive isn't byte-stable and
+  the release feed's newest real tarball is 20210206, so neither the feed nor the
+  archive can be pinned. The probe asks the contents API for the file at the tag and
+  refuses a blob id other than the pinned one (a moved tag), and the raw download is
+  checked against the pinned sha256. The `.asc` isn't checked: it signs the archive,
+  not the file, and would need gpg plus a pinned key, which the sha256 pin already
+  subsumes. Bumping winetricks is a catalog edit (tag, blob id, sha256).
+- Resolution: `WINETRICKS` → the store's copy of the pinned version → any other
+  store copy → `winetricks` on PATH. Auto-provision (`resolve_or_provision_winetricks`)
+  upgrades a stale store copy to the pin, says so with the
+  `gogo runtimes prune winetricks/<old>` remedy, and falls back to the stale copy if
+  the download fails.
 - Execution: `WINE=<bundled wine> WINEPREFIX=<bundle prefix> winetricks -q <verb>` —
   one verb per call, argv logged, timeout guard, self-update disabled.
 - **Shims** (new workspace crate `gogo-shims`, binaries `cabextract` + `7z`):
