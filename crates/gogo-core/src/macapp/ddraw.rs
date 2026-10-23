@@ -97,6 +97,25 @@ pub fn apply(store_tree: &Path, game_dir: &Path) -> Result<Applied, MacAppError>
     Ok(Applied::Applied { shaders })
 }
 
+/// Is the `ddraw.dll` in `game_dir` the one [`apply`] put there (its
+/// `ddraw.ini` is gogo's)?
+pub fn is_gogo(game_dir: &Path) -> bool {
+    std::fs::read_to_string(game_dir.join("ddraw.ini")).is_ok_and(|s| s.starts_with("; gogo:"))
+}
+
+/// Undo [`apply`] when the game moves to another renderer: remove
+/// `ddraw.dll` and `ddraw.ini` from `game_dir`, but only when the ini is
+/// gogo's (a game's or recipe's own wrapper is never touched). `Shaders/`
+/// stays; without the dll nothing loads it. Returns whether anything went.
+pub fn remove_gogo(game_dir: &Path) -> bool {
+    let ini = game_dir.join("ddraw.ini");
+    if !is_gogo(game_dir) {
+        return false;
+    }
+    let _ = std::fs::remove_file(game_dir.join("ddraw.dll"));
+    std::fs::remove_file(&ini).is_ok()
+}
+
 /// Set the per-prefix DllOverrides entry `ddraw = n,b` (native, builtin)
 /// with the bundled wine — the missing half of the wrapper (live finding
 /// 2026-10-19: wine's default load order for draw is builtin-first, so the
@@ -170,6 +189,23 @@ mod tests {
         assert!(game.join("Shaders/xbr/one.fxc").is_file());
         // Everything else in the store tree stays out of the game dir (D3).
         assert!(!game.join("cnc-ddraw config.exe").exists());
+    }
+
+    #[test]
+    fn remove_gogo_only_removes_gogos_wrapper() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = tree(tmp.path());
+        let game = tmp.path().join("game");
+        std::fs::create_dir_all(&game).unwrap();
+        apply(&t, &game).unwrap();
+        assert!(remove_gogo(&game));
+        assert!(!game.join("ddraw.dll").exists() && !game.join("ddraw.ini").exists());
+        assert!(!remove_gogo(&game));
+        // A game's own wrapper (its own ini) stays.
+        std::fs::write(game.join("ddraw.dll"), b"own").unwrap();
+        std::fs::write(game.join("ddraw.ini"), b"[ddraw]\n").unwrap();
+        assert!(!remove_gogo(&game));
+        assert!(game.join("ddraw.dll").is_file());
     }
 
     #[test]

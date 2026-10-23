@@ -4,6 +4,11 @@
 //! download → sha256 verify → extract to a temp dir → locate + probe the wine
 //! tree → rename into place → manifest update. The archive is deleted after a
 //! successful install; the manifest keeps the sha256 for re-download.
+//!
+//! Renderers (design 16 decision 6) use the same install path but live under
+//! `<state_dir>/renderers/<id>/<ver>/<arch>/` with their own manifest.
+//! [`derive`] builds the derived runtimes engine-overlay renderers run from
+//! (decision 3).
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -29,6 +34,33 @@ fn manifest_path() -> PathBuf {
     runtimes_dir().join("manifest.json")
 }
 
+/// Renderer store root: `<state_dir>/renderers/` (design 16 decision 6).
+pub fn renderers_dir() -> PathBuf {
+    crate::state::state_dir().join("renderers")
+}
+
+fn renderer_manifest_path() -> PathBuf {
+    renderers_dir().join("manifest.json")
+}
+
+/// The `<arch>` level of `renderers/<id>/<ver>/<arch>/`: the runtime arch a
+/// payload is for. Every runtime is x86_64 (Rosetta) today; arm64ec joins
+/// it with an ARM64 runtime.
+pub const RENDERER_ARCH: &str = "x86_64";
+
+/// Is `id` a renderer catalog entry (stored under `renderers/`)?
+pub fn is_renderer(id: &str) -> bool {
+    catalog::find(id).is_some_and(|e| matches!(e.kind, catalog::Kind::Renderer { .. }))
+}
+
+fn manifest_path_for(id: &str) -> PathBuf {
+    if is_renderer(id) {
+        renderer_manifest_path()
+    } else {
+        manifest_path()
+    }
+}
+
 /// One cached runtime (manifest record).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ManifestEntry {
@@ -44,15 +76,37 @@ pub struct ManifestEntry {
     pub bytes: u64,
 }
 
-/// Tree root of a cached runtime: `<runtimes>/<id>/<version>/`.
+/// Tree root of a cached entry: `<runtimes>/<id>/<version>/`, or
+/// `<renderers>/<id>/<version>/<arch>/` for a renderer.
 pub fn tree_root(m: &ManifestEntry) -> PathBuf {
-    runtimes_dir().join(&m.id).join(&m.version)
+    if is_renderer(&m.id) {
+        renderers_dir()
+            .join(&m.id)
+            .join(&m.version)
+            .join(RENDERER_ARCH)
+    } else {
+        runtimes_dir().join(&m.id).join(&m.version)
+    }
 }
 
-/// Load the manifest; missing → empty; corrupt → warn + empty (06 §2: reads
-/// never hard-fail).
+/// Is `version` a derived runtime (`<ver>+<renderer>-<rver>`, decision 3)?
+pub fn is_derived(version: &str) -> bool {
+    version.contains('+')
+}
+
+/// Load the runtime manifest; missing → empty; corrupt → warn + empty (06
+/// §2: reads never hard-fail).
 pub fn load_manifest() -> Vec<ManifestEntry> {
-    match std::fs::read_to_string(manifest_path()) {
+    load_manifest_at(&manifest_path())
+}
+
+/// Load the renderer manifest (same rules as [`load_manifest`]).
+pub fn load_renderer_manifest() -> Vec<ManifestEntry> {
+    load_manifest_at(&renderer_manifest_path())
+}
+
+fn load_manifest_at(path: &Path) -> Vec<ManifestEntry> {
+    match std::fs::read_to_string(path) {
         Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|e| {
             tracing::warn!("runtimes manifest corrupt ({e}) — treating as empty");
             Vec::new()
@@ -62,7 +116,16 @@ pub fn load_manifest() -> Vec<ManifestEntry> {
 }
 
 pub fn save_manifest(entries: &[ManifestEntry]) -> Result<(), MacAppError> {
-    let path = manifest_path();
+    save_manifest_at(&manifest_path(), entries)
+}
+
+/// Save the renderer manifest.
+pub fn save_renderer_manifest(entries: &[ManifestEntry]) -> Result<(), MacAppError> {
+    save_manifest_at(&renderer_manifest_path(), entries)
+}
+
+fn save_manifest_at(path: &Path, entries: &[ManifestEntry]) -> Result<(), MacAppError> {
+    let path = path.to_path_buf();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -75,11 +138,18 @@ pub fn save_manifest(entries: &[ManifestEntry]) -> Result<(), MacAppError> {
 }
 
 /// The newest cached instance of `id` (optionally version-pinned), verified to
-/// still exist on disk.
+/// still exist on disk. Unpinned lookups never pick a derived runtime: those
+/// are reached only by their full `<ver>+<renderer>-<rver>` version.
 pub fn installed(id: &str, version: Option<&str>) -> Option<(ManifestEntry, PathBuf)> {
-    let mut hits: Vec<ManifestEntry> = load_manifest()
+    let mut hits: Vec<ManifestEntry> = load_manifest_at(&manifest_path_for(id))
         .into_iter()
-        .filter(|m| m.id == id && version.is_none_or(|v| m.version == v))
+        .filter(|m| {
+            m.id == id
+                && match version {
+                    Some(v) => m.version == v,
+                    None => !is_derived(&m.version),
+                }
+        })
         .collect();
     hits.sort_by(|a, b| b.fetched_at.cmp(&a.fetched_at));
     hits.into_iter()
@@ -226,7 +296,7 @@ pub async fn install(
                 .to_string_lossy()
                 .into_owned()
         }
-        catalog::Kind::Tool { payload } => {
+        catalog::Kind::Tool { payload } | catalog::Kind::Renderer { payload, .. } => {
             let f = locate_named_file(&extract_dir, payload).ok_or_else(|| {
                 MacAppError::RuntimeInvalid {
                     path: extract_dir.clone(),
@@ -249,16 +319,19 @@ pub async fn install(
         }
     };
 
-    // Commit: rename into place, drop the archive, update the manifest.
-    let dest = runtimes_dir().join(entry.id).join(&rel.tag);
-    std::fs::create_dir_all(dest.parent().expect("dest has a parent"))?;
-    let _ = std::fs::remove_dir_all(&dest);
-    std::fs::rename(&extract_dir, &dest)?;
-    let _ = std::fs::remove_file(&part);
-    if let Some(p) = &frameworks_part {
-        let _ = std::fs::remove_file(p);
+    if matches!(entry.kind, catalog::Kind::Renderer { .. }) {
+        // The bundles that use it copy this (design 10 §8, as for runtimes).
+        std::fs::write(
+            extract_dir.join("NOTICES.txt"),
+            format!(
+                "{} {} — {}\n  {}\n\nDownloaded by gogo on this Mac from the upstream \
+                 release; gogo doesn't redistribute it.\n",
+                entry.id, rel.tag, entry.license, rel.asset_url
+            ),
+        )?;
     }
 
+    // Commit: rename into place, drop the archive, update the manifest.
     let m = ManifestEntry {
         id: entry.id.into(),
         version: rel.tag.clone(),
@@ -268,14 +341,21 @@ pub async fn install(
         entry_rel,
         bytes,
     };
-    let mut manifest: Vec<ManifestEntry> = load_manifest()
-        .into_iter()
-        .filter(|e| !(e.id == m.id && e.version == m.version))
-        .collect();
-    manifest.push(m.clone());
-    save_manifest(&manifest)?;
+    let dest = tree_root(&m);
+    std::fs::create_dir_all(dest.parent().expect("dest has a parent"))?;
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::rename(&extract_dir, &dest)?;
+    let _ = std::fs::remove_file(&part);
+    if let Some(p) = &frameworks_part {
+        let _ = std::fs::remove_file(p);
+    }
 
-    if matches!(entry.kind, catalog::Kind::Tool { .. }) {
+    record(&m)?;
+
+    if matches!(
+        entry.kind,
+        catalog::Kind::Tool { .. } | catalog::Kind::Renderer { .. }
+    ) {
         emit(&ProgressEvent::ToolProvisioned {
             id: entry.id.into(),
             version: rel.tag.clone(),
@@ -287,6 +367,147 @@ pub async fn install(
         });
     }
     Ok(m)
+}
+
+/// Add or replace `m` in its manifest.
+fn record(m: &ManifestEntry) -> Result<(), MacAppError> {
+    let path = manifest_path_for(&m.id);
+    let mut manifest: Vec<ManifestEntry> = load_manifest_at(&path)
+        .into_iter()
+        .filter(|e| !(e.id == m.id && e.version == m.version))
+        .collect();
+    manifest.push(m.clone());
+    save_manifest_at(&path, &manifest)
+}
+
+/// `<ver>+<renderer>-<rver>`: the version of the derived runtime for a base
+/// runtime version and a renderer (design 16 decision 3).
+pub fn derived_version(base_version: &str, renderer: &ManifestEntry) -> String {
+    format!("{base_version}+{}-{}", renderer.id, renderer.version)
+}
+
+/// The derived runtime for `base` × `renderer` (design 16 decision 3):
+/// `runtimes/<id>/<ver>+<renderer>-<rver>/`, built once and shared by every
+/// game using that pair. `engine/` is an APFS clone of the base engine with
+/// the renderer's `<arch>-windows`/`<arch>-unix` dirs copied over
+/// `lib/wine/`; `Frameworks` is a relative symlink to the base's. The base
+/// runtime is never written. An existing derived runtime is reused as is
+/// (immutable: a bumped input gets a new version, never a patch).
+pub fn derive(
+    base: &ManifestEntry,
+    renderer: &ManifestEntry,
+) -> Result<ManifestEntry, MacAppError> {
+    let version = derived_version(&base.version, renderer);
+    if let Some((m, _)) = installed(&base.id, Some(&version)) {
+        return Ok(m);
+    }
+    let base_root = tree_root(base);
+    let invalid = |path: &Path, reason: String| MacAppError::RuntimeInvalid {
+        path: path.to_path_buf(),
+        reason,
+    };
+    if !base.entry_rel.starts_with("engine/") {
+        return Err(invalid(
+            &base_root,
+            "a derived runtime needs the {engine,Frameworks} store layout".into(),
+        ));
+    }
+    // The renderer's arch dirs sit next to its payload's dir
+    // (`v0.80/x86_64-unix/winemetal.so` → `v0.80/`).
+    let payload = tree_root(renderer).join(&renderer.entry_rel);
+    let overlay_src = payload
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| invalid(&payload, "renderer payload has no arch dir".into()))?
+        .to_path_buf();
+    let arch_dirs: Vec<PathBuf> = std::fs::read_dir(&overlay_src)?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_dir()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with("-windows") || n.ends_with("-unix"))
+        })
+        .collect();
+    if arch_dirs.is_empty() {
+        return Err(invalid(
+            &overlay_src,
+            "renderer has no <arch>-windows/<arch>-unix dirs".into(),
+        ));
+    }
+
+    std::fs::create_dir_all(tmp_dir())?;
+    let work = tmp_dir().join(format!("{}-{version}", base.id));
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work)?;
+    let engine = work.join("engine");
+    super::bundle::clone_tree(&base_root.join("engine"), &engine)?;
+    let lib_wine = engine.join("lib/wine");
+    let mut bytes = 0u64;
+    for dir in &arch_dirs {
+        let dst = lib_wine.join(dir.file_name().expect("arch dir has a name"));
+        bytes += overlay(dir, &dst)?;
+    }
+    if base_root.join("Frameworks").is_dir() {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            Path::new("..").join(&base.version).join("Frameworks"),
+            work.join("Frameworks"),
+        )?;
+    }
+    let mut notices = std::fs::read_to_string(base_root.join("NOTICES.txt")).unwrap_or_default();
+    if let Ok(r) = std::fs::read_to_string(tree_root(renderer).join("NOTICES.txt")) {
+        notices.push_str(&format!(
+            "\n— engine/lib/wine overlaid with {} {} —\n{r}",
+            renderer.id, renderer.version
+        ));
+    }
+    std::fs::write(work.join("NOTICES.txt"), notices)?;
+
+    let dest = runtimes_dir().join(&base.id).join(&version);
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::rename(&work, &dest)?;
+    // Probed in place: the Frameworks link is relative to the final location.
+    if let Err(e) = super::runtime::probe_tree(&dest.join(&base.entry_rel)) {
+        let _ = std::fs::remove_dir_all(&dest);
+        return Err(e);
+    }
+    let m = ManifestEntry {
+        id: base.id.clone(),
+        version,
+        sha256: base.sha256.clone(),
+        fetched_at: Utc::now().to_rfc3339(),
+        upstream_url: format!(
+            "derived:{}/{}+{}/{}",
+            base.id, base.version, renderer.id, renderer.version
+        ),
+        entry_rel: base.entry_rel.clone(),
+        bytes,
+    };
+    record(&m)?;
+    Ok(m)
+}
+
+/// Copy `src`'s files over `dst` (recursively), replacing what is there.
+/// A replaced file is unlinked first, so the copy never writes through into
+/// an inode it might share with the base. Returns the bytes copied.
+fn overlay(src: &Path, dst: &Path) -> Result<u64, MacAppError> {
+    std::fs::create_dir_all(dst)?;
+    let mut bytes = 0;
+    for e in std::fs::read_dir(src)? {
+        let e = e?;
+        let to = dst.join(e.file_name());
+        if e.file_type()?.is_dir() {
+            bytes += overlay(&e.path(), &to)?;
+        } else {
+            if to.symlink_metadata().is_ok() {
+                std::fs::remove_file(&to)?;
+            }
+            bytes += std::fs::copy(e.path(), &to)?;
+        }
+    }
+    Ok(bytes)
 }
 
 fn archive_ext(name: &str) -> &'static str {
@@ -439,21 +660,32 @@ fn notices_text(
     Ok(out)
 }
 
-/// Remove every cached version of `ids`; returns the removed tree roots.
+/// Remove every cached version of `ids` (runtimes, derived runtimes and
+/// renderers alike); returns the removed tree roots. Callers check the
+/// game references first (design 16 decision 6).
 pub fn prune(ids: &[String]) -> Result<Vec<PathBuf>, MacAppError> {
-    let keep: Vec<ManifestEntry> = load_manifest()
-        .into_iter()
-        .filter(|m| !ids.iter().any(|i| i == &m.id))
-        .collect();
     let mut removed = Vec::new();
-    for id in ids {
-        let dir = runtimes_dir().join(id);
-        if dir.is_dir() {
-            std::fs::remove_dir_all(&dir)?;
-            removed.push(dir);
+    for (path, root) in [
+        (manifest_path(), runtimes_dir()),
+        (renderer_manifest_path(), renderers_dir()),
+    ] {
+        let all = load_manifest_at(&path);
+        let keep: Vec<ManifestEntry> = all
+            .iter()
+            .filter(|m| !ids.iter().any(|i| i == &m.id))
+            .cloned()
+            .collect();
+        for id in ids {
+            let dir = root.join(id);
+            if dir.is_dir() {
+                std::fs::remove_dir_all(&dir)?;
+                removed.push(dir);
+            }
+        }
+        if keep.len() != all.len() {
+            save_manifest_at(&path, &keep)?;
         }
     }
-    save_manifest(&keep)?;
     Ok(removed)
 }
 
@@ -1144,6 +1376,123 @@ mod store_tests {
             .await
             .unwrap();
         server.verify().await;
+    }
+
+    fn write_exec(path: &Path, body: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    fn entry(id: &str, version: &str, entry_rel: &str) -> ManifestEntry {
+        ManifestEntry {
+            id: id.into(),
+            version: version.into(),
+            sha256: "abc".into(),
+            fetched_at: "2026-10-23T00:00:00Z".into(),
+            upstream_url: "http://x".into(),
+            entry_rel: entry_rel.into(),
+            bytes: 1,
+        }
+    }
+
+    #[test]
+    fn derive_overlays_a_clone_and_leaves_the_base_alone() {
+        let home = tempfile::tempdir().unwrap();
+        let _g = env_home(home.path());
+        // A base store runtime …
+        let base = entry("winecx", "24.0.7_7", "engine/bin/wine");
+        let root = tree_root(&base);
+        write_exec(
+            &root.join("engine/bin/wine"),
+            "#!/bin/sh\necho 'wine-9.0 (SikarugirCX 24.0.7)'\n",
+        );
+        let lib = root.join("engine/lib/wine");
+        for (rel, body) in [
+            ("x86_64-windows/d3d11.dll", "wined3d-64"),
+            ("i386-windows/d3d11.dll", "wined3d-32"),
+            ("x86_64-windows/kernel32.dll", "k32"),
+            ("x86_64-unix/ntdll.so", "ntdll"),
+        ] {
+            std::fs::create_dir_all(lib.join(rel).parent().unwrap()).unwrap();
+            std::fs::write(lib.join(rel), body).unwrap();
+        }
+        std::fs::create_dir_all(root.join("Frameworks")).unwrap();
+        std::fs::write(root.join("Frameworks/libinotify.0.dylib"), "ino").unwrap();
+        std::fs::write(root.join("NOTICES.txt"), "winecx notices\n").unwrap();
+        save_manifest(std::slice::from_ref(&base)).unwrap();
+        // … and DXMT as downloaded (`v0.80/<arch>-*/`).
+        let dxmt = entry("dxmt", "v0.80", "v0.80/x86_64-unix/winemetal.so");
+        let r = tree_root(&dxmt);
+        assert_eq!(r, renderers_dir().join("dxmt/v0.80/x86_64"));
+        for (rel, body) in [
+            ("v0.80/x86_64-windows/d3d11.dll", "dxmt-64"),
+            ("v0.80/i386-windows/d3d11.dll", "dxmt-32"),
+            ("v0.80/x86_64-unix/winemetal.so", "metal"),
+        ] {
+            std::fs::create_dir_all(r.join(rel).parent().unwrap()).unwrap();
+            std::fs::write(r.join(rel), body).unwrap();
+        }
+        std::fs::write(r.join("NOTICES.txt"), "dxmt LGPL\n").unwrap();
+        save_renderer_manifest(std::slice::from_ref(&dxmt)).unwrap();
+        assert!(installed("dxmt", Some("v0.80")).is_some());
+
+        let m = derive(&base, &dxmt).unwrap();
+        assert_eq!(m.version, "24.0.7_7+dxmt-v0.80");
+        let d = tree_root(&m);
+        assert_eq!(d, runtimes_dir().join("winecx/24.0.7_7+dxmt-v0.80"));
+        let dlib = d.join("engine/lib/wine");
+        let read = |p: PathBuf| std::fs::read_to_string(p).unwrap();
+        assert_eq!(read(dlib.join("x86_64-windows/d3d11.dll")), "dxmt-64");
+        assert_eq!(read(dlib.join("i386-windows/d3d11.dll")), "dxmt-32");
+        assert_eq!(read(dlib.join("x86_64-unix/winemetal.so")), "metal");
+        assert_eq!(read(dlib.join("x86_64-windows/kernel32.dll")), "k32");
+        assert_eq!(read(dlib.join("x86_64-unix/ntdll.so")), "ntdll");
+        // The base is untouched.
+        assert_eq!(read(lib.join("x86_64-windows/d3d11.dll")), "wined3d-64");
+        assert!(!lib.join("x86_64-unix/winemetal.so").exists());
+        // Frameworks is shared by a relative link; notices carry both.
+        assert_eq!(
+            std::fs::read_link(d.join("Frameworks")).unwrap(),
+            Path::new("../24.0.7_7/Frameworks")
+        );
+        assert!(d.join("Frameworks/libinotify.0.dylib").is_file());
+        let notices = read(d.join("NOTICES.txt"));
+        assert!(notices.contains("winecx notices") && notices.contains("dxmt LGPL"));
+        assert_eq!(
+            super::super::runtime::frameworks_for(&d.join(&m.entry_rel)),
+            Some(d.join("Frameworks"))
+        );
+
+        // Reused, never rebuilt; unpinned lookups keep finding the base.
+        std::fs::write(dlib.join("marker"), "x").unwrap();
+        assert_eq!(derive(&base, &dxmt).unwrap().version, m.version);
+        assert!(dlib.join("marker").is_file());
+        assert_eq!(installed("winecx", None).unwrap().0.version, "24.0.7_7");
+        assert!(installed("winecx", Some("24.0.7_7+dxmt-v0.80")).is_some());
+
+        // Prune reaches both stores.
+        let removed = prune(&["winecx".to_string(), "dxmt".to_string()]).unwrap();
+        assert_eq!(removed.len(), 2);
+        assert!(load_manifest().is_empty() && load_renderer_manifest().is_empty());
+    }
+
+    #[test]
+    fn derive_needs_the_engine_layout() {
+        let home = tempfile::tempdir().unwrap();
+        let _g = env_home(home.path());
+        let base = entry(
+            "wine-staging",
+            "11.18",
+            "Wine Staging.app/Contents/Resources/wine/bin/wine",
+        );
+        let dxmt = entry("dxmt", "v0.80", "v0.80/x86_64-unix/winemetal.so");
+        let err = derive(&base, &dxmt).unwrap_err();
+        assert!(err.to_string().contains("{engine,Frameworks}"), "{err}");
     }
 
     #[test]

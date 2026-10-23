@@ -144,16 +144,11 @@ pub enum Command {
             conflicts_with_all = ["from_depot", "retarget"]
         )]
         installer: Option<std::path::PathBuf>,
-        /// Point an existing game at another runtime without rebuilding:
-        /// writes `--runtime` into the game's user override file (L4, design
-        /// 16 decision 7); the next launch applies it. `--runtime auto` drops
-        /// the override.
-        #[arg(
-            long,
-            value_name = "BUNDLE|GOGID",
-            conflicts_with = "from_depot",
-            requires = "runtime"
-        )]
+        /// Point an existing game at another runtime or renderer without
+        /// rebuilding: writes `--runtime` / `--renderer` into the game's user
+        /// override file (L4, design 16 decision 7); the next launch applies
+        /// it. `auto` drops the override.
+        #[arg(long, value_name = "BUNDLE|GOGID", conflicts_with = "from_depot")]
         retarget: Option<String>,
         /// Build from a depot (Model B) game tree instead of running an
         /// installer: an existing directory, or a game selector resolved
@@ -180,12 +175,17 @@ pub enum Command {
         /// (docs/design/11 §1).
         #[arg(long)]
         recipe: Option<String>,
-        /// Apply the cnc-ddraw DirectDraw wrapper (design 13; black-screen
-        /// classics). Default: ask interactively, off headless.
-        #[arg(long, conflicts_with = "no_ddraw_wrapper")]
+        /// Renderer (#70): `auto` (default) picks it from the game's PE
+        /// imports (D3D10/11 → dxmt, D3D9 and older → wined3d, 2D DirectDraw
+        /// → cnc-ddraw) unless gogo's compat DB or your override file says
+        /// otherwise.
+        #[arg(long, value_enum)]
+        renderer: Option<RendererArg>,
+        /// Alias for `--renderer cnc-ddraw` (design 13).
+        #[arg(long, conflicts_with_all = ["no_ddraw_wrapper", "renderer"])]
         ddraw_wrapper: bool,
-        /// Never apply the cnc-ddraw wrapper.
-        #[arg(long)]
+        /// Like `--renderer auto`, but never cnc-ddraw (wined3d instead).
+        #[arg(long, conflicts_with = "renderer")]
         no_ddraw_wrapper: bool,
         /// Skip the size confirmation; overwrite an existing bundle.
         #[arg(long)]
@@ -319,6 +319,36 @@ pub enum OsFilter {
     Linux,
     All,
 }
+/// `--renderer` values (#70).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum RendererArg {
+    /// Picked from the game's imports (L1), unless L3/L4 say otherwise.
+    Auto,
+    /// Wine's own Direct3D-on-OpenGL.
+    Wined3d,
+    /// D3D10/11 on Metal (needs the winecx runtime and a Metal 3 GPU).
+    Dxmt,
+    /// DirectDraw wrapper for 2D classics.
+    #[value(name = "cnc-ddraw")]
+    CncDdraw,
+    /// Apple's D3D11/12 translator (#71, not available yet).
+    D3dmetal,
+}
+
+impl RendererArg {
+    /// `None` for `auto`.
+    pub fn renderer(self) -> Option<gogo::macapp::Renderer> {
+        use gogo::macapp::Renderer as R;
+        match self {
+            RendererArg::Auto => None,
+            RendererArg::Wined3d => Some(R::Wined3d),
+            RendererArg::Dxmt => Some(R::Dxmt),
+            RendererArg::CncDdraw => Some(R::CncDdraw),
+            RendererArg::D3dmetal => Some(R::D3dMetal),
+        }
+    }
+}
+
 /// CLI mirror of [`gogo::macapp::RuntimeMode`] (foreign enum — clap's
 /// `ValueEnum` can't be implemented on it here).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -388,9 +418,10 @@ pub enum RuntimesCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Remove cached runtimes from the store.
+    /// Remove cached runtimes and renderers from the store (never one a
+    /// game still uses).
     Prune {
-        /// Remove every cached runtime.
+        /// Remove every cached runtime and renderer.
         #[arg(long)]
         all: bool,
         /// Remove one catalog id.

@@ -179,6 +179,39 @@ pub fn write_ddraw_notice(bundle: &Bundle) -> Result<(), MacAppError> {
     Ok(())
 }
 
+/// The renderer's licence notice (`LICENSE-<id>.txt`), written like the
+/// runtime's: v2 bundles carry no renderer files, so the notice says where
+/// they come from. wined3d is part of Wine (`LICENSE-wine.txt`).
+pub fn write_renderer_notice(bundle: &Bundle, renderer: &str) -> Result<(), MacAppError> {
+    let Ok(r) = super::renderer::RendererRef::parse(renderer) else {
+        return Ok(());
+    };
+    let Some(entry) = super::catalog::find(r.renderer.id()) else {
+        return Ok(());
+    };
+    let source = match &entry.discovery {
+        Some(super::catalog::Discovery::Pinned(pin)) => format!(
+            "https://github.com/{}/releases/tag/{} ({})",
+            pin.repo, pin.tag, pin.asset
+        ),
+        _ => String::new(),
+    };
+    std::fs::write(
+        bundle.resources.join(format!("LICENSE-{}.txt", entry.id)),
+        format!(
+            "This application runs {} {}, licensed {}, from gogo's local renderer\n\
+             store on this Mac. It contains no {} files itself.\n\
+             Source: {source}\n\
+             Downloaded by `gogo mac-app` on the user's machine; gogo itself ships none.\n",
+            entry.id,
+            r.version().unwrap_or_default(),
+            entry.license,
+            entry.id,
+        ),
+    )?;
+    Ok(())
+}
+
 /// Licensing notices inside the bundle (design 10 §8): Wine LGPL pointer for
 /// every bundle; an extra GPTK EULA warning when the runtime came from a
 /// user-supplied GPTK mount.
