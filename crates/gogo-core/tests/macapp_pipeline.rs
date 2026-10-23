@@ -3168,10 +3168,11 @@ fn d3d11_game_runs_from_a_derived_dxmt_runtime() {
     macapp::store::save_renderer_manifest(&[m("dxmt", "v0.80", "v0.80/x86_64-unix/winemetal.so")])
         .unwrap();
 
-    // Rebel Galaxy's shape: a 32-bit exe importing d3d11.
+    // Rebel Galaxy's shape: a 32-bit exe importing d3d11. Not its id: the
+    // compiled-in compat DB has an entry (with verbs) for that one.
     let tree = depot_game(
         tmp.path(),
-        "1435582019",
+        "1000000001",
         "Rebel",
         false,
         &["kernel32.dll", "d3d11.dll", "dxgi.dll"],
@@ -3239,7 +3240,7 @@ fn d3d11_game_runs_from_a_derived_dxmt_runtime() {
         "wined3d"
     );
     assert!(!lib.join("x86_64-unix/winemetal.so").exists());
-    let g = home.join("games/1435582019");
+    let g = home.join("games/1000000001");
     let conf = std::fs::read_to_string(g.join("launch.conf")).unwrap();
     assert!(
         conf.contains("RUNTIME_DIR='runtimes/winecx/24.0.7_7+dxmt-v0.80/engine'"),
@@ -3264,8 +3265,8 @@ fn d3d11_game_runs_from_a_derived_dxmt_runtime() {
     assert!(refs.iter().any(|r| r == "dxmt/v0.80"));
 
     // An L4 switch to wined3d moves the game back to the base runtime.
-    macapp::compat::set_user_keys("1435582019", &[("renderer", Some("wined3d"))]).unwrap();
-    let out = macapp::setup::setup("1435582019", None).unwrap();
+    macapp::compat::set_user_keys("1000000001", &[("renderer", Some("wined3d"))]).unwrap();
+    let out = macapp::setup::setup("1000000001", None).unwrap();
     assert_eq!(out.state.runtime, "winecx/24.0.7_7");
     assert_eq!(out.state.renderer, "wined3d");
     unsafe { std::env::remove_var("GOGO_HOME") };

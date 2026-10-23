@@ -1,0 +1,5 @@
+# Stronghold HD (2D DirectDraw, 32-bit). Not run by gogo yet (docs/19 §4).
+# umu-protonfixes installs directplay for multiplayer.
+title  = "Stronghold HD"
+verbs  = ["directplay"]
+source = "umu-protonfixes:gamefixes-steam/40950.py@3603ccbbc20de88c2878306acdfdd4e9a07fc8c4"

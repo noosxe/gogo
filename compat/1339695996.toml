@@ -1,0 +1,5 @@
+# Rebel Galaxy Outlaw. Not run by gogo yet.
+# umu-protonfixes installs mfc42 (ValveSoftware/Proton#4216).
+title  = "Rebel Galaxy Outlaw"
+verbs  = ["mfc42"]
+source = "umu-protonfixes:gamefixes-gog/umu-910830.py@3603ccbbc20de88c2878306acdfdd4e9a07fc8c4"

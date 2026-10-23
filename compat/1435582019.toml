@@ -1,0 +1,17 @@
+# Rebel Galaxy (OGRE, D3D11, 32-bit). The exe is picked right since #107.
+# DXMT (the L1 pick) reaches the menu after ~4 min of shader compiling on
+# every launch (no cache across runs) and then runs at slideshow frame rate:
+# a 32-bit exe on CX24's experimental WoW64. wined3d is fast but its GLSL
+# programs fail to link on macOS GL 4.1 (glUseProgram GL_INVALID_OPERATION;
+# no GL_ARB_uniform_buffer_object / GL_EXT_texture_array): garbled 3D.
+# The verbs are the L1 auto set; without the native d3dcompiler/d3dx11 the
+# shaders don't compile at all (docs/19 §5).
+title  = "Rebel Galaxy"
+verbs  = ["d3dcompiler_43", "d3dx11_43", "d3dx9_43", "xinput"]
+status = "broken"
+notes  = "unplayable: DXMT loads ~4 min per launch then runs at slideshow speed (32-bit on WoW64), wined3d garbles the 3D; play it elsewhere"
+tested = [
+  { runtime = "winecx/24.0.7_7+dxmt-v0.80", host = "m4pro/macos-27.0.1", date = 2026-10-23 },
+  { runtime = "winecx/24.0.7_7", host = "m4pro/macos-27.0.1", date = 2026-10-23 },
+]
+source = "gogo-host"

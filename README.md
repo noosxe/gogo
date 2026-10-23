@@ -13,7 +13,8 @@ renderer and fixes per game.
   see [`docs/design/12`](docs/design/12-runtime-catalog-and-interactive-flow.md).
 - **Unofficial APIs:** gogo uses the same undocumented web/Galaxy APIs as every
   third-party GOG client. See [`docs/01`](docs/01-gog-platform-and-apis.md).
-- **License:** MIT OR Apache-2.0.
+- **License:** MIT OR Apache-2.0. Compat DB entries translated from umu-protonfixes
+  are BSD-2-Clause ([`compat/NOTICE-umu-protonfixes`](compat/NOTICE-umu-protonfixes)).
 
 ## Install
 

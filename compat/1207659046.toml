@@ -1,0 +1,9 @@
+# Pharaoh + Cleopatra (Pharaoh Gold; 2D DirectDraw, 32-bit): cnc-ddraw (L1).
+# From the depot it shows "Please insert your Cleopatra CD.": the tree lacks
+# the installer-written Pharaoh.ini (CDDrive), and GOG's support installer
+# declines to run (docs/18 §5). The offline installer lane writes the config.
+title  = "Pharaoh + Cleopatra"
+status = "broken"
+notes  = "from the depot it asks for the Cleopatra CD (no installer-written Pharaoh.ini, docs/18 §5); build it from the offline installer"
+tested = [{ runtime = "winecx/24.0.7_7", host = "vm/macos-27.0", date = 2026-10-23 }]
+source = "gogo-vm"

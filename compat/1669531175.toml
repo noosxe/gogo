@@ -1,0 +1,11 @@
+# Neo Cab (Unity 2022.3, D3D11, 64-bit). L1 picks DXMT; D3DMetal works too.
+# A derived runtime id names the renderer it was tested with. Same date, so
+# the last row (DXMT, the automatic pick) is the one the status line shows.
+title  = "Neo Cab"
+status = "plays"
+notes  = "host pass, eyes on: renders, input and audio fine on DXMT and on D3DMetal 4.0b3 (not played through)"
+tested = [
+  { runtime = "winecx/24.0.7_7+d3dmetal-4.0b3", host = "m4pro/macos-27.0.1", date = 2026-10-23 },
+  { runtime = "winecx/24.0.7_7+dxmt-v0.80", host = "m4pro/macos-27.0.1", date = 2026-10-23 },
+]
+source = "gogo-host"
