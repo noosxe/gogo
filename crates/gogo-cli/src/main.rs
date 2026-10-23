@@ -3,6 +3,7 @@
 
 mod cli;
 mod lane;
+mod menus;
 mod output;
 mod prompt;
 
@@ -179,6 +180,15 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
         } => verify(games, all, path, fix, rebuild).await,
         Command::Config { sub } => config_cmd(sub),
         Command::MacApp { sub: Some(sub), .. } => mac_app_sub(sub),
+        // The bare `--runtime` menu (#76) is a build-time form only.
+        Command::MacApp {
+            retarget: Some(_),
+            runtime: Some(None),
+            ..
+        } => {
+            eprintln!("gogo: --retarget needs a runtime id (`--runtime <RUNTIME>`)");
+            Ok(cli::exit::USAGE)
+        }
         Command::MacApp {
             retarget: Some(target),
             runtime,
@@ -189,7 +199,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
             ..
         } => mac_app_retarget(
             target,
-            runtime,
+            runtime.flatten(),
             renderer,
             runtime_path,
             runtime_version,
@@ -205,6 +215,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
             runtime_path,
             runtime_version,
             recipe,
+            interactive,
             renderer,
             ddraw_wrapper,
             no_ddraw_wrapper,
@@ -224,14 +235,14 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
                 },
                 (None, _, _) => gogo::macapp::RendererChoice::Auto,
             };
+            let menus = menus::resolve(recipe.as_deref(), runtime, interactive);
             mac_app(
                 input,
                 from_depot,
                 name,
-                runtime,
+                menus,
                 runtime_path,
                 runtime_version,
-                recipe,
                 renderer,
                 out,
                 yes,
@@ -2294,10 +2305,9 @@ async fn mac_app(
     input: Option<String>,
     from_depot: Option<String>,
     name: Option<String>,
-    runtime: Option<crate::cli::RuntimeSource>,
+    menus: menus::Menus,
     runtime_path: Option<std::path::PathBuf>,
     runtime_version: Option<String>,
-    recipe: Option<String>,
     renderer: gogo::macapp::RendererChoice,
     out: Option<std::path::PathBuf>,
     yes: bool,
@@ -2327,10 +2337,7 @@ async fn mac_app(
         }
     };
 
-    let mut recipe = recipe
-        .as_deref()
-        .map(gogo::macapp::RecipeChoice::parse)
-        .unwrap_or_default();
+    let mut recipe = menus.recipe;
     if game_tree.is_some() {
         // Recipes are installer-shaped (design 15 D6); the tree already is
         // the installed artifact their steps produce.
@@ -2348,7 +2355,8 @@ async fn mac_app(
     }
     // Interactive flow (design 12 §9): the dialoguer renderer on a TTY;
     // --json / --json-progress imply non-interactive; non-TTY runs take the
-    // ranked best (recipes) or the headless ladder (runtimes).
+    // ranked best (recipes) or the headless ladder (runtimes). The recipe
+    // and runtime menus show only when asked for (#76).
     let prompter: Option<std::sync::Arc<gogo::macapp::PromptFn>> =
         if std::io::IsTerminal::is_terminal(&std::io::stdin())
             && std::io::IsTerminal::is_terminal(&std::io::stderr())
@@ -2364,7 +2372,7 @@ async fn mac_app(
         installer,
         game_tree,
         name,
-        mode: runtime.map(Into::into).unwrap_or_default(),
+        mode: menus.mode,
         runtime_path,
         runtime_version,
         out_dir: out.unwrap_or_else(|| {
@@ -2372,6 +2380,7 @@ async fn mac_app(
         }),
         overwrite: yes,
         recipe,
+        runtime_menu: menus.runtime_menu,
         lutris_base: None,
         renderer,
         portable: false,

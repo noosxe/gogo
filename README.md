@@ -8,7 +8,7 @@ community fixes (Lutris recipes) along the way.
 - **Platforms:** Linux and macOS. `mac-app` is macOS-only.
 - **Wine runtimes:** `gogo runtimes` downloads, verifies, and caches official
   macOS Wine builds (staging/devel/stable) plus a pinned `winetricks` —
-  `mac-app` picks one interactively or via `--runtime`, no Homebrew required —
+  `mac-app` picks one for you (or takes `--runtime`), no Homebrew required —
   see [`docs/design/12`](docs/design/12-runtime-catalog-and-interactive-flow.md).
 - **Unofficial APIs:** gogo uses the same undocumented web/Galaxy APIs as every
   third-party GOG client. See [`docs/01`](docs/01-gog-platform-and-apis.md).
@@ -76,14 +76,18 @@ game tree directory.
 
 ```sh
 gogo mac-app pharaoh                                       # depot lane
-gogo mac-app ~/Downloads/setup_pharaoh_gold_2.1.0.15.exe   # installer lane: recipe + runtime
+gogo mac-app ~/Downloads/setup_pharaoh_gold_2.1.0.15.exe   # installer lane
+gogo mac-app setup_pharaoh_gold_2.1.0.15.exe --interactive  # pick recipe + runtime in menus
 ```
 
-On a terminal it asks interactively — which Lutris recipe to apply (if any), then
-which Wine runtime: cached ones first, then catalog downloads (recommended
-`wine-staging` first, sizes and arch shown), Homebrew, GPTK (Apple Silicon, after
-an EULA consent), or a custom path. Non-interactive use pins everything:
-`--recipe none|<slug>|<file>`, and `--runtime auto|brew|gptk|path|staging|devel|stable`
+It asks no setup questions by default: no Lutris recipe, and the Wine runtime
+comes from your override file or gogo's compat DB for the game, else the default
+track. To choose by hand on a terminal, pass `--interactive` (both menus), or
+`--recipe` / `--runtime` without a value (just that menu). The runtime menu lists
+cached ones first, then catalog downloads (sizes and arch shown), Homebrew, GPTK
+(Apple Silicon, after an EULA consent), or a custom path. Flags with a value pin
+the choice with no menu: `--recipe auto|none|<slug>|<file>`, and
+`--runtime auto|brew|gptk|path|winecx|staging|devel|stable`
 (`--runtime staging` downloads + caches on first use; `--runtime path` needs
 `--runtime-path <DIR>` with `bin/wine` inside; `--runtime-version` pins a release
 tag). Pass `--out` for the output directory, `--name` to override the bundle title.
@@ -102,8 +106,8 @@ gogo mac-app --retarget <bundle|gogid> --runtime winecx --runtime-version 24.0.7
 
 GOG Windows titles are the community's Wine-testing corpus: most games already
 have a Lutris install script encoding the fixes (DLL overrides, winetricks
-verbs, patches, launch flags). During planning, gogo live-searches
-[lutris.net](https://lutris.net) for the game and, when several scripts exist,
+verbs, patches, launch flags). With `--recipe` (or `--interactive`), gogo
+live-searches [lutris.net](https://lutris.net) for the game during planning and
 offers a fuzzy-searchable picker (version, author, updated shown); a script's
 `wine.version` pin maps to a runtime recommendation — advisory, never a blocker.
 
@@ -116,7 +120,7 @@ gogo recipes show warcraft-ii-battlenet-edition-cd          # the plan, step by 
 
 Applied steps are reported; unsupported steps are skipped loudly, never
 silently. Nothing is stored — the next conversion searches again. For
-scripting: `--recipe none` to disable, `--recipe <slug>` to pick one, or
+scripting: `--recipe auto` for the ranked best, `--recipe <slug>` to pick one, or
 `--recipe file.json` to apply a downloaded script verbatim. Host-shell steps
 in scripts are skipped by default; `winetricks` steps run a pinned,
 sha256-verified winetricks provisioned from the runtime store, with Rust-made

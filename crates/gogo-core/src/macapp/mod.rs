@@ -105,8 +105,12 @@ pub struct MacAppOptions {
     pub out_dir: PathBuf,
     /// Overwrite an existing bundle (CLI `--yes`).
     pub overwrite: bool,
-    /// Lutris recipe selection (design 11).
+    /// Lutris recipe selection (design 11). Default `None`; only `Auto`
+    /// shows the picker (#76).
     pub recipe: RecipeChoice,
+    /// Show the runtime menu on an interactive run (`--runtime` without a
+    /// value, or `--interactive`; #76). Off: the default ladder picks.
+    pub runtime_menu: bool,
     /// Lutris API base override (tests pin a wiremock server; the CLI never
     /// sets it).
     pub lutris_base: Option<String>,
@@ -125,10 +129,10 @@ pub struct MacAppOptions {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum RecipeChoice {
     /// Live search + rank; the user picks via the injected prompt renderer
-    /// when ambiguous (design 11 §1, design 12 §9).
-    #[default]
+    /// (design 11 §1, design 12 §9), headless runs take the ranked best.
     Auto,
-    /// No recipe lookup.
+    /// No recipe lookup — the default (#76): recipes are a human hint.
+    #[default]
     None,
     /// A pinned Lutris installer slug.
     Slug(String),
@@ -326,10 +330,10 @@ fn select_recipe(
                     return Ok(None);
                 }
                 Ok(candidates) => {
-                    // §1 (amended 2026-10-19): interactively the picker is
-                    // mandatory — applying community patches is the user's
-                    // decision every time, single candidate included ("none"
-                    // is always offered); headless runs take the ranked best.
+                    // §1 (amended 2026-10-23, #76): `auto` is opt-in, and
+                    // then the picker always shows interactively, single
+                    // candidate included ("none" is always offered);
+                    // headless runs take the ranked best.
                     if let Some(p) = prompt {
                         match choose_recipe(&candidates, display, p)? {
                             Some(RecipePick::Installer(inst)) => (inst, true),
@@ -551,10 +555,9 @@ fn resolve_runtime(
         lanes.push((r.id, None));
     }
     lanes.push((catalog::DEFAULT_RUNTIME, None));
-    // §5 (amended 2026-10-19): the ladder only computes the "easy" default
-    // now — interactively the runtime menu is MANDATORY and lists every
-    // option (cached, locally installed, downloadable) with the easy pick
-    // preselected; headless runs keep the Phase-3 behavior.
+    // §5 (amended 2026-10-23, #76): the ladder's pick is the runtime unless
+    // the menu was asked for; then the menu lists every option (cached,
+    // locally installed, downloadable) with the easy pick preselected.
     let mut easy: Option<(runtime::Runtime, String)> = None;
     'ladder: for (id, ver) in lanes {
         if let Some((m, _)) = store::installed(id, ver) {
@@ -592,8 +595,8 @@ fn resolve_runtime(
     Ok((rt, downloaded.then(|| (m.id.clone(), m.version.clone()))))
 }
 
-/// The §5 runtime menu — MANDATORY in interactive runs (amended
-/// 2026-10-19): every option is listed, cached flavors first (✓ cached),
+/// The §5 runtime menu — opt-in (`--runtime` without a value or
+/// `--interactive`, #76): every option is listed, cached flavors first (✓ cached),
 /// locally installed lanes (brew / GPTK) with their probed version,
 /// downloadable flavors with arch tags, GPTK downloads behind the D9
 /// consent gate (Apple Silicon hosts only), a custom path lane with
@@ -869,8 +872,10 @@ pub fn plan(
         .map(|r| r.value.clone());
 
     // §6 step 3: runtime resolution — may download into the store (events).
+    // The menu is opt-in (#76); without it the ladder's pick stands.
+    let menu = prompt.filter(|_| opts.runtime_menu);
     let (runtime, runtime_downloaded) =
-        resolve_runtime(opts, recipe.as_ref(), pin.as_deref(), prompt, emit)?;
+        resolve_runtime(opts, recipe.as_ref(), pin.as_deref(), menu, emit)?;
     let kind = runtime.mode.as_str().to_string();
     let wine = runtime.wine.display().to_string();
     emit(&ProgressEvent::RuntimeResolved { kind, path: wine });

@@ -126,7 +126,7 @@ into a bundled WINEPREFIX; Wine runtime resolved per design 10 §3 + design 12
 download + cache), copied into the bundle; ad-hoc codesigned. macOS only (exit 2
 elsewhere). Full specs: **design 10**, **design 12**; discovery: docs/13, docs/15.
 Exit 7 on conversion failures. Names/flags: `--name`, `--runtime`,
-`--runtime-version`, `--runtime-path`, `--out`, `--recipe`, `--json-progress`,
+`--runtime-version`, `--runtime-path`, `--out`, `--recipe`, `--interactive` (#76: recipe and runtime menus are opt-in), `--json-progress`,
 `--json`, `--yes`. Per-game fixes
 (registry tweaks, extra installer flags, entry-point override) come from
 community recipes — design 11.
