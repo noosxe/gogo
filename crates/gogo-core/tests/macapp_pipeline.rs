@@ -353,11 +353,17 @@ fn recipe_wine_pin_recommends_cached_catalog_runtime() {
     let installer = tmp.path().join("setup_testgame_1.0.exe");
     std::fs::write(&installer, b"MZ").unwrap();
 
-    // A cached wine-staging store entry (manifest + probeable tree).
+    // A cached winecx store entry (manifest + probeable tree in design 16's
+    // `{engine,Frameworks}` layout).
     let home = tmp.path().join("home");
-    let tree = home.join("runtimes/wine-staging/11.0/bin");
+    let tree = home.join("runtimes/winecx/24.0.7_7/engine/bin");
     std::fs::create_dir_all(&tree).unwrap();
-    std::fs::write(tree.join("wine"), "#!/bin/sh\necho wine-11.0\n").unwrap();
+    std::fs::create_dir_all(home.join("runtimes/winecx/24.0.7_7/Frameworks")).unwrap();
+    std::fs::write(
+        tree.join("wine"),
+        "#!/bin/sh\necho 'wine-9.0 (SikarugirCX 24.0.7)'\n",
+    )
+    .unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -367,7 +373,7 @@ fn recipe_wine_pin_recommends_cached_catalog_runtime() {
     std::fs::create_dir_all(home.join("runtimes")).unwrap();
     std::fs::write(
         home.join("runtimes/manifest.json"),
-        r#"[{"id":"wine-staging","version":"11.0","sha256":"0","fetched_at":"2026-01-01T00:00:00Z","upstream_url":"x","entry_rel":"bin/wine","bytes":16}]"#,
+        r#"[{"id":"winecx","version":"24.0.7_7","sha256":"0","fetched_at":"2026-01-01T00:00:00Z","upstream_url":"x","entry_rel":"engine/bin/wine","bytes":16}]"#,
     )
     .unwrap();
 
@@ -415,11 +421,13 @@ fn recipe_wine_pin_recommends_cached_catalog_runtime() {
     let sel = plan.recipe.as_ref().expect("recipe selected at plan time");
     assert_eq!(sel.wine_version.as_deref(), Some("lutris-7.2-2"));
     assert!(!sel.from_search, "file recipes are pinned, not searched");
-    // The ladder: recommendation (staging) satisfied from the store cache.
-    assert_eq!(plan.runtime.version, "wine-11.0");
+    // The ladder: recommendation (the default track, winecx) satisfied from
+    // the store cache.
+    assert_eq!(plan.runtime.version, "wine-9.0 (SikarugirCX 24.0.7)");
+    assert_eq!(plan.runtime.mode, RuntimeMode::Catalog("winecx".into()));
     assert_eq!(
-        plan.runtime.mode,
-        RuntimeMode::Catalog("wine-staging".into())
+        macapp::launch::frameworks_of(&plan.runtime),
+        Some(home.join("runtimes/winecx/24.0.7_7/Frameworks"))
     );
     assert_eq!(plan.runtime_downloaded, None);
     assert!(
@@ -664,8 +672,8 @@ fn runtime_menu_offers_cached_and_custom_path_lanes() {
     assert!(
         menu.items
             .iter()
-            .any(|i| i.starts_with("download wine-staging") && i.contains("recommended")),
-        "staging is marked recommended"
+            .any(|i| i.starts_with("download winecx") && i.contains("recommended")),
+        "the default track (winecx) is marked recommended"
     );
     let reprompt = specs
         .iter()
@@ -867,7 +875,7 @@ fn recipes_list_and_show_inspection_path() {
     let pin = gogo::macapp::lutris::wine_version(&inst.script);
     assert_eq!(pin.as_deref(), Some("lutris-ge-proton9-20"));
     let rec = gogo::macapp::catalog::recommend_for_wine(pin.as_deref());
-    assert_eq!(rec.id, "wine-staging");
+    assert_eq!(rec.id, "winecx");
     assert!(rec.notice.is_some(), "Linux-only pin carries the notice");
 
     let ctx = macapp::inspection_ctx(&inst.script);
@@ -1107,7 +1115,8 @@ fn search_recipe_failure_degrades_pinned_stays_fatal() {
 
 #[test]
 fn runtime_menu_is_mandatory_with_easy_default() {
-    // §5 (amended 2026-10-19): the ladder hit (cached wine-staging) no longer
+    // §5 (amended 2026-10-19): the ladder hit (cached winecx, the default
+    // track; a cached wine-staging is listed but not picked) no longer
     // bypasses the menu — interactively the selection is mandatory, the easy
     // pick is preselected (spec.default + "· easy"), and choosing it resolves
     // from the store.
@@ -1129,9 +1138,18 @@ fn runtime_menu_is_mandatory_with_easy_default() {
     std::fs::create_dir_all(home.join("runtimes")).unwrap();
     std::fs::write(
         home.join("runtimes/manifest.json"),
-        r#"[{"id":"wine-staging","version":"9.0","sha256":"0","fetched_at":"2026-01-01T00:00:00Z","upstream_url":"x","entry_rel":"bin/wine","bytes":16}]"#,
+        r#"[{"id":"wine-staging","version":"9.0","sha256":"0","fetched_at":"2026-01-01T00:00:00Z","upstream_url":"x","entry_rel":"bin/wine","bytes":16},
+            {"id":"winecx","version":"24.0.7_7","sha256":"0","fetched_at":"2026-01-01T00:00:00Z","upstream_url":"x","entry_rel":"engine/bin/wine","bytes":16}]"#,
     )
     .unwrap();
+    let cx = home.join("runtimes/winecx/24.0.7_7/engine/bin");
+    std::fs::create_dir_all(&cx).unwrap();
+    std::fs::write(cx.join("wine"), "#!/bin/sh\necho wine-9.0-cx\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(cx.join("wine"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
 
     let seen: std::sync::Arc<std::sync::Mutex<Vec<gogo::macapp::PromptSpec>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1188,15 +1206,22 @@ fn runtime_menu_is_mandatory_with_easy_default() {
     );
     assert_eq!(menu.default, 0, "easy pick preselected");
     assert!(
-        menu.items[0].contains("wine-staging") && menu.items[0].contains("· easy"),
+        menu.items[0].contains("winecx") && menu.items[0].contains("· easy"),
         "easy marker on the ladder pick: {:?}",
         menu.items[0]
     );
+    assert!(
+        menu.items
+            .iter()
+            .any(|i| i.starts_with("wine-staging 9.0 (✓ cached)") && !i.contains("easy")),
+        "staging stays selectable: {:?}",
+        menu.items
+    );
     // from_store keeps the literal GOGO_HOME path (no canonicalization).
-    let store_root = home.join("runtimes/wine-staging/9.0");
+    let store_root = home.join("runtimes/winecx/24.0.7_7");
     assert!(
         plan.runtime.wine.starts_with(&store_root),
-        "default choice resolves to the cached staging tree: {}",
+        "default choice resolves to the cached winecx tree: {}",
         plan.runtime.wine.display()
     );
 }

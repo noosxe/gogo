@@ -169,7 +169,7 @@ pub enum Command {
         /// Runtime directory for --runtime gptk|path.
         #[arg(long, value_name = "DIR")]
         runtime_path: Option<std::path::PathBuf>,
-        /// Pin a catalog release tag (`--runtime staging|devel|stable`).
+        /// Pin a catalog release tag (`--runtime winecx|staging|devel|stable`).
         #[arg(long, value_name = "TAG", requires = "runtime")]
         runtime_version: Option<String>,
         /// Output directory for <name>.app (default: current directory).
@@ -327,7 +327,10 @@ pub enum RuntimeSource {
     Auto,
     /// Homebrew wine-crossover.
     Brew,
-    /// Cached/downloaded wine-staging (design 12 catalog).
+    /// Cached/downloaded CrossOver-source engine `winecx` with its
+    /// Frameworks/ (the default track, docs/19 §6.1).
+    Winecx,
+    /// Cached/downloaded wine-staging (design 12 catalog; the alternate track).
     Staging,
     /// Cached/downloaded wine-devel.
     Devel,
@@ -344,6 +347,7 @@ impl From<RuntimeSource> for gogo::macapp::RuntimeMode {
         match s {
             RuntimeSource::Auto => gogo::macapp::RuntimeMode::Auto,
             RuntimeSource::Brew => gogo::macapp::RuntimeMode::Brew,
+            RuntimeSource::Winecx => gogo::macapp::RuntimeMode::Catalog("winecx".into()),
             RuntimeSource::Staging => gogo::macapp::RuntimeMode::Catalog("wine-staging".into()),
             RuntimeSource::Devel => gogo::macapp::RuntimeMode::Catalog("wine-devel".into()),
             RuntimeSource::Stable => gogo::macapp::RuntimeMode::Catalog("wine-stable".into()),

@@ -137,74 +137,65 @@ pub async fn install(
     });
 
     std::fs::create_dir_all(tmp_dir())?;
-    let gz = rel.asset_name.ends_with(".tar.gz") || rel.asset_name.ends_with(".tgz");
-    let zip = rel.asset_name.ends_with(".zip");
     let part = tmp_dir().join(format!(
-        "{}-{}.{}",
+        "{}-{}.{}.part",
         entry.id,
         rel.tag,
-        if gz {
-            "tar.gz.part"
-        } else if zip {
-            "zip.part"
-        } else {
-            "tar.xz.part"
-        }
+        archive_ext(&rel.asset_name)
     ));
-    download_with_retry(http, &rel.asset_url, &part).await?;
-
-    // Verify against the upstream digest when present; always record the hash.
-    let actual = sha256_file(&part)?;
-    if let Some(expected) = &rel.sha256
-        && !expected.eq_ignore_ascii_case(&actual)
-    {
-        let _ = std::fs::remove_file(&part);
-        return Err(MacAppError::RuntimeChecksumMismatch {
-            id: entry.id.into(),
-            expected: expected.clone(),
-            actual,
-        });
-    }
+    let actual = download_verified(http, &rel, &part, entry.id).await?;
+    // The engine's dylib closure (#62), pinned like the engine itself.
+    let frameworks_part = match &entry.frameworks {
+        Some(fw) => {
+            let fw_rel = catalog::probe_pinned(&fw.asset, http, api_base).await?;
+            let fw_part = tmp_dir().join(format!(
+                "{}-{}-frameworks.{}.part",
+                entry.id,
+                rel.tag,
+                archive_ext(&fw_rel.asset_name)
+            ));
+            if let Err(e) = download_verified(http, &fw_rel, &fw_part, entry.id).await {
+                let _ = std::fs::remove_file(&part);
+                return Err(e);
+            }
+            Some(fw_part)
+        }
+        None => None,
+    };
 
     // Extract to a temp dir (decoder by archive extension), then locate +
-    // probe the payload — blocking work.
+    // probe the payload — blocking work. With a Frameworks set the layout is
+    // design 16's `{engine,Frameworks}`: the engine tree is moved to
+    // `engine/`, the dylibs to `Frameworks/`.
     let extract_dir = tmp_dir().join(format!("{}-{}", entry.id, rel.tag));
     let _ = std::fs::remove_dir_all(&extract_dir);
     std::fs::create_dir_all(&extract_dir)?;
     let archive = part.clone();
+    let asset_name = rel.asset_name.clone();
     let extract_dir2 = extract_dir.clone();
+    let fw_job = frameworks_part
+        .clone()
+        .zip(entry.frameworks.as_ref().map(|f| f.dir));
     let bytes = tokio::task::spawn_blocking(move || -> Result<u64, MacAppError> {
-        let file = std::fs::File::open(&archive)?;
-        if zip {
-            // Tool zips (design 13 D2: cnc-ddraw) unpack entry-by-entry;
-            // `enclosed_name` keeps members inside the extract dir.
-            let zip_err = |e: zip::result::ZipError| MacAppError::Recipe(format!("zip: {e}"));
-            let mut zip = zip::ZipArchive::new(file).map_err(zip_err)?;
-            for i in 0..zip.len() {
-                let mut entry = zip.by_index(i).map_err(zip_err)?;
-                let Some(rel_path) = entry.enclosed_name() else {
-                    continue;
-                };
-                let out = extract_dir2.join(rel_path);
-                if entry.is_dir() {
-                    std::fs::create_dir_all(&out)?;
-                } else {
-                    if let Some(parent) = out.parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-                    let mut out_file = std::fs::File::create(&out)?;
-                    std::io::copy(&mut entry, &mut out_file)?;
+        match fw_job {
+            None => unpack(&archive, &asset_name, &extract_dir2)?,
+            Some((fw_archive, fw_dir)) => {
+                let raw = extract_dir2.join(".raw");
+                unpack(&archive, &asset_name, &raw)?;
+                let engine = engine_dir_in(&raw).ok_or_else(|| MacAppError::RuntimeInvalid {
+                    path: raw.clone(),
+                    reason: "engine archive has no <dir>/bin/wine".into(),
+                })?;
+                std::fs::rename(&engine, extract_dir2.join("engine"))?;
+                std::fs::remove_dir_all(&raw)?;
+                let n = unpack_dylibs(&fw_archive, fw_dir, &extract_dir2.join("Frameworks"))?;
+                if n == 0 {
+                    return Err(MacAppError::RuntimeInvalid {
+                        path: fw_archive,
+                        reason: format!("no *.dylib under {fw_dir}"),
+                    });
                 }
             }
-        } else {
-            let decoder: Box<dyn std::io::Read> = if gz {
-                Box::new(flate2::read::GzDecoder::new(file))
-            } else {
-                Box::new(xz2::read::XzDecoder::new(file))
-            };
-            let mut tar = tar::Archive::new(decoder);
-            tar.set_preserve_permissions(true);
-            tar.unpack(&extract_dir2)?;
         }
         dir_size(&extract_dir2)
     })
@@ -213,12 +204,23 @@ pub async fn install(
         url: rel.asset_url.clone(),
         reason: format!("extract task: {e}"),
     })??;
+    if let Some(fw) = &entry.frameworks {
+        std::fs::write(
+            extract_dir.join("NOTICES.txt"),
+            notices_text(entry, &rel, fw, &extract_dir.join("Frameworks"))?,
+        )?;
+    }
 
     // Locate the payload and prove it BEFORE committing anything: wine trees
     // must run; tool scripts must exist and be made executable.
     let entry_rel = match entry.kind {
         catalog::Kind::Wine => {
             let (wine, _version) = locate_and_probe(&extract_dir)?;
+            if entry.frameworks.is_some() {
+                // `wine --version` loads none of the closure; wineserver links
+                // libinotify, so this proves `Frameworks/` resolves.
+                super::runtime::probe_tree(&wine.with_file_name("wineserver"))?;
+            }
             wine.strip_prefix(&extract_dir)
                 .expect("payload inside the extract dir")
                 .to_string_lossy()
@@ -253,6 +255,9 @@ pub async fn install(
     let _ = std::fs::remove_dir_all(&dest);
     std::fs::rename(&extract_dir, &dest)?;
     let _ = std::fs::remove_file(&part);
+    if let Some(p) = &frameworks_part {
+        let _ = std::fs::remove_file(p);
+    }
 
     let m = ManifestEntry {
         id: entry.id.into(),
@@ -282,6 +287,156 @@ pub async fn install(
         });
     }
     Ok(m)
+}
+
+fn archive_ext(name: &str) -> &'static str {
+    if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
+        "tar.gz"
+    } else if name.ends_with(".zip") {
+        "zip"
+    } else {
+        "tar.xz"
+    }
+}
+
+/// Download `rel` to `part` and check it against `rel.sha256` (the upstream
+/// digest, or the catalog pin) and return its sha256. A mismatch deletes
+/// the file.
+async fn download_verified(
+    http: &reqwest::Client,
+    rel: &catalog::RemoteRelease,
+    part: &Path,
+    id: &str,
+) -> Result<String, MacAppError> {
+    download_with_retry(http, &rel.asset_url, part).await?;
+    let actual = sha256_file(part)?;
+    if let Some(expected) = &rel.sha256
+        && !expected.eq_ignore_ascii_case(&actual)
+    {
+        let _ = std::fs::remove_file(part);
+        return Err(MacAppError::RuntimeChecksumMismatch {
+            id: id.into(),
+            expected: expected.clone(),
+            actual,
+        });
+    }
+    Ok(actual)
+}
+
+/// Unpack a tar.xz / tar.gz / zip into `dest` (decoder by asset name).
+fn unpack(archive: &Path, asset_name: &str, dest: &Path) -> Result<(), MacAppError> {
+    std::fs::create_dir_all(dest)?;
+    let file = std::fs::File::open(archive)?;
+    match archive_ext(asset_name) {
+        "zip" => {
+            // Tool zips (design 13 D2: cnc-ddraw) unpack entry-by-entry;
+            // `enclosed_name` keeps members inside the extract dir.
+            let zip_err = |e: zip::result::ZipError| MacAppError::Recipe(format!("zip: {e}"));
+            let mut zip = zip::ZipArchive::new(file).map_err(zip_err)?;
+            for i in 0..zip.len() {
+                let mut entry = zip.by_index(i).map_err(zip_err)?;
+                let Some(rel_path) = entry.enclosed_name() else {
+                    continue;
+                };
+                let out = dest.join(rel_path);
+                if entry.is_dir() {
+                    std::fs::create_dir_all(&out)?;
+                } else {
+                    if let Some(parent) = out.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    let mut out_file = std::fs::File::create(&out)?;
+                    std::io::copy(&mut entry, &mut out_file)?;
+                }
+            }
+        }
+        ext => {
+            let decoder: Box<dyn std::io::Read> = if ext == "tar.gz" {
+                Box::new(flate2::read::GzDecoder::new(file))
+            } else {
+                Box::new(xz2::read::XzDecoder::new(file))
+            };
+            let mut tar = tar::Archive::new(decoder);
+            tar.set_preserve_permissions(true);
+            tar.unpack(dest)?;
+        }
+    }
+    Ok(())
+}
+
+/// Unpack only the top-level `*.dylib` members (files and symlinks) of `dir`
+/// inside a tar.xz into `dest`; returns how many. Symlinks stay symlinks
+/// (`libfreetype.dylib -> libfreetype.6.dylib`).
+fn unpack_dylibs(archive: &Path, dir: &str, dest: &Path) -> Result<usize, MacAppError> {
+    std::fs::create_dir_all(dest)?;
+    let decoder = xz2::read::XzDecoder::new(std::fs::File::open(archive)?);
+    let mut tar = tar::Archive::new(decoder);
+    tar.set_preserve_permissions(true);
+    let dir = Path::new(dir);
+    let mut n = 0;
+    for entry in tar.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?.into_owned();
+        let Ok(rest) = path.strip_prefix(dir) else {
+            continue;
+        };
+        let mut parts = rest.components();
+        let (Some(std::path::Component::Normal(name)), None) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let is_dylib = Path::new(name).extension().is_some_and(|e| e == "dylib");
+        let kind = entry.header().entry_type();
+        if is_dylib && (kind.is_file() || kind.is_symlink()) {
+            entry.unpack(dest.join(name))?;
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+/// The engine tree inside an extracted archive: `<dir>` itself or its one
+/// child holding `bin/wine{,64}` (`wswine.bundle/` for Sikarugir engines).
+fn engine_dir_in(dir: &Path) -> Option<PathBuf> {
+    if wine_in(&dir.join("bin")).is_some() {
+        return Some(dir.to_path_buf());
+    }
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| wine_in(&p.join("bin")).is_some())
+}
+
+/// `NOTICES.txt` for a store entry with a Frameworks set: the engine's
+/// licence and source, then one line per installed dylib (#62).
+fn notices_text(
+    entry: &CatalogEntry,
+    rel: &catalog::RemoteRelease,
+    fw: &catalog::FrameworksSet,
+    frameworks: &Path,
+) -> Result<String, MacAppError> {
+    let mut out = format!(
+        "{} {} — {}\n  {}\n\n\
+         Frameworks/ — the engine's dylib closure, from {} ({}), installed by\n\
+         gogo on this Mac. gogo downloads these; it doesn't redistribute them.\n\n",
+        entry.id, rel.tag, entry.license, rel.asset_url, fw.asset.asset, fw.asset.repo,
+    );
+    let mut names: Vec<String> = std::fs::read_dir(frameworks)?
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    let mut prefixes: Vec<&(&str, &str)> = fw.notices.iter().collect();
+    prefixes.sort_by_key(|(p, _)| std::cmp::Reverse(p.len()));
+    for name in names {
+        let licence = prefixes.iter().find(|(p, _)| name.starts_with(p)).map_or(
+            "licence not catalogued — see the upstream project",
+            |(_, l)| l,
+        );
+        out.push_str(&format!("{name}: {licence}\n"));
+    }
+    Ok(out)
 }
 
 /// Remove every cached version of `ids`; returns the removed tree roots.
@@ -320,9 +475,15 @@ fn locate_and_probe(dir: &Path) -> Result<(PathBuf, String), MacAppError> {
             }
         }
     }
+    // Store layout with a Frameworks set: `engine/bin/wine`.
+    if let Some(wine) = wine_in(&dir.join("engine/bin")) {
+        let version = super::runtime::probe_tree(&wine)?;
+        return Ok((wine, version));
+    }
     Err(MacAppError::RuntimeInvalid {
         path: dir.to_path_buf(),
-        reason: "archive has no bin/wine{,64} (bare or *.app/Contents/Resources/wine)".into(),
+        reason: "archive has no bin/wine{,64} (bare, *.app/Contents/Resources/wine or engine/)"
+            .into(),
     })
 }
 
@@ -771,6 +932,217 @@ mod store_tests {
             .await
             .unwrap();
         assert_eq!(m2.version, "20260125");
+        server.verify().await;
+    }
+
+    fn tar_xz(build: impl FnOnce(&mut tar::Builder<&mut Vec<u8>>)) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut tar_buf = Vec::new();
+        {
+            let mut t = tar::Builder::new(&mut tar_buf);
+            build(&mut t);
+            t.finish().unwrap();
+        }
+        let mut xz = xz2::write::XzEncoder::new(Vec::new(), 6);
+        xz.write_all(&tar_buf).unwrap();
+        xz.finish().unwrap()
+    }
+
+    fn add_file(t: &mut tar::Builder<&mut Vec<u8>>, path: &str, body: &[u8], mode: u32) {
+        let mut h = tar::Header::new_gnu();
+        h.set_size(body.len() as u64);
+        h.set_mode(mode);
+        h.set_cksum();
+        t.append_data(&mut h, path, body).unwrap();
+    }
+
+    fn add_symlink(t: &mut tar::Builder<&mut Vec<u8>>, path: &str, target: &str) {
+        let mut h = tar::Header::new_gnu();
+        h.set_entry_type(tar::EntryType::Symlink);
+        h.set_size(0);
+        h.set_mode(0o755);
+        t.append_link(&mut h, path, target).unwrap();
+    }
+
+    fn leak(s: String) -> &'static str {
+        Box::leak(s.into_boxed_str())
+    }
+
+    // The env guard must span install's awaits: GOGO_HOME is read throughout.
+    // Safe: the test runtime is single-threaded and no other task touches env.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn engine_with_frameworks_round_trip() {
+        let home = tempfile::tempdir().unwrap();
+        let _g = env_home(home.path());
+        // A Sikarugir-style engine archive (`wswine.bundle/…`) …
+        let engine = tar_xz(|t| {
+            add_file(
+                t,
+                "wswine.bundle/bin/wine",
+                b"#!/bin/sh\necho 'wine-9.0 (SikarugirCX 24.0.7)'\n",
+                0o755,
+            );
+            add_file(
+                t,
+                "wswine.bundle/bin/wineserver",
+                b"#!/bin/sh\necho 'Wine 9.0'\n",
+                0o755,
+            );
+            add_file(t, "wswine.bundle/version", b"WineCX 24.0.7\n", 0o644);
+        });
+        // … and a Template whose Frameworks/ holds dylibs, a symlink, and
+        // things that must be left out.
+        let fw_dir = "Template-1.0.24.app/Contents/Frameworks";
+        let template = tar_xz(|t| {
+            add_file(t, &format!("{fw_dir}/libinotify.0.dylib"), b"ino", 0o755);
+            add_file(t, &format!("{fw_dir}/libfreetype.6.dylib"), b"ft", 0o755);
+            add_symlink(
+                t,
+                &format!("{fw_dir}/libfreetype.dylib"),
+                "libfreetype.6.dylib",
+            );
+            add_file(t, &format!("{fw_dir}/libunknown.1.dylib"), b"?", 0o755);
+            add_file(t, &format!("{fw_dir}/README"), b"no", 0o644);
+            add_file(
+                t,
+                &format!("{fw_dir}/GStreamer.framework/Versions/1.0/lib/libgst.dylib"),
+                b"no",
+                0o755,
+            );
+            add_file(
+                t,
+                "Template-1.0.24.app/Contents/MacOS/Sikarugir",
+                b"no",
+                0o755,
+            );
+        });
+
+        let server = wiremock::MockServer::start().await;
+        for (repo, name, body) in [
+            (
+                "Sikarugir-App/Engines",
+                "WS12WineCX24.0.7_7.tar.xz",
+                &engine,
+            ),
+            (
+                "Sikarugir-App/Template",
+                "Template-1.0.24.tar.xz",
+                &template,
+            ),
+        ] {
+            wiremock::Mock::given(wiremock::matchers::method("GET"))
+                .and(wiremock::matchers::path(format!(
+                    "/repos/{repo}/releases/tags/v1.0"
+                )))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({
+                        "tag_name": "v1.0", "prerelease": false,
+                        "published_at": "2024-10-03T20:04:52Z",
+                        "assets": [{
+                            "name": name,
+                            "size": body.len(),
+                            "browser_download_url": format!("{}/dl/{name}", server.uri()),
+                            "digest": format!("sha256:{}", sha256_hex(body)),
+                        }],
+                    }),
+                ))
+                .mount(&server)
+                .await;
+            wiremock::Mock::given(wiremock::matchers::method("GET"))
+                .and(wiremock::matchers::path(format!("/dl/{name}")))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(body.clone()))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let pin = |repo, asset, version, body: &[u8]| catalog::PinnedAsset {
+            repo,
+            tag: "v1.0",
+            asset,
+            version,
+            sha256: leak(sha256_hex(body)),
+        };
+        let real = catalog::find("winecx").unwrap();
+        let entry: &'static CatalogEntry = Box::leak(Box::new(CatalogEntry {
+            id: "winecx",
+            kind: catalog::Kind::Wine,
+            status: Status::Available,
+            discovery: Some(catalog::Discovery::Pinned(pin(
+                "Sikarugir-App/Engines",
+                "WS12WineCX24.0.7_7.tar.xz",
+                "24.0.7_7",
+                &engine,
+            ))),
+            license: real.license,
+            redistributable: true,
+            min_macos: None,
+            arch: real.arch,
+            note: "test",
+            frameworks: Some(catalog::FrameworksSet {
+                asset: pin(
+                    "Sikarugir-App/Template",
+                    "Template-1.0.24.tar.xz",
+                    "1.0.24",
+                    &template,
+                ),
+                dir: fw_dir,
+                notices: real.frameworks.as_ref().unwrap().notices,
+            }),
+        }));
+        let http = catalog::http_client().unwrap();
+
+        let m = install(entry, None, &http, &server.uri(), false, &mut |_| {})
+            .await
+            .unwrap();
+        assert_eq!(m.version, "24.0.7_7");
+        assert_eq!(m.entry_rel, "engine/bin/wine");
+        assert_eq!(m.sha256, sha256_hex(&engine));
+        // Design 16 decision 6: `runtimes/<id>/<ver>/{engine,Frameworks}`.
+        let root = tree_root(&m);
+        assert_eq!(root, runtimes_dir().join("winecx/24.0.7_7"));
+        assert!(root.join("engine/bin/wineserver").is_file());
+        assert!(root.join("engine/version").is_file());
+        assert!(!root.join("wswine.bundle").exists());
+        let mut fw: Vec<String> = std::fs::read_dir(root.join("Frameworks"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        fw.sort();
+        assert_eq!(
+            fw,
+            [
+                "libfreetype.6.dylib",
+                "libfreetype.dylib",
+                "libinotify.0.dylib",
+                "libunknown.1.dylib"
+            ]
+        );
+        let link = root.join("Frameworks/libfreetype.dylib");
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            Path::new("libfreetype.6.dylib")
+        );
+        // The engine finds its closure there.
+        assert_eq!(
+            super::super::runtime::frameworks_for(&root.join(&m.entry_rel)),
+            Some(root.join("Frameworks"))
+        );
+        // Licence notes per dylib, with a visible gap for unknown ones.
+        let notices = std::fs::read_to_string(root.join("NOTICES.txt")).unwrap();
+        assert!(notices.contains("LGPL-2.1"), "{notices}");
+        assert!(
+            notices.contains("libfreetype.6.dylib: FreeType"),
+            "{notices}"
+        );
+        assert!(notices.contains("libinotify.0.dylib: libinotify-kqueue — MIT"));
+        assert!(notices.contains("libunknown.1.dylib: licence not catalogued"));
+        assert!(!runtimes_dir().join(".tmp/winecx-24.0.7_7").exists());
+
+        // Reuse: a second install downloads nothing (each asset expects 1 hit).
+        install(entry, None, &http, &server.uri(), false, &mut |_| {})
+            .await
+            .unwrap();
         server.verify().await;
     }
 

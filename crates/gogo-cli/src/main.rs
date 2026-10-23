@@ -2040,6 +2040,7 @@ fn mac_app_retarget(
     };
     let new = match runtime {
         R::Auto => None,
+        R::Winecx => Some(with_version("winecx")),
         R::Staging => Some(with_version("wine-staging")),
         R::Devel => Some(with_version("wine-devel")),
         R::Stable => Some(with_version("wine-stable")),
@@ -2378,6 +2379,9 @@ async fn runtimes_cmd(args: crate::cli::RuntimesArgs) -> Result<i32, AppError> {
                     _ => None,
                 };
                 let status = match &entry.status {
+                    catalog::Status::Available if entry.id == catalog::DEFAULT_RUNTIME => {
+                        "available · default".to_string()
+                    }
                     catalog::Status::Available => "available".to_string(),
                     catalog::Status::ConsentRequired => "consent (Apple EULA)".to_string(),
                     catalog::Status::Tool => "tool (design 12 §8)".to_string(),
@@ -2409,6 +2413,7 @@ async fn runtimes_cmd(args: crate::cli::RuntimesArgs) -> Result<i32, AppError> {
                 ]);
                 json_rows.push(serde_json::json!({
                     "id": entry.id,
+                    "default": entry.id == catalog::DEFAULT_RUNTIME,
                     "status": status,
                     "license": entry.license,
                     "arch": entry.arch,
@@ -2644,7 +2649,10 @@ fn recipes_cmd(args: crate::cli::RecipesArgs) -> Result<i32, AppError> {
                         .map(|n| format!(" ({n})"))
                         .unwrap_or_default()
                 ),
-                None => println!("wine pin: none → default wine-staging"),
+                None => println!(
+                    "wine pin: none → default {}",
+                    gogo::macapp::catalog::DEFAULT_RUNTIME
+                ),
             }
             if !plan.installer_args.is_empty() {
                 println!("harvested setup flags: {}", plan.installer_args.join(" "));

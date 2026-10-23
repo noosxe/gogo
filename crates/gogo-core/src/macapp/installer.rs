@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use super::error::MacAppError;
-use super::runtime::Runtime;
+use super::runtime::{Runtime, wine_cmd};
 
 /// The validated installer + its multi-part `.bin` siblings (13 §2: Inno picks
 /// siblings up automatically as long as they sit in the same directory).
@@ -63,7 +63,7 @@ pub fn run_silent(
     win_target: &str,
     bundle: &Path,
 ) -> Result<(), MacAppError> {
-    let status = Command::new(&runtime.wine)
+    let status = wine_cmd(&runtime.wine, &runtime.wine)
         .arg(&plan.installer)
         .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
         .arg(format!("/DIR={win_target}"))
@@ -89,14 +89,23 @@ pub fn run_silent(
 /// Initialize a fresh WINEPREFIX (`wine wineboot -u`, design 10 §2.2).
 pub fn stage_prefix(runtime: &Runtime, prefix: &Path) -> Result<(), MacAppError> {
     std::fs::create_dir_all(prefix)?;
-    let status = Command::new(&runtime.wine)
-        .args(["wineboot", "-u"])
-        .env("WINEPREFIX", prefix)
-        .status()
-        .map_err(|e| MacAppError::RuntimeInvalid {
-            path: runtime.wine.clone(),
-            reason: format!("cannot execute wine for wineboot: {e}"),
-        })?;
+    let mut cmd = wine_cmd(&runtime.wine, &runtime.wine);
+    cmd.args(["wineboot", "-u"]).env("WINEPREFIX", prefix);
+    if runtime.is_crossover() {
+        // CX engines: wineboot otherwise loops on a failing wine-mono MSI
+        // install (err 1603, docs/19 §8.2 Q5). Only for staging the prefix;
+        // whatever the caller already overrides is kept after it.
+        let mut dlls = std::ffi::OsString::from("mscoree=");
+        if let Some(old) = std::env::var_os("WINEDLLOVERRIDES").filter(|v| !v.is_empty()) {
+            dlls.push(";");
+            dlls.push(old);
+        }
+        cmd.env("WINEDLLOVERRIDES", dlls);
+    }
+    let status = cmd.status().map_err(|e| MacAppError::RuntimeInvalid {
+        path: runtime.wine.clone(),
+        reason: format!("cannot execute wine for wineboot: {e}"),
+    })?;
     if status.success() {
         Ok(())
     } else {
@@ -124,7 +133,9 @@ pub fn stop_wineserver(runtime: &Runtime, prefix: &Path) -> Result<(), MacAppErr
         return Ok(());
     }
     let _ = run_with_timeout(
-        Command::new(&server).arg("-k").env("WINEPREFIX", prefix),
+        wine_cmd(&server, &runtime.wine)
+            .arg("-k")
+            .env("WINEPREFIX", prefix),
         Duration::from_secs(5),
     );
     std::thread::sleep(Duration::from_millis(500));
