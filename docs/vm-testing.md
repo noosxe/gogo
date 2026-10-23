@@ -4,7 +4,9 @@
 developer's Mac: a launched game grabs focus and full-screens over whatever you were doing.
 `scripts/vm-test.sh` wraps [Tart](https://tart.run) so that one command clones a clean
 guest, runs the bundle like a freshly downloaded app, collects evidence and deletes the
-clone. Strategy context: [design/08-testing.md §5.1](design/08-testing.md).
+clone. Strategy context: [design/08-testing.md §5.1](design/08-testing.md). The one exception is
+rendering on DXMT, D3DMetal or OpenGL, which the VM can't do: a human runs that on the
+host ([Host pass](#host-pass-real-hardware-run-by-a-human-80)).
 
 Findings and limits below were measured on 2026-10-22: host M4 Pro, macOS 27.0.1, Tart
 2.40.1, guest `macos-golden-gate-base` (macOS 27.0, 26A428).
@@ -195,7 +197,7 @@ and what it proves. `--only a,b` runs a subset. It prints a markdown table, the
 A case whose check fails with `running_no_window` while Wine logged that wined3d got no
 GL context is reported as **`vm-limit`**, not `fail`, and doesn't fail the set. The guest
 has no OpenGL, so a D3D-on-wined3d title can be fine on a Mac and windowless here. The
-summary's `vm_no_gl` holds the log lines; judge such titles on the host (#80).
+summary's `vm_no_gl` holds the log lines; judge such titles on the host ([Host pass](#host-pass-real-hardware-run-by-a-human-80)).
 
 | Case | Layer | What it proves |
 |---|---|---|
@@ -221,7 +223,7 @@ scripts/vm-test.sh smoke
 ```
 
 Renderer cases only prove start-up here: the VM GPU has **no Metal 3 and no OpenGL**, so
-DXMT, D3DMetal and OpenGL rendering are judged on the host (#80), never by a VM pass.
+DXMT, D3DMetal and OpenGL rendering are judged on the host ([Host pass](#host-pass-real-hardware-run-by-a-human-80)), never by a VM pass.
 
 ## Results (`target/vm-test/<slug>-<timestamp>/`)
 
@@ -303,6 +305,136 @@ prompt), `windows-all.json`, `processes.txt`, `processes-after-kill.txt`,
   ASIF disk images and raced a booting VM for its lock).
 - No audio verification. The window list can't read Wine window titles (they aren't
   exposed to Accessibility).
+
+## Host pass (real hardware, run by a human, #80)
+
+The VM can't judge rendering: its GPU has no Metal 3 and no OpenGL (*Known VM
+limitations*). DXMT, D3DMetal and OpenGL results therefore come from a short pass on a
+real Apple Silicon Mac. A human runs it, because the game takes the screen. Agents
+never run it against a real bundle (AGENTS.md). A PR that needs a pass lists the exact
+steps for the user instead.
+
+**When it's needed:** any change to DXMT or D3DMetal (catalog pins, the renderer store,
+derived `<ver>+<renderer>-<rver>` runtimes), to renderer selection (L1 picks, compat
+`renderer` entries, the "Try next renderer" order), or to the `winecx` runtime pin. Also
+when a smoke case reports `vm-limit`. Run the cases the change touches. A change to
+selection or the runtime pin runs all four.
+
+### Cases
+
+| Case | Game (gogid) | Build (with the setup below) | Pass when |
+|---|---|---|---|
+| `neo-cab-dxmt` | Neo Cab (1669531175), Unity, 64-bit D3D11 | `"$G" mac-app 1669531175 --renderer dxmt --out "$GOGO_HOME/apps/neo-cab" --yes` | `renderer` is `dxmt/…` and `runtime_dir` ends in `+dxmt-<rver>/engine`; `markers.feature_level` shows `D3D_FEATURE_LEVEL_11_1`; `metal_layer_failed` and `wined3d` are empty; `markers.unity` shows `Direct3D 11.0 [level 11.1]` and `Renderer: Apple M…`; the game draws correctly, with input and audio working |
+| `neo-cab-d3dmetal` | Neo Cab (1669531175) | `"$G" mac-app 1669531175 --renderer d3dmetal --out "$GOGO_HOME/apps/neo-cab" --yes` (answer `y` to the D3DMetal prompt once) | `renderer` is `d3dmetal/…` on `+d3dmetal-<rver>`; `markers.unity` shows `Direct3D 11.0 [level 11.1]` and `Renderer: AMD Compatibility Mode` (what D3DMetal reports); `missing_libs` is empty and there's no `could not load` in `markers.unity`; the game draws, with input and audio working |
+| `rebel-galaxy-dxmt` | Rebel Galaxy (1435582019), OGRE, 32-bit D3D11 | `"$G" mac-app 1435582019 --renderer dxmt --out "$GOGO_HOME/apps/rebel-galaxy" --yes` | `verbs` holds the L1 verbs (`d3dcompiler_43 d3dx11_43 d3dx9_43 xinput`); `markers.ogre` shows the D3D11 render system and no `OGRE EXCEPTION`; `markers.feature_level` is non-empty; the in-game image is right, not only the menu (docs/19 §8.2 Q7). Record the `class_linkage` count, since DXMT's `Class linkage not supported` warnings are part of Q7 |
+| `snake-core-gl` | Snake Core (1276268370), Java/libGDX, OpenGL | `"$G" mac-app 1276268370 --out "$GOGO_HOME/apps/snake-core" --yes` (auto, default `winecx`) | `runtime` is `winecx/…` with no derived runtime; the game window ("Snake Core - v1.6.1") is up and playable; no `OpenGL 2.0 or higher with the FBO extension is required` (that's the wine-staging failure, docs/19 §5) |
+
+Each game builds into its own `apps/<game>/` dir, so the `*.app` glob below matches one
+bundle. Neo Cab's two cases share that bundle: build, pass, then rebuild with the other
+`--renderer` (`--yes` overwrites) and pass again.
+
+### Running it
+
+```sh
+# This branch's gogo, signed once so the keychain stops asking (AGENTS.md)
+nix develop -c cargo build -p gogo-cli
+scripts/dev-sign.sh
+G="$PWD/target/debug/gogo"
+
+# Scratch state + config: your real games and settings stay untouched. Keyring
+# tokens still work; if your config has token_store = "file", sign in again.
+export GOGO_HOME="$HOME/gogo-hostpass"
+
+# Per case: build (table above), then run it for 90 s and play during that time
+"$G" mac-app 1669531175 --renderer dxmt --out "$GOGO_HOME/apps/neo-cab" --yes
+scripts/host-pass.sh "$GOGO_HOME/apps/Neo Cab.app" --secs 90
+
+# Clean up when done (run logs stay in ~/Library/Logs/gogo/<gogid>)
+rm -rf "$GOGO_HOME"; unset GOGO_HOME
+```
+
+`scripts/host-pass.sh <X.app> [--secs N]` (`--help` lists all options):
+
+1. Reads the bundle's `launch.conf` and the game's state `launch.conf`: gogid, state dir,
+   renderer, runtime dir, verbs, prefix and `wineserver`. The state dir is `GOGO_HOME`,
+   else what the bundle recorded, else `~/Library/Application Support/gogo`.
+   `--dry-run` prints these and stops.
+2. Starts the launcher (`Contents/MacOS/*`) directly from the shell, not with `open`,
+   so `GOGO_HOME` reaches it and a stale config's `gogo mac-app setup` uses the scratch
+   state. The launcher's #78 early-exit dialog is off (`GOGO_LAUNCHER_NO_DIALOG=1`,
+   `--dialogs` turns it back on), so nothing waits for a click. Because Terminal is the
+   parent, a microphone prompt names Terminal, not the game.
+3. Waits `--secs` (default 60) and follows the launcher's process tree. Quitting the
+   game early is fine: the run ends there with `status: "exited"`.
+4. Records the tree's on-screen windows (CoreGraphics via JXA, as the VM harness does,
+   limited to the game's pids) and whether a permission or Gatekeeper prompt is up.
+   `--screenshot` adds `screencapture -x`. Terminal needs Screen Recording for that, and
+   macOS asks once.
+5. Teardown: `SIGTERM` to the launcher (its own #42 teardown), up to `--kill-wait`
+   (20 s). Anything of the game still alive, or the prefix's `wineserver` (found by its
+   cwd, as the launcher does), counts as a leftover. Leftovers go to
+   `WINEPREFIX=<prefix> wineserver -k`, then `SIGKILL`, so nothing is left running.
+6. Collects this launch's run log (#77, `<ts>-<launcher pid>.log`, else the newest),
+   `launch.log`, and engine logs from `games/<gogid>/`: Unity `Player.log` /
+   `Player-prev.log` (the prefix's `AppData/LocalLow`), OGRE `ogre.log`, and any other
+   `*.log` written during the run.
+
+Results go to `target/host-pass/<slug>-<timestamp>/`. The summary is printed with home
+paths shown as `~`, so it can be pasted into a PR as is. The last line is the path of
+`summary.json`. Exit codes match the VM harness: `0` = alive with a window and a clean
+teardown, `1` = the app failed (`exited`, `running_no_window`, `teardown_leftovers`),
+`2` = usage, `3` = the harness itself failed.
+
+```json
+{
+  "status": "ok", "exit_code": 0, "gogid": "1669531175",
+  "runtime": "winecx/24.0.7_7", "renderer": "dxmt/v0.80",
+  "runtime_dir": "runtimes/winecx/24.0.7_7+dxmt-v0.80/engine", "verbs": "",
+  "host": {"macos": "27.0.1", "chip": "Apple M4 Pro"},
+  "launched": true, "running_after_secs": true, "exited_after_secs": null, "run_exit": "143 (SIGTERM)",
+  "windows": [{"owner": "…", "pid": 4242, "layer": 0, "w": 1920, "h": 1080}],
+  "prompts_left": [],
+  "teardown": {"signal": "TERM", "launcher_pid": "4200", "wait_secs": 20, "leftovers": [],
+               "wineserver_k_fallback": false, "killed_after_fallback": [], "ok": true},
+  "markers": {"feature_level": ["2 info:dxmt: Using feature level D3D_FEATURE_LEVEL_11_1"],
+              "metal_layer_failed": [], "class_linkage": [], "wined3d": [], "d3dmetal": [],
+              "opengl": [], "unity": ["1 Renderer: Apple M4 Pro (ID=0x…)", "…"], "ogre": []},
+  "err_lines": ["3 0124:err:combase:RoGetActivationFactory …DispatcherQueue…"],
+  "missing_libs": [], "engine_logs": ["prefix/drive_c/users/crossover/AppData/LocalLow/…/Player.log"],
+  "files": {"run_log": "…/launcher-logs/20261023-171500-4200.log", "launch_log": "…", "engine_logs": "…"}
+}
+```
+
+- `markers`: the top matching lines (with counts) for what a reviewer checks per
+  renderer. `feature_level`, `metal_layer_failed`, `class_linkage`, `wined3d`,
+  `d3dmetal` and `opengl` come from the launcher's output and the run log. `unity` and
+  `ogre` come from the engine logs.
+- `err_lines`: Wine's `err:` lines, the most frequent first. The Unity
+  `RoGetActivationFactory … DispatcherQueue` line is a harmless WinRT probe.
+- `run_exit`: the run log's footer. `143 (SIGTERM)` means the pass stopped the game.
+- `ok` means only "alive with a window". Whether it draws correctly is your call, and
+  goes in the record below.
+
+The script is tested headlessly with fake bundles (a stub launcher and a stub
+`wineserver`; no Wine, no window): `scripts/tests/host-pass-fake.sh`, which runs in CI.
+
+### What to record
+
+One row per case, in the PR (or on the issue the change belongs to), plus the summary
+JSON in a collapsed `<details>`. A pass that fails is still recorded.
+
+```markdown
+| Case | Date | Host | gogo | Renderer / runtime_dir | status | Markers | Eyes on (render / input / audio) | Notes |
+|---|---|---|---|---|---|---|---|---|
+| neo-cab-dxmt | 2026-10-23 | M4 Pro, macOS 27.0.1 | <commit> | dxmt/v0.80, +dxmt-v0.80 | ok | FL 11_1; Renderer: Apple M4 Pro | ✓ / ✓ / ✓ | |
+```
+
+Each passing case becomes a compat `tested` entry for the game (#75):
+`{ runtime = "winecx-24.0.7_7", host = "m4pro/macos-27.0.1", date = 2026-10-23 }`. A
+worked example is the Neo Cab DXMT pass in #70's comments. It was started by a
+double-click before this script existed, and recorded the same evidence: the run log's
+runtime path, DXMT's feature level with no `Failed to get metal layer`, and Unity's
+`Renderer`.
 
 ## What the first real run found (Pharaoh Gold, `--from-depot`, wine-staging 11.18, cnc-ddraw)
 

@@ -33,6 +33,9 @@ tools, or binaries from the host system — no exceptions.**
 - **Launch-testing `.app` bundles / games**: never `open` them on the host (it steals the
   user's focus). Use `scripts/vm-test.sh run <X.app> [--secs N]` (Tart VM; how-to in
   `docs/vm-testing.md`) and read the summary JSON it prints.
+  Rendering on DXMT, D3DMetal or OpenGL needs real hardware: that is the user's host
+  pass (`scripts/host-pass.sh`, `docs/vm-testing.md` "Host pass"). Agents never run it
+  against a real bundle; they put its steps in the PR.
 
 ## Canonical checks (run inside the shell)
 
@@ -41,6 +44,7 @@ cargo fmt --check              # formatting
 cargo clippy --all-targets -- -D warnings
 cargo nextest run              # tests (see docs/design/08-testing.md)
 cargo deny check               # licenses + advisories
+shellcheck scripts/*.sh scripts/tests/*.sh   # when scripts change
 ```
 
 ## Repo conventions
