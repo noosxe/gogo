@@ -31,7 +31,7 @@ gogo login            # sign in: browser + paste-code, tokens in the OS keychain
 gogo list             # your library (id, title, platforms)
 gogo download <GAME>  # offline installers, chunk-verified and resumable
 gogo depot <GAME>      # straight from GOG's depot into the user cache dir
-gogo mac-app --from-depot <GAME>  # wrap the depot tree (no installer run)
+gogo mac-app <GAME>   # macOS: game -> .app from its depot build (no installer run)
 gogo mac-app <EXE>    # macOS: installer -> .app (with a Lutris recipe)
 gogo runtimes list    # macOS: Wine catalog + what's cached locally
 gogo recipes show <slug>  # what a Lutris recipe would do, step by step
@@ -63,14 +63,20 @@ Config file: `gogo config path|get|set|edit` (keys mirror the flags, e.g.
 
 ### mac-app (macOS)
 
-Converts a downloaded GOG Windows installer into a self-contained
-`<name>.app`: it stages a Wine prefix, runs the installer silently, copies the
-Wine runtime inside, and ad-hoc codesigns the bundle. The result needs nothing
-else installed.
+Builds a self-contained `<name>.app` for a GOG Windows game. Given a game
+(id, slug or fuzzy title) it takes the **depot lane**: the game's files come
+straight from GOG's depot (downloaded into the cache on first use, with a
+confirmation or `--yes`) and are bundled as-is, with no installer run. Games
+without a depot build fall back to their downloaded offline installer, with a
+notice (`gogo download <GAME>` first). Given a `setup_*.exe` path it takes the
+**installer lane**: it stages a Wine prefix and runs the installer silently.
+Either way it wires up a Wine runtime and ad-hoc codesigns the bundle.
+`--from-depot <GAME|DIR>` forces the depot lane (no fallback) and also takes a
+game tree directory.
 
 ```sh
-gogo mac-app ~/Downloads/setup_pharaoh_gold_2.1.0.15.exe   # interactive: recipe + runtime
-open Pharaoh.app
+gogo mac-app pharaoh                                       # depot lane
+gogo mac-app ~/Downloads/setup_pharaoh_gold_2.1.0.15.exe   # installer lane: recipe + runtime
 ```
 
 On a terminal it asks interactively — which Lutris recipe to apply (if any), then
