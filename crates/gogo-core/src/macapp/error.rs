@@ -68,6 +68,10 @@ pub enum MacAppError {
     #[error("compat file {path}: {reason}")]
     Compat { path: PathBuf, reason: String },
 
+    /// `--portable` (#84): what a self-contained bundle can't carry or do.
+    #[error("--portable: {0}")]
+    Portable(String),
+
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }

@@ -66,6 +66,10 @@ pub fn setup(gogid: &str, bundle: Option<&Path>) -> Result<SetupOutcome, MacAppE
         reason: e.to_string(),
     })?;
     let baked = LaunchToml::parse(&String::from_utf8_lossy(&raw), &toml_path)?;
+    // #84: a portable bundle's launcher sets its own prefix up.
+    if baked.portable.is_some() {
+        super::portable::refuse(&bundle.to_string_lossy(), "gogo mac-app setup")?;
+    }
     if baked.gogid != gogid {
         return Err(MacAppError::Compat {
             path: toml_path,
@@ -242,6 +246,7 @@ pub fn retarget(
     gogid: &str,
     updates: &[(&str, Option<&str>)],
 ) -> Result<RetargetOutcome, MacAppError> {
+    super::portable::refuse(gogid, "--retarget")?;
     let changes = compat::set_user_keys(gogid, updates)?;
     let has_state = GameDirs::for_game(gogid)?.state_toml.is_file();
     let setup = (!changes.is_empty() && has_state).then(|| setup(gogid, None));
@@ -258,6 +263,7 @@ pub fn retarget(
 /// it is written to L4 as `renderer = "<ref>"`, so the next launch sees a
 /// stale stamp and setup applies it. `Ok(None)`: no more renderers.
 pub fn next_renderer(gogid: &str, dry_run: bool) -> Result<Option<String>, MacAppError> {
+    super::portable::refuse(gogid, "gogo mac-app next-renderer")?;
     let dirs = GameDirs::for_game(gogid)?;
     let state = GameState::load(&dirs.state_toml)?.ok_or_else(|| MacAppError::Compat {
         path: dirs.state_toml.clone(),
@@ -305,7 +311,7 @@ pub fn next_renderer(gogid: &str, dry_run: bool) -> Result<Option<String>, MacAp
 /// the store (design 16 §2.2, network allowed under design 12 D8). Anything
 /// that can't be installed this way (a `path:` runtime, a consent download)
 /// fails with how to install it by hand.
-fn resolve_or_install(r: &str) -> Result<(Runtime, Option<String>), MacAppError> {
+pub(super) fn resolve_or_install(r: &str) -> Result<(Runtime, Option<String>), MacAppError> {
     let err = match resolve_ref(r) {
         Ok(rt) => return Ok((rt, None)),
         Err(e @ MacAppError::RuntimeNotFound { .. }) if !r.starts_with("path:") => e,
@@ -436,7 +442,7 @@ fn reg_add_argv(v: &compat::RegistryValue) -> Vec<String> {
 /// winetricks verbs through gogo's extractor shims (design 12 §8).
 /// winetricks runs its downloads by unix path, so `z:` is back for the
 /// duration and gone again afterwards. It skips verbs already installed.
-fn run_verbs(
+pub(super) fn run_verbs(
     rt: &Runtime,
     prefix: &Path,
     verbs: &[String],
@@ -489,7 +495,7 @@ fn run_verbs(
 
 /// Wait until the prefix's wineserver has exited (`wineserver -w`), so
 /// nothing writes into the prefix after setup returns; `-k` after a minute.
-fn wait_quiet(rt: &Runtime, prefix: &Path) {
+pub(super) fn wait_quiet(rt: &Runtime, prefix: &Path) {
     let server = wineserver_of(rt);
     if !server.is_file() {
         return;

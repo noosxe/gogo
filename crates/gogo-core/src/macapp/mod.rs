@@ -21,6 +21,7 @@ pub mod catalog;
 pub mod ddraw;
 pub mod lutris;
 pub mod pe;
+pub mod portable;
 pub mod prompt;
 pub mod renderer;
 pub mod runtime;
@@ -78,8 +79,11 @@ pub struct MacAppPlan {
     /// v2 bundles (design 16): the per-game state dirs the build writes
     /// into. The depot lane knows its gogid up front; the installer lane
     /// builds in a staging dir and moves it to `games/<gogid>/` once the
-    /// install reveals the id. `None` = the fat, self-contained bundle.
-    pub state: Option<launch::GameDirs>,
+    /// install reveals the id. A portable build (#84) runs in a staging dir
+    /// next to the bundle and removes it at the end.
+    pub state: launch::GameDirs,
+    /// `--portable` (#84): a self-contained bundle for another Mac.
+    pub portable: bool,
     /// Depot lane: the game's GOG id (installer lane: found post-install).
     pub gogid: Option<String>,
     /// `[gogo] path` for the launcher (decision 2).
@@ -120,9 +124,9 @@ pub struct MacAppOptions {
     pub lutris_base: Option<String>,
     /// `--renderer` (`--ddraw-wrapper` / `--no-ddraw-wrapper` are aliases).
     pub renderer: RendererChoice,
-    /// Build today's fat bundle (runtime, prefix and game inside the `.app`)
-    /// instead of a v2 launcher bundle. Kept as the basis for `--portable`
-    /// (#84); not exposed on the CLI yet.
+    /// `--portable` (#84): put the runtime, the renderer, the verb files and
+    /// the game inside the `.app`, for another Mac; its launcher creates the
+    /// prefix there. Can't be retargeted in place.
     pub portable: bool,
     /// The path gogo was invoked as, recorded in the bundle for the
     /// launcher (design 16 decision 2). `None` = the current executable.
@@ -839,6 +843,20 @@ pub fn plan(
         (None, _) => display_name(opts.installer.as_ref().unwrap(), opts.name.as_deref()),
     };
     let slug = slugify(&display);
+    // #84: refused before anything long runs. Apple's licence keeps
+    // D3DMetal and the GPTK out of bundles someone else gets.
+    if opts.portable {
+        if opts.renderer == RendererChoice::Force(Renderer::D3dMetal) {
+            return Err(MacAppError::Portable(portable::D3DMETAL.into()));
+        }
+        if opts.mode == RuntimeMode::Gptk {
+            return Err(MacAppError::Portable(
+                "--runtime gptk is Apple's Game Porting Toolkit, which gogo doesn't \
+                 redistribute inside bundles; pick another `--runtime` (winecx)"
+                    .into(),
+            ));
+        }
+    }
 
     // §6 step 2: recipe discovery + selection precede the runtime — a wine
     // pin feeds the recommendation (D2: flag > recipe > default). Depot mode
@@ -874,6 +892,9 @@ pub fn plan(
         opts.mode != RuntimeMode::Auto || opts.runtime_path.is_some() || menu.is_some();
     let (runtime, runtime_downloaded) =
         resolve_runtime(opts, recipe.as_ref(), pin.as_deref(), menu, emit)?;
+    if opts.portable {
+        portable::check_runtime(&runtime)?;
+    }
     let kind = runtime.mode.as_str().to_string();
     let wine = runtime.wine.display().to_string();
     emit(&ProgressEvent::RuntimeResolved { kind, path: wine });
@@ -890,21 +911,24 @@ pub fn plan(
 
     let mut bundle = bundle::layout(&opts.out_dir, &display);
     // Design 16: the prefix and game files live in the state dir, never in
-    // the bundle.
+    // the bundle. A portable build (#84) leaves the builder's state dir
+    // alone: it stages next to the bundle, and the prefix it ends up using
+    // is created by its launcher on the Mac it runs on.
     let (state, gogid) = if opts.portable {
-        (None, None)
+        // Absolute: Wine refuses a relative WINEPREFIX (`--out target/x`).
+        let staging = launch::absolute(&opts.out_dir)
+            .join(format!(".{slug}.portable-{}", std::process::id()));
+        (launch::GameDirs::at(staging), tree_id.clone())
     } else if let Some(tree) = &opts.game_tree {
         let id = tree_id
             .clone()
             .ok_or_else(|| MacAppError::EntryPointNotFound { dir: tree.clone() })?;
-        (Some(launch::GameDirs::for_game(&id)?), Some(id))
+        (launch::GameDirs::for_game(&id)?, Some(id))
     } else {
         let staging = launch::games_dir().join(format!(".build-{slug}-{}", std::process::id()));
-        (Some(launch::GameDirs::at(staging)), None)
+        (launch::GameDirs::at(staging), None)
     };
-    if let Some(dirs) = &state {
-        bundle.prefix = dirs.prefix.clone();
-    }
+    bundle.prefix = state.prefix.clone();
     if bundle.root.exists() {
         if !opts.overwrite {
             return Err(MacAppError::BundleExists {
@@ -939,10 +963,7 @@ pub fn plan(
     // renderer (#70) and the winetricks verbs (#72). The tree is the
     // installed game, so both show up in the confirmation summary.
     let scan = opts.game_tree.as_ref().map(|tree| pe::scan(tree));
-    let auto_verbs = match (&scan, opts.portable) {
-        (Some(scan), false) => Some(auto_verbs(scan, emit)),
-        _ => None,
-    };
+    let auto_verbs = scan.as_ref().map(|scan| auto_verbs(scan, emit));
     // The installer lane scans only after installing, with no terminal:
     // an explicit `--renderer d3dmetal` gets its consent question now (#71).
     if opts.game_tree.is_none() && opts.renderer == RendererChoice::Force(Renderer::D3dMetal) {
@@ -954,9 +975,10 @@ pub fn plan(
         .zip(scan.as_ref())
         .map(|(tree, scan)| {
             // D3DMetal consent (#71) is asked here, once, on a terminal.
+            // Never for a portable bundle, which can't carry it.
             let gogid = info::root_game_id(tree);
-            let d3dmetal =
-                renderer::ask_d3dmetal(gogid.as_deref(), scan, opts.renderer, prompt, emit);
+            let d3dmetal = !opts.portable
+                && renderer::ask_d3dmetal(gogid.as_deref(), scan, opts.renderer, prompt, emit);
             let sel = renderer::select(
                 gogid.as_deref(),
                 renderer::pick_with(scan, d3dmetal),
@@ -985,6 +1007,7 @@ pub fn plan(
         renderer,
         bundle,
         state,
+        portable: opts.portable,
         gogid,
         gogo_path: opts
             .gogo_path
@@ -1039,6 +1062,26 @@ fn write_gog_game_key(
     win_path: &str,
     exe_file: &str,
 ) -> Result<(), MacAppError> {
+    for value in gog_game_key(id, name, win_path, exe_file) {
+        interpret::run_in_prefix(
+            bundled_wine,
+            prefix,
+            &value.argv(),
+            std::time::Duration::from_secs(60),
+        )
+        .map_err(|e| MacAppError::Recipe(format!("gog registry: {e}")))?;
+    }
+    Ok(())
+}
+
+/// The values of [`write_gog_game_key`]; a portable bundle (#84) bakes them
+/// for the prefix its launcher creates.
+pub(crate) fn gog_game_key(
+    id: &str,
+    name: &str,
+    win_path: &str,
+    exe_file: &str,
+) -> Vec<launch::RegValue> {
     let key = format!(r"Software\GOG.com\Games\{id}");
     let exe = format!(r"{win_path}\{exe_file}");
     let dll = format!("goggame-{id}.dll");
@@ -1055,29 +1098,16 @@ fn write_gog_game_key(
         ("DEPENDSON", String::new()),
         ("DLC", String::new()),
     ];
-    for (value, data) in values {
-        let argv = vec![
-            "reg".to_string(),
-            "add".to_string(),
-            format!(r"HKLM\{key}"),
-            "/v".to_string(),
-            value.to_string(),
-            "/t".to_string(),
-            "REG_SZ".to_string(),
-            "/d".to_string(),
+    values
+        .into_iter()
+        .map(|(value, data)| launch::RegValue {
+            key: format!(r"HKLM\{key}"),
+            name: Some(value.to_string()),
+            kind: "REG_SZ".to_string(),
             data,
-            "/f".to_string(),
-            "/reg:32".to_string(),
-        ];
-        interpret::run_in_prefix(
-            bundled_wine,
-            prefix,
-            &argv,
-            std::time::Duration::from_secs(60),
-        )
-        .map_err(|e| MacAppError::Recipe(format!("gog registry: {e}")))?;
-    }
-    Ok(())
+            wow32: true,
+        })
+        .collect()
 }
 
 /// The depot cache's GOG support installer (`gog-support/**/galaxy_*.exe`,
@@ -1155,39 +1185,30 @@ pub fn execute(
             path: plan.bundle.root.clone(),
         });
     }
+    let out = execute_into(plan, codesign, emit);
+    // #84: the staging prefix served the build only, whatever happened.
+    if plan.portable && plan.state.root.symlink_metadata().is_ok() {
+        let _ = installer::stop_wineserver(&plan.runtime, &plan.state.prefix);
+        let _ = std::fs::remove_dir_all(&plan.state.root);
+    }
+    out
+}
+
+fn execute_into(
+    plan: &MacAppPlan,
+    codesign: CodesignPolicy,
+    emit: &mut dyn FnMut(&ProgressEvent),
+) -> Result<u64, MacAppError> {
     bundle::create_layout(&plan.bundle)?;
 
-    // v2 (design 16): Wine runs from the store and the prefix lives in the
-    // state dir. The fat bundle copies the runtime in first: a failing copy
-    // must not leave a half-installed prefix behind as the only artifact.
-    let bundled_wine = if plan.state.is_some() {
-        plan.runtime.wine.clone()
-    } else {
-        emit(&ProgressEvent::Warn {
-            message: format!(
-                "copying runtime {} (~{} MiB) into the bundle",
-                plan.runtime.version,
-                plan.estimated_bytes / (1024 * 1024)
-            ),
-        });
-        bundle::copy_runtime(&plan.runtime, &plan.bundle.resources.join("wine"))?;
-        bundle::copy_runtime_dylibs(
-            &plan.runtime,
-            &plan.bundle.resources.join("wine-frameworks"),
-        )?;
-        // In-bundle wine path = the runtime binary's own relative position.
-        let rel = plan
-            .runtime
-            .wine
-            .strip_prefix(&plan.runtime.root)
-            .unwrap_or(Path::new("bin/wine"));
-        plan.bundle.resources.join("wine").join(rel)
-    };
+    // Design 16: Wine runs from the store and the prefix lives in the state
+    // dir (a portable build's staging dir, #84).
+    let bundled_wine = plan.runtime.wine.clone();
 
     emit(&ProgressEvent::PrefixStaged);
     // A rebuild keeps the game's prefix (and the saves in it, decision 6);
     // only `game/` is re-cloned.
-    if plan.state.is_some() && plan.bundle.prefix.is_dir() {
+    if plan.bundle.prefix.is_dir() {
         emit(&ProgressEvent::Warn {
             message: format!(
                 "reusing the existing prefix {} (saves kept)",
@@ -1201,11 +1222,9 @@ pub fn execute(
             #[cfg(unix)]
             std::os::unix::fs::symlink("/", &z)?;
         }
-    } else if plan.state.is_some() {
+    } else {
         // Design 16 decision 4 (#67): no links into the builder's home.
         setup::create_prefix(&plan.runtime, &plan.bundle.prefix)?;
-    } else {
-        installer::stage_prefix(&plan.runtime, &plan.bundle.prefix)?;
     }
 
     // Design 15 D3: the depot lane swaps exactly this step — a tree clone
@@ -1243,22 +1262,14 @@ pub fn execute(
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| plan.slug.clone());
         emit(&ProgressEvent::InstallStarted);
-        let dst = match &plan.state {
-            // Design 16 decision 4: `game/` is the clone, reached from the
-            // prefix as `C:\GOG\<name>` through a relative symlink.
-            Some(dirs) => {
-                if dirs.game.symlink_metadata().is_ok() {
-                    std::fs::remove_dir_all(&dirs.game)?;
-                }
-                bundle::clone_tree(tree, &dirs.game)?;
-                setup::link_game(dirs, &name)?
-            }
-            None => {
-                let dst = plan.bundle.prefix.join("drive_c/GOG").join(&name);
-                bundle::clone_tree(tree, &dst)?;
-                dst
-            }
-        };
+        // Design 16 decision 4: `game/` is the clone, reached from the
+        // prefix as `C:\GOG\<name>` through a relative symlink.
+        let dirs = &plan.state;
+        if dirs.game.symlink_metadata().is_ok() {
+            std::fs::remove_dir_all(&dirs.game)?;
+        }
+        bundle::clone_tree(tree, &dirs.game)?;
+        let dst = setup::link_game(dirs, &name)?;
         // GOG's support overlay (design 15 §3): files Galaxy merges into the
         // install dir, missing from the depot manifest itself.
         for overlay in locate_support_overlays(tree) {
@@ -1407,9 +1418,10 @@ pub fn execute(
             let scan = scan.as_ref().expect("scanned when not planned");
             // No terminal here: a D3D12 game uses the stored D3DMetal
             // answer; `--renderer d3dmetal` was asked about at plan time.
+            // A portable bundle never carries D3DMetal (#84).
             let gogid = info::root_game_id(&install_dir);
-            let d3dmetal =
-                renderer::ask_d3dmetal(gogid.as_deref(), scan, plan.renderer_choice, None, emit);
+            let d3dmetal = !plan.portable
+                && renderer::ask_d3dmetal(gogid.as_deref(), scan, plan.renderer_choice, None, emit);
             let sel = renderer::select(
                 gogid.as_deref(),
                 renderer::pick_with(scan, d3dmetal),
@@ -1420,91 +1432,20 @@ pub fn execute(
         }
     };
 
-    // Fat bundles apply cnc-ddraw at build (design 13 D3/D4), after the
-    // recipe phase so a recipe's own wrapper wins. v2 bundles leave every
-    // renderer to setup, which runs at the end of the build and again
-    // whenever the config changes.
-    let wanted = renderer::RendererRef::parse(&selection.renderer.value)
-        .map(|r| r.renderer)
-        .unwrap_or(Renderer::Wined3d);
-    if plan.state.is_none() && wanted == Renderer::CncDdraw {
-        match ddraw::resolve_or_provision(emit) {
-            Some(tree) => match ddraw::apply(&tree, &install_dir)? {
-                ddraw::Applied::Applied { shaders } => {
-                    // The load-order half (live finding 2026-10-19): without
-                    // `ddraw=n,b` wine prefers its builtin and the game-dir
-                    // dll is silently ignored.
-                    ddraw::register_override(&bundled_wine, &plan.bundle.prefix)?;
-                    emit(&ProgressEvent::RecipeStep {
-                        verb: format!("cnc-ddraw (dll + ini + override, {shaders} shaders)"),
-                    });
-                    bundle::write_ddraw_notice(&plan.bundle)?;
-                }
-                ddraw::Applied::AlreadyPresent => emit(&ProgressEvent::Warn {
-                    message: "ddraw.dll already present (recipe-placed) — gogo wrapper \
-                              skipped"
-                        .into(),
-                }),
-            },
-            None => emit(&ProgressEvent::Warn {
-                message: "cnc-ddraw unavailable (provisioning failed) — DirectDraw games \
-                          may black-screen"
-                    .into(),
-            }),
-        }
-    } else if plan.state.is_none() && matches!(wanted, Renderer::Dxmt | Renderer::D3dMetal) {
-        emit(&ProgressEvent::Warn {
-            message: format!(
-                "{} needs a derived store runtime, which a self-contained bundle can't \
-                 carry: using wined3d",
-                wanted.id()
-            ),
-        });
-    }
-
-    if let Some(dirs) = &plan.state {
-        let winetricks_used = recipe.as_ref().is_some_and(|o| o.winetricks_used);
-        return finish_v2(
-            plan,
-            dirs,
-            &install_dir,
-            &entry,
-            (&recipe_env, &recipe_args),
-            (&selection, lane_scan.as_ref()),
-            winetricks_used,
-            codesign,
-            emit,
-        );
-    }
-
-    bundle::write_launch_conf(
-        &plan.bundle,
-        &bundled_wine,
+    // Every renderer is setup's (v2), or the portable tail's: after the
+    // recipe phase, so a recipe's own wrapper wins.
+    let winetricks_used = recipe.as_ref().is_some_and(|o| o.winetricks_used);
+    finish_v2(
+        plan,
+        &plan.state,
+        &install_dir,
         &entry,
-        &recipe_env,
-        &recipe_args,
-    )?;
-    bundle::write_launcher(&plan.bundle, &plan.display)?;
-    bundle::write_info_plist(
-        &plan.bundle,
-        &plan.display,
-        &plan.slug,
-        plan.runtime.min_macos,
-    )?;
-    bundle::write_notices(&plan.bundle, &plan.runtime)?;
-    if recipe.as_ref().is_some_and(|o| o.winetricks_used) {
-        bundle::write_winetricks_notice(&plan.bundle)?;
-    }
-    bundle::write_runtime_marker(&plan.bundle, &plan.runtime)?;
-    emit(&ProgressEvent::BundleAssembled);
-
-    // Seal-blocking metadata must go before signing (live finding 2026-10-18:
-    // GPTK files carry FinderInfo/resource forks from the quarantined app).
-    bundle::strip_detritus(&plan.bundle.root, codesign)?;
-    bundle::codesign_adhoc(&plan.bundle.root, codesign)?;
-    emit(&ProgressEvent::Codesigned);
-
-    dir_size(&plan.bundle.root)
+        (&recipe_env, &recipe_args),
+        (&selection, lane_scan.as_ref()),
+        winetricks_used,
+        codesign,
+        emit,
+    )
 }
 
 /// Where a compat `exe` points: a `C:\` path inside the prefix, or a path
@@ -1523,7 +1464,8 @@ fn compat_exe(prefix: &Path, game_dir: &Path, exe: &str) -> Option<PathBuf> {
 /// The v2 tail of [`execute`] (design 16): settle the prefix in
 /// `games/<gogid>/`, write the launcher bundle (launcher, TOML + mirror,
 /// plist, notices; nothing else), sign it and verify it strictly, then run
-/// the same setup the launcher runs when the config is stale.
+/// the same setup the launcher runs when the config is stale. A portable
+/// build (#84) bakes the same TOML and hands it to [`portable::finish`].
 #[allow(clippy::too_many_arguments)]
 fn finish_v2(
     plan: &MacAppPlan,
@@ -1569,25 +1511,6 @@ fn finish_v2(
             dir: install_dir.to_path_buf(),
         })?,
     };
-    // Installer lane: the id is known only now; move the staging dir into
-    // place. An older prefix for the same game is set aside, never deleted.
-    if plan.gogid.is_none() {
-        let target = launch::GameDirs::for_game(&gogid)?;
-        std::fs::create_dir_all(&target.root)?;
-        if target.prefix.symlink_metadata().is_ok() {
-            let aside = target.root.join(format!(
-                "prefix.old-{}",
-                chrono::Utc::now().format("%Y%m%dT%H%M%S")
-            ));
-            std::fs::rename(&target.prefix, &aside)?;
-            emit(&ProgressEvent::Warn {
-                message: format!("previous prefix moved to {}", aside.display()),
-            });
-        }
-        std::fs::rename(&dirs.prefix, &target.prefix)?;
-        std::fs::remove_dir_all(&dirs.root).ok();
-    }
-
     let workdir = exe
         .rsplit_once('\\')
         .map(|(head, _)| head.to_string())
@@ -1638,7 +1561,39 @@ fn finish_v2(
             state: crate::state::state_dir(),
         },
         variants,
+        portable: None,
     };
+    // #84: everything into the bundle, the effective config baked.
+    if plan.portable {
+        return portable::finish(
+            plan,
+            dirs,
+            install_dir,
+            toml,
+            selection,
+            winetricks_used,
+            codesign,
+            emit,
+        );
+    }
+    // Installer lane: the id is known only now; move the staging dir into
+    // place. An older prefix for the same game is set aside, never deleted.
+    if plan.gogid.is_none() {
+        let target = launch::GameDirs::for_game(&gogid)?;
+        std::fs::create_dir_all(&target.root)?;
+        if target.prefix.symlink_metadata().is_ok() {
+            let aside = target.root.join(format!(
+                "prefix.old-{}",
+                chrono::Utc::now().format("%Y%m%dT%H%M%S")
+            ));
+            std::fs::rename(&target.prefix, &aside)?;
+            emit(&ProgressEvent::Warn {
+                message: format!("previous prefix moved to {}", aside.display()),
+            });
+        }
+        std::fs::rename(&dirs.prefix, &target.prefix)?;
+        std::fs::remove_dir_all(&dirs.root).ok();
+    }
     launch::write_bundle_config(&plan.bundle.resources, &toml)?;
     launch::write_launcher(&plan.bundle.macos, &plan.display)?;
     bundle::write_info_plist(
