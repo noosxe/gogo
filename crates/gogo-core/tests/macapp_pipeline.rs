@@ -571,6 +571,92 @@ fn auto_recipe_discovery_and_gogid_crosscheck() {
     drop(guard);
 }
 
+/// #125: an installed Homebrew wine (on a GPTK-cask Mac, a link into Game
+/// Porting Toolkit.app) is a menu lane, never the ladder's pick: with nothing
+/// cached the menu preselects the default track's download.
+#[test]
+fn auto_ladder_never_picks_a_host_brew_wine() {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let installer = tmp.path().join("setup_testgame_1.0.exe");
+    std::fs::write(&installer, b"MZ").unwrap();
+    // `brew --prefix` → <tmp>/brew, whose bin/wine64 is a working fake wine.
+    let brew_prefix = tmp.path().join("brew");
+    fake_runtime(&brew_prefix, &tmp.path().join("wine.log"));
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        bin.join("brew"),
+        format!("#!/bin/sh\necho '{}'\n", brew_prefix.display()),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(bin.join("brew"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let home = tmp.path().join("home"); // empty runtime store
+
+    let seen: std::sync::Arc<std::sync::Mutex<Vec<gogo::macapp::PromptSpec>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen2 = seen.clone();
+    // Cancel the menu: only what it offered and preselected matters.
+    let prompter: std::sync::Arc<gogo::macapp::PromptFn> =
+        std::sync::Arc::new(move |spec: &gogo::macapp::PromptSpec| {
+            seen2.lock().unwrap().push(spec.clone());
+            None
+        });
+    let opts = MacAppOptions {
+        installer: Some(installer),
+        game_tree: None,
+        name: Some("Test Game".into()),
+        mode: RuntimeMode::Auto,
+        runtime_path: None,
+        out_dir: tmp.path().to_path_buf(),
+        overwrite: true,
+        recipe: gogo::macapp::RecipeChoice::None,
+        runtime_menu: true,
+        runtime_version: None,
+        lutris_base: None,
+        renderer: macapp::RendererChoice::Auto,
+        portable: true,
+        gogo_path: None,
+    };
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    // SAFETY: env mutation under ENV_LOCK (established pattern above).
+    unsafe {
+        std::env::set_var("GOGO_HOME", &home);
+        std::env::set_var("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+    }
+    let res = macapp::plan(&opts, Some(prompter.as_ref()), &mut |_| {});
+    // SAFETY: restore.
+    unsafe {
+        std::env::set_var("PATH", &old_path);
+        std::env::remove_var("GOGO_HOME");
+    }
+    drop(guard);
+
+    assert!(res.is_err(), "the menu was cancelled");
+    let specs = seen.lock().unwrap();
+    let menu = specs
+        .iter()
+        .find(|sp| matches!(sp.kind, gogo::macapp::PromptKind::Select))
+        .expect("menu prompted");
+    assert!(
+        menu.items
+            .iter()
+            .any(|i| i.starts_with("brew ") && i.contains("(installed)")),
+        "the host brew wine is still a lane: {:?}",
+        menu.items
+    );
+    let pick = &menu.items[menu.default];
+    assert!(
+        pick.starts_with("download winecx"),
+        "default track preselected, not brew: {pick:?} in {:?}",
+        menu.items
+    );
+}
+
 #[test]
 fn runtime_menu_offers_cached_and_custom_path_lanes() {
     // §5/§9: with nothing auto-resolvable (no cached ladder hit, no brew on

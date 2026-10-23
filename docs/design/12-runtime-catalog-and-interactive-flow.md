@@ -106,7 +106,7 @@ consent (EULA notice, D9); registering a user mount stays available.
 >
 > **Amended 2026-10-23 (#76) — the menu is opt-in.** `mac-app` resolves the runtime
 > with no prompt: `--runtime <id>` wins, else the ladder (the L3 compat pin, then the
-> recipe recommendation, then the cached default track, brew, else a download of the
+> recipe recommendation, then the cached default track, else a download of the
 > default track); L4 is applied on top by `gogo mac-app setup` at launch, so the
 > effective order is flag > L4 > L3 > default track. The menu below (content and
 > "· easy" preselection unchanged) runs only on a terminal and only when asked for:
@@ -114,6 +114,13 @@ consent (EULA notice, D9); registering a user mount stays available.
 > --runtime <id>` (#69) is unaffected; a bare `--runtime` there is a usage error, and
 > `--interactive` conflicts with `--retarget`.
 > Headless and `--json` runs never prompt, as before. Core: `MacAppOptions.runtime_menu`.
+>
+> **Amended 2026-10-23 (#125) — no implicit host wine.** brew left the `auto` ladder:
+> with nothing cached, `auto` downloads the default track instead of taking whatever
+> `$(brew --prefix)/bin/wine64` is. On a Mac with Gcenx's GPTK cask that link points
+> into `Game Porting Toolkit.app` (Wine 7.7), which silently replaced `winecx` and
+> with it DXMT/D3DMetal derived runtimes. Host wines stay available as `--runtime
+> brew|gptk|path` and as menu lanes; the menu preselects the default track.
 >
 > **Amended 2026-10-19** (post-v1 field feedback): interactively the runtime
 > menu is **mandatory** — the §5 ladder now only computes the preselected

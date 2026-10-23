@@ -378,8 +378,8 @@ impl RendererArg {
 /// `ValueEnum` can't be implemented on it here).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum RuntimeSource {
-    /// Recipe-recommended or cached runtime, else brew, else download
-    /// (design 12 §5).
+    /// Recipe-recommended or cached runtime, else download the default
+    /// track (design 12 §5); a host brew/GPTK wine only by flag or menu.
     Auto,
     /// Homebrew wine-crossover.
     Brew,
