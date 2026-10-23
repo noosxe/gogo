@@ -83,7 +83,9 @@ state = "/Users/me/Library/Application Support/gogo"
 - *#56:* `lane = "installer"` marks a bundle built by running GOG's offline
   installer. It's absent from a depot bundle (so its bytes don't change) and means
   "the depot build". `doctor` uses it to apply a compat `status` only to the lane it
-  was seen on (L3/L4 `lane`, compat/README.md).
+  was seen on (L3/L4 `lane`, compat/README.md); an entry's `[lanes.<lane>]` table
+  gives that lane a status of its own, so a game can be broken from one lane and play
+  from the other.
 - Unknown keys are an error for gogo (`deny_unknown_fields`); `schema` gates any future
   change. A bundle with a newer `schema` than the running gogo is refused with "upgrade
   gogo", never half-read.
@@ -811,7 +813,7 @@ findings as objects). Exit 1 when a check fails; warnings don't fail it.
 |---|---|---|
 | `bundle` | fail: no state and no bundle path, or `gogo-launch.toml` unreadable | rebuild |
 | `codesign` | fail: `codesign --verify --deep --strict` on the `.app` | rebuild |
-| `compat` | warn: the game's status is broken (#74/#75); else the status line. An entry's `lane` (#56) scopes its status to the build lane it was seen on: a depot-only "broken" reads "untested from the offline installer (…)" on an installer-built bundle | `mac-app compat` |
+| `compat` | warn: the game's status is broken (#74/#75); else the status line. An entry's `lane` (#56) scopes its status to the build lane it was seen on: a depot-only "broken" reads "untested from the offline installer (…)" on an installer-built bundle; a `[lanes.<lane>]` table wins for its lane | `mac-app compat` |
 | `runtime` | fail: the effective runtime (bundle TOML + L4, as setup resolves it) isn't in the store or doesn't probe (`wine --version`). warn: a `path:` host Wine, Homebrew or GPTK (#125) | `runtimes install`, `--retarget --runtime winecx` |
 | `renderer` | fail: DXMT/D3DMetal's payload or derived runtime (`<ver>+<renderer>-<rver>`) missing, or its overlay file (`lib/wine/x86_64-unix/winemetal.so`) absent; cnc-ddraw without `ddraw.dll` | setup, or prune the derived runtime |
 | `d3dmetal` | warn: D3DMetal is the renderer, or "Try next renderer"'s next one, and `[mac_app] d3dmetal` isn't `"yes"` (#71). Shown only then | the config key |

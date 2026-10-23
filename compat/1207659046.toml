@@ -2,10 +2,20 @@
 # From the depot it shows "Please insert your Cleopatra CD.": the tree lacks
 # the installer-written Pharaoh.ini (CDDrive), and GOG's support installer
 # declines to run (docs/18 §5). The offline installer lane writes the config
-# (#56), so the status below is the depot build's only.
+# (#56): the top-level status is the depot build's, [lanes.installer] the
+# installer build's.
 title  = "Pharaoh + Cleopatra"
 status = "broken"
 lane   = "depot"
 notes  = "from the depot it asks for the Cleopatra CD (no installer-written Pharaoh.ini, docs/18 §5); build it from the offline installer"
 tested = [{ runtime = "winecx/24.0.7_7", host = "vm/macos-27.0", date = 2026-10-23 }]
-source = "gogo-vm"
+source = "gogo-host"
+
+# setup_pharaoh_gold_2.1.0.15.exe (#134): the VM smoke run reached the title
+# screen with no CD prompt; the host pass was judged playable by eye.
+[lanes.installer]
+status = "plays"
+tested = [
+  { runtime = "winecx/24.0.7_7", host = "vm/macos-27.0", date = 2026-10-23 },
+  { runtime = "winecx/24.0.7_7", host = "m4pro/macos-27.0.1", date = 2026-10-23 },
+]
