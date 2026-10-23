@@ -3031,6 +3031,19 @@ fn emit_macapp_event(ev: &gogo::engine::events::ProgressEvent, json_progress: bo
             layer,
             reason,
         } => Some(format!("renderer: {renderer} ({layer}: {reason})")),
+        // Reported like `--retarget`'s own L4 writes (#110).
+        Ev::UserOverrideSet {
+            gogid,
+            key,
+            old,
+            new,
+            path,
+        } => Some(format!(
+            "{gogid}: {key} {} -> {} ({})",
+            old.as_deref().unwrap_or("(bundle default)"),
+            new.as_deref().unwrap_or("(bundle default)"),
+            path.display()
+        )),
         Ev::RecipeStep { verb } => Some(format!("applied {verb}")),
         _ => None,
     };

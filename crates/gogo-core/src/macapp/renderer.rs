@@ -334,7 +334,8 @@ pub struct Selection {
     pub renderer: Sourced<String>,
     pub reason: String,
     pub l1: Pick,
-    /// An L4 renderer that setup applies on top at launch.
+    /// An L4 renderer that setup applies on top at launch. `None` when a
+    /// `--renderer` flag won: the build writes it into L4 (#110).
     pub user: Option<String>,
     pub warnings: Vec<String>,
 }
@@ -356,7 +357,8 @@ impl Selection {
 }
 
 /// Merge the renderer field over L0–L3 and the build flags (design 16
-/// decision 5). L4 is reported, not baked: setup applies it at launch.
+/// decision 5). L4 is reported, not baked: setup applies it at launch,
+/// unless a `--renderer` flag wins, which the build then writes into L4.
 pub fn select(gogid: Option<&str>, l1: Pick, choice: RendererChoice) -> Selection {
     let l0 = CompatEntry {
         renderer: Some(Renderer::Wined3d.id().into()),
@@ -391,7 +393,7 @@ pub fn select(gogid: Option<&str>, l1: Pick, choice: RendererChoice) -> Selectio
                 .into()
         });
     }
-    let user = gogid
+    let mut user = gogid
         .and_then(|g| compat::load_user(g).ok())
         .and_then(|p| p.entry.renderer);
     let mut layers = vec![
@@ -423,12 +425,10 @@ pub fn select(gogid: Option<&str>, l1: Pick, choice: RendererChoice) -> Selectio
             };
             layers.push((Layer::Flags, &flag_entry));
             flag_reason = format!("--renderer {}", r.id());
-            if user.is_some() {
-                warnings.push(
-                    "an L4 user override sets the renderer and wins at launch; change it \
-                     with `gogo mac-app --retarget <gogid> --renderer …`"
-                        .into(),
-                );
+            // Flags > L4 (#110): the build writes the flag into the L4
+            // file, so that override no longer applies on top.
+            if let Some(u) = user.take() {
+                flag_reason.push_str(&format!(", replacing the L4 override {u}"));
             }
         }
         RendererChoice::AutoNoDdraw => {
@@ -961,7 +961,7 @@ mod tests {
         assert_eq!(s.renderer.layer, Layer::Auto);
         assert!(s.warnings.iter().any(|w| w.contains("64-bit only")));
 
-        // L4 is reported, not baked; with a flag it is a warning.
+        // L4 is reported, not baked; a flag replaces it (#110).
         compat::set_user_keys("1", &[("renderer", Some("wined3d"))]).unwrap();
         let s = select(Some("1"), pick(Renderer::Dxmt), RendererChoice::Auto);
         assert_eq!(s.renderer.value, "dxmt/v0.80");
@@ -972,7 +972,10 @@ mod tests {
             pick(Renderer::Dxmt),
             RendererChoice::Force(Renderer::Dxmt),
         );
-        assert!(s.warnings.iter().any(|w| w.contains("L4")));
+        assert_eq!(s.renderer.layer, Layer::Flags);
+        assert_eq!(s.user, None);
+        assert!(s.reason.contains("replacing the L4 override wined3d"));
+        assert!(s.warnings.is_empty(), "{:?}", s.warnings);
         // explain(): L4 wins; else a baked value off L0–L3 is a flag.
         let (r, _) = explain("1", "dxmt/v0.80", None, None);
         assert_eq!((r.value.as_str(), r.layer), ("wined3d", Layer::User));
