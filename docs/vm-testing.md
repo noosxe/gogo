@@ -203,7 +203,7 @@ summary's `vm_no_gl` holds the log lines; judge such titles on the host (#80).
 | `gog-support` | L2 GOG support overlay | Carmageddon TDR 2000 (1146738698) has `ASSETS/options.txt` from the depot's `gog-support` overlay, so it reaches its first-run dialog instead of `Abort at File.cpp:73` |
 | `signing` | launcher seal, Gatekeeper | the launcher verifies `--deep --strict` in the guest and a quarantined launch gets the "could not verify" prompt, not "damaged" (#53) |
 | `teardown-term` | launcher teardown (#42) | `SIGTERM` to the launcher leaves no Wine process behind |
-| `teardown-kill` | launcher teardown (#42) | informational: what a `SIGKILL` (untrappable) leaves |
+| `teardown-kill` | launcher teardown (#42, #103) | `SIGKILL` of the launcher: its watchdog tears down, nothing left after 15 s |
 | `runtime-cx24` | L0 runtime (#62) | the default `winecx` engine and its `Frameworks/` start TAG in a clean guest: no missing dylibs, no microphone prompt |
 | `renderer-l1-ddraw` | L1 renderer (#70) | Pharaoh Gold (1207659046) imports only `ddraw`: setup gives it cnc-ddraw (`renderer` = `cnc-ddraw/…`) and its dialog is on screen |
 | `renderer-l1-wined3d` | L1 renderer (#70) | TAG's legacy Direct3D keeps wined3d on the base `winecx` runtime |
