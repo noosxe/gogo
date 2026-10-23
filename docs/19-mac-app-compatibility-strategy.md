@@ -160,7 +160,7 @@ archived flag, last push, licence, latest release).
 |---|---|---|---|---|
 | **wined3d** (in every Wine) | DDraw/D3D1–11 on OpenGL | Builtin | LGPL | Fine for DDraw/D3D≤7 and simple D3D8/9; D3D11 fails on macOS GL 4.1 (Neo Cab, §5). |
 | **cnc-ddraw** | 2D DirectDraw | v7.1.0.0 (**verified**) | MIT | Already in gogo; Sikarugir ships it **on by default** (Info.plist `CNC_DDRAW=1`, verified in Template 1.0.24). |
-| **DXMT** (3Shain, now © CodeWeavers) | D3D10/11 → Metal | v0.80 2026-04; Sikarugir carries `v0.80-244` (**verified**) | **LGPL-2.1** (**verified**) | i386 + x86_64 PE builds + `winemetal.so`. Needs a Wine whose `winemac.drv` exports the DXMT hook — CrossOver 24+ sources or patched Wine (DXMT wiki, **verified**). Heroic overlays it onto Gcenx staging. |
+| **DXMT** (3Shain, now © CodeWeavers) | D3D10/11 → Metal | v0.80 2026-04; Sikarugir carries `v0.80-244` (**verified**) | **LGPL-2.1** (**verified**) | i386 + x86_64 PE builds + `winemetal.so`. Needs a Wine whose `winemac.drv` exports the DXMT hook — CrossOver 24+ sources or patched Wine (DXMT wiki, **verified**). Heroic overlays it onto Gcenx staging. **Upstream accepts no AI/LLM-made or co-authored contributions** (`CONTRIBUTING.md` "AI Policy", `AGENTS.md`; **verified** 2026-10-23): gogo uses DXMT only as a downloaded dependency, and agents never open PRs or issues there; a human files any report. |
 | **D3DMetal** (Apple GPTK) | D3D11/12 → Metal, **64-bit only** | 3.0 in CrossOver 26, 4.0 in Sikarugir Template (**verified** files) | Apple GPTK licence: **distribution permitted for non-commercial purposes**, Framework/redist may be distributed separately (GPTK 4.0 License, §2A(iii)/2C, **verified** from the copy Sikarugir publishes) | Supersedes docs/13 §3's "never": a free tool may fetch it, with the notice. Still x86_64-PE-only. |
 | **DXVK / D9VK on MoltenVK** | D3D8/9 (and old 10/11) → Vulkan → Metal | Sikarugir ships `DXVK-Sikarugir-v3.1.1-async` (d3d8/9 "D9VK"), on by default; `Gcenx/DXVK-macOS` v1.10.3 (2023, stale) for d3d10/11 | zlib | DXVK ≥2 needs Vulkan features MoltenVK lacks for d3d11; the d3d8/9 path works on macOS 26+ per Sikarugir README (**reported**). |
 | **KosmicKrisp** (Mesa Vulkan-on-Metal) | Vulkan ICD alternative to MoltenVK | Shipped as an ICD json in Sikarugir Template 1.0.24 (**verified** file) | MIT | Watch item. |
@@ -455,7 +455,7 @@ another Mac.
 | Upstream FEX has no Darwin support; CodeWeavers' Wine side will publish with CrossOver 27 sources | **reported** (third-party tracker) | [highball#6](https://github.com/gauthierpiarrette/highball/issues/6) |
 | Community ARM64 Wine 11.10 + FEX ARM64EC for macOS: x86-64 apps work, **32-bit x86 does not yet** | **verified** (README, LGPL, 0 stars, experimental) | [Irz-Z/wine-macos-native](https://github.com/Irz-Z/wine-macos-native) |
 | D3DMetal as distributed today (GPTK 4.0 in Sikarugir Template 1.0.24) is **x86_64-only** Mach-O; DXMT's `winemetal.so` release build is x86_64 too; MoltenVK is universal | **verified** (`file` on the binaries) | §3.2 |
-| DXMT has ARM64EC/native-arm64 build work merged | **reported** (search results; PR #75/#76 "native macOS/arm64" closed 2025-07) | [3Shain/dxmt](https://github.com/3Shain/dxmt) |
+| DXMT builds as ARM64EC upstream: `build-arm64ec.txt` meson cross file (`arm64ec-w64-mingw32-*`, added in `7ef5d9c` "build: add arm64ec support", 2026-03-08; `-marm64x` added in `3b78076`, 2026-09-17), and CI has a `setup-wine-arm64ec` job on `macos-15` building against `3Shain/wine` `wine-11.2`. **Releases do not ship it yet**: `dxmt-v0.80-builtin.tar.gz` (2026-04-23, latest) has only `i386-windows`, `x86_64-windows` and `x86_64-unix` | **verified** (repo tree, commit log, CI workflow and v0.80 tarball listing, 2026-10-23) | [3Shain/dxmt](https://github.com/3Shain/dxmt) |
 
 ### 7.2 How each candidate is expected to hold up on macOS 28
 
@@ -468,6 +468,7 @@ another Mac.
 | Whisky | Dead already | firm |
 | Heroic on macOS | Uses the same x86_64 Wine builds; inherits the problem | firm for today's builds |
 | Upstream Wine ARM64 + FEX (Hangover-style) | The only open path; needs Shanks' MRs upstream, a Darwin FEX, and **restricted entitlements** | reported; entitlement need is verified |
+| DXMT (renderer) | Likely to follow the ARM64 runtimes: the ARM64EC build already exists upstream and is built in CI (§7.1). The L1 renderer choice survives the switch if gogo's `renderers/` set gains an `arm64ec` variant once releases carry one | build support verified; shipped artefact pending |
 | Native ports (ScummVM, DOSBox — docs/16 S2) | Unaffected — arm64-native | firm |
 
 Two consequences matter more than the dates:
