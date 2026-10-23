@@ -13,8 +13,8 @@
 # (CoreGraphics via JXA, as the VM harness does), stops the launcher with
 # SIGTERM (its own teardown, #42), falls back to the prefix's `wineserver -k`
 # if anything is left, then collects this run's log (#77), launch.log and the
-# engine logs (Unity Player.log, OGRE ogre.log, other new *.log) from the
-# game's state dir.
+# engine logs (Unity Player.log, OGRE ogre.log, any *.log written during
+# the run) from the game's state dir.
 #
 # options:
 #   --secs N        how long the game runs before teardown (default 60);
@@ -79,6 +79,31 @@ tree_pids() {
             }
         }'
 }
+# This game's processes, one pid per line: the launcher's tree, the prefix's
+# wineserver and its tree, and anything Wine started for this prefix that
+# isn't a descendant (on winecx, `start.exe /exec` has the game exe started
+# outside the launcher's tree). Those carry WINEPREFIX=<prefix> in their
+# environment (`ps -E`, same-user processes on macOS) or the game's Windows
+# folder in their command line (Wine sets argv[0] to the exe's path). Other
+# Wine games have another prefix and folder, so they aren't counted.
+game_tree() {
+    local s
+    tree_pids "$lpid"
+    for s in $(prefix_server_pid "$prefix"); do tree_pids "$s"; done
+    if [ -n "$prefix" ]; then
+        ps -wwE -A -o pid=,command= 2>/dev/null \
+            | HP_PREFIX="$prefix" awk '{
+                # The needle is built here: the environment of awk itself
+                # must not hold it, or awk would match itself.
+                n = "WINEPREFIX=" ENVIRON["HP_PREFIX"]; i = index($0, n)
+                if (i && (i + length(n) > length($0) || substr($0, i + length(n), 1) == " ")) print $1
+            }' || true
+    fi
+    if [ -n "$workdir" ]; then
+        # Without -E: the command line only, never an environment value.
+        ps -A -o pid=,command= | HP_NEEDLE="$workdir\\" awk 'index($0, ENVIRON["HP_NEEDLE"]) { print $1 }' || true
+    fi
+}
 # The live (not zombie) pids of a list.
 alive_pids() {
     local p s
@@ -137,15 +162,15 @@ game_state="$state/games/$gogid"
 game_conf="$game_state/launch.conf"
 log_dir="${GOGO_LOG_DIR:-$HOME/Library/Logs/gogo/$gogid}"
 abs() { case "$1" in /*) printf '%s' "$1" ;; ?*) printf '%s/%s' "$state" "$1" ;; esac; }
-renderer="" runtime="" runtime_dir="" verbs="" prefix="" wineserver=""
+renderer="" runtime="" runtime_dir="" verbs="" prefix="" wineserver="" workdir=""
 if [ -f "$game_conf" ]; then
     # shellcheck disable=SC1090
     # \x1f, not a tab: IFS whitespace would merge empty fields.
-    IFS=$'\x1f' read -r renderer runtime runtime_dir verbs prefix wineserver < <(
+    IFS=$'\x1f' read -r renderer runtime runtime_dir verbs prefix wineserver workdir < <(
         source "$game_conf"
         # shellcheck disable=SC2153 # from launch.conf
-        printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "${RENDERER:-}" "${RUNTIME:-}" "${RUNTIME_DIR:-}" \
-            "${VERBS[*]+${VERBS[*]}}" "${PREFIX:-}" "${WINESERVER:-}") || true
+        printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\n' "${RENDERER:-}" "${RUNTIME:-}" "${RUNTIME_DIR:-}" \
+            "${VERBS[*]+${VERBS[*]}}" "${PREFIX:-}" "${WINESERVER:-}" "${WORKDIR:-}") || true
     prefix="$(abs "$prefix")"; wineserver="$(abs "$wineserver")"
 else
     log "no $game_conf yet: the launcher's setup will create it (or refuse to launch)"
@@ -238,12 +263,12 @@ collect() {
         fi
     fi
     if [ -d "$game_state" ]; then
-        # Unity and OGRE logs wherever the game keeps them (Unity: the
-        # prefix's AppData/LocalLow; OGRE: next to the exe or in Documents),
-        # plus any other small *.log written during this run.
+        # Logs written during this run only: Unity's Player.log (the
+        # prefix's AppData/LocalLow), OGRE's ogre.log (next to the exe or in
+        # Documents) and any other small *.log. An older run's log
+        # (Player-prev.log, another renderer's) would mix into the markers.
         (cd "$game_state" && find . \( -path ./.launchers -prune \) -o -type f -size -20M \
-            \( -name 'Player.log' -o -name 'Player-prev.log' -o -iname 'ogre.log' \
-               -o \( -iname '*.log' -newer "$res/.t0" \) \) -print) \
+            -iname '*.log' -newer "$res/.t0" -print) \
             | sed 's|^\./||' >"$res/engine-logs.txt" || true
         while IFS= read -r f; do
             mkdir -p "$res/engine-logs/$(dirname "$f")"
@@ -288,7 +313,7 @@ markers_json() {
 marker() {
     local acc="$1" name="${2%%|*}" re="${2#*|}"
     shift 2
-    { grep -r -h -E -- "$re" "$@" 2>/dev/null || true; } | sed 's/^[[:space:]]*//' | cut -c1-200 \
+    { grep -r -h -E -- "$re" "$@" 2>/dev/null || true; } | tr -d '\r' | sed 's/^[[:space:]]*//' | cut -c1-200 \
         | LC_ALL=C sort | uniq -c | sort -rn | head -8 | sed 's/^ *//' \
         | jq -R -s --argjson acc "$acc" --arg n "$name" '$acc + {($n): split("\n") | map(select(length>0))}'
 }
@@ -310,9 +335,10 @@ while [ $((SECONDS - t0)) -lt "$secs" ]; do
     fi
     # Remember the game's process tree while it's up: after a SIGTERM the
     # leftovers check needs it, and the launcher may be gone by then.
-    while IFS= read -r p; do game_pids+=("$p"); done < <(tree_pids "$lpid")
+    while IFS= read -r p; do game_pids+=("$p"); done < <(game_tree)
     sleep 1
 done
+while IFS= read -r p; do game_pids+=("$p"); done < <(game_tree)
 # shellcheck disable=SC2207 # pids: no spaces or globs
 game_pids=($(printf '%s\n' ${game_pids[@]+"${game_pids[@]}"} | LC_ALL=C sort -un))
 # shellcheck disable=SC2207

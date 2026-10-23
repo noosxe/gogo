@@ -324,10 +324,10 @@ selection or the runtime pin runs all four.
 
 | Case | Game (gogid) | Build (with the setup below) | Pass when |
 |---|---|---|---|
-| `neo-cab-dxmt` | Neo Cab (1669531175), Unity, 64-bit D3D11 | `"$G" mac-app 1669531175 --renderer dxmt --out "$GOGO_HOME/apps/neo-cab" --yes` | `renderer` is `dxmt/…` and `runtime_dir` ends in `+dxmt-<rver>/engine`; `markers.feature_level` shows `D3D_FEATURE_LEVEL_11_1`; `metal_layer_failed` and `wined3d` are empty; `markers.unity` shows `Direct3D 11.0 [level 11.1]` and `Renderer: Apple M…`; the game draws correctly, with input and audio working |
-| `neo-cab-d3dmetal` | Neo Cab (1669531175) | `"$G" mac-app 1669531175 --renderer d3dmetal --out "$GOGO_HOME/apps/neo-cab" --yes` (answer `y` to the D3DMetal prompt once) | `renderer` is `d3dmetal/…` on `+d3dmetal-<rver>`; `markers.unity` shows `Direct3D 11.0 [level 11.1]` and `Renderer: AMD Compatibility Mode` (what D3DMetal reports); `missing_libs` is empty and there's no `could not load` in `markers.unity`; the game draws, with input and audio working |
-| `rebel-galaxy-dxmt` | Rebel Galaxy (1435582019), OGRE, 32-bit D3D11 | `"$G" mac-app 1435582019 --renderer dxmt --out "$GOGO_HOME/apps/rebel-galaxy" --yes` | `verbs` holds the L1 verbs (`d3dcompiler_43 d3dx11_43 d3dx9_43 xinput`); `markers.ogre` shows the D3D11 render system and no `OGRE EXCEPTION`; `markers.feature_level` is non-empty; the in-game image is right, not only the menu (docs/19 §8.2 Q7). Record the `class_linkage` count, since DXMT's `Class linkage not supported` warnings are part of Q7 |
-| `snake-core-gl` | Snake Core (1276268370), Java/libGDX, OpenGL | `"$G" mac-app 1276268370 --out "$GOGO_HOME/apps/snake-core" --yes` (auto, default `winecx`) | `runtime` is `winecx/…` with no derived runtime; the game window ("Snake Core - v1.6.1") is up and playable; no `OpenGL 2.0 or higher with the FBO extension is required` (that's the wine-staging failure, docs/19 §5) |
+| `neo-cab-dxmt` | Neo Cab (1669531175), Unity, 64-bit D3D11 | `"$G" mac-app 1669531175 --runtime winecx --renderer dxmt --out "$GOGO_HOME/apps/neo-cab" --yes` | `renderer` is `dxmt/…` and `runtime_dir` ends in `+dxmt-<rver>/engine`; `markers.feature_level` shows `D3D_FEATURE_LEVEL_11_1`; `metal_layer_failed` and `wined3d` are empty; `markers.unity` shows `Direct3D 11.0 [level 11.1]` and `Renderer: Apple M…`; the game draws correctly, with input and audio working |
+| `neo-cab-d3dmetal` | Neo Cab (1669531175) | `"$G" mac-app 1669531175 --runtime winecx --renderer d3dmetal --out "$GOGO_HOME/apps/neo-cab" --yes` (answer `y` to the D3DMetal prompt once) | `renderer` is `d3dmetal/…` on `+d3dmetal-<rver>`; `markers.unity` shows `Direct3D 11.0 [level 11.1]` and `Renderer: AMD Compatibility Mode` (what D3DMetal reports); `missing_libs` is empty and there's no `could not load` in `markers.unity`; the game draws, with input and audio working |
+| `rebel-galaxy-dxmt` | Rebel Galaxy (1435582019), OGRE, 32-bit D3D11 | `"$G" mac-app 1435582019 --runtime winecx --renderer dxmt --out "$GOGO_HOME/apps/rebel-galaxy" --yes` | `verbs` holds the L1 verbs (`d3dcompiler_43 d3dx11_43 d3dx9_43 xinput`); `markers.ogre` shows the D3D11 render system and no `OGRE EXCEPTION`; `markers.feature_level` is non-empty; the in-game image is right, not only the menu (docs/19 §8.2 Q7). Record the `class_linkage` count, since DXMT's `Class linkage not supported` warnings are part of Q7 |
+| `snake-core-gl` | Snake Core (1276268370), Java/libGDX, OpenGL | `"$G" mac-app 1276268370 --runtime winecx --out "$GOGO_HOME/apps/snake-core" --yes` (renderer auto) | `runtime` is `winecx/…` with no derived runtime; the game window ("Snake Core - v1.6.1") is up and playable; no `OpenGL 2.0 or higher with the FBO extension is required` (that's the wine-staging failure, docs/19 §5) |
 
 Each game builds into its own `apps/<game>/` dir, so the `*.app` glob below matches one
 bundle. Neo Cab's two cases share that bundle: build, pass, then rebuild with the other
@@ -346,7 +346,7 @@ G="$PWD/target/debug/gogo"
 export GOGO_HOME="$HOME/gogo-hostpass"
 
 # Per case: build (table above), then run it for 90 s and play during that time
-"$G" mac-app 1669531175 --renderer dxmt --out "$GOGO_HOME/apps/neo-cab" --yes
+"$G" mac-app 1669531175 --runtime winecx --renderer dxmt --out "$GOGO_HOME/apps/neo-cab" --yes
 scripts/host-pass.sh "$GOGO_HOME/apps/Neo Cab.app" --secs 90
 
 # Clean up when done (run logs stay in ~/Library/Logs/gogo/<gogid>)
@@ -364,10 +364,15 @@ rm -rf "$GOGO_HOME"; unset GOGO_HOME
    state. The launcher's #78 early-exit dialog is off (`GOGO_LAUNCHER_NO_DIALOG=1`,
    `--dialogs` turns it back on), so nothing waits for a click. Because Terminal is the
    parent, a microphone prompt names Terminal, not the game.
-3. Waits `--secs` (default 60) and follows the launcher's process tree. Quitting the
-   game early is fine: the run ends there with `status: "exited"`.
-4. Records the tree's on-screen windows (CoreGraphics via JXA, as the VM harness does,
-   limited to the game's pids) and whether a permission or Gatekeeper prompt is up.
+3. Waits `--secs` (default 60) and follows the game's processes. Those are the
+   launcher's tree, the prefix's `wineserver` and its tree, and anything with
+   `WINEPREFIX=<prefix>` in its environment or the game's Windows folder in its command
+   line. On `winecx` the game exe is started outside the launcher's tree
+   (`start.exe /exec`), so the tree alone misses it. Other Wine games have another
+   prefix and aren't counted. Quitting the game early is fine: the run ends there with
+   `status: "exited"`.
+4. Records the on-screen windows of those processes (CoreGraphics via JXA, as the VM
+   harness does) and whether a permission or Gatekeeper prompt is up.
    `--screenshot` adds `screencapture -x`. Terminal needs Screen Recording for that, and
    macOS asks once.
 5. Teardown: `SIGTERM` to the launcher (its own #42 teardown), up to `--kill-wait`
@@ -375,9 +380,10 @@ rm -rf "$GOGO_HOME"; unset GOGO_HOME
    cwd, as the launcher does), counts as a leftover. Leftovers go to
    `WINEPREFIX=<prefix> wineserver -k`, then `SIGKILL`, so nothing is left running.
 6. Collects this launch's run log (#77, `<ts>-<launcher pid>.log`, else the newest),
-   `launch.log`, and engine logs from `games/<gogid>/`: Unity `Player.log` /
-   `Player-prev.log` (the prefix's `AppData/LocalLow`), OGRE `ogre.log`, and any other
-   `*.log` written during the run.
+   `launch.log`, and the engine logs from `games/<gogid>/` written during the run: Unity
+   `Player.log` (the prefix's `AppData/LocalLow`), OGRE `ogre.log`, and any other `*.log`.
+   Older logs, such as Unity's `Player-prev.log` from a run on another renderer, are left
+   out so the markers show only this run.
 
 Results go to `target/host-pass/<slug>-<timestamp>/`. The summary is printed with home
 paths shown as `~`, so it can be pasted into a PR as is. The last line is the path of

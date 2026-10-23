@@ -10,8 +10,21 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HP="$REPO/scripts/host-pass.sh"
 command -v jq >/dev/null 2>&1 || { echo "needs jq (nix develop)" >&2; exit 3; }
 T="$(mktemp -d "${TMPDIR:-/tmp}/host-pass-fake.XXXXXX")"
-trap 'pkill -f "$T/" 2>/dev/null || true; [ -n "${KEEP:-}" ] || rm -rf "$T"' EXIT
+cleanup() {
+    pkill -f "$T/" 2>/dev/null || true
+    # The detached fake games don't carry $T in their command line.
+    cat "$T"/*/*.pid "$T"/decoy.pid 2>/dev/null | xargs kill -KILL 2>/dev/null || true
+    [ -n "${KEEP:-}" ] || rm -rf "$T"
+}
+trap cleanup EXIT
 GOGID=1669531175
+# The fake Wine processes: an ad-hoc signed copy of /bin/sleep. macOS hides
+# the environment of Apple-signed binaries from `ps -E` (Wine isn't one), and
+# nix's coreutils sleep dispatches on argv[0], which `exec -a` replaces.
+WINEPROC="$T/bin/wine-proc"
+mkdir -p "$T/bin"
+cp /bin/sleep "$WINEPROC"
+codesign -f -s - "$WINEPROC" 2>/dev/null || true
 fails=0
 ok() { printf 'ok   %s\n' "$1"; }
 bad() { printf 'FAIL %s\n' "$1"; fails=$((fails + 1)); }
@@ -24,6 +37,10 @@ check() { # name jq-expr summary
 #   good      runs until SIGTERM, then stops its game and exits 143
 #   stubborn  ignores SIGTERM, and so does its game: only wineserver -k ends it
 #   quits     the game exits 0 by itself after 1 s
+# good and stubborn start the game the way winecx does, outside the
+# launcher's process tree: one process with WINEPREFIX=<prefix> in its
+# environment, one whose argv[0] is the exe's Windows path. An older run's
+# Player-prev.log (another renderer) is already in the prefix.
 fake_bundle() {
     local name="$1" mode="$2" st="$T/$1/state" app="$T/$1/Fake Game.app"
     mkdir -p "$st/games/$GOGID/prefix/drive_c/users/crossover/AppData/LocalLow/Chance/Neo Cab" \
@@ -39,15 +56,21 @@ RENDERER='dxmt/v0.80'
 RUNTIME_DIR='runtimes/winecx/24.0.7_7+dxmt-v0.80/engine'
 VERBS=(d3dcompiler_43 xinput)
 PREFIX='games/$GOGID/prefix'
+WORKDIR='C:\GOG\Fake Game'
 WINESERVER='runtimes/fake/engine/bin/wineserver'
 EOF
     # wineserver -k: record the prefix it was given, end the game.
     cat >"$st/runtimes/fake/engine/bin/wineserver" <<EOF
 #!/bin/bash
 printf '%s %s\n' "\$WINEPREFIX" "\$*" >"$T/$name/wineserver-called"
-[ -f "$T/$name/game.pid" ] && kill -KILL "\$(cat "$T/$name/game.pid")" 2>/dev/null
+for f in "$T/$name/game.pid" "$T/$name/exe.pid"; do
+    [ -f "\$f" ] && kill -KILL "\$(cat "\$f")" 2>/dev/null
+done
 exit 0
 EOF
+    local ll="$st/games/$GOGID/prefix/drive_c/users/crossover/AppData/LocalLow/Chance/Neo Cab"
+    printf 'Direct3D:\r\n    Renderer: AMD Compatibility Mode (ID=0x66af)\r\n' >"$ll/Player-prev.log"
+    touch -t 202001010000 "$ll/Player-prev.log"
     cat >"$app/Contents/MacOS/Fake Game" <<EOF
 #!/bin/bash
 MODE='$mode'
@@ -56,18 +79,19 @@ RUN="\$GOGO_LOG_DIR/\$(date +%Y%m%d-%H%M%S)-\$\$.log"
 printf '# gogo run log: Fake Game ($GOGID)\n# renderer: dxmt/v0.80\n# ---\n' >"\$RUN"
 echo "\$(date) [\$\$] launch Fake Game" >>"\$GOGO_LOG_DIR/launch.log"
 pl="$st/games/$GOGID/prefix/drive_c/users/crossover/AppData/LocalLow/Chance/Neo Cab/Player.log"
-printf 'Direct3D:\n    Version:  Direct3D 11.0 [level 11.1]\n    Renderer: Apple M4 Pro (ID=0x0)\n' >"\$pl"
+printf 'Direct3D:\r\n    Version:  Direct3D 11.0 [level 11.1]\r\n    Renderer: Apple M4 Pro (ID=0x0)\r\n' >"\$pl"
 echo 'Creating D3D11 RenderSystem' >"$st/games/$GOGID/game/ogre.log"
 { echo 'info:dxmt: Using feature level D3D_FEATURE_LEVEL_11_1'
   echo '0124:err:combase:RoGetActivationFactory Failed to find library for L"Windows.System.DispatcherQueue"'; } | tee -a "\$RUN"
-case "\$MODE" in
-    quits) sleep 1; printf '# ---\n# exit: 0\n' >>"\$RUN"; exit 0 ;;
-    stubborn) trap '' TERM; (trap '' TERM; exec sleep 300) & ;;
-    *) sleep 300 & ;;
-esac
-echo \$! >"$T/$name/game.pid"
-[ "\$MODE" = stubborn ] || trap 'kill \$!; printf "# ---\n# exit: 143 (SIGTERM)\n" >>"\$RUN"; exit 143' TERM
-while :; do wait; [ "\$MODE" = stubborn ] || break; done
+if [ "\$MODE" = quits ]; then sleep 1; printf '# ---\n# exit: 0\n' >>"\$RUN"; exit 0; fi
+ign=:
+if [ "\$MODE" = stubborn ]; then trap '' TERM; ign="trap '' TERM"; fi
+( (eval "\$ign"; export WINEPREFIX="$st/games/$GOGID/prefix"; exec "$WINEPROC" 300) & echo \$! >"$T/$name/game.pid" )
+( (eval "\$ign"; exec -a 'C:\GOG\Fake Game\Fake.exe' "$WINEPROC" 300) & echo \$! >"$T/$name/exe.pid" )
+if [ "\$MODE" != stubborn ]; then
+    trap 'kill \$(cat "$T/$name/game.pid" "$T/$name/exe.pid"); printf "# ---\n# exit: 143 (SIGTERM)\n" >>"\$RUN"; exit 143' TERM
+fi
+while :; do sleep 1; done
 EOF
     chmod +x "$app/Contents/MacOS/Fake Game" "$st/runtimes/fake/engine/bin/wineserver"
 }
@@ -81,6 +105,25 @@ run_hp() { # name args… → summary path (last stdout line); exit code in $T/<
     echo "$rc" >"$T/$name/rc"
     tail -1 "$T/$name/stdout"
 }
+
+pid_of() { cat "$T/$1" 2>/dev/null; }
+alive() { kill -0 "$1" 2>/dev/null; }
+# check that a summary list (processes, leftovers: "pid stat command")
+# holds / lacks the pids in the given files.
+has_pids() { # name summary jq-path files…
+    local name="$1" sum="$2" path="$3" f want=true; shift 3
+    case "$1" in --not) want=false; shift ;; esac
+    for f in "$@"; do
+        if [ "$(jq --arg p "$(pid_of "$f")" "$path | map(split(\" \")[0]) | index(\$p) != null" "$sum")" != "$want" ]; then
+            bad "$name ($f)"; return
+        fi
+    done
+    ok "$name"
+}
+
+# Another Wine game (another prefix and folder), outside every tree: never
+# counted, never stopped.
+( (export WINEPREFIX="$T/other/prefix"; exec -a 'C:\GOG\Other Game\Other.exe' "$WINEPROC" 300) & echo $! >"$T/decoy.pid" )
 
 # 1. Cooperative launcher: SIGTERM teardown, logs collected.
 fake_bundle good good
@@ -103,6 +146,11 @@ check "good: markers" \
 check "good: err lines counted" '.err_lines | any(test("RoGetActivationFactory"))' "$s"
 if grep -q -F "$HOME/" "$s"; then bad "good: summary contains \$HOME"; else ok "good: summary has no \$HOME"; fi
 if [ -f "$(dirname "$s")/launcher-logs/launch.log" ]; then ok "good: launch.log copied"; else bad "good: launch.log missing"; fi
+has_pids "good: detached game found (WINEPREFIX, exe path)" "$s" .processes good/game.pid good/exe.pid
+has_pids "good: another prefix's game not counted" "$s" .processes --not decoy.pid
+check "good: only this run's engine logs, no CRs" \
+    '(.engine_logs | any(test("Player-prev")) | not) and (.markers.unity | any(test("AMD")) | not) and ([.markers[][]] | any(test("\r")) | not)' "$s"
+if alive "$(pid_of good/game.pid)" || alive "$(pid_of good/exe.pid)"; then bad "good: detached game left running"; else ok "good: detached game stopped"; fi
 if pgrep -f "$T/good/" >/dev/null; then bad "good: processes left"; else ok "good: nothing left running"; fi
 
 # 2. Launcher and game ignore SIGTERM: prefix-scoped wineserver -k fallback.
@@ -116,6 +164,8 @@ if [ "$(cat "$T/stubborn/wineserver-called" 2>/dev/null)" = "$T/stubborn/state/g
     ok "stubborn: wineserver -k on the game's prefix"
 else bad "stubborn: wineserver call: $(cat "$T/stubborn/wineserver-called" 2>/dev/null)"; fi
 sleep 1
+has_pids "stubborn: detached game reported as leftovers" "$s" .teardown.leftovers stubborn/game.pid stubborn/exe.pid
+if alive "$(pid_of stubborn/game.pid)" || alive "$(pid_of stubborn/exe.pid)"; then bad "stubborn: detached game left running"; else ok "stubborn: detached game stopped"; fi
 if pgrep -f "$T/stubborn/" >/dev/null; then bad "stubborn: processes left"; else ok "stubborn: nothing left running"; fi
 
 # 3. The game quits by itself before --secs.
@@ -138,6 +188,8 @@ if [ "$rc" = 2 ]; then ok "usage: no bundle → 2"; else bad "usage: rc $rc"; fi
 mkdir -p "$T/notgogo.app"
 rc=0; "$HP" "$T/notgogo.app" >/dev/null 2>&1 || rc=$?
 if [ "$rc" = 2 ]; then ok "usage: not a gogo bundle → 2"; else bad "usage: rc $rc"; fi
+
+if alive "$(pid_of decoy.pid)"; then ok "decoy: the other game survived"; else bad "decoy: the other game was stopped"; fi
 
 if [ "$fails" != 0 ]; then echo "$fails failed"; exit 1; fi
 echo "all host-pass fake cases pass"
