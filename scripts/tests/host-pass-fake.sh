@@ -44,6 +44,13 @@ mkdir -p "$T/bin"
 cp /bin/sleep "$WINEPROC"
 codesign -f -s - "$WINEPROC" 2>/dev/null || true
 fails=0
+# What Wine prints with WINEDEBUG=+loaddll (debugstr_w doubles backslashes).
+loaddll() { # dll builtin|native
+    printf '0024:trace:loaddll:build_module Loaded L"C:\\\\windows\\\\system32\\\\%s" at 000000006A240000: %s\n' "$1" "$2"
+}
+{ loaddll KERNEL32.dll builtin; loaddll d3d11.dll builtin; loaddll dxgi.dll builtin
+  loaddll D3DCompiler_43.dll native; } >"$T/loaddll-d3d.txt"
+{ loaddll KERNEL32.dll builtin; loaddll opengl32.dll builtin; } >"$T/loaddll-gl.txt"
 ok() { printf 'ok   %s\n' "$1"; }
 bad() { printf 'FAIL %s\n' "$1"; fails=$((fails + 1)); }
 check() { # name jq-expr summary
@@ -54,7 +61,8 @@ check() { # name jq-expr summary
 # as <mode> says:
 #   good      runs until SIGTERM, then stops its game and exits 143
 #   stubborn  ignores SIGTERM, and so does its game: only wineserver -k ends it
-#   quits     the game exits 0 by itself after 1 s
+#   quits     the game exits 0 by itself after 1 s; it draws with OpenGL
+#             (loads opengl32 only), the others with D3D11
 #   d3dmetal  like good, on D3DMetal (Unity reports "AMD Compatibility Mode"),
 #             and the game keeps logging (good goes silent after start-up)
 # good and stubborn start the game the way winecx does, outside the
@@ -105,6 +113,8 @@ else
     gpu='Apple M4 Pro (ID=0x0)'
 fi
 echo "\$(date) [\$\$] launch Fake Game" >>"\$GOGO_LOG_DIR/launch.log"
+printf '%s\n' "\$WINEDEBUG" >"$T/$name/winedebug"
+if [ "\$MODE" = quits ]; then tee -a "\$RUN" <"$T/loaddll-gl.txt" >&2; else tee -a "\$RUN" <"$T/loaddll-d3d.txt" >&2; fi
 pl="$st/games/$GOGID/prefix/drive_c/users/crossover/AppData/LocalLow/Chance/Neo Cab/Player.log"
 printf 'Direct3D:\r\n    Version:  Direct3D 11.0 [level 11.1]\r\n    Renderer: %s\r\n' "\$gpu" >"\$pl"
 echo 'Creating D3D11 RenderSystem' >"$st/games/$GOGID/game/ogre.log"
@@ -158,9 +168,10 @@ has_pids() { # name summary jq-path files…
 # counted, never stopped.
 ( (export WINEPREFIX="$T/other/prefix"; exec -a 'C:\GOG\Other Game\Other.exe' "$WINEPROC" $LIFETIME) & echo $! >"$T/decoy.pid" )
 
-# 1. Cooperative launcher: SIGTERM teardown, logs collected.
+# 1. Cooperative launcher: SIGTERM teardown, logs collected. A WINEDEBUG of
+# your own is kept, +loaddll added after it.
 fake_bundle good good
-s="$(run_hp good)"
+s="$(WINEDEBUG=fixme-all run_hp good)"
 [ -f "$s" ] || { bad "good: no summary ($(cat "$T/good/stderr"))"; s=/dev/null; }
 check "good: exit 1 (alive, no window)" '.status == "running_no_window" and .exit_code == 1' "$s"
 if [ "$(cat "$T/good/rc")" = 1 ]; then ok "good: process exit code 1"; else bad "good: rc $(cat "$T/good/rc")"; fi
@@ -176,6 +187,11 @@ check "good: engine logs collected" \
 check "good: markers" \
     '(.markers.feature_level | any(test("D3D_FEATURE_LEVEL_11_1"))) and (.markers.unity | any(test("Renderer: Apple M4 Pro")))
      and (.markers.ogre | any(test("D3D11 RenderSystem"))) and .markers.metal_layer_failed == []' "$s"
+check "good: graphics DLLs from +loaddll, each line counted once" \
+    '.markers.graphics_dlls == ["1 d3d11.dll: builtin", "1 d3dcompiler_43.dll: native", "1 dxgi.dll: builtin"]
+     and .markers.feature_level == ["1 info:dxmt: Using feature level D3D_FEATURE_LEVEL_11_1"]' "$s"
+if [ "$(cat "$T/good/winedebug")" = "fixme-all,+loaddll" ]; then ok "good: launcher got WINEDEBUG=fixme-all,+loaddll"
+else bad "good: launcher got WINEDEBUG=$(cat "$T/good/winedebug")"; fi
 check "good: err lines counted" '.err_lines | any(test("RoGetActivationFactory"))' "$s"
 if grep -q -F "$HOME/" "$s"; then bad "good: summary contains \$HOME"; else ok "good: summary has no \$HOME"; fi
 if [ -f "$(dirname "$s")/launcher-logs/launch.log" ]; then ok "good: launch.log copied"; else bad "good: launch.log missing"; fi
@@ -209,6 +225,7 @@ s="$(run_hp quits --secs 6)"
 [ -f "$s" ] || { bad "quits: no summary"; s=/dev/null; }
 check "quits: exited early, exit code from the run log" \
     '.status == "exited" and .exited_after_secs != null and .exited_after_secs < 6 and .run_exit == "0" and .teardown.ok' "$s"
+check "quits: an OpenGL game shows opengl32 only" '.markers.graphics_dlls == ["1 opengl32.dll: builtin"] and .winedebug == "+loaddll"' "$s"
 
 # 4. --dry-run launches nothing.
 fake_bundle dry good

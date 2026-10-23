@@ -324,10 +324,10 @@ selection or the runtime pin runs all four.
 
 | Case | Game (gogid) | Build (with the setup below) | Pass when |
 |---|---|---|---|
-| `neo-cab-dxmt` | Neo Cab (1669531175), Unity, 64-bit D3D11 | `"$G" mac-app 1669531175 --runtime winecx --renderer dxmt --out "$GOGO_HOME/apps/neo-cab" --yes` | `renderer` is `dxmt/…` and `runtime_dir` ends in `+dxmt-<rver>/engine`; `markers.feature_level` shows `D3D_FEATURE_LEVEL_11_1`; `metal_layer_failed` and `wined3d` are empty; `markers.unity` shows `Direct3D 11.0 [level 11.1]` and `Renderer: Apple M…`; the game draws correctly, with input and audio working |
+| `neo-cab-dxmt` | Neo Cab (1669531175), Unity, 64-bit D3D11 | `"$G" mac-app 1669531175 --runtime winecx --renderer dxmt --out "$GOGO_HOME/apps/neo-cab" --yes` | `renderer` is `dxmt/…` and `runtime_dir` ends in `+dxmt-<rver>/engine`; `markers.feature_level` shows `D3D_FEATURE_LEVEL_11_1`; `markers.graphics_dlls` shows `d3d11.dll` and `dxgi.dll`; `metal_layer_failed` and `wined3d` are empty; `markers.unity` shows `Direct3D 11.0 [level 11.1]` and `Renderer: Apple M…`; the game draws correctly, with input and audio working |
 | `neo-cab-d3dmetal` | Neo Cab (1669531175) | `"$G" mac-app 1669531175 --runtime winecx --renderer d3dmetal --out "$GOGO_HOME/apps/neo-cab" --yes` (answer `y` to the D3DMetal prompt once) | `renderer` is `d3dmetal/…` on `+d3dmetal-<rver>`; `markers.unity` shows `Direct3D 11.0 [level 11.1]` and `Renderer: AMD Compatibility Mode` (what D3DMetal reports); `markers.d3dmetal` holds that line; `missing_libs` is empty and there's no `could not load` in `markers.unity`; the game draws, with input and audio working |
-| `rebel-galaxy-dxmt` | Rebel Galaxy (1435582019), OGRE, 32-bit D3D11 | `"$G" mac-app 1435582019 --runtime winecx --renderer dxmt --out "$GOGO_HOME/apps/rebel-galaxy" --yes` | `verbs` holds the L1 verbs (`d3dcompiler_43 d3dx11_43 d3dx9_43 xinput`); `markers.ogre` shows the D3D11 render system and no `OGRE EXCEPTION`; `markers.feature_level` is non-empty; the in-game image is right, not only the menu (docs/19 §8.2 Q7). A loading screen that never ends still reads `ok`: check `log_quiet_secs` and your own eyes. Record the `class_linkage` count, since DXMT's `Class linkage not supported` warnings are part of Q7 |
-| `snake-core-gl` | Snake Core (1276268370), Java/libGDX, OpenGL | `"$G" mac-app 1276268370 --runtime winecx --out "$GOGO_HOME/apps/snake-core" --yes` (renderer auto) | `runtime` is `winecx/…` with no derived runtime; the game window ("Snake Core - v1.6.1") is up and playable; no `OpenGL 2.0 or higher with the FBO extension is required` (that's the wine-staging failure, docs/19 §5) |
+| `rebel-galaxy-dxmt` | Rebel Galaxy (1435582019), OGRE, 32-bit D3D11 | `"$G" mac-app 1435582019 --runtime winecx --renderer dxmt --out "$GOGO_HOME/apps/rebel-galaxy" --yes` | `verbs` holds the L1 verbs (`d3dcompiler_43 d3dx11_43 d3dx9_43 xinput`), and `markers.graphics_dlls` shows `d3dcompiler_43.dll: native` (the verb took); `markers.ogre` shows the D3D11 render system and no `OGRE EXCEPTION`; `markers.feature_level` is non-empty; the in-game image is right, not only the menu (docs/19 §8.2 Q7). A loading screen that never ends still reads `ok`: check `log_quiet_secs` and your own eyes. Record the `class_linkage` count, since DXMT's `Class linkage not supported` warnings are part of Q7 |
+| `snake-core-gl` | Snake Core (1276268370), Java/libGDX, OpenGL | `"$G" mac-app 1276268370 --runtime winecx --out "$GOGO_HOME/apps/snake-core" --yes` (renderer auto) | `runtime` is `winecx/…` with no derived runtime. `renderer` reads `wined3d`, gogo's label for anything that isn't D3D10/11; an OpenGL game makes no D3D calls, so wined3d isn't used. `markers.graphics_dlls` shows `opengl32.dll: builtin` and no `d3d*`/`dxgi`. The game has no engine log and logs no `err:` lines on a good run. The window ("Snake Core - v1.6.1") is up and playable, with no `OpenGL 2.0 or higher with the FBO extension is required` (that's the wine-staging failure, docs/19 §5) |
 
 Each game builds into its own `apps/<game>/` dir, so the `*.app` glob below matches one
 bundle. Neo Cab's two cases share that bundle: build, pass, then rebuild with the other
@@ -362,7 +362,9 @@ rm -rf "$GOGO_HOME"; unset GOGO_HOME
 2. Starts the launcher (`Contents/MacOS/*`) directly from the shell, not with `open`,
    so `GOGO_HOME` reaches it and a stale config's `gogo mac-app setup` uses the scratch
    state. The launcher's #78 early-exit dialog is off (`GOGO_LAUNCHER_NO_DIALOG=1`,
-   `--dialogs` turns it back on), so nothing waits for a click. Because Terminal is the
+   `--dialogs` turns it back on), so nothing waits for a click. It adds `+loaddll` to
+   `WINEDEBUG`, after any value of your own, so Wine logs one line per DLL it loads; a
+   compat entry's `env` can still override it. Because Terminal is the
    parent, a microphone prompt names Terminal, not the game.
 3. Waits `--secs` (default 60) and follows the game's processes. Those are the
    launcher's tree, the prefix's `wineserver` and its tree, and anything with
@@ -398,14 +400,15 @@ teardown, `1` = the app failed (`exited`, `running_no_window`, `teardown_leftove
   "runtime_dir": "runtimes/winecx/24.0.7_7+dxmt-v0.80/engine", "verbs": "",
   "host": {"macos": "27.0.1", "chip": "Apple M4 Pro"},
   "launched": true, "running_after_secs": true, "exited_after_secs": null, "run_exit": "143 (SIGTERM)",
-  "log_quiet_secs": 0, "engine_log_quiet_secs": 4,
+  "log_quiet_secs": 0, "engine_log_quiet_secs": 4, "winedebug": "+loaddll",
   "windows": [{"owner": "…", "pid": 4242, "layer": 0, "w": 1920, "h": 1080}],
   "prompts_left": [],
   "teardown": {"signal": "TERM", "launcher_pid": "4200", "wait_secs": 20, "leftovers": [],
                "wineserver_k_fallback": false, "killed_after_fallback": [], "ok": true},
   "markers": {"feature_level": ["2 info:dxmt: Using feature level D3D_FEATURE_LEVEL_11_1"],
               "metal_layer_failed": [], "class_linkage": [], "wined3d": [],
-              "opengl": [], "unity": ["1 Renderer: Apple M4 Pro (ID=0x…)", "…"], "ogre": [], "d3dmetal": []},
+              "opengl": [], "unity": ["1 Renderer: Apple M4 Pro (ID=0x…)", "…"], "ogre": [], "d3dmetal": [],
+              "graphics_dlls": ["1 d3d11.dll: builtin", "1 dxgi.dll: builtin"]},
   "err_lines": ["3 0124:err:combase:RoGetActivationFactory …DispatcherQueue…"],
   "missing_libs": [], "engine_logs": ["prefix/drive_c/users/crossover/AppData/LocalLow/…/Player.log"],
   "files": {"run_log": "…/launcher-logs/20261023-171500-4200.log", "launch_log": "…", "engine_logs": "…"}
@@ -419,6 +422,12 @@ teardown, `1` = the app failed (`exited`, `running_no_window`, `teardown_leftove
   run, so its evidence is Unity's `Renderer: AMD Compatibility Mode`, or the D3DMetal
   libs named in a failure. The run log's header and footer (`# renderer: …`) never count,
   because they say what was asked for, not what ran.
+- `graphics_dlls`: the graphics DLLs Wine loaded, as `<count> <dll>: builtin|native`,
+  from the `+loaddll` trace. `opengl32` only means the game draws with OpenGL itself.
+  `d3d11`/`dxgi` means D3D11 (DXMT and D3DMetal replace these builtins). `native`
+  `d3dcompiler_*`/`d3dx*` comes from winetricks verbs. Counts are per process.
+- Wine-side markers read the run log, which holds the launcher's output; the
+  launcher's own stdout/stderr files are read only when there's no run log.
 - `log_quiet_secs`, `engine_log_quiet_secs`: how long Wine's output and the engine logs
   had been silent when the wait ended. A game stuck on a loading screen can still be
   alive with a window (`ok`), but its logs stop. A quiet time close to `--secs` is a
