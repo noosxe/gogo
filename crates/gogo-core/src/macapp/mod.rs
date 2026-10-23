@@ -593,7 +593,12 @@ fn choose_runtime(
         if !selectable {
             continue;
         }
-        if let Some(m) = manifest.iter().find(|m| m.id == entry.id).cloned() {
+        // A derived runtime (`<ver>+<renderer>-<rver>`) is setup's, not a choice.
+        if let Some(m) = manifest
+            .iter()
+            .find(|m| m.id == entry.id && !store::is_derived(&m.version))
+            .cloned()
+        {
             lanes.push(MenuLane::Cached(entry, m));
         } else {
             lanes.push(MenuLane::Fresh(entry));
