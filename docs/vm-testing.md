@@ -205,13 +205,18 @@ summary's `vm_no_gl` holds the log lines; judge such titles on the host (#80).
 | `teardown-term` | launcher teardown (#42) | `SIGTERM` to the launcher leaves no Wine process behind |
 | `teardown-kill` | launcher teardown (#42) | informational: what a `SIGKILL` (untrappable) leaves |
 | `runtime-cx24` | L0 runtime (#62) | the default `winecx` engine and its `Frameworks/` start TAG in a clean guest: no missing dylibs, no microphone prompt |
-| `prefix-setup`, `renderer-l1` | #67, #70 | placeholders (`-` bundle): fill in the bundle and check when those land |
+| `renderer-l1-ddraw` | L1 renderer (#70) | Pharaoh Gold (1207659046) imports only `ddraw`: setup gives it cnc-ddraw (`renderer` = `cnc-ddraw/…`) and its dialog is on screen |
+| `renderer-l1-wined3d` | L1 renderer (#70) | TAG's legacy Direct3D keeps wined3d on the base `winecx` runtime |
+| `renderer-l1-dxmt` | L1 renderer (#70) | Neo Cab (1669531175, Unity, 64-bit) runs from the derived `winecx/<ver>+dxmt-<rver>` runtime and DXMT logs a D3D11 feature level. No window is expected: the guest has no Metal 3 ("Failed to get metal layer"); rendering is the host pass (#80) |
+| `prefix-setup` | #67 | placeholder (`-` bundle): fill in the bundle and check when it lands |
 
 Build the bundles first:
 
 ```sh
 gogo mac-app --from-depot 1207659013 --out target/v2 --yes
 gogo mac-app --from-depot 1146738698 --out target/v2 --yes
+gogo mac-app --from-depot 1207659046 --out target/v2 --yes   # Pharaoh Gold
+gogo mac-app --from-depot 1669531175 --out target/v2 --yes   # Neo Cab
 scripts/vm-test.sh smoke
 ```
 
@@ -229,6 +234,7 @@ path of `summary.json`, and the summary is printed just before it:
   "status": "ok | running_no_window | exited | did_not_launch | teardown_leftovers | gatekeeper_prompted | gatekeeper_blocked | infra_error",
   "exit_code": 0,
   "model": "v2", "gogid": "1207659013", "runtime": "wine-staging/11.18",
+  "renderer": "wined3d", "runtime_dir": "runtimes/wine-staging/11.18/engine",
   "state": {"units": ["copy games/1207659013", "store runtimes/wine-staging"], "runtimes": "share"},
   "gatekeeper": "not_quarantined | allowed | prompted | blocked",
   "gatekeeper_dialog_left": false,
@@ -254,6 +260,9 @@ alive), so the smoke cases use 45.
 - `codesign_verify_rc` is the strict verify before launch; `codesign_strict_rc` is the
   same check after the run. `bundle_modified` compares a stat listing of `Contents/`
   before and after. Both catch a write into the signed bundle (#53).
+- `renderer`, `runtime_dir`: what setup applied on the host, from the game's state
+  `launch.conf` (`RENDERER`, `RUNTIME_DIR`). A DXMT game's `runtime_dir` is its derived
+  `<ver>+dxmt-<rver>` runtime (#70).
 - `missing_libs`: `cannot find` / `Library not loaded` / `image not found` lines from
   Wine's and the launcher's logs, i.e. what the runtime pulled from the build host.
 - `writes_outside_gogo`: files created in the guest home during the run, outside
