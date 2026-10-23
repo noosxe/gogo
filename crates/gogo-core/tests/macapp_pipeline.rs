@@ -3951,3 +3951,423 @@ fn build_flags_replace_existing_l4_values() {
     unsafe { std::env::remove_var("GOGO_HOME") };
     drop(guard);
 }
+
+// — `gogo mac-app doctor` (#79) —
+
+/// A built and set-up v2 game for the doctor tests: winecx in the store,
+/// DXMT in the renderer store and its derived runtime, a 32-bit d3d11 game
+/// (gogid 1000000001). GOGO_HOME must already point at `home`. Returns the
+/// `.app`.
+fn doctor_game(tmp: &std::path::Path, home: &std::path::Path) -> std::path::PathBuf {
+    let base = home.join("runtimes/winecx/24.0.7_7");
+    fake_runtime(&base.join("engine"), &tmp.join("wine.log"));
+    let wine = base.join("engine/bin/wine");
+    let script = std::fs::read_to_string(&wine)
+        .unwrap()
+        .replace("wine-9.0-fake", "wine-9.0 (SikarugirCX 24.0.7)");
+    std::fs::write(&wine, script).unwrap();
+    for arch in ["x86_64-windows", "i386-windows", "x86_64-unix"] {
+        std::fs::create_dir_all(base.join("engine/lib/wine").join(arch)).unwrap();
+    }
+    std::fs::create_dir_all(base.join("Frameworks")).unwrap();
+    let m = |id: &str, version: &str, entry_rel: &str| macapp::store::ManifestEntry {
+        id: id.into(),
+        version: version.into(),
+        sha256: "0".into(),
+        fetched_at: "2026-10-23T00:00:00Z".into(),
+        upstream_url: "http://x".into(),
+        entry_rel: entry_rel.into(),
+        bytes: 1,
+    };
+    macapp::store::save_manifest(&[m("winecx", "24.0.7_7", "engine/bin/wine")]).unwrap();
+    let dxmt = home.join("renderers/dxmt/v0.80/x86_64/v0.80");
+    for rel in ["i386-windows/d3d11.dll", "x86_64-unix/winemetal.so"] {
+        std::fs::create_dir_all(dxmt.join(rel).parent().unwrap()).unwrap();
+        std::fs::write(dxmt.join(rel), "dxmt").unwrap();
+    }
+    macapp::store::save_renderer_manifest(&[m("dxmt", "v0.80", "v0.80/x86_64-unix/winemetal.so")])
+        .unwrap();
+    let tree = depot_game(
+        tmp,
+        "1000000001",
+        "Rebel",
+        false,
+        &["kernel32.dll", "d3d11.dll"],
+    );
+    let opts = MacAppOptions {
+        installer: None,
+        game_tree: Some(tree),
+        name: None,
+        mode: RuntimeMode::Catalog("winecx".into()),
+        runtime_path: None,
+        out_dir: tmp.join("out"),
+        overwrite: true,
+        recipe: Default::default(),
+        runtime_menu: false,
+        runtime_version: None,
+        lutris_base: None,
+        renderer: macapp::RendererChoice::Auto,
+        portable: false,
+        gogo_path: Some(tmp.join("no-such-gogo")),
+    };
+    let plan = macapp::plan(&opts, None, &mut |_| {}).expect("plan");
+    macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).expect("execute");
+    tmp.join("out/Rebel.app")
+}
+
+/// A host whose codesign is a stub (`ok` or not), with Rosetta "installed".
+fn doctor_host(tmp: &std::path::Path, codesign_ok: bool) -> macapp::doctor::Host {
+    let codesign = tmp.join(if codesign_ok {
+        "codesign-ok"
+    } else {
+        "codesign-bad"
+    });
+    write_exec(
+        &codesign,
+        if codesign_ok {
+            "#!/bin/sh\nexit 0\n"
+        } else {
+            "#!/bin/sh\necho \"$4: a sealed resource is missing or invalid\" >&2\nexit 1\n"
+        },
+    );
+    let rosetta = tmp.join("rosetta");
+    std::fs::write(&rosetta, "").unwrap();
+    macapp::doctor::Host {
+        codesign: Some(codesign),
+        rosetta: Some(rosetta),
+        logs: tmp.join("logs"),
+    }
+}
+
+/// `(check, level)` of every finding that isn't ok.
+fn not_ok(target: &str, host: &macapp::doctor::Host) -> Vec<(&'static str, macapp::doctor::Level)> {
+    let r = macapp::doctor::doctor(
+        target,
+        &macapp::doctor::DoctorOptions {
+            host: host.clone(),
+            stop_leftovers: false,
+        },
+    )
+    .unwrap();
+    r.findings
+        .iter()
+        .filter(|f| f.level != macapp::doctor::Level::Ok)
+        .map(|f| (f.check, f.level))
+        .collect()
+}
+
+#[test]
+fn doctor_all_green_then_each_check_fails_in_turn() {
+    use macapp::doctor::{DoctorOptions, Level};
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let t = tmp.path();
+    let home = t.join("home");
+    // SAFETY: env mutation under ENV_LOCK.
+    unsafe {
+        std::env::set_var("GOGO_HOME", &home);
+        std::env::set_var("GOGO_CONFIG", t.join("config.toml"));
+        std::env::remove_var("GOGO_COMPAT_DIR");
+    }
+    let app = doctor_game(t, &home);
+    let host = doctor_host(t, true);
+    let gogid = "1000000001";
+    let g = home.join("games").join(gogid);
+
+    // All green, by gogid and by bundle path.
+    let r = macapp::doctor::doctor(
+        gogid,
+        &DoctorOptions {
+            host: host.clone(),
+            stop_leftovers: false,
+        },
+    )
+    .unwrap();
+    let checks: Vec<&str> = r.findings.iter().map(|f| f.check).collect();
+    assert_eq!(
+        checks,
+        [
+            "bundle",
+            "codesign",
+            "compat",
+            "runtime",
+            "renderer",
+            "stamp",
+            "links",
+            "rosetta",
+            "processes",
+            "log"
+        ]
+    );
+    assert!(r.ok(), "{:#?}", r.findings);
+    assert!(
+        r.findings.iter().all(|f| f.level == Level::Ok),
+        "{:#?}",
+        r.findings
+    );
+    let renderer = &r.findings[4].message;
+    assert!(
+        renderer.contains("winecx/24.0.7_7+dxmt-v0.80 has x86_64-unix/winemetal.so"),
+        "{renderer}"
+    );
+    assert_eq!(r.bundle.as_deref(), Some(app.as_path()));
+    assert!(not_ok(&app.to_string_lossy(), &host).is_empty());
+
+    // Each check fails (or warns) alone.
+    assert_eq!(
+        not_ok(gogid, &doctor_host(t, false)),
+        [("codesign", Level::Fail)]
+    );
+    let r = macapp::doctor::doctor(
+        gogid,
+        &DoctorOptions {
+            host: doctor_host(t, false),
+            stop_leftovers: false,
+        },
+    )
+    .unwrap();
+    assert!(!r.ok());
+    assert!(
+        r.findings[1]
+            .message
+            .contains("a sealed resource is missing or invalid"),
+        "{:?}",
+        r.findings[1]
+    );
+
+    let mut no_rosetta = host.clone();
+    no_rosetta.rosetta = Some(t.join("no-rosetta"));
+    assert_eq!(not_ok(gogid, &no_rosetta), [("rosetta", Level::Fail)]);
+
+    let base = home.join("runtimes/winecx/24.0.7_7");
+    std::fs::rename(&base, t.join("aside")).unwrap();
+    assert_eq!(not_ok(gogid, &host), [("runtime", Level::Fail)]);
+    std::fs::rename(t.join("aside"), &base).unwrap();
+
+    let metal =
+        home.join("runtimes/winecx/24.0.7_7+dxmt-v0.80/engine/lib/wine/x86_64-unix/winemetal.so");
+    std::fs::remove_file(&metal).unwrap();
+    assert_eq!(not_ok(gogid, &host), [("renderer", Level::Fail)]);
+    std::fs::write(&metal, "dxmt").unwrap();
+
+    std::fs::rename(g.join("prefix"), t.join("prefix-aside")).unwrap();
+    assert_eq!(not_ok(gogid, &host), [("stamp", Level::Fail)]);
+    std::fs::rename(t.join("prefix-aside"), g.join("prefix")).unwrap();
+
+    let docs = g.join("prefix/drive_c/users/someone/Documents");
+    std::fs::create_dir_all(docs.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink("/Users/someone/Documents", &docs).unwrap();
+    assert_eq!(not_ok(gogid, &host), [("links", Level::Fail)]);
+    std::fs::remove_file(&docs).unwrap();
+
+    std::fs::rename(&app, t.join("app-aside")).unwrap();
+    assert_eq!(not_ok(gogid, &host), [("bundle", Level::Fail)]);
+    std::fs::rename(t.join("app-aside"), &app).unwrap();
+
+    // Warnings: a known-broken compat entry, a failed last launch, a stale
+    // stamp after an L4 edit.
+    let db = t.join("compat-db");
+    std::fs::create_dir_all(&db).unwrap();
+    std::fs::write(
+        db.join(format!("{gogid}.toml")),
+        "status = \"broken\"\nnotes = \"black screen\"\n",
+    )
+    .unwrap();
+    unsafe { std::env::set_var("GOGO_COMPAT_DIR", &db) };
+    assert_eq!(not_ok(gogid, &host), [("compat", Level::Warn)]);
+    unsafe { std::env::remove_var("GOGO_COMPAT_DIR") };
+
+    let logs = t.join("logs").join(gogid);
+    std::fs::create_dir_all(&logs).unwrap();
+    std::fs::write(
+        logs.join("20261023-120000-42.log"),
+        "# gogo run log: Rebel (1000000001)\n# started: 2026-10-23 12:00:00 +0200\n# ---\n\
+         err:module:import_dll Library d3dcompiler_47.dll not found\n# ---\n# exit: 53\n\
+         # duration: 1s\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("20261023-120000-42.log", logs.join("latest.log")).unwrap();
+    let r = macapp::doctor::doctor(
+        gogid,
+        &DoctorOptions {
+            host: host.clone(),
+            stop_leftovers: false,
+        },
+    )
+    .unwrap();
+    let log = r.findings.iter().find(|f| f.check == "log").unwrap();
+    assert_eq!(log.level, Level::Warn);
+    assert!(
+        log.message.contains("exited 53 after 1s"),
+        "{}",
+        log.message
+    );
+    assert_eq!(
+        log.detail,
+        ["err:module:import_dll Library d3dcompiler_47.dll not found"]
+    );
+    assert!(r.ok(), "warnings don't fail");
+    std::fs::remove_dir_all(&logs).unwrap();
+
+    // The same renderer the bundle baked, but the L4 bytes changed.
+    macapp::compat::set_user_keys(gogid, &[("renderer", Some("dxmt/v0.80"))]).unwrap();
+    assert_eq!(not_ok(gogid, &host), [("stamp", Level::Warn)]);
+
+    // D3DMetal as the renderer without consent: a warning (setup falls back
+    // to wined3d), next to the stale stamp the L4 edit causes.
+    macapp::compat::set_user_keys(gogid, &[("renderer", Some("d3dmetal"))]).unwrap();
+    assert_eq!(
+        not_ok(gogid, &host),
+        [("d3dmetal", Level::Warn), ("stamp", Level::Warn)]
+    );
+    std::fs::write(t.join("config.toml"), "[mac_app]\nd3dmetal = \"no\"\n").unwrap();
+    let r = macapp::doctor::doctor(
+        gogid,
+        &DoctorOptions {
+            host: host.clone(),
+            stop_leftovers: false,
+        },
+    )
+    .unwrap();
+    let d = r.findings.iter().find(|f| f.check == "d3dmetal").unwrap();
+    assert!(d.message.contains("declined"), "{}", d.message);
+    assert!(
+        d.hint.as_deref().unwrap().contains("d3dmetal = \"yes\""),
+        "{d:?}"
+    );
+
+    // A host Wine (`path:`) works but warns (#125).
+    macapp::compat::set_user_keys(
+        gogid,
+        &[
+            ("renderer", Some("wined3d")),
+            (
+                "runtime",
+                Some(&format!("path:{}", base.join("engine").display())),
+            ),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        not_ok(gogid, &host),
+        [("runtime", Level::Warn), ("stamp", Level::Warn)]
+    );
+
+    unsafe {
+        std::env::remove_var("GOGO_HOME");
+        std::env::remove_var("GOGO_CONFIG");
+    }
+    drop(guard);
+}
+
+/// Not a test: the body of the stub Wine process the leftover-process test
+/// runs from a copy of this binary named `wine-stub` (a copied system
+/// binary is killed on macOS; a script shows up as its interpreter).
+#[test]
+#[ignore]
+fn stub_wine_process() {
+    if std::env::var_os("GOGO_STUB_WINE").is_some() {
+        std::thread::sleep(std::time::Duration::from_secs(120));
+    }
+}
+
+/// A Wine process left in the prefix with no launcher (#103) is reported,
+/// spared while a launcher of the game runs, and stopped by
+/// `--stop-leftovers`.
+#[test]
+fn doctor_reports_and_stops_leftover_wine_processes() {
+    use macapp::doctor::{DoctorOptions, Level};
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let t = tmp.path();
+    let home = t.join("home");
+    // SAFETY: env mutation under ENV_LOCK.
+    unsafe {
+        std::env::set_var("GOGO_HOME", &home);
+        std::env::set_var("GOGO_CONFIG", t.join("config.toml"));
+    }
+    doctor_game(t, &home);
+    let host = doctor_host(t, true);
+    let gogid = "1000000001";
+    let g = home.join("games").join(gogid);
+
+    let stub = t.join("wine-stub");
+    std::fs::copy(std::env::current_exe().unwrap(), &stub).unwrap();
+    let mut child = std::process::Command::new(&stub)
+        .args([
+            "--exact",
+            "stub_wine_process",
+            "--ignored",
+            "--test-threads=1",
+        ])
+        .env("GOGO_STUB_WINE", "1")
+        .current_dir(g.join("prefix/drive_c"))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    assert!(
+        wait_until(10, || macapp::doctor::prefix_procs(&g.join("prefix"))
+            .iter()
+            .any(|p| p.pid == pid)),
+        "stub {pid} not seen in the prefix"
+    );
+    let r = |stop| {
+        macapp::doctor::doctor(
+            gogid,
+            &DoctorOptions {
+                host: host.clone(),
+                stop_leftovers: stop,
+            },
+        )
+        .unwrap()
+        .findings
+        .into_iter()
+        .find(|f| f.check == "processes")
+        .unwrap()
+    };
+    let f = r(false);
+    assert_eq!(f.level, Level::Warn, "{f:?}");
+    assert!(
+        f.message.contains(&format!("{pid} wine-stub")),
+        "{}",
+        f.message
+    );
+    assert_eq!(
+        f.hint.as_deref(),
+        Some("gogo mac-app doctor 1000000001 --stop-leftovers")
+    );
+
+    // A live launcher of the game (its `.launchers/<pid>` record): the
+    // processes are the running game's, and nothing is stopped.
+    let start = std::process::Command::new("ps")
+        .args(["-o", "lstart=", "-p", &std::process::id().to_string()])
+        .output()
+        .unwrap();
+    std::fs::create_dir_all(g.join(".launchers")).unwrap();
+    let record = g.join(".launchers").join(std::process::id().to_string());
+    std::fs::write(&record, String::from_utf8_lossy(&start.stdout).trim()).unwrap();
+    let f = r(true);
+    assert_eq!(f.level, Level::Ok);
+    assert!(f.message.contains("the game is running"), "{}", f.message);
+    assert!(child.try_wait().unwrap().is_none(), "stub spared");
+    std::fs::remove_file(&record).unwrap();
+
+    let f = r(true);
+    assert_eq!(f.level, Level::Ok, "{f:?}");
+    assert!(f.message.starts_with("stopped 1 leftover"), "{}", f.message);
+    assert!(
+        wait_until(5, || child.try_wait().unwrap().is_some()),
+        "stub still running"
+    );
+    let log = std::fs::read_to_string(t.join("wine.log")).unwrap();
+    assert!(log.contains("wineserver -k"), "the launcher's teardown ran");
+    assert_eq!(r(false).message, "no Wine processes left in the prefix");
+
+    unsafe {
+        std::env::remove_var("GOGO_HOME");
+        std::env::remove_var("GOGO_CONFIG");
+    }
+    drop(guard);
+}

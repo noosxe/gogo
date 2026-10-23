@@ -131,7 +131,14 @@ gogo mac-app next-renderer <gogid> --dry-run                    # what "Try next
 `~/Library/Logs/gogo/<gogid>/`. If the game quits within 15 s or with an error,
 the launcher shows a dialog with the last error lines and *Open log*, *Copy
 report* and *Try next renderer* (which runs `gogo mac-app next-renderer` and
-starts the game again). `gogo mac-app doctor` is planned (#79).
+starts the game again). `gogo mac-app doctor` checks everything the game needs
+(signature, runtime and renderer files, prefix, Rosetta, leftover Wine processes,
+the last launch's exit code) without starting it, one line per finding:
+
+```sh
+gogo mac-app doctor 1207659013                     # or the .app path; --json for scripts
+gogo mac-app doctor 1207659013 --stop-leftovers    # also stop Wine processes a dead launcher left
+```
 
 **Recipes and runtime menus are opt-in.** `--interactive` asks for both in
 menus on a terminal; bare `--recipe` or `--runtime` asks for just that one.

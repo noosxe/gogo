@@ -276,6 +276,24 @@ pub enum MacAppSub {
         #[arg(long)]
         json: bool,
     },
+    /// Can this game work on this Mac (#79)? Checks the bundle's signature,
+    /// the effective runtime and renderer files, the prefix stamp and links,
+    /// Rosetta, Wine processes left running, and the last launch's log; one
+    /// line per finding (ok / warn / fail) with a fix hint. Never launches
+    /// the game. Exits 1 when a check fails (warnings don't).
+    Doctor {
+        /// GOG product id, or the game's .app.
+        #[arg(value_name = "BUNDLE|GOGID")]
+        target: String,
+        /// Stop Wine processes left running in the game's prefix with no
+        /// launcher (the launcher's own teardown: `wineserver -k`, then
+        /// SIGKILL). Changes nothing else.
+        #[arg(long)]
+        stop_leftovers: bool,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Switch a game to the next renderer in its order (the launcher's
     /// "Try next renderer", #78): the one after what setup last applied,
     /// written to the override file as `renderer = "<ref>"`. Prints the new
