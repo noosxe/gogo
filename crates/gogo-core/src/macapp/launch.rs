@@ -514,18 +514,27 @@ teardown() {
     [ -n "$TORN" ] && return
     TORN=1
     if [ -n "$WPID" ]; then kill -TERM -- "-$WPID" 2>/dev/null; fi
-    "$WINESERVER_BIN" -k >/dev/null 2>&1 &
-    local k=$! left
-    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-        kill -0 "$k" 2>/dev/null || break
-        sleep 0.25
-    done
-    kill -KILL "$k" 2>/dev/null
-    left="$(prefix_server_pid)"
-    if [ -n "$left" ]; then
-        log "reaped: wineserver $left did not exit after -k, SIGKILL"
-        # shellcheck disable=SC2086
-        kill -KILL $left 2>/dev/null
+    local k left other
+    other="$(other_launcher)"
+    if [ -n "$other" ]; then
+        # A later launch of this game shares the prefix (#103): its game
+        # needs the wineserver, so only this run's process group goes.
+        log "launcher $other of this game is running: leaving the prefix's wineserver"
+        sleep 1
+    else
+        "$WINESERVER_BIN" -k >/dev/null 2>&1 &
+        k=$!
+        for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+            kill -0 "$k" 2>/dev/null || break
+            sleep 0.25
+        done
+        kill -KILL "$k" 2>/dev/null
+        left="$(prefix_server_pid)"
+        if [ -n "$left" ]; then
+            log "reaped: wineserver $left did not exit after -k, SIGKILL"
+            # shellcheck disable=SC2086
+            kill -KILL $left 2>/dev/null
+        fi
     fi
     if [ -n "$WPID" ]; then
         left="$(ps -A -o pid=,pgid=,command= | awk -v g="$WPID" '$2 == g { print }')"
@@ -536,7 +545,80 @@ teardown() {
     fi
     log "teardown done"
 }
-on_signal() { log "got SIG$1"; teardown; end_run_log "$2" "SIG$1"; exit "$2"; }
+
+# #103: a launcher killed untrapped (SIGKILL, Force Quit) can't tear down,
+# so a watchdog in its own process group does it: it polls the launcher
+# every 2s and, once it's gone, runs the same teardown, ends the tees and
+# writes the run log's footer. The launcher stops it before any exit of its
+# own (and before #78's relaunch, which keeps the pid). Each running
+# launcher leaves <state>/games/<gogid>/.launchers/<pid> (its start time),
+# so a teardown spares the wineserver of a later launch of the same game.
+WATCHDOG=""
+ME_START=""
+LIVE_DIR="$GAME_STATE/.launchers"
+proc_start() { ps -o lstart= -p "$1" 2>/dev/null; }
+# $1 is alive and is the process that started at $2: not a zombie, not a
+# reused pid.
+alive_as() {
+    case "$(ps -o stat= -p "$1" 2>/dev/null | tr -d ' ')" in "" | Z*) return 1 ;; esac
+    [ "$(proc_start "$1")" = "$2" ]
+}
+# The pid of another running launcher of this game, if any.
+other_launcher() {
+    local f pid start
+    for f in "$LIVE_DIR"/*; do
+        [ -f "$f" ] || continue
+        pid="${f##*/}"
+        start="$(cat "$f" 2>/dev/null)"
+        [ "$pid" = "$$" ] && [ "$start" = "$ME_START" ] && continue
+        if alive_as "$pid" "$start"; then printf '%s' "$pid"; return; fi
+        rm -f "$f"
+    done
+}
+register_launch() {
+    ME_START="$(proc_start $$)"
+    mkdir -p "$LIVE_DIR" && printf '%s' "$ME_START" >"$LIVE_DIR/$$"
+}
+unregister_launch() {
+    if [ "$(cat "$LIVE_DIR/$$" 2>/dev/null)" = "$ME_START" ]; then rm -f "$LIVE_DIR/$$"; fi
+}
+start_watchdog() {
+    set -m
+    (
+        trap '' INT HUP
+        while alive_as "$$" "$ME_START"; do sleep 2; done
+        log "watchdog: launcher $$ is gone (SIGKILL or Force Quit): tearing down"
+        teardown
+        # The tees see EOF once Wine's last writer is gone; they ignore
+        # TERM, so stragglers get KILL.
+        for _ in 1 2 3 4 5 6 7 8; do
+            # shellcheck disable=SC2086
+            kill -0 $TEE_PIDS 2>/dev/null || break
+            sleep 0.25
+        done
+        # shellcheck disable=SC2086
+        if [ -n "$TEE_PIDS" ]; then kill -KILL $TEE_PIDS 2>/dev/null; fi
+        unregister_launch
+        if [ -n "$RUN_LOG" ]; then run_footer "$RUN_LOG" 137 "launcher killed" $((SECONDS - RUN_T0)); fi
+        log "watchdog done"
+    ) </dev/null >/dev/null 2>&1 3>&- 4>&- &
+    WATCHDOG=$!
+    set +m
+}
+stop_watchdog() {
+    [ -n "$WATCHDOG" ] || return 0
+    kill -- "-$WATCHDOG" 2>/dev/null
+    wait "$WATCHDOG" 2>/dev/null
+    WATCHDOG=""
+}
+on_signal() {
+    log "got SIG$1"
+    stop_watchdog
+    teardown
+    unregister_launch
+    end_run_log "$2" "SIG$1"
+    exit "$2"
+}
 trap 'on_signal INT 130' INT
 trap 'on_signal TERM 143' TERM
 trap 'on_signal HUP 129' HUP
@@ -614,20 +696,24 @@ end_run_log() {
     exec >&3 2>&4
     if [ -n "$TEE_PIDS" ]; then
         # A straggler still holding Wine's output open must not hold the
-        # launcher: give the tees 2s to see EOF.
+        # launcher: give the tees 2s to see EOF (KILL: they ignore TERM).
         # shellcheck disable=SC2086
-        ( sleep 2; kill $TEE_PIDS ) >/dev/null 2>&1 &
+        ( sleep 2; kill -KILL $TEE_PIDS ) >/dev/null 2>&1 &
         local dog=$!
         # shellcheck disable=SC2086
         wait $TEE_PIDS 2>/dev/null
         kill "$dog" 2>/dev/null
     fi
+    run_footer "$run" "$1" "${2:-}" "$RUN_SECS"
+}
+# run_footer <run log> <exit code> <reason> <secs>
+run_footer() {
     {
         printf '# ---\n'
-        printf '# exit: %s%s\n' "$1" "${2:+ ($2)}"
-        printf '# duration: %ss\n' "$RUN_SECS"
+        printf '# exit: %s%s\n' "$2" "${3:+ ($3)}"
+        printf '# duration: %ss\n' "$4"
         printf '# ended: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
-    } >>"$run"
+    } >>"$1"
 }
 
 # #78: a run that ends within EARLY_EXIT_SECS or with a non-zero code
@@ -715,6 +801,8 @@ set -m
 "$WINE_BIN" "$EXE" ${ARGS[@]+"${ARGS[@]}"} "$@" 3>&- 4>&- &
 WPID=$!
 set +m
+register_launch
+start_watchdog
 wait "$WPID"
 rc=$?
 log "wine exited $rc; waiting for the prefix's wineserver"
@@ -723,6 +811,8 @@ log "wine exited $rc; waiting for the prefix's wineserver"
 "$WINESERVER_BIN" -w >/dev/null 2>&1 &
 wait $!
 log "prefix idle"
+stop_watchdog
+unregister_launch
 end_run_log "$rc"
 if [ "$rc" -ne 0 ] || [ "$RUN_SECS" -lt "$EARLY_EXIT_SECS" ]; then early_exit "$@"; fi
 exit "$rc"

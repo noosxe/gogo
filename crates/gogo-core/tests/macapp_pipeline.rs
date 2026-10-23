@@ -2387,6 +2387,202 @@ fn v2_launcher_teardown_reaps_its_own_prefix_only() {
     drop(guard);
 }
 
+/// Start the built launcher with a hanging fake game (`FAKE_WINE_HANG`) and
+/// return it with the pid of the game's TERM-ignoring child.
+fn spawn_hanging_launcher(
+    app: &std::path::Path,
+    home: &std::path::Path,
+    pidfile: &std::path::Path,
+) -> (std::process::Child, i32) {
+    let launcher = std::process::Command::new(app.join("Contents/MacOS/Treasure Adventure Game"))
+        .env_clear()
+        .env("HOME", home)
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .env("FAKE_WINE_HANG", pidfile)
+        .env("GOGO_LAUNCHER_NO_DIALOG", "1")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !pidfile.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let pid = std::fs::read_to_string(pidfile)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    (launcher, pid)
+}
+
+/// Alive and not a zombie.
+fn running(pid: i32) -> bool {
+    let ps = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    let stat = String::from_utf8_lossy(&ps.stdout);
+    !stat.trim().is_empty() && !stat.contains('Z')
+}
+
+/// Processes whose command line mentions `needle`.
+fn procs_matching(needle: &str) -> Vec<String> {
+    let ps = std::process::Command::new("ps")
+        .args(["-A", "-o", "pid=,stat=,command="])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&ps.stdout)
+        .lines()
+        .filter(|l| l.contains(needle) && !l.split_whitespace().nth(1).unwrap_or("").contains('Z'))
+        .map(str::to_string)
+        .collect()
+}
+
+fn wait_until(secs: u64, mut f: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    while std::time::Instant::now() < deadline {
+        if f() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    f()
+}
+
+/// #103: a SIGKILLed launcher can't trap, so its watchdog tears down: the
+/// prefix's `wineserver -k`, the game's process group, the tees, and the
+/// run log's footer; then the watchdog itself is gone.
+#[test]
+fn v2_launcher_watchdog_tears_down_after_sigkill() {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    unsafe { std::env::set_var("GOGO_HOME", &home) };
+    let opts = v2_opts(tmp.path(), &tmp.path().join("no-such-gogo"));
+    let plan = macapp::plan(&opts, None, &mut |_| {}).unwrap();
+    macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).unwrap();
+    let app = tmp.path().join("out/Treasure Adventure Game.app");
+    let wine_log = tmp.path().join("wine.log");
+    std::fs::write(&wine_log, "").unwrap();
+    let logs = home.join("Library/Logs/gogo/1207659013");
+
+    let (mut launcher, daemon) =
+        spawn_hanging_launcher(&app, &home, &tmp.path().join("daemon.pid"));
+    assert!(running(daemon));
+    let run_log = logs.join(std::fs::read_link(logs.join("latest.log")).unwrap());
+    let tee = format!("tee -a {}", run_log.display());
+    assert_eq!(procs_matching(&tee).len(), 2, "two tees while running");
+    launcher.kill().unwrap();
+    launcher.wait().unwrap();
+
+    let macos = app.join("Contents/MacOS").display().to_string();
+    assert!(
+        wait_until(20, || !running(daemon)
+            && procs_matching(&macos).is_empty()
+            && procs_matching(&tee).is_empty()),
+        "left: daemon {daemon} running={}, {:?}, {:?}",
+        running(daemon),
+        procs_matching(&macos),
+        procs_matching(&tee)
+    );
+    let logged = std::fs::read_to_string(&wine_log).unwrap();
+    assert!(logged.contains("wineserver -k"), "{logged}");
+    let launch_log = std::fs::read_to_string(logs.join("launch.log")).unwrap();
+    assert!(launch_log.contains("watchdog: launcher"), "{launch_log}");
+    assert!(launch_log.contains("reaped (SIGKILL)"), "{launch_log}");
+    assert!(launch_log.contains("watchdog done"), "{launch_log}");
+    let run = std::fs::read_to_string(&run_log).unwrap();
+    assert!(run.contains("# exit: 137 (launcher killed)\n"), "{run}");
+    let live = home.join("games/1207659013/.launchers");
+    assert_eq!(std::fs::read_dir(&live).unwrap().count(), 0, "marker gone");
+    unsafe { std::env::remove_var("GOGO_HOME") };
+    drop(guard);
+}
+
+/// #103: a watchdog whose launcher was killed spares a later launch of the
+/// same game: only its own game goes, the shared wineserver stays; a normal
+/// exit stops the watchdog without a teardown.
+#[test]
+fn v2_launcher_watchdog_spares_a_later_launch() {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    unsafe { std::env::set_var("GOGO_HOME", &home) };
+    let opts = v2_opts(tmp.path(), &tmp.path().join("no-such-gogo"));
+    let plan = macapp::plan(&opts, None, &mut |_| {}).unwrap();
+    macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).unwrap();
+    let app = tmp.path().join("out/Treasure Adventure Game.app");
+    let wine_log = tmp.path().join("wine.log");
+    let logs = home.join("Library/Logs/gogo/1207659013");
+
+    // A normal run stops its watchdog: no teardown, nothing left behind.
+    std::fs::write(&wine_log, "").unwrap();
+    let out = run_launcher(&app, &home, &[]);
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("Terminated"), "no job notice: {stderr}");
+    let macos = app.join("Contents/MacOS").display().to_string();
+    assert!(
+        procs_matching(&macos).is_empty(),
+        "{:?}",
+        procs_matching(&macos)
+    );
+    let launch_log = std::fs::read_to_string(logs.join("launch.log")).unwrap();
+    assert!(!launch_log.contains("watchdog"), "{launch_log}");
+    assert!(
+        !std::fs::read_to_string(&wine_log)
+            .unwrap()
+            .contains("wineserver -k")
+    );
+
+    std::fs::write(&wine_log, "").unwrap();
+    let (mut first, d1) = spawn_hanging_launcher(&app, &home, &tmp.path().join("d1.pid"));
+    let (mut second, d2) = spawn_hanging_launcher(&app, &home, &tmp.path().join("d2.pid"));
+    first.kill().unwrap();
+    first.wait().unwrap();
+    assert!(wait_until(20, || !running(d1)), "first game {d1} reaped");
+    assert!(
+        wait_until(10, || std::fs::read_to_string(logs.join("launch.log"))
+            .unwrap()
+            .contains("watchdog done")),
+        "watchdog finished"
+    );
+    assert!(running(d2), "the later launch's game is untouched");
+    assert!(second.try_wait().unwrap().is_none(), "second launcher runs");
+    let launch_log = std::fs::read_to_string(logs.join("launch.log")).unwrap();
+    assert!(
+        launch_log.contains("leaving the prefix's wineserver"),
+        "{launch_log}"
+    );
+    assert!(
+        !std::fs::read_to_string(&wine_log)
+            .unwrap()
+            .contains("wineserver -k")
+    );
+
+    // The second one still tears down fully on SIGTERM.
+    std::process::Command::new("kill")
+        .args(["-TERM", &second.id().to_string()])
+        .status()
+        .unwrap();
+    assert_eq!(second.wait().unwrap().code(), Some(143));
+    assert!(wait_until(5, || !running(d2)), "second game {d2} reaped");
+    assert!(
+        std::fs::read_to_string(&wine_log)
+            .unwrap()
+            .contains("wineserver -k")
+    );
+    assert!(
+        wait_until(5, || procs_matching(&macos).is_empty()),
+        "{:?}",
+        procs_matching(&macos)
+    );
+    unsafe { std::env::remove_var("GOGO_HOME") };
+    drop(guard);
+}
+
 /// #77: each launcher run writes `<ts>-<pid>.log` under the game's log dir
 /// (header, Wine's output, exit code and duration), `latest.log` points at
 /// it, and only the newest 10 run logs are kept.

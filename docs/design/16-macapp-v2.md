@@ -539,7 +539,30 @@ In order, in bash, with no other dependencies than `/usr/bin/shasum` and `osascr
   services `setsid()` into their own groups, so the process group can't be used to
   find them. What's left of the game's group also gets `SIGKILL`, and the launcher
   logs it.
-- A `SIGKILL` of the launcher itself can't be trapped.
+- A `SIGKILL` of the launcher itself can't be trapped, so a watchdog does the
+  teardown for it (#103), described next.
+- *#103 watchdog.* Right after starting Wine, the launcher starts a background
+  subshell in its own process group, with stdio on `/dev/null`, so it holds no end
+  of the tee FIFOs and a terminal's Ctrl-C doesn't reach it. Every 2 s it checks
+  that the launcher is still alive and is still the same process: not a zombie, and
+  the same `ps -o lstart` start time, so a reused pid doesn't count. Once the
+  launcher is gone (`SIGKILL`, Activity Monitor's Force Quit, a crash), it logs
+  `watchdog: launcher <pid> is gone` to `launch.log` and runs the same teardown as
+  the signal path. It then gives the tees 2 s to see EOF and `SIGKILL`s any that are
+  left (they ignore `TERM`). It writes the run log footer `# exit: 137 (launcher
+  killed)`, logs `watchdog done`, and exits. The launcher stops the watchdog (kills
+  its process group) before every exit of its own: after `wineserver -w` on a normal
+  end, and before the teardown in the signal handler. So the two never both tear
+  down, and #78's relaunch, which `exec`s under the same pid, starts with no
+  watchdog from the run before. Detection takes up to 2 s and the teardown up to
+  about 5 s, so a `kill -9` leaves nothing after about 10 s.
+- *Later launches of the same game.* Each running launcher writes
+  `games/<gogid>/.launchers/<pid>` (its start time) and removes it on exit; the
+  watchdog removes a dead launcher's file. If another launcher of this game is still
+  running at teardown, the teardown leaves the shared wineserver alone (no
+  `wineserver -k`, no `SIGKILL` of the server) and only ends its own game's process
+  group. This applies to the signal path too. Stale files (a dead pid, or a reused
+  pid with another start time) are ignored and removed.
 - Logs go to `~/Library/Logs/gogo/<gogid>/`: `launch.log` and one run log per launch
   (§8.1, #77).
 
@@ -594,7 +617,8 @@ includes L4. `runtime` is the reference and `runtime_dir` the engine Wine runs f
 derived runtime for DXMT, §3). `exit` is Wine's exit code, or `<code> (SIG<name>)` when a signal
 ended the run (`130`/`143`/`129`). `duration` runs from Wine's start until
 `wineserver -w` returns. #78's early-exit dialog reads `exit` and `duration`. A
-launcher killed with `SIGKILL` leaves no footer.
+launcher killed with `SIGKILL` gets its footer from the watchdog (§8, #103): `# exit: 137
+(launcher killed)`.
 
 *Why per run and not one appended `wine.log`.* #66 teed Wine's output into an
 unbounded `wine.log` and kept launcher events in `launch.log`. #77 replaces
@@ -608,7 +632,8 @@ of the run log, so a terminal launch still shows both streams separately. The te
 ignore `INT`/`TERM`/`HUP`, so a Ctrl-C doesn't cut the tail of the log. Process
 substitution won't do here: bash 3.2 can't `wait` for it, and the footer has to come
 after everything Wine wrote. Before writing the footer, the launcher closes its ends
-and waits up to 2 s for the tees to see EOF; an orphan still holding Wine's output
+and waits up to 2 s for the tees to see EOF, then `SIGKILL`s them (they ignore
+`TERM`); an orphan still holding Wine's output
 open can't stall the exit. If `mkfifo` fails, output is appended to the run log
 directly, without the tee.
 
