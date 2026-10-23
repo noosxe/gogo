@@ -2581,9 +2581,16 @@ sed -i.bak 1d "{answers}"
         "# runtime: path:",
         "# macos: ",
         "# exit: 1\n",
-        "--- last 40 log lines ---\nfake-wine stdout line\nfake-wine stderr line\n",
     ] {
         assert!(report.contains(want), "{want:?} in:\n{report}");
+    }
+    // Wine's stdout and stderr reach the log through separate pipes, so the
+    // two lines can land in either order.
+    let (_, tail) = report
+        .split_once("--- last 40 log lines ---\n")
+        .unwrap_or_else(|| panic!("no log tail in:\n{report}"));
+    for want in ["fake-wine stdout line\n", "fake-wine stderr line\n"] {
+        assert!(tail.contains(want), "{want:?} in:\n{report}");
     }
     assert!(!report.contains("# prefix:"), "{report}");
     unsafe { std::env::remove_var("GOGO_HOME") };
