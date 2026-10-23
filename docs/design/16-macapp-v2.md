@@ -128,6 +128,15 @@ command substitution and no code, only assignments.
   `dll_overrides = { ddraw = "n,b" }` is what the state `launch.conf` ends up with,
   not the bundle TOML.
 
+*#107 (entry point):* `exe` defaults to the `goggame-<id>.info` task chosen by
+`macapp/info.rs`: the `isPrimary` `FileTask`, **unless its `category` is
+`launcher`** — then a `category = "game"` task wins, hidden (`isHidden`) or not. A
+primary launcher stays the pick only when no game task exists on disk; with no
+primary at all, the first runnable task is used. GOG ships `GoGLauncher.exe` as the
+primary task for some games (Rebel Galaxy, 1435582019) and it needs MFC runtimes a
+fresh prefix lacks (`mfc110u.dll`, exit 53), while the game exe runs. `workdir`
+follows the chosen exe's directory; `args` are not taken from `playTasks` yet.
+
 ## 2. Decision 2: gogo builds the prefix; the launcher re-runs setup only when stale
 
 **Settled:** gogo creates and populates the prefix **at build time**, into

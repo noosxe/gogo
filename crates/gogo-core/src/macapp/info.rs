@@ -1,8 +1,9 @@
 //! `goggame-*.info` parsing → launchable entry point (`docs/design/10` §2.4).
 //!
 //! GOG drops one `goggame-<id>.info` JSON per game/DLC into the install root.
-//! The launchable exe is a `FileTask` in `playTasks` (prefer `isPrimary`),
-//! relative to the info file's directory. `.lnk`-only games are rejected loudly
+//! The launchable exe is a `FileTask` in `playTasks` (prefer `isPrimary`, but
+//! a `game` task over a primary `launcher` one — #107), relative to the info
+//! file's directory. `.lnk`-only games are rejected loudly
 //! — parsing Windows shortcuts is out of scope for v1 (design 10 §2.4).
 
 use std::path::{Path, PathBuf};
@@ -82,7 +83,13 @@ pub fn find_entry_point(dir: &Path) -> Result<PathBuf, MacAppError> {
             dir: dir.to_path_buf(),
         });
     }
-    // Primary task anywhere wins; else first runnable game task.
+    // Preference: primary task (unless it is GOG's launcher) > a `game` task
+    // when the primary is a launcher (#107) > the primary launcher > first
+    // runnable task. GOG marks `GoGLauncher.exe` primary for some games
+    // (Rebel Galaxy) and hides the real game task; the launcher needs MFC
+    // runtimes a fresh prefix lacks, the game doesn't.
+    let mut primary_launcher: Option<PathBuf> = None;
+    let mut game: Option<PathBuf> = None;
     let mut fallback: Option<PathBuf> = None;
     for info_path in &infos {
         let Ok(raw) = std::fs::read_to_string(info_path) else {
@@ -103,11 +110,21 @@ pub fn find_entry_point(dir: &Path) -> Result<PathBuf, MacAppError> {
             if !candidate.is_file() {
                 continue;
             }
-            if task.is_primary {
-                return Ok(candidate);
+            match (task.is_primary, task.category.as_deref()) {
+                (true, Some("launcher")) => {
+                    primary_launcher.get_or_insert(candidate.clone());
+                }
+                (true, _) => return Ok(candidate),
+                (false, Some("game")) => {
+                    game.get_or_insert(candidate.clone());
+                }
+                _ => {}
             }
             fallback.get_or_insert(candidate);
         }
+    }
+    if let Some(launcher) = primary_launcher {
+        return Ok(game.unwrap_or(launcher));
     }
     fallback.ok_or(MacAppError::EntryPointNotFound {
         dir: dir.to_path_buf(),
@@ -226,5 +243,60 @@ mod info_tests {
         std::fs::write(tmp.path().join("game.exe"), b"MZ").unwrap();
         let entry = find_entry_point(tmp.path()).unwrap();
         assert_eq!(entry, tmp.path().join("game.exe"));
+    }
+
+    /// Rebel Galaxy (1435582019): GOG marks `GoGLauncher.exe` primary and
+    /// hides the real game task (#107).
+    #[test]
+    fn hidden_game_task_beats_primary_launcher() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_info(
+            tmp.path(),
+            "1435582019",
+            r#"{"gameId":"1435582019","name":"Rebel Galaxy","playTasks":[
+                {"category":"launcher","isPrimary":true,"name":"Rebel Galaxy",
+                 "path":"GoGLauncher.exe","type":"FileTask"},
+                {"category":"game","isHidden":true,"name":"Rebel Galaxy",
+                 "path":"RebelGalaxyGOG.exe","type":"FileTask"},
+                {"category":"document","name":"Manual","path":"manual.pdf","type":"FileTask"}
+            ]}"#,
+        );
+        std::fs::write(tmp.path().join("GoGLauncher.exe"), b"MZ").unwrap();
+        std::fs::write(tmp.path().join("RebelGalaxyGOG.exe"), b"MZ").unwrap();
+        let entry = find_entry_point(tmp.path()).unwrap();
+        assert_eq!(entry, tmp.path().join("RebelGalaxyGOG.exe"));
+    }
+
+    #[test]
+    fn primary_launcher_without_game_task_is_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_info(
+            tmp.path(),
+            "6",
+            r#"{"playTasks":[
+                {"type":"FileTask","category":"tool","path":"tool.exe"},
+                {"type":"FileTask","category":"launcher","path":"GoGLauncher.exe","isPrimary":true}
+            ]}"#,
+        );
+        std::fs::write(tmp.path().join("tool.exe"), b"MZ").unwrap();
+        std::fs::write(tmp.path().join("GoGLauncher.exe"), b"MZ").unwrap();
+        let entry = find_entry_point(tmp.path()).unwrap();
+        assert_eq!(entry, tmp.path().join("GoGLauncher.exe"));
+    }
+
+    #[test]
+    fn game_task_missing_on_disk_falls_back_to_primary_launcher() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_info(
+            tmp.path(),
+            "7",
+            r#"{"playTasks":[
+                {"type":"FileTask","category":"launcher","path":"GoGLauncher.exe","isPrimary":true},
+                {"type":"FileTask","category":"game","path":"ghost.exe","isHidden":true}
+            ]}"#,
+        );
+        std::fs::write(tmp.path().join("GoGLauncher.exe"), b"MZ").unwrap();
+        let entry = find_entry_point(tmp.path()).unwrap();
+        assert_eq!(entry, tmp.path().join("GoGLauncher.exe"));
     }
 }
