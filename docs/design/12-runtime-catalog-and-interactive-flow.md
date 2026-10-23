@@ -26,7 +26,7 @@ design 03 §1 (`mac-app` flags, new `runtimes` command). Exit codes unchanged �
 |---|---|
 | D1 | The catalog is **data + live probes**, not code: entries carry `status` (available / gone / conditional / user-acquired / reference) and are re-probed at use time; dead entries remain as legible tombstones (docs/15 §1). Availability is a moving target — the wine-crossover 404 between 2026-10-18 and 2026-10-19 is the proof. |
 | D2 | **Recipe selection precedes runtime resolution** (both in `plan()`): the runtime must exist before any wine runs (prefix staging, silent install), so a recipe-driven runtime choice requires the recipe to be known first. Precedence: **explicit flag > recipe recommendation > default**. |
-| D3 | Bundles stay **self-contained** (runtime copied into `Contents/Resources/wine/`, design 10 §3). The store dedupes *downloads*, not bundle size. Shared-reference bundles remain future work (design 10 §10). |
+| D3 | Bundles stay **self-contained** (runtime copied into `Contents/Resources/wine/`, design 10 §3). The store dedupes *downloads*, not bundle size. Shared-reference bundles remain future work (design 10 §10). **Superseded 2026-10-23 by design 16:** default bundles reference the store runtime by id; self-contained copies remain only for `--portable` (#84). |
 | D4 | winetricks flips from "user-installed bridge" to a **pinned vendored download** (sha256, under `runtimes/tools/`), with `WINETRICKS` env var / user-installed binary as override, and skip-loud as the floor. |
 | D5 | gogo ships **Rust-made extractor shims** (`cabextract`, `7z`): a `gogo-shims` crate (readers: `cab` MIT, `sevenz-rust` Apache-2.0) behind the CLI's hidden `__shim` subcommand; gogo-core materializes tiny re-exec launcher scripts into the tools dir and PATH-scopes them to the winetricks invocation — zero host installs, shims always in lockstep with the running binary. The 7z reader doubles as recipe `extract` support (closes a design 11 §3.1 gap; rar stays v2). |
 | D6 | Recipe `wine.version` is **advisory**: mac-servable pins pre-answer the runtime prompt; Linux-only pins fall back with a notice; never a blocker (docs/15 §6). |
@@ -63,6 +63,12 @@ gogo artifacts (GPTK: consent-download conduit only, D9).
 
 ## 4. Store (gogo-core: `macapp/store.rs`)
 
+> **Amended 2026-10-23 (design 16 §6):** the store grows to
+> `runtimes/<id>/<ver>/{engine,Frameworks}`, derived
+> `runtimes/<id>/<ver>+<renderer>-<rver>/engine`, `renderers/<id>/<ver>/<arch>/` and
+> per-game `games/<gogid>/`. `prune` never removes anything a game references and keeps
+> N-1. The flat layout below stays readable.
+
 ```
 <state_dir>/runtimes/                  # ~/Library/Application Support/gogo/runtimes/ on macOS
   wine-staging/11.18/…                 # extracted + probed runtime tree
@@ -93,6 +99,11 @@ mount registration, custom path. Apple-Silicon hosts get a Rosetta presence chec
 a one-line remedy; Intel hosts see no GPTK entries. GPTK downloads only on explicit
 consent (EULA notice, D9); registering a user mount stays available.
 
+> **Amended 2026-10-23 (design 16 §5, docs/19 §6.1):** the runtime is **data, not a
+> menu**: the L0 default track, overridden by L3/L4 and flags (precedence in design 16
+> §5). The mandatory menu below is superseded. The exact interactive surface for
+> choosing a runtime by hand is #69's call.
+>
 > **Amended 2026-10-19** (post-v1 field feedback): interactively the runtime
 > menu is **mandatory** — the §5 ladder now only computes the preselected
 > "· easy" default (the pick gogo would have used: cached recommendation →
