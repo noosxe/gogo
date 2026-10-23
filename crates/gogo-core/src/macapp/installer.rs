@@ -116,7 +116,10 @@ pub fn stage_prefix(runtime: &Runtime, prefix: &Path) -> Result<(), MacAppError>
 /// daemonizes a never-exiting server that inherits (and holds) the caller's
 /// stdio pipes. So: `-k` only, null stdio, hard timeout, short settle sleep.
 pub fn stop_wineserver(runtime: &Runtime, prefix: &Path) -> Result<(), MacAppError> {
-    let server = runtime.root.join("bin/wineserver");
+    // Next to the wine binary: store runtimes are wrapper trees
+    // (`Foo.app/Contents/Resources/wine/bin`), so `root/bin` would miss it
+    // and leave the server writing into the prefix after signing (#53).
+    let server = runtime.wine.with_file_name("wineserver");
     if !server.is_file() {
         return Ok(());
     }

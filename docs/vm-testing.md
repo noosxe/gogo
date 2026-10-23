@@ -54,6 +54,7 @@ scripts/vm-test.sh run "/path/Game.app" --secs 30   # full clone → test → de
 scripts/vm-test.sh run Game.app --strict-gatekeeper # stop at the Gatekeeper dialog
 scripts/vm-test.sh run Game.app --no-quarantine     # skip the download simulation
 scripts/vm-test.sh run Game.app --keep              # keep the stopped clone for poking
+scripts/vm-test.sh run Game.app --state             # v2 bundle: also seed its state dir (below)
 scripts/vm-test.sh shell [Game.app]                 # interactive clone, deleted on exit
 scripts/vm-test.sh status                           # golden, clones, running count (JSON)
 scripts/vm-test.sh cleanup                          # stop + delete every gog-test-* clone
@@ -82,6 +83,13 @@ What `run` does:
 **Two-VM limit.** macOS allows at most two macOS guests at once. `run`/`shell` take a slot
 lock (`~/.local/state/gogo-vm/slot.lock`) and *queue* for up to `--wait-secs` (default 1800)
 while two `tart run` processes exist. Linux VMs (Docker Desktop) don't count.
+
+**v2 bundles (design 16).** A v2 `.app` is only a launcher, so `--state` also copies
+`games/<gogid>/`, `compat/<gogid>.toml` and the store runtime that `state.toml`
+references from the host's `~/Library/Application Support/gogo`, into the same place
+under the guest's `admin` user. The launcher's state paths are relative to the state
+dir, so they resolve there. The launcher's own logs come back in `launcher-logs/`.
+This is the minimum; the full store/state seeding is #68.
 
 ## Results (`target/vm-test/<slug>-<timestamp>/`)
 

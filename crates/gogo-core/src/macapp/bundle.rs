@@ -183,6 +183,38 @@ pub fn write_ddraw_notice(bundle: &Bundle) -> Result<(), MacAppError> {
 /// every bundle; an extra GPTK EULA warning when the runtime came from a
 /// user-supplied GPTK mount.
 pub fn write_notices(bundle: &Bundle, runtime: &Runtime) -> Result<(), MacAppError> {
+    write_wine_notice(bundle, runtime, true)
+}
+
+/// v2 launcher bundles (design 16) carry no Wine: the notice says where the
+/// runtime it runs comes from instead.
+pub fn write_launcher_notices(bundle: &Bundle, runtime: &Runtime) -> Result<(), MacAppError> {
+    write_wine_notice(bundle, runtime, false)
+}
+
+fn write_wine_notice(bundle: &Bundle, runtime: &Runtime, bundled: bool) -> Result<(), MacAppError> {
+    if !bundled {
+        std::fs::write(
+            bundle.resources.join("LICENSE-wine.txt"),
+            format!(
+                "This application runs Wine ({}), licensed under the GNU LGPL v2.1, from\n\
+                 gogo's local runtime store on this Mac. It contains no Wine binaries itself.\n\
+                 Source: https://github.com/wine-mirror/wine\n\
+                 Wine is copyright the Wine project authors. Built by `gogo mac-app` on the\n\
+                 user's machine; gogo itself ships no Wine binaries.\n",
+                runtime.version
+            ),
+        )?;
+        if runtime.mode == super::runtime::RuntimeMode::Gptk {
+            std::fs::write(
+                bundle.resources.join("README-GPTK.txt"),
+                "This application runs Apple's Game Porting Toolkit Wine runtime from the\n\
+                 user's own copy, under Apple's Game Porting Toolkit license. It embeds none\n\
+                 of it. gogo never downloads or ships the GPTK itself.\n",
+            )?;
+        }
+        return Ok(());
+    }
     std::fs::write(
         bundle.resources.join("LICENSE-wine.txt"),
         format!(
@@ -338,7 +370,19 @@ pub enum CodesignPolicy {
     Skip,
 }
 
+/// Sign ad-hoc, then verify. `strict` adds `--deep --strict` (v2 bundles,
+/// design 16: a bundle that fails it is a hard error, so #53 can't come back
+/// silently). Fat bundles keep the plain verify: their prefix's absolute
+/// home symlinks fail `--strict` (#55).
 pub fn codesign_adhoc(bundle: &Path, policy: CodesignPolicy) -> Result<(), MacAppError> {
+    codesign_and_verify(bundle, policy, false)
+}
+
+pub fn codesign_and_verify(
+    bundle: &Path,
+    policy: CodesignPolicy,
+    strict: bool,
+) -> Result<(), MacAppError> {
     if policy == CodesignPolicy::Skip {
         return Ok(());
     }
@@ -354,8 +398,12 @@ pub fn codesign_adhoc(bundle: &Path, policy: CodesignPolicy) -> Result<(), MacAp
             stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
         });
     }
-    let verify = std::process::Command::new("codesign")
-        .arg("--verify")
+    let mut verify = std::process::Command::new("codesign");
+    verify.arg("--verify");
+    if strict {
+        verify.args(["--deep", "--strict"]);
+    }
+    let verify = verify
         .arg(bundle)
         .output()
         .map_err(|e| MacAppError::Codesign {
@@ -363,7 +411,10 @@ pub fn codesign_adhoc(bundle: &Path, policy: CodesignPolicy) -> Result<(), MacAp
         })?;
     if !verify.status.success() {
         return Err(MacAppError::Codesign {
-            stderr: String::from_utf8_lossy(&verify.stderr).trim().to_string(),
+            stderr: format!(
+                "verify failed after signing: {}",
+                String::from_utf8_lossy(&verify.stderr).trim()
+            ),
         });
     }
     Ok(())

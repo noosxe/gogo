@@ -140,10 +140,21 @@ pub enum Command {
         /// Path to the GOG setup .exe (.bin siblings are picked up automatically).
         #[arg(
             value_name = "INSTALLER",
-            required_unless_present = "from_depot",
-            conflicts_with = "from_depot"
+            required_unless_present_any = ["from_depot", "retarget"],
+            conflicts_with_all = ["from_depot", "retarget"]
         )]
         installer: Option<std::path::PathBuf>,
+        /// Point an existing game at another runtime without rebuilding:
+        /// writes `--runtime` into the game's user override file (L4, design
+        /// 16 decision 7); the next launch applies it. `--runtime auto` drops
+        /// the override.
+        #[arg(
+            long,
+            value_name = "BUNDLE|GOGID",
+            conflicts_with = "from_depot",
+            requires = "runtime"
+        )]
+        retarget: Option<String>,
         /// Build from a depot (Model B) game tree instead of running an
         /// installer: an existing directory, or a game selector resolved
         /// against the local depot cache (docs/design/15).
@@ -233,6 +244,21 @@ pub enum MacAppSub {
         /// GOG product id.
         #[arg(value_name = "GOGID")]
         gogid: String,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Bring a game's state dir up to date with its bundle and override
+    /// file: resolve the runtime, create a missing prefix, write the
+    /// effective launch config (design 16 §2.2). The launcher runs this
+    /// when its config stamp is stale.
+    Setup {
+        /// GOG product id.
+        #[arg(value_name = "GOGID")]
+        gogid: String,
+        /// The .app to read (default: the one recorded at build).
+        #[arg(long, value_name = "APP")]
+        bundle: Option<std::path::PathBuf>,
         /// Machine-readable output.
         #[arg(long)]
         json: bool,
