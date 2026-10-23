@@ -96,52 +96,94 @@ pub fn path_with_shims() -> Result<String, MacAppError> {
 }
 
 /// The winetricks to use (design 12 D4 chain): `WINETRICKS` env → vendored
-/// store copy → host `winetricks` on PATH. `None` = skip-loud.
+/// store copy (the catalog's pinned version first, else any cached one) →
+/// host `winetricks` on PATH. `None` = skip-loud.
 pub fn resolve_winetricks() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("WINETRICKS") {
-        let p = PathBuf::from(p);
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    if let Some((m, root)) = store::installed(WINETRICKS_ID, None)
-        && root.join(&m.entry_rel).is_file()
-    {
-        return Some(root.join(&m.entry_rel));
-    }
-    which("winetricks")
+    env_winetricks()
+        .or_else(|| store_winetricks(pinned_winetricks()))
+        .or_else(|| store_winetricks(None))
+        .or_else(|| which("winetricks"))
 }
 
 /// Resolve or auto-provision winetricks (network exception, design 12 D8).
-/// Provisioning failure degrades to nothing — never fatal to the recipe.
+/// A cached copy older than the catalog's pin is upgraded (#106) and kept
+/// as the fallback should that fail. Provisioning failure degrades to
+/// nothing — never fatal to the recipe.
 pub fn resolve_or_provision_winetricks(emit: &mut dyn FnMut(&ProgressEvent)) -> Option<PathBuf> {
-    if let Some(p) = resolve_winetricks() {
+    resolve_or_provision_at(catalog::find(WINETRICKS_ID)?, catalog::GITHUB_API, emit)
+}
+
+fn resolve_or_provision_at(
+    entry: &catalog::CatalogEntry,
+    api_base: &str,
+    emit: &mut dyn FnMut(&ProgressEvent),
+) -> Option<PathBuf> {
+    let pinned = entry.discovery.as_ref().and_then(|d| d.pinned_version());
+    if let Some(p) = env_winetricks().or_else(|| store_winetricks(pinned)) {
         return Some(p);
     }
-    let entry = catalog::find(WINETRICKS_ID)?;
+    let stale = store::installed(WINETRICKS_ID, None);
+    if stale.is_none()
+        && let Some(p) = which("winetricks")
+    {
+        return Some(p);
+    }
+    let fallback = stale.as_ref().map(|(m, root)| root.join(&m.entry_rel));
     let Ok(http) = catalog::http_client() else {
-        return None;
+        return fallback;
     };
-    let outcome = lutris::block_on_detached(store::install(
-        entry,
-        None,
-        &http,
-        catalog::GITHUB_API,
-        false,
-        emit,
-    ));
-    match outcome {
-        Ok(m) => {
+    let outcome =
+        lutris::block_on_detached(store::install(entry, None, &http, api_base, false, emit));
+    match (outcome, stale) {
+        (Ok(m), stale) => {
+            if let Some((old, _)) = stale {
+                emit(&ProgressEvent::Warn {
+                    message: format!(
+                        "winetricks {} replaced {} for verbs; the old copy can go: \
+                         `gogo runtimes prune winetricks/{}`",
+                        m.version, old.version, old.version
+                    ),
+                });
+            }
             let p = store::tree_root(&m).join(&m.entry_rel);
             p.is_file().then_some(p)
         }
-        Err(e) => {
+        (Err(e), Some((old, _))) => {
+            emit(&ProgressEvent::Warn {
+                message: format!(
+                    "winetricks upgrade failed ({e}); using the cached {}",
+                    old.version
+                ),
+            });
+            fallback
+        }
+        (Err(e), None) => {
             emit(&ProgressEvent::Warn {
                 message: format!("winetricks auto-provision failed ({e}); skipping verbs"),
             });
             None
         }
     }
+}
+
+fn env_winetricks() -> Option<PathBuf> {
+    let p = PathBuf::from(std::env::var_os("WINETRICKS")?);
+    p.is_file().then_some(p)
+}
+
+/// The version the catalog pins winetricks to.
+fn pinned_winetricks() -> Option<&'static str> {
+    catalog::find(WINETRICKS_ID)?
+        .discovery
+        .as_ref()?
+        .pinned_version()
+}
+
+/// A cached store copy, of `version` or (with `None`) the newest.
+fn store_winetricks(version: Option<&str>) -> Option<PathBuf> {
+    let (m, root) = store::installed(WINETRICKS_ID, version)?;
+    let p = root.join(&m.entry_rel);
+    p.is_file().then_some(p)
 }
 
 /// Minimal `which`: first PATH entry holding a file (mirrors mod.rs's).
@@ -185,6 +227,99 @@ mod tools_tests {
         }
         // Idempotent re-run.
         materialize_shims().unwrap();
+        // SAFETY: restore for other tests.
+        unsafe { std::env::remove_var("GOGO_HOME") };
+        drop(guard);
+    }
+
+    /// A cached winetricks `version`, fetched at `at` (store layout).
+    fn cache_winetricks(version: &str, at: &str) -> PathBuf {
+        let m = store::ManifestEntry {
+            id: WINETRICKS_ID.into(),
+            version: version.into(),
+            sha256: "x".into(),
+            fetched_at: at.into(),
+            upstream_url: "test".into(),
+            entry_rel: "winetricks".into(),
+            bytes: 1,
+        };
+        let p = store::tree_root(&m).join(&m.entry_rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, format!("#!/bin/sh\nWINETRICKS_VERSION={version}\n")).unwrap();
+        let mut all = store::load_manifest();
+        all.push(m);
+        store::save_manifest(&all).unwrap();
+        p
+    }
+
+    /// #106: the catalog's pinned version wins over a stale copy, even one
+    /// fetched later.
+    #[test]
+    fn resolve_prefers_the_pinned_store_copy() {
+        let home = tempfile::tempdir().unwrap();
+        let guard = crate::test_util::env_lock();
+        // SAFETY: env mutation under the shared env mutex.
+        unsafe { std::env::set_var("GOGO_HOME", home.path()) };
+        let pinned = pinned_winetricks().unwrap();
+        assert_eq!(pinned, "20260125");
+        let old = cache_winetricks("20210206", "2026-01-01T00:00:00Z");
+        assert_eq!(resolve_winetricks(), Some(old));
+        let new = cache_winetricks(pinned, "2025-01-01T00:00:00Z");
+        cache_winetricks("20220411", "2026-06-01T00:00:00Z");
+        assert_eq!(resolve_winetricks(), Some(new));
+        // SAFETY: restore for other tests.
+        unsafe { std::env::remove_var("GOGO_HOME") };
+        drop(guard);
+    }
+
+    /// A stale cached winetricks is upgraded to the pin, with a pointer at
+    /// pruning it; offline, it stays in use.
+    #[tokio::test(flavor = "multi_thread")]
+    // The env guard must span the provisioning: GOGO_HOME is read throughout.
+    #[allow(clippy::await_holding_lock)]
+    async fn stale_winetricks_is_upgraded_or_kept() {
+        let home = tempfile::tempdir().unwrap();
+        let guard = crate::test_util::env_lock();
+        // SAFETY: env mutation under the shared env mutex.
+        unsafe { std::env::set_var("GOGO_HOME", home.path()) };
+        let old = cache_winetricks("20210206", "2026-01-01T00:00:00Z");
+        let body = b"#!/bin/sh\nWINETRICKS_VERSION=20260125\n";
+        let mut warns = Vec::new();
+
+        // Offline: the upgrade fails, the stale copy is used.
+        let offline = wiremock::MockServer::start().await;
+        let (_, entry) = store::store_tests::mock_winetricks(body, "20260125", 0).await;
+        let got = resolve_or_provision_at(entry, &offline.uri(), &mut |ev| {
+            if let ProgressEvent::Warn { message } = ev {
+                warns.push(message.clone());
+            }
+        });
+        assert_eq!(got, Some(old.clone()));
+        assert!(warns[0].contains("using the cached 20210206"), "{warns:?}");
+
+        warns.clear();
+        let (server, entry) = store::store_tests::mock_winetricks(body, "20260125", 1).await;
+        let got = resolve_or_provision_at(entry, &server.uri(), &mut |ev| {
+            if let ProgressEvent::Warn { message } = ev {
+                warns.push(message.clone());
+            }
+        })
+        .unwrap();
+        assert_ne!(got, old);
+        assert_eq!(std::fs::read(&got).unwrap(), body);
+        assert!(
+            warns
+                .iter()
+                .any(|w| w.contains("20260125 replaced 20210206")
+                    && w.contains("gogo runtimes prune winetricks/20210206")),
+            "{warns:?}"
+        );
+        // Now current: resolved from the store, no second download.
+        assert_eq!(
+            resolve_or_provision_at(entry, &server.uri(), &mut |_| {}),
+            Some(got)
+        );
+        server.verify().await;
         // SAFETY: restore for other tests.
         unsafe { std::env::remove_var("GOGO_HOME") };
         drop(guard);

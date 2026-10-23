@@ -82,10 +82,7 @@ impl Renderer {
 
 /// The version the catalog pins for `id`, if it is a pinned catalog entry.
 fn pinned_version(id: &str) -> Option<&'static str> {
-    match &catalog::find(id)?.discovery {
-        Some(catalog::Discovery::Pinned(pin)) => Some(pin.version),
-        _ => None,
-    }
+    catalog::find(id)?.discovery.as_ref()?.pinned_version()
 }
 
 /// A renderer ref, `<id>[/<ver>]` (gogo-launch.toml `renderer`, compat
