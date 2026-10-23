@@ -446,8 +446,8 @@ In order, in bash, with no other dependencies than `/usr/bin/shasum` and `osascr
    fact and continue.
 3. Export `WINEPREFIX`, `WINEDLLOVERRIDES`, `env`; `cd` to the workdir; run Wine from
    `RUNTIME_DIR` with its log teed to `~/Library/Logs/gogo/<gogid>/` (#77).
-4. Early-exit dialog and "try next renderer" are #78. They write L4 through gogo, never
-   directly.
+4. If Wine ended early or failed, show the early-exit dialog (§8.2, #78). "Try next
+   renderer" writes L4 through gogo, never directly.
 
 *As implemented in #66:*
 
@@ -528,6 +528,58 @@ and waits up to 2 s for the tees to see EOF; an orphan still holding Wine's outp
 open can't stall the exit. If `mkfifo` fails, output is appended to the run log
 directly, without the tee.
 
+### 8.2 Early-exit dialog (#78)
+
+After the footer, a run that exited non-zero, or within `EARLY_EXIT_SECS` (15;
+`GOGO_EARLY_EXIT_SECS` overrides), explains itself. A run ended by a trapped signal
+doesn't: the user or a supervisor stopped it. The dialog is an `osascript display
+dialog` titled with the game. It says how long the game ran, its exit code and the
+renderer it ran on, and shows up to five lines of Wine output from the run log: the
+last ones that look like errors (`err:`, `error`, `fail`, `exception`, `cannot`, `not
+found`), or else the last five. Lines are cut to 160 characters. It has three
+buttons:
+
+- **Open log**: `open <run log>`, which shows it in Console.
+- **Try next renderer**: `gogo mac-app next-renderer <gogid>` writes `renderer =
+  "<next>"` to L4 (#65). The launcher then re-execs itself with the environment it
+  started with, so the exports above don't stack up. The changed L4 file makes the
+  stamp stale, so the relaunch runs setup, which applies the renderer: DXMT's derived
+  runtime, cnc-ddraw in the game dir, or wined3d with both removed.
+- **Copy report**: `pbcopy` of the game and gogid, the header's runtime, runtime_dir,
+  renderer, verbs, stamp, macOS, exe and args lines, the exit and duration, and the
+  last 40 lines of Wine output. The header's `wine:` and `prefix:` lines are left out,
+  because they hold the user's home path.
+
+The default button is the last one. The dialog gives up after 10 minutes, and giving
+up does nothing.
+
+*The next renderer.* This is `renderer::next_after(pick, current, d3dmetal)`:
+
+- The order is the docs/19 §6.2 table's for this game, i.e. the L1 pick followed by its
+  alternatives, from a fresh PE scan of the game's entry point.
+- `current` is the renderer setup last applied (`state.toml`), not the configured one.
+  A DXMT whose install failed already ran as wined3d, and retrying it would fail the
+  same way.
+- A `current` outside the order (L3, L4 or a build flag) starts the order from the
+  top.
+- D3DMetal is skipped unless `renderer::d3dmetal_available()`, the #71 consent hook.
+
+Before showing the dialog, the launcher asks `next-renderer --dry-run`. If that comes
+back empty ("no more renderers", or no gogo, as in the VM guest), the dialog says
+there is nothing left to try, and its third button is **Close** instead. The walk always
+ends: each switch moves forward in a finite order, and every step is the user's click.
+
+| L1 class | order |
+|---|---|
+| DirectDraw 2D, 32-bit | cnc-ddraw → wined3d |
+| Direct3D 10/11 | DXMT → (D3DMetal, 64-bit with consent) → wined3d |
+| Direct3D 12, 64-bit, with consent | D3DMetal → DXMT → wined3d |
+| everything else | wined3d |
+
+Tests replace the dialog with `GOGO_LAUNCHER_DIALOG=<cmd>`. The command gets the
+title, the message and the button labels, and prints the label it chose.
+`GOGO_LAUNCHER_NO_DIALOG` without it only logs the early exit.
+
 ## 9. Testing (08 conventions)
 
 - Unit: TOML ⇄ `launch.conf` projection (golden), stamp computation matching a
@@ -537,7 +589,11 @@ directly, without the tee.
   `Foo.app` changes after signing; edit the L4 file → the launcher (run against a fake
   `gogo`) calls setup exactly once. A fake Wine that prints on both streams and exits 3
   leaves a run log with the header, its output and `# exit: 3`, and only 10 run logs
-  remain (#77).
+  remain (#77). A fake Wine that exits 1 after 1 s, with a stub dialog answering "Try
+  next renderer": L4 gets the next renderer from (fake) gogo, the relaunch runs setup
+  and Wine on it, and the second dialog offers Close, then "Copy report" fills the
+  (stub) clipboard (#78). Unit: the next-renderer walk per API class, ending in "no more
+  renderers".
 - VM (#68): `scripts/vm-test.sh` gains a store and state-dir seeding step, since a v2
   bundle alone isn't enough to launch.
 

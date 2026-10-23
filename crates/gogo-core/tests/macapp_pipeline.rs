@@ -44,6 +44,7 @@ case "$1" in
     fi
     # FAKE_WINE_EXIT=<n>: chatter on both streams, then exit n (#77 run log).
     if [ -n "${{FAKE_WINE_EXIT:-}}" ]; then
+      sleep "${{FAKE_WINE_SLEEP:-0}}"
       echo "fake-wine stdout line"
       echo "fake-wine stderr line" >&2
       exit "$FAKE_WINE_EXIT"
@@ -2404,6 +2405,244 @@ fn v2_launcher_writes_a_rotated_run_log() {
     assert!(log.find("# exit: 3").unwrap() > log.find("fake-wine stderr line").unwrap());
     let launch_log = std::fs::read_to_string(logs.join("launch.log")).unwrap();
     assert!(launch_log.contains(newest.as_str()), "{launch_log}");
+    unsafe { std::env::remove_var("GOGO_HOME") };
+    drop(guard);
+}
+
+fn write_exec(path: &std::path::Path, script: &str) {
+    std::fs::write(path, script).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+/// #78: a game that quits after 1 s gets the early-exit dialog; "Try next
+/// renderer" writes L4 through gogo and relaunches, the relaunch runs setup
+/// on the stale stamp and Wine starts on the new renderer; with nothing left
+/// to try, the dialog offers Close, and "Copy report" puts the report on the
+/// clipboard.
+#[test]
+fn v2_early_exit_dialog_tries_the_next_renderer() {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    unsafe { std::env::set_var("GOGO_HOME", &home) };
+    // A fake gogo: `next-renderer` answers wined3d until L4 names it, then
+    // runs out; `setup` applies L4's renderer and restamps, like the real one.
+    let gogo = tmp.path().join("fake-gogo");
+    let calls = tmp.path().join("gogo-calls.log");
+    write_exec(
+        &gogo,
+        &format!(
+            r#"#!/bin/bash
+echo "$*" >> "{calls}"
+l4="{home}/compat/$3.toml"
+g="{home}/games/$3"
+case "$2" in
+  next-renderer)
+    if grep -q wined3d "$l4" 2>/dev/null; then echo "gogo: $3: no more renderers" >&2; exit 1; fi
+    [ "${{4:-}}" = --dry-run ] || {{ mkdir -p "{home}/compat"; echo 'renderer = "wined3d"' > "$l4"; }}
+    echo wined3d;;
+  setup)
+    new="$(cat "$5/Contents/Resources/gogo-launch.toml" "$l4" 2>/dev/null | /usr/bin/shasum -a 256)"
+    grep -v -e '^STAMP=' -e '^RENDERER=' "$g/launch.conf" > "$g/launch.conf.new"
+    echo "RENDERER='wined3d'" >> "$g/launch.conf.new"
+    echo "STAMP='${{new%% *}}'" >> "$g/launch.conf.new"
+    mv "$g/launch.conf.new" "$g/launch.conf";;
+esac
+"#,
+            calls = calls.display(),
+            home = home.display()
+        ),
+    );
+    // The dialog stub: records each dialog, answers from a script of choices.
+    let dialogs = tmp.path().join("dialogs.log");
+    let answers = tmp.path().join("answers");
+    std::fs::write(&answers, "Try next renderer\nCopy report\n").unwrap();
+    let dialog = tmp.path().join("dialog");
+    write_exec(
+        &dialog,
+        &format!(
+            r#"#!/bin/bash
+{{ printf '%s\n' "$@"; echo ===; }} >> "{dialogs}"
+head -1 "{answers}"
+sed -i.bak 1d "{answers}"
+"#,
+            dialogs = dialogs.display(),
+            answers = answers.display()
+        ),
+    );
+    // pbcopy on PATH: the clipboard is a file.
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let clipboard = tmp.path().join("clipboard");
+    write_exec(
+        &bin.join("pbcopy"),
+        &format!("#!/bin/sh\ncat > \"{}\"\n", clipboard.display()),
+    );
+    let opts = v2_opts(tmp.path(), &gogo);
+    let plan = macapp::plan(&opts, None, &mut |_| {}).unwrap();
+    macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).unwrap();
+    let app = tmp.path().join("out/Treasure Adventure Game.app");
+    // As if the build's setup had applied DXMT (no download in a test).
+    let g = home.join("games/1207659013");
+    let conf = std::fs::read_to_string(g.join("launch.conf")).unwrap();
+    let conf: String = conf
+        .lines()
+        .map(|l| {
+            if l.starts_with("RENDERER=") {
+                "RENDERER='dxmt/v0.80'"
+            } else {
+                l
+            }
+        })
+        .map(|l| format!("{l}\n"))
+        .collect();
+    std::fs::write(g.join("launch.conf"), conf).unwrap();
+
+    let path = format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", bin.display());
+    let out = run_launcher(
+        &app,
+        &home,
+        &[
+            ("FAKE_WINE_EXIT", std::path::Path::new("1")),
+            ("FAKE_WINE_SLEEP", std::path::Path::new("1")),
+            ("GOGO_LAUNCHER_DIALOG", &dialog),
+            ("PATH", std::path::Path::new(&path)),
+        ],
+    );
+    assert_eq!(out.status.code(), Some(1));
+
+    // L4 now names the next renderer, written by gogo.
+    let l4 = std::fs::read_to_string(home.join("compat/1207659013.toml")).unwrap();
+    assert_eq!(l4.trim(), r#"renderer = "wined3d""#);
+    let calls = std::fs::read_to_string(&calls).unwrap();
+    let calls: Vec<&str> = calls.lines().collect();
+    assert_eq!(
+        calls,
+        [
+            "mac-app next-renderer 1207659013 --dry-run",
+            "mac-app next-renderer 1207659013",
+            &format!("mac-app setup 1207659013 --bundle {}", app.display()),
+            "mac-app next-renderer 1207659013 --dry-run",
+        ]
+    );
+    // Two dialogs: the first offers the switch, the second has nothing left.
+    let dialogs = std::fs::read_to_string(&dialogs).unwrap();
+    let shown: Vec<&str> = dialogs.split("===\n").filter(|d| !d.is_empty()).collect();
+    assert_eq!(shown.len(), 2, "{dialogs}");
+    assert!(
+        shown[0].starts_with("Treasure Adventure Game\n"),
+        "{}",
+        shown[0]
+    );
+    assert!(
+        shown[0].contains("exit code 1) on the dxmt/v0.80 renderer"),
+        "{}",
+        shown[0]
+    );
+    assert!(shown[0].contains("fake-wine stderr line"), "{}", shown[0]);
+    assert!(shown[0].contains("switches to wined3d"), "{}", shown[0]);
+    assert!(
+        shown[0].ends_with("Copy report\nOpen log\nTry next renderer\n"),
+        "{}",
+        shown[0]
+    );
+    assert!(shown[1].contains("on the wined3d renderer"), "{}", shown[1]);
+    assert!(shown[1].contains("no more renderers"), "{}", shown[1]);
+    assert!(
+        shown[1].ends_with("Copy report\nOpen log\nClose\n"),
+        "{}",
+        shown[1]
+    );
+
+    // The relaunch ran Wine on the new renderer, in a run log of its own.
+    let logs = home.join("Library/Logs/gogo/1207659013");
+    let mut runs: Vec<String> = std::fs::read_dir(&logs)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.as_bytes()[0].is_ascii_digit())
+        .collect();
+    runs.sort();
+    assert_eq!(runs.len(), 2, "{runs:?}");
+    let first = std::fs::read_to_string(logs.join(&runs[0])).unwrap();
+    let second = std::fs::read_to_string(logs.join(&runs[1])).unwrap();
+    assert!(first.contains("# renderer: dxmt/v0.80\n"), "{first}");
+    assert!(second.contains("# renderer: wined3d\n"), "{second}");
+    assert!(second.contains("# exit: 1\n"), "{second}");
+
+    // Copy report: identity, config, macOS and the log tail; no home paths.
+    let report = std::fs::read_to_string(&clipboard).unwrap();
+    for want in [
+        "gogo launch report: Treasure Adventure Game (1207659013)\n",
+        "# renderer: wined3d\n",
+        "# runtime: path:",
+        "# macos: ",
+        "# exit: 1\n",
+        "--- last 40 log lines ---\nfake-wine stdout line\nfake-wine stderr line\n",
+    ] {
+        assert!(report.contains(want), "{want:?} in:\n{report}");
+    }
+    assert!(!report.contains("# prefix:"), "{report}");
+    unsafe { std::env::remove_var("GOGO_HOME") };
+    drop(guard);
+}
+
+/// #78, the real `next_renderer`: after what setup last applied, in this
+/// game's order, written to L4; then nothing left.
+#[test]
+fn v2_next_renderer_writes_l4_then_runs_out() {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    unsafe { std::env::set_var("GOGO_HOME", &home) };
+    let opts = v2_opts(tmp.path(), &tmp.path().join("no-such-gogo"));
+    let plan = macapp::plan(&opts, None, &mut |_| {}).unwrap();
+    macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).unwrap();
+    let state_path = home.join("games/1207659013/state.toml");
+    let state = std::fs::read_to_string(&state_path).unwrap();
+    assert!(state.contains("renderer = \"wined3d\""), "{state}");
+    // TAG's stub exe doesn't scan: its order is wined3d alone.
+    assert_eq!(
+        macapp::setup::next_renderer("1207659013", false).unwrap(),
+        None
+    );
+    let l4 = home.join("compat/1207659013.toml");
+    assert!(!l4.exists());
+
+    // As if the last setup had applied DXMT: wined3d is next, and a dry run
+    // writes nothing.
+    std::fs::write(
+        &state_path,
+        state.replace("renderer = \"wined3d\"", "renderer = \"dxmt/v0.80\""),
+    )
+    .unwrap();
+    assert_eq!(
+        macapp::setup::next_renderer("1207659013", true)
+            .unwrap()
+            .as_deref(),
+        Some("wined3d")
+    );
+    assert!(!l4.exists());
+    assert_eq!(
+        macapp::setup::next_renderer("1207659013", false)
+            .unwrap()
+            .as_deref(),
+        Some("wined3d")
+    );
+    assert_eq!(
+        std::fs::read_to_string(&l4).unwrap().trim(),
+        r#"renderer = "wined3d""#
+    );
+    // Setup applies it; the order is used up.
+    let out = macapp::setup::setup("1207659013", None).unwrap();
+    assert_eq!(out.state.renderer, "wined3d");
+    assert_eq!(
+        macapp::setup::next_renderer("1207659013", false).unwrap(),
+        None
+    );
     unsafe { std::env::remove_var("GOGO_HOME") };
     drop(guard);
 }

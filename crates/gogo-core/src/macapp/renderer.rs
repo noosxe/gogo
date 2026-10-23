@@ -206,6 +206,26 @@ pub fn from_scan(scan: &PeScan, d3dmetal: bool) -> Pick {
     }
 }
 
+/// What "Try next renderer" (#78) says once the order is used up.
+pub const NO_MORE_RENDERERS: &str = "no more renderers";
+
+/// The renderer to try after `current` (a ref, `<id>[/<ver>]`), in the
+/// order the docs/19 §6.2 table gives for this game: the L1 pick, then its
+/// alternatives. A `current` outside that order (an L3/L4 or flag choice)
+/// starts it from the top. D3DMetal is skipped unless `d3dmetal` (consent,
+/// #71). `None`: [`NO_MORE_RENDERERS`].
+pub fn next_after(pick: &Pick, current: &str, d3dmetal: bool) -> Option<Renderer> {
+    let order: Vec<Renderer> = std::iter::once(pick.renderer)
+        .chain(pick.alternatives.iter().copied())
+        .filter(|r| d3dmetal || *r != Renderer::D3dMetal)
+        .collect();
+    let current = RendererRef::parse(current).ok().map(|r| r.renderer);
+    match order.iter().position(|r| Some(*r) == current) {
+        Some(i) => order.get(i + 1).copied(),
+        None => order.into_iter().find(|r| Some(*r) != current),
+    }
+}
+
 /// L1 from an import scan; a failed scan picks wined3d. A cnc-ddraw gogo
 /// placed on an earlier setup isn't counted as the game's own wrapper.
 pub fn pick(scan: &Result<PeScan, pe::ScanError>) -> Pick {
@@ -549,6 +569,83 @@ mod tests {
             local_overrides: BTreeSet::new(),
             files: vec![],
         }
+    }
+
+    /// #78: the renderers "Try next renderer" walks, per API class, from the
+    /// L1 pick until it runs out.
+    #[test]
+    fn next_renderer_order_per_api_class() {
+        use Bitness::*;
+        use GraphicsApi as A;
+        use GraphicsImport as G;
+        let walk = |pick: &Pick, d3dmetal: bool| {
+            let mut seen = vec![pick.renderer.id().to_string()];
+            while let Some(n) = next_after(pick, seen.last().unwrap(), d3dmetal) {
+                assert!(seen.len() < 8, "cycle: {seen:?}");
+                seen.push(n.id().to_string());
+            }
+            seen.push(NO_MORE_RENDERERS.to_string());
+            seen
+        };
+        // (api, bits, imports, d3dmetal consent, renderers in order)
+        type Case<'a> = (A, Bitness, &'a [G], bool, &'a [&'a str]);
+        let cases: &[Case] = &[
+            (
+                A::Ddraw2d,
+                I386,
+                &[G::Ddraw],
+                false,
+                &["cnc-ddraw", "wined3d"],
+            ),
+            (A::Ddraw2d, X86_64, &[G::Ddraw], false, &["wined3d"]),
+            (A::D3dLegacy, I386, &[G::D3d9], false, &["wined3d"]),
+            (A::D3d11, I386, &[G::D3d11], false, &["dxmt", "wined3d"]),
+            (A::D3d11, X86_64, &[G::D3d11], false, &["dxmt", "wined3d"]),
+            (
+                A::D3d11,
+                X86_64,
+                &[G::D3d11],
+                true,
+                &["dxmt", "d3dmetal", "wined3d"],
+            ),
+            (
+                A::D3d12,
+                X86_64,
+                &[G::D3d12],
+                true,
+                &["d3dmetal", "dxmt", "wined3d"],
+            ),
+            (A::D3d12, X86_64, &[G::D3d12], false, &["wined3d"]),
+            (A::OpenGl, I386, &[], false, &["wined3d"]),
+        ];
+        for (api, bits, imports, d3dmetal, want) in cases {
+            let pick = from_scan(&scan(*api, *bits, imports), *d3dmetal);
+            let mut want: Vec<String> = want.iter().map(|s| s.to_string()).collect();
+            want.push(NO_MORE_RENDERERS.into());
+            assert_eq!(
+                walk(&pick, *d3dmetal),
+                want,
+                "{api:?} {bits:?} d3dmetal={d3dmetal}"
+            );
+        }
+        // Without consent D3DMetal is skipped even if the pick lists it.
+        let pick = from_scan(&scan(A::D3d11, X86_64, &[G::D3d11]), true);
+        assert_eq!(
+            next_after(&pick, "dxmt/v0.80", false),
+            Some(Renderer::Wined3d)
+        );
+        // A renderer from outside the order (L4, a flag) restarts it, versioned
+        // refs included.
+        let pick = from_scan(&scan(A::D3d11, I386, &[G::D3d11]), false);
+        assert_eq!(
+            next_after(&pick, "cnc-ddraw/7.1.0", false),
+            Some(Renderer::Dxmt)
+        );
+        assert_eq!(
+            next_after(&pick, "dxmt/v0.80", false),
+            Some(Renderer::Wined3d)
+        );
+        assert_eq!(next_after(&pick, "wined3d", false), None);
     }
 
     #[test]

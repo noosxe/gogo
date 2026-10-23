@@ -264,6 +264,18 @@ pub enum MacAppSub {
         #[arg(long)]
         json: bool,
     },
+    /// Switch a game to the next renderer in its order (the launcher's
+    /// "Try next renderer", #78): the one after what setup last applied,
+    /// written to the override file as `renderer = "<ref>"`. Prints the new
+    /// ref; exits 1 with "no more renderers" when the order is used up.
+    NextRenderer {
+        /// GOG product id.
+        #[arg(value_name = "GOGID")]
+        gogid: String,
+        /// Print the next renderer, write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Debug, clap::Args)]

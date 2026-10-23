@@ -2037,6 +2037,21 @@ fn mac_app_sub(sub: crate::cli::MacAppSub) -> Result<i32, AppError> {
             );
             Ok(cli::exit::OK)
         }
+        crate::cli::MacAppSub::NextRenderer { gogid, dry_run } => {
+            match gogo::macapp::setup::next_renderer(&gogid, dry_run)? {
+                Some(next) => {
+                    println!("{next}");
+                    Ok(cli::exit::OK)
+                }
+                None => {
+                    eprintln!(
+                        "gogo: {gogid}: {}",
+                        gogo::macapp::renderer::NO_MORE_RENDERERS
+                    );
+                    Ok(cli::exit::FAILED)
+                }
+            }
+        }
         crate::cli::MacAppSub::Setup {
             gogid,
             bundle,

@@ -433,6 +433,9 @@ pub const LAUNCHER: &str = r#"#!/bin/bash
 # reads files gogo wrote, never writes inside this bundle, and runs Wine from
 # gogo's runtime store against this game's prefix in the state dir.
 set -u
+# The environment as started, for "Try next renderer"'s relaunch (#78):
+# the exports below must not stack up across relaunches.
+ENV0="$(export -p)"
 CONTENTS="$(cd "$(dirname "$0")/.." && pwd)"
 RES="$CONTENTS/Resources"
 # shellcheck source=/dev/null
@@ -562,7 +565,9 @@ trap 'on_signal HUP 129' HUP
 # then exit code and duration. launch.log stays the launcher's own journal.
 KEEP_RUNS=10
 RUN_LOG=""
+LAST_RUN_LOG=""
 RUN_T0=0
+RUN_SECS=0
 TEE_PIDS=""
 macos_version() {
     if [ -x /usr/bin/sw_vers ]; then
@@ -621,6 +626,8 @@ end_run_log() {
     [ -n "$RUN_LOG" ] || return 0
     local run="$RUN_LOG"
     RUN_LOG=""
+    LAST_RUN_LOG="$run"
+    RUN_SECS=$((SECONDS - RUN_T0))
     exec >&3 2>&4
     if [ -n "$TEE_PIDS" ]; then
         # A straggler still holding Wine's output open must not hold the
@@ -635,9 +642,77 @@ end_run_log() {
     {
         printf '# ---\n'
         printf '# exit: %s%s\n' "$1" "${2:+ ($2)}"
-        printf '# duration: %ss\n' "$((SECONDS - RUN_T0))"
+        printf '# duration: %ss\n' "$RUN_SECS"
         printf '# ended: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
     } >>"$run"
+}
+
+# #78: a run that ends within EARLY_EXIT_SECS or with a non-zero code
+# explains itself: the last error lines of its run log and three buttons.
+# GOGO_LAUNCHER_DIALOG=<cmd> replaces osascript (tests): it gets the title,
+# the message and the button labels, and prints the chosen label.
+EARLY_EXIT_SECS="${GOGO_EARLY_EXIT_SECS:-15}"
+ask() {
+    if [ -n "${GOGO_LAUNCHER_DIALOG:-}" ]; then "$GOGO_LAUNCHER_DIALOG" "$TITLE" "$@"; return; fi
+    [ -n "${GOGO_LAUNCHER_NO_DIALOG:-}" ] && return 0
+    /usr/bin/osascript -e 'on run argv' -e 'set b to items 3 thru -1 of argv' \
+        -e 'set r to display dialog (item 2 of argv) with title (item 1 of argv) buttons b default button (item -1 of b) with icon caution giving up after 600' \
+        -e 'if gave up of r then return ""' -e 'return button returned of r' -e 'end run' \
+        "$TITLE" "$@" 2>/dev/null
+}
+# Wine's output in a run log: between the header's and the footer's `# ---`.
+run_output() { awk '/^# ---$/ { n++; next } n == 1' "$1"; }
+last_errors() {
+    local errs
+    errs="$(run_output "$1" | grep -E -i 'err:|error|fail|exception|cannot|not found' | tail -n 5)"
+    [ -n "$errs" ] || errs="$(run_output "$1" | tail -n 5)"
+    printf '%s' "$errs" | cut -c1-160
+}
+# Copy report: what a bug report needs, no home paths.
+report() {
+    printf 'gogo launch report: %s (%s)\n' "$TITLE" "$GOGID"
+    grep -E '^# (runtime|runtime_dir|renderer|verbs|stamp|macos|exe|args|exit|duration):' "$1"
+    printf -- '--- last 40 log lines ---\n'
+    run_output "$1" | tail -n 40
+}
+early_exit() {
+    local log="$LAST_RUN_LOG" gogo next="" msg choice
+    if [ -z "${GOGO_LAUNCHER_DIALOG:-}" ] && [ -n "${GOGO_LAUNCHER_NO_DIALOG:-}" ]; then
+        log "early exit: code $rc after ${RUN_SECS}s on $RENDERER (dialogs off)"
+        return 0
+    fi
+    gogo="$(find_gogo)"
+    if [ -n "$gogo" ]; then
+        next="$("$gogo" mac-app next-renderer "$GOGID" --dry-run 2>>"$LOG")" || next=""
+    fi
+    log "early exit: code $rc after ${RUN_SECS}s on $RENDERER; next renderer: ${next:-none}"
+    msg="$TITLE quit after ${RUN_SECS}s (exit code $rc) on the $RENDERER renderer.
+
+$(last_errors "$log")
+
+"
+    if [ -n "$next" ]; then
+        choice="$(ask "${msg}Try next renderer switches to $next and starts the game again." \
+            "Copy report" "Open log" "Try next renderer")"
+    else
+        choice="$(ask "${msg}There are no more renderers to try for this game." \
+            "Copy report" "Open log" "Close")"
+    fi
+    log "dialog: ${choice:-dismissed}"
+    case "$choice" in
+        "Open log") open "$log" ;;
+        "Copy report") report "$log" | pbcopy ;;
+        "Try next renderer")
+            if "$gogo" mac-app next-renderer "$GOGID" >>"$LOG" 2>&1; then
+                log "relaunching on $next"
+                # The stamp is stale now: the relaunch runs setup, which
+                # applies the new renderer.
+                exec /usr/bin/env -i /bin/bash -c 'eval "$1"; shift; exec "$@"' relaunch \
+                    "$ENV0" "$CONTENTS/MacOS/$(basename "$0")" "$@"
+            fi
+            log "next-renderer failed: not relaunching"
+            ;;
+    esac
 }
 
 start_run_log "$@"
@@ -655,6 +730,7 @@ log "wine exited $rc; waiting for the prefix's wineserver"
 wait $!
 log "prefix idle"
 end_run_log "$rc"
+if [ "$rc" -ne 0 ] || [ "$RUN_SECS" -lt "$EARLY_EXIT_SECS" ]; then early_exit "$@"; fi
 exit "$rc"
 "#;
 
