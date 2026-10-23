@@ -115,6 +115,16 @@ the summary records `"audio": true`) before treating that as a real failure.
 
 ## v2 bundles: seeding the state dir (design 16)
 
+A `--portable` bundle (#84, design 16 §10) carries its engine and game and sets its own
+prefix up, so it needs no seeding: run it with `--no-state` (`--state` is refused for
+it). The summary says `model: portable`, `renderer` and `runtime` come from its TOML, and
+the prefix logs are collected from the guest's `games/<gogid>/`, which its launcher
+created.
+
+```sh
+scripts/vm-test.sh run "target/portable/Pharaoh Gold.app" --no-state --secs 60
+```
+
 A v2 `.app` is only a ~10 KiB launcher. The prefix, game files and effective config live
 in `~/Library/Application Support/gogo/games/<gogid>/`, and Wine comes from gogo's
 runtime store. So for any bundle with `Contents/Resources/gogo-launch.toml` (and no

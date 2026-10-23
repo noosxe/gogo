@@ -45,8 +45,9 @@ flags  >  L4 user override  >  L3 compat DB  >  L2 GOG-native  >  L1 auto render
 The launcher only sources files gogo wrote, compares a stamp, and either execs Wine or
 asks gogo to bring the prefix up to date first.
 
-`--portable` (#84) keeps today's fat bundle (engine + prefix + game inside the `.app`) for
-copying to another Mac. Everything below is about the default, non-portable bundle.
+`--portable` (#84) builds a self-contained bundle for copying to another Mac: engine,
+renderer, verb files and game inside the `.app`, the prefix still outside it (§10).
+Everything else in this doc is about the default, non-portable bundle.
 
 ## 1. Decision 1: `gogo-launch.toml` is the source of truth, `launch.conf` is its mirror
 
@@ -353,7 +354,9 @@ DXMT from outside its tree.
   `dxgi.dll`.
 - *#70:* fat (`--portable`) bundles can't carry a derived runtime: DXMT there
   falls back to wined3d with a warning. cnc-ddraw keeps design 13's build-time
-  path (game dir + a registry `ddraw=n,b`).
+  path (game dir + a registry `ddraw=n,b`). *Superseded by #84 (§10):* a
+  portable bundle copies the derived engine itself, so DXMT works there, and
+  cnc-ddraw's `ddraw=n,b` is a baked `dll_overrides` entry.
 - **arm64ec:** the overlay copies whatever `<arch>-*` dirs the renderer release ships
   (`aarch64-windows`/`aarch64-unix` for an ARM64EC DXMT), and the loader rule doesn't
   depend on arch. See §Open for entitlement-signed runtimes.
@@ -853,6 +856,77 @@ no other prefix and nothing else in the state dir.
   spared while a live launcher record exists, and stopped by `--stop-leftovers`.
 - VM (#68): `scripts/vm-test.sh` gains a store and state-dir seeding step, since a v2
   bundle alone isn't enough to launch.
+- Integration (#84, `portable_bundle_carries_everything_and_sets_up_outside`): a portable
+  depot build (cnc-ddraw flag over an L4 renderer, an L1 verb through a fake winetricks,
+  an L4 env and registry value) has the engine, the game with `ddraw.dll`, the verb's
+  DLL and the baked config inside, no prefix, and no builder paths. The launcher, run as
+  another user with no gogo, creates the prefix in that user's state dir, runs the
+  `reg add`s and the game with the baked overrides, and leaves the bundle's tree digest
+  unchanged across two launches. `doctor` is all ok by path and by gogid. `--retarget`,
+  `next-renderer` and `setup` refuse it, and so does `--renderer d3dmetal` at plan time.
+  VM: `scripts/vm-test.sh run --no-state` on a portable bundle (`model: portable` in the
+  summary).
+
+## 10. `--portable` (#84)
+
+docs/19 §6.1/§6.5's "fat bundle for another Mac", rebuilt on the v2 pieces. The old
+fat path (prefix inside the `.app`, symlinks skipped, cnc-ddraw only) is gone.
+
+```
+Foo.app/Contents/
+  MacOS/<name>                          the same launcher (§8), PORTABLE=1 branch
+  Resources/gogo-launch.toml            effective config + [portable]
+  Resources/launch.conf                 its mirror (WINE, GAME_SRC, REG, … Resources-relative)
+  Resources/wine/                       the engine: base, or the derived DXMT one (§3)
+  Resources/wine-frameworks/            its Frameworks/ dylibs (top-level *.dylib, links kept)
+  Resources/game/<tree-name>/           the game tree, cnc-ddraw already in it
+  Resources/verbs/{system32,syswow64,Fonts}/   what the build's verbs added
+  Resources/LICENSE-*.txt               runtime, renderer, winetricks, verbs
+```
+
+- **Build.** Same lanes and steps as v2, staged in `<out>/.<slug>.portable-<pid>/` (removed
+  at the end, success or not), so the builder's state dir gets nothing. The TOML is what
+  setup would compute (`LaunchToml::effective` over L3 and the builder's L4), with flags
+  still winning (#110): a portable bundle never runs setup, so L4 is baked, not applied
+  later. The renderer is applied in the staging dir (`renderer::apply`), then the engine
+  it returns is copied. The effective verbs run once through winetricks in the staging
+  prefix. Every file they add under `drive_c/windows/{system32,syswow64,Fonts}` goes to
+  `Resources/verbs/`, and the `DllOverrides` they write in `user.reg` become baked
+  `dll_overrides`. Other registry changes a verb makes (`xact`'s COM registration) aren't
+  carried. `registry` bakes the GOG.com key (`HKLM\Software\GOG.com\Games\<id>`,
+  `/reg:32`, the values GOG's installers write), then L3's and L4's. Absolute symlinks in
+  the copied engine are dropped. Nothing names the builder's paths: `[gogo]` is
+  `gogo` / `~/Library/Application Support/gogo`, and a `path:` runtime is recorded by its
+  version. Signed and verified `--strict`, like v2.
+- **Launch.** The state dir is always `~/Library/Application Support/gogo` of the user
+  running it (the baked `[gogo] state` is ignored). The launcher never calls gogo. When
+  `games/<gogid>/prefix` is missing, it runs `wineboot -u` with the bundled Wine
+  (`mscoree=` as in builds). It clones `Resources/game/<tree>` to `games/<gogid>/game`
+  once (`cp -c`), where the game may write, links `C:\GOG\<tree>` to it, and drops links
+  out of the state dir (decision 4). When the prefix is new, or `games/<gogid>/portable`
+  records another stamp (sha256 of the TOML alone), it copies `Resources/verbs/` into
+  `drive_c/windows/`, runs each baked `reg add`, and writes `portable` (`stamp=`,
+  `bundle=`). Then it runs as §8 does. The early-exit dialog offers no "Try next renderer":
+  it says a rebuild picks another.
+- **Refused.** `--renderer d3dmetal --portable` and `--runtime gptk --portable` at plan time.
+  Any other consent-gated catalog runtime is refused once resolved
+  (`portable::check_runtime`). An L1/L3/L4 D3DMetal is set aside for the L1 pick without
+  D3DMetal. D3DMetal's consent prompt says gogo never redistributes it inside bundles, and
+  the GPTK licence (EA18380 §2A(iii)) allows only non-commercial distribution, which gogo
+  can't vouch for when the user hands a bundle on. `check_runtime` is also the hook for
+  #82's vendor-signed runtimes, which can't be copied into another signed bundle.
+  `--retarget`, `next-renderer` and `setup` fail on a portable bundle, or on a gogid that
+  only a portable bundle set up here (no `state.toml`, a `portable` marker), with
+  "rebuild it".
+- **`doctor`** reads the bundle (by path, or through the marker) and swaps the store
+  checks for bundle ones: the bundled Wine probes, the renderer's files are in the bundle
+  (`ddraw.dll` in the bundled game dir, `winemetal.so` in the bundled engine), and the
+  prefix is absent (ok: the first launch creates it) or was set up from this build (else
+  warn). `links`, `rosetta`, `processes` and `log` are unchanged; `d3dmetal` doesn't
+  apply. **`compat`** says the bundle's config was baked at build, and shows the baked
+  renderer and variant instead of L4's.
+- **Shared gogid.** On a Mac where gogo also manages the same game, the portable launcher
+  uses the same `games/<gogid>/` (prefix and `game/`), and logs that it does.
 
 ## Open
 

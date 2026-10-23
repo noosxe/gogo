@@ -45,7 +45,8 @@ stable exit codes, no prompts unless `--yes` is owed.
 > `~/Library/Application Support/gogo/games/<gogid>/{prefix,game}` (design 16 §2, §4),
 > the bundle carries `gogo-launch.toml` + a generated `launch.conf` (design 16 §1), and
 > nothing is written into `Foo.app` after signing. Steps 2–4 below describe the
-> `--portable` lane (#84) and today's code until #66/#67 land.
+> pre-#66 fat bundle. *#84:* `--portable` no longer puts a prefix in the bundle either.
+> Its launcher creates one on the Mac it runs on (design 16 §10).
 
 ```
 resolve runtime → stage prefix → silent install → locate entry point
@@ -104,7 +105,8 @@ debugging aid and honesty marker (GPTK vs wine changes support expectations).
 > **Amended 2026-10-23 (design 16):** the default bundle **references** its runtime
 > by store id (`runtime = "<id>/<ver>"` in `gogo-launch.toml`) instead of copying it.
 > Renderers that replace Wine builtins (DXMT) come as a derived store runtime (design 16
-> §3). Copying, as described in the next paragraph, remains only for `--portable` (#84).
+> §3). Copying, as described in the next paragraph, remains only for `--portable` (#84,
+> design 16 §10: the engine, its dylibs, the game and the verbs' files).
 
 **The runtime is copied into the bundle** (`Contents/Resources/wine/`):
 self-contained by construction; hundreds of MB per game is the accepted cost

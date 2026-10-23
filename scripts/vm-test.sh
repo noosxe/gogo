@@ -23,7 +23,8 @@
 #   --no-state          v2 bundles (design 16) get their games/<gogid>, L4
 #                       override and store runtime(s) seeded into the guest by
 #                       default, derived from gogo-launch.toml; this skips that
-#                       (--state forces it). v1 self-contained bundles: none.
+#                       (--state forces it). v1 self-contained and --portable
+#                       (#84) bundles: none (a portable one sets itself up).
 #   --audio             give the guest a sound device wired to the host (off by
 #                       default; also for smoke and shell)
 #   --runtimes share|copy  store runtimes as read-only virtiofs shares (default,
@@ -374,10 +375,15 @@ cmd_run() {
     [ -f "$KEY" ] || die "no ssh key at $KEY; run: scripts/vm-test.sh golden"
 
     # v2 bundle (design 16): only a launcher plus gogo-launch.toml. A v1
-    # self-contained bundle carries its engine in Resources/wine.
+    # self-contained bundle carries its engine in Resources/wine; so does a
+    # portable one (#84), whose TOML has a [portable] table and whose
+    # launcher creates games/<gogid> in the guest itself.
     local toml="$app/Contents/Resources/gogo-launch.toml" model=v1 gogid="" runtime=""
     local renderer="" runtime_dir=""
-    if [ -f "$toml" ] && [ ! -d "$app/Contents/Resources/wine" ]; then
+    if [ -f "$toml" ] && grep -q '^\[portable\]' "$toml"; then
+        model=portable; gogid="$(toml_str "$toml" gogid)"; runtime="$(toml_str "$toml" runtime)"
+        renderer="$(toml_str "$toml" renderer)"; runtime_dir="Contents/Resources/wine"
+    elif [ -f "$toml" ] && [ ! -d "$app/Contents/Resources/wine" ]; then
         model=v2; gogid="$(toml_str "$toml" gogid)"; runtime="$(toml_str "$toml" runtime)"
         if [ -z "$HOST_STATE" ]; then
             HOST_STATE="$(toml_str "$toml" state)"
@@ -462,6 +468,7 @@ cmd_run() {
     # runtime at all; --runtimes copy streams it with tar like the rest.
     local dirs=(--dir="out:$res") u p i=0 shares=()
     if [ "$state" = 1 ]; then
+        [ "$model" != portable ] || { note="--state: $base is a portable bundle (it sets itself up; use --no-state)"; exit 3; }
         [ "$model" = v2 ] || { note="--state: $base has no gogo-launch.toml (not a v2 bundle)"; exit 3; }
         while IFS= read -r u; do units+=("$u"); done < <(state_units "$app" "$rtmode") \
             || true
@@ -627,7 +634,7 @@ cmd_run() {
     # Wine-side logs: anything *.log/*.txt-ish the game or Wine left in the prefix.
     mkdir -p "$res/prefix-logs"
     local pfx="$dst/Contents/Resources"
-    [ "$model" = v2 ] && pfx="$GUEST_STATE/games/$gogid"
+    case "$model" in v2 | portable) pfx="$GUEST_STATE/games/$gogid" ;; esac
     vssh "$ip" "cd \"$pfx\" 2>/dev/null && find . -path ./wine -prune -o -type f \\( -iname '*.log' -o -iname '*.err' -o -iname 'ddraw.ini' -o -iname 'launch.conf' \\) -size -5M -print0 | xargs -0 tar cf - 2>/dev/null" \
         | tar -C "$res/prefix-logs" -xf - 2>/dev/null || true
     if [ -n "$gogid" ]; then

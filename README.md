@@ -140,6 +140,19 @@ gogo mac-app doctor 1207659013                     # or the .app path; --json fo
 gogo mac-app doctor 1207659013 --stop-leftovers    # also stop Wine processes a dead launcher left
 ```
 
+**Handing a game to another Mac.** `--portable` builds a self-contained
+`.app`: the Wine runtime, the renderer, the files the game's winetricks verbs
+install and the game itself go inside it (hundreds of MB). Its launcher sets the
+prefix up on whatever Mac it runs on, under
+`~/Library/Application Support/gogo/games/<gogid>/`, and needs no gogo there.
+The config is baked in at build, so `--retarget` and *Try next renderer* refuse
+a portable bundle: rebuild it instead. D3DMetal and the GPTK never go into one
+(Apple's licence).
+
+```sh
+gogo mac-app pharaoh --portable --out ~/Desktop
+```
+
 **Recipes and runtime menus are opt-in.** `--interactive` asks for both in
 menus on a terminal; bare `--recipe` or `--runtime` asks for just that one.
 Lutris recipes (`--recipe auto|<slug>|<file.json>`) are applied step by step,
