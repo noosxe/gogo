@@ -5,6 +5,12 @@ Status: contract · Depends on: docs/18 (research), design 10 (mac-app), design 
 
 ## 0. Scope
 
+> **Amended 2026-10-23 (design 16, docs/19 §6.3):** the depot lane becomes the
+> **default** `mac-app` input whenever a depot build exists (#73); the offline-installer
+> lane stays as the fallback. In the design 16 bundle model the clone target moves from
+> `prefix/drive_c/GOG/<tree-name>` to `games/<gogid>/game` (reached from the prefix as
+> `C:\GOG\<tree-name>`, design 16 §4). The steps below are otherwise unchanged.
+
 `gogo mac-app --from-depot <GAME-or-PATH>` builds the .app from a depot
 (content-system) game tree instead of running an offline installer under wine.
 Everything after the "install" step is shared with the offline lane (docs/18 §1).
@@ -70,6 +76,14 @@ Gcenx staging 11.18) — the gate is internal GOG script logic (suspected
 synthesizes the key anyway (principled parity with a real install) and
 attempts the support run; on decline the bundle ships with a warning naming
 the offline lane as the remedy for that game class.
+
+**gog-support overlay (amended 2026-10-23, docs/19 §1 item 4, #64):** besides the
+support installer, the depot cache can carry `gog-support/<id>/<id>/app/**`: files
+Galaxy merges into the install dir (Carmageddon TDR 2000: `ASSETS/options.txt`, without
+which the exe aborts at `File.cpp:73`; Treasure Adventure Game: `config.ini`). Right
+after `clone_tree`, the depot lane merges that `app/` tree over the cloned game dir
+(overlay files win) and reports what it merged as a progress line. It runs before the
+support installer.
 
 - `install_dir` = `prefix/drive_c/GOG/<tree-name>` in both lanes (docs/18 §5).
 - `InstallStarted/InstallFinished` events carry the tree bytes in depot mode.

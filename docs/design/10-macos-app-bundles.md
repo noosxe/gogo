@@ -40,6 +40,13 @@ stable exit codes, no prompts unless `--yes` is owed.
 
 ## 2. Pipeline
 
+> **Amended 2026-10-23 (design 16):** in the default (non-portable) bundle the prefix
+> and the game files leave the bundle. gogo builds them under
+> `~/Library/Application Support/gogo/games/<gogid>/{prefix,game}` (design 16 §2, §4),
+> the bundle carries `gogo-launch.toml` + a generated `launch.conf` (design 16 §1), and
+> nothing is written into `Foo.app` after signing. Steps 2–4 below describe the
+> `--portable` lane (#84) and today's code until #66/#67 land.
+
 ```
 resolve runtime → stage prefix → silent install → locate entry point
   → write launcher + Info.plist → ad-hoc codesign → summary
@@ -93,6 +100,11 @@ section when implemented):
 
 Resolution records which runtime was used into `Resources/runtime.txt` —
 debugging aid and honesty marker (GPTK vs wine changes support expectations).
+
+> **Amended 2026-10-23 (design 16):** the default bundle **references** its runtime
+> by store id (`runtime = "<id>/<ver>"` in `gogo-launch.toml`) instead of copying it.
+> Renderers that replace Wine builtins (DXMT) come as a derived store runtime (design 16
+> §3). Copying, as described in the next paragraph, remains only for `--portable` (#84).
 
 **The runtime is copied into the bundle** (`Contents/Resources/wine/`):
 self-contained by construction; hundreds of MB per game is the accepted cost
@@ -168,6 +180,7 @@ logic in the frontend.
   overrides from a community repo) — now designed in **design 11**.
 - Shared-runtime bundles (tiny `.app` referencing the store) — the **download
   store** itself is now v1 (design 12 §4); reference-style bundles remain future.
+  *(Amended 2026-10-23: now designed in design 16.)*
 - DXVK/MoltenVK toggle for non-GPTK runtimes (licenses permit; 13 §3).
 - MojoSetup branch for mac-native installers (13 §2) — extraction-only, no
   Wine.
