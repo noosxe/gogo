@@ -443,6 +443,9 @@ source   = "gogo-vm"                    # or "umu-protonfixes:<file>@<sha>"
 - Fields are the six primitives umu-protonfixes actually uses (verbs, dll
   overrides, env, registry, exe replace, args) plus `renderer`, `runtime`,
   `exe`, `status`. No code, no shell.
+- `verbs` add to the layers below, L1's auto verbs included (#128): a fix list
+  is additive, like umu-protonfixes' `protontricks` calls. `-<verb>` removes
+  one, `-*` all of them (design 16 decision 5).
 - **Seed**: translate umu-protonfixes' GOG-mapped fixes mechanically (BSD-2,
   attribute), dropping Proton-only knobs (DXVK/fsync/`protonprefix`).
   Most entries will come from **our own VM smoke runs** — `scripts/vm-test.sh`

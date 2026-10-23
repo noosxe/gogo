@@ -2177,8 +2177,8 @@ fn v2_real_setup_applies_l4_and_restamps() {
 /// or a setup, L4 registry values and verbs are applied (verbs with `z:`
 /// back for the run only), and a runtime gogo can't install names the fix.
 /// #72: the build bakes the L1 auto verbs into `gogo-launch.toml`; setup
-/// runs winetricks for them once, not again while nothing changes, and L4
-/// replaces them whole.
+/// runs winetricks for them once, not again while nothing changes. #128: L4
+/// verbs add to them, `-<verb>` / `-*` remove, and each edit restamps.
 #[test]
 fn v2_auto_verbs_are_baked_and_run_once() {
     let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -2241,19 +2241,35 @@ fn v2_auto_verbs_are_baked_and_run_once() {
     macapp::setup::setup("1207659013", None).unwrap();
     assert_eq!(runs().len(), 1, "{:?}", runs());
 
-    // L4 replaces L1 whole: `[]` runs nothing, a new list runs it.
-    std::fs::write(&l4, "verbs = []\n").unwrap();
+    // L4 verbs add to L1's: the stamp and the recorded list change, and
+    // winetricks runs for the union.
+    let before = macapp::setup::setup("1207659013", None).unwrap().state;
+    std::fs::write(&l4, "verbs = [\"xinput\", \"d3dx11_43\"]\n").unwrap();
+    let out = macapp::setup::setup("1207659013", None).unwrap();
+    assert_ne!(out.state.stamp, before.stamp);
+    assert_eq!(out.state.verbs, ["d3dcompiler_43", "d3dx11_43", "xinput"]);
+    assert_eq!(
+        runs().last().unwrap(),
+        "-q d3dcompiler_43 d3dx11_43 xinput|wine64ok"
+    );
+    assert_eq!(runs().len(), 2);
+    // `-<verb>` drops one, `-*` all of them (nothing to run).
+    std::fs::write(&l4, "verbs = [\"-d3dx11_43\"]\n").unwrap();
+    let out = macapp::setup::setup("1207659013", None).unwrap();
+    assert_eq!(out.state.verbs, ["d3dcompiler_43"]);
+    assert_eq!(runs().len(), 3);
+    std::fs::write(&l4, "verbs = [\"-*\"]\n").unwrap();
     let out = macapp::setup::setup("1207659013", None).unwrap();
     assert!(out.state.verbs.is_empty());
-    std::fs::write(&l4, "verbs = [\"xinput\"]\n").unwrap();
+    std::fs::write(&l4, "verbs = [\"-*\", \"xinput\"]\n").unwrap();
     macapp::setup::setup("1207659013", None).unwrap();
     assert_eq!(runs().last().unwrap(), "-q xinput|wine64ok");
-    assert_eq!(runs().len(), 2);
+    assert_eq!(runs().len(), 4);
 
     // A new prefix gets its verbs again.
     std::fs::remove_dir_all(home.join("games/1207659013/prefix")).unwrap();
     macapp::setup::setup("1207659013", None).unwrap();
-    assert_eq!(runs().len(), 3);
+    assert_eq!(runs().len(), 5);
 
     unsafe { std::env::remove_var("WINETRICKS") };
     unsafe { std::env::remove_var("GOGO_HOME") };
@@ -3364,7 +3380,7 @@ fn ddraw_game_gets_cnc_ddraw_until_l4_says_otherwise() {
 /// An L3 entry (through `GOGO_COMPAT_DIR`) with exe/renderer/verbs/env/args:
 /// the plan shows its status, the bundle TOML bakes its exe, renderer, args,
 /// env and DLL overrides over L1 and `goggame-*.info`, and setup runs its
-/// verbs through winetricks in place of the L1 ones.
+/// verbs through winetricks on top of the L1 ones (#128).
 #[test]
 fn compat_entry_drives_build_and_setup() {
     let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -3457,16 +3473,22 @@ tested   = [{ runtime = "winecx-24.0.7_7", date = 2026-10-22 }]
     assert_eq!(baked.args, ["-windowed"]);
     assert_eq!(baked.env["WINEMSYNC"], "1");
     assert_eq!(baked.dll_overrides["xinput1_3"], "n,b");
-    // The TOML keeps L1 verbs (design 16 §2.2); setup applies L3's instead.
+    // The TOML keeps L1 verbs (design 16 §2.2); setup adds L3's.
     assert_eq!(baked.verbs, ["d3dx11_43"]);
     let runs = std::fs::read_to_string(&wt_log).expect("fake winetricks ran");
-    assert_eq!(runs.lines().collect::<Vec<_>>(), ["-q d3dx9_43 xact"]);
+    assert_eq!(
+        runs.lines().collect::<Vec<_>>(),
+        ["-q d3dx11_43 d3dx9_43 xact"]
+    );
     let conf = std::fs::read_to_string(home.join("games/1435582019/launch.conf")).unwrap();
     assert!(
         conf.contains(r"EXE='C:\GOG\Rebel Galaxy\bin\RealGame.exe'"),
         "{conf}"
     );
-    assert!(conf.contains("VERBS=('d3dx9_43' 'xact')"), "{conf}");
+    assert!(
+        conf.contains("VERBS=('d3dx11_43' 'd3dx9_43' 'xact')"),
+        "{conf}"
+    );
     assert!(conf.contains("DLL_OVERRIDES='xinput1_3=n,b'"), "{conf}");
 
     unsafe {

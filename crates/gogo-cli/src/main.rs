@@ -2550,6 +2550,10 @@ async fn mac_app(
                     "from_search": r.from_search,
                 })),
                 "auto_verbs": plan.auto_verbs,
+                // What setup applies: L1 plus the L3/L4 edits (#128).
+                "verbs": plan.auto_verbs.as_deref().map(|a| {
+                    gogo::macapp::verbs::for_plan(plan.gogid.as_deref(), a)
+                }),
                 "compat_status": plan.compat.as_ref().map(|c| c.status_line()),
                 "renderer": selected.lock().unwrap().clone(),
                 "runtime": {

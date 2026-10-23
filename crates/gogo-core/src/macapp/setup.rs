@@ -144,10 +144,14 @@ pub fn setup(gogid: &str, bundle: Option<&Path>) -> Result<SetupOutcome, MacAppE
         )
         .map_err(|e| MacAppError::Recipe(format!("registry {}: {e}", value.key)))?;
     }
-    // Verbs: the bundle's L1 list, then L3, then L4 (decision 5). winetricks
-    // runs only when the list changed since the last setup or the prefix is
-    // new; winetricks would skip installed verbs, but not for free.
-    eff.verbs = verbs::effective(&baked.verbs, &db.entry, &l4.entry).value;
+    // Verbs: the bundle's L1 list plus L3's, then L4's edits (decision 5,
+    // #128). winetricks runs only when the effective list changed since the
+    // last setup (`state.toml`) or the prefix is new; winetricks would skip
+    // installed verbs, but not for free.
+    eff.verbs = verbs::effective(&baked.verbs, &db.entry, &l4.entry)
+        .into_iter()
+        .map(|s| s.value)
+        .collect();
     let verbs_applied = !prefix_created
         && prior
             .as_ref()

@@ -4,8 +4,9 @@
 # a 32-bit exe on CX24's experimental WoW64. wined3d is fast but its GLSL
 # programs fail to link on macOS GL 4.1 (glUseProgram GL_INVALID_OPERATION;
 # no GL_ARB_uniform_buffer_object / GL_EXT_texture_array): garbled 3D.
-# The verbs are the L1 auto set; without the native d3dcompiler/d3dx11 the
-# shaders don't compile at all (docs/19 §5).
+# The verbs are the L1 auto set (verbs add to L1's, so this only pins them);
+# without the native d3dcompiler/d3dx11 the shaders don't compile at all
+# (docs/19 §5).
 title  = "Rebel Galaxy"
 verbs  = ["d3dcompiler_43", "d3dx11_43", "d3dx9_43", "xinput"]
 status = "broken"

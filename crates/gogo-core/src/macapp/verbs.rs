@@ -12,7 +12,8 @@
 //! Wine builtins and get no verb.
 //!
 //! The build bakes these into `gogo-launch.toml` `verbs` (so they're part
-//! of the config stamp); setup layers L3 then L4 over them ([`effective`]).
+//! of the config stamp); setup applies L3 then L4 to them ([`effective`]):
+//! their verbs add to these, `-<verb>` / `-*` remove (#128).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -122,16 +123,31 @@ pub fn names(auto: &[AutoVerb]) -> Vec<String> {
     auto.iter().map(|a| a.verb.clone()).collect()
 }
 
-/// The verbs setup applies: the bundle's baked L1 list, replaced whole by
-/// L3 then L4 when they set `verbs` (decision 5; `verbs = []` clears).
-pub fn effective(baked: &[String], db: &CompatEntry, l4: &CompatEntry) -> Sourced<Vec<String>> {
+/// The verbs setup applies, each with the layer that added it: the bundle's
+/// baked L1 list, then L3's and L4's edits to it (decision 5, #128: their
+/// verbs add, `-<verb>` removes one, `-*` all; [`compat::merge`]).
+///
+/// [`compat::merge`]: super::compat::merge
+pub fn effective(baked: &[String], db: &CompatEntry, l4: &CompatEntry) -> Vec<Sourced<String>> {
     let auto = CompatEntry {
         verbs: Some(baked.to_vec()),
         ..Default::default()
     };
-    super::compat::merge(&[(Layer::Auto, &auto), (Layer::Db, db), (Layer::User, l4)])
-        .verbs
-        .expect("the L1 layer always sets verbs")
+    super::compat::merge(&[(Layer::Auto, &auto), (Layer::Db, db), (Layer::User, l4)]).verbs
+}
+
+/// [`effective`] for a planned build: its L1 verbs under `gogid`'s L3 and L4.
+pub fn for_plan(gogid: Option<&str>, auto: &[AutoVerb]) -> Vec<Sourced<String>> {
+    let (db, l4) = match gogid {
+        Some(id) => (
+            super::compat::db_entry(id).entry,
+            super::compat::load_user(id)
+                .map(|p| p.entry)
+                .unwrap_or_default(),
+        ),
+        None => Default::default(),
+    };
+    effective(&names(auto), &db, &l4)
 }
 
 /// The verbs a built game's bundle baked (its L1 list), read through
@@ -144,34 +160,34 @@ pub fn baked(gogid: &str) -> Option<Vec<String>> {
     Some(super::launch::LaunchToml::parse(&raw, &path).ok()?.verbs)
 }
 
-/// The pre-confirm summary's `verbs:` value: what setup will apply and the
-/// layer it comes from, with the imports behind L1 verbs. `auto` is `None`
+/// The pre-confirm summary's `verbs:` value: what setup will apply, each
+/// verb with its layer, and the imports behind the L1 ones. `auto` is `None`
 /// when the tree isn't there yet (the installer lane).
 pub fn summary(gogid: Option<&str>, auto: Option<&[AutoVerb]>) -> String {
     let Some(auto) = auto else {
         return "from the game's imports, once installed".into();
     };
-    let (db, l4) = match gogid {
-        Some(id) => (
-            super::compat::db_entry(id).entry,
-            super::compat::load_user(id)
-                .map(|p| p.entry)
-                .unwrap_or_default(),
-        ),
-        None => Default::default(),
-    };
-    let eff = effective(&names(auto), &db, &l4);
-    let list = if eff.value.is_empty() {
-        "none".to_string()
-    } else if eff.layer == Layer::Auto {
-        auto.iter()
-            .map(|a| format!("{} ({})", a.verb, a.imports.join(", ")))
-            .collect::<Vec<_>>()
-            .join(", ")
-    } else {
-        eff.value.join(", ")
-    };
-    format!("{list}  ({})", eff.layer.describe())
+    describe(&for_plan(gogid, auto), auto)
+}
+
+fn describe(eff: &[Sourced<String>], auto: &[AutoVerb]) -> String {
+    if eff.is_empty() {
+        return "none".into();
+    }
+    eff.iter()
+        .map(|s| match auto.iter().find(|a| a.verb == s.value) {
+            Some(a) if s.layer == Layer::Auto => {
+                format!(
+                    "{} ({}: {})",
+                    s.value,
+                    s.layer.describe(),
+                    a.imports.join(", ")
+                )
+            }
+            _ => format!("{} ({})", s.value, s.layer.describe()),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]
@@ -312,26 +328,81 @@ mod tests {
         assert_eq!(auto[1].imports, ["x3daudio1_7.dll", "xactengine3_7.dll"]);
     }
 
+    fn verbs(v: &[&str]) -> CompatEntry {
+        CompatEntry {
+            verbs: Some(v.iter().map(|s| s.to_string()).collect()),
+            ..Default::default()
+        }
+    }
+
+    fn pairs(eff: &[Sourced<String>]) -> Vec<(&str, Layer)> {
+        eff.iter().map(|s| (s.value.as_str(), s.layer)).collect()
+    }
+
+    /// #128: L3 and L4 verbs add to L1's, in order, without duplicates.
     #[test]
-    fn l3_and_l4_replace_auto_verbs_whole() {
-        let baked = vec!["d3dcompiler_43".to_string()];
+    fn l3_and_l4_verbs_add_to_auto_verbs() {
+        let baked = vec!["d3dcompiler_43".to_string(), "d3dx11_43".into()];
         let none = CompatEntry::default();
-        let e = effective(&baked, &none, &none);
-        assert_eq!((e.value, e.layer), (baked.clone(), Layer::Auto));
+        assert_eq!(
+            pairs(&effective(&baked, &none, &none)),
+            [("d3dcompiler_43", Layer::Auto), ("d3dx11_43", Layer::Auto)]
+        );
+        // L3 adds; a verb L1 already has keeps L1's place and layer.
+        let db = verbs(&["directplay", "d3dx11_43", "directplay"]);
+        assert_eq!(
+            pairs(&effective(&baked, &db, &none)),
+            [
+                ("d3dcompiler_43", Layer::Auto),
+                ("d3dx11_43", Layer::Auto),
+                ("directplay", Layer::Db),
+            ]
+        );
+        // L4 adds after L3.
+        let l4 = verbs(&["xinput", "directplay"]);
+        assert_eq!(
+            pairs(&effective(&baked, &db, &l4)),
+            [
+                ("d3dcompiler_43", Layer::Auto),
+                ("d3dx11_43", Layer::Auto),
+                ("directplay", Layer::Db),
+                ("xinput", Layer::User),
+            ]
+        );
+        // An empty list has nothing to add.
+        assert_eq!(effective(&baked, &db, &verbs(&[])).len(), 3);
+    }
 
-        let db = CompatEntry {
-            verbs: Some(vec!["d3dx9".into()]),
-            ..Default::default()
-        };
-        let e = effective(&baked, &db, &none);
-        assert_eq!((e.value, e.layer), (vec!["d3dx9".to_string()], Layer::Db));
-
-        let clear = CompatEntry {
-            verbs: Some(vec![]),
-            ..Default::default()
-        };
-        let e = effective(&baked, &db, &clear);
-        assert_eq!((e.value, e.layer), (vec![], Layer::User));
+    /// #128: `-<verb>` drops one verb of any lower layer, `-*` all of them;
+    /// entries apply in order, so `-*` then names replaces the list whole.
+    #[test]
+    fn l4_removes_or_clears_verbs() {
+        let baked = vec!["d3dcompiler_43".to_string(), "d3dx11_43".into()];
+        let db = verbs(&["directplay"]);
+        let e = effective(&baked, &db, &verbs(&["-d3dx11_43", "-directplay", "-xact"]));
+        assert_eq!(pairs(&e), [("d3dcompiler_43", Layer::Auto)]);
+        assert!(effective(&baked, &db, &verbs(&["-*"])).is_empty());
+        let e = effective(&baked, &db, &verbs(&["-*", "xinput"]));
+        assert_eq!(pairs(&e), [("xinput", Layer::User)]);
+        // Removed then added back: it moves to the end, under the new layer.
+        let e = effective(&baked, &db, &verbs(&["-d3dcompiler_43", "d3dcompiler_43"]));
+        assert_eq!(
+            pairs(&e),
+            [
+                ("d3dx11_43", Layer::Auto),
+                ("directplay", Layer::Db),
+                ("d3dcompiler_43", Layer::User),
+            ]
+        );
+        // L3 can remove an L1 verb too, and L4 can add it back.
+        let db = verbs(&["-d3dx11_43"]);
+        let e = effective(&baked, &db, &CompatEntry::default());
+        assert_eq!(pairs(&e), [("d3dcompiler_43", Layer::Auto)]);
+        let e = effective(&baked, &db, &verbs(&["d3dx11_43"]));
+        assert_eq!(
+            pairs(&e),
+            [("d3dcompiler_43", Layer::Auto), ("d3dx11_43", Layer::User)]
+        );
     }
 
     #[test]
@@ -342,9 +413,15 @@ mod tests {
         }];
         assert_eq!(
             summary(None, Some(&auto)),
-            "d3dcompiler_43 (d3dcompiler_43.dll)  (L1 auto)"
+            "d3dcompiler_43 (L1 auto: d3dcompiler_43.dll)"
         );
-        assert_eq!(summary(None, Some(&[])), "none  (L1 auto)");
+        assert_eq!(summary(None, Some(&[])), "none");
         assert!(summary(None, None).contains("once installed"));
+        let eff = effective(&names(&auto), &verbs(&["directplay"]), &verbs(&["xinput"]));
+        assert_eq!(
+            describe(&eff, &auto),
+            "d3dcompiler_43 (L1 auto: d3dcompiler_43.dll), directplay (L3 compat DB), \
+             xinput (L4 user override)"
+        );
     }
 }
