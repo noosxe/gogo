@@ -7,6 +7,7 @@
 //! records, no update detection — the bundle is the artifact.
 
 pub mod bundle;
+pub mod compat;
 pub mod error;
 pub mod info;
 pub mod installer;

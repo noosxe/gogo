@@ -177,7 +177,9 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
             rebuild,
         } => verify(games, all, path, fix, rebuild).await,
         Command::Config { sub } => config_cmd(sub),
+        Command::MacApp { sub: Some(sub), .. } => mac_app_sub(sub),
         Command::MacApp {
+            sub: None,
             installer,
             from_depot,
             name,
@@ -1912,6 +1914,56 @@ fn find_game_tree(root: &std::path::Path) -> Option<std::path::PathBuf> {
     }
     dirs.into_iter()
         .find(|d| !gogo::macapp::info::gog_game_ids(d).is_empty())
+}
+
+/// `gogo mac-app <sub>` (no build).
+fn mac_app_sub(sub: crate::cli::MacAppSub) -> Result<i32, AppError> {
+    use gogo::macapp::compat;
+    match sub {
+        crate::cli::MacAppSub::Compat { gogid, json } => {
+            compat::validate_gogid(&gogid)?;
+            let db = compat::db_entry(&gogid);
+            let user = compat::load_user(&gogid)?;
+            let eff = compat::merge(&[
+                (compat::Layer::Db, &db.entry),
+                (compat::Layer::User, &user.entry),
+            ]);
+            let warnings: Vec<String> =
+                db.warnings
+                    .iter()
+                    .map(|w| format!("compat DB: unknown key {w}"))
+                    .chain(user.warnings.iter().map(|w| {
+                        format!("{}: unknown key {w}", compat::user_path(&gogid).display())
+                    }))
+                    .collect();
+            if json {
+                let out = serde_json::json!({
+                    "gogid": gogid,
+                    "user_file": compat::user_path(&gogid),
+                    "effective": eff,
+                    "warnings": warnings,
+                });
+                println!("{out}");
+                return Ok(cli::exit::OK);
+            }
+            for w in &warnings {
+                eprintln!("warning: {w}");
+            }
+            let lines = eff.display_lines();
+            if lines.is_empty() {
+                println!("no compat data for {gogid} (L3 DB and L4 override are both empty)");
+            } else {
+                for line in lines {
+                    println!("{line}");
+                }
+            }
+            println!(
+                "L4 override file: {}\n(L0–L2 are computed when the bundle is built)",
+                compat::user_path(&gogid).display()
+            );
+            Ok(cli::exit::OK)
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

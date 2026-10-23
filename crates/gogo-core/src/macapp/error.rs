@@ -64,6 +64,10 @@ pub enum MacAppError {
         actual: String,
     },
 
+    /// A compat DB / user override file (`compat.rs`) that can't be used.
+    #[error("compat file {path}: {reason}")]
+    Compat { path: PathBuf, reason: String },
+
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }

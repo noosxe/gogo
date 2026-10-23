@@ -214,6 +214,8 @@ Windows path stays `C:\GOG\<tree-name>` as in design 15, and registry keys and
 ## 5. Decision 5: precedence
 
 **Settled:** `flags > L4 > L3 > L2 > L1 auto > L0 default`, field by field.
+Maps (`env`, `dll_overrides`) merge per key; every other field, lists included, is
+replaced whole, so an L4 `verbs = []` clears L3's verbs (#65, `macapp/compat.rs`).
 
 **Why:** the closer a source is to the user's explicit intent, the more it wins. Curated
 data (L3) beats heuristics (L1) because it records an observed result. GOG's own data (L2)
