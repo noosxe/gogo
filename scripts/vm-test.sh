@@ -707,11 +707,12 @@ cmd_smoke() {
     local results="$dir/results.jsonl" case layer bundle opts check proves
     : >"$results"
     while IFS='|' read -r case layer bundle opts check proves; do
-        case="$(echo "$case" | xargs)"
+        trim() { printf '%s' "$1" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'; }
+        case="$(trim "$case")"
         case "$case" in ""|\#*) continue ;; esac
         [ -z "$only" ] || [[ ",$only," == *",$case,"* ]] || continue
-        layer="$(echo "$layer" | xargs)"; bundle="$(echo "$bundle" | xargs)"
-        check="$(echo "$check" | sed 's/^ *//;s/ *$//')"; proves="$(echo "$proves" | sed 's/^ *//;s/ *$//')"
+        layer="$(trim "$layer")"; bundle="$(trim "$bundle")"
+        check="$(trim "$check")"; proves="$(trim "$proves")"
         local verdict summary="" rc=0 sj="{}"
         if [ "$bundle" = - ]; then
             verdict="todo"
