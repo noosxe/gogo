@@ -203,6 +203,7 @@ fi
 
 mkdir -p "$res/engine-logs" "$res/launcher-logs"
 touch "$res/.t0"
+wine_logs=()
 status="infra_error" exit_code=3 note="" lpid="" launched=false alive=false exited_after=null
 log_quiet=null engine_quiet=null
 windows="[]" prompts="[]" teardown="null" run_log="" run_exit=""
@@ -225,6 +226,7 @@ finish() {
           --argjson secs "$secs" --argjson launched "$launched" --argjson running "$alive" \
           --argjson exited_after "$exited_after" --arg run_exit "$run_exit" \
           --argjson log_quiet "$log_quiet" --argjson engine_quiet "$engine_quiet" \
+          --arg winedebug "${WINEDEBUG:-}" \
           --argjson windows "$windows" --argjson prompts "$prompts" --argjson processes "$procs" \
           --argjson teardown "$teardown" \
           --argjson missing "$(lines_json "$res/missing-libs.txt")" \
@@ -241,7 +243,7 @@ finish() {
             state:{host:$host_state}, host:{macos:$host_macos, chip:$host_chip},
             secs:$secs, launched:$launched, running_after_secs:$running,
             exited_after_secs:$exited_after, run_exit:$run_exit,
-            log_quiet_secs:$log_quiet, engine_log_quiet_secs:$engine_quiet,
+            log_quiet_secs:$log_quiet, engine_log_quiet_secs:$engine_quiet, winedebug:$winedebug,
             windows:$windows, prompts_left:$prompts, processes:$processes,
             teardown:$teardown, markers:$markers, err_lines:$errs, missing_libs:$missing,
             engine_logs:$engine, note:$note, results_dir:$dir, screenshot:$screenshot,
@@ -288,8 +290,12 @@ collect() {
             cp "$game_state/$f" "$res/engine-logs/$f" 2>/dev/null || true
         done <"$res/engine-logs.txt"
     fi
-    local all=("$res/launcher-stdout.log" "$res/launcher-stderr.log")
-    [ -n "$run_log" ] && all+=("$res/launcher-logs/$run_log")
+    # Wine's output: the run log, which already holds the launcher's
+    # stdout and stderr (teed); those two only when there's no run log.
+    # Reading all three would count every line twice.
+    wine_logs=("$res/launcher-stdout.log" "$res/launcher-stderr.log")
+    if [ -n "$run_log" ]; then wine_logs=("$res/launcher-logs/$run_log"); fi
+    local all=("${wine_logs[@]}")
     cat "${all[@]}" 2>/dev/null | grep -E -i 'cannot find|Library not loaded|image not found' \
         | LC_ALL=C sort -u | head -20 >"$res/missing-libs.txt" || true
     cat "${all[@]}" 2>/dev/null | grep -E '(^|:)err:' | LC_ALL=C sort | uniq -c | sort -rn \
@@ -305,22 +311,29 @@ MARKERS_WINE=(
     'wined3d|wined3d'
     'opengl|OpenGL (version|2\.0)|GL_VERSION|GL_RENDERER'
 )
+# Graphics DLLs Wine loaded (WINEDEBUG=+loaddll), reported as
+# "<dll>: builtin|native": opengl32 for a native-OpenGL game, d3d11/dxgi for
+# DXMT and D3DMetal, native d3dcompiler/d3dx from winetricks verbs.
+GFX_DLLS='opengl32|ddraw|d3d8|d3d9|d3d10|d3d10_1|d3d10core|d3d11|d3d12|d3d12core|dxgi|winemetal|nvapi|nvapi64|d3dcompiler_[0-9]+|d3dx9_[0-9]+|d3dx10_[0-9]+|d3dx11_[0-9]+'
+
 MARKERS_ENGINE=(
     'unity|^[[:space:]]*(Direct3D|Renderer:|Vendor:|VRAM:|Version:)|Failed to initialize player|could not load'
     'ogre|RenderSystem|Direct3D11|D3D11 *:|Feature level|OGRE EXCEPTION|Exception'
 )
 # shellcheck disable=SC2329 # called from finish
 markers_json() {
-    local m acc='{}' rl=()
-    [ -n "$run_log" ] && rl=("$res/launcher-logs/$run_log")
-    for m in "${MARKERS_WINE[@]}"; do
-        acc="$(marker "$acc" "$m" "$res/launcher-stdout.log" "$res/launcher-stderr.log" ${rl[@]+"${rl[@]}"})"
-    done
+    local m acc='{}'
+    for m in "${MARKERS_WINE[@]}"; do acc="$(marker "$acc" "$m" "${wine_logs[@]}")"; done
+    acc="$( { grep -h -o -E 'trace:loaddll:[^ ]* Loaded L"[^"]*" at [0-9A-Fa-f]+: (builtin|native)' \
+            "${wine_logs[@]}" 2>/dev/null || true; } \
+        | sed -E 's/.*[\\/]([^\\/"]+)" at [0-9A-Fa-f]+: /\1: /' | tr '[:upper:]' '[:lower:]' \
+        | { grep -E "^($GFX_DLLS)\.dll: " || true; } | LC_ALL=C sort | uniq -c | LC_ALL=C sort -k1,1nr -k2 | sed 's/^ *//' \
+        | jq -R -s --argjson acc "$acc" '$acc + {graphics_dlls: split("\n") | map(select(length>0))}')"
     for m in "${MARKERS_ENGINE[@]}"; do acc="$(marker "$acc" "$m" "$res/engine-logs")"; done
     # D3DMetal logs nothing of its own on a good run: the evidence is the
     # renderer Unity reports for it, or its libs named in a failure.
     acc="$(marker "$acc" 'd3dmetal|D3DMetal|libd3dshared|AMD Compatibility Mode' \
-        "$res/launcher-stdout.log" "$res/launcher-stderr.log" ${rl[@]+"${rl[@]}"} "$res/engine-logs")"
+        "${wine_logs[@]}" "$res/engine-logs")"
     printf '%s' "$acc"
 }
 # marker <json so far> <name|regex> <files or dirs…>: the top matching lines,
@@ -341,6 +354,9 @@ log "the game takes the screen: play it during the wait; Ctrl-C stops early and 
 export GOGO_LOG_DIR="$log_dir"
 if [ -n "${GOGO_HOME:-}" ]; then export GOGO_HOME; fi
 if [ "$dialogs" = 0 ]; then export GOGO_LAUNCHER_NO_DIALOG=1; fi
+# One trace line per DLL Wine loads: what markers.graphics_dlls is made of.
+# Kept after any WINEDEBUG of your own (a compat entry's env still wins).
+export WINEDEBUG="${WINEDEBUG:+$WINEDEBUG,}+loaddll"
 "$launcher" </dev/null >"$res/launcher-stdout.log" 2>"$res/launcher-stderr.log" &
 lpid=$!
 launched=true
