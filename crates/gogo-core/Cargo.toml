@@ -41,6 +41,7 @@ fs4.workspace = true
 tracing.workspace = true
 bytesize.workspace = true
 gog-warp.workspace = true
+object.workspace = true
 
 [dev-dependencies]
 wiremock.workspace = true

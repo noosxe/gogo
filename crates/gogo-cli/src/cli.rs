@@ -199,6 +199,20 @@ pub enum Command {
         #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
         args: Vec<String>,
     },
+    /// Debug: PE import scan of a game tree — bitness, graphics API, helper
+    /// DLLs (#63, docs/19 §6.2). Input for renderer selection; changes nothing.
+    #[command(hide = true, name = "__pe-scan")]
+    PeScan {
+        /// Game install / depot tree.
+        #[arg(value_name = "DIR")]
+        dir: std::path::PathBuf,
+        /// Main exe (default: `goggame-*.info` primary task, else a heuristic).
+        #[arg(long, value_name = "EXE")]
+        exe: Option<std::path::PathBuf>,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print a shell completion script to stdout.
     Completions {
         /// Shell to generate the script for.

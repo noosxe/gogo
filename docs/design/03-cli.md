@@ -144,6 +144,12 @@ wine pin's runtime recommendation (design 12 §7). `--json` on both; a hidden
 `--lutris-base` exists for tests/mirrors. gogo consumes Lutris scripts — it
 hosts no recipes of its own. Full spec: **design 11**.
 
+### `gogo __pe-scan <DIR> [--exe EXE] [--json]` (hidden, debug)
+PE import scan of a game tree (#63, docs/19 §6.2): main exe and its bitness,
+detected engine, graphics API classification, helper DLLs (`d3dcompiler_*`,
+`d3dx*`, `xinput*`, `xact*`) and runtime-loaded DLL names. Read-only; the
+input for L1 renderer selection (design 16).
+
 
 ## 2. Global flags
 
