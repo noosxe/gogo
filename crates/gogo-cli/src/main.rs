@@ -2007,6 +2007,7 @@ fn mac_app_sub(sub: crate::cli::MacAppSub) -> Result<i32, AppError> {
                     "gogid": gogid,
                     "user_file": compat::user_path(&gogid),
                     "effective": eff,
+                    "status_line": eff.status_line(),
                     "renderer_reason": renderer_why.as_ref().map(|(w, _)| w),
                     "renderer_applied": renderer_why.as_ref().map(|(_, a)| a),
                     "warnings": warnings,
@@ -2018,6 +2019,7 @@ fn mac_app_sub(sub: crate::cli::MacAppSub) -> Result<i32, AppError> {
                 eprintln!("warning: {w}");
             }
             let lines = eff.display_lines();
+            println!("status: {}", eff.status_line());
             if let Some((why, applied)) = &renderer_why {
                 println!("renderer: {why}; last applied by setup: {applied}");
             }
@@ -2361,10 +2363,17 @@ async fn mac_app(
                 _ => "auto (picked from the installed files)".to_string(),
             },
         };
+        // #74: what gogo knows about this game, before the long part.
+        let compat_line = plan
+            .compat
+            .as_ref()
+            .map(|c| format!("\n  compat:    {}", c.status_line()))
+            .unwrap_or_default();
         eprintln!(
-            "converting:\n  source:    {}\n  bundle:    {}\n  recipe:    {}\n  runtime:   {} ({}){}\n  renderer:  {}{}\n  est. size: {}",
+            "converting:\n  source:    {}\n  bundle:    {}{}\n  recipe:    {}\n  runtime:   {} ({}){}\n  renderer:  {}{}\n  est. size: {}",
             source_line,
             plan.bundle_path.display(),
+            compat_line,
             recipe_line,
             plan.runtime.version,
             runtime_kind,
@@ -2461,6 +2470,7 @@ async fn mac_app(
                     "from_search": r.from_search,
                 })),
                 "auto_verbs": plan.auto_verbs,
+                "compat_status": plan.compat.as_ref().map(|c| c.status_line()),
                 "renderer": selected.lock().unwrap().clone(),
                 "runtime": {
                     "kind": plan.runtime.kind,

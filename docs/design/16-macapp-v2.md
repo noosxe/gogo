@@ -361,6 +361,28 @@ beats the import heuristic because it comes from the vendor.
   reported as a build flag).
 - gogo edits only the keys it owns in the L4 file (`toml_edit`, so the user's comments
   survive) and reports what it changed.
+- *#74 (compat entries at build and setup), as implemented:* `plan` merges L3 and L4
+  for the game (`compat::db_and_user`) and shows `Effective::status_line` before the
+  confirmation (`compat:    known to boot on winecx-24.0.7_7 (2026-10-22)`, `untested`,
+  `known broken: <notes>`; `notes` is a new one-line schema key) and as
+  `compat_status` in `--json`; `gogo mac-app compat` prints it too. Where each field
+  goes:
+
+  | Field | Build (baked into the bundle TOML) | Setup |
+  |---|---|---|
+  | `exe` | L3 replaces the `info.rs` / recipe entry point (warns and keeps it when the file isn't there); `workdir` follows | L4 over the baked one (`with_override`) |
+  | `args` | L3 replaces the recipe's | L4 |
+  | `env`, `dll_overrides` | L3 per key over the recipe's | L4 per key; renderer overrides only fill gaps |
+  | `renderer` | L3 in `renderer::select` (#70) | L4 |
+  | `runtime` | L3 pins the `auto` ladder (cached → used; headless and not cached → downloaded; interactive → the menu, with a warning); flags still win | L4 (installed if missing) |
+  | `verbs` | not baked (the TOML keeps L1) | L3 then L4 replace L1 whole, via winetricks |
+  | `registry` | not baked | L3 then L4, `reg add` through `interpret::run_in_prefix` |
+
+  DLL overrides stay a launch-time `WINEDLLOVERRIDES` (§1.1), not registry writes, so
+  an L4 edit takes them away again without touching the prefix. `replace_command` is
+  parsed but not applied yet. `GOGO_COMPAT_DIR=<dir>` shadows the compiled-in DB with
+  `<dir>/<gogid>.toml` files (still L3): for trying an entry before contributing it,
+  and for the integration test (`compat_entry_drives_build_and_setup`).
 - `gogo mac-app doctor` (#79) shows the winning layer for each field.
 
 ## 6. Decision 6: store layout and GC
@@ -619,4 +641,7 @@ title, the message and the button labels, and prints the label it chose.
 6. **Removing a game** (`games/<gogid>/` holds saves): command name and confirmation
    flow aren't designed yet.
 7. **L3 freshness:** when gogo fetches a newer compat DB, should it re-run `setup` for
-   affected games or leave that to the next explicit command? (#74)
+   affected games or leave that to the next explicit command? *#74:* the DB is still
+   compiled in, so there is no fetch yet. Setup reads L3 `verbs` and `registry` live;
+   the baked L3 fields (`exe`, `args`, `env`, `dll_overrides`, `renderer`, `runtime`)
+   change with a rebuild.

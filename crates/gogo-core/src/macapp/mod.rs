@@ -82,6 +82,10 @@ pub struct MacAppPlan {
     /// L1 winetricks verbs from the tree's imports (#72). Depot lane only:
     /// the installer lane scans once the install is done.
     pub auto_verbs: Option<Vec<verbs::AutoVerb>>,
+    /// L3 merged with L4 for the game (#74), when its id is known at plan
+    /// time (depot lane). Its [`compat::Effective::status_line`] goes into
+    /// the confirmation; the build bakes the L3 fields, setup adds L4.
+    pub compat: Option<compat::Effective>,
 }
 
 /// Conversion inputs (CLI flags, design 10 §1).
@@ -486,6 +490,7 @@ fn catalog_lane(
 fn resolve_runtime(
     opts: &MacAppOptions,
     recipe: Option<&SelectedRecipe>,
+    pin: Option<&str>,
     prompt: Option<&prompt::PromptFn>,
     emit: &mut dyn FnMut(&ProgressEvent),
 ) -> Result<(runtime::Runtime, Option<(String, String)>), MacAppError> {
@@ -504,8 +509,34 @@ fn resolve_runtime(
         return Ok((rt, None));
     }
 
-    // `auto` (§5 ladder): cached(recipe-recommended) → cached(default) →
-    // brew → download the recommendation.
+    // `auto` (§5 ladder): cached(compat pin) → cached(recipe-recommended) →
+    // cached(default) → brew → download the pin, else the recommendation.
+    // An L3 `runtime` (#74) is a store ref `<id>[/<ver>]`; headless, a pin
+    // that isn't cached is downloaded rather than passed over.
+    let pin = pin.map(|r| r.split_once('/').map_or((r, None), |(i, v)| (i, Some(v))));
+    if let Some((id, ver)) = pin {
+        match store::installed(id, ver) {
+            Some((m, _)) => {
+                if let Ok(rt) = runtime::from_store(&m)
+                    && prompt.is_none()
+                {
+                    return Ok((rt, None));
+                }
+            }
+            None if prompt.is_none() => {
+                let (m, downloaded) = catalog_lane(id, ver, false, emit)?;
+                let rt = runtime::from_store(&m)?;
+                return Ok((rt, downloaded.then(|| (m.id.clone(), m.version.clone()))));
+            }
+            None => emit(&ProgressEvent::Warn {
+                message: format!(
+                    "the compat DB asks for runtime {id}{} (not installed): pick it in \
+                     the menu to download it",
+                    ver.map(|v| format!(" {v}")).unwrap_or_default()
+                ),
+            }),
+        }
+    }
     let rec = recipe
         .and_then(|r| r.wine_version.as_deref())
         .map(|v| catalog::recommend_for_wine(Some(v)));
@@ -514,17 +545,18 @@ fn resolve_runtime(
             message: format!("recipe wine pin: {notice}"),
         });
     }
-    let mut lanes: Vec<&str> = rec.as_ref().map(|r| r.id).into_iter().collect();
-    if !lanes.contains(&catalog::DEFAULT_RUNTIME) {
-        lanes.push(catalog::DEFAULT_RUNTIME);
+    let mut lanes: Vec<(&str, Option<&str>)> = pin.into_iter().collect();
+    if let Some(r) = &rec {
+        lanes.push((r.id, None));
     }
+    lanes.push((catalog::DEFAULT_RUNTIME, None));
     // §5 (amended 2026-10-19): the ladder only computes the "easy" default
     // now — interactively the runtime menu is MANDATORY and lists every
     // option (cached, locally installed, downloadable) with the easy pick
     // preselected; headless runs keep the Phase-3 behavior.
     let mut easy: Option<(runtime::Runtime, String)> = None;
-    'ladder: for id in lanes {
-        if let Some((m, _)) = store::installed(id, None) {
+    'ladder: for (id, ver) in lanes {
+        if let Some((m, _)) = store::installed(id, ver) {
             match runtime::from_store(&m) {
                 Ok(rt) => {
                     easy = Some((rt, format!("{}@{}", m.id, m.version)));
@@ -818,8 +850,26 @@ pub fn plan(
         select_recipe(opts, &display, prompt, emit)?
     };
 
+    // The game's compat entries (#74): L3 + L4, read before anything long
+    // runs, so the status shows before the confirmation.
+    let tree_id = opts.game_tree.as_deref().and_then(info::root_game_id);
+    let compat = tree_id.as_deref().map(|id| {
+        let (eff, warnings) = compat::db_and_user(id);
+        for message in warnings {
+            emit(&ProgressEvent::Warn { message });
+        }
+        eff
+    });
+    // The bundle bakes L3's runtime (flags > L3); L4's is setup's.
+    let pin = compat
+        .as_ref()
+        .and_then(|c| c.runtime.as_ref())
+        .filter(|r| r.layer == compat::Layer::Db)
+        .map(|r| r.value.clone());
+
     // §6 step 3: runtime resolution — may download into the store (events).
-    let (runtime, runtime_downloaded) = resolve_runtime(opts, recipe.as_ref(), prompt, emit)?;
+    let (runtime, runtime_downloaded) =
+        resolve_runtime(opts, recipe.as_ref(), pin.as_deref(), prompt, emit)?;
     let kind = runtime.mode.as_str().to_string();
     let wine = runtime.wine.display().to_string();
     emit(&ProgressEvent::RuntimeResolved { kind, path: wine });
@@ -840,7 +890,8 @@ pub fn plan(
     let (state, gogid) = if opts.portable {
         (None, None)
     } else if let Some(tree) = &opts.game_tree {
-        let id = info::root_game_id(tree)
+        let id = tree_id
+            .clone()
             .ok_or_else(|| MacAppError::EntryPointNotFound { dir: tree.clone() })?;
         (Some(launch::GameDirs::for_game(&id)?), Some(id))
     } else {
@@ -904,6 +955,7 @@ pub fn plan(
 
     Ok(MacAppPlan {
         auto_verbs,
+        compat,
         bundle_path: bundle.root.clone(),
         display,
         slug,
@@ -1300,6 +1352,29 @@ pub fn execute(
         Some(outcome) if outcome.exe.is_some() => outcome.exe.clone().unwrap(),
         _ => info::find_entry_point(&install_dir)?,
     };
+    // An L3 `exe` (#74) replaces both: it records what was seen to run. The
+    // installer lane learns the game's id only now.
+    let db = plan
+        .gogid
+        .clone()
+        .or_else(|| info::root_game_id(&install_dir))
+        .map(|id| compat::db_entry(&id).entry)
+        .unwrap_or_default();
+    let entry = match &db.exe {
+        Some(exe) => match compat_exe(&plan.bundle.prefix, &install_dir, exe) {
+            Some(path) if path.is_file() => path,
+            _ => {
+                emit(&ProgressEvent::Warn {
+                    message: format!(
+                        "compat DB exe `{exe}` is not in the game dir; keeping {}",
+                        entry.display()
+                    ),
+                });
+                entry
+            }
+        },
+        None => entry,
+    };
     let (recipe_env, recipe_args) = recipe
         .as_ref()
         .map(|o| (o.env.clone(), o.args.clone()))
@@ -1413,6 +1488,19 @@ pub fn execute(
     dir_size(&plan.bundle.root)
 }
 
+/// Where a compat `exe` points: a `C:\` path inside the prefix, or a path
+/// relative to the game dir (either separator).
+fn compat_exe(prefix: &Path, game_dir: &Path, exe: &str) -> Option<PathBuf> {
+    if exe.len() >= 3 && exe.as_bytes()[1] == b':' {
+        return launch::windows_to_unix(prefix, exe);
+    }
+    let rel = exe.replace('\\', "/");
+    let rel = Path::new(&rel);
+    rel.components()
+        .all(|c| matches!(c, std::path::Component::Normal(_)))
+        .then(|| game_dir.join(rel))
+}
+
 /// The v2 tail of [`execute`] (design 16): settle the prefix in
 /// `games/<gogid>/`, write the launcher bundle (launcher, TOML + mirror,
 /// plist, notices; nothing else), sign it and verify it strictly, then run
@@ -1472,8 +1560,20 @@ fn finish_v2(
         .map(|(head, _)| head.to_string())
         .unwrap_or_else(|| exe.clone());
     // Renderer overrides (`ddraw=n,b`) are setup's: they follow the
-    // effective renderer, so an L4 switch takes them away again.
-    let dll_overrides = std::collections::BTreeMap::new();
+    // effective renderer, so an L4 switch takes them away again. The
+    // compat DB's own (#74) are baked, as are its `args` (replacing the
+    // recipe's) and `env` (per key over the recipe's); L4 is setup's.
+    let db = compat::db_entry(&gogid).entry;
+    let dll_overrides = db.dll_overrides;
+    let args = db
+        .args
+        .unwrap_or_else(|| recipe_args.split_whitespace().map(str::to_string).collect());
+    let mut env: std::collections::BTreeMap<String, String> = recipe_env
+        .split_whitespace()
+        .filter_map(|kv| kv.split_once('='))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    env.extend(db.env);
     let toml = launch::LaunchToml {
         schema: launch::SCHEMA,
         gogid: gogid.clone(),
@@ -1482,12 +1582,8 @@ fn finish_v2(
         renderer: selection.renderer.value.clone(),
         exe,
         workdir,
-        args: recipe_args.split_whitespace().map(str::to_string).collect(),
-        env: recipe_env
-            .split_whitespace()
-            .filter_map(|kv| kv.split_once('='))
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect(),
+        args,
+        env,
         dll_overrides,
         // L1 only; setup layers L3 and L4 over it (verbs::effective).
         verbs: verbs::names(&plan.auto_verbs.clone().unwrap_or_else(|| match lane_scan {
