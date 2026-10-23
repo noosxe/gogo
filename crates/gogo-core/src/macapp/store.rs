@@ -381,7 +381,6 @@ pub async fn install(
     }
 
     record(&m)?;
-
     if matches!(
         entry.kind,
         catalog::Kind::Tool { .. } | catalog::Kind::Renderer { .. }
@@ -739,11 +738,117 @@ fn notices_text(
     Ok(out)
 }
 
-/// Remove every cached version of `ids` (runtimes, derived runtimes and
-/// renderers alike); returns the removed tree roots. Callers check the
-/// game references first (design 16 decision 6).
-pub fn prune(ids: &[String]) -> Result<Vec<PathBuf>, MacAppError> {
-    let mut removed = Vec::new();
+/// Base versions of each id a sweep (`gogo runtimes prune --all`) keeps,
+/// used or not: the newest pin and the one before it, to roll back to (N-1,
+/// #69).
+pub const KEEP_VERSIONS: usize = 2;
+
+/// One use of a store entry (design 16 decision 6): what a game's
+/// `state.toml` last applied, or what its L4 file asks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reference {
+    pub gogid: String,
+    /// The file that holds it: `games/<gogid>/state.toml` or the L4 file.
+    pub file: PathBuf,
+    /// `<id>`, `<id>/<ver>` or `<id>/<ver>+<renderer>-<rver>`.
+    pub reference: String,
+}
+
+/// Every runtime and renderer reference: `games/*/state.toml` (runtime,
+/// renderer) and the L4 files (`runtime`, `renderer`). Unreadable files are
+/// skipped; `path:` runtimes aren't in the store and aren't listed.
+pub fn references() -> Vec<Reference> {
+    let mut out = Vec::new();
+    let mut push = |gogid: &str, file: &Path, r: &str| {
+        if !r.is_empty() && !r.starts_with("path:") {
+            out.push(Reference {
+                gogid: gogid.to_string(),
+                file: file.to_path_buf(),
+                reference: r.to_string(),
+            });
+        }
+    };
+    let games = super::launch::games_dir();
+    for e in std::fs::read_dir(&games).into_iter().flatten().flatten() {
+        let file = e.path().join("state.toml");
+        if let Ok(Some(s)) = super::launch::GameState::load(&file) {
+            push(&s.gogid, &file, &s.runtime);
+            push(&s.gogid, &file, &s.renderer);
+        }
+    }
+    let l4 = super::compat::user_dir();
+    for e in std::fs::read_dir(&l4).into_iter().flatten().flatten() {
+        let file = e.path();
+        let Some(gogid) = file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix(".toml"))
+        else {
+            continue;
+        };
+        if let Ok(p) = super::compat::load_user(gogid) {
+            for r in [&p.entry.runtime, &p.entry.renderer].into_iter().flatten() {
+                push(gogid, &file, r);
+            }
+        }
+    }
+    out.sort_by(|a, b| (&a.gogid, &a.reference).cmp(&(&b.gogid, &b.reference)));
+    out
+}
+
+/// Does reference `r` keep `target` (`<id>` or `<id>/<ver>`) alive? A
+/// derived runtime (`<ver>+dxmt-…`) is a use of its base `<ver>`; a
+/// version-less reference resolves to, and so uses, the newest base.
+fn uses(r: &str, target: &str) -> bool {
+    let (rid, rver) = r.split_once('/').map_or((r, None), |(i, v)| (i, Some(v)));
+    let (tid, tver) = target
+        .split_once('/')
+        .map_or((target, None), |(i, v)| (i, Some(v)));
+    match (rid == tid, tver, rver) {
+        (false, _, _) => false,
+        (true, None, _) => true,
+        (true, Some(t), Some(v)) => v == t || v.strip_prefix(t).is_some_and(|s| s.starts_with('+')),
+        (true, Some(t), None) => installed(rid, None).is_some_and(|(m, _)| m.version == t),
+    }
+}
+
+/// What [`prune`] did.
+#[derive(Debug, Default, Clone)]
+pub struct PruneOutcome {
+    /// Tree roots removed.
+    pub removed: Vec<PathBuf>,
+    /// Targets kept, with the references that keep them.
+    pub kept: Vec<(String, Vec<Reference>)>,
+}
+
+/// Remove `targets` from the store (runtimes, derived runtimes and renderers
+/// alike): `<id>` takes every version, `<id>/<ver>` one version and the
+/// derived runtimes built on it. A target any game still references
+/// ([`references`]) is kept and reported instead (design 16 decision 6).
+pub fn prune(targets: &[String]) -> Result<PruneOutcome, MacAppError> {
+    let refs = references();
+    let mut out = PruneOutcome::default();
+    let mut go: Vec<(&str, Option<&str>)> = Vec::new();
+    for t in targets {
+        let users: Vec<Reference> = refs
+            .iter()
+            .filter(|r| uses(&r.reference, t))
+            .cloned()
+            .collect();
+        if users.is_empty() {
+            go.push(t.split_once('/').map_or((t, None), |(i, v)| (i, Some(v))));
+        } else {
+            out.kept.push((t.clone(), users));
+        }
+    }
+    // A derived runtime goes with its base, unless a game still uses it
+    // (and then the base was kept above).
+    let hit = |mid: &str, mver: &str, id: &str, ver: Option<&str>| {
+        mid == id
+            && ver.is_none_or(|v| {
+                mver == v || mver.strip_prefix(v).is_some_and(|s| s.starts_with('+'))
+            })
+    };
     for (path, root) in [
         (manifest_path(), runtimes_dir()),
         (renderer_manifest_path(), renderers_dir()),
@@ -751,21 +856,58 @@ pub fn prune(ids: &[String]) -> Result<Vec<PathBuf>, MacAppError> {
         let all = load_manifest_at(&path);
         let keep: Vec<ManifestEntry> = all
             .iter()
-            .filter(|m| !ids.iter().any(|i| i == &m.id))
+            .filter(|m| !go.iter().any(|(id, ver)| hit(&m.id, &m.version, id, *ver)))
             .cloned()
             .collect();
-        for id in ids {
-            let dir = root.join(id);
-            if dir.is_dir() {
+        for (id, ver) in &go {
+            let dirs: Vec<PathBuf> = match ver {
+                None => vec![root.join(id)],
+                Some(_) => std::fs::read_dir(root.join(id))
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .filter(|e| hit(id, &e.file_name().to_string_lossy(), id, *ver))
+                    .map(|e| e.path())
+                    .collect(),
+            };
+            for dir in dirs.into_iter().filter(|d| d.is_dir()) {
                 std::fs::remove_dir_all(&dir)?;
-                removed.push(dir);
+                out.removed.push(dir);
             }
         }
         if keep.len() != all.len() {
             save_manifest_at(&path, &keep)?;
         }
     }
-    Ok(removed)
+    out.removed.sort();
+    Ok(out)
+}
+
+/// What a sweep offers [`prune`]: every cached version as `<id>/<ver>`, but
+/// the newest [`KEEP_VERSIONS`] base versions of each id (by fetch time).
+/// Derived runtimes are listed on their own: only a reference keeps them,
+/// they are rebuilt from their base in seconds.
+pub fn sweep_targets() -> Vec<String> {
+    let mut all: Vec<ManifestEntry> = load_manifest();
+    all.extend(load_renderer_manifest());
+    all.sort_by(|a, b| (&a.id, &b.fetched_at).cmp(&(&b.id, &a.fetched_at)));
+    let mut out = Vec::new();
+    let mut seen: (String, usize) = (String::new(), 0);
+    for m in &all {
+        if !is_derived(&m.version) {
+            if seen.0 != m.id {
+                seen = (m.id.clone(), 0);
+            }
+            seen.1 += 1;
+            if seen.1 <= KEEP_VERSIONS {
+                continue;
+            }
+        }
+        out.push(format!("{}/{}", m.id, m.version));
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Find the wine tree inside an extracted archive: bare `<dir>/bin/wine{,64}`
@@ -1047,7 +1189,7 @@ mod store_tests {
         assert!(installed("wine-staging", Some("9.0")).is_none());
 
         // Prune removes the tree + the manifest entries.
-        let removed = prune(&["wine-staging".to_string()]).unwrap();
+        let removed = prune(&["wine-staging".to_string()]).unwrap().removed;
         assert_eq!(removed, vec![runtimes_dir().join("wine-staging")]);
         assert!(installed("wine-staging", None).is_none());
     }
@@ -1721,7 +1863,9 @@ mod store_tests {
         assert!(installed("winecx", Some("24.0.7_7+dxmt-v0.80")).is_some());
 
         // Prune reaches both stores.
-        let removed = prune(&["winecx".to_string(), "dxmt".to_string()]).unwrap();
+        let removed = prune(&["winecx".to_string(), "dxmt".to_string()])
+            .unwrap()
+            .removed;
         assert_eq!(removed.len(), 2);
         assert!(load_manifest().is_empty() && load_renderer_manifest().is_empty());
     }
@@ -1773,5 +1917,107 @@ mod store_tests {
         let (found, version) = locate_and_probe(tmp.path()).unwrap();
         assert_eq!(found, wine);
         assert_eq!(version, "wine-9.0-fake");
+    }
+
+    /// Store entries for `winecx` at `versions` (oldest first, so the last
+    /// one is the newest), each with its tree on disk.
+    fn winecx_versions(versions: &[&str]) {
+        let mut all = Vec::new();
+        for (i, v) in versions.iter().enumerate() {
+            let mut m = entry("winecx", v, "engine/bin/wine");
+            m.fetched_at = format!("2026-10-{:02}T00:00:00Z", i + 1);
+            let wine = tree_root(&m).join(&m.entry_rel);
+            std::fs::create_dir_all(wine.parent().unwrap()).unwrap();
+            std::fs::write(&wine, "#!/bin/sh\n").unwrap();
+            all.push(m);
+        }
+        save_manifest(&all).unwrap();
+    }
+
+    fn game_uses(gogid: &str, runtime: &str) {
+        let dir = super::super::launch::games_dir().join(gogid);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("state.toml"),
+            format!(
+                "schema = 1\ngogid = \"{gogid}\"\nbundle = \"/x.app\"\n\
+                 runtime = \"{runtime}\"\nrenderer = \"wined3d\"\nstamp = \"s\"\n\
+                 gogo_version = \"0\"\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn versions() -> Vec<String> {
+        let mut v: Vec<String> = load_manifest().into_iter().map(|m| m.version).collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn prune_keeps_what_games_and_l4_files_reference() {
+        let home = tempfile::tempdir().unwrap();
+        let _g = env_home(home.path());
+        winecx_versions(&["1", "1+dxmt-v0.80", "2", "3"]);
+        // A derived runtime is a use of its base; L4 counts like state.toml.
+        game_uses("1207659013", "winecx/1+dxmt-v0.80");
+        super::super::compat::set_user_keys("1435582019", &[("runtime", Some("winecx/2"))])
+            .unwrap();
+
+        let out = prune(&["winecx".into(), "winecx/1".into(), "winecx/2".into()]).unwrap();
+        assert!(out.removed.is_empty(), "{:?}", out.removed);
+        let kept: Vec<(&str, Vec<&str>)> = out
+            .kept
+            .iter()
+            .map(|(t, u)| (t.as_str(), u.iter().map(|r| r.gogid.as_str()).collect()))
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                ("winecx", vec!["1207659013", "1435582019"]),
+                ("winecx/1", vec!["1207659013"]),
+                ("winecx/2", vec!["1435582019"]),
+            ]
+        );
+
+        // Unreferenced: the derived runtime alone, then the base with it.
+        game_uses("1207659013", "winecx/1");
+        let out = prune(&["winecx/1+dxmt-v0.80".into(), "winecx/3".into()]).unwrap();
+        assert_eq!(
+            out.removed,
+            [
+                runtimes_dir().join("winecx/1+dxmt-v0.80"),
+                runtimes_dir().join("winecx/3")
+            ]
+        );
+        assert_eq!(versions(), ["1", "2"]);
+        // A version-less L4 reference uses the newest base.
+        super::super::compat::set_user_keys("1435582019", &[("runtime", Some("winecx"))]).unwrap();
+        assert_eq!(prune(&["winecx/2".into()]).unwrap().kept.len(), 1);
+        super::super::compat::set_user_keys("1435582019", &[("runtime", None)]).unwrap();
+        assert_eq!(prune(&["winecx/2".into()]).unwrap().removed.len(), 1);
+        assert_eq!(versions(), ["1"]);
+    }
+
+    #[test]
+    fn a_sweep_keeps_the_previous_pin() {
+        let home = tempfile::tempdir().unwrap();
+        let _g = env_home(home.path());
+        winecx_versions(&["1", "1+dxmt-v0.80", "2", "2+dxmt-v0.80", "3"]);
+        // N and N-1 stay unused; N-2 and every unused derived runtime go.
+        assert_eq!(
+            sweep_targets(),
+            ["winecx/1", "winecx/1+dxmt-v0.80", "winecx/2+dxmt-v0.80"]
+        );
+        prune(&sweep_targets()).unwrap();
+        assert_eq!(versions(), ["2", "3"]);
+
+        // A game on N-2 keeps it through the sweep.
+        winecx_versions(&["1", "2", "3"]);
+        game_uses("1207659013", "winecx/1");
+        let out = prune(&sweep_targets()).unwrap();
+        assert!(out.removed.is_empty());
+        assert_eq!(out.kept[0].0, "winecx/1");
+        assert_eq!(versions(), ["1", "2", "3"]);
     }
 }

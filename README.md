@@ -93,7 +93,9 @@ Runtimes are managed explicitly too:
 ```sh
 gogo runtimes list                  # catalog (live-probed) + cached versions
 gogo runtimes install wine-staging  # download → probe → cache, reused by every bundle
-gogo runtimes prune --all
+gogo runtimes prune --all           # what no game uses, keeping each id's previous pin
+gogo mac-app --retarget <bundle|gogid> --runtime winecx --runtime-version 24.0.7_7
+                                    # move a game to another runtime; the .app stays sealed
 ```
 
 ### Recipes

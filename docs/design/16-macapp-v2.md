@@ -434,6 +434,24 @@ games/<gogid>/{prefix,game,state.toml,launch.conf}
   deleted. The depot lane keys the dir by `rootGameId` from `goggame-*.info`.
   `gogo runtimes prune` already refuses ids that a `state.toml` references. The N-1
   rule is left for the GC work.
+- *#69, as implemented:* the reference list is `store::references()`: every
+  `games/*/state.toml` (`runtime`, `renderer`) and every L4 file (`runtime`,
+  `renderer`). The L4 file counts because it is what the next setup will run: a game
+  retargeted to a runtime that isn't applied yet still protects it. The bundle's own
+  `gogo-launch.toml` doesn't count: gogo can't enumerate bundles, and once nothing else
+  names the baked runtime, setup installs it again from the catalog if L4 is dropped.
+  `prune` takes `<id>` (every version) or `<id>/<ver>` (one version, with the derived
+  runtimes built on it). A reference keeps a target when it names the same id and,
+  for a versioned target, the same version or a derived runtime on it
+  (`winecx/24.0.7_7+dxmt-v0.80` keeps `winecx/24.0.7_7`). A version-less reference
+  (`runtime = "winecx"` in L4) keeps the newest base version, the one it resolves to.
+  The check lives in `store::prune` itself, which reports what it kept and why. N-1
+  belongs to the sweep, not to `prune <target>`: `gogo runtimes prune --all` offers
+  every cached version except the newest two base versions of each id (by fetch
+  time), so the previous pin survives a sweep, used or not, for rollback. Derived
+  runtimes get no N-1: only a reference keeps them, since setup rebuilds one from its
+  base in seconds. An explicit `prune <id>[/<ver>]` removes anything unreferenced:
+  that is the user saying so. Installing a new pin still prunes nothing.
 - Today's flat entries (`runtimes/wine-staging/11.18/…`, design 12 §4) stay readable:
   an entry without `engine/` is treated as an engine with no `Frameworks/`.
 - *#62 (the CX engine, `winecx/24.0.7_7`):* the entry is
@@ -466,6 +484,16 @@ game files and saves that survive a bundle rebuild.
 **Settled:** `gogo mac-app --retarget <bundle|gogid> --runtime <id>` (and `--renderer`)
 writes the choice into `compat/<gogid>.toml` (L4). The signed bundle is never touched.
 The next launch sees the stamp change and runs setup.
+
+*#69, as implemented:* `--retarget` writes L4, then runs setup itself when the game
+has a `state.toml` (and something changed), so a missing runtime is installed and a
+failure shows up on the terminal instead of at the next launch. If that setup fails,
+L4 stays written and the command exits non-zero; the next launch tries again. Setup
+resolves the runtime as L4 `runtime` > `gogo-launch.toml` `runtime` (decision 5). When
+the engine differs from the one `state.toml` last applied (comparing base runtimes,
+so a renderer switch on the same engine doesn't count), setup runs `wineboot -u` on
+the existing prefix before anything else, so the new engine updates the prefix before
+the game starts rather than in the middle of it.
 
 **Why:** the bundle seal stays valid (#53), retargeting is as cheap as editing a file,
 and the user's override and gogo's retarget are the same mechanism, so `doctor` explains
@@ -501,6 +529,14 @@ In order, in bash, with no other dependencies than `/usr/bin/shasum` and `osascr
 - A `SIGKILL` of the launcher itself can't be trapped.
 - Logs go to `~/Library/Logs/gogo/<gogid>/`: `launch.log` and one run log per launch
   (§8.1, #77).
+
+- *#69:* when setup fails, its last non-warning line goes into `launch.log` and into
+  the run log header as `# setup: setup failed (exit <n>): <line>; running the last
+  applied config`. The launcher then runs what the last setup applied. If that
+  runtime's `wine` is gone from the store (pruned by hand, or a deleted tree), the
+  launcher doesn't run anything. It writes a run log whose output says which runtime
+  is missing and how to reinstall or retarget, with footer `# exit: 127 (runtime
+  missing)`, shows a dialog, and exits 1.
 
 The launcher never writes inside the bundle, never runs winetricks, and never modifies
 the store.
@@ -673,6 +709,14 @@ title, the message and the button labels, and prints the label it chose.
   and Wine on it, and the second dialog offers Close, then "Copy report" fills the
   (stub) clipboard (#78). Unit: the next-renderer walk per API class, ending in "no more
   renderers".
+- Integration (#69): two store runtimes A and B. Build on A (ad-hoc signed where
+  `codesign` exists), retarget to B: L4 says B, setup ran `wineboot -u` with B, the
+  launcher execs B's wine and never A's, the bundle's tree is unchanged and `codesign
+  --verify --deep --strict` passes. `prune A` is refused before the retarget and
+  succeeds after it. L4 back to the pruned A: setup fails and the run log header says
+  so while B runs. B removed: the launcher refuses with `# exit: 127 (runtime
+  missing)`. Unit: `prune` reference rules (state, L4, derived → base, version-less →
+  newest) and the sweep's N-1.
 - Unit (#71): D3DMetal consent with fake TTY prompts (yes and no are stored and never
   asked again, cancel stores nothing), headless with no answer (warns, writes nothing,
   falls back), a stored answer respected headless and on a TTY, no prompt and no

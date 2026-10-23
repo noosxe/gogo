@@ -2146,18 +2146,7 @@ fn mac_app_retarget(
         return Ok(cli::exit::USAGE);
     }
 
-    let gogid = if target.bytes().all(|b| b.is_ascii_digit()) {
-        target
-    } else {
-        let toml = std::path::Path::new(&target).join("Contents/Resources/gogo-launch.toml");
-        let raw = std::fs::read_to_string(&toml).map_err(|e| {
-            AppError::MacApp(gogo::macapp::MacAppError::Compat {
-                path: toml.clone(),
-                reason: format!("not a gogo v2 bundle: {e}"),
-            })
-        })?;
-        launch::LaunchToml::parse(&raw, &toml)?.gogid
-    };
+    let gogid = gogo::macapp::setup::target_gogid(&target)?;
     let with_version = |id: &str| match &runtime_version {
         Some(v) => format!("{id}/{v}"),
         None => id.to_string(),
@@ -2197,7 +2186,17 @@ fn mac_app_retarget(
             Some(launch::runtime_ref(&rt))
         }
     };
-    if let Some(r) = &new
+    if runtime.is_some() {
+        updates.push(("runtime", new.clone()));
+    }
+    let updates: Vec<(&str, Option<&str>)> =
+        updates.iter().map(|(k, v)| (*k, v.as_deref())).collect();
+    // L4, then setup (a missing catalog runtime is installed on the way, and
+    // a new engine gets `wineboot -u`): the bundle stays sealed.
+    let out = gogo::macapp::setup::retarget(&gogid, &updates)?;
+    // No setup ran (no state yet): say now what the first launch would.
+    if out.setup.is_none()
+        && let Some(r) = &new
         && !r.starts_with("path:")
     {
         let (id, ver) = r
@@ -2210,25 +2209,36 @@ fn mac_app_retarget(
             );
         }
     }
-    if runtime.is_some() {
-        updates.push(("runtime", new.clone()));
-    }
-    let updates: Vec<(&str, Option<&str>)> =
-        updates.iter().map(|(k, v)| (*k, v.as_deref())).collect();
-    let changes = compat::set_user_keys(&gogid, &updates)?;
+    let setup = match &out.setup {
+        Some(Ok(s)) => {
+            for w in &s.warnings {
+                eprintln!("warning: {w}");
+            }
+            serde_json::json!({
+                "ok": true,
+                "runtime": s.state.runtime,
+                "renderer": s.state.renderer,
+                "prefix_updated": s.prefix_updated,
+                "runtime_installed": s.runtime_installed,
+            })
+        }
+        Some(Err(e)) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        None => serde_json::Value::Null,
+    };
     if json {
         println!(
             "{}",
             serde_json::json!({
                 "gogid": gogid,
                 "file": compat::user_path(&gogid),
-                "changes": changes,
+                "changes": out.changes,
+                "setup": setup,
             })
         );
-    } else if changes.is_empty() {
+    } else if out.changes.is_empty() {
         println!("{gogid}: nothing to change (the override file already says so)");
     } else {
-        for c in &changes {
+        for c in &out.changes {
             println!(
                 "{gogid}: {} {} -> {} ({})",
                 c.key,
@@ -2237,7 +2247,27 @@ fn mac_app_retarget(
                 compat::user_path(&gogid).display()
             );
         }
-        println!("the next launch applies it");
+        match &out.setup {
+            Some(Ok(s)) => println!(
+                "{gogid}: set up on runtime {}, renderer {}{}",
+                s.state.runtime,
+                s.state.renderer,
+                if s.prefix_updated {
+                    " (prefix updated for the new engine)"
+                } else {
+                    ""
+                }
+            ),
+            Some(Err(e)) => {
+                eprintln!("gogo: {gogid}: setup failed: {e}");
+                eprintln!("the override is saved; the next launch tries the setup again");
+                return Ok(cli::exit::FAILED);
+            }
+            None => println!("the next launch applies it"),
+        }
+    }
+    if matches!(out.setup, Some(Err(_))) {
+        return Ok(cli::exit::FAILED);
     }
     Ok(cli::exit::OK)
 }
@@ -2676,14 +2706,8 @@ async fn runtimes_cmd(args: crate::cli::RuntimesArgs) -> Result<i32, AppError> {
         }
         crate::cli::RuntimesCmd::Prune { all, id } => {
             let ids: Vec<String> = if all {
-                let mut ids: Vec<String> = store::load_manifest()
-                    .iter()
-                    .chain(store::load_renderer_manifest().iter())
-                    .map(|m| m.id.clone())
-                    .collect();
-                ids.sort();
-                ids.dedup();
-                ids
+                // Per version, keeping each id's newest two (N-1, #69).
+                store::sweep_targets()
             } else {
                 match id {
                     Some(i) => vec![i],
@@ -2694,28 +2718,17 @@ async fn runtimes_cmd(args: crate::cli::RuntimesArgs) -> Result<i32, AppError> {
                 }
             };
             // Design 16 decision 6: never prune a runtime (base or derived)
-            // or a renderer a game still uses.
-            let mut refs = gogo::macapp::launch::referenced_runtimes();
-            refs.extend(gogo::macapp::launch::referenced_renderers());
-            let ids: Vec<String> = ids
-                .into_iter()
-                .filter(|id| {
-                    let users: Vec<&str> = refs
-                        .iter()
-                        .filter(|(_, r)| r == id || r.starts_with(&format!("{id}/")))
-                        .map(|(g, _)| g.as_str())
-                        .collect();
-                    if !users.is_empty() {
-                        eprintln!("gogo: keeping {id}: used by game(s) {}", users.join(", "));
-                    }
-                    users.is_empty()
-                })
-                .collect();
-            if ids.is_empty() {
-                println!("nothing to prune");
-                return Ok(cli::exit::OK);
+            // or a renderer a game still uses (`state.toml` or L4).
+            let out = store::prune(&ids)?;
+            for (id, users) in &out.kept {
+                let mut games: Vec<&str> = users.iter().map(|u| u.gogid.as_str()).collect();
+                games.dedup();
+                eprintln!("gogo: keeping {id}: used by game(s) {}", games.join(", "));
             }
-            for path in store::prune(&ids)? {
+            if out.removed.is_empty() {
+                println!("nothing to prune");
+            }
+            for path in &out.removed {
                 println!("pruned {}", path.display());
             }
             Ok(cli::exit::OK)

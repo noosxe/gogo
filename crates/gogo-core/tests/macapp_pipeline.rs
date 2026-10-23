@@ -2923,16 +2923,12 @@ fn d3d11_game_runs_from_a_derived_dxmt_runtime() {
     assert_eq!(state.runtime, "winecx/24.0.7_7+dxmt-v0.80");
     assert_eq!(state.renderer, "dxmt/v0.80");
     // The store's reference list keeps both from `prune`.
-    assert!(
-        macapp::launch::referenced_runtimes()
-            .iter()
-            .any(|(_, r)| r == "winecx/24.0.7_7+dxmt-v0.80")
-    );
-    assert!(
-        macapp::launch::referenced_renderers()
-            .iter()
-            .any(|(_, r)| r == "dxmt/v0.80")
-    );
+    let refs: Vec<String> = macapp::store::references()
+        .into_iter()
+        .map(|r| r.reference)
+        .collect();
+    assert!(refs.iter().any(|r| r == "winecx/24.0.7_7+dxmt-v0.80"));
+    assert!(refs.iter().any(|r| r == "dxmt/v0.80"));
 
     // An L4 switch to wined3d moves the game back to the base runtime.
     macapp::compat::set_user_keys("1435582019", &[("renderer", Some("wined3d"))]).unwrap();
@@ -3209,4 +3205,190 @@ fn compat_runtime_pins_the_auto_ladder() {
     assert_eq!(pinned.runtime.version, "wine-9.0 (SikarugirCX 24.0.6)");
     assert_eq!(unpinned.runtime.version, "wine-9.0 (SikarugirCX 24.0.7)");
     assert_eq!(pinned.compat.unwrap().status_line(), "untested");
+}
+
+/// #69: two store runtimes A and B. Build on A, retarget to B: L4 says B,
+/// setup runs `wineboot -u` with B's wine, the launcher execs B's wine, and
+/// the signed bundle is byte-for-byte what was built (`codesign --verify`
+/// where codesign exists). `prune A` refuses while a game still uses A and
+/// succeeds once nothing does. A failed setup and a pruned runtime both end
+/// up in the run log.
+#[test]
+fn retarget_moves_a_game_to_another_runtime_without_touching_the_bundle() {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    // SAFETY: env mutation under ENV_LOCK.
+    unsafe { std::env::set_var("GOGO_HOME", &home) };
+    let (log_a, log_b) = (tmp.path().join("wine-a.log"), tmp.path().join("wine-b.log"));
+    let m = |id: &str, version: &str| macapp::store::ManifestEntry {
+        id: id.into(),
+        version: version.into(),
+        sha256: "0".into(),
+        fetched_at: "2026-10-23T00:00:00Z".into(),
+        upstream_url: "http://x".into(),
+        entry_rel: "bin/wine".into(),
+        bytes: 1,
+    };
+    fake_runtime(&home.join("runtimes/wine-staging/11.18"), &log_a);
+    fake_runtime(&home.join("runtimes/wine-devel/11.19"), &log_b);
+    macapp::store::save_manifest(&[m("wine-staging", "11.18"), m("wine-devel", "11.19")]).unwrap();
+
+    let gogid = "1207659013";
+    let tree = depot_game(tmp.path(), gogid, "Retarget Game", false, &["kernel32.dll"]);
+    // A fake gogo for the launcher's setup: fails the way a runtime that
+    // isn't in the store does.
+    let gogo = tmp.path().join("fake-gogo");
+    write_exec(
+        &gogo,
+        "#!/bin/sh\necho 'warning: noise'\n\
+         echo \"error: runtime \\`wine-staging/11.18\\` is not in the store\" >&2\nexit 1\n",
+    );
+    let opts = MacAppOptions {
+        installer: None,
+        game_tree: Some(tree),
+        name: None,
+        mode: RuntimeMode::Catalog("wine-staging".into()),
+        runtime_path: None,
+        out_dir: tmp.path().join("out"),
+        overwrite: true,
+        recipe: Default::default(),
+        runtime_version: None,
+        lutris_base: None,
+        renderer: macapp::RendererChoice::Auto,
+        portable: false,
+        gogo_path: Some(gogo),
+    };
+    let codesign = std::path::Path::new("/usr/bin/codesign").is_file();
+    let policy = if codesign {
+        CodesignPolicy::Adhoc
+    } else {
+        CodesignPolicy::Skip
+    };
+    let plan = macapp::plan(&opts, None, &mut |_| {}).expect("plan");
+    macapp::execute(&plan, policy, &mut |_| {}).expect("execute");
+    let app = tmp.path().join("out/Retarget Game.app");
+    let toml = std::fs::read_to_string(app.join("Contents/Resources/gogo-launch.toml")).unwrap();
+    assert!(toml.contains("runtime = \"wine-staging/11.18\""), "{toml}");
+    let built = tree_digest(&app);
+    let g = home.join("games").join(gogid);
+    let state = || {
+        macapp::launch::GameState::load(&g.join("state.toml"))
+            .unwrap()
+            .unwrap()
+    };
+    assert_eq!(state().runtime, "wine-staging/11.18");
+
+    // A is in use: prune keeps it.
+    let out = macapp::store::prune(&["wine-staging".into()]).unwrap();
+    assert!(out.removed.is_empty());
+    assert_eq!(out.kept[0].1[0].gogid, gogid);
+
+    // Retarget by bundle path: L4 + setup on B (a new engine: wineboot -u).
+    std::fs::write(&log_b, "").unwrap();
+    let target = macapp::setup::target_gogid(&app.to_string_lossy()).unwrap();
+    assert_eq!(target, gogid);
+    let out = macapp::setup::retarget(&target, &[("runtime", Some("wine-devel/11.19"))]).unwrap();
+    assert_eq!(out.changes.len(), 1);
+    let setup = out.setup.expect("the game has state").expect("setup on B");
+    assert!(setup.prefix_updated);
+    assert_eq!(setup.state.runtime, "wine-devel/11.19");
+    let l4 = std::fs::read_to_string(home.join("compat").join(format!("{gogid}.toml"))).unwrap();
+    assert!(l4.contains("runtime = \"wine-devel/11.19\""), "{l4}");
+    assert!(
+        std::fs::read_to_string(&log_b)
+            .unwrap()
+            .contains("wineboot -u"),
+        "setup updated the prefix with B"
+    );
+    assert!(g.join("prefix/dosdevices/z:").symlink_metadata().is_err());
+    // Retargeting again changes nothing and runs no setup.
+    let again = macapp::setup::retarget(gogid, &[("runtime", Some("wine-devel/11.19"))]).unwrap();
+    assert!(again.changes.is_empty() && again.setup.is_none());
+
+    // The launcher execs B's wine (fresh stamp: no setup).
+    let launch = |extra: &[(&str, &std::path::Path)]| {
+        let mut cmd = std::process::Command::new(app.join("Contents/MacOS/Retarget Game"));
+        cmd.env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .env("GOGO_LAUNCHER_NO_DIALOG", "1");
+        for (k, v) in extra {
+            cmd.env(k, v);
+        }
+        cmd.output().unwrap()
+    };
+    std::fs::write(&log_a, "").unwrap();
+    std::fs::write(&log_b, "").unwrap();
+    let run = launch(&[]);
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let b = std::fs::read_to_string(&log_b).unwrap();
+    assert!(b.contains(r"C:\GOG\Retarget Game\Game.exe"), "{b}");
+    assert_eq!(std::fs::read_to_string(&log_a).unwrap(), "", "A never ran");
+    let logs = home.join("Library/Logs/gogo").join(gogid);
+    let latest = std::fs::read_to_string(logs.join("latest.log")).unwrap();
+    assert!(latest.contains("# runtime: wine-devel/11.19\n"), "{latest}");
+
+    // The bundle is what was built, and still verifies.
+    assert_eq!(built, tree_digest(&app), "retarget never writes the bundle");
+    if codesign {
+        let v = std::process::Command::new("/usr/bin/codesign")
+            .args(["--verify", "--deep", "--strict"])
+            .arg(&app)
+            .output()
+            .unwrap();
+        assert!(v.status.success(), "{}", String::from_utf8_lossy(&v.stderr));
+    }
+
+    // Nothing references A any more: prune removes it. B stays.
+    let out = macapp::store::prune(&["wine-staging".into(), "wine-devel".into()]).unwrap();
+    assert_eq!(out.removed, [home.join("runtimes/wine-staging")]);
+    assert_eq!(out.kept.len(), 1);
+    assert_eq!(out.kept[0].0, "wine-devel");
+
+    // L4 back to A, which is gone: setup fails, the run says so in its
+    // header and runs on what was last applied (B).
+    macapp::compat::set_user_keys(gogid, &[("runtime", Some("wine-staging/11.18"))]).unwrap();
+    std::fs::write(&log_b, "").unwrap();
+    let run = launch(&[]);
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert!(
+        std::fs::read_to_string(&log_b)
+            .unwrap()
+            .contains("Game.exe")
+    );
+    let latest = std::fs::read_to_string(logs.join("latest.log")).unwrap();
+    assert!(
+        latest.contains(
+            "# setup: setup failed (exit 1): error: runtime `wine-staging/11.18` is not in \
+             the store; running the last applied config\n"
+        ),
+        "{latest}"
+    );
+
+    // B pruned behind the game's back: the launcher refuses, and says why
+    // in the run log.
+    std::fs::remove_dir_all(home.join("runtimes/wine-devel")).unwrap();
+    let run = launch(&[]);
+    assert_eq!(run.status.code(), Some(1));
+    let latest = std::fs::read_to_string(logs.join("latest.log")).unwrap();
+    assert!(
+        latest.contains("runtime wine-devel/11.19 is not in the runtime store"),
+        "{latest}"
+    );
+    assert!(
+        latest.contains("# exit: 127 (runtime missing)\n"),
+        "{latest}"
+    );
+
+    unsafe { std::env::remove_var("GOGO_HOME") };
+    drop(guard);
 }
