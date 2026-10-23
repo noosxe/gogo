@@ -398,7 +398,9 @@ the store.
    tested yet.
 4. **The `C:\GOG\<name>` symlink** to `games/<gogid>/game`: Wine follows it, but games that
    canonicalize their own path (and installers run into it) should be checked in the VM
-   during #67.
+   during #67. *#67:* Treasure Adventure Game (CX24) starts from it in the VM. Wine runs
+   `C:\GOG\Treasure Adventure Game\…exe` through the relative link with no path
+   errors. A game that canonicalizes its own path hasn't been tried yet.
 5. **Migrating today's fat bundles:** not planned. They keep working as they are, and a
    rebuild produces a v2 bundle. Decide whether `doctor` should say so.
 6. **Removing a game** (`games/<gogid>/` holds saves): command name and confirmation
