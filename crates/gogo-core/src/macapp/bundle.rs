@@ -449,6 +449,44 @@ pub fn clone_tree(src: &Path, dst: &Path) -> Result<(), MacAppError> {
     }
 }
 
+/// Merge an overlay tree over `dst`, overlay files winning (design 15 §3:
+/// the depot `gog-support/<id>/<id>/app/` files Galaxy merges into the
+/// install dir). Missing directories are created; symlinks in the overlay
+/// are skipped. Returns the merged files relative to `overlay`, sorted.
+pub fn merge_overlay(overlay: &Path, dst: &Path) -> Result<Vec<PathBuf>, MacAppError> {
+    fn walk(
+        root: &Path,
+        dir: &Path,
+        dst: &Path,
+        out: &mut Vec<PathBuf>,
+    ) -> Result<(), MacAppError> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let kind = entry.file_type()?;
+            let rel = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+            let target = dst.join(&rel);
+            if kind.is_dir() {
+                std::fs::create_dir_all(&target)?;
+                walk(root, &path, dst, out)?;
+            } else if kind.is_file() {
+                // Replace rather than write through: the target is usually an
+                // APFS clone, possibly read-only, of a depot cache file.
+                if target.symlink_metadata().is_ok() {
+                    std::fs::remove_file(&target)?;
+                }
+                std::fs::copy(&path, &target)?;
+                out.push(rel);
+            }
+        }
+        Ok(())
+    }
+    let mut merged = Vec::new();
+    walk(overlay, overlay, dst, &mut merged)?;
+    merged.sort();
+    Ok(merged)
+}
+
 #[cfg(test)]
 mod bundle_tests {
     use super::*;
@@ -697,6 +735,40 @@ mod bundle_tests {
         assert!(dest.join("bin/wine").is_file());
         assert!(dest.join("share.txt").is_file());
         assert!(!dest.join("bin/wine64").exists(), "symlinks are skipped");
+    }
+
+    #[test]
+    fn merge_overlay_adds_and_replaces_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let overlay = tmp.path().join("app");
+        std::fs::create_dir_all(overlay.join("ASSETS")).unwrap();
+        std::fs::write(overlay.join("ASSETS/options.txt"), b"overlay").unwrap();
+        std::fs::write(overlay.join("config.ini"), b"new").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("/nowhere", overlay.join("link")).unwrap();
+
+        let game = tmp.path().join("game");
+        std::fs::create_dir_all(&game).unwrap();
+        let old = game.join("config.ini");
+        std::fs::write(&old, b"old").unwrap();
+        let mut perms = std::fs::metadata(&old).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&old, perms).unwrap();
+
+        let merged = merge_overlay(&overlay, &game).unwrap();
+        assert_eq!(
+            merged,
+            vec![
+                PathBuf::from("ASSETS/options.txt"),
+                PathBuf::from("config.ini")
+            ]
+        );
+        assert_eq!(
+            std::fs::read(game.join("ASSETS/options.txt")).unwrap(),
+            b"overlay"
+        );
+        assert_eq!(std::fs::read(&old).unwrap(), b"new", "overlay wins");
+        assert!(!game.join("link").exists(), "symlinks are skipped");
     }
 
     #[test]
