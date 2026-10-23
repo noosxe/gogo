@@ -628,8 +628,11 @@ only after the user agreed, and asks once:
 - **The answer** lives in gogo's config: `[mac_app] d3dmetal = "yes"|"no"` (design
   05 §3). It is written with `toml_edit`, so the rest of the file is kept.
 - **When it is asked**: at build time (`mac-app` plan, depot lane), for a **64-bit**
-  game whose scan says Direct3D 12, or for `--renderer d3dmetal`. `--retarget
-  --renderer d3dmetal` asks too. It is a Confirm prompt, default no, that names
+  game whose scan says Direct3D 12, for `--renderer d3dmetal`, or when the game's L3
+  compat entry (#74) sets `renderer = "d3dmetal"`. `--retarget --renderer d3dmetal`
+  asks too. An L3 D3DMetal without a yes, or on a 32-bit game, is set aside with a
+  warning, so the layers below pick (DXMT for 64-bit D3D11), not setup's wined3d
+  fallback. It is a Confirm prompt, default no, that names
   Apple's licence and the download size. The answer is stored either way.
   Cancelling stores nothing. A stored answer is never asked again. The installer
   lane scans only after installing, so it asks only for `--renderer d3dmetal` (at

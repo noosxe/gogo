@@ -151,10 +151,12 @@ pub fn d3dmetal_available() -> bool {
 }
 
 /// The build-time consent question (#71, asked once): for a 64-bit game
-/// that imports `d3d12`, or one built with `--renderer d3dmetal`. Any other
-/// game just uses the stored answer, and a 32-bit game never gets D3DMetal.
-/// `prompt` is `None` headless: no answer stored → a warning, and `false`.
+/// that imports `d3d12`, one built with `--renderer d3dmetal`, or one whose
+/// compat DB entry (L3, for `gogid`) names D3DMetal. Any other game just uses
+/// the stored answer, and a 32-bit game never gets D3DMetal. `prompt` is
+/// `None` headless: no answer stored → a warning, and `false`.
 pub fn ask_d3dmetal(
+    gogid: Option<&str>,
     scan: &Result<PeScan, pe::ScanError>,
     choice: RendererChoice,
     prompt: Option<&super::prompt::PromptFn>,
@@ -170,6 +172,8 @@ pub fn ask_d3dmetal(
         format!("{} uses Direct3D 12", scan.main_exe)
     } else if choice == RendererChoice::Force(Renderer::D3dMetal) {
         format!("--renderer d3dmetal was asked for {}", scan.main_exe)
+    } else if gogid.is_some_and(db_wants_d3dmetal) {
+        format!("gogo's compat entry for {} picks D3DMetal", scan.main_exe)
     } else {
         return d3dmetal_available();
     };
@@ -288,6 +292,15 @@ pub fn pick(scan: &Result<PeScan, pe::ScanError>) -> Pick {
     pick_with(scan, d3dmetal_available())
 }
 
+/// Does the L3 entry for `gogid` set the renderer to D3DMetal?
+fn db_wants_d3dmetal(gogid: &str) -> bool {
+    compat::db_entry(gogid)
+        .entry
+        .renderer
+        .and_then(|r| RendererRef::parse(&r).ok())
+        .is_some_and(|r| r.renderer == Renderer::D3dMetal)
+}
+
 /// [`pick`] with the D3DMetal answer given ([`ask_d3dmetal`]'s).
 pub fn pick_with(scan: &Result<PeScan, pe::ScanError>, d3dmetal: bool) -> Pick {
     match scan {
@@ -356,11 +369,34 @@ pub fn select(gogid: Option<&str>, l1: Pick, choice: RendererChoice) -> Selectio
         renderer: Some(l1.renderer.default_ref()),
         ..Default::default()
     };
-    let db = gogid.map(compat::db_entry).unwrap_or_default();
+    let mut db = gogid.map(compat::db_entry).unwrap_or_default();
+    let mut warnings: Vec<String> = l1.warning.iter().cloned().collect();
+    // An L3 D3DMetal needs a 64-bit game and consent (#71); without them the
+    // layers below pick (DXMT for 64-bit D3D11), not setup's wined3d fallback.
+    if db
+        .entry
+        .renderer
+        .as_deref()
+        .and_then(|r| RendererRef::parse(r).ok())
+        .is_some_and(|r| r.renderer == Renderer::D3dMetal)
+        && !(l1.x86_64 && l1.d3dmetal)
+    {
+        db.entry.renderer = None;
+        warnings.push(if l1.x86_64 {
+            format!(
+                "gogo's compat entry picks D3DMetal, which needs your consent ({} = \"yes\"): \
+                 using the automatic choice",
+                d3dmetal::KEY
+            )
+        } else {
+            "gogo's compat entry picks D3DMetal, which is 64-bit only: using the automatic \
+             choice"
+                .into()
+        });
+    }
     let user = gogid
         .and_then(|g| compat::load_user(g).ok())
         .and_then(|p| p.entry.renderer);
-    let mut warnings: Vec<String> = l1.warning.iter().cloned().collect();
     let mut layers = vec![
         (Layer::Default, &l0),
         (Layer::Auto, &l1_entry),
@@ -988,10 +1024,17 @@ mod tests {
             (A::D3d12, &[G::D3d12][..], auto),
             (A::D3d11, &[G::D3d11][..], force),
         ] {
-            assert!(!ask_d3dmetal(&ok(api, I386, i), c, Some(&yes), &mut emit));
+            assert!(!ask_d3dmetal(
+                None,
+                &ok(api, I386, i),
+                c,
+                Some(&yes),
+                &mut emit
+            ));
         }
         // 64-bit D3D11 without the flag: DXMT's game, not asked.
         assert!(!ask_d3dmetal(
+            None,
             &ok(A::D3d11, X86_64, &[G::D3d11]),
             auto,
             Some(&yes),
@@ -1001,12 +1044,12 @@ mod tests {
         assert!(warns.borrow().is_empty() && !home.path().join("config.toml").exists());
         // Headless 64-bit D3D12, no answer: warned, not stored, falls back.
         let d3d12 = ok(A::D3d12, X86_64, &[G::D3d12]);
-        assert!(!ask_d3dmetal(&d3d12, auto, None, &mut emit));
+        assert!(!ask_d3dmetal(None, &d3d12, auto, None, &mut emit));
         assert_eq!(warns.borrow().len(), 1, "{warns:?}");
         assert_eq!(pick_with(&d3d12, false).renderer, Renderer::Wined3d);
         // TTY: asked once, stored, then the stored answer serves everyone.
-        assert!(ask_d3dmetal(&d3d12, auto, Some(&yes), &mut emit));
-        assert!(ask_d3dmetal(&d3d12, auto, None, &mut emit));
+        assert!(ask_d3dmetal(None, &d3d12, auto, Some(&yes), &mut emit));
+        assert!(ask_d3dmetal(None, &d3d12, auto, None, &mut emit));
         assert_eq!(asked.load(Ordering::SeqCst), 1);
         assert!(d3dmetal_available());
         assert_eq!(super::pick(&d3d12).renderer, Renderer::D3dMetal);
@@ -1019,7 +1062,7 @@ mod tests {
         );
         // A stored no is respected the same way, and never re-asked.
         crate::macapp::d3dmetal::store(crate::config::Consent::No).unwrap();
-        assert!(!ask_d3dmetal(&d3d12, auto, Some(&yes), &mut emit));
+        assert!(!ask_d3dmetal(None, &d3d12, auto, Some(&yes), &mut emit));
         assert_eq!(asked.load(Ordering::SeqCst), 1);
         assert_eq!(
             next_after(&d3d11, "dxmt/v0.80", d3dmetal_available()),
@@ -1045,6 +1088,75 @@ mod tests {
             wine: "/rt/bin/wine".into(),
             version: "wine-9.0".into(),
             min_macos: None,
+        }
+    }
+
+    /// #71 × #74: an L3 entry naming D3DMetal asks for consent on a 64-bit
+    /// game, and without a yes (or on a 32-bit game) the layers below pick.
+    #[test]
+    fn compat_entry_d3dmetal_is_gated_like_the_flag() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let home = tempfile::tempdir().unwrap();
+        let db = tempfile::tempdir().unwrap();
+        std::fs::write(db.path().join("42.toml"), "renderer = \"d3dmetal\"\n").unwrap();
+        let _g = crate::test_util::env_lock();
+        // SAFETY: env mutation under the shared env mutex.
+        unsafe {
+            std::env::set_var("GOGO_HOME", home.path());
+            std::env::remove_var("GOGO_CONFIG");
+            std::env::set_var(compat::DB_DIR_ENV, db.path());
+        }
+        let asked = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = asked.clone();
+        let no = move |_: &super::super::prompt::PromptSpec| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Some(super::super::prompt::PromptAnswer::Confirmed(false))
+        };
+        let d3d11 = |b| Ok(scan(GraphicsApi::D3d11, b, &[pe::GraphicsImport::D3d11]));
+        let auto = RendererChoice::Auto;
+        // 32-bit: not asked; the entry is set aside for the L1 pick.
+        assert!(!ask_d3dmetal(
+            Some("42"),
+            &d3d11(Bitness::I386),
+            auto,
+            Some(&no),
+            &mut |_| {}
+        ));
+        let s = select(Some("42"), pick_with(&d3d11(Bitness::I386), false), auto);
+        assert_eq!(
+            (s.renderer.value.as_str(), s.renderer.layer),
+            ("dxmt/v0.80", Layer::Auto)
+        );
+        assert!(
+            s.warnings.iter().any(|w| w.contains("64-bit only")),
+            "{:?}",
+            s.warnings
+        );
+        // 64-bit: asked because of the entry; a no keeps DXMT.
+        let s64 = d3d11(Bitness::X86_64);
+        let c = ask_d3dmetal(Some("42"), &s64, auto, Some(&no), &mut |_| {});
+        assert!(!c);
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+        let s = select(Some("42"), pick_with(&s64, c), auto);
+        assert_eq!(
+            (s.renderer.value.as_str(), s.renderer.layer),
+            ("dxmt/v0.80", Layer::Auto)
+        );
+        assert!(
+            s.warnings.iter().any(|w| w.contains("consent")),
+            "{:?}",
+            s.warnings
+        );
+        // With consent the entry wins as L3.
+        let s = select(Some("42"), pick_with(&s64, true), auto);
+        assert_eq!(
+            (s.renderer.value.as_str(), s.renderer.layer),
+            ("d3dmetal", Layer::Db)
+        );
+        assert!(s.warnings.is_empty(), "{:?}", s.warnings);
+        unsafe {
+            std::env::remove_var("GOGO_HOME");
+            std::env::remove_var(compat::DB_DIR_ENV);
         }
     }
 
