@@ -7,8 +7,9 @@
 //!
 //! [`merge`] applies `flags > L4 > L3 > L2 > L1 > L0` field by field and
 //! keeps the winning layer of every field, so `gogo mac-app compat` (and
-//! later `doctor`, #79) can show where a value came from. Applying the
-//! result at build/setup is #74; this module only parses, merges and writes.
+//! later `doctor`, #79) can show where a value came from. The build and
+//! setup apply the result (#74, design 16 §5); this module only parses,
+//! merges and writes.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -146,6 +147,9 @@ pub struct CompatEntry {
     pub status: Option<Status>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tested: Option<Vec<Tested>>,
+    /// One line on why the game has its `status` (what breaks, what works).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
     /// Provenance: `gogo-vm`, `umu-protonfixes:<file>@<sha>`, …
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
@@ -165,6 +169,7 @@ const KNOWN_KEYS: &[&str] = &[
     "replace_command",
     "status",
     "tested",
+    "notes",
     "source",
 ];
 
@@ -226,9 +231,29 @@ pub fn validate_gogid(gogid: &str) -> Result<(), MacAppError> {
 // `(gogid, file contents)` for every `compat/<gogid>.toml` (build.rs).
 include!(concat!(env!("OUT_DIR"), "/compat_db.rs"));
 
-/// The L3 entry for `gogid`, if the compiled-in DB has one. A DB file that
-/// fails to parse is a build-time bug; it reads as "no entry" plus a warning.
+/// `GOGO_COMPAT_DIR`: a directory of `<gogid>.toml` files that shadow the
+/// compiled-in DB, for trying a new entry before it is contributed (and for
+/// tests). Its entries are still L3.
+pub const DB_DIR_ENV: &str = "GOGO_COMPAT_DIR";
+
+/// The L3 entry for `gogid`: `$GOGO_COMPAT_DIR/<gogid>.toml` when that
+/// exists, else the compiled-in DB's. A DB file that fails to parse reads
+/// as "no entry" plus a warning (compiled in, it is a build-time bug).
 pub fn db_entry(gogid: &str) -> Parsed {
+    if let Some(dir) = std::env::var_os(DB_DIR_ENV).filter(|d| !d.is_empty())
+        && validate_gogid(gogid).is_ok()
+    {
+        let path = Path::new(&dir).join(format!("{gogid}.toml"));
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            return parse(&raw).unwrap_or_else(|e| Parsed {
+                entry: CompatEntry::default(),
+                warnings: vec![format!(
+                    "compat DB entry {} unreadable: {e}",
+                    path.display()
+                )],
+            });
+        }
+    }
     db_lookup(COMPAT_DB, gogid)
 }
 
@@ -383,6 +408,8 @@ pub struct Effective {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tested: Option<Sourced<Vec<Tested>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<Sourced<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<Sourced<String>>,
 }
 
@@ -431,6 +458,7 @@ pub fn merge(layers: &[(Layer, &CompatEntry)]) -> Effective {
         take(&mut out.replace_command, &e.replace_command, layer);
         take(&mut out.status, &e.status, layer);
         take(&mut out.tested, &e.tested, layer);
+        take(&mut out.notes, &e.notes, layer);
         take(&mut out.source, &e.source, layer);
     }
     out
@@ -472,9 +500,68 @@ impl Effective {
                 t.layer.describe()
             ));
         }
+        line(&mut out, "notes", &self.notes);
         line(&mut out, "source", &self.source);
         out
     }
+
+    /// The pre-confirm status line (docs/19 §6.6): `known to boot on
+    /// winecx-24.0.7_7 (2026-10-22)`, `untested`, `known broken: <notes>`.
+    /// The runtime is the most recent `tested` run (the last one when none
+    /// carries a date).
+    pub fn status_line(&self) -> String {
+        let status = self.status.as_ref().map_or(Status::Unknown, |s| s.value);
+        let verb = match status {
+            Status::Unknown => return "untested".into(),
+            Status::Broken => {
+                return match &self.notes {
+                    Some(n) => format!("known broken: {}", n.value),
+                    None => "known broken".into(),
+                };
+            }
+            Status::Boots => "boot",
+            Status::Plays => "play",
+        };
+        let latest = self.tested.as_ref().and_then(|t| {
+            t.value
+                .iter()
+                .enumerate()
+                .max_by_key(|(i, t)| (t.date.map(|d| d.to_string()), *i))
+                .map(|(_, t)| t)
+        });
+        match latest {
+            Some(t) => match t.date {
+                Some(d) => format!("known to {verb} on {} ({d})", t.runtime),
+                None => format!("known to {verb} on {}", t.runtime),
+            },
+            None => format!("known to {verb}"),
+        }
+    }
+}
+
+/// L3 merged with L4 for `gogid` (what the build reads before confirming),
+/// plus both layers' warnings. An unreadable L4 file is a warning here, not
+/// an error: setup refuses it later, with the path.
+pub fn db_and_user(gogid: &str) -> (Effective, Vec<String>) {
+    let db = db_entry(gogid);
+    let mut warnings = db.warnings;
+    let user = match load_user(gogid) {
+        Ok(p) => {
+            let path = user_path(gogid);
+            warnings.extend(
+                p.warnings
+                    .iter()
+                    .map(|w| format!("{}: unknown key {w}", path.display())),
+            );
+            p.entry
+        }
+        Err(e) => {
+            warnings.push(e.to_string());
+            CompatEntry::default()
+        }
+    };
+    let eff = merge(&[(Layer::Db, &db.entry), (Layer::User, &user)]);
+    (eff, warnings)
 }
 
 #[cfg(test)]
@@ -490,6 +577,7 @@ verbs    = ["d3dcompiler_43", "d3dx11_43"]
 status   = "boots"
 tested   = [{ runtime = "winecx-24.0.7_7", host = "m4pro/macos-27.0.1", date = 2026-10-22 }]
 source   = "gogo-vm"
+notes    = "boots to the main menu"
 env      = { WINEMSYNC = "1" }
 dll_overrides = { ddraw = "n,b" }
 registry = [{ key = 'HKCU\Software\Wine\Direct3D', name = "renderer", data = "gl" }]
@@ -664,6 +752,48 @@ replace_command = { from = "GoGLauncher.exe", to = "RebelGalaxyGOG.exe" }
         let json = serde_json::to_value(&eff).unwrap();
         assert_eq!(json["renderer"]["layer"], "L4");
         assert_eq!(json["tested"]["value"][0]["date"], "2026-10-22");
+    }
+
+    /// Golden status lines (docs/19 §6.6), each from L3 alone or L4 over it.
+    #[test]
+    fn status_line_goldens() {
+        let line = |db: &str, user: &str| {
+            let db = parse(db).unwrap().entry;
+            let user = parse(user).unwrap().entry;
+            merge(&[(Layer::Db, &db), (Layer::User, &user)]).status_line()
+        };
+        assert_eq!(
+            line(REBEL_GALAXY, ""),
+            "known to boot on winecx-24.0.7_7 (2026-10-22)"
+        );
+        assert_eq!(line("", ""), "untested");
+        assert_eq!(line("status = \"unknown\"", ""), "untested");
+        assert_eq!(line("exe = \"a.exe\"", ""), "untested");
+        assert_eq!(
+            line(
+                "status = \"broken\"\nnotes = \"black screen after the intro video\"",
+                ""
+            ),
+            "known broken: black screen after the intro video"
+        );
+        assert_eq!(line("status = \"broken\"", ""), "known broken");
+        assert_eq!(line("status = \"plays\"", ""), "known to play");
+        // The newest dated run wins over list order; L4 overrides L3.
+        assert_eq!(
+            line(
+                REBEL_GALAXY,
+                "status = \"plays\"\ntested = [{ runtime = \"winecx-25\", date = 2026-11-01 }, \
+                 { runtime = \"winecx-24\", date = 2026-10-01 }]"
+            ),
+            "known to play on winecx-25 (2026-11-01)"
+        );
+        assert_eq!(
+            line(
+                "status = \"boots\"\ntested = [{ runtime = \"a\" }, { runtime = \"b\" }]",
+                ""
+            ),
+            "known to boot on b"
+        );
     }
 
     #[test]

@@ -3027,3 +3027,186 @@ fn ddraw_game_gets_cnc_ddraw_until_l4_says_otherwise() {
     }
     drop(guard);
 }
+
+// — compat entries drive the build and setup (#74) —
+
+/// An L3 entry (through `GOGO_COMPAT_DIR`) with exe/renderer/verbs/env/args:
+/// the plan shows its status, the bundle TOML bakes its exe, renderer, args,
+/// env and DLL overrides over L1 and `goggame-*.info`, and setup runs its
+/// verbs through winetricks in place of the L1 ones.
+#[test]
+fn compat_entry_drives_build_and_setup() {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let db = tmp.path().join("compat-db");
+    std::fs::create_dir_all(&db).unwrap();
+    std::fs::write(
+        db.join("1435582019.toml"),
+        r#"
+title    = "Rebel Galaxy"
+exe      = 'bin\RealGame.exe'
+renderer = "wined3d"
+verbs    = ["d3dx9_43", "xact"]
+env      = { WINEMSYNC = "1" }
+args     = ["-windowed"]
+dll_overrides = { xinput1_3 = "n,b" }
+status   = "boots"
+tested   = [{ runtime = "winecx-24.0.7_7", date = 2026-10-22 }]
+"#,
+    )
+    .unwrap();
+    let wt_log = tmp.path().join("winetricks.log");
+    let wt = tmp.path().join("winetricks");
+    std::fs::write(
+        &wt,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
+            wt_log.display()
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&wt, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    // SAFETY: env mutation under ENV_LOCK.
+    unsafe {
+        std::env::set_var("GOGO_HOME", &home);
+        std::env::set_var("GOGO_COMPAT_DIR", &db);
+        std::env::set_var("WINETRICKS", &wt);
+    }
+    let runtime_dir = tmp.path().join("runtime");
+    fake_runtime(&runtime_dir, &tmp.path().join("wine.log"));
+    // A D3D11 launcher as the info's game task (L1: dxmt + d3dx11_43), and
+    // the real game exe the compat entry points at.
+    let tree = depot_game(
+        tmp.path(),
+        "1435582019",
+        "Rebel Galaxy",
+        true,
+        &["kernel32.dll", "d3d11.dll", "d3dx11_43.dll"],
+    );
+    std::fs::create_dir_all(tree.join("bin")).unwrap();
+    std::fs::write(tree.join("bin/RealGame.exe"), b"MZ").unwrap();
+    let opts = MacAppOptions {
+        installer: None,
+        game_tree: Some(tree),
+        name: None,
+        mode: RuntimeMode::Path,
+        runtime_path: Some(runtime_dir),
+        out_dir: tmp.path().join("out"),
+        overwrite: true,
+        recipe: Default::default(),
+        runtime_version: None,
+        lutris_base: None,
+        renderer: macapp::RendererChoice::Auto,
+        portable: false,
+        gogo_path: Some(tmp.path().join("no-such-gogo")),
+    };
+    let plan = macapp::plan(&opts, None, &mut |_| {}).expect("plan");
+    assert_eq!(
+        plan.compat.as_ref().unwrap().status_line(),
+        "known to boot on winecx-24.0.7_7 (2026-10-22)"
+    );
+    let sel = plan.renderer.as_ref().unwrap();
+    assert_eq!(
+        (sel.renderer.value.as_str(), sel.renderer.layer),
+        ("wined3d", macapp::compat::Layer::Db)
+    );
+    macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).expect("execute");
+
+    let app = tmp.path().join("out/Rebel Galaxy.app");
+    let toml = std::fs::read_to_string(app.join("Contents/Resources/gogo-launch.toml")).unwrap();
+    let baked = macapp::launch::LaunchToml::parse(&toml, std::path::Path::new("t")).unwrap();
+    assert_eq!(baked.exe, r"C:\GOG\Rebel Galaxy\bin\RealGame.exe", "{toml}");
+    assert_eq!(baked.workdir, r"C:\GOG\Rebel Galaxy\bin");
+    assert_eq!(baked.renderer, "wined3d");
+    assert_eq!(baked.args, ["-windowed"]);
+    assert_eq!(baked.env["WINEMSYNC"], "1");
+    assert_eq!(baked.dll_overrides["xinput1_3"], "n,b");
+    // The TOML keeps L1 verbs (design 16 §2.2); setup applies L3's instead.
+    assert_eq!(baked.verbs, ["d3dx11_43"]);
+    let runs = std::fs::read_to_string(&wt_log).expect("fake winetricks ran");
+    assert_eq!(runs.lines().collect::<Vec<_>>(), ["-q d3dx9_43 xact"]);
+    let conf = std::fs::read_to_string(home.join("games/1435582019/launch.conf")).unwrap();
+    assert!(
+        conf.contains(r"EXE='C:\GOG\Rebel Galaxy\bin\RealGame.exe'"),
+        "{conf}"
+    );
+    assert!(conf.contains("VERBS=('d3dx9_43' 'xact')"), "{conf}");
+    assert!(conf.contains("DLL_OVERRIDES='xinput1_3=n,b'"), "{conf}");
+
+    unsafe {
+        std::env::remove_var("WINETRICKS");
+        std::env::remove_var("GOGO_COMPAT_DIR");
+        std::env::remove_var("GOGO_HOME");
+    }
+    drop(guard);
+}
+
+/// An L3 `runtime` pins the auto ladder to that store runtime, even when a
+/// newer one of the same lane is cached (#74).
+#[test]
+fn compat_runtime_pins_the_auto_ladder() {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    for (ver, label) in [("24.0.7_7", "24.0.7"), ("24.0.6_1", "24.0.6")] {
+        let bin = home.join(format!("runtimes/winecx/{ver}/engine/bin"));
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(home.join(format!("runtimes/winecx/{ver}/Frameworks"))).unwrap();
+        std::fs::write(
+            bin.join("wine"),
+            format!("#!/bin/sh\necho 'wine-9.0 (SikarugirCX {label})'\n"),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(bin.join("wine"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::write(
+        home.join("runtimes/manifest.json"),
+        r#"[{"id":"winecx","version":"24.0.7_7","sha256":"0","fetched_at":"2026-02-01T00:00:00Z","upstream_url":"x","entry_rel":"engine/bin/wine","bytes":16},
+{"id":"winecx","version":"24.0.6_1","sha256":"0","fetched_at":"2026-01-01T00:00:00Z","upstream_url":"x","entry_rel":"engine/bin/wine","bytes":16}]"#,
+    )
+    .unwrap();
+    let db = tmp.path().join("compat-db");
+    std::fs::create_dir_all(&db).unwrap();
+    std::fs::write(
+        db.join("1207659013.toml"),
+        "runtime = \"winecx/24.0.6_1\"\n",
+    )
+    .unwrap();
+    // SAFETY: env mutation under ENV_LOCK.
+    unsafe {
+        std::env::set_var("GOGO_HOME", &home);
+        std::env::set_var("GOGO_COMPAT_DIR", &db);
+    }
+    let tree = depot_game(tmp.path(), "1207659013", "Pinned", false, &["kernel32.dll"]);
+    let opts = MacAppOptions {
+        installer: None,
+        game_tree: Some(tree),
+        name: None,
+        mode: RuntimeMode::Auto,
+        runtime_path: None,
+        out_dir: tmp.path().join("out"),
+        overwrite: true,
+        recipe: Default::default(),
+        runtime_version: None,
+        lutris_base: None,
+        renderer: macapp::RendererChoice::Auto,
+        portable: false,
+        gogo_path: None,
+    };
+    let pinned = macapp::plan(&opts, None, &mut |_| {}).expect("plan");
+    std::fs::remove_file(db.join("1207659013.toml")).unwrap();
+    let unpinned = macapp::plan(&opts, None, &mut |_| {}).expect("plan");
+    unsafe {
+        std::env::remove_var("GOGO_COMPAT_DIR");
+        std::env::remove_var("GOGO_HOME");
+    }
+    drop(guard);
+    assert_eq!(pinned.runtime.version, "wine-9.0 (SikarugirCX 24.0.6)");
+    assert_eq!(unpinned.runtime.version, "wine-9.0 (SikarugirCX 24.0.7)");
+    assert_eq!(pinned.compat.unwrap().status_line(), "untested");
+}
