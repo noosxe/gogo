@@ -54,7 +54,10 @@ scripts/vm-test.sh run "/path/Game.app" --secs 30   # full clone → test → de
 scripts/vm-test.sh run Game.app --strict-gatekeeper # stop at the Gatekeeper dialog
 scripts/vm-test.sh run Game.app --no-quarantine     # skip the download simulation
 scripts/vm-test.sh run Game.app --keep              # keep the stopped clone for poking
-scripts/vm-test.sh run Game.app --state             # v2 bundle: also seed its state dir (below)
+scripts/vm-test.sh run Game.app --kill term         # #42: kill the launcher, assert no Wine left
+scripts/vm-test.sh run Game.app --runtimes copy     # copy store runtimes instead of sharing them
+scripts/vm-test.sh run Game.app --click 512,400     # click past a first-run dialog (also --osascript F)
+scripts/vm-test.sh smoke                            # per-layer smoke set (below)
 scripts/vm-test.sh shell [Game.app]                 # interactive clone, deleted on exit
 scripts/vm-test.sh status                           # golden, clones, running count (JSON)
 scripts/vm-test.sh cleanup                          # stop + delete every gog-test-* clone
@@ -67,29 +70,104 @@ What `run` does:
 2. Copies the bundle to `~/Applications` by streaming `tar` over SSH. A virtiofs
    share + `ditto` doesn't work: Wine prefixes contain absolute symlinks (`dosdevices/z:`
    → `/`, `drive_c/users/<you>/Desktop` → `/Users/<you>/Desktop`), and virtiofs fails
-   those with ELOOP.
+   those with ELOOP. For a v2 bundle it then seeds the game's state (next section).
 3. Sets `com.apple.quarantine` (`0081;<hex time>;Safari;`), then records
    `codesign --verify --deep --strict` and `spctl -a -vv`.
 4. `open`s the bundle via LaunchServices, like a double-click, with Wine's stdout/stderr
    sent to the results dir. After 8 s it classifies Gatekeeper: `allowed`, `prompted`
    (process present but SIGSTOPped behind the first-launch dialog) or `blocked` (no
-   process). Then it screenshots the dialog. Unless `--strict-gatekeeper` is set, it
-   kills the held launch, strips quarantine (what "Open Anyway" does) and relaunches.
-5. Waits `--secs`, then collects: process list, on-screen windows (CoreGraphics, from
-   JXA), `screencapture -x`, Wine logs from the prefix, a `log show` slice (syspolicyd,
-   XProtect, wine), crash reports and guest info.
-6. Stops and deletes the clone, even on error or Ctrl-C.
+   process). Then it screenshots the dialog (`gatekeeper.png`). Unless
+   `--strict-gatekeeper` is set, it clicks the dialog away (System Events, *Done*),
+   kills the held launch, strips quarantine (what "Open Anyway" does) and relaunches,
+   so `screenshot.png` shows the game, not the dialog. `gatekeeper_dialog_left` says
+   whether one was still on screen at the end.
+5. Runs the `--click` / `--osascript` hooks, if any, then waits `--secs` and collects:
+   process list, on-screen windows (CoreGraphics, from JXA), `screencapture -x`, the
+   launcher's logs, Wine logs from the prefix, a `log show` slice (syspolicyd, XProtect,
+   wine), crash reports and guest info.
+6. With `--kill`, signals the launcher and checks for leftovers (see *Teardown*).
+7. Records the seal and self-containment evidence: a second strict `codesign` verify,
+   whether anything under `Contents/` changed, missing-library lines from the logs, and
+   new files in the guest home outside gogo's dirs.
+8. Stops and deletes the clone, even on error or Ctrl-C.
 
 **Two-VM limit.** macOS allows at most two macOS guests at once. `run`/`shell` take a slot
 lock (`~/.local/state/gogo-vm/slot.lock`) and *queue* for up to `--wait-secs` (default 1800)
 while two `tart run` processes exist. Linux VMs (Docker Desktop) don't count.
 
-**v2 bundles (design 16).** A v2 `.app` is only a launcher, so `--state` also copies
-`games/<gogid>/`, `compat/<gogid>.toml` and the store runtime that `state.toml`
-references from the host's `~/Library/Application Support/gogo`, into the same place
-under the guest's `admin` user. The launcher's state paths are relative to the state
-dir, so they resolve there. The launcher's own logs come back in `launcher-logs/`.
-This is the minimum; the full store/state seeding is #68.
+## v2 bundles: seeding the state dir (design 16)
+
+A v2 `.app` is only a ~10 KiB launcher. The prefix, game files and effective config live
+in `~/Library/Application Support/gogo/games/<gogid>/`, and Wine comes from gogo's
+runtime store. So for any bundle with `Contents/Resources/gogo-launch.toml` (and no
+`Resources/wine`), `run` seeds the guest by default (`--no-state` skips it, old
+self-contained bundles are left as they were). What to seed is derived, not hand-picked:
+
+| From | Seeded | How |
+|---|---|---|
+| `gogid` in `gogo-launch.toml` | `games/<gogid>/` (prefix, game, `launch.conf`, `state.toml`), `compat/<gogid>.toml` if present | `tar` over SSH (writable) |
+| `runtime` in `gogo-launch.toml`, plus `RUNTIME_DIR`/`FRAMEWORKS` in the game's `launch.conf` (an L4 retarget or a derived `<ver>+<renderer>-<rver>` runtime) | `runtimes/<id>/` (and `renderers/<id>/`) | read-only virtiofs share, symlinked into the guest store |
+| `runtime = "path:<dir>"` (outside the store) | that dir at the same absolute path | share + `sudo ln -s` |
+
+Everything lands under the guest `admin` user's `~/Library/Application Support/gogo`.
+That works because the launcher writes state paths relative to the state dir
+(`PREFIX='games/<gogid>/prefix'`) and falls back to `~/Library/Application Support/gogo`
+when the recorded `gogo.state` doesn't exist. The guest has no gogo, so the prefix must
+already be up to date on the host: a stale stamp makes the launcher log "no gogo
+found" and launch as-is.
+
+**Runtimes are shared, not copied.** A store runtime is 0.5–1 GB and never written,
+so by default each `runtimes/<id>` dir is mounted read-only (`tart run --dir`) and
+nothing is copied, however many runs use it. Store runtimes contain only relative
+symlinks, so virtiofs's ELOOP problem doesn't apply. `--runtimes copy` streams them with
+`tar` instead (the earlier behaviour), for when you suspect the share itself. The
+launcher's logs come back in `launcher-logs/`; the summary lists what was seeded under
+`state.units`.
+
+## Teardown check (#42)
+
+`--kill term` lets the game run `--secs`, then sends `SIGTERM` to the launcher (the
+bash process under `Contents/MacOS/` whose parent is launchd), waits `--kill-wait`
+(15 s) and lists anything Wine left: `wineserver`, `wine*-preloader`, `*.exe`. The guest
+runs nothing else Wine, so every match belongs to this game's prefix. The result is
+`teardown` in the summary:
+
+```json
+"teardown": {"signal": "TERM", "launcher_pid": "812", "wait_secs": 15, "leftovers": [], "ok": true}
+```
+
+A non-empty `leftovers` turns an `ok` run into `teardown_leftovers` (exit 1).
+`--kill kill` sends `SIGKILL`, which the launcher can't trap (design 16 §8), so it only
+records what stays behind.
+
+## Smoke set
+
+`scripts/vm-test.sh smoke` runs the cases in [`scripts/vm-smoke.txt`](../scripts/vm-smoke.txt),
+one VM run each, against bundles in `target/v2` (`--bundles DIR` or `GOGO_VM_BUNDLES`).
+Each case is a line with its layer, bundle, run options, a `jq` check on `summary.json`
+and what it proves. `--only a,b` runs a subset. It prints a markdown table, the
+`tested = [...]` compat line for each passing case, and the path of `smoke.json`
+(exit 0 all pass, 1 a case failed, 3 infra).
+
+| Case | Layer | What it proves |
+|---|---|---|
+| `depot-lane` | depot lane, L0 runtime | TAG (1207659013) from `--from-depot` starts in a clean guest from the seeded state dir and the store runtime; no write into the bundle; no Gatekeeper dialog left on screen |
+| `gog-support` | L2 GOG support overlay | Carmageddon TDR 2000 (1146738698) has `ASSETS/options.txt` from the depot's `gog-support` overlay, so it reaches its first-run dialog instead of `Abort at File.cpp:73` |
+| `signing` | launcher seal, Gatekeeper | the launcher verifies `--deep --strict` in the guest and a quarantined launch gets the "could not verify" prompt, not "damaged" (#53) |
+| `teardown-term` | launcher teardown (#42) | `SIGTERM` to the launcher leaves no Wine process behind |
+| `teardown-kill` | launcher teardown (#42) | informational: what a `SIGKILL` (untrappable) leaves |
+| `runtime-cx24`, `prefix-setup`, `renderer-l1` | #62, #67, #70 | placeholders (`-` bundle): fill in the bundle and check when those land |
+
+Build the bundles first:
+
+```sh
+gogo mac-app --from-depot 1207659013 --out target/v2 --yes
+gogo mac-app --from-depot 1146738698 --out target/v2 --yes
+scripts/vm-test.sh smoke
+```
+
+Renderer cases only prove start-up here: the VM GPU has **no Metal 3 and no OpenGL**, so
+DXMT, D3DMetal and OpenGL rendering are judged on the host (#80), never by a VM pass.
 
 ## Results (`target/vm-test/<slug>-<timestamp>/`)
 
@@ -99,10 +177,17 @@ path of `summary.json`, and the summary is printed just before it:
 
 ```json
 {
-  "status": "ok | running_no_window | exited | did_not_launch | gatekeeper_prompted | gatekeeper_blocked | infra_error",
+  "status": "ok | running_no_window | exited | did_not_launch | teardown_leftovers | gatekeeper_prompted | gatekeeper_blocked | infra_error",
   "exit_code": 0,
+  "model": "v2", "gogid": "1207659013", "runtime": "wine-staging/11.18",
+  "state": {"units": ["copy games/1207659013", "store runtimes/wine-staging"], "runtimes": "share"},
   "gatekeeper": "not_quarantined | allowed | prompted | blocked",
-  "codesign_verify_rc": "1", "spctl_rc": "1",
+  "gatekeeper_dialog_left": false,
+  "codesign_verify_rc": "0", "codesign_strict_rc": "0", "spctl_rc": "3",
+  "bundle_modified": false,
+  "missing_libs": ["…Wine cannot find the FreeType font library…"],
+  "writes_outside_gogo": [],
+  "log_grep": [], "teardown": null,
   "launched": true, "running_after_secs": true,
   "windows": [{"owner": "wine", "pid": 839, "layer": 26, "w": 1024, "h": 768}],
   "processes": ["839 S C:\\GOG\\Pharaoh Gold\\Pharaoh.exe", "..."],
@@ -113,16 +198,34 @@ path of `summary.json`, and the summary is printed just before it:
 ```
 
 `ok` means "alive with a window". It does **not** mean "renders correctly", so always look
-at `screenshot.png`. Other files: `gatekeeper.log`, `processes.txt`, `crash-reports.txt`,
-`guest-info.txt`, `open.txt`.
+at `screenshot.png`. Give games enough `--secs`: under Rosetta in the guest, TAG takes
+30–40 s to open its window (a 25 s run reported `running_no_window` with the game
+alive), so the smoke cases use 45.
+
+- `codesign_verify_rc` is the strict verify before launch; `codesign_strict_rc` is the
+  same check after the run. `bundle_modified` compares a stat listing of `Contents/`
+  before and after. Both catch a write into the signed bundle (#53).
+- `missing_libs`: `cannot find` / `Library not loaded` / `image not found` lines from
+  Wine's and the launcher's logs, i.e. what the runtime pulled from the build host.
+- `writes_outside_gogo`: files created in the guest home during the run, outside
+  `gogo/` state and logs, with macOS's own `~/Library` churn filtered out (design 16
+  decision 4: saves stay in the prefix).
+- `log_grep`: matches for `--grep`.
+
+Other files: `gatekeeper.log`, `gatekeeper-windows.json` (everything on screen at the
+prompt), `windows-all.json`, `processes.txt`, `processes-after-kill.txt`,
+`codesign-after.txt`, `missing-libs.txt`, `writes-outside-gogo.txt`, `crash-reports.txt`,
+`guest-info.txt`, `open.txt`, `launcher-logs/`.
 
 ## Known VM limitations
 
 - **GPU is "Apple Paravirtual device"**: Metal GPU families Apple5 + Mac2 only, **no Metal 3**
   (no Apple7/8). So **D3DMetal / GPTK cannot work in the guest** (they need Metal 3), and
   DXVK/MoltenVK and wined3d-GL paths may behave differently from real hardware. Performance
-  numbers mean nothing. Use the VM for "does it start, is it self-contained, what does
-  Gatekeeper say", and real hardware for rendering and performance.
+  numbers mean nothing. There is **no usable OpenGL** either. Use the VM for "does it
+  start, is it self-contained, what does Gatekeeper say, does it tear down", and real
+  hardware for rendering and performance: DXMT, D3DMetal and OpenGL results always come
+  from the host pass (#80).
 - **SIP is disabled** in Cirrus images, and TCC is pre-granted to `sshd`/`osascript`. That's
   needed for automation, but it isn't a stock Mac: anything SIP- or TCC-sensitive must be
   re-checked on real hardware.

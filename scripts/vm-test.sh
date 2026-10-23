@@ -5,6 +5,7 @@
 #
 #   scripts/vm-test.sh golden [--refresh]        create/refresh the gog-golden image
 #   scripts/vm-test.sh run <X.app> [opts]        clone → copy app → launch → collect → delete
+#   scripts/vm-test.sh smoke [manifest] [opts]   per-layer smoke cases (scripts/vm-smoke.txt)
 #   scripts/vm-test.sh shell [<X.app>]           interactive clone (deleted on exit)
 #   scripts/vm-test.sh cleanup                   stop + delete every gog-test-* clone
 #   scripts/vm-test.sh status                    golden + clones + running VM count
@@ -15,18 +16,31 @@
 #   --name NAME         clone name (default gog-test-<app>-<timestamp>)
 #   --no-quarantine     skip the Gatekeeper quarantine xattr
 #   --strict-gatekeeper if Gatekeeper blocks the quarantined launch, stop there
-#                       (default: record the block, strip quarantine, launch again)
+#                       (default: record the block, dismiss the dialog, strip
+#                       quarantine, launch again)
 #   --keep              leave the clone stopped-but-present for inspection
 #   --wait-secs N       how long to queue for a free VM slot (default 1800)
-#   --state             v2 bundle (design 16): also copy the game's state dir,
-#                       its L4 override and its store runtime from the host's
-#                       ~/Library/Application Support/gogo (minimal; #68)
+#   --no-state          v2 bundles (design 16) get their games/<gogid>, L4
+#                       override and store runtime(s) seeded into the guest by
+#                       default, derived from gogo-launch.toml; this skips that
+#                       (--state forces it). v1 self-contained bundles: none.
+#   --runtimes share|copy  store runtimes as read-only virtiofs shares (default,
+#                       nothing copied) or streamed with tar like the game state
+#   --kill term|kill    #42 teardown check: after --secs, signal the launcher,
+#                       wait --kill-wait N (default 15) s, assert no Wine left
+#   --grep REGEX        record matching wine/launcher log lines as log_grep
+#   --click X,Y         click there (System Events) after launch; repeatable
+#   --osascript FILE    run this AppleScript in the guest after launch
+#
+# smoke options: --bundles DIR (default $GOGO_VM_BUNDLES or <repo>/target/v2),
+#   --out DIR, --only case1,case2
 #
 # Output (machine-readable): the LAST stdout line of `run` is the summary JSON
-# path; the summary is also printed to stdout as one JSON object before it.
-# Exit codes: 0 = launched and still running with ≥1 window; 1 = test ran but
-# the app failed (blocked/crashed/no window); 2 = usage; 3 = infrastructure
-# (tart/VM/SSH problem; the result says nothing about the app).
+# path (of `smoke`: smoke.json); the summary is printed to stdout before it.
+# Exit codes: 0 = launched and still running with ≥1 window (smoke: all cases
+# pass); 1 = test ran but the app failed (blocked/crashed/no window/teardown
+# leftovers; smoke: a case failed); 2 = usage; 3 = infrastructure (tart/VM/SSH
+# problem; the result says nothing about the app).
 #
 # Host needs: Tart (Homebrew `openai/tools/tart`, or a release archive on PATH)
 # plus jq/ssh (the script re-execs itself under `nix develop` when jq is missing).
@@ -242,9 +256,65 @@ const out = ws.filter(w => !sys.includes(w.kCGWindowOwnerName) &&
               w: Math.round(w.kCGWindowBounds.Width), h: Math.round(w.kCGWindowBounds.Height)}));
 JSON.stringify(out);
 '
+# Same, unfiltered: what else is on screen (dialogs covering the game).
+GUEST_PROBE_ALL='
+ObjC.import("CoreGraphics");
+const raw = $.CGWindowListCopyWindowInfo($.kCGWindowListOptionOnScreenOnly, 0);
+const ws = ObjC.deepUnwrap(ObjC.castRefToObject(raw)) || [];
+JSON.stringify(ws.filter(w => w.kCGWindowLayer < 1000 && w.kCGWindowBounds.Width > 40 &&
+    !["Window Server","Dock","Wallpaper","SystemUIServer","Control Center"].includes(w.kCGWindowOwnerName))
+  .map(w => ({owner: w.kCGWindowOwnerName, pid: w.kCGWindowOwnerPID, layer: w.kCGWindowLayer,
+              w: Math.round(w.kCGWindowBounds.Width), h: Math.round(w.kCGWindowBounds.Height)})));
+'
+
+# The host's gogo state dir (design 16 §0); a v2 bundle needs parts of it.
+HOST_STATE="${GOGO_VM_HOST_STATE:-$HOME/Library/Application Support/gogo}"
+# shellcheck disable=SC2016 # expanded by the guest shell
+GUEST_STATE='$HOME/Library/Application Support/gogo'
+SHARES="/Volumes/My Shared Files"
+
+toml_str() { # file key → first string value (gogo writes 'x' or "x")
+    sed -n "s/^$2 *= *[\"']\\(.*\\)[\"'] *\$/\\1/p" "$1" | head -1
+}
+
+# What a v2 bundle needs from the host state dir, derived from its
+# gogo-launch.toml and the game's effective launch.conf, one unit per line:
+#   copy <rel>   games/<gogid>, compat/<gogid>.toml (writable; tar over ssh)
+#   store <rel>  a store entry: runtimes/<id>[/<ver>], renderers/<id>[/<ver>]
+#   abs <dir>    a runtime outside the store (`path:`), same path in the guest
+# With mode=share a store unit is the whole <id> dir, so a derived runtime
+# (<ver>+<renderer>-<rver>) and the base its Frameworks link to resolve alike.
+state_units() { # app mode
+    local toml="$1/Contents/Resources/gogo-launch.toml" mode="$2" gogid rt p kind rest id ver
+    gogid="$(toml_str "$toml" gogid)"
+    [ -n "$gogid" ] && [ -d "$HOST_STATE/games/$gogid" ] || return 1
+    echo "copy games/$gogid"
+    if [ -f "$HOST_STATE/compat/$gogid.toml" ]; then echo "copy compat/$gogid.toml"; fi
+    rt="$(toml_str "$toml" runtime)"
+    {
+        case "$rt" in path:*) echo "${rt#path:}" ;; ?*) echo "runtimes/$rt" ;; esac
+        # The effective config can point elsewhere (an L4 retarget, a derived
+        # renderer runtime): follow its resolved paths too.
+        if [ -f "$HOST_STATE/games/$gogid/launch.conf" ]; then (
+            # shellcheck source=/dev/null
+            source "$HOST_STATE/games/$gogid/launch.conf"
+            printf '%s\n' "${RUNTIME_DIR:-}" "${FRAMEWORKS:-}"
+        ); fi
+    } | while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        case "$p" in "$HOST_STATE"/*) p="${p#"$HOST_STATE"/}" ;; esac
+        case "$p" in
+            /*) echo "abs $p" ;;
+            runtimes/*|renderers/*)
+                kind="${p%%/*}"; rest="${p#*/}"; id="${rest%%/*}"; rest="${rest#*/}"; ver="${rest%%/*}"
+                if [ "$mode" = share ]; then echo "store $kind/$id"; else echo "store $kind/$id/$ver"; fi ;;
+        esac
+    done | sort -u
+}
 
 cmd_run() {
-    local app="" secs=30 out="$REPO/target/vm-test" name="" quar=1 strict=0 keep=0 waits=1800 state=0
+    local app="" secs=30 out="$REPO/target/vm-test" name="" quar=1 strict=0 keep=0 waits=1800
+    local state=auto rtmode=share kill_sig="" kill_wait=15 grep_re="" hook_osa="" clicks=()
     while [ $# -gt 0 ]; do
         case "$1" in
             --secs) secs="$2"; shift 2 ;;
@@ -255,14 +325,24 @@ cmd_run() {
             --keep) keep=1; shift ;;
             --wait-secs) waits="$2"; shift 2 ;;
             --state) state=1; shift ;;
+            --no-state) state=0; shift ;;
+            --runtimes) rtmode="$2"; shift 2 ;;
+            --kill) kill_sig="$(printf '%s' "$2" | tr '[:lower:]' '[:upper:]')"; shift 2 ;;
+            --kill-wait) kill_wait="$2"; shift 2 ;;
+            --grep) grep_re="$2"; shift 2 ;;
+            --click) clicks+=("$2"); shift 2 ;;
+            --osascript) hook_osa="$2"; shift 2 ;;
             -*) die "unknown option $1" 2 ;;
             *) app="$1"; shift ;;
         esac
     done
     [ -n "$app" ] && [ -d "$app" ] && [[ "$app" == *.app ]] || die "run needs an existing X.app" 2
+    case "$rtmode" in share|copy) ;; *) die "--runtimes share|copy" 2 ;; esac
+    case "$kill_sig" in ""|TERM|KILL|INT|HUP) ;; *) die "--kill term|kill|int|hup" 2 ;; esac
+    [ -z "$hook_osa" ] || [ -f "$hook_osa" ] || die "--osascript: no file $hook_osa" 2
     app="$(cd "$app" && pwd)"
     local base; base="$(basename "$app")"
-    local slug; slug="$(printf '%s' "${base%.app}" | tr -cs 'A-Za-z0-9' '-' | tr 'A-Z' 'a-z' | sed 's/^-//;s/-$//' | cut -c1-24)"
+    local slug; slug="$(printf '%s' "${base%.app}" | tr -cs 'A-Za-z0-9' '-' | tr '[:upper:]' '[:lower:]' | sed 's/^-//;s/-$//' | cut -c1-24)"
     local ts; ts="$(date +%Y%m%d-%H%M%S)"
     name="${name:-$PREFIX_CLONE$slug-$ts}"
     local res="$out/$slug-$ts"
@@ -270,29 +350,56 @@ cmd_run() {
     vm_exists "$GOLDEN" || die "no $GOLDEN image; run: scripts/vm-test.sh golden"
     [ -f "$KEY" ] || die "no ssh key at $KEY; run: scripts/vm-test.sh golden"
 
+    # v2 bundle (design 16): only a launcher plus gogo-launch.toml. A v1
+    # self-contained bundle carries its engine in Resources/wine.
+    local toml="$app/Contents/Resources/gogo-launch.toml" model=v1 gogid="" runtime=""
+    if [ -f "$toml" ] && [ ! -d "$app/Contents/Resources/wine" ]; then
+        model=v2; gogid="$(toml_str "$toml" gogid)"; runtime="$(toml_str "$toml" runtime)"
+    fi
+    [ "$state" = auto ] && { [ "$model" = v2 ] && state=1 || state=0; }
+
     # Everything below writes into the result dir; summary assembled at the end.
     local status="infra_error" exit_code=3 ip="" gk_block=false gatekeeper="not_quarantined" spctl_rc="" cs_rc=""
-    local launched=false alive=false windows="[]" note=""
+    local launched=false alive=false windows="[]" note="" cs_after_rc="" modified="null" gk_left="null"
+    local units=() teardown="null"
+    # shellcheck disable=SC2329 # invoked by the EXIT trap
     finish() {
         local procs="[]"
         [ -f "$res/processes.txt" ] && procs="$(jq -R -s 'split("\n") | map(select(length>0) | sub("^ +"; ""))' "$res/processes.txt")"
+        lines() { if [ -s "$1" ]; then jq -R -s 'split("\n") | map(select(length>0))' "$1"; else echo '[]'; fi; }
         jq -n --arg status "$status" --argjson exit "$exit_code" --arg app "$app" \
+              --arg model "$model" --arg gogid "$gogid" --arg runtime "$runtime" \
               --arg vm "$name" --arg ip "$ip" --argjson secs "$secs" \
               --argjson quarantined "$([ "$quar" = 1 ] && echo true || echo false)" \
               --argjson gatekeeper_blocked "$gk_block" --arg gatekeeper "$gatekeeper" \
-              --arg spctl_rc "$spctl_rc" --arg codesign_rc "$cs_rc" \
+              --argjson gk_left "$gk_left" \
+              --arg spctl_rc "$spctl_rc" --arg codesign_rc "$cs_rc" --arg cs_after "$cs_after_rc" \
+              --argjson modified "$modified" \
               --argjson launched "$launched" --argjson running "$alive" \
               --argjson windows "$windows" --argjson processes "$procs" \
+              --argjson missing "$(lines "$res/missing-libs.txt")" \
+              --argjson outside "$(lines "$res/writes-outside-gogo.txt")" \
+              --argjson grep "$(lines "$res/log-grep.txt")" \
+              --argjson units "$(printf '%s\n' ${units[@]+"${units[@]}"} | jq -R -s 'split("\n") | map(select(length>0))')" \
+              --arg rtmode "$([ "$state" = 1 ] && echo "$rtmode")" \
+              --argjson teardown "$teardown" \
               --arg note "$note" --arg dir "$res" \
               --arg screenshot "$([ -s "$res/screenshot.png" ] && echo "$res/screenshot.png")" \
-              '{status:$status, exit_code:$exit, app:$app, vm:$vm, ip:$ip, secs:$secs,
+              '{status:$status, exit_code:$exit, app:$app, model:$model, gogid:$gogid, runtime:$runtime,
+                vm:$vm, ip:$ip, secs:$secs,
+                state:{units:$units, runtimes:$rtmode},
                 quarantined:$quarantined, gatekeeper:$gatekeeper, gatekeeper_blocked:$gatekeeper_blocked,
-                codesign_verify_rc:$codesign_rc, spctl_rc:$spctl_rc,
+                gatekeeper_dialog_left:$gk_left,
+                codesign_verify_rc:$codesign_rc, codesign_strict_rc:$cs_after, spctl_rc:$spctl_rc,
+                bundle_modified:$modified,
                 gatekeeper_screenshot:(if $gatekeeper_blocked then $dir+"/gatekeeper.png" else "" end),
                 launched:$launched, running_after_secs:$running, windows:$windows,
-                processes:$processes, note:$note, results_dir:$dir, screenshot:$screenshot,
+                processes:$processes, missing_libs:$missing, writes_outside_gogo:$outside,
+                log_grep:$grep, teardown:$teardown,
+                note:$note, results_dir:$dir, screenshot:$screenshot,
                 files:{codesign:($dir+"/codesign.txt"), spctl:($dir+"/spctl.txt"),
                        stdout:($dir+"/wine-stdout.log"), stderr:($dir+"/wine-stderr.log"),
+                       launcher_logs:($dir+"/launcher-logs"),
                        prefix_logs:($dir+"/prefix-logs"), system_log:($dir+"/system.log"),
                        vm_log:($dir+"/tart-run.log")}}' >"$res/summary.json"
         if [ "$keep" = 1 ]; then "$TART" stop "$name" --timeout 20 >/dev/null 2>&1 || true
@@ -304,15 +411,35 @@ cmd_run() {
     trap finish EXIT
     trap 'note="interrupted"; exit 3' INT TERM
 
+    # Plan the state seeding before boot: read-only store shares are
+    # virtiofs mounts, given to `tart run`. Sharing (the default) copies no
+    # runtime at all; --runtimes copy streams it with tar like the rest.
+    local dirs=(--dir="out:$res") u p i=0 shares=()
+    if [ "$state" = 1 ]; then
+        [ "$model" = v2 ] || { note="--state: $base has no gogo-launch.toml (not a v2 bundle)"; exit 3; }
+        while IFS= read -r u; do units+=("$u"); done < <(state_units "$app" "$rtmode") \
+            || true
+        [ "${#units[@]}" -gt 0 ] || { note="--state: no $HOST_STATE/games/$gogid for $base"; exit 3; }
+        for u in "${units[@]}"; do
+            case "$u" in
+                "store "*) [ "$rtmode" = share ] || continue; p="$HOST_STATE/${u#store }" ;;
+                "abs "*) [ "$rtmode" = share ] || continue; p="${u#abs }" ;;
+                *) continue ;;
+            esac
+            [ -d "$p" ] || { note="--state: $p missing on the host"; exit 3; }
+            dirs+=(--dir="rt$i:$p:ro"); shares+=("rt$i ${u#* }"); i=$((i + 1))
+        done
+    fi
+
     log "clone $GOLDEN → $name"
     "$TART" clone "$GOLDEN" "$name" || { note="tart clone failed"; exit 3; }
     acquire_slot "$waits" || { note="no free VM slot after ${waits}s"; exit 3; }
-    ip="$(start_vm "$name" "$res/tart-run.log" --dir="out:$res")" \
+    ip="$(start_vm "$name" "$res/tart-run.log" "${dirs[@]}")" \
         || { note="VM did not boot / no IP"; exit 3; }
     wait_ssh "$ip" 180 || { note="ssh to $ip failed"; exit 3; }
     log "vm $name up at $ip; copying $base"
 
-    local G="/Volumes/My Shared Files"
+    local G="$SHARES"
     local dst="/Users/admin/Applications/$base"
     # tar over ssh, not a virtiofs share + ditto: Wine prefixes carry absolute
     # symlinks (dosdevices/z: -> /, drive_c/users/<you>/Desktop -> ~/Desktop)
@@ -320,23 +447,38 @@ cmd_run() {
     # zip/dmg download would, and lands on a local volume Wine can write to.
     tar -C "$(dirname "$app")" -cf - "$base" | vssh "$ip" "mkdir -p ~/Applications && tar -C ~/Applications -xf -" \
         || { note="copy into VM failed"; exit 3; }
-    # v2 bundles hold only a launcher: seed games/<gogid>, compat/<gogid>.toml
-    # and the runtime state.toml references (store-relative paths, so they
-    # land under the guest user's own Application Support).
-    local gogid=""
     if [ "$state" = 1 ]; then
-        local host_state="$HOME/Library/Application Support/gogo"
-        gogid="$(sed -n 's/^gogid *= *"\([0-9]*\)"/\1/p' "$app/Contents/Resources/gogo-launch.toml")"
-        [ -n "$gogid" ] && [ -d "$host_state/games/$gogid" ] || { note="--state: no games/<gogid> for $base"; exit 3; }
-        local rt; rt="$(sed -n 's/^runtime *= *"\(.*\)"/\1/p' "$host_state/games/$gogid/state.toml")"
-        local seed=("games/$gogid")
-        [ -f "$host_state/compat/$gogid.toml" ] && seed+=("compat/$gogid.toml")
-        case "$rt" in path:*|"") log "runtime '$rt' is outside the store; not copied" ;; *) seed+=("runtimes/$rt") ;; esac
-        log "seeding guest state: ${seed[*]}"
-        tar -C "$host_state" -cf - "${seed[@]}" \
-            | vssh "$ip" "mkdir -p ~/Library/Application\\ Support/gogo && tar -C ~/Library/Application\\ Support/gogo -xf -" \
+        # State-dir paths in launch.conf are relative (design 16 §1.2), so the
+        # same layout under the guest's admin user resolves unchanged.
+        local copies=() abs=() s
+        for u in "${units[@]}"; do
+            case "$u" in
+                "copy "*) copies+=("${u#copy }") ;;
+                "store "*) [ "$rtmode" = copy ] && copies+=("${u#store }") ;;
+                "abs "*) [ "$rtmode" = copy ] && abs+=("${u#abs /}") ;;
+            esac
+        done
+        log "seeding guest state ($rtmode runtimes): ${units[*]}"
+        tar -C "$HOST_STATE" -cf - "${copies[@]}" \
+            | vssh "$ip" "mkdir -p \"$GUEST_STATE\" && tar -C \"$GUEST_STATE\" -xf -" \
             || { note="state copy into VM failed"; exit 3; }
+        if [ "${#abs[@]}" -gt 0 ]; then
+            tar -C / -cf - "${abs[@]}" | vssh "$ip" "sudo tar -C / -xf -" \
+                || { note="runtime copy into VM failed"; exit 3; }
+        fi
+        for s in ${shares[@]+"${shares[@]}"}; do
+            local tag="${s%% *}" tgt="${s#* }" sudo=""
+            case "$tgt" in /*) sudo=sudo ;; *) tgt="$GUEST_STATE/$tgt" ;; esac
+            vssh "$ip" "for _ in \$(seq 30); do [ -d \"$G/$tag\" ] && break; sleep 1; done
+                        $sudo mkdir -p \"\$(dirname \"$tgt\")\" && $sudo ln -sfn \"$G/$tag\" \"$tgt\" && ls \"$tgt/\" >/dev/null" \
+                || { note="store share $tag → $tgt not mounted in the guest"; exit 3; }
+        done
     fi
+
+    # A stat listing of Contents/ (path size mtime mode): equal before and
+    # after the run ⇔ nothing wrote into the signed bundle (#53).
+    bundle_hash() { vssh "$ip" "cd \"$dst\" && find Contents -exec stat -f '%N %z %m %p' {} + | LC_ALL=C sort | shasum -a 256 | cut -c1-64"; }
+    local h0; h0="$(bundle_hash 2>/dev/null || true)"
     if [ "$quar" = 1 ]; then
         vssh "$ip" "xattr -w com.apple.quarantine \"0081;\$(printf %x \$(date +%s));Safari;\" \"$dst\""
     fi
@@ -348,7 +490,7 @@ cmd_run() {
     # Launch through LaunchServices (what a double-click does). `open --stdout`
     # hands the files straight to the launcher (= Wine's stdout/stderr) but
     # itself stays attached for the app's lifetime, so detach it.
-    local since; since="$(vssh "$ip" 'date "+%Y-%m-%d %H:%M:%S"')"
+    local since; since="$(vssh "$ip" 'date "+%Y-%m-%d %H:%M:%S"; mkdir -p ~/gogo-test; touch ~/gogo-test/.t0' | head -1)"
     launch() {
         vssh "$ip" "nohup open --stdout \"$G/out/wine-stdout.log\" --stderr \"$G/out/wine-stderr.log\" \"$dst\" >/dev/null 2>&1 &" \
             >>"$res/open.txt" 2>&1
@@ -361,6 +503,7 @@ cmd_run() {
     # Live = present and not stopped (T): macOS holds a quarantined app's first
     # launch SIGSTOPped behind the "downloaded from the Internet" dialog.
     n_live() { game_procs | awk '$2 !~ /T/' | grep -c . || true; }
+    all_windows() { vssh "$ip" "osascript -l JavaScript -e '$GUEST_PROBE_ALL'" 2>/dev/null || echo '[]'; }
     launch || true
     sleep 8
     if [ "$quar" = 1 ]; then
@@ -372,20 +515,37 @@ cmd_run() {
             gk_block=true
             log "quarantined launch: $gatekeeper (Gatekeeper dialog); screenshot → gatekeeper.png"
             vssh "$ip" "screencapture -x \"$G/out/gatekeeper.png\"" >/dev/null 2>&1 || true
+            all_windows >"$res/gatekeeper-windows.json"
             vssh "$ip" "/usr/bin/log show --style compact --start '$since' --predicate 'process == \"syspolicyd\" OR process == \"XprotectService\" OR process == \"CoreServicesUIAgent\"'" >"$res/gatekeeper.log" 2>&1 || true
             if [ "$strict" = 1 ]; then
                 status="gatekeeper_$gatekeeper"; exit_code=1; note="strict: stopped at the Gatekeeper dialog"
                 exit 1
             fi
-            # Equivalent of the user clicking Open / "Open Anyway": drop the
-            # stopped first launch + dialog, strip quarantine, launch again.
-            vssh "$ip" "pkill -9 -f AppTranslocation; killall CoreServicesUIAgent; xattr -dr com.apple.quarantine \"$dst\"" >/dev/null 2>&1 || true
+            # Equivalent of the user clicking Done, then "Open Anyway": close
+            # the dialog, drop the stopped first launch, strip quarantine and
+            # launch again. GK_DISMISS is defined below.
+            vssh "$ip" "osascript -e '$GK_DISMISS'" >"$res/gatekeeper-dismiss.txt" 2>&1 || true
+            vssh "$ip" "pkill -9 -f AppTranslocation; xattr -dr com.apple.quarantine \"$dst\"" >/dev/null 2>&1 || true
             sleep 2
             launch || true
             sleep 5
         fi
     fi
     [ "$(n_live)" -gt 0 ] && launched=true
+    # First-run dialogs the game itself shows (docs/19 §8.2 Q8).
+    if [ "${#clicks[@]}" -gt 0 ] || [ -n "$hook_osa" ]; then
+        sleep 5
+        local c
+        for c in ${clicks[@]+"${clicks[@]}"}; do
+            log "click at $c"
+            vssh "$ip" "osascript -e 'tell application \"System Events\" to click at {$c}'" >>"$res/hooks.txt" 2>&1 || true
+            sleep 2
+        done
+        if [ -n "$hook_osa" ]; then
+            log "osascript hook $hook_osa"
+            vssh "$ip" "osascript -" <"$hook_osa" >>"$res/hooks.txt" 2>&1 || true
+        fi
+    fi
     log "running for ${secs}s…"
     sleep "$secs"
 
@@ -393,11 +553,35 @@ cmd_run() {
     [ "$(n_live)" -gt 0 ] && alive=true
     windows="$(vssh "$ip" "osascript -l JavaScript -e '$GUEST_PROBE'" 2>/dev/null || echo '[]')"
     echo "$windows" | jq -e . >/dev/null 2>&1 || windows="[]"
+    all_windows >"$res/windows-all.json"
+    if [ "$gk_block" = true ]; then
+        gk_left="$(jq 'any(.[]; .owner == "CoreServicesUIAgent")' "$res/windows-all.json" 2>/dev/null || echo null)"
+    fi
     vssh "$ip" "screencapture -x \"$G/out/screenshot.png\"" >"$res/screencapture.txt" 2>&1 || true
+
+    # #42: kill the launcher like a force-quit / supervisor would, then check
+    # nothing Wine is left. The guest runs only this game, so any wine*
+    # process is this prefix's.
+    if [ -n "$kill_sig" ]; then
+        local lpid left
+        lpid="$(vssh "$ip" "ps -axo pid=,ppid=,command= | awk -v b='/$base/Contents/MacOS/' 'index(\$0, b) && \$2 == 1 { print \$1; exit }'" 2>/dev/null || true)"
+        log "teardown check: SIG$kill_sig → launcher ${lpid:-?}, then ${kill_wait}s"
+        if [ -n "$lpid" ]; then
+            vssh "$ip" "kill -$kill_sig $lpid" || true
+            sleep "$kill_wait"
+        fi
+        game_procs >"$res/processes-after-kill.txt"
+        left="$(jq -R -s 'split("\n") | map(select(length>0) | sub("^ +"; ""))' "$res/processes-after-kill.txt")"
+        teardown="$(jq -n --arg sig "$kill_sig" --arg pid "$lpid" --argjson wait "$kill_wait" --argjson left "$left" \
+            '{signal:$sig, launcher_pid:$pid, wait_secs:$wait, leftovers:$left,
+              ok:(($pid | length) > 0 and ($left | length) == 0)}')"
+    fi
 
     # Wine-side logs: anything *.log/*.txt-ish the game or Wine left in the prefix.
     mkdir -p "$res/prefix-logs"
-    vssh "$ip" "cd \"$dst/Contents/Resources\" 2>/dev/null && find . -path ./wine -prune -o -type f \\( -iname '*.log' -o -iname '*.err' -o -iname 'ddraw.ini' -o -iname 'launch.conf' \\) -size -5M -print0 | xargs -0 tar cf - 2>/dev/null" \
+    local pfx="$dst/Contents/Resources"
+    [ "$model" = v2 ] && pfx="$GUEST_STATE/games/$gogid"
+    vssh "$ip" "cd \"$pfx\" 2>/dev/null && find . -path ./wine -prune -o -type f \\( -iname '*.log' -o -iname '*.err' -o -iname 'ddraw.ini' -o -iname 'launch.conf' \\) -size -5M -print0 | xargs -0 tar cf - 2>/dev/null" \
         | tar -C "$res/prefix-logs" -xf - 2>/dev/null || true
     if [ -n "$gogid" ]; then
         mkdir -p "$res/launcher-logs"
@@ -409,13 +593,137 @@ cmd_run() {
         >"$res/crash-reports.txt" 2>/dev/null || true
     vssh "$ip" "sw_vers; uname -m; arch -x86_64 /usr/bin/true && echo rosetta=yes || echo rosetta=no; system_profiler SPDisplaysDataType 2>/dev/null | sed -n 1,20p" >"$res/guest-info.txt" 2>&1 || true
 
+    # Self-containment and seal evidence (#68).
+    local wlogs=("$res/wine-stderr.log" "$res/wine-stdout.log")
+    [ -f "$res/launcher-logs/wine.log" ] && wlogs+=("$res/launcher-logs/wine.log")
+    cat "${wlogs[@]}" 2>/dev/null | grep -E -i 'cannot find|Library not loaded|image not found' \
+        | LC_ALL=C sort -u | head -20 >"$res/missing-libs.txt" || true
+    if [ -n "$grep_re" ]; then
+        cat "${wlogs[@]}" "$res"/launcher-logs/launch.log 2>/dev/null | grep -E -- "$grep_re" \
+            | LC_ALL=C sort -u | head -20 >"$res/log-grep.txt" || true
+    fi
+    local h1; h1="$(bundle_hash 2>/dev/null || true)"
+    if [ -n "$h0" ] && [ -n "$h1" ]; then
+        [ "$h0" = "$h1" ] && modified=false || modified=true
+    fi
+    set +e
+    vssh "$ip" "codesign --verify --deep --strict --verbose=2 \"$dst\"" >"$res/codesign-after.txt" 2>&1; cs_after_rc=$?
+    set -e
+    # New files in the guest home outside gogo's own dirs: saves or configs a
+    # game wrote into the real ~ (design 16 decision 4).
+    vssh "$ip" "find ~ -xdev -newer ~/gogo-test/.t0 -type f 2>/dev/null | sed \"s|^\$HOME/||\"" 2>/dev/null \
+        | grep -i -E "$OUTSIDE_WATCH" | grep -v -E "$OUTSIDE_SKIP" | head -50 >"$res/writes-outside-gogo.txt" || true
+
     local nwin; nwin="$(echo "$windows" | jq length)"
     if [ "$alive" = true ] && [ "$nwin" -gt 0 ]; then status="ok"; exit_code=0
     elif [ "$alive" = true ]; then status="running_no_window"; exit_code=1
     elif [ "$launched" = true ]; then status="exited"; exit_code=1
     else status="did_not_launch"; exit_code=1; fi
+    if [ "$status" = ok ] && [ "$teardown" != null ] && [ "$(jq .ok <<<"$teardown")" != true ]; then
+        status="teardown_leftovers"; exit_code=1
+    fi
     exit "$exit_code"
 }
+
+# Click the Gatekeeper "could not verify" dialog away (Done / OK), the way a
+# user would, so it doesn't stay on top of the relaunched game.
+GK_DISMISS='tell application "System Events"
+  repeat with p in (every process whose name is "CoreServicesUIAgent" or name is "UserNotificationCenter")
+    repeat with w in (every window of p)
+      repeat with b in {"Done", "OK", "Cancel"}
+        if exists button b of w then
+          click button b of w
+          exit repeat
+        end if
+      end repeat
+    end repeat
+  end repeat
+end tell'
+
+# Where a game escaping its prefix would write (relative to ~): the user's
+# content folders, home dotfiles, and anything named after Wine or GOG.
+# macOS's own churn under ~/Library and the media libraries doesn't match.
+OUTSIDE_WATCH='^(Desktop|Documents|Downloads|Saved Games|My Games)/|^\.[^/]+$|^\.(wine|local|config|cache)/|wine|gog|\.exe'
+OUTSIDE_SKIP='^(gogo-test/|Applications/|Library/(Application Support/gogo|Logs/gogo|Caches)/|\.(zsh|bash)_|\.ssh/|\.CFUserTextEncoding$)'
+
+# ----------------------------------------------------------------- smoke ----
+# Run the per-layer cases in a manifest (default scripts/vm-smoke.txt), one VM
+# run each, and judge each summary with the case's jq check. Prints a table and
+# writes smoke.json; exit 0 = all pass, 1 = a case failed, 3 = infra.
+cmd_smoke() {
+    local manifest="$REPO/scripts/vm-smoke.txt" out="$REPO/target/vm-test" only="" bundles
+    bundles="${GOGO_VM_BUNDLES:-$REPO/target/v2}"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --bundles) bundles="$2"; shift 2 ;;
+            --out) out="$2"; shift 2 ;;
+            --only) only="$2"; shift 2 ;;
+            -*) die "unknown option $1" 2 ;;
+            *) manifest="$1"; shift ;;
+        esac
+    done
+    [ -f "$manifest" ] || die "no manifest $manifest" 2
+    local dir; dir="$out/smoke-$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$dir"
+    local results="$dir/results.jsonl" case layer bundle opts check proves
+    : >"$results"
+    while IFS='|' read -r case layer bundle opts check proves; do
+        case="$(echo "$case" | xargs)"
+        case "$case" in ""|\#*) continue ;; esac
+        [ -z "$only" ] || [[ ",$only," == *",$case,"* ]] || continue
+        layer="$(echo "$layer" | xargs)"; bundle="$(echo "$bundle" | xargs)"
+        check="$(echo "$check" | sed 's/^ *//;s/ *$//')"; proves="$(echo "$proves" | sed 's/^ *//;s/ *$//')"
+        local verdict summary="" rc=0 sj="{}"
+        if [ "$bundle" = - ]; then
+            verdict="todo"
+        elif [ ! -d "$bundles/$bundle" ]; then
+            verdict="missing"; log "$case: no bundle $bundles/$bundle"
+        else
+            log "case $case ($layer): $bundle $opts"
+            # shellcheck disable=SC2086 # opts is a word list from the manifest
+            summary="$(cmd_run_sub "$bundles/$bundle" --out "$dir/$case" $opts </dev/null | tail -1)" || rc=$?
+            if [ -f "$summary" ]; then
+                sj="$(cat "$summary")"
+                if [ "$rc" = 3 ]; then verdict="infra"
+                elif jq -e "$check" "$summary" >/dev/null 2>&1; then verdict="pass"
+                else verdict="fail"; fi
+            else
+                verdict="infra"
+            fi
+        fi
+        jq -n -c --arg case "$case" --arg layer "$layer" --arg bundle "$bundle" --arg opts "$opts" \
+            --arg check "$check" --arg proves "$proves" --arg verdict "$verdict" --arg summary "$summary" \
+            --argjson s "$sj" \
+            '{case:$case, layer:$layer, bundle:$bundle, opts:$opts, check:$check, proves:$proves,
+              verdict:$verdict, summary:$summary, status:($s.status // null),
+              gatekeeper:($s.gatekeeper // null), runtime:($s.runtime // null),
+              missing_libs:(($s.missing_libs // []) | length), teardown_ok:($s.teardown.ok // null)}' >>"$results"
+    done <"$manifest"
+    jq -s '{cases: ., pass: (map(select(.verdict == "pass")) | length),
+            fail: (map(select(.verdict == "fail" or .verdict == "missing")) | length),
+            infra: (map(select(.verdict == "infra")) | length)}' "$results" >"$dir/smoke.json"
+    # Table (markdown, ready for a PR) and a ready-to-paste compat line.
+    {
+        echo "| case | layer | verdict | status | gatekeeper | missing libs | teardown |"
+        echo "|---|---|---|---|---|---|---|"
+        jq -r '.cases[] | "| \(.case) | \(.layer) | **\(.verdict)** | \(.status // "-") | \(.gatekeeper // "-") | \(.missing_libs) | \(.teardown_ok // "-") |"' "$dir/smoke.json"
+    } | tee "$dir/table.md"
+    local first host
+    first="$(jq -r '[.cases[] | select(.summary != "") | .summary][0] // ""' "$dir/smoke.json")"
+    host="vm/macos-$( [ -n "$first" ] && sed -n 's/^ProductVersion:[[:space:]]*//p' "$(dirname "$first")/guest-info.txt" 2>/dev/null)"
+    jq -r --arg host "$host" --arg date "$(date +%Y-%m-%d)" \
+        '.cases[] | select(.verdict == "pass" and .runtime != null and .runtime != "") |
+         "# \(.case): tested = [{ runtime = \"\(.runtime)\", host = \"\($host)\", date = \($date) }]"' \
+        "$dir/smoke.json" | sort -u
+    echo "$dir/smoke.json"
+    local f i
+    f="$(jq '.fail' "$dir/smoke.json")"; i="$(jq '.infra' "$dir/smoke.json")"
+    [ "$f" -gt 0 ] && exit 1
+    [ "$i" -gt 0 ] && exit 3
+    exit 0
+}
+# cmd_run exits via its EXIT trap; give each case its own process.
+cmd_run_sub() { "$0" run "$@"; }
 
 # ----------------------------------------------------------------- shell ----
 cmd_shell() {
@@ -450,8 +758,9 @@ cmd_status() {
 case "${1:-}" in
     golden) shift; cmd_golden "$@" ;;
     run) shift; cmd_run "$@" ;;
+    smoke|matrix) shift; cmd_smoke "$@" ;;
     shell) shift; cmd_shell "$@" ;;
     cleanup) cmd_cleanup ;;
     status) cmd_status ;;
-    *) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+    *) sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
