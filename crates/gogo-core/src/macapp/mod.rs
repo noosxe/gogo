@@ -17,6 +17,7 @@ use std::process::Command;
 pub mod catalog;
 pub mod ddraw;
 pub mod lutris;
+pub mod pe;
 pub mod prompt;
 pub mod runtime;
 pub mod store;

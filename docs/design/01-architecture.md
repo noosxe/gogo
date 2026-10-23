@@ -171,6 +171,7 @@ re-verify at implementation time.
 | Config edit | toml_edit | ~0.23 | comment-preserving `config set` round-trip (gogo-cli — D7) |
 | Tests (dev) | wiremock · proptest · tempfile | re-verify at impl | mock GOG (08 §3); planner properties (08 §4); temp dirs |
 | Logging | tracing, tracing-subscriber | ~0.1 / ~0.3 | |
+| PE parsing | object | 0.40 | `read_core` + `pe` only: import / delay-load tables for the mac-app PE scan (#63, docs/19 §6.2) |
 | GOG | gog-warp | git rev-pin | auth/token/user data only (library list is ours — review A1) |
 
 **Not used in v1**: async-compression (depot-only), crossterm, rpassword, `ctrlc`

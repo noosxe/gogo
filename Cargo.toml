@@ -51,6 +51,8 @@ url = "2.5.8"
 # RFC 3339 timestamps in InstallRecord (already in-tree via gog-warp).
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+# PE import scan for mac-app renderer selection (#63); read-only PE, no write/compression.
+object = { version = "0.40", default-features = false, features = ["read_core", "pe", "std"] }
 
 # — errors / secrets —
 thiserror = "2.0.21"

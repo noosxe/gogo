@@ -212,8 +212,72 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
         Command::Runtimes(args) => runtimes_cmd(args).await,
         Command::Recipes(args) => recipes_cmd(args),
         Command::Shim { tool, args } => Ok(gogo_shims::run_tool(&tool, &args)),
+        Command::PeScan { dir, exe, json } => pe_scan(&dir, exe.as_deref(), json),
         Command::Completions { shell } => completions(shell),
     }
+}
+
+fn pe_scan(
+    dir: &std::path::Path,
+    exe: Option<&std::path::Path>,
+    json: bool,
+) -> Result<i32, AppError> {
+    use gogo::macapp::pe;
+
+    let scan = match exe {
+        Some(exe) => pe::scan_exe(dir, exe),
+        None => pe::scan(dir),
+    };
+    let scan = match scan {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return Ok(cli::exit::FAILED);
+        }
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&scan).unwrap());
+        return Ok(cli::exit::OK);
+    }
+    let list = |v: Vec<String>| {
+        if v.is_empty() {
+            "—".to_string()
+        } else {
+            v.join(" ")
+        }
+    };
+    println!("main exe   {} ({:?})", scan.main_exe, scan.main_exe_source);
+    println!("bitness    {:?}", scan.bitness);
+    println!(
+        "engine     {}",
+        scan.engine.map_or("—".into(), |e| format!("{e:?}"))
+    );
+    println!(
+        "graphics   {:?} (from {:?})",
+        scan.graphics, scan.graphics_source
+    );
+    println!(
+        "imports    {}",
+        list(
+            scan.graphics_imports
+                .iter()
+                .map(|g| format!("{g:?}"))
+                .collect()
+        )
+    );
+    println!(
+        "runtime    {}",
+        list(scan.runtime_loaded.iter().cloned().collect())
+    );
+    println!(
+        "helpers    {}",
+        list(scan.helpers.iter().cloned().collect())
+    );
+    println!(
+        "overrides  {}",
+        list(scan.local_overrides.iter().cloned().collect())
+    );
+    Ok(cli::exit::OK)
 }
 
 // — login (A6: config-decided store, probe before the browser, no fallback) —
