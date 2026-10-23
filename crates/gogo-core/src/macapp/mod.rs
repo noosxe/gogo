@@ -24,6 +24,7 @@ pub mod runtime;
 pub mod setup;
 pub mod store;
 pub mod tools;
+pub mod verbs;
 
 use std::path::{Path, PathBuf};
 
@@ -71,6 +72,9 @@ pub struct MacAppPlan {
     pub gogid: Option<String>,
     /// `[gogo] path` for the launcher (decision 2).
     pub gogo_path: PathBuf,
+    /// L1 winetricks verbs from the tree's imports (#72). Depot lane only:
+    /// the installer lane scans once the install is done.
+    pub auto_verbs: Option<Vec<verbs::AutoVerb>>,
 }
 
 /// Conversion inputs (CLI flags, design 10 §1).
@@ -898,7 +902,13 @@ pub fn plan(
             (None, None) => unreachable!("asserted above"),
         };
 
+    let auto_verbs = match (&opts.game_tree, opts.portable) {
+        (Some(tree), false) => Some(auto_verbs(tree, emit)),
+        _ => None,
+    };
+
     Ok(MacAppPlan {
+        auto_verbs,
         bundle_path: bundle.root.clone(),
         display,
         slug,
@@ -921,6 +931,20 @@ pub fn plan(
             .or_else(|| std::env::current_exe().ok())
             .unwrap_or_else(|| PathBuf::from("gogo")),
     })
+}
+
+/// L1 verbs for a game tree; a tree the PE scan can't read gets none (with
+/// a warning), since verbs are an improvement, not a requirement.
+fn auto_verbs(tree: &Path, emit: &mut dyn FnMut(&ProgressEvent)) -> Vec<verbs::AutoVerb> {
+    match pe::scan(tree) {
+        Ok(scan) => verbs::for_scan(&scan),
+        Err(e) => {
+            emit(&ProgressEvent::Warn {
+                message: format!("import scan failed ({e}); no automatic winetricks verbs"),
+            });
+            Vec::new()
+        }
+    }
 }
 
 /// Write the `HKLM\Software\GOG.com\Games\<id>` key (32-bit view) that GOG
@@ -1421,7 +1445,13 @@ fn finish_v2(
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
         dll_overrides,
-        verbs: Vec::new(),
+        // L1 only; setup layers L3 and L4 over it (verbs::effective).
+        verbs: verbs::names(
+            &plan
+                .auto_verbs
+                .clone()
+                .unwrap_or_else(|| auto_verbs(install_dir, emit)),
+        ),
         gogo: launch::GogoRef {
             path: plan.gogo_path.clone(),
             state: crate::state::state_dir(),

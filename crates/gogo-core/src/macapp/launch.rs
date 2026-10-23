@@ -272,6 +272,10 @@ pub struct GameState {
     pub bundle: PathBuf,
     pub runtime: String,
     pub renderer: String,
+    /// The verbs the last setup applied (#72): winetricks runs again only
+    /// when these change or the prefix is new.
+    #[serde(default)]
+    pub verbs: Vec<String>,
     pub stamp: String,
     pub gogo_version: String,
 }

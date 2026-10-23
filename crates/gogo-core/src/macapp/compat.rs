@@ -23,7 +23,8 @@ pub enum Layer {
     /// L0: the default runtime.
     #[serde(rename = "L0")]
     Default,
-    /// L1: renderer picked from the game's PE imports (#63).
+    /// L1: picked from the game's PE imports (#63): renderer, and the
+    /// winetricks verbs for its DirectX helper DLLs (#72).
     #[serde(rename = "L1")]
     Auto,
     /// L2: GOG-native fixes (support overlay, registry, `goggame-*.info`).

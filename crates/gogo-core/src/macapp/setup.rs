@@ -21,7 +21,7 @@ use super::launch::{
     stamp, state_rel, to_launch_conf, wineserver_of, write_atomic,
 };
 use super::runtime::{Runtime, wine_cmd};
-use super::{catalog, lutris, store, tools};
+use super::{catalog, lutris, store, tools, verbs};
 
 /// What [`setup`] did.
 #[derive(Debug, Clone)]
@@ -80,7 +80,7 @@ pub fn setup(gogid: &str, bundle: Option<&Path>) -> Result<SetupOutcome, MacAppE
         .iter()
         .map(|w| format!("{}: unknown key {w}", l4_path.display()))
         .collect();
-    let eff = baked.with_override(&l4.entry);
+    let mut eff = baked.with_override(&l4.entry);
     let (rt, runtime_installed) = resolve_or_install(&eff.runtime)?;
 
     let prefix_created = !dirs.prefix.is_dir();
@@ -114,7 +114,15 @@ pub fn setup(gogid: &str, bundle: Option<&Path>) -> Result<SetupOutcome, MacAppE
         )
         .map_err(|e| MacAppError::Recipe(format!("registry {}: {e}", value.key)))?;
     }
-    if !eff.verbs.is_empty() {
+    // Verbs: the bundle's L1 list, then L3, then L4 (decision 5). winetricks
+    // runs only when the list changed since the last setup or the prefix is
+    // new; winetricks would skip installed verbs, but not for free.
+    eff.verbs = verbs::effective(&baked.verbs, &db.entry, &l4.entry).value;
+    let verbs_applied = !prefix_created
+        && prior
+            .as_ref()
+            .is_some_and(|s| s.verbs == eff.verbs && s.runtime == eff.runtime);
+    if !eff.verbs.is_empty() && !verbs_applied {
         run_verbs(&rt, &dirs.prefix, &eff.verbs, &mut warnings)?;
     }
     wait_quiet(&rt, &dirs.prefix);
@@ -143,6 +151,7 @@ pub fn setup(gogid: &str, bundle: Option<&Path>) -> Result<SetupOutcome, MacAppE
         bundle,
         runtime: eff.runtime.clone(),
         renderer: eff.renderer.clone(),
+        verbs: eff.verbs.clone(),
         stamp,
         gogo_version: env!("CARGO_PKG_VERSION").to_string(),
     };
@@ -317,11 +326,17 @@ fn run_verbs(
         #[cfg(unix)]
         std::os::unix::fs::symlink("/", &z)?;
     }
+    // winetricks is a /bin/sh script and calls wine through /usr/bin/env:
+    // SIP strips DYLD_* from both, so wine gets wrappers that set it
+    // themselves. WINE64 too: winetricks derives `${WINE}64`, which a wow64
+    // engine doesn't have.
+    let (wine, server) = tools::wine_wrappers(&rt.wine, &wineserver_of(rt))?;
     let mut cmd = wine_cmd(&wt, &rt.wine);
     cmd.arg("-q")
         .args(verbs)
-        .env("WINE", &rt.wine)
-        .env("WINESERVER", wineserver_of(rt))
+        .env("WINE", &wine)
+        .env("WINE64", &wine)
+        .env("WINESERVER", &server)
         .env("WINEPREFIX", prefix)
         .env("PATH", tools::path_with_shims()?);
     let status = installer::run_with_timeout(&mut cmd, Duration::from_secs(1800));
