@@ -325,8 +325,8 @@ selection or the runtime pin runs all four.
 | Case | Game (gogid) | Build (with the setup below) | Pass when |
 |---|---|---|---|
 | `neo-cab-dxmt` | Neo Cab (1669531175), Unity, 64-bit D3D11 | `"$G" mac-app 1669531175 --runtime winecx --renderer dxmt --out "$GOGO_HOME/apps/neo-cab" --yes` | `renderer` is `dxmt/…` and `runtime_dir` ends in `+dxmt-<rver>/engine`; `markers.feature_level` shows `D3D_FEATURE_LEVEL_11_1`; `metal_layer_failed` and `wined3d` are empty; `markers.unity` shows `Direct3D 11.0 [level 11.1]` and `Renderer: Apple M…`; the game draws correctly, with input and audio working |
-| `neo-cab-d3dmetal` | Neo Cab (1669531175) | `"$G" mac-app 1669531175 --runtime winecx --renderer d3dmetal --out "$GOGO_HOME/apps/neo-cab" --yes` (answer `y` to the D3DMetal prompt once) | `renderer` is `d3dmetal/…` on `+d3dmetal-<rver>`; `markers.unity` shows `Direct3D 11.0 [level 11.1]` and `Renderer: AMD Compatibility Mode` (what D3DMetal reports); `missing_libs` is empty and there's no `could not load` in `markers.unity`; the game draws, with input and audio working |
-| `rebel-galaxy-dxmt` | Rebel Galaxy (1435582019), OGRE, 32-bit D3D11 | `"$G" mac-app 1435582019 --runtime winecx --renderer dxmt --out "$GOGO_HOME/apps/rebel-galaxy" --yes` | `verbs` holds the L1 verbs (`d3dcompiler_43 d3dx11_43 d3dx9_43 xinput`); `markers.ogre` shows the D3D11 render system and no `OGRE EXCEPTION`; `markers.feature_level` is non-empty; the in-game image is right, not only the menu (docs/19 §8.2 Q7). Record the `class_linkage` count, since DXMT's `Class linkage not supported` warnings are part of Q7 |
+| `neo-cab-d3dmetal` | Neo Cab (1669531175) | `"$G" mac-app 1669531175 --runtime winecx --renderer d3dmetal --out "$GOGO_HOME/apps/neo-cab" --yes` (answer `y` to the D3DMetal prompt once) | `renderer` is `d3dmetal/…` on `+d3dmetal-<rver>`; `markers.unity` shows `Direct3D 11.0 [level 11.1]` and `Renderer: AMD Compatibility Mode` (what D3DMetal reports); `markers.d3dmetal` holds that line; `missing_libs` is empty and there's no `could not load` in `markers.unity`; the game draws, with input and audio working |
+| `rebel-galaxy-dxmt` | Rebel Galaxy (1435582019), OGRE, 32-bit D3D11 | `"$G" mac-app 1435582019 --runtime winecx --renderer dxmt --out "$GOGO_HOME/apps/rebel-galaxy" --yes` | `verbs` holds the L1 verbs (`d3dcompiler_43 d3dx11_43 d3dx9_43 xinput`); `markers.ogre` shows the D3D11 render system and no `OGRE EXCEPTION`; `markers.feature_level` is non-empty; the in-game image is right, not only the menu (docs/19 §8.2 Q7). A loading screen that never ends still reads `ok`: check `log_quiet_secs` and your own eyes. Record the `class_linkage` count, since DXMT's `Class linkage not supported` warnings are part of Q7 |
 | `snake-core-gl` | Snake Core (1276268370), Java/libGDX, OpenGL | `"$G" mac-app 1276268370 --runtime winecx --out "$GOGO_HOME/apps/snake-core" --yes` (renderer auto) | `runtime` is `winecx/…` with no derived runtime; the game window ("Snake Core - v1.6.1") is up and playable; no `OpenGL 2.0 or higher with the FBO extension is required` (that's the wine-staging failure, docs/19 §5) |
 
 Each game builds into its own `apps/<game>/` dir, so the `*.app` glob below matches one
@@ -398,13 +398,14 @@ teardown, `1` = the app failed (`exited`, `running_no_window`, `teardown_leftove
   "runtime_dir": "runtimes/winecx/24.0.7_7+dxmt-v0.80/engine", "verbs": "",
   "host": {"macos": "27.0.1", "chip": "Apple M4 Pro"},
   "launched": true, "running_after_secs": true, "exited_after_secs": null, "run_exit": "143 (SIGTERM)",
+  "log_quiet_secs": 0, "engine_log_quiet_secs": 4,
   "windows": [{"owner": "…", "pid": 4242, "layer": 0, "w": 1920, "h": 1080}],
   "prompts_left": [],
   "teardown": {"signal": "TERM", "launcher_pid": "4200", "wait_secs": 20, "leftovers": [],
                "wineserver_k_fallback": false, "killed_after_fallback": [], "ok": true},
   "markers": {"feature_level": ["2 info:dxmt: Using feature level D3D_FEATURE_LEVEL_11_1"],
-              "metal_layer_failed": [], "class_linkage": [], "wined3d": [], "d3dmetal": [],
-              "opengl": [], "unity": ["1 Renderer: Apple M4 Pro (ID=0x…)", "…"], "ogre": []},
+              "metal_layer_failed": [], "class_linkage": [], "wined3d": [],
+              "opengl": [], "unity": ["1 Renderer: Apple M4 Pro (ID=0x…)", "…"], "ogre": [], "d3dmetal": []},
   "err_lines": ["3 0124:err:combase:RoGetActivationFactory …DispatcherQueue…"],
   "missing_libs": [], "engine_logs": ["prefix/drive_c/users/crossover/AppData/LocalLow/…/Player.log"],
   "files": {"run_log": "…/launcher-logs/20261023-171500-4200.log", "launch_log": "…", "engine_logs": "…"}
@@ -412,9 +413,16 @@ teardown, `1` = the app failed (`exited`, `running_no_window`, `teardown_leftove
 ```
 
 - `markers`: the top matching lines (with counts) for what a reviewer checks per
-  renderer. `feature_level`, `metal_layer_failed`, `class_linkage`, `wined3d`,
-  `d3dmetal` and `opengl` come from the launcher's output and the run log. `unity` and
-  `ogre` come from the engine logs.
+  renderer. `feature_level`, `metal_layer_failed`, `class_linkage`, `wined3d` and
+  `opengl` come from the launcher's output and the run log. `unity` and `ogre` come from
+  the engine logs. `d3dmetal` comes from both: D3DMetal logs nothing of its own on a good
+  run, so its evidence is Unity's `Renderer: AMD Compatibility Mode`, or the D3DMetal
+  libs named in a failure. The run log's header and footer (`# renderer: …`) never count,
+  because they say what was asked for, not what ran.
+- `log_quiet_secs`, `engine_log_quiet_secs`: how long Wine's output and the engine logs
+  had been silent when the wait ended. A game stuck on a loading screen can still be
+  alive with a window (`ok`), but its logs stop. A quiet time close to `--secs` is a
+  stall to look at before calling the case a pass.
 - `err_lines`: Wine's `err:` lines, the most frequent first. The Unity
   `RoGetActivationFactory … DispatcherQueue` line is a harmless WinRT probe.
 - `run_exit`: the run log's footer. `143 (SIGTERM)` means the pass stopped the game.

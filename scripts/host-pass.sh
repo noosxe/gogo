@@ -126,6 +126,16 @@ prefix_server_pid() {
         /^p/ { pid = substr($0, 2) }
         /^n/ { n = substr($0, 2); if (substr(n, length(n) - length(d) + 1) == d) print pid }'
 }
+# Seconds since the newest of these files was written, or null if none exists.
+quiet_secs() {
+    local f m newest=0
+    for f in "$@"; do
+        [ -f "$f" ] || continue
+        m="$(date -r "$f" +%s 2>/dev/null)" || continue
+        if [ "$m" -gt "$newest" ]; then newest="$m"; fi
+    done
+    if [ "$newest" = 0 ]; then echo null; else echo $(($(date +%s) - newest)); fi
+}
 lines_json() { if [ -s "$1" ]; then jq -R -s 'split("\n") | map(select(length>0))' "$1"; else echo '[]'; fi; }
 
 app="" secs=60 out="$REPO/target/host-pass" kill_wait=20 dialogs=0 shot=0 dry=0
@@ -194,6 +204,7 @@ fi
 mkdir -p "$res/engine-logs" "$res/launcher-logs"
 touch "$res/.t0"
 status="infra_error" exit_code=3 note="" lpid="" launched=false alive=false exited_after=null
+log_quiet=null engine_quiet=null
 windows="[]" prompts="[]" teardown="null" run_log="" run_exit=""
 game_pids=()
 
@@ -213,6 +224,7 @@ finish() {
           --arg runtime_dir "$runtime_dir" --arg verbs "$verbs" --arg host_state "$state" \
           --argjson secs "$secs" --argjson launched "$launched" --argjson running "$alive" \
           --argjson exited_after "$exited_after" --arg run_exit "$run_exit" \
+          --argjson log_quiet "$log_quiet" --argjson engine_quiet "$engine_quiet" \
           --argjson windows "$windows" --argjson prompts "$prompts" --argjson processes "$procs" \
           --argjson teardown "$teardown" \
           --argjson missing "$(lines_json "$res/missing-libs.txt")" \
@@ -229,6 +241,7 @@ finish() {
             state:{host:$host_state}, host:{macos:$host_macos, chip:$host_chip},
             secs:$secs, launched:$launched, running_after_secs:$running,
             exited_after_secs:$exited_after, run_exit:$run_exit,
+            log_quiet_secs:$log_quiet, engine_log_quiet_secs:$engine_quiet,
             windows:$windows, prompts_left:$prompts, processes:$processes,
             teardown:$teardown, markers:$markers, err_lines:$errs, missing_libs:$missing,
             engine_logs:$engine, note:$note, results_dir:$dir, screenshot:$screenshot,
@@ -290,7 +303,6 @@ MARKERS_WINE=(
     'metal_layer_failed|Failed to get metal layer'
     'class_linkage|Class linkage not supported'
     'wined3d|wined3d'
-    'd3dmetal|D3DMetal|libd3dshared'
     'opengl|OpenGL (version|2\.0)|GL_VERSION|GL_RENDERER'
 )
 MARKERS_ENGINE=(
@@ -305,6 +317,10 @@ markers_json() {
         acc="$(marker "$acc" "$m" "$res/launcher-stdout.log" "$res/launcher-stderr.log" ${rl[@]+"${rl[@]}"})"
     done
     for m in "${MARKERS_ENGINE[@]}"; do acc="$(marker "$acc" "$m" "$res/engine-logs")"; done
+    # D3DMetal logs nothing of its own on a good run: the evidence is the
+    # renderer Unity reports for it, or its libs named in a failure.
+    acc="$(marker "$acc" 'd3dmetal|D3DMetal|libd3dshared|AMD Compatibility Mode' \
+        "$res/launcher-stdout.log" "$res/launcher-stderr.log" ${rl[@]+"${rl[@]}"} "$res/engine-logs")"
     printf '%s' "$acc"
 }
 # marker <json so far> <name|regex> <files or dirs…>: the top matching lines,
@@ -313,7 +329,9 @@ markers_json() {
 marker() {
     local acc="$1" name="${2%%|*}" re="${2#*|}"
     shift 2
-    { grep -r -h -E -- "$re" "$@" 2>/dev/null || true; } | tr -d '\r' | sed 's/^[[:space:]]*//' | cut -c1-200 \
+    # Not the run log's header and footer (`# renderer: …`): what was asked
+    # for, not evidence of what ran.
+    { grep -r -h -E -- "$re" "$@" 2>/dev/null || true; } | { grep -v '^# ' || true; } | tr -d '\r' | sed 's/^[[:space:]]*//' | cut -c1-200 \
         | LC_ALL=C sort | uniq -c | sort -rn | head -8 | sed 's/^ *//' \
         | jq -R -s --argjson acc "$acc" --arg n "$name" '$acc + {($n): split("\n") | map(select(length>0))}'
 }
@@ -339,6 +357,16 @@ while [ $((SECONDS - t0)) -lt "$secs" ]; do
     sleep 1
 done
 while IFS= read -r p; do game_pids+=("$p"); done < <(game_tree)
+# How long the logs had been silent at the end of the wait: a game stuck on
+# a loading screen can still be alive with a window ("ok"), but its Wine
+# output and engine logs stop.
+log_quiet="$(quiet_secs "$res/launcher-stdout.log" "$res/launcher-stderr.log" "$log_dir"/[0-9]*-"$lpid".log)"
+if [ -d "$game_state" ]; then
+    fresh=()
+    while IFS= read -r f; do fresh+=("$game_state/${f#./}"); done < <(cd "$game_state" \
+        && find . \( -path ./.launchers -prune \) -o -type f -iname '*.log' -newer "$res/.t0" -print)
+    engine_quiet="$(quiet_secs ${fresh[@]+"${fresh[@]}"})"
+fi
 # shellcheck disable=SC2207 # pids: no spaces or globs
 game_pids=($(printf '%s\n' ${game_pids[@]+"${game_pids[@]}"} | LC_ALL=C sort -un))
 # shellcheck disable=SC2207
