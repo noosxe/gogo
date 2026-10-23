@@ -398,7 +398,7 @@ cmd_run() {
     # Everything below writes into the result dir; summary assembled at the end.
     local status="infra_error" exit_code=3 ip="" gk_block=false gatekeeper="not_quarantined" spctl_rc="" cs_rc=""
     local launched=false alive=false windows="[]" note="" cs_after_rc="" modified="null" gk_left="null" tcc_left="null"
-    local units=() teardown="null"
+    local units=() teardown="null" run_log=""
     # shellcheck disable=SC2329 # invoked by the EXIT trap
     finish() {
         local procs="[]"
@@ -423,6 +423,7 @@ cmd_run() {
               --argjson units "$(printf '%s\n' ${units[@]+"${units[@]}"} | jq -R -s 'split("\n") | map(select(length>0))')" \
               --arg rtmode "$([ "$state" = 1 ] && echo "$rtmode")" --arg host_state "$([ "$state" = 1 ] && echo "$HOST_STATE")" \
               --argjson teardown "$teardown" \
+              --arg run_log "$([ -n "$run_log" ] && echo "$res/launcher-logs/$run_log")" \
               --arg note "$note" --arg dir "$res" \
               --arg screenshot "$([ -s "$res/screenshot.png" ] && echo "$res/screenshot.png")" \
               '{status:$status, exit_code:$exit, app:$app, model:$model, gogid:$gogid, runtime:$runtime,
@@ -441,7 +442,7 @@ cmd_run() {
                 note:$note, results_dir:$dir, screenshot:$screenshot,
                 files:{codesign:($dir+"/codesign.txt"), spctl:($dir+"/spctl.txt"),
                        stdout:($dir+"/wine-stdout.log"), stderr:($dir+"/wine-stderr.log"),
-                       launcher_logs:($dir+"/launcher-logs"),
+                       launcher_logs:($dir+"/launcher-logs"), run_log:$run_log,
                        prefix_logs:($dir+"/prefix-logs"), system_log:($dir+"/system.log"),
                        vm_log:($dir+"/tart-run.log")}}' >"$res/summary.json" \
             || jq -n --arg app "$app" --arg dir "$res" \
@@ -632,6 +633,8 @@ cmd_run() {
     if [ -n "$gogid" ]; then
         mkdir -p "$res/launcher-logs"
         vssh "$ip" "tar -C ~/Library/Logs/gogo/$gogid -cf - . 2>/dev/null" | tar -C "$res/launcher-logs" -xf - 2>/dev/null || true
+        # This launch's run log (#77): the newest <ts>-<pid>.log.
+        run_log="$(cd "$res/launcher-logs" && find . -maxdepth 1 -name '[0-9]*-*.log' -type f | sed 's|^\./||' | LC_ALL=C sort | tail -1)"
     fi
     vssh "$ip" "/usr/bin/log show --style compact --start '$since' --predicate 'process == \"syspolicyd\" OR process == \"XprotectService\" OR process CONTAINS[c] \"wine\" OR (process == \"tccd\" AND eventMessage CONTAINS[c] \"microphone\") OR eventMessage CONTAINS[c] \"$base\"'" \
         >"$res/system.log" 2>&1 || true
@@ -641,7 +644,7 @@ cmd_run() {
 
     # Self-containment and seal evidence (#68).
     local wlogs=("$res/wine-stderr.log" "$res/wine-stdout.log")
-    [ -f "$res/launcher-logs/wine.log" ] && wlogs+=("$res/launcher-logs/wine.log")
+    [ -n "$run_log" ] && wlogs+=("$res/launcher-logs/$run_log")
     # wined3d without a GL context: the guest has no OpenGL, so a D3D-on-
     # wined3d title may never show a window here although it would on a Mac.
     cat "${wlogs[@]}" 2>/dev/null | grep -E 'wined3d_adapter_gl_init|Failed to create internal global context|Failed to get a GL context' \

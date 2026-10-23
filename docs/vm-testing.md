@@ -248,6 +248,7 @@ path of `summary.json`, and the summary is printed just before it:
   "processes": ["839 S C:\\GOG\\Pharaoh Gold\\Pharaoh.exe", "..."],
   "screenshot": ".../screenshot.png", "gatekeeper_screenshot": ".../gatekeeper.png",
   "files": {"codesign": "...", "spctl": "...", "stdout": "...", "stderr": "...",
+            "launcher_logs": "...", "run_log": ".../launcher-logs/20261023-142501-812.log",
             "prefix_logs": "...", "system_log": "...", "vm_log": "..."}
 }
 ```
@@ -269,6 +270,10 @@ alive), so the smoke cases use 45.
   `gogo/` state and logs, with macOS's own `~/Library` churn filtered out (design 16
   decision 4: saves stay in the prefix).
 - `log_grep`: matches for `--grep`.
+- `files.run_log`: this launch's run log (#77, design 16 §8.1): header with the
+  effective runtime, renderer, verbs, stamp and macOS version, Wine's output, then
+  `# exit:` and `# duration:` (no footer if the run was still going when collected).
+  Empty when the launcher never reached Wine.
 
 Other files: `gatekeeper.log`, `gatekeeper-windows.json` (everything on screen at the
 prompt), `windows-all.json`, `processes.txt`, `processes-after-kill.txt`,
