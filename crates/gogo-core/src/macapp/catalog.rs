@@ -402,8 +402,9 @@ static ENTRIES: &[CatalogEntry] = &[
 ];
 
 /// Where the Template keeps its D3DMetal kit: `wine/x86_64-{unix,windows}`
-/// (overlaid on the engine's `lib/wine/`), `external/` (`D3DMetal.framework`
-/// and `libd3dshared.dylib`, which the unix libs load via `@loader_path`)
+/// (overlaid on the engine's `lib/wine/`; the unix libs are symlinks to
+/// `../../external/libd3dshared.dylib`), `external/` (`D3DMetal.framework`
+/// and `libd3dshared.dylib`, installed as the engine's `lib/external/`)
 /// and Apple's `License.rtf`, `Acknowledgements.rtf`, `Read Me.rtf`.
 pub const D3DMETAL_SUBDIR: &str = "Template-1.0.24.app/Contents/SharedSupport/renderer/d3dmetal";
 

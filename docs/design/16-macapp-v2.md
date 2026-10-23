@@ -299,15 +299,17 @@ DXMT from outside its tree.
   `winemac.drv` hook, docs/19 §3.2); another engine falls back to wined3d.
 - *#71 (D3DMetal):* the same mechanism. The payload is the Sikarugir Template's
   kit (below). Its `wine/x86_64-{unix,windows}` go over `lib/wine/` like DXMT's
-  arch dirs. Its `external/` (`D3DMetal.framework`, `libd3dshared.dylib`) goes into
-  `lib/wine/x86_64-unix/` as well: `d3d11.so`/`d3d12.so`/`dxgi.so` link
-  `@rpath/libd3dshared.dylib` with an rpath of `@loader_path`, and
-  `libd3dshared.dylib` links `@rpath/D3DMetal.framework/D3DMetal` the same way
-  (verified with `otool -l`). So dyld finds both without `DYLD_*` variables, and the
-  launcher stays unchanged. (Sikarugir and the docs/19 host harness used
-  `lib/external` + `DYLD_FALLBACK_LIBRARY_PATH` instead.) The overlay keeps symlinks
-  (the framework's `Versions/Current -> A`). The result is
-  `winecx/24.0.7_7+d3dmetal-4.0b3`.
+  arch dirs. Its `external/` (`D3DMetal.framework`, `libd3dshared.dylib`) becomes
+  the engine's `lib/external/`, the layout Sikarugir uses. The kit's `d3d11.so`,
+  `d3d12.so`, `dxgi.so` and the rest are symlinks to
+  `../../external/libd3dshared.dylib`. That library loads `D3DMetal.framework`
+  beside it through an `@loader_path` rpath, so the launcher needs no `DYLD_*`
+  variables. The overlay keeps symlinks (those links, and the framework's
+  `Versions/Current -> A`). The result is `winecx/24.0.7_7+d3dmetal-4.0b3`. The
+  first host pass (2026-10-23) put `external/` next to the unix libs instead. The
+  links dangled, and Unity reported "could not load d3d11.dll". A Wine loader test
+  with `lib/external` resolves `D3D11CreateDevice` and goes on to load
+  `dxgi.dll`.
 - *#70:* fat (`--portable`) bundles can't carry a derived runtime: DXMT there
   falls back to wined3d with a warning. cnc-ddraw keeps design 13's build-time
   path (game dir + a registry `ddraw=n,b`).

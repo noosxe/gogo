@@ -479,19 +479,14 @@ pub fn derive(
         let dst = lib_wine.join(dir.file_name().expect("arch dir has a name"));
         bytes += overlay(dir, &dst)?;
     }
-    // Host libraries the unix side loads by `@rpath` = `@loader_path`
-    // (D3DMetal: `d3d11.so` → `libd3dshared.dylib` →
-    // `D3DMetal.framework`) go next to the unix libs, so dyld finds them
-    // with no `DYLD_*` help.
+    // Host libraries beside the renderer's `wine/` dir go to `lib/external`,
+    // where its unix libs point: D3DMetal's `d3d11.so`, `dxgi.so`, … are
+    // symlinks to `../../external/libd3dshared.dylib`, which loads
+    // `D3DMetal.framework` beside it by `@loader_path` (host check
+    // 2026-10-23: no `DYLD_*` needed).
     let external = overlay_src.parent().map(|p| p.join("external"));
     if let Some(external) = external.filter(|e| e.is_dir()) {
-        for dir in arch_dirs
-            .iter()
-            .filter(|d| d.to_string_lossy().ends_with("-unix"))
-        {
-            let dst = lib_wine.join(dir.file_name().expect("arch dir has a name"));
-            bytes += overlay(&external, &dst)?;
-        }
+        bytes += overlay(&external, &engine.join("lib/external"))?;
     }
     if base_root.join("Frameworks").is_dir() {
         #[cfg(unix)]
@@ -1484,11 +1479,11 @@ mod store_tests {
                 b"d3d12",
                 0o755,
             );
-            add_file(
+            // As in the Template: the unix libs are links into external/.
+            add_symlink(
                 t,
                 &format!("{sub}/wine/x86_64-unix/d3d11.so"),
-                b"d3d11",
-                0o755,
+                "../../external/libd3dshared.dylib",
             );
             add_file(
                 t,
@@ -1593,7 +1588,8 @@ mod store_tests {
         );
 
         // Derived from a CX-layout base: wine dirs over lib/wine, the host
-        // libs next to the unix libs (`@loader_path`), symlinks kept.
+        // libs in lib/external where the unix-lib links resolve, symlinks
+        // kept.
         let base = self::entry("winecx", "24.0.7_7", "engine/bin/wine");
         let root = tree_root(&base);
         write_exec(
@@ -1608,20 +1604,22 @@ mod store_tests {
         let d = derive(&base, &m).unwrap();
         assert_eq!(d.version, "24.0.7_7+d3dmetal-4.0b3");
         let dunix = tree_root(&d).join("engine/lib/wine/x86_64-unix");
+        let dext = tree_root(&d).join("engine/lib/external");
         let read = |p: PathBuf| std::fs::read_to_string(p).unwrap();
-        assert_eq!(read(dunix.join("d3d11.so")), "d3d11");
-        assert_eq!(read(dunix.join("libd3dshared.dylib")), "shared");
-        assert_eq!(read(dunix.join("D3DMetal.framework/D3DMetal")), "metal");
+        // The link resolves (the 2026-10-23 host pass failed on a dangling one).
+        assert!(dunix.join("d3d11.so").is_symlink());
+        assert_eq!(read(dunix.join("d3d11.so")), "shared");
+        assert!(!dunix.join("libd3dshared.dylib").exists());
+        assert_eq!(read(dext.join("D3DMetal.framework/D3DMetal")), "metal");
         assert!(
-            dunix
-                .join("D3DMetal.framework/Versions/Current")
+            dext.join("D3DMetal.framework/Versions/Current")
                 .is_symlink()
         );
         assert_eq!(
             read(tree_root(&d).join("engine/lib/wine/x86_64-windows/d3d11.dll")),
             "gptk-64"
         );
-        assert!(!lib.join("x86_64-unix/libd3dshared.dylib").exists());
+        assert!(!root.join("engine/lib/external").exists(), "base untouched");
         assert!(read(tree_root(&d).join("NOTICES.txt")).contains("EA18380"));
     }
 
