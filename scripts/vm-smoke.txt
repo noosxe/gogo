@@ -1,0 +1,20 @@
+# Per-layer VM smoke set for `scripts/vm-test.sh smoke` (docs/vm-testing.md).
+# One VM run per case. Columns, `|`-separated:
+#   case | layer | bundle (under --bundles, default target/v2; `-` = placeholder)
+#   | run options (split on spaces) | jq check on summary.json, no `|` (true =
+#   pass) | what it proves
+# Bundles are built from the depot lane on the host first:
+#   gogo mac-app --from-depot 1207659013 --out target/v2 --yes   # Treasure Adventure Game
+#   gogo mac-app --from-depot 1146738698 --out target/v2 --yes   # Carmageddon TDR 2000
+# The VM GPU has no Metal 3 and no OpenGL: renderer cases only prove start-up
+# here; DXMT/D3DMetal/OpenGL rendering is a host pass (#80).
+
+depot-lane | depot / L0 runtime | Treasure Adventure Game.app | --secs 45 | .status == "ok" and .model == "v2" and .bundle_modified == false and .gatekeeper_dialog_left == false | depot tree cloned into games/<gogid>/game, launched by the v2 launcher from the store runtime with only the seeded state dir; the game window is up and nothing wrote into the bundle
+gog-support | L2 GOG support overlay | Carmageddon TDR 2000.app | --secs 45 --grep File\.cpp:73 | .status == "ok" and .log_grep == [] | the depot gog-support app/ overlay (ASSETS/options.txt) is merged: the game reaches its first-run flow instead of "Abort at File.cpp:73"
+signing | launcher seal / Gatekeeper | Treasure Adventure Game.app | --strict-gatekeeper | .gatekeeper == "prompted" and .codesign_verify_rc == "0" | the ad-hoc signed launcher verifies --deep --strict in a clean guest and Gatekeeper offers "could not verify" (Open Anyway), not "damaged" (#53)
+teardown-term | launcher teardown (#42) | Treasure Adventure Game.app | --secs 45 --kill term | .teardown.ok == true | SIGTERM to the launcher reaps the prefix's wineserver, services and the game: no wine* process left after 15 s
+teardown-kill | launcher teardown (#42) | Treasure Adventure Game.app | --secs 45 --kill kill | .teardown.launcher_pid != "" | SIGKILL can't be trapped (design 16 §8): records what is left behind, informational
+# Placeholders for the renderer/runtime work; fill in bundle + check there.
+runtime-cx24 | L0 runtime CX24 (#62) | - | | .status == "ok" and .missing_libs == [] | CX24 engine + Frameworks from the store: starts, no missing dylibs (FreeType etc.)
+prefix-setup | per-user prefix (#67) | - | | .status == "ok" | prefix built for the guest user on first launch, no builder-home leak
+renderer-l1 | L1 auto renderer (#70) | - | | .status == "ok" | the renderer L1 picks from PE imports starts (start-up only in the VM)
