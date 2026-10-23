@@ -1933,7 +1933,14 @@ fn mac_app_sub(sub: crate::cli::MacAppSub) -> Result<i32, AppError> {
             compat::validate_gogid(&gogid)?;
             let db = compat::db_entry(&gogid);
             let user = compat::load_user(&gogid)?;
+            // L1: the verbs the built bundle baked (the only L1 field shown
+            // here; the rest of L0–L2 lives in the bundle TOML).
+            let auto = compat::CompatEntry {
+                verbs: gogo::macapp::verbs::baked(&gogid),
+                ..Default::default()
+            };
             let eff = compat::merge(&[
+                (compat::Layer::Auto, &auto),
                 (compat::Layer::Db, &db.entry),
                 (compat::Layer::User, &user.entry),
             ]);
@@ -1960,14 +1967,17 @@ fn mac_app_sub(sub: crate::cli::MacAppSub) -> Result<i32, AppError> {
             }
             let lines = eff.display_lines();
             if lines.is_empty() {
-                println!("no compat data for {gogid} (L3 DB and L4 override are both empty)");
+                println!(
+                    "no compat data for {gogid} (no L1 verbs, L3 DB and L4 override are empty)"
+                );
             } else {
                 for line in lines {
                     println!("{line}");
                 }
             }
             println!(
-                "L4 override file: {}\n(L0–L2 are computed when the bundle is built)",
+                "L4 override file: {}\n(L0–L2 are computed when the bundle is built; L1 verbs \
+                 show once it is)",
                 compat::user_path(&gogid).display()
             );
             Ok(cli::exit::OK)
@@ -2258,14 +2268,22 @@ async fn mac_app(
                     .map(|t| format!("{} (depot)", t.display()))
             })
             .unwrap_or_default();
+        let verbs_line = match &plan.state {
+            Some(_) => format!(
+                "\n  verbs:     {}",
+                gogo::macapp::verbs::summary(plan.gogid.as_deref(), plan.auto_verbs.as_deref())
+            ),
+            None => String::new(),
+        };
         eprintln!(
-            "converting:\n  source:    {}\n  bundle:    {}\n  recipe:    {}\n  runtime:   {} ({}){}\n  est. size: {}",
+            "converting:\n  source:    {}\n  bundle:    {}\n  recipe:    {}\n  runtime:   {} ({}){}{}\n  est. size: {}",
             source_line,
             plan.bundle_path.display(),
             recipe_line,
             plan.runtime.version,
             runtime_kind,
             download_line,
+            verbs_line,
             gogo::fmt::human_size(plan.estimated_bytes),
         );
         if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
@@ -2333,6 +2351,7 @@ async fn mac_app(
                     "wine_version": r.wine_version,
                     "from_search": r.from_search,
                 })),
+                "auto_verbs": plan.auto_verbs,
                 "runtime": {
                     "kind": plan.runtime.kind,
                     "version": plan.runtime.version,

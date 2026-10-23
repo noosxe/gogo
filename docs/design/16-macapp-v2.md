@@ -72,7 +72,7 @@ workdir  = 'C:\GOG\Carmageddon TDR 2000'
 args     = ["-f"]
 env      = { WINEMSYNC = "1" }
 dll_overrides = { ddraw = "n,b" }     # what the launcher exports in WINEDLLOVERRIDES
-verbs    = []                         # winetricks verbs; applied by setup, never by the launcher
+verbs    = []                         # L1 winetricks verbs (#72); setup layers L3/L4, never the launcher
 
 [gogo]
 path  = "/Users/me/.nix-profile/bin/gogo"   # recorded at build (decision 2)
@@ -181,6 +181,37 @@ take different paths into the prefix.
   winetricks and gogo's shims. winetricks skips verbs that are already installed.
   Verbs run their downloads by unix path, so `z:` is restored for the winetricks
   run and removed after it. Renderer files are left to #70/#74.
+
+*Verbs, #72 (`macapp/verbs.rs`):*
+
+- **L1 auto verbs.** The build scans the game's imports (#63 `helpers`: static
+  imports minus DLLs the game ships, never runtime-loaded names) and maps each
+  DirectX helper DLL to the winetricks verb that installs Microsoft's copy:
+  - `d3dcompiler_42/43/46/47`, `d3dx9_24…43`, `d3dx10_43`, `d3dx11_42/43` and
+    `d3dcsx_46/47` map to verbs of the same name;
+  - any other `d3dx10_*` maps to `d3dx10`;
+  - `xinput1_1…1_3` map to `xinput`;
+  - XACT, X3DAudio, XAPOFX and `xaudio2_0…2_7` map to `xact` (`xact_x64` for
+    64-bit importers).
+
+  `xinput1_4`, `xinput9_1_0` and `xaudio2_8/2_9` ship with Windows, so they're
+  Wine builtins and get no verb. The pre-confirm summary shows each verb with
+  the imports behind it and its layer. The installer lane decides its verbs
+  after the install.
+- **Where each layer lives.** The bundle TOML's `verbs` holds **L1 only**; it is
+  the build's list, so it is part of the stamp. Setup merges L3 (the compat DB,
+  read live, like `registry`) and then L4 over it, each replacing the list
+  whole. `gogo mac-app compat <gogid>` shows the winner with its layer, and it
+  reads L1 from the built bundle.
+- **Re-runs.** winetricks runs only when the effective list differs from the one
+  `state.toml` recorded (`verbs`), when the runtime changed, or when the prefix
+  is new. A stale stamp alone (an L4 `env` edit) doesn't re-run it.
+- **SIP and winetricks.** winetricks is a `/bin/sh` script and calls wine through
+  `/usr/bin/env`. SIP drops `DYLD_*` whenever a protected binary starts, so an
+  inherited `DYLD_FALLBACK_LIBRARY_PATH` never reaches a CX24 wine. So `WINE` and
+  `WINESERVER` point at small wrapper scripts (`runtimes/tools/shims/wine-<hash>/`)
+  that export it themselves before `exec`. `WINE64` is set to the same wrapper,
+  because winetricks otherwise derives `${WINE}64`, which a wow64 engine lacks.
 - Setup returns only after `wineserver -w` (with `-k` after 60 s), so nothing writes
   into the prefix later.
 

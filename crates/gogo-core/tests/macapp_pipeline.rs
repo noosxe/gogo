@@ -2026,6 +2026,90 @@ fn v2_real_setup_applies_l4_and_restamps() {
 /// #67 / #55: the prefix holds no link out of the state dir after a build
 /// or a setup, L4 registry values and verbs are applied (verbs with `z:`
 /// back for the run only), and a runtime gogo can't install names the fix.
+/// #72: the build bakes the L1 auto verbs into `gogo-launch.toml`; setup
+/// runs winetricks for them once, not again while nothing changes, and L4
+/// replaces them whole.
+#[test]
+fn v2_auto_verbs_are_baked_and_run_once() {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    unsafe { std::env::set_var("GOGO_HOME", &home) };
+    let wt_log = tmp.path().join("winetricks.log");
+    let wt = tmp.path().join("winetricks");
+    std::fs::write(
+        &wt,
+        format!(
+            "#!/bin/sh\nprintf '%s|%s\\n' \"$*\" \"$([ \"$WINE64\" = \"$WINE\" ] && echo wine64ok)\" >> '{}'\n",
+            wt_log.display()
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&wt, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    unsafe { std::env::set_var("WINETRICKS", &wt) };
+    let runs = || {
+        std::fs::read_to_string(&wt_log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+
+    let opts = v2_opts(tmp.path(), &tmp.path().join("no-such-gogo"));
+    let mut plan = macapp::plan(&opts, None, &mut |_| {}).unwrap();
+    // The fixture's Game.exe is no PE: no scan result, so set L1 by hand
+    // (the scan → verb mapping is unit-tested in macapp::verbs).
+    assert_eq!(plan.auto_verbs.as_deref(), Some(&[][..]));
+    plan.auto_verbs = Some(vec![
+        macapp::verbs::AutoVerb {
+            verb: "d3dcompiler_43".into(),
+            imports: vec!["d3dcompiler_43.dll".into()],
+        },
+        macapp::verbs::AutoVerb {
+            verb: "d3dx11_43".into(),
+            imports: vec!["d3dx11_43.dll".into()],
+        },
+    ]);
+    macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).unwrap();
+    let toml =
+        std::fs::read_to_string(plan.bundle_path.join("Contents/Resources/gogo-launch.toml"))
+            .unwrap();
+    assert!(
+        toml.contains(r#"verbs = ["d3dcompiler_43", "d3dx11_43"]"#),
+        "{toml}"
+    );
+    assert_eq!(runs(), ["-q d3dcompiler_43 d3dx11_43|wine64ok"]);
+
+    // Nothing changed: no winetricks. An L4 change elsewhere: still none.
+    macapp::setup::setup("1207659013", None).unwrap();
+    std::fs::create_dir_all(home.join("compat")).unwrap();
+    let l4 = home.join("compat/1207659013.toml");
+    std::fs::write(&l4, "env = { WINEMSYNC = \"1\" }\n").unwrap();
+    macapp::setup::setup("1207659013", None).unwrap();
+    assert_eq!(runs().len(), 1, "{:?}", runs());
+
+    // L4 replaces L1 whole: `[]` runs nothing, a new list runs it.
+    std::fs::write(&l4, "verbs = []\n").unwrap();
+    let out = macapp::setup::setup("1207659013", None).unwrap();
+    assert!(out.state.verbs.is_empty());
+    std::fs::write(&l4, "verbs = [\"xinput\"]\n").unwrap();
+    macapp::setup::setup("1207659013", None).unwrap();
+    assert_eq!(runs().last().unwrap(), "-q xinput|wine64ok");
+    assert_eq!(runs().len(), 2);
+
+    // A new prefix gets its verbs again.
+    std::fs::remove_dir_all(home.join("games/1207659013/prefix")).unwrap();
+    macapp::setup::setup("1207659013", None).unwrap();
+    assert_eq!(runs().len(), 3);
+
+    unsafe { std::env::remove_var("WINETRICKS") };
+    unsafe { std::env::remove_var("GOGO_HOME") };
+    drop(guard);
+}
+
 #[test]
 fn v2_setup_localizes_prefix_and_applies_registry_and_verbs() {
     let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
