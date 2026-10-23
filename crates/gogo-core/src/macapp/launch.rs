@@ -1,7 +1,8 @@
 //! The v2 launcher contract (design 16 §1, §2, §8): `gogo-launch.toml` (the
 //! source of truth), its shell mirror `launch.conf`, the config stamp, the
 //! per-game state dir `<state_dir>/games/<gogid>/`, runtime references into
-//! the store, `gogo mac-app setup`, and the bash launcher itself.
+//! the store, and the bash launcher itself. `gogo mac-app setup` is
+//! `macapp/setup.rs`.
 //!
 //! The `.app` holds only the launcher, the TOML and its mirror, `Info.plist`
 //! and licence notices. It is signed once and never written again; the
@@ -299,7 +300,7 @@ pub fn absolute(p: &Path) -> PathBuf {
         .collect()
 }
 
-fn write_atomic(path: &Path, contents: &str) -> Result<(), MacAppError> {
+pub(super) fn write_atomic(path: &Path, contents: &str) -> Result<(), MacAppError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -379,147 +380,10 @@ pub fn frameworks_of(rt: &Runtime) -> Option<PathBuf> {
 /// A path for the state `launch.conf`: relative to the state root when under
 /// it (the launcher resolves it against the state dir it finds, so a state
 /// dir copied to another account still works), absolute otherwise.
-fn state_rel(state_root: &Path, p: &Path) -> String {
+pub(super) fn state_rel(state_root: &Path, p: &Path) -> String {
     p.strip_prefix(state_root)
         .map(|r| r.to_string_lossy().into_owned())
         .unwrap_or_else(|_| p.to_string_lossy().into_owned())
-}
-
-// — prefix placement (decision 4; prefix *configuration* is #67) —
-
-/// Make the game reachable as `C:\GOG\<name>` without `z:`: a relative
-/// symlink `prefix/drive_c/GOG/<name>` → `../../../game`. Replaces whatever
-/// was there (a rebuild re-clones `game/`).
-pub fn link_game(dirs: &GameDirs, tree_name: &str) -> Result<PathBuf, MacAppError> {
-    let gog = dirs.prefix.join("drive_c/GOG");
-    std::fs::create_dir_all(&gog)?;
-    let link = gog.join(tree_name);
-    if let Ok(meta) = link.symlink_metadata() {
-        if meta.is_dir() {
-            std::fs::remove_dir_all(&link)?;
-        } else {
-            std::fs::remove_file(&link)?;
-        }
-    }
-    #[cfg(unix)]
-    std::os::unix::fs::symlink("../../../game", &link)?;
-    Ok(link)
-}
-
-/// Drop `dosdevices/z:` (decision 4). Wine creates it only with a new
-/// prefix, so it stays gone. Build steps that run unix-path installers need
-/// it, so this runs last.
-pub fn drop_z_drive(prefix: &Path) -> Result<(), MacAppError> {
-    let z = prefix.join("dosdevices/z:");
-    if z.symlink_metadata().is_ok() {
-        std::fs::remove_file(&z)?;
-    }
-    Ok(())
-}
-
-// — `gogo mac-app setup` (design 16 §2.2) —
-
-/// What [`setup`] did.
-#[derive(Debug, Clone)]
-pub struct SetupOutcome {
-    pub state: GameState,
-    pub prefix_created: bool,
-    pub warnings: Vec<String>,
-}
-
-/// Bring `games/<gogid>/` up to date with the bundle TOML and the L4
-/// override: resolve the runtime, create the prefix if it's missing (the
-/// way builds create it today; #67 replaces this), then write the effective
-/// `launch.conf` and `state.toml` with the new stamp. Never touches the
-/// bundle; never deletes the prefix.
-///
-/// `bundle` is the `.app` path when the caller knows it (the build, or the
-/// launcher reporting where it runs from); otherwise `state.toml`'s.
-pub fn setup(gogid: &str, bundle: Option<&Path>) -> Result<SetupOutcome, MacAppError> {
-    let dirs = GameDirs::for_game(gogid)?;
-    let prior = GameState::load(&dirs.state_toml)?;
-    let bundle = match (bundle, &prior) {
-        (Some(b), _) => absolute(b),
-        (None, Some(s)) => s.bundle.clone(),
-        (None, None) => {
-            return Err(MacAppError::Compat {
-                path: dirs.state_toml.clone(),
-                reason: format!("no state for {gogid}: build the bundle first, or pass --bundle"),
-            });
-        }
-    };
-    let toml_path = bundle.join("Contents/Resources/gogo-launch.toml");
-    let raw = std::fs::read(&toml_path).map_err(|e| MacAppError::Compat {
-        path: toml_path.clone(),
-        reason: e.to_string(),
-    })?;
-    let baked = LaunchToml::parse(&String::from_utf8_lossy(&raw), &toml_path)?;
-    if baked.gogid != gogid {
-        return Err(MacAppError::Compat {
-            path: toml_path,
-            reason: format!("bundle is for {}, not {gogid}", baked.gogid),
-        });
-    }
-
-    let l4_path = compat::user_path(gogid);
-    let l4_raw = match std::fs::read(&l4_path) {
-        Ok(b) => Some(b),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e.into()),
-    };
-    let l4 = compat::load_user(gogid)?;
-    let warnings: Vec<String> = l4
-        .warnings
-        .iter()
-        .map(|w| format!("{}: unknown key {w}", l4_path.display()))
-        .collect();
-    let eff = baked.with_override(&l4.entry);
-    let rt = resolve_ref(&eff.runtime)?;
-
-    let prefix_created = !dirs.prefix.is_dir();
-    if prefix_created {
-        super::installer::stage_prefix(&rt, &dirs.prefix)?;
-        if let Some(name) = eff.tree_name().filter(|_| dirs.game.is_dir()) {
-            link_game(&dirs, &name)?;
-        }
-        super::installer::stop_wineserver(&rt, &dirs.prefix)?;
-        drop_z_drive(&dirs.prefix)?;
-    }
-
-    let state_root = crate::state::state_dir();
-    let stamp = stamp(&raw, l4_raw.as_deref());
-    let extra = [
-        ("RUNTIME_DIR", state_rel(&state_root, &engine_root(&rt))),
-        ("WINE", state_rel(&state_root, &rt.wine)),
-        ("WINESERVER", state_rel(&state_root, &wineserver_of(&rt))),
-        (
-            "FRAMEWORKS",
-            frameworks_of(&rt)
-                .map(|f| state_rel(&state_root, &f))
-                .unwrap_or_default(),
-        ),
-        ("PREFIX", state_rel(&state_root, &dirs.prefix)),
-        ("STAMP", stamp.clone()),
-    ];
-    write_atomic(&dirs.launch_conf, &to_launch_conf(&eff, &extra))?;
-    let state = GameState {
-        schema: SCHEMA,
-        gogid: gogid.to_string(),
-        bundle,
-        runtime: eff.runtime.clone(),
-        renderer: eff.renderer.clone(),
-        stamp,
-        gogo_version: env!("CARGO_PKG_VERSION").to_string(),
-    };
-    write_atomic(
-        &dirs.state_toml,
-        &toml::to_string(&state).expect("GameState always serializes"),
-    )?;
-    Ok(SetupOutcome {
-        state,
-        prefix_created,
-        warnings,
-    })
 }
 
 // — the bundle side —
@@ -866,33 +730,6 @@ mod launch_tests {
             Err(MacAppError::RuntimeNotFound { .. })
         ));
         unsafe { std::env::remove_var("GOGO_HOME") };
-    }
-
-    #[test]
-    fn link_game_is_relative_and_replaces() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dirs = GameDirs::at(tmp.path().join("games/1"));
-        std::fs::create_dir_all(&dirs.game).unwrap();
-        std::fs::write(dirs.game.join("g.exe"), b"MZ").unwrap();
-        std::fs::create_dir_all(dirs.prefix.join("drive_c/GOG/Foo")).unwrap();
-        let link = link_game(&dirs, "Foo").unwrap();
-        assert_eq!(
-            std::fs::read_link(&link).unwrap(),
-            Path::new("../../../game")
-        );
-        assert!(link.join("g.exe").is_file());
-        link_game(&dirs, "Foo").unwrap();
-        std::fs::create_dir_all(dirs.prefix.join("dosdevices")).unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink("/", dirs.prefix.join("dosdevices/z:")).unwrap();
-        drop_z_drive(&dirs.prefix).unwrap();
-        assert!(
-            dirs.prefix
-                .join("dosdevices/z:")
-                .symlink_metadata()
-                .is_err()
-        );
-        drop_z_drive(&dirs.prefix).unwrap();
     }
 
     #[test]

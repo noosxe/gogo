@@ -169,6 +169,21 @@ the prefix, writes the state `launch.conf`, and exits 0. Exit codes as for `mac-
 (07 §2). The same function runs at the end of every build, so build and launch never
 take different paths into the prefix.
 
+*Implemented in #67 (`macapp/setup.rs`):*
+
+- A store runtime that's missing is installed from the catalog (`<id>/<ver>` pins the
+  version). A runtime it can't install (not in the catalog, or a consent download)
+  fails with the `gogo runtimes install …` command to run.
+- The prefix is created with `wineboot -u` and kept free of links out of the state
+  dir (decision 4) on every run, not only at creation.
+- Applied on every run: registry values from L3 then L4 (merged per decision 5;
+  `gogo-launch.toml` has no `registry` field), then the effective `verbs` through
+  winetricks and gogo's shims. winetricks skips verbs that are already installed.
+  Verbs run their downloads by unix path, so `z:` is restored for the winetricks
+  run and removed after it. Renderer files are left to #70/#74.
+- Setup returns only after `wineserver -w` (with `-k` after 60 s), so nothing writes
+  into the prefix later.
+
 ## 3. Decision 3: renderers that replace Wine builtins live in a derived runtime
 
 **Settled by #94** (overturns the pre-filled default "PE DLLs per prefix, `winemetal.so`
@@ -217,6 +232,24 @@ DXMT from outside its tree.
 **Settled:** `drive_c/users/<user>/{Desktop,Documents,Downloads,Music,Pictures,Videos}`
 are plain directories inside `games/<gogid>/prefix`. They are never symlinks into the
 real `~`. `dosdevices/z:` is removed.
+
+*Implemented in #67, slightly wider than written:* a fresh prefix has more links out
+than these (tested on CX24, 2026-10-23):
+
+- `AppData/Roaming/Microsoft/Windows/Templates` → `~/Templates`;
+- a drive letter for every volume the builder had mounted, e.g. `e:` →
+  `/Users/<builder>/Library/Developer/…`, simulator runtimes, plus their raw `x::`
+  devices.
+
+So the rule is that every symlink under `drive_c/users/` with an absolute target
+becomes an empty real dir, and `dosdevices/` keeps only `c:`. Wine maps the player's
+own removable volumes again at run time. A later `wineboot -u` leaves the real dirs
+alone.
+
+The CX engine names the Windows user `crossover` whoever builds, so the builder's
+username doesn't appear either. Build steps that run unix-path installers still
+need `z:`: a new prefix drops it only after the build, and a reused one gets it back
+for the build.
 
 **Why:** saves and logs stay with the game (Rebel Galaxy wrote into the host's
 `~/Documents/My Games/` during docs/19 §5), nothing escapes into the user's real folders,
