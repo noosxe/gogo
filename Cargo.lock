@@ -1280,6 +1280,7 @@ dependencies = [
  "gogo-shims",
  "indicatif",
  "serde_json",
+ "tempfile",
  "tokio",
  "toml_edit",
  "tracing-subscriber",

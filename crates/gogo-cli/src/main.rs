@@ -2,6 +2,7 @@
 //! This crate is a thin shell over `gogo-core`; everything domain lives there.
 
 mod cli;
+mod lane;
 mod output;
 mod prompt;
 
@@ -197,7 +198,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
         Command::MacApp {
             sub: None,
             retarget: _,
-            installer,
+            input,
             from_depot,
             name,
             runtime,
@@ -224,7 +225,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
                 (None, _, _) => gogo::macapp::RendererChoice::Auto,
             };
             mac_app(
-                installer,
+                input,
                 from_depot,
                 name,
                 runtime,
@@ -1819,20 +1820,17 @@ fn write_completions(
 /// download engine's (NDJSON on stdout for `--json-progress`, one-liners on
 /// stderr otherwise, 03 §4).
 #[allow(clippy::too_many_arguments)]
-/// Resolve `--from-depot`'s value (design 15 §1): an existing directory is
-/// used directly (local, auth-free); otherwise a game selector resolves
-/// against the depot cache, with an optional auto-download (cold cache +
-/// `--yes` or an interactive confirm).
-async fn resolve_depot_tree(
+/// Resolve a game selector to its build source (#73, design 15 §1): the
+/// depot tree when a depot build exists (warm cache, else an auto-download
+/// with `--yes` or an interactive confirm), else — unless `--from-depot`
+/// asked for the depot lane explicitly — its downloaded offline installer.
+/// Returns `(installer, game_tree)`, exactly one `Some`.
+async fn resolve_game_source(
     selector: &str,
+    explicit: bool,
     auto: bool,
     machine: bool,
-) -> Result<std::path::PathBuf, AppError> {
-    let direct = std::path::Path::new(selector);
-    if direct.is_dir() {
-        return Ok(direct.to_path_buf());
-    }
-
+) -> Result<(Option<std::path::PathBuf>, Option<std::path::PathBuf>), AppError> {
     let built = AppContext::build(load_config_from_env()?, true)
         .await
         .map_err(|e| {
@@ -1861,8 +1859,45 @@ async fn resolve_depot_tree(
         return Err(AppError::Depot(gogo::gog::depot::DepotError::NoCacheDir));
     };
 
-    if let Some(tree) = find_game_tree(&root) {
-        return Ok(tree);
+    let mut facts = lane::GameFacts {
+        cached_tree: find_game_tree(&root),
+        ..Default::default()
+    };
+    if facts.cached_tree.is_none() {
+        facts.has_depot_build = gogo::gog::depot::has_public_build(session, game.id)
+            .await
+            .map_err(AppError::Depot)?;
+    }
+    if !facts.has_depot_build {
+        let download_root =
+            std::path::PathBuf::from(load_config_from_env()?.download.dir.unwrap_or_default());
+        let state = gogo::state::State::load().unwrap_or_default();
+        facts.installer = lane::downloaded_installer(&state.installs, game.id, &download_root);
+    }
+    match lane::pick(facts, explicit) {
+        lane::Lane::DepotCached(tree) => return Ok((None, Some(tree))),
+        lane::Lane::DepotDownload => {}
+        lane::Lane::InstallerFallback(exe) => {
+            eprintln!(
+                "gogo: {title} has no depot build — using its offline installer {}",
+                exe.display()
+            );
+            return Ok((Some(exe), None));
+        }
+        lane::Lane::NoSource => {
+            eprintln!(
+                "gogo: {title} has no depot build and no downloaded installer — \
+                 run `gogo download {selector}` first"
+            );
+            return Err(AppError::Usage);
+        }
+        lane::Lane::NoDepotBuild => {
+            eprintln!(
+                "gogo: {title} has no depot build — pass its installer instead \
+                 (`gogo mac-app {selector}` falls back to it)"
+            );
+            return Err(AppError::Usage);
+        }
     }
 
     // Cold cache: auto-download with consent (--yes headless, confirm on TTY).
@@ -1918,13 +1953,14 @@ async fn resolve_depot_tree(
         }
     };
     result.map_err(AppError::Depot)?;
-    find_game_tree(&root).ok_or_else(|| {
+    let tree = find_game_tree(&root).ok_or_else(|| {
         eprintln!(
             "gogo: depot download finished but no game tree found under {}",
             root.display()
         );
         AppError::Usage
-    })
+    })?;
+    Ok((None, Some(tree)))
 }
 
 /// The install tree inside a depot cache root: a single child directory, or
@@ -2225,7 +2261,7 @@ fn invoked_path() -> Option<std::path::PathBuf> {
 
 #[allow(clippy::too_many_arguments)]
 async fn mac_app(
-    installer: Option<std::path::PathBuf>,
+    input: Option<String>,
     from_depot: Option<String>,
     name: Option<String>,
     runtime: Option<crate::cli::RuntimeSource>,
@@ -2245,21 +2281,20 @@ async fn mac_app(
         ));
     }
 
-    // Design 15 §1: exactly one source — the positional installer or a depot
-    // tree (path or game selector resolved against the local depot cache).
+    // Design 15 §1 / #73: exactly one source. A game selector takes the
+    // depot lane (installer fallback when it has no depot build); an .exe
+    // path keeps the installer lane; a directory is a ready game tree.
     let machine = json || json_progress;
-    let (installer, game_tree) = match from_depot {
-        Some(sel) => {
-            let tree = resolve_depot_tree(&sel, yes, machine).await?;
-            (None, Some(tree))
+    let (installer, game_tree) = match lane::classify(input.as_deref(), from_depot.as_deref()) {
+        Some(lane::Input::Installer(p)) => (Some(p), None),
+        Some(lane::Input::Tree(t)) => (None, Some(t)),
+        Some(lane::Input::Game { selector, explicit }) => {
+            resolve_game_source(&selector, explicit, yes, machine).await?
         }
-        None => match installer {
-            Some(p) => (Some(p), None),
-            None => {
-                eprintln!("gogo: mac-app needs an INSTALLER path or --from-depot");
-                return Ok(cli::exit::USAGE);
-            }
-        },
+        None => {
+            eprintln!("gogo: mac-app needs a GAME or an INSTALLER path");
+            return Ok(cli::exit::USAGE);
+        }
     };
 
     let mut recipe = recipe
@@ -2275,7 +2310,7 @@ async fn mac_app(
         ) {
             eprintln!(
                 "gogo: --recipe is installer-lane only; depot mode bundles the \
-                 tree as-is (docs/design/15 D6)"
+                 tree as-is — pass the setup .exe to use a recipe (docs/design/15 D6)"
             );
             return Ok(cli::exit::USAGE);
         }

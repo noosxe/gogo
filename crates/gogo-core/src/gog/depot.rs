@@ -117,6 +117,16 @@ pub fn pick_build<'a>(items: impl IntoIterator<Item = &'a Build>) -> Option<&'a 
     })
 }
 
+/// Whether GOG publishes a public Windows build for `product_id`, i.e.
+/// whether the depot lane can serve it (`gogo mac-app`'s default, #73).
+pub async fn has_public_build(core: &Core, product_id: u64) -> Result<bool, DepotError> {
+    let builds = core
+        .get_builds(&product_id.to_string(), Platform::Windows, None)
+        .await
+        .map_err(DepotError::library)?;
+    Ok(pick_build(builds.items()).is_some())
+}
+
 /// Map an IETF code to the plain name the v1 (legacy XML) content system
 /// expects for `old_language`; unknown codes fall back to English.
 pub fn v1_language(code: &str) -> String {

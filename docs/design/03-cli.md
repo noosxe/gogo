@@ -114,7 +114,11 @@ the script pipes cleanly into an install. Install paths (bash): file-based
 Known quirk: macOS system bash 3.2 can garble `source <(gogo completions bash)` FIFO
 sourcing for any multi-write producer — use the file or eval path there.
 
-### `gogo mac-app <installer-path>`
+### `gogo mac-app <GAME|installer-path>`
+> **Amended 2026-10-23 (#73):** a game selector builds from the game's depot tree
+> (design 15), falling back to its downloaded installer when it has no depot build;
+> an installer path keeps the lane below. Lane rules: design 15 §1.
+
 Convert a downloaded Windows offline installer into a self-contained macOS
 `.app` (double-click launch, drag to Applications). Silent Inno Setup install
 into a bundled WINEPREFIX; Wine runtime resolved per design 10 §3 + design 12

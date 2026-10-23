@@ -131,31 +131,35 @@ pub enum Command {
         #[command(subcommand)]
         sub: ConfigSub,
     },
-    /// Convert a downloaded Windows installer into a self-contained macOS .app
-    /// (docs/design/10).
+    /// Build a self-contained macOS .app for a Windows game (docs/design/10):
+    /// from its depot build by default, else from its offline installer.
     #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
     MacApp {
         #[command(subcommand)]
         sub: Option<MacAppSub>,
-        /// Path to the GOG setup .exe (.bin siblings are picked up automatically).
+        /// A game (id, slug or part of the title) — built from its depot
+        /// build, or from its downloaded installer when it has none — or the
+        /// path to a GOG setup .exe (.bin siblings are picked up
+        /// automatically) or an installed game tree (docs/design/15 §1).
         #[arg(
-            value_name = "INSTALLER",
+            value_name = "GAME|INSTALLER",
             required_unless_present_any = ["from_depot", "retarget"],
             conflicts_with_all = ["from_depot", "retarget"]
         )]
-        installer: Option<std::path::PathBuf>,
+        input: Option<String>,
         /// Point an existing game at another runtime or renderer without
         /// rebuilding: writes `--runtime` / `--renderer` into the game's user
         /// override file (L4, design 16 decision 7); the next launch applies
         /// it. `auto` drops the override.
         #[arg(long, value_name = "BUNDLE|GOGID", conflicts_with = "from_depot")]
         retarget: Option<String>,
-        /// Build from a depot (Model B) game tree instead of running an
-        /// installer: an existing directory, or a game selector resolved
-        /// against the local depot cache (docs/design/15).
+        /// Depot lane only: like the positional GAME, but never falls back
+        /// to the installer lane; also takes a game tree directory
+        /// (docs/design/15).
         #[arg(long, value_name = "GAME|PATH")]
         from_depot: Option<String>,
-        /// Bundle title (default: derived from the installer file name).
+        /// Bundle title (default: the game's name, or derived from the
+        /// installer file name).
         #[arg(long)]
         name: Option<String>,
         /// Wine runtime source (docs/design/10 §3).
@@ -604,5 +608,43 @@ mod tests {
         assert!(a.with_dlcs && a.dry_run && a.json_progress);
         assert_eq!(a.language, "fr-FR");
         assert_eq!(a.limit.as_deref(), Some("4MiB/s"));
+    }
+
+    /// `(input, from_depot)` of a parsed `gogo mac-app …` build.
+    fn mac_app_source(args: &[&str]) -> (Option<String>, Option<String>) {
+        let cli = Cli::try_parse_from(args).unwrap();
+        let Command::MacApp {
+            sub: None,
+            input,
+            from_depot,
+            ..
+        } = cli.command
+        else {
+            panic!("expected a mac-app build");
+        };
+        (input, from_depot)
+    }
+
+    #[test]
+    fn mac_app_takes_a_game_or_an_installer() {
+        // #73: a game selector is the positional argument (depot lane).
+        assert_eq!(
+            mac_app_source(&["gogo", "mac-app", "pharaoh", "--yes"]),
+            (Some("pharaoh".into()), None)
+        );
+        assert_eq!(
+            mac_app_source(&["gogo", "mac-app", "Downloads/setup_pharaoh_2.1.exe"]),
+            (Some("Downloads/setup_pharaoh_2.1.exe".into()), None)
+        );
+        // --from-depot stays as the explicit alias.
+        assert_eq!(
+            mac_app_source(&["gogo", "mac-app", "--from-depot", "1207659046"]),
+            (None, Some("1207659046".into()))
+        );
+        // Both at once, or neither, is a usage error.
+        assert!(
+            Cli::try_parse_from(["gogo", "mac-app", "pharaoh", "--from-depot", "pharaoh"]).is_err()
+        );
+        assert!(Cli::try_parse_from(["gogo", "mac-app"]).is_err());
     }
 }

@@ -17,12 +17,32 @@ Everything after the "install" step is shared with the offline lane (docs/18 §1
 
 ## 1. Command surface
 
+> **Amended 2026-10-23 (#73):** the positional argument is `GAME|INSTALLER`, and a
+> game selector there takes the depot lane by default. The lane is picked from the
+> argument alone, before any lookup:
+>
+> | argument | lane |
+> |---|---|
+> | an existing file, or any path ending in `.exe` | installer (as before) |
+> | an existing directory | depot, used directly (same as `--from-depot DIR`) |
+> | anything else: a game selector (id/slug/fuzzy) | depot, with the fallback below |
+>
+> For a selector: a warm depot cache wins; otherwise GOG is asked for a public
+> Windows build (`depot::has_public_build`), and when one exists the cold-cache rules
+> below apply. With **no depot build**, the game falls back to the installer lane:
+> its newest downloaded base-game `setup_*.exe` from `state.json` (resolved against
+> `download.dir`), announced with a notice on stderr; with no such download it is a
+> usage error pointing at `gogo download <GAME>`. `--from-depot` stays as the
+> explicit form: same resolution, but **no fallback** (no depot build → usage
+> error). The pure decisions live in `gogo-cli/src/lane.rs`.
+
 ```
+gogo mac-app <GAME|INSTALLER|DIR> [--name NAME] [--runtime …] [--out DIR] …
 gogo mac-app --from-depot <GAME|PATH> [--name NAME] [--runtime …] [--out DIR]
                  [--ddraw-wrapper|--no-ddraw-wrapper] [--yes] [--json-progress|--json]
 ```
 
-- `--from-depot` conflicts with the positional `INSTALLER` (usage error if both).
+- `--from-depot` conflicts with the positional `GAME|INSTALLER` (usage error if both).
 - `GAME|PATH`: an existing directory → used directly (local, auth-free, testable).
   Otherwise a game selector (id/slug/fuzzy, resolved with a session) → depot cache
   `~/Library/Caches/gogo/depot/<id>/<install-dir>` (design 14 D2).
@@ -32,7 +52,8 @@ gogo mac-app --from-depot <GAME|PATH> [--name NAME] [--runtime …] [--out DIR]
 - Cold cache (selector form): on a TTY, confirm-download prompt (default yes) shows
   the depot plan sizes; headless requires `--yes` (auto-downloads) or fails with a
   "run `gogo depot <GAME>` first" hint. Download uses the design 14 driver as-is.
-- `--recipe`: only `none` is accepted in depot mode — any other value is a usage
+- `--recipe`: only `none` is accepted in depot mode (a selector that resolves to the
+  depot lane included; pass the `.exe` to use a recipe) — any other value is a usage
   error; `auto`/absent behaves as `none` (recipes are installer-shaped, docs/18 §3).
 
 ## 2. D2 — Core data model (gogo-core, minimal diff)
