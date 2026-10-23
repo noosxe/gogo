@@ -2079,6 +2079,50 @@ fn mac_app_sub(sub: crate::cli::MacAppSub) -> Result<i32, AppError> {
             );
             Ok(cli::exit::OK)
         }
+        crate::cli::MacAppSub::Doctor {
+            target,
+            stop_leftovers,
+            json,
+        } => {
+            use gogo::macapp::doctor;
+            let report = doctor::doctor(
+                &target,
+                &doctor::DoctorOptions {
+                    host: doctor::Host::detect(),
+                    stop_leftovers,
+                },
+            )?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "gogid": report.gogid,
+                        "bundle": report.bundle,
+                        "ok": report.ok(),
+                        "findings": report.findings,
+                    })
+                );
+            } else {
+                for f in &report.findings {
+                    let hint = f.hint.as_ref().map(|h| format!(" (fix: {h})"));
+                    println!(
+                        "{:<4} {:<9} {}{}",
+                        f.level.as_str(),
+                        f.check,
+                        f.message,
+                        hint.unwrap_or_default()
+                    );
+                    for d in &f.detail {
+                        println!("               | {d}");
+                    }
+                }
+            }
+            Ok(if report.ok() {
+                cli::exit::OK
+            } else {
+                cli::exit::FAILED
+            })
+        }
         crate::cli::MacAppSub::NextRenderer { gogid, dry_run } => {
             match gogo::macapp::setup::next_renderer(&gogid, dry_run)? {
                 Some(next) => {

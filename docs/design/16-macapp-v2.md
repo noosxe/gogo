@@ -428,7 +428,8 @@ beats the import heuristic because it comes from the vendor.
   parsed but not applied yet. `GOGO_COMPAT_DIR=<dir>` shadows the compiled-in DB with
   `<dir>/<gogid>.toml` files (still L3): for trying an entry before contributing it,
   and for the integration test (`compat_entry_drives_build_and_setup`).
-- `gogo mac-app doctor` (#79) shows the winning layer for each field.
+- `gogo mac-app compat <gogid>` shows the winning layer for each field; `gogo mac-app
+  doctor` (§8.3) checks that what they resolve to is there and works.
 
 ## 6. Decision 6: store layout and GC
 
@@ -752,6 +753,36 @@ Tests replace the dialog with `GOGO_LAUNCHER_DIALOG=<cmd>`. The command gets the
 title, the message and the button labels, and prints the label it chose.
 `GOGO_LAUNCHER_NO_DIALOG` without it only logs the early exit.
 
+### 8.3 `gogo mac-app doctor <bundle|gogid>` (#79)
+
+One command that says whether a game can work on this Mac (docs/19 §6.6). It reads; it
+never launches the game, never runs setup and never downloads. Each check prints one
+line, `ok`, `warn` or `fail`, with a fix hint for anything not ok (`--json`: the same
+findings as objects). Exit 1 when a check fails; warnings don't fail it.
+
+| check | fails / warns when | hint |
+|---|---|---|
+| `bundle` | fail: no state and no bundle path, or `gogo-launch.toml` unreadable | rebuild |
+| `codesign` | fail: `codesign --verify --deep --strict` on the `.app` | rebuild |
+| `compat` | warn: the game's status is broken (#74/#75); else the status line | `mac-app compat` |
+| `runtime` | fail: the effective runtime (bundle TOML + L4, as setup resolves it) isn't in the store or doesn't probe (`wine --version`). warn: a `path:` host Wine, Homebrew or GPTK (#125) | `runtimes install`, `--retarget --runtime winecx` |
+| `renderer` | fail: DXMT/D3DMetal's payload or derived runtime (`<ver>+<renderer>-<rver>`) missing, or its overlay file (`lib/wine/x86_64-unix/winemetal.so`) absent; cnc-ddraw without `ddraw.dll` | setup, or prune the derived runtime |
+| `d3dmetal` | warn: D3DMetal is the renderer, or "Try next renderer"'s next one, and `[mac_app] d3dmetal` isn't `"yes"` (#71). Shown only then | the config key |
+| `stamp` | fail: no prefix, or setup never completed. warn: the stamp (§2.1) is stale; the next launch runs setup | `mac-app setup` |
+| `links` | fail: a symlink in the prefix leads out of the state dir (decision 4) | `mac-app setup` |
+| `rosetta` | fail: Apple silicon without Rosetta 2 | `softwareupdate --install-rosetta` |
+| `processes` | warn: Wine processes in the prefix with no live launcher (`.launchers/<pid>`, #103) | `--stop-leftovers` |
+| `log` | warn: the latest run log (§8.1) has a non-zero `# exit:` or none; the output tail is attached | the log path |
+
+A prefix's processes are its wineserver (its cwd is `/tmp/.wine-<uid>/server-<dev>-<ino>`
+of the prefix, as the launcher finds it) and any process named `*wine*` or `*.exe`
+whose cwd is inside the prefix (`lsof -d cwd` on macOS, `/proc` elsewhere). The name
+filter keeps a shell that happens to sit in the prefix out of it. While a launcher of
+the game is alive they belong to the running game and the check is ok.
+`--stop-leftovers` runs the launcher's teardown for that prefix only: `wineserver -k`
+with the runtime setup last applied, then SIGKILL whatever is still there. It touches
+no other prefix and nothing else in the state dir.
+
 ## 9. Testing (08 conventions)
 
 - Unit: TOML ⇄ `launch.conf` projection (golden), stamp computation matching a
@@ -781,6 +812,14 @@ title, the message and the button labels, and prints the label it chose.
   Template-subdir install (refused without consent, only the kit extracted, Apple's
   files and notice kept) and the derived runtime (host libs next to the unix libs,
   symlinks kept).
+- Integration (#79): one built, set-up game (store winecx, DXMT derived runtime, stub
+  `codesign`, a Rosetta marker file) is all green. Then each check fails alone: a
+  failing codesign stub, no Rosetta, the base runtime moved away, the overlay file
+  removed, the prefix moved away, a `/Users/…` link in the prefix, the bundle moved
+  away; and warns alone: a broken L3 entry, a run log with `# exit: 53`, an L4 edit
+  (stale stamp; with D3DMetal without consent; with a `path:` runtime). A stub Wine
+  process (a copy of the test binary named `wine-stub`, cwd in the prefix) is reported,
+  spared while a live launcher record exists, and stopped by `--stop-leftovers`.
 - VM (#68): `scripts/vm-test.sh` gains a store and state-dir seeding step, since a v2
   bundle alone isn't enough to launch.
 
@@ -802,7 +841,8 @@ title, the message and the button labels, and prints the label it chose.
    `C:\GOG\Treasure Adventure Game\…exe` through the relative link with no path
    errors. A game that canonicalizes its own path hasn't been tried yet.
 5. **Migrating today's fat bundles:** not planned. They keep working as they are, and a
-   rebuild produces a v2 bundle. Decide whether `doctor` should say so.
+   rebuild produces a v2 bundle. *#79:* `doctor` reports a bundle without
+   `gogo-launch.toml` as a `bundle` failure with "rebuild" as the hint.
 6. **Removing a game** (`games/<gogid>/` holds saves): command name and confirmation
    flow aren't designed yet.
 7. **L3 freshness:** when gogo fetches a newer compat DB, should it re-run `setup` for
