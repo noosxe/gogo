@@ -16,8 +16,10 @@ re-checked).
   (**verified**).
 - **Tested (§3):** CX 26.3 passes headless `wineboot`, the depot, teardown,
   gog-support and DXMT VM cases, and the Pharaoh installer itself. But installer-lane
-  Pharaoh spins with no window in the VM, where CX24 shows it. So `winecx26` is a
-  non-default catalog entry, waiting for a host pass.
+  Pharaoh spins with no window in the VM, where CX24 shows it. The user's host pass
+  (§3.4) then passed all five cases: Pharaoh works on real hardware, Snake Core goes
+  fullscreen where CX24 did not, and Rebel Galaxy's 90 s run was too short to compare. `winecx26` is a
+  non-default catalog entry; switching the default is the next decision.
 - **There is a CX 26.3 (Wine 11.0) engine:** Highball's `highball-engine`. CI builds it
   from CodeWeavers' LGPL `crossover-sources-26.3.0.tar.gz`, pinned by sha256, plus 24
   Highball patches. It is LGPL-2.1 and each release asset is sha256-pinned. This is the
@@ -197,18 +199,33 @@ behaves differently (the VM's paravirtual GPU is no Apple GPU) is for the host p
 it stands, **CX 26.3 is not "at least as good" as CX24**: `winecx26` stays a selectable,
 non-default entry.
 
+### 3.4 Host pass (2026-10-24, run by the user, M4 Pro, macOS 27.0.1)
+
+| Case | Renderer / runtime | status | Markers | Eyes on (render / input / audio) | Notes |
+|---|---|---|---|---|---|
+| neo-cab-dxmt | dxmt/v0.80, `winecx26/…+dxmt-v0.80` | ok | FL 11_1; Unity `Renderer: Apple M4 Pro` | ✓ / ✓ / ✓ | same as CX24 |
+| neo-cab-d3dmetal | d3dmetal/4.0b3, `winecx26/…+d3dmetal-4.0b3` | ok | Unity `Direct3D 11.0 [level 11.1]`, `AMD Compatibility Mode` | ✓ / ✓ / ✓ | same as CX24 |
+| rebel-galaxy-dxmt | dxmt/v0.80, `winecx26/…+dxmt-v0.80` | ok (harness) | FL 11_0; OGRE D3D11 created; 163 `Class linkage` | ✗ / – / ✗ | **inconclusive**: no menu or music within the 90 s run; `ogre.log` stops at the save path 3 s in, then 87 s silent. On CX24, DXMT reached the menu only after ~4 min of shader compiling (compat note), so this run ended too early to compare. No `tested` row |
+| snake-core-gl | wined3d label (OpenGL), `winecx26/26.3-20261014` | ok | `opengl32` builtin, no d3d | ✓ / ✓ / ✓ | proper fullscreen (3024×1890); the earlier CX24 run did not go fullscreen |
+| pharaoh (installer lane) | cnc-ddraw/7.1.0.0, `winecx26/26.3-20261014` | ok | `ddraw.dll` native | ✓ (user: "works") | 2,045 `NtGdiDdDDIOpenAdapterFromHdc` stub lines, harmless here: **the §3.3 VM hang is VM-only** (paravirtual GPU) |
+
+On real hardware `winecx26` is at least as good as CX24 in every judged case, and Snake
+Core is better. Rebel Galaxy needs a run of 5 minutes or more to compare: `--secs 300`.
+The VM's Pharaoh hang is a VM limitation, like the missing Metal 3 and OpenGL in
+docs/vm-testing.md.
+
 ## 4. Next steps
 
-1. `winecx26` is now a **non-default** catalog entry (§3). Still to do: the user's host
-   pass (`scripts/host-pass.sh`, with `--runtime winecx26`): Neo Cab on DXMT and D3DMetal,
-   Snake Core on OpenGL, Rebel Galaxy 32-bit, and Pharaoh from the installer, the VM
-   regression above. The default pin moves only if CX 26.3 is at least as good on all of
-   them. If Pharaoh also spins on the host, look at the d3dkmt loop first: it may be
-   one of Highball's patches or the CX 26.3 tree, and the place to report it is
-   highball-engine.
-2. No second source exists for `winecx/24.0.7_7`. To protect against the Sikarugir asset
+1. `winecx26` passed the host pass (§3.4). Making it the default is a separate
+   decision and a separate change, kept apart from this entry: `DEFAULT_RUNTIME`, the
+   `[lanes]` compat tables and the smoke set's `winecx/` checks all name CX24 today.
+   Keep `winecx` in the catalog as the N-1 rollback.
+2. The VM can't judge installer-lane Pharaoh on `winecx26`: it spins in a d3dkmt
+   `OpenAdapterFromHdc` loop under the paravirtual GPU. Judge it on the host, like
+   DXMT and OpenGL.
+3. No second source exists for `winecx/24.0.7_7`. To protect against the Sikarugir asset
    disappearing, keep the store's N-1 copy (docs/19 §6.1). The other option is building CX
    24.0.7 from CodeWeavers' tarball, using `highball-engine`'s workflow as the template.
    That is a larger job; file it only if the asset goes away.
-3. Re-check Sikarugir `Engines` for a `WineCX25`/`WineCX26` asset when the next Sikarugir
+4. Re-check Sikarugir `Engines` for a `WineCX25`/`WineCX26` asset when the next Sikarugir
    Template ships.

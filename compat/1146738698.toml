@@ -6,5 +6,8 @@
 title  = "Carmageddon TDR 2000"
 status = "boots"
 notes  = "VM: reaches its first-run dialog; the 3D path past it needs a host pass (no OpenGL in the VM)"
-tested = [{ runtime = "winecx/24.0.7_7", host = "vm/macos-27.0", date = 2026-10-23 }]
+tested = [
+  { runtime = "winecx/24.0.7_7", host = "vm/macos-27.0", date = 2026-10-23 },
+  { runtime = "winecx26/26.3-20261014", host = "vm/macos-27.0", date = 2026-10-24 },
+]
 source = "gogo-vm"

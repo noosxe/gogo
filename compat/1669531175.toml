@@ -7,5 +7,7 @@ notes  = "host pass, eyes on: renders, input and audio fine on DXMT and on D3DMe
 tested = [
   { runtime = "winecx/24.0.7_7+d3dmetal-4.0b3", host = "m4pro/macos-27.0.1", date = 2026-10-23 },
   { runtime = "winecx/24.0.7_7+dxmt-v0.80", host = "m4pro/macos-27.0.1", date = 2026-10-23 },
+  { runtime = "winecx26/26.3-20261014+d3dmetal-4.0b3", host = "m4pro/macos-27.0.1", date = 2026-10-24 },
+  { runtime = "winecx26/26.3-20261014+dxmt-v0.80", host = "m4pro/macos-27.0.1", date = 2026-10-24 },
 ]
 source = "gogo-host"
