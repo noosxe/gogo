@@ -592,6 +592,30 @@ So the recommendation (§6) keeps the **runtime outside the bundle by
 reference**, switchable per bundle without a rebuild, and treats "self-contained"
 as *self-contained on this Mac* rather than *copy the engine into every app*.
 
+### 7.4 Status as of 2026-10-24 (#81 watch)
+
+Full table: [#81 comment](https://github.com/noosxe/gogo/issues/81#issuecomment-6386011510).
+Only the changes since §7.1 are listed.
+
+- **Apple.** No macOS 28 beta yet. An Apple games engineer said on the
+  [developer forums](https://developer.apple.com/forums/thread/830692) (June 2026) that
+  "x86_64 macOS games should continue to work as they do on macOS 26", previewable on
+  macOS 27 with `game-test-tool`. This covers native macOS games; Wine is not addressed,
+  so §8.2 Q1 stays open. **verified** (forum page); `game-test-tool` usage unread.
+- **CrossOver 27.** Still no source drop (the source page lists only 26.3.0) and no
+  CodeWeavers post after 2026-08-31. **verified**
+- **Highball arm64 engine.** `highball-engine` now publishes arm64 releases (Wine 11.18 +
+  FEX 2610, latest 2026-10-20), but it runs only through the entitled loader inside
+  Highball.app (§8.2 Q2, docs/20 §1.3). Its README claims 32-bit and 64-bit x86 programs
+  run within 20% of Rosetta on a compute loop (FEX WoW64): **reported**, not run by us.
+  Irz-Z/wine-macos-native has `v0.1.0` (2026-10-17); 32-bit still in progress.
+- **Wine upstream.** Shanks' ARM64 macOS MRs are merging (!11402, !11668); !12257 was closed.
+- **Renderers.** DXMT still has no release after v0.80 (2026-04-23), so no `arm64ec`
+  artefact. GPTK 4 is Apple-silicon-focused, but the D3DMetal binary's architecture is
+  **unknown** (**reported** only).
+- **Unchanged.** Gcenx (x86_64 only, 11.18), Sikarugir Engines (`v1.0`), upstream FEX
+  (no Darwin support).
+
 ## 8. Open questions, known gaps, and what this means for #53–#56
 
 ### 8.1 Bundle bugs filed under epic #50
