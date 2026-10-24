@@ -13,9 +13,12 @@ source = "gogo-host"
 
 # setup_pharaoh_gold_2.1.0.15.exe (#134): the VM smoke run reached the title
 # screen with no CD prompt; the host pass was judged playable by eye.
+# winecx26 (docs/20 §3): plays on the host; in the VM it spins in a d3dkmt
+# OpenAdapterFromHdc loop with no window, so it has no VM row.
 [lanes.installer]
 status = "plays"
 tested = [
   { runtime = "winecx/24.0.7_7", host = "vm/macos-27.0", date = 2026-10-23 },
   { runtime = "winecx/24.0.7_7", host = "m4pro/macos-27.0.1", date = 2026-10-23 },
+  { runtime = "winecx26/26.3-20261014", host = "m4pro/macos-27.0.1", date = 2026-10-24 },
 ]
