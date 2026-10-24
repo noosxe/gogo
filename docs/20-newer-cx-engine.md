@@ -2,7 +2,7 @@
 
 **Research date:** 2026-10-24
 **Builds on:** docs/19 §3.1, §6.1 (watch items), §7, §8.2 Q4; catalog arch fields (#82)
-**Status:** research plus a non-default catalog entry, `winecx26` (§3). Facts are marked **verified** (GitHub
+**Status:** research; `winecx26` (§3) is the default runtime since 2026-10-24. Facts are marked **verified** (GitHub
 API, a source read, or a binary inspection) or **reported** (the project's own README, not
 re-checked).
 
@@ -18,8 +18,8 @@ re-checked).
   gog-support and DXMT VM cases, and the Pharaoh installer itself. But installer-lane
   Pharaoh spins with no window in the VM, where CX24 shows it. The user's host pass
   (§3.4) then passed all five cases: Pharaoh works on real hardware, Snake Core goes
-  fullscreen where CX24 did not, and Rebel Galaxy's 90 s run was too short to compare. `winecx26` is a
-  non-default catalog entry; switching the default is the next decision.
+  fullscreen where CX24 did not, and Rebel Galaxy's 90 s run was too short to compare. `winecx26` is the
+  default runtime since 2026-10-24, with `winecx` (CX24) as the rollback.
 - **There is a CX 26.3 (Wine 11.0) engine:** Highball's `highball-engine`. CI builds it
   from CodeWeavers' LGPL `crossover-sources-26.3.0.tar.gz`, pinned by sha256, plus 24
   Highball patches. It is LGPL-2.1 and each release asset is sha256-pinned. This is the
@@ -216,10 +216,10 @@ docs/vm-testing.md.
 
 ## 4. Next steps
 
-1. `winecx26` passed the host pass (§3.4). Making it the default is a separate
-   decision and a separate change, kept apart from this entry: `DEFAULT_RUNTIME`, the
-   `[lanes]` compat tables and the smoke set's `winecx/` checks all name CX24 today.
-   Keep `winecx` in the catalog as the N-1 rollback.
+1. `winecx26` passed the host pass (§3.4) and is the default since 2026-10-24
+   (`DEFAULT_RUNTIME`, listed first in the catalog). `winecx` stays as the N-1 rollback:
+   `gogo mac-app --retarget <bundle|gogid> --runtime winecx`. Existing bundles keep the
+   runtime they were built with until they're rebuilt or retargeted.
 2. The VM can't judge installer-lane Pharaoh on `winecx26`: it spins in a d3dkmt
    `OpenAdapterFromHdc` loop under the paravirtual GPU. Judge it on the host, like
    DXMT and OpenGL.

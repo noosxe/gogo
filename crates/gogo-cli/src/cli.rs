@@ -375,7 +375,8 @@ pub enum RendererArg {
     Auto,
     /// Wine's own Direct3D-on-OpenGL.
     Wined3d,
-    /// D3D10/11 on Metal (needs the winecx runtime and a Metal 3 GPU).
+    /// D3D10/11 on Metal (needs a CrossOver-source runtime, winecx26 or winecx,
+    /// and a Metal 3 GPU).
     Dxmt,
     /// DirectDraw wrapper for 2D classics.
     #[value(name = "cnc-ddraw")]
@@ -408,11 +409,11 @@ pub enum RuntimeSource {
     Auto,
     /// Homebrew wine-crossover.
     Brew,
-    /// Cached/downloaded CrossOver-source engine `winecx` with its
-    /// Frameworks/ (the default track, docs/19 §6.1).
+    /// Cached/downloaded CrossOver-24-source engine `winecx` with its
+    /// Frameworks/ (the rollback track, docs/19 §6.1).
     Winecx,
     /// Cached/downloaded CrossOver-26.3-source engine `winecx26` (Highball
-    /// build, Wine 11.0): the candidate next pin, not the default (docs/20).
+    /// build, Wine 11.0) with its Frameworks/: the default track (docs/20).
     Winecx26,
     /// Cached/downloaded wine-staging (design 12 catalog; the alternate track).
     Staging,

@@ -7,7 +7,7 @@ renderer and fixes per game.
 
 - **Platforms:** Linux and macOS. `mac-app` is macOS-only.
 - **Wine runtimes:** `gogo runtimes` downloads, verifies, and caches official
-  macOS Wine builds (the CrossOver-source `winecx` default, staging/devel/stable)
+  macOS Wine builds (the CrossOver-source `winecx26` default, `winecx` rollback, staging/devel/stable)
   plus a pinned `winetricks` — `mac-app` picks one for you (or takes
   `--runtime`), no Homebrew required —
   see [`docs/design/12`](docs/design/12-runtime-catalog-and-interactive-flow.md).
@@ -97,10 +97,9 @@ back); deleting `games/<gogid>/` removes the game, prefix and saves, and the
 **No questions asked.** Compatibility comes in layers, each overriding the one
 below (docs/19 §6):
 
-- runtime: the CrossOver-source `winecx` 24.0.7_7 engine from gogo's store
-  (while none is cached, a Homebrew Wine is used instead; `--runtime winecx`
-  forces the download; `--runtime winecx26` tries the CrossOver 26.3 candidate,
-  docs/20);
+- runtime: the CrossOver-26.3-source `winecx26` engine from gogo's store
+  (docs/20; while none is cached, a Homebrew Wine is used instead; `--runtime
+  winecx26` forces the download; `--runtime winecx` is the CrossOver 24 rollback);
 - renderer from the game's PE imports: DXMT for D3D10/11, wined3d for D3D9 and
   older, cnc-ddraw for 2D DirectDraw, plus winetricks verbs for the d3dx /
   d3dcompiler DLLs it imports;
@@ -125,7 +124,7 @@ config.
 
 ```sh
 gogo mac-app --retarget <bundle|gogid> --renderer wined3d       # writes the override file
-gogo mac-app --retarget <bundle|gogid> --runtime winecx --runtime-version 24.0.7_7
+gogo mac-app --retarget <bundle|gogid> --runtime winecx --runtime-version 24.0.7_7   # roll back to CX24
 gogo mac-app --retarget <bundle|gogid> --renderer auto          # drop the override
 gogo mac-app next-renderer <gogid> --dry-run                    # what "Try next renderer" would pick
 ```

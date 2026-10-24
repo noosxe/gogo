@@ -390,17 +390,13 @@ fn recipe_wine_pin_recommends_cached_catalog_runtime() {
     let installer = tmp.path().join("setup_testgame_1.0.exe");
     std::fs::write(&installer, b"MZ").unwrap();
 
-    // A cached winecx store entry (manifest + probeable tree in design 16's
+    // A cached winecx26 store entry (the default track) (manifest + probeable tree in design 16's
     // `{engine,Frameworks}` layout).
     let home = tmp.path().join("home");
-    let tree = home.join("runtimes/winecx/24.0.7_7/engine/bin");
+    let tree = home.join("runtimes/winecx26/26.3-20261014/engine/bin");
     std::fs::create_dir_all(&tree).unwrap();
-    std::fs::create_dir_all(home.join("runtimes/winecx/24.0.7_7/Frameworks")).unwrap();
-    std::fs::write(
-        tree.join("wine"),
-        "#!/bin/sh\necho 'wine-9.0 (SikarugirCX 24.0.7)'\n",
-    )
-    .unwrap();
+    std::fs::create_dir_all(home.join("runtimes/winecx26/26.3-20261014/Frameworks")).unwrap();
+    std::fs::write(tree.join("wine"), "#!/bin/sh\necho 'wine-11.0'\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -410,7 +406,7 @@ fn recipe_wine_pin_recommends_cached_catalog_runtime() {
     std::fs::create_dir_all(home.join("runtimes")).unwrap();
     std::fs::write(
         home.join("runtimes/manifest.json"),
-        r#"[{"id":"winecx","version":"24.0.7_7","sha256":"0","fetched_at":"2026-01-01T00:00:00Z","upstream_url":"x","entry_rel":"engine/bin/wine","bytes":16}]"#,
+        r#"[{"id":"winecx26","version":"26.3-20261014","sha256":"0","fetched_at":"2026-01-01T00:00:00Z","upstream_url":"x","entry_rel":"engine/bin/wine","bytes":16}]"#,
     )
     .unwrap();
 
@@ -459,13 +455,13 @@ fn recipe_wine_pin_recommends_cached_catalog_runtime() {
     let sel = plan.recipe.as_ref().expect("recipe selected at plan time");
     assert_eq!(sel.wine_version.as_deref(), Some("lutris-7.2-2"));
     assert!(!sel.from_search, "file recipes are pinned, not searched");
-    // The ladder: recommendation (the default track, winecx) satisfied from
+    // The ladder: recommendation (the default track, winecx26) satisfied from
     // the store cache.
-    assert_eq!(plan.runtime.version, "wine-9.0 (SikarugirCX 24.0.7)");
-    assert_eq!(plan.runtime.mode, RuntimeMode::Catalog("winecx".into()));
+    assert_eq!(plan.runtime.version, "wine-11.0");
+    assert_eq!(plan.runtime.mode, RuntimeMode::Catalog("winecx26".into()));
     assert_eq!(
         macapp::launch::frameworks_of(&plan.runtime),
-        Some(home.join("runtimes/winecx/24.0.7_7/Frameworks"))
+        Some(home.join("runtimes/winecx26/26.3-20261014/Frameworks"))
     );
     assert_eq!(plan.runtime_downloaded, None);
     assert!(
@@ -1002,7 +998,7 @@ fn recipes_list_and_show_inspection_path() {
     let pin = gogo::macapp::lutris::wine_version(&inst.script);
     assert_eq!(pin.as_deref(), Some("lutris-ge-proton9-20"));
     let rec = gogo::macapp::catalog::recommend_for_wine(pin.as_deref());
-    assert_eq!(rec.id, "winecx");
+    assert_eq!(rec.id, gogo::macapp::catalog::DEFAULT_RUNTIME);
     assert!(rec.notice.is_some(), "Linux-only pin carries the notice");
 
     let ctx = macapp::inspection_ctx(&inst.script);
@@ -1245,7 +1241,7 @@ fn search_recipe_failure_degrades_pinned_stays_fatal() {
 #[test]
 fn runtime_menu_is_opt_in_with_easy_default() {
     // §5 (amended 2026-10-23, #76): without the menu flag an interactive run
-    // takes the ladder hit (cached winecx, the default track; a cached
+    // takes the ladder hit (cached winecx26, the default track; a cached
     // wine-staging is not picked) with no prompt. With it, the menu lists
     // every option, the easy pick is preselected (spec.default + "· easy"),
     // and choosing it resolves from the store.
@@ -1268,12 +1264,12 @@ fn runtime_menu_is_opt_in_with_easy_default() {
     std::fs::write(
         home.join("runtimes/manifest.json"),
         r#"[{"id":"wine-staging","version":"9.0","sha256":"0","fetched_at":"2026-01-01T00:00:00Z","upstream_url":"x","entry_rel":"bin/wine","bytes":16},
-            {"id":"winecx","version":"24.0.7_7","sha256":"0","fetched_at":"2026-01-01T00:00:00Z","upstream_url":"x","entry_rel":"engine/bin/wine","bytes":16}]"#,
+            {"id":"winecx26","version":"26.3-20261014","sha256":"0","fetched_at":"2026-01-01T00:00:00Z","upstream_url":"x","entry_rel":"engine/bin/wine","bytes":16}]"#,
     )
     .unwrap();
-    let cx = home.join("runtimes/winecx/24.0.7_7/engine/bin");
+    let cx = home.join("runtimes/winecx26/26.3-20261014/engine/bin");
     std::fs::create_dir_all(&cx).unwrap();
-    std::fs::write(cx.join("wine"), "#!/bin/sh\necho wine-9.0-cx\n").unwrap();
+    std::fs::write(cx.join("wine"), "#!/bin/sh\necho wine-11.0-cx\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1333,7 +1329,7 @@ fn runtime_menu_is_opt_in_with_easy_default() {
     drop(guard);
 
     assert!(no_menu, "no runtime menu unless asked for");
-    let store_root = home.join("runtimes/winecx/24.0.7_7");
+    let store_root = home.join("runtimes/winecx26/26.3-20261014");
     assert!(
         quiet.runtime.wine.starts_with(&store_root),
         "the ladder picks the cached default track: {}",
@@ -1351,7 +1347,7 @@ fn runtime_menu_is_opt_in_with_easy_default() {
     );
     assert_eq!(menu.default, 0, "easy pick preselected");
     assert!(
-        menu.items[0].contains("winecx") && menu.items[0].contains("· easy"),
+        menu.items[0].contains("winecx26") && menu.items[0].contains("· easy"),
         "easy marker on the ladder pick: {:?}",
         menu.items[0]
     );
@@ -1365,7 +1361,7 @@ fn runtime_menu_is_opt_in_with_easy_default() {
     // from_store keeps the literal GOGO_HOME path (no canonicalization).
     assert!(
         plan.runtime.wine.starts_with(&store_root),
-        "default choice resolves to the cached winecx tree: {}",
+        "default choice resolves to the cached winecx26 tree: {}",
         plan.runtime.wine.display()
     );
 }
@@ -3651,13 +3647,13 @@ fn compat_runtime_pins_the_auto_ladder() {
     let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");
-    for (ver, label) in [("24.0.7_7", "24.0.7"), ("24.0.6_1", "24.0.6")] {
-        let bin = home.join(format!("runtimes/winecx/{ver}/engine/bin"));
+    for (ver, label) in [("26.3-20261014", "20261014"), ("26.3-20261006", "20261006")] {
+        let bin = home.join(format!("runtimes/winecx26/{ver}/engine/bin"));
         std::fs::create_dir_all(&bin).unwrap();
-        std::fs::create_dir_all(home.join(format!("runtimes/winecx/{ver}/Frameworks"))).unwrap();
+        std::fs::create_dir_all(home.join(format!("runtimes/winecx26/{ver}/Frameworks"))).unwrap();
         std::fs::write(
             bin.join("wine"),
-            format!("#!/bin/sh\necho 'wine-9.0 (SikarugirCX {label})'\n"),
+            format!("#!/bin/sh\necho 'wine-11.0 (build {label})'\n"),
         )
         .unwrap();
         use std::os::unix::fs::PermissionsExt as _;
@@ -3665,15 +3661,15 @@ fn compat_runtime_pins_the_auto_ladder() {
     }
     std::fs::write(
         home.join("runtimes/manifest.json"),
-        r#"[{"id":"winecx","version":"24.0.7_7","sha256":"0","fetched_at":"2026-02-01T00:00:00Z","upstream_url":"x","entry_rel":"engine/bin/wine","bytes":16},
-{"id":"winecx","version":"24.0.6_1","sha256":"0","fetched_at":"2026-01-01T00:00:00Z","upstream_url":"x","entry_rel":"engine/bin/wine","bytes":16}]"#,
+        r#"[{"id":"winecx26","version":"26.3-20261014","sha256":"0","fetched_at":"2026-02-01T00:00:00Z","upstream_url":"x","entry_rel":"engine/bin/wine","bytes":16},
+{"id":"winecx26","version":"26.3-20261006","sha256":"0","fetched_at":"2026-01-01T00:00:00Z","upstream_url":"x","entry_rel":"engine/bin/wine","bytes":16}]"#,
     )
     .unwrap();
     let db = tmp.path().join("compat-db");
     std::fs::create_dir_all(&db).unwrap();
     std::fs::write(
         db.join("1207659013.toml"),
-        "runtime = \"winecx/24.0.6_1\"\n",
+        "runtime = \"winecx26/26.3-20261006\"\n",
     )
     .unwrap();
     // SAFETY: env mutation under ENV_LOCK.
@@ -3706,8 +3702,8 @@ fn compat_runtime_pins_the_auto_ladder() {
         std::env::remove_var("GOGO_HOME");
     }
     drop(guard);
-    assert_eq!(pinned.runtime.version, "wine-9.0 (SikarugirCX 24.0.6)");
-    assert_eq!(unpinned.runtime.version, "wine-9.0 (SikarugirCX 24.0.7)");
+    assert_eq!(pinned.runtime.version, "wine-11.0 (build 20261006)");
+    assert_eq!(unpinned.runtime.version, "wine-11.0 (build 20261014)");
     assert_eq!(pinned.compat.unwrap().status_line(), "untested");
 }
 
@@ -3930,13 +3926,13 @@ fn build_flags_replace_existing_l4_values() {
     );
     // The default track cached too, so the `auto` ladder never downloads.
     fake_runtime(
-        &home.join("runtimes/winecx/24.0.7_7"),
+        &home.join("runtimes/winecx26/26.3-20261014"),
         &tmp.path().join("cx.log"),
     );
     macapp::store::save_manifest(&[
         m("wine-staging", "11.18"),
         m("wine-devel", "11.19"),
-        m("winecx", "24.0.7_7"),
+        m("winecx26", "26.3-20261014"),
     ])
     .unwrap();
 

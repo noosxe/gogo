@@ -404,7 +404,10 @@ L0  runtime            one curated, pinned engine track, referenced (not frozen)
 
 ### 6.1 L0 — Runtime: one track, referenced by id
 
-- **Default today (macOS ≤ 27): the CrossOver-source lineage** — Gcenx's
+- **Default today (macOS ≤ 27): the CrossOver-source lineage.** *Update 2026-10-24
+  (#83, [docs/20](20-newer-cx-engine.md) §3.4): the default is now `winecx26`, Highball's
+  CX 26.3 (Wine 11.0) build, in the same `{engine,Frameworks}` layout. `winecx` (below)
+  stays as the rollback.* Originally: Gcenx's
   `WineCX24.0.7` engine (Sikarugir `Engines`), laid out as
   `Contents/Frameworks/wswine.bundle` with the engine's `Frameworks/` dylib set
   beside it (that is what its `@rpath` expects; **verified**: the

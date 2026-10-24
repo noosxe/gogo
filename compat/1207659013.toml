@@ -1,5 +1,5 @@
 # Treasure Adventure Game (GameMaker, legacy Direct3D, 32-bit): wined3d (L1).
-# VM smoke runs (depot-lane, runtime-cx24, renderer-l1-wined3d) show its
+# VM smoke runs (depot-lane, runtime-cx24 / runtime-cx, renderer-l1-wined3d) show its
 # title menu; input and audio were not judged (the VM runs with audio off).
 title  = "Treasure Adventure Game"
 status = "boots"
