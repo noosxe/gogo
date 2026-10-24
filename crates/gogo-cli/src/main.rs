@@ -2325,6 +2325,7 @@ fn mac_app_retarget(
         None => None,
         Some(R::Auto) => None,
         Some(R::Winecx) => Some(with_version("winecx")),
+        Some(R::Winecx26) => Some(with_version("winecx26")),
         Some(R::Staging) => Some(with_version("wine-staging")),
         Some(R::Devel) => Some(with_version("wine-devel")),
         Some(R::Stable) => Some(with_version("wine-stable")),

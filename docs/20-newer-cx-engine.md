@@ -2,7 +2,7 @@
 
 **Research date:** 2026-10-24
 **Builds on:** docs/19 §3.1, §6.1 (watch items), §7, §8.2 Q4; catalog arch fields (#82)
-**Status:** research. No catalog change in this doc. Facts are marked **verified** (GitHub
+**Status:** research plus a non-default catalog entry, `winecx26` (§3). Facts are marked **verified** (GitHub
 API, a source read, or a binary inspection) or **reported** (the project's own README, not
 re-checked).
 
@@ -14,6 +14,10 @@ re-checked).
 - **Heroic's `wine-crossover` mirror can't be a second source for our pin.** It has a
   single asset, CX **23.7.1**-1, so it is neither the same bytes nor the same version
   (**verified**).
+- **Tested (§3):** CX 26.3 passes headless `wineboot`, the depot, teardown,
+  gog-support and DXMT VM cases, and the Pharaoh installer itself. But installer-lane
+  Pharaoh spins with no window in the VM, where CX24 shows it. So `winecx26` is a
+  non-default catalog entry, waiting for a host pass.
 - **There is a CX 26.3 (Wine 11.0) engine:** Highball's `highball-engine`. CI builds it
   from CodeWeavers' LGPL `crossover-sources-26.3.0.tar.gz`, pinned by sha256, plus 24
   Highball patches. It is LGPL-2.1 and each release asset is sha256-pinned. This is the
@@ -142,14 +146,66 @@ Technically yes: export one variable. **Recommendation: no.**
   third-party launchers may use it, then record the answer here. Until then it stays out
   of the catalog, and docs/19's watch item closes as "gated by design".
 
-## 3. Next steps
+## 3. Test results (2026-10-24, after the go)
 
-1. Highball CX 26.3 as a **non-default** catalog entry (`winecx26`, say), pinned by asset
-   digest, after a go on the 335 MB download. Steps: headless `wineboot` into a scratch
-   prefix, then the #68 VM matrix (`scripts/vm-test.sh`), then the user's host pass
-   (`scripts/host-pass.sh`; Neo Cab on DXMT/D3DMetal, Snake Core on OpenGL, Pharaoh from
-   the installer, Rebel Galaxy 32-bit). The default pin moves only if CX 26.3 is at least
-   as good on all of them.
+All on the host (M4 Pro, macOS 27.0.1) and the `gog-golden` VM (macOS 27.0). The host
+runs used a scratch `GOGO_HOME` that was an APFS clone of the real state, with the
+cloned prefixes deleted first, so every build made a fresh prefix.
+
+### 3.1 Headless `wineboot -u` (scratch prefix, no window)
+
+| Engine | Env | Result |
+|---|---|---|
+| `winecx26` (Highball CX 26.3) | gogo's winecx `Frameworks/` on `DYLD_FALLBACK_LIBRARY_PATH`, `mscoree=` | exit 0, 14 s; 839 `system32` + 877 `syswow64` files; no FreeType/GnuTLS errors |
+| `winecx26` | same, **without** `mscoree=` | exit 0, 14 s: no wine-mono MSI loop, unlike CX24 (docs/19 §8.2 Q5) |
+| `WineSikarugir11.0_1` | Frameworks, no `SikarugirAppWine11` | exit 1 after 3 s, `run_wineboot failed to start wineboot 1`: the gate (§2.2) |
+| `WineSikarugir11.0_1` | same + `SikarugirAppWine11=1` | exit 0, 19 s; 836 + 876 files. Six `try_map_free_area mmap() … 0x7ffffff70000` errors that do no harm |
+
+So WineSikarugir11 does run under gogo once the variable is set. That confirms §2.2 and
+leaves §2.3's recommendation as it is.
+
+Harness note: a timeout wrapper that runs `/usr/bin/perl` (or any SIP-protected binary)
+strips `DYLD_*`, and Wine then can't find FreeType. Use a shell watchdog instead.
+
+### 3.2 `gogo runtimes install winecx26` and builds
+
+- Install: digest checked, the `engine/` tree moved into the store layout with the
+  Template 1.0.24 `Frameworks/`, `wine --version` probe `wine-11.0`, 1.0 GiB unpacked.
+- `wine --version` doesn't say CrossOver, so `Runtime::is_crossover()` now also asks the
+  catalog (`CX_LINEAGE`). Without that, DXMT and D3DMetal refused to derive a runtime on
+  it. With it, `--renderer dxmt` derives `winecx26/26.3-20261014+dxmt-v0.80`.
+- Installer lane (#56): `setup_pharaoh_gold_2.1.0.15.exe` installs silently, exit 0,
+  45 s, **no stack overflow**. cnc-ddraw is picked (L1).
+
+### 3.3 VM matrix (#68 smoke cases, adapted to `winecx26`)
+
+| Case | Bundle | Result |
+|---|---|---|
+| depot-lane | TAG (1207659013), depot, wined3d | `ok`: window up, `bundle_modified` false, no Gatekeeper dialog left |
+| runtime (cx24 case) | same | `missing_libs` empty, no TCC prompt |
+| teardown-kill (#103) | same, `--kill kill` | `teardown.ok` true |
+| gog-support | Carmageddon TDR 2000 (1146738698) | `ok`, no `File.cpp:73` |
+| renderer-l1-dxmt | Neo Cab (1669531175), `+dxmt-v0.80` | `running_no_window`, as expected in the VM (no Metal 3); DXMT logs `Using feature level D3D_FEATURE_LEVEL_11_0`; `missing_libs` empty: **pass** by the smoke check |
+| installer-lane Pharaoh (cnc-ddraw) | Pharaoh Gold (1207659046) from the offline installer | **`running_no_window` after 45 s and after 120 s**: `Pharaoh.exe` at 100 % CPU, no window |
+| same, `--renderer wined3d` | same | **`running_no_window`** after 90 s: not cnc-ddraw |
+| baseline: same bundle on `winecx` (CX24) | same | `ok`: `Pharaoh.exe` window 1024×768 |
+
+The Pharaoh regression has one clue. In 120 s the run log holds 5,496 copies of
+`fixme:d3dkmt:NtGdiDdDDIOpenAdapterFromHdc (…): stub`, so the game seems to retry a
+D3DKMT adapter open in a loop instead of creating its window. Whether real hardware
+behaves differently (the VM's paravirtual GPU is no Apple GPU) is for the host pass. As
+it stands, **CX 26.3 is not "at least as good" as CX24**: `winecx26` stays a selectable,
+non-default entry.
+
+## 4. Next steps
+
+1. `winecx26` is now a **non-default** catalog entry (§3). Still to do: the user's host
+   pass (`scripts/host-pass.sh`, with `--runtime winecx26`): Neo Cab on DXMT and D3DMetal,
+   Snake Core on OpenGL, Rebel Galaxy 32-bit, and Pharaoh from the installer, the VM
+   regression above. The default pin moves only if CX 26.3 is at least as good on all of
+   them. If Pharaoh also spins on the host, look at the d3dkmt loop first: it may be
+   one of Highball's patches or the CX 26.3 tree, and the place to report it is
+   highball-engine.
 2. No second source exists for `winecx/24.0.7_7`. To protect against the Sikarugir asset
    disappearing, keep the store's N-1 copy (docs/19 §6.1). The other option is building CX
    24.0.7 from CodeWeavers' tarball, using `highball-engine`'s workflow as the template.

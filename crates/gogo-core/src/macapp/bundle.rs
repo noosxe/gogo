@@ -179,10 +179,13 @@ fn write_wine_notice(bundle: &Bundle, runtime: &Runtime, bundled: bool) -> Resul
         std::fs::copy(&notices, bundle.resources.join("LICENSE-runtime.txt"))?;
     }
     let source = if runtime.is_crossover() {
-        "Source: CrossOver's Wine sources, https://www.codeweavers.com/crossover/source\n\
-         (engine build: https://github.com/Sikarugir-App/Engines)"
+        let build = runtime.crossover_build().unwrap_or("Sikarugir-App/Engines");
+        format!(
+            "Source: CrossOver's Wine sources, https://www.codeweavers.com/crossover/source\n\
+             (engine build: https://github.com/{build})"
+        )
     } else {
-        "Source: https://github.com/wine-mirror/wine"
+        "Source: https://github.com/wine-mirror/wine".to_string()
     };
     if !bundled {
         std::fs::write(
