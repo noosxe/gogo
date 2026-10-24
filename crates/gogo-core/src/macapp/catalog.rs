@@ -256,13 +256,14 @@ pub fn check_renderer_arch(runtime: Arch, renderer: &CatalogEntry) -> Result<(),
 }
 
 /// The default runtime track (docs/19 §6.1, #62): the CrossOver-source
-/// engine. `wine-staging` stays selectable as the alternate.
-pub const DEFAULT_RUNTIME: &str = "winecx";
+/// engine, CX 26.3 since its host pass (docs/20 §3.4, #83). `winecx` (CX
+/// 24.0.7) stays as the rollback, `wine-staging` as the alternate.
+pub const DEFAULT_RUNTIME: &str = "winecx26";
 
 /// Catalog engines built from CodeWeavers' CrossOver sources (docs/19 §6.1,
 /// docs/20). Their `wine --version` doesn't always say so: Highball's CX 26.3
 /// build reports a bare `wine-11.0`, the same as WineHQ's.
-const CX_LINEAGE: &[&str] = &[DEFAULT_RUNTIME, "winecx26"];
+const CX_LINEAGE: &[&str] = &["winecx", "winecx26"];
 
 /// The repository that builds `id`'s CrossOver-source engine; `None` when
 /// `id` isn't one.
@@ -344,37 +345,6 @@ const CX_FRAMEWORKS_NOTICES: &[(&str, &str)] = &[
 
 static ENTRIES: &[CatalogEntry] = &[
     CatalogEntry {
-        id: "winecx",
-        kind: Kind::Wine,
-        status: Status::Available,
-        discovery: Some(Discovery::Pinned(PinnedAsset {
-            repo: "Sikarugir-App/Engines",
-            tag: "v1.0",
-            asset: "WS12WineCX24.0.7_7.tar.xz",
-            version: "24.0.7_7",
-            sha256: "203f9e9fd6c2cc77e6525d798a434ced326145db34a356355e05659d3445fd1c",
-        })),
-        license: "LGPL-2.1 (Wine; CrossOver 24.0.7 sources by CodeWeavers, built by Gcenx/Sikarugir)",
-        redistributable: true,
-        min_macos: None,
-        arch: Some(Arch::X86_64Rosetta),
-        vendor_signed: false,
-        note: "default track (docs/19 §6.1): CrossOver-24-source engine (Wine 9.0). Runs \
-               32-bit Inno code without #56's overflow, usable OpenGL, FreeType from its \
-               own Frameworks/ (#54)",
-        frameworks: Some(FrameworksSet {
-            asset: PinnedAsset {
-                repo: "Sikarugir-App/Template",
-                tag: "v1.0",
-                asset: "Template-1.0.24.tar.xz",
-                version: "1.0.24",
-                sha256: "4b5f89eeb9ef139936bdfad33d9b420b05ea4597cb7d63376674f7a8e171321c",
-            },
-            dir: "Template-1.0.24.app/Contents/Frameworks",
-            notices: CX_FRAMEWORKS_NOTICES,
-        }),
-    },
-    CatalogEntry {
         id: "winecx26",
         kind: Kind::Wine,
         status: Status::Available,
@@ -393,8 +363,40 @@ static ENTRIES: &[CatalogEntry] = &[
         min_macos: Some("14.0"),
         arch: Some(Arch::X86_64Rosetta),
         vendor_signed: false,
-        note: "candidate (docs/20, #83): CrossOver-26.3-source engine (Wine 11.0) + 24 \
-               Highball patches, new-style WoW64. Not the default until a host pass",
+        note: "default track (docs/20 §3.4, #83): CrossOver-26.3-source engine (Wine 11.0) \
+               + 24 Highball patches, new-style WoW64. Host-passed on DXMT, D3DMetal, \
+               OpenGL and installer-lane Pharaoh",
+        frameworks: Some(FrameworksSet {
+            asset: PinnedAsset {
+                repo: "Sikarugir-App/Template",
+                tag: "v1.0",
+                asset: "Template-1.0.24.tar.xz",
+                version: "1.0.24",
+                sha256: "4b5f89eeb9ef139936bdfad33d9b420b05ea4597cb7d63376674f7a8e171321c",
+            },
+            dir: "Template-1.0.24.app/Contents/Frameworks",
+            notices: CX_FRAMEWORKS_NOTICES,
+        }),
+    },
+    CatalogEntry {
+        id: "winecx",
+        kind: Kind::Wine,
+        status: Status::Available,
+        discovery: Some(Discovery::Pinned(PinnedAsset {
+            repo: "Sikarugir-App/Engines",
+            tag: "v1.0",
+            asset: "WS12WineCX24.0.7_7.tar.xz",
+            version: "24.0.7_7",
+            sha256: "203f9e9fd6c2cc77e6525d798a434ced326145db34a356355e05659d3445fd1c",
+        })),
+        license: "LGPL-2.1 (Wine; CrossOver 24.0.7 sources by CodeWeavers, built by Gcenx/Sikarugir)",
+        redistributable: true,
+        min_macos: None,
+        arch: Some(Arch::X86_64Rosetta),
+        vendor_signed: false,
+        note: "rollback track (the default is winecx26, docs/20): CrossOver-24-source \
+               engine (Wine 9.0). Runs 32-bit Inno code without #56's overflow, usable \
+               OpenGL, FreeType from its own Frameworks/ (#54)",
         frameworks: Some(FrameworksSet {
             asset: PinnedAsset {
                 repo: "Sikarugir-App/Template",
@@ -1396,9 +1398,11 @@ mod catalog_tests {
         assert!(find("wine-staging").is_some());
         assert!(find("nope").is_none());
         assert_eq!(entries().len(), 11);
-        // The default track is the pinned CX engine with its Frameworks set.
+        // The default track is the pinned CX 26.3 engine with its Frameworks
+        // set (docs/20 §3.4), listed first; CX24 stays as the rollback.
         let cx = find(DEFAULT_RUNTIME).unwrap();
-        assert_eq!(cx.id, "winecx");
+        assert_eq!(cx.id, "winecx26");
+        assert_eq!(entries()[0].id, DEFAULT_RUNTIME);
         assert!(matches!(cx.status, Status::Available));
         assert!(matches!(cx.discovery, Some(Discovery::Pinned(_))));
         let fw = cx.frameworks.as_ref().unwrap();
@@ -1412,15 +1416,15 @@ mod catalog_tests {
                 .filter(|e| !CX_LINEAGE.contains(&e.id))
                 .all(|e| e.frameworks.is_none())
         );
-        // The CX 26.3 candidate (#83) is selectable, never the default.
-        let cx26 = find("winecx26").unwrap();
-        assert!(matches!(cx26.status, Status::Available));
         assert_eq!(
-            cx26.discovery.as_ref().unwrap().pinned_version(),
+            cx.discovery.as_ref().unwrap().pinned_version(),
             Some("26.3-20261014")
         );
-        assert!(cx26.needs_rosetta() && !cx26.vendor_signed);
-        assert_ne!(DEFAULT_RUNTIME, "winecx26");
+        assert!(cx.needs_rosetta() && !cx.vendor_signed);
+        // The CX24 rollback keeps the same Frameworks set.
+        let cx24 = find("winecx").unwrap();
+        assert!(matches!(cx24.status, Status::Available));
+        assert_eq!(cx24.frameworks.as_ref().unwrap().dir, fw.dir);
         // Renderers (#70): pinned, game-dir vs engine overlay.
         assert!(matches!(
             find("cnc-ddraw").unwrap().kind,
@@ -1529,9 +1533,9 @@ mod catalog_tests {
     #[test]
     fn wine_recommendation_table() {
         // Design 12 §7 — every row of the mapping, as data. The default
-        // track is winecx (docs/19 §6.1).
+        // track is winecx26 (docs/20 §3.4).
         let default_plain = WineRecommendation {
-            id: "winecx",
+            id: "winecx26",
             notice: None,
         };
         assert_eq!(recommend_for_wine(None), default_plain);
@@ -1539,8 +1543,8 @@ mod catalog_tests {
         assert_eq!(recommend_for_wine(Some("  ")), default_plain);
         assert_eq!(recommend_for_wine(Some("system")), default_plain);
         // Exact mac-servable ids pass through untouched.
-        assert_eq!(recommend_for_wine(Some("winecx")), default_plain);
-        for id in ["wine-staging", "wine-stable"] {
+        assert_eq!(recommend_for_wine(Some("winecx26")), default_plain);
+        for id in ["winecx", "wine-staging", "wine-stable"] {
             assert_eq!(
                 recommend_for_wine(Some(id)),
                 WineRecommendation { id, notice: None }
@@ -1549,7 +1553,7 @@ mod catalog_tests {
         // Linux runner pins → the default + notice.
         for v in ["lutris-7.2-2", "GE-Proton9-20", "ge-8-26"] {
             let r = recommend_for_wine(Some(v));
-            assert_eq!(r.id, "winecx", "{v}");
+            assert_eq!(r.id, "winecx26", "{v}");
             assert!(r.notice.is_some(), "{v}");
         }
         // Crossover pins → the CX track, no notice.
@@ -1559,11 +1563,11 @@ mod catalog_tests {
         );
         // gptk is never a recipe side effect (D9 consent lane).
         let r = recommend_for_wine(Some("gptk"));
-        assert_eq!(r.id, "winecx");
+        assert_eq!(r.id, "winecx26");
         assert!(r.notice.is_some());
         // Unknown ids → the Linux fallback (default + notice).
         let r = recommend_for_wine(Some("some-future-runner-1.0"));
-        assert_eq!(r.id, "winecx");
+        assert_eq!(r.id, "winecx26");
         assert!(r.notice.is_some());
     }
 }

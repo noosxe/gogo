@@ -219,10 +219,10 @@ summary's `vm_no_gl` holds the log lines; judge such titles on the host ([Host p
 | `signing` | launcher seal, Gatekeeper | the launcher verifies `--deep --strict` in the guest and a quarantined launch gets the "could not verify" prompt, not "damaged" (#53) |
 | `teardown-term` | launcher teardown (#42) | `SIGTERM` to the launcher leaves no Wine process behind |
 | `teardown-kill` | launcher teardown (#42, #103) | `SIGKILL` of the launcher: its watchdog tears down, nothing left after 15 s |
-| `runtime-cx24` | L0 runtime (#62) | the default `winecx` engine and its `Frameworks/` start TAG in a clean guest: no missing dylibs, no microphone prompt |
-| `renderer-l1-ddraw` | L1 renderer (#70) | Pharaoh Gold (1207659046) imports only `ddraw`: setup gives it cnc-ddraw (`renderer` = `cnc-ddraw/…`) and its dialog is on screen |
-| `renderer-l1-wined3d` | L1 renderer (#70) | TAG's legacy Direct3D keeps wined3d on the base `winecx` runtime |
-| `renderer-l1-dxmt` | L1 renderer (#70) | Neo Cab (1669531175, Unity, 64-bit) runs from the derived `winecx/<ver>+dxmt-<rver>` runtime and DXMT logs a D3D11 feature level. No window is expected: the guest has no Metal 3 ("Failed to get metal layer"); rendering is the host pass (#80) |
+| `runtime-cx` | L0 runtime (#62, #83) | the default `winecx26` engine and its `Frameworks/` start TAG in a clean guest: no missing dylibs, no microphone prompt |
+| `renderer-l1-ddraw` | L1 renderer (#70) | Pharaoh Gold (1207659046) imports only `ddraw`: setup gives it cnc-ddraw (`renderer` = `cnc-ddraw/…`). On `winecx26` the guest shows no window (see *Known VM limitations*); the window is judged on the host |
+| `renderer-l1-wined3d` | L1 renderer (#70) | TAG's legacy Direct3D keeps wined3d on the base `winecx26` runtime |
+| `renderer-l1-dxmt` | L1 renderer (#70) | Neo Cab (1669531175, Unity, 64-bit) runs from the derived `winecx26/<ver>+dxmt-<rver>` runtime and DXMT logs a D3D11 feature level. No window is expected: the guest has no Metal 3 ("Failed to get metal layer"); rendering is the host pass (#80) |
 | `prefix-setup` | #67 | placeholder (`-` bundle): fill in the bundle and check when it lands |
 
 Build the bundles first:
@@ -312,6 +312,11 @@ prompt), `windows-all.json`, `processes.txt`, `processes-after-kill.txt`,
 - **Rosetta**: present. Launching an x86_64 Wine bundle on macOS 27 posts *"App Update
   Required — … includes a component that will not open in macOS 28"* (the Rosetta
   retirement notice). It shows up in screenshots.
+- **Pharaoh on `winecx26` (docs/20 §3.3)**: `Pharaoh.exe` loops on
+  `NtGdiDdDDIOpenAdapterFromHdc` (a d3dkmt stub) under the paravirtual GPU and never opens
+  its window, with cnc-ddraw or wined3d alike. On real hardware the same bundle plays, and on
+  `winecx` (CX24) the guest shows the window. The `renderer-l1-ddraw` case accepts
+  `running_no_window`.
 - The display is 1024×768 (2048×1536 Retina), and fullscreen games take all of it.
 - Boot can fail with `VZErrorDomain Code=1` if the disk is busy. The script retries 3×, and
   checks running state from the process table, never `tart list` (which opens the
@@ -329,7 +334,7 @@ steps for the user instead.
 
 **When it's needed:** any change to DXMT or D3DMetal (catalog pins, the renderer store,
 derived `<ver>+<renderer>-<rver>` runtimes), to renderer selection (L1 picks, compat
-`renderer` entries, the "Try next renderer" order), or to the `winecx` runtime pin. Also
+`renderer` entries, the "Try next renderer" order), or to the default runtime pin (`winecx26`). Also
 when a smoke case reports `vm-limit`. Run the cases the change touches. A change to
 selection or the runtime pin runs all four.
 
@@ -337,12 +342,12 @@ selection or the runtime pin runs all four.
 
 | Case | Game (gogid) | Build (with the setup below) | Pass when |
 |---|---|---|---|
-| `neo-cab-dxmt` | Neo Cab (1669531175), Unity, 64-bit D3D11 | `"$G" mac-app 1669531175 --runtime winecx --renderer dxmt --out "$GOGO_HOME/apps/neo-cab" --yes` | `renderer` is `dxmt/…` and `runtime_dir` ends in `+dxmt-<rver>/engine`; `markers.feature_level` shows `D3D_FEATURE_LEVEL_11_1`; `markers.graphics_dlls` shows `d3d11.dll` and `dxgi.dll`; `metal_layer_failed` and `wined3d` are empty; `markers.unity` shows `Direct3D 11.0 [level 11.1]` and `Renderer: Apple M…`; the game draws correctly, with input and audio working |
-| `neo-cab-d3dmetal` | Neo Cab (1669531175) | `"$G" mac-app 1669531175 --runtime winecx --renderer d3dmetal --out "$GOGO_HOME/apps/neo-cab" --yes` (answer `y` to the D3DMetal prompt once) | `renderer` is `d3dmetal/…` on `+d3dmetal-<rver>`; `markers.unity` shows `Direct3D 11.0 [level 11.1]` and `Renderer: AMD Compatibility Mode` (what D3DMetal reports); `markers.d3dmetal` holds that line; `missing_libs` is empty and there's no `could not load` in `markers.unity`; the game draws, with input and audio working |
-| `rebel-galaxy-dxmt` | Rebel Galaxy (1435582019), OGRE, 32-bit D3D11 | `"$G" mac-app 1435582019 --runtime winecx --renderer dxmt --out "$GOGO_HOME/apps/rebel-galaxy" --yes` | `verbs` holds the L1 verbs (`d3dcompiler_43 d3dx11_43 d3dx9_43 xinput`), and `markers.graphics_dlls` shows `d3dcompiler_43.dll: native` (the verb took); `markers.ogre` shows the D3D11 render system and no `OGRE EXCEPTION`; `markers.feature_level` is non-empty; the in-game image is right, not only the menu (docs/19 §8.2 Q7). A loading screen that never ends still reads `ok`: check `log_quiet_secs` and your own eyes. Record the `class_linkage` count, since DXMT's `Class linkage not supported` warnings are part of Q7 |
-| `snake-core-gl` | Snake Core (1276268370), Java/libGDX, OpenGL | `"$G" mac-app 1276268370 --runtime winecx --out "$GOGO_HOME/apps/snake-core" --yes` (renderer auto) | `runtime` is `winecx/…` with no derived runtime. `renderer` reads `wined3d`, gogo's label for anything that isn't D3D10/11; an OpenGL game makes no D3D calls, so wined3d isn't used. `markers.graphics_dlls` shows `opengl32.dll: builtin` and no `d3d*`/`dxgi`. The game has no engine log and logs no `err:` lines on a good run. The window ("Snake Core - v1.6.1") is up and playable, with no `OpenGL 2.0 or higher with the FBO extension is required` (that's the wine-staging failure, docs/19 §5) |
+| `neo-cab-dxmt` | Neo Cab (1669531175), Unity, 64-bit D3D11 | `"$G" mac-app 1669531175 --runtime winecx26 --renderer dxmt --out "$GOGO_HOME/apps/neo-cab" --yes` | `renderer` is `dxmt/…` and `runtime_dir` ends in `+dxmt-<rver>/engine`; `markers.feature_level` shows `D3D_FEATURE_LEVEL_11_1`; `markers.graphics_dlls` shows `d3d11.dll` and `dxgi.dll`; `metal_layer_failed` and `wined3d` are empty; `markers.unity` shows `Direct3D 11.0 [level 11.1]` and `Renderer: Apple M…`; the game draws correctly, with input and audio working |
+| `neo-cab-d3dmetal` | Neo Cab (1669531175) | `"$G" mac-app 1669531175 --runtime winecx26 --renderer d3dmetal --out "$GOGO_HOME/apps/neo-cab" --yes` (answer `y` to the D3DMetal prompt once) | `renderer` is `d3dmetal/…` on `+d3dmetal-<rver>`; `markers.unity` shows `Direct3D 11.0 [level 11.1]` and `Renderer: AMD Compatibility Mode` (what D3DMetal reports); `markers.d3dmetal` holds that line; `missing_libs` is empty and there's no `could not load` in `markers.unity`; the game draws, with input and audio working |
+| `rebel-galaxy-dxmt` | Rebel Galaxy (1435582019), OGRE, 32-bit D3D11 | `"$G" mac-app 1435582019 --runtime winecx26 --renderer dxmt --out "$GOGO_HOME/apps/rebel-galaxy" --yes` | `verbs` holds the L1 verbs (`d3dcompiler_43 d3dx11_43 d3dx9_43 xinput`), and `markers.graphics_dlls` shows `d3dcompiler_43.dll: native` (the verb took); `markers.ogre` shows the D3D11 render system and no `OGRE EXCEPTION`; `markers.feature_level` is non-empty; the in-game image is right, not only the menu (docs/19 §8.2 Q7). A loading screen that never ends still reads `ok`: check `log_quiet_secs` and your own eyes. Record the `class_linkage` count, since DXMT's `Class linkage not supported` warnings are part of Q7 |
+| `snake-core-gl` | Snake Core (1276268370), Java/libGDX, OpenGL | `"$G" mac-app 1276268370 --runtime winecx26 --out "$GOGO_HOME/apps/snake-core" --yes` (renderer auto) | `runtime` is `winecx26/…` with no derived runtime. `renderer` reads `wined3d`, gogo's label for anything that isn't D3D10/11; an OpenGL game makes no D3D calls, so wined3d isn't used. `markers.graphics_dlls` shows `opengl32.dll: builtin` and no `d3d*`/`dxgi`. The game has no engine log and logs no `err:` lines on a good run. The window ("Snake Core - v1.6.1") is up and playable, with no `OpenGL 2.0 or higher with the FBO extension is required` (that's the wine-staging failure, docs/19 §5) |
 
-The builds pin `--runtime winecx` because these cases are about that runtime; the auto
+The builds pin `--runtime winecx26` because these cases are about that runtime; the auto
 pick would choose it too. Each game builds into its own `apps/<game>/` dir, so the
 `*.app` glob below matches one bundle. Neo Cab's two cases share that bundle: build,
 pass, then rebuild with the other
@@ -361,7 +366,7 @@ G="$PWD/target/debug/gogo"
 export GOGO_HOME="$HOME/gogo-hostpass"
 
 # Per case: build (table above), then run it for 90 s and play during that time
-"$G" mac-app 1669531175 --runtime winecx --renderer dxmt --out "$GOGO_HOME/apps/neo-cab" --yes
+"$G" mac-app 1669531175 --runtime winecx26 --renderer dxmt --out "$GOGO_HOME/apps/neo-cab" --yes
 scripts/host-pass.sh "$GOGO_HOME/apps/Neo Cab.app" --secs 90
 
 # Clean up when done (run logs stay in ~/Library/Logs/gogo/<gogid>)
