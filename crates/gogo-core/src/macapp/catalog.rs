@@ -259,6 +259,23 @@ pub fn check_renderer_arch(runtime: Arch, renderer: &CatalogEntry) -> Result<(),
 /// engine. `wine-staging` stays selectable as the alternate.
 pub const DEFAULT_RUNTIME: &str = "winecx";
 
+/// Catalog engines built from CodeWeavers' CrossOver sources (docs/19 §6.1,
+/// docs/20). Their `wine --version` doesn't always say so: Highball's CX 26.3
+/// build reports a bare `wine-11.0`, the same as WineHQ's.
+const CX_LINEAGE: &[&str] = &[DEFAULT_RUNTIME, "winecx26"];
+
+/// The repository that builds `id`'s CrossOver-source engine; `None` when
+/// `id` isn't one.
+pub fn crossover_build(id: &str) -> Option<&'static str> {
+    if !CX_LINEAGE.contains(&id) {
+        return None;
+    }
+    match find(id)?.discovery {
+        Some(Discovery::Pinned(ref pin)) => Some(pin.repo),
+        _ => None,
+    }
+}
+
 /// Licence notes for the Sikarugir Template `Frameworks/` dylibs (Template
 /// 1.0.24 ships none of its own). Matched by file-name prefix, longest first.
 const CX_FRAMEWORKS_NOTICES: &[(&str, &str)] = &[
@@ -345,6 +362,39 @@ static ENTRIES: &[CatalogEntry] = &[
         note: "default track (docs/19 §6.1): CrossOver-24-source engine (Wine 9.0). Runs \
                32-bit Inno code without #56's overflow, usable OpenGL, FreeType from its \
                own Frameworks/ (#54)",
+        frameworks: Some(FrameworksSet {
+            asset: PinnedAsset {
+                repo: "Sikarugir-App/Template",
+                tag: "v1.0",
+                asset: "Template-1.0.24.tar.xz",
+                version: "1.0.24",
+                sha256: "4b5f89eeb9ef139936bdfad33d9b420b05ea4597cb7d63376674f7a8e171321c",
+            },
+            dir: "Template-1.0.24.app/Contents/Frameworks",
+            notices: CX_FRAMEWORKS_NOTICES,
+        }),
+    },
+    CatalogEntry {
+        id: "winecx26",
+        kind: Kind::Wine,
+        status: Status::Available,
+        // highball-engine publishes every build as its own release; the
+        // `.tar.gz.sha256` beside it agrees with this digest.
+        discovery: Some(Discovery::Pinned(PinnedAsset {
+            repo: "gauthierpiarrette/highball-engine",
+            tag: "engine-wine-11.0-20261014T003801Z-0024-app-packages-0023-spatial-mixer",
+            asset: "engine-wine-11.0-20261014T003801Z-0024-app-packages-0023-spatial-mixer.tar.gz",
+            version: "26.3-20261014",
+            sha256: "1d1a130c0108a4bbb88cd289c3c313292868c3b84010eb315801eba43026e3e8",
+        })),
+        license: "LGPL-2.1-or-later (Wine; CrossOver 26.3 sources by CodeWeavers, patches and \
+                  build by Highball/highball-engine)",
+        redistributable: true,
+        min_macos: Some("14.0"),
+        arch: Some(Arch::X86_64Rosetta),
+        vendor_signed: false,
+        note: "candidate (docs/20, #83): CrossOver-26.3-source engine (Wine 11.0) + 24 \
+               Highball patches, new-style WoW64. Not the default until a host pass",
         frameworks: Some(FrameworksSet {
             asset: PinnedAsset {
                 repo: "Sikarugir-App/Template",
@@ -1331,10 +1381,21 @@ mod catalog_tests {
     }
 
     #[test]
+    fn crossover_lineage_comes_from_the_catalog() {
+        assert_eq!(crossover_build("winecx"), Some("Sikarugir-App/Engines"));
+        assert_eq!(
+            crossover_build("winecx26"),
+            Some("gauthierpiarrette/highball-engine")
+        );
+        assert_eq!(crossover_build("wine-stable"), None);
+        assert_eq!(crossover_build("nope"), None);
+    }
+
+    #[test]
     fn entries_and_statuses() {
         assert!(find("wine-staging").is_some());
         assert!(find("nope").is_none());
-        assert_eq!(entries().len(), 10);
+        assert_eq!(entries().len(), 11);
         // The default track is the pinned CX engine with its Frameworks set.
         let cx = find(DEFAULT_RUNTIME).unwrap();
         assert_eq!(cx.id, "winecx");
@@ -1348,9 +1409,18 @@ mod catalog_tests {
         assert!(
             entries()
                 .iter()
-                .filter(|e| e.id != "winecx")
+                .filter(|e| !CX_LINEAGE.contains(&e.id))
                 .all(|e| e.frameworks.is_none())
         );
+        // The CX 26.3 candidate (#83) is selectable, never the default.
+        let cx26 = find("winecx26").unwrap();
+        assert!(matches!(cx26.status, Status::Available));
+        assert_eq!(
+            cx26.discovery.as_ref().unwrap().pinned_version(),
+            Some("26.3-20261014")
+        );
+        assert!(cx26.needs_rosetta() && !cx26.vendor_signed);
+        assert_ne!(DEFAULT_RUNTIME, "winecx26");
         // Renderers (#70): pinned, game-dir vs engine overlay.
         assert!(matches!(
             find("cnc-ddraw").unwrap().kind,

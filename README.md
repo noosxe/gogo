@@ -99,7 +99,8 @@ below (docs/19 §6):
 
 - runtime: the CrossOver-source `winecx` 24.0.7_7 engine from gogo's store
   (while none is cached, a Homebrew Wine is used instead; `--runtime winecx`
-  forces the download);
+  forces the download; `--runtime winecx26` tries the CrossOver 26.3 candidate,
+  docs/20);
 - renderer from the game's PE imports: DXMT for D3D10/11, wined3d for D3D9 and
   older, cnc-ddraw for 2D DirectDraw, plus winetricks verbs for the d3dx /
   d3dcompiler DLLs it imports;

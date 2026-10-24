@@ -269,11 +269,21 @@ impl Runtime {
     /// A CrossOver-source engine (`wine-9.0 (SikarugirCX 24.0.7)`, CodeWeavers'
     /// own builds): its `wineboot` loops on a failing wine-mono MSI (err 1603)
     /// unless `mscoree` is disabled while the prefix is staged (docs/19 §8.2 Q5).
+    /// Store engines count by catalog id too: Highball's CX 26.3 build says
+    /// only `wine-11.0` (docs/20).
     pub fn is_crossover(&self) -> bool {
         let v = self.version.to_ascii_lowercase();
         v.contains("crossover")
             || v.split(|c: char| !c.is_ascii_alphanumeric())
                 .any(|w| w.ends_with("cx"))
+            || self.crossover_build().is_some()
+    }
+
+    /// The repository that built this store engine from CrossOver sources
+    /// (catalog `CX_LINEAGE`); `None` outside the store or for other engines.
+    pub fn crossover_build(&self) -> Option<&'static str> {
+        let r = super::launch::runtime_ref(self);
+        super::catalog::crossover_build(r.split_once('/')?.0)
     }
 }
 
