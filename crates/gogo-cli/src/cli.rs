@@ -221,6 +221,9 @@ pub enum Command {
     /// Manage Wine runtimes: list the catalog and what's cached, install,
     /// prune.
     Runtimes(RuntimesArgs),
+    /// Manage renderers (cnc-ddraw, DXMT, D3DMetal): list the catalog and
+    /// what's cached, install, prune.
+    Renderers(RenderersArgs),
     /// Inspect Lutris community recipes for a game: list the
     /// ranked candidates, or show one recipe's execution plan.
     Recipes(RecipesArgs),
@@ -420,10 +423,13 @@ pub enum RuntimeSource {
     /// build, Wine 11.0) with its Frameworks/: the default.
     Winecx26,
     /// Cached/downloaded wine-staging.
+    #[value(alias = "wine-staging")]
     Staging,
     /// Cached/downloaded wine-devel.
+    #[value(alias = "wine-devel")]
     Devel,
     /// Cached/downloaded wine-stable.
+    #[value(alias = "wine-stable")]
     Stable,
     /// User-supplied GPTK mount (user accepted Apple's terms).
     Gptk,
@@ -451,23 +457,33 @@ impl From<RuntimeSource> for gogo::macapp::RuntimeMode {
 #[derive(Debug, clap::Args)]
 pub struct RuntimesArgs {
     #[command(subcommand)]
-    pub cmd: RuntimesCmd,
+    pub cmd: StoreCmd,
 }
 
+/// Field bag for [`Command::Renderers`]: the same verbs over the renderer
+/// entries of the catalog and store.
+#[derive(Debug, clap::Args)]
+pub struct RenderersArgs {
+    #[command(subcommand)]
+    pub cmd: StoreCmd,
+}
+
+/// `list` / `install` / `prune`, shared by `runtimes` and `renderers`.
 #[derive(Debug, clap::Subcommand)]
-pub enum RuntimesCmd {
-    /// List catalog entries (live-probed) and cached runtimes.
+pub enum StoreCmd {
+    /// List the catalog (latest versions checked online) with what's cached
+    /// and which games use it.
     List {
         /// Machine-readable output.
         #[arg(long)]
         json: bool,
-        /// Skip live catalog probes.
+        /// Don't check for the latest versions online.
         #[arg(long)]
         offline: bool,
     },
-    /// Download, verify, and cache a catalog runtime (macOS only).
+    /// Download, verify, and cache a catalog entry (macOS only).
     Install {
-        /// Catalog id (see `runtimes list`).
+        /// Catalog id (see `list`).
         #[arg(value_name = "ID")]
         id: String,
         /// Pin a release tag (default: latest).
@@ -477,15 +493,15 @@ pub enum RuntimesCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Remove cached runtimes and renderers from the store (never one a
-    /// game still uses).
+    /// Remove cached versions (never one a game still uses).
+    #[command(group = clap::ArgGroup::new("what").required(true).args(["unused", "id"]))]
     Prune {
-        /// Remove every cached runtime and renderer no game uses, but the
-        /// newest two versions of each (the previous one, to roll back to).
-        #[arg(long)]
-        all: bool,
-        /// Remove one catalog id (every version), or one version as
-        /// `<id>/<version>` (with the derived runtimes built on it).
+        /// Remove every cached version no game uses, except the newest two
+        /// of each (the current one and the one before, to roll back to).
+        #[arg(long, alias = "all")]
+        unused: bool,
+        /// Remove one id (every version), or one version as `<id>/<version>`,
+        /// with the runtimes built on it.
         #[arg(value_name = "ID[/VERSION]")]
         id: Option<String>,
     },
@@ -691,6 +707,46 @@ mod tests {
             Cli::try_parse_from(["gogo", "mac-app", "pharaoh", "--from-depot", "pharaoh"]).is_err()
         );
         assert!(Cli::try_parse_from(["gogo", "mac-app"]).is_err());
+    }
+
+    #[test]
+    fn runtimes_and_renderers_share_the_store_verbs() {
+        let Command::Renderers(a) = Cli::try_parse_from(["gogo", "renderers", "list"])
+            .unwrap()
+            .command
+        else {
+            panic!("expected Renderers");
+        };
+        assert!(matches!(a.cmd, StoreCmd::List { json: false, .. }));
+        // prune needs a target or --unused (--all still works), not both.
+        let prune = |args: &[&str]| {
+            Cli::try_parse_from([&["gogo", "runtimes", "prune"], args].concat()).map(|c| c.command)
+        };
+        assert!(prune(&[]).is_err());
+        assert!(prune(&["--unused", "winecx"]).is_err());
+        for flag in ["--unused", "--all"] {
+            let Ok(Command::Runtimes(RuntimesArgs {
+                cmd:
+                    StoreCmd::Prune {
+                        unused: true,
+                        id: None,
+                    },
+            })) = prune(&[flag])
+            else {
+                panic!("{flag} should parse as --unused");
+            };
+        }
+    }
+
+    #[test]
+    fn runtime_takes_catalog_ids_and_short_names() {
+        for name in ["staging", "wine-staging"] {
+            let cli = Cli::try_parse_from(["gogo", "mac-app", "x", "--runtime", name]).unwrap();
+            let Command::MacApp { runtime, .. } = cli.command else {
+                panic!("expected MacApp");
+            };
+            assert_eq!(runtime, Some(Some(RuntimeSource::Staging)));
+        }
     }
 
     /// Help text is for users: no pointers into the repo's docs or issues.

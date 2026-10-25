@@ -488,7 +488,7 @@ games/<gogid>/{prefix,game,state.toml,launch.conf}
   files) plus a `NOTICES.txt`. Only `x86_64` exists today. Both entries are pinned
   by sha256 (`dxmt-v0.80-builtin.tar.gz`; cnc-ddraw `v7.1.0.0`, whose release has
   no GitHub digest). cnc-ddraw moved here from `runtimes/cnc-ddraw/`, and
-  `gogo runtimes prune cnc-ddraw` removes both.
+  `gogo renderers prune cnc-ddraw` removes both.
 - *#82:* the catalog says each entry's arch (`X86_64Rosetta`, `Arm64`, `Arm64ec`;
   every entry is x86_64 today) and `<arch>` is that build's `Arch::dir()`.
   Old layouts are read in place as x86_64, never moved or re-downloaded: a
@@ -528,12 +528,18 @@ games/<gogid>/{prefix,game,state.toml,launch.conf}
   (`winecx/24.0.7_7+dxmt-v0.80` keeps `winecx/24.0.7_7`). A version-less reference
   (`runtime = "winecx"` in L4) keeps the newest base version, the one it resolves to.
   The check lives in `store::prune` itself, which reports what it kept and why. N-1
-  belongs to the sweep, not to `prune <target>`: `gogo runtimes prune --all` offers
-  every cached version except the newest two base versions of each id (by fetch
-  time), so the previous pin survives a sweep, used or not, for rollback. Derived
-  runtimes get no N-1: only a reference keeps them, since setup rebuilds one from its
-  base in seconds. An explicit `prune <id>[/<ver>]` removes anything unreferenced:
-  that is the user saying so. Installing a new pin still prunes nothing.
+  belongs to the sweep, not to `prune <target>`: `prune --unused` offers every
+  cached version except the newest two base versions of each id (by fetch time), so
+  the previous pin survives a sweep, used or not, for rollback. Derived runtimes get
+  no N-1: only a reference keeps them, since setup rebuilds one from its base in
+  seconds. An explicit `prune <id>[/<ver>]` removes anything unreferenced: that is
+  the user saying so, and a renderer target takes the derived runtimes made with it
+  too. Installing a new pin still prunes nothing.
+- *CLI:* `gogo runtimes` and `gogo renderers` share `list|install|prune` over the
+  one store, each on its own catalog entries (winetricks is a footnote under
+  `runtimes list`: gogo keeps it at its pin itself). An id on the wrong command is
+  a usage error naming the right one. `list` shows each entry's users (the same
+  references `prune` checks); `--json` gives `status` as a stable key.
 - Today's flat entries (`runtimes/wine-staging/11.18/…`, design 12 §4) stay readable:
   an entry without `engine/` is treated as an engine with no `Frameworks/`.
 - *#62 (the CX engine, `winecx/24.0.7_7`):* the entry is
@@ -792,7 +798,7 @@ only after the user agreed, and asks once:
 - **Where it is used.** With a yes: the L1 pick for 64-bit D3D12, and the
   alternative after DXMT for 64-bit D3D11 ("Try next renderer"). DXMT stays the
   default there. `apply` without a yes falls back to wined3d before any download.
-  `gogo runtimes install d3dmetal` works only with a yes.
+  `gogo renderers install d3dmetal` works only with a yes.
 - **Notices.** The store's `NOTICES.txt` carries the licence line and Apple's notice,
   and so does the derived runtime's (`LICENSE-runtime.txt` in bundles). A bundle
   whose baked renderer *or* "Try next renderer" alternative is D3DMetal gets

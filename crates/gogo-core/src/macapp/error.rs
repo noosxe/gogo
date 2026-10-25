@@ -61,7 +61,7 @@ pub enum MacAppError {
     #[error("runtime catalog unreachable: {detail}")]
     CatalogUnreachable { detail: String },
 
-    #[error("runtime download failed: {url}: {reason}")]
+    #[error("download failed: {url}: {reason}")]
     RuntimeDownloadFailed { url: String, reason: String },
 
     #[error(

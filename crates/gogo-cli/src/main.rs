@@ -253,7 +253,8 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
             )
             .await
         }
-        Command::Runtimes(args) => runtimes_cmd(args).await,
+        Command::Runtimes(args) => store_cmd(Shelf::Runtimes, args.cmd).await,
+        Command::Renderers(args) => store_cmd(Shelf::Renderers, args.cmd).await,
         Command::Recipes(args) => recipes_cmd(args),
         Command::Shim { tool, args } => Ok(gogo_shims::run_tool(&tool, &args)),
         Command::PeScan { dir, exe, json } => pe_scan(&dir, exe.as_deref(), json),
@@ -1922,7 +1923,7 @@ async fn resolve_game_source(
     {
         go = dialoguer::Confirm::new()
             .with_prompt(format!(
-                "depot cache empty for {title} — download it now? (gogo depot, design 14)"
+                "depot cache empty for {title} — download it now? (same as `gogo depot`)"
             ))
             .default(true)
             .interact()
@@ -2743,15 +2744,64 @@ async fn mac_app(
 
 // — runtimes (design 12 §4/§10): Wine runtime catalog + store management —
 
-/// `gogo runtimes list|install|prune`. `list` live-probes available catalog
-/// entries with a short client timeout (`--offline` skips); `install` is
-/// macOS-only — runtimes exist to feed `mac-app`.
-async fn runtimes_cmd(args: crate::cli::RuntimesArgs) -> Result<i32, AppError> {
+/// Which catalog entries a `runtimes` / `renderers` command works on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shelf {
+    /// Wine runtimes (and the winetricks tool provisioned with them).
+    Runtimes,
+    Renderers,
+}
+
+impl Shelf {
+    fn command(self) -> &'static str {
+        match self {
+            Shelf::Runtimes => "runtimes",
+            Shelf::Renderers => "renderers",
+        }
+    }
+
+    fn noun(self) -> &'static str {
+        match self {
+            Shelf::Runtimes => "runtime",
+            Shelf::Renderers => "renderer",
+        }
+    }
+
+    fn holds(self, entry: &gogo::macapp::catalog::CatalogEntry) -> bool {
+        use gogo::macapp::catalog::Kind;
+        matches!(entry.kind, Kind::Renderer { .. }) == (self == Shelf::Renderers)
+    }
+
+    /// The shelf an id (`<id>[/<ver>]`) belongs on; ids the catalog no
+    /// longer has are runtimes (the store only kept those).
+    fn of(target: &str) -> Shelf {
+        let id = target.split_once('/').map_or(target, |(i, _)| i);
+        match gogo::macapp::catalog::find(id) {
+            Some(e) if Shelf::Renderers.holds(e) => Shelf::Renderers,
+            _ => Shelf::Runtimes,
+        }
+    }
+}
+
+/// A version as listings show it: a release tag's leading `v` dropped
+/// (`v7.1.0.0` and `7.1.0.0` are one version).
+fn shown_version(v: &str) -> &str {
+    v.strip_prefix('v')
+        .filter(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+        .unwrap_or(v)
+}
+
+/// `gogo runtimes|renderers list|install|prune`. `list` checks the latest
+/// version online with a short client timeout (`--offline` skips);
+/// `install` is macOS-only — runtimes and renderers exist to feed `mac-app`.
+async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppError> {
     use gogo::macapp::{catalog, store};
 
-    match args.cmd {
-        crate::cli::RuntimesCmd::List { json, offline } => {
-            let mut cached = store::load_manifest();
+    let (command, noun) = (shelf.command(), shelf.noun());
+    match cmd {
+        crate::cli::StoreCmd::List { json, offline } => {
+            let runtimes = store::load_manifest();
+            let mut cached = runtimes.clone();
             cached.extend(store::load_renderer_manifest());
             let http = if offline {
                 None
@@ -2759,54 +2809,47 @@ async fn runtimes_cmd(args: crate::cli::RuntimesArgs) -> Result<i32, AppError> {
                 catalog::http_client().ok()
             };
             let mut json_rows: Vec<serde_json::Value> = Vec::new();
+            let mut footnotes: Vec<String> = Vec::new();
             let mut table = comfy_table::Table::new();
-            table.set_header(vec!["ID", "STATUS", "LATEST", "SIZE", "ARCH", "CACHED"]);
-            for entry in catalog::entries() {
+            table.set_header(vec!["ID", "STATUS", "LATEST", "SIZE", "CACHED", "USED BY"]);
+            for entry in catalog::entries().iter().filter(|e| shelf.holds(e)) {
+                let tool = matches!(entry.kind, catalog::Kind::Tool { .. });
                 let latest = match &http {
-                    Some(http) if entry.discovery.is_some() => {
+                    Some(http) if entry.discovery.is_some() && !tool => {
                         catalog::probe(entry, None, http, catalog::GITHUB_API)
                             .await
                             .ok()
                     }
                     _ => None,
                 };
-                let status = match &entry.status {
-                    catalog::Status::Available if entry.id == catalog::DEFAULT_RUNTIME => {
-                        "available · default".to_string()
-                    }
-                    catalog::Status::Available => "available".to_string(),
-                    catalog::Status::ConsentRequired => "consent (Apple EULA)".to_string(),
-                    catalog::Status::Tool => "tool (design 12 §8)".to_string(),
-                    catalog::Status::Gone { since, .. } => format!("gone since {since}"),
-                };
-                let mine: Vec<&store::ManifestEntry> =
-                    cached.iter().filter(|m| m.id == entry.id).collect();
-                let cached_col = if mine.is_empty() {
-                    "-".to_string()
-                } else {
-                    mine.iter()
-                        .map(|m| m.version.clone())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                };
-                table.add_row(vec![
-                    entry.id.to_string(),
-                    status.clone(),
-                    latest
-                        .as_ref()
-                        .map(|l| l.tag.clone())
-                        .unwrap_or_else(|| "-".into()),
-                    latest
-                        .as_ref()
-                        .map(|l| gogo::fmt::human_size(l.size))
-                        .unwrap_or_else(|| "-".into()),
-                    entry.arch_label().to_string(),
-                    cached_col,
-                ]);
+                let mine: Vec<&store::ManifestEntry> = cached
+                    .iter()
+                    .filter(|m| m.id == entry.id && !store::is_derived(&m.version))
+                    .collect();
+                // Runtimes built from a base runtime and an overlay renderer:
+                // under the base id for a runtime, `<base>/<ver>` for the
+                // renderer they were made with.
+                let derived: Vec<String> = runtimes
+                    .iter()
+                    .filter(|m| match m.version.split_once('+') {
+                        None => false,
+                        Some(_) if shelf == Shelf::Runtimes => m.id == entry.id,
+                        Some((_, with)) => with.starts_with(&format!("{}-", entry.id)),
+                    })
+                    .map(|m| match shelf {
+                        Shelf::Runtimes => m.version.clone(),
+                        Shelf::Renderers => format!("{}/{}", m.id, m.version),
+                    })
+                    .collect();
+                let used_by = store::users_of(entry.id);
                 json_rows.push(serde_json::json!({
                     "id": entry.id,
                     "default": entry.id == catalog::DEFAULT_RUNTIME,
-                    "status": status,
+                    "status": entry.status.key(),
+                    "gone_since": match &entry.status {
+                        catalog::Status::Gone { since, .. } => Some(since),
+                        _ => None,
+                    },
                     "license": entry.license,
                     "arch": entry.arch_label(),
                     "vendor_signed": entry.vendor_signed,
@@ -2819,29 +2862,98 @@ async fn runtimes_cmd(args: crate::cli::RuntimesArgs) -> Result<i32, AppError> {
                         "bytes": m.bytes,
                         "fetched_at": m.fetched_at,
                     })).collect::<Vec<_>>(),
+                    "derived": derived,
+                    "used_by": used_by,
                 }));
-                if let catalog::Status::Gone { story, .. } = &entry.status {
-                    eprintln!("note: {}: {story}", entry.id);
+                let versions: Vec<&str> = mine.iter().map(|m| shown_version(&m.version)).collect();
+                if tool {
+                    // Not a choice: gogo fetches its pinned version itself.
+                    let pinned = entry.discovery.as_ref().and_then(|d| d.pinned_version());
+                    let pinned = pinned.map(|p| format!(", pinned {p}")).unwrap_or_default();
+                    footnotes.push(match versions.as_slice() {
+                        [] => format!(
+                            "{}: not cached{pinned}; downloaded when a game needs it",
+                            entry.id
+                        ),
+                        v => format!(
+                            "{}: cached {}{pinned}; updated when a game needs it",
+                            entry.id,
+                            v.join(", ")
+                        ),
+                    });
+                    continue;
                 }
+                let status = match &entry.status {
+                    catalog::Status::Available if entry.id == catalog::DEFAULT_RUNTIME => {
+                        "available · default".to_string()
+                    }
+                    catalog::Status::Available | catalog::Status::Tool => "available".to_string(),
+                    catalog::Status::ConsentRequired => "needs consent (Apple licence)".to_string(),
+                    // A retired entry only matters while copies of it remain.
+                    catalog::Status::Gone { .. } if mine.is_empty() => continue,
+                    catalog::Status::Gone { since, .. } => {
+                        format!("gone since {since} (cached copies still work)")
+                    }
+                };
+                let latest_tag = latest.as_ref().map(|l| shown_version(&l.tag));
+                let mut cached_col = if versions.is_empty() {
+                    "-".to_string()
+                } else {
+                    versions.join(", ")
+                };
+                if let Some(tag) = latest_tag
+                    && !versions.is_empty()
+                    && !versions.contains(&tag)
+                {
+                    cached_col.push_str(" (update available)");
+                }
+                table.add_row(vec![
+                    entry.id.to_string(),
+                    status,
+                    latest_tag.unwrap_or("-").to_string(),
+                    latest
+                        .as_ref()
+                        .map(|l| gogo::fmt::human_size(l.size))
+                        .unwrap_or_else(|| "-".into()),
+                    cached_col,
+                    if used_by.is_empty() {
+                        "-".to_string()
+                    } else {
+                        used_by.join(", ")
+                    },
+                ]);
             }
             if json {
                 println!("{}", serde_json::json!({ "entries": json_rows }));
             } else {
                 println!("{table}");
+                for note in footnotes {
+                    println!("{note}");
+                }
             }
             Ok(cli::exit::OK)
         }
-        crate::cli::RuntimesCmd::Install { id, version, json } => {
+        crate::cli::StoreCmd::Install { id, version, json } => {
             if !cfg!(target_os = "macos") {
                 eprintln!(
-                    "gogo: `gogo runtimes install` is macOS-only — runtimes feed `gogo mac-app`"
+                    "gogo: `gogo {command} install` is macOS-only — {command} feed `gogo mac-app`"
                 );
                 return Ok(cli::exit::USAGE);
             }
-            let Some(entry) = catalog::find(&id) else {
-                eprintln!("gogo: unknown runtime id '{id}' — see `gogo runtimes list`");
+            let id = catalog::canonical_id(&id);
+            let Some(entry) = catalog::find(id) else {
+                eprintln!("gogo: unknown {noun} id '{id}' — see `gogo {command} list`");
                 return Ok(cli::exit::USAGE);
             };
+            if !shelf.holds(entry) {
+                let other = Shelf::of(id);
+                eprintln!(
+                    "gogo: {id} is a {}: `gogo {} install {id}`",
+                    other.noun(),
+                    other.command()
+                );
+                return Ok(cli::exit::USAGE);
+            }
             // D3DMetal (#71) installs here only with the stored consent.
             let consent =
                 id == gogo::macapp::Renderer::D3dMetal.id() && gogo::macapp::d3dmetal::available();
@@ -2880,22 +2992,35 @@ async fn runtimes_cmd(args: crate::cli::RuntimesArgs) -> Result<i32, AppError> {
             }
             Ok(cli::exit::OK)
         }
-        crate::cli::RuntimesCmd::Prune { all, id } => {
-            let ids: Vec<String> = if all {
+        crate::cli::StoreCmd::Prune { unused, id } => {
+            let targets: Vec<String> = match id {
                 // Per version, keeping each id's newest two (N-1, #69).
-                store::sweep_targets()
-            } else {
-                match id {
-                    Some(i) => vec![i],
-                    None => {
-                        eprintln!("gogo: `gogo runtimes prune` needs an <id> or --all");
+                None if unused => store::sweep_targets()
+                    .into_iter()
+                    .filter(|t| Shelf::of(t) == shelf)
+                    .collect(),
+                // clap requires one of the two.
+                None => return Ok(cli::exit::USAGE),
+                Some(t) => {
+                    let (tid, ver) = t
+                        .split_once('/')
+                        .map_or((t.as_str(), None), |(i, v)| (i, Some(v)));
+                    let tid = catalog::canonical_id(tid);
+                    if Shelf::of(tid) != shelf {
+                        let other = Shelf::of(tid);
+                        eprintln!(
+                            "gogo: {tid} is a {}: `gogo {} prune {t}`",
+                            other.noun(),
+                            other.command()
+                        );
                         return Ok(cli::exit::USAGE);
                     }
+                    vec![ver.map_or(tid.to_string(), |v| format!("{tid}/{v}"))]
                 }
             };
             // Design 16 decision 6: never prune a runtime (base or derived)
             // or a renderer a game still uses (`state.toml` or L4).
-            let out = store::prune(&ids)?;
+            let out = store::prune(&targets)?;
             for (id, users) in &out.kept {
                 let mut games: Vec<&str> = users.iter().map(|u| u.gogid.as_str()).collect();
                 games.dedup();

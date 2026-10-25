@@ -226,9 +226,9 @@ pub async fn install(
         Status::ConsentRequired => {
             return Err(MacAppError::RuntimeDownloadFailed {
                 url: entry.id.into(),
-                reason: "consent-download (Apple EULA, design 12 D9) requires the \
-                         interactive runtime selection; meanwhile register a mount via \
-                         `mac-app --runtime gptk --runtime-path <dir>`"
+                reason: "the GPTK download needs your consent to Apple's licence: pick \
+                         it in `gogo mac-app --runtime` on a terminal, or use a mounted \
+                         copy with `gogo mac-app --runtime gptk --runtime-path <dir>`"
                     .into(),
             });
         }
@@ -871,6 +871,46 @@ fn uses(r: &str, target: &str) -> bool {
     }
 }
 
+/// The derived runtimes (`<base>/<ver>+<renderer>-<rver>`) built with a
+/// renderer among `targets` (`<renderer>` or `<renderer>/<rver>`).
+fn derived_with_renderers(targets: &[String]) -> Vec<String> {
+    let renderers: Vec<(&str, Option<&str>)> = targets
+        .iter()
+        .map(|t| {
+            t.split_once('/')
+                .map_or((t.as_str(), None), |(i, v)| (i, Some(v)))
+        })
+        .filter(|(id, _)| is_renderer(id))
+        .collect();
+    if renderers.is_empty() {
+        return Vec::new();
+    }
+    load_manifest()
+        .into_iter()
+        .filter(|m| {
+            m.version.split_once('+').is_some_and(|(_, made_with)| {
+                renderers.iter().any(|(rid, rver)| match rver {
+                    Some(v) => made_with == format!("{rid}-{v}"),
+                    None => made_with.starts_with(&format!("{rid}-")),
+                })
+            })
+        })
+        .map(|m| format!("{}/{}", m.id, m.version))
+        .collect()
+}
+
+/// The games (gogids, sorted, no repeats) whose state or override file
+/// references `id` (any version, derived runtimes included).
+pub fn users_of(id: &str) -> Vec<String> {
+    let mut games: Vec<String> = references()
+        .into_iter()
+        .filter(|r| uses(&r.reference, id))
+        .map(|r| r.gogid)
+        .collect();
+    games.dedup();
+    games
+}
+
 /// What [`prune`] did.
 #[derive(Debug, Default, Clone)]
 pub struct PruneOutcome {
@@ -882,13 +922,18 @@ pub struct PruneOutcome {
 
 /// Remove `targets` from the store (runtimes, derived runtimes and renderers
 /// alike): `<id>` takes every version, `<id>/<ver>` one version and the
-/// derived runtimes built on it. A target any game still references
+/// derived runtimes built on it, from either side: a renderer takes the
+/// derived runtimes made with it too. A target any game still references
 /// ([`references`]) is kept and reported instead (design 16 decision 6).
 pub fn prune(targets: &[String]) -> Result<PruneOutcome, MacAppError> {
     let refs = references();
     let mut out = PruneOutcome::default();
+    let mut targets = targets.to_vec();
+    targets.extend(derived_with_renderers(&targets));
+    targets.sort();
+    targets.dedup();
     let mut go: Vec<(&str, Option<&str>)> = Vec::new();
-    for t in targets {
+    for t in &targets {
         let users: Vec<Reference> = refs
             .iter()
             .filter(|r| uses(&r.reference, t))
@@ -2142,6 +2187,25 @@ pub(crate) mod store_tests {
         super::super::compat::set_user_keys("1435582019", &[("runtime", None)]).unwrap();
         assert_eq!(prune(&["winecx/2".into()]).unwrap().removed.len(), 1);
         assert_eq!(versions(), ["1"]);
+    }
+
+    #[test]
+    fn pruning_a_renderer_takes_the_runtimes_built_with_it() {
+        let home = tempfile::tempdir().unwrap();
+        let _g = env_home(home.path());
+        winecx_versions(&["1", "1+dxmt-v0.80", "1+dxmt-v0.90"]);
+        game_uses("1207659013", "winecx/1+dxmt-v0.90");
+        assert_eq!(users_of("winecx"), ["1207659013"]);
+        assert!(users_of("dxmt").is_empty());
+
+        // One renderer version: only the runtime made with that version.
+        let out = prune(&["dxmt/v0.80".into()]).unwrap();
+        assert_eq!(out.removed, [runtimes_dir().join("winecx/1+dxmt-v0.80")]);
+        // Every version: a runtime a game still runs on stays.
+        let out = prune(&["dxmt".into()]).unwrap();
+        assert!(out.removed.is_empty(), "{:?}", out.removed);
+        assert_eq!(out.kept[0].0, "winecx/1+dxmt-v0.90");
+        assert_eq!(versions(), ["1", "1+dxmt-v0.90"]);
     }
 
     #[test]

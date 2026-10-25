@@ -211,7 +211,9 @@ code change.
 - `--runtime` accepts `auto | brew | gptk | path | <catalog-id>` (staging/devel/stable);
   new `--runtime-version <ver>`; `--recipe` unchanged.
 - New command: `gogo runtimes list [--json]`, `gogo runtimes install <id> [--version]`,
-  `gogo runtimes prune [--all | <id>]`.
+  `gogo runtimes prune [--all | <id>]`. Since split: renderers have their own
+  `gogo renderers list|install|prune`, and `--all` is `--unused` (`--all` kept as
+  an alias); see design 16 §6.
 - Carried debt (design 11 §1): `gogo recipes list|show` — resolved in Phase 5:
   `recipes list <installer-path> | --name <game>` prints the ranked
   `runner: wine` installers; `recipes show <installer-slug|file>` prints the
