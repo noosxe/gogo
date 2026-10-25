@@ -269,11 +269,11 @@ pub fn write_verbs_notice(bundle: &Bundle, verbs: &[String]) -> Result<(), MacAp
     Ok(())
 }
 
-/// Ad-hoc codesign argv (`codesign --force --deep --sign - <bundle>`) — split
+/// Ad-hoc codesign argv (`/usr/bin/codesign --force --deep --sign - <bundle>`) — split
 /// out for unit testing; [`codesign_and_verify`] executes + verifies.
 pub fn codesign_argv(bundle: &Path) -> Vec<std::ffi::OsString> {
     vec![
-        "codesign".into(),
+        "/usr/bin/codesign".into(),
         "--force".into(),
         "--deep".into(),
         "--sign".into(),
@@ -315,7 +315,7 @@ pub fn codesign_and_verify(
             stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
         });
     }
-    let mut verify = std::process::Command::new("codesign");
+    let mut verify = std::process::Command::new("/usr/bin/codesign");
     verify.arg("--verify");
     if strict {
         verify.args(["--deep", "--strict"]);
@@ -538,7 +538,14 @@ mod bundle_tests {
         let strs: Vec<&std::ffi::OsStr> = args.iter().map(|a| a.as_os_str()).collect();
         assert_eq!(
             strs,
-            ["codesign", "--force", "--deep", "--sign", "-", "/out/G.app"]
+            [
+                "/usr/bin/codesign",
+                "--force",
+                "--deep",
+                "--sign",
+                "-",
+                "/out/G.app"
+            ]
         );
     }
 
