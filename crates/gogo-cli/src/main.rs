@@ -255,6 +255,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
         }
         Command::Runtimes(args) => store_cmd(Shelf::Runtimes, args.cmd).await,
         Command::Renderers(args) => store_cmd(Shelf::Renderers, args.cmd).await,
+        Command::Apps(args) => apps_cmd(args.cmd),
         Command::Recipes(args) => recipes_cmd(args),
         Command::Shim { tool, args } => Ok(gogo_shims::run_tool(&tool, &args)),
         Command::PeScan { dir, exe, json } => pe_scan(&dir, exe.as_deref(), json),
@@ -3035,6 +3036,182 @@ async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppEr
             Ok(cli::exit::OK)
         }
     }
+}
+
+// — apps: the games set up for .app bundles —
+
+fn apps_cmd(cmd: crate::cli::AppsCmd) -> Result<i32, AppError> {
+    use gogo::macapp::apps;
+
+    let logs = gogo::macapp::doctor::Host::detect().logs;
+    let dash = |s: Option<&str>| s.unwrap_or("-").to_string();
+    match cmd {
+        crate::cli::AppsCmd::List { json } => {
+            let all = apps::list(&logs)?;
+            if json {
+                println!("{}", serde_json::json!({ "apps": all }));
+                return Ok(cli::exit::OK);
+            }
+            if all.is_empty() {
+                println!("no games set up yet: `gogo mac-app <GAME>` builds one");
+                return Ok(cli::exit::OK);
+            }
+            let mut table = comfy_table::Table::new();
+            table.set_header(vec![
+                "GOGID",
+                "TITLE",
+                ".APP",
+                "RUNTIME",
+                "RENDERER",
+                "SIZE",
+                "LAST LAUNCH",
+            ]);
+            for a in &all {
+                table.add_row(vec![
+                    a.gogid.clone(),
+                    dash(a.title.as_deref()),
+                    app_column(a),
+                    dash(a.runtime.as_deref()),
+                    dash(a.renderer.as_deref()),
+                    gogo::fmt::human_size(a.bytes),
+                    dash(a.last_launch.as_deref()),
+                ]);
+            }
+            println!("{table}");
+            let orphans = all.iter().filter(|a| a.orphaned()).count();
+            if orphans > 0 {
+                println!(
+                    "{orphans} game(s) with a missing .app: `gogo apps prune --orphaned` \
+                     removes them (it asks first)"
+                );
+            }
+            Ok(cli::exit::OK)
+        }
+        crate::cli::AppsCmd::Show { target, json } => {
+            let Some(a) = apps::get(&target, &logs)? else {
+                eprintln!("gogo: {target} isn't set up on this Mac — see `gogo apps list`");
+                return Ok(cli::exit::USAGE);
+            };
+            if json {
+                println!("{}", serde_json::json!(a));
+                return Ok(cli::exit::OK);
+            }
+            let path = |p: Option<&std::path::Path>| {
+                p.map_or("-".to_string(), |p| p.display().to_string())
+            };
+            println!("{} {}", a.gogid, dash(a.title.as_deref()));
+            println!("  .app:        {}", app_column(&a));
+            if let Some(b) = &a.bundle {
+                println!("               {}", b.display());
+            }
+            println!("  state:       {}", a.root.display());
+            println!("  prefix:      {}", a.prefix.display());
+            println!("  logs:        {}", path(a.logs.as_deref()));
+            println!("  override:    {}", path(a.override_file.as_deref()));
+            println!("  runtime:     {}", dash(a.runtime.as_deref()));
+            println!("  renderer:    {}", dash(a.renderer.as_deref()));
+            println!("  size:        {}", gogo::fmt::human_size(a.bytes));
+            println!("  last launch: {}", dash(a.last_launch.as_deref()));
+            Ok(cli::exit::OK)
+        }
+        crate::cli::AppsCmd::Remove {
+            target,
+            keep_override,
+            yes,
+        } => {
+            let Some(a) = apps::get(&target, &logs)? else {
+                eprintln!("gogo: {target} isn't set up on this Mac — see `gogo apps list`");
+                return Ok(cli::exit::USAGE);
+            };
+            remove_apps(&[a], keep_override, yes)
+        }
+        crate::cli::AppsCmd::Prune {
+            orphaned: _,
+            keep_override,
+            yes,
+        } => {
+            let orphans: Vec<apps::App> = apps::list(&logs)?
+                .into_iter()
+                .filter(apps::App::orphaned)
+                .collect();
+            if orphans.is_empty() {
+                println!("nothing to prune: every game's .app is where it was");
+                return Ok(cli::exit::OK);
+            }
+            remove_apps(&orphans, keep_override, yes)
+        }
+    }
+}
+
+/// `present`, `missing`, `portable` (and `-` when nothing is recorded).
+fn app_column(a: &gogo::macapp::apps::App) -> String {
+    let kind = if a.portable { "portable, " } else { "" };
+    match (&a.bundle, a.bundle_present) {
+        (None, _) => "-".to_string(),
+        (Some(_), true) => format!("{kind}present"),
+        (Some(_), false) => format!("{kind}missing"),
+    }
+}
+
+/// Print what goes, ask (unless `yes`), remove, and report.
+fn remove_apps(
+    targets: &[gogo::macapp::apps::App],
+    keep_override: bool,
+    yes: bool,
+) -> Result<i32, AppError> {
+    let total: u64 = targets.iter().map(|a| a.bytes).sum();
+    println!("to remove (Wine prefix and saves included):");
+    for a in targets {
+        let title = a.title.as_deref().unwrap_or("-");
+        println!(
+            "  {} {title} ({}) at {}",
+            a.gogid,
+            gogo::fmt::human_size(a.bytes),
+            a.root.display()
+        );
+        if let Some(b) = a.bundle.as_ref().filter(|_| a.bundle_present) {
+            println!("    {} stays, but won't start until rebuilt", b.display());
+        }
+    }
+    if !yes {
+        if !console::Term::stdout().features().is_attended() {
+            eprintln!("gogo: not attached to a terminal — pass --yes to remove the above");
+            return Ok(cli::exit::USAGE);
+        }
+        let confirmed = dialoguer::Confirm::new()
+            .with_prompt(format!(
+                "remove {} game(s), {}?",
+                targets.len(),
+                gogo::fmt::human_size(total)
+            ))
+            .default(false)
+            .interact()
+            .unwrap_or(false);
+        if !confirmed {
+            println!("aborted");
+            return Ok(cli::exit::OK);
+        }
+    }
+    let mut failed = false;
+    for a in targets {
+        match gogo::macapp::apps::remove(a, keep_override) {
+            Ok(out) => {
+                for p in &out.paths {
+                    println!("removed {}", p.display());
+                }
+            }
+            Err(e) => {
+                eprintln!("gogo: {e}");
+                failed = true;
+            }
+        }
+    }
+    println!("`gogo runtimes prune --unused` frees the runtimes no game uses now");
+    Ok(if failed {
+        cli::exit::MACAPP
+    } else {
+        cli::exit::OK
+    })
 }
 
 // — recipes (design 11 §1: corpus inspection, nothing applied or stored) —

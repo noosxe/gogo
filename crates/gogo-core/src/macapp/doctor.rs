@@ -917,7 +917,7 @@ fn teardown(dirs: &GameDirs, state: Option<&GameState>) {
 
 /// The pid of a running launcher of this game (`.launchers/<pid>` holding
 /// its start time, as the launcher writes it), if any.
-fn live_launcher(game_root: &Path) -> Option<u32> {
+pub(super) fn live_launcher(game_root: &Path) -> Option<u32> {
     std::fs::read_dir(game_root.join(".launchers"))
         .ok()?
         .flatten()

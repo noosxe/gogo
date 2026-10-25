@@ -6,6 +6,7 @@
 //! gogo tracks nothing after conversion (design 10 boundary): no install
 //! records, no update detection — the bundle is the artifact.
 
+pub mod apps;
 pub mod bundle;
 pub mod compat;
 pub mod d3dmetal;
