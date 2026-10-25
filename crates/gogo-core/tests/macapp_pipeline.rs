@@ -49,7 +49,8 @@ case "$1" in
     printf 'DLLOV:%s\n' "${{WINEDLLOVERRIDES:-}}" >> "{log}"
     if [ -n "${{FAKE_WINE_HANG:-}}" ]; then
       (trap '' TERM; exec sleep 300) &
-      echo $! > "$FAKE_WINE_HANG"
+      # Renamed into place: the test reads it as soon as it exists.
+      echo $! > "$FAKE_WINE_HANG.tmp" && mv "$FAKE_WINE_HANG.tmp" "$FAKE_WINE_HANG"
       sleep 300
     fi
     # FAKE_WINE_EXIT=<n>: chatter on both streams, then exit n (#77 run log).
