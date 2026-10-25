@@ -528,9 +528,13 @@ games/<gogid>/{prefix,game,state.toml,launch.conf}
   (`winecx/24.0.7_7+dxmt-v0.80` keeps `winecx/24.0.7_7`). A version-less reference
   (`runtime = "winecx"` in L4) keeps the newest base version, the one it resolves to.
   The check lives in `store::prune` itself, which reports what it kept and why. N-1
-  belongs to the sweep, not to `prune <target>`: `prune --unused` offers every
-  cached version except the newest two base versions of each id (by fetch time), so
-  the previous pin survives a sweep, used or not, for rollback. Derived runtimes get
+  belongs to the sweep, not to `prune <target>`. `store::sweep` plans `prune
+  --unused`: an id a game uses keeps its newest two base versions (by fetch time),
+  so the previous pin survives for rollback; the default runtime and tools
+  (winetricks) keep their newest, so the next build doesn't download them again;
+  every other id goes entirely. (Keeping the newest two of *every* id, used or
+  not, meant a store with one version per id never swept anything.) The sweep
+  reports each version it keeps and why. Derived runtimes get
   no N-1: only a reference keeps them, since setup rebuilds one from its base in
   seconds. An explicit `prune <id>[/<ver>]` removes anything unreferenced: that is
   the user saying so, and a renderer target takes the derived runtimes made with it

@@ -176,7 +176,7 @@ Runtimes and renderers are managed explicitly too, with the same verbs:
 ```sh
 gogo runtimes list                  # catalog (live-probed), cached versions, games using them
 gogo runtimes install wine-staging  # download → probe → cache, reused by every bundle
-gogo runtimes prune --unused        # what no game uses, keeping each id's previous pin
+gogo runtimes prune --unused        # what no game uses (a used id keeps its previous pin)
 gogo renderers list                 # cnc-ddraw, DXMT, D3DMetal
 gogo renderers prune dxmt/v0.80     # one version, with the runtimes built with it
 ```
