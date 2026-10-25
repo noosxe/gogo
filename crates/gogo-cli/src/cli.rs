@@ -500,8 +500,9 @@ pub enum StoreCmd {
     /// Remove cached versions (never one a game still uses).
     #[command(group = clap::ArgGroup::new("what").required(true).args(["unused", "id"]))]
     Prune {
-        /// Remove every cached version no game uses, except the newest two
-        /// of each (the current one and the one before, to roll back to).
+        /// Remove every cached version no game uses. An id a game uses keeps
+        /// its newest two (the current one and the one before, to roll back
+        /// to); the default runtime and winetricks keep their newest.
         #[arg(long, alias = "all")]
         unused: bool,
         /// Remove one id (every version), or one version as `<id>/<version>`,

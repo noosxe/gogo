@@ -2994,12 +2994,21 @@ async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppEr
             Ok(cli::exit::OK)
         }
         crate::cli::StoreCmd::Prune { unused, id } => {
+            let mut swept: Vec<(String, String)> = Vec::new();
             let targets: Vec<String> = match id {
-                // Per version, keeping each id's newest two (N-1, #69).
-                None if unused => store::sweep_targets()
-                    .into_iter()
-                    .filter(|t| Shelf::of(t) == shelf)
-                    .collect(),
+                // Per version: rollback pins only for ids a game uses (#69).
+                None if unused => {
+                    let plan = store::sweep();
+                    swept = plan
+                        .kept
+                        .into_iter()
+                        .filter(|(t, _)| Shelf::of(t) == shelf)
+                        .collect();
+                    plan.targets
+                        .into_iter()
+                        .filter(|t| Shelf::of(t) == shelf)
+                        .collect()
+                }
                 // clap requires one of the two.
                 None => return Ok(cli::exit::USAGE),
                 Some(t) => {
@@ -3026,6 +3035,9 @@ async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppEr
                 let mut games: Vec<&str> = users.iter().map(|u| u.gogid.as_str()).collect();
                 games.dedup();
                 eprintln!("gogo: keeping {id}: used by game(s) {}", games.join(", "));
+            }
+            for (target, why) in &swept {
+                eprintln!("gogo: keeping {target}: {why}");
             }
             if out.removed.is_empty() {
                 println!("nothing to prune");

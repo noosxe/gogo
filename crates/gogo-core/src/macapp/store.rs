@@ -797,8 +797,8 @@ fn notices_text(
     Ok(out)
 }
 
-/// Base versions of each id a sweep (`gogo runtimes prune --all`) keeps,
-/// used or not: the newest pin and the one before it, to roll back to (N-1,
+/// Base versions a sweep (`gogo runtimes prune --unused`) keeps of an id a
+/// game uses: the newest pin and the one before it, to roll back to (N-1,
 /// #69).
 pub const KEEP_VERSIONS: usize = 2;
 
@@ -987,30 +987,65 @@ pub fn prune(targets: &[String]) -> Result<PruneOutcome, MacAppError> {
     Ok(out)
 }
 
-/// What a sweep offers [`prune`]: every cached version as `<id>/<ver>`, but
-/// the newest [`KEEP_VERSIONS`] base versions of each id (by fetch time).
+/// What a sweep offers [`prune`], and what it leaves alone and why.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Sweep {
+    /// `<id>/<ver>` to hand to [`prune`], which still keeps referenced ones.
+    pub targets: Vec<String>,
+    /// `(<id>/<ver>, why)` for each base version the sweep keeps.
+    pub kept: Vec<(String, String)>,
+}
+
+/// Plan a sweep over every cached base version (newest first by fetch
+/// time):
+/// - an id a game uses keeps its newest [`KEEP_VERSIONS`] (N and N-1, to
+///   roll back to); older ones go unless a game uses them;
+/// - the default runtime and gogo's tools keep their newest, so the next
+///   build needn't download them again;
+/// - any other id goes entirely.
+///
 /// Derived runtimes are listed on their own: only a reference keeps them,
 /// they are rebuilt from their base in seconds.
-pub fn sweep_targets() -> Vec<String> {
+pub fn sweep() -> Sweep {
     let mut all: Vec<ManifestEntry> = load_manifest();
     all.extend(load_renderer_manifest());
     all.sort_by(|a, b| (&a.id, &b.fetched_at).cmp(&(&b.id, &a.fetched_at)));
-    let mut out = Vec::new();
+    let refs = references();
+    let mut out = Sweep::default();
     let mut seen: (String, usize) = (String::new(), 0);
     for m in &all {
-        if !is_derived(&m.version) {
-            if seen.0 != m.id {
-                seen = (m.id.clone(), 0);
-            }
-            seen.1 += 1;
-            if seen.1 <= KEEP_VERSIONS {
-                continue;
-            }
+        let target = format!("{}/{}", m.id, m.version);
+        if is_derived(&m.version) {
+            out.targets.push(target);
+            continue;
         }
-        out.push(format!("{}/{}", m.id, m.version));
+        if seen.0 != m.id {
+            seen = (m.id.clone(), 0);
+        }
+        seen.1 += 1;
+        let tool =
+            catalog::find(&m.id).is_some_and(|e| matches!(e.kind, catalog::Kind::Tool { .. }));
+        let why = if refs.iter().any(|r| uses(&r.reference, &m.id)) {
+            match seen.1 {
+                1 => Some(format!("newest {} (a game uses {})", m.id, m.id)),
+                2 => Some("the version before it, to roll back to".to_string()),
+                _ => None,
+            }
+        } else if seen.1 == 1 && m.id == catalog::DEFAULT_RUNTIME {
+            Some("newest of the default runtime".to_string())
+        } else if seen.1 == 1 && tool {
+            Some("newest of a tool gogo uses".to_string())
+        } else {
+            None
+        };
+        match why {
+            Some(why) => out.kept.push((target, why)),
+            None => out.targets.push(target),
+        }
     }
-    out.sort();
-    out.dedup();
+    out.targets.sort();
+    out.targets.dedup();
+    out.kept.sort();
     out
 }
 
@@ -2209,24 +2244,60 @@ pub(crate) mod store_tests {
     }
 
     #[test]
-    fn a_sweep_keeps_the_previous_pin() {
+    fn a_sweep_keeps_rollback_pins_only_for_used_ids() {
         let home = tempfile::tempdir().unwrap();
         let _g = env_home(home.path());
-        winecx_versions(&["1", "1+dxmt-v0.80", "2", "2+dxmt-v0.80", "3"]);
-        // N and N-1 stay unused; N-2 and every unused derived runtime go.
+        let targets = || sweep().targets;
+
+        // Nothing uses winecx: every version goes, derived ones too.
+        winecx_versions(&["1", "1+dxmt-v0.80", "2", "3"]);
         assert_eq!(
-            sweep_targets(),
+            targets(),
+            ["winecx/1", "winecx/1+dxmt-v0.80", "winecx/2", "winecx/3"]
+        );
+        prune(&targets()).unwrap();
+        assert!(versions().is_empty());
+
+        // A game uses it: N and N-1 stay, N-2 and unused derived ones go.
+        winecx_versions(&["1", "1+dxmt-v0.80", "2", "2+dxmt-v0.80", "3"]);
+        game_uses("1207659013", "winecx/3");
+        let plan = sweep();
+        assert_eq!(
+            plan.targets,
             ["winecx/1", "winecx/1+dxmt-v0.80", "winecx/2+dxmt-v0.80"]
         );
-        prune(&sweep_targets()).unwrap();
+        assert_eq!(
+            plan.kept
+                .iter()
+                .map(|(t, _)| t.as_str())
+                .collect::<Vec<_>>(),
+            ["winecx/2", "winecx/3"]
+        );
+        prune(&plan.targets).unwrap();
         assert_eq!(versions(), ["2", "3"]);
 
-        // A game on N-2 keeps it through the sweep.
+        // A game on N-2 keeps it: prune refuses what's referenced.
         winecx_versions(&["1", "2", "3"]);
         game_uses("1207659013", "winecx/1");
-        let out = prune(&sweep_targets()).unwrap();
+        let out = prune(&targets()).unwrap();
         assert!(out.removed.is_empty());
         assert_eq!(out.kept[0].0, "winecx/1");
         assert_eq!(versions(), ["1", "2", "3"]);
+    }
+
+    #[test]
+    fn a_sweep_keeps_the_newest_default_runtime() {
+        let home = tempfile::tempdir().unwrap();
+        let _g = env_home(home.path());
+        let mut all = Vec::new();
+        for (i, v) in ["26.1", "26.3"].iter().enumerate() {
+            let mut m = entry(catalog::DEFAULT_RUNTIME, v, "engine/bin/wine");
+            m.fetched_at = format!("2026-10-{:02}T00:00:00Z", i + 1);
+            all.push(m);
+        }
+        save_manifest(&all).unwrap();
+        let plan = sweep();
+        assert_eq!(plan.targets, [format!("{}/26.1", catalog::DEFAULT_RUNTIME)]);
+        assert_eq!(plan.kept[0].0, format!("{}/26.3", catalog::DEFAULT_RUNTIME));
     }
 }
