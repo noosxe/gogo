@@ -31,6 +31,18 @@ rustPlatform.buildRustPackage {
     };
   };
 
+  # These drive real processes through `ps` (the launcher's watchdog and
+  # liveness checks, doctor's leftover-process scan), which the macOS build
+  # sandbox denies; outside it the launcher reads that as "parent gone" and
+  # tears down. They run in the dev shell (`cargo nextest run`) and CI.
+  checkFlags = map (t: "--skip=${t}") [
+    "doctor_reports_and_stops_leftover_wine_processes"
+    "v2_early_exit_dialog_tries_the_next_renderer"
+    "v2_launcher_teardown_reaps_its_own_prefix_only"
+    "v2_launcher_watchdog_spares_a_later_launch"
+    "v2_launcher_watchdog_tears_down_after_sigkill"
+  ];
+
   meta = {
     description = "GOG.com offline-installer downloader (Rust CLI)";
     homepage = "https://github.com/noosxe/gogo";
