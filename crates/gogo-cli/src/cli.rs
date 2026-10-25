@@ -41,7 +41,8 @@ pub enum ColorWhen {
 /// The eleven commands (`docs/design/03-cli.md` §1).
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Interactive browser paste-code login (docs/design/02 §2).
+    /// Sign in to GOG: open the login page in a browser, then paste back
+    /// the code it ends on.
     Login {
         /// Non-interactive: paste the code directly (secrets never printed).
         #[arg(long)]
@@ -103,7 +104,8 @@ pub enum Command {
         games: Vec<String>,
         #[arg(long)]
         all: bool,
-        /// Additionally compare checksum-XML build id + timestamp (docs/design/06 §4).
+        /// Also treat a changed build id or timestamp in GOG's checksum file
+        /// as an update.
         #[arg(long)]
         strict: bool,
     },
@@ -119,20 +121,22 @@ pub enum Command {
         /// Re-download corrupt files.
         #[arg(long)]
         fix: bool,
-        /// Walk the download dir and adopt verified files into records (06 §5).
+        /// Scan the download directory and record every file that verifies
+        /// (for files downloaded elsewhere or records that were lost).
         #[arg(long)]
         rebuild: bool,
     },
-    /// Download a game straight from GOG's content system (depot / Model B)
-    /// into the user cache directory (docs/design/14). macOS only for now.
+    /// Download a game's files straight from GOG's content servers (its
+    /// depot build, as GOG Galaxy does) into the user cache directory.
+    /// macOS only for now.
     Depot(DepotArgs),
     /// Config file management.
     Config {
         #[command(subcommand)]
         sub: ConfigSub,
     },
-    /// Build a self-contained macOS .app for a Windows game (docs/design/10):
-    /// from its depot build by default, else from its offline installer.
+    /// Build a macOS .app that runs a Windows game in Wine: from its depot
+    /// build by default, else from its offline installer.
     #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
     MacApp {
         #[command(subcommand)]
@@ -140,7 +144,7 @@ pub enum Command {
         /// A game (id, slug or part of the title) — built from its depot
         /// build, or from its downloaded installer when it has none — or the
         /// path to a GOG setup .exe (.bin siblings are picked up
-        /// automatically) or an installed game tree (docs/design/15 §1).
+        /// automatically) or an installed game directory.
         #[arg(
             value_name = "GAME|INSTALLER",
             required_unless_present_any = ["from_depot", "retarget"],
@@ -149,23 +153,22 @@ pub enum Command {
         input: Option<String>,
         /// Point an existing game at another runtime or renderer without
         /// rebuilding: writes `--runtime` / `--renderer` into the game's user
-        /// override file (L4, design 16 decision 7), then sets the game up on
+        /// override file, then sets the game up on
         /// it (installing the runtime, `wineboot -u` for a new engine). The
         /// signed bundle is untouched. `auto` drops the override.
         #[arg(long, value_name = "BUNDLE|GOGID", conflicts_with = "from_depot")]
         retarget: Option<String>,
-        /// Depot lane only: like the positional GAME, but never falls back
-        /// to the installer lane; also takes a game tree directory
-        /// (docs/design/15).
+        /// Like the positional GAME, but only from the depot build, never
+        /// the installer; also takes an installed game directory.
         #[arg(long, value_name = "GAME|PATH")]
         from_depot: Option<String>,
         /// Bundle title (default: the game's name, or derived from the
         /// installer file name).
         #[arg(long)]
         name: Option<String>,
-        /// Wine runtime source (docs/design/10 §3). Default: the game's
-        /// override or compat entry, else the default track. Without a
-        /// value, pick it from a menu (#76).
+        /// Wine runtime to use. Default: the one set for the game in your
+        /// override file or gogo's compat list, else the default runtime.
+        /// Without a value, pick it from a menu.
         #[arg(long, value_enum, num_args = 0..=1, value_name = "RUNTIME")]
         runtime: Option<Option<RuntimeSource>>,
         /// Runtime directory for --runtime gptk|path.
@@ -179,27 +182,26 @@ pub enum Command {
         out: Option<std::path::PathBuf>,
         /// Lutris recipe: none (default), auto (live search: a picker on a
         /// terminal, the ranked best otherwise), a Lutris installer slug, or
-        /// a downloaded script JSON path (docs/design/11 §1). Without a
-        /// value: auto.
+        /// a downloaded script JSON path. Without a value: auto.
         #[arg(long, num_args = 0..=1, default_missing_value = "auto", value_name = "RECIPE")]
         recipe: Option<String>,
         /// Ask for the recipe and the runtime in menus (a terminal only;
         /// flags with a value still win). Same as bare `--recipe --runtime`.
         #[arg(long, conflicts_with = "retarget")]
         interactive: bool,
-        /// Renderer (#70): `auto` (default) picks it from the game's PE
-        /// imports (D3D10/11 → dxmt, D3D9 and older → wined3d, 2D DirectDraw
-        /// → cnc-ddraw) unless gogo's compat DB or your override file says
-        /// otherwise.
+        /// Renderer: `auto` (default) picks it from the graphics API the
+        /// game uses (D3D10/11 → dxmt, D3D9 and older → wined3d, 2D
+        /// DirectDraw → cnc-ddraw) unless gogo's compat list or your
+        /// override file says otherwise.
         #[arg(long, value_enum)]
         renderer: Option<RendererArg>,
-        /// Alias for `--renderer cnc-ddraw` (design 13).
+        /// Alias for `--renderer cnc-ddraw`.
         #[arg(long, conflicts_with_all = ["no_ddraw_wrapper", "renderer"])]
         ddraw_wrapper: bool,
         /// Like `--renderer auto`, but never cnc-ddraw (wined3d instead).
         #[arg(long, conflicts_with = "renderer")]
         no_ddraw_wrapper: bool,
-        /// Self-contained bundle for another Mac (#84): the runtime, the
+        /// Self-contained bundle for another Mac: the runtime, the
         /// renderer, the verbs' files and the game go inside the .app, and
         /// its launcher creates the prefix on the Mac it runs on (no gogo
         /// needed there). Can't be retargeted in place; D3DMetal and the GPTK
@@ -216,13 +218,13 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Manage Wine runtimes: list the catalog + cache, install, prune
-    /// (design 12 §10).
+    /// Manage Wine runtimes: list the catalog and what's cached, install,
+    /// prune.
     Runtimes(RuntimesArgs),
-    /// Inspect Lutris community recipes for a game (design 11 §1): list the
+    /// Inspect Lutris community recipes for a game: list the
     /// ranked candidates, or show one recipe's execution plan.
     Recipes(RecipesArgs),
-    /// Internal: extractor shims materialized for winetricks (design 12 D5).
+    /// Internal: archive-extractor stand-ins that winetricks calls.
     /// Double-underscore name keeps it out of help and completion output.
     #[command(hide = true, name = "__shim")]
     Shim {
@@ -233,7 +235,7 @@ pub enum Command {
         args: Vec<String>,
     },
     /// Debug: PE import scan of a game tree — bitness, graphics API, helper
-    /// DLLs (#63, docs/19 §6.2). Input for renderer selection; changes nothing.
+    /// DLLs. Input for renderer selection; changes nothing.
     #[command(hide = true, name = "__pe-scan")]
     PeScan {
         /// Game install / depot tree.
@@ -257,8 +259,8 @@ pub enum Command {
 /// `gogo mac-app <sub>`: per-game commands next to the build itself.
 #[derive(Debug, Subcommand)]
 pub enum MacAppSub {
-    /// Print a game's effective compat config and the layer each field came
-    /// from (design 16 decision 5).
+    /// Print a game's effective compat config and where each value comes
+    /// from (built-in defaults, gogo's compat list, your override file).
     Compat {
         /// GOG product id.
         #[arg(value_name = "GOGID")]
@@ -270,8 +272,8 @@ pub enum MacAppSub {
     /// Bring a game's state dir up to date with its bundle and override
     /// file: resolve the runtime (installing a missing catalog runtime),
     /// create a missing prefix with no links out of the state dir, apply
-    /// registry values and verbs, write the effective launch config (design
-    /// 16 §2.2). The launcher runs this when its config stamp is stale.
+    /// registry values and verbs, write the effective launch config. The
+    /// launcher runs this when the game's config has changed.
     Setup {
         /// GOG product id.
         #[arg(value_name = "GOGID")]
@@ -283,7 +285,7 @@ pub enum MacAppSub {
         #[arg(long)]
         json: bool,
     },
-    /// Can this game work on this Mac (#79)? Checks the bundle's signature,
+    /// Can this game work on this Mac? Checks the bundle's signature,
     /// the effective runtime and renderer files, the prefix stamp and links,
     /// Rosetta, Wine processes left running, and the last launch's log; one
     /// line per finding (ok / warn / fail) with a fix hint. Never launches
@@ -302,7 +304,7 @@ pub enum MacAppSub {
         json: bool,
     },
     /// Switch a game to the next renderer in its order (the launcher's
-    /// "Try next renderer", #78): the one after what setup last applied,
+    /// "Try next renderer"): the one after what setup last applied,
     /// written to the override file as `renderer = "<ref>"`. Prints the new
     /// ref; exits 1 with "no more renderers" when the order is used up.
     NextRenderer {
@@ -329,10 +331,11 @@ pub struct DepotArgs {
     /// Password for password-protected builds.
     #[arg(long)]
     pub password: Option<String>,
-    /// Install root override (default: user cache dir, design 14 D2).
+    /// Install root override (default: the user cache directory).
     #[arg(long, value_name = "DIR")]
     pub dir: Option<std::path::PathBuf>,
-    /// Global rate limit, e.g. 4MiB/s (download.limit grammar, 05 §3).
+    /// Global rate limit, e.g. 4MiB/s (same syntax as the download.limit
+    /// config key).
     #[arg(long)]
     pub limit: Option<String>,
     /// Skip the free-space preflight.
@@ -371,7 +374,8 @@ pub enum OsFilter {
 /// `--renderer` values (#70).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum RendererArg {
-    /// Picked from the game's imports (L1), unless L3/L4 say otherwise.
+    /// Picked from the game's graphics API, unless gogo's compat list or
+    /// your override file says otherwise.
     Auto,
     /// Wine's own Direct3D-on-OpenGL.
     Wined3d,
@@ -404,18 +408,18 @@ impl RendererArg {
 /// `ValueEnum` can't be implemented on it here).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum RuntimeSource {
-    /// Recipe-recommended or cached runtime, else download the default
-    /// track (design 12 §5); a host brew/GPTK wine only by flag or menu.
+    /// The recipe's or a cached runtime, else download the default one;
+    /// a Homebrew or GPTK wine only when asked for.
     Auto,
     /// Homebrew wine-crossover.
     Brew,
     /// Cached/downloaded CrossOver-24-source engine `winecx` with its
-    /// Frameworks/ (the rollback track, docs/19 §6.1).
+    /// Frameworks/ (the previous default, to roll back to).
     Winecx,
     /// Cached/downloaded CrossOver-26.3-source engine `winecx26` (Highball
-    /// build, Wine 11.0) with its Frameworks/: the default track (docs/20).
+    /// build, Wine 11.0) with its Frameworks/: the default.
     Winecx26,
-    /// Cached/downloaded wine-staging (design 12 catalog; the alternate track).
+    /// Cached/downloaded wine-staging.
     Staging,
     /// Cached/downloaded wine-devel.
     Devel,
@@ -514,7 +518,7 @@ pub enum RecipesCmd {
         lutris_base: Option<String>,
     },
     /// Show a recipe's execution plan: applied steps vs skipped, with
-    /// reasons (design 11 §3). Nothing is executed.
+    /// reasons. Nothing is executed.
     Show {
         /// Installer slug (live fetch) or a local script JSON file.
         #[arg(value_name = "SLUG|FILE")]
@@ -574,7 +578,7 @@ pub struct DownloadArgs {
     /// Language filter.
     #[arg(long)]
     pub language: Option<String>,
-    /// Include DLC installers (DLCs enter only via their parent game, A1).
+    /// Include DLC installers (a DLC comes with its parent game).
     #[arg(long)]
     pub with_dlcs: bool,
     /// Include bonus content (extras).
@@ -595,7 +599,8 @@ pub struct DownloadArgs {
     /// Simultaneous files (download.parallel_files).
     #[arg(long, value_name = "N")]
     pub parallel_files: Option<u32>,
-    /// Global rate limit, e.g. 4MiB/s (download.limit grammar, 05 §3).
+    /// Global rate limit, e.g. 4MiB/s (same syntax as the download.limit
+    /// config key).
     #[arg(long)]
     pub limit: Option<String>,
     /// Redownload even if recorded as present.
@@ -686,5 +691,46 @@ mod tests {
             Cli::try_parse_from(["gogo", "mac-app", "pharaoh", "--from-depot", "pharaoh"]).is_err()
         );
         assert!(Cli::try_parse_from(["gogo", "mac-app"]).is_err());
+    }
+
+    /// Help text is for users: no pointers into the repo's docs or issues.
+    #[test]
+    fn help_text_does_not_reference_repo_docs() {
+        fn texts(cmd: &clap::Command, path: &str, out: &mut Vec<(String, String)>) {
+            let path = format!("{path} {}", cmd.get_name());
+            for t in [cmd.get_about(), cmd.get_long_about()]
+                .into_iter()
+                .flatten()
+            {
+                out.push((path.clone(), t.to_string()));
+            }
+            for arg in cmd.get_arguments() {
+                let at = format!("{path} --{}", arg.get_id());
+                for t in [arg.get_help(), arg.get_long_help()].into_iter().flatten() {
+                    out.push((at.clone(), t.to_string()));
+                }
+                for v in arg.get_possible_values() {
+                    if let Some(t) = v.get_help() {
+                        out.push((format!("{at}={}", v.get_name()), t.to_string()));
+                    }
+                }
+            }
+            for sub in cmd.get_subcommands() {
+                texts(sub, &path, out);
+            }
+        }
+        let mut all = Vec::new();
+        texts(&<Cli as clap::CommandFactory>::command(), "", &mut all);
+        let issue_ref = |t: &str| {
+            t.match_indices('#')
+                .any(|(i, _)| t[i + 1..].starts_with(|c: char| c.is_ascii_digit()))
+        };
+        let bad: Vec<_> = all
+            .iter()
+            .filter(|(_, t)| {
+                t.contains("docs/") || t.contains("design ") || t.contains('§') || issue_ref(t)
+            })
+            .collect();
+        assert!(bad.is_empty(), "help text references repo docs: {bad:#?}");
     }
 }
