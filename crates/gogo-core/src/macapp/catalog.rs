@@ -55,6 +55,18 @@ pub enum Status {
     },
 }
 
+impl Status {
+    /// Stable name for `--json` output.
+    pub fn key(&self) -> &'static str {
+        match self {
+            Status::Available => "available",
+            Status::ConsentRequired => "consent",
+            Status::Tool => "tool",
+            Status::Gone { .. } => "gone",
+        }
+    }
+}
+
 /// How the artifact is discovered.
 pub enum Discovery {
     /// GitHub releases: assets matched by prefix/suffix — tags may carry `_N`
@@ -363,7 +375,7 @@ static ENTRIES: &[CatalogEntry] = &[
         min_macos: Some("14.0"),
         arch: Some(Arch::X86_64Rosetta),
         vendor_signed: false,
-        note: "default track (docs/20 §3.4, #83): CrossOver-26.3-source engine (Wine 11.0) \
+        note: "the default: CrossOver-26.3-source engine (Wine 11.0) \
                + 24 Highball patches, new-style WoW64. Host-passed on DXMT, D3DMetal, \
                OpenGL and installer-lane Pharaoh",
         frameworks: Some(FrameworksSet {
@@ -394,9 +406,9 @@ static ENTRIES: &[CatalogEntry] = &[
         min_macos: None,
         arch: Some(Arch::X86_64Rosetta),
         vendor_signed: false,
-        note: "rollback track (the default is winecx26, docs/20): CrossOver-24-source \
-               engine (Wine 9.0). Runs 32-bit Inno code without #56's overflow, usable \
-               OpenGL, FreeType from its own Frameworks/ (#54)",
+        note: "the previous default, to roll back to: CrossOver-24-source engine \
+               (Wine 9.0). Runs 32-bit Inno installers, usable OpenGL, FreeType from \
+               its own Frameworks/",
         frameworks: Some(FrameworksSet {
             asset: PinnedAsset {
                 repo: "Sikarugir-App/Template",
@@ -457,7 +469,7 @@ static ENTRIES: &[CatalogEntry] = &[
         min_macos: None,
         arch: Some(Arch::X86_64Rosetta),
         vendor_signed: false,
-        note: "WineHQ stable train; tags may carry _N suffixes (docs/15 §8.2)",
+        note: "WineHQ stable train; tags may carry _N suffixes",
         frameworks: None,
     },
     CatalogEntry {
@@ -486,8 +498,7 @@ static ENTRIES: &[CatalogEntry] = &[
         status: Status::Gone {
             since: "2026-10-19",
             story: "repo + releases 404; WoW64 matured upstream, the cx-llvm toolchain \
-                    bit-rotted, and the maintainer pivoted to Gcenx/macOS_Wine_builds \
-                    (docs/15 §1)",
+                    bit-rotted, and the maintainer pivoted to Gcenx/macOS_Wine_builds",
         },
         discovery: None,
         license: "LGPL-2.1 (Wine)",
@@ -545,7 +556,7 @@ static ENTRIES: &[CatalogEntry] = &[
         min_macos: None,
         arch: Some(Arch::X86_64Rosetta),
         vendor_signed: false,
-        note: "renderer: DirectDraw wrapper (design 13) for 2D DirectDraw games, dropped \
+        note: "renderer: DirectDraw wrapper for 2D DirectDraw games, dropped \
                into the game dir with ddraw=n,b; never over a game's or recipe's own \
                ddraw.dll",
         frameworks: None,
@@ -573,9 +584,9 @@ static ENTRIES: &[CatalogEntry] = &[
         min_macos: None,
         arch: Some(Arch::X86_64Rosetta),
         vendor_signed: false,
-        note: "renderer: D3D10/11 to Metal (docs/19 §6.2). Replaces the engine's \
-               d3d11/dxgi/d3d10core/winemetal, so it runs from a derived runtime \
-               (design 16 decision 3); needs a CrossOver-source engine (winecx) and a \
+        note: "renderer: D3D10/11 to Metal. Replaces the engine's \
+               d3d11/dxgi/d3d10core/winemetal, so it runs from a derived runtime; \
+               needs a CrossOver-source engine (winecx) and a \
                Metal 3 GPU",
         frameworks: None,
     },
@@ -608,7 +619,7 @@ static ENTRIES: &[CatalogEntry] = &[
         min_macos: Some("14.0"),
         arch: Some(Arch::X86_64Rosetta),
         vendor_signed: false,
-        note: "renderer: D3D11/12 to Metal (docs/19 §6.2), on consent. The default for \
+        note: "renderer: D3D11/12 to Metal, on consent. The default for \
                64-bit Direct3D 12 games and the alternative to DXMT for 64-bit D3D11. \
                Replaces the engine's d3d11/d3d12/dxgi, so it runs from a derived runtime; \
                needs a CrossOver-source engine (winecx) and a Metal 3 GPU",
@@ -646,6 +657,22 @@ pub fn entries() -> &'static [CatalogEntry] {
 
 pub fn find(id: &str) -> Option<&'static CatalogEntry> {
     ENTRIES.iter().find(|e| e.id == id)
+}
+
+/// Short names `--runtime` takes for catalog ids (`staging` for
+/// `wine-staging`); the CLI accepts both spellings everywhere.
+const ALIASES: &[(&str, &str)] = &[
+    ("staging", "wine-staging"),
+    ("devel", "wine-devel"),
+    ("stable", "wine-stable"),
+];
+
+/// The catalog id for `id` or its short name; anything else unchanged.
+pub fn canonical_id(id: &str) -> &str {
+    ALIASES
+        .iter()
+        .find(|(short, _)| *short == id)
+        .map_or(id, |(_, full)| full)
 }
 
 /// A recipe-driven runtime recommendation (design 12 §7).

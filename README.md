@@ -36,6 +36,7 @@ gogo depot <GAME>     # straight from GOG's depot into the user cache dir
 gogo mac-app <GAME>   # macOS: game -> .app from its depot build (no installer run)
 gogo mac-app <EXE>    # macOS: installer -> .app
 gogo runtimes list    # macOS: Wine catalog + what's cached locally
+gogo renderers list   # macOS: renderers (cnc-ddraw, DXMT, D3DMetal), same verbs
 gogo recipes show <slug>  # what a Lutris recipe would do, step by step
 ```
 
@@ -162,12 +163,14 @@ unsupported steps are skipped with a note; `gogo recipes list|show` inspects
 them without building anything. Pass `--out` for the output directory and
 `--name` to override the bundle title.
 
-Runtimes are managed explicitly too:
+Runtimes and renderers are managed explicitly too, with the same verbs:
 
 ```sh
-gogo runtimes list                  # catalog (live-probed) + cached versions
+gogo runtimes list                  # catalog (live-probed), cached versions, games using them
 gogo runtimes install wine-staging  # download → probe → cache, reused by every bundle
-gogo runtimes prune --all           # what no game uses, keeping each id's previous pin
+gogo runtimes prune --unused        # what no game uses, keeping each id's previous pin
+gogo renderers list                 # cnc-ddraw, DXMT, D3DMetal
+gogo renderers prune dxmt/v0.80     # one version, with the runtimes built with it
 ```
 
 Details: [`docs/19`](docs/19-mac-app-compatibility-strategy.md) (why the

@@ -357,7 +357,7 @@ pub fn plan(script: &Value, ctx: &RecipeCtx) -> RecipePlan {
             }
             Some((k, _)) if k == "insert_disc" || k == "insert-disc" || k == "execute" => {
                 let reason = if k == "execute" {
-                    "host shell step (design 11 §7); --allow-recipe-exec in v1.1".into()
+                    "runs host shell commands, which gogo never does".into()
                 } else {
                     "offline installer flow has no disc".into()
                 };
