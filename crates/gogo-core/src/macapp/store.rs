@@ -1155,7 +1155,7 @@ fn sha256_file(path: &Path) -> Result<String, MacAppError> {
         .collect())
 }
 
-fn dir_size(p: &Path) -> Result<u64, MacAppError> {
+pub(super) fn dir_size(p: &Path) -> Result<u64, MacAppError> {
     let mut total = 0u64;
     if p.is_file() {
         return Ok(std::fs::metadata(p)?.len());

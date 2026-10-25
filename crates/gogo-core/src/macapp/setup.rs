@@ -191,6 +191,7 @@ pub fn setup(gogid: &str, bundle: Option<&Path>) -> Result<SetupOutcome, MacAppE
     let state = GameState {
         schema: SCHEMA,
         gogid: gogid.to_string(),
+        title: Some(baked.title.clone()),
         bundle,
         runtime: eff.runtime.clone(),
         renderer: eff.renderer.clone(),

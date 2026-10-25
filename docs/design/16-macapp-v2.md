@@ -540,6 +540,18 @@ games/<gogid>/{prefix,game,state.toml,launch.conf}
   `runtimes list`: gogo keeps it at its pin itself). An id on the wrong command is
   a usage error naming the right one. `list` shows each entry's users (the same
   references `prune` checks); `--json` gives `status` as a stable key.
+- *CLI, the explicit command for `games/<gogid>/`:* `gogo apps list|show|remove|prune
+  --orphaned`. A game is any all-digit dir under `games/` (staging dirs are
+  skipped). Its bundle is `state.toml`'s, or the portable marker's; it is
+  *orphaned* when that path is no longer a dir. The bundle path updates only when
+  the launcher runs, so a moved `.app` reads as orphaned until its next launch:
+  `prune` lists what it would take and asks (or needs `--yes`). `remove` takes
+  `games/<gogid>/`, `~/Library/Logs/gogo/<gogid>/` and the L4 file (kept with
+  `--keep-override`), never the `.app`, and refuses while a launcher or any Wine
+  process of that prefix is running. `state.toml` now records the bundle's
+  `title` so the list can name a game whose `.app` is gone (older states fall back
+  to `launch.conf`'s `TITLE`). Removing games frees store references; it prunes
+  nothing itself.
 - Today's flat entries (`runtimes/wine-staging/11.18/…`, design 12 §4) stay readable:
   an entry without `engine/` is treated as an engine with no `Frameworks/`.
 - *#62 (the CX engine, `winecx/24.0.7_7`):* the entry is

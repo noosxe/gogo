@@ -224,6 +224,10 @@ pub enum Command {
     /// Manage renderers (cnc-ddraw, DXMT, D3DMetal): list the catalog and
     /// what's cached, install, prune.
     Renderers(RenderersArgs),
+    /// Manage the games gogo set up for its .app bundles: each one's Wine
+    /// prefix (saves included), game files and launch logs. List them,
+    /// show where they live, remove them.
+    Apps(AppsArgs),
     /// Inspect Lutris community recipes for a game: list the
     /// ranked candidates, or show one recipe's execution plan.
     Recipes(RecipesArgs),
@@ -507,6 +511,64 @@ pub enum StoreCmd {
     },
 }
 
+/// Field bag for [`Command::Apps`].
+#[derive(Debug, clap::Args)]
+pub struct AppsArgs {
+    #[command(subcommand)]
+    pub cmd: AppsCmd,
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub enum AppsCmd {
+    /// List every game set up on this Mac: its .app (and whether it is
+    /// still there), runtime, renderer, disk use and last launch. Disk use
+    /// counts the game files in full, though a depot game's share space
+    /// with the depot cache.
+    List {
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show where one game's things live: state folder, Wine prefix,
+    /// launch logs, override file, .app.
+    Show {
+        /// GOG product id, or the game's .app.
+        #[arg(value_name = "BUNDLE|GOGID")]
+        target: String,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete one game's state folder (Wine prefix and saves included),
+    /// its launch logs and its override file. The .app stays, but won't
+    /// start again until rebuilt. Refuses while the game is running.
+    Remove {
+        /// GOG product id, or the game's .app.
+        #[arg(value_name = "BUNDLE|GOGID")]
+        target: String,
+        /// Keep the override file (`gogo mac-app compat` shows it).
+        #[arg(long)]
+        keep_override: bool,
+        /// Don't ask first.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// Remove every game whose .app is no longer where it was built or
+    /// last launched from. A moved .app updates that on its next launch,
+    /// so check the list before saying yes.
+    Prune {
+        /// Games whose .app is missing (the only kind for now).
+        #[arg(long, required = true)]
+        orphaned: bool,
+        /// Keep their override files.
+        #[arg(long)]
+        keep_override: bool,
+        /// Don't ask first.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+}
+
 /// Field bag for [`Command::Recipes`] (design 11 §1, carried debt resolved
 /// in design 12 §12 phase 5).
 #[derive(Debug, clap::Args)]
@@ -736,6 +798,37 @@ mod tests {
                 panic!("{flag} should parse as --unused");
             };
         }
+    }
+
+    #[test]
+    fn apps_verbs_parse() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from([&["gogo", "apps"], args].concat()).map(|c| c.command)
+        };
+        assert!(matches!(
+            parse(&["list"]),
+            Ok(Command::Apps(AppsArgs {
+                cmd: AppsCmd::List { json: false }
+            }))
+        ));
+        assert!(matches!(
+            parse(&["remove", "1207659013", "-y"]),
+            Ok(Command::Apps(AppsArgs {
+                cmd: AppsCmd::Remove {
+                    yes: true,
+                    keep_override: false,
+                    ..
+                }
+            }))
+        ));
+        // prune names what to remove; there's no bare "remove everything".
+        assert!(parse(&["prune"]).is_err());
+        assert!(matches!(
+            parse(&["prune", "--orphaned"]),
+            Ok(Command::Apps(AppsArgs {
+                cmd: AppsCmd::Prune { orphaned: true, .. }
+            }))
+        ));
     }
 
     #[test]

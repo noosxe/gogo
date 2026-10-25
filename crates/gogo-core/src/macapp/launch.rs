@@ -473,6 +473,9 @@ impl GameDirs {
 pub struct GameState {
     pub schema: u32,
     pub gogid: String,
+    /// The bundle's title, for `gogo apps` once the `.app` is gone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// The `.app` this state belongs to (updated when the launcher reports a
     /// moved bundle).
     pub bundle: PathBuf,

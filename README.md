@@ -37,6 +37,7 @@ gogo mac-app <GAME>   # macOS: game -> .app from its depot build (no installer r
 gogo mac-app <EXE>    # macOS: installer -> .app
 gogo runtimes list    # macOS: Wine catalog + what's cached locally
 gogo renderers list   # macOS: renderers (cnc-ddraw, DXMT, D3DMetal), same verbs
+gogo apps list        # macOS: games set up for .apps (prefix, saves, logs)
 gogo recipes show <slug>  # what a Lutris recipe would do, step by step
 ```
 
@@ -93,7 +94,14 @@ gogo sets up the prefix at build time; at launch the launcher re-runs
 `gogo mac-app setup <gogid>` only when the config changed or the prefix is gone.
 Deleting the `.app` keeps the game and its saves (rebuild to get a launcher
 back); deleting `games/<gogid>/` removes the game, prefix and saves, and the
-`.app` needs a rebuild.
+`.app` needs a rebuild. `gogo apps` does that bookkeeping for you:
+
+```sh
+gogo apps list                   # every game: its .app (present/missing), runtime, size, last launch
+gogo apps show 1207659013        # where its state, prefix, logs and override file live
+gogo apps remove 1207659013      # state, prefix, saves and logs (asks first; --keep-override)
+gogo apps prune --orphaned       # every game whose .app is gone (asks first)
+```
 
 **No questions asked.** Compatibility comes in layers, each overriding the one
 below (docs/19 §6):

@@ -82,6 +82,10 @@ pub enum MacAppError {
     #[error("--portable: {0}")]
     Portable(String),
 
+    /// `gogo apps remove|prune`: a game that can't be removed right now.
+    #[error("{0}")]
+    Apps(String),
+
     /// A runtime or renderer of the wrong architecture for this Mac or for
     /// each other (#82).
     #[error("{0}")]
