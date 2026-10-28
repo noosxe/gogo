@@ -1,0 +1,5 @@
+{"page":1,"totalPages":1,"totalProducts":3,"productsPerPage":100,
+ "products":[
+  {"id":1000000003,"title":"1979 Revolution: Black Friday","slug":"1979_revolution_black_friday","isHidden":false,"isGame":true,"isMovie":false},
+  {"id":1000000001,"title":"Hot Brass","slug":"hot_brass","isHidden":false,"isGame":true,"isMovie":false},
+  {"id":1000000002,"title":"The Witcher 3: Wild Hunt","slug":"the_witcher_3_wild_hunt","isHidden":false,"isGame":true,"isMovie":false}]}

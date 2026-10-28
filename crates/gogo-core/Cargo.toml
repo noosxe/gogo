@@ -43,6 +43,8 @@ tracing.workspace = true
 bytesize.workspace = true
 gog-warp.workspace = true
 object.workspace = true
+unicode-normalization.workspace = true
+strsim.workspace = true
 
 [dev-dependencies]
 wiremock.workspace = true

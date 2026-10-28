@@ -1,6 +1,6 @@
 # Design 17 — `gogo search`
 
-Status: design (not implemented) · Depends on: design 03 (CLI), design 06 (local
+Status: implemented (#149; §9 live checks pending) · Depends on: design 03 (CLI), design 06 (local
 state), docs/03 + docs/11 (API shapes) · 2026-10-28.
 
 ## 0. Scope
@@ -141,6 +141,9 @@ Deterministic and explainable; no fuzzy scoring.
    goodie entry → entry `name` + subtype; goodie product → title + slug + subtype.
 5. **Parent match:** DLC and goodies also match when the query matches their
    parent game's text. The match reason is kept (`self` | `parent`) — see §5.
+   The parent match tests the row's own text and its parent's text together, so
+   `witcher hearts` finds "Hearts of Stone" under "The Witcher 3" (a goodie of a
+   DLC takes both the DLC's and the game's text).
 6. **Id:** a single all-digit word also matches a product id exactly (any kind).
    Goodie entries have numeric ids of their own; they match too.
 

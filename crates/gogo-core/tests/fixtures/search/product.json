@@ -1,0 +1,24 @@
+{"id":1000000002,"title":"The Witcher 3: Wild Hunt","slug":"the_witcher_3_wild_hunt","game_type":"game",
+ "downloads":{
+  "installers":[{"id":"en1installer0","name":"The Witcher 3","os":"windows","language":"en","version":"1.32","total_size":3865470566,
+    "files":[{"id":"en1installer0","size":3865470566,"downlink":"/products/1000000002/downlink/installer/en1installer0"}]}],
+  "bonus_content":[
+   {"id":48213,"name":"Soundtrack (MP3)","type":"audio","total_size":432013312,
+    "files":[{"id":48213,"size":432013312,"downlink":"/products/1000000002/downlink/product_bonus_content/48213"}]},
+   {"id":48214,"name":"Manual","type":"manuals","total_size":1048576,
+    "files":[{"id":48214,"size":1048576,"downlink":"/products/1000000002/downlink/product_bonus_content/48214"}]}]},
+ "expanded_dlcs":[
+  {"id":1000000101,"title":"Hearts of Stone","slug":"the_witcher_3_wild_hunt_hearts_of_stone","game_type":"dlc",
+   "downloads":{"installers":[{"id":"en1installer0","name":"Hearts of Stone","os":"windows","language":"en","version":"1.32","total_size":3865470566,
+     "files":[{"id":"en1installer0","size":3865470566,"downlink":"/products/1000000101/downlink/installer/en1installer0"}]}],
+    "bonus_content":[{"id":48300,"name":"Hearts of Stone Artbook","type":"artworks","total_size":20971520,
+     "files":[{"id":48300,"size":20971520,"downlink":"/products/1000000101/downlink/product_bonus_content/48300"}]}]}},
+  {"id":1000000102,"title":"Blood and Wine","slug":"blood_and_wine","game_type":"dlc",
+   "downloads":{"installers":[{"id":"en1installer0","name":"Blood and Wine","os":"windows","language":"en","version":"1.32","total_size":10,
+     "files":[{"id":"en1installer0","size":10,"downlink":"/products/1000000102/downlink/installer/en1installer0"}]}],
+    "bonus_content":[{"id":48400,"name":"Blood and Wine Soundtrack","type":"audio","total_size":10,
+     "files":[{"id":48400,"size":10,"downlink":"/products/1000000102/downlink/product_bonus_content/48400"}]}]}},
+  {"id":1000000103,"title":"The Witcher 3: Wild Hunt - Free DLC Soundtrack","slug":"the_witcher_3_free_dlc_soundtrack","game_type":"dlc",
+   "downloads":{"installers":[],
+    "bonus_content":[{"id":48500,"name":"Soundtrack","type":"audio","total_size":10,
+     "files":[{"id":48500,"size":10,"downlink":"/products/1000000103/downlink/product_bonus_content/48500"}]}]}}]}

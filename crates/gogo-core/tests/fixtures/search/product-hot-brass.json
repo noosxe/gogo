@@ -1,0 +1,13 @@
+{"id":1000000001,"title":"Hot Brass","slug":"hot_brass","game_type":"game",
+ "downloads":{"installers":[
+   {"id":"en1installer0","name":"Hot Brass","os":"windows","language":"en","version":"2.2.2","total_size":362121616,
+    "files":[{"id":"en1installer0","size":362121616,"downlink":"/products/1000000001/downlink/installer/en1installer0"}]},
+   {"id":"en2installer0","name":"Hot Brass","os":"mac","language":"en","version":"2.2.2","total_size":362121616,
+    "files":[{"id":"en2installer0","size":362121616,"downlink":"/products/1000000001/downlink/installer/en2installer0"}]}]},
+ "expanded_dlcs":[
+  {"id":1000000201,"title":"Hot Brass Original Soundtrack","slug":"hot_brass_original_soundtrack","game_type":"dlc",
+   "downloads":{"installers":[],"bonus_content":[
+    {"id":100897,"name":"Soundtrack (MP3)","type":"audio","total_size":707788800,
+     "files":[{"id":100897,"size":707788800,"downlink":"/products/1000000201/downlink/product_bonus_content/100897"}]},
+    {"id":100898,"name":"Soundtrack (FLAC)","type":"audio","total_size":707788800,
+     "files":[{"id":100898,"size":707788800,"downlink":"/products/1000000201/downlink/product_bonus_content/100898"}]}]}}]}

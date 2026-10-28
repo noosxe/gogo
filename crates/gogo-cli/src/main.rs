@@ -167,6 +167,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
             json,
             refresh,
         } => list(search, os, with_dlcs, json, refresh, color).await,
+        Command::Search(args) => search(args).await,
         Command::Info { game, json } => info(game, json).await,
         Command::Download(args) => download(args, cli.no_progress, cli.quiet).await,
         Command::Depot(args) => depot_cmd(args).await,
@@ -476,9 +477,15 @@ async fn list(
 
     let ctx = session_ctx().await?;
     let mut games = library_products(&ctx).await?;
-    if let Some(needle) = &search {
-        let needle = needle.to_lowercase();
-        games.retain(|g| g.title.to_lowercase().contains(&needle));
+    // Same normalizer as `search` (design 17 §3), on title + slug.
+    if let Some(query) = search.as_deref().and_then(gogo::search::Query::parse) {
+        games.retain(|g| {
+            query.matches_text(&gogo::search::normalize(&format!(
+                "{} {}",
+                g.title,
+                g.slug.as_deref().unwrap_or_default()
+            )))
+        });
     }
 
     // 03 §1: the library list is always live; catalog data (os, sizes, versions)
@@ -490,7 +497,7 @@ async fn list(
         let cached = if refresh {
             None
         } else {
-            gogo::state::cache::load_product(game.id).unwrap_or(None)
+            gogo::state::cache::load_typed_product(game.id)
         };
         let product = match cached {
             Some(p) => p,
@@ -507,6 +514,7 @@ async fn list(
                         id: game.id,
                         title: Some(game.title.clone()),
                         slug: game.slug.clone(),
+                        game_type: None,
                         downloads: None,
                         expanded_dlcs: Vec::new(),
                     }
@@ -597,6 +605,77 @@ async fn list(
     }
 
     println!("{}", output::list_table(&rows, color));
+    Ok(cli::exit::OK)
+}
+
+/// `gogo search` (design 17): classify what the account owns, match, print.
+async fn search(args: cli::SearchArgs) -> Result<i32, AppError> {
+    use gogo::search::{self, Filters, Kind};
+
+    let raw = args.query.join(" ");
+    let Some(query) = search::Query::parse(&raw) else {
+        eprintln!("gogo: the search query needs at least one letter or digit");
+        return Ok(cli::exit::USAGE);
+    };
+    let kinds = args
+        .category
+        .iter()
+        .map(|c| match c {
+            cli::SearchCategory::Games => Kind::Game,
+            cli::SearchCategory::Dlc => Kind::Dlc,
+            cli::SearchCategory::Packs => Kind::Pack,
+            cli::SearchCategory::Goodies => Kind::Goodies,
+        })
+        .collect();
+    let filters = Filters::new(
+        kinds,
+        args.goodies_type,
+        os_filter_to_catalog(args.os),
+        args.owned,
+    );
+
+    let ctx = session_ctx().await?;
+    let token = bearer(&ctx).await?;
+    let (lib, warnings) = search::gather::gather(&ctx.http, &token, args.refresh).await?;
+    for w in warnings {
+        eprintln!("warn: {w}");
+    }
+    let state = ctx.state.lock().unwrap().clone();
+    let installed = |product_id: u64, dlc_id: Option<u64>| {
+        state
+            .installs
+            .iter()
+            .find(|r| r.product_id == product_id && r.dlc_id == dlc_id)
+            .and_then(|r| r.version.clone())
+    };
+    let items = search::classify(&lib, &installed);
+    let hits = search::search(&items, &query, &filters);
+    let suggestion = if hits.is_empty() {
+        search::suggest(&items, &query, &filters)
+    } else {
+        None
+    };
+
+    if args.json {
+        println!(
+            "{}",
+            output::search_json(&raw, &hits, suggestion.as_deref())
+        );
+    } else if hits.is_empty() {
+        match suggestion {
+            Some(s) => eprintln!("no matches for \"{raw}\" — did you mean \"{s}\"?"),
+            None => eprintln!("no matches for \"{raw}\""),
+        }
+    } else {
+        print!(
+            "{}",
+            output::search_human(
+                &hits,
+                !filters.asked(Kind::Goodies),
+                !filters.asked(Kind::Dlc)
+            )
+        );
+    }
     Ok(cli::exit::OK)
 }
 
@@ -1657,6 +1736,7 @@ fn rebuild_records(cfg: &gogo::config::Config, root: &std::path::Path) -> Result
                 language_full: None,
                 version,
                 total_size: Some(doc.total_size),
+                kind: None,
                 files: Vec::new(),
             },
             file: gogo::gog::catalog::FileEntry {
