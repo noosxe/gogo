@@ -83,3 +83,4 @@ so a pass also proves the bundle is self-contained. How-to, result layout and VM
 - All commands run at the workspace root (01 §1); integration tests live in `crates/gogo-core/tests/` — the CLI is too thin to warrant its own suite, the TUI mirrors `list`/`info` rendering through core APIs.
 - `cargo deny` (licenses/advisories; gog-warp git dep noted as Apache-2.0)
 - Coverage informational (target: `engine` + `gog` ≥ 80% line coverage)
+- Workflows: `ci.yml` runs the checks above on Linux, plus nextest on macOS. It runs on PRs and pushes to `main`, and skips changes that touch only `docs/**` or `*.md`. `scripts.yml` runs shellcheck and `scripts/tests/host-pass-fake.sh` (macOS) only when `scripts/` changes. There is no release build yet; it comes with a release workflow.

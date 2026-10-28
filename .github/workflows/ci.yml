@@ -5,10 +5,14 @@
 
 name: ci
 
+# Docs-only changes skip CI. Pushes to main still run it: that keeps the
+# rust-cache entries PRs restore from fresh, so PR builds stay warm.
 on:
   push:
     branches: [main]
+    paths-ignore: ['docs/**', '**/*.md']
   pull_request:
+    paths-ignore: ['docs/**', '**/*.md']
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -65,36 +69,3 @@ jobs:
           tool: cargo-deny@0.20.2
       # Licenses (permissive-only allowlist + gog-warp clarify) and advisories.
       - run: cargo deny check
-
-  shellcheck:
-    name: shellcheck
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      # Same version as the flake's dev shell.
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: shellcheck@0.11.0
-      - run: shellcheck scripts/*.sh scripts/tests/*.sh
-
-  host-pass-fake:
-    name: host-pass fake bundles
-    # The script targets macOS (bash 3.2, ps/lsof/osascript); jq is on the
-    # runner image. Stub launchers only: no Wine, no window.
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v7
-      - run: scripts/tests/host-pass-fake.sh
-
-  build:
-    name: release build (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions-rust-lang/setup-rust-toolchain@v2
-      # The app itself, in the profile we would ship.
-      - run: cargo build --release --workspace

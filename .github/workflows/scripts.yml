@@ -1,0 +1,36 @@
+# The shell scripts' checks, only when scripts change: they don't depend on
+# the Rust code, and host-pass-fake needs a macOS runner.
+
+name: scripts
+
+on:
+  push:
+    branches: [main]
+    paths: ['scripts/**', '.github/workflows/scripts.yml']
+  pull_request:
+    paths: ['scripts/**', '.github/workflows/scripts.yml']
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Same version as the flake's dev shell.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: shellcheck@0.11.0
+      - run: shellcheck scripts/*.sh scripts/tests/*.sh
+
+  host-pass-fake:
+    name: host-pass fake bundles
+    # The script targets macOS (bash 3.2, ps/lsof/osascript); jq is on the
+    # runner image. Stub launchers only: no Wine, no window.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: scripts/tests/host-pass-fake.sh
