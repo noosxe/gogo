@@ -222,17 +222,17 @@ Human (stdout), groups in fixed order, empty groups omitted:
 ```
 $ gogo search hot brass
 Games (1)
-  1075439258  Hot Brass                         win mac       691 MiB  ✓ 2.2.2
+  1075439258    Hot Brass                      win mac    691 MiB  ✓ 2.2.2
 
 Goodies (1)
   Hot Brass
-    1702049827  Hot Brass Original Soundtrack   audio  (product)   1.3 GiB
+    1702049827  Hot Brass Original Soundtrack  audio      1.3 GiB  (product)
 
 $ gogo search witcher 3 -c dlc
 DLC (2)
   The Witcher 3: Wild Hunt
-    1202585036  Hearts of Stone                 win           3.6 GiB  ✓ 1.32
-    1640424747  Blood and Wine                  not owned
+    1202585036  Hearts of Stone  win  3.6 GiB  ✓ 1.32
+    1640424747  Blood and Wine                 not owned
 
 $ gogo search witchr
 no matches for "witchr" — did you mean "witcher"?
@@ -240,15 +240,18 @@ no matches for "witchr" — did you mean "witcher"?
 $ gogo search soundtrack -c goodies
 Goodies (3)
   Hot Brass
-    1702049827  Hot Brass Original Soundtrack   audio  (product)   1.3 GiB
+    1702049827  Hot Brass Original Soundtrack  audio  1.3 GiB  (product)
   The Witcher 3: Wild Hunt
-    48213       Soundtrack (MP3)                audio              412 MiB
-    48214       Soundtrack (FLAC)               audio              1.1 GiB
+    48213       Soundtrack (MP3)               audio  412 MiB
+    48214       Soundtrack (FLAC)              audio  1.1 GiB
 ```
 
 (The Witcher rows and all goodie sizes are illustrative.) Columns: id, title or
 entry name, then per kind — games/DLC: OS + size + downloaded state (as `list`);
-packs: id + title; goodies: subtype, `(product)` for a goodie product, size.
+packs: id + title; goodies: subtype, size, `(product)` for a goodie product.
+Every row shares one set of column widths, across groups and indent levels: ids
+are left-aligned, sizes right-aligned, and the last column carries `✓ <version>`,
+`(product)` and `not owned`. Empty columns take no room.
 
 No match: nothing on stdout, `no matches for "…"` (plus the suggestion, §4) on
 stderr, exit 0 (design 03 §5: "nothing to do" is success; exit 1 is reserved for
