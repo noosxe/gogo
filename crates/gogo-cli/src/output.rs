@@ -79,35 +79,33 @@ fn folded(hit: &gogo::search::Hit, fold_goodies: bool, fold_dlc: bool) -> bool {
         }
 }
 
-/// Per-kind columns after id and title (design 17 §7).
-fn search_columns(item: &gogo::search::Item) -> String {
+/// Per-kind cells after id and title (design 17 §7): `[info, size, status]`.
+/// info is the OS list, the goodie subtype or the raw type; size is shown for
+/// owned rows only; status holds `✓ <version>`, `(product)` and `not owned`.
+fn search_cells(item: &gogo::search::Item) -> [String; 3] {
     use gogo::search::Kind;
-    match item.kind {
-        Kind::Game | Kind::Dlc if !item.owned => "not owned".into(),
-        Kind::Game | Kind::Dlc => {
-            let mut s = format!(
-                "{:<13} {:>9}",
-                os_label(&item.os),
-                gogo::fmt::human_size(item.size)
-            );
-            if let Some(v) = &item.installed_version {
-                s.push_str(&format!("  ✓ {v}"));
-            }
-            s
-        }
-        Kind::Goodies => {
-            let subtype = item.subtype.as_deref().unwrap_or("-");
-            let product = if item.product { "(product)" } else { "" };
-            let tail = if item.owned {
-                format!("{:>9}", gogo::fmt::human_size(item.size))
-            } else {
-                "not owned".into()
-            };
-            format!("{subtype:<8} {product:<9}  {tail}")
-        }
-        Kind::Pack => String::new(),
+    let size = if item.owned && matches!(item.kind, Kind::Game | Kind::Dlc | Kind::Goodies) {
+        gogo::fmt::human_size(item.size)
+    } else {
+        String::new()
+    };
+    let info = match item.kind {
+        Kind::Game | Kind::Dlc if item.owned => os_label(&item.os),
+        Kind::Goodies => item.subtype.clone().unwrap_or_else(|| "-".into()),
         Kind::Other => format!("type: {}", item.game_type.as_deref().unwrap_or("unknown")),
+        _ => String::new(),
+    };
+    let mut status = Vec::new();
+    if let Some(v) = item.installed_version.as_ref().filter(|_| item.owned) {
+        status.push(format!("✓ {v}"));
     }
+    if item.kind == Kind::Goodies && item.product {
+        status.push("(product)".into());
+    }
+    if !item.owned {
+        status.push("not owned".into());
+    }
+    [info, size, status.join(" ")]
 }
 
 /// Summary line for one parent's folded rows: `+ 14 goodies (audio 3, …)` or
@@ -148,11 +146,22 @@ fn fold_summary(rows: &[&gogo::search::Hit]) -> Vec<String> {
     out
 }
 
+/// One line of the human `search` output, before column widths are known.
+enum Line {
+    /// A blank line before every group but the first.
+    Gap,
+    /// A group header or a parent title, already indented.
+    Text(String),
+    /// `indent + id`, title, then [`search_cells`].
+    Row([String; 5]),
+}
+
 /// Human `search` output (design 17 §7): groups in fixed order, DLC and goodies
-/// under their parent. `hits` come ordered from [`gogo::search::search`].
+/// under their parent. `hits` come ordered from [`gogo::search::search`]. Every
+/// row shares one set of column widths, across groups and indent levels.
 pub fn search_human(hits: &[gogo::search::Hit], fold_goodies: bool, fold_dlc: bool) -> String {
     use gogo::search::Kind;
-    let mut out = String::new();
+    let mut lines = Vec::new();
     let mut rest = hits;
     while let Some(first) = rest.first() {
         let kind = first.item.kind;
@@ -167,26 +176,10 @@ pub fn search_human(hits: &[gogo::search::Hit], fold_goodies: bool, fold_dlc: bo
             Kind::Goodies => "Goodies",
             Kind::Other => "Other",
         };
-        if !out.is_empty() {
-            out.push('\n');
+        if !lines.is_empty() {
+            lines.push(Line::Gap);
         }
-        out.push_str(&format!("{label} ({})\n", group.len()));
-
-        let shown = group.iter().filter(|h| !folded(h, fold_goodies, fold_dlc));
-        let id_w = shown.clone().map(|h| h.item.id.len()).max().unwrap_or(0);
-        let title_w = shown
-            .map(|h| h.item.title.chars().count())
-            .max()
-            .unwrap_or(0);
-        let row = |h: &gogo::search::Hit, indent: &str| {
-            let line = format!(
-                "{indent}{:<id_w$}  {:<title_w$}  {}",
-                h.item.id,
-                h.item.title,
-                search_columns(&h.item)
-            );
-            format!("{}\n", line.trim_end())
-        };
+        lines.push(Line::Text(format!("{label} ({})", group.len())));
 
         let mut i = 0;
         while i < group.len() {
@@ -199,7 +192,7 @@ pub fn search_human(hits: &[gogo::search::Hit], fold_goodies: bool, fold_dlc: bo
             i += n;
             let indent = match &sub[0].item.parent {
                 Some(p) if matches!(kind, Kind::Dlc | Kind::Goodies) => {
-                    out.push_str(&format!("  {}\n", p.title));
+                    lines.push(Line::Text(format!("  {}", p.title)));
                     "    "
                 }
                 _ => "  ",
@@ -209,13 +202,53 @@ pub fn search_human(hits: &[gogo::search::Hit], fold_goodies: bool, fold_dlc: bo
                 if folded(h, fold_goodies, fold_dlc) {
                     hidden.push(h);
                 } else {
-                    out.push_str(&row(h, indent));
+                    let [info, size, status] = search_cells(&h.item);
+                    lines.push(Line::Row([
+                        format!("{indent}{}", h.item.id),
+                        h.item.title.clone(),
+                        info,
+                        size,
+                        status,
+                    ]));
                 }
             }
             for line in fold_summary(&hidden) {
-                out.push_str(&format!("{indent}{line}\n"));
+                lines.push(Line::Text(format!("{indent}{line}")));
             }
         }
+    }
+
+    let width = console::measure_text_width;
+    let mut w = [0usize; 5];
+    for line in &lines {
+        if let Line::Row(cells) = line {
+            for (w, c) in w.iter_mut().zip(cells) {
+                *w = (*w).max(width(c));
+            }
+        }
+    }
+    let mut out = String::new();
+    for line in lines {
+        match line {
+            Line::Gap => {}
+            Line::Text(t) => out.push_str(&t),
+            Line::Row(cells) => {
+                let mut row = String::new();
+                for (i, (c, w)) in cells.iter().zip(w).enumerate() {
+                    // Columns with nothing in them take no room.
+                    if w == 0 {
+                        continue;
+                    }
+                    let pad = " ".repeat(w - width(c));
+                    match i {
+                        3 => row.push_str(&format!("{pad}{c}  ")),
+                        _ => row.push_str(&format!("{c}{pad}  ")),
+                    }
+                }
+                out.push_str(row.trim_end());
+            }
+        }
+        out.push('\n');
     }
     out
 }
@@ -331,11 +364,11 @@ mod search_tests {
             run("hot brass", vec![]),
             "\
 Games (1)
-  1000000001  Hot Brass  win mac       690.7 MiB  ✓ 2.2.2
+  1000000001    Hot Brass                      win mac  690.7 MiB  ✓ 2.2.2
 
 Goodies (1)
   Hot Brass
-    1000000201  Hot Brass Original Soundtrack  audio    (product)    1.3 GiB
+    1000000201  Hot Brass Original Soundtrack  audio      1.3 GiB  (product)
 "
         );
     }
@@ -347,8 +380,8 @@ Goodies (1)
             "\
 DLC (2)
   The Witcher 3: Wild Hunt
-    1000000102  Blood and Wine   not owned
-    1000000101  Hearts of Stone  win             3.6 GiB  ✓ 1.32
+    1000000102  Blood and Wine                 not owned
+    1000000101  Hearts of Stone  win  3.6 GiB  ✓ 1.32
 "
         );
     }
@@ -370,6 +403,36 @@ DLC (2)
         assert!(!full.contains("+ "), "{full}");
         assert!(full.contains("Manual") && full.contains("Blood and Wine"));
         assert!(full.contains("Hearts of Stone Artbook"));
+    }
+
+    /// Every row starts each column at the same place, across groups, parents
+    /// and indent levels, whatever the subtype or title lengths.
+    #[test]
+    fn columns_line_up_across_groups() {
+        let out = run("witcher", vec![Kind::Dlc, Kind::Goodies]);
+        let width = console::measure_text_width;
+        let rows: Vec<&str> = out
+            .lines()
+            .filter(|l| l.contains("  10") || l.contains("  48"))
+            .collect();
+        assert!(rows.len() > 4, "{out}");
+        // Titles start at one column: past the indent, the id and the gap.
+        let titles: Vec<usize> = rows
+            .iter()
+            .map(|l| {
+                let id = l.trim_start();
+                let gap = &id[id.find(' ').unwrap()..];
+                width(&l[..l.len() - gap.trim_start().len()])
+            })
+            .collect();
+        assert!(titles.windows(2).all(|w| w[0] == w[1]), "{out}");
+        // Sizes end at one column.
+        let sizes: Vec<usize> = rows
+            .iter()
+            .filter_map(|l| l.rfind("iB").map(|i| width(&l[..i + 2])))
+            .collect();
+        assert!(sizes.len() > 2, "{out}");
+        assert!(sizes.windows(2).all(|w| w[0] == w[1]), "{out}");
     }
 
     #[test]
