@@ -7,8 +7,10 @@ state), docs/03 + docs/11 (API shapes) · 2026-10-28.
 
 `gogo search <QUERY>` searches **what the signed-in account owns** and prints the
 matches grouped by the kind of content GOG sells: games, DLC, packs, and goodies
-(soundtracks, manuals, artbooks, wallpapers …). It is read-only: it never downloads,
-and it never searches the public GOG store.
+(soundtracks, manuals, artbooks, wallpapers …). It is read-only and never downloads.
+Besides what is owned, it also shows the DLC that owned games offer but the account
+does not own, marked **not owned** (§2.1). It does not search the rest of the
+GOG store.
 
 `gogo list` stays the games-only table it is today (design 03 §1). `search` is the
 cross-kind view: it answers "what do I own that is called X?", including things
@@ -81,11 +83,26 @@ Parents:
 - Packs have no parent. What a pack contains is not known from the current data
   (§9 Q4); v1 shows the pack itself only.
 
+### 2.1 Not-owned DLC
+
+An owned game's `expanded_dlcs` also lists the DLC the account does not own (§1).
+`search` shows them, so "which DLC am I missing?" has an answer:
+
+- A DLC id in an owned game's `expanded_dlcs` but not in `owned[]` is **not owned**.
+  It is classified by the same rules (DLC, or goodies for a goodie-only DLC) and
+  marked `not owned`.
+- Not-owned rows show id, title and parent only. No OS, size or downloaded state:
+  whether their `downloads` block is real is unchecked (§9 Q2), and they cannot be
+  downloaded anyway. Their `bonus_content` entries are not listed as goodies.
+- Only DLC of owned games appear. Packs and games the account does not own are
+  store questions and stay out.
+- `--owned` hides not-owned rows.
+
 ## 3. Command surface
 
 ```
 gogo search <QUERY>... [-c, --category <KIND>]... [--goodies-type <TYPE>]
-                       [--os <windows|mac|linux|all>] [--refresh] [--offline] [--json]
+                       [--os <windows|mac|linux|all>] [--owned] [--refresh] [--json]
 ```
 
 | Arg / flag | Default | Meaning |
@@ -94,8 +111,8 @@ gogo search <QUERY>... [-c, --category <KIND>]... [--goodies-type <TYPE>]
 | `-c, --category` | all kinds | repeatable or comma list: `games`, `dlc`, `packs`, `goodies` |
 | `--goodies-type` | any | keep only goodies with this subtype (implies `-c goodies`) |
 | `--os` | any | keep games/DLC with an installer for this OS; packs and goodies are not filtered |
+| `--owned` | off | hide not-owned DLC (§2.1) |
 | `--refresh` | off | refetch product data (as `list --refresh`) |
-| `--offline` | off | use only local data: no API call at all (§6) |
 | `--json` | off | machine output (§7); also honours the global `--json` |
 
 An id query (`gogo search 1075439258`) is just a query whose word is all digits (§4).
@@ -127,12 +144,30 @@ Deterministic and explainable; no fuzzy scoring.
 6. **Id:** a single all-digit word also matches a product id exactly (any kind).
    Goodie entries have numeric ids of their own; they match too.
 
-No edit-distance or typo tolerance in v1: a substring miss is a miss, and the
-output says so (§7). Ranking inside a group: exact normalized title match → title
+Matching itself has no typo tolerance: a substring miss is a miss. Ranking inside a group: exact normalized title match → title
 starts with the query → the rest; ties by title.
 
+**"Did you mean" on no match.** Only when a search finds nothing at all:
+
+1. Build a vocabulary of the normalized words in every candidate's text (titles,
+   slugs, goodie names; a few hundred words for this library).
+2. For each query word that is not a substring of any vocabulary word, take the
+   closest vocabulary word by Damerau-Levenshtein distance (`strsim`): at most 1
+   edit for words of 4 characters or fewer, 2 for longer ones. Ties go to the word
+   that occurs in more candidates, then alphabetical. No candidate within the cap →
+   no suggestion.
+3. Run the search again with the corrected words. If it finds something, print the
+   suggestion; the results themselves are **not** shown, so a typo never silently
+   turns into a different search (the user reruns with the suggestion).
+
+Fuzzy ranking of every result (fzf-style scoring) is left out on purpose: it needs
+score cut-offs, makes short queries noisy against 200+ goodie names, gives `--json`
+consumers no clear hit/miss line, and would disagree with the substring selectors of
+`download`/`info`/`mac-app`. It fits a future TUI picker better (`nucleo`).
+
 Normalization needs one new dependency, `unicode-normalization` (MIT/Apache-2.0,
-the usual crate for NFKD; check `cargo deny` when adding it).
+the usual crate for NFKD; check `cargo deny` when adding it). `strsim` is already in
+the lockfile (clap uses it for its own suggestions); it becomes a direct dependency.
 
 ## 5. Goodies: searched, and listed under their parent
 
@@ -147,22 +182,24 @@ unless the user asked for goodies (`-c goodies` or `--goodies-type`), which list
 them all. Goodies matched on their own name are always listed. JSON always lists
 everything, with `matched_by`.
 
-DLC matched through the parent are listed in full (few per game once unowned DLC
-are dropped).
+Owned DLC matched through the parent are listed in full (few per game). Not-owned
+DLC matched through the parent fold the same way as goodies: one line per parent,
+`+ 23 DLC not owned`, unless `-c dlc` asks for DLC, which lists them all. Not-owned
+DLC matched on their own title are always listed.
 
 ## 6. Data sources, caching and cost
 
 | Data | Endpoint | Calls | Cached |
 |---|---|---|---|
 | games | `getFilteredProducts?mediaType=1` | 1 per 100 games | no (design 06 §3) |
-| ownership | `/user/data/games` | 1 | index only (below) |
+| ownership | `/user/data/games` | 1 | no |
 | game detail + DLC + goodies | `products/{id}?expand=downloads,expanded_dlcs` | 1 per game on a cache miss | yes, existing product cache |
 | non-game owned ids | `products?ids=…&expand=downloads` | 1 per 50 ids not covered by a game's `expanded_dlcs` | yes, same cache |
 
 On this library (83 games, 63 other ids, 60 of them unexplained): warm cache = 2
 calls (library page + owned ids) + 0 product calls; cold = 2 + 83 detail + 2 batch
 calls. The warm path is what matters: `search` should feel instant after the first
-`list`.
+`list`. Not-owned DLC cost nothing extra: they come with the parent's detail.
 
 Cache changes needed:
 
@@ -172,20 +209,8 @@ Cache changes needed:
 - Non-game products from the batch call are cached under the same
   `products/<id>.json` path.
 
-**Library index (amends design 06 §3).** `--offline` needs to know what is owned
-without the network, and design 06 says the library list is never cached. Proposal:
-every online `search`/`list` run writes `cache/library-index.json`:
-
-```json
-{ "schema": 1, "fetched_at": "2026-10-28T12:00:00Z",
-  "games": [1075439258], "owned": [1075439258, 1702049827] }
-```
-
-Online runs never read it — they always fetch live, so the 06 rule still holds for
-them. Only `--offline` reads it, and prints `using library from <date> (offline)`
-on stderr. No index → exit 4 with a hint to run once online. Offline results are
-otherwise identical (products all come from the cache; a missing product is an
-Other row with `game_type: null`).
+No offline mode: like `list`, `search` needs the live library and owned ids
+(design 06 §3 is unchanged). Without the network it fails with exit 4.
 
 ## 7. Output
 
@@ -200,6 +225,15 @@ Goodies (1)
   Hot Brass
     1702049827  Hot Brass Original Soundtrack   audio  (product)   1.3 GiB
 
+$ gogo search witcher 3 -c dlc
+DLC (2)
+  The Witcher 3: Wild Hunt
+    1202585036  Hearts of Stone                 win           3.6 GiB  ✓ 1.32
+    1640424747  Blood and Wine                  not owned
+
+$ gogo search witchr
+no matches for "witchr" — did you mean "witcher"?
+
 $ gogo search soundtrack -c goodies
 Goodies (3)
   Hot Brass
@@ -209,12 +243,14 @@ Goodies (3)
     48214       Soundtrack (FLAC)               audio              1.1 GiB
 ```
 
-(The Witcher ids and all goodie sizes are illustrative.) Columns: id, title or
+(The Witcher rows and all goodie sizes are illustrative.) Columns: id, title or
 entry name, then per kind — games/DLC: OS + size + downloaded state (as `list`);
 packs: id + title; goodies: subtype, `(product)` for a goodie product, size.
 
-No match: nothing on stdout, `no matches for "…"` on stderr, exit 0 (design 03 §5:
-"nothing to do" is success; exit 1 is reserved for runtime errors).
+No match: nothing on stdout, `no matches for "…"` (plus the suggestion, §4) on
+stderr, exit 0 (design 03 §5: "nothing to do" is success; exit 1 is reserved for
+runtime errors). With `--json` the document has empty `results` and a
+`"suggestion": "witcher"` field (or `null`).
 
 `--json` (stdout, one document):
 
@@ -226,12 +262,14 @@ No match: nothing on stdout, `no matches for "…"` on stderr, exit 0 (design 03
       "matched_by": "self" },
     { "kind": "goodies", "id": 1702049827, "title": "Hot Brass Original Soundtrack",
       "subtype": "audio", "product": true, "parent": 1075439258, "size": 1415577600,
-      "matched_by": "self" }
-  ] }
+      "owned": true, "matched_by": "self" }
+  ],
+  "suggestion": null }
 ```
 
 `kind` ∈ `game | dlc | pack | goodies | other`; `other` rows carry `game_type`
-(raw or null). Goodie entries carry `parent` and `parent_kind` (`game | dlc`). The
+(raw or null). Every row carries `owned` (only DLC and goodie products can be
+`false`; not-owned rows have no `os`/`size`/`installed_version`). Goodie entries carry `parent` and `parent_kind` (`game | dlc`). The
 list is flat and ordered like the human output; consumers group by `kind`.
 
 ## 8. Errors and tests
@@ -241,9 +279,8 @@ list is flat and ordered like the human output; consumers group by `kind`.
 | empty query / only punctuation | usage error | 2 |
 | unknown `--category` / bad `--goodies-type` syntax | clap error | 2 |
 | not signed in (online) | as `list` | 3 |
-| library or owned-ids call fails after retries | error, hint `--offline` | 4 |
+| library or owned-ids call fails after retries | error (no offline fallback) | 4 |
 | one product fetch fails | `warn:` on stderr, row degrades to Other, command continues (as `list`) | 0 |
-| `--offline` without an index | error with hint | 4 |
 | cache write fails | `warn:`, continue | 0 |
 
 Tests (design 08 layout; fixtures synthesized from the live shapes):
@@ -252,14 +289,18 @@ Tests (design 08 layout; fixtures synthesized from the live shapes):
   punctuation runs, `_` in slugs, CJK passes through, empty after normalization.
 - **Unit, `search::matches`** — word order, all-words rule, id match vs a
   digits-in-title game (`1979 Revolution`), parent match reason.
+- **Unit, `search::suggest`** — one typo per word (`witchr` → `witcher`), the
+  length cap (`mod` gets no 2-edit suggestion), tie-break order, no suggestion when
+  nothing is close, multi-word query with one bad word.
 - **Unit, `search::classify`** — one fixture per rule in §2: game, pack, DLC with
   installers, goodie product (Hot Brass soundtrack shape), unowned DLC in
-  `expanded_dlcs` (must not appear), unknown `game_type` → Other.
+  `expanded_dlcs` (shown as not owned, hidden by `--owned`, its bonus entries never
+  goodies), unknown `game_type` → Other.
 - **Unit, output** — rendered table for the two §7 examples (plain string assert);
-  goodie folding on/off; JSON shape round-trip.
+  goodie and not-owned folding on/off; JSON shape round-trip.
 - **Integration (wiremock)** — library page + owned ids + one detail + one batch:
   assert call counts cold (1+1+N+⌈M/50⌉) and warm (2); old cache entry without
-  `game_type` triggers exactly one refetch; `--offline` makes zero requests.
+  `game_type` triggers exactly one refetch.
 - **Fixtures** — `fixtures/owned.json` (new, fake ids), `product.json` extended with
   `game_type` + a `bonus_content` entry carrying `type`, `products-batch.json`
   (a pack, a goodie product, an unknown type).
@@ -284,11 +325,5 @@ output stays in `gogo-probe/`):
    contains (`expand=related_products`, `includes_games` or similar)? If yes, packs
    get children like games; if no, they stay flat.
 
-Design questions for the user:
-
-5. **Fuzzy matching.** v1 is substring-only. A typo fallback ("did you mean …",
-   `strsim` is already in the lockfile) could be added when there are no matches.
-6. **Unowned DLC.** Hidden today. A `--catalog` flag could show them marked "not
-   owned" — useful for "which DLC am I missing", but that is a store question.
-7. **Library index.** §6 amends design 06 by caching owned ids for `--offline`. If
-   offline search is not worth that, drop `--offline` and the index.
+Decided with the user (2026-10-28): "did you mean" instead of fuzzy ranking (§4);
+not-owned DLC are shown (§2.1); no offline mode, the owned ids are not cached (§6).
