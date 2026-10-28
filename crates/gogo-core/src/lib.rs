@@ -11,6 +11,7 @@ pub mod engine;
 pub mod fmt;
 pub mod gog;
 pub mod macapp;
+pub mod search;
 pub mod state;
 
 #[cfg(test)]

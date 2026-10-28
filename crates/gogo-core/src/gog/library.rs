@@ -73,6 +73,29 @@ pub(crate) async fn list_games_at(
     Ok(all)
 }
 
+/// `/user/data/games` — every owned product id (games, DLC, packs, goodie products).
+#[derive(Debug, Deserialize)]
+struct OwnedIds {
+    #[serde(default)]
+    owned: Vec<u64>,
+}
+
+/// Every product id the account owns (design 17 §6). Always live, never cached.
+pub async fn owned_ids(http: &reqwest::Client, bearer: &str) -> Result<Vec<u64>, ApiError> {
+    owned_ids_at(http, bearer, EMBED_BASE).await
+}
+
+pub(crate) async fn owned_ids_at(
+    http: &reqwest::Client,
+    bearer: &str,
+    base: &str,
+) -> Result<Vec<u64>, ApiError> {
+    let url = format!("{base}/user/data/games");
+    let resp = ApiError::check(http.get(url).bearer_auth(bearer).send().await?).await?;
+    let parsed: OwnedIds = resp.json().await.map_err(ApiError::decode)?;
+    Ok(parsed.owned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,5 +159,20 @@ mod tests {
         assert_eq!(parsed.products.len(), 1);
         assert_eq!(parsed.products[0].title, "60 Minutes");
         assert!(!parsed.products[0].is_hidden);
+    }
+
+    #[tokio::test]
+    async fn owned_ids_parse() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::path("/user/data/games"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_string(include_str!("../../tests/fixtures/search/owned.json")),
+            )
+            .mount(&server)
+            .await;
+        let http = crate::gog::http().unwrap();
+        let owned = owned_ids_at(&http, "t", &server.uri()).await.unwrap();
+        assert!(owned.contains(&1000000001));
     }
 }

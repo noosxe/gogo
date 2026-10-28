@@ -52,6 +52,9 @@ url = "2.5.8"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 # PE import scan for mac-app renderer selection (#63); read-only PE, no write/compression.
+# `gogo search` text matching (design 17 §4): NFKD folding, "did you mean" distance.
+unicode-normalization = "0.1"
+strsim = "0.11"
 object = { version = "0.40", default-features = false, features = ["read_core", "pe", "std"] }
 
 # — errors / secrets —

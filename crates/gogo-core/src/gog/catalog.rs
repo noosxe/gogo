@@ -13,6 +13,10 @@ pub struct Product {
     pub id: u64,
     pub title: Option<String>,
     pub slug: Option<String>,
+    /// GOG's product kind: `game`, `dlc`, `pack` (design 17 §1). Cache entries
+    /// written before this field existed lack it and count as a miss.
+    #[serde(default, rename = "game_type")] // snake_case in the camelCase doc (live)
+    pub game_type: Option<String>,
     pub downloads: Option<Downloads>,
     /// DLC products, present on detail fetches with `expand=expanded_dlcs`
     /// (review A1: DLCs enter only through their parent game).
@@ -71,6 +75,10 @@ pub struct InstallerEntry {
     pub language_full: Option<String>,
     pub version: Option<String>,
     pub total_size: Option<u64>,
+    /// Bonus-content subtype as GOG sends it (`audio`, …; design 17 §2). Absent on
+    /// installers.
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     /// Multi-part files: `en1installer0`, `en1installer1`, … (live-verified).
     #[serde(default)]
     pub files: Vec<FileEntry>,
@@ -96,7 +104,8 @@ pub enum Os {
     Linux,
 }
 
-/// Fetch catalog entries in batches of 50 (`docs/design/03` §1).
+/// Fetch catalog entries with their `downloads` in batches of 50 (`docs/design/03`
+/// §1; design 17 §6 — the non-game owned ids).
 pub async fn batch(
     http: &reqwest::Client,
     bearer: &str,
@@ -127,7 +136,7 @@ pub(crate) async fn batch_at(
             .map(|id| id.to_string())
             .collect::<Vec<_>>()
             .join(",");
-        let url = format!("{base}/products?ids={ids}");
+        let url = format!("{base}/products?ids={ids}&expand=downloads");
         let resp = ApiError::check(http.get(&url).bearer_auth(bearer).send().await?).await?;
         let page: Vec<Product> = resp.json().await.map_err(ApiError::decode)?;
         out.extend(page);

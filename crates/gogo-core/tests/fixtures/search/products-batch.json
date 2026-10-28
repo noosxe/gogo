@@ -1,0 +1,8 @@
+[{"id":1000000301,"title":"The Witcher Collection","slug":"the_witcher_collection","game_type":"pack",
+  "downloads":{"installers":[],"bonus_content":[]}},
+ {"id":1000000302,"title":"Pokémon™ Fan Artbook","slug":"pokemon_fan_artbook","game_type":"dlc",
+  "downloads":{"installers":[],"bonus_content":[
+   {"id":7001,"name":"Artbook (PDF)","type":"artworks","total_size":52428800,
+    "files":[{"id":7001,"size":52428800,"downlink":"/products/1000000302/downlink/product_bonus_content/7001"}]}]}},
+ {"id":1000000303,"title":"Mystery Bundle","slug":"mystery_bundle","game_type":"bundle",
+  "downloads":{"installers":[],"bonus_content":[]}}]

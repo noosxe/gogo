@@ -87,6 +87,8 @@ pub enum Command {
         #[arg(long)]
         refresh: bool,
     },
+    /// Search what you own: games, DLC, packs and goodies.
+    Search(SearchArgs),
     /// Show one game's full catalog entry.
     Info {
         /// Game id, slug, or fuzzy title.
@@ -369,6 +371,53 @@ pub enum ConfigSub {
     Set { key: String, value: String },
     /// Open $EDITOR on the file.
     Edit,
+}
+
+/// Field bag for [`Command::Search`] (design 17 §3).
+#[derive(Debug, clap::Args)]
+pub struct SearchArgs {
+    /// Words to match (all of them, any order); a lone number also matches ids.
+    #[arg(value_name = "QUERY", required = true)]
+    pub query: Vec<String>,
+    /// Kinds to show (repeatable or comma list).
+    #[arg(short, long, value_enum, value_delimiter = ',')]
+    pub category: Vec<SearchCategory>,
+    /// Keep only goodies of this type (`audio`, …; implies `-c goodies`).
+    #[arg(long, value_parser = parse_goodies_type)]
+    pub goodies_type: Option<String>,
+    /// Keep games and DLC with an installer for this OS.
+    #[arg(long, value_enum)]
+    pub os: Option<OsFilter>,
+    /// Hide DLC you don't own.
+    #[arg(long)]
+    pub owned: bool,
+    /// Bypass the catalog cache.
+    #[arg(long)]
+    pub refresh: bool,
+    /// Machine-readable output.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// `search --category` values (design 17 §2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum SearchCategory {
+    Games,
+    Dlc,
+    Packs,
+    Goodies,
+}
+
+/// GOG's `bonus_content.type` vocabulary is lowercase words (`audio`, …).
+fn parse_goodies_type(s: &str) -> Result<String, String> {
+    if !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+    {
+        Ok(s.to_owned())
+    } else {
+        Err("expected a lowercase type such as `audio`".into())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -702,6 +751,38 @@ pub struct DownloadArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_parses_words_and_categories() {
+        let c = Cli::try_parse_from([
+            "gogo",
+            "search",
+            "witcher",
+            "3",
+            "-c",
+            "dlc,goodies",
+            "-c",
+            "packs",
+            "--owned",
+        ])
+        .unwrap();
+        let Command::Search(a) = c.command else {
+            panic!("expected Search");
+        };
+        assert_eq!(a.query, ["witcher", "3"]);
+        assert_eq!(
+            a.category,
+            [
+                SearchCategory::Dlc,
+                SearchCategory::Goodies,
+                SearchCategory::Packs
+            ]
+        );
+        assert!(a.owned && !a.json && !a.refresh);
+        assert!(Cli::try_parse_from(["gogo", "search"]).is_err());
+        assert!(Cli::try_parse_from(["gogo", "search", "x", "-c", "movies"]).is_err());
+        assert!(Cli::try_parse_from(["gogo", "search", "x", "--goodies-type", "Audio!"]).is_err());
+    }
 
     #[test]
     fn depot_parses_defaults_and_overrides() {

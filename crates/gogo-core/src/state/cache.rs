@@ -34,6 +34,16 @@ pub fn load_product(product_id: u64) -> anyhow::Result<Option<Product>> {
     }
 }
 
+/// [`load_product`] for readers that need the product kind (`list`, `search`): an
+/// entry written before `game_type` existed counts as a miss, so it is refetched
+/// once and rewritten with it (design 17 §6). Read errors are misses too.
+pub fn load_typed_product(product_id: u64) -> Option<Product> {
+    load_product(product_id)
+        .ok()
+        .flatten()
+        .filter(|p| p.game_type.is_some())
+}
+
 /// Write product JSON atomically after a successful batch fetch.
 pub fn save_product(product: &Product) -> anyhow::Result<()> {
     atomic_write(&product_path(product.id), &serde_json::to_string(product)?)
