@@ -20,6 +20,11 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # What setup-rust-toolchain used to set: no incremental or debug info on
+  # CI (smaller, faster caches) and warnings as errors.
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_BUILD_WARNINGS: deny
 
 jobs:
   rustfmt:
@@ -27,8 +32,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      # Reads rust-toolchain.toml (1.99.0) and wires rust-cache (cache: true default).
-      - uses: actions-rust-lang/setup-rust-toolchain@v2
+      # rustup is on every runner image: this installs what rust-toolchain.toml
+      # pins (1.99.0, clippy, rustfmt). Not setup-rust-toolchain, which spends
+      # a minute on `brew install bash` on macOS runners.
+      - run: rustup toolchain install
       - run: cargo fmt --all --check
 
   clippy:
@@ -36,7 +43,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions-rust-lang/setup-rust-toolchain@v2
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
       # -D warnings: warnings are failures, same as locally.
       - run: cargo clippy --all-targets -- -D warnings
 
@@ -49,7 +57,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-      - uses: actions-rust-lang/setup-rust-toolchain@v2
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
       # nextest is the canonical runner (docs/design/08); the .cargo/config.toml
       # dev-signing runner degrades to plain exec here (no codesigning identity
       # on CI runners) and never signs test binaries (*/deps/*).
@@ -63,7 +72,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions-rust-lang/setup-rust-toolchain@v2
+      - run: rustup toolchain install
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny@0.20.2
