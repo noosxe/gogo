@@ -1086,7 +1086,7 @@ fn check_log(dir: &Path) -> Finding {
     finding
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 

@@ -196,7 +196,7 @@ pub fn remove(app: &App, keep_override: bool) -> Result<Removed, MacAppError> {
     Ok(out)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 

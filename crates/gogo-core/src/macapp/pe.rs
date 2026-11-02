@@ -646,7 +646,7 @@ fn file_name(rel: &str) -> String {
     rel.rsplit('/').next().unwrap_or(rel).to_ascii_lowercase()
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 

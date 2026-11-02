@@ -2,7 +2,9 @@
 //! (docs/design/10 §7) — a shell script named `wine` that logs its argv and
 //! simulates `--version` / `wineboot -u` / an Inno Setup silent install. No
 //! network, no real Wine; asserts bundle layout, `launch.conf`, plist identity,
-//! and installer argv exactness. Runs on every host (codesign skipped).
+//! and installer argv exactness. macOS only (codesign skipped): mac-app is a
+//! macOS feature, and the launcher calls macOS tools by absolute path.
+#![cfg(target_os = "macos")]
 
 use gogo::engine::events::ProgressEvent;
 use gogo::macapp::bundle::CodesignPolicy;

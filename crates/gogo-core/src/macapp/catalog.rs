@@ -1055,7 +1055,7 @@ fn parse_release(v: &Value) -> Option<ReleaseDoc> {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod catalog_tests {
     use super::*;
 

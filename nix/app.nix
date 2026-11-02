@@ -31,6 +31,12 @@ rustPlatform.buildRustPackage {
     };
   };
 
+  # gog-warp's reqwest keeps its default native-tls feature, which links
+  # openssl-sys on Linux (macOS uses Security.framework instead). Its build
+  # script also runs bindgen over xdelta3, which needs libclang.
+  nativeBuildInputs = [ pkgs.pkg-config rustPlatform.bindgenHook ];
+  buildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.openssl ];
+
   # These drive real processes through `ps` (the launcher's watchdog and
   # liveness checks, doctor's leftover-process scan), which the macOS build
   # sandbox denies; outside it the launcher reads that as "parent gone" and

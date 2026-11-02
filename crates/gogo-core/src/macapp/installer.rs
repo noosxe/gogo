@@ -202,7 +202,7 @@ pub(crate) fn run_with_timeout(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod installer_tests {
     use super::*;
 

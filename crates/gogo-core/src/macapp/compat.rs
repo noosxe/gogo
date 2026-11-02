@@ -799,7 +799,7 @@ pub fn db_and_user(gogid: &str) -> (Effective, Vec<String>) {
     (eff, warnings)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod compat_tests {
     use super::*;
 

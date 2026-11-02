@@ -1957,7 +1957,7 @@ fn run_recipe_phase(
     result.map(Some)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod pipeline_tests {
     use super::*;
 

@@ -397,7 +397,7 @@ pub fn block_on_detached<F: std::future::Future>(fut: F) -> F::Output {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 
@@ -545,7 +545,7 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod rank_tests {
     use super::*;
 

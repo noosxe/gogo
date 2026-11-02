@@ -455,7 +455,7 @@ pub fn merge_overlay(overlay: &Path, dst: &Path) -> Result<Vec<PathBuf>, MacAppE
     Ok(merged)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod bundle_tests {
     use super::*;
     use crate::macapp::runtime::RuntimeMode;

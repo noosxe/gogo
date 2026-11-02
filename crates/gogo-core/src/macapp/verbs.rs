@@ -190,7 +190,7 @@ fn describe(eff: &[Sourced<String>], auto: &[AutoVerb]) -> String {
         .join(", ")
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
     use crate::macapp::pe::PeFileScan;
