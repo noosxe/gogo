@@ -25,6 +25,9 @@ pkgs.mkShell {
     pkgs.shellcheck         # lint for scripts/*.sh
   ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
     pkgs.libiconv           # some crates still want it on macOS
+  ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+    pkgs.openssl            # gog-warp's reqwest keeps default native-tls → openssl-sys on Linux
+    pkgs.rustPlatform.bindgenHook # libclang for gog-warp's xdelta3 bindgen (macOS finds Xcode's)
   ];
 
   env = {

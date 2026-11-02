@@ -672,7 +672,7 @@ pub fn explain(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
     use crate::macapp::pe::GraphicsImport;

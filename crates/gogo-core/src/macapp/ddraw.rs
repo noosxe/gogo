@@ -158,7 +158,7 @@ fn copy_dir(src: &Path, dst: &Path, count: &mut usize) -> Result<(), MacAppError
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 

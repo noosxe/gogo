@@ -194,7 +194,7 @@ fn which(bin: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tools_tests {
     use super::*;
 

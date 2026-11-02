@@ -477,7 +477,7 @@ fn dll_overrides(prefix: &Path) -> BTreeMap<String, String> {
     out
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod portable_tests {
     use super::*;
 

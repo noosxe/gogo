@@ -133,7 +133,7 @@ fn ensure_at(
     answer == Consent::Yes
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
     use std::sync::Arc;

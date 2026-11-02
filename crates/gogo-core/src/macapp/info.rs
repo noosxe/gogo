@@ -283,7 +283,7 @@ fn collect_info_files(dir: &Path, depth: u8) -> Vec<PathBuf> {
     found
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod info_tests {
     use super::*;
 

@@ -1146,7 +1146,7 @@ pub fn write_launcher(macos: &Path, display: &str) -> Result<PathBuf, MacAppErro
     Ok(path)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod launch_tests {
     use super::*;
 

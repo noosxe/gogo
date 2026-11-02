@@ -1206,7 +1206,7 @@ pub(super) fn dir_size(p: &Path) -> Result<u64, MacAppError> {
     Ok(total)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 pub(crate) mod store_tests {
     use super::*;
 

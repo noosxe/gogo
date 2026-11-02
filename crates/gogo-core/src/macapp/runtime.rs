@@ -345,7 +345,7 @@ fn mounted_gptk_candidates() -> Vec<PathBuf> {
     found
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod runtime_tests {
     use super::*;
 

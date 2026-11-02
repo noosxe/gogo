@@ -508,7 +508,7 @@ pub(super) fn wait_quiet(rt: &Runtime, prefix: &Path) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod setup_tests {
     use super::*;
 
