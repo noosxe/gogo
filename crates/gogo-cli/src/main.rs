@@ -2,9 +2,12 @@
 //! This crate is a thin shell over `gogo-core`; everything domain lives there.
 
 mod cli;
+#[cfg(target_os = "macos")]
 mod lane;
+#[cfg(target_os = "macos")]
 mod menus;
 mod output;
+#[cfg(target_os = "macos")]
 mod prompt;
 
 use std::sync::Arc;
@@ -45,12 +48,8 @@ fn main() {
         }
         Err(AppError::MacApp(e)) => {
             eprintln!("gogo: {e}");
-            // UnsupportedPlatform is a usage error (exit 2); the rest of the
-            // taxonomy is conversion failure (exit 7) — docs/design/10 §4.
-            match e {
-                gogo::macapp::MacAppError::UnsupportedPlatform => cli::exit::USAGE,
-                _ => cli::exit::MACAPP,
-            }
+            // Conversion failure (exit 7) — docs/design/10 §4.
+            cli::exit::MACAPP
         }
         Err(AppError::Depot(e)) => match e {
             gogo::gog::depot::DepotError::UnsupportedPlatform(_)
@@ -180,8 +179,10 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
             rebuild,
         } => verify(games, all, path, fix, rebuild).await,
         Command::Config { sub } => config_cmd(sub),
+        #[cfg(target_os = "macos")]
         Command::MacApp { sub: Some(sub), .. } => mac_app_sub(sub),
         // The bare `--runtime` menu (#76) is a build-time form only.
+        #[cfg(target_os = "macos")]
         Command::MacApp {
             retarget: Some(_),
             runtime: Some(None),
@@ -190,6 +191,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
             eprintln!("gogo: --retarget needs a runtime id (`--runtime <RUNTIME>`)");
             Ok(cli::exit::USAGE)
         }
+        #[cfg(target_os = "macos")]
         Command::MacApp {
             retarget: Some(target),
             runtime,
@@ -206,6 +208,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
             runtime_version,
             json,
         ),
+        #[cfg(target_os = "macos")]
         Command::MacApp {
             sub: None,
             retarget: _,
@@ -1909,12 +1912,7 @@ fn write_completions(
 
 // — mac-app (docs/design/10): installer → self-contained macOS .app —
 
-/// `gogo mac-app` — convert one downloaded Windows installer into a
-/// self-contained `.app`. The pipeline is synchronous (child processes + fs
-/// copies), so it runs on blocking threads; events render exactly like the
-/// download engine's (NDJSON on stdout for `--json-progress`, one-liners on
-/// stderr otherwise, 03 §4).
-#[allow(clippy::too_many_arguments)]
+#[cfg(target_os = "macos")]
 /// Resolve a game selector to its build source (#73, design 15 §1): the
 /// depot tree when a depot build exists (warm cache, else an auto-download
 /// with `--yes` or an interactive confirm), else — unless `--from-depot`
@@ -2058,6 +2056,7 @@ async fn resolve_game_source(
     Ok((None, Some(tree)))
 }
 
+#[cfg(target_os = "macos")]
 /// The install tree inside a depot cache root: a single child directory, or
 /// the child carrying a `goggame-*.info` (DLC-capable roots may hold more).
 fn find_game_tree(root: &std::path::Path) -> Option<std::path::PathBuf> {
@@ -2075,6 +2074,7 @@ fn find_game_tree(root: &std::path::Path) -> Option<std::path::PathBuf> {
         .find(|d| !gogo::macapp::info::gog_game_ids(d).is_empty())
 }
 
+#[cfg(target_os = "macos")]
 /// `gogo mac-app <sub>` (no build).
 fn mac_app_sub(sub: crate::cli::MacAppSub) -> Result<i32, AppError> {
     use gogo::macapp::compat;
@@ -2359,6 +2359,7 @@ fn mac_app_sub(sub: crate::cli::MacAppSub) -> Result<i32, AppError> {
     }
 }
 
+#[cfg(target_os = "macos")]
 /// `gogo mac-app --retarget <bundle|gogid> --runtime <src> --renderer <r>`
 /// (design 16 decision 7): write the choices into L4; the bundle stays
 /// sealed.
@@ -2506,6 +2507,7 @@ fn mac_app_retarget(
     Ok(cli::exit::OK)
 }
 
+#[cfg(target_os = "macos")]
 /// The path gogo was invoked as, for the launcher (design 16 decision 2):
 /// a profile symlink like `~/.nix-profile/bin/gogo` survives upgrades, the
 /// resolved store path doesn't, so this never canonicalizes.
@@ -2523,6 +2525,12 @@ fn invoked_path() -> Option<std::path::PathBuf> {
         .find(|p| p.is_file())
 }
 
+#[cfg(target_os = "macos")]
+/// `gogo mac-app` — convert one downloaded Windows installer into a
+/// self-contained `.app`. The pipeline is synchronous (child processes + fs
+/// copies), so it runs on blocking threads; events render exactly like the
+/// download engine's (NDJSON on stdout for `--json-progress`, one-liners on
+/// stderr otherwise, 03 §4).
 #[allow(clippy::too_many_arguments)]
 async fn mac_app(
     input: Option<String>,
@@ -2538,13 +2546,6 @@ async fn mac_app(
     json_progress: bool,
     json: bool,
 ) -> Result<i32, AppError> {
-    if !cfg!(target_os = "macos") {
-        // Design 10: macOS-only for now; fail fast with the remedy (exit 2).
-        return Err(AppError::MacApp(
-            gogo::macapp::MacAppError::UnsupportedPlatform,
-        ));
-    }
-
     // Design 15 §1 / #73: exactly one source. A game selector takes the
     // depot lane (installer fallback when it has no depot build); an .exe
     // path keeps the installer lane; a directory is a ready game tree.
