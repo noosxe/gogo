@@ -137,6 +137,7 @@ pub enum Command {
         #[command(subcommand)]
         sub: ConfigSub,
     },
+    #[cfg(target_os = "macos")]
     /// Build a macOS .app that runs a Windows game in Wine: from its depot
     /// build by default, else from its offline installer.
     #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
@@ -265,6 +266,7 @@ pub enum Command {
     },
 }
 
+#[cfg(target_os = "macos")]
 /// `gogo mac-app <sub>`: per-game commands next to the build itself.
 #[derive(Debug, Subcommand)]
 pub enum MacAppSub {
@@ -448,6 +450,7 @@ pub enum RendererArg {
 
 impl RendererArg {
     /// `None` for `auto`.
+    #[cfg(target_os = "macos")]
     pub fn renderer(self) -> Option<gogo::macapp::Renderer> {
         use gogo::macapp::Renderer as R;
         match self {
@@ -815,6 +818,7 @@ mod tests {
         assert_eq!(a.limit.as_deref(), Some("4MiB/s"));
     }
 
+    #[cfg(target_os = "macos")]
     /// `(input, from_depot)` of a parsed `gogo mac-app …` build.
     fn mac_app_source(args: &[&str]) -> (Option<String>, Option<String>) {
         let cli = Cli::try_parse_from(args).unwrap();
@@ -830,6 +834,7 @@ mod tests {
         (input, from_depot)
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn mac_app_takes_a_game_or_an_installer() {
         // #73: a game selector is the positional argument (depot lane).
@@ -913,6 +918,7 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn runtime_takes_catalog_ids_and_short_names() {
         for name in ["staging", "wine-staging"] {

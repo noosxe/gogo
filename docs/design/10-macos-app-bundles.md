@@ -10,9 +10,10 @@ conversion*, not install management. gogo tracks no installed-library, does no
 launching beyond the generated launcher stub, and never updates a converted
 game — `gogo update` still manages installer files, not bundles.
 
-**Platform:** macOS only for now. On Linux the subcommand exists but fails
-fast with exit 2 and a one-line explanation (a Linux counterpart is future
-work, §10).
+**Platform:** macOS only for now. Other builds don't have the subcommand
+(#158): clap rejects `gogo mac-app` as an unknown command (exit 2). The
+`gogo::macapp` core still compiles everywhere, along with the `runtimes`,
+`renderers`, `apps` and `recipes` commands, for the Linux counterpart (§10).
 
 ## 1. CLI surface (03 §1 carries the user-facing summary)
 
@@ -122,11 +123,10 @@ self-contained by construction; hundreds of MB per game is the accepted cost
 
 New taxonomy `MacAppError` (07 §1 layout): `RuntimeNotFound`,
 `RuntimeInvalid`, `InstallerFailed { exit }`, `EntryPointNotFound`,
-`Codesign { stderr }`, `UnsupportedPlatform`, `Io`.
+`Codesign { stderr }`, `Io`.
 
 Normative: **`MacAppError::*` → exit 7** (new; severity-ordered after
-disk=6, 03 §5 / 07 §2). Usage errors still exit 2 (bad flag values, non-macOS
-platform).
+disk=6, 03 §5 / 07 §2). Usage errors still exit 2 (bad flag values).
 
 ## 5. Naming & paths
 

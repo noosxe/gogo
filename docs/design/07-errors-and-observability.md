@@ -50,7 +50,7 @@ redaction can't be forgotten at the log site (04 §5 / 07 §4).
 | `DownloadError::DiskSpace` | 6 |
 | `DownloadError::Io` | 6 for ENOSPC, else 1 |
 | `MacAppError::*` (design 10 §4) | 7 |
-| usage errors in `mac-app` (bad flags, non-macOS) | 2 |
+| usage errors in `mac-app` (bad flags) | 2 |
 | cancellation | 130 |
 | anything else | 1 |
 

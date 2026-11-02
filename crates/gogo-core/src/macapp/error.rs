@@ -1,6 +1,5 @@
 //! `MacAppError` taxonomy (`docs/design/10` §4): every variant maps to exit 7
-//! except [`MacAppError::UnsupportedPlatform`], which is a usage error (exit 2,
-//! `07` §2 normative table).
+//! (`07` §2 normative table).
 
 use std::path::PathBuf;
 
@@ -49,12 +48,6 @@ pub enum MacAppError {
 
     #[error("codesign failed: {stderr}")]
     Codesign { stderr: String },
-
-    #[error(
-        "`gogo mac-app` is macOS-only — on Linux, run the installer with Wine \
-         (e.g. `WINEPREFIX=… wine setup.exe /VERYSILENT …`) or use Lutris"
-    )]
-    UnsupportedPlatform,
 
     /// Runtime catalog probe/discovery failure (design 12 §3): API unreachable
     /// after retries, unparseable, or entry not downloadable.
