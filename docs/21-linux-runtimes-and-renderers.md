@@ -1,0 +1,436 @@
+# 21 — Linux runtimes and renderers: Proton/umu, DXVK, VKD3D-Proton (#150)
+
+**Research date:** 2026-11-02 (all probes the same day)
+**Test bed:** NixOS 26.11 (Zokor), x86_64, kernel 7.2.11-zen1; NVIDIA RTX 4090 (driver
+595.112.07, Vulkan 1.4.329) plus the Ryzen 9800X3D iGPU (RADV, Mesa 26.2.6); 32-bit
+Vulkan ICDs present (`/run/opengl-driver-32`). No game or Wine binary was run: downloads
+were inspected (file lists, `readelf`, scripts), not executed.
+**Builds on:** issue #150 (facts from a chat on 2026-10-28), epic #155; docs/14 (Lutris),
+docs/15 (runtime distribution), docs/16 (cnc-ddraw), docs/19 (compat layers L0–L4);
+designs 12 and 16.
+**Status:** research only. No code changed. Facts are marked **verified** (GitHub API, a
+file or script read, an archive listing, a live HTTP request) or **reported** (the
+project's own docs, not re-checked).
+
+## 0. Summary
+
+- **GE-Proton is the right default, run through umu-launcher.** GE-Proton11-11
+  (2026-10-19, Wine 11.0 Staging base) ships DXVK, VKD3D-Proton, D7VK, dxvk-nvapi,
+  protonfixes and winetricks in one 565 MB tarball, pinned by a `.sha512sum` asset and
+  GitHub's asset digest (**verified**, §1.1). umu-launcher 1.4.4 (GPL-3.0) runs it inside
+  Valve's Steam Linux Runtime container and is in nixpkgs (**verified**, §1.2).
+- **umu does not look up GOG ids.** `GAMEID` must already be the umu id
+  (`umu-<steam appid>` or `umu-<gog id>`). The client does the GOG → umu lookup, as Heroic
+  does against `umu.openwinecomponents.org` (**verified**, umu and Heroic source, §2.1).
+  #150 implies umu does this itself; it does not.
+- **umu-database covers few GOG games, and is GPL-3.0.** 210 GOG rows out of 1,213; only
+  77 of them have a fix module under `STORE=gog` (most of those modules are
+  symlinks to Steam fixes). The database lists games that *need* fixes, not all games (**verified**, §2.2).
+  The CSV is GPL-3.0, so gogo should not vendor it; GE-Proton ships a copy inside its own
+  tree, which gogo can read in place (§2.3).
+- **umu-protonfixes is BSD-2-Clause** (**verified**), as docs/19 §6.4 assumed. Its GOG
+  fixes are mostly winetricks verbs (30 of 78 modules), env vars (16) and DLL overrides
+  (14). None picks a renderer (§2.4).
+- **Renderer choice under Proton is coarse.** `PROTON_USE_WINED3D=1` moves D3D9–12 to
+  wined3d together. The only other switches are `PROTON_NO_D3D10`/`PROTON_NO_D3D11`,
+  `PROTON_DXVK_D3D8` and `PROTON_USE_D7VK` (**verified**, `proton` script, §3.1). Plain
+  Wine needs DXVK/VKD3D-Proton copied into the prefix plus native overrides, as DXMT does
+  on the Mac (§3.2).
+- **New since #150:** GE-Proton bundles **D7VK** (D3D7/6/5/3 → Vulkan as a `ddraw.dll`),
+  which overlaps cnc-ddraw (§3.3); GE-Proton11 needs **Steam Linux Runtime 4**, not
+  sniper (§1.1); GE-Proton now also ships an **aarch64** build.
+- **The compat `env` maps cleanly** onto `PROTON_*`, `DXVK_*` and `VKD3D_*` vars, and all
+  six compat primitives have a Proton equivalent. Two catches: protonfixes overwrites
+  caller env without checking, so an L4 value can lose; and L3/L4 have no platform
+  dimension yet, while today's values (`WINEMSYNC`, `DXMT_*`, renderer ids) are Mac-only
+  (§4).
+
+## 1. Runtimes
+
+### 1.1 GE-Proton
+
+| Attribute | Verified value |
+|---|---|
+| Repo | `GloriousEggroll/proton-ge-custom`, 15.3k stars, pushed 2026-11-02 |
+| Latest | `GE-Proton11-11`, 2026-10-19 (a hotfix; `GE-Proton11-10` the same morning) |
+| Cadence | `GE-Proton11-1` 2026-06-24; 11 releases since 2026-05-01, 8 since 2026-08-01 |
+| Assets | `GE-Proton11-11-x86_64.tar.gz` 564,789,552 B; `GE-Proton11-11-aarch64.tar.gz` 648,071,663 B; one `.sha512sum` per tarball |
+| Integrity | the `.sha512sum` matched the download; GitHub asset digest `sha256:aa85986c…` |
+| Unpacked | 1.5 GB, root `GE-Proton11-11-x86_64/` |
+| Layout | `proton` (Python), `toolmanifest.vdf`, `compatibilitytool.vdf`, `version`, `files/{bin,lib,share}`, `protonfixes/` (with `umu-database.csv`, `winetricks`, `gamefixes-*`), `LICENSE`, `LICENSE.OFL`, `PATENTS.AV1` |
+| Wine | `wine-11.0 (Staging)` (string in `x86_64-unix/ntdll.so`); `lib/wine` has `i386-unix` too, so classic WoW64 by default, new-style with `PROTON_USE_WOW64=1` |
+| Bundled renderers | `files/lib/wine/dxvk` (`v3.1.1-134-g2cb40186c`), `vkd3d-proton` (`0bb64c56`), `d7vk` (i386 `ddraw.dll` only), `nvapi`, `nvidia-libs` |
+| Container | `toolmanifest.vdf`: `require_tool_appid "4183110"` = Steam Linux Runtime 4 (`steamrt4`) |
+| Licence | repo: none detected by GitHub (`NOASSERTION`); the tarball's `LICENSE` is Valve's BSD-3-Clause for the Proton tree, and the components carry their own (Wine LGPL, DXVK zlib, …). nixpkgs' `proton-ge-bin` labels it BSD-3-Clause. |
+| nixpkgs | `proton-ge-bin` = GE-Proton11-11 |
+
+- Valve's own Proton is at `proton-11.0-2e` (2026-10-09) on GitHub; Valve ships it only
+  through Steam. **UMU-Proton** (`Open-Wine-Components/umu-proton`) is umu's default
+  when `PROTONPATH` is unset; its last release is `UMU-Proton-10.0-4`
+  (2026-03-30, 491 MB), well behind GE.
+- **Wine-GE is gone**, as #150 says: `GloriousEggroll/wine-ge-custom` is archived, its
+  README opens "THIS REPO IS DEAD. UMU-LAUNCHER IS ITS SUCCESSOR", last release
+  `GE-Proton8-26` (2024-02-04).
+
+### 1.2 umu-launcher
+
+| Attribute | Verified value |
+|---|---|
+| Repo | `Open-Wine-Components/umu-launcher`, GPL-3.0, 3.8k stars |
+| Latest | `1.4.4`, 2026-07-25 |
+| Assets | `umu-launcher-1.4.4-zipapp.tar` (430,080 B), Debian 12/13 and Ubuntu noble/resolute `.deb`s, Fedora 43/44 `.rpm`s; all with asset digests |
+| nixpkgs | `umu-launcher` 1.4.4 (also at gogo's flake pin `e7439b6b`), wrapped with `buildFHSEnv` (`umu-launcher-1.4.4-bwrap`). The repo also has its own flake in `packaging/nix` (x86_64 and aarch64; on aarch64 only the unwrapped package) |
+| Tried | `nix shell nixpkgs#umu-launcher -c umu-run --help` works: `umu-run [-h] [-v] [--config CONFIG] [winetricks]` |
+
+What `umu-run` does with its environment (**verified**, `umu/umu_run.py` on `main`):
+
+- **`GAMEID`**: unset → `umu-default` (no fixes). Copied to `UMU_ID`. If it matches
+  `^umu-[\d\w]+$`, the part after `umu-` becomes `SteamAppId`/`SteamGameId`, so Valve's
+  per-appid fixes in the `proton` script apply to the non-Steam copy too.
+- **`STORE`**: passed through for protonfixes. Also: with `STORE` set and no
+  `WINEPREFIX`, the prefix defaults to **`~/Games/<store>`, one prefix shared by every
+  GOG game**. gogo must always set `WINEPREFIX`.
+- **`WINEPREFIX`**: the directory gets a `pfx -> .` symlink so that Proton's
+  `$STEAM_COMPAT_DATA_PATH/pfx` is the prefix itself; `drive_c/users/<user>` and
+  `steamuser` are symlinked to each other.
+- **`PROTONPATH`**: a path, a name looked up in `~/.local/share/Steam/compatibilitytools.d`,
+  or a codename: `GE-Proton`/`GE-Latest` (download the latest GE-Proton), `UMU-Proton`/
+  `UMU-Latest`. Unset → latest UMU-Proton. gogo would always pass a store path.
+- **The container**: umu reads `require_tool_appid` and downloads the matching runtime
+  from `repo.steampowered.com/<variant>/images/<version>/` into `~/.local/share/umu`.
+  `SteamLinuxRuntime_4.tar.xz` is 175,077,288 B (HTTP HEAD, last-modified 2026-10-21);
+  sniper is 194,771,152 B. `UMU_NO_RUNTIME=1` skips the container; `UMU_RUNTIME_UPDATE`
+  controls updates. So a first GE-Proton launch fetches about 740 MB.
+- **Verbs**: `umu-run winetricks <verbs>` runs the winetricks shipped inside the Proton
+  tree against `WINEPREFIX`. `PROTON_VERB` (default `waitforexitandrun`) is passed on.
+- **`PROTONFIXES_DISABLE=1`** turns protonfixes off (**verified**,
+  `protonfixes/__init__.py`).
+
+Lutris (`lutris/util/wine/proton.py`) and Heroic both drive `umu-run` for Proton
+(**verified**, source).
+
+### 1.3 Kron4ek Wine builds (standalone Wine)
+
+| Attribute | Verified value |
+|---|---|
+| Repo | `Kron4ek/Wine-Builds`, MIT (build scripts), 1.3k stars |
+| Latest | `11.21`, 2026-10-31; a new tag follows each Wine dev release (`11.20` on 2026-10-18) |
+| Flavours | vanilla, `staging`, `staging-tkg`; each as `amd64`, `amd64-wow64`, `x86`. A Proton-Wine flavour is described in the README but has no asset in the latest release |
+| Sizes | `wine-11.21-staging-amd64-wow64.tar.xz` 99,958,200 B; `wine-11.21-amd64.tar.xz` 100,390,416 B |
+| Integrity | `sha256sums.txt` asset plus asset digests; the staging-wow64 download matched (`a70a9691…`) |
+| Layout | `wine-11.21-staging-amd64-wow64/{bin,include,lib,share}`; `lib/wine` has `i386-windows`, `x86_64-unix`, `x86_64-windows`, no `i386-unix` (new-style WoW64) |
+| Host deps | "All regular Wine dependencies are required", glibc ≥ 2.27; `bin/wine` asks for `/lib64/ld-linux-x86-64.so.2`. The `-wow64` builds need no 32-bit host libraries |
+
+- These fit the existing store (one GitHub asset, sha256-pinned, `.tar.xz`) as-is.
+- **They are not distro-independent.** They use the host's libraries. On NixOS that means
+  `nix-ld` with Wine's library set, `steam-run`, or a gogo-built FHS wrapper; on other
+  distros, the distro's Wine packages for the dependencies. GE-Proton under umu avoids
+  this because the container carries its libraries.
+- The distro's Wine is the other option (nixpkgs: `wineWow64Packages.stable` 11.0,
+  `.staging` 11.19).
+
+### 1.4 What drops out
+
+GPTK/D3DMetal and the CrossOver lineage (winecx, winecx26) have no Linux role, as #150
+says. The CX lineage was chosen on the Mac for Rosetta-era reasons (docs/19 §3.1, §7)
+that do not apply here.
+
+## 2. Per-game fixes: umu-database and umu-protonfixes
+
+### 2.1 How a GOG game gets its fix
+
+The chain, as the code does it (**verified**, `umu_run.py`, `protonfixes/fix.py`):
+
+1. The client maps the GOG product id to a umu id. umu does not do this. Heroic's
+   `getUmuId` calls `https://umu.openwinecomponents.org/umu_api.php?codename=<id>&store=gog`
+   and caches the answer, including "no entry".
+2. The client runs `GAMEID=umu-<id> STORE=gog umu-run game.exe`.
+3. Inside Proton, protonfixes imports `protonfixes.gamefixes-gog.umu-<id>` (the store
+   directory is chosen from `STORE` because `umu-<id>` is not numeric). It runs
+   `default.py` and then the game's module. A file in `~/.config/protonfixes/localfixes/`
+   with the same name replaces the global one.
+
+Live lookup: `umu_api.php?store=gog&codename=1207658883` returned
+`[{"title":"Age of Wonders","umu_id":"umu-61500"}]` (Steam appid 61500).
+
+### 2.2 GOG coverage
+
+From `umu-database.csv` at `7bd4ba23` (2026-10-25) and the `umu-protonfixes` tree at
+`4500d09f` (2026-10-25):
+
+| Count | Value |
+|---|---|
+| Rows, all stores | 1,213 (1,109 distinct umu ids) |
+| `gog` rows | **210**, all keyed by the numeric GOG product id; 209 distinct umu ids |
+| …whose umu id is a Steam appid | 182 |
+| …whose umu id is the GOG id itself (not on Steam) | 28 |
+| `gamefixes-gog/` entries | 78 `umu-*` modules + `default.py` + `__init__.py`: 29 regular files and 51 symlinks into `gamefixes-steam` |
+| GOG rows with a module under `STORE=gog` | **77** (76 distinct umu ids); 2 modules have no GOG row |
+
+- The README says the database is for games "that do require fixes" and points to the
+  Lutris API for anything wider. So 210 is not a coverage gap to fix; most GOG games
+  just need no entry.
+- A GOG row with no `gamefixes-gog` module still gets **Valve's** per-appid fixes when
+  its umu id is a Steam appid (§1.2), but not the Steam protonfix: under `STORE=gog`
+  protonfixes only looks in `gamefixes-gog`.
+- The online API (`?store=gog`, 30,254 B JSON, 2026-11-02) and the CSV agree; the API is
+  a periodic import of the CSV.
+
+### 2.3 Licences
+
+| Data | Licence | Consequence |
+|---|---|---|
+| `umu-database` (CSV, tools) | **GPL-3.0** (`LICENSE`) | Don't vendor the CSV into gogo's tree or binary. Read it at run time instead: from the installed GE-Proton (`protonfixes/umu-database.csv`) or from the API |
+| `umu-protonfixes` | **BSD-2-Clause** | Translating fixes into gogo's L3 TOML with attribution is fine (docs/19 §6.4; five L3 files already do this) |
+| `umu-launcher` | GPL-3.0 | gogo runs it as a separate program; no linking |
+
+The GE-Proton copy of the CSV is the cheapest lookup: no network, versioned with the
+runtime that will apply the fix, and gogo distributes nothing.
+
+### 2.4 What the GOG fixes do
+
+Over the 78 `gamefixes-gog` modules bundled in GE-Proton11-11 (77 game modules plus
+`default.py`; symlinks followed; a module counts once per call kind):
+
+| Call | Modules |
+|---|---|
+| `util.protontricks(verb)` (winetricks at launch) | 30 |
+| `util.set_environment` | 16 |
+| `util.winedll_override` | 14 |
+| `util.regedit_add` / registry | 10 |
+| `util.replace_command` | 8 |
+| `util.append_argument` | 5 |
+| `set_ini_options` / `set_xml_options` (edit game config files) | 2 |
+| anything mentioning `wined3d` or DXVK | 0 |
+
+These are the six primitives docs/19 §6.4 named, plus game-file edits. `protontricks`
+runs winetricks during launch and needs the network the first time; gogo's model runs
+verbs in a setup step instead (design 16 decision 2).
+
+## 3. Renderers
+
+### 3.1 Under GE-Proton
+
+The `proton` script decides per launch which DLLs go into the prefix (**verified**,
+GE-Proton11-11 `proton`, `setup_prefix` and `check_environment`):
+
+| Setting | Effect |
+|---|---|
+| default | DXVK `d3d9`, `d3d10core`, `d3d11`, `dxgi`; VKD3D-Proton `d3d12`, `d3d12core`; all set `n` (native) |
+| `PROTON_USE_WINED3D=1` (or `PROTON_USE_WINED3D11`) | wined3d for `d3d9`–`d3d12` and `dxgi`, all together |
+| `PROTON_DXVK_D3D8=1` | DXVK `d3d8` too (default: wined3d's) |
+| `PROTON_NO_D3D10=1`, `PROTON_NO_D3D11=1` | hide those APIs |
+| `PROTON_USE_D7VK=1` | D7VK `ddraw.dll` into `syswow64`, `WINEDLLOVERRIDES+=ddraw=n,b` |
+| `WINEDLLOVERRIDES` with `dxgi=b` | keep Wine's `dxgi` with DXVK's D3D |
+| `PROTON_USE_WOW64=1` | new-style WoW64 |
+
+The same switches can come in as `STEAM_COMPAT_CONFIG` tokens (`wined3d`, `dxvkd3d8`,
+`nod3d11`, …). The `proton` script reads 77 distinct `PROTON_*` variables (HDR,
+Wayland, NVAPI, FSR/DLSS upgrades, input, …).
+
+So the L1 import scan's per-API choice (D3D9–11 → DXVK, D3D12 → VKD3D-Proton) is
+already Proton's default. What L1 adds on Linux is the exceptions: DirectDraw/D3D≤7 →
+cnc-ddraw or D7VK, and the import list for `doctor`.
+
+### 3.2 Into a plain Wine prefix
+
+| | DXVK 3.1.1 | VKD3D-Proton 3.1 |
+|---|---|---|
+| Repo, licence | `doitsujin/dxvk`, zlib | `HansKristian-Work/vkd3d-proton`, LGPL-2.1 |
+| Release | 2026-09-15 | 2026-10-28 (3.0.1: 2026-05-06) |
+| Asset | `dxvk-3.1.1.tar.gz`, 18,041,512 B, digest `40565b4a…` (matched); also `dxvk-native-3.1.1-steamrt-sniper.tar.gz` | `vkd3d-proton-3.1.tar.zst`, 5,665,978 B, digest `b85ea821…` (matched) |
+| Contents | `x64/` and `x32/`: `d3d8 d3d9 d3d10core d3d11 dxgi .dll` — **no setup script** | `x64/`, `x86/`: `d3d12.dll`, `d3d12core.dll`, plus `setup_vkd3d_proton.sh` |
+| Install | copy `x64` → `system32`, `x32` → `syswow64`, set `native` overrides for each DLL (README) | the script runs `wineboot -u`, copies the DLLs, adds `HKCU\Software\Wine\DllOverrides` `native` via `wine reg add` |
+| nixpkgs | `dxvk` 3.1.1 | `vkd3d-proton` 3.0.1 |
+| winetricks | `dxvk` (latest release) and pinned `dxvkNNNN` verbs | `vkd3d` |
+
+- This is the same shape as DXMT on the Mac: PE DLLs into the prefix plus overrides, so
+  design 16 decision 3's machinery mostly carries over. Because the DLLs go into the
+  prefix, no derived runtime is needed (DXMT needed one only for `winemetal.so`).
+- The store's extractor handles `.tar.gz` and `.tar.xz` only (`store.rs`).
+  VKD3D-Proton needs **zstd**, D7VK a **zip** (`d7vk-v2.4.zip`).
+- DXVK and VKD3D settings are plain env vars (`DXVK_HUD`, `DXVK_CONFIG`,
+  `DXVK_CONFIG_FILE`, `DXVK_FILTER_DEVICE_NAME`, `DXVK_LOG_LEVEL`, `VKD3D_CONFIG`,
+  `VKD3D_FILTER_DEVICE_NAME`, `VKD3D_SHADER_CACHE_PATH`, …) and work the same under Proton and
+  plain Wine. DXVK's README warns that swapping D3D DLLs in online games can count as
+  cheating.
+
+### 3.3 DirectDraw and old Direct3D: cnc-ddraw vs D7VK
+
+- **D7VK** (`WinterSnowfall/d7vk`, zlib, 791 stars, v2.4 on 2026-10-28) implements D3D7,
+  6, 5 and 3 on Vulkan as a 32-bit `ddraw.dll`. GE-Proton bundles it, off by default.
+- **cnc-ddraw** (docs/16) is a Windows DLL, and gogo puts it in the game directory with a
+  `ddraw.dll` override (`ddraw.rs`). Under Proton, `setup_ddraw` only touches `syswow64`,
+  and `WINEDLLOVERRIDES` from the caller survives (Proton appends to it), so the
+  game-directory placement should keep working (**reported**, not run).
+- Both are `ddraw.dll`, so they exclude each other per game. cnc-ddraw targets 2D
+  DirectDraw games; D7VK targets games that use D3D≤7 for 3D. L1 can't tell those apart
+  from imports alone (both import `ddraw.dll`).
+
+### 3.4 wined3d
+
+Still the fallback on Linux, with OpenGL by default and a Vulkan backend selectable
+through `WINE_D3D_CONFIG` (`renderer=vulkan`) (**reported**, Wine wiki). Under Proton,
+`PROTON_USE_WINED3D=1` selects it.
+
+## 4. The compat model on Linux
+
+### 4.1 Field by field
+
+The L3/L4 schema (`compat.rs` `Entry`) against a Proton launch:
+
+| Field | Under GE-Proton/umu | Under plain Wine |
+|---|---|---|
+| `env` | **straight through** to `umu-run`'s environment; `PROTON_*`, `DXVK_*`, `VKD3D_*`, `WINE*` all reach Proton/Wine | straight through |
+| `dll_overrides` | `WINEDLLOVERRIDES` (Proton appends its own) | same |
+| `verbs` | `umu-run winetricks <verbs>` with the runtime's winetricks, in the setup step | gogo's pinned winetricks, as on the Mac |
+| `registry` | `reg add` run in the prefix through umu (exact verb, e.g. `PROTON_VERB=runinprefix`, to be tested) | `wine reg`, as on the Mac |
+| `args`, `exe`, `replace_command` | unchanged | unchanged |
+| `renderer` | `dxvk`/`vkd3d-proton` = default; `wined3d` → `PROTON_USE_WINED3D=1`; `d7vk` → `PROTON_USE_D7VK=1`; `cnc-ddraw` → game-dir DLL + override | DLLs into the prefix (§3.2) |
+| `runtime` | `ge-proton/<ver>` store ref | `kron4ek-wine[-staging]/<ver>`, or system Wine |
+| `status`, `tested`, `lane` | need a platform (see §4.2) | same |
+
+So yes: `PROTON_*` and DXVK vars map onto the existing `env` with no schema change.
+
+### 4.2 Gaps
+
+1. **No platform dimension.** L3 files and the `tested` entries are Mac results
+   (`winecx-…`, `m4pro/macos-…`). The values gogo writes today (`WINEMSYNC`, `DXMT_*`,
+   `renderer = "dxmt"`, `d3dmetal`) mean nothing on Linux, and `PROTON_*` means nothing on
+   the Mac. `lane`/`lanes` already scope status by build lane. The same idea is needed
+   per OS (e.g. `[platforms.linux]` with its own `renderer`, `env`, `status`, `tested`),
+   or an explicit map such as `dxmt → dxvk`, `d3dmetal → vkd3d-proton`.
+2. **protonfixes runs after gogo's env and overwrites it.** `util.set_environment`
+   assigns `os.environ[var]` and `g_session.env[var]` unconditionally. An L4 `env` value
+   for a variable that the game's protonfix also sets will lose. Options: pass
+   `PROTONFIXES_DISABLE=1` when L4 has any `env`; write the L4 override as a protonfixes
+   `localfix`; or accept it and document it.
+3. **Two fix sources at once.** With `GAMEID`/`STORE` set, protonfixes applies its
+   fixes; gogo's L3 may carry a translated copy of the same fix. Verbs then run twice
+   (setup and launch). The design should pick one owner per game: probably protonfixes
+   for games it covers, with L3 only for the rest and for `status`.
+4. **Renderer granularity.** `renderer = "wined3d"` on Proton switches D3D9–12 at once.
+   A per-API override (wined3d for D3D9 only) needs `dll_overrides` instead.
+
+## 5. Other differences from the Mac lane
+
+- **Launcher**: a `.desktop` file plus a launcher script, no bundle and no signing.
+  `gogo-launch.toml` (design 16 decision 1) still works as the source of truth.
+- **Native Linux installers** (MojoSetup `.sh`) skip Wine entirely; `list --os` already
+  knows about them.
+- **Vulkan driver**: this machine shows the case `doctor` has to handle: a discrete
+  NVIDIA GPU plus an AMD iGPU, both with Vulkan. DXVK and VKD3D pick a device;
+  `DXVK_FILTER_DEVICE_NAME`/`VKD3D_FILTER_DEVICE_NAME` override it. 32-bit games under
+  classic WoW64 also need the 32-bit ICDs (on NixOS: `hardware.graphics.enable32Bit`).
+- **NixOS**: umu from nixpkgs is already FHS-wrapped; a downloaded umu zipapp or a
+  Kron4ek build is not. The design has to decide whether gogo downloads umu itself or
+  requires it on `PATH`.
+- **Testing**: no Vulkan in the VM, so the user's machine is the host pass, as #150 says.
+
+## 6. Corrections to #150
+
+| #150 says | Finding |
+|---|---|
+| `GAMEID=umu-<id>` with `STORE=gog` "makes umu apply that game's protonfixes on its own" | True once `GAMEID` is the umu id. The **GOG id → umu id lookup is the client's job** (§2.1). The fixes are applied by protonfixes inside GE-/UMU-Proton, not by umu-launcher |
+| umu-database "maps store ids, including GOG product ids" | True, for 210 GOG games (§2.2); the licence is **GPL-3.0**, so don't vendor it |
+| GE-Proton's renderer choice "comes down to environment variables such as `PROTON_USE_WINED3D=1`" | True, but it is all-or-nothing for D3D9–12 (§3.1) |
+| "Steam Linux Runtime container" | GE-Proton11 needs **steamrt4** (appid 4183110), not sniper; umu downloads it (175 MB) on first use |
+| DirectDraw → cnc-ddraw | Still valid, but GE-Proton now bundles **D7VK** as an alternative for D3D≤7 (§3.3) |
+| Kron4ek tarballs "fit the current download-and-cache store" | True for the store; they still need host libraries, which on NixOS means a wrapper (§1.3) |
+| (not mentioned) | umu's default prefix with `STORE` set is `~/Games/<store>`, shared by all games; gogo must set `WINEPREFIX` |
+| (not mentioned) | GE-Proton now ships an aarch64 build (steamrt4-arm64) |
+
+Everything else in #150 checked out: Wine-GE is dead, GE-Proton bundles DXVK and
+VKD3D-Proton, plain Wine needs them installed into the prefix, umu-protonfixes is BSD-2.
+
+## 7. What carries over from the mac-app lane
+
+| Piece | Carries over? |
+|---|---|
+| Runtime/renderer store: catalog, sha256 pins, GitHub asset digests, `prune`, N-1 rollback (design 12, design 16 decision 6) | Yes. Add zstd and zip extraction (§3.2) |
+| `gogo runtimes` / `gogo renderers` / `gogo apps` | Yes; their catalogs need Linux entries and per-OS filtering |
+| Compat layers L1–L4, `--retarget` writing L4 | Yes, plus a platform dimension (§4.2) |
+| PE import scan (`pe.rs`) | Yes; the mapping becomes D3D9–11 → dxvk, D3D12 → vkd3d-proton, DirectDraw → cnc-ddraw (or d7vk) |
+| `gogo-launch.toml`, setup stamp, per-game state dir, logs, early-exit surfacing, `doctor` | Yes in shape; paths move to XDG dirs, `doctor` gains Vulkan checks |
+| Winetricks pin and verbs | Yes for plain Wine; under Proton, the runtime's own winetricks |
+| cnc-ddraw (`ddraw.rs`) | Yes, as-is |
+| `.app` bundle, signing, `--portable`, D3DMetal, DXMT, CX engines | No |
+
+## 8. Open questions for the design doc
+
+1. **umu: dependency or download?** Require `umu-run` on `PATH` (nixpkgs, distro
+   packages), or fetch the zipapp into the store like winetricks (needs a host Python
+   and, on NixOS, an FHS wrapper)? Or run GE-Proton's `proton` directly with
+   `UMU_NO_RUNTIME`-style settings and give up the container?
+2. **Where do GE-Proton builds live?** gogo's store (pinned, `prune`-able, passed as a
+   path in `PROTONPATH`) or `~/.local/share/Steam/compatibilitytools.d` (shared with
+   Steam, Lutris, Heroic, ProtonUp-Qt)? 1.5 GB per version makes sharing attractive.
+3. **Who owns the Steam Linux Runtime download?** umu fetches it into
+   `~/.local/share/umu`; gogo can only pin it by letting umu do it.
+4. **protonfixes on or off by default**, and how L4 wins over it (§4.2 items 2–3).
+5. **GOG → umu id lookup**: the CSV inside the installed GE-Proton (offline, no
+   redistribution), the online API (fresher, network at build time), or both?
+6. **Platform scoping in L3/L4**: a `[platforms.linux]` table, or separate files per OS?
+7. **Second runtime**: Kron4ek staging-wow64 as the plain-Wine option, the distro's Wine,
+   or nothing in the first round?
+8. **D7VK vs cnc-ddraw**: which is the L1 default for `ddraw.dll` importers, and can the
+   scan tell D3D≤7 3D from 2D DirectDraw (e.g. `IDirect3D7` use)?
+9. **Launcher format**: `.desktop` + shell script calling `gogo launch <gogid>`, or a
+   self-contained script with the env baked in (the `launch.conf` mirror)?
+10. **Native Linux installers**: in this epic or a separate one?
+11. **aarch64 Linux** (GE-Proton aarch64, steamrt4-arm64): in scope?
+
+## 9. Proposed outline for the design doc (`docs/design/18-linux-runtime.md`)
+
+Numbered after design 17; the name is a suggestion.
+
+0. Summary and decisions table
+1. Decision 1: runtime default (GE-Proton through umu) and the second runtime
+2. Decision 2: how gogo gets umu and GE-Proton (dependency vs store; Steam
+   `compatibilitytools.d` or not); the Steam Linux Runtime
+3. Decision 3: renderer mapping (L1 scan → Proton switches; plain-Wine DLL install;
+   cnc-ddraw vs D7VK)
+4. Decision 4: per-game fixes (protonfixes ownership, GOG → umu lookup, L3 seeding,
+   L4 precedence over protonfixes)
+5. Decision 5: compat schema change for platforms (migration of today's 13 L3 files)
+6. Decision 6: store layout and GC on Linux (XDG paths, archive formats, prune, shared
+   tools dir)
+7. Decision 7: launcher contract (`.desktop`, launcher script, `gogo-launch.toml`,
+   prefix per game, logs, early-exit surfacing)
+8. `doctor` on Linux (Vulkan devices, 32-bit ICDs, umu, container, NixOS hints)
+9. Native Linux installers (scope note)
+10. Testing (unit and wiremock tests; the user's host pass; no VM rendering)
+11. Open items
+
+## 10. Sources
+
+All checked 2026-11-02.
+
+- GitHub API (repo metadata, releases, trees, contents) for
+  `GloriousEggroll/proton-ge-custom` (GE-Proton11-11),
+  `GloriousEggroll/wine-ge-custom`, `Open-Wine-Components/umu-launcher` (1.4.4, `main`),
+  `Open-Wine-Components/umu-database` (`7bd4ba23`), `Open-Wine-Components/umu-protonfixes`
+  (`4500d09f`), `Open-Wine-Components/umu-proton`, `ValveSoftware/Proton`,
+  `doitsujin/dxvk` (v3.1.1), `HansKristian-Work/vkd3d-proton` (v3.1),
+  `WinterSnowfall/d7vk` (v2.4), `Kron4ek/Wine-Builds` (11.21).
+- Source read: `umu/umu_run.py`, `umu/umu_runtime.py`, `umu/umu_consts.py`,
+  `umu/umu_proton.py`, `docs/umu.1.scd` (umu-launcher `main`); `fix.py`
+  (umu-protonfixes `master`); the `proton` script, `protonfixes/util.py`,
+  `protonfixes/__init__.py` and `gamefixes-gog/` inside the GE-Proton11-11 x86_64
+  tarball; `src/backend/wiki_game_info/umu/utils.ts` (Heroic, `main`);
+  `lutris/util/wine/proton.py` (Lutris, `master`); `src/winetricks` (Winetricks
+  `master`, `20260125-next`).
+- READMEs: umu-database, DXVK, VKD3D-Proton, Kron4ek/Wine-Builds, wine-ge-custom.
+- Downloads inspected (not run): GE-Proton11-11 x86_64 (sha512 matched), `dxvk-3.1.1.tar.gz`,
+  `vkd3d-proton-3.1.tar.zst`, `wine-11.21-staging-amd64-wow64.tar.xz` (all sha256 matched
+  the asset digests).
+- Live HTTP: `https://umu.openwinecomponents.org/umu_api.php` (`?store=gog`,
+  `?store=gog&codename=1207658883`); HEAD on
+  `repo.steampowered.com/steamrt4/images/latest-public-beta/SteamLinuxRuntime_4.tar.xz`
+  and the sniper equivalent.
+- nixpkgs (flake registry, `lib.version` 26.11; and gogo's pin `e7439b6b`):
+  `umu-launcher`, `proton-ge-bin`, `dxvk`, `vkd3d-proton`, `wineWow64Packages`,
+  `winetricks` versions via `nix eval`; `umu-run --help` run from nixpkgs.
+- Host: `vulkaninfo --summary` (nixpkgs `vulkan-tools`).
+- **Reported only:** wined3d's Vulkan backend via `WINE_D3D_CONFIG`; cnc-ddraw behaviour
+  under Proton.
