@@ -323,8 +323,9 @@ So yes: `PROTON_*` and DXVK vars map onto the existing `env` with no schema chan
   `DXVK_FILTER_DEVICE_NAME`/`VKD3D_FILTER_DEVICE_NAME` override it. 32-bit games under
   classic WoW64 also need the 32-bit ICDs (on NixOS: `hardware.graphics.enable32Bit`).
 - **NixOS**: umu from nixpkgs is already FHS-wrapped; a downloaded umu zipapp or a
-  Kron4ek build is not. umu is required for the Proton runtime (§8 item 1): pinned in
-  the flake for Nix, downloaded after the user confirms elsewhere.
+  Kron4ek build is not. umu is required for the Proton runtime (§8 item 1): gogo downloads
+  its zipapp after the user confirms; Python comes from the flake on Nix and from the
+  user elsewhere.
 - **Testing**: no Vulkan in the VM, so the user's machine is the host pass, as #150 says.
 
 ## 6. Corrections to #150
@@ -371,17 +372,24 @@ VKD3D-Proton, plain Wine needs them installed into the prefix, umu-protonfixes i
      wrapper, the same problem as Kron4ek builds, §1.3);
    - run winetricks through the runtime.
 
-   So:
-   - **Nix**: gogo's flake pins nixpkgs' `umu-launcher` (already FHS-wrapped) as a
-     dependency of the gogo package.
-   - **Outside Nix**: gogo downloads the pinned umu version into its store, only after
-     the user confirms.
+   **How gogo gets it: the zipapp (user decision, 2026-11-03).** gogo downloads umu's
+   release zipapp (`umu-launcher-<ver>-zipapp.tar`, 430,080 B for 1.4.4, sha256
+   `eb590691…`) into its store, pinned like any catalog entry:
+   - The archive holds `umu/umu-run`, one zip file with a `#!/usr/bin/env python3`
+     shebang. It vendors its dependencies (`python-xlib`, `urllib3`, `truststore`,
+     `six`), so all it needs is a host Python ≥ 3.10 (`requires-python` in umu's
+     `pyproject.toml`) (**verified**, archive listing, not run).
+   - **Nix**: gogo's flake provides a pinned Python (≥ 3.10) for it.
+   - **Outside Nix**: a compatible Python installed by the user is a requirement, and
+     `doctor` checks for it. The download itself happens only after the user confirms.
    - **No umu, no Proton runtime**: no fallback that runs `proton` directly. Plain-Wine
      runtimes (Kron4ek, the distro's Wine) don't use umu and stay usable without it.
 
-   Still to settle in the design: what the non-Nix download is (the zipapp needs a host
-   Python; the `.deb`/`.rpm` assets are per distro). The zipapp is the likely choice, with
-   `doctor` checking for Python.
+   Still to check on NixOS: nixpkgs wraps its own `umu-launcher` in `buildFHSEnv`. The
+   zipapp run with a plain Python gets no such wrapper. Whether umu's Steam Linux
+   Runtime launch works without it is untested. If it doesn't, the Nix build needs the
+   FHS wrapper too, or nixpkgs' `umu-launcher` instead of the zipapp.
+
 2. **Where do GE-Proton builds live?** gogo's store (pinned, `prune`-able, passed as a
    path in `PROTONPATH`) or `~/.local/share/Steam/compatibilitytools.d` (shared with
    Steam, Lutris, Heroic, ProtonUp-Qt)? 1.5 GB per version makes sharing attractive.
@@ -406,8 +414,8 @@ Numbered after design 17; the name is a suggestion.
 
 0. Summary and decisions table
 1. Decision 1: runtime default (GE-Proton through umu) and the second runtime
-2. Decision 2: umu as a required dependency (flake pin; confirmed download outside
-   Nix, §8 item 1); where GE-Proton lives (store or Steam `compatibilitytools.d`);
+2. Decision 2: umu as a required dependency (zipapp download after confirmation;
+   Python from the flake or the user, §8 item 1); where GE-Proton lives (store or Steam `compatibilitytools.d`);
    the Steam Linux Runtime
 3. Decision 3: renderer mapping (L1 scan → Proton switches; plain-Wine DLL install;
    cnc-ddraw vs D7VK)
