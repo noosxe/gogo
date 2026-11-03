@@ -555,11 +555,11 @@ VKD3D-Proton, plain Wine needs them installed into the prefix, umu-protonfixes i
    first round ships GE-Proton through umu only. The plain-Wine path (Kron4ek, the
    distro's Wine; §1.3, §3.2) stays researched but unbuilt, and R8 doesn't apply yet.
    Unmanaged Proton builds (item 2) are still allowed.
-8. **D7VK vs cnc-ddraw: researched in docs/22 (PR #163, 2026-11-03); recommendation
-   to decide.** They cover different halves of `ddraw.dll`: cnc-ddraw does 2D
+8. **D7VK vs cnc-ddraw: docs/22's recommendation accepted (user decision,
+   2026-11-03; research in PR #163).** They cover different halves of `ddraw.dll`: cnc-ddraw does 2D
    DirectDraw and fails Direct3D device creation; D7VK does D3D7/6/5/3 and passes 2D
    through to Wine's own `ddraw`. So cnc-ddraw on a 3D game breaks it, while D7VK on a
-   2D game only loses cnc-ddraw's extras. docs/22 §6 recommends, on Linux:
+   2D game only loses cnc-ddraw's extras. Decided, per docs/22 §6, on Linux:
    - D3D≤7 evidence, or an ambiguous scan → **D7VK** (`PROTON_USE_D7VK=1`);
    - confident 2D → **cnc-ddraw**, as on the Mac;
    - a `ddraw.dll` the game ships → keep it, use neither;
@@ -569,8 +569,11 @@ VKD3D-Proton, plain Wine needs them installed into the prefix, umu-protonfixes i
    keeps cnc-ddraw/wined3d. Detection: `pe.rs` already looks for the `IID_IDirect3D*`
    GUIDs, but the full `dxguid` GUID block shows up in unrelated DLLs. docs/22 §6.2
    proposes discounting that block, adding device/texture GUIDs as signals, and
-   checking files that load `ddraw.dll` at run time. Not yet tested on a real D3D7-era
-   GOG exe.
+   checking files that load `ddraw.dll` at run time. Also adopted.
+
+   Still to settle in the design: testing the detection rule on a real D3D7-era GOG exe,
+   and the other open questions in docs/22 §7 (e.g. whether Linux needs cnc-ddraw for 2D
+   as much as the Mac does, decided by a host pass).
 9. **Launcher: a `.desktop` file running a generated script; gogo does setup (user
    decision, 2026-11-03).** The Linux version of the Mac launcher (design 16 §1.2):
    - `~/.local/share/applications/gogo-<gogid>.desktop` (`Exec=` the script, `Icon=`,
@@ -641,7 +644,7 @@ worth knowing.
 | # | Risk | Severity | Why (section) |
 |---|---|---|---|
 | R16 | Renderer switching under Proton is all-or-nothing (`PROTON_USE_WINED3D` covers D3D9–12); per-API choices need hand-written overrides | medium | §3.1 |
-| R17 | (docs/22 §6.1 proposes the fix: never both) D7VK and cnc-ddraw are both `ddraw.dll`; picking the wrong one for a game, or both being active, breaks it. The import scan can't tell them apart yet | medium | §3.3 |
+| R17 | (addressed by §8 item 8: never both) D7VK and cnc-ddraw are both `ddraw.dll`; picking the wrong one for a game, or both being active, breaks it. The import scan can't tell them apart yet | medium | §3.3 |
 | R18 | Multi-GPU machines (this one: NVIDIA plus an AMD iGPU): DXVK/VKD3D may pick the wrong device, and the game runs slow or fails | medium | §5 |
 | R19 | Missing 32-bit Vulkan ICDs break 32-bit games under classic WoW64, and the error doesn't name the cause | medium | §5 |
 | R20 | DXVK's README warns that swapping D3D DLLs in online games can count as cheating and get accounts banned | low | §3.2 |
