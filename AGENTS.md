@@ -77,7 +77,7 @@ shellcheck scripts/*.sh scripts/tests/*.sh   # when scripts change
 - Work is grouped under `epic` issues using GitHub's native sub-issues (not task lists):
   v0.1.0 release (#49), mac-app & Wine runtime (#50), docs/research/hygiene (#51),
   depot downloads (#10), TUI (#11), v2 backlog (#12),
-  Linux runtime (#155). File the issue, then link it:
+  Linux runtime (#155), native Linux games (#162). File the issue, then link it:
 
   ```sh
   p=$(gh api repos/noosxe/gogo/issues/<epic> --jq .node_id)
