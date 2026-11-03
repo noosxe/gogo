@@ -1599,7 +1599,7 @@ fn finish_v2(
         })),
         gogo: launch::GogoRef {
             path: plan.gogo_path.clone(),
-            state: crate::state::state_dir(),
+            state: crate::state::data_root(),
         },
         variants,
         portable: None,

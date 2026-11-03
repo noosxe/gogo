@@ -2867,6 +2867,14 @@ impl Shelf {
     }
 }
 
+/// `macOS and Linux`, for listings.
+fn os_list(os: &[gogo::macapp::catalog::Os]) -> String {
+    os.iter()
+        .map(|o| o.label())
+        .collect::<Vec<_>>()
+        .join(" and ")
+}
+
 /// A version as listings show it: a release tag's leading `v` dropped
 /// (`v7.1.0.0` and `7.1.0.0` are one version).
 fn shown_version(v: &str) -> &str {
@@ -2875,15 +2883,26 @@ fn shown_version(v: &str) -> &str {
         .unwrap_or(v)
 }
 
+/// Does `list` show `entry` on `os`? This OS's entries; `--all` adds the
+/// rest (design 18 §6).
+fn listed(
+    entry: &gogo::macapp::catalog::CatalogEntry,
+    os: gogo::macapp::catalog::Os,
+    all: bool,
+) -> bool {
+    all || entry.runs_on_os(os)
+}
+
 /// `gogo runtimes|renderers list|install|prune`. `list` checks the latest
-/// version online with a short client timeout (`--offline` skips);
-/// `install` is macOS-only — runtimes and renderers exist to feed `mac-app`.
+/// version online with a short client timeout (`--offline` skips) and shows
+/// this OS's entries (`--all`: every OS's); `install` takes this OS's.
 async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppError> {
     use gogo::macapp::{catalog, store};
 
     let (command, noun) = (shelf.command(), shelf.noun());
+    let os = catalog::Os::current();
     match cmd {
-        crate::cli::StoreCmd::List { json, offline } => {
+        crate::cli::StoreCmd::List { json, offline, all } => {
             let runtimes = store::load_manifest();
             let mut cached = runtimes.clone();
             cached.extend(store::load_renderer_manifest());
@@ -2896,8 +2915,12 @@ async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppEr
             let mut footnotes: Vec<String> = Vec::new();
             let mut table = comfy_table::Table::new();
             table.set_header(vec!["ID", "STATUS", "LATEST", "SIZE", "CACHED", "USED BY"]);
-            for entry in catalog::entries().iter().filter(|e| shelf.holds(e)) {
+            for entry in catalog::entries()
+                .iter()
+                .filter(|e| shelf.holds(e) && listed(e, os, all))
+            {
                 let tool = matches!(entry.kind, catalog::Kind::Tool { .. });
+                let here = entry.runs_on_os(os);
                 let latest = match &http {
                     Some(http) if entry.discovery.is_some() && !tool => {
                         catalog::probe(entry, None, http, catalog::GITHUB_API)
@@ -2935,7 +2958,9 @@ async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppEr
                         _ => None,
                     },
                     "license": entry.license,
-                    "arch": entry.arch_label(),
+                    "arch": if here { entry.arch_label_on(os) } else { entry.arch_label() },
+                    "os": entry.os.iter().map(|o| o.key()).collect::<Vec<_>>(),
+                    "installable": here,
                     "vendor_signed": entry.vendor_signed,
                     "latest": latest.as_ref().map(|l| serde_json::json!({
                         "tag": l.tag,
@@ -2950,6 +2975,15 @@ async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppEr
                     "used_by": used_by,
                 }));
                 let versions: Vec<&str> = mine.iter().map(|m| shown_version(&m.version)).collect();
+                if tool && !here {
+                    footnotes.push(format!(
+                        "{}: {} only, not installable on {}",
+                        entry.id,
+                        os_list(entry.os),
+                        os.label()
+                    ));
+                    continue;
+                }
                 if tool {
                     // Not a choice: gogo fetches its pinned version itself.
                     let pinned = entry.discovery.as_ref().and_then(|d| d.pinned_version());
@@ -2968,13 +3002,18 @@ async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppEr
                     continue;
                 }
                 let status = match &entry.status {
+                    // A retired entry only matters while copies of it remain.
+                    catalog::Status::Gone { .. } if mine.is_empty() => continue,
+                    _ if !here => format!(
+                        "{} only, not installable on {}",
+                        os_list(entry.os),
+                        os.label()
+                    ),
                     catalog::Status::Available if entry.id == catalog::DEFAULT_RUNTIME => {
                         "available · default".to_string()
                     }
                     catalog::Status::Available | catalog::Status::Tool => "available".to_string(),
                     catalog::Status::ConsentRequired => "needs consent (Apple licence)".to_string(),
-                    // A retired entry only matters while copies of it remain.
-                    catalog::Status::Gone { .. } if mine.is_empty() => continue,
                     catalog::Status::Gone { since, .. } => {
                         format!("gone since {since} (cached copies still work)")
                     }
@@ -3009,6 +3048,15 @@ async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppEr
             }
             if json {
                 println!("{}", serde_json::json!({ "entries": json_rows }));
+            } else if table.row_count() == 0 && !all {
+                // Linux before its first runtimes (#169).
+                println!(
+                    "no {command} for {} in the catalog yet: `--all` lists the other OSes'",
+                    os.label()
+                );
+                for note in footnotes {
+                    println!("{note}");
+                }
             } else {
                 println!("{table}");
                 for note in footnotes {
@@ -3018,12 +3066,6 @@ async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppEr
             Ok(cli::exit::OK)
         }
         crate::cli::StoreCmd::Install { id, version, json } => {
-            if !cfg!(target_os = "macos") {
-                eprintln!(
-                    "gogo: `gogo {command} install` is macOS-only — {command} feed `gogo mac-app`"
-                );
-                return Ok(cli::exit::USAGE);
-            }
             let id = catalog::canonical_id(&id);
             let Some(entry) = catalog::find(id) else {
                 eprintln!("gogo: unknown {noun} id '{id}' — see `gogo {command} list`");
@@ -3036,6 +3078,10 @@ async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppEr
                     other.noun(),
                     other.command()
                 );
+                return Ok(cli::exit::USAGE);
+            }
+            if let Err(why) = entry.check_os(os) {
+                eprintln!("gogo: {why} — see `gogo {command} list`");
                 return Ok(cli::exit::USAGE);
             }
             // D3DMetal (#71) installs here only with the stored consent.
@@ -3619,6 +3665,28 @@ fn emit_macapp_event(ev: &gogo::engine::events::ProgressEvent, json_progress: bo
 /// Smoke tests for the completion generation (08 §2: thin frontend gets smoke tests):
 /// every shell yields a script naming the binary, with the shell's load-bearing
 /// marker present.
+#[cfg(test)]
+mod store_tests {
+    use super::listed;
+    use gogo::macapp::catalog::{self, Os};
+
+    /// Design 18 §6: each OS lists its own entries; `--all` lists them all.
+    #[test]
+    fn list_shows_this_os_and_all_shows_the_rest() {
+        let ids = |os, all| -> Vec<&str> {
+            catalog::entries()
+                .iter()
+                .filter(|e| listed(e, os, all))
+                .map(|e| e.id)
+                .collect()
+        };
+        assert_eq!(ids(Os::Linux, false), ["cnc-ddraw"]);
+        assert!(ids(Os::Macos, false).contains(&"winecx26"));
+        assert!(ids(Os::Macos, false).contains(&"cnc-ddraw"));
+        assert_eq!(ids(Os::Linux, true).len(), catalog::entries().len());
+    }
+}
+
 #[cfg(test)]
 mod completions_tests {
     use super::write_completions;

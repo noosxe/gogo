@@ -536,8 +536,11 @@ pub enum StoreCmd {
         /// Don't check for the latest versions online.
         #[arg(long)]
         offline: bool,
+        /// Also list the entries for other OSes (not installable here).
+        #[arg(long)]
+        all: bool,
     },
-    /// Download, verify, and cache a catalog entry (macOS only).
+    /// Download, verify, and cache a catalog entry for this OS.
     Install {
         /// Catalog id (see `list`).
         #[arg(value_name = "ID")]

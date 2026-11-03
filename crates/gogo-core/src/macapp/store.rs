@@ -21,9 +21,9 @@ use crate::engine::events::ProgressEvent;
 use super::catalog::{self, CatalogEntry, Status};
 use super::error::MacAppError;
 
-/// Store root: `<state_dir>/runtimes/` (design 12 §4).
+/// Store root: `<data_root>/runtimes/` (design 12 §4).
 pub fn runtimes_dir() -> PathBuf {
-    crate::state::state_dir().join("runtimes")
+    crate::state::data_root().join("runtimes")
 }
 
 fn tmp_dir() -> PathBuf {
@@ -34,9 +34,9 @@ fn manifest_path() -> PathBuf {
     runtimes_dir().join("manifest.json")
 }
 
-/// Renderer store root: `<state_dir>/renderers/` (design 16 decision 6).
+/// Renderer store root: `<data_root>/renderers/` (design 16 decision 6).
 pub fn renderers_dir() -> PathBuf {
-    crate::state::state_dir().join("renderers")
+    crate::state::data_root().join("renderers")
 }
 
 fn renderer_manifest_path() -> PathBuf {
@@ -379,12 +379,17 @@ pub async fn install(
         std::fs::write(
             extract_dir.join("NOTICES.txt"),
             format!(
-                "{} {} — {}\n  {}\n\nDownloaded by gogo on this Mac from the upstream \
+                "{} {} — {}\n  {}\n\nDownloaded by gogo on this {} from the upstream \
                  release; gogo doesn't redistribute it.\n{}",
                 entry.id,
                 rel.tag,
                 entry.license,
                 rel.asset_url,
+                if cfg!(target_os = "macos") {
+                    "Mac"
+                } else {
+                    "machine"
+                },
                 notice.map(|n| format!("\n{n}")).unwrap_or_default()
             ),
         )?;
@@ -608,6 +613,9 @@ fn archive_ext(name: &str) -> &'static str {
         "zip"
     } else if name.ends_with(".tar.xz") || name.ends_with(".txz") {
         "tar.xz"
+    } else if name.ends_with(".tar") {
+        // The umu zipapp release (design 18 §6).
+        "tar"
     } else {
         "file"
     }
@@ -637,7 +645,7 @@ async fn download_verified(
     Ok(actual)
 }
 
-/// Unpack a tar.xz / tar.gz / zip into `dest` (decoder by asset name); a
+/// Unpack a tar.xz / tar.gz / tar / zip into `dest` (decoder by asset name); a
 /// bare file is copied in under its own name.
 fn unpack(archive: &Path, asset_name: &str, dest: &Path) -> Result<(), MacAppError> {
     std::fs::create_dir_all(dest)?;
@@ -676,10 +684,10 @@ fn unpack(archive: &Path, asset_name: &str, dest: &Path) -> Result<(), MacAppErr
             }
         }
         ext => {
-            let decoder: Box<dyn std::io::Read> = if ext == "tar.gz" {
-                Box::new(flate2::read::GzDecoder::new(file))
-            } else {
-                Box::new(xz2::read::XzDecoder::new(file))
+            let decoder: Box<dyn std::io::Read> = match ext {
+                "tar.gz" => Box::new(flate2::read::GzDecoder::new(file)),
+                "tar" => Box::new(file),
+                _ => Box::new(xz2::read::XzDecoder::new(file)),
             };
             let mut tar = tar::Archive::new(decoder);
             tar.set_preserve_permissions(true);
@@ -1206,6 +1214,58 @@ pub(super) fn dir_size(p: &Path) -> Result<u64, MacAppError> {
     Ok(total)
 }
 
+/// OS-independent (design 18 §6): these run on every CI job.
+#[cfg(test)]
+mod archive_tests {
+    use super::*;
+
+    #[test]
+    fn archive_ext_tells_plain_tar_from_compressed() {
+        assert_eq!(archive_ext("umu-launcher-1.4.4-zipapp.tar"), "tar");
+        assert_eq!(archive_ext("GE-Proton10-25.tar.gz"), "tar.gz");
+        assert_eq!(archive_ext("wine.tar.xz"), "tar.xz");
+        assert_eq!(archive_ext("cnc-ddraw.zip"), "zip");
+        assert_eq!(archive_ext("winetricks"), "file");
+    }
+
+    /// Design 18 §6: the umu zipapp ships as a plain `.tar`.
+    #[test]
+    fn unpacks_a_plain_tar_keeping_modes() {
+        let mut tar_buf = Vec::new();
+        {
+            let mut t = tar::Builder::new(&mut tar_buf);
+            for (path, body, mode) in [
+                ("umu/umu-run", &b"#!/usr/bin/env python3\n"[..], 0o755),
+                ("umu/README.md", &b"umu\n"[..], 0o644),
+            ] {
+                let mut h = tar::Header::new_gnu();
+                h.set_size(body.len() as u64);
+                h.set_mode(mode);
+                h.set_cksum();
+                t.append_data(&mut h, path, body).unwrap();
+            }
+            t.finish().unwrap();
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("umu.tar.part");
+        std::fs::write(&archive, &tar_buf).unwrap();
+        let dest = dir.path().join("out");
+        unpack(&archive, "umu-launcher-1.4.4-zipapp.tar", &dest).unwrap();
+        let run = dest.join("umu/umu-run");
+        assert_eq!(
+            std::fs::read(&run).unwrap(),
+            b"#!/usr/bin/env python3\n".to_vec()
+        );
+        assert_eq!(std::fs::read(dest.join("umu/README.md")).unwrap(), b"umu\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&run).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o755);
+        }
+    }
+}
+
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) mod store_tests {
     use super::*;
@@ -1485,6 +1545,7 @@ pub(crate) mod store_tests {
         let real = catalog::find("winetricks").unwrap();
         let entry: &'static CatalogEntry = Box::leak(Box::new(CatalogEntry {
             id: real.id,
+            os: &[catalog::Os::Macos],
             kind: catalog::Kind::Tool {
                 payload: "winetricks",
             },
@@ -1699,6 +1760,7 @@ pub(crate) mod store_tests {
         let real = catalog::find("winecx").unwrap();
         let entry: &'static CatalogEntry = Box::leak(Box::new(CatalogEntry {
             id: "winecx",
+            os: &[catalog::Os::Macos],
             kind: catalog::Kind::Wine,
             status: Status::Available,
             discovery: Some(catalog::Discovery::Pinned(pin(
@@ -1860,6 +1922,7 @@ pub(crate) mod store_tests {
         let real = catalog::find("d3dmetal").unwrap();
         let entry: &'static CatalogEntry = Box::leak(Box::new(CatalogEntry {
             id: "d3dmetal",
+            os: &[catalog::Os::Macos],
             kind: catalog::Kind::Renderer {
                 payload: "d3d12.so",
                 overlay: true,

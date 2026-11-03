@@ -570,12 +570,12 @@ pub fn db_len() -> usize {
 
 // — L4: the user's override file —
 
-/// `<state_dir>/compat/` (design 16 §0; `GOGO_HOME` flattens).
+/// `<data_root>/compat/` (design 16 §0; `GOGO_HOME` flattens).
 pub fn user_dir() -> PathBuf {
-    crate::state::state_dir().join("compat")
+    crate::state::data_root().join("compat")
 }
 
-/// `<state_dir>/compat/<gogid>.toml`.
+/// `<data_root>/compat/<gogid>.toml`.
 pub fn user_path(gogid: &str) -> PathBuf {
     user_dir().join(format!("{gogid}.toml"))
 }

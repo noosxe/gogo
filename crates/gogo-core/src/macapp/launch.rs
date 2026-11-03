@@ -434,9 +434,9 @@ pub fn stamp(bundle_toml: &[u8], l4: Option<&[u8]>) -> String {
 
 // — the state dir —
 
-/// `<state_dir>/games/`.
+/// `<data_root>/games/`.
 pub fn games_dir() -> PathBuf {
-    crate::state::state_dir().join("games")
+    crate::state::data_root().join("games")
 }
 
 /// One game's state (design 16 §0, decision 6).
