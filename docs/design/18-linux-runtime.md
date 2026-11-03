@@ -419,6 +419,22 @@ facts); `[platforms.macos]` / `[platforms.linux]` = per OS. OS names follow Rust
   OS-specific keys as `[platforms.macos]` on macOS, with a one-line note, and ignores
   them on Linux with a warning. gogo moves the keys it owns into `[platforms.macos]`
   the next time it edits the file; it never rewrites the user's own keys.
+- *#166, as implemented* (`macapp/compat.rs`), where the above leaves a choice:
+  - "The keys" means per key, not per file: in L4 the eight pre-#166 OS keys
+    (`renderer`, `runtime`, `env`, `status`, `notes`, `tested`, `lane`, `lanes`) at the
+    top level are always legacy, even when the file has `[platforms.*]` tables, so a
+    user's top-level `env` keeps working after gogo moved its own keys. A
+    `[platforms.macos]` value wins over a legacy one. `protonfixes` was never a top-level
+    key, so it only warns there.
+  - In L3 every `[platforms.<os>]`-only key at the top level warns and is ignored (not
+    just `renderer` / `runtime` / `env` / `protonfixes`): the 11 files are migrated, and
+    a top-level `status` would otherwise claim a Mac result for Linux.
+  - `protonfixes` under `[platforms.macos]` warns ("Linux only") and is ignored.
+    Unknown OS tables (`[platforms.windows]`) warn like an unknown key.
+  - gogo's write moves the legacy `renderer` / `runtime` under `[platforms.macos]` on
+    Linux too (they are Mac values), and drops one that `[platforms.macos]` already sets
+    (it never applied). It moves them only when the write changes a value ("no change,
+    no write" stays). Emptied `[platforms.<os>]` tables are removed.
 
 ```toml
 # compat/1435582019.toml — Rebel Galaxy, after migration
