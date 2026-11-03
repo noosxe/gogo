@@ -3201,6 +3201,7 @@ fn d3d11_game_runs_from_a_derived_dxmt_runtime() {
         upstream_url: "http://x".into(),
         entry_rel: entry_rel.into(),
         bytes: 1,
+        path: None,
     };
     macapp::store::save_manifest(&[m("winecx", "24.0.7_7", "engine/bin/wine")]).unwrap();
     // … and DXMT in the renderer store, as downloaded.
@@ -3743,6 +3744,7 @@ fn retarget_moves_a_game_to_another_runtime_without_touching_the_bundle() {
         upstream_url: "http://x".into(),
         entry_rel: "bin/wine".into(),
         bytes: 1,
+        path: None,
     };
     fake_runtime(&home.join("runtimes/wine-staging/11.18"), &log_a);
     fake_runtime(&home.join("runtimes/wine-devel/11.19"), &log_b);
@@ -3929,6 +3931,7 @@ fn build_flags_replace_existing_l4_values() {
         upstream_url: "http://x".into(),
         entry_rel: "bin/wine".into(),
         bytes: 1,
+        path: None,
     };
     fake_runtime(
         &home.join("runtimes/wine-staging/11.18"),
@@ -4135,6 +4138,7 @@ fn doctor_game(tmp: &std::path::Path, home: &std::path::Path) -> std::path::Path
         upstream_url: "http://x".into(),
         entry_rel: entry_rel.into(),
         bytes: 1,
+        path: None,
     };
     macapp::store::save_manifest(&[m("winecx", "24.0.7_7", "engine/bin/wine")]).unwrap();
     let dxmt = home.join("renderers/dxmt/v0.80/x86_64/v0.80");
@@ -4211,6 +4215,7 @@ fn doctor_setup_and_retarget_work_on_a_store_from_before_arch_keys() {
         upstream_url: "http://x".into(),
         entry_rel: "ddraw.dll".into(),
         bytes: 1,
+        path: None,
     });
     macapp::store::save_manifest(&manifest).unwrap();
 

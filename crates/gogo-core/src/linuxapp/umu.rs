@@ -73,7 +73,7 @@ impl Host<'_> {
         self.root.join("etc/NIXOS").exists()
     }
 
-    fn var(&self, key: &str) -> Option<OsString> {
+    pub(crate) fn var(&self, key: &str) -> Option<OsString> {
         (self.env)(key).filter(|v| !v.is_empty())
     }
 
@@ -251,9 +251,7 @@ pub fn resolve_system(host: &Host) -> Result<PathBuf, MacAppError> {
 /// The stored answer, if any. An unreadable config or another value counts
 /// as no answer.
 pub fn stored_at(path: &Path) -> Option<UmuMode> {
-    let raw = std::fs::read_to_string(path).ok()?;
-    let table: toml::Table = raw.parse().ok()?;
-    match table.get("linux")?.get("umu")?.as_str()? {
+    match super::stored_key(path, "umu")?.as_str() {
         "zipapp" => Some(UmuMode::Zipapp),
         "system" => Some(UmuMode::System),
         _ => None,
@@ -262,24 +260,7 @@ pub fn stored_at(path: &Path) -> Option<UmuMode> {
 
 /// Write the answer into the config, keeping everything else in the file.
 pub fn store_at(path: &Path, mode: UmuMode) -> Result<(), MacAppError> {
-    let raw = match std::fs::read_to_string(path) {
-        Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(e.into()),
-    };
-    let mut doc: toml_edit::DocumentMut = raw.parse().map_err(|e| MacAppError::Compat {
-        path: path.to_path_buf(),
-        reason: format!("{e}"),
-    })?;
-    if !doc.contains_table("linux") {
-        doc["linux"] = toml_edit::table();
-    }
-    doc["linux"]["umu"] = toml_edit::value(mode.as_str());
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(path, doc.to_string())?;
-    Ok(())
+    super::store_key(path, "umu", mode.as_str())
 }
 
 fn pin(entry: &CatalogEntry) -> Option<&catalog::PinnedAsset> {
