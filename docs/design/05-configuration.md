@@ -53,6 +53,14 @@ catalog_ttl_hours = 24        # catalog cache freshness (06 §3)
 #                             # Toolkit licence (#71, design 16 §3). Unset: `gogo mac-app`
 #                             # asks once on a terminal and writes the answer here;
 #                             # headless builds fall back without it.
+
+[linux]
+# umu = "zipapp" | "system"   # how gogo runs umu-launcher (design 18 §2.1). Unset: the
+#                             # first `gogo linux-app` build asks (zipapp download) and
+#                             # writes the answer here; headless builds fail naming the key.
+# proton_dir = "store" | "steam"   # where new GE-Proton builds go: gogo's store, or
+#                             # Steam's compatibilitytools.d (asked once when it exists, §2.2)
+# default_runtime = "ge-proton" | "path:<dir>"   # an unmanaged Proton build as the default (§1)
 ```
 
 ### Rate value grammar (`--limit`, `download.limit`)

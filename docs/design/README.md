@@ -65,6 +65,7 @@ in `docs/13` grounds design 10.
 | [11-recipes](11-recipes.md) | per-game fixes for `mac-app` by consuming Lutris installer scripts (discovery, declarative-subset interpreter) |
 | [12-runtime-catalog-and-interactive-flow](12-runtime-catalog-and-interactive-flow.md) | runtime catalog + store, recipe-first interactive selection, winetricks provisioning + Rust shims — implemented (input: docs/15) |
 | [16-macapp-v2](16-macapp-v2.md) | mac-app v2 contract: layers L0–L4, immutable launcher bundle, store-referenced runtime, per-game state dir (input: docs/19, #94) |
+| [18-linux-runtime](18-linux-runtime.md) | Linux lane (`gogo linux-app`): GE-Proton through umu, DXVK/VKD3D-Proton/D7VK/cnc-ddraw, per-game fixes from protonfixes, `[platforms.<os>]` compat tables, `.desktop` launcher (input: docs/21, docs/22) |
 ## Key decisions (traceability)
 
 | Decision | Rationale / source |
@@ -82,6 +83,7 @@ in `docs/13` grounds design 10.
 | Linux + macOS only (no Windows) | directories follow XDG base dirs (Linux) and `~/Library` (macOS) — 06 §1 |
 | `.part` + sidecar JSON, atomic rename on completion | resume is data-only (offsets/md5), CDN URLs are never persisted |
 | macOS bundles: gogo assembles the `.app` itself, headlessly | No headless API in Porting Kit/Sikarugir; CrossOver proprietary; GPTK not redistributable; Wine is LGPL + scriptable (docs/13) |
+| Linux games: GE-Proton through umu-launcher, not plain Wine | Proton bundles DXVK/VKD3D-Proton/D7VK and protonfixes; umu runs it in the Steam Linux Runtime, so no host-library wrangling (docs/21, design 18) |
 
 ## Status
 

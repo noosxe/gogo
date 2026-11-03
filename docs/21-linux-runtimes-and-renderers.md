@@ -579,8 +579,9 @@ VKD3D-Proton, plain Wine needs them installed into the prefix, umu-protonfixes i
      `dxvk`/`PROTON_*`), so the loader warns about them at the top level, the way it
      warns about unknown keys.
    - OS names follow Rust's `target_os` (`macos`, `linux`).
-   - **Migration of today's 13 L3 files:** they use only `title`, `verbs`, `status`,
-     `notes`, `tested`, `source`, `lane` and `[lanes.installer]`. `title`, `verbs` and
+   - **Migration of today's L3 files** (11, not 13; design 18 §5): they use only
+     `title`, `verbs`, `status`, `notes`, `tested`, `source`, `lane` and
+     `[lanes.installer]`. `title`, `verbs` and
      `source` stay at the top. `status`, `notes`, `tested`, `lane` and `lanes` move
      under `[platforms.macos]` (`[lanes.installer]` becomes
      `[platforms.macos.lanes.installer]`). L4 files follow the same schema.
@@ -716,7 +717,8 @@ worth knowing.
 
 ## 10. Proposed outline for the design doc (`docs/design/18-linux-runtime.md`)
 
-Numbered after design 17; the name is a suggestion.
+Numbered after design 17. Written as [design 18](design/18-linux-runtime.md) (2026-11-03),
+which settles the details this section leaves open.
 
 0. Summary and decisions table
 1. Decision 1: runtime (GE-Proton through umu; no second runtime in the first round,
