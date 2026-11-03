@@ -415,6 +415,21 @@ VKD3D-Proton, plain Wine needs them installed into the prefix, umu-protonfixes i
 
    Still to settle in the design: how gogo marks the builds it installed in a shared
    directory, and the check before launch (R27).
+
+   **Unmanaged Proton builds (user decision, 2026-11-03).** gogo can also use a Proton
+   build it didn't install: one another tool put in `compatibilitytools.d`, Valve's
+   Proton under `steamapps/common/`, or one the user installed from somewhere else.
+   umu accepts any directory with a `toolmanifest.vdf` (§1.2).
+   - The user decides whether to use such a build, per game or as the default.
+   - `gogo runtimes` lists them next to gogo's own, each with an **unmanaged** note:
+     not pinned, not installed by gogo, never pruned.
+   - Why the note matters: the build may change or vanish (R27); it may not be GE-Proton,
+     so protonfixes, D7VK or the bundled umu-database copy may be missing; its
+     `require_tool_appid` may name a runtime the pinned umu doesn't know (R2); and L3
+     `tested` entries don't match an unknown build (R28).
+   - **Later (not in the first round):** inspect each build to find out what it
+     supports (Proton base and Wine version, bundled DXVK/VKD3D-Proton/D7VK, protonfixes,
+     required runtime) and explain why it may not work for a given game.
 3. **Who owns the Steam Linux Runtime download?** umu fetches it into
    `~/.local/share/umu`; gogo can only pin it by letting umu do it.
 4. **protonfixes on or off by default**, and how L4 wins over it (§4.2 items 2–3).
@@ -482,6 +497,7 @@ worth knowing.
 | R25 | GE-Proton's repo has no licence GitHub can detect; the tarball carries Valve's BSD-3 plus each component's licence. Fine for downloading; check it before gogo mirrors or redistributes anything | low | §1.1 |
 | R26 | A shared `compatibilitytools.d` grows without bound: `prune` doesn't delete there (§8 item 2), so old GE-Proton builds (1.5 GB each) pile up unless the user removes them. Builds other tools put there aren't sha-pinned either, so gogo can't vouch for them | medium | §8 item 2 |
 | R27 | Other tools can delete or replace a build gogo pinned (ProtonUp-Qt cleanups, a user tidying up). A launch then finds its runtime gone or different; gogo has to check before launching. Steam also lists every build there as a compatibility tool | low | §8 item 2 |
+| R28 | An unmanaged Proton build silently lacks what gogo expects (protonfixes, D7VK, a known runtime), so `GAMEID`/`STORE=gog` fixes or a `d7vk` renderer do nothing, and L3 `status` can't vouch for it. The **unmanaged** note covers it until gogo can inspect builds | medium | §8 item 2 |
 
 ## 10. Proposed outline for the design doc (`docs/design/18-linux-runtime.md`)
 
@@ -491,7 +507,7 @@ Numbered after design 17; the name is a suggestion.
 1. Decision 1: runtime default (GE-Proton through umu) and the second runtime
 2. Decision 2: umu as a required dependency (zipapp download after confirmation;
    Python from the flake or the user, §8 item 1); where GE-Proton lives (store by
-   default, shared `compatibilitytools.d` on request, §8 item 2);
+   default, shared `compatibilitytools.d` on request, unmanaged builds, §8 item 2);
    the Steam Linux Runtime
 3. Decision 3: renderer mapping (L1 scan → Proton switches; plain-Wine DLL install;
    cnc-ddraw vs D7VK)
