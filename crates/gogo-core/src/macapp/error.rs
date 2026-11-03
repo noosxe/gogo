@@ -89,6 +89,10 @@ pub enum MacAppError {
     #[error("umu: {0}")]
     Umu(String),
 
+    /// A Proton build that can't be placed or used (design 18 §1, §2.2).
+    #[error("proton: {0}")]
+    Proton(String),
+
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }

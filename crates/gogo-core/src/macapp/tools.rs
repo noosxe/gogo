@@ -242,6 +242,7 @@ mod tools_tests {
             upstream_url: "test".into(),
             entry_rel: "winetricks".into(),
             bytes: 1,
+            path: None,
         };
         let p = store::tree_root(&m).join(&m.entry_rel);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();

@@ -78,11 +78,27 @@ pub struct ManifestEntry {
     /// app-wrapper layout) or the tool script (winetricks).
     pub entry_rel: String,
     pub bytes: u64,
+    /// The tree root when it's outside the store: a Proton build in a
+    /// shared `compatibilitytools.d` (design 18 §2.2, O1). Absolute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
 }
 
-/// Where an entry installs: `<runtimes>/<id>/<version>/`, or
-/// `<renderers>/<id>/<version>/<arch>/` for a renderer.
+/// Is `id` a Proton build (design 18 §1)?
+pub fn is_proton(id: &str) -> bool {
+    catalog::find(id).is_some_and(|e| matches!(e.kind, catalog::Kind::Proton { .. }))
+}
+
+/// Where an entry installs: `<runtimes>/<id>/<version>/`,
+/// `<renderers>/<id>/<version>/<arch>/` for a renderer, or
+/// `<runtimes>/<id>/<version>/<arch>/` for a Proton build (design 18 §2.2).
 fn store_root(m: &ManifestEntry) -> PathBuf {
+    if let Some(arch) = catalog::find(&m.id)
+        .filter(|e| matches!(e.kind, catalog::Kind::Proton { .. }))
+        .and_then(|e| e.arch)
+    {
+        return runtimes_dir().join(&m.id).join(&m.version).join(arch.dir());
+    }
     if is_renderer(&m.id) {
         renderers_dir()
             .join(&m.id)
@@ -98,6 +114,9 @@ fn store_root(m: &ManifestEntry) -> PathBuf {
 /// `renderers/<id>/<ver>/`, or `runtimes/<id>/<ver>/` from before the
 /// renderer store (#70; cnc-ddraw). Nothing is moved or re-downloaded.
 pub fn tree_root(m: &ManifestEntry) -> PathBuf {
+    if let Some(p) = &m.path {
+        return p.clone();
+    }
     let root = store_root(m);
     if !is_renderer(&m.id)
         || renderer_arch(&m.id) != catalog::Arch::X86_64Rosetta
@@ -182,11 +201,28 @@ pub fn installed(id: &str, version: Option<&str>) -> Option<(ManifestEntry, Path
         .collect();
     hits.sort_by(|a, b| b.fetched_at.cmp(&a.fetched_at));
     hits.into_iter()
-        .find(|m| tree_root(m).join(&m.entry_rel).is_file())
+        .find(|m| {
+            let payload = tree_root(m).join(&m.entry_rel);
+            // A shared build counts while it's still gogo's (O1): another
+            // tool may have replaced it under the same name.
+            payload.is_file()
+                && (m.path.is_none()
+                    || payload
+                        .parent()
+                        .is_some_and(crate::linuxapp::proton::is_managed))
+        })
         .map(|m| {
             let root = tree_root(&m);
             (m, root)
         })
+}
+
+/// The proton dir of a cached Proton build: where `proton` is.
+pub fn proton_dir(m: &ManifestEntry) -> PathBuf {
+    let payload = tree_root(m).join(&m.entry_rel);
+    payload
+        .parent()
+        .map_or_else(|| tree_root(m), Path::to_path_buf)
 }
 
 /// Install (download → verify → extract → probe → cache; design 12 §4). An
@@ -199,6 +235,37 @@ pub async fn install(
     consent: bool,
     emit: &mut dyn FnMut(&ProgressEvent),
 ) -> Result<ManifestEntry, MacAppError> {
+    install_to(entry, version, http, api_base, consent, None, emit).await
+}
+
+/// Removes a temp dir on drop unless disarmed: a failed install leaves
+/// nothing half-extracted in a shared tools dir.
+struct TempDir(Option<PathBuf>);
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        if let Some(d) = self.0.take() {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+}
+
+/// [`install`], with `shared`: for a Proton build, the `compatibilitytools.d`
+/// to install into instead of the store (design 18 §2.2, O1); ignored for
+/// any other entry. The build is extracted into a hidden temp dir there,
+/// checked, marked ([`crate::linuxapp::proton::MARKER`]) and renamed to its
+/// version (`GE-ProtonX-Y`). A name another tool already uses is left alone:
+/// the build goes into the store instead, and an event says so.
+pub async fn install_to(
+    entry: &CatalogEntry,
+    version: Option<&str>,
+    http: &reqwest::Client,
+    api_base: &str,
+    consent: bool,
+    shared: Option<&Path>,
+    emit: &mut dyn FnMut(&ProgressEvent),
+) -> Result<ManifestEntry, MacAppError> {
+    use crate::linuxapp::proton;
     match &entry.status {
         Status::Available | Status::Tool => {}
         Status::Gone { since, story } => {
@@ -242,6 +309,54 @@ pub async fn install(
         return Ok(m);
     }
 
+    let proton_kind = match entry.kind {
+        catalog::Kind::Proton { appid, sha512 } => Some((appid, sha512)),
+        _ => None,
+    };
+    let mut shared = shared
+        .filter(|_| proton_kind.is_some())
+        .map(Path::to_path_buf);
+    if let Some(tools) = shared.clone() {
+        let named = tools.join(&rel.tag);
+        if named.symlink_metadata().is_ok() {
+            if !proton::is_managed(&named) {
+                emit(&ProgressEvent::Warn {
+                    message: format!(
+                        "{} exists and isn't gogo's (no {}): leaving it alone and \
+                         installing {} {} into gogo's store instead",
+                        named.display(),
+                        proton::MARKER,
+                        entry.id,
+                        rel.tag
+                    ),
+                });
+                shared = None;
+            } else if let Ok(marker) = proton::check_managed(&named)
+                && rel
+                    .sha256
+                    .as_deref()
+                    .is_some_and(|s| s.eq_ignore_ascii_case(&marker.archive_sha256))
+            {
+                // gogo's own, intact, but not in the manifest: adopt it.
+                let m = ManifestEntry {
+                    id: entry.id.into(),
+                    version: rel.tag.clone(),
+                    sha256: marker.archive_sha256,
+                    fetched_at: Utc::now().to_rfc3339(),
+                    upstream_url: rel.asset_url.clone(),
+                    entry_rel: "proton".into(),
+                    bytes: dir_size(&named)?,
+                    path: Some(named),
+                };
+                record(&m)?;
+                return Ok(m);
+            } else {
+                // gogo's own, changed or broken: reinstalled in place (§2.2).
+                std::fs::remove_dir_all(&named)?;
+            }
+        }
+    }
+
     emit(&ProgressEvent::RuntimeDownloadStarted {
         id: entry.id.into(),
         version: rel.tag.clone(),
@@ -255,7 +370,26 @@ pub async fn install(
         rel.tag,
         archive_ext(&rel.asset_name)
     ));
-    let actual = download_verified(http, &rel, &part, entry.id).await?;
+    // A GE-Proton is 540 MiB: past the probe client's total timeout.
+    let long = match proton_kind {
+        Some(_) => Some(catalog::download_client()?),
+        None => None,
+    };
+    let actual = download_verified(long.as_ref().unwrap_or(http), &rel, &part, entry.id).await?;
+    if let Some((_, sha512)) = proton_kind {
+        // The release's `.sha512sum`, beside GitHub's sha256 (design 18 §1).
+        let got = sha512_file(&part)?;
+        if !got.eq_ignore_ascii_case(sha512) {
+            let _ = std::fs::remove_file(&part);
+            return Err(MacAppError::RuntimeDownloadFailed {
+                url: rel.asset_url.clone(),
+                reason: format!(
+                    "sha512 {got} differs from the release's .sha512sum {sha512}; the \
+                     archive was discarded"
+                ),
+            });
+        }
+    }
     // The engine's dylib closure (#62), pinned like the engine itself.
     let frameworks_part = match &entry.frameworks {
         Some(fw) => {
@@ -279,9 +413,14 @@ pub async fn install(
     // probe the payload — blocking work. With a Frameworks set the layout is
     // design 16's `{engine,Frameworks}`: the engine tree is moved to
     // `engine/`, the dylibs to `Frameworks/`.
-    let extract_dir = tmp_dir().join(format!("{}-{}", entry.id, rel.tag));
+    let extract_dir = match &shared {
+        // Hidden, and a level deeper than Steam looks: never seen as a build.
+        Some(tools) => tools.join(format!(".gogo-tmp-{}-{}", rel.tag, std::process::id())),
+        None => tmp_dir().join(format!("{}-{}", entry.id, rel.tag)),
+    };
     let _ = std::fs::remove_dir_all(&extract_dir);
     std::fs::create_dir_all(&extract_dir)?;
+    let _cleanup = TempDir(proton_kind.map(|_| extract_dir.clone()));
     let archive = part.clone();
     let asset_name = rel.asset_name.clone();
     let extract_dir2 = extract_dir.clone();
@@ -372,6 +511,61 @@ pub async fn install(
                 .to_string_lossy()
                 .into_owned()
         }
+        catalog::Kind::Proton { appid, .. } => {
+            // The build's root is where `toolmanifest.vdf` is (the
+            // archive's top dir); `proton` must be beside it.
+            let manifest =
+                locate_named_file(&extract_dir, proton::TOOLMANIFEST).ok_or_else(|| {
+                    MacAppError::RuntimeInvalid {
+                        path: extract_dir.clone(),
+                        reason: format!("archive contains no '{}'", proton::TOOLMANIFEST),
+                    }
+                })?;
+            let dir = manifest
+                .parent()
+                .expect("a file has a parent")
+                .to_path_buf();
+            if !dir.join("proton").is_file() {
+                return Err(MacAppError::RuntimeInvalid {
+                    path: dir,
+                    reason: format!("no 'proton' beside {}", proton::TOOLMANIFEST),
+                });
+            }
+            // R2: a container the pinned umu can't fetch fails the install.
+            let needs = proton::require_tool_appid(&dir)
+                .map_err(|reason| MacAppError::RuntimeInvalid {
+                    path: dir.clone(),
+                    reason,
+                })?
+                .ok_or_else(|| MacAppError::RuntimeInvalid {
+                    path: dir.clone(),
+                    reason: format!("{} names no require_tool_appid", proton::TOOLMANIFEST),
+                })?;
+            if let Err(why) = proton::check_appid(&needs) {
+                return Err(MacAppError::Umu(format!(
+                    "{} {}: {why}. Bump umu in gogo's catalog (with this \
+                     GE-Proton, in one commit) or pin an older {}",
+                    entry.id, rel.tag, entry.id
+                )));
+            }
+            if needs != appid {
+                return Err(MacAppError::RuntimeInvalid {
+                    path: dir,
+                    reason: format!(
+                        "require_tool_appid is {needs}; the catalog records {appid} for \
+                         {} {}",
+                        entry.id, rel.tag
+                    ),
+                });
+            }
+            let marker = proton::marker_for(&dir, &format!("{}/{}", entry.id, rel.tag), &actual)?;
+            proton::write_marker(&dir, &marker)?;
+            dir.join("proton")
+                .strip_prefix(&extract_dir)
+                .expect("payload inside the extract dir")
+                .to_string_lossy()
+                .into_owned()
+        }
     };
 
     if let catalog::Kind::Renderer { notice, .. } | catalog::Kind::Tool { notice, .. } = entry.kind
@@ -397,7 +591,7 @@ pub async fn install(
     }
 
     // Commit: rename into place, drop the archive, update the manifest.
-    let m = ManifestEntry {
+    let mut m = ManifestEntry {
         id: entry.id.into(),
         version: rel.tag.clone(),
         sha256: actual,
@@ -405,11 +599,28 @@ pub async fn install(
         upstream_url: rel.asset_url.clone(),
         entry_rel,
         bytes,
+        path: None,
     };
-    let dest = store_root(&m);
-    std::fs::create_dir_all(dest.parent().expect("dest has a parent"))?;
-    let _ = std::fs::remove_dir_all(&dest);
-    std::fs::rename(&extract_dir, &dest)?;
+    if let Some(tools) = &shared {
+        // The build itself takes the name; the temp dir around it goes.
+        let named = tools.join(&rel.tag);
+        let build = extract_dir.join(&m.entry_rel);
+        let build = build.parent().expect("proton has a parent");
+        if named.symlink_metadata().is_ok() {
+            return Err(MacAppError::Proton(format!(
+                "{} appeared while gogo was installing; nothing was changed there",
+                named.display()
+            )));
+        }
+        std::fs::rename(build, &named)?;
+        m.entry_rel = "proton".into();
+        m.path = Some(named);
+    } else {
+        let dest = store_root(&m);
+        std::fs::create_dir_all(dest.parent().expect("dest has a parent"))?;
+        let _ = std::fs::remove_dir_all(&dest);
+        std::fs::rename(&extract_dir, &dest)?;
+    }
     let _ = std::fs::remove_file(&part);
     if let Some(p) = &frameworks_part {
         let _ = std::fs::remove_file(p);
@@ -572,6 +783,7 @@ pub fn derive(
         ),
         entry_rel: base.entry_rel.clone(),
         bytes,
+        path: None,
     };
     record(&m)?;
     Ok(m)
@@ -927,6 +1139,18 @@ pub struct PruneOutcome {
     pub removed: Vec<PathBuf>,
     /// Targets kept, with the references that keep them.
     pub kept: Vec<(String, Vec<Reference>)>,
+    /// gogo's builds in a shared tools dir that a target named: never
+    /// deleted (design 18 §2.2, R26), listed for the user to delete.
+    pub shared: Vec<SharedBuild>,
+}
+
+/// One of gogo's builds in a shared tools dir, as [`prune`] reports it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SharedBuild {
+    /// `<id>/<ver>`.
+    pub target: String,
+    pub path: PathBuf,
+    pub bytes: u64,
 }
 
 /// Remove `targets` from the store (runtimes, derived runtimes and renderers
@@ -967,9 +1191,23 @@ pub fn prune(targets: &[String]) -> Result<PruneOutcome, MacAppError> {
         (renderer_manifest_path(), renderers_dir()),
     ] {
         let all = load_manifest_at(&path);
+        // A build in a shared tools dir stays, on disk and in the manifest
+        // (design 18 §2.2): Steam, Lutris or Heroic may use it by name.
+        for m in all.iter().filter(|m| m.path.is_some()) {
+            if go.iter().any(|(id, ver)| hit(&m.id, &m.version, id, *ver)) {
+                let dir = m.path.clone().expect("filtered");
+                out.shared.push(SharedBuild {
+                    target: format!("{}/{}", m.id, m.version),
+                    bytes: dir_size(&dir).unwrap_or(m.bytes),
+                    path: dir,
+                });
+            }
+        }
         let keep: Vec<ManifestEntry> = all
             .iter()
-            .filter(|m| !go.iter().any(|(id, ver)| hit(&m.id, &m.version, id, *ver)))
+            .filter(|m| {
+                m.path.is_some() || !go.iter().any(|(id, ver)| hit(&m.id, &m.version, id, *ver))
+            })
             .cloned()
             .collect();
         for (id, ver) in &go {
@@ -1040,7 +1278,8 @@ pub fn sweep() -> Sweep {
                 2 => Some("the version before it, to roll back to".to_string()),
                 _ => None,
             }
-        } else if seen.1 == 1 && m.id == catalog::DEFAULT_RUNTIME {
+        } else if seen.1 == 1 && (m.id == catalog::DEFAULT_RUNTIME || m.id == catalog::GE_PROTON) {
+            // GE-Proton is the Linux default (design 18 §1).
             Some("newest of the default runtime".to_string())
         } else if seen.1 == 1 && tool {
             Some("newest of a tool gogo uses".to_string())
@@ -1179,6 +1418,25 @@ async fn download_with_retry(
         url: url.into(),
         reason: format!("unreachable after 3 attempts: {last}"),
     })
+}
+
+fn sha512_file(path: &Path) -> Result<String, MacAppError> {
+    use sha2::Sha512;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha512::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
 fn sha256_file(path: &Path) -> Result<String, MacAppError> {
@@ -2032,6 +2290,7 @@ pub(crate) mod store_tests {
             upstream_url: "http://x".into(),
             entry_rel: entry_rel.into(),
             bytes: 1,
+            path: None,
         }
     }
 
@@ -2188,6 +2447,7 @@ pub(crate) mod store_tests {
             upstream_url: "http://x".into(),
             entry_rel: "bin/wine".into(),
             bytes: 1,
+            path: None,
         };
         save_manifest(std::slice::from_ref(&m)).unwrap();
         assert_eq!(load_manifest(), vec![m]);

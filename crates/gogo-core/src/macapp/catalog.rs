@@ -43,6 +43,17 @@ pub enum Kind {
         subdir: Option<&'static str>,
         notice: Option<&'static str>,
     },
+    /// A Proton build for the Linux lane (design 18 §1, §2.2), stored under
+    /// `runtimes/<id>/<ver>/<arch>/` as unpacked (the archive's top dir
+    /// kept, as for Wine), or in a shared `compatibilitytools.d`.
+    /// `appid`: its `toolmanifest.vdf` `require_tool_appid`, checked at
+    /// install and against the umu pin's list by a unit test (R2).
+    /// `sha512`: the release's `.sha512sum` asset, checked against the
+    /// download beside the sha256 pin (GitHub's asset digest).
+    Proton {
+        appid: &'static str,
+        sha512: &'static str,
+    },
 }
 
 /// Static claim about an entry; the live probe refines availability.
@@ -638,6 +649,40 @@ static ENTRIES: &[CatalogEntry] = &[
         frameworks: None,
     },
     CatalogEntry {
+        id: GE_PROTON,
+        os: &[Os::Linux],
+        kind: Kind::Proton {
+            // steamrt4 (docs/21 §1.2, R1 on GE-Proton11-11); re-read from
+            // the archive at install.
+            appid: "4183110",
+            // GE-Proton11-12-x86_64.sha512sum, read 2026-11-04.
+            sha512: "2e37447902529c9fc39138dc0b3f24aed3513b59a190b825e6b4a668e49e2033\
+                     bdf6b8a7998e8686e067bbb3f61f3a6633e2408f0cc96f6dad983bd18e2db31e",
+        },
+        status: Status::Available,
+        // The newest release on 2026-11-04 (published 2026-11-03),
+        // 566,859,228 B; the pin is GitHub's asset digest. The archive's top
+        // dir is `GE-Proton11-12-x86_64/`, its `version` file
+        // `1793687165 GE-Proton11-12`.
+        discovery: Some(Discovery::Pinned(PinnedAsset {
+            repo: "GloriousEggroll/proton-ge-custom",
+            tag: "GE-Proton11-12",
+            asset: "GE-Proton11-12-x86_64.tar.gz",
+            version: "GE-Proton11-12",
+            sha256: "0595159e417c3dbbfb7cc3ae0d3ed15a617cc607aa23ef756ea79029d7af5d70",
+        })),
+        license: "BSD-3-Clause (Proton by Valve) with LGPL-2.1 Wine and the licences of \
+                  its bundled components (GE-Proton by GloriousEggroll), run as a \
+                  separate program",
+        redistributable: true,
+        min_macos: None,
+        arch: Some(Arch::X86_64),
+        vendor_signed: false,
+        note: "GE-Proton, run through umu-launcher: Wine + DXVK, VKD3D-Proton, D7VK \
+               and protonfixes. About 1.5 GB unpacked",
+        frameworks: None,
+    },
+    CatalogEntry {
         id: UMU,
         os: &[Os::Linux],
         kind: Kind::Tool {
@@ -766,6 +811,9 @@ static ENTRIES: &[CatalogEntry] = &[
         frameworks: None,
     },
 ];
+
+/// The GE-Proton catalog id (design 18 §1): the Linux lane's runtime.
+pub const GE_PROTON: &str = "ge-proton";
 
 /// The umu-launcher catalog id (design 18 §2.1).
 pub const UMU: &str = "umu";
@@ -934,6 +982,20 @@ pub fn http_client() -> Result<reqwest::Client, MacAppError> {
     reqwest::Client::builder()
         .user_agent(UA)
         .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| MacAppError::CatalogUnreachable {
+            detail: format!("http client: {e}"),
+        })
+}
+
+/// A client for large archive downloads: no total timeout (a 540 MiB
+/// GE-Proton doesn't fit [`http_client`]'s 30 s), but a stall still fails:
+/// 30 s to connect, 60 s per read.
+pub fn download_client() -> Result<reqwest::Client, MacAppError> {
+    reqwest::Client::builder()
+        .user_agent(UA)
+        .connect_timeout(Duration::from_secs(30))
+        .read_timeout(Duration::from_secs(60))
         .build()
         .map_err(|e| MacAppError::CatalogUnreachable {
             detail: format!("http client: {e}"),
@@ -1247,14 +1309,24 @@ mod os_tests {
     }
 
     /// Every Mac entry stays a Mac entry; cnc-ddraw is the one shared,
-    /// umu the one Linux-only.
+    /// umu and GE-Proton the Linux-only ones.
     #[test]
     fn entries_name_their_os() {
         for e in entries() {
             assert!(!e.os.is_empty(), "{}", e.id);
             let linux = e.runs_on_os(Os::Linux);
-            assert_eq!(linux, ["cnc-ddraw", UMU].contains(&e.id), "{}", e.id);
-            assert_eq!(e.runs_on_os(Os::Macos), e.id != UMU, "{}", e.id);
+            assert_eq!(
+                linux,
+                ["cnc-ddraw", UMU, GE_PROTON].contains(&e.id),
+                "{}",
+                e.id
+            );
+            assert_eq!(
+                e.runs_on_os(Os::Macos),
+                ![UMU, GE_PROTON].contains(&e.id),
+                "{}",
+                e.id
+            );
         }
         let winecx = find("winecx26").unwrap();
         assert!(winecx.check_os(Os::Macos).is_ok());
@@ -1299,6 +1371,49 @@ mod os_tests {
         assert_eq!(pin.tag, pin.version);
         assert_eq!(pin.sha256.len(), 64);
         assert!(pin.sha256.starts_with("eb590691"));
+    }
+
+    /// Design 18 §1: GE-Proton, pinned, Linux x86_64, a Proton build with
+    /// both upstream digests.
+    #[test]
+    fn ge_proton_is_a_pinned_linux_proton_build() {
+        let ge = find(GE_PROTON).unwrap();
+        assert_eq!(ge.os, &[Os::Linux]);
+        assert!(ge.check_os(Os::Macos).is_err());
+        assert_eq!(ge.arch, Some(Arch::X86_64));
+        assert!(matches!(ge.status, Status::Available));
+        let Kind::Proton { appid, sha512 } = ge.kind else {
+            panic!("ge-proton is a Proton build");
+        };
+        assert!(!appid.is_empty() && appid.bytes().all(|b| b.is_ascii_digit()));
+        assert_eq!(sha512.len(), 128);
+        assert!(sha512.bytes().all(|b| b.is_ascii_hexdigit()));
+        let Some(Discovery::Pinned(pin)) = &ge.discovery else {
+            panic!("pinned");
+        };
+        assert_eq!(pin.repo, "GloriousEggroll/proton-ge-custom");
+        assert_eq!((pin.tag, pin.version), (pin.version, pin.version));
+        assert_eq!(pin.asset, format!("{}-x86_64.tar.gz", pin.version));
+        assert_eq!(pin.sha256.len(), 64);
+    }
+
+    /// R2: every Proton build in the catalog needs a container the umu pin
+    /// knows. A GE-Proton bump that needs a new one bumps umu with it.
+    #[test]
+    fn every_proton_build_needs_a_runtime_the_umu_pin_knows() {
+        let mut n = 0;
+        for e in entries() {
+            if let Kind::Proton { appid, .. } = e.kind {
+                n += 1;
+                assert!(
+                    umu_runtimes().contains(&appid),
+                    "{} needs Steam runtime {appid}, unknown to umu {:?}: bump umu",
+                    e.id,
+                    find(UMU).and_then(|u| u.discovery.as_ref()?.pinned_version())
+                );
+            }
+        }
+        assert!(n > 0);
     }
 }
 
@@ -1671,7 +1786,7 @@ mod catalog_tests {
     fn entries_and_statuses() {
         assert!(find("wine-staging").is_some());
         assert!(find("nope").is_none());
-        assert_eq!(entries().len(), 12);
+        assert_eq!(entries().len(), 13);
         // The default track is the pinned CX 26.3 engine with its Frameworks
         // set (docs/20 §3.4), listed first; CX24 stays as the rollback.
         let cx = find(DEFAULT_RUNTIME).unwrap();
@@ -1760,7 +1875,7 @@ mod catalog_tests {
         for e in entries() {
             match e.id {
                 "winetricks" => assert_eq!((e.arch, e.needs_rosetta()), (None, false)),
-                UMU => assert_eq!(e.arch, Some(Arch::X86_64), "{}", e.id),
+                UMU | GE_PROTON => assert_eq!(e.arch, Some(Arch::X86_64), "{}", e.id),
                 _ => assert_eq!(e.arch, Some(Arch::X86_64Rosetta), "{}", e.id),
             }
             assert_eq!(e.vendor_signed, e.id == "gptk", "{}", e.id);

@@ -116,6 +116,40 @@ pub struct LinuxConfig {
     /// asks on a terminal and stores the answer; headless builds fail
     /// naming the key.
     pub umu: Option<UmuMode>,
+    /// Where new GE-Proton builds go (design 18 §2.2). Unset: asked once on
+    /// a terminal when a Steam install exists; otherwise the store.
+    pub proton_dir: Option<ProtonDir>,
+    /// The Proton build games use unless `--runtime` says otherwise
+    /// (design 18 §1): `ge-proton[/<ver>]` or `path:<dir>`. Unset: the
+    /// catalog's GE-Proton.
+    pub default_runtime: Option<String>,
+}
+
+/// `[linux] proton_dir`: gogo's store, or a Steam's `compatibilitytools.d`
+/// (`steam`: the native Steam, else the only one there is; `steam-flatpak`:
+/// Flatpak's).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProtonDir {
+    Store,
+    Steam,
+    SteamFlatpak,
+}
+
+impl ProtonDir {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProtonDir::Store => "store",
+            ProtonDir::Steam => "steam",
+            ProtonDir::SteamFlatpak => "steam-flatpak",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<ProtonDir> {
+        [ProtonDir::Store, ProtonDir::Steam, ProtonDir::SteamFlatpak]
+            .into_iter()
+            .find(|d| d.as_str() == s)
+    }
 }
 
 /// `[linux] umu`: gogo's pinned zipapp, or the `umu-run` on `PATH`.
@@ -466,7 +500,7 @@ fn unknown_keys(table: &toml::Table) -> Vec<String> {
         ("download", &["dir", "workers", "parallel_files", "limit"]),
         ("state", &["catalog_ttl_hours"]),
         ("mac_app", &["d3dmetal"]),
-        ("linux", &["umu"]),
+        ("linux", &["umu", "proton_dir", "default_runtime"]),
     ];
     let mut out = Vec::new();
     for (section, value) in table {
@@ -609,6 +643,29 @@ mod tests {
             assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
         }
         std::fs::write(&path, "[linux]\numu = \"flatpak\"\n").unwrap();
+        assert!(Config::load_from(&path, no_env).is_err());
+    }
+
+    #[test]
+    fn linux_proton_keys_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for raw in ["store", "steam", "steam-flatpak"] {
+            std::fs::write(
+                &path,
+                format!("[linux]\nproton_dir = \"{raw}\"\ndefault_runtime = \"path:/opt/p\"\n"),
+            )
+            .unwrap();
+            let loaded = Config::load_from(&path, no_env).unwrap();
+            let d = loaded.config.linux.proton_dir.unwrap();
+            assert_eq!((d.as_str(), ProtonDir::parse(raw)), (raw, Some(d)));
+            assert_eq!(
+                loaded.config.linux.default_runtime.as_deref(),
+                Some("path:/opt/p")
+            );
+            assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        }
+        std::fs::write(&path, "[linux]\nproton_dir = \"lutris\"\n").unwrap();
         assert!(Config::load_from(&path, no_env).is_err());
     }
 
