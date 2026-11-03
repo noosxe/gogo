@@ -4,7 +4,7 @@
 //!
 //! - `"zipapp"`: gogo's pinned release zipapp (catalog `umu/<ver>`), run
 //!   through an explicit interpreter, never its shebang. The interpreter is
-//!   `GOGO_UMU_PYTHON` when set (the flake package sets it to its
+//!   `GOGO_UMU_PYTHON` when set (the flake's `gogo-linux-app` sets it to its
 //!   `steam.buildRuntimeEnv`, R1), else the first `python3` on `PATH` that
 //!   reports ≥ 3.10. On NixOS without `GOGO_UMU_PYTHON` the zipapp can't
 //!   start the Steam Linux Runtime, so it's refused with the two ways out.
@@ -31,12 +31,15 @@ use crate::macapp::store;
 /// The config key, as the user writes it.
 pub const KEY: &str = "[linux] umu";
 
-/// The interpreter the flake package records for the zipapp (R1): its
+/// The interpreter the flake's `gogo-linux-app` records for the zipapp (R1): its
 /// `steam.buildRuntimeEnv` with `runScript = "python3"`.
 pub const PYTHON_ENV: &str = "GOGO_UMU_PYTHON";
 
 /// umu's `requires-python` (pyproject.toml at 1.4.4: `>=3.10`).
 pub const MIN_PYTHON: (u32, u32) = (3, 10);
+
+/// The flake package that runs the zipapp in an FHS env on NixOS.
+pub const FLAKE_PACKAGE: &str = "github:noosxe/gogo#gogo-linux-app";
 
 /// The Steam Linux Runtime umu fetches on a game's first launch, for the
 /// plan (docs/21 §1.2 and §8 item 1: steamrt4, by HTTP HEAD and unpacked).
@@ -171,7 +174,7 @@ pub fn resolve_python(host: &Host) -> Result<PathBuf, MacAppError> {
         }
         return Err(MacAppError::Umu(format!(
             "{PYTHON_ENV} is {}, which is not an executable file: point it at a \
-             Python >= {}.{} (the flake package sets it), or unset it",
+             Python >= {}.{} (the flake's gogo-linux-app sets it), or unset it",
             p.display(),
             MIN_PYTHON.0,
             MIN_PYTHON.1
@@ -181,7 +184,7 @@ pub fn resolve_python(host: &Host) -> Result<PathBuf, MacAppError> {
         return Err(MacAppError::Umu(format!(
             "on NixOS umu's zipapp can't start the Steam Linux Runtime without an FHS \
              env, and this gogo doesn't provide one ({PYTHON_ENV} is unset). Either \
-             install gogo from its flake (`nix profile install github:noosxe/gogo`), \
+             install gogo's Linux game package (`nix profile install {FLAKE_PACKAGE}`), \
              which runs umu in steam.buildRuntimeEnv, or install nixpkgs' \
              umu-launcher and set {KEY} = \"system\""
         )));
@@ -569,7 +572,10 @@ mod tests {
         script(&f.dir("bin"), "python3", "Python 3.12.1");
         let why = umu_err(f.with(resolve_python));
         assert!(why.contains("NixOS"), "{why}");
-        assert!(why.contains("flake"), "{why}");
+        assert!(
+            why.contains("nix profile install github:noosxe/gogo#gogo-linux-app"),
+            "{why}"
+        );
         assert!(why.contains("[linux] umu = \"system\""), "{why}");
         // An empty GOGO_UMU_PYTHON is unset.
         let f = f.set(PYTHON_ENV, "");
