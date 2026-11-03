@@ -323,8 +323,8 @@ So yes: `PROTON_*` and DXVK vars map onto the existing `env` with no schema chan
   `DXVK_FILTER_DEVICE_NAME`/`VKD3D_FILTER_DEVICE_NAME` override it. 32-bit games under
   classic WoW64 also need the 32-bit ICDs (on NixOS: `hardware.graphics.enable32Bit`).
 - **NixOS**: umu from nixpkgs is already FHS-wrapped; a downloaded umu zipapp or a
-  Kron4ek build is not. The design has to decide whether gogo downloads umu itself or
-  requires it on `PATH`.
+  Kron4ek build is not. How gogo gets umu is settled in outline (§8 item 1): pinned in
+  the flake for Nix, downloaded after the user confirms elsewhere.
 - **Testing**: no Vulkan in the VM, so the user's machine is the host pass, as #150 says.
 
 ## 6. Corrections to #150
@@ -358,10 +358,19 @@ VKD3D-Proton, plain Wine needs them installed into the prefix, umu-protonfixes i
 
 ## 8. Open questions for the design doc
 
-1. **umu: dependency or download?** Require `umu-run` on `PATH` (nixpkgs, distro
-   packages), or fetch the zipapp into the store like winetricks (needs a host Python
-   and, on NixOS, an FHS wrapper)? Or run GE-Proton's `proton` directly with
-   `UMU_NO_RUNTIME`-style settings and give up the container?
+1. **How gogo gets umu: decided by the user (2026-11-03).** gogo pins one umu
+   version either way. What's still open is whether umu is **required** or
+   **optional**:
+   - *Required*: the Nix build pins umu in gogo's flake (nixpkgs `umu-launcher`,
+     already FHS-wrapped). Outside Nix, gogo downloads the pinned version only after the
+     user confirms.
+   - *Optional*: the Nix build gets a config option that installs the pinned version
+     automatically when it is turned on. Outside Nix, gogo still asks before it
+     downloads umu, when a launch first needs it.
+
+   Still to settle in the design: required or optional; what the non-Nix download is
+   (the zipapp needs a host Python; the `.deb`/`.rpm` assets are per distro); and
+   whether running GE-Proton's `proton` without umu stays a fallback.
 2. **Where do GE-Proton builds live?** gogo's store (pinned, `prune`-able, passed as a
    path in `PROTONPATH`) or `~/.local/share/Steam/compatibilitytools.d` (shared with
    Steam, Lutris, Heroic, ProtonUp-Qt)? 1.5 GB per version makes sharing attractive.
@@ -386,7 +395,8 @@ Numbered after design 17; the name is a suggestion.
 
 0. Summary and decisions table
 1. Decision 1: runtime default (GE-Proton through umu) and the second runtime
-2. Decision 2: how gogo gets umu and GE-Proton (dependency vs store; Steam
+2. Decision 2: how gogo gets umu (required or optional; flake pin vs confirmed
+   download, §8 item 1) and GE-Proton (store vs Steam
    `compatibilitytools.d` or not); the Steam Linux Runtime
 3. Decision 3: renderer mapping (L1 scan → Proton switches; plain-Wine DLL install;
    cnc-ddraw vs D7VK)
