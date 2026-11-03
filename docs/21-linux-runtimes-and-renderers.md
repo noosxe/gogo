@@ -515,7 +515,42 @@ VKD3D-Proton, plain Wine needs them installed into the prefix, umu-protonfixes i
 
    Still to settle in the design: whether the fallback follows `main` or a commit gogo
    pins, and how often the cache refreshes.
-6. **Platform scoping in L3/L4**: a `[platforms.linux]` table, or separate files per OS?
+6. **Platform scoping in L3/L4: one file per game, with per-OS tables (user decision,
+   2026-11-03).** No separate files per OS: everything about a game stays visible in
+   one file. Proposed shape, for the design to settle:
+   - **Top level = applies on every OS.** These are the Windows-side facts: `title`,
+     `exe`, `args`, `variant`, `replace_command`, `verbs`, `dll_overrides`, `registry`,
+     `source`.
+   - **`[platforms.macos]` / `[platforms.linux]` = per OS.** `renderer`, `runtime`,
+     `env`, `status`, `notes`, `tested`, `lane`/`lanes`, plus any top-level key to
+     override or extend it there. The platform table merges over the top level with
+     the existing rules (design 16 decision 5): `verbs` add, `-<verb>` removes, `-*`
+     clears.
+   - `renderer`, `runtime` and `env` only make sense per OS (`dxmt`/`WINEMSYNC` vs
+     `dxvk`/`PROTON_*`), so the loader warns about them at the top level, the way it
+     warns about unknown keys.
+   - OS names follow Rust's `target_os` (`macos`, `linux`).
+   - **Migration of today's 13 L3 files:** they use only `title`, `verbs`, `status`,
+     `notes`, `tested`, `source`, `lane` and `[lanes.installer]`. `title`, `verbs` and
+     `source` stay at the top. `status`, `notes`, `tested`, `lane` and `lanes` move
+     under `[platforms.macos]` (`[lanes.installer]` becomes
+     `[platforms.macos.lanes.installer]`). L4 files follow the same schema.
+
+   ```toml
+   # compat/1435582019.toml — Rebel Galaxy
+   title  = "Rebel Galaxy"
+   verbs  = ["d3dcompiler_43", "d3dx11_43", "d3dx9_43", "xinput"]
+   source = "gogo-host"
+
+   [platforms.macos]
+   status = "broken"
+   notes  = "unplayable: DXMT loads ~4 min per launch then runs at slideshow speed …"
+   tested = [{ runtime = "winecx/24.0.7_7+dxmt-v0.80", host = "m4pro/macos-27.0.1", date = 2026-10-23 }]
+
+   [platforms.linux]
+   renderer = "dxvk"
+   status   = "unknown"
+   ```
 7. **Second runtime**: Kron4ek staging-wow64 as the plain-Wine option, the distro's Wine,
    or nothing in the first round?
 8. **D7VK vs cnc-ddraw**: which is the L1 default for `ddraw.dll` importers, and can the
@@ -572,7 +607,7 @@ worth knowing.
 | # | Risk | Severity | Why (section) |
 |---|---|---|---|
 | R22 | No Vulkan in the VM: CI and agents can't check rendering; every renderer change waits for the user's host pass | medium | §5 |
-| R23 | Compat data written for the Mac (`renderer = "dxmt"`, `WINEMSYNC`, Mac `tested` entries) would apply on Linux until L3/L4 get a platform dimension | medium | §4.2 item 1 |
+| R23 | (addressed by §8 item 6 once migrated) Compat data written for the Mac (`renderer = "dxmt"`, `WINEMSYNC`, Mac `tested` entries) would apply on Linux until L3/L4 get a platform dimension | medium | §4.2 item 1 |
 | R24 | New archive formats (zstd, zip) mean new crates, which have to pass `cargo deny` | low | §3.2 |
 | R25 | GE-Proton's repo has no licence GitHub can detect; the tarball carries Valve's BSD-3 plus each component's licence. Fine for downloading; check it before gogo mirrors or redistributes anything | low | §1.1 |
 | R26 | A shared `compatibilitytools.d` grows without bound: `prune` doesn't delete there (§8 item 2), so old GE-Proton builds (1.5 GB each) pile up unless the user removes them. Builds other tools put there aren't sha-pinned either, so gogo can't vouch for them | medium | §8 item 2 |
@@ -594,7 +629,8 @@ Numbered after design 17; the name is a suggestion.
    cnc-ddraw vs D7VK)
 4. Decision 4: per-game fixes, detected at app creation (protonfix reading, GOG → umu
    lookup from the build's CSV with a GitHub fallback, L3 seeding, L4 precedence over protonfixes; §8 item 4)
-5. Decision 5: compat schema change for platforms (migration of today's 13 L3 files)
+5. Decision 5: compat schema change for platforms: `[platforms.<os>]` tables in one
+   file per game (§8 item 6), and migrating today's 13 L3 files
 6. Decision 6: store layout and GC on Linux (XDG paths, archive formats, prune, shared
    tools dir)
 7. Decision 7: launcher contract (`.desktop`, launcher script, `gogo-launch.toml`,
