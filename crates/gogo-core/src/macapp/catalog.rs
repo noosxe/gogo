@@ -137,9 +137,49 @@ pub struct FrameworksSet {
     pub notices: &'static [(&'static str, &'static str)],
 }
 
+/// An OS gogo runs on (design 18 §6). No Windows (AGENTS.md scope).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Os {
+    Macos,
+    Linux,
+}
+
+impl Os {
+    /// The OS this gogo was built for.
+    pub fn current() -> Os {
+        if cfg!(target_os = "linux") {
+            Os::Linux
+        } else {
+            Os::Macos
+        }
+    }
+
+    /// Stable name for `--json` output.
+    pub fn key(self) -> &'static str {
+        match self {
+            Os::Macos => "macos",
+            Os::Linux => "linux",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Os::Macos => "macOS",
+            Os::Linux => "Linux",
+        }
+    }
+}
+
+/// `os` of an entry for the Mac only.
+const MACOS: &[Os] = &[Os::Macos];
+
 /// One catalog entry (design 12 §3 schema, trimmed to v1 needs).
 pub struct CatalogEntry {
     pub id: &'static str,
+    /// The OSes it installs on (design 18 §6). Stated on every entry: an
+    /// implicit default would let a Linux entry that forgot it pass as a
+    /// Mac one.
+    pub os: &'static [Os],
     pub kind: Kind,
     pub status: Status,
     pub discovery: Option<Discovery>,
@@ -169,6 +209,34 @@ impl CatalogEntry {
     pub fn arch_label(&self) -> &'static str {
         self.arch.map_or("any", Arch::label)
     }
+
+    /// [`Self::arch_label`] as `os` sees it: a Mac x86_64 build (a Windows
+    /// DLL like cnc-ddraw's) is plain x86_64 on Linux, no Rosetta.
+    pub fn arch_label_on(&self, os: Os) -> &'static str {
+        match (self.arch, os) {
+            (Some(Arch::X86_64Rosetta), Os::Linux) => Arch::X86_64.label(),
+            _ => self.arch_label(),
+        }
+    }
+
+    /// Does it install on `os`?
+    pub fn runs_on_os(&self, os: Os) -> bool {
+        self.os.contains(&os)
+    }
+
+    /// Refuse an entry for another OS, saying which it is for.
+    pub fn check_os(&self, os: Os) -> Result<(), String> {
+        if self.runs_on_os(os) {
+            return Ok(());
+        }
+        let on: Vec<&str> = self.os.iter().map(|o| o.label()).collect();
+        Err(format!(
+            "{} is for {} only: it doesn't install on {}",
+            self.id,
+            on.join(" and "),
+            os.label()
+        ))
+    }
 }
 
 /// The architecture an entry's code runs as (#82, docs/19 §6.1, §7). Every
@@ -182,6 +250,10 @@ pub enum Arch {
     Arm64,
     /// ARM64EC Windows code: a renderer build for an `Arm64` runtime.
     Arm64ec,
+    /// A Linux x86_64 build (design 18 §6).
+    X86_64,
+    /// A Linux aarch64 build.
+    Aarch64,
 }
 
 impl Arch {
@@ -191,6 +263,8 @@ impl Arch {
             Arch::X86_64Rosetta => "x86_64",
             Arch::Arm64 => "arm64",
             Arch::Arm64ec => "arm64ec",
+            Arch::X86_64 => "x86_64",
+            Arch::Aarch64 => "aarch64",
         }
     }
 
@@ -199,6 +273,8 @@ impl Arch {
             Arch::X86_64Rosetta => "x86_64 (Rosetta 2 on Apple Silicon)",
             Arch::Arm64 => "arm64",
             Arch::Arm64ec => "arm64ec",
+            Arch::X86_64 => "x86_64",
+            Arch::Aarch64 => "aarch64",
         }
     }
 
@@ -208,10 +284,16 @@ impl Arch {
 
     /// Can a renderer built for `self` run in a runtime of `runtime`?
     /// x86_64 with x86_64; an arm64 runtime takes arm64 or ARM64EC builds.
+    /// A renderer is Windows code, so a Mac x86_64 build (cnc-ddraw, the
+    /// same entry on both OSes) renders for a Linux x86_64 runtime too.
     pub fn renders_for(self, runtime: Arch) -> bool {
         match runtime {
             Arch::X86_64Rosetta => self == Arch::X86_64Rosetta,
+            Arch::X86_64 => matches!(self, Arch::X86_64Rosetta | Arch::X86_64),
             Arch::Arm64 | Arch::Arm64ec => matches!(self, Arch::Arm64 | Arch::Arm64ec),
+            Arch::Aarch64 => {
+                matches!(self, Arch::Arm64 | Arch::Arm64ec | Arch::Aarch64)
+            }
         }
     }
 }
@@ -230,6 +312,12 @@ pub const NO_ROSETTA: &str = "Rosetta-only runtime on a Mac without Rosetta: ins
 
 /// Does a runtime of `arch` run on `host`?
 pub fn runs_on(arch: Arch, host: HostArch) -> Result<(), String> {
+    if matches!(arch, Arch::X86_64 | Arch::Aarch64) {
+        return Err(format!(
+            "{} Linux build: it doesn't run on a Mac",
+            arch.dir()
+        ));
+    }
     match (arch.needs_rosetta(), host) {
         (true, HostArch::AppleSilicon { rosetta: false }) => Err(NO_ROSETTA.into()),
         (false, HostArch::Intel) => Err(format!(
@@ -358,6 +446,7 @@ const CX_FRAMEWORKS_NOTICES: &[(&str, &str)] = &[
 static ENTRIES: &[CatalogEntry] = &[
     CatalogEntry {
         id: "winecx26",
+        os: MACOS,
         kind: Kind::Wine,
         status: Status::Available,
         // highball-engine publishes every build as its own release; the
@@ -392,6 +481,7 @@ static ENTRIES: &[CatalogEntry] = &[
     },
     CatalogEntry {
         id: "winecx",
+        os: MACOS,
         kind: Kind::Wine,
         status: Status::Available,
         discovery: Some(Discovery::Pinned(PinnedAsset {
@@ -423,6 +513,7 @@ static ENTRIES: &[CatalogEntry] = &[
     },
     CatalogEntry {
         id: "wine-staging",
+        os: MACOS,
         kind: Kind::Wine,
         status: Status::Available,
         discovery: Some(Discovery::GitHubReleases {
@@ -440,6 +531,7 @@ static ENTRIES: &[CatalogEntry] = &[
     },
     CatalogEntry {
         id: "wine-devel",
+        os: MACOS,
         kind: Kind::Wine,
         status: Status::Available,
         discovery: Some(Discovery::GitHubReleases {
@@ -457,6 +549,7 @@ static ENTRIES: &[CatalogEntry] = &[
     },
     CatalogEntry {
         id: "wine-stable",
+        os: MACOS,
         kind: Kind::Wine,
         status: Status::Available,
         discovery: Some(Discovery::GitHubReleases {
@@ -474,6 +567,7 @@ static ENTRIES: &[CatalogEntry] = &[
     },
     CatalogEntry {
         id: "gptk",
+        os: MACOS,
         kind: Kind::Wine,
         status: Status::ConsentRequired,
         discovery: Some(Discovery::GitHubReleases {
@@ -494,6 +588,7 @@ static ENTRIES: &[CatalogEntry] = &[
     },
     CatalogEntry {
         id: "wine-crossover",
+        os: MACOS,
         kind: Kind::Wine,
         status: Status::Gone {
             since: "2026-10-19",
@@ -511,6 +606,7 @@ static ENTRIES: &[CatalogEntry] = &[
     },
     CatalogEntry {
         id: "winetricks",
+        os: MACOS,
         kind: Kind::Tool {
             payload: "winetricks",
         },
@@ -535,6 +631,7 @@ static ENTRIES: &[CatalogEntry] = &[
     },
     CatalogEntry {
         id: "cnc-ddraw",
+        os: &[Os::Macos, Os::Linux],
         kind: Kind::Renderer {
             payload: "ddraw.dll",
             overlay: false,
@@ -563,6 +660,7 @@ static ENTRIES: &[CatalogEntry] = &[
     },
     CatalogEntry {
         id: "dxmt",
+        os: MACOS,
         kind: Kind::Renderer {
             payload: "winemetal.so",
             overlay: true,
@@ -592,6 +690,7 @@ static ENTRIES: &[CatalogEntry] = &[
     },
     CatalogEntry {
         id: "d3dmetal",
+        os: MACOS,
         kind: Kind::Renderer {
             payload: "d3d12.so",
             overlay: true,
@@ -1053,6 +1152,53 @@ fn parse_release(v: &Value) -> Option<ReleaseDoc> {
             })
             .collect(),
     })
+}
+
+/// OS-independent (design 18 §6): these run on every CI job.
+#[cfg(test)]
+mod os_tests {
+    use super::*;
+
+    /// Design 18 §6: the Linux arches. cnc-ddraw (a Windows DLL, one entry
+    /// for both OSes) renders for a Linux x86_64 runtime.
+    #[test]
+    fn linux_arches() {
+        use Arch::*;
+        assert_eq!((X86_64.dir(), Aarch64.dir()), ("x86_64", "aarch64"));
+        assert!(X86_64Rosetta.renders_for(X86_64) && X86_64.renders_for(X86_64));
+        assert!(!X86_64.renders_for(X86_64Rosetta));
+        assert!(!Arm64.renders_for(X86_64) && !X86_64.renders_for(Aarch64));
+        assert!(Arm64ec.renders_for(Aarch64) && Aarch64.renders_for(Aarch64));
+        assert!(!X86_64.needs_rosetta() && !Aarch64.needs_rosetta());
+        let host = HostArch::AppleSilicon { rosetta: true };
+        assert!(runs_on(X86_64, host).is_err() && runs_on(Aarch64, host).is_err());
+        let ddraw = find("cnc-ddraw").unwrap();
+        assert!(check_renderer_arch(X86_64, ddraw).is_ok());
+        assert_eq!(ddraw.arch_label_on(Os::Linux), "x86_64");
+        assert_eq!(
+            ddraw.arch_label_on(Os::Macos),
+            "x86_64 (Rosetta 2 on Apple Silicon)"
+        );
+    }
+
+    /// Every Mac entry stays a Mac entry; cnc-ddraw is the one shared.
+    #[test]
+    fn entries_name_their_os() {
+        for e in entries() {
+            assert!(!e.os.is_empty(), "{}", e.id);
+            let both = e.runs_on_os(Os::Linux);
+            assert_eq!(both, e.id == "cnc-ddraw", "{}", e.id);
+            assert!(e.runs_on_os(Os::Macos), "{}", e.id);
+        }
+        let winecx = find("winecx26").unwrap();
+        assert!(winecx.check_os(Os::Macos).is_ok());
+        let err = winecx.check_os(Os::Linux).unwrap_err();
+        assert_eq!(
+            err,
+            "winecx26 is for macOS only: it doesn't install on Linux"
+        );
+        assert!(find("cnc-ddraw").unwrap().check_os(Os::Linux).is_ok());
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]

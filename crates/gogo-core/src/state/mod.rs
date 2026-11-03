@@ -21,6 +21,50 @@ pub fn state_dir() -> std::path::PathBuf {
         None => std::path::PathBuf::from(".gogo"),
     }
 }
+
+/// Base dir for the runtime and game store (design 18 §6, O7): `runtimes/`,
+/// `renderers/`, `games/`, `compat/`. `$XDG_DATA_HOME/gogo` on Linux;
+/// `~/Library/Application Support/gogo` on macOS, where it is the same dir
+/// as [`state_dir`]. `GOGO_HOME` collapses everything.
+pub fn data_root() -> std::path::PathBuf {
+    data_root_from(std::env::var_os("GOGO_HOME"), dirs::data_dir())
+}
+
+fn data_root_from(
+    gogo_home: Option<std::ffi::OsString>,
+    data_dir: Option<std::path::PathBuf>,
+) -> std::path::PathBuf {
+    if let Some(home) = gogo_home {
+        return std::path::PathBuf::from(home);
+    }
+    match data_dir {
+        Some(dir) => dir.join("gogo"),
+        None => std::path::PathBuf::from(".gogo"),
+    }
+}
+
+/// Root of the per-game run logs, `<root>/<gogid>/` (design 18 §6):
+/// `~/Library/Logs/gogo` on macOS, `<state_dir>/logs` on Linux
+/// (`$XDG_STATE_HOME/gogo/logs`; `GOGO_HOME` flattens it there too).
+pub fn logs_root() -> std::path::PathBuf {
+    logs_root_for(
+        cfg!(target_os = "macos"),
+        &dirs::home_dir().unwrap_or_default(),
+        &state_dir(),
+    )
+}
+
+fn logs_root_for(
+    macos: bool,
+    home: &std::path::Path,
+    state_dir: &std::path::Path,
+) -> std::path::PathBuf {
+    if macos {
+        home.join("Library/Logs/gogo")
+    } else {
+        state_dir.join("logs")
+    }
+}
 /// Local install state (`docs/design/06` §3).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct State {
@@ -116,6 +160,43 @@ impl Drop for StateLock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn data_root_is_the_data_dir_unless_gogo_home_flattens() {
+        let xdg = PathBuf::from("/home/u/.local/share");
+        assert_eq!(
+            data_root_from(None, Some(xdg.clone())),
+            Path::new("/home/u/.local/share/gogo")
+        );
+        assert_eq!(
+            data_root_from(Some("/tmp/gh".into()), Some(xdg)),
+            Path::new("/tmp/gh")
+        );
+        assert_eq!(data_root_from(None, None), Path::new(".gogo"));
+    }
+
+    /// macOS: the store doesn't move (design 18 §6) — `state_dir()` there
+    /// falls back to the data dir, which is what `data_root()` is.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn data_root_is_the_state_dir_on_macos() {
+        let _guard = crate::test_util::env_lock();
+        // SAFETY: env mutation under the shared env mutex.
+        unsafe { std::env::remove_var("GOGO_HOME") };
+        assert_eq!(data_root(), state_dir());
+        assert!(data_root().ends_with("Library/Application Support/gogo"));
+    }
+
+    #[test]
+    fn logs_root_per_os() {
+        let (home, state) = (Path::new("/Users/me"), Path::new("/s/gogo"));
+        assert_eq!(
+            logs_root_for(true, home, state),
+            Path::new("/Users/me/Library/Logs/gogo")
+        );
+        assert_eq!(logs_root_for(false, home, state), Path::new("/s/gogo/logs"));
+    }
 
     #[test]
     fn round_trip_and_corrupt_recovery() {

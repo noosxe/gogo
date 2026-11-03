@@ -172,7 +172,7 @@ pub fn setup(gogid: &str, bundle: Option<&Path>) -> Result<SetupOutcome, MacAppE
     // Last: anything above (wineboot, a verb) may have linked out again.
     localize(&dirs.prefix)?;
 
-    let state_root = crate::state::state_dir();
+    let state_root = crate::state::data_root();
     let stamp = stamp(&raw, l4_raw.as_deref());
     let extra = [
         ("RUNTIME_DIR", state_rel(&state_root, &engine_root(&rt))),

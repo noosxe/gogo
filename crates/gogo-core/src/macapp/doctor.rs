@@ -104,9 +104,7 @@ impl Host {
             codesign: codesign.is_file().then(|| codesign.to_path_buf()),
             rosetta: needs_rosetta
                 .then(|| PathBuf::from("/Library/Apple/usr/share/rosetta/rosetta")),
-            logs: dirs::home_dir()
-                .unwrap_or_default()
-                .join("Library/Logs/gogo"),
+            logs: crate::state::logs_root(),
         }
     }
 }
@@ -744,7 +742,7 @@ fn check_links(dirs: &GameDirs, gogid: &str) -> Finding {
     if !dirs.prefix.is_dir() {
         return Finding::ok("links", "no prefix yet");
     }
-    let root = crate::state::state_dir();
+    let root = crate::state::data_root();
     let mut out = Vec::new();
     walk_links(&dirs.prefix, &root, &dirs.prefix, &mut out);
     if out.is_empty() {
