@@ -276,7 +276,7 @@ Mac, with a Linux table:
 
 | docs/22 §7 item | Placement |
 |---|---|
-| 1. A real D3D≤7 corpus (download, `innoextract`, run the rule) | **Open, gating:** an implementation issue (§13, I9). Needs the owner's go-ahead for ~3 GB of account downloads. Until it runs, "block only" stays D7VK |
+| 1. A real D3D≤7 corpus (download, `innoextract`, run the rule) | **Open, gating:** an implementation issue (§13, I9, #174). Needs the owner's go-ahead for ~3 GB of account downloads. Until it runs, "block only" stays D7VK |
 | 2. Does Linux need cnc-ddraw for 2D? | **Open, host pass** (Pharaoh, Stronghold, X11 and Wayland; §11.2). Default stays cnc-ddraw for confident 2D until then |
 | 3. The D7VK pin | **Decided:** the D7VK the Proton build bundles; no separate D7VK download in the first round. Release zips come with the plain-Wine lane |
 | 4. `syswow64` vs game dir for D7VK on plain Wine | **Deferred** with the plain-Wine lane (decision 1) |
@@ -733,21 +733,21 @@ Still open after this doc, by design: the D3D≤7 corpus check
 
 ## 13. Implementation issues (epic #155)
 
-Proposed; filed once the owner agrees. Each is a sub-issue of #155.
+Filed 2026-11-03 after the owner agreed; each is a sub-issue of #155.
 
 | # | Title | Labels | Blocked by |
 |---|---|---|---|
-| I1 | Compat schema: `[platforms.<os>]` tables, migrate the 11 L3 files and legacy L4 keys (§5) | `type:feature`, `area:wine-runtime`, `area:mac-app` | — |
-| I2 | Linux data root and per-OS catalog: `data_root()`, `os`/`arch` on entries, `.tar` extraction, `runtimes`/`renderers install` on Linux (§6) | `type:feature`, `area:wine-runtime`, `area:cli` | — |
-| I3 | umu provisioning: zipapp catalog entry, consent, Python discovery, `[linux] umu`, the flake's `steam.buildRuntimeEnv` wrapper (R1) (§2.1) | `type:feature`, `area:wine-runtime`, `area:packaging` | I2 |
-| I4 | GE-Proton catalog entry, umu appid check, `compatibilitytools.d` option with marker, unmanaged builds in `runtimes list` (§1, §2.2) | `type:feature`, `area:wine-runtime` | I2, I3 |
-| I5 | GOG → umu id lookup: the build's CSV, GitHub fallback cache (§4.1) | `type:feature`, `area:wine-runtime`, `area:licensing` | — |
-| I6 | Protonfix static reader, fix summary, collision warnings, `protonfixes = false`, L3 ownership rule (§4.2, §4.3) | `type:feature`, `area:wine-runtime` | I1, I5 |
-| I7 | Linux renderer table and next-renderer order: DXVK/VKD3D-Proton/D7VK switches, cnc-ddraw, never both (§3) | `type:feature`, `area:wine-runtime` | I8 |
-| I8 | `pe.rs`: docs/22 §6.2 detection rule (dxguid block, device GUIDs, runtime-loaded ddraw, engine hints) (§3) | `type:feature`, `area:wine-runtime`, `area:mac-app` | — |
-| I9 | Research: run the D3D≤7 detection rule on real GOG exes (docs/22 §7 item 1) | `type:research`, `area:wine-runtime` | — (needs the owner's OK for downloads) |
-| I10 | Depot materialization on Linux (reflink or copy) and `depot` help text (§6) | `type:feature`, `area:depot` | — |
-| I11 | `gogo linux-app` command: build (depot and installer lanes), `setup`, `compat`, `next-renderer`, `--retarget`; `apps` on Linux (§10) | `type:feature`, `area:cli`, `area:wine-runtime` | I1–I7, I10 |
-| I12 | Linux launcher: `.desktop`, `launch.sh` template, `launch.conf`, stamp, runtime check, logs, teardown, early-exit dialog (§7) | `type:feature`, `area:wine-runtime` | I11 (or lands with it) |
-| I13 | `gogo linux-app doctor`: umu, runtime, container, Vulkan and 32-bit ICD checks, NixOS hints (§8) | `type:feature`, `area:wine-runtime` | I12 |
-| I14 | Linux host pass: script and runbook for the checks in §11.2 | `type:chore`, `area:wine-runtime` | I12 |
+| I1 (#166) | Compat schema: `[platforms.<os>]` tables, migrate the 11 L3 files and legacy L4 keys (§5) | `type:feature`, `area:wine-runtime`, `area:mac-app` | — |
+| I2 (#167) | Linux data root and per-OS catalog: `data_root()`, `os`/`arch` on entries, `.tar` extraction, `runtimes`/`renderers install` on Linux (§6) | `type:feature`, `area:wine-runtime`, `area:cli` | — |
+| I3 (#168) | umu provisioning: zipapp catalog entry, consent, Python discovery, `[linux] umu`, the flake's `steam.buildRuntimeEnv` wrapper (R1) (§2.1) | `type:feature`, `area:wine-runtime`, `area:packaging` | #167 |
+| I4 (#169) | GE-Proton catalog entry, umu appid check, `compatibilitytools.d` option with marker, unmanaged builds in `runtimes list` (§1, §2.2) | `type:feature`, `area:wine-runtime` | #167, #168 |
+| I5 (#170) | GOG → umu id lookup: the build's CSV, GitHub fallback cache (§4.1) | `type:feature`, `area:wine-runtime`, `area:licensing` | — |
+| I6 (#171) | Protonfix static reader, fix summary, collision warnings, `protonfixes = false`, L3 ownership rule (§4.2, §4.3) | `type:feature`, `area:wine-runtime` | #166, #170 |
+| I7 (#172) | Linux renderer table and next-renderer order: DXVK/VKD3D-Proton/D7VK switches, cnc-ddraw, never both (§3) | `type:feature`, `area:wine-runtime` | #173 |
+| I8 (#173) | `pe.rs`: docs/22 §6.2 detection rule (dxguid block, device GUIDs, runtime-loaded ddraw, engine hints) (§3) | `type:feature`, `area:wine-runtime`, `area:mac-app` | — |
+| I9 (#174) | Research: run the D3D≤7 detection rule on real GOG exes (docs/22 §7 item 1) | `type:research`, `area:wine-runtime` | — (needs the owner's OK for downloads) |
+| I10 (#175) | Depot materialization on Linux (reflink or copy) and `depot` help text (§6) | `type:feature`, `area:depot` | — |
+| I11 (#176) | `gogo linux-app` command: build (depot and installer lanes), `setup`, `compat`, `next-renderer`, `--retarget`; `apps` on Linux (§10) | `type:feature`, `area:cli`, `area:wine-runtime` | #166–#172, #175 |
+| I12 (#177) | Linux launcher: `.desktop`, `launch.sh` template, `launch.conf`, stamp, runtime check, logs, teardown, early-exit dialog (§7) | `type:feature`, `area:wine-runtime` | #176 (or lands with it) |
+| I13 (#178) | `gogo linux-app doctor`: umu, runtime, container, Vulkan and 32-bit ICD checks, NixOS hints (§8) | `type:feature`, `area:wine-runtime` | #177 |
+| I14 (#179) | Linux host pass: script and runbook for the checks in §11.2 | `type:chore`, `area:wine-runtime` | #177 |
