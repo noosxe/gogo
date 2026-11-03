@@ -556,7 +556,8 @@ VKD3D-Proton, plain Wine needs them installed into the prefix, umu-protonfixes i
    distro's Wine; §1.3, §3.2) stays researched but unbuilt, and R8 doesn't apply yet.
    Unmanaged Proton builds (item 2) are still allowed.
 8. **D7VK vs cnc-ddraw: docs/22's recommendation accepted (user decision,
-   2026-11-03; research in PR #163).** They cover different halves of `ddraw.dll`: cnc-ddraw does 2D
+   2026-11-03; research in [docs/22](22-ddraw-renderers-d7vk-vs-cnc-ddraw.md),
+   #163).** They cover different halves of `ddraw.dll`: cnc-ddraw does 2D
    DirectDraw and fails Direct3D device creation; D7VK does D3D7/6/5/3 and passes 2D
    through to Wine's own `ddraw`. So cnc-ddraw on a 3D game breaks it, while D7VK on a
    2D game only loses cnc-ddraw's extras. Decided, per docs/22 §6, on Linux:
