@@ -351,7 +351,7 @@ pub async fn install(
                 .to_string_lossy()
                 .into_owned()
         }
-        catalog::Kind::Tool { payload } | catalog::Kind::Renderer { payload, .. } => {
+        catalog::Kind::Tool { payload, .. } | catalog::Kind::Renderer { payload, .. } => {
             let f = locate_named_file(&extract_dir, payload).ok_or_else(|| {
                 MacAppError::RuntimeInvalid {
                     path: extract_dir.clone(),
@@ -374,7 +374,8 @@ pub async fn install(
         }
     };
 
-    if let catalog::Kind::Renderer { notice, .. } = entry.kind {
+    if let catalog::Kind::Renderer { notice, .. } | catalog::Kind::Tool { notice, .. } = entry.kind
+    {
         // The bundles that use it copy this (design 10 §8, as for runtimes).
         std::fs::write(
             extract_dir.join("NOTICES.txt"),
@@ -1548,6 +1549,8 @@ pub(crate) mod store_tests {
             os: &[catalog::Os::Macos],
             kind: catalog::Kind::Tool {
                 payload: "winetricks",
+                notice: None,
+                runtimes: &[],
             },
             status: Status::Tool,
             discovery: Some(catalog::Discovery::PinnedFile(catalog::PinnedFile {
