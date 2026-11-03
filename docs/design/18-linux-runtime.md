@@ -26,7 +26,7 @@ no signing. Everything else follows design 16:
 
 $XDG_DATA_HOME/gogo/                                   the "data root" (§6), ~/.local/share/gogo
   runtimes/ge-proton/<ver>/<arch>/                     GE-Proton, as pinned (§2.2)
-  runtimes/umu/<ver>/umu-run                           umu zipapp, as pinned (§2.1)
+  runtimes/umu/<ver>/umu/umu-run                       umu zipapp, as pinned (§2.1)
   renderers/cnc-ddraw/<ver>/<arch>/                    the only renderer download on Linux (§3)
   games/<gogid>/gogo-launch.toml                       what to run, baked at build (design 16 §1.1)
   games/<gogid>/launch.conf                            effective config, written by setup
@@ -161,6 +161,48 @@ the appids its pin knows (`runtimes = ["1391110", "1628350", "4183110", "4185400
 umu" for a managed build, and is a `doctor` failure for an unmanaged one. A catalog
 bump that adds a GE-Proton needing a new container must bump umu in the same commit; a
 unit test checks every GE-Proton entry's appid against the umu entry.
+
+**As built (#168)** — choices the design left open:
+
+- **Catalog.** `umu/1.4.4` is a `Kind::Tool` (payload `umu-run`), `os = ["linux"]`,
+  `arch` x86_64, pinned to `eb590691…cc851` (GitHub's digest, re-checked against the
+  download on 2026-11-04). `Kind::Tool` gained `notice` (umu's GPL-3.0 note, written to
+  the store's `NOTICES.txt` as for renderers; it also names what the zipapp vendors:
+  python-xlib LGPL-2.1, urllib3/truststore/six MIT) and `runtimes`, the appid list.
+  The list was confirmed against `RUNTIME_VERSIONS` in `umu/umu_runtime.py` at the
+  1.4.4 tag: `1391110` soldier, `1628350` sniper, `4183110` steamrt4, `4185400`
+  steamrt4-arm64. `catalog::umu_runtimes()` returns it for #169's check.
+- **Store layout.** The archive is kept as unpacked: the zipapp is
+  `runtimes/umu/<ver>/umu/umu-run` (the manifest's `entry_rel`), beside upstream's
+  `umu_run.py` symlink.
+- **Code.** `gogo_core::linuxapp::umu`. `provision()` resolves a `UmuRun` (whose
+  `launch_conf()` gives the `UMU_PYTHON` / `UMU_RUN` values) and downloads the zipapp
+  only after the interpreter checks pass, so nothing is fetched that couldn't run. Its
+  errors are `MacAppError::Umu` (exit 7).
+- **Interpreter.** `GOGO_UMU_PYTHON` must be an absolute path to an executable; it
+  isn't run to check its version (running the FHS env starts bwrap). Empty counts as
+  unset. `python3` candidates are run with `--version`; relative `PATH` entries are
+  skipped. `umu = "system"` ignores the NixOS check.
+- **Consent.** A two-item select, `zipapp` (the default) or `system`, under the plan
+  line (umu's download size from the catalog probe, its licence, and the container umu
+  fetches on first launch). When the zipapp can't run here and a `umu-run` is on
+  `PATH`, `system` is the default and the zipapp item says why. A cancelled prompt
+  stores nothing. Wiring it into the `linux-app` plan is #176's.
+- **Flake.** `nix/umu-python.nix` is `steam.buildRuntimeEnv { extraPkgs = [ python3 ];
+  runScript = "python3"; }` (no `allowUnfree`: the env holds nothing of Steam). The
+  package wraps `gogo` with `--set-default GOGO_UMU_PYTHON` (a user's own value wins)
+  and exposes the env as `packages.x86_64-linux.umu-python`. x86_64 Linux only: the env
+  is multiArch, and nixpkgs has no i686 set on aarch64. The macOS derivation is
+  unchanged. The pin's Python is 3.14 (R1 ran 3.12); the zipapp's `--help` was
+  smoke-run through it.
+- **Dev shell: not exported.** Building and testing never need it (tests inject the
+  env), and exporting it would build the multiArch FHS env on every `nix develop`,
+  CI's included. For a manual run of the lane from the dev shell:
+  `export GOGO_UMU_PYTHON=$(nix build .#umu-python --print-out-paths)/bin/gogo-umu-python`.
+- **For #177/#178.** The wrapper renames the binary to `.gogo-wrapped`, so
+  `current_exe()` bypasses it: re-exec gogo through the path it was invoked as. And
+  `UMU_PYTHON` is a store path that a Nix GC can remove after a gogo upgrade: setup
+  should re-record it, and `doctor` should check that it exists.
 
 ### 2.2 Where GE-Proton builds live
 
