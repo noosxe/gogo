@@ -14,8 +14,21 @@ let
     cargo = rustToolchain;
     rustc = rustToolchain;
   };
+
+  inherit (pkgs.stdenv.hostPlatform) isLinux isx86_64;
+  # x86_64 only, like umu's catalog entry: the env is multiArch (i686 half),
+  # which nixpkgs can't build on aarch64-linux.
+  withUmuPython = isLinux && isx86_64;
+
+  # The interpreter gogo runs umu-launcher's zipapp with (design 18 §2.1, R1).
+  # On a stock NixOS root the bare zipapp can't start the Steam Linux
+  # Runtime; inside nixpkgs' own wrapper for umu-launcher
+  # (pkgs/by-name/um/umu-launcher/package.nix) it can: verified in docs/21
+  # §8 item 1. Same env, with Python as the program instead of umu, so the
+  # pinned zipapp from gogo's store runs in it.
+  umuPython = import ./umu-python.nix { inherit pkgs; };
 in
-rustPlatform.buildRustPackage {
+rustPlatform.buildRustPackage ({
   pname = "gogo";
   # Keep in sync with [workspace.package] version in Cargo.toml.
   version = "0.1.0";
@@ -34,8 +47,9 @@ rustPlatform.buildRustPackage {
   # gog-warp's reqwest keeps its default native-tls feature, which links
   # openssl-sys on Linux (macOS uses Security.framework instead). Its build
   # script also runs bindgen over xdelta3, which needs libclang.
-  nativeBuildInputs = [ pkgs.pkg-config rustPlatform.bindgenHook ];
-  buildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.openssl ];
+  nativeBuildInputs = [ pkgs.pkg-config rustPlatform.bindgenHook ]
+    ++ pkgs.lib.optionals withUmuPython [ pkgs.makeWrapper ];
+  buildInputs = pkgs.lib.optionals isLinux [ pkgs.openssl ];
 
   # These drive real processes through `ps` (the launcher's watchdog and
   # liveness checks, doctor's leftover-process scan), which the macOS build
@@ -58,4 +72,14 @@ rustPlatform.buildRustPackage {
     ];
     mainProgram = "gogo";
   };
-}
+} // pkgs.lib.optionalAttrs withUmuPython {
+  # x86_64 Linux: point gogo at the FHS env (GOGO_UMU_PYTHON). A default, so a
+  # user's own value still wins. gogo records the path in each game's
+  # launch.conf as UMU_PYTHON; the launcher doesn't need this wrapper.
+  # Attrs absent elsewhere, so the macOS derivation is unchanged.
+  postFixup = ''
+    wrapProgram $out/bin/gogo \
+      --set-default GOGO_UMU_PYTHON ${umuPython}/bin/${umuPython.meta.mainProgram}
+  '';
+  passthru = { inherit umuPython; };
+})
