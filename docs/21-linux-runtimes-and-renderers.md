@@ -448,7 +448,37 @@ VKD3D-Proton, plain Wine needs them installed into the prefix, umu-protonfixes i
      `lutris/util/wine/proton.py`), so umu doesn't download the runtime again into the
      game's folder.
    - `doctor` reports which runtime variants are present and their size.
-4. **protonfixes on or off by default**, and how L4 wins over it (§4.2 items 2–3).
+4. **protonfixes: decided per game at app creation (user decision, 2026-11-03).**
+   Whether protonfixes matters depends on whether the game needs fixes. So when gogo
+   creates the app, it works out whether the game needs any fixes and which, and shows
+   the result. Proposed mechanism, for the design to settle:
+   1. Resolve the GOG id to a umu id (item 5).
+   2. Look for `protonfixes/gamefixes-gog/umu-<id>.py` in the chosen Proton build
+      (managed or unmanaged; an unmanaged build may have no `protonfixes/` at all).
+   3. If there is one, read it **without running it** and list what it does: winetricks
+      verbs, env keys, DLL overrides, registry values, command or argument changes,
+      game-file edits (the calls in §2.4). gogo is Rust, so that's a small static
+      reader of `util.*` calls (pattern matching, or a Python parser crate such as
+      `rustpython-parser`).
+   4. Merge that with the L3 entry and the L1 import scan, and show one summary: which
+      fixes apply and where each comes from (protonfix, L3, L1), or "no known fixes".
+   5. Record the module's hash in the per-game state, so a GE-Proton bump that adds or
+      changes the fix is noticed (like design 16's setup stamp).
+
+   Two facts shape this (**verified**, umu-protonfixes `master`):
+   - `gamefixes-gog/default.py` runs for **every** GOG game and sets
+     `OPENSSL_ia32cap=~0x20000000` (an OpenSSL CPU-detection workaround). Valve's
+     per-appid fixes also key on the umu id (§1.2). So gogo should always pass
+     `GAMEID`/`STORE=gog`, even for games with no module. In practice the question is
+     not on or off but who owns each fix.
+   - Steam's `default.py` also parses `-pf_tricks`, `-pf_dxvk_set` and
+     `-pf_replace_cmd` launch options; the GOG one doesn't.
+
+   Because the summary lists the protonfix's env keys, gogo can warn at creation and at
+   `--retarget` when an L3 or L4 value collides with one (R10). Still to settle in the
+   design: what wins on a collision (`PROTONFIXES_DISABLE=1` for that game, a
+   protonfixes `localfix`, or a warning only), and whether L3 keeps fixes for games
+   that protonfixes already covers (R11).
 5. **GOG → umu id lookup**: the CSV inside the installed GE-Proton (offline, no
    redistribution), the online API (fresher, network at build time), or both?
 6. **Platform scoping in L3/L4**: a `[platforms.linux]` table, or separate files per OS?
@@ -514,6 +544,7 @@ worth knowing.
 | R26 | A shared `compatibilitytools.d` grows without bound: `prune` doesn't delete there (§8 item 2), so old GE-Proton builds (1.5 GB each) pile up unless the user removes them. Builds other tools put there aren't sha-pinned either, so gogo can't vouch for them | medium | §8 item 2 |
 | R27 | Other tools can delete or replace a build gogo pinned (ProtonUp-Qt cleanups, a user tidying up). A launch then finds its runtime gone or different; gogo has to check before launching. Steam also lists every build there as a compatibility tool | low | §8 item 2 |
 | R28 | An unmanaged Proton build silently lacks what gogo expects (protonfixes, D7VK, a known runtime), so `GAMEID`/`STORE=gog` fixes or a `d7vk` renderer do nothing, and L3 `status` can't vouch for it. The **unmanaged** note covers it until gogo can inspect builds | medium | §8 item 2 |
+| R29 | Reading a protonfix without running it is approximate: fixes are Python, with conditionals (exe name, file checks), helper functions and game-file edits. The creation-time summary can miss or overstate what the fix does at launch | medium | §8 item 4 |
 
 ## 10. Proposed outline for the design doc (`docs/design/18-linux-runtime.md`)
 
@@ -527,8 +558,8 @@ Numbered after design 17; the name is a suggestion.
    the Steam Linux Runtime left to umu in its shared folder (§8 item 3)
 3. Decision 3: renderer mapping (L1 scan → Proton switches; plain-Wine DLL install;
    cnc-ddraw vs D7VK)
-4. Decision 4: per-game fixes (protonfixes ownership, GOG → umu lookup, L3 seeding,
-   L4 precedence over protonfixes)
+4. Decision 4: per-game fixes, detected at app creation (protonfix reading, GOG → umu
+   lookup, L3 seeding, L4 precedence over protonfixes; §8 item 4)
 5. Decision 5: compat schema change for platforms (migration of today's 13 L3 files)
 6. Decision 6: store layout and GC on Linux (XDG paths, archive formats, prune, shared
    tools dir)
