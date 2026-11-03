@@ -74,8 +74,12 @@ gogo artifacts (GPTK: consent-download conduit only, D9).
   wine-staging/11.18/…                 # extracted + probed runtime tree
   tools/winetricks/<sha256[:12]>/winetricks
   tools/shims/{cabextract,7z}          # materialized from embedded bytes
-  manifest.json                        # { id, version, sha256, fetched_at, upstream_url }
+  ge-proton/<ver>/x86_64/<top dir>/    # a Proton build (Linux, design 18 §2.2)
+  manifest.json                        # { id, version, sha256, fetched_at, upstream_url[, path] }
 ```
+
+`path` (#169): the absolute tree root of a Proton build gogo installed into a shared
+`compatibilitytools.d` instead (design 18 §2.2). `prune` never deletes those.
 
 - Mirrors `state/cache.rs` conventions: `GOGO_HOME` flattening for tests, atomic
   install (download → verify sha256 → extract to temp → `find_wine_in` + `wine

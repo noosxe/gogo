@@ -58,9 +58,13 @@ catalog_ttl_hours = 24        # catalog cache freshness (06 §3)
 # umu = "zipapp" | "system"   # how gogo runs umu-launcher (design 18 §2.1). Unset: the
 #                             # first `gogo linux-app` build asks (zipapp download) and
 #                             # writes the answer here; headless builds fail naming the key.
-# proton_dir = "store" | "steam"   # where new GE-Proton builds go: gogo's store, or
-#                             # Steam's compatibilitytools.d (asked once when it exists, §2.2)
-# default_runtime = "ge-proton" | "path:<dir>"   # an unmanaged Proton build as the default (§1)
+# proton_dir = "store" | "steam" | "steam-flatpak"   # where new GE-Proton builds go:
+#                             # gogo's store, or a Steam's compatibilitytools.d (`steam`: the
+#                             # native one, else the only one; `steam-flatpak`: Flatpak's).
+#                             # Asked once on a terminal when a Steam exists; headless and
+#                             # unset: the store, with a note. New installs only (18 §2.2)
+# default_runtime = "ge-proton[/<ver>]" | "path:<dir>"   # the Proton build games use unless
+#                             # --runtime says otherwise; unset: the catalog's GE-Proton (18 §1)
 ```
 
 ### Rate value grammar (`--limit`, `download.limit`)
