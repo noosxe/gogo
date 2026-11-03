@@ -161,7 +161,7 @@ From `umu-database.csv` at `7bd4ba23` (2026-10-25) and the `umu-protonfixes` tre
 | Count | Value |
 |---|---|
 | Rows, all stores | 1,213 (1,109 distinct umu ids) |
-| `gog` rows | **210**, all keyed by the numeric GOG product id; 209 distinct umu ids |
+| `gog` rows | **210**, all keyed by the numeric GOG product id; 209 distinct umu ids (212 on 2026-11-03, §8 item 5) |
 | …whose umu id is a Steam appid | 182 |
 | …whose umu id is the GOG id itself (not on Steam) | 28 |
 | `gamefixes-gog/` entries | 78 `umu-*` modules + `default.py` + `__init__.py`: 29 regular files and 51 symlinks into `gamefixes-steam` |
@@ -479,8 +479,38 @@ VKD3D-Proton, plain Wine needs them installed into the prefix, umu-protonfixes i
    design: what wins on a collision (`PROTONFIXES_DISABLE=1` for that game, a
    protonfixes `localfix`, or a warning only), and whether L3 keeps fixes for games
    that protonfixes already covers (R11).
-5. **GOG → umu id lookup**: the CSV inside the installed GE-Proton (offline, no
-   redistribution), the online API (fresher, network at build time), or both?
+5. **GOG → umu id lookup: comparison (to decide).** Checked 2026-11-03.
+
+   How the copies relate (**verified**): GE-Proton's `protonfixes/umu-database.csv` is
+   a git submodule of umu-protonfixes (`subprojects/umu-database`), frozen at release
+   time. GE-Proton11-11 carries umu-database `4fba4616` (2026-10-19); protonfixes
+   `master` pins `87b499f4` (2026-11-03). GOG rows: **209** in GE-Proton11-11's copy,
+   **212** on umu-database `main`, and **209** from the API. The API matched GE's copy
+   exactly and was missing the 3 rows added since 2026-10-19 (e.g. The Witcher 3
+   standard edition, `1207664643` → `umu-292030`). So the API is not fresher than
+   GE's copy today.
+
+   | | A. CSV in the chosen Proton build | B. Online API (`umu_api.php`) | C. CSV from GitHub, cached | D. A, then C as fallback |
+   |---|---|---|---|---|
+   | Freshness | as of that build's release (GE: 2–3 weeks behind at most, given its cadence) | lagged `main` by 2+ weeks on 2026-11-03 | `main`, or a commit gogo pins | A's, C's where A has none |
+   | Network | none | one request per game at creation | one file download (~94 KB), refreshed now and then | only for builds without a CSV |
+   | Matches the fixes that will run | **yes**: same snapshot as that build's `gamefixes-gog` | no guarantee | no guarantee (may name a module the build lacks) | yes when A is used |
+   | Unmanaged builds without `protonfixes/` | no answer | works | works | works |
+   | Privacy | nothing leaves the machine | each GOG id is sent to a community host, so the host sees the user's library | whole file fetched from GitHub; nothing per game | as A, plus C's single fetch |
+   | Availability | always | single community host (R14); Heroic depends on it | GitHub | always for managed builds |
+   | Licence (GPL-3.0 data) | read in place, nothing distributed | nothing distributed | downloaded to the user's cache by the user's gogo; not vendored | same |
+   | Effort | a CSV read from a known path | HTTP + cache (Heroic caches answers, including "none") | HTTP + cache + refresh rule | both A and C |
+
+   What a newer id buys: a GOG game with a Steam umu id also gets Valve's per-appid
+   fixes from the `proton` script (§1.2), even with no protonfix module in the build.
+   So a fresher id can still help, but rarely. A protonfix that isn't in the build can't
+   run whatever the id source says.
+
+   Suggested: **D**. Read the chosen build's own CSV, which matches the fixes that
+   build can actually run, works offline and sends nothing anywhere. Fall back to a
+   cached copy of the CSV from GitHub only when the build has none (unmanaged builds).
+   Skip the API: today it lags, and it sends the user's library to a third party one
+   game at a time.
 6. **Platform scoping in L3/L4**: a `[platforms.linux]` table, or separate files per OS?
 7. **Second runtime**: Kron4ek staging-wow64 as the plain-Wine option, the distro's Wine,
    or nothing in the first round?
