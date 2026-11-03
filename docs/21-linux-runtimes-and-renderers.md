@@ -430,8 +430,24 @@ VKD3D-Proton, plain Wine needs them installed into the prefix, umu-protonfixes i
    - **Later (not in the first round):** inspect each build to find out what it
      supports (Proton base and Wine version, bundled DXVK/VKD3D-Proton/D7VK, protonfixes,
      required runtime) and explain why it may not work for a given game.
-3. **Who owns the Steam Linux Runtime download?** umu fetches it into
-   `~/.local/share/umu`; gogo can only pin it by letting umu do it.
+3. **Steam Linux Runtime: umu owns it, shared with other umu users (user decision,
+   2026-11-03).** gogo follows the pattern umu and Lutris already use rather than
+   inventing its own:
+   - umu puts the runtime in `$XDG_DATA_HOME/umu/<variant>` (default
+     `~/.local/share/umu`) or `$UMU_FOLDERS_PATH/umu`. Flatpak launchers use the host's
+     `HOST_XDG_DATA_HOME` with the `xdg-data/umu:create` permission, so every umu user
+     on a machine shares one copy. Installs and updates take a file lock (`umu.lock`)
+     and re-check for a newer version once they hold it (**verified**,
+     `umu_consts.py`, `umu_runtime.py`). Steam's own runtimes under `steamapps/common/`
+     are not reused.
+   - This machine already has `~/.local/share/umu/{steamrt3,steamrt4,umu.lock,umu-shim}`
+     from another umu user.
+   - gogo doesn't pin or prune the runtime; R3 is an accepted risk.
+   - When gogo overrides a game's `HOME` or `XDG_DATA_HOME`, it sets `UMU_FOLDERS_PATH`
+     back to the shared location, as Lutris does (`get_umu_folders_path` in
+     `lutris/util/wine/proton.py`), so umu doesn't download the runtime again into the
+     game's folder.
+   - `doctor` reports which runtime variants are present and their size.
 4. **protonfixes on or off by default**, and how L4 wins over it (§4.2 items 2–3).
 5. **GOG → umu id lookup**: the CSV inside the installed GE-Proton (offline, no
    redistribution), the online API (fresher, network at build time), or both?
@@ -457,7 +473,7 @@ worth knowing.
 |---|---|---|---|
 | R1 | The umu zipapp may not launch the Steam Linux Runtime on NixOS without the FHS wrapper that nixpkgs adds | high | untested (§8 item 1) |
 | R2 | A pinned umu can fall behind GE-Proton: umu maps runtime appids to runtimes in a hard-coded table (`umu_runtime.py`: soldier, sniper, steamrt4, steamrt4-arm64). A GE-Proton that needs a newer runtime fails until umu is bumped too | high | §1.1, §1.2 |
-| R3 | The Steam Linux Runtime isn't pinned by gogo: umu resolves `latest-public-beta.txt` on `repo.steampowered.com` and updates it in `~/.local/share/umu`. The same game can change behaviour with no gogo change, and the first launch needs the network | medium | §1.2 |
+| R3 | (accepted, §8 item 3) The Steam Linux Runtime isn't pinned by gogo: umu resolves `latest-public-beta.txt` on `repo.steampowered.com` and updates it in `~/.local/share/umu`. The same game can change behaviour with no gogo change, and the first launch needs the network | medium | §1.2 |
 | R4 | Fast GE-Proton cadence (8 releases in 3 months, two hotfixes on one day) and one main maintainer: pins go stale quickly, regressions land between our host passes | medium | §1.1 |
 | R5 | Disk and bandwidth: 565 MB download and 1.5 GB unpacked per GE-Proton version, plus 175 MB for the runtime; keeping an N-1 rollback doubles it | medium | §1.1 |
 | R6 | Python requirement outside Nix: distros with Python < 3.10 (e.g. Debian 11, which ships 3.9, **reported**) can't run umu | medium | §8 item 1 |
@@ -508,7 +524,7 @@ Numbered after design 17; the name is a suggestion.
 2. Decision 2: umu as a required dependency (zipapp download after confirmation;
    Python from the flake or the user, §8 item 1); where GE-Proton lives (store by
    default, shared `compatibilitytools.d` on request, unmanaged builds, §8 item 2);
-   the Steam Linux Runtime
+   the Steam Linux Runtime left to umu in its shared folder (§8 item 3)
 3. Decision 3: renderer mapping (L1 scan → Proton switches; plain-Wine DLL install;
    cnc-ddraw vs D7VK)
 4. Decision 4: per-game fixes (protonfixes ownership, GOG → umu lookup, L3 seeding,
