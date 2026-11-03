@@ -87,7 +87,7 @@ pub fn setup(gogid: &str, bundle: Option<&Path>) -> Result<SetupOutcome, MacAppE
     let mut warnings: Vec<String> = l4
         .warnings
         .iter()
-        .map(|w| format!("{}: unknown key {w}", l4_path.display()))
+        .map(|w| format!("{}: {w}", l4_path.display()))
         .collect();
     let db = compat::db_entry(gogid);
     let mut eff = baked

@@ -1,0 +1,9 @@
+# The Witcher 3: Wild Hunt (64-bit, D3D11/12). Not run by gogo yet.
+# umu-protonfixes hides Wine's exports (winetricks setting, HKCU\Software\Wine
+# HideWineExports): since 5.0 the game turns off Streamline, ray tracing and
+# frame generation when it finds wine_get_version. Those are NVIDIA/RT paths,
+# so expect little effect on a Mac, and whether CX24 honours the setting is
+# unverified.
+title  = "The Witcher 3: Wild Hunt"
+verbs  = ["hidewineexports=enable"]
+source = "umu-protonfixes:gamefixes-steam/292030.py@3603ccbbc20de88c2878306acdfdd4e9a07fc8c4"

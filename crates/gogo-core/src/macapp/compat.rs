@@ -5,6 +5,10 @@
 //! (L0 default runtime, L1 auto renderer, L2 GOG-native) are computed by the
 //! pipeline and fed in as [`CompatEntry`] values of their own.
 //!
+//! A file's top level holds the keys every OS shares; `[platforms.<os>]`
+//! the OS-specific ones (design 18 decision 5, #166). [`parse`] resolves a
+//! file for one [`Os`] into that layer's [`CompatEntry`].
+//!
 //! [`merge`] applies `flags > L4 > L3 > L2 > L1 > L0` field by field and
 //! keeps the winning layer of every field (of every key or verb for the
 //! fields that combine across layers), so `gogo mac-app compat` (and
@@ -208,6 +212,11 @@ pub struct CompatEntry {
     /// `[lanes.<lane>]`: a status of that lane's own, over the top-level one.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub lanes: BTreeMap<Lane, LaneStatus>,
+    /// `[platforms.linux]` only: `false` turns umu-protonfixes off for the
+    /// game. Parsed and checked; applying it (`PROTONFIXES_DISABLE=1`) is
+    /// #171 / #177.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protonfixes: Option<bool>,
     /// Provenance: `gogo-vm`, `umu-protonfixes:<file>@<sha>`, …
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
@@ -217,54 +226,206 @@ pub struct CompatEntry {
 /// before it) added. `["-*", "d3dx9"]` replaces the list whole.
 pub const VERBS_CLEAR: &str = "-*";
 
-/// Top-level keys of the schema (unknown ones warn, like the config loader).
-const KNOWN_KEYS: &[&str] = &[
+/// An OS a `[platforms.<os>]` table is for, named as Rust's `target_os`
+/// (design 18 decision 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Os {
+    Macos,
+    Linux,
+}
+
+impl Os {
+    pub const ALL: [Os; 2] = [Os::Macos, Os::Linux];
+
+    /// The OS gogo runs on (macOS for anything that isn't Linux: gogo
+    /// targets only those two).
+    pub fn current() -> Os {
+        if cfg!(target_os = "linux") {
+            Os::Linux
+        } else {
+            Os::Macos
+        }
+    }
+
+    /// The schema spelling: `macos`, `linux`.
+    pub fn key(self) -> &'static str {
+        match self {
+            Os::Macos => "macos",
+            Os::Linux => "linux",
+        }
+    }
+
+    fn from_key(key: &str) -> Option<Os> {
+        Os::ALL.into_iter().find(|os| os.key() == key)
+    }
+}
+
+/// Keys valid at the top level: the Windows-side facts, the same on every OS.
+const TOP_KEYS: &[&str] = &[
     "title",
     "exe",
-    "renderer",
-    "runtime",
-    "verbs",
-    "dll_overrides",
-    "env",
-    "registry",
     "args",
     "variant",
     "replace_command",
-    "status",
-    "tested",
-    "notes",
-    "lane",
-    "lanes",
+    "verbs",
+    "dll_overrides",
+    "registry",
     "source",
 ];
 
-/// Keys gogo itself writes into L4 (`--retarget`, persisted build flags;
-/// design 16 decisions 5 and 7). Everything else in the file is the user's.
+/// Keys valid only under `[platforms.<os>]` (which takes the top-level
+/// ones too, to override or extend them there).
+const PLATFORM_KEYS: &[&str] = &[
+    "renderer",
+    "runtime",
+    "env",
+    "status",
+    "notes",
+    "tested",
+    "lane",
+    "lanes",
+    "protonfixes",
+];
+
+/// The OS-specific keys the schema had at the top level before
+/// `[platforms.<os>]` (#166). In an L4 file they still read as
+/// `[platforms.macos]`: gogo and its users wrote them on a Mac.
+const LEGACY_KEYS: &[&str] = &[
+    "renderer", "runtime", "env", "status", "notes", "tested", "lane", "lanes",
+];
+
+/// Renderers that exist only on macOS: an error under `[platforms.linux]`.
+const MAC_ONLY_RENDERERS: &[&str] = &["dxmt", "d3dmetal"];
+
+/// Keys gogo itself writes into L4 (`--retarget`, persisted build flags,
+/// "Try next renderer"; design 16 decisions 5 and 7), always under
+/// `[platforms.<this os>]`. Everything else in the file is the user's.
 pub const OWNED_KEYS: &[&str] = &["runtime", "renderer"];
 
-/// A parsed layer plus non-fatal warnings (unknown keys).
+/// A parsed layer, resolved for one OS, plus non-fatal warnings (unknown
+/// keys, keys in the wrong place, legacy keys), each a full message.
 #[derive(Debug, Clone, Default)]
 pub struct Parsed {
     pub entry: CompatEntry,
     pub warnings: Vec<String>,
 }
 
-/// Parse one entry. Unknown keys (top level, inside `tested` / `registry`
-/// items and `[lanes.<lane>]` tables) are reported as warnings, never
-/// errors: an older gogo must still read a newer DB.
-pub fn parse(raw: &str) -> Result<Parsed, String> {
-    let table: toml::Table = toml::from_str(raw).map_err(|e| e.to_string())?;
+/// Parse one entry and resolve it for `os`: the top level, then
+/// `[platforms.<os>]` over it ([`overlay`]). A table for another OS is
+/// checked the same way but not applied. `layer` is [`Layer::Db`] or
+/// [`Layer::User`]: only L4 reads [`LEGACY_KEYS`] at the top level (as
+/// `[platforms.macos]`, so on macOS only); in L3 they warn and are ignored,
+/// like `protonfixes` there anywhere and every unknown key. Warnings, never
+/// errors: an older gogo must still read a newer DB. Bad values are errors.
+pub fn parse(raw: &str, os: Os, layer: Layer) -> Result<Parsed, String> {
+    let mut table: toml::Table = toml::from_str(raw).map_err(|e| e.to_string())?;
     let mut warnings = Vec::new();
-    for (key, value) in &table {
-        if !KNOWN_KEYS.contains(&key.as_str()) {
-            warnings.push(key.clone());
+    let platforms = match table.remove("platforms") {
+        None => toml::Table::new(),
+        Some(toml::Value::Table(t)) => t,
+        Some(_) => return Err("`platforms` must be a table of `[platforms.<os>]`".into()),
+    };
+    let mut legacy = toml::Table::new();
+    for key in table.keys().cloned().collect::<Vec<_>>() {
+        if TOP_KEYS.contains(&key.as_str()) {
             continue;
         }
+        let value = table.remove(&key).expect("listed above");
+        if layer == Layer::User && LEGACY_KEYS.contains(&key.as_str()) {
+            legacy.insert(key, value);
+        } else if PLATFORM_KEYS.contains(&key.as_str()) {
+            warnings.push(format!(
+                "`{key}` is only valid under [platforms.<os>]: ignored"
+            ));
+        } else {
+            warnings.push(format!("unknown key {key}"));
+        }
+    }
+    check_items(&table, "", &mut warnings);
+    let mut entry = entry_from(table)?;
+
+    let mut own = None;
+    if !legacy.is_empty() {
+        let keys = legacy.keys().map(|k| format!("`{k}`")).collect::<Vec<_>>();
+        let keys = keys.join(", ");
+        let mac = platform_entry(legacy, Os::Macos, "", &mut warnings)
+            .map_err(|e| format!("legacy top-level keys: {e}"))?;
+        match os {
+            Os::Macos => {
+                warnings.push(format!(
+                    "note: top-level {keys} read as [platforms.macos], the shape before \
+                     #166 (gogo moves `renderer` / `runtime` there on its next edit; move the \
+                     rest to drop this note)"
+                ));
+                overlay(&mut entry, mac);
+            }
+            Os::Linux => warnings.push(format!(
+                "top-level {keys}: Mac-only values from before [platforms.<os>], ignored on \
+                 linux (move them under [platforms.macos])"
+            )),
+        }
+    }
+    for (name, value) in platforms {
+        let Some(p) = Os::from_key(&name) else {
+            warnings.push(format!("unknown key platforms.{name}"));
+            continue;
+        };
+        let toml::Value::Table(t) = value else {
+            return Err(format!("`platforms.{name}` must be a table"));
+        };
+        let prefix = format!("platforms.{name}.");
+        let e = platform_entry(t, p, &prefix, &mut warnings)?;
+        if p == os {
+            own = Some(e);
+        }
+    }
+    if let Some(e) = own {
+        overlay(&mut entry, e);
+    }
+    Ok(Parsed { entry, warnings })
+}
+
+/// One `[platforms.<os>]` table: checked (keys, renderer) and deserialized.
+fn platform_entry(
+    mut t: toml::Table,
+    os: Os,
+    prefix: &str,
+    warnings: &mut Vec<String>,
+) -> Result<CompatEntry, String> {
+    for key in t.keys().cloned().collect::<Vec<_>>() {
+        let known = TOP_KEYS.contains(&key.as_str()) || PLATFORM_KEYS.contains(&key.as_str());
+        if !known {
+            warnings.push(format!("unknown key {prefix}{key}"));
+            t.remove(&key);
+        } else if key == "protonfixes" && os != Os::Linux {
+            warnings.push(format!("`{prefix}{key}` is Linux only: ignored"));
+            t.remove(&key);
+        }
+    }
+    check_items(&t, prefix, warnings);
+    let e = entry_from(t).map_err(|e| format!("[platforms.{}]: {e}", os.key()))?;
+    if os == Os::Linux
+        && let Some(r) = &e.renderer
+        && let id = r.split('/').next().unwrap_or_default().trim()
+        && MAC_ONLY_RENDERERS.contains(&id)
+    {
+        return Err(format!(
+            "renderer `{r}` in [platforms.linux]: {id} runs on macOS only"
+        ));
+    }
+    Ok(e)
+}
+
+/// Unknown keys inside `tested` / `registry` items and `[lanes.<lane>]`
+/// tables, as warnings (`tested[0].gpu`, `platforms.macos.lanes.depot.foo`).
+fn check_items(t: &toml::Table, prefix: &str, warnings: &mut Vec<String>) {
+    for (key, value) in t {
         if key == "lanes" {
             for (lane, t) in value.as_table().into_iter().flatten() {
                 for k in t.as_table().into_iter().flat_map(|t| t.keys()) {
                     if !["status", "tested", "notes"].contains(&k.as_str()) {
-                        warnings.push(format!("lanes.{lane}.{k}"));
+                        warnings.push(format!("unknown key {prefix}lanes.{lane}.{k}"));
                     }
                 }
             }
@@ -278,15 +439,75 @@ pub fn parse(raw: &str) -> Result<Parsed, String> {
         for (i, item) in value.as_array().into_iter().flatten().enumerate() {
             for k in item.as_table().into_iter().flat_map(|t| t.keys()) {
                 if !item_keys.contains(&k.as_str()) {
-                    warnings.push(format!("{key}[{i}].{k}"));
+                    warnings.push(format!("unknown key {prefix}{key}[{i}].{k}"));
                 }
             }
         }
     }
-    // Straight from the text, not via `toml::Value`: the value
-    // deserializer hands dates over as strings.
-    let entry: CompatEntry = toml::from_str(raw).map_err(|e| e.to_string())?;
-    Ok(Parsed { entry, warnings })
+}
+
+/// Deserialize a checked table. Through its text, not the `toml::Value`:
+/// the value deserializer hands dates over as strings.
+fn entry_from(t: toml::Table) -> Result<CompatEntry, String> {
+    let text = toml::to_string(&t).map_err(|e| e.to_string())?;
+    toml::from_str(&text).map_err(|e| e.to_string())
+}
+
+/// `over` (a `[platforms.<os>]` table) on top of `base` (the top level),
+/// within one layer, by the rules [`merge`] uses across layers: maps per
+/// key, `verbs` edit the list (`over`'s edits after `base`'s), a `status`
+/// takes the lane and lanes below it away, each lane's table and every
+/// other field is replaced whole.
+fn overlay(base: &mut CompatEntry, over: CompatEntry) {
+    fn take<T>(slot: &mut Option<T>, v: Option<T>) {
+        if v.is_some() {
+            *slot = v;
+        }
+    }
+    let CompatEntry {
+        title,
+        exe,
+        renderer,
+        runtime,
+        verbs,
+        dll_overrides,
+        env,
+        registry,
+        args,
+        variant,
+        replace_command,
+        status,
+        tested,
+        notes,
+        lane,
+        lanes,
+        protonfixes,
+        source,
+    } = over;
+    take(&mut base.title, title);
+    take(&mut base.exe, exe);
+    take(&mut base.renderer, renderer);
+    take(&mut base.runtime, runtime);
+    if let Some(v) = verbs {
+        base.verbs.get_or_insert_default().extend(v);
+    }
+    base.dll_overrides.extend(dll_overrides);
+    base.env.extend(env);
+    take(&mut base.registry, registry);
+    take(&mut base.args, args);
+    take(&mut base.variant, variant);
+    take(&mut base.replace_command, replace_command);
+    if status.is_some() {
+        base.lane = None;
+        base.lanes.clear();
+    }
+    take(&mut base.status, status);
+    take(&mut base.tested, tested);
+    take(&mut base.notes, notes);
+    take(&mut base.lane, lane);
+    base.lanes.extend(lanes);
+    take(&mut base.protonfixes, protonfixes);
+    take(&mut base.source, source);
 }
 
 /// A GOG product id is all digits; anything else would be a path (`..`).
@@ -320,7 +541,7 @@ pub fn db_entry(gogid: &str) -> Parsed {
     {
         let path = Path::new(&dir).join(format!("{gogid}.toml"));
         if let Ok(raw) = std::fs::read_to_string(&path) {
-            return parse(&raw).unwrap_or_else(|e| Parsed {
+            return parse(&raw, Os::current(), Layer::Db).unwrap_or_else(|e| Parsed {
                 entry: CompatEntry::default(),
                 warnings: vec![format!(
                     "compat DB entry {} unreadable: {e}",
@@ -329,12 +550,12 @@ pub fn db_entry(gogid: &str) -> Parsed {
             });
         }
     }
-    db_lookup(COMPAT_DB, gogid)
+    db_lookup(COMPAT_DB, gogid, Os::current())
 }
 
-fn db_lookup(db: &[(&str, &str)], gogid: &str) -> Parsed {
+fn db_lookup(db: &[(&str, &str)], gogid: &str, os: Os) -> Parsed {
     match db.iter().find(|(id, _)| *id == gogid) {
-        Some((_, raw)) => parse(raw).unwrap_or_else(|e| Parsed {
+        Some((_, raw)) => parse(raw, os, Layer::Db).unwrap_or_else(|e| Parsed {
             entry: CompatEntry::default(),
             warnings: vec![format!("compat DB entry {gogid} unreadable: {e}")],
         }),
@@ -359,17 +580,17 @@ pub fn user_path(gogid: &str) -> PathBuf {
     user_dir().join(format!("{gogid}.toml"))
 }
 
-/// Load the L4 file for `gogid`. A missing file is an empty layer; a file
-/// that doesn't parse is an error (it is the user's own edit — say so
-/// rather than silently ignoring it).
+/// Load the L4 file for `gogid`, resolved for this OS. A missing file is an
+/// empty layer; a file that doesn't parse is an error (it is the user's own
+/// edit — say so rather than silently ignoring it).
 pub fn load_user(gogid: &str) -> Result<Parsed, MacAppError> {
     validate_gogid(gogid)?;
-    load_user_at(&user_path(gogid))
+    load_user_at(&user_path(gogid), Os::current())
 }
 
-fn load_user_at(path: &Path) -> Result<Parsed, MacAppError> {
+fn load_user_at(path: &Path, os: Os) -> Result<Parsed, MacAppError> {
     match std::fs::read_to_string(path) {
-        Ok(raw) => parse(&raw).map_err(|reason| MacAppError::Compat {
+        Ok(raw) => parse(&raw, os, Layer::User).map_err(|reason| MacAppError::Compat {
             path: path.to_path_buf(),
             reason,
         }),
@@ -387,19 +608,25 @@ pub struct Change {
 }
 
 /// Set (`Some`) or remove (`None`) gogo-owned keys in the L4 file for
-/// `gogid`, keeping everything else (comments included) as the user wrote it.
-/// Returns only the keys whose value actually changed; no change, no write.
+/// `gogid`, under `[platforms.<this os>]`, keeping everything else
+/// (comments included) as the user wrote it. Returns only the keys whose
+/// value for this OS actually changed; no change, no write.
 pub fn set_user_keys(
     gogid: &str,
     updates: &[(&str, Option<&str>)],
 ) -> Result<Vec<Change>, MacAppError> {
     validate_gogid(gogid)?;
-    set_user_keys_at(&user_path(gogid), updates)
+    set_user_keys_at(&user_path(gogid), updates, Os::current())
 }
 
+/// [`set_user_keys`] for `os`. A write also moves the legacy top-level keys
+/// gogo owns (written before #166, on a Mac) under `[platforms.macos]`,
+/// unless that table sets them already (then the top-level one never
+/// applied and goes). The user's own legacy keys stay where they are.
 fn set_user_keys_at(
     path: &Path,
     updates: &[(&str, Option<&str>)],
+    os: Os,
 ) -> Result<Vec<Change>, MacAppError> {
     let err = |reason: String| MacAppError::Compat {
         path: path.to_path_buf(),
@@ -411,20 +638,26 @@ fn set_user_keys_at(
         Err(e) => return Err(e.into()),
     };
     let mut doc: toml_edit::DocumentMut = raw.parse().map_err(|e| err(format!("{e}")))?;
+    let str_at = |doc: &toml_edit::DocumentMut, os: Option<Os>, key: &str| {
+        let item = match os {
+            None => doc.get(key),
+            Some(os) => doc
+                .get("platforms")
+                .and_then(|p| p.get(os.key()))
+                .and_then(|t| t.get(key)),
+        };
+        item.and_then(|i| i.as_str()).map(str::to_string)
+    };
     let mut changes = Vec::new();
     for (key, new) in updates {
         if !OWNED_KEYS.contains(key) {
             return Err(err(format!("`{key}` is not a key gogo writes")));
         }
-        let old = doc.get(key).and_then(|i| i.as_str()).map(str::to_string);
+        // The value this OS reads now: its table's, else (macOS) a legacy one.
+        let old = str_at(&doc, Some(os), key)
+            .or_else(|| (os == Os::Macos).then(|| str_at(&doc, None, key)).flatten());
         if old.as_deref() == *new {
             continue;
-        }
-        match new {
-            Some(v) => doc[*key] = toml_edit::value(*v),
-            None => {
-                doc.remove(key);
-            }
         }
         changes.push(Change {
             key: key.to_string(),
@@ -435,9 +668,35 @@ fn set_user_keys_at(
     if changes.is_empty() {
         return Ok(changes);
     }
+    for key in OWNED_KEYS {
+        let Some((k, item)) = doc.as_table_mut().remove_entry(key) else {
+            continue;
+        };
+        let mac = platform_table(&mut doc, Os::Macos).map_err(err)?;
+        if !mac.contains_key(key) {
+            mac.insert(k.get(), item);
+            if let Some(mut moved) = mac.key_mut(key) {
+                *moved.leaf_decor_mut() = k.leaf_decor().clone();
+            }
+        }
+    }
+    for c in &changes {
+        let t = platform_table(&mut doc, os).map_err(err)?;
+        match &c.new {
+            Some(v) => {
+                t.insert(&c.key, toml_edit::value(v.as_str()));
+            }
+            None => {
+                t.remove(&c.key);
+            }
+        }
+    }
+    prune_platforms(&mut doc);
     let out = doc.to_string();
     // Never leave a file behind that the next load would reject.
-    parse(&out).map_err(err)?;
+    for os in Os::ALL {
+        parse(&out, os, Layer::User).map_err(err)?;
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -445,6 +704,48 @@ fn set_user_keys_at(
     std::fs::write(&tmp, out)?;
     std::fs::rename(&tmp, path)?;
     Ok(changes)
+}
+
+/// `[platforms.<os>]` in an L4 document, made if missing (`[platforms]`
+/// itself stays implicit, so no empty header is written).
+fn platform_table(
+    doc: &mut toml_edit::DocumentMut,
+    os: Os,
+) -> Result<&mut dyn toml_edit::TableLike, String> {
+    let platforms = doc.entry("platforms").or_insert_with(|| {
+        let mut t = toml_edit::Table::new();
+        t.set_implicit(true);
+        toml_edit::Item::Table(t)
+    });
+    let platforms = platforms
+        .as_table_like_mut()
+        .ok_or("`platforms` must be a table of `[platforms.<os>]`")?;
+    if platforms.get(os.key()).is_none() {
+        platforms.insert(os.key(), toml_edit::Item::Table(toml_edit::Table::new()));
+    }
+    platforms
+        .get_mut(os.key())
+        .and_then(toml_edit::Item::as_table_like_mut)
+        .ok_or_else(|| format!("`platforms.{}` must be a table", os.key()))
+}
+
+/// Drop `[platforms.<os>]` tables gogo emptied, and `platforms` with them.
+fn prune_platforms(doc: &mut toml_edit::DocumentMut) {
+    let Some(platforms) = doc.get_mut("platforms").and_then(|p| p.as_table_like_mut()) else {
+        return;
+    };
+    for os in Os::ALL {
+        if platforms
+            .get(os.key())
+            .and_then(|t| t.as_table_like())
+            .is_some_and(|t| t.is_empty())
+        {
+            platforms.remove(os.key());
+        }
+    }
+    if platforms.is_empty() {
+        doc.remove("platforms");
+    }
 }
 
 // — merge —
@@ -493,6 +794,9 @@ pub struct Effective {
     /// one's, and a layer that sets the top-level `status` drops them all.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub lanes: BTreeMap<Lane, Sourced<LaneStatus>>,
+    /// Linux only. TODO(#171, #177): `false` sets `PROTONFIXES_DISABLE=1`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protonfixes: Option<Sourced<bool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<Sourced<String>>,
 }
@@ -568,6 +872,7 @@ pub fn merge(layers: &[(Layer, &CompatEntry)]) -> Effective {
         }
         take(&mut out.tested, &e.tested, layer);
         take(&mut out.notes, &e.notes, layer);
+        take(&mut out.protonfixes, &e.protonfixes, layer);
         take(&mut out.source, &e.source, layer);
     }
     out
@@ -643,6 +948,7 @@ impl Effective {
                 out.push(format!("lanes.{lane}.notes = {n:?}  ({at})"));
             }
         }
+        line(&mut out, "protonfixes", &self.protonfixes);
         line(&mut out, "source", &self.source);
         out
     }
@@ -779,14 +1085,18 @@ fn status_text(status: Status, notes: Option<&str>, tested: Option<&[Tested]>) -
 /// an error: setup refuses it later, with the path.
 pub fn db_and_user(gogid: &str) -> (Effective, Vec<String>) {
     let db = db_entry(gogid);
-    let mut warnings = db.warnings;
+    let mut warnings: Vec<String> = db
+        .warnings
+        .iter()
+        .map(|w| format!("compat DB {gogid}: {w}"))
+        .collect();
     let user = match load_user(gogid) {
         Ok(p) => {
             let path = user_path(gogid);
             warnings.extend(
                 p.warnings
                     .iter()
-                    .map(|w| format!("{}: unknown key {w}", path.display())),
+                    .map(|w| format!("{}: {w}", path.display())),
             );
             p.entry
         }
@@ -799,30 +1109,45 @@ pub fn db_and_user(gogid: &str) -> (Effective, Vec<String>) {
     (eff, warnings)
 }
 
-#[cfg(all(test, target_os = "macos"))]
+// OS-independent: every test names the OS it resolves for (#166).
+#[cfg(test)]
 mod compat_tests {
     use super::*;
+
+    /// An L3 entry resolved for macOS.
+    fn db(raw: &str) -> Parsed {
+        parse(raw, Os::Macos, Layer::Db).unwrap()
+    }
+
+    /// An L4 entry resolved for macOS. Its legacy top-level keys read as
+    /// `[platforms.macos]`, so the old shape stays a short way to write a
+    /// macOS layer in these tests.
+    fn mac(raw: &str) -> CompatEntry {
+        parse(raw, Os::Macos, Layer::User).unwrap().entry
+    }
 
     const REBEL_GALAXY: &str = r#"
 # compat/1435582019.toml — Rebel Galaxy
 title    = "Rebel Galaxy"
 exe      = "RebelGalaxyGOG.exe"        # skip GoGLauncher.exe
-renderer = "dxmt"
 verbs    = ["d3dcompiler_43", "d3dx11_43"]
-status   = "boots"
-tested   = [{ runtime = "winecx-24.0.7_7", host = "m4pro/macos-27.0.1", date = 2026-10-22 }]
 source   = "gogo-vm"
-notes    = "boots to the main menu"
-env      = { WINEMSYNC = "1" }
 dll_overrides = { ddraw = "n,b" }
 registry = [{ key = 'HKCU\Software\Wine\Direct3D', name = "renderer", data = "gl" }]
 args     = ["-windowed"]
 replace_command = { from = "GoGLauncher.exe", to = "RebelGalaxyGOG.exe" }
+
+[platforms.macos]
+renderer = "dxmt"
+status   = "boots"
+tested   = [{ runtime = "winecx-24.0.7_7", host = "m4pro/macos-27.0.1", date = 2026-10-22 }]
+notes    = "boots to the main menu"
+env      = { WINEMSYNC = "1" }
 "#;
 
     #[test]
     fn parses_the_docs19_example() {
-        let p = parse(REBEL_GALAXY).unwrap();
+        let p = db(REBEL_GALAXY);
         assert!(p.warnings.is_empty(), "{:?}", p.warnings);
         let e = p.entry;
         assert_eq!(e.title.as_deref(), Some("Rebel Galaxy"));
@@ -841,23 +1166,25 @@ replace_command = { from = "GoGLauncher.exe", to = "RebelGalaxyGOG.exe" }
 
     #[test]
     fn unknown_keys_warn_not_fail() {
-        let p = parse(
-            "renderer = \"wined3d\"\nfuture = 1\ntested = [{ runtime = \"x\", gpu = \"m4\" }]\n",
-        )
-        .unwrap();
+        let p = db("future = 1\n[platforms.macos]\nrenderer = \"wined3d\"\n\
+             tested = [{ runtime = \"x\", gpu = \"m4\" }]\n[platforms.windows]\nx = 1\n");
         assert_eq!(p.entry.renderer.as_deref(), Some("wined3d"));
         assert_eq!(
             p.warnings,
-            vec!["future".to_string(), "tested[0].gpu".into()]
+            [
+                "unknown key future",
+                "unknown key platforms.macos.tested[0].gpu",
+                "unknown key platforms.windows",
+            ]
         );
     }
 
     #[test]
     fn variant_is_a_known_key_and_merges_l4_over_l3() {
-        let l3 = parse("variant = \"Settings\"\n").unwrap();
+        let l3 = db("variant = \"Settings\"\n");
         assert!(l3.warnings.is_empty(), "{:?}", l3.warnings);
-        let l4 = parse("variant = \"Carmageddon TDR 2000 (safe mode)\"\n").unwrap();
-        let eff = merge(&[(Layer::Db, &l3.entry), (Layer::User, &l4.entry)]);
+        let l4 = mac("variant = \"Carmageddon TDR 2000 (safe mode)\"\n");
+        let eff = merge(&[(Layer::Db, &l3.entry), (Layer::User, &l4)]);
         let v = eff.variant.as_ref().unwrap();
         assert_eq!(v.value, "Carmageddon TDR 2000 (safe mode)");
         assert_eq!(v.layer, Layer::User);
@@ -868,20 +1195,34 @@ replace_command = { from = "GoGLauncher.exe", to = "RebelGalaxyGOG.exe" }
             "{:?}",
             eff.display_lines()
         );
-        assert!(parse("variant = [\"a\"]").is_err());
+        assert!(parse("variant = [\"a\"]", Os::Macos, Layer::Db).is_err());
     }
 
     #[test]
     fn bad_values_are_errors() {
-        assert!(parse("status = \"great\"").is_err());
-        assert!(parse("verbs = \"not-a-list\"").is_err());
-        assert!(parse("not toml at all =").is_err());
+        for os in Os::ALL {
+            for layer in [Layer::Db, Layer::User] {
+                for bad in [
+                    "[platforms.macos]\nstatus = \"great\"",
+                    "[platforms.linux]\nstatus = \"great\"",
+                    "verbs = \"not-a-list\"",
+                    "[platforms.macos]\nverbs = \"not-a-list\"",
+                    "platforms = 1",
+                    "platforms = { linux = 1 }",
+                    "not toml at all =",
+                ] {
+                    assert!(parse(bad, os, layer).is_err(), "{bad} ({os:?}, {layer:?})");
+                }
+            }
+        }
+        // A legacy L4 key is checked too, on every OS.
+        assert!(parse("status = \"great\"", Os::Linux, Layer::User).is_err());
     }
 
     #[test]
     fn missing_user_file_is_an_empty_layer() {
         let tmp = tempfile::tempdir().unwrap();
-        let p = load_user_at(&tmp.path().join("1.toml")).unwrap();
+        let p = load_user_at(&tmp.path().join("1.toml"), Os::Macos).unwrap();
         assert_eq!(p.entry, CompatEntry::default());
         assert!(p.warnings.is_empty());
     }
@@ -892,7 +1233,7 @@ replace_command = { from = "GoGLauncher.exe", to = "RebelGalaxyGOG.exe" }
         let path = tmp.path().join("1.toml");
         std::fs::write(&path, "renderer = ").unwrap();
         assert!(matches!(
-            load_user_at(&path),
+            load_user_at(&path, Os::Macos),
             Err(MacAppError::Compat { .. })
         ));
     }
@@ -907,20 +1248,28 @@ replace_command = { from = "GoGLauncher.exe", to = "RebelGalaxyGOG.exe" }
 
     #[test]
     fn db_lookup_finds_and_degrades() {
-        let db = [("1", "renderer = \"dxmt\""), ("2", "status = \"great\"")];
-        assert_eq!(db_lookup(&db, "1").entry.renderer.as_deref(), Some("dxmt"));
-        let broken = db_lookup(&db, "2");
+        let db = [
+            ("1", "[platforms.macos]\nrenderer = \"dxmt\""),
+            ("2", "[platforms.macos]\nstatus = \"great\""),
+        ];
+        let found = db_lookup(&db, "1", Os::Macos).entry;
+        assert_eq!(found.renderer.as_deref(), Some("dxmt"));
+        assert_eq!(db_lookup(&db, "1", Os::Linux).entry.renderer, None);
+        let broken = db_lookup(&db, "2", Os::Macos);
         assert_eq!(broken.entry, CompatEntry::default());
         assert_eq!(broken.warnings.len(), 1);
-        assert_eq!(db_lookup(&db, "3").entry, CompatEntry::default());
+        assert_eq!(db_lookup(&db, "3", Os::Macos).entry, CompatEntry::default());
     }
 
     #[test]
     fn compiled_db_entries_all_parse() {
         for (id, raw) in COMPAT_DB {
             validate_gogid(id).unwrap();
-            let p = parse(raw).unwrap_or_else(|e| panic!("compat/{id}.toml: {e}"));
-            assert!(p.warnings.is_empty(), "compat/{id}.toml: {:?}", p.warnings);
+            for os in Os::ALL {
+                let p = parse(raw, os, Layer::Db)
+                    .unwrap_or_else(|e| panic!("compat/{id}.toml ({os:?}): {e}"));
+                assert!(p.warnings.is_empty(), "compat/{id}.toml: {:?}", p.warnings);
+            }
         }
     }
 
@@ -942,26 +1291,29 @@ replace_command = { from = "GoGLauncher.exe", to = "RebelGalaxyGOG.exe" }
                 .unwrap_or_else(|| panic!("compat/{name}: not a <gogid>.toml"));
             validate_gogid(id).unwrap_or_else(|_| panic!("compat/{name}: not a GOG id"));
             let raw = std::fs::read_to_string(&path).unwrap();
-            let p = parse(&raw).unwrap_or_else(|e| panic!("compat/{name}: {e}"));
-            assert!(p.warnings.is_empty(), "compat/{name}: {:?}", p.warnings);
-            let e = p.entry;
-            assert!(
-                e.source.as_deref().is_some_and(|s| !s.is_empty()),
-                "compat/{name}: no source"
-            );
-            if e.status.unwrap_or_default() != Status::Unknown {
+            for os in Os::ALL {
+                let p = parse(&raw, os, Layer::Db)
+                    .unwrap_or_else(|e| panic!("compat/{name} ({os:?}): {e}"));
+                assert!(p.warnings.is_empty(), "compat/{name}: {:?}", p.warnings);
+                let e = p.entry;
                 assert!(
-                    e.tested.as_ref().is_some_and(|t| !t.is_empty()),
-                    "compat/{name}: status without a tested run"
+                    e.source.as_deref().is_some_and(|s| !s.is_empty()),
+                    "compat/{name}: no source"
                 );
-            }
-            for (lane, s) in &e.lanes {
-                if s.status.unwrap_or_default() != Status::Unknown {
+                if e.status.unwrap_or_default() != Status::Unknown {
                     assert!(
-                        s.tested.as_ref().is_some_and(|t| !t.is_empty()),
-                        "compat/{name}: lanes.{} status without a tested run",
-                        lane.key()
+                        e.tested.as_ref().is_some_and(|t| !t.is_empty()),
+                        "compat/{name} ({os:?}): status without a tested run"
                     );
+                }
+                for (lane, s) in &e.lanes {
+                    if s.status.unwrap_or_default() != Status::Unknown {
+                        assert!(
+                            s.tested.as_ref().is_some_and(|t| !t.is_empty()),
+                            "compat/{name} ({os:?}): lanes.{} status without a tested run",
+                            lane.key()
+                        );
+                    }
                 }
             }
             entries += 1;
@@ -1019,12 +1371,10 @@ replace_command = { from = "GoGLauncher.exe", to = "RebelGalaxyGOG.exe" }
 
     #[test]
     fn merge_is_field_by_field() {
-        let db = parse(REBEL_GALAXY).unwrap().entry;
-        let user = parse(
+        let db = db(REBEL_GALAXY).entry;
+        let user = mac(
             "renderer = \"wined3d\"\nverbs = [\"-d3dx11_43\", \"xinput\"]\nenv = { DXVK_HUD = \"1\", WINEMSYNC = \"0\" }\n",
-        )
-        .unwrap()
-        .entry;
+        );
         let l0 = CompatEntry {
             runtime: Some("wine-staging/11.18".into()),
             ..Default::default()
@@ -1064,8 +1414,7 @@ replace_command = { from = "GoGLauncher.exe", to = "RebelGalaxyGOG.exe" }
     #[test]
     fn status_line_goldens() {
         let line = |db: &str, user: &str| {
-            let db = parse(db).unwrap().entry;
-            let user = parse(user).unwrap().entry;
+            let (db, user) = (mac(db), mac(user));
             merge(&[(Layer::Db, &db), (Layer::User, &user)]).status_line()
         };
         assert_eq!(
@@ -1105,8 +1454,7 @@ replace_command = { from = "GoGLauncher.exe", to = "RebelGalaxyGOG.exe" }
     #[test]
     fn lane_scopes_the_status_to_one_build_lane() {
         let eff = |db: &str, user: &str| {
-            let db = parse(db).unwrap().entry;
-            let user = parse(user).unwrap().entry;
+            let (db, user) = (mac(db), mac(user));
             merge(&[(Layer::Db, &db), (Layer::User, &user)])
         };
         let pharaoh = "status = \"broken\"\nnotes = \"asks for the CD\"\nlane = \"depot\"";
@@ -1135,14 +1483,13 @@ replace_command = { from = "GoGLauncher.exe", to = "RebelGalaxyGOG.exe" }
             eff("lane = \"installer\"", "").status_line_for(Some(Lane::Depot)),
             "untested"
         );
-        assert!(parse("lane = \"floppy\"").is_err());
+        assert!(parse("lane = \"floppy\"", Os::Macos, Layer::User).is_err());
     }
 
     #[test]
     fn lanes_give_each_build_lane_its_own_status() {
         let eff = |db: &str, user: &str| {
-            let db = parse(db).unwrap().entry;
-            let user = parse(user).unwrap().entry;
+            let (db, user) = (mac(db), mac(user));
             merge(&[(Layer::Db, &db), (Layer::User, &user)])
         };
         let pharaoh = r#"
@@ -1195,20 +1542,26 @@ tested = [{ runtime = "winecx/24.0.7_7", host = "m4pro/macos-27.0.1", date = 202
         assert_eq!(e.status_for(Some(Lane::Depot)), Status::Plays);
 
         assert_eq!(
-            parse("[lanes.depot]\nstatus = \"plays\"\nfoo = 1")
-                .unwrap()
-                .warnings,
-            ["lanes.depot.foo"]
+            db("[platforms.macos.lanes.depot]\nstatus = \"plays\"\nfoo = 1").warnings,
+            ["unknown key platforms.macos.lanes.depot.foo"]
         );
-        assert!(parse("[lanes.floppy]\nstatus = \"plays\"").is_err());
+        assert!(
+            parse(
+                "[platforms.macos.lanes.floppy]\nstatus = \"plays\"",
+                Os::Macos,
+                Layer::Db
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn set_user_keys_keeps_comments_and_reports_changes() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("compat/1.toml");
+        let set = |u: &[(&str, Option<&str>)]| set_user_keys_at(&path, u, Os::Macos).unwrap();
         // Fresh file.
-        let c = set_user_keys_at(&path, &[("runtime", Some("winecx/24.0.7_7"))]).unwrap();
+        let c = set(&[("runtime", Some("winecx/24.0.7_7"))]);
         assert_eq!(
             c,
             vec![Change {
@@ -1217,36 +1570,114 @@ tested = [{ runtime = "winecx/24.0.7_7", host = "m4pro/macos-27.0.1", date = 202
                 new: Some("winecx/24.0.7_7".into())
             }]
         );
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(raw, "[platforms.macos]\nruntime = \"winecx/24.0.7_7\"\n");
         // The user adds their own keys and a comment.
-        let mut raw = std::fs::read_to_string(&path).unwrap();
-        raw.push_str("# my note\nenv = { WINEMSYNC = \"1\" }\n");
+        let raw =
+            format!("# my note\nverbs = [\"xinput\"]\n\n{raw}env = {{ WINEMSYNC = \"1\" }}\n");
         std::fs::write(&path, &raw).unwrap();
         // Same value again: no change, no write.
-        assert!(
-            set_user_keys_at(&path, &[("runtime", Some("winecx/24.0.7_7"))])
-                .unwrap()
-                .is_empty()
-        );
-        let c = set_user_keys_at(
-            &path,
-            &[("renderer", Some("dxmt/v0.80")), ("runtime", None)],
-        )
-        .unwrap();
+        assert!(set(&[("runtime", Some("winecx/24.0.7_7"))]).is_empty());
+        let c = set(&[("renderer", Some("dxmt/v0.80")), ("runtime", None)]);
         assert_eq!(c.len(), 2);
         assert_eq!(c[1].old.as_deref(), Some("winecx/24.0.7_7"));
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(after.contains("# my note"), "{after}");
-        let p = load_user_at(&path).unwrap().entry;
+        let p = load_user_at(&path, Os::Macos).unwrap().entry;
         assert_eq!(p.renderer.as_deref(), Some("dxmt/v0.80"));
         assert_eq!(p.runtime, None);
         assert_eq!(p.env["WINEMSYNC"], "1");
+        assert_eq!(p.verbs.as_deref(), Some(&["xinput".to_string()][..]));
+        // Nothing gogo wrote applies on Linux.
+        assert_eq!(load_user_at(&path, Os::Linux).unwrap().entry.renderer, None);
+    }
+
+    #[test]
+    fn set_user_keys_writes_this_os_table_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("1.toml");
+        set_user_keys_at(&path, &[("renderer", Some("dxmt"))], Os::Macos).unwrap();
+        set_user_keys_at(&path, &[("renderer", Some("wined3d"))], Os::Linux).unwrap();
+        let r = |os| load_user_at(&path, os).unwrap().entry.renderer;
+        assert_eq!(r(Os::Macos).as_deref(), Some("dxmt"));
+        assert_eq!(r(Os::Linux).as_deref(), Some("wined3d"));
+        // Removing the last key gogo wrote there drops the table.
+        set_user_keys_at(&path, &[("renderer", None)], Os::Linux).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(raw, "[platforms.macos]\nrenderer = \"dxmt\"\n");
+        // gogo never writes a Mac-only renderer for Linux.
+        let err = set_user_keys_at(&path, &[("renderer", Some("dxmt/v0.80"))], Os::Linux);
+        assert!(err.is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+    }
+
+    /// An L4 file from before #166: gogo's legacy keys move under
+    /// `[platforms.macos]` on its next write, the user's stay put.
+    #[test]
+    fn set_user_keys_moves_legacy_owned_keys() {
+        let legacy = "# my notes\nruntime = \"wine-staging/11.18\"  # pinned\n\
+                      renderer = \"dxmt/v0.80\"\nenv = { WINEMSYNC = \"1\" }\n";
+        for os in Os::ALL {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("1.toml");
+            std::fs::write(&path, legacy).unwrap();
+            // Same value as the legacy one (on a Mac): nothing changes.
+            if os == Os::Macos {
+                let c = set_user_keys_at(&path, &[("renderer", Some("dxmt/v0.80"))], os).unwrap();
+                assert!(c.is_empty());
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), legacy);
+            }
+            let c = set_user_keys_at(&path, &[("renderer", Some("wined3d"))], os).unwrap();
+            let old = (os == Os::Macos).then(|| "dxmt/v0.80".to_string());
+            assert_eq!(c[0].old, old, "{os:?}");
+            let after = std::fs::read_to_string(&path).unwrap();
+            let doc: toml::Table = toml::from_str(&after).unwrap();
+            assert!(
+                !doc.contains_key("runtime") && !doc.contains_key("renderer"),
+                "{after}"
+            );
+            // The user's own legacy key is theirs: left at the top.
+            assert!(doc.contains_key("env"), "{after}");
+            assert!(
+                after.contains("# my notes") && after.contains("# pinned"),
+                "{after}"
+            );
+            let m = load_user_at(&path, Os::Macos).unwrap();
+            assert_eq!(m.entry.runtime.as_deref(), Some("wine-staging/11.18"));
+            assert_eq!(m.entry.env["WINEMSYNC"], "1");
+            let l = load_user_at(&path, Os::Linux).unwrap();
+            assert_eq!(l.entry.runtime, None);
+            assert!(l.entry.env.is_empty());
+            if os == Os::Macos {
+                assert_eq!(m.entry.renderer.as_deref(), Some("wined3d"));
+                assert_eq!(l.entry.renderer, None);
+            } else {
+                // The Mac keeps its value; Linux gets the new one.
+                assert_eq!(m.entry.renderer.as_deref(), Some("dxmt/v0.80"));
+                assert_eq!(l.entry.renderer.as_deref(), Some("wined3d"));
+            }
+        }
+        // A legacy key [platforms.macos] already overrides never applied: it goes.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("1.toml");
+        std::fs::write(
+            &path,
+            "runtime = \"a/1\"\n[platforms.macos]\nruntime = \"b/2\"\n",
+        )
+        .unwrap();
+        let c = set_user_keys_at(&path, &[("renderer", Some("wined3d"))], Os::Macos).unwrap();
+        assert_eq!(c.len(), 1);
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(!after.contains("a/1"), "{after}");
+        let e = load_user_at(&path, Os::Macos).unwrap().entry;
+        assert_eq!(e.runtime.as_deref(), Some("b/2"));
     }
 
     #[test]
     fn set_user_keys_refuses_user_keys() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("1.toml");
-        assert!(set_user_keys_at(&path, &[("env", Some("x"))]).is_err());
+        assert!(set_user_keys_at(&path, &[("env", Some("x"))], Os::Macos).is_err());
         assert!(!path.exists());
     }
 
@@ -1258,9 +1689,201 @@ tested = [{ runtime = "winecx/24.0.7_7", host = "m4pro/macos-27.0.1", date = 202
         unsafe { std::env::set_var("GOGO_HOME", tmp.path()) };
         assert_eq!(user_path("42"), tmp.path().join("compat/42.toml"));
         set_user_keys("42", &[("renderer", Some("wined3d"))]).unwrap();
+        let raw = std::fs::read_to_string(user_path("42")).unwrap();
+        assert!(
+            raw.contains(&format!("[platforms.{}]", Os::current().key())),
+            "{raw}"
+        );
         let p = load_user("42").unwrap();
         assert_eq!(p.entry.renderer.as_deref(), Some("wined3d"));
         assert!(load_user("../42").is_err());
         unsafe { std::env::remove_var("GOGO_HOME") };
+    }
+
+    #[test]
+    fn platform_table_merges_over_the_top_level() {
+        let raw = r#"
+exe   = "Game.exe"
+args  = ["-a"]
+verbs = ["d3dx9", "xinput", "d3dcompiler_43"]
+dll_overrides = { ddraw = "n,b", dinput = "n" }
+
+[platforms.macos]
+renderer = "dxmt"
+args     = ["-windowed"]
+verbs    = ["-xinput", "xact"]
+dll_overrides = { ddraw = "b" }
+env      = { WINEMSYNC = "1" }
+
+[platforms.linux]
+renderer = "wined3d"
+verbs    = ["-*", "vcrun2019"]
+protonfixes = false
+"#;
+        let m = db(raw);
+        assert!(m.warnings.is_empty(), "{:?}", m.warnings);
+        let m = m.entry;
+        assert_eq!(m.exe.as_deref(), Some("Game.exe"));
+        assert_eq!(m.renderer.as_deref(), Some("dxmt"));
+        assert_eq!(m.args, Some(vec!["-windowed".into()]));
+        assert_eq!(m.dll_overrides["ddraw"], "b");
+        assert_eq!(m.dll_overrides["dinput"], "n");
+        assert_eq!(m.env["WINEMSYNC"], "1");
+        assert_eq!(m.protonfixes, None);
+        let verbs = |e: &CompatEntry| {
+            merge(&[(Layer::Db, e)])
+                .verbs
+                .into_iter()
+                .map(|s| s.value)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(verbs(&m), ["d3dx9", "d3dcompiler_43", "xact"]);
+
+        let l = parse(raw, Os::Linux, Layer::Db).unwrap().entry;
+        assert_eq!(l.renderer.as_deref(), Some("wined3d"));
+        assert_eq!(l.args, Some(vec!["-a".into()]));
+        assert_eq!(l.dll_overrides["ddraw"], "n,b");
+        assert!(l.env.is_empty());
+        assert_eq!(l.protonfixes, Some(false));
+        assert_eq!(verbs(&l), ["vcrun2019"]);
+        // `-*` in a platform table clears the lower layers' verbs too.
+        let auto = CompatEntry {
+            verbs: Some(vec!["d3dx11_43".into()]),
+            ..Default::default()
+        };
+        let eff = merge(&[(Layer::Auto, &auto), (Layer::Db, &l)]);
+        assert_eq!(eff.verbs.len(), 1);
+        assert!(!eff.protonfixes.unwrap().value);
+    }
+
+    #[test]
+    fn a_platform_status_drops_the_lane_below_it() {
+        let raw = "[platforms.macos]\nstatus = \"plays\"\n";
+        let mut base =
+            mac("status = \"broken\"\nlane = \"depot\"\n[lanes.installer]\nstatus = \"boots\"");
+        overlay(&mut base, db(raw).entry);
+        assert_eq!(base.status, Some(Status::Plays));
+        assert_eq!(base.lane, None);
+        assert!(base.lanes.is_empty());
+    }
+
+    #[test]
+    fn os_only_keys_at_the_top_level_warn_in_l3() {
+        let p = db(
+            "title = \"T\"\nrenderer = \"dxmt\"\nruntime = \"x/1\"\nenv = { A = \"1\" }\n\
+                    status = \"plays\"\nprotonfixes = false\n",
+        );
+        assert_eq!(p.entry.title.as_deref(), Some("T"));
+        assert_eq!(p.entry.renderer, None);
+        assert_eq!(p.entry.runtime, None);
+        assert!(p.entry.env.is_empty());
+        assert_eq!(p.entry.status, None);
+        assert_eq!(p.entry.protonfixes, None);
+        assert_eq!(p.warnings.len(), 5, "{:?}", p.warnings);
+        assert!(
+            p.warnings
+                .contains(&"`renderer` is only valid under [platforms.<os>]: ignored".into()),
+            "{:?}",
+            p.warnings
+        );
+        // `protonfixes` was never a top-level key, so in L4 it isn't legacy.
+        let p = parse("protonfixes = false", Os::Linux, Layer::User).unwrap();
+        assert_eq!(p.entry.protonfixes, None);
+        assert_eq!(p.warnings.len(), 1);
+        // Linux only.
+        let p = db("[platforms.macos]\nprotonfixes = false\n");
+        assert_eq!(p.entry.protonfixes, None);
+        assert_eq!(
+            p.warnings,
+            ["`platforms.macos.protonfixes` is Linux only: ignored"]
+        );
+        assert!(parse("[platforms.linux]\nprotonfixes = 1", Os::Macos, Layer::Db).is_err());
+    }
+
+    #[test]
+    fn mac_only_renderers_are_an_error_for_linux() {
+        for r in ["dxmt", "dxmt/v0.80", "d3dmetal", "d3dmetal/4.0b3"] {
+            let raw = format!("[platforms.linux]\nrenderer = \"{r}\"\n");
+            for os in Os::ALL {
+                let e = parse(&raw, os, Layer::Db).unwrap_err();
+                assert!(e.contains("macOS only"), "{e}");
+            }
+            // Fine for the Mac, and as a legacy (Mac) L4 key on Linux.
+            let raw = format!("[platforms.macos]\nrenderer = \"{r}\"\n");
+            assert!(parse(&raw, Os::Linux, Layer::Db).is_ok());
+            let raw = format!("renderer = \"{r}\"\n");
+            assert!(parse(&raw, Os::Linux, Layer::User).is_ok());
+        }
+        for r in ["wined3d", "cnc-ddraw/v7.1.0.0"] {
+            let raw = format!("[platforms.linux]\nrenderer = \"{r}\"\n");
+            let e = parse(&raw, Os::Linux, Layer::Db).unwrap().entry;
+            assert_eq!(e.renderer.as_deref(), Some(r));
+        }
+    }
+
+    /// An L4 file from before #166: its top-level OS keys are the Mac's.
+    #[test]
+    fn legacy_l4_keys_read_as_macos() {
+        let raw = "renderer = \"dxmt\"\nruntime = \"winecx/24.0.7_7\"\nexe = \"G.exe\"\n\
+                   env = { A = \"1\" }\n";
+        let m = parse(raw, Os::Macos, Layer::User).unwrap();
+        assert_eq!(m.entry.renderer.as_deref(), Some("dxmt"));
+        assert_eq!(m.entry.env["A"], "1");
+        assert_eq!(m.warnings.len(), 1, "{:?}", m.warnings);
+        assert!(
+            m.warnings[0].starts_with(
+                "note: top-level `env`, `renderer`, `runtime` read as [platforms.macos]"
+            ),
+            "{:?}",
+            m.warnings
+        );
+        let l = parse(raw, Os::Linux, Layer::User).unwrap();
+        assert_eq!(l.entry.renderer, None);
+        assert!(l.entry.env.is_empty());
+        assert_eq!(l.entry.exe.as_deref(), Some("G.exe"));
+        assert_eq!(l.warnings.len(), 1);
+        assert!(
+            l.warnings[0].contains("ignored on linux"),
+            "{:?}",
+            l.warnings
+        );
+        // [platforms.macos] wins over a legacy key; maps still merge per key.
+        let raw = "renderer = \"dxmt\"\nenv = { A = \"1\" }\n\
+                   [platforms.macos]\nrenderer = \"wined3d\"\nenv = { B = \"2\" }\n";
+        let m = mac(raw);
+        assert_eq!(m.renderer.as_deref(), Some("wined3d"));
+        assert_eq!((m.env["A"].as_str(), m.env["B"].as_str()), ("1", "2"));
+    }
+
+    /// The L3 migration (#166) changed no macOS entry: each pre-#166 file
+    /// (kept in `tests/fixtures/compat-pre-166/`, read the way gogo read
+    /// them then) merges to the same entry as its migrated `compat/` file.
+    /// On Linux the migrated files carry no status: none was seen there.
+    #[test]
+    fn l3_migration_keeps_every_macos_entry() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let fixtures = root.join("tests/fixtures/compat-pre-166");
+        let mut n = 0;
+        for f in std::fs::read_dir(&fixtures).unwrap() {
+            let path = f.unwrap().path();
+            let name = path.file_name().unwrap().to_str().unwrap().to_string();
+            let before: CompatEntry =
+                toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            let now = std::fs::read_to_string(root.join("../../compat").join(&name)).unwrap();
+            let after = db(&now).entry;
+            assert_eq!(
+                merge(&[(Layer::Db, &before)]),
+                merge(&[(Layer::Db, &after)]),
+                "compat/{name}"
+            );
+            let linux = parse(&now, Os::Linux, Layer::Db).unwrap().entry;
+            assert_eq!(linux.status, None, "compat/{name}");
+            assert!(
+                linux.lanes.is_empty() && linux.tested.is_none(),
+                "compat/{name}"
+            );
+            n += 1;
+        }
+        assert_eq!(n, 11);
     }
 }
