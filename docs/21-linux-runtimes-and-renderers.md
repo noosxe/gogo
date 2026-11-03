@@ -582,7 +582,7 @@ VKD3D-Proton, plain Wine needs them installed into the prefix, umu-protonfixes i
    Still to settle in the design: the early-exit dialog on Linux (`zenity`/`kdialog`, or
    none), and which paths `launch.conf` writes relative to the state dir (the Mac does
    this so state dirs can be copied).
-10. **Native Linux installers: a separate epic (user decision, 2026-11-03).** GOG's
+10. **Native Linux installers: a separate epic, #162 (user decision, 2026-11-03).** GOG's
     MojoSetup `.sh` installers need no Wine, so they are out of epic #155 and out of
     this design. The design only keeps room for them: `.desktop` files and per-game
     state shouldn't assume Wine.
@@ -672,7 +672,7 @@ Numbered after design 17; the name is a suggestion.
    sources `launch.conf`, §8 item 9; `gogo-launch.toml`,
    prefix per game, logs, early-exit surfacing)
 8. `doctor` on Linux (Vulkan devices, 32-bit ICDs, umu, container, NixOS hints)
-9. Scope notes: native Linux installers (separate epic, §8 item 10); aarch64 kept in
+9. Scope notes: native Linux installers (separate epic #162, §8 item 10); aarch64 kept in
    the design, nothing built for it alone (§8 item 11)
 10. Testing (unit and wiremock tests; the user's host pass; no VM rendering)
 11. Open items, and which risks from docs/21 §9 the design addresses
