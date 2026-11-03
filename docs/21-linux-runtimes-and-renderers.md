@@ -390,9 +390,22 @@ VKD3D-Proton, plain Wine needs them installed into the prefix, umu-protonfixes i
    Runtime launch works without it is untested. If it doesn't, the Nix build needs the
    FHS wrapper too, or nixpkgs' `umu-launcher` instead of the zipapp.
 
-2. **Where do GE-Proton builds live?** gogo's store (pinned, `prune`-able, passed as a
-   path in `PROTONPATH`) or `~/.local/share/Steam/compatibilitytools.d` (shared with
-   Steam, Lutris, Heroic, ProtonUp-Qt)? 1.5 GB per version makes sharing attractive.
+2. **Where GE-Proton builds live: decided by the user (2026-11-03).** Steam is **not**
+   a requirement. umu takes any directory in `PROTONPATH`, and
+   `compatibilitytools.d` is only a place where it looks names up
+   (`$XDG_DATA_HOME/Steam/compatibilitytools.d`, or under `UMU_FOLDERS_PATH`;
+   **verified**, `umu_consts.py`). So:
+   - **Default: gogo's store**, pinned and `prune`-able, passed to umu as a path.
+   - **If Steam is installed or `compatibilitytools.d` already exists** (Steam, Lutris,
+     Heroic or ProtonUp-Qt may use it), gogo asks once whether to keep GE-Proton builds
+     there instead, and remembers the answer in its config. `gogo config set` changes it
+     later (key name for the design, e.g. `linux.proton_dir = "store" | "steam"`).
+   - Detection, for the design to confirm: `~/.local/share/Steam` (on this machine
+     `~/.steam/root` points there; Steam is installed, but `compatibilitytools.d` does
+     not exist yet) and Flatpak Steam's `~/.var/app/com.valvesoftware.Steam/data/Steam`
+     (**reported**).
+
+   Still to settle in the design: what gogo owns in a shared directory (R26, R27).
 3. **Who owns the Steam Linux Runtime download?** umu fetches it into
    `~/.local/share/umu`; gogo can only pin it by letting umu do it.
 4. **protonfixes on or off by default**, and how L4 wins over it (§4.2 items 2–3).
@@ -458,6 +471,8 @@ worth knowing.
 | R23 | Compat data written for the Mac (`renderer = "dxmt"`, `WINEMSYNC`, Mac `tested` entries) would apply on Linux until L3/L4 get a platform dimension | medium | §4.2 item 1 |
 | R24 | New archive formats (zstd, zip) mean new crates, which have to pass `cargo deny` | low | §3.2 |
 | R25 | GE-Proton's repo has no licence GitHub can detect; the tarball carries Valve's BSD-3 plus each component's licence. Fine for downloading; check it before gogo mirrors or redistributes anything | low | §1.1 |
+| R26 | In a shared `compatibilitytools.d`, `prune` and the N-1 rule must touch only builds gogo installed (a marker file or a list in gogo's state). Builds other tools put there aren't sha-pinned, so gogo can't vouch for them | medium | §8 item 2 |
+| R27 | Other tools can delete or replace a build gogo pinned (ProtonUp-Qt cleanups, a user tidying up). A launch then finds its runtime gone or different; gogo has to check before launching. Steam also lists every build there as a compatibility tool | low | §8 item 2 |
 
 ## 10. Proposed outline for the design doc (`docs/design/18-linux-runtime.md`)
 
@@ -466,7 +481,8 @@ Numbered after design 17; the name is a suggestion.
 0. Summary and decisions table
 1. Decision 1: runtime default (GE-Proton through umu) and the second runtime
 2. Decision 2: umu as a required dependency (zipapp download after confirmation;
-   Python from the flake or the user, §8 item 1); where GE-Proton lives (store or Steam `compatibilitytools.d`);
+   Python from the flake or the user, §8 item 1); where GE-Proton lives (store by
+   default, shared `compatibilitytools.d` on request, §8 item 2);
    the Steam Linux Runtime
 3. Decision 3: renderer mapping (L1 scan → Proton switches; plain-Wine DLL install;
    cnc-ddraw vs D7VK)
