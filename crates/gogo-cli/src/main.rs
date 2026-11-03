@@ -3680,8 +3680,9 @@ mod store_tests {
                 .map(|e| e.id)
                 .collect()
         };
-        assert_eq!(ids(Os::Linux, false), ["cnc-ddraw"]);
+        assert_eq!(ids(Os::Linux, false), ["umu", "cnc-ddraw"]);
         assert!(ids(Os::Macos, false).contains(&"winecx26"));
+        assert!(!ids(Os::Macos, false).contains(&"umu"));
         assert!(ids(Os::Macos, false).contains(&"cnc-ddraw"));
         assert_eq!(ids(Os::Linux, true).len(), catalog::entries().len());
     }

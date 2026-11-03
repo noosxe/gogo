@@ -19,9 +19,15 @@ const UA: &str = concat!("gogo/", env!("CARGO_PKG_VERSION"), " (runtime catalog)
 pub enum Kind {
     Wine,
     /// A tool payload; `payload` names the file that proves the extract
-    /// (design 13 D2: the `winetricks` script).
+    /// (design 13 D2: the `winetricks` script; umu's `umu-run` zipapp).
+    /// `notice`: extra licence text for the store's `NOTICES.txt`.
+    /// `runtimes`: for umu, the Steam runtime appids (a Proton build's
+    /// `require_tool_appid`) its pin maps to a container (design 18 §2.1,
+    /// R2); empty for any other tool.
     Tool {
         payload: &'static str,
+        notice: Option<&'static str>,
+        runtimes: &'static [&'static str],
     },
     /// A renderer (design 16 decisions 3 and 6), stored as downloaded under
     /// `renderers/<id>/<ver>/<arch>/`. `payload` proves the extract like a
@@ -609,6 +615,8 @@ static ENTRIES: &[CatalogEntry] = &[
         os: MACOS,
         kind: Kind::Tool {
             payload: "winetricks",
+            notice: None,
+            runtimes: &[],
         },
         status: Status::Tool,
         // Releases since 20220411 carry no tarball asset (#106): the script
@@ -627,6 +635,39 @@ static ENTRIES: &[CatalogEntry] = &[
         arch: None,
         vendor_signed: false,
         note: "src/winetricks at a release tag (sha256-pinned)",
+        frameworks: None,
+    },
+    CatalogEntry {
+        id: UMU,
+        os: &[Os::Linux],
+        kind: Kind::Tool {
+            payload: "umu-run",
+            notice: Some(UMU_NOTICE),
+            // RUNTIME_VERSIONS in umu/umu_runtime.py at the 1.4.4 tag:
+            // soldier, sniper, steamrt4, steamrt4-arm64.
+            runtimes: &["1391110", "1628350", "4183110", "4185400"],
+        },
+        status: Status::Tool,
+        // The release zipapp (design 18 §2.1): `umu/umu-run`, a Python
+        // zipapp that vendors its dependencies. 430,080 B; the pin is
+        // GitHub's asset digest, re-checked against the download 2026-11-04.
+        discovery: Some(Discovery::Pinned(PinnedAsset {
+            repo: "Open-Wine-Components/umu-launcher",
+            tag: "1.4.4",
+            asset: "umu-launcher-1.4.4-zipapp.tar",
+            version: "1.4.4",
+            sha256: "eb590691841f7fad3fc3ad8fd5db4ccb87849fe7948e62b28ece7a4ee48cc851",
+        })),
+        license: "GPL-3.0 (umu-launcher by Open-Wine-Components), run as a separate program",
+        redistributable: true,
+        min_macos: None,
+        // Python, so arch-independent code; but umu itself only starts on
+        // x86_64 and aarch64, and gogo's Proton lane is x86_64 first.
+        arch: Some(Arch::X86_64),
+        vendor_signed: false,
+        note: "umu-launcher's release zipapp: runs GE-Proton in the Steam Linux \
+               Runtime container, through an explicit Python >= 3.10 \
+               ([linux] umu = \"zipapp\")",
         frameworks: None,
     },
     CatalogEntry {
@@ -725,6 +766,30 @@ static ENTRIES: &[CatalogEntry] = &[
         frameworks: None,
     },
 ];
+
+/// The umu-launcher catalog id (design 18 §2.1).
+pub const UMU: &str = "umu";
+
+/// umu's licence note, for the store's `NOTICES.txt`.
+pub const UMU_NOTICE: &str = "\
+umu-launcher (https://github.com/Open-Wine-Components/umu-launcher) is free
+software under the GNU General Public License, version 3. gogo downloaded its
+release zipapp unmodified from that project's GitHub release and runs it as a
+separate program (`<python> umu-run ...`); gogo links none of its code and
+doesn't redistribute it. The source for this version is at the release tag.
+The zipapp vendors python-xlib (LGPL-2.1), urllib3, truststore and six (MIT);
+their licence texts are inside it, under *.dist-info/.
+";
+
+/// The Steam runtime appids the newest umu in the catalog maps to a
+/// container (design 18 §2.1, R2): a Proton build whose
+/// `require_tool_appid` isn't here needs a umu bump.
+pub fn umu_runtimes() -> &'static [&'static str] {
+    match find(UMU).map(|e| &e.kind) {
+        Some(Kind::Tool { runtimes, .. }) => runtimes,
+        _ => &[],
+    }
+}
 
 /// Where the Template keeps its D3DMetal kit: `wine/x86_64-{unix,windows}`
 /// (overlaid on the engine's `lib/wine/`; the unix libs are symlinks to
@@ -1181,14 +1246,15 @@ mod os_tests {
         );
     }
 
-    /// Every Mac entry stays a Mac entry; cnc-ddraw is the one shared.
+    /// Every Mac entry stays a Mac entry; cnc-ddraw is the one shared,
+    /// umu the one Linux-only.
     #[test]
     fn entries_name_their_os() {
         for e in entries() {
             assert!(!e.os.is_empty(), "{}", e.id);
-            let both = e.runs_on_os(Os::Linux);
-            assert_eq!(both, e.id == "cnc-ddraw", "{}", e.id);
-            assert!(e.runs_on_os(Os::Macos), "{}", e.id);
+            let linux = e.runs_on_os(Os::Linux);
+            assert_eq!(linux, ["cnc-ddraw", UMU].contains(&e.id), "{}", e.id);
+            assert_eq!(e.runs_on_os(Os::Macos), e.id != UMU, "{}", e.id);
         }
         let winecx = find("winecx26").unwrap();
         assert!(winecx.check_os(Os::Macos).is_ok());
@@ -1198,6 +1264,41 @@ mod os_tests {
             "winecx26 is for macOS only: it doesn't install on Linux"
         );
         assert!(find("cnc-ddraw").unwrap().check_os(Os::Linux).is_ok());
+    }
+
+    /// Design 18 §2.1: the umu zipapp, pinned, Linux x86_64, a tool with
+    /// its GPL-3.0 notice and the appids of umu_runtime.py at its tag.
+    #[test]
+    fn umu_is_a_pinned_linux_tool_listing_its_runtimes() {
+        let umu = find(UMU).unwrap();
+        assert_eq!(umu.os, &[Os::Linux]);
+        assert!(umu.check_os(Os::Macos).is_err());
+        assert_eq!(umu.arch, Some(Arch::X86_64));
+        assert!(matches!(umu.status, Status::Tool));
+        assert!(umu.license.starts_with("GPL-3.0"));
+        let Kind::Tool {
+            payload: "umu-run",
+            notice: Some(notice),
+            runtimes,
+        } = umu.kind
+        else {
+            panic!("umu is a tool with a notice");
+        };
+        assert!(notice.contains("General Public License, version 3"));
+        assert!(notice.contains("separate program"));
+        assert_eq!(runtimes, ["1391110", "1628350", "4183110", "4185400"]);
+        assert_eq!(umu_runtimes(), runtimes);
+        let Some(Discovery::Pinned(pin)) = &umu.discovery else {
+            panic!("pinned");
+        };
+        assert_eq!(pin.repo, "Open-Wine-Components/umu-launcher");
+        assert_eq!(
+            pin.asset,
+            format!("umu-launcher-{}-zipapp.tar", pin.version)
+        );
+        assert_eq!(pin.tag, pin.version);
+        assert_eq!(pin.sha256.len(), 64);
+        assert!(pin.sha256.starts_with("eb590691"));
     }
 }
 
@@ -1570,7 +1671,7 @@ mod catalog_tests {
     fn entries_and_statuses() {
         assert!(find("wine-staging").is_some());
         assert!(find("nope").is_none());
-        assert_eq!(entries().len(), 11);
+        assert_eq!(entries().len(), 12);
         // The default track is the pinned CX 26.3 engine with its Frameworks
         // set (docs/20 §3.4), listed first; CX24 stays as the rollback.
         let cx = find(DEFAULT_RUNTIME).unwrap();
@@ -1659,6 +1760,7 @@ mod catalog_tests {
         for e in entries() {
             match e.id {
                 "winetricks" => assert_eq!((e.arch, e.needs_rosetta()), (None, false)),
+                UMU => assert_eq!(e.arch, Some(Arch::X86_64), "{}", e.id),
                 _ => assert_eq!(e.arch, Some(Arch::X86_64Rosetta), "{}", e.id),
             }
             assert_eq!(e.vendor_signed, e.id == "gptk", "{}", e.id);
