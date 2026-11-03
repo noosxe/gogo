@@ -551,10 +551,14 @@ VKD3D-Proton, plain Wine needs them installed into the prefix, umu-protonfixes i
    renderer = "dxvk"
    status   = "unknown"
    ```
-7. **Second runtime**: Kron4ek staging-wow64 as the plain-Wine option, the distro's Wine,
-   or nothing in the first round?
-8. **D7VK vs cnc-ddraw**: which is the L1 default for `ddraw.dll` importers, and can the
-   scan tell D3D≤7 3D from 2D DirectDraw (e.g. `IDirect3D7` use)?
+7. **Second runtime: none in the first round (user decision, 2026-11-03).** The
+   first round ships GE-Proton through umu only. The plain-Wine path (Kron4ek, the
+   distro's Wine; §1.3, §3.2) stays researched but unbuilt, and R8 doesn't apply yet.
+   Unmanaged Proton builds (item 2) are still allowed.
+8. **D7VK vs cnc-ddraw: needs its own research (user decision, 2026-11-03).** Which is
+   the L1 default for `ddraw.dll` importers, and can the import scan tell 3D D3D≤7
+   games from 2D DirectDraw ones (e.g. `IDirect3D7` use)? Not decided here; to be
+   researched before the design's renderer decision (R17).
 9. **Launcher format**: `.desktop` + shell script calling `gogo launch <gogid>`, or a
    self-contained script with the env baked in (the `launch.conf` mirror)?
 10. **Native Linux installers**: in this epic or a separate one?
@@ -577,7 +581,7 @@ worth knowing.
 | R5 | Disk and bandwidth: 565 MB download and 1.5 GB unpacked per GE-Proton version, plus 175 MB for the runtime; keeping an N-1 rollback doubles it | medium | §1.1 |
 | R6 | Python requirement outside Nix: distros with Python < 3.10 (e.g. Debian 11, which ships 3.9, **reported**) can't run umu | medium | §8 item 1 |
 | R7 | umu's default prefix with `STORE=gog` is `~/Games/gog`, shared by every game. One missing `WINEPREFIX` mixes games' prefixes | medium | §1.2 |
-| R8 | Kron4ek and distro Wine depend on host libraries (32-bit ones too for non-WoW64 builds); on NixOS they need a wrapper | medium | §1.3 |
+| R8 | (deferred with the second runtime, §8 item 7) Kron4ek and distro Wine depend on host libraries (32-bit ones too for non-WoW64 builds); on NixOS they need a wrapper | medium | §1.3 |
 | R9 | Python code runs at launch: `proton` and protonfixes execute from the downloaded runtime. Today's runtimes are also code, but gogo has never shipped a runtime that runs per-game scripts | low | §2.1 |
 
 ### 9.2 Per-game fixes
@@ -620,13 +624,14 @@ worth knowing.
 Numbered after design 17; the name is a suggestion.
 
 0. Summary and decisions table
-1. Decision 1: runtime default (GE-Proton through umu) and the second runtime
+1. Decision 1: runtime (GE-Proton through umu; no second runtime in the first round,
+   §8 item 7)
 2. Decision 2: umu as a required dependency (zipapp download after confirmation;
    Python from the flake or the user, §8 item 1); where GE-Proton lives (store by
    default, shared `compatibilitytools.d` on request, unmanaged builds, §8 item 2);
    the Steam Linux Runtime left to umu in its shared folder (§8 item 3)
-3. Decision 3: renderer mapping (L1 scan → Proton switches; plain-Wine DLL install;
-   cnc-ddraw vs D7VK)
+3. Decision 3: renderer mapping (L1 scan → Proton switches; cnc-ddraw vs D7VK, from
+   the research in §8 item 8)
 4. Decision 4: per-game fixes, detected at app creation (protonfix reading, GOG → umu
    lookup from the build's CSV with a GitHub fallback, L3 seeding, L4 precedence over protonfixes; §8 item 4)
 5. Decision 5: compat schema change for platforms: `[platforms.<os>]` tables in one
