@@ -479,7 +479,8 @@ VKD3D-Proton, plain Wine needs them installed into the prefix, umu-protonfixes i
    design: what wins on a collision (`PROTONFIXES_DISABLE=1` for that game, a
    protonfixes `localfix`, or a warning only), and whether L3 keeps fixes for games
    that protonfixes already covers (R11).
-5. **GOG → umu id lookup: comparison (to decide).** Checked 2026-11-03.
+5. **GOG → umu id lookup: D, the build's CSV with a GitHub fallback (user decision,
+   2026-11-03).** Comparison checked 2026-11-03.
 
    How the copies relate (**verified**): GE-Proton's `protonfixes/umu-database.csv` is
    a git submodule of umu-protonfixes (`subprojects/umu-database`), frozen at release
@@ -506,11 +507,14 @@ VKD3D-Proton, plain Wine needs them installed into the prefix, umu-protonfixes i
    So a fresher id can still help, but rarely. A protonfix that isn't in the build can't
    run whatever the id source says.
 
-   Suggested: **D**. Read the chosen build's own CSV, which matches the fixes that
-   build can actually run, works offline and sends nothing anywhere. Fall back to a
-   cached copy of the CSV from GitHub only when the build has none (unmanaged builds).
-   Skip the API: today it lags, and it sends the user's library to a third party one
-   game at a time.
+   Decided: **D**. gogo reads the chosen build's own CSV: it matches the fixes that
+   build can actually run, works offline and sends nothing anywhere. Only when the
+   build has none (unmanaged builds) does gogo fall back to a cached copy of the CSV
+   from GitHub. gogo doesn't use the API: today it lags, and it sends the user's
+   library to a third party one game at a time.
+
+   Still to settle in the design: whether the fallback follows `main` or a commit gogo
+   pins, and how often the cache refreshes.
 6. **Platform scoping in L3/L4**: a `[platforms.linux]` table, or separate files per OS?
 7. **Second runtime**: Kron4ek staging-wow64 as the plain-Wine option, the distro's Wine,
    or nothing in the first round?
@@ -549,7 +553,7 @@ worth knowing.
 | R11 | Fixes from two owners: L3 and protonfixes both apply verbs, env and overrides for the same game; double runs or conflicting values | medium | §4.2 item 3 |
 | R12 | protonfixes runs winetricks at launch (30 of 78 GOG modules), which needs the network the first time and can fail or stall a launch | medium | §2.4 |
 | R13 | umu-database is GPL-3.0: copying the CSV (or a derived table) into gogo's repo or binary would bring GPL terms in | medium | §2.3 |
-| R14 | The online umu API is a single community host; if it is down or changes, lookups fail. The CSV inside GE-Proton avoids it but lags until the next GE release | low | §2.1, §2.2 |
+| R14 | Id lookups lag: the CSV inside a Proton build is frozen at its release, and the GitHub fallback (§8 item 5) needs the network once. gogo doesn't use the online API, so its host being down doesn't matter | low | §2.1, §8 item 5 |
 | R15 | A GOG game not on Steam gets `umu-<gog id>`, and umu passes the GOG id as `SteamAppId`. Proton's per-appid hacks then key on a GOG id. Today GOG ids (about 1–2 billion) don't overlap Steam appids (about 4.2 million and below), so no collision yet | low | §1.2, §2.2 |
 
 ### 9.3 Renderers and drivers
@@ -589,7 +593,7 @@ Numbered after design 17; the name is a suggestion.
 3. Decision 3: renderer mapping (L1 scan → Proton switches; plain-Wine DLL install;
    cnc-ddraw vs D7VK)
 4. Decision 4: per-game fixes, detected at app creation (protonfix reading, GOG → umu
-   lookup, L3 seeding, L4 precedence over protonfixes; §8 item 4)
+   lookup from the build's CSV with a GitHub fallback, L3 seeding, L4 precedence over protonfixes; §8 item 4)
 5. Decision 5: compat schema change for platforms (migration of today's 13 L3 files)
 6. Decision 6: store layout and GC on Linux (XDG paths, archive formats, prune, shared
    tools dir)
