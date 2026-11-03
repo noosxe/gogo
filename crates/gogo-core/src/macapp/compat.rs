@@ -683,9 +683,20 @@ fn set_user_keys_at(
     for c in &changes {
         let t = platform_table(&mut doc, os).map_err(err)?;
         match &c.new {
-            Some(v) => {
-                t.insert(&c.key, toml_edit::value(v.as_str()));
-            }
+            // In place when the key is there: `insert` would replace the
+            // key too, and the comment above it lives on the key.
+            Some(v) => match t.get_mut(&c.key) {
+                Some(item) => {
+                    let mut new = toml_edit::value(v.as_str());
+                    if let (Some(old), Some(nv)) = (item.as_value(), new.as_value_mut()) {
+                        *nv.decor_mut() = old.decor().clone();
+                    }
+                    *item = new;
+                }
+                None => {
+                    t.insert(&c.key, toml_edit::value(v.as_str()));
+                }
+            },
             None => {
                 t.remove(&c.key);
             }
@@ -1583,6 +1594,19 @@ tested = [{ runtime = "winecx/24.0.7_7", host = "m4pro/macos-27.0.1", date = 202
         assert_eq!(c[1].old.as_deref(), Some("winecx/24.0.7_7"));
         let after = std::fs::read_to_string(&path).unwrap();
         assert!(after.contains("# my note"), "{after}");
+        // Comments on a key gogo overwrites in its table stay too.
+        let raw = after.replace(
+            "renderer = \"dxmt/v0.80\"",
+            "# why dxmt\nrenderer = \"dxmt/v0.80\" # pinned",
+        );
+        std::fs::write(&path, &raw).unwrap();
+        set(&[("renderer", Some("wined3d"))]);
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains("# why dxmt\nrenderer = \"wined3d\" # pinned"),
+            "{after}"
+        );
+        set(&[("renderer", Some("dxmt/v0.80"))]);
         let p = load_user_at(&path, Os::Macos).unwrap().entry;
         assert_eq!(p.renderer.as_deref(), Some("dxmt/v0.80"));
         assert_eq!(p.runtime, None);
