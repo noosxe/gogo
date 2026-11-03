@@ -70,7 +70,7 @@ gogo artifacts (GPTK: consent-download conduit only, D9).
 > N-1. The flat layout below stays readable.
 
 ```
-<state_dir>/runtimes/                  # ~/Library/Application Support/gogo/runtimes/ on macOS
+<data_root>/runtimes/                  # ~/Library/Application Support/gogo/runtimes/ on macOS, ~/.local/share/gogo/runtimes/ on Linux (06 §1)
   wine-staging/11.18/…                 # extracted + probed runtime tree
   tools/winetricks/<sha256[:12]>/winetricks
   tools/shims/{cabextract,7z}          # materialized from embedded bytes

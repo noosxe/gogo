@@ -489,6 +489,21 @@ tested = [
   supports it (btrfs, XFS, bcachefs), else a plain copy. The plan shows which, and the
   extra disk a copy costs. `gogo depot`'s help loses "macOS only for now".
 
+- **As built (#167)** — choices the design left open:
+  - `os` is stated on every catalog entry (`os = ["macos"]` for every Mac one), with no
+    default. The catalog is static Rust data, so there is no old data a default would
+    keep valid; a default of macOS would let a Linux entry that forgot `os` pass as a
+    Mac one.
+  - `list --all` rows for another OS read "macOS only, not installable on Linux";
+    `--json` rows gain `os` and `installable`. `install` of another OS's entry exits 2:
+    "winecx26 is for macOS only: it doesn't install on Linux". The check is in the CLI;
+    `store::install` stays OS-agnostic.
+  - cnc-ddraw keeps the Mac x86_64 arch (it's a Windows DLL); a Linux `x86_64` runtime
+    takes Mac-x86_64 renderer builds, and listings label it plain `x86_64` on Linux.
+  - Logs: `state::logs_root()` (`<state_dir>/logs` on Linux, so `GOGO_HOME` flattens
+    it) feeds doctor and `apps`. The launcher script still writes
+    `~/Library/Logs/gogo`; pointing it at the Linux path is #177's.
+
 ## 7. Decision 7: the launcher
 
 **Settled (docs/21 §8 item 9):** `~/.local/share/applications/gogo-<gogid>.desktop` runs
