@@ -84,6 +84,11 @@ pub enum MacAppError {
     #[error("{0}")]
     Arch(String),
 
+    /// umu-launcher can't be provisioned or run as configured (design 18
+    /// §2.1): `[linux] umu` unset headless, no usable Python, no `umu-run`.
+    #[error("umu: {0}")]
+    Umu(String),
+
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
