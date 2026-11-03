@@ -325,7 +325,8 @@ So yes: `PROTON_*` and DXVK vars map onto the existing `env` with no schema chan
 - **NixOS**: umu from nixpkgs is already FHS-wrapped; a downloaded umu zipapp or a
   Kron4ek build is not. umu is required for the Proton runtime (§8 item 1): gogo downloads
   its zipapp after the user confirms; Python comes from the flake on Nix and from the
-  user elsewhere.
+  user elsewhere. On NixOS the zipapp must run inside an FHS env
+  (`steam.buildRuntimeEnv`) from the flake: verified in §8 item 1 (R1).
 - **Testing**: no Vulkan in the VM, so the user's machine is the host pass, as #150 says.
 
 ## 6. Corrections to #150
@@ -378,17 +379,65 @@ VKD3D-Proton, plain Wine needs them installed into the prefix, umu-protonfixes i
    - The archive holds `umu/umu-run`, one zip file with a `#!/usr/bin/env python3`
      shebang. It vendors its dependencies (`python-xlib`, `urllib3`, `truststore`,
      `six`), so all it needs is a host Python ≥ 3.10 (`requires-python` in umu's
-     `pyproject.toml`) (**verified**, archive listing, not run).
+     `pyproject.toml`) (**verified**, archive listing; run with nixpkgs Python 3.12 on 2026-11-03, see below).
    - **Nix**: gogo's flake provides a pinned Python (≥ 3.10) for it.
    - **Outside Nix**: a compatible Python installed by the user is a requirement, and
      `doctor` checks for it. The download itself happens only after the user confirms.
    - **No umu, no Proton runtime**: no fallback that runs `proton` directly. Plain-Wine
      runtimes (Kron4ek, the distro's Wine) don't use umu and stay usable without it.
 
-   Still to check on NixOS: nixpkgs wraps its own `umu-launcher` in `buildFHSEnv`. The
-   zipapp run with a plain Python gets no such wrapper. Whether umu's Steam Linux
-   Runtime launch works without it is untested. If it doesn't, the Nix build needs the
-   FHS wrapper too, or nixpkgs' `umu-launcher` instead of the zipapp.
+   **On NixOS the bare zipapp needs an FHS wrapper (verified 2026-11-03, R1).** With a
+   plain nixpkgs Python and no wrapper, umu itself runs fine and downloads the runtime,
+   but the Steam Linux Runtime's own binaries can't start on a stock NixOS root.
+   Inside a `buildFHSEnv` the same zipapp works. So the Nix build wraps the zipapp in an
+   FHS env, the one nixpkgs uses (`steam.buildRuntimeEnv`), with `runScript = python3`,
+   and gogo runs `<fhs-env> <store>/umu-run …`. The zipapp pin stays. The test:
+
+   - **Setup.** umu `1.4.4` zipapp (sha256 `eb590691…`, the GitHub asset digest),
+     `GE-Proton11-12-x86_64.tar.gz` (released 2026-11-03, `.sha512sum` OK), `python3`
+     3.12.15 from nixpkgs (system flake, nixos 26.11.20261030). NixOS 26.11 x86_64,
+     kernel 7.2.11. umu read `require_tool_appid 4183110` and fetched **steamrt4**
+     `4.0.20261021.265997` (not sniper): 699 MB unpacked.
+   - **Program.** Console only, no GPU: `cmd /c echo …`, `cmd /c type Z:\etc\os-release`,
+     `cmd /c exit 7`, with `GAMEID=umu-0`, `WINEPREFIX` and `XDG_DATA_HOME` in a scratch
+     dir, `PROTONPATH=<GE-Proton dir>`, `UMU_LOG=debug`, run under `env -i`.
+   - **A stock NixOS root.** The test ran from the Claude desktop app, which is itself a
+     `buildFHSEnv` (its `/usr` and `/lib64` came from `claude-desktop-fhsenv-rootfs`), so
+     a direct run would have passed for the wrong reason. Every run therefore went
+     through `bwrap --tmpfs / --ro-bind /nix /nix --ro-bind <host /etc> /etc --bind /run
+     /run --bind /home /home --bind /tmp /tmp --proc /proc --dev-bind /dev /dev`, with
+     only `/usr/bin/env` and `/bin/sh` added. That is a stock NixOS root. Nested user
+     namespaces worked: pressure-vessel's own bwrap ran inside it.
+
+   | Variant | Result | Where it stops |
+   |---|---|---|
+   | Zipapp, stock root | **fails** (exit 127) | `pressure-vessel-wrap: cannot execute: required file not found`. Its ELF interpreter is `/lib64/ld-linux-x86-64.so.2`, which stock NixOS lacks (`pv-verify` fails the same way) |
+   | + `/lib64/ld-linux-x86-64.so.2` from `programs.nix-ld` (this host has it on) | **fails** (exit 1) | pressure-vessel's bwrap self-check `srt-bwrap --ro-bind /etc … --ro-bind /usr /usr --ro-bind-try /nix/store … true` binds `/usr` and `/nix/store` but not `/run`, so `true` from `/run/current-system/sw/bin` isn't found: `bwrap: execvp true: No such file or directory` |
+   | + a store coreutils `bin` first on `PATH` | **fails** (exit 1) | importing the host graphics stack: `x86_64-linux-gnu-capsule-capture-libs: error: code 2: open "/var/cache/ldconfig/ld.so.cache"` (no `ld.so.cache` on NixOS); the i386 helpers can't run (no `/lib/ld-linux.so.2`) |
+   | + `PRESSURE_VESSEL_GRAPHICS_PROVIDER=""` | **works**, console only | the container starts, `type Z:\etc\os-release` prints `PRETTY_NAME="Steam Runtime 4"`, `BUILD_ID="4.0.20261021.265997"`; `cmd /c exit 7` → umu-run exits 7. But with no graphics provider the game gets the runtime's own Mesa and none of the host's drivers (no NVIDIA), so this is no path for games |
+   | nixpkgs `umu-launcher` 1.4.4 (`buildRuntimeEnv`), stock root, no extras | **works** | `R1-NIXPKGS-OK`, `PRETTY_NAME="Steam Runtime 4"`; default graphics provider; pressure-vessel maps `/run/opengl-driver{,-32}` |
+   | Zipapp in a minimal `buildFHSEnv` (`targetPkgs = [ python312 ]`, `runScript = "python3"`) | **works**, console | `R1-FHS-min-OK`; but `W: Cannot determine ld.so for i386-linux-gnu`, and no `/run/opengl-driver` mapping |
+   | Zipapp in `steam.buildRuntimeEnv` (`extraPkgs = [ python312 ]`, `runScript = "python3"`) | **works** | `R1-FHS-steam-OK`, `PRETTY_NAME="Steam Runtime 4"`; same warnings as nixpkgs' package, i386 resolved, `/run/opengl-driver{,-32}` mapped |
+
+   Findings for the design:
+   - **Use `steam.buildRuntimeEnv`, not a minimal `buildFHSEnv`.** It is nixpkgs'
+     own wrapper for `umu-launcher` (`pkgs/by-name/um/umu-launcher/package.nix`), and
+     the minimal one misses the i386 loader and the driver mapping games need. Whether
+     the GPU works through it is still for the host pass (Vulkan/NVIDIA aren't tested
+     here).
+   - **gogo installed outside Nix but running on NixOS** has no wrapper: there umu
+     can't start the runtime even with nix-ld. `doctor` should detect NixOS
+     (`/etc/NIXOS`) and point to the flake install.
+   - **Errors and exit codes.** A `PROTONPATH` without `toolmanifest.vdf` raised
+     `FileNotFoundError` and umu-run still **exited 0**, so gogo must check
+     `PROTONPATH` itself before launching. Otherwise the game's exit code comes back
+     unchanged. Each failing variant also ran the whole launch twice (umu retries once).
+   - **Host prerequisites**: unprivileged user namespaces (here
+     `kernel.unprivileged_userns_clone=1`, `user.max_user_namespaces=2147483647`); ntsync
+     was available (`ntsync: up and running.`).
+   - **Disk writes**: with `XDG_DATA_HOME` redirected, umu wrote only under
+     `$XDG_DATA_HOME/umu` (runtime, `umu-shim`, lock), plus the `WINEPREFIX`. Nothing in
+     `/tmp` or elsewhere in `$HOME`.
 
 2. **Where GE-Proton builds live: decided by the user (2026-11-03).** Steam is **not**
    a requirement. umu takes any directory in `PROTONPATH`, and
@@ -619,7 +668,7 @@ worth knowing.
 
 | # | Risk | Severity | Why (section) |
 |---|---|---|---|
-| R1 | The umu zipapp may not launch the Steam Linux Runtime on NixOS without the FHS wrapper that nixpkgs adds | high | untested (§8 item 1) |
+| R1 | (**verified 2026-11-03: fails without a wrapper; fixed by one**) The umu zipapp can't launch the Steam Linux Runtime on a stock NixOS root without an FHS wrapper: pressure-vessel needs `/lib64/ld-linux-x86-64.so.2`, a `true` under `/usr` or `/nix/store` for its bwrap check, and `ld.so.cache` for the graphics stack. The zipapp inside `steam.buildRuntimeEnv` (what nixpkgs' `umu-launcher` uses) works with GE-Proton11-12 + steamrt4, console exe; so does nixpkgs' package. GPU not tested. Still open: gogo outside Nix on NixOS (no wrapper) | high → resolved for Nix builds | §8 item 1 |
 | R2 | A pinned umu can fall behind GE-Proton: umu maps runtime appids to runtimes in a hard-coded table (`umu_runtime.py`: soldier, sniper, steamrt4, steamrt4-arm64). A GE-Proton that needs a newer runtime fails until umu is bumped too | high | §1.1, §1.2 |
 | R3 | (accepted, §8 item 3) The Steam Linux Runtime isn't pinned by gogo: umu resolves `latest-public-beta.txt` on `repo.steampowered.com` and updates it in `~/.local/share/umu`. The same game can change behaviour with no gogo change, and the first launch needs the network | medium | §1.2 |
 | R4 | Fast GE-Proton cadence (8 releases in 3 months, two hotfixes on one day) and one main maintainer: pins go stale quickly, regressions land between our host passes | medium | §1.1 |
@@ -704,6 +753,9 @@ All checked 2026-11-02.
   (`4500d09f`), `Open-Wine-Components/umu-proton`, `ValveSoftware/Proton`,
   `doitsujin/dxvk` (v3.1.1), `HansKristian-Work/vkd3d-proton` (v3.1),
   `WinterSnowfall/d7vk` (v2.4), `Kron4ek/Wine-Builds` (11.21).
+- Run on NixOS 26.11 x86_64, 2026-11-03 (R1, §8 item 1): umu 1.4.4 zipapp, GE-Proton11-12
+  x86_64, steamrt4 `4.0.20261021.265997`, nixpkgs `python312` 3.12.15, `umu-launcher`
+  1.4.4 and `steam.buildRuntimeEnv`, in a bwrap root imitating stock NixOS.
 - Source read: `umu/umu_run.py`, `umu/umu_runtime.py`, `umu/umu_consts.py`,
   `umu/umu_proton.py`, `docs/umu.1.scd` (umu-launcher `main`); `fix.py`
   (umu-protonfixes `master`); the `proton` script, `protonfixes/util.py`,
