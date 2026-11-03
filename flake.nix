@@ -43,24 +43,34 @@
 
       packages = forAllSystems (system:
         let
+          pkgs = pkgsFor system;
           gogo = packageFor system;
         in
         {
           default = gogo;
           inherit gogo;
         }
-        # x86_64 Linux: the FHS env gogo runs umu's zipapp with (design 18
-        # §2.1), on its own for a dev-shell run: `export GOGO_UMU_PYTHON=$(nix
-        # build .#umu-python --print-out-paths)/bin/gogo-umu-python`.
-        // nixpkgs.lib.optionalAttrs (gogo ? umuPython) {
-          umu-python = gogo.umuPython;
+        # x86_64 Linux: gogo for the Linux game lane, wrapped to run umu's
+        # zipapp in nixpkgs' Steam runtime FHS env (design 18 §2.1), and that
+        # env on its own, for a dev-shell run: `export GOGO_UMU_PYTHON=$(nix
+        # build .#umu-python --print-out-paths)/bin/gogo-umu-python`. The env
+        # is multiArch; nixpkgs has no i686 set on aarch64-linux.
+        // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") rec {
+          gogo-linux-app = import ./nix/linux-app.nix { inherit pkgs gogo; };
+          umu-python = gogo-linux-app.umuPython;
         });
 
       # `nix run .` / `nix run github:noosxe/gogo`
+      # `nix run .#gogo-linux-app` (x86_64 Linux): the Linux game lane's gogo.
       apps = forAllSystems (system: {
         default = {
           type = "app";
           program = "${packageFor system}/bin/gogo";
+        };
+      } // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
+        gogo-linux-app = {
+          type = "app";
+          program = "${self.packages.${system}.gogo-linux-app}/bin/gogo";
         };
       });
     };
