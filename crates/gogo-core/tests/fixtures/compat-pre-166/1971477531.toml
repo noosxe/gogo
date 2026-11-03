@@ -1,0 +1,5 @@
+# GWENT: The Witcher Card Game. Not run by gogo yet.
+# umu-protonfixes: mfc140 is needed to start the game.
+title  = "GWENT: The Witcher Card Game"
+verbs  = ["mfc140"]
+source = "umu-protonfixes:gamefixes-steam/1284410.py@3603ccbbc20de88c2878306acdfdd4e9a07fc8c4"

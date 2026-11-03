@@ -1149,6 +1149,7 @@ pub fn write_launcher(macos: &Path, display: &str) -> Result<PathBuf, MacAppErro
 #[cfg(all(test, target_os = "macos"))]
 mod launch_tests {
     use super::*;
+    use crate::macapp::compat::{Layer, Os};
 
     fn sample() -> LaunchToml {
         LaunchToml {
@@ -1210,16 +1211,22 @@ mod launch_tests {
         let none = CompatEntry::default();
         assert_eq!(t.effective(&none, &none).unwrap(), t);
 
-        let l4 = compat::parse("variant = \"Settings\"\n").unwrap().entry;
+        let l4 = compat::parse("variant = \"Settings\"\n", Os::Macos, Layer::User)
+            .unwrap()
+            .entry;
         let eff = t.effective(&none, &l4).unwrap();
         assert_eq!(eff.exe, r"C:\GOG\Carmageddon TDR 2000\Setup.exe");
         assert_eq!(eff.workdir, r"C:\GOG\Carmageddon TDR 2000");
         assert!(eff.args.is_empty());
 
         // L4 over L3; an L4 `args` beats the variant's.
-        let l3 = compat::parse("variant = \"Settings\"\n").unwrap().entry;
+        let l3 = compat::parse("variant = \"Settings\"\n", Os::Macos, Layer::Db)
+            .unwrap()
+            .entry;
         let l4 = compat::parse(
             "variant = \"Carmageddon TDR 2000 (safe mode)\"\nargs = [\"-s\", \"-w\"]\n",
+            Os::Macos,
+            Layer::User,
         )
         .unwrap()
         .entry;
@@ -1230,7 +1237,9 @@ mod launch_tests {
 
     #[test]
     fn unknown_variant_fails_and_lists_the_names() {
-        let l4 = compat::parse("variant = \"Turbo\"\n").unwrap().entry;
+        let l4 = compat::parse("variant = \"Turbo\"\n", Os::Macos, Layer::User)
+            .unwrap()
+            .entry;
         let none = CompatEntry::default();
         let e = with_variants().effective(&none, &l4).unwrap_err();
         assert_eq!(
@@ -1389,7 +1398,10 @@ mod launch_tests {
     fn override_applies_field_by_field() {
         let t = sample();
         let l4 = compat::parse(
-            "runtime = \"wine-staging/11.18\"\nexe = \"bin/Other.exe\"\nenv = { DXMT_HUD = \"1\" }\n",
+            "exe = \"bin/Other.exe\"\n[platforms.macos]\nruntime = \"wine-staging/11.18\"\n\
+             env = { DXMT_HUD = \"1\" }\n",
+            Os::Macos,
+            Layer::User,
         )
         .unwrap()
         .entry;

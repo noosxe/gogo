@@ -1106,7 +1106,11 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let home = tempfile::tempdir().unwrap();
         let db = tempfile::tempdir().unwrap();
-        std::fs::write(db.path().join("42.toml"), "renderer = \"d3dmetal\"\n").unwrap();
+        std::fs::write(
+            db.path().join("42.toml"),
+            "[platforms.macos]\nrenderer = \"d3dmetal\"\n",
+        )
+        .unwrap();
         let _g = crate::test_util::env_lock();
         // SAFETY: env mutation under the shared env mutex.
         unsafe {

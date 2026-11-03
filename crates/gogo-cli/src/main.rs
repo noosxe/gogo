@@ -2094,14 +2094,16 @@ fn mac_app_sub(sub: crate::cli::MacAppSub) -> Result<i32, AppError> {
                 (compat::Layer::Db, &db.entry),
                 (compat::Layer::User, &user.entry),
             ]);
-            let warnings: Vec<String> =
-                db.warnings
-                    .iter()
-                    .map(|w| format!("compat DB: unknown key {w}"))
-                    .chain(user.warnings.iter().map(|w| {
-                        format!("{}: unknown key {w}", compat::user_path(&gogid).display())
-                    }))
-                    .collect();
+            let warnings: Vec<String> = db
+                .warnings
+                .iter()
+                .map(|w| format!("compat DB: {w}"))
+                .chain(
+                    user.warnings
+                        .iter()
+                        .map(|w| format!("{}: {w}", compat::user_path(&gogid).display())),
+                )
+                .collect();
             // The renderer setup applies and why (#70): L4, else what the
             // bundle baked, traced back to its layer.
             let mut eff = eff;

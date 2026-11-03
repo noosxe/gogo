@@ -10,6 +10,12 @@ use gogo::engine::events::ProgressEvent;
 use gogo::macapp::bundle::CodesignPolicy;
 use gogo::macapp::{self, MacAppOptions, RuntimeMode};
 
+/// A compat file's `[platforms.<this os>]` table holding `body` (#166).
+fn on_this_os(body: &str) -> String {
+    let os = macapp::compat::Os::current().key();
+    format!("[platforms.{os}]\n{body}")
+}
+
 /// Build a fake runtime whose `wine` logs every invocation to `log_path` and
 /// simulates: `--version` → `wine-9.0-fake`; `wineboot -u` → ok; a `*.exe`
 /// argument → lay down a GOG-style install (`goggame-1.info` + `game.exe`)
@@ -2262,7 +2268,7 @@ fn v2_auto_verbs_are_baked_and_run_once() {
     macapp::setup::setup("1207659013", None).unwrap();
     std::fs::create_dir_all(home.join("compat")).unwrap();
     let l4 = home.join("compat/1207659013.toml");
-    std::fs::write(&l4, "env = { WINEMSYNC = \"1\" }\n").unwrap();
+    std::fs::write(&l4, on_this_os("env = { WINEMSYNC = \"1\" }\n")).unwrap();
     macapp::setup::setup("1207659013", None).unwrap();
     assert_eq!(runs().len(), 1, "{:?}", runs());
 
@@ -2394,7 +2400,7 @@ fn v2_setup_localizes_prefix_and_applies_registry_and_verbs() {
     // says how to install one.
     std::fs::write(
         home.join("compat/1207659013.toml"),
-        "runtime = \"no-such-runtime/1.0\"\n",
+        on_this_os("runtime = \"no-such-runtime/1.0\"\n"),
     )
     .unwrap();
     let err = macapp::setup::setup("1207659013", None).unwrap_err();
@@ -2816,7 +2822,7 @@ g="{home}/games/$3"
 case "$2" in
   next-renderer)
     if grep -q wined3d "$l4" 2>/dev/null; then echo "gogo: $3: no more renderers" >&2; exit 1; fi
-    [ "${{4:-}}" = --dry-run ] || {{ mkdir -p "{home}/compat"; echo 'renderer = "wined3d"' > "$l4"; }}
+    [ "${{4:-}}" = --dry-run ] || {{ mkdir -p "{home}/compat"; printf '[platforms.{os}]\nrenderer = "wined3d"\n' > "$l4"; }}
     echo wined3d;;
   setup)
     new="$(cat "$5/Contents/Resources/gogo-launch.toml" "$l4" 2>/dev/null | /usr/bin/shasum -a 256)"
@@ -2827,7 +2833,8 @@ case "$2" in
 esac
 "#,
             calls = calls.display(),
-            home = home.display()
+            home = home.display(),
+            os = macapp::compat::Os::current().key(),
         ),
     );
     // The dialog stub: records each dialog, answers from a script of choices.
@@ -2890,7 +2897,7 @@ sed -i.bak 1d "{answers}"
 
     // L4 now names the next renderer, written by gogo.
     let l4 = std::fs::read_to_string(home.join("compat/1207659013.toml")).unwrap();
-    assert_eq!(l4.trim(), r#"renderer = "wined3d""#);
+    assert_eq!(l4, on_this_os("renderer = \"wined3d\"\n"));
     let calls = std::fs::read_to_string(&calls).unwrap();
     let calls: Vec<&str> = calls.lines().collect();
     assert_eq!(
@@ -3013,8 +3020,8 @@ fn v2_next_renderer_writes_l4_then_runs_out() {
         Some("wined3d")
     );
     assert_eq!(
-        std::fs::read_to_string(&l4).unwrap().trim(),
-        r#"renderer = "wined3d""#
+        std::fs::read_to_string(&l4).unwrap(),
+        on_this_os("renderer = \"wined3d\"\n")
     );
     // Setup applies it; the order is used up.
     let out = macapp::setup::setup("1207659013", None).unwrap();
@@ -3418,14 +3425,18 @@ fn compat_entry_drives_build_and_setup() {
         r#"
 title    = "Rebel Galaxy"
 exe      = 'bin\RealGame.exe'
-renderer = "wined3d"
 verbs    = ["d3dx9_43", "xact"]
-env      = { WINEMSYNC = "1" }
 args     = ["-windowed"]
 dll_overrides = { xinput1_3 = "n,b" }
+"#
+        .to_string()
+            + &on_this_os(
+                r#"renderer = "wined3d"
+env      = { WINEMSYNC = "1" }
 status   = "boots"
 tested   = [{ runtime = "winecx-24.0.7_7", date = 2026-10-22 }]
 "#,
+            ),
     )
     .unwrap();
     let wt_log = tmp.path().join("winetricks.log");
@@ -3672,7 +3683,7 @@ fn compat_runtime_pins_the_auto_ladder() {
     std::fs::create_dir_all(&db).unwrap();
     std::fs::write(
         db.join("1207659013.toml"),
-        "runtime = \"winecx26/26.3-20261006\"\n",
+        on_this_os("runtime = \"winecx26/26.3-20261006\"\n"),
     )
     .unwrap();
     // SAFETY: env mutation under ENV_LOCK.
@@ -3997,8 +4008,10 @@ fn build_flags_replace_existing_l4_values() {
     std::fs::create_dir_all(l4_path.parent().unwrap()).unwrap();
     std::fs::write(
         &l4_path,
-        "# my notes\nruntime = \"wine-staging/11.18\"\nrenderer = \"dxmt/v0.80\"\n\
-         env = { FOO = \"1\" }\n",
+        on_this_os(
+            "# my notes\nruntime = \"wine-staging/11.18\"\nrenderer = \"dxmt/v0.80\"\n\
+             env = { FOO = \"1\" }\n",
+        ),
     )
     .unwrap();
     let (state, sets) = build(&opts, None);
@@ -4024,7 +4037,7 @@ fn build_flags_replace_existing_l4_values() {
     );
 
     // A key L4 doesn't set gets nothing, even with its flag given.
-    std::fs::write(&l4_path, "runtime = \"wine-staging/11.18\"\n").unwrap();
+    std::fs::write(&l4_path, on_this_os("runtime = \"wine-staging/11.18\"\n")).unwrap();
     let (_, sets) = build(&opts, None);
     assert_eq!(
         sets,
@@ -4042,7 +4055,7 @@ fn build_flags_replace_existing_l4_values() {
 
     // `--renderer d3dmetal` on a 32-bit game is set aside (#71): L4 keeps
     // its renderer.
-    std::fs::write(&l4_path, "renderer = \"wined3d\"\n").unwrap();
+    std::fs::write(&l4_path, on_this_os("renderer = \"wined3d\"\n")).unwrap();
     let d3dmetal = MacAppOptions {
         renderer: macapp::RendererChoice::Force(macapp::Renderer::D3dMetal),
         ..opts.clone()
@@ -4051,12 +4064,12 @@ fn build_flags_replace_existing_l4_values() {
     assert!(sets.is_empty(), "{sets:?}");
     assert_eq!(
         std::fs::read_to_string(&l4_path).unwrap(),
-        "renderer = \"wined3d\"\n"
+        on_this_os("renderer = \"wined3d\"\n")
     );
     assert_eq!(state.renderer, "wined3d");
 
     // Bare `--runtime` (#76): the menu pick is the flag.
-    std::fs::write(&l4_path, "runtime = \"wine-staging/11.18\"\n").unwrap();
+    std::fs::write(&l4_path, on_this_os("runtime = \"wine-staging/11.18\"\n")).unwrap();
     let pick: std::sync::Arc<gogo::macapp::PromptFn> =
         std::sync::Arc::new(|spec: &gogo::macapp::PromptSpec| match spec.kind {
             gogo::macapp::PromptKind::Select => spec
@@ -4087,7 +4100,7 @@ fn build_flags_replace_existing_l4_values() {
         runtime_menu: false,
         ..menu
     };
-    std::fs::write(&l4_path, "runtime = \"wine-staging/11.18\"\n").unwrap();
+    std::fs::write(&l4_path, on_this_os("runtime = \"wine-staging/11.18\"\n")).unwrap();
     let (state, sets) = build(&ladder, None);
     assert!(sets.is_empty(), "{sets:?}");
     assert_eq!(state.runtime, "wine-staging/11.18");
@@ -4403,7 +4416,7 @@ fn doctor_all_green_then_each_check_fails_in_turn() {
     std::fs::create_dir_all(&db).unwrap();
     std::fs::write(
         db.join(format!("{gogid}.toml")),
-        "status = \"broken\"\nnotes = \"black screen\"\n",
+        on_this_os("status = \"broken\"\nnotes = \"black screen\"\n"),
     )
     .unwrap();
     unsafe { std::env::set_var("GOGO_COMPAT_DIR", &db) };
@@ -4655,8 +4668,8 @@ fn portable_bundle_carries_everything_and_sets_up_outside() {
     std::fs::create_dir_all(builder.join("compat")).unwrap();
     std::fs::write(
         builder.join(format!("compat/{gogid}.toml")),
-        "renderer = \"wined3d\"\nenv = { PHARAOH = \"1\" }\n\
-         [[registry]]\nkey = 'HKCU\\Software\\Impressions'\nname = \"Mode\"\ndata = \"window\"\n",
+        on_this_os("renderer = \"wined3d\"\nenv = { PHARAOH = \"1\" }\n")
+            + "[[registry]]\nkey = 'HKCU\\Software\\Impressions'\nname = \"Mode\"\ndata = \"window\"\n",
     )
     .unwrap();
     // SAFETY: env mutation under ENV_LOCK.
@@ -4944,10 +4957,11 @@ fn installer_lane_keeps_its_logs_and_records_the_lane() {
     let compat_dir = t.join("compat");
     std::fs::create_dir_all(&compat_dir).unwrap();
     let entry = |lane: &str| {
-        format!(
-            "status = \"broken\"\nlane = \"{lane}\"\nnotes = \"asks for the CD\"\n\
-             tested = [{{ runtime = \"winecx/24.0.7_7\" }}]\nsource = \"gogo-vm\"\n"
-        )
+        "source = \"gogo-vm\"\n".to_string()
+            + &on_this_os(&format!(
+                "status = \"broken\"\nlane = \"{lane}\"\nnotes = \"asks for the CD\"\n\
+                 tested = [{{ runtime = \"winecx/24.0.7_7\" }}]\n"
+            ))
     };
     std::fs::write(compat_dir.join("1.toml"), entry("depot")).unwrap();
     // SAFETY: env mutation under ENV_LOCK.
