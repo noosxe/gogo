@@ -7,7 +7,6 @@ mod lane;
 #[cfg(target_os = "macos")]
 mod menus;
 mod output;
-#[cfg(target_os = "macos")]
 mod prompt;
 
 use std::sync::Arc;
@@ -2867,6 +2866,35 @@ impl Shelf {
     }
 }
 
+/// The unmanaged Proton builds `runtimes list` shows (design 18 §1): what
+/// discovery finds, plus `[linux] default_runtime`'s `path:` build; each
+/// with whether it's the default.
+fn unmanaged_builds(
+    default_runtime: Option<&str>,
+) -> Vec<(gogo::linuxapp::proton::Unmanaged, bool)> {
+    use gogo::linuxapp::{proton, umu};
+    let default = match proton::default_ref(default_runtime) {
+        Ok(proton::ProtonRef::Path(p)) => Some(p),
+        _ => None,
+    };
+    let same = |a: &std::path::Path, b: &std::path::Path| {
+        a == b || std::fs::canonicalize(a).ok() == std::fs::canonicalize(b).ok()
+    };
+    let mut out: Vec<(proton::Unmanaged, bool)> = proton::discover(&umu::Host::real())
+        .into_iter()
+        .map(|b| {
+            let d = default.as_deref().is_some_and(|p| same(p, &b.path));
+            (b, d)
+        })
+        .collect();
+    if let Some(p) = default
+        && !out.iter().any(|(_, d)| *d)
+    {
+        out.insert(0, (proton::inspect(&p, "[linux] default_runtime"), true));
+    }
+    out
+}
+
 /// `macOS and Linux`, for listings.
 fn os_list(os: &[gogo::macapp::catalog::Os]) -> String {
     os.iter()
@@ -2901,6 +2929,20 @@ async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppEr
 
     let (command, noun) = (shelf.command(), shelf.noun());
     let os = catalog::Os::current();
+    // On Linux the default runtime is `[linux] default_runtime`, else
+    // GE-Proton (design 18 §1); on the Mac the catalog's.
+    let linux_default = (os == catalog::Os::Linux)
+        .then(|| gogo::linuxapp::stored_key(&gogo::config::Config::path(), "default_runtime"))
+        .flatten();
+    let is_default = |id: &str| match os {
+        catalog::Os::Macos => id == catalog::DEFAULT_RUNTIME,
+        catalog::Os::Linux => {
+            matches!(
+                gogo::linuxapp::proton::default_ref(linux_default.as_deref()),
+                Ok(gogo::linuxapp::proton::ProtonRef::Catalog { id: d, .. }) if d == id
+            )
+        }
+    };
     match cmd {
         crate::cli::StoreCmd::List { json, offline, all } => {
             let runtimes = store::load_manifest();
@@ -2949,9 +2991,10 @@ async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppEr
                     })
                     .collect();
                 let used_by = store::users_of(entry.id);
+                let proton = matches!(entry.kind, catalog::Kind::Proton { .. });
                 json_rows.push(serde_json::json!({
                     "id": entry.id,
-                    "default": entry.id == catalog::DEFAULT_RUNTIME,
+                    "default": is_default(entry.id),
                     "status": entry.status.key(),
                     "gone_since": match &entry.status {
                         catalog::Status::Gone { since, .. } => Some(since),
@@ -2966,11 +3009,18 @@ async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppEr
                         "tag": l.tag,
                         "bytes": l.size,
                     })),
-                    "cached": mine.iter().map(|m| serde_json::json!({
-                        "version": m.version,
-                        "bytes": m.bytes,
-                        "fetched_at": m.fetched_at,
-                    })).collect::<Vec<_>>(),
+                    "cached": mine.iter().map(|m| {
+                        let mut row = serde_json::json!({
+                            "version": m.version,
+                            "bytes": m.bytes,
+                            "fetched_at": m.fetched_at,
+                        });
+                        // A build in a shared tools dir (design 18 §2.2).
+                        if let Some(p) = &m.path {
+                            row["path"] = serde_json::json!(p);
+                        }
+                        row
+                    }).collect::<Vec<_>>(),
                     "derived": derived,
                     "used_by": used_by,
                 }));
@@ -3009,7 +3059,7 @@ async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppEr
                         os_list(entry.os),
                         os.label()
                     ),
-                    catalog::Status::Available if entry.id == catalog::DEFAULT_RUNTIME => {
+                    catalog::Status::Available if is_default(entry.id) => {
                         "available · default".to_string()
                     }
                     catalog::Status::Available | catalog::Status::Tool => "available".to_string(),
@@ -3021,6 +3071,23 @@ async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppEr
                 let latest_tag = latest.as_ref().map(|l| shown_version(&l.tag));
                 let mut cached_col = if versions.is_empty() {
                     "-".to_string()
+                } else if proton {
+                    // 1.5 GB each (R5), and where: the store or a tools dir.
+                    mine.iter()
+                        .map(|m| {
+                            let at = if m.path.is_some() {
+                                ", compatibilitytools.d"
+                            } else {
+                                ""
+                            };
+                            format!(
+                                "{} ({}{at})",
+                                shown_version(&m.version),
+                                gogo::fmt::human_size(m.bytes)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 } else {
                     versions.join(", ")
                 };
@@ -3046,8 +3113,31 @@ async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppEr
                     },
                 ]);
             }
+            // Proton builds gogo didn't install (design 18 §1), Linux only.
+            let unmanaged = if os == catalog::Os::Linux && shelf == Shelf::Runtimes {
+                unmanaged_builds(linux_default.as_deref())
+            } else {
+                Vec::new()
+            };
             if json {
-                println!("{}", serde_json::json!({ "entries": json_rows }));
+                let mut doc = serde_json::json!({ "entries": json_rows });
+                if os == catalog::Os::Linux && shelf == Shelf::Runtimes {
+                    doc["unmanaged"] = unmanaged
+                        .iter()
+                        .map(|(b, default)| {
+                            serde_json::json!({
+                                "ref": format!("path:{}", b.path.display()),
+                                "path": b.path,
+                                "source": b.source,
+                                "version": b.version,
+                                "require_tool_appid": b.appid,
+                                "default": default,
+                                "problems": b.problems(),
+                            })
+                        })
+                        .collect();
+                }
+                println!("{doc}");
             } else if table.row_count() == 0 && !all {
                 // Linux before its first runtimes (#169).
                 println!(
@@ -3062,6 +3152,28 @@ async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppEr
                 for note in footnotes {
                     println!("{note}");
                 }
+            }
+            if !json && !unmanaged.is_empty() {
+                println!(
+                    "\nunmanaged Proton builds (not pinned, not installed by gogo, never \
+                     pruned; use one with `path:<dir>`):"
+                );
+                let mut t = comfy_table::Table::new();
+                t.set_header(vec!["PATH", "VERSION", "FOUND IN", "NOTE"]);
+                for (b, default) in &unmanaged {
+                    let mut note = vec!["unmanaged".to_string()];
+                    if *default {
+                        note.push("default ([linux] default_runtime)".into());
+                    }
+                    note.extend(b.problems());
+                    t.add_row(vec![
+                        b.path.display().to_string(),
+                        b.version.clone().unwrap_or_else(|| "-".into()),
+                        b.source.clone(),
+                        note.join("; "),
+                    ]);
+                }
+                println!("{t}");
             }
             Ok(cli::exit::OK)
         }
@@ -3088,12 +3200,40 @@ async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppEr
             let consent =
                 id == gogo::macapp::Renderer::D3dMetal.id() && gogo::macapp::d3dmetal::available();
             let http = catalog::http_client()?;
-            let m = store::install(
+            // GE-Proton: the store or a Steam's tools dir, `[linux]
+            // proton_dir`, asked once (design 18 §2.2).
+            let shared = if matches!(entry.kind, catalog::Kind::Proton { .. }) {
+                use gogo::linuxapp::{proton, umu};
+                let config = gogo::config::Config::path();
+                let tty = std::io::IsTerminal::is_terminal(&std::io::stdin())
+                    && std::io::IsTerminal::is_terminal(&std::io::stderr())
+                    && !json;
+                let host = umu::Host::real();
+                let asks = tty
+                    && proton::stored_at(&config).is_none()
+                    && !proton::steam_roots(&host).is_empty();
+                let size = if asks {
+                    catalog::probe(entry, version.as_deref(), &http, catalog::GITHUB_API)
+                        .await
+                        .ok()
+                        .map(|r| r.size)
+                } else {
+                    None
+                };
+                let p = tty.then(prompt::renderer);
+                proton::placement(entry, size, &config, p.as_deref(), &host, &mut |ev| {
+                    emit_macapp_event(ev, false)
+                })?
+            } else {
+                None
+            };
+            let m = store::install_to(
                 entry,
                 version.as_deref(),
                 &http,
                 catalog::GITHUB_API,
                 consent,
+                shared.as_deref(),
                 &mut |ev| {
                     emit_macapp_event(ev, false);
                 },
@@ -3168,7 +3308,18 @@ async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppEr
             for (target, why) in &swept {
                 eprintln!("gogo: keeping {target}: {why}");
             }
-            if out.removed.is_empty() {
+            // Design 18 §2.2 (R26): listed, never deleted.
+            for b in &out.shared {
+                println!(
+                    "left {} at {} ({}): gogo never deletes from a shared tools dir \
+                     (Steam, Lutris or Heroic may use it by name); delete it yourself \
+                     when nothing does",
+                    b.target,
+                    b.path.display(),
+                    gogo::fmt::human_size(b.bytes)
+                );
+            }
+            if out.removed.is_empty() && out.shared.is_empty() {
                 println!("nothing to prune");
             }
             for path in &out.removed {
@@ -3680,9 +3831,10 @@ mod store_tests {
                 .map(|e| e.id)
                 .collect()
         };
-        assert_eq!(ids(Os::Linux, false), ["umu", "cnc-ddraw"]);
+        assert_eq!(ids(Os::Linux, false), ["ge-proton", "umu", "cnc-ddraw"]);
         assert!(ids(Os::Macos, false).contains(&"winecx26"));
         assert!(!ids(Os::Macos, false).contains(&"umu"));
+        assert!(!ids(Os::Macos, false).contains(&"ge-proton"));
         assert!(ids(Os::Macos, false).contains(&"cnc-ddraw"));
         assert_eq!(ids(Os::Linux, true).len(), catalog::entries().len());
     }
