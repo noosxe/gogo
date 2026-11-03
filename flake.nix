@@ -41,10 +41,20 @@
     {
       devShells = forAllSystems (system: { default = mkDevShell system; });
 
-      packages = forAllSystems (system: rec {
-        default = packageFor system;
-        gogo = default;
-      });
+      packages = forAllSystems (system:
+        let
+          gogo = packageFor system;
+        in
+        {
+          default = gogo;
+          inherit gogo;
+        }
+        # x86_64 Linux: the FHS env gogo runs umu's zipapp with (design 18
+        # §2.1), on its own for a dev-shell run: `export GOGO_UMU_PYTHON=$(nix
+        # build .#umu-python --print-out-paths)/bin/gogo-umu-python`.
+        // nixpkgs.lib.optionalAttrs (gogo ? umuPython) {
+          umu-python = gogo.umuPython;
+        });
 
       # `nix run .` / `nix run github:noosxe/gogo`
       apps = forAllSystems (system: {
