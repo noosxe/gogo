@@ -323,7 +323,7 @@ So yes: `PROTON_*` and DXVK vars map onto the existing `env` with no schema chan
   `DXVK_FILTER_DEVICE_NAME`/`VKD3D_FILTER_DEVICE_NAME` override it. 32-bit games under
   classic WoW64 also need the 32-bit ICDs (on NixOS: `hardware.graphics.enable32Bit`).
 - **NixOS**: umu from nixpkgs is already FHS-wrapped; a downloaded umu zipapp or a
-  Kron4ek build is not. How gogo gets umu is settled in outline (§8 item 1): pinned in
+  Kron4ek build is not. umu is required for the Proton runtime (§8 item 1): pinned in
   the flake for Nix, downloaded after the user confirms elsewhere.
 - **Testing**: no Vulkan in the VM, so the user's machine is the host pass, as #150 says.
 
@@ -358,19 +358,30 @@ VKD3D-Proton, plain Wine needs them installed into the prefix, umu-protonfixes i
 
 ## 8. Open questions for the design doc
 
-1. **How gogo gets umu: decided by the user (2026-11-03).** gogo pins one umu
-   version either way. What's still open is whether umu is **required** or
-   **optional**:
-   - *Required*: the Nix build pins umu in gogo's flake (nixpkgs `umu-launcher`,
-     already FHS-wrapped). Outside Nix, gogo downloads the pinned version only after the
-     user confirms.
-   - *Optional*: the Nix build gets a config option that installs the pinned version
-     automatically when it is turned on. Outside Nix, gogo still asks before it
-     downloads umu, when a launch first needs it.
+1. **umu is required for the Proton runtime (user decision, 2026-11-03).** The rule:
+   umu is required if launching without it would mean extra work, and it would. To run
+   GE-Proton's `proton` without umu, gogo would have to rebuild what `umu_run.py` does
+   (§1.2):
+   - set the Steam variables `proton` expects (`STEAM_COMPAT_DATA_PATH`,
+     `STEAM_COMPAT_CLIENT_INSTALL_PATH`, which `setup_prefix` reads unguarded,
+     `SteamAppId`/`SteamGameId` from the umu id, `STEAM_COMPAT_TOOL_PATHS`, …);
+   - create the `pfx -> .` and `steamuser` symlinks;
+   - either download and enter the Steam Linux Runtime container itself, or run outside
+     it, which puts GE-Proton's Wine on the host's libraries (on NixOS that means a
+     wrapper, the same problem as Kron4ek builds, §1.3);
+   - run winetricks through the runtime.
 
-   Still to settle in the design: required or optional; what the non-Nix download is
-   (the zipapp needs a host Python; the `.deb`/`.rpm` assets are per distro); and
-   whether running GE-Proton's `proton` without umu stays a fallback.
+   So:
+   - **Nix**: gogo's flake pins nixpkgs' `umu-launcher` (already FHS-wrapped) as a
+     dependency of the gogo package.
+   - **Outside Nix**: gogo downloads the pinned umu version into its store, only after
+     the user confirms.
+   - **No umu, no Proton runtime**: no fallback that runs `proton` directly. Plain-Wine
+     runtimes (Kron4ek, the distro's Wine) don't use umu and stay usable without it.
+
+   Still to settle in the design: what the non-Nix download is (the zipapp needs a host
+   Python; the `.deb`/`.rpm` assets are per distro). The zipapp is the likely choice, with
+   `doctor` checking for Python.
 2. **Where do GE-Proton builds live?** gogo's store (pinned, `prune`-able, passed as a
    path in `PROTONPATH`) or `~/.local/share/Steam/compatibilitytools.d` (shared with
    Steam, Lutris, Heroic, ProtonUp-Qt)? 1.5 GB per version makes sharing attractive.
@@ -395,9 +406,9 @@ Numbered after design 17; the name is a suggestion.
 
 0. Summary and decisions table
 1. Decision 1: runtime default (GE-Proton through umu) and the second runtime
-2. Decision 2: how gogo gets umu (required or optional; flake pin vs confirmed
-   download, §8 item 1) and GE-Proton (store vs Steam
-   `compatibilitytools.d` or not); the Steam Linux Runtime
+2. Decision 2: umu as a required dependency (flake pin; confirmed download outside
+   Nix, §8 item 1); where GE-Proton lives (store or Steam `compatibilitytools.d`);
+   the Steam Linux Runtime
 3. Decision 3: renderer mapping (L1 scan → Proton switches; plain-Wine DLL install;
    cnc-ddraw vs D7VK)
 4. Decision 4: per-game fixes (protonfixes ownership, GOG → umu lookup, L3 seeding,
