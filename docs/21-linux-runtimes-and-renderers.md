@@ -405,7 +405,16 @@ VKD3D-Proton, plain Wine needs them installed into the prefix, umu-protonfixes i
      not exist yet) and Flatpak Steam's `~/.var/app/com.valvesoftware.Steam/data/Steam`
      (**reported**).
 
-   Still to settle in the design: what gogo owns in a shared directory (R26, R27).
+   - **`prune` never deletes from a shared `compatibilitytools.d`** (user decision,
+     2026-11-03), not even builds gogo installed there: Steam, Lutris or Heroic may
+     have a game set to that build by name. The exception would be a build gogo can
+     prove nothing else uses. That proof isn't available today: each tool keeps its own
+     per-game mappings (e.g. Steam's `CompatToolMapping`, **reported**). So in practice
+     `prune` lists gogo's old builds there with their sizes and leaves deleting them to
+     the user.
+
+   Still to settle in the design: how gogo marks the builds it installed in a shared
+   directory, and the check before launch (R27).
 3. **Who owns the Steam Linux Runtime download?** umu fetches it into
    `~/.local/share/umu`; gogo can only pin it by letting umu do it.
 4. **protonfixes on or off by default**, and how L4 wins over it (§4.2 items 2–3).
@@ -471,7 +480,7 @@ worth knowing.
 | R23 | Compat data written for the Mac (`renderer = "dxmt"`, `WINEMSYNC`, Mac `tested` entries) would apply on Linux until L3/L4 get a platform dimension | medium | §4.2 item 1 |
 | R24 | New archive formats (zstd, zip) mean new crates, which have to pass `cargo deny` | low | §3.2 |
 | R25 | GE-Proton's repo has no licence GitHub can detect; the tarball carries Valve's BSD-3 plus each component's licence. Fine for downloading; check it before gogo mirrors or redistributes anything | low | §1.1 |
-| R26 | In a shared `compatibilitytools.d`, `prune` and the N-1 rule must touch only builds gogo installed (a marker file or a list in gogo's state). Builds other tools put there aren't sha-pinned, so gogo can't vouch for them | medium | §8 item 2 |
+| R26 | A shared `compatibilitytools.d` grows without bound: `prune` doesn't delete there (§8 item 2), so old GE-Proton builds (1.5 GB each) pile up unless the user removes them. Builds other tools put there aren't sha-pinned either, so gogo can't vouch for them | medium | §8 item 2 |
 | R27 | Other tools can delete or replace a build gogo pinned (ProtonUp-Qt cleanups, a user tidying up). A launch then finds its runtime gone or different; gogo has to check before launching. Steam also lists every build there as a compatibility tool | low | §8 item 2 |
 
 ## 10. Proposed outline for the design doc (`docs/design/18-linux-runtime.md`)
