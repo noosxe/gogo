@@ -408,7 +408,58 @@ VKD3D-Proton, plain Wine needs them installed into the prefix, umu-protonfixes i
 10. **Native Linux installers**: in this epic or a separate one?
 11. **aarch64 Linux** (GE-Proton aarch64, steamrt4-arm64): in scope?
 
-## 9. Proposed outline for the design doc (`docs/design/18-linux-runtime.md`)
+## 9. Risks
+
+Noted for follow-up; none is solved here. Rough severity: **high** blocks the lane or
+breaks games silently, **medium** costs users or maintainers real effort, **low** is
+worth knowing.
+
+### 9.1 Runtime and umu
+
+| # | Risk | Severity | Why (section) |
+|---|---|---|---|
+| R1 | The umu zipapp may not launch the Steam Linux Runtime on NixOS without the FHS wrapper that nixpkgs adds | high | untested (§8 item 1) |
+| R2 | A pinned umu can fall behind GE-Proton: umu maps runtime appids to runtimes in a hard-coded table (`umu_runtime.py`: soldier, sniper, steamrt4, steamrt4-arm64). A GE-Proton that needs a newer runtime fails until umu is bumped too | high | §1.1, §1.2 |
+| R3 | The Steam Linux Runtime isn't pinned by gogo: umu resolves `latest-public-beta.txt` on `repo.steampowered.com` and updates it in `~/.local/share/umu`. The same game can change behaviour with no gogo change, and the first launch needs the network | medium | §1.2 |
+| R4 | Fast GE-Proton cadence (8 releases in 3 months, two hotfixes on one day) and one main maintainer: pins go stale quickly, regressions land between our host passes | medium | §1.1 |
+| R5 | Disk and bandwidth: 565 MB download and 1.5 GB unpacked per GE-Proton version, plus 175 MB for the runtime; keeping an N-1 rollback doubles it | medium | §1.1 |
+| R6 | Python requirement outside Nix: distros with Python < 3.10 (e.g. Debian 11, which ships 3.9, **reported**) can't run umu | medium | §8 item 1 |
+| R7 | umu's default prefix with `STORE=gog` is `~/Games/gog`, shared by every game. One missing `WINEPREFIX` mixes games' prefixes | medium | §1.2 |
+| R8 | Kron4ek and distro Wine depend on host libraries (32-bit ones too for non-WoW64 builds); on NixOS they need a wrapper | medium | §1.3 |
+| R9 | Python code runs at launch: `proton` and protonfixes execute from the downloaded runtime. Today's runtimes are also code, but gogo has never shipped a runtime that runs per-game scripts | low | §2.1 |
+
+### 9.2 Per-game fixes
+
+| # | Risk | Severity | Why (section) |
+|---|---|---|---|
+| R10 | protonfixes overwrites caller env, so an L4 user override can lose with no warning | high | §4.2 item 2 |
+| R11 | Fixes from two owners: L3 and protonfixes both apply verbs, env and overrides for the same game; double runs or conflicting values | medium | §4.2 item 3 |
+| R12 | protonfixes runs winetricks at launch (30 of 78 GOG modules), which needs the network the first time and can fail or stall a launch | medium | §2.4 |
+| R13 | umu-database is GPL-3.0: copying the CSV (or a derived table) into gogo's repo or binary would bring GPL terms in | medium | §2.3 |
+| R14 | The online umu API is a single community host; if it is down or changes, lookups fail. The CSV inside GE-Proton avoids it but lags until the next GE release | low | §2.1, §2.2 |
+| R15 | A GOG game not on Steam gets `umu-<gog id>`, and umu passes the GOG id as `SteamAppId`. Proton's per-appid hacks then key on a GOG id. Today GOG ids (about 1–2 billion) don't overlap Steam appids (about 4.2 million and below), so no collision yet | low | §1.2, §2.2 |
+
+### 9.3 Renderers and drivers
+
+| # | Risk | Severity | Why (section) |
+|---|---|---|---|
+| R16 | Renderer switching under Proton is all-or-nothing (`PROTON_USE_WINED3D` covers D3D9–12); per-API choices need hand-written overrides | medium | §3.1 |
+| R17 | D7VK and cnc-ddraw are both `ddraw.dll`; picking the wrong one for a game, or both being active, breaks it. The import scan can't tell them apart yet | medium | §3.3 |
+| R18 | Multi-GPU machines (this one: NVIDIA plus an AMD iGPU): DXVK/VKD3D may pick the wrong device, and the game runs slow or fails | medium | §5 |
+| R19 | Missing 32-bit Vulkan ICDs break 32-bit games under classic WoW64, and the error doesn't name the cause | medium | §5 |
+| R20 | DXVK's README warns that swapping D3D DLLs in online games can count as cheating and get accounts banned | low | §3.2 |
+| R21 | cnc-ddraw under Proton is reasoned from the script, not tested | low | §3.3 |
+
+### 9.4 Project and process
+
+| # | Risk | Severity | Why (section) |
+|---|---|---|---|
+| R22 | No Vulkan in the VM: CI and agents can't check rendering; every renderer change waits for the user's host pass | medium | §5 |
+| R23 | Compat data written for the Mac (`renderer = "dxmt"`, `WINEMSYNC`, Mac `tested` entries) would apply on Linux until L3/L4 get a platform dimension | medium | §4.2 item 1 |
+| R24 | New archive formats (zstd, zip) mean new crates, which have to pass `cargo deny` | low | §3.2 |
+| R25 | GE-Proton's repo has no licence GitHub can detect; the tarball carries Valve's BSD-3 plus each component's licence. Fine for downloading; check it before gogo mirrors or redistributes anything | low | §1.1 |
+
+## 10. Proposed outline for the design doc (`docs/design/18-linux-runtime.md`)
 
 Numbered after design 17; the name is a suggestion.
 
@@ -429,9 +480,9 @@ Numbered after design 17; the name is a suggestion.
 8. `doctor` on Linux (Vulkan devices, 32-bit ICDs, umu, container, NixOS hints)
 9. Native Linux installers (scope note)
 10. Testing (unit and wiremock tests; the user's host pass; no VM rendering)
-11. Open items
+11. Open items, and which risks from docs/21 §9 the design addresses
 
-## 10. Sources
+## 11. Sources
 
 All checked 2026-11-02.
 
