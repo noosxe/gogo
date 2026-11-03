@@ -94,6 +94,37 @@ umu takes any directory with a `toolmanifest.vdf`.
 - Inspecting an unmanaged build (Wine version, bundled renderers, required runtime) and
   saying why it may not suit a game is later work, not in the first round.
 
+**As built (#169)** — choices the design left open:
+
+- **Catalog.** `ge-proton/GE-Proton11-12` (still the newest release on 2026-11-04), a new
+  `Kind::Proton { appid, sha512 }`, `os = ["linux"]`, `arch` x86_64, 566,859,228 B.
+  "Both digests agree" can't be checked without the bytes (one is a sha256, the other a
+  sha512), so the entry pins both: the sha256 is GitHub's asset digest (`0595159e…`,
+  checked at probe time as for every pinned asset, and against the download), and the
+  sha512 is the release's `GE-Proton11-12-x86_64.sha512sum` (`2e374479…`, read from that
+  160-byte asset), checked against the download too. A mismatch on either discards the
+  archive. `appid` is the expected `require_tool_appid`, `4183110` (steamrt4).
+- **Install-time check (R2).** The store reads `toolmanifest.vdf` after unpacking: an
+  appid missing from `catalog::umu_runtimes()` fails the install (`MacAppError::Umu`,
+  exit 7) with "Bump umu in gogo's catalog (with this GE-Proton, in one commit)"; an
+  appid other than the entry's recorded one fails as an invalid runtime. A unit test
+  checks every `Kind::Proton` entry's appid against the umu entry.
+- **VDF.** `linuxapp::vdf`, a ~150-line KeyValues reader (quoted and bare tokens, `{}`,
+  `//` comments, `\\ \" \n \t`): no crate, for two small files.
+- **Refs.** `linuxapp::proton::ProtonRef`: `ge-proton[/<ver>]` or `path:<dir>` (an
+  absolute dir). `[linux] default_runtime` takes either; unset, the catalog's GE-Proton is
+  the Linux default (shown as `available · default` in `runtimes list`, and its newest
+  build is kept by the sweep as `winecx26`'s is on the Mac). Resolving a ref for a game is
+  #176's.
+- **`runtimes list` on Linux** adds an "unmanaged Proton builds" table (path, `version`,
+  where it was found, note) and an `unmanaged` array in `--json`. Each row says
+  **unmanaged**, "default" when it is `default_runtime`, and the problems: no
+  `toolmanifest.vdf`, no `require_tool_appid`, or one umu's pin doesn't know (R2; `doctor`
+  failing on it is #178's). A `default_runtime` path that discovery didn't find is listed
+  too. Discovery skips builds carrying gogo's marker (they are the `ge-proton` row) and
+  hidden dirs (gogo's install temp dirs); one row per build when two paths reach it.
+  Steam libraries are the Steam root plus each `path` in `steamapps/libraryfolders.vdf`.
+
 ## 2. Decision 2: umu, where GE-Proton lives, the container
 
 ### 2.1 umu is required, fetched as the zipapp
@@ -252,6 +283,50 @@ unit test checks every GE-Proton entry's appid against the umu entry.
     launch (the user chose to follow that build). Gone: as for a managed build, minus the
     reinstall.
 - `doctor` checks the same, plus the marker's archive sha against the catalog.
+
+**As built (#169)** — choices the design left open:
+
+- **Store layout.** `runtimes/ge-proton/<ver>/x86_64/` holds the archive as unpacked,
+  top dir kept as for Wine runtimes: `…/GE-Proton11-12/x86_64/GE-Proton11-12-x86_64/proton`
+  is the manifest's `entry_rel`, and `store::proton_dir()` (where `proton` is) is the
+  `PROTONPATH`. Store builds get the marker too, so one check covers both places.
+- **`proton_dir` values.** `"store" | "steam" | "steam-flatpak"`: with both Steams
+  present the answer has to say which, so Flatpak's is its own value. `steam` is the
+  native Steam, or the only one there is. A stored Steam that's no longer there → the
+  store, with a note. The question is a select (store first, the default; then each
+  Steam's tools dir) whose title carries the download size from the catalog probe and
+  "about 1.5 GB unpacked" (R5). A cancelled prompt fails and stores nothing. Headless and
+  unset, with a Steam: the store, a note naming `gogo config set linux.proton_dir
+  steam`, nothing stored. No Steam: the store, nothing asked. `gogo runtimes install
+  ge-proton` asks today; wiring it into the `linux-app` plan is #176's.
+- **Detection.** Native: `$XDG_DATA_HOME/Steam` (default `~/.local/share/Steam`), else
+  `~/.steam/root`; one root when the symlink points at the first. Flatpak:
+  `~/.var/app/com.valvesoftware.Steam/data/Steam`. An existing root dir counts as a Steam
+  install; its `compatibilitytools.d` is created when gogo installs there.
+- **Shared install.** `store::install_to(…, shared: Some(tools_dir), …)`: the archive
+  downloads into the store's `.tmp/`, unpacks into `<tools>/.gogo-tmp-<ver>-<pid>/`
+  (hidden, and a level below where Steam looks), is checked (appid, `proton` beside
+  `toolmanifest.vdf`) and marked there, then the build dir itself is renamed to
+  `<tools>/GE-ProtonX-Y` and the temp dir removed. Any failure removes the temp dir. The
+  manifest records the absolute path (a `path` field, absent for store entries, so
+  existing manifests read unchanged) with `entry_rel = "proton"`.
+- **Marker** (`gogo-managed.toml`, schema 1): `catalog_ref`, `archive_sha256`,
+  `proton_sha256`, `version` (the file's contents, trimmed), `installed_at` (RFC 3339),
+  `gogo_version`, under a comment saying gogo never deletes the build from a shared dir.
+- **The name already exists.** Without the marker: left alone, the store gets the build,
+  and a note says so. With it: gogo's own. Intact and matching the pin, it is adopted
+  into the manifest without a download. Changed, it is reinstalled in place (the
+  reinstall §2.2 describes). A manifest entry whose shared build lost its marker no
+  longer counts as installed.
+- **The check for #177/#178.** `linuxapp::proton::check_build(dir, Expect { version,
+  proton_sha256 })` (`proton`, `toolmanifest.vdf` and `version` exist, both match) and
+  `check_managed(dir)` (the same against the build's marker), returning a
+  `BuildProblem`.
+- **Prune (R26).** `store::prune` keeps every manifest entry with a `path`, on disk and in
+  the manifest, and returns the ones a target named in `PruneOutcome::shared` (target,
+  path, size measured now). `gogo runtimes prune` prints each as "left … (size): gogo
+  never deletes from a shared tools dir …; delete it yourself when nothing does". The
+  sweep still names them, so every `prune --unused` lists them again.
 
 ### 2.3 The Steam Linux Runtime
 
