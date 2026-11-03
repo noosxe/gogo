@@ -10,6 +10,7 @@ pub mod config;
 pub mod engine;
 pub mod fmt;
 pub mod gog;
+pub mod linuxapp;
 pub mod macapp;
 pub mod search;
 pub mod state;

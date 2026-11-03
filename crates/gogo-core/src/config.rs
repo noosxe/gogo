@@ -20,6 +20,7 @@ pub struct Config {
     pub download: DownloadConfig,
     pub state: StateConfig,
     pub mac_app: MacAppConfig,
+    pub linux: LinuxConfig,
 }
 
 /// No silent fallback (review A6): keyring configured but unavailable fails loudly in
@@ -105,6 +106,33 @@ pub struct MacAppConfig {
     /// licence (#71, docs/19 §3.2). Unset: asked on a terminal the first
     /// time a game needs it; headless builds fall back without it.
     pub d3dmetal: Option<Consent>,
+}
+
+/// `[linux]`: answers `gogo linux-app` asks for once and keeps (design 18).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct LinuxConfig {
+    /// How gogo runs umu-launcher (design 18 §2.1). Unset: the first build
+    /// asks on a terminal and stores the answer; headless builds fail
+    /// naming the key.
+    pub umu: Option<UmuMode>,
+}
+
+/// `[linux] umu`: gogo's pinned zipapp, or the `umu-run` on `PATH`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UmuMode {
+    Zipapp,
+    System,
+}
+
+impl UmuMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UmuMode::Zipapp => "zipapp",
+            UmuMode::System => "system",
+        }
+    }
 }
 
 /// A stored yes/no answer.
@@ -438,6 +466,7 @@ fn unknown_keys(table: &toml::Table) -> Vec<String> {
         ("download", &["dir", "workers", "parallel_files", "limit"]),
         ("state", &["catalog_ttl_hours"]),
         ("mac_app", &["d3dmetal"]),
+        ("linux", &["umu"]),
     ];
     let mut out = Vec::new();
     for (section, value) in table {
@@ -564,6 +593,23 @@ mod tests {
         std::fs::write(&path, "[mac_app]\nd3dmetal = \"no\"\n").unwrap();
         let loaded = Config::load_from(&path, no_env).unwrap();
         assert_eq!(loaded.config.mac_app.d3dmetal, Some(Consent::No));
+    }
+
+    #[test]
+    fn linux_umu_mode_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let loaded = Config::load_from(&path, no_env).unwrap();
+        assert_eq!(loaded.config.linux.umu, None);
+        for (raw, mode) in [("zipapp", UmuMode::Zipapp), ("system", UmuMode::System)] {
+            std::fs::write(&path, format!("[linux]\numu = \"{raw}\"\n")).unwrap();
+            let loaded = Config::load_from(&path, no_env).unwrap();
+            assert_eq!(loaded.config.linux.umu, Some(mode));
+            assert_eq!(mode.as_str(), raw);
+            assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        }
+        std::fs::write(&path, "[linux]\numu = \"flatpak\"\n").unwrap();
+        assert!(Config::load_from(&path, no_env).is_err());
     }
 
     #[test]
