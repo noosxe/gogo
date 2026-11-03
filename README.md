@@ -21,6 +21,8 @@ renderer and fixes per game.
 ```sh
 # Nix
 nix run github:noosxe/gogo -- --version
+# Nix, x86_64 Linux: with the FHS env for the Linux game lane (umu; in progress, ~1.5 GiB more)
+nix profile install github:noosxe/gogo#gogo-linux-app
 
 # or build from source (Rust 1.99+)
 cargo install --locked --git https://github.com/noosxe/gogo

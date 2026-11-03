@@ -115,15 +115,17 @@ How gogo runs it:
   a `true` under `/usr` for its bwrap check, and `ld.so.cache` for the host graphics
   stack. Inside `steam.buildRuntimeEnv` (nixpkgs' own wrapper for `umu-launcher`) the same
   zipapp starts steamrt4 with i386 resolved and `/run/opengl-driver{,-32}` mapped. So
-  gogo's flake package builds that env with `extraPkgs = [ python3 ]` and `runScript =
-  "python3"`, and records its path at build time (a wrapper env var, `GOGO_UMU_PYTHON`).
+  gogo's flake builds that env with `extraPkgs = [ python3 ]` and `runScript =
+  "python3"`, and its `gogo-linux-app` package records the env's path at build time (a
+  wrapper env var, `GOGO_UMU_PYTHON`). The default package stays without it.
   `UMU_PYTHON` is then that env, not a bare Python. The zipapp pin stays; the user
   installs nothing. A minimal `buildFHSEnv` isn't enough (no i386 loader, no driver
   mapping). Whether the GPU works through it is the host pass's first check (§11.2).
-- **NixOS without gogo's Nix package** (a gogo binary from elsewhere): no FHS env, and
-  nix-ld doesn't help. Setup refuses `umu = "zipapp"` there (`/etc/NIXOS` exists and
-  `GOGO_UMU_PYTHON` is unset) and names the two ways out: install gogo from the flake,
-  or `umu = "system"` with nixpkgs' `umu-launcher`. `doctor` says the same.
+- **NixOS without `gogo-linux-app`** (the default flake package, or a gogo binary from
+  elsewhere): no FHS env, and nix-ld doesn't help. Setup refuses `umu = "zipapp"` there
+  (`/etc/NIXOS` exists and `GOGO_UMU_PYTHON` is unset) and names the two ways out: install
+  `github:noosxe/gogo#gogo-linux-app`, or `umu = "system"` with nixpkgs' `umu-launcher`.
+  `doctor` says the same.
 - **Elsewhere:** the first `python3` on `PATH` that reports ≥ 3.10 (`requires-python` in
   umu's `pyproject.toml`). None → setup fails with what to install, and `doctor` says the
   same (R6).
@@ -142,9 +144,9 @@ How gogo runs it:
 
 | Where | How umu runs | `UMU_PYTHON` / `UMU_RUN` |
 |---|---|---|
-| gogo from the flake (NixOS or Nix on another distro) | zipapp in `steam.buildRuntimeEnv` | the FHS env / store zipapp |
-| other distros | zipapp with the host's Python ≥ 3.10 | `python3` path / store zipapp |
-| NixOS, gogo not from the flake | refused unless `umu = "system"` | — |
+| the flake's `gogo-linux-app` (NixOS or Nix on another distro) | zipapp in `steam.buildRuntimeEnv` | the FHS env / store zipapp |
+| other distros (any other gogo) | zipapp with the host's Python ≥ 3.10 | `python3` path / store zipapp |
+| NixOS, any gogo but `gogo-linux-app` | refused unless `umu = "system"` | — |
 | `umu = "system"`, anywhere | `umu-run` on `PATH` | empty / its absolute path |
 
 **What umu doesn't report (docs/21 §8 item 1).** A `PROTONPATH` without
@@ -188,19 +190,24 @@ unit test checks every GE-Proton entry's appid against the umu entry.
   fetches on first launch). When the zipapp can't run here and a `umu-run` is on
   `PATH`, `system` is the default and the zipapp item says why. A cancelled prompt
   stores nothing. Wiring it into the `linux-app` plan is #176's.
-- **Flake.** `nix/umu-python.nix` is `steam.buildRuntimeEnv { extraPkgs = [ python3 ];
-  runScript = "python3"; }` (no `allowUnfree`: the env holds nothing of Steam). The
-  package wraps `gogo` with `--set-default GOGO_UMU_PYTHON` (a user's own value wins)
-  and exposes the env as `packages.x86_64-linux.umu-python`. x86_64 Linux only: the env
-  is multiArch, and nixpkgs has no i686 set on aarch64. The macOS derivation is
-  unchanged. The pin's Python is 3.14 (R1 ran 3.12); the zipapp's `--help` was
-  smoke-run through it.
+- **Flake: a package of its own (owner, 2026-11-04).** `nix/umu-python.nix` is
+  `steam.buildRuntimeEnv { extraPkgs = [ python3 ]; runScript = "python3"; }` (no
+  `allowUnfree`: the env holds nothing of Steam). The env is about 1.5 GiB, so the
+  default package (`default` / `gogo`, every system) stays without it, unchanged from
+  before. `packages.x86_64-linux.gogo-linux-app` (`nix/linux-app.nix`, also an `apps`
+  entry) is a `symlinkJoin` around that same build, with `gogo` wrapped by
+  `--set-default GOGO_UMU_PYTHON` (a user's own value wins): no second Rust build. The
+  env is also `packages.x86_64-linux.umu-python`. x86_64 Linux only: the env is
+  multiArch, and nixpkgs has no i686 set on aarch64. The pin's Python is 3.14 (R1 ran
+  3.12); the zipapp's `--help` was smoke-run through it, and a launch on it is #179's
+  host pass to confirm.
 - **Dev shell: not exported.** Building and testing never need it (tests inject the
   env), and exporting it would build the multiArch FHS env on every `nix develop`,
   CI's included. For a manual run of the lane from the dev shell:
   `export GOGO_UMU_PYTHON=$(nix build .#umu-python --print-out-paths)/bin/gogo-umu-python`.
-- **For #177/#178.** The wrapper renames the binary to `.gogo-wrapped`, so
-  `current_exe()` bypasses it: re-exec gogo through the path it was invoked as. And
+- **For #177/#178.** `current_exe()` resolves to the unwrapped binary (the wrapper
+  execs `.gogo-wrapped`, a link into the default package), so it bypasses the wrapper:
+  re-exec gogo through the path it was invoked as. And
   `UMU_PYTHON` is a store path that a Nix GC can remove after a gogo upgrade: setup
   should re-record it, and `doctor` should check that it exists.
 
@@ -647,7 +654,7 @@ a failure.
 |---|---|---|
 | `launcher` | fail: no `gogo-launch.toml`/`launch.conf`/`launch.sh`, or the `.desktop` file's `Exec=` doesn't point at it | `linux-app setup` |
 | `compat` | warn: status broken for `linux` (§5); the fix summary (§4.3) with collisions | `linux-app compat` |
-| `umu` | fail: the zipapp missing or its sha wrong, no Python ≥ 3.10, NixOS without gogo's FHS env (§2.1), no unprivileged user namespaces, `umu = "system"` with no `umu-run` on `PATH`. warn: `system` (unpinned) | `runtimes install umu`, install Python, install gogo from the flake |
+| `umu` | fail: the zipapp missing or its sha wrong, no Python ≥ 3.10, NixOS without gogo's FHS env (§2.1), no unprivileged user namespaces, `umu = "system"` with no `umu-run` on `PATH`. warn: `system` (unpinned) | `runtimes install umu`, install Python, install the flake's `gogo-linux-app` |
 | `runtime` | fail: Proton dir missing, `proton` or `version` changed for a managed build, `require_tool_appid` unknown to umu (R2). warn: unmanaged, or a managed build in a shared tools dir | `linux-app setup`, `--retarget --runtime ge-proton` |
 | `container` | warn: the Steam Linux Runtime variant the build needs isn't in umu's folder (first launch downloads it); else variant and size | none |
 | `renderer` | fail: cnc-ddraw without its files; `d7vk` on a build without D7VK; both a game-dir `ddraw.dll` and `PROTON_USE_D7VK`. Notes `dxguid_block` | `linux-app setup` |
@@ -656,7 +663,7 @@ a failure.
 | `stamp`, `links`, `processes`, `log` | as design 16 §8.3 (processes found through `/proc/<pid>/environ`) | as there |
 
 NixOS gets its own hints where the fix differs: 32-bit graphics, `nix-ld` not needed for
-umu (the container carries its libraries), and gogo from outside the flake (§2.1: refused, with the two ways out).
+umu (the container carries its libraries), and a gogo other than the flake's `gogo-linux-app` (§2.1: refused, with the two ways out).
 
 ## 9. Scope notes
 
@@ -767,7 +774,7 @@ Still open after this doc, by design: the D3D≤7 corpus check
 
 | # | Risk (short) | Status | Where |
 |---|---|---|---|
-| R1 | umu zipapp vs NixOS without FHS wrapper | addressed (verified 2026-11-03, docs/21 §8 item 1): the flake runs the zipapp in `steam.buildRuntimeEnv`; a non-Nix gogo on NixOS is refused with a hint. GPU through the env: host pass | §2.1, §11.2 |
+| R1 | umu zipapp vs NixOS without FHS wrapper | addressed (verified 2026-11-03, docs/21 §8 item 1): the flake's `gogo-linux-app` runs the zipapp in `steam.buildRuntimeEnv`; any other gogo on NixOS is refused with a hint. GPU through the env: host pass | §2.1, §11.2 |
 | R2 | pinned umu behind GE-Proton's container | addressed: appid list per umu pin, install check, catalog test | §2.1 |
 | R3 | Steam Linux Runtime unpinned | accepted (§8 item 3) | §2.3 |
 | R4 | fast GE-Proton cadence | accepted: catalog pin + N-1 rollback; a host pass per bump | §1, §11.2 |
@@ -812,7 +819,7 @@ Filed 2026-11-03 after the owner agreed; each is a sub-issue of #155.
 |---|---|---|---|
 | I1 (#166) | Compat schema: `[platforms.<os>]` tables, migrate the 11 L3 files and legacy L4 keys (§5) | `type:feature`, `area:wine-runtime`, `area:mac-app` | — |
 | I2 (#167) | Linux data root and per-OS catalog: `data_root()`, `os`/`arch` on entries, `.tar` extraction, `runtimes`/`renderers install` on Linux (§6) | `type:feature`, `area:wine-runtime`, `area:cli` | — |
-| I3 (#168) | umu provisioning: zipapp catalog entry, consent, Python discovery, `[linux] umu`, the flake's `steam.buildRuntimeEnv` wrapper (R1) (§2.1) | `type:feature`, `area:wine-runtime`, `area:packaging` | #167 |
+| I3 (#168) | umu provisioning: zipapp catalog entry, consent, Python discovery, `[linux] umu`, the flake's `steam.buildRuntimeEnv` wrapper as `gogo-linux-app` (R1) (§2.1) | `type:feature`, `area:wine-runtime`, `area:packaging` | #167 |
 | I4 (#169) | GE-Proton catalog entry, umu appid check, `compatibilitytools.d` option with marker, unmanaged builds in `runtimes list` (§1, §2.2) | `type:feature`, `area:wine-runtime` | #167, #168 |
 | I5 (#170) | GOG → umu id lookup: the build's CSV, GitHub fallback cache (§4.1) | `type:feature`, `area:wine-runtime`, `area:licensing` | — |
 | I6 (#171) | Protonfix static reader, fix summary, collision warnings, `protonfixes = false`, L3 ownership rule (§4.2, §4.3) | `type:feature`, `area:wine-runtime` | #166, #170 |
