@@ -49,7 +49,7 @@ game dir.
 | # | Decision | Source |
 |---|---|---|
 | 1 | Runtime: GE-Proton through umu-launcher; no second runtime in the first round. Unmanaged Proton builds allowed | docs/21 §8 items 1, 7 |
-| 2 | umu is required for Proton, fetched as the release zipapp after the user confirms; Python from the flake on Nix, from the user elsewhere. **Pending R1** for the Nix default (§2.1) | §8 item 1 |
+| 2 | umu is required for Proton, fetched as the release zipapp after the user confirms; on Nix it runs inside `steam.buildRuntimeEnv` (R1, verified), elsewhere with the user's Python (§2.1) | §8 item 1 |
 | 2a | GE-Proton lives in gogo's store by default; in a shared `compatibilitytools.d` if the user says so once; `prune` never deletes there | §8 item 2 |
 | 2b | The Steam Linux Runtime belongs to umu, in its shared folder; gogo doesn't pin or prune it | §8 item 3 |
 | 3 | Renderer mapping: Proton's defaults for D3D9–12; D7VK for D3D≤7 or an unclear scan, cnc-ddraw for confident 2D, a game's own `ddraw.dll` wins, never both | §8 item 8, docs/22 §6 |
@@ -67,8 +67,9 @@ through umu-launcher. It's a catalog entry like `winecx` on the Mac: pinned by s
 (the release's `.sha512sum` asset and GitHub's asset digest must both agree), `prune`-able,
 with the N-1 rollback of design 16 decision 6.
 
-- The catalog entry is `ge-proton/<GE-ProtonX-Y>` (`ge-proton/GE-Proton11-11` first).
-  Its `arch` is `x86_64` (`GE-Proton11-11-x86_64.tar.gz`); the `aarch64` asset is a
+- The catalog entry is `ge-proton/<GE-ProtonX-Y>`: the newest release when the entry is
+  written (GE-Proton11-12 as of 2026-11-03; docs/21 inspected 11-11).
+  Its `arch` is `x86_64` (`GE-ProtonX-Y-x86_64.tar.gz`); the `aarch64` asset is a
   second entry for the same version when someone needs it (§9).
 - gogo never runs GE-Proton's `proton` script itself. Without umu there's no Proton
   runtime (§2.1).
@@ -109,11 +110,26 @@ How gogo runs it:
 - **Always through an explicit interpreter**: `<python> <store>/umu/<ver>/umu-run …`,
   never through the shebang. The interpreter is recorded in `launch.conf` as `UMU_PYTHON`
   so the launcher runs the same one setup used.
-- **Nix:** gogo's flake package records a pinned `python3` (≥ 3.10) store path at build
-  time (a wrapper env var, `GOGO_UMU_PYTHON`), so the user installs nothing.
+- **Nix: inside an FHS env (R1, verified 2026-11-03, docs/21 §8 item 1).** On a stock
+  NixOS root the bare zipapp fails: pressure-vessel needs `/lib64/ld-linux-x86-64.so.2`,
+  a `true` under `/usr` for its bwrap check, and `ld.so.cache` for the host graphics
+  stack. Inside `steam.buildRuntimeEnv` (nixpkgs' own wrapper for `umu-launcher`) the same
+  zipapp starts steamrt4 with i386 resolved and `/run/opengl-driver{,-32}` mapped. So
+  gogo's flake package builds that env with `extraPkgs = [ python3 ]` and `runScript =
+  "python3"`, and records its path at build time (a wrapper env var, `GOGO_UMU_PYTHON`).
+  `UMU_PYTHON` is then that env, not a bare Python. The zipapp pin stays; the user
+  installs nothing. A minimal `buildFHSEnv` isn't enough (no i386 loader, no driver
+  mapping). Whether the GPU works through it is the host pass's first check (§11.2).
+- **NixOS without gogo's Nix package** (a gogo binary from elsewhere): no FHS env, and
+  nix-ld doesn't help. Setup refuses `umu = "zipapp"` there (`/etc/NIXOS` exists and
+  `GOGO_UMU_PYTHON` is unset) and names the two ways out: install gogo from the flake,
+  or `umu = "system"` with nixpkgs' `umu-launcher`. `doctor` says the same.
 - **Elsewhere:** the first `python3` on `PATH` that reports ≥ 3.10 (`requires-python` in
   umu's `pyproject.toml`). None → setup fails with what to install, and `doctor` says the
   same (R6).
+- **Host prerequisite:** unprivileged user namespaces (pressure-vessel runs bwrap).
+  `doctor` checks `kernel.unprivileged_userns_clone` / `user.max_user_namespaces` where
+  they exist.
 - **Consent.** The plan shows umu's download (with GE-Proton's 565 MB and the container's
   ~175 MB, which umu fetches on first launch) before the confirmation. The answer to "use
   umu" is stored as `[linux] umu = "zipapp"`, so it's asked once. Headless with no answer:
@@ -123,17 +139,17 @@ How gogo runs it:
   as unmanaged. `UMU_RUN` in `launch.conf` then holds its absolute path, and `UMU_PYTHON`
   is empty.
 
-**Pending R1.** Whether the zipapp, run by a plain Python, can start the Steam Linux
-Runtime on NixOS without the `buildFHSEnv` wrapper that nixpkgs puts around its own
-`umu-launcher` is being tested in a parallel session. The design holds either way:
-
-| R1 result | Nix default | Elsewhere |
+| Where | How umu runs | `UMU_PYTHON` / `UMU_RUN` |
 |---|---|---|
-| zipapp works | `umu = "zipapp"`, as above | `zipapp` |
-| zipapp fails | gogo's flake package wraps the zipapp in a `buildFHSEnv` (the same environment nixpkgs uses), or defaults to `umu = "system"` with nixpkgs' `umu-launcher` as a dependency of the package. Which of the two goes to the implementation issue | `zipapp` |
+| gogo from the flake (NixOS or Nix on another distro) | zipapp in `steam.buildRuntimeEnv` | the FHS env / store zipapp |
+| other distros | zipapp with the host's Python ≥ 3.10 | `python3` path / store zipapp |
+| NixOS, gogo not from the flake | refused unless `umu = "system"` | — |
+| `umu = "system"`, anywhere | `umu-run` on `PATH` | empty / its absolute path |
 
-Only the Nix default changes. The `launch.conf` contract (`UMU_RUN`, `UMU_PYTHON`) is the
-same for all three.
+**What umu doesn't report (docs/21 §8 item 1).** A `PROTONPATH` without
+`toolmanifest.vdf` makes umu raise `FileNotFoundError` and still exit 0, and a failing
+launch is retried once. So gogo checks the Proton dir itself before every launch (§2.2),
+and the run log's exit code is only trusted once that check passed.
 
 **The umu pin and GE-Proton move together (R2).** umu maps a runtime's
 `require_tool_appid` to a container in a hard-coded table. Each catalog umu entry lists
@@ -175,7 +191,7 @@ unit test checks every GE-Proton entry's appid against the umu entry.
 - **Name already taken.** If `compatibilitytools.d/GE-ProtonX-Y` exists without gogo's
   marker (ProtonUp-Qt installed the same version), gogo doesn't touch it. It installs
   that version into its store instead and says so.
-- **Before every launch** (`launch.sh`, cheap): `PROTON_DIR/proton` exists, `version`
+- **Before every launch** (`launch.sh`, cheap): `PROTON_DIR/proton` and `toolmanifest.vdf` exist, `version`
   matches `PROTON_VERSION`, and `sha256sum proton` matches `PROTON_SHA`, all from
   `launch.conf`.
   - Managed build gone or changed: run `gogo linux-app setup <gogid>`, which reinstalls
@@ -435,7 +451,7 @@ tested = [
   `runtimes`/`renderers list|install` show only this OS's entries (`--all` shows the
   rest, not installable). `runtimes install` and `renderers install` work on Linux; the
   "macOS-only — feed `gogo mac-app`" refusal goes.
-- **Linux catalog, first round:** `ge-proton/GE-Proton11-11` (x86_64), `umu/1.4.4`,
+- **Linux catalog, first round:** `ge-proton/<newest>` (x86_64), `umu/1.4.4`,
   `cnc-ddraw/7.1.0.0` (the Windows DLL, the same entry as the Mac's, `os = ["macos",
   "linux"]`). Winetricks isn't fetched on Linux: the Proton build's own runs the verbs.
 - **Archive formats:** `store.rs` already unpacks `.tar.gz` (GE-Proton) and `.zip`
@@ -550,7 +566,7 @@ a failure.
 |---|---|---|
 | `launcher` | fail: no `gogo-launch.toml`/`launch.conf`/`launch.sh`, or the `.desktop` file's `Exec=` doesn't point at it | `linux-app setup` |
 | `compat` | warn: status broken for `linux` (§5); the fix summary (§4.3) with collisions | `linux-app compat` |
-| `umu` | fail: the zipapp missing or its sha wrong, no Python ≥ 3.10, `umu = "system"` with no `umu-run` on `PATH`. warn: `system` (unpinned) | `runtimes install umu`, install Python |
+| `umu` | fail: the zipapp missing or its sha wrong, no Python ≥ 3.10, NixOS without gogo's FHS env (§2.1), no unprivileged user namespaces, `umu = "system"` with no `umu-run` on `PATH`. warn: `system` (unpinned) | `runtimes install umu`, install Python, install gogo from the flake |
 | `runtime` | fail: Proton dir missing, `proton` or `version` changed for a managed build, `require_tool_appid` unknown to umu (R2). warn: unmanaged, or a managed build in a shared tools dir | `linux-app setup`, `--retarget --runtime ge-proton` |
 | `container` | warn: the Steam Linux Runtime variant the build needs isn't in umu's folder (first launch downloads it); else variant and size | none |
 | `renderer` | fail: cnc-ddraw without its files; `d7vk` on a build without D7VK; both a game-dir `ddraw.dll` and `PROTON_USE_D7VK`. Notes `dxguid_block` | `linux-app setup` |
@@ -559,7 +575,7 @@ a failure.
 | `stamp`, `links`, `processes`, `log` | as design 16 §8.3 (processes found through `/proc/<pid>/environ`) | as there |
 
 NixOS gets its own hints where the fix differs: 32-bit graphics, `nix-ld` not needed for
-umu (the container carries its libraries), and the R1 outcome for the zipapp.
+umu (the container carries its libraries), and gogo from outside the flake (§2.1: refused, with the two ways out).
 
 ## 9. Scope notes
 
@@ -610,7 +626,9 @@ only on Linux (`#[cfg(target_os = "linux")]`), with the same shape:
   a module and applied when it doesn't.
 - **Renderer:** the §3 table per L1 class, the next-renderer walk, never-both, the
   docs/22 §6.2 rule on synthesized PE fixtures (block vs selective GUIDs).
-- **Store:** per-OS catalog filtering, `.tar` extraction, the umu/GE-Proton appid check,
+- **Store:** per-OS catalog filtering, `.tar` extraction, the umu/GE-Proton appid check, the
+  interpreter choice (`GOGO_UMU_PYTHON`, a host `python3` ≥ 3.10, refusal on a fake `/etc/NIXOS`
+  root without the env),
   the shared tools dir (temp dir + rename, marker, name collision → store), prune never
   deleting there.
 - **Launcher** (integration, fake `umu-run` and fake gogo, as `macapp_pipeline.rs` does):
@@ -629,8 +647,8 @@ No Vulkan in the VM and no GPU in CI (R22). The rest is the user's **Linux host 
 on their machine (NixOS, RTX 4090 + RADV iGPU), never by an agent against a real game. The
 implementation issues list its steps in their PRs:
 
-1. **R1 outcome** confirmed on the real setup: zipapp (or the fallback) launches a game
-   in steamrt4.
+1. **The FHS env with a GPU** (R1 was verified with a console exe only): a game renders
+   through the zipapp in `steam.buildRuntimeEnv`, on NVIDIA and on the RADV iGPU.
 2. **Smoke:** one D3D11 game (DXVK) and one D3D12 game (VKD3D-Proton) start, render, and
    exit cleanly; the run log header is right; teardown leaves no process.
 3. **Fixes:** a game with a `gamefixes-gog` module (Rebel Galaxy Outlaw, `umu-910830`): the
@@ -661,14 +679,14 @@ Results go into L3 `[platforms.linux]` `tested` entries (`host = "rtx4090/nixos-
 | O8 | CLI name for the Linux lane | **settled** (owner, 2026-11-03), §10 |
 | O9 | docs/22 §7 items placed | **settled** (owner, 2026-11-03), §3 |
 
-Still open after this doc, by design: R1 (parallel session), the D3D≤7 corpus check
+Still open after this doc, by design: the D3D≤7 corpus check
 (docs/22 §7 item 1), and the host-pass questions in §11.2.
 
 ### 12.2 Risks R1–R30 (docs/21 §9)
 
 | # | Risk (short) | Status | Where |
 |---|---|---|---|
-| R1 | umu zipapp vs NixOS without FHS wrapper | **open**, pending the parallel session; the design holds either way | §2.1 |
+| R1 | umu zipapp vs NixOS without FHS wrapper | addressed (verified 2026-11-03, docs/21 §8 item 1): the flake runs the zipapp in `steam.buildRuntimeEnv`; a non-Nix gogo on NixOS is refused with a hint. GPU through the env: host pass | §2.1, §11.2 |
 | R2 | pinned umu behind GE-Proton's container | addressed: appid list per umu pin, install check, catalog test | §2.1 |
 | R3 | Steam Linux Runtime unpinned | accepted (§8 item 3) | §2.3 |
 | R4 | fast GE-Proton cadence | accepted: catalog pin + N-1 rollback; a host pass per bump | §1, §11.2 |
@@ -713,7 +731,7 @@ Proposed; filed once the owner agrees. Each is a sub-issue of #155.
 |---|---|---|
 | I1 | Compat schema: `[platforms.<os>]` tables, migrate the 11 L3 files and legacy L4 keys (§5) | `type:feature`, `area:wine-runtime`, `area:mac-app` |
 | I2 | Linux data root and per-OS catalog: `data_root()`, `os`/`arch` on entries, `.tar` extraction, `runtimes`/`renderers install` on Linux (§6) | `type:feature`, `area:wine-runtime`, `area:cli` |
-| I3 | umu provisioning: zipapp catalog entry, consent, Python discovery, `[linux] umu`, Nix packaging per R1 (§2.1) | `type:feature`, `area:wine-runtime`, `area:packaging` |
+| I3 | umu provisioning: zipapp catalog entry, consent, Python discovery, `[linux] umu`, the flake's `steam.buildRuntimeEnv` wrapper (R1) (§2.1) | `type:feature`, `area:wine-runtime`, `area:packaging` |
 | I4 | GE-Proton catalog entry, umu appid check, `compatibilitytools.d` option with marker, unmanaged builds in `runtimes list` (§1, §2.2) | `type:feature`, `area:wine-runtime` |
 | I5 | GOG → umu id lookup: the build's CSV, GitHub fallback cache (§4.1) | `type:feature`, `area:wine-runtime`, `area:licensing` |
 | I6 | Protonfix static reader, fix summary, collision warnings, `protonfixes = false`, L3 ownership rule (§4.2, §4.3) | `type:feature`, `area:wine-runtime` |
