@@ -55,6 +55,7 @@ A Rust CLI app that:
 | [16-gog-specific-solidification.md](16-gog-specific-solidification.md) | GOG-specific findings: cnc-ddraw as ecosystem default (Sikarugir/winetricks/GOG forums), ScummVM/DOSBox native lane, recommendation backlog S1–S5 |
 | [19-mac-app-compatibility-strategy.md](19-mac-app-compatibility-strategy.md) | Why mac-app games fail (renderer layer, runtime lineage, bundle model) and the layered fix: CX-lineage runtime by reference, auto renderer from PE imports, GOG-native fixes, GOG-id compat DB; host + VM test matrix; macOS 28 Rosetta risk |
 | [20-newer-cx-engine.md](20-newer-cx-engine.md) | #83: newer CrossOver-source engines (none from Sikarugir; Highball's CX 26.3 build is the candidate), Heroic mirror as second source (no), and why `WineSikarugir11` exits outside its launcher (a deliberate env-var gate) |
+| [22-ddraw-renderers-d7vk-vs-cnc-ddraw.md](22-ddraw-renderers-d7vk-vs-cnc-ddraw.md) | #150 / docs/21 §8 item 8: D7VK vs cnc-ddraw for `ddraw.dll` games (2D vs D3D≤7, Proton/Wine install, no D7VK on MoltenVK), and a static rule to tell 3D from 2D (the `dxguid` GUID block is noise; device/texture GUIDs are the signal) |
 
 🧪 **Launch-testing bundles:** [vm-testing.md](vm-testing.md) — Tart VM workflow
 (`scripts/vm-test.sh`), result format, VM limitations.
