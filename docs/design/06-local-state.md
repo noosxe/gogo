@@ -10,6 +10,8 @@ gogo keeps four classes of local data. Paths resolve via `dirs` (platform table 
 | state | `$XDG_STATE_HOME/gogo`, else `~/.local/state/gogo` | `~/Library/Application Support/gogo` | `state.json` (install records), `tokens.json` (file store), `verify-cache/` |
 | cache | `$XDG_CACHE_HOME/gogo`, else `~/.cache/gogo` | `~/Library/Caches/gogo` | `catalog-{locale}.json` |
 | data | user-chosen `download.dir` (default under the XDG download dir, 05 §3) | same | `{Title}/setup_….exe`, `.part` + sidecars while running |
+| data root (design 18 §6) | `$XDG_DATA_HOME/gogo`, else `~/.local/share/gogo` | `~/Library/Application Support/gogo` (the state dir) | `runtimes/`, `renderers/`, `games/<gogid>/` (prefixes, saves), `compat/` (L4) |
+| logs | `$XDG_STATE_HOME/gogo/logs/<gogid>/` | `~/Library/Logs/gogo/<gogid>/` | per-game run logs (`launch.log`, `latest.log`) |
 
 **Resolution rules (normative).** All paths resolve through the `dirs` crate, which implements
 both standards: the XDG base-directory spec on Linux (`config_dir`, `cache_dir`, `state_dir`,
@@ -20,9 +22,13 @@ both standards: the XDG base-directory spec on Linux (`config_dir`, `cache_dir`,
 - `dirs::state_dir()` is **Linux-only** (the XDG state dir has no macOS counterpart) and
   returns `None` on macOS → fall back to `data_dir()`, i.e. state lives next to config in
   Application Support. Resolution: `state_dir().unwrap_or_else(data_dir)` + `/gogo`.
+- The data root is `data_dir()` + `/gogo` (`state::data_root()`). On macOS that is the
+  state dir above, so nothing moved there; on Linux it is the XDG data dir, not the state
+  dir: prefixes hold saves and runtimes are large (design 18 §6, O7).
 - **Windows is unsupported** (scope decision, README non-goals): no `%APPDATA%` /
   `%LOCALAPPDATA%` handling, no Windows-specific path logic anywhere.
-- `GOGO_HOME` (env override) flattens config + state + cache into a single directory —
+- `GOGO_HOME` (env override) flattens config + state + cache + data root (and Linux logs,
+  `$GOGO_HOME/logs/`) into a single directory —
   `config.toml`, tokens file, `state.json`, and the catalog cache sit side by side in
   `$GOGO_HOME/`. Purpose: tests, portable/USB setups, containers. It never touches
   `download.dir` (data stays where the user chose it).
