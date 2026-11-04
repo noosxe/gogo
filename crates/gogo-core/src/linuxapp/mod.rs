@@ -8,6 +8,7 @@ use crate::macapp::error::MacAppError;
 
 pub mod proton;
 pub mod umu;
+pub mod umu_id;
 pub mod vdf;
 
 /// A `[linux] <key>` string in the config at `path`, if set. An unreadable
