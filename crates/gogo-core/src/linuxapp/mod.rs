@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::macapp::error::MacAppError;
 
+pub mod fixes;
 pub mod proton;
 pub mod protonfix;
 pub mod umu;
