@@ -1,0 +1,5 @@
+# Tests that skip themselves at runtime print why; show that output even on
+# success so the skip is visible (nextest captures passing tests' output).
+[[profile.default.overrides]]
+filter = 'test(ficlone)'
+success-output = "immediate"

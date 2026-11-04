@@ -11,6 +11,7 @@ pub mod depot;
 pub mod downlink;
 pub mod error;
 pub mod library;
+pub mod materialize;
 
 pub const EMBED_BASE: &str = "https://embed.gog.com";
 pub const API_BASE: &str = "https://api.gog.com";
