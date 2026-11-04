@@ -223,9 +223,37 @@ Without a terminal and with no answer stored, it stops and names the key to set.
 umu in `runtimes/`, and per game in `games/<gogid>/` the Proton prefix (saves
 included), the game files, `gogo-launch.toml` (what the build chose),
 `launch.conf` (what the launcher runs) and `state.toml`. `gogo linux-app setup
-<gogid>` brings that up to date after you change the override file. The menu
-entry and launcher, `~/.local/share/applications/gogo-<gogid>.desktop`, come with
-[#177](https://github.com/noosxe/gogo/issues/177).
+<gogid>` brings that up to date after you change the override file.
+
+**The launcher.** The build adds the game to your desktop's menu:
+`~/.local/share/applications/gogo-<gogid>.desktop`, with the game's icon,
+runs `games/<gogid>/launch.sh`. You can also run that script from a terminal
+and pass the game extra arguments. Before each launch it:
+
+- runs `gogo linux-app setup` itself when the override file changed, the prefix
+  is gone, or umu's Python went away (a Nix garbage collection). With no gogo to
+  run, it launches what the last setup applied and logs that;
+- checks the GE-Proton build. If gogo installed the build and it's gone or
+  changed, setup reinstalls it. If you pointed the game at your own build, a
+  change is logged and the game runs on it. A missing build with no gogo to
+  reinstall it stops the launch with a dialog (exit 127).
+
+Logs are in `~/.local/state/gogo/logs/<gogid>/`: `launch.log` (the launcher's own
+journal), one log per run with the effective config at the top (the newest 10
+are kept) and `latest.log`. Closing the launcher (Ctrl-C, `kill`) stops the game
+and everything else running in its prefix. If the launcher itself is killed,
+its watchdog does the same. A game that quits within 15 s or with an error shows
+a dialog through zenity or kdialog, or a notification. The dialog has three
+buttons:
+
+- **Open log** opens the run log.
+- **Try next renderer** switches the renderer and starts the game again.
+- **Copy report** puts a report on the clipboard (`wl-copy` or `xclip`).
+  Without either, the button is **Save report** and the report goes to
+  `report.txt` next to the logs.
+
+`launch.sh` is generated: don't edit it, since setup rewrites it whenever gogo's
+launcher changes. Edit the override file instead.
 
 **Layers** as on the Mac: the renderer from the game's imports (DXVK for
 D3D8–11, VKD3D-Proton for D3D12, D7VK for D3D ≤ 7, cnc-ddraw for 2D DirectDraw,

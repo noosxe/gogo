@@ -905,7 +905,7 @@ tested = [
     takes Mac-x86_64 renderer builds, and listings label it plain `x86_64` on Linux.
   - Logs: `state::logs_root()` (`<state_dir>/logs` on Linux, so `GOGO_HOME` flattens
     it) feeds doctor and `apps`. The launcher script still writes
-    `~/Library/Logs/gogo`; pointing it at the Linux path is #177's.
+    `~/Library/Logs/gogo`; pointing it at the Linux path is #177's (done: the Linux launcher, §7.5).
 
 ## 7. Decision 7: the launcher
 
@@ -1048,6 +1048,149 @@ the run log as `report.txt` and the button says **Save report**). `GOGO_LAUNCHER
 and `GOGO_LAUNCHER_NO_DIALOG` work as on the Mac, so the tests don't depend on any of
 these tools.
 
+### 7.5 As built (#177)
+
+The code is in `linuxapp/launcher.rs` (the template, the `.desktop` file, the writes) and
+`linuxapp/icon.rs`. The tests are in `tests/linuxapp_pipeline.rs`.
+
+**Files, written by setup.** After `launch.conf` and `state.toml`, setup writes
+`launch.sh`, `icon.png` and the `.desktop` file. The build gets them through its own
+setup run.
+
+- Each file is written only when its bytes changed, through a temp file renamed into
+  place. A launcher that runs setup keeps reading the script it started with.
+- A changed template reaches a game at its next setup (R30), and setup's notes say
+  `launch.sh: launcher <old> -> <new>`.
+- When setup, run by the launcher, wrote a launcher with another `LAUNCHER_VERSION`, the
+  launcher `exec`s the new one for this launch.
+- `LAUNCHER_VERSION` is a constant in `launcher.rs`, starting at 1. It is printed in
+  `launch.log` and in the run log header (`# launcher:`).
+- **The `.desktop` file** is at `game::desktop_path`. It has:
+  - `Type=Application`, `Version=1.5`, `Name=`, `Exec=`, `Icon=` (left out when there's
+    no icon), `Terminal=false`, `Categories=Game;` and `X-Gogo-Gogid=`;
+  - every value escaped as a Desktop Entry string;
+  - `Exec=`'s one argument always double-quoted: `"`, `` ` ``, `$` and `\` are
+    backslashed, `%` is doubled, and then the string escape applies on top (a literal
+    `$` is written `\\$`).
+  - A moved data root changes `Exec=`, so the next setup rewrites the file.
+- **The icon** is made once, while `icon.png` is missing.
+  - It comes from GOG's `goggame-<gogid>.ico` in the game files, else from the exe's
+    first `RT_GROUP_ICON` (through `object`'s resource directory).
+  - The largest image wins, then the deepest colour.
+  - A PNG image is copied as it is. A DIB (1/4/8/16/24/32 bpp, `BI_RGB` or
+    `BI_BITFIELDS`) is decoded with its AND mask as transparency (for 32 bpp, only
+    when its alpha is empty) and written as an RGBA PNG.
+  - No image crate: one IDAT through `flate2`, with its CRC-32.
+- **Setup reinstalls a changed managed build** (`setup::changed_managed`).
+  - This covers a catalog ref whose build fails `check_managed` (changed `version` or
+    `proton`, or missing files). Setup deletes the build and installs the pin again,
+    as `store::install_to` does for its own changed shared builds.
+  - Before #177, setup took such a build as it found it and recorded its new sha in
+    `launch.conf`, which would have hidden the change from the launch check.
+  - A `path:` build and one without a marker are left alone.
+
+**`launch.sh`**, step by step (§7.2):
+
+- **Shebang and tools.** `#!/usr/bin/env bash`: NixOS has no `/bin/bash`. Beyond bash, it
+  uses coreutils, GNU `grep` (`-z`, for `environ`), `sed`, `awk` and bash's job
+  control (`set -m`). The tests run it with a `PATH` of exactly those tools (the
+  `LAUNCHER_TOOLS` list) plus the fakes. The unit test runs `shellcheck` on the rendered
+  script when it is installed: in the dev shell and on the Ubuntu runner, not on macOS.
+- **Roots.**
+  - `GOGID` and the data root come from where the script is
+    (`<root>/games/<gogid>/launch.sh`), so a missing `launch.conf` still logs to the
+    right place.
+  - Relative paths resolve against `DATA_ROOT` when that dir exists, else this data
+    root. This differs from §7.1's "else `${XDG_DATA_HOME}/gogo`": the two are the same
+    unless the data root moved, and then only the script's own location is right.
+  - When the data root isn't gogo's default and `GOGO_HOME` is unset (a game built with
+    `GOGO_HOME`), gogo runs with `GOGO_HOME=<root>`, so setup and `next-renderer` find
+    the game.
+- **Logs** go where `state::logs_root()` puts them: `GOGO_LOG_DIR` (this game's dir, as
+  on the Mac), else `<GOGO_HOME or that root>/logs/<gogid>`, else
+  `${XDG_STATE_HOME:-~/.local/state}/gogo/logs/<gogid>`.
+- **When setup runs.** At most once per launch, for the first of these reasons:
+  1. no prefix;
+  2. a stale stamp;
+  3. the Proton build `missing` (managed or not, "minus the reinstall" for an
+     unmanaged one), or `changed` and managed;
+  4. `UMU_PYTHON` not executable, or `UMU_RUN` gone.
+
+  A build counts as managed when it has `gogo-managed.toml`, or when `PROTON_DIR` is
+  relative (a store build). Setup runs with stdin from `/dev/null`, so it's headless and
+  never prompts. Its output goes to `launch.log`. A failure goes into the header
+  (`# setup: setup failed (exit <n>): <line>; running the last applied config`), as on
+  the Mac (#69).
+- **After setup:**
+  - With no prefix, there's a dialog and exit 1 (as with no `launch.conf`).
+  - The runtime check runs again. A changed unmanaged build is logged and launched, with
+    `# runtime_note:` in the header. Anything else (missing, or a managed build that is
+    still changed) gets a run log that says why, footer `# exit: 127 (runtime
+    missing)`, a dialog naming `linux-app setup` and `--retarget`, and exit 127.
+  - A umu that is still gone is handled the same way, with footer `(umu missing)`.
+- **The environment** is set in umu-run's own subshell, never exported by the launcher.
+  This way no tee, watchdog or `sleep` of the launcher's carries `WINEPREFIX` and gets
+  killed at teardown. `WINEPREFIX` is unset at the top for the same reason.
+  - The order: the `ENV` entries first, then `WINEDLLOVERRIDES` (`DLL_OVERRIDES` before
+    any inherited value), `PROTONFIXES_DISABLE=1` for `PROTONFIXES=0`, and
+    `UMU_FOLDERS_PATH` when `UMU_FOLDERS` is set.
+  - Last come `WINEPREFIX`, `GAMEID`, `STORE=gog` and `PROTONPATH`, which are gogo's and
+    can't be overridden.
+  - The working dir is `WORKDIR`. The command is `"$UMU_PYTHON" "$UMU_RUN" "$EXE" ARGS…
+    "$@"`, or `"$UMU_RUN" …` for a system umu.
+- **Run log header** (§7.3), in this order:
+  - `# setup:` (only when setup failed), `# launcher:`;
+  - `# runtime: <state.toml runtime> (<version file on disk>)`, `# runtime_note:` (only
+    when there is one), `# runtime_dir:` (`PROTON_DIR` as written);
+  - `# umu:` (`<ver> (zipapp)` for the store zipapp, else the path), `# umu_id:`,
+    `# renderer:`;
+  - `# protonfix:` (state.toml's hash or `none`), `# protonfixes: on|off`, `# verbs:`,
+    `# stamp:`;
+  - `# os: <PRETTY_NAME> <arch>`, `# exe:`, `# args:`, `# prefix:`.
+
+  The footer is the Mac's. Two runs in the same second under the same pid (the
+  early-exit relaunch `exec`s) would share a name, so the second waits for the next
+  second: names keep sorting by time.
+- **Waiting for the game.** After umu-run exits, the launcher waits until no process
+  carries the prefix. This is the Linux `wineserver -w`: a launcher exe may have started
+  the real game. The wait is skipped while another launcher of this game runs.
+- **Teardown.**
+  - `TERM` goes to umu-run's process group.
+  - Then, for up to 5 s, the launcher polls the prefix's processes: one `grep -lzxF`
+    over `/proc/[0-9]*/environ` for `WINEPREFIX=<prefix>` (also with a trailing `/` and
+    the `readlink -f` form, as `game::prefix_procs` matches).
+  - Whatever is left gets `SIGKILL`, named in `launch.log` (`reaped (SIGKILL): <pid>
+    <comm>;…`). Last, the group gets `SIGKILL`.
+  - With another live launcher of this game (`.launchers/<pid>`), only this run's group
+    goes.
+  - The watchdog is the Mac's. Its liveness check reads `/proc/<pid>/stat`: the state
+    field (not `Z`) and the start time (field 22), not `ps -o lstart`.
+- **Early-exit dialog** (§7.4):
+  - The trigger, message, button order and the `next-renderer --dry-run` probe are the
+    Mac's. "Try next renderer" `exec`s the script again with its arguments. Nothing was
+    exported, so the environment is the one it started with.
+  - **zenity** runs as `--question --switch` with one `--extra-button` per label, so
+    there's no OK or Cancel; it prints the label and times out after 10 minutes.
+  - **kdialog** runs as `--yesnocancel`. Yes is the default (last) label, No the first,
+    and Cancel (also Escape) the middle one, "Open log".
+  - Both are used only with `DISPLAY` or `WAYLAND_DISPLAY` set. Otherwise `notify-send`
+    says "<title> exited after <n>s, see <run log>".
+  - Errors before a run (no `launch.conf`, no prefix, runtime missing) use the same
+    tools with one OK button. `GOGO_LAUNCHER_DIALOG` gets them too (title, message,
+    `OK`), unlike on the Mac.
+  - **Copy report**: `wl-copy` with `WAYLAND_DISPLAY`, else `xclip -selection
+    clipboard`. With neither, the button reads **Save report** and writes
+    `<log dir>/report.txt`.
+  - The report has the header lines except `prefix:`, then the last 40 lines of output,
+    with `$HOME` written as `~`.
+  - **Open log**: `xdg-open <run log>`, detached.
+
+**Checks the tests don't reach** (#179's host pass): whether `umu-run` passes `TERM` into
+pressure-vessel's container and Proton ends the game cleanly, or only the 5 s `KILL`
+does; whether Wine's processes inside the container show this `WINEPREFIX` in their
+`environ` (umu may rewrite it); zenity's `--switch` and kdialog's labels on real
+desktops; and whether the menu entry and icon show up in GNOME and KDE.
+
 ## 8. `gogo linux-app doctor <gogid>`
 
 Read-only, as design 16 §8.3: one line per check, `ok`/`warn`/`fail` with a hint; exit 1 on
@@ -1152,7 +1295,7 @@ only on Linux (`#[cfg(target_os = "linux")]`), with the same shape:
   for never having had one; `apps list` says `not yet` for it. `apps remove` deletes the
   `.desktop` file with the game, and refuses while a process has the prefix as its
   `WINEPREFIX` (`linuxapp::game::prefix_procs`, through `/proc/<pid>/environ`, §7.2).
-- #177's, not here: the `.desktop` file, `launch.sh`, the stamp check at launch, logs and
+- #177's, not here (built: §7.5): the `.desktop` file, `launch.sh`, the stamp check at launch, logs and
   the dialog. The pieces they share are in core: `linuxapp::game` (`launch.conf`,
   `state.toml`, `current_stamp`) and `linuxapp::setup::setup`.
 
