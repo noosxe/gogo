@@ -506,6 +506,53 @@ reads it in place or downloads it into the user's cache, and never vendors it (R
    it: a GE-Proton bump that adds, changes or removes the fix re-runs the summary and
    the verb pre-install (below) and logs the change.
 
+**As built (#171)** — the reader, where the design left choices:
+
+- **Code.** `gogo_core::linuxapp::protonfix`. `read_module(build, umu_id)` and
+  `read_default(build)` return a `Module` (path, symlink target, sha256, `Reading`) or
+  `None`. Like Python's finder, a package (`<name>/__init__.py`) wins over `<name>.py`,
+  symlinks are followed and a dangling one counts as no module. An id that isn't
+  `umu-` plus letters, digits, `-` and `_` has no module (no path tricks).
+- **Pattern matching, no parser.** A small lexer (about 200 lines) makes logical
+  lines: string literals (all quote forms and prefixes, escapes), comments, brackets,
+  `\` continuations and `;`. Statements are then matched by shape. Over the 79 modules of
+  GE-Proton11-12's `gamefixes-gog` (umu-protonfixes `28a02c25`, read once, nothing
+  committed), **55 read fully and 24 have other code**. Every one of those 24 is real
+  logic (file checks, downloads, `main_with_id` tables, `disable_esync()`-style
+  helpers), not a pattern the reader missed. A Python parser crate wouldn't read any of
+  them either: the gap is in what the modules do, not in their syntax. So no
+  dependency.
+- **What runs.** As `fix.py` does: `early_with_id` or else `early`, then
+  `main_with_id` or else `main`. Only those bodies are read. A statement directly in
+  one of them is a fix when it's `util.<call>` of a known kind with literal arguments.
+  Imports, `pass`, bare strings (docstrings) and `log.*` calls do nothing and are
+  skipped. Anything else is other code, listed as `line N: <statement>` (cut at 100
+  chars; a compound statement by its header, `if x:`): computed arguments, calls
+  inside `if`/`for`/`with`, unknown `util` calls (`disable_esync()`), calls to local
+  helpers. So is any module-level statement that isn't an import, a `def`, a bare
+  string or `NAME = '<string>'`.
+- **Literals.** Strings (adjacent ones joined; an f-string only without fields;
+  bytes are computed), `True`/`False`/`None`, `[util.]OverrideOrder.*` and
+  `[util.]BasePath.*`, and module-level string constants. Positional and keyword
+  arguments bind by the real parameter names, `set_xml_options`' misspelt
+  `base_attibutte` included. A `match_flags` on `replace_command` makes it other code.
+  `util` may be aliased (`from protonfixes import util as u`, `from protonfixes.util
+  import protontricks`).
+- **Summarised as.** `verb X`, `env K = "v"`, `dll_overrides d = "n,b"`
+  (`OverrideOrder.DISABLED` is `""`, shown as disabled), `registry <key> <name> =
+  <type> "<data>"`, or `registry <key> (key only)` when name, type and data aren't all
+  given (`util.py` then only creates the key). `/reg:64` is noted as the 64-bit view.
+  Then `replace_command "a" -> "b"` and `args += "x"`. `set_ini_options` becomes
+  `ini <file>: [SECTION] k=v, k=v; [NEXT] …` (comments and blank lines dropped, a
+  non-game `base_path` noted). `set_xml_options` becomes `xml <file>: "<line>" after
+  each line containing "<anchor>"`. The encoding isn't shown.
+- **The hash.** `state_value(module)` is the sha256 of the module's bytes or `none`.
+  `compare(stored, now)` gives `Unrecorded`, `Unchanged`, `Added`, `Changed` or
+  `Removed`; `rerun()` is true for all but `Unchanged`, and its `Display` is the log
+  line. A Linux `state.toml` doesn't exist yet: #176/#177 store it as `protonfix`.
+- Out of scope: `~/.config/protonfixes/localfixes/`. A localfix replaces the module at
+  launch, but it belongs to the user and every umu client, so gogo doesn't read it.
+
 ### 4.3 One summary
 
 The build plan, `gogo linux-app compat <gogid>` and `doctor` show one list: each fix,
@@ -552,6 +599,58 @@ launch-time network use for verbs is limited to what the static reader couldn't 
   - Example: Stronghold HD's `directplay` comes from `gamefixes-steam/40950.py`. Under
     `STORE=gog` protonfixes only looks in `gamefixes-gog`, so the L3 verb applies on
     Linux unless the build adds a GOG module for it.
+
+**As built (#171)** — the summary, collisions and ownership:
+
+- **Code.** `gogo_core::linuxapp::fixes`. `resolve(Inputs { umu_id, module, default,
+  db, layers })` takes the L3 file as text (`compat::db_raw`), so the ownership rule
+  can split its top level off, and the other layers resolved for Linux. It returns
+  `Fixes`: the effective config, the covered L3 fixes, both modules and the L3
+  warnings. `Fixes::summary()` builds a `Summary` (items with source and state, other
+  code, the `protonfixes = false` layer), and its `Display` is the text. The plan,
+  `compat` and `doctor` print it (#176, #178).
+- **The summary**, one line each, in this order: the module (`protonfix umu-40950:
+  gamefixes-gog/umu-40950.py -> gamefixes-steam/40950.py (sha256 0123456789ab)`, or
+  `none in this Proton build`); gogo's fixes from the effective config
+  (`renderer`, `exe`, `variant`, `args`, `replace_command`, `verbs`, `dll_overrides`,
+  `env`, `registry`) as `<fix>  (<L1 auto|L3 compat DB|L4 override|flags>)`; the L3
+  fixes the protonfix covers; `default.py`'s, as `protonfix default (every GOG game)`;
+  the module's; then `other code in <module> (may do more at launch):` and the
+  statements. `no known fixes` when nothing applies and there's no other code.
+- **Collisions.** These are env keys, DLL overrides (case-insensitive, Wine's `*` and
+  `.dll` dropped) and registry values (key and name case-insensitive, hives
+  abbreviated). A gogo value is marked when the protonfix that runs last (the game's,
+  then `default.py`) sets the same key to a different value: `env DXVK_ASYNC: L4 "0"
+  is overridden at launch by protonfix umu-910830 ("1")`. Same value: no mark. The
+  protonfix's DLL override is appended to `WINEDLLOVERRIDES` after gogo's, so it's
+  counted as winning too.
+- **`protonfixes = false`.** `compat::merge` puts `PROTONFIXES_DISABLE = "1"` into the
+  effective env at the layer of the winning `protonfixes = false`, unless a higher
+  layer sets that env key itself. It's in `compat.rs`, but `parse` drops
+  `protonfixes` on macOS, so the Mac lane never gets it. The summary then lists, under
+  `protonfixes = false (L4 override): PROTONFIXES_DISABLE=1, so the game loses:`,
+  every fix of both modules and their other code. Collisions aren't marked then.
+- **Ownership.** `compat::TOP_FIX_KEYS` (`verbs`, `dll_overrides`, `registry`, `args`,
+  `exe`, `replace_command`) are what's skipped. `env` is OS-specific, so a top-level
+  one is ignored anyway; `title`, `variant` and `source` stay. The rule needs a module
+  for the game in the chosen build, an L3 `source` (as resolved for Linux) starting
+  with `umu-protonfixes:`, and protonfixes **not** turned off: with
+  `protonfixes = false` nothing else owns the game, so L3 applies whole. Covered
+  fixes show as `verb directplay  (L3 compat DB: covered by protonfix umu-40950, not
+  applied)`. Stronghold HD (`compat/1207658712.toml`) has no `gamefixes-gog` module
+  in GE-Proton11-12, so its `directplay` applies (tested against the real file).
+- **Verbs at setup (R12).** `Fixes::setup_verbs()` is the effective verbs in order,
+  then `default.py`'s and the module's literal `protontricks` verbs, without
+  duplicates and with none of the protonfix's when it's off.
+  `pending_verbs(prefix, verbs)` drops those already in the prefix's
+  `winetricks.log`. umu 1.4.4's winetricks mode exits 1 **without installing
+  anything** when any verb it's given is already there (`is_installed_verb`), so
+  setup must pass only the missing ones. `winetricks_command(umu, proton, prefix,
+  umu_id, verbs)` builds `umu-run winetricks <verbs>` through `UmuRun::command()`
+  with `WINEPREFIX`, `PROTONPATH`, `GAMEID`, `STORE=gog` and `PROTONFIXES_DISABLE=1`
+  (umu adds `-q`). It's `None` when there's nothing to install. The disable is there
+  because the winetricks call is a `waitforexitandrun` Proton run, which would
+  otherwise run the protonfix too. Running the command is #176/#177's setup.
 
 ## 5. Decision 5: `[platforms.<os>]` in the compat schema
 
