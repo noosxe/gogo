@@ -941,6 +941,44 @@ from `$XDG_STATE_HOME` at run time (`GOGO_LOG_DIR` overrides), as the Mac comput
 `~/Library/Logs`. The `.desktop` file is the one absolute pointer; setup rewrites it when
 the data root moved.
 
+**As built (#176)** — the files setup writes (`linuxapp/game.rs`, `linuxapp/setup.rs`):
+
+- **`launch.conf`** (`LaunchConf::render`): a one-line header comment, then the keys in
+  the order above (golden file `tests/fixtures/linuxapp/launch.conf.golden`; bash sources
+  it back). `EXE` and `WORKDIR` are unix paths relative to the data root, through the
+  prefix's `drive_c/GOG/<name>` link into `game/`
+  (`games/<gogid>/prefix/drive_c/GOG/<name>/game.exe`): with `z:` gone, Wine maps them to
+  `C:\`. `GAME_DIR` is `games/<gogid>/game`, or the installed dir in the prefix (installer
+  lane). `UMU_FOLDERS` isn't written yet: nothing sets it. `UMU_PYTHON` comes from
+  `[linux] umu` again on every setup.
+- **`state.toml`** (`LinuxState`, schema 1): `gogid`, `title`, `runtime`, `renderer`,
+  `umu_id`, `protonfix` (§4.2's hash or `none`, compared with `protonfix::compare`),
+  `verbs`, `registry`, `stamp`, `gogo_version`. No `bundle`. `store::references` reads
+  its `runtime`/`renderer`, and the L4 file's `[platforms.linux]` table, so GC keeps the
+  GE-Proton a Linux game uses.
+- **The stamp** is the Mac's: sha256 of `gogo-launch.toml` and the L4 file.
+  `linuxapp::game::current_stamp(gogid)` computes it for #177's launch-time check.
+- **What's baked and what isn't.** `gogo-launch.toml` bakes L2 (exe, args, variants), the
+  L1 verbs, the runtime (flag > L3 > `[linux] default_runtime` > pin) and the renderer the
+  build selected. L3's `exe`/`args`/`env`/`dll_overrides`/`registry`/`verbs` are not
+  baked: setup applies them, because §4.3's ownership rule depends on which Proton build
+  is chosen.
+- **Setup's order**: read `state.toml`, the TOML and L4 → the runtime (L4, else baked;
+  a missing GE-Proton installed) → umu → the umu id → the prefix (`umu-run ""`: success
+  is `drive_c` being there) → home links made real, the game linked → L1 from a fresh scan
+  → the fixes (L1 verbs, the renderer at its layer, L3 as owned, L4) → the protonfix
+  compared (a change is a note) → the renderer (`apply_linux`) → registry values
+  (`umu-run reg add`, only for a new prefix or changed values) → pending verbs only
+  (`fixes::pending_verbs`; `z:` back for the run; anything still missing warns) →
+  `localize` → `launch.conf`, `state.toml`.
+- **Every umu run** gets `WINEPREFIX`, `PROTONPATH`, `GAMEID`, `STORE=gog`,
+  `PROTONFIXES_DISABLE=1` and `games/<gogid>/` as its working dir; its output goes to
+  `games/<gogid>/install/setup.log`. A data root, installer, prefix, Proton build or
+  umu-run under `/tmp` is refused ("private /tmp") before anything runs.
+- **wined3d**: chosen by L3, L4, a flag or the walk, it adds `PROTON_USE_WINED3D=1` (the
+  env and overrides the renderer sets fill gaps only); as L1's own pick it sets nothing.
+  The plan line and setup's notes say which.
+
 ### 7.2 What the launcher does
 
 1. Source `launch.conf`. No file: a dialog and exit 1 (as design 16 Open 1).
@@ -1051,6 +1089,39 @@ only on Linux (`#[cfg(target_os = "linux")]`), with the same shape:
   builds. A neutral alias can come later without breaking either.
 - Leftovers fixed in the same work: `depot`'s "macOS only for now" (§6), the `runtimes
   install`/`renderers install` refusal off macOS (§6).
+
+**As built (#176, the build and setup)** — `linuxapp/build.rs`, `gogo linux-app`:
+
+- Flags: `<game|setup.exe|dir>`, `--from-depot`, `--name`, `--runtime [<ref>]`,
+  `--renderer auto|dxvk|vkd3d-proton|d7vk|cnc-ddraw|wined3d`, `--refresh`,
+  `--interactive`, `--yes`, `--json`, `--json-progress`; `setup <gogid> [--refresh]
+  [--json]`. A bare `--runtime` (or `--interactive`) opens a menu: gogo's pinned GE-Proton,
+  the GE-Protons in the store, the unmanaged builds each Steam has, "other…" for a typed
+  ref. `compat`, `next-renderer`, `--retarget` and `apps` on Linux are the next PR;
+  `doctor` is #178.
+- The plan asks `[linux] umu` and, for a GE-Proton download, `[linux] proton_dir` before
+  anything downloads (headless and unset fails naming the key). Its lines: source, game
+  dir (a rebuild keeps the prefix and saves), compat, umu, runtime, container, renderer
+  with what it sets, verbs, `game files:` (#175), and the umu id with the fix summary. The
+  last needs the build's `protonfixes/`: with the GE-Proton still to download the plan
+  says so, and setup prints the summary after the install.
+- Depot lane: `game/` is materialized from the tree (a rebuild replaces it), support
+  overlays merged, the prefix created through umu, the game linked. GOG's support
+  installer runs best-effort as on the Mac, with the GOG.com key imported first as one
+  `REGEDIT4` file through `reg import` (the 32-bit view: `Wow6432Node`).
+- Installer lane: staged in `games/.build-<slug>-<pid>/` as `GAMEID=umu-0`, the Mac's
+  Inno flags with `/DIR=C:\GOG\<slug>` and `/LOG` through `Z:`. The id comes from the
+  installed tree; an older prefix for that id is moved to `prefix.old-<time>`, never
+  deleted. `gogo-launch.toml` records `lane = "installer"`.
+- A `--renderer` / `--runtime` that won is written into L4's `[platforms.linux]` only
+  where the L4 file already sets that key (flags > L4, #110), as on the Mac.
+- `[gogo] path` is the invoked path (argv0, else `PATH`), never `current_exe()`: in the
+  `gogo-linux-app` package that's `.gogo-wrapped`, which skips the wrapper that sets
+  `GOGO_UMU_PYTHON`.
+- `lane.rs`, the game-source resolution and the depot-tree lookup now build on Linux too.
+- #177's, not here: the `.desktop` file, `launch.sh`, the stamp check at launch, logs and
+  the dialog. The pieces they share are in core: `linuxapp::game` (`launch.conf`,
+  `state.toml`, `current_stamp`) and `linuxapp::setup::setup`.
 
 ## 11. Testing
 
