@@ -383,6 +383,12 @@ fn portable_checks(
             "d3dmetal in a portable bundle: gogo never puts D3DMetal into one",
             format!("{rebuild} --renderer dxmt"),
         )),
+        // `RendererRef::parse` has only the macOS ids.
+        Ok(r @ (Renderer::Dxvk | Renderer::Vkd3dProton | Renderer::D7vk)) => f.push(Finding::fail(
+            "renderer",
+            format!("{} is Linux only", r.id()),
+            rebuild.clone(),
+        )),
         Err(e) => f.push(Finding::fail("renderer", e, rebuild.clone())),
     }
 
@@ -552,6 +558,12 @@ fn check_renderer(
                 )),
             }
         }
+        // `RendererRef::parse` has only the macOS ids.
+        Renderer::Dxvk | Renderer::Vkd3dProton | Renderer::D7vk => f.push(Finding::fail(
+            "renderer",
+            format!("{} is Linux only", rref.renderer.id()),
+            format!("fix `renderer` in {}", compat::user_path(gogid).display()),
+        )),
         Renderer::D3dMetal if !renderer::d3dmetal_available() => f.push(Finding::ok(
             "renderer",
             "d3dmetal without consent: setup runs wined3d instead (see d3dmetal)",
