@@ -904,8 +904,34 @@ fn tiny_ico() -> Vec<u8> {
 impl World {
     /// A built game whose launcher can run: GOG's `.ico` in the tree, the
     /// fake gogo as `GOGO_PATH` (`no_gogo`: a path that isn't there), the
-    /// fake game as umu-run.
-    fn launcher(name: &str, no_gogo: bool) -> World {
+    /// fake game as umu-run, and the tools dir. `None` (skipped, said on
+    /// stderr) where the launcher can't run: Nix's build sandbox has no
+    /// `/usr/bin/env` for its shebang and no `setsid`.
+    fn launcher(name: &str, no_gogo: bool) -> Option<World> {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let found: Vec<Option<PathBuf>> = LAUNCHER_TOOLS
+            .iter()
+            .map(|t| {
+                std::env::split_paths(&path)
+                    .map(|d| d.join(t))
+                    .find(|p| p.is_file())
+            })
+            .collect();
+        if !Path::new("/usr/bin/env").is_file() || found.iter().any(Option::is_none) {
+            eprintln!("no /usr/bin/env or a launcher tool missing from PATH: skipped");
+            return None;
+        }
+        let w = World::launcher_built(name, no_gogo);
+        let tools = w.root.join("tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        for (t, p) in LAUNCHER_TOOLS.iter().zip(found) {
+            std::os::unix::fs::symlink(p.unwrap(), tools.join(t)).unwrap();
+        }
+        Some(w)
+    }
+
+    /// [`World::launcher`]'s game without the tools: for what setup writes.
+    fn launcher_built(name: &str, no_gogo: bool) -> World {
         let w = World::new(name, &["d3d9.dll"]);
         std::fs::write(w.tree.join(format!("goggame-{ID}.ico")), tiny_ico()).unwrap();
         let gogo = w
@@ -921,16 +947,6 @@ impl World {
         let umu = w.root.join("bin/umu-run");
         std::fs::write(&umu, FAKE_GAME_UMU).unwrap();
         chmod_x(&umu);
-        let tools = w.root.join("tools");
-        std::fs::create_dir_all(&tools).unwrap();
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        for t in LAUNCHER_TOOLS {
-            let found = std::env::split_paths(&path)
-                .map(|d| d.join(t))
-                .find(|p| p.is_file())
-                .unwrap_or_else(|| panic!("{t} isn't on PATH"));
-            std::os::unix::fs::symlink(found, tools.join(t)).unwrap();
-        }
         w
     }
 
@@ -1085,7 +1101,7 @@ fn wait_until(secs: u64, mut f: impl FnMut() -> bool) -> bool {
 
 #[test]
 fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() {
-    let w = World::launcher("files", false);
+    let w = World::launcher_built("files", false);
     let sh = w.game().join("launch.sh");
     let script = std::fs::read_to_string(&sh).unwrap();
     assert_eq!(script, gogo::linuxapp::launcher::launch_sh());
@@ -1142,7 +1158,9 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
 
 #[test]
 fn the_launcher_runs_umu_with_the_games_environment_and_logs_the_run() {
-    let w = World::launcher("run", false);
+    let Some(w) = World::launcher("run", false) else {
+        return;
+    };
     w.edit_conf(&[
         ("ENV", "('FOO=bar baz')"),
         ("DLL_OVERRIDES", "'ddraw=n,b'"),
@@ -1225,7 +1243,9 @@ fn the_launcher_runs_umu_with_the_games_environment_and_logs_the_run() {
 
 #[test]
 fn a_stale_stamp_runs_setup_once_and_without_gogo_the_last_setup_runs() {
-    let w = World::launcher("stamp", false);
+    let Some(w) = World::launcher("stamp", false) else {
+        return;
+    };
     std::fs::create_dir_all(w.home.join("compat")).unwrap();
     std::fs::write(
         w.home.join(format!("compat/{ID}.toml")),
@@ -1284,7 +1304,9 @@ fn a_stale_stamp_runs_setup_once_and_without_gogo_the_last_setup_runs() {
 
 #[test]
 fn a_changed_build_runs_setup_when_managed_and_launches_when_not() {
-    let w = World::launcher("runtime", false);
+    let Some(w) = World::launcher("runtime", false) else {
+        return;
+    };
     let version = w.build.join("version");
     // Unmanaged (the user's own build): logged, in the header, launched.
     std::fs::write(&version, "1793687166 GE-Proton10-35\n").unwrap();
@@ -1343,7 +1365,9 @@ fn a_changed_build_runs_setup_when_managed_and_launches_when_not() {
 
 #[test]
 fn nothing_runs_without_launch_conf_or_a_prefix() {
-    let w = World::launcher("refuse", true);
+    let Some(w) = World::launcher("refuse", true) else {
+        return;
+    };
     std::fs::remove_dir_all(w.game().join("prefix")).unwrap();
     let out = w.launch(&[], &[]);
     assert_eq!(out.status.code(), Some(1));
@@ -1362,7 +1386,9 @@ fn nothing_runs_without_launch_conf_or_a_prefix() {
 
 #[test]
 fn run_logs_rotate_to_the_newest_ten() {
-    let w = World::launcher("rotate", true);
+    let Some(w) = World::launcher("rotate", true) else {
+        return;
+    };
     std::fs::create_dir_all(w.logs()).unwrap();
     for i in 0..10 {
         std::fs::write(w.logs().join(format!("2000010{i}-000000-1.log")), "# old\n").unwrap();
@@ -1384,7 +1410,9 @@ fn run_logs_rotate_to_the_newest_ten() {
 
 #[test]
 fn the_early_exit_dialog_offers_the_next_renderer_and_its_buttons_work() {
-    let w = World::launcher("dialog", false);
+    let Some(w) = World::launcher("dialog", false) else {
+        return;
+    };
     // Wayland, with wl-copy and xdg-open: the clipboard and the opened log
     // are files.
     let bin = w.root.join("bin");
@@ -1531,7 +1559,9 @@ fn prefix_procs(w: &World) -> Vec<u32> {
 
 #[test]
 fn teardown_on_term_kills_every_process_with_the_prefix() {
-    let w = World::launcher("teardown", true);
+    let Some(w) = World::launcher("teardown", true) else {
+        return;
+    };
     let mut child = w
         .launch_cmd(&[("FAKE_GAME_HANG", "1")], &[])
         .stdout(std::process::Stdio::null())
@@ -1569,7 +1599,9 @@ fn teardown_on_term_kills_every_process_with_the_prefix() {
 
 #[test]
 fn the_watchdog_tears_down_after_the_launcher_is_killed() {
-    let w = World::launcher("watchdog", true);
+    let Some(w) = World::launcher("watchdog", true) else {
+        return;
+    };
     let mut child = w
         .launch_cmd(&[("FAKE_GAME_HANG", "1")], &[])
         .stdout(std::process::Stdio::null())
