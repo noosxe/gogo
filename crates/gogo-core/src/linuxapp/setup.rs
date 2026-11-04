@@ -705,10 +705,12 @@ pub fn setup(
         exe_now.as_deref(),
     )?;
     if let Some(old) = &launcher.updated_from {
-        notes.push(format!(
-            "launch.sh: launcher {old} -> {}",
-            launcher::LAUNCHER_VERSION
-        ));
+        let new = launcher::LAUNCHER_VERSION.to_string();
+        notes.push(if *old == new {
+            format!("launch.sh: launcher {new} rewritten")
+        } else {
+            format!("launch.sh: launcher {old} -> {new}")
+        });
     }
     Ok(SetupOutcome {
         launcher,
