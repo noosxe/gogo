@@ -1054,6 +1054,10 @@ pub fn references() -> Vec<Reference> {
         if let Ok(Some(s)) = super::launch::GameState::load(&file) {
             push(&s.gogid, &file, &s.runtime);
             push(&s.gogid, &file, &s.renderer);
+        } else if let Some(s) = linux_state(&file) {
+            // A `gogo linux-app` game (design 18 §6): no bundle, same keys.
+            push(&s.gogid, &file, &s.runtime);
+            push(&s.gogid, &file, &s.renderer);
         }
     }
     let l4 = super::compat::user_dir();
@@ -1066,14 +1070,31 @@ pub fn references() -> Vec<Reference> {
         else {
             continue;
         };
-        if let Ok(p) = super::compat::load_user(gogid) {
-            for r in [&p.entry.runtime, &p.entry.renderer].into_iter().flatten() {
-                push(gogid, &file, r);
+        for os in [super::compat::Os::Macos, super::compat::Os::Linux] {
+            if let Ok(p) = super::compat::load_user_for(gogid, os) {
+                for r in [&p.entry.runtime, &p.entry.renderer].into_iter().flatten() {
+                    push(gogid, &file, r);
+                }
             }
         }
     }
     out.sort_by(|a, b| (&a.gogid, &a.reference).cmp(&(&b.gogid, &b.reference)));
     out
+}
+
+/// The keys [`references`] reads from a `state.toml` without a bundle (a
+/// Linux game's, `linuxapp::game::LinuxState`).
+fn linux_state(file: &Path) -> Option<LinuxRefs> {
+    toml::from_str(&std::fs::read_to_string(file).ok()?).ok()
+}
+
+#[derive(serde::Deserialize)]
+struct LinuxRefs {
+    gogid: String,
+    #[serde(default)]
+    runtime: String,
+    #[serde(default)]
+    renderer: String,
 }
 
 /// Does reference `r` keep `target` (`<id>` or `<id>/<ver>`) alive? A
@@ -1522,6 +1543,48 @@ mod archive_tests {
             let mode = std::fs::metadata(&run).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o755);
         }
+    }
+}
+
+#[cfg(test)]
+mod linux_reference_tests {
+    use super::*;
+
+    #[test]
+    fn linux_games_and_their_l4_keep_their_proton() {
+        let _g = crate::test_util::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        // SAFETY: env mutation under the env mutex.
+        unsafe { std::env::set_var("GOGO_HOME", home.path()) };
+        let game = super::super::launch::games_dir().join("1207659013");
+        std::fs::create_dir_all(&game).unwrap();
+        std::fs::write(
+            game.join("state.toml"),
+            "schema = 1\ngogid = \"1207659013\"\nruntime = \"ge-proton/GE-Proton10-34\"\n\
+             renderer = \"wined3d\"\numu_id = \"umu-0\"\nprotonfix = \"none\"\n\
+             stamp = \"x\"\ngogo_version = \"0\"\n",
+        )
+        .unwrap();
+        let l4 = super::super::compat::user_path("1435582019");
+        std::fs::create_dir_all(l4.parent().unwrap()).unwrap();
+        std::fs::write(
+            &l4,
+            "[platforms.linux]\nruntime = \"ge-proton/GE-Proton9-27\"\n",
+        )
+        .unwrap();
+        let refs: Vec<(String, String)> = references()
+            .into_iter()
+            .map(|r| (r.gogid, r.reference))
+            .collect();
+        unsafe { std::env::remove_var("GOGO_HOME") };
+        assert!(
+            refs.contains(&("1207659013".into(), "ge-proton/GE-Proton10-34".into())),
+            "{refs:?}"
+        );
+        assert!(
+            refs.contains(&("1435582019".into(), "ge-proton/GE-Proton9-27".into())),
+            "{refs:?}"
+        );
     }
 }
 

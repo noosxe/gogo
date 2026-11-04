@@ -111,7 +111,7 @@ pub fn z_path(path: &Path) -> String {
 
 /// The last `n` non-empty lines of `path` (Inno writes UTF-8 or the ANSI
 /// code page; lossy is enough for a hint), or "" when there is no log.
-fn log_tail(path: &Path, n: usize) -> String {
+pub(crate) fn log_tail(path: &Path, n: usize) -> String {
     let Ok(raw) = std::fs::read(path) else {
         return String::new();
     };

@@ -339,11 +339,11 @@ pub fn windows_to_unix(prefix: &Path, path: &str) -> Option<PathBuf> {
 }
 
 /// POSIX single-quote (the same quoting the fat bundle's `launch.conf` uses).
-fn sh_quote(s: &str) -> String {
+pub(crate) fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-fn sh_array(items: impl IntoIterator<Item = String>) -> String {
+pub(crate) fn sh_array(items: impl IntoIterator<Item = String>) -> String {
     let quoted: Vec<String> = items.into_iter().map(|s| sh_quote(&s)).collect();
     format!("({})", quoted.join(" "))
 }
@@ -513,7 +513,7 @@ pub fn absolute(p: &Path) -> PathBuf {
         .collect()
 }
 
-pub(super) fn write_atomic(path: &Path, contents: &str) -> Result<(), MacAppError> {
+pub(crate) fn write_atomic(path: &Path, contents: &str) -> Result<(), MacAppError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -580,7 +580,7 @@ pub fn frameworks_of(rt: &Runtime) -> Option<PathBuf> {
 /// A path for the state `launch.conf`: relative to the state root when under
 /// it (the launcher resolves it against the state dir it finds, so a state
 /// dir copied to another account still works), absolute otherwise.
-pub(super) fn state_rel(state_root: &Path, p: &Path) -> String {
+pub(crate) fn state_rel(state_root: &Path, p: &Path) -> String {
     p.strip_prefix(state_root)
         .map(|r| r.to_string_lossy().into_owned())
         .unwrap_or_else(|_| p.to_string_lossy().into_owned())

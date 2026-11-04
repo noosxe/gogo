@@ -424,7 +424,7 @@ pub fn drop_host_drives(prefix: &Path) -> Result<(), MacAppError> {
 }
 
 /// `reg add` argv for one compat registry value.
-fn reg_add_argv(v: &compat::RegistryValue) -> Vec<String> {
+pub(crate) fn reg_add_argv(v: &compat::RegistryValue) -> Vec<String> {
     let mut argv = vec!["reg".to_string(), "add".to_string(), v.key.clone()];
     match &v.name {
         Some(name) => argv.extend(["/v".to_string(), name.clone()]),

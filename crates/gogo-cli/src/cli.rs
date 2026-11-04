@@ -220,6 +220,63 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    #[cfg(target_os = "linux")]
+    /// Set up a Windows game to run through GE-Proton and umu-launcher, as
+    /// `games/<gogid>/` in gogo's data dir: from its depot build by default,
+    /// else from its offline installer (run under umu).
+    #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+    LinuxApp {
+        #[command(subcommand)]
+        sub: Option<LinuxAppSub>,
+        /// A game (id, slug or part of the title) — built from its depot
+        /// build, or from its downloaded installer when it has none — or the
+        /// path to a GOG setup .exe (.bin siblings are picked up
+        /// automatically) or an installed game directory.
+        #[arg(
+            value_name = "GAME|INSTALLER",
+            required_unless_present = "from_depot",
+            conflicts_with = "from_depot"
+        )]
+        input: Option<String>,
+        /// Like the positional GAME, but only from the depot build, never
+        /// the installer; also takes an installed game directory.
+        #[arg(long, value_name = "GAME|PATH")]
+        from_depot: Option<String>,
+        /// The game's title (default: the game's name, or derived from the
+        /// installer file name).
+        #[arg(long)]
+        name: Option<String>,
+        /// Proton build: `ge-proton[/<version>]` or `path:<dir>`. Default:
+        /// the one set for the game in your override file or gogo's compat
+        /// list, else `[linux] default_runtime`, else gogo's pinned
+        /// GE-Proton. Without a value, pick it from a menu.
+        #[arg(long, num_args = 0..=1, value_name = "RUNTIME")]
+        runtime: Option<Option<String>>,
+        /// Renderer: `auto` (default) picks it from the graphics API the
+        /// game uses (D3D12 → vkd3d-proton, D3D8–11 → dxvk, D3D ≤ 7 → d7vk,
+        /// 2D DirectDraw → cnc-ddraw) unless gogo's compat list or your
+        /// override file says otherwise.
+        #[arg(long, value_enum)]
+        renderer: Option<LinuxRendererArg>,
+        /// Re-fetch umu-database's CSV for the umu id (only used when the
+        /// Proton build has no copy of it).
+        #[arg(long)]
+        refresh: bool,
+        /// Pick the runtime from a menu (a terminal only; a `--runtime`
+        /// value still wins). Same as a bare `--runtime`.
+        #[arg(long)]
+        interactive: bool,
+        /// Skip the confirmation; rebuild an existing game's files (its
+        /// prefix and saves stay).
+        #[arg(long)]
+        yes: bool,
+        /// Progress events as NDJSON on stdout.
+        #[arg(long)]
+        json_progress: bool,
+        /// Machine-readable summary.
+        #[arg(long)]
+        json: bool,
+    },
     /// Manage Wine runtimes: list the catalog and what's cached, install,
     /// prune.
     Runtimes(RuntimesArgs),
@@ -263,6 +320,64 @@ pub enum Command {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
+}
+
+#[cfg(target_os = "linux")]
+/// `gogo linux-app <sub>`: per-game commands next to the build itself.
+#[derive(Debug, Subcommand)]
+pub enum LinuxAppSub {
+    /// Bring a game's dir up to date with its gogo-launch.toml and override
+    /// file: resolve the Proton build (installing a missing GE-Proton),
+    /// create a missing prefix with no links out of the game's dir, apply
+    /// registry values, verbs and the renderer, write launch.conf. The
+    /// launcher runs this when the game's config has changed.
+    Setup {
+        /// GOG product id.
+        #[arg(value_name = "GOGID")]
+        gogid: String,
+        /// Re-fetch umu-database's CSV (see `linux-app --refresh`).
+        #[arg(long)]
+        refresh: bool,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[cfg(target_os = "linux")]
+/// `linux-app --renderer` values (design 18 §3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum LinuxRendererArg {
+    /// Picked from the game's graphics API, unless gogo's compat list or
+    /// your override file says otherwise.
+    Auto,
+    /// Proton's D3D8–11 on Vulkan.
+    Dxvk,
+    /// Proton's D3D12 on Vulkan.
+    #[value(name = "vkd3d-proton")]
+    Vkd3dProton,
+    /// Proton's D3D ≤ 7 on Vulkan (`PROTON_USE_D7VK=1`).
+    D7vk,
+    /// DirectDraw wrapper for 2D classics.
+    #[value(name = "cnc-ddraw")]
+    CncDdraw,
+    /// Wine's Direct3D on OpenGL (`PROTON_USE_WINED3D=1`).
+    Wined3d,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxRendererArg {
+    pub fn choice(self) -> gogo::macapp::RendererChoice {
+        use gogo::macapp::{Renderer as R, RendererChoice as C};
+        match self {
+            LinuxRendererArg::Auto => C::Auto,
+            LinuxRendererArg::Dxvk => C::Force(R::Dxvk),
+            LinuxRendererArg::Vkd3dProton => C::Force(R::Vkd3dProton),
+            LinuxRendererArg::D7vk => C::Force(R::D7vk),
+            LinuxRendererArg::CncDdraw => C::Force(R::CncDdraw),
+            LinuxRendererArg::Wined3d => C::Force(R::Wined3d),
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -971,5 +1086,80 @@ mod tests {
             })
             .collect();
         assert!(bad.is_empty(), "help text references repo docs: {bad:#?}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_app_parses_its_flags() {
+        let cli = Cli::try_parse_from([
+            "gogo",
+            "linux-app",
+            "tag",
+            "--runtime",
+            "ge-proton/GE-Proton10-34",
+            "--renderer",
+            "vkd3d-proton",
+            "--refresh",
+            "--yes",
+        ])
+        .unwrap();
+        let Command::LinuxApp {
+            sub: None,
+            input,
+            runtime,
+            renderer,
+            refresh,
+            yes,
+            ..
+        } = cli.command
+        else {
+            panic!("expected a linux-app build");
+        };
+        assert_eq!(input.as_deref(), Some("tag"));
+        assert_eq!(runtime, Some(Some("ge-proton/GE-Proton10-34".into())));
+        assert_eq!(
+            renderer.map(|r| r.choice()),
+            Some(gogo::macapp::RendererChoice::Force(
+                gogo::macapp::Renderer::Vkd3dProton
+            ))
+        );
+        assert!(refresh && yes);
+
+        // A bare `--runtime` asks; mac-only flags don't exist here.
+        let cli = Cli::try_parse_from(["gogo", "linux-app", "tag", "--runtime"]).unwrap();
+        let Command::LinuxApp { runtime, .. } = cli.command else {
+            panic!("expected linux-app");
+        };
+        assert_eq!(runtime, Some(None));
+        for flag in ["--portable", "--codesign", "--out=x", "--retarget=1"] {
+            assert!(
+                Cli::try_parse_from(["gogo", "linux-app", "tag", flag]).is_err(),
+                "{flag}"
+            );
+        }
+        for r in ["dxmt", "d3dmetal"] {
+            assert!(Cli::try_parse_from(["gogo", "linux-app", "x", "--renderer", r]).is_err());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_app_setup_takes_a_gogid() {
+        let cli =
+            Cli::try_parse_from(["gogo", "linux-app", "setup", "1207659013", "--json"]).unwrap();
+        let Command::LinuxApp {
+            sub:
+                Some(LinuxAppSub::Setup {
+                    gogid,
+                    json,
+                    refresh,
+                }),
+            ..
+        } = cli.command
+        else {
+            panic!("expected linux-app setup");
+        };
+        assert_eq!(gogid, "1207659013");
+        assert!(json && !refresh);
     }
 }

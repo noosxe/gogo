@@ -6,9 +6,12 @@ use std::path::Path;
 
 use crate::macapp::error::MacAppError;
 
+pub mod build;
 pub mod fixes;
+pub mod game;
 pub mod proton;
 pub mod protonfix;
+pub mod setup;
 pub mod umu;
 pub mod umu_id;
 pub mod vdf;
