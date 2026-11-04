@@ -130,7 +130,6 @@ pub enum Command {
     },
     /// Download a game's files straight from GOG's content servers (its
     /// depot build, as GOG Galaxy does) into the user cache directory.
-    /// macOS only for now.
     Depot(DepotArgs),
     /// Config file management.
     Config {

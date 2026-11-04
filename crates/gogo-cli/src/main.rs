@@ -51,8 +51,7 @@ fn main() {
             cli::exit::MACAPP
         }
         Err(AppError::Depot(e)) => match e {
-            gogo::gog::depot::DepotError::UnsupportedPlatform(_)
-            | gogo::gog::depot::DepotError::NoCacheDir => {
+            gogo::gog::depot::DepotError::NoCacheDir => {
                 eprintln!("gogo: {e}");
                 cli::exit::USAGE
             }
@@ -798,8 +797,9 @@ async fn resolve_games(
 // — download —
 
 /// `gogo depot <GAME>` — Model B lane (docs/design/14): resolve the latest
-/// public Windows build and materialize it into the user cache directory.
-/// macOS-only materialization (D7); resolve+plan works everywhere.
+/// public Windows build and download it into the user cache directory
+/// (macOS and Linux). On Linux the plan also says how a build will
+/// materialize it (design 18 §6).
 async fn depot_cmd(args: cli::DepotArgs) -> Result<i32, AppError> {
     use gogo::gog::depot::{DepotEvent, DepotOptions};
 
@@ -933,6 +933,7 @@ fn render_depot_event(
             disk_size,
             language,
             dlcs,
+            game_files,
         } => {
             println!(
                 "gogo: plan {} (download {}, disk {}, {}{})",
@@ -946,6 +947,9 @@ fn render_depot_event(
                     format!(" +{} dlcs", dlcs.len())
                 }
             );
+            if let Some(plan) = game_files {
+                println!("gogo: {}", game_files_line(plan));
+            }
         }
         Preparing => println!("gogo: preparing"),
         Allocating { fraction } | Verifying { fraction } => {
@@ -974,6 +978,23 @@ fn render_depot_event(
             let _ = std::io::Write::flush(&mut std::io::stdout());
         }
         Finished { .. } => {}
+    }
+}
+
+/// The plan's Linux line: how a build turns the depot tree into the game's
+/// `game/` dir, and what that costs (design 18 §6).
+fn game_files_line(plan: &gogo::gog::materialize::MaterializePlan) -> String {
+    use gogo::gog::materialize::TreeMethod;
+    match plan.method {
+        TreeMethod::Reflink => format!(
+            "game files: reflink into {} (no extra disk)",
+            plan.game_dir.display()
+        ),
+        TreeMethod::Copy => format!(
+            "game files: copy into {} (+{} disk: no reflink between the cache and the data dir)",
+            plan.game_dir.display(),
+            gogo::fmt::human_size(plan.extra_bytes)
+        ),
     }
 }
 
@@ -3885,5 +3906,35 @@ mod completions_tests {
     #[test]
     fn fish_script_completes_the_gogo_command() {
         assert!(script(Shell::Fish).contains("complete -c gogo"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::game_files_line;
+    use gogo::gog::materialize::{MaterializePlan, TreeMethod};
+
+    #[test]
+    fn game_files_line_says_reflink_or_copy_and_its_cost() {
+        let mut plan = MaterializePlan {
+            method: TreeMethod::Reflink,
+            game_dir: "/d/games/1/game".into(),
+            extra_bytes: 0,
+        };
+        assert_eq!(
+            game_files_line(&plan),
+            "game files: reflink into /d/games/1/game (no extra disk)"
+        );
+        plan.method = TreeMethod::Copy;
+        plan.extra_bytes = 3 * 1024 * 1024 * 1024;
+        let line = game_files_line(&plan);
+        assert!(
+            line.starts_with("game files: copy into /d/games/1/game (+"),
+            "{line}"
+        );
+        assert!(
+            line.contains(&gogo::fmt::human_size(plan.extra_bytes)),
+            "{line}"
+        );
     }
 }

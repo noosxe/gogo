@@ -1,7 +1,9 @@
 //! Depot (Model B) downloads via gog-warp — `docs/design/14`.
 //!
 //! Thin driver over gog-warp's `Downloader`: resolve the latest public Windows
-//! build, plan, and materialize the game tree into the user cache directory.
+//! build, plan, and download the game tree into the user cache directory
+//! (macOS and Linux). Turning that tree into a game's `game/` dir is
+//! `macapp::bundle::clone_tree` on macOS and [`super::materialize`] on Linux.
 //! The heavy lifting (depots, secure links, chunk reconstruction, verification)
 //! is the library's; this module owns selection, layout, events, and limits.
 
@@ -14,6 +16,8 @@ use gog_warp::Core;
 use gog_warp::content_system::downloader::Downloader;
 use gog_warp::content_system::downloader::progress::DownloadState;
 use gog_warp::content_system::types::{Build, Platform};
+
+use super::materialize::MaterializePlan;
 
 /// Progress surface for the depot lane (design 14 D4); NDJSON under
 /// `--json-progress`.
@@ -38,6 +42,11 @@ pub enum DepotEvent {
         language: String,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         dlcs: Vec<String>,
+        /// Linux only: how a build will turn the cache tree into
+        /// `games/<gogid>/game` (reflink or copy) and the extra disk it
+        /// costs (design 18 §6). macOS clones through APFS and has none.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        game_files: Option<MaterializePlan>,
     },
     Preparing,
     Allocating {
@@ -59,8 +68,6 @@ pub enum DepotEvent {
 
 #[derive(thiserror::Error, Debug)]
 pub enum DepotError {
-    #[error("depot downloads are not implemented on {0} yet")]
-    UnsupportedPlatform(&'static str),
     #[error("no public Windows builds for product {0}")]
     NoBuilds(u64),
     #[error("no user cache directory available")]
@@ -205,13 +212,6 @@ pub async fn run(
         cache_roots(cache_base.as_deref(), product_id, opts.dir.as_deref())
             .ok_or(DepotError::NoCacheDir)?;
 
-    // D7: the materialization lane is macOS-only for now; resolve+plan is
-    // allowed everywhere, but no directory may be created elsewhere.
-    let materialize = cfg!(target_os = "macos");
-    if !materialize && !opts.dry_run {
-        return Err(DepotError::UnsupportedPlatform("this platform"));
-    }
-
     let builds = core
         .get_builds(
             &product_id.to_string(),
@@ -242,18 +242,22 @@ pub async fn run(
     };
     let (download_size, disk_size) = manifest.install_size(&opts.language, &dlcs, None);
     let install_dir = install_root.join(manifest.install_directory());
+    let game_files = cfg!(target_os = "linux").then(|| {
+        let game_dir = crate::macapp::launch::games_dir()
+            .join(product_id.to_string())
+            .join("game");
+        super::materialize::plan_tree(&install_root, &game_dir, disk_size)
+    });
     let _ = events.send(DepotEvent::Plan {
         install_dir: install_dir.clone(),
         download_size,
         disk_size,
         language: opts.language.clone(),
         dlcs: dlcs.clone(),
+        game_files,
     });
     if opts.dry_run {
         return Ok(install_dir);
-    }
-    if !materialize {
-        return Err(DepotError::UnsupportedPlatform("this platform"));
     }
 
     // The preflight (and the downloader) expect the install root to exist;
@@ -401,6 +405,34 @@ mod tests {
         assert_eq!(
             j,
             r#"{"type":"resolved","productId":1,"title":"T","buildId":"b","version":"v","generation":2}"#
+        );
+    }
+
+    #[test]
+    fn plan_ndjson_shape_with_and_without_game_files() {
+        // macOS (no game_files): the shape it had before Linux.
+        let mut e = DepotEvent::Plan {
+            install_dir: "/c/T".into(),
+            download_size: 1,
+            disk_size: 2,
+            language: "en-US".into(),
+            dlcs: vec![],
+            game_files: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&e).unwrap(),
+            r#"{"type":"plan","installDir":"/c/T","downloadSize":1,"diskSize":2,"language":"en-US"}"#
+        );
+        if let DepotEvent::Plan { game_files, .. } = &mut e {
+            *game_files = Some(MaterializePlan {
+                method: super::super::materialize::TreeMethod::Copy,
+                game_dir: "/d/games/1/game".into(),
+                extra_bytes: 2,
+            });
+        }
+        assert_eq!(
+            serde_json::to_string(&e).unwrap(),
+            r#"{"type":"plan","installDir":"/c/T","downloadSize":1,"diskSize":2,"language":"en-US","gameFiles":{"method":"copy","gameDir":"/d/games/1/game","extraBytes":2}}"#
         );
     }
 
