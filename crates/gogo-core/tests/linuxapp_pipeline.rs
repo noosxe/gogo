@@ -698,21 +698,22 @@ fn apps_lists_and_removes_linux_games_with_their_menu_entry() {
         "GOGO_HOME keeps the menu entry in scratch"
     );
 
-    // Before #177's launcher: no menu entry yet, and not orphaned.
+    // The build wrote the launcher and its menu entry (#177): present.
     let a = &apps::list(&logs).unwrap()[0];
-    assert!(a.linux && !a.launcher && !a.desktop_present && !a.orphaned());
+    assert!(a.linux && a.launcher && a.desktop_present && !a.orphaned());
     assert_eq!(
         a.runtime.as_deref(),
         Some(format!("path:{}", w.build.display()).as_str())
     );
     assert_eq!(a.title.as_deref(), Some("Test Game"));
 
-    // With a launcher and its menu entry: present; entry deleted: orphaned.
-    std::fs::write(w.game().join("launch.sh"), "#!/bin/bash\n").unwrap();
-    std::fs::create_dir_all(desktop.parent().unwrap()).unwrap();
-    std::fs::write(&desktop, "[Desktop Entry]\n").unwrap();
-    assert!(!apps::get(ID, &logs).unwrap().unwrap().orphaned());
+    // A game built before #177 (no launch.sh, no entry) isn't orphaned; a
+    // launcher whose entry was deleted is.
+    std::fs::rename(w.game().join("launch.sh"), w.root.join("launch.sh")).unwrap();
     std::fs::remove_file(&desktop).unwrap();
+    let a = apps::get(ID, &logs).unwrap().unwrap();
+    assert!(!a.launcher && !a.desktop_present && !a.orphaned());
+    std::fs::rename(w.root.join("launch.sh"), w.game().join("launch.sh")).unwrap();
     assert!(apps::get(ID, &logs).unwrap().unwrap().orphaned());
 
     // A process in the prefix (found by its WINEPREFIX) blocks removal.
@@ -792,6 +793,810 @@ fn tmp_paths_never_reach_umu() {
 }
 
 // — L1 renderer selection fixtures —
+
+// — the launcher (#177, design 18 §7) —
+//
+// The build writes `launch.sh`, then umu-run on PATH is swapped for a fake
+// game that logs its argv, the env and its working dir, prints a line on
+// each stream and exits as told. A fake gogo answers `setup` the way the
+// real one leaves `launch.conf` (restamped) and `next-renderer` as #176's.
+// The launcher runs with a cleared environment and a PATH of exactly the
+// tools it needs, so no dialog tool, clipboard or gogo of the host's is
+// ever reached.
+
+/// The fake game (see above). `FAKE_GAME_HANG`: a child that ignores TERM
+/// in a session of its own (as Wine's services and umu's container leave
+/// the process group), then hang.
+const FAKE_GAME_UMU: &str = r#"#!/bin/sh
+{
+  printf 'ARGV:%s\n' "$*"
+  printf 'ENV:WINEPREFIX=%s GAMEID=%s STORE=%s PROTONPATH=%s WINEDLLOVERRIDES=%s PROTONFIXES_DISABLE=%s FOO=%s CWD=%s\n' \
+    "${WINEPREFIX-unset}" "${GAMEID-}" "${STORE-}" "${PROTONPATH-}" "${WINEDLLOVERRIDES-}" \
+    "${PROTONFIXES_DISABLE-}" "${FOO-}" "$(pwd)"
+} >> "$FAKE_UMU_LOG"
+echo "fake-game stdout line"
+echo "err: fake-game stderr line" >&2
+if [ -n "${FAKE_GAME_HANG:-}" ]; then
+  setsid sh -c 'trap "" TERM; exec sleep 300' </dev/null >/dev/null 2>&1 &
+  exec sleep 300
+fi
+sleep "${FAKE_GAME_SLEEP:-0}"
+exit "${FAKE_GAME_EXIT:-0}"
+"#;
+
+/// The fake gogo. `setup` restamps `launch.conf` (and clears a vanished
+/// `UMU_PYTHON`, and puts `FAKE_VERSION` back into `FAKE_VERSION_FILE`, as
+/// a reinstall would); `FAKE_SETUP_FAIL` fails it. `next-renderer` answers
+/// wined3d until L4 names it.
+const FAKE_GOGO: &str = r#"#!/bin/sh
+echo "GOGO_HOME=${GOGO_HOME:-} $*" >> "$FAKE_CALLS"
+g="$GOGO_HOME/games/$3"
+l4="$GOGO_HOME/compat/$3.toml"
+case "$2" in
+  setup)
+    [ -n "${FAKE_SETUP_FAIL:-}" ] && { echo "warning: a warning"; echo "gogo: setup broke" >&2; exit 1; }
+    if [ -n "${FAKE_VERSION_FILE:-}" ]; then printf '%s\n' "$FAKE_VERSION" > "$FAKE_VERSION_FILE"; fi
+    new="$(cat "$g/gogo-launch.toml" "$l4" 2>/dev/null | sha256sum)"
+    sed -e "s|^STAMP=.*|STAMP='${new%% *}'|" -e "s|^UMU_PYTHON=.*|UMU_PYTHON=''|" \
+      "$g/launch.conf" > "$g/launch.conf.new"
+    if grep -q wined3d "$l4" 2>/dev/null; then
+      sed -i "s|^RENDERER=.*|RENDERER='wined3d'|" "$g/launch.conf.new"
+    fi
+    mv "$g/launch.conf.new" "$g/launch.conf";;
+  next-renderer)
+    if grep -q wined3d "$l4" 2>/dev/null; then echo "gogo: $3: no more renderers" >&2; exit 1; fi
+    [ "${4:-}" = --dry-run ] || { mkdir -p "$GOGO_HOME/compat"; printf '[platforms.linux]\nrenderer = "wined3d"\n' > "$l4"; }
+    echo wined3d;;
+esac
+"#;
+
+/// What `launch.sh` and the fakes run, linked from the test's PATH.
+const LAUNCHER_TOOLS: &[&str] = &[
+    "bash",
+    "sh",
+    "cat",
+    "date",
+    "mkdir",
+    "rm",
+    "ln",
+    "mv",
+    "cp",
+    "sha256sum",
+    "grep",
+    "sed",
+    "awk",
+    "tr",
+    "cut",
+    "tail",
+    "head",
+    "sleep",
+    "tee",
+    "mkfifo",
+    "basename",
+    "dirname",
+    "readlink",
+    "uname",
+    "setsid",
+    "printf",
+    "env",
+];
+
+/// A 16×16 `.ico` (one 32 bpp DIB, opaque red).
+fn tiny_ico() -> Vec<u8> {
+    let mut dib = Vec::new();
+    dib.extend_from_slice(&40u32.to_le_bytes());
+    dib.extend_from_slice(&16u32.to_le_bytes());
+    dib.extend_from_slice(&32u32.to_le_bytes());
+    dib.extend_from_slice(&1u16.to_le_bytes());
+    dib.extend_from_slice(&32u16.to_le_bytes());
+    dib.extend_from_slice(&[0; 24]);
+    for _ in 0..256 {
+        dib.extend_from_slice(&[0, 0, 255, 255]);
+    }
+    dib.extend_from_slice(&[0; 64]);
+    let mut ico = vec![0, 0, 1, 0, 1, 0, 16, 16, 0, 0, 1, 0, 32, 0];
+    ico.extend_from_slice(&(dib.len() as u32).to_le_bytes());
+    ico.extend_from_slice(&22u32.to_le_bytes());
+    ico.extend_from_slice(&dib);
+    ico
+}
+
+impl World {
+    /// A built game whose launcher can run: GOG's `.ico` in the tree, the
+    /// fake gogo as `GOGO_PATH` (`no_gogo`: a path that isn't there), the
+    /// fake game as umu-run.
+    fn launcher(name: &str, no_gogo: bool) -> World {
+        let w = World::new(name, &["d3d9.dll"]);
+        std::fs::write(w.tree.join(format!("goggame-{ID}.ico")), tiny_ico()).unwrap();
+        let gogo = w
+            .root
+            .join(if no_gogo { "no-such-gogo" } else { "fake-gogo" });
+        if !no_gogo {
+            std::fs::write(&gogo, FAKE_GOGO).unwrap();
+            chmod_x(&gogo);
+        }
+        let mut opts = w.opts();
+        opts.gogo_path = Some(gogo);
+        build_with(&opts);
+        let umu = w.root.join("bin/umu-run");
+        std::fs::write(&umu, FAKE_GAME_UMU).unwrap();
+        chmod_x(&umu);
+        let tools = w.root.join("tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        for t in LAUNCHER_TOOLS {
+            let found = std::env::split_paths(&path)
+                .map(|d| d.join(t))
+                .find(|p| p.is_file())
+                .unwrap_or_else(|| panic!("{t} isn't on PATH"));
+            std::os::unix::fs::symlink(found, tools.join(t)).unwrap();
+        }
+        w
+    }
+
+    /// The fake game's runs (the build's umu runs are in the same log).
+    fn game_runs(&self) -> usize {
+        self.log()
+            .lines()
+            .filter(|l| l.starts_with("ARGV:") && l.contains("game.exe"))
+            .count()
+    }
+
+    fn user_home(&self) -> PathBuf {
+        self.root.join("user-home")
+    }
+
+    fn calls(&self) -> Vec<String> {
+        std::fs::read_to_string(self.root.join("gogo-calls.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Where the launcher logs: `<GOGO_HOME>/logs/<gogid>` (the data root
+    /// isn't the XDG default, so it's gogo's GOGO_HOME, as logs_root()).
+    fn logs(&self) -> PathBuf {
+        self.home.join("logs").join(ID)
+    }
+
+    fn launch_log(&self) -> String {
+        std::fs::read_to_string(self.logs().join("launch.log")).unwrap_or_default()
+    }
+
+    /// The run logs, oldest first.
+    fn runs(&self) -> Vec<String> {
+        let mut runs: Vec<PathBuf> = std::fs::read_dir(self.logs())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(|c: char| c.is_ascii_digit())
+            })
+            .collect();
+        runs.sort();
+        runs.iter()
+            .map(|p| std::fs::read_to_string(p).unwrap())
+            .collect()
+    }
+
+    /// `launch.sh` with a cleared environment: the scratch `HOME` and XDG
+    /// dirs, PATH = the tools + `bin/` (+ `extra_bin`), dialogs off unless
+    /// `env` sets `GOGO_LAUNCHER_DIALOG`. No GOGO_HOME: the launcher works
+    /// it out from where it is.
+    fn launch_cmd(&self, env: &[(&str, &str)], args: &[&str]) -> std::process::Command {
+        let mut c = std::process::Command::new(self.game().join("launch.sh"));
+        let home = self.user_home();
+        c.env_clear()
+            .args(args)
+            .current_dir(&self.root)
+            .env("HOME", &home)
+            .env("XDG_DATA_HOME", home.join(".local/share"))
+            .env("XDG_STATE_HOME", home.join(".local/state"))
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    self.root.join("tools").display(),
+                    self.root.join("bin").display()
+                ),
+            )
+            .env("FAKE_UMU_LOG", &self.umu_log)
+            .env("FAKE_CALLS", self.root.join("gogo-calls.log"));
+        if !env.iter().any(|(k, _)| *k == "GOGO_LAUNCHER_DIALOG") {
+            c.env("GOGO_LAUNCHER_NO_DIALOG", "1");
+        }
+        for (k, v) in env {
+            c.env(k, v);
+        }
+        c
+    }
+
+    fn launch(&self, env: &[(&str, &str)], args: &[&str]) -> std::process::Output {
+        let out = self.launch_cmd(env, args).output().unwrap();
+        eprintln!("launch.log:\n{}", self.launch_log());
+        out
+    }
+
+    /// Rewrite `KEY=` lines of `launch.conf`.
+    fn edit_conf(&self, sets: &[(&str, &str)]) {
+        let conf: String = self
+            .conf()
+            .lines()
+            .map(|l| {
+                sets.iter()
+                    .find(|(k, _)| l.starts_with(&format!("{k}=")))
+                    .map(|(k, v)| format!("{k}={v}\n"))
+                    .unwrap_or_else(|| format!("{l}\n"))
+            })
+            .collect();
+        std::fs::write(self.game().join("launch.conf"), conf).unwrap();
+    }
+
+    /// A dialog stub answering from `answers` in turn, recording each
+    /// dialog's argv (title, message, labels) to `dialogs.log`.
+    fn dialog_stub(&self, answers: &[&str]) -> PathBuf {
+        let file = self.root.join("answers");
+        std::fs::write(
+            &file,
+            answers.iter().map(|a| format!("{a}\n")).collect::<String>(),
+        )
+        .unwrap();
+        let stub = self.root.join("dialog");
+        std::fs::write(
+            &stub,
+            format!(
+                "#!/bin/sh\n{{ printf '%s\\n' \"$@\"; echo ===; }} >> \"{log}\"\n\
+                 head -n 1 \"{file}\"\nsed -i 1d \"{file}\"\n",
+                log = self.root.join("dialogs.log").display(),
+                file = file.display()
+            ),
+        )
+        .unwrap();
+        chmod_x(&stub);
+        stub
+    }
+
+    fn dialogs(&self) -> Vec<String> {
+        std::fs::read_to_string(self.root.join("dialogs.log"))
+            .unwrap_or_default()
+            .split("===\n")
+            .filter(|d| !d.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+/// Poll `f` for up to `secs`.
+fn wait_until(secs: u64, mut f: impl FnMut() -> bool) -> bool {
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    while std::time::Instant::now() < end {
+        if f() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    f()
+}
+
+#[test]
+fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() {
+    let w = World::launcher("files", false);
+    let sh = w.game().join("launch.sh");
+    let script = std::fs::read_to_string(&sh).unwrap();
+    assert_eq!(script, gogo::linuxapp::launcher::launch_sh());
+    use std::os::unix::fs::PermissionsExt as _;
+    assert_eq!(
+        std::fs::metadata(&sh).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+
+    let desktop = gogo::linuxapp::game::desktop_path(ID);
+    assert_eq!(
+        desktop,
+        w.home.join(format!("applications/gogo-{ID}.desktop"))
+    );
+    let entry = std::fs::read_to_string(&desktop).unwrap();
+    assert_eq!(
+        entry,
+        format!(
+            "[Desktop Entry]\nType=Application\nVersion=1.5\nName=Test Game\n\
+             Exec=\"{sh}\"\nIcon={icon}\nTerminal=false\nCategories=Game;\n\
+             X-Gogo-Gogid={ID}\n",
+            sh = sh.display(),
+            icon = w.game().join("icon.png").display()
+        )
+    );
+    // The icon: GOG's .ico, as a PNG.
+    let png = std::fs::read(w.game().join("icon.png")).unwrap();
+    assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+    assert_eq!(&png[16..24], &[0, 0, 0, 16, 0, 0, 0, 16]);
+
+    // R30: an older launcher (or a damaged menu entry) is rewritten by the
+    // next setup, which says so; an unchanged one isn't touched.
+    std::fs::write(
+        &sh,
+        script.replace("LAUNCHER_VERSION=1", "LAUNCHER_VERSION=0"),
+    )
+    .unwrap();
+    std::fs::write(&desktop, "[Desktop Entry]\nExec=/old/root/launch.sh\n").unwrap();
+    let out = setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
+    assert_eq!(std::fs::read_to_string(&sh).unwrap(), script);
+    assert_eq!(std::fs::read_to_string(&desktop).unwrap(), entry);
+    assert!(
+        out.notes.iter().any(|n| n == "launch.sh: launcher 0 -> 1"),
+        "{:?}",
+        out.notes
+    );
+    assert_eq!(out.launcher.desktop, desktop);
+    let mtime = std::fs::metadata(&sh).unwrap().modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let out = setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
+    assert!(out.launcher.updated_from.is_none());
+    assert_eq!(std::fs::metadata(&sh).unwrap().modified().unwrap(), mtime);
+}
+
+#[test]
+fn the_launcher_runs_umu_with_the_games_environment_and_logs_the_run() {
+    let w = World::launcher("run", false);
+    w.edit_conf(&[
+        ("ENV", "('FOO=bar baz')"),
+        ("DLL_OVERRIDES", "'ddraw=n,b'"),
+        ("PROTONFIXES", "'0'"),
+    ]);
+    let out = w.launch(&[], &["-extra"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    // The streams reach the terminal as well as the run log.
+    assert!(String::from_utf8_lossy(&out.stdout).contains("fake-game stdout line"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("fake-game stderr line"));
+    // Fresh stamp: no setup.
+    assert!(w.calls().is_empty(), "{:?}", w.calls());
+
+    let log = w.log();
+    let prefix = w.game().join("prefix");
+    let workdir = prefix.join("drive_c/GOG/Test Game");
+    assert!(
+        log.contains(&format!(
+            "ARGV:{} -windowed -extra\n",
+            workdir.join("game.exe").display()
+        )),
+        "{log}"
+    );
+    let env = log.lines().rfind(|l| l.starts_with("ENV:")).unwrap();
+    assert_eq!(
+        env,
+        format!(
+            "ENV:WINEPREFIX={} GAMEID=umu-777001 STORE=gog PROTONPATH={} \
+             WINEDLLOVERRIDES=ddraw=n,b PROTONFIXES_DISABLE=1 FOO=bar baz CWD={}",
+            prefix.display(),
+            w.build.display(),
+            workdir.display()
+        )
+    );
+
+    // One run log: header, the game's output, footer; latest.log names it.
+    let runs = w.runs();
+    assert_eq!(runs.len(), 1);
+    let run = &runs[0];
+    for want in [
+        format!("# gogo run log: Test Game ({ID})\n"),
+        "# launcher: 1\n".into(),
+        format!(
+            "# runtime: path:{} (1793687165 GE-Proton10-34)\n",
+            w.build.display()
+        ),
+        format!("# runtime_dir: {}\n", w.build.display()),
+        format!("# umu: {}\n", w.root.join("bin/umu-run").display()),
+        "# umu_id: umu-777001\n".into(),
+        "# renderer: dxvk\n".into(),
+        "# protonfix: none\n".into(),
+        "# protonfixes: off\n".into(),
+        "# os: ".into(),
+        format!("# exe: games/{ID}/prefix/drive_c/GOG/Test Game/game.exe\n"),
+        "# args: -windowed -extra\n".into(),
+        format!("# prefix: {}\n", prefix.display()),
+        // stdout and stderr reach the log through separate tees: either order.
+        "fake-game stdout line\n".into(),
+        "# exit: 0\n# duration: ".into(),
+    ] {
+        assert!(run.contains(&want), "{want:?} in:\n{run}");
+    }
+    assert!(run.contains("err: fake-game stderr line\n"), "{run}");
+    let latest = std::fs::read_link(w.logs().join("latest.log")).unwrap();
+    assert!(latest.to_string_lossy().ends_with(".log"));
+    // Dialogs off: the early exit is only logged.
+    assert!(
+        w.launch_log().contains("early exit: code 0"),
+        "{}",
+        w.launch_log()
+    );
+    // Nothing of the launcher's is left behind.
+    assert!(
+        std::fs::read_dir(w.game().join(".launchers"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
+}
+
+#[test]
+fn a_stale_stamp_runs_setup_once_and_without_gogo_the_last_setup_runs() {
+    let w = World::launcher("stamp", false);
+    std::fs::create_dir_all(w.home.join("compat")).unwrap();
+    std::fs::write(
+        w.home.join(format!("compat/{ID}.toml")),
+        "[platforms.linux]\nargs = []\n",
+    )
+    .unwrap();
+    assert!(w.launch(&[], &[]).status.success());
+    assert!(w.launch(&[], &[]).status.success());
+    // Once, with the data root as GOGO_HOME (it isn't the XDG default).
+    assert_eq!(
+        w.calls(),
+        [format!(
+            "GOGO_HOME={} linux-app setup {ID}",
+            w.home.display()
+        )]
+    );
+    assert!(
+        w.launch_log().contains("config stale ("),
+        "{}",
+        w.launch_log()
+    );
+    assert_eq!(w.game_runs(), 2);
+
+    // umu's Python gone (a Nix GC): setup again, which records it anew.
+    w.edit_conf(&[("UMU_PYTHON", "'/nix/store/gone-umu-python/bin/python3'")]);
+    assert!(w.launch(&[], &[]).status.success());
+    assert_eq!(w.calls().len(), 2, "{:?}", w.calls());
+    assert!(
+        w.launch_log()
+            .contains("umu's Python /nix/store/gone-umu-python/bin/python3 is gone")
+    );
+
+    // A failing setup: logged, in the run log's header, the last config runs.
+    std::fs::write(w.home.join(format!("compat/{ID}.toml")), "").unwrap();
+    assert!(w.launch(&[("FAKE_SETUP_FAIL", "1")], &[]).status.success());
+    let run = w.runs().pop().unwrap();
+    assert!(
+        run.contains(
+            "# setup: setup failed (exit 1): gogo: setup broke; running the last applied config\n"
+        ),
+        "{run}"
+    );
+
+    // No gogo at all: logged, and the last setup runs.
+    w.edit_conf(&[("GOGO_PATH", "'/nowhere/gogo'")]);
+    let calls = w.calls().len();
+    assert!(w.launch(&[], &[]).status.success());
+    assert_eq!(w.calls().len(), calls);
+    assert!(
+        w.launch_log()
+            .contains("and no gogo found (GOGO_PATH=/nowhere/gogo): running the last setup"),
+        "{}",
+        w.launch_log()
+    );
+}
+
+#[test]
+fn a_changed_build_runs_setup_when_managed_and_launches_when_not() {
+    let w = World::launcher("runtime", false);
+    let version = w.build.join("version");
+    // Unmanaged (the user's own build): logged, in the header, launched.
+    std::fs::write(&version, "1793687166 GE-Proton10-35\n").unwrap();
+    assert!(w.launch(&[], &[]).status.success());
+    assert!(w.calls().is_empty(), "{:?}", w.calls());
+    let run = w.runs().pop().unwrap();
+    assert!(
+        run.contains(
+            "# runtime_note: unmanaged build changed: version is '1793687166 GE-Proton10-35', \
+             expected '1793687165 GE-Proton10-34'; launching it as it is\n"
+        ),
+        "{run}"
+    );
+    assert!(run.contains("(1793687166 GE-Proton10-35)\n"), "{run}");
+
+    // gogo's own (its marker): setup, which reinstalls it, then the launch.
+    std::fs::write(w.build.join("gogo-managed.toml"), "schema = 1\n").unwrap();
+    let out = w.launch(
+        &[
+            ("FAKE_VERSION_FILE", version.to_str().unwrap()),
+            ("FAKE_VERSION", "1793687165 GE-Proton10-34"),
+        ],
+        &[],
+    );
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(w.calls().len(), 1, "{:?}", w.calls());
+    assert!(
+        w.launch_log().contains("Proton build"),
+        "{}",
+        w.launch_log()
+    );
+    let run = w.runs().pop().unwrap();
+    assert!(!run.contains("# runtime_note"), "{run}");
+
+    // The build gone and no gogo to reinstall it: no launch, exit 127, a
+    // dialog naming the fix, a run log saying why.
+    std::fs::remove_dir_all(&w.build).unwrap();
+    w.edit_conf(&[("GOGO_PATH", "'/nowhere/gogo'")]);
+    let stub = w.dialog_stub(&["OK"]);
+    let launches = w.game_runs();
+    let out = w.launch(&[("GOGO_LAUNCHER_DIALOG", stub.to_str().unwrap())], &[]);
+    assert_eq!(out.status.code(), Some(127), "{out:?}");
+    assert_eq!(w.game_runs(), launches);
+    let run = w.runs().pop().unwrap();
+    assert!(run.contains("# exit: 127 (runtime missing)\n"), "{run}");
+    assert!(run.contains("proton is missing"), "{run}");
+    let d = w.dialogs();
+    assert_eq!(d.len(), 1);
+    assert!(
+        d[0].contains("is missing or changed")
+            && d[0].contains(&format!("gogo linux-app setup {ID}")),
+        "{}",
+        d[0]
+    );
+}
+
+#[test]
+fn nothing_runs_without_launch_conf_or_a_prefix() {
+    let w = World::launcher("refuse", true);
+    std::fs::remove_dir_all(w.game().join("prefix")).unwrap();
+    let out = w.launch(&[], &[]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        w.launch_log().contains("not launching"),
+        "{}",
+        w.launch_log()
+    );
+    std::fs::remove_file(w.game().join("launch.conf")).unwrap();
+    let stub = w.dialog_stub(&["OK"]);
+    let out = w.launch(&[("GOGO_LAUNCHER_DIALOG", stub.to_str().unwrap())], &[]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(w.dialogs()[0].contains("isn't set up"), "{:?}", w.dialogs());
+    assert_eq!(w.game_runs(), 0);
+}
+
+#[test]
+fn run_logs_rotate_to_the_newest_ten() {
+    let w = World::launcher("rotate", true);
+    std::fs::create_dir_all(w.logs()).unwrap();
+    for i in 0..10 {
+        std::fs::write(w.logs().join(format!("2000010{i}-000000-1.log")), "# old\n").unwrap();
+    }
+    assert!(w.launch(&[], &[]).status.success());
+    let names: Vec<String> = {
+        let mut n: Vec<String> = std::fs::read_dir(w.logs())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(|c: char| c.is_ascii_digit()))
+            .collect();
+        n.sort();
+        n
+    };
+    assert_eq!(names.len(), 10, "{names:?}");
+    assert_eq!(names[0], "20000101-000000-1.log");
+    assert!(!names[9].starts_with("2000"));
+}
+
+#[test]
+fn the_early_exit_dialog_offers_the_next_renderer_and_its_buttons_work() {
+    let w = World::launcher("dialog", false);
+    // Wayland, with wl-copy and xdg-open: the clipboard and the opened log
+    // are files.
+    let bin = w.root.join("bin");
+    let clip = w.root.join("clipboard");
+    let opened = w.root.join("opened");
+    std::fs::write(
+        bin.join("wl-copy"),
+        format!("#!/bin/sh\ncat > \"{}\"\n", clip.display()),
+    )
+    .unwrap();
+    std::fs::write(
+        bin.join("xdg-open"),
+        format!("#!/bin/sh\necho \"$1\" > \"{}\"\n", opened.display()),
+    )
+    .unwrap();
+    chmod_x(&bin.join("wl-copy"));
+    chmod_x(&bin.join("xdg-open"));
+    let stub = w.dialog_stub(&["Try next renderer", "Copy report"]);
+    let env = [
+        ("GOGO_LAUNCHER_DIALOG", stub.to_str().unwrap()),
+        ("FAKE_GAME_EXIT", "3"),
+        ("WAYLAND_DISPLAY", "wayland-0"),
+    ];
+    let out = w.launch(&env, &[]);
+    assert_eq!(out.status.code(), Some(3));
+
+    // next-renderer wrote L4; the relaunch ran setup on the stale stamp.
+    assert_eq!(
+        w.calls(),
+        [
+            format!(
+                "GOGO_HOME={} linux-app next-renderer {ID} --dry-run",
+                w.home.display()
+            ),
+            format!(
+                "GOGO_HOME={} linux-app next-renderer {ID}",
+                w.home.display()
+            ),
+            format!("GOGO_HOME={} linux-app setup {ID}", w.home.display()),
+            format!(
+                "GOGO_HOME={} linux-app next-renderer {ID} --dry-run",
+                w.home.display()
+            ),
+        ]
+    );
+    let d = w.dialogs();
+    assert_eq!(d.len(), 2, "{d:?}");
+    assert!(d[0].starts_with("Test Game\n"), "{}", d[0]);
+    assert!(
+        d[0].contains("(exit code 3) on the dxvk renderer"),
+        "{}",
+        d[0]
+    );
+    assert!(d[0].contains("err: fake-game stderr line"), "{}", d[0]);
+    assert!(d[0].contains("switches to wined3d"), "{}", d[0]);
+    assert!(
+        d[0].ends_with("Copy report\nOpen log\nTry next renderer\n"),
+        "{}",
+        d[0]
+    );
+    assert!(d[1].contains("on the wined3d renderer"), "{}", d[1]);
+    assert!(d[1].ends_with("Copy report\nOpen log\nClose\n"), "{}", d[1]);
+    let runs = w.runs();
+    assert_eq!(runs.len(), 2);
+    assert!(runs[1].contains("# renderer: wined3d\n"), "{}", runs[1]);
+
+    // Copy report: wl-copy got it; the home dir is ~.
+    let report = std::fs::read_to_string(&clip).unwrap();
+    for want in [
+        format!("gogo launch report: Test Game ({ID})\n"),
+        "# renderer: wined3d\n".into(),
+        "# exit: 3\n".into(),
+        "# os: ".into(),
+        "--- last 40 log lines ---\n".into(),
+        "fake-game stdout line\n".into(),
+    ] {
+        assert!(report.contains(&want), "{want:?} in:\n{report}");
+    }
+    assert!(!report.contains("# prefix:"), "{report}");
+
+    // Open log: xdg-open on the run log.
+    let stub = w.dialog_stub(&["Open log"]);
+    let env = [
+        ("GOGO_LAUNCHER_DIALOG", stub.to_str().unwrap()),
+        ("FAKE_GAME_EXIT", "3"),
+    ];
+    assert_eq!(w.launch(&env, &[]).status.code(), Some(3));
+    assert!(wait_until(5, || opened.is_file()));
+    let target = std::fs::read_to_string(&opened).unwrap();
+    assert!(
+        target.trim().starts_with(w.logs().to_str().unwrap()),
+        "{target}"
+    );
+
+    // X11 (no WAYLAND_DISPLAY): xclip.
+    std::fs::write(
+        bin.join("xclip"),
+        format!(
+            "#!/bin/sh\necho \"$*\" > \"{clip}.args\"\ncat > \"{clip}\"\n",
+            clip = clip.display()
+        ),
+    )
+    .unwrap();
+    chmod_x(&bin.join("xclip"));
+    std::fs::remove_file(&clip).unwrap();
+    let stub = w.dialog_stub(&["Copy report"]);
+    let env = [
+        ("GOGO_LAUNCHER_DIALOG", stub.to_str().unwrap()),
+        ("FAKE_GAME_EXIT", "3"),
+    ];
+    assert_eq!(w.launch(&env, &[]).status.code(), Some(3));
+    assert_eq!(
+        std::fs::read_to_string(w.root.join("clipboard.args")).unwrap(),
+        "-selection clipboard\n"
+    );
+    assert!(
+        std::fs::read_to_string(&clip)
+            .unwrap()
+            .contains("# exit: 3\n")
+    );
+
+    // Neither tool: Save report writes report.txt next to the run logs.
+    std::fs::remove_file(bin.join("xclip")).unwrap();
+    std::fs::remove_file(bin.join("wl-copy")).unwrap();
+    let stub = w.dialog_stub(&["Save report"]);
+    let env = [
+        ("GOGO_LAUNCHER_DIALOG", stub.to_str().unwrap()),
+        ("FAKE_GAME_EXIT", "3"),
+    ];
+    assert_eq!(w.launch(&env, &[]).status.code(), Some(3));
+    let last = w.dialogs().pop().unwrap();
+    assert!(last.ends_with("Save report\nOpen log\nClose\n"), "{last}");
+    let saved = std::fs::read_to_string(w.logs().join("report.txt")).unwrap();
+    assert!(saved.contains("# exit: 3\n"), "{saved}");
+}
+
+/// The prefix's processes as gogo sees them (`/proc/<pid>/environ`).
+fn prefix_procs(w: &World) -> Vec<u32> {
+    gogo::linuxapp::game::prefix_procs(&w.game().join("prefix"))
+        .into_iter()
+        .map(|p| p.pid)
+        .collect()
+}
+
+#[test]
+fn teardown_on_term_kills_every_process_with_the_prefix() {
+    let w = World::launcher("teardown", true);
+    let mut child = w
+        .launch_cmd(&[("FAKE_GAME_HANG", "1")], &[])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    // The game and its TERM-proof child of another session.
+    assert!(
+        wait_until(10, || prefix_procs(&w).len() >= 2),
+        "{:?}",
+        prefix_procs(&w)
+    );
+    let status = std::process::Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let start = std::time::Instant::now();
+    let code = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s.code();
+        }
+        assert!(start.elapsed().as_secs() < 15, "the launcher didn't exit");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    assert_eq!(code, Some(143));
+    assert!(prefix_procs(&w).is_empty(), "{:?}", prefix_procs(&w));
+    let log = w.launch_log();
+    assert!(log.contains("got SIGTERM"), "{log}");
+    assert!(log.contains("reaped (SIGKILL): "), "{log}");
+    assert!(log.contains("sleep;"), "{log}");
+    let run = w.runs().pop().unwrap();
+    assert!(run.contains("# exit: 143 (SIGTERM)\n"), "{run}");
+}
+
+#[test]
+fn the_watchdog_tears_down_after_the_launcher_is_killed() {
+    let w = World::launcher("watchdog", true);
+    let mut child = w
+        .launch_cmd(&[("FAKE_GAME_HANG", "1")], &[])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    assert!(wait_until(10, || prefix_procs(&w).len() >= 2));
+    assert!(wait_until(5, || w.launch_log().contains("exec umu-run")));
+    let pid = child.id();
+    assert!(w.game().join(format!(".launchers/{pid}")).is_file());
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(
+        wait_until(15, || prefix_procs(&w).is_empty()
+            && w.launch_log().contains("watchdog done")),
+        "{:?}\n{}",
+        prefix_procs(&w),
+        w.launch_log()
+    );
+    assert!(
+        w.launch_log()
+            .contains(&format!("watchdog: launcher {pid} is gone"))
+    );
+    let run = w.runs().pop().unwrap();
+    assert!(run.contains("# exit: 137 (launcher killed)\n"), "{run}");
+    assert!(!w.game().join(format!(".launchers/{pid}")).exists());
+}
 
 fn pe_with_imports(pe64: bool, imports: &[&str]) -> Vec<u8> {
     const RVA: u32 = 0x1000;

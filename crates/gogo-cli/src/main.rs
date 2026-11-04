@@ -3204,10 +3204,15 @@ async fn linux_app(a: LinuxAppArgs) -> Result<i32, AppError> {
     });
     if !a.json {
         println!(
-            "game files, prefix and saves: {} — the menu entry and launcher come with #177; \
-             until then `gogo linux-app setup {}` keeps launch.conf current",
+            "game files, prefix and saves: {}\nmenu entry: {} (runs {}){}",
             out.dirs.root.display(),
-            out.gogid
+            out.setup.launcher.desktop.display(),
+            out.setup.launcher.launch_sh.display(),
+            if out.setup.launcher.icon.is_none() {
+                "; no icon found in the game"
+            } else {
+                ""
+            }
         );
     }
     Ok(cli::exit::OK)
@@ -3238,6 +3243,9 @@ fn print_linux_setup(
             "fixes": out.fixes.to_string(),
             "notes": out.notes,
             "warnings": out.warnings,
+            "launch_sh": out.launcher.launch_sh,
+            "desktop": out.launcher.desktop,
+            "icon": out.launcher.icon,
         });
         extra(&mut v);
         println!("{v}");
