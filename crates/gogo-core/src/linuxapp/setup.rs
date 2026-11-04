@@ -22,6 +22,7 @@ use std::process::{Command, Stdio};
 
 use super::fixes::{self, Fixes};
 use super::game::{self, LaunchConf, LinuxState, STATE_SCHEMA, refuse_private_tmp};
+use super::launcher;
 use super::proton::{self, ProtonRef};
 use super::protonfix;
 use super::umu::{self, Host, UmuRun};
@@ -65,6 +66,8 @@ pub struct SetupOutcome {
     pub verbs_installed: Vec<String>,
     pub notes: Vec<String>,
     pub warnings: Vec<String>,
+    /// `launch.sh`, the menu entry and the icon.
+    pub launcher: launcher::LauncherFiles,
 }
 
 /// A Proton build resolved for a game.
@@ -114,6 +117,22 @@ pub fn find_proton(r: &ProtonRef) -> Result<Option<ProtonBuild>, MacAppError> {
     }
 }
 
+/// Why a catalog build gogo installed must be reinstalled (§2.2): it no
+/// longer matches its marker (edited, half-overwritten), which the launcher
+/// takes as a reason to run setup. `None` for an intact build, one without
+/// a marker, or a `path:` build: that one is the user's pick, followed as
+/// it is.
+pub fn changed_managed(r: &ProtonRef, dir: &Path) -> Option<proton::BuildProblem> {
+    match (r, proton::check_managed(dir)) {
+        (ProtonRef::Catalog { .. }, Err(p))
+            if !matches!(p, proton::BuildProblem::NotManaged(_)) =>
+        {
+            Some(p)
+        }
+        _ => None,
+    }
+}
+
 /// [`find_proton`], installing a catalog build that's missing (design 16
 /// §2.2: setup installs the pin). Where it goes is `[linux] proton_dir`,
 /// asked once on a terminal ([`proton::placement`]). Returns the build and
@@ -124,7 +143,17 @@ pub fn ensure_proton(
     emit: &mut dyn FnMut(&ProgressEvent),
 ) -> Result<(ProtonBuild, Option<String>), MacAppError> {
     if let Some(b) = find_proton(r)? {
-        return Ok((b, None));
+        let Some(problem) = changed_managed(r, &b.dir) else {
+            return Ok((b, None));
+        };
+        emit(&ProgressEvent::Warn {
+            message: format!(
+                "{} ({}): {problem}; reinstalling it",
+                b.reference,
+                b.dir.display()
+            ),
+        });
+        std::fs::remove_dir_all(&b.dir)?;
     }
     let ProtonRef::Catalog { id, version } = r else {
         unreachable!("find_proton returns path: builds or fails")
@@ -665,7 +694,24 @@ pub fn setup(
         gogo_version: env!("CARGO_PKG_VERSION").to_string(),
     };
     write_if_changed(&dirs.state_toml, &state.to_toml())?;
+    // The launcher and the menu entry (#177): rewritten when the template
+    // changed (R30) or the data root moved.
+    let exe_now = windows_to_unix(&dirs.prefix, &eff.exe);
+    let launcher = launcher::write(
+        &dirs,
+        gogid,
+        &baked.title,
+        Some(&game_files),
+        exe_now.as_deref(),
+    )?;
+    if let Some(old) = &launcher.updated_from {
+        notes.push(format!(
+            "launch.sh: launcher {old} -> {}",
+            launcher::LAUNCHER_VERSION
+        ));
+    }
     Ok(SetupOutcome {
+        launcher,
         state,
         conf,
         prefix_created,
@@ -676,4 +722,34 @@ pub fn setup(
         notes,
         warnings,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_changed_catalog_build_with_its_marker_is_reinstalled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("proton"), "#!/bin/sh\n").unwrap();
+        std::fs::write(dir.join("version"), "1 GE-Proton11-12\n").unwrap();
+        std::fs::write(dir.join(proton::TOOLMANIFEST), "\"manifest\" {}\n").unwrap();
+        let catalog = ProtonRef::Catalog {
+            id: "ge-proton".into(),
+            version: Some("GE-Proton11-12".into()),
+        };
+        let path = ProtonRef::Path(dir.to_path_buf());
+        // No marker: someone else's, never touched.
+        assert!(changed_managed(&catalog, dir).is_none());
+        let marker = proton::marker_for(dir, "ge-proton/GE-Proton11-12", "ab").unwrap();
+        proton::write_marker(dir, &marker).unwrap();
+        assert!(changed_managed(&catalog, dir).is_none());
+        std::fs::write(dir.join("proton"), "#!/bin/sh\n# edited\n").unwrap();
+        assert!(matches!(
+            changed_managed(&catalog, dir),
+            Some(proton::BuildProblem::ProtonChanged { .. })
+        ));
+        assert!(changed_managed(&path, dir).is_none());
+    }
 }
