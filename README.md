@@ -55,7 +55,7 @@ gogo download 1207658916 --with-dlcs           # by id, include DLCs
 gogo download --all --yes --os windows         # everything, Windows installers
 gogo download "hot brass" --extras --patches   # + bonus content and patches
 gogo depot pharaoh --dry-run                   # plan a depot (Model B) download
-gogo depot 1207658916 --with-dlcs              # materialize game files to ~/Library/Caches
+gogo depot 1207658916 --with-dlcs              # game files to ~/Library/Caches (Linux: ~/.cache)
 ```
 
 Useful flags: `--dir`, `--workers`, `--parallel-files`, `--limit 4MiB/s` (rate
