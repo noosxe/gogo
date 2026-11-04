@@ -386,6 +386,41 @@ pub fn parse(raw: &str, os: Os, layer: Layer) -> Result<Parsed, String> {
     Ok(Parsed { entry, warnings })
 }
 
+/// The top-level keys that are fixes rather than facts about the game or
+/// the file (`title`, `variant`, `source`): what design 18 §4.3's ownership
+/// rule (O3) skips in an L3 file that protonfixes covers. `env` would be
+/// one, but at the top level it is ignored anyway (it is OS-specific).
+pub const TOP_FIX_KEYS: &[&str] = &[
+    "verbs",
+    "dll_overrides",
+    "registry",
+    "args",
+    "exe",
+    "replace_command",
+];
+
+/// [`parse`] without the top level's [`TOP_FIX_KEYS`], plus those fixes on
+/// their own (the top level alone, no platform table). The first is what
+/// applies when another owner has the file's fixes, the second what the
+/// summary shows as covered. `[platforms.<os>]` still applies whole.
+pub fn parse_without_top_fixes(
+    raw: &str,
+    os: Os,
+    layer: Layer,
+) -> Result<(Parsed, CompatEntry), String> {
+    let mut kept: toml::Table = toml::from_str(raw).map_err(|e| e.to_string())?;
+    let mut fixes = toml::Table::new();
+    for key in TOP_FIX_KEYS {
+        if let Some(v) = kept.remove(*key) {
+            fixes.insert((*key).to_string(), v);
+        }
+    }
+    let text = |t: &toml::Table| toml::to_string(t).map_err(|e| e.to_string());
+    let parsed = parse(&text(&kept)?, os, layer)?;
+    let covered = parse(&text(&fixes)?, os, layer)?.entry;
+    Ok((parsed, covered))
+}
+
 /// One `[platforms.<os>]` table: checked (keys, renderer) and deserialized.
 fn platform_entry(
     mut t: toml::Table,
@@ -561,6 +596,25 @@ fn db_lookup(db: &[(&str, &str)], gogid: &str, os: Os) -> Parsed {
         }),
         None => Parsed::default(),
     }
+}
+
+/// The L3 file's text for `gogid`, from where [`db_entry`] reads it, and
+/// a label for messages (its path, or `compat DB <gogid>`). For callers
+/// that resolve the file their own way (the Linux lane's ownership rule,
+/// design 18 §4.3).
+pub fn db_raw(gogid: &str) -> Option<(String, String)> {
+    if let Some(dir) = std::env::var_os(DB_DIR_ENV).filter(|d| !d.is_empty())
+        && validate_gogid(gogid).is_ok()
+    {
+        let path = Path::new(&dir).join(format!("{gogid}.toml"));
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            return Some((path.display().to_string(), raw));
+        }
+    }
+    COMPAT_DB
+        .iter()
+        .find(|(id, _)| *id == gogid)
+        .map(|(_, raw)| (format!("compat DB {gogid}"), raw.to_string()))
 }
 
 /// Number of entries in the compiled-in DB.
@@ -805,7 +859,9 @@ pub struct Effective {
     /// one's, and a layer that sets the top-level `status` drops them all.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub lanes: BTreeMap<Lane, Sourced<LaneStatus>>,
-    /// Linux only. TODO(#171, #177): `false` sets `PROTONFIXES_DISABLE=1`.
+    /// Linux only ([`parse`] drops it for other OSes). `false` puts
+    /// `PROTONFIXES_DISABLE = "1"` into `env` ([`merge`], #171); the Linux
+    /// launcher exports `env` (#177).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub protonfixes: Option<Sourced<bool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -886,8 +942,29 @@ pub fn merge(layers: &[(Layer, &CompatEntry)]) -> Effective {
         take(&mut out.protonfixes, &e.protonfixes, layer);
         take(&mut out.source, &e.source, layer);
     }
+    // `protonfixes = false` turns umu-protonfixes off for the game (design
+    // 18 §4.3, O2), from its layer: a higher layer's own env value wins.
+    if let Some(p) = &out.protonfixes
+        && !p.value
+        && out
+            .env
+            .get(PROTONFIXES_DISABLE)
+            .is_none_or(|e| e.layer <= p.layer)
+    {
+        out.env.insert(
+            PROTONFIXES_DISABLE.into(),
+            Sourced {
+                value: "1".into(),
+                layer: p.layer,
+            },
+        );
+    }
     out
 }
+
+/// The env var umu-protonfixes checks to skip every fix (any value but
+/// `0`), set by `protonfixes = false`.
+pub const PROTONFIXES_DISABLE: &str = "PROTONFIXES_DISABLE";
 
 /// One layer's `verbs` applied to the list below it (see [`merge`]).
 fn apply_verbs(list: &mut Vec<Sourced<String>>, edits: &[String], layer: Layer) {
@@ -1822,6 +1899,65 @@ protonfixes = false
             ["`platforms.macos.protonfixes` is Linux only: ignored"]
         );
         assert!(parse("[platforms.linux]\nprotonfixes = 1", Os::Macos, Layer::Db).is_err());
+    }
+
+    #[test]
+    fn protonfixes_false_sets_protonfixes_disable() {
+        let off = "[platforms.linux]\nprotonfixes = false\n";
+        let l3 = parse(off, Os::Linux, Layer::Db).unwrap().entry;
+        let eff = merge(&[(Layer::Db, &l3)]);
+        let env = &eff.env[PROTONFIXES_DISABLE];
+        assert_eq!((env.value.as_str(), env.layer), ("1", Layer::Db));
+        // A higher layer's own env value wins; a lower one's doesn't.
+        let l4 = parse(
+            "[platforms.linux]\nenv = { PROTONFIXES_DISABLE = \"0\" }\n",
+            Os::Linux,
+            Layer::User,
+        )
+        .unwrap()
+        .entry;
+        let eff = merge(&[(Layer::Db, &l3), (Layer::User, &l4)]);
+        assert_eq!(eff.env[PROTONFIXES_DISABLE].value, "0");
+        let eff = merge(&[
+            (Layer::Db, &l4),
+            (
+                Layer::User,
+                &parse(off, Os::Linux, Layer::User).unwrap().entry,
+            ),
+        ]);
+        assert_eq!(eff.env[PROTONFIXES_DISABLE].value, "1");
+        // `true`, and macOS (where `protonfixes` is dropped): nothing.
+        let on = parse(
+            "[platforms.linux]\nprotonfixes = true\n",
+            Os::Linux,
+            Layer::Db,
+        )
+        .unwrap();
+        assert!(merge(&[(Layer::Db, &on.entry)]).env.is_empty());
+        let mac = parse(off, Os::Macos, Layer::Db).unwrap();
+        assert!(merge(&[(Layer::Db, &mac.entry)]).env.is_empty());
+    }
+
+    #[test]
+    fn top_fixes_split_off() {
+        let raw = "title = \"T\"\nexe = \"G.exe\"\nverbs = [\"a\"]\nargs = [\"-x\"]\n\
+                   dll_overrides = { ddraw = \"n\" }\nvariant = \"V\"\n\
+                   source = \"umu-protonfixes:gamefixes-steam/1.py@0\"\n\
+                   [platforms.linux]\nverbs = [\"b\"]\nnotes = \"n\"\n";
+        let (kept, top) = parse_without_top_fixes(raw, Os::Linux, Layer::Db).unwrap();
+        assert!(kept.warnings.is_empty(), "{:?}", kept.warnings);
+        let k = kept.entry;
+        assert_eq!(k.title.as_deref(), Some("T"));
+        assert_eq!(k.variant.as_deref(), Some("V"));
+        assert_eq!(k.verbs, Some(vec!["b".into()]));
+        assert_eq!(k.notes.as_deref(), Some("n"));
+        assert!(k.source.unwrap().starts_with("umu-protonfixes:"));
+        assert_eq!((k.exe, k.args), (None, None));
+        assert!(k.dll_overrides.is_empty());
+        assert_eq!(top.verbs, Some(vec!["a".into()]));
+        assert_eq!(top.exe.as_deref(), Some("G.exe"));
+        assert_eq!(top.dll_overrides["ddraw"], "n");
+        assert_eq!((top.title, top.notes), (None, None));
     }
 
     #[test]
