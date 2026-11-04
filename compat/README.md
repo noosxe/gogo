@@ -34,7 +34,7 @@ tested   = [{ runtime = "winecx/24.0.7_7+dxmt-v0.80", host = "m4pro/macos-27.0.1
 
 [platforms.linux]
 renderer = "wined3d"                  # wined3d | cnc-ddraw[/ver]; dxmt / d3dmetal are an error here
-protonfixes = false                   # Linux only: turn umu-protonfixes off (applied from #171)
+protonfixes = false                   # Linux only: PROTONFIXES_DISABLE=1, umu-protonfixes off (#171)
 ```
 
 | Where | Keys |
@@ -122,7 +122,10 @@ Seed (#75), see docs/19 §5:
 - `source = "umu-protonfixes:<file>@<sha>"`: hand-translated from that file
   of [umu-protonfixes](https://github.com/Open-Wine-Components/umu-protonfixes),
   BSD-2-Clause (`NOTICE-umu-protonfixes`); Proton-only knobs are dropped. Not
-  run by gogo, so no `status`.
+  run by gogo, so no `status`. On Linux such a file's top-level fixes are
+  skipped when the Proton build has a `gamefixes-gog` module for the game:
+  protonfixes applies the original there, and the file's
+  `[platforms.linux]` still applies (design 18 §4.3, #171).
 
 Every file here is tested (`compat_dir_entries_are_sourced_and_tested`): a
 numeric name, no unknown or misplaced keys, a `source`, and, on each OS, a
