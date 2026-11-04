@@ -430,6 +430,71 @@ Mac, with a Linux table:
   machine and names the fix: L4 `env = { DXVK_FILTER_DEVICE_NAME = "…",
   VKD3D_FILTER_DEVICE_NAME = "…" }`.
 
+**As built (#172)** — choices the design left open (`macapp/renderer.rs`):
+
+- **Where it lives.** `Renderer` gains `Dxvk`, `Vkd3dProton`, `D7vk`; `Renderer::on(os)`
+  lists each OS's ids. `RendererRef::parse_on(s, os)` reads Linux refs: a Mac-only id is
+  compat's error (`compat::mac_only_renderer`, the same check as `[platforms.linux]`),
+  and `dxvk`/`vkd3d-proton`/`d7vk` with a version is an error too. `RendererRef::parse`
+  stays the Mac's (same ids, same message). `select_on(os, …)` merges with `os`'s ids
+  and its L3/L4 (`compat::db_entry_for` / `load_user_for` / `set_user_keys_for`);
+  `select` stays the Mac lane's. A `--renderer` id the OS lacks warns and keeps the
+  automatic choice.
+- **L1 (`from_scan_linux`).** The class is what decided `graphics` (the static imports,
+  or the runtime names when those decided). Inside `d3d_legacy`: `d3d9` → `dxvk`;
+  `d3d8` without `d3d9` → `dxvk` with `Pick.d3d8` (→ `PROTON_DXVK_D3D8=1`); D3D ≤ 7
+  alone → `d7vk` at every #173 confidence. Additions to the table:
+  - **64-bit D3D ≤ 7 → wined3d.** GE-Proton builds D7VK for `i386-windows` only
+    (`Makefile.in`), and `setup_ddraw` copies it into `syswow64`.
+  - **Retained mode** is a `d3drm.dll` / `d3dxof.dll` import in any scanned file outside
+    the game's own wrappers (or a runtime name, when those decided). It beats any
+    immediate-mode evidence.
+  - **The game's own `ddraw.dll`** (2D or D3D ≤ 7 class) → `wined3d` as the L1 pick,
+    which does nothing (below), plus `ddraw=n,b`. That is the table's "none", and Proton's
+    defaults stay, so a dgVoodoo `ddraw.dll` still reaches DXVK. A D3D8–12 game that
+    ships a `ddraw.dll` keeps its class. A cnc-ddraw gogo placed earlier isn't counted
+    (`pick_linux`, as on the Mac).
+  - **An engine's implied class** (Clickteam: `d3d_legacy` with no API seen) → `wined3d`,
+    with nothing set.
+- **Reason text.** It is the Mac's `<what>: <seen> (<engine>, <bits> <exe>)`. The D3D ≤ 7
+  rows add #173's wording for all three levels: "from a device/work GUID or a
+  d3dim/d3drm import" or "from the renderer DLL d3ddrv.dll" (`strong`), "from interface
+  GUIDs only" (`medium`), and "only from the dxguid GUID block: may be 2D"
+  (`dxguid_block`). The Mac still says nothing for `strong`. The own-`ddraw.dll` row
+  ends "…kept (ddraw=n,b): no cnc-ddraw, no D7VK".
+- **What setup does (`plan_linux`, pure; `apply_linux`, the game-dir step).** It returns
+  `env`, `dll_overrides`, a `DdrawStep` (`none` / `place_cnc_ddraw` / `remove_gogo` /
+  `keep_games`), notes and warnings, plus the ref in effect after any fallback:
+  - `dxvk` and `vkd3d-proton` set nothing; `dxvk` adds `PROTON_DXVK_D3D8=1` for the
+    D3D8 class.
+  - `d7vk` sets `PROTON_USE_D7VK=1`. gogo adds no override: Proton appends `ddraw=n,b`
+    itself.
+  - `cnc-ddraw` places gogo's DLL (`ddraw::resolve_or_provision` + `ddraw::apply`) with
+    `ddraw=n,b`.
+  - `wined3d` sets `PROTON_USE_WINED3D=1`, except when it is `l1`'s own pick: the table's
+    "nothing" rows keep Proton's defaults, so a packed D3D9 exe the scan missed stays
+    on DXVK.
+  - Every renderer but `cnc-ddraw` takes gogo's cnc-ddraw out (`ddraw::remove_gogo`).
+    A game's own `ddraw.dll` is never touched and always gets `ddraw=n,b`.
+- **Never both (R17).** `d7vk` on a game dir with its own `ddraw.dll` warns ("…would win
+  over D7VK's: keeping the game's") and moves to the next renderer in the order.
+  `apply_linux` checks again after its step: a `ddraw.dll` still in the dir (a failed
+  removal, or a half-placed cnc-ddraw) drops D7VK the same way. A test runs every
+  renderer × game dir (empty, gogo's, the game's) × build (with and without D7VK).
+- **Fallbacks follow the order.** D7VK is checked at `files/lib/wine/d7vk/i386-windows/
+  ddraw.dll`, the file GE-Proton11-12's `proton` (`setup_ddraw`) copies; without it
+  Proton only logs and keeps Wine's `ddraw`. A missing D7VK, a cnc-ddraw with no game
+  dir and a cnc-ddraw that can't be placed each warn and take `next_after` in `l1`'s
+  order (D3D ≤ 7: `d7vk` → `cnc-ddraw`), skipping what was tried and ending at wined3d.
+  An unparseable ref → wined3d.
+- **The walk.** `next_after` is shared: a `current` of either OS's ids is found in the
+  order (a ref from outside it restarts it, as before). `next_renderer_on(os, gogid,
+  pick, current, dry_run)` writes the next ref into `[platforms.<os>]` of L4. The Mac's
+  `setup::next_renderer` is unchanged. `linux-app` wires `apply_linux` and the walk
+  (#176).
+- **The Mac lane** keeps its table, ids, messages and JSON: `Pick.d3d8` is always
+  `false` there and isn't serialized when `false`.
+
 **docs/22 §7, placed (owner, 2026-11-03; O9):**
 
 | docs/22 §7 item | Placement |
