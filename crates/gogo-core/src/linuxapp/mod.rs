@@ -9,6 +9,7 @@ use crate::macapp::error::MacAppError;
 pub mod build;
 pub mod fixes;
 pub mod game;
+pub mod manage;
 pub mod proton;
 pub mod protonfix;
 pub mod setup;

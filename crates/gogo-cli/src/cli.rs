@@ -234,10 +234,16 @@ pub enum Command {
         /// automatically) or an installed game directory.
         #[arg(
             value_name = "GAME|INSTALLER",
-            required_unless_present = "from_depot",
-            conflicts_with = "from_depot"
+            required_unless_present_any = ["from_depot", "retarget"],
+            conflicts_with_all = ["from_depot", "retarget"]
         )]
         input: Option<String>,
+        /// Point a built game at another Proton build or renderer without
+        /// rebuilding: writes `--runtime` / `--renderer` into the game's
+        /// override file (`[platforms.linux]`), then sets the game up on
+        /// them (installing a missing GE-Proton). `auto` drops the override.
+        #[arg(long, value_name = "GOGID", conflicts_with = "from_depot")]
+        retarget: Option<String>,
         /// Like the positional GAME, but only from the depot build, never
         /// the installer; also takes an installed game directory.
         #[arg(long, value_name = "GAME|PATH")]
@@ -264,7 +270,7 @@ pub enum Command {
         refresh: bool,
         /// Pick the runtime from a menu (a terminal only; a `--runtime`
         /// value still wins). Same as a bare `--runtime`.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "retarget")]
         interactive: bool,
         /// Skip the confirmation; rebuild an existing game's files (its
         /// prefix and saves stay).
@@ -283,8 +289,8 @@ pub enum Command {
     /// Manage renderers (cnc-ddraw, DXMT, D3DMetal): list the catalog and
     /// what's cached, install, prune.
     Renderers(RenderersArgs),
-    /// Manage the games gogo set up for its .app bundles: each one's Wine
-    /// prefix (saves included), game files and launch logs. List them,
+    /// Manage the games gogo set up (`mac-app`, `linux-app`): each one's
+    /// Wine prefix (saves included), game files and launch logs. List them,
     /// show where they live, remove them.
     Apps(AppsArgs),
     /// Inspect Lutris community recipes for a game: list the
@@ -341,6 +347,31 @@ pub enum LinuxAppSub {
         /// Machine-readable output.
         #[arg(long)]
         json: bool,
+    },
+    /// Print a game's effective compat config on Linux and where each
+    /// value comes from (the build's automatic verbs, gogo's compat list,
+    /// your override file), with the protonfix summary when the game's
+    /// Proton build is installed.
+    Compat {
+        /// GOG product id.
+        #[arg(value_name = "GOGID")]
+        gogid: String,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Switch a game to the next renderer in its order (the launcher's
+    /// "Try next renderer"): the one after what setup last applied,
+    /// written to the override file as `renderer = "<id>"`. Prints the new
+    /// renderer; exits 1 with "no more renderers" when the order is used
+    /// up.
+    NextRenderer {
+        /// GOG product id.
+        #[arg(value_name = "GOGID")]
+        gogid: String,
+        /// Print the next renderer, write nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -690,17 +721,17 @@ pub struct AppsArgs {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum AppsCmd {
-    /// List every game set up on this Mac: its .app (and whether it is
-    /// still there), runtime, renderer, disk use and last launch. Disk use
-    /// counts the game files in full, though a depot game's share space
-    /// with the depot cache.
+    /// List every game set up here: its .app on macOS or its menu entry on
+    /// Linux (and whether it is still there), runtime, renderer, disk use
+    /// and last launch. Disk use counts the game files in full, though a
+    /// depot game's may share space with the depot cache.
     List {
         /// Machine-readable output.
         #[arg(long)]
         json: bool,
     },
     /// Show where one game's things live: state folder, Wine prefix,
-    /// launch logs, override file, .app.
+    /// launch logs, override file, .app or menu entry.
     Show {
         /// GOG product id, or the game's .app.
         #[arg(value_name = "BUNDLE|GOGID")]
@@ -710,24 +741,27 @@ pub enum AppsCmd {
         json: bool,
     },
     /// Delete one game's state folder (Wine prefix and saves included),
-    /// its launch logs and its override file. The .app stays, but won't
-    /// start again until rebuilt. Refuses while the game is running.
+    /// its launch logs and its override file, and on Linux its menu entry.
+    /// A .app stays, but won't start again until rebuilt. Refuses while
+    /// the game is running.
     Remove {
         /// GOG product id, or the game's .app.
         #[arg(value_name = "BUNDLE|GOGID")]
         target: String,
-        /// Keep the override file (`gogo mac-app compat` shows it).
+        /// Keep the override file (`gogo mac-app compat` / `linux-app
+        /// compat` show it).
         #[arg(long)]
         keep_override: bool,
         /// Don't ask first.
         #[arg(long, short = 'y')]
         yes: bool,
     },
-    /// Remove every game whose .app is no longer where it was built or
-    /// last launched from. A moved .app updates that on its next launch,
-    /// so check the list before saying yes.
+    /// Remove every orphaned game: on macOS, one whose .app is no longer
+    /// where it was built or last launched from (a moved .app updates that
+    /// on its next launch, so check the list before saying yes); on Linux,
+    /// one whose menu entry was deleted.
     Prune {
-        /// Games whose .app is missing (the only kind for now).
+        /// Games whose .app or menu entry is missing (the only kind for now).
         #[arg(long, required = true)]
         orphaned: bool,
         /// Keep their override files.
@@ -1161,5 +1195,53 @@ mod tests {
         };
         assert_eq!(gogid, "1207659013");
         assert!(json && !refresh);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_app_retarget_compat_and_next_renderer_parse() {
+        let cli = Cli::try_parse_from([
+            "gogo",
+            "linux-app",
+            "--retarget",
+            "1207659013",
+            "--renderer",
+            "wined3d",
+        ])
+        .unwrap();
+        let Command::LinuxApp {
+            retarget,
+            renderer,
+            input,
+            ..
+        } = cli.command
+        else {
+            panic!("expected linux-app");
+        };
+        assert_eq!(retarget.as_deref(), Some("1207659013"));
+        assert_eq!(renderer, Some(LinuxRendererArg::Wined3d));
+        assert!(input.is_none());
+        assert!(Cli::try_parse_from(["gogo", "linux-app", "x", "--retarget", "1"]).is_err());
+        assert!(
+            Cli::try_parse_from(["gogo", "linux-app", "--retarget", "1", "--interactive"]).is_err()
+        );
+
+        let cli =
+            Cli::try_parse_from(["gogo", "linux-app", "next-renderer", "1", "--dry-run"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::LinuxApp {
+                sub: Some(LinuxAppSub::NextRenderer { dry_run: true, .. }),
+                ..
+            }
+        ));
+        let cli = Cli::try_parse_from(["gogo", "linux-app", "compat", "1", "--json"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::LinuxApp {
+                sub: Some(LinuxAppSub::Compat { json: true, .. }),
+                ..
+            }
+        ));
     }
 }

@@ -23,6 +23,66 @@ pub const LAUNCH_TOML: &str = "gogo-launch.toml";
 /// `state.toml`'s schema.
 pub const STATE_SCHEMA: u32 = 1;
 
+/// `games/<gogid>/launch.sh`, the launcher #177 generates beside
+/// `launch.conf`.
+pub const LAUNCH_SH: &str = "launch.sh";
+
+/// The game's menu entry (design 18 §6, §7.1):
+/// `$XDG_DATA_HOME/applications/gogo-<gogid>.desktop`. `GOGO_HOME` collapses
+/// it into `$GOGO_HOME/applications/`, as it does every other dir, so a
+/// scratch home never writes the user's menu.
+pub fn desktop_path(gogid: &str) -> PathBuf {
+    let dir = match std::env::var_os("GOGO_HOME") {
+        Some(home) => PathBuf::from(home),
+        None => dirs::data_dir().unwrap_or_else(crate::state::data_root),
+    };
+    dir.join("applications")
+        .join(format!("gogo-{gogid}.desktop"))
+}
+
+/// Processes of this user running in `prefix`: those whose environment
+/// has `WINEPREFIX=<prefix>` (design 18 §7.2: Linux lets a user read their
+/// own processes' `/proc/<pid>/environ`, which sees into umu's container
+/// where a cwd wouldn't). Never this process.
+pub fn prefix_procs(prefix: &Path) -> Vec<crate::macapp::doctor::PrefixProc> {
+    let canon = prefix.canonicalize().ok();
+    let wanted: Vec<Vec<u8>> = std::iter::once(prefix.to_path_buf())
+        .chain(canon)
+        .map(|p| {
+            let mut v = b"WINEPREFIX=".to_vec();
+            v.extend_from_slice(p.as_os_str().as_encoded_bytes());
+            v
+        })
+        .collect();
+    let me = std::process::id();
+    let mut out: Vec<_> = std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let pid: u32 = e.file_name().to_str()?.parse().ok()?;
+            if pid == me {
+                return None;
+            }
+            let env = std::fs::read(e.path().join("environ")).ok()?;
+            env.split(|b| *b == 0)
+                .any(|kv| {
+                    let kv = kv.strip_suffix(b"/").unwrap_or(kv);
+                    wanted.iter().any(|w| kv == w.as_slice())
+                })
+                .then(|| crate::macapp::doctor::PrefixProc {
+                    pid,
+                    name: std::fs::read_to_string(e.path().join("comm"))
+                        .unwrap_or_default()
+                        .trim()
+                        .to_string(),
+                })
+        })
+        .collect();
+    out.sort_by_key(|p| p.pid);
+    out
+}
+
 /// `games/<gogid>/gogo-launch.toml`.
 pub fn launch_toml_path(dirs: &GameDirs) -> PathBuf {
     dirs.root.join(LAUNCH_TOML)

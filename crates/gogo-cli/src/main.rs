@@ -259,7 +259,26 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
         Command::LinuxApp { sub: Some(sub), .. } => linux_app_sub(sub),
         #[cfg(target_os = "linux")]
         Command::LinuxApp {
+            retarget: Some(_),
+            runtime: Some(None),
+            ..
+        } => {
+            eprintln!("gogo: --retarget needs a runtime ref (`--runtime <RUNTIME>`)");
+            Ok(cli::exit::USAGE)
+        }
+        #[cfg(target_os = "linux")]
+        Command::LinuxApp {
+            retarget: Some(gogid),
+            runtime,
+            renderer,
+            refresh,
+            json,
+            ..
+        } => linux_app_retarget(gogid, runtime.flatten(), renderer, refresh, json),
+        #[cfg(target_os = "linux")]
+        Command::LinuxApp {
             sub: None,
+            retarget: None,
             input,
             from_depot,
             name,
@@ -3248,6 +3267,115 @@ fn print_linux_setup(
 }
 
 #[cfg(target_os = "linux")]
+/// `gogo linux-app --retarget <gogid> --runtime <ref> --renderer <id>`
+/// (design 16 decision 7 on Linux): write the choices into L4's
+/// `[platforms.linux]`, then set the game up on them.
+fn linux_app_retarget(
+    gogid: String,
+    runtime: Option<String>,
+    renderer: Option<crate::cli::LinuxRendererArg>,
+    refresh: bool,
+    json: bool,
+) -> Result<i32, AppError> {
+    use gogo::macapp::compat;
+    if runtime.is_none() && renderer.is_none() {
+        eprintln!("gogo: --retarget needs --runtime and/or --renderer");
+        return Ok(cli::exit::USAGE);
+    }
+    let mut updates: Vec<(&str, Option<String>)> = Vec::new();
+    if let Some(r) = renderer {
+        // `auto` drops the override.
+        updates.push((
+            "renderer",
+            match r.choice() {
+                gogo::macapp::RendererChoice::Force(r) => Some(r.default_ref()),
+                _ => None,
+            },
+        ));
+    }
+    if let Some(r) = &runtime {
+        // `auto` drops it too: the baked runtime applies again.
+        updates.push(("runtime", (r != "auto").then(|| r.clone())));
+    }
+    let updates: Vec<(&str, Option<&str>)> =
+        updates.iter().map(|(k, v)| (*k, v.as_deref())).collect();
+    let prompter: Option<std::sync::Arc<gogo::macapp::PromptFn>> =
+        if std::io::IsTerminal::is_terminal(&std::io::stdin())
+            && std::io::IsTerminal::is_terminal(&std::io::stderr())
+            && !json
+        {
+            Some(prompt::renderer())
+        } else {
+            None
+        };
+    let out = gogo::linuxapp::manage::retarget(
+        &gogid,
+        &updates,
+        &gogo::linuxapp::setup::SetupOptions {
+            refresh,
+            prompt: prompter.as_deref(),
+        },
+        &mut |ev| emit_macapp_event(ev, false),
+    )?;
+    if json {
+        let setup = match &out.setup {
+            Some(Ok(s)) => serde_json::json!({
+                "ok": true,
+                "runtime": s.state.runtime,
+                "renderer": s.state.renderer,
+                "prefix_created": s.prefix_created,
+                "runtime_installed": s.runtime_installed,
+                "warnings": s.warnings,
+            }),
+            Some(Err(e)) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+            None => serde_json::Value::Null,
+        };
+        println!(
+            "{}",
+            serde_json::json!({
+                "gogid": gogid,
+                "file": compat::user_path(&gogid),
+                "changes": out.changes,
+                "setup": setup,
+            })
+        );
+    } else if out.changes.is_empty() {
+        println!("{gogid}: nothing to change (the override file already says so)");
+    } else {
+        for c in &out.changes {
+            println!(
+                "{gogid}: {} {} -> {} ({})",
+                c.key,
+                c.old.as_deref().unwrap_or("(build default)"),
+                c.new.as_deref().unwrap_or("(build default)"),
+                compat::user_path(&gogid).display()
+            );
+        }
+        match &out.setup {
+            Some(Ok(s)) => {
+                for w in &s.warnings {
+                    eprintln!("warning: {w}");
+                }
+                println!(
+                    "{gogid}: set up on runtime {}, renderer {}",
+                    s.state.runtime, s.state.renderer
+                );
+            }
+            Some(Err(e)) => {
+                eprintln!("gogo: {gogid}: setup failed: {e}");
+                eprintln!("the override is saved; the next launch tries the setup again");
+            }
+            None => println!("not built yet: the build applies it"),
+        }
+    }
+    Ok(if matches!(out.setup, Some(Err(_))) {
+        cli::exit::FAILED
+    } else {
+        cli::exit::OK
+    })
+}
+
+#[cfg(target_os = "linux")]
 /// `gogo linux-app <sub>` (no build).
 fn linux_app_sub(sub: crate::cli::LinuxAppSub) -> Result<i32, AppError> {
     match sub {
@@ -3275,6 +3403,93 @@ fn linux_app_sub(sub: crate::cli::LinuxAppSub) -> Result<i32, AppError> {
                 &mut |ev| emit_macapp_event(ev, false),
             )?;
             print_linux_setup(&out, json, |_| {});
+            Ok(cli::exit::OK)
+        }
+        crate::cli::LinuxAppSub::NextRenderer { gogid, dry_run } => {
+            match gogo::linuxapp::manage::next_renderer(&gogid, dry_run)? {
+                Some(next) => {
+                    println!("{next}");
+                    Ok(cli::exit::OK)
+                }
+                None => {
+                    eprintln!(
+                        "gogo: {gogid}: {}",
+                        gogo::macapp::renderer::NO_MORE_RENDERERS
+                    );
+                    Ok(cli::exit::FAILED)
+                }
+            }
+        }
+        crate::cli::LinuxAppSub::Compat { gogid, json } => {
+            let r = gogo::linuxapp::manage::compat(&gogid)?;
+            if json {
+                println!("{}", serde_json::json!(r));
+                return Ok(cli::exit::OK);
+            }
+            for w in &r.warnings {
+                eprintln!("warning: {w}");
+            }
+            println!("status: {}", r.status_line);
+            if let Some(rt) = &r.runtime {
+                println!("runtime: {rt}");
+            }
+            if let Some(x) = &r.renderer {
+                println!(
+                    "renderer: {} ({}); baked {} ({}); L1 auto would pick {} ({}){}",
+                    x.effective,
+                    x.effective_layer.describe(),
+                    x.baked,
+                    x.baked_layer.describe(),
+                    x.auto,
+                    x.reason,
+                    x.applied
+                        .as_ref()
+                        .map(|a| format!("; last applied by setup: {a}"))
+                        .unwrap_or_default()
+                );
+            }
+            let lines = r.effective.display_lines();
+            if lines.is_empty() {
+                println!("no compat data for {gogid} (L1 verbs, L3 and L4 are empty)");
+            }
+            for line in lines {
+                println!("{line}");
+            }
+            if let Some(fx) = &r.fixes {
+                print!("{fx}");
+            }
+            if !r.variants.is_empty() {
+                println!(
+                    "variants (`*` runs; pick one with `variant = \"<name>\"` under \
+                     [platforms.linux] in the L4 file):"
+                );
+                for v in &r.variants {
+                    println!(
+                        "  {} {:?}  {}{}{}",
+                        if v.selected { "*" } else { " " },
+                        v.name,
+                        v.exe,
+                        if v.args.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" {}", v.args.join(" "))
+                        },
+                        if v.default { "  (default)" } else { "" }
+                    );
+                }
+            }
+            if let Some(e) = &r.variant_error {
+                eprintln!("error: {e}");
+            }
+            println!(
+                "L4 override file: {}{}",
+                r.user_file.display(),
+                if r.built {
+                    ""
+                } else {
+                    "\n(not built yet: L1 and the renderer show once `gogo linux-app <game>` ran)"
+                }
+            );
             Ok(cli::exit::OK)
         }
     }
@@ -3800,14 +4015,21 @@ fn apps_cmd(cmd: crate::cli::AppsCmd) -> Result<i32, AppError> {
                 return Ok(cli::exit::OK);
             }
             if all.is_empty() {
-                println!("no games set up yet: `gogo mac-app <GAME>` builds one");
+                println!(
+                    "no games set up yet: `gogo {} <GAME>` builds one",
+                    app_command()
+                );
                 return Ok(cli::exit::OK);
             }
             let mut table = comfy_table::Table::new();
             table.set_header(vec![
                 "GOGID",
                 "TITLE",
-                ".APP",
+                if cfg!(target_os = "macos") {
+                    ".APP"
+                } else {
+                    "MENU ENTRY"
+                },
                 "RUNTIME",
                 "RENDERER",
                 "SIZE",
@@ -3828,15 +4050,20 @@ fn apps_cmd(cmd: crate::cli::AppsCmd) -> Result<i32, AppError> {
             let orphans = all.iter().filter(|a| a.orphaned()).count();
             if orphans > 0 {
                 println!(
-                    "{orphans} game(s) with a missing .app: `gogo apps prune --orphaned` \
-                     removes them (it asks first)"
+                    "{orphans} game(s) with a missing {}: `gogo apps prune --orphaned` \
+                     removes them (it asks first)",
+                    if cfg!(target_os = "macos") {
+                        ".app"
+                    } else {
+                        "menu entry"
+                    }
                 );
             }
             Ok(cli::exit::OK)
         }
         crate::cli::AppsCmd::Show { target, json } => {
             let Some(a) = apps::get(&target, &logs)? else {
-                eprintln!("gogo: {target} isn't set up on this Mac — see `gogo apps list`");
+                eprintln!("gogo: {target} isn't set up here — see `gogo apps list`");
                 return Ok(cli::exit::USAGE);
             };
             if json {
@@ -3847,9 +4074,16 @@ fn apps_cmd(cmd: crate::cli::AppsCmd) -> Result<i32, AppError> {
                 p.map_or("-".to_string(), |p| p.display().to_string())
             };
             println!("{} {}", a.gogid, dash(a.title.as_deref()));
-            println!("  .app:        {}", app_column(&a));
-            if let Some(b) = &a.bundle {
-                println!("               {}", b.display());
+            if a.linux {
+                println!("  menu entry:  {}", app_column(&a));
+                if let Some(d) = &a.desktop {
+                    println!("               {}", d.display());
+                }
+            } else {
+                println!("  .app:        {}", app_column(&a));
+                if let Some(b) = &a.bundle {
+                    println!("               {}", b.display());
+                }
             }
             println!("  state:       {}", a.root.display());
             println!("  prefix:      {}", a.prefix.display());
@@ -3867,7 +4101,7 @@ fn apps_cmd(cmd: crate::cli::AppsCmd) -> Result<i32, AppError> {
             yes,
         } => {
             let Some(a) = apps::get(&target, &logs)? else {
-                eprintln!("gogo: {target} isn't set up on this Mac — see `gogo apps list`");
+                eprintln!("gogo: {target} isn't set up here — see `gogo apps list`");
                 return Ok(cli::exit::USAGE);
             };
             remove_apps(&[a], keep_override, yes)
@@ -3882,7 +4116,7 @@ fn apps_cmd(cmd: crate::cli::AppsCmd) -> Result<i32, AppError> {
                 .filter(apps::App::orphaned)
                 .collect();
             if orphans.is_empty() {
-                println!("nothing to prune: every game's .app is where it was");
+                println!("nothing to prune: no game lost its .app or menu entry");
                 return Ok(cli::exit::OK);
             }
             remove_apps(&orphans, keep_override, yes)
@@ -3890,8 +4124,25 @@ fn apps_cmd(cmd: crate::cli::AppsCmd) -> Result<i32, AppError> {
     }
 }
 
-/// `present`, `missing`, `portable` (and `-` when nothing is recorded).
+/// The command that builds a game on this OS.
+fn app_command() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "mac-app"
+    } else {
+        "linux-app"
+    }
+}
+
+/// `present`, `missing`, `portable` (and `-` when nothing is recorded). A
+/// Linux game: its menu entry, `not yet` before #177's launcher made one.
 fn app_column(a: &gogo::macapp::apps::App) -> String {
+    if a.linux {
+        return match (a.desktop_present, a.launcher) {
+            (true, _) => "present".to_string(),
+            (false, true) => "missing".to_string(),
+            (false, false) => "not yet".to_string(),
+        };
+    }
     let kind = if a.portable { "portable, " } else { "" };
     match (&a.bundle, a.bundle_present) {
         (None, _) => "-".to_string(),
@@ -3918,6 +4169,9 @@ fn remove_apps(
         );
         if let Some(b) = a.bundle.as_ref().filter(|_| a.bundle_present) {
             println!("    {} stays, but won't start until rebuilt", b.display());
+        }
+        if let Some(d) = a.desktop.as_ref().filter(|_| a.desktop_present) {
+            println!("    its menu entry {} goes too", d.display());
         }
     }
     if !yes {

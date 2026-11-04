@@ -887,9 +887,8 @@ pub fn execute(
     })
 }
 
-/// A fresh Proton prefix maps `z:` to `/`; a rebuilt one lost it to the
-/// last setup. Build steps hand Wine unix paths (installer logs), so it's
-/// back until setup drops it.
+/// A Proton prefix maps `z:` to `/`; one set up before setup kept it (#176)
+/// lost it. Build steps hand Wine unix paths (installer logs).
 fn restore_z_for_build(prefix: &Path) -> Result<(), MacAppError> {
     setup::restore_z(prefix).map(|_| ())
 }
