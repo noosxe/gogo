@@ -10,8 +10,15 @@
 //!   the exe: Rebel Galaxy's D3D11 lives in `RenderSystem_Direct3D11.dll`.
 //! - **Imports**: regular and delay-load import tables, via the `object` crate.
 //! - **Direct3D ≤ 7** has no DLL of its own (it comes from `ddraw.dll` through
-//!   `QueryInterface`), so a ddraw importer is checked for the `IID_IDirect3D*`
-//!   GUIDs that `dxguid.lib` links into the image.
+//!   `QueryInterface`), so a file that imports `ddraw.dll` or names it is
+//!   checked for the 44 ddraw/d3d GUIDs that `dxguid.lib` links into the
+//!   image (docs/22 §6.2). Device and work GUIDs (`IID_IDirect3DHALDevice`,
+//!   `IID_IDirect3DTexture2` …) are strong evidence, the `IID_IDirect3D*`
+//!   interface GUIDs alone medium. ≥ 40 of the 44 is the whole `dxguid` set,
+//!   which says only "linked `dxguid`": its D3D hits are the weakest
+//!   evidence ([`D3d7Confidence::DxguidBlock`]), but still count as D3D ≤ 7
+//!   (docs/22 §6.1: unsure is not 2D). Unreal's `D3DDrv.dll` and LithTech's
+//!   `d3d.ren` next to the exe mark a D3D path too.
 //! - **Runtime-loaded DLLs**: a `strings`-style scan of the section data
 //!   (ASCII and UTF-16LE) for known DLL names, because some games
 //!   `LoadLibrary` their renderer. Used for the classification only when no
@@ -106,6 +113,24 @@ pub enum GraphicsSource {
     None,
 }
 
+/// How sure the scan is that the game uses Direct3D ≤ 7 (docs/22 §5.3, §6.2),
+/// weakest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum D3d7Confidence {
+    /// The D3D GUIDs come only with the whole `dxguid` block (≥ 40 of the
+    /// 44 ddraw/d3d GUIDs): a D3D game and a 2D one linked against all of
+    /// `dxguid.lib` look the same.
+    DxguidBlock,
+    /// Only `IID_IDirect3D`/`2`/`3`/`7`: real use, or a 2D game probing for
+    /// 3D hardware.
+    Medium,
+    /// A device or work GUID (`IID_IDirect3DHALDevice`, `…Texture2`,
+    /// `…Viewport3` …) outside the block, a `d3dim`/`d3drm` import, or a D3D
+    /// renderer DLL (Unreal `D3DDrv.dll`, LithTech `d3d.ren`).
+    Strong,
+}
+
 /// Engines that pick the graphics API at runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -153,6 +178,19 @@ pub struct PeScan {
     /// dgVoodoo or cnc-ddraw, or a bundled `d3dcompiler_47.dll`). Their own
     /// imports are left out of the classification.
     pub local_overrides: BTreeSet<String>,
+    /// The strongest Direct3D ≤ 7 evidence behind a [`GraphicsImport::Direct3d7`]
+    /// in [`Self::graphics_imports`] or [`Self::runtime_graphics`]; `None`
+    /// when there is none.
+    #[serde(default)]
+    pub d3d7_confidence: Option<D3d7Confidence>,
+    /// A scanned ddraw file carries the whole `dxguid` GUID block (`doctor`
+    /// notes it: its D3D GUIDs prove nothing).
+    #[serde(default)]
+    pub dxguid_block: bool,
+    /// D3D renderer DLLs of an engine found next to the exe (`d3ddrv.dll`,
+    /// `d3d.ren`).
+    #[serde(default)]
+    pub renderer_dlls: BTreeSet<String>,
     pub files: Vec<PeFileScan>,
 }
 
@@ -164,8 +202,19 @@ pub struct PeFileScan {
     pub imports: BTreeSet<String>,
     /// Interesting DLL names found as strings in the image.
     pub runtime_loaded: BTreeSet<String>,
-    /// `IID_IDirect3D*` GUIDs present (only looked for in ddraw importers).
+    /// `IID_IDirect3D`/`2`/`3`/`7` present, in or outside the `dxguid`
+    /// block. The GUIDs are only looked for in files that import `ddraw.dll`
+    /// or name it.
     pub d3d7_iids: bool,
+    /// How many of the 44 ddraw/d3d GUIDs are present (0 if not looked for).
+    #[serde(default)]
+    pub ddraw_guids: u8,
+    /// `ddraw_guids` ≥ [`DXGUID_BLOCK_MIN`]: the whole `dxguid` set.
+    #[serde(default)]
+    pub dxguid_block: bool,
+    /// This file's Direct3D ≤ 7 evidence.
+    #[serde(default)]
+    pub d3d7: Option<D3d7Confidence>,
     #[serde(skip)]
     clickteam: bool,
 }
@@ -204,6 +253,7 @@ fn scan_from(root: &Path, exe: &Path, source: MainExeSource) -> Result<PeScan, S
         candidates.extend(unreal_binaries(root));
     }
     let mut shipped = BTreeSet::new();
+    let mut renderer_dlls = BTreeSet::new();
     for path in candidates {
         let name = lower_name(&path);
         if name.ends_with(".dll") {
@@ -213,7 +263,18 @@ fn scan_from(root: &Path, exe: &Path, source: MainExeSource) -> Result<PeScan, S
             continue;
         }
         // Unreadable or non-PE siblings (renamed data files) are skipped.
-        if let Ok(Some(f)) = scan_file(root, &path) {
+        if let Ok(Some(mut f)) = scan_file(root, &path) {
+            if is_renderer_dll(&name) {
+                renderer_dlls.insert(name);
+                // UE2's D3DDrv.dll imports d3d8: that import says it all.
+                let newer = f
+                    .imports
+                    .iter()
+                    .any(|n| graphics_import(n).is_some_and(|g| g > GraphicsImport::Direct3d7));
+                if !newer {
+                    f.d3d7 = Some(D3d7Confidence::Strong);
+                }
+            }
             files.push(f);
         }
     }
@@ -229,15 +290,32 @@ fn scan_from(root: &Path, exe: &Path, source: MainExeSource) -> Result<PeScan, S
     let mut helpers = BTreeSet::new();
     let mut runtime_loaded = BTreeSet::new();
     let mut all_imports = BTreeSet::new();
+    let mut d3d7_confidence = None;
+    let mut dxguid_block = false;
+    let mut runtime_d3d7 = false;
     for f in &files {
-        if local_overrides.contains(&file_name(&f.path)) {
+        let name = file_name(&f.path);
+        if local_overrides.contains(&name) {
             continue;
         }
         all_imports.extend(f.imports.iter().cloned());
         graphics_imports.extend(f.imports.iter().filter_map(|n| graphics_import(n)));
-        if f.d3d7_iids {
-            graphics_imports.insert(GraphicsImport::Direct3d7);
+        let imports_d3dim = f
+            .imports
+            .iter()
+            .any(|n| graphics_import(n) == Some(GraphicsImport::Direct3d7));
+        let d3d7 = f.d3d7.max(imports_d3dim.then_some(D3d7Confidence::Strong));
+        if let Some(c) = d3d7 {
+            // GUIDs in a file that only names ddraw.dll are as runtime as
+            // its ddraw.
+            if imports_d3dim || f.imports.contains("ddraw.dll") || is_renderer_dll(&name) {
+                graphics_imports.insert(GraphicsImport::Direct3d7);
+            } else {
+                runtime_d3d7 = true;
+            }
+            d3d7_confidence = d3d7_confidence.max(Some(c));
         }
+        dxguid_block |= f.dxguid_block;
         helpers.extend(
             f.imports
                 .iter()
@@ -248,6 +326,9 @@ fn scan_from(root: &Path, exe: &Path, source: MainExeSource) -> Result<PeScan, S
     }
     runtime_loaded.retain(|n| !all_imports.contains(n));
     runtime_graphics.extend(runtime_loaded.iter().filter_map(|n| graphics_import(n)));
+    if runtime_d3d7 {
+        runtime_graphics.insert(GraphicsImport::Direct3d7);
+    }
 
     let clickteam = files[0].clickteam || files[0].imports.contains("mmfs2.dll");
     let engine = engine_hint.or(clickteam.then_some(Engine::Clickteam));
@@ -284,6 +365,9 @@ fn scan_from(root: &Path, exe: &Path, source: MainExeSource) -> Result<PeScan, S
         helpers,
         runtime_loaded,
         local_overrides,
+        d3d7_confidence,
+        dxguid_block,
+        renderer_dlls,
         files,
     })
 }
@@ -378,43 +462,129 @@ fn is_ignored(name: &str) -> bool {
     .any(|p| name.starts_with(p))
 }
 
-// IID_IDirect3D, IID_IDirect3D2, IID_IDirect3D3, IID_IDirect3D7 (d3d.h), in
-// GUID memory layout (Data1–3 little-endian, Data4 as bytes).
-const D3D7_IIDS: [[u8; 16]; 4] = [
-    guid(
-        0x3BBA0080,
-        0x2421,
-        0x11CF,
-        [0xA3, 0x1A, 0x00, 0xAA, 0x00, 0xB9, 0x33, 0x56],
-    ),
-    guid(
-        0x6AAE1EC1,
-        0x662A,
-        0x11D0,
-        [0x88, 0x9D, 0x00, 0xAA, 0x00, 0xBB, 0xB7, 0x6A],
-    ),
-    guid(
-        0xBB223240,
-        0xE72B,
-        0x11D0,
-        [0xA9, 0xB4, 0x00, 0xAA, 0x00, 0xC0, 0x99, 0x3E],
-    ),
-    guid(
-        0xF5049E77,
-        0x4861,
-        0x11D2,
-        [0xA4, 0x07, 0x00, 0xA0, 0xC9, 0x06, 0x29, 0xA8],
-    ),
+/// Unreal's and LithTech's Direct3D renderer DLLs (docs/22 §5.3).
+fn is_renderer_dll(name: &str) -> bool {
+    matches!(name, "d3ddrv.dll" | "d3d.ren")
+}
+
+/// The 44 `DEFINE_GUID`s of Wine's `include/d3d.h` (27) and `include/ddraw.h`
+/// (17), as of `wine-11.0` (unchanged on `master` 2026-11-04), in GUID memory
+/// layout (Data1–3 little-endian, Data4 as bytes). Order matters: the first
+/// [`D3D_INTERFACES`] are the `IID_IDirect3D*` interfaces, then the device
+/// and work GUIDs up to [`D3D_GUIDS`], then DirectDraw.
+const DDRAW_GUIDS: [[u8; 16]; 44] = [
+    // d3d.h: interfaces.
+    guid(0x3BBA0080, 0x2421, 0x11CF, 0xA31A_00AA00B93356), // IID_IDirect3D
+    guid(0x6AAE1EC1, 0x662A, 0x11D0, 0x889D_00AA00BBB76A), // IID_IDirect3D2
+    guid(0xBB223240, 0xE72B, 0x11D0, 0xA9B4_00AA00C0993E), // IID_IDirect3D3
+    guid(0xF5049E77, 0x4861, 0x11D2, 0xA407_00A0C90629A8), // IID_IDirect3D7
+    // d3d.h: devices.
+    guid(0xF2086B20, 0x259F, 0x11CF, 0xA31A_00AA00B93356), // IID_IDirect3DRampDevice
+    guid(0xA4665C60, 0x2673, 0x11CF, 0xA31A_00AA00B93356), // IID_IDirect3DRGBDevice
+    guid(0x84E63DE0, 0x46AA, 0x11CF, 0x816F_0000C020156E), // IID_IDirect3DHALDevice
+    guid(0x881949A1, 0xD6F3, 0x11D0, 0x89AB_00A0C9054129), // IID_IDirect3DMMXDevice
+    guid(0x50936643, 0x13E9, 0x11D1, 0x89AA_00A0C9054129), // IID_IDirect3DRefDevice
+    guid(0xF5049E78, 0x4861, 0x11D2, 0xA407_00A0C90629A8), // IID_IDirect3DTnLHalDevice
+    guid(0x8767DF22, 0xBACC, 0x11D1, 0x8969_00A0C90629A8), // IID_IDirect3DNullDevice
+    // d3d.h: work interfaces.
+    guid(0x64108800, 0x957D, 0x11D0, 0x89AB_00A0C9054129), // IID_IDirect3DDevice
+    guid(0x93281501, 0x8CF8, 0x11D0, 0x89AB_00A0C9054129), // IID_IDirect3DDevice2
+    guid(0xB0AB3B60, 0x33D7, 0x11D1, 0xA981_00C04FD7B174), // IID_IDirect3DDevice3
+    guid(0xF5049E79, 0x4861, 0x11D2, 0xA407_00A0C90629A8), // IID_IDirect3DDevice7
+    guid(0x2CDCD9E0, 0x25A0, 0x11CF, 0xA31A_00AA00B93356), // IID_IDirect3DTexture
+    guid(0x93281502, 0x8CF8, 0x11D0, 0x89AB_00A0C9054129), // IID_IDirect3DTexture2
+    guid(0x4417C142, 0x33AD, 0x11CF, 0x816F_0000C020156E), // IID_IDirect3DLight
+    guid(0x4417C144, 0x33AD, 0x11CF, 0x816F_0000C020156E), // IID_IDirect3DMaterial
+    guid(0x93281503, 0x8CF8, 0x11D0, 0x89AB_00A0C9054129), // IID_IDirect3DMaterial2
+    guid(0xCA9C46F4, 0xD3C5, 0x11D1, 0xB75A_00600852B312), // IID_IDirect3DMaterial3
+    guid(0x4417C145, 0x33AD, 0x11CF, 0x816F_0000C020156E), // IID_IDirect3DExecuteBuffer
+    guid(0x4417C146, 0x33AD, 0x11CF, 0x816F_0000C020156E), // IID_IDirect3DViewport
+    guid(0x93281500, 0x8CF8, 0x11D0, 0x89AB_00A0C9054129), // IID_IDirect3DViewport2
+    guid(0xB0AB3B61, 0x33D7, 0x11D1, 0xA981_00C04FD7B174), // IID_IDirect3DViewport3
+    guid(0x7A503555, 0x4A83, 0x11D1, 0xA5DB_00A0C90367F8), // IID_IDirect3DVertexBuffer
+    guid(0xF5049E7D, 0x4861, 0x11D2, 0xA407_00A0C90629A8), // IID_IDirect3DVertexBuffer7
+    // ddraw.h.
+    guid(0xD7B70EE0, 0x4340, 0x11CF, 0xB063_0020AFC2CD35), // CLSID_DirectDraw
+    guid(0x3C305196, 0x50DB, 0x11D3, 0x9CFE_00C04FD930C5), // CLSID_DirectDraw7
+    guid(0x593817A0, 0x7DB3, 0x11CF, 0xA2DE_00AA00B93356), // CLSID_DirectDrawClipper
+    guid(0x6C14DB80, 0xA733, 0x11CE, 0xA521_0020AF0BE560), // IID_IDirectDraw
+    guid(0xB3A6F3E0, 0x2B43, 0x11CF, 0xA2DE_00AA00B93356), // IID_IDirectDraw2
+    guid(0x618F8AD4, 0x8B7A, 0x11D0, 0x8FCC_00C04FD9189D), // IID_IDirectDraw3
+    guid(0x9C59509A, 0x39BD, 0x11D1, 0x8C4A_00C04FD930C5), // IID_IDirectDraw4
+    guid(0x15E65EC0, 0x3B9C, 0x11D2, 0xB92F_00609797EA5B), // IID_IDirectDraw7
+    guid(0x6C14DB81, 0xA733, 0x11CE, 0xA521_0020AF0BE560), // IID_IDirectDrawSurface
+    guid(0x57805885, 0x6EEC, 0x11CF, 0x9441_A82303C10E27), // IID_IDirectDrawSurface2
+    guid(0xDA044E00, 0x69B2, 0x11D0, 0xA1D5_00AA00B8DFBB), // IID_IDirectDrawSurface3
+    guid(0x0B2B8630, 0xAD35, 0x11D0, 0x8EA6_00609797EA5B), // IID_IDirectDrawSurface4
+    guid(0x06675A80, 0x3B9B, 0x11D2, 0xB92F_00609797EA5B), // IID_IDirectDrawSurface7
+    guid(0x6C14DB84, 0xA733, 0x11CE, 0xA521_0020AF0BE560), // IID_IDirectDrawPalette
+    guid(0x6C14DB85, 0xA733, 0x11CE, 0xA521_0020AF0BE560), // IID_IDirectDrawClipper
+    guid(0x4B9F0EE0, 0x0D7E, 0x11D0, 0x9B06_00A0C903A3B8), // IID_IDirectDrawColorControl
+    guid(0x69C11C3E, 0xB46B, 0x11D1, 0xAD7A_00C04FC29B4E), // IID_IDirectDrawGammaControl
 ];
 
-const fn guid(d1: u32, d2: u16, d3: u16, d4: [u8; 8]) -> [u8; 16] {
+/// `DDRAW_GUIDS[..D3D_INTERFACES]`: `IID_IDirect3D`, `2`, `3`, `7`.
+const D3D_INTERFACES: usize = 4;
+/// `DDRAW_GUIDS[..D3D_GUIDS]`: everything from `d3d.h`.
+const D3D_GUIDS: usize = 27;
+/// This many of the 44 present = the whole `dxguid` set (43 seen on real
+/// files, docs/22 §5.2; #174's corpus may tune it).
+pub const DXGUID_BLOCK_MIN: u32 = 40;
+
+/// `Data4` written as one big-endian number, the way `DEFINE_GUID` lists it.
+const fn guid(d1: u32, d2: u16, d3: u16, d4: u64) -> [u8; 16] {
     let a = d1.to_le_bytes();
     let b = d2.to_le_bytes();
     let c = d3.to_le_bytes();
+    let d = d4.to_be_bytes();
     [
-        a[0], a[1], a[2], a[3], b[0], b[1], c[0], c[1], d4[0], d4[1], d4[2], d4[3], d4[4], d4[5],
-        d4[6], d4[7],
+        a[0], a[1], a[2], a[3], b[0], b[1], c[0], c[1], d[0], d[1], d[2], d[3], d[4], d[5], d[6],
+        d[7],
     ]
+}
+
+/// For each byte value, the [`DDRAW_GUIDS`] (as bits) that start with it.
+const GUID_BY_FIRST_BYTE: [u64; 256] = {
+    let mut t = [0u64; 256];
+    let mut i = 0;
+    while i < DDRAW_GUIDS.len() {
+        t[DDRAW_GUIDS[i][0] as usize] |= 1 << i;
+        i += 1;
+    }
+    t
+};
+
+/// Which [`DDRAW_GUIDS`] occur in `bytes`, as bits.
+fn ddraw_guid_hits(bytes: &[u8]) -> u64 {
+    let mut hits = 0;
+    for w in bytes.windows(16) {
+        let mut cand = GUID_BY_FIRST_BYTE[w[0] as usize] & !hits;
+        while cand != 0 {
+            let i = cand.trailing_zeros() as usize;
+            if w == DDRAW_GUIDS[i] {
+                hits |= 1 << i;
+            }
+            cand &= cand - 1;
+        }
+    }
+    hits
+}
+
+/// docs/22 §6.2 for one file: (`d3d7_iids`, `dxguid_block`, evidence).
+fn d3d7_verdict(hits: u64) -> (bool, bool, Option<D3d7Confidence>) {
+    let interfaces = hits & ((1 << D3D_INTERFACES) - 1) != 0;
+    let work = hits & ((1 << D3D_GUIDS) - (1 << D3D_INTERFACES)) != 0;
+    let block = hits.count_ones() >= DXGUID_BLOCK_MIN;
+    let evidence = if block {
+        Some(D3d7Confidence::DxguidBlock)
+    } else if work {
+        Some(D3d7Confidence::Strong)
+    } else if interfaces {
+        Some(D3d7Confidence::Medium)
+    } else {
+        None
+    };
+    (interfaces, block, evidence)
 }
 
 /// Files larger than this are not executables we care about (Clickteam and
@@ -471,16 +641,16 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8], bitness: Bitness) -> Option<PeFileS
         }
     }
 
-    let wants_iids = imports.contains("ddraw.dll");
     let mut runtime_loaded = BTreeSet::new();
     let mut clickteam = false;
-    let mut d3d7_iids = false;
     // Section data only: an appended overlay (Clickteam, installers) is game
     // data, not code, and would only add false hits.
-    for section in file.section_table().iter() {
-        let Ok(bytes) = section.pe_data(data) else {
-            continue;
-        };
+    let sections: Vec<&[u8]> = file
+        .section_table()
+        .iter()
+        .filter_map(|s| s.pe_data(data).ok())
+        .collect();
+    for bytes in &sections {
         for_each_token(bytes, |token| {
             let lower = token.to_ascii_lowercase();
             if lower.contains("clickteam") {
@@ -490,10 +660,15 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8], bitness: Bitness) -> Option<PeFileS
                 runtime_loaded.insert(lower);
             }
         });
-        if wants_iids && !d3d7_iids {
-            d3d7_iids = bytes.windows(16).any(|w| D3D7_IIDS.iter().any(|g| w == g));
-        }
     }
+
+    // GUIDs only in files that import ddraw.dll or name it (LoadLibrary).
+    let hits = if imports.contains("ddraw.dll") || runtime_loaded.contains("ddraw.dll") {
+        sections.iter().fold(0, |h, b| h | ddraw_guid_hits(b))
+    } else {
+        0
+    };
+    let (d3d7_iids, dxguid_block, d3d7) = d3d7_verdict(hits);
 
     Some(PeFileScan {
         path: String::new(),
@@ -501,6 +676,9 @@ fn parse_pe<Pe: ImageNtHeaders>(data: &[u8], bitness: Bitness) -> Option<PeFileS
         imports,
         runtime_loaded,
         d3d7_iids,
+        ddraw_guids: hits.count_ones() as u8,
+        dxguid_block,
+        d3d7,
         clickteam,
     })
 }
@@ -584,8 +762,9 @@ fn unreal_binaries(root: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// LithTech renderers (`d3d.ren`) are PE DLLs too.
 fn pe_files_in(dir: &Path) -> Vec<PathBuf> {
-    files_with_ext(dir, &["exe", "dll"])
+    files_with_ext(dir, &["exe", "dll", "ren"])
 }
 
 fn jars_in(dir: &Path) -> Vec<PathBuf> {
@@ -646,7 +825,7 @@ fn file_name(rel: &str) -> String {
     rel.rsplit('/').next().unwrap_or(rel).to_ascii_lowercase()
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -898,7 +1077,7 @@ mod tests {
         assert_eq!(s.graphics, GraphicsApi::Ddraw2d);
 
         let mut blob = vec![0xCC; 3];
-        blob.extend_from_slice(&D3D7_IIDS[3]);
+        blob.extend_from_slice(&DDRAW_GUIDS[3]);
         let d3d = put(
             tmp.path(),
             "3d/TDR.exe",
@@ -911,6 +1090,291 @@ mod tests {
         let s = scan_exe(tmp.path(), &d3d).unwrap();
         assert_eq!(s.graphics, GraphicsApi::D3dLegacy);
         assert!(s.graphics_imports.contains(&GraphicsImport::Direct3d7));
+        assert_eq!(s.d3d7_confidence, Some(D3d7Confidence::Medium));
+        assert!(s.files[0].d3d7_iids);
+    }
+
+    // Indices into DDRAW_GUIDS.
+    const IID_D3D7: usize = 3;
+    const IID_HAL_DEVICE: usize = 6;
+    const IID_TEXTURE2: usize = 16;
+    const IID_DDRAW3: usize = 32;
+    const IID_DDRAW7: usize = 34;
+
+    /// The given GUIDs back to back, after a few odd bytes (GUIDs need not
+    /// be aligned).
+    fn guids(which: impl IntoIterator<Item = usize>) -> Vec<u8> {
+        let mut blob = vec![0xCC; 3];
+        for i in which {
+            blob.extend_from_slice(&DDRAW_GUIDS[i]);
+        }
+        blob
+    }
+
+    /// A 32-bit `ddraw.dll` importer carrying `blob`, scanned.
+    fn ddraw_exe(blob: &[u8]) -> PeScan {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = put(
+            tmp.path(),
+            "game.exe",
+            &Pe {
+                imports: &["kernel32.dll", "DDRAW.dll"],
+                blob,
+                ..Pe::default()
+            },
+        );
+        scan_exe(tmp.path(), &exe).unwrap()
+    }
+
+    #[test]
+    fn guid_table_is_wines_44() {
+        let set: BTreeSet<[u8; 16]> = DDRAW_GUIDS.iter().copied().collect();
+        assert_eq!(set.len(), 44);
+        // Spot checks against the byte layout of d3d.h / ddraw.h.
+        assert_eq!(
+            DDRAW_GUIDS[IID_D3D7],
+            [
+                0x77, 0x9E, 0x04, 0xF5, 0x61, 0x48, 0xD2, 0x11, 0xA4, 0x07, 0x00, 0xA0, 0xC9, 0x06,
+                0x29, 0xA8
+            ]
+        );
+        assert_eq!(
+            DDRAW_GUIDS[IID_DDRAW3],
+            [
+                0xD4, 0x8A, 0x8F, 0x61, 0x7A, 0x8B, 0xD0, 0x11, 0x8F, 0xCC, 0x00, 0xC0, 0x4F, 0xD9,
+                0x18, 0x9D
+            ]
+        );
+        assert_eq!(ddraw_guid_hits(&guids(0..44)), (1 << 44) - 1);
+        assert_eq!(ddraw_guid_hits(&DDRAW_GUIDS[5][..15]), 0);
+    }
+
+    /// docs/22 §5.2: the 43-GUID `dxguid` block (all but `IID_IDirectDraw3`)
+    /// is the weakest D3D evidence, yet still D3D ≤ 7 (§6.1: unsure is not 2D).
+    #[test]
+    fn dxguid_block_is_weak_d3d7_evidence() {
+        let s = ddraw_exe(&guids((0..44).filter(|&i| i != IID_DDRAW3)));
+        assert_eq!(s.graphics, GraphicsApi::D3dLegacy);
+        assert_eq!(s.d3d7_confidence, Some(D3d7Confidence::DxguidBlock));
+        assert!(s.dxguid_block);
+        assert_eq!(s.files[0].ddraw_guids, 43);
+        assert!(s.files[0].dxguid_block);
+
+        // The threshold: 40 is the block, 39 with a device GUID is strong.
+        let s = ddraw_exe(&guids(0..40));
+        assert_eq!(s.d3d7_confidence, Some(D3d7Confidence::DxguidBlock));
+        let s = ddraw_exe(&guids(0..39));
+        assert_eq!(s.d3d7_confidence, Some(D3d7Confidence::Strong));
+        assert!(!s.dxguid_block);
+    }
+
+    /// Stronghold Crusader HD carries only `IID_IDirectDraw7`.
+    #[test]
+    fn selective_ddraw_guids_stay_2d() {
+        let s = ddraw_exe(&guids([IID_DDRAW7, 28, 30]));
+        assert_eq!(s.graphics, GraphicsApi::Ddraw2d);
+        assert_eq!(s.d3d7_confidence, None);
+        assert_eq!(s.files[0].ddraw_guids, 3);
+        assert!(!s.files[0].d3d7_iids);
+    }
+
+    #[test]
+    fn device_and_work_guids_are_strong() {
+        // A device GUID alone (no IID_IDirect3D*) was 2D before #173.
+        for i in [IID_HAL_DEVICE, IID_TEXTURE2, 26] {
+            let s = ddraw_exe(&guids([IID_DDRAW7, i]));
+            assert_eq!(s.graphics, GraphicsApi::D3dLegacy, "guid {i}");
+            assert_eq!(s.d3d7_confidence, Some(D3d7Confidence::Strong), "guid {i}");
+            assert!(!s.files[0].d3d7_iids);
+        }
+        let s = ddraw_exe(&guids([IID_D3D7, IID_HAL_DEVICE, IID_DDRAW7]));
+        assert_eq!(s.d3d7_confidence, Some(D3d7Confidence::Strong));
+        assert!(s.files[0].d3d7_iids);
+    }
+
+    #[test]
+    fn d3dim_import_is_strong() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = put(
+            tmp.path(),
+            "game.exe",
+            &Pe {
+                imports: &["d3drm.dll", "ddraw.dll"],
+                ..Pe::default()
+            },
+        );
+        let s = scan_exe(tmp.path(), &exe).unwrap();
+        assert_eq!(s.graphics, GraphicsApi::D3dLegacy);
+        assert_eq!(s.d3d7_confidence, Some(D3d7Confidence::Strong));
+    }
+
+    #[test]
+    fn guids_are_checked_where_ddraw_is_loaded_by_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut blob = b"\0LoadLibraryA\0ddraw.dll\0".to_vec();
+        blob.extend(guids([IID_TEXTURE2]));
+        let exe = put(
+            tmp.path(),
+            "3d/game.exe",
+            &Pe {
+                blob: &blob,
+                ..Pe::default()
+            },
+        );
+        let s = scan_exe(tmp.path(), &exe).unwrap();
+        assert_eq!(s.graphics, GraphicsApi::D3dLegacy);
+        assert_eq!(s.graphics_source, GraphicsSource::RuntimeStrings);
+        assert!(s.graphics_imports.is_empty());
+        assert_eq!(
+            s.runtime_graphics,
+            BTreeSet::from([GraphicsImport::Ddraw, GraphicsImport::Direct3d7])
+        );
+        assert_eq!(s.d3d7_confidence, Some(D3d7Confidence::Strong));
+
+        // Without GUIDs it stays 2D (the RenderWare driver of docs/22 §5.2).
+        let exe = put(
+            tmp.path(),
+            "2d/game.exe",
+            &Pe {
+                imports: &["gdi32.dll", "user32.dll"],
+                blob: b"\0ddraw.dll\0",
+                ..Pe::default()
+            },
+        );
+        let s = scan_exe(tmp.path(), &exe).unwrap();
+        assert_eq!(s.graphics, GraphicsApi::Ddraw2d);
+        assert_eq!(s.d3d7_confidence, None);
+
+        // A file that never names ddraw is not searched: the block in an
+        // input DLL is noise.
+        let exe = put(
+            tmp.path(),
+            "noise/game.exe",
+            &Pe {
+                imports: &["ddraw.dll"],
+                ..Pe::default()
+            },
+        );
+        put(
+            tmp.path(),
+            "noise/input_di8.dll",
+            &Pe {
+                blob: &guids(0..44),
+                ..Pe::default()
+            },
+        );
+        let s = scan_exe(tmp.path(), &exe).unwrap();
+        assert_eq!(s.graphics, GraphicsApi::Ddraw2d);
+        assert!(!s.dxguid_block);
+        assert_eq!(s.files[1].ddraw_guids, 0);
+    }
+
+    #[test]
+    fn engine_renderer_dlls_mark_d3d7() {
+        let tmp = tempfile::tempdir().unwrap();
+        // LithTech (Blood II, Shogo): the exe is clean, `d3d.ren` is a PE
+        // DLL importing ddraw.
+        let exe = put(
+            tmp.path(),
+            "lith/Client.exe",
+            &Pe {
+                imports: &["kernel32.dll", "DDRAW.dll"],
+                ..Pe::default()
+            },
+        );
+        put(
+            tmp.path(),
+            "lith/D3D.REN",
+            &Pe {
+                imports: &["ddraw.dll"],
+                ..Pe::default()
+            },
+        );
+        let s = scan_exe(tmp.path(), &exe).unwrap();
+        assert!(s.files.iter().any(|f| f.path == "lith/D3D.REN"));
+        assert_eq!(s.renderer_dlls, BTreeSet::from(["d3d.ren".into()]));
+        assert_eq!(s.graphics, GraphicsApi::D3dLegacy);
+        assert!(s.graphics_imports.contains(&GraphicsImport::Direct3d7));
+        assert_eq!(s.d3d7_confidence, Some(D3d7Confidence::Strong));
+
+        // Unreal (UE1): the exe imports the engine; D3DDrv.dll imports ddraw.
+        let exe = put(
+            tmp.path(),
+            "ue1/System/Unreal.exe",
+            &Pe {
+                imports: &["Core.dll", "Engine.dll"],
+                ..Pe::default()
+            },
+        );
+        put(
+            tmp.path(),
+            "ue1/System/D3DDrv.dll",
+            &Pe {
+                imports: &["DDRAW.dll"],
+                ..Pe::default()
+            },
+        );
+        let s = scan_exe(tmp.path(), &exe).unwrap();
+        assert_eq!(s.renderer_dlls, BTreeSet::from(["d3ddrv.dll".into()]));
+        assert_eq!(s.graphics, GraphicsApi::D3dLegacy);
+        assert_eq!(s.d3d7_confidence, Some(D3d7Confidence::Strong));
+
+        // UE2's D3DDrv.dll imports d3d8: that import decides, no D3D ≤ 7.
+        let exe = put(
+            tmp.path(),
+            "ue2/System/UT2004.exe",
+            &Pe {
+                imports: &["Core.dll"],
+                ..Pe::default()
+            },
+        );
+        put(
+            tmp.path(),
+            "ue2/System/D3DDrv.dll",
+            &Pe {
+                imports: &["d3d8.dll"],
+                ..Pe::default()
+            },
+        );
+        let s = scan_exe(tmp.path(), &exe).unwrap();
+        assert_eq!(s.graphics, GraphicsApi::D3dLegacy);
+        assert!(!s.graphics_imports.contains(&GraphicsImport::Direct3d7));
+        assert_eq!(s.d3d7_confidence, None);
+    }
+
+    /// The 64-bit rule is untouched: the GUID check runs the same, the
+    /// classification is bit-blind (renderer.rs decides by bitness).
+    #[test]
+    fn sixty_four_bit_ddraw_scans_the_same() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = put(
+            tmp.path(),
+            "game.exe",
+            &Pe {
+                pe64: true,
+                imports: &["ddraw.dll"],
+                blob: &guids([IID_DDRAW7]),
+                ..Pe::default()
+            },
+        );
+        let s = scan_exe(tmp.path(), &exe).unwrap();
+        assert_eq!(s.bitness, Bitness::X86_64);
+        assert_eq!(s.graphics, GraphicsApi::Ddraw2d);
+        assert_eq!(s.files[0].ddraw_guids, 1);
+
+        let exe = put(
+            tmp.path(),
+            "b/game.exe",
+            &Pe {
+                pe64: true,
+                imports: &["ddraw.dll"],
+                blob: &guids(0..44),
+                ..Pe::default()
+            },
+        );
+        let s = scan_exe(tmp.path(), &exe).unwrap();
+        assert_eq!(s.graphics, GraphicsApi::D3dLegacy);
+        assert_eq!(s.d3d7_confidence, Some(D3d7Confidence::DxguidBlock));
     }
 
     #[test]
@@ -1079,7 +1543,22 @@ mod tests {
         let json = serde_json::to_value(&s).unwrap();
         assert_eq!(json["bitness"], "i386");
         assert_eq!(json["graphics"], "unknown");
-        let back: PeScan = serde_json::from_value(json).unwrap();
+        assert_eq!(json["d3d7_confidence"], serde_json::Value::Null);
+        assert_eq!(json["dxguid_block"], false);
+        let back: PeScan = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(back.main_exe, "ok.exe");
+
+        // JSON from before #173 (no confidence, block or GUID count) reads.
+        let mut old = json;
+        for k in ["d3d7_confidence", "dxguid_block", "renderer_dlls"] {
+            old.as_object_mut().unwrap().remove(k);
+        }
+        for f in old["files"].as_array_mut().unwrap() {
+            for k in ["ddraw_guids", "dxguid_block", "d3d7"] {
+                f.as_object_mut().unwrap().remove(k);
+            }
+        }
+        let back: PeScan = serde_json::from_value(old).unwrap();
+        assert_eq!(back.d3d7_confidence, None);
     }
 }

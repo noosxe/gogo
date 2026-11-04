@@ -313,6 +313,20 @@ fn pe_scan(
                 .collect()
         )
     );
+    if let Some(c) = scan.d3d7_confidence {
+        let block = if scan.dxguid_block {
+            " (dxguid block present)"
+        } else {
+            ""
+        };
+        println!("d3d≤7      {c:?}{block}");
+    }
+    if !scan.renderer_dlls.is_empty() {
+        println!(
+            "renderers  {}",
+            list(scan.renderer_dlls.iter().cloned().collect())
+        );
+    }
     println!(
         "runtime    {}",
         list(scan.runtime_loaded.iter().cloned().collect())
