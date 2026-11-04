@@ -1,7 +1,9 @@
-//! `gogo apps`: the games gogo set up on this Mac, one per
-//! `games/<gogid>/` (prefix, game files, `state.toml`), with the launch
-//! logs and the override file that go with each. Listing reads only;
-//! [`remove`] deletes a game's state and never touches its `.app`.
+//! `gogo apps`: the games gogo set up here, one per `games/<gogid>/`
+//! (prefix, game files, `state.toml`), with the launch logs and the
+//! override file that go with each. A Mac game has its `.app`; a Linux one
+//! (design 18 §10) its menu entry, `gogo-<gogid>.desktop`. Listing reads
+//! only; [`remove`] deletes a game's state, and on Linux its menu entry,
+//! but never a `.app`.
 
 use std::path::{Path, PathBuf};
 
@@ -10,6 +12,7 @@ use serde::Serialize;
 use super::error::MacAppError;
 use super::launch::{self, GameDirs, GameState, LaunchToml};
 use super::{compat, doctor, portable};
+use crate::linuxapp::game::LinuxState;
 
 /// One set-up game.
 #[derive(Debug, Clone, Serialize)]
@@ -36,13 +39,23 @@ pub struct App {
     pub last_launch: Option<String>,
     /// `compat/<gogid>.toml`, when it exists.
     pub override_file: Option<PathBuf>,
+    /// A `gogo linux-app` game: `gogo-launch.toml` in its dir, no bundle.
+    pub linux: bool,
+    /// Linux: its menu entry ([`crate::linuxapp::game::desktop_path`]).
+    pub desktop: Option<PathBuf>,
+    pub desktop_present: bool,
+    /// Linux: `launch.sh` is there, so the menu entry was made too (#177
+    /// writes both). A game built before has no menu entry to lose.
+    pub launcher: bool,
 }
 
 impl App {
-    /// The game's `.app` is recorded but no longer where it was. (A moved
-    /// bundle updates the record on its next launch.)
+    /// The game's `.app` is recorded but no longer where it was (a moved
+    /// bundle updates the record on its next launch), or, on Linux, its
+    /// launcher was made and its `.desktop` file is gone.
     pub fn orphaned(&self) -> bool {
-        self.bundle.is_some() && !self.bundle_present
+        (self.bundle.is_some() && !self.bundle_present)
+            || (self.linux && self.launcher && !self.desktop_present)
     }
 }
 
@@ -80,6 +93,9 @@ pub fn get(target: &str, logs: &Path) -> Result<Option<App>, MacAppError> {
 
 fn read(gogid: &str, logs: &Path) -> Result<App, MacAppError> {
     let dirs = GameDirs::for_game(gogid)?;
+    if crate::linuxapp::game::launch_toml_path(&dirs).is_file() {
+        return Ok(read_linux(gogid, dirs, logs));
+    }
     // A state.toml gogo can't read still leaves a game to list or remove.
     let state = GameState::load(&dirs.state_toml).ok().flatten();
     let marker = state.is_none().then(|| portable::marker(gogid)).flatten();
@@ -109,7 +125,44 @@ fn read(gogid: &str, logs: &Path) -> Result<App, MacAppError> {
         last_launch: logs.as_deref().and_then(last_launch),
         logs,
         override_file,
+        linux: false,
+        desktop: None,
+        desktop_present: false,
+        launcher: false,
     })
+}
+
+/// A `gogo linux-app` game: `state.toml` is [`LinuxState`]'s, the title
+/// falls back to the baked TOML's.
+fn read_linux(gogid: &str, dirs: GameDirs, logs: &Path) -> App {
+    use crate::linuxapp::game;
+    let state = LinuxState::load(&dirs.state_toml).ok().flatten();
+    let title = state
+        .as_ref()
+        .and_then(|s| s.title.clone())
+        .or_else(|| conf_title(&dirs.launch_conf))
+        .or_else(|| game::read_launch_toml(&dirs).ok().map(|(t, _)| t.title));
+    let desktop = game::desktop_path(gogid);
+    let logs = Some(logs.join(gogid)).filter(|p| p.is_dir());
+    App {
+        gogid: gogid.to_string(),
+        title,
+        bytes: super::store::dir_size(&dirs.root).unwrap_or(0),
+        prefix: dirs.prefix.clone(),
+        launcher: dirs.root.join(game::LAUNCH_SH).is_file(),
+        root: dirs.root,
+        bundle: None,
+        bundle_present: false,
+        portable: false,
+        runtime: state.as_ref().map(|s| s.runtime.clone()),
+        renderer: state.as_ref().map(|s| s.renderer.clone()),
+        last_launch: logs.as_deref().and_then(last_launch),
+        logs,
+        override_file: Some(compat::user_path(gogid)).filter(|p| p.is_file()),
+        linux: true,
+        desktop_present: desktop.is_file(),
+        desktop: Some(desktop),
+    }
 }
 
 /// `TITLE='…'` from a `launch.conf` (states written before `title` was
@@ -159,9 +212,10 @@ pub struct Removed {
     pub bytes: u64,
 }
 
-/// Delete `app`'s state dir (prefix and saves included) and launch logs,
-/// and its override file unless `keep_override`. Refuses while the game or
-/// any Wine process in its prefix is running. The `.app` is left alone.
+/// Delete `app`'s state dir (prefix and saves included), launch logs and,
+/// on Linux, its `.desktop` file, and its override file unless
+/// `keep_override`. Refuses while the game or any Wine process in its
+/// prefix is running. The `.app` is left alone.
 pub fn remove(app: &App, keep_override: bool) -> Result<Removed, MacAppError> {
     if let Some(pid) = doctor::live_launcher(&app.root) {
         return Err(MacAppError::Apps(format!(
@@ -169,7 +223,27 @@ pub fn remove(app: &App, keep_override: bool) -> Result<Removed, MacAppError> {
             app.gogid
         )));
     }
-    let procs = doctor::prefix_procs(&app.prefix);
+    if app.linux {
+        let procs = crate::linuxapp::game::prefix_procs(&app.prefix);
+        if !procs.is_empty() {
+            let pids: Vec<String> = procs
+                .iter()
+                .map(|p| format!("{} ({})", p.pid, p.name))
+                .collect();
+            return Err(MacAppError::Apps(format!(
+                "{} process(es) still running in {}'s prefix: {} — quit the game \
+                 or stop them first",
+                procs.len(),
+                app.gogid,
+                pids.join(", ")
+            )));
+        }
+    }
+    let procs = if app.linux {
+        vec![]
+    } else {
+        doctor::prefix_procs(&app.prefix)
+    };
     if !procs.is_empty() {
         return Err(MacAppError::Apps(format!(
             "{} Wine process(es) still running in {}'s prefix: stop them with \
@@ -185,6 +259,10 @@ pub fn remove(app: &App, keep_override: bool) -> Result<Removed, MacAppError> {
     };
     std::fs::remove_dir_all(&app.root)?;
     out.paths.push(app.root.clone());
+    if let Some(entry) = app.desktop.as_ref().filter(|p| p.is_file()) {
+        std::fs::remove_file(entry)?;
+        out.paths.push(entry.clone());
+    }
     if let Some(logs) = &app.logs {
         std::fs::remove_dir_all(logs)?;
         out.paths.push(logs.clone());

@@ -41,6 +41,8 @@ case "$1" in
     echo "WINE REGISTRY Version 2" > "$WINEPREFIX/system.reg"
     ln -sfn ../drive_c "$WINEPREFIX/dosdevices/c:"
     ln -sfn / "$WINEPREFIX/dosdevices/z:"
+    ln -sfn "$HOME" "$WINEPREFIX/dosdevices/x:"
+    ln -sfn /dev/ttyS0 "$WINEPREFIX/dosdevices/com1"
     ln -sfn "$HOME/Documents" "$WINEPREFIX/drive_c/users/steamuser/Documents"
     exit 0 ;;
   winetricks)
@@ -247,13 +249,20 @@ fn assert_runs_are_clean(log: &str, umu_id: &str) {
     }
 }
 
-/// No absolute links under `drive_c/users/`, no `z:` (design 16 decision 4).
+/// No absolute links under `drive_c/users/`; `dosdevices/` is `c:` and
+/// `z:` → `/` only (design 16 decision 4, design 18 §7.2).
 fn assert_isolated(prefix: &Path) {
     assert!(prefix.join("drive_c").is_dir());
-    assert!(
-        prefix.join("dosdevices/z:").symlink_metadata().is_err(),
-        "z: still in {}",
-        prefix.display()
+    let mut drives: Vec<String> = std::fs::read_dir(prefix.join("dosdevices"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    drives.sort();
+    assert_eq!(drives, ["c:", "z:"], "in {}", prefix.display());
+    assert_eq!(
+        std::fs::read_link(prefix.join("dosdevices/z:")).unwrap(),
+        Path::new("/")
     );
     fn walk(d: &Path) {
         for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
@@ -560,6 +569,174 @@ fn installer_lane_runs_the_setup_exe_under_umu() {
         format!("'games/{ID}/prefix/drive_c/GOG/{}/game.exe'", plan.slug)
     );
     assert_isolated(&w.game().join("prefix"));
+}
+
+// — after the build: compat, next-renderer, --retarget (#176) —
+
+#[test]
+fn compat_next_renderer_and_retarget_work_on_the_linux_layers() {
+    use gogo::linuxapp::manage;
+    let w = World::new("manage", &["d3d9.dll", "d3dx9_43.dll"]);
+    let l4 = gogo::macapp::compat::user_path(ID);
+
+    // Not built: L3 and L4 only.
+    let r = manage::compat(ID).unwrap();
+    assert!(!r.built && r.renderer.is_none());
+
+    build_with(&w.opts());
+    let r = manage::compat(ID).unwrap();
+    assert!(r.built);
+    let x = r.renderer.as_ref().unwrap();
+    assert_eq!(
+        (x.effective.as_str(), x.baked_layer),
+        ("dxvk", gogo::macapp::compat::Layer::Auto)
+    );
+    assert_eq!(x.applied.as_deref(), Some("dxvk"));
+    assert_eq!(
+        r.runtime.as_deref(),
+        Some(format!("path:{}", w.build.display()).as_str())
+    );
+    assert!(
+        r.fixes.as_deref().unwrap().contains("umu-777001"),
+        "{:?}",
+        r.fixes
+    );
+    assert!(
+        r.effective.verbs.iter().any(|v| v.value == "d3dx9_43"),
+        "{:?}",
+        r.effective.verbs
+    );
+    assert_eq!(r.variants.len(), 1);
+    assert!(r.variants[0].selected && r.variants[0].default);
+
+    // next-renderer: the one after dxvk in a D3D9 game's order, written
+    // to [platforms.linux] unless --dry-run.
+    let next = manage::next_renderer(ID, true).unwrap().unwrap();
+    assert!(!l4.exists(), "--dry-run wrote the override file");
+    assert_eq!(
+        manage::next_renderer(ID, false).unwrap().as_deref(),
+        Some(next.as_str())
+    );
+    let raw = std::fs::read_to_string(&l4).unwrap();
+    assert!(
+        raw.contains("[platforms.linux]") && raw.contains(&format!("renderer = \"{next}\"")),
+        "{raw}"
+    );
+    let out = setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
+    assert_eq!(out.state.renderer, next);
+
+    assert_eq!(next, "wined3d", "a D3D9 game's order: dxvk, then wined3d");
+    // `auto` drops it: back to the baked dxvk.
+    let out = manage::retarget(
+        ID,
+        &[("renderer", None)],
+        &SetupOptions::default(),
+        &mut quiet(),
+    )
+    .unwrap();
+    assert_eq!(out.setup.unwrap().unwrap().state.renderer, "dxvk");
+    assert_eq!(conf_value(&w.conf(), "ENV"), "()");
+
+    // --retarget --renderer wined3d: L4, then setup; wined3d chosen by L4
+    // sets the switch.
+    let out = manage::retarget(
+        ID,
+        &[("renderer", Some("wined3d"))],
+        &SetupOptions::default(),
+        &mut quiet(),
+    )
+    .unwrap();
+    assert_eq!(out.changes.len(), 1);
+    let s = out.setup.unwrap().unwrap();
+    assert_eq!(s.state.renderer, "wined3d");
+    assert_eq!(conf_value(&w.conf(), "ENV"), "('PROTON_USE_WINED3D=1')");
+    // Again: nothing to change, no setup.
+    let out = manage::retarget(
+        ID,
+        &[("renderer", Some("wined3d"))],
+        &SetupOptions::default(),
+        &mut quiet(),
+    )
+    .unwrap();
+    assert!(out.changes.is_empty() && out.setup.is_none());
+
+    // A Mac renderer or a bad runtime ref is refused before L4 is written.
+    let before = std::fs::read_to_string(&l4).unwrap();
+    assert!(
+        manage::retarget(
+            ID,
+            &[("renderer", Some("dxmt"))],
+            &SetupOptions::default(),
+            &mut quiet()
+        )
+        .is_err()
+    );
+    assert!(
+        manage::retarget(
+            ID,
+            &[("runtime", Some("winecx"))],
+            &SetupOptions::default(),
+            &mut quiet()
+        )
+        .is_err()
+    );
+    assert_eq!(std::fs::read_to_string(&l4).unwrap(), before);
+    assert_runs_are_clean(&w.log(), "umu-777001");
+}
+
+// — gogo apps on Linux —
+
+#[test]
+fn apps_lists_and_removes_linux_games_with_their_menu_entry() {
+    use gogo::macapp::apps;
+    let w = World::new("apps", &["d3d9.dll"]);
+    build_with(&w.opts());
+    let logs = w.root.join("logs");
+    let desktop = gogo::linuxapp::game::desktop_path(ID);
+    assert!(
+        desktop.starts_with(&w.home),
+        "GOGO_HOME keeps the menu entry in scratch"
+    );
+
+    // Before #177's launcher: no menu entry yet, and not orphaned.
+    let a = &apps::list(&logs).unwrap()[0];
+    assert!(a.linux && !a.launcher && !a.desktop_present && !a.orphaned());
+    assert_eq!(
+        a.runtime.as_deref(),
+        Some(format!("path:{}", w.build.display()).as_str())
+    );
+    assert_eq!(a.title.as_deref(), Some("Test Game"));
+
+    // With a launcher and its menu entry: present; entry deleted: orphaned.
+    std::fs::write(w.game().join("launch.sh"), "#!/bin/bash\n").unwrap();
+    std::fs::create_dir_all(desktop.parent().unwrap()).unwrap();
+    std::fs::write(&desktop, "[Desktop Entry]\n").unwrap();
+    assert!(!apps::get(ID, &logs).unwrap().unwrap().orphaned());
+    std::fs::remove_file(&desktop).unwrap();
+    assert!(apps::get(ID, &logs).unwrap().unwrap().orphaned());
+
+    // A process in the prefix (found by its WINEPREFIX) blocks removal.
+    std::fs::write(&desktop, "[Desktop Entry]\n").unwrap();
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .env("WINEPREFIX", w.game().join("prefix"))
+        .spawn()
+        .unwrap();
+    let a = apps::get(ID, &logs).unwrap().unwrap();
+    let err = apps::remove(&a, false).unwrap_err();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(err.to_string().contains("still running"), "{err}");
+
+    // Removed: the game's dir and its menu entry; nothing else of the user's.
+    let out = apps::remove(&a, false).unwrap();
+    assert!(
+        out.paths.contains(&w.game()) && out.paths.contains(&desktop),
+        "{:?}",
+        out.paths
+    );
+    assert!(!w.game().exists() && !desktop.exists());
+    assert!(apps::list(&logs).unwrap().is_empty());
 }
 
 // — refusals —

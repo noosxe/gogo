@@ -300,9 +300,33 @@ pub fn is_prefix(prefix: &Path) -> bool {
     prefix.join("system.reg").is_file() && prefix.join("drive_c/windows").is_dir()
 }
 
+/// The `dosdevices/` entries a Linux prefix keeps (design 18 §7.2): `c:`,
+/// and `z:` → `/`, which GE-Proton's `proton` script recreates on every
+/// run, so removing it would only hold between runs. Every other drive
+/// (Wine's `x:` → `$HOME`, `com1`…) goes, as on the Mac. #178's `links`
+/// check skips these.
+pub const KEPT_DRIVES: [&str; 2] = ["c:", "z:"];
+
+/// Decision 4 on Linux: home folders are real dirs (no absolute links under
+/// `drive_c/users/`), and `dosdevices/` keeps only [`KEPT_DRIVES`].
+/// Idempotent.
+pub fn localize(prefix: &Path) -> Result<(), MacAppError> {
+    crate::macapp::setup::localize_home(prefix)?;
+    let Ok(entries) = std::fs::read_dir(prefix.join("dosdevices")) else {
+        return Ok(());
+    };
+    for e in entries.flatten() {
+        let name = e.file_name();
+        if !KEPT_DRIVES.iter().any(|k| name == *k) && e.file_type()?.is_symlink() {
+            std::fs::remove_file(e.path())?;
+        }
+    }
+    Ok(())
+}
+
 /// `z:` → `/` for a step that hands Wine unix paths (winetricks' cached
-/// downloads, an installer's log); `true` when it had to be put back.
-/// [`crate::macapp::setup::localize`] drops it again.
+/// downloads, an installer's log); `true` when it had to be put back (a
+/// prefix set up before `z:` was kept, #176).
 pub fn restore_z(prefix: &Path) -> Result<bool, MacAppError> {
     let z = prefix.join("dosdevices/z:");
     if z.symlink_metadata().is_ok() {
@@ -316,7 +340,7 @@ pub fn restore_z(prefix: &Path) -> Result<bool, MacAppError> {
 
 /// The layer a baked renderer came from, as far as setup can tell: L1 when
 /// it's the scan's pick, L3 when the compat DB names it, else a build flag.
-fn baked_renderer_layer(baked: &str, l1: &renderer::Pick, db: &CompatEntry) -> Layer {
+pub(crate) fn baked_renderer_layer(baked: &str, l1: &renderer::Pick, db: &CompatEntry) -> Layer {
     if baked == l1.renderer.default_ref() {
         Layer::Auto
     } else if db.renderer.as_deref() == Some(baked) {
@@ -588,7 +612,7 @@ pub fn setup(
         }
     }
     // Last: anything above may have linked out again (decision 4).
-    crate::macapp::setup::localize(&dirs.prefix)?;
+    localize(&dirs.prefix)?;
 
     let rel = |p: &Path| state_rel(&data_root, p);
     let stamp = crate::macapp::launch::stamp(&raw, l4_raw.as_deref());
