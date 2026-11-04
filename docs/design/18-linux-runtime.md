@@ -759,6 +759,40 @@ tested = [
   supports it (btrfs, XFS, bcachefs), else a plain copy. The plan shows which, and the
   extra disk a copy costs. `gogo depot`'s help loses "macOS only for now".
 
+- **As built (#175)**:
+  - Why `depot` said "macOS only": one gate (design 14 D7) in `depot::run`, nothing
+    else. gog-warp's downloader, the free-space preflight and the cache path all work on
+    Linux, so the gate and `DepotError::UnsupportedPlatform` are gone and `gogo depot`
+    downloads on Linux into `$XDG_CACHE_HOME/gogo/depot/<id>`.
+  - The code is `gog/materialize.rs` (beside `depot.rs`): `materialize_tree(src, dst,
+    Reflink::Try|Never)` and `plan_tree(src, game_dir, tree_bytes)`. The macOS lane keeps
+    `bundle::clone_tree` (`cp -c`, clonefile) unchanged; the copy walk is portable unix
+    code and is tested on both OSes, only the ioctl is Linux-only.
+  - `FICLONE` through `rustix::fs::ioctl_ficlone` (safe API; rustix was already in
+    `Cargo.lock` through zbus, now a Linux-only direct dep with `fs`).
+  - **Per file, with a per-tree probe for the plan.** Each regular file tries `FICLONE`
+    and falls back to a copy on its own: the destination is one fresh dir, but the cache
+    tree may cross a mount, and a failed ioctl costs microseconds. The plan can't walk a
+    tree that isn't downloaded yet, so it probes once: a 4 KiB file in the nearest
+    existing ancestor of the cache root and of `games/<gogid>/game`, cloned and removed
+    (any error reads as "copy", so a plan may overstate the cost, never understate it).
+    A dry run therefore writes and removes two probe files, and creates no directory.
+  - The copy keeps what `cp -Rp` keeps on the Mac path: modes (dirs set after their
+    children, so read-only dirs work), mtimes, symlinks as symlinks (relative and
+    dangling ones too); the root is followed. Other file types are an error. A copy is
+    `io::copy` (copy_file_range); where that still shares extents (NFS server-side copy)
+    the report counts it as a copy.
+  - The plan: `DepotEvent::Plan` gains `gameFiles: {method, gameDir, extraBytes}` on
+    Linux only (`None`, not serialized, on macOS). `gogo depot` prints `game files:
+    reflink into <dir> (no extra disk)` or `game files: copy into <dir> (+<size> disk: no
+    reflink between the cache and the data dir)`; `extraBytes` is the manifest's disk
+    size for a copy. `linux-app` (#176) calls `materialize_tree` and can report its
+    `MaterializeReport` (reflinked/copied files and bytes).
+  - Tests: the forced copy path (`Reflink::Never`), and FICLONE end to end in
+    `CARGO_TARGET_TMPDIR`, which skips with a `SKIP …` line where that filesystem has no
+    reflink (`/tmp` is often tmpfs; CI runners are ext4). `.config/nextest.toml` shows
+    that test's output on success so the skip is visible.
+
 - **As built (#167)** — choices the design left open:
   - `os` is stated on every catalog entry (`os = ["macos"]` for every Mac one), with no
     default. The catalog is static Rust data, so there is no old data a default would
@@ -948,7 +982,8 @@ only on Linux (`#[cfg(target_os = "linux")]`), with the same shape:
   prefix in its environment.
 - **doctor:** a set-up fake game is all green, then each check fails alone (no ICD,
   32-bit game without a 32-bit ICD, missing zipapp, Python too old, changed `proton`).
-- **Depot materialization:** reflink when the temp dir supports it, copy otherwise.
+- **Depot materialization:** reflink when the temp dir supports it, copy otherwise
+  (built in #175: `tests/materialize.rs`).
 
 ### 11.2 What CI and agents can't check
 

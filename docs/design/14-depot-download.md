@@ -7,7 +7,7 @@ Status: contract · Depends on: docs/17 (research), design 01 (architecture), de
 
 One command: `gogo depot <GAME>` — resolve an owned game to its latest **Windows**
 content-system build and materialize the game tree into the user cache directory via
-gog-warp's `Downloader`. macOS full lane; Linux stubbed (D7). `mac-app` consumption of
+gog-warp's `Downloader`. macOS and Linux full lane (Linux since #175, D7). `mac-app` consumption of
 the cache is a **follow-up** (D8), not this contract.
 
 ## 1. Command surface
@@ -30,8 +30,8 @@ gogo depot <GAME> [--language CODE] [--with-dlcs] [--password PW]
   nothing. `--json` machine summary; `--json-progress` NDJSON events (D4).
 
 Exit codes follow the existing map (03 §5 / 10 §4): success 0, usage 2, auth 3,
-network 4, depot failure 7 (conversion/download), Linux stub 2 with
-`gogo: depot downloads are not implemented on Linux yet` (stderr, no partial trees).
+network 4, depot failure 7 (conversion/download). (Until #175 Linux exited 2 with
+`gogo: depot downloads are not implemented on Linux yet`; that stub is gone, D7.)
 
 ## 2. D2 — Cache layout (macOS)
 
@@ -111,9 +111,16 @@ No `--all`, no records/state updates, no patch/upgrade lane (`upgrade_from`, xde
 no macOS/Linux platform builds, no resume across invocations (the downloader's own
 prepare/verify makes re-runs converge). All documented as future work in 17 §4.
 
-## 7. D7 — Linux stub
+## 7. D7 — Linux stub (superseded by #175)
 
-`gogo depot` on non-macOS: resolve+plan still work (they are pure API calls) **only
+> **Amended (#175, design 18 §6):** the stub is gone. The only Mac-only piece was this
+> gate: gog-warp downloads on Linux (its `fallocate` arm predates the macOS one), fs4's
+> free-space probe and `dirs::cache_dir()` (`$XDG_CACHE_HOME`) work there, and nothing
+> else in the lane is OS-specific. `DepotError::UnsupportedPlatform` was removed. On
+> Linux the `Plan` event also carries `gameFiles` (design 18 §6 "As built (#175)"); on
+> macOS it doesn't, so the Mac's NDJSON and human output are unchanged.
+
+Original text: `gogo depot` on non-macOS: resolve+plan still work (they are pure API calls) **only
 when** a session exists, but the materialization step returns
 `DepotError::UnsupportedPlatform` before creating any directory. Rationale: keep the
 command honest and testable while the mac-app pipeline that motivates it is
