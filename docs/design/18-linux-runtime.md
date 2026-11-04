@@ -965,16 +965,24 @@ the data root moved.
   is chosen.
 - **Setup's order**: read `state.toml`, the TOML and L4 → the runtime (L4, else baked;
   a missing GE-Proton installed) → umu → the umu id → the prefix (`umu-run ""`: success
-  is `drive_c` being there) → home links made real, the game linked → L1 from a fresh scan
+  is `system.reg` and `drive_c/windows`, not `drive_c`, which umu's own `setup_pfx` makes
+  before Proton runs) → home links made real, the game linked → L1 from a fresh scan
   → the fixes (L1 verbs, the renderer at its layer, L3 as owned, L4) → the protonfix
   compared (a change is a note) → the renderer (`apply_linux`) → registry values
   (`umu-run reg add`, only for a new prefix or changed values) → pending verbs only
   (`fixes::pending_verbs`; `z:` back for the run; anything still missing warns) →
-  `localize` → `launch.conf`, `state.toml`.
+  `localize` → `launch.conf`, `state.toml`, each written only when its bytes changed (a
+  setup that changes nothing runs nothing through umu and rewrites nothing).
 - **Every umu run** gets `WINEPREFIX`, `PROTONPATH`, `GAMEID`, `STORE=gog`,
   `PROTONFIXES_DISABLE=1` and `games/<gogid>/` as its working dir; its output goes to
   `games/<gogid>/install/setup.log`. A data root, installer, prefix, Proton build or
   umu-run under `/tmp` is refused ("private /tmp") before anything runs.
+- **`z:` comes back on every Proton run (real smoke, 2026-11-04).** GE-Proton11-12's
+  `proton` script recreates `dosdevices/z: -> /` whenever it's missing (its prefix setup,
+  every run), and Wine adds `x: -> $HOME` and `com1`–`com4`. So on Linux decision 4 holds
+  at rest only: setup's last `localize` leaves `dosdevices/` with just `c:`, and the next
+  Proton run (the game's own included) maps `/` and `$HOME` again while it runs. Undoing
+  that after the game exits, or living with it, is #177's call.
 - **wined3d**: chosen by L3, L4, a flag or the walk, it adds `PROTON_USE_WINED3D=1` (the
   env and overrides the renderer sets fill gaps only); as L1's own pick it sets nothing.
   The plan line and setup's notes say which.
