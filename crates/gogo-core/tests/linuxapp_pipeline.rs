@@ -32,11 +32,16 @@ printf 'ENV:WINEPREFIX=%s PROTONPATH=%s GAMEID=%s STORE=%s PROTONFIXES_DISABLE=%
 [ -n "$WINEPREFIX" ] || { echo "no WINEPREFIX" >&2; exit 3; }
 case "$1" in
   "")
-    mkdir -p "$WINEPREFIX/drive_c/users/steamuser/AppData/Roaming" "$WINEPREFIX/dosdevices"
+    # umu's setup_pfx runs before Proton: it leaves drive_c/users either way.
+    mkdir -p "$WINEPREFIX/drive_c/users/steamuser"
+    ln -sfn . "$WINEPREFIX/pfx"
+    [ -n "$FAKE_UMU_BROKEN" ] && { echo "bwrap: Can't find source path /sys" >&2; exit 1; }
+    mkdir -p "$WINEPREFIX/drive_c/users/steamuser/AppData/Roaming" "$WINEPREFIX/dosdevices" \
+      "$WINEPREFIX/drive_c/windows/system32"
+    echo "WINE REGISTRY Version 2" > "$WINEPREFIX/system.reg"
     ln -sfn ../drive_c "$WINEPREFIX/dosdevices/c:"
     ln -sfn / "$WINEPREFIX/dosdevices/z:"
     ln -sfn "$HOME/Documents" "$WINEPREFIX/drive_c/users/steamuser/Documents"
-    ln -sfn . "$WINEPREFIX/pfx"
     exit 0 ;;
   winetricks)
     shift
@@ -545,6 +550,23 @@ fn installer_lane_runs_the_setup_exe_under_umu() {
 }
 
 // — refusals —
+
+#[test]
+fn a_prefix_proton_never_made_fails_the_build() {
+    // What the real smoke hit: the container didn't start, umu's setup_pfx
+    // had already made drive_c/users. Not a prefix: the build stops.
+    let w = World::new("broken", &["d3d9.dll"]);
+    // SAFETY: under ENV_LOCK (`w` holds it).
+    unsafe { std::env::set_var("FAKE_UMU_BROKEN", "1") };
+    let plan = build::plan(&w.opts(), None, &mut quiet()).unwrap();
+    let err = build::execute(&plan, None, &mut quiet()).unwrap_err();
+    unsafe { std::env::remove_var("FAKE_UMU_BROKEN") };
+    assert!(
+        err.to_string().contains("didn't create the prefix"),
+        "{err}"
+    );
+    assert!(!w.game().join("launch.conf").exists());
+}
 
 #[test]
 fn headless_without_umu_set_fails_naming_the_key() {

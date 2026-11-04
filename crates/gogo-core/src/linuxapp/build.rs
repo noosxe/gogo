@@ -748,7 +748,7 @@ pub fn execute(
         };
         umu.check()?;
         emit(&ProgressEvent::PrefixStaged);
-        if dirs.prefix.join("drive_c").is_dir() {
+        if setup::is_prefix(&dirs.prefix) {
             emit(&ProgressEvent::Warn {
                 message: format!(
                     "reusing the existing prefix {} (saves kept)",

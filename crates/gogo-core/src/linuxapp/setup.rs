@@ -253,11 +253,11 @@ impl Umu<'_> {
 
     /// Create the prefix (`umu-run ""`: Proton sets the prefix up and runs
     /// nothing). Proton exits non-zero for the missing exe on some umu
-    /// versions, so success is `drive_c` being there afterwards.
+    /// versions, so success is [`is_prefix`] afterwards.
     pub fn create_prefix(&self) -> Result<(), MacAppError> {
         std::fs::create_dir_all(self.prefix)?;
         let status = self.run("create the prefix", self.command([""]))?;
-        if self.prefix.join("drive_c").is_dir() {
+        if is_prefix(self.prefix) {
             return Ok(());
         }
         Err(MacAppError::Umu(format!(
@@ -282,6 +282,13 @@ impl Umu<'_> {
             self.log.display()
         )))
     }
+}
+
+/// A Wine prefix Proton made: `system.reg` and `drive_c/windows`. Not just
+/// `drive_c`: umu's own `setup_pfx` makes `drive_c/users/<user>` before
+/// Proton runs, so a run that failed in the container leaves one behind.
+pub fn is_prefix(prefix: &Path) -> bool {
+    prefix.join("system.reg").is_file() && prefix.join("drive_c/windows").is_dir()
 }
 
 /// `z:` → `/` for a step that hands Wine unix paths (winetricks' cached
@@ -416,7 +423,7 @@ pub fn setup(
         log: dirs.root.join(LOG_DIR).join(SETUP_LOG),
     };
     umu.check()?;
-    let prefix_created = !dirs.prefix.join("drive_c").is_dir();
+    let prefix_created = !is_prefix(&dirs.prefix);
     if prefix_created {
         umu.create_prefix()?;
     }
