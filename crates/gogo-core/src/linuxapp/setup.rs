@@ -284,6 +284,15 @@ impl Umu<'_> {
     }
 }
 
+/// [`write_atomic`] unless the file already holds `text`: a setup that
+/// changed nothing leaves `launch.conf` and `state.toml` as they were.
+fn write_if_changed(path: &Path, text: &str) -> Result<(), MacAppError> {
+    if std::fs::read(path).is_ok_and(|b| b == text.as_bytes()) {
+        return Ok(());
+    }
+    write_atomic(path, text)
+}
+
 /// A Wine prefix Proton made: `system.reg` and `drive_c/windows`. Not just
 /// `drive_c`: umu's own `setup_pfx` makes `drive_c/users/<user>` before
 /// Proton runs, so a run that failed in the container leaves one behind.
@@ -617,7 +626,7 @@ pub fn setup(
         gogo_path: eff.gogo.path.display().to_string(),
         data_root: data_root.display().to_string(),
     };
-    write_atomic(&dirs.launch_conf, &conf.render())?;
+    write_if_changed(&dirs.launch_conf, &conf.render())?;
     let state = LinuxState {
         schema: STATE_SCHEMA,
         gogid: gogid.to_string(),
@@ -631,7 +640,7 @@ pub fn setup(
         stamp,
         gogo_version: env!("CARGO_PKG_VERSION").to_string(),
     };
-    write_atomic(&dirs.state_toml, &state.to_toml())?;
+    write_if_changed(&dirs.state_toml, &state.to_toml())?;
     Ok(SetupOutcome {
         state,
         conf,

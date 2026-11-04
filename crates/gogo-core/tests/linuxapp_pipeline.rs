@@ -382,7 +382,20 @@ fn depot_lane_builds_and_sets_up() {
 
     // Setup again: nothing pending, so winetricks doesn't run (umu's would
     // exit 1 having installed nothing).
+    let mtime = |f: &str| {
+        std::fs::metadata(w.game().join(f))
+            .unwrap()
+            .modified()
+            .unwrap()
+    };
+    let before = (mtime("launch.conf"), mtime("state.toml"));
+    std::thread::sleep(std::time::Duration::from_millis(20));
     let again = setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
+    assert_eq!(
+        (mtime("launch.conf"), mtime("state.toml")),
+        before,
+        "an unchanged setup rewrote its files"
+    );
     assert!(!again.prefix_created);
     assert!(again.verbs_installed.is_empty());
     assert_eq!(w.log().matches("ARGV:winetricks").count(), 1);
