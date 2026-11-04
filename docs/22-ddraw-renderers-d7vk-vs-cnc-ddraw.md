@@ -272,6 +272,11 @@ Findings:
 Cost: one more 16-byte comparison pass per ddraw-related file, which `pe.rs` already
 reads in full. No new dependency.
 
+**As built (#173):** the rule is in `pe.rs` as above, with Wine `wine-11.0`'s 44 GUIDs.
+In step 2, the block's D3D hits stay D3D≤7 at the lowest confidence (`dxguid_block`),
+following §6.1's "only the `dxguid` block" row, rather than dropping to 2D. Details,
+output fields and class transitions: design 18 §3 "As built (#173)".
+
 ## 7. Open questions for the Linux design doc
 
 1. **A real D3D≤7 corpus.** Download (not run) Carmageddon TDR 2000, Anno 1503, Pharaoh,

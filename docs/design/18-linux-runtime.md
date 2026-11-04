@@ -375,6 +375,40 @@ Mac, with a Linux table:
   recorded for `doctor`), check files that load `ddraw.dll` by name, add the Unreal
   `D3DDrv.dll` and LithTech `.ren` hints. The Mac table only changes where docs/22 §6.1
   says so (it doesn't: the Mac keeps wined3d for D3D≤7).
+
+  **As built (#173):**
+
+  - **GUIDs.** The 44 `DEFINE_GUID`s of Wine `wine-11.0`'s `include/d3d.h` (27) and
+    `include/ddraw.h` (17), unchanged on `master` as of 2026-11-04: 4 interface, 23
+    device/work (the 7 devices incl. `IID_IDirect3DNullDevice`), 17 DirectDraw. Checked
+    in files that import `ddraw.dll` and in files that name it (the runtime-string scan
+    found `ddraw.dll`), in section data only.
+  - **"Its D3D hits don't count" = they aren't evidence, not "2D".** A file with ≥ 40
+    (`DXGUID_BLOCK_MIN`) gets the lowest level, `dxguid_block`, and still adds
+    `Direct3d7`: docs/22 §6.1 and the table above both keep "only the `dxguid` block" in
+    the D3D≤7 class (D7VK on Linux, wined3d on the Mac), and O9 keeps it there until
+    #174's corpus says otherwise. Below 40: any device/work GUID → `strong`, interface
+    GUIDs only → `medium`. A `d3dim`/`d3drm` import and the renderer DLLs are `strong`.
+  - **Runtime-loaded ddraw.** The D3D≤7 evidence of a file that only names `ddraw.dll`
+    lands in `runtime_graphics`, beside its `ddraw`: it decides only when no static
+    import says anything (or for Unity/Unreal), like every runtime-loaded name.
+  - **Engine hints.** `d3ddrv.dll` and `d3d.ren` next to the exe (`.ren` files are
+    scanned as PE now) are `strong` unless the file imports `d3d8` or newer (UE2's
+    `D3DDrv.dll` is D3D8). Listed in `renderer_dlls`. The engine stays unset: UE1 has
+    no `Engine/` dir and picks nothing at runtime the scan could read.
+  - **Output** (additive: old JSON still reads, every new field defaults). `PeScan`:
+    `d3d7_confidence` (`strong` / `medium` / `dxguid_block` / `null`), `dxguid_block`,
+    `renderer_dlls`. Per file: `ddraw_guids` (0–44), `dxguid_block`, `d3d7`;
+    `d3d7_iids` stays (interface GUIDs present, block or not). The L1 reason says
+    "interface GUIDs only" / "only from the dxguid GUID block: may be 2D"; `__pe-scan`
+    prints a `d3d≤7` line. No Mac `doctor` check reads the scan today: the Linux
+    `renderer` row (§8) is the first consumer of `dxguid_block`.
+  - **Class transitions.** Only 2D DirectDraw → D3D≤7, never back: a device/work GUID
+    without `IID_IDirect3D*`, GUIDs in a file that loads ddraw by name, a renderer DLL,
+    or a `.ren` file's imports. On the Mac that is cnc-ddraw → wined3d. None of the
+    `compat/` games changes (#173's PR lists them). The 64-bit rule is unchanged.
+  - The `pe.rs` unit tests run on Linux too (they were macOS-gated with the rest of
+    `macapp`).
 - **"Try next renderer" order on Linux** (design 16 §8.2's walk, a Linux table):
 
   | L1 class | order |
