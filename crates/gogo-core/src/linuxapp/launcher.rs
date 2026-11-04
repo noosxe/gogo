@@ -511,14 +511,22 @@ cd "$WORKDIR_ABS" 2>/dev/null || {
 }
 
 # Teardown (design 18 §7.2): TERM to umu-run's process group, then, after
-# 5 s, KILL for every process of this user whose environment has this
-# WINEPREFIX (umu's container and Wine's services leave the group; their
-# /proc/<pid>/environ still says whose they are).
+# 5 s, KILL for every process of this user whose environment names this
+# prefix (umu's container and Wine's services leave the group; their
+# /proc/<pid>/environ still says whose they are). Inside the container
+# Proton runs Wine with WINEPREFIX=<prefix>/pfx/ (umu's pfx -> . link) and
+# STEAM_COMPAT_DATA_PATH=<prefix>, so all of these count (real smoke,
+# design 18 §7.5).
 PREFIX_REAL="$(readlink -f "$PREFIX_ABS" 2>/dev/null || printf '%s' "$PREFIX_ABS")"
+PREFIX_MARKS=()
+for p in "$PREFIX_ABS" "$PREFIX_REAL"; do
+    for v in "WINEPREFIX=$p" "WINEPREFIX=$p/pfx" "STEAM_COMPAT_DATA_PATH=$p"; do
+        PREFIX_MARKS+=(-e "$v" -e "$v/")
+    done
+done
 prefix_pids() {
-    grep -lzxF -e "WINEPREFIX=$PREFIX_ABS" -e "WINEPREFIX=$PREFIX_ABS/" \
-        -e "WINEPREFIX=$PREFIX_REAL" -e "WINEPREFIX=$PREFIX_REAL/" \
-        /proc/[0-9]*/environ 2>/dev/null | sed -e 's|^/proc/||' -e 's|/environ$||' | grep -vx -e "$$"
+    grep -lzxF "${PREFIX_MARKS[@]}" /proc/[0-9]*/environ 2>/dev/null \
+        | sed -e 's|^/proc/||' -e 's|/environ$||' | grep -vx -e "$$"
 }
 proc_names() {
     local p n out=""

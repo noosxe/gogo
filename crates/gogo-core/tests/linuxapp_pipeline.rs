@@ -804,9 +804,10 @@ fn tmp_paths_never_reach_umu() {
 // tools it needs, so no dialog tool, clipboard or gogo of the host's is
 // ever reached.
 
-/// The fake game (see above). `FAKE_GAME_HANG`: a child that ignores TERM
-/// in a session of its own (as Wine's services and umu's container leave
-/// the process group), then hang.
+/// The fake game (see above). `FAKE_GAME_HANG`: children that ignore TERM
+/// in sessions of their own (as Wine's services and umu's container leave
+/// the process group), marked as in the container (`WINEPREFIX=<prefix>`,
+/// `<prefix>/pfx/`, or only `STEAM_COMPAT_DATA_PATH`), then hang.
 const FAKE_GAME_UMU: &str = r#"#!/bin/sh
 {
   printf 'ARGV:%s\n' "$*"
@@ -818,6 +819,8 @@ echo "fake-game stdout line"
 echo "err: fake-game stderr line" >&2
 if [ -n "${FAKE_GAME_HANG:-}" ]; then
   setsid sh -c 'trap "" TERM; exec sleep 300' </dev/null >/dev/null 2>&1 &
+  WINEPREFIX="$WINEPREFIX/pfx/" setsid sh -c 'trap "" TERM; exec sleep 300' </dev/null >/dev/null 2>&1 &
+  STEAM_COMPAT_DATA_PATH="$WINEPREFIX" setsid env -u WINEPREFIX sh -c 'trap "" TERM; exec sleep 300' </dev/null >/dev/null 2>&1 &
   exec sleep 300
 fi
 sleep "${FAKE_GAME_SLEEP:-0}"
@@ -1568,9 +1571,9 @@ fn teardown_on_term_kills_every_process_with_the_prefix() {
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
-    // The game and its TERM-proof child of another session.
+    // The game and its TERM-proof children of other sessions.
     assert!(
-        wait_until(10, || prefix_procs(&w).len() >= 2),
+        wait_until(10, || prefix_procs(&w).len() >= 4),
         "{:?}",
         prefix_procs(&w)
     );
@@ -1608,7 +1611,7 @@ fn the_watchdog_tears_down_after_the_launcher_is_killed() {
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
-    assert!(wait_until(10, || prefix_procs(&w).len() >= 2));
+    assert!(wait_until(10, || prefix_procs(&w).len() >= 4));
     assert!(wait_until(5, || w.launch_log().contains("exec umu-run")));
     let pid = child.id();
     assert!(w.game().join(format!(".launchers/{pid}")).is_file());

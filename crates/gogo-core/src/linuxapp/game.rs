@@ -41,15 +41,25 @@ pub fn desktop_path(gogid: &str) -> PathBuf {
 }
 
 /// Processes of this user running in `prefix`: those whose environment
-/// has `WINEPREFIX=<prefix>` (design 18 §7.2: Linux lets a user read their
-/// own processes' `/proc/<pid>/environ`, which sees into umu's container
-/// where a cwd wouldn't). Never this process.
+/// names it (design 18 §7.2: Linux lets a user read their own processes'
+/// `/proc/<pid>/environ`, which sees into umu's container where a cwd
+/// wouldn't). Inside the container Proton runs Wine with
+/// `WINEPREFIX=<prefix>/pfx/` (umu's `pfx -> .` link) and
+/// `STEAM_COMPAT_DATA_PATH=<prefix>` (#177's real smoke), so those count
+/// too, with or without a trailing `/`. Never this process.
 pub fn prefix_procs(prefix: &Path) -> Vec<crate::macapp::doctor::PrefixProc> {
     let canon = prefix.canonicalize().ok();
     let wanted: Vec<Vec<u8>> = std::iter::once(prefix.to_path_buf())
         .chain(canon)
-        .map(|p| {
-            let mut v = b"WINEPREFIX=".to_vec();
+        .flat_map(|p| {
+            [
+                ("WINEPREFIX=", p.clone()),
+                ("WINEPREFIX=", p.join("pfx")),
+                ("STEAM_COMPAT_DATA_PATH=", p),
+            ]
+        })
+        .map(|(k, p)| {
+            let mut v = k.as_bytes().to_vec();
             v.extend_from_slice(p.as_os_str().as_encoded_bytes());
             v
         })

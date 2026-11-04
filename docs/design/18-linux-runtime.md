@@ -1010,8 +1010,9 @@ the data root moved.
 `SIGKILL` to every process whose `/proc/<pid>/environ` has this `WINEPREFIX` (Linux lets a
 user read their own processes' environment, which beats design 16's cwd heuristic inside
 the container). The Mac's watchdog (#103) and `.launchers/<pid>` records carry over
-unchanged. Whether `umu-run` forwards `TERM` into the container cleanly is to be checked
-in the first host pass.
+unchanged. Inside the container Wine's processes carry `WINEPREFIX=<prefix>/pfx/`, not
+`<prefix>`, and `TERM` doesn't end them within the 5 s: the `SIGKILL` sweep does the work
+(real smoke, §7.5).
 
 **Prefix isolation (design 16 decision 4).** Proton's prefix has a `steamuser` home with
 real directories, not links into `~`, and umu links `users/<user>` and `steamuser` to each
@@ -1060,7 +1061,8 @@ setup run.
 - Each file is written only when its bytes changed, through a temp file renamed into
   place. A launcher that runs setup keeps reading the script it started with.
 - A changed template reaches a game at its next setup (R30), and setup's notes say
-  `launch.sh: launcher <old> -> <new>`.
+  `launch.sh: launcher <old> -> <new>` (`launch.sh: launcher <n> rewritten` when only
+  the bytes changed).
 - When setup, run by the launcher, wrote a launcher with another `LAUNCHER_VERSION`, the
   launcher `exec`s the new one for this launch.
 - `LAUNCHER_VERSION` is a constant in `launcher.rs`, starting at 1. It is printed in
@@ -1157,8 +1159,14 @@ setup run.
 - **Teardown.**
   - `TERM` goes to umu-run's process group.
   - Then, for up to 5 s, the launcher polls the prefix's processes: one `grep -lzxF`
-    over `/proc/[0-9]*/environ` for `WINEPREFIX=<prefix>` (also with a trailing `/` and
-    the `readlink -f` form, as `game::prefix_procs` matches).
+    over `/proc/[0-9]*/environ` for `WINEPREFIX=<prefix>`, `WINEPREFIX=<prefix>/pfx` and
+    `STEAM_COMPAT_DATA_PATH=<prefix>`, each also with a trailing `/` and in the
+    `readlink -f` form (`PREFIX_MARKS`; `game::prefix_procs` matches the same set).
+    umu's python, `srt-bwrap`, `pv-adverb` and Proton's python carry
+    `WINEPREFIX=<prefix>`; every Wine process in the container (`umu.exe`, `wineserver`,
+    `services.exe`, `explorer.exe`, the game, …) carries `WINEPREFIX=<prefix>/pfx/`, through
+    umu's `pfx -> .` link; all of them carry `STEAM_COMPAT_DATA_PATH=<prefix>`. The first
+    real smoke, matching `WINEPREFIX=<prefix>` alone, left 12 Wine processes behind.
   - Whatever is left gets `SIGKILL`, named in `launch.log` (`reaped (SIGKILL): <pid>
     <comm>;…`). Last, the group gets `SIGKILL`.
   - With another live launcher of this game (`.launchers/<pid>`), only this run's group
@@ -1185,11 +1193,32 @@ setup run.
     with `$HOME` written as `~`.
   - **Open log**: `xdg-open <run log>`, detached.
 
-**Checks the tests don't reach** (#179's host pass): whether `umu-run` passes `TERM` into
-pressure-vessel's container and Proton ends the game cleanly, or only the 5 s `KILL`
-does; whether Wine's processes inside the container show this `WINEPREFIX` in their
-`environ` (umu may rewrite it); zenity's `--switch` and kdialog's labels on real
-desktops; and whether the menu entry and icon show up in GNOME and KDE.
+**Real smoke** (before merge; GE-Proton11-12, umu 1.4.4 zipapp, steamrt4, on NixOS 26.11
+in a stock-NixOS `bwrap` root with `env -i`, a scratch `GOGO_HOME`, and Xvfb as the
+display). The game was built, then `launch.conf`'s `EXE`/`ARGS` were edited to run console
+programs (editing `launch.conf` doesn't change the stamp, so no setup ran):
+
+- `cmd /c exit 3` and `cmd /c echo SMOKE` give footers `# exit: 3` and `# exit: 0`, and
+  `launch.log` reads `umu-run exited <n>; waiting for the prefix's processes`, `prefix
+  idle`, `early exit: code <n> after 3s on wined3d (dialogs off)` with
+  `GOGO_LAUNCHER_NO_DIALOG=1`.
+- Proton's `umu.exe` starts the exe with `CREATE_NEW_CONSOLE`, so a console program
+  gets a windowed `conhost`. Its output goes to that window, not to the run log. With
+  no display, `conhost` and the program hang (no Xvfb, `cmd /c exit 3` never ended).
+  Games always have a display.
+- `TERM` to the launcher mid-run (`ping -n 120`): within 5 s, `TERM` to umu-run's group
+  ended none of the 17 processes (umu-run doesn't forward it usefully). The sweep
+  reaped all of them (`reaped (SIGKILL): … umu.exe;wineserver;…;ping.exe;conhost.exe;`),
+  none was left, and the footer was `# exit: 143 (SIGTERM)`.
+- `kill -9` of the launcher: the watchdog logged `launcher <pid> is gone (SIGKILL?):
+  tearing down` 1 s later and was done in 6 s. No process was left, `.launchers/` was
+  empty, and the footer was `# exit: 137 (launcher killed)`.
+- The `.desktop` file passes `desktop-file-validate`. `icon.png` is a 256×256 RGBA PNG
+  of the game's icon.
+
+**Checks the tests and the smoke don't reach** (#179's host pass): whether Proton ends a
+real game cleanly on `TERM` given longer than 5 s; zenity's `--switch` and kdialog's
+labels on real desktops; and whether the menu entry and icon show up in GNOME and KDE.
 
 ## 8. `gogo linux-app doctor <gogid>`
 
@@ -1324,8 +1353,9 @@ only on Linux (`#[cfg(target_os = "linux")]`), with the same shape:
   `launch.conf` ⇄ TOML golden; stamp → setup exactly once; `WINEPREFIX`, `GAMEID`,
   `STORE`, `PROTONPATH` exported; a changed `version` file → setup (managed) or a logged
   launch (unmanaged); a missing build with no gogo → exit 127; run log header and footer;
-  the dialog through `GOGO_LAUNCHER_DIALOG`; teardown kills a fake process carrying the
-  prefix in its environment.
+  the dialog through `GOGO_LAUNCHER_DIALOG`; teardown kills fake processes carrying the
+  prefix in their environment, as `WINEPREFIX=<prefix>`, `<prefix>/pfx/` or only
+  `STEAM_COMPAT_DATA_PATH`.
 - **doctor:** a set-up fake game is all green, then each check fails alone (no ICD,
   32-bit game without a 32-bit ICD, missing zipapp, Python too old, changed `proton`).
 - **Depot materialization:** reflink when the temp dir supports it, copy otherwise
