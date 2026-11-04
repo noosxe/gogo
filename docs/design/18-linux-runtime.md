@@ -442,6 +442,53 @@ reads it in place or downloads it into the user's cache, and never vendors it (R
 - Fetch failure: use the stale copy and warn. No copy and no network: rule 3, with a
   warning. A lookup never fails a build.
 
+**As built (#170)** — choices the design left open:
+
+- **Code.** `gogo_core::linuxapp::umu_id`. `lookup(build, gogid, refresh)` takes the
+  Proton dir (`store::proton_dir()`, or a `path:` build) and returns a `Lookup`: an
+  `UmuId { id, source }` (`Source::Build { csv }`, `Cache { csv }` or `Fallback`) plus
+  the warnings for the caller to print. `UmuId`'s `Display` is the summary line:
+  `umu-910830 (umu-database.csv in GE-Proton11-12)`, `… (umu-database.csv from GitHub,
+  cached)`, `umu-<gogid> (no umu-database row: the GOG id)`. `refresh` is the
+  parameter `--refresh` will pass (#176).
+- **The CSV.** The real header (checked 2026-11-04 against `main`) is `TITLE, STORE,
+  CODENAME, UMU_ID, COMMON ACRONYM (Optional), NOTE (Optional), EXE_STRINGS
+  (Optional)`. Columns are found by name (trimmed, case-insensitive), not position; a
+  CSV without `STORE`, `CODENAME` or `UMU_ID` counts as unreadable. `STORE` is compared
+  trimmed and case-insensitively to `gog`; `CODENAME` must equal the GOG id exactly
+  (trimmed). A matching row whose `UMU_ID` isn't `umu-<something>` is skipped with a
+  warning.
+- **Several matching rows:** the first in file order wins. If the others give a different
+  id, a warning names them. `main` has none today (212 GOG rows, 212 distinct ids).
+- **Parser: gogo's own, no crate.** A small RFC 4180 reader (quoted fields with commas,
+  `""` and line breaks; LF or CRLF; a leading BOM dropped; blank lines skipped). The file
+  needs nothing more, and the `csv` crate would add two crates (`csv`, `csv-core`)
+  for what is about 60 lines here. Checked once on the real file: all 212 GOG rows read the
+  same as Python's `csv` module, and Rebel Galaxy Outlaw resolved to `umu-910830`.
+  Nothing of it was committed (R13).
+- **Rule 1 vs rule 2.** A build CSV that exists but can't be read (I/O error, no usable
+  header) is warned about and treated as absent, so rule 2 applies. A readable build CSV
+  with no row is rule 3 at once, with no fetch and no warning: most GOG games simply
+  have no entry. `refresh` only matters when rule 2 is reached.
+- **Cache location.** `state::cache::cache_dir()`, like the product cache:
+  `$XDG_CACHE_HOME/gogo/umu-database.csv` (`~/.cache/gogo/…`), or `$GOGO_HOME/cache/…`
+  when `GOGO_HOME` is set. The ETag is `umu-database.csv.etag` beside it.
+- **Age** is the CSV's mtime. A 304 sets it to now, a 200 writes the file (temp file +
+  rename) with now as its mtime; a timestamp in the future counts as fresh. The
+  conditional GET is sent only when there is both a copy and a stored ETag; `refresh`
+  still sends it (a 304 is a valid answer to a forced check).
+- **What a 200 must be.** The body must have the three columns, or it's a failed fetch
+  (a captive portal's page never replaces a good copy). A response without an `ETag`
+  removes the stored one, so the next refresh is unconditional.
+- **Network.** One GET with gogo's user agent, a 10 s connect and 30 s total timeout, no
+  retries: a failure has the stale copy or rule 3 behind it. Errors are reported
+  without the URL.
+- **Warnings** start with why GitHub was asked: "<build> has no
+  protonfixes/umu-database.csv (typically an unmanaged build without protonfixes), so
+  its umu id comes from umu-database's CSV on GitHub", then either "refreshing it failed
+  (…): using the cached copy from N day(s) ago" or "fetching it failed (…) and there is
+  no cached copy: using umu-<gogid>, gogo's fallback".
+
 ### 4.2 Reading the protonfix
 
 1. Look for `protonfixes/gamefixes-gog/umu-<id>.py` in the chosen build (following
