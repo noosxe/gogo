@@ -2,7 +2,7 @@
 //! This crate is a thin shell over `gogo-core`; everything domain lives there.
 
 mod cli;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod lane;
 #[cfg(target_os = "macos")]
 mod menus;
@@ -253,6 +253,36 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
                 json_progress,
                 json,
             )
+            .await
+        }
+        #[cfg(target_os = "linux")]
+        Command::LinuxApp { sub: Some(sub), .. } => linux_app_sub(sub),
+        #[cfg(target_os = "linux")]
+        Command::LinuxApp {
+            sub: None,
+            input,
+            from_depot,
+            name,
+            runtime,
+            renderer,
+            refresh,
+            interactive,
+            yes,
+            json_progress,
+            json,
+        } => {
+            linux_app(LinuxAppArgs {
+                input,
+                from_depot,
+                name,
+                runtime,
+                renderer: renderer.map_or(gogo::macapp::RendererChoice::Auto, |r| r.choice()),
+                refresh,
+                interactive,
+                yes,
+                json_progress,
+                json,
+            })
             .await
         }
         Command::Runtimes(args) => store_cmd(Shelf::Runtimes, args.cmd).await,
@@ -1946,13 +1976,14 @@ fn write_completions(
 
 // — mac-app (docs/design/10): installer → self-contained macOS .app —
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 /// Resolve a game selector to its build source (#73, design 15 §1): the
 /// depot tree when a depot build exists (warm cache, else an auto-download
 /// with `--yes` or an interactive confirm), else — unless `--from-depot`
 /// asked for the depot lane explicitly — its downloaded offline installer.
 /// Returns `(installer, game_tree)`, exactly one `Some`.
 async fn resolve_game_source(
+    command: &str,
     selector: &str,
     explicit: bool,
     auto: bool,
@@ -2021,7 +2052,7 @@ async fn resolve_game_source(
         lane::Lane::NoDepotBuild => {
             eprintln!(
                 "gogo: {title} has no depot build — pass its installer instead \
-                 (`gogo mac-app {selector}` falls back to it)"
+                 (`gogo {command} {selector}` falls back to it)"
             );
             return Err(AppError::Usage);
         }
@@ -2090,7 +2121,7 @@ async fn resolve_game_source(
     Ok((None, Some(tree)))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 /// The install tree inside a depot cache root: a single child directory, or
 /// the child carrying a `goggame-*.info` (DLC-capable roots may hold more).
 fn find_game_tree(root: &std::path::Path) -> Option<std::path::PathBuf> {
@@ -2543,7 +2574,7 @@ fn mac_app_retarget(
     Ok(cli::exit::OK)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 /// The path gogo was invoked as, for the launcher (design 16 decision 2):
 /// a profile symlink like `~/.nix-profile/bin/gogo` survives upgrades, the
 /// resolved store path doesn't, so this never canonicalizes.
@@ -2590,7 +2621,7 @@ async fn mac_app(
         Some(lane::Input::Installer(p)) => (Some(p), None),
         Some(lane::Input::Tree(t)) => (None, Some(t)),
         Some(lane::Input::Game { selector, explicit }) => {
-            resolve_game_source(&selector, explicit, yes, machine).await?
+            resolve_game_source("mac-app", &selector, explicit, yes, machine).await?
         }
         None => {
             eprintln!("gogo: mac-app needs a GAME or an INSTALLER path");
@@ -2858,6 +2889,395 @@ async fn mac_app(
         }
     }
     Ok(cli::exit::OK)
+}
+
+// — linux-app (design 18 §10): a Windows game through GE-Proton and umu —
+
+#[cfg(target_os = "linux")]
+/// `gogo linux-app`'s build flags.
+struct LinuxAppArgs {
+    input: Option<String>,
+    from_depot: Option<String>,
+    name: Option<String>,
+    runtime: Option<Option<String>>,
+    renderer: gogo::macapp::RendererChoice,
+    refresh: bool,
+    interactive: bool,
+    yes: bool,
+    json_progress: bool,
+    json: bool,
+}
+
+#[cfg(target_os = "linux")]
+/// The `--runtime` menu (bare `--runtime`, `--interactive`): gogo's pinned
+/// GE-Proton, the GE-Protons in the store, then the unmanaged builds found
+/// in each Steam (design 18 §1); "other…" takes a typed ref.
+fn linux_runtime_menu(prompt: &gogo::macapp::PromptFn) -> Option<String> {
+    use gogo::linuxapp::proton;
+    use gogo::macapp::{PromptAnswer, PromptKind, PromptSpec, catalog, store};
+    let mut refs: Vec<String> = Vec::new();
+    let mut items: Vec<String> = Vec::new();
+    let pin = gogo::linuxapp::setup::pinned_version(catalog::GE_PROTON);
+    if let Some(pin) = pin {
+        let here = store::installed(catalog::GE_PROTON, Some(pin)).is_some();
+        refs.push(format!("{}/{pin}", catalog::GE_PROTON));
+        items.push(format!(
+            "{}/{pin}  gogo's pin ({})",
+            catalog::GE_PROTON,
+            if here { "installed" } else { "download" }
+        ));
+    }
+    let mut versions: Vec<String> = store::load_manifest()
+        .into_iter()
+        .filter(|m| m.id == catalog::GE_PROTON && Some(m.version.as_str()) != pin)
+        .map(|m| m.version)
+        .collect();
+    versions.sort();
+    versions.dedup();
+    for v in versions.into_iter().rev() {
+        refs.push(format!("{}/{v}", catalog::GE_PROTON));
+        items.push(format!("{}/{v}  installed", catalog::GE_PROTON));
+    }
+    for b in proton::discover(&gogo::linuxapp::umu::Host::real()) {
+        let problems = b.problems();
+        refs.push(format!("path:{}", b.path.display()));
+        items.push(format!(
+            "path:{}  {}, unmanaged{}",
+            b.path.display(),
+            b.source,
+            if problems.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", problems.join("; "))
+            }
+        ));
+    }
+    match prompt(&PromptSpec {
+        kind: PromptKind::Select,
+        title: "Proton build for this game".into(),
+        items,
+        allow_other: true,
+        allow_none: false,
+        default: 0,
+    })? {
+        PromptAnswer::Index(i) => refs.get(i).cloned(),
+        PromptAnswer::Other(s) => Some(s.trim().to_string()),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+/// The plan the confirmation shows (design 18 §10): what runs, what gets
+/// downloaded and where, and what the build sets for the game.
+fn linux_app_plan_lines(plan: &gogo::linuxapp::build::LinuxAppPlan) -> String {
+    use gogo::linuxapp::build;
+    let mut out = String::from("setting up:\n");
+    let line = |out: &mut String, k: &str, v: String| out.push_str(&format!("  {k:<10} {v}\n"));
+    let source = plan
+        .installer
+        .as_ref()
+        .map(|i| {
+            format!(
+                "{} (offline installer, run under umu)",
+                i.installer.display()
+            )
+        })
+        .or_else(|| {
+            plan.game_tree
+                .as_ref()
+                .map(|t| format!("{} (depot)", t.display()))
+        })
+        .unwrap_or_default();
+    line(&mut out, "source:", source);
+    line(
+        &mut out,
+        "game dir:",
+        match &plan.gogid {
+            Some(_) if plan.rebuild => format!(
+                "{} (rebuild: game files replaced, prefix and saves kept)",
+                plan.state.root.display()
+            ),
+            Some(_) => plan.state.root.display().to_string(),
+            None => format!(
+                "{} (the game's id is known after the install)",
+                gogo::macapp::launch::games_dir().join("<gogid>").display()
+            ),
+        },
+    );
+    if let Some(c) = &plan.compat {
+        line(
+            &mut out,
+            "compat:",
+            c.status_line_for(Some(gogo::macapp::compat::Lane::Depot)),
+        );
+    }
+    line(&mut out, "umu:", plan.umu_line.clone());
+    line(&mut out, "runtime:", plan.runtime_line.clone());
+    line(&mut out, "container:", plan.container_line.clone());
+    let renderer = match &plan.renderer {
+        Some(sel) => {
+            let mut r = sel.describe();
+            match &plan.renderer_setup {
+                Some(p) => r.push_str(&format!("; sets {}", build::switches(p))),
+                None if sel.renderer.value == gogo::macapp::Renderer::Wined3d.id()
+                    && sel.renderer.layer == gogo::macapp::compat::Layer::Auto =>
+                {
+                    r.push_str("; sets nothing: Proton's defaults")
+                }
+                None if sel.renderer.value == gogo::macapp::Renderer::Wined3d.id() => {
+                    r.push_str("; sets PROTON_USE_WINED3D=1")
+                }
+                None => r.push_str("; its switches are known once the Proton build is here"),
+            }
+            r
+        }
+        None => match plan.renderer_choice {
+            gogo::macapp::RendererChoice::Force(r) => format!("{} (flags)", r.id()),
+            _ => "auto (picked from the installed files)".to_string(),
+        },
+    };
+    line(&mut out, "renderer:", renderer);
+    if let Some(v) = &plan.auto_verbs {
+        line(
+            &mut out,
+            "verbs:",
+            gogo::macapp::verbs::summary(plan.gogid.as_deref(), Some(v)),
+        );
+    }
+    if let Some(g) = &plan.game_files {
+        out.push_str(&format!("  {}\n", game_files_line(g)));
+    }
+    match (&plan.umu_id, &plan.fixes) {
+        (Some(id), Some(fx)) => {
+            line(&mut out, "umu id:", id.to_string());
+            for l in fx.to_string().lines() {
+                out.push_str(&format!("  {l}\n"));
+            }
+        }
+        _ => out.push_str(
+            "  fixes:     shown after the Proton build is installed (its protonfixes decide them)\n",
+        ),
+    }
+    out
+}
+
+#[cfg(target_os = "linux")]
+/// `gogo linux-app` (design 18 §10): plan, confirm, build, set up. Like
+/// `mac-app`, the pipeline is synchronous and runs on blocking threads.
+async fn linux_app(a: LinuxAppArgs) -> Result<i32, AppError> {
+    let machine = a.json || a.json_progress;
+    let (installer, game_tree) = match lane::classify(a.input.as_deref(), a.from_depot.as_deref()) {
+        Some(lane::Input::Installer(p)) => (Some(p), None),
+        Some(lane::Input::Tree(t)) => (None, Some(t)),
+        Some(lane::Input::Game { selector, explicit }) => {
+            resolve_game_source("linux-app", &selector, explicit, a.yes, machine).await?
+        }
+        None => {
+            eprintln!("gogo: linux-app needs a GAME or an INSTALLER path");
+            return Ok(cli::exit::USAGE);
+        }
+    };
+    let prompter: Option<std::sync::Arc<gogo::macapp::PromptFn>> =
+        if std::io::IsTerminal::is_terminal(&std::io::stdin())
+            && std::io::IsTerminal::is_terminal(&std::io::stderr())
+            && !machine
+        {
+            Some(prompt::renderer())
+        } else {
+            None
+        };
+    // A `--runtime` value wins; a bare `--runtime` or `--interactive` asks.
+    let runtime = a.runtime.clone().flatten();
+    let ask = runtime.is_none() && (a.interactive || matches!(a.runtime, Some(None)));
+    let runtime = if ask {
+        let Some(p) = &prompter else {
+            eprintln!(
+                "gogo: the runtime menu needs a terminal — pass `--runtime <RUNTIME>` \
+                 (ge-proton[/<version>] or path:<dir>)"
+            );
+            return Ok(cli::exit::USAGE);
+        };
+        let Some(r) = linux_runtime_menu(p.as_ref()) else {
+            eprintln!("gogo: aborted");
+            return Ok(cli::exit::USAGE);
+        };
+        Some(r)
+    } else {
+        runtime
+    };
+    let opts = gogo::linuxapp::build::LinuxAppOptions {
+        installer,
+        game_tree,
+        name: a.name,
+        runtime,
+        renderer: a.renderer,
+        refresh: a.refresh,
+        gogo_path: invoked_path(),
+    };
+    let jp = a.json_progress;
+    let plan = {
+        let p = prompter.clone();
+        tokio::task::spawn_blocking(move || {
+            gogo::linuxapp::build::plan(&opts, p.as_deref(), &mut |ev| emit_macapp_event(ev, jp))
+        })
+        .await
+        .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))??
+    };
+
+    if !a.yes {
+        eprint!("{}", linux_app_plan_lines(&plan));
+        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            eprintln!("gogo: non-interactive without --yes — aborting (plan above)");
+            return Ok(cli::exit::USAGE);
+        }
+        let go_ahead = match &prompter {
+            Some(p) => {
+                p(&gogo::macapp::PromptSpec {
+                    kind: gogo::macapp::PromptKind::Confirm { default: false },
+                    title: "proceed?".into(),
+                    items: vec![],
+                    allow_other: false,
+                    allow_none: false,
+                    default: 0,
+                }) == Some(gogo::macapp::PromptAnswer::Confirmed(true))
+            }
+            None => {
+                print!("proceed? [y/N]: ");
+                {
+                    use std::io::Write as _;
+                    std::io::stdout().flush().ok();
+                }
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line)?;
+                line.trim().eq_ignore_ascii_case("y")
+            }
+        };
+        if !go_ahead {
+            eprintln!("gogo: aborted");
+            return Ok(cli::exit::USAGE);
+        }
+    }
+
+    let out = {
+        let plan = plan.clone();
+        let p = prompter.clone();
+        tokio::task::spawn_blocking(move || {
+            gogo::linuxapp::build::execute(&plan, p.as_deref(), &mut |ev| emit_macapp_event(ev, jp))
+        })
+        .await
+        .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))??
+    };
+    print_linux_setup(&out.setup, a.json, |v| {
+        v["name"] = serde_json::json!(plan.display);
+        v["game_dir"] = serde_json::json!(out.dirs.root);
+        v["lane"] = serde_json::json!(if plan.installer.is_some() {
+            "installer"
+        } else {
+            "depot"
+        });
+        v["game_files"] = serde_json::json!(out.materialized.as_ref().map(|r| serde_json::json!({
+            "method": r.method().as_str(),
+            "reflinked_files": r.reflinked_files,
+            "reflinked_bytes": r.reflinked_bytes,
+            "copied_files": r.copied_files,
+            "copied_bytes": r.copied_bytes,
+        })));
+    });
+    if !a.json {
+        println!(
+            "game files, prefix and saves: {} — the menu entry and launcher come with #177; \
+             until then `gogo linux-app setup {}` keeps launch.conf current",
+            out.dirs.root.display(),
+            out.gogid
+        );
+    }
+    Ok(cli::exit::OK)
+}
+
+#[cfg(target_os = "linux")]
+/// What setup did, as text or one JSON object (`extra` adds the build's keys).
+fn print_linux_setup(
+    out: &gogo::linuxapp::setup::SetupOutcome,
+    json: bool,
+    extra: impl FnOnce(&mut serde_json::Value),
+) {
+    for w in &out.warnings {
+        eprintln!("warning: {w}");
+    }
+    if json {
+        let mut v = serde_json::json!({
+            "gogid": out.state.gogid,
+            "runtime": out.state.runtime,
+            "renderer": out.state.renderer,
+            "umu_id": out.state.umu_id,
+            "protonfix": out.state.protonfix,
+            "stamp": out.state.stamp,
+            "verbs": out.state.verbs,
+            "verbs_installed": out.verbs_installed,
+            "prefix_created": out.prefix_created,
+            "runtime_installed": out.runtime_installed,
+            "fixes": out.fixes.to_string(),
+            "notes": out.notes,
+            "warnings": out.warnings,
+        });
+        extra(&mut v);
+        println!("{v}");
+        return;
+    }
+    for n in &out.notes {
+        eprintln!("note: {n}");
+    }
+    eprint!("{}", out.fixes);
+    println!(
+        "{}: runtime {}{}, renderer {}, {}{}",
+        out.state.gogid,
+        out.state.runtime,
+        if out.runtime_installed.is_some() {
+            " (installed)"
+        } else {
+            ""
+        },
+        out.state.renderer,
+        out.state.umu_id,
+        if out.prefix_created {
+            ", prefix created"
+        } else {
+            ""
+        }
+    );
+}
+
+#[cfg(target_os = "linux")]
+/// `gogo linux-app <sub>` (no build).
+fn linux_app_sub(sub: crate::cli::LinuxAppSub) -> Result<i32, AppError> {
+    match sub {
+        crate::cli::LinuxAppSub::Setup {
+            gogid,
+            refresh,
+            json,
+        } => {
+            gogo::macapp::compat::validate_gogid(&gogid)?;
+            let prompter: Option<std::sync::Arc<gogo::macapp::PromptFn>> =
+                if std::io::IsTerminal::is_terminal(&std::io::stdin())
+                    && std::io::IsTerminal::is_terminal(&std::io::stderr())
+                    && !json
+                {
+                    Some(prompt::renderer())
+                } else {
+                    None
+                };
+            let out = gogo::linuxapp::setup::setup(
+                &gogid,
+                &gogo::linuxapp::setup::SetupOptions {
+                    refresh,
+                    prompt: prompter.as_deref(),
+                },
+                &mut |ev| emit_macapp_event(ev, false),
+            )?;
+            print_linux_setup(&out, json, |_| {});
+            Ok(cli::exit::OK)
+        }
+    }
 }
 
 // — runtimes (design 12 §4/§10): Wine runtime catalog + store management —

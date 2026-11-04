@@ -148,7 +148,7 @@ pub fn marker_for(
     })
 }
 
-fn sha256_of(path: &Path) -> std::io::Result<String> {
+pub fn sha256_of(path: &Path) -> std::io::Result<String> {
     use sha2::{Digest as _, Sha256};
     use std::io::Read as _;
     let mut f = std::fs::File::open(path)?;
