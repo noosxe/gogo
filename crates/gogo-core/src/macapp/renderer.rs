@@ -249,6 +249,17 @@ pub fn from_scan(scan: &PeScan, d3dmetal: bool) -> Pick {
         .unwrap_or_default();
     let bits = if bits64 { "64-bit" } else { "32-bit" };
     let mut reason = format!("{what}: {seen} ({engine}{bits} {})", scan.main_exe);
+    if scan.graphics == GraphicsApi::D3dLegacy {
+        match scan.d3d7_confidence {
+            Some(pe::D3d7Confidence::Medium) => {
+                reason.push_str("; Direct3D ≤ 7 from interface GUIDs only")
+            }
+            Some(pe::D3d7Confidence::DxguidBlock) => {
+                reason.push_str("; Direct3D ≤ 7 only from the dxguid GUID block: may be 2D")
+            }
+            _ => {}
+        }
+    }
     if renderer == CncDdraw && scan.local_overrides.contains("ddraw.dll") {
         reason.push_str("; the game's own ddraw.dll is kept");
     }
@@ -696,6 +707,9 @@ mod tests {
             helpers: BTreeSet::new(),
             runtime_loaded: BTreeSet::new(),
             local_overrides: BTreeSet::new(),
+            d3d7_confidence: None,
+            dxguid_block: false,
+            renderer_dlls: BTreeSet::new(),
             files: vec![],
         }
     }
@@ -873,6 +887,30 @@ mod tests {
         let p = from_scan(&s, false);
         assert_eq!(p.renderer, Renderer::CncDdraw);
         assert!(p.reason.ends_with("own ddraw.dll is kept"));
+    }
+
+    /// #173: the D3D ≤ 7 confidence shows in the reason; the Mac table
+    /// (wined3d for every D3D ≤ 7 level) doesn't change.
+    #[test]
+    fn d3d7_confidence_is_in_the_reason_only() {
+        use pe::D3d7Confidence as C;
+        let imports = [GraphicsImport::Ddraw, GraphicsImport::Direct3d7];
+        for (c, note) in [
+            (C::Strong, None),
+            (C::Medium, Some("interface GUIDs only")),
+            (C::DxguidBlock, Some("dxguid GUID block: may be 2D")),
+        ] {
+            let mut s = scan(GraphicsApi::D3dLegacy, Bitness::I386, &imports);
+            s.d3d7_confidence = Some(c);
+            s.dxguid_block = c == C::DxguidBlock;
+            let p = from_scan(&s, false);
+            assert_eq!(p.renderer, Renderer::Wined3d, "{c:?}");
+            assert!(p.alternatives.is_empty());
+            match note {
+                Some(n) => assert!(p.reason.ends_with(n), "{}", p.reason),
+                None => assert!(!p.reason.contains("GUID"), "{}", p.reason),
+            }
+        }
     }
 
     #[test]
