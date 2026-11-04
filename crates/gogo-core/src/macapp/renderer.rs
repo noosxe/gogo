@@ -16,13 +16,20 @@
 //!
 //! The build bakes `flags > L3 > L2 > L1 > L0` into `gogo-launch.toml`;
 //! `setup` applies L4 on top and installs what the result needs ([`apply`]).
+//!
+//! **Linux** (design 18 §3, #172) has its own table ([`from_scan_linux`]),
+//! ids and setup ([`plan_linux`], [`apply_linux`]): under GE-Proton
+//! **DXVK** and **VKD3D-Proton** are Proton's defaults, **D7VK** and
+//! **wined3d** are Proton switches, and **cnc-ddraw** is the one renderer
+//! gogo places itself. The OS is a parameter ([`select_on`],
+//! [`RendererRef::parse_on`]), so both lanes are tested on either OS.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::Serialize;
 
-use super::compat::{self, CompatEntry, Layer, Sourced};
+use super::compat::{self, CompatEntry, Layer, Os, Sourced};
 use super::error::MacAppError;
 use super::pe::{self, Bitness, GraphicsApi, GraphicsSource, PeScan};
 use super::runtime::Runtime;
@@ -36,15 +43,39 @@ pub enum Renderer {
     Dxmt,
     CncDdraw,
     D3dMetal,
+    /// Linux: Proton's D3D8–11 (D3D8 only with [`PROTON_DXVK_D3D8`]).
+    Dxvk,
+    /// Linux: Proton's D3D12.
+    Vkd3dProton,
+    /// Linux: Proton's D3D ≤ 7 `ddraw.dll`, with [`PROTON_USE_D7VK`].
+    D7vk,
 }
 
 impl Renderer {
-    pub const ALL: [Renderer; 4] = [
+    /// The macOS renderers, in the order "unknown renderer" lists them.
+    pub const MACOS: [Renderer; 4] = [
         Renderer::Wined3d,
         Renderer::Dxmt,
         Renderer::CncDdraw,
         Renderer::D3dMetal,
     ];
+
+    /// The Linux renderers (design 18 §3).
+    pub const LINUX: [Renderer; 5] = [
+        Renderer::Dxvk,
+        Renderer::Vkd3dProton,
+        Renderer::D7vk,
+        Renderer::CncDdraw,
+        Renderer::Wined3d,
+    ];
+
+    /// The renderers `os` has.
+    pub fn on(os: Os) -> &'static [Renderer] {
+        match os {
+            Os::Macos => &Renderer::MACOS,
+            Os::Linux => &Renderer::LINUX,
+        }
+    }
 
     /// The id used in refs, flags and the compat schema.
     pub fn id(self) -> &'static str {
@@ -53,11 +84,28 @@ impl Renderer {
             Renderer::Dxmt => "dxmt",
             Renderer::CncDdraw => "cnc-ddraw",
             Renderer::D3dMetal => "d3dmetal",
+            Renderer::Dxvk => "dxvk",
+            Renderer::Vkd3dProton => "vkd3d-proton",
+            Renderer::D7vk => "d7vk",
         }
     }
 
+    /// A macOS renderer by id (the Mac lane's refs and flags).
     pub fn from_id(id: &str) -> Option<Renderer> {
-        Renderer::ALL.into_iter().find(|r| r.id() == id)
+        Renderer::from_id_on(id, Os::Macos)
+    }
+
+    /// A renderer of `os` by id.
+    pub fn from_id_on(id: &str, os: Os) -> Option<Renderer> {
+        Renderer::on(os).iter().copied().find(|r| r.id() == id)
+    }
+
+    /// Whatever the Proton build bundles: no version, no download.
+    pub fn proton_bundled(self) -> bool {
+        matches!(
+            self,
+            Renderer::Dxvk | Renderer::Vkd3dProton | Renderer::D7vk
+        )
     }
 
     /// The name in messages.
@@ -67,12 +115,18 @@ impl Renderer {
             Renderer::Dxmt => "DXMT",
             Renderer::CncDdraw => "cnc-ddraw",
             Renderer::D3dMetal => "D3DMetal",
+            Renderer::Dxvk => "DXVK",
+            Renderer::Vkd3dProton => "VKD3D-Proton",
+            Renderer::D7vk => "D7VK",
         }
     }
 
     /// The ref this renderer is written as when no version is asked for:
     /// `wined3d`, or `<id>/<catalog-pinned version>`.
     pub fn default_ref(self) -> String {
+        if self.proton_bundled() {
+            return self.id().to_string();
+        }
         match pinned_version(self.id()) {
             Some(v) => format!("{}/{v}", self.id()),
             None => self.id().to_string(),
@@ -94,15 +148,42 @@ pub struct RendererRef {
 }
 
 impl RendererRef {
+    /// A macOS ref (the Mac lane's).
     pub fn parse(s: &str) -> Result<RendererRef, String> {
+        RendererRef::parse_on(s, Os::Macos)
+    }
+
+    /// A ref for `os`. On Linux a Mac-only id is compat's error, and the
+    /// Proton-bundled renderers take no version.
+    pub fn parse_on(s: &str, os: Os) -> Result<RendererRef, String> {
         let (id, version) = match s.trim().split_once('/') {
             Some((id, v)) => (id, Some(v.to_string())),
             None => (s.trim(), None),
         };
-        let renderer = Renderer::from_id(id).ok_or_else(|| {
-            format!("unknown renderer `{s}` (wined3d, dxmt, cnc-ddraw, d3dmetal)")
+        if os == Os::Linux
+            && let Some(why) = compat::mac_only_renderer(id)
+        {
+            return Err(format!("renderer `{s}`: {why}"));
+        }
+        let renderer = Renderer::from_id_on(id, os).ok_or_else(|| {
+            let ids: Vec<&str> = Renderer::on(os).iter().map(|r| r.id()).collect();
+            format!("unknown renderer `{s}` ({})", ids.join(", "))
         })?;
+        if renderer.proton_bundled() && version.is_some() {
+            return Err(format!(
+                "renderer `{s}`: {} takes no version (it is the one the Proton build bundles)",
+                renderer.id()
+            ));
+        }
         Ok(RendererRef { renderer, version })
+    }
+
+    /// A ref of either OS (the walk's `current`).
+    fn parse_any(s: &str) -> Option<Renderer> {
+        let id = s.trim().split('/').next().unwrap_or_default();
+        Os::ALL
+            .into_iter()
+            .find_map(|os| Renderer::from_id_on(id, os))
     }
 
     /// The version to install: the ref's own, else the catalog pin.
@@ -139,6 +220,10 @@ pub struct Pick {
     pub x86_64: bool,
     /// D3DMetal consent this pick was made with (#71).
     pub d3dmetal: bool,
+    /// Linux: the game's Direct3D is 8, which DXVK only takes with
+    /// [`PROTON_DXVK_D3D8`]. Always `false` on the Mac.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub d3d8: bool,
 }
 
 /// May D3DMetal be used (#71)? Only with a stored yes in gogo's config;
@@ -230,6 +315,28 @@ pub fn from_scan(scan: &PeScan, d3dmetal: bool) -> Pick {
         GraphicsApi::Vulkan => (Wined3d, vec![], "Vulkan", None),
         GraphicsApi::Unknown => (Wined3d, vec![], "no graphics API found", None),
     };
+    let mut reason = reason_for(scan, what);
+    if scan.graphics == GraphicsApi::D3dLegacy
+        && let Some(note) = d3d7_note(scan, false)
+    {
+        reason.push_str(&note);
+    }
+    if renderer == CncDdraw && scan.local_overrides.contains("ddraw.dll") {
+        reason.push_str("; the game's own ddraw.dll is kept");
+    }
+    Pick {
+        renderer,
+        alternatives,
+        reason,
+        warning,
+        x86_64: bits64,
+        d3dmetal,
+        d3d8: false,
+    }
+}
+
+/// `<what>: <where it was seen> (<engine>, <bits> <exe>)`, both lanes.
+fn reason_for(scan: &PeScan, what: &str) -> String {
     let seen = match scan.graphics_source {
         GraphicsSource::Imports => {
             let names: Vec<String> = scan
@@ -247,30 +354,32 @@ pub fn from_scan(scan: &PeScan, d3dmetal: bool) -> Pick {
         .engine
         .map(|e| format!("{e:?} engine, "))
         .unwrap_or_default();
-    let bits = if bits64 { "64-bit" } else { "32-bit" };
-    let mut reason = format!("{what}: {seen} ({engine}{bits} {})", scan.main_exe);
-    if scan.graphics == GraphicsApi::D3dLegacy {
-        match scan.d3d7_confidence {
-            Some(pe::D3d7Confidence::Medium) => {
-                reason.push_str("; Direct3D ≤ 7 from interface GUIDs only")
-            }
-            Some(pe::D3d7Confidence::DxguidBlock) => {
-                reason.push_str("; Direct3D ≤ 7 only from the dxguid GUID block: may be 2D")
-            }
-            _ => {}
+    let bits = if scan.bitness == Bitness::X86_64 {
+        "64-bit"
+    } else {
+        "32-bit"
+    };
+    format!("{what}: {seen} ({engine}{bits} {})", scan.main_exe)
+}
+
+/// #173's confidence wording for the reason. The Mac says nothing for
+/// `strong`; Linux (`strong_too`) names that level as well, since it picks
+/// D7VK on every level.
+fn d3d7_note(scan: &PeScan, strong_too: bool) -> Option<String> {
+    Some(match scan.d3d7_confidence? {
+        pe::D3d7Confidence::Medium => "; Direct3D ≤ 7 from interface GUIDs only".into(),
+        pe::D3d7Confidence::DxguidBlock => {
+            "; Direct3D ≤ 7 only from the dxguid GUID block: may be 2D".into()
         }
-    }
-    if renderer == CncDdraw && scan.local_overrides.contains("ddraw.dll") {
-        reason.push_str("; the game's own ddraw.dll is kept");
-    }
-    Pick {
-        renderer,
-        alternatives,
-        reason,
-        warning,
-        x86_64: bits64,
-        d3dmetal,
-    }
+        pe::D3d7Confidence::Strong if !strong_too => return None,
+        pe::D3d7Confidence::Strong if scan.renderer_dlls.is_empty() => {
+            "; Direct3D ≤ 7 from a device/work GUID or a d3dim/d3drm import".into()
+        }
+        pe::D3d7Confidence::Strong => {
+            let dlls: Vec<&str> = scan.renderer_dlls.iter().map(String::as_str).collect();
+            format!("; Direct3D ≤ 7 from the renderer DLL {}", dlls.join(", "))
+        }
+    })
 }
 
 /// What "Try next renderer" (#78) says once the order is used up.
@@ -286,7 +395,7 @@ pub fn next_after(pick: &Pick, current: &str, d3dmetal: bool) -> Option<Renderer
         .chain(pick.alternatives.iter().copied())
         .filter(|r| d3dmetal || *r != Renderer::D3dMetal)
         .collect();
-    let current = RendererRef::parse(current).ok().map(|r| r.renderer);
+    let current = RendererRef::parse_any(current);
     match order.iter().position(|r| Some(*r) == current) {
         Some(i) => order.get(i + 1).copied(),
         None => order.into_iter().find(|r| Some(*r) != current),
@@ -326,6 +435,7 @@ pub fn pick_with(scan: &Result<PeScan, pe::ScanError>, d3dmetal: bool) -> Pick {
             warning: None,
             x86_64: false,
             d3dmetal: false,
+            d3d8: false,
         },
     }
 }
@@ -370,7 +480,27 @@ impl Selection {
 /// Merge the renderer field over L0–L3 and the build flags (design 16
 /// decision 5). L4 is reported, not baked: setup applies it at launch,
 /// unless a `--renderer` flag wins, which the build then writes into L4.
+///
+/// This is the Mac lane's: it reads this OS's L3/L4, as before #172.
 pub fn select(gogid: Option<&str>, l1: Pick, choice: RendererChoice) -> Selection {
+    select_in(Os::Macos, Os::current(), gogid, l1, choice)
+}
+
+/// [`select`] for `os`: its renderers, and L3/L4 resolved for it. On Linux
+/// `l1` is [`from_scan_linux`]'s, and a `--renderer` id Linux doesn't have
+/// (`dxmt`, `d3dmetal`) warns and keeps the automatic choice.
+pub fn select_on(os: Os, gogid: Option<&str>, l1: Pick, choice: RendererChoice) -> Selection {
+    select_in(os, os, gogid, l1, choice)
+}
+
+/// The merge with `os`'s renderers and the layers of `layers`.
+fn select_in(
+    os: Os,
+    layers_os: Os,
+    gogid: Option<&str>,
+    l1: Pick,
+    choice: RendererChoice,
+) -> Selection {
     let l0 = CompatEntry {
         renderer: Some(Renderer::Wined3d.id().into()),
         ..Default::default()
@@ -379,7 +509,9 @@ pub fn select(gogid: Option<&str>, l1: Pick, choice: RendererChoice) -> Selectio
         renderer: Some(l1.renderer.default_ref()),
         ..Default::default()
     };
-    let mut db = gogid.map(compat::db_entry).unwrap_or_default();
+    let mut db = gogid
+        .map(|g| compat::db_entry_for(g, layers_os))
+        .unwrap_or_default();
     let mut warnings: Vec<String> = l1.warning.iter().cloned().collect();
     // An L3 D3DMetal needs a 64-bit game and consent (#71); without them the
     // layers below pick (DXMT for 64-bit D3D11), not setup's wined3d fallback.
@@ -405,7 +537,7 @@ pub fn select(gogid: Option<&str>, l1: Pick, choice: RendererChoice) -> Selectio
         });
     }
     let mut user = gogid
-        .and_then(|g| compat::load_user(g).ok())
+        .and_then(|g| compat::load_user_for(g, layers_os).ok())
         .and_then(|p| p.entry.renderer);
     let mut layers = vec![
         (Layer::Default, &l0),
@@ -416,6 +548,12 @@ pub fn select(gogid: Option<&str>, l1: Pick, choice: RendererChoice) -> Selectio
     let mut flag_reason = String::new();
     match choice {
         RendererChoice::Auto => {}
+        RendererChoice::Force(r) if !Renderer::on(os).contains(&r) => warnings.push(format!(
+            "--renderer {}: {} has no {}; keeping the automatic choice",
+            r.id(),
+            os.key(),
+            r.name()
+        )),
         // D3DMetal only for a 64-bit game with consent; otherwise the
         // layers below decide.
         RendererChoice::Force(Renderer::D3dMetal) if !l1.x86_64 => warnings.push(
@@ -572,6 +710,11 @@ pub fn apply(renderer: &str, rt: Runtime, game_dir: Option<&Path>) -> Applied {
             out.dll_overrides.insert("ddraw".into(), "n,b".into());
             out.renderer = r.renderer.default_ref();
         }
+        // `RendererRef::parse` has only the macOS ids.
+        Renderer::Dxvk | Renderer::Vkd3dProton | Renderer::D7vk => out.warnings.push(format!(
+            "{} is Linux only: using wined3d",
+            r.renderer.name()
+        )),
         Renderer::Dxmt | Renderer::D3dMetal => match derive_for(&r, &out.runtime) {
             Ok((derived, rref)) => {
                 out.notes.push(format!(
@@ -664,6 +807,7 @@ pub fn explain(
             warning: None,
             x86_64: false,
             d3dmetal: false,
+            d3d8: false,
         },
     };
     let sel = select(Some(gogid), l1, RendererChoice::Auto);
@@ -683,36 +827,397 @@ pub fn explain(
     }
 }
 
+// — Linux (design 18 §3, #172) —
+
+/// Proton's switch for D7VK's `ddraw.dll` (32-bit only, in `syswow64`).
+pub const PROTON_USE_D7VK: &str = "PROTON_USE_D7VK";
+/// Proton's switch that moves D3D9–12 to wined3d together.
+pub const PROTON_USE_WINED3D: &str = "PROTON_USE_WINED3D";
+/// Proton's switch for DXVK's `d3d8` (else wined3d's).
+pub const PROTON_DXVK_D3D8: &str = "PROTON_DXVK_D3D8";
+
+/// Where a Proton build keeps D7VK, relative to its root: the file
+/// Proton's `setup_ddraw` copies (GE-Proton11-12's `proton` and
+/// `Makefile.in`: `files/lib/wine/d7vk/i386-windows/`, no 64-bit build).
+pub const D7VK_DLL: &str = "files/lib/wine/d7vk/i386-windows/ddraw.dll";
+
+/// Does the Proton build at `proton` have D7VK ([`D7VK_DLL`])? Without it
+/// Proton logs and silently keeps Wine's `ddraw`.
+pub fn has_d7vk(proton: &Path) -> bool {
+    proton.join(D7VK_DLL).is_file()
+}
+
+/// The Direct3D APIs that decided [`PeScan::graphics`]: the static imports,
+/// plus the runtime-loaded names when those decided; none for an engine's
+/// implied class (Clickteam).
+fn deciding_apis(scan: &PeScan) -> std::collections::BTreeSet<pe::GraphicsImport> {
+    match scan.graphics_source {
+        GraphicsSource::Imports => scan.graphics_imports.clone(),
+        GraphicsSource::RuntimeStrings => scan
+            .graphics_imports
+            .union(&scan.runtime_graphics)
+            .copied()
+            .collect(),
+        GraphicsSource::Engine | GraphicsSource::None => Default::default(),
+    }
+}
+
+/// D3D ≤ 7 retained mode: a `d3drm` / `d3dxof` import (or runtime name,
+/// when those decided) outside the game's own wrapper DLLs.
+fn retained_mode(scan: &PeScan) -> bool {
+    let rm = |n: &String| n == "d3drm.dll" || n == "d3dxof.dll";
+    let imported = scan.files.iter().any(|f| {
+        let name = f.path.rsplit(['/', '\\']).next().unwrap_or_default();
+        !scan.local_overrides.contains(&name.to_ascii_lowercase()) && f.imports.iter().any(rm)
+    });
+    imported
+        || (scan.graphics_source == GraphicsSource::RuntimeStrings
+            && scan.runtime_loaded.iter().any(rm))
+}
+
+/// The design 18 §3 table (docs/22 §6.1), Linux's L1:
+///
+/// | L1 class | bits | renderer | then |
+/// |---|---|---|---|
+/// | DirectDraw or D3D ≤ 7, the game ships its own `ddraw.dll` | any | wined3d (nothing; the DLL is kept, `ddraw=n,b`) | — |
+/// | DirectDraw 2D | 32 | cnc-ddraw | d7vk, wined3d |
+/// | DirectDraw 2D | 64 | wined3d | — |
+/// | D3D ≤ 7, any #173 confidence | 32 | d7vk | cnc-ddraw, wined3d |
+/// | D3D ≤ 7 | 64 | wined3d (D7VK is 32-bit) | — |
+/// | D3D ≤ 7 retained mode (`d3drm`/`d3dxof`) | any | wined3d | — |
+/// | D3D8 | any | dxvk + [`PROTON_DXVK_D3D8`] | wined3d |
+/// | D3D9 / 10 / 11 | any | dxvk | wined3d |
+/// | D3D12 | any | vkd3d-proton | wined3d |
+/// | OpenGL, Vulkan, an engine's class, nothing found | any | wined3d (nothing) | — |
+///
+/// Never cnc-ddraw and D7VK together: each is the other's alternative.
+pub fn from_scan_linux(scan: &PeScan) -> Pick {
+    use Renderer::*;
+    use pe::GraphicsImport as G;
+    let bits64 = scan.bitness == Bitness::X86_64;
+    let apis = deciding_apis(scan);
+    let has = |g| apis.contains(&g);
+    let d3d7_class = scan.graphics == GraphicsApi::D3dLegacy
+        && has(G::Direct3d7)
+        && !has(G::D3d8)
+        && !has(G::D3d9);
+    let ddraw_class = scan.graphics == GraphicsApi::Ddraw2d || d3d7_class;
+    let own_ddraw = ddraw_class && scan.local_overrides.contains("ddraw.dll");
+    let (renderer, alternatives, what) = match scan.graphics {
+        _ if own_ddraw && d3d7_class => (Wined3d, vec![], "Direct3D ≤ 7"),
+        _ if own_ddraw => (Wined3d, vec![], "DirectDraw 2D"),
+        GraphicsApi::Ddraw2d if !bits64 => (CncDdraw, vec![D7vk, Wined3d], "DirectDraw 2D"),
+        GraphicsApi::Ddraw2d => (Wined3d, vec![], "DirectDraw 2D (cnc-ddraw is 32-bit)"),
+        GraphicsApi::D3dLegacy if has(G::D3d9) => (Dxvk, vec![Wined3d], "Direct3D 9"),
+        GraphicsApi::D3dLegacy if has(G::D3d8) => (Dxvk, vec![Wined3d], "Direct3D 8"),
+        GraphicsApi::D3dLegacy if d3d7_class && retained_mode(scan) => (
+            Wined3d,
+            vec![],
+            "Direct3D ≤ 7 retained mode (D7VK has none)",
+        ),
+        GraphicsApi::D3dLegacy if d3d7_class && bits64 => {
+            (Wined3d, vec![], "Direct3D ≤ 7 (D7VK is 32-bit)")
+        }
+        GraphicsApi::D3dLegacy if d3d7_class => (D7vk, vec![CncDdraw, Wined3d], "Direct3D ≤ 7"),
+        GraphicsApi::D3dLegacy => (Wined3d, vec![], "Direct3D 9 or older"),
+        GraphicsApi::D3d11 => (Dxvk, vec![Wined3d], "Direct3D 10/11"),
+        GraphicsApi::D3d12 => (Vkd3dProton, vec![Wined3d], "Direct3D 12"),
+        GraphicsApi::OpenGl => (Wined3d, vec![], "OpenGL"),
+        GraphicsApi::Vulkan => (Wined3d, vec![], "Vulkan"),
+        GraphicsApi::Unknown => (Wined3d, vec![], "no graphics API found"),
+    };
+    let mut reason = reason_for(scan, what);
+    if d3d7_class && let Some(note) = d3d7_note(scan, true) {
+        reason.push_str(&note);
+    }
+    if own_ddraw {
+        reason.push_str("; the game's own ddraw.dll is kept (ddraw=n,b): no cnc-ddraw, no D7VK");
+    }
+    Pick {
+        renderer,
+        alternatives,
+        reason,
+        warning: None,
+        x86_64: bits64,
+        d3dmetal: false,
+        d3d8: renderer == Dxvk && has(G::D3d8) && !has(G::D3d9),
+    }
+}
+
+/// [`pick_with`] for Linux: L1 from an import scan; a failed scan picks
+/// wined3d (Proton's defaults). A cnc-ddraw gogo placed earlier isn't the
+/// game's own `ddraw.dll`.
+pub fn pick_linux(scan: &Result<PeScan, pe::ScanError>) -> Pick {
+    match scan {
+        Ok(scan) => {
+            let mut scan = scan.clone();
+            if ddraw::is_gogo(&scan.root) {
+                scan.local_overrides.remove("ddraw.dll");
+            }
+            from_scan_linux(&scan)
+        }
+        Err(e) => Pick {
+            renderer: Renderer::Wined3d,
+            alternatives: vec![],
+            reason: format!("import scan failed ({e})"),
+            warning: None,
+            x86_64: false,
+            d3dmetal: false,
+            d3d8: false,
+        },
+    }
+}
+
+/// "Try next renderer" on `os` (design 16 §8.2's walk): the renderer after
+/// `current` in `pick`'s order, written to L4 under `[platforms.<os>]`
+/// unless `dry_run`. `Ok(None)`: [`NO_MORE_RENDERERS`]. `current` is what
+/// setup last applied, as on the Mac.
+pub fn next_renderer_on(
+    os: Os,
+    gogid: &str,
+    pick: &Pick,
+    current: &str,
+    dry_run: bool,
+) -> Result<Option<String>, MacAppError> {
+    let consent = os == Os::Macos && d3dmetal_available();
+    let Some(next) = next_after(pick, current, consent) else {
+        return Ok(None);
+    };
+    let next = next.default_ref();
+    if !dry_run {
+        compat::set_user_keys_for(gogid, &[("renderer", Some(&next))], os)?;
+    }
+    Ok(Some(next))
+}
+
+/// What setup does in the game dir for a Linux renderer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DdrawStep {
+    /// Nothing there to do.
+    None,
+    /// Put gogo's cnc-ddraw there ([`ddraw::apply`]).
+    PlaceCncDdraw,
+    /// Take gogo's cnc-ddraw out again ([`ddraw::remove_gogo`]).
+    RemoveGogo,
+    /// The game's own `ddraw.dll` stays, with `ddraw=n,b`.
+    KeepGames,
+}
+
+/// What a Linux renderer needs (design 18 §3): Proton switches, DLL
+/// overrides and the game-dir step. [`plan_linux`] works it out without
+/// touching anything; [`apply_linux`] does the game-dir step.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LinuxPlan {
+    /// The ref in effect, after any fallback.
+    pub renderer: String,
+    /// Proton switches for the launch environment.
+    pub env: BTreeMap<String, String>,
+    /// `ddraw=n,b` for a game-dir `ddraw.dll` (cnc-ddraw or the game's).
+    pub dll_overrides: BTreeMap<String, String>,
+    pub ddraw: DdrawStep,
+    pub notes: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+/// Work out `renderer` (a Linux ref) for one game: `l1` is its
+/// [`pick_linux`] (the walk order, the D3D8 class), `game_dir` the game's
+/// files, `proton` the build's root.
+///
+/// - **dxvk**, **vkd3d-proton**: nothing, Proton's defaults; D3D8 adds
+///   [`PROTON_DXVK_D3D8`].
+/// - **d7vk**: [`PROTON_USE_D7VK`] and gogo's cnc-ddraw out. A game that
+///   ships its own `ddraw.dll` keeps it with a warning, and a build without
+///   [`D7VK_DLL`] warns; either way the next renderer in `l1`'s order is
+///   used.
+/// - **cnc-ddraw**: placed in the game dir with `ddraw=n,b`, or the game's
+///   own `ddraw.dll` kept.
+/// - **wined3d**: [`PROTON_USE_WINED3D`], except as `l1`'s own pick, where
+///   design 18 §3 says "nothing" (Proton's defaults: a packed D3D9 game the
+///   scan missed stays on DXVK).
+///
+/// Never both `ddraw.dll`s (R17): D7VK is never set while one sits in the
+/// game dir, and every renderer but cnc-ddraw takes gogo's out. The game's
+/// own `ddraw.dll` always gets `ddraw=n,b`. Anything that can't be set up
+/// falls back along the order, ending at wined3d.
+pub fn plan_linux(renderer: &str, l1: &Pick, game_dir: Option<&Path>, proton: &Path) -> LinuxPlan {
+    let mut out = LinuxPlan {
+        renderer: Renderer::Wined3d.id().into(),
+        env: BTreeMap::new(),
+        dll_overrides: BTreeMap::new(),
+        ddraw: DdrawStep::None,
+        notes: vec![],
+        warnings: vec![],
+    };
+    let dir = game_dir.filter(|d| d.is_dir());
+    let gogo = dir.is_some_and(ddraw::is_gogo);
+    let own = !gogo && dir.is_some_and(|d| d.join("ddraw.dll").is_file());
+    let mut r = match RendererRef::parse_on(renderer, Os::Linux) {
+        Ok(r) => r.renderer,
+        Err(e) => {
+            out.warnings.push(format!("{e}: using wined3d"));
+            Renderer::Wined3d
+        }
+    };
+    let mut tried = vec![];
+    loop {
+        tried.push(r);
+        let unusable = match r {
+            Renderer::D7vk if own => Some(
+                "the game ships its own ddraw.dll, which would win over D7VK's: keeping the \
+                 game's"
+                    .to_string(),
+            ),
+            Renderer::D7vk if !has_d7vk(proton) => Some(format!(
+                "the Proton build has no D7VK ({} not found)",
+                proton.join(D7VK_DLL).display()
+            )),
+            Renderer::CncDdraw if dir.is_none() => Some("game dir not found".to_string()),
+            _ => None,
+        };
+        let Some(why) = unusable else { break };
+        let next = next_after(l1, r.id(), false)
+            .filter(|n| !tried.contains(n))
+            .unwrap_or(Renderer::Wined3d);
+        out.warnings
+            .push(format!("{}: {why}: using {}", r.name(), next.id()));
+        if next == r {
+            break;
+        }
+        r = next;
+    }
+    match r {
+        Renderer::D7vk => {
+            out.env.insert(PROTON_USE_D7VK.into(), "1".into());
+            out.notes.push(format!("D7VK: {PROTON_USE_D7VK}=1"));
+        }
+        Renderer::Dxvk if l1.d3d8 => {
+            out.env.insert(PROTON_DXVK_D3D8.into(), "1".into());
+            out.notes
+                .push(format!("DXVK for Direct3D 8: {PROTON_DXVK_D3D8}=1"));
+        }
+        Renderer::Wined3d if l1.renderer != Renderer::Wined3d => {
+            out.env.insert(PROTON_USE_WINED3D.into(), "1".into());
+            out.notes.push(format!("wined3d: {PROTON_USE_WINED3D}=1"));
+        }
+        Renderer::CncDdraw if own => {}
+        Renderer::CncDdraw => {
+            out.ddraw = DdrawStep::PlaceCncDdraw;
+            out.dll_overrides.insert("ddraw".into(), "n,b".into());
+        }
+        _ => {}
+    }
+    if own {
+        out.ddraw = DdrawStep::KeepGames;
+        out.dll_overrides.insert("ddraw".into(), "n,b".into());
+        out.notes
+            .push("the game dir's own ddraw.dll is kept (ddraw=n,b)".into());
+    } else if gogo && r != Renderer::CncDdraw {
+        out.ddraw = DdrawStep::RemoveGogo;
+    }
+    out.renderer = r.default_ref();
+    out
+}
+
+/// [`plan_linux`], then its game-dir step: cnc-ddraw placed
+/// ([`ddraw::resolve_or_provision`], [`ddraw::apply`]) or gogo's taken out
+/// ([`ddraw::remove_gogo`]). A cnc-ddraw that can't be placed, or a D7VK
+/// with a `ddraw.dll` still in the game dir afterwards, falls back along
+/// `l1`'s order. Running it is setup's job (#176).
+pub fn apply_linux(renderer: &str, l1: &Pick, game_dir: Option<&Path>, proton: &Path) -> LinuxPlan {
+    let mut warnings = vec![];
+    let mut renderer = renderer.to_string();
+    let mut tried = vec![];
+    loop {
+        let mut plan = plan_linux(&renderer, l1, game_dir, proton);
+        plan.warnings.splice(0..0, warnings.drain(..));
+        let failed = match (plan.ddraw, game_dir) {
+            (DdrawStep::PlaceCncDdraw, Some(dir)) => {
+                let mut provision = vec![];
+                let tree = ddraw::resolve_or_provision(&mut |ev| {
+                    if let super::ProgressEvent::Warn { message } = ev {
+                        provision.push(message.clone());
+                    }
+                });
+                plan.warnings.extend(provision);
+                match tree.map(|t| ddraw::apply(&t, dir)) {
+                    Some(Ok(ddraw::Applied::Applied { shaders })) => {
+                        plan.notes.push(format!(
+                            "cnc-ddraw (dll + ini, {shaders} shaders) in the game dir"
+                        ));
+                        None
+                    }
+                    Some(Ok(ddraw::Applied::AlreadyPresent)) => None,
+                    Some(Err(e)) => Some(e.to_string()),
+                    None => Some("provisioning failed".to_string()),
+                }
+            }
+            (DdrawStep::RemoveGogo, Some(dir)) => {
+                if ddraw::remove_gogo(dir) {
+                    plan.notes
+                        .push("removed gogo's cnc-ddraw from the game dir".into());
+                }
+                None
+            }
+            _ => None,
+        };
+        // Never both (R17), whatever the step did.
+        let failed = failed.or_else(|| {
+            (plan.env.contains_key(PROTON_USE_D7VK)
+                && game_dir.is_some_and(|d| d.join("ddraw.dll").exists()))
+            .then(|| "a ddraw.dll is still in the game dir, which would win over D7VK's".into())
+        });
+        let Some(why) = failed else { return plan };
+        let Ok(r) = RendererRef::parse_on(&plan.renderer, Os::Linux).map(|r| r.renderer) else {
+            return plan;
+        };
+        tried.push(r);
+        let next = next_after(l1, r.id(), false)
+            .filter(|n| !tried.contains(n))
+            .unwrap_or(Renderer::Wined3d);
+        warnings = plan.warnings;
+        warnings.push(format!("{}: {why}: using {}", r.name(), next.id()));
+        renderer = next.default_ref();
+    }
+}
+
+/// A scan with just the fields the tables read (tests, both lanes).
+#[cfg(test)]
+pub(crate) fn test_scan(
+    graphics: GraphicsApi,
+    bitness: Bitness,
+    imports: &[pe::GraphicsImport],
+) -> PeScan {
+    PeScan {
+        root: "/g".into(),
+        main_exe: "Game.exe".into(),
+        main_exe_source: pe::MainExeSource::GogInfo,
+        bitness,
+        engine: None,
+        graphics,
+        graphics_source: if imports.is_empty() {
+            GraphicsSource::None
+        } else {
+            GraphicsSource::Imports
+        },
+        graphics_imports: imports.iter().copied().collect(),
+        runtime_graphics: std::collections::BTreeSet::new(),
+        helpers: std::collections::BTreeSet::new(),
+        runtime_loaded: std::collections::BTreeSet::new(),
+        local_overrides: std::collections::BTreeSet::new(),
+        d3d7_confidence: None,
+        dxguid_block: false,
+        renderer_dlls: std::collections::BTreeSet::new(),
+        files: vec![],
+    }
+}
+
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
     use crate::macapp::pe::GraphicsImport;
-    use std::collections::BTreeSet;
 
-    fn scan(graphics: GraphicsApi, bitness: Bitness, imports: &[GraphicsImport]) -> PeScan {
-        PeScan {
-            root: "/g".into(),
-            main_exe: "Game.exe".into(),
-            main_exe_source: pe::MainExeSource::GogInfo,
-            bitness,
-            engine: None,
-            graphics,
-            graphics_source: if imports.is_empty() {
-                GraphicsSource::None
-            } else {
-                GraphicsSource::Imports
-            },
-            graphics_imports: imports.iter().copied().collect(),
-            runtime_graphics: BTreeSet::new(),
-            helpers: BTreeSet::new(),
-            runtime_loaded: BTreeSet::new(),
-            local_overrides: BTreeSet::new(),
-            d3d7_confidence: None,
-            dxguid_block: false,
-            renderer_dlls: BTreeSet::new(),
-            files: vec![],
-        }
-    }
+    use super::test_scan as scan;
 
     /// #78: the renderers "Try next renderer" walks, per API class, from the
     /// L1 pick until it runs out.
@@ -935,6 +1440,7 @@ mod tests {
             warning: None,
             x86_64: true,
             d3dmetal: false,
+            d3d8: false,
         }
     }
 
@@ -1223,5 +1729,686 @@ mod tests {
         };
         let m = compat::merge(&[(Layer::Auto, &l1), (Layer::Db, &db)]);
         assert_eq!(m.renderer.unwrap().layer, Layer::Db);
+    }
+}
+
+/// The Linux table, walk and setup (design 18 §3, #172), on any OS; and
+/// the Mac picks they must not change.
+#[cfg(test)]
+mod linux_tests {
+    use super::*;
+    use crate::macapp::pe::{D3d7Confidence as C, GraphicsImport as G};
+    use Bitness::*;
+    use GraphicsApi as A;
+    use Renderer::*;
+
+    use super::test_scan as scan;
+
+    fn d3d7(c: C, bits: Bitness) -> PeScan {
+        let mut s = scan(A::D3dLegacy, bits, &[G::Ddraw, G::Direct3d7]);
+        s.d3d7_confidence = Some(c);
+        s.dxguid_block = c == C::DxguidBlock;
+        s
+    }
+
+    fn file(path: &str, imports: &[&str]) -> pe::PeFileScan {
+        serde_json::from_value(serde_json::json!({
+            "path": path,
+            "bitness": "i386",
+            "imports": imports,
+            "runtime_loaded": [],
+            "d3d7_iids": false,
+        }))
+        .unwrap()
+    }
+
+    fn walk(pick: &Pick) -> Vec<&'static str> {
+        let mut seen = vec![pick.renderer.id()];
+        while let Some(n) = next_after(pick, &pick_ref(seen.last().unwrap()), false) {
+            assert!(seen.len() < 8, "cycle: {seen:?}");
+            seen.push(n.id());
+        }
+        seen
+    }
+
+    /// What setup last applied: versioned for cnc-ddraw, as `state.toml` has it.
+    fn pick_ref(id: &str) -> String {
+        Renderer::from_id_on(id, Os::Linux).unwrap().default_ref()
+    }
+
+    /// Design 18 §3, one row per L1 class: the pick, its order and the D3D8 flag.
+    #[test]
+    fn table_rows_and_walk_order() {
+        let mut rm = d3d7(C::Strong, I386);
+        rm.files = vec![file("Game.exe", &["ddraw.dll", "d3drm.dll"])];
+        let mut d3dxof = d3d7(C::Strong, I386);
+        d3dxof.files = vec![file("bin/Engine.dll", &["d3dxof.dll"])];
+        let mut clickteam = scan(A::D3dLegacy, I386, &[]);
+        clickteam.engine = Some(pe::Engine::Clickteam);
+        clickteam.graphics_source = GraphicsSource::Engine;
+        let mut unity = scan(A::D3d11, X86_64, &[G::Opengl32]);
+        unity.engine = Some(pe::Engine::Unity);
+        unity.graphics_source = GraphicsSource::RuntimeStrings;
+        unity.runtime_graphics.insert(G::D3d11);
+        let mut runtime_d3d8 = scan(A::D3dLegacy, I386, &[]);
+        runtime_d3d8.graphics_source = GraphicsSource::RuntimeStrings;
+        runtime_d3d8.runtime_graphics.insert(G::D3d8);
+        // (what, scan, pick, walk, d3d8)
+        let rows: Vec<(&str, PeScan, Renderer, &[&str], bool)> = vec![
+            (
+                "2D 32",
+                scan(A::Ddraw2d, I386, &[G::Ddraw]),
+                CncDdraw,
+                &["cnc-ddraw", "d7vk", "wined3d"],
+                false,
+            ),
+            (
+                "2D 64",
+                scan(A::Ddraw2d, X86_64, &[G::Ddraw]),
+                Wined3d,
+                &["wined3d"],
+                false,
+            ),
+            (
+                "D3D≤7 strong",
+                d3d7(C::Strong, I386),
+                D7vk,
+                &["d7vk", "cnc-ddraw", "wined3d"],
+                false,
+            ),
+            (
+                "D3D≤7 medium",
+                d3d7(C::Medium, I386),
+                D7vk,
+                &["d7vk", "cnc-ddraw", "wined3d"],
+                false,
+            ),
+            (
+                "D3D≤7 dxguid_block",
+                d3d7(C::DxguidBlock, I386),
+                D7vk,
+                &["d7vk", "cnc-ddraw", "wined3d"],
+                false,
+            ),
+            (
+                "D3D≤7 64",
+                d3d7(C::Strong, X86_64),
+                Wined3d,
+                &["wined3d"],
+                false,
+            ),
+            ("D3D≤7 d3drm", rm, Wined3d, &["wined3d"], false),
+            ("D3D≤7 d3dxof", d3dxof, Wined3d, &["wined3d"], false),
+            (
+                "D3D8",
+                scan(A::D3dLegacy, I386, &[G::D3d8]),
+                Dxvk,
+                &["dxvk", "wined3d"],
+                true,
+            ),
+            (
+                "D3D8 runtime",
+                runtime_d3d8,
+                Dxvk,
+                &["dxvk", "wined3d"],
+                true,
+            ),
+            (
+                "D3D8 + D3D9",
+                scan(A::D3dLegacy, I386, &[G::D3d8, G::D3d9]),
+                Dxvk,
+                &["dxvk", "wined3d"],
+                false,
+            ),
+            (
+                "D3D9 + ddraw/D3D7",
+                scan(A::D3dLegacy, X86_64, &[G::Ddraw, G::Direct3d7, G::D3d9]),
+                Dxvk,
+                &["dxvk", "wined3d"],
+                false,
+            ),
+            (
+                "D3D11",
+                scan(A::D3d11, I386, &[G::D3d11, G::Dxgi]),
+                Dxvk,
+                &["dxvk", "wined3d"],
+                false,
+            ),
+            ("Unity D3D11", unity, Dxvk, &["dxvk", "wined3d"], false),
+            (
+                "D3D12 64",
+                scan(A::D3d12, X86_64, &[G::D3d12]),
+                Vkd3dProton,
+                &["vkd3d-proton", "wined3d"],
+                false,
+            ),
+            (
+                "D3D12 32",
+                scan(A::D3d12, I386, &[G::D3d12]),
+                Vkd3dProton,
+                &["vkd3d-proton", "wined3d"],
+                false,
+            ),
+            (
+                "OpenGL",
+                scan(A::OpenGl, X86_64, &[G::Opengl32]),
+                Wined3d,
+                &["wined3d"],
+                false,
+            ),
+            (
+                "Vulkan",
+                scan(A::Vulkan, X86_64, &[G::Vulkan]),
+                Wined3d,
+                &["wined3d"],
+                false,
+            ),
+            ("Clickteam", clickteam, Wined3d, &["wined3d"], false),
+            (
+                "nothing",
+                scan(A::Unknown, I386, &[]),
+                Wined3d,
+                &["wined3d"],
+                false,
+            ),
+        ];
+        for (what, s, want, order, d3d8) in rows {
+            let p = from_scan_linux(&s);
+            assert_eq!(p.renderer, want, "{what}: {}", p.reason);
+            assert_eq!(walk(&p), order, "{what}");
+            assert_eq!(p.d3d8, d3d8, "{what}");
+            assert!(!p.d3dmetal && p.warning.is_none(), "{what}");
+            // Never both: cnc-ddraw and D7VK only ever follow each other.
+            assert!(
+                !(p.renderer == D7vk && p.alternatives.contains(&D7vk)),
+                "{what}"
+            );
+        }
+        // A runtime name that doesn't decide (a static import does) is ignored.
+        let mut s = scan(A::D3dLegacy, I386, &[G::D3d9]);
+        s.runtime_graphics.insert(G::D3d8);
+        assert!(!from_scan_linux(&s).d3d8);
+    }
+
+    /// #173's three confidences, named in the reason.
+    #[test]
+    fn d3d7_confidence_is_in_the_reason() {
+        for (c, note) in [
+            (C::Strong, "from a device/work GUID or a d3dim/d3drm import"),
+            (C::Medium, "from interface GUIDs only"),
+            (C::DxguidBlock, "only from the dxguid GUID block: may be 2D"),
+        ] {
+            let p = from_scan_linux(&d3d7(c, I386));
+            assert_eq!(
+                p.reason,
+                format!(
+                    "Direct3D ≤ 7: imports ddraw, direct3d7 (32-bit Game.exe); Direct3D ≤ 7 {note}"
+                ),
+                "{c:?}"
+            );
+        }
+        let mut s = d3d7(C::Strong, I386);
+        s.renderer_dlls.insert("d3ddrv.dll".into());
+        let p = from_scan_linux(&s);
+        assert!(
+            p.reason.ends_with("from the renderer DLL d3ddrv.dll"),
+            "{}",
+            p.reason
+        );
+        // The 64-bit and retained-mode rows say why they aren't D7VK.
+        let p = from_scan_linux(&d3d7(C::Medium, X86_64));
+        assert!(
+            p.reason.starts_with("Direct3D ≤ 7 (D7VK is 32-bit)"),
+            "{}",
+            p.reason
+        );
+        // No note outside the D3D ≤ 7 class.
+        let p = from_scan_linux(&scan(A::D3d11, I386, &[G::D3d11]));
+        assert_eq!(p.reason, "Direct3D 10/11: imports d3d11 (32-bit Game.exe)");
+    }
+
+    /// A game that ships its own ddraw.dll keeps it: no cnc-ddraw, no D7VK.
+    #[test]
+    fn shipped_ddraw_dll_is_neither() {
+        for s in [
+            scan(A::Ddraw2d, I386, &[G::Ddraw]),
+            d3d7(C::Strong, I386),
+            d3d7(C::DxguidBlock, I386),
+        ] {
+            let mut s = s;
+            s.local_overrides.insert("ddraw.dll".into());
+            let p = from_scan_linux(&s);
+            assert_eq!((p.renderer, walk(&p)), (Wined3d, vec!["wined3d"]));
+            assert!(
+                p.reason
+                    .ends_with("own ddraw.dll is kept (ddraw=n,b): no cnc-ddraw, no D7VK"),
+                "{}",
+                p.reason
+            );
+        }
+        // gogo's own cnc-ddraw from an earlier setup isn't the game's.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("ddraw.dll"), "x").unwrap();
+        std::fs::write(dir.path().join("ddraw.ini"), ddraw::DDRAW_INI).unwrap();
+        let mut s = d3d7(C::Medium, I386);
+        s.root = dir.path().to_path_buf();
+        s.local_overrides.insert("ddraw.dll".into());
+        assert_eq!(pick_linux(&Ok(s)).renderer, D7vk);
+        // A D3D9 game's shipped ddraw.dll doesn't change its class.
+        let mut s = scan(A::D3dLegacy, I386, &[G::D3d9]);
+        s.local_overrides.insert("ddraw.dll".into());
+        assert_eq!(from_scan_linux(&s).renderer, Dxvk);
+        // A failed scan: Proton's defaults.
+        let e = pick_linux(&Err(pe::ScanError::NoExecutable { dir: "/g".into() }));
+        assert_eq!((e.renderer, e.alternatives.len()), (Wined3d, 0));
+    }
+
+    #[test]
+    fn linux_ids_and_the_mac_only_error() {
+        for (s, r) in [
+            ("dxvk", Dxvk),
+            ("vkd3d-proton", Vkd3dProton),
+            ("d7vk", D7vk),
+            ("wined3d", Wined3d),
+        ] {
+            let p = RendererRef::parse_on(s, Os::Linux).unwrap();
+            assert_eq!((p.renderer, p.version()), (r, None));
+            assert_eq!(r.default_ref(), s);
+        }
+        let p = RendererRef::parse_on("cnc-ddraw/7.0.0.0", Os::Linux).unwrap();
+        assert_eq!(p.version().as_deref(), Some("7.0.0.0"));
+        assert!(CncDdraw.default_ref().starts_with("cnc-ddraw/"));
+        // Mac-only ids: compat's error, here and in [platforms.linux].
+        for id in ["dxmt", "d3dmetal/4.0b3"] {
+            let e = RendererRef::parse_on(id, Os::Linux).unwrap_err();
+            assert!(e.ends_with("runs on macOS only"), "{e}");
+            let raw = format!("[platforms.linux]\nrenderer = \"{id}\"\n");
+            let e = compat::parse(&raw, Os::Linux, Layer::Db).unwrap_err();
+            assert!(e.ends_with("runs on macOS only"), "{e}");
+        }
+        let e = RendererRef::parse_on("dxvk/v2.7", Os::Linux).unwrap_err();
+        assert!(e.contains("takes no version"), "{e}");
+        let e = RendererRef::parse_on("dgvoodoo", Os::Linux).unwrap_err();
+        assert!(
+            e.ends_with("(dxvk, vkd3d-proton, d7vk, cnc-ddraw, wined3d)"),
+            "{e}"
+        );
+        // The Mac lane keeps its ids and message.
+        for id in ["dxvk", "vkd3d-proton", "d7vk"] {
+            let e = RendererRef::parse(id).unwrap_err();
+            assert!(e.ends_with("(wined3d, dxmt, cnc-ddraw, d3dmetal)"), "{e}");
+        }
+        assert_eq!(RendererRef::parse("dxmt").unwrap().renderer, Dxmt);
+        // Setup warns and falls back on a ref it can't use.
+        let l1 = from_scan_linux(&scan(A::D3d11, I386, &[G::D3d11]));
+        let plan = plan_linux("dxmt/v0.80", &l1, None, Path::new("/none"));
+        assert_eq!(plan.renderer, "wined3d");
+        assert!(
+            plan.warnings[0].contains("runs on macOS only"),
+            "{:?}",
+            plan.warnings
+        );
+    }
+
+    /// A fake Proton build root, with or without D7VK.
+    fn proton(d7vk: bool) -> tempfile::TempDir {
+        let p = tempfile::tempdir().unwrap();
+        if d7vk {
+            let dll = p.path().join(D7VK_DLL);
+            std::fs::create_dir_all(dll.parent().unwrap()).unwrap();
+            std::fs::write(dll, "MZ").unwrap();
+        }
+        p
+    }
+
+    /// A game dir: empty, with gogo's cnc-ddraw, or with the game's own ddraw.dll.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Dir {
+        Empty,
+        Gogo,
+        Own,
+    }
+
+    fn game(state: Dir) -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        if state != Dir::Empty {
+            std::fs::write(d.path().join("ddraw.dll"), "game").unwrap();
+        }
+        if state == Dir::Gogo {
+            std::fs::write(d.path().join("ddraw.ini"), ddraw::DDRAW_INI).unwrap();
+        }
+        d
+    }
+
+    fn env(plan: &LinuxPlan) -> Vec<&str> {
+        plan.env.keys().map(String::as_str).collect()
+    }
+
+    /// What each renderer needs, without touching anything.
+    #[test]
+    fn plan_per_renderer() {
+        let p = proton(true);
+        let g = game(Dir::Empty);
+        let d3d8 = from_scan_linux(&scan(A::D3dLegacy, I386, &[G::D3d8]));
+        let d3d9 = from_scan_linux(&scan(A::D3dLegacy, I386, &[G::D3d9]));
+        let d3d7 = from_scan_linux(&d3d7(C::Medium, I386));
+        let nothing = from_scan_linux(&scan(A::Unknown, I386, &[]));
+        let plan = |r: &str, l1: &Pick| plan_linux(r, l1, Some(g.path()), p.path());
+
+        let x = plan("dxvk", &d3d9);
+        assert_eq!((x.renderer.as_str(), env(&x)), ("dxvk", vec![]));
+        let x = plan("dxvk", &d3d8);
+        assert_eq!(env(&x), [PROTON_DXVK_D3D8]);
+        let x = plan("vkd3d-proton", &d3d9);
+        assert!(x.env.is_empty() && x.dll_overrides.is_empty());
+        let x = plan("d7vk", &d3d7);
+        assert_eq!(
+            (x.renderer.as_str(), env(&x)),
+            ("d7vk", vec![PROTON_USE_D7VK])
+        );
+        assert_eq!((x.ddraw, x.dll_overrides.len()), (DdrawStep::None, 0));
+        let x = plan("cnc-ddraw", &d3d7);
+        assert_eq!((x.ddraw, env(&x)), (DdrawStep::PlaceCncDdraw, vec![]));
+        assert_eq!(
+            x.dll_overrides.get("ddraw").map(String::as_str),
+            Some("n,b")
+        );
+        assert!(x.renderer.starts_with("cnc-ddraw/"));
+        // wined3d: the switch when chosen over another pick, nothing as L1's own.
+        let x = plan("wined3d", &d3d9);
+        assert_eq!(env(&x), [PROTON_USE_WINED3D]);
+        let x = plan("wined3d", &nothing);
+        assert!(x.env.is_empty() && x.warnings.is_empty(), "{x:?}");
+        // Nothing was written.
+        assert_eq!(std::fs::read_dir(g.path()).unwrap().count(), 0);
+    }
+
+    /// R17 in every direction: for every renderer × game-dir state × D7VK
+    /// build, after setup there is never PROTON_USE_D7VK with a ddraw.dll
+    /// in the game dir, the game's own DLL is never touched and always
+    /// gets `ddraw=n,b`, and gogo's goes for anything but cnc-ddraw.
+    #[test]
+    fn never_both_ddraw_dlls() {
+        let tree = tempfile::tempdir().unwrap();
+        std::fs::write(tree.path().join("ddraw.dll"), "cnc").unwrap();
+        let _g = crate::test_util::env_lock();
+        // SAFETY: env mutation under the shared env mutex.
+        unsafe { std::env::set_var("GOGO_CNC_DDRAW_DIR", tree.path()) };
+        let picks = [
+            from_scan_linux(&scan(A::Ddraw2d, I386, &[G::Ddraw])),
+            from_scan_linux(&d3d7(C::DxguidBlock, I386)),
+            from_scan_linux(&scan(A::D3d11, I386, &[G::D3d11])),
+        ];
+        for l1 in &picks {
+            for r in Renderer::LINUX {
+                for state in [Dir::Empty, Dir::Gogo, Dir::Own] {
+                    for d7vk in [true, false] {
+                        let p = proton(d7vk);
+                        let g = game(state);
+                        let mut l1 = l1.clone();
+                        if state == Dir::Own {
+                            // The scan sees the game's DLL too.
+                            let mut s = scan(A::Ddraw2d, I386, &[G::Ddraw]);
+                            s.local_overrides.insert("ddraw.dll".into());
+                            if l1.renderer == CncDdraw {
+                                l1 = from_scan_linux(&s);
+                            }
+                        }
+                        let x = apply_linux(&r.default_ref(), &l1, Some(g.path()), p.path());
+                        let what =
+                            format!("{} {r:?} {state:?} d7vk={d7vk}: {x:?}", l1.renderer.id());
+                        let dll = g.path().join("ddraw.dll");
+                        assert!(
+                            !(x.env.contains_key(PROTON_USE_D7VK) && dll.exists()),
+                            "{what}"
+                        );
+                        match state {
+                            Dir::Own => {
+                                assert_eq!(
+                                    std::fs::read_to_string(&dll).unwrap(),
+                                    "game",
+                                    "{what}"
+                                );
+                                assert_eq!(x.ddraw, DdrawStep::KeepGames, "{what}");
+                                assert_eq!(x.dll_overrides["ddraw"], "n,b", "{what}");
+                            }
+                            _ if x.renderer.starts_with("cnc-ddraw") => {
+                                assert!(dll.exists() && ddraw::is_gogo(g.path()), "{what}");
+                                assert_eq!(x.dll_overrides["ddraw"], "n,b", "{what}");
+                            }
+                            _ => {
+                                assert!(!dll.exists(), "{what}");
+                                assert!(x.dll_overrides.is_empty(), "{what}");
+                            }
+                        }
+                        if r == D7vk && state == Dir::Own {
+                            assert!(x.warnings[0].contains("ships its own ddraw.dll"), "{what}");
+                        }
+                    }
+                }
+            }
+        }
+        // Moving a game from cnc-ddraw to D7VK takes gogo's out first.
+        let p = proton(true);
+        let g = game(Dir::Empty);
+        let l1 = from_scan_linux(&d3d7(C::Medium, I386));
+        let x = apply_linux("cnc-ddraw", &l1, Some(g.path()), p.path());
+        assert!(x.renderer.starts_with("cnc-ddraw") && ddraw::is_gogo(g.path()));
+        let x = apply_linux("d7vk", &l1, Some(g.path()), p.path());
+        assert_eq!(
+            (x.renderer.as_str(), env(&x)),
+            ("d7vk", vec![PROTON_USE_D7VK])
+        );
+        assert!(
+            x.notes
+                .iter()
+                .any(|n| n.contains("removed gogo's cnc-ddraw"))
+        );
+        assert!(!g.path().join("ddraw.dll").exists() && !g.path().join("ddraw.ini").exists());
+        // A cnc-ddraw that can't be placed (its ini can't be written) falls
+        // back along the order: D7VK next, but the copied ddraw.dll is in
+        // the way, so wined3d.
+        let l2d = from_scan_linux(&scan(A::Ddraw2d, I386, &[G::Ddraw]));
+        let bad = tempfile::tempdir().unwrap();
+        std::fs::create_dir(bad.path().join("ddraw.ini")).unwrap();
+        let x = apply_linux("cnc-ddraw", &l2d, Some(bad.path()), p.path());
+        assert_eq!(
+            (x.renderer.as_str(), env(&x)),
+            ("wined3d", vec![PROTON_USE_WINED3D])
+        );
+        assert!(x.warnings[0].ends_with(": using d7vk"), "{:?}", x.warnings);
+        assert!(
+            x.warnings[1].contains("ships its own ddraw.dll"),
+            "{:?}",
+            x.warnings
+        );
+        unsafe { std::env::remove_var("GOGO_CNC_DDRAW_DIR") };
+    }
+
+    /// A build without D7VK: the next renderer in the order, with a warning.
+    #[test]
+    fn no_d7vk_falls_back_along_the_order() {
+        let p = proton(false);
+        assert!(!has_d7vk(p.path()) && has_d7vk(proton(true).path()));
+        let g = game(Dir::Empty);
+        let d3d7 = from_scan_linux(&d3d7(C::Strong, I386));
+        let x = plan_linux("d7vk", &d3d7, Some(g.path()), p.path());
+        assert!(x.renderer.starts_with("cnc-ddraw/"), "{x:?}");
+        assert_eq!((x.ddraw, env(&x)), (DdrawStep::PlaceCncDdraw, vec![]));
+        assert_eq!(x.warnings.len(), 1);
+        assert!(
+            x.warnings[0].starts_with("D7VK: the Proton build has no D7VK (")
+                && x.warnings[0].ends_with("not found): using cnc-ddraw"),
+            "{:?}",
+            x.warnings
+        );
+        // No game dir either: on to wined3d.
+        let x = plan_linux("d7vk", &d3d7, None, p.path());
+        assert_eq!((x.renderer.as_str(), x.warnings.len()), ("wined3d", 2));
+        assert_eq!(env(&x), [PROTON_USE_WINED3D]);
+        // A 2D game: d7vk is after cnc-ddraw, so wined3d is next.
+        let l2d = from_scan_linux(&scan(A::Ddraw2d, I386, &[G::Ddraw]));
+        let x = plan_linux("d7vk", &l2d, Some(g.path()), p.path());
+        assert_eq!(x.renderer, "wined3d");
+        // A D3D11 game forced to d7vk: its own order from the top.
+        let l11 = from_scan_linux(&scan(A::D3d11, I386, &[G::D3d11]));
+        let x = plan_linux("d7vk", &l11, Some(g.path()), p.path());
+        assert_eq!(x.renderer, "dxvk");
+    }
+
+    /// L3/L4/flags over the Linux L1, from [platforms.linux] only; the
+    /// walk writes there too.
+    #[test]
+    fn layers_and_the_persisted_walk() {
+        let home = tempfile::tempdir().unwrap();
+        let db = tempfile::tempdir().unwrap();
+        std::fs::write(
+            db.path().join("42.toml"),
+            "[platforms.macos]\nrenderer = \"dxmt\"\n[platforms.linux]\nrenderer = \"cnc-ddraw\"\n",
+        )
+        .unwrap();
+        let _g = crate::test_util::env_lock();
+        // SAFETY: env mutation under the shared env mutex.
+        unsafe {
+            std::env::set_var("GOGO_HOME", home.path());
+            std::env::set_var(compat::DB_DIR_ENV, db.path());
+        }
+        let l1 = from_scan_linux(&d3d7(C::DxguidBlock, I386));
+        let auto = RendererChoice::Auto;
+        // L1.
+        let s = select_on(Os::Linux, Some("1"), l1.clone(), auto);
+        assert_eq!(
+            (s.renderer.value.as_str(), s.renderer.layer),
+            ("d7vk", Layer::Auto)
+        );
+        assert!(s.reason.ends_with("may be 2D"), "{}", s.reason);
+        // L3 from [platforms.linux]; [platforms.macos] doesn't apply.
+        let s = select_on(Os::Linux, Some("42"), l1.clone(), auto);
+        assert_eq!(
+            (s.renderer.value.as_str(), s.renderer.layer),
+            ("cnc-ddraw", Layer::Db)
+        );
+        let s = select_on(Os::Macos, Some("42"), l1.clone(), auto);
+        assert_eq!(
+            (s.renderer.value.as_str(), s.renderer.layer),
+            ("dxmt", Layer::Db)
+        );
+        // A flag beats L3; a Mac-only flag keeps the automatic choice.
+        let s = select_on(
+            Os::Linux,
+            Some("42"),
+            l1.clone(),
+            RendererChoice::Force(D7vk),
+        );
+        assert_eq!(
+            (s.renderer.value.as_str(), s.renderer.layer),
+            ("d7vk", Layer::Flags)
+        );
+        let s = select_on(
+            Os::Linux,
+            Some("1"),
+            l1.clone(),
+            RendererChoice::Force(Dxmt),
+        );
+        assert_eq!(s.renderer.layer, Layer::Auto);
+        assert!(
+            s.warnings[0].contains("linux has no DXMT"),
+            "{:?}",
+            s.warnings
+        );
+        // --no-ddraw-wrapper acts on a cnc-ddraw below it.
+        let s = select_on(
+            Os::Linux,
+            Some("42"),
+            l1.clone(),
+            RendererChoice::AutoNoDdraw,
+        );
+        assert_eq!(
+            (s.renderer.value.as_str(), s.renderer.layer),
+            ("wined3d", Layer::Flags)
+        );
+
+        // "Try next renderer": d7vk → cnc-ddraw → wined3d, into [platforms.linux].
+        compat::set_user_keys_for("1", &[("renderer", Some("dxmt/v0.80"))], Os::Macos).unwrap();
+        let next = |cur: &str| next_renderer_on(Os::Linux, "1", &l1, cur, false).unwrap();
+        let cnc = next("d7vk").unwrap();
+        assert!(cnc.starts_with("cnc-ddraw/"), "{cnc}");
+        let raw = std::fs::read_to_string(compat::user_path("1")).unwrap();
+        assert!(
+            raw.contains(&format!("[platforms.linux]\nrenderer = \"{cnc}\"")),
+            "{raw}"
+        );
+        // L4 is reported, not baked; a flag replaces it.
+        let s = select_on(Os::Linux, Some("1"), l1.clone(), auto);
+        assert_eq!(
+            (s.renderer.value.as_str(), s.user.as_deref()),
+            ("d7vk", Some(cnc.as_str()))
+        );
+        let s = select_on(
+            Os::Linux,
+            Some("1"),
+            l1.clone(),
+            RendererChoice::Force(Wined3d),
+        );
+        assert_eq!(s.user, None);
+        assert!(
+            s.reason.contains("replacing the L4 override cnc-ddraw/"),
+            "{}",
+            s.reason
+        );
+        assert_eq!(next(&cnc).as_deref(), Some("wined3d"));
+        assert_eq!(next("wined3d"), None);
+        // A dry run writes nothing; the Mac table was never touched.
+        let before = std::fs::read_to_string(compat::user_path("1")).unwrap();
+        assert_eq!(
+            next_renderer_on(Os::Linux, "1", &l1, "d7vk", true)
+                .unwrap()
+                .as_deref(),
+            Some(cnc.as_str())
+        );
+        let after = std::fs::read_to_string(compat::user_path("1")).unwrap();
+        assert_eq!(before, after);
+        let mac = compat::load_user_for("1", Os::Macos)
+            .unwrap()
+            .entry
+            .renderer;
+        assert_eq!(mac.as_deref(), Some("dxmt/v0.80"));
+        unsafe {
+            std::env::remove_var("GOGO_HOME");
+            std::env::remove_var(compat::DB_DIR_ENV);
+        }
+    }
+
+    /// The Mac table is unchanged by #172 (the macOS-gated tests cover the
+    /// rest): the same picks, alternatives and reasons on any OS.
+    #[test]
+    fn mac_picks_unchanged() {
+        let rows: Vec<(PeScan, Renderer, &[Renderer])> = vec![
+            (scan(A::Ddraw2d, I386, &[G::Ddraw]), CncDdraw, &[Wined3d]),
+            (d3d7(C::Strong, I386), Wined3d, &[]),
+            (d3d7(C::DxguidBlock, I386), Wined3d, &[]),
+            (scan(A::D3dLegacy, I386, &[G::D3d8]), Wined3d, &[]),
+            (scan(A::D3dLegacy, I386, &[G::D3d9]), Wined3d, &[]),
+            (scan(A::D3d11, I386, &[G::D3d11]), Dxmt, &[Wined3d]),
+            (scan(A::D3d12, X86_64, &[G::D3d12]), Wined3d, &[]),
+        ];
+        for (s, want, alts) in rows {
+            let p = from_scan(&s, false);
+            assert_eq!((p.renderer, p.alternatives.as_slice()), (want, alts));
+            assert!(!p.d3d8);
+        }
+        let p = from_scan(&d3d7(C::Strong, I386), false);
+        assert_eq!(
+            p.reason,
+            "Direct3D 9 or older: imports ddraw, direct3d7 (32-bit Game.exe)"
+        );
+        let p = from_scan(&d3d7(C::Medium, I386), false);
+        assert!(
+            p.reason
+                .ends_with("; Direct3D ≤ 7 from interface GUIDs only")
+        );
+        // Pick's JSON has no new field on the Mac.
+        let json = serde_json::to_value(&p).unwrap();
+        assert!(json.get("d3d8").is_none(), "{json}");
     }
 }

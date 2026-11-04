@@ -298,6 +298,16 @@ const LEGACY_KEYS: &[&str] = &[
 /// Renderers that exist only on macOS: an error under `[platforms.linux]`.
 const MAC_ONLY_RENDERERS: &[&str] = &["dxmt", "d3dmetal"];
 
+/// The error for a Mac-only renderer ref (`dxmt[/<ver>]`, `d3dmetal[/<ver>]`)
+/// on Linux, `None` for any other ref. The `[platforms.linux]` check and the
+/// Linux renderer refs (#172) both use it.
+pub fn mac_only_renderer(r: &str) -> Option<String> {
+    let id = r.split('/').next().unwrap_or_default().trim();
+    MAC_ONLY_RENDERERS
+        .contains(&id)
+        .then(|| format!("{id} runs on macOS only"))
+}
+
 /// Keys gogo itself writes into L4 (`--retarget`, persisted build flags,
 /// "Try next renderer"; design 16 decisions 5 and 7), always under
 /// `[platforms.<this os>]`. Everything else in the file is the user's.
@@ -442,12 +452,9 @@ fn platform_entry(
     let e = entry_from(t).map_err(|e| format!("[platforms.{}]: {e}", os.key()))?;
     if os == Os::Linux
         && let Some(r) = &e.renderer
-        && let id = r.split('/').next().unwrap_or_default().trim()
-        && MAC_ONLY_RENDERERS.contains(&id)
+        && let Some(why) = mac_only_renderer(r)
     {
-        return Err(format!(
-            "renderer `{r}` in [platforms.linux]: {id} runs on macOS only"
-        ));
+        return Err(format!("renderer `{r}` in [platforms.linux]: {why}"));
     }
     Ok(e)
 }
@@ -571,12 +578,18 @@ pub const DB_DIR_ENV: &str = "GOGO_COMPAT_DIR";
 /// exists, else the compiled-in DB's. A DB file that fails to parse reads
 /// as "no entry" plus a warning (compiled in, it is a build-time bug).
 pub fn db_entry(gogid: &str) -> Parsed {
+    db_entry_for(gogid, Os::current())
+}
+
+/// [`db_entry`] resolved for `os` (the Linux renderer walk's tests run on
+/// any OS, #172).
+pub fn db_entry_for(gogid: &str, os: Os) -> Parsed {
     if let Some(dir) = std::env::var_os(DB_DIR_ENV).filter(|d| !d.is_empty())
         && validate_gogid(gogid).is_ok()
     {
         let path = Path::new(&dir).join(format!("{gogid}.toml"));
         if let Ok(raw) = std::fs::read_to_string(&path) {
-            return parse(&raw, Os::current(), Layer::Db).unwrap_or_else(|e| Parsed {
+            return parse(&raw, os, Layer::Db).unwrap_or_else(|e| Parsed {
                 entry: CompatEntry::default(),
                 warnings: vec![format!(
                     "compat DB entry {} unreadable: {e}",
@@ -585,7 +598,7 @@ pub fn db_entry(gogid: &str) -> Parsed {
             });
         }
     }
-    db_lookup(COMPAT_DB, gogid, Os::current())
+    db_lookup(COMPAT_DB, gogid, os)
 }
 
 fn db_lookup(db: &[(&str, &str)], gogid: &str, os: Os) -> Parsed {
@@ -638,8 +651,13 @@ pub fn user_path(gogid: &str) -> PathBuf {
 /// empty layer; a file that doesn't parse is an error (it is the user's own
 /// edit — say so rather than silently ignoring it).
 pub fn load_user(gogid: &str) -> Result<Parsed, MacAppError> {
+    load_user_for(gogid, Os::current())
+}
+
+/// [`load_user`] resolved for `os`.
+pub fn load_user_for(gogid: &str, os: Os) -> Result<Parsed, MacAppError> {
     validate_gogid(gogid)?;
-    load_user_at(&user_path(gogid), Os::current())
+    load_user_at(&user_path(gogid), os)
 }
 
 fn load_user_at(path: &Path, os: Os) -> Result<Parsed, MacAppError> {
@@ -669,8 +687,17 @@ pub fn set_user_keys(
     gogid: &str,
     updates: &[(&str, Option<&str>)],
 ) -> Result<Vec<Change>, MacAppError> {
+    set_user_keys_for(gogid, updates, Os::current())
+}
+
+/// [`set_user_keys`] under `[platforms.<os>]`.
+pub fn set_user_keys_for(
+    gogid: &str,
+    updates: &[(&str, Option<&str>)],
+    os: Os,
+) -> Result<Vec<Change>, MacAppError> {
     validate_gogid(gogid)?;
-    set_user_keys_at(&user_path(gogid), updates, Os::current())
+    set_user_keys_at(&user_path(gogid), updates, os)
 }
 
 /// [`set_user_keys`] for `os`. A write also moves the legacy top-level keys
