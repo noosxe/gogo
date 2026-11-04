@@ -2,10 +2,12 @@
 
 A Rust CLI for [GOG.com](https://www.gog.com): sign in, list your library, download
 offline installers — resumable, MD5-verified, rate-limited. On macOS it can also
-turn a GOG Windows game into a `.app` that runs it through Wine, picking the
-renderer and fixes per game.
+turn a GOG Windows game into a `.app` that runs it through Wine, and on Linux
+set one up to run through GE-Proton and umu, picking the renderer and fixes per
+game.
 
-- **Platforms:** Linux and macOS. `mac-app` is macOS-only.
+- **Platforms:** Linux and macOS. `mac-app` is macOS-only, `linux-app`
+  Linux-only.
 - **Wine runtimes:** `gogo runtimes` downloads, verifies, and caches official
   macOS Wine builds (the CrossOver-source `winecx26` default, `winecx` rollback, staging/devel/stable)
   plus a pinned `winetricks` — `mac-app` picks one for you (or takes
@@ -21,7 +23,7 @@ renderer and fixes per game.
 ```sh
 # Nix
 nix run github:noosxe/gogo -- --version
-# Nix, x86_64 Linux: with the FHS env for the Linux game lane (umu; in progress, ~1.5 GiB more)
+# Nix, x86_64 Linux: with the FHS env `linux-app` needs on NixOS (umu; ~1.5 GiB more)
 nix profile install github:noosxe/gogo#gogo-linux-app
 
 # or build from source (Rust 1.99+)
@@ -37,9 +39,10 @@ gogo download <GAME>  # offline installers, chunk-verified and resumable
 gogo depot <GAME>     # straight from GOG's depot into the user cache dir
 gogo mac-app <GAME>   # macOS: game -> .app from its depot build (no installer run)
 gogo mac-app <EXE>    # macOS: installer -> .app
+gogo linux-app <GAME> # Linux: game -> GE-Proton + umu setup from its depot build
 gogo runtimes list    # macOS: Wine catalog + what's cached locally
 gogo renderers list   # macOS: renderers (cnc-ddraw, DXMT, D3DMetal), same verbs
-gogo apps list        # macOS: games set up for .apps (prefix, saves, logs)
+gogo apps list        # games set up by mac-app / linux-app (prefix, saves, logs)
 gogo recipes show <slug>  # what a Lutris recipe would do, step by step
 ```
 
@@ -186,6 +189,66 @@ gogo renderers prune dxmt/v0.80     # one version, with the runtimes built with 
 Details: [`docs/19`](docs/19-mac-app-compatibility-strategy.md) (why the
 layers) and [design 16](docs/design/16-macapp-v2.md) (bundle, state dir,
 launcher). Launch-testing bundles without stealing focus: [`docs/vm-testing.md`](docs/vm-testing.md).
+
+### linux-app (Linux)
+
+Sets a GOG Windows game up to run through [GE-Proton](https://github.com/GloriousEggroll/proton-ge-custom)
+and [umu-launcher](https://github.com/Open-Wine-Components/umu-launcher), the
+way Steam runs Proton, but for GOG games.
+
+```sh
+gogo linux-app 1207659013                                  # depot lane (default)
+gogo linux-app ~/Downloads/setup_pharaoh_gold_2.1.0.15.exe  # installer lane, run under umu
+```
+
+The lanes are `mac-app`'s: a game takes its depot build (falling back to its
+downloaded offline installer), `--from-depot` forces the depot, a `setup_*.exe`
+takes the installer lane. Without `--yes` it prints the plan and asks first.
+The plan shows what runs (umu, the GE-Proton build, the Steam Linux Runtime
+umu fetches on its first run), the renderer and what it sets, the verbs, how
+the game files land (a reflink where the filesystem has them, else a copy), the
+game's umu id and the fixes its protonfix applies.
+
+**Asked once.** On the first build gogo asks two things, both kept in the config:
+
+- `[linux] umu`: `zipapp`, gogo downloads its pinned umu-launcher (on NixOS
+  this needs the `gogo-linux-app` package, see Install), or `system`, the
+  `umu-run` on `PATH`;
+- `[linux] proton_dir`, when a GE-Proton has to be downloaded and you have Steam:
+  gogo's store, or Steam's `compatibilitytools.d` so Steam can use it too.
+
+Without a terminal and with no answer stored, it stops and names the key to set.
+
+**What goes where.** Everything lives in `~/.local/share/gogo/`: GE-Proton and
+umu in `runtimes/`, and per game in `games/<gogid>/` the Proton prefix (saves
+included), the game files, `gogo-launch.toml` (what the build chose),
+`launch.conf` (what the launcher runs) and `state.toml`. `gogo linux-app setup
+<gogid>` brings that up to date after you change the override file. The menu
+entry and launcher, `~/.local/share/applications/gogo-<gogid>.desktop`, come with
+[#177](https://github.com/noosxe/gogo/issues/177).
+
+**Layers** as on the Mac: the renderer from the game's imports (DXVK for
+D3D8–11, VKD3D-Proton for D3D12, D7VK for D3D ≤ 7, cnc-ddraw for 2D DirectDraw,
+wined3d as the fallback), GOG's own fixes, the game's protonfix from the Proton
+build, gogo's compat DB, then your override file,
+`~/.local/share/gogo/compat/<gogid>.toml`, whose `[platforms.linux]` table holds
+the Linux values. `--renderer` and `--runtime` (`ge-proton[/<version>]` or
+`path:<dir>` for a Proton build of your own) win.
+
+```sh
+gogo linux-app compat 1207659013                                    # merged config, layer per field, protonfix summary
+gogo linux-app --retarget 1207659013 --renderer wined3d             # writes the override file, re-runs setup
+gogo linux-app --retarget 1207659013 --runtime ge-proton/GE-Proton10-34
+gogo linux-app --retarget 1207659013 --renderer auto                # drop the override
+gogo linux-app next-renderer 1207659013 --dry-run                   # what "Try next renderer" would pick
+```
+
+`gogo apps list|show|remove|prune` work on Linux too. A game counts as orphaned
+once its menu entry was made and then deleted; `apps remove` deletes the menu
+entry with the game.
+
+Details: [design 18](docs/design/18-linux-runtime.md) and
+[`docs/21`](docs/21-linux-runtimes-and-renderers.md).
 
 ### completions
 

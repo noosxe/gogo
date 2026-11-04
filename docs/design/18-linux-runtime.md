@@ -971,7 +971,8 @@ the data root moved.
   compared (a change is a note) → the renderer (`apply_linux`) → registry values
   (`umu-run reg add`, only for a new prefix or changed values) → pending verbs only
   (`fixes::pending_verbs`; `z:` back for the run; anything still missing warns) →
-  `localize` → `launch.conf`, `state.toml`, each written only when its bytes changed (a
+  `localize` (home links made real; `dosdevices/` keeps `c:` and `z:`, §7.2) →
+  `launch.conf`, `state.toml`, each written only when its bytes changed (a
   setup that changes nothing runs nothing through umu and rewrites nothing).
 - **Every umu run** gets `WINEPREFIX`, `PROTONPATH`, `GAMEID`, `STORE=gog`,
   `PROTONFIXES_DISABLE=1` and `games/<gogid>/` as its working dir; its output goes to
@@ -979,10 +980,10 @@ the data root moved.
   umu-run under `/tmp` is refused ("private /tmp") before anything runs.
 - **`z:` comes back on every Proton run (real smoke, 2026-11-04).** GE-Proton11-12's
   `proton` script recreates `dosdevices/z: -> /` whenever it's missing (its prefix setup,
-  every run), and Wine adds `x: -> $HOME` and `com1`–`com4`. So on Linux decision 4 holds
-  at rest only: setup's last `localize` leaves `dosdevices/` with just `c:`, and the next
-  Proton run (the game's own included) maps `/` and `$HOME` again while it runs. Undoing
-  that after the game exits, or living with it, is #177's call.
+  every run), and Wine adds `x: -> $HOME` and `com1`–`com4`. So §7.2's fallback is the
+  decision: setup keeps `z:` (and, until a prefix set up before had it back, `restore_z`
+  still puts it there for steps that hand Wine unix paths), and drops the rest. While the
+  game runs, Wine's `x:` and ports are back; the next setup drops them again.
 - **wined3d**: chosen by L3, L4, a flag or the walk, it adds `PROTON_USE_WINED3D=1` (the
   env and overrides the renderer sets fill gaps only); as L1's own pick it sets nothing.
   The plan line and setup's notes say which.
@@ -1015,9 +1016,11 @@ in the first host pass.
 **Prefix isolation (design 16 decision 4).** Proton's prefix has a `steamuser` home with
 real directories, not links into `~`, and umu links `users/<user>` and `steamuser` to each
 other (relative). Setup applies decision 4's rule (no absolute links under
-`drive_c/users/`). `z:` → `/`: setup removes it as on the Mac, unless the first host pass
-shows that Proton recreates it at every launch (reported, not checked). Then it stays on
-Linux and `doctor`'s `links` check skips it.
+`drive_c/users/`). **Settled (owner, 2026-11-04, from #176's real smoke): `z:` → `/`
+stays on Linux.** GE-Proton's `proton` script recreates it on every run, so removing it
+would hold only between runs. Setup keeps `c:` and `z:` (`linuxapp::setup::KEPT_DRIVES`)
+and still drops every other drive letter (Wine's `x:` → `$HOME`, `com1`…); `doctor`'s
+`links` check (#178) skips `z:`. macOS is unchanged: setup removes `z:` there.
 
 ### 7.3 Logs
 
@@ -1060,7 +1063,7 @@ a failure.
 | `renderer` | fail: cnc-ddraw without its files; `d7vk` on a build without D7VK; both a game-dir `ddraw.dll` and `PROTON_USE_D7VK`. Notes `dxguid_block` | `linux-app setup` |
 | `vulkan` | fail: no Vulkan ICD found (`/usr/share/vulkan/icd.d`, `/etc/vulkan/icd.d`, `/run/opengl-driver/share/vulkan/icd.d`, `VK_ICD_FILENAMES`/`VK_DRIVER_FILES`). warn: more than one GPU (R18); `vulkaninfo --summary` output when it's on `PATH` | the driver; `DXVK_FILTER_DEVICE_NAME` |
 | `vulkan32` | fail: a 32-bit game and no 32-bit ICD (R19) | NixOS: `hardware.graphics.enable32Bit = true`; elsewhere the distro's 32-bit Mesa/NVIDIA package |
-| `stamp`, `links`, `processes`, `log` | as design 16 §8.3 (processes found through `/proc/<pid>/environ`) | as there |
+| `stamp`, `links`, `processes`, `log` | as design 16 §8.3 (processes found through `/proc/<pid>/environ`; `links` skips `z:`, which stays on Linux, §7.2) | as there |
 
 NixOS gets its own hints where the fix differs: 32-bit graphics, `nix-ld` not needed for
 umu (the container carries its libraries), and a gogo other than the flake's `gogo-linux-app` (§2.1: refused, with the two ways out).
@@ -1098,15 +1101,14 @@ only on Linux (`#[cfg(target_os = "linux")]`), with the same shape:
 - Leftovers fixed in the same work: `depot`'s "macOS only for now" (§6), the `runtimes
   install`/`renderers install` refusal off macOS (§6).
 
-**As built (#176, the build and setup)** — `linuxapp/build.rs`, `gogo linux-app`:
+**As built (#176)** — `linuxapp/build.rs`, `linuxapp/manage.rs`, `gogo linux-app`:
 
 - Flags: `<game|setup.exe|dir>`, `--from-depot`, `--name`, `--runtime [<ref>]`,
   `--renderer auto|dxvk|vkd3d-proton|d7vk|cnc-ddraw|wined3d`, `--refresh`,
   `--interactive`, `--yes`, `--json`, `--json-progress`; `setup <gogid> [--refresh]
   [--json]`. A bare `--runtime` (or `--interactive`) opens a menu: gogo's pinned GE-Proton,
   the GE-Protons in the store, the unmanaged builds each Steam has, "other…" for a typed
-  ref. `compat`, `next-renderer`, `--retarget` and `apps` on Linux are the next PR;
-  `doctor` is #178.
+  ref. `compat`, `next-renderer`, `--retarget` and `apps` are below; `doctor` is #178.
 - The plan asks `[linux] umu` and, for a GE-Proton download, `[linux] proton_dir` before
   anything downloads (headless and unset fails naming the key). Its lines: source, game
   dir (a rebuild keeps the prefix and saves), compat, umu, runtime, container, renderer
@@ -1127,6 +1129,29 @@ only on Linux (`#[cfg(target_os = "linux")]`), with the same shape:
   `gogo-linux-app` package that's `.gogo-wrapped`, which skips the wrapper that sets
   `GOGO_UMU_PYTHON`.
 - `lane.rs`, the game-source resolution and the depot-tree lookup now build on Linux too.
+- **After the build** (`linuxapp/manage.rs`, the second PR):
+  - `gogo linux-app compat <gogid> [--json]`: L1 (the baked verbs), L3 and L4 for Linux,
+    merged as setup merges them. With the game's Proton build here, L3 is shown under the
+    ownership rule (§4.3) with the fix summary; without it, L3 whole and a note. The
+    renderer line gives the effective one and its layer, the baked one and its layer, L1's
+    pick from the game as installed, and what setup last applied. Variants as on the Mac.
+    Nothing is installed or fetched.
+  - `gogo linux-app next-renderer <gogid> [--dry-run]`: `renderer::next_renderer_on(Os::Linux,
+    …)` after `state.toml`'s renderer (else the baked one), L1 from a fresh scan; written to
+    L4's `[platforms.linux]`.
+  - `gogo linux-app --retarget <gogid> --runtime <ref> --renderer <id>`: both checked
+    (`ProtonRef::parse`, a Linux renderer id) before L4's `[platforms.linux]` is written;
+    `auto` drops a key. Setup runs when something changed and the game is built. No
+    `.app`/bundle form: the target is a gogid.
+- **`gogo apps` on Linux** (`macapp/apps.rs`): a game whose dir has `gogo-launch.toml` is
+  a Linux one (`state.toml` read as `LinuxState`). Its menu entry is
+  `linuxapp::game::desktop_path`: `$XDG_DATA_HOME/applications/gogo-<gogid>.desktop`, or
+  `$GOGO_HOME/applications/` when `GOGO_HOME` is set (it collapses every dir, and keeps a
+  scratch home out of the user's menu). Orphaned: `launch.sh` is there (#177 writes it with
+  the menu entry) and the `.desktop` file isn't, so a game built before #177 isn't pruned
+  for never having had one; `apps list` says `not yet` for it. `apps remove` deletes the
+  `.desktop` file with the game, and refuses while a process has the prefix as its
+  `WINEPREFIX` (`linuxapp::game::prefix_procs`, through `/proc/<pid>/environ`, §7.2).
 - #177's, not here: the `.desktop` file, `launch.sh`, the stamp check at launch, logs and
   the dialog. The pieces they share are in core: `linuxapp::game` (`launch.conf`,
   `state.toml`, `current_stamp`) and `linuxapp::setup::setup`.
