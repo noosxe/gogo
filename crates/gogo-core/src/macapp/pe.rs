@@ -14,8 +14,9 @@
 //!   checked for the 44 ddraw/d3d GUIDs that `dxguid.lib` links into the
 //!   image (docs/22 §6.2). Device and work GUIDs (`IID_IDirect3DHALDevice`,
 //!   `IID_IDirect3DTexture2` …) are strong evidence, the `IID_IDirect3D*`
-//!   interface GUIDs alone medium. ≥ 40 of the 44 is the whole `dxguid` set,
-//!   which says only "linked `dxguid`": its D3D hits are the weakest
+//!   interface GUIDs alone medium. ≥ 32 of the 44 is a whole `dxguid` set
+//!   (DirectX 7's has 43, DirectX 6's 36), which says only "linked
+//!   `dxguid`": its D3D hits are the weakest
 //!   evidence ([`D3d7Confidence::DxguidBlock`]), but still count as D3D ≤ 7
 //!   (docs/22 §6.1: unsure is not 2D). Unreal's `D3DDrv.dll` and LithTech's
 //!   `d3d.ren` next to the exe mark a D3D path too.
@@ -118,7 +119,7 @@ pub enum GraphicsSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum D3d7Confidence {
-    /// The D3D GUIDs come only with the whole `dxguid` block (≥ 40 of the
+    /// The D3D GUIDs come only with a whole `dxguid` block (≥ 32 of the
     /// 44 ddraw/d3d GUIDs): a D3D game and a 2D one linked against all of
     /// `dxguid.lib` look the same.
     DxguidBlock,
@@ -209,7 +210,7 @@ pub struct PeFileScan {
     /// How many of the 44 ddraw/d3d GUIDs are present (0 if not looked for).
     #[serde(default)]
     pub ddraw_guids: u8,
-    /// `ddraw_guids` ≥ [`DXGUID_BLOCK_MIN`]: the whole `dxguid` set.
+    /// `ddraw_guids` ≥ [`DXGUID_BLOCK_MIN`]: a whole `dxguid` set.
     #[serde(default)]
     pub dxguid_block: bool,
     /// This file's Direct3D ≤ 7 evidence.
@@ -527,9 +528,11 @@ const DDRAW_GUIDS: [[u8; 16]; 44] = [
 const D3D_INTERFACES: usize = 4;
 /// `DDRAW_GUIDS[..D3D_GUIDS]`: everything from `d3d.h`.
 const D3D_GUIDS: usize = 27;
-/// This many of the 44 present = the whole `dxguid` set (43 seen on real
-/// files, docs/22 §5.2; #174's corpus may tune it).
-pub const DXGUID_BLOCK_MIN: u32 = 40;
+/// This many of the 44 present = a whole `dxguid` set (docs/22 §5.2, §7.1).
+/// DirectX 7's `dxguid.lib` brings 43 (all but `IID_IDirectDraw3`),
+/// DirectX 6's 36 (also without the seven DX7 GUIDs: SimCity 3000, #174).
+/// The most a file without a block carried is 16.
+pub const DXGUID_BLOCK_MIN: u32 = 32;
 
 /// `Data4` written as one big-endian number, the way `DEFINE_GUID` lists it.
 const fn guid(d1: u32, d2: u16, d3: u16, d4: u64) -> [u8; 16] {
@@ -1100,6 +1103,10 @@ mod tests {
     const IID_TEXTURE2: usize = 16;
     const IID_DDRAW3: usize = 32;
     const IID_DDRAW7: usize = 34;
+    /// What DirectX 7 added (`IID_IDirect3D7`, `…TnLHalDevice`, `…Device7`,
+    /// `…VertexBuffer7`, `CLSID_DirectDraw7`, `IID_IDirectDraw7`,
+    /// `…Surface7`), plus `IID_IDirectDraw3`, which no `dxguid.lib` has.
+    const NOT_IN_DX6_BLOCK: [usize; 8] = [IID_D3D7, 9, 14, 26, 28, IID_DDRAW3, IID_DDRAW7, 39];
 
     /// The given GUIDs back to back, after a few odd bytes (GUIDs need not
     /// be aligned).
@@ -1160,12 +1167,24 @@ mod tests {
         assert_eq!(s.files[0].ddraw_guids, 43);
         assert!(s.files[0].dxguid_block);
 
-        // The threshold: 40 is the block, 39 with a device GUID is strong.
-        let s = ddraw_exe(&guids(0..40));
+        // The threshold: 32 is the block, 31 with a device GUID is strong.
+        let s = ddraw_exe(&guids(0..32));
         assert_eq!(s.d3d7_confidence, Some(D3d7Confidence::DxguidBlock));
-        let s = ddraw_exe(&guids(0..39));
+        let s = ddraw_exe(&guids(0..31));
         assert_eq!(s.d3d7_confidence, Some(D3d7Confidence::Strong));
         assert!(!s.dxguid_block);
+    }
+
+    /// #174: SimCity 3000 (2D) links DirectX 6's `dxguid.lib`, 36 GUIDs
+    /// without the DX7 ones. Its sound DLL carries the same 36: noise, not
+    /// device GUIDs.
+    #[test]
+    fn dx6_dxguid_block_is_a_block_too() {
+        let s = ddraw_exe(&guids((0..44).filter(|i| !NOT_IN_DX6_BLOCK.contains(i))));
+        assert_eq!(s.files[0].ddraw_guids, 36);
+        assert!(s.files[0].dxguid_block);
+        assert_eq!(s.graphics, GraphicsApi::D3dLegacy);
+        assert_eq!(s.d3d7_confidence, Some(D3d7Confidence::DxguidBlock));
     }
 
     /// Stronghold Crusader HD carries only `IID_IDirectDraw7`.
