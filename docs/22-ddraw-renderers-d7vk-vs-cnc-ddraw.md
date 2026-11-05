@@ -253,7 +253,7 @@ Main exes come from `goggame-*.info`. All are 32-bit. All facts in this section 
 | Anno 1503 A.D. (1438074791, `setup_anno_1503_2.0.0.5.exe`) | `AnnoDisplay.dll` imports it; `AnnoFrame.dll` names it | `AnnoDisplay.dll` **7**: `IID_IDirect3D7`, `IID_IDirectDraw7`, HAL, RGB, Ref, Null and TnLHal device. `AnnoFrame.dll` 2: HAL and RGB device. `Max_Sound.dll` carries the 43-GUID block but has nothing to do with ddraw, so it isn't checked | no | `d3d_legacy`, `strong` → `d7vk` / `wined3d` | ✓ 3D (D3D7; D7VK profile) |
 | Pharaoh + Cleopatra (1207659046, `setup_pharaoh_gold_2.1.0.15.exe`) | `Pharaoh.exe` imports it | **0** | no | `ddraw_2d` → `cnc-ddraw` / `cnc-ddraw` | ✓ 2D (live-proven on the Mac, docs/16) |
 | Zeus + Poseidon (1207659039, `setup_zeus_and_poseidon_2.1.0.10.exe`) | `Zeus.exe` imports it | **0** | no | `ddraw_2d` → `cnc-ddraw` / `cnc-ddraw` | ✓ 2D |
-| SimCity 3000 Unlimited (2086050016, `setup_simcity_3000_unlimited_2.0.949(a)_ddrawfix_(77026).exe`) | `Apps/GZGraphicD.dll` imports it (`DirectDrawCreate`, `DirectDrawEnumerateA`); `SIMBABLD.DLL` and `Baapp.exe` name it | **36**, the same set in `SC3U.exe`, `GZGraphicD.dll`, `SIMBABLD.DLL` and `GZSOUNDD.DLL` (which imports only `dsound`): all 44 except the seven DirectX 7 GUIDs and `IID_IDirectDraw3`. This is DirectX 6's `dxguid` block. No `Direct3D` string in `SC3U.exe` or `GZGraphicD.dll`. `Baapp.exe`, the separate "Building Architect Tool" play task, has 5 selective ones: `IID_IDirect3D3`, `IID_IDirect3DTexture2`, RGB device, `IID_IDirectDraw4`, `IID_IDirectDrawSurface4` | yes: DDrawCompat (`narzoul/DDrawCompat`, in `Apps/`; GOG's "ddrawfix" build) | `d3d_legacy`, `strong` (from the 36, under the old threshold of 40) → `wined3d` + game's `ddraw.dll` kept / `wined3d` + kept | class ✗ (2D read as D3D≤7), pick ✗ in effect until #199: `Apps/ddraw.dll` was looked for in the install root, so `ddraw=n,b` was never set and Wine's builtin ddraw ran. Fixed: the exe's dir counts |
+| SimCity 3000 Unlimited (2086050016, `setup_simcity_3000_unlimited_2.0.949(a)_ddrawfix_(77026).exe`) | `Apps/GZGraphicD.dll` imports it (`DirectDrawCreate`, `DirectDrawEnumerateA`); `SIMBABLD.DLL` and `Baapp.exe` name it | **36**, the same set in `SC3U.exe`, `GZGraphicD.dll`, `SIMBABLD.DLL` and `GZSOUNDD.DLL` (which imports only `dsound`): all 44 except the seven DirectX 7 GUIDs and `IID_IDirectDraw3`. This is DirectX 6's `dxguid` block. No `Direct3D` string in `SC3U.exe` or `GZGraphicD.dll`. `Baapp.exe`, the separate "Building Architect Tool" play task, has 5 selective ones: `IID_IDirect3D3`, `IID_IDirect3DTexture2`, RGB device, `IID_IDirectDraw4`, `IID_IDirectDrawSurface4` | yes: DDrawCompat (`narzoul/DDrawCompat`, in `Apps/`; GOG's "ddrawfix" build) | `d3d_legacy`, `strong` (from the 36, under the old threshold of 40) → `wined3d`, the game's DDrawCompat left in place and unloaded / same | class ✗ (2D read as D3D≤7), pick ✓ since #199: Wine's builtin ddraw, on purpose. `ddraw=n,b` ends the game with code 9 in 2 s (§5.5) |
 | Warhammer 40,000: Chaos Gate (1433928487, `setup_warhammer_40000_chaos_gate_1.2_gog_v9_(90274).exe`) | `WH40K.exe` imports `wing32.dll` and names `ddraw.dll` (runtime) | **13**, DirectDraw only (`CLSID_DirectDraw`, `…Clipper`, `IID_IDirectDraw`/`2`/`4`, `…Surface`/`2`/`3`/`4`, `…Palette`, `…Clipper`, `…ColorControl`, `…GammaControl`). No D3D | yes: "GOG.com DirectX 1-7 wrapper" 1.1.0.6929, which imports `d3d9.dll` (left out of the class as a game wrapper) | `ddraw_2d` (runtime names) → `wined3d` + game's `ddraw.dll` kept (its D3D9 then lands on Proton's DXVK) / `cnc-ddraw` id, game's DLL kept | ✓ 2D |
 
 Findings:
@@ -287,11 +287,29 @@ Findings:
    like Stronghold's one (§5.2). Pharaoh and Zeus need none: they stay on the
    `IDirectDraw` that `DirectDrawCreate` returns.
 6. **Two of six ship their own `ddraw.dll`** (DDrawCompat, GOG's D3D9-based wrapper).
-   gogo keeps both, as §6.1 says. For these games the class decides nothing.
-   **Correction (#199):** this table read the picks off the scan, which looks beside the
-   exe. Setup looked in the install root, so SimCity 3000's `Apps/ddraw.dll` never got its
-   `ddraw=n,b` and the owner's first real run was on Wine's builtin ddraw. Setup, `plan`
-   and `doctor` now look beside the exe (design 18 §3).
+   gogo keeps both, as §6.1 says, and loads only the wrapper. For these games the class
+   decides nothing. **Correction (#199):** this table read the picks off the scan, which
+   looks beside the exe. Setup looked in the install root, so SimCity 3000's
+   `Apps/ddraw.dll` never got its `ddraw=n,b` and the owner's first real run was on Wine's
+   builtin ddraw. Setup, `plan` and `doctor` now look beside the exe (design 18 §3), and
+   that accident turned out to be the right outcome (§5.5).
+
+### 5.5 DDrawCompat under Proton (#199)
+
+Run headless (sway with the headless backend, pixman and llvmpipe, 1280×800, GE-Proton11-12,
+SimCity 3000 Unlimited in a scratch build, not on real hardware):
+
+| `Apps/ddraw.dll` | Result |
+|---|---|
+| DDrawCompat, `ddraw=n,b` | Exits with code 9 within 2 s, every time. `+loaddll` shows `Apps\ddraw.dll` native, then `system32\ddraw.dll` builtin; a read of address 0 at RVA 0x1D692 before its first "Installing…" log line, then `c0000409`. `FullscreenMode = exclusive` and `CrashDump = mini` change nothing |
+| DDrawCompat, no override (Wine's builtin runs) | Menu, 800×600 scaled to fill, clicks land (Preferences opens). The game holds `_NET_WM_STATE_FULLSCREEN` and ignores the WM's close request |
+| Moved aside by hand, cnc-ddraw in `Apps/` | Menu, scaled, clicks land, the New City dialog opens |
+
+DDrawCompat v0.5.3's README rules Wine out, and `narzoul/DDrawCompat#418` was closed "Wine
+is not supported". So gogo tells it from other wrappers by its own log strings and never
+loads it; the owner chose to leave it unloaded over moving it aside for cnc-ddraw, which
+is the fallback if real hardware shows a problem the builtin can't get past. The tiled
+window the owner saw under Hyprland didn't reproduce headless: that is the host pass.
 
 Seen on the way (not part of the rule):
 
@@ -310,7 +328,8 @@ Seen on the way (not part of the rule):
 
 | Scan result | Linux (GE-Proton / Wine) | macOS |
 |---|---|---|
-| Game ships its own `ddraw.dll` (`local_overrides`) | keep it, `ddraw=n,b`. No cnc-ddraw, no D7VK (as protonfixes does) | same (today's behaviour) |
+| Game ships DDrawCompat as `ddraw.dll` (§5.5) | keep it, unloaded: no override, Wine's builtin. No cnc-ddraw, no D7VK (Proton's own `ddraw=n,b` would load it) | same |
+| Game ships another `ddraw.dll` (`local_overrides`) | keep it, `ddraw=n,b`. No cnc-ddraw, no D7VK (as protonfixes does). Untested under Proton (Chaos Gate's GOG D3D9 wrapper) | keep it (override under cnc-ddraw, today's behaviour) |
 | D3D≤7 **immediate mode**: device/work GUID outside the block, or `d3dim*` import, or a D3D renderer DLL | **D7VK**: `PROTON_USE_D7VK=1` under Proton, game-dir `ddraw.dll` + `ddraw=n,b` on plain Wine | wined3d |
 | D3D≤7 **retained mode** (`d3drm`/`d3dxof`) | wined3d (Proton default; D7VK doesn't do RM) | wined3d |
 | Only `IID_IDirect3D*` outside the block (probe-only or real use) | D7VK (harmless if it's 2D) | wined3d (as today) |

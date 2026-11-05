@@ -354,7 +354,8 @@ Mac, with a Linux table:
 | D3D9 / 10 / 11 | `dxvk` | nothing: Proton's default |
 | D3D12 | `vkd3d-proton` | nothing: Proton's default |
 | D3D8 | `dxvk` | `PROTON_DXVK_D3D8=1` (else wined3d's `d3d8`) |
-| Game ships its own `ddraw.dll` | none | keep it, `ddraw=n,b`; no cnc-ddraw, no D7VK |
+| Game ships DDrawCompat as `ddraw.dll` (#199) | none | keep it, unloaded: no override, Wine's builtin; no cnc-ddraw, no D7VK |
+| Game ships another `ddraw.dll` | none | keep it, `ddraw=n,b`; no cnc-ddraw, no D7VK |
 | D3D≤7 immediate mode, interface GUIDs only, or only the `dxguid` block | `d7vk` | `PROTON_USE_D7VK=1` |
 | D3D≤7 retained mode (`d3drm`/`d3dxof`) | `wined3d` | nothing: Proton's default `ddraw` |
 | DirectDraw, selective DirectDraw GUIDs only, 32-bit | `cnc-ddraw` | `ddraw.dll` + gogo's `ddraw.ini` in the game dir, `ddraw=n,b` (as `ddraw.rs` does on the Mac) |
@@ -419,7 +420,7 @@ Mac, with a Linux table:
     `dxguid.lib`: 36 GUIDs, the 43 minus the DirectX 7 ones, the same in its sound DLL.
     At 40 they counted as device GUIDs (`strong`). At 32 both blocks are caught; files
     without one carry at most 16. No pick changes: SimCity 3000 ships DDrawCompat,
-    which both lanes keep (in effect only since #199, below), and #173's local Steam
+    which both lanes leave unloaded (#199, below), and #173's local Steam
     sweep (re-run, 60 game dirs) is unchanged.
   - **"Block only" stays D3D≤7.** It leans 2D (the one block-only ddraw game is 2D, no
     D3D≤7 game carries a block), but that is one game, whose pick doesn't depend on its
@@ -445,11 +446,25 @@ Mac, with a Linux table:
   - **Existing games:** the next `gogo linux-app setup` applies it; a launch runs setup
     only when the stamp is stale (`gogo-launch.toml` or the L4 file changed), the prefix
     or umu's Python is gone or the build changed, since the launcher already on disk
-    can't know gogo changed. Until then `doctor` fails `renderer` and names that setup.
-  - **The Mac:** the same dir, and the game's own DLL now gets `ddraw=n,b` under any
-    renderer, not just cnc-ddraw. Before, a game whose pick was wined3d (SimCity 3000's,
-    from its `dxguid` block) kept the file but ran Wine's builtin, as design 13's
-    load-order finding predicts. Mac `doctor` fails on it the same way.
+    can't know gogo changed. Until then `doctor` warns on `renderer` and names that setup.
+  - **The Mac:** the same dir. A game's own DLL gets `ddraw=n,b` only under cnc-ddraw,
+    as before.
+- **DDrawCompat stays unloaded (#199, the owner's decision, both lanes).** The first real
+  look past the wrong dir showed the override was the bug's other half: SimCity 3000 with
+  `ddraw=n,b` exits with code 9 within 2 s on a null read in DDrawCompat's init under
+  GE-Proton11-12, and its README rules Wine out. On Wine's builtin it reaches the menu,
+  scaled, and takes clicks (doc 22 §5.5, headless, not real hardware). So:
+  - **Recognised by content** (`ddraw::is_ddrawcompat`, `PeScan::ddrawcompat`): the log
+    strings `DDrawCompat loaded successfully` or `Loading DDrawCompat `, not the name,
+    which every wrapper shares, and not the bare word, which other wrappers can mention.
+  - **No override.** `plan_linux` returns `DdrawStep::LeaveDdrawCompat`; the file stays.
+  - **D7VK can't be used:** Proton appends `ddraw=n,b` itself, which would load it.
+    **cnc-ddraw can't either:** it isn't placed over a game's DLL. Both warn and walk on
+    to wined3d. The L1 pick has no alternatives for it. Mac `apply` falls back the same.
+  - **An L4 override is heard:** `dll_overrides.ddraw = "n,b"` still applies, setup warns,
+    and `doctor` fails `renderer` naming the file to edit.
+  - **Any other own `ddraw.dll`** keeps `ddraw=n,b` (Chaos Gate's GOG D3D9 wrapper),
+    untested under Proton. With no override `doctor` warns: the game runs, on the builtin.
 - **"Try next renderer" order on Linux** (design 16 §8.2's walk, a Linux table):
 
   | L1 class | order |
@@ -502,7 +517,8 @@ Mac, with a Linux table:
   d3dim/d3drm import" or "from the renderer DLL d3ddrv.dll" (`strong`), "from interface
   GUIDs only" (`medium`), and "only from the dxguid GUID block: may be 2D"
   (`dxguid_block`). The Mac still says nothing for `strong`. The own-`ddraw.dll` row
-  ends "…kept (ddraw=n,b): no cnc-ddraw, no D7VK".
+  ends "…kept (ddraw=n,b): no cnc-ddraw, no D7VK"; DDrawCompat's "…stays unloaded (it
+  doesn't run under Wine): Wine's builtin ddraw, no cnc-ddraw, no D7VK".
 - **What setup does (`plan_linux`, pure; `apply_linux`, the game-dir step).** It returns
   `env`, `dll_overrides`, a `DdrawStep` (`none` / `place_cnc_ddraw` / `remove_gogo` /
   `keep_games`), notes and warnings, plus the ref in effect after any fallback:
@@ -516,7 +532,8 @@ Mac, with a Linux table:
     "nothing" rows keep Proton's defaults, so a packed D3D9 exe the scan missed stays
     on DXVK.
   - Every renderer but `cnc-ddraw` takes gogo's cnc-ddraw out (`ddraw::remove_gogo`).
-    A game's own `ddraw.dll` is never touched and always gets `ddraw=n,b`.
+    A game's own `ddraw.dll` is never touched, and gets `ddraw=n,b` unless it is
+    DDrawCompat (#199).
 - **Never both (R17).** `d7vk` on a game dir with its own `ddraw.dll` warns ("…would win
   over D7VK's: keeping the game's") and moves to the next renderer in the order.
   `apply_linux` checks again after its step: a `ddraw.dll` still in the dir (a failed
@@ -1293,7 +1310,7 @@ a failure.
 | `umu` | fail: the zipapp missing or its sha wrong, no Python ≥ 3.10, NixOS without gogo's FHS env (§2.1), no unprivileged user namespaces, `umu = "system"` with no `umu-run` on `PATH`. warn: `system` (unpinned) | `runtimes install umu`, install Python, install the flake's `gogo-linux-app` |
 | `runtime` | fail: Proton dir missing, `proton` or `version` changed for a managed build, `require_tool_appid` unknown to umu (R2). warn: unmanaged, or a managed build in a shared tools dir | `linux-app setup`, `--retarget --runtime ge-proton` |
 | `container` | warn: the Steam Linux Runtime variant the build needs isn't in umu's folder (first launch downloads it); else variant and size | none |
-| `renderer` | fail: cnc-ddraw without its files; `d7vk` on a build without D7VK; both a `ddraw.dll` beside the exe and `PROTON_USE_D7VK`; the game's own `ddraw.dll` beside the exe with no `ddraw=` override (another value than `n…` warns: that's a choice). Notes `dxguid_block` | `linux-app setup` |
+| `renderer` | fail: cnc-ddraw without its files; `d7vk` on a build without D7VK; both a `ddraw.dll` beside the exe and `PROTON_USE_D7VK`; `ddraw=n…` loading the game's DDrawCompat beside the exe. warn: another own `ddraw.dll` with no `ddraw=` override, or a value other than `n…` (that's a choice). Notes `dxguid_block` and DDrawCompat left unloaded | `linux-app setup` |
 | `vulkan` | fail: no Vulkan ICD found (`/usr/share/vulkan/icd.d`, `/etc/vulkan/icd.d`, `/run/opengl-driver/share/vulkan/icd.d`, `VK_ICD_FILENAMES`/`VK_DRIVER_FILES`). warn: more than one GPU (R18); `vulkaninfo --summary` output when it's on `PATH` | the driver; `DXVK_FILTER_DEVICE_NAME` |
 | `vulkan32` | fail: a 32-bit game and no 32-bit ICD (R19) | NixOS: `hardware.graphics.enable32Bit = true`; elsewhere the distro's 32-bit Mesa/NVIDIA package |
 | `stamp`, `links`, `processes`, `log` | as design 16 §8.3 (processes found through `/proc/<pid>/environ`; `links` skips `z:`, which stays on Linux, §7.2) | as there |
