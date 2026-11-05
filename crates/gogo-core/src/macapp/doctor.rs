@@ -360,8 +360,12 @@ fn portable_checks(
     }
 
     let ddraw_dir = t.exe_dir_in(&res.join(&p.game));
-    if ddraw::is_games(&ddraw_dir) && !t.dll_overrides.contains_key("ddraw") {
-        f.push(no_own_ddraw_override(&ddraw_dir, rebuild.clone()));
+    if ddraw::is_ddrawcompat(&ddraw_dir)
+        && t.dll_overrides
+            .get("ddraw")
+            .is_some_and(|v| v.starts_with('n'))
+    {
+        f.push(ddrawcompat_loaded(rebuild.clone()));
     }
     match RendererRef::parse(&t.renderer).map(|r| r.renderer) {
         Ok(Renderer::Wined3d) => f.push(Finding::ok("renderer", "wined3d (built into Wine)")),
@@ -531,15 +535,12 @@ fn check_runtime(r: &str, gogid: &str, f: &mut Vec<Finding>) -> Option<super::ru
     }
 }
 
-/// The game's own `ddraw.dll` with no `ddraw=` override (#199).
-fn no_own_ddraw_override(dir: &Path, fix: String) -> Finding {
+/// The game's DDrawCompat with an override that loads it (#199).
+fn ddrawcompat_loaded(fix: String) -> Finding {
     Finding::fail(
         "renderer",
-        format!(
-            "{} ships beside the exe, but there is no ddraw=n,b override, so Wine's builtin \
-             ddraw runs instead",
-            dir.join("ddraw.dll").display()
-        ),
+        "ddraw=n,b loads the game's DDrawCompat beside the exe, which doesn't run under Wine: \
+         the game exits at once",
         fix,
     )
 }
@@ -558,12 +559,17 @@ fn check_renderer(
     let ddraw_dir = eff
         .tree_name()
         .map(|n| eff.exe_dir_in(&dirs.prefix.join("drive_c/GOG").join(n)));
-    if let Some(d) = ddraw_dir.as_deref().filter(|d| ddraw::is_games(d)) {
-        // Setup's override is in launch.conf, an L3/L4 one in `eff` too.
-        let conf = std::fs::read_to_string(&dirs.launch_conf).unwrap_or_default();
-        if !conf.contains("ddraw=") && !eff.dll_overrides.contains_key("ddraw") {
-            f.push(no_own_ddraw_override(d, setup.clone()));
-        }
+    if ddraw_dir.as_deref().is_some_and(ddraw::is_ddrawcompat)
+        && (eff
+            .dll_overrides
+            .get("ddraw")
+            .is_some_and(|v| v.starts_with('n'))
+            || std::fs::read_to_string(&dirs.launch_conf).is_ok_and(|c| c.contains("ddraw=n")))
+    {
+        f.push(ddrawcompat_loaded(format!(
+            "drop ddraw from dll_overrides in {}, then {setup}",
+            compat::user_path(gogid).display()
+        )));
     }
     let rref = match RendererRef::parse(r) {
         Ok(rref) => rref,

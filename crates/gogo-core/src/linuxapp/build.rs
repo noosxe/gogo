@@ -125,6 +125,9 @@ pub fn switches(p: &LinuxPlan) -> String {
             parts.push("cnc-ddraw's ddraw.dll in the game dir, ddraw=n,b".into())
         }
         renderer::DdrawStep::KeepGames => parts.push("the game's own ddraw.dll, ddraw=n,b".into()),
+        renderer::DdrawStep::LeaveDdrawCompat => {
+            parts.push("the game's DDrawCompat left unloaded, Wine's builtin ddraw".into())
+        }
         renderer::DdrawStep::RemoveGogo | renderer::DdrawStep::None => {}
     }
     if parts.is_empty() {
