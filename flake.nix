@@ -60,6 +60,26 @@
           umu-python = gogo-linux-app.umuPython;
         });
 
+      # `nixpkgs.overlays = [ gogo.overlays.default ]` (NixOS, home-manager):
+      # `pkgs.gogo`, and `pkgs.gogo-linux-app` on x86_64 Linux. Re-exports
+      # `packages` rather than rebuilding against the consumer's `pkgs`: the
+      # same store paths as `nix profile install`, and nothing depends on
+      # which channel they're on (`steam.buildRuntimeEnv` in umu-python.nix
+      # is a moving target). `inputs.nixpkgs.follows` is how a consumer opts
+      # into their own nixpkgs instead (README "Install"). Names are fixed,
+      # not system-dependent, so the overlay never forces `prev` to list them.
+      overlays.default = final: prev:
+        let
+          system = prev.stdenv.hostPlatform.system;
+          pick = name:
+            self.packages.${system}.${name}
+              or (throw "gogo: no ${name} for ${system} (packages: ${nixpkgs.lib.concatStringsSep ", " systems}; gogo-linux-app: x86_64-linux)");
+        in
+        {
+          gogo = pick "gogo";
+          gogo-linux-app = pick "gogo-linux-app";
+        };
+
       # `nix run .` / `nix run github:noosxe/gogo`
       # `nix run .#gogo-linux-app` (x86_64 Linux): the Linux game lane's gogo.
       apps = forAllSystems (system: {
