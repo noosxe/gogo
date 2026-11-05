@@ -14,14 +14,14 @@
 use std::path::{Path, PathBuf};
 
 use super::game::{self, LAUNCH_SH};
-use super::icon;
+use super::{icon, setup};
 use crate::macapp::error::MacAppError;
 use crate::macapp::launch::GameDirs;
 
 /// Bumped with every change to [`TEMPLATE`] that matters to a game set up
 /// before it. Setup rewrites `launch.sh` whenever its bytes differ, so this
 /// is for people: the run log header and `launch.log` name it.
-pub const LAUNCHER_VERSION: u32 = 1;
+pub const LAUNCHER_VERSION: u32 = 2;
 
 /// `games/<gogid>/icon.png`.
 pub const ICON: &str = "icon.png";
@@ -39,7 +39,12 @@ pub struct LauncherFiles {
 
 /// `launch.sh` for this gogo.
 pub fn launch_sh() -> String {
-    TEMPLATE.replace("@LAUNCHER_VERSION@", &LAUNCHER_VERSION.to_string())
+    TEMPLATE
+        .replace("@LAUNCHER_VERSION@", &LAUNCHER_VERSION.to_string())
+        .replace(
+            "@GAME_DRIVE_OFF@",
+            &format!("{}={}", setup::GAME_DRIVE_OFF.0, setup::GAME_DRIVE_OFF.1),
+        )
 }
 
 /// The `LAUNCHER_VERSION=` a `launch.sh` carries.
@@ -769,11 +774,13 @@ $(last_errors "$log")
     esac
 }
 
-# The game's environment (§7.2 step 4), in umu-run's process only. The L4
-# and fix env first: WINEPREFIX (R7), GAMEID, STORE and PROTONPATH are
-# gogo's and come last.
+# The game's environment (§7.2 step 4), in umu-run's process only. No host
+# drives (s:, x: -> $HOME, ...; setup::GAME_DRIVE_OFF), which the L4 env can
+# undo. The L4 and fix env next: WINEPREFIX (R7), GAMEID, STORE and
+# PROTONPATH are gogo's and come last.
 run_game() {
     local pair
+    export @GAME_DRIVE_OFF@
     for pair in ${ENV[@]+"${ENV[@]}"}; do export "${pair?}"; done
     if [ -n "$DLL_OVERRIDES" ]; then
         export WINEDLLOVERRIDES="$DLL_OVERRIDES${WINEDLLOVERRIDES:+;$WINEDLLOVERRIDES}"

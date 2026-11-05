@@ -24,6 +24,7 @@ use std::path::Path;
 use std::process::Command;
 
 use super::protonfix::{self, Fix, Module, OtherCode};
+use super::setup;
 use super::umu::UmuRun;
 use crate::macapp::compat::{self, CompatEntry, Effective, Layer, Os};
 
@@ -611,7 +612,8 @@ pub fn winetricks_command(
         .env("PROTONPATH", proton)
         .env("GAMEID", umu_id)
         .env("STORE", "gog")
-        .env(compat::PROTONFIXES_DISABLE, "1");
+        .env(compat::PROTONFIXES_DISABLE, "1")
+        .env(setup::GAME_DRIVE_OFF.0, setup::GAME_DRIVE_OFF.1);
     Some(c)
 }
 
@@ -883,6 +885,7 @@ mod tests {
         assert_eq!(env[std::ffi::OsStr::new("GAMEID")], "umu-40950");
         assert_eq!(env[std::ffi::OsStr::new("STORE")], "gog");
         assert_eq!(env[std::ffi::OsStr::new("PROTONPATH")], proton.as_os_str());
+        assert_eq!(env[std::ffi::OsStr::new("PROTON_SET_GAME_DRIVE")], "0");
         assert_eq!(
             env[std::ffi::OsStr::new("WINEPREFIX")],
             t.path().as_os_str()

@@ -33,7 +33,7 @@ use crate::macapp::error::MacAppError;
 use crate::macapp::launch::{GameDirs, LaunchToml, state_rel, windows_to_unix, write_atomic};
 use crate::macapp::prompt::PromptFn;
 use crate::macapp::renderer::{self, PROTON_USE_WINED3D, Renderer};
-use crate::macapp::{catalog, lutris, pe, store};
+use crate::macapp::{catalog, ddraw, lutris, pe, store};
 
 /// `games/<gogid>/install/`: umu's output from the build and setup.
 pub const LOG_DIR: &str = "install";
@@ -245,7 +245,8 @@ impl Umu<'_> {
             .env("PROTONPATH", self.proton)
             .env("GAMEID", self.umu_id)
             .env("STORE", "gog")
-            .env(compat::PROTONFIXES_DISABLE, "1");
+            .env(compat::PROTONFIXES_DISABLE, "1")
+            .env(GAME_DRIVE_OFF.0, GAME_DRIVE_OFF.1);
         c
     }
 
@@ -332,9 +333,19 @@ pub fn is_prefix(prefix: &Path) -> bool {
 /// The `dosdevices/` entries a Linux prefix keeps (design 18 §7.2): `c:`,
 /// and `z:` → `/`, which GE-Proton's `proton` script recreates on every
 /// run, so removing it would only hold between runs. Every other drive
-/// (Wine's `x:` → `$HOME`, `com1`…) goes, as on the Mac. #178's `links`
-/// check skips these.
+/// goes, as on the Mac. [`GAME_DRIVE_OFF`] keeps Proton's host drives from
+/// coming back; `com1`… do come back (Wine's mountmgr, every start), so
+/// #178's `links` check skips those as well as these.
 pub const KEPT_DRIVES: [&str; 2] = ["c:", "z:"];
+
+/// Turns off GE-Proton's `gamedrive` compat option, which it forces on under
+/// umu: `s:` → the library dir (`/home` here, from umu's
+/// `STEAM_COMPAT_LIBRARY_PATHS`), and from protonfixes' `setup_mount_drives`
+/// `u:` → `/media`, `v:` → `/run/media`, `w:` → `/mnt`, `x:` → `$HOME` on
+/// every run (#199). gogo's games live inside the prefix and need none of
+/// them. The launcher sets it before the L4 env, so an L4 `env` can turn
+/// the drives back on.
+pub const GAME_DRIVE_OFF: (&str, &str) = ("PROTON_SET_GAME_DRIVE", "0");
 
 /// Decision 4 on Linux: home folders are real dirs (no absolute links under
 /// `drive_c/users/`), and `dosdevices/` keeps only [`KEPT_DRIVES`].
@@ -579,8 +590,24 @@ pub fn setup(
                 reason,
             })?;
 
-    // The renderer (design 18 §3): switches, overrides, the game-dir step.
-    let mut rplan = renderer::apply_linux(&renderer_ref, &l1, scan_dir.as_deref(), &build.dir);
+    // The renderer (design 18 §3): switches, overrides, the game-dir step,
+    // all in the dir of the exe this game runs (#199). gogo's cnc-ddraw
+    // from an earlier setup leaves the tree's other dirs.
+    let ddraw_dir = scan_dir.as_deref().map(|d| eff.exe_dir_in(d));
+    let mut rplan = renderer::apply_linux(&renderer_ref, &l1, ddraw_dir.as_deref(), &build.dir);
+    if let (Some(root), Some(keep)) = (&scan_dir, &ddraw_dir) {
+        let stale = baked
+            .ddraw_dirs_in(root)
+            .into_iter()
+            .chain(eff.ddraw_dirs_in(root));
+        for d in stale.filter(|d| d != keep) {
+            if ddraw::remove_gogo(&d) {
+                rplan
+                    .notes
+                    .push(format!("removed gogo's cnc-ddraw from {}", d.display()));
+            }
+        }
+    }
     // `wined3d` chosen (L3, L4, a flag, the walk) moves D3D9–12 to wined3d;
     // as L1's own pick it means Proton's defaults (#172).
     if rplan.renderer == Renderer::Wined3d.id()

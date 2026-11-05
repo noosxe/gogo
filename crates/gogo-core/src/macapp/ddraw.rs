@@ -77,7 +77,7 @@ pub enum Applied {
 /// only: the PE loader finds the local dll before any builtin (live-proven),
 /// so no registry dll-overrides are touched.
 pub fn apply(store_tree: &Path, game_dir: &Path) -> Result<Applied, MacAppError> {
-    if game_dir.join("ddraw.dll").exists() {
+    if has_dll(game_dir) {
         return Ok(Applied::AlreadyPresent);
     }
     let dll = store_tree.join("ddraw.dll");
@@ -95,6 +95,32 @@ pub fn apply(store_tree: &Path, game_dir: &Path) -> Result<Applied, MacAppError>
         copy_dir(&src_shaders, &game_dir.join("Shaders"), &mut shaders)?;
     }
     Ok(Applied::Applied { shaders })
+}
+
+/// The dir a game's `ddraw.dll` counts in: the entry exe's, since that's
+/// where Wine's loader looks (#199; SimCity 3000 keeps its DDrawCompat in
+/// `Apps/`, beside `Apps/SC3U.exe`). `root` when the exe is unknown, outside
+/// the tree or in a dir that isn't there.
+pub fn dir_for(root: &Path, exe: Option<&Path>) -> PathBuf {
+    exe.and_then(Path::parent)
+        .filter(|d| d.starts_with(root) && d.is_dir())
+        .unwrap_or(root)
+        .to_path_buf()
+}
+
+/// A `ddraw.dll` in `game_dir`, in any case (Wine's lookup ignores it, as
+/// does `pe::scan`'s `local_overrides`).
+pub fn has_dll(game_dir: &Path) -> bool {
+    std::fs::read_dir(game_dir).is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|e| e.file_name().eq_ignore_ascii_case("ddraw.dll") && e.path().is_file())
+    })
+}
+
+/// A `ddraw.dll` in `game_dir` that isn't the one [`apply`] put there.
+pub fn is_games(game_dir: &Path) -> bool {
+    has_dll(game_dir) && !is_gogo(game_dir)
 }
 
 /// Is the `ddraw.dll` in `game_dir` the one [`apply`] put there (its

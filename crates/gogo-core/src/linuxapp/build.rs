@@ -27,7 +27,7 @@ use crate::macapp::error::MacAppError;
 use crate::macapp::launch::{self, GameDirs, LaunchToml};
 use crate::macapp::prompt::PromptFn;
 use crate::macapp::renderer::{self, LinuxPlan, PROTON_USE_WINED3D, Renderer, RendererChoice};
-use crate::macapp::{catalog, info, installer, lutris, pe, store, verbs};
+use crate::macapp::{catalog, ddraw, info, installer, lutris, pe, store, verbs};
 
 /// `gogo linux-app` inputs.
 #[derive(Debug, Clone, Default)]
@@ -134,9 +134,12 @@ pub fn switches(p: &LinuxPlan) -> String {
     }
 }
 
-/// [`renderer::plan_linux`] plus setup's rule for a chosen `wined3d`.
-fn renderer_plan(sel: &renderer::Selection, game_dir: &Path, build: &Path) -> LinuxPlan {
-    let mut p = renderer::plan_linux(&sel.renderer.value, &sel.l1, Some(game_dir), build);
+/// [`renderer::plan_linux`] plus setup's rule for a chosen `wined3d`, for
+/// the entry exe's dir in `tree` (an L3/L4 `exe` is setup's to apply).
+fn renderer_plan(sel: &renderer::Selection, tree: &Path, build: &Path) -> LinuxPlan {
+    let entry = info::find_entry_point(tree).ok();
+    let dir = ddraw::dir_for(tree, entry.as_deref());
+    let mut p = renderer::plan_linux(&sel.renderer.value, &sel.l1, Some(&dir), build);
     if p.renderer == Renderer::Wined3d.id()
         && sel.renderer.layer != Layer::Auto
         && !p.env.contains_key(PROTON_USE_WINED3D)

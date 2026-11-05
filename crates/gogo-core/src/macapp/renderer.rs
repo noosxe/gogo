@@ -636,9 +636,14 @@ pub struct Applied {
 /// DXMT or D3DMetal (with consent) → the derived runtime for `rt` (built
 /// once, shared); cnc-ddraw →
 /// `ddraw.dll` + ini in `game_dir` and `ddraw=n,b`; wined3d → nothing, and a
-/// cnc-ddraw gogo placed earlier is removed again. Anything that can't be
-/// set up falls back to wined3d with a warning, so a launch never fails on
-/// the renderer alone.
+/// cnc-ddraw gogo placed earlier is removed again. `game_dir` is the entry
+/// exe's dir ([`LaunchToml::exe_dir_in`]). The game's own `ddraw.dll` there
+/// gets `ddraw=n,b` whatever the renderer: Wine's default for `ddraw` is
+/// builtin first, which would ignore it (#199). Anything that can't be set
+/// up falls back to wined3d with a warning, so a launch never fails on the
+/// renderer alone.
+///
+/// [`LaunchToml::exe_dir_in`]: super::launch::LaunchToml::exe_dir_in
 pub fn apply(renderer: &str, rt: Runtime, game_dir: Option<&Path>) -> Applied {
     let mut out = Applied {
         renderer: Renderer::Wined3d.id().into(),
@@ -660,6 +665,11 @@ pub fn apply(renderer: &str, rt: Runtime, game_dir: Option<&Path>) -> Applied {
     {
         out.notes
             .push("removed gogo's cnc-ddraw from the game dir".into());
+    }
+    if game_dir.is_some_and(ddraw::is_games) {
+        out.dll_overrides.insert("ddraw".into(), "n,b".into());
+        out.notes
+            .push("the game dir's own ddraw.dll is kept (ddraw=n,b)".into());
     }
     // #82: a renderer build for another arch than the runtime's.
     let arch = catalog::runtime_arch(&super::launch::runtime_ref(&out.runtime));
@@ -693,14 +703,12 @@ pub fn apply(renderer: &str, rt: Runtime, game_dir: Option<&Path>) -> Applied {
                 Some(Ok(ddraw::Applied::Applied { shaders })) => out.notes.push(format!(
                     "cnc-ddraw (dll + ini, {shaders} shaders) in the game dir"
                 )),
-                Some(Ok(ddraw::Applied::AlreadyPresent)) => out
-                    .notes
-                    .push("cnc-ddraw: the game dir's own ddraw.dll is kept".into()),
+                Some(Ok(ddraw::Applied::AlreadyPresent)) => {}
                 Some(Err(e)) => {
                     out.warnings.push(format!("cnc-ddraw: {e}: using wined3d"));
                     return out;
                 }
-                None if dir.join("ddraw.dll").is_file() => {}
+                None if ddraw::has_dll(dir) => {}
                 None => {
                     out.warnings
                         .push("cnc-ddraw unavailable (provisioning failed): using wined3d".into());
@@ -1021,8 +1029,9 @@ pub struct LinuxPlan {
 }
 
 /// Work out `renderer` (a Linux ref) for one game: `l1` is its
-/// [`pick_linux`] (the walk order, the D3D8 class), `game_dir` the game's
-/// files, `proton` the build's root.
+/// [`pick_linux`] (the walk order, the D3D8 class), `game_dir` the entry
+/// exe's dir ([`ddraw::dir_for`]: every `ddraw.dll` question is about that
+/// dir, not the install root), `proton` the build's root.
 ///
 /// - **dxvk**, **vkd3d-proton**: nothing, Proton's defaults; D3D8 adds
 ///   [`PROTON_DXVK_D3D8`].
@@ -1051,7 +1060,7 @@ pub fn plan_linux(renderer: &str, l1: &Pick, game_dir: Option<&Path>, proton: &P
     };
     let dir = game_dir.filter(|d| d.is_dir());
     let gogo = dir.is_some_and(ddraw::is_gogo);
-    let own = !gogo && dir.is_some_and(|d| d.join("ddraw.dll").is_file());
+    let own = dir.is_some_and(ddraw::is_games);
     let mut r = match RendererRef::parse_on(renderer, Os::Linux) {
         Ok(r) => r.renderer,
         Err(e) => {
@@ -1163,9 +1172,8 @@ pub fn apply_linux(renderer: &str, l1: &Pick, game_dir: Option<&Path>, proton: &
         };
         // Never both (R17), whatever the step did.
         let failed = failed.or_else(|| {
-            (plan.env.contains_key(PROTON_USE_D7VK)
-                && game_dir.is_some_and(|d| d.join("ddraw.dll").exists()))
-            .then(|| "a ddraw.dll is still in the game dir, which would win over D7VK's".into())
+            (plan.env.contains_key(PROTON_USE_D7VK) && game_dir.is_some_and(ddraw::has_dll))
+                .then(|| "a ddraw.dll is still in the game dir, which would win over D7VK's".into())
         });
         let Some(why) = failed else { return plan };
         let Ok(r) = RendererRef::parse_on(&plan.renderer, Os::Linux).map(|r| r.renderer) else {
@@ -1630,6 +1638,27 @@ mod tests {
         );
         assert_eq!(warns.borrow().len(), 1, "{warns:?}");
         unsafe { std::env::remove_var("GOGO_HOME") };
+    }
+
+    /// #199: the game's own DLL is loaded whatever the renderer; gogo's isn't
+    /// the game's, and goes when it isn't the renderer.
+    #[test]
+    fn apply_overrides_for_the_games_own_ddraw_only() {
+        let g = tempfile::tempdir().unwrap();
+        let a = apply("wined3d", fake_runtime(), Some(g.path()));
+        assert!(a.dll_overrides.is_empty(), "{a:?}");
+        std::fs::write(g.path().join("DDraw.dll"), "game").unwrap();
+        let a = apply("wined3d", fake_runtime(), Some(g.path()));
+        assert_eq!(a.dll_overrides["ddraw"], "n,b");
+        assert_eq!(a.renderer, "wined3d");
+        assert!(g.path().join("DDraw.dll").is_file());
+
+        let g = tempfile::tempdir().unwrap();
+        std::fs::write(g.path().join("ddraw.dll"), "cnc").unwrap();
+        std::fs::write(g.path().join("ddraw.ini"), "; gogo: x\n").unwrap();
+        let a = apply("wined3d", fake_runtime(), Some(g.path()));
+        assert!(a.dll_overrides.is_empty(), "{a:?}");
+        assert!(!g.path().join("ddraw.dll").exists());
     }
 
     fn fake_runtime() -> Runtime {
@@ -2121,6 +2150,58 @@ mod linux_tests {
         assert!(x.env.is_empty() && x.warnings.is_empty(), "{x:?}");
         // Nothing was written.
         assert_eq!(std::fs::read_dir(g.path()).unwrap().count(), 0);
+    }
+
+    /// #199: where a `ddraw.dll` counts.
+    #[test]
+    fn the_ddraw_dir_is_the_entry_exes() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path();
+        std::fs::create_dir_all(root.join("Apps")).unwrap();
+        let apps = root.join("Apps");
+        let dir_for = |exe: &Path| ddraw::dir_for(root, Some(exe));
+        assert_eq!(dir_for(&apps.join("SC3U.exe")), apps);
+        assert_eq!(dir_for(&root.join("game.exe")), root);
+        assert_eq!(dir_for(&root.join("No/x.exe")), root);
+        assert_eq!(dir_for(Path::new("/elsewhere/x.exe")), root);
+        assert_eq!(ddraw::dir_for(root, None), root);
+
+        assert!(!ddraw::has_dll(&apps));
+        std::fs::create_dir(apps.join("ddraw.dll")).unwrap();
+        assert!(!ddraw::has_dll(&apps), "a dir isn't one");
+        std::fs::remove_dir(apps.join("ddraw.dll")).unwrap();
+        std::fs::write(apps.join("DDRAW.DLL"), "x").unwrap();
+        assert!(ddraw::has_dll(&apps) && ddraw::is_games(&apps));
+        std::fs::write(apps.join("ddraw.ini"), "; gogo: x\n").unwrap();
+        assert!(ddraw::has_dll(&apps) && !ddraw::is_games(&apps));
+
+        let toml = |exe: &str, variant: &str| {
+            crate::macapp::launch::LaunchToml::parse(
+                &format!(
+                    "schema = 1\ngogid = \"1\"\ntitle = \"T\"\nruntime = \"r\"\n\
+                 renderer = \"wined3d\"\nexe = '{exe}'\nworkdir = 'C:\\GOG\\T'\n\
+                 [gogo]\npath = \"/g\"\nstate = \"/s\"\n\
+                 [[variant]]\nname = \"v\"\nexe = '{variant}'\nworkdir = 'C:\\GOG\\T'\n"
+                ),
+                Path::new("t"),
+            )
+            .unwrap()
+        };
+        let t = toml(r"C:\GOG\T\Apps\SC3U.exe", r"C:\GOG\T\tool.exe");
+        assert_eq!(t.exe_dir_in(root), apps);
+        assert_eq!(
+            t.ddraw_dirs_in(root).into_iter().collect::<Vec<_>>(),
+            [root.to_path_buf(), apps.clone()]
+        );
+        // The tree's copy has no such dir: the root.
+        assert_eq!(
+            toml(r"C:\GOG\T\No\x.exe", r"C:\GOG\T\x.exe").exe_dir_in(root),
+            root
+        );
+        assert_eq!(
+            toml(r"C:\GOG\T\x.exe", r"C:\GOG\T\x.exe").exe_dir_in(root),
+            root
+        );
     }
 
     /// R17 in every direction: for every renderer × game-dir state × D7VK

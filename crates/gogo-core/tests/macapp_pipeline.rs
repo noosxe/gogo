@@ -2204,6 +2204,97 @@ fn v2_real_setup_applies_l4_and_restamps() {
     drop(guard);
 }
 
+/// #199: `ddraw.dll` means the one beside the exe: the game's own gets its
+/// override, gogo's cnc-ddraw goes there and leaves the root, and doctor
+/// looks there.
+#[test]
+fn v2_ddraw_is_the_one_beside_the_exe() {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let store = tmp.path().join("ddraw-tree");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(store.join("ddraw.dll"), b"cnc").unwrap();
+    unsafe {
+        std::env::set_var("GOGO_HOME", &home);
+        std::env::set_var("GOGO_CNC_DDRAW_DIR", &store);
+    }
+    let opts = v2_opts(tmp.path(), &tmp.path().join("no-such-gogo"));
+    let tree = opts.game_tree.clone().unwrap();
+    std::fs::create_dir_all(tree.join("Apps")).unwrap();
+    std::fs::rename(tree.join("Game.exe"), tree.join("Apps/Game.exe")).unwrap();
+    let info = tree.join("goggame-1207659013.info");
+    let text = std::fs::read_to_string(&info).unwrap();
+    std::fs::write(&info, text.replace("\"Game.exe\"", r#""Apps\\Game.exe""#)).unwrap();
+    std::fs::write(tree.join("Apps/ddraw.dll"), b"game").unwrap();
+    let plan = macapp::plan(&opts, None, &mut |_| {}).unwrap();
+    macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).unwrap();
+    macapp::setup::setup("1207659013", None).unwrap();
+    let g = home.join("games/1207659013");
+    let game = g.join("prefix/drive_c/GOG/Treasure Adventure Game");
+    let conf = std::fs::read_to_string(g.join("launch.conf")).unwrap();
+    assert!(conf.contains("DLL_OVERRIDES='ddraw=n,b'"), "{conf}");
+    assert_eq!(std::fs::read(game.join("Apps/ddraw.dll")).unwrap(), b"game");
+    let renderer = || {
+        let r = gogo::macapp::doctor::doctor(
+            "1207659013",
+            &gogo::macapp::doctor::DoctorOptions {
+                host: gogo::macapp::doctor::Host::detect(),
+                stop_leftovers: false,
+            },
+        )
+        .unwrap();
+        r.findings
+            .iter()
+            .filter(|f| f.check == "renderer")
+            .map(|f| (f.level, f.message.clone()))
+            .collect::<Vec<_>>()
+    };
+    use gogo::macapp::doctor::Level;
+    assert!(
+        renderer()
+            .iter()
+            .all(|(l, m)| *l == Level::Ok || !m.contains("ddraw"))
+    );
+    // No override: Wine's builtin would run.
+    std::fs::write(g.join("launch.conf"), conf.replace("'ddraw=n,b'", "''")).unwrap();
+    assert!(
+        renderer()
+            .iter()
+            .any(|(l, m)| *l == Level::Fail && m.contains("no ddraw=n,b override")),
+        "{:?}",
+        renderer()
+    );
+
+    // cnc-ddraw beside the exe, out of the root where it used to go.
+    std::fs::remove_file(game.join("Apps/ddraw.dll")).unwrap();
+    std::fs::write(game.join("ddraw.dll"), b"cnc").unwrap();
+    std::fs::write(game.join("ddraw.ini"), "; gogo: x\n").unwrap();
+    std::fs::create_dir_all(home.join("compat")).unwrap();
+    std::fs::write(
+        home.join("compat/1207659013.toml"),
+        on_this_os("renderer = \"cnc-ddraw\"\n"),
+    )
+    .unwrap();
+    macapp::setup::setup("1207659013", None).unwrap();
+    assert_eq!(std::fs::read(game.join("Apps/ddraw.dll")).unwrap(), b"cnc");
+    assert!(!game.join("ddraw.dll").exists());
+    let conf = std::fs::read_to_string(g.join("launch.conf")).unwrap();
+    assert!(conf.contains("DLL_OVERRIDES='ddraw=n,b'"), "{conf}");
+    assert!(
+        renderer()
+            .iter()
+            .any(|(l, m)| *l == Level::Ok && m == "cnc-ddraw: ddraw.dll in the game dir"),
+        "{:?}",
+        renderer()
+    );
+    unsafe {
+        std::env::remove_var("GOGO_CNC_DDRAW_DIR");
+        std::env::remove_var("GOGO_HOME");
+    }
+    drop(guard);
+}
+
 /// #67 / #55: the prefix holds no link out of the state dir after a build
 /// or a setup, L4 registry values and verbs are applied (verbs with `z:`
 /// back for the run only), and a runtime gogo can't install names the fix.

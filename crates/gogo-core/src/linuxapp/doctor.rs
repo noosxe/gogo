@@ -844,7 +844,8 @@ fn dir_size(dir: &Path) -> u64 {
 // — renderer —
 
 /// The renderer setup last applied, against the files it needs (§3): gogo's
-/// cnc-ddraw in the game dir, D7VK in the build, never both `ddraw.dll`s.
+/// cnc-ddraw in the dir of the exe that runs, D7VK in the build, never both
+/// `ddraw.dll`s, and the game's own `ddraw.dll` there loaded (`ddraw=n,b`).
 fn check_renderer(
     g: &Game,
     build: &Path,
@@ -869,10 +870,12 @@ fn check_renderer(
         .as_ref()
         .map(|c| c.get("DLL_OVERRIDES").to_string())
         .unwrap_or_default();
-    let game_dir = scan.and_then(|(d, _)| d.clone());
-    let dll_in_game = game_dir
-        .as_ref()
-        .is_some_and(|d| d.join("ddraw.dll").exists());
+    let exe = g.conf.as_ref().map(|c| g.data_root.join(c.get("EXE")));
+    let game_dir = scan
+        .and_then(|(d, _)| d.as_deref())
+        .map(|root| ddraw::dir_for(root, exe.as_deref()));
+    let dll_in_game = game_dir.as_deref().is_some_and(ddraw::has_dll);
+    let own = game_dir.as_deref().is_some_and(ddraw::is_games);
     let dxguid = scan
         .and_then(|(_, s)| s.as_ref().ok())
         .is_some_and(|s| s.dxguid_block);
@@ -899,15 +902,42 @@ fn check_renderer(
             setup,
         );
     }
+    let ddraw_set = overrides
+        .split(';')
+        .find_map(|o| o.strip_prefix("ddraw="))
+        .map(str::to_string);
+    if own && ddraw_set.is_none() {
+        return Finding::fail(
+            "renderer",
+            format!(
+                "{} ships beside the exe, but launch.conf has no ddraw=n,b override, so Wine's \
+                 builtin ddraw runs instead",
+                game_dir
+                    .as_ref()
+                    .map(|d| d.join("ddraw.dll").display().to_string())
+                    .unwrap_or_default()
+            ),
+            setup,
+        );
+    }
+    if let Some(v) = ddraw_set.as_deref().filter(|v| own && !v.starts_with('n')) {
+        return Finding::warn(
+            "renderer",
+            format!("ddraw={v} in launch.conf: the game's own ddraw.dll beside the exe isn't used"),
+            format!(
+                "drop the override from {} to use it",
+                compat::user_path(&g.gogid).display()
+            ),
+        );
+    }
     let r = match RendererRef::parse_on(&applied, Os::Linux) {
         Ok(r) => r.renderer,
         Err(e) => return Finding::fail("renderer", format!("{applied}: {e}"), setup),
     };
     match r {
+        Renderer::CncDdraw if own => {}
         Renderer::CncDdraw => {
-            let placed = game_dir
-                .as_ref()
-                .is_some_and(|d| d.join("ddraw.dll").is_file() && ddraw::is_gogo(d));
+            let placed = dll_in_game && game_dir.as_deref().is_some_and(ddraw::is_gogo);
             if !placed {
                 return Finding::fail(
                     "renderer",
@@ -952,7 +982,12 @@ fn check_renderer(
             .collect::<Vec<_>>()
             .join(" ")
     };
-    Finding::ok("renderer", format!("{applied} ({sets}){note}"))
+    let kept = if own {
+        ", the game's own ddraw.dll beside the exe with ddraw=n,b"
+    } else {
+        ""
+    };
+    Finding::ok("renderer", format!("{applied} ({sets}{kept}){note}"))
 }
 
 // — vulkan, vulkan32 —
@@ -1328,10 +1363,21 @@ fn check_stamp(g: &Game, toml_raw: &[u8]) -> Finding {
     }
 }
 
+/// Wine's serial ports: `dosdevices/com1` → `/dev/ttyS0`. Its mountmgr makes
+/// them on every start (real smoke, #199), and they reach no files.
+fn is_wine_port(prefix: &Path, link: &Path, target: &Path) -> bool {
+    let name = link.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    link.parent() == Some(prefix.join("dosdevices").as_path())
+        && name
+            .strip_prefix("com")
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        && target.starts_with("/dev")
+}
+
 /// Links out of the data root in the prefix, but `dosdevices/z:`, which
 /// GE-Proton recreates on every run and setup keeps
-/// ([`setup::KEPT_DRIVES`], design 18 §7.2), and links into the game's own
-/// Proton build: Proton links its DLLs and fonts into `drive_c/windows`
+/// ([`setup::KEPT_DRIVES`], design 18 §7.2), Wine's serial ports, and links
+/// into the game's own Proton build: Proton links its DLLs and fonts into `drive_c/windows`
 /// (about 1,300 in a GE-Proton11-12 prefix, real smoke), which are outside
 /// the data root for a build in a shared tools dir or a `path:` one.
 fn check_links(g: &Game, proton: Option<&Path>) -> Finding {
@@ -1348,7 +1394,9 @@ fn check_links(g: &Game, proton: Option<&Path>) -> Finding {
     let proton = proton.map(normalize);
     out.retain(|(p, t)| {
         let resolved = normalize(&p.parent().unwrap_or(prefix).join(t));
-        !kept.contains(p) && !proton.as_ref().is_some_and(|d| resolved.starts_with(d))
+        !kept.contains(p)
+            && !is_wine_port(prefix, p, t)
+            && !proton.as_ref().is_some_and(|d| resolved.starts_with(d))
     });
     // Links into another Proton build: the one the game ran on before a
     // retarget. Proton re-links the prefix when a build of another version
@@ -1370,7 +1418,8 @@ fn check_links(g: &Game, proton: Option<&Path>) -> Finding {
     if out.is_empty() && others.is_empty() {
         return Finding::ok(
             "links",
-            "no links out of the data dir but z: and the Proton build's own files",
+            "no links out of the data dir but z:, Wine's serial ports and the Proton build's \
+             own files",
         );
     }
     if out.is_empty() {

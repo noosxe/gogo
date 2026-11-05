@@ -125,11 +125,17 @@ pub fn setup(gogid: &str, bundle: Option<&Path>) -> Result<SetupOutcome, MacAppE
     }
 
     // The renderer (#70, decision 3): an engine overlay (DXMT) runs from its
-    // derived runtime, a game-local one (cnc-ddraw) goes into the game dir.
-    let game_dir = eff
+    // derived runtime, a game-local one (cnc-ddraw) goes beside the exe.
+    let tree = eff
         .tree_name()
         .map(|n| dirs.prefix.join("drive_c/GOG").join(n));
+    let game_dir = tree.as_deref().map(|t| eff.exe_dir_in(t));
     let applied = renderer::apply(&eff.renderer, rt, game_dir.as_deref());
+    if let (Some(root), Some(keep)) = (&tree, &game_dir) {
+        for d in eff.ddraw_dirs_in(root).iter().filter(|d| *d != keep) {
+            super::ddraw::remove_gogo(d);
+        }
+    }
     warnings.extend(applied.warnings);
     let rt = applied.runtime;
     for (k, v) in applied.dll_overrides {

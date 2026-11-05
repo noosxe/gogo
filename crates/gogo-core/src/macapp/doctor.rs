@@ -17,7 +17,7 @@ use super::compat;
 use super::error::MacAppError;
 use super::launch::{self, GameDirs, GameState, LaunchToml};
 use super::renderer::{self, Renderer, RendererRef};
-use super::{catalog, d3dmetal, installer, store};
+use super::{catalog, d3dmetal, ddraw, installer, store};
 
 /// How bad a finding is. Only [`Level::Fail`] fails the command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -359,11 +359,16 @@ fn portable_checks(
         ));
     }
 
+    let ddraw_dir = t.exe_dir_in(&res.join(&p.game));
+    if ddraw::is_games(&ddraw_dir) && !t.dll_overrides.contains_key("ddraw") {
+        f.push(no_own_ddraw_override(&ddraw_dir, rebuild.clone()));
+    }
     match RendererRef::parse(&t.renderer).map(|r| r.renderer) {
         Ok(Renderer::Wined3d) => f.push(Finding::ok("renderer", "wined3d (built into Wine)")),
-        Ok(Renderer::CncDdraw) if res.join(&p.game).join("ddraw.dll").is_file() => f.push(
-            Finding::ok("renderer", "cnc-ddraw: ddraw.dll in the bundled game dir"),
-        ),
+        Ok(Renderer::CncDdraw) if ddraw::has_dll(&ddraw_dir) => f.push(Finding::ok(
+            "renderer",
+            "cnc-ddraw: ddraw.dll in the bundled game dir",
+        )),
         Ok(Renderer::CncDdraw) => f.push(Finding::fail(
             "renderer",
             "cnc-ddraw: no ddraw.dll in the bundled game dir",
@@ -526,8 +531,21 @@ fn check_runtime(r: &str, gogid: &str, f: &mut Vec<Finding>) -> Option<super::ru
     }
 }
 
+/// The game's own `ddraw.dll` with no `ddraw=` override (#199).
+fn no_own_ddraw_override(dir: &Path, fix: String) -> Finding {
+    Finding::fail(
+        "renderer",
+        format!(
+            "{} ships beside the exe, but there is no ddraw=n,b override, so Wine's builtin \
+             ddraw runs instead",
+            dir.join("ddraw.dll").display()
+        ),
+        fix,
+    )
+}
+
 /// The files the chosen renderer needs: a derived runtime with the overlay
-/// (DXMT, D3DMetal), or `ddraw.dll` in the game dir (cnc-ddraw).
+/// (DXMT, D3DMetal), or `ddraw.dll` beside the exe (cnc-ddraw).
 fn check_renderer(
     r: &str,
     rt: Option<&super::runtime::Runtime>,
@@ -537,6 +555,16 @@ fn check_renderer(
     f: &mut Vec<Finding>,
 ) {
     let setup = format!("gogo mac-app setup {gogid}");
+    let ddraw_dir = eff
+        .tree_name()
+        .map(|n| eff.exe_dir_in(&dirs.prefix.join("drive_c/GOG").join(n)));
+    if let Some(d) = ddraw_dir.as_deref().filter(|d| ddraw::is_games(d)) {
+        // Setup's override is in launch.conf, an L3/L4 one in `eff` too.
+        let conf = std::fs::read_to_string(&dirs.launch_conf).unwrap_or_default();
+        if !conf.contains("ddraw=") && !eff.dll_overrides.contains_key("ddraw") {
+            f.push(no_own_ddraw_override(d, setup.clone()));
+        }
+    }
     let rref = match RendererRef::parse(r) {
         Ok(rref) => rref,
         Err(e) => {
@@ -550,22 +578,17 @@ fn check_renderer(
     };
     match rref.renderer {
         Renderer::Wined3d => f.push(Finding::ok("renderer", "wined3d (built into Wine)")),
-        Renderer::CncDdraw => {
-            let dll = eff
-                .tree_name()
-                .map(|n| dirs.prefix.join("drive_c/GOG").join(n).join("ddraw.dll"));
-            match dll {
-                Some(d) if d.is_file() => f.push(Finding::ok(
-                    "renderer",
-                    "cnc-ddraw: ddraw.dll in the game dir",
-                )),
-                _ => f.push(Finding::fail(
-                    "renderer",
-                    "cnc-ddraw: no ddraw.dll in the game dir",
-                    setup,
-                )),
-            }
-        }
+        Renderer::CncDdraw => match ddraw_dir {
+            Some(d) if ddraw::has_dll(&d) => f.push(Finding::ok(
+                "renderer",
+                "cnc-ddraw: ddraw.dll in the game dir",
+            )),
+            _ => f.push(Finding::fail(
+                "renderer",
+                "cnc-ddraw: no ddraw.dll in the game dir",
+                setup,
+            )),
+        },
         // `RendererRef::parse` has only the macOS ids.
         Renderer::Dxvk | Renderer::Vkd3dProton | Renderer::D7vk => f.push(Finding::fail(
             "renderer",

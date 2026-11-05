@@ -212,7 +212,7 @@ pub(super) fn finish(
         });
         eff.renderer = fallback.default_ref();
     }
-    let applied = renderer::apply(&eff.renderer, rt, Some(install_dir));
+    let applied = renderer::apply(&eff.renderer, rt, Some(&eff.exe_dir_in(install_dir)));
     for message in applied.warnings {
         emit(&ProgressEvent::Warn { message });
     }

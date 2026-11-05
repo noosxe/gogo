@@ -8,7 +8,7 @@
 //! and licence notices. It is signed once and never written again; the
 //! prefix, the game files and the effective config live in the state dir.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -201,6 +201,34 @@ impl LaunchToml {
     pub fn tree_name(&self) -> Option<String> {
         let parts: Vec<&str> = self.exe.split('\\').collect();
         (parts.len() >= 4 && parts[1].eq_ignore_ascii_case("GOG")).then(|| parts[2].to_string())
+    }
+
+    /// The entry exe's dir in the game tree at `root` (the `C:\\GOG\\<name>`
+    /// of [`Self::game_dir`], wherever it sits): where the game's `ddraw.dll`
+    /// counts and where gogo's cnc-ddraw goes (#199, design 18 §3). `root`
+    /// when that dir isn't there.
+    pub fn exe_dir_in(&self, root: &Path) -> PathBuf {
+        self.dir_in(root, &self.exe)
+    }
+
+    /// Every dir in the tree at `root` a `ddraw.dll` of gogo's may have been
+    /// put in by an earlier setup: the root (where it went before #199), the
+    /// entry exe's and the variants'. Only one is in use at a time, so setup
+    /// takes it out of the others ([`Self::exe_dir_in`]).
+    pub fn ddraw_dirs_in(&self, root: &Path) -> BTreeSet<PathBuf> {
+        let exes = std::iter::once(&self.exe).chain(self.variants.iter().map(|v| &v.exe));
+        exes.map(|e| self.dir_in(root, e))
+            .chain([root.to_path_buf()])
+            .collect()
+    }
+
+    fn dir_in(&self, root: &Path, exe: &str) -> PathBuf {
+        let dir = exe
+            .strip_prefix(&format!("{}\\", self.game_dir()))
+            .and_then(|rel| rel.rsplit_once('\\'))
+            .map(|(head, _)| head.split('\\').fold(root.to_path_buf(), |p, c| p.join(c)));
+        dir.filter(|d| d.is_dir())
+            .unwrap_or_else(|| root.to_path_buf())
     }
 
     /// The variant the bundle runs by default: the one whose exe and args
