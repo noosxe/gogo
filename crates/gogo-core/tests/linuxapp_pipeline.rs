@@ -27,8 +27,8 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 const FAKE_UMU: &str = r#"#!/bin/sh
 log="$FAKE_UMU_LOG"
 printf 'ARGV:%s\n' "$*" >> "$log"
-printf 'ENV:WINEPREFIX=%s PROTONPATH=%s GAMEID=%s STORE=%s PROTONFIXES_DISABLE=%s CWD=%s\n' \
-  "$WINEPREFIX" "$PROTONPATH" "$GAMEID" "$STORE" "$PROTONFIXES_DISABLE" "$(pwd)" >> "$log"
+printf 'ENV:WINEPREFIX=%s PROTONPATH=%s GAMEID=%s STORE=%s PROTONFIXES_DISABLE=%s GAME_DRIVE=%s CWD=%s\n' \
+  "$WINEPREFIX" "$PROTONPATH" "$GAMEID" "$STORE" "$PROTONFIXES_DISABLE" "$PROTON_SET_GAME_DRIVE" "$(pwd)" >> "$log"
 [ -n "$WINEPREFIX" ] || { echo "no WINEPREFIX" >&2; exit 3; }
 case "$1" in
   "")
@@ -234,6 +234,7 @@ fn assert_runs_are_clean(log: &str, umu_id: &str) {
         assert!(!l.contains("WINEPREFIX= "), "WINEPREFIX unset: {l}");
         assert!(l.contains("STORE=gog"), "{l}");
         assert!(l.contains("PROTONFIXES_DISABLE=1"), "{l}");
+        assert!(l.contains("GAME_DRIVE=0"), "{l}");
         assert!(
             l.contains(&format!("GAMEID={umu_id}")) || l.contains("GAMEID=umu-0"),
             "{l}"
@@ -522,6 +523,163 @@ fn d7vk_for_d3d7_and_never_both_ddraw_dlls() {
         "{conf}"
     );
     assert_eq!(conf_value(&conf, "DLL_OVERRIDES"), "'ddraw=n,b'");
+}
+
+/// SimCity 3000's layout (#199): the exe, and whatever Wine should load
+/// beside it, in `Apps/`.
+fn exe_in_apps(w: &World) -> PathBuf {
+    let apps = w.tree.join("Apps");
+    std::fs::create_dir_all(&apps).unwrap();
+    std::fs::rename(w.tree.join("game.exe"), apps.join("game.exe")).unwrap();
+    let info = w.tree.join(format!("goggame-{ID}.info"));
+    let text = std::fs::read_to_string(&info).unwrap();
+    std::fs::write(&info, text.replace("\"game.exe\"", r#""Apps\\game.exe""#)).unwrap();
+    apps
+}
+
+fn renderer_finding(r: &gogo::macapp::doctor::Report) -> (gogo::macapp::doctor::Level, String) {
+    r.findings
+        .iter()
+        .find(|f| f.check == "renderer")
+        .map(|f| (f.level, f.message.clone()))
+        .unwrap()
+}
+
+#[test]
+fn the_games_own_ddraw_beside_an_exe_in_a_subdir_is_loaded() {
+    use gogo::macapp::doctor::Level;
+    let w = World::new("own-apps", &["ddraw.dll"]);
+    let apps = exe_in_apps(&w);
+    std::fs::write(apps.join("ddraw.dll"), "game").unwrap();
+    let plan = build::plan(&w.opts(), None, &mut quiet()).unwrap();
+    let p = plan.renderer_setup.as_ref().unwrap();
+    assert_eq!(
+        build::switches(p),
+        "the game's own ddraw.dll, ddraw=n,b",
+        "{p:?}"
+    );
+    build::execute(&plan, None, &mut quiet()).unwrap();
+    assert_eq!(conf_value(&w.conf(), "DLL_OVERRIDES"), "'ddraw=n,b'");
+    let dll = w.game().join("game/Apps/ddraw.dll");
+    assert_eq!(std::fs::read_to_string(&dll).unwrap(), "game");
+    assert!(!w.game().join("game/ddraw.ini").exists());
+
+    let host = doctor_host(&w, &[("radeon.x86_64", 2), ("radeon.i686", 1)]);
+    let (level, msg) = renderer_finding(&doctor(&w, &host));
+    assert!(level == Level::Ok && msg.contains("own ddraw.dll"), "{msg}");
+
+    // What a build before #199 wrote: no override.
+    let conf_path = w.game().join("launch.conf");
+    let conf = w.conf();
+    std::fs::write(&conf_path, conf.replace("'ddraw=n,b'", "''")).unwrap();
+    let (level, msg) = renderer_finding(&doctor(&w, &host));
+    assert!(
+        level == Level::Fail && msg.contains("no ddraw=n,b override"),
+        "{msg}"
+    );
+    // The next setup picks the fix up, with no config change.
+    setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
+    assert_eq!(conf_value(&w.conf(), "DLL_OVERRIDES"), "'ddraw=n,b'");
+
+    // An L4 `ddraw = "b"` says not to use it: heard, and said.
+    let l4 = gogo::macapp::compat::user_path(ID);
+    std::fs::create_dir_all(l4.parent().unwrap()).unwrap();
+    std::fs::write(
+        &l4,
+        "[platforms.linux]\ndll_overrides = { ddraw = \"b\" }\n",
+    )
+    .unwrap();
+    setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
+    assert_eq!(conf_value(&w.conf(), "DLL_OVERRIDES"), "'ddraw=b'");
+    let (level, msg) = renderer_finding(&doctor(&w, &host));
+    assert!(level == Level::Warn && msg.contains("isn't used"), "{msg}");
+    std::fs::remove_file(&l4).unwrap();
+
+    // Another case, as Wine's lookup and the scan see it.
+    std::fs::rename(&dll, w.game().join("game/Apps/DDRAW.DLL")).unwrap();
+    setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
+    assert_eq!(conf_value(&w.conf(), "DLL_OVERRIDES"), "'ddraw=n,b'");
+}
+
+#[test]
+fn a_ddraw_dll_away_from_the_exe_is_not_the_games_own() {
+    let w = World::new("root-dll", &["d3d9.dll"]);
+    let _ = exe_in_apps(&w);
+    std::fs::write(w.tree.join("ddraw.dll"), "tool").unwrap();
+    let plan = build::plan(&w.opts(), None, &mut quiet()).unwrap();
+    assert_eq!(
+        plan.renderer_setup.as_ref().unwrap().ddraw,
+        gogo::macapp::renderer::DdrawStep::None
+    );
+    build::execute(&plan, None, &mut quiet()).unwrap();
+    assert_eq!(conf_value(&w.conf(), "DLL_OVERRIDES"), "''");
+    assert_eq!(
+        std::fs::read_to_string(w.game().join("game/ddraw.dll")).unwrap(),
+        "tool"
+    );
+}
+
+#[test]
+fn cnc_ddraw_goes_beside_the_exe_and_follows_it() {
+    use gogo::macapp::doctor::Level;
+    let w = World::new("cnc-apps", &["ddraw.dll"]);
+    let store = w.root.join("cnc-store");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(store.join("ddraw.dll"), "cnc").unwrap();
+    // SAFETY: env mutation under ENV_LOCK, held by `w`.
+    unsafe { std::env::set_var("GOGO_CNC_DDRAW_DIR", &store) };
+    let _ = exe_in_apps(&w);
+    let other = w.tree.join("Other");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::copy(w.tree.join("Apps/game.exe"), other.join("tool.exe")).unwrap();
+    let plan = build::plan(&w.opts(), None, &mut quiet()).unwrap();
+    assert_eq!(
+        plan.renderer.as_ref().unwrap().renderer.value,
+        gogo::macapp::renderer::Renderer::CncDdraw.default_ref()
+    );
+    build::execute(&plan, None, &mut quiet()).unwrap();
+    let tree = w.game().join("game");
+    assert_eq!(
+        std::fs::read_to_string(tree.join("Apps/ddraw.dll")).unwrap(),
+        "cnc"
+    );
+    assert!(gogo::macapp::ddraw::is_gogo(&tree.join("Apps")));
+    assert!(!tree.join("ddraw.dll").exists());
+    assert_eq!(conf_value(&w.conf(), "DLL_OVERRIDES"), "'ddraw=n,b'");
+    let host = doctor_host(&w, &[("radeon.x86_64", 2), ("radeon.i686", 1)]);
+    let (level, msg) = renderer_finding(&doctor(&w, &host));
+    assert_eq!(level, Level::Ok, "{msg}");
+
+    // Where a build before #199 left it: out of the root at the next setup,
+    // the DLL the game's exe loads untouched.
+    std::fs::write(tree.join("ddraw.dll"), "cnc").unwrap();
+    std::fs::copy(tree.join("Apps/ddraw.ini"), tree.join("ddraw.ini")).unwrap();
+    setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
+    assert!(!tree.join("ddraw.dll").exists() && !tree.join("ddraw.ini").exists());
+    assert!(tree.join("Apps/ddraw.dll").is_file());
+
+    // Gone from beside the exe: doctor says so, wherever else it is.
+    std::fs::remove_file(tree.join("Apps/ddraw.dll")).unwrap();
+    std::fs::remove_file(tree.join("Apps/ddraw.ini")).unwrap();
+    std::fs::write(tree.join("ddraw.dll"), "cnc").unwrap();
+    std::fs::write(tree.join("ddraw.ini"), "; gogo: x\n").unwrap();
+    let (level, msg) = renderer_finding(&doctor(&w, &host));
+    assert!(
+        level == Level::Fail && msg.starts_with("cnc-ddraw: "),
+        "{msg}"
+    );
+    setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
+
+    // An L4 `exe` in another dir runs instead: the DLL moves with it.
+    let l4 = gogo::macapp::compat::user_path(ID);
+    std::fs::create_dir_all(l4.parent().unwrap()).unwrap();
+    std::fs::write(&l4, "[platforms.linux]\nexe = 'Other\\tool.exe'\n").unwrap();
+    setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
+    assert!(tree.join("Other/ddraw.dll").is_file());
+    assert!(!tree.join("Apps/ddraw.dll").exists());
+    let (level, msg) = renderer_finding(&doctor(&w, &host));
+    assert_eq!(level, Level::Ok, "{msg}");
+    unsafe { std::env::remove_var("GOGO_CNC_DDRAW_DIR") };
 }
 
 #[test]
@@ -842,9 +1000,9 @@ fn tmp_paths_never_reach_umu() {
 const FAKE_GAME_UMU: &str = r#"#!/bin/sh
 {
   printf 'ARGV:%s\n' "$*"
-  printf 'ENV:WINEPREFIX=%s GAMEID=%s STORE=%s PROTONPATH=%s WINEDLLOVERRIDES=%s PROTONFIXES_DISABLE=%s FOO=%s CWD=%s\n' \
+  printf 'ENV:WINEPREFIX=%s GAMEID=%s STORE=%s PROTONPATH=%s WINEDLLOVERRIDES=%s PROTONFIXES_DISABLE=%s FOO=%s GAME_DRIVE=%s CWD=%s\n' \
     "${WINEPREFIX-unset}" "${GAMEID-}" "${STORE-}" "${PROTONPATH-}" "${WINEDLLOVERRIDES-}" \
-    "${PROTONFIXES_DISABLE-}" "${FOO-}" "$(pwd)"
+    "${PROTONFIXES_DISABLE-}" "${FOO-}" "${PROTON_SET_GAME_DRIVE-}" "$(pwd)"
 } >> "$FAKE_UMU_LOG"
 echo "fake-game stdout line"
 echo "err: fake-game stderr line" >&2
@@ -1170,7 +1328,7 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
     // next setup, which says so; an unchanged one isn't touched.
     std::fs::write(
         &sh,
-        script.replace("LAUNCHER_VERSION=1", "LAUNCHER_VERSION=0"),
+        script.replace("LAUNCHER_VERSION=2", "LAUNCHER_VERSION=0"),
     )
     .unwrap();
     std::fs::write(&desktop, "[Desktop Entry]\nExec=/old/root/launch.sh\n").unwrap();
@@ -1178,7 +1336,7 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
     assert_eq!(std::fs::read_to_string(&sh).unwrap(), script);
     assert_eq!(std::fs::read_to_string(&desktop).unwrap(), entry);
     assert!(
-        out.notes.iter().any(|n| n == "launch.sh: launcher 0 -> 1"),
+        out.notes.iter().any(|n| n == "launch.sh: launcher 0 -> 2"),
         "{:?}",
         out.notes
     );
@@ -1223,7 +1381,7 @@ fn the_launcher_runs_umu_with_the_games_environment_and_logs_the_run() {
         env,
         format!(
             "ENV:WINEPREFIX={} GAMEID=umu-777001 STORE=gog PROTONPATH={} \
-             WINEDLLOVERRIDES=ddraw=n,b PROTONFIXES_DISABLE=1 FOO=bar baz CWD={}",
+             WINEDLLOVERRIDES=ddraw=n,b PROTONFIXES_DISABLE=1 FOO=bar baz GAME_DRIVE=0 CWD={}",
             prefix.display(),
             w.build.display(),
             workdir.display()
@@ -1233,10 +1391,17 @@ fn the_launcher_runs_umu_with_the_games_environment_and_logs_the_run() {
     // One run log: header, the game's output, footer; latest.log names it.
     let runs = w.runs();
     assert_eq!(runs.len(), 1);
+    // An L4 env can turn Proton's host drives back on.
+    w.edit_conf(&[("ENV", "('PROTON_SET_GAME_DRIVE=1')")]);
+    assert_eq!(w.launch(&[], &[]).status.code(), Some(0));
+    let log = w.log();
+    let env = log.lines().rfind(|l| l.starts_with("ENV:")).unwrap();
+    assert!(env.contains(" GAME_DRIVE=1 "), "{env}");
+    let runs = w.runs();
     let run = &runs[0];
     for want in [
         format!("# gogo run log: Test Game ({ID})\n"),
-        "# launcher: 1\n".into(),
+        "# launcher: 2\n".into(),
         format!(
             "# runtime: path:{} (1793687165 GE-Proton10-34)\n",
             w.build.display()
@@ -1872,9 +2037,9 @@ fn doctor_is_green_on_a_set_up_game_and_each_check_fails_alone() {
         "{ok:?}"
     );
     assert!(
-        ok.iter()
-            .any(|o| o
-                == "links: no links out of the data dir but z: and the Proton build's own files"),
+        ok.iter().any(|o| o
+            == "links: no links out of the data dir but z:, Wine's serial ports and the \
+                    Proton build's own files"),
         "{ok:?}"
     );
     assert!(
@@ -2030,6 +2195,16 @@ fn doctor_finds_links_stale_stamps_the_menu_entry_and_leftover_processes() {
         "{f:?}"
     );
     std::fs::remove_file(prefix.join("dosdevices/x:")).unwrap();
+
+    // Wine's serial ports come back on every start and reach no files; a
+    // com link anywhere else isn't one.
+    let com1 = prefix.join("dosdevices/com1");
+    std::os::unix::fs::symlink("/dev/ttyS0", &com1).unwrap();
+    assert!(doctor(&w, &host).ok());
+    std::fs::remove_file(&com1).unwrap();
+    std::os::unix::fs::symlink(&w.root, &com1).unwrap();
+    assert!(!doctor(&w, &host).ok());
+    std::fs::remove_file(&com1).unwrap();
 
     // An L4 edit since setup: stale (a warning; the next launch runs setup).
     let l4 = gogo::macapp::compat::user_path(ID);
