@@ -271,6 +271,20 @@ gogo linux-app --retarget 1207659013 --renderer auto                # drop the o
 gogo linux-app next-renderer 1207659013 --dry-run                   # what "Try next renderer" would pick
 ```
 
+**When a game won't start**, `gogo linux-app doctor <gogid>` checks what it
+needs, one `ok` / `warn` / `fail` line each with a fix: the launcher and menu
+entry, umu and its Python (on NixOS, that it's the `gogo-linux-app` FHS env and
+still there after a garbage collection), user namespaces, the GE-Proton build
+(unchanged, its marker, a Steam Linux Runtime umu knows), the runtime umu
+downloads, the renderer's files, your Vulkan drivers (a 32-bit one for a 32-bit
+game; a warning with more than one GPU), links out of the prefix, processes
+left running in it, and the last run's log. It only reads: it never launches
+the game, runs umu or stops a process. It exits 1 when a check fails.
+
+```sh
+gogo linux-app doctor 1207659013          # --json for scripts
+```
+
 `gogo apps list|show|remove|prune` work on Linux too. A game counts as orphaned
 once its menu entry was made and then deleted; `apps remove` deletes the menu
 entry with the game.
