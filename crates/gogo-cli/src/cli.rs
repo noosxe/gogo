@@ -360,6 +360,21 @@ pub enum LinuxAppSub {
         #[arg(long)]
         json: bool,
     },
+    /// Can this game work on this machine? Checks the launcher files and
+    /// menu entry, umu and its Python, user namespaces, the Proton build,
+    /// the Steam Linux Runtime, the renderer's files, Vulkan drivers (32-bit
+    /// too, for a 32-bit game), the prefix stamp and links, processes left
+    /// running, and the last launch's log; one line per finding (ok / warn /
+    /// fail) with a fix hint. Read-only: never launches the game, runs umu
+    /// or stops a process. Exits 1 when a check fails (warnings don't).
+    Doctor {
+        /// GOG product id.
+        #[arg(value_name = "GOGID")]
+        gogid: String,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Switch a game to the next renderer in its order (the launcher's
     /// "Try next renderer"): the one after what setup last applied,
     /// written to the override file as `renderer = "<id>"`. Prints the new

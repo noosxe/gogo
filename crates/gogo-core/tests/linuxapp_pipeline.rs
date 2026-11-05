@@ -479,6 +479,37 @@ fn d7vk_for_d3d7_and_never_both_ddraw_dlls() {
     assert_eq!(conf_value(&conf, "ENV"), "('PROTON_USE_D7VK=1')");
     assert!(!w.game().join("game/ddraw.dll").exists());
 
+    // doctor: D7VK is there and set; then a ddraw.dll beside it (never
+    // both), then a build without D7VK.
+    use gogo::macapp::doctor::Level;
+    let host = doctor_host(&w, &[("radeon.x86_64", 2), ("radeon.i686", 1)]);
+    let renderer = |r: &gogo::macapp::doctor::Report| {
+        r.findings
+            .iter()
+            .find(|f| f.check == "renderer")
+            .map(|f| (f.level, f.message.clone()))
+            .unwrap()
+    };
+    let r = doctor(&w, &host);
+    assert_eq!(renderer(&r), (Level::Ok, "d7vk (PROTON_USE_D7VK=1)".into()));
+    let stray = w.game().join("game/ddraw.dll");
+    std::fs::write(&stray, "MZ").unwrap();
+    let (level, msg) = renderer(&doctor(&w, &host));
+    assert!(
+        level == Level::Fail && msg.contains("D7VK never loads"),
+        "{msg}"
+    );
+    std::fs::remove_file(&stray).unwrap();
+    std::fs::remove_file(&dll).unwrap();
+    let (level, msg) = renderer(&doctor(&w, &host));
+    assert!(
+        level == Level::Fail
+            && msg.starts_with("d7vk: ")
+            && msg.contains("has no files/lib/wine/d7vk"),
+        "{msg}"
+    );
+    std::fs::write(&dll, "MZ").unwrap();
+
     // The game ships its own ddraw.dll: it's kept, D7VK isn't turned on.
     std::fs::write(w.tree.join("ddraw.dll"), "MZ").unwrap();
     let plan = build::plan(&w.opts(), None, &mut quiet()).unwrap();
@@ -1728,4 +1759,327 @@ fn pe_with_imports(pe64: bool, imports: &[&str]) -> Vec<u8> {
     h[0x40..0x40 + w.len()].copy_from_slice(&w);
     h.extend_from_slice(&sec);
     h
+}
+
+// — `gogo linux-app doctor` (#178) —
+
+/// A host for doctor: a fake root with one GPU, user namespaces on, and
+/// the Vulkan drivers `icds` names (`(manifest name, ELF class)`), and the
+/// test's env minus anything Vulkan (the real machine's must not leak in).
+fn doctor_host(w: &World, icds: &[(&str, u8)]) -> gogo::linuxapp::doctor::Host {
+    let names: Vec<&str> = icds.iter().map(|(n, _)| *n).collect();
+    let root = w.root.join(format!("host-{}", names.join("+")));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("proc/sys/user")).unwrap();
+    std::fs::write(root.join("proc/sys/user/max_user_namespaces"), "63000\n").unwrap();
+    std::fs::create_dir_all(root.join("sys/class/drm/card0/device")).unwrap();
+    std::fs::write(root.join("sys/class/drm/card0/device/vendor"), "0x1002\n").unwrap();
+    let icd_dir = root.join("usr/share/vulkan/icd.d");
+    std::fs::create_dir_all(&icd_dir).unwrap();
+    std::fs::create_dir_all(root.join("usr/lib")).unwrap();
+    for (name, class) in icds {
+        let lib = format!("/usr/lib/libvulkan_{name}.so");
+        std::fs::write(
+            root.join(lib.trim_start_matches('/')),
+            [0x7f, b'E', b'L', b'F', *class, 1, 1, 0],
+        )
+        .unwrap();
+        std::fs::write(
+            icd_dir.join(format!("{name}_icd.json")),
+            format!(
+                "{{\"file_format_version\": \"1.0.0\", \"ICD\": {{\"library_path\": \"{lib}\", \
+                 \"api_version\": \"1.3.0\"}}}}"
+            ),
+        )
+        .unwrap();
+    }
+    gogo::linuxapp::doctor::Host {
+        root,
+        env: Box::new(|k| {
+            (!k.starts_with("VK_") && k != "XDG_DATA_DIRS")
+                .then(|| std::env::var_os(k))
+                .flatten()
+        }),
+        logs: w.root.join("logs"),
+        vulkaninfo: false,
+    }
+}
+
+fn doctor(w: &World, host: &gogo::linuxapp::doctor::Host) -> gogo::macapp::doctor::Report {
+    let _ = w;
+    gogo::linuxapp::doctor::doctor(ID, host).unwrap()
+}
+
+/// The findings at `level`, as `check: message` lines.
+fn at(r: &gogo::macapp::doctor::Report, level: gogo::macapp::doctor::Level) -> Vec<String> {
+    r.findings
+        .iter()
+        .filter(|f| f.level == level)
+        .map(|f| format!("{}: {}", f.check, f.message))
+        .collect()
+}
+
+/// A fake Python printing `version`.
+fn fake_python(w: &World, version: &str) -> PathBuf {
+    let p = w.root.join(format!("python-{version}"));
+    std::fs::write(&p, format!("#!/bin/sh\necho Python {version}\n")).unwrap();
+    chmod_x(&p);
+    p
+}
+
+#[test]
+fn doctor_is_green_on_a_set_up_game_and_each_check_fails_alone() {
+    use gogo::macapp::doctor::Level;
+    let w = World::launcher_built("doctor", false);
+    let host = doctor_host(&w, &[("radeon.x86_64", 2), ("radeon.i686", 1)]);
+
+    // Nothing failed; the warnings are this world's: a system umu and an
+    // unmanaged build (both by design), no container yet.
+    let r = doctor(&w, &host);
+    assert!(r.ok(), "{:#?}", at(&r, Level::Fail));
+    let checks: Vec<&str> = r.findings.iter().map(|f| f.check).collect();
+    for c in [
+        "launcher",
+        "compat",
+        "umu",
+        "runtime",
+        "container",
+        "renderer",
+        "vulkan",
+        "vulkan32",
+        "stamp",
+        "links",
+        "processes",
+        "log",
+    ] {
+        assert!(checks.contains(&c), "{c} missing: {checks:?}");
+    }
+    let warns = at(&r, Level::Warn);
+    assert!(
+        warns.iter().any(|w| w.starts_with("umu: system umu-run")),
+        "{warns:?}"
+    );
+    assert!(warns.iter().any(|w| w.contains("unmanaged")), "{warns:?}");
+    assert!(
+        warns.iter().any(|w| w.starts_with("container: steamrt4")),
+        "{warns:?}"
+    );
+    assert_eq!(warns.len(), 3, "{warns:?}");
+    let ok = at(&r, Level::Ok);
+    assert!(
+        ok.iter()
+            .any(|o| o.starts_with("vulkan32: 32-bit game: 1 32-bit")),
+        "{ok:?}"
+    );
+    assert!(
+        ok.iter()
+            .any(|o| o
+                == "links: no links out of the data dir but z: and the Proton build's own files"),
+        "{ok:?}"
+    );
+    assert!(
+        ok.iter().any(|o| o.starts_with("stamp: config current")),
+        "{ok:?}"
+    );
+
+    // Each failure alone.
+    let fails = |r: &gogo::macapp::doctor::Report| at(r, Level::Fail);
+
+    // No Vulkan driver at all.
+    let r = doctor(&w, &doctor_host(&w, &[]));
+    let f = fails(&r);
+    assert!(
+        f.iter().any(|l| l.starts_with("vulkan: no Vulkan driver")),
+        "{f:?}"
+    );
+    assert!(
+        f.iter()
+            .any(|l| l.starts_with("vulkan32: 32-bit game and no")),
+        "{f:?}"
+    );
+    assert_eq!(f.len(), 2, "{f:?}");
+
+    // A 32-bit game with only a 64-bit driver.
+    let r = doctor(&w, &doctor_host(&w, &[("radeon.x86_64", 2)]));
+    assert_eq!(
+        fails(&r),
+        [
+            "vulkan32: 32-bit game and no 32-bit Vulkan driver: DXVK and D7VK fail, only wined3d works"
+        ]
+    );
+
+    // The zipapp gone (umu in zipapp mode, a good Python).
+    let good = fake_python(&w, "3.12.4");
+    let conf = w.conf();
+    w.edit_conf(&[
+        ("UMU_PYTHON", &format!("'{}'", good.display())),
+        ("UMU_RUN", "'runtimes/umu/1.4.4/umu/umu-run'"),
+    ]);
+    let r = doctor(&w, &host);
+    let f = fails(&r);
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert!(
+        f[0].starts_with("umu: the zipapp ") && f[0].ends_with(" is missing"),
+        "{f:?}"
+    );
+    assert!(
+        at(&r, Level::Ok)
+            .iter()
+            .any(|o| o.starts_with("umu: Python 3.12"))
+    );
+
+    // Python too old.
+    let zipapp = w.root.join("umu-run.pyz");
+    std::fs::write(&zipapp, "zip").unwrap();
+    let old = fake_python(&w, "3.8.10");
+    w.edit_conf(&[
+        ("UMU_PYTHON", &format!("'{}'", old.display())),
+        ("UMU_RUN", &format!("'{}'", zipapp.display())),
+    ]);
+    let f = fails(&doctor(&w, &host));
+    assert_eq!(
+        f,
+        [format!(
+            "umu: umu's zipapp needs Python >= 3.10; {} is 3.8",
+            old.display()
+        )]
+    );
+
+    // umu's Python gone (a Nix GC).
+    w.edit_conf(&[(
+        "UMU_PYTHON",
+        "'/nix/store/gone-umu-python/bin/gogo-umu-python'",
+    )]);
+    let f = fails(&doctor(&w, &host));
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert!(f[0].contains("is gone (a Nix garbage collection"), "{f:?}");
+    std::fs::write(w.game().join("launch.conf"), &conf).unwrap();
+
+    // A changed `proton` script in a build gogo installed (its marker).
+    let marker =
+        gogo::linuxapp::proton::marker_for(&w.build, "ge-proton/GE-Proton10-34", "ab").unwrap();
+    gogo::linuxapp::proton::write_marker(&w.build, &marker).unwrap();
+    assert!(doctor(&w, &host).ok(), "{:?}", fails(&doctor(&w, &host)));
+    std::fs::write(w.build.join("proton"), "#!/bin/sh\n# changed\n").unwrap();
+    let f = fails(&doctor(&w, &host));
+    assert!(
+        f.iter().all(|l| l.starts_with("runtime: "))
+            && f.iter().any(|l| l.contains("changed since setup")),
+        "{f:?}"
+    );
+
+    // Unmanaged and changed: the launcher launches it, so a warning.
+    std::fs::remove_file(w.build.join("gogo-managed.toml")).unwrap();
+    let r = doctor(&w, &host);
+    assert!(r.ok(), "{:?}", fails(&r));
+    assert!(
+        at(&r, Level::Warn)
+            .iter()
+            .any(|l| l.contains("changed since setup"))
+    );
+}
+
+#[test]
+fn doctor_finds_links_stale_stamps_the_menu_entry_and_leftover_processes() {
+    use gogo::macapp::doctor::Level;
+    let w = World::launcher_built("doctor-files", false);
+    let host = doctor_host(&w, &[("radeon.x86_64", 2), ("radeon.i686", 1)]);
+    let prefix = w.game().join("prefix");
+
+    // Links into the game's Proton build (outside the data dir here: a
+    // `path:` build) are Proton's own DLLs: fine.
+    std::fs::create_dir_all(w.build.join("files/lib/wine/i386-windows")).unwrap();
+    std::os::unix::fs::symlink(
+        w.build.join("files/lib/wine/i386-windows/d3d9.dll"),
+        prefix.join("drive_c/windows/system32/d3d9.dll"),
+    )
+    .unwrap();
+    assert!(doctor(&w, &host).ok());
+    assert!(
+        at(&doctor(&w, &host), Level::Warn)
+            .iter()
+            .all(|l| !l.starts_with("links"))
+    );
+
+    // Into another Proton build (the one before a retarget): a warning.
+    let old = w.root.join("GE-Proton-old");
+    std::fs::create_dir_all(old.join("files/lib/wine/i386-windows")).unwrap();
+    for f in ["proton", "toolmanifest.vdf"] {
+        std::fs::write(old.join(f), "x").unwrap();
+    }
+    let ddraw = prefix.join("drive_c/windows/system32/ddraw.dll");
+    std::os::unix::fs::symlink(old.join("files/lib/wine/i386-windows/ddraw.dll"), &ddraw).unwrap();
+    let r = doctor(&w, &host);
+    assert!(r.ok());
+    assert!(
+        at(&r, Level::Warn)
+            .iter()
+            .any(|l| l.starts_with("links: the prefix still links into another Proton build")),
+        "{:?}",
+        at(&r, Level::Warn)
+    );
+    std::fs::remove_file(&ddraw).unwrap();
+
+    // A link out of the data dir (Wine's x:), z: kept.
+    std::os::unix::fs::symlink(&w.root, prefix.join("dosdevices/x:")).unwrap();
+    assert!(prefix.join("dosdevices/z:").symlink_metadata().is_ok());
+    let f = at(&doctor(&w, &host), Level::Fail);
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert!(
+        f[0].starts_with("links: 1 link(s) out of the data dir: dosdevices/x: -> "),
+        "{f:?}"
+    );
+    std::fs::remove_file(prefix.join("dosdevices/x:")).unwrap();
+
+    // An L4 edit since setup: stale (a warning; the next launch runs setup).
+    let l4 = gogo::macapp::compat::user_path(ID);
+    std::fs::create_dir_all(l4.parent().unwrap()).unwrap();
+    std::fs::write(&l4, "[platforms.linux]\nnotes = \"x\"\n").unwrap();
+    let r = doctor(&w, &host);
+    assert!(r.ok());
+    assert!(
+        at(&r, Level::Warn)
+            .iter()
+            .any(|l| l.starts_with("stamp: config stale"))
+    );
+    std::fs::remove_file(&l4).unwrap();
+
+    // The menu entry pointing elsewhere.
+    let desktop = gogo::linuxapp::game::desktop_path(ID);
+    let entry = std::fs::read_to_string(&desktop).unwrap();
+    std::fs::write(&desktop, entry.replace("launch.sh", "other.sh")).unwrap();
+    let f = at(&doctor(&w, &host), Level::Fail);
+    assert!(
+        f.len() == 1 && f[0].starts_with("launcher: ") && f[0].contains("doesn't run"),
+        "{f:?}"
+    );
+    std::fs::write(&desktop, &entry).unwrap();
+
+    // A process left in the prefix (Wine's form of WINEPREFIX), no launcher.
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .env("WINEPREFIX", format!("{}/pfx/", prefix.display()))
+        .spawn()
+        .unwrap();
+    let r = doctor(&w, &host);
+    let _ = child.kill();
+    let _ = child.wait();
+    let warn = at(&r, Level::Warn);
+    assert!(
+        warn.iter()
+            .any(|l| l.starts_with("processes: 1 process(es)")
+                && l.contains(&format!("{} sleep", child.id()))),
+        "{warn:?}"
+    );
+
+    // Not built: one failing launcher line, the host checks still run.
+    std::fs::remove_dir_all(w.game()).unwrap();
+    let r = doctor(&w, &host);
+    let f = at(&r, Level::Fail);
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert!(
+        f[0].starts_with("launcher: 1999999901 isn't built"),
+        "{f:?}"
+    );
+    assert!(r.findings.iter().any(|f| f.check == "vulkan"));
 }

@@ -32,22 +32,32 @@ fn built(gogid: &str) -> Result<Built, MacAppError> {
     Ok(Built { dirs, baked, state })
 }
 
-/// L1 for the renderer from the game as installed (setup's scan: the
-/// entry point when it's there, else the tree), and the dir it scanned.
-fn l1(b: &Built) -> (Option<PathBuf>, renderer::Pick) {
-    let dir = b
-        .baked
+/// The game as installed, scanned as setup scans it (the entry point when
+/// it's there, else the tree): the game dir in the prefix
+/// (`drive_c/GOG/<name>`, when it's there) and the scan.
+pub fn scan_installed(
+    dirs: &GameDirs,
+    baked: &LaunchToml,
+) -> (Option<PathBuf>, Result<pe::PeScan, pe::ScanError>) {
+    let dir = baked
         .tree_name()
-        .map(|n| b.dirs.prefix.join("drive_c/GOG").join(n))
+        .map(|n| dirs.prefix.join("drive_c/GOG").join(n))
         .filter(|d| d.is_dir());
-    let exe = windows_to_unix(&b.dirs.prefix, &b.baked.exe).filter(|e| e.is_file());
+    let exe = windows_to_unix(&dirs.prefix, &baked.exe).filter(|e| e.is_file());
     let scan = match (&dir, &exe) {
         (Some(d), Some(e)) => pe::scan_exe(d, e),
         (Some(d), None) => pe::scan(d),
         _ => Err(pe::ScanError::NoExecutable {
-            dir: b.dirs.game.clone(),
+            dir: dirs.game.clone(),
         }),
     };
+    (dir, scan)
+}
+
+/// L1 for the renderer from the game as installed ([`scan_installed`]),
+/// and the dir it scanned.
+fn l1(b: &Built) -> (Option<PathBuf>, renderer::Pick) {
+    let (dir, scan) = scan_installed(&b.dirs, &b.baked);
     (dir, renderer::pick_linux(&scan))
 }
 
@@ -156,6 +166,9 @@ pub struct CompatReport {
     pub runtime: Option<String>,
     /// The fix summary (design 18 §4.3), when the Proton build is here.
     pub fixes: Option<String>,
+    /// gogo's fixes a protonfix overrides at launch (O2), one line each.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collisions: Vec<String>,
     pub variants: Vec<VariantLine>,
     pub variant_error: Option<String>,
     pub warnings: Vec<String>,
@@ -194,6 +207,7 @@ pub fn compat(gogid: &str) -> Result<CompatReport, MacAppError> {
             renderer: None,
             runtime: l4.entry.runtime.clone(),
             fixes: None,
+            collisions: vec![],
             variants: vec![],
             variant_error: None,
             warnings,
@@ -243,10 +257,13 @@ pub fn compat(gogid: &str) -> Result<CompatReport, MacAppError> {
     let build = ProtonRef::parse(&runtime)
         .ok()
         .and_then(|r| setup::find_proton(&r).ok().flatten());
+    let mut collisions = Vec::new();
     let (effective, fixes) = match (&build, &b.state) {
         (Some(build), Some(state)) => {
             let fx = setup::fixes_for(gogid, &build.dir, &state.umu_id, layers, &mut warnings);
-            (fx.effective.clone(), Some(fx.summary().to_string()))
+            let summary = fx.summary();
+            collisions = summary.collisions();
+            (fx.effective.clone(), Some(summary.to_string()))
         }
         _ => {
             let entries: Vec<(Layer, &CompatEntry)> = std::iter::once((Layer::Db, &db.entry))
@@ -295,6 +312,7 @@ pub fn compat(gogid: &str) -> Result<CompatReport, MacAppError> {
         renderer: Some(renderer),
         runtime: Some(runtime),
         fixes,
+        collisions,
         variants,
         variant_error,
         warnings,

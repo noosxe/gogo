@@ -99,13 +99,13 @@ impl Host<'_> {
 }
 
 #[cfg(unix)]
-fn is_executable(p: &Path) -> bool {
+pub(crate) fn is_executable(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 #[cfg(not(unix))]
-fn is_executable(p: &Path) -> bool {
+pub(crate) fn is_executable(p: &Path) -> bool {
     p.is_file()
 }
 
@@ -211,7 +211,7 @@ pub fn resolve_python(host: &Host) -> Result<PathBuf, MacAppError> {
 }
 
 /// `python --version` as `(major, minor)`. Python 2 prints it on stderr.
-fn python_version(python: &Path) -> Option<(u32, u32)> {
+pub(crate) fn python_version(python: &Path) -> Option<(u32, u32)> {
     let out = std::process::Command::new(python)
         .arg("--version")
         .stdin(std::process::Stdio::null())

@@ -2158,6 +2158,24 @@ fn find_game_tree(root: &std::path::Path) -> Option<std::path::PathBuf> {
         .find(|d| !gogo::macapp::info::gog_game_ids(d).is_empty())
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+/// A doctor's findings, one line each (`mac-app doctor`, `linux-app doctor`).
+fn print_findings(findings: &[gogo::macapp::doctor::Finding]) {
+    for f in findings {
+        let hint = f.hint.as_ref().map(|h| format!(" (fix: {h})"));
+        println!(
+            "{:<4} {:<9} {}{}",
+            f.level.as_str(),
+            f.check,
+            f.message,
+            hint.unwrap_or_default()
+        );
+        for d in &f.detail {
+            println!("               | {d}");
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 /// `gogo mac-app <sub>` (no build).
 fn mac_app_sub(sub: crate::cli::MacAppSub) -> Result<i32, AppError> {
@@ -2366,19 +2384,7 @@ fn mac_app_sub(sub: crate::cli::MacAppSub) -> Result<i32, AppError> {
                     })
                 );
             } else {
-                for f in &report.findings {
-                    let hint = f.hint.as_ref().map(|h| format!(" (fix: {h})"));
-                    println!(
-                        "{:<4} {:<9} {}{}",
-                        f.level.as_str(),
-                        f.check,
-                        f.message,
-                        hint.unwrap_or_default()
-                    );
-                    for d in &f.detail {
-                        println!("               | {d}");
-                    }
-                }
+                print_findings(&report.findings);
             }
             Ok(if report.ok() {
                 cli::exit::OK
@@ -3387,6 +3393,27 @@ fn linux_app_retarget(
 /// `gogo linux-app <sub>` (no build).
 fn linux_app_sub(sub: crate::cli::LinuxAppSub) -> Result<i32, AppError> {
     match sub {
+        crate::cli::LinuxAppSub::Doctor { gogid, json } => {
+            let report =
+                gogo::linuxapp::doctor::doctor(&gogid, &gogo::linuxapp::doctor::Host::detect())?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "gogid": report.gogid,
+                        "ok": report.ok(),
+                        "findings": report.findings,
+                    })
+                );
+            } else {
+                print_findings(&report.findings);
+            }
+            Ok(if report.ok() {
+                cli::exit::OK
+            } else {
+                cli::exit::FAILED
+            })
+        }
         crate::cli::LinuxAppSub::Setup {
             gogid,
             refresh,
