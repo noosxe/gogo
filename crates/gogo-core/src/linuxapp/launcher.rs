@@ -55,10 +55,7 @@ pub fn version_of(script: &str) -> Option<&str> {
 pub fn desktop_entry(gogid: &str, title: &str, launch_sh: &Path, icon: Option<&Path>) -> String {
     let mut out = String::from("[Desktop Entry]\nType=Application\nVersion=1.5\n");
     out.push_str(&format!("Name={}\n", desktop_string(title)));
-    out.push_str(&format!(
-        "Exec={}\n",
-        desktop_string(&exec_arg(&launch_sh.to_string_lossy()))
-    ));
+    out.push_str(&format!("Exec={}\n", exec_value(launch_sh)));
     if let Some(icon) = icon {
         out.push_str(&format!(
             "Icon={}\n",
@@ -68,6 +65,12 @@ pub fn desktop_entry(gogid: &str, title: &str, launch_sh: &Path, icon: Option<&P
     out.push_str("Terminal=false\nCategories=Game;\n");
     out.push_str(&format!("X-Gogo-Gogid={gogid}\n"));
     out
+}
+
+/// The menu entry's `Exec=` value for `launch_sh`, as [`desktop_entry`]
+/// writes it (`doctor` compares it).
+pub fn exec_value(launch_sh: &Path) -> String {
+    desktop_string(&exec_arg(&launch_sh.to_string_lossy()))
 }
 
 /// A `string`/`localestring` value: `\` and control characters escaped, a

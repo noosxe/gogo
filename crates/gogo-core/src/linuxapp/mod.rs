@@ -7,6 +7,7 @@ use std::path::Path;
 use crate::macapp::error::MacAppError;
 
 pub mod build;
+pub mod doctor;
 pub mod fixes;
 pub mod game;
 pub mod icon;

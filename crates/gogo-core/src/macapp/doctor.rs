@@ -55,7 +55,7 @@ pub struct Finding {
 }
 
 impl Finding {
-    fn new(check: &'static str, level: Level, message: impl Into<String>) -> Finding {
+    pub(crate) fn new(check: &'static str, level: Level, message: impl Into<String>) -> Finding {
         Finding {
             check,
             level,
@@ -65,19 +65,27 @@ impl Finding {
         }
     }
 
-    fn ok(check: &'static str, message: impl Into<String>) -> Finding {
+    pub(crate) fn ok(check: &'static str, message: impl Into<String>) -> Finding {
         Finding::new(check, Level::Ok, message)
     }
 
-    fn warn(check: &'static str, message: impl Into<String>, hint: impl Into<String>) -> Finding {
+    pub(crate) fn warn(
+        check: &'static str,
+        message: impl Into<String>,
+        hint: impl Into<String>,
+    ) -> Finding {
         Finding::new(check, Level::Warn, message).hint(hint)
     }
 
-    fn fail(check: &'static str, message: impl Into<String>, hint: impl Into<String>) -> Finding {
+    pub(crate) fn fail(
+        check: &'static str,
+        message: impl Into<String>,
+        hint: impl Into<String>,
+    ) -> Finding {
         Finding::new(check, Level::Fail, message).hint(hint)
     }
 
-    fn hint(mut self, hint: impl Into<String>) -> Finding {
+    pub(crate) fn hint(mut self, hint: impl Into<String>) -> Finding {
         self.hint = Some(hint.into());
         self
     }
@@ -788,7 +796,12 @@ fn check_links(dirs: &GameDirs, gogid: &str) -> Finding {
     )
 }
 
-fn walk_links(dir: &Path, root: &Path, prefix: &Path, out: &mut Vec<(PathBuf, PathBuf)>) {
+pub(crate) fn walk_links(
+    dir: &Path,
+    root: &Path,
+    prefix: &Path,
+    out: &mut Vec<(PathBuf, PathBuf)>,
+) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -810,7 +823,7 @@ fn walk_links(dir: &Path, root: &Path, prefix: &Path, out: &mut Vec<(PathBuf, Pa
 }
 
 /// Lexical `..`/`.` removal (the link target may not exist).
-fn normalize(p: &Path) -> PathBuf {
+pub(crate) fn normalize(p: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for c in p.components() {
         match c {
@@ -1025,7 +1038,7 @@ fn cwds() -> Vec<(u32, String, PathBuf)> {
 
 // — the last launch (#77) —
 
-fn check_log(dir: &Path) -> Finding {
+pub(crate) fn check_log(dir: &Path) -> Finding {
     let latest = dir.join("latest.log");
     let run = if latest.is_file() {
         Some(latest)

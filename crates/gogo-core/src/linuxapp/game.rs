@@ -93,6 +93,103 @@ pub fn prefix_procs(prefix: &Path) -> Vec<crate::macapp::doctor::PrefixProc> {
     out
 }
 
+/// The pid of a running launcher of this game: a `.launchers/<pid>` record
+/// (#177) whose process is alive, not a zombie, and started when the record
+/// says (field 22 of `/proc/<pid>/stat`, as `launch.sh`'s `proc_start`
+/// writes it), so a reused pid doesn't count.
+pub fn live_launcher(game_root: &Path) -> Option<u32> {
+    std::fs::read_dir(game_root.join(".launchers"))
+        .ok()?
+        .flatten()
+        .find_map(|e| {
+            let pid: u32 = e.file_name().to_str()?.parse().ok()?;
+            let start = std::fs::read_to_string(e.path()).ok()?;
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+            // After the parenthesized name: state is field 3, starttime 22.
+            let rest: Vec<&str> = stat.rsplit_once(") ")?.1.split_whitespace().collect();
+            (rest.first() != Some(&"Z") && rest.get(19) == Some(&start.trim())).then_some(pid)
+        })
+}
+
+/// `launch.conf` read back: the values of [`LaunchConf::render`]'s
+/// assignments, POSIX single quotes undone. Arrays (`ARGS`, `ENV`) are in
+/// `arrays`, everything else in `values`. Lines that aren't assignments
+/// (the header comment) are skipped; a value gogo never writes (unquoted,
+/// or quoted another way) is kept as written.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConfValues {
+    pub values: BTreeMap<String, String>,
+    pub arrays: BTreeMap<String, Vec<String>>,
+}
+
+impl ConfValues {
+    pub fn parse(text: &str) -> ConfValues {
+        let mut out = ConfValues::default();
+        for line in text.lines() {
+            let Some((k, v)) = line.split_once('=') else {
+                continue;
+            };
+            if k.is_empty() || !k.bytes().all(|b| b.is_ascii_uppercase() || b == b'_') {
+                continue;
+            }
+            match v.strip_prefix('(').and_then(|v| v.strip_suffix(')')) {
+                Some(items) => {
+                    out.arrays.insert(k.to_string(), sh_words(items));
+                }
+                None => {
+                    let words = sh_words(v);
+                    let value = match words.as_slice() {
+                        [one] => one.clone(),
+                        [] => String::new(),
+                        _ => v.to_string(),
+                    };
+                    out.values.insert(k.to_string(), value);
+                }
+            }
+        }
+        out
+    }
+
+    pub fn read(path: &Path) -> std::io::Result<ConfValues> {
+        Ok(ConfValues::parse(&std::fs::read_to_string(path)?))
+    }
+
+    /// A value, `""` when unset.
+    pub fn get(&self, key: &str) -> &str {
+        self.values.get(key).map(String::as_str).unwrap_or("")
+    }
+}
+
+/// Words of `sh_quote`d values separated by spaces: `'a'\''b' 'c'` is
+/// `a'b`, `c`.
+fn sh_words(s: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut cur: Option<String> = None;
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => {
+                let w = cur.get_or_insert_with(String::new);
+                for q in chars.by_ref() {
+                    if q == '\'' {
+                        break;
+                    }
+                    w.push(q);
+                }
+            }
+            '\\' => {
+                if let Some(n) = chars.next() {
+                    cur.get_or_insert_with(String::new).push(n);
+                }
+            }
+            ' ' | '\t' => words.extend(cur.take()),
+            c => cur.get_or_insert_with(String::new).push(c),
+        }
+    }
+    words.extend(cur);
+    words
+}
+
 /// `games/<gogid>/gogo-launch.toml`.
 pub fn launch_toml_path(dirs: &GameDirs) -> PathBuf {
     dirs.root.join(LAUNCH_TOML)
@@ -353,6 +450,48 @@ mod tests {
             "games/1207659013/prefix/drive_c/GOG/Treasure Adventure Game/Game.exe|it's|\
              PROTON_USE_D7VK=1|ddraw=n,b|1|"
         );
+    }
+
+    #[test]
+    fn launch_conf_reads_back() {
+        let c = conf();
+        let v = ConfValues::parse(&c.render());
+        assert_eq!(v.get("EXE"), c.exe);
+        assert_eq!(v.get("UMU_PYTHON"), c.umu_python);
+        assert_eq!(v.get("DLL_OVERRIDES"), "ddraw=n,b");
+        assert_eq!(v.get("UMU_FOLDERS"), "");
+        assert_eq!(v.arrays["ARGS"], c.args);
+        assert_eq!(v.arrays["ENV"], ["PROTON_USE_D7VK=1"]);
+        assert!(!v.values.contains_key("Generated"));
+        let empty = ConfValues::parse("ARGS=()\nUMU_PYTHON=''\n");
+        assert!(empty.arrays["ARGS"].is_empty());
+        assert_eq!(empty.get("UMU_PYTHON"), "");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn live_launcher_needs_a_matching_start_time() {
+        let tmp = tempfile::tempdir().unwrap();
+        let live = tmp.path().join(".launchers");
+        std::fs::create_dir_all(&live).unwrap();
+        let me = std::process::id();
+        let stat = std::fs::read_to_string(format!("/proc/{me}/stat")).unwrap();
+        let start = stat
+            .rsplit_once(") ")
+            .unwrap()
+            .1
+            .split_whitespace()
+            .nth(19)
+            .unwrap()
+            .to_string();
+        std::fs::write(live.join(me.to_string()), "1").unwrap();
+        assert_eq!(
+            live_launcher(tmp.path()),
+            None,
+            "another start time: a reused pid"
+        );
+        std::fs::write(live.join(me.to_string()), &start).unwrap();
+        assert_eq!(live_launcher(tmp.path()), Some(me));
     }
 
     #[test]

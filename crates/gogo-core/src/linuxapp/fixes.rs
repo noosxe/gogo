@@ -341,6 +341,25 @@ pub struct Summary {
     pub disabled: Option<Layer>,
 }
 
+impl Summary {
+    /// gogo's values a protonfix overrides at launch (O2), worded as the
+    /// summary words them.
+    pub fn collisions(&self) -> Vec<String> {
+        self.items
+            .iter()
+            .filter_map(|i| match (&i.state, &i.source) {
+                (State::Overridden { by, by_value }, FixSource::Layer(l)) => Some(format!(
+                    "{}: {} {:?} is overridden at launch by {by} ({by_value:?})",
+                    i.key.as_deref().unwrap_or(&i.fix),
+                    layer_tag(*l),
+                    i.value.as_deref().unwrap_or_default(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
 impl std::fmt::Display for Summary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.module {

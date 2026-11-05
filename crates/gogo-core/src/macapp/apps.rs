@@ -217,7 +217,14 @@ pub struct Removed {
 /// `keep_override`. Refuses while the game or any Wine process in its
 /// prefix is running. The `.app` is left alone.
 pub fn remove(app: &App, keep_override: bool) -> Result<Removed, MacAppError> {
-    if let Some(pid) = doctor::live_launcher(&app.root) {
+    // The Linux launcher records its start time from /proc/<pid>/stat,
+    // the Mac's from `ps -o lstart`.
+    let live = if app.linux {
+        crate::linuxapp::game::live_launcher(&app.root)
+    } else {
+        doctor::live_launcher(&app.root)
+    };
+    if let Some(pid) = live {
         return Err(MacAppError::Apps(format!(
             "{} is running (launcher {pid}): quit it first",
             app.gogid
