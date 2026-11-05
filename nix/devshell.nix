@@ -23,6 +23,7 @@ pkgs.mkShell {
     pkgs.stdenv.cc          # C compiler for ring/asm builds — from nixpkgs, never system
     pkgs.jq                 # scripts/vm-test.sh JSON (tart list, run summary)
     pkgs.shellcheck         # lint for scripts/*.sh
+    pkgs.innoextract        # unpack GOG offline installers for PE-scan research (docs/22 §7), never run
   ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
     pkgs.libiconv           # some crates still want it on macOS
   ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
