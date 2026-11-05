@@ -33,7 +33,11 @@ cargo install --locked --git https://github.com/noosxe/gogo
 
 **Which package:** `gogo` (~78 MiB closure) everywhere. `gogo-linux-app` only
 on x86_64 Linux, and only for `linux-app` on NixOS: the same binary, wrapped
-with the Steam-runtime FHS env umu-launcher runs in (~1.5 GiB).
+with the Steam-runtime FHS env umu-launcher runs in (~1.5 GiB). **Install
+one, never both:** `gogo-linux-app` already contains gogo, and both ship
+`bin/gogo`, so listing both in one profile, `home.packages` or
+`environment.systemPackages` fails the build with a `collision between …`
+error (`nix build --dry-run` doesn't catch it).
 
 ### As a flake input (NixOS, home-manager)
 
@@ -72,7 +76,7 @@ nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
     ./configuration.nix
     ({ pkgs, ... }: {
       nixpkgs.overlays = [ gogo.overlays.default ];
-      environment.systemPackages = [ pkgs.gogo ]; # or pkgs.gogo-linux-app
+      environment.systemPackages = [ pkgs.gogo ]; # or pkgs.gogo-linux-app, not both
     })
   ];
 };
