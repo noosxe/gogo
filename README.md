@@ -23,11 +23,106 @@ game.
 ```sh
 # Nix
 nix run github:noosxe/gogo -- --version
+nix profile install github:noosxe/gogo
 # Nix, x86_64 Linux: with the FHS env `linux-app` needs on NixOS (umu; ~1.5 GiB more)
 nix profile install github:noosxe/gogo#gogo-linux-app
 
 # or build from source (Rust 1.99+)
 cargo install --locked --git https://github.com/noosxe/gogo
+```
+
+**Which package:** `gogo` (~78 MiB closure) everywhere. `gogo-linux-app` only
+on x86_64 Linux, and only for `linux-app` on NixOS: the same binary, wrapped
+with the Steam-runtime FHS env umu-launcher runs in (~1.5 GiB).
+
+### As a flake input (NixOS, home-manager)
+
+```nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+    home-manager = {
+      url = "github:nix-community/home-manager/release-26.05";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    gogo.url = "github:noosxe/gogo";
+    # Optional, see below:
+    # gogo.inputs.nixpkgs.follows = "nixpkgs";
+  };
+}
+```
+
+`gogo.overlays.default` adds `pkgs.gogo`, and `pkgs.gogo-linux-app` on
+x86_64 Linux. They are gogo's own `packages`, built from gogo's pinned
+nixpkgs and Rust toolchain whatever channel you're on: the same store paths
+as `nix profile install`.
+
+`gogo.inputs.nixpkgs.follows = "nixpkgs"` builds gogo against your nixpkgs
+instead (still with gogo's pinned Rust 1.99): one nixpkgs in your lock and no
+second copy of glibc/openssl. The trade-off: new store paths, so gogo
+compiles on your machine and no cache has it, and your channel isn't the one
+gogo is tested on.
+
+NixOS, system-wide (`outputs = { nixpkgs, gogo, ... }:`):
+
+```nix
+nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+  system = "x86_64-linux";
+  modules = [
+    ./configuration.nix
+    ({ pkgs, ... }: {
+      nixpkgs.overlays = [ gogo.overlays.default ];
+      environment.systemPackages = [ pkgs.gogo ]; # or pkgs.gogo-linux-app
+    })
+  ];
+};
+```
+
+home-manager as a NixOS module (`home-manager.useGlobalPkgs = true` picks up
+the overlay above):
+
+```nix
+modules = [
+  ./configuration.nix
+  home-manager.nixosModules.home-manager
+  {
+    nixpkgs.overlays = [ gogo.overlays.default ];
+    home-manager.useGlobalPkgs = true;
+    home-manager.users.alice = { pkgs, ... }: {
+      home.packages = [ pkgs.gogo ];
+      home.stateVersion = "26.05";
+    };
+  }
+];
+```
+
+home-manager standalone:
+
+```nix
+homeConfigurations.alice = home-manager.lib.homeManagerConfiguration {
+  pkgs = import nixpkgs {
+    system = "x86_64-linux";
+    overlays = [ gogo.overlays.default ];
+  };
+  modules = [
+    ({ pkgs, ... }: {
+      home.packages = [ pkgs.gogo ];
+      home.username = "alice";
+      home.homeDirectory = "/home/alice";
+      home.stateVersion = "26.05";
+    })
+  ];
+};
+```
+
+Without the overlay, take the package straight from the flake, in any of
+these modules:
+
+```nix
+({ pkgs, ... }: {
+  environment.systemPackages = [ gogo.packages.${pkgs.stdenv.hostPlatform.system}.gogo ];
+  # home-manager: home.packages = [ gogo.packages.${pkgs.stdenv.hostPlatform.system}.gogo ];
+})
 ```
 
 ## Usage
