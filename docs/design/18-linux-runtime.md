@@ -1240,6 +1240,116 @@ a failure.
 NixOS gets its own hints where the fix differs: 32-bit graphics, `nix-ld` not needed for
 umu (the container carries its libraries), and a gogo other than the flake's `gogo-linux-app` (§2.1: refused, with the two ways out).
 
+**As built (#178)** — `linuxapp/doctor.rs`, `gogo linux-app doctor <gogid> [--json]`:
+
+- **Shape.** The Mac doctor's `Finding` / `Report` (`ok` / `warn` / `fail`, a hint, detail
+  lines), its printer and JSON (`gogid`, `ok`, `findings`), exit 1 on a failure. A check
+  may give more than one line (`umu`: the zipapp, the Python, user namespaces; `vulkan`:
+  the drivers, then the GPUs). Every host lookup goes through a `doctor::Host` (a root
+  under which `/etc/NIXOS`, `/proc/sys`, `/sys/class/drm` and the ICD dirs are read, and
+  an env), so the tests run each check on a fake root.
+- **Read-only, strictly.** Unlike `mac-app doctor` there is no `--stop-leftovers`:
+  `processes` names the pids and the `kill` to run. umu and Proton are never run: umu-run
+  exits 0 on a broken `PROTONPATH` (§2.1), so a run would prove nothing, and
+  running gogo's FHS env starts bwrap. `vulkaninfo --summary` is the one program run, when
+  it's on `PATH`, for device names (10 s limit).
+- **Not built.** No `games/<gogid>/` → one failing `launcher` line, and the host checks
+  (`umu` as setup would resolve it, user namespaces, `vulkan`) still run.
+- **What each check reads** (reusing setup's helpers, not copies of them):
+  - `launcher`: `gogo-launch.toml` parses, `launch.conf` is there, `launch.sh` is there,
+    executable and this gogo's template (another `LAUNCHER_VERSION` or other bytes warn:
+    the next setup rewrites it), and the `.desktop` file at `game::desktop_path` has
+    `Exec=` equal to `launcher::exec_value(<launch.sh>)`, the value setup writes.
+  - `compat`: `manage::compat`. Warns when the Linux status is broken, or when a protonfix
+    overrides one of gogo's values (`CompatReport.collisions`, from the new
+    `fixes::Summary::collisions`, worded as the summary words them; the hint names
+    `protonfixes = false`). The fix summary and compat warnings are its detail lines.
+  - `umu`: `launch.conf` read back (`game::ConfValues`, the inverse of `LaunchConf::render`).
+    Zipapp: `UMU_RUN` exists and is the store's `umu/<ver>` whose recorded archive sha256
+    is the pin's (the store keeps no hash of the unpacked zipapp, so that is what "its sha"
+    can mean); another version than the pin warns. `UMU_PYTHON` must still be executable:
+    a missing `/nix/store` path says a garbage collection removed it and to re-run setup.
+    gogo's FHS env (named `gogo-umu-python`, or what `GOGO_UMU_PYTHON` names) is trusted
+    as built; any other Python fails on NixOS (§2.1's two ways out) and is version-checked
+    elsewhere (≥ 3.10). System umu: `UMU_RUN` executable → warn (unpinned), else fail.
+    Before setup ran, `[linux] umu` is resolved as setup would. User namespaces:
+    `kernel.unprivileged_userns_clone = 0` or `user.max_user_namespaces = 0` fail;
+    `kernel.apparmor_restrict_unprivileged_userns = 1` (Ubuntu ≥ 23.10) warns. On NixOS
+    the Python line adds "nix-ld isn't needed".
+  - `runtime`: `PROTON_DIR` (relative to `DATA_ROOT`) through `proton::check_build`
+    against `PROTON_VERSION` / `PROTON_SHA`: missing fails; changed fails for a managed build
+    (the marker, or a relative `PROTON_DIR`: the launcher's own test) and warns for an
+    unmanaged one, as the launcher treats them. A marker is also `check_managed` (only when
+    the launch check passed, so one change is one line) and its `archive_sha256` against
+    the catalog pin of the same version. R2:
+    `require_tool_appid` through `proton::check_appid`; none named warns. Unmanaged builds
+    warn; a managed build outside the data root (a shared tools dir) warns with no hint.
+  - `container`: the appid's folder in `$UMU_FOLDERS_PATH/umu` (or `UMU_FOLDERS` from
+    `launch.conf`), else `$XDG_DATA_HOME/umu`. umu 1.4.4 names it after the variant column
+    of `RUNTIME_VERSIONS` (`1391110` → `steamrt2`, `1628350` → `steamrt3`, `4183110` →
+    `steamrt4`, `4185400` → `steamrt4-arm64`; read from the pinned zipapp's
+    `umu_runtime.py`, a unit test ties the list to `catalog::umu_runtimes()`). Present
+    (its `toolmanifest.vdf`) → its size; missing → a warning that the first launch
+    downloads it.
+  - `renderer`: `state.toml`'s renderer against `launch.conf` and the game dir in the
+    prefix (`manage::scan_installed`, setup's scan, now shared): both a `ddraw.dll` and
+    `PROTON_USE_D7VK=1` fail; `cnc-ddraw` needs gogo's `ddraw.dll` + `ddraw.ini` and
+    `ddraw=n,b`; `d7vk` needs `renderer::has_d7vk` and the switch. The line lists the
+    `PROTON_*` switches, and adds the `dxguid_block` note (may be 2D, try
+    `next-renderer`) when the scan has it.
+  - `vulkan`: ICD manifests as the loader finds them: `VK_DRIVER_FILES` /
+    `VK_ICD_FILENAMES` (they replace the search), else `/etc/vulkan/icd.d`,
+    `/usr/local/share` and `/usr/share/vulkan/icd.d`, `/run/opengl-driver{,-32}/share/
+    vulkan/icd.d` and each `XDG_DATA_DIRS` entry; one per real file. Bitness: the
+    manifest's `library_arch`, else the library's ELF class, else the name (`.i686.`,
+    `opengl-driver-32/` → 32). The line groups by driver: `radeon (32/64), nvidia
+    (32/64), …`. None → fail (NixOS: `hardware.graphics.enable`). GPUs are
+    `/sys/class/drm/card<N>` with a PCI vendor, one per device; more than one warns
+    (R18) with the `DXVK_FILTER_DEVICE_NAME` / `VKD3D_FILTER_DEVICE_NAME` L4 hint and
+    `vulkaninfo`'s device names as detail.
+  - `vulkan32`: the scan's bitness. A 64-bit game needs nothing; a 32-bit one on a build
+    with `files/lib/wine/i386-unix` needs a 32-bit ICD (R19): none fails, only manifests
+    of unknown bitness warn. A build with `x86_64-unix` and no `i386-unix` (new WoW64)
+    serves 32-bit games with the 64-bit driver. Hints: NixOS
+    `hardware.graphics.enable32Bit = true`, else the distro's 32-bit Vulkan package.
+  - `stamp`: no prefix, or not one Proton made (`setup::is_prefix`) fails; no
+    `state.toml`/`launch.conf` fails; the stamp (`gogo-launch.toml` + L4) differing from
+    `state.toml`'s or `launch.conf`'s `STAMP` warns (the next launch runs setup).
+  - `links`: the Mac's walk with the data root as the boundary, minus the
+    `dosdevices/` entries of `setup::KEPT_DRIVES` (`z:`, §7.2) and links into the game's
+    own Proton build (`PROTON_DIR`). Proton links its DLLs and fonts into `drive_c/windows`:
+    1,324 absolute links in a GE-Proton11-12 prefix (real smoke). They are inside the data
+    root for a store build, outside it for a shared tools dir or a `path:` build, where
+    the Mac's rule failed every game (found by the real smoke, fixed before merge). Links
+    into another Proton build (a dir with `proton` and `toolmanifest.vdf`: the build the
+    game ran on before a `--retarget`) warn: Proton re-links the prefix when a build of
+    another version next runs it. Anything else out of the data root fails.
+  - `processes`: a live launcher (`game::live_launcher`: a `.launchers/<pid>` record whose
+    `/proc/<pid>/stat` start time matches, as `launch.sh` writes it) → ok; else
+    `game::prefix_procs`, the launcher's teardown markers (`WINEPREFIX=<p>`,
+    `<p>/pfx`, `STEAM_COMPAT_DATA_PATH=<p>`, each with or without `/`, in both path
+    forms) → warn with the pids.
+  - `log`: the Mac's `check_log` on `state::logs_root()/<gogid>` (the Linux run log has
+    the same `# started:` / `# exit:` / `# duration:` lines).
+- **Real smoke** (before merge; `nix build .#gogo-linux-app`, GE-Proton11-12 in the store,
+  umu 1.4.4 zipapp through `gogo-umu-python` 3.14.7, steamrt4, NixOS 26.11 in a
+  stock-NixOS `bwrap` root with `env -i` and scratch `GOGO_HOME` / XDG dirs, RTX 4090 +
+  RADV iGPU host). Treasure Adventure Game (1207659013) was built from its depot (setup
+  only, the game never ran). `doctor` was all `ok` but the two-GPU warning, exit 0;
+  steamrt4 measured 1.3 GiB unpacked in umu's folder (§2.3 says 699 MB). Then one change
+  at a time, each restored after: a gone `UMU_PYTHON` store path, a bare `python3`
+  recorded on NixOS, an edited `version` in the managed build, steamrt4 moved away,
+  Wine's `x:` → `$HOME` back, `VK_DRIVER_FILES` pointing nowhere, only the 64-bit ICDs,
+  a `sleep` carrying `WINEPREFIX=<prefix>/pfx/`, the menu entry gone, an unbuilt gogid.
+  Each gave the line its check owes (exit 1 for the failures, 0 for the warnings). A
+  copy of the build outside the data root, as `path:` with and without the marker,
+  gave the shared-dir and unmanaged warnings, an edited `proton` there a warning, and
+  after the prefix was re-made on it, its 1,324 links passed `links`; `--retarget
+  --runtime auto` back to the store build then gave the "another Proton build" warning.
+- **Fixed on the way.** `apps remove` on Linux checked for a running launcher with the
+  Mac's `live_launcher` (`ps -o lstart`), which never matches a Linux launcher's record;
+  it uses `game::live_launcher` now.
+
 ## 9. Scope notes
 
 - **Native Linux installers** (MojoSetup `.sh`): epic #162, not here. This design keeps
