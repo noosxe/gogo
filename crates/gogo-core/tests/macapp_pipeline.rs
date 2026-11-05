@@ -2204,11 +2204,12 @@ fn v2_real_setup_applies_l4_and_restamps() {
     drop(guard);
 }
 
-/// #199: `ddraw.dll` means the one beside the exe: the game's own gets its
-/// override, gogo's cnc-ddraw goes there and leaves the root, and doctor
-/// looks there.
+/// #199: `ddraw.dll` means the one beside the exe:
+/// DDrawCompat stays unloaded, gogo's cnc-ddraw goes there and leaves the
+/// root, and doctor looks there.
 #[test]
 fn v2_ddraw_is_the_one_beside_the_exe() {
+    const COMPAT: &[u8] = b"MZ\0\0DDrawCompat loaded successfully\0";
     let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");
@@ -2226,15 +2227,15 @@ fn v2_ddraw_is_the_one_beside_the_exe() {
     let info = tree.join("goggame-1207659013.info");
     let text = std::fs::read_to_string(&info).unwrap();
     std::fs::write(&info, text.replace("\"Game.exe\"", r#""Apps\\Game.exe""#)).unwrap();
-    std::fs::write(tree.join("Apps/ddraw.dll"), b"game").unwrap();
+    std::fs::write(tree.join("Apps/ddraw.dll"), COMPAT).unwrap();
     let plan = macapp::plan(&opts, None, &mut |_| {}).unwrap();
     macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).unwrap();
     macapp::setup::setup("1207659013", None).unwrap();
     let g = home.join("games/1207659013");
     let game = g.join("prefix/drive_c/GOG/Treasure Adventure Game");
     let conf = std::fs::read_to_string(g.join("launch.conf")).unwrap();
-    assert!(conf.contains("DLL_OVERRIDES='ddraw=n,b'"), "{conf}");
-    assert_eq!(std::fs::read(game.join("Apps/ddraw.dll")).unwrap(), b"game");
+    assert!(conf.contains("DLL_OVERRIDES=''"), "{conf}");
+    assert_eq!(std::fs::read(game.join("Apps/ddraw.dll")).unwrap(), COMPAT);
     let renderer = || {
         let r = gogo::macapp::doctor::doctor(
             "1207659013",
@@ -2256,15 +2257,38 @@ fn v2_ddraw_is_the_one_beside_the_exe() {
             .iter()
             .all(|(l, m)| *l == Level::Ok || !m.contains("ddraw"))
     );
-    // No override: Wine's builtin would run.
-    std::fs::write(g.join("launch.conf"), conf.replace("'ddraw=n,b'", "''")).unwrap();
+    // An override loads it, and it doesn't run under Wine.
+    std::fs::write(
+        g.join("launch.conf"),
+        conf.replace("DLL_OVERRIDES=''", "DLL_OVERRIDES='ddraw=n,b'"),
+    )
+    .unwrap();
     assert!(
         renderer()
             .iter()
-            .any(|(l, m)| *l == Level::Fail && m.contains("no ddraw=n,b override")),
+            .any(|(l, m)| *l == Level::Fail && m.contains("loads the game's DDrawCompat")),
         "{:?}",
         renderer()
     );
+    // Asked for, cnc-ddraw doesn't replace it.
+    std::fs::create_dir_all(home.join("compat")).unwrap();
+    std::fs::write(
+        home.join("compat/1207659013.toml"),
+        on_this_os("renderer = \"cnc-ddraw\"\n"),
+    )
+    .unwrap();
+    macapp::setup::setup("1207659013", None).unwrap();
+    let conf = std::fs::read_to_string(g.join("launch.conf")).unwrap();
+    assert!(conf.contains("DLL_OVERRIDES=''"), "{conf}");
+    assert_eq!(std::fs::read(game.join("Apps/ddraw.dll")).unwrap(), COMPAT);
+    assert!(!game.join("Apps/ddraw.ini").exists());
+
+    // Any other game ddraw.dll: kept, with its override under cnc-ddraw.
+    std::fs::write(game.join("Apps/ddraw.dll"), b"game").unwrap();
+    macapp::setup::setup("1207659013", None).unwrap();
+    let conf = std::fs::read_to_string(g.join("launch.conf")).unwrap();
+    assert!(conf.contains("DLL_OVERRIDES='ddraw=n,b'"), "{conf}");
+    assert_eq!(std::fs::read(game.join("Apps/ddraw.dll")).unwrap(), b"game");
 
     // cnc-ddraw beside the exe, out of the root where it used to go.
     std::fs::remove_file(game.join("Apps/ddraw.dll")).unwrap();

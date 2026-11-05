@@ -118,6 +118,35 @@ pub fn has_dll(game_dir: &Path) -> bool {
     })
 }
 
+/// Strings in every DDrawCompat release's own log lines. The file name says
+/// nothing (it's always `ddraw.dll`), and the bare word turns up in other
+/// wrappers' compatibility notes.
+const DDRAWCOMPAT_MARKERS: [&[u8]; 2] =
+    [b"DDrawCompat loaded successfully", b"Loading DDrawCompat "];
+
+/// Is the game's `ddraw.dll` in `game_dir` DDrawCompat (`narzoul/DDrawCompat`)?
+/// It patches Windows' own ddraw and doesn't run under any Wine: its README
+/// rules Wine out, and v0.5.3 reads a null pointer during init under
+/// GE-Proton11-12, ending the game with code 9 (#199). So gogo never loads
+/// it: no `ddraw=n,b`, and the game runs on Wine's builtin ddraw.
+pub fn is_ddrawcompat(game_dir: &Path) -> bool {
+    if is_gogo(game_dir) {
+        return false;
+    }
+    let Ok(entries) = std::fs::read_dir(game_dir) else {
+        return false;
+    };
+    entries
+        .flatten()
+        .filter(|e| e.file_name().eq_ignore_ascii_case("ddraw.dll"))
+        .filter_map(|e| std::fs::read(e.path()).ok())
+        .any(|bytes| {
+            DDRAWCOMPAT_MARKERS
+                .iter()
+                .any(|m| bytes.windows(m.len()).any(|w| w == *m))
+        })
+}
+
 /// A `ddraw.dll` in `game_dir` that isn't the one [`apply`] put there.
 pub fn is_games(game_dir: &Path) -> bool {
     has_dll(game_dir) && !is_gogo(game_dir)

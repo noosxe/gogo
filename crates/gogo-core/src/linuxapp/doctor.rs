@@ -845,7 +845,8 @@ fn dir_size(dir: &Path) -> u64 {
 
 /// The renderer setup last applied, against the files it needs (§3): gogo's
 /// cnc-ddraw in the dir of the exe that runs, D7VK in the build, never both
-/// `ddraw.dll`s, and the game's own `ddraw.dll` there loaded (`ddraw=n,b`).
+/// `ddraw.dll`s, DDrawCompat there unloaded, and any other game `ddraw.dll`
+/// there with its `ddraw=n,b`.
 fn check_renderer(
     g: &Game,
     build: &Path,
@@ -875,7 +876,8 @@ fn check_renderer(
         .and_then(|(d, _)| d.as_deref())
         .map(|root| ddraw::dir_for(root, exe.as_deref()));
     let dll_in_game = game_dir.as_deref().is_some_and(ddraw::has_dll);
-    let own = game_dir.as_deref().is_some_and(ddraw::is_games);
+    let ddrawcompat = game_dir.as_deref().is_some_and(ddraw::is_ddrawcompat);
+    let own = !ddrawcompat && game_dir.as_deref().is_some_and(ddraw::is_games);
     let dxguid = scan
         .and_then(|(_, s)| s.as_ref().ok())
         .is_some_and(|s| s.dxguid_block);
@@ -906,18 +908,32 @@ fn check_renderer(
         .split(';')
         .find_map(|o| o.strip_prefix("ddraw="))
         .map(str::to_string);
-    if own && ddraw_set.is_none() {
+    if ddrawcompat && ddraw_set.as_deref().is_some_and(|v| v.starts_with('n')) {
         return Finding::fail(
             "renderer",
             format!(
-                "{} ships beside the exe, but launch.conf has no ddraw=n,b override, so Wine's \
-                 builtin ddraw runs instead",
+                "launch.conf loads the game's DDrawCompat (ddraw={}), which doesn't run under \
+                 Wine: the game exits at once",
+                ddraw_set.as_deref().unwrap_or_default()
+            ),
+            format!(
+                "drop ddraw from dll_overrides in {}, then {setup}",
+                compat::user_path(&g.gogid).display()
+            ),
+        );
+    }
+    if own && ddraw_set.is_none() {
+        return Finding::warn(
+            "renderer",
+            format!(
+                "{} ships beside the exe with no ddraw=n,b override, so Wine's builtin ddraw \
+                 runs instead",
                 game_dir
                     .as_ref()
                     .map(|d| d.join("ddraw.dll").display().to_string())
                     .unwrap_or_default()
             ),
-            setup,
+            format!("{setup} (it sets the override)"),
         );
     }
     if let Some(v) = ddraw_set.as_deref().filter(|v| own && !v.starts_with('n')) {
@@ -982,7 +998,9 @@ fn check_renderer(
             .collect::<Vec<_>>()
             .join(" ")
     };
-    let kept = if own {
+    let kept = if ddrawcompat {
+        ", the game's DDrawCompat beside the exe left unloaded: it doesn't run under Wine"
+    } else if own {
         ", the game's own ddraw.dll beside the exe with ddraw=n,b"
     } else {
         ""

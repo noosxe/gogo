@@ -179,6 +179,10 @@ pub struct PeScan {
     /// dgVoodoo or cnc-ddraw, or a bundled `d3dcompiler_47.dll`). Their own
     /// imports are left out of the classification.
     pub local_overrides: BTreeSet<String>,
+    /// The `ddraw.dll` beside the exe is DDrawCompat ([`super::ddraw::is_ddrawcompat`]),
+    /// which gogo leaves unloaded.
+    #[serde(default)]
+    pub ddrawcompat: bool,
     /// The strongest Direct3D ≤ 7 evidence behind a [`GraphicsImport::Direct3d7`]
     /// in [`Self::graphics_imports`] or [`Self::runtime_graphics`]; `None`
     /// when there is none.
@@ -365,6 +369,7 @@ fn scan_from(root: &Path, exe: &Path, source: MainExeSource) -> Result<PeScan, S
         runtime_graphics,
         helpers,
         runtime_loaded,
+        ddrawcompat: local_overrides.contains("ddraw.dll") && super::ddraw::is_ddrawcompat(exe_dir),
         local_overrides,
         d3d7_confidence,
         dxguid_block,

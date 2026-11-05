@@ -617,6 +617,18 @@ pub fn setup(
         rplan.env.insert(PROTON_USE_WINED3D.into(), "1".into());
         rplan.notes.push(format!("wined3d: {PROTON_USE_WINED3D}=1"));
     }
+    if rplan.ddraw == renderer::DdrawStep::LeaveDdrawCompat
+        && eff
+            .dll_overrides
+            .get("ddraw")
+            .is_some_and(|v| v.starts_with('n'))
+    {
+        rplan.warnings.push(format!(
+            "ddraw={} loads the game's DDrawCompat, which doesn't run under Wine: drop it from {}",
+            eff.dll_overrides["ddraw"],
+            l4_path.display()
+        ));
+    }
     warnings.extend(rplan.warnings.iter().cloned());
     notes.extend(rplan.notes.iter().cloned());
     for (k, v) in &rplan.env {

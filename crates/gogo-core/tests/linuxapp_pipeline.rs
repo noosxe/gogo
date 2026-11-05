@@ -568,13 +568,14 @@ fn the_games_own_ddraw_beside_an_exe_in_a_subdir_is_loaded() {
     let (level, msg) = renderer_finding(&doctor(&w, &host));
     assert!(level == Level::Ok && msg.contains("own ddraw.dll"), "{msg}");
 
-    // What a build before #199 wrote: no override.
+    // What a build before #199 wrote: no override. Not fatal, the game runs
+    // on Wine's builtin, but it isn't what the game shipped.
     let conf_path = w.game().join("launch.conf");
     let conf = w.conf();
     std::fs::write(&conf_path, conf.replace("'ddraw=n,b'", "''")).unwrap();
     let (level, msg) = renderer_finding(&doctor(&w, &host));
     assert!(
-        level == Level::Fail && msg.contains("no ddraw=n,b override"),
+        level == Level::Warn && msg.contains("no ddraw=n,b override"),
         "{msg}"
     );
     // The next setup picks the fix up, with no config change.
@@ -599,6 +600,76 @@ fn the_games_own_ddraw_beside_an_exe_in_a_subdir_is_loaded() {
     std::fs::rename(&dll, w.game().join("game/Apps/DDRAW.DLL")).unwrap();
     setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
     assert_eq!(conf_value(&w.conf(), "DLL_OVERRIDES"), "'ddraw=n,b'");
+}
+
+/// #199: SimCity 3000 Unlimited's shape. DDrawCompat beside the exe isn't
+/// loaded, whatever is asked for, and doctor fails only when it is.
+#[test]
+fn ddrawcompat_beside_the_exe_stays_unloaded() {
+    use gogo::macapp::doctor::Level;
+    const DLL: &[u8] = b"MZ\0\0DDrawCompat loaded successfully\0";
+    let w = World::new("ddrawcompat", &["ddraw.dll"]);
+    let apps = exe_in_apps(&w);
+    std::fs::write(apps.join("ddraw.dll"), DLL).unwrap();
+    let plan = build::plan(&w.opts(), None, &mut quiet()).unwrap();
+    let p = plan.renderer_setup.as_ref().unwrap();
+    assert_eq!(
+        p.ddraw,
+        gogo::macapp::renderer::DdrawStep::LeaveDdrawCompat,
+        "{p:?}"
+    );
+    assert!(build::switches(p).contains("DDrawCompat left unloaded"));
+    build::execute(&plan, None, &mut quiet()).unwrap();
+    assert_eq!(conf_value(&w.conf(), "DLL_OVERRIDES"), "''");
+    let dll = w.game().join("game/Apps/ddraw.dll");
+    assert_eq!(std::fs::read(&dll).unwrap(), DLL);
+
+    let host = doctor_host(&w, &[("radeon.x86_64", 2), ("radeon.i686", 1)]);
+    let (level, msg) = renderer_finding(&doctor(&w, &host));
+    assert!(level == Level::Ok && msg.contains("left unloaded"), "{msg}");
+
+    // An L4 that loads it is heard, and doctor says what it does.
+    let l4 = gogo::macapp::compat::user_path(ID);
+    std::fs::create_dir_all(l4.parent().unwrap()).unwrap();
+    std::fs::write(
+        &l4,
+        "[platforms.linux]\ndll_overrides = { ddraw = \"n,b\" }\n",
+    )
+    .unwrap();
+    setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
+    assert_eq!(conf_value(&w.conf(), "DLL_OVERRIDES"), "'ddraw=n,b'");
+    let r = doctor(&w, &host);
+    let f = r.findings.iter().find(|f| f.check == "renderer").unwrap();
+    assert_eq!(f.level, Level::Fail, "{}", f.message);
+    assert!(
+        f.message.contains("loads the game's DDrawCompat"),
+        "{}",
+        f.message
+    );
+    assert!(
+        f.hint
+            .as_deref()
+            .is_some_and(|x| x.contains("dll_overrides"))
+    );
+
+    // Dropping it and running setup is the fix.
+    std::fs::remove_file(&l4).unwrap();
+    setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
+    assert_eq!(conf_value(&w.conf(), "DLL_OVERRIDES"), "''");
+    let (level, _) = renderer_finding(&doctor(&w, &host));
+    assert_eq!(level, Level::Ok);
+
+    // Forcing a renderer that would load or replace it falls back.
+    for forced in ["d7vk", "cnc-ddraw"] {
+        std::fs::write(&l4, format!("[platforms.linux]\nrenderer = \"{forced}\"\n")).unwrap();
+        setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
+        let conf = w.conf();
+        assert_eq!(conf_value(&conf, "DLL_OVERRIDES"), "''", "{forced}");
+        assert!(!conf.contains("PROTON_USE_D7VK"), "{forced}: {conf}");
+        assert_eq!(std::fs::read(&dll).unwrap(), DLL, "{forced}");
+        assert!(!w.game().join("game/Apps/ddraw.ini").exists(), "{forced}");
+    }
+    std::fs::remove_file(&l4).unwrap();
 }
 
 #[test]
