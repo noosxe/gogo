@@ -419,8 +419,8 @@ Mac, with a Linux table:
     `dxguid.lib`: 36 GUIDs, the 43 minus the DirectX 7 ones, the same in its sound DLL.
     At 40 they counted as device GUIDs (`strong`). At 32 both blocks are caught; files
     without one carry at most 16. No pick changes: SimCity 3000 ships DDrawCompat,
-    which both lanes keep, and #173's local Steam sweep (re-run, 60 game dirs) is
-    unchanged.
+    which both lanes keep (in effect only since #199, below), and #173's local Steam
+    sweep (re-run, 60 game dirs) is unchanged.
   - **"Block only" stays D3D≤7.** It leans 2D (the one block-only ddraw game is 2D, no
     D3D≤7 game carries a block), but that is one game, whose pick doesn't depend on its
     class. The Mac's "block only" row stays a host-pass decision (docs/22 §6.1).
@@ -429,6 +429,27 @@ Mac, with a Linux table:
     sibling tool (SimCity 3000's `Baapp.exe`) can lift it above what decided the class;
     and Zeus's info file names `zeus.exe` for `Zeus.exe`, which `find_entry_point`
     misses on a case-sensitive file system.
+- **Where a `ddraw.dll` counts: beside the entry exe (#199, both lanes).** Wine loads
+  DLLs from the exe's dir, and SimCity 3000 keeps its DDrawCompat in `Apps/`, beside
+  `Apps/SC3U.exe`. Setup looked in the install root, so `own` was false, `ddraw=n,b` was
+  never set and Wine's builtin ddraw ran; `doctor` looked in the same place. Now:
+  - **One dir, the effective exe's** (`LaunchToml::exe_dir_in`, `ddraw::dir_for`): keeping
+    the game's DLL, placing and removing gogo's cnc-ddraw, D7VK's "own ddraw wins" and
+    `doctor`. The root when the dir isn't there (an exe path whose case differs). The
+    name matches in any case, as in Wine and `pe::scan`.
+  - **Variants: the one that runs, nothing else.** The launcher runs one exe. An L3/L4
+    `exe` or `variant` changes it and the stamp, so setup re-plans for its dir, and
+    gogo's DLL moves: setup takes it out of the root, the baked exe's dir and every
+    variant's. A variant that isn't running gets no DLL. A `ddraw.dll` elsewhere in the
+    tree is the game's business: it gets no override and nothing touches it.
+  - **Existing games:** the next `gogo linux-app setup` applies it; a launch runs setup
+    only when the stamp is stale (`gogo-launch.toml` or the L4 file changed), the prefix
+    or umu's Python is gone or the build changed, since the launcher already on disk
+    can't know gogo changed. Until then `doctor` fails `renderer` and names that setup.
+  - **The Mac:** the same dir, and the game's own DLL now gets `ddraw=n,b` under any
+    renderer, not just cnc-ddraw. Before, a game whose pick was wined3d (SimCity 3000's,
+    from its `dxguid` block) kept the file but ran Wine's builtin, as design 13's
+    load-order finding predicts. Mac `doctor` fails on it the same way.
 - **"Try next renderer" order on Linux** (design 16 §8.2's walk, a Linux table):
 
   | L1 class | order |
@@ -1000,10 +1021,9 @@ the data root moved.
   umu-run under `/tmp` is refused ("private /tmp") before anything runs.
 - **`z:` comes back on every Proton run (real smoke, 2026-11-04).** GE-Proton11-12's
   `proton` script recreates `dosdevices/z: -> /` whenever it's missing (its prefix setup,
-  every run), and Wine adds `x: -> $HOME` and `com1`–`com4`. So §7.2's fallback is the
-  decision: setup keeps `z:` (and, until a prefix set up before had it back, `restore_z`
-  still puts it there for steps that hand Wine unix paths), and drops the rest. While the
-  game runs, Wine's `x:` and ports are back; the next setup drops them again.
+  every run). So §7.2's fallback is the decision: setup keeps `z:` (and, until a prefix
+  set up before had it back, `restore_z` still puts it there for steps that hand Wine unix
+  paths), and drops the rest. The other drives that came back are §7.2's "Host drives".
 - **wined3d**: chosen by L3, L4, a flag or the walk, it adds `PROTON_USE_WINED3D=1` (the
   env and overrides the renderer sets fill gaps only); as L1's own pick it sets nothing.
   The plan line and setup's notes say which.
@@ -1042,6 +1062,27 @@ stays on Linux.** GE-Proton's `proton` script recreates it on every run, so remo
 would hold only between runs. Setup keeps `c:` and `z:` (`linuxapp::setup::KEPT_DRIVES`)
 and still drops every other drive letter (Wine's `x:` → `$HOME`, `com1`…); `doctor`'s
 `links` check (#178) skips `z:`. macOS is unchanged: setup removes `z:` there.
+
+**Host drives (#199).** On a real run `dosdevices/` grew `s: -> /home`, `v: -> /run/media`,
+`x: -> $HOME` and `com1`–`com4`, and `doctor` failed `links` after every launch. Their
+sources, read from GE-Proton11-12:
+
+| Links | Made by | When |
+|---|---|---|
+| `s:` | `proton`'s `setup_game_dir_drive`, from umu's `STEAM_COMPAT_LIBRARY_PATHS` (hence the log's `unable to use parent for game drive, path /home`) | prefix setup and update, verb `run` |
+| `u:` `v:` `w:` `x:` (`/media`, `/run/media`, `/mnt`, `$HOME`, each if readable and not empty) | `protonfixes.setup_mount_drives` | every run |
+| `com1`… (`/dev/ttyS*`) | Wine's mountmgr | every start |
+
+The first two hang off the `gamedrive` compat option, which `proton` forces on under umu,
+and `PROTON_SET_GAME_DRIVE=0` takes it off again (`setup::GAME_DRIVE_OFF`). gogo's games
+live inside the prefix and need none of them, so the launcher and every umu run setup makes
+set it; an L4 `env` can set it back to `1`. The launcher exports it, so the launcher's
+version went to 2 and setup rewrites `launch.sh` (R30). It stops new links only: a link
+already there stays until setup's `localize` drops it. The `com` ports can't be stopped
+without a registry key per prefix and reach no files, so `doctor` skips `comN -> /dev/*`
+as it does `z:`; `localize` still drops them. **What this doesn't do:** `z: -> /` stays
+(above), so a game that walks `Z:\` still reaches `$HOME`. It no longer gets a drive letter
+for it, and its file dialogs and drive scans no longer list it.
 
 ### 7.3 Logs
 
@@ -1252,7 +1293,7 @@ a failure.
 | `umu` | fail: the zipapp missing or its sha wrong, no Python ≥ 3.10, NixOS without gogo's FHS env (§2.1), no unprivileged user namespaces, `umu = "system"` with no `umu-run` on `PATH`. warn: `system` (unpinned) | `runtimes install umu`, install Python, install the flake's `gogo-linux-app` |
 | `runtime` | fail: Proton dir missing, `proton` or `version` changed for a managed build, `require_tool_appid` unknown to umu (R2). warn: unmanaged, or a managed build in a shared tools dir | `linux-app setup`, `--retarget --runtime ge-proton` |
 | `container` | warn: the Steam Linux Runtime variant the build needs isn't in umu's folder (first launch downloads it); else variant and size | none |
-| `renderer` | fail: cnc-ddraw without its files; `d7vk` on a build without D7VK; both a game-dir `ddraw.dll` and `PROTON_USE_D7VK`. Notes `dxguid_block` | `linux-app setup` |
+| `renderer` | fail: cnc-ddraw without its files; `d7vk` on a build without D7VK; both a `ddraw.dll` beside the exe and `PROTON_USE_D7VK`; the game's own `ddraw.dll` beside the exe with no `ddraw=` override (another value than `n…` warns: that's a choice). Notes `dxguid_block` | `linux-app setup` |
 | `vulkan` | fail: no Vulkan ICD found (`/usr/share/vulkan/icd.d`, `/etc/vulkan/icd.d`, `/run/opengl-driver/share/vulkan/icd.d`, `VK_ICD_FILENAMES`/`VK_DRIVER_FILES`). warn: more than one GPU (R18); `vulkaninfo --summary` output when it's on `PATH` | the driver; `DXVK_FILTER_DEVICE_NAME` |
 | `vulkan32` | fail: a 32-bit game and no 32-bit ICD (R19) | NixOS: `hardware.graphics.enable32Bit = true`; elsewhere the distro's 32-bit Mesa/NVIDIA package |
 | `stamp`, `links`, `processes`, `log` | as design 16 §8.3 (processes found through `/proc/<pid>/environ`; `links` skips `z:`, which stays on Linux, §7.2) | as there |
@@ -1336,7 +1377,8 @@ umu (the container carries its libraries), and a gogo other than the flake's `go
     `state.toml`/`launch.conf` fails; the stamp (`gogo-launch.toml` + L4) differing from
     `state.toml`'s or `launch.conf`'s `STAMP` warns (the next launch runs setup).
   - `links`: the Mac's walk with the data root as the boundary, minus the
-    `dosdevices/` entries of `setup::KEPT_DRIVES` (`z:`, §7.2) and links into the game's
+    `dosdevices/` entries of `setup::KEPT_DRIVES` (`z:`, §7.2), Wine's `comN -> /dev/*`
+    (§7.2 "Host drives") and links into the game's
     own Proton build (`PROTON_DIR`). Proton links its DLLs and fonts into `drive_c/windows`:
     1,324 absolute links in a GE-Proton11-12 prefix (real smoke). They are inside the data
     root for a store build, outside it for a shared tools dir or a `path:` build, where

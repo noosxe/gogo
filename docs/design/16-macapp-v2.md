@@ -247,7 +247,7 @@ take different paths into the prefix.
 - *#70:* the effective renderer is applied on every run, before registry and
   verbs: DXMT → the derived runtime (installed from the renderer store, built
   if missing) becomes the runtime for the rest of setup and for the launcher;
-  cnc-ddraw → `ddraw.dll` + gogo's `ddraw.ini` in the game dir and `ddraw=n,b`;
+  cnc-ddraw → `ddraw.dll` + gogo's `ddraw.ini` beside the entry exe (#199) and `ddraw=n,b`;
   wined3d → nothing. Moving off cnc-ddraw removes gogo's `ddraw.dll`/`ddraw.ini`
   again (only when the ini is gogo's). A renderer that can't be set up (no CX
   engine for DXMT, a `path:` runtime, a failed download, D3DMetal without consent)
