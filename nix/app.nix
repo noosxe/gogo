@@ -37,6 +37,13 @@ rustPlatform.buildRustPackage {
   nativeBuildInputs = [ pkgs.pkg-config rustPlatform.bindgenHook ];
   buildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.openssl ];
 
+  # Panic locations in std/core point into the toolchain's rust-src
+  # (`<toolchain>/lib/rustlib/src/…`), and Nix's reference scan would make
+  # the whole ~1.5 GiB toolchain a runtime dependency (#183). Remap it to
+  # rustc's usual virtual prefix, and fail the build if it creeps back.
+  RUSTFLAGS = "--remap-path-prefix=${rustToolchain}=/rustc";
+  disallowedReferences = [ rustToolchain ];
+
   # These drive real processes through `ps` (the launcher's watchdog and
   # liveness checks, doctor's leftover-process scan), which the macOS build
   # sandbox denies; outside it the launcher reads that as "parent gone" and
