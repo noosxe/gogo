@@ -371,7 +371,7 @@ Mac, with a Linux table:
   cnc-ddraw (`ddraw::remove_gogo`). A user `renderer = "d7vk"` on a game that ships its
   own `ddraw.dll` warns and keeps the game's DLL (closes R17).
 - **The detection rule** of docs/22 §6.2 goes into `pe.rs` for both lanes: device/work
-  vs interface GUIDs, discount the `dxguid` block at ≥ 40 of 44 GUIDs (`dxguid_block`
+  vs interface GUIDs, discount the `dxguid` block at ≥ 32 of 44 GUIDs (`dxguid_block`
   recorded for `doctor`), check files that load `ddraw.dll` by name, add the Unreal
   `D3DDrv.dll` and LithTech `.ren` hints. The Mac table only changes where docs/22 §6.1
   says so (it doesn't: the Mac keeps wined3d for D3D≤7).
@@ -383,12 +383,12 @@ Mac, with a Linux table:
     device/work (the 7 devices incl. `IID_IDirect3DNullDevice`), 17 DirectDraw. Checked
     in files that import `ddraw.dll` and in files that name it (the runtime-string scan
     found `ddraw.dll`), in section data only.
-  - **"Its D3D hits don't count" = they aren't evidence, not "2D".** A file with ≥ 40
-    (`DXGUID_BLOCK_MIN`) gets the lowest level, `dxguid_block`, and still adds
-    `Direct3d7`: docs/22 §6.1 and the table above both keep "only the `dxguid` block" in
-    the D3D≤7 class (D7VK on Linux, wined3d on the Mac), and O9 keeps it there until
-    #174's corpus says otherwise. Below 40: any device/work GUID → `strong`, interface
-    GUIDs only → `medium`. A `d3dim`/`d3drm` import and the renderer DLLs are `strong`.
+  - **"Its D3D hits don't count" = they aren't evidence, not "2D".** A file with ≥ 32
+    (`DXGUID_BLOCK_MIN`; 40 in #173) gets the lowest level, `dxguid_block`, and still
+    adds `Direct3d7`: docs/22 §6.1 and the table above both keep "only the `dxguid`
+    block" in the D3D≤7 class (D7VK on Linux, wined3d on the Mac), and #174's corpus
+    keeps it there (below). Below 32: any device/work GUID → `strong`, interface GUIDs
+    only → `medium`. A `d3dim`/`d3drm` import and the renderer DLLs are `strong`.
   - **Runtime-loaded ddraw.** The D3D≤7 evidence of a file that only names `ddraw.dll`
     lands in `runtime_graphics`, beside its `ddraw`: it decides only when no static
     import says anything (or for Unity/Unreal), like every runtime-loaded name.
@@ -409,6 +409,26 @@ Mac, with a Linux table:
     `compat/` games changes (#173's PR lists them). The 64-bit rule is unchanged.
   - The `pe.rs` unit tests run on Linux too (they were macOS-gated with the rest of
     `macapp`).
+
+  **The GOG corpus (#174, docs/22 §5.4):** six account games, unpacked, never run.
+
+  - **D3D≤7 exes carry selective GUIDs.** Carmageddon TDR 2000: 2 (`medium`), Anno
+    1503: 7 with device GUIDs (`strong`). Both → `d7vk` / Mac `wined3d`, right. Pharaoh
+    and Zeus carry none, Chaos Gate 13 DirectDraw-only ones: `ddraw_2d`, right.
+  - **The threshold moved from 40 to 32.** SimCity 3000 (2D) links DirectX 6's
+    `dxguid.lib`: 36 GUIDs, the 43 minus the DirectX 7 ones, the same in its sound DLL.
+    At 40 they counted as device GUIDs (`strong`). At 32 both blocks are caught; files
+    without one carry at most 16. No pick changes: SimCity 3000 ships DDrawCompat,
+    which both lanes keep, and #173's local Steam sweep (re-run, 60 game dirs) is
+    unchanged.
+  - **"Block only" stays D3D≤7.** It leans 2D (the one block-only ddraw game is 2D, no
+    D3D≤7 game carries a block), but that is one game, whose pick doesn't depend on its
+    class. The Mac's "block only" row stays a host-pass decision (docs/22 §6.1).
+  - **No retained mode** in the six (no `d3drm`/`d3dxof` import or name).
+  - Not changed, noted: the game-level `d3d7_confidence` is the strongest file's, so a
+    sibling tool (SimCity 3000's `Baapp.exe`) can lift it above what decided the class;
+    and Zeus's info file names `zeus.exe` for `Zeus.exe`, which `find_entry_point`
+    misses on a case-sensitive file system.
 - **"Try next renderer" order on Linux** (design 16 §8.2's walk, a Linux table):
 
   | L1 class | order |
@@ -499,14 +519,14 @@ Mac, with a Linux table:
 
 | docs/22 §7 item | Placement |
 |---|---|
-| 1. A real D3D≤7 corpus (download, `innoextract`, run the rule) | **Open, gating:** an implementation issue (§13, I9, #174). Needs the owner's go-ahead for ~3 GB of account downloads. Until it runs, "block only" stays D7VK |
+| 1. A real D3D≤7 corpus (download, `innoextract`, run the rule) | **Done (#174):** selective GUIDs in D3D≤7 exes; DirectX 6's 36-GUID block found, threshold 40 → 32; "block only" stays D7VK (above, "The GOG corpus") |
 | 2. Does Linux need cnc-ddraw for 2D? | **Open, host pass** (Pharaoh, Stronghold, X11 and Wayland; §11.2). Default stays cnc-ddraw for confident 2D until then |
 | 3. The D7VK pin | **Decided:** the D7VK the Proton build bundles; no separate D7VK download in the first round. Release zips come with the plain-Wine lane |
 | 4. `syswow64` vs game dir for D7VK on plain Wine | **Deferred** with the plain-Wine lane (decision 1) |
 | 5. Dual-renderer games | **Decided:** default D7VK (the table above), the cnc-ddraw override documented; L3 entries only after a host pass shows one needs it |
 | 6. Wayland and D7VK (gamescope?) | **Deferred:** no gamescope by default in the first round. A host pass on Wayland records whether it's needed; running a game under a wrapper is a later feature |
 | 7. DXVK-Sarek on MoltenVK | **Out of scope:** Mac lane (epic #50) |
-| 8. Retained-mode GOG games | **Deferred:** the RM row needs no code (Proton's default); the corpus check (item 1) notes any it finds |
+| 8. Retained-mode GOG games | **Deferred:** the RM row needs no code (Proton's default). The corpus (item 1, #174) found none |
 
 ## 4. Decision 4: per-game fixes, worked out at app creation
 
@@ -1567,7 +1587,7 @@ Filed 2026-11-03 after the owner agreed; each is a sub-issue of #155.
 | I6 (#171) | Protonfix static reader, fix summary, collision warnings, `protonfixes = false`, L3 ownership rule (§4.2, §4.3) | `type:feature`, `area:wine-runtime` | #166, #170 |
 | I7 (#172) | Linux renderer table and next-renderer order: DXVK/VKD3D-Proton/D7VK switches, cnc-ddraw, never both (§3) | `type:feature`, `area:wine-runtime` | #173 |
 | I8 (#173) | `pe.rs`: docs/22 §6.2 detection rule (dxguid block, device GUIDs, runtime-loaded ddraw, engine hints) (§3) | `type:feature`, `area:wine-runtime`, `area:mac-app` | — |
-| I9 (#174) | Research: run the D3D≤7 detection rule on real GOG exes (docs/22 §7 item 1) | `type:research`, `area:wine-runtime` | — (needs the owner's OK for downloads) |
+| I9 (#174) | Research: run the D3D≤7 detection rule on real GOG exes (docs/22 §7 item 1) | `type:research`, `area:wine-runtime` | — (done: docs/22 §5.4) |
 | I10 (#175) | Depot materialization on Linux (reflink or copy) and `depot` help text (§6) | `type:feature`, `area:depot` | — |
 | I11 (#176) | `gogo linux-app` command: build (depot and installer lanes), `setup`, `compat`, `next-renderer`, `--retarget`; `apps` on Linux (§10) | `type:feature`, `area:cli`, `area:wine-runtime` | #166–#172, #175 |
 | I12 (#177) | Linux launcher: `.desktop`, `launch.sh` template, `launch.conf`, stamp, runtime check, logs, teardown, early-exit dialog (§7) | `type:feature`, `area:wine-runtime` | #176 (or lands with it) |

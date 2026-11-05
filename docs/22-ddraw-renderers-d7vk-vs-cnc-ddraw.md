@@ -1,6 +1,7 @@
 # 22 — DirectDraw renderers: D7VK vs cnc-ddraw, and telling 3D from 2D (#150)
 
-**Research date:** 2026-11-03 (all probes the same day)
+**Research date:** 2026-11-03 (all probes the same day). §5.4 (the GOG corpus, #174):
+2026-11-05
 **Test bed:** NixOS 26.11, x86_64, kernel 7.2.11-zen1 (as docs/21). No game, installer or
 Wine binary was run: release archives were hashed and listed, DLLs were read with
 `objdump -p`/`strings`, and game files were read by a throwaway Python scanner
@@ -39,6 +40,11 @@ source file or script read, an archive listing or hash, a binary read) or **repo
   `ddraw.dll` the game ships itself → keep it, use neither. The detection rule changes in
   three ways: discount the full `dxguid` block, add the device/texture GUIDs as signals,
   and check GUIDs in runtime-loading files too.
+- **On six real GOG games (§5.4, #174), D3D≤7 exes carry selective GUIDs, not the
+  block.** Carmageddon TDR 2000 has 2 (`IID_IDirect3D7`, `IID_IDirectDraw7`), Anno 1503
+  7 (with five device GUIDs). The only block in a ddraw game is SimCity 3000's, a 2D
+  game, and it is DirectX 6's 36-GUID block, which the first threshold (40) missed. The
+  threshold is now 32. None of the six uses retained mode.
 
 ## 1. The two candidates
 
@@ -206,7 +212,8 @@ Findings:
 3. **Not tested here: a real D3D≤7 GOG exe.** None was on disk (this account owns
    Carmageddon TDR 2000 and Anno 1503 but hasn't downloaded them). gogo's compat entry
    for TDR records that L1 already picks wined3d for it, so the four-GUID check fires on
-   at least one real D3D6/7 game (**reported**, `compat/1146738698.toml`).
+   at least one real D3D6/7 game (**reported**, `compat/1146738698.toml`). §5.4 tests
+   six GOG games.
 
 ### 5.3 Signals, ranked
 
@@ -217,11 +224,81 @@ Findings:
 | Device GUID (HAL/TnLHal/RGB/Ref/MMX/Ramp) outside the block | strong 3D | a 2D game that enumerates devices for a caps screen (unlikely) | games that pass the GUID from the `EnumDevices` callback carry no device GUID |
 | D3D work GUIDs (`Texture2`, `Device*`, `VertexBuffer*`, `Viewport*`, `Material*`) outside the block | strong 3D | — | as above, but most D3D3/5/6 code queries `IID_IDirect3DTexture2` |
 | `IID_IDirect3D`/`2`/`3`/`7` outside the block (today's rule) | medium | 2D games that probe for D3D | — |
-| The 43-GUID `dxguid` block | **none** (ambiguous) | high | — |
+| The 43-GUID `dxguid` block (DirectX 7 SDK) or the 36-GUID one (DirectX 6 SDK, §5.4) | **none** (ambiguous) | high | — |
 | `DirectDrawCreateEx` import, `IID_IDirectDraw7` | none (2D DD7 exists: Stronghold) | high | — |
 | A renderer DLL next to the exe: Unreal `D3DDrv.dll`/`SoftDrv.dll`/`GlideDrv.dll`/`OpenGLDrv.dll`; LithTech `*.ren` (Blood II, Shogo); Glide `glide2x.dll`/`glide3x.dll` shipped | strong "has a 3D path" (and possibly a software one) | — | `.ren` files aren't scanned today (`pe_files_in` takes `.exe`/`.dll`) |
 | Strings `Direct3D`, `RGB Emulation`, `Direct3D HAL` | weak | menus of 2D games, shared code | — |
 | Packed exe (entropy ≈ 8, `kernel32`-only imports) | — | — | **total**: nothing to read. Stay `Unknown` → wined3d, never guess 2D |
+
+### 5.4 The GOG corpus (#174)
+
+Six games from this account, downloaded with gogo (`gogo download --os windows
+--language en`, 3.4 GiB, installers kept in `~/Downloads/gogo`). Each installer was
+unpacked with `innoextract` 1.10-dev (added to the dev shell). Nothing was installed or
+run. Every `.exe`/`.dll` was read two ways:
+
+- **gogo's own scan**: `pe::scan` plus `renderer::pick_with` (Mac, no D3DMetal) and
+  `renderer::pick_linux`, from a throwaway example binary (not committed). These are the
+  picks a fresh `mac-app` / `linux-app` would make (L1 only: no L3/L4 entry applied).
+- **A raw dump**: which of `pe.rs`'s 44 GUIDs sit anywhere in each file, and where, in
+  every PE file (not only the ddraw files gogo checks). Imports and runtime-loaded names
+  come from the scan's JSON.
+
+Main exes come from `goggame-*.info`. All are 32-bit. All facts in this section are
+**verified** (binary read) unless marked.
+
+| Game (GOG id, installer) | Where ddraw is | ddraw/d3d GUIDs | Game's own `ddraw.dll` | gogo today: class, D3D≤7 confidence → Linux / Mac | Right? |
+|---|---|---|---|---|---|
+| Carmageddon TDR 2000 (1146738698, `setup_carmageddon_tdr2k_1.0_(17943).exe`) | `TDR2000.exe` imports it | **2**: `IID_IDirect3D7`, `IID_IDirectDraw7` (32 B, side by side). Strings `Direct3D Renderer (using DirectX v7.x)`, `Direct3D7->EnumDevices` | no | `d3d_legacy`, `medium` → `d7vk` / `wined3d` | ✓ 3D (D3D7; D7VK profile) |
+| Anno 1503 A.D. (1438074791, `setup_anno_1503_2.0.0.5.exe`) | `AnnoDisplay.dll` imports it; `AnnoFrame.dll` names it | `AnnoDisplay.dll` **7**: `IID_IDirect3D7`, `IID_IDirectDraw7`, HAL, RGB, Ref, Null and TnLHal device. `AnnoFrame.dll` 2: HAL and RGB device. `Max_Sound.dll` carries the 43-GUID block but has nothing to do with ddraw, so it isn't checked | no | `d3d_legacy`, `strong` → `d7vk` / `wined3d` | ✓ 3D (D3D7; D7VK profile) |
+| Pharaoh + Cleopatra (1207659046, `setup_pharaoh_gold_2.1.0.15.exe`) | `Pharaoh.exe` imports it | **0** | no | `ddraw_2d` → `cnc-ddraw` / `cnc-ddraw` | ✓ 2D (live-proven on the Mac, docs/16) |
+| Zeus + Poseidon (1207659039, `setup_zeus_and_poseidon_2.1.0.10.exe`) | `Zeus.exe` imports it | **0** | no | `ddraw_2d` → `cnc-ddraw` / `cnc-ddraw` | ✓ 2D |
+| SimCity 3000 Unlimited (2086050016, `setup_simcity_3000_unlimited_2.0.949(a)_ddrawfix_(77026).exe`) | `Apps/GZGraphicD.dll` imports it (`DirectDrawCreate`, `DirectDrawEnumerateA`); `SIMBABLD.DLL` and `Baapp.exe` name it | **36**, the same set in `SC3U.exe`, `GZGraphicD.dll`, `SIMBABLD.DLL` and `GZSOUNDD.DLL` (which imports only `dsound`): all 44 except the seven DirectX 7 GUIDs and `IID_IDirectDraw3`. This is DirectX 6's `dxguid` block. No `Direct3D` string in `SC3U.exe` or `GZGraphicD.dll`. `Baapp.exe`, the separate "Building Architect Tool" play task, has 5 selective ones: `IID_IDirect3D3`, `IID_IDirect3DTexture2`, RGB device, `IID_IDirectDraw4`, `IID_IDirectDrawSurface4` | yes: DDrawCompat (`narzoul/DDrawCompat`, in `Apps/`; GOG's "ddrawfix" build) | `d3d_legacy`, `strong` (from the 36, under the old threshold of 40) → `wined3d` + game's `ddraw.dll` kept / `wined3d` + kept | class ✗ (the game is 2D; its D3D GUIDs are the block). Pick ✓ in effect: both lanes keep DDrawCompat, which does DirectDraw and D3D≤7 |
+| Warhammer 40,000: Chaos Gate (1433928487, `setup_warhammer_40000_chaos_gate_1.2_gog_v9_(90274).exe`) | `WH40K.exe` imports `wing32.dll` and names `ddraw.dll` (runtime) | **13**, DirectDraw only (`CLSID_DirectDraw`, `…Clipper`, `IID_IDirectDraw`/`2`/`4`, `…Surface`/`2`/`3`/`4`, `…Palette`, `…Clipper`, `…ColorControl`, `…GammaControl`). No D3D | yes: "GOG.com DirectX 1-7 wrapper" 1.1.0.6929, which imports `d3d9.dll` (left out of the class as a game wrapper) | `ddraw_2d` (runtime names) → `wined3d` + game's `ddraw.dll` kept (its D3D9 then lands on Proton's DXVK) / `cnc-ddraw` id, game's DLL kept | ✓ 2D |
+
+Findings:
+
+1. **D3D≤7 GOG exes carry selective GUIDs.** Both 3D games carry a handful: the
+   interfaces they query, and for Anno the device GUIDs it passes to `CreateDevice`. Neither
+   carries a block. TDR shows the false-negative case of §5.3: it takes its device GUID
+   from the `EnumDevices` callback, so it has no device GUID and lands at `medium`.
+   `medium` must stay D3D≤7 (it does).
+2. **There is a second, smaller block: DirectX 6's.** SimCity 3000 links a `dxguid.lib`
+   older than DirectX 7: 36 GUIDs, i.e. the 43 of §5.2 minus the seven DirectX 7
+   additions (`IID_IDirect3D7`, `…TnLHalDevice`, `…Device7`, `…VertexBuffer7`,
+   `CLSID_DirectDraw7`, `IID_IDirectDraw7`, `…Surface7`). Its sound DLL carries the same
+   36. At the first threshold (≥ 40 of 44) the 36 counted as device/work GUIDs: `strong`.
+   **Changed in #174: `DXGUID_BLOCK_MIN` is 32.** That catches both blocks and stays
+   above every file without one (at most 16 here, in §5.2 and in a re-run of #173's local
+   sweep, 60 Steam game dirs: no file between 14 and 35, no pick changed). Wrapper DLLs
+   that implement the interfaces count high too (Chaos Gate's GOG wrapper 37, DDrawCompat
+   43), but a game's own `ddraw.dll` is left out of the class anyway. A DirectX 5 block
+   would be smaller still; none was seen.
+3. **"Block only" leans 2D, but on one game.** The only ddraw game in either corpus
+   whose D3D evidence is just a block is SimCity 3000, and it is 2D. The blocks elsewhere
+   sit in D3D8/D3D11 games and sound/input DLLs (§5.2, Anno's `Max_Sound.dll`). No D3D≤7
+   game carries one. One game is too few to move the class, and SimCity 3000's pick
+   doesn't depend on it (it ships DDrawCompat). So "block only" stays D3D≤7 at
+   `dxguid_block` (D7VK on Linux, harmless if 2D; wined3d on the Mac until a host pass
+   decides, §6.1).
+4. **Retained mode: none.** No file of the six imports or names `d3drm.dll` or
+   `d3dxof.dll` (§7 item 8).
+5. **Selective DirectDraw GUIDs are real 2D use.** Chaos Gate's 13 are all DirectDraw,
+   like Stronghold's one (§5.2). Pharaoh and Zeus need none: they stay on the
+   `IDirectDraw` that `DirectDrawCreate` returns.
+6. **Two of six ship their own `ddraw.dll`** (DDrawCompat, GOG's D3D9-based wrapper).
+   gogo keeps both, as §6.1 says. For these games the class decides nothing.
+
+Seen on the way (not part of the rule):
+
+- **The game-level confidence takes the strongest file in the dir.** SimCity 3000's
+  `GZGraphicD.dll` is `dxguid_block` now, but its `Baapp.exe` (a separate tool) is
+  `strong` through a runtime-named ddraw, so `d3d7_confidence` and the L1 reason still
+  say "device/work GUID". The class and the pick don't change. The confidence could be
+  taken only from the files that decided the class.
+- **Zeus's main exe came from the heuristic.** Its `goggame-1207659039.info` names
+  `zeus.exe`; the file is `Zeus.exe`. On a case-sensitive file system
+  `info::find_entry_point` misses it. Here the heuristic picks the same file.
 
 ## 6. Recommendation
 
@@ -257,9 +334,10 @@ Findings:
    **device/work** (the 7 device GUIDs plus `IID_IDirect3DDevice*`, `Texture*`,
    `VertexBuffer*`, `Viewport*`, `Material*`, `ExecuteBuffer`, `Light`). That is 27 D3D
    GUIDs, all in Wine's `d3d.h`.
-2. Count the 44 ddraw/d3d GUIDs per file. **If ≥ 40 are present, the file carries the
+2. Count the 44 ddraw/d3d GUIDs per file. **If ≥ 32 are present, the file carries a
    `dxguid` block. Its D3D hits don't count** (record `dxguid_block: true` for `doctor`).
-   The threshold leaves headroom under the 43 seen.
+   The threshold leaves headroom under DirectX 6's 36 and DirectX 7's 43 (first set at
+   40, lowered by #174, §5.4).
 3. Otherwise any device/work GUID → `Direct3d7` (strong); interface GUID only →
    `Direct3d7` (medium). A `confidence` field would let `renderer.rs` treat "medium" and
    "block only" differently, if a host pass shows that matters.
@@ -275,14 +353,18 @@ reads in full. No new dependency.
 **As built (#173):** the rule is in `pe.rs` as above, with Wine `wine-11.0`'s 44 GUIDs.
 In step 2, the block's D3D hits stay D3D≤7 at the lowest confidence (`dxguid_block`),
 following §6.1's "only the `dxguid` block" row, rather than dropping to 2D. Details,
-output fields and class transitions: design 18 §3 "As built (#173)".
+output fields and class transitions: design 18 §3 "As built (#173)". #174 lowered the
+block threshold from 40 to 32 (§5.4).
 
 ## 7. Open questions for the Linux design doc
 
-1. **A real D3D≤7 corpus.** Download (not run) Carmageddon TDR 2000, Anno 1503, Pharaoh,
-   Zeus, SimCity 3000 and Chaos Gate from this account. `innoextract` them and run the
-   §6.2 rule. Do D3D≤7 GOG exes carry selective GUIDs or the block? This decides whether
-   "block only" can lean 2D. Needs the user's go-ahead (account downloads, ~3 GB).
+1. **A real D3D≤7 corpus.** *Resolved (#174, §5.4).* Download (not run) Carmageddon
+   TDR 2000, Anno 1503, Pharaoh, Zeus, SimCity 3000 and Chaos Gate from this account.
+   `innoextract` them and run the §6.2 rule. Do D3D≤7 GOG exes carry selective GUIDs or
+   the block? This decides whether "block only" can lean 2D. **Answer:** selective (2
+   and 7 GUIDs). The one block-only ddraw game is 2D (SimCity 3000, a DirectX 6 block of
+   36, now caught by a threshold of 32). "Block only" leans 2D, but on one game: it stays
+   D3D≤7 at `dxguid_block`.
 2. **Does Linux need cnc-ddraw for 2D at all?** Host pass: Pharaoh and Stronghold under
    GE-Proton with Wine's `ddraw`, then with cnc-ddraw. On X11 and on Wayland. If Wine
    alone is fine, the Linux 2D default could be "Proton default" and cnc-ddraw opt-in.
@@ -298,7 +380,9 @@ output fields and class transitions: design 18 §3 "As built (#173)".
 7. **DXVK-Sarek on MoltenVK** for the Mac's D3D≤7 games: worth one VM/host probe, or
    settled by the D9VK crash in docs/19?
 8. **Retained-mode (`d3drm`) GOG games**: are there any in the catalog? If none matter,
-   the RM row is moot.
+   the RM row is moot. *Answered for the corpus (#174, §5.4):* none of the six imports or
+   names `d3drm.dll`/`d3dxof.dll`. The catalog as a whole wasn't searched. The RM row
+   costs no code (Proton's default), so it stays.
 
 ## 8. Sources
 
