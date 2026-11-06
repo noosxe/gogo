@@ -18,9 +18,9 @@ tested = [
 # 320x200, and the device dialog is magnified with its OK off screen and takes no input. On
 # wined3d the same dialog is normal, but "Play" then shows black.
 [platforms.linux]
-status = "boots"
+status = "broken"
 lane   = "depot"
-notes  = "headless sway: stops at the first-run device dialog on D7VK, the menu isn't reached"
+notes  = "headless sway: D7VK's first-run device dialog is stuck at 320x200 with OK off screen and takes no input, so the menu isn't reached (#203)"
 tested = [
   { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/software", date = 2026-11-06 },
   { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/radv", date = 2026-11-06 },
