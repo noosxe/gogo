@@ -21,7 +21,7 @@ use crate::macapp::launch::GameDirs;
 /// Bumped with every change to [`TEMPLATE`] that matters to a game set up
 /// before it. Setup rewrites `launch.sh` whenever its bytes differ, so this
 /// is for people: the run log header and `launch.log` name it.
-pub const LAUNCHER_VERSION: u32 = 2;
+pub const LAUNCHER_VERSION: u32 = 3;
 
 /// `games/<gogid>/icon.png`.
 pub const ICON: &str = "icon.png";
@@ -645,6 +645,7 @@ start_watchdog() {
     ) </dev/null >/dev/null 2>&1 3>&- 4>&- &
     WATCHDOG=$!
     set +m
+    log "watchdog armed ($WATCHDOG)"
 }
 stop_watchdog() {
     [ -n "$WATCHDOG" ] || return 0
@@ -796,11 +797,13 @@ run_game() {
 
 start_run_log ${ARGV[@]+"${ARGV[@]}"}
 log "exec umu-run $EXE_ABS (runtime $RUNTIME, prefix $PREFIX_ABS, log $RUN_LOG)"
+# Registered before the game starts: a launcher killed in the gap would leave
+# a game nothing knows about. Only the watchdog needs WPID, so it follows.
+register_launch
 set -m
 ( run_game ${ARGV[@]+"${ARGV[@]}"} ) 3>&- 4>&- &
 WPID=$!
 set +m
-register_launch
 start_watchdog
 wait "$WPID"
 rc=$?

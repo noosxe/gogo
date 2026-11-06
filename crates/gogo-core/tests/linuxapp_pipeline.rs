@@ -1399,7 +1399,7 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
     // next setup, which says so; an unchanged one isn't touched.
     std::fs::write(
         &sh,
-        script.replace("LAUNCHER_VERSION=2", "LAUNCHER_VERSION=0"),
+        script.replace("LAUNCHER_VERSION=3", "LAUNCHER_VERSION=0"),
     )
     .unwrap();
     std::fs::write(&desktop, "[Desktop Entry]\nExec=/old/root/launch.sh\n").unwrap();
@@ -1407,7 +1407,7 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
     assert_eq!(std::fs::read_to_string(&sh).unwrap(), script);
     assert_eq!(std::fs::read_to_string(&desktop).unwrap(), entry);
     assert!(
-        out.notes.iter().any(|n| n == "launch.sh: launcher 0 -> 2"),
+        out.notes.iter().any(|n| n == "launch.sh: launcher 0 -> 3"),
         "{:?}",
         out.notes
     );
@@ -1472,7 +1472,7 @@ fn the_launcher_runs_umu_with_the_games_environment_and_logs_the_run() {
     let run = &runs[0];
     for want in [
         format!("# gogo run log: Test Game ({ID})\n"),
-        "# launcher: 2\n".into(),
+        "# launcher: 3\n".into(),
         format!(
             "# runtime: path:{} (1793687165 GE-Proton10-34)\n",
             w.build.display()
@@ -1881,7 +1881,10 @@ fn the_watchdog_tears_down_after_the_launcher_is_killed() {
     assert!(wait_until(10, || prefix_procs(&w).len() >= 4));
     assert!(wait_until(5, || w.launch_log().contains("exec umu-run")));
     let pid = child.id();
-    assert!(w.game().join(format!(".launchers/{pid}")).is_file());
+    // A kill before the watchdog exists would leave nothing to tear down.
+    assert!(wait_until(5, || w.launch_log().contains("watchdog armed")));
+    let record = w.game().join(format!(".launchers/{pid}"));
+    assert!(wait_until(5, || record.is_file()), "no record for {pid}");
     child.kill().unwrap();
     child.wait().unwrap();
     assert!(
