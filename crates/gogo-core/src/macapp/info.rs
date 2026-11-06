@@ -130,10 +130,9 @@ pub fn find_entry_point(dir: &Path) -> Result<PathBuf, MacAppError> {
             let Some(rel) = task.path.as_deref() else {
                 continue;
             };
-            let candidate = base.join(rel.replace('\\', "/"));
-            if !candidate.is_file() {
+            let Some(candidate) = resolve_task_path(base, rel) else {
                 continue;
-            }
+            };
             match (task.is_primary, task.category.as_deref()) {
                 (true, Some("launcher")) => {
                     primary_launcher.get_or_insert(candidate.clone());
@@ -184,10 +183,9 @@ pub fn play_variants(dir: &Path) -> Vec<PlayVariant> {
             let Some(rel) = task.path.as_deref() else {
                 continue;
             };
-            let exe = base.join(rel.replace('\\', "/"));
-            if !exe.is_file() {
+            let Some(exe) = resolve_task_path(base, rel) else {
                 continue;
-            }
+            };
             let file = exe
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -255,6 +253,33 @@ pub fn split_args(raw: &str) -> Vec<String> {
     out
 }
 
+/// A task's `path` as the file on disk. Windows paths ignore case, and an info
+/// can disagree with its files (Zeus: `zeus.exe` for `Zeus.exe`), so each part
+/// falls back to a case-insensitive match; the result has the on-disk spelling.
+fn resolve_task_path(base: &Path, rel: &str) -> Option<PathBuf> {
+    let rel = rel.replace('\\', "/");
+    let exact = base.join(&rel);
+    if exact.is_file() {
+        return Some(exact);
+    }
+    let mut cur = base.to_path_buf();
+    for part in rel.split('/').filter(|p| !p.is_empty() && *p != ".") {
+        let exact = cur.join(part);
+        cur = if exact.exists() {
+            exact
+        } else {
+            std::fs::read_dir(&cur)
+                .ok()?
+                .flatten()
+                .map(|e| e.file_name())
+                .filter(|n| n.to_string_lossy().eq_ignore_ascii_case(part))
+                .min()
+                .map(|n| cur.join(n))?
+        };
+    }
+    cur.is_file().then_some(cur)
+}
+
 fn is_runnable_file_task(task: &GogTask) -> bool {
     task.kind.as_deref() == Some("FileTask")
         && task.path.as_deref().is_some_and(|p| p.to_lowercase().ends_with(".exe"))
@@ -281,6 +306,28 @@ fn collect_info_files(dir: &Path, depth: u8) -> Vec<PathBuf> {
         }
     }
     found
+}
+
+#[cfg(test)]
+mod task_path_tests {
+    use super::*;
+
+    #[test]
+    fn task_path_ignores_case_like_windows() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("goggame-1.info"),
+            r#"{"name":"T","playTasks":[
+                {"type":"FileTask","category":"game","path":"apps\\zeus.exe","isPrimary":true,"name":"Z"}
+            ]}"#,
+        )
+        .unwrap();
+        std::fs::create_dir(tmp.path().join("Apps")).unwrap();
+        std::fs::write(tmp.path().join("Apps/Zeus.exe"), b"MZ").unwrap();
+        let on_disk = tmp.path().join("Apps/Zeus.exe");
+        assert_eq!(find_entry_point(tmp.path()).unwrap(), on_disk);
+        assert_eq!(play_variants(tmp.path())[0].exe, on_disk);
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
