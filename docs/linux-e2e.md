@@ -130,12 +130,12 @@ vendor. The label in the summary comes from the node's kernel driver: `nvidia`, 
 | `gpu_vulkan` | `vulkaninfo` only lists the expected device |
 | `gpu_used_by_game` | `--gpu`: a process of the game holds the node open (`/dev/nvidia0` for NVIDIA). `gpu_detail.gpu_fds` lists who |
 
-On a real game, `SC3U.exe` holds `/dev/dri/renderD128` or `/dev/nvidia0` open. That game is
-wined3d on GL: **DXVK's device choice has no result yet**, since it needs a D3D9–11 game, and
-that download is the owner's call. With `--gpu` the sandbox has one GPU, so a game on DXVK
-should see just that one. The summary's log excerpt and `run.log` are where to look;
-`DXVK_LOG_LEVEL=info` prints the device to the log. Which of two GPUs DXVK picks by itself
-stays a host question (R18).
+On a real game the game's process holds `/dev/dri/renderD128` or `/dev/nvidia0` open.
+`gpu_used_by_game` also passes when only `explorer.exe` or `xalia.exe` do: read
+`gpu_detail.gpu_fds` for who. **DXVK's device:** with `--gpu` the sandbox has one GPU, and
+`DXVK_LOG_LEVEL = "info"` under `[env]` prints it to `game.out` (`Found device: …`). In these
+runs it was always the chosen one. Which of two GPUs DXVK picks by itself stays a host question
+(R18). A Unity game's real API is in its `Player.log` (`Version: Direct3D 12`), under `--keep`.
 
 ## Manifests
 
@@ -152,10 +152,14 @@ resolution = "1280x800"          # the headless output; default 1280x800
 title = "^SimCity"               # regex for the window; default the largest visible
 min_fill = { w = 80, h = 95 }    # % of the window; default 90 x 90
 
+[env]                            # only for the game's launch: logging, for example
+DXVK_LOG_LEVEL = "info"
+
 [exit]
 how = "self"                     # "self": it exits by itself after the steps, code 0
                                  # "signal" (default): the launcher gets TERM, code 143
 wait_secs = 60                   # default 30
+code = 255                       # "self": the code it exits with; default 0
 
 [[step]]
 wait_settled = 240               # until the picture fills the window and holds still
@@ -242,5 +246,14 @@ These stay in the owner's host pass (#179, design 18 §11.2), and agents put the
 - **NVIDIA needs its EGL vendor named** (`__EGL_VENDOR_LIBRARY_FILENAMES`), or wlroots gets
   Mesa's EGL on NVIDIA's GBM: `gbm device using incorrect/incompatible backend`.
 - **`XDG_RUNTIME_DIR` isn't under `target/`:** a socket path has a limit of 108 bytes.
+- **`runtimes` and `renderers` share one mount** (`cache/store`, linked from `GOGO_HOME`): the
+  store stages renderers in `runtimes/.tmp`, and a rename across two bind mounts fails. gogo
+  then falls back from cnc-ddraw to D7VK with only "provisioning failed" to say so.
+- **A support installer can hang with no display** (Zeus, Pharaoh). gogo stops it after 180 s,
+  so those builds take 3 minutes longer here.
+- **A click is a percent of the largest window,** which on a game's small first dialog is that
+  dialog, not the screen.
+- **`gogo depot --dir` puts `gog-support/` beside the game:** it belongs there. TDR 2000 aborts
+  without its `ASSETS/options.txt`.
 - **Sway comes as `sway-unwrapped`:** nixpkgs' wrapper starts `dbus-run-session`, which needs
   a config in `/etc`.

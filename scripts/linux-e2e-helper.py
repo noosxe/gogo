@@ -151,7 +151,7 @@ def parse_manifest(text):
         raw = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
         raise ManifestError(f"not TOML: {e}") from e
-    _only(raw, ("gogid", "title", "command", "window", "exit", "step"), "manifest")
+    _only(raw, ("gogid", "title", "command", "window", "exit", "env", "step"), "manifest")
 
     gogid = raw.get("gogid")
     command = raw.get("command")
@@ -180,10 +180,14 @@ def parse_manifest(text):
             raise ManifestError(f"window.title: not a regex: {e}") from e
 
     exit_ = raw.get("exit", {})
-    _only(exit_, ("how", "wait_secs"), "exit")
+    _only(exit_, ("how", "wait_secs", "code"), "exit")
     how = exit_.get("how", "signal")
     if how not in EXIT_HOW:
         raise ManifestError(f"exit.how: want one of {EXIT_HOW}, got {how!r}")
+
+    env = raw.get("env", {})
+    if not isinstance(env, dict) or not all(isinstance(v, str) for v in env.values()):
+        raise ManifestError("env: must be a table of strings")
 
     steps_raw = raw.get("step", [])
     if not isinstance(steps_raw, list) or not steps_raw:
@@ -205,7 +209,9 @@ def parse_manifest(text):
         "exit": {
             "how": how,
             "wait_secs": _number(exit_.get("wait_secs", 30), "exit.wait_secs"),
+            "code": int(_number(exit_.get("code", 0), "exit.code")),
         },
+        "env": env,
         "steps": steps,
     }
 
@@ -720,6 +726,7 @@ class Driver:
     def launch(self):
         env = dict(self.env)
         env.update(self.cfg["game_env"])
+        env.update(self.manifest["env"])
         out = open(os.path.join(self.results, "game.out"), "wb")
         self.game = subprocess.Popen(
             self.cfg["launch"],
@@ -907,7 +914,11 @@ class Driver:
         self.game_exit = self.game.returncode
         self.result["game_exit"] = self.game_exit
         if how == "self":
-            self.check("clean_exit", self.game_exit == 0, f"exit {self.game_exit}")
+            self.check(
+                "clean_exit",
+                self.game_exit == self.manifest["exit"]["code"],
+                f"exit {self.game_exit}",
+            )
         elif how == "signal":
             # The launcher's own footer for SIGTERM is 143.
             self.check(
