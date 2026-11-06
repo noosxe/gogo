@@ -1,0 +1,14 @@
+# Zeus + Poseidon (2D DirectDraw: gogo's cnc-ddraw). Fails today: an access violation in heap
+# code as the intro video starts, exit 5 (see the PR's issue). Kept so a fix can be checked.
+title = "Zeus + Poseidon"
+gogid = 1207659039
+
+[window]
+wait_secs = 200
+
+[[step]]
+wait = 30
+
+[[step]]
+screenshot = "intro"
+min_fill = false

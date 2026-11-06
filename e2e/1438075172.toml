@@ -1,0 +1,66 @@
+# Anno 1701 (D3D9: DXVK). Escape skips the videos to the main menu, which on a first
+# run opens on profile creation. Create a profile, then Leave game and confirm.
+# Coordinates are percent of the window.
+title = "Anno 1701 A.D."
+gogid = 1438075172
+
+[exit]
+how = "self"
+wait_secs = 60
+code = 255                       # what it exits with from its own Quit, on every renderer
+
+[env]
+DXVK_LOG_LEVEL = "info"
+
+[window]
+wait_secs = 240
+resolution = "1280x800"
+min_fill = { w = 80, h = 95 }
+
+[[step]]
+wait = 20
+
+[[step]]
+key = "Escape"
+
+[[step]]
+wait = 30
+
+[[step]]
+key = "Escape"
+
+[[step]]
+wait = 40
+
+[[step]]
+screenshot = "menu"
+
+# Create profile.
+[[step]]
+click = { x = 55, y = 69.5 }
+
+[[step]]
+wait = 8
+
+[[step]]
+screenshot = "profile-made"
+
+[[step]]
+expect_change = { from = "menu", to = "profile-made", min = 2 }
+
+# Leave game.
+[[step]]
+click = { x = 19.4, y = 67.2 }
+
+[[step]]
+wait = 5
+
+[[step]]
+screenshot = "leave"
+
+[[step]]
+expect_change = { from = "profile-made", to = "leave", min = 1 }
+
+# The dialog's check mark.
+[[step]]
+click = { x = 47.3, y = 50.5 }

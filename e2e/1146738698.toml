@@ -1,0 +1,31 @@
+# Carmageddon TDR 2000 (D3D7: D7VK). The first-run hardware check: OK, then D7VK creates
+# its device and the game asks which device to use. It stops there: the check leaves the
+# display in 320x200, the dialog is magnified with its OK off screen, and it takes no input
+# here, so the menu isn't reached.
+title = "Carmageddon TDR 2000"
+gogid = 1146738698
+
+[window]
+wait_secs = 240
+resolution = "1280x800"
+
+[[step]]
+wait = 15
+
+[[step]]
+screenshot = "first-run-dialog"
+min_fill = false
+
+# OK. Coordinates are percent of the window: here, the dialog.
+[[step]]
+click = { x = 37.3, y = 80.6 }
+
+[[step]]
+wait = 40
+
+[[step]]
+screenshot = "device-dialog"
+min_fill = false
+
+[[step]]
+expect_change = { from = "first-run-dialog", to = "device-dialog", min = 20 }

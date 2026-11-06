@@ -1,0 +1,42 @@
+# Pharaoh + Cleopatra (2D DirectDraw: gogo's cnc-ddraw). Escape skips the logos and the
+# intro to the title; Escape there opens "Leave the Kingdom?", whose Yes ends the game.
+# 4:3 pillarboxed in 1280x800, hence the width. Coordinates are percent of the window.
+title = "Pharaoh + Cleopatra"
+gogid = 1207659046
+
+[window]
+wait_secs = 240
+resolution = "1280x800"
+min_fill = { w = 80, h = 95 }
+
+[exit]
+how = "self"
+wait_secs = 60
+
+[[step]]
+wait = 25
+
+[[step]]
+key = "Escape"
+
+[[step]]
+wait = 15
+
+[[step]]
+screenshot = "title"
+
+[[step]]
+key = "Escape"
+
+[[step]]
+wait = 8
+
+[[step]]
+screenshot = "leave-dialog"
+
+[[step]]
+expect_change = { from = "title", to = "leave-dialog", min = 5 }
+
+# Yes.
+[[step]]
+click = { x = 44, y = 57 }

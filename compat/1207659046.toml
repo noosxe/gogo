@@ -24,3 +24,14 @@ tested = [
   { runtime = "winecx/24.0.7_7", host = "m4pro/macos-27.0.1", date = 2026-10-23 },
   { runtime = "winecx26/26.3-20261014", host = "m4pro/macos-27.0.1", date = 2026-10-24 },
 ]
+
+# Linux depot lane (e2e/1207659046.toml): no CD prompt, the overlay's Pharaoh.ini is enough.
+[platforms.linux]
+status = "boots"
+lane   = "depot"
+notes  = "headless sway: intro, title and the Quit dialog work on cnc-ddraw; audio and the owner's compositor not judged"
+tested = [
+  { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/software", date = 2026-11-06 },
+  { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/radv", date = 2026-11-06 },
+  { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/nvidia", date = 2026-11-06 },
+]

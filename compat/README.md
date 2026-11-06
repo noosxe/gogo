@@ -47,8 +47,8 @@ as across layers (below): maps per key, `verbs` add (`-<verb>` removes one,
 `-*` clears), everything else replaced whole. The result is this file's
 entry. A table for the other OS is checked (bad values are errors there too)
 but not applied, and a key of the second row at the top level warns and is
-ignored, like an unknown key. Files here have no `[platforms.linux]` tables
-yet: they come with a Linux host pass that has something to record.
+ignored, like an unknown key. `[platforms.linux]` tables come from a Linux run
+that has something to record (`host = "headless-sway/<gpu>"`, `docs/linux-e2e.md`).
 
 *L4 files from before #166* hold `renderer` / `runtime` (written by gogo)
 and maybe `env`, `status`, … at the top level. On macOS gogo reads those as
@@ -113,6 +113,8 @@ Seed (#75), see docs/19 §5:
   (`scripts/host-pass.sh`); `gogo-vm`: a `scripts/vm-test.sh` smoke run. The VM
   has no Metal 3 and no OpenGL, so a VM row never vouches for DXMT, D3DMetal
   or OpenGL rendering.
+- `source = "gogo-headless"`: a `scripts/linux-e2e.sh` run on this machine's
+  software, RADV and NVIDIA drivers, with no display, compositor or audio of its own.
 - `tested` rows carry no renderer: the runtime id says it, a derived
   `winecx/24.0.7_7+dxmt-v0.80` for DXMT/D3DMetal, the base id otherwise.
   `host` is `m4pro/macos-<ver>` or `vm/macos-<ver>`.

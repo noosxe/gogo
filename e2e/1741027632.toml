@@ -1,0 +1,52 @@
+# Right and Down (Unity, D3D11: DXVK). The menu's particles never hold still, so
+# plain waits. Settings, Back, then Quit. Coordinates are percent of the window.
+title = "Right and Down"
+gogid = 1741027632
+
+[env]
+DXVK_LOG_LEVEL = "info"
+
+[window]
+wait_secs = 180
+resolution = "1280x800"
+min_fill = { w = 95, h = 95 }
+
+[exit]
+how = "self"
+wait_secs = 60
+
+[[step]]
+wait = 60
+
+[[step]]
+screenshot = "menu"
+
+# Settings.
+[[step]]
+click = { x = 62, y = 95 }
+
+[[step]]
+wait = 5
+
+[[step]]
+screenshot = "settings"
+
+[[step]]
+expect_change = { from = "menu", to = "settings", min = 20 }
+
+# Back.
+[[step]]
+click = { x = 30.7, y = 66.5 }
+
+[[step]]
+wait = 5
+
+[[step]]
+screenshot = "menu-again"
+
+[[step]]
+expect_change = { from = "settings", to = "menu-again", min = 20 }
+
+# Quit.
+[[step]]
+click = { x = 85.7, y = 95 }

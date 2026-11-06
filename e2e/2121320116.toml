@@ -1,0 +1,48 @@
+# Pinball Spire (Unity 6, ships D3D12Core.dll, but its Player.log says Direct3D 11:
+# DXVK). Options, back, then Quit Game. Coordinates are percent of the window.
+title = "Pinball Spire"
+gogid = 2121320116
+
+[env]
+DXVK_LOG_LEVEL = "info"
+
+[window]
+wait_secs = 180
+resolution = "1280x800"
+min_fill = { w = 95, h = 95 }
+
+[exit]
+how = "self"
+wait_secs = 60
+
+[[step]]
+wait = 45
+
+[[step]]
+screenshot = "menu"
+
+# Options.
+[[step]]
+click = { x = 50, y = 58 }
+
+[[step]]
+wait = 4
+
+[[step]]
+screenshot = "options"
+
+[[step]]
+expect_change = { from = "menu", to = "options", min = 2 }
+
+[[step]]
+key = "Escape"
+
+[[step]]
+wait = 4
+
+[[step]]
+screenshot = "menu-again"
+
+# Quit Game.
+[[step]]
+click = { x = 50, y = 72.5 }
