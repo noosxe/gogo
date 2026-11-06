@@ -1,0 +1,67 @@
+# SimCity 3000 Unlimited (#199, #200): its own DDrawCompat stays unloaded, Wine's
+# builtin ddraw runs. The menu, the Preferences dialog, then the game's Exit.
+#
+# 800x600 scaled to the window's height: 1067x800 pillarboxed in 1280x800, hence
+# a width of 83%. Coordinates are percent of the window.
+title = "SimCity 3000 Unlimited"
+gogid = 2086050016
+
+[window]
+wait_secs = 180
+resolution = "1280x800"
+min_fill = { w = 80, h = 95 }
+
+[exit]
+how = "self"
+wait_secs = 60
+
+# Past the intro videos, which end by themselves (or a click ends them, but one
+# meant for the menu must not land on one).
+[[step]]
+wait_settled = 240
+
+[[step]]
+screenshot = "menu"
+
+# Preferences, on the menu's map sheet.
+[[step]]
+click = { x = 43, y = 71 }
+
+[[step]]
+wait = 5
+
+[[step]]
+screenshot = "preferences"
+
+[[step]]
+expect_change = { from = "menu", to = "preferences", min = 20 }
+
+# The dialog's check mark.
+[[step]]
+click = { x = 72, y = 85.5 }
+
+[[step]]
+wait = 5
+
+[[step]]
+screenshot = "menu-again"
+
+[[step]]
+expect_change = { from = "preferences", to = "menu-again", min = 20 }
+
+# Exit, the door at the bottom right.
+[[step]]
+click = { x = 76, y = 81 }
+
+[[step]]
+wait = 3
+
+[[step]]
+screenshot = "exit-dialog"
+
+[[step]]
+expect_change = { from = "menu-again", to = "exit-dialog", min = 5 }
+
+# The dialog's OK: the game leaves.
+[[step]]
+click = { x = 44, y = 58 }

@@ -6,9 +6,9 @@ name: scripts
 on:
   push:
     branches: [main]
-    paths: ['scripts/**', '.github/workflows/scripts.yml']
+    paths: ['scripts/**', 'e2e/**', 'nix/linux-e2e.nix', 'flake.lock', '.github/workflows/scripts.yml']
   pull_request:
-    paths: ['scripts/**', '.github/workflows/scripts.yml']
+    paths: ['scripts/**', 'e2e/**', 'nix/linux-e2e.nix', 'flake.lock', '.github/workflows/scripts.yml']
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -34,3 +34,28 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: scripts/tests/host-pass-fake.sh
+
+  linux-e2e-helper:
+    name: linux-e2e helper tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # stdlib only; the runner's Python has tomllib.
+      - run: python3 -I scripts/tests/linux-e2e-helper-test.py
+
+  linux-e2e-self-test:
+    name: linux-e2e self-test
+    # scripts/linux-e2e.sh's own test: headless sway on a plain xterm, software
+    # rendering, teardown on every signal. No game.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/determinate-nix-action@v3
+      # Ubuntu's AppArmor keeps unprivileged user namespaces from bwrap.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: scripts/linux-e2e.sh self-test
+      - name: Logs
+        if: failure()
+        run: |
+          find target/linux-e2e/self-test -name stderr -exec tail -n 20 {} +
+          find target/linux-e2e/self-test -name sway.log -exec tail -n 20 {} +

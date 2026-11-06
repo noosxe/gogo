@@ -1,0 +1,44 @@
+# The harness's own test (scripts/linux-e2e.sh self-test): an xterm running a
+# shell that turns on xterm's mouse reporting, changes the background when a
+# click reaches it, and exits when a key does. Each step only passes if the
+# input really went through sway and Xwayland to the client.
+title = "self-test: xterm"
+command = [
+  "xterm", "-bg", "white", "-fg", "black", "-e", "bash", "-c", '''
+    printf "\033[?9h\n  waiting for a click\n"
+    IFS= read -rsn6 _
+    printf "\033[?9l\033]11;#2060c0\007\n  clicked; waiting for q\n"
+    IFS= read -rsn1 key
+    [ "$key" = q ]
+  ''',
+]
+
+[window]
+wait_secs = 30
+resolution = "1024x768"
+min_fill = { w = 95, h = 95 }
+
+[exit]
+how = "self"
+wait_secs = 10
+
+[[step]]
+wait = 1
+
+[[step]]
+screenshot = "before-click"
+
+[[step]]
+click = { x = 50, y = 50 }
+
+[[step]]
+wait = 1
+
+[[step]]
+screenshot = "after-click"
+
+[[step]]
+expect_change = { from = "before-click", to = "after-click", min = 50 }
+
+[[step]]
+type = "q"

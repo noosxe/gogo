@@ -1,0 +1,15 @@
+# The self-test's teardown cases: a client that doesn't end and a long wait, so
+# only a signal or the time limit can stop the run. Its own child outlives
+# xterm, to show the PID namespace takes it too.
+title = "self-test: teardown"
+command = ["xterm", "-bg", "white", "-e", "bash", "-c", "setsid sleep 600 & sleep 600"]
+
+[window]
+wait_secs = 30
+resolution = "1024x768"
+
+[[step]]
+wait = 300
+
+[[step]]
+screenshot = "never"
