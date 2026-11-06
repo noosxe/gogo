@@ -3,6 +3,8 @@
 # click reaches it, and exits when a key does. Each step only passes if the
 # input really went through sway and Xwayland to the client.
 title = "self-test: xterm"
+# The build phase's display: only passes if the client reaches the X server.
+build_command = ["xwininfo", "-root"]
 command = [
   "xterm", "-bg", "white", "-fg", "black", "-e", "bash", "-c", '''
     printf "\033[?9h\n  waiting for a click\n"

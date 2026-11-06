@@ -6,7 +6,8 @@
 #
 #   scripts/linux-e2e.sh run <gogid> [opts]   one game, from e2e/<gogid>.toml
 #   scripts/linux-e2e.sh self-test            the harness itself: a plain xterm,
-#                                             teardown on TERM, INT, KILL, timeout
+#                                             teardown on TERM, INT, KILL, timeout,
+#                                             the build's display, the null audio sink
 #   scripts/linux-e2e.sh cleanup              remove scratch of dead runs
 #
 # run options:
@@ -118,7 +119,7 @@ start_sandbox() { # mode logfile command…
     sandbox_args "$mode"
     sandbox_env
     if [ "$mode" = build ]; then
-        SE+=(DBUS_SESSION_BUS_ADDRESS="unix:path=$RUNTIME_DIR/bus")
+        SE+=(DBUS_SESSION_BUS_ADDRESS="unix:path=$RUNTIME_DIR/bus" "${SOFTWARE_COMPOSITOR_ENV[@]}")
     else
         SE+=("${COMPOSITOR_ENV[@]}")
     fi
@@ -262,6 +263,8 @@ log_excerpt() {
 write_summary() { # entry-status killed left deleted
     local status="$1" killed="$2" left="$3" deleted="$4" result="$RESULTS/result.json" outer
     [ -s "$result" ] || printf '{"checks":[],"steps":[],"isolation":{},"gpu":{}}\n' >"$result"
+    local build_result="$RESULTS/build-result.json"
+    [ -s "$build_result" ] || printf '{}\n' >"$build_result"
     outer="$(jq -n \
         --arg killed "$killed" --arg left "$left" --arg build "${BUILD_FAILED:-}" \
         --arg timeout "${TIMED_OUT:-}" --arg sig "$INTERRUPTED" --arg keep "$KEEP" \
@@ -276,13 +279,15 @@ write_summary() { # entry-status killed left deleted
            detail:(if $keep == "1" then "kept (--keep)" elif $deleted then "deleted" else "still there" end)} ]')"
     local summary="$RESULTS/summary.json" excerpt
     excerpt="$(log_excerpt || true)"
-    jq -n --slurpfile r "$result" --argjson outer "$outer" \
+    jq -n --slurpfile r "$result" --slurpfile b "$build_result" --argjson outer "$outer" \
         --arg gogid "${GOGID:-}" --arg title "${TITLE:-}" --arg gpu "${GPU_LABEL:-software}" \
         --arg results "$RESULTS" --arg scratch "$RUN" --argjson deleted "$deleted" \
         --arg keep "$KEEP" --arg left "$left" --arg killed "$killed" --arg excerpt "$excerpt" \
         --arg runtime "${STATE_RUNTIME:-}" --arg date "$(date -u +%F)" '
         ($r[0]) as $res
-        | (($res.checks // []) + $outer) as $seen
+        | ($b[0]) as $bld
+        | (($bld.checks // []) | map(.name = "build_" + .name)) as $build_checks
+        | ($build_checks + ($res.checks // []) + $outer) as $seen
         # The driver reports "finished" last: without it, nothing says the steps ran.
         | ($seen + (if any($seen[]; .name == "finished") then []
                     else [{name:"finished",ok:false,detail:"the driver did not reach its end"}] end)) as $checks
@@ -293,6 +298,9 @@ write_summary() { # entry-status killed left deleted
            screenshots:[($res.steps // [])[] | select(.action == "screenshot" and .path) | .path],
            steps:($res.steps // []),
            isolation:($res.isolation // {}), gpu_detail:($res.gpu // {}),
+           audio:($res.audio // {}),
+           build:{exit:($bld.exit // null), secs:($bld.secs // null), isolation:($bld.isolation // {}),
+                  windows:($bld.windows // []), support_installer:($bld.support_installer // null)},
            game_exit:($res.game_exit // null),
            doctor:($res.doctor // null),
            log_excerpt:$excerpt,
@@ -324,8 +332,21 @@ icd_files() { # file-name glob for each: prints a colon-joined list of ICD manif
     printf '%s' "$out"
 }
 
+# Software rendering: the default game phase, and every build (its sandbox has
+# no GPU node).
+software_setup() {
+    local icd
+    SOFTWARE_COMPOSITOR_ENV=(WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1
+                             WLR_RENDERER=pixman WLR_RENDERER_ALLOW_SOFTWARE=1)
+    SOFTWARE_ENV=(GOGO_LAUNCHER_NO_DIALOG=1 LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe
+                  __GLX_VENDOR_LIBRARY_NAME=mesa)
+    icd="$(icd_files 'lvp_icd*.json')"
+    [ -z "$icd" ] || SOFTWARE_ENV+=("VK_DRIVER_FILES=$icd")
+}
+
 gpu_setup() { # node or ""
     local node="$1" driver="" icd
+    software_setup
     GPU_BINDS=()
     GPU_NODES=()
     GAME_NODE=""
@@ -334,10 +355,8 @@ gpu_setup() { # node or ""
     if [ -z "$node" ]; then
         GPU_LABEL=software
         GPU_EXPECT='llvmpipe|softpipe|lavapipe'
-        COMPOSITOR_ENV+=(WLR_RENDERER=pixman WLR_RENDERER_ALLOW_SOFTWARE=1)
-        GAME_ENV+=(LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe __GLX_VENDOR_LIBRARY_NAME=mesa)
-        icd="$(icd_files 'lvp_icd*.json')"
-        [ -z "$icd" ] || GAME_ENV+=("VK_DRIVER_FILES=$icd")
+        COMPOSITOR_ENV=("${SOFTWARE_COMPOSITOR_ENV[@]}")
+        GAME_ENV=("${SOFTWARE_ENV[@]}")
         return 0
     fi
     case "$node" in /dev/dri/renderD[0-9]*) ;; *) die "--gpu wants a render node, /dev/dri/renderD12x: $node" 2 ;; esac
@@ -483,45 +502,75 @@ cmd_run() {
     log "scratch: $RUN"
     log "results: $RESULTS"
 
-    if [ -n "$GOGID" ]; then
-        log "building the game (log: $RESULTS/build.log)"
-        MODE_NOW=build
-        start_sandbox build "$RESULTS/build.log" "$GOGO" linux-app "$GOGID" --yes
-        if ! supervise 0 || [ -n "$INTERRUPTED" ]; then
-            BUILD_FAILED="gogo linux-app failed, see $RESULTS/build.log"
-            exit 1
-        fi
-    fi
-
-    local launch launch_cwd doctor='null'
-    if [ -n "$GOGID" ]; then
-        launch="$(jq -cn --arg l "$GOGO_HOME_DIR/games/$GOGID/launch.sh" '[$l]')"
-        launch_cwd="$GOGO_HOME_DIR/games/$GOGID"
-        doctor="$(jq -cn --arg g "$GOGO" --arg i "$GOGID" '[$g,"linux-app","doctor",$i,"--json"]')"
-    else
-        launch="$(jq -c .command <<<"$MANIFEST_JSON")"
-        launch_cwd="$RUN/home"
-    fi
     local forbidden
     forbidden="$(jq -cn --arg h "$HOME" --arg r "/run/user/$(id -u)" '[
         "\($h)/.local/share/applications", "\($h)/.local/share/Steam",
         "\($h)/.local/share/gogo", "\($h)/.local/share/umu", "\($h)/.steam",
         "\($h)/.var/app/com.valvesoftware.Steam", "\($h)/Downloads", "\($h)/.cache/gogo",
-        "\($r)/bus", "\($r)/wayland-1", "/tmp/.X11-unix/X1"]')"
-    jq -n --argjson m "$MANIFEST_JSON" --arg run "$RUN" --arg results "$RESULTS" \
-        --arg shots "$RESULTS/shots" --arg stop "$RUN/stop" \
-        --arg netns "$(readlink /proc/self/ns/net)" --arg pidns "$(readlink /proc/self/ns/pid)" \
-        --argjson forbidden "$forbidden" --argjson launch "$launch" --arg cwd "$launch_cwd" \
-        --argjson doctor "$doctor" --arg label "$GPU_LABEL" --arg expect "$GPU_EXPECT" \
-        --arg gamenode "$GAME_NODE" --arg rt "$RUNTIME_DIR" \
-        --args '{manifest:$m, run_dir:$run, results_dir:$results, shots_dir:$shots, stop_file:$stop,
-            host_netns:$netns, host_pidns:$pidns, forbidden_paths:$forbidden,
-            launch:$launch, launch_cwd:$cwd, doctor:$doctor, runtime_dir:$rt,
-            gpu:{label:$label, expect:$expect, game_node:$gamenode,
-                 nodes:($ARGS.positional | map(select(startswith("@n:")) | ltrimstr("@n:")))},
-            game_env:($ARGS.positional | map(select(startswith("@e:")) | ltrimstr("@e:"))
-                      | map(capture("^(?<key>[^=]+)=(?<value>.*)$")) | from_entries)}' \
-        "${GPU_NODES[@]/#/@n:}" "${GAME_ENV[@]/#/@e:}" >"$RUN/drive.json"
+        "\($r)/bus", "\($r)/wayland-1", "\($r)/pulse", "\($r)/pipewire-0",
+        "/tmp/.X11-unix/X1"]')"
+    # What both of the driver's phases read; `extra` is one phase's own keys.
+    drive_config() { # file extra-json label expect game-node [@n:node…] [@e:KEY=value…]
+        local file="$1" extra="$2" label="$3" expect="$4" node="$5"
+        shift 5
+        jq -n --argjson m "$MANIFEST_JSON" --arg run "$RUN" --arg results "$RESULTS" \
+            --arg shots "$RESULTS/shots" --arg stop "$RUN/stop" \
+            --arg netns "$(readlink /proc/self/ns/net)" --arg pidns "$(readlink /proc/self/ns/pid)" \
+            --argjson forbidden "$forbidden" --argjson extra "$extra" \
+            --arg label "$label" --arg expect "$expect" --arg gamenode "$node" --arg rt "$RUNTIME_DIR" \
+            --args '{manifest:$m, run_dir:$run, results_dir:$results, shots_dir:$shots, stop_file:$stop,
+                host_netns:$netns, host_pidns:$pidns, forbidden_paths:$forbidden, runtime_dir:$rt,
+                gpu:{label:$label, expect:$expect, game_node:$gamenode,
+                     nodes:($ARGS.positional | map(select(startswith("@n:")) | ltrimstr("@n:")))},
+                game_env:($ARGS.positional | map(select(startswith("@e:")) | ltrimstr("@e:"))
+                          | map(capture("^(?<key>[^=]+)=(?<value>.*)$")) | from_entries)} + $extra' \
+            "$@" >"$file"
+    }
+
+    local build_cmd='null'
+    if [ -n "$GOGID" ]; then
+        build_cmd="$(jq -cn --arg g "$GOGO" --arg i "$GOGID" '[$g,"linux-app",$i,"--yes"]')"
+    else
+        build_cmd="$(jq -c .build_command <<<"$MANIFEST_JSON")"
+    fi
+    if [ "$build_cmd" != null ]; then
+        log "building the game on a headless display (log: $RESULTS/build.log)"
+        MODE_NOW=build
+        local build_extra support_log=""
+        # build.rs: <game state>/<INSTALL_LOGS>/support/<INNO_LOG>, once the build has moved it in place
+        [ -z "$GOGID" ] || support_log="$GOGO_HOME_DIR/games/$GOGID/install/support/inno.log"
+        build_extra="$(jq -cn --argjson c "$build_cmd" --arg cwd "$RUN/home" --arg s "$support_log" \
+            '{build_command:$c, launch_cwd:$cwd, support_log:$s}')"
+        drive_config "$RUN/build.json" "$build_extra" software 'llvmpipe|softpipe|lavapipe' "" \
+            "${SOFTWARE_ENV[@]/#/@e:}"
+        start_sandbox build "$RESULTS/build-sandbox.log" python3 -I "$RUN/harness/helper.py" drive "$RUN/build.json"
+        local build_rc=0
+        supervise 0 || build_rc=$?
+        if [ "$build_rc" = 3 ]; then
+            INFRA_ERROR="no build display: $(jq -r '[.checks[] | select(.ok | not) | .name + ": " + .detail][0] // "see build-sandbox.log"' "$RESULTS/build-result.json" 2>/dev/null || tail -n 3 "$RESULTS/build-sandbox.log" | tr '\n' ' ')"
+            exit 3
+        fi
+        if [ "$build_rc" != 0 ] || [ -n "$INTERRUPTED" ]; then
+            BUILD_FAILED="the build failed (exit $build_rc), see $RESULTS/build.log"
+            exit 1
+        fi
+    fi
+
+    local launch launch_cwd doctor='null' game_log=""
+    if [ -n "$GOGID" ]; then
+        launch="$(jq -cn --arg l "$GOGO_HOME_DIR/games/$GOGID/launch.sh" '[$l]')"
+        launch_cwd="$GOGO_HOME_DIR/games/$GOGID"
+        doctor="$(jq -cn --arg g "$GOGO" --arg i "$GOGID" '[$g,"linux-app","doctor",$i,"--json"]')"
+        game_log="$GOGO_HOME_DIR/logs/$GOGID/latest.log"
+    else
+        launch="$(jq -c .command <<<"$MANIFEST_JSON")"
+        launch_cwd="$RUN/home"
+    fi
+    local game_extra
+    game_extra="$(jq -cn --argjson l "$launch" --arg cwd "$launch_cwd" --argjson d "$doctor" --arg g "$game_log" \
+        '{launch:$l, launch_cwd:$cwd, doctor:$d, game_log:$g}')"
+    drive_config "$RUN/drive.json" "$game_extra" "$GPU_LABEL" "$GPU_EXPECT" "$GAME_NODE" \
+        "${GPU_NODES[@]/#/@n:}" "${GAME_ENV[@]/#/@e:}"
 
     log "running in headless sway ($GPU_LABEL, up to $secs s)"
     MODE_NOW=game
@@ -616,6 +665,10 @@ cmd_self_test() {
         st_fail "pass: failed: $(jq -c .failed "$summary" 2>/dev/null)"
     fi
     ST_SUMMARY="$summary"
+    jq -e '.build.exit == 0 and (.checks | any(.name == "build_isolation_display" and .ok))' "$summary" >/dev/null ||
+        st_fail "pass: the build step had no display: $(jq -c .build "$summary" 2>/dev/null)"
+    jq -e '.checks | any(.name == "audio" and .ok)' "$summary" >/dev/null ||
+        st_fail "pass: no audio device: $(jq -c .audio "$summary" 2>/dev/null)"
 
     # 2. A signal mid-run: stopped, reported as failed, nothing left. A client
     #    that never ends, so only the teardown can end it.

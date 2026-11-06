@@ -332,6 +332,94 @@ class Views(unittest.TestCase):
         self.assertEqual(helper.click_point(rect, 100, 100), (299, 149))
 
 
+class WhoseProcess(unittest.TestCase):
+    EXE = "games/1741027632/prefix/drive_c/GOG/Right and Down/Right and Down.exe"
+
+    def test_the_exe_and_its_folder(self):
+        for argv0 in (
+            r"C:\GOG\Right and Down\Right and Down.exe",
+            r"c:\gog\right and down\Tools\helper.exe",
+            r"Z:\home\x\prefix\drive_c\GOG\Right and Down\Right and Down.exe",
+        ):
+            self.assertTrue(helper.belongs_to_game(argv0, self.EXE), argv0)
+
+    def test_wines_helpers_arent_the_game(self):
+        for argv0 in (
+            r"C:\windows\system32\explorer.exe",
+            r"C:\windows\system32\steam.exe",
+            r"Z:\store\xalia\xalia.exe",
+            "/nix/store/x/bin/python3",
+            "",
+        ):
+            self.assertFalse(helper.belongs_to_game(argv0, self.EXE), argv0)
+
+    def test_no_exe_known(self):
+        self.assertFalse(helper.belongs_to_game(r"C:\GOG\Right and Down\a.exe", None))
+
+    def test_exe_outside_a_folder_is_matched_by_name_only(self):
+        exe = "games/1/prefix/drive_c/game.exe"
+        self.assertIsNone(helper.game_dir(exe))
+        self.assertTrue(helper.belongs_to_game(r"C:\game.exe", exe))
+        self.assertFalse(helper.belongs_to_game(r"C:\windows\explorer.exe", exe))
+
+    def test_exe_line(self):
+        self.assertEqual(helper.parse_exe("# launcher: 2\n# exe: a/b.exe\n# args: \n"), "a/b.exe")
+        self.assertIsNone(helper.parse_exe("no header"))
+
+
+class Parsers(unittest.TestCase):
+    def test_xwayland_displays(self):
+        self.assertEqual(
+            helper.xwayland_displays(
+                [["/nix/store/x/bin/Xwayland", ":1", "-rootless"], ["sway", ":9"], []]
+            ),
+            [":1"],
+        )
+
+    def test_support_installer(self):
+        start = "note: running GOG support installer into the game dir\n"
+        self.assertIsNone(helper.parse_support_installer("nothing"))
+        for line, outcome, code in (
+            ("GOG support installer finished (exit 0)", "finished", 0),
+            ("GOG support installer declined (exit 3; install-time", "declined", 3),
+            ("GOG support installer still running after 180 s, stopped", "stopped", None),
+            ("", "unknown", None),
+        ):
+            self.assertEqual(
+                helper.parse_support_installer(start + line), {"outcome": outcome, "exit": code}
+            )
+
+    def test_pactl_info(self):
+        self.assertEqual(
+            helper.parse_pactl_info(
+                "Server String: /run/e2e-runtime/pulse/native\nDefault Sink: e2e-null\n"
+            ),
+            {"server": "/run/e2e-runtime/pulse/native", "default_sink": "e2e-null"},
+        )
+        self.assertEqual(helper.parse_pactl_info(""), {"server": None, "default_sink": None})
+
+    def test_audio_streams(self):
+        log = (
+            'I: [p] sink-input.c: Created input 0 "pacat" on e2e-null with sample spec\n'
+            'I: [p] sink-input.c: Created input 1 "Game" on e2e-null with sample spec\n'
+        )
+        self.assertEqual(helper.audio_streams(log), ["pacat", "Game"])
+
+
+class BuildCommand(unittest.TestCase):
+    STEP = 'screenshot = "a"'
+
+    def test_beside_command(self):
+        m = helper.parse_manifest(
+            f'command = ["x"]\nbuild_command = ["y"]\n[[step]]\n{self.STEP}\n'
+        )
+        self.assertEqual(m["build_command"], ["y"])
+
+    def test_not_for_a_game(self):
+        with self.assertRaises(helper.ManifestError):
+            helper.parse_manifest(f'gogid = 1\nbuild_command = ["y"]\n[[step]]\n{self.STEP}\n')
+
+
 class Wayland(unittest.TestCase):
     def test_globals(self):
         name = b"wl_seat\0"

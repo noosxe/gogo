@@ -956,7 +956,12 @@ fn restore_and_run_support(
         SUPPORT_INSTALLER_LIMIT,
     )?;
     match ran {
-        Some(status) if status.success() => {}
+        Some(status) if status.success() => emit(&ProgressEvent::Warn {
+            message: format!(
+                "GOG support installer finished (exit {})",
+                status.code().unwrap_or(0)
+            ),
+        }),
         Some(status) => emit(&ProgressEvent::Warn {
             message: format!(
                 "GOG support installer declined (exit {}; install-time config not \

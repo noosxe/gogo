@@ -10,7 +10,9 @@ Run with `python3 -I`: stdlib only, nothing from the working directory.
 
 `drive` starts headless sway, proves the display is the headless one, launches
 the game, runs the manifest's steps and writes result.json after every step, so
-a killed run still has what it got that far.
+a killed run still has what it got that far. With `build_command` in its config
+it runs that on the display instead (the build phase): it exits with the
+command's status, or BUILD_NO_DISPLAY when it never got to run it.
 """
 
 import json
@@ -39,6 +41,14 @@ DEFAULT_MIN_CHANGE_PCT = 0.5
 SETTLE_POLL_SECS = 2.0
 SETTLE_MAX_CHANGE_PCT = 1.0
 EXIT_HOW = ("self", "signal")
+NULL_SINK = "e2e-null"
+BUILD_NO_DISPLAY = 3
+# How the build's log says the support installer ended (build.rs).
+SUPPORT_LINES = (
+    (re.compile(r"GOG support installer finished \(exit (\d+)\)"), "finished"),
+    (re.compile(r"GOG support installer declined \(exit (-?\d+)"), "declined"),
+    (re.compile(r"GOG support installer still running after \d+ s"), "stopped"),
+)
 
 
 class ManifestError(Exception):
@@ -151,7 +161,11 @@ def parse_manifest(text):
         raw = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
         raise ManifestError(f"not TOML: {e}") from e
-    _only(raw, ("gogid", "title", "command", "window", "exit", "env", "step"), "manifest")
+    _only(
+        raw,
+        ("gogid", "title", "command", "build_command", "window", "exit", "env", "step"),
+        "manifest",
+    )
 
     gogid = raw.get("gogid")
     command = raw.get("command")
@@ -165,6 +179,16 @@ def parse_manifest(text):
         or not all(isinstance(c, str) for c in command)
     ):
         raise ManifestError("command must be a non-empty list of strings")
+    build_command = raw.get("build_command")
+    if build_command is not None and (
+        command is None
+        or not isinstance(build_command, list)
+        or not build_command
+        or not all(isinstance(c, str) for c in build_command)
+    ):
+        raise ManifestError(
+            "build_command is for self-tests: a non-empty list of strings beside command"
+        )
 
     window = raw.get("window", {})
     _only(window, ("wait_secs", "resolution", "title", "min_fill"), "window")
@@ -199,6 +223,7 @@ def parse_manifest(text):
         "gogid": gogid,
         "title": raw.get("title", str(gogid) if gogid else "self-test"),
         "command": command,
+        "build_command": build_command,
         "window": {
             "wait_secs": _number(window.get("wait_secs", 180), "window.wait_secs"),
             "width": int(m.group(1)),
@@ -397,6 +422,77 @@ def click_point(rect, x_pct, y_pct):
     )
 
 
+# --- whose display, whose process ----------------------------------------------
+
+
+def xwayland_displays(cmdlines):
+    """The `:N` each Xwayland command line serves (argv lists)."""
+    found = []
+    for argv in cmdlines:
+        if argv and os.path.basename(argv[0]) == "Xwayland":
+            found += [a for a in argv[1:] if re.fullmatch(r":\d+", a)]
+    return found
+
+
+def game_dir(exe):
+    """Lowercase path of the exe's folder under drive_c (the run log's `# exe:`
+    line), or None when it isn't in a folder there."""
+    path = exe.replace("\\", "/").lower()
+    _, found, rest = path.rpartition("/drive_c/")
+    if not found or "/" not in rest:
+        return None
+    return rest.rpartition("/")[0]
+
+
+def belongs_to_game(argv0, exe):
+    """Is this process image the effective exe, or another one from its folder?
+
+    Wine shows a process's Windows path as argv[0]. Wine's helpers (explorer.exe,
+    xalia.exe, services.exe, steam.exe) live outside the game's folder.
+    """
+    if not argv0 or not exe:
+        return False
+    image = argv0.replace("\\", "/").lower()
+    if image.rpartition("/")[2] == exe.replace("\\", "/").lower().rpartition("/")[2]:
+        return True
+    folder = game_dir(exe)
+    if folder is None:
+        return False
+    return image.startswith(f"c:/{folder}/") or f"/drive_c/{folder}/" in image
+
+
+def parse_exe(log_text):
+    """The run log's `# exe:` header line."""
+    m = re.search(r"^# exe: (.+)$", log_text, re.M)
+    return m.group(1).strip() if m else None
+
+
+def parse_support_installer(build_log):
+    """How the support installer ended, from the build's log. None: it didn't run."""
+    if "running GOG support installer" not in build_log:
+        return None
+    for pattern, outcome in SUPPORT_LINES:
+        m = pattern.search(build_log)
+        if m:
+            return {"outcome": outcome, "exit": int(m.group(1)) if m.groups() else None}
+    return {"outcome": "unknown", "exit": None}
+
+
+def parse_pactl_info(text):
+    """`pactl info` as the two lines that say whose server and which sink."""
+    server = re.search(r"^Server String: (.+)$", text, re.M)
+    sink = re.search(r"^Default Sink: (.+)$", text, re.M)
+    return {
+        "server": server.group(1).strip() if server else None,
+        "default_sink": sink.group(1).strip() if sink else None,
+    }
+
+
+def audio_streams(daemon_log):
+    """Names of the streams the sound server took, from its `-v` log, in order."""
+    return re.findall(r'Created input \d+ "([^"]*)" on ', daemon_log)
+
+
 # --- a pointer for the seat ----------------------------------------------------
 
 
@@ -485,7 +581,10 @@ class Driver:
         self.run_dir = config["run_dir"]
         self.results = config["results_dir"]
         self.env = dict(os.environ)
+        self.building = "build_command" in config
+        self.prefix = "build-" if self.building else ""
         self.sway = None
+        self.pulse = None
         self.pointer = None
         self.game = None
         self.game_exit = None
@@ -496,6 +595,7 @@ class Driver:
         self.result = {
             "isolation": {},
             "gpu": {},
+            "audio": {},
             "steps": self.steps,
             "checks": self.checks,
             "game_exit": None,
@@ -504,7 +604,7 @@ class Driver:
         }
 
     def save(self):
-        path = os.path.join(self.results, "result.json")
+        path = os.path.join(self.results, f"{self.prefix}result.json")
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
             json.dump(self.result, f, indent=2)
@@ -547,8 +647,8 @@ class Driver:
 
     def start_sway(self):
         w, h = self.manifest["window"]["width"], self.manifest["window"]["height"]
-        env_file = os.path.join(self.run_dir, "sway.env")
-        conf = os.path.join(self.run_dir, "sway.conf")
+        env_file = os.path.join(self.run_dir, f"{self.prefix}sway.env")
+        conf = os.path.join(self.run_dir, f"{self.prefix}sway.conf")
         with open(conf, "w") as f:
             f.write(
                 "xwayland force\n"
@@ -557,10 +657,12 @@ class Driver:
                 "focus_follows_mouse no\n"
                 f'exec env -0 > "{env_file}.tmp" && mv "{env_file}.tmp" "{env_file}"\n'
             )
-        log = open(os.path.join(self.results, "sway.log"), "wb")
+        log = open(os.path.join(self.results, f"{self.prefix}sway.log"), "wb")
+        # The build's session bus is for gogo's keyring, not for the compositor.
+        sway_env = {k: v for k, v in self.env.items() if k != "DBUS_SESSION_BUS_ADDRESS"}
         self.sway = subprocess.Popen(
             ["sway", "--unsupported-gpu", "--debug", "--config", conf],
-            env=self.env,
+            env=sway_env,
             stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=subprocess.STDOUT,
@@ -593,6 +695,79 @@ class Driver:
             self.sleep(0.2)
         raise RuntimeError(f"no X server on {self.env.get('DISPLAY')!r} (see sway.log)")
 
+    # audio ---------------------------------------------------------------
+
+    def start_audio(self):
+        """A sound server with one null sink, on a socket in this sandbox's own
+        runtime dir. Its `-v` log says which streams the game opened."""
+        pulse_dir = os.path.join(self.env["XDG_RUNTIME_DIR"], "pulse")
+        os.makedirs(pulse_dir, exist_ok=True)
+        sock = os.path.join(pulse_dir, "native")
+        log = open(os.path.join(self.results, "audio.log"), "wb")
+        self.pulse = subprocess.Popen(
+            [
+                "pulseaudio",
+                "-n",
+                "-v",
+                "--daemonize=no",
+                "--use-pid-file=no",
+                "--exit-idle-time=-1",
+                "--realtime=no",
+                "--high-priority=no",
+                "--log-target=stderr",
+                f"--load=module-native-protocol-unix socket={sock} auth-anonymous=1",
+                f"--load=module-null-sink sink_name={NULL_SINK} "
+                f"sink_properties=device.description={NULL_SINK}",
+            ],
+            env=self.env,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        # Explicit: libpulse would otherwise also read the host's /etc/pulse.
+        self.env["PULSE_SERVER"] = f"unix:{sock}"
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if self.pulse.poll() is not None:
+                break
+            if self.tool("pactl", "info").returncode == 0:
+                return
+            self.sleep(0.1)
+        raise RuntimeError("the sound server didn't start (see audio.log)")
+
+    def check_audio(self):
+        """The default device is the sandbox's null sink, and it takes a stream."""
+        audio = self.result["audio"]
+        audio.update(parse_pactl_info(self.tool("pactl", "info").stdout))
+        sinks = self.tool("pactl", "list", "sinks", "short").stdout
+        audio["sinks"] = [line.split("\t")[1] for line in sinks.splitlines() if "\t" in line]
+        probe = os.path.join(self.run_dir, "audio-probe.raw")
+        with open(probe, "wb") as f:
+            f.write(bytes(48000))
+        played = self.tool(
+            "pacat", "--raw", "--rate=48000", "--format=s16le", "--channels=2", probe
+        )
+        audio["probe_exit"] = played.returncode
+        ours = os.path.join(self.env["XDG_RUNTIME_DIR"], "pulse", "native")
+        self.check(
+            "audio",
+            audio["server"] in (ours, f"unix:{ours}")
+            and audio["default_sink"] == NULL_SINK
+            and audio["sinks"] == [NULL_SINK]
+            and played.returncode == 0,
+            f"{audio['default_sink']} on {audio['server']}, sinks {audio['sinks']}, "
+            f"test stream exit {played.returncode}",
+        )
+
+    def record_audio_streams(self):
+        if self.pulse is None:
+            return
+        with open(os.path.join(self.results, "audio.log"), errors="replace") as f:
+            streams = audio_streams(f.read())
+        # The first one is check_audio's own test stream.
+        self.result["audio"]["game_streams"] = streams[1:]
+
     # isolation -----------------------------------------------------------
 
     def assert_isolation(self):
@@ -603,11 +778,14 @@ class Driver:
         with open("/proc/net/dev") as f:
             links = [line.split(":")[0].strip() for line in f if ":" in line]
         iso["netns"] = {"ns": netns, "links": links}
-        self.check(
-            "isolation_netns",
-            netns != c["host_netns"] and links == ["lo"],
-            f"{netns}, links {links}",
-        )
+        # The build downloads, so it keeps the host's network, and with it the
+        # host's abstract X sockets: isolation_display proves whose display it has.
+        if not self.building:
+            self.check(
+                "isolation_netns",
+                netns != c["host_netns"] and links == ["lo"],
+                f"{netns}, links {links}",
+            )
 
         pidns = os.readlink("/proc/self/ns/pid")
         self.check("isolation_pidns", pidns != c["host_pidns"], pidns)
@@ -631,7 +809,13 @@ class Driver:
         leaked = sorted(k for k in os.environ if k.startswith("HYPRLAND_"))
         self.check("isolation_env", not leaked, f"inherited: {leaked}" if leaked else "")
 
-        visible = [p for p in c["forbidden_paths"] if os.path.lexists(p)]
+        # On the host's network Xwayland can get another number than :0, and
+        # that socket on this /tmp is its own.
+        visible = [
+            p
+            for p in c["forbidden_paths"]
+            if os.path.lexists(p) and not (self.building and p.startswith("/tmp/.X11-unix/"))
+        ]
         self.check(
             "isolation_paths",
             not visible,
@@ -645,11 +829,14 @@ class Driver:
         mh = re.search(r"Height:\s*(\d+)", info)
         got = f"{mw.group(1)}x{mh.group(1)}" if mw and mh else "?"
         socket = f"/tmp/.X11-unix/X{display.lstrip(':').split('.')[0]}"
-        iso["display"] = {"DISPLAY": display, "root": got, "socket": socket}
+        # Only this sandbox's PID namespace is in /proc, so a match is our own
+        # Xwayland, and it holds the abstract socket of that number.
+        served = xwayland_displays(_cmdlines())
+        iso["display"] = {"DISPLAY": display, "root": got, "socket": socket, "served": served}
         self.check(
             "isolation_display",
-            got == f"{w}x{h}" and os.path.exists(socket),
-            f"{display} root {got}, socket {socket}",
+            got == f"{w}x{h}" and os.path.exists(socket) and served == [display],
+            f"{display} root {got}, socket {socket}, our Xwayland serves {served}",
         )
 
         outputs = json.loads(self.swaymsg("-t", "get_outputs", "--raw"))
@@ -703,9 +890,20 @@ class Driver:
             gpu["vulkan_devices"],
         )
 
+    def effective_exe(self):
+        """The exe the launcher ran, from the header of its log."""
+        path = self.cfg.get("game_log")
+        try:
+            with open(path, errors="replace") as f:
+                return parse_exe(f.read(16384))
+        except (OSError, TypeError):
+            return None
+
     def game_gpu_fds(self):
-        """Which processes hold a GPU node open: what the game really uses."""
+        """Which processes hold a GPU node open: (everybody, the game's own)."""
         held = {}
+        game = {}
+        exe = self.effective_exe()
         sway_side = {"sway", "Xwayland"}
         for pid in filter(str.isdigit, os.listdir("/proc")):
             try:
@@ -717,9 +915,21 @@ class Driver:
                     target = os.readlink(f"/proc/{pid}/fd/{fd}")
                     if target.startswith(("/dev/dri/", "/dev/nvidia")):
                         held.setdefault(comm, set()).add(target)
+                        if belongs_to_game(_argv(pid)[0], exe):
+                            game.setdefault(comm, set()).add(target)
             except OSError:
                 continue
-        return {k: sorted(v) for k, v in sorted(held.items())}
+        return tuple({k: sorted(v) for k, v in sorted(d.items())} for d in (held, game))
+
+    def record_gpu_fds(self):
+        """While something renders. Add to what's known: a game can open the
+        node after the first frame anyone looked at."""
+        gpu = self.result["gpu"]
+        held, game = self.game_gpu_fds()
+        for key, found in (("gpu_fds", held), ("game_gpu_fds", game)):
+            known = gpu.setdefault(key, {})
+            for comm, nodes in found.items():
+                known[comm] = sorted(set(known.get(comm, [])) | set(nodes))
 
     # game ----------------------------------------------------------------
 
@@ -857,9 +1067,7 @@ class Driver:
                 f"picture {stats['box_w_pct']}% x {stats['box_h_pct']}% of the "
                 f"window, want {fill['w']}% x {fill['h']}%",
             )
-        # While something renders, record who holds a GPU node.
-        if "gpu_fds" not in self.result["gpu"]:
-            self.result["gpu"]["gpu_fds"] = self.game_gpu_fds()
+        self.record_gpu_fds()
 
     def do_expect_change(self, want, record):
         a, b = self.shots.get(want["from"]), self.shots.get(want["to"])
@@ -874,13 +1082,22 @@ class Driver:
         self.check(name, record["ok"], f"{pct}% of pixels changed, want {want['min']}%")
 
     def check_gpu_used(self):
-        """--gpu: some game process has the chosen node open."""
+        """--gpu: the game's own process has the chosen node open. Wine's helpers
+        open it whether or not the game renders there."""
         node = self.cfg["gpu"].get("game_node")
         if not node or self.manifest["command"]:
             return
-        held = self.result["gpu"].get("gpu_fds", {})
-        users = sorted(k for k, v in held.items() if node in v)
-        self.check("gpu_used_by_game", bool(users), f"{node}: {users or held or 'nobody'}")
+        gpu = self.result["gpu"]
+        users = sorted(k for k, v in gpu.get("game_gpu_fds", {}).items() if node in v)
+        others = sorted(
+            k for k, v in gpu.get("gpu_fds", {}).items() if node in v and k not in users
+        )
+        self.check(
+            "gpu_used_by_game",
+            bool(users),
+            f"{node}: game {users or 'nobody'}, Wine's helpers and others {others or 'nobody'}"
+            f" (exe {self.effective_exe()})",
+        )
 
     def finish_game(self, how):
         """The game's end: on its own, or the launcher's SIGTERM teardown."""
@@ -953,11 +1170,108 @@ class Driver:
                 "; ".join(f.get("message", "") for f in lines) or report.get("error", "no line"),
             )
 
+    def stop_services(self):
+        self.save()
+        if self.sway and self.sway.poll() is None:
+            self.tool("swaymsg", "exit")
+            try:
+                self.sway.wait(5)
+            except subprocess.TimeoutExpired:
+                self.sway.kill()
+        if self.pulse and self.pulse.poll() is None:
+            self.pulse.terminate()
+            try:
+                self.pulse.wait(5)
+            except subprocess.TimeoutExpired:
+                self.pulse.kill()
+
+    # build ---------------------------------------------------------------
+
+    def note_build_windows(self, windows, started):
+        """A build isn't watched: what it opened is the only sign of a prompt."""
+        try:
+            tree = json.loads(self.swaymsg("-t", "get_tree", "--raw"))
+        except (RuntimeError, ValueError, subprocess.TimeoutExpired):
+            return
+        for view in walk_views(tree):
+            name = view.get("name") or ""
+            if any(w["name"] == name for w in windows):
+                continue
+            shot = os.path.join(self.cfg["shots_dir"], f"build-window-{len(windows) + 1}.png")
+            self.tool("grim", shot)
+            windows.append(
+                {"name": name, "after_secs": round(time.monotonic() - started), "shot": shot}
+            )
+            self.save()
+
+    def run_build(self):
+        env = dict(self.env)
+        env.update(self.cfg["game_env"])
+        windows = []
+        self.result["windows"] = windows
+        started = time.monotonic()
+        log_path = os.path.join(self.results, "build.log")
+        with open(log_path, "wb") as log:
+            build = subprocess.Popen(
+                self.cfg["build_command"],
+                env=env,
+                cwd=self.cfg["launch_cwd"],
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
+        last_look = 0.0
+        while build.poll() is None:
+            if time.monotonic() - last_look >= 2:
+                last_look = time.monotonic()
+                self.note_build_windows(windows, started)
+            time.sleep(0.2)
+        self.result["exit"] = build.returncode
+        self.result["secs"] = round(time.monotonic() - started)
+        with open(log_path, errors="replace") as f:
+            support = parse_support_installer(f.read())
+        if support is not None:
+            support.update(self.support_log())
+        self.result["support_installer"] = support
+        return build.returncode
+
+    def support_log(self):
+        """Did Inno write its log? A copy goes to the results: scratch is deleted."""
+        path = self.cfg.get("support_log")
+        if not path or not os.path.isfile(path):
+            return {"inno_log": False, "inno_bytes": 0}
+        shutil.copy(path, os.path.join(self.results, "support-inno.log"))
+        return {"inno_log": True, "inno_bytes": os.path.getsize(path)}
+
+    def main_build(self):
+        """The build phase, on a display of its own (software: it has no GPU node)."""
+        try:
+            self.start_sway()
+            self.assert_isolation()
+            bad = [c for c in self.checks if not c["ok"]]
+            if bad:
+                raise RuntimeError(f"isolation failed: {bad[0]['name']}: {bad[0]['detail']}")
+            code = self.run_build()
+            self.check("finished", True, f"build exited {code}")
+            return code
+        except Stop:
+            self.check("finished", False, "stopped from outside (signal)")
+            return 1
+        except Exception as e:  # recorded: the outer script reports it as a harness problem
+            self.check("finished", False, f"{type(e).__name__}: {e}")
+            return BUILD_NO_DISPLAY
+        finally:
+            self.stop_services()
+
+    # game ----------------------------------------------------------------
+
     def main(self):
         how = self.manifest["exit"]["how"]
         try:
             self.start_sway()
+            self.start_audio()
             self.assert_isolation()
+            self.check_audio()
             bad = [c for c in self.checks if not c["ok"]]
             if bad:
                 # A display that isn't provably ours: never launch.
@@ -971,9 +1285,11 @@ class Driver:
                 self.check_gpu_used()
                 self.finish_game(how)
                 self.check_doctor()
+                self.record_audio_streams()
                 self.check("finished", True, "every step ran")
             else:
                 self.finish_game("cleanup")
+                self.record_audio_streams()
                 self.check("finished", True, "no window, so no steps")
         except Stop:
             self.check("finished", False, "stopped from outside (timeout or signal)")
@@ -982,13 +1298,8 @@ class Driver:
             self.check("finished", False, f"{type(e).__name__}: {e}")
             self.finish_game("cleanup")
         finally:
-            self.save()
-            if self.sway and self.sway.poll() is None:
-                self.tool("swaymsg", "exit")
-                try:
-                    self.sway.wait(5)
-                except subprocess.TimeoutExpired:
-                    self.sway.kill()
+            self.stop_services()
+        return 0
 
 
 def _wtype(*keys):
@@ -1003,6 +1314,21 @@ def _mount_fstype(path):
             fields = line.split()
             if fields[4] == path:
                 found = fields[fields.index("-") + 1]
+    return found
+
+
+def _argv(pid):
+    with open(f"/proc/{pid}/cmdline", "rb") as f:
+        return f.read().decode(errors="replace").split("\0")
+
+
+def _cmdlines():
+    found = []
+    for pid in filter(str.isdigit, os.listdir("/proc")):
+        try:
+            found.append(_argv(pid))
+        except OSError:
+            continue
     return found
 
 
@@ -1035,8 +1361,8 @@ def main(argv):
         return 0
     if len(argv) == 3 and argv[1] == "drive":
         with open(argv[2], encoding="utf-8") as f:
-            Driver(json.load(f)).main()
-        return 0
+            driver = Driver(json.load(f))
+        return driver.main_build() if driver.building else driver.main()
     print(__doc__, file=sys.stderr)
     return 2
 

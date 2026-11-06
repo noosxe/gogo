@@ -55,9 +55,11 @@ build's sandbox sees. It needs `gogo login` done once. Tokens are never printed.
 
 | File | |
 |---|---|
-| `summary.json` | checks, steps, screenshots, doctor, log excerpt, cleanup, `tested_entry` |
-| `shots/<name>.png` | the manifest's screenshots, and `not-exited.png` if a game ignored its exit |
-| `build.log`, `sway.log`, `game.out`, `sandbox.log` | what each printed |
+| `summary.json` | checks, steps, screenshots, audio, `build`, doctor, log excerpt, cleanup, `tested_entry` |
+| `shots/<name>.png` | the manifest's screenshots, `not-exited.png` if a game ignored its exit, `build-window-<n>.png` for each window the build opened |
+| `build.log`, `build-sway.log`, `build-sandbox.log` | what the build phase printed |
+| `sway.log`, `game.out`, `sandbox.log`, `audio.log` | what the game phase printed |
+| `support-inno.log` | the support installer's Inno log, when it wrote one |
 | `run.log`, `launch.log` | the launcher's logs (design 18 §7.3) |
 | `doctor-before.json`, `doctor-after.json` | `gogo linux-app doctor` around the run |
 
@@ -67,9 +69,12 @@ build's sandbox sees. It needs `gogo login` done once. Tokens are never printed.
    Proton, umu's runtime and the depot download are bind-mounted from
    `target/linux-e2e/cache/`, so a re-run downloads nothing and the build is still fresh.
    Runs take turns, through a lock.
-2. **Build,** in a sandbox with the network and the session bus: `gogo linux-app <gogid> --yes`.
-3. **Game,** in a sandbox with neither (below): sway, Xwayland, the isolation checks, then
-   `launch.sh`, the steps, the exit, and doctor.
+2. **Build,** in a sandbox with the network and the session bus, on a headless sway of its
+   own (software rendering, whatever `--gpu` says): the isolation checks, then
+   `gogo linux-app <gogid> --yes`. `build` in the summary has its exit, how long it took, the
+   windows it opened and how the support installer ended.
+3. **Game,** in a sandbox with neither network nor bus (below): sway, Xwayland, a null sound
+   device, the isolation checks, then `launch.sh`, the steps, the exit, and doctor.
 4. **Teardown,** on every exit path: kill the sandbox, sweep, assert nothing is left, delete
    scratch, write the summary.
 
@@ -80,22 +85,32 @@ Both sandboxes are a whitelist bwrap root: `/nix`, `/etc`, `/sys`, the driver li
 `/tmp` aren't in it. On top of that, the game's has its own network namespace with only
 `lo` (X11's abstract socket is per netns, so a shared one could reach the host's `:0`), its
 own `/tmp` and `XDG_RUNTIME_DIR`, and only the chosen GPU's device nodes. `DISPLAY`,
-`WAYLAND_DISPLAY` and `HYPRLAND_*` never reach it.
+`WAYLAND_DISPLAY` and `HYPRLAND_*` never reach it, and the host's sound sockets aren't in it.
+
+The build's sandbox differs in one way: it keeps the host's network, because it downloads. So
+its X server's abstract socket sits in the host's namespace for the build's length, and a host
+client asking for that display number could reach it, as the build could ask for the host's.
+Nothing in the build is told any number but its own (`DISPLAY` comes from its sway), and
+`isolation_display` proves that number is the sandbox's: an X server won't bind a number that's
+taken, and only this sandbox's Xwayland is in its `/proc`.
 
 The script doesn't trust that: before launching, the driver asserts it, and a failure means
 the game isn't started.
 
 | Check | Asserts |
 |---|---|
-| `isolation_netns` | a network namespace of its own, with only `lo` |
+| `isolation_netns` | a network namespace of its own, with only `lo`. Game phase only |
 | `isolation_pidns` | a PID namespace of its own |
 | `isolation_tmp` | `/tmp` is a tmpfs with only the X server's files |
 | `isolation_runtime_dir` | `XDG_RUNTIME_DIR` is on the sandbox's own `/run` |
 | `isolation_env` | no `HYPRLAND_*` |
-| `isolation_paths` | the owner's game dirs, menu entries, Steam, Downloads and session bus aren't visible |
-| `isolation_display` | `xwininfo -root` answers with the manifest's size, on this `/tmp`'s socket |
+| `isolation_paths` | the owner's game dirs, menu entries, Steam, Downloads, session bus and sound sockets aren't visible |
+| `isolation_display` | `xwininfo -root` answers with the manifest's size, on this `/tmp`'s socket, and this sandbox's Xwayland serves that number |
 | `isolation_headless` | sway's outputs are all `HEADLESS-*` |
-| `isolation_gpu_nodes` | exactly the chosen GPU's device nodes, and none in software mode |
+| `isolation_gpu_nodes` | exactly the chosen GPU's device nodes, and none in software mode or in the build |
+| `audio` | the default device is the sandbox's null sink, the only sink, on its own socket, and it takes a test stream. Game phase only |
+
+The build's run of these checks appears in the summary as `build_<check>`.
 
 ### Teardown
 
@@ -128,11 +143,16 @@ vendor. The label in the summary comes from the node's kernel driver: `nvidia`, 
 |---|---|
 | `gpu_gl` | `glxinfo` in the game's environment names the expected driver |
 | `gpu_vulkan` | `vulkaninfo` only lists the expected device |
-| `gpu_used_by_game` | `--gpu`: a process of the game holds the node open (`/dev/nvidia0` for NVIDIA). `gpu_detail.gpu_fds` lists who |
+| `gpu_used_by_game` | `--gpu`: the game's own process holds the node open (`/dev/nvidia0` for NVIDIA). `gpu_detail.game_gpu_fds` lists those, `gpu_detail.gpu_fds` everybody |
 
-On a real game the game's process holds `/dev/dri/renderD128` or `/dev/nvidia0` open.
-`gpu_used_by_game` also passes when only `explorer.exe` or `xalia.exe` do: read
-`gpu_detail.gpu_fds` for who. **DXVK's device:** with `--gpu` the sandbox has one GPU, and
+**What counts as the game:** a process whose Windows path (its `argv[0]`) is the effective exe,
+the launcher log's `# exe:` line, or lies in that exe's folder. `explorer.exe` and `xalia.exe`
+hold the node whether or not anything renders there, so they don't count. An exe that runs
+from outside the game's folder, such as a launcher unpacking into `Temp`, doesn't count either:
+the check fails, and `gpu_detail.gpu_fds` shows who held it. The fds are read at each
+screenshot, so the manifest needs one while the game renders.
+
+**DXVK's device:** with `--gpu` the sandbox has one GPU, and
 `DXVK_LOG_LEVEL = "info"` under `[env]` prints it to `game.out` (`Found device: …`). In these
 runs it was always the chosen one. Which of two GPUs DXVK picks by itself stays a host question
 (R18). A Unity game's real API is in its `Player.log` (`Version: Direct3D 12`), under `--keep`.
@@ -228,8 +248,9 @@ These stay in the owner's host pass (#179, design 18 §11.2), and agents put the
 - **Compositor quirks**, such as the picture in the top-left of a tiled window on Hyprland
   (#199): that never reproduced on sway, so a pass here doesn't rule it out.
 - **Real display modes and VRR.** A headless output has one mode and no refresh to sync to.
-- **Audio.** There's no sound server in the sandbox. ALSA's `Unknown PCM default` in the log
-  is expected.
+- **Audio you can hear.** The sandbox's device is a null sink: it takes the stream and drops
+  it. `audio.game_streams` in the summary names the streams the game opened, which says it found
+  a device, not that it sounds right.
 - **The menu entry and its icon** on a real desktop. The harness runs `launch.sh` directly,
   and writes its `.desktop` file into scratch.
 - **The early-exit dialog.** It's off here, and GNOME and KDE aren't anything the owner runs.
@@ -249,11 +270,17 @@ These stay in the owner's host pass (#179, design 18 §11.2), and agents put the
 - **`runtimes` and `renderers` share one mount** (`cache/store`, linked from `GOGO_HOME`): the
   store stages renderers in `runtimes/.tmp`, and a rename across two bind mounts fails. gogo
   then falls back from cnc-ddraw to D7VK with only "provisioning failed" to say so.
-- **A support installer can hang with no display** (Zeus, Pharaoh). gogo stops it after 180 s,
-  so those builds take 3 minutes longer here.
+- **A support installer hangs with no display** (Zeus, Pharaoh), which is why the build has one
+  (#206). On a display it ends at once, exit 1 (`InitializeSetup returned False`). gogo's 180 s
+  limit stays for users building with no display.
+- **Zeus exits 5 with no audio device** (#204), so `[env] PULSE_SERVER = "unix:/nonexistent/native"`
+  in a scratch manifest is how to ask what a game does without one.
 - **A click is a percent of the largest window,** which on a game's small first dialog is that
   dialog, not the screen.
 - **`gogo depot --dir` puts `gog-support/` beside the game:** it belongs there. TDR 2000 aborts
   without its `ASSETS/options.txt`.
+- **The sound server is PulseAudio, not PipeWire:** one process with two modules, and no session
+  manager. Proton's `winepulse` speaks to it through `PULSE_SERVER`, which pressure-vessel carries
+  into its container. It's set explicitly because `/etc` is the host's, `/etc/pulse` included.
 - **Sway comes as `sway-unwrapped`:** nixpkgs' wrapper starts `dbus-run-session`, which needs
   a config in `/etc`.
