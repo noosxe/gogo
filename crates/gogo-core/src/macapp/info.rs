@@ -255,7 +255,9 @@ pub fn split_args(raw: &str) -> Vec<String> {
 
 /// A task's `path` as the file on disk. Windows paths ignore case, and an info
 /// can disagree with its files (Zeus: `zeus.exe` for `Zeus.exe`), so each part
-/// falls back to a case-insensitive match; the result has the on-disk spelling.
+/// falls back to a case-insensitive match. On a case-sensitive filesystem the
+/// result has the on-disk spelling; a case-insensitive one (APFS) takes the info's
+/// spelling as it is, and that opens the same file.
 fn resolve_task_path(base: &Path, rel: &str) -> Option<PathBuf> {
     let rel = rel.replace('\\', "/");
     let exact = base.join(&rel);
@@ -324,9 +326,17 @@ mod task_path_tests {
         .unwrap();
         std::fs::create_dir(tmp.path().join("Apps")).unwrap();
         std::fs::write(tmp.path().join("Apps/Zeus.exe"), b"MZ").unwrap();
-        let on_disk = tmp.path().join("Apps/Zeus.exe");
-        assert_eq!(find_entry_point(tmp.path()).unwrap(), on_disk);
-        assert_eq!(play_variants(tmp.path())[0].exe, on_disk);
+        // The file's identity, not its spelling: APFS keeps the info's.
+        let same_file = |found: &Path| {
+            use std::os::unix::fs::MetadataExt;
+            let (found, on_disk) = (
+                std::fs::metadata(found).unwrap(),
+                std::fs::metadata(tmp.path().join("Apps/Zeus.exe")).unwrap(),
+            );
+            (found.dev(), found.ino()) == (on_disk.dev(), on_disk.ino())
+        };
+        assert!(same_file(&find_entry_point(tmp.path()).unwrap()));
+        assert!(same_file(&play_variants(tmp.path())[0].exe));
     }
 }
 
