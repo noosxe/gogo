@@ -36,6 +36,14 @@ tools, or binaries from the host system — no exceptions.**
   Rendering on DXMT, D3DMetal or OpenGL needs real hardware: that is the user's host
   pass (`scripts/host-pass.sh`, `docs/vm-testing.md` "Host pass"). Agents never run it
   against a real bundle; they put its steps in the PR.
+- **Launching Linux (`linux-app`) games**: only through `scripts/linux-e2e.sh run <gogid>`
+  (headless sway in a bwrap root, scratch state under `target/`, everything torn down;
+  how-to in `docs/linux-e2e.md`). Never launch a game any other way, never touch the
+  owner's game dirs, `~/.local/share/applications`, Steam or `compatibilitytools.d`.
+  A game whose download isn't in `target/linux-e2e/cache` needs the owner's OK first:
+  each new game download is the owner's call. Screenshots stay in `target/`, never in git.
+  Hyprland quirks, display modes, VRR and audio are the owner's host pass (#179);
+  agents put those steps in the PR.
 
 ## Canonical checks (run inside the shell)
 
@@ -45,6 +53,8 @@ cargo clippy --all-targets -- -D warnings
 cargo nextest run              # tests (see docs/design/08-testing.md)
 cargo deny check               # licenses + advisories
 shellcheck scripts/*.sh scripts/tests/*.sh   # when scripts change
+python3 -I scripts/tests/linux-e2e-helper-test.py   # when the e2e helper or a manifest changes
+scripts/linux-e2e.sh self-test                      # when the e2e harness changes (Linux)
 ```
 
 ## Repo conventions
