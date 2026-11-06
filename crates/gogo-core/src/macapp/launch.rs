@@ -936,7 +936,7 @@ start_watchdog() {
     ) </dev/null >/dev/null 2>&1 3>&- 4>&- &
     WATCHDOG=$!
     set +m
-    log "watchdog armed ($WATCHDOG)"
+    log "guard armed ($WATCHDOG)"
 }
 stop_watchdog() {
     [ -n "$WATCHDOG" ] || return 0
