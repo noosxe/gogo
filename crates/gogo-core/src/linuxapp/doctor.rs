@@ -1409,12 +1409,17 @@ fn check_links(g: &Game, proton: Option<&Path>) -> Finding {
         .iter()
         .map(|d| prefix.join("dosdevices").join(d))
         .collect();
+    // The build's real path too: Proton links through it when a part of the
+    // data root is itself a link.
+    let proton_real = proton.and_then(|d| d.canonicalize().ok());
     let proton = proton.map(normalize);
     out.retain(|(p, t)| {
         let resolved = normalize(&p.parent().unwrap_or(prefix).join(t));
         !kept.contains(p)
             && !is_wine_port(prefix, p, t)
-            && !proton.as_ref().is_some_and(|d| resolved.starts_with(d))
+            && ![&proton, &proton_real]
+                .iter()
+                .any(|d| d.as_ref().is_some_and(|d| resolved.starts_with(d)))
     });
     // Links into another Proton build: the one the game ran on before a
     // retarget. Proton re-links the prefix when a build of another version
