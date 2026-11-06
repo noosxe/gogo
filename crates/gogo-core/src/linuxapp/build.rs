@@ -12,6 +12,7 @@
 //! file and `launch.sh` are #177's.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use super::fixes;
 use super::game::{self, refuse_private_tmp};
@@ -899,6 +900,10 @@ fn restore_z_for_build(prefix: &Path) -> Result<(), MacAppError> {
     setup::restore_z(prefix).map(|_| ())
 }
 
+/// How long the best-effort support installer gets. It writes a few config
+/// files; with no display, Zeus's sat idle for good.
+const SUPPORT_INSTALLER_LIMIT: Duration = Duration::from_secs(180);
+
 /// The depot lane's GOG support installer: the GOG.com key it checks for
 /// (one `reg import`), then the installer into the game dir. A failure is
 /// a warning, as on the Mac (design 15 D3 amendment).
@@ -941,25 +946,37 @@ fn restore_and_run_support(
         message: "running GOG support installer into the game dir".into(),
     });
     let support_plan = installer::plan(support)?;
-    let ran = umu.run(
+    let ran = umu.run_limited(
         "GOG's support installer",
         umu.command(installer_args(
             &support_plan,
             &win_path,
             &logs.join(installer::INNO_LOG),
         )),
+        SUPPORT_INSTALLER_LIMIT,
     )?;
-    if !ran.success() {
-        emit(&ProgressEvent::Warn {
+    match ran {
+        Some(status) if status.success() => {}
+        Some(status) => emit(&ProgressEvent::Warn {
             message: format!(
                 "GOG support installer declined (exit {}; install-time config not \
                  written; logs in {} and {}) — if the game stalls at launch, build it \
                  from the offline installer",
-                ran.code().unwrap_or(-1),
+                status.code().unwrap_or(-1),
                 logs.display(),
                 umu.log.display()
             ),
-        });
+        }),
+        None => emit(&ProgressEvent::Warn {
+            message: format!(
+                "GOG support installer still running after {} s, stopped (install-time \
+                 config not written; logs in {} and {}) — if the game stalls at launch, \
+                 build it from the offline installer",
+                SUPPORT_INSTALLER_LIMIT.as_secs(),
+                logs.display(),
+                umu.log.display()
+            ),
+        }),
     }
     Ok(())
 }
