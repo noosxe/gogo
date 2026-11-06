@@ -1,13 +1,21 @@
-# Carmageddon TDR 2000 (D3D7: D7VK). The first-run hardware check: OK, then D7VK creates
-# its device and the game asks which device to use. It stops there: the check leaves the
-# display in 320x200, the dialog is magnified with its OK off screen, and it takes no input
-# here, so the menu isn't reached.
+# Carmageddon TDR 2000 (D3D7: wined3d, see compat/1146738698.toml). First run: the hardware
+# check's OK, the Display Configuration dialog (640x480, Play), then its audio check, the
+# studio videos and the main menu.
+#
+# The audio check hangs on a black screen without an audio device: DirectSound fails, then
+# it writes to a waveOut handle that never completes (#203). The sandbox's null sink is what
+# gets it past that.
+#
+# The steps stop at the menu, because the harness's input there is unreliable: Return only
+# sometimes registers, and clicks don't. The game may be polling and missing an instant press
+# and release (not proven). The host pass judges the menu's input.
 title = "Carmageddon TDR 2000"
 gogid = 1146738698
 
 [window]
 wait_secs = 240
 resolution = "1280x800"
+min_fill = { w = 80, h = 95 }
 
 [[step]]
 wait = 15
@@ -21,11 +29,61 @@ min_fill = false
 click = { x = 37.3, y = 80.6 }
 
 [[step]]
-wait = 40
+wait = 30
 
 [[step]]
 screenshot = "device-dialog"
 min_fill = false
 
 [[step]]
-expect_change = { from = "first-run-dialog", to = "device-dialog", min = 20 }
+expect_change = { from = "first-run-dialog", to = "device-dialog", min = 10 }
+
+# 640x480 in the resolution list, then Play.
+[[step]]
+click = { x = 62.7, y = 65 }
+
+[[step]]
+wait = 2
+
+[[step]]
+click = { x = 50, y = 90.9 }
+
+[[step]]
+wait = 15
+
+# Return skips a video. The narrative and intro videos then play out.
+[[step]]
+key = "Return"
+
+[[step]]
+wait = 5
+
+[[step]]
+key = "Return"
+
+[[step]]
+wait = 5
+
+[[step]]
+key = "Return"
+
+[[step]]
+wait = 5
+
+[[step]]
+key = "Return"
+
+[[step]]
+wait = 5
+
+[[step]]
+key = "Return"
+
+[[step]]
+wait = 5
+
+[[step]]
+wait_settled = 300
+
+[[step]]
+screenshot = "menu"
