@@ -987,7 +987,7 @@ class Driver:
         elif action == "wait_settled":
             self.do_wait_settled(step["wait_settled"], record)
         elif action == "key":
-            self.tool(*_wtype("-k", step["key"])).check_returncode()
+            self.tool(*_wtype_key(step["key"])).check_returncode()
         elif action == "type":
             self.tool(*_wtype(step["type"])).check_returncode()
         elif action == "click":
@@ -1300,6 +1300,17 @@ class Driver:
         finally:
             self.stop_services()
         return 0
+
+
+# How long a `key` step holds the key between press and release. A game that polls its
+# input misses an instant press+release (`wtype -k`). (`click` already holds the button
+# 100 ms between its swaymsg press and release.)
+KEY_HOLD_MS = 50
+
+
+def _wtype_key(key):
+    """A key held KEY_HOLD_MS: `wtype -P`, a pause, `wtype -p`."""
+    return _wtype("-P", key, "-s", str(KEY_HOLD_MS), "-p", key)
 
 
 def _wtype(*keys):
