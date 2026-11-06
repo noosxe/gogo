@@ -936,6 +936,7 @@ start_watchdog() {
     ) </dev/null >/dev/null 2>&1 3>&- 4>&- &
     WATCHDOG=$!
     set +m
+    log "watchdog armed ($WATCHDOG)"
 }
 stop_watchdog() {
     [ -n "$WATCHDOG" ] || return 0
@@ -1140,11 +1141,13 @@ if [ ! -x "$WINE_BIN" ]; then
     exit 1
 fi
 log "exec $WINE_BIN $EXE (runtime $RUNTIME, prefix $WINEPREFIX, log $RUN_LOG)"
+# Registered before the game starts: a launcher killed in the gap would leave
+# a game nothing knows about. Only the watchdog needs WPID, so it follows.
+register_launch
 set -m
 "$WINE_BIN" "$EXE" ${ARGS[@]+"${ARGS[@]}"} "$@" 3>&- 4>&- &
 WPID=$!
 set +m
-register_launch
 start_watchdog
 wait "$WPID"
 rc=$?

@@ -2656,6 +2656,14 @@ fn spawn_hanging_launcher(
     while !pidfile.exists() && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
+    // The record and the watchdog exist once the launcher logs "watchdog armed"
+    // (a SIGKILL before that leaves nothing to tear down).
+    let log = home.join("Library/Logs/gogo/1207659013/launch.log");
+    while std::time::Instant::now() < deadline
+        && !std::fs::read_to_string(&log).is_ok_and(|l| l.contains("watchdog armed"))
+    {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     std::thread::sleep(std::time::Duration::from_millis(100));
     let pid = std::fs::read_to_string(pidfile)
         .unwrap()
