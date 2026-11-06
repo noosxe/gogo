@@ -2045,6 +2045,7 @@ protonfixes = false
     /// The L3 migration (#166) changed no macOS entry: each pre-#166 file
     /// (kept in `tests/fixtures/compat-pre-166/`, read the way gogo read
     /// them then) merges to the same entry as its migrated `compat/` file.
+    /// A file with no `[platforms.linux]` table carries no Linux status.
     #[test]
     fn l3_migration_keeps_every_macos_entry() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -2062,6 +2063,14 @@ protonfixes = false
                 merge(&[(Layer::Db, &after)]),
                 "compat/{name}"
             );
+            if !now.contains("[platforms.linux]") {
+                let linux = parse(&now, Os::Linux, Layer::Db).unwrap().entry;
+                assert_eq!(linux.status, None, "compat/{name}");
+                assert!(
+                    linux.lanes.is_empty() && linux.tested.is_none(),
+                    "compat/{name}"
+                );
+            }
             n += 1;
         }
         assert_eq!(n, 11);
