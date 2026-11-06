@@ -810,6 +810,44 @@ launch-time network use for verbs is limited to what the static reader couldn't 
   because the winetricks call is a `waitforexitandrun` Proton run, which would
   otherwise run the protonfix too. Running the command is #176/#177's setup.
 
+### 4.9 GOG's install script (`goggame-<gogid>.script`)
+
+Most older GOG games ship `goggame-<gogid>.script` in the game dir: the JSON GOG Galaxy
+runs after an install. A depot build runs no installer, so gogo applies the script's
+**registry actions** itself (`macapp/goggame.rs`, shared by the Linux and macOS depot lanes;
+#205: Chaos Gate overflows its stack without the `HKCU\Software\RandomGames\WH40K\1.0` values).
+
+Shape: `{"productId", "actions": [{"name", "languages", "install": {"action", "arguments",
+"conditions"?}}], "uninstall"?}`. Action types in the cached depots:
+
+| `install.action` | seen in | gogo |
+|---|---|---|
+| `setRegistry` (`root`, `subkey`, `valueName`, `valueType`, `valueData`, `saveGameData`?, `deleteSubkeys`?) | Chaos Gate, SimCity 3000/4, Stronghold HD | applied |
+| `delRegistry` (`root`, `subkey`; `conditions: onLanguageChange`) | AD2044 | skipped, warned |
+| `Execute` (`executable`, `runAsAdmin`) | the offline installer wrappers (Zeus, Pharaoh), Chaos Gate's DirectPlay and Firewall helpers, SimCity 4 | skipped, warned |
+| `savePath`, `supportData` (`{supportDir}` → `{userdocs}` copies) | SimCity 4, Stronghold HD | skipped, warned |
+
+Registry details:
+
+- `root` is `HKEY_LOCAL_MACHINE`/`CURRENT_USER`/`CLASSES_ROOT`/`USERS`.
+- `valueType`: `string`, `expandString`, `dword` and `binary` (any case). `dword` data is
+  `$`-prefixed hex (`$0012434f`) or decimal; `binary` is base64, passed to `reg add` as hex.
+  An empty or absent `valueName` is the key's default value; no name, type or data means the
+  key only (`reg add KEY /f`). Anything else skips that action with a warning.
+- Placeholders: `{app}` is `C:\GOG\<tree>` in the prefix, `{userdocs}` the user's Documents
+  (`C:\users\steamuser\Documents` on Linux), `{group}` the title. `{{` is a literal `{`;
+  other `{…}` (GUIDs) stay as written. `{supportDir}` and the like aren't available: an action
+  using one is skipped with a warning.
+- A key under `HKLM\SOFTWARE\` outside `Wow6432Node` is also written under
+  `Wow6432Node`, since the script doesn't say which view Galaxy used and a 32-bit game reads
+  through the redirect.
+- Order: the script's values first, then compat `registry` entries, so compat wins. They apply
+  when the prefix is new or the combined list changed (Linux), and each setup (macOS).
+- Cached games with a script and what it writes: Chaos Gate (20 `HKCU` game settings + DirectPlay
+  IPX in `HKLM`), SimCity 3000 Unlimited (3 `HKLM` values), SimCity 4 Deluxe (18 `HKLM`), Stronghold
+  HD (9 `HKLM`: App Paths, DirectPlay), AD2044 (a delete only), Zeus & Poseidon and Pharaoh Gold
+  (installer `Execute` only).
+
 ## 5. Decision 5: `[platforms.<os>]` in the compat schema
 
 **Settled (docs/21 §8 item 6):** one file per game. Top level = every OS (the Windows-side
