@@ -1,5 +1,5 @@
-# Zeus + Poseidon (2D DirectDraw: gogo's cnc-ddraw). Fails today: an access violation in heap
-# code as the intro video starts, exit 5 (see the PR's issue). Kept so a fix can be checked.
+# Zeus + Poseidon (2D DirectDraw: gogo's cnc-ddraw). Needs an audio device: with none, an
+# access violation as the intro video starts, exit 5 (#204). The harness's null sink is enough.
 title = "Zeus + Poseidon"
 gogid = 1207659039
 

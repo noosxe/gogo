@@ -15,6 +15,7 @@ pkgs.buildEnv {
     pkgs.wtype             # keyboard input
     pkgs.xwininfo          # proves the display is the headless one
     pkgs.xterm             # the self-test's client
+    pkgs.pulseaudio        # the sandbox's null sink: pulseaudio, pactl, pacat
     pkgs.bubblewrap
     pkgs.jq
     pkgs.python3           # scripts/linux-e2e-helper.py, run with -I
