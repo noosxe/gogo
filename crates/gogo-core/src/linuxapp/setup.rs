@@ -19,6 +19,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use super::fixes::{self, Fixes};
 use super::game::{self, LaunchConf, LinuxState, STATE_SCHEMA, refuse_private_tmp};
@@ -258,6 +259,47 @@ impl Umu<'_> {
         what: &str,
         mut cmd: Command,
     ) -> Result<std::process::ExitStatus, MacAppError> {
+        self.prepare(what, &mut cmd)?;
+        cmd.status().map_err(|e| self.cannot_run(what, &e))
+    }
+
+    /// [`Self::run`] for a best-effort step that may never end: after `limit`
+    /// it kills `cmd` and everything in the prefix, and returns `None`.
+    pub fn run_limited(
+        &self,
+        what: &str,
+        mut cmd: Command,
+        limit: Duration,
+    ) -> Result<Option<std::process::ExitStatus>, MacAppError> {
+        self.prepare(what, &mut cmd)?;
+        let mut child = cmd.spawn().map_err(|e| self.cannot_run(what, &e))?;
+        let deadline = Instant::now() + limit;
+        loop {
+            if let Some(status) = child.try_wait()? {
+                return Ok(Some(status));
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        // umu's container and Wine's services leave the child's process group.
+        let pids = game::prefix_procs(self.prefix);
+        if !pids.is_empty() {
+            let _ = Command::new("kill")
+                .arg("-KILL")
+                .args(pids.iter().map(|p| p.pid.to_string()))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        Ok(None)
+    }
+
+    /// Working dir and log for one run, with its `## what` line.
+    fn prepare(&self, what: &str, cmd: &mut Command) -> Result<(), MacAppError> {
         if let Some(dir) = self.log.parent() {
             std::fs::create_dir_all(dir)?;
         }
@@ -273,12 +315,14 @@ impl Umu<'_> {
             .stdin(Stdio::null())
             .stdout(log.try_clone()?)
             .stderr(log);
-        cmd.status().map_err(|e| {
-            MacAppError::Umu(format!(
-                "cannot run {} for {what}: {e}",
-                self.run.umu_run().display()
-            ))
-        })
+        Ok(())
+    }
+
+    fn cannot_run(&self, what: &str, e: &std::io::Error) -> MacAppError {
+        MacAppError::Umu(format!(
+            "cannot run {} for {what}: {e}",
+            self.run.umu_run().display()
+        ))
     }
 
     /// Create the prefix (`umu-run ""`: Proton sets the prefix up and runs
@@ -767,6 +811,41 @@ pub fn setup(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn run_limited_stops_what_never_ends() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run = UmuRun::System {
+            umu_run: "umu-run".into(),
+        };
+        let umu = Umu {
+            run: &run,
+            proton: tmp.path(),
+            prefix: tmp.path(),
+            umu_id: "umu-1",
+            cwd: tmp.path(),
+            log: tmp.path().join("setup.log"),
+        };
+        let mut sleep = Command::new("sleep");
+        sleep.arg("30");
+        let started = Instant::now();
+        let ran = umu
+            .run_limited("a hang", sleep, Duration::from_millis(300))
+            .unwrap();
+        assert!(ran.is_none());
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let mut quick = Command::new("true");
+        quick.arg("x");
+        let ran = umu
+            .run_limited("quick", quick, Duration::from_secs(20))
+            .unwrap();
+        assert!(ran.unwrap().success());
+        assert!(
+            std::fs::read_to_string(tmp.path().join("setup.log"))
+                .unwrap()
+                .contains("## a hang")
+        );
+    }
+
     use super::*;
 
     #[test]
