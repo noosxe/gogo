@@ -12,6 +12,7 @@ pub mod compat;
 pub mod d3dmetal;
 pub mod doctor;
 pub mod error;
+pub mod goggame;
 pub mod info;
 pub mod installer;
 pub mod interpret;

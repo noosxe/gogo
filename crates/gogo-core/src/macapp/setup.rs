@@ -146,10 +146,26 @@ pub fn setup(gogid: &str, bundle: Option<&Path>) -> Result<SetupOutcome, MacAppE
 
     // Registry values the bundle TOML can't carry: L3, then L4 per field
     // (decision 5). The rest of L3 is #74.
-    let registry = compat::merge(&[(Layer::Db, &db.entry), (Layer::User, &l4.entry)])
-        .registry
-        .map(|r| r.value)
-        .unwrap_or_default();
+    let mut registry = Vec::new();
+    // GOG's install script first (design 18 §4.9), so these win over it.
+    if let (Some(name), Some(root)) = (eff.tree_name(), &tree) {
+        let user = std::env::var("USER").unwrap_or_else(|_| "user".into());
+        let ctx = super::goggame::Ctx {
+            app: &format!(r"C:\GOG\{name}"),
+            userdocs: &format!(r"C:\users\{user}\Documents"),
+            group: &eff.title,
+        };
+        if let Some(script) = super::goggame::load(root, &eff.gogid, &ctx) {
+            warnings.extend(script.warnings);
+            registry.extend(script.values);
+        }
+    }
+    registry.extend(
+        compat::merge(&[(Layer::Db, &db.entry), (Layer::User, &l4.entry)])
+            .registry
+            .map(|r| r.value)
+            .unwrap_or_default(),
+    );
     for value in &registry {
         super::interpret::run_in_prefix(
             &rt.wine,
@@ -432,6 +448,10 @@ pub fn drop_host_drives(prefix: &Path) -> Result<(), MacAppError> {
 /// `reg add` argv for one compat registry value.
 pub(crate) fn reg_add_argv(v: &compat::RegistryValue) -> Vec<String> {
     let mut argv = vec!["reg".to_string(), "add".to_string(), v.key.clone()];
+    if v.kind.as_deref() == Some(super::goggame::KEY_ONLY) {
+        argv.push("/f".to_string());
+        return argv;
+    }
     match &v.name {
         Some(name) => argv.extend(["/v".to_string(), name.clone()]),
         None => argv.push("/ve".to_string()),

@@ -683,12 +683,26 @@ pub fn setup(
     }
 
     // Registry values: L3 (as owned), then L4; again only when they changed.
-    let registry: Vec<compat::RegistryValue> = fx
-        .effective
-        .registry
-        .as_ref()
-        .map(|r| r.value.clone())
-        .unwrap_or_default();
+    let mut registry: Vec<compat::RegistryValue> = Vec::new();
+    // GOG's install script first (design 18 §4.9), so these win over it.
+    if let (Some(name), Some(dir)) = (&tree, &scan_dir) {
+        let ctx = crate::macapp::goggame::Ctx {
+            app: &format!(r"C:\GOG\{name}"),
+            userdocs: r"C:\users\steamuser\Documents",
+            group: &baked.title,
+        };
+        if let Some(script) = crate::macapp::goggame::load(dir, gogid, &ctx) {
+            warnings.extend(script.warnings);
+            registry.extend(script.values);
+        }
+    }
+    registry.extend(
+        fx.effective
+            .registry
+            .as_ref()
+            .map(|r| r.value.clone())
+            .unwrap_or_default(),
+    );
     let reg_lines: Vec<String> = registry.iter().map(game::registry_line).collect();
     if !registry.is_empty()
         && (prefix_created || prior.as_ref().is_none_or(|s| s.registry != reg_lines))
