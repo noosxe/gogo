@@ -1,15 +1,33 @@
 # Warhammer 40,000: Chaos Gate (own GOG D3D9 wrapper as ddraw.dll, kept with ddraw=n,b).
-# Fails today: exit 1 in about 3 s, before any window, and the same with Wine's builtin ddraw
-# (see the PR's issue). Kept so a fix can be checked.
+# Needs the settings GOG's install script writes (the compat entry). Without them it overflows
+# its stack and exits 1, with no window (#205). Escape skips the opening movie.
 title = "Warhammer 40,000: Chaos Gate"
 gogid = 1433928487
 
 [window]
 wait_secs = 60
+min_fill = { w = 80, h = 95 }    # 4:3 in a 16:10 output
 
 [[step]]
-wait = 20
+wait = 45
+
+[[step]]
+key = "Escape"
+
+[[step]]
+wait_settled = 60
 
 [[step]]
 screenshot = "menu"
-min_fill = false
+
+[[step]]
+click = { x = 50, y = 47 }       # New Game
+
+[[step]]
+wait = 5
+
+[[step]]
+screenshot = "new_game"
+
+[[step]]
+expect_change = { from = "menu", to = "new_game", min = 20 }
