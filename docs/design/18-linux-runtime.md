@@ -1294,9 +1294,9 @@ programs (editing `launch.conf` doesn't change the stamp, so no setup ran):
 - The `.desktop` file passes `desktop-file-validate`. `icon.png` is a 256×256 RGBA PNG
   of the game's icon.
 
-**Checks the tests and the smoke don't reach** (#179's host pass): whether Proton ends a
-real game cleanly on `TERM` given longer than 5 s; zenity's `--switch` and kdialog's
-labels on real desktops; and whether the menu entry and icon show up in GNOME and KDE.
+**Checks the tests and the smoke don't reach**: whether Proton ends a real game cleanly on
+`TERM` given longer than 5 s, and zenity's `--switch` and kdialog's labels and the menu
+entry on GNOME and KDE, which the owner doesn't use (§11.2).
 
 ## 8. `gogo linux-app doctor <gogid>`
 
@@ -1550,27 +1550,52 @@ only on Linux (`#[cfg(target_os = "linux")]`), with the same shape:
 - **Depot materialization:** reflink when the temp dir supports it, copy otherwise
   (built in #175: `tests/materialize.rs`).
 
-### 11.2 What CI and agents can't check
+### 11.2 What the harness checks, and what stays the owner's
 
-No Vulkan in the VM and no GPU in CI (R22). The rest is the user's **Linux host pass**, run
-on their machine (NixOS, RTX 4090 + RADV iGPU), never by an agent against a real game. The
-implementation issues list its steps in their PRs:
+**Agents and the owner: `scripts/linux-e2e.sh`** (#201, runbook: [docs/linux-e2e.md](../linux-e2e.md)).
+One command builds a game in a scratch home, runs it through its generated `launch.sh` in
+headless sway inside a bwrap root with its own network, PID namespace, `/tmp` and
+`XDG_RUNTIME_DIR`, drives a per-game manifest (`e2e/<gogid>.toml`), and tears everything
+down on every exit path. It runs in software (pixman, llvmpipe, lavapipe), or on a real GPU
+with no display output (`--gpu /dev/dri/renderD12x`).
 
-1. **The FHS env with a GPU** (R1 was verified with a console exe only): a game renders
-   through the zipapp in `steam.buildRuntimeEnv`, on NVIDIA and on the RADV iGPU.
-2. **Smoke:** one D3D11 game (DXVK) and one D3D12 game (VKD3D-Proton) start, render, and
-   exit cleanly; the run log header is right; teardown leaves no process.
-3. **Fixes:** a game with a `gamefixes-gog` module (Rebel Galaxy Outlaw, `umu-910830`): the
-   summary matches, the verb was pre-installed, no download at launch. A game with no row
-   (rule 3) launches.
-4. **ddraw (docs/22 §7 items 2, 6):** Pharaoh and Stronghold with Wine's `ddraw`, then
-   cnc-ddraw, on X11 and on Wayland; Carmageddon TDR 2000 on D7VK. Decides whether
-   cnc-ddraw stays the 2D default and whether gamescope is needed.
-5. **cnc-ddraw under Proton** (R21): the game-dir placement plus `ddraw=n,b` loads.
-6. **Multi-GPU** (R18): which device DXVK picks; `DXVK_FILTER_DEVICE_NAME` moves it.
-7. **Early-exit dialog** on GNOME (zenity) and KDE (kdialog) if available.
+| Check | How |
+|---|---|
+| The display is the headless one, before launching | own netns with only `lo`, `xwininfo -root` at the manifest's size, `HEADLESS-*` outputs only, private `/tmp`, none of the owner's game or Steam paths visible |
+| The game reaches its window | sway's tree, within the manifest's wait |
+| Correct graphics | each screenshot: not all black, and the non-black bounding box fills the window |
+| Working input | a frame changes after a click or key (`expect_change`) |
+| Which GPU | `glxinfo`, `vulkaninfo`, and which GPU node the game's processes hold open |
+| Exit | the game's own exit (code 0), or the launcher's teardown on `TERM` |
+| Doctor | `links` and `processes` ok after the run |
+| Nothing left | no process of the run and no scratch dir, on success, failure, timeout, `INT` and `TERM` |
 
-Results go into L3 `[platforms.linux]` `tested` entries (`host = "rtx4090/nixos-26.11"`).
+A pass prints a `tested_entry` for L3 `[platforms.linux]`, with
+`host = "headless-sway/<software|nvidia|radv>"`. CI runs the harness's self-test on
+a plain xterm, never a game.
+
+**Still the owner's Linux host pass** (#179), on their real session (NixOS, RTX 4090 + RADV
+iGPU), because a headless compositor can't show it:
+
+1. **Compositor quirks:** Hyprland's tiling and fullscreen behaviour (#199's picture in the
+   top-left of a tiled window didn't reproduce on sway).
+2. **Display modes and VRR:** a game changing the real mode, gamescope's need, frame pacing.
+3. **Audio:** the sandbox has no sound server.
+4. **The menu entry and icon** on the owner's desktop, launched from the launcher.
+
+These can now run through the harness once the games are downloaded (each download is the
+owner's OK), and move to the owner only where a run shows a compositor-specific result:
+
+- **Smoke:** one D3D11 game (DXVK) and one D3D12 game (VKD3D-Proton).
+- **Fixes:** a game with a `gamefixes-gog` module (Rebel Galaxy Outlaw, `umu-910830`), and a
+  game with no row (rule 3).
+- **ddraw (docs/22 §7 items 2, 6):** Pharaoh and Stronghold with Wine's `ddraw`, then
+  cnc-ddraw; Carmageddon TDR 2000 on D7VK. cnc-ddraw under Proton (R21).
+- **Multi-GPU** (R18): `--gpu` gives a sandbox with one GPU, so the device DXVK picks among
+  several, and `DXVK_FILTER_DEVICE_NAME` moving it, stay on the host pass.
+
+The early-exit dialog on GNOME (zenity) and KDE (kdialog) isn't on any list: the owner
+uses neither. The harness turns the dialog off (`GOGO_LAUNCHER_NO_DIALOG=1`).
 
 ## 12. Open items and risks
 
@@ -1651,4 +1676,4 @@ Filed 2026-11-03 after the owner agreed; each is a sub-issue of #155.
 | I11 (#176) | `gogo linux-app` command: build (depot and installer lanes), `setup`, `compat`, `next-renderer`, `--retarget`; `apps` on Linux (§10) | `type:feature`, `area:cli`, `area:wine-runtime` | #166–#172, #175 |
 | I12 (#177) | Linux launcher: `.desktop`, `launch.sh` template, `launch.conf`, stamp, runtime check, logs, teardown, early-exit dialog (§7) | `type:feature`, `area:wine-runtime` | #176 (or lands with it) |
 | I13 (#178) | `gogo linux-app doctor`: umu, runtime, container, Vulkan and 32-bit ICD checks, NixOS hints (§8) | `type:feature`, `area:wine-runtime` | #177 |
-| I14 (#179) | Linux host pass: script and runbook for the checks in §11.2 | `type:chore`, `area:wine-runtime` | #177 |
+| I14 (#179) | Linux host pass: the compositor-specific checks in §11.2 (script and runbook: #201, `scripts/linux-e2e.sh`) | `type:chore`, `area:wine-runtime` | #177 |

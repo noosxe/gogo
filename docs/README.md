@@ -59,6 +59,7 @@ A Rust CLI app that:
 | [22-ddraw-renderers-d7vk-vs-cnc-ddraw.md](22-ddraw-renderers-d7vk-vs-cnc-ddraw.md) | #150 / docs/21 §8 item 8: D7VK vs cnc-ddraw for `ddraw.dll` games (2D vs D3D≤7, Proton/Wine install, no D7VK on MoltenVK), and a static rule to tell 3D from 2D (the `dxguid` GUID block is noise; device/texture GUIDs are the signal) |
 
 🧪 **Launch-testing bundles:** [vm-testing.md](vm-testing.md) — Tart VM workflow
+🧪 **Launch-testing Linux games:** [linux-e2e.md](linux-e2e.md) — headless sway harness
 (`scripts/vm-test.sh`), result format, VM limitations.
 
 ➡️ **Design phase:** [`docs/design/`](design/README.md) — architecture, auth, CLI spec,
