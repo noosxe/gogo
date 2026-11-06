@@ -1,0 +1,13 @@
+# Right and Down (Unity, D3D11: DXVK, the L1 default). e2e/1741027632.toml.
+title  = "Right and Down"
+source = "gogo-headless"
+
+[platforms.linux]
+status = "boots"
+lane   = "depot"
+notes  = "headless sway: menu, Settings and Quit work on DXVK; audio and the owner's compositor not judged"
+tested = [
+  { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/software", date = 2026-11-06 },
+  { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/radv", date = 2026-11-06 },
+  { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/nvidia", date = 2026-11-06 },
+]

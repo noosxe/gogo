@@ -1,0 +1,15 @@
+# Warhammer 40,000: Chaos Gate (own GOG D3D9 wrapper as ddraw.dll, kept with ddraw=n,b).
+# Fails today: exit 1 in about 3 s, before any window, and the same with Wine's builtin ddraw
+# (see the PR's issue). Kept so a fix can be checked.
+title = "Warhammer 40,000: Chaos Gate"
+gogid = 1433928487
+
+[window]
+wait_secs = 60
+
+[[step]]
+wait = 20
+
+[[step]]
+screenshot = "menu"
+min_fill = false

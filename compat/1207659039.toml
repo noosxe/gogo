@@ -1,0 +1,13 @@
+# Zeus + Poseidon (2D DirectDraw: cnc-ddraw). e2e/1207659039.toml.
+title  = "Zeus + Poseidon"
+source = "gogo-headless"
+
+[platforms.linux]
+status = "broken"
+lane   = "depot"
+notes  = "headless sway: access violation in heap code as the intro video starts, exit 5, on all three"
+tested = [
+  { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/software", date = 2026-11-06 },
+  { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/radv", date = 2026-11-06 },
+  { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/nvidia", date = 2026-11-06 },
+]

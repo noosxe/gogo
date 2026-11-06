@@ -1,0 +1,14 @@
+# Pinball Spire (Unity 6, D3D11 by default though it ships D3D12Core: DXVK, the L1 default).
+# With -force-d3d12 it also reached the menu and Options on VKD3D-Proton in all three modes.
+title  = "Pinball Spire"
+source = "gogo-headless"
+
+[platforms.linux]
+status = "boots"
+lane   = "depot"
+notes  = "headless sway: menu, Options and Quit Game work on DXVK; audio and the owner's compositor not judged"
+tested = [
+  { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/software", date = 2026-11-06 },
+  { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/radv", date = 2026-11-06 },
+  { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/nvidia", date = 2026-11-06 },
+]

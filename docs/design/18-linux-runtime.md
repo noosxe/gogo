@@ -463,8 +463,9 @@ Mac, with a Linux table:
     to wined3d. The L1 pick has no alternatives for it. Mac `apply` falls back the same.
   - **An L4 override is heard:** `dll_overrides.ddraw = "n,b"` still applies, setup warns,
     and `doctor` fails `renderer` naming the file to edit.
-  - **Any other own `ddraw.dll`** keeps `ddraw=n,b` (Chaos Gate's GOG D3D9 wrapper),
-    untested under Proton. With no override `doctor` warns: the game runs, on the builtin.
+  - **Any other own `ddraw.dll`** keeps `ddraw=n,b` (Chaos Gate's GOG D3D9 wrapper: it
+    exits 1 before a window under Proton, but so does Wine's builtin, so the wrapper isn't
+    shown to be the cause). With no override `doctor` warns: the game runs, on the builtin.
 - **"Try next renderer" order on Linux** (design 16 §8.2's walk, a Linux table):
 
   | L1 class | order |

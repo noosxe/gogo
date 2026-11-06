@@ -1,0 +1,13 @@
+# Chaos Gate (own GOG D3D9 wrapper as ddraw.dll, kept). e2e/1433928487.toml.
+title  = "Warhammer 40,000: Chaos Gate"
+source = "gogo-headless"
+
+[platforms.linux]
+status = "broken"
+lane   = "depot"
+notes  = "headless sway: exits 1 in about 3 s with no window, with its wrapper and with Wine's builtin ddraw"
+tested = [
+  { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/software", date = 2026-11-06 },
+  { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/radv", date = 2026-11-06 },
+  { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/nvidia", date = 2026-11-06 },
+]
