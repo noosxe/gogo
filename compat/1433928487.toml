@@ -3,9 +3,33 @@ title  = "Warhammer 40,000: Chaos Gate"
 source = "gogo-headless"
 
 [platforms.linux]
-status = "broken"
+# What GOG's install script writes, which a depot build doesn't run. Without PALFILE the game
+# overflows its stack and exits 1, with no window (#205). The script's PALFILE and Directory are
+# absolute: a relative PALFILE works and holds on either lane, and Directory isn't needed.
+registry = [
+  { key = 'HKCU\Software\RandomGames\WH40K\1.0', name = "PALFILE", type = "REG_SZ", data = "WH40K.pal" },
+  { key = 'HKCU\Software\RandomGames\WH40K\1.0', name = "Auto Cut Character Level", type = "REG_SZ", data = "Yes" },
+  { key = 'HKCU\Software\RandomGames\WH40K\1.0', name = "Combat Resolution", type = "REG_SZ", data = "1024 x 768" },
+  { key = 'HKCU\Software\RandomGames\WH40K\1.0', name = "Combat Voices", type = "REG_SZ", data = "Yes" },
+  { key = 'HKCU\Software\RandomGames\WH40K\1.0', name = "Music", type = "REG_SZ", data = "Yes" },
+  { key = 'HKCU\Software\RandomGames\WH40K\1.0', name = "DirDrawBitDepth", type = "REG_SZ", data = "8" },
+  { key = 'HKCU\Software\RandomGames\WH40K\1.0', name = "DirDrawFullScreen", type = "REG_SZ", data = "TRUE" },
+  { key = 'HKCU\Software\RandomGames\WH40K\1.0', name = "Display Resolution", type = "REG_SZ", data = "640x480" },
+  { key = 'HKCU\Software\RandomGames\WH40K\1.0', name = "Effect Animation Speed", type = "REG_SZ", data = "50" },
+  { key = 'HKCU\Software\RandomGames\WH40K\1.0', name = "Music Volume", type = "REG_SZ", data = "100" },
+  { key = 'HKCU\Software\RandomGames\WH40K\1.0', name = "Point Save", type = "REG_SZ", data = "Yes" },
+  { key = 'HKCU\Software\RandomGames\WH40K\1.0', name = "Show Animations", type = "REG_SZ", data = "Yes" },
+  { key = 'HKCU\Software\RandomGames\WH40K\1.0', name = "Show Grid", type = "REG_SZ", data = "No" },
+  { key = 'HKCU\Software\RandomGames\WH40K\1.0', name = "Show Paths On First Click", type = "REG_SZ", data = "Yes" },
+  { key = 'HKCU\Software\RandomGames\WH40K\1.0', name = "Sound Effects Volume", type = "REG_SZ", data = "100" },
+  { key = 'HKCU\Software\RandomGames\WH40K\1.0', name = "Unit Animation Speed", type = "REG_SZ", data = "50" },
+  { key = 'HKCU\Software\RandomGames\WH40K\1.0', name = "UseDirDraw", type = "REG_SZ", data = "TRUE" },
+  { key = 'HKCU\Software\RandomGames\WH40K\1.0', name = "Show Movie Sequences", type = "REG_SZ", data = "Yes" },
+  { key = 'HKCU\Software\RandomGames\WH40K_TD\1.0', name = "PALFILE", type = "REG_SZ", data = "WH40K.pal" },
+]
+status = "boots"
 lane   = "depot"
-notes  = "headless sway: exits 1 in about 3 s with no window, with its wrapper and with Wine's builtin ddraw"
+notes  = "headless sway: main menu and New Game work; audio, a mission and the owner's compositor not judged"
 tested = [
   { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/software", date = 2026-11-06 },
   { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/radv", date = 2026-11-06 },
