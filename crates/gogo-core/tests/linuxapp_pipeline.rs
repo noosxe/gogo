@@ -1882,7 +1882,7 @@ fn the_watchdog_tears_down_after_the_launcher_is_killed() {
     assert!(wait_until(5, || w.launch_log().contains("exec umu-run")));
     let pid = child.id();
     // A kill before the watchdog exists would leave nothing to tear down.
-    assert!(wait_until(5, || w.launch_log().contains("watchdog armed")));
+    assert!(wait_until(5, || w.launch_log().contains("guard armed")));
     let record = w.game().join(format!(".launchers/{pid}"));
     assert!(wait_until(5, || record.is_file()), "no record for {pid}");
     child.kill().unwrap();
