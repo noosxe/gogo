@@ -195,7 +195,7 @@ min_fill = false                 # this frame needn't fill the window
 [[step]]
 expect_change = { from = "menu", to = "preferences", min = 20 }  # % of pixels
 [[step]]
-key = "Escape"                   # wtype -k: one named key
+key = "Escape"                   # wtype -P, 50 ms, -p: one named key, held
 [[step]]
 type = "hello"                   # wtype: text
 ```
@@ -263,7 +263,7 @@ These stay in the owner's host pass (#179, design 18 §11.2), and agents put the
 - **A headless seat has no pointer**, and then `seat cursor press` reaches nobody. The driver
   holds a wlr virtual pointer for the whole run, over a small Wayland client in the helper.
 - **Each `wtype` is a new keyboard,** and a key sent at once is lost while Xwayland loads
-  its keymap, so `key` and `type` start with a 500 ms pause.
+  its keymap, so `key` and `type` start with a 500 ms pause. A `key` is held 50 ms (`wtype -P`, `-s 50`, `-p`), not sent as an instant `-k`: a game that polls its input misses that.
 - **NVIDIA needs its EGL vendor named** (`__EGL_VENDOR_LIBRARY_FILENAMES`), or wlroots gets
   Mesa's EGL on NVIDIA's GBM: `gbm device using incorrect/incompatible backend`.
 - **`XDG_RUNTIME_DIR` isn't under `target/`:** a socket path has a limit of 108 bytes.

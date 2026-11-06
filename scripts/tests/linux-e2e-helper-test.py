@@ -420,6 +420,17 @@ class BuildCommand(unittest.TestCase):
             helper.parse_manifest(f'gogid = 1\nbuild_command = ["y"]\n[[step]]\n{self.STEP}\n')
 
 
+class Wtype(unittest.TestCase):
+    def test_key_is_held(self):
+        self.assertEqual(
+            helper._wtype_key("Return"),
+            ("wtype", "-s", "500", "-P", "Return", "-s", "50", "-p", "Return", "-s", "200"),
+        )
+
+    def test_text_keeps_lead_in(self):
+        self.assertEqual(helper._wtype("hi"), ("wtype", "-s", "500", "hi", "-s", "200"))
+
+
 class Wayland(unittest.TestCase):
     def test_globals(self):
         name = b"wl_seat\0"

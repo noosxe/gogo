@@ -6,9 +6,11 @@
 # it writes to a waveOut handle that never completes (#203). The sandbox's null sink is what
 # gets it past that.
 #
-# The steps stop at the menu, because the harness's input there is unreliable: Return only
-# sometimes registers, and clicks don't. The game may be polling and missing an instant press
-# and release (not proven). The host pass judges the menu's input.
+# On the menu, Return registers now that a key is held 50 ms (3 of 3 runs): the menu's focus
+# is on Quit, so it opens the "Quit TDR 2000?" confirm dialog, which the steps stop at. Clicks
+# still don't register there, though the button is held 100 ms: the hold isn't the cause
+# (a click on "No" changed 0.1% of the picture, 2 of 2 runs). The host pass judges the
+# menu's mouse input.
 title = "Carmageddon TDR 2000"
 gogid = 1146738698
 
@@ -87,3 +89,17 @@ wait_settled = 300
 
 [[step]]
 screenshot = "menu"
+
+# Return on the menu: the held key opens the quit confirm dialog.
+[[step]]
+key = "Return"
+
+[[step]]
+wait = 5
+
+[[step]]
+screenshot = "after-return"
+min_fill = false
+
+[[step]]
+expect_change = { from = "menu", to = "after-return", min = 5 }
