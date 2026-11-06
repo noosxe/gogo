@@ -88,7 +88,7 @@ class Manifest(unittest.TestCase):
         self.assertEqual(m["title"], "42")
         self.assertEqual((m["window"]["width"], m["window"]["height"]), (1280, 800))
         self.assertEqual(m["window"]["min_fill"], {"w": 90.0, "h": 90.0})
-        self.assertEqual(m["exit"], {"how": "signal", "wait_secs": 30.0})
+        self.assertEqual(m["exit"], {"how": "signal", "wait_secs": 30.0, "code": 0})
         self.assertEqual(m["steps"], [{"screenshot": "a"}])
 
     def test_all_steps(self):
@@ -128,6 +128,15 @@ class Manifest(unittest.TestCase):
         self.assertEqual(
             m["steps"][7], {"expect_change": {"from": "a", "to": "b", "min": 3.0}}
         )
+
+    def test_env_and_exit_code(self):
+        m = helper.parse_manifest(
+            'gogid = 1\n[env]\nDXVK_LOG_LEVEL = "info"\n[exit]\ncode = 255\n[[step]]\nwait = 1\n'
+        )
+        self.assertEqual(m["env"], {"DXVK_LOG_LEVEL": "info"})
+        self.assertEqual(m["exit"]["code"], 255)
+        with self.assertRaises(helper.ManifestError):
+            helper.parse_manifest('gogid = 1\n[env]\nX = 1\n[[step]]\nwait = 1\n')
 
     def test_command_instead_of_gogid(self):
         m = helper.parse_manifest('command = ["xterm"]\n[[step]]\nwait = 1\n')

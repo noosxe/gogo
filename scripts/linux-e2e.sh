@@ -85,8 +85,7 @@ sandbox_args() { # mode: build | game
         SB+=(--ro-bind-try "$d" "$d")
     done
     SB+=(--bind "$RUN" "$RUN" --bind "$RESULTS" "$RESULTS"
-         --bind "$CACHE/runtimes" "$GOGO_HOME_DIR/runtimes"
-         --bind "$CACHE/renderers" "$GOGO_HOME_DIR/renderers"
+         --bind "$CACHE/store" "$RUN/store"
          --bind "$CACHE/depot" "$RUN/xdg/cache/gogo/depot"
          --bind "$CACHE/umu" "$RUN/xdg/data/umu")
     case "$GOGO" in /nix/store/*) ;; ?*) SB+=(--ro-bind "$GOGO" "$GOGO") ;; esac
@@ -467,10 +466,14 @@ cmd_run() {
     PREFIX=""
     if [ -n "$GOGID" ]; then PREFIX="$GOGO_HOME_DIR/games/$GOGID/prefix"; fi
     if [ "$FRESH" = 1 ]; then CACHE="$RUN/cache"; else CACHE="$ROOT/cache"; fi
-    mkdir -p "$CACHE/runtimes" "$CACHE/renderers" "$CACHE/depot" "$CACHE/umu" \
+    mkdir -p "$CACHE/store/runtimes" "$CACHE/store/renderers" "$CACHE/depot" "$CACHE/umu" \
         "$RUN/home" "$RUN/xdg/data/umu" "$RUN/xdg/config" "$RUN/xdg/cache" "$RUN/xdg/state" \
-        "$RUN/harness" "$GOGO_HOME_DIR/runtimes" "$GOGO_HOME_DIR/renderers" \
+        "$RUN/harness" "$RUN/store" "$GOGO_HOME_DIR" \
         "$RUN/xdg/cache/gogo/depot"
+    # One mount: the store stages renderers in runtimes/.tmp and renames them
+    # over, which two bind mounts refuse (EXDEV), and cnc-ddraw falls back.
+    ln -s "$RUN/store/runtimes" "$GOGO_HOME_DIR/runtimes"
+    ln -s "$RUN/store/renderers" "$GOGO_HOME_DIR/renderers"
     cp "$HELPER_SRC" "$RUN/harness/helper.py"
     mkdir -p "$RUN/etc"
     printf '%s:x:%s:%s::%s:%s\n' "$(id -un)" "$(id -u)" "$(id -g)" "$RUN/home" "$TOOLS/bin/bash" >"$RUN/etc/passwd"
