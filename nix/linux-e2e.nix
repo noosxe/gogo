@@ -12,7 +12,7 @@ pkgs.buildEnv {
     pkgs.sway-unwrapped    # headless compositor, swaymsg; the wrapper wants a D-Bus config in /etc
     pkgs.xwayland
     pkgs.grim              # screenshots
-    pkgs.wtype             # keyboard input
+    pkgs.libxkbcommon      # xkbcli: the virtual keyboard's pc105/us keymap
     pkgs.xwininfo          # proves the display is the headless one
     pkgs.xterm             # the self-test's client
     pkgs.pulseaudio        # the sandbox's null sink: pulseaudio, pactl, pacat

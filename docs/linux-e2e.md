@@ -284,10 +284,17 @@ min_fill = false                 # this frame needn't fill the window
 [[step]]
 expect_change = { from = "menu", to = "preferences", min = 20 }  # % of pixels
 [[step]]
-key = "Escape"                   # wtype -P, 50 ms, -p: one named key, held
+key = "Escape"                   # one key, held 50 ms: an XKB keysym name, as below
 [[step]]
-type = "hello"                   # wtype: text
+type = "Hello!"                  # text, a key at a time, Shift where the us layout needs it
 ```
+
+`key` and `type` go through one virtual keyboard with a standard `pc105`/`us` keymap and
+real evdev keycodes, so a game sees what a USB keyboard would send. `key` takes the level-1
+(unshifted) keysym names of that layout: `Escape`, `Return`, `space`, `Tab`, `BackSpace`,
+`a`-`z`, `0`-`9`, `F1`-`F12`, `Up`/`Down`/`Left`/`Right`, `Home`, `End`, `Prior`/`Next` (Page
+Up/Down), `Insert`, `Delete`, `Shift_L`, `Control_L`, `Alt_L` and the like (`KEYS` in the
+helper). `type` takes printable ASCII, `\n` and `\t`. The manifest check refuses anything else.
 
 Prefer `wait_settled` to a long `wait` before the first click: the same intro takes a
 different time on another renderer, and a click meant for the menu lands on the video. Its
@@ -361,8 +368,17 @@ These stay in the owner's host pass (#179, design 18 §11.2), and agents put the
   delta, so Xwayland reports it as absolute raw motion, and Wine passes the 0-65535 value on,
   scaled, as a delta (+21611 in TDR 2000's DirectInput, which threw its cursor into a corner).
   The clicks were landing all along, just not where they aimed. A real mouse never does this.
-- **Each `wtype` is a new keyboard,** and a key sent at once is lost while Xwayland loads
-  its keymap, so `key` and `type` start with a 500 ms pause. A `key` is held 50 ms (`wtype -P`, `-s 50`, `-p`), not sent as an instant `-k`: a game that polls its input misses that.
+- **The keyboard is one virtual keyboard for the whole run,** like the pointer, with a
+  `pc105`/`us` keymap from the flake's `xkbcli compile-keymap` and real evdev keycodes
+  (`zwp_virtual_keyboard_v1`). Before the first step the driver checks its keycode table
+  against that keymap, and a mismatch fails the run. It replaced `wtype` (#236), which made
+  a new keyboard per call, with a keymap of its own holding just that call's keysyms from
+  keycode 1 up. So every key came on keycode 1, X keycode 9: Escape's place on a real
+  keyboard. Xwayland's keysyms were right, which was enough for xterm, but a game that
+  reads scan codes through Wine got Escape for every key: TDR 2000's "Return" on its menu
+  was an Escape, and Cyberpunk 2077's title screen never saw a space. A key is held 50 ms,
+  since a game that polls its input misses an instant press and release. wlroots doesn't
+  work out modifiers from a virtual keyboard's keys, so `type` sends Shift's state itself.
 - **NVIDIA needs its EGL vendor named** (`__EGL_VENDOR_LIBRARY_FILENAMES`), or wlroots gets
   Mesa's EGL on NVIDIA's GBM: `gbm device using incorrect/incompatible backend`.
 - **`XDG_RUNTIME_DIR` isn't under `target/`:** a socket path has a limit of 108 bytes.
