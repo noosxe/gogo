@@ -35,12 +35,14 @@ tested   = [{ runtime = "winecx/24.0.7_7+dxmt-v0.80", host = "m4pro/macos-27.0.1
 [platforms.linux]
 renderer = "wined3d"                  # wined3d | cnc-ddraw[/ver]; dxmt / d3dmetal are an error here
 protonfixes = false                   # Linux only: PROTONFIXES_DISABLE=1, umu-protonfixes off (#171)
+extra_args = ["-skipStartScreen"]     # Linux only: after the game's own args (`args` replaces those; #234)
+env      = { PROTON_ENABLE_NVAPI = "1" }  # `gogo linux-app env set` writes [platforms.linux.env]
 ```
 
 | Where | Keys |
 |---|---|
 | top level | `title`, `exe`, `args`, `variant`, `replace_command`, `verbs`, `dll_overrides`, `registry`, `source` |
-| `[platforms.<os>]` | `renderer`, `runtime`, `env`, `status`, `notes`, `tested`, `lane`, `lanes`, `protonfixes` (Linux only), and any top-level key, to override or extend it on that OS |
+| `[platforms.<os>]` | `renderer`, `runtime`, `env`, `status`, `notes`, `tested`, `lane`, `lanes`, `protonfixes` and `extra_args` (Linux only), and any top-level key, to override or extend it on that OS |
 
 gogo reads the top level, then its own OS's table over it, by the same rules
 as across layers (below): maps per key, `verbs` add (`-<verb>` removes one,

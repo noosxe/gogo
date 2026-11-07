@@ -363,6 +363,11 @@ min_fill = { w = 80, h = 95 }    # % of the window; default 90 x 90
 [env]                            # only for the game's launch: logging, for example
 DXVK_LOG_LEVEL = "info"
 
+[override]                       # games only: into the game's override file, through gogo
+extra_args = ["-skipStartScreen"] #   (`linux-app args <gogid> -- …`), before the launch
+[override.env]                   #   (`linux-app env set <gogid> K=V…`)
+PROTON_ENABLE_NVAPI = "1"
+
 [exit]
 how = "self"                     # "self": it exits by itself after the steps, code 0
                                  # "signal" (default): the launcher gets TERM, code 143
@@ -394,6 +399,13 @@ key = "Escape"                   # one key, held 50 ms: an XKB keysym name, as b
 type = "Hello!"                  # text, a key at a time, Shift where the us layout needs it
 ```
 
+`[env]` is the environment `launch.sh` starts with, so `launch.conf`'s own `ENV` beats it.
+`[override]` is what a player sets (#234): the harness runs `gogo linux-app env set` and
+`gogo linux-app args` with the run's scratch `GOGO_HOME` right before the launch (check
+`override`), so `launch.sh` sees a stale stamp and runs setup in the sandbox, and the
+game gets them through `launch.conf`. The installed base a `--reuse-install` run copies is
+never touched. Live sessions (#241) can set a run's env and args the same way.
+
 `key` and `type` go through one virtual keyboard with a standard `pc105`/`us` keymap and
 real evdev keycodes, so a game sees what a USB keyboard would send. `key` takes the level-1
 (unshifted) keysym names of that layout: `Escape`, `Return`, `space`, `Tab`, `BackSpace`,
@@ -420,6 +432,7 @@ say "a picture fills the window and it changed", not "it's the right picture".
 
 | Check | Fails when | Would have caught |
 |---|---|---|
+| `override` | with `[override]`: a `gogo linux-app env set` / `args` call failed (the game isn't launched) | a refused key, a gogo without #234 |
 | `window` | no window in `wait_secs`, or the game exited first | DDrawCompat's exit 9 in #199 |
 | `settled` | `wait_settled` timed out | a game stuck in a video |
 | `not_black_<shot>` | under 1% of the window's pixels are above level 16 | a black screen |

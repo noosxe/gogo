@@ -370,6 +370,27 @@ gogo linux-app --retarget 1207659013 --renderer auto                # drop the o
 gogo linux-app next-renderer 1207659013 --dry-run                   # what "Try next renderer" would pick
 ```
 
+**Env vars and launch args** of your own go into the same override file, and the
+next launch applies them (no rebuild). `env list` shows every variable the game
+gets, where each comes from (gogo's default, the renderer, gogo's compat DB, your
+override, the launcher, the protonfix) and what it beats. Your args go after the
+game's own; `-- <args…>` replaces the ones you set before.
+
+```sh
+gogo linux-app env list 1423049311                         # --json; --reveal shows values of *TOKEN*/*SECRET*/… names
+gogo linux-app env set 1423049311 PROTON_ENABLE_NVAPI=1 DXVK_HUD=fps
+gogo linux-app env unset 1423049311 DXVK_HUD
+gogo linux-app args 1423049311 -- --launcher-skip -skipStartScreen
+gogo linux-app args 1423049311                             # what the exe gets, and from where
+gogo linux-app args 1423049311 --clear
+```
+
+`env set` refuses what the launcher sets itself (`WINEPREFIX`, `GAMEID`, `STORE`,
+`PROTONPATH`), `WINEDLLOVERRIDES` (use `[platforms.linux.dll_overrides]`) and
+`PROTONFIXES_DISABLE` (use `protonfixes = false`), and warns when yours beats a
+renderer switch or gogo's `PROTON_SET_GAME_DRIVE=0`. A protonfix that sets the
+same variable still wins at launch: `env list` and `doctor` say so.
+
 **When a game won't start**, `gogo linux-app doctor <gogid>` checks what it
 needs, one `ok` / `warn` / `fail` line each with a fix: the launcher and menu
 entry, umu and its Python (on NixOS, that it's the `gogo-linux-app` FHS env and

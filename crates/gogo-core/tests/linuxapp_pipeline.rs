@@ -2572,6 +2572,22 @@ fn env_and_args_from_the_override_reach_the_game_with_their_quoting() {
         f.detail
     );
 
+    // No secret in any of doctor's lines (the fix summary included), nor in
+    // `compat`'s.
+    for f in &r.findings {
+        assert!(!f.message.contains("s3cret"), "{f:?}");
+        assert!(f.detail.iter().all(|d| !d.contains("s3cret")), "{f:?}");
+    }
+    let c = gogo::linuxapp::manage::compat(ID).unwrap();
+    assert!(!c.fixes.unwrap_or_default().contains("s3cret"));
+    let lines = c.effective.display_lines();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l == "env.GAME_TOKEN = <hidden>  (L4 user override)"),
+        "{lines:?}"
+    );
+
     // Unset and clear: pending until the next setup; then gone.
     envargs::unset_env(ID, &["DXVK_HUD".into()]).unwrap();
     let out = envargs::unset_env(ID, &["NOPE".into()]).unwrap();

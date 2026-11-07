@@ -131,6 +131,24 @@ Exit 7 on conversion failures. Names/flags: `--name`, `--runtime`,
 (registry tweaks, extra installer flags, entry-point override) come from
 community recipes — design 11.
 
+### `gogo linux-app <GAME|installer-path>`
+
+The Linux sibling of `mac-app` (Linux only): a Windows game set up to run through GE-Proton
+and umu, as `games/<gogid>/` plus a menu entry. Full spec: **design 18** §10. Per-game
+subcommands take a GOGID: `setup`, `compat`, `doctor`, `next-renderer`, and (#234, design 18
+§7.6):
+
+- `env list <gogid> [--reveal] [--json]`: every env var the game gets at its next launch,
+  with its source and what it beats; values of secret-looking names hidden.
+- `env set <gogid> KEY=VALUE…` / `env unset <gogid> KEY…`: the user's own, in the game's
+  override file. A key gogo owns is refused with exit 2 and nothing written.
+- `args <gogid> [-- <args…> | --clear] [--json]`: show, set (after the game's own args) or
+  clear the user's launch args.
+
+Verb-first `env list|set|unset`, as `config get|set` and `runtimes list|install`. Edits
+print `key old -> new` lines on stdout and warnings on stderr, and apply at the next launch
+(it runs setup on the changed override); nothing is rebuilt.
+
 ### `gogo runtimes <list|install|prune>`
 Manage the Wine runtime store (design 12 §4): `list` (cached + catalog, `--json`),
 `install <id> [--version]` (download → probe → cache), `prune [--all | <id>]`.
