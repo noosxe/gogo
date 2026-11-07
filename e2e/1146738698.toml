@@ -6,11 +6,15 @@
 # it writes to a waveOut handle that never completes (#203). The sandbox's null sink is what
 # gets it past that.
 #
-# On the menu, Return registers now that a key is held 50 ms (3 of 3 runs): the menu's focus
-# is on Quit, so it opens the "Quit TDR 2000?" confirm dialog, which the steps stop at. Clicks
-# still don't register there, though the button is held 100 ms: the hold isn't the cause
-# (a click on "No" changed 0.1% of the picture, 2 of 2 runs). The host pass judges the
-# menu's mouse input.
+# On the menu, Return works since a key is held 50 ms: the menu's focus is on Quit, so it
+# opens the "Quit TDR 2000?" confirm dialog.
+#
+# The menu reads the mouse through exclusive, relative DirectInput and draws its own cursor,
+# and while Wine holds that grab the compositor's pointer stays put. So `click` can't aim here,
+# wherever it says: a manifest steers like a hand does. A big `move_by` pins the cursor in the
+# picture's top-left corner, where it clamps, then a second one goes to the target. One unit
+# of `move_by` is about 0.637 pixels of a 1280x800 output, and the 640x480 picture starts at
+# x = 108.
 title = "Carmageddon TDR 2000"
 gogid = 1146738698
 
@@ -103,3 +107,33 @@ min_fill = false
 
 [[step]]
 expect_change = { from = "menu", to = "after-return", min = 5 }
+
+# No, 557 x 436 pixels from the corner.
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = 874, y = 684 }
+
+[[step]]
+wait = 2
+
+[[step]]
+screenshot = "on-no"
+min_fill = false
+
+[[step]]
+click_here = true
+
+[[step]]
+wait = 5
+
+[[step]]
+screenshot = "after-no"
+min_fill = false
+
+[[step]]
+expect_change = { from = "on-no", to = "after-no", min = 5 }

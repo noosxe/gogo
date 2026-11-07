@@ -95,8 +95,8 @@ def _step(raw, i, shots):
     actions = [k for k in raw if k != "min_fill"]
     if len(actions) != 1:
         raise ManifestError(
-            f"{what}: needs exactly one of click, key, type, wait, wait_settled, "
-            f"screenshot, expect_change; got {sorted(actions)}"
+            f"{what}: needs exactly one of click, click_here, move_by, key, type, wait, "
+            f"wait_settled, screenshot, expect_change; got {sorted(actions)}"
         )
     action = actions[0]
     value = raw[action]
@@ -110,6 +110,20 @@ def _step(raw, i, shots):
             "click": {
                 "x": _percent(value["x"], f"{what}: click.x"),
                 "y": _percent(value["y"], f"{what}: click.y"),
+            }
+        }
+    if action == "click_here":
+        if value is not True:
+            raise ManifestError(f"{what}: click_here must be true")
+        return {"click_here": True}
+    if action == "move_by":
+        _only(value, ("x", "y"), f"{what}: move_by")
+        if "x" not in value or "y" not in value:
+            raise ManifestError(f"{what}: move_by needs x and y")
+        return {
+            "move_by": {
+                "x": _number(value["x"], f"{what}: move_by.x"),
+                "y": _number(value["y"], f"{what}: move_by.y"),
             }
         }
     if action in ("key", "type"):
@@ -567,6 +581,29 @@ def virtual_pointer(socket_path):
     return conn
 
 
+def _wl_fixed(value):
+    """A wl_fixed_t's bits: signed 24.8."""
+    return struct.pack("<i", round(value * 256))
+
+
+def pointer_move_to(x, y, width, height, msec):
+    """zwlr_virtual_pointer_v1 (object 5).motion_absolute, then frame: where the
+    pointer goes as a fraction of the output.
+
+    Sway turns it into a motion with a delta, so a client that reads relative
+    motion sees a mouse move. `seat cursor set` is a warp: it has no delta, and
+    Xwayland reports it as absolute raw motion.
+    """
+    body = struct.pack("<IIIII", msec & 0xFFFFFFFF, x, y, width, height)
+    return _wl_message(5, 1, body) + _wl_message(5, 4)
+
+
+def pointer_move_by(dx, dy, msec):
+    """zwlr_virtual_pointer_v1 (object 5).motion, then frame: a delta in device units."""
+    body = struct.pack("<I", msec & 0xFFFFFFFF) + _wl_fixed(dx) + _wl_fixed(dy)
+    return _wl_message(5, 0, body) + _wl_message(5, 4)
+
+
 # --- drive: inside the sandbox ------------------------------------------------
 
 
@@ -992,6 +1029,11 @@ class Driver:
             self.tool(*_wtype(step["type"])).check_returncode()
         elif action == "click":
             self.do_click(step["click"], record)
+        elif action == "click_here":
+            self.press_button()
+        elif action == "move_by":
+            at = step["move_by"]
+            self.pointer.sendall(pointer_move_by(at["x"], at["y"], _msec()))
         elif action == "screenshot":
             self.do_screenshot(step, record)
         elif action == "expect_change":
@@ -1006,8 +1048,12 @@ class Driver:
             return
         x, y = click_point(view["rect"], at["x"], at["y"])
         record["at"] = [x, y]
-        self.swaymsg("seat", "seat0", "cursor", "set", str(x), str(y))
+        window = self.manifest["window"]
+        self.pointer.sendall(pointer_move_to(x, y, window["width"], window["height"], _msec()))
         time.sleep(0.2)
+        self.press_button()
+
+    def press_button(self):
         self.swaymsg("seat", "seat0", "cursor", "press", "button1")
         time.sleep(0.1)
         self.swaymsg("seat", "seat0", "cursor", "release", "button1")
@@ -1306,6 +1352,10 @@ class Driver:
 # input misses an instant press+release (`wtype -k`). (`click` already holds the button
 # 100 ms between its swaymsg press and release.)
 KEY_HOLD_MS = 50
+
+
+def _msec():
+    return int(time.monotonic() * 1000)
 
 
 def _wtype_key(key):
