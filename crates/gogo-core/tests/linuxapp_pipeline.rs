@@ -1078,9 +1078,17 @@ const FAKE_GAME_UMU: &str = r#"#!/bin/sh
 echo "fake-game stdout line"
 echo "err: fake-game stderr line" >&2
 if [ -n "${FAKE_GAME_HANG:-}" ]; then
+  : > "$FAKE_UMU_LOG.pids"
   setsid sh -c 'trap "" TERM; exec sleep 300' </dev/null >/dev/null 2>&1 &
+  echo $! >> "$FAKE_UMU_LOG.pids"
   WINEPREFIX="$WINEPREFIX/pfx/" setsid sh -c 'trap "" TERM; exec sleep 300' </dev/null >/dev/null 2>&1 &
+  echo $! >> "$FAKE_UMU_LOG.pids"
   STEAM_COMPAT_DATA_PATH="$WINEPREFIX" setsid env -u WINEPREFIX sh -c 'trap "" TERM; exec sleep 300' </dev/null >/dev/null 2>&1 &
+  echo $! >> "$FAKE_UMU_LOG.pids"
+  echo $$ >> "$FAKE_UMU_LOG.pids"
+  # Wine's server: the process the launcher's close request looks for.
+  setsid "$FAKE_WS_DIR/wineserver" -c 'trap "" TERM; while :; do sleep 1; done' </dev/null >/dev/null 2>&1 &
+  echo $! >> "$FAKE_UMU_LOG.pids"
   exec sleep 300
 fi
 sleep "${FAKE_GAME_SLEEP:-0}"
@@ -1116,6 +1124,7 @@ esac
 /// What `launch.sh` and the fakes run, linked from the test's PATH.
 const LAUNCHER_TOOLS: &[&str] = &[
     "bash",
+    "timeout",
     "sh",
     "cat",
     "date",
@@ -1210,6 +1219,30 @@ impl World {
         let umu = w.root.join("bin/umu-run");
         std::fs::write(&umu, FAKE_GAME_UMU).unwrap();
         chmod_x(&umu);
+        // The close request's pieces: `nsenter` that just runs the command
+        // (no namespaces here), and a "wineserver" with a `wine` beside it.
+        let nsenter = w.root.join("bin/nsenter");
+        std::fs::write(
+            &nsenter,
+            "#!/bin/sh\nwhile [ \"$1\" != -- ]; do shift; done\nshift\nexec \"$@\"\n",
+        )
+        .unwrap();
+        chmod_x(&nsenter);
+        let ws = w.root.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let bash = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .map(|d| d.join("bash"))
+            .find(|p| p.is_file())
+            .unwrap();
+        std::fs::copy(bash, ws.join("wineserver")).unwrap();
+        std::fs::write(
+            ws.join("wine"),
+            "#!/bin/sh\n\
+             printf 'CLOSE:%s\\n' \"$*\" >> \"$FAKE_UMU_LOG\"\n\
+             if [ -n \"${FAKE_CLOSE_WORKS:-}\" ]; then kill -KILL $(cat \"$FAKE_UMU_LOG.pids\") 2>/dev/null; fi\n",
+        )
+        .unwrap();
+        chmod_x(&ws.join("wine"));
         w
     }
 
@@ -1285,6 +1318,7 @@ impl World {
                 ),
             )
             .env("FAKE_UMU_LOG", &self.umu_log)
+            .env("FAKE_WS_DIR", self.root.join("ws"))
             .env("FAKE_CALLS", self.root.join("gogo-calls.log"));
         if !env.iter().any(|(k, _)| *k == "GOGO_LAUNCHER_DIALOG") {
             c.env("GOGO_LAUNCHER_NO_DIALOG", "1");
@@ -1399,7 +1433,7 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
     // next setup, which says so; an unchanged one isn't touched.
     std::fs::write(
         &sh,
-        script.replace("LAUNCHER_VERSION=3", "LAUNCHER_VERSION=0"),
+        script.replace("LAUNCHER_VERSION=4", "LAUNCHER_VERSION=0"),
     )
     .unwrap();
     std::fs::write(&desktop, "[Desktop Entry]\nExec=/old/root/launch.sh\n").unwrap();
@@ -1407,7 +1441,7 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
     assert_eq!(std::fs::read_to_string(&sh).unwrap(), script);
     assert_eq!(std::fs::read_to_string(&desktop).unwrap(), entry);
     assert!(
-        out.notes.iter().any(|n| n == "launch.sh: launcher 0 -> 3"),
+        out.notes.iter().any(|n| n == "launch.sh: launcher 0 -> 4"),
         "{:?}",
         out.notes
     );
@@ -1472,7 +1506,7 @@ fn the_launcher_runs_umu_with_the_games_environment_and_logs_the_run() {
     let run = &runs[0];
     for want in [
         format!("# gogo run log: Test Game ({ID})\n"),
-        "# launcher: 3\n".into(),
+        "# launcher: 4\n".into(),
         format!(
             "# runtime: path:{} (1793687165 GE-Proton10-34)\n",
             w.build.display()
@@ -1827,22 +1861,22 @@ fn prefix_procs(w: &World) -> Vec<u32> {
         .collect()
 }
 
-#[test]
-fn teardown_on_term_kills_every_process_with_the_prefix() {
-    let Some(w) = World::launcher("teardown", true) else {
-        return;
-    };
+/// Launch the hanging fake game, TERM the launcher, wait for it to exit
+/// (its code, the time it took).
+fn term_hanging_launcher(w: &World, env: &[(&str, &str)]) -> (Option<i32>, u64) {
+    let mut env = env.to_vec();
+    env.push(("FAKE_GAME_HANG", "1"));
     let mut child = w
-        .launch_cmd(&[("FAKE_GAME_HANG", "1")], &[])
+        .launch_cmd(&env, &[])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
     // The game and its TERM-proof children of other sessions.
     assert!(
-        wait_until(10, || prefix_procs(&w).len() >= 4),
+        wait_until(10, || prefix_procs(w).len() >= 4),
         "{:?}",
-        prefix_procs(&w)
+        prefix_procs(w)
     );
     let status = std::process::Command::new("kill")
         .args(["-TERM", &child.id().to_string()])
@@ -1857,12 +1891,44 @@ fn teardown_on_term_kills_every_process_with_the_prefix() {
         assert!(start.elapsed().as_secs() < 15, "the launcher didn't exit");
         std::thread::sleep(std::time::Duration::from_millis(100));
     };
+    (code, start.elapsed().as_secs())
+}
+
+#[test]
+fn teardown_on_term_kills_every_process_with_the_prefix() {
+    let Some(w) = World::launcher("teardown", true) else {
+        return;
+    };
+    // A game that ignores the close request: after the grace, TERM then KILL.
+    let (code, _) = term_hanging_launcher(&w, &[("GOGO_CLOSE_GRACE_SECS", "2")]);
     assert_eq!(code, Some(143));
     assert!(prefix_procs(&w).is_empty(), "{:?}", prefix_procs(&w));
     let log = w.launch_log();
     assert!(log.contains("got SIGTERM"), "{log}");
+    assert!(log.contains("asked the game to close"), "{log}");
+    assert!(log.contains("didn't close in 2s: TERM"), "{log}");
     assert!(log.contains("reaped (SIGKILL): "), "{log}");
     assert!(log.contains("sleep;"), "{log}");
+    let run = w.runs().pop().unwrap();
+    assert!(run.contains("# exit: 143 (SIGTERM)\n"), "{run}");
+    // The request ran Wine's wineboot, in the wineserver's namespaces.
+    let umu = std::fs::read_to_string(&w.umu_log).unwrap();
+    assert!(umu.contains("CLOSE:wineboot --end-session\n"), "{umu}");
+}
+
+#[test]
+fn a_game_that_closes_on_the_request_is_not_torn_down() {
+    let Some(w) = World::launcher("close", true) else {
+        return;
+    };
+    let (code, _) = term_hanging_launcher(&w, &[("FAKE_CLOSE_WORKS", "1")]);
+    assert_eq!(code, Some(143));
+    assert!(prefix_procs(&w).is_empty(), "{:?}", prefix_procs(&w));
+    let log = w.launch_log();
+    assert!(log.contains("asked the game to close"), "{log}");
+    assert!(log.contains("closed by itself after "), "{log}");
+    assert!(!log.contains("didn't close"), "{log}");
+    assert!(!log.contains("reaped (SIGKILL)"), "{log}");
     let run = w.runs().pop().unwrap();
     assert!(run.contains("# exit: 143 (SIGTERM)\n"), "{run}");
 }
