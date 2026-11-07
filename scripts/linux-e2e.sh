@@ -156,7 +156,7 @@ start_sandbox() { # mode logfile command…
         env -i "${SE[@]}" "$TOOLS/bin/unshare" --user --map-root-user --net "$TOOLS/bin/bash" -c '
             for _ in $(seq 100); do [ "$(wc -l </proc/net/dev)" -gt 3 ] && break; sleep 0.1; done
             "$1" link set lo up; shift
-            exec "$@"' _ "$TOOLS/bin/ip" "$TOOLS/bin/bwrap" "${SB[@]}" "$@" >"$logf" 2>&1 8>&- 9>&- </dev/null &
+            exec "$@"' _ "$TOOLS/bin/ip" "$TOOLS/bin/bwrap" "${SB[@]}" "$@" >"$logf" 2>&1 9>&- </dev/null &
         SANDBOX_PID=$!
         # Not before the holder has left ours.
         for _ in $(seq 100); do
@@ -166,10 +166,10 @@ start_sandbox() { # mode logfile command…
         done
         "$TOOLS/bin/pasta" --config-net --foreground --quiet --dns-forward "$BUILD_DNS" \
             --userns "/proc/$SANDBOX_PID/ns/user" --netns "/proc/$SANDBOX_PID/ns/net" \
-            >>"$logf" 2>&1 8>&- 9>&- </dev/null &
+            >>"$logf" 2>&1 9>&- </dev/null &
         NET_PID=$!
     else
-        env -i "${SE[@]}" "$TOOLS/bin/bwrap" "${SB[@]}" "$@" >"$logf" 2>&1 8>&- 9>&- </dev/null &
+        env -i "${SE[@]}" "$TOOLS/bin/bwrap" "${SB[@]}" "$@" >"$logf" 2>&1 9>&- </dev/null &
         SANDBOX_PID=$!
     fi
 }
@@ -241,7 +241,7 @@ teardown() {
     trap - EXIT INT TERM HUP
     [ -z "${TORN_DOWN:-}" ] || exit "$status"
     TORN_DOWN=1
-    [ -n "${RUN:-}" ] || exit "$status"
+    [ -n "${RUN:-}" ] || { clear_holder; exit "$status"; }
     # An exit nobody planned (set -e, die): the run proved nothing.
     if [ "$status" != 0 ] && [ -z "${BUILD_FAILED:-}" ]; then
         INFRA_ERROR="${INFRA_ERROR:-the script stopped with exit $status; see stderr}"
@@ -281,6 +281,7 @@ teardown() {
     elif delete_scratch; then
         deleted=true
     fi
+    clear_holder
     write_summary "$status" "$killed" "$left" "$deleted"
     exit "$FINAL_EXIT"
 }
@@ -560,8 +561,8 @@ REUSE_FORMAT=1
 # shared cache (worktrees share one), so bases are shared too: the resolved
 # dir must be a target/linux-e2e/cache/installed, ours, and not a link itself.
 # GOGO_E2E_INSTALLED_DIR is the self-test's own, under $ROOT, so it never
-# prunes the real ones. Runs on a base have their scratch in its .runs/, and
-# take turns on its .lock (fd 8) across checkouts too.
+# prunes the real ones. Runs on a base have their scratch in its .runs/; they
+# take turns with every other run on the cache lock (below).
 installed_dir() {
     local d="${GOGO_E2E_INSTALLED_DIR:-$ROOT/cache/installed}" real
     if [ -n "${GOGO_E2E_INSTALLED_DIR:-}" ]; then
@@ -579,7 +580,67 @@ installed_dir() {
         case "$real" in */target/linux-e2e/cache/installed) ;; *) die "$d leads to $real" 3 ;; esac
     fi
     INSTALLED="$real"
-    exec 8>"$INSTALLED/.lock"
+}
+
+# The cache lock: one `run` or `cleanup` at a time over a cache, across every
+# checkout that shares it (worktrees link target/linux-e2e/cache to the main
+# checkout's). fd 9, in the resolved cache dir, never inherited by a sandbox.
+# It covers the whole run: the build writes the store, umu's runtime and the
+# depot cache, a reused base is copied and saved in here, and the game takes the
+# GPU. .lock.holder beside it says who has it; the flock is the truth.
+# GOGO_E2E_LOCK_DIR is the self-test's own dir, under $ROOT.
+CACHE_HOLDER=""
+cache_lock() { # run (waits) | cleanup (refuses when busy)
+    local d="${GOGO_E2E_LOCK_DIR:-$ROOT/cache}" real
+    if [ -n "${GOGO_E2E_LOCK_DIR:-}" ]; then
+        case "$d" in "$ROOT"/?*) ;; *) die "the lock dir must be under $ROOT: $d" 2 ;; esac
+    fi
+    # A link to a cache that isn't there yet (a fresh main checkout): make it.
+    mkdir -p "$(readlink -m "$d")"
+    real="$(readlink -f "$d")"
+    if [ ! -d "$real" ] || [ "$(stat -c %u "$real")" != "$(id -u)" ]; then die "not the harness's own dir: $d" 3; fi
+    if [ -n "${GOGO_E2E_LOCK_DIR:-}" ]; then
+        [ "$real" = "$d" ] || die "a link on the way to $d" 3
+    else
+        case "$real" in */target/linux-e2e/cache) ;; *) die "$d leads to $real" 3 ;; esac
+    fi
+    CACHE_HOLDER="$real/.lock.holder"
+    if [ -L "$real/.lock" ] || [ -L "$CACHE_HOLDER" ]; then die "$real/.lock is a link" 3; fi
+    exec 9>>"$real/.lock"
+    if ! flock -n 9; then
+        log "the cache $real is busy: $(holder_text)"
+        [ "$1" != cleanup ] || die "a run is going: not cleaning up under it"
+        log "waiting for it"
+        flock 9
+    fi
+    write_holder starting
+}
+
+# Who has the lock, from the holder file. Information only: a dead pid means
+# the file is stale (a SIGKILL), and the flock decides.
+holder_text() {
+    local repo="" run="" pid="" since="" k v
+    if [ -f "$CACHE_HOLDER" ] && [ ! -L "$CACHE_HOLDER" ]; then
+        while IFS='=' read -r k v; do
+            case "$k" in repo) repo="$v" ;; run) run="$v" ;; pid) pid="$v" ;; started) since="$v" ;; esac
+        done <"$CACHE_HOLDER"
+    fi
+    case "$pid" in '' | *[!0-9]*) printf 'held, but its holder left no note'; return 0 ;; esac
+    local gone=""
+    if ! kill -0 "$pid" 2>/dev/null; then gone=" (pid $pid is gone: the note may be stale)"; fi
+    printf 'held by %s, %s, pid %s since %s%s' "${repo:-?}" "${run:-?}" "$pid" "${since:-?}" "$gone"
+}
+
+write_holder() { # run-id
+    local tmp="$CACHE_HOLDER.$$"
+    printf 'repo=%s\nrun=%s\npid=%s\nstarted=%s\n' "$REPO" "$1" "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$tmp"
+    mv -f "$tmp" "$CACHE_HOLDER" || rm -f "$tmp"
+}
+
+# Ours to remove only, and with the lock still held, so nobody's note is lost.
+clear_holder() {
+    [ -n "${CACHE_HOLDER:-}" ] && [ -f "$CACHE_HOLDER" ] && [ ! -L "$CACHE_HOLDER" ] || return 0
+    if grep -qx "pid=$$" "$CACHE_HOLDER" 2>/dev/null; then rm -f "$CACHE_HOLDER"; fi
 }
 
 # Every input of a build, as JSON: its sha256 is the key. gogo's sources
@@ -816,25 +877,18 @@ cmd_run() {
     [ "$REUSE" = 0 ] || [ "$BUILD_CMD" != null ] || die "--reuse-install: this manifest builds nothing" 2
     [ "$REUSE" = 0 ] || installed_dir
 
-    # One run at a time: they share the cache and the GPU. fd 9 stays out of
-    # the sandbox.
+    # One run at a time over a cache, whichever checkout: they share the cache
+    # and the GPU.
     mkdir -p "$ROOT/runs"
-    exec 9>"$ROOT/lock"
-    if ! flock -n 9; then
-        log "another run is going: waiting"
-        flock 9
-    fi
+    cache_lock run
     remove_dead_runs
-    if [ "$REUSE" = 1 ] && ! flock -n 8; then
-        log "another run on an installed base is going (another checkout?): waiting"
-        flock 8
-    fi
 
     local stamp slug
     stamp="$(date -u +%Y%m%dT%H%M%SZ)"
     slug="$target-$stamp-$$"
     SLUG="$slug"
     RUN_ID="linux-e2e-$slug"
+    write_holder "$RUN_ID"
     RUN="$ROOT/runs/$slug"
     if [ "$REUSE" = 1 ]; then
         # The path the base was built at, the same for every run of it (above).
@@ -967,8 +1021,8 @@ cmd_run() {
     exit 0
 }
 
-# The same, for runs on installed bases. Only with fd 8 held: then no run of
-# any checkout is using one.
+# The same, for runs on installed bases. Only with the cache lock held: then no
+# run of any checkout is using one.
 remove_dead_reuse_runs() {
     local d
     for d in "$INSTALLED"/.runs/*/; do
@@ -1004,17 +1058,12 @@ cmd_cleanup() {
     resolve_tools
     use_tools
     mkdir -p "$ROOT/runs"
-    exec 9>"$ROOT/lock"
-    flock -n 9 || die "a run is going"
+    # Whoever holds the cache, in this checkout or another, has scratch and
+    # saves in it: no sweeping or pruning meanwhile, and no waiting either.
+    cache_lock cleanup
+    trap clear_holder EXIT
     remove_dead_runs
     installed_dir
-    if ! flock -n 8; then
-        # Another checkout's: its scratch and its save are in here.
-        [ "${#prune[@]}" = 0 ] || die "a run on an installed base is going: not pruning"
-        log "a run on an installed base is going: only listing them"
-        list_installed
-        return 0
-    fi
     remove_dead_reuse_runs
     # A save no run finished: with the lock held, nobody is writing one.
     for d in "$INSTALLED"/.partial-* "$INSTALLED"/.probe-*; do
@@ -1178,7 +1227,7 @@ st_reuse() { # self-test dir
     if [ -e "$one" ] || [ ! -e "$two" ]; then st_fail "cleanup --prune-installed ${one##*/}: wrong base gone"; fi
     "$SELF" cleanup --prune-installed all >/dev/null 2>&1 || st_fail "cleanup --prune-installed all failed"
     local left
-    left="$(find "$GOGO_E2E_INSTALLED_DIR" -mindepth 1 -maxdepth 1 ! -name .lock ! -name .runs
+    left="$(find "$GOGO_E2E_INSTALLED_DIR" -mindepth 1 -maxdepth 1 ! -name .runs
         find "$GOGO_E2E_INSTALLED_DIR/.runs" -mindepth 1 -maxdepth 1)"
     [ -z "$left" ] || st_fail "cleanup --prune-installed all left: $left"
     unset GOGO_E2E_INSTALLED_DIR
@@ -1194,6 +1243,8 @@ cmd_self_test() {
     chmod -R u+rwX "$base" 2>/dev/null || true
     rm -rf "$base"
     mkdir -p "$base"
+    # Its own cache lock: neither waiting for a real run nor holding one up.
+    export GOGO_E2E_LOCK_DIR="$base/cache-lock"
 
     # 1. The whole path with a plain X11 client: window, click, key, exit.
     out="$base/pass"; mkdir -p "$out"
@@ -1258,6 +1309,39 @@ cmd_self_test() {
     [ -d "$killed_run" ] || st_fail "kill: expected its scratch to stay for cleanup"
     "$SELF" cleanup 2>>"$out/stderr" || st_fail "kill: cleanup failed"
     [ ! -e "$killed_run" ] || st_fail "kill: cleanup left $killed_run"
+
+    # 4b. The cache lock, as another checkout would meet it: the second run
+    #     waits, says who has the lock, and goes once the first is gone; a
+    #     cleanup refuses meanwhile. A holder note left by a SIGKILL is stale
+    #     information, not a lock.
+    log "self-test: the cache lock"
+    local lk="$base/cache-lock" held="$base/lock-held" waiter="$base/lock-waiter" w_pid
+    mkdir -p "$held" "$waiter"
+    st_start "$held" "$REPO/e2e/self-test-hold.toml"
+    w_pid="$ST_PID"
+    st_wait_window "$held" || st_fail "lock: no window"
+    if ! grep -q "^pid=$w_pid\$" "$lk/.lock.holder" 2>/dev/null || ! grep -q "^run=linux-e2e-self-test-" "$lk/.lock.holder"; then
+        st_fail "lock: no holder note: $(cat "$lk/.lock.holder" 2>&1)"
+    fi
+    st_start "$waiter" "$REPO/e2e/self-test.toml"
+    local i
+    for i in $(seq 60); do grep -q "waiting for it" "$waiter/stderr" 2>/dev/null && break; sleep 0.5; done
+    grep -q "held by $REPO, linux-e2e-self-test-.*pid $w_pid " "$waiter/stderr" ||
+        st_fail "lock: the waiter didn't name the holder: $(cat "$waiter/stderr")"
+    code=0
+    "$SELF" cleanup >/dev/null 2>"$base/lock-cleanup.stderr" || code=$?
+    { [ "$code" = 3 ] && grep -q "held by $REPO" "$base/lock-cleanup.stderr"; } ||
+        st_fail "lock: cleanup under a run: exit $code: $(cat "$base/lock-cleanup.stderr")"
+    [ ! -s "$waiter/stdout" ] || st_fail "lock: the waiter ran under the holder"
+    kill -TERM "$w_pid"
+    wait "$w_pid" 2>/dev/null || true
+    code=0
+    wait "$ST_PID" || code=$?
+    st_assert_clean lock-waiter "$waiter" "$code" 0
+    [ ! -s "$lk/.lock.holder" ] || st_fail "lock: a holder note left after every run is gone"
+    # A stale note (dead pid, nobody holding): the next run takes the lock.
+    printf 'repo=/gone\nrun=linux-e2e-x\npid=2147483646\nstarted=2000-01-01T00:00:00Z\n' >"$lk/.lock.holder"
+    "$SELF" cleanup >/dev/null 2>&1 || st_fail "lock: cleanup refused on a stale note"
 
     # 5. --gpu's usage errors, before anything needs a GPU.
     log "self-test: --gpu's usage"
