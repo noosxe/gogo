@@ -1087,7 +1087,11 @@ if [ -n "${FAKE_GAME_HANG:-}" ]; then
   echo $! >> "$FAKE_UMU_LOG.pids"
   echo $$ >> "$FAKE_UMU_LOG.pids"
   # Wine's server: the process the launcher's close request looks for.
-  setsid "$FAKE_WS_DIR/wineserver" -c 'trap "" TERM; while :; do sleep 1; done' </dev/null >/dev/null 2>&1 &
+  # It must wait without forking: a child (an inherited WINEPREFIX) born
+  # between the launcher's listing and its KILL would outlive the sweep.
+  # `read -t` on a held-open FIFO is a builtin, so no child is ever made.
+  mkfifo "$FAKE_UMU_LOG.fifo"
+  setsid "$FAKE_WS_DIR/wineserver" -c 'trap "" TERM; exec 3<>"$1"; while :; do read -t 300 -u 3; done' wineserver "$FAKE_UMU_LOG.fifo" </dev/null >/dev/null 2>&1 &
   echo $! >> "$FAKE_UMU_LOG.pids"
   exec sleep 300
 fi
