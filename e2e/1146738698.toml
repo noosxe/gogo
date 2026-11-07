@@ -6,8 +6,9 @@
 # it writes to a waveOut handle that never completes (#203). The sandbox's null sink is what
 # gets it past that.
 #
-# On the menu, Return works since a key is held 50 ms: the menu's focus is on Quit, so it
-# opens the "Quit TDR 2000?" confirm dialog.
+# On the menu, Escape opens the "Quit TDR 2000?" confirm dialog. (Return picks the button
+# under the game's cursor, Load Game. Up to #236 the manifest said Return, but wtype sent
+# every key on the keycode that is Escape's on a real keyboard, so the game got Escape.)
 #
 # The menu reads the mouse through exclusive, relative DirectInput and draws its own cursor,
 # and while Wine holds that grab the compositor's pointer stays put. So `click` can't aim here,
@@ -57,33 +58,33 @@ click = { x = 50, y = 90.9 }
 [[step]]
 wait = 15
 
-# Return skips a video. The narrative and intro videos then play out.
+# Escape skips a video. The narrative and intro videos then play out.
 [[step]]
-key = "Return"
+key = "Escape"
 
 [[step]]
 wait = 5
 
 [[step]]
-key = "Return"
+key = "Escape"
 
 [[step]]
 wait = 5
 
 [[step]]
-key = "Return"
+key = "Escape"
 
 [[step]]
 wait = 5
 
 [[step]]
-key = "Return"
+key = "Escape"
 
 [[step]]
 wait = 5
 
 [[step]]
-key = "Return"
+key = "Escape"
 
 [[step]]
 wait = 5
@@ -94,19 +95,19 @@ wait_settled = 300
 [[step]]
 screenshot = "menu"
 
-# Return on the menu: the held key opens the quit confirm dialog.
+# Escape on the menu: the quit confirm dialog.
 [[step]]
-key = "Return"
+key = "Escape"
 
 [[step]]
 wait = 5
 
 [[step]]
-screenshot = "after-return"
+screenshot = "after-escape"
 min_fill = false
 
 [[step]]
-expect_change = { from = "menu", to = "after-return", min = 5 }
+expect_change = { from = "menu", to = "after-escape", min = 5 }
 
 # No, 557 x 436 pixels from the corner.
 [[step]]

@@ -4,9 +4,9 @@
 #   scripts/linux-e2e.sh run 1423049311 --installer <setup_cyberpunk_2077_….exe> --gpu renderD129
 #
 # The intro video, then the animated title screen ("Press space to continue"),
-# about 2 min after the window on an RTX 4090. The title screen doesn't take
-# the harness's input (#236), so the run stops there. Animated: no
-# wait_settled.
+# about 2 min after the window on an RTX 4090. Space takes it to CD Projekt
+# Red's user agreement, where the run stops: past it is the main menu, but
+# accepting the agreement is the owner's call. Animated: no wait_settled.
 title = "Cyberpunk 2077"
 gogid = 1423049311
 
@@ -28,13 +28,14 @@ wait = 150
 screenshot = "title"
 
 [[step]]
-click = { x = 50, y = 50 }
-
-[[step]]
 key = "space"
 
 [[step]]
-wait = 30
+wait = 20
 
 [[step]]
-screenshot = "after-space"
+screenshot = "agreement"
+
+# Through the persistent virtual keyboard: wtype's keys never got here (#236).
+[[step]]
+expect_change = { from = "title", to = "agreement", min = 20 }

@@ -473,15 +473,105 @@ class BuildCommand(unittest.TestCase):
             helper.parse_manifest(f'gogid = 1\nbuild_command = ["y"]\n[[step]]\n{self.STEP}\n')
 
 
-class Wtype(unittest.TestCase):
-    def test_key_is_held(self):
+KEYMAP = """xkb_keymap {
+xkb_keycodes "evdev+aliases(qwerty)" {
+	minimum = 8;
+	<ESC>                = 9;
+	<AE01>               = 10;
+	<AC01>               = 38;
+	<FK01>               = 67;
+	alias <LatA>         = <AC01>;
+};
+xkb_symbols "pc+us+inet(evdev)" {
+	key <ESC>                {	[          Escape ] };
+	key <AE01>               {	[               1,          exclam ] };
+	key <AC01>               {	[               a,               A ] };
+	key <FK01>               {
+		type= "CTRL+ALT",
+		symbols[1]= [              F1,  XF86Switch_VT_1 ]
+	};
+};
+};
+"""
+
+
+class Keyboard(unittest.TestCase):
+    def test_keymap_levels(self):
         self.assertEqual(
-            helper._wtype_key("Return"),
-            ("wtype", "-s", "500", "-P", "Return", "-s", "50", "-p", "Return", "-s", "200"),
+            helper.keymap_levels(KEYMAP),
+            {1: ["Escape"], 2: ["1", "exclam"], 30: ["a", "A"], 59: ["F1", "XF86Switch_VT_1"]},
         )
 
-    def test_text_keeps_lead_in(self):
-        self.assertEqual(helper._wtype("hi"), ("wtype", "-s", "500", "hi", "-s", "200"))
+    def test_mismatches_name_the_key(self):
+        bad = dict(helper.keymap_mismatches(KEYMAP))
+        for ok in ("Escape", "1", "a", "F1", "exclam", "A"):
+            self.assertNotIn(ok, bad)
+        self.assertIn("space", bad)  # not in this keymap
+        wrong = KEYMAP.replace("<AC01>               = 38", "<AC01>               = 39")
+        self.assertIn("a", dict(helper.keymap_mismatches(wrong)))
+
+    def test_agrees_with_the_real_keymap(self):
+        """The flake's xkbcli: on PATH in a run (and via .#linux-e2e-tools)."""
+        import shutil
+        import subprocess
+
+        xkbcli = shutil.which("xkbcli")
+        if not xkbcli:
+            self.skipTest("no xkbcli on PATH")
+        out = subprocess.run(
+            [xkbcli, "compile-keymap", *helper.KEYMAP_ARGS],
+            capture_output=True, text=True, check=True,
+        ).stdout  # fmt: skip
+        self.assertEqual(helper.keymap_mismatches(out), [])
+
+    def test_evdev_codes(self):
+        k = helper.KEYS
+        self.assertEqual(
+            (k["Escape"], k["1"], k["0"], k["q"], k["Return"], k["a"], k["z"], k["space"]),
+            (1, 2, 11, 16, 28, 30, 44, 57),
+        )
+        self.assertEqual(
+            (k["F1"], k["F10"], k["F11"], k["Up"], k["Delete"]), (59, 68, 87, 103, 111)
+        )
+
+    def test_type_chars(self):
+        t = helper.TYPE_CHARS
+        self.assertEqual(t["q"], (16, False))
+        self.assertEqual(t["Q"], (16, True))
+        self.assertEqual(t[" "], (57, False))
+        self.assertEqual(t["!"], (2, True))
+        self.assertEqual(t["?"], (53, True))
+        self.assertEqual(t["\n"], (28, False))
+        printable = [chr(n) for n in range(0x20, 0x7F)]
+        self.assertEqual([c for c in printable if c not in t], [])
+
+    def test_manifest_checks_keys(self):
+        base = 'command = ["x"]\n[[step]]\n'
+        steps = helper.parse_manifest(base + 'key = "space"\n')["steps"]
+        self.assertEqual(steps, [{"key": "space"}])
+        for bad in ('key = "spacebar"', 'key = "A"', 'type = "caf\u00e9"'):
+            with self.subTest(bad), self.assertRaises(helper.ManifestError):
+                helper.parse_manifest(base + bad + "\n")
+
+    def test_key_messages(self):
+        self.assertEqual(
+            helper.keyboard_key(57, True, 2**32 + 7),
+            helper._wl_message(6, 1, struct.pack("<III", 7, 57, 1)),
+        )
+        self.assertEqual(
+            helper.keyboard_modifiers(1), helper._wl_message(6, 2, struct.pack("<IIII", 1, 0, 0, 0))
+        )
+
+    def test_wait_done(self):
+        import socket
+
+        a, b = socket.socketpair()
+        with a, b:
+            b.sendall(helper._wl_message(2, 0, b"x" * 4) + helper._wl_message(7, 0, b"\0" * 4))
+            self.assertTrue(helper._wl_wait_done(a, 7, "it"))
+            b.sendall(helper._wl_message(1, 0, struct.pack("<III", 6, 1, 0)))
+            with self.assertRaises(RuntimeError):
+                helper._wl_wait_done(a, 9, "it")
 
 
 class Wayland(unittest.TestCase):
