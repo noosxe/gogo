@@ -13,6 +13,10 @@ gogo-probe/
 /target/
 
 
+# --- Python bytecode (the e2e helper's tests and probes import it) ---
+__pycache__/
+*.pyc
+
 # --- Nix ---
 # `nix build` result symlinks.
 /result
