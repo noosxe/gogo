@@ -12,8 +12,12 @@
 #
 # run options:
 #   --manifest FILE   manifest (default e2e/<gogid>.toml)
-#   --gpu NODE        render on /dev/dri/renderD12x (default: software: pixman,
-#                     llvmpipe, lavapipe, and no GPU node in the sandbox)
+#   --gpu NODE[,NODE] the GPUs the sandbox has, as renderD12x or /dev/dri/renderD12x:
+#                     comma-joined or repeated, and sway renders on the first
+#                     (default: software: pixman, llvmpipe, lavapipe, and no GPU
+#                     node in the sandbox)
+#   --expect-gpu NODE with several GPUs, the one the game must render on
+#                     (default: any of them, and the summary says which)
 #   --secs N          seconds the game phase may take (default 600); over it the
 #                     run is stopped and fails
 #   --gogo PATH       this gogo (default: `nix build .#gogo-linux-app`)
@@ -384,72 +388,108 @@ software_setup() {
     [ -z "$icd" ] || SOFTWARE_ENV+=("VK_DRIVER_FILES=$icd")
 }
 
-gpu_setup() { # node or ""
-    local node="$1" driver="" icd
+# What one render node needs. Sets N_LABEL, N_EXPECT, N_HELD (the node a process
+# of that GPU holds), N_BINDS, N_COMPOSITOR_ENV, N_GAME_ENV and N_ICD.
+gpu_node() { # /dev/dri/renderD12x
+    local node="$1" driver="" d
+    case "$node" in /dev/dri/renderD[0-9]*) ;; *) die "--gpu wants render nodes, renderD12x: $node" 2 ;; esac
+    [ -c "$node" ] || die "--gpu: no such device: $node" 2
+    driver="$(basename "$(readlink -f "/sys/class/drm/$(basename "$node")/device/driver")")"
+    N_BINDS=("$node")
+    N_HELD="$node"
+    N_COMPOSITOR_ENV=(WLR_RENDERER=gles2 "WLR_RENDER_DRM_DEVICE=$node")
+    case "$driver" in
+    nvidia)
+        N_LABEL=nvidia
+        N_EXPECT='nvidia|geforce|quadro|rtx|gtx'
+        for d in /dev/nvidia0 /dev/nvidiactl /dev/nvidia-modeset /dev/nvidia-uvm /dev/nvidia-uvm-tools /dev/nvidia-caps; do
+            [ -e "$d" ] && N_BINDS+=("$d")
+        done
+        N_HELD=/dev/nvidia0
+        N_COMPOSITOR_ENV+=(GBM_BACKEND=nvidia-drm __GLX_VENDOR_LIBRARY_NAME=nvidia
+                           GBM_BACKENDS_PATH=/run/opengl-driver/lib/gbm
+                           __EGL_VENDOR_LIBRARY_FILENAMES=/run/opengl-driver/share/glvnd/egl_vendor.d/10_nvidia.json
+                           __EGL_EXTERNAL_PLATFORM_CONFIG_DIRS=/run/opengl-driver/share/egl/egl_external_platform.d)
+        N_GAME_ENV=(__GLX_VENDOR_LIBRARY_NAME=nvidia __NV_PRIME_RENDER_OFFLOAD=1)
+        N_ICD="$(icd_files 'nvidia_icd*.json')"
+        ;;
+    amdgpu | radeon)
+        N_LABEL=radv
+        N_EXPECT='amd|radv|radeon'
+        N_GAME_ENV=(__GLX_VENDOR_LIBRARY_NAME=mesa)
+        N_ICD="$(icd_files 'radeon_icd*.json')"
+        ;;
+    i915 | xe)
+        N_LABEL=intel
+        N_EXPECT='intel'
+        N_GAME_ENV=(__GLX_VENDOR_LIBRARY_NAME=mesa)
+        N_ICD="$(icd_files 'intel_icd*.json')"
+        ;;
+    *) die "--gpu: don't know the driver of $node: ${driver:-none}" 3 ;;
+    esac
+}
+
+gpu_setup() { # comma-joined render nodes, the compositor's first ("": software); --expect-gpu
+    local list="$1" want="$2" name node seen="," labels="" expects="" first=1 json
+    local -a nodes
     software_setup
     GPU_BINDS=()
     GPU_NODES=()
-    GAME_NODE=""
+    GPUS_JSON='[]'
+    GPU_WANT=""
     COMPOSITOR_ENV=(WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1)
     GAME_ENV=(GOGO_LAUNCHER_NO_DIALOG=1)
-    if [ -z "$node" ]; then
+    if [ -z "$list" ]; then
+        [ -z "$want" ] || die "--expect-gpu needs --gpu" 2
         GPU_LABEL=software
         GPU_EXPECT='llvmpipe|softpipe|lavapipe'
         COMPOSITOR_ENV=("${SOFTWARE_COMPOSITOR_ENV[@]}")
         GAME_ENV=("${SOFTWARE_ENV[@]}")
         return 0
     fi
-    case "$node" in /dev/dri/renderD[0-9]*) ;; *) die "--gpu wants a render node, /dev/dri/renderD12x: $node" 2 ;; esac
-    [ -c "$node" ] || die "--gpu: no such device: $node" 2
-    driver="$(basename "$(readlink -f "/sys/class/drm/$(basename "$node")/device/driver")")"
-    GPU_BINDS=("$node")
-    GPU_NODES=("$node")
-    GAME_NODE="$node"
-    COMPOSITOR_ENV+=(WLR_RENDERER=gles2 "WLR_RENDER_DRM_DEVICE=$node")
-    case "$driver" in
-    nvidia)
-        GPU_LABEL=nvidia
-        GPU_EXPECT='nvidia|geforce|quadro|rtx|gtx'
-        local d
-        for d in /dev/nvidia0 /dev/nvidiactl /dev/nvidia-modeset /dev/nvidia-uvm /dev/nvidia-uvm-tools /dev/nvidia-caps; do
-            [ -e "$d" ] || continue
-            GPU_BINDS+=("$d")
-            GPU_NODES+=("$d")
-        done
-        GAME_NODE=/dev/nvidia0
-        COMPOSITOR_ENV+=(GBM_BACKEND=nvidia-drm __GLX_VENDOR_LIBRARY_NAME=nvidia
-                         GBM_BACKENDS_PATH=/run/opengl-driver/lib/gbm
-                         __EGL_VENDOR_LIBRARY_FILENAMES=/run/opengl-driver/share/glvnd/egl_vendor.d/10_nvidia.json
-                         __EGL_EXTERNAL_PLATFORM_CONFIG_DIRS=/run/opengl-driver/share/egl/egl_external_platform.d)
-        GAME_ENV+=(__GLX_VENDOR_LIBRARY_NAME=nvidia __NV_PRIME_RENDER_OFFLOAD=1)
-        icd="$(icd_files 'nvidia_icd*.json')"
-        ;;
-    amdgpu | radeon)
-        GPU_LABEL=radv
-        GPU_EXPECT='amd|radv|radeon'
-        GAME_ENV+=(__GLX_VENDOR_LIBRARY_NAME=mesa)
-        icd="$(icd_files 'radeon_icd*.json')"
-        ;;
-    i915 | xe)
-        GPU_LABEL=intel
-        GPU_EXPECT='intel'
-        GAME_ENV+=(__GLX_VENDOR_LIBRARY_NAME=mesa)
-        icd="$(icd_files 'intel_icd*.json')"
-        ;;
-    *) die "--gpu: don't know the driver of $node: ${driver:-none}" 3 ;;
-    esac
-    [ -z "$icd" ] || GAME_ENV+=("VK_DRIVER_FILES=$icd")
+    [ -z "$want" ] || want="/dev/dri/${want#/dev/dri/}"
+    IFS=, read -ra nodes <<<"$list"
+    for name in "${nodes[@]}"; do
+        node="/dev/dri/${name#/dev/dri/}"
+        case "$seen" in *",$node,"*) die "--gpu: named twice: $node" 2 ;; esac
+        seen="$seen$node,"
+        gpu_node "$node"
+        GPU_BINDS+=("${N_BINDS[@]}")
+        GPU_NODES+=("${N_BINDS[@]}")
+        labels="${labels:+$labels+}$N_LABEL"
+        expects="${expects:+$expects|}$N_EXPECT"
+        json="$(jq -cn --arg node "$node" --arg label "$N_LABEL" --arg expect "$N_EXPECT" --arg held "$N_HELD" \
+            --argjson compositor "$first" '{node:$node, label:$label, expect:$expect, held:$held, compositor:($compositor == 1)}')"
+        GPUS_JSON="$(jq -c --argjson g "$json" '. + [$g]' <<<"$GPUS_JSON")"
+        if [ "$first" = 1 ]; then COMPOSITOR_ENV+=("${N_COMPOSITOR_ENV[@]}"); fi
+        first=0
+    done
+    case "$seen" in *",${want:-$node},"*) ;; *) die "--expect-gpu isn't one of --gpu: $want" 2 ;; esac
+    GPU_LABEL="$labels"
+    GPU_EXPECT="$expects"
+    GPU_WANT="$want"
+    if [ "${#nodes[@]}" = 1 ]; then
+        # The one GPU the game may find: nothing else to choose, however it looks.
+        GPU_WANT="$node"
+        GAME_ENV+=("${N_GAME_ENV[@]}")
+        [ -z "$N_ICD" ] || GAME_ENV+=("VK_DRIVER_FILES=$N_ICD")
+    else
+        # Several: what a desktop gives a game, so the choice is the game's own.
+        # The loader searches for every ICD and implicit layer, and nothing steers.
+        GAME_ENV+=("XDG_DATA_DIRS=/run/opengl-driver/share:/run/opengl-driver-32/share:/usr/local/share:/usr/share")
+    fi
 }
 
 # --- run ----------------------------------------------------------------------
 
 cmd_run() {
-    local target="" manifest="" gpu="" secs=600 out=""
+    local target="" manifest="" gpu="" expect_gpu="" secs=600 out=""
     GOGO="" KEEP=0 FRESH=0
     while [ $# -gt 0 ]; do
         case "$1" in
         --manifest) manifest="${2:?}"; shift 2 ;;
-        --gpu) gpu="${2:?}"; shift 2 ;;
+        --gpu) gpu="${gpu:+$gpu,}${2:?}"; shift 2 ;;
+        --expect-gpu) expect_gpu="${2:?}"; shift 2 ;;
         --secs) secs="${2:?}"; shift 2 ;;
         --gogo) GOGO="${2:?}"; shift 2 ;;
         --out) out="${2:?}"; shift 2 ;;
@@ -493,7 +533,7 @@ cmd_run() {
         fi
     fi
     use_tools
-    gpu_setup "$gpu"
+    gpu_setup "$gpu" "$expect_gpu"
 
     # One run at a time: they share the cache and the GPU. fd 9 stays out of
     # the sandbox.
@@ -551,17 +591,17 @@ cmd_run() {
         "\($r)/bus", "\($r)/wayland-1", "\($r)/pulse", "\($r)/pipewire-0",
         "/tmp/.X11-unix/X1"]')"
     # What both of the driver's phases read; `extra` is one phase's own keys.
-    drive_config() { # file extra-json label expect game-node [@n:node…] [@e:KEY=value…]
-        local file="$1" extra="$2" label="$3" expect="$4" node="$5"
-        shift 5
+    drive_config() { # file extra-json label expect want-node gpus-json [@n:node…] [@e:KEY=value…]
+        local file="$1" extra="$2" label="$3" expect="$4" want="$5" gpus="$6"
+        shift 6
         jq -n --argjson m "$MANIFEST_JSON" --arg run "$RUN" --arg results "$RESULTS" \
             --arg shots "$RESULTS/shots" --arg stop "$RUN/stop" \
             --arg netns "$(readlink /proc/self/ns/net)" --arg pidns "$(readlink /proc/self/ns/pid)" \
             --argjson forbidden "$forbidden" --argjson extra "$extra" \
-            --arg label "$label" --arg expect "$expect" --arg gamenode "$node" --arg rt "$RUNTIME_DIR" \
+            --arg label "$label" --arg expect "$expect" --arg want "$want" --argjson gpus "$gpus" --arg rt "$RUNTIME_DIR" \
             --args '{manifest:$m, run_dir:$run, results_dir:$results, shots_dir:$shots, stop_file:$stop,
                 host_netns:$netns, host_pidns:$pidns, forbidden_paths:$forbidden, runtime_dir:$rt,
-                gpu:{label:$label, expect:$expect, game_node:$gamenode,
+                gpu:{label:$label, expect:$expect, want:$want, gpus:$gpus,
                      nodes:($ARGS.positional | map(select(startswith("@n:")) | ltrimstr("@n:")))},
                 game_env:($ARGS.positional | map(select(startswith("@e:")) | ltrimstr("@e:"))
                           | map(capture("^(?<key>[^=]+)=(?<value>.*)$")) | from_entries)} + $extra' \
@@ -582,7 +622,7 @@ cmd_run() {
         [ -z "$GOGID" ] || support_log="$GOGO_HOME_DIR/games/$GOGID/install/support/inno.log"
         build_extra="$(jq -cn --argjson c "$build_cmd" --arg cwd "$RUN/home" --arg s "$support_log" \
             '{build_command:$c, launch_cwd:$cwd, support_log:$s}')"
-        drive_config "$RUN/build.json" "$build_extra" software 'llvmpipe|softpipe|lavapipe' "" \
+        drive_config "$RUN/build.json" "$build_extra" software 'llvmpipe|softpipe|lavapipe' "" '[]' \
             "${SOFTWARE_ENV[@]/#/@e:}"
         start_sandbox build "$RESULTS/build-sandbox.log" python3 -I "$RUN/harness/helper.py" drive "$RUN/build.json"
         local build_rc=0
@@ -610,7 +650,7 @@ cmd_run() {
     local game_extra
     game_extra="$(jq -cn --argjson l "$launch" --arg cwd "$launch_cwd" --argjson d "$doctor" --arg g "$game_log" \
         '{launch:$l, launch_cwd:$cwd, doctor:$d, game_log:$g}')"
-    drive_config "$RUN/drive.json" "$game_extra" "$GPU_LABEL" "$GPU_EXPECT" "$GAME_NODE" \
+    drive_config "$RUN/drive.json" "$game_extra" "$GPU_LABEL" "$GPU_EXPECT" "${GPU_WANT:-}" "$GPUS_JSON" \
         "${GPU_NODES[@]/#/@n:}" "${GAME_ENV[@]/#/@e:}"
 
     log "running in headless sway ($GPU_LABEL, up to $secs s)"
@@ -755,7 +795,18 @@ cmd_self_test() {
     "$SELF" cleanup 2>>"$out/stderr" || st_fail "kill: cleanup failed"
     [ ! -e "$killed_run" ] || st_fail "kill: cleanup left $killed_run"
 
-    # 5. The sweep sees a stray process that outlived its run: a decoy carrying
+    # 5. --gpu's usage errors, before anything needs a GPU.
+    log "self-test: --gpu's usage"
+    local bad
+    for bad in "--expect-gpu renderD128" "--gpu renderD128,renderD128" "--gpu card1" \
+        "--gpu renderD128 --gpu renderD128"; do
+        code=0
+        # shellcheck disable=SC2086 # the words of one case
+        "$SELF" run self-test --manifest "$REPO/e2e/self-test.toml" $bad >/dev/null 2>&1 || code=$?
+        [ "$code" = 2 ] || st_fail "usage: $bad: exit $code, want 2"
+    done
+
+    # 6. The sweep sees a stray process that outlived its run: a decoy carrying
     #    a run's marker, outside any sandbox.
     log "self-test: the sweep finds a stray"
     RUN_ID="self-test-decoy-$$" RUN="$base/decoy" PREFIX="$base/decoy/prefix" RUN_PIDNS=""

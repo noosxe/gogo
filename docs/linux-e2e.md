@@ -24,6 +24,9 @@ scripts/linux-e2e.sh run 2086050016
 scripts/linux-e2e.sh run 2086050016 --gpu /dev/dri/renderD129
 ```
 ```bash
+scripts/linux-e2e.sh run 2086050016 --gpu renderD128,renderD129 --expect-gpu renderD129
+```
+```bash
 scripts/linux-e2e.sh self-test
 ```
 ```bash
@@ -36,7 +39,8 @@ It needs `nix` and nothing else, and resolves its own tools, so there's no need 
 | `run` option | |
 |---|---|
 | `--manifest FILE` | default `e2e/<gogid>.toml` |
-| `--gpu NODE` | a real GPU, with no display output (below). Default: software |
+| `--gpu NODE[,NODE]` | real GPUs, with no display output (below), comma-joined or repeated: sway renders on the first. `renderD12x` or the full path. Default: software |
+| `--expect-gpu NODE` | with several GPUs, the one the game must render on. Default: any of them, and the summary says which |
 | `--secs N` | the limit of the game phase, default 600. Over it, the run stops and fails |
 | `--gogo PATH` | this gogo; `.#umu-python` supplies the FHS env. Default: `nix build .#gogo-linux-app` |
 | `--keep` | keep the scratch dir. `cleanup` leaves it; delete it by hand |
@@ -84,7 +88,7 @@ Both sandboxes are a whitelist bwrap root: `/nix`, `/etc`, `/sys`, the driver li
 `/run`, scratch and results. The host's `/home`, `/mnt`, `/media`, `/run/user` and
 `/tmp` aren't in it. On top of that, the game's has its own network namespace with only
 `lo` (X11's abstract socket is per netns, so a shared one could reach the host's `:0`), its
-own `/tmp` and `XDG_RUNTIME_DIR`, and only the chosen GPU's device nodes. `DISPLAY`,
+own `/tmp` and `XDG_RUNTIME_DIR`, and only the chosen GPUs' device nodes. `DISPLAY`,
 `WAYLAND_DISPLAY` and `HYPRLAND_*` never reach it, and the host's sound sockets aren't in it.
 
 The build's sandbox has a network namespace of its own too, and still reaches the internet.
@@ -109,7 +113,7 @@ the game isn't started.
 | `isolation_paths` | the owner's game dirs, menu entries, Steam, Downloads, session bus and sound sockets aren't visible |
 | `isolation_display` | `xwininfo -root` answers with the manifest's size, on this `/tmp`'s socket, and this sandbox's Xwayland serves that number, `:0` |
 | `isolation_headless` | sway's outputs are all `HEADLESS-*` |
-| `isolation_gpu_nodes` | exactly the chosen GPU's device nodes, and none in software mode or in the build |
+| `isolation_gpu_nodes` | exactly the chosen GPUs' device nodes, and none in software mode or in the build |
 | `audio` | the default device is the sandbox's null sink, the only sink, on its own socket, and it takes a test stream. Game phase only |
 
 The build's run of these checks appears in the summary as `build_<check>`.
@@ -135,7 +139,7 @@ kills what it finds. `scratch_deleted` fails if the dir stays.
 **Software (default).** wlroots on pixman, GL on llvmpipe, Vulkan on lavapipe (the host's
 `lvp_icd` manifests). There's no GPU node in the sandbox, so nothing can quietly use one.
 
-**`--gpu /dev/dri/renderD12x`.** wlroots renders there (`WLR_RENDERER=gles2`,
+**`--gpu renderD12x`.** wlroots renders there (`WLR_RENDERER=gles2`,
 `WLR_RENDER_DRM_DEVICE`), with no display output. That node is the sandbox's only GPU
 (plus `/dev/nvidia*` for NVIDIA), Vulkan only gets that driver's manifests, and GL gets its
 vendor. The label in the summary comes from the node's kernel driver: `nvidia`, `radv` or
@@ -145,7 +149,7 @@ vendor. The label in the summary comes from the node's kernel driver: `nvidia`, 
 |---|---|
 | `gpu_gl` | `glxinfo` in the game's environment names the expected driver |
 | `gpu_vulkan` | `vulkaninfo` only lists the expected device |
-| `gpu_used_by_game` | `--gpu`: the game's own process holds the node open (`/dev/nvidia0` for NVIDIA). `gpu_detail.game_gpu_fds` lists those, `gpu_detail.gpu_fds` everybody |
+| `gpu_used_by_game` | One GPU: the game's own process holds the node open (`/dev/nvidia0` for NVIDIA). `gpu_detail.game_gpu_fds` lists those, `gpu_detail.gpu_fds` everybody |
 
 **What counts as the game:** a process whose Windows path (its `argv[0]`) is the effective exe,
 the launcher log's `# exe:` line, or lies in that exe's folder. `explorer.exe` and `xalia.exe`
@@ -154,10 +158,56 @@ from outside the game's folder, such as a launcher unpacking into `Temp`, doesn'
 the check fails, and `gpu_detail.gpu_fds` shows who held it. The fds are read at each
 screenshot, so the manifest needs one while the game renders.
 
-**DXVK's device:** with `--gpu` the sandbox has one GPU, and
-`DXVK_LOG_LEVEL = "info"` under `[env]` prints it to `game.out` (`Found device: …`). In these
-runs it was always the chosen one. Which of two GPUs DXVK picks by itself stays a host question
-(R18). A Unity game's real API is in its `Player.log` (`Version: Direct3D 12`), under `--keep`.
+**DXVK's device:** `DXVK_LOG_LEVEL = "info"` under `[env]` prints it to `game.out` (`Creating
+device:`). A Unity game's real API is in its `Player.log` (`Version: Direct3D 12`), under `--keep`.
+
+**`--gpu renderD128,renderD129`.** The sandbox has both, and wlroots renders on the first, so
+the order is the compositor's choice: `renderD128,renderD129` is a hybrid laptop's shape,
+`renderD129,renderD128` a desktop on the dGPU. The label joins them, compositor first
+(`radv+nvidia`), and so does `tested_entry`'s host.
+
+The game gets what a desktop gives it: no `VK_DRIVER_FILES`, no GL vendor, no
+`__NV_PRIME_RENDER_OFFLOAD`, and an `XDG_DATA_DIRS` where the loader finds every ICD and
+implicit layer, Mesa's device-select included. Nothing steers it, so what it picks is its own
+choice. Only the compositor's own variables remain, as on a desktop: on NVIDIA, sway's
+`GBM_BACKEND` and `__GLX_VENDOR_LIBRARY_NAME` reach the game too.
+
+| Check | With several GPUs |
+|---|---|
+| `gpu_gl` | names one of them |
+| `gpu_vulkan` | lists each, and nothing else but the host's software driver |
+| `gpu_used_by_game` | it's shown to render on `--expect-gpu`'s. Without that, it holds at least one, and `game_renders_on` says what it uses |
+
+**Holding a node doesn't mean rendering on it.** A Vulkan driver opens its node when it's
+enumerated and keeps it, so a game holds both GPUs and only uses one, and Wine's helpers
+hold both too. `gpu_detail` keeps the two apart:
+
+| Key | |
+|---|---|
+| `compositor_node` | the first `--gpu` |
+| `game_nodes` | the render nodes the game holds |
+| `game_renders_on` | the render nodes it uses: the GPU DXVK made its device on, or with no DXVK, a GPU whose kernel driver counts engine time for the game's fds. Empty when neither shows anything |
+| `dxvk` | `found`, in the order Vulkan gave them, before DXVK's own sort, and `created`, from `game.out`. Needs `DXVK_LOG_LEVEL = "info"` |
+| `game_drm_use` | per node, `engine_ns` and `vram_kib` from `/proc/<pid>/fdinfo`. amdgpu and Intel's drivers count these; NVIDIA's doesn't |
+| `vulkan_devices` | `vulkaninfo`'s list, in the loader's order after the layers |
+
+So a game on NVIDIA that isn't on DXVK shows nothing from inside the sandbox, and
+`--expect-gpu` can't pass on it. `nvidia-smi pmon -s um` from outside the sandbox lists it by
+process; inside, it lists nothing, because of the PID namespace.
+
+**Which GPU a game picks** (RTX 4090 and a Ryzen iGPU, GE-Proton11-12, DXVK 3.1.1):
+
+- DXVK games (D3D9, D3D11) take the discrete GPU, wherever the compositor is. DXVK sorts
+  discrete before integrated, after Vulkan's list, so Mesa's device-select and the ICD order
+  change what it finds first but not what it picks.
+- `DXVK_FILTER_DEVICE_NAME = "AMD"` moves it (a case-sensitive part of the name), and so does
+  `MESA_VK_DEVICE_SELECT=<id>` with `MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE=1`.
+- A game on the iGPU with the compositor on NVIDIA shows nothing: DXVK logs `Failed to create
+  Vulkan swapchain: VK_ERROR_INITIALIZATION_FAILED` for every frame, and the window stays white
+  or black. The other way round, on the dGPU with the compositor on the iGPU, works.
+- GL games (wined3d) follow the compositor: GL's vendor comes from the X server.
+
+VKD3D-Proton wasn't tried. What a real desktop does stays on the host pass.
 
 ## Manifests
 

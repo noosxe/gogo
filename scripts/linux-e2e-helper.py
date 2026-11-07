@@ -481,6 +481,67 @@ def parse_exe(log_text):
     return m.group(1).strip() if m else None
 
 
+def parse_dxvk(game_out):
+    """What DXVK's log says (`DXVK_LOG_LEVEL=info`): the GPUs Vulkan gave it, in
+    that order (before its own sort), and the ones it made a device on."""
+    found = []
+    created = []
+    lines = game_out.splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(r"info:\s+Found device: (.+) \(", line)
+        if m and m.group(1) not in found:
+            found.append(m.group(1))
+        if re.match(r"info:\s+Creating device:\s*$", line) and i + 1 < len(lines):
+            m = re.match(r"info:\s+(.+):\s*$", lines[i + 1])
+            if m and m.group(1) not in created:
+                created.append(m.group(1))
+    return {"found": found, "created": created}
+
+
+def parse_fdinfo(text):
+    """A DRM fd's use, from /proc/<pid>/fdinfo: nanoseconds on its engines and
+    memory in KiB. None when the driver keeps no such count (NVIDIA's)."""
+    engines = re.findall(r"^drm-engine-[\w-]+:\s+(\d+) ns", text, re.M)
+    if "drm-driver:" not in text:
+        return None
+    vram = re.search(r"^drm-(?:total|memory)-vram:\s+(\d+) KiB", text, re.M)
+    return {"engine_ns": sum(map(int, engines)), "vram_kib": int(vram.group(1)) if vram else 0}
+
+
+def vulkan_devices_ok(devices, expect, gpus):
+    """Does vulkaninfo's list fit the sandbox? One GPU: every device is it. Several
+    (no VK_DRIVER_FILES, as on a desktop): each is listed, and any other device is
+    the host's software driver, which DXVK skips."""
+    if not devices:
+        return False
+    if len(gpus) < 2:
+        return all(re.search(expect, d, re.I) for d in devices)
+    hardware = [d for d in devices if not re.search(r"llvmpipe|softpipe|lavapipe", d, re.I)]
+    return all(any(re.search(g["expect"], d, re.I) for d in hardware) for g in gpus) and all(
+        any(re.search(g["expect"], d, re.I) for g in gpus) for d in hardware
+    )
+
+
+def held_nodes(fds, gpus):
+    """The render nodes of the GPUs these processes hold, whatever they do with them."""
+    held = {n for nodes in fds.values() for n in nodes}
+    return [g["node"] for g in gpus if g["held"] in held]
+
+
+def renders_on(gpus, dxvk, drm_use):
+    """The render nodes the game really uses. Holding one says nothing: a Vulkan
+    driver keeps it open from enumeration on. So: the GPU DXVK made its device on.
+    With no DXVK, a GPU whose kernel driver counts engine time for the game's fds;
+    beside DXVK that's only crumbs (Anno 1701: 2 ms, on the compositor's GPU)."""
+    if dxvk["created"]:
+        return [
+            g["node"]
+            for g in gpus
+            if any(re.search(g["expect"], name, re.I) for name in dxvk["created"])
+        ]
+    return [g["node"] for g in gpus if drm_use.get(g["held"], {}).get("engine_ns", 0) > 0]
+
+
 def parse_support_installer(build_log):
     """How the support installer ended, from the build's log. None: it didn't run."""
     if "running GOG support installer" not in build_log:
@@ -900,7 +961,9 @@ class Driver:
     def probe_gpu(self):
         """What GL and Vulkan say they are, in the environment the game gets."""
         gpu = self.result["gpu"]
+        gpus = self.cfg["gpu"]["gpus"]
         gpu["label"] = self.cfg["gpu"]["label"]
+        gpu["compositor_node"] = next((g["node"] for g in gpus if g["compositor"]), None)
         env = dict(self.env)
         env.update(self.cfg["game_env"])
         gpu["gl_renderer"] = None
@@ -924,8 +987,7 @@ class Driver:
             return
         self.check(
             "gpu_vulkan",
-            bool(gpu["vulkan_devices"])
-            and all(re.search(expect, d, re.I) for d in gpu["vulkan_devices"]),
+            vulkan_devices_ok(gpu["vulkan_devices"], expect, gpus),
             gpu["vulkan_devices"],
         )
 
@@ -939,9 +1001,11 @@ class Driver:
             return None
 
     def game_gpu_fds(self):
-        """Which processes hold a GPU node open: (everybody, the game's own)."""
+        """Which processes hold a GPU node open: (everybody, the game's own, and
+        the use the kernel counts for the game's fds)."""
         held = {}
         game = {}
+        use = {}
         exe = self.effective_exe()
         sway_side = {"sway", "Xwayland"}
         for pid in filter(str.isdigit, os.listdir("/proc")):
@@ -956,19 +1020,30 @@ class Driver:
                         held.setdefault(comm, set()).add(target)
                         if belongs_to_game(_argv(pid)[0], exe):
                             game.setdefault(comm, set()).add(target)
+                            with open(f"/proc/{pid}/fdinfo/{fd}") as f:
+                                counted = parse_fdinfo(f.read())
+                            if counted:
+                                total = use.setdefault(target, {"engine_ns": 0, "vram_kib": 0})
+                                total["engine_ns"] += counted["engine_ns"]
+                                total["vram_kib"] += counted["vram_kib"]
             except OSError:
                 continue
-        return tuple({k: sorted(v) for k, v in sorted(d.items())} for d in (held, game))
+        return *({k: sorted(v) for k, v in sorted(d.items())} for d in (held, game)), use
 
     def record_gpu_fds(self):
         """While something renders. Add to what's known: a game can open the
         node after the first frame anyone looked at."""
         gpu = self.result["gpu"]
-        held, game = self.game_gpu_fds()
+        held, game, use = self.game_gpu_fds()
         for key, found in (("gpu_fds", held), ("game_gpu_fds", game)):
             known = gpu.setdefault(key, {})
             for comm, nodes in found.items():
                 known[comm] = sorted(set(known.get(comm, [])) | set(nodes))
+        known = gpu.setdefault("game_drm_use", {})
+        for node, counted in use.items():
+            before = known.setdefault(node, {"engine_ns": 0, "vram_kib": 0})
+            for key, value in counted.items():
+                before[key] = max(before[key], value)
 
     # game ----------------------------------------------------------------
 
@@ -1130,21 +1205,43 @@ class Driver:
         self.check(name, record["ok"], f"{pct}% of pixels changed, want {want['min']}%")
 
     def check_gpu_used(self):
-        """--gpu: the game's own process has the chosen node open. Wine's helpers
-        open it whether or not the game renders there."""
-        node = self.cfg["gpu"].get("game_node")
-        if not node or self.manifest["command"]:
+        """--gpu. One GPU: the game's own process has the node open. Wine's helpers
+        open it whether or not the game renders there. Several: it holds them all, so
+        --expect-gpu needs it shown to render there; with none, holding one will do,
+        and the summary says what it renders on, if anything shows."""
+        gpus = self.cfg["gpu"]["gpus"]
+        if not gpus or self.manifest["command"]:
             return
         gpu = self.result["gpu"]
-        users = sorted(k for k, v in gpu.get("game_gpu_fds", {}).items() if node in v)
-        others = sorted(
-            k for k, v in gpu.get("gpu_fds", {}).items() if node in v and k not in users
-        )
+        game_fds = gpu.get("game_gpu_fds", {})
+        gpu["game_nodes"] = held_nodes(game_fds, gpus)
+        try:
+            with open(os.path.join(self.results, "game.out"), errors="replace") as f:
+                gpu["dxvk"] = parse_dxvk(f.read())
+        except OSError:
+            gpu["dxvk"] = parse_dxvk("")
+        gpu["game_renders_on"] = renders_on(gpus, gpu["dxvk"], gpu.get("game_drm_use", {}))
+        want = self.cfg["gpu"]["want"]
+        if len(gpus) == 1:
+            held = gpus[0]["held"]
+            users = sorted(k for k, v in game_fds.items() if held in v)
+            others = sorted(
+                k for k, v in gpu.get("gpu_fds", {}).items() if held in v and k not in users
+            )
+            self.check(
+                "gpu_used_by_game",
+                bool(users),
+                f"{held}: game {users or 'nobody'}, Wine's helpers and others {others or 'nobody'}"
+                f" (exe {self.effective_exe()})",
+            )
+            return
+        on = gpu["game_renders_on"]
         self.check(
             "gpu_used_by_game",
-            bool(users),
-            f"{node}: game {users or 'nobody'}, Wine's helpers and others {others or 'nobody'}"
-            f" (exe {self.effective_exe()})",
+            want in on if want else bool(gpu["game_nodes"]),
+            f"renders on {on or 'nothing DXVK or the kernel can show'}, want {want or 'any'}; "
+            f"holds {gpu['game_nodes']}; DXVK found {gpu['dxvk']['found']}, made "
+            f"{gpu['dxvk']['created']} (exe {self.effective_exe()})",
         )
 
     def finish_game(self, how):
