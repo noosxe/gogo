@@ -82,6 +82,31 @@ screenshot = "a"
 
 
 class Manifest(unittest.TestCase):
+    def test_steering_steps(self):
+        m = helper.parse_manifest(
+            """
+            gogid = 1
+            [[step]]
+            move_by = { x = -3000, y = 12.5 }
+            [[step]]
+            click_here = true
+            """
+        )
+        self.assertEqual(
+            m["steps"], [{"move_by": {"x": -3000, "y": 12.5}}, {"click_here": True}]
+        )
+
+    def test_steering_steps_are_checked(self):
+        for step in (
+            'move_by = { x = 1 }',
+            'move_by = { x = 1, y = 2, z = 3 }',
+            'move_by = { x = "1", y = 2 }',
+            'click_here = false',
+            'click_here = { x = 1, y = 2 }',
+        ):
+            with self.subTest(step), self.assertRaises(helper.ManifestError):
+                helper.parse_manifest(f"gogid = 1\n[[step]]\n{step}\n")
+
     def test_defaults(self):
         m = helper.parse_manifest(MINIMAL)
         self.assertEqual(m["gogid"], 42)
@@ -442,6 +467,26 @@ class Wayland(unittest.TestCase):
     def test_string_is_padded(self):
         self.assertEqual(helper._wl_string("abc"), struct.pack("<I", 4) + b"abc\0")
         self.assertEqual(helper._wl_string("abcd"), struct.pack("<I", 5) + b"abcd\0\0\0\0")
+
+    def test_pointer_move_to(self):
+        self.assertEqual(
+            helper.pointer_move_to(640, 400, 1280, 800, 7),
+            helper._wl_message(5, 1, struct.pack("<IIIII", 7, 640, 400, 1280, 800))
+            + helper._wl_message(5, 4),
+        )
+
+    def test_pointer_move_by(self):
+        # wl_fixed_t: signed 24.8. A frame ends it, or no client sees the motion.
+        self.assertEqual(
+            helper.pointer_move_by(-3000, 1.5, 7),
+            helper._wl_message(5, 0, struct.pack("<Iii", 7, -3000 * 256, 384))
+            + helper._wl_message(5, 4),
+        )
+
+    def test_pointer_time_wraps(self):
+        self.assertEqual(
+            helper.pointer_move_by(0, 0, 2**32 + 5), helper.pointer_move_by(0, 0, 5)
+        )
 
 
 if __name__ == "__main__":

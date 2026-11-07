@@ -190,6 +190,10 @@ screenshot = "menu"              # checks not_black_menu and fills_window_menu
 [[step]]
 click = { x = 43, y = 71 }       # percent of the window
 [[step]]
+move_by = { x = -3000, y = -3000 } # a relative move, in device units: for a game's own cursor
+[[step]]
+click_here = true                # press and release, without moving
+[[step]]
 wait = 5                         # seconds
 [[step]]
 screenshot = "preferences"
@@ -206,6 +210,12 @@ Prefer `wait_settled` to a long `wait` before the first click: the same intro ta
 different time on another renderer, and a click meant for the menu lands on the video. Its
 picture must fill the window and hold still (under 1% of pixels changing across 2 s), so an
 animated menu needs a plain `wait`.
+
+A game that draws its own cursor from relative DirectInput (Carmageddon TDR 2000's menu) can't
+be aimed with `click`: while Wine holds the exclusive grab, the compositor's pointer stays put
+and only the deltas count. Steer it instead: a big `move_by` pins the cursor in a corner, where
+the game clamps it, a second one goes to the target, and `click_here` presses there. A unit of
+`move_by` isn't a pixel, since the game and Wine scale it, so measure it from a screenshot.
 
 To write one: run it with `--keep` or a first screenshot, read the coordinates off the
 PNG, and divide by the resolution. Look at the screenshots yourself: the automatic checks
@@ -264,6 +274,10 @@ These stay in the owner's host pass (#179, design 18 §11.2), and agents put the
   gives `Authorization required`: the sandbox makes its own `passwd` and `group`.
 - **A headless seat has no pointer**, and then `seat cursor press` reaches nobody. The driver
   holds a wlr virtual pointer for the whole run, over a small Wayland client in the helper.
+- **Motion goes through that pointer, not `seat cursor set`.** That command is a warp with no
+  delta, so Xwayland reports it as absolute raw motion, and Wine passes the 0-65535 value on,
+  scaled, as a delta (+21611 in TDR 2000's DirectInput, which threw its cursor into a corner).
+  The clicks were landing all along, just not where they aimed. A real mouse never does this.
 - **Each `wtype` is a new keyboard,** and a key sent at once is lost while Xwayland loads
   its keymap, so `key` and `type` start with a 500 ms pause. A `key` is held 50 ms (`wtype -P`, `-s 50`, `-p`), not sent as an instant `-k`: a game that polls its input misses that.
 - **NVIDIA needs its EGL vendor named** (`__EGL_VENDOR_LIBRARY_FILENAMES`), or wlroots gets
