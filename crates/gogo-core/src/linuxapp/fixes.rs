@@ -325,6 +325,15 @@ pub enum State {
     Lost,
 }
 
+/// An item's value for a line, `{:?}`-quoted, or [`compat::HIDDEN`] for a
+/// secret-looking env key (#234).
+fn shown_value(i: &Item) -> String {
+    match i.key.as_deref().and_then(|k| k.strip_prefix("env ")) {
+        Some(k) if compat::is_secret(k) => compat::HIDDEN.to_string(),
+        _ => format!("{:?}", i.value.as_deref().unwrap_or_default()),
+    }
+}
+
 /// The fix summary (design 18 §4.3): build it with [`Fixes::summary`],
 /// show it with `Display`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -350,10 +359,10 @@ impl Summary {
             .iter()
             .filter_map(|i| match (&i.state, &i.source) {
                 (State::Overridden { by, by_value }, FixSource::Layer(l)) => Some(format!(
-                    "{}: {} {:?} is overridden at launch by {by} ({by_value:?})",
+                    "{}: {} {} is overridden at launch by {by} ({by_value:?})",
                     i.key.as_deref().unwrap_or(&i.fix),
                     layer_tag(*l),
-                    i.value.as_deref().unwrap_or_default(),
+                    shown_value(i),
                 )),
                 _ => None,
             })
@@ -384,10 +393,10 @@ impl std::fmt::Display for Summary {
                     };
                     writeln!(
                         f,
-                        "{}: {} {:?} is overridden at launch by {by} ({by_value:?})",
+                        "{}: {} {} is overridden at launch by {by} ({by_value:?})",
                         i.key.as_deref().unwrap_or(&i.fix),
                         layer_tag(l),
-                        i.value.as_deref().unwrap_or_default(),
+                        shown_value(i),
                     )?;
                 }
                 State::Covered { by } => {
@@ -506,11 +515,16 @@ fn gogo_items(e: &Effective) -> Vec<GogoItem> {
     }
     for (k, s) in &e.env {
         let label = format!("env {k}");
+        let shown = if compat::is_secret(k) {
+            compat::HIDDEN.to_string()
+        } else {
+            format!("{:?}", s.value)
+        };
         keyed(
             label.clone(),
             label.clone(),
             s.value.clone(),
-            format!("{label} = {:?}", s.value),
+            format!("{label} = {shown}"),
             s.layer,
         );
     }

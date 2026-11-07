@@ -857,7 +857,7 @@ facts); `[platforms.macos]` / `[platforms.linux]` = per OS. OS names follow Rust
 | Where | Keys |
 |---|---|
 | top level | `title`, `exe`, `args`, `variant`, `replace_command`, `verbs`, `dll_overrides`, `registry`, `source` |
-| `[platforms.<os>]` | `renderer`, `runtime`, `env`, `status`, `notes`, `tested`, `lane`, `lanes`, `protonfixes` (Linux only), plus any top-level key to override or extend it there |
+| `[platforms.<os>]` | `renderer`, `runtime`, `env`, `status`, `notes`, `tested`, `lane`, `lanes`, `protonfixes` and `extra_args` (Linux only, #234), plus any top-level key to override or extend it there |
 
 - The platform table merges over the top level by design 16 decision 5's rules (maps per
   key, `verbs` add, `-<verb>` removes, `-*` clears, everything else replaced whole), and
@@ -1353,6 +1353,110 @@ programs (editing `launch.conf` doesn't change the stamp, so no setup ran):
 `TERM` given longer than 5 s, and zenity's `--switch` and kdialog's labels and the menu
 entry on GNOME and KDE, which the owner doesn't use (§11.2).
 
+### 7.6 Per-game env and launch args (#234)
+
+The owner's Heroic pain (#231): setting env vars and launch args is awkward, and nothing
+shows what's active. The CLI covers it now; the TUI (#11) gets a nicer editor later, and a
+catalogue of which variables exist (#233) builds on the same report.
+
+**What L4 already had, and what was missing.** `[platforms.linux] env` was in the schema,
+merged per key, and setup put it into `launch.conf`'s `ENV` over the renderer's switches
+(those fill gaps only, §7.1). `args` existed too, but it *replaces* the game's args (GOG's
+`playTasks` arguments, a variant's), which is wrong for "add `-skipStartScreen`": a game
+with task args would lose them silently. Missing: a way to set either without editing TOML,
+an append, and a view of what applies and why.
+
+**Decided:**
+
+- **Storage: the game's L4 file, `[platforms.linux]`.** `env` is a table
+  (`[platforms.linux.env]` when gogo makes it, `toml_edit`, comments kept, removed once
+  empty). Launch args are a new key, **`extra_args`**: a list appended after the game's
+  args, as Heroic's launcher args are. Linux only (like `protonfixes`: under
+  `[platforms.macos]` it warns and is ignored, at the top level too); replaced whole by a
+  higher layer, so an L3 entry could carry one and L4 replaces it. `args` keeps its
+  meaning. These are the user's keys, not `OWNED_KEYS`: gogo writes them only when asked
+  (`compat::edit_user_platform_for`, `UserEdit`).
+- **Applied at the next launch, no rebuild.** The launch stamp covers the L4 file (§7.2),
+  so a changed one sends the launcher through setup, which writes `ENV` and
+  `ARGS = game args + extra_args` (`envargs::launch_args`). Nothing in `launch.conf` or
+  `launch.sh` changed shape: no `LAUNCHER_VERSION` bump. They survive rebuilds, setup
+  reruns and launcher upgrades because they live in L4, which none of those rewrites.
+  The commands don't run setup themselves (unlike `--retarget`, nothing needs
+  installing).
+- **Where the args go.** `"$UMU_RUN" "$EXE" ARGS… "$@"`: after the exe, the game's args,
+  then the user's, then whatever `launch.sh` itself is given. Quoting: `launch.conf` holds
+  each word `sh_quote`d in a bash array, so spaces, both quotes, `$`, backticks and `\`
+  reach the game as typed (golden file, and the pipeline test checks the argv the fake
+  game gets). Line breaks and NUL are refused, in values and args alike: `launch.conf`
+  stays one assignment per line for gogo's own reader (`ConfValues`).
+- **Key names**: `[A-Za-z_][A-Za-z0-9_]*`, what `export "K=V"` takes. Setup skips a bad
+  name hand-written into the file, with a warning, and `doctor` names it.
+- **Keys gogo owns** (`envargs::policy`):
+  - refused: `WINEPREFIX`, `GAMEID`, `STORE`, `PROTONPATH` (the launcher exports them after
+    `ENV`, so a value would never apply); `WINEDLLOVERRIDES` (built from `DLL_OVERRIDES`:
+    use `[platforms.linux.dll_overrides]`); `PROTONFIXES_DISABLE` (use `protonfixes =
+    false`, so the fix summary knows what the game loses);
+  - written with a warning, and the user's value wins: the renderer switches
+    (`PROTON_USE_D7VK`, `PROTON_USE_WINED3D`, `PROTON_DXVK_D3D8`) and gogo's
+    `PROTON_SET_GAME_DRIVE=0` (§7.2, Host drives);
+  - a protonfix that sets the same key still wins at launch (O2): `env set` warns, and
+    `env list` and `doctor` show it.
+- **Secrets.** Game env vars rarely are, but a user may put a token in one. Keys matching
+  `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `API_KEY`, `APIKEY`, `CREDENTIAL`, `AUTH` or
+  `PRIVATE` (case-insensitive) are written as given but shown as `<hidden>` by `env list`
+  (unless `--reveal`), `env set`'s report (JSON too) and `doctor`. gogo never logs env
+  values: the run log has `# args:` but no env line, and setup's notes don't list them.
+  The L4 file and `launch.conf` hold them in plain text, like any config.
+
+**What wins at launch** (lowest first), as `env list` orders it: the environment
+`launch.sh` starts with; gogo's default `PROTON_SET_GAME_DRIVE=0`; the renderer's switches;
+`gogo-launch.toml`'s `env`; L3, then L4 (and `protonfixes = false` at its layer);
+`WINEDLLOVERRIDES`; the launcher's four; then, inside umu, the protonfix (`default.py`,
+then the game's module).
+
+**CLI** (`gogo linux-app`, §10). Verb-first `env list|set|unset`, as `config get|set`,
+`runtimes list|install` and the issue's own sketch, and the `env list` #233 asked for;
+`args` is one command, since it has one value: no args shows it, `-- <args…>` sets it,
+`--clear` drops it. They take a GOGID like every other per-game `linux-app` subcommand
+(`setup`, `compat`, `doctor`), not a title.
+
+- `env list <gogid> [--reveal] [--json]`: one line per key that applies,
+  `KEY=VALUE  (source)`, `pending: the next launch's setup applies it` when `launch.conf`
+  doesn't have it yet, and the values it beats under it (`over KEY=VALUE  (source)`).
+  Sources: `gogo default`, `renderer <id>`, `gogo-launch.toml`, `L3 compat DB`, `L4 user
+  override`, `gogo: dll_overrides + renderer`, `launcher, always`,
+  `protonfix <id>, at launch`, and `last setup; the next one may drop it` for a
+  `launch.conf` value no layer has while the stamp is stale (a value just unset).
+  Renderer values come from `launch.conf` (setup's last run): computing them again would
+  mean running the renderer step, which touches the game dir.
+- `env set <gogid> KEY=VALUE…`, `env unset <gogid> KEY…`: `Change` lines
+  (`env.DXVK_HUD "fps" -> (unset)`), then "the next launch applies it" or "not built yet:
+  the build applies it". `unset` of a key another layer sets says who still sets it.
+  A refusal is a usage error (exit 2) and writes nothing.
+- `args <gogid> [-- <args…> | --clear] [--json]`: the exe, the game's args and where they
+  come from (GOG, a variant, an `args` layer), the extra args and their layer, what the
+  exe gets, and `pending` while `launch.conf` has older ones.
+
+**For #233 and the TUI.** `envargs::env_report` is the "what's active" half: one line per
+(key, source) with its state. The catalogue adds the "what exists" half (descriptions,
+defaults, whether it applies to this renderer and GPU) next to it, and an `EnvSource` for
+Proton's own defaults when it knows them.
+
+**For the e2e harness and #241.** A manifest's `[override]` (`env`, `extra_args`) is
+applied by the harness through these commands, with the run's scratch `GOGO_HOME`, right
+before the launch (`docs/linux-e2e.md`). So a run (or a live session) sets a game's env
+and args without touching the owner's games, and the launch goes through the same stale
+stamp and setup a player's would.
+
+**Tests.** `compat`: the writer keeps comments and other tables, reports only changes, no
+change no write, empties removed, a fresh file gets `[platforms.linux.env]`; `extra_args`
+Linux only and replaced by the higher layer. `envargs`: names, values, ownership, secrets,
+the append, shell quoting. The pipeline test sets env and args through `envargs`, checks
+`pending`, runs setup, launches through `launch.sh` and compares the fake game's argv and
+environment word for word (spaces, quotes, `$`, backticks), checks the run log holds no
+value, `doctor`'s `launch` line, unset and clear, and a hand-written bad name and
+launcher key. The CLI's parse and its human output have unit tests.
+
 ## 8. `gogo linux-app doctor <gogid>`
 
 Read-only, as design 16 §8.3: one line per check, `ok`/`warn`/`fail` with a hint; exit 1 on
@@ -1397,6 +1501,11 @@ umu (the container carries its libraries), and a gogo other than the flake's `go
     overrides one of gogo's values (`CompatReport.collisions`, from the new
     `fixes::Summary::collisions`, worded as the summary words them; the hint names
     `protonfixes = false`). The fix summary and compat warnings are its detail lines.
+  - `launch` (#234, §7.6): `envargs::env_report` and `args_report`. The message names the
+    user's env keys and extra args, and says when some apply only at the next launch; the
+    detail lines are every env value that applies (`*` marks the user's) and the args.
+    Warns when a value of the user's never applies: a bad name (setup skips it), a key
+    the launcher sets after `ENV`, or one a protonfix sets at launch.
   - `umu`: `launch.conf` read back (`game::ConfValues`, the inverse of `LaunchConf::render`).
     Zipapp: `UMU_RUN` exists and is the store's `umu/<ver>` whose recorded archive sha256
     is the pin's (the store keeps no hash of the unpacked zipapp, so that is what "its sha"
@@ -1552,6 +1661,8 @@ only on Linux (`#[cfg(target_os = "linux")]`), with the same shape:
     renderer line gives the effective one and its layer, the baked one and its layer, L1's
     pick from the game as installed, and what setup last applied. Variants as on the Mac.
     Nothing is installed or fetched.
+  - `gogo linux-app env list|set|unset <gogid>` and `gogo linux-app args <gogid>
+    [-- <args…> | --clear]` (#234): §7.6.
   - `gogo linux-app next-renderer <gogid> [--dry-run]`: `renderer::next_renderer_on(Os::Linux,
     …)` after `state.toml`'s renderer (else the baked one), L1 from a fresh scan; written to
     L4's `[platforms.linux]`.

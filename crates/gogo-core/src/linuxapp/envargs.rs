@@ -37,7 +37,7 @@ use crate::macapp::renderer;
 pub const LAUNCHER_KEYS: &[&str] = &["WINEPREFIX", "GAMEID", "STORE", "PROTONPATH"];
 
 /// Shown in place of a value [`is_secret`] hides.
-pub const HIDDEN: &str = "<hidden>";
+pub use crate::macapp::compat::HIDDEN;
 
 /// Is `key` a valid env var name for the launcher (`export "K=V"` in
 /// bash): ASCII letters, digits and `_`, not starting with a digit.
@@ -113,26 +113,7 @@ pub fn policy(key: &str) -> Policy {
     }
 }
 
-/// A key whose value may be a credential: `*TOKEN*`, `*SECRET*`,
-/// `*PASSWORD*`, `*PASSWD*`, `*API_KEY*`, `*APIKEY*`, `*CREDENTIAL*`,
-/// `*AUTH*`, `*PRIVATE*`. Their values are written as given but shown as
-/// [`HIDDEN`].
-pub fn is_secret(key: &str) -> bool {
-    let k = key.to_ascii_uppercase();
-    [
-        "TOKEN",
-        "SECRET",
-        "PASSWORD",
-        "PASSWD",
-        "API_KEY",
-        "APIKEY",
-        "CREDENTIAL",
-        "AUTH",
-        "PRIVATE",
-    ]
-    .iter()
-    .any(|s| k.contains(s))
-}
+pub use crate::macapp::compat::is_secret;
 
 /// `value`, or [`HIDDEN`] for a secret-looking `key` unless `reveal`.
 pub fn shown(key: &str, value: &str, reveal: bool) -> String {

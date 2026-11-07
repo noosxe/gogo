@@ -992,6 +992,30 @@ fn prune_platforms(doc: &mut toml_edit::DocumentMut) {
     }
 }
 
+/// Shown in place of an env value [`is_secret`] hides.
+pub const HIDDEN: &str = "<hidden>";
+
+/// An env key whose value may be a credential: `*TOKEN*`, `*SECRET*`,
+/// `*PASSWORD*`, `*PASSWD*`, `*API_KEY*`, `*APIKEY*`, `*CREDENTIAL*`,
+/// `*AUTH*`, `*PRIVATE*` (any case). Their values are stored as given but
+/// shown as [`HIDDEN`] (#234, design 18 §7.6).
+pub fn is_secret(key: &str) -> bool {
+    let k = key.to_ascii_uppercase();
+    [
+        "TOKEN",
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "API_KEY",
+        "APIKEY",
+        "CREDENTIAL",
+        "AUTH",
+        "PRIVATE",
+    ]
+    .iter()
+    .any(|s| k.contains(s))
+}
+
 // — merge —
 
 /// A value plus the layer it came from.
@@ -1191,7 +1215,14 @@ impl Effective {
             out.push(format!("verbs += {:?}  ({})", s.value, s.layer.describe()));
         }
         map(&mut out, "dll_overrides", &self.dll_overrides);
-        map(&mut out, "env", &self.env);
+        for (k, s) in &self.env {
+            let v = if is_secret(k) {
+                HIDDEN.to_string()
+            } else {
+                format!("{:?}", s.value)
+            };
+            out.push(format!("env.{k} = {v}  ({})", s.layer.describe()));
+        }
         line(&mut out, "registry", &self.registry);
         line(&mut out, "args", &self.args);
         line(&mut out, "extra_args", &self.extra_args);
