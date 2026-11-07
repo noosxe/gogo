@@ -19,7 +19,7 @@ __pycache__/
 
 # --- Nix ---
 # `nix build` result symlinks.
-/result
+/result*
 # --- Environment ---
 .env
 .env.*
