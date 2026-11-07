@@ -84,7 +84,7 @@ build's sandbox sees. It needs `gogo login` done once. Tokens are never printed.
 1. **Scratch.** `target/linux-e2e/runs/<id>/` holds `GOGO_HOME`, `HOME` and the XDG dirs.
    Proton, umu's runtime and the depot download are bind-mounted from
    `target/linux-e2e/cache/`, so a re-run downloads nothing and the build is still fresh.
-   Runs take turns, through a lock. `--reuse-install` copies an installed base in here
+   Runs take turns, through [the cache lock](#the-cache-lock). `--reuse-install` copies an installed base in here
    instead, and skips step 2 ([below](#reusing-an-installed-game)).
 2. **Build,** in a sandbox with a NATed network of its own (pasta) and the session bus, on a headless sway of its
    own (software rendering, whatever `--gpu` says): the isolation checks, then
@@ -147,6 +147,31 @@ markers and the run's own marker in `/proc/<pid>/environ`, the scratch path on a
 line, and the sandbox's PID namespace. `nothing_left` fails if it finds anything, and it
 kills what it finds. `scratch_deleted` fails if the dir stays.
 
+## The cache lock
+
+One `run` or `cleanup` at a time over a cache, whichever checkout starts it. The lock is
+`.lock` in the *resolved* cache dir (`target/linux-e2e/cache/.lock`, followed through a
+worktree's link to the main checkout's; refused if it isn't ours or is itself a link), held
+as a `flock` on fd 9, which no sandbox inherits.
+
+- **Why the whole run, not just the build.** The build writes the store (Proton, umu's
+  runtime), the depot cache and the installed bases; a reused base is copied and saved in
+  there; and the game takes the GPU, and the harness assumes one game at a time. Parallel
+  game phases would need per-run GPU and display bookkeeping that nothing needs yet, so the
+  simplest rule that is also right is one run per cache. It replaces the old per-checkout
+  `target/linux-e2e/lock` and the bases' `.lock`: one lock, no order to get wrong.
+- **Waiting.** A `run` that finds it taken logs who has it and waits. `.lock.holder` next
+  to it has the holder's checkout path, run id, pid and start time; a run writes it once it
+  has the lock and removes it on the way out. The note is information only: a SIGKILLed run
+  leaves a stale one (the log says when its pid is gone), and the flock alone decides.
+- **`cleanup`** takes the same lock but doesn't wait: with a run going, in any checkout, it
+  names the holder and exits 3, so it never sweeps or prunes under a run.
+- **Self-test.** `self-test` uses a lock dir of its own (`GOGO_E2E_LOCK_DIR`, under
+  `target/linux-e2e/`), so it never waits for a real run. It covers two runs on one lock
+  (the second waits and names the first, then goes), `cleanup` refusing meanwhile, and a
+  stale note.
+- Runs from a checkout older than this lock don't take it. Rebase before running in parallel.
+
 ## Building from an offline installer
 
 `--installer <setup.exe>` builds through `gogo linux-app <setup.exe> --yes`, gogo's installer
@@ -195,13 +220,15 @@ scripts/linux-e2e.sh run 2086050016 --reuse-install
 - **The same path as the build.** `launch.sh`, the prefix and `state.toml` name absolute
   paths, and a data root that moved sends `launch.sh` through setup again. So every
   `--reuse-install` run of a game, the building one too, has its scratch at
-  `target/linux-e2e/cache/installed/.runs/<gogid>`, and they take turns on the bases'
-  own lock. With `--keep`, the dir is renamed to `.runs/<gogid>-<time>-<pid>` after
+  `target/linux-e2e/cache/installed/.runs/<gogid>`, and they take turns with every other
+  run on the cache lock. With `--keep`, the dir is renamed to `.runs/<gogid>-<time>-<pid>` after
   teardown, out of the next one's way, so paths inside it name the old one.
 - **Checkouts share them.** When `target/linux-e2e/cache` is a link to another checkout's
   cache, as in a worktree, the bases and their runs are that cache's, so a base built in
   one worktree serves the next. That's why the scratch lives beside the bases and not in
   `target/linux-e2e/runs/`.
+  The same link is why the lock is the cache's, not the checkout's
+  ([below](#the-cache-lock)).
 - **The key** is the sha256 of everything that goes into a build: gogo's sources (the
   workspace, `compat/`, the toolchain and the Nix that builds it, so its compat DB,
   `LAUNCHER_VERSION` and the Proton and umu pins; not its store path, which a manifest
