@@ -129,6 +129,15 @@ def _step(raw, i, shots):
     if action in ("key", "type"):
         if not isinstance(value, str) or not value:
             raise ManifestError(f"{what}: {action} must be a non-empty string")
+        if action == "key" and value not in KEYS:
+            raise ManifestError(
+                f"{what}: key {value!r} isn't a key of the us keymap the harness knows "
+                "(an XKB keysym name: Escape, Return, space, a, F1, Up, ...)"
+            )
+        if action == "type":
+            bad = sorted({c for c in value if c not in TYPE_CHARS})
+            if bad:
+                raise ManifestError(f"{what}: type can't type {bad[0]!r} on a us keyboard")
         return {action: value}
     if action in ("wait", "wait_settled"):
         n = _number(value, f"{what}: {action}")
@@ -645,33 +654,19 @@ def virtual_pointer(socket_path):
     conn.sendall(
         _wl_message(1, 1, struct.pack("<I", 2)) + _wl_message(1, 0, struct.pack("<I", 3))
     )
-    data = b""
-    done = struct.pack("<II", 3, 12 << 16)
-    while done not in data:
-        chunk = conn.recv(65536)
-        if not chunk:
-            raise RuntimeError("the compositor closed the Wayland connection")
-        data += chunk
+    found = _wl_globals(_wl_wait_done(conn, 3, "the Wayland connection"))
     iface = "zwlr_virtual_pointer_manager_v1"
-    if iface not in (found := _wl_globals(data)):
+    if iface not in found:
         raise RuntimeError(f"the compositor has no {iface}")
     name, _ = found[iface]
     # wl_registry.bind (new id 4), create_virtual_pointer(seat: null, new id 5),
     # sync (new id 6) so we return with the device in place.
     conn.sendall(
-        _wl_message(
-            2, 0, struct.pack("<I", name) + _wl_string(iface) + struct.pack("<II", 1, 4)
-        )
+        _wl_bind(name, iface, 4)
         + _wl_message(4, 0, struct.pack("<II", 0, 5))
         + _wl_message(1, 0, struct.pack("<I", 6))
     )
-    data = b""
-    done = struct.pack("<II", 6, 12 << 16)
-    while done not in data:
-        chunk = conn.recv(65536)
-        if not chunk:
-            raise RuntimeError("the compositor refused the virtual pointer")
-        data += chunk
+    _wl_wait_done(conn, 6, "the virtual pointer")
     return conn
 
 
@@ -698,6 +693,200 @@ def pointer_move_by(dx, dy, msec):
     return _wl_message(5, 0, body) + _wl_message(5, 4)
 
 
+# --- a keyboard for the seat ---------------------------------------------------
+#
+# One zwp_virtual_keyboard_v1 for the whole run, with a standard pc105/us keymap
+# and real evdev keycodes, so Xwayland and Wine see an ordinary keyboard.
+# wtype, which this replaced (#236), made a keyboard per call whose keymap had
+# just that call's keysyms from keycode 1 up: X keycode 9, Escape's scan code to
+# Wine, for every key, so Cyberpunk 2077's title screen never saw a space.
+
+KEYMAP_ARGS = ("--rules", "evdev", "--model", "pc105", "--layout", "us")
+# Linux input-event-codes.h. The keysym names are XKB's, as the us keymap has
+# them on level 1 (unshifted): `key` takes these.
+KEYS = {
+    "Escape": 1,
+    **{str(n): 2 + (n - 1) % 10 for n in range(10)},
+    "minus": 12,
+    "equal": 13,
+    "BackSpace": 14,
+    "Tab": 15,
+    **{c: 16 + i for i, c in enumerate("qwertyuiop")},
+    "bracketleft": 26,
+    "bracketright": 27,
+    "Return": 28,
+    "Control_L": 29,
+    **{c: 30 + i for i, c in enumerate("asdfghjkl")},
+    "semicolon": 39,
+    "apostrophe": 40,
+    "grave": 41,
+    "Shift_L": 42,
+    "backslash": 43,
+    **{c: 44 + i for i, c in enumerate("zxcvbnm")},
+    "comma": 51,
+    "period": 52,
+    "slash": 53,
+    "Shift_R": 54,
+    "Alt_L": 56,
+    "space": 57,
+    "Caps_Lock": 58,
+    **{f"F{n}": 58 + n for n in range(1, 11)},
+    "F11": 87,
+    "F12": 88,
+    "Control_R": 97,
+    "Alt_R": 100,
+    "Home": 102,
+    "Up": 103,
+    "Prior": 104,
+    "Left": 105,
+    "Right": 106,
+    "End": 107,
+    "Down": 108,
+    "Next": 109,
+    "Insert": 110,
+    "Delete": 111,
+    "Pause": 119,
+    "Super_L": 125,
+}
+# Level 2 (with Shift) of the us keymap: keysym name, and the level-1 key it's on.
+SHIFTED = {
+    **{c.upper(): c for c in "abcdefghijklmnopqrstuvwxyz"},
+    **dict(
+        zip(
+            "exclam at numbersign dollar percent asciicircum ampersand asterisk "
+            "parenleft parenright underscore plus braceleft braceright colon "
+            "quotedbl asciitilde bar less greater question".split(),
+            "1 2 3 4 5 6 7 8 9 0 minus equal bracketleft bracketright semicolon "
+            "apostrophe grave backslash comma period slash".split(),
+        )
+    ),
+}
+_CHAR_NAMES = {
+    " ": "space", "-": "minus", "=": "equal", "[": "bracketleft", "]": "bracketright",
+    ";": "semicolon", "'": "apostrophe", "`": "grave", "\\": "backslash", ",": "comma",
+    ".": "period", "/": "slash", "!": "exclam", "@": "at", "#": "numbersign",
+    "$": "dollar", "%": "percent", "^": "asciicircum", "&": "ampersand",
+    "*": "asterisk", "(": "parenleft", ")": "parenright", "_": "underscore",
+    "+": "plus", "{": "braceleft", "}": "braceright", ":": "colon", '"': "quotedbl",
+    "~": "asciitilde", "|": "bar", "<": "less", ">": "greater", "?": "question",
+    "\n": "Return", "\t": "Tab",
+}  # fmt: skip
+# What `type` can type: a character, its evdev keycode, and whether Shift is held.
+TYPE_CHARS = {}
+for _c in [chr(n) for n in range(0x21, 0x7F)] + list(_CHAR_NAMES):
+    _name = _CHAR_NAMES.get(_c, _c)
+    if _name in KEYS:
+        TYPE_CHARS[_c] = (KEYS[_name], False)
+    elif _name in SHIFTED:
+        TYPE_CHARS[_c] = (KEYS[SHIFTED[_name]], True)
+del _c, _name
+SHIFT_KEY = KEYS["Shift_L"]
+SHIFT_MASK = 1  # the us keymap's Shift modifier: the first real modifier
+
+
+def keymap_levels(text):
+    """{evdev keycode: [level-1 keysym, level-2 keysym, ...]} of a compiled XKB
+    keymap (`xkbcli compile-keymap`), first group only."""
+    codes = {
+        name: int(code) - 8
+        for name, code in re.findall(r"^\s*<(\w+)>\s*=\s*(\d+);", text, re.M)
+    }
+    levels = {}
+    for name, body in re.findall(r"\bkey\s+<(\w+)>\s*\{([^}]*)\}", text):
+        # `symbols[1]= [ F1, XF86Switch_VT_1 ]`: the group's index isn't a level.
+        syms = re.search(r"\[([^\]]*)\]", re.sub(r"\w+\[\w+\]", "", body))
+        if name in codes and syms:
+            levels[codes[name]] = [s.strip() for s in syms.group(1).split(",")]
+    return levels
+
+
+def keymap_mismatches(text):
+    """Where KEYS and SHIFTED disagree with the keymap: (keysym, why) pairs."""
+    levels = keymap_levels(text)
+    bad = []
+    for sym, code in KEYS.items():
+        got = levels.get(code, [])
+        if not got or got[0] != sym:
+            bad.append((sym, f"keycode {code} is {got[:1] or 'missing'}"))
+    for sym, base in SHIFTED.items():
+        got = levels.get(KEYS[base], [])
+        if len(got) < 2 or got[1] != sym:
+            bad.append((sym, f"Shift+{base} is {got[1:2] or 'missing'}"))
+    return bad
+
+
+def virtual_keyboard(socket_path, keymap):
+    """A virtual keyboard on the seat with `keymap` (XKB text), for as long as
+    the returned socket stays open. Keys go to it with keyboard_key()."""
+    conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    conn.connect(socket_path)
+    conn.sendall(
+        _wl_message(1, 1, struct.pack("<I", 2)) + _wl_message(1, 0, struct.pack("<I", 3))
+    )
+    found = _wl_globals(_wl_wait_done(conn, 3, "the Wayland connection"))
+    iface = "zwp_virtual_keyboard_manager_v1"
+    for need in ("wl_seat", iface):
+        if need not in found:
+            raise RuntimeError(f"the compositor has no {need}")
+    data = keymap.encode() + b"\0"
+    fd = os.memfd_create("gogo-e2e-keymap")
+    try:
+        os.write(fd, data)
+        # bind wl_seat (4) and the manager (5), create_virtual_keyboard(seat 4,
+        # new id 6), keymap(XKB_V1, fd, size), then sync (7): the keymap is in
+        # place before the first key.
+        msg = (
+            _wl_bind(found["wl_seat"][0], "wl_seat", 4)
+            + _wl_bind(found[iface][0], iface, 5)
+            + _wl_message(5, 0, struct.pack("<II", 4, 6))
+            + _wl_message(6, 0, struct.pack("<II", 1, len(data)))
+            + _wl_message(1, 0, struct.pack("<I", 7))
+        )
+        socket.send_fds(conn, [msg], [fd])
+    finally:
+        os.close(fd)
+    _wl_wait_done(conn, 7, "the virtual keyboard")
+    return conn
+
+
+def _wl_bind(name, iface, new_id):
+    """wl_registry (object 2).bind of a global at version 1."""
+    body = struct.pack("<I", name) + _wl_string(iface) + struct.pack("<II", 1, new_id)
+    return _wl_message(2, 0, body)
+
+
+def _wl_wait_done(conn, callback, what):
+    """Read until wl_callback `callback` is done; a wl_display.error is a failure."""
+    data = b""
+    pos = 0
+    while True:
+        chunk = conn.recv(65536)
+        if not chunk:
+            raise RuntimeError(f"the compositor closed {what}")
+        data += chunk
+        while pos + 8 <= len(data):
+            obj, word = struct.unpack_from("<II", data, pos)
+            size, opcode = word >> 16, word & 0xFFFF
+            if size < 8 or pos + size > len(data):
+                break
+            pos += size
+            if obj == 1 and opcode == 0:
+                raise RuntimeError(f"the compositor refused {what} (wl_display.error)")
+            if obj == callback and opcode == 0:
+                return data
+
+
+def keyboard_key(code, pressed, msec):
+    """zwp_virtual_keyboard_v1 (object 6).key: an evdev keycode down or up."""
+    return _wl_message(6, 1, struct.pack("<III", msec & 0xFFFFFFFF, code, int(pressed)))
+
+
+def keyboard_modifiers(depressed):
+    """zwp_virtual_keyboard_v1 (object 6).modifiers: wlroots doesn't work them
+    out from a virtual keyboard's keys, so Shift is said in so many words."""
+    return _wl_message(6, 2, struct.pack("<IIII", depressed, 0, 0, 0))
+
+
 # --- drive: inside the sandbox ------------------------------------------------
 
 
@@ -717,6 +906,7 @@ class Driver:
         self.sway = None
         self.pulse = None
         self.pointer = None
+        self.keyboard = None
         self.game = None
         self.game_exit = None
         self.view = None
@@ -819,12 +1009,23 @@ class Driver:
             if self.env.get("DISPLAY"):
                 r = self.tool("xwininfo", "-root", "-display", self.env["DISPLAY"])
                 if r.returncode == 0:
-                    self.pointer = virtual_pointer(
-                        os.path.join(self.env["XDG_RUNTIME_DIR"], self.env["WAYLAND_DISPLAY"])
-                    )
+                    wl = os.path.join(self.env["XDG_RUNTIME_DIR"], self.env["WAYLAND_DISPLAY"])
+                    self.pointer = virtual_pointer(wl)
+                    self.keyboard = virtual_keyboard(wl, self.keymap())
                     return
             self.sleep(0.2)
         raise RuntimeError(f"no X server on {self.env.get('DISPLAY')!r} (see sway.log)")
+
+    def keymap(self):
+        """The virtual keyboard's pc105/us keymap, from the flake's xkbcli and
+        xkeyboard-config; KEYS has to agree with it."""
+        r = self.tool("xkbcli", "compile-keymap", *KEYMAP_ARGS)
+        if r.returncode != 0 or "xkb_keymap" not in r.stdout:
+            raise RuntimeError(f"xkbcli compile-keymap failed: {r.stderr.strip()}")
+        bad = keymap_mismatches(r.stdout)
+        if bad:
+            raise RuntimeError(f"the us keymap disagrees with KEYS: {bad[:3]}")
+        return r.stdout
 
     # audio ---------------------------------------------------------------
 
@@ -1138,9 +1339,11 @@ class Driver:
         elif action == "wait_settled":
             self.do_wait_settled(step["wait_settled"], record)
         elif action == "key":
-            self.tool(*_wtype_key(step["key"])).check_returncode()
+            self.press_key(KEYS[step["key"]], False)
         elif action == "type":
-            self.tool(*_wtype(step["type"])).check_returncode()
+            for c in step["type"]:
+                self.press_key(*TYPE_CHARS[c])
+                time.sleep(KEY_GAP_MS / 1000)
         elif action == "click":
             self.do_click(step["click"], record)
         elif action == "click_here":
@@ -1166,6 +1369,20 @@ class Driver:
         self.pointer.sendall(pointer_move_to(x, y, window["width"], window["height"], _msec()))
         time.sleep(0.2)
         self.press_button()
+
+    def press_key(self, code, shift):
+        """Down, held KEY_HOLD_MS, up; Shift around it when `shift`."""
+        if shift:
+            self.keyboard.sendall(
+                keyboard_key(SHIFT_KEY, True, _msec()) + keyboard_modifiers(SHIFT_MASK)
+            )
+        self.keyboard.sendall(keyboard_key(code, True, _msec()))
+        time.sleep(KEY_HOLD_MS / 1000)
+        self.keyboard.sendall(keyboard_key(code, False, _msec()))
+        if shift:
+            self.keyboard.sendall(
+                keyboard_key(SHIFT_KEY, False, _msec()) + keyboard_modifiers(0)
+            )
 
     def press_button(self):
         self.swaymsg("seat", "seat0", "cursor", "press", "button1")
@@ -1487,24 +1704,15 @@ class Driver:
         return 0
 
 
-# How long a `key` step holds the key between press and release. A game that polls its
-# input misses an instant press+release (`wtype -k`). (`click` already holds the button
-# 100 ms between its swaymsg press and release.)
+# How long a key is held between press and release. A game that polls its input
+# misses an instant press+release. (`click` already holds the button 100 ms between
+# its swaymsg press and release.) And the pause between `type`'s characters.
 KEY_HOLD_MS = 50
+KEY_GAP_MS = 30
 
 
 def _msec():
     return int(time.monotonic() * 1000)
-
-
-def _wtype_key(key):
-    """A key held KEY_HOLD_MS: `wtype -P`, a pause, `wtype -p`."""
-    return _wtype("-P", key, "-s", str(KEY_HOLD_MS), "-p", key)
-
-
-def _wtype(*keys):
-    """wtype is a new keyboard every time: Xwayland needs a moment for its keymap."""
-    return ("wtype", "-s", "500", *keys, "-s", "200")
 
 
 def _mount_fstype(path):
