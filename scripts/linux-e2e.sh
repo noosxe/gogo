@@ -8,7 +8,10 @@
 #   scripts/linux-e2e.sh self-test            the harness itself: a plain xterm,
 #                                             teardown on TERM, INT, KILL, timeout,
 #                                             the build's display, the null audio sink
-#   scripts/linux-e2e.sh cleanup              remove scratch of dead runs
+#   scripts/linux-e2e.sh cleanup [--prune-installed NAME|all]
+#                                             remove scratch of dead runs; list the
+#                                             installed bases (--reuse-install) and
+#                                             their size, and prune the ones named
 #
 # run options:
 #   --manifest FILE   manifest (default e2e/<gogid>.toml)
@@ -26,6 +29,10 @@
 #   --keep            keep the scratch dir, for a look around
 #   --no-cache        download Proton, umu's runtime and the game afresh, into
 #                     scratch (default: target/linux-e2e/cache, shared by runs)
+#   --reuse-install   skip the build when an installed base with the same inputs
+#                     is in target/linux-e2e/cache/installed, and run on a
+#                     copy-on-write copy of it; else build and save one. For
+#                     manifest rounds: a PR's final run and CI build afresh
 #   --out DIR         results root (default target/linux-e2e/results)
 #
 # Output: progress on stderr; the summary JSON on stdout, then on the LAST line
@@ -149,7 +156,7 @@ start_sandbox() { # mode logfile command…
         env -i "${SE[@]}" "$TOOLS/bin/unshare" --user --map-root-user --net "$TOOLS/bin/bash" -c '
             for _ in $(seq 100); do [ "$(wc -l </proc/net/dev)" -gt 3 ] && break; sleep 0.1; done
             "$1" link set lo up; shift
-            exec "$@"' _ "$TOOLS/bin/ip" "$TOOLS/bin/bwrap" "${SB[@]}" "$@" >"$logf" 2>&1 9>&- </dev/null &
+            exec "$@"' _ "$TOOLS/bin/ip" "$TOOLS/bin/bwrap" "${SB[@]}" "$@" >"$logf" 2>&1 8>&- 9>&- </dev/null &
         SANDBOX_PID=$!
         # Not before the holder has left ours.
         for _ in $(seq 100); do
@@ -159,10 +166,10 @@ start_sandbox() { # mode logfile command…
         done
         "$TOOLS/bin/pasta" --config-net --foreground --quiet --dns-forward "$BUILD_DNS" \
             --userns "/proc/$SANDBOX_PID/ns/user" --netns "/proc/$SANDBOX_PID/ns/net" \
-            >>"$logf" 2>&1 9>&- </dev/null &
+            >>"$logf" 2>&1 8>&- 9>&- </dev/null &
         NET_PID=$!
     else
-        env -i "${SE[@]}" "$TOOLS/bin/bwrap" "${SB[@]}" "$@" >"$logf" 2>&1 9>&- </dev/null &
+        env -i "${SE[@]}" "$TOOLS/bin/bwrap" "${SB[@]}" "$@" >"$logf" 2>&1 8>&- 9>&- </dev/null &
         SANDBOX_PID=$!
     fi
 }
@@ -266,6 +273,10 @@ teardown() {
     fi
     local deleted=false
     if [ "$KEEP" = 1 ]; then
+        if [ "${REUSE:-0}" = 1 ] && [ -d "$RUN" ] && mv -T "$RUN" "$INSTALLED/.runs/$SLUG"; then
+            # Out of the next reused run's way; paths inside still name the old one.
+            RUN="$INSTALLED/.runs/$SLUG"
+        fi
         log "kept scratch: $RUN"
     elif delete_scratch; then
         deleted=true
@@ -281,7 +292,7 @@ on_signal() {
 }
 
 delete_scratch() {
-    case "$RUN" in "$ROOT"/runs/*) ;; *) log "not deleting $RUN"; return 1 ;; esac
+    case "$RUN" in "$ROOT"/runs/?* | "${INSTALLED:-/nonexistent}"/.runs/?*) ;; *) log "not deleting $RUN"; return 1 ;; esac
     [ -d "$RUN" ] || return 0
     # Proton and umu leave read-only dirs; bind-mount targets are just empty
     # dirs out here, so the cache isn't touched.
@@ -335,7 +346,7 @@ write_summary() { # entry-status killed left deleted
         --arg results "$RESULTS" --arg scratch "$RUN" --argjson deleted "$deleted" \
         --arg keep "$KEEP" --arg left "$left" --arg killed "$killed" --arg excerpt "$excerpt" \
         --arg runtime "${STATE_RUNTIME:-}" --arg date "$(date -u +%F)" \
-        --arg installer "${INSTALLER_FILE##*/}" '
+        --arg installer "${INSTALLER_FILE##*/}" --argjson reuse "$(reuse_json)" '
         ($r[0]) as $res
         | ($b[0]) as $bld
         | (($bld.checks // []) | map(.name = "build_" + .name)) as $build_checks
@@ -351,14 +362,16 @@ write_summary() { # entry-status killed left deleted
            steps:($res.steps // []),
            isolation:($res.isolation // {}), gpu_detail:($res.gpu // {}),
            audio:($res.audio // {}),
-           build:{exit:($bld.exit // null), secs:($bld.secs // null), isolation:($bld.isolation // {}),
+           build:{reused:($reuse.reused // false), reuse:$reuse,
+                  exit:($bld.exit // null), secs:($bld.secs // null), isolation:($bld.isolation // {}),
                   installer:(if $installer == "" then null else $installer end),
                   windows:($bld.windows // []), support_installer:($bld.support_installer // null)},
            game_exit:($res.game_exit // null),
            doctor:($res.doctor // null),
            log_excerpt:$excerpt,
            cleanup:{left:$left, swept:$killed, scratch:$scratch, scratch_deleted:$deleted, kept:($keep == "1")},
-           tested_entry:(if $ok and $gogid != "self-test" and $runtime != ""
+           # A compat entry stands on a fresh build, never a reused one.
+           tested_entry:(if $ok and $gogid != "self-test" and $runtime != "" and ($reuse.reused // false | not)
                          then {runtime:$runtime, host:("headless-sway/"+$gpu), date:$date}
                          else null end),
            results:$results}' >"$summary"
@@ -368,6 +381,25 @@ write_summary() { # entry-status killed left deleted
     else FINAL_EXIT=1; fi
     jq . "$summary"
     printf '%s\n' "$summary"
+}
+
+# build.reuse: null without --reuse-install. `reused` says the game ran on a
+# copy of an earlier build; `saved`, that this run's build became a base.
+reuse_json() {
+    [ "${REUSE:-0}" = 1 ] || { echo null; return 0; }
+    local meta='null'
+    [ "${REUSED:-}" != 1 ] || meta="$(jq -c '{built_by, build_results, created, build_secs}' "${REUSE_BASE:-}/meta.json" 2>/dev/null || echo null)"
+    jq -cn --argjson reused "$([ "${REUSED:-}" = 1 ] && echo true || echo false)" --arg key "${REUSE_KEY:-}" \
+        --arg base "${REUSE_BASE:-}" --arg copy "${COPY_MODE:-}" --arg secs "${COPY_SECS:-}" --arg saved "${SAVED:-}" \
+        --arg note "${SAVE_NOTE:-}" --argjson meta "$meta" '
+        {reused:$reused, key:(if $key == "" then null else $key end),
+         base:(if $base == "" then null else $base end),
+         source:(if $reused then "cache" else "fresh build" end),
+         copy:(if $copy == "" then null else $copy end),
+         copy_secs:(if $secs == "" then null else ($secs | tonumber) end),
+         saved:(if $saved == "" then null else ($saved == "true") end),
+         note:(if $note == "" then null else $note end),
+         base_meta:$meta}'
 }
 
 # --- GPU ----------------------------------------------------------------------
@@ -491,9 +523,226 @@ gpu_setup() { # comma-joined render nodes, the compositor's first ("": software)
 
 # --- run ----------------------------------------------------------------------
 
+# The scratch a build starts from. Part of the installed-base key
+# (install_key_inputs): what's here shapes what the build leaves.
+seed_scratch() {
+    mkdir -p "$CACHE/store/runtimes" "$CACHE/store/renderers" "$CACHE/depot" "$CACHE/umu" \
+        "$RUN/home" "$RUN/xdg/data/umu" "$RUN/xdg/config" "$RUN/xdg/cache" "$RUN/xdg/state" \
+        "$RUN/harness" "$RUN/store" "$GOGO_HOME_DIR" \
+        "$RUN/xdg/cache/gogo/depot"
+    # One mount: the store stages renderers in runtimes/.tmp and renames them
+    # over, which two bind mounts refuse (EXDEV), and cnc-ddraw falls back.
+    ln -s "$RUN/store/runtimes" "$GOGO_HOME_DIR/runtimes"
+    ln -s "$RUN/store/renderers" "$GOGO_HOME_DIR/renderers"
+    cp "$HELPER_SRC" "$RUN/harness/helper.py"
+    mkdir -p "$RUN/etc"
+    printf '%s:x:%s:%s::%s:%s\n' "$(id -un)" "$(id -u)" "$(id -g)" "$RUN/home" "$TOOLS/bin/bash" >"$RUN/etc/passwd"
+    printf '%s:x:%s:\n' "$(id -gn)" "$(id -g)" >"$RUN/etc/group"
+    printf 'nameserver %s\n' "$BUILD_DNS" >"$RUN/etc/resolv.conf"
+    # Answers `gogo linux-app` would ask for, and never Steam's tools dir.
+    printf '[linux]\numu = "zipapp"\nproton_dir = "store"\n' >"$GOGO_HOME_DIR/config.toml"
+}
+
+# --- installed bases (--reuse-install, #240) ------------------------------------
+#
+# A build's output, kept under $INSTALLED/<target>-<key>/: tree/ holds the
+# run's gogo, home and xdg as the build left them, before anything launched,
+# and meta.json says what built it. A reused run gets a copy-on-write copy
+# (reflinks; a full copy where the filesystem has none) at the very path it
+# was built at, $INSTALLED/.runs/<target>: launch.sh, the prefix and
+# state.toml name absolute paths, and a moved data root would send launch.sh
+# through setup again. The base itself is only ever read.
+
+# Bump with any change to what a build gets that the key doesn't already see.
+REUSE_FORMAT=1
+
+# Where bases live. target/linux-e2e/cache may be a link to a checkout's
+# shared cache (worktrees share one), so bases are shared too: the resolved
+# dir must be a target/linux-e2e/cache/installed, ours, and not a link itself.
+# GOGO_E2E_INSTALLED_DIR is the self-test's own, under $ROOT, so it never
+# prunes the real ones. Runs on a base have their scratch in its .runs/, and
+# take turns on its .lock (fd 8) across checkouts too.
+installed_dir() {
+    local d="${GOGO_E2E_INSTALLED_DIR:-$ROOT/cache/installed}" real
+    if [ -n "${GOGO_E2E_INSTALLED_DIR:-}" ]; then
+        case "$d" in "$ROOT"/?*) ;; *) die "installed bases must be under $ROOT: $d" 2 ;; esac
+    fi
+    mkdir -p "$d/.runs"
+    real="$(readlink -f "$d")"
+    if [ -L "$d" ] || [ "$(stat -c %u "$real")" != "$(id -u)" ] || [ "$(stat -c %u "$real/.runs")" != "$(id -u)" ] ||
+        [ -L "$real/.runs" ]; then
+        die "not the harness's own dir: $d" 3
+    fi
+    if [ -n "${GOGO_E2E_INSTALLED_DIR:-}" ]; then
+        [ "$real" = "$d" ] || die "a link on the way to $d" 3
+    else
+        case "$real" in */target/linux-e2e/cache/installed) ;; *) die "$d leads to $real" 3 ;; esac
+    fi
+    INSTALLED="$real"
+    exec 8>"$INSTALLED/.lock"
+}
+
+# Every input of a build, as JSON: its sha256 is the key. gogo's sources
+# (gogo_identity) cover its compat DB, LAUNCHER_VERSION and the Proton and umu
+# pins; the scratch's seed covers config.toml (no L4 yet); the build's sandbox
+# code and tools cover the rest. A depot game is keyed on its download cache as it is:
+# a newer build on GOG shows up once a fresh run fetches it.
+install_key_inputs() {
+    local gogo_id="" installer='null' depot='null' code
+    if [ -n "$GOGO" ]; then gogo_id="$(gogo_identity)"; fi
+    if [ -n "$INSTALLER_DIR" ]; then
+        # The .exe and its .bin parts by name, size and mtime: hashing 70 GB isn't worth it.
+        installer="$(find "$INSTALLER_DIR" -maxdepth 1 -type f -printf '%f %s %T@\n' | LC_ALL=C sort |
+            jq -Rsc --arg f "${INSTALLER_FILE##*/}" '{file:$f, files:(split("\n") | map(select(. != "")))}')"
+    elif [ -n "$GOGID" ]; then
+        # Files only: a build touches its dirs' mtimes. None yet: an empty listing.
+        depot="$( (cd "$CACHE/depot" && find "./$GOGID" -type f -printf '%P %s %T@\n' 2>/dev/null || true) | LC_ALL=C sort |
+            sha256sum | cut -d' ' -f1)"
+        depot="\"$depot\""
+    fi
+    code="$(declare -f seed_scratch sandbox_args sandbox_env start_sandbox software_setup | sha256sum | cut -d' ' -f1)"
+    jq -cn --argjson format "$REUSE_FORMAT" --arg target "$TARGET" --arg gogo "$gogo_id" --arg umu "$UMU_PY" \
+        --argjson cmd "$BUILD_CMD" --argjson installer "$installer" --argjson depot "$depot" \
+        --arg tools "$TOOLS" --arg code "$code" --arg run "$RUN" \
+        --arg config "$(cat "$GOGO_HOME_DIR/config.toml")" \
+        --args '{format:$format, target:$target, gogo:$gogo, umu_python:$umu, build_command:$cmd,
+                 installer:$installer, depot:$depot, tools:$tools, harness:$code, run_path:$run,
+                 config_toml:$config, build_env:$ARGS.positional}' \
+        "${SOFTWARE_ENV[@]}" "${SOFTWARE_COMPOSITOR_ENV[@]}" |
+        # $GOGO is in the command; its identity is already in .gogo.
+        jq -c --arg g "$GOGO" '.build_command |= map(if . == $g then "<gogo>" else . end)'
+}
+
+key_of() { sha256sum | cut -c1-16; }
+
+# What gogo is, for the key. Its store path won't do: the package's src is
+# the whole checkout, so a manifest edit is a new path. Its build reads only
+# the workspace, compat/ (build.rs), the toolchain and the Nix that builds
+# and wraps it, so those files' hash is. A --gogo outside the store: its bytes.
+gogo_identity() {
+    case "$GOGO" in
+    /nix/store/*)
+        (cd "$REPO" && find crates compat nix -type f -print0 | LC_ALL=C sort -z |
+            xargs -0 sha256sum -- Cargo.toml Cargo.lock rust-toolchain.toml flake.nix flake.lock) |
+            sha256sum | sed 's/^/src:/; s/ .*//'
+        ;;
+    *) sha256sum <"$GOGO" | sed 's/^/sha256:/; s/ .*//' ;;
+    esac
+}
+
+# Reflinks where $RUN and the bases share a filesystem that has them (btrfs,
+# XFS), a full copy elsewhere (CI's ext4). Sets COPY_MODE.
+probe_reflinks() {
+    local probe="$INSTALLED/.probe-$$"
+    printf 'probe\n' >"$RUN/harness/.probe"
+    if cp --reflink=always "$RUN/harness/.probe" "$probe" 2>/dev/null; then COPY_MODE=reflink
+    else COPY_MODE=copy; log "no reflinks between $RUN and $INSTALLED: full copies"; fi
+    rm -f "$probe" "$RUN/harness/.probe"
+}
+
+copy_tree() { # from to
+    if [ "$COPY_MODE" = reflink ]; then cp -a --reflink=always "$1/." "$2/"
+    else cp -a "$1/." "$2/"; fi
+}
+
+# A base we may copy from: ours, under $INSTALLED, no links, built for this
+# run's path and key, and nothing in it ours-only or leading out (the helper's
+# tree-check). Prints why not.
+base_problem() { # base key
+    local base="$1" key="$2" f
+    case "$base" in "$INSTALLED"/*) ;; *) echo "not under $INSTALLED"; return 0 ;; esac
+    for f in "$base" "$base/meta.json" "$base/tree"; do
+        if [ -L "$f" ] || [ ! -e "$f" ] || [ "$(stat -c %u "$f")" != "$(id -u)" ]; then
+            echo "$f: missing, a link or not ours"; return 0
+        fi
+    done
+    [ "$(readlink -f "$base")" = "$base" ] || { echo "a link on its path"; return 0; }
+    jq -e --arg k "$key" --arg r "$RUN" '.key == $k and .inputs.run_path == $r' "$base/meta.json" >/dev/null 2>&1 ||
+        { echo "meta.json isn't for key $key at $RUN"; return 0; }
+    tree_problem "$base/tree"
+}
+
+# The helper's tree-check, as one line; empty: none. A crash counts as one.
+tree_problem() { # tree
+    local out
+    out="$(helper tree-check "$1" "$RUN" "$HOME" "$ROOT" 2>&1)" && return 0
+    printf '%s' "${out:-tree-check failed}" | head -n 5 | tr '\n' ';'
+}
+
+# A copy-on-write copy of the base into this run's scratch.
+restore_base() { # base
+    local base="$1" t0
+    t0="$(date +%s.%N)"
+    # Only what seed_scratch just made: the base has the same, and the build's too.
+    rm -rf "${RUN:?}/gogo" "${RUN:?}/home" "${RUN:?}/xdg"
+    copy_tree "$base/tree" "$RUN"
+    COPY_SECS="$(awk -v a="$t0" -v b="$(date +%s.%N)" 'BEGIN { printf "%.1f", b - a }')"
+}
+
+# Right after the build, before the game's sandbox starts: the state a fresh
+# run's launch.sh would find. Under the key of the inputs as they are now (a
+# first build fills the depot cache it's keyed on). Sets SAVED / SAVE_NOTE.
+save_base() { # build-secs
+    local inputs key base tmp problems
+    inputs="$(install_key_inputs)"
+    key="$(key_of <<<"$inputs")"
+    base="$INSTALLED/$TARGET-$key"
+    REUSE_KEY="$key" REUSE_BASE="$base"
+    if [ -e "$base" ]; then SAVED=false SAVE_NOTE="a base for $key is already there"; return 0; fi
+    tmp="$INSTALLED/.partial-$TARGET-$$"
+    rm -rf "$tmp"
+    mkdir -p "$tmp/tree"
+    log "saving the installed base: $base ($COPY_MODE)"
+    local d
+    problems=""
+    for d in gogo home xdg; do
+        mkdir "$tmp/tree/$d"
+        copy_tree "$RUN/$d" "$tmp/tree/$d" || { problems="the copy failed (disk full?)"; break; }
+    done
+    [ -n "$problems" ] || problems="$(tree_problem "$tmp/tree")"
+    if [ -n "$problems" ]; then
+        chmod -R u+rwX "$tmp" 2>/dev/null || true
+        rm -rf "$tmp"
+        SAVED=false SAVE_NOTE="not saved: $problems"
+        log "installed base $SAVE_NOTE"
+        return 0
+    fi
+    jq -n --arg key "$key" --argjson inputs "$inputs" --arg by "$RUN_ID" --arg results "$RESULTS" \
+        --arg created "$(date -u +%FT%TZ)" --argjson secs "${1:-null}" --arg copy "$COPY_MODE" \
+        '{key:$key, inputs:$inputs, built_by:$by, build_results:$results, created:$created,
+          build_secs:$secs, copy:$copy}' >"$tmp/meta.json"
+    mv -T "$tmp" "$base"
+    SAVED=true SAVE_NOTE=""
+}
+
+remove_tree() { # dir under $INSTALLED
+    case "$1" in "$INSTALLED"/?*) ;; *) log "not deleting $1"; return 1 ;; esac
+    [ ! -L "$1" ] || { log "not deleting a link: $1"; return 1; }
+    chmod -R u+rwX "$1" 2>/dev/null || true
+    rm -rf "$1"
+}
+
+# cleanup's list: name, size, when, what built it. du counts shared reflinked
+# extents in full, so on btrfs it's an upper bound.
+list_installed() {
+    local d n=0 total=0 bytes
+    for d in "$INSTALLED"/*/; do
+        [ -d "$d" ] || continue
+        d="${d%/}"
+        bytes="$(du -sb "$d" | cut -f1)"
+        total=$((total + bytes))
+        n=$((n + 1))
+        printf '%s\t%s\t%s\t%s\n' "${d##*/}" "$(numfmt --to=iec "$bytes")" \
+            "$(jq -r '.created // "?"' "$d/meta.json" 2>/dev/null || echo '?')" \
+            "$(jq -r '.built_by // "?"' "$d/meta.json" 2>/dev/null || echo '?')"
+    done
+    log "installed bases in $INSTALLED: $n, $(numfmt --to=iec "$total") (du; reflinked copies share extents)"
+}
+
+
 cmd_run() {
     local target="" manifest="" gpu="" expect_gpu="" secs=600 out="" installer=""
-    GOGO="" KEEP=0 FRESH=0 INSTALLER_DIR="" INSTALLER_FILE=""
+    GOGO="" KEEP=0 FRESH=0 REUSE=0 INSTALLER_DIR="" INSTALLER_FILE=""
     while [ $# -gt 0 ]; do
         case "$1" in
         --manifest) manifest="${2:?}"; shift 2 ;;
@@ -505,6 +754,7 @@ cmd_run() {
         --out) out="${2:?}"; shift 2 ;;
         --keep) KEEP=1; shift ;;
         --no-cache) FRESH=1; shift ;;
+        --reuse-install) REUSE=1; shift ;;
         -h | --help) usage ;;
         -*) log "unknown option: $1"; usage ;;
         *) [ -z "$target" ] || usage; target="$1"; shift ;;
@@ -514,6 +764,9 @@ cmd_run() {
     case "$secs" in '' | *[!0-9]*) die "--secs wants a number" 2 ;; esac
     [ -n "$manifest" ] || manifest="$REPO/e2e/$target.toml"
     [ -f "$manifest" ] || die "no manifest: $manifest" 2
+    case "$target" in *[!A-Za-z0-9._-]* | .*) die "not a game id: $target" 2 ;; esac
+    TARGET="$target"
+    [ "$REUSE" = 0 ] || [ "$FRESH" = 0 ] || die "--reuse-install keeps bases in the cache: not with --no-cache" 2
     if [ -n "$installer" ]; then
         installer="$(readlink -f -- "$installer")"
         [ -f "$installer" ] || die "--installer: no such file" 2
@@ -554,6 +807,14 @@ cmd_run() {
     if [ -n "$INSTALLER_FILE" ] && [ -z "$GOGID" ] && [ "$(jq -c .build_command <<<"$MANIFEST_JSON")" = null ]; then
         die "--installer: this manifest builds nothing" 2
     fi
+    if [ -n "$GOGID" ]; then
+        # The installer lane reads the id from the tree it installs (design 18 §10).
+        BUILD_CMD="$(jq -cn --arg g "$GOGO" --arg i "${INSTALLER_FILE:-$GOGID}" '[$g,"linux-app",$i,"--yes"]')"
+    else
+        BUILD_CMD="$(jq -c .build_command <<<"$MANIFEST_JSON")"
+    fi
+    [ "$REUSE" = 0 ] || [ "$BUILD_CMD" != null ] || die "--reuse-install: this manifest builds nothing" 2
+    [ "$REUSE" = 0 ] || installed_dir
 
     # One run at a time: they share the cache and the GPU. fd 9 stays out of
     # the sandbox.
@@ -564,12 +825,23 @@ cmd_run() {
         flock 9
     fi
     remove_dead_runs
+    if [ "$REUSE" = 1 ] && ! flock -n 8; then
+        log "another run on an installed base is going (another checkout?): waiting"
+        flock 8
+    fi
 
     local stamp slug
     stamp="$(date -u +%Y%m%dT%H%M%SZ)"
     slug="$target-$stamp-$$"
+    SLUG="$slug"
     RUN_ID="linux-e2e-$slug"
     RUN="$ROOT/runs/$slug"
+    if [ "$REUSE" = 1 ]; then
+        # The path the base was built at, the same for every run of it (above).
+        RUN="$INSTALLED/.runs/$target"
+        remove_dead_reuse_runs
+        [ ! -e "$RUN" ] || die "$RUN is in the way (a kept run killed hard?): delete it by hand" 3
+    fi
     RESULTS="${out:-$ROOT/results}/$slug"
     mkdir -p "$RESULTS/shots" "$RUN"
     RESULTS="$(readlink -f "$RESULTS")"
@@ -585,23 +857,29 @@ cmd_run() {
     PREFIX=""
     if [ -n "$GOGID" ]; then PREFIX="$GOGO_HOME_DIR/games/$GOGID/prefix"; fi
     if [ "$FRESH" = 1 ]; then CACHE="$RUN/cache"; else CACHE="$ROOT/cache"; fi
-    mkdir -p "$CACHE/store/runtimes" "$CACHE/store/renderers" "$CACHE/depot" "$CACHE/umu" \
-        "$RUN/home" "$RUN/xdg/data/umu" "$RUN/xdg/config" "$RUN/xdg/cache" "$RUN/xdg/state" \
-        "$RUN/harness" "$RUN/store" "$GOGO_HOME_DIR" \
-        "$RUN/xdg/cache/gogo/depot"
-    # One mount: the store stages renderers in runtimes/.tmp and renames them
-    # over, which two bind mounts refuse (EXDEV), and cnc-ddraw falls back.
-    ln -s "$RUN/store/runtimes" "$GOGO_HOME_DIR/runtimes"
-    ln -s "$RUN/store/renderers" "$GOGO_HOME_DIR/renderers"
-    cp "$HELPER_SRC" "$RUN/harness/helper.py"
-    mkdir -p "$RUN/etc"
-    printf '%s:x:%s:%s::%s:%s\n' "$(id -un)" "$(id -u)" "$(id -g)" "$RUN/home" "$TOOLS/bin/bash" >"$RUN/etc/passwd"
-    printf '%s:x:%s:\n' "$(id -gn)" "$(id -g)" >"$RUN/etc/group"
-    printf 'nameserver %s\n' "$BUILD_DNS" >"$RUN/etc/resolv.conf"
-    # Answers `gogo linux-app` would ask for, and never Steam's tools dir.
-    printf '[linux]\numu = "zipapp"\nproton_dir = "store"\n' >"$GOGO_HOME_DIR/config.toml"
+    seed_scratch
     log "scratch: $RUN"
     log "results: $RESULTS"
+    REUSED=0 REUSE_KEY="" REUSE_BASE="" COPY_MODE="" COPY_SECS="" SAVED="" SAVE_NOTE=""
+    if [ "$REUSE" = 1 ]; then
+        probe_reflinks
+        REUSE_KEY="$(install_key_inputs | key_of)"
+        REUSE_BASE="$INSTALLED/$target-$REUSE_KEY"
+        if [ -e "$REUSE_BASE" ] || [ -L "$REUSE_BASE" ]; then
+            local problem
+            problem="$(base_problem "$REUSE_BASE" "$REUSE_KEY")"
+            if [ -n "$problem" ]; then
+                INFRA_ERROR="won't reuse $REUSE_BASE: $problem"
+                exit 3
+            fi
+            log "reusing the installed base $REUSE_BASE ($COPY_MODE)"
+            restore_base "$REUSE_BASE"
+            REUSED=1
+            log "copied in $COPY_SECS s: no build"
+        else
+            log "no installed base for key $REUSE_KEY: building, then saving one"
+        fi
+    fi
 
     local forbidden
     forbidden="$(jq -cn --arg h "$HOME" --arg r "/run/user/$(id -u)" '[
@@ -630,14 +908,8 @@ cmd_run() {
             "$@" >"$file"
     }
 
-    local build_cmd='null'
-    if [ -n "$GOGID" ]; then
-        # The installer lane reads the id from the tree it installs (design 18 §10).
-        build_cmd="$(jq -cn --arg g "$GOGO" --arg i "${INSTALLER_FILE:-$GOGID}" '[$g,"linux-app",$i,"--yes"]')"
-    else
-        build_cmd="$(jq -c .build_command <<<"$MANIFEST_JSON")"
-    fi
-    if [ "$build_cmd" != null ]; then
+    local build_cmd="$BUILD_CMD"
+    if [ "$build_cmd" != null ] && [ "$REUSED" = 0 ]; then
         log "building the game on a headless display (log: $RESULTS/build.log)"
         MODE_NOW=build
         local build_extra support_log=""
@@ -663,6 +935,7 @@ cmd_run() {
             BUILD_FAILED="the installer didn't build game $GOGID, see $RESULTS/build.log"
             exit 1
         fi
+        [ "$REUSE" = 0 ] || save_base "$(jq '.secs // null' "$RESULTS/build-result.json" 2>/dev/null || echo null)"
     fi
 
     local launch launch_cwd doctor='null' game_log=""
@@ -694,6 +967,18 @@ cmd_run() {
     exit 0
 }
 
+# The same, for runs on installed bases. Only with fd 8 held: then no run of
+# any checkout is using one.
+remove_dead_reuse_runs() {
+    local d
+    for d in "$INSTALLED"/.runs/*/; do
+        [ -d "$d" ] && [ ! -L "${d%/}" ] && [ ! -e "$d/.kept" ] || continue
+        log "removing dead run's scratch: $d"
+        chmod -R u+rwX "$d" 2>/dev/null || true
+        rm -rf "$d"
+    done
+}
+
 # Scratch whose owner died too hard for its teardown (a SIGKILL, a power cut).
 remove_dead_runs() {
     local d owner
@@ -709,12 +994,53 @@ remove_dead_runs() {
 }
 
 cmd_cleanup() {
+    local prune=() name d
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        --prune-installed) prune+=("${2:?}"); shift 2 ;;
+        *) usage ;;
+        esac
+    done
     resolve_tools
     use_tools
     mkdir -p "$ROOT/runs"
     exec 9>"$ROOT/lock"
     flock -n 9 || die "a run is going"
     remove_dead_runs
+    installed_dir
+    if ! flock -n 8; then
+        # Another checkout's: its scratch and its save are in here.
+        [ "${#prune[@]}" = 0 ] || die "a run on an installed base is going: not pruning"
+        log "a run on an installed base is going: only listing them"
+        list_installed
+        return 0
+    fi
+    remove_dead_reuse_runs
+    # A save no run finished: with the lock held, nobody is writing one.
+    for d in "$INSTALLED"/.partial-* "$INSTALLED"/.probe-*; do
+        [ -e "$d" ] || continue
+        log "removing an unfinished base: $d"
+        remove_tree "$d" || true
+    done
+    for name in "${prune[@]+"${prune[@]}"}"; do
+        if [ "$name" = all ]; then
+            for d in "$INSTALLED"/*/; do
+                [ -d "$d" ] || continue
+                log "pruning ${d%/}"
+                remove_tree "${d%/}"
+            done
+            continue
+        fi
+        case "$name" in */* | .* | '') die "--prune-installed wants a name cleanup lists, or all: $name" 2 ;; esac
+        [ -d "$INSTALLED/$name" ] || die "no installed base $name" 2
+        log "pruning $INSTALLED/$name"
+        remove_tree "$INSTALLED/$name"
+    done
+    list_installed
+    for d in "$INSTALLED"/.runs/*/; do
+        [ -d "$d" ] && log "kept, delete it by hand: ${d%/}"
+    done
+    return 0
 }
 
 # --- self-test ----------------------------------------------------------------
@@ -739,17 +1065,123 @@ st_wait_window() { # outdir → waits for the driver's "window" check
     return 1
 }
 
-st_assert_clean() { # name outdir exit-code want-exit
-    local name="$1" out="$2" code="$3" want="$4" summary
+st_assert_clean() { # name outdir exit-code want-exit [kept]
+    local name="$1" out="$2" code="$3" want="$4" kept="${5:-}" summary
     summary="$(tail -n 1 "$out/stdout")"
     [ "$code" = "$want" ] || st_fail "$name: exit $code, want $want (see $out/stderr)"
     if [ ! -f "$summary" ]; then st_fail "$name: no summary (see $out/stderr)"; return 0; fi
-    jq -e '.cleanup.left == "" and .cleanup.swept == "" and .cleanup.scratch_deleted' "$summary" >/dev/null ||
+    jq -e --arg k "$kept" '.cleanup.left == "" and .cleanup.swept == ""
+        and (if $k == "" then .cleanup.scratch_deleted else .cleanup.kept end)' "$summary" >/dev/null ||
         st_fail "$name: cleanup: $(jq -c .cleanup "$summary")"
     local scratch
     scratch="$(jq -r .cleanup.scratch "$summary")"
-    [ ! -e "$scratch" ] || st_fail "$name: scratch still there: $scratch"
+    if [ -z "$kept" ]; then [ ! -e "$scratch" ] || st_fail "$name: scratch still there: $scratch"
+    else [ -d "$scratch" ] || st_fail "$name: kept scratch not there: $scratch"; fi
     log "self-test: $name: exit $code, cleanup $(jq -c .cleanup.scratch_deleted "$summary")"
+}
+
+# The bases' own fingerprint: every entry's type, mode, size, mtime and link,
+# and the fake install's stamp.
+st_tree_print() { # base
+    (cd "$1/tree" && find . -printf '%p %y %m %s %T@ %l\n' | LC_ALL=C sort && cat gogo/games/fake/installed)
+}
+
+st_reuse_run() { # name outdir manifest want-exit [extra…]: sets ST_RS, the summary
+    local name="$1" out="$2" manifest="$3" want="$4" code=0
+    shift 4
+    mkdir -p "$out"
+    env --default-signal=INT,TERM "$SELF" run self-test --manifest "$manifest" --out "$out" --reuse-install "$@" \
+        >"$out/stdout" 2>"$out/stderr" || code=$?
+    case " $* " in *" --keep "*) st_assert_clean "$name" "$out" "$code" "$want" kept ;;
+    *) st_assert_clean "$name" "$out" "$code" "$want" ;; esac
+    ST_RS="$(tail -n 1 "$out/stdout")"
+}
+
+st_reuse() { # self-test dir
+    local base="$1" bases one two before m2 code
+    log "self-test: --reuse-install"
+    export GOGO_E2E_INSTALLED_DIR="$base/installed"
+    local m="$REPO/e2e/self-test-reuse.toml"
+
+    # A miss: it builds, saves the base, then launches on its own scratch.
+    st_reuse_run reuse-build "$base/reuse-1" "$m" 0
+    jq -e '.ok and .build.reused == false and .build.exit == 0 and .build.reuse.saved
+        and .build.reuse.source == "fresh build" and (.build.reuse.key | length == 16)' "$ST_RS" >/dev/null ||
+        st_fail "reuse-build: $(jq -c '{failed, build}' "$ST_RS" 2>/dev/null)"
+    one="$(jq -r .build.reuse.base "$ST_RS" 2>/dev/null)"
+    [ -f "$one/meta.json" ] || { st_fail "reuse-build: no base at $one"; unset GOGO_E2E_INSTALLED_DIR; return 0; }
+    [ ! -e "$one/tree/gogo/games/fake/launched" ] || st_fail "reuse-build: the launch wrote into the base"
+    before="$(st_tree_print "$one")"
+
+    # A hit, twice: no build, the copy's first launch both times. The game
+    # writes `launched` and fails if it's there, so the third run passing says
+    # the second's write didn't reach it. The third keeps its scratch, which
+    # moves out of the next one's way.
+    local i keep
+    for i in 2 3; do
+        keep=""
+        [ "$i" = 2 ] || keep=--keep
+        st_reuse_run "reuse-hit-$i" "$base/reuse-$i" "$m" 0 $keep
+        jq -e --arg b "$one" '.ok and .build.reused and .build.exit == null and .build.reuse.source == "cache"
+            and .build.reuse.base == $b and .build.reuse.copy_secs != null and .tested_entry == null
+            and (.checks | all(.name | startswith("build_") | not))' "$ST_RS" >/dev/null ||
+            st_fail "reuse-hit-$i: $(jq -c '{failed, build}' "$ST_RS" 2>/dev/null)"
+        [ "$(st_tree_print "$one")" = "$before" ] || st_fail "reuse-hit-$i: the base changed"
+    done
+    local kept
+    kept="$(jq -r .cleanup.scratch "$ST_RS")"
+    case "$kept" in "$GOGO_E2E_INSTALLED_DIR"/.runs/self-test-*) ;; *) st_fail "reuse-keep: kept at $kept" ;; esac
+    [ -e "$kept/gogo/games/fake/launched" ] || st_fail "reuse-keep: the kept scratch has no launch in it"
+    chmod -R u+rwX "$kept" && rm -rf "$kept"
+
+    # Another build command is another key: it builds and saves a second base.
+    m2="$base/self-test-reuse-2.toml"
+    sed 's|date +%s%N|date +v2-%s%N|' "$m" >"$m2"
+    cmp -s "$m" "$m2" && st_fail "reuse-key: the manifest didn't change"
+    st_reuse_run reuse-key "$base/reuse-key" "$m2" 0
+    two="$(jq -r .build.reuse.base "$ST_RS" 2>/dev/null)"
+    if ! jq -e '.ok and .build.reused == false and .build.exit == 0 and .build.reuse.saved' "$ST_RS" >/dev/null ||
+        [ "$two" = "$one" ]; then
+        st_fail "reuse-key: didn't build a base of its own: $(jq -c .build "$ST_RS" 2>/dev/null)"
+    fi
+
+    # A link out of the run, into the base: refused before anything runs.
+    touch -r "$one/tree/gogo/games/fake" "$base/fake-mtime"
+    ln -s "$one/tree/gogo/games/fake/installed" "$one/tree/gogo/games/fake/out"
+    st_reuse_run reuse-link "$base/reuse-link" "$m" 3
+    jq -e '.failed == ["harness", "finished"] and (.checks[0].detail | test("link out of the run"))' "$ST_RS" >/dev/null ||
+        st_fail "reuse-link: $(jq -c '[.checks[] | select(.ok | not)]' "$ST_RS" 2>/dev/null)"
+    rm -f "$one/tree/gogo/games/fake/out"
+    touch -r "$base/fake-mtime" "$one/tree/gogo/games/fake"
+    [ "$(st_tree_print "$one")" = "$before" ] || st_fail "reuse-link: the base changed"
+
+    # Usage: a manifest that builds nothing, --no-cache, a dir outside target/.
+    code=0
+    "$SELF" run self-test --manifest "$REPO/e2e/self-test-hold.toml" --reuse-install >/dev/null 2>&1 || code=$?
+    [ "$code" = 2 ] || st_fail "usage: --reuse-install with no build: exit $code, want 2"
+    code=0
+    "$SELF" run self-test --manifest "$m" --reuse-install --no-cache >/dev/null 2>&1 || code=$?
+    [ "$code" = 2 ] || st_fail "usage: --reuse-install --no-cache: exit $code, want 2"
+    code=0
+    GOGO_E2E_INSTALLED_DIR=/tmp/gogo-e2e-installed "$SELF" run self-test --manifest "$m" --reuse-install \
+        >/dev/null 2>&1 || code=$?
+    [ "$code" = 2 ] || st_fail "usage: a base dir outside target/: exit $code, want 2"
+    [ ! -e /tmp/gogo-e2e-installed ] || st_fail "usage: made a base dir outside target/"
+
+    # cleanup lists both with their size, prunes one by name, then the rest.
+    bases="$("$SELF" cleanup 2>"$base/cleanup.stderr")" || st_fail "cleanup failed"
+    if ! grep -q "^${one##*/}	" <<<"$bases" || ! grep -q "^${two##*/}	" <<<"$bases" ||
+        ! grep -q "installed bases in .*: 2, " "$base/cleanup.stderr"; then
+        st_fail "cleanup didn't list both: $bases"
+    fi
+    "$SELF" cleanup --prune-installed "${one##*/}" >/dev/null 2>&1 || st_fail "cleanup --prune-installed failed"
+    if [ -e "$one" ] || [ ! -e "$two" ]; then st_fail "cleanup --prune-installed ${one##*/}: wrong base gone"; fi
+    "$SELF" cleanup --prune-installed all >/dev/null 2>&1 || st_fail "cleanup --prune-installed all failed"
+    local left
+    left="$(find "$GOGO_E2E_INSTALLED_DIR" -mindepth 1 -maxdepth 1 ! -name .lock ! -name .runs
+        find "$GOGO_E2E_INSTALLED_DIR/.runs" -mindepth 1 -maxdepth 1)"
+    [ -z "$left" ] || st_fail "cleanup --prune-installed all left: $left"
+    unset GOGO_E2E_INSTALLED_DIR
 }
 
 cmd_self_test() {
@@ -780,6 +1212,8 @@ cmd_self_test() {
         st_fail "pass: the build step had no display: $(jq -c .build "$summary" 2>/dev/null)"
     jq -e '.checks | any(.name == "audio" and .ok)' "$summary" >/dev/null ||
         st_fail "pass: no audio device: $(jq -c .audio "$summary" 2>/dev/null)"
+    jq -e '.build.reused == false and .build.reuse == null' "$summary" >/dev/null ||
+        st_fail "pass: a run without --reuse-install says it reused: $(jq -c .build.reuse "$summary" 2>/dev/null)"
 
     # 2. A signal mid-run: stopped, reported as failed, nothing left. A client
     #    that never ends, so only the teardown can end it.
@@ -865,7 +1299,12 @@ cmd_self_test() {
     "$SELF" run self-test --manifest "$REPO/e2e/self-test-hold.toml" --installer "$fake/setup_fake.exe" >/dev/null 2>&1 || code=$?
     [ "$code" = 2 ] || st_fail "usage: --installer with no build: exit $code, want 2"
 
-    # 7. The sweep sees a stray process that outlived its run: a decoy carrying
+    # 7. --reuse-install: build → base; a reused run on a copy of it; its write
+    #    in neither the base nor the next run; a changed key builds again;
+    #    a base that links out is refused; cleanup prunes.
+    st_reuse "$base"
+
+    # 8. The sweep sees a stray process that outlived its run: a decoy carrying
     #    a run's marker, outside any sandbox.
     log "self-test: the sweep finds a stray"
     RUN_ID="self-test-decoy-$$" RUN="$base/decoy" PREFIX="$base/decoy/prefix" RUN_PIDNS=""

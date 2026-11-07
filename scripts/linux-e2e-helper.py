@@ -7,6 +7,8 @@ Run with `python3 -I`: stdlib only, nothing from the working directory.
     linux-e2e-helper.py image <png> [w h x y]  print image stats as JSON
     linux-e2e-helper.py diff <a.png> <b.png>   print the changed fraction as JSON
     linux-e2e-helper.py drive <config.json>    inside the sandbox: run a whole game
+    linux-e2e-helper.py tree-check <tree> <run> <guard>…
+                                               may an installed base be reused (exit 1: no)
 
 `drive` starts headless sway, proves the display is the headless one, launches
 the game, runs the manifest's steps and writes result.json after every step, so
@@ -1540,6 +1542,49 @@ def _device_nodes():
     return sorted(nodes)
 
 
+# --- installed bases (#240) ---------------------------------------------------
+
+
+def _under(path, root):
+    return path == root or path.startswith(root.rstrip("/") + "/")
+
+
+def tree_problems(tree, run, guards, uid):
+    """Why an installed base at `tree` mustn't be copied into the run at `run`.
+
+    The tree is what the build left in `run` (its `gogo`, `home`, `xdg`), and a
+    reused run sees it at that same path. Every entry must be `uid`'s, and no
+    symlink may lead, from `run`, into a guard (the owner's home, the harness's
+    root) but inside `run`: such a link would let a run write into the base
+    or out of scratch. Links elsewhere (`z:` to `/`, the Nix store) see only
+    the sandbox's whitelist, as in a fresh run. Empty: it may be reused.
+    """
+    problems = []
+    tree, run = os.path.normpath(tree), os.path.normpath(run)
+    top = os.lstat(tree)
+    if os.path.islink(tree) or not os.path.isdir(tree):
+        return [f"{tree}: not a directory"]
+    if top.st_uid != uid:
+        return [f"{tree}: not ours (uid {top.st_uid})"]
+    for here, dirs, files in os.walk(tree):
+        for name in dirs + files:
+            path = os.path.join(here, name)
+            st = os.lstat(path)
+            if st.st_uid != uid:
+                problems.append(f"{path}: not ours (uid {st.st_uid})")
+            if not os.path.islink(path):
+                continue
+            seen_at = os.path.join(run, os.path.relpath(path, tree))
+            target = os.path.normpath(
+                os.path.join(os.path.dirname(seen_at), os.readlink(path))
+            )
+            if any(_under(target, g) for g in guards) and not _under(target, run):
+                problems.append(f"{seen_at}: a link out of the run, to {target}")
+        if len(problems) > 20:
+            break
+    return problems
+
+
 # --- CLI ----------------------------------------------------------------------
 
 
@@ -1563,6 +1608,11 @@ def main(argv):
         with open(argv[2], encoding="utf-8") as f:
             driver = Driver(json.load(f))
         return driver.main_build() if driver.building else driver.main()
+    if len(argv) >= 5 and argv[1] == "tree-check":
+        problems = tree_problems(argv[2], argv[3], argv[4:], os.getuid())
+        for p in problems:
+            print(p)
+        return 1 if problems else 0
     print(__doc__, file=sys.stderr)
     return 2
 
