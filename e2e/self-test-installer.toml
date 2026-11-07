@@ -1,0 +1,25 @@
+# The self-test's --installer case. The build passes only if the fake installer
+# can be read and its folder can't be written. The game's xterm ends at once if
+# that folder is there, and then there's no window.
+title = "self-test: installer"
+build_command = ["bash", "-c", '''
+  test -r "$GOGO_E2E_INSTALLER" && ! touch "${GOGO_E2E_INSTALLER%/*}/written" 2>/dev/null
+''']
+command = ["xterm", "-e", "bash", "-c", "[ ! -e /e2e-installer ] && read -rsn1"]
+
+[window]
+wait_secs = 30
+resolution = "1024x768"
+
+[exit]
+how = "self"
+wait_secs = 10
+
+[[step]]
+wait = 1
+
+[[step]]
+screenshot = "no-installer"
+
+[[step]]
+type = "q"
