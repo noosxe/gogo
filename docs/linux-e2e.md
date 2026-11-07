@@ -30,10 +30,16 @@ scripts/linux-e2e.sh run 2086050016 --gpu renderD128,renderD129 --expect-gpu ren
 scripts/linux-e2e.sh run 1423049311 --installer ~/backups/cyberpunk/setup_cyberpunk_2077.exe --gpu renderD129
 ```
 ```bash
+scripts/linux-e2e.sh run 1423049311 --installer ~/backups/cyberpunk/setup_cyberpunk_2077.exe --reuse-install
+```
+```bash
 scripts/linux-e2e.sh self-test
 ```
 ```bash
 scripts/linux-e2e.sh cleanup
+```
+```bash
+scripts/linux-e2e.sh cleanup --prune-installed all
 ```
 
 It needs `nix` and nothing else, and resolves its own tools, so there's no need for
@@ -49,6 +55,7 @@ It needs `nix` and nothing else, and resolves its own tools, so there's no need 
 | `--installer FILE` | build from this GOG setup `.exe` ([below](#building-from-an-offline-installer)) instead of the depot |
 | `--keep` | keep the scratch dir. `cleanup` leaves it; delete it by hand |
 | `--no-cache` | download Proton, umu's runtime and the game afresh, into scratch |
+| `--reuse-install` | run on a copy of an installed base with the same inputs, with no build, or build and save one ([below](#reusing-an-installed-game)). For manifest rounds only: the final run before a PR builds afresh |
 | `--out DIR` | results root, default `target/linux-e2e/results` |
 
 **Login.** The build uses your usual keyring login, through the session bus, which only the
@@ -77,7 +84,8 @@ build's sandbox sees. It needs `gogo login` done once. Tokens are never printed.
 1. **Scratch.** `target/linux-e2e/runs/<id>/` holds `GOGO_HOME`, `HOME` and the XDG dirs.
    Proton, umu's runtime and the depot download are bind-mounted from
    `target/linux-e2e/cache/`, so a re-run downloads nothing and the build is still fresh.
-   Runs take turns, through a lock.
+   Runs take turns, through a lock. `--reuse-install` copies an installed base in here
+   instead, and skips step 2 ([below](#reusing-an-installed-game)).
 2. **Build,** in a sandbox with a NATed network of its own (pasta) and the session bus, on a headless sway of its
    own (software rendering, whatever `--gpu` says): the isolation checks, then
    `gogo linux-app <gogid> --yes`. `build` in the summary has its exit, how long it took, the
@@ -157,10 +165,78 @@ the manifest names: another id fails the build.
   `~/Downloads` while `isolation_paths` still hides that.
 - **Other files in the folder** (`dlc/`, `patches/`, `extras/`) are visible and unused: the
   installer only opens its own `.bin` parts. Nothing else installs them.
-- **Disk:** the installed game is in scratch, deleted with it, so every run installs again.
-  There's no cache of installed games. Scratch needs the game's size free (Cyberpunk 2077: about 70 GB).
+- **Disk:** the installed game is in scratch, deleted with it, so every run installs again
+  unless it's `--reuse-install` ([below](#reusing-an-installed-game)). Scratch needs the
+  game's size free (Cyberpunk 2077: about 70 GB), and so does each installed base.
 - `build.installer` in the summary names the file. A self-test's `build_command` finds it in
   `GOGO_E2E_INSTALLER`.
+
+## Reusing an installed game
+
+`--reuse-install` is for the rounds of a manifest edit: run, read the screenshots, edit,
+run again. Without it every run builds the game, which for Cyberpunk 2077 is 9 of a
+round's 13–15 minutes. With it, the first run builds as usual and then saves what the
+build left as an **installed base**; the next runs with the same inputs skip the build
+and launch a copy of it.
+
+```bash
+scripts/linux-e2e.sh run 2086050016 --reuse-install
+```
+
+- **The default is a fresh build.** CI and the final run before a PR build afresh. A
+  reused run never prints `tested_entry`: a compat entry stands on a fresh build.
+- **A base is the state right after the build, before any launch.** It's saved after the
+  build's sandbox has exited and before the game's starts, so a reused run is a first
+  launch on disk: no accepted EULA, no settings, no shader cache. Nothing writes to a base
+  after that: each run gets its own copy.
+- **The copy is copy-on-write:** reflinks (`cp --reflink=always`) on btrfs or XFS, which
+  takes seconds for a 70 GB game and no space until the game writes. On a filesystem
+  without them (ext4, CI's) it's a full copy, logged, and `build.reuse.copy` says `copy`.
+- **The same path as the build.** `launch.sh`, the prefix and `state.toml` name absolute
+  paths, and a data root that moved sends `launch.sh` through setup again. So every
+  `--reuse-install` run of a game, the building one too, has its scratch at
+  `target/linux-e2e/cache/installed/.runs/<gogid>`, and they take turns on the bases'
+  own lock. With `--keep`, the dir is renamed to `.runs/<gogid>-<time>-<pid>` after
+  teardown, out of the next one's way, so paths inside it name the old one.
+- **Checkouts share them.** When `target/linux-e2e/cache` is a link to another checkout's
+  cache, as in a worktree, the bases and their runs are that cache's, so a base built in
+  one worktree serves the next. That's why the scratch lives beside the bases and not in
+  `target/linux-e2e/runs/`.
+- **The key** is the sha256 of everything that goes into a build: gogo's sources (the
+  workspace, `compat/`, the toolchain and the Nix that builds it, so its compat DB,
+  `LAUNCHER_VERSION` and the Proton and umu pins; not its store path, which a manifest
+  edit changes too), or a `--gogo` binary's bytes, the build command, the
+  installer's files by name, size and mtime, or for a depot game the download cache's
+  listing, the scratch's seed (`config.toml`: no L4 yet), the build's sandbox code
+  (`declare -f`), its environment, the tools' store path and `REUSE_FORMAT`. Another of
+  any of them builds a new base beside the old one. A depot game is keyed on its download
+  cache as it is, so a newer build on GOG shows up once a fresh run fetches it. The key's
+  inputs are in the base's `meta.json`.
+- **Checked before every copy:** the bases' dir resolves to a
+  `target/linux-e2e/cache/installed`, and the base and its `meta.json` are the harness's
+  own, not links, and for this key and path; every entry in it is ours; and
+  no link leads from the run's path into the owner's home or `target/linux-e2e/` outside
+  the run (`tree-check` in the helper). A failure is a harness error (exit 3), and nothing
+  is copied. A build that leaves such a link isn't saved. A base is only read, and
+  deleting a run's scratch removes its copy only: `rm` doesn't follow links. The isolation
+  checks, `nothing_left`, `scratch_deleted` and the run marker are as for any run.
+- **What's not in a base:** the run's own logs and results. Proton, umu's runtime and the
+  depot download stay in the shared cache, bind-mounted as always.
+
+`summary.json`'s `build` says which it was:
+
+| Key | |
+|---|---|
+| `build.reused` | `true`: the game ran on a copy of an earlier build, and `build.exit` and `build.secs` are `null` |
+| `build.reuse` | `null` without `--reuse-install`. Else `key`, `base` (its dir), `source` (`cache` or `fresh build`), `copy` (`reflink` or `copy`), `copy_secs`, `saved` (this run's build became a base), `note`, and `base_meta` (the run that built it, when, how long it took) |
+
+**Disk.** A Cyberpunk 2077 base is about 70 GB, once. Its copies share its extents.
+`cleanup` lists the bases and their size (`du`, which counts shared extents in full), and
+removes saves that never finished. `cleanup --prune-installed <name>` removes one, by the
+name it lists, and `--prune-installed all` all of them.
+
+**Continuing from a launched state** (the EULA accepted, a menu reached) isn't this: a
+base is always pre-launch. That's #241's checkpoints, which sit on top of these copies.
 
 ## Graphics
 

@@ -707,5 +707,49 @@ info:  NVIDIA GeForce RTX 4090:
         self.assertFalse(helper.vulkan_devices_ok([*both, "Intel(R) Arc"], expect, gpus))
 
 
+class TreeCheck(unittest.TestCase):
+    """tree_problems: may an installed base be copied into a run (#240)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = self.tmp.name
+        self.tree = os.path.join(self.root, "cache", "installed", "x-key", "tree")
+        self.run = os.path.join(self.root, "runs", "reuse-x")
+        os.makedirs(os.path.join(self.tree, "gogo", "games"))
+        self.uid = os.getuid()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def link(self, target, name="l"):
+        os.symlink(target, os.path.join(self.tree, "gogo", name))
+
+    def problems(self):
+        return helper.tree_problems(self.tree, self.run, [self.root], self.uid)
+
+    def test_plain_tree_and_links_inside_the_run_pass(self):
+        self.link(os.path.join(self.run, "store", "runtimes"), "runtimes")
+        self.link("games", "rel")
+        self.link("/", "z")  # a prefix's z: sees only the sandbox's root
+        self.assertEqual(self.problems(), [])
+
+    def test_absolute_link_into_the_base_is_refused(self):
+        self.link(os.path.join(self.tree, "gogo", "games"))
+        self.assertIn("a link out of the run", self.problems()[0])
+
+    def test_relative_link_climbing_out_of_the_run_is_refused(self):
+        # Seen from the run's path: gogo/../../../cache is under the guard.
+        self.link("../../../cache/installed")
+        self.assertIn("a link out of the run", self.problems()[0])
+
+    def test_someone_elses_entry_is_refused(self):
+        self.assertIn("not ours", helper.tree_problems(self.tree, self.run, [self.root], self.uid + 1)[0])
+
+    def test_the_tree_itself_must_be_a_dir(self):
+        os.symlink(self.tree, os.path.join(self.root, "alias"))
+        alias = os.path.join(self.root, "alias")
+        self.assertIn("not a directory", helper.tree_problems(alias, self.run, [self.root], self.uid)[0])
+
+
 if __name__ == "__main__":
     unittest.main()

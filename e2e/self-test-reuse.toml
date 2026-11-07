@@ -1,0 +1,32 @@
+# The self-test's --reuse-install cases (#240). The build "installs" a file
+# with its own stamp in GOGO_HOME, and a link inside the run. The game's xterm
+# ends at once, so there's no window, unless that install is there and this
+# is its first launch: `launched` must not be there yet, and the game writes
+# it. So a run on a base that a launch had written to fails.
+title = "self-test: reuse"
+build_command = ["bash", "-c", '''
+  mkdir -p "$GOGO_HOME/games/fake" &&
+  date +%s%N >"$GOGO_HOME/games/fake/installed" &&
+  ln -s "$GOGO_HOME/games/fake/installed" "$GOGO_HOME/games/fake/link"
+''']
+command = ["xterm", "-e", "bash", "-c", '''
+  d="$GOGO_HOME/games/fake"
+  [ -s "$d/link" ] && [ ! -e "$d/launched" ] && touch "$d/launched" && read -rsn1
+''']
+
+[window]
+wait_secs = 30
+resolution = "1024x768"
+
+[exit]
+how = "self"
+wait_secs = 10
+
+[[step]]
+wait = 1
+
+[[step]]
+screenshot = "first-launch"
+
+[[step]]
+type = "q"
