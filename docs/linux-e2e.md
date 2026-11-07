@@ -69,7 +69,7 @@ build's sandbox sees. It needs `gogo login` done once. Tokens are never printed.
    Proton, umu's runtime and the depot download are bind-mounted from
    `target/linux-e2e/cache/`, so a re-run downloads nothing and the build is still fresh.
    Runs take turns, through a lock.
-2. **Build,** in a sandbox with the network and the session bus, on a headless sway of its
+2. **Build,** in a sandbox with a NATed network of its own (pasta) and the session bus, on a headless sway of its
    own (software rendering, whatever `--gpu` says): the isolation checks, then
    `gogo linux-app <gogid> --yes`. `build` in the summary has its exit, how long it took, the
    windows it opened and how the support installer ended.
@@ -87,25 +87,27 @@ Both sandboxes are a whitelist bwrap root: `/nix`, `/etc`, `/sys`, the driver li
 own `/tmp` and `XDG_RUNTIME_DIR`, and only the chosen GPU's device nodes. `DISPLAY`,
 `WAYLAND_DISPLAY` and `HYPRLAND_*` never reach it, and the host's sound sockets aren't in it.
 
-The build's sandbox differs in one way: it keeps the host's network, because it downloads. So
-its X server's abstract socket sits in the host's namespace for the build's length, and a host
-client asking for that display number could reach it, as the build could ask for the host's.
-Nothing in the build is told any number but its own (`DISPLAY` comes from its sway), and
-`isolation_display` proves that number is the sandbox's: an X server won't bind a number that's
-taken, and only this sandbox's Xwayland is in its `/proc`.
+The build's sandbox has a network namespace of its own too, and still reaches the internet.
+A holder process (`unshare --user --map-root-user --net`) owns a user and a network namespace;
+`pasta` (passt) joins them from outside and NATs them out in user space, and bwrap then nests
+its sandbox in them with `--uid`/`--gid` set back to yours (Proton refuses to run as root). Inside
+there's `lo` and pasta's tap, named after the host's uplink. DNS goes to a mapped address that
+pasta forwards to the host's resolver, so there are no nscd or resolved sockets bound. So the
+build's X server's abstract socket isn't in the host's namespace either, and its Xwayland gets
+`:0` like the game's. Killing the holder takes the sandbox with it.
 
 The script doesn't trust that: before launching, the driver asserts it, and a failure means
 the game isn't started.
 
 | Check | Asserts |
 |---|---|
-| `isolation_netns` | a network namespace of its own, with only `lo`. Game phase only |
+| `isolation_netns` | a network namespace of its own, with only `lo` (the build: `lo` and pasta's tap) |
 | `isolation_pidns` | a PID namespace of its own |
 | `isolation_tmp` | `/tmp` is a tmpfs with only the X server's files |
 | `isolation_runtime_dir` | `XDG_RUNTIME_DIR` is on the sandbox's own `/run` |
 | `isolation_env` | no `HYPRLAND_*` |
 | `isolation_paths` | the owner's game dirs, menu entries, Steam, Downloads, session bus and sound sockets aren't visible |
-| `isolation_display` | `xwininfo -root` answers with the manifest's size, on this `/tmp`'s socket, and this sandbox's Xwayland serves that number |
+| `isolation_display` | `xwininfo -root` answers with the manifest's size, on this `/tmp`'s socket, and this sandbox's Xwayland serves that number, `:0` |
 | `isolation_headless` | sway's outputs are all `HEADLESS-*` |
 | `isolation_gpu_nodes` | exactly the chosen GPU's device nodes, and none in software mode or in the build |
 | `audio` | the default device is the sandbox's null sink, the only sink, on its own socket, and it takes a test stream. Game phase only |
