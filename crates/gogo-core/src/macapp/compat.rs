@@ -217,6 +217,12 @@ pub struct CompatEntry {
     /// #171 / #177.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protonfixes: Option<bool>,
+    /// `[platforms.linux]` only: launch args appended after the game's own
+    /// (`args`, the variant's or GOG's), as Heroic's "launcher args" are
+    /// (#234). `args` replaces the game's; this keeps them. Replaced whole
+    /// by a higher layer; `gogo linux-app args` writes it in L4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_args: Option<Vec<String>>,
     /// Provenance: `gogo-vm`, `umu-protonfixes:<file>@<sha>`, …
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
@@ -286,7 +292,12 @@ const PLATFORM_KEYS: &[&str] = &[
     "lane",
     "lanes",
     "protonfixes",
+    "extra_args",
 ];
+
+/// [`PLATFORM_KEYS`] only the Linux lane applies: under `[platforms.macos]`
+/// they warn and are ignored.
+const LINUX_ONLY_KEYS: &[&str] = &["protonfixes", "extra_args"];
 
 /// The OS-specific keys the schema had at the top level before
 /// `[platforms.<os>]` (#166). In an L4 file they still read as
@@ -443,7 +454,7 @@ fn platform_entry(
         if !known {
             warnings.push(format!("unknown key {prefix}{key}"));
             t.remove(&key);
-        } else if key == "protonfixes" && os != Os::Linux {
+        } else if LINUX_ONLY_KEYS.contains(&key.as_str()) && os != Os::Linux {
             warnings.push(format!("`{prefix}{key}` is Linux only: ignored"));
             t.remove(&key);
         }
@@ -524,6 +535,7 @@ fn overlay(base: &mut CompatEntry, over: CompatEntry) {
         lane,
         lanes,
         protonfixes,
+        extra_args,
         source,
     } = over;
     take(&mut base.title, title);
@@ -549,6 +561,7 @@ fn overlay(base: &mut CompatEntry, over: CompatEntry) {
     take(&mut base.lane, lane);
     base.lanes.extend(lanes);
     take(&mut base.protonfixes, protonfixes);
+    take(&mut base.extra_args, extra_args);
     take(&mut base.source, source);
 }
 
@@ -798,6 +811,141 @@ fn set_user_keys_at(
     Ok(changes)
 }
 
+/// One edit of the user's own launch keys in L4's `[platforms.<os>]`
+/// (#234, `gogo linux-app env` / `args`). Unlike [`OWNED_KEYS`], these are
+/// the user's: gogo writes them only when asked to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserEdit {
+    /// `env.<KEY> = "<value>"`.
+    SetEnv(String, String),
+    /// Drop `env.<KEY>`.
+    UnsetEnv(String),
+    /// `extra_args = [...]`; `None` drops it.
+    ExtraArgs(Option<Vec<String>>),
+}
+
+/// Apply `edits` to the L4 file for `gogid` under `[platforms.<os>]`,
+/// keeping everything else (comments included). The `env` table is made as
+/// `[platforms.<os>.env]` when missing and removed once empty. Returns the
+/// values that changed for `os` (`env.<KEY>`, `extra_args` as a debug-quoted
+/// list); no change, no write. Key names aren't checked here: the caller
+/// knows which ones it allows.
+pub fn edit_user_platform_for(
+    gogid: &str,
+    edits: &[UserEdit],
+    os: Os,
+) -> Result<Vec<Change>, MacAppError> {
+    validate_gogid(gogid)?;
+    edit_user_platform_at(&user_path(gogid), edits, os)
+}
+
+fn edit_user_platform_at(
+    path: &Path,
+    edits: &[UserEdit],
+    os: Os,
+) -> Result<Vec<Change>, MacAppError> {
+    let err = |reason: String| MacAppError::Compat {
+        path: path.to_path_buf(),
+        reason,
+    };
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e.into()),
+    };
+    // What this OS reads now: the old values, legacy keys and all.
+    let mut now = parse(&raw, os, Layer::User).map_err(err)?.entry;
+    let mut doc: toml_edit::DocumentMut = raw.parse().map_err(|e| err(format!("{e}")))?;
+    let args_text = |a: &Option<Vec<String>>| a.as_ref().map(|a| format!("{a:?}"));
+    let mut changes = Vec::new();
+    for edit in edits {
+        let t = platform_table(&mut doc, os).map_err(err)?;
+        match edit {
+            UserEdit::SetEnv(k, _) | UserEdit::UnsetEnv(k) => {
+                let new = match edit {
+                    UserEdit::SetEnv(_, v) => Some(v.clone()),
+                    _ => None,
+                };
+                let old = now.env.get(k).cloned();
+                if old == new {
+                    continue;
+                }
+                if t.get("env").is_none() {
+                    t.insert("env", toml_edit::Item::Table(toml_edit::Table::new()));
+                }
+                let env = t
+                    .get_mut("env")
+                    .and_then(toml_edit::Item::as_table_like_mut)
+                    .ok_or_else(|| err(format!("`platforms.{}.env` must be a table", os.key())))?;
+                match &new {
+                    Some(v) => match env.get_mut(k) {
+                        Some(item) => {
+                            let mut nv = toml_edit::value(v.as_str());
+                            if let (Some(old), Some(n)) = (item.as_value(), nv.as_value_mut()) {
+                                *n.decor_mut() = old.decor().clone();
+                            }
+                            *item = nv;
+                        }
+                        None => {
+                            env.insert(k, toml_edit::value(v.as_str()));
+                        }
+                    },
+                    None => {
+                        env.remove(k);
+                    }
+                }
+                if env.is_empty() {
+                    t.remove("env");
+                }
+                match &new {
+                    Some(v) => now.env.insert(k.clone(), v.clone()),
+                    None => now.env.remove(k),
+                };
+                changes.push(Change {
+                    key: format!("env.{k}"),
+                    old,
+                    new,
+                });
+            }
+            UserEdit::ExtraArgs(new) => {
+                if now.extra_args == *new {
+                    continue;
+                }
+                match new {
+                    Some(a) => {
+                        let arr: toml_edit::Array = a.iter().map(String::as_str).collect();
+                        t.insert("extra_args", toml_edit::value(arr));
+                    }
+                    None => {
+                        t.remove("extra_args");
+                    }
+                }
+                changes.push(Change {
+                    key: "extra_args".into(),
+                    old: args_text(&now.extra_args),
+                    new: args_text(new),
+                });
+                now.extra_args = new.clone();
+            }
+        }
+    }
+    if changes.is_empty() {
+        return Ok(changes);
+    }
+    prune_platforms(&mut doc);
+    let out = doc.to_string();
+    for os in Os::ALL {
+        parse(&out, os, Layer::User).map_err(err)?;
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, out)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(changes)
+}
+
 /// `[platforms.<os>]` in an L4 document, made if missing (`[platforms]`
 /// itself stays implicit, so no empty header is written).
 fn platform_table(
@@ -813,7 +961,11 @@ fn platform_table(
         .as_table_like_mut()
         .ok_or("`platforms` must be a table of `[platforms.<os>]`")?;
     if platforms.get(os.key()).is_none() {
-        platforms.insert(os.key(), toml_edit::Item::Table(toml_edit::Table::new()));
+        // Implicit: no `[platforms.<os>]` header while it holds only
+        // sub-tables (`[platforms.linux.env]`).
+        let mut t = toml_edit::Table::new();
+        t.set_implicit(true);
+        platforms.insert(os.key(), toml_edit::Item::Table(t));
     }
     platforms
         .get_mut(os.key())
@@ -891,6 +1043,9 @@ pub struct Effective {
     /// launcher exports `env` (#177).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub protonfixes: Option<Sourced<bool>>,
+    /// Linux only: appended after the effective `args` at launch (#234).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra_args: Option<Sourced<Vec<String>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<Sourced<String>>,
 }
@@ -967,6 +1122,7 @@ pub fn merge(layers: &[(Layer, &CompatEntry)]) -> Effective {
         take(&mut out.tested, &e.tested, layer);
         take(&mut out.notes, &e.notes, layer);
         take(&mut out.protonfixes, &e.protonfixes, layer);
+        take(&mut out.extra_args, &e.extra_args, layer);
         take(&mut out.source, &e.source, layer);
     }
     // `protonfixes = false` turns umu-protonfixes off for the game (design
@@ -1038,6 +1194,7 @@ impl Effective {
         map(&mut out, "env", &self.env);
         line(&mut out, "registry", &self.registry);
         line(&mut out, "args", &self.args);
+        line(&mut out, "extra_args", &self.extra_args);
         line(&mut out, "variant", &self.variant);
         line(&mut out, "replace_command", &self.replace_command);
         line(&mut out, "status", &self.status);
@@ -2074,5 +2231,131 @@ protonfixes = false
             n += 1;
         }
         assert_eq!(n, 11);
+    }
+
+    #[test]
+    fn user_env_and_extra_args_edits_keep_the_file_and_report_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("compat/1.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "# mine\nverbs = [\"xact\"]\n\n[platforms.macos]\nrenderer = \"dxmt\"\n\n\
+             [platforms.linux]\n# the HUD\nenv = { DXVK_HUD = \"fps\" }\n",
+        )
+        .unwrap();
+        let edit = |e: &[UserEdit]| edit_user_platform_at(&path, e, Os::Linux).unwrap();
+        let c = edit(&[
+            UserEdit::SetEnv("DXVK_HUD".into(), "fps,gpuload".into()),
+            UserEdit::SetEnv("ODD".into(), "a 'b' \"c\" $X".into()),
+            UserEdit::ExtraArgs(Some(vec!["--launcher-skip".into(), "two words".into()])),
+        ]);
+        assert_eq!(
+            c,
+            [
+                Change {
+                    key: "env.DXVK_HUD".into(),
+                    old: Some("fps".into()),
+                    new: Some("fps,gpuload".into())
+                },
+                Change {
+                    key: "env.ODD".into(),
+                    old: None,
+                    new: Some("a 'b' \"c\" $X".into())
+                },
+                Change {
+                    key: "extra_args".into(),
+                    old: None,
+                    new: Some(r#"["--launcher-skip", "two words"]"#.into())
+                },
+            ]
+        );
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.starts_with("# mine\n"), "{raw}");
+        assert!(raw.contains("# the HUD\n"), "{raw}");
+        assert!(raw.contains("renderer = \"dxmt\""), "{raw}");
+        let linux = parse(&raw, Os::Linux, Layer::User).unwrap();
+        assert!(linux.warnings.is_empty(), "{:?}", linux.warnings);
+        assert_eq!(linux.entry.env["ODD"], "a 'b' \"c\" $X");
+        assert_eq!(
+            linux.entry.extra_args.as_deref(),
+            Some(["--launcher-skip".to_string(), "two words".to_string()].as_slice())
+        );
+        // The Mac reads none of it.
+        let mac = parse(&raw, Os::Macos, Layer::User).unwrap().entry;
+        assert!(mac.env.is_empty() && mac.extra_args.is_none());
+
+        // No change, no write.
+        let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert!(edit(&[UserEdit::SetEnv("ODD".into(), "a 'b' \"c\" $X".into())]).is_empty());
+        assert!(edit(&[UserEdit::UnsetEnv("NOPE".into())]).is_empty());
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), mtime);
+
+        // Emptied: the env table and `[platforms.linux]` go, the rest stays.
+        let c = edit(&[
+            UserEdit::UnsetEnv("DXVK_HUD".into()),
+            UserEdit::UnsetEnv("ODD".into()),
+            UserEdit::ExtraArgs(None),
+        ]);
+        assert_eq!(c.len(), 3);
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("linux") && !raw.contains("env"), "{raw}");
+        assert!(raw.contains("[platforms.macos]"), "{raw}");
+
+        // A fresh file gets a `[platforms.linux.env]` table.
+        let fresh = tmp.path().join("compat/2.toml");
+        edit_user_platform_at(
+            &fresh,
+            &[UserEdit::SetEnv("PROTON_ENABLE_NVAPI".into(), "1".into())],
+            Os::Linux,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&fresh).unwrap(),
+            "[platforms.linux.env]\nPROTON_ENABLE_NVAPI = \"1\"\n"
+        );
+    }
+
+    #[test]
+    fn extra_args_are_linux_only_and_replaced_by_the_higher_layer() {
+        let p = parse(
+            "[platforms.macos]\nextra_args = [\"-x\"]\n",
+            Os::Macos,
+            Layer::User,
+        )
+        .unwrap();
+        assert_eq!(p.entry.extra_args, None);
+        assert_eq!(
+            p.warnings,
+            ["`platforms.macos.extra_args` is Linux only: ignored"]
+        );
+        let p = parse("extra_args = [\"-x\"]\n", Os::Linux, Layer::Db).unwrap();
+        assert_eq!(p.entry.extra_args, None);
+        assert_eq!(p.warnings.len(), 1, "{:?}", p.warnings);
+        let l3 = parse(
+            "[platforms.linux]\nextra_args = [\"-a\"]\n",
+            Os::Linux,
+            Layer::Db,
+        )
+        .unwrap()
+        .entry;
+        let l4 = parse(
+            "[platforms.linux]\nextra_args = [\"-b\", \"-c\"]\n",
+            Os::Linux,
+            Layer::User,
+        )
+        .unwrap()
+        .entry;
+        let eff = merge(&[(Layer::User, &l4), (Layer::Db, &l3)]);
+        let x = eff.extra_args.unwrap();
+        assert_eq!(x.value, ["-b", "-c"]);
+        assert_eq!(x.layer, Layer::User);
+        // `args` and `extra_args` are separate: one replaces, one appends.
+        let l4 = parse("[platforms.linux]\nargs = []\n", Os::Linux, Layer::User)
+            .unwrap()
+            .entry;
+        let eff = merge(&[(Layer::User, &l4), (Layer::Db, &l3)]);
+        assert_eq!(eff.args.unwrap().value, Vec::<String>::new());
+        assert_eq!(eff.extra_args.unwrap().value, ["-a"]);
     }
 }

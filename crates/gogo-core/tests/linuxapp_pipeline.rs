@@ -1075,6 +1075,11 @@ const FAKE_GAME_UMU: &str = r#"#!/bin/sh
     "${WINEPREFIX-unset}" "${GAMEID-}" "${STORE-}" "${PROTONPATH-}" "${WINEDLLOVERRIDES-}" \
     "${PROTONFIXES_DISABLE-}" "${FOO-}" "${PROTON_SET_GAME_DRIVE-}" "$(pwd)"
 } >> "$FAKE_UMU_LOG"
+if [ -n "${FAKE_ARGS_LOG:-}" ]; then
+  : > "$FAKE_ARGS_LOG"
+  for a in "$@"; do printf '%s\n' "$a" >> "$FAKE_ARGS_LOG"; done
+fi
+if [ -n "${FAKE_ENV_DUMP:-}" ]; then env > "$FAKE_ENV_DUMP"; fi
 echo "fake-game stdout line"
 echo "err: fake-game stderr line" >&2
 if [ -n "${FAKE_GAME_HANG:-}" ]; then
@@ -2401,4 +2406,215 @@ fn doctor_finds_links_stale_stamps_the_menu_entry_and_leftover_processes() {
         "{f:?}"
     );
     assert!(r.findings.iter().any(|f| f.check == "vulkan"));
+}
+
+#[test]
+fn env_and_args_from_the_override_reach_the_game_with_their_quoting() {
+    use gogo::linuxapp::envargs::{self, EnvSource, EnvState};
+    use gogo::macapp::compat::Layer;
+    let Some(w) = World::launcher("envargs", false) else {
+        return;
+    };
+    let odd = "a 'b' \"c\" $HOME `x` \\ ; *";
+    let out = envargs::set_env(
+        ID,
+        &[
+            ("DXVK_HUD".into(), "fps,gpuload".into()),
+            ("ODD".into(), odd.into()),
+            ("GAME_TOKEN".into(), "s3cret".into()),
+            ("PROTON_SET_GAME_DRIVE".into(), "1".into()),
+        ],
+    )
+    .unwrap();
+    assert_eq!(out.changes.len(), 4, "{:?}", out.changes);
+    assert!(out.built);
+    // gogo's default beaten: said so.
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.starts_with("PROTON_SET_GAME_DRIVE:")),
+        "{:?}",
+        out.warnings
+    );
+    // The launcher's own keys are refused and nothing is written.
+    let l4 = w.home.join(format!("compat/{ID}.toml"));
+    let before = std::fs::read_to_string(&l4).unwrap();
+    assert!(envargs::set_env(ID, &[("WINEPREFIX".into(), "/x".into())]).is_err());
+    assert!(envargs::set_env(ID, &[("WINEDLLOVERRIDES".into(), "d3d9=n".into())]).is_err());
+    assert_eq!(std::fs::read_to_string(&l4).unwrap(), before);
+    let extra: Vec<String> = [
+        "--launcher-skip",
+        "-skipStartScreen",
+        "two words",
+        "it's",
+        "$HOME",
+        "\"q\"",
+        "",
+    ]
+    .map(String::from)
+    .to_vec();
+    envargs::set_args(ID, Some(extra.clone())).unwrap();
+    // Setting the same again changes nothing.
+    assert!(
+        envargs::set_args(ID, Some(extra.clone()))
+            .unwrap()
+            .changes
+            .is_empty()
+    );
+
+    // Before setup: pending, and doctor says so.
+    let a = envargs::args_report(ID).unwrap();
+    assert!(a.pending);
+    assert_eq!(a.game_args, ["-windowed"]);
+    assert_eq!(a.game_args_from, "GOG (gogo-launch.toml)");
+    let mut want = vec!["-windowed".to_string()];
+    want.extend(extra.iter().cloned());
+    assert_eq!(a.launch_args, want);
+    let e = envargs::env_report(ID, false).unwrap();
+    let line = |e: &envargs::EnvReport, k: &str| {
+        e.lines
+            .iter()
+            .find(|l| l.key == k && !matches!(l.state, EnvState::Overridden { .. }))
+            .cloned()
+            .unwrap_or_else(|| panic!("{k} in {:?}", e.lines))
+    };
+    assert_eq!(line(&e, "DXVK_HUD").state, EnvState::Pending);
+
+    // Setup (what the launcher runs on the stale stamp) writes them.
+    setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
+    let conf = gogo::linuxapp::game::ConfValues::parse(&w.conf());
+    assert_eq!(conf.arrays["ARGS"], want);
+    assert!(
+        conf.arrays["ENV"].contains(&format!("ODD={odd}")),
+        "{:?}",
+        conf.arrays["ENV"]
+    );
+    let a = envargs::args_report(ID).unwrap();
+    assert!(!a.pending, "{a:?}");
+
+    let e = envargs::env_report(ID, false).unwrap();
+    let hud = line(&e, "DXVK_HUD");
+    assert_eq!(hud.value, "fps,gpuload");
+    assert_eq!(hud.source, EnvSource::Layer { layer: Layer::User });
+    assert_eq!(hud.state, EnvState::Applies);
+    // Secrets: hidden unless revealed.
+    assert_eq!(line(&e, "GAME_TOKEN").value, envargs::HIDDEN);
+    let shown = envargs::env_report(ID, true).unwrap();
+    assert_eq!(line(&shown, "GAME_TOKEN").value, "s3cret");
+    // The user's beats gogo's default, which is listed as beaten.
+    let drive: Vec<_> = e
+        .lines
+        .iter()
+        .filter(|l| l.key == "PROTON_SET_GAME_DRIVE")
+        .collect();
+    assert_eq!(drive.len(), 2, "{drive:?}");
+    assert_eq!(drive[0].value, "1");
+    assert_eq!(drive[1].source, EnvSource::GogoDefault);
+    assert!(matches!(drive[1].state, EnvState::Overridden { .. }));
+    assert_eq!(line(&e, "WINEPREFIX").source, EnvSource::Launcher);
+    assert_eq!(line(&e, "STORE").value, "gog");
+
+    // The game gets every word as it was given, then launch.sh's own.
+    let args_log = w.root.join("args.log");
+    let env_dump = w.root.join("env.dump");
+    let out = w.launch(
+        &[
+            ("FAKE_ARGS_LOG", args_log.to_str().unwrap()),
+            ("FAKE_ENV_DUMP", env_dump.to_str().unwrap()),
+        ],
+        &["-cli arg"],
+    );
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(w.calls().is_empty(), "setup ran: {:?}", w.calls());
+    let got: Vec<String> = std::fs::read_to_string(&args_log)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert!(got[0].ends_with("game.exe"), "{got:?}");
+    let mut with_cli = want.clone();
+    with_cli.push("-cli arg".into());
+    assert_eq!(&got[1..], with_cli.as_slice());
+    let dump = std::fs::read_to_string(&env_dump).unwrap();
+    for want in [
+        "DXVK_HUD=fps,gpuload".to_string(),
+        format!("ODD={odd}"),
+        "PROTON_SET_GAME_DRIVE=1".into(),
+        "GAME_TOKEN=s3cret".into(),
+    ] {
+        assert!(dump.lines().any(|l| l == want), "{want} in\n{dump}");
+    }
+    // The run log has the args, never an env value.
+    let run = w.runs().pop().unwrap();
+    assert!(!run.contains("s3cret") && !run.contains("gpuload"), "{run}");
+
+    // Doctor shows them.
+    let r = doctor(&w, &doctor_host(&w, &[("radeon", 64)]));
+    let f = r.findings.iter().find(|f| f.check == "launch").unwrap();
+    assert_eq!(f.level, gogo::macapp::doctor::Level::Ok, "{f:?}");
+    assert!(
+        f.message
+            .contains("your env: DXVK_HUD, GAME_TOKEN, ODD, PROTON_SET_GAME_DRIVE"),
+        "{}",
+        f.message
+    );
+    assert!(
+        f.message
+            .contains("extra args --launcher-skip -skipStartScreen 'two words'"),
+        "{}",
+        f.message
+    );
+    assert!(
+        f.detail
+            .iter()
+            .any(|d| d == "* GAME_TOKEN=<hidden>  (L4 user override)"),
+        "{:?}",
+        f.detail
+    );
+
+    // Unset and clear: pending until the next setup; then gone.
+    envargs::unset_env(ID, &["DXVK_HUD".into()]).unwrap();
+    let out = envargs::unset_env(ID, &["NOPE".into()]).unwrap();
+    assert_eq!(out.warnings, ["NOPE wasn't set"]);
+    envargs::set_args(ID, None).unwrap();
+    let e = envargs::env_report(ID, false).unwrap();
+    assert_eq!(line(&e, "DXVK_HUD").source, EnvSource::LastSetup);
+    assert!(envargs::args_report(ID).unwrap().pending);
+    setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
+    let e = envargs::env_report(ID, false).unwrap();
+    assert!(e.lines.iter().all(|l| l.key != "DXVK_HUD"), "{:?}", e.lines);
+    let a = envargs::args_report(ID).unwrap();
+    assert_eq!(a.launch_args, ["-windowed"]);
+    assert!(!a.pending);
+    let l4 = std::fs::read_to_string(&l4).unwrap();
+    assert!(!l4.contains("extra_args"), "{l4}");
+
+    // A bad name hand-written into the file is skipped by setup and named.
+    std::fs::write(
+        w.home.join(format!("compat/{ID}.toml")),
+        "[platforms.linux.env]\n\"BAD-NAME\" = \"1\"\nGAMEID = \"x\"\n",
+    )
+    .unwrap();
+    let out = setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.starts_with("env BAD-NAME (L4 user override):")),
+        "{:?}",
+        out.warnings
+    );
+    assert!(!w.conf().contains("BAD-NAME"));
+    let r = doctor(&w, &doctor_host(&w, &[("radeon", 64)]));
+    let f = r.findings.iter().find(|f| f.check == "launch").unwrap();
+    assert_eq!(f.level, gogo::macapp::doctor::Level::Warn, "{f:?}");
+    assert!(
+        f.message.contains("env GAMEID: GAMEID is the launcher's"),
+        "{}",
+        f.message
+    );
+    assert!(
+        f.message.contains("env BAD-NAME in the override file"),
+        "{}",
+        f.message
+    );
 }

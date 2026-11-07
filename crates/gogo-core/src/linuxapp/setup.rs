@@ -616,6 +616,16 @@ pub fn setup(
             .effective
             .env
             .iter()
+            .filter(|(k, s)| match super::envargs::check_key(k) {
+                Ok(()) => true,
+                Err(why) => {
+                    warnings.push(format!(
+                        "env {k} ({}): {why}; not applied",
+                        s.layer.describe()
+                    ));
+                    false
+                }
+            })
             .map(|(k, s)| (k.clone(), s.value.clone()))
             .collect(),
         dll_overrides: fx
@@ -767,7 +777,7 @@ pub fn setup(
         game_dir: rel(&game_files),
         workdir: unix(&eff.workdir),
         exe: unix(&eff.exe),
-        args: eff.args.clone(),
+        args: super::envargs::launch_args(&eff.args, &fx.effective),
         env: eff.env.clone(),
         dll_overrides: eff.dll_overrides.clone(),
         renderer: rplan.renderer.clone(),

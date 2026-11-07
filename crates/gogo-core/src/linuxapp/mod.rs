@@ -8,6 +8,7 @@ use crate::macapp::error::MacAppError;
 
 pub mod build;
 pub mod doctor;
+pub mod envargs;
 pub mod fixes;
 pub mod game;
 pub mod icon;

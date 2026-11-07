@@ -169,6 +169,9 @@ pub struct CompatReport {
     /// gogo's fixes a protonfix overrides at launch (O2), one line each.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub collisions: Vec<String>,
+    /// The summary itself, for callers that need its items (`env list`).
+    #[serde(skip)]
+    pub summary: Option<super::fixes::Summary>,
     pub variants: Vec<VariantLine>,
     pub variant_error: Option<String>,
     pub warnings: Vec<String>,
@@ -208,6 +211,7 @@ pub fn compat(gogid: &str) -> Result<CompatReport, MacAppError> {
             runtime: l4.entry.runtime.clone(),
             fixes: None,
             collisions: vec![],
+            summary: None,
             variants: vec![],
             variant_error: None,
             warnings,
@@ -258,12 +262,15 @@ pub fn compat(gogid: &str) -> Result<CompatReport, MacAppError> {
         .ok()
         .and_then(|r| setup::find_proton(&r).ok().flatten());
     let mut collisions = Vec::new();
+    let mut full = None;
     let (effective, fixes) = match (&build, &b.state) {
         (Some(build), Some(state)) => {
             let fx = setup::fixes_for(gogid, &build.dir, &state.umu_id, layers, &mut warnings);
             let summary = fx.summary();
             collisions = summary.collisions();
-            (fx.effective.clone(), Some(summary.to_string()))
+            let text = summary.to_string();
+            full = Some(summary);
+            (fx.effective.clone(), Some(text))
         }
         _ => {
             let entries: Vec<(Layer, &CompatEntry)> = std::iter::once((Layer::Db, &db.entry))
@@ -313,6 +320,7 @@ pub fn compat(gogid: &str) -> Result<CompatReport, MacAppError> {
         runtime: Some(runtime),
         fixes,
         collisions,
+        summary: full,
         variants,
         variant_error,
         warnings,
