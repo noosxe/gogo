@@ -158,6 +158,7 @@ pub fn doctor(gogid: &str, host: &Host) -> Result<Report, MacAppError> {
     };
     if g.baked.is_some() {
         f.push(check_compat(&g));
+        f.push(check_launch(&g));
     }
     check_umu(&g, host, &mut f);
     let build = check_runtime(&g, &mut f);
@@ -331,6 +332,94 @@ fn check_compat(g: &Game) -> Finding {
         .iter()
         .map(|w| format!("warning: {w}"))
         .chain(r.fixes.iter().flat_map(|s| s.lines().map(str::to_string)))
+        .collect();
+    finding
+}
+
+// — env and args —
+
+/// What the game gets at launch beyond the exe (#234): the env, each value
+/// with its source, and the args. Warns when a value of the user's never
+/// applies (a bad name, a key the launcher sets, a protonfix that wins).
+fn check_launch(g: &Game) -> Finding {
+    use super::envargs::{self, EnvSource, EnvState};
+    let hint = format!("gogo linux-app env list {}", g.gogid);
+    let (env, args) = match (
+        envargs::env_report(&g.gogid, false),
+        envargs::args_report(&g.gogid),
+    ) {
+        (Ok(e), Ok(a)) => (e, a),
+        (Err(e), _) | (_, Err(e)) => return Finding::fail("launch", e.to_string(), hint),
+    };
+    let user = compat::Layer::User;
+    let mine: Vec<&envargs::EnvLine> = env.user_lines().collect();
+    let mut problems: Vec<String> = env
+        .warnings
+        .iter()
+        .filter(|w| w.starts_with("env "))
+        .cloned()
+        .collect();
+    for l in &mine {
+        if let EnvState::Overridden { by } = &l.state {
+            problems.push(format!("env {}: yours is overridden by {by}", l.key));
+        }
+    }
+    let words = |a: &[String]| {
+        if a.is_empty() {
+            "(none)".to_string()
+        } else {
+            envargs::shell_words(a)
+        }
+    };
+    let mut parts = vec![if mine.is_empty() {
+        "no env of yours".to_string()
+    } else {
+        format!(
+            "your env: {}",
+            mine.iter()
+                .map(|l| l.key.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }];
+    parts.push(match &args.extra_args {
+        Some(x) => format!("extra args {} ({})", words(&x.value), x.layer.describe()),
+        None => "no extra args".into(),
+    });
+    if mine.iter().any(|l| l.state == EnvState::Pending) || args.pending {
+        parts.push("some apply at the next launch".into());
+    }
+    let mut finding = if problems.is_empty() {
+        Finding::ok("launch", parts.join("; "))
+    } else {
+        Finding::warn(
+            "launch",
+            format!("{}; {}", parts.join("; "), problems.join("; ")),
+            hint,
+        )
+    };
+    finding.detail = env
+        .lines
+        .iter()
+        .filter(|l| !matches!(l.state, EnvState::Overridden { .. }))
+        .map(|l| {
+            let pending = if l.state == EnvState::Pending {
+                ", pending"
+            } else {
+                ""
+            };
+            let mark = if l.source == (EnvSource::Layer { layer: user }) {
+                "* "
+            } else {
+                ""
+            };
+            format!("{mark}{}={}  ({}{pending})", l.key, l.value, l.source)
+        })
+        .chain(std::iter::once(format!(
+            "args: {}  (game: {})",
+            words(&args.launch_args),
+            args.game_args_from
+        )))
         .collect();
     finding
 }

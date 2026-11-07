@@ -388,6 +388,82 @@ pub enum LinuxAppSub {
         #[arg(long)]
         dry_run: bool,
     },
+    /// A game's environment variables: list what it gets at launch and
+    /// where each value comes from, or set and unset your own (kept in the
+    /// game's override file, `[platforms.linux.env]`; the next launch
+    /// applies them, no rebuild needed).
+    Env {
+        #[command(subcommand)]
+        cmd: LinuxEnvCmd,
+    },
+    /// A game's launch args: show them, set the args added after the
+    /// game's own (`-- <args…>`, kept in the override file as
+    /// `extra_args`; the next launch applies them), or `--clear` them.
+    Args {
+        /// GOG product id.
+        #[arg(value_name = "GOGID")]
+        gogid: String,
+        /// Remove your extra args.
+        #[arg(long, conflicts_with = "args")]
+        clear: bool,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+        /// The args to add after the game's own, after `--`
+        /// (`-- --launcher-skip -skipStartScreen`). They replace the ones
+        /// set before.
+        #[arg(last = true, value_name = "ARGS", allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+}
+
+#[cfg(target_os = "linux")]
+/// `gogo linux-app env <cmd>`.
+#[derive(Debug, Subcommand)]
+pub enum LinuxEnvCmd {
+    /// Every variable the game gets at its next launch, with its value and
+    /// where it comes from (gogo's default, the renderer, gogo's compat
+    /// list, your override, the launcher, the protonfix), and the values
+    /// they beat. Values of names that look like secrets (TOKEN, SECRET,
+    /// PASSWORD, API_KEY, …) are hidden unless `--reveal`.
+    List {
+        /// GOG product id.
+        #[arg(value_name = "GOGID")]
+        gogid: String,
+        /// Show hidden values.
+        #[arg(long)]
+        reveal: bool,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set variables for the game. Refuses the launcher's own
+    /// (WINEPREFIX, GAMEID, STORE, PROTONPATH) and the ones with their own
+    /// setting (WINEDLLOVERRIDES, PROTONFIXES_DISABLE); warns when yours
+    /// beats a renderer switch or gogo's default.
+    Set {
+        /// GOG product id.
+        #[arg(value_name = "GOGID")]
+        gogid: String,
+        /// `KEY=VALUE`, one or more (quote values with spaces in your shell).
+        #[arg(value_name = "KEY=VALUE", required = true)]
+        pairs: Vec<String>,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove variables you set (others' values stay).
+    Unset {
+        /// GOG product id.
+        #[arg(value_name = "GOGID")]
+        gogid: String,
+        /// `KEY`, one or more.
+        #[arg(value_name = "KEY", required = true)]
+        keys: Vec<String>,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[cfg(target_os = "linux")]
@@ -1250,6 +1326,66 @@ mod tests {
                 ..
             }
         ));
+        let cli = Cli::try_parse_from([
+            "gogo",
+            "linux-app",
+            "args",
+            "1",
+            "--",
+            "--launcher-skip",
+            "-skipStartScreen",
+        ])
+        .unwrap();
+        let Command::LinuxApp {
+            sub: Some(LinuxAppSub::Args { args, clear, .. }),
+            ..
+        } = cli.command
+        else {
+            panic!("expected linux-app args");
+        };
+        assert_eq!(args, ["--launcher-skip", "-skipStartScreen"]);
+        assert!(!clear);
+        assert!(Cli::try_parse_from(["gogo", "linux-app", "args", "1", "--clear"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["gogo", "linux-app", "args", "1", "--clear", "--", "-x"]).is_err()
+        );
+        // Without `--`, a dash arg is gogo's flag, not the game's.
+        assert!(Cli::try_parse_from(["gogo", "linux-app", "args", "1", "-x"]).is_err());
+        let cli = Cli::try_parse_from([
+            "gogo",
+            "linux-app",
+            "env",
+            "set",
+            "1",
+            "DXVK_HUD=fps",
+            "A=b c",
+        ])
+        .unwrap();
+        let Command::LinuxApp {
+            sub:
+                Some(LinuxAppSub::Env {
+                    cmd: LinuxEnvCmd::Set { pairs, .. },
+                }),
+            ..
+        } = cli.command
+        else {
+            panic!("expected env set");
+        };
+        assert_eq!(pairs, ["DXVK_HUD=fps", "A=b c"]);
+        assert!(Cli::try_parse_from(["gogo", "linux-app", "env", "set", "1"]).is_err());
+        assert!(Cli::try_parse_from(["gogo", "linux-app", "env", "unset", "1", "A", "B"]).is_ok());
+        assert!(
+            Cli::try_parse_from([
+                "gogo",
+                "linux-app",
+                "env",
+                "list",
+                "1",
+                "--reveal",
+                "--json"
+            ])
+            .is_ok()
+        );
         let cli = Cli::try_parse_from(["gogo", "linux-app", "compat", "1", "--json"]).unwrap();
         assert!(matches!(
             cli.command,

@@ -3455,6 +3455,13 @@ fn linux_app_sub(sub: crate::cli::LinuxAppSub) -> Result<i32, AppError> {
                 }
             }
         }
+        crate::cli::LinuxAppSub::Env { cmd } => linux_app_env(cmd),
+        crate::cli::LinuxAppSub::Args {
+            gogid,
+            clear,
+            json,
+            args,
+        } => linux_app_args(&gogid, clear, json, args),
         crate::cli::LinuxAppSub::Compat { gogid, json } => {
             let r = gogo::linuxapp::manage::compat(&gogid)?;
             if json {
@@ -3528,6 +3535,249 @@ fn linux_app_sub(sub: crate::cli::LinuxAppSub) -> Result<i32, AppError> {
             Ok(cli::exit::OK)
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+/// An edit's changes, as `env set` / `unset` / `args` print them (secret
+/// values hidden).
+fn print_edit(out: &gogo::linuxapp::envargs::EditOutcome, json: bool) {
+    use gogo::linuxapp::envargs;
+    let hide = |key: &str, v: &Option<String>| {
+        v.as_ref()
+            .map(|v| envargs::shown(key.strip_prefix("env.").unwrap_or(key), v, false))
+    };
+    let changes: Vec<gogo::macapp::compat::Change> = out
+        .changes
+        .iter()
+        .map(|c| gogo::macapp::compat::Change {
+            key: c.key.clone(),
+            old: hide(&c.key, &c.old),
+            new: hide(&c.key, &c.new),
+        })
+        .collect();
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "gogid": out.gogid,
+                "file": out.file,
+                "changes": changes,
+                "warnings": out.warnings,
+                "built": out.built,
+            })
+        );
+        return;
+    }
+    for w in &out.warnings {
+        eprintln!("warning: {w}");
+    }
+    if changes.is_empty() {
+        println!(
+            "{}: nothing to change (the override file already says so)",
+            out.gogid
+        );
+        return;
+    }
+    for c in &changes {
+        let v = |v: &Option<String>| match v {
+            Some(v) if c.key.starts_with("env.") => format!("{v:?}"),
+            Some(v) => v.clone(),
+            None => "(unset)".into(),
+        };
+        println!(
+            "{}: {} {} -> {} ({})",
+            out.gogid,
+            c.key,
+            v(&c.old),
+            v(&c.new),
+            out.file.display()
+        );
+    }
+    if out.built {
+        println!("the next launch applies it (it runs setup on the changed override first)");
+    } else {
+        println!("not built yet: the build applies it");
+    }
+}
+
+#[cfg(target_os = "linux")]
+/// `gogo linux-app env list|set|unset`.
+fn linux_app_env(cmd: crate::cli::LinuxEnvCmd) -> Result<i32, AppError> {
+    use crate::cli::LinuxEnvCmd;
+    use gogo::linuxapp::envargs;
+    match cmd {
+        LinuxEnvCmd::List {
+            gogid,
+            reveal,
+            json,
+        } => {
+            let r = envargs::env_report(&gogid, reveal)?;
+            if json {
+                println!("{}", serde_json::json!(r));
+                return Ok(cli::exit::OK);
+            }
+            for w in &r.warnings {
+                eprintln!("warning: {w}");
+            }
+            print!("{}", env_list_text(&r));
+            Ok(cli::exit::OK)
+        }
+        LinuxEnvCmd::Set { gogid, pairs, json } => {
+            let mut parsed = Vec::new();
+            for p in &pairs {
+                let Some((k, v)) = p.split_once('=') else {
+                    eprintln!("gogo: {p:?} isn't KEY=VALUE");
+                    return Ok(cli::exit::USAGE);
+                };
+                parsed.push((k.to_string(), v.to_string()));
+            }
+            if let Err(why) = envargs::check_set(&parsed) {
+                eprintln!("gogo: {gogid}: {why}");
+                return Ok(cli::exit::USAGE);
+            }
+            print_edit(&envargs::set_env(&gogid, &parsed)?, json);
+            Ok(cli::exit::OK)
+        }
+        LinuxEnvCmd::Unset { gogid, keys, json } => {
+            for k in &keys {
+                if let Err(why) = envargs::check_key(k) {
+                    eprintln!("gogo: {k:?}: {why}");
+                    return Ok(cli::exit::USAGE);
+                }
+            }
+            print_edit(&envargs::unset_env(&gogid, &keys)?, json);
+            Ok(cli::exit::OK)
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+/// `gogo linux-app args <gogid> [-- <args…> | --clear]`.
+fn linux_app_args(
+    gogid: &str,
+    clear: bool,
+    json: bool,
+    args: Vec<String>,
+) -> Result<i32, AppError> {
+    use gogo::linuxapp::envargs;
+    if clear || !args.is_empty() {
+        for a in &args {
+            if let Err(why) = envargs::check_value(&format!("arg {a:?}"), a) {
+                eprintln!("gogo: {gogid}: {why}");
+                return Ok(cli::exit::USAGE);
+            }
+        }
+        let new = (!clear).then_some(args);
+        print_edit(&envargs::set_args(gogid, new)?, json);
+        return Ok(cli::exit::OK);
+    }
+    let r = envargs::args_report(gogid)?;
+    if json {
+        println!("{}", serde_json::json!(r));
+        return Ok(cli::exit::OK);
+    }
+    for w in &r.warnings {
+        eprintln!("warning: {w}");
+    }
+    print!("{}", args_text(&r));
+    Ok(cli::exit::OK)
+}
+
+#[cfg(target_os = "linux")]
+/// `env list`'s human output: one `KEY=VALUE  (source)` line per key that
+/// applies, the values it beats indented under it.
+fn env_list_text(r: &gogo::linuxapp::envargs::EnvReport) -> String {
+    use gogo::linuxapp::envargs::EnvState;
+    use std::fmt::Write as _;
+    let mut out = format!(
+        "env of {} at its next launch (each line beats the environment launch.sh \
+         starts with, and the values listed under it):\n",
+        r.gogid
+    );
+    let width = r
+        .lines
+        .iter()
+        .filter(|l| !matches!(l.state, EnvState::Overridden { .. }))
+        .map(|l| l.key.len() + l.value.len() + 1)
+        .max()
+        .unwrap_or(0)
+        .min(40);
+    for l in &r.lines {
+        let kv = format!("{}={}", l.key, l.value);
+        let _ = match &l.state {
+            EnvState::Applies => writeln!(out, "{kv:<width$}  ({})", l.source),
+            EnvState::Pending => writeln!(
+                out,
+                "{kv:<width$}  ({}; pending: the next launch's setup applies it)",
+                l.source
+            ),
+            EnvState::Overridden { .. } => writeln!(out, "  over {kv}  ({})", l.source),
+        };
+    }
+    if !r.built {
+        out.push_str("(not built yet: the renderer's and the launcher's values show once it is)\n");
+    }
+    let _ = writeln!(
+        out,
+        "your override file: {} (`gogo linux-app env set {} KEY=VALUE`)",
+        r.user_file.display(),
+        r.gogid
+    );
+    out
+}
+
+#[cfg(target_os = "linux")]
+/// `args`' human output.
+fn args_text(r: &gogo::linuxapp::envargs::ArgsReport) -> String {
+    use gogo::linuxapp::envargs;
+    use std::fmt::Write as _;
+    let words = |a: &[String]| {
+        if a.is_empty() {
+            "(none)".to_string()
+        } else {
+            envargs::shell_words(a)
+        }
+    };
+    let mut out = String::new();
+    if let Some(exe) = &r.exe {
+        let _ = writeln!(out, "exe: {exe}");
+    }
+    let _ = writeln!(
+        out,
+        "game args: {}  ({})",
+        words(&r.game_args),
+        r.game_args_from
+    );
+    let _ = match &r.extra_args {
+        Some(x) => writeln!(
+            out,
+            "extra args: {}  ({})",
+            words(&x.value),
+            x.layer.describe()
+        ),
+        None => writeln!(
+            out,
+            "extra args: (none)  (`gogo linux-app args {} -- <args…>` adds some)",
+            r.gogid
+        ),
+    };
+    let _ = writeln!(
+        out,
+        "the exe gets: {} (then any args launch.sh itself is given)",
+        words(&r.launch_args)
+    );
+    if r.pending {
+        let _ = writeln!(
+            out,
+            "pending: launch.conf still has {}; the next launch's setup writes the new ones",
+            words(r.applied.as_deref().unwrap_or_default())
+        );
+    }
+    if !r.built {
+        out.push_str("(not built yet: GOG's args show once it is)\n");
+    }
+    let _ = writeln!(out, "your override file: {}", r.user_file.display());
+    out
 }
 
 // — runtimes (design 12 §4/§10): Wine runtime catalog + store management —
@@ -4658,6 +4908,99 @@ mod tests {
         assert!(
             line.contains(&gogo::fmt::human_size(plan.extra_bytes)),
             "{line}"
+        );
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod envargs_output_tests {
+    use super::{args_text, env_list_text};
+    use gogo::linuxapp::envargs::{ArgsReport, EnvLine, EnvReport, EnvSource, EnvState};
+    use gogo::macapp::compat::{Layer, Sourced};
+
+    #[test]
+    fn env_list_shows_the_winner_its_source_and_what_it_beats() {
+        let line = |k: &str, v: &str, source, state| EnvLine {
+            key: k.into(),
+            value: v.into(),
+            source,
+            state,
+        };
+        let r = EnvReport {
+            gogid: "1423049311".into(),
+            user_file: "/d/compat/1423049311.toml".into(),
+            built: true,
+            lines: vec![
+                line(
+                    "DXVK_HUD",
+                    "fps",
+                    EnvSource::Layer { layer: Layer::User },
+                    EnvState::Pending,
+                ),
+                line(
+                    "PROTON_SET_GAME_DRIVE",
+                    "1",
+                    EnvSource::Layer { layer: Layer::User },
+                    EnvState::Applies,
+                ),
+                line(
+                    "PROTON_SET_GAME_DRIVE",
+                    "0",
+                    EnvSource::GogoDefault,
+                    EnvState::Overridden {
+                        by: "L4 user override".into(),
+                    },
+                ),
+                line("STORE", "gog", EnvSource::Launcher, EnvState::Applies),
+            ],
+            warnings: vec![],
+        };
+        assert_eq!(
+            env_list_text(&r),
+            "env of 1423049311 at its next launch (each line beats the environment \
+             launch.sh starts with, and the values listed under it):\n\
+             DXVK_HUD=fps             (L4 user override; pending: the next launch's setup applies it)\n\
+             PROTON_SET_GAME_DRIVE=1  (L4 user override)\n\
+             \x20 over PROTON_SET_GAME_DRIVE=0  (gogo default)\n\
+             STORE=gog                (launcher, always)\n\
+             your override file: /d/compat/1423049311.toml (`gogo linux-app env set 1423049311 KEY=VALUE`)\n"
+        );
+    }
+
+    #[test]
+    fn args_quote_what_the_shell_would_split() {
+        let r = ArgsReport {
+            gogid: "1423049311".into(),
+            user_file: "/d/compat/1423049311.toml".into(),
+            built: true,
+            exe: Some("games/1423049311/prefix/drive_c/GOG/x/bin/x64/Cyberpunk2077.exe".into()),
+            game_args: vec![],
+            game_args_from: "GOG (gogo-launch.toml)".into(),
+            extra_args: Some(Sourced {
+                value: vec![
+                    "--launcher-skip".into(),
+                    "-skipStartScreen".into(),
+                    "a b".into(),
+                ],
+                layer: Layer::User,
+            }),
+            launch_args: vec![
+                "--launcher-skip".into(),
+                "-skipStartScreen".into(),
+                "a b".into(),
+            ],
+            applied: Some(vec![]),
+            pending: true,
+            warnings: vec![],
+        };
+        assert_eq!(
+            args_text(&r),
+            "exe: games/1423049311/prefix/drive_c/GOG/x/bin/x64/Cyberpunk2077.exe\n\
+             game args: (none)  (GOG (gogo-launch.toml))\n\
+             extra args: --launcher-skip -skipStartScreen 'a b'  (L4 user override)\n\
+             the exe gets: --launcher-skip -skipStartScreen 'a b' (then any args launch.sh itself is given)\n\
+             pending: launch.conf still has (none); the next launch's setup writes the new ones\n\
+             your override file: /d/compat/1423049311.toml\n"
         );
     }
 }

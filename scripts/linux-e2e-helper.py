@@ -192,7 +192,17 @@ def parse_manifest(text):
         raise ManifestError(f"not TOML: {e}") from e
     _only(
         raw,
-        ("gogid", "title", "command", "build_command", "window", "exit", "env", "step"),
+        (
+            "gogid",
+            "title",
+            "command",
+            "build_command",
+            "window",
+            "exit",
+            "env",
+            "override",
+            "step",
+        ),
         "manifest",
     )
 
@@ -242,6 +252,26 @@ def parse_manifest(text):
     if not isinstance(env, dict) or not all(isinstance(v, str) for v in env.values()):
         raise ManifestError("env: must be a table of strings")
 
+    # Written into the game's override file through gogo (`linux-app env set`
+    # and `args`) in this run's scratch, right before the launch (#234).
+    override = raw.get("override", {})
+    if not isinstance(override, dict):
+        raise ManifestError("override: must be a table")
+    _only(override, ("env", "extra_args"), "override")
+    if override and gogid is None:
+        raise ManifestError("override is for a game (gogid), not a command")
+    o_env = override.get("env", {})
+    if not isinstance(o_env, dict) or not all(
+        isinstance(v, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k)
+        for k, v in o_env.items()
+    ):
+        raise ManifestError("override.env: a table of NAME = \"string\"")
+    o_args = override.get("extra_args")
+    if o_args is not None and (
+        not isinstance(o_args, list) or not o_args or not all(isinstance(a, str) for a in o_args)
+    ):
+        raise ManifestError("override.extra_args: a non-empty list of strings")
+
     steps_raw = raw.get("step", [])
     if not isinstance(steps_raw, list) or not steps_raw:
         raise ManifestError("needs at least one [[step]]")
@@ -266,6 +296,7 @@ def parse_manifest(text):
             "code": int(_number(exit_.get("code", 0), "exit.code")),
         },
         "env": env,
+        "override": {"env": o_env, "extra_args": o_args},
         "steps": steps,
     }
 
@@ -1565,6 +1596,24 @@ class Driver:
                 "torn_down", self.game_exit in (0, 143), f"launcher exit {self.game_exit}"
             )
 
+    def apply_override(self):
+        """The manifest's [override], through gogo in this run's scratch."""
+        argvs = self.cfg.get("pre_launch") or []
+        if not argvs:
+            return
+        failed = []
+        for argv in argvs:
+            r = self.tool(*argv, timeout=60)
+            if r.returncode != 0:
+                failed.append(f"{' '.join(argv[1:3])}: exit {r.returncode}: {r.stderr.strip()[-300:]}")
+        self.check(
+            "override",
+            not failed,
+            "; ".join(failed) or f"{len(argvs)} gogo call(s) wrote the override file",
+        )
+        if failed:
+            raise RuntimeError(f"override failed: {failed[0]}")
+
     def doctor(self, name):
         argv = self.cfg.get("doctor")
         if not argv:
@@ -1703,6 +1752,7 @@ class Driver:
                 # A display that isn't provably ours: never launch.
                 raise RuntimeError(f"isolation failed: {bad[0]['name']}: {bad[0]['detail']}")
             self.probe_gpu()
+            self.apply_override()
             self.doctor("before")
             self.launch()
             if self.wait_window():

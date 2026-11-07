@@ -412,8 +412,20 @@ mod tests {
             game_dir: "games/1207659013/game".into(),
             workdir: "games/1207659013/prefix/drive_c/GOG/Treasure Adventure Game".into(),
             exe: "games/1207659013/prefix/drive_c/GOG/Treasure Adventure Game/Game.exe".into(),
-            args: vec!["-windowed".into(), "it's".into()],
-            env: [("PROTON_USE_D7VK".to_string(), "1".to_string())].into(),
+            // GOG's args, then #234's extra args, with what a shell would
+            // touch: spaces, both quotes, `$`, backticks, a backslash.
+            args: vec![
+                "-windowed".into(),
+                "it's".into(),
+                "-skipStartScreen".into(),
+                "two words".into(),
+                "$HOME \"q\" `x` \\".into(),
+            ],
+            env: [
+                ("PROTON_USE_D7VK".to_string(), "1".to_string()),
+                ("ODD".to_string(), "a 'b' $X".to_string()),
+            ]
+            .into(),
             dll_overrides: [("ddraw".to_string(), "n,b".to_string())].into(),
             renderer: "d7vk".into(),
             protonfixes: true,
@@ -437,7 +449,7 @@ mod tests {
         let out = std::process::Command::new("bash")
             .arg("-c")
             .arg(
-                "set -u; source \"$1\"; printf '%s|' \"$EXE\" \"${ARGS[1]}\" \"${ENV[0]}\" \
+                "set -u; source \"$1\"; printf '%s|' \"$EXE\" \"${ARGS[@]}\" \"${ENV[@]}\" \
                  \"$DLL_OVERRIDES\" \"$PROTONFIXES\"",
             )
             .arg("bash")
@@ -447,8 +459,9 @@ mod tests {
         assert!(out.status.success(), "{out:?}");
         assert_eq!(
             String::from_utf8_lossy(&out.stdout),
-            "games/1207659013/prefix/drive_c/GOG/Treasure Adventure Game/Game.exe|it's|\
-             PROTON_USE_D7VK=1|ddraw=n,b|1|"
+            "games/1207659013/prefix/drive_c/GOG/Treasure Adventure Game/Game.exe|-windowed|it's|\
+             -skipStartScreen|two words|$HOME \"q\" `x` \\|ODD=a 'b' $X|PROTON_USE_D7VK=1|\
+             ddraw=n,b|1|"
         );
     }
 
@@ -461,7 +474,7 @@ mod tests {
         assert_eq!(v.get("DLL_OVERRIDES"), "ddraw=n,b");
         assert_eq!(v.get("UMU_FOLDERS"), "");
         assert_eq!(v.arrays["ARGS"], c.args);
-        assert_eq!(v.arrays["ENV"], ["PROTON_USE_D7VK=1"]);
+        assert_eq!(v.arrays["ENV"], ["ODD=a 'b' $X", "PROTON_USE_D7VK=1"]);
         assert!(!v.values.contains_key("Generated"));
         let empty = ConfValues::parse("ARGS=()\nUMU_PYTHON=''\n");
         assert!(empty.arrays["ARGS"].is_empty());

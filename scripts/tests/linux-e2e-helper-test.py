@@ -163,6 +163,30 @@ class Manifest(unittest.TestCase):
         with self.assertRaises(helper.ManifestError):
             helper.parse_manifest('gogid = 1\n[env]\nX = 1\n[[step]]\nwait = 1\n')
 
+    def test_override(self):
+        m = helper.parse_manifest(
+            'gogid = 1\n[override]\nextra_args = ["--launcher-skip", "a b"]\n'
+            '[override.env]\nDXVK_HUD = "fps"\n[[step]]\nwait = 1\n'
+        )
+        self.assertEqual(
+            m["override"],
+            {"env": {"DXVK_HUD": "fps"}, "extra_args": ["--launcher-skip", "a b"]},
+        )
+        m = helper.parse_manifest(MINIMAL)
+        self.assertEqual(m["override"], {"env": {}, "extra_args": None})
+        step = "[[step]]\nwait = 1\n"
+        for bad in (
+            'gogid = 1\n[override]\nargs = ["-x"]\n',
+            'gogid = 1\n[override]\nextra_args = []\n',
+            'gogid = 1\n[override]\nextra_args = "-x"\n',
+            'gogid = 1\n[override.env]\n"A-B" = "1"\n',
+            'gogid = 1\n[override.env]\nA = 1\n',
+            'command = ["x"]\n[override]\nextra_args = ["-x"]\n',
+        ):
+            with self.subTest(bad):
+                with self.assertRaises(helper.ManifestError):
+                    helper.parse_manifest(bad + step)
+
     def test_command_instead_of_gogid(self):
         m = helper.parse_manifest('command = ["xterm"]\n[[step]]\nwait = 1\n')
         self.assertEqual(m["command"], ["xterm"])

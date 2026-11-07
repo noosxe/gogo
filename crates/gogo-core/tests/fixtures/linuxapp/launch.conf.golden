@@ -12,8 +12,8 @@ PREFIX='games/1207659013/prefix'
 GAME_DIR='games/1207659013/game'
 WORKDIR='games/1207659013/prefix/drive_c/GOG/Treasure Adventure Game'
 EXE='games/1207659013/prefix/drive_c/GOG/Treasure Adventure Game/Game.exe'
-ARGS=('-windowed' 'it'\''s')
-ENV=('PROTON_USE_D7VK=1')
+ARGS=('-windowed' 'it'\''s' '-skipStartScreen' 'two words' '$HOME "q" `x` \')
+ENV=('ODD=a '\''b'\'' $X' 'PROTON_USE_D7VK=1')
 DLL_OVERRIDES='ddraw=n,b'
 RENDERER='d7vk'
 PROTONFIXES='1'

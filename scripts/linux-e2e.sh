@@ -992,11 +992,18 @@ cmd_run() {
         [ "$REUSE" = 0 ] || save_base "$(jq '.secs // null' "$RESULTS/build-result.json" 2>/dev/null || echo null)"
     fi
 
-    local launch launch_cwd doctor='null' game_log=""
+    local launch launch_cwd doctor='null' game_log="" pre_launch='[]'
     if [ -n "$GOGID" ]; then
         launch="$(jq -cn --arg l "$GOGO_HOME_DIR/games/$GOGID/launch.sh" '[$l]')"
         launch_cwd="$GOGO_HOME_DIR/games/$GOGID"
         doctor="$(jq -cn --arg g "$GOGO" --arg i "$GOGID" '[$g,"linux-app","doctor",$i,"--json"]')"
+        # The manifest's [override] (#234), written by gogo itself before the launch.
+        pre_launch="$(jq -c --arg g "$GOGO" --arg i "$GOGID" '.override as $o | [
+            (if ($o.env | length) > 0
+             then [$g,"linux-app","env","set",$i] + ($o.env | to_entries | map("\(.key)=\(.value)"))
+             else empty end),
+            (if $o.extra_args != null then [$g,"linux-app","args",$i,"--"] + $o.extra_args else empty end)
+        ]' <<<"$MANIFEST_JSON")"
         game_log="$GOGO_HOME_DIR/logs/$GOGID/latest.log"
     else
         launch="$(jq -c .command <<<"$MANIFEST_JSON")"
@@ -1004,8 +1011,8 @@ cmd_run() {
     fi
     local game_extra
     game_extra="$(jq -cn --argjson l "$launch" --arg cwd "$launch_cwd" --argjson d "$doctor" --arg g "$game_log" \
-        --argjson f "$forbidden" --arg i "${INSTALLER_FILE:+$INSTALLER_MOUNT}" \
-        '{launch:$l, launch_cwd:$cwd, doctor:$d, game_log:$g,
+        --argjson f "$forbidden" --arg i "${INSTALLER_FILE:+$INSTALLER_MOUNT}" --argjson p "$pre_launch" \
+        '{launch:$l, launch_cwd:$cwd, doctor:$d, game_log:$g, pre_launch:$p,
           forbidden_paths:($f + (if $i == "" then [] else [$i] end))}')"
     drive_config "$RUN/drive.json" "$game_extra" "$GPU_LABEL" "$GPU_EXPECT" "${GPU_WANT:-}" "$GPUS_JSON" \
         "${GPU_NODES[@]/#/@n:}" "${GAME_ENV[@]/#/@e:}"
