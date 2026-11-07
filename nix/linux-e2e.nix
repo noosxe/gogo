@@ -17,6 +17,8 @@ pkgs.buildEnv {
     pkgs.xterm             # the self-test's client
     pkgs.pulseaudio        # the sandbox's null sink: pulseaudio, pactl, pacat
     pkgs.bubblewrap
+    pkgs.passt             # pasta: the build sandbox's own netns, NATed out to the internet
+    pkgs.iproute2          # ip: lo up in the build's netns
     pkgs.jq
     pkgs.python3           # scripts/linux-e2e-helper.py, run with -I
     pkgs.mesa-demos        # glxinfo: which GL driver --gpu gives

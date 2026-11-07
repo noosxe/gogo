@@ -778,14 +778,19 @@ class Driver:
         with open("/proc/net/dev") as f:
             links = [line.split(":")[0].strip() for line in f if ":" in line]
         iso["netns"] = {"ns": netns, "links": links}
-        # The build downloads, so it keeps the host's network, and with it the
-        # host's abstract X sockets: isolation_display proves whose display it has.
-        if not self.building:
-            self.check(
-                "isolation_netns",
-                netns != c["host_netns"] and links == ["lo"],
-                f"{netns}, links {links}",
-            )
+        if self.building:
+            # The build downloads: its netns has `lo` and pasta's tap, which
+            # takes the name of the host's uplink, NATed out to the internet.
+            ok = len(links) == 2 and links[0] == "lo"
+            tap = links[1] if ok else ""
+        else:
+            ok, tap = links == ["lo"], ""
+        iso["netns"]["tap"] = tap
+        self.check(
+            "isolation_netns",
+            netns != c["host_netns"] and ok,
+            f"{netns}, links {links}" + (f" (lo + pasta's {tap})" if tap else ""),
+        )
 
         pidns = os.readlink("/proc/self/ns/pid")
         self.check("isolation_pidns", pidns != c["host_pidns"], pidns)
@@ -809,13 +814,7 @@ class Driver:
         leaked = sorted(k for k in os.environ if k.startswith("HYPRLAND_"))
         self.check("isolation_env", not leaked, f"inherited: {leaked}" if leaked else "")
 
-        # On the host's network Xwayland can get another number than :0, and
-        # that socket on this /tmp is its own.
-        visible = [
-            p
-            for p in c["forbidden_paths"]
-            if os.path.lexists(p) and not (self.building and p.startswith("/tmp/.X11-unix/"))
-        ]
+        visible = [p for p in c["forbidden_paths"] if os.path.lexists(p)]
         self.check(
             "isolation_paths",
             not visible,
@@ -835,7 +834,10 @@ class Driver:
         iso["display"] = {"DISPLAY": display, "root": got, "socket": socket, "served": served}
         self.check(
             "isolation_display",
-            got == f"{w}x{h}" and os.path.exists(socket) and served == [display],
+            got == f"{w}x{h}"
+            and os.path.exists(socket)
+            and served == [display]
+            and display == ":0",
             f"{display} root {got}, socket {socket}, our Xwayland serves {served}",
         )
 

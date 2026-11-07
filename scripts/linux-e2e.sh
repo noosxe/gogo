@@ -53,6 +53,9 @@ resolve_tools() {
 use_tools() { export PATH="$TOOLS/bin"; }
 helper() { python3 -I "$HELPER_SRC" "$@"; }
 
+# The resolver address the build sees; pasta forwards it to the host's.
+BUILD_DNS=192.0.2.53
+
 # --- the sandbox --------------------------------------------------------------
 
 # A whitelist root: nothing of the host's /home, /mnt, /media or /run but what
@@ -91,9 +94,12 @@ sandbox_args() { # mode: build | game
          --bind "$CACHE/umu" "$RUN/xdg/data/umu")
     case "$GOGO" in /nix/store/*) ;; ?*) SB+=(--ro-bind "$GOGO" "$GOGO") ;; esac
     if [ "$mode" = build ]; then
-        # Build only: the network, and the session bus for the keyring login.
-        SB+=(--share-net)
-        for d in /run/nscd /run/systemd/resolve; do SB+=(--ro-bind-try "$d" "$d"); done
+        # Build only: the session bus for the keyring login. The network is the
+        # holder's (start_sandbox): a netns of its own, NATed out by pasta. Its
+        # resolver address forwards to the host's, so no nscd or resolved sockets.
+        # The holder's root is the real user, so the sandbox names its uid again.
+        SB+=(--uid "$(id -u)" --gid "$(id -g)")
+        SB+=(--ro-bind "$RUN/etc/resolv.conf" "$(readlink -f /etc/resolv.conf)")
         if [ -S "/run/user/$(id -u)/bus" ]; then
             SB+=(--bind "/run/user/$(id -u)/bus" "$RUNTIME_DIR/bus")
         fi
@@ -123,8 +129,31 @@ start_sandbox() { # mode logfile command…
     else
         SE+=("${COMPOSITOR_ENV[@]}")
     fi
-    env -i "${SE[@]}" "$TOOLS/bin/bwrap" "${SB[@]}" "$@" >"$logf" 2>&1 9>&- </dev/null &
-    SANDBOX_PID=$!
+    if [ "$mode" = build ]; then
+        # A holder with user and network namespaces of its own (root, mapped to
+        # the real user, so it has the capabilities pasta's own child lacks and
+        # bwrap can nest its user namespace in it). pasta joins them from outside,
+        # and bwrap starts once the tap is there. SANDBOX_PID is the holder.
+        # shellcheck disable=SC2016  # the gate is bash -c text
+        env -i "${SE[@]}" "$TOOLS/bin/unshare" --user --map-root-user --net "$TOOLS/bin/bash" -c '
+            for _ in $(seq 100); do [ "$(wc -l </proc/net/dev)" -gt 3 ] && break; sleep 0.1; done
+            "$1" link set lo up; shift
+            exec "$@"' _ "$TOOLS/bin/ip" "$TOOLS/bin/bwrap" "${SB[@]}" "$@" >"$logf" 2>&1 9>&- </dev/null &
+        SANDBOX_PID=$!
+        # Not before the holder has left ours.
+        for _ in $(seq 100); do
+            [ "$(readlink "/proc/$SANDBOX_PID/ns/user")" != "$(readlink /proc/self/ns/user)" ] &&
+                [ "$(readlink "/proc/$SANDBOX_PID/ns/net")" != "$(readlink /proc/self/ns/net)" ] && break
+            sleep 0.05
+        done
+        "$TOOLS/bin/pasta" --config-net --foreground --quiet --dns-forward "$BUILD_DNS" \
+            --userns "/proc/$SANDBOX_PID/ns/user" --netns "/proc/$SANDBOX_PID/ns/net" \
+            >>"$logf" 2>&1 9>&- </dev/null &
+        NET_PID=$!
+    else
+        env -i "${SE[@]}" "$TOOLS/bin/bwrap" "${SB[@]}" "$@" >"$logf" 2>&1 9>&- </dev/null &
+        SANDBOX_PID=$!
+    fi
 }
 
 # Wait for the sandbox. Past the deadline, or on a signal, ask the driver to
@@ -149,6 +178,11 @@ supervise() { # deadline-epoch (0 = none)
     local rc=0
     wait "$SANDBOX_PID" || rc=$?
     SANDBOX_PID=""
+    if [ -n "${NET_PID:-}" ]; then
+        kill "$NET_PID" 2>/dev/null || true
+        wait "$NET_PID" 2>/dev/null || true
+        NET_PID=""
+    fi
     return "$rc"
 }
 
@@ -197,6 +231,12 @@ teardown() {
     if [ -n "${SANDBOX_PID:-}" ]; then
         kill -KILL "$SANDBOX_PID" 2>/dev/null || true
         wait "$SANDBOX_PID" 2>/dev/null || true
+        SANDBOX_PID=""
+    fi
+    if [ -n "${NET_PID:-}" ]; then
+        kill "$NET_PID" 2>/dev/null || true
+        wait "$NET_PID" 2>/dev/null || true
+        NET_PID=""
     fi
     collect_logs
     local left="" tries=10 pid killed=""
@@ -473,7 +513,7 @@ cmd_run() {
     RESULTS="${out:-$ROOT/results}/$slug"
     mkdir -p "$RESULTS/shots" "$RUN"
     RESULTS="$(readlink -f "$RESULTS")"
-    INTERRUPTED="" INTERRUPT_COUNT=0 SANDBOX_PID="" MODE_NOW=build
+    INTERRUPTED="" INTERRUPT_COUNT=0 SANDBOX_PID="" NET_PID="" MODE_NOW=build
     trap teardown EXIT
     trap 'on_signal INT' INT
     trap 'on_signal TERM' TERM
@@ -497,6 +537,7 @@ cmd_run() {
     mkdir -p "$RUN/etc"
     printf '%s:x:%s:%s::%s:%s\n' "$(id -un)" "$(id -u)" "$(id -g)" "$RUN/home" "$TOOLS/bin/bash" >"$RUN/etc/passwd"
     printf '%s:x:%s:\n' "$(id -gn)" "$(id -g)" >"$RUN/etc/group"
+    printf 'nameserver %s\n' "$BUILD_DNS" >"$RUN/etc/resolv.conf"
     # Answers `gogo linux-app` would ask for, and never Steam's tools dir.
     printf '[linux]\numu = "zipapp"\nproton_dir = "store"\n' >"$GOGO_HOME_DIR/config.toml"
     log "scratch: $RUN"
