@@ -1,0 +1,40 @@
+# Cyberpunk 2077 (64-bit, D3D12): gogo's Linux lane picks VKD3D-Proton by
+# default (#228). Built from the owner's offline installer, not the depot:
+#
+#   scripts/linux-e2e.sh run 1423049311 --installer <setup_cyberpunk_2077_….exe> --gpu renderD129
+#
+# The intro video, then the animated title screen ("Press space to continue"),
+# about 2 min after the window on an RTX 4090. The title screen doesn't take
+# the harness's input (#236), so the run stops there. Animated: no
+# wait_settled.
+title = "Cyberpunk 2077"
+gogid = 1423049311
+
+[window]
+wait_secs = 900
+resolution = "1920x1080"
+
+# Logging only: which d3d12.dll loads, VKD3D-Proton's device, dxvk-nvapi.
+[env]
+WINEDEBUG = "+loaddll"
+VKD3D_DEBUG = "info"
+DXVK_LOG_LEVEL = "info"
+DXVK_NVAPI_LOG_LEVEL = "info"
+
+[[step]]
+wait = 150
+
+[[step]]
+screenshot = "title"
+
+[[step]]
+click = { x = 50, y = 50 }
+
+[[step]]
+key = "space"
+
+[[step]]
+wait = 30
+
+[[step]]
+screenshot = "after-space"

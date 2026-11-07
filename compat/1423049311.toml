@@ -1,0 +1,14 @@
+# Cyberpunk 2077 (64-bit, D3D12 only: VKD3D-Proton, the L1 default). GOG's
+# primary task is REDprelauncher.exe, a launcher, so gogo starts the game task
+# bin/x64/Cyberpunk2077.exe (#107). e2e/1423049311.toml, built from the 2.31a
+# offline installer (#228).
+title  = "Cyberpunk 2077"
+source = "gogo-headless"
+
+[platforms.linux]
+status = "boots"
+lane   = "installer"
+notes  = "headless sway: intro and the title screen on VKD3D-Proton with NVAPI and DLSS loaded, 3 runs; the title screen ignores the harness's input (#236), so the menu, play, audio and the owner's compositor are not judged"
+tested = [
+  { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/nvidia", date = 2026-11-07 },
+]
