@@ -21,6 +21,8 @@
 #   --secs N          seconds the game phase may take (default 600); over it the
 #                     run is stopped and fails
 #   --gogo PATH       this gogo (default: `nix build .#gogo-linux-app`)
+#   --installer FILE  build from this GOG setup .exe instead of the depot: its
+#                     folder is mounted read-only, in the build's sandbox only
 #   --keep            keep the scratch dir, for a look around
 #   --no-cache        download Proton, umu's runtime and the game afresh, into
 #                     scratch (default: target/linux-e2e/cache, shared by runs)
@@ -59,6 +61,9 @@ helper() { python3 -I "$HELPER_SRC" "$@"; }
 
 # The resolver address the build sees; pasta forwards it to the host's.
 BUILD_DNS=192.0.2.53
+# Where --installer's folder appears in the build's sandbox: a fixed path, so its
+# host path says nothing and the scratch cleanup never walks it.
+INSTALLER_MOUNT=/e2e-installer
 
 # --- the sandbox --------------------------------------------------------------
 
@@ -107,6 +112,7 @@ sandbox_args() { # mode: build | game
         if [ -S "/run/user/$(id -u)/bus" ]; then
             SB+=(--bind "/run/user/$(id -u)/bus" "$RUNTIME_DIR/bus")
         fi
+        [ -z "${INSTALLER_DIR:-}" ] || SB+=(--ro-bind "$INSTALLER_DIR" "$INSTALLER_MOUNT")
     else
         SB+=(--unshare-net)
         for d in "${GPU_BINDS[@]+"${GPU_BINDS[@]}"}"; do SB+=(--dev-bind "$d" "$d"); done
@@ -130,6 +136,7 @@ start_sandbox() { # mode logfile command…
     sandbox_env
     if [ "$mode" = build ]; then
         SE+=(DBUS_SESSION_BUS_ADDRESS="unix:path=$RUNTIME_DIR/bus" "${SOFTWARE_COMPOSITOR_ENV[@]}")
+        [ -z "${INSTALLER_FILE:-}" ] || SE+=(GOGO_E2E_INSTALLER="$INSTALLER_FILE")
     else
         SE+=("${COMPOSITOR_ENV[@]}")
     fi
@@ -327,7 +334,8 @@ write_summary() { # entry-status killed left deleted
         --arg gogid "${GOGID:-}" --arg title "${TITLE:-}" --arg gpu "${GPU_LABEL:-software}" \
         --arg results "$RESULTS" --arg scratch "$RUN" --argjson deleted "$deleted" \
         --arg keep "$KEEP" --arg left "$left" --arg killed "$killed" --arg excerpt "$excerpt" \
-        --arg runtime "${STATE_RUNTIME:-}" --arg date "$(date -u +%F)" '
+        --arg runtime "${STATE_RUNTIME:-}" --arg date "$(date -u +%F)" \
+        --arg installer "${INSTALLER_FILE##*/}" '
         ($r[0]) as $res
         | ($b[0]) as $bld
         | (($bld.checks // []) | map(.name = "build_" + .name)) as $build_checks
@@ -344,6 +352,7 @@ write_summary() { # entry-status killed left deleted
            isolation:($res.isolation // {}), gpu_detail:($res.gpu // {}),
            audio:($res.audio // {}),
            build:{exit:($bld.exit // null), secs:($bld.secs // null), isolation:($bld.isolation // {}),
+                  installer:(if $installer == "" then null else $installer end),
                   windows:($bld.windows // []), support_installer:($bld.support_installer // null)},
            game_exit:($res.game_exit // null),
            doctor:($res.doctor // null),
@@ -483,8 +492,8 @@ gpu_setup() { # comma-joined render nodes, the compositor's first ("": software)
 # --- run ----------------------------------------------------------------------
 
 cmd_run() {
-    local target="" manifest="" gpu="" expect_gpu="" secs=600 out=""
-    GOGO="" KEEP=0 FRESH=0
+    local target="" manifest="" gpu="" expect_gpu="" secs=600 out="" installer=""
+    GOGO="" KEEP=0 FRESH=0 INSTALLER_DIR="" INSTALLER_FILE=""
     while [ $# -gt 0 ]; do
         case "$1" in
         --manifest) manifest="${2:?}"; shift 2 ;;
@@ -492,6 +501,7 @@ cmd_run() {
         --expect-gpu) expect_gpu="${2:?}"; shift 2 ;;
         --secs) secs="${2:?}"; shift 2 ;;
         --gogo) GOGO="${2:?}"; shift 2 ;;
+        --installer) installer="${2:?}"; shift 2 ;;
         --out) out="${2:?}"; shift 2 ;;
         --keep) KEEP=1; shift ;;
         --no-cache) FRESH=1; shift ;;
@@ -504,6 +514,13 @@ cmd_run() {
     case "$secs" in '' | *[!0-9]*) die "--secs wants a number" 2 ;; esac
     [ -n "$manifest" ] || manifest="$REPO/e2e/$target.toml"
     [ -f "$manifest" ] || die "no manifest: $manifest" 2
+    if [ -n "$installer" ]; then
+        installer="$(readlink -f -- "$installer")"
+        [ -f "$installer" ] || die "--installer: no such file" 2
+        case "$installer" in *.exe | *.EXE) ;; *) die "--installer wants a setup .exe: $installer" 2 ;; esac
+        INSTALLER_DIR="${installer%/*}"
+        INSTALLER_FILE="$INSTALLER_MOUNT/${installer##*/}"
+    fi
 
     resolve_tools
     # The builds need nix; everything after them runs on the pinned PATH.
@@ -534,6 +551,9 @@ cmd_run() {
     fi
     use_tools
     gpu_setup "$gpu" "$expect_gpu"
+    if [ -n "$INSTALLER_FILE" ] && [ -z "$GOGID" ] && [ "$(jq -c .build_command <<<"$MANIFEST_JSON")" = null ]; then
+        die "--installer: this manifest builds nothing" 2
+    fi
 
     # One run at a time: they share the cache and the GPU. fd 9 stays out of
     # the sandbox.
@@ -590,6 +610,8 @@ cmd_run() {
         "\($h)/.var/app/com.valvesoftware.Steam", "\($h)/Downloads", "\($h)/.cache/gogo",
         "\($r)/bus", "\($r)/wayland-1", "\($r)/pulse", "\($r)/pipewire-0",
         "/tmp/.X11-unix/X1"]')"
+    # Its host path is hidden from both phases; only the build has the mount.
+    [ -z "$INSTALLER_DIR" ] || forbidden="$(jq -c --arg d "$INSTALLER_DIR" '. + [$d]' <<<"$forbidden")"
     # What both of the driver's phases read; `extra` is one phase's own keys.
     drive_config() { # file extra-json label expect want-node gpus-json [@n:node…] [@e:KEY=value…]
         local file="$1" extra="$2" label="$3" expect="$4" want="$5" gpus="$6"
@@ -610,7 +632,8 @@ cmd_run() {
 
     local build_cmd='null'
     if [ -n "$GOGID" ]; then
-        build_cmd="$(jq -cn --arg g "$GOGO" --arg i "$GOGID" '[$g,"linux-app",$i,"--yes"]')"
+        # The installer lane reads the id from the tree it installs (design 18 §10).
+        build_cmd="$(jq -cn --arg g "$GOGO" --arg i "${INSTALLER_FILE:-$GOGID}" '[$g,"linux-app",$i,"--yes"]')"
     else
         build_cmd="$(jq -c .build_command <<<"$MANIFEST_JSON")"
     fi
@@ -621,7 +644,8 @@ cmd_run() {
         # build.rs: <game state>/<INSTALL_LOGS>/support/<INNO_LOG>, once the build has moved it in place
         [ -z "$GOGID" ] || support_log="$GOGO_HOME_DIR/games/$GOGID/install/support/inno.log"
         build_extra="$(jq -cn --argjson c "$build_cmd" --arg cwd "$RUN/home" --arg s "$support_log" \
-            '{build_command:$c, launch_cwd:$cwd, support_log:$s}')"
+            --arg i "$INSTALLER_FILE" --arg g "$GOGO_HOME_DIR/games" \
+            '{build_command:$c, launch_cwd:$cwd, support_log:$s, installer:$i, games_dir:$g}')"
         drive_config "$RUN/build.json" "$build_extra" software 'llvmpipe|softpipe|lavapipe' "" '[]' \
             "${SOFTWARE_ENV[@]/#/@e:}"
         start_sandbox build "$RESULTS/build-sandbox.log" python3 -I "$RUN/harness/helper.py" drive "$RUN/build.json"
@@ -633,6 +657,10 @@ cmd_run() {
         fi
         if [ "$build_rc" != 0 ] || [ -n "$INTERRUPTED" ]; then
             BUILD_FAILED="the build failed (exit $build_rc), see $RESULTS/build.log"
+            exit 1
+        fi
+        if [ -n "$INSTALLER_FILE" ] && [ -n "$GOGID" ] && [ ! -e "$GOGO_HOME_DIR/games/$GOGID/launch.sh" ]; then
+            BUILD_FAILED="the installer didn't build game $GOGID, see $RESULTS/build.log"
             exit 1
         fi
     fi
@@ -649,7 +677,9 @@ cmd_run() {
     fi
     local game_extra
     game_extra="$(jq -cn --argjson l "$launch" --arg cwd "$launch_cwd" --argjson d "$doctor" --arg g "$game_log" \
-        '{launch:$l, launch_cwd:$cwd, doctor:$d, game_log:$g}')"
+        --argjson f "$forbidden" --arg i "${INSTALLER_FILE:+$INSTALLER_MOUNT}" \
+        '{launch:$l, launch_cwd:$cwd, doctor:$d, game_log:$g,
+          forbidden_paths:($f + (if $i == "" then [] else [$i] end))}')"
     drive_config "$RUN/drive.json" "$game_extra" "$GPU_LABEL" "$GPU_EXPECT" "${GPU_WANT:-}" "$GPUS_JSON" \
         "${GPU_NODES[@]/#/@n:}" "${GAME_ENV[@]/#/@e:}"
 
@@ -806,7 +836,36 @@ cmd_self_test() {
         [ "$code" = 2 ] || st_fail "usage: $bad: exit $code, want 2"
     done
 
-    # 6. The sweep sees a stray process that outlived its run: a decoy carrying
+    # 6. --installer: read-only in the build, gone from the game, untouched.
+    log "self-test: --installer"
+    local fake="$base/fake-installer"
+    mkdir -p "$fake"
+    printf 'not a real installer\n' >"$fake/setup_fake.exe"
+    printf 'part\n' >"$fake/setup_fake-1.bin"
+    local fake_before
+    fake_before="$(cd "$fake" && find . -printf '%p %m %s %T@\n' | sort)"
+    out="$base/installer"; mkdir -p "$out"
+    code=0
+    env --default-signal=INT,TERM "$SELF" run self-test --manifest "$REPO/e2e/self-test-installer.toml" \
+        --installer "$fake/setup_fake.exe" --out "$out" >"$out/stdout" 2>"$out/stderr" || code=$?
+    st_assert_clean installer "$out" "$code" 0
+    summary="$(tail -n 1 "$out/stdout")"
+    jq -e '.build.exit == 0 and .build.installer == "setup_fake.exe"
+        and (.checks | any(.name == "build_isolation_installer" and .ok))
+        and (.checks | any(.name == "isolation_paths" and .ok))' "$summary" >/dev/null ||
+        st_fail "installer: $(jq -c '{build:.build.exit, failed}' "$summary" 2>/dev/null)"
+    [ "$(cd "$fake" && find . -printf '%p %m %s %T@\n' | sort)" = "$fake_before" ] ||
+        st_fail "installer: its folder changed"
+    for bad in "$fake/nothing.exe" "$fake/setup_fake-1.bin"; do
+        code=0
+        "$SELF" run self-test --manifest "$REPO/e2e/self-test.toml" --installer "$bad" >/dev/null 2>&1 || code=$?
+        [ "$code" = 2 ] || st_fail "usage: --installer $bad: exit $code, want 2"
+    done
+    code=0
+    "$SELF" run self-test --manifest "$REPO/e2e/self-test-hold.toml" --installer "$fake/setup_fake.exe" >/dev/null 2>&1 || code=$?
+    [ "$code" = 2 ] || st_fail "usage: --installer with no build: exit $code, want 2"
+
+    # 7. The sweep sees a stray process that outlived its run: a decoy carrying
     #    a run's marker, outside any sandbox.
     log "self-test: the sweep finds a stray"
     RUN_ID="self-test-decoy-$$" RUN="$base/decoy" PREFIX="$base/decoy/prefix" RUN_PIDNS=""

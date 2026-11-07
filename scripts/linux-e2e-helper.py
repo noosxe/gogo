@@ -553,6 +553,39 @@ def parse_support_installer(build_log):
     return {"outcome": "unknown", "exit": None}
 
 
+def installer_problem(path, flags=None):
+    """Why the build's --installer isn't what the harness asked for. None: it is.
+
+    The mount must be read-only by the kernel's word, not by anyone's behaviour.
+    """
+    mount = os.path.dirname(path)
+    try:
+        if flags is None:
+            flags = os.statvfs(mount).f_flag
+    except OSError as e:
+        return f"{mount}: {e.strerror}"
+    if not flags & os.ST_RDONLY:
+        return f"{mount} isn't read-only"
+    if not os.path.isfile(path) or not os.access(path, os.R_OK):
+        return f"can't read {path}"
+    return None
+
+
+def install_logs(games_dir):
+    """The installer lane's logs, staged or moved in place: (log name, path)."""
+    found = []
+    if not os.path.isdir(games_dir):
+        return found
+    for game in sorted(os.listdir(games_dir)):
+        logs = os.path.join(games_dir, game, "install")
+        if not os.path.isdir(logs):
+            continue
+        for name in sorted(os.listdir(logs)):
+            if name.endswith(".log"):
+                found.append((name, os.path.join(logs, name)))
+    return found
+
+
 def parse_pactl_info(text):
     """`pactl info` as the two lines that say whose server and which sink."""
     server = re.search(r"^Server String: (.+)$", text, re.M)
@@ -918,6 +951,10 @@ class Driver:
             not visible,
             f"visible: {visible}" if visible else f"{len(c['forbidden_paths'])} hidden",
         )
+
+        if c.get("installer"):
+            problem = installer_problem(c["installer"])
+            self.check("isolation_installer", problem is None, problem or f"{c['installer']}, read-only")
 
         w, h = self.manifest["window"]["width"], self.manifest["window"]["height"]
         display = self.env.get("DISPLAY", "")
@@ -1372,6 +1409,9 @@ class Driver:
                 self.note_build_windows(windows, started)
             time.sleep(0.2)
         self.result["exit"] = build.returncode
+        if self.cfg.get("installer"):
+            for name, path in install_logs(self.cfg["games_dir"]):
+                shutil.copy(path, os.path.join(self.results, f"install-{name}"))
         self.result["secs"] = round(time.monotonic() - started)
         with open(log_path, errors="replace") as f:
             support = parse_support_installer(f.read())

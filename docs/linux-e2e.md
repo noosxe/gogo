@@ -27,6 +27,9 @@ scripts/linux-e2e.sh run 2086050016 --gpu /dev/dri/renderD129
 scripts/linux-e2e.sh run 2086050016 --gpu renderD128,renderD129 --expect-gpu renderD129
 ```
 ```bash
+scripts/linux-e2e.sh run 1423049311 --installer ~/backups/cyberpunk/setup_cyberpunk_2077.exe --gpu renderD129
+```
+```bash
 scripts/linux-e2e.sh self-test
 ```
 ```bash
@@ -43,6 +46,7 @@ It needs `nix` and nothing else, and resolves its own tools, so there's no need 
 | `--expect-gpu NODE` | with several GPUs, the one the game must render on. Default: any of them, and the summary says which |
 | `--secs N` | the limit of the game phase, default 600. Over it, the run stops and fails |
 | `--gogo PATH` | this gogo; `.#umu-python` supplies the FHS env. Default: `nix build .#gogo-linux-app` |
+| `--installer FILE` | build from this GOG setup `.exe` ([below](#building-from-an-offline-installer)) instead of the depot |
 | `--keep` | keep the scratch dir. `cleanup` leaves it; delete it by hand |
 | `--no-cache` | download Proton, umu's runtime and the game afresh, into scratch |
 | `--out DIR` | results root, default `target/linux-e2e/results` |
@@ -64,6 +68,7 @@ build's sandbox sees. It needs `gogo login` done once. Tokens are never printed.
 | `build.log`, `build-sway.log`, `build-sandbox.log` | what the build phase printed |
 | `sway.log`, `game.out`, `sandbox.log`, `audio.log` | what the game phase printed |
 | `support-inno.log` | the support installer's Inno log, when it wrote one |
+| `install-inno.log`, `install-wine.log` | what the installer wrote, with `--installer` |
 | `run.log`, `launch.log` | the launcher's logs (design 18 §7.3) |
 | `doctor-before.json`, `doctor-after.json` | `gogo linux-app doctor` around the run |
 
@@ -133,6 +138,29 @@ Afterwards the script looks for what's left from outside the sandbox: the launch
 markers and the run's own marker in `/proc/<pid>/environ`, the scratch path on a command
 line, and the sandbox's PID namespace. `nothing_left` fails if it finds anything, and it
 kills what it finds. `scratch_deleted` fails if the dir stays.
+
+## Building from an offline installer
+
+`--installer <setup.exe>` builds through `gogo linux-app <setup.exe> --yes`, gogo's installer
+lane (design 18 §10), instead of the depot. Inno Setup runs silently under umu in a staged
+prefix (`GAMEID=umu-0`, `/DIR=C:\GOG\<slug>`), and the game's id, entry point and renderer
+come from the tree it installed, as they do for a depot build. It uses no game download, so
+there's no `cache/depot/<gogid>` and no owner's OK to ask for, but it can only build the game
+the manifest names: another id fails the build.
+
+- **The folder is read-only, in the build only.** The `.exe`'s folder is bind-mounted at
+  `/e2e-installer`, `.bin` parts and all. `build_isolation_installer` asserts the mount is
+  read-only by the kernel's word (`statvfs`) and the `.exe` can be read, and a failure means
+  the build isn't started. The game's sandbox doesn't have the mount, and its
+  `isolation_paths` asserts that, and both phases assert the host path isn't visible.
+- **A fixed path** keeps the host's layout out of the sandbox. An installer can stay in
+  `~/Downloads` while `isolation_paths` still hides that.
+- **Other files in the folder** (`dlc/`, `patches/`, `extras/`) are visible and unused: the
+  installer only opens its own `.bin` parts. Nothing else installs them.
+- **Disk:** the installed game is in scratch, deleted with it, so every run installs again.
+  There's no cache of installed games. Scratch needs the game's size free (Cyberpunk 2077: about 70 GB).
+- `build.installer` in the summary names the file. A self-test's `build_command` finds it in
+  `GOGO_E2E_INSTALLER`.
 
 ## Graphics
 

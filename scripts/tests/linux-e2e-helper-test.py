@@ -414,6 +414,34 @@ class Parsers(unittest.TestCase):
                 helper.parse_support_installer(start + line), {"outcome": outcome, "exit": code}
             )
 
+    def test_installer_problem(self):
+        with tempfile.TemporaryDirectory() as d:
+            exe = os.path.join(d, "setup_x.exe")
+            with open(exe, "w") as f:
+                f.write("x")
+            self.assertIsNone(helper.installer_problem(exe, os.ST_RDONLY))
+            self.assertIn("isn't read-only", helper.installer_problem(exe, 0))
+            self.assertIn("isn't read-only", helper.installer_problem(exe))  # a real rw dir
+            self.assertIn("can't read", helper.installer_problem(exe + ".no", os.ST_RDONLY))
+        self.assertIn("/gone", helper.installer_problem("/gone/setup_x.exe"))
+
+    def test_install_logs(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(helper.install_logs(os.path.join(d, "none")), [])
+            for game in ("1423049311", ".build-x-1", "nothing"):
+                os.makedirs(os.path.join(d, game))
+            for game in ("1423049311", ".build-x-1"):
+                os.makedirs(os.path.join(d, game, "install", "support"))
+                for name in ("inno.log", "keep.txt"):
+                    open(os.path.join(d, game, "install", name), "w").close()
+            self.assertEqual(
+                helper.install_logs(d),
+                [
+                    ("inno.log", os.path.join(d, ".build-x-1", "install", "inno.log")),
+                    ("inno.log", os.path.join(d, "1423049311", "install", "inno.log")),
+                ],
+            )
+
     def test_pactl_info(self):
         self.assertEqual(
             helper.parse_pactl_info(
