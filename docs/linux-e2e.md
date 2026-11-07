@@ -235,7 +235,12 @@ process; inside, it lists nothing, because of the PID namespace.
   or black. The other way round, on the dGPU with the compositor on the iGPU, works.
 - GL games (wined3d) follow the compositor: GL's vendor comes from the X server.
 
-VKD3D-Proton wasn't tried. What a real desktop does stays on the host pass.
+- VKD3D-Proton (Cyberpunk 2077, one GPU, the 4090) logs its device with `VKD3D_DEBUG = "info"`
+  and nothing that `gpu_detail.game_renders_on` reads, so that stays empty on NVIDIA.
+  `gpu_used_by_game` passes on the held node, and `nvidia-smi pmon` from outside shows the load.
+  With several GPUs it wasn't tried.
+
+What a real desktop does stays on the host pass.
 
 ## Manifests
 
