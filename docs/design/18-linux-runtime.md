@@ -1612,7 +1612,7 @@ One command builds a game in a scratch home, runs it through its generated `laun
 headless sway inside a bwrap root with its own network, PID namespace, `/tmp` and
 `XDG_RUNTIME_DIR`, drives a per-game manifest (`e2e/<gogid>.toml`), and tears everything
 down on every exit path. It runs in software (pixman, llvmpipe, lavapipe), or on a real GPU
-with no display output (`--gpu /dev/dri/renderD12x`).
+with no display output (`--gpu renderD12x`, or several with the compositor's first).
 
 | Check | How |
 |---|---|
@@ -1646,8 +1646,10 @@ owner's OK), and move to the owner only where a run shows a compositor-specific 
   game with no row (rule 3).
 - **ddraw (docs/22 §7 items 2, 6):** Pharaoh and Stronghold with Wine's `ddraw`, then
   cnc-ddraw; Carmageddon TDR 2000 on D7VK. cnc-ddraw under Proton (R21).
-- **Multi-GPU** (R18): `--gpu` gives a sandbox with one GPU, so the device DXVK picks among
-  several, and `DXVK_FILTER_DEVICE_NAME` moving it, stay on the host pass.
+- **Multi-GPU** (R18): `--gpu A,B` gives a sandbox with both. DXVK takes the discrete GPU
+  wherever the compositor is, and `DXVK_FILTER_DEVICE_NAME` moves it, but a game on the iGPU
+  with the compositor on NVIDIA shows nothing (`docs/linux-e2e.md`, Graphics). The same on the
+  owner's Hyprland stays on the host pass.
 
 The early-exit dialog on GNOME (zenity) and KDE (kdialog) isn't on any list: the owner
 uses neither. The harness turns the dialog off (`GOGO_LAUNCHER_NO_DIALOG=1`).
@@ -1692,7 +1694,7 @@ Still open after this doc, by design: the D3D≤7 corpus check
 | R15 | GOG id passed as `SteamAppId` | accepted: no overlap today | §4.1 |
 | R16 | wined3d switch is all-or-nothing | accepted: per-API via `dll_overrides` | §3 |
 | R17 | D7VK and cnc-ddraw both `ddraw.dll` | addressed: never both | §3 |
-| R18 | multi-GPU device choice | addressed: `doctor` warns, L4 env fixes; host pass | §3, §8 |
+| R18 | multi-GPU device choice | addressed: DXVK prefers the discrete GPU (verified headless, sway on either GPU), `doctor` warns, L4 env moves it; host pass | §3, §8 |
 | R19 | missing 32-bit ICDs | addressed: `doctor`'s `vulkan32` | §8 |
 | R20 | DXVK in online games | accepted: documented | §3 |
 | R21 | cnc-ddraw under Proton untested | **open**: host pass | §11.2 |

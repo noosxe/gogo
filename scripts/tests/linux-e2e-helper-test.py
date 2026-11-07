@@ -444,5 +444,105 @@ class Wayland(unittest.TestCase):
         self.assertEqual(helper._wl_string("abcd"), struct.pack("<I", 5) + b"abcd\0\0\0\0")
 
 
+class GpuChoice(unittest.TestCase):
+    NV = {
+        "node": "/dev/dri/renderD129",
+        "label": "nvidia",
+        "expect": "nvidia|geforce|quadro|rtx|gtx",
+        "held": "/dev/nvidia0",
+        "compositor": False,
+    }
+    AMD = {
+        "node": "/dev/dri/renderD128",
+        "label": "radv",
+        "expect": "amd|radv|radeon",
+        "held": "/dev/dri/renderD128",
+        "compositor": True,
+    }
+    NV_NAME = "NVIDIA GeForce RTX 4090"
+    AMD_NAME = "AMD Ryzen 7 9800X3D 8-Core Processor (RADV RAPHAEL_MENDOCINO)"
+    # As DXVK 3.1.1 logs it, cut to what matters.
+    DXVK_LOG = """info:  Found device: NVIDIA GeForce RTX 4090 (NVIDIA 595.112.7)
+info:  Found device: AMD Ryzen 7 9800X3D 8-Core Processor (RADV RAPHAEL_MENDOCINO) (radv 26.2.6)
+info:  Found device: llvmpipe (LLVM 21.1.8, 256 bits) (llvmpipe 26.2.6)
+info:    Skipping: Software driver
+info:  Found device: NVIDIA GeForce RTX 4090 (NVIDIA 595.112.7)
+info:  Creating device:
+info:  NVIDIA GeForce RTX 4090:
+info:    Driver   : NVIDIA 595.112.7
+info:  Creating device:
+info:  NVIDIA GeForce RTX 4090:
+"""
+
+    def test_dxvk_found_as_enumerated_and_created_once(self):
+        got = helper.parse_dxvk(self.DXVK_LOG)
+        self.assertEqual(
+            got["found"], [self.NV_NAME, self.AMD_NAME, "llvmpipe (LLVM 21.1.8, 256 bits)"]
+        )
+        self.assertEqual(got["created"], [self.NV_NAME])
+
+    def test_dxvk_silent_without_its_log(self):
+        self.assertEqual(helper.parse_dxvk("wine: starting\n"), {"found": [], "created": []})
+
+    def test_fdinfo_counts_engines_and_vram(self):
+        text = (
+            "pos:\t0\ndrm-driver:\tamdgpu\ndrm-engine-gfx:\t1500 ns\n"
+            "drm-engine-compute:\t20 ns\ndrm-total-vram:\t4096 KiB\ndrm-memory-vram:\t4096 KiB\n"
+        )
+        self.assertEqual(helper.parse_fdinfo(text), {"engine_ns": 1520, "vram_kib": 4096})
+
+    def test_fdinfo_idle_amd_fd_is_no_engine_time(self):
+        text = "drm-driver:\tamdgpu\ndrm-total-vram:\t12 KiB\n"
+        self.assertEqual(helper.parse_fdinfo(text), {"engine_ns": 0, "vram_kib": 12})
+
+    def test_fdinfo_nvidia_counts_nothing(self):
+        self.assertIsNone(helper.parse_fdinfo("pos:\t0\nflags:\t02\nmnt_id:\t30\n"))
+
+    def test_holding_both_rendering_on_the_one_dxvk_created(self):
+        gpus = [self.AMD, self.NV]
+        fds = {"game.exe": ["/dev/dri/renderD128", "/dev/dri/renderD129", "/dev/nvidia0"]}
+        self.assertEqual(helper.held_nodes(fds, gpus), [self.AMD["node"], self.NV["node"]])
+        dxvk = helper.parse_dxvk(self.DXVK_LOG)
+        use = {"/dev/dri/renderD128": {"engine_ns": 0, "vram_kib": 12}}
+        self.assertEqual(helper.renders_on(gpus, dxvk, use), [self.NV["node"]])
+
+    def test_engine_time_shows_rendering_with_no_dxvk_log(self):
+        gpus = [self.AMD, self.NV]
+        use = {"/dev/dri/renderD128": {"engine_ns": 7, "vram_kib": 900}}
+        self.assertEqual(
+            helper.renders_on(gpus, {"found": [], "created": []}, use), [self.AMD["node"]]
+        )
+
+    def test_dxvks_device_outweighs_crumbs_of_engine_time(self):
+        gpus = [self.AMD, self.NV]
+        dxvk = helper.parse_dxvk(self.DXVK_LOG)
+        use = {"/dev/dri/renderD128": {"engine_ns": 1798345, "vram_kib": 28852}}
+        self.assertEqual(helper.renders_on(gpus, dxvk, use), [self.NV["node"]])
+
+    def test_nothing_shows_rendering(self):
+        self.assertEqual(
+            helper.renders_on([self.AMD, self.NV], {"found": [], "created": []}, {}), []
+        )
+
+    def test_vulkan_one_gpu_lists_only_it(self):
+        expect = self.NV["expect"]
+        self.assertTrue(helper.vulkan_devices_ok([self.NV_NAME], expect, [self.NV]))
+        self.assertFalse(
+            helper.vulkan_devices_ok([self.NV_NAME, "llvmpipe (LLVM)"], expect, [self.NV])
+        )
+        self.assertFalse(helper.vulkan_devices_ok([], expect, [self.NV]))
+
+    def test_vulkan_software_mode_has_no_gpus(self):
+        self.assertTrue(helper.vulkan_devices_ok(["llvmpipe (LLVM)"], "llvmpipe", []))
+
+    def test_vulkan_two_gpus_need_both_and_allow_the_software_driver(self):
+        gpus = [self.AMD, self.NV]
+        expect = "|".join(g["expect"] for g in gpus)
+        both = [self.AMD_NAME, self.NV_NAME, "llvmpipe (LLVM 21.1.8, 256 bits)"]
+        self.assertTrue(helper.vulkan_devices_ok(both, expect, gpus))
+        self.assertFalse(helper.vulkan_devices_ok([self.NV_NAME], expect, gpus))
+        self.assertFalse(helper.vulkan_devices_ok([*both, "Intel(R) Arc"], expect, gpus))
+
+
 if __name__ == "__main__":
     unittest.main()
