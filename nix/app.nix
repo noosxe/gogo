@@ -20,7 +20,20 @@ rustPlatform.buildRustPackage {
   # Keep in sync with [workspace.package] version in Cargo.toml.
   version = "0.1.0";
 
-  src = ../.;
+  # Only what cargo reads (#243): the workspace, gogo-core's build.rs input
+  # (compat/) and the lockfile. Everything else (docs, scripts/, e2e/*.toml,
+  # nix/, .cargo/ whose only runner is macOS dev signing) stays out, so
+  # editing it doesn't change this derivation or rebuild gogo. Tracked files
+  # only, as for any flake source; a new path the build reads must be added here.
+  src = pkgs.lib.fileset.toSource {
+    root = ../.;
+    fileset = pkgs.lib.fileset.unions [
+      ../Cargo.toml
+      ../Cargo.lock
+      ../crates
+      ../compat
+    ];
+  };
   # Lockfile mode vendors everything from the committed Cargo.lock. The git
   # rev-pinned gog-warp additionally needs a content hash (Nix cannot verify
   # rev-pinned content otherwise).
