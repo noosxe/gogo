@@ -1,12 +1,21 @@
 # Cyberpunk 2077 (64-bit, D3D12): gogo's Linux lane picks VKD3D-Proton by
 # default (#228). Built from the owner's offline installer, not the depot:
 #
-#   scripts/linux-e2e.sh run 1423049311 --installer <setup_cyberpunk_2077_….exe> --gpu renderD129
+#   scripts/linux-e2e.sh run 1423049311 --installer <setup_cyberpunk_2077_….exe> \
+#       --gpu renderD129 --expect-gpu renderD129
 #
-# The intro video, then the animated title screen ("Press space to continue"),
-# about 2 min after the window on an RTX 4090. Space takes it to CD Projekt
-# Red's user agreement, where the run stops: past it is the main menu, but
-# accepting the agreement is the owner's call. Animated: no wait_settled.
+# First run, every run (scratch is fresh): the intro video, the animated title
+# screen ("Press space to continue") about 2 min after the window on an RTX
+# 4090, CD Projekt Red's user agreement, then the main menu under an analytics
+# prompt. The owner OKs accepting the agreement in the harness's throw-away
+# prefix (#238); analytics is declined. Then Settings -> Graphics, read only,
+# for DLSS, Frame Generation, Reflex and ray tracing (#232), and Quit Game.
+#
+# Keys only past the title: the game draws its own cursor from relative mouse
+# input, so `click` doesn't aim. The agreement scrolls with the wheel only.
+# In Settings, 1 and 3 switch tabs and Down moves the focus; Left, Right,
+# A, D, Return and F1 (Restore Defaults) would change something, so none is
+# pressed there. Animated: no wait_settled.
 title = "Cyberpunk 2077"
 gogid = 1423049311
 
@@ -14,18 +23,26 @@ gogid = 1423049311
 wait_secs = 900
 resolution = "1920x1080"
 
-# Logging only: which d3d12.dll loads, VKD3D-Proton's device, dxvk-nvapi.
+# Logging only: which DLLs load (d3d12, nvngx, Streamline), VKD3D-Proton's
+# device and DXR tier, dxvk-nvapi.
 [env]
 WINEDEBUG = "+loaddll"
 VKD3D_DEBUG = "info"
 DXVK_LOG_LEVEL = "info"
 DXVK_NVAPI_LOG_LEVEL = "info"
 
+# Quit Game ends it.
+[exit]
+how = "self"
+wait_secs = 60
+
 [[step]]
 wait = 150
 
 [[step]]
 screenshot = "title"
+
+# Through the persistent virtual keyboard: wtype's keys never got here (#236).
 
 [[step]]
 key = "space"
@@ -36,6 +53,502 @@ wait = 20
 [[step]]
 screenshot = "agreement"
 
-# Through the persistent virtual keyboard: wtype's keys never got here (#236).
 [[step]]
 expect_change = { from = "title", to = "agreement", min = 20 }
+
+# Accept needs the agreement scrolled to its end: about 500 notches, so 750.
+
+[[step]]
+scroll = 250
+
+[[step]]
+wait = 1
+
+[[step]]
+scroll = 250
+
+[[step]]
+wait = 1
+
+[[step]]
+scroll = 250
+
+[[step]]
+wait = 1
+
+[[step]]
+wait = 2
+
+[[step]]
+screenshot = "agreement-end"
+
+[[step]]
+expect_change = { from = "agreement", to = "agreement-end", min = 5 }
+
+# Return is Accept (the owner's OK, #238). The menu comes up under the analytics prompt.
+
+[[step]]
+key = "Return"
+
+[[step]]
+wait = 15
+
+[[step]]
+screenshot = "analytics"
+
+[[step]]
+expect_change = { from = "agreement-end", to = "analytics", min = 20 }
+
+# C is "No, I do not agree".
+
+[[step]]
+key = "c"
+
+[[step]]
+wait = 3
+
+[[step]]
+screenshot = "menu"
+
+[[step]]
+expect_change = { from = "analytics", to = "menu", min = 5 }
+
+# The menu's focus starts on Settings, unmarked: Down (Credits), Up (Settings), Return.
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 1
+
+[[step]]
+key = "Up"
+
+[[step]]
+wait = 1
+
+[[step]]
+key = "Return"
+
+[[step]]
+wait = 5
+
+[[step]]
+screenshot = "settings"
+
+[[step]]
+expect_change = { from = "menu", to = "settings", min = 20 }
+
+# 3 is the next tab: Sound, Controls, Gameplay, Graphics.
+
+[[step]]
+key = "3"
+
+[[step]]
+wait = 2
+
+[[step]]
+key = "3"
+
+[[step]]
+wait = 2
+
+[[step]]
+key = "3"
+
+[[step]]
+wait = 2
+
+[[step]]
+screenshot = "graphics"
+
+[[step]]
+expect_change = { from = "settings", to = "graphics", min = 2 }
+
+# Down through the list, a page at a time: the focus scrolls it, and changes nothing.
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+wait = 1
+
+[[step]]
+screenshot = "graphics-1"
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+wait = 1
+
+[[step]]
+screenshot = "graphics-2"
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+wait = 1
+
+[[step]]
+screenshot = "graphics-3"
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+wait = 1
+
+[[step]]
+screenshot = "graphics-4"
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+wait = 1
+
+[[step]]
+screenshot = "graphics-5"
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 0.3
+
+[[step]]
+wait = 1
+
+[[step]]
+screenshot = "graphics-6"
+
+[[step]]
+key = "3"
+
+[[step]]
+wait = 2
+
+[[step]]
+screenshot = "video"
+
+# Escape closes Settings, with nothing changed.
+
+[[step]]
+key = "Escape"
+
+[[step]]
+wait = 5
+
+[[step]]
+screenshot = "menu-again"
+
+[[step]]
+expect_change = { from = "video", to = "menu-again", min = 20 }
+
+# Back on the menu the focus is wherever the game left its cursor: Left takes
+# it to New Game, then Down x4 to Quit Game.
+[[step]]
+key = "Left"
+
+[[step]]
+wait = 1
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 1
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 1
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 1
+
+[[step]]
+key = "Down"
+
+[[step]]
+wait = 1
+
+[[step]]
+screenshot = "on-quit"
+
+# Return quits at once: no confirm dialog, exit 0.
+[[step]]
+key = "Return"

@@ -601,6 +601,21 @@ class Wayland(unittest.TestCase):
             + helper._wl_message(5, 4),
         )
 
+    def test_pointer_scroll(self):
+        self.assertEqual(
+            helper.pointer_scroll(-1, 7),
+            helper._wl_message(5, 5, struct.pack("<I", 0))
+            + helper._wl_message(5, 7, struct.pack("<IIii", 7, 0, -15 * 256, -1))
+            + helper._wl_message(5, 4),
+        )
+
+    def test_manifest_scroll(self):
+        base = 'command = ["x"]\n[[step]]\n'
+        self.assertEqual(helper.parse_manifest(base + "scroll = -3\n")["steps"], [{"scroll": -3}])
+        for bad in ("scroll = 0", "scroll = 1.5", "scroll = true", 'scroll = "down"'):
+            with self.subTest(bad), self.assertRaises(helper.ManifestError):
+                helper.parse_manifest(base + bad + "\n")
+
     def test_pointer_time_wraps(self):
         self.assertEqual(
             helper.pointer_move_by(0, 0, 2**32 + 5), helper.pointer_move_by(0, 0, 5)

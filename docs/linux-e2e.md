@@ -353,6 +353,8 @@ move_by = { x = -3000, y = -3000 } # a relative move, in device units: for a gam
 [[step]]
 click_here = true                # press and release, without moving
 [[step]]
+scroll = 250                     # wheel notches where the pointer is; negative is up
+[[step]]
 wait = 5                         # seconds
 [[step]]
 screenshot = "preferences"

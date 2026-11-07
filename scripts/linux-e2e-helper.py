@@ -97,7 +97,7 @@ def _step(raw, i, shots):
     actions = [k for k in raw if k != "min_fill"]
     if len(actions) != 1:
         raise ManifestError(
-            f"{what}: needs exactly one of click, click_here, move_by, key, type, wait, "
+            f"{what}: needs exactly one of click, click_here, move_by, scroll, key, type, wait, "
             f"wait_settled, screenshot, expect_change; got {sorted(actions)}"
         )
     action = actions[0]
@@ -128,6 +128,10 @@ def _step(raw, i, shots):
                 "y": _number(value["y"], f"{what}: move_by.y"),
             }
         }
+    if action == "scroll":
+        if isinstance(value, bool) or not isinstance(value, int) or value == 0:
+            raise ManifestError(f"{what}: scroll must be a non-zero whole number of notches")
+        return {"scroll": value}
     if action in ("key", "type"):
         if not isinstance(value, str) or not value:
             raise ManifestError(f"{what}: {action} must be a non-empty string")
@@ -693,6 +697,19 @@ def pointer_move_by(dx, dy, msec):
     """zwlr_virtual_pointer_v1 (object 5).motion, then frame: a delta in device units."""
     body = struct.pack("<I", msec & 0xFFFFFFFF) + _wl_fixed(dx) + _wl_fixed(dy)
     return _wl_message(5, 0, body) + _wl_message(5, 4)
+
+
+def pointer_scroll(notches, msec):
+    """One wheel event: axis_source(wheel), axis_discrete(vertical), frame, on
+    zwlr_virtual_pointer_v1 (object 5). Positive is down, a notch is 15 units, as
+    libinput reports a wheel's."""
+    t = msec & 0xFFFFFFFF
+    return (
+        _wl_message(5, 5, struct.pack("<I", 0))
+        + _wl_message(5, 7, struct.pack("<II", t, 0) + _wl_fixed(15 * notches)
+                      + struct.pack("<i", notches))
+        + _wl_message(5, 4)
+    )  # fmt: skip
 
 
 # --- a keyboard for the seat ---------------------------------------------------
@@ -1350,6 +1367,11 @@ class Driver:
             self.do_click(step["click"], record)
         elif action == "click_here":
             self.press_button()
+        elif action == "scroll":
+            n = step["scroll"]
+            for _ in range(abs(n)):
+                self.pointer.sendall(pointer_scroll(1 if n > 0 else -1, _msec()))
+                time.sleep(SCROLL_GAP_MS / 1000)
         elif action == "move_by":
             at = step["move_by"]
             self.pointer.sendall(pointer_move_by(at["x"], at["y"], _msec()))
@@ -1711,6 +1733,8 @@ class Driver:
 # its swaymsg press and release.) And the pause between `type`'s characters.
 KEY_HOLD_MS = 50
 KEY_GAP_MS = 30
+# Between a `scroll`'s notches: one at a time, like a wheel turned by hand.
+SCROLL_GAP_MS = 40
 
 
 def _msec():
