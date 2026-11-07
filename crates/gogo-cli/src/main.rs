@@ -3774,7 +3774,7 @@ fn args_text(r: &gogo::linuxapp::envargs::ArgsReport) -> String {
         );
     }
     if !r.built {
-        out.push_str("(not built yet: GOG's args show once it is)\n");
+        out.push_str("(GOG's args show once it is built)\n");
     }
     let _ = writeln!(out, "your override file: {}", r.user_file.display());
     out

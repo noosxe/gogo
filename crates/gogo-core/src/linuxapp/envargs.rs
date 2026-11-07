@@ -454,7 +454,7 @@ pub fn args_report(gogid: &str) -> Result<ArgsReport, MacAppError> {
                 Err(_) => (b.args.clone(), "GOG (gogo-launch.toml)".into()),
             }
         }
-        (None, None) => (vec![], "none (not built)".into()),
+        (None, None) => (vec![], "not built yet".into()),
     };
     let launch = launch_args(&game_args, e);
     let applied = conf.as_ref().and_then(|c| c.arrays.get("ARGS").cloned());
