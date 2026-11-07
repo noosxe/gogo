@@ -1102,7 +1102,23 @@ the data root moved.
    parent.
 6. Early exit: the dialog (§7.4).
 
-**Teardown.** On `INT`/`TERM`/`HUP`, `TERM` to umu-run's process group, then, after 5 s,
+**Teardown.** On `INT`/`TERM`/`HUP` the launcher first asks the game to close: a Unix
+`TERM` never reaches a Windows program as a close request, so a game torn down by it can't
+save. It runs `wineboot --end-session`, which sends every window `WM_QUERYENDSESSION` and
+`WM_ENDSESSION` and then ends the session's processes. It has to reach the game's own
+wineserver, and that one's socket is in `/tmp/.wine-<uid>` of umu's container (private
+`/tmp`; `PRESSURE_VESSEL_FILESYSTEMS_RW` refuses `/tmp`). A second `umu-run` (also with
+`PROTON_VERB=runinprefix`) is a second container and starts a second wineserver, which sees
+no game (live-checked, Chaos Gate). So the launcher enters the first one: it finds the
+`wineserver` among the prefix's processes and runs, under `timeout`,
+`nsenter -t <wineserver> --preserve-credentials -U -m -- env -i <its environ> <its wine> wineboot --end-session`.
+Only the user and mount namespaces: the container's pid namespace belongs to a user
+namespace above the launcher's and can't be joined, and Wine doesn't need it. No `nsenter`,
+or no wine beside the wineserver: logged, and the teardown goes on. The game then has
+`CLOSE_GRACE_SECS` (10, env `GOGO_CLOSE_GRACE_SECS`) to end on its own, umu-run gone and the
+prefix empty; the log says `closed by itself after Ns` or `didn't close in Ns: TERM`. The
+watchdog stays armed during the wait, and a second signal skips it. The watchdog's own
+teardown (a SIGKILLed launcher) skips the request. If the game is still there, `TERM` goes to umu-run's process group, then, after 5 s,
 `SIGKILL` to every process whose `/proc/<pid>/environ` has this `WINEPREFIX` (Linux lets a
 user read their own processes' environment, which beats design 16's cwd heuristic inside
 the container). The Mac's watchdog (#103) and `.launchers/<pid>` records carry over
