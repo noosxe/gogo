@@ -2720,9 +2720,23 @@ def live_call(sock_dir, request, timeout):
     return json.loads(data)
 
 
-def live_wait(state_file, sock_dir, secs, owner, min_life):
+def live_registered_dir(reg):
+    """The socket's dir from a registry entry's run=, once the session has one."""
+    try:
+        with open(reg) as f:
+            for line in f:
+                if line.startswith("run=") and line.strip() != "run=":
+                    return os.path.join(line[4:].strip(), "live")
+    except OSError:
+        pass
+    return ""
+
+
+def live_wait(state_file, sock_dir, secs, owner, min_life, reg=""):
     """Until the session is ready in life `min_life` or later, or ended, or
-    `secs` pass: (exit, reply). 0 ready, 1 ended, 4 still busy."""
+    `secs` pass: (exit, reply). 0 ready, 1 ended, 4 still busy. A session
+    still starting may not have a scratch yet: with no `sock_dir`, it's
+    read from the registry entry `reg` as the session registers one."""
     deadline = time.monotonic() + secs
     state = {}
     why = ""
@@ -2733,6 +2747,8 @@ def live_wait(state_file, sock_dir, secs, owner, min_life):
         except (OSError, ValueError):
             state = {}
         alive = _pid_alive(owner)
+        if not sock_dir and reg:
+            sock_dir = live_registered_dir(reg)
         if state.get("state") == "ready" and state.get("life", 0) >= min_life and alive:
             try:
                 reply = live_call(sock_dir, {"cmd": "status", "args": []}, 20)
@@ -2826,7 +2842,10 @@ def main(argv):
         print(json.dumps(reply, indent=1))
         return 0 if reply.get("ok") else 1
     if len(argv) == 6 and argv[1] == "live-wait":
-        code, reply = live_wait(argv[2], os.environ.get("GOGO_E2E_LIVE_DIR", ""), float(argv[3]), argv[4], int(argv[5]))
+        code, reply = live_wait(
+            argv[2], os.environ.get("GOGO_E2E_LIVE_DIR", ""), float(argv[3]), argv[4], int(argv[5]),
+            os.environ.get("GOGO_E2E_LIVE_REG", ""),
+        )
         print(json.dumps(reply, indent=1))
         return code
     if len(argv) == 3 and argv[1] == "live-export":

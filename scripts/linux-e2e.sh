@@ -1455,7 +1455,7 @@ live_start() {
 # (export, log and status still work). Sets L_PID, L_RESULTS, L_RUN, L_TOOLS.
 live_find() { # id-or-results-dir
     local id="$1" f k v
-    L_PID="" L_RESULTS="" L_RUN="" L_TOOLS=""
+    L_PID="" L_RESULTS="" L_RUN="" L_TOOLS="" L_REG=""
     if [ -d "$id/live" ]; then
         L_RESULTS="$(readlink -f "$id")"
     else
@@ -1463,6 +1463,7 @@ live_find() { # id-or-results-dir
         live_registry
         f="$LIVE_REG/$id"
         if [ -f "$f" ] && [ ! -L "$f" ]; then
+            L_REG="$f"
             while IFS='=' read -r k v; do
                 case "$k" in pid) L_PID="$v" ;; results) L_RESULTS="$v" ;; run) L_RUN="$v" ;; tools) L_TOOLS="$v" ;; esac
             done <"$f"
@@ -1527,7 +1528,7 @@ cmd_live() {
     status)
         if [ "${1:-}" = --wait ]; then
             [ $# -eq 2 ] || usage
-            GOGO_E2E_LIVE_DIR="$dir" helper live-wait "$state" "$2" "$L_PID" 1
+            GOGO_E2E_LIVE_DIR="$dir" GOGO_E2E_LIVE_REG="$L_REG" helper live-wait "$state" "$2" "$L_PID" 1
             return
         fi
         [ $# -eq 0 ] || usage
@@ -1541,7 +1542,7 @@ cmd_live() {
         life="$(jq -r '.life // 1' "$state")"
         reply="$(GOGO_E2E_LIVE_DIR="$dir" helper live-call 60 restore "$name")" || { printf '%s\n' "$reply"; return 1; }
         log "restoring $name: the game closes, the disk rolls back, it relaunches and replays"
-        GOGO_E2E_LIVE_DIR="$dir" helper live-wait "$state" "$wait" "$L_PID" "$((life + 1))"
+        GOGO_E2E_LIVE_DIR="$dir" GOGO_E2E_LIVE_REG="$L_REG" helper live-wait "$state" "$wait" "$L_PID" "$((life + 1))"
         ;;
     stop)
         [ $# -eq 0 ] || usage

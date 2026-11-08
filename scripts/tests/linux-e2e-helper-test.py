@@ -6,6 +6,7 @@ import os
 import struct
 import sys
 import tempfile
+import time
 import unittest
 import zlib
 
@@ -996,6 +997,38 @@ class LiveSocket(unittest.TestCase):
     def tearDown(self):
         self.driver.srv.close()
         self.tmp.cleanup()
+
+    def test_a_wait_finds_the_socket_once_registered(self):
+        # status --wait from before the session had a scratch: the registry
+        # entry's run= comes later, and the wait reads it then.
+        import threading
+
+        reg = os.path.join(self.tmp.name, "reg")
+        with open(reg, "w") as f:
+            f.write("pid=1\nrun=\n")
+        self.assertEqual(helper.live_registered_dir(reg), "")
+        state = os.path.join(self.tmp.name, "state.json")
+        helper.write_json(state, {"state": "ready", "life": 1})
+
+        def register():
+            time.sleep(0.5)
+            with open(reg, "w") as f:
+                f.write(f"pid=1\nrun={os.path.dirname(self.dir)}\n")
+
+        def serve():
+            for _ in range(100):
+                accepted = self.driver.live_accept(0.1)
+                if accepted:
+                    self.driver.live_reply(accepted[0], {"ok": True, "state": "ready"})
+                    return
+
+        threads = [threading.Thread(target=register), threading.Thread(target=serve)]
+        for t in threads:
+            t.start()
+        code, reply = helper.live_wait(state, "", 8, os.getpid(), 1, reg)
+        for t in threads:
+            t.join()
+        self.assertEqual((code, reply.get("state")), (0, "ready"))
 
     def test_round_trip(self):
         import threading
