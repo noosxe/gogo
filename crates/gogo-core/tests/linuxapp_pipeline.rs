@@ -1100,6 +1100,10 @@ if [ -n "${FAKE_GAME_HANG:-}" ]; then
   echo $! >> "$FAKE_UMU_LOG.pids"
   exec sleep 300
 fi
+if [ -n "${FAKE_GAME_TERM_OK:-}" ]; then
+  trap 'exit 0' TERM
+  for _ in $(seq 100); do sleep 0.1; done
+fi
 if [ -n "${FAKE_GAME_TRAP_TERM:-}" ]; then
   trap 'echo GOT_TERM >> "$FAKE_UMU_LOG"; exit 143' TERM
   echo TRAPPING >> "$FAKE_UMU_LOG"
@@ -2705,6 +2709,9 @@ const WRAP_EXEC: &str = "WRAP_SET=from-wrapper FOO=from-wrapper exec \"$@\"\n";
 /// group, handles TERM, exits when its child does, and always with 0.
 const WRAP_PARENT: &str =
     "\"$@\" &\nc=$!\ntrap 'kill -TERM $c 2>/dev/null; wait $c; exit 0' TERM\nwait $c\nexit 0\n";
+/// gamescope when its window is closed: TERM to its child and the game under it at once, then exit 0.
+const WRAP_TERM_CHILD: &str =
+    "\"$@\" &\nc=$!\nsleep 1\nkill -TERM $c $(pgrep -P $c)\nwait $c\nexit 0\n";
 /// Stays the parent, with the game in a session of its own: nothing sent to
 /// the wrapper's process group reaches the game.
 const WRAP_SESSION: &str = "setsid \"$@\" &\nwait $!\nexit $?\n";
@@ -3075,6 +3082,35 @@ fn the_runs_exit_code_is_the_games_under_a_wrapper_that_drops_it() {
         );
         assert!(prefix_procs(&w).is_empty(), "{name}");
         assert_eq!(w.run_scratch(), Vec::<String>::new(), "{name}");
+    }
+}
+
+/// A wrapper that TERMs the game step, and a game that quits cleanly on it:
+/// the step may see umu-run gone before it looks, and still records 0 (not
+/// the 143 of the interrupted wait).
+#[test]
+fn a_game_that_quits_cleanly_on_the_wrappers_term_is_exit_0() {
+    for i in 0..3 {
+        let Some(w) = World::launcher(&format!("wrap-term-ok-{i}"), false) else {
+            return;
+        };
+        w.wrapped(WRAP_TERM_CHILD, &[]);
+        let log = w.wrap_log();
+        let stub = w.dialog_stub(&["Close"]);
+        let out = w.launch(
+            &[
+                ("FAKE_GAME_TERM_OK", "1"),
+                ("FAKE_WRAP_LOG", log.to_str().unwrap()),
+                ("GOGO_LAUNCHER_DIALOG", stub.to_str().unwrap()),
+                ("GOGO_EARLY_EXIT_SECS", "0"),
+            ],
+            &[],
+        );
+        assert_eq!(out.status.code(), Some(0), "{i}: {out:?}");
+        let r = w.runs().pop().unwrap();
+        assert!(r.contains("# exit: 0\n"), "{i}: {r}");
+        assert!(w.dialogs().is_empty(), "{i}: {:?}", w.dialogs());
+        assert!(prefix_procs(&w).is_empty(), "{i}");
     }
 }
 
