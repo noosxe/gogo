@@ -63,8 +63,16 @@ jobs:
       # dev-signing runner degrades to plain exec here (no codesigning identity
       # on CI runners) and never signs test binaries (*/deps/*).
       - uses: taiki-e/install-action@v2
+        id: nextest
+        continue-on-error: true
         with:
           tool: cargo-nextest@0.9.146
+      # GitHub release assets occasionally 504; build the same version from source.
+      - name: Fallback - build cargo-nextest from source
+        if: steps.nextest.outcome == 'failure'
+        run: |
+          echo "::warning::prebuilt cargo-nextest 0.9.146 download failed; building from source"
+          cargo install cargo-nextest@0.9.146 --locked
       - run: cargo nextest run
 
   deny:
@@ -74,7 +82,15 @@ jobs:
       - uses: actions/checkout@v7
       - run: rustup toolchain install
       - uses: taiki-e/install-action@v2
+        id: deny
+        continue-on-error: true
         with:
           tool: cargo-deny@0.20.2
+      # GitHub release assets occasionally 504; build the same version from source.
+      - name: Fallback - build cargo-deny from source
+        if: steps.deny.outcome == 'failure'
+        run: |
+          echo "::warning::prebuilt cargo-deny 0.20.2 download failed; building from source"
+          cargo install cargo-deny@0.20.2 --locked
       # Licenses (permissive-only allowlist + gog-warp clarify) and advisories.
       - run: cargo deny check
