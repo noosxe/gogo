@@ -1,0 +1,34 @@
+# The self-test's live session (#241): `live start self-test --manifest` this.
+# The build "installs" a file in GOGO_HOME. The game, an xterm, ends at once
+# unless that install is there and this is its first launch on this disk:
+# `launched` must not be there yet, and the game writes it. So a restore that
+# didn't roll the disk back gets no window. Keys: r turns it red, b blue, q
+# quits (exit 0). A live session takes only [window] and [exit] from here; the
+# step is for the manifest check, and a plain run of this passes too.
+title = "self-test: live"
+build_command = ["bash", "-c", '''
+  mkdir -p "$GOGO_HOME/games/fake" && date +%s%N >"$GOGO_HOME/games/fake/installed"
+''']
+command = ["xterm", "-bg", "white", "-fg", "black", "-e", "bash", "-c", '''
+  d="$GOGO_HOME/games/fake"
+  [ -e "$d/installed" ] && [ ! -e "$d/launched" ] && touch "$d/launched" || exit 3
+  printf "\n  live self-test: r red, b blue, q quits\n"
+  while IFS= read -rsn1 k; do
+    case "$k" in
+    r) printf "\033]11;#c02020\007" ;;
+    b) printf "\033]11;#2040c0\007" ;;
+    q) exit 0 ;;
+    esac
+  done
+''']
+
+[window]
+wait_secs = 30
+resolution = "1024x768"
+
+[exit]
+how = "self"
+wait_secs = 10
+
+[[step]]
+type = "q"

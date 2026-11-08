@@ -9,12 +9,22 @@ Run with `python3 -I`: stdlib only, nothing from the working directory.
     linux-e2e-helper.py drive <config.json>    inside the sandbox: run a whole game
     linux-e2e-helper.py tree-check <tree> <run> <guard>…
                                                may an installed base be reused (exit 1: no)
+    linux-e2e-helper.py manifest --live <file> the same, for a live session: no steps needed
+    linux-e2e-helper.py live-call <timeout> <cmd> [arg…]
+                                               one command to a live session's socket,
+                                               in $GOGO_E2E_LIVE_DIR
+    linux-e2e-helper.py live-wait <state> <secs> <owner-pid> <life>
+                                               until a live session is ready (exit 4: still busy)
+    linux-e2e-helper.py live-export <session.json>
+                                               a live session's path as a manifest
 
 `drive` starts headless sway, proves the display is the headless one, launches
 the game, runs the manifest's steps and writes result.json after every step, so
 a killed run still has what it got that far. With `build_command` in its config
 it runs that on the display instead (the build phase): it exits with the
-command's status, or BUILD_NO_DISPLAY when it never got to run it.
+command's status, or BUILD_NO_DISPLAY when it never got to run it. With
+`live` in its config it serves a live session's socket instead of running
+steps (#241), and exits LIVE_RELAUNCH when a restore wants the next life.
 """
 
 import json
@@ -22,7 +32,9 @@ import os
 import re
 import shutil
 import signal
+import select
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -39,6 +51,8 @@ DEFAULT_MIN_FILL = {"w": 90.0, "h": 90.0}
 # an empty screen is a few hundred pixels.
 MIN_NONBLACK_PCT = 1.0
 DEFAULT_MIN_CHANGE_PCT = 0.5
+# `hold`: the longest a key may be held down, in ms.
+HOLD_MAX_MS = 10000
 # wait_settled: two frames this far apart, this close, count as holding still.
 SETTLE_POLL_SECS = 2.0
 SETTLE_MAX_CHANGE_PCT = 1.0
@@ -97,8 +111,8 @@ def _step(raw, i, shots):
     actions = [k for k in raw if k != "min_fill"]
     if len(actions) != 1:
         raise ManifestError(
-            f"{what}: needs exactly one of click, click_here, move_by, scroll, key, type, wait, "
-            f"wait_settled, screenshot, expect_change; got {sorted(actions)}"
+            f"{what}: needs exactly one of click, click_here, move_to, move_by, scroll, key, "
+            f"type, hold, wait, wait_settled, screenshot, expect_change; got {sorted(actions)}"
         )
     action = actions[0]
     value = raw[action]
@@ -118,6 +132,16 @@ def _step(raw, i, shots):
         if value is not True:
             raise ManifestError(f"{what}: click_here must be true")
         return {"click_here": True}
+    if action == "move_to":
+        _only(value, ("x", "y"), f"{what}: move_to")
+        if "x" not in value or "y" not in value:
+            raise ManifestError(f"{what}: move_to needs x and y")
+        return {
+            "move_to": {
+                "x": _percent(value["x"], f"{what}: move_to.x"),
+                "y": _percent(value["y"], f"{what}: move_to.y"),
+            }
+        }
     if action == "move_by":
         _only(value, ("x", "y"), f"{what}: move_by")
         if "x" not in value or "y" not in value:
@@ -128,6 +152,16 @@ def _step(raw, i, shots):
                 "y": _number(value["y"], f"{what}: move_by.y"),
             }
         }
+    if action == "hold":
+        _only(value, ("key", "ms"), f"{what}: hold")
+        if value.get("key") not in KEYS:
+            raise ManifestError(
+                f"{what}: hold.key {value.get('key')!r} isn't a key of the us keymap the harness knows"
+            )
+        ms = value.get("ms")
+        if isinstance(ms, bool) or not isinstance(ms, int) or not 1 <= ms <= HOLD_MAX_MS:
+            raise ManifestError(f"{what}: hold.ms must be a whole number of ms, 1-{HOLD_MAX_MS}")
+        return {"hold": {"key": value["key"], "ms": ms}}
     if action == "scroll":
         if isinstance(value, bool) or not isinstance(value, int) or value == 0:
             raise ManifestError(f"{what}: scroll must be a non-zero whole number of notches")
@@ -184,8 +218,10 @@ def _step(raw, i, shots):
     raise ManifestError(f"{what}: unknown action {action!r}")
 
 
-def parse_manifest(text):
-    """Validate a manifest's TOML and fill in its defaults."""
+def parse_manifest(text, live=False):
+    """Validate a manifest's TOML and fill in its defaults. `live`: for a live
+    session (#241), which drives the game itself: the steps may be left out,
+    and any there are checked and dropped."""
     try:
         raw = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
@@ -273,10 +309,12 @@ def parse_manifest(text):
         raise ManifestError("override.extra_args: a non-empty list of strings")
 
     steps_raw = raw.get("step", [])
-    if not isinstance(steps_raw, list) or not steps_raw:
+    if not isinstance(steps_raw, list) or not (steps_raw or live):
         raise ManifestError("needs at least one [[step]]")
     shots = set()
     steps = [_step(s, i, shots) for i, s in enumerate(steps_raw)]
+    if live:
+        steps = []
 
     return {
         "gogid": gogid,
@@ -953,6 +991,10 @@ class Driver:
         self.env = dict(os.environ)
         self.building = "build_command" in config
         self.prefix = "build-" if self.building else ""
+        # A live session's (#241): its control socket, once it listens.
+        self.live = config.get("live")
+        self.srv = None
+        self.busy = None
         self.sway = None
         self.pulse = None
         self.pointer = None
@@ -995,7 +1037,11 @@ class Driver:
             left = end - time.monotonic()
             if left <= 0:
                 return
-            time.sleep(min(left, 0.25))
+            if self.srv is not None:
+                # A live session answers while it waits: status, or busy.
+                self.live_busy(min(left, 0.25))
+            else:
+                time.sleep(min(left, 0.25))
 
     def tool(self, *argv, timeout=20, env=None):
         return subprocess.run(
@@ -1403,6 +1449,10 @@ class Driver:
             for _ in range(abs(n)):
                 self.pointer.sendall(pointer_scroll(1 if n > 0 else -1, _msec()))
                 time.sleep(SCROLL_GAP_MS / 1000)
+        elif action == "hold":
+            self.press_key(KEYS[step["hold"]["key"]], False, step["hold"]["ms"])
+        elif action == "move_to":
+            self.do_move_to(step["move_to"], record)
         elif action == "move_by":
             at = step["move_by"]
             self.pointer.sendall(pointer_move_by(at["x"], at["y"], _msec()))
@@ -1413,26 +1463,32 @@ class Driver:
         self.save()
 
     def do_click(self, at, record):
+        if self.do_move_to(at, record, "click"):
+            time.sleep(0.2)
+            self.press_button()
+
+    def do_move_to(self, at, record, what="move_to"):
+        """The pointer to a percent of the window, as a motion with a delta."""
         view = self.refresh_view()
         if not view:
             record["ok"] = False
-            self.check("input_click", False, "no window to click")
-            return
+            if self.live is None:
+                self.check(f"input_{what}", False, f"no window to {what.replace('_', ' ')}")
+            return False
         x, y = click_point(view["rect"], at["x"], at["y"])
         record["at"] = [x, y]
         window = self.manifest["window"]
         self.pointer.sendall(pointer_move_to(x, y, window["width"], window["height"], _msec()))
-        time.sleep(0.2)
-        self.press_button()
+        return True
 
-    def press_key(self, code, shift):
-        """Down, held KEY_HOLD_MS, up; Shift around it when `shift`."""
+    def press_key(self, code, shift, hold_ms=None):
+        """Down, held KEY_HOLD_MS (or `hold_ms`), up; Shift around it when `shift`."""
         if shift:
             self.keyboard.sendall(
                 keyboard_key(SHIFT_KEY, True, _msec()) + keyboard_modifiers(SHIFT_MASK)
             )
         self.keyboard.sendall(keyboard_key(code, True, _msec()))
-        time.sleep(KEY_HOLD_MS / 1000)
+        time.sleep((hold_ms or KEY_HOLD_MS) / 1000)
         self.keyboard.sendall(keyboard_key(code, False, _msec()))
         if shift:
             self.keyboard.sendall(
@@ -1471,19 +1527,28 @@ class Driver:
         record["ok"] = False
         self.check("settled", False, f"not in {secs:.0f}s; last frame {last}")
 
-    def do_screenshot(self, step, record):
-        name = step["screenshot"]
-        path = os.path.join(self.cfg["shots_dir"], f"{name}.png")
+    def grab(self, path):
+        """A screenshot of the output to `path`: (image, stats over the window),
+        or (None, grim's error)."""
         r = self.tool("grim", path)
         if r.returncode != 0:
-            record["ok"] = False
-            self.check(f"screenshot_{name}", False, r.stderr.strip())
-            return
+            return None, r.stderr.strip() or f"grim exited {r.returncode}"
         self.refresh_view()
         image = read_png(path)
         rect = self.view["rect"] if self.view else None
         region = (rect["x"], rect["y"], rect["width"], rect["height"]) if rect else None
         stats = analyze(image, region)
+        self.record_gpu_fds()
+        return image, stats
+
+    def do_screenshot(self, step, record):
+        name = step["screenshot"]
+        path = os.path.join(self.cfg["shots_dir"], f"{name}.png")
+        image, stats = self.grab(path)
+        if image is None:
+            record["ok"] = False
+            self.check(f"screenshot_{name}", False, stats)
+            return
         record.update(path=path, stats=stats)
         self.shots[name] = image
         self.check(
@@ -1499,7 +1564,6 @@ class Driver:
                 f"picture {stats['box_w_pct']}% x {stats['box_h_pct']}% of the "
                 f"window, want {fill['w']}% x {fill['h']}%",
             )
-        self.record_gpu_fds()
 
     def do_expect_change(self, want, record):
         a, b = self.shots.get(want["from"]), self.shots.get(want["to"])
@@ -1777,6 +1841,494 @@ class Driver:
             self.stop_services()
         return 0
 
+    # live (#241) ---------------------------------------------------------
+    #
+    # A live session is a game phase that takes its steps from a control
+    # socket instead of a manifest, one command at a time. Each life is one
+    # sandbox: `restore` ends it (LIVE_RELAUNCH), the outer script rolls the
+    # disk back to the launch and starts the next, which replays the
+    # checkpoint's path before it listens again. The path, the checkpoints and
+    # every command are in the results dir, which outlives the sandbox.
+
+    def main_live(self):
+        lv = self.live
+        self.session = live_load_session(lv["session"], self.manifest, lv)
+        self.life = lv["life"]
+        self.last_end = None
+        self.last_command = time.monotonic()
+        outcome = "stop"
+        try:
+            self.live_state("starting", "the display and the isolation checks")
+            self.start_sway()
+            self.start_audio()
+            self.assert_isolation()
+            self.check_audio()
+            bad = [c for c in self.checks if not c["ok"]]
+            if bad:
+                raise RuntimeError(f"isolation failed: {bad[0]['name']}: {bad[0]['detail']}")
+            self.probe_gpu()
+            self.apply_override()
+            self.doctor("before")
+            self.live_listen()
+            self.busy = "launching the game"
+            self.live_state("launching", self.busy)
+            self.launch()
+            self.busy = "waiting for the game's window"
+            self.live_state("launching", self.busy)
+            self.session["game_exit"] = None
+            try:
+                if self.wait_window():
+                    self.last_end = time.monotonic()
+                    self.live_replay()
+                outcome = self.live_serve()
+            except LiveStop:
+                outcome = "stop"
+            if outcome == "restore":
+                self.close_game()
+                self.check("finished", True, f"closed for a restore of {self.session['replay']['checkpoint']}")
+                return LIVE_RELAUNCH
+            if outcome == "idle":
+                self.check(
+                    "live_idle",
+                    False,
+                    f"no command for {lv['idle_secs']:.0f} s: stopped by the idle limit",
+                )
+            self.busy = "stopping"
+            self.live_state("stopping", f"{outcome}: closing the game")
+            self.check_gpu_used()
+            ended = self.game.poll() is not None
+            # Quit from its own menu: it exits by itself, which the export keeps.
+            self.manifest["exit"]["code"] = 0
+            self.finish_game("self" if ended else "signal")
+            self.session["ended"] = {"how": "self" if ended else "signal", "code": self.game_exit}
+            self.live_save()
+            self.check_doctor()
+            self.record_audio_streams()
+            self.check("finished", True, f"live session ended ({outcome})")
+        except (Stop, LiveStop):
+            self.check("finished", False, "stopped from outside (time limit or signal)")
+            self.finish_game("cleanup")
+        except Exception as e:  # recorded as a failed check: the session still reports
+            self.check("finished", False, f"{type(e).__name__}: {e}")
+            self.finish_game("cleanup")
+        finally:
+            if self.srv is not None:
+                self.srv.close()
+                self.srv = None
+                try:
+                    os.unlink(os.path.join(lv["dir"], LIVE_SOCKET))
+                except OSError:
+                    pass
+            self.stop_services()
+        return 0
+
+    def close_game(self):
+        """Close the game for a restore: TERM to the launcher, its own teardown."""
+        if self.game is None:
+            return
+        if self.game.poll() is None:
+            self.game.send_signal(signal.SIGTERM)
+            try:
+                self.game.wait(30)
+            except subprocess.TimeoutExpired:
+                os.killpg(self.game.pid, signal.SIGKILL)
+                self.game.wait()
+        self.game_exit = self.result["game_exit"] = self.game.returncode
+
+    def live_save(self):
+        write_json(self.live["session"], self.session)
+
+    def live_state(self, state, detail=""):
+        write_json(
+            self.live["state"],
+            {"state": state, "detail": detail, "life": self.life, "at": round(time.time(), 1)},
+        )
+
+    def live_journal(self, cmd, args, reply):
+        self.session["seq"] += 1
+        entry = {
+            "seq": self.session["seq"],
+            "at": round(time.time(), 2),
+            "life": self.life,
+            "cmd": cmd,
+            "args": args,
+            "reply": {k: v for k, v in reply.items() if k not in ("status",)},
+        }
+        with open(self.live["journal"], "a") as f:
+            f.write(json.dumps(entry) + "\n")
+
+    def live_listen(self):
+        """The control socket, `ctl.sock` in the session's dir, ours only. Bound
+        through the dir's fd: the scratch path can pass a socket's 108 bytes."""
+        d = self.live["dir"]
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        os.chmod(d, 0o700)
+        fd = os.open(d, os.O_PATH | os.O_DIRECTORY)
+        try:
+            path = f"/proc/self/fd/{fd}/{LIVE_SOCKET}"
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+            srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            old = os.umask(0o077)
+            try:
+                srv.bind(path)
+            finally:
+                os.umask(old)
+        finally:
+            os.close(fd)
+        srv.listen(8)
+        srv.setblocking(False)
+        self.srv = srv
+
+    def live_accept(self, timeout):
+        """One request off the socket within `timeout`: (conn, request) or None."""
+        ready, _, _ = select.select([self.srv], [], [], timeout)
+        if not ready:
+            return None
+        try:
+            conn, _ = self.srv.accept()
+        except (BlockingIOError, InterruptedError):
+            return None
+        conn.setblocking(True)
+        conn.settimeout(10)
+        data = b""
+        try:
+            while not data.endswith(b"\n") and len(data) < 65536:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            req = json.loads(data)
+            if (
+                not isinstance(req, dict)
+                or not isinstance(req.get("cmd"), str)
+                or not isinstance(req.get("args", []), list)
+                or not all(isinstance(a, str) for a in req.get("args", []))
+            ):
+                raise ValueError("want {cmd: string, args: [string]}")
+        except (OSError, ValueError) as e:
+            self.live_reply(conn, {"ok": False, "error": f"bad request: {e}"})
+            return None
+        req.setdefault("args", [])
+        return conn, req
+
+    @staticmethod
+    def live_reply(conn, reply):
+        try:
+            conn.sendall((json.dumps(reply) + "\n").encode())
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    def live_busy(self, timeout):
+        """While a command, the launch or a replay runs: status answers, stop
+        stops, anything else is told to wait."""
+        got = self.live_accept(timeout)
+        if not got:
+            return
+        conn, req = got
+        if req["cmd"] == "status":
+            self.live_reply(conn, self.live_status())
+        elif req["cmd"] == "stop":
+            self.live_reply(conn, {"ok": True, "stopping": True, "while": self.busy})
+            self.live_journal("stop", [], {"ok": True, "while": self.busy})
+            raise LiveStop()
+        else:
+            self.live_reply(conn, {"ok": False, "busy": self.busy or "busy", "error": "busy: try again"})
+
+    def live_serve(self):
+        """Commands until stop, restore or the idle limit: "stop", "restore", "idle"."""
+        self.busy = None
+        self.last_command = time.monotonic()
+        while True:
+            if os.path.exists(self.cfg["stop_file"]):
+                self.result["stopped"] = True
+                raise Stop()
+            self.live_watch_game()
+            if self.last_end is None:
+                self.last_end = time.monotonic()
+            idle = time.monotonic() - self.last_command
+            if idle >= self.live["idle_secs"]:
+                return "idle"
+            got = self.live_accept(0.5)
+            if not got:
+                continue
+            conn, req = got
+            self.last_command = time.monotonic()
+            outcome = self.live_handle(conn, req)
+            self.last_command = time.monotonic()
+            if outcome:
+                return outcome
+
+    def live_watch_game(self):
+        state = "ready"
+        detail = ""
+        if self.game is not None and self.game.poll() is not None:
+            if self.session.get("game_exit") is None:
+                self.game_exit = self.result["game_exit"] = self.game.returncode
+                self.session["game_exit"] = {"code": self.game.returncode, "life": self.life}
+                self.live_save()
+            detail = f"the game exited {self.game.returncode}: restore, or stop"
+        elif self.view is None:
+            detail = "no window: restore, or stop"
+        replay = self.session.get("last_replay")
+        if replay and replay.get("life") == self.life and not replay.get("ok"):
+            detail = (detail + "; " if detail else "") + f"replay stopped: {replay.get('why')}"
+        if getattr(self, "_shown", None) != (state, detail):
+            self._shown = (state, detail)
+            self.live_state(state, detail)
+
+    def live_status(self):
+        cps = {
+            name: {"steps": live_count_steps(cp["path"]), "replay_secs": live_replay_secs(cp["path"], self.session)}
+            for name, cp in self.session["checkpoints"].items()
+        }
+        rect = self.view["rect"] if self.view else None
+        running = self.game is not None and self.game.poll() is None
+        return {
+            "ok": True,
+            "state": "busy" if self.busy else "ready",
+            "busy": self.busy,
+            "life": self.life,
+            "game": {"running": running, "exit": None if running or self.game is None else self.game.returncode},
+            "window": rect and {k: rect[k] for k in ("x", "y", "width", "height")},
+            "steps": live_count_steps(self.session["path"]),
+            "checkpoints": cps,
+            "restores": len(self.session["restores"]),
+            "idle_left": round(self.live["idle_secs"] - (time.monotonic() - self.last_command)),
+            "last_replay": self.session.get("last_replay"),
+        }
+
+    def live_handle(self, conn, req):
+        """Run one command and answer it. Returns "stop" or "restore" when the
+        life ends here."""
+        cmd, args = req["cmd"], req["args"]
+        outcome = None
+        self.busy = None if cmd == "status" else f"running {cmd}"
+        try:
+            if cmd == "status":
+                reply = self.live_status()
+            elif cmd == "stop":
+                reply, outcome = {"ok": True, "stopping": True}, "stop"
+            elif cmd == "restore":
+                reply = self.live_restore(args)
+                outcome = "restore" if reply["ok"] else None
+            elif cmd == "checkpoint":
+                reply = self.live_checkpoint(args)
+            elif cmd in LIVE_STEP_CMDS:
+                reply = self.live_step(cmd, args)
+            else:
+                reply = {"ok": False, "error": f"unknown command {cmd!r}"}
+        except LiveError as e:
+            reply = {"ok": False, "error": str(e)}
+        except LiveStop:
+            reply, outcome = {"ok": False, "error": f"{cmd}: interrupted by a stop"}, "stop"
+        except Stop:
+            self.live_reply(conn, {"ok": False, "error": f"{cmd}: the session is being stopped"})
+            raise
+        except Exception as e:  # the session goes on: one command failed
+            reply = {"ok": False, "error": f"{cmd}: {type(e).__name__}: {e}"}
+        finally:
+            self.busy = None
+        self.live_journal(cmd, args, reply)
+        self.live_save()
+        self.live_reply(conn, reply)
+        return outcome
+
+    def live_step(self, cmd, args):
+        """An input, a wait or a screenshot: run it and put it on the path."""
+        if self.game is None:
+            raise LiveError("no game: restore, or stop")
+        started = time.monotonic()
+        gap = max(0.0, started - (self.last_end or started))
+        rect = self.refresh_view()
+        rect = rect and rect["rect"]
+        raw = live_raw_step(cmd, args, rect)
+        if cmd == "screenshot":
+            raw = {"screenshot": live_unique_name(raw["screenshot"], self.session["names"])}
+        try:
+            step = _step(raw, 0, set())
+        except ManifestError as e:
+            raise LiveError(str(e).removeprefix("step 1: ")) from e
+        entry = {"step": step, "gap": round(gap, 2), "life": self.life, "seq": self.session["seq"] + 1}
+        if cmd == "screenshot":
+            reply = self.live_screenshot(entry)
+        else:
+            self.run_step(step)
+            record = self.steps[-1]
+            if not record["ok"]:
+                raise LiveError(f"{cmd}: no window")
+            reply = {"ok": True, "step": step}
+            if "at" in record:
+                reply["at"] = record["at"]
+        self.session["path"].append(entry)
+        self.last_end = time.monotonic()
+        reply["gap"] = entry["gap"]
+        reply["secs"] = round(self.last_end - started, 2)
+        reply["game_running"] = self.game.poll() is None
+        return reply
+
+    def live_screenshot(self, entry):
+        name = entry["step"]["screenshot"]
+        path = os.path.join(self.cfg["shots_dir"], f"{name}.png")
+        image, stats = self.grab(path)
+        if image is None:
+            raise LiveError(f"screenshot: {stats}")
+        self.session["names"].append(name)
+        # How much the screen moves by itself: a video or an animated menu
+        # can't be matched pixel for pixel in a replay (live_replay_shot).
+        time.sleep(LIVE_MOTION_SECS)
+        again, _ = self.grab(os.path.join(self.run_dir, "motion.png"))
+        moving = None if again is None else changed_pct(image, again)
+        since, inputs = live_last_shot(self.session["path"])
+        change = None
+        if since is not None and since in self.shots:
+            change = changed_pct(self.shots[since], image)
+        self.shots[name] = image
+        entry.update(image=path, stats=stats, since=since, inputs_since=inputs, change_pct=change, moving_pct=moving)
+        fill = self.manifest["window"]["min_fill"]
+        rect = self.view["rect"] if self.view else None
+        return {
+            "ok": True,
+            "name": name,
+            "path": path,
+            "change_pct": change,
+            "since": since,
+            "moving_pct": moving,
+            "nonblack_pct": stats["nonblack_pct"],
+            "fills_window": stats["box_w_pct"] >= fill["w"] and stats["box_h_pct"] >= fill["h"],
+            "window": rect and {k: rect[k] for k in ("x", "y", "width", "height")},
+        }
+
+    def live_checkpoint(self, args):
+        if len(args) != 1 or not re.fullmatch(r"[A-Za-z0-9_-]+", args[0]):
+            raise LiveError("checkpoint NAME: a name of [A-Za-z0-9_-]")
+        name = args[0]
+        shot = self.live_step("screenshot", [f"cp-{name}"])
+        self.session["path"].append({"mark": "checkpoint", "name": name})
+        replaced = name in self.session["checkpoints"]
+        self.session["checkpoints"][name] = {
+            "name": name,
+            "path": json.loads(json.dumps(self.session["path"])),
+            "life": self.life,
+            "at": round(time.time(), 1),
+            "shot": shot["path"],
+        }
+        return {
+            "ok": True,
+            "checkpoint": name,
+            "replaced": replaced,
+            "steps": live_count_steps(self.session["path"]),
+            "replay_secs": live_replay_secs(self.session["path"], self.session),
+            "screenshot": shot["path"],
+        }
+
+    def live_restore(self, args):
+        cps = self.session["checkpoints"]
+        if len(args) != 1:
+            raise LiveError("restore NAME")
+        cp = cps.get(args[0])
+        if cp is None:
+            raise LiveError(f"no checkpoint {args[0]!r}; there are {sorted(cps) or 'none'}")
+        dropped = live_count_steps(self.session["path"]) - live_count_steps(cp["path"])
+        self.session["path"] = json.loads(json.dumps(cp["path"]))
+        self.session["replay"] = {"checkpoint": cp["name"], "from_life": self.life}
+        self.session["restores"].append(
+            {"checkpoint": cp["name"], "life": self.life, "at": round(time.time(), 1), "dropped": dropped}
+        )
+        return {
+            "ok": True,
+            "restoring": cp["name"],
+            "replay_steps": live_count_steps(cp["path"]),
+            "replay_secs": live_replay_secs(cp["path"], self.session),
+        }
+
+    def live_replay(self):
+        """After a restore: the checkpoint's path again, from the launch, at the
+        export's timing. Each screenshot must match the one recorded (within
+        match_pct, for up to LIVE_REPLAY_GRACE s more); the first that doesn't
+        stops it, and the path ends there."""
+        replay = self.session.get("replay")
+        if not replay:
+            return
+        entries = self.session["path"]
+        self.session["path"] = []
+        total = live_count_steps(entries)
+        result = {"checkpoint": replay["checkpoint"], "life": self.life, "steps": total, "ok": True}
+        done = 0
+        started = time.monotonic()
+        for entry in entries:
+            if "mark" in entry:
+                self.session["path"].append(entry)
+                continue
+            self.busy = f"replaying step {done + 1}/{total} to {replay['checkpoint']}"
+            self.live_state("replaying", self.busy)
+            gap = live_kept_gap(entry, self.session["max_gap"])
+            if gap:
+                self.sleep(gap)
+            step = entry["step"]
+            if "screenshot" in step:
+                why = self.live_replay_shot(entry)
+                if why:
+                    result.update(ok=False, why=why)
+                    break
+            else:
+                self.run_step(step)
+            self.session["path"].append(entry)
+            done += 1
+            self.live_save()
+        result["done"] = done
+        result["secs"] = round(time.monotonic() - started, 1)
+        self.session["replay"] = None
+        self.session["last_replay"] = result
+        self.live_save()
+        self.busy = None
+        self.last_end = time.monotonic()
+
+    def live_replay_shot(self, entry):
+        """Retake a recorded screenshot until it matches; None, or why not. A late
+        match lengthens the wait before it, for the next replay and the export."""
+        name = entry["step"]["screenshot"]
+        path = os.path.join(self.cfg["shots_dir"], f"{name}.life{self.life}.png")
+        try:
+            ref = read_png(entry["image"])
+        except (OSError, ValueError, KeyError):
+            ref = None
+        black = (entry.get("stats") or {}).get("nonblack_pct", 0) < MIN_NONBLACK_PCT
+        allowed, loose = live_match_allowance(entry, self.session["match_pct"])
+        first = time.monotonic()
+        while True:
+            at = time.monotonic()
+            image, stats = self.grab(path)
+            if image is None:
+                return f"screenshot {name}: {stats}"
+            if loose:
+                # It moved too much to compare: a picture there is all it can show.
+                pct = None
+                if stats["nonblack_pct"] >= MIN_NONBLACK_PCT:
+                    break
+                why = f"{stats['nonblack_pct']}% non-black, and it was a moving picture"
+            else:
+                pct = None if ref is None or black else changed_pct(image, ref)
+                if pct is None or pct <= allowed:
+                    break
+                why = f"{pct}% of pixels differ from the recorded one (want at most {allowed}%)"
+            if at - first >= LIVE_REPLAY_GRACE:
+                return (
+                    f"screenshot {name}: {why} after {LIVE_REPLAY_GRACE:.0f} s more; "
+                    f"recorded {entry['image']}, now {path}"
+                )
+            self.sleep(1.0)
+        late = round(at - first, 1)
+        if late > 0:
+            entry["extra"] = round(entry.get("extra", 0) + late, 1)
+        entry.update(replayed=path, match_pct=pct)
+        self.shots[name] = image
+        return None
+
 
 # How long a key is held between press and release. A game that polls its input
 # misses an instant press+release. (`click` already holds the button 100 ms between
@@ -1822,6 +2374,385 @@ def _device_nodes():
         nodes += [f"/dev/dri/{n}" for n in os.listdir("/dev/dri")]
     nodes += [f"/dev/{n}" for n in os.listdir("/dev") if n.startswith("nvidia")]
     return sorted(nodes)
+
+
+# --- live sessions (#241) -------------------------------------------------------
+#
+# The path is what a fresh run would do to get where the session is: manifest
+# steps, each with the gap of real time before it. A restore cuts it back to a
+# checkpoint's; export writes it as a manifest. Replay and export time it the
+# same way (live_kept_gap), so a replay that matches says the export's waits do.
+
+# The driver's exit when a restore asked for the next life.
+LIVE_RELAUNCH = 10
+LIVE_SOCKET = "ctl.sock"
+# A gap between two commands under this isn't kept: no wait step for it. Kept
+# down to here because a game can drop keys pressed back to back (Cyberpunk's
+# menu took Down, Up, Return 0.3 s apart, and is not asked to take them at once).
+LIVE_GAP_MIN = 0.2
+# Gaps over this are cut to it: the rest was the agent thinking, not the game.
+LIVE_MAX_GAP = 10.0
+# A replayed screenshot matches the recorded one when at most this % of pixels
+# differ (an animated menu differs some), within LIVE_REPLAY_GRACE s more.
+LIVE_MATCH_PCT = 15.0
+LIVE_REPLAY_GRACE = 30.0
+# A live screenshot takes a second frame this much later: how much the screen
+# moves by itself, which a replay allows (live_match_allowance).
+LIVE_MOTION_SECS = 0.5
+# The export's expect_change: after an input that changed at least this %, a
+# check of half of what it changed, at most LIVE_EXPECT_CAP.
+LIVE_EXPECT_MIN_PCT = 2.0
+LIVE_EXPECT_CAP = 20.0
+# What a screenshot takes (grim, decode, stats), for a replay's estimate.
+LIVE_SHOT_SECS = 2.5
+LIVE_INPUTS = ("key", "type", "hold", "click", "click_here", "move_to", "move_by", "scroll")
+LIVE_STEP_CMDS = ("screenshot", "wait", "key", "type", "hold", "click", "move_to", "move_by", "scroll")
+
+
+class LiveError(Exception):
+    """A live command that can't run; the session goes on."""
+
+
+class LiveStop(Exception):
+    """`stop` came while the session was busy."""
+
+
+def write_json(path, data):
+    tmp = f"{path}.tmp{os.getpid()}"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=1)
+    os.replace(tmp, path)
+
+
+def live_load_session(path, manifest, live):
+    """The session's state, kept in the results dir across lives; a new one the first time."""
+    if os.path.exists(path):
+        with open(path) as f:
+            return json.load(f)
+    session = {
+        "id": live["id"],
+        "manifest": manifest,
+        "max_gap": live["max_gap"],
+        "match_pct": live["match_pct"],
+        "path": [],
+        "checkpoints": {},
+        "names": [],
+        "restores": [],
+        "seq": 0,
+        "replay": None,
+        "last_replay": None,
+        "game_exit": None,
+        "ended": None,
+    }
+    write_json(path, session)
+    return session
+
+
+def live_kept_gap(entry, max_gap):
+    """The wait a replay or an export keeps before a path entry."""
+    gap = min(entry.get("gap", 0.0), max_gap)
+    if gap < LIVE_GAP_MIN:
+        gap = 0.0
+    return round(gap + entry.get("extra", 0.0), 1)
+
+
+def live_match_allowance(entry, match_pct):
+    """How different a replayed screenshot may be: (pct, loose). A frame that
+    moved by itself at least match_pct in LIVE_MOTION_SECS (a video, a scene
+    cut) is loose: only a picture there is checked. Otherwise its own motion
+    is allowed on top."""
+    moving = entry.get("moving_pct") or 0.0
+    if moving >= match_pct:
+        return None, True
+    return round(match_pct + moving, 2), False
+
+
+def live_count_steps(path):
+    return sum(1 for e in path if "step" in e)
+
+
+def live_replay_secs(path, session):
+    """About how long a replay of `path` takes after the window is up."""
+    secs = 0.0
+    for e in path:
+        if "step" not in e:
+            continue
+        secs += live_kept_gap(e, session["max_gap"])
+        step = e["step"]
+        if "wait" in step:
+            secs += step["wait"]
+        elif "screenshot" in step:
+            secs += LIVE_SHOT_SECS
+        elif "hold" in step:
+            secs += step["hold"]["ms"] / 1000
+    return round(secs)
+
+
+def live_last_shot(path):
+    """The last screenshot on the path, and how many inputs came after it."""
+    inputs = 0
+    for e in reversed(path):
+        step = e.get("step", {})
+        if "screenshot" in step:
+            return step["screenshot"], inputs
+        if any(k in step for k in LIVE_INPUTS):
+            inputs += 1
+    return None, inputs
+
+
+def live_unique_name(want, taken):
+    """A screenshot name not used in the session yet: `want`, or want-2, -3..."""
+    if want not in taken:
+        return want
+    n = 2
+    while f"{want}-{n}" in taken:
+        n += 1
+    return f"{want}-{n}"
+
+
+def _live_coord(text, origin, size, what):
+    """A live coordinate as a percent of the window: `N` pixels of the output
+    (as read off a screenshot), or `N%` of the window."""
+    try:
+        if text.endswith("%"):
+            return float(text[:-1])
+        if size is None:
+            raise LiveError(f"{what}: no window to aim at")
+        return 100.0 * (float(text) - origin) / size
+    except ValueError:
+        raise LiveError(f"{what}: want pixels (N) or a percent of the window (N%), got {text!r}") from None
+
+
+def live_raw_step(cmd, args, rect):
+    """A live command's words as a raw manifest step, for _step() to check.
+    `rect`: the window's, for pixel coordinates."""
+
+    def want(n, usage):
+        if len(args) not in n:
+            raise LiveError(f"usage: {cmd} {usage}")
+
+    def coords():
+        x0, y0, w, h = (rect["x"], rect["y"], rect["width"], rect["height"]) if rect else (0, 0, None, None)
+        point = {"x": _live_coord(args[0], x0, w, cmd), "y": _live_coord(args[1], y0, h, cmd)}
+        for k, v in point.items():
+            if not 0 <= v <= 100:
+                raise LiveError(f"{cmd}: {k} is outside the window ({v}% of it)")
+        return point
+
+    def number(text, what):
+        try:
+            return float(text) if "." in text or "e" in text.lower() else int(text)
+        except ValueError:
+            raise LiveError(f"{cmd}: {what} must be a number, got {text!r}") from None
+
+    if cmd == "screenshot":
+        want((0, 1), "[NAME]")
+        return {"screenshot": args[0] if args else "shot"}
+    if cmd == "wait":
+        want((1,), "SECS")
+        return {"wait": number(args[0], "SECS")}
+    if cmd == "key":
+        want((1,), "KEYSYM")
+        return {"key": args[0]}
+    if cmd == "type":
+        want((1,), "TEXT")
+        return {"type": args[0]}
+    if cmd == "hold":
+        want((2,), "KEYSYM MS")
+        return {"hold": {"key": args[0], "ms": number(args[1], "MS")}}
+    if cmd == "click":
+        want((0, 2), "[X Y]")
+        return {"click": coords()} if args else {"click_here": True}
+    if cmd == "move_to":
+        want((2,), "X Y")
+        return {"move_to": coords()}
+    if cmd == "move_by":
+        want((2,), "DX DY")
+        return {"move_by": {"x": number(args[0], "DX"), "y": number(args[1], "DY")}}
+    if cmd == "scroll":
+        want((1,), "NOTCHES")
+        return {"scroll": number(args[0], "NOTCHES")}
+    raise LiveError(f"unknown command {cmd!r}")
+
+
+def _toml(value):
+    """A TOML value: strings as basic strings (JSON's escapes are TOML's too),
+    numbers without a needless .0, inline tables."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        value = round(float(value), 2)
+        return str(int(value)) if value == int(value) else repr(value)
+    if isinstance(value, str):
+        return json.dumps(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml(v) for v in value) + "]"
+    if isinstance(value, dict):
+        return "{ " + ", ".join(f"{k} = {_toml(v)}" for k, v in value.items()) + " }"
+    raise TypeError(f"no TOML for {value!r}")
+
+
+def live_export(session):
+    """The session's path as a manifest (TOML text): the route that's left after
+    the restores, with the gaps it was driven at (cut to max_gap), and an
+    expect_change after each input that changed the screen. Black screenshots
+    are dropped: a fresh run's not_black would fail on them."""
+    m = session["manifest"]
+    max_gap = session["max_gap"]
+    out = [
+        f"# Exported from live session {session['id']} (scripts/linux-e2e.sh live, #241).",
+        f"# Gaps between commands are kept up to {_toml(max_gap)} s; "
+        f"{len(session['restores'])} restore(s), their dead ends dropped.",
+        "# Prove it with a fresh `run` before it replaces a manifest.",
+        f"title = {_toml(m['title'])}",
+    ]
+    if m.get("gogid") is not None:
+        out.append(f"gogid = {m['gogid']}")
+    else:
+        if m.get("build_command"):
+            out.append(f"build_command = {_toml(m['build_command'])}")
+        out.append(f"command = {_toml(m['command'])}")
+    w = m["window"]
+    out += ["", "[window]", f"wait_secs = {_toml(w['wait_secs'])}", f'resolution = "{w["width"]}x{w["height"]}"']
+    if w.get("title"):
+        out.append(f"title = {_toml(w['title'])}")
+    if w["min_fill"] != DEFAULT_MIN_FILL:
+        out.append(f"min_fill = {_toml(w['min_fill'])}")
+    if m.get("env"):
+        out += ["", "[env]"] + [f"{k} = {_toml(v)}" for k, v in m["env"].items()]
+    o = m.get("override") or {}
+    if o.get("env") or o.get("extra_args"):
+        out += ["", "[override]"]
+        if o.get("extra_args"):
+            out.append(f"extra_args = {_toml(o['extra_args'])}")
+        if o.get("env"):
+            out += ["[override.env]"] + [f"{k} = {_toml(v)}" for k, v in o["env"].items()]
+    # Quit from its own menu: it exits by itself, which the export keeps.
+    ended = session.get("ended") or {}
+    if not ended and session.get("game_exit"):
+        ended = {"how": "self", "code": session["game_exit"]["code"]}
+    out += ["", "[exit]"]
+    if ended.get("how") == "self":
+        out += ['how = "self"', f"wait_secs = {_toml(max(m['exit']['wait_secs'], 60))}"]
+        if ended.get("code"):
+            out.append(f"code = {ended['code']}")
+    else:
+        out += ['how = "signal"']
+
+    steps = []
+    comments = []
+    wait = 0.0
+    last_shot = None
+    inputs = 0
+
+    def emit(step):
+        nonlocal wait, comments
+        if wait >= LIVE_GAP_MIN:
+            steps.append((comments, {"wait": round(wait, 1)}))
+            comments = []
+        wait = 0.0
+        steps.append((comments, step))
+        comments = []
+
+    for e in session["path"]:
+        if "mark" in e:
+            comments.append(f"# checkpoint {e['name']!r}")
+            continue
+        wait += live_kept_gap(e, max_gap)
+        step = e["step"]
+        if "wait" in step:
+            wait += step["wait"]
+            continue
+        if "screenshot" in step:
+            name = step["screenshot"]
+            stats = e.get("stats") or {}
+            if stats.get("nonblack_pct", 0) < MIN_NONBLACK_PCT:
+                wait += LIVE_SHOT_SECS  # what grabbing it took
+                continue
+            shot = {"screenshot": name}
+            fill = w["min_fill"]
+            if stats.get("box_w_pct", 0) < fill["w"] or stats.get("box_h_pct", 0) < fill["h"]:
+                shot["min_fill"] = False
+            emit(shot)
+            change = e.get("change_pct")
+            if last_shot and e.get("since") == last_shot and inputs and change is not None and change >= LIVE_EXPECT_MIN_PCT:
+                floor = int(min(change / 2, LIVE_EXPECT_CAP))
+                steps.append(([], {"expect_change": {"from": last_shot, "to": name, "min": max(1, floor)}}))
+            last_shot, inputs = name, 0
+            continue
+        emit(step)
+        if any(k in step for k in LIVE_INPUTS):
+            inputs += 1
+    if not steps:
+        emit({"wait": round(max(wait, 1.0), 1)})
+    for notes, step in steps:
+        out.append("")
+        out += notes
+        out.append("[[step]]")
+        for k, v in step.items():
+            out.append(f"{k} = {_toml(v)}")
+    text = "\n".join(out) + "\n"
+    parse_manifest(text)  # never write one the harness would refuse
+    return text
+
+
+def live_call(sock_dir, request, timeout):
+    """One request to a live session's socket: its reply. The socket must be ours."""
+    path = os.path.join(sock_dir, LIVE_SOCKET)
+    st = os.lstat(path)
+    if not stat.S_ISSOCK(st.st_mode) or st.st_uid != os.getuid():
+        raise OSError(f"{path}: not our socket")
+    fd = os.open(sock_dir, os.O_PATH | os.O_DIRECTORY)
+    conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        conn.settimeout(timeout)
+        conn.connect(f"/proc/self/fd/{fd}/{LIVE_SOCKET}")
+        conn.sendall((json.dumps(request) + "\n").encode())
+        data = b""
+        while not data.endswith(b"\n"):
+            chunk = conn.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+    finally:
+        conn.close()
+        os.close(fd)
+    return json.loads(data)
+
+
+def live_wait(state_file, sock_dir, secs, owner, min_life):
+    """Until the session is ready in life `min_life` or later, or ended, or
+    `secs` pass: (exit, reply). 0 ready, 1 ended, 4 still busy."""
+    deadline = time.monotonic() + secs
+    state = {}
+    while True:
+        try:
+            with open(state_file) as f:
+                state = json.load(f)
+        except (OSError, ValueError):
+            state = {}
+        alive = _pid_alive(owner)
+        if state.get("state") == "ready" and state.get("life", 0) >= min_life and alive:
+            try:
+                reply = live_call(sock_dir, {"cmd": "status", "args": []}, 20)
+                if reply.get("state") == "ready":
+                    return 0, reply
+            except (OSError, ValueError):
+                pass
+        if not alive:
+            return 1, {"ok": False, "state": "ended", "last": state}
+        if time.monotonic() >= deadline:
+            return 4, {"ok": False, "state": state.get("state", "starting"), "busy": True,
+                       "detail": state.get("detail", ""), "life": state.get("life")}
+        time.sleep(1)
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 # --- installed bases (#240) ---------------------------------------------------
@@ -1871,13 +2802,37 @@ def tree_problems(tree, run, guards, uid):
 
 
 def main(argv):
-    if len(argv) >= 3 and argv[1] == "manifest":
+    if len(argv) in (3, 4) and argv[1] == "manifest" and (len(argv) == 3 or argv[2] == "--live"):
+        path = argv[-1]
         try:
-            with open(argv[2], encoding="utf-8") as f:
-                print(json.dumps(parse_manifest(f.read())))
+            with open(path, encoding="utf-8") as f:
+                print(json.dumps(parse_manifest(f.read(), live=len(argv) == 4)))
         except (OSError, ManifestError) as e:
-            print(f"{argv[2]}: {e}", file=sys.stderr)
+            print(f"{path}: {e}", file=sys.stderr)
             return 2
+        return 0
+    # The session's dir comes in GOGO_E2E_LIVE_DIR, not argv: the session's sweep
+    # takes a process with its scratch path on the command line for its own.
+    if len(argv) >= 4 and argv[1] == "live-call":
+        try:
+            sock_dir = os.environ["GOGO_E2E_LIVE_DIR"]
+            reply = live_call(sock_dir, {"cmd": argv[3], "args": argv[4:]}, float(argv[2]))
+        except (OSError, ValueError, KeyError) as e:
+            print(json.dumps({"ok": False, "error": f"the session doesn't answer: {e}"}))
+            return 3
+        print(json.dumps(reply, indent=1))
+        return 0 if reply.get("ok") else 1
+    if len(argv) == 6 and argv[1] == "live-wait":
+        code, reply = live_wait(argv[2], os.environ.get("GOGO_E2E_LIVE_DIR", ""), float(argv[3]), argv[4], int(argv[5]))
+        print(json.dumps(reply, indent=1))
+        return code
+    if len(argv) == 3 and argv[1] == "live-export":
+        try:
+            with open(argv[2]) as f:
+                print(live_export(json.load(f)), end="")
+        except (OSError, ValueError, ManifestError) as e:
+            print(f"{argv[2]}: {e}", file=sys.stderr)
+            return 1
         return 0
     if len(argv) in (3, 7) and argv[1] == "image":
         region = tuple(int(v) for v in argv[3:]) if len(argv) == 7 else None
@@ -1889,7 +2844,9 @@ def main(argv):
     if len(argv) == 3 and argv[1] == "drive":
         with open(argv[2], encoding="utf-8") as f:
             driver = Driver(json.load(f))
-        return driver.main_build() if driver.building else driver.main()
+        if driver.building:
+            return driver.main_build()
+        return driver.main_live() if driver.live else driver.main()
     if len(argv) >= 5 and argv[1] == "tree-check":
         problems = tree_problems(argv[2], argv[3], argv[4:], os.getuid())
         for p in problems:
