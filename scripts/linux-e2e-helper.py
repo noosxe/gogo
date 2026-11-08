@@ -76,6 +76,33 @@ SUPPORT_LINES = (
 )
 
 
+def tmp_foreign(entries, bind_roots, tmp="/tmp"):
+    """The /tmp entries that are neither X/sway sockets nor the parent
+    directories bwrap made for the harness's own binds (#225: a checkout under
+    /tmp). Each directory on the way to a bind root may hold nothing but the
+    next step of that path; the root itself is a mount and not looked into."""
+    roots = [os.path.normpath(r) for r in bind_roots]
+    out = []
+
+    def walk(d, names):
+        for e in names:
+            path = os.path.join(d, e)
+            if d == tmp and e.startswith((".X", "sway-ipc")):
+                continue
+            if path in roots:
+                continue
+            if any(r.startswith(path + "/") for r in roots):
+                try:
+                    walk(path, sorted(os.listdir(path)))
+                except OSError:
+                    out.append(path)
+                continue
+            out.append(path)
+
+    walk(tmp, entries)
+    return [os.path.relpath(p, tmp) for p in out]
+
+
 class ManifestError(Exception):
     pass
 
@@ -1313,7 +1340,7 @@ class Driver:
 
         tmp_fs = _mount_fstype("/tmp")
         tmp_entries = sorted(os.listdir("/tmp"))
-        foreign = [e for e in tmp_entries if not e.startswith((".X", "sway-ipc"))]
+        foreign = tmp_foreign(tmp_entries, c.get("bind_roots", []))
         self.check(
             "isolation_tmp",
             tmp_fs == "tmpfs" and not foreign,

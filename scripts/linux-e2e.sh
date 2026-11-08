@@ -1242,6 +1242,12 @@ cmd_run() {
         "\($h)/.var/app/com.valvesoftware.Steam", "\($h)/Downloads", "\($h)/.cache/gogo",
         "\($r)/bus", "\($r)/wayland-1", "\($r)/pulse", "\($r)/pipewire-0",
         "/tmp/.X11-unix/X1"]')"
+    # The host paths the sandbox binds at the same path (sandbox_args): where
+    # one is under /tmp, bwrap makes its parent directories in the sandbox's
+    # /tmp, which isolation_tmp must not take for a leak (#225).
+    local bind_roots
+    bind_roots="$(jq -cn --arg a "$RUN" --arg b "$RESULTS" --arg g "$GOGO" '[$a, $b, $g]
+        | map(select(startswith("/tmp/") and (startswith("/nix/store/") | not)))')"
     # Its host path is hidden from both phases; only the build has the mount.
     [ -z "$INSTALLER_DIR" ] || forbidden="$(jq -c --arg d "$INSTALLER_DIR" '. + [$d]' <<<"$forbidden")"
     # What both of the driver's phases read; `extra` is one phase's own keys.
@@ -1251,10 +1257,10 @@ cmd_run() {
         jq -n --argjson m "$MANIFEST_JSON" --arg run "$RUN" --arg results "$RESULTS" \
             --arg shots "$RESULTS/shots" --arg stop "$RUN/stop" \
             --arg netns "$(readlink /proc/self/ns/net)" --arg pidns "$(readlink /proc/self/ns/pid)" \
-            --argjson forbidden "$forbidden" --argjson extra "$extra" \
+            --argjson forbidden "$forbidden" --argjson bind_roots "$bind_roots" --argjson extra "$extra" \
             --arg label "$label" --arg expect "$expect" --arg want "$want" --argjson gpus "$gpus" --arg rt "$RUNTIME_DIR" \
             --args '{manifest:$m, run_dir:$run, results_dir:$results, shots_dir:$shots, stop_file:$stop,
-                host_netns:$netns, host_pidns:$pidns, forbidden_paths:$forbidden, runtime_dir:$rt,
+                host_netns:$netns, host_pidns:$pidns, forbidden_paths:$forbidden, bind_roots:$bind_roots, runtime_dir:$rt,
                 gpu:{label:$label, expect:$expect, want:$want, gpus:$gpus,
                      nodes:($ARGS.positional | map(select(startswith("@n:")) | ltrimstr("@n:")))},
                 game_env:($ARGS.positional | map(select(startswith("@e:")) | ltrimstr("@e:"))

@@ -452,6 +452,25 @@ class Parsers(unittest.TestCase):
             self.assertIn("can't read", helper.installer_problem(exe + ".no", os.ST_RDONLY))
         self.assertIn("/gone", helper.installer_problem("/gone/setup_x.exe"))
 
+    def test_tmp_foreign(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "repo/target/run"))
+            os.makedirs(os.path.join(d, "repo/target/results"))
+            roots = [os.path.join(d, "repo/target/run"), os.path.join(d, "repo/target/results")]
+            top = sorted(os.listdir(d))
+            self.assertEqual(helper.tmp_foreign(top + [".X11-unix"], roots, d), [])
+            # A bind root's own content is a mount, not looked into.
+            open(os.path.join(roots[0], "x"), "w").close()
+            self.assertEqual(helper.tmp_foreign(top, roots, d), [])
+            # A stray beside the path to a root, or none of the roots: a leak.
+            open(os.path.join(d, "repo/secret"), "w").close()
+            self.assertEqual(helper.tmp_foreign(top, roots, d), ["repo/secret"])
+            os.makedirs(os.path.join(d, "other"))
+            self.assertEqual(
+                helper.tmp_foreign(sorted(os.listdir(d)), roots, d), ["other", "repo/secret"]
+            )
+            self.assertEqual(helper.tmp_foreign(["other"], [], d), ["other"])
+
     def test_install_logs(self):
         with tempfile.TemporaryDirectory() as d:
             self.assertEqual(helper.install_logs(os.path.join(d, "none")), [])
