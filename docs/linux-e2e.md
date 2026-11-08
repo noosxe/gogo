@@ -175,7 +175,9 @@ as a `flock` on fd 9, which no sandbox inherits.
 - **A live session** holds it from its build to its `stop`, bounded by its idle limit and hard
   cap, and a waiting run's log says so ([below](#the-lock-the-limits-and-cleanup)).
 - **Self-test.** `self-test` uses a lock dir of its own (`GOGO_E2E_LOCK_DIR`, under
-  `target/linux-e2e/`), so it never waits for a real run. It covers two runs on one lock
+  `target/linux-e2e/`), so it never waits for a real run, and bases of its own
+  (`GOGO_E2E_INSTALLED_DIR`): its `cleanup` sweeps `.runs`, and under another lock that would
+  be a real session's scratch, so one without the other is refused. It covers two runs on one lock
   (the second waits and names the first, then goes), `cleanup` refusing meanwhile, and a
   stale note.
 - Runs from a checkout older than this lock don't take it. Rebase before running in parallel.
@@ -414,6 +416,7 @@ finds the steps (unless it [starts from them](#starting-from-a-manifest)). A gam
 | `status [--wait SECS]` | its state, the game's, the window, the checkpoints and the idle time left; with `--wait`, once it's ready, or exit 4 when it's still busy (building, launching, replaying) |
 | `screenshot [NAME]` | the PNG's path under `target/`, `change_pct` against the last screenshot (`since`), and `moving_pct`: how much a second frame half a second later differs, so a video or an animation shows as one. A name already taken gets `-2` |
 | `key KEYSYM`, `type TEXT`, `hold KEYSYM MS` | as the manifest's `key` and `type` ([below](#manifests)); `hold` keeps a key down for MS ms |
+| `press_until KEY --every SECS --max PRESSES --change PCT`, or `--marked X Y W H COLOR MIN [TOL]` for `--change`; `wait_until --every SECS --max LOOKS --marked ...` | as [the manifest's](#press_until); X Y W H in % of the window. Answers `presses` and `seen_pct`; exit 1 when it runs out |
 | `click [X Y]`, `move_to X Y` | X Y in pixels of the screenshot, or `N%` of the window. `click` with none clicks where the pointer is (`click_here`) |
 | `move_by DX DY`, `scroll NOTCHES`, `wait SECS` | as the manifest's |
 | `settle [--max SECS]` | waits until the picture fills the window and holds still, by the code of the manifest's `wait_settled`. Answers `settled`, `secs` it took, the last frame's `path`, and the `step` it put on the path. An animated screen answers `"settled": false` after `--max` (default 30, at most 600), it doesn't hang |
@@ -716,7 +719,7 @@ RTX 4090), from `live start` to `stop`: 19 min.
 | `restore agreed`: matched, 11 steps | 2 min 38 s (the replay 131 s) |
 | analytics declined, Settings, Graphics, back, Quit Game (exit 0), `export`, `stop` | 4 min |
 
-What it found that the old manifest had to guess or got lucky on:
+What it found that the old manifest had to guess or got lucky on (the last two are settled now, [below](#a-route-that-doesnt-race-cyberpunk-2077)):
 with `-skipStartScreen` the title is up in about 30 s, not 150; the intro takes longer on
 some launches than others, so a fixed `wait` before a title screenshot is a race; `click`
 doesn't aim (the game's own cursor, from relative input), which a click and a screenshot
@@ -903,6 +906,12 @@ type = "Hello!"                  # text, a key at a time, Shift where the us lay
 [[step]]
 hold = { key = "w", ms = 500 }   # one key, held down 500 ms (up to 10000)
 [[step]]
+press_until = { key = "space", change = 20, every = 2, max = 60 }  # a key until the screen says it took ([below](#press_until))
+[[step]]
+press_until = { key = "Down", every = 1, max = 8, marked = { x = 9, y = 57.5, w = 22, h = 7, color = "#f0f040", tol = 40, min = 1 } }
+[[step]]
+wait_until = { every = 1, max = 120, marked = { x = 78.6, y = 85.1, w = 14.9, h = 3, color = "#e85048", tol = 50, min = 10 } }
+[[step]]
 relaunch = true                  # the game has quit by itself: launch it again, same sandbox, same disk
 ```
 
@@ -935,6 +944,34 @@ To write one: run it with `--keep` or a first screenshot, read the coordinates o
 PNG, and divide by the resolution. Look at the screenshots yourself: the automatic checks
 say "a picture fills the window and it changed", not "it's the right picture".
 
+### `press_until`
+
+A key after a fixed `wait` is a bet on how long the game takes, and a key on a menu is a bet on
+where its focus is. `press_until` presses until the screen says the key took, up to `max`
+presses, `every` seconds apart. Both are required: no limit is guessed. It's in the step runner,
+so a `run`, a live session (`live <id> press_until`), `--from-manifest` and a restore's replay
+all do the same thing. Exactly one of two conditions:
+
+| | Passes when | For |
+|---|---|---|
+| `change = PCT` | the frame after a press differs by that % from the one right before it | a screen that holds still until the key takes. A game's own motion counts as a change, so a video or a scene cut passes it falsely: see `marked` |
+| `marked = { x, y, w, h, color, tol, min }` | at least `min`% of the region (% of the window) is within `tol` (default 40, per channel) of `color`, in 2 frames running. Looked at before the first press too: a key that moves a focus would move it off | a screen that moves, and "the focus is on this item": a colour nothing else has there. A colour says it with no game art in git |
+
+- **Running out fails, and stops.** The check `press_until_<n>_<key>` fails with the presses, the
+  last %, and the last frame (`shots/press-until-<n>-failed.png`), and a `run`'s steps end there,
+  since the ones after it stand on it: a `Return` that would open the wrong menu item is never
+  pressed. A replay stops there as at a frame that doesn't match, and `--from-manifest` as at a
+  failed check.
+- **The export is honest.** One that passed is on the path, and exports, as given. One that ran
+  out answers `ok: false` and exit 1, and the session goes on; its keys did reach the game, so the
+  path has them as the plain `key`s they were. `restore` drops them.
+- **A press may be one too many.** The key is pressed until the screen shows it took, so a slow
+  screen gets another. Use it where that's harmless, and `every` longer than the key takes to show.
+- `summary.json`'s step has `presses`, `secs` and `seen_pct`.
+- **`wait_until`** is the same with no key: `marked` only, `max` looks `every` seconds apart, and
+  running out fails and stops the same (`wait_until_<n>`). For a screen that moves, where
+  `wait_settled` can't say when it's there.
+
 ### The automatic checks
 
 | Check | Fails when | Would have caught |
@@ -945,6 +982,7 @@ say "a picture fills the window and it changed", not "it's the right picture".
 | `not_black_<shot>` | under 1% of the window's pixels are above level 16 | a black screen |
 | `fills_window_<shot>` | the non-black bounding box is under `min_fill` | 800×600 in the top-left of a window: 62% × 75% |
 | `changed_<a>_<b>` | under `min`% of pixels changed by more than 16 | a click that didn't land |
+| `press_until_<n>_<key>`, `wait_until_<n>` | the `n`th of them ran out, or the game exited first. The steps end there | a key pressed into an intro, a focus that isn't where the route needs it |
 | `clean_exit` | `how = "self"`: still up after `wait_secs`, or a non-zero exit | a game that hangs on exit |
 | `torn_down` | `how = "signal"`: the launcher doesn't end on `TERM` | a stuck teardown |
 | `doctor_links`, `doctor_processes` | doctor's lines aren't `ok` after the run | host drive links (#199), a stray Wine process |
@@ -1026,6 +1064,29 @@ These stay in the owner's host pass (#179, design 18 §11.2), and agents put the
   into its container. It's set explicitly because `/etc` is the host's, `/etc/pulse` included.
 - **Sway comes as `sway-unwrapped`:** nixpkgs' wrapper starts `dbus-run-session`, which needs
   a config in `/etc`.
+
+### A route that doesn't race: Cyberpunk 2077
+
+`e2e/1423049311.toml` used to press `space` a fixed time after the window, and walk the menu by a
+count of keys (#266, #262). Now a colour says what's on screen ([`press_until`](#press_until)).
+
+**The intro** (the 4090, `-skipStartScreen`). Black for 9 s, warnings on black to 31 s, then a video
+with the prompt, ending in the agreement by itself about 90 s after the window. Half a second apart,
+70% of the video's pixels differ, and a scene cut is as big as a key taking, so `change` can't
+tell. The prompt's region was 19-26% near its colour in every frame of the video sampled, and 0.0 in
+every other. So `wait_until` the prompt, a `title` screenshot, then `press_until space` until the
+agreement's dark panel is there.
+
+**The focus.** Left's and Down's traps are why a count of keys went wrong: Down ends swapping My
+Rewards and the version box, and Left swaps My Rewards and the banner. The manifest's comment has
+the map. Down until My Rewards is framed works from anywhere, Left goes to the banner, and Up climbs
+to the item, framed. A row with the focus is 3.3-4.6% near its yellow, and one without 0.0.
+
+| Proof | |
+|---|---|
+| The route to the agreement, 10 restores in a row (`--from-manifest --to-shot agreement`) | 10 of 10, no retries: 38-39 s replay, the prompt after 31-32 looks, `space` taking at its first press. So nothing here shows what the 2 of 9 in #257 were, but a late key now gets pressed again, and running out says so |
+| The route to Quit Game from every place the focus can be (the unmarked one after a dialog, New Game, Load Game, Settings, Credits, Quit Game, the banner, My Rewards, the version box), no `Return` | 9 of 9, 0-6 presses of Down and 1 of Up, Quit Game framed at 4.5% each time |
+| A fresh `run` of the manifest, the installer build and all, without `--reuse-install` | passed in 12 min 27 s, of which 8 min 31 s is the build: all 92 checks ok, on the fresh disk (title, agreement, analytics, Settings, every Graphics page, Video, Quit Game framed, exit 0 after 1.3 s) and on the remembered one after the relaunch (the window after 4.5 s, the menu, Quit Game framed, exit 0). The game phase took about 4 min |
 
 **Where a restore goes, and what was cut** (#257; the same RTX 4090 and options, 2026-11-08).
 `last_restore.phases`, and `last_replay.timeline`, on the same route as above, before and after.

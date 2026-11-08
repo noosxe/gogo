@@ -60,6 +60,14 @@ MIN_NONBLACK_PCT = 1.0
 DEFAULT_MIN_CHANGE_PCT = 0.5
 # `hold`: the longest a key may be held down, in ms.
 HOLD_MAX_MS = 10000
+# press_until: the most presses, and the longest pause between two.
+PRESS_MAX = 1000
+PRESS_EVERY_MAX = 120.0
+# How far a channel may be off `marked`'s colour, by default; and its frames in a
+# row, so a frame in passing doesn't count.
+MARKED_TOL = 40
+MARKED_HITS = 2
+MARKED_HIT_GAP = 0.2
 # wait_settled: two frames this far apart, this close, count as holding still.
 SETTLE_POLL_SECS = 2.0
 SETTLE_MAX_CHANGE_PCT = 1.0
@@ -139,6 +147,65 @@ def _min_fill(raw, what):
     }
 
 
+def _marked(raw, what):
+    """press_until's `marked`: a region, in % of the window, and how much of it
+    must be near a colour. A colour is what a manifest can say of a game's screen
+    with no game art in git: a focus frame, say, that nothing else there has."""
+    _only(raw, ("x", "y", "w", "h", "color", "tol", "min"), what)
+    for key in ("x", "y", "w", "h", "color", "min"):
+        if key not in raw:
+            raise ManifestError(f"{what}: needs x, y, w, h, color and min")
+    box = {k: _percent(raw[k], f"{what}.{k}") for k in ("x", "y", "w", "h")}
+    if box["w"] <= 0 or box["h"] <= 0 or box["x"] + box["w"] > 100 or box["y"] + box["h"] > 100:
+        raise ManifestError(f"{what}: the region must have a size and be inside the window")
+    color = raw["color"]
+    if not isinstance(color, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+        raise ManifestError(f"{what}.color: want #rrggbb, got {color!r}")
+    tol = raw.get("tol", MARKED_TOL)
+    if isinstance(tol, bool) or not isinstance(tol, int) or not 0 <= tol <= 255:
+        raise ManifestError(f"{what}.tol: a whole number, 0-255")
+    least = _percent(raw["min"], f"{what}.min")
+    if least <= 0:
+        raise ManifestError(f"{what}.min: must be over 0")
+    return {**box, "color": color.lower(), "tol": tol, "min": least}
+
+
+def _press_until(value, what):
+    """press_until: a key, again and again, until the screen says it took."""
+    _only(value, ("key", "change", "marked", "every", "max"), what)
+    if value.get("key") not in KEYS:
+        raise ManifestError(f"{what}.key {value.get('key')!r} isn't a key of the us keymap the harness knows")
+    if ("change" in value) == ("marked" in value):
+        raise ManifestError(f"{what}: needs exactly one of change or marked")
+    if "every" not in value or "max" not in value:
+        raise ManifestError(f"{what}: needs every (s between presses) and max (presses): no limit is guessed")
+    every = _number(value["every"], f"{what}.every")
+    if not 0 < every <= PRESS_EVERY_MAX:
+        raise ManifestError(f"{what}.every: over 0, at most {PRESS_EVERY_MAX:.0f} s")
+    most = value["max"]
+    if isinstance(most, bool) or not isinstance(most, int) or not 1 <= most <= PRESS_MAX:
+        raise ManifestError(f"{what}.max: a whole number of presses, 1-{PRESS_MAX}")
+    step = {"key": value["key"]}
+    if "change" in value:
+        step["change"] = _percent(value["change"], f"{what}.change")
+        if step["change"] <= 0:
+            raise ManifestError(f"{what}.change: must be over 0")
+    else:
+        step["marked"] = _marked(value["marked"], f"{what}.marked")
+    step.update(every=every, max=most)
+    return step
+
+
+def _wait_until(value, what):
+    """wait_until: as press_until's `marked`, with no key: `max` looks, `every` s apart."""
+    _only(value, ("marked", "every", "max"), what)
+    if "marked" not in value:
+        raise ManifestError(f"{what}: needs marked")
+    step = _press_until({"key": "space", **value}, what)
+    del step["key"]
+    return step
+
+
 def _step(raw, i, shots):
     """One `[[step]]`: exactly one action key (with `screenshot`'s `min_fill`)."""
     what = f"step {i + 1}"
@@ -148,7 +215,7 @@ def _step(raw, i, shots):
     if len(actions) != 1:
         raise ManifestError(
             f"{what}: needs exactly one of click, click_here, move_to, move_by, scroll, key, "
-            f"type, hold, wait, wait_settled, screenshot, expect_change, relaunch; got {sorted(actions)}"
+            f"type, hold, press_until, wait, wait_until, wait_settled, screenshot, expect_change, relaunch; got {sorted(actions)}"
         )
     action = actions[0]
     value = raw[action]
@@ -202,6 +269,10 @@ def _step(raw, i, shots):
         if isinstance(ms, bool) or not isinstance(ms, int) or not 1 <= ms <= HOLD_MAX_MS:
             raise ManifestError(f"{what}: hold.ms must be a whole number of ms, 1-{HOLD_MAX_MS}")
         return {"hold": {"key": value["key"], "ms": ms}}
+    if action == "press_until":
+        return {"press_until": _press_until(value, f"{what}: press_until")}
+    if action == "wait_until":
+        return {"wait_until": _wait_until(value, f"{what}: wait_until")}
     if action == "scroll":
         if isinstance(value, bool) or not isinstance(value, int) or value == 0:
             raise ManifestError(f"{what}: scroll must be a non-zero whole number of notches")
@@ -562,6 +633,27 @@ def changed_pct(a, b):
 
 
 # --- sway views ---------------------------------------------------------------
+
+
+def marked_pct(image, rect, marked):
+    """How much of press_until's region, in % of the window `rect`, is near its
+    colour. Clipped to the image."""
+    width, height, channels, rows = image
+    x0 = max(0, rect["x"] + round(rect["width"] * marked["x"] / 100))
+    y0 = max(0, rect["y"] + round(rect["height"] * marked["y"] / 100))
+    x1 = min(width, rect["x"] + round(rect["width"] * (marked["x"] + marked["w"]) / 100))
+    y1 = min(height, rect["y"] + round(rect["height"] * (marked["y"] + marked["h"]) / 100))
+    if x1 <= x0 or y1 <= y0:
+        return 0.0
+    want = bytes.fromhex(marked["color"][1:])
+    r, g, b = want
+    tol = marked["tol"]
+    hits = 0
+    for row in rows[y0:y1]:
+        for at in range(x0 * channels, x1 * channels, channels):
+            if abs(row[at] - r) <= tol and abs(row[at + 1] - g) <= tol and abs(row[at + 2] - b) <= tol:
+                hits += 1
+    return round(100.0 * hits / ((x1 - x0) * (y1 - y0)), 2)
 
 
 def walk_views(node):
@@ -1086,6 +1178,7 @@ class Driver:
         # The launches after the first, in this sandbox (#252), and whether
         # this launch has shown what GPU it holds, and an earlier one has.
         self.relaunches = 0
+        self.press_untils = 0
         # Who was up before the first launch: the harness's own.
         self.before_game = None
         self.gpu_seen = False
@@ -1571,6 +1664,8 @@ class Driver:
                 time.sleep(SCROLL_GAP_MS / 1000)
         elif action == "hold":
             self.press_key(KEYS[step["hold"]["key"]], False, step["hold"]["ms"])
+        elif action in ("press_until", "wait_until"):
+            self.do_press_until(step[action], record)
         elif action == "move_to":
             self.do_move_to(step["move_to"], record)
         elif action == "move_by":
@@ -1583,6 +1678,78 @@ class Driver:
         elif action == "relaunch":
             self.do_relaunch(record)
         self.save()
+
+    def press_until_marked(self, marked):
+        """Is the region marked, in MARKED_HITS frames running? (yes, its %, a
+        frame), with the frame that said no."""
+        pct, image = 0.0, None
+        for hit in range(MARKED_HITS):
+            if hit:
+                time.sleep(MARKED_HIT_GAP)
+            image, _ = self.capture()
+            view = self.refresh_view()
+            if image is None or not view:
+                return False, pct, image
+            pct = marked_pct(image, view["rect"], marked)
+            if pct < marked["min"]:
+                return False, pct, image
+        return True, pct, image
+
+    def do_press_until(self, want, record):
+        """Press until the screen says the key took, up to `max` presses, and fail
+        if it doesn't: the steps after it stand on it, so a run ends there, and so
+        does a replay. `change`: the frame after a press differs by that % from the
+        one right before it, against which a game's own motion counts too, so it's
+        for screens that hold still. `marked`: the region has the colour; looked at
+        before the first press too, since a key that moves a focus would move it off."""
+        self.press_untils += 1
+        key = want.get("key")
+        name = f"press_until_{self.press_untils}_{key}" if key else f"wait_until_{self.press_untils}"
+        started = time.monotonic()
+        presses, seen, frame = 0, None, None
+        why = None
+        while True:
+            if "marked" in want:
+                ok, seen, shot = self.press_until_marked(want["marked"])
+                frame = shot if shot is not None else frame
+                if ok:
+                    break
+            if self.game is not None and self.game.poll() is not None:
+                why = f"the game exited {self.game.returncode}"
+                break
+            if presses >= want["max"]:
+                why = "the screen never said so"
+                break
+            before = None
+            if "change" in want:
+                before, _ = self.capture()
+            if key:
+                self.press_key(KEYS[key], False)
+            presses += 1
+            self.sleep(want["every"])
+            if "change" in want:
+                frame, _ = self.capture()
+                if before is not None and frame is not None:
+                    seen = changed_pct(before, frame)
+                    if seen >= want["change"]:
+                        break
+        record.update(presses=presses, secs=round(time.monotonic() - started, 1), seen_pct=seen)
+        unit = "% changed" if "change" in want else "% marked"
+        tries = f"{presses} press(es) of {key}" if key else f"{presses} look(s)"
+        goal = f"want {want['change'] if 'change' in want else want['marked']['min']}"
+        if why is None:
+            detail = f"{tries} in {record['secs']} s: {seen}{unit}, {goal}"
+            if self.live is None:
+                self.check(name, True, detail)
+            return
+        record.update(ok=False, why=f"{why} after {tries} in {record['secs']} s (last {seen}{unit}, {goal})")
+        if frame is not None:
+            path = os.path.join(self.cfg["shots_dir"], f"press-until-{self.press_untils}-failed.png")
+            write_png(path, frame)
+            record["path"] = path
+            record["why"] += f"; last frame {path}"
+        if self.live is None:
+            self.check(name, False, record["why"])
 
     def do_click(self, at, record):
         if self.do_move_to(at, record, "click"):
@@ -2061,13 +2228,13 @@ class Driver:
                 stuck = False
                 for step in self.manifest["steps"]:
                     self.run_step(step)
-                    if "relaunch" in step and not self.steps[-1]["ok"]:
+                    if any(k in step for k in ("relaunch", *LIVE_UNTIL)) and not self.steps[-1]["ok"]:
                         stuck = True
                         break
                 if stuck:
                     self.finish_game("cleanup")
                     self.record_audio_streams()
-                    self.check("finished", True, f"a relaunch failed, so no more steps: {self.steps[-1]['why']}")
+                    self.check("finished", True, f"{self.steps[-1]['action']} failed, so no more steps: {self.steps[-1]['why']}")
                 else:
                     self.check_gpu_used()
                     self.finish_game(how)
@@ -2472,9 +2639,14 @@ class Driver:
         else:
             self.run_step(step)
             record = self.steps[-1]
+            if not record["ok"] and cmd in LIVE_UNTIL:
+                return self.live_press_failed(step[cmd], record, gap)
             if not record["ok"]:
                 raise LiveError(f"{cmd}: no window")
             reply = {"ok": True, "step": step}
+            if cmd in LIVE_UNTIL:
+                entry["press_secs"] = record["secs"]
+                reply.update(presses=record["presses"], seen_pct=record["seen_pct"])
             if "at" in record:
                 reply["at"] = record["at"]
         self.session["path"].append(entry)
@@ -2483,6 +2655,23 @@ class Driver:
         reply["secs"] = round(self.last_end - started, 2)
         reply["game_running"] = self.game.poll() is None
         return reply
+
+    def live_press_failed(self, want, record, gap):
+        """press_until ran out. Its keys did reach the game, so the path has them,
+        as the plain keys they were: a press_until on the path means one that
+        passed, and an export that says so would fail where this did."""
+        for n in range(record["presses"] if "key" in want else 0):
+            self.session["path"].append(
+                {"step": {"key": want["key"]}, "gap": round(gap, 2) if n == 0 else want["every"],
+                 "life": self.life, "seq": self.session["seq"] + 1}
+            )
+        self.last_end = time.monotonic()
+        return {
+            "ok": False, "error": record["why"], "presses": record["presses"],
+            "seen_pct": record["seen_pct"], "path": record.get("path"),
+            "game_running": self.game.poll() is None,
+            "note": "the path has them as plain keys: restore to drop them",
+        }
 
     def live_settle(self, args):
         """Wait until the screen holds still, at most --max s: it settled, or it
@@ -2742,7 +2931,7 @@ class Driver:
             record = self.steps[-1]
             bad = [c for c in self.checks[before:] if not c["ok"]]
             if bad or not record["ok"]:
-                why = "; ".join(f"{c['name']}: {c['detail']}" for c in bad) or "no window for it"
+                why = "; ".join(f"{c['name']}: {c['detail']}" for c in bad) or record.get("why") or "no window for it"
                 self.checks[before:] = [c for c in self.checks[before:] if c["ok"]]
                 failed_at = i
                 break
@@ -2759,6 +2948,8 @@ class Driver:
                 self.session["names"].append(name)
             elif "wait_settled" in step:
                 entry["settled_secs"] = record.get("after_secs", 0.0)
+            elif any(k in step for k in LIVE_UNTIL):
+                entry["press_secs"] = record["secs"]
             self.session["path"].append(entry)
             done += 1
             self.live_save()
@@ -2852,6 +3043,17 @@ class Driver:
                 if not self.settle_wait(step["wait_settled"])["settled"]:
                     result.update(ok=False, why=f"the screen didn't settle in {step['wait_settled']:.0f} s")
                     break
+            elif any(k in step for k in LIVE_UNTIL):
+                # As long as this life's screen needs, which is its point: a
+                # limit reached stops the replay, as a frame that doesn't match does.
+                self.run_step(step)
+                timeline[-1]["presses"] = self.steps[-1]["presses"]
+                if not self.steps[-1]["ok"]:
+                    result.update(ok=False, why=f"{self.steps[-1]['action']}: {self.steps[-1]['why']}")
+                    break
+                if "press_until" in step:
+                    inputs += 1
+                    matched = False
             elif "relaunch" in step:
                 # The route's own quit, again in this life. Its failure says why
                 # here, and isn't a failed check of the session.
@@ -3161,8 +3363,9 @@ LIVE_SETTLE_CAP = 600.0
 LIVE_DISK_REQUEST = "keep-disk.request"
 LIVE_DISK_REPLY = "keep-disk.reply"
 LIVE_DISK_SECS = 900.0
-LIVE_INPUTS = ("key", "type", "hold", "click", "click_here", "move_to", "move_by", "scroll")
-LIVE_STEP_CMDS = ("screenshot", "wait", "key", "type", "hold", "click", "move_to", "move_by", "scroll")
+LIVE_INPUTS = ("key", "type", "hold", "press_until", "click", "click_here", "move_to", "move_by", "scroll")
+LIVE_STEP_CMDS = ("screenshot", "wait", "wait_until", "key", "type", "hold", "press_until", "click", "move_to", "move_by", "scroll")
+LIVE_UNTIL = ("press_until", "wait_until")
 
 
 class LiveError(Exception):
@@ -3328,6 +3531,10 @@ def live_restore_phases(restored, between, phases, started):
 
 def live_step_label(step):
     """A path step, in a word or two, for a replay's timeline."""
+    if "press_until" in step:
+        return f"press_until {step['press_until']['key']}"
+    if "wait_until" in step:
+        return "wait_until"
     for key in ("wait", "wait_settled", "screenshot", "key", "scroll"):
         if key in step:
             return f"{key} {step[key]}"
@@ -3374,6 +3581,8 @@ def live_replay_secs(path, session):
             secs += LIVE_SHOT_SECS
         elif "hold" in step:
             secs += step["hold"]["ms"] / 1000
+        elif "press_until" in step or "wait_until" in step:
+            secs += e.get("press_secs", 0.0)
     return round(secs)
 
 
@@ -3464,7 +3673,39 @@ def live_raw_step(cmd, args, rect):
     if cmd == "scroll":
         want((1,), "NOTCHES")
         return {"scroll": number(args[0], "NOTCHES")}
+    if cmd == "press_until":
+        return {"press_until": live_press_args(args, number)}
+    if cmd == "wait_until":
+        raw = live_press_args(["space"] + args, number)
+        del raw["key"]
+        return {"wait_until": raw}
     raise LiveError(f"unknown command {cmd!r}")
+
+
+def live_press_args(args, number):
+    """`press_until KEY --every S --max N`, and `--change PCT` or `--marked X Y W H
+    COLOR MIN [TOL]`, as a raw step's table, for _step() to check."""
+    usage = "usage: press_until KEY --every SECS --max PRESSES (--change PCT | --marked X Y W H COLOR MIN [TOL])"
+    if not args or args[0].startswith("--"):
+        raise LiveError(usage)
+    raw = {"key": args[0]}
+    rest = args[1:]
+    while rest:
+        opt = rest.pop(0)
+        if opt in ("--every", "--max", "--change"):
+            if not rest:
+                raise LiveError(usage)
+            raw[opt[2:]] = number(rest.pop(0), opt)
+        elif opt == "--marked":
+            if len(rest) < 6:
+                raise LiveError(usage)
+            box = [number(rest.pop(0), f"--marked {k}") for k in "xywh"]
+            raw["marked"] = dict(zip("xywh", box), color=rest.pop(0), min=number(rest.pop(0), "--marked MIN"))
+            if rest and not rest[0].startswith("--"):
+                raw["marked"]["tol"] = number(rest.pop(0), "--marked TOL")
+        else:
+            raise LiveError(usage)
+    return raw
 
 
 def _toml(value):
