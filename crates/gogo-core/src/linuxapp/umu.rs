@@ -210,13 +210,31 @@ pub fn resolve_python(host: &Host) -> Result<PathBuf, MacAppError> {
     )))
 }
 
+/// `python --version`, retried while the kernel says `ETXTBSY`. That only
+/// means some process still has the file open for writing right now (a
+/// concurrent fork can hold a copy of a writer's fd until its `exec`, so
+/// it can hit a freshly installed interpreter, or a test's fake one); it
+/// clears within microseconds. Cargo and Go retry the same way.
+fn run_version(python: &Path) -> std::io::Result<std::process::Output> {
+    let mut tries = 0;
+    loop {
+        let r = std::process::Command::new(python)
+            .arg("--version")
+            .stdin(std::process::Stdio::null())
+            .output();
+        match r {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 50 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            r => return r,
+        }
+    }
+}
+
 /// `python --version` as `(major, minor)`. Python 2 prints it on stderr.
 pub(crate) fn python_version(python: &Path) -> Option<(u32, u32)> {
-    let out = std::process::Command::new(python)
-        .arg("--version")
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
+    let out = run_version(python).ok()?;
     let text = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
