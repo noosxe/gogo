@@ -77,8 +77,12 @@
 #                                 "settled": false after SECS (default 30)
 #   checkpoint NAME               mark where it is; restore NAME goes back there.
 #                                 After the game quit by itself: keeps the disk too
-#   restore NAME [--wait SECS]    close, roll the disk back, relaunch, replay (what's
-#                                 past the last kept disk on its path, if any)
+#   restore NAME [--wait SECS] [--full-waits]
+#                                 close, roll the disk back, relaunch, replay (what's
+#                                 past the last kept disk on its path, if any).
+#                                 Waits before a screenshot end once it's there, and
+#                                 a failure retries at full length; --full-waits:
+#                                 the export's timing from the start
 #   relaunch                      launch again on this disk, once the game has quit
 #                                 by itself; refused while it runs
 #   log [game|run|launch|sway|dxvk|vkd3d|proton] [--tail N]
@@ -264,7 +268,7 @@ supervise() { # deadline-epoch (0 = none)
 # (launcher.rs PREFIX_MARKS), the run's env marker, the scratch path on the
 # command line, or the sandbox's PID namespace. Prints "pid comm" lines.
 leftovers() {
-    local p pid comm hit mark marks=() prefix ns="${RUN_PIDNS:-}"
+    local marks=() prefix
     marks+=("GOGO_E2E_RUN=$RUN_ID")
     if [ -n "${PREFIX:-}" ]; then
         for prefix in "$PREFIX" "$(readlink -f "$PREFIX" 2>/dev/null || true)"; do
@@ -273,19 +277,10 @@ leftovers() {
                     "STEAM_COMPAT_DATA_PATH=$prefix" "STEAM_COMPAT_DATA_PATH=$prefix/")
         done
     fi
-    for p in /proc/[0-9]*; do
-        pid="${p#/proc/}"
-        [ "$pid" != "$$" ] && [ "$pid" != "$BASHPID" ] || continue
-        hit=""
-        for mark in "${marks[@]}"; do
-            if grep -qzxF -e "$mark" "$p/environ" 2>/dev/null; then hit=1; break; fi
-        done
-        if [ -z "$hit" ] && [ -n "$ns" ] && [ "$(readlink "$p/ns/pid" 2>/dev/null || true)" = "$ns" ]; then hit=1; fi
-        if [ -z "$hit" ] && grep -qzF -e "$RUN/" "$p/cmdline" 2>/dev/null; then hit=1; fi
-        [ -n "$hit" ] || continue
-        comm="$(cat "$p/comm" 2>/dev/null || echo '?')"
-        printf '%s %s\n' "$pid" "$comm"
-    done
+    # One process over /proc: a grep per process and mark forks some 8,000 times
+    # on a desktop (#257). A helper that fails says so: nothing found isn't that.
+    "$TOOLS/bin/python3" -I "$HELPER_SRC" leftovers "$$" "$BASHPID" \
+        <<<"$(printf '%s\n' "${RUN_PIDNS:-}" "$RUN/" "${marks[@]}")" || printf '? the-leftovers-check-failed\n'
 }
 
 # Every exit path: kill the sandbox, sweep, assert nothing is left, write the
@@ -1527,10 +1522,11 @@ live_game_phase() { # game-extra-json
         extra="$(jq -c --argjson life "$LIFE" --arg id "$LIVE_ID" --arg dir "$RUN/live" --arg r "$RESULTS/live" \
             --argjson idle "$LIVE_IDLE" --argjson gap "$LIVE_GAP" --argjson match "$LIVE_MATCH" \
             --argjson prefix "$LIVE_PREFIX" --argjson rollback "${LIVE_ROLLBACK_SECS:-null}" \
+            --argjson between "${LIVE_BETWEEN:-null}" \
             '. + {live:{id:$id, life:$life, dir:$dir, session:($r + "/session.json"),
                         journal:($r + "/journal.jsonl"), state:($r + "/state.json"),
                         idle_secs:$idle, max_gap:$gap, match_pct:$match, prefix:$prefix,
-                        rollback_secs:$rollback}}' <<<"$game_extra")"
+                        rollback_secs:$rollback, between:$between}}' <<<"$game_extra")"
         drive_config "$RUN/drive.json" "$extra" "$GPU_LABEL" "$GPU_EXPECT" "${GPU_WANT:-}" "$GPUS_JSON" \
             "${GPU_NODES[@]/#/@n:}" "${GAME_ENV[@]/#/@e:}"
         log "life $LIFE: launching in headless sway ($GPU_LABEL)"
@@ -1541,7 +1537,10 @@ live_game_phase() { # game-extra-json
         supervise "$LIVE_DEADLINE" || rc=$?
         if [ "$rc" = "$LIVE_RELAUNCH" ] && [ -z "$INTERRUPTED" ] && [ -z "${TIMED_OUT:-}" ]; then
             live_state restoring "life $LIFE ended: rolling the disk back"
+            local t_gone t_swept
+            t_gone="$(date +%s.%N)"
             sweep
+            t_swept="$(date +%s.%N)"
             if [ -n "$SWEPT_LEFT" ]; then
                 INFRA_ERROR="a restore couldn't end life $LIFE: $(printf '%s' "$SWEPT_LEFT" | tr '\n' ';')"
                 exit 3
@@ -1551,6 +1550,9 @@ live_game_phase() { # game-extra-json
             disk="$(live_restore_disk)" || { INFRA_ERROR="a restore named a disk that isn't a kept one: $disk"; exit 3; }
             restore_base "$disk" || { INFRA_ERROR="a restore couldn't roll the disk back"; exit 3; }
             LIVE_ROLLBACK_SECS="$COPY_SECS"
+            # When each part ended, for the restore's phases (#257).
+            LIVE_BETWEEN="$(jq -cn --argjson g "$t_gone" --argjson s "$t_swept" --argjson r "$(date +%s.%N)" \
+                '{gone:$g, swept:$s, rolled:$r}')"
             log "life $LIFE: rolled back to $disk in $COPY_SECS s"
             LIFE=$((LIFE + 1))
             continue
@@ -1795,11 +1797,19 @@ cmd_live() {
         jq -c '. + {ok:true, socket:false}' "$state"
         ;;
     restore)
-        local wait=900 name="${1:-}" reply life
-        [ "${2:-}" != --wait ] || wait="${3:?}"
+        local wait=900 name="" reply life
+        local -a opts=()
+        while [ $# -gt 0 ]; do
+            case "$1" in
+            --wait) wait="${2:?}"; shift 2 ;;
+            --full-waits) opts+=(--full-waits); shift ;;
+            -*) usage ;;
+            *) [ -z "$name" ] || usage; name="$1"; shift ;;
+            esac
+        done
         [ -n "$name" ] || usage
         life="$(jq -r '.life // 1' "$state")"
-        reply="$(GOGO_E2E_LIVE_DIR="$dir" helper live-call 60 restore "$name")" || { printf '%s\n' "$reply"; return 1; }
+        reply="$(GOGO_E2E_LIVE_DIR="$dir" helper live-call 60 restore "$name" "${opts[@]+"${opts[@]}"}")" || { printf '%s\n' "$reply"; return 1; }
         log "restoring $name: the game closes, the disk rolls back, it relaunches and replays"
         GOGO_E2E_LIVE_DIR="$dir" GOGO_E2E_LIVE_REG="$L_REG" GOGO_E2E_LIVE_START="$L_START" helper live-wait "$state" "$wait" "$L_PID" "$((life + 1))"
         ;;
@@ -2344,6 +2354,7 @@ st_live() { # self-test dir
         >/dev/null 2>&1 || code=$?
     [ "$code" = 2 ] || st_fail "usage: live start --env on a command: exit $code, want 2"
     st_live_from "$base"
+    st_live_fast "$base"
     st_live_clean "$base"
     "$SELF" cleanup --stop-live >/dev/null 2>&1 || true
 }
@@ -2526,6 +2537,80 @@ EOF
     summary="$(tail -n 1 "$d/stdout")"
     jq -e '(.failed | index("clean_exit_relaunch_1")) and ([.steps[] | select(.action == "screenshot")] | length == 0)' "$summary" >/dev/null ||
         st_fail "relaunch-up: $(jq -c '{failed, steps}' "$summary" 2>/dev/null)"
+}
+
+# A fast replay, and a restore's phases (#257), on the fake game.
+st_live_fast() { # self-test dir
+    local base="$1" out code summary
+    log "self-test: a fast replay"
+    out="$base/live-fast"
+    ST_LOUT="$out"
+    st_live_start "$out"
+    [ -n "$ST_LID" ] || return 0
+    st_live_cmd fast-ready '.state == "ready"' status --wait 60
+    st_live_cmd fast-white '.ok' screenshot white
+    st_live_cmd fast-key '.ok' key r
+    st_live_cmd fast-wait '.ok' wait 8
+    st_live_cmd fast-red '.change_pct >= 50' screenshot red
+    st_live_cmd fast-cp '.checkpoint == "red"' checkpoint red
+    "$SELF" live "$ST_LID" export 2>>"$out/client.stderr" | grep -v '^#' >"$out/export-before.toml"
+    # The wait ends once the red screen has arrived, and the phases say where a
+    # restore went. Isolation and the sweep ran: a failed one would end the session.
+    st_live_cmd fast-replay '.life == 2 and .last_replay.ok and (.last_replay.full_waits | not)
+        and .last_replay.cut_secs >= 4 and .last_replay.done == .last_replay.steps
+        and ([.last_replay.timeline[] | select(.step == "wait 8.0") | .cut] | .[0] >= 4)
+        and .last_restore.phases.sweep < 3 and .last_restore.phases.sound_check != null
+        and .last_restore.phases.close != null and .last_restore.phases.rollback != null
+        and .last_restore.phases.start != null and .last_restore.phases.isolation != null
+        and .last_restore.phases.doctor != null' restore red --wait 90
+    # The route is as it was recorded, whatever the replay cut: the export has it.
+    "$SELF" live "$ST_LID" export 2>>"$out/client.stderr" | grep -v '^#' >"$out/export-after.toml"
+    [ "$(cat "$out/export-before.toml")" = "$(cat "$out/export-after.toml")" ] ||
+        st_fail "live-fast: the fast replay changed the export: $(cat "$out/export-before.toml") then $(cat "$out/export-after.toml")"
+    grep -q '^wait = 8' "$out/export-after.toml" || st_fail "live-fast: the export lost its wait: $(cat "$out/export-after.toml")"
+    # --full-waits: the export's timing.
+    st_live_cmd fast-full '.life == 3 and .last_replay.ok and .last_replay.full_waits and .last_replay.cut_secs == 0
+        and ([.last_replay.timeline[] | select(.step == "wait 8.0") | .secs] | .[0] >= 8)' restore red --full-waits --wait 90
+    # A moving picture can't say when it's there: its wait runs in full.
+    st_live_cmd fast-anim '.ok' key a
+    st_live_cmd fast-anim-wait '.ok' wait 4
+    st_live_cmd fast-anim-shot '.moving_pct >= 15' screenshot moving
+    st_live_cmd fast-anim-cp '.checkpoint == "moving"' checkpoint moving
+    st_live_cmd fast-anim-replay '.last_replay.ok and (.last_replay.full_waits | not)
+        and ([.last_replay.timeline[] | select(.step == "wait 4.0") | .cut] | .[0] == null)
+        and ([.last_replay.timeline[] | select(.step == "wait 4.0") | .secs] | .[0] >= 4)' restore moving --wait 90
+    # A screen up before the game takes input: the fast replay's key is dropped, its
+    # next shot never matches, and the next life replays at the export's timing.
+    st_live_cmd fast-back '.last_replay.ok' restore red --wait 90
+    st_live_cmd fast-k '.ok' key k
+    st_live_cmd fast-k-wait '.ok' wait 8
+    st_live_cmd fast-yellow '.change_pct >= 50' screenshot yellow
+    st_live_cmd fast-k-b '.ok' key b
+    st_live_cmd fast-k-b-wait '.ok' wait 1
+    st_live_cmd fast-blue '.change_pct >= 50' screenshot blue
+    st_live_cmd fast-k-cp '.checkpoint == "after-k"' checkpoint after-k
+    st_live_cmd fast-retry '.last_replay.ok and .last_replay.full_waits
+        and (.last_replay.retried_because | test("screenshot blue"))
+        and .last_restore.retry and .last_replay.done == .last_replay.steps' restore after-k --wait 180
+    st_live_cmd fast-quit '.ok' type q
+    st_live_cmd fast-quit-wait '.game_running | not' wait 1
+    "$SELF" live "$ST_LID" export >"$out/export.toml" 2>>"$out/client.stderr" || st_fail "live-fast: export failed"
+    code=0
+    "$SELF" live "$ST_LID" stop >"$out/stdout" 2>>"$out/client.stderr" || code=$?
+    st_assert_clean live-fast "$out" "$code" 0
+    summary="$(tail -n 1 "$out/stdout")"
+    jq -e '.ok and .cleanup.left == "" and .cleanup.swept == "" and .cleanup.scratch_deleted' "$summary" >/dev/null ||
+        st_fail "live-fast: summary: $(jq -c '{failed, cleanup}' "$summary" 2>/dev/null)"
+    # doctor's report before the launch: once per disk, and the rest say whose.
+    jq -e '.same_disk_as_life == 1' "$(dirname "$summary")/life2-doctor-before.json" >/dev/null 2>&1 ||
+        st_fail "live-fast: life 2 ran doctor again on the launch's disk"
+    # The export's the proof: its waits are whole, and a fresh run passes.
+    local d="$base/live-fast-export"
+    mkdir -p "$d"
+    code=0
+    env --default-signal=INT,TERM "$SELF" run self-test --manifest "$out/export.toml" --out "$d" \
+        >"$d/stdout" 2>"$d/stderr" || code=$?
+    st_assert_clean live-fast-export "$d" "$code" 0
 }
 
 # A live session that starts from a manifest's steps (#251), on the fake game.

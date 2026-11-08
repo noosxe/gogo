@@ -415,6 +415,46 @@ def read_png(path):
     return width, height, channels, rows
 
 
+def parse_ppm(data):
+    """An 8-bit binary PPM (grim -t ppm): the same (width, height, channels, rows)
+    as read_png, with nothing to unfilter."""
+    fields = data[:64].split(maxsplit=4)
+    if len(fields) < 4 or fields[0] != b"P6" or fields[3] != b"255":
+        raise ValueError("not an 8-bit P6 PPM")
+    width, height = int(fields[1]), int(fields[2])
+    # The header's four fields, each with the one space after it.
+    start = sum(len(f) + 1 for f in fields[:4])
+    stride = width * 3
+    if len(data) - start != stride * height:
+        raise ValueError("truncated PPM")
+    rows = [data[start + y * stride : start + (y + 1) * stride] for y in range(height)]
+    return width, height, 3, rows
+
+
+def ppm_bytes(image):
+    width, height, channels, rows = image
+    if channels != 3:
+        raise ValueError("PPM wants RGB")
+    return b"P6\n%d %d\n255\n" % (width, height) + b"".join(rows)
+
+
+def write_png(path, image):
+    """An RGB PNG, unfiltered and lightly deflated: fast, and read_png reads it."""
+    width, height, channels, rows = image
+    if channels != 3:
+        raise ValueError("write_png wants RGB")
+
+    def chunk(kind, body):
+        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
+
+    raw = zlib.compress(b"".join(b"\0" + row for row in rows), 1)
+    with open(path, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n")
+        f.write(chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)))
+        f.write(chunk(b"IDAT", raw))
+        f.write(chunk(b"IEND", b""))
+
+
 def analyze(image, region=None):
     """Non-black share and bounding box inside `region` (x, y, w, h; default all).
 
@@ -1010,6 +1050,7 @@ class Driver:
         self.busy = None
         self.sway = None
         self.pulse = None
+        self.audio_probe = None
         self.pointer = None
         self.keyboard = None
         self.game = None
@@ -1025,7 +1066,11 @@ class Driver:
         self.shots = {}
         self.checks = []
         self.steps = []
+        # How long the sandbox's start took, phase by phase (#257).
+        self.phases = {}
+        self.phase_at = time.time()
         self.result = {
+            "phases": self.phases,
             "isolation": {},
             "gpu": {},
             "audio": {},
@@ -1062,6 +1107,12 @@ class Driver:
                 self.live_busy(min(left, 0.25))
             else:
                 time.sleep(min(left, 0.25))
+
+    def phase(self, name):
+        """The time since the last phase ended is this one's."""
+        now = time.time()
+        self.phases[name] = round(now - self.phase_at, 2)
+        self.phase_at = now
 
     def tool(self, *argv, timeout=20, env=None):
         return subprocess.run(
@@ -1114,6 +1165,7 @@ class Driver:
             if time.monotonic() > deadline:
                 raise RuntimeError("sway didn't start in 30 s (see sway.log)")
             self.sleep(0.1)
+        self.phase("sway")
         with open(env_file, "rb") as f:
             for item in f.read().split(b"\0"):
                 key, _, value = item.decode(errors="replace").partition("=")
@@ -1125,9 +1177,11 @@ class Driver:
             if self.env.get("DISPLAY"):
                 r = self.tool("xwininfo", "-root", "-display", self.env["DISPLAY"])
                 if r.returncode == 0:
+                    self.phase("xwayland")
                     wl = os.path.join(self.env["XDG_RUNTIME_DIR"], self.env["WAYLAND_DISPLAY"])
                     self.pointer = virtual_pointer(wl)
                     self.keyboard = virtual_keyboard(wl, self.keymap())
+                    self.phase("input_devices")
                     return
             self.sleep(0.2)
         raise RuntimeError(f"no X server on {self.env.get('DISPLAY')!r} (see sway.log)")
@@ -1184,28 +1238,42 @@ class Driver:
             self.sleep(0.1)
         raise RuntimeError("the sound server didn't start (see audio.log)")
 
+    def probe_audio(self):
+        """A test stream, in the background: it takes 2 s whatever its length
+        (the null sink wakes every 2 s), with nothing to wait on until the next
+        thing that needs the sound server, the game (#257). check_audio reads it."""
+        probe = os.path.join(self.run_dir, "audio-probe.raw")
+        with open(probe, "wb") as f:
+            f.write(bytes(48000))
+        self.audio_probe = subprocess.Popen(
+            ["pacat", "--raw", "--rate=48000", "--format=s16le", "--channels=2", probe],
+            env=self.env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
     def check_audio(self):
         """The default device is the sandbox's null sink, and it takes a stream."""
         audio = self.result["audio"]
         audio.update(parse_pactl_info(self.tool("pactl", "info").stdout))
         sinks = self.tool("pactl", "list", "sinks", "short").stdout
         audio["sinks"] = [line.split("\t")[1] for line in sinks.splitlines() if "\t" in line]
-        probe = os.path.join(self.run_dir, "audio-probe.raw")
-        with open(probe, "wb") as f:
-            f.write(bytes(48000))
-        played = self.tool(
-            "pacat", "--raw", "--rate=48000", "--format=s16le", "--channels=2", probe
-        )
-        audio["probe_exit"] = played.returncode
+        try:
+            played = self.audio_probe.wait(20)
+        except subprocess.TimeoutExpired:
+            self.audio_probe.kill()
+            raise
+        audio["probe_exit"] = played
         ours = os.path.join(self.env["XDG_RUNTIME_DIR"], "pulse", "native")
         self.check(
             "audio",
             audio["server"] in (ours, f"unix:{ours}")
             and audio["default_sink"] == NULL_SINK
             and audio["sinks"] == [NULL_SINK]
-            and played.returncode == 0,
+            and played == 0,
             f"{audio['default_sink']} on {audio['server']}, sinks {audio['sinks']}, "
-            f"test stream exit {played.returncode}",
+            f"test stream exit {played}",
         )
 
     def record_audio_streams(self):
@@ -1325,10 +1393,12 @@ class Driver:
             r = self.tool("glxinfo", "-B", env=env)
             m = re.search(r"OpenGL renderer string:\s*(.+)", r.stdout)
             gpu["gl_renderer"] = m.group(1).strip() if m else None
+        self.phase("gpu_gl")
         gpu["vulkan_devices"] = []
         if shutil.which("vulkaninfo", path=env["PATH"]):
             r = self.tool("vulkaninfo", "--summary", env=env)
             gpu["vulkan_devices"] = re.findall(r"deviceName\s*=\s*(.+)", r.stdout)
+        self.phase("gpu_vulkan")
         expect = self.cfg["gpu"]["expect"]
         if self.manifest["command"] and not gpu["gl_renderer"]:
             return  # self-test on a host with no GL driver to find: says nothing.
@@ -1568,6 +1638,33 @@ class Driver:
             return None, r.stderr.strip() or f"grim exited {r.returncode}"
         self.refresh_view()
         image = read_png(path)
+        rect = self.view["rect"] if self.view else None
+        region = (rect["x"], rect["y"], rect["width"], rect["height"]) if rect else None
+        stats = analyze(image, region)
+        self.record_gpu_fds()
+        return image, stats
+
+    def capture(self):
+        """A frame as it comes from grim, not through a PNG: (image, None) or
+        (None, why). What a fast replay polls with: under 1 s, against 3-4 s."""
+        try:
+            r = subprocess.run(
+                ["grim", "-t", "ppm", "-"], env=self.env, stdin=subprocess.DEVNULL,
+                capture_output=True, timeout=20, check=False,
+            )
+            if r.returncode != 0:
+                return None, r.stderr.decode(errors="replace").strip() or f"grim exited {r.returncode}"
+            return parse_ppm(r.stdout), None
+        except (subprocess.TimeoutExpired, ValueError) as e:
+            return None, str(e)
+
+    def grab_fast(self, path):
+        """As grab, through capture: a fast replay's screenshot."""
+        image, why = self.capture()
+        if image is None:
+            return None, why
+        write_png(path, image)
+        self.refresh_view()
         rect = self.view["rect"] if self.view else None
         region = (rect["x"], rect["y"], rect["width"], rect["height"]) if rect else None
         stats = analyze(image, region)
@@ -1913,17 +2010,27 @@ class Driver:
         try:
             self.start_sway()
             self.start_audio()
+            self.phase("sound_server")
             self.assert_isolation()
-            self.check_audio()
+            self.phase("isolation")
+            self.probe_audio()
             bad = [c for c in self.checks if not c["ok"]]
             if bad:
                 # A display that isn't provably ours: never launch.
                 raise RuntimeError(f"isolation failed: {bad[0]['name']}: {bad[0]['detail']}")
             self.probe_gpu()
             self.apply_override()
+            self.phase("override")
             self.doctor("before")
+            self.phase("doctor")
+            self.check_audio()
+            self.phase("sound_check")
+            bad = [c for c in self.checks if not c["ok"]]
+            if bad:
+                raise RuntimeError(f"isolation failed: {bad[0]['name']}: {bad[0]['detail']}")
             self.launch()
             if self.wait_window():
+                self.phase("window")
                 stuck = False
                 for step in self.manifest["steps"]:
                     self.run_step(step)
@@ -1973,14 +2080,17 @@ class Driver:
         outcome = "stop"
         replay = self.session.get("replay") or {}
         restored = self.session["restores"][-1] if replay else None
+        started = self.phase_at
         if restored is not None:
             restored["rollback_secs"] = lv.get("rollback_secs")
         try:
             self.live_state("starting", "the display and the isolation checks")
             self.start_sway()
             self.start_audio()
+            self.phase("sound_server")
             self.assert_isolation()
-            self.check_audio()
+            self.phase("isolation")
+            self.probe_audio()
             bad = [c for c in self.checks if not c["ok"]]
             if bad:
                 raise RuntimeError(f"isolation failed: {bad[0]['name']}: {bad[0]['detail']}")
@@ -1989,13 +2099,21 @@ class Driver:
             # relaunch doesn't write them again either.
             if not replay.get("disk"):
                 self.apply_override()
-            self.doctor("before")
+            self.phase("override")
+            self.live_doctor_before(replay.get("disk") or "launch")
+            self.phase("doctor")
+            self.check_audio()
+            self.phase("sound_check")
+            bad = [c for c in self.checks if not c["ok"]]
+            if bad:
+                raise RuntimeError(f"isolation failed: {bad[0]['name']}: {bad[0]['detail']}")
             self.live_listen()
             self.busy = "launching the game"
             self.live_state("launching", self.busy)
             launched = time.monotonic()
             if restored is not None:
                 restored["sandbox_secs"] = round(time.time() - restored["at"] - restored.get("close_secs", 0) - (restored["rollback_secs"] or 0), 1)
+                restored["phases"] = live_restore_phases(restored, lv.get("between"), self.phases, started)
             self.launch()
             self.busy = "waiting for the game's window"
             self.live_state("launching", self.busy)
@@ -2016,10 +2134,13 @@ class Driver:
                 outcome = self.live_serve()
             except LiveStop:
                 outcome = "stop"
+            except LiveRetry:
+                outcome = "restore"
             if outcome == "restore":
                 closing = time.monotonic()
                 self.close_game()
                 self.session["restores"][-1]["close_secs"] = round(time.monotonic() - closing, 1)
+                self.session["restores"][-1]["closed_at"] = round(time.time(), 2)
                 self.live_save()
                 self.check("finished", True, f"closed for a restore of {self.session['replay']['checkpoint']}")
                 return LIVE_RELAUNCH
@@ -2063,6 +2184,17 @@ class Driver:
                     pass
             self.stop_services()
         return 0
+
+    def live_doctor_before(self, disk):
+        """doctor's report before the launch, once per disk: a record, no check
+        reads it, and a life rolled back to a disk gets what the last one on it
+        got (7 s on Cyberpunk, #257). doctor-after, at a stop, always runs."""
+        seen = self.session.setdefault("doctored", {})
+        if disk in seen:
+            write_json(os.path.join(self.results, "doctor-before.json"), {"same_disk_as_life": seen[disk]})
+            return
+        self.doctor("before")
+        seen[disk] = self.life
 
     def close_game(self):
         """Close the game for a restore: TERM to the launcher, its own teardown."""
@@ -2384,6 +2516,7 @@ class Driver:
         if since is not None and since in self.shots:
             change = changed_pct(self.shots[since], image)
         self.shots[name] = image
+        self.live_keep_ref(name, image)
         entry.update(image=path, stats=stats, since=since, inputs_since=inputs, change_pct=change, moving_pct=moving)
         fill = self.manifest["window"]["min_fill"]
         rect = self.view["rect"] if self.view else None
@@ -2528,15 +2661,17 @@ class Driver:
 
     def live_restore(self, args):
         cps = self.session["checkpoints"]
+        full = "--full-waits" in args
+        args = [a for a in args if a != "--full-waits"]
         if len(args) != 1:
-            raise LiveError("restore NAME")
+            raise LiveError("restore NAME [--full-waits]")
         cp = cps.get(args[0])
         if cp is None:
             raise LiveError(f"no checkpoint {args[0]!r}; there are {sorted(cps) or 'none'}")
         path, disk, keep = live_restore_plan(cp["path"], self.life)
         dropped = max(0, live_count_steps(self.session["path"]) - live_count_steps(path))
         self.session["path"] = path
-        self.session["replay"] = {"checkpoint": cp["name"], "from_life": self.life, "disk": disk, "keep": keep}
+        self.session["replay"] = {"checkpoint": cp["name"], "from_life": self.life, "disk": disk, "keep": keep, "full": full}
         self.session["restores"].append(
             {"checkpoint": cp["name"], "life": self.life, "at": round(time.time(), 1), "dropped": dropped, "disk": disk is not None}
         )
@@ -2591,6 +2726,8 @@ class Driver:
                 again, _ = self.grab(os.path.join(self.run_dir, "motion.png"))
                 image = self.shots.get(name)
                 moving = None if again is None or image is None else changed_pct(image, again)
+                if image is not None:
+                    self.live_keep_ref(name, image)
                 entry.update(image=record["path"], stats=record["stats"], moving_pct=moving)
                 self.session["names"].append(name)
             elif "wait_settled" in step:
@@ -2604,40 +2741,80 @@ class Driver:
         self.last_end = time.monotonic()
 
     def live_replay(self):
-        """After a restore: the checkpoint's path again, at the export's timing:
-        from the launch, or on a kept disk (#252) from the relaunch after it, the
-        path before that standing as it is. Each screenshot must match the one
-        recorded (within match_pct, for up to LIVE_REPLAY_GRACE s more); the first
-        that doesn't stops it, and the path ends there."""
+        """After a restore: the checkpoint's path again: from the launch, or on a
+        kept disk (#252) from the relaunch after it, the path before that standing
+        as it is. Each screenshot must match the one recorded (within match_pct,
+        for up to LIVE_REPLAY_GRACE s more); the first that doesn't stops it, and
+        the path ends there.
+
+        By default a replay is fast (#257): a wait or a gap leading up to a
+        screenshot ends once the screen has arrived there, a gap (the agent's
+        thinking) after a matched screenshot is cut to LIVE_FAST_GAP, and frames
+        don't go through a PNG. The path keeps every length as recorded, so the
+        export is the same either way. If a fast replay fails, this may be why,
+        so the next life replays it at the export's timing, whose verdict stands.
+        With `restore --full-waits`, it's that from the start."""
         replay = self.session.get("replay")
         if not replay:
             return
         keep = replay.get("keep", 0)
+        fast = not replay.get("full")
         entries = self.session["path"][keep:]
+        whole = json.loads(json.dumps(self.session["path"]))
         self.session["path"] = self.session["path"][:keep]
         total = live_count_steps(entries)
         result = {
             "checkpoint": replay["checkpoint"], "life": self.life, "steps": total, "ok": True,
             "disk": "kept" if replay.get("disk") else "launch",
             "skipped": live_count_steps(self.session["path"]),
+            "full_waits": not fast,
         }
+        if replay.get("retry_of"):
+            result["retried_because"] = replay["retry_of"]
         done = 0
         started = time.monotonic()
-        for entry in entries:
+        timeline = result["timeline"] = []
+        cut = 0.0
+        shots = 0
+        arriving = None  # the poll of the screenshot the waits lead up to
+        last_frame = None  # the last matched frame, and the inputs since
+        inputs = 0
+        matched = False  # a matched screenshot, and no input after it yet
+        for i, entry in enumerate(entries):
             if "mark" in entry:
                 self.session["path"].append(entry)
                 continue
             self.busy = f"replaying step {done + 1}/{total} to {replay['checkpoint']}"
             self.live_state("replaying", self.busy)
-            gap = live_kept_gap(entry, self.session["max_gap"])
-            if gap:
-                self.sleep(gap)
+            step_at = time.monotonic()
             step = entry["step"]
+            gap = live_kept_gap(entry, self.session["max_gap"])
+            saved = 0.0
+            target = live_wait_target(entries, i) if fast else None
+            if target is not None:
+                # The wait step's own length goes into the same poll.
+                if arriving is None or arriving["at"] != target:
+                    arriving = self.live_arrival(entries, i, target, last_frame, inputs)
+                saved = self.live_wait_poll(arriving, gap + step.get("wait", 0.0))
+            else:
+                arriving = None
+                if fast and matched and gap > LIVE_FAST_GAP:
+                    saved = round(gap - LIVE_FAST_GAP, 1)
+                    gap = LIVE_FAST_GAP
+                if gap:
+                    self.sleep(gap)
+            cut += saved
+            timeline.append({"step": live_step_label(step), "gap": gap})
+            if saved:
+                timeline[-1]["cut"] = round(saved, 1)
             if "screenshot" in step:
-                why = self.live_replay_shot(entry)
+                why = self.live_replay_shot(entry, fast)
                 if why:
                     result.update(ok=False, why=why)
                     break
+                shots += 1
+                last_frame, inputs, matched = self.shots.get(step["screenshot"]), 0, True
+                arriving = None
             elif "expect_change" in step:
                 # A manifest's check, made when it ran; the shots it names were
                 # matched above.
@@ -2657,34 +2834,122 @@ class Driver:
                 if not self.steps[-1]["ok"]:
                     result.update(ok=False, why=self.steps[-1]["why"])
                     break
-            else:
+                last_frame, inputs, matched = None, 0, False
+            elif target is None or "wait" not in step:
                 self.run_step(step)
+                if any(k in step for k in LIVE_INPUTS):
+                    inputs += 1
+                    matched = False
+            timeline[-1]["secs"] = round(time.monotonic() - step_at, 2)
             self.session["path"].append(entry)
             done += 1
             self.live_save()
         result["done"] = done
+        result["cut_secs"] = round(cut, 1)
         result["secs"] = round(time.monotonic() - started, 1)
         self.session["replay"] = None
         self.session["last_replay"] = result
         self.live_save()
+        if fast and not result["ok"] and (cut > 0 or shots > 0):
+            # Anything past the first check ran ahead of the export's timing.
+            restore = self.session["restores"][-1]
+            self.session["path"] = whole
+            self.session["replay"] = dict(replay, full=True, retry_of=result["why"])
+            self.session["restores"].append(
+                {"checkpoint": restore["checkpoint"], "life": self.life, "at": round(time.time(), 1),
+                 "dropped": 0, "disk": restore["disk"], "retry": True}
+            )
+            self.live_save()
+            raise LiveRetry()
         self.busy = None
         self.last_end = time.monotonic()
 
-    def live_replay_shot(self, entry):
+    def live_keep_ref(self, name, image):
+        """A recorded frame, raw, in scratch: a replay reads it in no time, where
+        a PNG takes it over a second to decode."""
+        if image[2] != 3:
+            return
+        d = os.path.join(self.live["dir"], "refs")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, f"{name}.ppm"), "wb") as f:
+            f.write(ppm_bytes(image))
+
+    def live_load_ref(self, entry):
+        """A screenshot's recorded frame, or None."""
+        name = entry["step"]["screenshot"]
+        try:
+            with open(os.path.join(self.live["dir"], "refs", f"{name}.ppm"), "rb") as f:
+                return parse_ppm(f.read())
+        except (OSError, ValueError):
+            pass
+        try:
+            return read_png(entry["image"])
+        except (OSError, ValueError, KeyError):
+            return None
+
+    def live_arrival(self, entries, i, target, last_frame, inputs):
+        """The poll for the screenshot at entries[target], which the waits from
+        entries[i] on lead up to. Nothing to poll (a plain wait, then): a run of
+        waits too short to gain from one, a frame that can't be compared, or one
+        too like the screen before the input to tell the two apart."""
+        arriving = {"at": target, "ref": None, "hits": 0, "done": False}
+        entry = entries[target]
+        allowed = live_arrived_allowance(entry, self.session["match_pct"])
+        if allowed is None or live_wait_run_secs(entries, i, target, self.session["max_gap"]) < LIVE_POLL_MIN:
+            return arriving
+        ref = self.live_load_ref(entry)
+        if ref is None:
+            return arriving
+        if last_frame is not None and inputs and changed_pct(last_frame, ref) <= allowed:
+            return arriving
+        arriving.update(ref=ref, allowed=allowed)
+        return arriving
+
+    def live_wait_poll(self, arriving, secs):
+        """Wait up to `secs`, less once the screen has arrived: at the tight
+        allowance in LIVE_ARRIVED_HITS frames running, so a frame in passing
+        doesn't count. Returns the seconds it saved."""
+        if arriving["done"]:
+            return round(secs, 1)
+        if arriving["ref"] is None:
+            if secs:
+                self.sleep(secs)
+            return 0.0
+        end = time.monotonic() + secs
+        while True:
+            polled = time.monotonic()
+            if polled >= end:
+                return 0.0
+            image, _ = self.capture()
+            if image is not None and changed_pct(image, arriving["ref"]) <= arriving["allowed"]:
+                arriving["hits"] += 1
+                if arriving["hits"] >= LIVE_ARRIVED_HITS:
+                    arriving["done"] = True
+                    return round(max(0.0, end - time.monotonic()), 1)
+            else:
+                arriving["hits"] = 0
+            pause = min(end - time.monotonic(), LIVE_POLL_SECS - (time.monotonic() - polled))
+            if pause > 0:
+                self.sleep(pause)
+
+    def live_replay_shot(self, entry, fast=False):
         """Retake a recorded screenshot until it matches; None, or why not. A late
         match lengthens the wait before it, for the next replay and the export."""
         name = entry["step"]["screenshot"]
         path = os.path.join(self.cfg["shots_dir"], f"{name}.life{self.life}.png")
-        try:
-            ref = read_png(entry["image"])
-        except (OSError, ValueError, KeyError):
-            ref = None
+        if fast:
+            ref = self.live_load_ref(entry)
+        else:
+            try:
+                ref = read_png(entry["image"])
+            except (OSError, ValueError, KeyError):
+                ref = None
         black = (entry.get("stats") or {}).get("nonblack_pct", 0) < MIN_NONBLACK_PCT
         allowed, loose = live_match_allowance(entry, self.session["match_pct"])
         first = time.monotonic()
         while True:
             at = time.monotonic()
-            image, stats = self.grab(path)
+            image, stats = self.grab_fast(path) if fast else self.grab(path)
             if image is None:
                 return f"screenshot {name}: {stats}"
             if loose:
@@ -2764,6 +3029,46 @@ def _proc_table():
     return table
 
 
+def leftovers(marks, run, pidns, exclude, proc="/proc"):
+    """A run's processes still alive, as "pid comm" lines: an environment entry
+    that is one of `marks`, `run` (the scratch path) on the command line, or the
+    PID namespace `pidns`. Not those in `exclude`. One read per process, where a
+    grep per mark takes seconds on a desktop's hundreds (#257)."""
+    marks = {m.encode() for m in marks}
+    run = run.encode()
+    found = []
+    for pid in os.listdir(proc):
+        if not pid.isdigit() or pid in exclude:
+            continue
+        base = os.path.join(proc, pid)
+        hit = False
+        try:
+            with open(os.path.join(base, "environ"), "rb") as f:
+                hit = not marks.isdisjoint(f.read().split(b"\0"))
+        except OSError:
+            pass
+        if not hit and pidns:
+            try:
+                hit = os.readlink(os.path.join(base, "ns/pid")) == pidns
+            except OSError:
+                pass
+        if not hit:
+            try:
+                with open(os.path.join(base, "cmdline"), "rb") as f:
+                    hit = run in f.read()
+            except OSError:
+                pass
+        if not hit:
+            continue
+        try:
+            with open(os.path.join(base, "comm"), errors="replace") as f:
+                comm = f.read().strip()
+        except OSError:
+            comm = "?"
+        found.append(f"{pid} {comm}")
+    return found
+
+
 def left_processes(table, harness):
     """What in the sandbox's process table isn't in `harness`, the pids that were
     up before the first launch: ["pid comm"]. All of it the game's, since the
@@ -2799,6 +3104,18 @@ LIVE_MAX_GAP = 10.0
 # differ (an animated menu differs some), within LIVE_REPLAY_GRACE s more.
 LIVE_MATCH_PCT = 15.0
 LIVE_REPLAY_GRACE = 30.0
+# A fast replay (#257). A run of waits this short has nothing to gain from a
+# poll, which looks this often. The screen has arrived at a recorded frame when
+# this many frames running are within its own motion, times LIVE_ARRIVED_MOTION,
+# plus LIVE_ARRIVED_PCT: much tighter than match_pct, which takes a screen one
+# step short of it (Cyberpunk's agreement, scrolled to its end, is 9% off).
+LIVE_POLL_MIN = 3.0
+LIVE_POLL_SECS = 1.0
+LIVE_ARRIVED_HITS = 2
+LIVE_ARRIVED_MOTION = 1.5
+LIVE_ARRIVED_PCT = 1.0
+# A gap after a matched screenshot is thinking: the screen is where it was then.
+LIVE_FAST_GAP = 1.0
 # A live screenshot takes a second frame this much later: how much the screen
 # moves by itself, which a replay allows (live_match_allowance).
 LIVE_MOTION_SECS = 0.5
@@ -2823,6 +3140,10 @@ LIVE_STEP_CMDS = ("screenshot", "wait", "key", "type", "hold", "click", "move_to
 
 class LiveError(Exception):
     """A live command that can't run; the session goes on."""
+
+
+class LiveRetry(Exception):
+    """A fast replay failed: this life ends, and the next replays at full timing."""
 
 
 class LiveStop(Exception):
@@ -2898,6 +3219,39 @@ def live_kept_gap(entry, max_gap):
     return round(gap + entry.get("extra", 0.0), 1)
 
 
+def live_arrived_allowance(entry, match_pct):
+    """How close a frame must be for a wait before this screenshot to end early;
+    None when it can't say: a moving picture, or one recorded black."""
+    allowed, loose = live_match_allowance(entry, match_pct)
+    if loose or (entry.get("stats") or {}).get("nonblack_pct", 0) < MIN_NONBLACK_PCT:
+        return None
+    return min(allowed, round((entry.get("moving_pct") or 0.0) * LIVE_ARRIVED_MOTION + LIVE_ARRIVED_PCT, 2))
+
+
+def live_wait_target(entries, i):
+    """The index of the screenshot a wait at entries[i] leads up to (i itself, for
+    a screenshot's own gap), or None: an input or anything else comes first, and
+    there's no frame to say when it's over."""
+    for j in range(i, len(entries)):
+        step = entries[j].get("step")
+        if step is None:
+            continue
+        if "screenshot" in step:
+            return j
+        if "wait" not in step:
+            return None
+    return None
+
+
+def live_wait_run_secs(entries, i, target, max_gap):
+    """How long entries[i..target] wait, gaps and all."""
+    secs = 0.0
+    for e in entries[i : target + 1]:
+        if "step" in e:
+            secs += live_kept_gap(e, max_gap) + e["step"].get("wait", 0.0)
+    return secs
+
+
 def live_match_allowance(entry, match_pct):
     """How different a replayed screenshot may be: (pct, loose). A frame that
     moved by itself at least match_pct in LIVE_MOTION_SECS (a video, a scene
@@ -2928,6 +3282,29 @@ def live_settle_timeout(took):
     """The wait_settled an export writes for a settle that took `took` s: twice
     that and 10 s more, whole seconds, so a machine twice as slow still passes."""
     return float(math.ceil(2 * took + 10))
+
+
+def live_restore_phases(restored, between, phases, started):
+    """A restore up to the launch, phase by phase (#257): the closed game's life
+    ending, the supervisor's part between the lives (`between`, its clock is
+    this one's), and the new sandbox's own `phases`."""
+    out = {"close": restored.get("close_secs")}
+    between = between or {}
+    points = [restored.get("closed_at")] + [between.get(k) for k in ("gone", "swept", "rolled")] + [started]
+    names = ("leave", "sweep", "rollback", "start")
+    for name, a, b in zip(names, points, points[1:]):
+        if a is not None and b is not None:
+            out[name] = round(b - a, 2)
+    out.update(phases)
+    return out
+
+
+def live_step_label(step):
+    """A path step, in a word or two, for a replay's timeline."""
+    for key in ("wait", "wait_settled", "screenshot", "key", "scroll"):
+        if key in step:
+            return f"{key} {step[key]}"
+    return next(iter(step), "?")
 
 
 def live_count_steps(path):
@@ -3399,6 +3776,14 @@ def subvol_snapshot(src, path):
 
 
 def main(argv):
+    # What to look for comes on stdin (the namespace, the scratch path, then one
+    # mark a line): with a scratch path in argv, this would find itself.
+    if len(argv) >= 2 and argv[1] == "leftovers":
+        pidns, run, *marks = sys.stdin.read().split("\n")
+        exclude = set(argv[2:]) | {str(os.getpid())}
+        for line in leftovers([m for m in marks if m], run, pidns, exclude):
+            print(line)
+        return 0
     if len(argv) in (3, 4) and argv[1] == "manifest" and (len(argv) == 3 or argv[2] == "--live"):
         path = argv[-1]
         try:
