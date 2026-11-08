@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Tests of scripts/linux-e2e-helper.py: python3 -I scripts/tests/linux-e2e-helper-test.py"""
 
+import contextlib
 import importlib.util
+import io
 import os
 import struct
 import sys
@@ -789,6 +791,51 @@ class TreeCheck(unittest.TestCase):
         os.symlink(self.tree, os.path.join(self.root, "alias"))
         alias = os.path.join(self.root, "alias")
         self.assertIn("not a directory", helper.tree_problems(alias, self.run, [self.root], self.uid)[0])
+
+
+class Subvol(unittest.TestCase):
+    """The btrfs ioctls (#255): the numbers, and, on btrfs, a real round trip."""
+
+    def test_ioctl_numbers(self):
+        # linux/btrfs.h: _IOW(0x94, 1 | 14, struct btrfs_ioctl_vol_args), 4096 bytes.
+        self.assertEqual(helper.BTRFS_VOL_ARGS.size, 4096)
+        self.assertEqual(helper.BTRFS_IOC_SNAP_CREATE, 0x50009401)
+        self.assertEqual(helper.BTRFS_IOC_SUBVOL_CREATE, 0x5000940E)
+
+    def test_bad_names(self):
+        with tempfile.TemporaryDirectory() as d:
+            for name in ("x" * 256,):
+                with self.assertRaises(OSError):
+                    helper.subvol_create(os.path.join(d, name))
+            with self.assertRaises(OSError):
+                helper.subvol_create(d + "/..")
+
+    def test_round_trip(self):
+        # Under target/, where the harness works: btrfs on a dev box, else skipped.
+        target = os.path.join(REPO, "target")
+        os.makedirs(target, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=target, prefix="subvol-test-") as d:
+            sv, snap = os.path.join(d, "sv"), os.path.join(d, "snap")
+            try:
+                helper.subvol_create(sv)
+            except OSError as e:
+                self.skipTest(f"no btrfs subvolumes here: {e}")
+            self.assertEqual(os.stat(sv).st_ino, 256)
+            with open(os.path.join(sv, "f"), "w") as f:
+                f.write("one")
+            helper.subvol_snapshot(sv, snap)
+            with open(os.path.join(snap, "f"), "w") as f:
+                f.write("two")
+            with open(os.path.join(sv, "f")) as f:
+                self.assertEqual(f.read(), "one")
+            with self.assertRaises(OSError):
+                helper.subvol_snapshot(sv, snap)
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(helper.main(["h", "subvol", "snapshot", sv, snap]), 1)
+            self.assertIn("subvol snapshot", err.getvalue())
+            # Emptied, then rmdir: what rm -rf does, and TemporaryDirectory too.
+            os.unlink(os.path.join(snap, "f"))
+            os.rmdir(snap)
 
 
 class LiveSteps(unittest.TestCase):

@@ -17,6 +17,9 @@ Run with `python3 -I`: stdlib only, nothing from the working directory.
                                                until a live session is ready (exit 4: still busy)
     linux-e2e-helper.py live-export <session.json>
                                                a live session's path as a manifest
+    linux-e2e-helper.py subvol create <path>   a new btrfs subvolume (exit 1: couldn't)
+    linux-e2e-helper.py subvol snapshot <src> <path>
+                                               a writable snapshot of subvolume src
 
 `drive` starts headless sway, proves the display is the headless one, launches
 the game, runs the manifest's steps and writes result.json after every step, so
@@ -27,6 +30,7 @@ command's status, or BUILD_NO_DISPLAY when it never got to run it. With
 steps (#241), and exits LIVE_RELAUNCH when a restore wants the next life.
 """
 
+import fcntl
 import json
 import math
 import os
@@ -2913,6 +2917,53 @@ def tree_problems(tree, run, guards, uid):
     return problems
 
 
+# --- btrfs subvolumes (#255) ----------------------------------------------------
+#
+# The two ioctls the harness needs, unprivileged on any kernel it runs on, so
+# btrfs-progs needn't be in the tools (whose store path is part of every
+# installed base's key). Both take a struct btrfs_ioctl_vol_args: an fd and a
+# name, 4096 bytes, on the new entry's parent dir. Deleting one needs no ioctl:
+# `rm -rf` empties it and rmdir(2) takes an empty subvolume (kernel 4.18+),
+# where BTRFS_IOC_SNAP_DESTROY would want root or user_subvol_rm_allowed.
+
+BTRFS_IOCTL_MAGIC = 0x94
+BTRFS_VOL_ARGS = struct.Struct("q4088s")
+
+
+def _btrfs_iow(nr, size):
+    return (1 << 30) | (size << 16) | (BTRFS_IOCTL_MAGIC << 8) | nr
+
+
+BTRFS_IOC_SNAP_CREATE = _btrfs_iow(1, BTRFS_VOL_ARGS.size)
+BTRFS_IOC_SUBVOL_CREATE = _btrfs_iow(14, BTRFS_VOL_ARGS.size)
+
+
+def _subvol_ioctl(request, path, fd):
+    parent, name = os.path.split(os.path.abspath(path))
+    raw = os.fsencode(name)
+    if not raw or raw in (b".", b"..") or len(raw) > 255:
+        raise OSError(f"not a name for a subvolume: {name!r}")
+    # A bytearray: fcntl.ioctl refuses an immutable argument over 1024 bytes.
+    args = bytearray(BTRFS_VOL_ARGS.pack(fd, raw))
+    pfd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fcntl.ioctl(pfd, request, args)
+    finally:
+        os.close(pfd)
+
+
+def subvol_create(path):
+    _subvol_ioctl(BTRFS_IOC_SUBVOL_CREATE, path, 0)
+
+
+def subvol_snapshot(src, path):
+    sfd = os.open(src, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        _subvol_ioctl(BTRFS_IOC_SNAP_CREATE, path, sfd)
+    finally:
+        os.close(sfd)
+
+
 # --- CLI ----------------------------------------------------------------------
 
 
@@ -2970,6 +3021,18 @@ def main(argv):
         for p in problems:
             print(p)
         return 1 if problems else 0
+    if (len(argv) == 4 and argv[1:3] == ["subvol", "create"]) or (
+        len(argv) == 5 and argv[1:3] == ["subvol", "snapshot"]
+    ):
+        try:
+            if argv[2] == "create":
+                subvol_create(argv[3])
+            else:
+                subvol_snapshot(argv[3], argv[4])
+        except OSError as e:
+            print(f"subvol {argv[2]}: {e}", file=sys.stderr)
+            return 1
+        return 0
     print(__doc__, file=sys.stderr)
     return 2
 

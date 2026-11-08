@@ -222,9 +222,11 @@ scripts/linux-e2e.sh run 2086050016 --reuse-install
   build's sandbox has exited and before the game's starts, so a reused run is a first
   launch on disk: no accepted EULA, no settings, no shader cache. Nothing writes to a base
   after that: each run gets its own copy.
-- **The copy is copy-on-write:** reflinks (`cp --reflink=always`) on btrfs or XFS, which
-  takes seconds for a 70 GB game and no space until the game writes. On a filesystem
-  without them (ext4, CI's) it's a full copy, logged, and `build.reuse.copy` says `copy`.
+- **The copy is copy-on-write:** a btrfs snapshot, or reflinks (`cp --reflink=always`) on
+  XFS or a btrfs without unprivileged snapshots. Either takes well under a second for a
+  70 GB game and no space until the game writes. On a filesystem without either (ext4,
+  CI's) it's a full copy, logged. [Copies](#copies-snapshots-reflinks-full-copies) has the
+  modes, how one is picked and the opt-out.
 - **The same path as the build.** `launch.sh`, the prefix and `state.toml` name absolute
   paths, and a data root that moved sends `launch.sh` through setup again. So every
   `--reuse-install` run of a game, the building one too, has its scratch at
@@ -263,12 +265,94 @@ scripts/linux-e2e.sh run 2086050016 --reuse-install
 | Key | |
 |---|---|
 | `build.reused` | `true`: the game ran on a copy of an earlier build, and `build.exit` and `build.secs` are `null` |
-| `build.reuse` | `null` without `--reuse-install`. Else `key`, `base` (its dir), `source` (`cache` or `fresh build`), `copy` (`reflink` or `copy`), `copy_secs`, `saved` (this run's build became a base), `note`, and `base_meta` (the run that built it, when, how long it took) |
+| `build.reuse` | `null` without `--reuse-install`. Else `key`, `base` (its dir), `source` (`cache` or `fresh build`), `copy` (`snapshot`, `reflink` or `copy`), `copy_secs`, `saved` (this run's build became a base), `note`, and `base_meta` (the run that built it, when, how long it took) |
+| `build.copy` | `null` when nothing was copied (a run without `--reuse-install` or a live session). Else `mode` (`snapshot`, `reflink` or `copy`), `asked` (`GOGO_E2E_COPY`, `auto` by default) and `note`: why it isn't a snapshot, or that a plain base was just made subvolumes |
 
 **Disk.** A Cyberpunk 2077 base is about 70 GB, once. Its copies share its extents.
-`cleanup` lists the bases and their size (`du`, which counts shared extents in full), and
-removes saves that never finished. `cleanup --prune-installed <name>` removes one, by the
+`cleanup` lists the bases, their size (`du`, which counts shared extents in full) and
+whether they're `snapshot` (subvolumes) or `plain`. It also removes saves that never
+finished. `cleanup --prune-installed <name>` removes one, by the
 name it lists, and `--prune-installed all` all of them.
+
+### Copies: snapshots, reflinks, full copies
+
+A reused run's copy of its base, and a live session's disk and every restore of it, are
+made one of three ways (#255):
+
+| Mode | How | When `auto` picks it |
+|---|---|---|
+| `snapshot` | The base's `gogo`, `home` and `xdg` are btrfs subvolumes. A copy is a `subvolume snapshot` of each: no walk over the files. | The cache and the scratch are on one btrfs, and a probe works unprivileged: it creates a subvolume, snapshots it into the scratch, and deletes both |
+| `reflink` | `cp -a --reflink=always`: shared extents, but every file is visited | Reflinks work between the two dirs (btrfs, XFS) |
+| `copy` | `cp -a` | Neither works (ext4, as in CI) |
+
+- **The opt-out:** `GOGO_E2E_COPY=reflink` or `copy` forces that path even on btrfs, and
+  no subvolume is made. `snapshot` insists: without snapshots the run is a harness error
+  (exit 3). `auto` is the default. Anything else is a usage error. The probe and the mode
+  are logged (`copies: …`), and `build.copy` records them.
+- **No root, no btrfs-progs.** Creating and snapshotting use two ioctls through the
+  helper (`subvol create`, `subvol snapshot`). btrfs-progs would have to go in the tools,
+  and the tools' store path is part of every base's key, so adding it would orphan every
+  base already saved. Deleting needs no ioctl. `rm -rf` empties a subvolume and rmdir(2)
+  takes the empty one (kernel 4.18+). `btrfs subvolume delete` would need root or the
+  `user_subvol_rm_allowed` mount option. Teardown, `cleanup` and `--prune-installed`
+  check that what they deleted is gone. A leftover subvolume shows in their log and keeps
+  `scratch_deleted` false.
+- **What's a subvolume:** each base's `tree/gogo`, `tree/home` and `tree/xdg`, a reused
+  run's copies of them, and a live session's disk and its lives. Nothing is ever
+  snapshotted with a subvolume inside it: an inner one would show up in the snapshot as an
+  empty dir. The sandbox binds the scratch once (`--bind $RUN $RUN`), so the subvolumes
+  are plain dirs in there. The cache's store, depot and umu dirs are bound over empty
+  dirs in `xdg` and stay out of every copy. Each subvolume is its own `st_dev`, so a
+  rename between `gogo`, `home` and `xdg` is `EXDEV`, as it already is into the store's
+  bind mount. Nothing in a build or a launch does one. If a game ever does,
+  `GOGO_E2E_COPY=reflink` is the way back.
+- **A restore** moves the last life's subvolumes aside, into the scratch's `.trash/`,
+  and snapshots the disk again. Emptying a subvolume is a walk over its files, so the
+  trash is deleted with the scratch at teardown, off the restore's path.
+- **Bases from before.** A base saved before this, or with `GOGO_E2E_COPY=reflink` or
+  `copy`, is plain dirs. The first run that meets one in `snapshot` mode converts it, with
+  the cache lock held. It builds a reflinked copy of the tree beside the old one, as
+  subvolumes, then swaps the two in one rename (`mv --exchange`) and deletes the old tree.
+  `meta.json` then says `"copy": "snapshot"` and when it was converted. A failure at any
+  step leaves the base as it was, and that run copies by reflink. `cleanup` sweeps a
+  half-done conversion (`.tree-new-*`). The key doesn't change, so a checkout from before
+  this reuses a converted base too: to it, the subvolumes are plain dirs to read, and
+  `rm -rf` prunes them.
+
+What it buys depends on the tree. On Cyberpunk 2077's base (63 GB, but 950 files, all
+large), copying takes well under a second in either copy-on-write mode. The disk was never
+the slow part of a reused start or a restore (below). The gain is real for trees of many
+small files, such as a Wine prefix: the self-test times `copy`, `reflink` and `snapshot`
+on 20 000 small files and logs it.
+
+Measured on the owner's machine (btrfs, zstd, NVMe, kernel 7.2; 2026-11-08). The times
+are for the copy alone, then for deleting it (`rm -rf`), which a restore leaves to
+teardown in snapshot mode:
+
+| Tree | `copy` | `reflink` | `snapshot` | `rm -rf` |
+|---|---|---|---|---|
+| 200 000 files of 100 B (782 MB) | 2.13 s | 2.12 s | 0.05 s | 1.3–1.5 s |
+| 20 000 files of 64 KB (1.3 GB) | 0.21 s | 0.21 s | 0.04 s | 0.15 s |
+| Cyberpunk 2077's base, 950 files (63 GB) | — | 0.05 s | 0.02 s | 0.02 s |
+
+On btrfs, `cp -a` reflinks through `copy_file_range` anyway, so `copy` costs what
+`reflink` does there. The self-test's own line (20 000 files of a few bytes) read
+copy 0.23 s, reflink 0.23 s, snapshot 0.05 s.
+
+Cyberpunk 2077 with `--reuse-install`, a short live session, before (main, `reflink`) and
+after (this, `snapshot`, which also converted the base on its first run): `live start`,
+the title, `wait 30`, a screenshot, `checkpoint title`, `restore title`, `stop`.
+
+| | before: reflink | after: snapshot |
+|---|---|---|
+| the copy at the start (`copy_secs`) | 0.1 s | 0.2 s (after the base's one-off conversion) |
+| `live start` to `ready` (the window) | 27 s | 23 s |
+| a restore's rollback | 0.1 s | 0.2 s |
+| `restore` to `ready` | 80.4 s (replay 52.9 s) | 73.4 s (replay 45.5 s) |
+
+The differences are noise from the game's start-up. A snapshot is three helper calls,
+each a Python start and a btrfs commit, which on 950 files is no faster than a reflink.
+A restore's time is the game's relaunch and the replay, which is #257.
 
 **Continuing from a launched state** (the EULA accepted, a menu reached) isn't this: a
 base is always pre-launch. A [live session](#live-sessions)'s checkpoints are routes from
@@ -354,7 +438,8 @@ whose driver replays NAME's steps before it listens again.
 
 - **The disk it rolls back to** is the installed base itself when the session runs on one
   (`--reuse-install`: only ever read), or else a snapshot in scratch taken before the first
-  launch: reflinks, seconds and no space on btrfs or XFS; a full copy on ext4, logged.
+  launch, made [as a base's copies are](#copies-snapshots-reflinks-full-copies): subvolumes
+  on btrfs, reflinks on XFS, a full copy on ext4, logged.
 - **Why the launch, not the moment of the checkpoint.** A snapshot of a running game is
   what a power cut leaves: Wine writes the registry when it likes, a game its settings when
   it quits. And a game relaunched on a disk that remembers a screen (an accepted agreement)
