@@ -961,6 +961,9 @@ cmd_run() {
         needs_gogo=0
         GOGID=""
     fi
+    # Only now: live_start returns once there is a state, and a usage error
+    # before it must reach live start's exit.
+    [ -z "${LIVE:-}" ] || live_state starting "building gogo, then the game or a copy of its base"
     UMU_PY=""
     if [ "$needs_gogo" = 1 ]; then
         if [ -n "$GOGO" ]; then
@@ -1434,7 +1437,9 @@ live_start() {
         kill -0 "$pid" 2>/dev/null || break
         sleep 0.1
     done
-    if ! kill -0 "$pid" 2>/dev/null; then
+    # Ended already: its early exit writes "stopped", maybe before it's gone.
+    if ! kill -0 "$pid" 2>/dev/null ||
+        [ "$(PATH="$TOOLS/bin" jq -r .state "$results/live/state.json" 2>/dev/null)" = stopped ]; then
         local code=0
         wait "$pid" || code=$?
         sed 's/^/  /' "$results/session.log" >&2
@@ -2128,7 +2133,6 @@ __live-serve)
     trap live_early_exit EXIT
     trap 'exit 1' INT TERM HUP
     live_register
-    live_state starting "building gogo, then the game or a copy of its base"
     cmd_run "$@" ;;
 self-test) cmd_self_test "$@" ;;
 cleanup) cmd_cleanup "$@" ;;

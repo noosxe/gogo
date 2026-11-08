@@ -2725,6 +2725,7 @@ def live_wait(state_file, sock_dir, secs, owner, min_life):
     `secs` pass: (exit, reply). 0 ready, 1 ended, 4 still busy."""
     deadline = time.monotonic() + secs
     state = {}
+    why = ""
     while True:
         try:
             with open(state_file) as f:
@@ -2737,13 +2738,15 @@ def live_wait(state_file, sock_dir, secs, owner, min_life):
                 reply = live_call(sock_dir, {"cmd": "status", "args": []}, 20)
                 if reply.get("state") == "ready":
                     return 0, reply
-            except (OSError, ValueError):
-                pass
+                why = f"the socket answered {json.dumps(reply)[:300]}"
+            except (OSError, ValueError) as e:
+                why = f"the socket: {e}"
         if not alive:
             return 1, {"ok": False, "state": "ended", "last": state}
         if time.monotonic() >= deadline:
             return 4, {"ok": False, "state": state.get("state", "starting"), "busy": True,
-                       "detail": state.get("detail", ""), "life": state.get("life")}
+                       "detail": state.get("detail", ""), "life": state.get("life"),
+                       "why": why}
         time.sleep(1)
 
 

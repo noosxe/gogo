@@ -59,3 +59,6 @@ jobs:
         run: |
           find target/linux-e2e/self-test -name stderr -exec tail -n 20 {} +
           find target/linux-e2e/self-test -name sway.log -exec tail -n 20 {} +
+          find target/linux-e2e/self-test -path '*/live*' \( -name session.log -o -name client.stderr \
+            -o -name start.stderr -o -name serve.out -o -name state.json -o -name sandbox.log \
+            -o -name journal.jsonl \) -exec tail -n 30 {} +
