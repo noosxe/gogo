@@ -82,7 +82,7 @@ build's sandbox sees. It needs `gogo login` done once. Tokens are never printed.
 | `support-inno.log` | the support installer's Inno log, when it wrote one |
 | `install-inno.log`, `install-wine.log` | what the installer wrote, with `--installer` |
 | `run.log`, `launch.log` | the launcher's logs (design 18 §7.3) |
-| `doctor-before.json`, `doctor-after.json` | `gogo linux-app doctor` around the run |
+| `doctor-before.json`, `doctor-after.json` | `gogo linux-app doctor` around the run. A live session's life on a disk that already has its report says whose instead: `{"same_disk_as_life": N}` |
 
 ## What a run does
 
@@ -418,7 +418,7 @@ finds the steps (unless it [starts from them](#starting-from-a-manifest)). A gam
 | `move_by DX DY`, `scroll NOTCHES`, `wait SECS` | as the manifest's |
 | `settle [--max SECS]` | waits until the picture fills the window and holds still, by the code of the manifest's `wait_settled`. Answers `settled`, `secs` it took, the last frame's `path`, and the `step` it put on the path. An animated screen answers `"settled": false` after `--max` (default 30, at most 600), it doesn't hang |
 | `checkpoint NAME` | a screenshot (`cp-NAME`), and the path to here kept under NAME, with about how long its replay takes. After the game quit by itself (`game.running` false in `status`), [a clean stop](#a-clean-stop-a-kept-disk-and-a-relaunch): no screenshot, the disk kept too, `clean_stop: true`. Refused if the exit wasn't [exit]'s code, or something of the game is still up |
-| `restore NAME [--wait SECS]` | the game closed, the disk rolled back, a relaunch and a replay to NAME; answers once it's done, with `last_replay`, and `last_restore`: how long each part took |
+| `restore NAME [--wait SECS] [--full-waits]` | the game closed, the disk rolled back, a relaunch and a [fast replay](#a-fast-replay) to NAME; answers once it's done, with `last_replay` (its `timeline`, step by step, and `cut_secs`) and `last_restore`: how long each part took (`phases`). `--full-waits`: every wait at the length the export has |
 | `relaunch` | launches the game again on this disk, once it has quit by itself, and answers when its window is up. Refused while it runs, and as `checkpoint` is after a bad exit |
 | `log [game\|run\|launch\|sway\|dxvk\|vkd3d\|proton] [--tail N]` | a log's last lines: `game.out` (or its DXVK, VKD3D or Proton/Wine lines), the launcher's run log or `launch.log`, sway's |
 | `export` | the route so far, as a manifest, on stdout. Works after `stop` too |
@@ -495,9 +495,10 @@ whose driver replays NAME's steps before it listens again.
   it quits. And a game relaunched on a disk that remembers a screen (an accepted agreement)
   takes another way to the same menu, maybe with the focus elsewhere: the session would then
   be somewhere the exported manifest never goes. From the launch's disk, the replay is the
-  route the export writes, so a replay that matches is a dry run of the export.
-- **The replay** keeps the export's timing: each gap cut to `--max-gap`, each `wait` in
-  full. At each screenshot it retakes the frame until at most `--match-pct`% of it differs
+  route the export writes, so a replay that matches is a dry run of the export's route
+  (of its timing too, with `--full-waits`).
+- **The replay** goes by the export's timing, each gap cut to `--max-gap` and each `wait` in
+  full, except where [the screen shows it can go sooner](#a-fast-replay). At each screenshot it retakes the frame until at most `--match-pct`% of it differs
   from the one recorded, for up to 30 s more; a late match lengthens the wait before it,
   for the next replay and the export too. The first that never matches stops the replay
   there: the route ends at the last step that matched, `status` says why
@@ -510,11 +511,42 @@ whose driver replays NAME's steps before it listens again.
   makes the replay stop there, rightly, as the export would fail at it. Take the shot after
   the key that settles it.
 - **What a restore costs:** a relaunch (the sandbox, `launch.sh`, the game's own start)
-  plus the replay, about what `checkpoint` and `status` say as `replay_secs`, which counts
-  only what's past a kept disk. Cyberpunk 2077
+  plus the replay, at most about what `checkpoint` and `status` say as `replay_secs`, which
+  counts only what's past a kept disk, and every wait in full. Cyberpunk 2077
   on the 4090: see [What it cost](#what-it-cost-cyberpunk-2077).
 - **Dead ends** (what was done after the checkpoint, before the restore) leave the route,
   and stay in `journal.jsonl`.
+
+#### A fast replay
+
+A replay doesn't sit through what the screen says is over (#257). The route on the path
+isn't touched, so **the export is the same, byte for byte in its steps,** whatever a replay cut,
+and a `run` still waits the whole `wait`.
+
+- **A wait or a gap leading up to a screenshot** ends once the screen has arrived there: a
+  frame a second, compared with the recorded one, and two in a row must be within the
+  frame's own motion × 1.5, plus 1%. That is much tighter than `--match-pct`, which also
+  takes a screen one step short (Cyberpunk's agreement, scrolled to its end, is 9% off).
+- **It doesn't poll,** and the wait runs in full, when a poll can't tell: a run of waits under
+  3 s, a recorded frame that moves by `--match-pct` or more or is black, or a frame so like the
+  screen before the input that arriving doesn't show. **A wait with an input next has no
+  frame to go by, so it stays whole**: that's most of what's left on Cyberpunk.
+- **A gap after a matched screenshot** (the agent reading it) is cut to 1 s: the screen is
+  where it was then. A `wait` is never cut this way: it says what the game needs.
+- **Frames don't go through a PNG:** `grim -t ppm`, the recorded frame from a raw copy
+  in scratch (`live/refs/`), a PNG written unfiltered for the agent. 0.7 s a screenshot,
+  against 4 s. A `run`'s screenshots aren't changed, since a manifest's timing has them in it.
+- **A failure may be its own doing,** so it isn't the verdict: a fast replay that fails past its
+  first check ends that life, and the next one replays at full timing, whose answer stands.
+  `last_replay.retried_because` says what the fast one saw, `last_replay.full_waits` that this
+  was the full one, and a retry is a restore of its own in `session.json`, with `retry: true`.
+  A failure with nothing before it to blame stops there, as any replay does.
+- **What it proves:** a fast replay that matched says the route still reaches each screen,
+  not that its waits are long enough. That's still a fresh `run`'s to say.
+
+**doctor's report before the launch** is once per disk (the launch's, each kept one): it's a
+record, which no check reads, and 7 s on Cyberpunk. `doctor-after`, at a `stop`, is
+as ever, and every life still has its own isolation checks, sound check, GPU probes and sweep.
 
 #### A clean stop: a kept disk and a relaunch
 
@@ -713,7 +745,8 @@ restore's `last_restore`:
 | the replay | about 131 s (96 s in another session) | 0 s, 0 steps of 32 | 73 s, 8 steps, 32 standing |
 | `restore` to `ready` | 102–158 s | **24.7 s** | 96.6 s |
 
-So the replay was the lever. What's left of a restore is mostly the sandbox's own start,
+So the replay was the lever. What's left of a restore was mostly the sandbox's own start
+(until #257, below),
 and the game's window comes up within 5 s of the launch; that's still the window, not the
 menu. On the remembered disk Cyberpunk plays its intro from the window on (`space` skips it,
 after about 30 s), then goes straight to the menu, no agreement and no analytics. That's the
@@ -993,3 +1026,57 @@ These stay in the owner's host pass (#179, design 18 §11.2), and agents put the
   into its container. It's set explicitly because `/etc` is the host's, `/etc/pulse` included.
 - **Sway comes as `sway-unwrapped`:** nixpkgs' wrapper starts `dbus-run-session`, which needs
   a config in `/etc`.
+
+**Where a restore goes, and what was cut** (#257; the same RTX 4090 and options, 2026-11-08).
+`last_restore.phases`, and `last_replay.timeline`, on the same route as above, before and after.
+The "18 s of sandbox" of the table above wasn't the sandbox's start:
+
+| | before | after |
+|---|---|---|
+| closing the game | 0.8 s | 0.8 s |
+| the sandbox's exit (`leave`) | 0.2 s | 0.2 s |
+| the **sweep** between lives: nothing found, by a `grep` per process and mark, some 8,000 forks over a desktop's 580 processes | **7.4 s** | **0.05 s**, one process, the same marks |
+| the rollback (a snapshot) | 0.2 s | 0.2 s |
+| bwrap and the driver's start | 0.05 s | 0.05 s |
+| sway, Xwayland, the virtual keyboard and pointer | 0.2 s | 0.2 s |
+| the sound server, the isolation checks | 0.1 s | 0.1 s |
+| `glxinfo`, `vulkaninfo` | 0.75 s | 0.75 s |
+| the override, on the launch's disk only | 1.7 s | 1.7 s |
+| **doctor**, before the launch: it reads Cyberpunk's PE files three times (#265) | **7.4 s** | **0 s** once the disk has its report ([below](#a-fast-replay)), 7–10 s the first time |
+| the test sound stream: 2 s on a null sink, whatever its length | **2.0 s** | **1.3 s**, now beside the probes, 0 beside anything longer |
+| launch to the window | 4.5–5 s (launch's disk 7 s) | the same |
+
+So sway and the input devices, the first idea for reusing something across lives, cost 0.2 s, and
+a life keeps its own. The replay's waits and frames, the rest:
+
+| replay step | before | after |
+|---|---|---|
+| a screenshot | 3.5–5 s | 0.7 s |
+| `wait 25` after `space`, to the agreement | 25 s | 4.5 s |
+| `wait 15` after accepting, to analytics | 15 s | 2.8 s |
+| `wait 10` after `space`, to the remembered disk's menu | 10 s | 4.5 s |
+| a 9–10 s gap, then a checkpoint's own screenshot | 14 s | 2.2 s |
+| `wait 30` and `wait 34.9` before `space` (the intro, no frame to go by) | as written | as written |
+| `scroll 750` | 30 s | 30 s |
+
+| `restore` to `ready` | before | after |
+|---|---|---|
+| to a clean stop, its disk's first restore | 23.8 s | 17.5 s |
+| to a clean stop, again | 24.2 s | **8.2 s** |
+| 5 steps past a clean stop: the menu of the remembered disk | 72.8–75.3 s | **44.4–44.7 s** (first on a disk: about 50 s) |
+| a running checkpoint, 41 steps from the launch | 216.5 s | **130.4–132.4 s** (43.7 s cut) |
+
+What's left of a restore to the menu is the game's: 30 s of intro before `space` takes, with no
+frame to know it by, and 4.5 s to the window. Across 9 restores the
+`agreed` replay stopped at its first screenshot twice, with nothing cut, on the intro still
+playing: `space` at 34.9 s hadn't taken (the race #241 found, on a route where
+`wait` is all there is before that key). With doctor put back in those lives, 3 of 3 passed; 4 of 6 without it.
+Too few to tell apart, and doctor isn't near the key, so it's filed as the route's race (#266), not this cut's.
+The caches were left alone: nothing above needed them.
+
+The proof that the replay's cuts didn't reach the export: the route of that session, taken
+through fast restores (`restore agreed` at 131 s, a clean-stop checkpoint, `restore on-menu2`), with
+`wait 25`, `wait 15` and `wait 10` still whole in its export. A fresh `run` of it, the installer
+build and all, without `--reuse-install`, passed in 13 min 20 s, of which 8 min 36 s is the build,
+all 68 checks ok, Quit Game's exit 0 on both launches, the window 4.5 s after the relaunch,
+`nothing_left_relaunch_1`. `--reuse-install`'s base key didn't change: no new base was built.
