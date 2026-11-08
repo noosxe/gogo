@@ -633,6 +633,11 @@ REUSE_FORMAT=1
 # take turns with every other run on the cache lock (below).
 installed_dir() {
     local d="${GOGO_E2E_INSTALLED_DIR:-$ROOT/cache/installed}" real
+    # The real bases' only guard is the real lock: a self-test's own lock doesn't
+    # keep it off a session's scratch in there.
+    if [ -n "${GOGO_E2E_LOCK_DIR:-}" ] && [ -z "${GOGO_E2E_INSTALLED_DIR:-}" ]; then
+        die "GOGO_E2E_LOCK_DIR without GOGO_E2E_INSTALLED_DIR would touch the real bases under another lock" 3
+    fi
     if [ -n "${GOGO_E2E_INSTALLED_DIR:-}" ]; then
         case "$d" in "$ROOT"/?*) ;; *) die "installed bases must be under $ROOT: $d" 2 ;; esac
     fi
@@ -2021,7 +2026,7 @@ st_reuse() { # self-test dir
         and .build.reuse.source == "fresh build" and (.build.reuse.key | length == 16)' "$ST_RS" >/dev/null ||
         st_fail "reuse-build: $(jq -c '{failed, build}' "$ST_RS" 2>/dev/null)"
     one="$(jq -r .build.reuse.base "$ST_RS" 2>/dev/null)"
-    [ -f "$one/meta.json" ] || { st_fail "reuse-build: no base at $one"; unset GOGO_E2E_INSTALLED_DIR; return 0; }
+    [ -f "$one/meta.json" ] || { st_fail "reuse-build: no base at $one"; export GOGO_E2E_INSTALLED_DIR="$ST_INSTALLED"; return 0; }
     [ ! -e "$one/tree/gogo/games/fake/launched" ] || st_fail "reuse-build: the launch wrote into the base"
     before="$(st_tree_print "$one")"
     jq -e --arg m "$ST_COPY_AUTO" '.build.copy.mode == $m and .build.copy.asked == "auto"' "$ST_RS" >/dev/null ||
@@ -2100,7 +2105,7 @@ st_reuse() { # self-test dir
     left="$(find "$GOGO_E2E_INSTALLED_DIR" -mindepth 1 -maxdepth 1 ! -name .runs
         find "$GOGO_E2E_INSTALLED_DIR/.runs" -mindepth 1 -maxdepth 1)"
     [ -z "$left" ] || st_fail "cleanup --prune-installed all left: $left"
-    unset GOGO_E2E_INSTALLED_DIR
+    export GOGO_E2E_INSTALLED_DIR="$ST_INSTALLED"
 }
 
 # The modes this machine has (#255): sets ST_COPY_AUTO, what auto should pick,
@@ -2174,7 +2179,8 @@ st_copy() { # self-test dir
     code=0
     GOGO_E2E_COPY=bogus "$SELF" run self-test --manifest "$m" --reuse-install >/dev/null 2>&1 || code=$?
     [ "$code" = 2 ] || st_fail "usage: GOGO_E2E_COPY=bogus: exit $code, want 2"
-    unset GOGO_E2E_COPY GOGO_E2E_INSTALLED_DIR
+    unset GOGO_E2E_COPY
+    export GOGO_E2E_INSTALLED_DIR="$ST_INSTALLED"
 }
 
 # Where snapshots pay: a tree of many small files, like a Wine prefix's, timed
@@ -2740,6 +2746,10 @@ cmd_self_test() {
     mkdir -p "$base"
     # Its own cache lock: neither waiting for a real run nor holding one up.
     export GOGO_E2E_LOCK_DIR="$base/cache-lock"
+    # And its own bases: its `cleanup` sweeps `.runs`, which under a lock of its
+    # own would otherwise be a real session's scratch (installed_dir refuses that).
+    ST_INSTALLED="$base/own-installed"
+    export GOGO_E2E_INSTALLED_DIR="$ST_INSTALLED"
 
     # 1. The whole path with a plain X11 client: window, click, key, exit.
     out="$base/pass"; mkdir -p "$out"
