@@ -44,6 +44,10 @@
 #                     manifest rounds: a PR's final run and CI build afresh
 #   --out DIR         results root (default target/linux-e2e/results)
 #
+# GOGO_E2E_COPY=auto|snapshot|reflink|copy: how installed bases and a live
+# session's disk are copied (default auto: btrfs snapshots where they work
+# unprivileged, else reflinks, else a full copy; docs/linux-e2e.md).
+#
 # live start options, beside run's (--secs aside): the manifest is optional,
 # and only its [window], [env], [override] and [exit] count:
 #   --env K=V         into [override.env]: gogo's `linux-app env set`, per launch
@@ -346,7 +350,9 @@ delete_scratch() {
     # Proton and umu leave read-only dirs; bind-mount targets are just empty
     # dirs out here, so the cache isn't touched.
     chmod -R u+rwX "$RUN" 2>/dev/null || true
-    if ! rm -rf "$RUN"; then log "couldn't delete $RUN"; return 1; fi
+    rm -rf "$RUN" 2>/dev/null || true
+    # rm -rf takes subvolumes too, emptied, then rmdir(2): only what's gone counts.
+    gone_or_say "$RUN"
 }
 
 collect_logs() {
@@ -395,7 +401,8 @@ write_summary() { # entry-status killed left deleted
         --arg results "$RESULTS" --arg scratch "$RUN" --argjson deleted "$deleted" \
         --arg keep "$KEEP" --arg left "$left" --arg killed "$killed" --arg excerpt "$excerpt" \
         --arg runtime "${STATE_RUNTIME:-}" --arg date "$(date -u +%F)" \
-        --arg installer "${INSTALLER_FILE##*/}" --argjson reuse "$(reuse_json)" --argjson live "$(live_json)" '
+        --arg installer "${INSTALLER_FILE##*/}" --argjson reuse "$(reuse_json)" --argjson live "$(live_json)" \
+        --arg copy "${COPY_MODE:-}" --arg copy_ask "${COPY_ASK:-auto}" --arg copy_note "${COPY_NOTE:-}" '
         ($r[0]) as $res
         | ($b[0]) as $bld
         | (($bld.checks // []) | map(.name = "build_" + .name)) as $build_checks
@@ -412,6 +419,9 @@ write_summary() { # entry-status killed left deleted
            isolation:($res.isolation // {}), gpu_detail:($res.gpu // {}),
            audio:($res.audio // {}),
            build:{reused:($reuse.reused // false), reuse:$reuse,
+                  # How bases and live disks are copied (#255); null: nothing was.
+                  copy:(if $copy == "" then null
+                        else {mode:$copy, asked:$copy_ask, note:(if $copy_note == "" then null else $copy_note end)} end),
                   exit:($bld.exit // null), secs:($bld.secs // null), isolation:($bld.isolation // {}),
                   installer:(if $installer == "" then null else $installer end),
                   windows:($bld.windows // []), support_installer:($bld.support_installer // null)},
@@ -765,23 +775,98 @@ gogo_identity() {
     esac
 }
 
-# Reflinks where $RUN and the bases share a filesystem that has them (btrfs,
-# XFS), a full copy elsewhere (CI's ext4). Sets COPY_MODE.
-probe_reflinks() { # [dir: default the bases']
-    local to="${1:-$INSTALLED}" probe
-    probe="$to/.probe-$$"
-    printf 'probe\n' >"$RUN/harness/.probe"
-    if cp --reflink=always "$RUN/harness/.probe" "$probe" 2>/dev/null; then COPY_MODE=reflink
-    else COPY_MODE=copy; log "no reflinks between $RUN and $to: full copies"; fi
-    rm -f "$probe" "$RUN/harness/.probe"
+# --- copies (#255) --------------------------------------------------------------
+#
+# How a base, or a live session's disk, is copied: COPY_MODE.
+#   snapshot  btrfs subvolumes. The tree's gogo, home and xdg are each one, and
+#             a copy is `subvolume snapshot`: no walk over the files. Where
+#             $RUN and `to` are on one btrfs and the probe below works
+#             unprivileged, creating, snapshotting and deleting one.
+#   reflink   cp -a --reflink=always: shared extents, but every file is visited.
+#   copy      cp -a, where there are no reflinks (CI's ext4).
+# GOGO_E2E_COPY picks: auto (the default: the first that works), or snapshot
+# (fails without), reflink or copy (never a subvolume, even on btrfs).
+# Deleting needs no root: `rm -rf` empties a subvolume and rmdir(2) takes it
+# (kernel 4.18+), without user_subvol_rm_allowed. A subvolume nested in another
+# isn't in the outer one's snapshots, so the harness never snapshots a tree
+# with one in it, only gogo, home and xdg themselves.
+
+copy_ask() {
+    COPY_ASK="${GOGO_E2E_COPY:-auto}"
+    case "$COPY_ASK" in auto | snapshot | reflink | copy) ;;
+    *) die "GOGO_E2E_COPY wants auto, snapshot, reflink or copy: $COPY_ASK" 2 ;; esac
+}
+
+is_subvol() { # dir: a btrfs subvolume's root (inode 256), not a link
+    [ -d "$1" ] && [ ! -L "$1" ] && [ "$(stat -f -c %T "$1" 2>/dev/null)" = btrfs ] &&
+        [ "$(stat -c %i "$1" 2>/dev/null)" = 256 ]
+}
+
+# Can a snapshot be made in `to` and from it into $RUN, and both deleted
+# again, unprivileged? Prints why not.
+probe_snapshot() { # to
+    local to="$1" sv="$1/.probe-$$-sv" snap="$RUN/harness/.probe-snap" out="" ok=""
+    if [ "$(stat -f -c %T "$to")" != btrfs ] || [ "$(stat -f -c %T "$RUN/harness")" != btrfs ]; then
+        echo "not btrfs"; return 1
+    fi
+    if out="$(helper subvol create "$sv" 2>&1)" && printf 'probe\n' >"$sv/f" &&
+        out="$(helper subvol snapshot "$sv" "$snap" 2>&1)" && [ "$(cat "$snap/f" 2>/dev/null)" = probe ]; then
+        ok=1
+    fi
+    rm -rf "$sv" "$snap" 2>/dev/null || true
+    if [ -e "$sv" ] || [ -e "$snap" ]; then
+        echo "a probe subvolume won't go (rmdir takes an empty one from kernel 4.18): $sv $snap"; return 1
+    fi
+    [ -n "$ok" ] || { printf '%s\n' "${out:-the probe snapshot is empty}" | head -n 1; return 1; }
+}
+
+# The mode for copies between $RUN and `to`: sets COPY_MODE, and COPY_NOTE,
+# why it isn't a snapshot.
+probe_copy() { # [dir: default the bases']
+    local to="${1:-$INSTALLED}" probe why
+    COPY_NOTE=""
+    if [ "$COPY_ASK" = auto ] || [ "$COPY_ASK" = snapshot ]; then
+        if why="$(probe_snapshot "$to")"; then
+            COPY_MODE=snapshot
+            log "copies: btrfs snapshots ($to, GOGO_E2E_COPY=$COPY_ASK)"
+            return 0
+        fi
+        if [ "$COPY_ASK" = snapshot ]; then
+            INFRA_ERROR="GOGO_E2E_COPY=snapshot, but no snapshots between $RUN and $to: $why"
+            exit 3
+        fi
+        COPY_NOTE="no snapshots: $why"
+    else
+        COPY_NOTE="GOGO_E2E_COPY=$COPY_ASK"
+    fi
+    COPY_MODE=copy
+    if [ "$COPY_ASK" != copy ]; then
+        probe="$to/.probe-$$"
+        printf 'probe\n' >"$RUN/harness/.probe"
+        if cp --reflink=always "$RUN/harness/.probe" "$probe" 2>/dev/null; then COPY_MODE=reflink
+        else COPY_NOTE="$COPY_NOTE; no reflinks between $RUN and $to"; fi
+        rm -f "$probe" "$RUN/harness/.probe"
+    fi
+    log "copies: $COPY_MODE ($COPY_NOTE)"
 }
 
 # The run's gogo, home and xdg into `to`/: what a base holds.
 copy_run_tree() { # to
     local d
     for d in gogo home xdg; do
-        mkdir "$1/$d" && copy_tree "$RUN/$d" "$1/$d" || return 1
+        copy_dir "$RUN/$d" "$1/$d" || return 1
     done
+}
+
+# One of those dirs to `to`, not there yet. A snapshot where `from` is a
+# subvolume; else, in snapshot mode, a new subvolume with a reflinked copy in it.
+copy_dir() { # from to
+    if [ "$COPY_MODE" = snapshot ]; then
+        if is_subvol "$1"; then helper subvol snapshot "$1" "$2"; return; fi
+        helper subvol create "$2" && cp -a --reflink=always "$1/." "$2/"
+        return
+    fi
+    mkdir "$2" && copy_tree "$1" "$2"
 }
 
 copy_tree() { # from to
@@ -819,13 +904,22 @@ restore_base() { # base
     local base="$1" t0 d
     t0="$(date +%s.%N)"
     # What seed_scratch made, or a game left: the base has the same dirs.
-    # Proton leaves read-only ones.
+    # Proton leaves read-only ones. A life's snapshot goes aside, into
+    # scratch's .trash, deleted with it: emptying one is a walk over its files.
     for d in gogo home xdg; do
         [ -e "$RUN/$d" ] || continue
+        if [ "$COPY_MODE" = snapshot ] && is_subvol "$RUN/$d"; then
+            mkdir -p "$RUN/.trash" && mv -T "$RUN/$d" "$RUN/.trash/$d-life${LIFE:-0}" || return 1
+            continue
+        fi
         chmod -R u+rwX "${RUN:?}/$d" 2>/dev/null || true
         rm -rf "${RUN:?}/$d" || return 1
     done
-    copy_tree "$base/tree" "$RUN"
+    if [ "$COPY_MODE" = snapshot ]; then
+        for d in gogo home xdg; do copy_dir "$base/tree/$d" "$RUN/$d" || return 1; done
+    else
+        copy_tree "$base/tree" "$RUN"
+    fi
     COPY_SECS="$(awk -v a="$t0" -v b="$(date +%s.%N)" 'BEGIN { printf "%.1f", b - a }')"
 }
 
@@ -861,15 +955,62 @@ save_base() { # build-secs
     SAVED=true SAVE_NOTE=""
 }
 
+# A base saved as plain dirs (before #255, or with GOGO_E2E_COPY=reflink|copy),
+# met in snapshot mode: its gogo, home and xdg become subvolumes, once, with
+# the cache lock held. The new tree is a reflinked copy beside the old one
+# (.tree-new-*, which cleanup sweeps), swapped in with one rename, and the old
+# tree goes. Any failure leaves the base as it was. Sets COPY_NOTE.
+convert_base() { # base
+    local base="$1" new="$1/.tree-new-$$" d plain=""
+    for d in gogo home xdg; do is_subvol "$base/tree/$d" || plain=1; done
+    [ -n "$plain" ] || return 0
+    log "the base's tree is plain dirs: making them subvolumes, once"
+    local failed=""
+    if mkdir "$new"; then
+        for d in gogo home xdg; do copy_dir "$base/tree/$d" "$new/$d" || { failed=1; break; }; done
+    else failed=1; fi
+    if [ -n "$failed" ]; then
+        remove_tree "$new" || true
+        COPY_NOTE="couldn't make the base's dirs subvolumes: reflinked into this run"
+        log "$COPY_NOTE"
+        return 0
+    fi
+    # The tree's own mode and mtime, as a copy keeps the rest's.
+    chmod --reference="$base/tree" "$new" && touch -r "$base/tree" "$new" || failed=1
+    if [ -n "$failed" ] || ! mv --exchange -T "$new" "$base/tree"; then
+        remove_tree "$new" || true
+        COPY_NOTE="couldn't swap the base's tree: reflinked into this run"
+        log "$COPY_NOTE"
+        return 0
+    fi
+    remove_tree "$new" || log "couldn't delete the base's old tree: $new (cleanup sweeps it)"
+    local tmp="$base/.meta-$$"
+    if jq --arg at "$(date -u +%FT%TZ)" '.copy = "snapshot" | .converted = $at' "$base/meta.json" >"$tmp"; then
+        mv -f "$tmp" "$base/meta.json"
+    else rm -f "$tmp"; fi
+    COPY_NOTE="the base was plain dirs: made subvolumes"
+}
+
 remove_tree() { # dir under $INSTALLED
     case "$1" in "$INSTALLED"/?*) ;; *) log "not deleting $1"; return 1 ;; esac
     [ ! -L "$1" ] || { log "not deleting a link: $1"; return 1; }
     chmod -R u+rwX "$1" 2>/dev/null || true
     rm -rf "$1"
+    gone_or_say "$1"
 }
 
-# cleanup's list: name, size, when, what built it. du counts shared reflinked
-# extents in full, so on btrfs it's an upper bound.
+# Deleted, or say what's left: a subvolume rm -rf couldn't take (a read-only
+# snapshot, a kernel before 4.18) wants `btrfs subvolume delete` by its owner.
+gone_or_say() { # path
+    [ -e "$1" ] || return 0
+    local sv
+    sv="$(find "$1" -maxdepth 4 -type d -inum 256 2>/dev/null | head -n 3 | tr '\n' ' ')"
+    log "couldn't delete $1${sv:+ (subvolumes left in it: $sv)}"
+    return 1
+}
+
+# cleanup's list: name, size, when, what built it, how it's copied. du counts
+# extents a reflink or a snapshot shares in full, so on btrfs it's an upper bound.
 list_installed() {
     local d n=0 total=0 bytes
     for d in "$INSTALLED"/*/; do
@@ -878,11 +1019,12 @@ list_installed() {
         bytes="$(du -sb "$d" | cut -f1)"
         total=$((total + bytes))
         n=$((n + 1))
-        printf '%s\t%s\t%s\t%s\n' "${d##*/}" "$(numfmt --to=iec "$bytes")" \
+        printf '%s\t%s\t%s\t%s\t%s\n' "${d##*/}" "$(numfmt --to=iec "$bytes")" \
             "$(jq -r '.created // "?"' "$d/meta.json" 2>/dev/null || echo '?')" \
-            "$(jq -r '.built_by // "?"' "$d/meta.json" 2>/dev/null || echo '?')"
+            "$(jq -r '.built_by // "?"' "$d/meta.json" 2>/dev/null || echo '?')" \
+            "$(if is_subvol "$d/tree/gogo"; then echo snapshot; else echo plain; fi)"
     done
-    log "installed bases in $INSTALLED: $n, $(numfmt --to=iec "$total") (du; reflinked copies share extents)"
+    log "installed bases in $INSTALLED: $n, $(numfmt --to=iec "$total") (du; reflinks and snapshots share extents)"
 }
 
 
@@ -936,6 +1078,7 @@ cmd_run() {
     [ -f "$manifest" ] || die "no manifest: $manifest" 2
     TARGET="$target"
     [ "$REUSE" = 0 ] || [ "$FRESH" = 0 ] || die "--reuse-install keeps bases in the cache: not with --no-cache" 2
+    copy_ask
     if [ -n "$installer" ]; then
         installer="$(readlink -f -- "$installer")"
         [ -f "$installer" ] || die "--installer: no such file" 2
@@ -1042,9 +1185,9 @@ cmd_run() {
     seed_scratch
     log "scratch: $RUN"
     log "results: $RESULTS"
-    REUSED=0 REUSE_KEY="" REUSE_BASE="" COPY_MODE="" COPY_SECS="" SAVED="" SAVE_NOTE=""
+    REUSED=0 REUSE_KEY="" REUSE_BASE="" COPY_MODE="" COPY_NOTE="" COPY_SECS="" SAVED="" SAVE_NOTE=""
     if [ "$REUSE" = 1 ]; then
-        probe_reflinks
+        probe_copy
         REUSE_KEY="$(install_key_inputs | key_of)"
         REUSE_BASE="$INSTALLED/$target-$REUSE_KEY"
         if [ -e "$REUSE_BASE" ] || [ -L "$REUSE_BASE" ]; then
@@ -1055,6 +1198,7 @@ cmd_run() {
                 exit 3
             fi
             log "reusing the installed base $REUSE_BASE ($COPY_MODE)"
+            [ "$COPY_MODE" != snapshot ] || convert_base "$REUSE_BASE"
             restore_base "$REUSE_BASE"
             REUSED=1
             log "copied in $COPY_SECS s: no build"
@@ -1209,7 +1353,7 @@ cmd_cleanup() {
     installed_dir
     remove_dead_reuse_runs
     # A save no run finished: with the lock held, nobody is writing one.
-    for d in "$INSTALLED"/.partial-* "$INSTALLED"/.probe-*; do
+    for d in "$INSTALLED"/.partial-* "$INSTALLED"/.probe-* "$INSTALLED"/*/.tree-new-* "$INSTALLED"/*/.meta-*; do
         [ -e "$d" ] || continue
         log "removing an unfinished base: $d"
         remove_tree "$d" || true
@@ -1391,7 +1535,7 @@ live_snapshot() {
     fi
     LIVE_DISK="$RUN/live/disk"
     mkdir -p "$LIVE_DISK/tree"
-    probe_reflinks "$RUN/live"
+    probe_copy "$RUN/live"
     local t0="$SECONDS"
     copy_run_tree "$LIVE_DISK/tree" || { INFRA_ERROR="couldn't snapshot the disk for restores (disk full?)"; exit 3; }
     log "restores roll back to a snapshot of the launch ($COPY_MODE, $((SECONDS - t0)) s)"
@@ -1778,6 +1922,13 @@ st_reuse() { # self-test dir
     [ -f "$one/meta.json" ] || { st_fail "reuse-build: no base at $one"; unset GOGO_E2E_INSTALLED_DIR; return 0; }
     [ ! -e "$one/tree/gogo/games/fake/launched" ] || st_fail "reuse-build: the launch wrote into the base"
     before="$(st_tree_print "$one")"
+    jq -e --arg m "$ST_COPY_AUTO" '.build.copy.mode == $m and .build.copy.asked == "auto"' "$ST_RS" >/dev/null ||
+        st_fail "reuse-build: copies by $(jq -c .build.copy "$ST_RS"), want $ST_COPY_AUTO"
+    if [ "$ST_COPY_AUTO" = snapshot ]; then
+        if ! { is_subvol "$one/tree/gogo" && is_subvol "$one/tree/home" && is_subvol "$one/tree/xdg"; }; then
+            st_fail "reuse-build: snapshot mode, but the base's dirs aren't subvolumes"
+        fi
+    fi
 
     # A hit, twice: no build, the copy's first launch both times. The game
     # writes `launched` and fails if it's there, so the third run passing says
@@ -1848,6 +1999,109 @@ st_reuse() { # self-test dir
         find "$GOGO_E2E_INSTALLED_DIR/.runs" -mindepth 1 -maxdepth 1)"
     [ -z "$left" ] || st_fail "cleanup --prune-installed all left: $left"
     unset GOGO_E2E_INSTALLED_DIR
+}
+
+# The modes this machine has (#255): sets ST_COPY_AUTO, what auto should pick,
+# and ST_HAVE_SNAP / ST_HAVE_REFLINK. Probed here as the harness does.
+st_copy_probe() { # self-test dir
+    local d="$1/copy-probe"
+    mkdir -p "$d"
+    ST_HAVE_SNAP="" ST_HAVE_REFLINK=""
+    if helper subvol create "$d/sv" 2>/dev/null && helper subvol snapshot "$d/sv" "$d/snap" 2>/dev/null; then
+        rm -rf "$d/sv" "$d/snap"
+        [ -e "$d/sv" ] || [ -e "$d/snap" ] || ST_HAVE_SNAP=1
+    fi
+    printf 'x\n' >"$d/f"
+    cp --reflink=always "$d/f" "$d/g" 2>/dev/null && ST_HAVE_REFLINK=1
+    rm -rf "$d"
+    if [ -n "$ST_HAVE_SNAP" ]; then ST_COPY_AUTO=snapshot
+    elif [ -n "$ST_HAVE_REFLINK" ]; then ST_COPY_AUTO=reflink
+    else ST_COPY_AUTO=copy; fi
+    log "self-test: copies here: auto is $ST_COPY_AUTO (snapshots: ${ST_HAVE_SNAP:-no}, reflinks: ${ST_HAVE_REFLINK:-no})"
+}
+
+# Every copy mode, forced with GOGO_E2E_COPY: a build saves a base, a hit runs
+# on a copy of it, and the base is subvolumes only in snapshot mode. Where
+# snapshots work, a plain base meets auto and becomes subvolumes, unchanged.
+# Where they don't (CI), a forced snapshot is a harness failure, and clean.
+st_copy() { # self-test dir
+    local base="$1" m="$REPO/e2e/self-test-reuse.toml" mode want one before code
+    log "self-test: copy modes (GOGO_E2E_COPY)"
+    export GOGO_E2E_INSTALLED_DIR="$base/copy-installed"
+    for mode in copy reflink snapshot; do
+        want="$mode"
+        [ "$mode" != reflink ] || [ -n "$ST_HAVE_REFLINK" ] || want=copy
+        export GOGO_E2E_COPY="$mode"
+        if [ "$mode" = snapshot ] && [ -z "$ST_HAVE_SNAP" ]; then
+            st_reuse_run "copy-snapshot-none" "$base/copy-$mode" "$m" 3
+            jq -e '.checks[0].name == "harness" and (.checks[0].detail | test("GOGO_E2E_COPY=snapshot"))' "$ST_RS" >/dev/null ||
+                st_fail "copy-snapshot-none: $(jq -c '[.checks[] | select(.ok | not)]' "$ST_RS" 2>/dev/null)"
+            log "self-test: copy-snapshot: no snapshots here, skipped (a forced one fails cleanly)"
+            continue
+        fi
+        st_reuse_run "copy-$mode-build" "$base/copy-$mode-1" "$m" 0
+        one="$(jq -r .build.reuse.base "$ST_RS" 2>/dev/null)"
+        jq -e --arg m "$want" --arg a "$mode" '.ok and .build.reuse.saved and .build.copy.mode == $m
+            and .build.copy.asked == $a' "$ST_RS" >/dev/null ||
+            st_fail "copy-$mode-build: $(jq -c '{failed, copy:.build.copy}' "$ST_RS" 2>/dev/null)"
+        [ -d "$one/tree" ] || { st_fail "copy-$mode-build: no base"; continue; }
+        if is_subvol "$one/tree/gogo"; then [ "$want" = snapshot ] || st_fail "copy-$mode: a subvolume in the base"
+        else [ "$want" != snapshot ] || st_fail "copy-$mode: the base isn't subvolumes"; fi
+        before="$(st_tree_print "$one")"
+        st_reuse_run "copy-$mode-hit" "$base/copy-$mode-2" "$m" 0
+        jq -e --arg m "$want" '.ok and .build.reused and .build.copy.mode == $m' "$ST_RS" >/dev/null ||
+            st_fail "copy-$mode-hit: $(jq -c '{failed, copy:.build.copy}' "$ST_RS" 2>/dev/null)"
+        [ "$(st_tree_print "$one")" = "$before" ] || st_fail "copy-$mode-hit: the base changed"
+        if [ "$mode" = reflink ] && [ -n "$ST_HAVE_SNAP" ]; then
+            # The plain base, met by auto: made subvolumes, the same tree, then a launch on it.
+            unset GOGO_E2E_COPY
+            st_reuse_run "copy-convert" "$base/copy-convert" "$m" 0
+            jq -e '.ok and .build.reused and .build.copy.mode == "snapshot"
+                and (.build.copy.note | test("made subvolumes"))' "$ST_RS" >/dev/null ||
+                st_fail "copy-convert: $(jq -c '{failed, copy:.build.copy}' "$ST_RS" 2>/dev/null)"
+            if ! { is_subvol "$one/tree/gogo" && is_subvol "$one/tree/home" && is_subvol "$one/tree/xdg"; }; then
+                st_fail "copy-convert: the base's dirs aren't subvolumes"
+            fi
+            jq -e '.copy == "snapshot" and .converted' "$one/meta.json" >/dev/null || st_fail "copy-convert: meta.json says $(jq -c .copy "$one/meta.json")"
+            [ "$(st_tree_print "$one")" = "$before" ] || st_fail "copy-convert: the tree changed"
+            [ -z "$(find "$one" -maxdepth 1 -name '.tree-new-*')" ] || st_fail "copy-convert: the old tree is still there"
+        fi
+        "$SELF" cleanup --prune-installed all >/dev/null 2>&1 || st_fail "copy-$mode: cleanup --prune-installed all failed"
+        [ ! -e "$one" ] || st_fail "copy-$mode: prune left $one"
+    done
+    code=0
+    GOGO_E2E_COPY=bogus "$SELF" run self-test --manifest "$m" --reuse-install >/dev/null 2>&1 || code=$?
+    [ "$code" = 2 ] || st_fail "usage: GOGO_E2E_COPY=bogus: exit $code, want 2"
+    unset GOGO_E2E_COPY GOGO_E2E_INSTALLED_DIR
+}
+
+# Where snapshots pay: a tree of many small files, like a Wine prefix's, timed
+# in each mode this machine has. Logged, not checked: the numbers are the
+# disk's. (Cyberpunk 2077's base is 950 files, all large: every mode is
+# well under a second there, docs/linux-e2e.md.)
+st_copy_bench() { # self-test dir
+    local d="$1/copy-bench" n=20 i t0 out="" mode secs
+    mkdir -p "$d"
+    if [ -n "$ST_HAVE_SNAP" ]; then helper subvol create "$d/src"; else mkdir "$d/src"; fi
+    for i in $(seq "$n"); do
+        mkdir "$d/src/d$i"
+        (cd "$d/src/d$i" && seq 1000 | split -l 1 -a 4 - f)
+    done
+    for mode in copy reflink snapshot; do
+        case "$mode" in reflink) [ -n "$ST_HAVE_REFLINK" ] || continue ;; snapshot) [ -n "$ST_HAVE_SNAP" ] || continue ;; esac
+        sync
+        t0="$(date +%s.%N)"
+        case "$mode" in
+        copy) cp -a "$d/src" "$d/dst" ;;
+        reflink) cp -a --reflink=always "$d/src" "$d/dst" ;;
+        snapshot) helper subvol snapshot "$d/src" "$d/dst" ;;
+        esac
+        secs="$(awk -v a="$t0" -v b="$(date +%s.%N)" 'BEGIN { printf "%.2f", b - a }')"
+        out="$out $mode ${secs}s,"
+        rm -rf "$d/dst"
+    done
+    rm -rf "$d"
+    log "self-test: copying $((n * 1000)) small files:${out%,}"
 }
 
 # A live session's answer, checked: the command passes and jq's test holds.
@@ -1927,8 +2181,8 @@ st_live() { # self-test dir
     "$SELF" live "$ST_LID" stop >"$out/stdout" 2>>"$out/client.stderr" || code=$?
     st_assert_clean live "$out" "$code" 0
     summary="$(tail -n 1 "$out/stdout")"
-    jq -e '.ok and .live.lives == 2 and (.live.restores | length) == 1 and .live.checkpoints == ["red"]
-        and .tested_entry == null and (.checks | any(.name == "clean_exit" and .ok))' "$summary" >/dev/null ||
+    jq -e --arg m "$ST_COPY_AUTO" '.ok and .live.lives == 2 and (.live.restores | length) == 1 and .live.checkpoints == ["red"]
+        and .build.copy.mode == $m and .tested_entry == null and (.checks | any(.name == "clean_exit" and .ok))' "$summary" >/dev/null ||
         st_fail "live: summary: $(jq -c '{failed, live}' "$summary" 2>/dev/null)"
     [ "$(cat "$out/export.toml")" = "$(cat "$(jq -r .live.export "$summary")" 2>/dev/null)" ] ||
         st_fail "live: manifest.toml isn't the export"
@@ -2157,7 +2411,10 @@ cmd_self_test() {
     # 7. --reuse-install: build → base; a reused run on a copy of it; its write
     #    in neither the base nor the next run; a changed key builds again;
     #    a base that links out is refused; cleanup prunes.
+    st_copy_probe "$base"
     st_reuse "$base"
+    st_copy "$base"
+    st_copy_bench "$base"
 
     # 7b. A live session (#241): start, inputs, a checkpoint, a restore onto the
     #     rolled-back disk, the export (which a fresh run then passes), stop;
