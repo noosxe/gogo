@@ -1285,12 +1285,36 @@ live_override() { # manifest-json n-env env… args…
 
 live_registry() { lock_dir; LIVE_REG="$LOCK_REAL/live"; mkdir -p "$LIVE_REG"; }
 
+# A process's start time, in clock ticks since boot (/proc/PID/stat field 22):
+# with its pid, who it is. Fields after the ")" of comm, which may hold spaces.
+proc_start() { # pid
+    local s
+    s="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
+    s="${s##*) }"
+    # shellcheck disable=SC2086 # split into fields on purpose
+    set -- $s
+    [ -n "${20:-}" ] && printf '%s\n' "${20}"
+}
+
+# Whether the pid in a registry entry is still that session's supervisor: the
+# same start time, and its copy of this script serving __live-serve. A pid
+# alone isn't: after a SIGKILL, an OOM or a reboot the entry stays, and the
+# pid may be anyone's now (a browser, the compositor). No start: not ours.
+live_owner() { # pid start id
+    local pid="$1" start="$2" id="$3" cmd
+    case "$pid" in '' | *[!0-9]*) return 1 ;; esac
+    [ -n "$start" ] && [ "$(proc_start "$pid")" = "$start" ] || return 1
+    cmd="$(tr '\0' '\n' <"/proc/$pid/cmdline" 2>/dev/null)" || return 1
+    # bash, then its copy of the script (results/<id>/live/), then __live-serve.
+    [[ $'\n'"$cmd"$'\n' == *"/$id/live/linux-e2e.sh"$'\n__live-serve\n'* ]]
+}
+
 # The session's registry entry: who serves it and where it keeps things.
 live_register() {
     live_registry
     local tmp="$LIVE_REG/.$LIVE_ID.$$"
-    printf 'pid=%s\nrepo=%s\nresults=%s\ntools=%s\nrun=%s\ndeadline=%s\nidle=%s\n' \
-        "$$" "$REPO" "$LIVE_RESULTS" "$TOOLS" "${RUN:-}" "${LIVE_DEADLINE:-}" "$LIVE_IDLE" >"$tmp"
+    printf 'pid=%s\nstart=%s\nrepo=%s\nresults=%s\ntools=%s\nrun=%s\ndeadline=%s\nidle=%s\n' \
+        "$$" "$(proc_start $$)" "$REPO" "$LIVE_RESULTS" "$TOOLS" "${RUN:-}" "${LIVE_DEADLINE:-}" "$LIVE_IDLE" >"$tmp"
     mv -f "$tmp" "$LIVE_REG/$LIVE_ID"
 }
 
@@ -1452,10 +1476,11 @@ live_start() {
 }
 
 # The session named, from its registry entry; after it ended, from its results
-# (export, log and status still work). Sets L_PID, L_RESULTS, L_RUN, L_TOOLS.
+# (export, log and status still work). Sets L_PID (only while it's still the
+# session's supervisor: live_owner), L_START, L_ID, L_RESULTS, L_RUN, L_TOOLS.
 live_find() { # id-or-results-dir
     local id="$1" f k v
-    L_PID="" L_RESULTS="" L_RUN="" L_TOOLS="" L_REG=""
+    L_PID="" L_START="" L_RESULTS="" L_RUN="" L_TOOLS="" L_REG="" L_ID="${id%/}"; L_ID="${L_ID##*/}"
     if [ -d "$id/live" ]; then
         L_RESULTS="$(readlink -f "$id")"
     else
@@ -1465,7 +1490,9 @@ live_find() { # id-or-results-dir
         if [ -f "$f" ] && [ ! -L "$f" ]; then
             L_REG="$f"
             while IFS='=' read -r k v; do
-                case "$k" in pid) L_PID="$v" ;; results) L_RESULTS="$v" ;; run) L_RUN="$v" ;; tools) L_TOOLS="$v" ;; esac
+                case "$k" in
+                pid) L_PID="$v" ;; start) L_START="$v" ;; results) L_RESULTS="$v" ;; run) L_RUN="$v" ;; tools) L_TOOLS="$v" ;;
+                esac
             done <"$f"
         elif [ -d "$ROOT/results/$id/live" ]; then
             L_RESULTS="$ROOT/results/$id"
@@ -1476,21 +1503,21 @@ live_find() { # id-or-results-dir
     if [ -z "$L_TOOLS" ]; then resolve_tools; L_TOOLS="$TOOLS"; fi
     TOOLS="$L_TOOLS"
     use_tools
-    if [ -n "$L_PID" ] && ! kill -0 "$L_PID" 2>/dev/null; then L_PID=""; fi
+    [ -z "$L_PID" ] || live_owner "$L_PID" "$L_START" "$L_ID" || L_PID=""
 }
 
 live_list() {
     resolve_tools
     use_tools
     live_registry
-    local f k v pid results state
+    local f k v pid start results state
     for f in "$LIVE_REG"/*; do
         [ -f "$f" ] || continue
-        pid="" results=""
+        pid="" start="" results=""
         while IFS='=' read -r k v; do
-            case "$k" in pid) pid="$v" ;; results) results="$v" ;; esac
+            case "$k" in pid) pid="$v" ;; start) start="$v" ;; results) results="$v" ;; esac
         done <"$f"
-        if kill -0 "$pid" 2>/dev/null; then
+        if live_owner "$pid" "$start" "${f##*/}"; then
             state="$(jq -r '"\(.state): \(.detail)"' "$results/live/state.json" 2>/dev/null || echo '?')"
             printf '%s\t%s\n' "${f##*/}" "$state"
         else
@@ -1528,7 +1555,7 @@ cmd_live() {
     status)
         if [ "${1:-}" = --wait ]; then
             [ $# -eq 2 ] || usage
-            GOGO_E2E_LIVE_DIR="$dir" GOGO_E2E_LIVE_REG="$L_REG" helper live-wait "$state" "$2" "$L_PID" 1
+            GOGO_E2E_LIVE_DIR="$dir" GOGO_E2E_LIVE_REG="$L_REG" GOGO_E2E_LIVE_START="$L_START" helper live-wait "$state" "$2" "$L_PID" 1
             return
         fi
         [ $# -eq 0 ] || usage
@@ -1542,7 +1569,7 @@ cmd_live() {
         life="$(jq -r '.life // 1' "$state")"
         reply="$(GOGO_E2E_LIVE_DIR="$dir" helper live-call 60 restore "$name")" || { printf '%s\n' "$reply"; return 1; }
         log "restoring $name: the game closes, the disk rolls back, it relaunches and replays"
-        GOGO_E2E_LIVE_DIR="$dir" GOGO_E2E_LIVE_REG="$L_REG" helper live-wait "$state" "$wait" "$L_PID" "$((life + 1))"
+        GOGO_E2E_LIVE_DIR="$dir" GOGO_E2E_LIVE_REG="$L_REG" GOGO_E2E_LIVE_START="$L_START" helper live-wait "$state" "$wait" "$L_PID" "$((life + 1))"
         ;;
     stop)
         [ $# -eq 0 ] || usage
@@ -1567,13 +1594,13 @@ cmd_live() {
 live_stop() {
     local dir="${L_RUN:+$L_RUN/live}" i
     if [ -z "$dir" ] || [ ! -S "$dir/ctl.sock" ] || ! GOGO_E2E_LIVE_DIR="$dir" helper live-call 30 stop >/dev/null 2>&1; then
-        kill -TERM "$L_PID" 2>/dev/null || true
+        ! live_owner "$L_PID" "$L_START" "$L_ID" || kill -TERM "$L_PID" 2>/dev/null || true
     fi
     for i in $(seq $(((GRACE_SECS + 240) * 2))); do
-        kill -0 "$L_PID" 2>/dev/null || break
+        live_owner "$L_PID" "$L_START" "$L_ID" || break
         sleep 0.5
     done
-    if kill -0 "$L_PID" 2>/dev/null; then die "the session $L_PID is still up: cleanup --stop-live"; fi
+    if live_owner "$L_PID" "$L_START" "$L_ID"; then die "the session $L_PID is still up: cleanup --stop-live"; fi
     local summary="$L_RESULTS/summary.json"
     [ -s "$summary" ] || die "the session ended with no summary: $L_RESULTS/session.log"
     jq . "$summary"
@@ -1625,17 +1652,19 @@ live_log() { # [game|run|launch|sway|dxvk|vkd3d|proton] [--tail N]
 # doesn't answer while it says it's ready, is an orphan; with --stop-live,
 # every session is. An orphan gets TERM (its own teardown), then KILL.
 live_reap() { # all (1: --stop-live)
-    local all="$1" f k v pid results run deadline id stuck now left i
+    local all="$1" f k v pid start results run deadline id stuck now left i
     live_registry
     for f in "$LIVE_REG"/*; do
         [ -f "$f" ] && [ ! -L "$f" ] || continue
         id="${f##*/}"
-        pid="" results="" run="" deadline=""
+        pid="" start="" results="" run="" deadline=""
         while IFS='=' read -r k v; do
-            case "$k" in pid) pid="$v" ;; results) results="$v" ;; run) run="$v" ;; deadline) deadline="$v" ;; esac
+            case "$k" in
+            pid) pid="$v" ;; start) start="$v" ;; results) results="$v" ;; run) run="$v" ;; deadline) deadline="$v" ;;
+            esac
         done <"$f"
-        if ! kill -0 "$pid" 2>/dev/null; then
-            log "live session $id: its supervisor is gone; sweeping"
+        if ! live_owner "$pid" "$start" "$id"; then
+            log "live session $id: its supervisor is gone (pid ${pid:-?} isn't it); sweeping"
             left="$(RUN_ID="linux-e2e-$id" RUN="${run:-/nonexistent}" PREFIX="" RUN_PIDNS="" leftovers)"
             [ -z "$left" ] || while read -r k _; do kill -KILL "$k" 2>/dev/null || true; done <<<"$left"
             rm -f "${f:?}"
@@ -1656,9 +1685,10 @@ live_reap() { # all (1: --stop-live)
             continue
         fi
         log "live session $id: $stuck: stopping it"
-        kill -TERM "$pid" 2>/dev/null || true
-        for i in $(seq $(((GRACE_SECS + 120) * 2))); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
-        if kill -0 "$pid" 2>/dev/null; then
+        # Each signal only while the pid is still it.
+        ! live_owner "$pid" "$start" "$id" || kill -TERM "$pid" 2>/dev/null || true
+        for i in $(seq $(((GRACE_SECS + 120) * 2))); do live_owner "$pid" "$start" "$id" || break; sleep 0.5; done
+        if live_owner "$pid" "$start" "$id"; then
             log "live session $id: still up: KILL"
             kill -KILL "$pid" 2>/dev/null || true
             sleep 1
@@ -1927,6 +1957,23 @@ st_live() { # self-test dir
     "$SELF" cleanup 2>>"$out/cleanup.stderr" >/dev/null || st_fail "live-kill: cleanup failed: $(cat "$out/cleanup.stderr")"
     [ ! -e "$GOGO_E2E_LOCK_DIR/live/$ST_LID" ] || st_fail "live-kill: cleanup left its registry entry"
     [ ! -e "$run" ] || st_fail "live-kill: cleanup left $run"
+
+    # A registry entry outlives its supervisor (a SIGKILL, an OOM, a reboot),
+    # and its pid may be anyone's later: a live process that isn't the
+    # session, past the deadline, is left alone, and the entry cleared.
+    local how fake sl
+    for how in "" --stop-live; do
+        sleep 300 &
+        sl=$!
+        fake="self-test-$((RANDOM))-stale"
+        printf 'pid=%s\nstart=%s\nrepo=/gone\nresults=%s\ntools=%s\nrun=%s\ndeadline=1\nidle=900\n' \
+            "$sl" "$(proc_start "$sl")" "$base/$fake" "$TOOLS" "$base/$fake-run" >"$GOGO_E2E_LOCK_DIR/live/$fake"
+        "$SELF" cleanup $how >/dev/null 2>>"$base/stale.stderr" || st_fail "live-stale$how: cleanup failed: $(cat "$base/stale.stderr")"
+        kill -0 "$sl" 2>/dev/null || st_fail "live-stale$how: cleanup signalled pid $sl, not a session's"
+        [ ! -e "$GOGO_E2E_LOCK_DIR/live/$fake" ] || st_fail "live-stale$how: cleanup left the stale entry"
+        kill "$sl" 2>/dev/null || true
+        wait "$sl" 2>/dev/null || true
+    done
 
     # Usage: live options belong to live start; overrides to a game.
     code=0
