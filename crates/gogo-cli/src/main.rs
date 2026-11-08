@@ -3462,6 +3462,12 @@ fn linux_app_sub(sub: crate::cli::LinuxAppSub) -> Result<i32, AppError> {
             json,
             args,
         } => linux_app_args(&gogid, clear, json, args),
+        crate::cli::LinuxAppSub::Wrapper {
+            gogid,
+            clear,
+            json,
+            words,
+        } => linux_app_wrapper(&gogid, clear, json, words),
         crate::cli::LinuxAppSub::Compat { gogid, json } => {
             let r = gogo::linuxapp::manage::compat(&gogid)?;
             if json {
@@ -3701,6 +3707,77 @@ fn linux_app_env(cmd: crate::cli::LinuxEnvCmd) -> Result<i32, AppError> {
 }
 
 #[cfg(target_os = "linux")]
+/// `gogo linux-app wrapper <gogid> [-- <words…> | --clear]`.
+fn linux_app_wrapper(
+    gogid: &str,
+    clear: bool,
+    json: bool,
+    words: Vec<String>,
+) -> Result<i32, AppError> {
+    use gogo::linuxapp::envargs;
+    if clear || !words.is_empty() {
+        if !clear && let Err(why) = envargs::check_wrapper(&words) {
+            eprintln!("gogo: {gogid}: {why}");
+            return Ok(cli::exit::USAGE);
+        }
+        let new = (!clear).then_some(words);
+        print_edit(&envargs::set_wrapper(gogid, new)?, json);
+        return Ok(cli::exit::OK);
+    }
+    let r = envargs::wrapper_report(gogid)?;
+    if json {
+        println!("{}", serde_json::json!(r));
+        return Ok(cli::exit::OK);
+    }
+    for w in &r.warnings {
+        eprintln!("warning: {w}");
+    }
+    print!("{}", wrapper_text(&r));
+    Ok(cli::exit::OK)
+}
+
+#[cfg(target_os = "linux")]
+/// A wrapper's line in `wrapper` and `env list`.
+fn wrapper_line(v: &gogo::linuxapp::envargs::WrapperView) -> String {
+    use gogo::linuxapp::envargs::shell_words;
+    let mut out = match v.layer {
+        Some(l) => format!("wrapper: {}  ({})", shell_words(&v.words), l.describe()),
+        None => "wrapper: (none)".to_string(),
+    };
+    if v.pending {
+        out.push_str(&if v.applied.is_empty() {
+            "\npending: the next launch's setup applies it".to_string()
+        } else {
+            format!(
+                "\npending: launch.conf still has {}; the next launch's setup writes the new one",
+                shell_words(&v.applied)
+            )
+        });
+    }
+    out.push('\n');
+    out
+}
+
+#[cfg(target_os = "linux")]
+fn wrapper_text(r: &gogo::linuxapp::envargs::WrapperReport) -> String {
+    use std::fmt::Write as _;
+    let mut out = match &r.wrapper {
+        Some(v) => wrapper_line(v),
+        None => format!(
+            "wrapper: (none)  (`gogo linux-app wrapper {} -- gamescope -f --` sets one)\n",
+            r.gogid
+        ),
+    };
+    let _ = writeln!(
+        out,
+        "it runs outside umu-run with the environment launch.sh starts with; the game's env \
+         applies inside it"
+    );
+    let _ = writeln!(out, "your override file: {}", r.user_file.display());
+    out
+}
+
+#[cfg(target_os = "linux")]
 /// `gogo linux-app args <gogid> [-- <args…> | --clear]`.
 fn linux_app_args(
     gogid: &str,
@@ -3765,6 +3842,9 @@ fn env_list_text(r: &gogo::linuxapp::envargs::EnvReport) -> String {
     }
     if !r.built {
         out.push_str("(not built yet: the renderer's and the launcher's values show once it is)\n");
+    }
+    if let Some(v) = &r.wrapper {
+        out.push_str(&wrapper_line(v));
     }
     let _ = writeln!(
         out,
@@ -5203,7 +5283,7 @@ mod tests {
 
 #[cfg(all(test, target_os = "linux"))]
 mod envargs_output_tests {
-    use super::{args_text, env_catalogue_text, env_describe_text, env_list_text};
+    use super::{args_text, env_catalogue_text, env_describe_text, env_list_text, wrapper_text};
     use gogo::linuxapp::catalogue::table::{Component, Kind, Topic};
     use gogo::linuxapp::catalogue::{
         Applies, BuildSummary, CatalogueReport, Entry, InBuild, Source,
@@ -5413,6 +5493,7 @@ mod envargs_output_tests {
                 ),
                 line("STORE", "gog", EnvSource::Launcher, EnvState::Applies),
             ],
+            wrapper: None,
             warnings: vec![],
         };
         assert_eq!(
@@ -5424,6 +5505,57 @@ mod envargs_output_tests {
              \x20 over PROTON_SET_GAME_DRIVE=0  (gogo default)\n\
              STORE=gog                (launcher, always)\n\
              your override file: /d/compat/1423049311.toml (`gogo linux-app env set 1423049311 KEY=VALUE`)\n"
+        );
+    }
+
+    #[test]
+    fn the_wrapper_is_shown_with_what_applies_it() {
+        use gogo::linuxapp::envargs::{WrapperReport, WrapperView};
+        let view = |words: &[&str], applied: &[&str], pending| WrapperView {
+            words: words.iter().map(|s| s.to_string()).collect(),
+            layer: (!words.is_empty()).then_some(Layer::User),
+            applied: applied.iter().map(|s| s.to_string()).collect(),
+            pending,
+        };
+        let report = |wrapper| WrapperReport {
+            gogid: "1423049311".into(),
+            user_file: "/d/compat/1423049311.toml".into(),
+            built: true,
+            wrapper,
+            warnings: vec![],
+        };
+        let tail = "it runs outside umu-run with the environment launch.sh starts with; the \
+                    game's env applies inside it\n\
+                    your override file: /d/compat/1423049311.toml\n";
+        assert_eq!(
+            wrapper_text(&report(None)),
+            format!(
+                "wrapper: (none)  (`gogo linux-app wrapper 1423049311 -- gamescope -f --` sets \
+                 one)\n{tail}"
+            )
+        );
+        assert_eq!(
+            wrapper_text(&report(Some(view(
+                &["gamescope", "-W", "a b", "--"],
+                &["gamescope", "-W", "a b", "--"],
+                false
+            )))),
+            format!("wrapper: gamescope -W 'a b' --  (L4 user override)\n{tail}")
+        );
+        assert_eq!(
+            wrapper_text(&report(Some(view(&["gamemoderun"], &[], true)))),
+            format!(
+                "wrapper: gamemoderun  (L4 user override)\n\
+                 pending: the next launch's setup applies it\n{tail}"
+            )
+        );
+        assert_eq!(
+            wrapper_text(&report(Some(view(&[], &["gamemoderun"], true)))),
+            format!(
+                "wrapper: (none)\n\
+                 pending: launch.conf still has gamemoderun; the next launch's setup writes the \
+                 new one\n{tail}"
+            )
         );
     }
 

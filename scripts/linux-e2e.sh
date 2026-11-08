@@ -1313,12 +1313,13 @@ cmd_run() {
         launch="$(jq -cn --arg l "$GOGO_HOME_DIR/games/$GOGID/launch.sh" '[$l]')"
         launch_cwd="$GOGO_HOME_DIR/games/$GOGID"
         doctor="$(jq -cn --arg g "$GOGO" --arg i "$GOGID" '[$g,"linux-app","doctor",$i,"--json"]')"
-        # The manifest's [override] (#234), written by gogo itself before the launch.
+        # The manifest's [override] (#234, #271), written by gogo itself before the launch.
         pre_launch="$(jq -c --arg g "$GOGO" --arg i "$GOGID" '.override as $o | [
             (if ($o.env | length) > 0
              then [$g,"linux-app","env","set",$i] + ($o.env | to_entries | map("\(.key)=\(.value)"))
              else empty end),
-            (if $o.extra_args != null then [$g,"linux-app","args",$i,"--"] + $o.extra_args else empty end)
+            (if $o.extra_args != null then [$g,"linux-app","args",$i,"--"] + $o.extra_args else empty end),
+            (if $o.wrapper != null then [$g,"linux-app","wrapper",$i,"--"] + $o.wrapper else empty end)
         ]' <<<"$MANIFEST_JSON")"
         game_log="$GOGO_HOME_DIR/logs/$GOGID/latest.log"
     else

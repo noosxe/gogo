@@ -319,6 +319,9 @@ pub struct LaunchConf {
     pub workdir: String,
     pub exe: String,
     pub args: Vec<String>,
+    /// The command the game runs under, one word each (#271); empty: none,
+    /// and no `WRAPPER=` line.
+    pub wrapper: Vec<String>,
     /// gogo's env, the renderer switches and `PROTONFIXES_DISABLE` included.
     pub env: BTreeMap<String, String>,
     pub dll_overrides: BTreeMap<String, String>,
@@ -353,6 +356,9 @@ impl LaunchConf {
         kv("WORKDIR", sh_quote(&self.workdir));
         kv("EXE", sh_quote(&self.exe));
         kv("ARGS", sh_array(self.args.iter().cloned()));
+        if !self.wrapper.is_empty() {
+            kv("WRAPPER", sh_array(self.wrapper.iter().cloned()));
+        }
         kv(
             "ENV",
             sh_array(self.env.iter().map(|(k, v)| format!("{k}={v}"))),
@@ -421,6 +427,7 @@ mod tests {
                 "two words".into(),
                 "$HOME \"q\" `x` \\".into(),
             ],
+            wrapper: vec![],
             env: [
                 ("PROTON_USE_D7VK".to_string(), "1".to_string()),
                 ("ODD".to_string(), "a 'b' $X".to_string()),
@@ -439,6 +446,28 @@ mod tests {
     fn launch_conf_matches_the_golden_file() {
         let golden = include_str!("../../tests/fixtures/linuxapp/launch.conf.golden");
         assert_eq!(conf().render(), golden);
+    }
+
+    /// `WRAPPER=` only with a wrapper: every word as typed, right after `ARGS`.
+    #[test]
+    fn launch_conf_with_a_wrapper_matches_its_golden_file() {
+        let mut c = conf();
+        c.wrapper = [
+            "gamescope",
+            "-W",
+            "2560",
+            "it's",
+            "$HOME \"q\" `x` \\",
+            "--",
+        ]
+        .map(String::from)
+        .to_vec();
+        let text = c.render();
+        assert_eq!(
+            text,
+            include_str!("../../tests/fixtures/linuxapp/launch-wrapper.conf.golden")
+        );
+        assert_eq!(ConfValues::parse(&text).arrays["WRAPPER"], c.wrapper);
     }
 
     #[test]

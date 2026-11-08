@@ -415,6 +415,26 @@ pub enum LinuxAppSub {
         #[arg(last = true, value_name = "ARGS", allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// The command a game runs under, like gamescope or gamemoderun: show
+    /// it, set it (`-- <program> <words…>`, kept in the override file as
+    /// `wrapper`; the next launch applies it), or `--clear` it.
+    Wrapper {
+        /// GOG product id.
+        #[arg(value_name = "GOGID")]
+        gogid: String,
+        /// Run the game without your wrapper.
+        #[arg(long, conflicts_with = "words")]
+        clear: bool,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+        /// The wrapper, after `--`, one word per argument with no shell in
+        /// between; the game's command follows its last word
+        /// (`-- gamescope -f --`, `-- gamemoderun`). It replaces the one set
+        /// before.
+        #[arg(last = true, value_name = "WORDS", allow_hyphen_values = true)]
+        words: Vec<String>,
+    },
 }
 
 #[cfg(target_os = "linux")]
@@ -1373,6 +1393,34 @@ mod tests {
         );
         // Without `--`, a dash arg is gogo's flag, not the game's.
         assert!(Cli::try_parse_from(["gogo", "linux-app", "args", "1", "-x"]).is_err());
+        // A wrapper's own `--` is one of its words.
+        let cli = Cli::try_parse_from([
+            "gogo",
+            "linux-app",
+            "wrapper",
+            "1",
+            "--",
+            "gamescope",
+            "-f",
+            "--",
+        ])
+        .unwrap();
+        let Command::LinuxApp {
+            sub: Some(LinuxAppSub::Wrapper { words, clear, .. }),
+            ..
+        } = cli.command
+        else {
+            panic!("expected linux-app wrapper");
+        };
+        assert_eq!(words, ["gamescope", "-f", "--"]);
+        assert!(!clear);
+        assert!(Cli::try_parse_from(["gogo", "linux-app", "wrapper", "1", "--clear"]).is_ok());
+        assert!(Cli::try_parse_from(["gogo", "linux-app", "wrapper", "1"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["gogo", "linux-app", "wrapper", "1", "--clear", "--", "x"])
+                .is_err()
+        );
+        assert!(Cli::try_parse_from(["gogo", "linux-app", "wrapper", "1", "gamescope"]).is_err());
         let cli = Cli::try_parse_from([
             "gogo",
             "linux-app",

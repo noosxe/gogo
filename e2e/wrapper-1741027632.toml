@@ -1,0 +1,28 @@
+# #271's wiring on a real game, for design 18 §7.8: a wrapper from the harness's
+# tools, `env`, so a run needs nothing else. It ends on SIGTERM, so the close
+# has to reach the game through the wrapper. Not the game's own manifest
+# (e2e/1741027632.toml): pass this one with --manifest. For real gamescope, a
+# copy under target/ with a store path (docs/linux-e2e.md).
+title = "Right and Down"
+gogid = 1741027632
+
+[env]
+DXVK_LOG_LEVEL = "info"
+
+[override]
+wrapper = ["env", "GOGO_E2E_WRAPPED=from-wrapper"]
+
+[window]
+wait_secs = 180
+resolution = "1280x800"
+min_fill = { w = 95, h = 95 }
+
+[exit]
+how = "signal"
+wait_secs = 60
+
+[[step]]
+wait = 45
+
+[[step]]
+screenshot = "menu"

@@ -148,8 +148,6 @@ pub struct Spec {
     pub gpus: &'static [Vendor],
     /// The command that must be on `PATH` for it to do anything.
     pub needs: Option<&'static str>,
-    /// A reason it can't work on gogo's launcher whatever's installed.
-    pub blocked: Option<&'static str>,
     /// The string to look for in the build, when it isn't the name.
     pub probe: Option<&'static str>,
     /// [`REVIEWED_FOR`] doesn't have it: stale advice worth an answer, or newer
@@ -176,7 +174,6 @@ impl Spec {
             renderers: &[],
             gpus: &[],
             needs: None,
-            blocked: None,
             probe: None,
             absent: false,
         }
@@ -191,10 +188,6 @@ impl Spec {
     }
     const fn needs(mut self, command: &'static str) -> Spec {
         self.needs = Some(command);
-        self
-    }
-    const fn blocked(mut self, why: &'static str) -> Spec {
-        self.blocked = Some(why);
         self
     }
     const fn probe(mut self, s: &'static str) -> Spec {
@@ -311,9 +304,6 @@ pub const PLUMBING: &[&str] = &[
     "WINE_MOVE_HACK",
     "XDG_CONFIG_HOME",
 ];
-
-/// The launcher has no wrapper setting yet.
-const NO_WRAPPER: &str = "gogo's launcher can't wrap the game in a command yet (#271)";
 
 /// The table: sorted by component and topic when shown, not here.
 pub const TABLE: &[Spec] = &[
@@ -1827,8 +1817,7 @@ pub const TABLE: &[Spec] = &[
         "not used",
         "GameMode's wrapper: asks the daemon for performance settings while the game runs.",
     )
-    .needs("gamemoderun")
-    .blocked(NO_WRAPPER),
+    .needs("gamemoderun"),
     Spec::new(
         "gamescope",
         C::Wrappers,
@@ -1837,6 +1826,5 @@ pub const TABLE: &[Spec] = &[
         "not used",
         "Valve's micro-compositor: its own resolution, scaling and frame limit for one game.",
     )
-    .needs("gamescope")
-    .blocked(NO_WRAPPER),
+    .needs("gamescope"),
 ];

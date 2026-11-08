@@ -223,6 +223,12 @@ pub struct CompatEntry {
     /// by a higher layer; `gogo linux-app args` writes it in L4.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<Vec<String>>,
+    /// `[platforms.linux]` only: the command the launcher runs the game
+    /// under, in argv form (`["gamescope", "-f", "--"]`; #271, design 18
+    /// §7.8). It goes outside umu-run. Replaced whole by a higher layer;
+    /// `gogo linux-app wrapper` writes it in L4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrapper: Option<Vec<String>>,
     /// Provenance: `gogo-vm`, `umu-protonfixes:<file>@<sha>`, …
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
@@ -293,11 +299,12 @@ const PLATFORM_KEYS: &[&str] = &[
     "lanes",
     "protonfixes",
     "extra_args",
+    "wrapper",
 ];
 
 /// [`PLATFORM_KEYS`] only the Linux lane applies: under `[platforms.macos]`
 /// they warn and are ignored.
-const LINUX_ONLY_KEYS: &[&str] = &["protonfixes", "extra_args"];
+const LINUX_ONLY_KEYS: &[&str] = &["protonfixes", "extra_args", "wrapper"];
 
 /// The OS-specific keys the schema had at the top level before
 /// `[platforms.<os>]` (#166). In an L4 file they still read as
@@ -536,6 +543,7 @@ fn overlay(base: &mut CompatEntry, over: CompatEntry) {
         lanes,
         protonfixes,
         extra_args,
+        wrapper,
         source,
     } = over;
     take(&mut base.title, title);
@@ -562,6 +570,7 @@ fn overlay(base: &mut CompatEntry, over: CompatEntry) {
     base.lanes.extend(lanes);
     take(&mut base.protonfixes, protonfixes);
     take(&mut base.extra_args, extra_args);
+    take(&mut base.wrapper, wrapper);
     take(&mut base.source, source);
 }
 
@@ -822,13 +831,15 @@ pub enum UserEdit {
     UnsetEnv(String),
     /// `extra_args = [...]`; `None` drops it.
     ExtraArgs(Option<Vec<String>>),
+    /// `wrapper = [...]`; `None` drops it.
+    Wrapper(Option<Vec<String>>),
 }
 
 /// Apply `edits` to the L4 file for `gogid` under `[platforms.<os>]`,
 /// keeping everything else (comments included). The `env` table is made as
 /// `[platforms.<os>.env]` when missing and removed once empty. Returns the
-/// values that changed for `os` (`env.<KEY>`, `extra_args` as a debug-quoted
-/// list); no change, no write. Key names aren't checked here: the caller
+/// values that changed for `os` (`env.<KEY>`; `extra_args` and `wrapper` as a
+/// debug-quoted list); no change, no write. Key names aren't checked here: the caller
 /// knows which ones it allows.
 pub fn edit_user_platform_for(
     gogid: &str,
@@ -907,25 +918,29 @@ fn edit_user_platform_at(
                     new,
                 });
             }
-            UserEdit::ExtraArgs(new) => {
-                if now.extra_args == *new {
+            UserEdit::ExtraArgs(new) | UserEdit::Wrapper(new) => {
+                let (key, held) = match edit {
+                    UserEdit::ExtraArgs(_) => ("extra_args", &mut now.extra_args),
+                    _ => ("wrapper", &mut now.wrapper),
+                };
+                if *held == *new {
                     continue;
                 }
                 match new {
                     Some(a) => {
                         let arr: toml_edit::Array = a.iter().map(String::as_str).collect();
-                        t.insert("extra_args", toml_edit::value(arr));
+                        t.insert(key, toml_edit::value(arr));
                     }
                     None => {
-                        t.remove("extra_args");
+                        t.remove(key);
                     }
                 }
                 changes.push(Change {
-                    key: "extra_args".into(),
-                    old: args_text(&now.extra_args),
+                    key: key.into(),
+                    old: args_text(held),
                     new: args_text(new),
                 });
-                now.extra_args = new.clone();
+                held.clone_from(new);
             }
         }
     }
@@ -1070,6 +1085,9 @@ pub struct Effective {
     /// Linux only: appended after the effective `args` at launch (#234).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra_args: Option<Sourced<Vec<String>>>,
+    /// Linux only: what the launcher runs the game under (#271).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wrapper: Option<Sourced<Vec<String>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<Sourced<String>>,
 }
@@ -1147,6 +1165,7 @@ pub fn merge(layers: &[(Layer, &CompatEntry)]) -> Effective {
         take(&mut out.notes, &e.notes, layer);
         take(&mut out.protonfixes, &e.protonfixes, layer);
         take(&mut out.extra_args, &e.extra_args, layer);
+        take(&mut out.wrapper, &e.wrapper, layer);
         take(&mut out.source, &e.source, layer);
     }
     // `protonfixes = false` turns umu-protonfixes off for the game (design
@@ -1226,6 +1245,7 @@ impl Effective {
         line(&mut out, "registry", &self.registry);
         line(&mut out, "args", &self.args);
         line(&mut out, "extra_args", &self.extra_args);
+        line(&mut out, "wrapper", &self.wrapper);
         line(&mut out, "variant", &self.variant);
         line(&mut out, "replace_command", &self.replace_command);
         line(&mut out, "status", &self.status);
@@ -2345,6 +2365,65 @@ protonfixes = false
             std::fs::read_to_string(&fresh).unwrap(),
             "[platforms.linux.env]\nPROTON_ENABLE_NVAPI = \"1\"\n"
         );
+    }
+
+    #[test]
+    fn wrapper_is_linux_only_replaced_by_the_higher_layer_and_edited_whole() {
+        let p = parse(
+            "[platforms.macos]\nwrapper = [\"x\"]\n",
+            Os::Macos,
+            Layer::User,
+        )
+        .unwrap();
+        assert_eq!(p.entry.wrapper, None);
+        assert_eq!(
+            p.warnings,
+            ["`platforms.macos.wrapper` is Linux only: ignored"]
+        );
+        let at = |raw: &str, layer| parse(raw, Os::Linux, layer).unwrap().entry;
+        let eff = merge(&[
+            (
+                Layer::Db,
+                &at(
+                    "[platforms.linux]\nwrapper = [\"gamemoderun\"]\n",
+                    Layer::Db,
+                ),
+            ),
+            (
+                Layer::User,
+                &at(
+                    "[platforms.linux]\nwrapper = [\"gamescope\", \"--\"]\n",
+                    Layer::User,
+                ),
+            ),
+        ]);
+        let w = eff.wrapper.unwrap();
+        assert_eq!(w.value, ["gamescope", "--"]);
+        assert_eq!(w.layer, Layer::User);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("1.toml");
+        std::fs::write(&path, "# mine\n[platforms.linux]\nextra_args = [\"-a\"]\n").unwrap();
+        let words = vec!["gamescope".to_string(), "-f".into(), "--".into()];
+        let edit = UserEdit::Wrapper(Some(words.clone()));
+        let c = edit_user_platform_at(&path, std::slice::from_ref(&edit), Os::Linux).unwrap();
+        assert_eq!(c[0].key, "wrapper");
+        assert_eq!(c[0].old, None);
+        assert_eq!(c[0].new.as_deref(), Some(r#"["gamescope", "-f", "--"]"#));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# mine"), "{text}");
+        assert!(text.contains("extra_args"), "{text}");
+        let linux = parse(&text, Os::Linux, Layer::User).unwrap().entry;
+        assert_eq!(linux.wrapper.as_deref(), Some(words.as_slice()));
+        // The same value again: no change, no write.
+        assert!(
+            edit_user_platform_at(&path, &[edit], Os::Linux)
+                .unwrap()
+                .is_empty()
+        );
+        let c = edit_user_platform_at(&path, &[UserEdit::Wrapper(None)], Os::Linux).unwrap();
+        assert_eq!(c[0].new, None);
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("wrapper"));
     }
 
     #[test]

@@ -210,6 +210,7 @@ fn env_of(lines: Vec<EnvLine>) -> EnvReport {
         user_file: "/d/compat/1423049311.toml".into(),
         built: true,
         lines,
+        wrapper: None,
         warnings: vec![],
     }
 }
@@ -326,18 +327,18 @@ fn applicability_follows_renderer_gpu_and_tools() {
         Applies::Unknown { .. }
     ));
 
-    // A tool: on PATH or not. The launcher's limit beats being installed.
+    // A tool: on PATH or not.
     assert!(yes(&nv, "MANGOHUD"));
     assert_eq!(
         nv.find("gamescope").unwrap().applies,
         Applies::No {
-            why: table::TABLE
-                .iter()
-                .find(|s| s.name == "gamescope")
-                .unwrap()
-                .blocked
-                .unwrap()
-                .into()
+            why: "`gamescope` isn't on PATH".into()
+        }
+    );
+    assert_eq!(
+        nv.find("gamemoderun").unwrap().applies,
+        Applies::No {
+            why: "`gamemoderun` isn't on PATH".into()
         }
     );
 }
@@ -504,7 +505,14 @@ fn set_with_names_the_right_variable_or_refuses() {
         w("dxgi.maxFrameRate").unwrap(),
         "gogo linux-app env set 1 DXVK_CONFIG='dxgi.maxFrameRate=<value>' (`;` between keys: keep keys already there)"
     );
-    assert!(w("gamescope").is_err());
+    assert_eq!(
+        w("gamescope").unwrap(),
+        "gogo linux-app wrapper 1 -- gamescope <options> -- (it replaces any wrapper set before)"
+    );
+    assert_eq!(
+        w("gamemoderun").unwrap(),
+        "gogo linux-app wrapper 1 -- gamemoderun (it replaces any wrapper set before)"
+    );
     let g = report_of(
         vec![line(
             "WINEPREFIX",

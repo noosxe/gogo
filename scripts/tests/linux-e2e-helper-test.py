@@ -238,15 +238,18 @@ class Manifest(unittest.TestCase):
         )
         self.assertEqual(
             m["override"],
-            {"env": {"DXVK_HUD": "fps"}, "extra_args": ["--launcher-skip", "a b"]},
+            {"env": {"DXVK_HUD": "fps"}, "extra_args": ["--launcher-skip", "a b"], "wrapper": None},
         )
         m = helper.parse_manifest(MINIMAL)
-        self.assertEqual(m["override"], {"env": {}, "extra_args": None})
+        self.assertEqual(m["override"], {"env": {}, "extra_args": None, "wrapper": None})
         step = "[[step]]\nwait = 1\n"
         for bad in (
             'gogid = 1\n[override]\nargs = ["-x"]\n',
             'gogid = 1\n[override]\nextra_args = []\n',
             'gogid = 1\n[override]\nextra_args = "-x"\n',
+            'gogid = 1\n[override]\nwrapper = []\n',
+            'gogid = 1\n[override]\nwrapper = "gamescope --"\n',
+            'command = ["x"]\n[override]\nwrapper = ["env"]\n',
             'gogid = 1\n[override.env]\n"A-B" = "1"\n',
             'gogid = 1\n[override.env]\nA = 1\n',
             'command = ["x"]\n[override]\nextra_args = ["-x"]\n',
@@ -1034,7 +1037,7 @@ RECT = LiveSteps.RECT
 def live_session(path, **more):
     manifest = helper.parse_manifest(
         "gogid = 7\ntitle = \"Seven\"\n[window]\nresolution = \"800x600\"\n"
-        "[override]\nextra_args = [\"-skip\"]\n[override.env]\nA = \"1\"\n",
+        "[override]\nextra_args = [\"-skip\"]\nwrapper = [\"env\", \"B=1\"]\n[override.env]\nA = \"1\"\n",
         live=True,
     )
     session = {
@@ -1071,6 +1074,7 @@ class LiveExport(unittest.TestCase):
             shot("small", since="same", change=30.0, fill=50.0),    # no input between
         ]))
         self.assertIn('extra_args = ["-skip"]', text)
+        self.assertIn('wrapper = ["env", "B=1"]', text)
         self.assertIn("# checkpoint 'agreed'", text)
         self.assertIn('how = "signal"', text)
         self.assertEqual(self.steps(text), [
@@ -1087,7 +1091,9 @@ class LiveExport(unittest.TestCase):
             {"screenshot": "small", "min_fill": False},
         ])
         m = helper.parse_manifest(text)
-        self.assertEqual(m["override"], {"env": {"A": "1"}, "extra_args": ["-skip"]})
+        self.assertEqual(
+            m["override"], {"env": {"A": "1"}, "extra_args": ["-skip"], "wrapper": ["env", "B=1"]}
+        )
         self.assertEqual((m["window"]["width"], m["window"]["height"]), (800, 600))
 
     def test_press_until_exports_as_it_was_given(self):

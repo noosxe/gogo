@@ -763,6 +763,22 @@ pub fn setup(
             .unwrap_or_else(|| w.to_string())
     };
     let [(_, umu_python), (_, _)] = umu_run.launch_conf();
+    // A wrapper hand-written into the file and not one the launcher can run:
+    // the game runs without it, and `doctor` names it too.
+    let wrapper = match &fx.effective.wrapper {
+        Some(w) => match super::envargs::check_wrapper(&w.value) {
+            Ok(_) => w.value.clone(),
+            Err(why) => {
+                warnings.push(format!(
+                    "wrapper {:?} in the {}: {why}; running the game without it",
+                    w.value,
+                    w.layer.describe()
+                ));
+                Vec::new()
+            }
+        },
+        None => Vec::new(),
+    };
     let conf = LaunchConf {
         gogid: gogid.to_string(),
         title: eff.title.clone(),
@@ -778,6 +794,7 @@ pub fn setup(
         workdir: unix(&eff.workdir),
         exe: unix(&eff.exe),
         args: super::envargs::launch_args(&eff.args, &fx.effective),
+        wrapper,
         env: eff.env.clone(),
         dll_overrides: eff.dll_overrides.clone(),
         renderer: rplan.renderer.clone(),

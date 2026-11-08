@@ -399,12 +399,13 @@ def parse_manifest(text, live=False):
     if not isinstance(env, dict) or not all(isinstance(v, str) for v in env.values()):
         raise ManifestError("env: must be a table of strings")
 
-    # Written into the game's override file through gogo (`linux-app env set`
-    # and `args`) in this run's scratch, right before the launch (#234).
+    # Written into the game's override file through gogo (`linux-app env set`,
+    # `args` and `wrapper`) in this run's scratch, right before the launch
+    # (#234, #271).
     override = raw.get("override", {})
     if not isinstance(override, dict):
         raise ManifestError("override: must be a table")
-    _only(override, ("env", "extra_args"), "override")
+    _only(override, ("env", "extra_args", "wrapper"), "override")
     if override and gogid is None:
         raise ManifestError("override is for a game (gogid), not a command")
     o_env = override.get("env", {})
@@ -418,6 +419,13 @@ def parse_manifest(text, live=False):
         not isinstance(o_args, list) or not o_args or not all(isinstance(a, str) for a in o_args)
     ):
         raise ManifestError("override.extra_args: a non-empty list of strings")
+    o_wrapper = override.get("wrapper")
+    if o_wrapper is not None and (
+        not isinstance(o_wrapper, list)
+        or not o_wrapper
+        or not all(isinstance(a, str) for a in o_wrapper)
+    ):
+        raise ManifestError("override.wrapper: a non-empty list of strings")
 
     steps_raw = raw.get("step", [])
     if not isinstance(steps_raw, list) or not (steps_raw or live):
@@ -445,7 +453,7 @@ def parse_manifest(text, live=False):
             "code": int(_number(exit_.get("code", 0), "exit.code")),
         },
         "env": env,
-        "override": {"env": o_env, "extra_args": o_args},
+        "override": {"env": o_env, "extra_args": o_args, "wrapper": o_wrapper},
         "steps": steps,
     }
 
@@ -3762,10 +3770,12 @@ def live_export(session):
     if m.get("env"):
         out += ["", "[env]"] + [f"{k} = {_toml(v)}" for k, v in m["env"].items()]
     o = m.get("override") or {}
-    if o.get("env") or o.get("extra_args"):
+    if o.get("env") or o.get("extra_args") or o.get("wrapper"):
         out += ["", "[override]"]
         if o.get("extra_args"):
             out.append(f"extra_args = {_toml(o['extra_args'])}")
+        if o.get("wrapper"):
+            out.append(f"wrapper = {_toml(o['wrapper'])}")
         if o.get("env"):
             out += ["[override.env]"] + [f"{k} = {_toml(v)}" for k, v in o["env"].items()]
     # Quit from its own menu: it exits by itself, which the export keeps.
