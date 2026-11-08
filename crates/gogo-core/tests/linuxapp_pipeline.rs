@@ -2189,6 +2189,22 @@ fn fake_python(w: &World, version: &str) -> PathBuf {
 }
 
 #[test]
+fn one_doctor_report_scans_the_install_once() {
+    let w = World::launcher_built("doctor-scan-once", false);
+    let host = doctor_host(&w, &[("radeon.x86_64", 2), ("radeon.i686", 1)]);
+    let before = gogo::linuxapp::manage::scans_on_this_thread();
+    let r = doctor(&w, &host);
+    assert!(r.findings.iter().any(|f| f.check == "compat"));
+    assert!(r.findings.iter().any(|f| f.check == "launch"));
+    assert!(r.findings.iter().any(|f| f.check == "renderer"));
+    assert_eq!(
+        gogo::linuxapp::manage::scans_on_this_thread() - before,
+        1,
+        "compat, launch and renderer must share one scan"
+    );
+}
+
+#[test]
 fn doctor_is_green_on_a_set_up_game_and_each_check_fails_alone() {
     use gogo::macapp::doctor::Level;
     let w = World::launcher_built("doctor", false);

@@ -381,7 +381,16 @@ impl EnvReport {
 /// The game's env at its next launch, and where each value comes from.
 /// Reads only. An unbuilt game shows L3 and L4.
 pub fn env_report(gogid: &str, reveal: bool) -> Result<EnvReport, MacAppError> {
-    let r = manage::compat(gogid)?;
+    env_report_with(gogid, reveal, &manage::InstallScan::default())
+}
+
+/// [`env_report`] on a scan shared with the rest of a report.
+pub fn env_report_with(
+    gogid: &str,
+    reveal: bool,
+    scan: &manage::InstallScan,
+) -> Result<EnvReport, MacAppError> {
+    let r = manage::compat_with(gogid, scan)?;
     let dirs = GameDirs::for_game(gogid)?;
     let conf = ConfValues::read(&dirs.launch_conf).ok();
     let baked = game::read_launch_toml(&dirs).ok().map(|(t, _)| t);
@@ -585,7 +594,15 @@ pub struct ArgsReport {
 
 /// The game's launch args and where they come from. Reads only.
 pub fn args_report(gogid: &str) -> Result<ArgsReport, MacAppError> {
-    let r = manage::compat(gogid)?;
+    args_report_with(gogid, &manage::InstallScan::default())
+}
+
+/// [`args_report`] on a scan shared with the rest of a report.
+pub fn args_report_with(
+    gogid: &str,
+    scan: &manage::InstallScan,
+) -> Result<ArgsReport, MacAppError> {
+    let r = manage::compat_with(gogid, scan)?;
     let dirs = GameDirs::for_game(gogid)?;
     let conf = ConfValues::read(&dirs.launch_conf).ok();
     let baked = game::read_launch_toml(&dirs).ok().map(|(t, _)| t);

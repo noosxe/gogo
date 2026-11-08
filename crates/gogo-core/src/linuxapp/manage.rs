@@ -35,10 +35,8 @@ fn built(gogid: &str) -> Result<Built, MacAppError> {
 /// The game as installed, scanned as setup scans it (the entry point when
 /// it's there, else the tree): the game dir in the prefix
 /// (`drive_c/GOG/<name>`, when it's there) and the scan.
-pub fn scan_installed(
-    dirs: &GameDirs,
-    baked: &LaunchToml,
-) -> (Option<PathBuf>, Result<pe::PeScan, pe::ScanError>) {
+pub fn scan_installed(dirs: &GameDirs, baked: &LaunchToml) -> InstalledScan {
+    SCANS.with(|c| c.set(c.get() + 1));
     let dir = baked
         .tree_name()
         .map(|n| dirs.prefix.join("drive_c/GOG").join(n))
@@ -54,11 +52,37 @@ pub fn scan_installed(
     (dir, scan)
 }
 
+/// The installed game's scan, taken at most once and shared by every check
+/// of one report (#265): a large game's PE files are slow to read.
+#[derive(Default)]
+pub struct InstallScan(std::cell::OnceCell<InstalledScan>);
+
+/// What [`scan_installed`] returns.
+pub type InstalledScan = (Option<PathBuf>, Result<pe::PeScan, pe::ScanError>);
+
+impl InstallScan {
+    /// The scan, taken on first use.
+    pub fn get(&self, dirs: &GameDirs, baked: &LaunchToml) -> &InstalledScan {
+        self.0.get_or_init(|| scan_installed(dirs, baked))
+    }
+}
+
+thread_local! {
+    static SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times this thread has run [`scan_installed`]: tests use it to
+/// show one report scans the install once.
+#[doc(hidden)]
+pub fn scans_on_this_thread() -> usize {
+    SCANS.with(std::cell::Cell::get)
+}
+
 /// L1 for the renderer from the game as installed ([`scan_installed`]),
 /// and the dir it scanned.
-fn l1(b: &Built) -> (Option<PathBuf>, renderer::Pick) {
-    let (dir, scan) = scan_installed(&b.dirs, &b.baked);
-    (dir, renderer::pick_linux(&scan))
+fn l1(b: &Built, scan: &InstallScan) -> (Option<PathBuf>, renderer::Pick) {
+    let (dir, scan) = scan.get(&b.dirs, &b.baked);
+    (dir.clone(), renderer::pick_linux(scan))
 }
 
 /// `gogo linux-app next-renderer <gogid>`: the renderer after the one the
@@ -73,7 +97,7 @@ pub fn next_renderer(gogid: &str, dry_run: bool) -> Result<Option<String>, MacAp
         .as_ref()
         .map(|s| s.renderer.clone())
         .unwrap_or_else(|| b.baked.renderer.clone());
-    let (_, pick) = l1(&b);
+    let (_, pick) = l1(&b, &InstallScan::default());
     renderer::next_renderer_on(Os::Linux, gogid, &pick, &current, dry_run)
 }
 
@@ -180,6 +204,11 @@ pub struct CompatReport {
 /// The game's effective compat config on Linux and where each value comes
 /// from. Reads only; nothing is installed or looked up online.
 pub fn compat(gogid: &str) -> Result<CompatReport, MacAppError> {
+    compat_with(gogid, &InstallScan::default())
+}
+
+/// [`compat`] on a scan shared with the rest of a report.
+pub fn compat_with(gogid: &str, scan: &InstallScan) -> Result<CompatReport, MacAppError> {
     compat::validate_gogid(gogid)?;
     let user_file = compat::user_path(gogid);
     let db = compat::db_entry_for(gogid, Os::Linux);
@@ -218,7 +247,7 @@ pub fn compat(gogid: &str) -> Result<CompatReport, MacAppError> {
         });
     };
 
-    let (_, pick) = l1(&b);
+    let (_, pick) = l1(&b, scan);
     let baked_layer = setup::baked_renderer_layer(&b.baked.renderer, &pick, &db.entry);
     let (effective_renderer, effective_layer) = match &l4.entry.renderer {
         Some(r) => (r.clone(), Layer::User),
