@@ -56,6 +56,14 @@
 #   --max-secs N      stop N s after taking the cache lock, at the latest (5400)
 #   --max-gap N       gaps between commands kept up to N s (default 10)
 #   --match-pct N     a replayed screenshot matches at most N% different (15)
+#   --from-manifest   start partway along the manifest (#251): run its steps up to
+#                     --to-shot NAME (default: its last screenshot) or --to-step N
+#                     (steps count from 1, every [[step]] of it: waits, inputs,
+#                     screenshots, expect_change), with the manifest's own checks.
+#                     A failed one stops there, and the session is ready at the
+#                     step before. The steps after the point aren't run, and the
+#                     export doesn't have them: the old steps up to it, then the
+#                     new ones. The manifest is the one given, or e2e/<gogid>.toml
 #
 # live <id> commands, each one answers as JSON (exit 0 ok, 1 failed, 3 the
 # session isn't there, 4 not ready yet):
@@ -1034,8 +1042,16 @@ cmd_run() {
     # A live session's own (#241): only through `live start`.
     local -a live_env=() live_args=()
     LIVE_IDLE=900 LIVE_MAX=5400 LIVE_GAP=10 LIVE_MATCH=15
+    LIVE_FROM=0 LIVE_TO_STEP="" LIVE_TO_SHOT="" LIVE_PREFIX=null
     while [ $# -gt 0 ]; do
         case "$1" in
+        --from-manifest)
+            [ -n "${LIVE:-}" ] || { log "$1 is for live sessions: live start"; usage; }
+            LIVE_FROM=1; shift ;;
+        --to-step | --to-shot)
+            [ -n "${LIVE:-}" ] || { log "$1 is for live sessions: live start"; usage; }
+            if [ "$1" = --to-step ]; then LIVE_TO_STEP="${2:?}"; else LIVE_TO_SHOT="${2:?}"; fi
+            shift 2 ;;
         --env | --arg | --idle-secs | --max-secs | --max-gap | --match-pct)
             [ -n "${LIVE:-}" ] || { log "$1 is for live sessions: live start"; usage; }
             case "$1" in
@@ -1068,6 +1084,10 @@ cmd_run() {
     [ -n "$manifest" ] || manifest="$REPO/e2e/$target.toml"
     if [ -n "${LIVE:-}" ]; then
         live_options
+        if [ "$LIVE_FROM" = 0 ] && [ -n "$LIVE_TO_STEP$LIVE_TO_SHOT" ]; then
+            die "--to-step and --to-shot go with --from-manifest" 2
+        fi
+        [ "$LIVE_FROM" = 0 ] || [ -f "$manifest" ] || die "--from-manifest: no manifest: $manifest" 2
         # A game with no manifest yet: its window and exit take the defaults.
         if [ ! -f "$manifest" ] && [ "$manifest" = "$REPO/e2e/$target.toml" ]; then
             case "$target" in *[!0-9]* | 0*) die "no manifest for $target, and it isn't a GOG id" 2 ;; esac
@@ -1095,6 +1115,14 @@ cmd_run() {
         MANIFEST_JSON="$(PATH="$TOOLS/bin" helper manifest --live "$manifest")" || die "bad manifest" 2
         MANIFEST_JSON="$(live_override "$MANIFEST_JSON" "${#live_env[@]}" "${live_env[@]+"${live_env[@]}"}" \
             "${live_args[@]+"${live_args[@]}"}")" || exit
+        if [ "$LIVE_FROM" = 1 ]; then
+            local -a pick=()
+            [ -z "$LIVE_TO_STEP" ] || pick=(--to-step "$LIVE_TO_STEP")
+            [ -z "$LIVE_TO_SHOT" ] || pick+=(--to-shot "$LIVE_TO_SHOT")
+            [ ${#pick[@]} -le 2 ] || die "--from-manifest: --to-step and --to-shot are two ways to say where: use one" 2
+            LIVE_PREFIX="$(PATH="$TOOLS/bin" helper live-from-manifest "$manifest" "${pick[@]+"${pick[@]}"}")" ||
+                die "--from-manifest: can't pick the point" 2
+        fi
     else
         MANIFEST_JSON="$(PATH="$TOOLS/bin" helper manifest "$manifest")" || die "bad manifest" 2
     fi
@@ -1493,9 +1521,10 @@ live_game_phase() { # game-extra-json
     while :; do
         extra="$(jq -c --argjson life "$LIFE" --arg id "$LIVE_ID" --arg dir "$RUN/live" --arg r "$RESULTS/live" \
             --argjson idle "$LIVE_IDLE" --argjson gap "$LIVE_GAP" --argjson match "$LIVE_MATCH" \
+            --argjson prefix "$LIVE_PREFIX" \
             '. + {live:{id:$id, life:$life, dir:$dir, session:($r + "/session.json"),
                         journal:($r + "/journal.jsonl"), state:($r + "/state.json"),
-                        idle_secs:$idle, max_gap:$gap, match_pct:$match}}' <<<"$game_extra")"
+                        idle_secs:$idle, max_gap:$gap, match_pct:$match, prefix:$prefix}}' <<<"$game_extra")"
         drive_config "$RUN/drive.json" "$extra" "$GPU_LABEL" "$GPU_EXPECT" "${GPU_WANT:-}" "$GPUS_JSON" \
             "${GPU_NODES[@]/#/@n:}" "${GAME_ENV[@]/#/@e:}"
         log "life $LIFE: launching in headless sway ($GPU_LABEL)"
@@ -1572,7 +1601,7 @@ live_json() {
         | {id:$id, lives:$lives, idle_secs:$idle, max_secs:$max,
            steps:([($s.path // [])[] | select(.step)] | length),
            checkpoints:(($s.checkpoints // {}) | keys), restores:($s.restores // []),
-           last_replay:($s.last_replay // null), session:($r + "/session.json"),
+           last_replay:($s.last_replay // null), from_manifest:($s.from_manifest // null), session:($r + "/session.json"),
            journal:($r + "/journal.jsonl"),
            export:(if $s.path then $r + "/manifest.toml" else null end)}' "$s"
 }
@@ -1584,7 +1613,7 @@ live_start() {
     for a in "$@"; do
         case "$prev" in --out) out="$a" ;; esac
         case "$prev" in --manifest | --gpu | --expect-gpu | --secs | --gogo | --installer | --out | --env | --arg | \
-            --idle-secs | --max-secs | --max-gap | --match-pct) prev=""; continue ;; esac
+            --idle-secs | --max-secs | --max-gap | --match-pct | --to-step | --to-shot) prev=""; continue ;; esac
         case "$a" in -h | --help) usage ;; -*) ;; *) [ -n "$target" ] || target="$a" ;; esac
         prev="$a"
     done
@@ -2255,7 +2284,117 @@ st_live() { # self-test dir
     "$SELF" live start self-test --manifest "$REPO/e2e/self-test-live.toml" --env A=1 --out "$base/live-usage" \
         >/dev/null 2>&1 || code=$?
     [ "$code" = 2 ] || st_fail "usage: live start --env on a command: exit $code, want 2"
+    st_live_from "$base"
     "$SELF" cleanup --stop-live >/dev/null 2>&1 || true
+}
+
+# A live session that starts from a manifest's steps (#251), on the fake game.
+st_live_from() { # self-test dir
+    local base="$1" out code summary m
+    log "self-test: a live session from a manifest"
+    # The fake game's manifest with its own steps: the game and window are the same.
+    m="$base/from.toml"
+    sed '/^\[\[step\]\]/,$d' "$REPO/e2e/self-test-live.toml" >"$m"
+    cat >>"$m" <<'EOF'
+[[step]]
+screenshot = "white"
+[[step]]
+key = "r"
+[[step]]
+wait = 1
+[[step]]
+screenshot = "red"
+[[step]]
+expect_change = { from = "white", to = "red", min = 30 }
+[[step]]
+key = "b"
+[[step]]
+screenshot = "blue"
+[[step]]
+wait = 77
+EOF
+    # A point that isn't there is a usage error, before anything is built.
+    local args
+    for args in "--to-shot nope" "--to-step 0" "--to-step 9" "--to-step x" "--to-step 2 --to-shot red"; do
+        code=0
+        # shellcheck disable=SC2086
+        "$SELF" live start self-test --manifest "$m" --from-manifest $args --out "$base/live-from-usage" \
+            >/dev/null 2>"$base/from-usage.stderr" || code=$?
+        [ "$code" = 2 ] || st_fail "live-from usage: $args: exit $code, want 2: $(cat "$base/from-usage.stderr")"
+    done
+    code=0
+    "$SELF" live start self-test --manifest "$m" --to-shot red --out "$base/live-from-usage" >/dev/null 2>&1 || code=$?
+    [ "$code" = 2 ] || st_fail "live-from usage: --to-shot without --from-manifest: exit $code, want 2"
+
+    out="$base/live-from"
+    ST_LOUT="$out"
+    mkdir -p "$out"
+    ST_LID="$("$SELF" live start self-test --manifest "$m" --from-manifest --to-shot red --out "$out" \
+        2>>"$out/start.stderr" | tail -n 1)"
+    [ -n "$ST_LID" ] || { st_fail "live-from: no session: $(cat "$out/start.stderr")"; return 0; }
+    # Steps 1-5 ran (the shot "red" and the check after it); key b and q didn't.
+    st_live_cmd ready '.state == "ready" and .steps == 5 and .from_manifest.ok and .from_manifest.done == 5
+        and .from_manifest.of == 5 and .from_manifest.total == 8' status --wait 90
+    st_live_cmd next '.ok' key b
+    st_live_cmd shot '.since == "red" and .change_pct >= 50' screenshot blue
+    st_live_cmd cp '.checkpoint == "blue" and .steps == 8' checkpoint blue
+    # The replay goes through the manifest's steps, then the live ones.
+    st_live_cmd restore '.state == "ready" and .life == 2 and .last_replay.ok and .last_replay.done == 8
+        and .steps == 8' restore blue --wait 120
+    st_live_cmd more '.ok' key r
+    st_live_cmd after '.since == "cp-blue" and .change_pct >= 50' screenshot back
+    # Quit from the game's own menu, as the self-test's other session does: a
+    # game still up at stop is signalled, which a fresh run of the export checks.
+    st_live_cmd quit '.ok' type q
+    st_live_cmd quit-wait '.game_running | not' wait 1
+    "$SELF" live "$ST_LID" export >"$out/export.toml" 2>>"$out/client.stderr" || st_fail "live-from: export failed"
+    if ! { grep -q '^screenshot = "white"$' "$out/export.toml" && grep -q '^screenshot = "back"$' "$out/export.toml" &&
+        [ "$(grep -c '^expect_change = { from = "white", to = "red", min = 30' "$out/export.toml")" = 1 ] &&
+        ! grep -q '^wait = 77' "$out/export.toml" && grep -q '^# Steps 1-5 of 8' "$out/export.toml"; }; then
+        st_fail "live-from: the export isn't the old steps plus the new: $(cat "$out/export.toml")"
+    fi
+    code=0
+    "$SELF" live "$ST_LID" stop >"$out/stdout" 2>>"$out/client.stderr" || code=$?
+    st_assert_clean live-from "$out" "$code" 0
+    summary="$(tail -n 1 "$out/stdout")"
+    jq -e '.ok and .live.from_manifest.ok and .live.lives == 2' "$summary" >/dev/null ||
+        st_fail "live-from: summary: $(jq -c '{failed, live}' "$summary" 2>/dev/null)"
+    mkdir -p "$base/live-from-export"
+    code=0
+    env --default-signal=INT,TERM "$SELF" run self-test --manifest "$out/export.toml" --out "$base/live-from-export" \
+        >"$base/live-from-export/stdout" 2>"$base/live-from-export/stderr" || code=$?
+    st_assert_clean live-from-export "$base/live-from-export" "$code" 0
+
+    # A check that fails part-way stops there: step 4 of this one wants a change
+    # that doesn't come. The session is ready at the step before.
+    sed '/^\[\[step\]\]/,$d' "$m" >"$base/from-bad.toml"
+    cat >>"$base/from-bad.toml" <<'EOF'
+[[step]]
+screenshot = "white"
+[[step]]
+wait = 1
+[[step]]
+screenshot = "same"
+[[step]]
+expect_change = { from = "white", to = "same", min = 50 }
+[[step]]
+screenshot = "never"
+EOF
+    out="$base/live-from-bad"
+    ST_LOUT="$out"
+    mkdir -p "$out"
+    ST_LID="$("$SELF" live start self-test --manifest "$base/from-bad.toml" --from-manifest --out "$out" \
+        2>>"$out/start.stderr" | tail -n 1)"
+    [ -n "$ST_LID" ] || { st_fail "live-from-bad: no session: $(cat "$out/start.stderr")"; return 0; }
+    st_live_cmd bad-ready '.state == "ready" and .steps == 3 and (.from_manifest.ok | not)
+        and .from_manifest.step == 4 and .from_manifest.done == 3
+        and (.from_manifest.why | test("changed_white_same"))' status --wait 90
+    st_live_cmd bad-go-on '.ok' key r
+    st_live_cmd bad-quit '.ok' type q
+    st_live_cmd bad-quit-wait '.game_running | not' wait 1
+    code=0
+    "$SELF" live "$ST_LID" stop >"$out/stdout" 2>>"$out/client.stderr" || code=$?
+    st_assert_clean live-from-bad "$out" "$code" 0
 }
 
 cmd_self_test() {

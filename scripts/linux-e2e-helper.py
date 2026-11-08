@@ -1892,7 +1892,10 @@ class Driver:
             try:
                 if self.wait_window():
                     self.last_end = time.monotonic()
+                    self.live_from_manifest()
                     self.live_replay()
+                elif lv.get("prefix") and self.session["from_manifest"] is None:
+                    self.live_from_manifest_result(0, lv["prefix"], "the game's window never came up")
                 outcome = self.live_serve()
             except LiveStop:
                 outcome = "stop"
@@ -2113,6 +2116,7 @@ class Driver:
             "restores": len(self.session["restores"]),
             "idle_left": round(self.live["idle_secs"] - (time.monotonic() - self.last_command)),
             "last_replay": self.session.get("last_replay"),
+            "from_manifest": self.session.get("from_manifest"),
         }
 
     def live_handle(self, conn, req):
@@ -2303,6 +2307,61 @@ class Driver:
             "replay_secs": live_replay_secs(cp["path"], self.session),
         }
 
+    def live_from_manifest_result(self, done, prefix, why=None, step=None):
+        p = prefix["steps"]
+        self.session["from_manifest"] = {
+            "ok": why is None, "done": done, "of": len(p), "total": prefix["total"],
+            "to_step": prefix["to_step"], "to_shot": prefix["to_shot"], "step": step, "why": why,
+        }
+        self.live_save()
+
+    def live_from_manifest(self):
+        """`live start --from-manifest` (#251), the first life only: the manifest's
+        steps up to the chosen point, run as a `run` does, with the manifest's own
+        checks (not_black, fills_window, expect_change, wait_settled). Each one
+        goes on the path as the manifest wrote it, and a screenshot keeps its frame
+        and stats as the frame a later restore matches. The first step that fails
+        a check stops it: the path ends at the step before, and the session is
+        ready there. (The failed check is told in status, not held against the
+        session's summary: there is no run to fail.)"""
+        prefix = self.live.get("prefix")
+        if not prefix or self.session["from_manifest"] is not None:
+            return
+        steps = prefix["steps"]
+        done = 0
+        why = None
+        failed_at = None
+        for i, step in enumerate(steps, 1):
+            self.busy = f"manifest step {i}/{len(steps)}"
+            self.live_state("replaying", self.busy)
+            before = len(self.checks)
+            self.run_step(step)
+            record = self.steps[-1]
+            bad = [c for c in self.checks[before:] if not c["ok"]]
+            if bad or not record["ok"]:
+                why = "; ".join(f"{c['name']}: {c['detail']}" for c in bad) or "no window for it"
+                self.checks[before:] = [c for c in self.checks[before:] if c["ok"]]
+                failed_at = i
+                break
+            entry = {"step": step, "gap": 0.0, "life": self.life, "manifest": True}
+            if "screenshot" in step:
+                name = step["screenshot"]
+                time.sleep(LIVE_MOTION_SECS)
+                again, _ = self.grab(os.path.join(self.run_dir, "motion.png"))
+                image = self.shots.get(name)
+                moving = None if again is None or image is None else changed_pct(image, again)
+                entry.update(image=record["path"], stats=record["stats"], moving_pct=moving)
+                self.session["names"].append(name)
+            elif "wait_settled" in step:
+                entry["settled_secs"] = record.get("after_secs", 0.0)
+            self.session["path"].append(entry)
+            done += 1
+            self.live_save()
+        self.live_from_manifest_result(done, prefix, why, failed_at)
+        self.live_journal("from-manifest", [], dict(self.session["from_manifest"]))
+        self.busy = None
+        self.last_end = time.monotonic()
+
     def live_replay(self):
         """After a restore: the checkpoint's path again, from the launch, at the
         export's timing. Each screenshot must match the one recorded (within
@@ -2332,6 +2391,10 @@ class Driver:
                 if why:
                     result.update(ok=False, why=why)
                     break
+            elif "expect_change" in step:
+                # A manifest's check, made when it ran; the shots it names were
+                # matched above.
+                pass
             elif "wait_settled" in step:
                 # Waits for the screen again, as long as this machine needs;
                 # not a recorded sleep, and not a failed check of the run.
@@ -2508,11 +2571,40 @@ def live_load_session(path, manifest, live):
         "seq": 0,
         "replay": None,
         "last_replay": None,
+        "from_manifest": None,
         "game_exit": None,
         "ended": None,
     }
     write_json(path, session)
     return session
+
+
+def live_from_manifest(text, to_step=None, to_shot=None):
+    """`live start --from-manifest` (#251): the steps of a manifest a session
+    runs before it hands over, up to a point. `--to-step N` runs steps 1..N
+    (every [[step]] counts: a wait, an input, a screenshot, an expect_change).
+    `--to-shot NAME` runs through that screenshot and the expect_change checks
+    right after it; with neither, through the manifest's last screenshot.
+    Raises ManifestError (a usage error) for a point that isn't there."""
+    steps = parse_manifest(text)["steps"]
+    shots = [s["screenshot"] for s in steps if "screenshot" in s]
+    if to_step is not None and to_shot is not None:
+        raise ManifestError("--to-step and --to-shot are two ways to say where: use one")
+    if to_step is not None:
+        if not re.fullmatch(r"[0-9]+", str(to_step)) or not 1 <= int(to_step) <= len(steps):
+            raise ManifestError(f"--to-step {to_step}: the manifest has {len(steps)} steps, 1 to {len(steps)}")
+        upto = int(to_step)
+    else:
+        if to_shot is None:
+            if not shots:
+                raise ManifestError("no screenshot to stop at; give --to-step N")
+            to_shot = shots[-1]
+        if to_shot not in shots:
+            raise ManifestError(f"--to-shot {to_shot}: no such screenshot; the manifest's are {shots or 'none'}")
+        upto = next(i for i, s in enumerate(steps) if s.get("screenshot") == to_shot) + 1
+        while upto < len(steps) and "expect_change" in steps[upto]:
+            upto += 1
+    return {"steps": steps[:upto], "to_step": upto, "total": len(steps), "to_shot": to_shot}
 
 
 def live_kept_gap(entry, max_gap):
@@ -2693,6 +2785,14 @@ def live_export(session):
         f"# Exported from live session {session['id']} (scripts/linux-e2e.sh live, #241).",
         f"# Gaps between commands are kept up to {_toml(max_gap)} s; "
         f"{len(session['restores'])} restore(s), their dead ends dropped.",
+    ]
+    fm = session.get("from_manifest")
+    if fm and fm.get("done"):
+        out.append(
+            f"# Steps 1-{fm['done']} of {fm['total']} are the starting manifest's own (--from-manifest); "
+            "the rest of its steps are not here."
+        )
+    out += [
         "# Prove it with a fresh `run` before it replaces a manifest.",
         f"title = {_toml(m['title'])}",
     ]
@@ -2750,6 +2850,20 @@ def live_export(session):
             continue
         wait += live_kept_gap(e, max_gap)
         step = e["step"]
+        if e.get("manifest"):
+            # A step of the manifest the session started from: as written, with
+            # its own checks; the gaps a replay added are all that's kept.
+            if wait >= LIVE_GAP_MIN:
+                steps.append((comments, {"wait": round(wait, 1)}))
+                comments = []
+            wait = 0.0
+            steps.append((comments, step))
+            comments = []
+            if "screenshot" in step:
+                last_shot, inputs = step["screenshot"], 0
+            elif any(k in step for k in LIVE_INPUTS):
+                inputs += 1
+            continue
         if "wait" in step:
             wait += step["wait"]
             if e.get("unsettled"):
@@ -2995,6 +3109,18 @@ def main(argv):
         )
         print(json.dumps(reply, indent=1))
         return code
+    if len(argv) in (3, 5) and argv[1] == "live-from-manifest":
+        try:
+            with open(argv[2], encoding="utf-8") as f:
+                text = f.read()
+            pick = {argv[3]: argv[4]} if len(argv) == 5 else {}
+            if set(pick) - {"--to-step", "--to-shot"}:
+                raise ManifestError(f"unknown option {argv[3]}")
+            print(json.dumps(live_from_manifest(text, pick.get("--to-step"), pick.get("--to-shot"))))
+        except (OSError, ManifestError) as e:
+            print(f"{argv[2]}: {e}", file=sys.stderr)
+            return 2
+        return 0
     if len(argv) == 3 and argv[1] == "live-export":
         try:
             with open(argv[2]) as f:

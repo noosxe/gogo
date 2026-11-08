@@ -1061,6 +1061,98 @@ class LiveExport(unittest.TestCase):
         self.assertEqual(m["build_command"], ["true"])
 
 
+class LiveFromManifest(unittest.TestCase):
+    """live start --from-manifest (#251): the point, the path, the export."""
+
+    TEXT = """
+        gogid = 7
+        [[step]]
+        screenshot = "title"
+        [[step]]
+        key = "space"
+        [[step]]
+        wait = 3
+        [[step]]
+        screenshot = "menu"
+        [[step]]
+        expect_change = { from = "title", to = "menu", min = 30 }
+        [[step]]
+        key = "Down"
+        [[step]]
+        screenshot = "last"
+        [[step]]
+        key = "q"
+    """
+
+    def pick(self, **kw):
+        return helper.live_from_manifest(self.TEXT, **kw)
+
+    def test_default_is_the_last_screenshot(self):
+        got = self.pick()
+        self.assertEqual((got["to_shot"], got["to_step"], got["total"]), ("last", 7, 8))
+        self.assertEqual(got["steps"][-1], {"screenshot": "last"})
+
+    def test_a_shot_takes_its_expect_change_along(self):
+        got = self.pick(to_shot="menu")
+        self.assertEqual(got["to_step"], 5)
+        self.assertEqual(got["steps"][-1]["expect_change"]["to"], "menu")
+
+    def test_to_step_counts_every_step(self):
+        self.assertEqual(self.pick(to_step="2")["steps"], [{"screenshot": "title"}, {"key": "space"}])
+        self.assertEqual(self.pick(to_step=8)["to_step"], 8)
+
+    def test_a_point_that_isnt_there_is_refused(self):
+        for kw in ({"to_step": "0"}, {"to_step": "9"}, {"to_step": "x"}, {"to_shot": "nope"},
+                   {"to_step": "2", "to_shot": "menu"}):
+            with self.subTest(kw), self.assertRaises(helper.ManifestError):
+                self.pick(**kw)
+        with self.assertRaisesRegex(helper.ManifestError, "no screenshot"):
+            helper.live_from_manifest("gogid = 7\n[[step]]\nwait = 1\n")
+
+    def manifest_path(self):
+        return [
+            {"step": {"screenshot": "title"}, "gap": 0.0, "manifest": True,
+             "stats": {"nonblack_pct": 50.0, "box_w_pct": 100.0, "box_h_pct": 100.0}},
+            {"step": {"key": "space"}, "gap": 0.0, "manifest": True},
+            {"step": {"wait_settled": 20.0}, "gap": 0.0, "manifest": True, "settled_secs": 3.0},
+            {"step": {"screenshot": "menu"}, "gap": 0.0, "manifest": True, "extra": 1.5,
+             "stats": {"nonblack_pct": 50.0, "box_w_pct": 100.0, "box_h_pct": 100.0}},
+            {"step": {"expect_change": {"from": "title", "to": "menu", "min": 30.0}}, "gap": 0.0, "manifest": True},
+        ]
+
+    def test_export_has_the_old_steps_then_the_new(self):
+        path = self.manifest_path() + [
+            {"step": {"key": "Down"}, "gap": 2.0},
+            shot("deeper", since="menu", change=40.0, inputs=1),
+        ]
+        text = helper.live_export(live_session(path, from_manifest={"done": 5, "total": 8, "ok": True}))
+        self.assertIn("Steps 1-5 of 8", text)
+        steps = helper.parse_manifest(text)["steps"]
+        self.assertEqual(steps, [
+            {"screenshot": "title"},
+            {"key": "space"},
+            {"wait_settled": 20.0},
+            {"wait": 1.5},  # what a late match added
+            {"screenshot": "menu"},
+            {"expect_change": {"from": "title", "to": "menu", "min": 30.0}},
+            {"wait": 2.0},
+            {"key": "Down"},
+            {"screenshot": "deeper"},
+            {"expect_change": {"from": "menu", "to": "deeper", "min": 20.0}},
+        ])
+        self.assertNotIn('"q"', text)
+
+    def test_a_manifest_shot_is_kept_even_if_black_or_small(self):
+        path = self.manifest_path()
+        path[0]["stats"] = {"nonblack_pct": 0.1, "box_w_pct": 10.0, "box_h_pct": 10.0}
+        steps = helper.parse_manifest(helper.live_export(live_session(path)))["steps"]
+        self.assertEqual(steps[0], {"screenshot": "title"})  # as the manifest wrote it
+
+    def test_replay_estimate_counts_the_manifest_part(self):
+        self.assertEqual(helper.live_replay_secs(self.manifest_path(), {"max_gap": 10.0}),
+                         round(2 * helper.LIVE_SHOT_SECS + 3.0 + 1.5))
+
+
 class LiveSocket(unittest.TestCase):
     """The control socket: bound through the dir's fd (a long path is fine), ours
     only, one JSON line each way."""
