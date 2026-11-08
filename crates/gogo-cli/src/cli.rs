@@ -433,6 +433,28 @@ pub enum LinuxEnvCmd {
         /// Show hidden values.
         #[arg(long)]
         reveal: bool,
+        /// Every switch this game's Proton build has, what each does, its
+        /// default, whether it applies to this game's renderer and GPU, and
+        /// what sets it now. Nothing is left out for not applying.
+        #[arg(long)]
+        all: bool,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// One switch in full: what it does on this game's Proton build, its
+    /// default, whether it applies and why, what sets it now, how to set it.
+    Describe {
+        /// GOG product id.
+        #[arg(value_name = "GOGID")]
+        gogid: String,
+        /// An env var, a `VKD3D_CONFIG` flag or a `dxvk.conf` key; case
+        /// doesn't matter.
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// Show hidden values.
+        #[arg(long)]
+        reveal: bool,
         /// Machine-readable output.
         #[arg(long)]
         json: bool,
@@ -1373,6 +1395,39 @@ mod tests {
         };
         assert_eq!(pairs, ["DXVK_HUD=fps", "A=b c"]);
         assert!(Cli::try_parse_from(["gogo", "linux-app", "env", "set", "1"]).is_err());
+        let all = |args: &[&str]| {
+            let mut v = vec!["gogo", "linux-app", "env"];
+            v.extend_from_slice(args);
+            let Command::LinuxApp {
+                sub:
+                    Some(LinuxAppSub::Env {
+                        cmd: LinuxEnvCmd::List { all, .. },
+                    }),
+                ..
+            } = Cli::try_parse_from(v).unwrap().command
+            else {
+                panic!("expected env list");
+            };
+            all
+        };
+        assert!(
+            !all(&["list", "1"]),
+            "--all is opt-in: the default is #234's"
+        );
+        assert!(all(&["list", "1", "--all", "--json", "--reveal"]));
+        assert!(
+            Cli::try_parse_from([
+                "gogo",
+                "linux-app",
+                "env",
+                "describe",
+                "1",
+                "DXVK_HUD",
+                "--json"
+            ])
+            .is_ok()
+        );
+        assert!(Cli::try_parse_from(["gogo", "linux-app", "env", "describe", "1"]).is_err());
         assert!(Cli::try_parse_from(["gogo", "linux-app", "env", "unset", "1", "A", "B"]).is_ok());
         assert!(
             Cli::try_parse_from([

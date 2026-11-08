@@ -870,7 +870,7 @@ DXVK_LOG_LEVEL = "info"
 [override]                       # games only: into the game's override file, through gogo
 extra_args = ["-skipStartScreen"] #   (`linux-app args <gogid> -- …`), before the launch
 [override.env]                   #   (`linux-app env set <gogid> K=V…`)
-PROTON_ENABLE_NVAPI = "1"
+PROTON_DLSS_INDICATOR = "1"
 
 [exit]
 how = "self"                     # "self": it exits by itself after the steps, code 0

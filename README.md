@@ -373,13 +373,17 @@ gogo linux-app next-renderer 1207659013 --dry-run                   # what "Try 
 **Env vars and launch args** of your own go into the same override file, and the
 next launch applies them (no rebuild). `env list` shows every variable the game
 gets, where each comes from (gogo's default, the renderer, gogo's compat DB, your
-override, the launcher, the protonfix) and what it beats. Your args go after the
-game's own; `-- <args…>` replaces the ones you set before.
+override, the launcher, the protonfix) and what it beats. `env list --all` shows
+what *exists* for the game's Proton build: every switch from the build's own files,
+what it does, its default, and whether it applies to this game's renderer and GPU.
+Your args go after the game's own; `-- <args…>` replaces the ones you set before.
 
 ```sh
 gogo linux-app env list 1423049311                         # --json; --reveal shows values of *TOKEN*/*SECRET*/… names
-gogo linux-app env set 1423049311 PROTON_ENABLE_NVAPI=1 DXVK_HUD=fps
-gogo linux-app env unset 1423049311 DXVK_HUD
+gogo linux-app env list 1423049311 --all                   # every switch on this game's Proton build
+gogo linux-app env describe 1423049311 PROTON_DLSS_UPGRADE  # one in full; also VKD3D_CONFIG flags and dxvk.conf keys
+gogo linux-app env set 1423049311 PROTON_DLSS_INDICATOR=1 MANGOHUD=1
+gogo linux-app env unset 1423049311 MANGOHUD
 gogo linux-app args 1423049311 -- --launcher-skip -skipStartScreen
 gogo linux-app args 1423049311                             # what the exe gets, and from where
 gogo linux-app args 1423049311 --clear

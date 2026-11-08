@@ -1437,10 +1437,8 @@ then the game's module).
   come from (GOG, a variant, an `args` layer), the extra args and their layer, what the
   exe gets, and `pending` while `launch.conf` has older ones.
 
-**For #233 and the TUI.** `envargs::env_report` is the "what's active" half: one line per
-(key, source) with its state. The catalogue adds the "what exists" half (descriptions,
-defaults, whether it applies to this renderer and GPU) next to it, and an `EnvSource` for
-Proton's own defaults when it knows them.
+**For the TUI.** `envargs::env_report` is the "what's active" half: one line per (key,
+source) with its state. §7.7's catalogue adds the "what exists" half on top of it.
 
 **For the e2e harness and #241.** A manifest's `[override]` (`env`, `extra_args`) is
 applied by the harness through these commands, with the run's scratch `GOGO_HOME`, right
@@ -1456,6 +1454,122 @@ the append, shell quoting. The pipeline test sets env and args through `envargs`
 environment word for word (spaces, quotes, `$`, backticks), checks the run log holds no
 value, `doctor`'s `launch` line, unset and clear, and a hand-written bad name and
 launcher key. The CLI's parse and its human output have unit tests.
+
+### 7.7 Which switches exist for this game's build (#233)
+
+The owner's other Heroic complaint (#231): nothing tells you what exists, and it takes
+hours of searching to find what works with your Proton version. gogo knows the build a game
+runs on, so it says. `linuxapp::catalogue` is one report the CLI prints and the TUI (#11)
+can browse. It reads files and runs nothing, and it makes no network calls.
+
+**Where it comes from: the build for names, a table for words.** Neither alone would do. A
+table alone goes stale, and that's what forum advice is. The build alone has no words and
+no way to say what applies. Each entry's `sources` say which it came from
+(`catalogue::scan`):
+
+| Source | What it gives | Tag |
+|---|---|---|
+| `proton` | env vars read and set, `STEAM_COMPAT_CONFIG` token from `check_environment`, default from a `setdefault` outside an `if` | `script` |
+| `protonfixes/` helpers (`upscalers.py`, `utilities.py`, …) | what the upscaler code reads; `gamefixes-*/` are §4.2's | `fixes` |
+| `user_settings.sample.py` | what Proton documents, commented-out lines too | `sample` |
+| strings in 15 DLLs and modules (DXVK, VKD3D-Proton, dxvk-nvapi, D7VK, six of Wine's) | `DXVK_*`, `VKD3D_*`, `D7VK_*`, `PROTON_*`, `WAYLANDDRV_*`; flags and keys the table looks up | `dll` |
+| `catalogue::table` (shipped) | one line, default, renderer, GPU, wrapper | `table` |
+
+- **The script reader is a line scanner, not a Python parser.** It knows the shapes these
+  scripts use (`check_environment("X", "tok")`, `self.env["X"]`, `.get`, `.setdefault`,
+  `"X" in env`, `get_version(env, 'X', …)`, a call split over lines) and ignores the rest,
+  comments included. Set-only names are the build talking to itself and need no entry.
+- **The DLL scan is evidence, not proof.** A string in the file says the component knows the
+  name, not that it reads it. Compilers load some names in pieces (`mov rax, "DXVK_ENA"`), so
+  discovery takes only NUL-ended strings, and a miss reads "no trace of it", never "it can't
+  work". dxvk-nvapi's driver settings are the case in point: the DLL holds
+  `NGX_DLSS_SR_OVERRIDE` and joins `DXVK_NVAPI_DRS_` at run time, so those entries name the
+  string to look for (`Spec::probe`). `VKD3D_CONFIG` flags are matched as a string's tail,
+  since the linker merges `dxr` into `nodxr`. Flags and `dxvk.conf` keys aren't discovered,
+  only confirmed: no pattern tells one from any other lower-case string in the file. All 15
+  files take about 1 s in a debug build, so the plain `env list` doesn't read them.
+- **Not all of Wine.** `x86_64-windows` alone is 300 MB. The list is the modules that read a
+  switch a player would set. A name from anywhere else is `?` if it isn't in the table.
+- **`dxvk.conf` keys**: a short list with a player's use, reached through `DXVK_CONFIG`, not
+  the whole file. **Env-less `STEAM_COMPAT_CONFIG` tokens** (`vkd3dfl12`, `noopwr`, …) aren't
+  entries: mostly per-game hacks. `PROTON_ADD_CONFIG` is the entry that reaches them.
+
+**How the table stays current.** `table::REVIEWED_FOR` names the build it was checked
+against, and `tests/fixtures/linuxapp/catalogue/<build>.names` freezes that build's names
+(names only). Four tests hold them together:
+
+1. `REVIEWED_FOR` equals the catalog's GE-Proton pin, so **a pin bump fails** until someone
+   redoes the review.
+2. Every name the build reads has an entry or a place in `PLUMBING`.
+3. Every entry is in the build or marked `absent`, and nothing marked `absent` is in it.
+4. With `GOGO_CATALOGUE_BUILD=<dir>`, the fixture must match a real build
+   (`GOGO_CATALOGUE_BLESS=1` rewrites it). CI has no build, so unset passes.
+
+For a build the table wasn't reviewed for (a `path:` runtime, an old pin), nothing breaks:
+names are that build's, what the table lacks shows as `?` with `(not in gogo's table yet)`,
+and a warning says the words may lag. `absent` entries are the point, not a leftover: they
+answer stale advice (`PROTON_ENABLE_NVAPI`, `DXVK_ASYNC`, `PROTON_ENABLE_NGX_UPDATER`) and
+README lines ahead of the release (`PROTON_DUALSENSE_BT_AS_USB`).
+
+**Applicability is marked, never filtered.** `applies` is `yes`, `no` with why, or `?` with
+why, checked in this order:
+
+1. The build: no trace of it → `no`.
+2. The launcher: `blocked`, for `gamescope` and `gamemoderun`, since `launch.sh` can't put a
+   command in front of the game (#271).
+3. The wrapper's command on `PATH` (`Host`; `MANGOHUD` needs `mangohud`).
+4. The renderer, `launch.conf`'s `RENDERER`, else the compat pick. Under Proton DXVK's
+   `dxgi.dll` also fronts VKD3D-Proton, so `DXVK_FILTER_DEVICE_NAME`, `DXVK_HDR` and
+   `DXVK_CONFIG` reach D3D12 games, while `DXVK_HUD` draws on D3D9-11 only. wined3d and
+   cnc-ddraw get none of the Vulkan side.
+5. The GPU, by vendor, from `/sys/class/drm` as `doctor` reads it. Any matching GPU counts
+   (a hybrid laptop has both).
+
+No renderer or GPU known yet gives `?`, not a guess.
+
+**Active values** come from `env_report` unchanged, so "from where" is §7.6's answer. A
+`VKD3D_CONFIG` flag or `DXVK_CONFIG` key shows the line that holds it, matched as a whole
+word (`dxr` isn't in `nodxr`). Keys nobody knows still show, under `other`. The launcher's
+four and `WINEDLLOVERRIDES` are `plumbing`, with their values.
+
+**What it says for the flagship, on GE-Proton11-12** (Cyberpunk 2077, D3D12, NVIDIA, #232).
+Read from the script, not reported:
+
+- NVAPI is on by itself when an NVIDIA module is loaded (`/proc/modules`), so **no variable
+  is needed for DLSS**. `PROTON_ENABLE_NVAPI` isn't read any more; `PROTON_FORCE_NVAPI` is for
+  other vendors, and `PROTON_DISABLE_NVAPI` is the way out.
+- `PROTON_DLSS_UPGRADE` downloads at launch (`upscalers.py`), inside umu, not gogo. `gogo` makes
+  no network call for it. `PROTON_DLSS_INDICATOR` is how to see DLSS is really on.
+- Presets: `DXVK_NVAPI_DRS_NGX_DLSS_SR_OVERRIDE` and its `…_RENDER_PRESET_SELECTION`; likewise
+  `RR` and `FG`. These are in dxvk-nvapi 0.9.3's strings.
+- Ray tracing is on by itself where VKD3D-Proton thinks it safe; `VKD3D_CONFIG=dxr` forces it
+  and `nodxr` takes it out.
+- Reflex on D3D11/12 goes through DXVK or VKD3D-Proton: `DXVK_NVAPI_VKREFLEX` is the layer for
+  native Vulkan games, marked `no` on `vkd3d-proton`. A test keeps these covered.
+
+**CLI** (§10). `--all` extends #234's verb instead of a parallel command, and the plain `env
+list` is unchanged, as is its JSON.
+
+- `env list <gogid> --all [--reveal] [--json]`: sections by component (`proton`, `dxvk-nvapi`,
+  `vkd3d-proton`, `dxvk`, `d7vk`, `wine`, `wrappers`, `other`, `plumbing`), inside each NVIDIA
+  and upscalers first, then the flags and keys. One line per switch so `grep` works:
+  `yes NAME  about Default: d. (why) [sources]`, with `now: KEY=VALUE  (source)` under one
+  that's set, and the idle plumbing names on one line.
+- `env describe <gogid> <NAME> [--reveal] [--json]`: one switch in full, including its token
+  and how to set it (`set with:`, which warns where a value is a list). Any case; a miss exits
+  1 and offers the names holding the text. It takes a GOGID like the other per-game commands
+  because the answer depends on the game's build.
+
+**How much to describe.** One line each, in gogo's words (a test caps them at 110 bytes), and
+a link per component to upstream's README, the stable thing to link. No per-switch links:
+anchors move, and `env list --all` is read in a terminal. Descriptions are never pasted from
+upstream.
+
+**Tests** (`catalogue/tests.rs`, `linuxapp_pipeline.rs`, `main.rs`): each script shape and what
+isn't env use, the sample, whole strings vs a compiler's pieces, flags as tails, a build with
+parts missing (`not checked`, not `not found`), applicability per renderer, GPU and tool,
+nothing hidden, stale advice, active values by whole word, the four currency tests, flagship
+coverage, `report` over a built game, and goldens for both human outputs.
 
 ## 8. `gogo linux-app doctor <gogid>`
 
@@ -1663,6 +1777,7 @@ only on Linux (`#[cfg(target_os = "linux")]`), with the same shape:
     Nothing is installed or fetched.
   - `gogo linux-app env list|set|unset <gogid>` and `gogo linux-app args <gogid>
     [-- <args…> | --clear]` (#234): §7.6.
+  - `gogo linux-app env list <gogid> --all`, `env describe <gogid> <NAME>` (#233): §7.7.
   - `gogo linux-app next-renderer <gogid> [--dry-run]`: `renderer::next_renderer_on(Os::Linux,
     …)` after `state.toml`'s renderer (else the baked one), L1 from a fresh scan; written to
     L4's `[platforms.linux]`.
