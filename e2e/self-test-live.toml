@@ -3,7 +3,8 @@
 # unless that install is there and this is its first launch on this disk:
 # `launched` must not be there yet, and the game writes it. So a restore that
 # didn't roll the disk back gets no window. Keys: r turns it red, b blue, q
-# quits (exit 0). A live session takes only [window] and [exit] from here; the
+# quits (exit 0), a starts an animation (the colour flips every 0.3 s) and s stops
+# it. A live session takes only [window] and [exit] from here; the
 # step is for the manifest check, and a plain run of this passes too.
 title = "self-test: live"
 build_command = ["bash", "-c", '''
@@ -12,9 +13,18 @@ build_command = ["bash", "-c", '''
 command = ["xterm", "-bg", "white", "-fg", "black", "-e", "bash", "-c", '''
   d="$GOGO_HOME/games/fake"
   [ -e "$d/installed" ] && [ ! -e "$d/launched" ] && touch "$d/launched" || exit 3
-  printf "\n  live self-test: r red, b blue, q quits\n"
-  while IFS= read -rsn1 k; do
+  printf "\n  live self-test: r red, b blue, a animates, s stops, q quits\n"
+  anim=0 flip=0
+  while true; do
+    k=""
+    if [ "$anim" = 1 ]; then
+      IFS= read -rsn1 -t 0.3 k || { flip=$((1 - flip)); printf "\033]11;#%s\007" "$([ $flip = 1 ] && echo 20c020 || echo c0c020)"; continue; }
+    else
+      IFS= read -rsn1 k || exit 0
+    fi
     case "$k" in
+    a) anim=1 ;;
+    s) anim=0; printf "\033]11;#c02020\007" ;;
     r) printf "\033]11;#c02020\007" ;;
     b) printf "\033]11;#2040c0\007" ;;
     q) exit 0 ;;

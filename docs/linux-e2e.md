@@ -331,6 +331,7 @@ finds the steps. A game with no manifest yet gets the defaults.
 | `key KEYSYM`, `type TEXT`, `hold KEYSYM MS` | as the manifest's `key` and `type` ([below](#manifests)); `hold` keeps a key down for MS ms |
 | `click [X Y]`, `move_to X Y` | X Y in pixels of the screenshot, or `N%` of the window. `click` with none clicks where the pointer is (`click_here`) |
 | `move_by DX DY`, `scroll NOTCHES`, `wait SECS` | as the manifest's |
+| `settle [--max SECS]` | waits until the picture fills the window and holds still, by the code of the manifest's `wait_settled`. Answers `settled`, `secs` it took, the last frame's `path`, and the `step` it put on the path. An animated screen answers `"settled": false` after `--max` (default 30, at most 600), it doesn't hang |
 | `checkpoint NAME` | a screenshot (`cp-NAME`), and the path to here kept under NAME, with about how long its replay takes |
 | `restore NAME [--wait SECS]` | the game closed, the disk rolled back, a relaunch and a replay to NAME; answers once it's done, with `last_replay` |
 | `log [game\|run\|launch\|sway\|dxvk\|vkd3d\|proton] [--tail N]` | a log's last lines: `game.out` (or its DXVK, VKD3D or Proton/Wine lines), the launcher's run log or `launch.log`, sway's |
@@ -386,6 +387,15 @@ the gap of real time before it. A gap over `--max-gap` (10 s) is cut to it, sinc
 thinking, not the game. One under 0.2 s is dropped; above that the pause between two keys
 is kept, since a game can drop keys pressed at once. So **say what the game needs with `wait`**: after a key that
 starts a load, `wait 15` is kept whole, and the replay and the export wait as long.
+
+**`settle` or `wait`?** On a screen that ends up still (a static menu, a loading screen that
+ends in one), use `settle`: the export writes `wait_settled`, which waits as long as the machine
+needs, where a `wait` is as long as it took you, and breaks on a slower one. Use `wait` for a
+screen that never holds still (Cyberpunk's animated menus, a looping video): `settle` there says
+`settled: false` after `--max`, and the export writes the time it spent as a plain `wait`, with
+a comment saying it didn't settle. A settle that took *t* s exports as `wait_settled = 2t + 10`
+(whole seconds, so a machine twice as slow still passes); a restore's replay waits for the
+screen to settle again, up to that, and stops there if it doesn't.
 
 `export` writes the route as a manifest, and checks it with the manifest parser:
 

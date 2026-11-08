@@ -28,6 +28,7 @@ steps (#241), and exits LIVE_RELAUNCH when a restore wants the next life.
 """
 
 import json
+import math
 import os
 import re
 import shutil
@@ -1500,9 +1501,11 @@ class Driver:
         time.sleep(0.1)
         self.swaymsg("seat", "seat0", "cursor", "release", "button1")
 
-    def do_wait_settled(self, secs, record):
+    def settle_wait(self, secs):
         """Poll until the picture fills the window and holds still: past any
-        intro video, however long the renderer takes to get through it."""
+        intro video, however long the renderer takes to get through it. Gives
+        {settled, after_secs, last}; the last frame is left in settling.png.
+        The manifest's wait_settled and a live session's settle both use it."""
         path = os.path.join(self.run_dir, "settling.png")
         fill = self.manifest["window"]["min_fill"]
         start = time.monotonic()
@@ -1519,13 +1522,19 @@ class Driver:
                 last = analyze(image, (rect["x"], rect["y"], rect["width"], rect["height"]))
                 fills = last["box_w_pct"] >= fill["w"] and last["box_h_pct"] >= fill["h"]
                 if fills and prior is not None and changed_pct(prior, image) <= SETTLE_MAX_CHANGE_PCT:
-                    record["after_secs"] = round(time.monotonic() - start, 1)
-                    self.check("settled", True, f"after {record['after_secs']}s")
-                    return
+                    return {"settled": True, "after_secs": round(time.monotonic() - start, 1), "last": last}
                 prior = image
             self.sleep(SETTLE_POLL_SECS)
+        return {"settled": False, "after_secs": round(time.monotonic() - start, 1), "last": last}
+
+    def do_wait_settled(self, secs, record):
+        got = self.settle_wait(secs)
+        if got["settled"]:
+            record["after_secs"] = got["after_secs"]
+            self.check("settled", True, f"after {record['after_secs']}s")
+            return
         record["ok"] = False
-        self.check("settled", False, f"not in {secs:.0f}s; last frame {last}")
+        self.check("settled", False, f"not in {secs:.0f}s; last frame {got['last']}")
 
     def grab(self, path):
         """A screenshot of the output to `path`: (image, stats over the window),
@@ -2118,6 +2127,8 @@ class Driver:
                 outcome = "restore" if reply["ok"] else None
             elif cmd == "checkpoint":
                 reply = self.live_checkpoint(args)
+            elif cmd == "settle":
+                reply = self.live_settle(args)
             elif cmd in LIVE_STEP_CMDS:
                 reply = self.live_step(cmd, args)
             else:
@@ -2170,6 +2181,48 @@ class Driver:
         reply["secs"] = round(self.last_end - started, 2)
         reply["game_running"] = self.game.poll() is None
         return reply
+
+    def live_settle(self, args):
+        """Wait until the screen holds still, at most --max s: it settled, or it
+        never did (an animation, a video loop). On the path as wait_settled
+        or, if it never settled, as the plain wait it took."""
+        if self.game is None:
+            raise LiveError("no game: restore, or stop")
+        secs = live_settle_max(args)
+        started = time.monotonic()
+        gap = max(0.0, started - (self.last_end or started))
+        self.refresh_view()
+        if self.view is None:
+            raise LiveError("settle: no window")
+        got = self.settle_wait(secs)
+        spent = round(time.monotonic() - started, 1)
+        entry = {"gap": round(gap, 2), "life": self.life, "seq": self.session["seq"] + 1}
+        if got["settled"]:
+            entry["step"] = {"wait_settled": live_settle_timeout(spent)}
+            entry["settled_secs"] = spent
+        else:
+            entry["step"] = {"wait": spent}
+            entry["unsettled"] = True
+        path = os.path.join(self.cfg["shots_dir"], f"settle-{entry['seq']}.png")
+        shot = None
+        try:
+            shutil.copyfile(os.path.join(self.run_dir, "settling.png"), path)
+            shot = path
+        except OSError:
+            pass
+        entry["image"] = shot
+        self.session["path"].append(entry)
+        self.last_end = time.monotonic()
+        return {
+            "ok": True,
+            "settled": got["settled"],
+            "secs": spent,
+            "max": secs,
+            "path": shot,
+            "step": entry["step"],
+            "gap": entry["gap"],
+            "game_running": self.game.poll() is None,
+        }
 
     def live_screenshot(self, entry):
         name = entry["step"]["screenshot"]
@@ -2274,6 +2327,12 @@ class Driver:
                 why = self.live_replay_shot(entry)
                 if why:
                     result.update(ok=False, why=why)
+                    break
+            elif "wait_settled" in step:
+                # Waits for the screen again, as long as this machine needs;
+                # not a recorded sleep, and not a failed check of the run.
+                if not self.settle_wait(step["wait_settled"])["settled"]:
+                    result.update(ok=False, why=f"the screen didn't settle in {step['wait_settled']:.0f} s")
                     break
             else:
                 self.run_step(step)
@@ -2405,6 +2464,10 @@ LIVE_EXPECT_MIN_PCT = 2.0
 LIVE_EXPECT_CAP = 20.0
 # What a screenshot takes (grim, decode, stats), for a replay's estimate.
 LIVE_SHOT_SECS = 2.5
+# `settle` gives up after this long without --max: a static menu settles in a
+# few polls; an animated one never will, and this is what finding out costs.
+LIVE_SETTLE_MAX = 30.0
+LIVE_SETTLE_CAP = 600.0
 LIVE_INPUTS = ("key", "type", "hold", "click", "click_here", "move_to", "move_by", "scroll")
 LIVE_STEP_CMDS = ("screenshot", "wait", "key", "type", "hold", "click", "move_to", "move_by", "scroll")
 
@@ -2467,6 +2530,27 @@ def live_match_allowance(entry, match_pct):
     return round(match_pct + moving, 2), False
 
 
+def live_settle_max(args):
+    """`settle [--max SECS]`: the seconds to give it."""
+    if not args:
+        return LIVE_SETTLE_MAX
+    if len(args) != 2 or args[0] != "--max":
+        raise LiveError("usage: settle [--max SECS]")
+    try:
+        secs = float(args[1])
+    except ValueError:
+        raise LiveError(f"settle: --max must be a number, got {args[1]!r}") from None
+    if not 0 < secs <= LIVE_SETTLE_CAP:
+        raise LiveError(f"settle: --max must be over 0 and at most {LIVE_SETTLE_CAP:.0f} s")
+    return secs
+
+
+def live_settle_timeout(took):
+    """The wait_settled an export writes for a settle that took `took` s: twice
+    that and 10 s more, whole seconds, so a machine twice as slow still passes."""
+    return float(math.ceil(2 * took + 10))
+
+
 def live_count_steps(path):
     return sum(1 for e in path if "step" in e)
 
@@ -2481,6 +2565,8 @@ def live_replay_secs(path, session):
         step = e["step"]
         if "wait" in step:
             secs += step["wait"]
+        elif "wait_settled" in step:
+            secs += e.get("settled_secs", 0.0)
         elif "screenshot" in step:
             secs += LIVE_SHOT_SECS
         elif "hold" in step:
@@ -2662,6 +2748,8 @@ def live_export(session):
         step = e["step"]
         if "wait" in step:
             wait += step["wait"]
+            if e.get("unsettled"):
+                comments.append(f"# settle: the screen never settled; waited {_toml(step['wait'])} s instead")
             continue
         if "screenshot" in step:
             name = step["screenshot"]

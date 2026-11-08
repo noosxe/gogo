@@ -61,6 +61,8 @@
 #   key KEYSYM | type TEXT | hold KEYSYM MS
 #   click [X Y] | move_to X Y     X Y: pixels of the screenshot, or N% of the window
 #   move_by DX DY | scroll NOTCHES | wait SECS
+#   settle [--max SECS]           until the screen holds still (wait_settled), or
+#                                 "settled": false after SECS (default 30)
 #   checkpoint NAME               mark where it is; restore NAME goes back there:
 #   restore NAME [--wait SECS]    close, roll the disk back, relaunch, replay
 #   log [game|run|launch|sway|dxvk|vkd3d|proton] [--tail N]
@@ -1579,6 +1581,16 @@ cmd_live() {
         [ $# -eq 1 ] || usage
         GOGO_E2E_LIVE_DIR="$dir" helper live-call "$(awk -v s="$1" 'BEGIN { print s + 120 }')" wait "$1"
         ;;
+    settle)
+        local smax=30
+        case $# in
+        0) ;;
+        2) [ "$1" = --max ] || usage; smax="$2" ;;
+        *) usage ;;
+        esac
+        case "$smax" in '' | *[!0-9.]* | *.*.*) die "settle --max wants a number of seconds" 2 ;; esac
+        GOGO_E2E_LIVE_DIR="$dir" helper live-call "$(awk -v s="$smax" 'BEGIN { print s + 120 }')" settle "$@"
+        ;;
     *)
         [ -n "$dir" ] && [ -S "$dir/ctl.sock" ] || {
             jq -c '{ok:false, error:"not ready: \(.state): \(.detail) (status --wait)"}' "$state"
@@ -1897,11 +1909,17 @@ st_live() { # self-test dir
     st_live_cmd hold '.step.hold == {key: "b", ms: 200}' hold b 200
     st_live_cmd wait '.ok' wait 1
     st_live_cmd after '.name == "blue-2" and .since == "cp-red" and .change_pct >= 50' screenshot blue
+    # settle: a still screen settles; an animated one says so within --max.
+    st_live_cmd settle '.ok and .settled and .path != null and .step.wait_settled >= 10' settle --max 30
+    st_live_cmd animate '.ok' key a
+    st_live_cmd never '.ok and (.settled | not) and .secs >= 5 and .secs < 20 and (.step.wait != null)' settle --max 6
+    st_live_cmd calm '.ok' key s
     st_live_cmd quit '.ok' type q
     st_live_cmd quit-wait '.game_running | not' wait 1
     "$SELF" live "$ST_LID" export >"$out/export.toml" 2>>"$out/client.stderr" || st_fail "live: export failed"
     if ! { grep -q '^hold = { key = "b", ms = 200 }$' "$out/export.toml" && grep -q '^screenshot = "blue-2"$' "$out/export.toml" &&
         grep -q '^how = "self"$' "$out/export.toml" && grep -q '^expect_change = { from = "white", to = "red"' "$out/export.toml" &&
+        grep -q '^wait_settled = [0-9]*$' "$out/export.toml" && grep -q '^# settle: the screen never settled' "$out/export.toml" &&
         ! grep -q '"blue"' "$out/export.toml" && ! grep -q '^click' "$out/export.toml"; }; then
         st_fail "live: the export isn't the path after the restore: $(cat "$out/export.toml")"
     fi

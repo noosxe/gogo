@@ -959,6 +959,39 @@ class LiveExport(unittest.TestCase):
         self.assertEqual(m["override"], {"env": {"A": "1"}, "extra_args": ["-skip"]})
         self.assertEqual((m["window"]["width"], m["window"]["height"]), (800, 600))
 
+    def test_settle_exports_as_wait_settled_or_a_plain_wait(self):
+        text = helper.live_export(live_session([
+            shot("title", gap=1),
+            {"step": {"wait_settled": helper.live_settle_timeout(4.0)}, "gap": 2, "settled_secs": 4.0},
+            {"step": {"key": "space"}, "gap": 0.1},
+            {"step": {"wait": 6.5}, "gap": 0.1, "unsettled": True},
+            shot("menu", since="title", change=50.0, inputs=1),
+        ]))
+        self.assertEqual(self.steps(text), [
+            {"wait": 1.0},
+            {"screenshot": "title"},
+            {"wait": 2.0},
+            {"wait_settled": 18.0},  # 2 * 4 s + 10 s
+            {"key": "space"},
+            {"wait": 6.5},  # a settle that never did: the time it spent
+            {"screenshot": "menu"},
+            {"expect_change": {"from": "title", "to": "menu", "min": 20.0}},
+        ])
+        self.assertIn("# settle: the screen never settled", text)
+
+    def test_settle_args(self):
+        self.assertEqual(helper.live_settle_max([]), helper.LIVE_SETTLE_MAX)
+        self.assertEqual(helper.live_settle_max(["--max", "5"]), 5.0)
+        for bad in (["5"], ["--max"], ["--max", "x"], ["--max", "0"], ["--max", "9999"]):
+            with self.subTest(bad), self.assertRaises(helper.LiveError):
+                helper.live_settle_max(bad)
+        self.assertEqual(helper.live_settle_timeout(0.0), 10.0)
+        self.assertEqual(helper.live_settle_timeout(4.2), 19.0)
+
+    def test_replay_estimate_counts_a_settle_by_how_long_it_took(self):
+        path = [{"step": {"wait_settled": 18.0}, "gap": 0, "settled_secs": 4.0}]
+        self.assertEqual(helper.live_replay_secs(path, {"max_gap": 10.0}), 4)
+
     def test_a_game_that_quit_exits_by_itself(self):
         path = [shot("a"), {"step": {"key": "q"}, "gap": 1}]
         for more in ({"game_exit": {"code": 0, "life": 1}}, {"ended": {"how": "self", "code": 0}}):
