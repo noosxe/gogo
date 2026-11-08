@@ -480,7 +480,7 @@ there; `checkpoint`, `restore` and `export` work as always.
 A process with a Vulkan device, Wine's server and pressure-vessel's containers can't be
 frozen and thawed (CRIU doesn't do GPU contexts), so a checkpoint is a **route, not a
 process**: the session keeps the disk as it was right before the first launch, and the
-list of steps since. Each launch is a **life**: its own sandbox, sway, Xwayland, sound
+list of steps since (and the disk again at [a clean stop](#a-clean-stop-a-kept-disk-and-a-relaunch)). Each launch is a **life**: its own sandbox, sway, Xwayland, sound
 server and isolation checks. `restore NAME` ends the life (the launcher's own `TERM`
 teardown), and the supervisor sweeps, rolls the game's `gogo`, `home` and `xdg` back to the
 launch (`restore_base`, the same copy `--reuse-install` makes), and starts the next life,
@@ -510,7 +510,8 @@ whose driver replays NAME's steps before it listens again.
   makes the replay stop there, rightly, as the export would fail at it. Take the shot after
   the key that settles it.
 - **What a restore costs:** a relaunch (the sandbox, `launch.sh`, the game's own start)
-  plus the replay, about what `checkpoint` and `status` say as `replay_secs`. Cyberpunk 2077
+  plus the replay, about what `checkpoint` and `status` say as `replay_secs`, which counts
+  only what's past a kept disk. Cyberpunk 2077
   on the 4090: see [What it cost](#what-it-cost-cyberpunk-2077).
 - **Dead ends** (what was done after the checkpoint, before the restore) leave the route,
   and stay in `journal.jsonl`.
@@ -698,6 +699,39 @@ installer build and the whole route, without `--reuse-install`, passed in 13 min
 check ok, Quit Game's exit 0. It stays a draft beside `e2e/1423049311.toml`, which goes on
 through every Graphics page and Video for #232; the session's lessons go into that one by
 hand.
+
+**A clean-stop checkpoint** (#252; the RTX 4090, `--reuse-install`, `--launcher-skip`,
+`-skipStartScreen`, 2026-11-08). Past the agreement and analytics, Quit Game from the menu,
+`checkpoint agreed-clean`, a relaunch, a dead-end move, `restore agreed-clean`. From each
+restore's `last_restore`:
+
+| | a restore before: `agreed`, past the agreement (above, #257) | `restore agreed-clean` | `restore on-credits`, 8 steps past the stop |
+|---|---|---|---|
+| closing the game | about 8 s | 0.8 s | 0.8 s |
+| the disk's rollback | 0.1 s | 0.5 s | 0.2 s |
+| the sandbox (sway, the isolation checks, the GPU probes), then launch to the window | about 28 s | 18.4 s + 5.0 s | 18.0 s + 4.5 s |
+| the replay | about 131 s (96 s in another session) | 0 s, 0 steps of 32 | 73 s, 8 steps, 32 standing |
+| `restore` to `ready` | 102–158 s | **24.7 s** | 96.6 s |
+
+So the replay was the lever. What's left of a restore is mostly the sandbox's own start,
+and the game's window comes up within 5 s of the launch; that's still the window, not the
+menu. On the remembered disk Cyberpunk plays its intro from the window on (`space` skips it,
+after about 30 s), then goes straight to the menu, no agreement and no analytics. That's the
+other route the `relaunch` step keeps honest. The menu after a restore is about 40 s further
+on, which the 73 s of the `on-credits` replay includes. Quit Game exits 0 about 2 s after
+`Return`, nothing is left in the sandbox, and keeping the disk took 0.17 s (a snapshot).
+
+Back on the menu after `c` on analytics, `Left` and `Down` × 4 ended on My Rewards in this
+session, not Quit Game; `Left` went to the Phantom Liberty banner and `Up` from there to Quit
+Game, and screenshots caught that. After a relaunch the focus starts on Settings: `Down`,
+`Down`.
+
+The export's proof is a fresh `run` of it, the installer build and all, without
+`--reuse-install`: passed in 13 min 44 s, of which 8 min 39 s is the build, every check ok: the
+agreement, Quit Game's exit 0 after 1.5 s, `nothing_left_relaunch_1`, the window 4.5 s after
+the relaunch, then the menu on the remembered disk, and Quit Game again. It stays a draft:
+`e2e/1423049311.toml` goes on through every Graphics page and Video for #232, and a relaunch
+would add nothing there.
 
 ## Graphics
 
