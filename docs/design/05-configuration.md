@@ -121,13 +121,15 @@ interactions. `--library` on a `linux-app` or `mac-app` build is `library.dir`'s
 - `library.dir` gets the same expansion but stays unset when nothing sets it: unset is not a
   path, it means today's `games/` (`gogo config get library.dir` shows that dir). It is
   checked when a build is about to use it (`macapp::launch::Library::resolve`, exit 2, before
-  any download), because only then does it matter: refused inside `download.dir`, the
-  `runtimes/` or `renderers/` store or the depot cache (their walks and cleanups must not
-  meet a game), as the data root itself, and on anything gogo can't create a file and a
+  any download), because only then does it matter: refused inside `download.dir` or the depot
+  cache (their walks and cleanups must not meet a game), anywhere inside the data root (the
+  stores, `compat/`, `game-locations/`; `games/sub` would be found by neither `games/<gogid>`
+  nor a record), and on anything gogo can't create a file and a
   symlink in (a Proton or Wine prefix needs both). Symlinks are resolved first, so a link into
   the download dir is the download dir. The check leaves nothing behind: it probes the nearest
-  dir that exists and creates the library on the first build. On Linux `/tmp` is refused
-  too, for umu's private `/tmp` (design 18 §2.3). Naming `games/` itself is the same as unset.
+  dir that exists and creates the library on the first build. A `..` is resolved first, or
+  refused when it goes through a dir that doesn't exist. On Linux the plan then refuses `/tmp`,
+  as it does for any game's dir, for umu's private `/tmp` (design 18 §2.3). Naming `games/` itself is the same as unset.
 - Secret-bearing keys do not exist in config (tokens live in the TokenStore, 02 §3) — the file
   is safe to commit/share.
 

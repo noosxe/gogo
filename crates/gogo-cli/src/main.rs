@@ -444,11 +444,15 @@ async fn login(code: Option<String>, print_url: bool, force: bool) -> Result<i32
     Ok(cli::exit::OK)
 }
 
+fn load_config_quietly() -> Result<gogo::config::Loaded, ConfigError> {
+    match CONFIG_PATH.get().cloned().flatten() {
+        Some(path) => Config::load_from(&path, |k| std::env::var(k).ok()),
+        None => Config::load(),
+    }
+}
+
 fn load_config_from_env() -> Result<Config, ConfigError> {
-    let loaded = match CONFIG_PATH.get().cloned().flatten() {
-        Some(path) => Config::load_from(&path, |k| std::env::var(k).ok())?,
-        None => Config::load()?,
-    };
+    let loaded = load_config_quietly()?;
     for warning in &loaded.warnings {
         eprintln!("gogo: warning: unknown config key `{warning}` (ignored)");
     }
@@ -902,13 +906,9 @@ async fn depot_cmd(args: cli::DepotArgs) -> Result<i32, AppError> {
         with_dlcs: args.with_dlcs,
         password: args.password.clone(),
         dir: args.dir.clone(),
-        library: load_config_from_env()?
-            .library
-            .dir
-            .and_then(|d| {
-                gogo::macapp::launch::Library::resolve(std::path::Path::new(&d), None).ok()
-            })
-            .flatten(),
+        // Only the plan's cost line uses it: a bad one is said (on stderr) and
+        // doesn't stop a download. A build refuses it.
+        library: resolve_library(None).unwrap_or(None),
         limit,
         disk_check: !args.no_disk_check,
         dry_run: args.dry_run,
@@ -2028,7 +2028,8 @@ fn write_completions(
 fn resolve_library(
     flag: Option<std::path::PathBuf>,
 ) -> Result<Option<gogo::macapp::launch::Library>, AppError> {
-    let cfg = load_config_from_env()?;
+    // Quietly: the command's own load says what's wrong with the file.
+    let cfg = load_config_quietly()?.config;
     let Some(dir) = flag.or(cfg.library.dir.map(std::path::PathBuf::from)) else {
         return Ok(None);
     };

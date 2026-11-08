@@ -1014,8 +1014,9 @@ renderers, `compat/`, logs, config and tokens stay where they are.
 
 **Nothing configured is today's behaviour, byte for byte:** games in `<data_root>/games/`,
 `GOGO_HOME` and `XDG_DATA_HOME` as before, no record written, no migration, the same
-`launch.conf` and `state.toml`. A test holds this. The only byte that differs is the launcher
-template's, below, which every gogo upgrade rewrites anyway (R30).
+`launch.conf` and `state.toml`. A test holds this. What differs is the launcher templates, below,
+a few lines that do nothing for a game under `games/`: setup rewrites `launch.sh` as on every
+upgrade (R30), and a new Mac bundle gets the new launcher.
 
 **Finding a game: a record per game, not the setting.** The setting says where new games go.
 It can't say where old ones are, so a game outside `games/` has a location record:
