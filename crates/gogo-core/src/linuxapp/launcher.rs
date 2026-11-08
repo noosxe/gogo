@@ -370,6 +370,10 @@ run_step() {
         wait "$cpid"
         rc=$?
     done
+    # umu-run may have gone between the interrupted wait and the test above,
+    # already reaped: bash keeps a reaped child's status for this wait.
+    wait "$cpid"
+    rc=$?
     printf '%s' "$rc" >"$GAME_MARK.code.tmp" && mv -f "$GAME_MARK.code.tmp" "$GAME_MARK.code"
     exit "$rc"
 }
