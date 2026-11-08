@@ -790,5 +790,244 @@ class TreeCheck(unittest.TestCase):
         self.assertIn("not a directory", helper.tree_problems(alias, self.run, [self.root], self.uid)[0])
 
 
+class LiveSteps(unittest.TestCase):
+    """Live sessions (#241): the manifest's new steps, and commands into steps."""
+
+    RECT = {"x": 100, "y": 0, "width": 800, "height": 600}
+
+    def test_hold_and_move_to(self):
+        m = helper.parse_manifest(
+            """
+            gogid = 1
+            [[step]]
+            hold = { key = "w", ms = 500 }
+            [[step]]
+            move_to = { x = 25, y = 50.5 }
+            """
+        )
+        self.assertEqual(
+            m["steps"], [{"hold": {"key": "w", "ms": 500}}, {"move_to": {"x": 25.0, "y": 50.5}}]
+        )
+
+    def test_hold_and_move_to_are_checked(self):
+        for step in (
+            'hold = { key = "w" }',
+            'hold = { key = "W", ms = 5 }',
+            'hold = { key = "w", ms = 0 }',
+            'hold = { key = "w", ms = 1.5 }',
+            'hold = { key = "w", ms = 10001 }',
+            'move_to = { x = 101, y = 1 }',
+            'move_to = { x = 1 }',
+        ):
+            with self.subTest(step), self.assertRaises(helper.ManifestError):
+                helper.parse_manifest(f"gogid = 1\n[[step]]\n{step}\n")
+
+    def test_live_manifest_needs_no_steps(self):
+        with self.assertRaises(helper.ManifestError):
+            helper.parse_manifest("gogid = 1\n")
+        self.assertEqual(helper.parse_manifest("gogid = 1\n", live=True)["steps"], [])
+        # Steps there are checked, then dropped: the session finds its own.
+        self.assertEqual(helper.parse_manifest(MINIMAL, live=True)["steps"], [])
+        with self.assertRaises(helper.ManifestError):
+            helper.parse_manifest("gogid = 1\n[[step]]\nkey = \"Nope\"\n", live=True)
+
+    def test_pixels_are_a_percent_of_the_window(self):
+        step = helper.live_raw_step("click", ["500", "150"], self.RECT)
+        self.assertEqual(step, {"click": {"x": 50.0, "y": 25.0}})
+        self.assertEqual(helper.live_raw_step("move_to", ["10%", "90%"], None), {"move_to": {"x": 10.0, "y": 90.0}})
+        self.assertEqual(helper.live_raw_step("click", [], None), {"click_here": True})
+
+    def test_outside_the_window_or_not_a_number(self):
+        for cmd, args, rect in (
+            ("click", ["50", "10"], RECT),
+            ("click", ["500", "x"], RECT),
+            ("click", ["500", "10"], None),
+            ("move_to", ["1"], RECT),
+            ("hold", ["w"], RECT),
+            ("scroll", ["two"], RECT),
+            ("wait", [], RECT),
+            ("dance", [], RECT),
+        ):
+            with self.subTest(cmd=cmd, args=args), self.assertRaises(helper.LiveError):
+                helper.live_raw_step(cmd, args, rect)
+
+    def test_commands_become_steps(self):
+        for cmd, args, want in (
+            ("key", ["space"], {"key": "space"}),
+            ("type", ["Hi!"], {"type": "Hi!"}),
+            ("hold", ["w", "300"], {"hold": {"key": "w", "ms": 300}}),
+            ("move_by", ["-3000", "2.5"], {"move_by": {"x": -3000, "y": 2.5}}),
+            ("scroll", ["-3"], {"scroll": -3}),
+            ("wait", ["1.5"], {"wait": 1.5}),
+            ("screenshot", [], {"screenshot": "shot"}),
+        ):
+            with self.subTest(cmd=cmd):
+                raw = helper.live_raw_step(cmd, args, self.RECT)
+                self.assertEqual(raw, want)
+                helper._step(raw, 0, set())  # and the manifest takes it
+
+    def test_names_and_gaps(self):
+        self.assertEqual(helper.live_unique_name("a", ["b"]), "a")
+        self.assertEqual(helper.live_unique_name("a", ["a", "a-2"]), "a-3")
+        self.assertEqual(helper.live_kept_gap({"gap": 0.1}, 10), 0)
+        # A pause between two keys is kept: a game can drop keys sent at once.
+        self.assertEqual(helper.live_kept_gap({"gap": 0.3}, 10), 0.3)
+        self.assertEqual(helper.live_kept_gap({"gap": 3.21}, 10), 3.2)
+        self.assertEqual(helper.live_kept_gap({"gap": 99}, 10), 10)
+        # A late match in a replay waits longer, whatever the cap.
+        self.assertEqual(helper.live_kept_gap({"gap": 99, "extra": 4}, 10), 14)
+        self.assertEqual(helper.live_kept_gap({"gap": 0.1, "extra": 2}, 10), 2)
+
+    def test_a_moving_picture_is_matched_loosely(self):
+        self.assertEqual(helper.live_match_allowance({}, 15), (15, False))
+        self.assertEqual(helper.live_match_allowance({"moving_pct": 3.5}, 15), (18.5, False))
+        # A video: anything there will do, as long as it's a picture.
+        self.assertEqual(helper.live_match_allowance({"moving_pct": 40}, 15), (None, True))
+
+    def test_last_shot_counts_the_inputs_after_it(self):
+        path = [
+            {"step": {"screenshot": "a"}},
+            {"step": {"key": "x"}},
+            {"step": {"wait": 1}},
+            {"mark": "checkpoint", "name": "c"},
+            {"step": {"click_here": True}},
+        ]
+        self.assertEqual(helper.live_last_shot(path), ("a", 2))
+        self.assertEqual(helper.live_last_shot([]), (None, 0))
+
+
+RECT = LiveSteps.RECT
+
+
+def live_session(path, **more):
+    manifest = helper.parse_manifest(
+        "gogid = 7\ntitle = \"Seven\"\n[window]\nresolution = \"800x600\"\n"
+        "[override]\nextra_args = [\"-skip\"]\n[override.env]\nA = \"1\"\n",
+        live=True,
+    )
+    session = {
+        "id": "7-x", "manifest": manifest, "max_gap": 10.0, "match_pct": 15.0, "path": path,
+        "checkpoints": {}, "names": [], "restores": [{"checkpoint": "c"}], "seq": 0,
+        "replay": None, "last_replay": None, "game_exit": None, "ended": None,
+    }
+    session.update(more)
+    return session
+
+
+def shot(name, since=None, change=None, inputs=0, nonblack=50.0, fill=100.0, gap=0.0):
+    return {
+        "step": {"screenshot": name}, "gap": gap, "since": since, "change_pct": change,
+        "inputs_since": inputs,
+        "stats": {"nonblack_pct": nonblack, "box_w_pct": fill, "box_h_pct": fill},
+    }
+
+
+class LiveExport(unittest.TestCase):
+    def steps(self, text):
+        return helper.parse_manifest(text)["steps"]
+
+    def test_route_with_waits_and_checks(self):
+        text = helper.live_export(live_session([
+            shot("black", nonblack=0.2, gap=30),            # dropped: not_black would fail
+            shot("title", gap=4),
+            {"step": {"key": "space"}, "gap": 25},          # thinking: cut to 10
+            {"step": {"wait": 15}, "gap": 0.1},
+            shot("agreement", since="title", change=80.0, inputs=1, gap=0.1),
+            {"mark": "checkpoint", "name": "agreed"},
+            {"step": {"key": "Down"}, "gap": 2, "extra": 1.5},
+            shot("same", since="agreement", change=1.0, inputs=1),  # too small a change
+            shot("small", since="same", change=30.0, fill=50.0),    # no input between
+        ]))
+        self.assertIn('extra_args = ["-skip"]', text)
+        self.assertIn("# checkpoint 'agreed'", text)
+        self.assertIn('how = "signal"', text)
+        self.assertEqual(self.steps(text), [
+            {"wait": 16.5},  # 30 cut to 10, the black shot's grab, 4
+            {"screenshot": "title"},
+            {"wait": 10.0},
+            {"key": "space"},
+            {"wait": 15.0},  # an explicit wait is kept whole
+            {"screenshot": "agreement"},
+            {"expect_change": {"from": "title", "to": "agreement", "min": 20.0}},
+            {"wait": 3.5},
+            {"key": "Down"},
+            {"screenshot": "same"},
+            {"screenshot": "small", "min_fill": False},
+        ])
+        m = helper.parse_manifest(text)
+        self.assertEqual(m["override"], {"env": {"A": "1"}, "extra_args": ["-skip"]})
+        self.assertEqual((m["window"]["width"], m["window"]["height"]), (800, 600))
+
+    def test_a_game_that_quit_exits_by_itself(self):
+        path = [shot("a"), {"step": {"key": "q"}, "gap": 1}]
+        for more in ({"game_exit": {"code": 0, "life": 1}}, {"ended": {"how": "self", "code": 0}}):
+            with self.subTest(more):
+                m = helper.parse_manifest(helper.live_export(live_session(path, **more)))
+                self.assertEqual(m["exit"]["how"], "self")
+        m = helper.parse_manifest(helper.live_export(live_session(path, ended={"how": "self", "code": 2})))
+        self.assertEqual(m["exit"]["code"], 2)
+
+    def test_an_empty_route_is_still_a_manifest(self):
+        self.assertEqual(self.steps(helper.live_export(live_session([]))), [{"wait": 1.0}])
+
+    def test_a_command_manifest_keeps_its_commands(self):
+        session = live_session([shot("a")])
+        session["manifest"] = helper.parse_manifest(
+            'command = ["xterm", "-e", "say \\"hi\\"\\n"]\nbuild_command = ["true"]\n', live=True
+        )
+        m = helper.parse_manifest(helper.live_export(session))
+        self.assertEqual(m["command"], ["xterm", "-e", 'say "hi"\n'])
+        self.assertEqual(m["build_command"], ["true"])
+
+
+class LiveSocket(unittest.TestCase):
+    """The control socket: bound through the dir's fd (a long path is fine), ours
+    only, one JSON line each way."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        # Past a socket address's 108 bytes.
+        self.dir = os.path.join(self.tmp.name, "x" * 60, "y" * 60, "live")
+        cfg = {"manifest": helper.parse_manifest(MINIMAL), "run_dir": self.tmp.name,
+               "results_dir": self.tmp.name, "live": {"dir": self.dir}}
+        self.driver = helper.Driver(cfg)
+        self.driver.live_listen()
+
+    def tearDown(self):
+        self.driver.srv.close()
+        self.tmp.cleanup()
+
+    def test_round_trip(self):
+        import threading
+
+        got = {}
+
+        def client():
+            got["reply"] = helper.live_call(self.dir, {"cmd": "key", "args": ["a"]}, 5)
+
+        t = threading.Thread(target=client)
+        t.start()
+        conn, req = None, None
+        for _ in range(50):
+            accepted = self.driver.live_accept(0.1)
+            if accepted:
+                conn, req = accepted
+                break
+        self.assertEqual(req, {"cmd": "key", "args": ["a"]})
+        self.driver.live_reply(conn, {"ok": True})
+        t.join(5)
+        self.assertEqual(got["reply"], {"ok": True})
+        sock = os.path.join(self.dir, helper.LIVE_SOCKET)
+        self.assertEqual(os.stat(sock).st_mode & 0o077, 0)
+        self.assertEqual(os.stat(self.dir).st_mode & 0o777, 0o700)
+
+    def test_not_a_socket_is_refused(self):
+        os.unlink(os.path.join(self.dir, helper.LIVE_SOCKET))
+        with open(os.path.join(self.dir, helper.LIVE_SOCKET), "w"):
+            pass
+        with self.assertRaises(OSError):
+            helper.live_call(self.dir, {"cmd": "status", "args": []}, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

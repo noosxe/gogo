@@ -7,11 +7,20 @@
 #   scripts/linux-e2e.sh run <gogid> [opts]   one game, from e2e/<gogid>.toml
 #   scripts/linux-e2e.sh self-test            the harness itself: a plain xterm,
 #                                             teardown on TERM, INT, KILL, timeout,
-#                                             the build's display, the null audio sink
-#   scripts/linux-e2e.sh cleanup [--prune-installed NAME|all]
-#                                             remove scratch of dead runs; list the
+#                                             the build's display, the null audio
+#                                             sink, a live session
+#   scripts/linux-e2e.sh cleanup [--prune-installed NAME|all] [--stop-live]
+#                                             remove scratch of dead runs; stop
+#                                             orphaned live sessions (all of them
+#                                             with --stop-live); list the
 #                                             installed bases (--reuse-install) and
 #                                             their size, and prune the ones named
+#   scripts/linux-e2e.sh live start <gogid> [run opts] [live opts]
+#                                             a live session an agent drives
+#                                             (#241): prints its id, and goes on
+#                                             in the background
+#   scripts/linux-e2e.sh live <id> CMD …      one command to it (below)
+#   scripts/linux-e2e.sh live list            the sessions on this cache
 #
 # run options:
 #   --manifest FILE   manifest (default e2e/<gogid>.toml)
@@ -35,6 +44,29 @@
 #                     manifest rounds: a PR's final run and CI build afresh
 #   --out DIR         results root (default target/linux-e2e/results)
 #
+# live start options, beside run's (--secs aside): the manifest is optional,
+# and only its [window], [env], [override] and [exit] count:
+#   --env K=V         into [override.env]: gogo's `linux-app env set`, per launch
+#   --arg A           into [override].extra_args: `linux-app args`, repeatable
+#   --idle-secs N     stop after N s with no command (default 900)
+#   --max-secs N      stop N s after taking the cache lock, at the latest (5400)
+#   --max-gap N       gaps between commands kept up to N s (default 10)
+#   --match-pct N     a replayed screenshot matches at most N% different (15)
+#
+# live <id> commands, each one answers as JSON (exit 0 ok, 1 failed, 3 the
+# session isn't there, 4 not ready yet):
+#   status [--wait SECS]          its state; with --wait, until it's ready
+#   screenshot [NAME]             a PNG under target/, and the change % since
+#                                 the last one
+#   key KEYSYM | type TEXT | hold KEYSYM MS
+#   click [X Y] | move_to X Y     X Y: pixels of the screenshot, or N% of the window
+#   move_by DX DY | scroll NOTCHES | wait SECS
+#   checkpoint NAME               mark where it is; restore NAME goes back there:
+#   restore NAME [--wait SECS]    close, roll the disk back, relaunch, replay
+#   log [game|run|launch|sway|dxvk|vkd3d|proton] [--tail N]
+#   export                        the path so far as a manifest, on stdout
+#   stop                          close the game, check, tear down: the summary
+#
 # Output: progress on stderr; the summary JSON on stdout, then on the LAST line
 # the path of summary.json. Exit codes: 0 = every check passed; 1 = a check
 # failed; 2 = usage; 3 = harness problem (says nothing about the game).
@@ -42,7 +74,10 @@
 # Agents launch real games only through this script (AGENTS.md).
 set -euo pipefail
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# A live session's supervisor runs from a copy of this script (live_start),
+# which says where the checkout is: bash reads a script as it goes, and an
+# edit under a long session would land mid-function.
+REPO="${GOGO_E2E_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 SELF="$REPO/scripts/linux-e2e.sh"
 HELPER_SRC="$REPO/scripts/linux-e2e-helper.py"
 ROOT="$REPO/target/linux-e2e"
@@ -257,20 +292,9 @@ teardown() {
         NET_PID=""
     fi
     collect_logs
-    local left="" tries=10 pid killed=""
-    while [ "$tries" -gt 0 ]; do
-        tries=$((tries - 1))
-        left="$(leftovers)"
-        [ -n "$left" ] || break
-        sleep 0.5
-    done
-    if [ -n "$left" ]; then
-        log "left behind: $(printf '%s' "$left" | tr '\n' ';')"
-        killed="$left"
-        while read -r pid _; do kill -KILL "$pid" 2>/dev/null || true; done <<<"$left"
-        sleep 1
-        left="$(leftovers)"
-    fi
+    sweep
+    local left="$SWEPT_LEFT" killed="$SWEPT_KILLED"
+    [ -z "${LIVE:-}" ] || live_finish
     local deleted=false
     if [ "$KEEP" = 1 ]; then
         if [ "${REUSE:-0}" = 1 ] && [ -d "$RUN" ] && mv -T "$RUN" "$INSTALLED/.runs/$SLUG"; then
@@ -284,6 +308,28 @@ teardown() {
     clear_holder
     write_summary "$status" "$killed" "$left" "$deleted"
     exit "$FINAL_EXIT"
+}
+
+# What's left of the run's processes once its sandbox is gone: wait a little
+# for them, then kill. Sets SWEPT_KILLED (what had to be killed) and
+# SWEPT_LEFT (what even that didn't end).
+sweep() {
+    local left="" tries=10 pid
+    SWEPT_KILLED=""
+    while [ "$tries" -gt 0 ]; do
+        tries=$((tries - 1))
+        left="$(leftovers)"
+        [ -n "$left" ] || break
+        sleep 0.5
+    done
+    if [ -n "$left" ]; then
+        log "left behind: $(printf '%s' "$left" | tr '\n' ';')"
+        SWEPT_KILLED="$left"
+        while read -r pid _; do kill -KILL "$pid" 2>/dev/null || true; done <<<"$left"
+        sleep 1
+        left="$(leftovers)"
+    fi
+    SWEPT_LEFT="$left"
 }
 
 on_signal() {
@@ -347,7 +393,7 @@ write_summary() { # entry-status killed left deleted
         --arg results "$RESULTS" --arg scratch "$RUN" --argjson deleted "$deleted" \
         --arg keep "$KEEP" --arg left "$left" --arg killed "$killed" --arg excerpt "$excerpt" \
         --arg runtime "${STATE_RUNTIME:-}" --arg date "$(date -u +%F)" \
-        --arg installer "${INSTALLER_FILE##*/}" --argjson reuse "$(reuse_json)" '
+        --arg installer "${INSTALLER_FILE##*/}" --argjson reuse "$(reuse_json)" --argjson live "$(live_json)" '
         ($r[0]) as $res
         | ($b[0]) as $bld
         | (($bld.checks // []) | map(.name = "build_" + .name)) as $build_checks
@@ -371,8 +417,10 @@ write_summary() { # entry-status killed left deleted
            doctor:($res.doctor // null),
            log_excerpt:$excerpt,
            cleanup:{left:$left, swept:$killed, scratch:$scratch, scratch_deleted:$deleted, kept:($keep == "1")},
-           # A compat entry stands on a fresh build, never a reused one.
+           live:$live,
+           # A compat entry stands on a fresh run, never a reused base or a live session.
            tested_entry:(if $ok and $gogid != "self-test" and $runtime != "" and ($reuse.reused // false | not)
+                            and $live == null
                          then {runtime:$runtime, host:("headless-sway/"+$gpu), date:$date}
                          else null end),
            results:$results}' >"$summary"
@@ -591,6 +639,30 @@ installed_dir() {
 # GOGO_E2E_LOCK_DIR is the self-test's own dir, under $ROOT.
 CACHE_HOLDER=""
 cache_lock() { # run (waits) | cleanup (refuses when busy)
+    lock_dir
+    exec 9>>"$LOCK_REAL/.lock"
+    if ! flock -n 9; then
+        log "the cache $LOCK_REAL is busy: $(holder_text)"
+        [ "$1" != cleanup ] || die "a run is going: not cleaning up under it"
+        log "waiting for it"
+        if [ -n "${LIVE:-}" ]; then
+            live_state waiting "for the cache lock: $(holder_text)"
+            # In the background, so a stop (TERM) gets through. The lock is
+            # the open file's, ours too once the child has it.
+            flock 9 &
+            LOCK_WAITER=$!
+            wait "$LOCK_WAITER"
+            LOCK_WAITER=""
+        else
+            flock 9
+        fi
+    fi
+    write_holder starting
+}
+
+# The cache's dir, resolved and checked: LOCK_REAL, and CACHE_HOLDER in it.
+# Live sessions keep their registry beside the lock, in live/ (#241).
+lock_dir() {
     local d="${GOGO_E2E_LOCK_DIR:-$ROOT/cache}" real
     if [ -n "${GOGO_E2E_LOCK_DIR:-}" ]; then
         case "$d" in "$ROOT"/?*) ;; *) die "the lock dir must be under $ROOT: $d" 2 ;; esac
@@ -606,34 +678,34 @@ cache_lock() { # run (waits) | cleanup (refuses when busy)
     fi
     CACHE_HOLDER="$real/.lock.holder"
     if [ -L "$real/.lock" ] || [ -L "$CACHE_HOLDER" ]; then die "$real/.lock is a link" 3; fi
-    exec 9>>"$real/.lock"
-    if ! flock -n 9; then
-        log "the cache $real is busy: $(holder_text)"
-        [ "$1" != cleanup ] || die "a run is going: not cleaning up under it"
-        log "waiting for it"
-        flock 9
-    fi
-    write_holder starting
+    LOCK_REAL="$real"
 }
 
 # Who has the lock, from the holder file. Information only: a dead pid means
 # the file is stale (a SIGKILL), and the flock decides.
 holder_text() {
-    local repo="" run="" pid="" since="" k v
+    local repo="" run="" pid="" since="" live="" idle="" k v
     if [ -f "$CACHE_HOLDER" ] && [ ! -L "$CACHE_HOLDER" ]; then
         while IFS='=' read -r k v; do
-            case "$k" in repo) repo="$v" ;; run) run="$v" ;; pid) pid="$v" ;; started) since="$v" ;; esac
+            case "$k" in
+            repo) repo="$v" ;; run) run="$v" ;; pid) pid="$v" ;; started) since="$v" ;;
+            live_until) live="$v" ;; live_idle) idle="$v" ;;
+            esac
         done <"$CACHE_HOLDER"
     fi
     case "$pid" in '' | *[!0-9]*) printf 'held, but its holder left no note'; return 0 ;; esac
     local gone=""
     if ! kill -0 "$pid" 2>/dev/null; then gone=" (pid $pid is gone: the note may be stale)"; fi
-    printf 'held by %s, %s, pid %s since %s%s' "${repo:-?}" "${run:-?}" "$pid" "${since:-?}" "$gone"
+    [ -z "$live" ] || live=", a live session: it ends after ${idle:-?} s with no command, by $live at the latest"
+    printf 'held by %s, %s, pid %s since %s%s%s' "${repo:-?}" "${run:-?}" "$pid" "${since:-?}" "$live" "$gone"
 }
 
 write_holder() { # run-id
     local tmp="$CACHE_HOLDER.$$"
-    printf 'repo=%s\nrun=%s\npid=%s\nstarted=%s\n' "$REPO" "$1" "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$tmp"
+    { printf 'repo=%s\nrun=%s\npid=%s\nstarted=%s\n' "$REPO" "$1" "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      [ -z "${LIVE_DEADLINE:-}" ] ||
+          printf 'live_until=%s\nlive_idle=%s\n' "$(date -u -d "@$LIVE_DEADLINE" +%Y-%m-%dT%H:%M:%SZ)" "$LIVE_IDLE"
+    } >"$tmp"
     mv -f "$tmp" "$CACHE_HOLDER" || rm -f "$tmp"
 }
 
@@ -693,12 +765,21 @@ gogo_identity() {
 
 # Reflinks where $RUN and the bases share a filesystem that has them (btrfs,
 # XFS), a full copy elsewhere (CI's ext4). Sets COPY_MODE.
-probe_reflinks() {
-    local probe="$INSTALLED/.probe-$$"
+probe_reflinks() { # [dir: default the bases']
+    local to="${1:-$INSTALLED}" probe
+    probe="$to/.probe-$$"
     printf 'probe\n' >"$RUN/harness/.probe"
     if cp --reflink=always "$RUN/harness/.probe" "$probe" 2>/dev/null; then COPY_MODE=reflink
-    else COPY_MODE=copy; log "no reflinks between $RUN and $INSTALLED: full copies"; fi
+    else COPY_MODE=copy; log "no reflinks between $RUN and $to: full copies"; fi
     rm -f "$probe" "$RUN/harness/.probe"
+}
+
+# The run's gogo, home and xdg into `to`/: what a base holds.
+copy_run_tree() { # to
+    local d
+    for d in gogo home xdg; do
+        mkdir "$1/$d" && copy_tree "$RUN/$d" "$1/$d" || return 1
+    done
 }
 
 copy_tree() { # from to
@@ -730,12 +811,18 @@ tree_problem() { # tree
     printf '%s' "${out:-tree-check failed}" | head -n 5 | tr '\n' ';'
 }
 
-# A copy-on-write copy of the base into this run's scratch.
+# A copy-on-write copy of the base into this run's scratch: before a reused
+# run's launch, and a live session's restore (#241), over what a life left.
 restore_base() { # base
-    local base="$1" t0
+    local base="$1" t0 d
     t0="$(date +%s.%N)"
-    # Only what seed_scratch just made: the base has the same, and the build's too.
-    rm -rf "${RUN:?}/gogo" "${RUN:?}/home" "${RUN:?}/xdg"
+    # What seed_scratch made, or a game left: the base has the same dirs.
+    # Proton leaves read-only ones.
+    for d in gogo home xdg; do
+        [ -e "$RUN/$d" ] || continue
+        chmod -R u+rwX "${RUN:?}/$d" 2>/dev/null || true
+        rm -rf "${RUN:?}/$d" || return 1
+    done
     copy_tree "$base/tree" "$RUN"
     COPY_SECS="$(awk -v a="$t0" -v b="$(date +%s.%N)" 'BEGIN { printf "%.1f", b - a }')"
 }
@@ -754,12 +841,8 @@ save_base() { # build-secs
     rm -rf "$tmp"
     mkdir -p "$tmp/tree"
     log "saving the installed base: $base ($COPY_MODE)"
-    local d
     problems=""
-    for d in gogo home xdg; do
-        mkdir "$tmp/tree/$d"
-        copy_tree "$RUN/$d" "$tmp/tree/$d" || { problems="the copy failed (disk full?)"; break; }
-    done
+    copy_run_tree "$tmp/tree" || problems="the copy failed (disk full?)"
     [ -n "$problems" ] || problems="$(tree_problem "$tmp/tree")"
     if [ -n "$problems" ]; then
         chmod -R u+rwX "$tmp" 2>/dev/null || true
@@ -804,8 +887,22 @@ list_installed() {
 cmd_run() {
     local target="" manifest="" gpu="" expect_gpu="" secs=600 out="" installer=""
     GOGO="" KEEP=0 FRESH=0 REUSE=0 INSTALLER_DIR="" INSTALLER_FILE=""
+    # A live session's own (#241): only through `live start`.
+    local -a live_env=() live_args=()
+    LIVE_IDLE=900 LIVE_MAX=5400 LIVE_GAP=10 LIVE_MATCH=15
     while [ $# -gt 0 ]; do
         case "$1" in
+        --env | --arg | --idle-secs | --max-secs | --max-gap | --match-pct)
+            [ -n "${LIVE:-}" ] || { log "$1 is for live sessions: live start"; usage; }
+            case "$1" in
+            --env) live_env+=("${2:?}") ;;
+            --arg) live_args+=("${2?}") ;;
+            --idle-secs) LIVE_IDLE="${2:?}" ;;
+            --max-secs) LIVE_MAX="${2:?}" ;;
+            --max-gap) LIVE_GAP="${2:?}" ;;
+            --match-pct) LIVE_MATCH="${2:?}" ;;
+            esac
+            shift 2 ;;
         --manifest) manifest="${2:?}"; shift 2 ;;
         --gpu) gpu="${gpu:+$gpu,}${2:?}"; shift 2 ;;
         --expect-gpu) expect_gpu="${2:?}"; shift 2 ;;
@@ -823,9 +920,18 @@ cmd_run() {
     done
     [ -n "$target" ] || usage
     case "$secs" in '' | *[!0-9]*) die "--secs wants a number" 2 ;; esac
-    [ -n "$manifest" ] || manifest="$REPO/e2e/$target.toml"
-    [ -f "$manifest" ] || die "no manifest: $manifest" 2
     case "$target" in *[!A-Za-z0-9._-]* | .*) die "not a game id: $target" 2 ;; esac
+    [ -n "$manifest" ] || manifest="$REPO/e2e/$target.toml"
+    if [ -n "${LIVE:-}" ]; then
+        live_options
+        # A game with no manifest yet: its window and exit take the defaults.
+        if [ ! -f "$manifest" ] && [ "$manifest" = "$REPO/e2e/$target.toml" ]; then
+            case "$target" in *[!0-9]* | 0*) die "no manifest for $target, and it isn't a GOG id" 2 ;; esac
+            manifest="$LIVE_RESULTS/live/base.toml"
+            printf 'gogid = %s\n' "$target" >"$manifest"
+        fi
+    fi
+    [ -f "$manifest" ] || die "no manifest: $manifest" 2
     TARGET="$target"
     [ "$REUSE" = 0 ] || [ "$FRESH" = 0 ] || die "--reuse-install keeps bases in the cache: not with --no-cache" 2
     if [ -n "$installer" ]; then
@@ -839,7 +945,14 @@ cmd_run() {
     resolve_tools
     # The builds need nix; everything after them runs on the pinned PATH.
     local needs_gogo=1
-    MANIFEST_JSON="$(PATH="$TOOLS/bin" helper manifest "$manifest")" || die "bad manifest" 2
+    if [ -n "${LIVE:-}" ]; then
+        # Its steps are the session's to find; --env and --arg join its [override].
+        MANIFEST_JSON="$(PATH="$TOOLS/bin" helper manifest --live "$manifest")" || die "bad manifest" 2
+        MANIFEST_JSON="$(live_override "$MANIFEST_JSON" "${#live_env[@]}" "${live_env[@]+"${live_env[@]}"}" \
+            "${live_args[@]+"${live_args[@]}"}")" || exit
+    else
+        MANIFEST_JSON="$(PATH="$TOOLS/bin" helper manifest "$manifest")" || die "bad manifest" 2
+    fi
     GOGID="$(PATH="$TOOLS/bin" jq -r '.gogid // empty' <<<"$MANIFEST_JSON")"
     TITLE="$(PATH="$TOOLS/bin" jq -r .title <<<"$MANIFEST_JSON")"
     if [ -n "$GOGID" ]; then
@@ -880,12 +993,17 @@ cmd_run() {
     # One run at a time over a cache, whichever checkout: they share the cache
     # and the GPU.
     mkdir -p "$ROOT/runs"
+    [ -z "${LIVE:-}" ] || live_state waiting "for the cache lock"
     cache_lock run
+    # A live session's hard cap counts from the lock: what other runs may wait
+    # for it, and what its holder note says.
+    [ -z "${LIVE:-}" ] || LIVE_DEADLINE=$(($(date +%s) + LIVE_MAX))
     remove_dead_runs
 
     local stamp slug
     stamp="$(date -u +%Y%m%dT%H%M%SZ)"
     slug="$target-$stamp-$$"
+    [ -z "${LIVE:-}" ] || slug="$LIVE_ID"
     SLUG="$slug"
     RUN_ID="linux-e2e-$slug"
     write_holder "$RUN_ID"
@@ -897,10 +1015,15 @@ cmd_run() {
         [ ! -e "$RUN" ] || die "$RUN is in the way (a kept run killed hard?): delete it by hand" 3
     fi
     RESULTS="${out:-$ROOT/results}/$slug"
+    [ -z "${LIVE:-}" ] || RESULTS="$LIVE_RESULTS"
     mkdir -p "$RESULTS/shots" "$RUN"
     RESULTS="$(readlink -f "$RESULTS")"
     INTERRUPTED="" INTERRUPT_COUNT=0 SANDBOX_PID="" NET_PID="" MODE_NOW=build
     trap teardown EXIT
+    if [ -n "${LIVE:-}" ]; then
+        live_register
+        log "live session $LIVE_ID: idle limit $LIVE_IDLE s, ends by $(date -d "@$LIVE_DEADLINE" +%T) at the latest"
+    fi
     trap 'on_signal INT' INT
     trap 'on_signal TERM' TERM
     trap 'on_signal HUP' HUP
@@ -976,7 +1099,8 @@ cmd_run() {
             "${SOFTWARE_ENV[@]/#/@e:}"
         start_sandbox build "$RESULTS/build-sandbox.log" python3 -I "$RUN/harness/helper.py" drive "$RUN/build.json"
         local build_rc=0
-        supervise 0 || build_rc=$?
+        [ -z "${LIVE:-}" ] || live_state building "the game, on a display of its own (build.log)"
+        supervise "${LIVE_DEADLINE:-0}" || build_rc=$?
         if [ "$build_rc" = 3 ]; then
             INFRA_ERROR="no build display: $(jq -r '[.checks[] | select(.ok | not) | .name + ": " + .detail][0] // "see build-sandbox.log"' "$RESULTS/build-result.json" 2>/dev/null || tail -n 3 "$RESULTS/build-sandbox.log" | tr '\n' ' ')"
             exit 3
@@ -1014,6 +1138,10 @@ cmd_run() {
         --argjson f "$forbidden" --arg i "${INSTALLER_FILE:+$INSTALLER_MOUNT}" --argjson p "$pre_launch" \
         '{launch:$l, launch_cwd:$cwd, doctor:$d, game_log:$g, pre_launch:$p,
           forbidden_paths:($f + (if $i == "" then [] else [$i] end))}')"
+    if [ -n "${LIVE:-}" ]; then
+        live_game_phase "$game_extra"
+        exit 0
+    fi
     drive_config "$RUN/drive.json" "$game_extra" "$GPU_LABEL" "$GPU_EXPECT" "${GPU_WANT:-}" "$GPUS_JSON" \
         "${GPU_NODES[@]/#/@n:}" "${GAME_ENV[@]/#/@e:}"
 
@@ -1055,16 +1183,19 @@ remove_dead_runs() {
 }
 
 cmd_cleanup() {
-    local prune=() name d
+    local prune=() name d stop_live=0
     while [ $# -gt 0 ]; do
         case "$1" in
         --prune-installed) prune+=("${2:?}"); shift 2 ;;
+        --stop-live) stop_live=1; shift ;;
         *) usage ;;
         esac
     done
     resolve_tools
     use_tools
     mkdir -p "$ROOT/runs"
+    # Before the lock: a live session holds it for as long as it lives.
+    live_reap "$stop_live"
     # Whoever holds the cache, in this checkout or another, has scratch and
     # saves in it: no sweeping or pruning meanwhile, and no waiting either.
     cache_lock cleanup
@@ -1097,6 +1228,437 @@ cmd_cleanup() {
         [ -d "$d" ] && log "kept, delete it by hand: ${d%/}"
     done
     return 0
+}
+
+# --- live sessions (#241) -------------------------------------------------------
+#
+# `live start` runs this script's run in the background, from a copy of it, as
+# the session's supervisor: the same lock, build or reused base, sandbox and
+# teardown as a run, but the game phase is a series of lives. In each, the
+# driver serves the session's socket ($RUN/live/ctl.sock) instead of running a
+# manifest's steps. A restore ends a life (LIVE_RELAUNCH); the supervisor rolls
+# the disk back to the launch (restore_base) and starts the next, whose driver
+# replays the checkpoint's path. Everything the session records is in
+# $RESULTS/live/: state.json, session.json (the path and the checkpoints),
+# journal.jsonl (every command), and on the way out manifest.toml, the export.
+# The registry, one file per session beside the cache lock (live/<id>), is how
+# a client, or `cleanup`, finds it.
+
+LIVE_RELAUNCH=10
+
+live_options() {
+    local n
+    for n in "$LIVE_IDLE" "$LIVE_MAX"; do
+        case "$n" in '' | *[!0-9]* | 0) die "--idle-secs and --max-secs want a whole number of seconds" 2 ;; esac
+    done
+    for n in "$LIVE_GAP" "$LIVE_MATCH"; do
+        [[ "$n" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "--max-gap and --match-pct want a number" 2
+    done
+}
+
+# --env K=V and --arg A into the manifest's [override] (#250): through gogo,
+# before each launch, as a manifest's are; the export keeps them.
+live_override() { # manifest-json n-env env… args…
+    local m="$1" n="$2" kv
+    shift 2
+    local -a envs=("${@:1:$n}") args=("${@:$((n + 1))}")
+    for kv in "${envs[@]+"${envs[@]}"}"; do
+        [[ "$kv" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || die "--env wants NAME=value: $kv" 2
+    done
+    if [ $((${#envs[@]} + ${#args[@]})) -gt 0 ] && [ "$(PATH="$TOOLS/bin" jq -r '.gogid // empty' <<<"$m")" = "" ]; then
+        die "--env and --arg are for a game (a gogid), not a command" 2
+    fi
+    # On stdin, NUL-joined: jq would take an --arg's `--launcher-skip` for its own.
+    local words='[]'
+    [ $((${#envs[@]} + ${#args[@]})) = 0 ] ||
+        words="$(printf '%s\0' "${envs[@]+"${envs[@]}"}" "${args[@]+"${args[@]}"}" |
+            PATH="$TOOLS/bin" jq -Rsc 'split("\u0000") | .[:-1]')"
+    PATH="$TOOLS/bin" jq -c --argjson n "$n" --argjson w "$words" '
+        ($w[:$n] | map(capture("^(?<key>[^=]+)=(?<value>.*)$")) | from_entries) as $e
+        | $w[$n:] as $a
+        | .override.env += $e
+        | if ($a | length) > 0 then .override.extra_args = $a else . end' <<<"$m"
+}
+
+live_registry() { lock_dir; LIVE_REG="$LOCK_REAL/live"; mkdir -p "$LIVE_REG"; }
+
+# The session's registry entry: who serves it and where it keeps things.
+live_register() {
+    live_registry
+    local tmp="$LIVE_REG/.$LIVE_ID.$$"
+    printf 'pid=%s\nrepo=%s\nresults=%s\ntools=%s\nrun=%s\ndeadline=%s\nidle=%s\n' \
+        "$$" "$REPO" "$LIVE_RESULTS" "$TOOLS" "${RUN:-}" "${LIVE_DEADLINE:-}" "$LIVE_IDLE" >"$tmp"
+    mv -f "$tmp" "$LIVE_REG/$LIVE_ID"
+}
+
+live_unregister() {
+    [ -n "${LIVE_REG:-}" ] && [ -f "$LIVE_REG/$LIVE_ID" ] || return 0
+    if grep -qx "pid=$$" "$LIVE_REG/$LIVE_ID" 2>/dev/null; then rm -f "${LIVE_REG:?}/${LIVE_ID:?}"; fi
+}
+
+live_state() { # state detail
+    local f="$LIVE_RESULTS/live/state.json"
+    PATH="$TOOLS/bin" jq -n --arg s "$1" --arg d "${2:-}" --argjson life "${LIFE:-0}" \
+        '{state:$s, detail:$d, life:$life, at:(now | . * 10 | round / 10)}' >"$f.tmp$$" && mv -f "$f.tmp$$" "$f"
+}
+
+# The session's exit before a run's teardown was in place (usage, the lock wait).
+live_early_exit() {
+    local status=$?
+    [ -z "${LOCK_WAITER:-}" ] || kill "$LOCK_WAITER" 2>/dev/null || true
+    live_state stopped "ended before the game phase (exit $status): see session.log"
+    live_unregister
+    clear_holder
+    exit "$status"
+}
+
+# The lives: launch, serve, and on a restore roll the disk back and go again.
+live_game_phase() { # game-extra-json
+    local game_extra="$1" rc extra
+    LIFE=1
+    live_snapshot
+    while :; do
+        extra="$(jq -c --argjson life "$LIFE" --arg id "$LIVE_ID" --arg dir "$RUN/live" --arg r "$RESULTS/live" \
+            --argjson idle "$LIVE_IDLE" --argjson gap "$LIVE_GAP" --argjson match "$LIVE_MATCH" \
+            '. + {live:{id:$id, life:$life, dir:$dir, session:($r + "/session.json"),
+                        journal:($r + "/journal.jsonl"), state:($r + "/state.json"),
+                        idle_secs:$idle, max_gap:$gap, match_pct:$match}}' <<<"$game_extra")"
+        drive_config "$RUN/drive.json" "$extra" "$GPU_LABEL" "$GPU_EXPECT" "${GPU_WANT:-}" "$GPUS_JSON" \
+            "${GPU_NODES[@]/#/@n:}" "${GAME_ENV[@]/#/@e:}"
+        log "life $LIFE: launching in headless sway ($GPU_LABEL)"
+        MODE_NOW=game
+        live_state launching "life $LIFE: the sandbox"
+        start_sandbox game "$RESULTS/sandbox.log" python3 -I "$RUN/harness/helper.py" drive "$RUN/drive.json"
+        rc=0
+        supervise "$LIVE_DEADLINE" || rc=$?
+        if [ "$rc" = "$LIVE_RELAUNCH" ] && [ -z "$INTERRUPTED" ] && [ -z "${TIMED_OUT:-}" ]; then
+            live_state restoring "life $LIFE ended: rolling the disk back to the launch"
+            sweep
+            if [ -n "$SWEPT_LEFT" ]; then
+                INFRA_ERROR="a restore couldn't end life $LIFE: $(printf '%s' "$SWEPT_LEFT" | tr '\n' ';')"
+                exit 3
+            fi
+            live_keep_life "$LIFE"
+            restore_base "$LIVE_DISK" || { INFRA_ERROR="a restore couldn't roll the disk back"; exit 3; }
+            log "life $LIFE: rolled back in $COPY_SECS s"
+            LIFE=$((LIFE + 1))
+            continue
+        fi
+        [ "$rc" = 0 ] || [ -n "$INTERRUPTED" ] || [ -n "${TIMED_OUT:-}" ] || {
+            [ -s "$RESULTS/result.json" ] || INFRA_ERROR="sandbox exited $rc before the driver reported: $(tail -n 3 "$RESULTS/sandbox.log" | tr '\n' ' ')"
+        }
+        return 0
+    done
+}
+
+# The disk as it is before the first launch, for every restore: an installed
+# base when there is one (only ever read), else a copy-on-write snapshot in
+# scratch (a full copy where there are no reflinks).
+live_snapshot() {
+    if [ "${REUSED:-}" = 1 ] || [ "${SAVED:-}" = true ]; then
+        LIVE_DISK="$REUSE_BASE"
+        log "restores roll back to the installed base $LIVE_DISK"
+        return 0
+    fi
+    LIVE_DISK="$RUN/live/disk"
+    mkdir -p "$LIVE_DISK/tree"
+    probe_reflinks "$RUN/live"
+    local t0="$SECONDS"
+    copy_run_tree "$LIVE_DISK/tree" || { INFRA_ERROR="couldn't snapshot the disk for restores (disk full?)"; exit 3; }
+    log "restores roll back to a snapshot of the launch ($COPY_MODE, $((SECONDS - t0)) s)"
+}
+
+# A life's own files, before the next one writes them again.
+live_keep_life() { # life
+    local f
+    for f in result.json game.out sway.log audio.log sandbox.log doctor-before.json doctor-after.json; do
+        [ ! -e "$RESULTS/$f" ] || mv -f "$RESULTS/$f" "$RESULTS/life$1-$f"
+    done
+}
+
+# On the way out (teardown): the export, then out of the registry.
+live_finish() {
+    local s="$RESULTS/live/session.json"
+    if [ -s "$s" ]; then
+        helper live-export "$s" >"$RESULTS/live/manifest.toml" 2>"$RESULTS/live/export.err" ||
+            log "no export: $(cat "$RESULTS/live/export.err")"
+        [ -s "$RESULTS/live/manifest.toml" ] || rm -f "$RESULTS/live/manifest.toml"
+    fi
+    live_state stopped "the session ended: summary.json"
+    live_unregister
+}
+
+# summary.json's `live`: null for a run.
+live_json() {
+    [ -n "${LIVE:-}" ] || { echo null; return 0; }
+    local s="$RESULTS/live/session.json"
+    [ -s "$s" ] || s=/dev/null
+    jq -cs --arg id "$LIVE_ID" --argjson lives "${LIFE:-0}" --arg r "$RESULTS/live" \
+        --argjson idle "$LIVE_IDLE" --argjson max "$LIVE_MAX" '
+        (.[0] // {}) as $s
+        | {id:$id, lives:$lives, idle_secs:$idle, max_secs:$max,
+           steps:([($s.path // [])[] | select(.step)] | length),
+           checkpoints:(($s.checkpoints // {}) | keys), restores:($s.restores // []),
+           last_replay:($s.last_replay // null), session:($r + "/session.json"),
+           journal:($r + "/journal.jsonl"),
+           export:(if $s.path then $r + "/manifest.toml" else null end)}' "$s"
+}
+
+# --- live: the commands --------------------------------------------------------
+
+live_start() {
+    local target="" out="" a prev=""
+    for a in "$@"; do
+        case "$prev" in --out) out="$a" ;; esac
+        case "$prev" in --manifest | --gpu | --expect-gpu | --secs | --gogo | --installer | --out | --env | --arg | \
+            --idle-secs | --max-secs | --max-gap | --match-pct) prev=""; continue ;; esac
+        case "$a" in -h | --help) usage ;; -*) ;; *) [ -n "$target" ] || target="$a" ;; esac
+        prev="$a"
+    done
+    [ -n "$target" ] || usage
+    case "$target" in *[!A-Za-z0-9._-]* | .*) die "not a game id: $target" 2 ;; esac
+    resolve_tools
+    local id results
+    id="$target-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    results="${out:-$ROOT/results}/$id"
+    mkdir -p "$results/live"
+    results="$(readlink -f "$results")"
+    # Its own copy of this script: the checkout may change under a long session.
+    cp "$SELF" "$results/live/linux-e2e.sh"
+    GOGO_E2E_REPO="$REPO" GOGO_E2E_TOOLS="$TOOLS" GOGO_E2E_LIVE_ID="$id" GOGO_E2E_LIVE_RESULTS="$results" \
+        setsid "$TOOLS/bin/bash" "$results/live/linux-e2e.sh" __live-serve "$@" \
+        </dev/null >"$results/live/serve.out" 2>"$results/session.log" &
+    local pid=$! i
+    for i in $(seq 600); do
+        [ ! -s "$results/live/state.json" ] || break
+        kill -0 "$pid" 2>/dev/null || break
+        sleep 0.1
+    done
+    if ! kill -0 "$pid" 2>/dev/null; then
+        local code=0
+        wait "$pid" || code=$?
+        sed 's/^/  /' "$results/session.log" >&2
+        die "the session didn't start (exit $code)" "$code"
+    fi
+    PATH="$TOOLS/bin" jq -n --arg id "$id" --arg r "$results" --slurpfile s "$results/live/state.json" \
+        '{session:$id, results:$r, state:$s[0].state, detail:$s[0].detail,
+          next:"live \($id) status --wait 900, then screenshot, key, …, stop"}'
+    printf '%s\n' "$id"
+}
+
+# The session named, from its registry entry; after it ended, from its results
+# (export, log and status still work). Sets L_PID, L_RESULTS, L_RUN, L_TOOLS.
+live_find() { # id-or-results-dir
+    local id="$1" f k v
+    L_PID="" L_RESULTS="" L_RUN="" L_TOOLS=""
+    if [ -d "$id/live" ]; then
+        L_RESULTS="$(readlink -f "$id")"
+    else
+        case "$id" in *[!A-Za-z0-9._-]* | .* | '') die "not a session id: $id" 2 ;; esac
+        live_registry
+        f="$LIVE_REG/$id"
+        if [ -f "$f" ] && [ ! -L "$f" ]; then
+            while IFS='=' read -r k v; do
+                case "$k" in pid) L_PID="$v" ;; results) L_RESULTS="$v" ;; run) L_RUN="$v" ;; tools) L_TOOLS="$v" ;; esac
+            done <"$f"
+        elif [ -d "$ROOT/results/$id/live" ]; then
+            L_RESULTS="$ROOT/results/$id"
+        else
+            die "no live session $id (live list)"
+        fi
+    fi
+    if [ -z "$L_TOOLS" ]; then resolve_tools; L_TOOLS="$TOOLS"; fi
+    TOOLS="$L_TOOLS"
+    use_tools
+    if [ -n "$L_PID" ] && ! kill -0 "$L_PID" 2>/dev/null; then L_PID=""; fi
+}
+
+live_list() {
+    resolve_tools
+    use_tools
+    live_registry
+    local f k v pid results state
+    for f in "$LIVE_REG"/*; do
+        [ -f "$f" ] || continue
+        pid="" results=""
+        while IFS='=' read -r k v; do
+            case "$k" in pid) pid="$v" ;; results) results="$v" ;; esac
+        done <"$f"
+        if kill -0 "$pid" 2>/dev/null; then
+            state="$(jq -r '"\(.state): \(.detail)"' "$results/live/state.json" 2>/dev/null || echo '?')"
+            printf '%s\t%s\n' "${f##*/}" "$state"
+        else
+            printf '%s\tgone (its supervisor died; cleanup clears it)\n' "${f##*/}"
+        fi
+    done
+}
+
+cmd_live() {
+    [ $# -ge 1 ] || usage
+    case "$1" in
+    start) shift; live_start "$@"; return ;;
+    list) [ $# -eq 1 ] || usage; live_list; return ;;
+    -h | --help) usage ;;
+    esac
+    [ $# -ge 2 ] || usage
+    local id="$1" cmd="$2"
+    shift 2
+    live_find "$id"
+    local dir="${L_RUN:+$L_RUN/live}" state="$L_RESULTS/live/state.json"
+    case "$cmd" in
+    export)
+        [ $# -eq 0 ] || usage
+        helper live-export "$L_RESULTS/live/session.json"
+        return ;;
+    log)
+        live_log "$@"
+        return ;;
+    esac
+    [ -n "$L_PID" ] || {
+        jq -c '{ok:false, error:"the session has ended", last:.}' "$state" 2>/dev/null || echo '{"ok":false,"error":"the session has ended"}'
+        exit 3
+    }
+    case "$cmd" in
+    status)
+        if [ "${1:-}" = --wait ]; then
+            [ $# -eq 2 ] || usage
+            GOGO_E2E_LIVE_DIR="$dir" helper live-wait "$state" "$2" "$L_PID" 1
+            return
+        fi
+        [ $# -eq 0 ] || usage
+        if [ -n "$dir" ] && [ -S "$dir/ctl.sock" ] && GOGO_E2E_LIVE_DIR="$dir" helper live-call 20 status 2>/dev/null; then return 0; fi
+        jq -c '. + {ok:true, socket:false}' "$state"
+        ;;
+    restore)
+        local wait=900 name="${1:-}" reply life
+        [ "${2:-}" != --wait ] || wait="${3:?}"
+        [ -n "$name" ] || usage
+        life="$(jq -r '.life // 1' "$state")"
+        reply="$(GOGO_E2E_LIVE_DIR="$dir" helper live-call 60 restore "$name")" || { printf '%s\n' "$reply"; return 1; }
+        log "restoring $name: the game closes, the disk rolls back, it relaunches and replays"
+        GOGO_E2E_LIVE_DIR="$dir" helper live-wait "$state" "$wait" "$L_PID" "$((life + 1))"
+        ;;
+    stop)
+        [ $# -eq 0 ] || usage
+        live_stop
+        ;;
+    wait)
+        [ $# -eq 1 ] || usage
+        GOGO_E2E_LIVE_DIR="$dir" helper live-call "$(awk -v s="$1" 'BEGIN { print s + 120 }')" wait "$1"
+        ;;
+    *)
+        [ -n "$dir" ] && [ -S "$dir/ctl.sock" ] || {
+            jq -c '{ok:false, error:"not ready: \(.state): \(.detail) (status --wait)"}' "$state"
+            exit 4
+        }
+        GOGO_E2E_LIVE_DIR="$dir" helper live-call 120 "$cmd" "$@"
+        ;;
+    esac
+}
+
+# Stop: the driver closes the game; the supervisor checks and tears down. Before
+# there's a game (building, waiting for the lock), a TERM does the same.
+live_stop() {
+    local dir="${L_RUN:+$L_RUN/live}" i
+    if [ -z "$dir" ] || [ ! -S "$dir/ctl.sock" ] || ! GOGO_E2E_LIVE_DIR="$dir" helper live-call 30 stop >/dev/null 2>&1; then
+        kill -TERM "$L_PID" 2>/dev/null || true
+    fi
+    for i in $(seq $(((GRACE_SECS + 240) * 2))); do
+        kill -0 "$L_PID" 2>/dev/null || break
+        sleep 0.5
+    done
+    if kill -0 "$L_PID" 2>/dev/null; then die "the session $L_PID is still up: cleanup --stop-live"; fi
+    local summary="$L_RESULTS/summary.json"
+    [ -s "$summary" ] || die "the session ended with no summary: $L_RESULTS/session.log"
+    jq . "$summary"
+    printf '%s\n' "$summary"
+    if jq -e .ok "$summary" >/dev/null; then return 0; fi
+    if jq -e '.failed | index("harness")' "$summary" >/dev/null; then return 3; fi
+    return 1
+}
+
+live_log() { # [game|run|launch|sway|dxvk|vkd3d|proton] [--tail N]
+    local which=game tail=60 f="" pat=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+        --tail) tail="${2:?}"; shift 2 ;;
+        game | run | launch | sway | dxvk | vkd3d | proton) which="$1"; shift ;;
+        *) usage ;;
+        esac
+    done
+    case "$tail" in '' | *[!0-9]*) die "--tail wants a number" 2 ;; esac
+    case "$which" in
+    run | launch)
+        local name=launch.log
+        # From inside the dir: no scratch path on a command line (leftovers).
+        if [ -n "$L_RUN" ] && cd "$L_RUN/gogo/logs" 2>/dev/null; then
+            if [ "$which" = launch ]; then
+                f="$(find . -name launch.log -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2-)"
+            else
+                f="$(find . -name '*.log' ! -name launch.log -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2-)"
+            fi
+            [ -z "$f" ] || f="$PWD/${f#./}"
+        fi
+        [ "$which" = launch ] || name=run.log
+        [ -n "$f" ] || f="$L_RESULTS/$name" ;;
+    sway) f="$L_RESULTS/sway.log" ;;
+    *) f="$L_RESULTS/game.out" ;;
+    esac
+    case "$which" in
+    dxvk) pat='DXVK|^(info|warn|err): ' ;;
+    vkd3d) pat='vkd3d' ;;
+    proton) pat='[Pp]roton|^[0-9a-f]+:(err|warn|fixme):|wine' ;;
+    esac
+    [ -f "$f" ] || die "no $which log yet: $f"
+    if [ -n "$pat" ]; then grep -aE -- "$pat" "$f" | tail -n "$tail" || true
+    else tail -n "$tail" "$f"; fi | cut -c1-400 | sed "s|$HOME|~|g"
+}
+
+# cleanup's part: sessions whose supervisor died (a SIGKILL) leave a registry
+# entry and maybe processes; a supervisor past its hard cap, or whose socket
+# doesn't answer while it says it's ready, is an orphan; with --stop-live,
+# every session is. An orphan gets TERM (its own teardown), then KILL.
+live_reap() { # all (1: --stop-live)
+    local all="$1" f k v pid results run deadline id stuck now left i
+    live_registry
+    for f in "$LIVE_REG"/*; do
+        [ -f "$f" ] && [ ! -L "$f" ] || continue
+        id="${f##*/}"
+        pid="" results="" run="" deadline=""
+        while IFS='=' read -r k v; do
+            case "$k" in pid) pid="$v" ;; results) results="$v" ;; run) run="$v" ;; deadline) deadline="$v" ;; esac
+        done <"$f"
+        if ! kill -0 "$pid" 2>/dev/null; then
+            log "live session $id: its supervisor is gone; sweeping"
+            left="$(RUN_ID="linux-e2e-$id" RUN="${run:-/nonexistent}" PREFIX="" RUN_PIDNS="" leftovers)"
+            [ -z "$left" ] || while read -r k _; do kill -KILL "$k" 2>/dev/null || true; done <<<"$left"
+            rm -f "${f:?}"
+            continue
+        fi
+        now="$(date +%s)"
+        stuck=""
+        [ "$all" != 1 ] || stuck="--stop-live"
+        if [ -z "$stuck" ] && [ -n "$deadline" ] && [ "$now" -gt $((deadline + GRACE_SECS + 120)) ]; then
+            stuck="past its hard cap"
+        fi
+        if [ -z "$stuck" ] && [ -n "$run" ] && jq -e '.state == "ready"' "$results/live/state.json" >/dev/null 2>&1 &&
+            ! GOGO_E2E_LIVE_DIR="$run/live" helper live-call 20 status >/dev/null 2>&1; then
+            stuck="ready, but its socket doesn't answer"
+        fi
+        if [ -z "$stuck" ]; then
+            log "live session $id is in use ($(jq -r '"\(.state): \(.detail)"' "$results/live/state.json" 2>/dev/null)): live $id stop, or cleanup --stop-live"
+            continue
+        fi
+        log "live session $id: $stuck: stopping it"
+        kill -TERM "$pid" 2>/dev/null || true
+        for i in $(seq $(((GRACE_SECS + 120) * 2))); do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+        if kill -0 "$pid" 2>/dev/null; then
+            log "live session $id: still up: KILL"
+            kill -KILL "$pid" 2>/dev/null || true
+            sleep 1
+            rm -f "${f:?}"
+        fi
+    done
 }
 
 # --- self-test ----------------------------------------------------------------
@@ -1193,7 +1755,7 @@ st_reuse() { # self-test dir
     # Another build command is another key: it builds and saves a second base.
     m2="$base/self-test-reuse-2.toml"
     sed 's|date +%s%N|date +v2-%s%N|' "$m" >"$m2"
-    cmp -s "$m" "$m2" && st_fail "reuse-key: the manifest didn't change"
+    [ "$(cat "$m")" != "$(cat "$m2")" ] || st_fail "reuse-key: the manifest didn't change"
     st_reuse_run reuse-key "$base/reuse-key" "$m2" 0
     two="$(jq -r .build.reuse.base "$ST_RS" 2>/dev/null)"
     if ! jq -e '.ok and .build.reused == false and .build.exit == 0 and .build.reuse.saved' "$ST_RS" >/dev/null ||
@@ -1238,6 +1800,137 @@ st_reuse() { # self-test dir
         find "$GOGO_E2E_INSTALLED_DIR/.runs" -mindepth 1 -maxdepth 1)"
     [ -z "$left" ] || st_fail "cleanup --prune-installed all left: $left"
     unset GOGO_E2E_INSTALLED_DIR
+}
+
+# A live session's answer, checked: the command passes and jq's test holds.
+st_live_cmd() { # name test cmd…: sets ST_LR, the reply
+    local name="$1" test="$2"
+    shift 2
+    ST_LR="$("$SELF" live "$ST_LID" "$@" 2>>"$ST_LOUT/client.stderr")" ||
+        { st_fail "live: $name: $* failed: $ST_LR"; return 0; }
+    jq -e "$test" <<<"$ST_LR" >/dev/null 2>&1 || st_fail "live: $name: $*: $ST_LR"
+}
+
+st_live_start() { # outdir extra…: sets ST_LID
+    local out="$1"
+    shift
+    mkdir -p "$out"
+    ST_LID="$("$SELF" live start self-test --manifest "$REPO/e2e/self-test-live.toml" --out "$out" "$@" \
+        2>>"$out/start.stderr" | tail -n 1)"
+    [ -n "$ST_LID" ] || st_fail "live: no session: $(cat "$out/start.stderr")"
+}
+
+st_live_gone() { # id outdir: waits for its supervisor; prints its summary
+    local f="$GOGO_E2E_LOCK_DIR/live/$1" i
+    for i in $(seq 240); do [ -e "$f" ] || break; sleep 0.5; done
+    [ ! -e "$f" ] || st_fail "live: $1 still registered"
+    printf '%s\n' "$2/$1/summary.json"
+}
+
+st_live() { # self-test dir
+    local base="$1" out code summary
+    log "self-test: a live session"
+    out="$base/live"
+    ST_LOUT="$out"
+    st_live_start "$out"
+    [ -n "$ST_LID" ] || return 0
+    st_live_cmd ready '.state == "ready" and .life == 1 and .game.running' status --wait 60
+    # It holds the cache lock: cleanup names it and leaves it be.
+    code=0
+    "$SELF" cleanup >/dev/null 2>"$out/cleanup.stderr" || code=$?
+    { [ "$code" = 3 ] && grep -q "live session $ST_LID is in use" "$out/cleanup.stderr" &&
+        grep -q "a live session: it ends after 900 s" "$out/cleanup.stderr"; } ||
+        st_fail "live: cleanup under a session: exit $code: $(cat "$out/cleanup.stderr")"
+    st_live_cmd shot '.ok and .since == null and .fills_window' screenshot white
+    st_live_cmd key '.ok' key r
+    st_live_cmd change '.since == "white" and .change_pct >= 50' screenshot red
+    st_live_cmd checkpoint '.checkpoint == "red" and .steps == 4' checkpoint red
+    # A dead end: the restore drops it.
+    st_live_cmd dead-end '.ok' key b
+    st_live_cmd dead-shot '.change_pct >= 50' screenshot blue
+    st_live_cmd move '.step.move_to == {x: 50, y: 50}' move_to 50% 50%
+    st_live_cmd click '.ok and .at == [10, 10]' click 10 10
+    if "$SELF" live "$ST_LID" key NoSuchKey >"$out/bad-key.json" 2>/dev/null ||
+        ! jq -e '.ok == false and (.error | test("keymap"))' "$out/bad-key.json" >/dev/null; then
+        st_fail "live: a bad key: $(cat "$out/bad-key.json")"
+    fi
+    # Back to red: a new life on the disk of the launch (the game refuses a
+    # second launch on the same disk), the path replayed and matched.
+    st_live_cmd restore '.state == "ready" and .life == 2 and .game.running
+        and .last_replay.ok and .last_replay.done == 4 and .steps == 4' restore red --wait 120
+    st_live_cmd hold '.step.hold == {key: "b", ms: 200}' hold b 200
+    st_live_cmd wait '.ok' wait 1
+    st_live_cmd after '.name == "blue-2" and .since == "cp-red" and .change_pct >= 50' screenshot blue
+    st_live_cmd quit '.ok' type q
+    st_live_cmd quit-wait '.game_running | not' wait 1
+    "$SELF" live "$ST_LID" export >"$out/export.toml" 2>>"$out/client.stderr" || st_fail "live: export failed"
+    if ! { grep -q '^hold = { key = "b", ms = 200 }$' "$out/export.toml" && grep -q '^screenshot = "blue-2"$' "$out/export.toml" &&
+        grep -q '^how = "self"$' "$out/export.toml" && grep -q '^expect_change = { from = "white", to = "red"' "$out/export.toml" &&
+        ! grep -q '"blue"' "$out/export.toml" && ! grep -q '^click' "$out/export.toml"; }; then
+        st_fail "live: the export isn't the path after the restore: $(cat "$out/export.toml")"
+    fi
+    code=0
+    "$SELF" live "$ST_LID" stop >"$out/stdout" 2>>"$out/client.stderr" || code=$?
+    st_assert_clean live "$out" "$code" 0
+    summary="$(tail -n 1 "$out/stdout")"
+    jq -e '.ok and .live.lives == 2 and (.live.restores | length) == 1 and .live.checkpoints == ["red"]
+        and .tested_entry == null and (.checks | any(.name == "clean_exit" and .ok))' "$summary" >/dev/null ||
+        st_fail "live: summary: $(jq -c '{failed, live}' "$summary" 2>/dev/null)"
+    [ "$(cat "$out/export.toml")" = "$(cat "$(jq -r .live.export "$summary")" 2>/dev/null)" ] ||
+        st_fail "live: manifest.toml isn't the export"
+    [ ! -e "$GOGO_E2E_LOCK_DIR/live/$ST_LID" ] || st_fail "live: still registered after stop"
+    # The export is the proof: a fresh run of it passes.
+    mkdir -p "$base/live-export"
+    code=0
+    env --default-signal=INT,TERM "$SELF" run self-test --manifest "$out/export.toml" --out "$base/live-export" \
+        >"$base/live-export/stdout" 2>"$base/live-export/stderr" || code=$?
+    st_assert_clean live-export "$base/live-export" "$code" 0
+
+    # The limits: no command for --idle-secs, and --max-secs from the lock,
+    # each end the session through the same teardown, failed.
+    local how test
+    for how in idle max; do
+        out="$base/live-$how"
+        ST_LOUT="$out"
+        if [ "$how" = idle ]; then st_live_start "$out" --idle-secs 3; test='index("live_idle")'
+        else st_live_start "$out" --max-secs 20; test='index("time_limit")'; fi
+        [ -n "$ST_LID" ] || continue
+        summary="$(st_live_gone "$ST_LID" "$out")"
+        if ! jq -e ".failed | $test" "$summary" >/dev/null 2>&1 ||
+            ! jq -e '.cleanup.left == "" and .cleanup.swept == "" and .cleanup.scratch_deleted' "$summary" >/dev/null; then
+            st_fail "live-$how: $(jq -c '{failed, cleanup}' "$summary" 2>/dev/null || echo "no summary at $summary")"
+        fi
+    done
+
+    # A SIGKILLed supervisor: its sandbox dies with it, and cleanup takes its
+    # registry entry and scratch.
+    out="$base/live-kill"
+    ST_LOUT="$out"
+    st_live_start "$out"
+    [ -n "$ST_LID" ] || return 0
+    st_live_cmd kill-ready '.state == "ready"' status --wait 60
+    local pid run
+    pid="$(sed -n 's/^pid=//p' "$GOGO_E2E_LOCK_DIR/live/$ST_LID")"
+    run="$(sed -n 's/^run=//p' "$GOGO_E2E_LOCK_DIR/live/$ST_LID")"
+    kill -KILL "$pid"
+    sleep 2
+    local stray
+    stray="$(RUN_ID="linux-e2e-$ST_LID" RUN="$run" PREFIX="" RUN_PIDNS="" leftovers)"
+    [ -z "$stray" ] || st_fail "live-kill: left behind: $stray"
+    "$SELF" live "$ST_LID" key r >/dev/null 2>&1 && st_fail "live-kill: a dead session answered"
+    "$SELF" cleanup 2>>"$out/cleanup.stderr" >/dev/null || st_fail "live-kill: cleanup failed: $(cat "$out/cleanup.stderr")"
+    [ ! -e "$GOGO_E2E_LOCK_DIR/live/$ST_LID" ] || st_fail "live-kill: cleanup left its registry entry"
+    [ ! -e "$run" ] || st_fail "live-kill: cleanup left $run"
+
+    # Usage: live options belong to live start; overrides to a game.
+    code=0
+    "$SELF" run self-test --manifest "$REPO/e2e/self-test.toml" --idle-secs 5 >/dev/null 2>&1 || code=$?
+    [ "$code" = 2 ] || st_fail "usage: run --idle-secs: exit $code, want 2"
+    code=0
+    "$SELF" live start self-test --manifest "$REPO/e2e/self-test-live.toml" --env A=1 --out "$base/live-usage" \
+        >/dev/null 2>&1 || code=$?
+    [ "$code" = 2 ] || st_fail "usage: live start --env on a command: exit $code, want 2"
+    "$SELF" cleanup --stop-live >/dev/null 2>&1 || true
 }
 
 cmd_self_test() {
@@ -1395,6 +2088,11 @@ cmd_self_test() {
     #    a base that links out is refused; cleanup prunes.
     st_reuse "$base"
 
+    # 7b. A live session (#241): start, inputs, a checkpoint, a restore onto the
+    #     rolled-back disk, the export (which a fresh run then passes), stop;
+    #     the idle limit, the hard cap, and cleanup after a SIGKILL.
+    st_live "$base"
+
     # 8. The sweep sees a stray process that outlived its run: a decoy carrying
     #    a run's marker, outside any sandbox.
     log "self-test: the sweep finds a stray"
@@ -1422,6 +2120,16 @@ cmd_self_test() {
 cmd="$1"; shift
 case "$cmd" in
 run) cmd_run "$@" ;;
+live) cmd_live "$@" ;;
+__live-serve)
+    # live_start's supervisor, from its copy of this script.
+    LIVE=1 LIVE_ID="${GOGO_E2E_LIVE_ID:?}" LIVE_RESULTS="${GOGO_E2E_LIVE_RESULTS:?}" TOOLS="${GOGO_E2E_TOOLS:?}"
+    LIVE_IDLE=900
+    trap live_early_exit EXIT
+    trap 'exit 1' INT TERM HUP
+    live_register
+    live_state starting "building gogo, then the game or a copy of its base"
+    cmd_run "$@" ;;
 self-test) cmd_self_test "$@" ;;
 cleanup) cmd_cleanup "$@" ;;
 -h | --help | help) usage ;;
