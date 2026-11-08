@@ -140,6 +140,13 @@ subcommands take a GOGID: `setup`, `compat`, `doctor`, `next-renderer`, and (#23
 
 - `env list <gogid> [--reveal] [--json]`: every env var the game gets at its next launch,
   with its source and what it beats; values of secret-looking names hidden.
+- `env list <gogid> --all [--reveal] [--json]` (#233, design 18 §7.7): every switch this game's
+  Proton build has, by component, one line each: what it does, its default, whether it applies
+  to this game's renderer and GPU (`yes`, `no` and why, `?`), where gogo knows it from, and
+  what sets it now. Nothing is left out for not applying. Reads the build's files; no network.
+- `env describe <gogid> <NAME> [--reveal] [--json]`: one switch in full (an env var, a
+  `VKD3D_CONFIG` flag or a `dxvk.conf` key, any case), with how to set it. Exit 1 for a name
+  gogo doesn't know, offering similar ones.
 - `env set <gogid> KEY=VALUE…` / `env unset <gogid> KEY…`: the user's own, in the game's
   override file. A key gogo owns is refused with exit 2 and nothing written.
 - `args <gogid> [-- <args…> | --clear] [--json]`: show, set (after the game's own args) or

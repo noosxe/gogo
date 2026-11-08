@@ -2634,3 +2634,50 @@ fn env_and_args_from_the_override_reach_the_game_with_their_quoting() {
         f.message
     );
 }
+
+/// `env list --all` on a built game: names from the build's own files, the
+/// renderer and the GPU from this game and this machine, active values next to
+/// the switches they set. #233, design 18 §7.7.
+#[test]
+fn the_catalogue_reads_the_games_build_and_marks_what_applies() {
+    use gogo::linuxapp::catalogue::{self, Applies, InBuild};
+    use gogo::linuxapp::envargs;
+    let w = World::new("catalogue", &["d3d12.dll"]);
+    build_with(&w.opts());
+    envargs::set_env(ID, &[("PROTON_DLSS_INDICATOR".into(), "1".into())]).unwrap();
+
+    std::fs::write(
+        w.build.join("proton"),
+        "self.check_environment(\"PROTON_DLSS_INDICATOR\", \"dlsshud\")\n\
+         self.check_environment(\"PROTON_BRAND_NEW\", \"brandnew\")\n",
+    )
+    .unwrap();
+
+    let host = doctor_host(&w, &[]);
+    let r = catalogue::report(ID, &host, false).unwrap();
+    assert_eq!(r.renderer.as_deref(), Some("vkd3d-proton"));
+    assert_eq!(r.gpus, ["AMD"]);
+    assert_eq!(r.build.as_ref().unwrap().dir, w.build);
+
+    let dlss = r.find("PROTON_DLSS_INDICATOR").unwrap();
+    assert_eq!(dlss.in_build, InBuild::Found);
+    assert_eq!(dlss.active.len(), 1, "the user's value is next to it");
+    // The fake host has an AMD GPU; the DLSS indicator says so rather than hide.
+    assert_eq!(
+        dlss.applies,
+        Applies::No {
+            why: "for NVIDIA; this machine has AMD".into()
+        }
+    );
+    // The build reads it and gogo has no words: shown, marked.
+    let new = r.find("PROTON_BRAND_NEW").unwrap();
+    assert_eq!(new.about, None);
+    assert_eq!(new.in_build, InBuild::Found);
+    assert_eq!(r.undescribed(), 1);
+    // The build doesn't: said, not dropped.
+    assert_eq!(r.find("PROTON_LOG").unwrap().in_build, InBuild::NotFound);
+
+    // The plain list is what it was: active values only.
+    let plain = envargs::env_report(ID, false).unwrap();
+    assert!(plain.lines.iter().all(|l| l.key != "PROTON_LOG"));
+}

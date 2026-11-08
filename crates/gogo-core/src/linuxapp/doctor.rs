@@ -69,12 +69,12 @@ impl Host {
         }
     }
 
-    fn var(&self, key: &str) -> Option<OsString> {
+    pub(crate) fn var(&self, key: &str) -> Option<OsString> {
         (self.env)(key).filter(|v| !v.is_empty())
     }
 
     /// An absolute host path under [`Host::root`].
-    fn at(&self, abs: impl AsRef<Path>) -> PathBuf {
+    pub(crate) fn at(&self, abs: impl AsRef<Path>) -> PathBuf {
         let p = abs.as_ref();
         self.root.join(p.strip_prefix("/").unwrap_or(p))
     }
@@ -1222,12 +1222,12 @@ fn name_bits(manifest: &Path) -> Option<u8> {
 
 /// A GPU the kernel's DRM layer sees.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Gpu {
+pub(crate) struct Gpu {
     card: String,
-    vendor: String,
+    pub(crate) vendor: String,
 }
 
-fn gpus(host: &Host) -> Vec<Gpu> {
+pub(crate) fn gpus(host: &Host) -> Vec<Gpu> {
     let drm = host.at("/sys/class/drm");
     let mut seen = BTreeSet::new();
     let mut out: Vec<Gpu> = std::fs::read_dir(&drm)

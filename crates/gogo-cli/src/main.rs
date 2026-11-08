@@ -3604,11 +3604,60 @@ fn print_edit(out: &gogo::linuxapp::envargs::EditOutcome, json: bool) {
 /// `gogo linux-app env list|set|unset`.
 fn linux_app_env(cmd: crate::cli::LinuxEnvCmd) -> Result<i32, AppError> {
     use crate::cli::LinuxEnvCmd;
-    use gogo::linuxapp::envargs;
+    use gogo::linuxapp::doctor::Host;
+    use gogo::linuxapp::{catalogue, envargs};
     match cmd {
         LinuxEnvCmd::List {
             gogid,
             reveal,
+            all: true,
+            json,
+        } => {
+            let r = catalogue::report(&gogid, &Host::detect(), reveal)?;
+            if json {
+                println!("{}", serde_json::json!(r));
+                return Ok(cli::exit::OK);
+            }
+            for w in &r.warnings {
+                eprintln!("warning: {w}");
+            }
+            print!("{}", env_catalogue_text(&r));
+            Ok(cli::exit::OK)
+        }
+        LinuxEnvCmd::Describe {
+            gogid,
+            name,
+            reveal,
+            json,
+        } => {
+            let r = catalogue::report(&gogid, &Host::detect(), reveal)?;
+            let Some(e) = r.find(&name) else {
+                let similar = r.similar(&name);
+                let hint = if similar.is_empty() {
+                    format!("`gogo linux-app env list {gogid} --all` lists what it has")
+                } else {
+                    format!("did you mean: {}", similar.join(", "))
+                };
+                eprintln!(
+                    "gogo: {name:?} isn't a switch gogo knows, and {} doesn't show it; {hint}",
+                    r.build
+                        .as_ref()
+                        .and_then(|b| b.version.as_deref())
+                        .unwrap_or("this game's build")
+                );
+                return Ok(cli::exit::FAILED);
+            };
+            if json {
+                println!("{}", serde_json::json!(e));
+                return Ok(cli::exit::OK);
+            }
+            print!("{}", env_describe_text(&r, e));
+            Ok(cli::exit::OK)
+        }
+        LinuxEnvCmd::List {
+            gogid,
+            reveal,
+            all: false,
             json,
         } => {
             let r = envargs::env_report(&gogid, reveal)?;
@@ -3723,6 +3772,246 @@ fn env_list_text(r: &gogo::linuxapp::envargs::EnvReport) -> String {
         r.user_file.display(),
         r.gogid
     );
+    out
+}
+
+#[cfg(target_os = "linux")]
+/// One `KEY=VALUE  (source)` line for a catalogue entry's active value, as
+/// `env list` words it.
+fn env_active_line(l: &gogo::linuxapp::envargs::EnvLine) -> String {
+    use gogo::linuxapp::envargs::EnvState;
+    match &l.state {
+        EnvState::Applies => format!("{}={}  ({})", l.key, l.value, l.source),
+        EnvState::Pending => format!(
+            "{}={}  ({}; pending: the next launch's setup applies it)",
+            l.key, l.value, l.source
+        ),
+        EnvState::Overridden { .. } => format!("over {}={}  ({})", l.key, l.value, l.source),
+    }
+}
+
+#[cfg(target_os = "linux")]
+/// The heading of `env list --all`: the build, the renderer, the GPUs.
+fn env_catalogue_heading(r: &gogo::linuxapp::catalogue::CatalogueReport) -> String {
+    let build = r
+        .build
+        .as_ref()
+        .map_or("its Proton build isn't installed", |b| {
+            b.version
+                .as_deref()
+                .unwrap_or("a build with no version file")
+        });
+    let renderer = r.renderer.as_deref().unwrap_or("not picked yet");
+    let gpus = if r.gpus.is_empty() {
+        "none seen".to_string()
+    } else {
+        r.gpus.join(", ")
+    };
+    format!("{} on {build}: renderer {renderer}, GPU {gpus}", r.gogid)
+}
+
+#[cfg(target_os = "linux")]
+/// `env list --all`'s human output: a section per component, one line per
+/// switch (so `grep` works), and what sets it under the line.
+fn env_catalogue_text(r: &gogo::linuxapp::catalogue::CatalogueReport) -> String {
+    use gogo::linuxapp::catalogue::table::Component;
+    use gogo::linuxapp::catalogue::{Applies, Entry};
+    use std::fmt::Write as _;
+    let mut out = format!("{}\n", env_catalogue_heading(r));
+    if let Some(b) = &r.build {
+        let parts: Vec<String> = b
+            .components
+            .iter()
+            .map(|(k, v)| format!("{k} {v}"))
+            .collect();
+        if !parts.is_empty() {
+            let _ = writeln!(out, "bundled: {}", parts.join(", "));
+        }
+    }
+    out.push_str(
+        "yes: does something here; no: doesn't, and why; ?: gogo can't tell.\n\
+         [ ]: where gogo knows it from (script, fixes, sample and dll are this build; table is gogo's).\n",
+    );
+    let tags = |e: &Entry| {
+        let mut t: Vec<&str> = e.sources.iter().map(|s| s.tag()).collect();
+        t.dedup();
+        t.join(", ")
+    };
+    let mut section = None;
+    let shown: Vec<&Entry> = r
+        .entries
+        .iter()
+        .filter(|e| e.component != Component::Plumbing || !e.active.is_empty())
+        .collect();
+    for (i, e) in shown.iter().enumerate() {
+        if section != Some(e.component) {
+            section = Some(e.component);
+            let _ = write!(out, "\n{}", e.component.id());
+            if let Some(v) = r
+                .build
+                .as_ref()
+                .and_then(|b| b.components.get(e.component.id()))
+            {
+                let _ = write!(out, " {v}");
+            }
+            if let Some(l) = e.component.link() {
+                let _ = write!(out, " ({l})");
+            }
+            out.push('\n');
+        }
+        let width = shown[i..]
+            .iter()
+            .take_while(|o| o.component == e.component)
+            .chain(
+                shown[..i]
+                    .iter()
+                    .rev()
+                    .take_while(|o| o.component == e.component),
+            )
+            .map(|o| o.name.len())
+            .max()
+            .unwrap_or(0)
+            .min(36);
+        let mark = match &e.applies {
+            Applies::Yes => "yes",
+            Applies::No { .. } => "no",
+            Applies::Unknown { .. } => "?",
+        };
+        let plumbing = e.component == Component::Plumbing;
+        let about = match e.about.as_deref() {
+            Some(a) => a,
+            None if plumbing => "Not a switch: Steam's, umu's or the build's own.",
+            None => "(not in gogo's table yet)",
+        };
+        let _ = write!(out, "{mark:<3} {:<width$}  {about}", e.name);
+        if let Some(d) = &e.default {
+            let _ = write!(out, " Default: {d}.");
+        }
+        if let (false, Applies::No { why } | Applies::Unknown { why }) = (plumbing, &e.applies) {
+            let _ = write!(out, " ({why})");
+        }
+        let t = tags(e);
+        if !t.is_empty() {
+            let _ = write!(out, " [{t}]");
+        }
+        out.push('\n');
+        for l in &e.active {
+            let _ = writeln!(out, "    now: {}", env_active_line(l));
+        }
+    }
+    let plumbing: Vec<&str> = r
+        .entries
+        .iter()
+        .filter(|e| e.component == Component::Plumbing && e.active.is_empty())
+        .map(|e| e.name.as_str())
+        .collect();
+    if !plumbing.is_empty() {
+        let _ = writeln!(
+            out,
+            "\nnot switches (Steam's, umu's and the build's own): {}",
+            plumbing.join(", ")
+        );
+    }
+    let undescribed = r.undescribed();
+    if undescribed > 0 {
+        let _ = writeln!(
+            out,
+            "\n{undescribed} of these the build has and gogo's table doesn't describe yet \
+             (reviewed for {})",
+            r.reviewed_for
+        );
+    }
+    let _ = writeln!(
+        out,
+        "\none in full: gogo linux-app env describe {0} <NAME>; set one: gogo linux-app env set {0} KEY=VALUE",
+        r.gogid
+    );
+    out
+}
+
+#[cfg(target_os = "linux")]
+/// `env describe`'s human output.
+fn env_describe_text(
+    r: &gogo::linuxapp::catalogue::CatalogueReport,
+    e: &gogo::linuxapp::catalogue::Entry,
+) -> String {
+    use gogo::linuxapp::catalogue::table::Kind;
+    use gogo::linuxapp::catalogue::{Applies, InBuild, Source};
+    use std::fmt::Write as _;
+    let kind = match e.kind {
+        Kind::Env => "env var",
+        Kind::Vkd3dFlag => "VKD3D_CONFIG flag",
+        Kind::DxvkConf => "dxvk.conf key, through DXVK_CONFIG",
+        Kind::Command => "wrapper command",
+    };
+    let mut out = format!("{} ({}, {kind})\n", e.name, e.component.id());
+    let _ = writeln!(
+        out,
+        "  {}",
+        e.about.as_deref().unwrap_or("(not in gogo's table yet)")
+    );
+    if let Some(d) = &e.default {
+        let _ = writeln!(out, "default:  {d}");
+    }
+    let applies = match &e.applies {
+        Applies::Yes => "yes".to_string(),
+        Applies::No { why } => format!("no: {why}"),
+        Applies::Unknown { why } => format!("can't tell: {why}"),
+    };
+    let _ = writeln!(out, "applies:  {applies} ({})", env_catalogue_heading(r));
+    let build = r
+        .build
+        .as_ref()
+        .and_then(|b| b.version.as_deref())
+        .unwrap_or("this build");
+    let in_build = match e.in_build {
+        InBuild::Found => format!("{build} has it"),
+        InBuild::NotFound => format!("no trace of it in {build}"),
+        InBuild::NotChecked => format!("not checked against {build}"),
+        InBuild::NotOfBuild => "a host tool, not part of the build".to_string(),
+    };
+    let _ = writeln!(out, "build:    {in_build}");
+    let sources: Vec<String> = e
+        .sources
+        .iter()
+        .map(|s| match s {
+            Source::ProtonScript { token: Some(t) } => {
+                format!("proton script (STEAM_COMPAT_CONFIG token {t})")
+            }
+            Source::ProtonScript { token: None } => "proton script".to_string(),
+            Source::Protonfixes => "protonfixes".to_string(),
+            Source::SampleSettings => "user_settings.sample.py".to_string(),
+            Source::Dll { file } => file.clone(),
+            Source::Table => "gogo's table".to_string(),
+        })
+        .collect();
+    if !sources.is_empty() {
+        let _ = writeln!(out, "from:     {}", sources.join(", "));
+    }
+    if e.proton_sets {
+        let _ = writeln!(
+            out,
+            "note:     the proton script sets this itself in some configurations"
+        );
+    }
+    if e.active.is_empty() {
+        let _ = writeln!(out, "now:      not set for this game");
+    }
+    for l in &e.active {
+        let _ = writeln!(out, "now:      {}", env_active_line(l));
+    }
+    match e.set_with(&r.gogid) {
+        _ if e.in_build == InBuild::NotFound => {}
+        Ok(cmd) => {
+            let _ = writeln!(out, "set with: {cmd}");
+        }
+        Err(why) => {
+            let _ = writeln!(out, "set with: can't: {why}");
+        }
+    }
+    if let Some(l) = e.link {
+        let _ = writeln!(out, "docs:     {l}");
+    }
     out
 }
 
@@ -4914,9 +5203,180 @@ mod tests {
 
 #[cfg(all(test, target_os = "linux"))]
 mod envargs_output_tests {
-    use super::{args_text, env_list_text};
+    use super::{args_text, env_catalogue_text, env_describe_text, env_list_text};
+    use gogo::linuxapp::catalogue::table::{Component, Kind, Topic};
+    use gogo::linuxapp::catalogue::{
+        Applies, BuildSummary, CatalogueReport, Entry, InBuild, Source,
+    };
     use gogo::linuxapp::envargs::{ArgsReport, EnvLine, EnvReport, EnvSource, EnvState};
     use gogo::macapp::compat::{Layer, Sourced};
+
+    fn entry(name: &str, component: Component, applies: Applies, in_build: InBuild) -> Entry {
+        Entry {
+            name: name.into(),
+            component,
+            kind: Kind::Env,
+            topic: Some(Topic::Nvidia),
+            about: Some(format!("About {name}.")),
+            default: Some("off".into()),
+            default_from: Some("table"),
+            link: component.link(),
+            sources: vec![Source::Table],
+            in_build,
+            proton_sets: false,
+            applies,
+            active: vec![],
+        }
+    }
+
+    fn cyberpunk() -> CatalogueReport {
+        let mut dlss = entry(
+            "PROTON_DLSS_UPGRADE",
+            Component::Proton,
+            Applies::Yes,
+            InBuild::Found,
+        );
+        dlss.sources.insert(
+            0,
+            Source::ProtonScript {
+                token: Some("dlss".into()),
+            },
+        );
+        dlss.active = vec![EnvLine {
+            key: "PROTON_DLSS_UPGRADE".into(),
+            value: "1".into(),
+            source: EnvSource::Layer { layer: Layer::User },
+            state: EnvState::Pending,
+        }];
+        let mut uncharted = entry(
+            "PROTON_NEW_THING",
+            Component::Proton,
+            Applies::Unknown {
+                why: "the build has it; gogo's table doesn't".into(),
+            },
+            InBuild::Found,
+        );
+        uncharted.about = None;
+        uncharted.default = None;
+        uncharted.default_from = None;
+        uncharted.topic = None;
+        uncharted.sources = vec![Source::ProtonScript { token: None }];
+        let mut gamedir = entry(
+            "GAMEID",
+            Component::Plumbing,
+            Applies::Unknown {
+                why: "not a switch: Steam's, umu's or the build's own".into(),
+            },
+            InBuild::NotFound,
+        );
+        gamedir.about = None;
+        gamedir.default = None;
+        gamedir.default_from = None;
+        gamedir.sources = vec![];
+        gamedir.active = vec![EnvLine {
+            key: "GAMEID".into(),
+            value: "umu-1091500".into(),
+            source: EnvSource::Launcher,
+            state: EnvState::Applies,
+        }];
+        let mut plumbing = gamedir.clone();
+        plumbing.name = "STEAM_COMPAT_DATA_PATH".into();
+        plumbing.active = vec![];
+        CatalogueReport {
+            gogid: "1423049311".into(),
+            user_file: "/d/compat/1423049311.toml".into(),
+            built: true,
+            build: Some(BuildSummary {
+                dir: "/d/runtimes/ge-proton/x".into(),
+                version: Some("GE-Proton11-12".into()),
+                components: [("dxvk-nvapi".to_string(), "v0.9.3".to_string())]
+                    .into_iter()
+                    .collect(),
+            }),
+            reviewed_for: "GE-Proton11-12",
+            renderer: Some("vkd3d-proton".into()),
+            gpus: vec!["NVIDIA".into()],
+            entries: vec![
+                dlss,
+                entry(
+                    "PROTON_ENABLE_NVAPI",
+                    Component::Proton,
+                    Applies::No {
+                        why: "not in this build".into(),
+                    },
+                    InBuild::NotFound,
+                ),
+                uncharted,
+                entry(
+                    "DXVK_NVAPI_VKREFLEX",
+                    Component::DxvkNvapi,
+                    Applies::Yes,
+                    InBuild::Found,
+                ),
+                gamedir,
+                plumbing,
+            ],
+            warnings: vec![],
+        }
+    }
+
+    #[test]
+    fn env_list_all_marks_every_switch_on_one_line() {
+        assert_eq!(
+            env_catalogue_text(&cyberpunk()),
+            "1423049311 on GE-Proton11-12: renderer vkd3d-proton, GPU NVIDIA\n\
+             bundled: dxvk-nvapi v0.9.3\n\
+             yes: does something here; no: doesn't, and why; ?: gogo can't tell.\n\
+             [ ]: where gogo knows it from (script, fixes, sample and dll are this build; table is gogo's).\n\
+             \n\
+             proton (https://github.com/GloriousEggroll/proton-ge-custom#readme)\n\
+             yes PROTON_DLSS_UPGRADE  About PROTON_DLSS_UPGRADE. Default: off. [script, table]\n\
+             \x20   now: PROTON_DLSS_UPGRADE=1  (L4 user override; pending: the next launch's setup applies it)\n\
+             no  PROTON_ENABLE_NVAPI  About PROTON_ENABLE_NVAPI. Default: off. (not in this build) [table]\n\
+             ?   PROTON_NEW_THING     (not in gogo's table yet) (the build has it; gogo's table doesn't) [script]\n\
+             \n\
+             dxvk-nvapi v0.9.3 (https://github.com/jp7677/dxvk-nvapi#readme)\n\
+             yes DXVK_NVAPI_VKREFLEX  About DXVK_NVAPI_VKREFLEX. Default: off. [table]\n\
+             \n\
+             plumbing\n\
+             ?   GAMEID  Not a switch: Steam's, umu's or the build's own.\n\
+             \x20   now: GAMEID=umu-1091500  (launcher, always)\n\
+             \n\
+             not switches (Steam's, umu's and the build's own): STEAM_COMPAT_DATA_PATH\n\
+             \n\
+             1 of these the build has and gogo's table doesn't describe yet (reviewed for GE-Proton11-12)\n\
+             \n\
+             one in full: gogo linux-app env describe 1423049311 <NAME>; set one: gogo linux-app env set 1423049311 KEY=VALUE\n"
+        );
+    }
+
+    #[test]
+    fn env_describe_says_all_of_one_switch() {
+        let r = cyberpunk();
+        assert_eq!(
+            env_describe_text(&r, r.find("PROTON_DLSS_UPGRADE").unwrap()),
+            "PROTON_DLSS_UPGRADE (proton, env var)\n\
+             \x20 About PROTON_DLSS_UPGRADE.\n\
+             default:  off\n\
+             applies:  yes (1423049311 on GE-Proton11-12: renderer vkd3d-proton, GPU NVIDIA)\n\
+             build:    GE-Proton11-12 has it\n\
+             from:     proton script (STEAM_COMPAT_CONFIG token dlss), gogo's table\n\
+             now:      PROTON_DLSS_UPGRADE=1  (L4 user override; pending: the next launch's setup applies it)\n\
+             set with: gogo linux-app env set 1423049311 PROTON_DLSS_UPGRADE=<value>\n\
+             docs:     https://github.com/GloriousEggroll/proton-ge-custom#readme\n"
+        );
+        assert_eq!(
+            env_describe_text(&r, r.find("PROTON_ENABLE_NVAPI").unwrap()),
+            "PROTON_ENABLE_NVAPI (proton, env var)\n\
+             \x20 About PROTON_ENABLE_NVAPI.\n\
+             default:  off\n\
+             applies:  no: not in this build (1423049311 on GE-Proton11-12: renderer vkd3d-proton, GPU NVIDIA)\n\
+             build:    no trace of it in GE-Proton11-12\n\
+             from:     gogo's table\n\
+             now:      not set for this game\n\
+             docs:     https://github.com/GloriousEggroll/proton-ge-custom#readme\n"
+        );
+    }
 
     #[test]
     fn env_list_shows_the_winner_its_source_and_what_it_beats() {
