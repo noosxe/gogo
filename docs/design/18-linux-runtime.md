@@ -1647,7 +1647,7 @@ session; starts the game and leaves), and a fifth that outlives the game:
 | Piece | Without a wrapper | With one |
 |---|---|---|
 | `WPID` (`wait`, the group for `TERM`/`KILL`) | umu-run, which the subshell became | the wrapper, which the subshell became. umu-run is below it, and for a wrapper that keeps it in the group `TERM` still reaches it |
-| Game step ran? | always | `.run-<pid>.game` in the log dir (a path in the wrapper's argv, the game step's pid in it; umu-run keeps that pid). Removed with the launcher's record |
+| Game step ran? | always | `.run-<pid>.game` in the log dir (a path in the wrapper's argv, the game step's pid in it: the step is umu-run's parent and lives as long as it does). `.code` beside it holds the exit code. Both removed with the launcher's record |
 | `.launchers/<pid>` (#212) | the launcher | unchanged: launchers, not games |
 | `prefix_pids` | the game's | the game's, never the wrapper's. So the game is still seen once it left the wrapper's group, or the wrapper left it |
 | The close request (§7.2) | via the prefix's wineserver | the same: it finds the wineserver by environ and enters its namespaces, so the wrapper isn't in the way |
@@ -1658,7 +1658,7 @@ session; starts the game and leaves), and a fifth that outlives the game:
 | The `KILL` sweep and `-WPID` | as §7.2 | as §7.2. The sweep finds the game anywhere, `-WPID` the wrapper |
 | Watchdog (#103) | the same teardown | the same teardown, and `TERM`/`KILL` reach the wrapper the same way |
 | Footer's "the run ended" | `wait`, then the prefix empty | `wait` for the wrapper, then the prefix empty, so a wrapper that left early doesn't end the run |
-| Exit code | umu-run's | the **wrapper's**. gamescope doesn't pass on its child's (the source drops `WaitForChild`'s result), so a game's crash under it reads `# exit: 0`. The early-exit dialog still catches a short run, and says `under gamescope`. Worth a follow-up only if it misleads in practice |
+| Exit code | umu-run's | the **game's**. The game step stays umu-run's parent (it runs umu-run instead of exec'ing it), writes umu-run's code to `<mark>.code` (tmp, then `mv`) and passes `TERM`/`INT`/`HUP` on, waiting again after a trapped signal. The launcher prefers that code to the wrapper's and logs both (`wrapper gamescope exited 0; the game exited 139`; a signal death is 128+n). gamescope drops its child's code (the source ignores `WaitForChild`'s result), so without this a crash read `# exit: 0`. No `.code` (the step was killed, or never ran) → the wrapper's, as before. Without a wrapper nothing changed: umu-run is still exec'd |
 
 Two new endings, both before a game exists:
 
@@ -1673,7 +1673,7 @@ Two new endings, both before a game exists:
   do with.
 
 The launcher knows nothing about what a wrapper does beyond this: `launch.sh` has no gamescope
-case. `LAUNCHER_VERSION` is 5, and `# wrapper:` is a new run log header line (only with a
+case. `LAUNCHER_VERSION` is 6 (6: the game step stays umu-run's parent, #273), and `# wrapper:` is a new run log header line (only with a
 wrapper) that the report includes.
 
 **Live, in the harness** (2026-11-08, Right and Down, D3D11, RTX 4090; `docs/linux-e2e.md`). No

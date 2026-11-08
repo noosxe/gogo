@@ -23,7 +23,7 @@ use crate::macapp::launch::GameDirs;
 /// Bumped with every change to [`TEMPLATE`] that matters to a game set up
 /// before it. Setup rewrites `launch.sh` whenever its bytes differ, so this
 /// is for people: the run log header and `launch.log` name it.
-pub const LAUNCHER_VERSION: u32 = 5;
+pub const LAUNCHER_VERSION: u32 = 6;
 
 /// `launch.sh`'s first word when a wrapper runs it for the game's own step
 /// (design 18 §7.8): the game's environment, then umu-run.
@@ -348,10 +348,36 @@ run_setup() {
     load_conf
 }
 
+# The game step under a wrapper (design 18 §7.8): umu-run runs as this
+# script's child, so its exit code can be written beside the mark (a wrapper
+# like gamescope drops its child's). TERM, INT and HUP are passed on and the
+# wait goes on. Not exec'd: this shell lives exactly as long as umu-run.
+run_step() {
+    local cpid=0 rc
+    if [ -n "$UMU_PYTHON" ]; then
+        "$UMU_PYTHON" "$UMU_RUN_ABS" "$EXE_ABS" ${ARGS[@]+"${ARGS[@]}"} "$@" 0<&0 &
+    else
+        "$UMU_RUN_ABS" "$EXE_ABS" ${ARGS[@]+"${ARGS[@]}"} "$@" 0<&0 &
+    fi
+    cpid=$!
+    trap 'kill -TERM "$cpid" 2>/dev/null' TERM
+    trap 'kill -INT "$cpid" 2>/dev/null' INT
+    trap 'kill -HUP "$cpid" 2>/dev/null' HUP
+    wait "$cpid"
+    rc=$?
+    # A trapped signal ends the wait early, with the child still there.
+    while kill -0 "$cpid" 2>/dev/null; do
+        wait "$cpid"
+        rc=$?
+    done
+    printf '%s' "$rc" >"$GAME_MARK.code.tmp" && mv -f "$GAME_MARK.code.tmp" "$GAME_MARK.code"
+    exit "$rc"
+}
 # The game's environment (§7.2 step 4), in umu-run's process only. No host
 # drives (s:, x: -> $HOME, ...; setup::GAME_DRIVE_OFF), which the L4 env can
 # undo. The L4 and fix env next: WINEPREFIX (R7), GAMEID, STORE and
 # PROTONPATH are gogo's and come last.
+GAME_STEP=""
 run_game() {
     local pair
     export @GAME_DRIVE_OFF@
@@ -362,6 +388,7 @@ run_game() {
     if [ "$PROTONFIXES" = 0 ]; then export PROTONFIXES_DISABLE=1; fi
     if [ -n "$UMU_FOLDERS" ]; then export UMU_FOLDERS_PATH="$UMU_FOLDERS"; fi
     export WINEPREFIX="$PREFIX_ABS" GAMEID="$UMU_ID" STORE=gog PROTONPATH="$PROTON_ABS"
+    if [ -n "$GAME_STEP" ]; then run_step "$@"; fi
     if [ -n "$UMU_PYTHON" ]; then
         exec "$UMU_PYTHON" "$UMU_RUN_ABS" "$EXE_ABS" ${ARGS[@]+"${ARGS[@]}"} "$@"
     fi
@@ -379,13 +406,15 @@ start_game() {
     run_game "$@"
 }
 # The wrapper running this script for the game's step: nothing else of the
-# launcher happens here. The mark holds this pid, which umu-run keeps.
+# launcher happens here. The mark holds this pid, the parent of umu-run
+# (run_step), which is there as long as the game is.
 if [ "${1:-}" = @RUN_GAME_ARG@ ] && [ "$#" -ge 2 ]; then
     GAME_MARK="$2"
     shift 2
     load_conf
     cd "$WORKDIR_ABS" || exit 1
     printf '%s' "$$" >"$GAME_MARK.tmp" && mv -f "$GAME_MARK.tmp" "$GAME_MARK"
+    GAME_STEP=1
     run_game "$@"
 fi
 
@@ -756,7 +785,7 @@ register_launch() {
     mkdir -p "$LIVE_DIR" && printf '%s' "$ME_START" >"$LIVE_DIR/$$"
 }
 unregister_launch() {
-    rm -f "$GAME_MARK" "$GAME_MARK.tmp"
+    rm -f "$GAME_MARK" "$GAME_MARK.tmp" "$GAME_MARK.code" "$GAME_MARK.code.tmp"
     if [ "$(cat "$LIVE_DIR/$$" 2>/dev/null)" = "$ME_START" ]; then rm -f "$LIVE_DIR/$$"; fi
 }
 start_watchdog() {
@@ -941,7 +970,7 @@ if [ "${#WRAPPER[@]}" -gt 0 ]; then log "under wrapper: ${WRAPPER[*]}"; fi
 # a game nothing knows about. Only the watchdog needs WPID, so it follows.
 register_launch
 set -m
-rm -f "$GAME_MARK" "$GAME_MARK.tmp"
+rm -f "$GAME_MARK" "$GAME_MARK.tmp" "$GAME_MARK.code" "$GAME_MARK.code.tmp"
 ( start_game ${ARGV[@]+"${ARGV[@]}"} ) 3>&- 4>&- &
 WPID=$!
 set +m
@@ -972,6 +1001,23 @@ if [ -z "$(other_launcher)" ]; then
     done
 fi
 log "prefix idle"
+# The game step's own record of umu-run's code, which a wrapper may have
+# dropped: the step is gone a moment after umu-run.
+if [ "${#WRAPPER[@]}" -gt 0 ]; then
+    gpid="$(cat "$GAME_MARK" 2>/dev/null)"
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        [ -e "$GAME_MARK.code" ] || [ -z "$gpid" ] || ! running "$gpid" && break
+        sleep 0.1
+    done
+    gcode="$(cat "$GAME_MARK.code" 2>/dev/null)"
+    case "$gcode" in
+        ''|*[!0-9]*) ;;
+        *)
+            log "wrapper ${WRAPPER[0]} exited $rc; the game exited $gcode"
+            rc="$gcode"
+            ;;
+    esac
+fi
 stop_watchdog
 unregister_launch
 end_run_log "$rc"
@@ -1027,7 +1073,7 @@ mod tests {
     #[test]
     fn the_game_start_matches_the_golden_file() {
         let s = launch_sh();
-        let at = s.find("# The game's environment (§7.2 step 4)").unwrap();
+        let at = s.find("# The game step under a wrapper").unwrap();
         let end = s.find("# Design 16 Open 1:").unwrap();
         assert_eq!(
             &s[at..end],
