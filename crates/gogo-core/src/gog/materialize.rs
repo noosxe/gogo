@@ -230,7 +230,7 @@ fn reflink(_src: &File, _dst: &File) -> io::Result<()> {
     Err(io::ErrorKind::Unsupported.into())
 }
 
-fn existing_ancestor(path: &Path) -> Option<&Path> {
+pub(crate) fn existing_ancestor(path: &Path) -> Option<&Path> {
     path.ancestors().find(|p| p.is_dir())
 }
 

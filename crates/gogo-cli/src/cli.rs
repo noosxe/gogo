@@ -164,6 +164,11 @@ pub enum Command {
         /// the installer; also takes an installed game directory.
         #[arg(long, value_name = "GAME|PATH")]
         from_depot: Option<String>,
+        /// Where the game goes: `<PATH>/<gogid>/` (`library.dir`,
+        /// `GOGO_LIBRARY_DIR`). Default: gogo's data dir. A game that's
+        /// already built stays where it is.
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["portable", "retarget"])]
+        library: Option<std::path::PathBuf>,
         /// Bundle title (default: the game's name, or derived from the
         /// installer file name).
         #[arg(long)]
@@ -248,6 +253,11 @@ pub enum Command {
         /// the installer; also takes an installed game directory.
         #[arg(long, value_name = "GAME|PATH")]
         from_depot: Option<String>,
+        /// Where the game goes: `<PATH>/<gogid>/` (`library.dir`,
+        /// `GOGO_LIBRARY_DIR`). Default: gogo's data dir. A game that's
+        /// already built stays where it is.
+        #[arg(long, value_name = "PATH", conflicts_with = "retarget")]
+        library: Option<std::path::PathBuf>,
         /// The game's title (default: the game's name, or derived from the
         /// installer file name).
         #[arg(long)]
@@ -1253,6 +1263,33 @@ mod tests {
             })
             .collect();
         assert!(bad.is_empty(), "help text references repo docs: {bad:#?}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_app_takes_a_library_only_for_a_build() {
+        let cli = Cli::try_parse_from(["gogo", "linux-app", "tag", "--library", "/big"]).unwrap();
+        let Command::LinuxApp { library, .. } = cli.command else {
+            panic!("expected a linux-app build");
+        };
+        assert_eq!(library.as_deref(), Some(std::path::Path::new("/big")));
+        assert!(
+            Cli::try_parse_from(["gogo", "linux-app", "--retarget=1", "--library=/big"]).is_err()
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_app_takes_a_library_but_not_for_a_portable_build() {
+        let cli = Cli::try_parse_from(["gogo", "mac-app", "tag", "--library", "/big"]).unwrap();
+        let Command::MacApp { library, .. } = cli.command else {
+            panic!("expected a mac-app build");
+        };
+        assert_eq!(library.as_deref(), Some(std::path::Path::new("/big")));
+        assert!(
+            Cli::try_parse_from(["gogo", "mac-app", "tag", "--portable", "--library=/big"])
+                .is_err()
+        );
     }
 
     #[cfg(target_os = "linux")]

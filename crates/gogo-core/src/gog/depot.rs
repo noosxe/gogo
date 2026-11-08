@@ -94,6 +94,8 @@ pub struct DepotOptions {
     pub password: Option<String>,
     /// Replaces `<cache>/gogo/depot/<id>` as the install root.
     pub dir: Option<PathBuf>,
+    /// The library a build of this game would go to, for the plan's cost.
+    pub library: Option<crate::macapp::launch::Library>,
     /// Bytes/sec; `None` = unlimited.
     pub limit: Option<u64>,
     pub disk_check: bool,
@@ -107,6 +109,7 @@ impl Default for DepotOptions {
             with_dlcs: false,
             password: None,
             dir: None,
+            library: None,
             limit: None,
             disk_check: true,
             dry_run: false,
@@ -243,9 +246,16 @@ pub async fn run(
     let (download_size, disk_size) = manifest.install_size(&opts.language, &dlcs, None);
     let install_dir = install_root.join(manifest.install_directory());
     let game_files = cfg!(target_os = "linux").then(|| {
-        let game_dir = crate::macapp::launch::games_dir()
-            .join(product_id.to_string())
-            .join("game");
+        let game_dir = crate::macapp::launch::GameDirs::for_build(
+            &product_id.to_string(),
+            opts.library.as_ref(),
+        )
+        .map(|d| d.game)
+        .unwrap_or_else(|_| {
+            crate::macapp::launch::games_dir()
+                .join(product_id.to_string())
+                .join("game")
+        });
         super::materialize::plan_tree(&install_root, &game_dir, disk_size)
     });
     let _ = events.send(DepotEvent::Plan {

@@ -489,9 +489,250 @@ impl GameDirs {
         }
     }
 
+    /// Where `gogid` lives: its recorded location (design 18 §6.1), else
+    /// `games/<gogid>`. Every reader finds a game through this, whatever
+    /// the library setting says now.
     pub fn for_game(gogid: &str) -> Result<GameDirs, MacAppError> {
         compat::validate_gogid(gogid)?;
-        Ok(GameDirs::at(games_dir().join(gogid)))
+        Ok(GameDirs::at(
+            recorded_location(gogid).unwrap_or_else(|| games_dir().join(gogid)),
+        ))
+    }
+
+    /// Where a build of `gogid` goes: where the game already is, else the
+    /// library, else `games/<gogid>`. Changing the setting moves nothing. A
+    /// game recorded somewhere that isn't there is refused: a build would
+    /// fill the mount point of a drive that isn't mounted.
+    pub fn for_build(gogid: &str, library: Option<&Library>) -> Result<GameDirs, MacAppError> {
+        let found = GameDirs::for_game(gogid)?;
+        let recorded = recorded_location(gogid).is_some();
+        if recorded && !found.root.is_dir() {
+            return Err(MacAppError::Library {
+                path: found.root,
+                reason: format!(
+                    "{gogid} is recorded there and it isn't there (a drive not mounted?): \
+                     mount it, or `gogo apps remove {gogid}` first"
+                ),
+            });
+        }
+        let placed = recorded || found.root.symlink_metadata().is_ok();
+        Ok(match library {
+            Some(l) if !placed => GameDirs::at(l.dir().join(gogid)),
+            _ => found,
+        })
+    }
+}
+
+// — where a game lives: the game library (design 18 §6.1) —
+
+/// `<data_root>/game-locations/`: one file per game outside `games/`, named
+/// by its gogid and holding the game's absolute dir. It stays with the data
+/// root, because everything else about the game is in the dir it points at.
+pub fn locations_dir() -> PathBuf {
+    crate::state::data_root().join("game-locations")
+}
+
+/// A location file's contents, when they're what gogo writes: an absolute
+/// path, without `..`, whose last part is the game's id. Anything else isn't
+/// trusted, since `gogo apps remove` deletes this dir.
+fn parse_location(raw: &str, gogid: &str) -> Option<PathBuf> {
+    let p = Path::new(raw.strip_suffix('\n').unwrap_or(raw));
+    let safe = p.is_absolute()
+        && p.file_name().is_some_and(|n| n == gogid)
+        && !p
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir));
+    safe.then(|| p.to_path_buf())
+}
+
+/// The location recorded for `gogid`, if it has one. The dir may be gone (a
+/// drive that isn't mounted): callers see that as a game without files.
+pub fn recorded_location(gogid: &str) -> Option<PathBuf> {
+    let raw = std::fs::read_to_string(locations_dir().join(gogid)).ok()?;
+    parse_location(&raw, gogid)
+}
+
+/// Is `root` somewhere other than `games/`?
+pub fn in_library(root: &Path) -> bool {
+    !root.starts_with(games_dir())
+}
+
+/// Record that `gogid` lives at `root`. A game under `games/` needs no
+/// record, and gets none: nothing new appears for anyone without a library.
+pub fn record_location(gogid: &str, root: &Path) -> Result<(), MacAppError> {
+    if !in_library(root) {
+        return Ok(());
+    }
+    write_atomic(
+        &locations_dir().join(gogid),
+        &format!("{}\n", root.display()),
+    )
+}
+
+/// Drop `gogid`'s record, if it has one.
+pub fn forget_location(gogid: &str) -> Result<(), MacAppError> {
+    match std::fs::remove_file(locations_dir().join(gogid)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+        _ => Ok(()),
+    }
+}
+
+/// Every game with a location record, as `(gogid, dir)`, sorted.
+pub fn recorded_games() -> Vec<(String, PathBuf)> {
+    let mut out: Vec<(String, PathBuf)> = std::fs::read_dir(locations_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let gogid = e.file_name().into_string().ok()?;
+            compat::validate_gogid(&gogid).ok()?;
+            let root = recorded_location(&gogid)?;
+            Some((gogid, root))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// Recorded games whose dir isn't there now (a drive that isn't mounted).
+/// What they reference can't be read, so the store's GC stops for them.
+pub fn unreachable_games() -> Vec<(String, PathBuf)> {
+    let mut out = recorded_games();
+    out.retain(|(_, root)| !root.is_dir());
+    out
+}
+
+/// Where the installer lane stages a game whose id isn't known yet: on the
+/// filesystem the game will end up on.
+pub fn staging_root(library: Option<&Library>, slug: &str) -> PathBuf {
+    library
+        .map(Library::dir)
+        .map_or_else(games_dir, Path::to_path_buf)
+        .join(format!(".build-{slug}-{}", std::process::id()))
+}
+
+/// The warning for a build whose game stays out of `library`, if it does.
+pub fn stays_note(dirs: &GameDirs, library: Option<&Library>) -> Option<String> {
+    let library = library?;
+    (!dirs.root.starts_with(library.dir())).then(|| {
+        format!(
+            "this game is already at {}, and the library setting doesn't move games: it \
+             stays there (`gogo apps remove` and a new build put it in {})",
+            dirs.root.display(),
+            library.dir().display()
+        )
+    })
+}
+
+/// [`std::fs::rename`], with a copy when `from` and `to` are on different
+/// filesystems (an installer build of a game that stayed where it was).
+pub(crate) fn move_tree(from: &Path, to: &Path) -> Result<(), MacAppError> {
+    match std::fs::rename(from, to) {
+        Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
+            crate::gog::materialize::materialize_tree(
+                from,
+                to,
+                crate::gog::materialize::Reflink::Try,
+            )?;
+            std::fs::remove_dir_all(from)?;
+            Ok(())
+        }
+        other => Ok(other?),
+    }
+}
+
+/// A checked `library.dir` (design 05 §3): games go in `<dir>/<gogid>/`. The
+/// only way to get one is [`Library::resolve`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Library {
+    dir: PathBuf,
+}
+
+impl Library {
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Check a configured library dir. `None`: it is `games/` itself, which
+    /// is what no library means. Refused: a dir inside the download dir, the
+    /// stores or the depot cache (their cleanups and walks must not meet a
+    /// game), the data root itself, one gogo can't write to or that can't
+    /// hold the prefix's symlinks. Creates nothing but a probe, removed
+    /// again, in the nearest dir that exists.
+    pub fn resolve(
+        dir: &Path,
+        download_dir: Option<&Path>,
+    ) -> Result<Option<Library>, MacAppError> {
+        let dir = absolute(dir);
+        let refuse = |reason: String| MacAppError::Library {
+            path: dir.clone(),
+            reason,
+        };
+        // Location files and launch.conf hold it as one line of text.
+        if dir.to_str().is_none_or(|s| s.contains('\n')) {
+            return Err(refuse("the path has to be UTF-8, on one line".into()));
+        }
+        let real = real_path(&dir);
+        let data_root = crate::state::data_root();
+        if real == real_path(&games_dir()) {
+            return Ok(None);
+        }
+        if real == real_path(&data_root) {
+            return Err(refuse("it is gogo's data dir".into()));
+        }
+        let inside: [(&str, Option<PathBuf>); 4] = [
+            ("the download dir", download_dir.map(Path::to_path_buf)),
+            ("gogo's runtime store", Some(super::store::runtimes_dir())),
+            ("gogo's renderer store", Some(super::store::renderers_dir())),
+            (
+                "the depot cache",
+                crate::gog::depot::default_cache_dir().map(|c| c.join("gogo/depot")),
+            ),
+        ];
+        for (what, other) in inside {
+            if let Some(other) = other
+                && real.starts_with(real_path(&other))
+            {
+                return Err(refuse(format!("it is inside {what} ({})", other.display())));
+            }
+        }
+        let Some(near) = crate::gog::materialize::existing_ancestor(&dir) else {
+            return Err(refuse("no part of the path exists".into()));
+        };
+        let tag = format!(".gogo-library-probe-{}", std::process::id());
+        let (file, link) = (near.join(&tag), near.join(format!("{tag}-link")));
+        let probe = (|| {
+            std::fs::write(&file, "")?;
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&tag, &link)?;
+            Ok::<(), std::io::Error>(())
+        })();
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_file(&file);
+        probe.map_err(|e| {
+            refuse(format!(
+                "{} doesn't take a file and a symlink ({e}): the game's prefix needs both",
+                near.display()
+            ))
+        })?;
+        Ok(Some(Library { dir }))
+    }
+}
+
+/// `p` with its symlinks resolved as far as it exists (a library is compared
+/// by where it really is).
+fn real_path(p: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut cur = p;
+    loop {
+        if let Ok(real) = cur.canonicalize() {
+            return rest.iter().rev().fold(real, |acc, c| acc.join(c));
+        }
+        let (Some(parent), Some(name)) = (cur.parent(), cur.file_name()) else {
+            return p.to_path_buf();
+        };
+        rest.push(name);
+        cur = parent;
     }
 }
 
@@ -647,6 +888,10 @@ STATE_ROOT="$GOGO_STATE"
 # A portable bundle was built on another Mac: the state dir is this user's.
 [ -z "$PORTABLE" ] && [ -d "$STATE_ROOT" ] || STATE_ROOT="$HOME/Library/Application Support/gogo"
 GAME_STATE="$STATE_ROOT/games/$GOGID"
+# A game in a library (design 18 section 6.1): gogo records where it lives.
+if [ -f "$STATE_ROOT/game-locations/$GOGID" ]; then
+    IFS= read -r GAME_STATE <"$STATE_ROOT/game-locations/$GOGID"
+fi
 LOG_DIR="${GOGO_LOG_DIR:-$HOME/Library/Logs/gogo/$GOGID}"
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/launch.log"
@@ -1528,5 +1773,113 @@ mod launch_tests {
             "{}",
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    // — the game library (design 18 §6.1) —
+
+    #[test]
+    fn a_library_is_refused_inside_what_gogo_cleans_or_walks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _g = crate::test_util::env_lock();
+        // SAFETY: env mutation under the shared env mutex.
+        unsafe { std::env::set_var("GOGO_HOME", tmp.path().join("home")) };
+        let downloads = tmp.path().join("Downloads/gogo");
+        std::fs::create_dir_all(&downloads).unwrap();
+        let refused = |dir: &Path, needle: &str| {
+            let err = Library::resolve(dir, Some(&downloads)).unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains(needle), "{dir:?}: {msg}");
+        };
+        refused(&downloads, "the download dir");
+        refused(&downloads.join("games"), "the download dir");
+        let store = crate::state::data_root().join("runtimes");
+        refused(&store.join("x"), "runtime store");
+        let renderers = crate::state::data_root().join("renderers");
+        refused(&renderers, "renderer store");
+        refused(&crate::state::data_root(), "data dir");
+        if let Some(cache) = crate::gog::depot::default_cache_dir() {
+            refused(&cache.join("gogo/depot/1"), "depot cache");
+        }
+        // Reached through a symlink, it's still the download dir.
+        let link = tmp.path().join("looks-fine");
+        std::os::unix::fs::symlink(&downloads, &link).unwrap();
+        refused(&link.join("games"), "the download dir");
+        refused(Path::new("/tmp\nsecond"), "one line");
+
+        // games/ itself is no library at all.
+        let games = crate::state::data_root().join("games");
+        assert_eq!(Library::resolve(&games, Some(&downloads)).unwrap(), None);
+
+        // A fine one, not created yet: nothing is left behind by the check.
+        let big = tmp.path().join("big/GOG");
+        let lib = Library::resolve(&big, Some(&downloads)).unwrap().unwrap();
+        assert_eq!(lib.dir(), big);
+        assert!(!tmp.path().join("big").exists());
+        assert_eq!(
+            std::fs::read_dir(tmp.path())
+                .unwrap()
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().contains("probe"))
+                .count(),
+            0
+        );
+
+        // SAFETY: as above.
+        unsafe { std::env::remove_var("GOGO_HOME") };
+    }
+
+    #[test]
+    fn a_library_gogo_cannot_write_to_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let locked = tmp.path().join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // root writes anywhere: nothing to test there.
+        if std::fs::write(locked.join("probe"), "").is_ok() {
+            return;
+        }
+        let err = Library::resolve(&locked.join("games"), None).unwrap_err();
+        assert!(err.to_string().contains("doesn't take"), "{err}");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// The Mac launcher's top part, run: `GAME_STATE` from the record when
+    /// there is one, `games/<gogid>` otherwise (bash, on either OS).
+    #[test]
+    fn the_mac_launcher_finds_a_library_game_by_its_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let contents = tmp.path().join("Game.app/Contents");
+        let (res, macos) = (contents.join("Resources"), contents.join("MacOS"));
+        std::fs::create_dir_all(&res).unwrap();
+        std::fs::create_dir_all(&macos).unwrap();
+        let state = tmp.path().join("state");
+        std::fs::create_dir_all(state.join("game-locations")).unwrap();
+        std::fs::write(
+            res.join("launch.conf"),
+            format!(
+                "GOGID='7'\nTITLE='T'\nGOGO_STATE={}\n",
+                sh_quote(&state.display().to_string())
+            ),
+        )
+        .unwrap();
+        let top: String = LAUNCHER
+            .lines()
+            .take_while(|l| !l.starts_with("LOG_DIR="))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        let script = macos.join("launcher");
+        std::fs::write(&script, format!("{top}printf '%s' \"$GAME_STATE\"\n")).unwrap();
+        let run = || {
+            let out = std::process::Command::new("bash")
+                .arg(&script)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{out:?}");
+            String::from_utf8(out.stdout).unwrap()
+        };
+        assert_eq!(run(), state.join("games/7").display().to_string());
+        std::fs::write(state.join("game-locations/7"), "/Volumes/Big Drive/7\n").unwrap();
+        assert_eq!(run(), "/Volumes/Big Drive/7");
     }
 }

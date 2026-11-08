@@ -84,6 +84,8 @@ pub struct MacAppPlan {
     /// install reveals the id. A portable build (#84) runs in a staging dir
     /// next to the bundle and removes it at the end.
     pub state: launch::GameDirs,
+    /// The checked `library.dir`, for the installer lane's final place.
+    pub library: Option<launch::Library>,
     /// `--portable` (#84): a self-contained bundle for another Mac.
     pub portable: bool,
     /// Depot lane: the game's GOG id (installer lane: found post-install).
@@ -133,6 +135,9 @@ pub struct MacAppOptions {
     /// The path gogo was invoked as, recorded in the bundle for the
     /// launcher (design 16 decision 2). `None` = the current executable.
     pub gogo_path: Option<PathBuf>,
+    /// The checked `library.dir` (design 18 §6.1). `None`: `games/`. A
+    /// portable build ignores it: its prefix is made on the Mac it runs on.
+    pub library: Option<launch::Library>,
 }
 
 /// `--recipe auto|none|<installer-slug>|<script-file>` (design 11 §1).
@@ -956,9 +961,13 @@ pub fn plan(
         let id = tree_id
             .clone()
             .ok_or_else(|| MacAppError::EntryPointNotFound { dir: tree.clone() })?;
-        (launch::GameDirs::for_game(&id)?, Some(id))
+        let dirs = launch::GameDirs::for_build(&id, opts.library.as_ref())?;
+        if let Some(message) = launch::stays_note(&dirs, opts.library.as_ref()) {
+            emit(&ProgressEvent::Warn { message });
+        }
+        (dirs, Some(id))
     } else {
-        let staging = launch::games_dir().join(format!(".build-{slug}-{}", std::process::id()));
+        let staging = launch::staging_root(opts.library.as_ref(), &slug);
         (launch::GameDirs::at(staging), None)
     };
     bundle.prefix = state.prefix.clone();
@@ -1040,6 +1049,7 @@ pub fn plan(
         renderer,
         bundle,
         state,
+        library: opts.library.clone(),
         portable: opts.portable,
         gogid,
         gogo_path: opts
@@ -1231,6 +1241,20 @@ pub fn execute(
     out
 }
 
+/// The warning for a game tree that can't be cloned into a library: another
+/// volume means a full copy.
+fn copy_note(tree: &Path, root: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt as _;
+    let near = crate::gog::materialize::existing_ancestor(root)?;
+    (std::fs::metadata(tree).ok()?.dev() != std::fs::metadata(near).ok()?.dev()).then(|| {
+        format!(
+            "{} is on another volume than the library: the game files are copied in full, \
+             not cloned",
+            tree.display()
+        )
+    })
+}
+
 fn execute_into(
     plan: &MacAppPlan,
     codesign: CodesignPolicy,
@@ -1303,8 +1327,19 @@ fn execute_into(
         // Design 16 decision 4: `game/` is the clone, reached from the
         // prefix as `C:\GOG\<name>` through a relative symlink.
         let dirs = &plan.state;
+        if !plan.portable
+            && let Some(id) = &plan.gogid
+        {
+            launch::record_location(id, &dirs.root)?;
+        }
         if dirs.game.symlink_metadata().is_ok() {
             std::fs::remove_dir_all(&dirs.game)?;
+        }
+        if !plan.portable
+            && launch::in_library(&dirs.root)
+            && let Some(note) = copy_note(tree, &dirs.root)
+        {
+            emit(&ProgressEvent::Warn { message: note });
         }
         bundle::clone_tree(tree, &dirs.game)?;
         let dst = setup::link_game(dirs, &name)?;
@@ -1622,8 +1657,12 @@ fn finish_v2(
     // Installer lane: the id is known only now; move the staging dir into
     // place. An older prefix for the same game is set aside, never deleted.
     if plan.gogid.is_none() {
-        let target = launch::GameDirs::for_game(&gogid)?;
+        let target = launch::GameDirs::for_build(&gogid, plan.library.as_ref())?;
+        if let Some(message) = launch::stays_note(&target, plan.library.as_ref()) {
+            emit(&ProgressEvent::Warn { message });
+        }
         std::fs::create_dir_all(&target.root)?;
+        launch::record_location(&gogid, &target.root)?;
         if target.prefix.symlink_metadata().is_ok() {
             let aside = target.root.join(format!(
                 "prefix.old-{}",
@@ -1634,12 +1673,12 @@ fn finish_v2(
                 message: format!("previous prefix moved to {}", aside.display()),
             });
         }
-        std::fs::rename(&dirs.prefix, &target.prefix)?;
+        launch::move_tree(&dirs.prefix, &target.prefix)?;
         // The installer's logs (#56) go along, replacing an older build's.
         let logs = target.root.join(INSTALL_LOGS);
         if dirs.root.join(INSTALL_LOGS).is_dir() {
             std::fs::remove_dir_all(&logs).ok();
-            std::fs::rename(dirs.root.join(INSTALL_LOGS), &logs)?;
+            launch::move_tree(&dirs.root.join(INSTALL_LOGS), &logs)?;
         }
         std::fs::remove_dir_all(&dirs.root).ok();
     }

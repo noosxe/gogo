@@ -16,6 +16,7 @@ use gogo::engine::events::ProgressEvent;
 use gogo::linuxapp::build::{self, LinuxAppOptions};
 use gogo::linuxapp::game::LinuxState;
 use gogo::linuxapp::setup::{self, SetupOptions};
+use gogo::macapp::launch::Library;
 use gogo::macapp::{Renderer, RendererChoice};
 
 const ID: &str = "1999999901";
@@ -29,6 +30,7 @@ log="$FAKE_UMU_LOG"
 printf 'ARGV:%s\n' "$*" >> "$log"
 printf 'ENV:WINEPREFIX=%s PROTONPATH=%s GAMEID=%s STORE=%s PROTONFIXES_DISABLE=%s GAME_DRIVE=%s CWD=%s\n' \
   "$WINEPREFIX" "$PROTONPATH" "$GAMEID" "$STORE" "$PROTONFIXES_DISABLE" "$PROTON_SET_GAME_DRIVE" "$(pwd)" >> "$log"
+[ -n "$PRESSURE_VESSEL_FILESYSTEMS_RW" ] && printf 'SHARED:%s\n' "$PRESSURE_VESSEL_FILESYSTEMS_RW" >> "$log"
 [ -n "$WINEPREFIX" ] || { echo "no WINEPREFIX" >&2; exit 3; }
 case "$1" in
   "")
@@ -165,8 +167,29 @@ impl World {
         w
     }
 
+    /// The game's dir, wherever gogo finds it.
     fn game(&self) -> PathBuf {
-        self.home.join("games").join(ID)
+        let dirs = gogo::macapp::launch::GameDirs::for_game(ID).unwrap();
+        dirs.root
+    }
+
+    /// A library on "another drive": a space, and a `games` part that must
+    /// not be taken for the data root's.
+    fn library(&self) -> Library {
+        Library::resolve(&self.root.join("big drive/games"), None)
+            .unwrap()
+            .unwrap()
+    }
+
+    fn opts_in_library(&self) -> LinuxAppOptions {
+        LinuxAppOptions {
+            library: Some(self.library()),
+            ..self.opts()
+        }
+    }
+
+    fn locations(&self) -> PathBuf {
+        self.home.join("game-locations")
     }
 
     fn opts(&self) -> LinuxAppOptions {
@@ -1074,6 +1097,7 @@ const FAKE_GAME_UMU: &str = r#"#!/bin/sh
   printf 'ENV:WINEPREFIX=%s GAMEID=%s STORE=%s PROTONPATH=%s WINEDLLOVERRIDES=%s PROTONFIXES_DISABLE=%s FOO=%s GAME_DRIVE=%s CWD=%s\n' \
     "${WINEPREFIX-unset}" "${GAMEID-}" "${STORE-}" "${PROTONPATH-}" "${WINEDLLOVERRIDES-}" \
     "${PROTONFIXES_DISABLE-}" "${FOO-}" "${PROTON_SET_GAME_DRIVE-}" "$(pwd)"
+  printf 'GAME_SHARED:%s\n' "${PRESSURE_VESSEL_FILESYSTEMS_RW-}"
 } >> "$FAKE_UMU_LOG"
 if [ -n "${FAKE_ARGS_LOG:-}" ]; then
   : > "$FAKE_ARGS_LOG"
@@ -1121,6 +1145,7 @@ exit "${FAKE_GAME_EXIT:-0}"
 const FAKE_GOGO: &str = r#"#!/bin/sh
 echo "GOGO_HOME=${GOGO_HOME:-} $*" >> "$FAKE_CALLS"
 g="$GOGO_HOME/games/$3"
+if [ -f "$GOGO_HOME/game-locations/$3" ]; then g="$(cat "$GOGO_HOME/game-locations/$3")"; fi
 l4="$GOGO_HOME/compat/$3.toml"
 case "$2" in
   setup)
@@ -1199,6 +1224,10 @@ impl World {
     /// stderr) where the launcher can't run: Nix's build sandbox has no
     /// `/usr/bin/env` for its shebang and no `setsid`.
     fn launcher(name: &str, no_gogo: bool) -> Option<World> {
+        World::launcher_with(name, no_gogo, false)
+    }
+
+    fn launcher_with(name: &str, no_gogo: bool, library: bool) -> Option<World> {
         let path = std::env::var_os("PATH").unwrap_or_default();
         let found: Vec<Option<PathBuf>> = LAUNCHER_TOOLS
             .iter()
@@ -1212,7 +1241,7 @@ impl World {
             eprintln!("no /usr/bin/env or a launcher tool missing from PATH: skipped");
             return None;
         }
-        let w = World::launcher_built(name, no_gogo);
+        let w = World::launcher_built_with(name, no_gogo, library);
         let tools = w.root.join("tools");
         std::fs::create_dir_all(&tools).unwrap();
         for (t, p) in LAUNCHER_TOOLS.iter().zip(found) {
@@ -1223,6 +1252,10 @@ impl World {
 
     /// [`World::launcher`]'s game without the tools: for what setup writes.
     fn launcher_built(name: &str, no_gogo: bool) -> World {
+        World::launcher_built_with(name, no_gogo, false)
+    }
+
+    fn launcher_built_with(name: &str, no_gogo: bool, library: bool) -> World {
         let w = World::new(name, &["d3d9.dll"]);
         std::fs::write(w.tree.join(format!("goggame-{ID}.ico")), tiny_ico()).unwrap();
         let gogo = w
@@ -1232,7 +1265,11 @@ impl World {
             std::fs::write(&gogo, FAKE_GOGO).unwrap();
             chmod_x(&gogo);
         }
-        let mut opts = w.opts();
+        let mut opts = if library {
+            w.opts_in_library()
+        } else {
+            w.opts()
+        };
         opts.gogo_path = Some(gogo);
         build_with(&opts);
         let umu = w.root.join("bin/umu-run");
@@ -1452,7 +1489,7 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
     // next setup, which says so; an unchanged one isn't touched.
     std::fs::write(
         &sh,
-        script.replace("LAUNCHER_VERSION=6", "LAUNCHER_VERSION=0"),
+        script.replace("LAUNCHER_VERSION=7", "LAUNCHER_VERSION=0"),
     )
     .unwrap();
     std::fs::write(&desktop, "[Desktop Entry]\nExec=/old/root/launch.sh\n").unwrap();
@@ -1460,7 +1497,7 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
     assert_eq!(std::fs::read_to_string(&sh).unwrap(), script);
     assert_eq!(std::fs::read_to_string(&desktop).unwrap(), entry);
     assert!(
-        out.notes.iter().any(|n| n == "launch.sh: launcher 0 -> 6"),
+        out.notes.iter().any(|n| n == "launch.sh: launcher 0 -> 7"),
         "{:?}",
         out.notes
     );
@@ -1525,7 +1562,7 @@ fn the_launcher_runs_umu_with_the_games_environment_and_logs_the_run() {
     let run = &runs[0];
     for want in [
         format!("# gogo run log: Test Game ({ID})\n"),
-        "# launcher: 6\n".into(),
+        "# launcher: 7\n".into(),
         format!(
             "# runtime: path:{} (1793687165 GE-Proton10-34)\n",
             w.build.display()
@@ -3316,4 +3353,362 @@ fn the_wrapper_shows_up_where_a_player_looks() {
     setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
     assert!(!w.conf().contains("WRAPPER="));
     assert_eq!(envargs::wrapper_report(ID).unwrap().wrapper, None);
+}
+
+// — the game library (#276, design 18 §6.1) —
+
+/// A game's menu entry, as the build wrote it.
+fn desktop_exec() -> String {
+    let entry = std::fs::read_to_string(gogo::linuxapp::game::desktop_path(ID)).unwrap();
+    entry
+        .lines()
+        .find_map(|l| l.strip_prefix("Exec="))
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn without_a_library_nothing_new_appears_and_games_stay_under_the_data_root() {
+    let w = World::new("nolib", &["d3d9.dll"]);
+    let out = build_with(&w.opts());
+    assert_eq!(out.dirs.root, w.home.join("games").join(ID));
+    assert!(!w.locations().exists(), "no record for a game under games/");
+    let conf = w.conf();
+    assert!(!conf.contains("LIBRARY_GAME"), "{conf}");
+    assert_eq!(conf_value(&conf, "PREFIX"), format!("'games/{ID}/prefix'"));
+    assert!(!w.log().contains("SHARED:"), "{}", w.log());
+    assert_eq!(gogo::macapp::launch::recorded_games(), vec![]);
+
+    // A library that is games/ itself is no library: nothing changes either.
+    let same = Library::resolve(&w.home.join("games"), None).unwrap();
+    assert_eq!(same, None);
+}
+
+#[test]
+fn a_game_builds_into_a_library_and_everything_finds_it_there() {
+    use gogo::macapp::{apps, launch::GameDirs};
+    let w = World::new("library", &["d3d9.dll"]);
+    let lib = w.library();
+    let root = lib.dir().join(ID);
+    let plan = build::plan(&w.opts_in_library(), None, &mut quiet()).unwrap();
+    assert_eq!(plan.state.root, root);
+    assert!(!root.exists(), "a plan builds nothing");
+    assert!(!w.locations().exists(), "a plan records nothing");
+
+    let out = build::execute(&plan, None, &mut quiet()).unwrap();
+    // Only games/<gogid> moved: the data root keeps the rest.
+    assert_eq!(out.dirs.root, root);
+    assert!(root.join("game/game.exe").is_file());
+    assert!(root.join("prefix/drive_c/GOG/Test Game/game.exe").is_file());
+    assert!(!w.home.join("games").join(ID).exists());
+    assert_eq!(
+        std::fs::read_to_string(w.locations().join(ID)).unwrap(),
+        format!("{}\n", root.display())
+    );
+    assert_eq!(GameDirs::for_game(ID).unwrap().root, root);
+
+    // launch.conf: absolute game paths, the data root named, marked.
+    let conf = w.conf();
+    assert_eq!(
+        conf_value(&conf, "PREFIX"),
+        format!("'{}'", root.join("prefix").display())
+    );
+    assert_eq!(conf_value(&conf, "LIBRARY_GAME"), "'1'");
+    assert_eq!(
+        conf_value(&conf, "DATA_ROOT"),
+        format!("'{}'", w.home.display())
+    );
+    // The container gets the game's dir, for every umu run.
+    assert!(
+        w.log().contains(&format!("SHARED:{}\n", root.display())),
+        "{}",
+        w.log()
+    );
+
+    // The menu entry runs the launcher where it is.
+    assert!(
+        desktop_exec().contains("big drive/games"),
+        "{}",
+        desktop_exec()
+    );
+
+    // Setup again, from the record alone: the setting is gone.
+    setup::setup(
+        ID,
+        &SetupOptions {
+            refresh: false,
+            prompt: None,
+        },
+        &mut quiet(),
+    )
+    .unwrap();
+
+    // apps list / show, the store's references, env/args and doctor.
+    let logs = w.root.join("logs");
+    let listed = apps::list(&logs).unwrap();
+    assert_eq!(listed.len(), 1);
+    let a = &listed[0];
+    assert_eq!(a.gogid, ID);
+    assert_eq!(a.root, root);
+    assert!(a.linux && a.launcher && a.desktop_present && !a.unreachable);
+    assert!(a.bytes > 0);
+    assert_eq!(apps::get(ID, &logs).unwrap().unwrap().root, root);
+    assert!(
+        gogo::macapp::store::references()
+            .iter()
+            .any(|r| r.file == root.join("state.toml")),
+        "the store's GC sees what a library game uses"
+    );
+    let host = doctor_host(&w, &[]);
+    let report = gogo::linuxapp::doctor::doctor(ID, &host).unwrap();
+    let find = |check: &str| {
+        report
+            .findings
+            .iter()
+            .find(|f| f.check == check)
+            .unwrap_or_else(|| panic!("no {check} finding"))
+    };
+    assert_eq!(find("location").level, gogo::macapp::doctor::Level::Ok);
+    assert!(find("location").message.contains("big drive"));
+    assert_eq!(
+        find("links").level,
+        gogo::macapp::doctor::Level::Ok,
+        "the prefix's link to game/ stays in the game's dir: {:?}",
+        find("links")
+    );
+
+    // Removal takes the game's dir, the record and the menu entry.
+    let desktop = gogo::linuxapp::game::desktop_path(ID);
+    let removed = apps::remove(a, false).unwrap();
+    assert!(removed.paths.contains(&root), "{:?}", removed.paths);
+    assert_eq!(removed.left_behind, None);
+    assert!(!root.exists() && !desktop.exists());
+    assert!(!w.locations().join(ID).exists());
+    assert!(lib.dir().is_dir(), "the library itself stays");
+    assert!(apps::list(&logs).unwrap().is_empty());
+}
+
+#[test]
+fn changing_the_setting_moves_no_game() {
+    use gogo::macapp::launch::GameDirs;
+    let w = World::new("setting", &["d3d9.dll"]);
+    let default_root = w.home.join("games").join(ID);
+    // Built before the setting: a rebuild with a library stays, and says so.
+    build_with(&w.opts());
+    let mut warned = Vec::new();
+    let plan = build::plan(&w.opts_in_library(), None, &mut |ev| {
+        if let ProgressEvent::Warn { message } = ev {
+            warned.push(message.clone());
+        }
+    })
+    .unwrap();
+    assert_eq!(plan.state.root, default_root);
+    assert!(plan.rebuild);
+    assert!(
+        warned.iter().any(|m| m.contains("doesn't move games")),
+        "{warned:?}"
+    );
+    build::execute(&plan, None, &mut quiet()).unwrap();
+    assert!(!w.locations().exists());
+    assert_eq!(GameDirs::for_game(ID).unwrap().root, default_root);
+    gogo::macapp::apps::remove(
+        &gogo::macapp::apps::get(ID, &w.root.join("logs"))
+            .unwrap()
+            .unwrap(),
+        false,
+    )
+    .unwrap();
+
+    // Built in a library: a rebuild without the setting stays there.
+    let lib_root = w.library().dir().join(ID);
+    build_with(&w.opts_in_library());
+    let out = build_with(&w.opts());
+    assert_eq!(out.dirs.root, lib_root);
+    assert!(!default_root.exists());
+    assert_eq!(GameDirs::for_game(ID).unwrap().root, lib_root);
+}
+
+#[test]
+fn an_installer_build_stages_and_lands_in_the_library() {
+    let w = World::new("libinst", &["d3d9.dll"]);
+    let setup_exe = w.root.join("setup_test_game_1.0.exe");
+    std::fs::write(&setup_exe, "MZ").unwrap();
+    let lib = w.library();
+    let opts = LinuxAppOptions {
+        installer: Some(setup_exe),
+        runtime: Some(format!("path:{}", w.build.display())),
+        name: Some("Test Game".into()),
+        library: Some(lib.clone()),
+        ..Default::default()
+    };
+    let plan = build::plan(&opts, None, &mut quiet()).unwrap();
+    assert!(
+        plan.state.root.starts_with(lib.dir()),
+        "{:?}",
+        plan.state.root
+    );
+    let staging = plan.state.root.clone();
+    let out = build::execute(&plan, None, &mut quiet()).unwrap();
+    assert_eq!(out.dirs.root, lib.dir().join(ID));
+    assert!(!staging.exists());
+    assert!(out.dirs.root.join("gogo-launch.toml").is_file());
+    assert_eq!(
+        gogo::macapp::launch::recorded_location(ID),
+        Some(out.dirs.root)
+    );
+}
+
+#[test]
+fn removing_a_symlinked_game_dir_never_follows_it() {
+    use gogo::macapp::apps;
+    let w = World::new("symlink", &["d3d9.dll"]);
+    let logs = w.root.join("logs");
+    for in_library in [true, false] {
+        let opts = if in_library {
+            w.opts_in_library()
+        } else {
+            w.opts()
+        };
+        let out = build_with(&opts);
+        let root = out.dirs.root;
+        // The game's dir is moved away and linked back.
+        let elsewhere = w.root.join("elsewhere");
+        std::fs::rename(&root, &elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &root).unwrap();
+
+        let a = apps::get(ID, &logs).unwrap().unwrap();
+        let removed = apps::remove(&a, false).unwrap();
+        assert_eq!(removed.left_behind.as_deref(), Some(elsewhere.as_path()));
+        assert_eq!(removed.bytes, 0);
+        assert!(root.symlink_metadata().is_err(), "the link goes");
+        assert!(
+            elsewhere.join("game/game.exe").is_file(),
+            "what it points at stays"
+        );
+        assert!(!w.locations().join(ID).exists());
+        std::fs::remove_dir_all(&elsewhere).unwrap();
+    }
+}
+
+#[test]
+fn a_library_game_whose_drive_is_gone_is_listed_kept_from_gc_and_can_be_forgotten() {
+    use gogo::macapp::{apps, store};
+    let w = World::new("gone", &["d3d9.dll"]);
+    let logs = w.root.join("logs");
+    let root = build_with(&w.opts_in_library()).dirs.root;
+    let away = w.root.join("unmounted");
+    std::fs::rename(&root, &away).unwrap();
+
+    let listed = apps::list(&logs).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert!(listed[0].unreachable && !listed[0].orphaned());
+    assert_eq!(listed[0].root, root);
+
+    // Its references can't be read, so nothing can be called unused.
+    let err = store::prune(&["ge-proton".to_string()]).unwrap_err();
+    assert!(err.to_string().contains(ID), "{err}");
+
+    let host = doctor_host(&w, &[]);
+    let report = gogo::linuxapp::doctor::doctor(ID, &host).unwrap();
+    let f = report
+        .findings
+        .iter()
+        .find(|f| f.check == "location")
+        .unwrap();
+    assert_eq!(f.level, gogo::macapp::doctor::Level::Fail);
+
+    // A build doesn't fill the mount point of a drive that isn't mounted.
+    let err = build::plan(&w.opts(), None, &mut quiet()).unwrap_err();
+    assert!(err.to_string().contains("apps remove"), "{err}");
+    assert!(!root.exists());
+
+    let desktop = gogo::linuxapp::game::desktop_path(ID);
+    assert!(desktop.is_file());
+    let removed = apps::remove(&listed[0], false).unwrap();
+    assert_eq!(removed.left_behind.as_deref(), Some(root.as_path()));
+    assert!(!w.locations().join(ID).exists() && !desktop.exists());
+    assert!(away.join("game/game.exe").is_file());
+    assert!(apps::list(&logs).unwrap().is_empty());
+}
+
+#[test]
+fn a_location_record_gogo_did_not_write_is_not_trusted() {
+    use gogo::macapp::launch::GameDirs;
+    let w = World::new("tamper", &["d3d9.dll"]);
+    std::fs::create_dir_all(w.locations()).unwrap();
+    let default_root = w.home.join("games").join(ID);
+    for bad in [
+        "relative/path/1999999901\n".to_string(),
+        "/home/someone\n".to_string(),
+        format!("/data/../{ID}/x\n"),
+        format!("/data/../{ID}\n"),
+    ] {
+        std::fs::write(w.locations().join(ID), &bad).unwrap();
+        assert_eq!(GameDirs::for_game(ID).unwrap().root, default_root, "{bad}");
+    }
+}
+
+#[test]
+fn the_launcher_of_a_library_game_keeps_gogos_data_root() {
+    let Some(w) = World::launcher_with("liblaunch", false, true) else {
+        return;
+    };
+    let root = w.library().dir().join(ID);
+    assert_eq!(w.game(), root);
+
+    let out = w.launch(&[], &[]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(w.calls().is_empty(), "fresh stamp: {:?}", w.calls());
+    // The game ran from the library, sharing its dir with the container.
+    let log = w.log();
+    let env = log.lines().rfind(|l| l.starts_with("ENV:")).unwrap();
+    assert!(
+        env.contains(&format!("WINEPREFIX={}", root.join("prefix").display())),
+        "{env}"
+    );
+    assert!(
+        log.contains(&format!("GAME_SHARED:{}\n", root.display())),
+        "{log}"
+    );
+    // Logs stay under the data root, not the library's parent.
+    assert_eq!(w.runs().len(), 1, "run logs under {:?}", w.logs());
+    assert!(w.launch_log().contains("launcher 7"));
+    assert!(!w.root.join("big drive/logs").exists());
+
+    // Stale config: setup runs with gogo's data root as GOGO_HOME, and from
+    // there finds the game through its record.
+    let l4 = w.home.join("compat").join(format!("{ID}.toml"));
+    std::fs::create_dir_all(l4.parent().unwrap()).unwrap();
+    std::fs::write(&l4, "# edited\n").unwrap();
+    assert_eq!(w.launch(&[], &[]).status.code(), Some(0));
+    assert_eq!(
+        w.calls(),
+        vec![format!(
+            "GOGO_HOME={} linux-app setup {ID}",
+            w.home.display()
+        )]
+    );
+    assert!(w.launch_log().contains("config stale"));
+    // The fake's restamp reached the library's launch.conf: no second setup.
+    assert_eq!(w.launch(&[], &[]).status.code(), Some(0));
+    assert_eq!(w.calls().len(), 1);
+}
+
+#[test]
+fn a_library_game_outlives_a_data_root_that_moved_back_to_the_default() {
+    // launch.conf's DATA_ROOT is gone: the launcher falls back to gogo's
+    // default root, not to the library's parent.
+    let Some(w) = World::launcher_with("libgone", false, true) else {
+        return;
+    };
+    w.edit_conf(&[("DATA_ROOT", "'/nonexistent/gogo-root'")]);
+    let out = w.launch(&[], &[]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(
+        w.user_home()
+            .join(".local/state/gogo/logs")
+            .join(ID)
+            .join("launch.log")
+            .is_file()
+    );
 }

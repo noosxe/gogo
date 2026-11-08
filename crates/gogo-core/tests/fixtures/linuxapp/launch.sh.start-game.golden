@@ -41,6 +41,10 @@ run_game() {
     fi
     if [ "$PROTONFIXES" = 0 ]; then export PROTONFIXES_DISABLE=1; fi
     if [ -n "$UMU_FOLDERS" ]; then export UMU_FOLDERS_PATH="$UMU_FOLDERS"; fi
+    # A game in a library may be outside what the container shares by itself.
+    if [ -n "$LIBRARY_GAME" ]; then
+        export PRESSURE_VESSEL_FILESYSTEMS_RW="$HERE${PRESSURE_VESSEL_FILESYSTEMS_RW:+:$PRESSURE_VESSEL_FILESYSTEMS_RW}"
+    fi
     export WINEPREFIX="$PREFIX_ABS" GAMEID="$UMU_ID" STORE=gog PROTONPATH="$PROTON_ABS"
     if [ -n "$GAME_STEP" ]; then run_step "$@"; fi
     if [ -n "$UMU_PYTHON" ]; then

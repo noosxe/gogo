@@ -79,6 +79,11 @@ pub enum MacAppError {
     #[error("{0}")]
     Apps(String),
 
+    /// A `library.dir` gogo won't use (design 05 §6), or a game's recorded
+    /// dir a build can't use (design 18 §6.1).
+    #[error("{path} can't take this game: {reason}")]
+    Library { path: PathBuf, reason: String },
+
     /// A runtime or renderer of the wrong architecture for this Mac or for
     /// each other (#82).
     #[error("{0}")]

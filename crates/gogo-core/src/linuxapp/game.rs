@@ -333,6 +333,10 @@ pub struct LaunchConf {
     pub umu_folders: Option<String>,
     pub gogo_path: String,
     pub data_root: String,
+    /// The game isn't under `<data_root>/games/` (design 18 §6.1): its
+    /// launcher takes the data root from `DATA_ROOT`, not from where it is.
+    /// `false`: no `LIBRARY_GAME=` line.
+    pub library_game: bool,
 }
 
 impl LaunchConf {
@@ -379,6 +383,9 @@ impl LaunchConf {
         }
         kv("GOGO_PATH", sh_quote(&self.gogo_path));
         kv("DATA_ROOT", sh_quote(&self.data_root));
+        if self.library_game {
+            kv("LIBRARY_GAME", sh_quote("1"));
+        }
         out
     }
 }
@@ -439,6 +446,7 @@ mod tests {
             umu_folders: None,
             gogo_path: "/home/me/.nix-profile/bin/gogo".into(),
             data_root: "/home/me/.local/share/gogo".into(),
+            library_game: false,
         }
     }
 

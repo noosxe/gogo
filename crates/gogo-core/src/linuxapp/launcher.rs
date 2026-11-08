@@ -23,7 +23,7 @@ use crate::macapp::launch::GameDirs;
 /// Bumped with every change to [`TEMPLATE`] that matters to a game set up
 /// before it. Setup rewrites `launch.sh` whenever its bytes differ, so this
 /// is for people: the run log header and `launch.log` name it.
-pub const LAUNCHER_VERSION: u32 = 6;
+pub const LAUNCHER_VERSION: u32 = 7;
 
 /// `launch.sh`'s first word when a wrapper runs it for the game's own step
 /// (design 18 §7.8): the game's environment, then umu-run.
@@ -201,9 +201,24 @@ SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 HERE="${SELF%/*}"
 GOGID="${HERE##*/}"
 TITLE="$GOGID"
-# The data root this launcher is in (<root>/games/<gogid>/launch.sh).
-HERE_ROOT="${HERE%/games/*}"
 XDG_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/gogo"
+# The data root this launcher is in (<root>/games/<gogid>/launch.sh). A game in
+# a library (design 18 section 6.1) is outside it: launch.conf names it, and
+# when that dir is gone it is gogo's default.
+HERE_ROOT="${HERE%/games/*}"
+if [ -f "$HERE/launch.conf" ]; then
+    LIBRARY_ROOT="$(
+        LIBRARY_GAME="" DATA_ROOT=""
+        # shellcheck source=/dev/null
+        source "$HERE/launch.conf" >/dev/null 2>&1
+        if [ -n "$LIBRARY_GAME" ]; then printf '%s' "$DATA_ROOT"; fi
+    )"
+    if [ -d "$LIBRARY_ROOT" ]; then
+        HERE_ROOT="$LIBRARY_ROOT"
+    elif [ -n "$LIBRARY_ROOT" ]; then
+        HERE_ROOT="$XDG_ROOT"
+    fi
+fi
 # gogo's root for the setup this runs: GOGO_HOME as given, else this one
 # when it isn't gogo's default (a game built under GOGO_HOME).
 if [ -n "${GOGO_HOME:-}" ]; then
@@ -252,7 +267,7 @@ abs() { case "$1" in /* | "") printf '%s' "$1" ;; *) printf '%s/%s' "$ROOT" "$1"
 load_conf() {
     UMU_ID="" STAMP="" UMU_RUN="" UMU_PYTHON="" PROTON_DIR="" PROTON_VERSION=""
     PROTON_SHA="" PREFIX="" WORKDIR="" EXE="" DLL_OVERRIDES=""
-    RENDERER="" PROTONFIXES="1" UMU_FOLDERS="" GOGO_PATH="" DATA_ROOT=""
+    RENDERER="" PROTONFIXES="1" UMU_FOLDERS="" GOGO_PATH="" DATA_ROOT="" LIBRARY_GAME=""
     ARGS=() ENV=() WRAPPER=()
     # shellcheck source=/dev/null
     source "$HERE/launch.conf"
@@ -391,6 +406,10 @@ run_game() {
     fi
     if [ "$PROTONFIXES" = 0 ]; then export PROTONFIXES_DISABLE=1; fi
     if [ -n "$UMU_FOLDERS" ]; then export UMU_FOLDERS_PATH="$UMU_FOLDERS"; fi
+    # A game in a library may be outside what the container shares by itself.
+    if [ -n "$LIBRARY_GAME" ]; then
+        export PRESSURE_VESSEL_FILESYSTEMS_RW="$HERE${PRESSURE_VESSEL_FILESYSTEMS_RW:+:$PRESSURE_VESSEL_FILESYSTEMS_RW}"
+    fi
     export WINEPREFIX="$PREFIX_ABS" GAMEID="$UMU_ID" STORE=gog PROTONPATH="$PROTON_ABS"
     if [ -n "$GAME_STEP" ]; then run_step "$@"; fi
     if [ -n "$UMU_PYTHON" ]; then

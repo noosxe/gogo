@@ -50,6 +50,8 @@ pub struct LinuxAppOptions {
     /// `gogo-linux-app` package `current_exe()` is the unwrapped binary,
     /// which skips the wrapper that sets `GOGO_UMU_PYTHON` (#168).
     pub gogo_path: Option<PathBuf>,
+    /// The checked `library.dir` (design 18 §6.1). `None`: `games/`.
+    pub library: Option<launch::Library>,
 }
 
 /// A GE-Proton the build downloads.
@@ -75,6 +77,8 @@ pub struct LinuxAppPlan {
     pub game_tree_bytes: u64,
     /// `games/<gogid>/`, or the installer lane's staging dir.
     pub state: GameDirs,
+    /// The checked `library.dir`, for the installer lane's final place.
+    pub library: Option<launch::Library>,
     /// A depot rebuild: `game/` is replaced, the prefix and saves stay.
     pub rebuild: bool,
     pub umu_mode: UmuMode,
@@ -450,12 +454,15 @@ pub fn plan(
 
     let (state, rebuild) = match &gogid {
         Some(id) => {
-            let dirs = GameDirs::for_game(id)?;
+            let dirs = GameDirs::for_build(id, opts.library.as_ref())?;
             let rebuild = game::launch_toml_path(&dirs).is_file() || dirs.game.exists();
+            if let Some(message) = launch::stays_note(&dirs, opts.library.as_ref()) {
+                emit(&ProgressEvent::Warn { message });
+            }
             (dirs, rebuild)
         }
         None => (
-            GameDirs::at(launch::games_dir().join(format!(".build-{slug}-{}", std::process::id()))),
+            GameDirs::at(launch::staging_root(opts.library.as_ref(), &slug)),
             false,
         ),
     };
@@ -514,6 +521,7 @@ pub fn plan(
         game_tree: opts.game_tree.clone(),
         game_tree_bytes,
         state,
+        library: opts.library.clone(),
         rebuild,
         umu_mode,
         umu_line,
@@ -721,12 +729,24 @@ pub fn execute(
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| plan.slug.clone());
+        launch::record_location(&gogid, &dirs.root)?;
         // A rebuild re-materializes `game/` and keeps the prefix (saves).
         emit(&ProgressEvent::InstallStarted);
         if dirs.game.symlink_metadata().is_ok() {
             std::fs::remove_dir_all(&dirs.game)?;
         }
         let report = materialize::materialize_tree(tree, &dirs.game, materialize::Reflink::Try)?;
+        if launch::in_library(&dirs.root) && report.method() == materialize::TreeMethod::Copy {
+            emit(&ProgressEvent::Warn {
+                message: format!(
+                    "the game files were copied into {}, not reflinked ({} more on disk): \
+                     {} and the library aren't on one filesystem that can reflink",
+                    dirs.game.display(),
+                    crate::fmt::human_size(report.copied_bytes),
+                    tree.display()
+                ),
+            });
+        }
         for overlay in crate::macapp::locate_support_overlays(tree) {
             let merged = crate::macapp::bundle::merge_overlay(&overlay, &dirs.game)?;
             if !merged.is_empty() {
@@ -842,8 +862,12 @@ pub fn execute(
         });
 
         // Into place: an older prefix for the game is set aside, never deleted.
-        let target = GameDirs::for_game(&gogid)?;
+        let target = GameDirs::for_build(&gogid, plan.library.as_ref())?;
+        if let Some(message) = launch::stays_note(&target, plan.library.as_ref()) {
+            emit(&ProgressEvent::Warn { message });
+        }
         std::fs::create_dir_all(&target.root)?;
+        launch::record_location(&gogid, &target.root)?;
         if target.prefix.symlink_metadata().is_ok() {
             let aside = target.root.join(format!(
                 "prefix.old-{}",
@@ -854,11 +878,11 @@ pub fn execute(
                 message: format!("previous prefix moved to {}", aside.display()),
             });
         }
-        std::fs::rename(&staging.prefix, &target.prefix)?;
+        launch::move_tree(&staging.prefix, &target.prefix)?;
         let target_logs = target.root.join(crate::macapp::INSTALL_LOGS);
         if logs.is_dir() {
             std::fs::remove_dir_all(&target_logs).ok();
-            std::fs::rename(&logs, &target_logs)?;
+            launch::move_tree(&logs, &target_logs)?;
         }
         std::fs::remove_dir_all(&staging.root).ok();
         let install_dir = target.prefix.join("drive_c/GOG").join(&plan.slug);

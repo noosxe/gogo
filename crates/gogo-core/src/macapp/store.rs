@@ -1049,8 +1049,17 @@ pub fn references() -> Vec<Reference> {
         }
     };
     let games = super::launch::games_dir();
-    for e in std::fs::read_dir(&games).into_iter().flatten().flatten() {
-        let file = e.path().join("state.toml");
+    let in_games = std::fs::read_dir(&games)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path());
+    // Games in a library (design 18 §6.1) reference the store just the same.
+    let recorded = super::launch::recorded_games()
+        .into_iter()
+        .map(|(_, root)| root);
+    for dir in in_games.chain(recorded) {
+        let file = dir.join("state.toml");
         if let Ok(Some(s)) = super::launch::GameState::load(&file) {
             push(&s.gogid, &file, &s.runtime);
             push(&s.gogid, &file, &s.renderer);
@@ -1180,6 +1189,20 @@ pub struct SharedBuild {
 /// derived runtimes made with it too. A target any game still references
 /// ([`references`]) is kept and reported instead (design 16 decision 6).
 pub fn prune(targets: &[String]) -> Result<PruneOutcome, MacAppError> {
+    // A game whose drive isn't mounted can't say what it uses: nothing here
+    // can be called unused until it can.
+    let away = super::launch::unreachable_games();
+    if !away.is_empty() {
+        let names: Vec<String> = away
+            .iter()
+            .map(|(id, root)| format!("{id} ({})", root.display()))
+            .collect();
+        return Err(MacAppError::Apps(format!(
+            "can't tell what these games use, their dirs aren't there (a drive not mounted?): \
+             {}. Mount it, or `gogo apps remove` the game",
+            names.join(", ")
+        )));
+    }
     let refs = references();
     let mut out = PruneOutcome::default();
     let mut targets = targets.to_vec();

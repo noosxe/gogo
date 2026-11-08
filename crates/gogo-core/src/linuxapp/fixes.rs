@@ -634,6 +634,7 @@ pub fn winetricks_command(
         .env("STORE", "gog")
         .env(compat::PROTONFIXES_DISABLE, "1")
         .env(setup::GAME_DRIVE_OFF.0, setup::GAME_DRIVE_OFF.1);
+    setup::share_library_game(&mut c, prefix);
     Some(c)
 }
 

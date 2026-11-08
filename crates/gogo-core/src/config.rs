@@ -18,6 +18,7 @@ pub struct Config {
     pub gog: GogConfig,
     pub network: NetworkConfig,
     pub download: DownloadConfig,
+    pub library: LibraryConfig,
     pub state: StateConfig,
     pub mac_app: MacAppConfig,
     pub linux: LinuxConfig,
@@ -89,6 +90,15 @@ pub struct DownloadConfig {
     pub parallel_files: u32,
     /// Global bytes/sec; 0 = unlimited (05 §3 rate grammar).
     pub limit: u64,
+}
+
+/// The game library (05 §3): where `linux-app` and `mac-app` put new games.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct LibraryConfig {
+    /// `None`: `<data_root>/games/`. Resolved at load; checked when a build
+    /// uses it (`macapp::launch::Library`).
+    pub dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -369,6 +379,9 @@ fn apply_env(
     if let Some(v) = env("GOGO_DOWNLOAD_DIR") {
         config.download.dir = Some(v);
     }
+    if let Some(v) = env("GOGO_LIBRARY_DIR") {
+        config.library.dir = Some(v);
+    }
     if let Some(v) = env("GOGO_WORKERS") {
         config.download.workers = v.parse().map_err(|_| bad_env("GOGO_WORKERS", &v))?;
     }
@@ -435,6 +448,17 @@ fn resolve_dir(config: &mut Config) {
         .dir
         .clone()
         .unwrap_or_else(default_download_dir);
+    config.download.dir = Some(resolve_path(raw));
+    // Unset stays unset: no library is today's `games/`. Empty is unset too.
+    config.library.dir = config
+        .library
+        .dir
+        .take()
+        .filter(|d| !d.is_empty())
+        .map(resolve_path);
+}
+
+fn resolve_path(raw: String) -> String {
     let resolved = if let Some(rest) = raw.strip_prefix("~/") {
         dirs::home_dir()
             .map(|home| home.join(rest))
@@ -442,12 +466,10 @@ fn resolve_dir(config: &mut Config) {
     } else {
         PathBuf::from(raw)
     };
-    config.download.dir = Some(
-        std::path::absolute(&resolved)
-            .unwrap_or(resolved)
-            .to_string_lossy()
-            .into_owned(),
-    );
+    std::path::absolute(&resolved)
+        .unwrap_or(resolved)
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn default_download_dir() -> String {
@@ -498,6 +520,7 @@ fn unknown_keys(table: &toml::Table) -> Vec<String> {
             ],
         ),
         ("download", &["dir", "workers", "parallel_files", "limit"]),
+        ("library", &["dir"]),
         ("state", &["catalog_ttl_hours"]),
         ("mac_app", &["d3dmetal"]),
         ("linux", &["umu", "proton_dir", "default_runtime"]),
@@ -677,6 +700,30 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("download.parallel_files"), "{err}");
+    }
+
+    #[test]
+    fn library_dir_layers_like_download_dir_and_stays_unset_by_default() {
+        let no_env = |_: &str| None;
+        let missing = Path::new("/nonexistent/gogo.toml");
+        let loaded = Config::load_from(missing, no_env).unwrap();
+        assert_eq!(loaded.config.library.dir, None);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "[library]\ndir = \"~/big\"\n").unwrap();
+        let home = dirs::home_dir().unwrap();
+        let loaded = Config::load_from(&path, no_env).unwrap();
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        assert_eq!(
+            PathBuf::from(loaded.config.library.dir.unwrap()),
+            home.join("big")
+        );
+        let loaded = Config::load_from(&path, envs(&[("GOGO_LIBRARY_DIR", "/env/lib")])).unwrap();
+        assert_eq!(loaded.config.library.dir.as_deref(), Some("/env/lib"));
+        // An empty variable is no library, not the current directory.
+        let loaded = Config::load_from(missing, envs(&[("GOGO_LIBRARY_DIR", "")])).unwrap();
+        assert_eq!(loaded.config.library.dir, None);
     }
 
     #[test]

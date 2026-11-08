@@ -1004,6 +1004,90 @@ tested = [
     it) feeds doctor and `apps`. The launcher script still writes
     `~/Library/Logs/gogo`; pointing it at the Linux path is #177's (done: the Linux launcher, §7.5).
 
+### 6.1 The game library (#276)
+
+Games are the big part of gogo's data, and the only part someone wants on another drive
+(Cyberpunk 2077's build is about 70 GB). `GOGO_HOME` and `XDG_DATA_HOME` move far too much.
+`library.dir` (`GOGO_LIBRARY_DIR`, `--library`; design 05) puts new games in
+`<library.dir>/<gogid>/`, on both lanes. It moves that dir and nothing else: runtimes,
+renderers, `compat/`, logs, config and tokens stay where they are.
+
+**Nothing configured is today's behaviour, byte for byte:** games in `<data_root>/games/`,
+`GOGO_HOME` and `XDG_DATA_HOME` as before, no record written, no migration, the same
+`launch.conf` and `state.toml`. A test holds this. The only byte that differs is the launcher
+template's, below, which every gogo upgrade rewrites anyway (R30).
+
+**Finding a game: a record per game, not the setting.** The setting says where new games go.
+It can't say where old ones are, so a game outside `games/` has a location record:
+`<data_root>/game-locations/<gogid>`, one line, the game's absolute dir. A record is needed at
+all because everything else about the game is in the dir being looked for; it sits in the data
+root because that's the one place every gogo run and launcher can already find.
+
+- `GameDirs::for_game` is the one lookup: the record if there is one, else `games/<gogid>`.
+  `apps list|show|remove`, `doctor`, `setup`, `env`, `args`, `wrapper`, `compat`, the store's
+  references and both launchers go through it or read the same file, and none reads the
+  setting. `apps list` is the dirs under `games/` plus the records.
+- `GameDirs::for_build` is the one placement: where the game already is, else the library,
+  else `games/`.
+- A record is checked before it is believed (absolute, no `..`, last part the game's id):
+  `apps remove` deletes that dir, and the file is plain text anyone can edit. One that fails
+  is ignored.
+- `launch.conf` already wrote absolute paths for what's outside the data root, so a library
+  game's `PREFIX`, `WORKDIR`, `EXE` and `GAME_DIR` are absolute and everything else stays
+  relative to `DATA_ROOT`. The `.desktop` file was already absolute.
+
+**The Linux launcher, `LAUNCHER_VERSION` 7.** v6 and earlier take their data root from their own
+path (`${HERE%/games/*}`), which outside the data root is wrong: logs would land beside the
+library and setup would run with the library's parent as `GOGO_HOME`. A library game's
+`launch.conf` carries `LIBRARY_GAME='1'` (no such line otherwise), and then the launcher reads
+`DATA_ROOT` from it, or uses gogo's default root if that dir is gone. Older launchers keep
+working: they exist only for games under `games/`, which they read correctly, and the next
+setup replaces them. A library game never has an older launcher, since no older gogo built one.
+
+**The Mac launcher** is immutable in its bundle, so nothing about the location is baked (the
+TOML, its stamp and the bundle are byte-identical wherever the game is). It looks for
+`<state>/game-locations/<gogid>` at launch and otherwise uses `games/<gogid>`, as a portable
+bundle's does too. A bundle built before this reads `games/<gogid>` only: an old `.app` copy
+of a game rebuilt into a library stops finding its prefix and says so. Rebuild it.
+
+**The container.** The Steam Linux Runtime shares `$HOME`, the prefix, the exe's dir and the
+mount point umu finds above it, and `drive_c/GOG/<name>` is a link out of the prefix to `game/`.
+A library elsewhere on the root filesystem (`/games`) is none of those, so umu runs (the
+launcher's and setup's) add the game's dir to `PRESSURE_VESSEL_FILESYSTEMS_RW`, and only for a
+game outside the data root. Checked against umu's source; not yet on a real library outside
+`$HOME` (the owner's drive is under it), so the host pass names it.
+
+**Copying.** `game/` is a per-file `FICLONE` of the source tree where the filesystem allows,
+else a full copy (APFS clone or `cp` on the Mac). The source is the depot cache
+(`$XDG_CACHE_HOME/gogo/depot/<gogid>`, or `gogo depot --dir`), so a library on another drive
+usually means the tree's size again. The plan's `game files:` line says so before anything
+runs, and a build that did copy logs a warning with the bytes. To keep it cheap, keep the tree
+on the same filesystem: `gogo depot --dir <same drive>` and pass that directory to the build.
+An offline installer is not copied at all: it installs into a staging dir in the library
+(`<library>/.build-<slug>-<pid>/`, so the final rename stays on one filesystem), and
+keeping `download.dir` on that drive only saves reading across drives.
+
+**Changing the setting later moves nothing.** A built game stays where its record says, and a
+rebuild goes there too, with a warning when a library is set elsewhere. `gogo apps remove`
+and a new build move a game, at the cost of its prefix and saves; a `move` command that keeps
+them is #278. An installer rebuild whose game stayed on another filesystem than the new staging
+dir ends with a copy instead of a rename.
+
+**A drive that isn't there.** A record whose dir is missing is still a game: `apps list` shows
+it and says why, `doctor` fails a `location` check (a library game gets this check, in or out
+of reach; other games don't), and a build refuses, because it would fill the mount point of the
+drive that isn't mounted. The store's GC stops: `runtimes prune` refuses while any game can't say what it uses, because deleting its
+runtime would break it silently. `apps remove` forgets such a game, its menu entry, logs and
+L4 file, and says the files are still at that path.
+
+**Removing.** `apps remove` deletes the game's dir, then its record. A symlinked game dir goes
+as the link alone (as `remove_dir_all` always did): the report names the target as left behind,
+and never counts or follows it. The library dir itself stays.
+
+**The Mac lane's other paths:** a portable bundle ignores the setting (`--library` conflicts with
+`--portable`), since its prefix is made on the Mac it runs on. `scripts/host-pass.sh` follows
+the record; `scripts/vm-test.sh` and `scripts/linux-e2e.sh` work on scratch state with no library.
+
 ## 7. Decision 7: the launcher
 
 **Settled (docs/21 §8 item 9):** `~/.local/share/applications/gogo-<gogid>.desktop` runs
@@ -1036,7 +1120,8 @@ a `PROTON_DIR` in a shared tools dir or an unmanaged build, a `system` umu, `UMU
 `UMU_FOLDERS`, `GOGO_PATH`. The log dir isn't written at all: the launcher computes it
 from `$XDG_STATE_HOME` at run time (`GOGO_LOG_DIR` overrides), as the Mac computes
 `~/Library/Logs`. The `.desktop` file is the one absolute pointer; setup rewrites it when
-the data root moved.
+the data root moved. A game in a library (§6.1) has its own paths absolute, which the rule above
+already covers, and `LIBRARY_GAME='1'`, which says `DATA_ROOT` isn't where the launcher is.
 
 **As built (#176)** — the files setup writes (`linuxapp/game.rs`, `linuxapp/setup.rs`):
 
@@ -1673,7 +1758,7 @@ Two new endings, both before a game exists:
   do with.
 
 The launcher knows nothing about what a wrapper does beyond this: `launch.sh` has no gamescope
-case. `LAUNCHER_VERSION` is 6 (6: the game step stays umu-run's parent, #273), and `# wrapper:` is a new run log header line (only with a
+case. `LAUNCHER_VERSION` is 7 (6: the game step stays umu-run's parent, #273; 7: a game in a library, §6.1), and `# wrapper:` is a new run log header line (only with a
 wrapper) that the report includes.
 
 **Live, in the harness** (2026-11-08, Right and Down, D3D11, RTX 4090; `docs/linux-e2e.md`). No
@@ -1877,7 +1962,7 @@ only on Linux (`#[cfg(target_os = "linux")]`), with the same shape:
 
 - `gogo linux-app <game|setup.exe|dir>`: build from the depot (default) or the offline
   installer (run under umu), `--runtime`, `--renderer`, `--retarget`, `--interactive`,
-  `--json`, `--yes` as on the Mac. No `--portable`, `--codesign` or `--out`: the output is
+  `--library` (§6.1), `--json`, `--yes` as on the Mac. No `--portable`, `--codesign` or `--out`: the output is
   the state dir plus the `.desktop` file.
 - Subcommands: `setup`, `compat`, `doctor`, `next-renderer`, as on the Mac.
 - Shared and lane-neutral already: `gogo runtimes`, `gogo renderers`, `gogo apps
