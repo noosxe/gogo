@@ -398,11 +398,12 @@ scripts/linux-e2e.sh live <id> stop
 the build or the copy of a base goes on in the background, and `status --wait SECS` says
 when the game's window is up. The manifest, `e2e/<gogid>.toml` or `--manifest`, is
 optional, and only its `[window]`, `[env]`, `[override]` and `[exit]` count: the session
-finds the steps. A game with no manifest yet gets the defaults.
+finds the steps (unless it [starts from them](#starting-from-a-manifest)). A game with no manifest yet gets the defaults.
 
 | `live start` option | |
 |---|---|
 | `--env K=V`, `--arg A` | into the session's `[override]` (#250): gogo's `linux-app env set` and `linux-app args`, before every launch. Repeatable; the export keeps them |
+| `--from-manifest` | start partway along the manifest instead of at the first frame ([below](#starting-from-a-manifest)). With `--to-shot NAME` (default: the manifest's last screenshot) or `--to-step N` |
 | `--idle-secs N` | stop after N s with no command. Default 900 |
 | `--max-secs N` | stop N s after taking the cache lock, at the latest. Default 5400 |
 | `--max-gap N` | the gaps between commands that the replay and the export keep, cut to N s. Default 10 |
@@ -424,6 +425,54 @@ finds the steps. A game with no manifest yet gets the defaults.
 
 `live list` lists the sessions on this cache. Exit codes: `0` ok, `1` the command failed
 (the session goes on), `2` usage, `3` no such session, `4` not ready yet.
+
+### Starting from a manifest
+
+To extend a known route (Cyberpunk's title → Settings → Graphics, then the next page), start
+from it instead of driving it again by hand:
+
+```bash
+scripts/linux-e2e.sh live start 1423049311 --installer ~/backups/cyberpunk/setup_cyberpunk_2077.exe \
+    --gpu renderD129 --reuse-install --arg --launcher-skip --arg -skipStartScreen \
+    --from-manifest --to-shot graphics
+```
+
+The manifest is `e2e/<gogid>.toml` or `--manifest`, and it must exist. After the window is up
+the session runs the manifest's steps **up to the point**, in the first life, then is ready:
+`status` says `from_manifest` (`ok`, `done` of `of` steps run). The agent goes on live from
+there; `checkpoint`, `restore` and `export` work as always.
+
+- **The point.** `--to-shot NAME` runs through that screenshot and the `expect_change`
+  checks right after it; with no `--to-*` it is the manifest's last screenshot.
+  `--to-step N` runs steps 1 to N, **every** `[[step]]` counting, waits, inputs, screenshots
+  and checks alike, from 1 in file order. The two exclude each other. A name or number that
+  isn't in the manifest (or `--to-*` without `--from-manifest`) is a usage error, exit 2,
+  before anything is built.
+- **How the steps run: as a `run` runs them, with their own checks.** A screenshot of a
+  restore's replay is compared with the frame recorded in the live session, and a manifest
+  step has none. So the manifest part is run through the manifest's checks (`not_black`,
+  `fills_window`, `expect_change`, `wait_settled`), by the same step runner as a `run`'s,
+  and the frames that run took are kept as the recorded ones: a later `restore` matches
+  against them (`--match-pct`, and a frame's own motion, as for any recorded frame). On a
+  restore the replay does the manifest part first, then the live part; its `expect_change`
+  checks aren't run again (the shots they compare were matched).
+- **A check that fails stops it there.** The path ends at the step before, `status` tells
+  `from_manifest.step` and `why` (the check and its numbers), and the session is ready at that
+  point: the game is where the failed step left it, so take a screenshot before going on. The
+  failure isn't held against the session's summary, which is not a proof. If the window never
+  comes up, there is no point to be at: `from_manifest.ok` is false and the session behaves as
+  any without a window (`restore` or `stop`).
+- **`[window]`, `[env]`, `[exit]` and `[override]`** come from the manifest, as for a session
+  with no `--from-manifest`; so do the `--env` and `--arg` that add to `[override]`. A clash:
+  `--env K=V` replaces the manifest's value for K, `--arg` replaces the manifest's
+  `extra_args` as a whole (they are not appended). The merged `[override]` is what the
+  manifest part runs under, and what the export writes.
+- **The export** is the manifest's steps up to the point, as written (a black or partly
+  empty screenshot of the manifest stays, since its own run passed it; a wait a late match
+  lengthened is lengthened), then the live steps as usual. **The steps after the point are
+  not added back**: they were never run in this session, so nothing says they still hold
+  after the new ones. Paste them on by hand if the route continues, and prove it with a
+  fresh `run` as always. A comment at the top says how many of its steps are the manifest's.
 
 ### Lives, checkpoints and restore
 
