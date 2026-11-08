@@ -546,7 +546,7 @@ games/<gogid>/{prefix,game,state.toml,launch.conf}
   references `prune` checks); `--json` gives `status` as a stable key.
 - *CLI, the explicit command for `games/<gogid>/`:* `gogo apps list|show|remove|prune
   --orphaned`. A game is any all-digit dir under `games/` (staging dirs are
-  skipped). Its bundle is `state.toml`'s, or the portable marker's; it is
+  skipped) or a location record (design 18 §6.1). Its bundle is `state.toml`'s, or the portable marker's; it is
   *orphaned* when that path is no longer a dir. The bundle path updates only when
   the launcher runs, so a moved `.app` reads as orphaned until its next launch:
   `prune` lists what it would take and asks (or needs `--yes`). `remove` takes
@@ -607,7 +607,8 @@ both the same way.
 
 In order, in bash, with no other dependencies than `/usr/bin/shasum` and `osascript`:
 
-1. `source Resources/launch.conf`, then `games/<gogid>/launch.conf` if present.
+1. `source Resources/launch.conf`, then `games/<gogid>/launch.conf` if present (for a game in
+   a library, the dir `<state>/game-locations/<gogid>` names: design 18 §6.1).
 2. Compute the stamp (§2.1). If it's stale or the prefix is missing, run `gogo mac-app
    setup <gogid>` (`GOGO_PATH`, then `PATH`) and re-source. If there's no gogo, log the
    fact and continue.

@@ -141,6 +141,7 @@ pub fn doctor(gogid: &str, host: &Host) -> Result<Report, MacAppError> {
     compat::validate_gogid(gogid)?;
     let dirs = GameDirs::for_game(gogid)?;
     let mut f = Vec::new();
+    f.extend(crate::macapp::doctor::check_location(gogid, &dirs));
 
     let baked = game::read_launch_toml(&dirs);
     let conf = ConfValues::read(&dirs.launch_conf).ok();
@@ -1535,7 +1536,8 @@ fn check_links(g: &Game, proton: Option<&Path>) -> Finding {
         return Finding::ok("links", "no prefix yet");
     }
     let mut out = Vec::new();
-    walk_links(prefix, &g.data_root, prefix, &mut out);
+    // `../../../game` stays in the game's dir, wherever that is.
+    walk_links(prefix, &[&g.data_root, &g.dirs.root], prefix, &mut out);
     let kept: Vec<PathBuf> = setup::KEPT_DRIVES
         .iter()
         .map(|d| prefix.join("dosdevices").join(d))

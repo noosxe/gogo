@@ -152,6 +152,7 @@ fn full_pipeline_with_fake_runtime() {
         renderer: macapp::RendererChoice::Auto,
         portable: true,
         gogo_path: None,
+        library: None,
     };
 
     let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -270,6 +271,7 @@ fn execute_refuses_to_clobber_existing_bundle() {
         renderer: macapp::RendererChoice::Auto,
         portable: true,
         gogo_path: None,
+        library: None,
     };
     let plan = macapp::plan(&opts, None, &mut |_| {}).expect("plan");
     // Pre-create the bundle root: execute must refuse.
@@ -347,6 +349,7 @@ fn winetricks_verbs_run_with_wine_shims_and_notice() {
         renderer: macapp::RendererChoice::Auto,
         portable: true,
         gogo_path: None,
+        library: None,
     };
 
     // Sandbox the store (shims materialize under state_dir) + override the
@@ -442,6 +445,7 @@ fn recipe_wine_pin_recommends_cached_catalog_runtime() {
         renderer: macapp::RendererChoice::Auto,
         portable: true,
         gogo_path: None,
+        library: None,
     };
 
     let mut warns: Vec<String> = Vec::new();
@@ -558,6 +562,7 @@ fn auto_recipe_discovery_and_gogid_crosscheck() {
         renderer: macapp::RendererChoice::Auto,
         portable: true,
         gogo_path: None,
+        library: None,
     };
 
     let mut tags: Vec<&'static str> = Vec::new();
@@ -647,6 +652,7 @@ fn auto_ladder_never_picks_a_host_brew_wine() {
         renderer: macapp::RendererChoice::Auto,
         portable: true,
         gogo_path: None,
+        library: None,
     };
     let old_path = std::env::var("PATH").unwrap_or_default();
     // SAFETY: env mutation under ENV_LOCK (established pattern above).
@@ -753,6 +759,7 @@ fn runtime_menu_offers_cached_and_custom_path_lanes() {
         renderer: macapp::RendererChoice::Auto,
         portable: true,
         gogo_path: None,
+        library: None,
     };
 
     let old_path = std::env::var("PATH").unwrap_or_default();
@@ -912,6 +919,7 @@ fn recipe_picker_index_and_free_text_lanes() {
         renderer: macapp::RendererChoice::Auto,
         portable: true,
         gogo_path: None,
+        library: None,
     };
     let plan = macapp::plan(&opts, Some(prompter.as_ref()), &mut |_| {}).expect("plan");
     drop(guard);
@@ -1190,6 +1198,7 @@ fn search_recipe_failure_degrades_pinned_stays_fatal() {
         renderer: macapp::RendererChoice::Auto,
         portable: true,
         gogo_path: None,
+        library: None,
     };
     let mut warns = Vec::new();
     let mut record = |ev: &ProgressEvent| {
@@ -1240,6 +1249,7 @@ fn search_recipe_failure_degrades_pinned_stays_fatal() {
         renderer: macapp::RendererChoice::Auto,
         portable: true,
         gogo_path: None,
+        library: None,
     };
     let mut sink = |_ev: &ProgressEvent| {};
     let plan = macapp::plan(&opts, None, &mut sink).unwrap();
@@ -1314,6 +1324,7 @@ fn runtime_menu_is_opt_in_with_easy_default() {
         renderer: macapp::RendererChoice::Auto,
         portable: true,
         gogo_path: None,
+        library: None,
     };
 
     let old_path = std::env::var("PATH").unwrap_or_default();
@@ -1449,6 +1460,7 @@ fn recipe_picker_is_opt_in_and_asks_for_single_candidate() {
         renderer: macapp::RendererChoice::Auto,
         portable: true,
         gogo_path: None,
+        library: None,
     };
 
     // (a) pick the candidate.
@@ -1533,6 +1545,7 @@ fn produced_launcher_execs_wine_with_contents_relative_paths() {
         renderer: macapp::RendererChoice::Auto,
         portable: true,
         gogo_path: None,
+        library: None,
     };
     let plan = macapp::plan(&opts, None, &mut |_| {}).unwrap();
     let _bytes = macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).unwrap();
@@ -1624,6 +1637,7 @@ fn ddraw_wrapper_application_lanes() {
         renderer,
         portable: true,
         gogo_path: None,
+        library: None,
     };
 
     // SAFETY: env mutation under ENV_LOCK (established pattern above).
@@ -1738,6 +1752,7 @@ fn macapp_from_depot_executes() {
         renderer: macapp::RendererChoice::Auto,
         portable: true,
         gogo_path: None,
+        library: None,
     };
 
     let mut emit = |_ev: &ProgressEvent| {};
@@ -1828,6 +1843,7 @@ fn depot_support_decline_degrades_to_warn() {
         renderer: macapp::RendererChoice::Auto,
         portable: true,
         gogo_path: None,
+        library: None,
     };
     let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let sink = events.clone();
@@ -1895,6 +1911,7 @@ fn depot_support_overlay_merges_into_game_dir() {
         renderer: macapp::RendererChoice::Auto,
         portable: true,
         gogo_path: None,
+        library: None,
     };
     let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let sink = events.clone();
@@ -1960,6 +1977,7 @@ fn v2_opts(tmp: &std::path::Path, gogo_path: &std::path::Path) -> MacAppOptions 
         renderer: macapp::RendererChoice::Auto,
         portable: false,
         gogo_path: Some(gogo_path.to_path_buf()),
+        library: None,
     }
 }
 
@@ -2105,6 +2123,74 @@ fn v2_bundle_is_launcher_only_and_never_written() {
         !launch_log.contains("mac-app setup"),
         "stamp fresh, no setup: {launch_log}"
     );
+    unsafe { std::env::remove_var("GOGO_HOME") };
+    drop(guard);
+}
+
+#[test]
+fn v2_game_in_a_library_builds_launches_and_removes_from_there() {
+    let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    // SAFETY: env mutation under ENV_LOCK.
+    unsafe { std::env::set_var("GOGO_HOME", &home) };
+    let mut opts = v2_opts(tmp.path(), &tmp.path().join("no-such-gogo"));
+    let lib = macapp::launch::Library::resolve(&tmp.path().join("big drive/games"), None)
+        .unwrap()
+        .unwrap();
+    let root = lib.dir().join("1207659013");
+    opts.library = Some(lib);
+    let plan = macapp::plan(&opts, None, &mut |_| {}).expect("plan");
+    assert_eq!(plan.state.root, root);
+    macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).expect("execute");
+
+    // Only the game moved; the bundle bakes no path to it.
+    assert!(root.join("game/data/level1.dat").is_file());
+    assert!(root.join("state.toml").is_file());
+    assert!(!home.join("games/1207659013").exists());
+    assert_eq!(
+        std::fs::read_to_string(home.join("game-locations/1207659013")).unwrap(),
+        format!("{}\n", root.display())
+    );
+    let app = tmp.path().join("out/Treasure Adventure Game.app");
+    let toml = std::fs::read_to_string(app.join("Contents/Resources/gogo-launch.toml")).unwrap();
+    assert!(!toml.contains("big drive"), "{toml}");
+    let conf = std::fs::read_to_string(root.join("launch.conf")).unwrap();
+    assert!(
+        conf.contains(&format!("PREFIX='{}/prefix'", root.display())),
+        "{conf}"
+    );
+
+    // The launcher runs Wine on the library's prefix.
+    let wine_log = tmp.path().join("wine.log");
+    std::fs::write(&wine_log, "").unwrap();
+    let out = run_launcher(&app, &home, &[]);
+    assert!(out.status.success(), "{out:?}");
+    let wine = std::fs::read_to_string(&wine_log).unwrap();
+    assert!(
+        wine.contains(&format!("ENV:{}", root.join("prefix").display())),
+        "{wine}"
+    );
+
+    // apps and the removal find it through the record; logs stay put.
+    assert!(
+        home.join("Library/Logs/gogo/1207659013/launch.log")
+            .is_file()
+    );
+    let logs = tmp.path().join("Logs");
+    let a = macapp::apps::get("1207659013", &logs).unwrap().unwrap();
+    assert_eq!(a.root, root);
+    let listed = macapp::apps::list(&logs).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert!(
+        macapp::store::references()
+            .iter()
+            .any(|r| r.file == root.join("state.toml"))
+    );
+    macapp::apps::remove(&a, false).unwrap();
+    assert!(!root.exists());
+    assert!(!home.join("game-locations/1207659013").exists());
+    // SAFETY: env mutation under ENV_LOCK.
     unsafe { std::env::remove_var("GOGO_HOME") };
     drop(guard);
 }
@@ -3364,6 +3450,7 @@ fn d3d11_game_runs_from_a_derived_dxmt_runtime() {
         renderer: macapp::RendererChoice::Auto,
         portable: false,
         gogo_path: Some(tmp.path().join("no-such-gogo")),
+        library: None,
     };
     let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let plan = macapp::plan(&opts, None, &mut renderer_events(&events)).expect("plan");
@@ -3483,6 +3570,7 @@ fn ddraw_game_gets_cnc_ddraw_until_l4_says_otherwise() {
         renderer: macapp::RendererChoice::Auto,
         portable: false,
         gogo_path: Some(tmp.path().join("no-such-gogo")),
+        library: None,
     };
     let plan = macapp::plan(&opts, None, &mut |_| {}).expect("plan");
     assert_eq!(
@@ -3611,6 +3699,7 @@ tested   = [{ runtime = "winecx-24.0.7_7", date = 2026-10-22 }]
         renderer: macapp::RendererChoice::Auto,
         portable: false,
         gogo_path: Some(tmp.path().join("no-such-gogo")),
+        library: None,
     };
     let plan = macapp::plan(&opts, None, &mut |_| {}).expect("plan");
     assert_eq!(
@@ -3718,6 +3807,7 @@ fn l4_variant_switches_exe_and_args() {
         renderer: macapp::RendererChoice::Auto,
         portable: false,
         gogo_path: Some(tmp.path().join("no-such-gogo")),
+        library: None,
     };
     let plan = macapp::plan(&opts, None, &mut |_| {}).expect("plan");
     macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).expect("execute");
@@ -3831,6 +3921,7 @@ fn compat_runtime_pins_the_auto_ladder() {
         renderer: macapp::RendererChoice::Auto,
         portable: false,
         gogo_path: None,
+        library: None,
     };
     let pinned = macapp::plan(&opts, None, &mut |_| {}).expect("plan");
     std::fs::remove_file(db.join("1207659013.toml")).unwrap();
@@ -3898,6 +3989,7 @@ fn retarget_moves_a_game_to_another_runtime_without_touching_the_bundle() {
         renderer: macapp::RendererChoice::Auto,
         portable: false,
         gogo_path: Some(gogo),
+        library: None,
     };
     let codesign = std::path::Path::new("/usr/bin/codesign").is_file();
     let policy = if codesign {
@@ -4093,6 +4185,7 @@ fn build_flags_replace_existing_l4_values() {
         renderer: macapp::RendererChoice::Force(macapp::Renderer::Wined3d),
         portable: false,
         gogo_path: Some(tmp.path().join("fake-gogo")),
+        library: None,
     };
     let l4_path = home.join("compat").join(format!("{gogid}.toml"));
     let build = |opts: &MacAppOptions, prompt: Option<&gogo::macapp::PromptFn>| {
@@ -4293,6 +4386,7 @@ fn doctor_game(tmp: &std::path::Path, home: &std::path::Path) -> std::path::Path
         renderer: macapp::RendererChoice::Auto,
         portable: false,
         gogo_path: Some(tmp.join("no-such-gogo")),
+        library: None,
     };
     let plan = macapp::plan(&opts, None, &mut |_| {}).expect("plan");
     macapp::execute(&plan, CodesignPolicy::Skip, &mut |_| {}).expect("execute");
@@ -4822,6 +4916,7 @@ fn portable_bundle_carries_everything_and_sets_up_outside() {
         renderer: macapp::RendererChoice::Force(macapp::Renderer::D3dMetal),
         portable: true,
         gogo_path: None,
+        library: None,
     };
     let e = macapp::plan(&opts, None, &mut |_| {}).unwrap_err();
     assert!(
@@ -5070,6 +5165,7 @@ fn installer_opts(tmp: &std::path::Path, installer: std::path::PathBuf) -> MacAp
         renderer: macapp::RendererChoice::Auto,
         portable: false,
         gogo_path: Some(tmp.join("gogo")),
+        library: None,
     }
 }
 

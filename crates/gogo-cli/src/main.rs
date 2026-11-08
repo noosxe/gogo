@@ -213,6 +213,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
             input,
             from_depot,
             name,
+            library,
             runtime,
             runtime_path,
             runtime_version,
@@ -243,6 +244,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
                 input,
                 from_depot,
                 name,
+                library,
                 menus,
                 runtime_path,
                 runtime_version,
@@ -282,6 +284,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
             input,
             from_depot,
             name,
+            library,
             runtime,
             renderer,
             refresh,
@@ -294,6 +297,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
                 input,
                 from_depot,
                 name,
+                library,
                 runtime,
                 renderer: renderer.map_or(gogo::macapp::RendererChoice::Auto, |r| r.choice()),
                 refresh,
@@ -898,6 +902,13 @@ async fn depot_cmd(args: cli::DepotArgs) -> Result<i32, AppError> {
         with_dlcs: args.with_dlcs,
         password: args.password.clone(),
         dir: args.dir.clone(),
+        library: load_config_from_env()?
+            .library
+            .dir
+            .and_then(|d| {
+                gogo::macapp::launch::Library::resolve(std::path::Path::new(&d), None).ok()
+            })
+            .flatten(),
         limit,
         disk_check: !args.no_disk_check,
         dry_run: args.dry_run,
@@ -1054,9 +1065,14 @@ fn game_files_line(plan: &gogo::gog::materialize::MaterializePlan) -> String {
             plan.game_dir.display()
         ),
         TreeMethod::Copy => format!(
-            "game files: copy into {} (+{} disk: no reflink between the cache and the data dir)",
+            "game files: copy into {} (+{} disk: no reflink between the cache and the {})",
             plan.game_dir.display(),
-            gogo::fmt::human_size(plan.extra_bytes)
+            gogo::fmt::human_size(plan.extra_bytes),
+            if gogo::macapp::launch::in_library(&plan.game_dir) {
+                "library"
+            } else {
+                "data dir"
+            }
         ),
     }
 }
@@ -1906,6 +1922,11 @@ fn config_cmd(sub: cli::ConfigSub) -> Result<i32, AppError> {
             let cfg = load_config_from_env()?;
             let value = match key.as_str() {
                 "download.dir" => cfg.download.dir.clone().unwrap_or_default(),
+                "library.dir" => cfg.library.dir.clone().unwrap_or_else(|| {
+                    gogo::macapp::launch::games_dir()
+                        .to_string_lossy()
+                        .into_owned()
+                }),
                 "download.workers" => cfg.download.workers.to_string(),
                 "download.parallel_files" => cfg.download.parallel_files.to_string(),
                 "download.limit" => cfg.download.limit.to_string(),
@@ -2001,6 +2022,23 @@ fn write_completions(
 /// with `--yes` or an interactive confirm), else — unless `--from-depot`
 /// asked for the depot lane explicitly — its downloaded offline installer.
 /// Returns `(installer, game_tree)`, exactly one `Some`.
+/// The game library for a build (design 05 §7's order): `--library`, then
+/// `GOGO_LIBRARY_DIR`, then `library.dir`, checked. A dir gogo won't use is a
+/// usage error, before anything is downloaded.
+fn resolve_library(
+    flag: Option<std::path::PathBuf>,
+) -> Result<Option<gogo::macapp::launch::Library>, AppError> {
+    let cfg = load_config_from_env()?;
+    let Some(dir) = flag.or(cfg.library.dir.map(std::path::PathBuf::from)) else {
+        return Ok(None);
+    };
+    let downloads = cfg.download.dir.map(std::path::PathBuf::from);
+    gogo::macapp::launch::Library::resolve(&dir, downloads.as_deref()).map_err(|e| {
+        eprintln!("gogo: {e}");
+        AppError::Usage
+    })
+}
+
 async fn resolve_game_source(
     command: &str,
     selector: &str,
@@ -2628,6 +2666,7 @@ async fn mac_app(
     input: Option<String>,
     from_depot: Option<String>,
     name: Option<String>,
+    library: Option<std::path::PathBuf>,
     menus: menus::Menus,
     runtime_path: Option<std::path::PathBuf>,
     runtime_version: Option<String>,
@@ -2638,6 +2677,12 @@ async fn mac_app(
     json_progress: bool,
     json: bool,
 ) -> Result<i32, AppError> {
+    // Portable builds leave the game library alone (the flag conflicts).
+    let library = if portable {
+        None
+    } else {
+        resolve_library(library)?
+    };
     // Design 15 §1 / #73: exactly one source. A game selector takes the
     // depot lane (installer fallback when it has no depot build); an .exe
     // path keeps the installer lane; a directory is a ready game tree.
@@ -2702,6 +2747,7 @@ async fn mac_app(
         renderer,
         portable,
         gogo_path: invoked_path(),
+        library,
     };
 
     // Plan: resolve + probe the runtime, validate the installer, size things up.
@@ -2868,7 +2914,7 @@ async fn mac_app(
                 "gogid": plan.gogid,
                 "portable": plan.portable,
                 "state_dir": plan.gogid.as_ref().filter(|_| !plan.portable)
-                    .map(|id| gogo::macapp::launch::games_dir().join(id)),
+                    .map(|_| plan.state.root.clone()),
                 "name": plan.display,
                 "slug": plan.slug,
                 "recipe": plan.recipe.as_ref().map(|r| serde_json::json!({
@@ -2907,10 +2953,12 @@ async fn mac_app(
                  It can't be retargeted: rebuild it to change its runtime or renderer"
             );
         } else {
-            println!(
-                "game files, prefix and saves: {}",
-                gogo::macapp::launch::games_dir().display()
-            );
+            // The games dir, or where this game's dir is: a game in a library.
+            let shown = match plan.state.root.parent() {
+                Some(p) if gogo::macapp::launch::in_library(&plan.state.root) => p.to_path_buf(),
+                _ => gogo::macapp::launch::games_dir(),
+            };
+            println!("game files, prefix and saves: {}", shown.display());
         }
     }
     Ok(cli::exit::OK)
@@ -2924,6 +2972,7 @@ struct LinuxAppArgs {
     input: Option<String>,
     from_depot: Option<String>,
     name: Option<String>,
+    library: Option<std::path::PathBuf>,
     runtime: Option<Option<String>>,
     renderer: gogo::macapp::RendererChoice,
     refresh: bool,
@@ -3025,7 +3074,11 @@ fn linux_app_plan_lines(plan: &gogo::linuxapp::build::LinuxAppPlan) -> String {
             Some(_) => plan.state.root.display().to_string(),
             None => format!(
                 "{} (the game's id is known after the install)",
-                gogo::macapp::launch::games_dir().join("<gogid>").display()
+                plan.library
+                    .as_ref()
+                    .map_or_else(gogo::macapp::launch::games_dir, |l| l.dir().to_path_buf())
+                    .join("<gogid>")
+                    .display()
             ),
         },
     );
@@ -3091,6 +3144,7 @@ fn linux_app_plan_lines(plan: &gogo::linuxapp::build::LinuxAppPlan) -> String {
 /// `mac-app`, the pipeline is synchronous and runs on blocking threads.
 async fn linux_app(a: LinuxAppArgs) -> Result<i32, AppError> {
     let machine = a.json || a.json_progress;
+    let library = resolve_library(a.library.clone())?;
     let (installer, game_tree) = match lane::classify(a.input.as_deref(), a.from_depot.as_deref()) {
         Some(lane::Input::Installer(p)) => (Some(p), None),
         Some(lane::Input::Tree(t)) => (None, Some(t)),
@@ -3138,6 +3192,7 @@ async fn linux_app(a: LinuxAppArgs) -> Result<i32, AppError> {
         renderer: a.renderer,
         refresh: a.refresh,
         gogo_path: invoked_path(),
+        library,
     };
     let jp = a.json_progress;
     let plan = {
@@ -4701,6 +4756,13 @@ fn apps_cmd(cmd: crate::cli::AppsCmd) -> Result<i32, AppError> {
                 ]);
             }
             println!("{table}");
+            for a in all.iter().filter(|a| a.unreachable) {
+                println!(
+                    "{}: its dir {} isn't there (a drive not mounted?)",
+                    a.gogid,
+                    a.root.display()
+                );
+            }
             let orphans = all.iter().filter(|a| a.orphaned()).count();
             if orphans > 0 {
                 println!(
@@ -4853,6 +4915,14 @@ fn remove_apps(
             Ok(out) => {
                 for p in &out.paths {
                     println!("removed {}", p.display());
+                }
+                if let Some(p) = &out.left_behind {
+                    println!(
+                        "{}: its files at {} weren't touched; delete them yourself if you \
+                         don't want them",
+                        a.gogid,
+                        p.display()
+                    );
                 }
             }
             Err(e) => {

@@ -169,6 +169,10 @@ recorded_state="$(source "$conf"; printf '%s' "${GOGO_STATE:-}")"
 state="${GOGO_HOME:-$recorded_state}"
 [ -d "$state" ] || state="$HOME/Library/Application Support/gogo"
 game_state="$state/games/$gogid"
+# A game in a library (design 18 section 6.1): gogo records where it lives.
+if [ -f "$state/game-locations/$gogid" ]; then
+    IFS= read -r game_state <"$state/game-locations/$gogid"
+fi
 game_conf="$game_state/launch.conf"
 log_dir="${GOGO_LOG_DIR:-$HOME/Library/Logs/gogo/$gogid}"
 abs() { case "$1" in /*) printf '%s' "$1" ;; ?*) printf '%s/%s' "$state" "$1" ;; esac; }

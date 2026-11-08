@@ -248,6 +248,7 @@ impl Umu<'_> {
             .env("STORE", "gog")
             .env(compat::PROTONFIXES_DISABLE, "1")
             .env(GAME_DRIVE_OFF.0, GAME_DRIVE_OFF.1);
+        share_library_game(&mut c, self.prefix);
         c
     }
 
@@ -381,6 +382,27 @@ pub fn is_prefix(prefix: &Path) -> bool {
 /// coming back; `com1`… do come back (Wine's mountmgr, every start), so
 /// #178's `links` check skips those as well as these.
 pub const KEPT_DRIVES: [&str; 2] = ["c:", "z:"];
+
+/// A game in a library may sit outside what the Steam Linux Runtime's
+/// container shares by itself (`$HOME`, the prefix, the exe's dir and umu's
+/// mount above it), and `prefix/drive_c/GOG/<name>` leads out of the prefix
+/// to `game/`: the game's dir is shared by name (design 18 §6.1). The launcher
+/// does the same. Nothing changes for a game under the data root.
+pub(crate) fn share_library_game(c: &mut Command, prefix: &Path) {
+    if let Some(root) = prefix.parent()
+        && !prefix.starts_with(crate::state::data_root())
+    {
+        let mut shared = root.as_os_str().to_os_string();
+        if let Some(more) = std::env::var_os(PV_SHARED) {
+            shared.push(":");
+            shared.push(more);
+        }
+        c.env(PV_SHARED, shared);
+    }
+}
+
+/// pressure-vessel's list of extra paths to share, read-write.
+const PV_SHARED: &str = "PRESSURE_VESSEL_FILESYSTEMS_RW";
 
 /// Turns off GE-Proton's `gamedrive` compat option, which it forces on under
 /// umu: `s:` → the library dir (`/home` here, from umu's
@@ -802,6 +824,7 @@ pub fn setup(
         umu_folders: None,
         gogo_path: eff.gogo.path.display().to_string(),
         data_root: data_root.display().to_string(),
+        library_game: crate::macapp::launch::in_library(&dirs.root),
     };
     write_if_changed(&dirs.launch_conf, &conf.render())?;
     let state = LinuxState {

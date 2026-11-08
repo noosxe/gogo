@@ -29,6 +29,11 @@ workers = 3                   # parallel chunk connections per file (1..=16)
 parallel_files = 1            # simultaneous files (1..=4)
 limit = 0                     # bytes/sec; 0 = unlimited (see grammar below)
 
+[library]
+# dir = "<path>"              # where `linux-app` and `mac-app` put new games:
+#                             # <path>/<gogid>/. Unset: <data_root>/games/, as ever
+#                             # (design 18 §6.1). Moves new games only, nothing else.
+
 [auth]
 token_store = "keyring"       # "keyring" | "file" — where tokens live; no silent fallback (02 §3, review A6)
 # client_id / client_secret: optional overrides of the Galaxy public client — public
@@ -86,6 +91,7 @@ table is normative). Same parse rules as TOML values:
 | Env | Key |
 |---|---|
 | `GOGO_DOWNLOAD_DIR` | `download.dir` |
+| `GOGO_LIBRARY_DIR` | `library.dir` (empty: unset) |
 | `GOGO_WORKERS` | `download.workers` |
 | `GOGO_LIMIT` | `download.limit` |
 | `GOGO_PARALLEL_FILES` | `download.parallel_files` |
@@ -103,7 +109,8 @@ offending name (env mistakes should be loud, not silently ignored).
 `cli.rs` holds `Option<T>` mirrors of override-able keys (`--dir`, `--workers`,
 `--parallel-files`, `--limit`, `--language`, `--os` → overlays `gog.platform`, `--retries`);
 `Some(_)` wins over every other layer. This is the whole merge surface — no hidden
-interactions.
+interactions. `--library` on a `linux-app` or `mac-app` build is `library.dir`'s (not on
+`--retarget` or `--portable`: neither places a game).
 
 ## 6. Validation & path handling
 
@@ -111,6 +118,16 @@ interactions.
   `api_parallel 1..=16`, rate grammar above. Violations → exit 2 naming the key and layer.
 - `~` expansion + `dirs` resolution on `download.dir` at load time; the resolved absolute path
   is what the engine sees (`gogo config get download.dir` shows the resolved value).
+- `library.dir` gets the same expansion but stays unset when nothing sets it: unset is not a
+  path, it means today's `games/` (`gogo config get library.dir` shows that dir). It is
+  checked when a build is about to use it (`macapp::launch::Library::resolve`, exit 2, before
+  any download), because only then does it matter: refused inside `download.dir`, the
+  `runtimes/` or `renderers/` store or the depot cache (their walks and cleanups must not
+  meet a game), as the data root itself, and on anything gogo can't create a file and a
+  symlink in (a Proton or Wine prefix needs both). Symlinks are resolved first, so a link into
+  the download dir is the download dir. The check leaves nothing behind: it probes the nearest
+  dir that exists and creates the library on the first build. On Linux `/tmp` is refused
+  too, for umu's private `/tmp` (design 18 §2.3). Naming `games/` itself is the same as unset.
 - Secret-bearing keys do not exist in config (tokens live in the TokenStore, 02 §3) — the file
   is safe to commit/share.
 
@@ -120,3 +137,6 @@ interactions.
 `[download] dir = "…"` → default `<Downloads>/gogo`. Each layer present wins only over lower
 layers, per key; e.g. env sets `GOGO_WORKERS=8` while CLI passes `--limit 1MiB/s` → workers 8,
 limit 1 MiB/s.
+
+`library.dir` resolves the same way: `--library` → `GOGO_LIBRARY_DIR` → `[library] dir` →
+unset (`<data_root>/games/`). It takes effect for a game's first build only (design 18 §6.1).

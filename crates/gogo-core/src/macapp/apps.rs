@@ -19,8 +19,11 @@ use crate::linuxapp::game::LinuxState;
 pub struct App {
     pub gogid: String,
     pub title: Option<String>,
-    /// `games/<gogid>/`.
+    /// `games/<gogid>/`, or its dir in a library (design 18 §6.1).
     pub root: PathBuf,
+    /// A game in a library whose dir isn't there now (a drive not mounted).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub unreachable: bool,
     pub prefix: PathBuf,
     /// The `.app` it was last set up from: `state.toml`'s, or the portable
     /// launcher's marker.
@@ -64,20 +67,25 @@ impl App {
 pub fn list(logs: &Path) -> Result<Vec<App>, MacAppError> {
     let mut out = Vec::new();
     let entries = match std::fs::read_dir(launch::games_dir()) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+        Ok(e) => Some(e),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e.into()),
     };
-    for e in entries.flatten() {
+    let mut ids = std::collections::BTreeSet::new();
+    for e in entries.into_iter().flatten().flatten() {
         // Skips `.build-*` staging dirs and anything else not a game.
         let Some(gogid) = e.file_name().to_str().map(str::to_string) else {
             continue;
         };
         if compat::validate_gogid(&gogid).is_ok() && e.path().is_dir() {
-            out.push(read(&gogid, logs)?);
+            ids.insert(gogid);
         }
     }
-    out.sort_by(|a, b| a.gogid.cmp(&b.gogid));
+    // Games in a library (design 18 §6.1), there right now or not.
+    ids.extend(launch::recorded_games().into_iter().map(|(id, _)| id));
+    for gogid in &ids {
+        out.push(read(gogid, logs)?);
+    }
     Ok(out)
 }
 
@@ -85,7 +93,7 @@ pub fn list(logs: &Path) -> Result<Vec<App>, MacAppError> {
 pub fn get(target: &str, logs: &Path) -> Result<Option<App>, MacAppError> {
     let gogid = super::setup::target_gogid(target)?;
     let dirs = GameDirs::for_game(&gogid)?;
-    if !dirs.root.is_dir() {
+    if !dirs.root.is_dir() && launch::recorded_location(&gogid).is_none() {
         return Ok(None);
     }
     read(&gogid, logs).map(Some)
@@ -112,6 +120,7 @@ fn read(gogid: &str, logs: &Path) -> Result<App, MacAppError> {
     let logs = Some(logs.join(gogid)).filter(|p| p.is_dir());
     let override_file = Some(compat::user_path(gogid)).filter(|p| p.is_file());
     Ok(App {
+        unreachable: !dirs.root.is_dir(),
         gogid: gogid.to_string(),
         title,
         bytes: super::store::dir_size(&dirs.root).unwrap_or(0),
@@ -145,6 +154,7 @@ fn read_linux(gogid: &str, dirs: GameDirs, logs: &Path) -> App {
     let desktop = game::desktop_path(gogid);
     let logs = Some(logs.join(gogid)).filter(|p| p.is_dir());
     App {
+        unreachable: false,
         gogid: gogid.to_string(),
         title,
         bytes: super::store::dir_size(&dirs.root).unwrap_or(0),
@@ -210,13 +220,22 @@ fn last_launch(dir: &Path) -> Option<String> {
 pub struct Removed {
     pub paths: Vec<PathBuf>,
     pub bytes: u64,
+    /// Files gogo stopped referring to and didn't delete: the target of a
+    /// symlinked game dir, or the dir of a game that wasn't reachable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub left_behind: Option<PathBuf>,
 }
 
 /// Delete `app`'s state dir (prefix and saves included), launch logs and,
 /// on Linux, its `.desktop` file, and its override file unless
 /// `keep_override`. Refuses while the game or any Wine process in its
-/// prefix is running. The `.app` is left alone.
+/// prefix is running. The `.app` is left alone. A symlinked game dir goes as
+/// the link only, never what it points at; a game whose dir isn't there is
+/// forgotten, and its files stay wherever they are.
 pub fn remove(app: &App, keep_override: bool) -> Result<Removed, MacAppError> {
+    if app.unreachable {
+        return remove_unreachable(app, keep_override);
+    }
     // The Linux launcher records its start time from /proc/<pid>/stat,
     // the Mac's from `ps -o lstart`.
     let live = if app.linux {
@@ -264,12 +283,25 @@ pub fn remove(app: &App, keep_override: bool) -> Result<Removed, MacAppError> {
         bytes: app.bytes,
         ..Removed::default()
     };
-    std::fs::remove_dir_all(&app.root)?;
+    let is_link = app.root.symlink_metadata()?.file_type().is_symlink();
+    if is_link {
+        out.left_behind = std::fs::read_link(&app.root).ok();
+        out.bytes = 0;
+        std::fs::remove_file(&app.root)?;
+    } else {
+        std::fs::remove_dir_all(&app.root)?;
+    }
     out.paths.push(app.root.clone());
+    launch::forget_location(&app.gogid)?;
     if let Some(entry) = app.desktop.as_ref().filter(|p| p.is_file()) {
         std::fs::remove_file(entry)?;
         out.paths.push(entry.clone());
     }
+    remove_extras(app, keep_override, &mut out)?;
+    Ok(out)
+}
+
+fn remove_extras(app: &App, keep_override: bool, out: &mut Removed) -> Result<(), MacAppError> {
     if let Some(logs) = &app.logs {
         std::fs::remove_dir_all(logs)?;
         out.paths.push(logs.clone());
@@ -278,6 +310,26 @@ pub fn remove(app: &App, keep_override: bool) -> Result<Removed, MacAppError> {
         std::fs::remove_file(file)?;
         out.paths.push(file.clone());
     }
+    Ok(())
+}
+
+/// [`remove`] for a game whose dir isn't there: nothing can be running from
+/// it and nothing says it's a Linux game, so its menu entry goes by name.
+fn remove_unreachable(app: &App, keep_override: bool) -> Result<Removed, MacAppError> {
+    let mut out = Removed {
+        left_behind: Some(app.root.clone()),
+        ..Removed::default()
+    };
+    launch::forget_location(&app.gogid)?;
+    #[cfg(target_os = "linux")]
+    {
+        let entry = crate::linuxapp::game::desktop_path(&app.gogid);
+        if entry.is_file() {
+            std::fs::remove_file(&entry)?;
+            out.paths.push(entry);
+        }
+    }
+    remove_extras(app, keep_override, &mut out)?;
     Ok(out)
 }
 

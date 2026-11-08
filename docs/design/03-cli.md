@@ -125,7 +125,8 @@ into a bundled WINEPREFIX; Wine runtime resolved per design 10 §3 + design 12
 (`auto` / `brew` / `gptk` / `path` / catalog ids `staging`·`devel`·`stable` with
 download + cache), copied into the bundle; ad-hoc codesigned. macOS only (exit 2
 elsewhere). Full specs: **design 10**, **design 12**; discovery: docs/13, docs/15.
-Exit 7 on conversion failures. Names/flags: `--name`, `--runtime`,
+Exit 7 on conversion failures. Names/flags: `--name`, `--library` (where the game's files and
+prefix go: design 18 §6.1; not with `--portable`), `--runtime`,
 `--runtime-version`, `--runtime-path`, `--out`, `--recipe`, `--interactive` (#76: recipe and runtime menus are opt-in), `--json-progress`,
 `--json`, `--yes`. Per-game fixes
 (registry tweaks, extra installer flags, entry-point override) come from
@@ -134,7 +135,9 @@ community recipes — design 11.
 ### `gogo linux-app <GAME|installer-path>`
 
 The Linux sibling of `mac-app` (Linux only): a Windows game set up to run through GE-Proton
-and umu, as `games/<gogid>/` plus a menu entry. Full spec: **design 18** §10. Per-game
+and umu, as `games/<gogid>/` plus a menu entry. `--library <path>` (`library.dir`,
+`GOGO_LIBRARY_DIR`; design 05, design 18 §6.1) puts a new game in `<path>/<gogid>/` instead,
+as it does on `mac-app`. Full spec: **design 18** §10. Per-game
 subcommands take a GOGID: `setup`, `compat`, `doctor`, `next-renderer`, and (#234, design 18
 §7.6):
 

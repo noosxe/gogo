@@ -148,6 +148,7 @@ pub fn doctor(target: &str, opts: &DoctorOptions) -> Result<Report, MacAppError>
     let dirs = GameDirs::for_game(&gogid)?;
     let state = GameState::load(&dirs.state_toml);
     let mut f = Vec::new();
+    f.extend(check_location(&gogid, &dirs));
 
     // The bundle and what it baked: the one given, the one setup recorded,
     // or the portable bundle (#84) whose launcher set the prefix up.
@@ -793,7 +794,8 @@ fn check_links(dirs: &GameDirs, gogid: &str) -> Finding {
     }
     let root = crate::state::data_root();
     let mut out = Vec::new();
-    walk_links(&dirs.prefix, &root, &dirs.prefix, &mut out);
+    // `../../../game` stays in the game's dir, wherever that is.
+    walk_links(&dirs.prefix, &[&root, &dirs.root], &dirs.prefix, &mut out);
     if out.is_empty() {
         return Finding::ok("links", "no links out of the state dir");
     }
@@ -825,9 +827,27 @@ fn check_links(dirs: &GameDirs, gogid: &str) -> Finding {
     )
 }
 
+/// A game in a library (design 18 §6.1): where it is, and whether it's
+/// there. No finding for a game under `games/`.
+pub(crate) fn check_location(gogid: &str, dirs: &GameDirs) -> Option<Finding> {
+    launch::recorded_location(gogid)?;
+    Some(if dirs.root.is_dir() {
+        Finding::ok("location", format!("in a library: {}", dirs.root.display()))
+    } else {
+        Finding::fail(
+            "location",
+            format!(
+                "recorded at {}, which isn't there (a drive not mounted?)",
+                dirs.root.display()
+            ),
+            format!("mount it, or `gogo apps remove {gogid}`"),
+        )
+    })
+}
+
 pub(crate) fn walk_links(
     dir: &Path,
-    root: &Path,
+    roots: &[&Path],
     prefix: &Path,
     out: &mut Vec<(PathBuf, PathBuf)>,
 ) {
@@ -842,11 +862,11 @@ pub(crate) fn walk_links(
                 continue;
             };
             let resolved = normalize(&p.parent().unwrap_or(prefix).join(&target));
-            if !resolved.starts_with(root) {
+            if !roots.iter().any(|r| resolved.starts_with(r)) {
                 out.push((p, target));
             }
         } else if ty.is_dir() {
-            walk_links(&p, root, prefix, out);
+            walk_links(&p, roots, prefix, out);
         }
     }
 }
