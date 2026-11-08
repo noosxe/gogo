@@ -173,27 +173,25 @@ pub fn doctor(gogid: &str, host: &Host) -> Result<Report, MacAppError> {
         baked: check_launcher(&g, baked, &mut f),
         ..g
     };
+    let installed = manage::InstallScan::default();
     if g.baked.is_some() {
-        f.push(check_compat(&g));
-        f.push(check_launch(&g, host));
+        f.push(check_compat(&g, &installed));
+        f.push(check_launch(&g, host, &installed));
     }
     check_umu(&g, host, &mut f);
     let build = check_runtime(&g, &mut f);
     if let Some((_, appid)) = &build {
         f.push(check_container(&g, host, appid.as_deref()));
     }
-    let scan = g
-        .baked
-        .as_ref()
-        .map(|(t, _)| manage::scan_installed(&g.dirs, t));
+    let scan = g.baked.as_ref().map(|(t, _)| installed.get(&g.dirs, t));
     if let (Some(_), Some((dir, _))) = (&g.state, &build) {
-        f.push(check_renderer(&g, dir, scan.as_ref()));
+        f.push(check_renderer(&g, dir, scan));
     }
     let icds = check_vulkan(host, &mut f);
     f.push(check_vulkan32(
         host,
         &icds,
-        scan.as_ref().map(|(_, s)| s),
+        scan.map(|(_, s)| s),
         build.as_ref().map(|(d, _)| d.as_path()),
     ));
     if let Some((_, raw)) = &g.baked {
@@ -309,9 +307,9 @@ fn check_launcher(
 // — compat —
 
 /// The Linux status (§5) and the fix summary (§4.3), collisions marked.
-fn check_compat(g: &Game) -> Finding {
+fn check_compat(g: &Game, scan: &manage::InstallScan) -> Finding {
     let hint = format!("gogo linux-app compat {}", g.gogid);
-    let r = match manage::compat(&g.gogid) {
+    let r = match manage::compat_with(&g.gogid, scan) {
         Ok(r) => r,
         Err(e) => {
             return Finding::fail(
@@ -361,12 +359,12 @@ fn check_compat(g: &Game) -> Finding {
 /// protonfix that wins, a wrapper setup skips) and when the wrapper's program
 /// isn't where the launch would look: this PATH, which is the launch's own
 /// when it starts from this shell; a menu's is the session's.
-fn check_launch(g: &Game, host: &Host) -> Finding {
+fn check_launch(g: &Game, host: &Host, scan: &manage::InstallScan) -> Finding {
     use super::envargs::{self, EnvSource, EnvState};
     let hint = format!("gogo linux-app env list {}", g.gogid);
     let (env, args) = match (
-        envargs::env_report(&g.gogid, false),
-        envargs::args_report(&g.gogid),
+        envargs::env_report_with(&g.gogid, false, scan),
+        envargs::args_report_with(&g.gogid, scan),
     ) {
         (Ok(e), Ok(a)) => (e, a),
         (Err(e), _) | (_, Err(e)) => return Finding::fail("launch", e.to_string(), hint),
@@ -979,11 +977,7 @@ fn dir_size(dir: &Path) -> u64 {
 /// cnc-ddraw in the dir of the exe that runs, D7VK in the build, never both
 /// `ddraw.dll`s, DDrawCompat there unloaded, and any other game `ddraw.dll`
 /// there with its `ddraw=n,b`.
-fn check_renderer(
-    g: &Game,
-    build: &Path,
-    scan: Option<&(Option<PathBuf>, Result<PeScan, ScanError>)>,
-) -> Finding {
+fn check_renderer(g: &Game, build: &Path, scan: Option<&manage::InstalledScan>) -> Finding {
     let setup = g.setup_hint();
     let applied = g
         .state
