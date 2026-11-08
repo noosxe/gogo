@@ -120,7 +120,15 @@ impl Entry {
                 "{} (`;` between keys: keep keys already there)",
                 set(format!("DXVK_CONFIG='{}=<value>'", self.name))
             )),
-            Kind::Command => Err("a command that wraps the game, not a variable".into()),
+            Kind::Command => Ok(format!(
+                "gogo linux-app wrapper {gogid} -- {}{} (it replaces any wrapper set before)",
+                self.name,
+                if self.name == "gamescope" {
+                    " <options> --"
+                } else {
+                    ""
+                }
+            )),
             Kind::Env => match envargs::policy(&self.name) {
                 envargs::Policy::Refuse(why) => Err(why),
                 _ => Ok(set(format!("{}=<value>", self.name))),
@@ -197,16 +205,13 @@ fn list(items: impl IntoIterator<Item = String>) -> String {
     items.into_iter().collect::<Vec<_>>().join(", ")
 }
 
-/// Whether `spec` does anything here. Order: the build, the launcher, the
-/// host tool, then the renderer and the GPU.
+/// Whether `spec` does anything here. Order: the build, the host tool, then
+/// the renderer and the GPU.
 fn applies(spec: &Spec, in_build: InBuild, m: &Machine) -> Applies {
     if in_build == InBuild::NotFound {
         return Applies::No {
             why: "not in this build".into(),
         };
-    }
-    if let Some(why) = spec.blocked {
-        return Applies::No { why: why.into() };
     }
     if let Some(cmd) = spec.needs
         && !(m.on_path)(cmd)
@@ -348,7 +353,28 @@ fn active_for(name: &str, kind: Kind, env: &EnvReport) -> Vec<EnvLine> {
         Kind::Env => name,
         Kind::Vkd3dFlag => "VKD3D_CONFIG",
         Kind::DxvkConf => "DXVK_CONFIG",
-        Kind::Command => return vec![],
+        Kind::Command => {
+            let Some(w) = env
+                .wrapper
+                .as_ref()
+                .filter(|w| envargs::wrapper_runs(&w.words, name))
+            else {
+                return vec![];
+            };
+            let Some(layer) = w.layer else {
+                return vec![];
+            };
+            return vec![EnvLine {
+                key: "wrapper".into(),
+                value: envargs::shell_words(&w.words),
+                source: envargs::EnvSource::Layer { layer },
+                state: if w.pending {
+                    envargs::EnvState::Pending
+                } else {
+                    envargs::EnvState::Applies
+                },
+            }];
+        }
     };
     env.lines
         .iter()
@@ -549,14 +575,6 @@ fn locate_build(gogid: &str, dirs: &GameDirs, conf: Option<&ConfValues>) -> Opti
     setup::find_proton(&parsed).ok().flatten().map(|b| b.dir)
 }
 
-/// Is there a file named `cmd` in one of `PATH`'s folders?
-fn on_path(host: &Host, cmd: &str) -> bool {
-    let Some(path) = host.var("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path).any(|d| host.at(d.join(cmd)).is_file())
-}
-
 /// `gogo linux-app env list <gogid> --all`. Reads only.
 pub fn report(gogid: &str, host: &Host, reveal: bool) -> Result<CatalogueReport, MacAppError> {
     let env = envargs::env_report(gogid, reveal)?;
@@ -585,7 +603,7 @@ pub fn report(gogid: &str, host: &Host, reveal: bool) -> Result<CatalogueReport,
     let machine = Machine {
         renderer: parsed,
         gpus,
-        on_path: &|c| on_path(host, c),
+        on_path: &|c| host.finds_program(c),
     };
     Ok(merge(env, facts.as_ref(), renderer, &machine))
 }

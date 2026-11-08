@@ -79,6 +79,22 @@ impl Host {
         self.root.join(p.strip_prefix("/").unwrap_or(p))
     }
 
+    /// Can a launch run `program`: an executable file at that absolute path,
+    /// or by that name in one of `PATH`'s folders?
+    pub(crate) fn finds_program(&self, program: &str) -> bool {
+        use std::os::unix::fs::PermissionsExt as _;
+        let runs = |p: PathBuf| {
+            p.metadata()
+                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        };
+        if program.starts_with('/') {
+            return runs(self.at(program));
+        }
+        self.var("PATH").is_some_and(|path| {
+            std::env::split_paths(&path).any(|d| runs(self.at(d.join(program))))
+        })
+    }
+
     fn umu(&self) -> umu::Host<'_> {
         umu::Host {
             root: &self.root,
@@ -158,7 +174,7 @@ pub fn doctor(gogid: &str, host: &Host) -> Result<Report, MacAppError> {
     };
     if g.baked.is_some() {
         f.push(check_compat(&g));
-        f.push(check_launch(&g));
+        f.push(check_launch(&g, host));
     }
     check_umu(&g, host, &mut f);
     let build = check_runtime(&g, &mut f);
@@ -339,9 +355,12 @@ fn check_compat(g: &Game) -> Finding {
 // — env and args —
 
 /// What the game gets at launch beyond the exe (#234): the env, each value
-/// with its source, and the args. Warns when a value of the user's never
-/// applies (a bad name, a key the launcher sets, a protonfix that wins).
-fn check_launch(g: &Game) -> Finding {
+/// with its source, the args and the wrapper (#271). Warns when a value of
+/// the user's never applies (a bad name, a key the launcher sets, a
+/// protonfix that wins, a wrapper setup skips) and when the wrapper's program
+/// isn't where the launch would look: this PATH, which is the launch's own
+/// when it starts from this shell; a menu's is the session's.
+fn check_launch(g: &Game, host: &Host) -> Finding {
     use super::envargs::{self, EnvSource, EnvState};
     let hint = format!("gogo linux-app env list {}", g.gogid);
     let (env, args) = match (
@@ -356,7 +375,7 @@ fn check_launch(g: &Game) -> Finding {
     let mut problems: Vec<String> = env
         .warnings
         .iter()
-        .filter(|w| w.starts_with("env "))
+        .filter(|w| w.starts_with("env ") || w.starts_with("wrapper "))
         .cloned()
         .collect();
     for l in &mine {
@@ -386,7 +405,23 @@ fn check_launch(g: &Game) -> Finding {
         Some(x) => format!("extra args {} ({})", words(&x.value), x.layer.describe()),
         None => "no extra args".into(),
     });
-    if mine.iter().any(|l| l.state == EnvState::Pending) || args.pending {
+    let wrapper = env.wrapper.as_ref();
+    let wanted = wrapper.and_then(|v| v.layer.map(|l| (&v.words, l)));
+    if let Some((w, layer)) = wanted {
+        parts.push(format!("wrapper {} ({})", words(w), layer.describe()));
+        if let Some(program) = envargs::wrapper_program(w)
+            && !host.finds_program(program)
+        {
+            problems.push(format!(
+                "the wrapper's program `{program}` isn't on PATH: the launch stops and says so \
+                 (a menu launch has your session's PATH, which may differ from this shell's)"
+            ));
+        }
+    }
+    if mine.iter().any(|l| l.state == EnvState::Pending)
+        || args.pending
+        || wrapper.is_some_and(|v| v.pending)
+    {
         parts.push("some apply at the next launch".into());
     }
     let mut finding = if problems.is_empty() {
@@ -420,6 +455,13 @@ fn check_launch(g: &Game) -> Finding {
             words(&args.launch_args),
             args.game_args_from
         )))
+        .chain(wanted.map(|(w, layer)| {
+            format!(
+                "wrapper: {}  ({}; outside umu-run, the game's env inside it)",
+                words(w),
+                layer.describe()
+            )
+        }))
         .collect();
     finding
 }

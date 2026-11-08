@@ -151,6 +151,11 @@ subcommands take a GOGID: `setup`, `compat`, `doctor`, `next-renderer`, and (#23
   override file. A key gogo owns is refused with exit 2 and nothing written.
 - `args <gogid> [-- <args…> | --clear] [--json]`: show, set (after the game's own args) or
   clear the user's launch args.
+- `wrapper <gogid> [-- <words…> | --clear] [--json]` (#271, design 18 §7.8): show, set or clear
+  the command the game runs under (`-- gamescope -f --`, `-- gamemoderun`), one word per
+  argument and no shell. It runs outside umu-run; the game's env applies inside it. A shell
+  string, a relative path or `%command%` is refused with exit 2 and nothing written. `env list`
+  shows it too, and `doctor` warns when its program isn't on `PATH`.
 
 Verb-first `env list|set|unset`, as `config get|set` and `runtimes list|install`. Edits
 print `key old -> new` lines on stdout and warnings on stderr, and apply at the next launch

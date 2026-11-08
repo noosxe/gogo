@@ -563,7 +563,7 @@ Mac, with a Linux table:
 | 3. The D7VK pin | **Decided:** the D7VK the Proton build bundles; no separate D7VK download in the first round. Release zips come with the plain-Wine lane |
 | 4. `syswow64` vs game dir for D7VK on plain Wine | **Deferred** with the plain-Wine lane (decision 1) |
 | 5. Dual-renderer games | **Decided:** default D7VK (the table above), the cnc-ddraw override documented; L3 entries only after a host pass shows one needs it |
-| 6. Wayland and D7VK (gamescope?) | **Deferred:** no gamescope by default in the first round. A host pass on Wayland records whether it's needed; running a game under a wrapper is a later feature |
+| 6. Wayland and D7VK (gamescope?) | **Deferred:** no gamescope by default in the first round. A host pass on Wayland records whether it's needed; a player can run a game under one (§7.8) |
 | 7. DXVK-Sarek on MoltenVK | **Out of scope:** Mac lane (epic #50) |
 | 8. Retained-mode GOG games | **Deferred:** the RM row needs no code (Proton's default). The corpus (item 1, #174) found none |
 
@@ -1018,7 +1018,7 @@ tested = [
 - **`launch.conf`**: only assignments, POSIX single-quoted by `sh_quote`, written by setup.
   Keys: `GOGID`, `TITLE`, `UMU_ID`, `STAMP`, `UMU_RUN`, `UMU_PYTHON`, `PROTON_DIR`,
   `PROTON_VERSION`, `PROTON_SHA`, `PREFIX`, `GAME_DIR`, `WORKDIR`, `EXE`, `ARGS=(…)`,
-  `ENV=(…)`, `DLL_OVERRIDES`, `RENDERER`, `PROTONFIXES` (`1`/`0`), `UMU_FOLDERS` (when
+  `WRAPPER=(…)` (only with a wrapper, §7.8), `ENV=(…)`, `DLL_OVERRIDES`, `RENDERER`, `PROTONFIXES` (`1`/`0`), `UMU_FOLDERS` (when
   needed), `GOGO_PATH`, `DATA_ROOT`. There's one copy: no bundle to bake a second into.
 - **`launch.sh`**: bash, generated from a template inside gogo. It carries
   `LAUNCHER_VERSION`; setup rewrites it whenever the template changed, so a gogo upgrade
@@ -1440,7 +1440,7 @@ then the game's module).
 **For the TUI.** `envargs::env_report` is the "what's active" half: one line per (key,
 source) with its state. §7.7's catalogue adds the "what exists" half on top of it.
 
-**For the e2e harness and #241.** A manifest's `[override]` (`env`, `extra_args`) is
+**For the e2e harness and #241.** A manifest's `[override]` (`env`, `extra_args`, `wrapper`) is
 applied by the harness through these commands, with the run's scratch `GOGO_HOME`, right
 before the launch (`docs/linux-e2e.md`). So a run (or a live session) sets a game's env
 and args without touching the owner's games, and the launch goes through the same stale
@@ -1515,14 +1515,13 @@ README lines ahead of the release (`PROTON_DUALSENSE_BT_AS_USB`).
 why, checked in this order:
 
 1. The build: no trace of it → `no`.
-2. The launcher: `blocked`, for `gamescope` and `gamemoderun`, since `launch.sh` can't put a
-   command in front of the game (#271).
-3. The wrapper's command on `PATH` (`Host`; `MANGOHUD` needs `mangohud`).
-4. The renderer, `launch.conf`'s `RENDERER`, else the compat pick. Under Proton DXVK's
+2. The wrapper's command on `PATH` (`Host`; `MANGOHUD` needs `mangohud`, `gamescope` and
+   `gamemoderun` themselves, §7.8).
+3. The renderer, `launch.conf`'s `RENDERER`, else the compat pick. Under Proton DXVK's
    `dxgi.dll` also fronts VKD3D-Proton, so `DXVK_FILTER_DEVICE_NAME`, `DXVK_HDR` and
    `DXVK_CONFIG` reach D3D12 games, while `DXVK_HUD` draws on D3D9-11 only. wined3d and
    cnc-ddraw get none of the Vulkan side.
-5. The GPU, by vendor, from `/sys/class/drm` as `doctor` reads it. Any matching GPU counts
+4. The GPU, by vendor, from `/sys/class/drm` as `doctor` reads it. Any matching GPU counts
    (a hybrid laptop has both).
 
 No renderer or GPU known yet gives `?`, not a guess.
@@ -1570,6 +1569,158 @@ isn't env use, the sample, whole strings vs a compiler's pieces, flags as tails,
 parts missing (`not checked`, not `not found`), applicability per renderer, GPU and tool,
 nothing hidden, stale advice, active values by whole word, the four currency tests, flagship
 coverage, `report` over a built game, and goldens for both human outputs.
+
+### 7.8 Running a game under a wrapper (#271)
+
+`gamescope … --` and `gamemoderun`, the last piece of the tuning Heroic made awkward. A game
+gets one command in front of it; a chain is that command's own business
+(`gamemoderun gamescope -f --`).
+
+**Storage and CLI, as §7.6's args.** `wrapper = ["gamescope", "-f", "--"]` under
+`[platforms.linux]` in L4: Linux only (under `[platforms.macos]` it warns and is ignored),
+replaced whole by a higher layer, a user's key rather than one of `OWNED_KEYS`. The launch
+stamp covers the file, so the next launch's setup writes `WRAPPER=(…)` into `launch.conf`,
+`sh_quote`d word by word like `ARGS`; there's no such line without a wrapper, and the other
+lines are as they were. The launcher is one template either way, and `launch.conf` picks the
+branch.
+
+`gogo linux-app wrapper <gogid> [-- <words…> | --clear] [--json]`: no words shows it, words set
+it, `--clear` drops it. `env list` adds a `wrapper:` line when there is one (its JSON a
+`wrapper` key; without one both are as they were), `env list --all` shows it as `now:` under
+`gamescope` and `gamemoderun`, and `env describe` gives the command to set it.
+
+**Argv form, no shell** (`envargs::check_wrapper`; refused with exit 2, nothing written):
+
+- no words at all (`--clear` is how to drop it), a line break or NUL in any word;
+- a program that's empty, looks like an option, or is relative with a slash (the launch
+  `cd`s first): a bare name for `PATH`, or an absolute path;
+- a bare program with a space (`"gamescope -f --"`, a shell string) or a `=` (`DXVK_HUD=1`, a
+  shell assignment; `env DXVK_HUD=1 …` is the argv form);
+- `%command%` in any word: Steam's, and here the game's command always follows the last word.
+
+Everything else is passed as typed (golden files, and the pipeline test compares the argv a
+fake wrapper gets). Allowed but warned: `gamescope` with no `--` after it, since its own options
+end there. Setup treats a hand-written bad one as it does a bad env name: a warning, and the
+game runs without it, and `doctor` says so.
+
+**Where it goes: outside `umu-run`.** The order is `wrapper… launch.sh <game step> →
+umu-run → pressure-vessel's container → Proton → the game`, what Steam's `gamescope --
+%command%` gives. gamescope is a compositor: it owns the display connection and the Vulkan
+device, runs a nested Xwayland, and starts the game with `DISPLAY` pointing at that. It has to
+run on the host with the host's libraries and the session's sockets. Inside the container it
+would have the runtime's libraries and `/tmp`, and it wouldn't be the one starting umu.
+`gamemoderun` works there too: it's a shell script that adds `LD_PRELOAD` and `LD_LIBRARY_PATH`
+and execs (gamemode 1.8.2), and what it sets reaches umu-run underneath it.
+
+**Env: the wrapper gets what the launcher started with; the game's goes on after it.** The
+launcher doesn't export the game's environment, and that holds for the wrapper too:
+`launch.sh` runs `wrapper… "$SELF" --gogo-run-game <mark> <args…>`, so the wrapper's command is
+this script again, whose first step (before any setup, log or teardown code) sources
+`launch.conf`, exports `ENV` and the launcher's four, and execs umu-run. Why not hand the
+wrapper the game's whole environment, as a plain `export` would:
+
+- **It breaks gogo's tracking.** A process whose environ has `WINEPREFIX` counts as the game's
+  (§7.2): gamescope would count as the game, and be `SIGKILL`ed by the sweep with the game.
+- **It breaks the wrapper, or the setting.** `MANGOHUD=1`, `VK_*` and a game's own `LD_PRELOAD`
+  would apply to gamescope's own Vulkan and process. gamescope also edits what its child gets
+  (3.16.31: unsets `ENABLE_VKBASALT`, `SDL_VIDEODRIVER`, `WAYLAND_DISPLAY`, sets `DISPLAY`,
+  `ENABLE_GAMESCOPE_WSI=1` unless set). Applied after it, the player's `env` wins, as §7.6 says
+  it does.
+
+Why not `wrapper… env K=V… umu-run`: values would be on a command line every user can read,
+while §7.6 hides secret-looking values and keeps them out of logs. Why `launch.sh` and not a
+second generated file: one template to keep at one version (R30), and `load_conf` and `run_game`
+are already there. So the order at launch is §7.6's with one layer added under `ENV`: the
+environment `launch.sh` starts with, then what the wrapper sets, then the rest. Nothing is
+passed to the wrapper by environment: the mark is an argument, so a wrapper's env, and the
+game's, carry nothing new. `env …` as the wrapper's first words is how to give the wrapper
+something of its own.
+
+**What a wrapper does to the process tracking.** Read from gamescope 3.16.31's source at the
+flake's nixpkgs pin. gamescope stays the launcher's child and starts `gamescopereaper -- <cmd>`
+(same session and process group, a subreaper with `PDEATHSIG` `TERM`), which starts the command.
+When the command exits, gamescope shuts down (`shutdown_on_primary_child_death`, on by default).
+`TERM` makes gamescope shut down, and the reaper pass it to its children. Checked against four
+shapes of fake wrapper in the pipeline test (execs; stays the parent; puts the game in a new
+session; starts the game and leaves), and a fifth that outlives the game:
+
+| Piece | Without a wrapper | With one |
+|---|---|---|
+| `WPID` (`wait`, the group for `TERM`/`KILL`) | umu-run, which the subshell became | the wrapper, which the subshell became. umu-run is below it, and for a wrapper that keeps it in the group `TERM` still reaches it |
+| Game step ran? | always | `.run-<pid>.game` in the log dir (a path in the wrapper's argv, the game step's pid in it; umu-run keeps that pid). Removed with the launcher's record |
+| `.launchers/<pid>` (#212) | the launcher | unchanged: launchers, not games |
+| `prefix_pids` | the game's | the game's, never the wrapper's. So the game is still seen once it left the wrapper's group, or the wrapper left it |
+| The close request (§7.2) | via the prefix's wineserver | the same: it finds the wineserver by environ and enters its namespaces, so the wrapper isn't in the way |
+| `closed by itself` | umu-run gone, prefix empty | the wrapper gone too. A wrapper still there after its game isn't a clean close: at the grace, `didn't close`, `TERM`, then `KILL` to its group |
+| No game left to ask, wrapper running | n/a | the grace runs out, then `TERM` |
+| Wrapper gone, game running | n/a | The launcher used to skip the request when `WPID` was gone. Now it asks whenever the prefix has processes (this also fixes a launcher exe that started the real game and left) |
+| `TERM` | umu-run's group | that group, plus, with a wrapper and no other launcher of this game, every process of the prefix: a wrapper may have put the game in a new session. With another launcher, its sweep gets them later |
+| The `KILL` sweep and `-WPID` | as §7.2 | as §7.2. The sweep finds the game anywhere, `-WPID` the wrapper |
+| Watchdog (#103) | the same teardown | the same teardown, and `TERM`/`KILL` reach the wrapper the same way |
+| Footer's "the run ended" | `wait`, then the prefix empty | `wait` for the wrapper, then the prefix empty, so a wrapper that left early doesn't end the run |
+| Exit code | umu-run's | the **wrapper's**. gamescope doesn't pass on its child's (the source drops `WaitForChild`'s result), so a game's crash under it reads `# exit: 0`. The early-exit dialog still catches a short run, and says `under gamescope`. Worth a follow-up only if it misleads in practice |
+
+Two new endings, both before a game exists:
+
+- **The wrapper isn't on `PATH`** (`command -v` at launch, after any setup): `not_runnable`, a
+  run log with footer `127 (wrapper missing)`, and a dialog naming `wrapper <gogid> --clear`.
+  Not "run it without": the player asked for it, and a game at the wrong resolution with no
+  word why is worse.
+- **The wrapper exited and never ran the game** (no mark and no prefix process after 2 s, which
+  is the room a wrapper that forks and leaves needs): footer `<code> (wrapper never ran the game)`
+  (a `0` becomes `1`), a dialog with the wrapper's name, the log and `--clear`, and **no**
+  early-exit dialog: it would offer "Try next renderer" for something the renderer has nothing to
+  do with.
+
+The launcher knows nothing about what a wrapper does beyond this: `launch.sh` has no gamescope
+case. `LAUNCHER_VERSION` is 5, and `# wrapper:` is a new run log header line (only with a
+wrapper) that the report includes.
+
+**Live, in the harness** (2026-11-08, Right and Down, D3D11, RTX 4090; `docs/linux-e2e.md`). No
+base's key changed for it: gamescope is a store path in a manifest under `target/`, from the
+flake's nixpkgs, not one of the harness's tools.
+
+| Wrapper | Ending | What happened |
+|---|---|---|
+| `env X=y` | `SIGTERM` | window, `asked the game to close`, `closed by itself after 0s`, nothing left |
+| gamescope 3.16.31 `--backend sdl`, on X11 | `SIGTERM` | window (picture fills it), renders on the 4090, `closed by itself after 1s`, nothing left |
+| same | the game's own Quit (clicks through gamescope) | `wrapper env exited 0`, `prefix idle`, `clean_exit`, nothing left |
+| gamescope `--backend wayland` or `headless` | none | `Failed to create backend` (the sandbox has no primary DRM node): `never ran the game`, no renderer offered |
+
+So the process model above is checked against the real thing, on a backend the owner won't use.
+Hyprland's Wayland backend is still the host pass's.
+
+**Known and not solved** (read from source and upstream's flags, not run on real hardware;
+the owner's host pass, #179 and the PR's steps):
+
+- **`PROTON_ENABLE_WAYLAND=1` under gamescope.** gamescope 3.16.31 unsets `WAYLAND_DISPLAY` for
+  its child unless given `--expose-wayland`, so plain gamescope leaves winewayland no socket;
+  the game gets Xwayland as `DISPLAY` says. With `--expose-wayland` the socket is gamescope's
+  own (`gamescope-0`, xdg-shell clients). Whether that works with GE-Proton isn't tested. gogo
+  doesn't warn about the combination until someone has.
+- **HDR.** `--hdr-enabled` needs the gamescope WSI layer in the client (gamescope's help says
+  so), `ENABLE_GAMESCOPE_WSI=1` is set by default, and DXVK/VKD3D-Proton need `DXVK_HDR=1`.
+  Whether pressure-vessel's container finds the layer from a Nix-installed gamescope, and what
+  Hyprland does with a nested HDR surface, is unknown.
+- **A launcher exe under gamescope.** The reaper `TERM`s everything left once the command exits,
+  and gamescope shuts down. A game whose exe starts the real one and exits relies on umu-run
+  staying (it does while Wine's services run); nothing here changes that.
+- **gamescope's focus and input on Hyprland**, its window rules, and VRR: the host pass.
+- **`gamemoderun` in the container.** `LD_PRELOAD` crosses pressure-vessel by its own rules. That
+  the daemon registers the game is the host pass's to see (`gamemoded -s`).
+
+**Doctor.** `launch` names the wrapper and its layer, and warns when its program isn't found:
+an executable at that absolute path, or by that name on `PATH`. That is the `PATH` the launch
+has when it starts from the same shell; a menu launch has the session's, which the warning says.
+It checks the first word only: the rest of a chain is that program's arguments.
+
+**Tests** (`compat`, `envargs`, `game`, `launcher`, `catalogue`, `linuxapp_pipeline.rs`,
+`cli.rs`, `main.rs`): the L4 key, the refusals and warnings, the pending and applied view, goldens
+for `launch.conf` with a wrapper and for the template's game start (the same one with and
+without), the argv word for word, the env split in both dumps, close and `TERM` through each
+wrapper shape, a wrapper outliving the game, a killed launcher, a wrapper that left while the
+game runs, its exit code, the two new endings, doctor and catalogue with the tool on and off
+`PATH`, a hand-written bad one, and clearing.
 
 ## 8. `gogo linux-app doctor <gogid>`
 
@@ -1619,7 +1770,8 @@ umu (the container carries its libraries), and a gogo other than the flake's `go
     user's env keys and extra args, and says when some apply only at the next launch; the
     detail lines are every env value that applies (`*` marks the user's) and the args.
     Warns when a value of the user's never applies: a bad name (setup skips it), a key
-    the launcher sets after `ENV`, or one a protonfix sets at launch.
+    the launcher sets after `ENV`, or one a protonfix sets at launch. Names the wrapper
+    too, and warns when setup skips it or its program isn't found (#271, §7.8).
   - `umu`: `launch.conf` read back (`game::ConfValues`, the inverse of `LaunchConf::render`).
     Zipapp: `UMU_RUN` exists and is the store's `umu/<ver>` whose recorded archive sha256
     is the pin's (the store keeps no hash of the unpacked zipapp, so that is what "its sha"
@@ -1777,6 +1929,7 @@ only on Linux (`#[cfg(target_os = "linux")]`), with the same shape:
     Nothing is installed or fetched.
   - `gogo linux-app env list|set|unset <gogid>` and `gogo linux-app args <gogid>
     [-- <args…> | --clear]` (#234): §7.6.
+  - `gogo linux-app wrapper <gogid> [-- <words…> | --clear]` (#271): §7.8.
   - `gogo linux-app env list <gogid> --all`, `env describe <gogid> <NAME>` (#233): §7.7.
   - `gogo linux-app next-renderer <gogid> [--dry-run]`: `renderer::next_renderer_on(Os::Linux,
     …)` after `state.toml`'s renderer (else the baked one), L1 from a fresh scan; written to

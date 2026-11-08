@@ -1100,6 +1100,11 @@ if [ -n "${FAKE_GAME_HANG:-}" ]; then
   echo $! >> "$FAKE_UMU_LOG.pids"
   exec sleep 300
 fi
+if [ -n "${FAKE_GAME_TRAP_TERM:-}" ]; then
+  trap 'echo GOT_TERM >> "$FAKE_UMU_LOG"; exit 143' TERM
+  echo TRAPPING >> "$FAKE_UMU_LOG"
+  while :; do sleep 0.1; done
+fi
 sleep "${FAKE_GAME_SLEEP:-0}"
 exit "${FAKE_GAME_EXIT:-0}"
 "#;
@@ -1442,7 +1447,7 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
     // next setup, which says so; an unchanged one isn't touched.
     std::fs::write(
         &sh,
-        script.replace("LAUNCHER_VERSION=4", "LAUNCHER_VERSION=0"),
+        script.replace("LAUNCHER_VERSION=5", "LAUNCHER_VERSION=0"),
     )
     .unwrap();
     std::fs::write(&desktop, "[Desktop Entry]\nExec=/old/root/launch.sh\n").unwrap();
@@ -1450,7 +1455,7 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
     assert_eq!(std::fs::read_to_string(&sh).unwrap(), script);
     assert_eq!(std::fs::read_to_string(&desktop).unwrap(), entry);
     assert!(
-        out.notes.iter().any(|n| n == "launch.sh: launcher 0 -> 4"),
+        out.notes.iter().any(|n| n == "launch.sh: launcher 0 -> 5"),
         "{:?}",
         out.notes
     );
@@ -1515,7 +1520,7 @@ fn the_launcher_runs_umu_with_the_games_environment_and_logs_the_run() {
     let run = &runs[0];
     for want in [
         format!("# gogo run log: Test Game ({ID})\n"),
-        "# launcher: 4\n".into(),
+        "# launcher: 5\n".into(),
         format!(
             "# runtime: path:{} (1793687165 GE-Proton10-34)\n",
             w.build.display()
@@ -2680,4 +2685,579 @@ fn the_catalogue_reads_the_games_build_and_marks_what_applies() {
     // The plain list is what it was: active values only.
     let plain = envargs::env_report(ID, false).unwrap();
     assert!(plain.lines.iter().all(|l| l.key != "PROTON_LOG"));
+}
+
+// — wrappers (#271, design 18 §7.8) —
+
+/// How wrappers treat the game, as fake commands that exec their args one
+/// way or another. Each says its pid and environment first.
+const WRAP_PREAMBLE: &str = r#"#!/bin/sh
+echo $$ > "$FAKE_WRAP_LOG.pid"
+: > "$FAKE_WRAP_LOG.argv"
+for a in "$@"; do printf '%s\n' "$a" >> "$FAKE_WRAP_LOG.argv"; done
+env > "$FAKE_WRAP_LOG.env"
+"#;
+
+/// gamemoderun's shape: sets something for the game, then execs it.
+const WRAP_EXEC: &str = "WRAP_SET=from-wrapper FOO=from-wrapper exec \"$@\"\n";
+/// gamescope's shape (design 18 §7.8): stays the parent in the same process
+/// group, handles TERM, exits when its child does, and always with 0.
+const WRAP_PARENT: &str =
+    "\"$@\" &\nc=$!\ntrap 'kill -TERM $c 2>/dev/null; wait $c; exit 0' TERM\nwait $c\nexit 0\n";
+/// Stays the parent, with the game in a session of its own: nothing sent to
+/// the wrapper's process group reaches the game.
+const WRAP_SESSION: &str = "setsid \"$@\" &\nwait $!\nexit $?\n";
+/// Starts the game and leaves.
+const WRAP_DAEMON: &str = "setsid \"$@\" </dev/null >/dev/null 2>&1 &\nexit 0\n";
+/// Outlives the game, and doesn't take TERM.
+const WRAP_LINGER: &str = "trap '' TERM\n\"$@\"\nwhile :; do sleep 1; done\n";
+
+impl World {
+    /// `launch.sh` will run the game under a fake command `fake-wrap` with
+    /// these words after it: set through `envargs`, applied by setup.
+    fn wrapped(&self, body: &str, words: &[&str]) {
+        let path = self.root.join("bin/fake-wrap");
+        std::fs::write(&path, format!("{WRAP_PREAMBLE}{body}")).unwrap();
+        chmod_x(&path);
+        let mut all = vec!["fake-wrap".to_string()];
+        all.extend(words.iter().map(|s| s.to_string()));
+        gogo::linuxapp::envargs::set_wrapper(ID, Some(all)).unwrap();
+        setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
+    }
+
+    fn wrap_log(&self) -> PathBuf {
+        self.root.join("wrap")
+    }
+
+    fn wrap_file(&self, ext: &str) -> String {
+        let mut p = self.wrap_log().into_os_string();
+        p.push(ext);
+        std::fs::read_to_string(p).unwrap_or_default()
+    }
+
+    /// The wrapper process is gone (a zombie counts: nobody's left to reap it
+    /// in a test run's container).
+    fn wrapper_gone(&self) -> bool {
+        let pid = self.wrap_file(".pid");
+        let pid = pid.trim();
+        assert!(!pid.is_empty(), "the wrapper never ran");
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(s) => s.rsplit(") ").next().unwrap().starts_with('Z'),
+            Err(_) => true,
+        }
+    }
+
+    /// No game mark, no FIFOs: the run's scratch in the log dir is gone.
+    fn run_scratch(&self) -> Vec<String> {
+        std::fs::read_dir(self.logs())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with(".run-"))
+            .collect()
+    }
+}
+
+#[test]
+fn a_wrapper_goes_outside_umu_and_the_games_env_goes_inside_it() {
+    let Some(w) = World::launcher("wrap-env", false) else {
+        return;
+    };
+    let odd = "a 'b' \"c\" $HOME `x` \\ ; *";
+    gogo::linuxapp::envargs::set_env(
+        ID,
+        &[
+            ("DXVK_HUD".into(), "fps".into()),
+            ("FOO".into(), "from-l4".into()),
+        ],
+    )
+    .unwrap();
+    // Its own options end at `--`, as gamescope's do.
+    let own_options = format!("while [ \"$1\" != -- ]; do shift; done\nshift\n{WRAP_EXEC}");
+    w.wrapped(&own_options, &["--opt", odd, "--"]);
+    let conf = gogo::linuxapp::game::ConfValues::parse(&w.conf());
+    assert_eq!(conf.arrays["WRAPPER"], ["fake-wrap", "--opt", odd, "--"]);
+
+    let log = w.wrap_log();
+    let args_log = w.root.join("args.log");
+    let env_dump = w.root.join("game.env");
+    let out = w.launch(
+        &[
+            ("FAKE_WRAP_LOG", log.to_str().unwrap()),
+            ("FAKE_ARGS_LOG", args_log.to_str().unwrap()),
+            ("FAKE_ENV_DUMP", env_dump.to_str().unwrap()),
+        ],
+        &["-cli arg"],
+    );
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(w.calls().is_empty(), "setup ran: {:?}", w.calls());
+
+    // The wrapper's words as typed; then this launcher again, for the game.
+    let launch_sh = w.game().join("launch.sh");
+    let argv = w.wrap_file(".argv");
+    let argv: Vec<&str> = argv.lines().collect();
+    assert_eq!(argv[..3], ["--opt", odd, "--"], "{argv:?}");
+    assert_eq!(argv[3], launch_sh.to_str().unwrap(), "{argv:?}");
+    assert_eq!(argv[4], gogo::linuxapp::launcher::RUN_GAME_ARG, "{argv:?}");
+    assert_eq!(argv[6], "-cli arg", "{argv:?}");
+
+    // The wrapper has the launcher's starting environment, none of the game's.
+    let wrap_env = w.wrap_file(".env");
+    for k in [
+        "WINEPREFIX=",
+        "GAMEID=",
+        "STORE=",
+        "PROTONPATH=",
+        "DXVK_HUD=",
+        "FOO=",
+        "PROTON_SET_GAME_DRIVE=",
+    ] {
+        assert!(
+            !wrap_env.lines().any(|l| l.starts_with(k)),
+            "{k} in:\n{wrap_env}"
+        );
+    }
+    assert!(wrap_env.contains("FAKE_WRAP_LOG="), "{wrap_env}");
+
+    // umu-run has both: what the wrapper set, with the game's env over it.
+    let game_env = std::fs::read_to_string(&env_dump).unwrap();
+    let prefix = w.game().join("prefix");
+    for want in [
+        format!("WINEPREFIX={}", prefix.display()),
+        "DXVK_HUD=fps".to_string(),
+        "WRAP_SET=from-wrapper".to_string(),
+        "FOO=from-l4".to_string(),
+        "PROTON_SET_GAME_DRIVE=0".to_string(),
+    ] {
+        assert!(
+            game_env.lines().any(|l| l == want),
+            "{want} in:\n{game_env}"
+        );
+    }
+    let got = std::fs::read_to_string(&args_log).unwrap();
+    assert!(got.ends_with("-windowed\n-cli arg\n"), "{got}");
+    let umu = std::fs::read_to_string(&w.umu_log).unwrap();
+    assert!(
+        umu.contains(&format!("CWD={}", w.game().join("prefix").display())),
+        "{umu}"
+    );
+
+    let run = w.runs().pop().unwrap();
+    assert!(
+        run.contains(&format!("# wrapper: fake-wrap --opt {odd} --\n")),
+        "{run}"
+    );
+    assert!(run.contains("fake-game stdout line\n"), "{run}");
+    assert!(run.contains("# exit: 0\n"), "{run}");
+    let launch_log = w.launch_log();
+    assert!(
+        launch_log.contains("under wrapper: fake-wrap"),
+        "{launch_log}"
+    );
+    assert!(
+        launch_log.contains("wrapper fake-wrap exited 0"),
+        "{launch_log}"
+    );
+    assert_eq!(w.run_scratch(), Vec::<String>::new());
+}
+
+#[test]
+fn a_close_request_reaches_the_game_through_any_wrapper() {
+    for (name, body) in [
+        ("exec", WRAP_EXEC),
+        ("parent", WRAP_PARENT),
+        ("session", WRAP_SESSION),
+        ("daemon", WRAP_DAEMON),
+    ] {
+        let Some(w) = World::launcher(&format!("wrap-close-{name}"), false) else {
+            return;
+        };
+        w.wrapped(body, &[]);
+        let log = w.wrap_log();
+        let (code, _) = term_hanging_launcher(
+            &w,
+            &[
+                ("FAKE_CLOSE_WORKS", "1"),
+                ("FAKE_WRAP_LOG", log.to_str().unwrap()),
+            ],
+        );
+        assert_eq!(code, Some(143), "{name}");
+        assert!(
+            prefix_procs(&w).is_empty(),
+            "{name}: {:?}",
+            prefix_procs(&w)
+        );
+        assert!(wait_until(5, || w.wrapper_gone()), "{name}");
+        let l = w.launch_log();
+        assert!(l.contains("asked the game to close"), "{name}: {l}");
+        assert!(l.contains("closed by itself after "), "{name}: {l}");
+        assert!(!l.contains("didn't close"), "{name}: {l}");
+        assert!(!l.contains("reaped (SIGKILL)"), "{name}: {l}");
+        let umu = std::fs::read_to_string(&w.umu_log).unwrap();
+        assert!(
+            umu.contains("CLOSE:wineboot --end-session\n"),
+            "{name}: {umu}"
+        );
+        assert_eq!(w.run_scratch(), Vec::<String>::new(), "{name}");
+    }
+}
+
+#[test]
+fn term_reaches_the_game_through_any_wrapper() {
+    for (name, body) in [
+        ("exec", WRAP_EXEC),
+        ("parent", WRAP_PARENT),
+        ("session", WRAP_SESSION),
+        ("daemon", WRAP_DAEMON),
+    ] {
+        let Some(w) = World::launcher(&format!("wrap-term-{name}"), false) else {
+            return;
+        };
+        w.wrapped(body, &[]);
+        let log = w.wrap_log();
+        let mut child = w
+            .launch_cmd(
+                &[
+                    ("FAKE_GAME_TRAP_TERM", "1"),
+                    ("GOGO_CLOSE_GRACE_SECS", "1"),
+                    ("FAKE_WRAP_LOG", log.to_str().unwrap()),
+                ],
+                &[],
+            )
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let umu_log = || std::fs::read_to_string(&w.umu_log).unwrap_or_default();
+        assert!(wait_until(10, || umu_log().contains("TRAPPING")), "{name}");
+        std::process::Command::new("kill")
+            .args(["-TERM", &child.id().to_string()])
+            .status()
+            .unwrap();
+        assert_eq!(child.wait().unwrap().code(), Some(143), "{name}");
+        assert!(umu_log().contains("GOT_TERM"), "{name}: {}", umu_log());
+        assert!(wait_until(5, || prefix_procs(&w).is_empty()), "{name}");
+        assert!(wait_until(5, || w.wrapper_gone()), "{name}");
+        let l = w.launch_log();
+        assert!(l.contains("no wineserver of this prefix"), "{name}: {l}");
+        assert!(l.contains("didn't close in 1s: TERM"), "{name}: {l}");
+    }
+}
+
+/// The game answered and left, the wrapper hasn't: that isn't "closed", and
+/// the launcher still ends and takes the wrapper with it.
+#[test]
+fn a_wrapper_that_outlives_the_game_is_not_a_clean_close() {
+    let Some(w) = World::launcher("wrap-linger", false) else {
+        return;
+    };
+    w.wrapped(WRAP_LINGER, &[]);
+    let log = w.wrap_log();
+    let (code, secs) = term_hanging_launcher(
+        &w,
+        &[
+            ("FAKE_CLOSE_WORKS", "1"),
+            ("GOGO_CLOSE_GRACE_SECS", "2"),
+            ("FAKE_WRAP_LOG", log.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(code, Some(143));
+    assert!(secs < 12, "{secs}");
+    assert!(wait_until(5, || w.wrapper_gone()));
+    let l = w.launch_log();
+    assert!(l.contains("didn't close in 2s: TERM"), "{l}");
+    assert!(!l.contains("closed by itself"), "{l}");
+}
+
+#[test]
+fn a_launcher_killed_under_a_wrapper_still_tears_it_all_down() {
+    for (name, body) in [("parent", WRAP_PARENT), ("session", WRAP_SESSION)] {
+        let Some(w) = World::launcher(&format!("wrap-kill-{name}"), false) else {
+            return;
+        };
+        w.wrapped(body, &[]);
+        let log = w.wrap_log();
+        let mut child = w
+            .launch_cmd(
+                &[
+                    ("FAKE_GAME_HANG", "1"),
+                    ("FAKE_WRAP_LOG", log.to_str().unwrap()),
+                ],
+                &[],
+            )
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        assert!(wait_until(10, || prefix_procs(&w).len() >= 4), "{name}");
+        assert!(
+            wait_until(5, || w.launch_log().contains("guard armed")),
+            "{name}"
+        );
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(wait_until(15, || prefix_procs(&w).is_empty()), "{name}");
+        assert!(wait_until(5, || w.wrapper_gone()), "{name}");
+        assert!(
+            wait_until(5, || w.launch_log().contains("watchdog done")),
+            "{name}"
+        );
+        assert_eq!(w.run_scratch(), Vec::<String>::new(), "{name}");
+    }
+}
+
+/// A wrapper that has left while the game plays on: the launcher keeps
+/// waiting, and the footer comes when the game has gone.
+#[test]
+fn a_wrapper_that_leaves_does_not_end_the_run() {
+    let Some(w) = World::launcher("wrap-daemon", false) else {
+        return;
+    };
+    w.wrapped(WRAP_DAEMON, &[]);
+    let log = w.wrap_log();
+    let t0 = std::time::Instant::now();
+    let out = w.launch(
+        &[
+            ("FAKE_GAME_SLEEP", "4"),
+            ("FAKE_WRAP_LOG", log.to_str().unwrap()),
+        ],
+        &[],
+    );
+    assert!(t0.elapsed().as_secs() >= 4, "{:?}", t0.elapsed());
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(w.game_runs(), 1);
+    assert!(prefix_procs(&w).is_empty());
+    let l = w.launch_log();
+    assert!(l.contains("wrapper fake-wrap exited 0"), "{l}");
+    assert!(l.contains("prefix idle"), "{l}");
+    assert!(!l.contains("never ran the game"), "{l}");
+}
+
+/// gamescope's shape: its exit code is the run's, whatever the game's was
+/// (design 18 §7.8), and a short run still explains itself.
+#[test]
+fn the_runs_exit_code_is_the_wrappers() {
+    let Some(w) = World::launcher("wrap-code", false) else {
+        return;
+    };
+    w.wrapped(WRAP_PARENT, &[]);
+    let log = w.wrap_log();
+    let stub = w.dialog_stub(&["Close"]);
+    let out = w.launch(
+        &[
+            ("FAKE_GAME_EXIT", "7"),
+            ("FAKE_WRAP_LOG", log.to_str().unwrap()),
+            ("GOGO_LAUNCHER_DIALOG", stub.to_str().unwrap()),
+        ],
+        &[],
+    );
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(w.runs().pop().unwrap().contains("# exit: 0\n"));
+    let d = w.dialogs().pop().unwrap();
+    assert!(d.contains("on the "), "{d}");
+    assert!(d.contains(", under fake-wrap."), "{d}");
+}
+
+#[test]
+fn a_wrapper_that_never_runs_the_game_says_so_and_offers_no_renderer() {
+    for (name, body, want) in [
+        ("fails", "echo 'wrap: no display' >&2\nexit 3\n", 3),
+        ("quits", "exit 0\n", 1),
+    ] {
+        let Some(w) = World::launcher(&format!("wrap-never-{name}"), false) else {
+            return;
+        };
+        w.wrapped(body, &[]);
+        let log = w.wrap_log();
+        let stub = w.dialog_stub(&["OK"]);
+        let out = w.launch(
+            &[
+                ("FAKE_WRAP_LOG", log.to_str().unwrap()),
+                ("GOGO_LAUNCHER_DIALOG", stub.to_str().unwrap()),
+            ],
+            &[],
+        );
+        assert_eq!(out.status.code(), Some(want), "{name}: {out:?}");
+        assert_eq!(w.game_runs(), 0, "{name}");
+        let run = w.runs().pop().unwrap();
+        assert!(
+            run.contains(&format!("# exit: {want} (wrapper never ran the game)\n")),
+            "{name}: {run}"
+        );
+        let dialogs = w.dialogs();
+        assert_eq!(dialogs.len(), 1, "{name}: {dialogs:?}");
+        assert!(
+            dialogs[0].contains("before it started the game"),
+            "{name}: {dialogs:?}"
+        );
+        assert!(
+            dialogs[0].contains(&format!("wrapper {ID} --clear")),
+            "{name}: {dialogs:?}"
+        );
+        assert!(
+            !dialogs[0].contains("Try next renderer"),
+            "{name}: {dialogs:?}"
+        );
+        assert_eq!(w.run_scratch(), Vec::<String>::new(), "{name}");
+    }
+    // A wrapper the launch can't find stops it before anything starts.
+    let Some(w) = World::launcher("wrap-missing", false) else {
+        return;
+    };
+    w.wrapped(WRAP_EXEC, &[]);
+    std::fs::remove_file(w.root.join("bin/fake-wrap")).unwrap();
+    let stub = w.dialog_stub(&["OK"]);
+    let out = w.launch(&[("GOGO_LAUNCHER_DIALOG", stub.to_str().unwrap())], &[]);
+    assert_eq!(out.status.code(), Some(127), "{out:?}");
+    assert_eq!(w.game_runs(), 0);
+    let run = w.runs().pop().unwrap();
+    assert!(run.contains("# exit: 127 (wrapper missing)\n"), "{run}");
+    let d = w.dialogs().pop().unwrap();
+    assert!(d.contains(&format!("wrapper {ID} --clear")), "{d}");
+}
+
+/// The setting from `envargs` to `doctor` and the catalogue: pending, applied,
+/// shown, the program looked for, a hand-written refusal, cleared.
+#[test]
+fn the_wrapper_shows_up_where_a_player_looks() {
+    use gogo::linuxapp::catalogue::{self, Applies};
+    use gogo::linuxapp::envargs;
+    use gogo::macapp::compat::Layer;
+    use gogo::macapp::doctor::Level;
+    let Some(w) = World::launcher("wrap-shown", false) else {
+        return;
+    };
+    let launch_finding = |h: &gogo::linuxapp::doctor::Host| {
+        let r = gogo::linuxapp::doctor::doctor(ID, h).unwrap();
+        r.findings
+            .into_iter()
+            .find(|f| f.check == "launch")
+            .unwrap()
+    };
+    assert_eq!(envargs::wrapper_report(ID).unwrap().wrapper, None);
+    assert!(envargs::env_report(ID, false).unwrap().wrapper.is_none());
+
+    // Refused: nothing written.
+    for bad in [
+        vec![],
+        vec!["gamescope -f --".to_string()],
+        vec!["a\nb".to_string()],
+    ] {
+        assert!(envargs::set_wrapper(ID, Some(bad)).is_err());
+    }
+    let l4 = w.home.join(format!("compat/{ID}.toml"));
+    assert!(!l4.exists());
+
+    let words: Vec<String> = ["gamemoderun", "gamescope", "-f", "--"]
+        .map(String::from)
+        .to_vec();
+    let missing = envargs::set_wrapper(ID, Some(vec!["gogo-no-such-tool".into()])).unwrap();
+    assert!(
+        missing.warnings.iter().any(|w| w.contains("isn't on PATH")),
+        "{:?}",
+        missing.warnings
+    );
+    let out = envargs::set_wrapper(ID, Some(words.clone())).unwrap();
+    assert_eq!(out.changes[0].key, "wrapper");
+    assert!(out.built);
+    assert!(
+        std::fs::read_to_string(&l4)
+            .unwrap()
+            .contains("[platforms.linux]")
+    );
+    let v = envargs::env_report(ID, false).unwrap().wrapper.unwrap();
+    assert!(v.pending);
+    assert_eq!(v.words, words);
+    assert_eq!(v.layer, Some(Layer::User));
+
+    // Applied by setup; nothing else in launch.conf cares.
+    setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
+    assert!(
+        !envargs::wrapper_report(ID)
+            .unwrap()
+            .wrapper
+            .unwrap()
+            .pending
+    );
+    assert!(
+        w.conf()
+            .contains("WRAPPER=('gamemoderun' 'gamescope' '-f' '--')\n"),
+        "{}",
+        w.conf()
+    );
+
+    // Doctor looks where the launch will: not on PATH warns, on PATH doesn't.
+    let mut host = doctor_host(&w, &[("radeon", 64)]);
+    let f = launch_finding(&host);
+    assert_eq!(f.level, Level::Warn, "{f:?}");
+    assert!(
+        f.message.contains("wrapper gamemoderun gamescope -f --"),
+        "{}",
+        f.message
+    );
+    assert!(
+        f.message.contains("`gamemoderun` isn't on PATH"),
+        "{}",
+        f.message
+    );
+
+    // The catalogue: `no` for the missing tool; `yes` and shown once there.
+    let on_host = host.root.join("host-bin");
+    std::fs::create_dir_all(&on_host).unwrap();
+    for t in ["gamescope", "gamemoderun"] {
+        std::fs::write(on_host.join(t), "#!/bin/sh\n").unwrap();
+        chmod_x(&on_host.join(t));
+    }
+    let r = catalogue::report(ID, &host, false).unwrap();
+    assert!(
+        matches!(&r.find("gamescope").unwrap().applies, Applies::No { why } if why.contains("isn't on PATH")),
+        "{:?}",
+        r.find("gamescope")
+    );
+    host.env = Box::new(|k| {
+        if k == "PATH" {
+            Some("/host-bin".into())
+        } else {
+            (!k.starts_with("VK_") && k != "XDG_DATA_DIRS")
+                .then(|| std::env::var_os(k))
+                .flatten()
+        }
+    });
+    let found = host;
+    assert_eq!(launch_finding(&found).level, Level::Ok);
+    let r = catalogue::report(ID, &found, false).unwrap();
+    for name in ["gamescope", "gamemoderun"] {
+        let e = r.find(name).unwrap();
+        assert_eq!(e.applies, Applies::Yes, "{name}");
+        assert_eq!(e.active.len(), 1, "{name}");
+        assert_eq!(e.active[0].key, "wrapper");
+        assert_eq!(e.active[0].value, "gamemoderun gamescope -f --");
+    }
+
+    // A wrapper hand-written as a shell string: setup runs the game without
+    // it and says so, as does doctor.
+    std::fs::write(&l4, "[platforms.linux]\nwrapper = [\"gamescope -f --\"]\n").unwrap();
+    let out = setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.contains("running the game without it")),
+        "{:?}",
+        out.warnings
+    );
+    assert!(!w.conf().contains("WRAPPER="), "{}", w.conf());
+    let f = launch_finding(&found);
+    assert_eq!(f.level, Level::Warn, "{f:?}");
+    assert!(f.message.contains("setup skips it"), "{}", f.message);
+
+    // Cleared: gone from the file; pending until setup drops it.
+    envargs::set_wrapper(ID, Some(words)).unwrap();
+    setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
+    envargs::set_wrapper(ID, None).unwrap();
+    assert!(!std::fs::read_to_string(&l4).unwrap().contains("wrapper"));
+    let v = envargs::wrapper_report(ID).unwrap().wrapper.unwrap();
+    assert!(v.pending && v.words.is_empty());
+    setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
+    assert!(!w.conf().contains("WRAPPER="));
+    assert_eq!(envargs::wrapper_report(ID).unwrap().wrapper, None);
 }

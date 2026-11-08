@@ -387,6 +387,9 @@ gogo linux-app env unset 1423049311 MANGOHUD
 gogo linux-app args 1423049311 -- --launcher-skip -skipStartScreen
 gogo linux-app args 1423049311                             # what the exe gets, and from where
 gogo linux-app args 1423049311 --clear
+gogo linux-app wrapper 1423049311 -- gamescope -f --        # runs outside umu-run; one word per argument, no shell
+gogo linux-app wrapper 1423049311 -- gamemoderun
+gogo linux-app wrapper 1423049311 --clear
 ```
 
 `env set` refuses what the launcher sets itself (`WINEPREFIX`, `GAMEID`, `STORE`,

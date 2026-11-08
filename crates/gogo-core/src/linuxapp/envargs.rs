@@ -1,11 +1,13 @@
-//! Per-game env vars and launch args on the Linux lane (#234, design 18
-//! §7.6): `gogo linux-app env list|set|unset` and `gogo linux-app args`.
+//! Per-game env vars, launch args and wrapper on the Linux lane (#234, #271,
+//! design 18 §7.6, §7.8): `gogo linux-app env list|set|unset`,
+//! `gogo linux-app args` and `gogo linux-app wrapper`.
 //!
-//! Both live in the game's L4 file under `[platforms.linux]`: `env` (a
-//! table, the key the schema always had) and `extra_args` (appended after
-//! the game's own args; `args` replaces those). Nothing here runs setup:
-//! the launch stamp covers the L4 file, so the next launch sees it stale,
-//! runs setup, and `launch.conf` gets the new `ENV` / `ARGS`.
+//! All live in the game's L4 file under `[platforms.linux]`: `env` (a
+//! table, the key the schema always had), `extra_args` (appended after
+//! the game's own args; `args` replaces those) and `wrapper` (the command
+//! the game runs under). Nothing here runs setup: the launch stamp covers
+//! the L4 file, so the next launch sees it stale, runs setup, and
+//! `launch.conf` gets the new `ENV` / `ARGS` / `WRAPPER`.
 //!
 //! What wins at launch, lowest first (the launcher's `run_game`):
 //! the environment `launch.sh` starts with; gogo's default
@@ -65,6 +67,78 @@ pub fn check_value(what: &str, v: &str) -> Result<(), String> {
     } else {
         Ok(())
     }
+}
+
+/// The word of a wrapper that is the program to run.
+pub fn wrapper_program(words: &[String]) -> Option<&str> {
+    words.first().map(String::as_str)
+}
+
+/// A word's program name: `/x/gamescope` and `gamescope` are both `gamescope`.
+fn base_name(word: &str) -> &str {
+    word.rsplit('/').next().unwrap_or(word)
+}
+
+/// Does the wrapper run `name` anywhere in its chain? (`gamemoderun gamescope
+/// -f --` runs both; a word after `--` isn't gamescope's own option.)
+pub fn wrapper_runs(words: &[String], name: &str) -> bool {
+    words.iter().any(|w| base_name(w) == name)
+}
+
+/// Can the launcher run `words` as a wrapper (design 18 §7.8)? Argv form
+/// only: a program, a bare name for `PATH` or an absolute path, and its
+/// words. The warnings are for what's allowed but likely wrong.
+pub fn check_wrapper(words: &[String]) -> Result<Vec<String>, String> {
+    let Some(program) = wrapper_program(words) else {
+        return Err("a wrapper has at least a program (`--clear` drops it)".into());
+    };
+    for w in words {
+        check_value(&format!("wrapper word {w:?}"), w)?;
+        if w.contains("%command%") {
+            return Err(format!(
+                "{w:?} is Steam's: gogo puts the game's command after the wrapper's last word"
+            ));
+        }
+    }
+    if program.is_empty() {
+        return Err("the wrapper's program is empty".into());
+    }
+    if program.starts_with('-') {
+        return Err(format!(
+            "the wrapper's first word is its program, and {program:?} looks like an option"
+        ));
+    }
+    if !program.starts_with('/') {
+        if program.contains('/') {
+            return Err(format!(
+                "the wrapper's program {program:?} is relative: a bare name for PATH or an \
+                 absolute path"
+            ));
+        }
+        if program.contains(char::is_whitespace) {
+            return Err(format!(
+                "{program:?} is a shell string: a wrapper is one word per argument, not run \
+                 through a shell"
+            ));
+        }
+        if program.contains('=') {
+            return Err(format!(
+                "{program:?} is a shell assignment: use `env {program} …`, or `linux-app env \
+                 set` for what the game should see"
+            ));
+        }
+    }
+    let mut warnings = Vec::new();
+    if let Some(at) = words.iter().position(|w| base_name(w) == "gamescope")
+        && !words[at..].iter().any(|w| w == "--")
+    {
+        warnings.push(
+            "gamescope's own options end at `--`, and the game's command comes after this \
+             wrapper's last word: this usually ends in `--`"
+                .to_string(),
+        );
+    }
+    Ok(warnings)
 }
 
 /// What gogo does with a key the user sets.
@@ -230,6 +304,55 @@ pub struct EnvLine {
     pub state: EnvState,
 }
 
+/// The command the game runs under, set and as last applied (#271).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WrapperView {
+    /// What the next launch's setup writes; empty: none. A hand-written
+    /// wrapper [`check_wrapper`] refuses isn't here (setup skips it).
+    pub words: Vec<String>,
+    /// The layer `words` come from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layer: Option<Layer>,
+    /// `launch.conf`'s `WRAPPER`: what the last setup wrote.
+    pub applied: Vec<String>,
+    /// `words` isn't `applied` yet: the next launch's setup writes it.
+    pub pending: bool,
+}
+
+/// [`WrapperView`] and why a hand-written one doesn't count; `None` when no
+/// layer sets one and `launch.conf` has none.
+fn wrapper_view(eff: &Effective, conf: Option<&ConfValues>) -> (Option<WrapperView>, Vec<String>) {
+    let mut warnings = Vec::new();
+    let set = eff
+        .wrapper
+        .as_ref()
+        .filter(|w| match check_wrapper(&w.value) {
+            Ok(_) => true,
+            Err(why) => {
+                warnings.push(format!(
+                    "wrapper {:?} in the {}: {why}; setup skips it",
+                    w.value,
+                    w.layer.describe()
+                ));
+                false
+            }
+        });
+    let applied = conf
+        .and_then(|c| c.arrays.get("WRAPPER").cloned())
+        .unwrap_or_default();
+    if set.is_none() && applied.is_empty() {
+        return (None, warnings);
+    }
+    let words = set.map(|w| w.value.clone()).unwrap_or_default();
+    let view = WrapperView {
+        pending: conf.is_some() && words != applied,
+        layer: set.map(|w| w.layer),
+        words,
+        applied,
+    };
+    (Some(view), warnings)
+}
+
 /// `gogo linux-app env list <gogid>`.
 #[derive(Debug, Clone, Serialize)]
 pub struct EnvReport {
@@ -239,6 +362,10 @@ pub struct EnvReport {
     /// By key; for each key the one that applies first, then the ones it
     /// beats.
     pub lines: Vec<EnvLine>,
+    /// The command the game runs under, when there is one. Not an env var,
+    /// but "what's active" asks about it too.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wrapper: Option<WrapperView>,
     pub warnings: Vec<String>,
 }
 
@@ -368,6 +495,8 @@ pub fn env_report(gogid: &str, reveal: bool) -> Result<EnvReport, MacAppError> {
     }
 
     let mut warnings = r.warnings.clone();
+    let (wrapper, wrapper_warnings) = wrapper_view(&r.effective, conf.as_ref());
+    warnings.extend(wrapper_warnings);
     if conf.is_none() && r.built {
         warnings.push(format!(
             "{gogid} has no launch.conf yet: `gogo linux-app setup {gogid}` writes it"
@@ -397,6 +526,34 @@ pub fn env_report(gogid: &str, reveal: bool) -> Result<EnvReport, MacAppError> {
         user_file: r.user_file,
         built: r.built,
         lines,
+        wrapper,
+        warnings,
+    })
+}
+
+/// `gogo linux-app wrapper <gogid>`.
+#[derive(Debug, Clone, Serialize)]
+pub struct WrapperReport {
+    pub gogid: String,
+    pub user_file: PathBuf,
+    pub built: bool,
+    /// `None`: no wrapper set or applied.
+    pub wrapper: Option<WrapperView>,
+    pub warnings: Vec<String>,
+}
+
+/// The command the game runs under. Reads only.
+pub fn wrapper_report(gogid: &str) -> Result<WrapperReport, MacAppError> {
+    let r = manage::compat(gogid)?;
+    let dirs = GameDirs::for_game(gogid)?;
+    let conf = ConfValues::read(&dirs.launch_conf).ok();
+    let (wrapper, mut warnings) = wrapper_view(&r.effective, conf.as_ref());
+    warnings.extend(r.warnings);
+    Ok(WrapperReport {
+        gogid: gogid.to_string(),
+        user_file: r.user_file,
+        built: r.built,
+        wrapper,
         warnings,
     })
 }
@@ -623,6 +780,41 @@ pub fn set_args(gogid: &str, args: Option<Vec<String>>) -> Result<EditOutcome, M
     })
 }
 
+/// `gogo linux-app wrapper <gogid> -- <words…>` (`Some`) or `--clear`
+/// (`None`): L4's `[platforms.linux] wrapper`. A refused one writes nothing.
+pub fn set_wrapper(gogid: &str, words: Option<Vec<String>>) -> Result<EditOutcome, MacAppError> {
+    compat::validate_gogid(gogid)?;
+    let mut warnings = match &words {
+        Some(w) => check_wrapper(w).map_err(|r| refused(gogid, r))?,
+        None => Vec::new(),
+    };
+    let changes = compat::edit_user_platform_for(gogid, &[UserEdit::Wrapper(words)], Os::Linux)?;
+    if let Ok(r) = wrapper_report(gogid)
+        && let Some(v) = r.wrapper
+        && let (Some(program), Some(layer)) = (wrapper_program(&v.words), v.layer)
+    {
+        if !super::doctor::Host::detect().finds_program(program) {
+            warnings.push(format!(
+                "`{program}` isn't on PATH here: a launch that doesn't find it stops and says so"
+            ));
+        }
+        if layer != Layer::User {
+            warnings.push(format!(
+                "the game still runs under {} (from the {})",
+                shell_words(&v.words),
+                layer.describe()
+            ));
+        }
+    }
+    Ok(EditOutcome {
+        gogid: gogid.to_string(),
+        file: compat::user_path(gogid),
+        changes,
+        warnings,
+        built: built(gogid)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -643,6 +835,88 @@ mod tests {
         assert!(check_value("v", "").is_ok());
         assert!(check_value("v", "a\nb").is_err());
         assert!(check_value("v", "a\0b").is_err());
+    }
+
+    #[test]
+    fn wrappers_are_argv_form() {
+        let w = |words: &[&str]| {
+            check_wrapper(&words.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+        };
+        for ok in [
+            &["gamemoderun"][..],
+            &["gamescope", "-f", "--"],
+            &["gamemoderun", "gamescope", "-w", "1920", "--"],
+            &["gamescope", "--", "gamemoderun"],
+            &["env", "A=b c", "gamemoderun"],
+            &["/opt/my tools/wrap", "a b", "'q'", "$HOME"],
+        ] {
+            assert_eq!(w(ok), Ok(vec![]), "{ok:?}");
+        }
+        for bad in [
+            &[][..],
+            &[""],
+            &["-f"],
+            &["gamescope -f --"],
+            &["./wrap"],
+            &["tools/wrap"],
+            &["DXVK_HUD=1", "gamemoderun"],
+            &["gamescope", "--", "%command%"],
+            &["gamescope", "a\nb"],
+            &["gamescope", "a\rb"],
+            &["gamescope", "a\0b"],
+        ] {
+            assert!(w(bad).is_err(), "{bad:?}");
+        }
+        for odd in [&["gamescope", "-f"][..], &["gamemoderun", "/x/gamescope"]] {
+            let warned = w(odd).unwrap();
+            assert_eq!(warned.len(), 1, "{odd:?}");
+            assert!(warned[0].contains("`--`"), "{warned:?}");
+        }
+    }
+
+    #[test]
+    fn wrapper_chains_name_what_they_run() {
+        let words: Vec<String> = ["gamemoderun", "/x/gamescope", "-f", "--"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(wrapper_program(&words), Some("gamemoderun"));
+        assert!(wrapper_runs(&words, "gamescope"));
+        assert!(wrapper_runs(&words, "gamemoderun"));
+        assert!(!wrapper_runs(&words, "mangohud"));
+    }
+
+    #[test]
+    fn the_view_says_what_the_next_setup_changes() {
+        let conf = |text: &str| ConfValues::parse(text);
+        let mut eff = Effective::default();
+        assert_eq!(wrapper_view(&eff, None), (None, vec![]));
+        assert_eq!(wrapper_view(&eff, Some(&conf("ARGS=()\n"))), (None, vec![]));
+        eff.wrapper = Some(Sourced {
+            value: vec!["gamemoderun".into()],
+            layer: Layer::User,
+        });
+        // Set, not built: nothing pending. Built with another: pending.
+        let (v, _) = wrapper_view(&eff, None);
+        assert!(!v.unwrap().pending);
+        let (v, _) = wrapper_view(&eff, Some(&conf("ARGS=()\n")));
+        let v = v.unwrap();
+        assert!(v.pending);
+        assert_eq!(v.layer, Some(Layer::User));
+        let (v, _) = wrapper_view(&eff, Some(&conf("WRAPPER=('gamemoderun')\n")));
+        assert!(!v.unwrap().pending);
+        // Dropped, launch.conf still has it.
+        eff.wrapper = None;
+        let (v, _) = wrapper_view(&eff, Some(&conf("WRAPPER=('gamemoderun')\n")));
+        let v = v.unwrap();
+        assert!(v.pending && v.words.is_empty() && v.layer.is_none());
+        // Hand-written and refused: setup skips it, and that's said.
+        eff.wrapper = Some(Sourced {
+            value: vec!["gamescope -f --".into()],
+            layer: Layer::User,
+        });
+        let (v, w) = wrapper_view(&eff, None);
+        assert_eq!(v, None);
+        assert!(w[0].contains("setup skips it"), "{w:?}");
     }
 
     #[test]

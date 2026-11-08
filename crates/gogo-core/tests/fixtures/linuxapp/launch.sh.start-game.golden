@@ -1,0 +1,41 @@
+# The game's environment (§7.2 step 4), in umu-run's process only. No host
+# drives (s:, x: -> $HOME, ...; setup::GAME_DRIVE_OFF), which the L4 env can
+# undo. The L4 and fix env next: WINEPREFIX (R7), GAMEID, STORE and
+# PROTONPATH are gogo's and come last.
+run_game() {
+    local pair
+    export PROTON_SET_GAME_DRIVE=0
+    for pair in ${ENV[@]+"${ENV[@]}"}; do export "${pair?}"; done
+    if [ -n "$DLL_OVERRIDES" ]; then
+        export WINEDLLOVERRIDES="$DLL_OVERRIDES${WINEDLLOVERRIDES:+;$WINEDLLOVERRIDES}"
+    fi
+    if [ "$PROTONFIXES" = 0 ]; then export PROTONFIXES_DISABLE=1; fi
+    if [ -n "$UMU_FOLDERS" ]; then export UMU_FOLDERS_PATH="$UMU_FOLDERS"; fi
+    export WINEPREFIX="$PREFIX_ABS" GAMEID="$UMU_ID" STORE=gog PROTONPATH="$PROTON_ABS"
+    if [ -n "$UMU_PYTHON" ]; then
+        exec "$UMU_PYTHON" "$UMU_RUN_ABS" "$EXE_ABS" ${ARGS[@]+"${ARGS[@]}"} "$@"
+    fi
+    exec "$UMU_RUN_ABS" "$EXE_ABS" ${ARGS[@]+"${ARGS[@]}"} "$@"
+}
+# What umu-run's subshell runs. With a wrapper (design 18 §7.8) it goes outside
+# umu-run and sees the environment this launcher started with: the game's goes
+# on after it, in this script's second run (below), whose argv says where to
+# say it got there. The wrapper's environment reaches umu-run underneath it:
+# gamescope's DISPLAY, gamemoderun's LD_PRELOAD.
+start_game() {
+    if [ "${#WRAPPER[@]}" -gt 0 ]; then
+        exec "${WRAPPER[@]}" "$SELF" --gogo-run-game "$GAME_MARK" "$@"
+    fi
+    run_game "$@"
+}
+# The wrapper running this script for the game's step: nothing else of the
+# launcher happens here. The mark holds this pid, which umu-run keeps.
+if [ "${1:-}" = --gogo-run-game ] && [ "$#" -ge 2 ]; then
+    GAME_MARK="$2"
+    shift 2
+    load_conf
+    cd "$WORKDIR_ABS" || exit 1
+    printf '%s' "$$" >"$GAME_MARK.tmp" && mv -f "$GAME_MARK.tmp" "$GAME_MARK"
+    run_game "$@"
+fi
+

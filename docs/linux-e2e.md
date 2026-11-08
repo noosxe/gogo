@@ -869,6 +869,7 @@ DXVK_LOG_LEVEL = "info"
 
 [override]                       # games only: into the game's override file, through gogo
 extra_args = ["-skipStartScreen"] #   (`linux-app args <gogid> -- …`), before the launch
+wrapper = ["gamemoderun"]        #   (`linux-app wrapper <gogid> -- …`; #271)
 [override.env]                   #   (`linux-app env set <gogid> K=V…`)
 PROTON_DLSS_INDICATOR = "1"
 
@@ -916,11 +917,20 @@ relaunch = true                  # the game has quit by itself: launch it again,
 ```
 
 `[env]` is the environment `launch.sh` starts with, so `launch.conf`'s own `ENV` beats it.
-`[override]` is what a player sets (#234): the harness runs `gogo linux-app env set` and
-`gogo linux-app args` with the run's scratch `GOGO_HOME` right before the launch (check
+`[override]` is what a player sets (#234, #271): the harness runs `gogo linux-app env set`,
+`gogo linux-app args` and `gogo linux-app wrapper` with the run's scratch `GOGO_HOME` right
+before the launch (check
 `override`), so `launch.sh` sees a stale stamp and runs setup in the sandbox, and the
 game gets them through `launch.conf`. The installed base a `--reuse-install` run copies is
 never touched. A [live session](#live-sessions) sets them with `live start --env` and `--arg`.
+A wrapper's program has to be in the sandbox: the harness's tools (`env` is one) or a store
+path. A store path is how to try a tool the harness doesn't carry without changing every base's
+key: `nix build --inputs-from . nixpkgs#gamescope`, the flake's pin, and that path in a manifest
+under `target/`. Real gamescope runs here only as
+`["env", "SDL_VIDEODRIVER=x11", "<store path>/bin/gamescope", "--backend", "sdl", …, "--"]`, on
+`--gpu`: the sandbox has render nodes only, so `--backend wayland` (no Wayland surface for SDL)
+and `--backend headless` (`physical device has no primary node`) both fail to start.
+`e2e/wrapper-1741027632.toml` is the trivial case, with `env` as the wrapper.
 
 `key` and `type` go through one virtual keyboard with a standard `pc105`/`us` keymap and
 real evdev keycodes, so a game sees what a USB keyboard would send. `key` takes the level-1
@@ -979,7 +989,7 @@ all do the same thing. Exactly one of two conditions:
 
 | Check | Fails when | Would have caught |
 |---|---|---|
-| `override` | with `[override]`: a `gogo linux-app env set` / `args` call failed (the game isn't launched) | a refused key, a gogo without #234 |
+| `override` | with `[override]`: a `gogo linux-app env set` / `args` / `wrapper` call failed (the game isn't launched) | a refused key, a gogo without #234 |
 | `window` | no window in `wait_secs`, or the game exited first | DDrawCompat's exit 9 in #199 |
 | `settled` | `wait_settled` timed out | a game stuck in a video |
 | `not_black_<shot>` | under 1% of the window's pixels are above level 16 | a black screen |

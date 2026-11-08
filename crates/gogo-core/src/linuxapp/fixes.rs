@@ -486,6 +486,9 @@ fn gogo_items(e: &Effective) -> Vec<GogoItem> {
     if let Some(s) = &e.extra_args {
         plain(format!("extra_args = {:?}", s.value), s.layer);
     }
+    if let Some(s) = &e.wrapper {
+        plain(format!("wrapper = {:?}", s.value), s.layer);
+    }
     if let Some(s) = &e.replace_command {
         plain(
             format!("replace_command {:?} -> {:?}", s.value.from, s.value.to),

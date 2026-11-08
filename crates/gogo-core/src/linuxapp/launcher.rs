@@ -9,7 +9,9 @@
 //! stamp is stale, the prefix is gone, umu's Python is gone or the Proton
 //! build failed its check (§2.2), then runs the game through umu-run and
 //! stays its parent: run logs, teardown through `/proc/<pid>/environ`, the
-//! #103 watchdog and the early-exit dialog (§7.3, §7.4) as on the Mac.
+//! #103 watchdog and the early-exit dialog (§7.3, §7.4) as on the Mac. A
+//! game with a wrapper (§7.8) has it between the two: the launcher starts
+//! the wrapper, and the wrapper starts this script again for the game's step.
 
 use std::path::{Path, PathBuf};
 
@@ -21,7 +23,11 @@ use crate::macapp::launch::GameDirs;
 /// Bumped with every change to [`TEMPLATE`] that matters to a game set up
 /// before it. Setup rewrites `launch.sh` whenever its bytes differ, so this
 /// is for people: the run log header and `launch.log` name it.
-pub const LAUNCHER_VERSION: u32 = 4;
+pub const LAUNCHER_VERSION: u32 = 5;
+
+/// `launch.sh`'s first word when a wrapper runs it for the game's own step
+/// (design 18 §7.8): the game's environment, then umu-run.
+pub const RUN_GAME_ARG: &str = "--gogo-run-game";
 
 /// `games/<gogid>/icon.png`.
 pub const ICON: &str = "icon.png";
@@ -45,6 +51,7 @@ pub fn launch_sh() -> String {
             "@GAME_DRIVE_OFF@",
             &format!("{}={}", setup::GAME_DRIVE_OFF.0, setup::GAME_DRIVE_OFF.1),
         )
+        .replace("@RUN_GAME_ARG@", RUN_GAME_ARG)
 }
 
 /// The `LAUNCHER_VERSION=` a `launch.sh` carries.
@@ -246,7 +253,7 @@ load_conf() {
     UMU_ID="" STAMP="" UMU_RUN="" UMU_PYTHON="" PROTON_DIR="" PROTON_VERSION=""
     PROTON_SHA="" PREFIX="" WORKDIR="" EXE="" DLL_OVERRIDES=""
     RENDERER="" PROTONFIXES="1" UMU_FOLDERS="" GOGO_PATH="" DATA_ROOT=""
-    ARGS=() ENV=()
+    ARGS=() ENV=() WRAPPER=()
     # shellcheck source=/dev/null
     source "$HERE/launch.conf"
     # O7: relative paths are under the data root launch.conf names, else the
@@ -341,6 +348,47 @@ run_setup() {
     load_conf
 }
 
+# The game's environment (§7.2 step 4), in umu-run's process only. No host
+# drives (s:, x: -> $HOME, ...; setup::GAME_DRIVE_OFF), which the L4 env can
+# undo. The L4 and fix env next: WINEPREFIX (R7), GAMEID, STORE and
+# PROTONPATH are gogo's and come last.
+run_game() {
+    local pair
+    export @GAME_DRIVE_OFF@
+    for pair in ${ENV[@]+"${ENV[@]}"}; do export "${pair?}"; done
+    if [ -n "$DLL_OVERRIDES" ]; then
+        export WINEDLLOVERRIDES="$DLL_OVERRIDES${WINEDLLOVERRIDES:+;$WINEDLLOVERRIDES}"
+    fi
+    if [ "$PROTONFIXES" = 0 ]; then export PROTONFIXES_DISABLE=1; fi
+    if [ -n "$UMU_FOLDERS" ]; then export UMU_FOLDERS_PATH="$UMU_FOLDERS"; fi
+    export WINEPREFIX="$PREFIX_ABS" GAMEID="$UMU_ID" STORE=gog PROTONPATH="$PROTON_ABS"
+    if [ -n "$UMU_PYTHON" ]; then
+        exec "$UMU_PYTHON" "$UMU_RUN_ABS" "$EXE_ABS" ${ARGS[@]+"${ARGS[@]}"} "$@"
+    fi
+    exec "$UMU_RUN_ABS" "$EXE_ABS" ${ARGS[@]+"${ARGS[@]}"} "$@"
+}
+# What umu-run's subshell runs. With a wrapper (design 18 §7.8) it goes outside
+# umu-run and sees the environment this launcher started with: the game's goes
+# on after it, in this script's second run (below), whose argv says where to
+# say it got there. The wrapper's environment reaches umu-run underneath it:
+# gamescope's DISPLAY, gamemoderun's LD_PRELOAD.
+start_game() {
+    if [ "${#WRAPPER[@]}" -gt 0 ]; then
+        exec "${WRAPPER[@]}" "$SELF" @RUN_GAME_ARG@ "$GAME_MARK" "$@"
+    fi
+    run_game "$@"
+}
+# The wrapper running this script for the game's step: nothing else of the
+# launcher happens here. The mark holds this pid, which umu-run keeps.
+if [ "${1:-}" = @RUN_GAME_ARG@ ] && [ "$#" -ge 2 ]; then
+    GAME_MARK="$2"
+    shift 2
+    load_conf
+    cd "$WORKDIR_ABS" || exit 1
+    printf '%s' "$$" >"$GAME_MARK.tmp" && mv -f "$GAME_MARK.tmp" "$GAME_MARK"
+    run_game "$@"
+fi
+
 # Design 16 Open 1: nothing to run without the config setup writes.
 if [ ! -f "$HERE/launch.conf" ]; then
     log "no launch.conf in $HERE: not launching"
@@ -428,6 +476,7 @@ start_run_log() {
         printf '# runtime_dir: %s\n' "$PROTON_DIR"
         printf '# umu: %s\n' "$(umu_name)"
         printf '# umu_id: %s\n' "$UMU_ID"
+        if [ "${#WRAPPER[@]}" -gt 0 ]; then printf '# wrapper: %s\n' "${WRAPPER[*]}"; fi
         printf '# renderer: %s\n' "$RENDERER"
         printf '# protonfix: %s\n' "$(state_val protonfix)"
         printf '# protonfixes: %s\n' "$([ "$PROTONFIXES" = 0 ] && echo off || echo on)"
@@ -512,6 +561,10 @@ if [ -n "$why" ]; then
     not_runnable "$why" "umu missing" \
         "umu-launcher, which runs this game, is missing: $why. Run: gogo linux-app setup $GOGID"
 fi
+if [ "${#WRAPPER[@]}" -gt 0 ] && ! has "${WRAPPER[0]}"; then
+    not_runnable "wrapper ${WRAPPER[0]} isn't on PATH" "wrapper missing" \
+        "This game runs under ${WRAPPER[0]}, which isn't on this launch's PATH. Install it, or run the game without it: gogo linux-app wrapper $GOGID --clear"
+fi
 cd "$WORKDIR_ABS" 2>/dev/null || {
     log "workdir $WORKDIR_ABS missing"
     alert "The game folder $WORKDIR_ABS is missing. Run: gogo linux-app setup $GOGID"
@@ -570,7 +623,8 @@ close_game() {
     [ -n "$CLOSING" ] && return 0
     CLOSING=1
     [ -n "$WPID" ] || return 0
-    running "$WPID" || return 0
+    # A wrapper may have gone and left the game running.
+    running "$WPID" || [ -n "$(prefix_pids)" ] || return 0
     local t0=$SECONDS bpid="" ws
     ws="$(wineserver_pid)"
     if [ -n "$ws" ]; then
@@ -632,6 +686,12 @@ teardown() {
         log "launcher $other of this game is running: leaving the prefix's other processes"
         sleep 1
     else
+        # A wrapper can take the game out of its process group (§7.8).
+        if [ "${#WRAPPER[@]}" -gt 0 ]; then
+            left="$(prefix_pids)"
+            # shellcheck disable=SC2086
+            if [ -n "$left" ]; then kill -TERM $left 2>/dev/null; fi
+        fi
         for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
             [ -z "$(prefix_pids)" ] && break
             sleep 0.25
@@ -657,6 +717,7 @@ teardown() {
 # teardown spares the processes of a later launch of the same game.
 WATCHDOG=""
 ME_START=""
+GAME_MARK="$LOG_DIR/.run-$$.game"
 LIVE_DIR="$HERE/.launchers"
 # Field 22 of /proc/<pid>/stat (after the parenthesized name): the start
 # time, which a reused pid doesn't share.
@@ -695,6 +756,7 @@ register_launch() {
     mkdir -p "$LIVE_DIR" && printf '%s' "$ME_START" >"$LIVE_DIR/$$"
 }
 unregister_launch() {
+    rm -f "$GAME_MARK" "$GAME_MARK.tmp"
     if [ "$(cat "$LIVE_DIR/$$" 2>/dev/null)" = "$ME_START" ]; then rm -f "$LIVE_DIR/$$"; fi
 }
 start_watchdog() {
@@ -787,7 +849,7 @@ report() {
     local l
     {
         printf 'gogo launch report: %s (%s)\n' "$TITLE" "$GOGID"
-        grep -E '^# (setup|launcher|runtime|runtime_note|runtime_dir|umu|umu_id|renderer|protonfix|protonfixes|verbs|stamp|os|exe|args|exit|duration):' "$1"
+        grep -E '^# (setup|launcher|runtime|runtime_note|runtime_dir|umu|umu_id|wrapper|renderer|protonfix|protonfixes|verbs|stamp|os|exe|args|exit|duration):' "$1"
         printf -- '--- last 40 log lines ---\n'
         run_output "$1" | tail -n 40
     } | while IFS= read -r l; do printf '%s\n' "${l//"$HOME"/"~"}"; done
@@ -813,7 +875,7 @@ early_exit() {
     log "early exit: code $rc after ${RUN_SECS}s on $RENDERER; next renderer: ${next:-none}"
     copy="$(copy_tool)"
     if [ -n "$copy" ]; then copy_label="Copy report"; else copy_label="Save report"; fi
-    msg="$TITLE quit after ${RUN_SECS}s (exit code $rc) on the $RENDERER renderer.
+    msg="$TITLE quit after ${RUN_SECS}s (exit code $rc) on the $RENDERER renderer${WRAPPER[0]:+, under ${WRAPPER[0]}}.
 
 $(last_errors "$log")
 
@@ -852,39 +914,55 @@ $(last_errors "$log")
     esac
 }
 
-# The game's environment (§7.2 step 4), in umu-run's process only. No host
-# drives (s:, x: -> $HOME, ...; setup::GAME_DRIVE_OFF), which the L4 env can
-# undo. The L4 and fix env next: WINEPREFIX (R7), GAMEID, STORE and
-# PROTONPATH are gogo's and come last.
-run_game() {
-    local pair
-    export @GAME_DRIVE_OFF@
-    for pair in ${ENV[@]+"${ENV[@]}"}; do export "${pair?}"; done
-    if [ -n "$DLL_OVERRIDES" ]; then
-        export WINEDLLOVERRIDES="$DLL_OVERRIDES${WINEDLLOVERRIDES:+;$WINEDLLOVERRIDES}"
-    fi
-    if [ "$PROTONFIXES" = 0 ]; then export PROTONFIXES_DISABLE=1; fi
-    if [ -n "$UMU_FOLDERS" ]; then export UMU_FOLDERS_PATH="$UMU_FOLDERS"; fi
-    export WINEPREFIX="$PREFIX_ABS" GAMEID="$UMU_ID" STORE=gog PROTONPATH="$PROTON_ABS"
-    if [ -n "$UMU_PYTHON" ]; then
-        exec "$UMU_PYTHON" "$UMU_RUN_ABS" "$EXE_ABS" ${ARGS[@]+"${ARGS[@]}"} "$@"
-    fi
-    exec "$UMU_RUN_ABS" "$EXE_ABS" ${ARGS[@]+"${ARGS[@]}"} "$@"
+# The wrapper has exited: did the game's step ever run? A wrapper that forks
+# and leaves is ahead of its child, so give that a moment, and the step, once
+# it has marked its pid, the moment it takes to reach umu-run (which is when
+# prefix_pids can see it). Nothing here waits on a game already gone.
+wrapper_ran_game() {
+    local pid="" i
+    for i in 1 2 3 4 5 6 7 8; do
+        [ -e "$GAME_MARK" ] && break
+        [ -n "$(prefix_pids)" ] && return 0
+        sleep 0.25
+    done
+    [ -e "$GAME_MARK" ] || return 1
+    pid="$(cat "$GAME_MARK" 2>/dev/null)"
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        [ -n "$pid" ] && running "$pid" && [ -z "$(prefix_pids)" ] || break
+        sleep 0.1
+    done
+    return 0
 }
 
 start_run_log ${ARGV[@]+"${ARGV[@]}"}
 log "exec umu-run $EXE_ABS (runtime $RUNTIME, prefix $PREFIX_ABS, log $RUN_LOG)"
+if [ "${#WRAPPER[@]}" -gt 0 ]; then log "under wrapper: ${WRAPPER[*]}"; fi
 # Registered before the game starts: a launcher killed in the gap would leave
 # a game nothing knows about. Only the watchdog needs WPID, so it follows.
 register_launch
 set -m
-( run_game ${ARGV[@]+"${ARGV[@]}"} ) 3>&- 4>&- &
+rm -f "$GAME_MARK" "$GAME_MARK.tmp"
+( start_game ${ARGV[@]+"${ARGV[@]}"} ) 3>&- 4>&- &
 WPID=$!
 set +m
 start_watchdog
 wait "$WPID"
 rc=$?
-log "umu-run exited $rc; waiting for the prefix's processes"
+if [ "${#WRAPPER[@]}" -gt 0 ]; then
+    log "wrapper ${WRAPPER[0]} exited $rc; waiting for the prefix's processes"
+    if ! wrapper_ran_game; then
+        # The renderer has nothing to do with this: no early-exit dialog.
+        log "wrapper ${WRAPPER[0]} never ran the game"
+        stop_watchdog
+        unregister_launch
+        if [ "$rc" -eq 0 ]; then rc=1; fi
+        end_run_log "$rc" "wrapper never ran the game"
+        alert "${WRAPPER[0]}, which this game runs under, exited with code $rc before it started the game. Its output is in $LAST_RUN_LOG. To run the game without it: gogo linux-app wrapper $GOGID --clear"
+        exit "$rc"
+    fi
+else
+    log "umu-run exited $rc; waiting for the prefix's processes"
+fi
 # A launcher exe may have started the real game and exited: wait for the
 # whole prefix (Wine's wineserver included) to finish, not just umu-run.
 if [ -z "$(other_launcher)" ]; then
@@ -940,6 +1018,20 @@ mod tests {
             "{}{}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// How the game starts, with a wrapper and without: one template, and
+    /// `launch.conf`'s `WRAPPER` picks the branch (design 18 §7.8). The
+    /// quoting guarantees of §7.6 live in these lines.
+    #[test]
+    fn the_game_start_matches_the_golden_file() {
+        let s = launch_sh();
+        let at = s.find("# The game's environment (§7.2 step 4)").unwrap();
+        let end = s.find("# Design 16 Open 1:").unwrap();
+        assert_eq!(
+            &s[at..end],
+            include_str!("../../tests/fixtures/linuxapp/launch.sh.start-game.golden")
         );
     }
 
