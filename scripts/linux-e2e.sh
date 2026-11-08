@@ -75,8 +75,12 @@
 #   move_by DX DY | scroll NOTCHES | wait SECS
 #   settle [--max SECS]           until the screen holds still (wait_settled), or
 #                                 "settled": false after SECS (default 30)
-#   checkpoint NAME               mark where it is; restore NAME goes back there:
-#   restore NAME [--wait SECS]    close, roll the disk back, relaunch, replay
+#   checkpoint NAME               mark where it is; restore NAME goes back there.
+#                                 After the game quit by itself: keeps the disk too
+#   restore NAME [--wait SECS]    close, roll the disk back, relaunch, replay (what's
+#                                 past the last kept disk on its path, if any)
+#   relaunch                      launch again on this disk, once the game has quit
+#                                 by itself; refused while it runs
 #   log [game|run|launch|sway|dxvk|vkd3d|proton] [--tail N]
 #   export                        the path so far as a manifest, on stdout
 #   stop                          close the game, check, tear down: the summary
@@ -240,6 +244,7 @@ supervise() { # deadline-epoch (0 = none)
             log "killing the sandbox"
             kill -KILL "$SANDBOX_PID" 2>/dev/null || true
         fi
+        [ -z "${LIVE:-}" ] || live_keep_disk
         sleep 0.2
     done
     local rc=0
@@ -1414,8 +1419,8 @@ cmd_cleanup() {
 # teardown as a run, but the game phase is a series of lives. In each, the
 # driver serves the session's socket ($RUN/live/ctl.sock) instead of running a
 # manifest's steps. A restore ends a life (LIVE_RELAUNCH); the supervisor rolls
-# the disk back to the launch (restore_base) and starts the next, whose driver
-# replays the checkpoint's path. Everything the session records is in
+# the disk back (restore_base: to the launch, or to a disk kept at a clean stop)
+# and starts the next, whose driver replays the checkpoint's path. Everything the session records is in
 # $RESULTS/live/: state.json, session.json (the path and the checkpoints),
 # journal.jsonl (every command), and on the way out manifest.toml, the export.
 # The registry, one file per session beside the cache lock (live/<id>), is how
@@ -1521,10 +1526,11 @@ live_game_phase() { # game-extra-json
     while :; do
         extra="$(jq -c --argjson life "$LIFE" --arg id "$LIVE_ID" --arg dir "$RUN/live" --arg r "$RESULTS/live" \
             --argjson idle "$LIVE_IDLE" --argjson gap "$LIVE_GAP" --argjson match "$LIVE_MATCH" \
-            --argjson prefix "$LIVE_PREFIX" \
+            --argjson prefix "$LIVE_PREFIX" --argjson rollback "${LIVE_ROLLBACK_SECS:-null}" \
             '. + {live:{id:$id, life:$life, dir:$dir, session:($r + "/session.json"),
                         journal:($r + "/journal.jsonl"), state:($r + "/state.json"),
-                        idle_secs:$idle, max_gap:$gap, match_pct:$match, prefix:$prefix}}' <<<"$game_extra")"
+                        idle_secs:$idle, max_gap:$gap, match_pct:$match, prefix:$prefix,
+                        rollback_secs:$rollback}}' <<<"$game_extra")"
         drive_config "$RUN/drive.json" "$extra" "$GPU_LABEL" "$GPU_EXPECT" "${GPU_WANT:-}" "$GPUS_JSON" \
             "${GPU_NODES[@]/#/@n:}" "${GAME_ENV[@]/#/@e:}"
         log "life $LIFE: launching in headless sway ($GPU_LABEL)"
@@ -1534,15 +1540,18 @@ live_game_phase() { # game-extra-json
         rc=0
         supervise "$LIVE_DEADLINE" || rc=$?
         if [ "$rc" = "$LIVE_RELAUNCH" ] && [ -z "$INTERRUPTED" ] && [ -z "${TIMED_OUT:-}" ]; then
-            live_state restoring "life $LIFE ended: rolling the disk back to the launch"
+            live_state restoring "life $LIFE ended: rolling the disk back"
             sweep
             if [ -n "$SWEPT_LEFT" ]; then
                 INFRA_ERROR="a restore couldn't end life $LIFE: $(printf '%s' "$SWEPT_LEFT" | tr '\n' ';')"
                 exit 3
             fi
             live_keep_life "$LIFE"
-            restore_base "$LIVE_DISK" || { INFRA_ERROR="a restore couldn't roll the disk back"; exit 3; }
-            log "life $LIFE: rolled back in $COPY_SECS s"
+            local disk
+            disk="$(live_restore_disk)" || { INFRA_ERROR="a restore named a disk that isn't a kept one: $disk"; exit 3; }
+            restore_base "$disk" || { INFRA_ERROR="a restore couldn't roll the disk back"; exit 3; }
+            LIVE_ROLLBACK_SECS="$COPY_SECS"
+            log "life $LIFE: rolled back to $disk in $COPY_SECS s"
             LIFE=$((LIFE + 1))
             continue
         fi
@@ -1570,11 +1579,50 @@ live_snapshot() {
     log "restores roll back to a snapshot of the launch ($COPY_MODE, $((SECONDS - t0)) s)"
 }
 
+# Where a restore rolls back to (#252): the disk a clean stop kept, as the
+# driver's plan names it in the session, or the launch's.
+live_restore_disk() {
+    local disk
+    disk="$(jq -r '.replay.disk // empty' "$RESULTS/live/session.json")" || return 1
+    if [ -z "$disk" ]; then printf '%s\n' "$LIVE_DISK"; return 0; fi
+    printf '%s\n' "$disk"
+    # Written where the game could reach it, so only a dir of ours fits.
+    [[ "$disk" =~ ^"$RUN"/live/disks/[0-9]+$ ]] && [ ! -L "$disk" ] && [ -d "$disk/tree" ]
+}
+
+# A clean-stop checkpoint (#252): the driver asks through a file, and is
+# answered in one, since the copy is this side's. Outside the sandbox there are
+# no bind mounts over xdg, and copy_dir's snapshots work as for a base. Under
+# $RUN/live/disks/, deleted with the scratch, so scratch_deleted covers them.
+live_keep_disk() {
+    local req="$RUN/live/keep-disk.request" reply="$RUN/live/keep-disk.reply" id dir t0 secs
+    [ -f "$req" ] || return 0
+    id="$(cat "$req")"
+    rm -f "$req"
+    local ok=true err=""
+    case "$id" in '' | *[!0-9]*) ok=false err="not a disk's id: $id" ;; esac
+    dir="$RUN/live/disks/$id"
+    t0="$(date +%s.%N)"
+    if [ "$ok" = true ] && { [ -e "$dir" ] || ! mkdir -p "$dir/tree"; }; then ok=false err="$dir: in the way, or can't be made"; fi
+    if [ "$ok" = true ] && ! err="$(copy_run_tree "$dir/tree" 2>&1)"; then
+        ok=false err="the copy failed (disk full?): $(printf '%s' "$err" | tail -n 1)"
+        chmod -R u+rwX "$dir" 2>/dev/null || true
+        rm -rf "$dir" 2>/dev/null || true
+    fi
+    secs="$(awk -v a="$t0" -v b="$(date +%s.%N)" 'BEGIN { printf "%.2f", b - a }')"
+    log "life $LIFE: kept the disk as $dir ($COPY_MODE, $secs s): ${err:-ok}"
+    jq -n --argjson ok "$ok" --arg err "$err" --arg dir "$dir" --arg copy "$COPY_MODE" --argjson secs "$secs" \
+        '{ok:$ok, error:$err, dir:$dir, copy:$copy, secs:$secs}' >"$reply.tmp" && mv -f "$reply.tmp" "$reply"
+}
+
 # A life's own files, before the next one writes them again.
 live_keep_life() { # life
-    local f
+    local f p
     for f in result.json game.out sway.log audio.log sandbox.log doctor-before.json doctor-after.json; do
         [ ! -e "$RESULTS/$f" ] || mv -f "$RESULTS/$f" "$RESULTS/life$1-$f"
+    done
+    for p in "$RESULTS"/launch[0-9]*-game.out; do
+        [ ! -e "$p" ] || mv -f "$p" "$RESULTS/life$1-${p##*/}"
     done
 }
 
@@ -1601,6 +1649,7 @@ live_json() {
         | {id:$id, lives:$lives, idle_secs:$idle, max_secs:$max,
            steps:([($s.path // [])[] | select(.step)] | length),
            checkpoints:(($s.checkpoints // {}) | keys), restores:($s.restores // []),
+           kept_disks:([($s.checkpoints // {})[] | select(.disk)] | length),
            last_replay:($s.last_replay // null), from_manifest:($s.from_manifest // null), session:($r + "/session.json"),
            journal:($r + "/journal.jsonl"),
            export:(if $s.path then $r + "/manifest.toml" else null end)}' "$s"
@@ -1727,6 +1776,14 @@ cmd_live() {
         exit 3
     }
     case "$cmd" in
+    checkpoint | relaunch)
+        # A full copy of a big disk, or the game's whole start.
+        [ -n "$dir" ] && [ -S "$dir/ctl.sock" ] || {
+            jq -c '{ok:false, error:"not ready: \(.state): \(.detail) (status --wait)"}' "$state"
+            exit 4
+        }
+        GOGO_E2E_LIVE_DIR="$dir" helper live-call 1200 "$cmd" "$@"
+        ;;
     status)
         if [ "${1:-}" = --wait ]; then
             [ $# -eq 2 ] || usage
@@ -2155,6 +2212,8 @@ st_live_gone() { # id outdir: waits for its supervisor; prints its summary
     local f="$GOGO_E2E_LOCK_DIR/live/$1" i
     for i in $(seq 240); do [ -e "$f" ] || break; sleep 0.5; done
     [ ! -e "$f" ] || st_fail "live: $1 still registered"
+    # It leaves the registry before its teardown writes the summary.
+    for i in $(seq 60); do jq -e .results "$2/$1/summary.json" >/dev/null 2>&1 && break; sleep 0.5; done
     printf '%s\n' "$2/$1/summary.json"
 }
 
@@ -2285,7 +2344,188 @@ st_live() { # self-test dir
         >/dev/null 2>&1 || code=$?
     [ "$code" = 2 ] || st_fail "usage: live start --env on a command: exit $code, want 2"
     st_live_from "$base"
+    st_live_clean "$base"
     "$SELF" cleanup --stop-live >/dev/null 2>&1 || true
+}
+
+# One live command that must be refused: exit 1, an error that says why.
+st_live_refused() { # name error-regex cmd…
+    local name="$1" re="$2" reply
+    shift 2
+    if reply="$("$SELF" live "$ST_LID" "$@" 2>>"$ST_LOUT/client.stderr")" ||
+        ! jq -e --arg re "$re" '.ok == false and (.error | test($re))' <<<"$reply" >/dev/null 2>&1; then
+        st_fail "live-clean: $name: $* wasn't refused: $reply"
+    fi
+}
+
+# Checkpoints at a clean stop and the relaunch step (#252), on the fake game: a
+# Quit remembers (a green screen on the next launch), and d dirties the disk so
+# that a launch on it dies: a restore that didn't roll back gets no window.
+st_live_clean() { # self-test dir
+    local base="$1" out code summary run shots d
+    log "self-test: clean-stop checkpoints and relaunch"
+    out="$base/live-clean"
+    ST_LOUT="$out"
+    st_live_start "$out"
+    [ -n "$ST_LID" ] || return 0
+    st_live_cmd ready '.state == "ready"' status --wait 60
+    run="$(sed -n 's/^run=//p' "$GOGO_E2E_LOCK_DIR/live/$ST_LID")"
+    shots="$out/$ST_LID/shots"
+    # While it runs, relaunch is refused, and nothing goes on the path.
+    st_live_refused running 'still running' relaunch
+    st_live_cmd unmoved '.game.running and .steps == 0' status
+    st_live_cmd white '.fills_window' screenshot white
+    st_live_cmd red-key '.ok' key r
+    # On the path on purpose: a replay of it would take this long.
+    st_live_cmd long '.ok' wait 6
+    st_live_cmd red '.since == "white"' screenshot red
+    st_live_cmd early '.checkpoint == "early" and (.clean_stop | not)' checkpoint early
+    st_live_cmd quit '.ok' type q
+    st_live_cmd quit-wait '.game_running | not' wait 1
+    st_live_cmd agreed '.clean_stop and .screenshot == null and .replay_secs == 0
+        and .disk.copy != null and .disk.secs >= 0' checkpoint agreed
+    # In a session's own relaunch the disk stays: the game remembers.
+    st_live_cmd relaunch '.ok and .game_running' relaunch
+    st_live_cmd ready-again '.game.running and .life == 1 and .checkpoints.agreed.clean_stop
+        and (.checkpoints.early.clean_stop | not)' status
+    st_live_cmd green '.since == null and .fills_window' screenshot green
+    [ "$(helper diff "$shots/white.png" "$shots/green.png" | jq '.changed_pct >= 50')" = true ] ||
+        st_fail "live-clean: the relaunch didn't show the remembered disk's screen"
+    # A dead end that dirties the disk: only a rollback to the kept disk gets a
+    # window back, and with no replay of the route before it (its wait 6).
+    st_live_cmd dirty '.ok' key d
+    st_live_cmd to-kept '.state == "ready" and .life == 2 and .game.running and .last_replay.ok
+        and .last_replay.steps == 0 and .last_replay.disk == "kept" and .last_replay.skipped >= 7
+        and .last_replay.secs < 3 and .last_restore.disk and .last_restore.window_secs != null
+        and .last_restore.total_secs != null' restore agreed --wait 60
+    st_live_cmd green-2 '.since == null' screenshot green-again
+    [ "$(helper diff "$shots/green.png" "$shots/green-again.png" | jq '.changed_pct < 15')" = true ] ||
+        st_fail "live-clean: a restore to the kept disk isn't the remembered screen"
+    # Past the clean stop: an ordinary checkpoint rolls back to the kept disk,
+    # relaunches and replays only what came after it.
+    st_live_cmd blue-key '.ok' key b
+    st_live_cmd blue '.since == "green-again" and .change_pct >= 50' screenshot blue
+    st_live_cmd past '.checkpoint == "past" and (.clean_stop | not)' checkpoint past
+    st_live_cmd dirty-2 '.ok' key d
+    st_live_cmd to-past '.life == 3 and .game.running and .last_replay.ok and .last_replay.disk == "kept"
+        and .last_replay.done == .last_replay.steps and .last_replay.steps == 4' restore past --wait 60
+    # Before the clean stop: the launch's disk, the whole replay. The game takes
+    # it for a first launch, or there's no window.
+    st_live_cmd to-early '.life == 4 and .game.running and .last_replay.ok and .last_replay.disk == "launch"
+        and .last_replay.skipped == 0 and .last_replay.steps == 5' restore early --wait 90
+    # And the kept disk outlived that: on along the route.
+    st_live_cmd to-past-2 '.life == 5 and .game.running and .last_replay.ok and .last_replay.disk == "kept"' restore past --wait 60
+    st_live_cmd final-key '.ok' key r
+    st_live_cmd final '.since == "cp-past" and .change_pct >= 50' screenshot final
+    st_live_cmd final-quit '.ok' type q
+    st_live_cmd final-wait '.game_running | not' wait 1
+    "$SELF" live "$ST_LID" export >"$out/export.toml" 2>>"$out/client.stderr" || st_fail "live-clean: export failed"
+    if ! { [ "$(grep -c '^relaunch = true$' "$out/export.toml")" = 1 ] && grep -q '^how = "self"$' "$out/export.toml" &&
+        grep -q "^# checkpoint 'agreed': a clean stop" "$out/export.toml" && grep -q '^screenshot = "final"$' "$out/export.toml" &&
+        ! grep -q '^screenshot = "cp-agreed"' "$out/export.toml"; }; then
+        st_fail "live-clean: the export has no relaunch at the stop: $(cat "$out/export.toml")"
+    fi
+    [ -d "$run/live/disks" ] || st_fail "live-clean: no kept disk in $run/live/disks"
+    code=0
+    "$SELF" live "$ST_LID" stop >"$out/stdout" 2>>"$out/client.stderr" || code=$?
+    st_assert_clean live-clean "$out" "$code" 0
+    summary="$(tail -n 1 "$out/stdout")"
+    jq -e '.ok and .live.lives == 5 and .live.kept_disks == 1 and (.live.restores | length) == 4
+        and .cleanup.scratch_deleted' "$summary" >/dev/null ||
+        st_fail "live-clean: summary: $(jq -c '{failed, live, cleanup}' "$summary" 2>/dev/null)"
+    # The kept disks go with the scratch.
+    [ ! -e "$run" ] || st_fail "live-clean: $run outlived the session"
+    # The export's the proof: a fresh run quits, relaunches on the same disk, goes on.
+    d="$base/live-clean-export"
+    mkdir -p "$d"
+    code=0
+    env --default-signal=INT,TERM "$SELF" run self-test --manifest "$out/export.toml" --out "$d" \
+        >"$d/stdout" 2>"$d/stderr" || code=$?
+    st_assert_clean live-clean-export "$d" "$code" 0
+    summary="$(tail -n 1 "$d/stdout")"
+    jq -e '[.checks[].name] as $n | .ok and ($n | index("clean_exit_relaunch_1") and index("nothing_left_relaunch_1")
+        and index("window_relaunch_1") and index("clean_exit"))
+        and ([.steps[] | select(.action == "relaunch")] | length == 1 and .[0].exit == 0)' "$summary" >/dev/null ||
+        st_fail "live-clean-export: $(jq -c '{failed, steps}' "$summary" 2>/dev/null)"
+
+    # --from-manifest takes a manifest with a relaunch in it. With no kept disk,
+    # a restore replays through the quit and the relaunch, in one life.
+    out="$base/live-clean-from"
+    ST_LOUT="$out"
+    mkdir -p "$out"
+    ST_LID="$("$SELF" live start self-test --manifest "$base/live-clean/export.toml" --from-manifest --to-shot blue --out "$out" \
+        2>>"$out/start.stderr" | tail -n 1)" || ST_LID=""
+    if [ -n "$ST_LID" ]; then
+        st_live_cmd from-ready '.state == "ready" and .from_manifest.ok and .game.running' status --wait 90
+        st_live_cmd from-cp '(.clean_stop | not)' checkpoint from-blue
+        st_live_cmd from-restore '.life == 2 and .game.running and .last_replay.ok and .last_replay.disk == "launch"
+            and .last_replay.skipped == 0' restore from-blue --wait 90
+        "$SELF" live "$ST_LID" export >"$out/export.toml" 2>>"$out/client.stderr" || st_fail "live-clean-from: export failed"
+        [ "$(grep -c '^relaunch = true$' "$out/export.toml")" = 1 ] ||
+            st_fail "live-clean-from: the export lost its relaunch: $(cat "$out/export.toml")"
+        st_live_cmd from-quit '.ok' type q
+        st_live_cmd from-quit-wait '.game_running | not' wait 1
+        code=0
+        "$SELF" live "$ST_LID" stop >"$out/stdout" 2>>"$out/client.stderr" || code=$?
+        st_assert_clean live-clean-from "$out" "$code" 0
+    else st_fail "live-clean-from: no session: $(cat "$out/start.stderr")"; fi
+
+    # What isn't a clean stop: the wrong exit code (this manifest wants 9, as a
+    # crash's would differ from a Quit's), and a process left behind. Neither a
+    # checkpoint nor a relaunch takes it; a restore still gets back, here with a
+    # full copy, as on a filesystem with no reflinks.
+    out="$base/live-clean-not"
+    ST_LOUT="$out"
+    mkdir -p "$out"
+    sed 's/^how = "self"$/how = "self"\ncode = 9/' "$REPO/e2e/self-test-live.toml" >"$out/code9.toml"
+    st_live_start "$out" --manifest "$out/code9.toml"
+    if [ -n "$ST_LID" ]; then
+        st_live_cmd code-ready '.state == "ready"' status --wait 60
+        st_live_cmd code-quit '.ok' type q
+        st_live_cmd code-wait '.game_running | not' wait 1
+        st_live_refused code-cp 'exited 0, not the 9' checkpoint crashed
+        st_live_refused code-relaunch 'exited 0, not the 9' relaunch
+        code=0
+        "$SELF" live "$ST_LID" stop >"$out/stdout" 2>>"$out/client.stderr" || code=$?
+        st_assert_clean live-clean-code "$out" "$code" 0
+    else st_fail "live-clean-code: no session: $(cat "$out/start.stderr")"; fi
+    GOGO_E2E_COPY=copy st_live_start "$out"
+    if [ -n "$ST_LID" ]; then
+        st_live_cmd not-ready '.state == "ready"' status --wait 60
+        st_live_cmd not-start '.ok' checkpoint start
+        st_live_cmd not-leave '.ok' key l
+        st_live_cmd not-leave-wait '.game_running | not' wait 1
+        st_live_refused left-cp 'still up' checkpoint left
+        st_live_cmd not-back '.life == 2 and .game.running' restore start --wait 60
+        st_live_cmd not-quit '.ok' type q
+        st_live_cmd not-quit-wait '.game_running | not' wait 1
+        st_live_cmd not-kept '.clean_stop and .disk.copy == "copy"' checkpoint kept
+        st_live_cmd not-kept-back '.life == 3 and .game.running and .last_replay.steps == 0' restore kept --wait 60
+        st_live_cmd not-end '.ok' type q
+        st_live_cmd not-end-wait '.game_running | not' wait 1
+        code=0
+        "$SELF" live "$ST_LID" stop >"$out/stdout" 2>>"$out/client.stderr" || code=$?
+        st_assert_clean live-clean-not "$out" "$code" 0
+    else st_fail "live-clean-not: no session: $(cat "$out/start.stderr")"; fi
+
+    # A run: a relaunch whose game doesn't quit fails by name, and no more steps run.
+    d="$base/relaunch-up"
+    mkdir -p "$d"
+    sed '/^\[\[step\]\]/,$d; s/^wait_secs = 10$/wait_secs = 2/' "$REPO/e2e/self-test-live.toml" >"$d/m.toml"
+    cat >>"$d/m.toml" <<'EOF'
+[[step]]
+wait = 1
+[[step]]
+relaunch = true
+[[step]]
+screenshot = "never"
+EOF
+    code=0
+    env --default-signal=INT,TERM "$SELF" run self-test --manifest "$d/m.toml" --out "$d" >"$d/stdout" 2>"$d/stderr" || code=$?
+    st_assert_clean relaunch-up "$d" "$code" 1
+    summary="$(tail -n 1 "$d/stdout")"
+    jq -e '(.failed | index("clean_exit_relaunch_1")) and ([.steps[] | select(.action == "screenshot")] | length == 0)' "$summary" >/dev/null ||
+        st_fail "relaunch-up: $(jq -c '{failed, steps}' "$summary" 2>/dev/null)"
 }
 
 # A live session that starts from a manifest's steps (#251), on the fake game.

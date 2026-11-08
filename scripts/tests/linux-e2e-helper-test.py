@@ -1061,6 +1061,126 @@ class LiveExport(unittest.TestCase):
         self.assertEqual(m["build_command"], ["true"])
 
 
+class Relaunch(unittest.TestCase):
+    """The relaunch step and clean-stop checkpoints (#252)."""
+
+    KEPT = "/run/live/disks/9"
+
+    def steps(self, text):
+        return helper.parse_manifest(text)["steps"]
+
+    def route(self):
+        return [
+            shot("a", gap=1),
+            {"step": {"key": "Return"}, "gap": 1},
+            {"mark": "checkpoint", "name": "stop", "disk": self.KEPT},
+        ]
+
+    def test_the_step(self):
+        self.assertEqual(self.steps('gogid = 1\n[[step]]\nrelaunch = true\n'), [{"relaunch": True}])
+        for bad in ("false", "1", '"yes"', "{ }"):
+            with self.subTest(bad), self.assertRaises(helper.ManifestError):
+                helper.parse_manifest(f"gogid = 1\n[[step]]\nrelaunch = {bad}\n")
+
+    def test_a_checkpoint_with_no_disk_replays_from_the_launch(self):
+        path = [shot("a"), {"mark": "checkpoint", "name": "a"}, {"step": {"relaunch": True}, "gap": 0}, shot("b")]
+        got, disk, keep = helper.live_restore_plan(path, 3)
+        self.assertEqual((got, disk, keep), (path, None, 0))
+
+    def test_a_restore_to_the_stop_itself_gets_a_relaunch_and_replays_nothing(self):
+        path = self.route()
+        got, disk, keep = helper.live_restore_plan(path, 3)
+        self.assertEqual(disk, self.KEPT)
+        self.assertEqual(keep, len(got))
+        self.assertEqual(got[:3], path)
+        self.assertEqual(got[3], {"step": {"relaunch": True}, "gap": 0.0, "life": 3})
+        self.assertEqual(len(path), 3, "the checkpoint's own path stays as it was")
+        self.assertEqual(helper.live_replay_secs(path, {"max_gap": 10.0}), 0)
+
+    def test_a_restore_past_the_stop_replays_only_what_is_after_the_relaunch(self):
+        path = self.route() + [
+            {"step": {"wait": 1}, "gap": 0},  # with the game down: stands
+            {"step": {"relaunch": True}, "gap": 0, "relaunch_secs": 30.0},
+            {"step": {"key": "x"}, "gap": 2},
+            {"step": {"wait": 7}, "gap": 0},
+            {"mark": "checkpoint", "name": "past"},
+        ]
+        got, disk, keep = helper.live_restore_plan(path, 3)
+        self.assertEqual(disk, self.KEPT)
+        self.assertEqual(got, path)
+        self.assertEqual(keep, 5)
+        self.assertEqual([e.get("step") or e["mark"] for e in got[keep:]], [{"key": "x"}, {"wait": 7}, "checkpoint"])
+        self.assertEqual(helper.live_replay_secs(path, {"max_gap": 10.0}), 9)
+
+    def test_the_last_kept_disk_counts(self):
+        path = self.route() + [
+            {"step": {"relaunch": True}, "gap": 0},
+            {"step": {"key": "Return"}, "gap": 1},
+            {"mark": "checkpoint", "name": "again", "disk": "/run/live/disks/12"},
+        ]
+        _, disk, keep = helper.live_restore_plan(path, 3)
+        self.assertEqual((disk, keep), ("/run/live/disks/12", 7))
+
+    def test_a_relaunch_with_no_kept_disk_is_replayed_estimated_by_its_start(self):
+        path = [{"step": {"relaunch": True}, "gap": 0, "relaunch_secs": 28.0}]
+        self.assertEqual(helper.live_replay_secs(path, {"max_gap": 10.0}), 28)
+
+    def test_a_shot_past_a_relaunch_compares_with_nothing(self):
+        path = [shot("a"), {"step": {"key": "x"}, "gap": 1}, {"step": {"relaunch": True}, "gap": 0}]
+        self.assertEqual(helper.live_last_shot(path), (None, 0))
+        self.assertEqual(helper.live_last_shot(path + [{"step": {"key": "x"}}]), (None, 0))
+
+    def test_the_export_quits_relaunches_and_goes_on(self):
+        text = helper.live_export(live_session(self.route() + [
+            {"step": {"relaunch": True}, "gap": 0.0},
+            shot("b", since=None, change=None, gap=2),
+            {"step": {"key": "x"}, "gap": 1},
+            shot("c", since="b", change=40.0, inputs=1, gap=1),
+        ]))
+        self.assertIn("# checkpoint 'stop': a clean stop, its disk kept", text)
+        self.assertEqual(self.steps(text), [
+            {"wait": 1.0},
+            {"screenshot": "a"},
+            {"wait": 1.0},
+            {"key": "Return"},
+            {"relaunch": True},
+            {"wait": 2.0},
+            {"screenshot": "b"},  # no expect_change from a: another launch
+            {"wait": 1.0},
+            {"key": "x"},
+            {"wait": 1.0},
+            {"screenshot": "c"},
+            {"expect_change": {"from": "b", "to": "c", "min": 20.0}},
+        ])
+        # Its quit goes by [exit], whichever way the last launch ends.
+        m = helper.parse_manifest(text)
+        self.assertEqual((m["exit"]["how"], m["exit"]["wait_secs"]), ("signal", 60.0))
+
+    def test_the_export_keeps_the_exit_code_a_relaunch_was_held_to(self):
+        session = live_session(self.route() + [{"step": {"relaunch": True}, "gap": 0.0}])
+        session["manifest"]["exit"]["code"] = 9
+        self.assertEqual(helper.parse_manifest(helper.live_export(session))["exit"]["code"], 9)
+
+    def test_a_stop_with_no_relaunch_exports_none(self):
+        text = helper.live_export(live_session(self.route(), game_exit={"code": 0, "life": 1}))
+        self.assertNotIn("relaunch", text.replace("relaunches", ""))
+        self.assertEqual(helper.parse_manifest(text)["exit"]["how"], "self")
+
+    def test_from_manifest_runs_up_to_a_shot_past_a_relaunch(self):
+        text = 'gogid = 1\n[[step]]\nscreenshot = "a"\n[[step]]\nrelaunch = true\n[[step]]\nscreenshot = "b"\n[[step]]\nkey = "x"\n'
+        got = helper.live_from_manifest(text)
+        self.assertEqual(got["steps"], [{"screenshot": "a"}, {"relaunch": True}, {"screenshot": "b"}])
+
+    def test_what_is_left_of_a_launch(self):
+        table = [
+            (1, "bwrap", "S"), (2, "python3", "S"), (6, ".swaybg-wrapped", "S"), (9, "sway", "S"),
+            (30, "wineserver", "S"), (31, "game.exe", "Z"), (32, "explorer.exe", "R"),
+        ]
+        harness = {1, 2, 6, 9}
+        self.assertEqual(helper.left_processes(table, harness), ["30 wineserver", "32 explorer.exe"])
+        self.assertEqual(helper.left_processes(table[:4], harness), [])
+
+
 class LiveFromManifest(unittest.TestCase):
     """live start --from-manifest (#251): the point, the path, the export."""
 

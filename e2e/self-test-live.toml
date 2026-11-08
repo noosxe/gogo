@@ -2,19 +2,27 @@
 # The build "installs" a file in GOGO_HOME. The game, an xterm, ends at once
 # unless that install is there and this is its first launch on this disk:
 # `launched` must not be there yet, and the game writes it. So a restore that
-# didn't roll the disk back gets no window. Keys: r turns it red, b blue, q
-# quits (exit 0), a starts an animation (a new colour every 0.3 s, never the same one twice running, so no
-# poll rate lines up with it) and s stops
-# it. A live session takes only [window] and [exit] from here; the
-# step is for the manifest check, and a plain run of this passes too.
+# didn't roll the disk back gets no window. A Quit remembers (`quit`, #252): a
+# launch on a disk that has it may be another, and shows a green screen, unless
+# `dirt` is there too, from d: a restore to the kept disk has to have rolled
+# that back. Keys: r turns it red, b blue, q quits (exit 0), a starts an
+# animation (a new colour every 0.3 s, never the same one twice running, so no
+# poll rate lines up with it) and s stops it, l quits and leaves a process
+# behind. A live session takes only [window] and [exit] from here; the step is
+# for the manifest check, and a plain run of this passes too.
 title = "self-test: live"
 build_command = ["bash", "-c", '''
   mkdir -p "$GOGO_HOME/games/fake" && date +%s%N >"$GOGO_HOME/games/fake/installed"
 ''']
 command = ["xterm", "-bg", "white", "-fg", "black", "-e", "bash", "-c", '''
   d="$GOGO_HOME/games/fake"
-  [ -e "$d/installed" ] && [ ! -e "$d/launched" ] && touch "$d/launched" || exit 3
-  printf "\n  live self-test: r red, b blue, a animates, s stops, q quits\n"
+  [ -e "$d/installed" ] && [ ! -e "$d/dirt" ] || exit 3
+  if [ -e "$d/quit" ]; then
+    printf "\033]11;#20a040\007"
+  else
+    [ ! -e "$d/launched" ] && touch "$d/launched" || exit 3
+  fi
+  printf "\n  live self-test: r red, b blue, a animates, s stops, q quits, d dirties, l leaves one behind\n"
   anim=0 flip=0
   while true; do
     k=""
@@ -28,7 +36,9 @@ command = ["xterm", "-bg", "white", "-fg", "black", "-e", "bash", "-c", '''
     s) anim=0; printf "\033]11;#c02020\007" ;;
     r) printf "\033]11;#c02020\007" ;;
     b) printf "\033]11;#2040c0\007" ;;
-    q) exit 0 ;;
+    d) touch "$d/dirt" ;;
+    q) touch "$d/quit"; exit 0 ;;
+    l) touch "$d/quit"; setsid sleep 60 </dev/null >/dev/null 2>&1 & sleep 0.5; exit 0 ;;
     esac
   done
 ''']

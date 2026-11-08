@@ -76,9 +76,9 @@ build's sandbox sees. It needs `gogo login` done once. Tokens are never printed.
 | File | |
 |---|---|
 | `summary.json` | checks, steps, screenshots, audio, `build`, doctor, log excerpt, cleanup, `tested_entry` |
-| `shots/<name>.png` | the manifest's screenshots, `not-exited.png` if a game ignored its exit, `build-window-<n>.png` for each window the build opened |
+| `shots/<name>.png` | the manifest's screenshots, `not-exited.png` (`not-exited-relaunch_<n>.png` at a [`relaunch`](#a-clean-stop-a-kept-disk-and-a-relaunch)) if a game ignored its exit, `build-window-<n>.png` for each window the build opened |
 | `build.log`, `build-sway.log`, `build-sandbox.log` | what the build phase printed |
-| `sway.log`, `game.out`, `sandbox.log`, `audio.log` | what the game phase printed |
+| `sway.log`, `game.out`, `sandbox.log`, `audio.log` | what the game phase printed. `game.out` is the last launch's; with a `relaunch`, the ones before are `launch<n>-game.out` |
 | `support-inno.log` | the support installer's Inno log, when it wrote one |
 | `install-inno.log`, `install-wine.log` | what the installer wrote, with `--installer` |
 | `run.log`, `launch.log` | the launcher's logs (design 18 §7.3) |
@@ -417,8 +417,9 @@ finds the steps (unless it [starts from them](#starting-from-a-manifest)). A gam
 | `click [X Y]`, `move_to X Y` | X Y in pixels of the screenshot, or `N%` of the window. `click` with none clicks where the pointer is (`click_here`) |
 | `move_by DX DY`, `scroll NOTCHES`, `wait SECS` | as the manifest's |
 | `settle [--max SECS]` | waits until the picture fills the window and holds still, by the code of the manifest's `wait_settled`. Answers `settled`, `secs` it took, the last frame's `path`, and the `step` it put on the path. An animated screen answers `"settled": false` after `--max` (default 30, at most 600), it doesn't hang |
-| `checkpoint NAME` | a screenshot (`cp-NAME`), and the path to here kept under NAME, with about how long its replay takes |
-| `restore NAME [--wait SECS]` | the game closed, the disk rolled back, a relaunch and a replay to NAME; answers once it's done, with `last_replay` |
+| `checkpoint NAME` | a screenshot (`cp-NAME`), and the path to here kept under NAME, with about how long its replay takes. After the game quit by itself (`game.running` false in `status`), [a clean stop](#a-clean-stop-a-kept-disk-and-a-relaunch): no screenshot, the disk kept too, `clean_stop: true`. Refused if the exit wasn't [exit]'s code, or something of the game is still up |
+| `restore NAME [--wait SECS]` | the game closed, the disk rolled back, a relaunch and a replay to NAME; answers once it's done, with `last_replay`, and `last_restore`: how long each part took |
+| `relaunch` | launches the game again on this disk, once it has quit by itself, and answers when its window is up. Refused while it runs, and as `checkpoint` is after a bad exit |
 | `log [game\|run\|launch\|sway\|dxvk\|vkd3d\|proton] [--tail N]` | a log's last lines: `game.out` (or its DXVK, VKD3D or Proton/Wine lines), the launcher's run log or `launch.log`, sway's |
 | `export` | the route so far, as a manifest, on stdout. Works after `stop` too |
 | `stop` | the game closed (or its own exit noted, after a Quit), doctor, teardown, `nothing_left` and `scratch_deleted`, and the summary, as `run` prints it |
@@ -514,6 +515,84 @@ whose driver replays NAME's steps before it listens again.
 - **Dead ends** (what was done after the checkpoint, before the restore) leave the route,
   and stay in `journal.jsonl`.
 
+#### A clean stop: a kept disk and a relaunch
+
+A game that has quit from its own menu is what a snapshot of a running one isn't: its
+settings and Wine's registry are written, and nothing is left to write more. So
+`checkpoint NAME` right after a Quit keeps the disk as well as the route (#252), and
+`restore NAME` needs no replay. It rolls back to that disk and launches again. A game
+relaunched on a disk that remembers a screen takes another way to the same menu, which is
+why the route has to say so: the export writes a **`relaunch` step** at that point. A fresh
+`run` then quits, launches again in the same sandbox on the same disk, and goes on, as the
+session did.
+
+```bash
+scripts/linux-e2e.sh live <id> key Return
+```
+```bash
+scripts/linux-e2e.sh live <id> status
+```
+```bash
+scripts/linux-e2e.sh live <id> checkpoint agreed-clean
+```
+```bash
+scripts/linux-e2e.sh live <id> relaunch
+```
+
+`Return` on Quit Game, then `status` until `game.running` is false, since a game takes a
+moment to go, and a `checkpoint` while it's still up is an ordinary one. The answer's
+`clean_stop` says which it was.
+
+- **What counts as a clean stop:** the launcher has exited with [exit]'s `code` (default
+  0), and in up to 15 s nothing of the game is left in the sandbox (`wineserver` lingers
+  for a moment). Anything else (a crash's exit, a process that stays) isn't one:
+  `checkpoint` and `relaunch` are refused with what they found, and `restore` or `stop`
+  go on from there. An ordinary checkpoint behaves as ever, on the launch's disk or a kept
+  one, whichever its route starts from.
+- **`relaunch` while the game runs is refused,** and nothing goes on the path. It never
+  closes anything: quitting is the game's to do, and `restore` is what closes a running
+  one. A restore's reply says which disk it took (`kept` or `launch`).
+- **A restore to a clean-stop checkpoint** ends the life, snapshots the kept disk, and
+  starts the next life, whose launch stands for the `relaunch`: `last_replay.steps` is 0.
+  With no `relaunch` on the path yet, one is added there. `[override]` isn't written
+  again: the disk has it.
+- **A restore past one** (an ordinary checkpoint later on the route) rolls back to the
+  **last kept disk on its path**, relaunches, and replays only what came after that
+  relaunch; `last_replay.skipped` counts the steps it stood on. A checkpoint from before
+  the stop has no kept disk on its path, so it goes back to the launch and replays it all.
+  A `relaunch` on a path with no kept disk before it is replayed as it was driven: the
+  quit, the exit, the launch, in one life. A failure there stops the replay, as a frame
+  that doesn't match does.
+- **`--from-manifest` takes a manifest with `relaunch` in it.** It's a step like any
+  other (it counts for `--to-step`, and may be on the way to `--to-shot`), run with its
+  checks, and the session goes on past it, with no kept disk.
+- **A screenshot compares with nothing across a relaunch.** A `since` or an
+  `expect_change` from before it would only say that another launch looks different, so
+  the export writes none. A hand-written one is allowed, and checked.
+- **Disk.** Each clean-stop checkpoint keeps a copy under `live/disks/<n>/tree/` in the
+  scratch, made by the supervisor outside the sandbox with [the same copies as a
+  base](#copies-snapshots-reflinks-full-copies), so without the sandbox's bind mounts:
+  a snapshot or reflinks, costing only what the game then writes, but a **full copy** on
+  ext4 (Cyberpunk 2077: 63 GB each), and a failed copy fails the `checkpoint`, with the
+  session going on. A replaced name's copy stays, since a later checkpoint's route may
+  stand on it. They all go with the scratch at `stop` or any other teardown, and
+  `scratch_deleted` fails if one won't; `cleanup` takes a dead session's too.
+  `live.kept_disks` in the summary counts the checkpoints that have one.
+
+**In a `run`,** the `relaunch` step fits the checks like this, all in the sandbox the run
+already has. Each `<n>` counts from 1.
+
+| Check | At the `n`th relaunch |
+|---|---|
+| `clean_exit_relaunch_<n>` | the game exited by itself within [exit]'s `wait_secs`, with its `code`, also when the last launch ends by `how = "signal"`. If not, the steps end here: there's no way on from a game that didn't quit (`finished` says so) |
+| `nothing_left_relaunch_<n>` | nothing but the harness's own processes is up in the sandbox after 15 s. If something is, it fails and is killed, and the run goes on. The harness's `nothing_left`, from outside, stays the one at teardown; a live restore's sweep between lives is as it was, a harness error if something stays |
+| `window_relaunch_<n>` | the window is up within `[window]`'s `wait_secs`, as `window` says for the first launch. If not, the steps end here |
+| `gpu_used_by_game_launch_<n>` | with `--gpu`: the launch that just ended held the GPU, by `gpu_used_by_game`'s rules, read at that launch's screenshots. A launch with no screenshot isn't asked, unless none has one. `gpu_detail.launches` has what each one held |
+
+`clean_exit`, `torn_down`, `gpu_used_by_game` and doctor's checks are the last launch's,
+as for a run with one launch. `steps` has `exit`, `exit_secs` (how long the quit took) and
+`window_secs` on each `relaunch`.
+
 ### Time, and what the export writes
 
 A live session runs in real time: the game moves on while the agent thinks. Every step keeps
@@ -536,7 +615,8 @@ screen to settle again, up to that, and stops there if it doesn't.
 - `[window]`, `[env]` and `[exit]` from the session's manifest, `[override]` with `--env`
   and `--arg`. `[exit] how = "self"` when the game exited by itself after the last step
   (a Quit from its menu), else `"signal"`.
-- The steps in order, each gap a `wait`, checkpoints as comments.
+- The steps in order, each gap a `wait`, checkpoints as comments. A `relaunch` is a step,
+  and takes [exit]'s `wait_secs` and `code` along even when the last launch ends by signal.
 - After a screenshot that follows an input, an `expect_change` from the screenshot before,
   at half the change the session saw (at most 20%, none under 2%). A wait a fresh run would
   otherwise only sit through becomes a check that the screen moved on.
@@ -755,6 +835,8 @@ key = "Escape"                   # one key, held 50 ms: an XKB keysym name, as b
 type = "Hello!"                  # text, a key at a time, Shift where the us layout needs it
 [[step]]
 hold = { key = "w", ms = 500 }   # one key, held down 500 ms (up to 10000)
+[[step]]
+relaunch = true                  # the game has quit by itself: launch it again, same sandbox, same disk
 ```
 
 `[env]` is the environment `launch.sh` starts with, so `launch.conf`'s own `ENV` beats it.
@@ -801,6 +883,7 @@ say "a picture fills the window and it changed", not "it's the right picture".
 | `doctor_links`, `doctor_processes` | doctor's lines aren't `ok` after the run | host drive links (#199), a stray Wine process |
 | `finished` | the driver hit an error, or never got to the end | |
 | `live_idle` | a live session: no command for `--idle-secs` | an agent that went away |
+| `clean_exit_relaunch_<n>`, `nothing_left_relaunch_<n>`, `window_relaunch_<n>`, `gpu_used_by_game_launch_<n>` | a `relaunch` step: [above](#a-clean-stop-a-kept-disk-and-a-relaunch) | a Quit that hangs, a Wine process that stays and holds the prefix |
 | `nothing_left`, `scratch_deleted` | as above | |
 
 ## From a pass to a compat entry

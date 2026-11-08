@@ -27,7 +27,9 @@ a killed run still has what it got that far. With `build_command` in its config
 it runs that on the display instead (the build phase): it exits with the
 command's status, or BUILD_NO_DISPLAY when it never got to run it. With
 `live` in its config it serves a live session's socket instead of running
-steps (#241), and exits LIVE_RELAUNCH when a restore wants the next life.
+steps (#241), and exits LIVE_RELAUNCH when a restore wants the next life. A
+`relaunch` step (#252) launches the game again in the same sandbox, after it
+exited by itself.
 """
 
 import fcntl
@@ -64,6 +66,8 @@ SETTLE_MAX_CHANGE_PCT = 1.0
 EXIT_HOW = ("self", "signal")
 NULL_SINK = "e2e-null"
 BUILD_NO_DISPLAY = 3
+# A relaunch: how long what the game left behind (wineserver lingers) gets to go.
+RELAUNCH_LEFT_SECS = 15.0
 # How the build's log says the support installer ended (build.rs).
 SUPPORT_LINES = (
     (re.compile(r"GOG support installer finished \(exit (\d+)\)"), "finished"),
@@ -117,7 +121,7 @@ def _step(raw, i, shots):
     if len(actions) != 1:
         raise ManifestError(
             f"{what}: needs exactly one of click, click_here, move_to, move_by, scroll, key, "
-            f"type, hold, wait, wait_settled, screenshot, expect_change; got {sorted(actions)}"
+            f"type, hold, wait, wait_settled, screenshot, expect_change, relaunch; got {sorted(actions)}"
         )
     action = actions[0]
     value = raw[action]
@@ -137,6 +141,10 @@ def _step(raw, i, shots):
         if value is not True:
             raise ManifestError(f"{what}: click_here must be true")
         return {"click_here": True}
+    if action == "relaunch":
+        if value is not True:
+            raise ManifestError(f"{what}: relaunch must be true")
+        return {"relaunch": True}
     if action == "move_to":
         _only(value, ("x", "y"), f"{what}: move_to")
         if "x" not in value or "y" not in value:
@@ -1007,6 +1015,13 @@ class Driver:
         self.game = None
         self.game_exit = None
         self.view = None
+        # The launches after the first, in this sandbox (#252), and whether
+        # this launch has shown what GPU it holds, and an earlier one has.
+        self.relaunches = 0
+        # Who was up before the first launch: the harness's own.
+        self.before_game = None
+        self.gpu_seen = False
+        self.gpu_checked = False
         self.shots = {}
         self.checks = []
         self.steps = []
@@ -1373,6 +1388,7 @@ class Driver:
         """While something renders. Add to what's known: a game can open the
         node after the first frame anyone looked at."""
         gpu = self.result["gpu"]
+        self.gpu_seen = True
         held, game, use = self.game_gpu_fds()
         for key, found in (("gpu_fds", held), ("game_gpu_fds", game)):
             known = gpu.setdefault(key, {})
@@ -1387,6 +1403,8 @@ class Driver:
     # game ----------------------------------------------------------------
 
     def launch(self):
+        if self.before_game is None:
+            self.before_game = {pid for pid, _, _ in _proc_table()}
         env = dict(self.env)
         env.update(self.cfg["game_env"])
         env.update(self.manifest["env"])
@@ -1401,7 +1419,7 @@ class Driver:
             start_new_session=True,
         )
 
-    def wait_window(self):
+    def wait_window(self, name="window"):
         window = self.manifest["window"]
         start = time.monotonic()
         while time.monotonic() - start < window["wait_secs"]:
@@ -1410,7 +1428,7 @@ class Driver:
             if view:
                 self.view = view
                 return self.check(
-                    "window",
+                    name,
                     True,
                     f"{view.get('name')!r} {view['rect']['width']}x"
                     f"{view['rect']['height']} after {time.monotonic() - start:.0f}s",
@@ -1419,10 +1437,10 @@ class Driver:
                 self.game_exit = self.game.returncode
                 self.result["game_exit"] = self.game_exit
                 return self.check(
-                    "window", False, f"game exited {self.game_exit} with no window"
+                    name, False, f"game exited {self.game_exit} with no window"
                 )
             self.sleep(0.5)
-        return self.check("window", False, f"none in {window['wait_secs']:.0f}s")
+        return self.check(name, False, f"none in {window['wait_secs']:.0f}s")
 
     def refresh_view(self):
         tree = json.loads(self.swaymsg("-t", "get_tree", "--raw"))
@@ -1465,6 +1483,8 @@ class Driver:
             self.do_screenshot(step, record)
         elif action == "expect_change":
             self.do_expect_change(step["expect_change"], record)
+        elif action == "relaunch":
+            self.do_relaunch(record)
         self.save()
 
     def do_click(self, at, record):
@@ -1590,13 +1610,17 @@ class Driver:
         record["ok"] = pct >= want["min"]
         self.check(name, record["ok"], f"{pct}% of pixels changed, want {want['min']}%")
 
-    def check_gpu_used(self):
+    def check_gpu_used(self, name="gpu_used_by_game"):
         """--gpu. One GPU: the game's own process has the node open. Wine's helpers
         open it whether or not the game renders there. Several: it holds them all, so
         --expect-gpu needs it shown to render there; with none, holding one will do,
-        and the summary says what it renders on, if anything shows."""
+        and the summary says what it renders on, if anything shows. With relaunches
+        it's asked per launch: one with no screenshot says nothing, and only fails
+        if none of them had one."""
         gpus = self.cfg["gpu"]["gpus"]
         if not gpus or self.manifest["command"]:
+            return
+        if self.gpu_checked and not self.gpu_seen:
             return
         gpu = self.result["gpu"]
         game_fds = gpu.get("game_gpu_fds", {})
@@ -1615,7 +1639,7 @@ class Driver:
                 k for k, v in gpu.get("gpu_fds", {}).items() if held in v and k not in users
             )
             self.check(
-                "gpu_used_by_game",
+                name,
                 bool(users),
                 f"{held}: game {users or 'nobody'}, Wine's helpers and others {others or 'nobody'}"
                 f" (exe {self.effective_exe()})",
@@ -1623,7 +1647,7 @@ class Driver:
             return
         on = gpu["game_renders_on"]
         self.check(
-            "gpu_used_by_game",
+            name,
             want in on if want else bool(gpu["game_nodes"]),
             f"renders on {on or 'nothing DXVK or the kernel can show'}, want {want or 'any'}; "
             f"holds {gpu['game_nodes']}; DXVK found {gpu['dxvk']['found']}, made "
@@ -1672,6 +1696,73 @@ class Driver:
             self.check(
                 "torn_down", self.game_exit in (0, 143), f"launcher exit {self.game_exit}"
             )
+
+    def left_of_game(self, wait=RELAUNCH_LEFT_SECS):
+        """What's still up in this sandbox besides the harness, once the launcher
+        has exited: ["pid comm"], after up to `wait` s for it to go."""
+        end = time.monotonic() + wait
+        while True:
+            left = left_processes(_proc_table(), self.before_game)
+            if not left or time.monotonic() >= end:
+                return left
+            self.sleep(0.25)
+
+    def end_launch_gpu(self):
+        """The launch that just ended: its own check, under its own name, and
+        what it held out of the next one's way."""
+        if self.gpu_seen:
+            self.check_gpu_used(f"gpu_used_by_game_launch_{self.relaunches}")
+            self.gpu_checked = True
+        gpu = self.result["gpu"]
+        held = {k: gpu.pop(k) for k in ("gpu_fds", "game_gpu_fds", "game_drm_use") if k in gpu}
+        gpu.setdefault("launches", []).append(held)
+        self.gpu_seen = False
+
+    def do_relaunch(self, record):
+        """The `relaunch` step (#252): the game has quit by itself, by [exit]'s
+        wait_secs and with its code, nothing of it is left, and it's launched
+        again in this sandbox, on this disk, up to its window. record["ok"] false
+        ends a run's steps: the route has no way on from there."""
+        self.relaunches += 1
+        tag = f"relaunch_{self.relaunches}"
+        want = self.manifest["exit"]
+        started = time.monotonic()
+        while self.game.poll() is None:
+            if time.monotonic() - started >= want["wait_secs"]:
+                self.tool("grim", os.path.join(self.cfg["shots_dir"], f"not-exited-{tag}.png"))
+                record.update(ok=False, why=f"the game was still running {want['wait_secs']:.0f} s on")
+                self.check(f"clean_exit_{tag}", False, record["why"])
+                return
+            self.sleep(0.25)
+        self.game_exit = self.result["game_exit"] = self.game.returncode
+        record.update(exit=self.game_exit, exit_secs=round(time.monotonic() - started, 1))
+        ok = self.game_exit == want["code"]
+        self.check(f"clean_exit_{tag}", ok, f"exit {self.game_exit}, want {want['code']}")
+        if not ok:
+            record.update(ok=False, why=f"the game exited {self.game_exit}, not {want['code']}")
+            return
+        left = self.left_of_game()
+        self.check(f"nothing_left_{tag}", not left, f"swept: {'; '.join(left)}" if left else "no process of the launch left")
+        for line in left:
+            try:
+                os.kill(int(line.split()[0]), signal.SIGKILL)
+            except OSError:
+                pass
+        self.end_launch_gpu()
+        # game.out is the launch's own, as a life's is.
+        out = os.path.join(self.results, "game.out")
+        if os.path.exists(out):
+            os.replace(out, os.path.join(self.results, f"launch{self.relaunches}-game.out"))
+        self.view = None
+        self.game_exit = self.result["game_exit"] = None
+        if self.live is not None:
+            self.session["game_exit"] = None
+        started = time.monotonic()
+        self.launch()
+        got = self.wait_window(f"window_{tag}")
+        record["window_secs"] = round(time.monotonic() - started, 1)
+        if not got:
+            record.update(ok=False, why=f"no window after the relaunch: {self.checks[-1]['detail']}")
 
     def apply_override(self):
         """The manifest's [override], through gogo in this run's scratch."""
@@ -1833,13 +1924,22 @@ class Driver:
             self.doctor("before")
             self.launch()
             if self.wait_window():
+                stuck = False
                 for step in self.manifest["steps"]:
                     self.run_step(step)
-                self.check_gpu_used()
-                self.finish_game(how)
-                self.check_doctor()
-                self.record_audio_streams()
-                self.check("finished", True, "every step ran")
+                    if "relaunch" in step and not self.steps[-1]["ok"]:
+                        stuck = True
+                        break
+                if stuck:
+                    self.finish_game("cleanup")
+                    self.record_audio_streams()
+                    self.check("finished", True, f"a relaunch failed, so no more steps: {self.steps[-1]['why']}")
+                else:
+                    self.check_gpu_used()
+                    self.finish_game(how)
+                    self.check_doctor()
+                    self.record_audio_streams()
+                    self.check("finished", True, "every step ran")
             else:
                 self.finish_game("cleanup")
                 self.record_audio_streams()
@@ -1859,9 +1959,10 @@ class Driver:
     # A live session is a game phase that takes its steps from a control
     # socket instead of a manifest, one command at a time. Each life is one
     # sandbox: `restore` ends it (LIVE_RELAUNCH), the outer script rolls the
-    # disk back to the launch and starts the next, which replays the
-    # checkpoint's path before it listens again. The path, the checkpoints and
-    # every command are in the results dir, which outlives the sandbox.
+    # disk back (to the launch, or to the last disk a clean stop kept on the
+    # checkpoint's path, #252) and starts the next, which replays what's left of
+    # the path before it listens again. The path, the checkpoints and every
+    # command are in the results dir, which outlives the sandbox.
 
     def main_live(self):
         lv = self.live
@@ -1870,6 +1971,10 @@ class Driver:
         self.last_end = None
         self.last_command = time.monotonic()
         outcome = "stop"
+        replay = self.session.get("replay") or {}
+        restored = self.session["restores"][-1] if replay else None
+        if restored is not None:
+            restored["rollback_secs"] = lv.get("rollback_secs")
         try:
             self.live_state("starting", "the display and the isolation checks")
             self.start_sway()
@@ -1880,11 +1985,17 @@ class Driver:
             if bad:
                 raise RuntimeError(f"isolation failed: {bad[0]['name']}: {bad[0]['detail']}")
             self.probe_gpu()
-            self.apply_override()
+            # A disk from a clean stop has them already, and the export's
+            # relaunch doesn't write them again either.
+            if not replay.get("disk"):
+                self.apply_override()
             self.doctor("before")
             self.live_listen()
             self.busy = "launching the game"
             self.live_state("launching", self.busy)
+            launched = time.monotonic()
+            if restored is not None:
+                restored["sandbox_secs"] = round(time.time() - restored["at"] - restored.get("close_secs", 0) - (restored["rollback_secs"] or 0), 1)
             self.launch()
             self.busy = "waiting for the game's window"
             self.live_state("launching", self.busy)
@@ -1892,15 +2003,24 @@ class Driver:
             try:
                 if self.wait_window():
                     self.last_end = time.monotonic()
+                    if restored is not None:
+                        restored["window_secs"] = round(self.last_end - launched, 1)
                     self.live_from_manifest()
                     self.live_replay()
+                    if restored is not None:
+                        restored["replay_secs"] = (self.session.get("last_replay") or {}).get("secs")
+                        restored["total_secs"] = round(time.time() - restored["at"], 1)
+                        self.live_save()
                 elif lv.get("prefix") and self.session["from_manifest"] is None:
                     self.live_from_manifest_result(0, lv["prefix"], "the game's window never came up")
                 outcome = self.live_serve()
             except LiveStop:
                 outcome = "stop"
             if outcome == "restore":
+                closing = time.monotonic()
                 self.close_game()
+                self.session["restores"][-1]["close_secs"] = round(time.monotonic() - closing, 1)
+                self.live_save()
                 self.check("finished", True, f"closed for a restore of {self.session['replay']['checkpoint']}")
                 return LIVE_RELAUNCH
             if outcome == "idle":
@@ -1911,8 +2031,14 @@ class Driver:
                 )
             self.busy = "stopping"
             self.live_state("stopping", f"{outcome}: closing the game")
-            self.check_gpu_used()
+            # A life can come to its stop with no screenshot now (a restore that
+            # replays nothing): a frame while the game's up shows what it holds,
+            # and with the game gone there's nothing to ask. Not a proof anyway.
             ended = self.game.poll() is not None
+            if not ended and not self.gpu_seen:
+                self.grab(os.path.join(self.run_dir, "motion.png"))
+            if self.gpu_seen:
+                self.check_gpu_used()
             # Quit from its own menu: it exits by itself, which the export keeps.
             self.manifest["exit"]["code"] = 0
             self.finish_game("self" if ended else "signal")
@@ -2087,7 +2213,7 @@ class Driver:
                 self.game_exit = self.result["game_exit"] = self.game.returncode
                 self.session["game_exit"] = {"code": self.game.returncode, "life": self.life}
                 self.live_save()
-            detail = f"the game exited {self.game.returncode}: restore, or stop"
+            detail = f"the game exited {self.game.returncode}: checkpoint, relaunch, restore, or stop"
         elif self.view is None:
             detail = "no window: restore, or stop"
         replay = self.session.get("last_replay")
@@ -2099,7 +2225,11 @@ class Driver:
 
     def live_status(self):
         cps = {
-            name: {"steps": live_count_steps(cp["path"]), "replay_secs": live_replay_secs(cp["path"], self.session)}
+            name: {
+                "steps": live_count_steps(cp["path"]),
+                "replay_secs": live_replay_secs(cp["path"], self.session),
+                "clean_stop": "disk" in cp,
+            }
             for name, cp in self.session["checkpoints"].items()
         }
         rect = self.view["rect"] if self.view else None
@@ -2116,6 +2246,7 @@ class Driver:
             "restores": len(self.session["restores"]),
             "idle_left": round(self.live["idle_secs"] - (time.monotonic() - self.last_command)),
             "last_replay": self.session.get("last_replay"),
+            "last_restore": (self.session["restores"] or [None])[-1],
             "from_manifest": self.session.get("from_manifest"),
         }
 
@@ -2135,6 +2266,8 @@ class Driver:
                 outcome = "restore" if reply["ok"] else None
             elif cmd == "checkpoint":
                 reply = self.live_checkpoint(args)
+            elif cmd == "relaunch":
+                reply = self.live_relaunch(args)
             elif cmd == "settle":
                 reply = self.live_settle(args)
             elif cmd in LIVE_STEP_CMDS:
@@ -2152,6 +2285,8 @@ class Driver:
             reply = {"ok": False, "error": f"{cmd}: {type(e).__name__}: {e}"}
         finally:
             self.busy = None
+            # What a long command put in the state file goes on the next look.
+            self._shown = None
         self.live_journal(cmd, args, reply)
         self.live_save()
         self.live_reply(conn, reply)
@@ -2268,6 +2403,8 @@ class Driver:
         if len(args) != 1 or not re.fullmatch(r"[A-Za-z0-9_-]+", args[0]):
             raise LiveError("checkpoint NAME: a name of [A-Za-z0-9_-]")
         name = args[0]
+        if self.game is not None and self.game.poll() is not None:
+            return self.live_checkpoint_clean(name)
         shot = self.live_step("screenshot", [f"cp-{name}"])
         self.session["path"].append({"mark": "checkpoint", "name": name})
         replaced = name in self.session["checkpoints"]
@@ -2282,10 +2419,112 @@ class Driver:
             "ok": True,
             "checkpoint": name,
             "replaced": replaced,
+            "clean_stop": False,
             "steps": live_count_steps(self.session["path"]),
             "replay_secs": live_replay_secs(self.session["path"], self.session),
             "screenshot": shot["path"],
         }
+
+    def live_clean_stop(self, cmd):
+        """The game has exited, as a Quit from its menu does: with [exit]'s code,
+        and with nothing of it left to write the disk. Else `cmd` is refused."""
+        want = self.manifest["exit"]["code"]
+        code = self.game.returncode
+        if code != want:
+            raise LiveError(
+                f"{cmd}: the game exited {code}, not the {want} its [exit] expects: "
+                "not a clean stop. restore goes back, stop ends it"
+            )
+        left = self.left_of_game()
+        if left:
+            raise LiveError(
+                f"{cmd}: the launcher exited, but {'; '.join(left)} is still up {RELAUNCH_LEFT_SECS:.0f} s on: "
+                "not a clean stop. restore goes back, stop ends it"
+            )
+
+    def live_keep_disk(self, disk_id):
+        """Ask the supervisor, outside the sandbox, to keep the disk as it is: it
+        copies the game's gogo, home and xdg as a base's are, without this
+        sandbox's bind mounts in them. {copy, secs}, or a LiveError."""
+        d = self.live["dir"]
+        reply = os.path.join(d, LIVE_DISK_REPLY)
+        try:
+            os.unlink(reply)
+        except FileNotFoundError:
+            pass
+        tmp = os.path.join(d, f"{LIVE_DISK_REQUEST}.tmp")
+        with open(tmp, "w") as f:
+            f.write(f"{disk_id}\n")
+        os.replace(tmp, os.path.join(d, LIVE_DISK_REQUEST))
+        end = time.monotonic() + LIVE_DISK_SECS
+        while not os.path.exists(reply):
+            if time.monotonic() >= end:
+                raise LiveError(f"checkpoint: no copy of the disk in {LIVE_DISK_SECS:.0f} s")
+            self.sleep(0.1)
+        with open(reply) as f:
+            got = json.load(f)
+        os.unlink(reply)
+        if not got.get("ok"):
+            raise LiveError(f"checkpoint: couldn't keep the disk: {got.get('error')}")
+        return got
+
+    def live_checkpoint_clean(self, name):
+        """A checkpoint at a clean stop (#252): the disk as the game left it. A
+        restore to it relaunches on a copy of that, with no replay. No screenshot:
+        there's no game to show."""
+        self.live_clean_stop("checkpoint")
+        self.busy = f"keeping the disk for {name}"
+        self.live_state("keeping", self.busy)
+        disk_id = self.session["seq"] + 1
+        got = self.live_keep_disk(disk_id)
+        self.session["path"].append({"mark": "checkpoint", "name": name, "disk": got["dir"]})
+        replaced = name in self.session["checkpoints"]
+        self.session["checkpoints"][name] = {
+            "name": name,
+            "path": json.loads(json.dumps(self.session["path"])),
+            "life": self.life,
+            "at": round(time.time(), 1),
+            "shot": None,
+            "disk": got["dir"],
+        }
+        return {
+            "ok": True,
+            "checkpoint": name,
+            "replaced": replaced,
+            "clean_stop": True,
+            "steps": live_count_steps(self.session["path"]),
+            "replay_secs": 0,
+            "screenshot": None,
+            "disk": {"copy": got["copy"], "secs": got["secs"]},
+        }
+
+    def live_relaunch(self, args):
+        """The game exited by itself: launch it again here, on this disk. Refused
+        while it runs: quitting is the game's to do, and restore is what closes it."""
+        if args:
+            raise LiveError("usage: relaunch")
+        if self.game is None:
+            raise LiveError("no game: restore, or stop")
+        if self.game.poll() is None:
+            raise LiveError(
+                "relaunch: the game is still running. It follows a game that quit by "
+                "itself (status says when it has); restore closes a running one"
+            )
+        self.live_clean_stop("relaunch")
+        started = time.monotonic()
+        gap = max(0.0, started - (self.last_end or started))
+        self.busy = "relaunching the game"
+        self.live_state("launching", self.busy)
+        step = {"relaunch": True}
+        entry = {"step": step, "gap": round(gap, 2), "life": self.life, "seq": self.session["seq"] + 1}
+        self.run_step(step)
+        record = self.steps[-1]
+        if not record["ok"]:
+            raise LiveError(f"relaunch: {record['why']}")
+        entry["relaunch_secs"] = record["window_secs"]
+        self.session["path"].append(entry)
+        self.last_end = time.monotonic()
+        return {"ok": True, "step": step, "gap": entry["gap"], "secs": record["window_secs"], "game_running": self.game.poll() is None}
 
     def live_restore(self, args):
         cps = self.session["checkpoints"]
@@ -2294,16 +2533,18 @@ class Driver:
         cp = cps.get(args[0])
         if cp is None:
             raise LiveError(f"no checkpoint {args[0]!r}; there are {sorted(cps) or 'none'}")
-        dropped = live_count_steps(self.session["path"]) - live_count_steps(cp["path"])
-        self.session["path"] = json.loads(json.dumps(cp["path"]))
-        self.session["replay"] = {"checkpoint": cp["name"], "from_life": self.life}
+        path, disk, keep = live_restore_plan(cp["path"], self.life)
+        dropped = max(0, live_count_steps(self.session["path"]) - live_count_steps(path))
+        self.session["path"] = path
+        self.session["replay"] = {"checkpoint": cp["name"], "from_life": self.life, "disk": disk, "keep": keep}
         self.session["restores"].append(
-            {"checkpoint": cp["name"], "life": self.life, "at": round(time.time(), 1), "dropped": dropped}
+            {"checkpoint": cp["name"], "life": self.life, "at": round(time.time(), 1), "dropped": dropped, "disk": disk is not None}
         )
         return {
             "ok": True,
             "restoring": cp["name"],
-            "replay_steps": live_count_steps(cp["path"]),
+            "disk": "kept" if disk else "launch",
+            "replay_steps": live_count_steps(path[keep:]),
             "replay_secs": live_replay_secs(cp["path"], self.session),
         }
 
@@ -2363,17 +2604,23 @@ class Driver:
         self.last_end = time.monotonic()
 
     def live_replay(self):
-        """After a restore: the checkpoint's path again, from the launch, at the
-        export's timing. Each screenshot must match the one recorded (within
-        match_pct, for up to LIVE_REPLAY_GRACE s more); the first that doesn't
-        stops it, and the path ends there."""
+        """After a restore: the checkpoint's path again, at the export's timing:
+        from the launch, or on a kept disk (#252) from the relaunch after it, the
+        path before that standing as it is. Each screenshot must match the one
+        recorded (within match_pct, for up to LIVE_REPLAY_GRACE s more); the first
+        that doesn't stops it, and the path ends there."""
         replay = self.session.get("replay")
         if not replay:
             return
-        entries = self.session["path"]
-        self.session["path"] = []
+        keep = replay.get("keep", 0)
+        entries = self.session["path"][keep:]
+        self.session["path"] = self.session["path"][:keep]
         total = live_count_steps(entries)
-        result = {"checkpoint": replay["checkpoint"], "life": self.life, "steps": total, "ok": True}
+        result = {
+            "checkpoint": replay["checkpoint"], "life": self.life, "steps": total, "ok": True,
+            "disk": "kept" if replay.get("disk") else "launch",
+            "skipped": live_count_steps(self.session["path"]),
+        }
         done = 0
         started = time.monotonic()
         for entry in entries:
@@ -2400,6 +2647,15 @@ class Driver:
                 # not a recorded sleep, and not a failed check of the run.
                 if not self.settle_wait(step["wait_settled"])["settled"]:
                     result.update(ok=False, why=f"the screen didn't settle in {step['wait_settled']:.0f} s")
+                    break
+            elif "relaunch" in step:
+                # The route's own quit, again in this life. Its failure says why
+                # here, and isn't a failed check of the session.
+                before = len(self.checks)
+                self.run_step(step)
+                self.checks[before:] = [c for c in self.checks[before:] if c["ok"]]
+                if not self.steps[-1]["ok"]:
+                    result.update(ok=False, why=self.steps[-1]["why"])
                     break
             else:
                 self.run_step(step)
@@ -2494,6 +2750,27 @@ def _cmdlines():
     return found
 
 
+def _proc_table():
+    """(pid, comm, state) of every process this namespace sees."""
+    table = []
+    for pid in filter(str.isdigit, os.listdir("/proc")):
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                text = f.read()
+        except OSError:
+            continue
+        comm = text[text.index("(") + 1 : text.rindex(")")]
+        table.append((int(pid), comm, text[text.rindex(")") + 2 :].split()[0]))
+    return table
+
+
+def left_processes(table, harness):
+    """What in the sandbox's process table isn't in `harness`, the pids that were
+    up before the first launch: ["pid comm"]. All of it the game's, since the
+    driver runs one tool at a time and asks between them. Zombies are gone."""
+    return [f"{pid} {comm}" for pid, comm, state in sorted(table) if pid not in harness and state != "Z"]
+
+
 def _device_nodes():
     nodes = []
     if os.path.isdir("/dev/dri"):
@@ -2535,6 +2812,11 @@ LIVE_SHOT_SECS = 2.5
 # few polls; an animated one never will, and this is what finding out costs.
 LIVE_SETTLE_MAX = 30.0
 LIVE_SETTLE_CAP = 600.0
+# A clean-stop checkpoint's request to the supervisor, and its answer, in the
+# socket's dir; and how long a copy of the disk may take (a full one, on ext4).
+LIVE_DISK_REQUEST = "keep-disk.request"
+LIVE_DISK_REPLY = "keep-disk.reply"
+LIVE_DISK_SECS = 900.0
 LIVE_INPUTS = ("key", "type", "hold", "click", "click_here", "move_to", "move_by", "scroll")
 LIVE_STEP_CMDS = ("screenshot", "wait", "key", "type", "hold", "click", "move_to", "move_by", "scroll")
 
@@ -2561,7 +2843,8 @@ def live_load_session(path, manifest, live):
             return json.load(f)
     session = {
         "id": live["id"],
-        "manifest": manifest,
+        # Its own copy: the driver's own has its [exit] changed at a stop.
+        "manifest": json.loads(json.dumps(manifest)),
         "max_gap": live["max_gap"],
         "match_pct": live["match_pct"],
         "path": [],
@@ -2651,12 +2934,32 @@ def live_count_steps(path):
     return sum(1 for e in path if "step" in e)
 
 
+def live_restore_plan(path, life):
+    """What a restore to a checkpoint's `path` does (#252): (path, disk, keep).
+    `disk`: the last disk a clean stop kept on the path, or None: the launch's,
+    with everything to replay. On a kept disk the next life's launch is the
+    relaunch after it, so the replay starts behind that: the path's first `keep`
+    entries stand. A checkpoint with no relaunch after it yet gets one."""
+    path = json.loads(json.dumps(path))
+    at = next((i for i in range(len(path) - 1, -1, -1) if path[i].get("disk")), None)
+    if at is None:
+        return path, None, 0
+    disk = path[at]["disk"]
+    for i in range(at + 1, len(path)):
+        if "relaunch" in path[i].get("step", {}):
+            return path, disk, i + 1
+    path.append({"step": {"relaunch": True}, "gap": 0.0, "life": life})
+    return path, disk, len(path)
+
+
 def live_replay_secs(path, session):
     """About how long a replay of `path` takes after the window is up."""
     secs = 0.0
-    for e in path:
+    _, disk, keep = live_restore_plan(path, 0)
+    for e in path[keep:] if disk else path:
         if "step" not in e:
             continue
+        secs += e.get("relaunch_secs", 0.0)
         secs += live_kept_gap(e, session["max_gap"])
         step = e["step"]
         if "wait" in step:
@@ -2671,10 +2974,13 @@ def live_replay_secs(path, session):
 
 
 def live_last_shot(path):
-    """The last screenshot on the path, and how many inputs came after it."""
+    """The last screenshot on the path, and how many inputs came after it. None
+    past a relaunch: another launch's screen says nothing of what an input did."""
     inputs = 0
     for e in reversed(path):
         step = e.get("step", {})
+        if "relaunch" in step:
+            return None, 0
         if "screenshot" in step:
             return step["screenshot"], inputs
         if any(k in step for k in LIVE_INPUTS):
@@ -2821,6 +3127,8 @@ def live_export(session):
     ended = session.get("ended") or {}
     if not ended and session.get("game_exit"):
         ended = {"how": "self", "code": session["game_exit"]["code"]}
+    # A relaunch step's quit goes by these too, whichever way the last one ends.
+    relaunches = any("relaunch" in e.get("step", {}) for e in session["path"])
     out += ["", "[exit]"]
     if ended.get("how") == "self":
         out += ['how = "self"', f"wait_secs = {_toml(max(m['exit']['wait_secs'], 60))}"]
@@ -2828,6 +3136,10 @@ def live_export(session):
             out.append(f"code = {ended['code']}")
     else:
         out += ['how = "signal"']
+        if relaunches:
+            out.append(f"wait_secs = {_toml(max(m['exit']['wait_secs'], 60))}")
+            if m["exit"]["code"]:
+                out.append(f"code = {m['exit']['code']}")
 
     steps = []
     comments = []
@@ -2846,10 +3158,15 @@ def live_export(session):
 
     for e in session["path"]:
         if "mark" in e:
-            comments.append(f"# checkpoint {e['name']!r}")
+            kept = ": a clean stop, its disk kept" if e.get("disk") else ""
+            comments.append(f"# checkpoint {e['name']!r}{kept}")
             continue
         wait += live_kept_gap(e, max_gap)
         step = e["step"]
+        if "relaunch" in step:
+            emit(step)
+            last_shot, inputs = None, 0
+            continue
         if e.get("manifest"):
             # A step of the manifest the session started from: as written, with
             # its own checks; the gaps a replay added are all that's kept.
