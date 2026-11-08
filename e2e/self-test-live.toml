@@ -8,7 +8,8 @@
 # that back. Keys: r turns it red, b blue, q quits (exit 0), a starts an
 # animation (a new colour every 0.3 s, never the same one twice running, so no
 # poll rate lines up with it) and s stops it, l quits and leaves a process
-# behind. A live session takes only [window] and [exit] from here; the step is
+# behind, k turns it yellow and drops every key for the next 6 s (a screen that's
+# up before the game takes input, #257). A live session takes only [window] and [exit] from here; the step is
 # for the manifest check, and a plain run of this passes too.
 title = "self-test: live"
 build_command = ["bash", "-c", '''
@@ -37,6 +38,7 @@ command = ["xterm", "-bg", "white", "-fg", "black", "-e", "bash", "-c", '''
     r) printf "\033]11;#c02020\007" ;;
     b) printf "\033]11;#2040c0\007" ;;
     d) touch "$d/dirt" ;;
+    k) printf "\033]11;#c0c020\007"; sleep 6; while IFS= read -rsn1 -t 0.05 k; do :; done ;;
     q) touch "$d/quit"; exit 0 ;;
     l) touch "$d/quit"; setsid sleep 60 </dev/null >/dev/null 2>&1 & sleep 0.5; exit 0 ;;
     esac

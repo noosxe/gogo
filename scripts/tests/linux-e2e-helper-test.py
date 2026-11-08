@@ -1273,6 +1273,95 @@ class LiveFromManifest(unittest.TestCase):
                          round(2 * helper.LIVE_SHOT_SECS + 3.0 + 1.5))
 
 
+class Frames(unittest.TestCase):
+    IMAGE = (3, 2, 3, [bytes(range(9)), bytes(range(9, 18))])
+
+    def test_ppm_round_trip(self):
+        self.assertEqual(helper.parse_ppm(helper.ppm_bytes(self.IMAGE)), self.IMAGE)
+
+    def test_ppm_header_with_a_data_byte_like_whitespace(self):
+        image = (1, 1, 3, [b"\n \n"])
+        self.assertEqual(helper.parse_ppm(helper.ppm_bytes(image)), image)
+
+    def test_a_bad_ppm_is_refused(self):
+        for data in (b"", b"P5\n1 1\n255\nxxx", b"P6\n2 2\n255\nshort", b"P6\n1 1\n65535\nxxxxxx"):
+            with self.assertRaises(ValueError):
+                helper.parse_ppm(data)
+
+    def test_write_png_reads_back(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "x.png")
+            helper.write_png(path, self.IMAGE)
+            self.assertEqual(helper.read_png(path), self.IMAGE)
+
+
+class Leftovers(unittest.TestCase):
+    def proc(self, root, pid, environ=b"", cmdline=b"", comm="x\n", ns=None):
+        d = os.path.join(root, pid)
+        os.makedirs(os.path.join(d, "ns"))
+        for name, data in (("environ", environ), ("cmdline", cmdline), ("comm", comm.encode())):
+            with open(os.path.join(d, name), "wb") as f:
+                f.write(data)
+        if ns:
+            os.symlink(ns, os.path.join(d, "ns/pid"))
+
+    def test_what_counts(self):
+        with tempfile.TemporaryDirectory() as root:
+            marks = ["GOGO_E2E_RUN=r1", "WINEPREFIX=/p"]
+            self.proc(root, "10", environ=b"A=1\0GOGO_E2E_RUN=r1\0B=2\0", comm="wine\n")
+            self.proc(root, "11", environ=b"WINEPREFIX=/p/other\0GOGO_E2E_RUN=r10\0")  # not whole entries
+            self.proc(root, "12", cmdline=b"python3\0--dir\0/scratch/run/x\0", comm="py\n")
+            self.proc(root, "13", cmdline=b"python3\0/scratch/runner\0")
+            self.proc(root, "14", ns="pid:[7]", comm="sway\n")
+            self.proc(root, "15", ns="pid:[8]")
+            self.proc(root, "16", environ=b"WINEPREFIX=/p\0")  # excluded
+            os.makedirs(os.path.join(root, "self"))
+            got = helper.leftovers(marks, "/scratch/run/", "pid:[7]", {"16"}, proc=root)
+            self.assertEqual(sorted(got), ["10 wine", "12 py", "14 sway"])
+
+    def test_a_process_that_went_away_is_no_error(self):
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "20"))
+            self.assertEqual(helper.leftovers(["A=1"], "/run/", "", set(), proc=root), [])
+
+
+class FastReplay(unittest.TestCase):
+    @staticmethod
+    def wait(secs, gap=0.0):
+        return {"step": {"wait": secs}, "gap": gap}
+
+    @staticmethod
+    def shot(name, gap=0.0, **more):
+        return {"step": {"screenshot": name}, "gap": gap, **more}
+
+    def test_a_wait_leads_up_to_the_next_shot_unless_an_input_comes_first(self):
+        key = {"step": {"key": "a"}, "gap": 0.0}
+        path = [self.wait(5), {"mark": "checkpoint", "name": "x"}, self.wait(1), self.shot("a"), self.wait(5), key, self.shot("b")]
+        self.assertEqual(helper.live_wait_target(path, 0), 3)
+        self.assertEqual(helper.live_wait_target(path, 3), 3)
+        self.assertIsNone(helper.live_wait_target(path, 4))
+        self.assertIsNone(helper.live_wait_target(path, 5))
+        self.assertEqual(helper.live_wait_target(path, 6), 6)
+        self.assertIsNone(helper.live_wait_target([self.wait(5)], 0))
+
+    def test_the_run_counts_gaps_and_waits(self):
+        path = [self.wait(5, gap=20.0), {"mark": "checkpoint", "name": "x"}, self.shot("a", gap=2.0)]
+        self.assertEqual(helper.live_wait_run_secs(path, 0, 2, 10.0), 17.0)
+
+    def test_arriving_is_tighter_than_matching(self):
+        entry = self.shot("a", moving_pct=2.0, stats={"nonblack_pct": 80.0})
+        self.assertEqual(helper.live_arrived_allowance(entry, 15.0), 4.0)
+        self.assertEqual(helper.live_match_allowance(entry, 15.0), (17.0, False))
+        # And never looser than the match itself.
+        entry = self.shot("a", moving_pct=1.0, stats={"nonblack_pct": 80.0})
+        self.assertEqual(helper.live_arrived_allowance(entry, 1.2), 2.2)
+
+    def test_a_moving_or_black_frame_cant_say(self):
+        self.assertIsNone(helper.live_arrived_allowance(self.shot("a", moving_pct=20.0, stats={"nonblack_pct": 80.0}), 15.0))
+        self.assertIsNone(helper.live_arrived_allowance(self.shot("a", moving_pct=0.0, stats={"nonblack_pct": 0.0}), 15.0))
+        self.assertIsNone(helper.live_arrived_allowance(self.shot("a", moving_pct=0.0), 15.0))
+
+
 class LiveSocket(unittest.TestCase):
     """The control socket: bound through the dir's fd (a long path is fine), ours
     only, one JSON line each way."""
