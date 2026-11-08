@@ -75,6 +75,10 @@
 #   move_by DX DY | scroll NOTCHES | wait SECS
 #   settle [--max SECS]           until the screen holds still (wait_settled), or
 #                                 "settled": false after SECS (default 30)
+#   press_until KEY --every SECS --max PRESSES (--change PCT | --marked X Y W H COLOR MIN [TOL])
+#                                 a key until the screen says it took, or exit 1
+#   wait_until --every SECS --max LOOKS --marked X Y W H COLOR MIN [TOL]
+#                                 no key: until the region has the colour, or exit 1
 #   checkpoint NAME               mark where it is; restore NAME goes back there.
 #                                 After the game quit by itself: keeps the disk too
 #   restore NAME [--wait SECS] [--full-waits]
@@ -1842,6 +1846,18 @@ cmd_live() {
         case "$smax" in '' | *[!0-9.]* | *.*.*) die "settle --max wants a number of seconds" 2 ;; esac
         GOGO_E2E_LIVE_DIR="$dir" helper live-call "$(awk -v s="$smax" 'BEGIN { print s + 120 }')" settle "$@"
         ;;
+    press_until | wait_until)
+        # As long as its limit can take, however far off; the driver checks the words.
+        local pevery=1 pmax=1000 pi
+        for ((pi = 1; pi < $#; pi++)); do
+            case "${!pi}" in
+            --every) local pn=$((pi + 1)); pevery="${!pn}" ;;
+            --max) local pn=$((pi + 1)); pmax="${!pn}" ;;
+            esac
+        done
+        case "$pevery$pmax" in *[!0-9.]*) die "$cmd: --every and --max want numbers" 2 ;; esac
+        GOGO_E2E_LIVE_DIR="$dir" helper live-call "$(awk -v e="$pevery" -v m="$pmax" 'BEGIN { print int(e * m + m * 2 + 120) }')" "$cmd" "$@"
+        ;;
     *)
         [ -n "$dir" ] && [ -S "$dir/ctl.sock" ] || {
             jq -c '{ok:false, error:"not ready: \(.state): \(.detail) (status --wait)"}' "$state"
@@ -2368,6 +2384,7 @@ st_live() { # self-test dir
     st_live_from "$base"
     st_live_fast "$base"
     st_live_clean "$base"
+    st_live_press "$base"
     "$SELF" cleanup --stop-live >/dev/null 2>&1 || true
 }
 
@@ -2732,6 +2749,107 @@ EOF
     code=0
     "$SELF" live "$ST_LID" stop >"$out/stdout" 2>>"$out/client.stderr" || code=$?
     st_assert_clean live-from-bad "$out" "$code" 0
+}
+
+# press_until (#266, #262), on the fake game: k drops every key for 6 s, as an
+# intro does. The same step in a live session and its restore, its export, a
+# --from-manifest and a run; and one that runs out, which stops each of them.
+st_live_press() { # self-test dir
+    local base="$1" out code summary m="$REPO/e2e/self-test-live.toml"
+    log "self-test: press_until"
+    out="$base/live-press"
+    ST_LOUT="$out"
+    st_live_start "$out"
+    [ -n "$ST_LID" ] || return 0
+    st_live_cmd press-ready '.state == "ready"' status --wait 60
+    st_live_cmd press-white '.ok' screenshot white
+    st_live_cmd press-deaf '.ok' key k
+    st_live_cmd press-change '.ok and .presses >= 2 and .seen_pct >= 30 and .step.press_until.max == 15' \
+        press_until r --every 1 --max 15 --change 30
+    st_live_cmd press-marked '.ok and .presses == 1 and .seen_pct >= 50 and .step.press_until.marked.color == "#2040c0"' \
+        press_until b --every 0.5 --max 5 --marked 0 0 100 100 '#2040c0' 50
+    st_live_cmd press-until '.ok and .presses == 0 and .step.wait_until.max == 3' wait_until --every 0.5 --max 3 --marked 0 0 100 100 '#2040c0' 50
+    code=0
+    ST_LR="$("$SELF" live "$ST_LID" wait_until --every 0.2 --max 2 --marked 0 0 100 100 '#00ff00' 50 2>>"$out/client.stderr")" || code=$?
+    { [ "$code" = 1 ] && jq -e '(.ok | not) and .presses == 2' <<<"$ST_LR" >/dev/null; } || st_fail "wait_until: running out: exit $code: $ST_LR"
+    # Already there: not one press, or r would turn it red.
+    st_live_cmd press-there '.ok and .presses == 0' press_until r --every 0.5 --max 5 --marked 10 10 50 50 '#2040c0' 50
+    code=0
+    ST_LR="$("$SELF" live "$ST_LID" press_until x --every 0.5 --max 2 --change 30 2>>"$out/client.stderr")" || code=$?
+    { [ "$code" = 1 ] && jq -e '(.ok | not) and .presses == 2 and (.error | test("never said so")) and (.path | test("press-until-.*failed"))' <<<"$ST_LR" >/dev/null &&
+        [ -s "$(jq -r .path <<<"$ST_LR")" ]; } || st_fail "press_until: running out: exit $code: $ST_LR"
+    st_live_cmd press-goes-on '.state == "ready" and .game.running' status
+    st_live_cmd press-cp '.ok' checkpoint pressed
+    st_live_cmd press-restore '.state == "ready" and .life == 2 and .last_replay.ok
+        and (.last_replay.timeline | map(select(.step == "press_until r")) | .[0].presses >= 2)' restore pressed --wait 180
+    st_live_cmd press-quit '.ok' type q
+    st_live_cmd press-quit-wait '.game_running | not' wait 1
+    "$SELF" live "$ST_LID" export >"$out/export.toml" 2>>"$out/client.stderr" || st_fail "press_until: export failed"
+    # What passed, as given; what ran out, as the plain keys it was.
+    { [ "$(grep -c '^press_until = ' "$out/export.toml")" = 3 ] && [ "$(grep -c '^wait_until = ' "$out/export.toml")" = 1 ] && grep -q '^press_until = { key = "r", change = 30, every = 1, max = 15 }$' "$out/export.toml" &&
+        [ "$(grep -c '^key = "x"$' "$out/export.toml")" = 2 ]; } || st_fail "press_until: the export: $(cat "$out/export.toml")"
+    code=0
+    "$SELF" live "$ST_LID" stop >"$out/stdout" 2>>"$out/client.stderr" || code=$?
+    st_assert_clean live-press "$out" "$code" 0
+    mkdir -p "$base/press-export"
+    code=0
+    env --default-signal=INT,TERM "$SELF" run self-test --manifest "$out/export.toml" --out "$base/press-export" \
+        >"$base/press-export/stdout" 2>"$base/press-export/stderr" || code=$?
+    st_assert_clean press-export "$base/press-export" "$code" 0
+
+    # --from-manifest, and a run: through the same step runner.
+    sed '/^\[\[step\]\]/,$d' "$m" >"$base/press.toml"
+    cp "$base/press.toml" "$base/press-out.toml"
+    cat >>"$base/press.toml" <<'EOF'
+[[step]]
+key = "k"
+[[step]]
+wait_until = { every = 0.5, max = 20, marked = { x = 10, y = 10, w = 50, h = 50, color = "#c0c020", min = 50 } }
+[[step]]
+press_until = { key = "b", change = 30, every = 1, max = 15 }
+[[step]]
+screenshot = "blue"
+[[step]]
+type = "q"
+EOF
+    cat >>"$base/press-out.toml" <<'EOF'
+[[step]]
+press_until = { key = "x", change = 30, every = 0.5, max = 2 }
+[[step]]
+screenshot = "never"
+EOF
+    out="$base/live-press-from"
+    ST_LOUT="$out"
+    mkdir -p "$out"
+    ST_LID="$("$SELF" live start self-test --manifest "$base/press.toml" --from-manifest --to-shot blue --out "$out" \
+        2>>"$out/start.stderr" | tail -n 1)"
+    [ -n "$ST_LID" ] || { st_fail "press_until: no --from-manifest session: $(cat "$out/start.stderr")"; return 0; }
+    st_live_cmd press-from '.state == "ready" and .from_manifest.ok and .from_manifest.done == 4' status --wait 90
+    st_live_cmd press-from-quit '.ok' type q
+    st_live_cmd press-from-wait '.game_running | not' wait 1
+    code=0
+    "$SELF" live "$ST_LID" stop >"$out/stdout" 2>>"$out/client.stderr" || code=$?
+    st_assert_clean live-press-from "$out" "$code" 0
+
+    out="$base/press-pass"; mkdir -p "$out"
+    code=0
+    env --default-signal=INT,TERM "$SELF" run self-test --manifest "$base/press.toml" --out "$out" \
+        >"$out/stdout" 2>"$out/stderr" || code=$?
+    st_assert_clean press-pass "$out" "$code" 0
+    summary="$(tail -n 1 "$out/stdout")"
+    jq -e '.ok and (.checks | any(.name == "wait_until_1" and .ok)) and (.checks | any(.name == "press_until_2_b" and .ok)) and (.steps | any(.action == "press_until" and .presses >= 2))' "$summary" >/dev/null ||
+        st_fail "press_until: the run: $(jq -c '{failed, steps}' "$summary" 2>/dev/null)"
+
+    # Running out fails the run clearly, and the steps after it never run.
+    out="$base/press-out"; mkdir -p "$out"
+    code=0
+    env --default-signal=INT,TERM "$SELF" run self-test --manifest "$base/press-out.toml" --out "$out" \
+        >"$out/stdout" 2>"$out/stderr" || code=$?
+    st_assert_clean press-out "$out" "$code" 1
+    summary="$(tail -n 1 "$out/stdout")"
+    jq -e '(.failed | index("press_until_1_x")) and (.steps | any(.action == "screenshot") | not)
+        and (.checks | any(.name == "finished" and .ok and (.detail | test("press_until failed"))))' "$summary" >/dev/null ||
+        st_fail "press_until: running out in a run: $(jq -c '{failed, steps}' "$summary" 2>/dev/null)"
 }
 
 cmd_self_test() {

@@ -157,6 +157,71 @@ class Manifest(unittest.TestCase):
             m["steps"][7], {"expect_change": {"from": "a", "to": "b", "min": 3.0}}
         )
 
+    def test_press_until(self):
+        m = helper.parse_manifest(
+            """
+            gogid = 1
+            [[step]]
+            press_until = { key = "space", change = 20, every = 2, max = 90 }
+            [[step]]
+            press_until = { key = "Down", every = 0.5, max = 8, marked = { x = 9, y = 57.5, w = 21.5, h = 6.5, color = "#F0F040", min = 1 } }
+            [[step]]
+            press_until = { key = "Up", every = 1, max = 1, marked = { x = 0, y = 0, w = 100, h = 100, color = "#000000", tol = 5, min = 50 } }
+            """
+        )
+        self.assertEqual(m["steps"][0], {"press_until": {"key": "space", "change": 20.0, "every": 2.0, "max": 90}})
+        self.assertEqual(
+            m["steps"][1]["press_until"]["marked"],
+            {"x": 9.0, "y": 57.5, "w": 21.5, "h": 6.5, "color": "#f0f040", "tol": helper.MARKED_TOL, "min": 1.0},
+        )
+        self.assertEqual(m["steps"][2]["press_until"]["marked"]["tol"], 5)
+
+    def test_wait_until(self):
+        box = 'marked = { x = 1, y = 1, w = 5, h = 5, color = "#ffffff", min = 1 }'
+        m = helper.parse_manifest(f"gogid = 1\n[[step]]\nwait_until = {{ every = 1, max = 3, {box} }}\n")
+        self.assertNotIn("key", m["steps"][0]["wait_until"])
+        for table in ("every = 1, max = 3, change = 5", f'key = "a", every = 1, max = 3, {box}', f"max = 3, {box}", f"every = 1, {box}"):
+            with self.subTest(table), self.assertRaises(helper.ManifestError):
+                helper.parse_manifest(f"gogid = 1\n[[step]]\nwait_until = {{ {table} }}\n")
+
+    def test_press_until_is_checked(self):
+        box = 'x = 1, y = 1, w = 5, h = 5, color = "#ffffff", min = 1'
+        for table in (
+            'key = "space", every = 1, max = 3',  # no condition
+            f'key = "space", change = 5, marked = {{ {box} }}, every = 1, max = 3',  # two
+            'key = "space", change = 5, max = 3',  # no every
+            'key = "space", change = 5, every = 1',  # no limit: never guessed
+            'key = "nope", change = 5, every = 1, max = 3',
+            'change = 5, every = 1, max = 3',
+            'key = "space", change = 0, every = 1, max = 3',
+            'key = "space", change = 101, every = 1, max = 3',
+            'key = "space", change = 5, every = 0, max = 3',
+            'key = "space", change = 5, every = 1, max = 0',
+            'key = "space", change = 5, every = 1, max = 1.5',
+            'key = "space", change = 5, every = 1, max = 3, soon = true',
+            'key = "a", every = 1, max = 3, marked = { x = 1, y = 1, w = 5, h = 5, min = 1 }',
+            'key = "a", every = 1, max = 3, marked = { x = 1, y = 1, w = 5, h = 5, color = "red", min = 1 }',
+            'key = "a", every = 1, max = 3, marked = { x = 1, y = 1, w = 0, h = 5, color = "#ffffff", min = 1 }',
+            'key = "a", every = 1, max = 3, marked = { x = 90, y = 1, w = 20, h = 5, color = "#ffffff", min = 1 }',
+            'key = "a", every = 1, max = 3, marked = { x = 1, y = 1, w = 5, h = 5, color = "#ffffff", min = 0 }',
+            f'key = "a", every = 1, max = 3, marked = {{ {box}, tol = 300 }}',
+        ):
+            with self.subTest(table), self.assertRaises(helper.ManifestError):
+                helper.parse_manifest(f"gogid = 1\n[[step]]\npress_until = {{ {table} }}\n")
+
+    def test_marked_pct_is_of_the_region_in_the_window(self):
+        # A 100x100 output, the window at (0, 50) and 100x50; its top half blue-ish.
+        def pixel(x, y):
+            return (10, 20, 240) if 50 <= y < 75 else (0, 0, 0)
+
+        img = image(100, 100, pixel)
+        rect = {"x": 0, "y": 50, "width": 100, "height": 50}
+        marked = {"x": 0, "y": 0, "w": 100, "h": 100, "color": "#0000ff", "tol": 40, "min": 1}
+        self.assertEqual(helper.marked_pct(img, rect, marked), 50.0)
+        self.assertEqual(helper.marked_pct(img, rect, dict(marked, h=50)), 100.0)
+        self.assertEqual(helper.marked_pct(img, rect, dict(marked, y=50, h=50)), 0.0)
+        self.assertEqual(helper.marked_pct(img, rect, dict(marked, tol=5)), 0.0)
+
     def test_env_and_exit_code(self):
         m = helper.parse_manifest(
             'gogid = 1\n[env]\nDXVK_LOG_LEVEL = "info"\n[exit]\ncode = 255\n[[step]]\nwait = 1\n'
@@ -1024,6 +1089,42 @@ class LiveExport(unittest.TestCase):
         m = helper.parse_manifest(text)
         self.assertEqual(m["override"], {"env": {"A": "1"}, "extra_args": ["-skip"]})
         self.assertEqual((m["window"]["width"], m["window"]["height"]), (800, 600))
+
+    def test_press_until_exports_as_it_was_given(self):
+        marked = {"x": 9.0, "y": 57.5, "w": 21.5, "h": 6.5, "color": "#f0f040", "tol": 40, "min": 1.0}
+        session = live_session(
+            [
+                shot("a"),
+                {"step": {"press_until": {"key": "space", "change": 20.0, "every": 2.0, "max": 90}}, "gap": 0.0, "press_secs": 31.0},
+                {"step": {"press_until": {"key": "Down", "marked": marked, "every": 1.0, "max": 8}}, "gap": 3.0, "press_secs": 2.0},
+                shot("b", since="a", change=60.0, inputs=2),
+            ]
+        )
+        steps = helper.parse_manifest(helper.live_export(session))["steps"]
+        self.assertEqual(steps[1], {"press_until": {"key": "space", "change": 20.0, "every": 2.0, "max": 90}})
+        self.assertEqual(steps[2], {"wait": 3.0})
+        self.assertEqual(steps[3]["press_until"]["marked"], marked)
+        # An input: the screenshot after it gets its check.
+        self.assertEqual(steps[5]["expect_change"]["from"], "a")
+        self.assertEqual(helper.live_replay_secs(session["path"], session), 41)
+
+    def test_live_press_args(self):
+        def number(text, what):
+            return float(text)
+
+        self.assertEqual(
+            helper.live_press_args(["space", "--every", "2", "--max", "90", "--change", "20"], number),
+            {"key": "space", "every": 2.0, "max": 90.0, "change": 20.0},
+        )
+        got = helper.live_press_args(["Down", "--marked", "9", "57", "21", "6", "#f0f040", "1", "30", "--every", "1", "--max", "8"], number)
+        self.assertEqual(got["marked"], {"x": 9.0, "y": 57.0, "w": 21.0, "h": 6.0, "color": "#f0f040", "min": 1.0, "tol": 30.0})
+        self.assertEqual(
+            helper.live_raw_step("wait_until", ["--every", "1", "--max", "3", "--marked", "1", "2", "3", "4", "#ffffff", "5"], None),
+            {"wait_until": {"every": 1, "max": 3, "marked": {"x": 1, "y": 2, "w": 3, "h": 4, "color": "#ffffff", "min": 5}}},
+        )
+        for bad in ([], ["--every", "1"], ["a", "--marked", "1", "2"], ["a", "--soon"], ["a", "--every"]):
+            with self.subTest(bad), self.assertRaises(helper.LiveError):
+                helper.live_press_args(bad, number)
 
     def test_settle_exports_as_wait_settled_or_a_plain_wait(self):
         text = helper.live_export(live_session([
