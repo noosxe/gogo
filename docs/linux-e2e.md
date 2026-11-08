@@ -33,6 +33,9 @@ scripts/linux-e2e.sh run 1423049311 --installer ~/backups/cyberpunk/setup_cyberp
 scripts/linux-e2e.sh run 1423049311 --installer ~/backups/cyberpunk/setup_cyberpunk_2077.exe --reuse-install
 ```
 ```bash
+scripts/linux-e2e.sh live start 1423049311 --installer ~/backups/cyberpunk/setup_cyberpunk_2077.exe --reuse-install
+```
+```bash
 scripts/linux-e2e.sh self-test
 ```
 ```bash
@@ -57,6 +60,8 @@ It needs `nix` and nothing else, and resolves its own tools, so there's no need 
 | `--no-cache` | download Proton, umu's runtime and the game afresh, into scratch |
 | `--reuse-install` | run on a copy of an installed base with the same inputs, with no build, or build and save one ([below](#reusing-an-installed-game)). For manifest rounds only: the final run before a PR builds afresh |
 | `--out DIR` | results root, default `target/linux-e2e/results` |
+
+`live start` takes these too, and its own ([Live sessions](#live-sessions)).
 
 **Login.** The build uses your usual keyring login, through the session bus, which only the
 build's sandbox sees. It needs `gogo login` done once. Tokens are never printed.
@@ -165,7 +170,10 @@ as a `flock` on fd 9, which no sandbox inherits.
   has the lock and removes it on the way out. The note is information only: a SIGKILLed run
   leaves a stale one (the log says when its pid is gone), and the flock alone decides.
 - **`cleanup`** takes the same lock but doesn't wait: with a run going, in any checkout, it
-  names the holder and exits 3, so it never sweeps or prunes under a run.
+  names the holder and exits 3, so it never sweeps or prunes under a run. Before that, it
+  stops orphaned [live sessions](#the-lock-the-limits-and-cleanup).
+- **A live session** holds it from its build to its `stop`, bounded by its idle limit and hard
+  cap, and a waiting run's log says so ([below](#the-lock-the-limits-and-cleanup)).
 - **Self-test.** `self-test` uses a lock dir of its own (`GOGO_E2E_LOCK_DIR`, under
   `target/linux-e2e/`), so it never waits for a real run. It covers two runs on one lock
   (the second waits and names the first, then goes), `cleanup` refusing meanwhile, and a
@@ -263,7 +271,206 @@ removes saves that never finished. `cleanup --prune-installed <name>` removes on
 name it lists, and `--prune-installed all` all of them.
 
 **Continuing from a launched state** (the EULA accepted, a menu reached) isn't this: a
-base is always pre-launch. That's #241's checkpoints, which sit on top of these copies.
+base is always pre-launch. A [live session](#live-sessions)'s checkpoints are routes from
+that state, and its restores roll a copy back to it.
+
+## Live sessions
+
+A `run` proves a manifest; a **live session** is for writing one. The game keeps running in
+the same sandbox while an agent drives it one command at a time: a screenshot, a key, a
+click, a look at the PNG, the next key. When it gets lost, it restores a checkpoint. When
+it has the route, `export` writes that route as a manifest, and a fresh `run` of it is the
+proof, as always. Use one when the next step of a manifest is a guess: a menu nobody has
+mapped, a prompt that may or may not come up, a key that may not land. A blind edit costs a
+whole round each time (Cyberpunk 2077: 6.5 min with `--reuse-install`, 13–15 without).
+
+```bash
+scripts/linux-e2e.sh live start 1423049311 --installer ~/backups/cyberpunk/setup_cyberpunk_2077.exe \
+    --gpu renderD129 --reuse-install --arg --launcher-skip --arg -skipStartScreen
+```
+```bash
+scripts/linux-e2e.sh live <id> status --wait 900
+```
+```bash
+scripts/linux-e2e.sh live <id> screenshot title
+```
+```bash
+scripts/linux-e2e.sh live <id> key space
+```
+```bash
+scripts/linux-e2e.sh live <id> checkpoint agreed
+```
+```bash
+scripts/linux-e2e.sh live <id> restore agreed
+```
+```bash
+scripts/linux-e2e.sh live <id> export > /tmp/route.toml
+```
+```bash
+scripts/linux-e2e.sh live <id> stop
+```
+
+`live start` takes `run`'s options (but `--secs`) and returns at once with the session's id:
+the build or the copy of a base goes on in the background, and `status --wait SECS` says
+when the game's window is up. The manifest, `e2e/<gogid>.toml` or `--manifest`, is
+optional, and only its `[window]`, `[env]`, `[override]` and `[exit]` count: the session
+finds the steps. A game with no manifest yet gets the defaults.
+
+| `live start` option | |
+|---|---|
+| `--env K=V`, `--arg A` | into the session's `[override]` (#250): gogo's `linux-app env set` and `linux-app args`, before every launch. Repeatable; the export keeps them |
+| `--idle-secs N` | stop after N s with no command. Default 900 |
+| `--max-secs N` | stop N s after taking the cache lock, at the latest. Default 5400 |
+| `--max-gap N` | the gaps between commands that the replay and the export keep, cut to N s. Default 10 |
+| `--match-pct N` | a replayed screenshot matches the recorded one when at most N% of its pixels differ. Default 15 |
+
+| `live <id>` command | Answers (JSON) |
+|---|---|
+| `status [--wait SECS]` | its state, the game's, the window, the checkpoints and the idle time left; with `--wait`, once it's ready, or exit 4 when it's still busy (building, launching, replaying) |
+| `screenshot [NAME]` | the PNG's path under `target/`, `change_pct` against the last screenshot (`since`), and `moving_pct`: how much a second frame half a second later differs, so a video or an animation shows as one. A name already taken gets `-2` |
+| `key KEYSYM`, `type TEXT`, `hold KEYSYM MS` | as the manifest's `key` and `type` ([below](#manifests)); `hold` keeps a key down for MS ms |
+| `click [X Y]`, `move_to X Y` | X Y in pixels of the screenshot, or `N%` of the window. `click` with none clicks where the pointer is (`click_here`) |
+| `move_by DX DY`, `scroll NOTCHES`, `wait SECS` | as the manifest's |
+| `checkpoint NAME` | a screenshot (`cp-NAME`), and the path to here kept under NAME, with about how long its replay takes |
+| `restore NAME [--wait SECS]` | the game closed, the disk rolled back, a relaunch and a replay to NAME; answers once it's done, with `last_replay` |
+| `log [game\|run\|launch\|sway\|dxvk\|vkd3d\|proton] [--tail N]` | a log's last lines: `game.out` (or its DXVK, VKD3D or Proton/Wine lines), the launcher's run log or `launch.log`, sway's |
+| `export` | the route so far, as a manifest, on stdout. Works after `stop` too |
+| `stop` | the game closed (or its own exit noted, after a Quit), doctor, teardown, `nothing_left` and `scratch_deleted`, and the summary, as `run` prints it |
+
+`live list` lists the sessions on this cache. Exit codes: `0` ok, `1` the command failed
+(the session goes on), `2` usage, `3` no such session, `4` not ready yet.
+
+### Lives, checkpoints and restore
+
+A process with a Vulkan device, Wine's server and pressure-vessel's containers can't be
+frozen and thawed (CRIU doesn't do GPU contexts), so a checkpoint is a **route, not a
+process**: the session keeps the disk as it was right before the first launch, and the
+list of steps since. Each launch is a **life**: its own sandbox, sway, Xwayland, sound
+server and isolation checks. `restore NAME` ends the life (the launcher's own `TERM`
+teardown), and the supervisor sweeps, rolls the game's `gogo`, `home` and `xdg` back to the
+launch (`restore_base`, the same copy `--reuse-install` makes), and starts the next life,
+whose driver replays NAME's steps before it listens again.
+
+- **The disk it rolls back to** is the installed base itself when the session runs on one
+  (`--reuse-install`: only ever read), or else a snapshot in scratch taken before the first
+  launch: reflinks, seconds and no space on btrfs or XFS; a full copy on ext4, logged.
+- **Why the launch, not the moment of the checkpoint.** A snapshot of a running game is
+  what a power cut leaves: Wine writes the registry when it likes, a game its settings when
+  it quits. And a game relaunched on a disk that remembers a screen (an accepted agreement)
+  takes another way to the same menu, maybe with the focus elsewhere: the session would then
+  be somewhere the exported manifest never goes. From the launch's disk, the replay is the
+  route the export writes, so a replay that matches is a dry run of the export.
+- **The replay** keeps the export's timing: each gap cut to `--max-gap`, each `wait` in
+  full. At each screenshot it retakes the frame until at most `--match-pct`% of it differs
+  from the one recorded, for up to 30 s more; a late match lengthens the wait before it,
+  for the next replay and the export too. The first that never matches stops the replay
+  there: the route ends at the last step that matched, `status` says why
+  (`last_replay.why`, with both PNGs), and the session is ready from that point.
+  A recorded frame that was black isn't compared. A frame's own motion (`moving_pct`) is
+  allowed on top of `--match-pct`; one that moved by `--match-pct` or more in half a second
+  (a video) is only checked for a picture, since no two frames of it match.
+- **A screenshot of a screen that isn't settled** is a trap: Cyberpunk's intro plays for a
+  varying time before the agreement comes up. A shot taken while it may still be either
+  makes the replay stop there, rightly, as the export would fail at it. Take the shot after
+  the key that settles it.
+- **What a restore costs:** a relaunch (the sandbox, `launch.sh`, the game's own start)
+  plus the replay, about what `checkpoint` and `status` say as `replay_secs`. Cyberpunk 2077
+  on the 4090: see [What it cost](#what-it-cost-cyberpunk-2077).
+- **Dead ends** (what was done after the checkpoint, before the restore) leave the route,
+  and stay in `journal.jsonl`.
+
+### Time, and what the export writes
+
+A live session runs in real time: the game moves on while the agent thinks. Every step keeps
+the gap of real time before it. A gap over `--max-gap` (10 s) is cut to it, since the rest was
+thinking, not the game. One under 0.2 s is dropped; above that the pause between two keys
+is kept, since a game can drop keys pressed at once. So **say what the game needs with `wait`**: after a key that
+starts a load, `wait 15` is kept whole, and the replay and the export wait as long.
+
+`export` writes the route as a manifest, and checks it with the manifest parser:
+
+- `[window]`, `[env]` and `[exit]` from the session's manifest, `[override]` with `--env`
+  and `--arg`. `[exit] how = "self"` when the game exited by itself after the last step
+  (a Quit from its menu), else `"signal"`.
+- The steps in order, each gap a `wait`, checkpoints as comments.
+- After a screenshot that follows an input, an `expect_change` from the screenshot before,
+  at half the change the session saw (at most 20%, none under 2%). A wait a fresh run would
+  otherwise only sit through becomes a check that the screen moved on.
+- A screenshot that was black is dropped (a fresh run's `not_black` would fail it), and
+  one that didn't fill the window gets `min_fill = false`.
+
+It's a draft: read it, prune the probes, and prove it with a fresh `run`. `stop` writes it
+to `live/manifest.toml` in the results, too.
+
+### The lock, the limits and cleanup
+
+- **The cache lock.** A session takes [the cache lock](#the-cache-lock) as a run does, and
+  holds it for its whole life: its game has the GPU, a reused base's scratch
+  (`installed/.runs/<gogid>`) is the one every run of that game uses, and a restore copies from
+  the base. A run that waits for it is told it's a live session, when it stops if idle, and
+  the time it ends by at the latest (`.lock.holder`'s `live_until`). A session that is waiting
+  for the lock says so in `status`; `stop` ends it there.
+- **It can't outlive the agent.** `--idle-secs` (15 min with no command, `status` counts)
+  and `--max-secs` (90 min from the lock) end it through the normal teardown, and fail it
+  (`live_idle`, `time_limit`), as do a signal and every other way out. So the longest
+  another run waits for a session is its `--max-secs`.
+- **The registry** is `live/<id>` beside the lock, in the resolved cache, so every checkout
+  that shares the cache sees it: the supervisor's pid, its results and scratch. `cleanup`
+  (in any checkout) looks there first. A session whose supervisor is gone (a SIGKILL: its
+  sandbox dies with it) has its leftovers swept, its entry removed and its scratch deleted. A
+  session past its hard cap, or ready but not answering its socket, is an orphan: `TERM` (its
+  own teardown), then `KILL`. Any other is in use: `cleanup` names it and, as under a run,
+  doesn't sweep. `cleanup --stop-live` stops every session on the cache.
+- **The supervisor runs from a copy** of the script, in `live/` in the results: bash reads a
+  script as it goes, and an edit to the checkout's would land mid-function under a long
+  session.
+
+### The control socket
+
+One per session: `ctl.sock` in `live/` in its scratch, bound under umask 077 in a 0700 dir. The driver
+binds it from inside the sandbox, through the dir's `/proc/self/fd` (a scratch path can pass
+a socket address's 108 bytes), and a client checks that it's a socket and ours before it
+connects. A request is one line of JSON, `{cmd, args}`, and so is the answer. Commands run
+one at a time; while one runs, or the launch, or a replay, `status` still answers, `stop`
+stops, and anything else is told to try again (exit 4). The client passes the socket's dir in
+`GOGO_E2E_LIVE_DIR`, never on its command line, which the teardown's sweep reads as one of the
+run's own.
+
+Everything is in the results dir, `live/`: `state.json` (what it's doing), `session.json`
+(the route, the checkpoints, the restores), `journal.jsonl` (every command and its answer,
+dead ends too), `manifest.toml` (the export, from `stop`); beside them `session.log` (the
+supervisor's stderr), each life's logs as `life<N>-game.out` and so on, and `summary.json`
+with a `live` key. A session never prints `tested_entry`: a fresh run does.
+
+### What it cost: Cyberpunk 2077
+
+The proof session (`--reuse-install`, `--arg --launcher-skip --arg -skipStartScreen`, the
+RTX 4090), from `live start` to `stop`: 19 min.
+
+| | |
+|---|---|
+| `live start` to the window (gogo's build, the base's reflink copy, Wine's and the game's start) | 5 min |
+| the title, the agreement scrolled and accepted, analytics up: `checkpoint agreed` | 4 min, mostly reading PNGs |
+| a `restore agreed` that stopped: the intro was still playing where life 1 had shown the agreement | 1 min 43 s (a 28 s relaunch, the replay up to its 30 s of grace) |
+| the route redone from there without that shot, `checkpoint agreed` again | 2 min |
+| `restore agreed`: matched, 11 steps | 2 min 38 s (the replay 131 s) |
+| analytics declined, Settings, Graphics, back, Quit Game (exit 0), `export`, `stop` | 4 min |
+
+What it found that the old manifest had to guess or got lucky on:
+with `-skipStartScreen` the title is up in about 30 s, not 150; the intro takes longer on
+some launches than others, so a fixed `wait` before a title screenshot is a race; `click`
+doesn't aim (the game's own cursor, from relative input), which a click and a screenshot
+showed in 10 s; and back on the menu after Settings, `Left` and `Down` × 4 landed on the
+Phantom Liberty banner, not Quit Game, in this session (after that click; the old manifest's
+runs reach Quit Game with them): `Return` there would open its store page, and a screenshot
+before it caught that.
+Each is a 6.5 min round as a blind edit (`--reuse-install`), so four of them are 26 min
+before the route is right, against 19 for the session that found them all, its two
+restores included. The export then needs its fresh `run`, as any edit does: the
+installer build and the whole route, without `--reuse-install`, passed in 13 min 15 s, every
+check ok, Quit Game's exit 0. It stays a draft beside `e2e/1423049311.toml`, which goes on
+through every Graphics page and Video for #232; the session's lessons go into that one by
+hand.
 
 ## Graphics
 
@@ -383,6 +590,8 @@ click = { x = 43, y = 71 }       # percent of the window
 [[step]]
 move_by = { x = -3000, y = -3000 } # a relative move, in device units: for a game's own cursor
 [[step]]
+move_to = { x = 43, y = 71 }     # the pointer there, percent of the window, no click
+[[step]]
 click_here = true                # press and release, without moving
 [[step]]
 scroll = 250                     # wheel notches where the pointer is; negative is up
@@ -397,6 +606,8 @@ expect_change = { from = "menu", to = "preferences", min = 20 }  # % of pixels
 key = "Escape"                   # one key, held 50 ms: an XKB keysym name, as below
 [[step]]
 type = "Hello!"                  # text, a key at a time, Shift where the us layout needs it
+[[step]]
+hold = { key = "w", ms = 500 }   # one key, held down 500 ms (up to 10000)
 ```
 
 `[env]` is the environment `launch.sh` starts with, so `launch.conf`'s own `ENV` beats it.
@@ -404,7 +615,7 @@ type = "Hello!"                  # text, a key at a time, Shift where the us lay
 `gogo linux-app args` with the run's scratch `GOGO_HOME` right before the launch (check
 `override`), so `launch.sh` sees a stale stamp and runs setup in the sandbox, and the
 game gets them through `launch.conf`. The installed base a `--reuse-install` run copies is
-never touched. Live sessions (#241) can set a run's env and args the same way.
+never touched. A [live session](#live-sessions) sets them with `live start --env` and `--arg`.
 
 `key` and `type` go through one virtual keyboard with a standard `pc105`/`us` keymap and
 real evdev keycodes, so a game sees what a USB keyboard would send. `key` takes the level-1
@@ -442,6 +653,7 @@ say "a picture fills the window and it changed", not "it's the right picture".
 | `torn_down` | `how = "signal"`: the launcher doesn't end on `TERM` | a stuck teardown |
 | `doctor_links`, `doctor_processes` | doctor's lines aren't `ok` after the run | host drive links (#199), a stray Wine process |
 | `finished` | the driver hit an error, or never got to the end | |
+| `live_idle` | a live session: no command for `--idle-secs` | an agent that went away |
 | `nothing_left`, `scratch_deleted` | as above | |
 
 ## From a pass to a compat entry
