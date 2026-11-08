@@ -1106,6 +1106,7 @@ if [ -n "${FAKE_GAME_TRAP_TERM:-}" ]; then
   while :; do sleep 0.1; done
 fi
 sleep "${FAKE_GAME_SLEEP:-0}"
+if [ -n "${FAKE_GAME_SIGNAL:-}" ]; then kill -s "$FAKE_GAME_SIGNAL" $$; sleep 5; fi
 exit "${FAKE_GAME_EXIT:-0}"
 "#;
 
@@ -1447,7 +1448,7 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
     // next setup, which says so; an unchanged one isn't touched.
     std::fs::write(
         &sh,
-        script.replace("LAUNCHER_VERSION=5", "LAUNCHER_VERSION=0"),
+        script.replace("LAUNCHER_VERSION=6", "LAUNCHER_VERSION=0"),
     )
     .unwrap();
     std::fs::write(&desktop, "[Desktop Entry]\nExec=/old/root/launch.sh\n").unwrap();
@@ -1455,7 +1456,7 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
     assert_eq!(std::fs::read_to_string(&sh).unwrap(), script);
     assert_eq!(std::fs::read_to_string(&desktop).unwrap(), entry);
     assert!(
-        out.notes.iter().any(|n| n == "launch.sh: launcher 0 -> 5"),
+        out.notes.iter().any(|n| n == "launch.sh: launcher 0 -> 6"),
         "{:?}",
         out.notes
     );
@@ -1520,7 +1521,7 @@ fn the_launcher_runs_umu_with_the_games_environment_and_logs_the_run() {
     let run = &runs[0];
     for want in [
         format!("# gogo run log: Test Game ({ID})\n"),
-        "# launcher: 5\n".into(),
+        "# launcher: 6\n".into(),
         format!(
             "# runtime: path:{} (1793687165 GE-Proton10-34)\n",
             w.build.display()
@@ -3033,29 +3034,48 @@ fn a_wrapper_that_leaves_does_not_end_the_run() {
     assert!(!l.contains("never ran the game"), "{l}");
 }
 
-/// gamescope's shape: its exit code is the run's, whatever the game's was
-/// (design 18 §7.8), and a short run still explains itself.
+/// gamescope's shape: it drops its child's exit code (always 0), but the
+/// game step records umu-run's, which is the run's (design 18 §7.8), and a
+/// short run still explains itself.
 #[test]
-fn the_runs_exit_code_is_the_wrappers() {
-    let Some(w) = World::launcher("wrap-code", false) else {
-        return;
-    };
-    w.wrapped(WRAP_PARENT, &[]);
-    let log = w.wrap_log();
-    let stub = w.dialog_stub(&["Close"]);
-    let out = w.launch(
-        &[
-            ("FAKE_GAME_EXIT", "7"),
+fn the_runs_exit_code_is_the_games_under_a_wrapper_that_drops_it() {
+    for (name, env, want) in [
+        ("code", vec![("FAKE_GAME_EXIT", "7")], 7),
+        (
+            "sleep",
+            vec![("FAKE_GAME_EXIT", "9"), ("FAKE_GAME_SLEEP", "2")],
+            9,
+        ),
+        ("signal", vec![("FAKE_GAME_SIGNAL", "SEGV")], 139),
+    ] {
+        let Some(w) = World::launcher(&format!("wrap-code-{name}"), false) else {
+            return;
+        };
+        w.wrapped(WRAP_PARENT, &[]);
+        let log = w.wrap_log();
+        let stub = w.dialog_stub(&["Close"]);
+        let mut e = vec![
             ("FAKE_WRAP_LOG", log.to_str().unwrap()),
             ("GOGO_LAUNCHER_DIALOG", stub.to_str().unwrap()),
-        ],
-        &[],
-    );
-    assert_eq!(out.status.code(), Some(0), "{out:?}");
-    assert!(w.runs().pop().unwrap().contains("# exit: 0\n"));
-    let d = w.dialogs().pop().unwrap();
-    assert!(d.contains("on the "), "{d}");
-    assert!(d.contains(", under fake-wrap."), "{d}");
+        ];
+        e.extend(env);
+        let out = w.launch(&e, &[]);
+        assert_eq!(out.status.code(), Some(want), "{name}: {out:?}");
+        let r = w.runs().pop().unwrap();
+        assert!(r.contains(&format!("# exit: {want}\n")), "{name}: {r}");
+        let d = w.dialogs().pop().unwrap();
+        assert!(d.contains(&format!("exit code {want}")), "{name}: {d}");
+        assert!(d.contains(", under fake-wrap."), "{name}: {d}");
+        let l = w.launch_log();
+        assert!(
+            l.contains(&format!(
+                "wrapper fake-wrap exited 0; the game exited {want}"
+            )),
+            "{name}: {l}"
+        );
+        assert!(prefix_procs(&w).is_empty(), "{name}");
+        assert_eq!(w.run_scratch(), Vec::<String>::new(), "{name}");
+    }
 }
 
 #[test]
