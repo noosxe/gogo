@@ -415,8 +415,11 @@ to `live/manifest.toml` in the results, too.
   (`live_idle`, `time_limit`), as do a signal and every other way out. So the longest
   another run waits for a session is its `--max-secs`.
 - **The registry** is `live/<id>` beside the lock, in the resolved cache, so every checkout
-  that shares the cache sees it: the supervisor's pid, its results and scratch. `cleanup`
-  (in any checkout) looks there first. A session whose supervisor is gone (a SIGKILL: its
+  that shares the cache sees it: the supervisor's pid and start time, its results and
+  scratch. `cleanup` (in any checkout) looks there first. A pid counts as the session only
+  while its start time still matches and it still runs the session's `__live-serve`: an
+  entry outlives a SIGKILL, an OOM or a reboot, and its pid may be anyone's by then, so
+  nothing is ever signalled on the pid alone. A session whose supervisor is gone (its
   sandbox dies with it) has its leftovers swept, its entry removed and its scratch deleted. A
   session past its hard cap, or ready but not answering its socket, is an orphan: `TERM` (its
   own teardown), then `KILL`. Any other is in use: `cleanup` names it and, as under a run,

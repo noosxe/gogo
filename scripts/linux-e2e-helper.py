@@ -2746,7 +2746,7 @@ def live_wait(state_file, sock_dir, secs, owner, min_life, reg=""):
                 state = json.load(f)
         except (OSError, ValueError):
             state = {}
-        alive = _pid_alive(owner)
+        alive = _pid_alive(owner, os.environ.get("GOGO_E2E_LIVE_START", ""))
         if not sock_dir and reg:
             sock_dir = live_registered_dir(reg)
         if state.get("state") == "ready" and state.get("life", 0) >= min_life and alive:
@@ -2766,11 +2766,19 @@ def live_wait(state_file, sock_dir, secs, owner, min_life, reg=""):
         time.sleep(1)
 
 
-def _pid_alive(pid):
+def _pid_alive(pid, start=""):
+    """Whether pid runs, and with `start` (/proc/PID/stat field 22, as the
+    registry keeps it) whether it is still that process, not a reuse."""
     try:
         os.kill(int(pid), 0)
-        return True
     except (OSError, ValueError):
+        return False
+    if not start:
+        return True
+    try:
+        with open(f"/proc/{int(pid)}/stat") as f:
+            return f.read().rsplit(")", 1)[1].split()[19] == start
+    except (OSError, IndexError, ValueError):
         return False
 
 
