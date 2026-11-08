@@ -3,7 +3,8 @@
 # unless that install is there and this is its first launch on this disk:
 # `launched` must not be there yet, and the game writes it. So a restore that
 # didn't roll the disk back gets no window. Keys: r turns it red, b blue, q
-# quits (exit 0), a starts an animation (the colour flips every 0.3 s) and s stops
+# quits (exit 0), a starts an animation (a new colour every 0.3 s, never the same one twice running, so no
+# poll rate lines up with it) and s stops
 # it. A live session takes only [window] and [exit] from here; the
 # step is for the manifest check, and a plain run of this passes too.
 title = "self-test: live"
@@ -18,7 +19,7 @@ command = ["xterm", "-bg", "white", "-fg", "black", "-e", "bash", "-c", '''
   while true; do
     k=""
     if [ "$anim" = 1 ]; then
-      IFS= read -rsn1 -t 0.3 k || { flip=$((1 - flip)); printf "\033]11;#%s\007" "$([ $flip = 1 ] && echo 20c020 || echo c0c020)"; continue; }
+      IFS= read -rsn1 -t 0.3 k || { flip=$((flip + 1)); printf "\033]11;#%02x%02x%02x\007" $((flip * 37 % 200 + 30)) $((flip * 91 % 200 + 30)) $((flip * 53 % 200 + 30)); continue; }
     else
       IFS= read -rsn1 k || exit 0
     fi
