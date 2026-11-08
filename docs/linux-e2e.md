@@ -965,8 +965,11 @@ all do the same thing. Exactly one of two conditions:
 - **The export is honest.** One that passed is on the path, and exports, as given. One that ran
   out answers `ok: false` and exit 1, and the session goes on; its keys did reach the game, so the
   path has them as the plain `key`s they were. `restore` drops them.
-- **A press may be one too many.** The key is pressed until the screen shows it took, so a slow
-  screen gets another. Use it where that's harmless, and `every` longer than the key takes to show.
+- **Never use it with a key that confirms or selects.** The key is pressed until the screen shows
+  it took, so a slow screen gets another, and that one lands on whatever came up next. So
+  `press_until` is for keys that only move or skip, and only where you've seen an extra press do
+  nothing. For `Return`, or a prompt's answer key, press once with a plain `key`, then
+  `wait_until` what it brings up: if that never comes, the run fails and nothing was pressed twice.
 - `summary.json`'s step has `presses`, `secs` and `seen_pct`.
 - **`wait_until`** is the same with no key: `marked` only, `max` looks `every` seconds apart, and
   running out fails and stops the same (`wait_until_<n>`). For a screen that moves, where
@@ -1082,11 +1085,18 @@ Rewards and the version box, and Left swaps My Rewards and the banner. The manif
 the map. Down until My Rewards is framed works from anywhere, Left goes to the banner, and Up climbs
 to the item, framed. A row with the focus is 3.3-4.6% near its yellow, and one without 0.0.
 
+**What's pressed more than once.** `Return` on the agreement and `c` on the analytics prompt act, so
+each is pressed once, and `wait_until` sees what they bring up: a second `Return` could land on the
+prompt, which is always declined. `Down` and `Up` only move the focus. An extra `space` was tried on
+each screen it could reach (the agreement, scrolled or not, the prompt, the menu with no focus shown
+and with one on Credits), and did nothing.
+
 | Proof | |
 |---|---|
 | The route to the agreement, 10 restores in a row (`--from-manifest --to-shot agreement`) | 10 of 10, no retries: 38-39 s replay, the prompt after 31-32 looks, `space` taking at its first press. So nothing here shows what the 2 of 9 in #257 were, but a late key now gets pressed again, and running out says so |
+| The route past the agreement, Accept and analytics pressed once, 10 restores in a row (`--to-shot menu`) | 10 of 10, no retries, 77-79 s replay. The agreement's route is the row above's, unchanged, so this re-proves it too |
 | The route to Quit Game from every place the focus can be (the unmarked one after a dialog, New Game, Load Game, Settings, Credits, Quit Game, the banner, My Rewards, the version box), no `Return` | 9 of 9, 0-6 presses of Down and 1 of Up, Quit Game framed at 4.5% each time |
-| A fresh `run` of the manifest, the installer build and all, without `--reuse-install` | passed in 12 min 27 s, of which 8 min 31 s is the build: all 92 checks ok, on the fresh disk (title, agreement, analytics, Settings, every Graphics page, Video, Quit Game framed, exit 0 after 1.3 s) and on the remembered one after the relaunch (the window after 4.5 s, the menu, Quit Game framed, exit 0). The game phase took about 4 min |
+| A fresh `run` of the manifest, the installer build and all, without `--reuse-install` | passed in 12 min 25 s, of which 8 min 31 s is the build: all 92 checks ok, on the fresh disk (title, agreement, analytics, Settings, every Graphics page, Video, Quit Game framed, exit 0) and on the remembered one after the relaunch (the menu, Quit Game framed, exit 0). The game phase took about 4 min |
 
 **Where a restore goes, and what was cut** (#257; the same RTX 4090 and options, 2026-11-08).
 `last_restore.phases`, and `last_replay.timeline`, on the same route as above, before and after.

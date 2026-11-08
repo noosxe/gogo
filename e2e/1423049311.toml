@@ -4,18 +4,32 @@
 #   scripts/linux-e2e.sh run 1423049311 --installer <setup_cyberpunk_2077_….exe> \
 #       --gpu renderD129 --expect-gpu renderD129
 #
-# First run, every run (scratch is fresh): the intro video, the animated title
-# screen ("Press space to continue") about 2 min after the window on an RTX
-# 4090, CD Projekt Red's user agreement, then the main menu under an analytics
+# First launch, every run (scratch is fresh): warnings, then the intro video
+# with "Press space to continue", CD Projekt Red's user agreement (the video
+# ends in it by itself, in about 90 s), then the main menu under an analytics
 # prompt. The owner OKs accepting the agreement in the harness's throw-away
 # prefix (#238); analytics is declined. Then Settings -> Graphics, read only,
-# for DLSS, Frame Generation, Reflex and ray tracing (#232), and Quit Game.
+# for DLSS, Frame Generation, Reflex and ray tracing (#232), Quit Game, and a
+# second launch on the disk that remembers all that: intro, menu, Quit Game.
+#
+# Nothing here is timed against the intro, or assumes where the menu's focus is
+# (#266, #262): a colour in a region says what's on screen (press_until,
+# docs/linux-e2e.md). No key goes in on a guess, so no Return lands on the wrong
+# item. They're for this resolution. The screens are animated: no wait_settled.
 #
 # Keys only past the title: the game draws its own cursor from relative mouse
 # input, so `click` doesn't aim. The agreement scrolls with the wheel only.
 # In Settings, 1 and 3 switch tabs and Down moves the focus; Left, Right,
 # A, D, Return and F1 (Restore Defaults) would change something, so none is
-# pressed there. Animated: no wait_settled.
+# pressed there.
+#
+# The menu's focus, by key (read off screenshots). Down goes New Game, Load
+# Game, Settings, Credits, Quit Game, the Phantom Liberty banner, My Rewards,
+# then swaps My Rewards and the version box at the top right for good. Left
+# swaps the banner and My Rewards, and New Game and the version box. Up climbs
+# from the banner. So from anywhere: Down until My Rewards is framed, Left to the
+# banner, Up until the item is framed. The frame is yellow, its corners cyan; a
+# row without it has neither. Neither Left nor Down opens anything.
 title = "Cyberpunk 2077"
 gogid = 1423049311
 
@@ -31,24 +45,30 @@ VKD3D_DEBUG = "info"
 DXVK_LOG_LEVEL = "info"
 DXVK_NVAPI_LOG_LEVEL = "info"
 
+# Past the launcher, and the title up in about 30 s, not 150.
+[override]
+extra_args = ["--launcher-skip", "-skipStartScreen"]
+
 # Quit Game ends it.
 [exit]
 how = "self"
 wait_secs = 60
 
+# The video's own moves are no use here: 70% of its pixels differ in half a
+# second. Its prompt is the title.
+
 [[step]]
-wait = 150
+wait_until = { every = 1, max = 180, marked = { x = 78.6, y = 85.1, w = 14.9, h = 3, color = "#e85048", tol = 50, min = 10 } }
 
 [[step]]
 screenshot = "title"
+min_fill = false
 
 # Through the persistent virtual keyboard: wtype's keys never got here (#236).
+# The panel of the agreement is the only dark navy there.
 
 [[step]]
-key = "space"
-
-[[step]]
-wait = 20
+press_until = { key = "space", every = 3, max = 40, marked = { x = 42, y = 33, w = 36, h = 40, color = "#0c0c16", tol = 10, min = 60 } }
 
 [[step]]
 screenshot = "agreement"
@@ -74,10 +94,7 @@ wait = 1
 scroll = 250
 
 [[step]]
-wait = 1
-
-[[step]]
-wait = 2
+wait = 3
 
 [[step]]
 screenshot = "agreement-end"
@@ -85,13 +102,15 @@ screenshot = "agreement-end"
 [[step]]
 expect_change = { from = "agreement", to = "agreement-end", min = 5 }
 
-# Return is Accept (the owner's OK, #238). The menu comes up under the analytics prompt.
+# Return is Accept (the owner's OK, #238), pressed once: a second one could land
+# on the analytics prompt, which is always declined. The menu comes up under the
+# prompt, with its red buttons where the agreement has white text.
 
 [[step]]
 key = "Return"
 
 [[step]]
-wait = 15
+wait_until = { every = 1, max = 60, marked = { x = 36, y = 54, w = 8, h = 3.5, color = "#ff4a4a", tol = 50, min = 3 } }
 
 [[step]]
 screenshot = "analytics"
@@ -99,13 +118,13 @@ screenshot = "analytics"
 [[step]]
 expect_change = { from = "agreement-end", to = "analytics", min = 20 }
 
-# C is "No, I do not agree".
+# C is "No, I do not agree", once. The prompt dims the logo until it goes.
 
 [[step]]
 key = "c"
 
 [[step]]
-wait = 3
+wait_until = { every = 1, max = 30, marked = { x = 5.7, y = 16.7, w = 26.6, h = 11.1, color = "#f8e800", tol = 30, min = 3 } }
 
 [[step]]
 screenshot = "menu"
@@ -113,19 +132,22 @@ screenshot = "menu"
 [[step]]
 expect_change = { from = "analytics", to = "menu", min = 5 }
 
-# The menu's focus starts on Settings, unmarked: Down (Credits), Up (Settings), Return.
+# The focus to Settings, framed, then in.
 
 [[step]]
-key = "Down"
+press_until = { key = "Down", every = 0.7, max = 12, marked = { x = 71, y = 89.6, w = 25.3, h = 6.7, color = "#20f0f0", tol = 40, min = 0.4 } }
 
 [[step]]
-wait = 1
+key = "Left"
 
 [[step]]
-key = "Up"
+wait = 0.7
 
 [[step]]
-wait = 1
+press_until = { key = "Up", every = 0.7, max = 6, marked = { x = 9.1, y = 49.1, w = 21.2, h = 3, color = "#f0e640", tol = 40, min = 2 } }
+
+[[step]]
+screenshot = "on-settings"
 
 [[step]]
 key = "Return"
@@ -137,7 +159,7 @@ wait = 5
 screenshot = "settings"
 
 [[step]]
-expect_change = { from = "menu", to = "settings", min = 20 }
+expect_change = { from = "on-settings", to = "settings", min = 20 }
 
 # 3 is the next tab: Sound, Controls, Gameplay, Graphics.
 
@@ -514,41 +536,56 @@ screenshot = "menu-again"
 [[step]]
 expect_change = { from = "video", to = "menu-again", min = 20 }
 
-# Back on the menu the focus is wherever the game left its cursor: Left takes
-# it to New Game, then Down x4 to Quit Game.
+# Quit Game, framed, whatever Settings left the focus on. Return quits at once:
+# no confirm dialog, exit 0.
+
+[[step]]
+press_until = { key = "Down", every = 0.7, max = 12, marked = { x = 71, y = 89.6, w = 25.3, h = 6.7, color = "#20f0f0", tol = 40, min = 0.4 } }
+
 [[step]]
 key = "Left"
 
 [[step]]
-wait = 1
+wait = 0.7
 
 [[step]]
-key = "Down"
-
-[[step]]
-wait = 1
-
-[[step]]
-key = "Down"
-
-[[step]]
-wait = 1
-
-[[step]]
-key = "Down"
-
-[[step]]
-wait = 1
-
-[[step]]
-key = "Down"
-
-[[step]]
-wait = 1
+press_until = { key = "Up", every = 0.7, max = 6, marked = { x = 9.1, y = 59.4, w = 21.2, h = 3, color = "#f0e640", tol = 40, min = 2 } }
 
 [[step]]
 screenshot = "on-quit"
 
-# Return quits at once: no confirm dialog, exit 0.
+[[step]]
+key = "Return"
+
+[[step]]
+relaunch = true
+
+# The remembered disk: the intro again, then straight to the menu. The focus is
+# elsewhere than on the first launch, which is the route's to not care about.
+
+[[step]]
+wait_until = { every = 1, max = 180, marked = { x = 78.6, y = 85.1, w = 14.9, h = 3, color = "#e85048", tol = 50, min = 10 } }
+
+[[step]]
+press_until = { key = "space", every = 3, max = 40, marked = { x = 5.7, y = 16.7, w = 26.6, h = 11.1, color = "#f8e800", tol = 30, min = 3 } }
+
+[[step]]
+screenshot = "menu-remembered"
+
+[[step]]
+press_until = { key = "Down", every = 0.7, max = 12, marked = { x = 71, y = 89.6, w = 25.3, h = 6.7, color = "#20f0f0", tol = 40, min = 0.4 } }
+
+[[step]]
+key = "Left"
+
+[[step]]
+wait = 0.7
+
+[[step]]
+press_until = { key = "Up", every = 0.7, max = 6, marked = { x = 9.1, y = 59.4, w = 21.2, h = 3, color = "#f0e640", tol = 40, min = 2 } }
+
+[[step]]
+screenshot = "on-quit-remembered"
+
 [[step]]
 key = "Return"
