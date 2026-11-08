@@ -557,12 +557,15 @@ pub fn in_library(root: &Path) -> bool {
     !root.starts_with(games_dir())
 }
 
-/// Record that `gogid` lives at `root`. A game under `games/` needs no
-/// record, and gets none: nothing new appears for anyone without a library.
+/// Record that `gogid` lives at `root`, creating `root`: a record of a dir
+/// that isn't there means a drive that isn't mounted. A game under `games/`
+/// needs no record, and gets none: nothing new appears for anyone without a
+/// library.
 pub fn record_location(gogid: &str, root: &Path) -> Result<(), MacAppError> {
     if !in_library(root) {
         return Ok(());
     }
+    std::fs::create_dir_all(root)?;
     write_atomic(
         &locations_dir().join(gogid),
         &format!("{}\n", root.display()),
@@ -654,20 +657,34 @@ impl Library {
     }
 
     /// Check a configured library dir. `None`: it is `games/` itself, which
-    /// is what no library means. Refused: a dir inside the download dir, the
-    /// stores or the depot cache (their cleanups and walks must not meet a
-    /// game), the data root itself, one gogo can't write to or that can't
-    /// hold the prefix's symlinks. Creates nothing but a probe, removed
+    /// is what no library means. Refused: a dir inside the data root (only
+    /// `games/<gogid>` and a record find a game), the download dir or the
+    /// depot cache (their cleanups and walks must not meet a game), one gogo
+    /// can't write to or that can't hold the prefix's symlinks. Creates nothing but a probe, removed
     /// again, in the nearest dir that exists.
     pub fn resolve(
         dir: &Path,
         download_dir: Option<&Path>,
     ) -> Result<Option<Library>, MacAppError> {
+        let has_parent = |p: &Path| {
+            p.components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        };
+        // A location record can't hold `..`, so it's resolved here, or
+        // refused below when it goes through a dir that doesn't exist.
         let dir = absolute(dir);
+        let dir = if has_parent(&dir) {
+            real_path(&dir)
+        } else {
+            dir
+        };
         let refuse = |reason: String| MacAppError::Library {
             path: dir.clone(),
             reason,
         };
+        if has_parent(&dir) {
+            return Err(refuse("`..` goes through a dir that doesn't exist".into()));
+        }
         // Location files and launch.conf hold it as one line of text.
         if dir.to_str().is_none_or(|s| s.contains('\n')) {
             return Err(refuse("the path has to be UTF-8, on one line".into()));
@@ -677,7 +694,8 @@ impl Library {
         if real == real_path(&games_dir()) {
             return Ok(None);
         }
-        if real == real_path(&data_root) {
+        let real_root = real_path(&data_root);
+        if real == real_root {
             return Err(refuse("it is gogo's data dir".into()));
         }
         let inside: [(&str, Option<PathBuf>); 4] = [
@@ -695,6 +713,14 @@ impl Library {
             {
                 return Err(refuse(format!("it is inside {what} ({})", other.display())));
             }
+        }
+        // `games/sub` isn't a place a game is looked for, and it wouldn't get
+        // a record; `game-locations/` would make a game's dir its own record.
+        if real.starts_with(&real_root) {
+            return Err(refuse(format!(
+                "it is inside gogo's data dir ({})",
+                data_root.display()
+            )));
         }
         let Some(near) = crate::gog::materialize::existing_ancestor(&dir) else {
             return Err(refuse("no part of the path exists".into()));
@@ -1797,6 +1823,10 @@ mod launch_tests {
         let renderers = crate::state::data_root().join("renderers");
         refused(&renderers, "renderer store");
         refused(&crate::state::data_root(), "data dir");
+        let root = crate::state::data_root();
+        for inside in ["games/sub", "game-locations", "compat", "logs", "other/x"] {
+            refused(&root.join(inside), "inside gogo's data dir");
+        }
         if let Some(cache) = crate::gog::depot::default_cache_dir() {
             refused(&cache.join("gogo/depot/1"), "depot cache");
         }
@@ -1823,6 +1853,17 @@ mod launch_tests {
                 .count(),
             0
         );
+
+        // `..` never reaches a location record, which wouldn't be believed.
+        std::fs::create_dir_all(tmp.path().join("real")).unwrap();
+        let lib = Library::resolve(&tmp.path().join("real/../big"), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(lib.dir(), tmp.path().canonicalize().unwrap().join("big"));
+        refused(&tmp.path().join("no-such/../big"), "`..`");
+        record_location("7", &lib.dir().join("7")).unwrap();
+        assert_eq!(recorded_location("7"), Some(lib.dir().join("7")));
+        forget_location("7").unwrap();
 
         // SAFETY: as above.
         unsafe { std::env::remove_var("GOGO_HOME") };

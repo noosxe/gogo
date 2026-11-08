@@ -3559,6 +3559,21 @@ fn an_installer_build_stages_and_lands_in_the_library() {
 }
 
 #[test]
+fn a_build_that_fails_early_leaves_a_game_the_next_build_can_finish() {
+    let w = World::new("libfail", &["d3d9.dll"]);
+    let mut plan = build::plan(&w.opts_in_library(), None, &mut quiet()).unwrap();
+    // The source tree goes away after the plan.
+    plan.game_tree = Some(w.root.join("no-such-tree"));
+    assert!(build::execute(&plan, None, &mut quiet()).is_err());
+    assert!(
+        plan.state.root.is_dir(),
+        "no record of a dir that isn't there"
+    );
+    let out = build_with(&w.opts_in_library());
+    assert_eq!(out.dirs.root, plan.state.root);
+}
+
+#[test]
 fn removing_a_symlinked_game_dir_never_follows_it() {
     use gogo::macapp::apps;
     let w = World::new("symlink", &["d3d9.dll"]);
