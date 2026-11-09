@@ -120,6 +120,8 @@ pub struct LinuxAppPlan {
 #[derive(Debug, Clone)]
 pub struct BuildOutcome {
     pub gogid: String,
+    /// The title baked into `gogo-launch.toml`.
+    pub title: String,
     pub dirs: GameDirs,
     pub materialized: Option<MaterializeReport>,
     pub setup: SetupOutcome,
@@ -589,7 +591,6 @@ fn launch_toml(
     gogid: &str,
     prefix: &Path,
     install_dir: &Path,
-    title: &str,
     runtime: &str,
     selection: &renderer::Selection,
     auto: Vec<String>,
@@ -626,7 +627,7 @@ fn launch_toml(
     Ok(LaunchToml {
         schema: launch::SCHEMA,
         gogid: gogid.to_string(),
-        title: title.to_string(),
+        title: plan.display.clone(),
         runtime: runtime.to_string(),
         renderer: selection.renderer.value.clone(),
         exe,
@@ -728,6 +729,7 @@ pub fn execute(
     };
 
     let mut materialized = None;
+    let mut title = plan.display.clone();
     let (gogid, selection, auto) = if let Some(tree) = &plan.game_tree {
         let gogid = plan.gogid.clone().expect("the depot lane knows its id");
         let dirs = &plan.state;
@@ -811,7 +813,6 @@ pub fn execute(
             &gogid,
             &dirs.prefix,
             &install_dir,
-            &plan.display,
             &build.reference,
             &sel,
             auto.clone(),
@@ -895,21 +896,21 @@ pub fn execute(
         let install_dir = target.prefix.join("drive_c/GOG").join(&plan.slug);
         // The stem only guessed the title (the slug had to be fixed before the
         // install); the installed game's own name is the real one (#235).
-        let title = if plan.title_fixed {
+        title = if plan.title_fixed {
             plan.display.clone()
         } else {
             info::game_name(&install_dir).unwrap_or_else(|| plan.display.clone())
         };
-        let toml = launch_toml(
+        let mut toml = launch_toml(
             plan,
             &gogid,
             &target.prefix,
             &install_dir,
-            &title,
             &build.reference,
             &sel,
             auto.clone(),
         )?;
+        toml.title = title.clone();
         launch::write_atomic(&game::launch_toml_path(&target), &toml.to_toml())?;
         (gogid, sel, auto)
     };
@@ -926,6 +927,7 @@ pub fn execute(
         emit,
     )?;
     Ok(BuildOutcome {
+        title,
         dirs: GameDirs::for_game(&gogid)?,
         gogid,
         materialized,

@@ -210,17 +210,18 @@ pub fn display_name(installer: &Path, name: Option<&str>) -> String {
 /// (it needs a dot), so "Portal 2" and "Cyberpunk 2077" keep theirs.
 fn strip_version_tail(stem: &str) -> &str {
     let mut end = stem;
+    // One version only: a title can itself end in a dotted number
+    // (`heroes_of_might_and_magic_5.5_2.0.0.1`).
+    let mut versioned = false;
     while let Some(pos) = end.rfind('_') {
         let tail = &end[pos + 1..];
         let before = &end[..pos];
-        if is_bitness(tail) || is_build_number(tail) || is_dotted_version(tail) {
-            end = before;
-        } else if is_revision_word(tail)
-            && before
-                .rsplit('_')
-                .next()
-                .is_some_and(|t| is_dotted_version(t))
-        {
+        let version = !versioned && is_dotted_version(tail);
+        let revision = !versioned
+            && is_revision_word(tail)
+            && before.rsplit('_').next().is_some_and(is_dotted_version);
+        if is_bitness(tail) || is_build_number(tail) || version || revision {
+            versioned |= version;
             end = before;
         } else {
             break;
@@ -2084,6 +2085,11 @@ mod name_tests {
         assert_eq!(name("setup_cyberpunk_2077.exe"), "Cyberpunk 2077");
         assert_eq!(name("setup_fallout_2_(64bit)_(1234).exe"), "Fallout 2");
         assert_eq!(name("setup_game_hotfix.exe"), "Game hotfix");
+        // A title ending in a dotted number keeps it: one version goes.
+        assert_eq!(
+            name("setup_heroes_of_might_and_magic_5.5_2.0.0.1.exe"),
+            "Heroes of might and magic 5 5"
+        );
     }
 }
 

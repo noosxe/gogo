@@ -3249,7 +3249,7 @@ async fn linux_app(a: LinuxAppArgs) -> Result<i32, AppError> {
         .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))??
     };
     print_linux_setup(&out.setup, a.json, |v| {
-        v["name"] = serde_json::json!(plan.display);
+        v["name"] = serde_json::json!(out.title);
         v["game_dir"] = serde_json::json!(out.dirs.root);
         v["lane"] = serde_json::json!(if plan.installer.is_some() {
             "installer"

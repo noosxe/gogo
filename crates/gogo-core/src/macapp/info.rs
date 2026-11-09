@@ -92,12 +92,20 @@ pub fn root_game_id(dir: &Path) -> Option<String> {
         .or_else(|| gog_game_ids(dir).into_iter().next())
 }
 
-/// The `gameName` from any `goggame-*.info` in `dir` (first hit).
+/// The `name` of the base game's `goggame-*.info` in `dir`: the one whose
+/// `gameId` is its `rootGameId` (or that has no root id), so a DLC's info
+/// never titles the game. Falls back to any named info.
 pub fn game_name(dir: &Path) -> Option<String> {
-    collect_info_files(dir, 0).iter().find_map(|p| {
-        let info: GogGameInfo = serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()?;
-        info.name
-    })
+    let mut infos: Vec<GogGameInfo> = collect_info_files(dir, 0)
+        .iter()
+        .filter_map(|p| serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok())
+        .filter(|i: &GogGameInfo| i.name.is_some())
+        .collect();
+    infos.sort_by_key(|i| {
+        let base = i.root_game_id.is_none() || i.root_game_id == i.game_id;
+        std::cmp::Reverse(base)
+    });
+    infos.into_iter().find_map(|i| i.name)
 }
 
 pub fn find_entry_point(dir: &Path) -> Result<PathBuf, MacAppError> {
@@ -594,5 +602,22 @@ mod info_tests {
         assert_eq!(split_args(" -f  -w "), ["-f", "-w"]);
         assert_eq!(split_args(r#"-cfg "a b.ini" x"#), ["-cfg", "a b.ini", "x"]);
         assert_eq!(split_args(r#""""#), [""]);
+    }
+
+    #[test]
+    fn game_name_ignores_a_dlcs_info() {
+        let d = tempfile::tempdir().unwrap();
+        // Named so that a DLC sorts first in any directory order.
+        std::fs::write(
+            d.path().join("goggame-100.info"),
+            r#"{"gameId":"100","rootGameId":"200","name":"Some DLC"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            d.path().join("goggame-200.info"),
+            r#"{"gameId":"200","rootGameId":"200","name":"The Game"}"#,
+        )
+        .unwrap();
+        assert_eq!(game_name(d.path()).as_deref(), Some("The Game"));
     }
 }
