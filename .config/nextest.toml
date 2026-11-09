@@ -3,3 +3,8 @@
 [[profile.default.overrides]]
 filter = 'test(ficlone)'
 success-output = "immediate"
+
+# Move/adopt recovery tests take locks and walk dirs; none should run long.
+[[profile.default.overrides]]
+filter = 'test(/adopting_the_copy|a_refusal_after_a_recovery|a_move_refused_after|a_copy_whose_source|an_interrupted_move_is_settled/)'
+slow-timeout = { period = "30s", terminate-after = 4 }
