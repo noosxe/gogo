@@ -4740,6 +4740,30 @@ mod moving {
         .unwrap();
         let err = adopt(&target).unwrap_err();
         assert!(err.contains("game 999, not"), "{err}");
+        // A game file that can't be read.
+        std::fs::write(&toml, "not toml {{{").unwrap();
+        let err = adopt(&target).unwrap_err();
+        assert!(err.contains("can't tell whose game"), "{err}");
+        // A copy an interrupted move left.
+        std::fs::write(&toml, &text).unwrap();
+        std::fs::write(new.join(".gogo-moved"), "").unwrap();
+        let err = adopt(&target).unwrap_err();
+        assert!(err.contains(".gogo-moved"), "{err}");
+        std::fs::remove_file(new.join(".gogo-moved")).unwrap();
+        // A launch.conf an earlier, half-done adopt left naming a third place.
+        let conf_text = std::fs::read_to_string(new.join("launch.conf")).unwrap();
+        std::fs::write(
+            new.join("launch.conf"),
+            conf_text.replace("PREFIX='", "PREFIX='/elsewhere/"),
+        )
+        .unwrap();
+        let err = adopt(&target).unwrap_err();
+        assert!(err.contains("stopped halfway"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(w.locations().join(ID)).unwrap(),
+            record
+        );
+        std::fs::write(new.join("launch.conf"), conf_text).unwrap();
         // Not a built game at all.
         std::fs::remove_file(&toml).unwrap();
         let err = adopt(&target).unwrap_err();

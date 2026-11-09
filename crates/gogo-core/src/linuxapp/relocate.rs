@@ -51,6 +51,32 @@ impl Lane for LinuxLane {
             .map(|(toml, _)| toml.gogid)
     }
 
+    fn check_rewritten(&self, to: &GameDirs) -> Result<(), MacAppError> {
+        let Ok(text) = std::fs::read_to_string(&to.launch_conf) else {
+            return Ok(());
+        };
+        let conf = game::ConfValues::parse(&text);
+        let data_root = crate::state::data_root();
+        for key in ["PREFIX", "GAME_DIR"] {
+            let Some(v) = conf.values.get(key) else {
+                continue;
+            };
+            let at = data_root.join(v);
+            if !at.starts_with(&to.root) {
+                return Err(MacAppError::Library {
+                    path: to.root.clone(),
+                    reason: format!(
+                        "its launch.conf names {} ({key}), another place than this: an earlier \
+                         adopt probably stopped halfway. Adopt the dir it names first, or put \
+                         this one there",
+                        at.display()
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn refuse_running(&self, gogid: &str, dirs: &GameDirs) -> Result<(), MacAppError> {
         game::refuse_running(gogid, &dirs.root, &dirs.prefix)
     }
