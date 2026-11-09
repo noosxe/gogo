@@ -33,6 +33,9 @@ scripts/linux-e2e.sh run 1423049311 --installer ~/backups/cyberpunk/setup_cyberp
 scripts/linux-e2e.sh run 1423049311 --installer ~/backups/cyberpunk/setup_cyberpunk_2077.exe --reuse-install
 ```
 ```bash
+scripts/linux-e2e.sh run 1423049311 --installer ~/backups/cyberpunk/setup_cyberpunk_2077.exe --reuse-install --display wayland --gpu renderD129
+```
+```bash
 scripts/linux-e2e.sh live start 1423049311 --installer ~/backups/cyberpunk/setup_cyberpunk_2077.exe --reuse-install
 ```
 ```bash
@@ -53,6 +56,7 @@ It needs `nix` and nothing else, and resolves its own tools, so there's no need 
 | `--manifest FILE` | default `e2e/<gogid>.toml` |
 | `--gpu NODE[,NODE]` | real GPUs, with no display output (below), comma-joined or repeated: sway renders on the first. `renderD12x` or the full path. Default: software |
 | `--expect-gpu NODE` | with several GPUs, the one the game must render on. Default: any of them, and the summary says which |
+| `--display MODE` | `xwayland` (default) or `wayland`: no X server at all, and Wine's Wayland driver for a Proton game ([Wayland mode](#wayland-mode)). Beats the manifest's `[window] display` |
 | `--secs N` | the limit of the game phase, default 600. Over it, the run stops and fails |
 | `--gogo PATH` | this gogo; `.#umu-python` supplies the FHS env. Default: `nix build .#gogo-linux-app` |
 | `--installer FILE` | build from this GOG setup `.exe` ([below](#building-from-an-offline-installer)) instead of the depot |
@@ -75,7 +79,7 @@ build's sandbox sees. It needs `gogo login` done once. Tokens are never printed.
 
 | File | |
 |---|---|
-| `summary.json` | checks, steps, screenshots, audio, `build`, doctor, log excerpt, cleanup, `tested_entry` |
+| `summary.json` | checks, steps, screenshots, `display`, audio, `build`, doctor, log excerpt, cleanup, `tested_entry` |
 | `shots/<name>.png` | the manifest's screenshots, `not-exited.png` (`not-exited-relaunch_<n>.png` at a [`relaunch`](#a-clean-stop-a-kept-disk-and-a-relaunch)) if a game ignored its exit, `build-window-<n>.png` for each window the build opened |
 | `build.log`, `build-sway.log`, `build-sandbox.log` | what the build phase printed |
 | `sway.log`, `game.out`, `sandbox.log`, `audio.log` | what the game phase printed. `game.out` is the last launch's; with a `relaunch`, the ones before are `launch<n>-game.out` |
@@ -95,8 +99,8 @@ build's sandbox sees. It needs `gogo login` done once. Tokens are never printed.
    own (software rendering, whatever `--gpu` says): the isolation checks, then
    `gogo linux-app <gogid> --yes`. `build` in the summary has its exit, how long it took, the
    windows it opened and how the support installer ended.
-3. **Game,** in a sandbox with neither network nor bus (below): sway, Xwayland, a null sound
-   device, the isolation checks, then `launch.sh`, the steps, the exit, and doctor.
+3. **Game,** in a sandbox with neither network nor bus (below): sway, Xwayland (none in
+   [Wayland mode](#wayland-mode)), a null sound device, the isolation checks, then `launch.sh`, the steps, the exit, and doctor.
 4. **Teardown,** on every exit path: kill the sandbox, sweep, assert nothing is left, delete
    scratch, write the summary.
 
@@ -125,11 +129,12 @@ the game isn't started.
 |---|---|
 | `isolation_netns` | a network namespace of its own, with only `lo` (the build: `lo` and pasta's tap) |
 | `isolation_pidns` | a PID namespace of its own |
-| `isolation_tmp` | `/tmp` is a tmpfs with only the X server's files |
+| `isolation_tmp` | `/tmp` is a tmpfs with only the X server's files (none in Wayland mode) |
 | `isolation_runtime_dir` | `XDG_RUNTIME_DIR` is on the sandbox's own `/run` |
 | `isolation_env` | no `HYPRLAND_*` |
 | `isolation_paths` | the owner's game dirs, menu entries, Steam, Downloads, session bus and sound sockets aren't visible |
-| `isolation_display` | `xwininfo -root` answers with the manifest's size, on this `/tmp`'s socket, and this sandbox's Xwayland serves that number, `:0` |
+| `isolation_display` | `xwininfo -root` answers with the manifest's size, on this `/tmp`'s socket, and this sandbox's Xwayland serves that number, `:0`. In Wayland mode: the only listening Wayland socket is our sway's, in `XDG_RUNTIME_DIR`, and its one output has the manifest's size |
+| `isolation_no_x` | Wayland mode only: no Xwayland process, no listening X socket (filesystem or abstract), nothing in `/tmp/.X11-unix`, and no `DISPLAY` in the game's environment |
 | `isolation_headless` | sway's outputs are all `HEADLESS-*` |
 | `isolation_gpu_nodes` | exactly the chosen GPUs' device nodes, and none in software mode or in the build |
 | `audio` | the default device is the sandbox's null sink, the only sink, on its own socket, and it takes a test stream. Game phase only |
@@ -866,6 +871,68 @@ process; inside, it lists nothing, because of the PID namespace.
 
 What a real desktop does stays on the host pass.
 
+## Wayland mode
+
+`--display wayland` on `run` or `live start`, or `display = "wayland"` in a manifest's
+`[window]` (#264), runs the game phase with no X server at all. It's the path Wine's Wayland
+driver takes on the owner's desktop, and the one HDR needs (Cyberpunk 2077, #232). The default
+stays Xwayland, and the build phase always has Xwayland: it runs an installer, not the game.
+
+- **Sway starts with `xwayland disable`,** and the game's environment has no `DISPLAY`. So a
+  process that wants X fails, instead of passing quietly on an Xwayland nobody meant to test.
+  The alternative was to keep Xwayland up and catch a stray X client after the fact; that lets
+  a game half-work on X and still reach its menu, which is exactly what this mode is there to
+  rule out. `no_x_fallback` then names the log line that says what wanted X.
+- **A gogo game gets `PROTON_ENABLE_WAYLAND=1`** in its launch's environment only: nothing is
+  written to the game's state, the installed base or the owner's. GE-Proton11-12 (gogo's pin)
+  ships `winewayland.drv` for both arches, and its `proton` script turns the switch into
+  `WINE_GRAPHICS_DRIVER=wayland`, `WINE_USE_EGL=1`, `WINE_DISABLE_FULLSCREEN_HACK=1` and
+  `PROTON_USE_XALIA=0`, only when `WAYLAND_DISPLAY` is set. It guesses the primary monitor with
+  `xrandr`, which prints `Error: failed to run xrandr` with no X server: noise, and not matched
+  by `no_x_fallback`. `PROTON_WAYLAND_MONITOR` names one instead.
+- **The checks** are `isolation_display` (only our sway serves a Wayland socket, at the
+  manifest's size), `isolation_no_x` before the launch, and `wayland_client` once the window is
+  up: an `xdg_shell` window in sway's tree, and every process the launch started is connected
+  to our sway's socket and to no X server. That comes from `ss -xapn` in the sandbox's network
+  namespace, by the peer of each socket, so it holds inside pressure-vessel's container too,
+  where the socket has another path. `summary.json`'s `display` says the mode, the socket,
+  whether Proton got the switch, and what each window's processes were connected to.
+- **Window discovery, screenshots, `fills_window`, focus and the close** never used X: sway's
+  tree, `grim` on the output, and the launcher's own close request through the wineserver.
+- **`gpu_gl` asks EGL's surfaceless platform** (`eglinfo`), since there's no GLX.
+  `gpu.egl_wayland` records EGL on the Wayland socket beside it: on NVIDIA it's
+  `eglInitialize failed`, because egl-wayland wants the DRM device sway names, and the sandbox
+  only has the render node. Vulkan games don't go through it (Cyberpunk's VKD3D-Proton renders
+  on the 4090 either way); an OpenGL game on Wine's Wayland driver (`WINE_USE_EGL=1`) on
+  NVIDIA would, and is expected to fail here (not tried).
+
+**Input.** The virtual keyboard and pointer are Wayland devices already, so nothing changed.
+The self-test's client (`scripts/linux-e2e-wayland-client.py`, Wayland-native, no toolkit) asks
+for a pointer lock and relative motion after its click, as a game that steers by the mouse
+does: headless sway grants the lock (`zwp_pointer_constraints_v1`), and `move_by` arrives as
+`zwp_relative_pointer_v1` motion under it, unscaled. `self-test` runs it
+(`e2e/self-test-wayland.toml`: click, lock, motion, key, exit), and an xterm in Wayland mode,
+which must fail with `no_x_fallback` naming "Can't open display". In Cyberpunk 2077's menu on Wine's
+Wayland driver, `move_by` moved the game's own cursor by about as many pixels, and a `click`
+after steering it (pin it in a corner with a big `move_by` first) opened the item under it.
+`move_to` is a poor fit for such a game: sway turns it into a delta from where its own pointer
+is, which a locked or hidden pointer doesn't track, and the game's cursor jumped off the screen.
+What a real compositor does with confinement across monitors, and the cursor image, are the
+host pass's.
+
+**Proven on** (2026-11-09, RTX 4090, `--gpu renderD129 --expect-gpu renderD129
+--reuse-install`): `e2e/1423049311.toml` unchanged, with `--display wayland`. Every check
+passed: title, agreement, menu, Settings and its Graphics pages (DLSS Super Resolution, Frame
+Generation and Ray Tracing offered), Quit, the relaunch on the same disk, and Quit again.
+`winewayland.drv` loaded, `winex11.drv` never did, and DLSS's DLLs and Streamline loaded as on
+X. Wine logs that sway lacks `zwp_text_input_manager_v3` and `xdg_toplevel_icon_manager_v1`:
+input methods and window icons, nothing a run needs.
+
+**Not covered here,** and the owner's host pass (#179): HDR (a headless output has no colour
+management and no HDR metadata, so `DXVK_HDR` and Wine's HDR reporting have nothing to find),
+VRR, fractional scaling, several monitors, the cursor image, and Hyprland itself. gogo's own
+per-game switch is #292.
+
 ## Manifests
 
 `e2e/<gogid>.toml`. The parser is `scripts/linux-e2e-helper.py`, which refuses unknown keys
@@ -880,6 +947,7 @@ wait_secs = 180                  # for the first window; default 180
 resolution = "1280x800"          # the headless output; default 1280x800
 title = "^SimCity"               # regex for the window; default the largest visible
 min_fill = { w = 80, h = 95 }    # % of the window; default 90 x 90
+display = "wayland"              # "xwayland" (default) or "wayland": Wayland mode, below
 
 [env]                            # only for the game's launch: logging, for example
 DXVK_LOG_LEVEL = "info"
@@ -1010,6 +1078,8 @@ all do the same thing. Exactly one of two conditions:
 |---|---|---|
 | `override` | with `[override]`: a `gogo linux-app env set` / `args` / `wrapper` call failed (the game isn't launched) | a refused key, a gogo without #234 |
 | `window` | no window in `wait_secs`, or the game exited first | DDrawCompat's exit 9 in #199 |
+| `wayland_client` (`wayland_client_relaunch_<n>`) | Wayland mode, at the window: it isn't an xdg-shell window, or what the launch started isn't connected to our sway's socket, or is connected to an X server | a game that came up through a display it shouldn't have |
+| `no_x_fallback` | Wayland mode, at the end: a line in `game.out` or the launcher's run log says a process wanted X (Wine's X11 driver, "can't open display" and the like), and names it | a launcher or game that silently needs X |
 | `settled` | `wait_settled` timed out | a game stuck in a video |
 | `not_black_<shot>` | under 1% of the window's pixels are above level 16 | a black screen |
 | `fills_window_<shot>` | the non-black bounding box is under `min_fill` | 800×600 in the top-left of a window: 62% × 75% |
@@ -1053,6 +1123,9 @@ These stay in the owner's host pass (#179, design 18 §11.2), and agents put the
 - **The menu entry and its icon** on a real desktop. The harness runs `launch.sh` directly,
   and writes its `.desktop` file into scratch.
 - **The early-exit dialog.** It's off here, and GNOME and KDE aren't anything the owner runs.
+- **HDR and the rest of a real Wayland desktop.** [Wayland mode](#wayland-mode) proves the
+  game runs on Wine's Wayland driver with no X server; a headless output has no HDR, no
+  colour management and one scale.
 
 ## How it was found to work, and what to watch for
 
