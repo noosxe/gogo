@@ -535,7 +535,7 @@ pub fn locations_dir() -> PathBuf {
 /// A location file's contents, when they're what gogo writes: an absolute
 /// path, without `..`, whose last part is the game's id. Anything else isn't
 /// trusted, since `gogo apps remove` deletes this dir.
-fn parse_location(raw: &str, gogid: &str) -> Option<PathBuf> {
+pub(crate) fn parse_location(raw: &str, gogid: &str) -> Option<PathBuf> {
     let p = Path::new(raw.strip_suffix('\n').unwrap_or(raw));
     let safe = p.is_absolute()
         && p.file_name().is_some_and(|n| n == gogid)
@@ -618,9 +618,17 @@ pub fn staging_root(library: Option<&Library>, slug: &str) -> PathBuf {
 pub fn stays_note(dirs: &GameDirs, library: Option<&Library>) -> Option<String> {
     let library = library?;
     (!dirs.root.starts_with(library.dir())).then(|| {
+        let how = if cfg!(target_os = "linux") {
+            format!(
+                "`gogo linux-app move {} <dir>`",
+                dirs.root.file_name().unwrap_or_default().to_string_lossy()
+            )
+        } else {
+            "`gogo apps remove` and a new build".to_string()
+        };
         format!(
             "this game is already at {}, and the library setting doesn't move games: it \
-             stays there (`gogo apps remove` and a new build put it in {})",
+             stays there ({how} puts it in {})",
             dirs.root.display(),
             library.dir().display()
         )
@@ -747,7 +755,7 @@ impl Library {
 
 /// `p` with its symlinks resolved as far as it exists (a library is compared
 /// by where it really is).
-fn real_path(p: &Path) -> PathBuf {
+pub(crate) fn real_path(p: &Path) -> PathBuf {
     let mut rest = Vec::new();
     let mut cur = p;
     loop {

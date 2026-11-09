@@ -499,6 +499,17 @@ pub fn umu_id_for(gogid: &str, build: &Path, refresh: bool, warnings: &mut Vec<S
     l.umu
 }
 
+/// The game's files: `game/` for a depot build, else its dir in the prefix.
+pub(crate) fn game_files(dirs: &GameDirs, tree: Option<&str>) -> PathBuf {
+    if dirs.game.is_dir() {
+        return dirs.game.clone();
+    }
+    tree.map_or_else(
+        || dirs.game.clone(),
+        |n| dirs.prefix.join("drive_c/GOG").join(n),
+    )
+}
+
 /// Bring `games/<gogid>/` up to date (see the module docs). Never deletes
 /// the prefix or anything in it but links out of the data root.
 pub fn setup(
@@ -774,11 +785,7 @@ pub fn setup(
 
     let rel = |p: &Path| state_rel(&data_root, p);
     let stamp = crate::macapp::launch::stamp(&raw, l4_raw.as_deref());
-    let game_files = if dirs.game.is_dir() {
-        dirs.game.clone()
-    } else {
-        game_dir.clone().unwrap_or_else(|| dirs.game.clone())
-    };
+    let game_files = game_files(&dirs, tree.as_deref());
     let unix = |w: &str| {
         windows_to_unix(&dirs.prefix, w)
             .map(|p| rel(&p))

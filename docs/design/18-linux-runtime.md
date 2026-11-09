@@ -1069,9 +1069,9 @@ An offline installer is not copied at all: it installs into a staging dir in the
 keeping `download.dir` on that drive only saves reading across drives.
 
 **Changing the setting later moves nothing.** A built game stays where its record says, and a
-rebuild goes there too, with a warning when a library is set elsewhere. `gogo apps remove`
-and a new build move a game, at the cost of its prefix and saves; a `move` command that keeps
-them is #278. An installer rebuild whose game stayed on another filesystem than the new staging
+rebuild goes there too, with a warning when a library is set elsewhere. `gogo linux-app move`
+moves a game and keeps its prefix and saves (below); on the Mac, `gogo apps remove` and a new
+build is still the only way, at the cost of both. An installer rebuild whose game stayed on another filesystem than the new staging
 dir ends with a copy instead of a rename.
 
 **A drive that isn't there.** A record whose dir is missing is still a game: `apps list` shows
@@ -1085,9 +1085,84 @@ L4 file, and says the files are still at that path.
 as the link alone (as `remove_dir_all` always did): the report names the target as left behind,
 and never counts or follows it. The library dir itself stays.
 
+**Moving a game (#278).** `gogo linux-app move <gogid> <dir>` puts a built game in
+`<dir>/<gogid>/`, and `--default` puts it back in `games/`. `<dir>` is checked as `--library` is.
+`--dry-run` says what would happen. The Mac half is still to do: the core
+(`macapp/relocate.rs`) is lane-neutral, and a lane only says what counts as running and which of
+its files name the old place (`linuxapp/relocate.rs`).
+
+*A prefix needs nothing rewritten.* Read from a real GE-Proton11-12 prefix (Cyberpunk 2077's, 2026-11-09):
+
+| What | What it holds | After a move |
+|---|---|---|
+| 1324 absolute symlinks in `drive_c/windows`, `Program Files*` | paths into the Proton build | valid: the build doesn't move |
+| `dosdevices/z:` | `/` | valid |
+| `pfx`, `dosdevices/c:`, `users/<user>`, `Application Data` and the like, `drive_c/GOG/<name>` | relative paths inside the game's dir | valid |
+| `system.reg`, `user.reg` | `C:` paths; `Z:` only for fonts and Proton's own build tree | valid |
+| `config_info` | the Proton build's version and paths | valid |
+| `version`, `tracked_files` | no absolute paths | valid |
+| `drive_c/proton_shortcuts/*.desktop` | a `Path=` of the staging dir the prefix was built in | already stale on every installer build; nothing reads them |
+
+Nothing there leads into the prefix by absolute path, and the installer lane has always renamed
+prefixes out of `.build-<slug>-<pid>/`. So move rewrites nothing in the prefix, and neither does
+setup. One thing does need care across filesystems: 34 entries in that prefix carry `user.wine.sd`
+(Wine's security descriptors, and hidden or read-only flags go in `user.DOSATTRIB`), so the copy
+keeps `user.*` attributes. A game that wrote its own path into the registry gets a warning, not a
+rewrite, and so does an `env` or `args` value naming the old dir: those are the game's and the
+user's.
+
+*The steps.* A journal, `<data_root>/game-moves/<gogid>` (from and to), comes first. Then:
+
+1. **The data.** `rename` on one filesystem. On `EXDEV`: refuse if it can't fit, copy to
+   `<target>/.moving-<gogid>/` (symlinks as symlinks, modes, mtimes, `user.*`; a reflink where the
+   filesystems allow; sockets and FIFOs skipped), `syncfs`, compare every file byte for byte, refuse if
+   the game was launched meanwhile, mark the copy `.gogo-moved`, and rename it into place. The
+   comparison reads the game twice, minutes on 70 GB, because deleting the source next would take
+   someone's saves with it. It drops each copied file's page cache first, so it reads the disk where the
+   filesystem lets it.
+2. **The game's own files:** `launch.conf`'s `PREFIX`, `GAME_DIR`, `WORKDIR` and `EXE`, and its
+   `LIBRARY_GAME` and `DATA_ROOT`, to exactly what setup writes there (a test runs setup after and
+   compares; the other lines aren't touched, moving back gives the same bytes as before).
+3. **The commit:** the location record is written, or removed for `games/`, and the data root flushed.
+   This is the only step that changes where the game is.
+4. **Outside the dir:** `launch.sh`, the icon and the menu entry through `launcher::write`, the source
+   deleted (read-only dirs too; not while something runs from it, which keeps the journal and warns),
+   the marker and the journal deleted.
+
+No setup runs: it can need the network and Wine, and the data has already moved. Nothing it would
+write differently is left, and its stamp is about the config, not the place.
+
+*Interrupted.* Before the commit nothing refers to the new place, so a crash, Ctrl-C or full disk
+leaves the game runnable where it was. `doctor` warns (a `move` finding), and the next `move`,
+`apps remove` or `apps prune` works out from the journal and the record which side of the commit
+it stopped on:
+
+| Found | What happens |
+|---|---|
+| A `.moving-<gogid>/`, or a marked copy the record doesn't name | deleted; the game stays; a new copy starts from nothing |
+| The record names the target, and the game is there | the rest of step 4 |
+| The record names the target, and the game isn't (a drive not mounted, or a power cut undid it) | refused, and nothing deleted, so the source is still there |
+| No source, and an unmarked game at the target (a rename, just before its record) | recorded now. The one window with nowhere to run from, as long as it takes to write one small file |
+| No source, and a marked copy | refused: the source may be on a drive that isn't mounted, with newer saves. Mount it and run the move again |
+
+Only a dir with the marker, or `.moving-<gogid>` by its name, is ever deleted as a leftover. A
+failed `rename`, a copy error or a mismatch cleans up at once and says the game wasn't touched.
+A source that won't delete is a warning: the game has moved, and the journal stays for the next run.
+
+The launcher doesn't know about moves. A launch in the seconds between the last running check and
+the commit runs from the old place, and if it exits again before the source goes, what it saved goes too.
+Closing that for good means the launcher taking the move's lock; the checks leave only that window.
+
+*Refused:* while its launcher or anything in its prefix runs (the same check as `apps remove`, again
+after a copy); a target `Library::resolve` refuses, or under `/tmp`; where the game already is; a
+target where `<gogid>` already exists, whatever it is; a dir inside the game's own; a symlinked
+game dir; a game not built here; a recorded dir that isn't there (mount it first; `apps remove` forgets
+it); while another `move` holds the data root's lock (`flock`, so a killed one can't leave it held).
+
 **The Mac lane's other paths:** a portable bundle ignores the setting (`--library` conflicts with
 `--portable`), since its prefix is made on the Mac it runs on. `scripts/host-pass.sh` follows
-the record; `scripts/vm-test.sh` and `scripts/linux-e2e.sh` work on scratch state with no library.
+the record; `scripts/vm-test.sh` works on scratch state with no library, and
+`scripts/linux-e2e.sh` builds under `games/` and reaches a library only by its `move_relaunch` step.
 
 ## 7. Decision 7: the launcher
 
@@ -1965,7 +2040,8 @@ only on Linux (`#[cfg(target_os = "linux")]`), with the same shape:
   installer (run under umu), `--runtime`, `--renderer`, `--retarget`, `--interactive`,
   `--library` (§6.1), `--json`, `--yes` as on the Mac. No `--portable`, `--codesign` or `--out`: the output is
   the state dir plus the `.desktop` file.
-- Subcommands: `setup`, `compat`, `doctor`, `next-renderer`, as on the Mac.
+- Subcommands: `setup`, `compat`, `doctor`, `next-renderer`, as on the Mac; `move` (§6.1), for now
+  on Linux only.
 - Shared and lane-neutral already: `gogo runtimes`, `gogo renderers`, `gogo apps
   list|show|remove|prune` (on Linux a game is orphaned when its `.desktop` file is gone,
   and `remove` also deletes it).

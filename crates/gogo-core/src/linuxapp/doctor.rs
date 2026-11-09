@@ -142,6 +142,7 @@ pub fn doctor(gogid: &str, host: &Host) -> Result<Report, MacAppError> {
     let dirs = GameDirs::for_game(gogid)?;
     let mut f = Vec::new();
     f.extend(crate::macapp::doctor::check_location(gogid, &dirs));
+    f.extend(crate::macapp::doctor::check_interrupted_move(gogid));
 
     let baked = game::read_launch_toml(&dirs);
     let conf = ConfValues::read(&dirs.launch_conf).ok();

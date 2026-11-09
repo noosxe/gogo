@@ -3743,3 +3743,684 @@ fn a_library_game_outlives_a_data_root_that_moved_back_to_the_default() {
             .is_file()
     );
 }
+
+// — moving a built game (#278, design 18 §6.1) —
+
+mod moving {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    use gogo::macapp::relocate::{Faults, KilledAt, Method, MoveEvent, MoveOptions, Target};
+
+    use super::*;
+
+    const SAVE: &str = "prefix/drive_c/users/steamuser/Saved Games/slot one.sav";
+
+    fn go(target: &Target, faults: Faults) -> Result<gogo::macapp::relocate::MoveOutcome, String> {
+        gogo::linuxapp::relocate::move_game(ID, target, &MoveOptions { faults }, &mut |_| {})
+            .map_err(|e| e.to_string())
+    }
+
+    fn across() -> Faults {
+        Faults {
+            across_filesystems: true,
+            ..Faults::default()
+        }
+    }
+
+    /// A built game with an icon, so its menu entry has one to follow.
+    fn built(name: &str) -> World {
+        let w = World::new(name, &["d3d9.dll"]);
+        std::fs::write(w.tree.join(format!("goggame-{ID}.ico")), tiny_ico()).unwrap();
+        build_with(&w.opts());
+        w
+    }
+
+    /// What Proton leaves that a move must keep: a save with an attribute Wine
+    /// would write, links out to the build and inside the prefix, a read-only
+    /// dir and a stray FIFO.
+    fn dress(w: &World) {
+        let root = w.game();
+        let save = root.join(SAVE);
+        std::fs::create_dir_all(save.parent().unwrap()).unwrap();
+        std::fs::write(&save, b"level 42").unwrap();
+        let prefix = root.join("prefix");
+        let notepad = prefix.join("drive_c/windows/notepad.exe");
+        std::os::unix::fs::symlink(w.build.join("proton"), &notepad).unwrap();
+        let _ = std::os::unix::fs::symlink(".", prefix.join("pfx"));
+        let ro = prefix.join("drive_c/read only");
+        std::fs::create_dir_all(&ro).unwrap();
+        std::fs::write(ro.join("f"), "x").unwrap();
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+        std::fs::set_permissions(ro.join("f"), std::fs::Permissions::from_mode(0o444)).unwrap();
+    }
+
+    /// A test's own cleanup can't delete a read-only dir.
+    fn undress(root: &Path) {
+        let ro = root.join("prefix/drive_c/read only");
+        let _ = std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755));
+    }
+
+    /// The moved game is whole, and everything finds it at `root`.
+    fn assert_game_at(w: &World, root: &Path) {
+        assert_eq!(GameDirs::for_game(ID).unwrap().root, root);
+        assert_eq!(std::fs::read(root.join(SAVE)).unwrap(), b"level 42");
+        let prefix = root.join("prefix");
+        // Links came as links, the relative one to game/ still leading there.
+        let gog = prefix.join("drive_c/GOG/Test Game");
+        assert!(std::fs::read_link(&gog).unwrap().is_relative());
+        assert!(gog.join("game.exe").is_file(), "{}", gog.display());
+        assert_eq!(
+            std::fs::read_link(prefix.join("drive_c/windows/notepad.exe")).unwrap(),
+            w.build.join("proton")
+        );
+        assert_eq!(
+            std::fs::read_link(prefix.join("pfx")).unwrap(),
+            Path::new(".")
+        );
+        let ro = prefix.join("drive_c/read only");
+        assert_eq!(ro.metadata().unwrap().mode() & 0o777, 0o555);
+        assert_eq!(ro.join("f").metadata().unwrap().mode() & 0o777, 0o444);
+
+        // launch.conf and the menu entry say so.
+        let conf = std::fs::read_to_string(root.join("launch.conf")).unwrap();
+        let in_lib = gogo::macapp::launch::in_library(root);
+        let shown = if in_lib {
+            root.display().to_string()
+        } else {
+            format!("games/{ID}")
+        };
+        for key in ["PREFIX", "WORKDIR", "EXE", "GAME_DIR"] {
+            assert!(
+                conf_value(&conf, key).starts_with(&format!("'{shown}/")),
+                "{key}: {conf}"
+            );
+        }
+        assert_eq!(conf.contains("LIBRARY_GAME='1'"), in_lib, "{conf}");
+        assert!(
+            desktop_exec().contains(&root.join("launch.sh").display().to_string()),
+            "{}",
+            desktop_exec()
+        );
+        let entry = std::fs::read_to_string(gogo::linuxapp::game::desktop_path(ID)).unwrap();
+        assert!(
+            entry.contains(&format!("Icon={}", root.join("icon.png").display())),
+            "{entry}"
+        );
+
+        // `apps` and `doctor` agree.
+        let logs = w.root.join("logs");
+        let listed = gogo::macapp::apps::list(&logs).unwrap();
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        assert_eq!(listed[0].root, root);
+        assert!(!listed[0].unreachable && listed[0].desktop_present);
+        let report = gogo::linuxapp::doctor::doctor(ID, &doctor_host(w, &[])).unwrap();
+        let find = |check: &str| report.findings.iter().find(|f| f.check == check);
+        assert!(find("move").is_none(), "{:?}", report.findings);
+        assert_eq!(
+            find("links").unwrap().level,
+            gogo::macapp::doctor::Level::Ok,
+            "{:?}",
+            find("links")
+        );
+        assert_eq!(find("location").is_some(), in_lib);
+        assert!(!w.home.join("game-moves").join(ID).exists());
+    }
+
+    /// Setup, run again from where the game now is, writes the same
+    /// `launch.conf`: the move's rewrite is what setup would have done.
+    fn assert_setup_agrees(root: &Path) {
+        let before = std::fs::read_to_string(root.join("launch.conf")).unwrap();
+        setup::setup(
+            ID,
+            &SetupOptions {
+                refresh: false,
+                prompt: None,
+            },
+            &mut quiet(),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("launch.conf")).unwrap(),
+            before
+        );
+    }
+
+    fn both_ways(w: &World, faults: Faults, method: Method) {
+        dress(w);
+        let home = w.game();
+        let conf_at_home = std::fs::read_to_string(home.join("launch.conf")).unwrap();
+        let entry_at_home =
+            std::fs::read_to_string(gogo::linuxapp::game::desktop_path(ID)).unwrap();
+        let lib = w.library();
+        let there = lib.dir().join(ID);
+
+        // A dry run moves nothing.
+        let target = Target::Library(lib.clone());
+        let plan = gogo::linuxapp::relocate::plan(ID, &target, &MoveOptions { faults }).unwrap();
+        assert_eq!(
+            (plan.from.as_path(), plan.to.as_path()),
+            (home.as_path(), there.as_path())
+        );
+        assert!(home.is_dir() && !there.exists() && !w.locations().exists());
+
+        let out = go(&target, faults).unwrap();
+        assert!(
+            out.plan.method == method
+                || (method == Method::Copy && out.plan.method == Method::Reflink),
+            "{:?}",
+            out.plan
+        );
+        assert!(out.recovered.is_empty(), "{out:?}");
+        assert!(!home.exists(), "the source goes");
+        assert_eq!(
+            std::fs::read_to_string(w.locations().join(ID)).unwrap(),
+            format!("{}\n", there.display())
+        );
+        assert_game_at(w, &there);
+        assert!(
+            !there.join(".gogo-moved").exists()
+                && !lib.dir().join(format!(".moving-{ID}")).exists()
+        );
+        assert_setup_agrees(&there);
+
+        // And back: no record, and every file as a build under games/ wrote it.
+        let out = go(&Target::Default, faults).unwrap();
+        assert!(out.warnings.is_empty(), "{out:?}");
+        assert!(!there.exists() && lib.dir().is_dir());
+        assert!(!w.locations().join(ID).exists());
+        assert_game_at(w, &home);
+        assert_eq!(
+            std::fs::read_to_string(home.join("launch.conf")).unwrap(),
+            conf_at_home
+        );
+        assert_eq!(
+            std::fs::read_to_string(gogo::linuxapp::game::desktop_path(ID)).unwrap(),
+            entry_at_home
+        );
+        undress(&home);
+    }
+
+    #[test]
+    fn a_rename_on_one_filesystem_keeps_the_game_both_ways() {
+        let w = built("move-rename");
+        both_ways(&w, Faults::default(), Method::Rename);
+    }
+
+    #[test]
+    fn a_copy_across_filesystems_keeps_the_game_both_ways() {
+        let w = built("move-copy");
+        both_ways(&w, across(), Method::Copy);
+    }
+
+    /// Two real filesystems, where the machine has them: `/dev/shm` is a tmpfs
+    /// on most Linux systems, and the test dir usually isn't.
+    #[test]
+    fn a_real_move_to_another_filesystem_copies() {
+        let shm = Path::new("/dev/shm").join(format!("gogo-move-{}", std::process::id()));
+        if std::fs::create_dir_all(&shm).is_err() {
+            eprintln!("SKIP no /dev/shm here");
+            return;
+        }
+        let dev = |p: &Path| p.metadata().unwrap().dev();
+        let w = World::new("move-real", &["d3d9.dll"]);
+        if dev(&shm) == dev(&w.root) {
+            eprintln!("SKIP /dev/shm is on the test dir's filesystem");
+            let _ = std::fs::remove_dir(&shm);
+            return;
+        }
+        std::fs::write(w.tree.join(format!("goggame-{ID}.ico")), tiny_ico()).unwrap();
+        build_with(&w.opts());
+        dress(&w);
+        let home = w.game();
+        let lib = Library::resolve(&shm, None).unwrap().unwrap();
+        let there = lib.dir().join(ID);
+        let out = go(&Target::Library(lib), Faults::default());
+        let moved = (|| {
+            let out = out?;
+            assert_eq!(out.plan.method, Method::Copy, "{:?}", out.plan);
+            assert!(!home.exists());
+            assert_game_at(&w, &there);
+            go(&Target::Default, Faults::default())
+        })();
+        let _ = std::fs::remove_dir_all(&shm);
+        moved.unwrap();
+        assert!(!there.exists());
+        assert_game_at(&w, &home);
+        undress(&home);
+    }
+
+    #[test]
+    fn a_moved_game_launches_from_its_new_place_with_logs_at_the_data_root() {
+        let Some(w) = World::launcher("move-launch", false) else {
+            return;
+        };
+        let lib = w.library();
+        let there = lib.dir().join(ID);
+        go(&Target::Library(lib), across()).unwrap();
+        assert_eq!(w.game(), there);
+
+        let out = w.launch(&[], &[]);
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        let log = w.log();
+        let prefix = there.join("prefix");
+        assert!(
+            log.contains(&format!("WINEPREFIX={} ", prefix.display())),
+            "{log}"
+        );
+        assert!(
+            log.contains(&format!(
+                "ARGV:{} ",
+                prefix.join("drive_c/GOG/Test Game/game.exe").display()
+            )),
+            "{log}"
+        );
+        assert!(w.home.join("logs").join(ID).join("launch.log").is_file());
+        assert!(!there.parent().unwrap().join("logs").exists());
+        // Fresh stamp, moved or not: no setup was needed.
+        assert!(w.calls().is_empty(), "{:?}", w.calls());
+
+        go(&Target::Default, Faults::default()).unwrap();
+        assert_eq!(w.launch(&[], &[]).status.code(), Some(0));
+        let log = w.log();
+        let env = log.lines().rfind(|l| l.starts_with("ENV:")).unwrap();
+        assert!(env.contains(&format!("games/{ID}/prefix")), "{env}");
+    }
+
+    /// A kill at any point of a copy leaves the game running from where it was
+    /// (nothing refers to the copy yet), and the next move starts clean.
+    #[test]
+    fn a_killed_copy_leaves_the_game_where_it_was_and_the_next_move_cleans_up() {
+        let w = built("move-killed");
+        dress(&w);
+        let home = w.game();
+        let lib = w.library();
+        let there = lib.dir().join(ID);
+        let staging = lib.dir().join(format!(".moving-{ID}"));
+        let target = Target::Library(lib);
+        let conf = std::fs::read_to_string(home.join("launch.conf")).unwrap();
+
+        for (kill, left) in [
+            (KilledAt::Copying(2), &staging),
+            (KilledAt::BeforeRename, &staging),
+            (KilledAt::BeforeCommit, &there),
+        ] {
+            let faults = Faults {
+                killed_at: Some(kill),
+                ..across()
+            };
+            let err = go(&target, faults).unwrap_err();
+            assert!(err.contains("killed"), "{err}");
+            assert!(left.exists(), "{kill:?} leaves {}", left.display());
+
+            // Nothing about the game changed: same dir, same config, runnable.
+            assert_eq!(GameDirs::for_game(ID).unwrap().root, home);
+            assert!(!w.locations().join(ID).exists());
+            assert_eq!(
+                std::fs::read_to_string(home.join("launch.conf")).unwrap(),
+                conf
+            );
+            assert_eq!(std::fs::read(home.join(SAVE)).unwrap(), b"level 42");
+            assert!(desktop_exec().contains(&home.display().to_string()));
+
+            // Doctor names it.
+            let report = gogo::linuxapp::doctor::doctor(ID, &doctor_host(&w, &[])).unwrap();
+            assert!(
+                report
+                    .findings
+                    .iter()
+                    .any(|f| f.check == "move" && f.level == gogo::macapp::doctor::Level::Warn),
+                "{:?}",
+                report.findings
+            );
+
+            // The next move clears it, even one refused for being home already.
+            let refused = go(&Target::Default, Faults::default()).unwrap_err();
+            assert!(refused.contains("already there"), "{refused}");
+            assert!(!left.exists(), "{kill:?}: {} stays", left.display());
+            assert!(!staging.exists() && !there.exists());
+            assert!(!w.home.join("game-moves").join(ID).exists());
+        }
+
+        // Past the commit the new place is the game; only the cleanup was left.
+        let faults = Faults {
+            killed_at: Some(KilledAt::BeforeCleanup),
+            ..across()
+        };
+        go(&target, faults).unwrap_err();
+        assert_eq!(GameDirs::for_game(ID).unwrap().root, there);
+        assert!(home.is_dir(), "the source waits for the cleanup");
+        let done =
+            gogo::macapp::relocate::recover(ID, &gogo::linuxapp::relocate::LinuxLane).unwrap();
+        assert_eq!(done.len(), 1, "{done:?}");
+        assert!(!home.exists());
+        assert_game_at(&w, &there);
+        undress(&there);
+    }
+
+    #[test]
+    fn a_killed_rename_finishes_on_the_next_move() {
+        let w = built("move-rename-killed");
+        dress(&w);
+        let home = w.game();
+        let lib = w.library();
+        let there = lib.dir().join(ID);
+        let faults = Faults {
+            killed_at: Some(KilledAt::BeforeCommit),
+            ..Faults::default()
+        };
+        go(&Target::Library(lib.clone()), faults).unwrap_err();
+        assert!(!home.exists() && there.is_dir());
+
+        // The data can't go back on its own: the move finishes where it went.
+        let done = gogo::linuxapp::relocate::recover_all();
+        assert_eq!(done.len(), 1, "{done:?}");
+        assert!(done[0].contains("recorded now"), "{done:?}");
+        assert_game_at(&w, &there);
+        undress(&there);
+    }
+
+    /// A full copy, and a source that isn't there: gogo can't tell a dead drive
+    /// from one that isn't mounted, and that source may have newer saves.
+    #[test]
+    fn a_copy_whose_source_is_missing_is_never_deleted_or_believed() {
+        let w = World::new("move-no-source", &["d3d9.dll"]);
+        let lib = w.library();
+        let other = Library::resolve(&w.root.join("second drive"), None)
+            .unwrap()
+            .unwrap();
+        build_with(&w.opts_in_library());
+        let from = w.game();
+        let to = other.dir().join(ID);
+        let target = Target::Library(other);
+        let faults = Faults {
+            killed_at: Some(KilledAt::BeforeCommit),
+            ..across()
+        };
+        go(&target, faults).unwrap_err();
+
+        let away = lib.dir().join("unmounted");
+        std::fs::rename(&from, &away).unwrap();
+        let err = go(&target, Faults::default()).unwrap_err();
+        assert!(err.contains("mount it"), "{err}");
+        assert!(to.join("launch.sh").is_file());
+        assert_eq!(GameDirs::for_game(ID).unwrap().root, from);
+
+        std::fs::rename(&away, &from).unwrap();
+        go(&target, Faults::default()).unwrap();
+        assert_eq!(GameDirs::for_game(ID).unwrap().root, to);
+        assert!(!from.exists());
+    }
+
+    /// Past the commit the source is only deleted once the game is proved to be
+    /// at the target and nothing runs from the source.
+    #[test]
+    fn a_source_past_the_commit_waits_for_its_target_and_its_processes() {
+        let w = built("move-keep-source");
+        let home = w.game();
+        let lib = w.library();
+        let there = lib.dir().join(ID);
+        let faults = Faults {
+            killed_at: Some(KilledAt::BeforeCleanup),
+            ..across()
+        };
+        go(&Target::Library(lib), faults).unwrap_err();
+        assert_eq!(GameDirs::for_game(ID).unwrap().root, there);
+
+        // The target's drive is gone, or a power cut undid its data.
+        let away = w.root.join("not mounted");
+        std::fs::rename(&there, &away).unwrap();
+        let lines = gogo::linuxapp::relocate::recover_all();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("isn't there"), "{lines:?}");
+        assert!(home.join("launch.sh").is_file(), "the source stays");
+        assert!(w.home.join("game-moves").join(ID).exists());
+        std::fs::rename(&away, &there).unwrap();
+
+        // Something still runs from the old prefix: maybe a game writing saves.
+        let mut game = std::process::Command::new("sleep")
+            .arg("60")
+            .env("WINEPREFIX", home.join("prefix"))
+            .spawn()
+            .unwrap();
+        assert!(wait_until(10, || !gogo::linuxapp::game::prefix_procs(
+            &home.join("prefix")
+        )
+        .is_empty()));
+        let lines = gogo::linuxapp::relocate::recover_all();
+        game.kill().unwrap();
+        game.wait().unwrap();
+        assert!(lines.iter().any(|l| l.contains("in use")), "{lines:?}");
+        assert!(home.join("launch.sh").is_file());
+        assert!(w.home.join("game-moves").join(ID).exists());
+
+        assert_eq!(gogo::linuxapp::relocate::recover_all().len(), 1);
+        assert!(!home.exists());
+        assert!(!w.home.join("game-moves").join(ID).exists());
+    }
+
+    #[test]
+    fn a_copy_that_fails_or_differs_goes_and_the_game_stays() {
+        let w = World::new("move-fail", &["d3d9.dll"]);
+        build_with(&w.opts());
+        let home = w.game();
+        let lib = w.library();
+        let target = Target::Library(lib.clone());
+        for (faults, says) in [
+            (
+                Faults {
+                    disk_full_after: Some(1),
+                    ..across()
+                },
+                "the copy failed",
+            ),
+            (
+                Faults {
+                    corrupt_copy: true,
+                    ..across()
+                },
+                "doesn't match",
+            ),
+        ] {
+            let err = go(&target, faults).unwrap_err();
+            assert!(err.contains(says), "{err}");
+            assert!(err.contains(&home.display().to_string()), "{err}");
+            assert_eq!(GameDirs::for_game(ID).unwrap().root, home);
+            assert!(home.join("launch.sh").is_file());
+            assert!(!lib.dir().join(ID).exists());
+            assert!(!lib.dir().join(format!(".moving-{ID}")).exists());
+            assert!(!w.home.join("game-moves").join(ID).exists());
+        }
+
+        // Too big for the target is refused before anything's written.
+        // (Not where the two share a filesystem that reflinks: that costs nothing.)
+        let faults = Faults {
+            free_bytes: Some(1),
+            ..across()
+        };
+        match gogo::linuxapp::relocate::plan(ID, &target, &MoveOptions { faults }) {
+            Err(e) => assert!(e.to_string().contains("is free"), "{e}"),
+            Ok(plan) => assert_eq!(plan.method, Method::Reflink),
+        }
+    }
+
+    #[test]
+    fn a_game_launched_during_the_copy_stops_the_move() {
+        let w = World::new("move-launched", &["d3d9.dll"]);
+        build_with(&w.opts());
+        let home = w.game();
+        let lib = w.library();
+        let mut game = None;
+        let err = gogo::linuxapp::relocate::move_game(
+            ID,
+            &Target::Library(lib.clone()),
+            &MoveOptions { faults: across() },
+            &mut |ev| {
+                if game.is_none() && matches!(ev, MoveEvent::Copying { .. }) {
+                    game = Some(
+                        std::process::Command::new("sleep")
+                            .arg("60")
+                            .env("WINEPREFIX", home.join("prefix"))
+                            .spawn()
+                            .unwrap(),
+                    );
+                    // /proc shows its environ once exec is done.
+                    assert!(wait_until(10, || !gogo::linuxapp::game::prefix_procs(
+                        &home.join("prefix")
+                    )
+                    .is_empty()));
+                }
+            },
+        )
+        .unwrap_err();
+        let mut game = game.unwrap();
+        game.kill().unwrap();
+        game.wait().unwrap();
+        assert!(err.to_string().contains("still running"), "{err}");
+        assert_eq!(GameDirs::for_game(ID).unwrap().root, home);
+        assert!(home.join("launch.sh").is_file());
+        assert!(!lib.dir().join(format!(".moving-{ID}")).exists());
+        assert!(!lib.dir().join(ID).exists());
+    }
+
+    #[test]
+    fn what_a_move_refuses() {
+        let w = World::new("move-refuse", &["d3d9.dll"]);
+        let lib = w.library();
+        let target = Target::Library(lib.clone());
+        let there = lib.dir().join(ID);
+
+        // Not built.
+        let err = go(&target, Faults::default()).unwrap_err();
+        assert!(err.contains("isn't built here"), "{err}");
+        assert!(gogo::linuxapp::relocate::plan("nope", &target, &MoveOptions::default()).is_err());
+
+        build_with(&w.opts());
+        let home = w.game();
+
+        // Its launcher is running; a process is in its prefix.
+        let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+        let start = stat
+            .rsplit_once(") ")
+            .unwrap()
+            .1
+            .split_whitespace()
+            .nth(19)
+            .unwrap();
+        let live = home.join(".launchers");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::write(live.join(std::process::id().to_string()), start).unwrap();
+        let err = go(&target, Faults::default()).unwrap_err();
+        assert!(err.contains("is running"), "{err}");
+        std::fs::remove_dir_all(&live).unwrap();
+
+        let mut game = std::process::Command::new("sleep")
+            .arg("60")
+            .env("WINEPREFIX", home.join("prefix"))
+            .spawn()
+            .unwrap();
+        assert!(wait_until(10, || !gogo::linuxapp::game::prefix_procs(
+            &home.join("prefix")
+        )
+        .is_empty()));
+        let err = go(&target, Faults::default()).unwrap_err();
+        game.kill().unwrap();
+        game.wait().unwrap();
+        assert!(err.contains("still running"), "{err}");
+        assert!(home.is_dir() && !there.exists());
+        assert!(!w.home.join("game-moves").join(ID).exists());
+
+        // Where it already is, by any name.
+        let err = go(&Target::Default, Faults::default()).unwrap_err();
+        assert!(err.contains("already there"), "{err}");
+
+        // A target that holds this game, or anything by its name.
+        std::fs::create_dir_all(&there).unwrap();
+        std::fs::write(there.join("mine"), "keep").unwrap();
+        let err = go(&target, Faults::default()).unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(std::fs::read_to_string(there.join("mine")).unwrap(), "keep");
+        std::fs::remove_dir_all(&there).unwrap();
+
+        // Under umu's private /tmp.
+        let tmp = Library::resolve(Path::new("/tmp/gogo-move-test"), None)
+            .unwrap()
+            .unwrap();
+        let err = go(&Target::Library(tmp), Faults::default()).unwrap_err();
+        assert!(err.contains("/tmp"), "{err}");
+
+        // Another move is running.
+        let lock = w.home.join("game-moves/.lock");
+        std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+        let held = std::fs::File::create(&lock).unwrap();
+        held.lock().unwrap();
+        let err = go(&target, Faults::default()).unwrap_err();
+        assert!(err.contains("another"), "{err}");
+        held.unlock().unwrap();
+
+        // A symlinked game dir: the data is somewhere gogo doesn't know about.
+        let real = w.root.join("elsewhere");
+        std::fs::rename(&home, &real).unwrap();
+        std::os::unix::fs::symlink(&real, &home).unwrap();
+        let err = go(&target, Faults::default()).unwrap_err();
+        assert!(err.contains("symlink"), "{err}");
+        std::fs::remove_file(&home).unwrap();
+        std::fs::rename(&real, &home).unwrap();
+
+        // Inside its own dir.
+        go(&target, Faults::default()).unwrap();
+        let inside = Library::resolve(&there.join("sub"), None).unwrap().unwrap();
+        let err = go(&Target::Library(inside), Faults::default()).unwrap_err();
+        assert!(err.contains("inside"), "{err}");
+
+        // A record whose drive isn't mounted.
+        let away = w.root.join("unmounted");
+        std::fs::rename(&there, &away).unwrap();
+        let err = go(&Target::Default, Faults::default()).unwrap_err();
+        assert!(err.contains("a drive not mounted"), "{err}");
+        assert_eq!(GameDirs::for_game(ID).unwrap().root, there);
+    }
+
+    /// A game's own record of where it was, the one thing a move can't rewrite
+    /// for it: the move says so. An args line naming the old dir, likewise.
+    #[test]
+    fn a_game_that_recorded_its_path_gets_a_warning() {
+        let w = built("move-mentions");
+        let home = w.game();
+        let reg = home.join("prefix/user.reg");
+        let dos = home.display().to_string().replace('/', "\\\\");
+        let mut text = std::fs::read_to_string(&reg).unwrap_or_default();
+        text.push_str(&format!("\"Install\"=\"Z:{dos}\\\\prefix\"\n"));
+        std::fs::write(&reg, text).unwrap();
+        w.edit_conf(&[("ARGS", &format!("('{}/x')", home.display()))]);
+
+        let out = go(&Target::Library(w.library()), Faults::default()).unwrap();
+        assert_eq!(out.warnings.len(), 2, "{:?}", out.warnings);
+        assert!(
+            out.warnings[0].contains("launch.conf"),
+            "{:?}",
+            out.warnings
+        );
+        assert!(out.warnings[1].contains("user.reg"), "{:?}", out.warnings);
+    }
+
+    #[test]
+    fn apps_remove_after_an_interrupted_move_finds_the_game() {
+        let w = World::new("move-remove", &["d3d9.dll"]);
+        build_with(&w.opts());
+        let lib = w.library();
+        let faults = Faults {
+            killed_at: Some(KilledAt::BeforeCommit),
+            ..across()
+        };
+        go(&Target::Library(lib.clone()), faults).unwrap_err();
+        assert_eq!(gogo::linuxapp::relocate::recover_all().len(), 1);
+        assert!(!lib.dir().join(ID).exists());
+        assert!(!w.home.join("game-moves").join(ID).exists());
+        let logs = w.root.join("logs");
+        let a = gogo::macapp::apps::get(ID, &logs).unwrap().unwrap();
+        gogo::macapp::apps::remove(&a, false).unwrap();
+        assert!(gogo::macapp::apps::list(&logs).unwrap().is_empty());
+    }
+
+    use gogo::macapp::launch::GameDirs;
+}

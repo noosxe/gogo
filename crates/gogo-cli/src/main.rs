@@ -3445,6 +3445,88 @@ fn linux_app_retarget(
     })
 }
 
+/// `gogo linux-app move`: `dir` is checked as a library, and `None` or `games/`
+/// itself means the default.
+#[cfg(target_os = "linux")]
+fn linux_app_move(
+    gogid: &str,
+    dir: Option<std::path::PathBuf>,
+    dry_run: bool,
+    json: bool,
+) -> Result<i32, AppError> {
+    use gogo::macapp::relocate::{MoveEvent, MoveOptions, Target};
+    let human = gogo::fmt::human_size;
+    let library = match dir {
+        // Not through `resolve_library(None)`: that would be `library.dir`.
+        Some(d) => resolve_library(Some(d))?,
+        None => None,
+    };
+    let target = library.map_or(Target::Default, Target::Library);
+    let opts = MoveOptions::default();
+    if dry_run {
+        let plan = gogo::linuxapp::relocate::plan(gogid, &target, &opts)?;
+        if json {
+            println!("{}", serde_json::to_string(&plan).unwrap());
+        } else {
+            println!(
+                "would move {gogid} ({}) by {}: {} -> {}",
+                human(plan.bytes),
+                plan.method.as_str(),
+                plan.from.display(),
+                plan.to.display()
+            );
+            if plan.extra_bytes > 0 {
+                println!(
+                    "it needs {} free there until the copy is checked",
+                    human(plan.extra_bytes)
+                );
+            }
+        }
+        return Ok(cli::exit::OK);
+    }
+    let tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
+    let mut shown = (0, 0);
+    let out = gogo::linuxapp::relocate::move_game(gogid, &target, &opts, &mut |ev| {
+        let (what, kind, done, total) = match ev {
+            MoveEvent::Copying { done, total } => ("copying", 1, *done, *total),
+            MoveEvent::Verifying { done, total } => ("checking the copy", 2, *done, *total),
+        };
+        let percent = (done * 100).checked_div(total).unwrap_or(100);
+        // Each percent on a terminal, each tenth in a log.
+        let step = if tty { percent } else { percent / 10 * 10 };
+        if !json && (kind, step) != shown {
+            shown = (kind, step);
+            if tty {
+                eprint!("\r\x1b[K{what}: {percent}% of {}", human(total));
+            } else {
+                eprintln!("{what}: {percent}% of {}", human(total));
+            }
+        }
+    });
+    if tty && shown != (0, 0) && !json {
+        eprintln!();
+    }
+    let out = out?;
+    if json {
+        println!("{}", serde_json::to_string(&out).unwrap());
+        return Ok(cli::exit::OK);
+    }
+    for line in &out.recovered {
+        println!("{line}");
+    }
+    println!(
+        "moved {gogid} ({}) by {}: {} -> {}",
+        human(out.plan.bytes),
+        out.plan.method.as_str(),
+        out.plan.from.display(),
+        out.plan.to.display()
+    );
+    for w in &out.warnings {
+        eprintln!("warning: {w}");
+    }
+    Ok(cli::exit::OK)
+}
+
 #[cfg(target_os = "linux")]
 /// `gogo linux-app <sub>` (no build).
 fn linux_app_sub(sub: crate::cli::LinuxAppSub) -> Result<i32, AppError> {
@@ -3496,6 +3578,13 @@ fn linux_app_sub(sub: crate::cli::LinuxAppSub) -> Result<i32, AppError> {
             print_linux_setup(&out, json, |_| {});
             Ok(cli::exit::OK)
         }
+        crate::cli::LinuxAppSub::Move {
+            gogid,
+            dir,
+            default: _,
+            dry_run,
+            json,
+        } => linux_app_move(&gogid, dir, dry_run, json),
         crate::cli::LinuxAppSub::NextRenderer { gogid, dry_run } => {
             match gogo::linuxapp::manage::next_renderer(&gogid, dry_run)? {
                 Some(next) => {
@@ -4817,6 +4906,7 @@ fn apps_cmd(cmd: crate::cli::AppsCmd) -> Result<i32, AppError> {
             keep_override,
             yes,
         } => {
+            finish_interrupted_moves()?;
             let Some(a) = apps::get(&target, &logs)? else {
                 eprintln!("gogo: {target} isn't set up here — see `gogo apps list`");
                 return Ok(cli::exit::USAGE);
@@ -4828,6 +4918,7 @@ fn apps_cmd(cmd: crate::cli::AppsCmd) -> Result<i32, AppError> {
             keep_override,
             yes,
         } => {
+            finish_interrupted_moves()?;
             let orphans: Vec<apps::App> = apps::list(&logs)?
                 .into_iter()
                 .filter(apps::App::orphaned)
@@ -4866,6 +4957,16 @@ fn app_column(a: &gogo::macapp::apps::App) -> String {
         (Some(_), true) => format!("{kind}present"),
         (Some(_), false) => format!("{kind}missing"),
     }
+}
+
+/// An interrupted `linux-app move` first: otherwise a removal could miss the
+/// copy it left, or remove the game from the wrong side of it.
+fn finish_interrupted_moves() -> Result<(), AppError> {
+    #[cfg(target_os = "linux")]
+    for line in gogo::linuxapp::relocate::recover_all() {
+        println!("{line}");
+    }
+    Ok(())
 }
 
 /// Print what goes, ask (unless `yes`), remove, and report.

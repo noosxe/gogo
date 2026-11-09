@@ -25,6 +25,7 @@ pub mod lutris;
 pub mod pe;
 pub mod portable;
 pub mod prompt;
+pub mod relocate;
 pub mod renderer;
 pub mod runtime;
 pub mod setup;
