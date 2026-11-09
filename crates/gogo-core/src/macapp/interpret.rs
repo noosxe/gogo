@@ -518,7 +518,7 @@ impl Executor<'_> {
                     if src.is_dir() {
                         copy_dir(&src, &dst)?;
                         if is_move {
-                            std::fs::remove_dir_all(&src).ok();
+                            crate::gog::materialize::remove_tree(&src).ok();
                         }
                     } else {
                         if let Some(parent) = dst.parent() {

@@ -366,10 +366,14 @@ fn same_bytes(a: &Path, b: &Path) -> io::Result<bool> {
 
 /// [`fs::remove_dir_all`] for a tree that may have read-only dirs in it, as a
 /// game's or a copy of one may ([`copy_exact`] keeps modes). Never follows a
-/// symlink.
+/// symlink: one at `path` is unlinked, its target left alone.
 pub fn remove_tree(path: &Path) -> io::Result<()> {
     fn writable(dir: &Path) -> io::Result<()> {
         use std::os::unix::fs::PermissionsExt as _;
+        // chmod follows links: only ever touch a real dir.
+        if !fs::symlink_metadata(dir)?.is_dir() {
+            return Ok(());
+        }
         let mode = fs::symlink_metadata(dir)?.permissions().mode();
         fs::set_permissions(dir, fs::Permissions::from_mode(mode | 0o700))?;
         for entry in fs::read_dir(dir)? {
@@ -379,6 +383,9 @@ pub fn remove_tree(path: &Path) -> io::Result<()> {
             }
         }
         Ok(())
+    }
+    if fs::symlink_metadata(path)?.file_type().is_symlink() {
+        return fs::remove_file(path);
     }
     match fs::remove_dir_all(path) {
         Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
@@ -599,6 +606,24 @@ mod tests {
         remove_tree(&tree).unwrap();
         assert!(!tree.exists());
         assert!(keep.join("f").is_file());
+    }
+
+    #[test]
+    fn remove_tree_on_a_link_leaves_a_read_only_target_alone() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let (target, link) = (tmp.path().join("target"), tmp.path().join("link"));
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("f"), "").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o555)).unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let res = remove_tree(&link);
+        let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+        res.unwrap();
+        assert!(link.symlink_metadata().is_err());
+        assert_eq!(mode, 0o555);
+        assert!(target.join("f").is_file());
     }
 
     #[test]

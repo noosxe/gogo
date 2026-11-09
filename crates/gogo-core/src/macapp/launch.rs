@@ -645,7 +645,7 @@ pub(crate) fn move_tree(from: &Path, to: &Path) -> Result<(), MacAppError> {
                 to,
                 crate::gog::materialize::Reflink::Try,
             )?;
-            std::fs::remove_dir_all(from)?;
+            crate::gog::materialize::remove_tree(from)?;
             Ok(())
         }
         other => Ok(other?),

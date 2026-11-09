@@ -733,7 +733,7 @@ pub fn execute(
         // A rebuild re-materializes `game/` and keeps the prefix (saves).
         emit(&ProgressEvent::InstallStarted);
         if dirs.game.symlink_metadata().is_ok() {
-            std::fs::remove_dir_all(&dirs.game)?;
+            materialize::remove_tree(&dirs.game)?;
         }
         let report = materialize::materialize_tree(tree, &dirs.game, materialize::Reflink::Try)?;
         if launch::in_library(&dirs.root) && report.method() == materialize::TreeMethod::Copy {
@@ -881,10 +881,10 @@ pub fn execute(
         launch::move_tree(&staging.prefix, &target.prefix)?;
         let target_logs = target.root.join(crate::macapp::INSTALL_LOGS);
         if logs.is_dir() {
-            std::fs::remove_dir_all(&target_logs).ok();
+            materialize::remove_tree(&target_logs).ok();
             launch::move_tree(&logs, &target_logs)?;
         }
-        std::fs::remove_dir_all(&staging.root).ok();
+        materialize::remove_tree(&staging.root).ok();
         let install_dir = target.prefix.join("drive_c/GOG").join(&plan.slug);
         let toml = launch_toml(
             plan,
