@@ -3622,6 +3622,68 @@ fn removing_a_symlinked_game_dir_never_follows_it() {
     }
 }
 
+/// `0o555` on `dirs`, deepest first; hands back a restore for the tempdir.
+fn lock_dirs(dirs: &[&Path]) {
+    use std::os::unix::fs::PermissionsExt as _;
+    for d in dirs {
+        std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o555)).unwrap();
+    }
+}
+
+fn unlock_dirs(dirs: &[&Path]) {
+    use std::os::unix::fs::PermissionsExt as _;
+    for d in dirs.iter().rev() {
+        let _ = std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+#[test]
+fn removing_a_game_with_read_only_dirs_in_its_prefix_takes_all_of_it() {
+    use gogo::macapp::apps;
+    let w = World::new("ro-remove", &["d3d9.dll"]);
+    let logs = w.root.join("logs");
+    let root = build_with(&w.opts()).dirs.root;
+    let ro = root.join("prefix/drive_c/ro");
+    std::fs::create_dir_all(ro.join("sub")).unwrap();
+    std::fs::write(ro.join("f"), "x").unwrap();
+    std::fs::write(ro.join("sub/g"), "x").unwrap();
+    let locked = [ro.as_path(), &ro.join("sub")];
+    lock_dirs(&[&ro.join("sub"), &ro]);
+    let a = apps::get(ID, &logs).unwrap().unwrap();
+    let res = apps::remove(&a, false);
+    if ro.exists() {
+        unlock_dirs(&locked); // let the tempdir cleanup work on a failure
+    }
+    res.unwrap();
+    assert!(!root.exists(), "the whole game is gone");
+}
+
+#[test]
+fn removing_a_symlinked_game_dir_leaves_a_read_only_target_alone() {
+    use gogo::macapp::apps;
+    use std::os::unix::fs::PermissionsExt as _;
+    let w = World::new("ro-symlink", &["d3d9.dll"]);
+    let logs = w.root.join("logs");
+    let root = build_with(&w.opts()).dirs.root;
+    let elsewhere = w.root.join("elsewhere");
+    std::fs::rename(&root, &elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &root).unwrap();
+    let ro = elsewhere.join("prefix/drive_c/ro");
+    std::fs::create_dir_all(&ro).unwrap();
+    std::fs::write(ro.join("f"), "x").unwrap();
+    lock_dirs(&[&ro, &elsewhere]);
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+
+    let a = apps::get(ID, &logs).unwrap().unwrap();
+    let res = apps::remove(&a, false);
+    let modes = (mode(&elsewhere), mode(&ro));
+    unlock_dirs(&[&elsewhere, &ro]);
+    res.unwrap();
+    assert!(root.symlink_metadata().is_err(), "the link goes");
+    assert!(ro.join("f").is_file(), "the target stays");
+    assert_eq!(modes, (0o555, 0o555), "and keeps its modes");
+}
+
 #[test]
 fn a_library_game_whose_drive_is_gone_is_listed_kept_from_gc_and_can_be_forgotten() {
     use gogo::macapp::{apps, store};

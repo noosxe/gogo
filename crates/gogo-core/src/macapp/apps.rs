@@ -267,7 +267,7 @@ pub fn remove(app: &App, keep_override: bool) -> Result<Removed, MacAppError> {
         out.bytes = 0;
         std::fs::remove_file(&app.root)?;
     } else {
-        std::fs::remove_dir_all(&app.root)?;
+        crate::gog::materialize::remove_tree(&app.root)?;
     }
     out.paths.push(app.root.clone());
     launch::forget_location(&app.gogid)?;
@@ -281,7 +281,7 @@ pub fn remove(app: &App, keep_override: bool) -> Result<Removed, MacAppError> {
 
 fn remove_extras(app: &App, keep_override: bool, out: &mut Removed) -> Result<(), MacAppError> {
     if let Some(logs) = &app.logs {
-        std::fs::remove_dir_all(logs)?;
+        crate::gog::materialize::remove_tree(logs)?;
         out.paths.push(logs.clone());
     }
     if let Some(file) = app.override_file.as_ref().filter(|_| !keep_override) {

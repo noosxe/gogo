@@ -980,7 +980,7 @@ pub fn plan(
         }
         // Overwrite confirmed (--yes): clear the stale bundle so execute()
         // starts from a clean root instead of refusing it.
-        std::fs::remove_dir_all(&bundle.root)?;
+        crate::gog::materialize::remove_tree(&bundle.root)?;
     }
 
     let runtime_bytes = if opts.portable {
@@ -1237,7 +1237,7 @@ pub fn execute(
     // #84: the staging prefix served the build only, whatever happened.
     if plan.portable && plan.state.root.symlink_metadata().is_ok() {
         let _ = installer::stop_wineserver(&plan.runtime, &plan.state.prefix);
-        let _ = std::fs::remove_dir_all(&plan.state.root);
+        let _ = crate::gog::materialize::remove_tree(&plan.state.root);
     }
     out
 }
@@ -1334,7 +1334,7 @@ fn execute_into(
             launch::record_location(id, &dirs.root)?;
         }
         if dirs.game.symlink_metadata().is_ok() {
-            std::fs::remove_dir_all(&dirs.game)?;
+            crate::gog::materialize::remove_tree(&dirs.game)?;
         }
         if !plan.portable
             && launch::in_library(&dirs.root)
@@ -1678,10 +1678,10 @@ fn finish_v2(
         // The installer's logs (#56) go along, replacing an older build's.
         let logs = target.root.join(INSTALL_LOGS);
         if dirs.root.join(INSTALL_LOGS).is_dir() {
-            std::fs::remove_dir_all(&logs).ok();
+            crate::gog::materialize::remove_tree(&logs).ok();
             launch::move_tree(&dirs.root.join(INSTALL_LOGS), &logs)?;
         }
-        std::fs::remove_dir_all(&dirs.root).ok();
+        crate::gog::materialize::remove_tree(&dirs.root).ok();
     }
     launch::write_bundle_config(&plan.bundle.resources, &toml)?;
     launch::write_launcher(&plan.bundle.macos, &plan.display)?;

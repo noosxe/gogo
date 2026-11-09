@@ -384,7 +384,7 @@ pub fn link_game(dirs: &GameDirs, tree_name: &str) -> Result<PathBuf, MacAppErro
     let link = gog.join(tree_name);
     if let Ok(meta) = link.symlink_metadata() {
         if meta.is_dir() {
-            std::fs::remove_dir_all(&link)?;
+            crate::gog::materialize::remove_tree(&link)?;
         } else {
             std::fs::remove_file(&link)?;
         }
