@@ -203,7 +203,8 @@ start_sandbox() { # mode logfile command…
     sandbox_args "$mode"
     sandbox_env
     if [ "$mode" = build ]; then
-        SE+=(DBUS_SESSION_BUS_ADDRESS="unix:path=$RUNTIME_DIR/bus" "${SOFTWARE_COMPOSITOR_ENV[@]}")
+        SE+=(DBUS_SESSION_BUS_ADDRESS="unix:path=$RUNTIME_DIR/bus" "${SOFTWARE_COMPOSITOR_ENV[@]}"
+            "${SOFTWARE_EGL[@]+"${SOFTWARE_EGL[@]}"}")
         [ -z "${INSTALLER_FILE:-}" ] || SE+=(GOGO_E2E_INSTALLER="$INSTALLER_FILE")
     else
         SE+=("${COMPOSITOR_ENV[@]}")
@@ -500,6 +501,12 @@ software_setup() {
                   __GLX_VENDOR_LIBRARY_NAME=mesa)
     icd="$(icd_files 'lvp_icd*.json')"
     [ -z "$icd" ] || SOFTWARE_ENV+=("VK_DRIVER_FILES=$icd")
+    # No GPU node, so no vendor but Mesa's: Xwayland's GLX probe goes through glvnd
+    # to every vendor, and nvidia 595's egl-gbm crashes it without a device. Apart
+    # from the lists above, which key the installed bases: it changes no game file.
+    SOFTWARE_EGL=()
+    local mesa=/run/opengl-driver/share/glvnd/egl_vendor.d/50_mesa.json
+    [ ! -e "$mesa" ] || SOFTWARE_EGL=("__EGL_VENDOR_LIBRARY_FILENAMES=$mesa")
 }
 
 # What one render node needs. Sets N_LABEL, N_EXPECT, N_HELD (the node a process
@@ -557,7 +564,7 @@ gpu_setup() { # comma-joined render nodes, the compositor's first ("": software)
         [ -z "$want" ] || die "--expect-gpu needs --gpu" 2
         GPU_LABEL=software
         GPU_EXPECT='llvmpipe|softpipe|lavapipe'
-        COMPOSITOR_ENV=("${SOFTWARE_COMPOSITOR_ENV[@]}")
+        COMPOSITOR_ENV=("${SOFTWARE_COMPOSITOR_ENV[@]}" "${SOFTWARE_EGL[@]+"${SOFTWARE_EGL[@]}"}")
         GAME_ENV=("${SOFTWARE_ENV[@]}")
         return 0
     fi
