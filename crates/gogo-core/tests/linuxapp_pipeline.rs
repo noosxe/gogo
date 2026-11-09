@@ -854,6 +854,27 @@ fn installer_lane_runs_the_setup_exe_under_umu() {
     assert_isolated(&w.game().join("prefix"));
 }
 
+#[test]
+fn installer_lane_titles_the_game_from_the_installed_info() {
+    let w = World::new("instname", &["d3d9.dll"]);
+    let setup_exe = w.root.join("setup_test_game_1.2.3a_(64bit)_(4242).exe");
+    std::fs::write(&setup_exe, "MZ").unwrap();
+    let opts = LinuxAppOptions {
+        installer: Some(setup_exe),
+        runtime: Some(format!("path:{}", w.build.display())),
+        ..Default::default()
+    };
+    let plan = build::plan(&opts, None, &mut quiet()).unwrap();
+    // The stem is clean before the install; its case is only a guess.
+    assert_eq!(plan.display, "Test game");
+    assert_eq!(plan.slug, "test-game");
+    build::execute(&plan, None, &mut quiet()).unwrap();
+    let toml = std::fs::read_to_string(w.game().join("gogo-launch.toml")).unwrap();
+    // The title is the installed game's own name; the install dir keeps the slug.
+    assert!(toml.contains("title = \"Test Game\""), "{toml}");
+    assert!(toml.contains("test-game"), "{toml}");
+}
+
 // — after the build: compat, next-renderer, --retarget (#176) —
 
 #[test]

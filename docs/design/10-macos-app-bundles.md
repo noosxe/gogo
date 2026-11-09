@@ -27,7 +27,8 @@ gogo mac-app <installer-path> [--name <title>] [--runtime <auto|brew|gptk|path>]
 - `--name` — bundle title (defaults to a sanitized installer stem:
 - `--name` — bundle title. Default: derived from the installer stem —
   `setup_` stripped, separators spaced (`setup_heroes3_gold.exe` →
-  `Heroes3 gold`); slug rules in §5.
+  `Heroes3 gold`); a trailing dotted version, `(64bit)`/`(32bit)` and `(<build>)`
+  are dropped too (`setup_cyberpunk_2077_2.31a_(64bit)_(85116).exe` → `Cyberpunk 2077`); slug rules in §5.
 - `--runtime` — Wine source (§3). Default `auto`.
 - `--out` — output directory for `Title.app` (default: cwd).
 - `--yes` — skip the size confirmation (13 §4: bundles land at
