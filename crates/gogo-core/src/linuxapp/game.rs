@@ -14,7 +14,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::macapp::compat;
 use crate::macapp::error::MacAppError;
-use crate::macapp::launch::{GameDirs, LaunchToml, sh_array, sh_quote, stamp};
+use crate::macapp::launch::{
+    GameDirs, LaunchToml, in_library, sh_array, sh_quote, stamp, state_rel,
+};
 
 /// `games/<gogid>/gogo-launch.toml`: one copy, beside the prefix (there's
 /// no bundle on Linux).
@@ -109,6 +111,73 @@ pub fn live_launcher(game_root: &Path) -> Option<u32> {
             let rest: Vec<&str> = stat.rsplit_once(") ")?.1.split_whitespace().collect();
             (rest.first() != Some(&"Z") && rest.get(19) == Some(&start.trim())).then_some(pid)
         })
+}
+
+/// Refuse while the game's launcher or anything in its prefix runs: what
+/// `apps remove` and `linux-app move` both can't work around.
+pub fn refuse_running(gogid: &str, root: &Path, prefix: &Path) -> Result<(), MacAppError> {
+    if let Some(pid) = live_launcher(root) {
+        return Err(MacAppError::Apps(format!(
+            "{gogid} is running (launcher {pid}): quit it first"
+        )));
+    }
+    let procs = prefix_procs(prefix);
+    if !procs.is_empty() {
+        let pids: Vec<String> = procs
+            .iter()
+            .map(|p| format!("{} ({})", p.pid, p.name))
+            .collect();
+        return Err(MacAppError::Apps(format!(
+            "{} process(es) still running in {gogid}'s prefix: {} — quit the game or stop \
+             them first",
+            procs.len(),
+            pids.join(", ")
+        )));
+    }
+    Ok(())
+}
+
+/// `launch.conf` for a game moved from `from` to `to`, the result what
+/// [`crate::linuxapp::setup::setup`] would write there and every other line as
+/// it was: paths under the data root are relative to it, the rest absolute, and
+/// a game outside `games/` is marked. Running it twice changes nothing.
+pub fn relocated_conf(text: &str, from: &Path, to: &Path, data_root: &Path) -> String {
+    const PATHS: [&str; 4] = ["PREFIX", "GAME_DIR", "WORKDIR", "EXE"];
+    let rehome = |value: &str| {
+        let abs = data_root.join(value);
+        match abs.strip_prefix(from) {
+            Ok(rest) if rest.as_os_str().is_empty() => state_rel(data_root, to),
+            Ok(rest) => state_rel(data_root, &to.join(rest)),
+            Err(_) => value.to_string(),
+        }
+    };
+    let mut out = String::with_capacity(text.len());
+    let mut has_root = false;
+    for line in text.split_inclusive('\n') {
+        let key = line.split_once('=').map_or("", |(k, _)| k);
+        if PATHS.contains(&key) {
+            let value = ConfValues::parse(line);
+            out.push_str(&format!("{key}={}\n", sh_quote(&rehome(value.get(key)))));
+        } else if key == "DATA_ROOT" {
+            has_root = true;
+            out.push_str(&format!(
+                "DATA_ROOT={}\n",
+                sh_quote(&data_root.display().to_string())
+            ));
+        } else if key != "LIBRARY_GAME" {
+            out.push_str(line);
+        }
+    }
+    if !has_root {
+        out.push_str(&format!(
+            "DATA_ROOT={}\n",
+            sh_quote(&data_root.display().to_string())
+        ));
+    }
+    if in_library(to) {
+        out.push_str(&format!("LIBRARY_GAME={}\n", sh_quote("1")));
+    }
+    out
 }
 
 /// `launch.conf` read back: the values of [`LaunchConf::render`]'s
@@ -448,6 +517,41 @@ mod tests {
             data_root: "/home/me/.local/share/gogo".into(),
             library_game: false,
         }
+    }
+
+    /// A move's rewrite is what setup writes at the new place, every other
+    /// line untouched, in both directions and through a quote in the path.
+    #[test]
+    fn a_relocated_conf_is_what_setup_would_write_there() {
+        let (data, from) = (Path::new("/d"), Path::new("/d/games/7"));
+        let to = Path::new("/big drive/it's/7");
+        let render = |root: &Path, library_game: bool, rel: bool| {
+            let mut c = conf();
+            let p = |tail: &str| {
+                let abs = root.join(tail);
+                if rel {
+                    abs.strip_prefix(data).unwrap().display().to_string()
+                } else {
+                    abs.display().to_string()
+                }
+            };
+            c.prefix = p("prefix");
+            c.game_dir = p("game");
+            c.workdir = p("prefix/drive_c/GOG/x y");
+            c.exe = p("prefix/drive_c/GOG/x y/a.exe");
+            c.data_root = "/d".into();
+            c.library_game = library_game;
+            c.render()
+        };
+        let (at_home, away) = (render(from, false, true), render(to, true, false));
+        let _guard = crate::test_util::env_lock();
+        // SAFETY: under the crate's env lock.
+        unsafe { std::env::set_var("GOGO_HOME", data) };
+        assert_eq!(relocated_conf(&at_home, from, to, data), away);
+        assert_eq!(relocated_conf(&away, from, to, data), away, "twice is once");
+        assert_eq!(relocated_conf(&away, to, from, data), at_home);
+        // SAFETY: as above.
+        unsafe { std::env::remove_var("GOGO_HOME") };
     }
 
     #[test]

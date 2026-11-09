@@ -845,6 +845,22 @@ pub(crate) fn check_location(gogid: &str, dirs: &GameDirs) -> Option<Finding> {
     })
 }
 
+/// A move of this game that didn't finish (design 18 §6.1): the game runs from
+/// wherever `location` says, and what the move left waits for the next one.
+pub(crate) fn check_interrupted_move(gogid: &str) -> Option<Finding> {
+    let to = super::relocate::interrupted(gogid)?;
+    Some(Finding::warn(
+        "move",
+        format!(
+            "a move to {} is running or was interrupted, and may have left a copy there",
+            to.display()
+        ),
+        format!(
+            "if no move is running, `gogo linux-app move {gogid} <dir>` cleans up and tries again"
+        ),
+    ))
+}
+
 pub(crate) fn walk_links(
     dir: &Path,
     roots: &[&Path],

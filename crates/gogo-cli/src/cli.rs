@@ -385,6 +385,32 @@ pub enum LinuxAppSub {
         #[arg(long)]
         json: bool,
     },
+    /// Move a built game to `<DIR>/<gogid>/`, or back to gogo's data dir with
+    /// `--default`, keeping its Wine prefix and saves. A rename on one
+    /// filesystem. Across filesystems, a copy compared byte for byte before
+    /// the original goes; stopped at any point, the game still runs from where
+    /// it was, and the next move cleans up. Refused while the game is running.
+    Move {
+        /// GOG product id.
+        #[arg(value_name = "GOGID")]
+        gogid: String,
+        /// The library to move it into, as for `--library`.
+        #[arg(
+            value_name = "DIR",
+            required_unless_present = "default",
+            conflicts_with = "default"
+        )]
+        dir: Option<std::path::PathBuf>,
+        /// Back to `games/` in gogo's data dir.
+        #[arg(long)]
+        default: bool,
+        /// Print what would happen, move nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Switch a game to the next renderer in its order (the launcher's
     /// "Try next renderer"): the one after what setup last applied,
     /// written to the override file as `renderer = "<id>"`. Prints the new
@@ -1365,6 +1391,42 @@ mod tests {
         };
         assert_eq!(gogid, "1207659013");
         assert!(json && !refresh);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_app_move_takes_a_dir_or_default_and_not_both() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(
+                ["gogo", "linux-app", "move", "7"]
+                    .iter()
+                    .chain(args)
+                    .copied(),
+            )
+        };
+        let Command::LinuxApp {
+            sub: Some(LinuxAppSub::Move { dir, default, .. }),
+            ..
+        } = parse(&["/big"]).unwrap().command
+        else {
+            panic!("not a move");
+        };
+        assert_eq!(dir.as_deref(), Some(std::path::Path::new("/big")));
+        assert!(!default);
+        assert!(matches!(
+            parse(&["--default", "--dry-run"]).unwrap().command,
+            Command::LinuxApp {
+                sub: Some(LinuxAppSub::Move {
+                    dir: None,
+                    default: true,
+                    dry_run: true,
+                    ..
+                }),
+                ..
+            }
+        ));
+        assert!(parse(&[]).is_err(), "a dir or --default");
+        assert!(parse(&["/big", "--default"]).is_err());
     }
 
     #[cfg(target_os = "linux")]

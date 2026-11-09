@@ -236,48 +236,26 @@ pub fn remove(app: &App, keep_override: bool) -> Result<Removed, MacAppError> {
     if app.unreachable {
         return remove_unreachable(app, keep_override);
     }
-    // The Linux launcher records its start time from /proc/<pid>/stat,
-    // the Mac's from `ps -o lstart`.
-    let live = if app.linux {
-        crate::linuxapp::game::live_launcher(&app.root)
-    } else {
-        doctor::live_launcher(&app.root)
-    };
-    if let Some(pid) = live {
-        return Err(MacAppError::Apps(format!(
-            "{} is running (launcher {pid}): quit it first",
-            app.gogid
-        )));
-    }
     if app.linux {
-        let procs = crate::linuxapp::game::prefix_procs(&app.prefix);
-        if !procs.is_empty() {
-            let pids: Vec<String> = procs
-                .iter()
-                .map(|p| format!("{} ({})", p.pid, p.name))
-                .collect();
+        crate::linuxapp::game::refuse_running(&app.gogid, &app.root, &app.prefix)?;
+    } else {
+        // The Mac's launcher records its start from `ps -o lstart`.
+        if let Some(pid) = doctor::live_launcher(&app.root) {
             return Err(MacAppError::Apps(format!(
-                "{} process(es) still running in {}'s prefix: {} — quit the game \
-                 or stop them first",
-                procs.len(),
-                app.gogid,
-                pids.join(", ")
+                "{} is running (launcher {pid}): quit it first",
+                app.gogid
             )));
         }
-    }
-    let procs = if app.linux {
-        vec![]
-    } else {
-        doctor::prefix_procs(&app.prefix)
-    };
-    if !procs.is_empty() {
-        return Err(MacAppError::Apps(format!(
-            "{} Wine process(es) still running in {}'s prefix: stop them with \
-             `gogo mac-app doctor {} --stop-leftovers`",
-            procs.len(),
-            app.gogid,
-            app.gogid
-        )));
+        let procs = doctor::prefix_procs(&app.prefix);
+        if !procs.is_empty() {
+            return Err(MacAppError::Apps(format!(
+                "{} Wine process(es) still running in {}'s prefix: stop them with \
+                 `gogo mac-app doctor {} --stop-leftovers`",
+                procs.len(),
+                app.gogid,
+                app.gogid
+            )));
+        }
     }
     let mut out = Removed {
         bytes: app.bytes,

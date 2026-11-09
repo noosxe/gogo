@@ -160,6 +160,13 @@ subcommands take a GOGID: `setup`, `compat`, `doctor`, `next-renderer`, and (#23
   string, a relative path or `%command%` is refused with exit 2 and nothing written. `env list`
   shows it too, and `doctor` warns when its program isn't on `PATH`.
 
+- `move <gogid> <dir> | --default [--dry-run] [--json]` (#278, design 18 §6.1): move a built game
+  to `<dir>/<gogid>/` or back to `games/`, keeping its prefix and saves. A rename on one
+  filesystem; across filesystems, a copy compared byte for byte before the original goes. Stopped
+  at any point, the game runs from where it was, and the next move cleans up. Refusals (it's
+  running, the target holds that name, a recorded drive isn't mounted, not enough room) exit 7
+  and touch nothing; a `<dir>` gogo won't use as a library exits 2. Linux only so far.
+
 Verb-first `env list|set|unset`, as `config get|set` and `runtimes list|install`. Edits
 print `key old -> new` lines on stdout and warnings on stderr, and apply at the next launch
 (it runs setup on the changed override); nothing is rebuilt.

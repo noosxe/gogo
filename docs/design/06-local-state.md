@@ -11,7 +11,7 @@ gogo keeps four classes of local data. Paths resolve via `dirs` (platform table 
 | cache | `$XDG_CACHE_HOME/gogo`, else `~/.cache/gogo` | `~/Library/Caches/gogo` | `catalog-{locale}.json` |
 | data | user-chosen `download.dir` (default under the XDG download dir, 05 §3) | same | `{Title}/setup_….exe`, `.part` + sidecars while running |
 | data root (design 18 §6) | `$XDG_DATA_HOME/gogo`, else `~/.local/share/gogo` | `~/Library/Application Support/gogo` (the state dir) | `runtimes/`, `renderers/`, `games/<gogid>/` (prefixes, saves), `compat/` (L4) |
-| game library (design 18 §6.1), only when `library.dir` is set | user-chosen | same | `<library.dir>/<gogid>/`: a game's dir, as it would be under `games/`. `<data root>/game-locations/<gogid>` records where it is |
+| game library (design 18 §6.1), only when `library.dir` is set | user-chosen | same | `<library.dir>/<gogid>/`: a game's dir, as it would be under `games/`. `<data root>/game-locations/<gogid>` records where it is. `<data root>/game-moves/` holds a move's lock and, while one runs or after it was interrupted, its journal |
 | logs | `$XDG_STATE_HOME/gogo/logs/<gogid>/` | `~/Library/Logs/gogo/<gogid>/` | per-game run logs (`launch.log`, `latest.log`) |
 
 **Resolution rules (normative).** All paths resolve through the `dirs` crate, which implements
