@@ -638,7 +638,22 @@ pub fn adopt_game(
         // The game is at the path the user named (checked above: a real dir, this
         // game, no marker), so the marked copy is the spare and goes. Nothing is
         // deleted before that check; a kill here leaves the same journal.
-        materialize::remove_tree(&j.to)?;
+        // Renamed to the staging name first (atomic): a kill or an I/O error
+        // mid-delete must not leave a half-deleted dir that recovery could
+        // record as the game. Recovery removes a staging dir.
+        let (spare, named) = (launch::real_path(&j.to), launch::real_path(&plan.to));
+        if spare.starts_with(&named) || named.starts_with(&spare) {
+            return Err(MacAppError::Library {
+                path: plan.to.clone(),
+                reason: format!(
+                    "it is nested with the unfinished copy at {}: give a path outside it",
+                    j.to.display()
+                ),
+            });
+        }
+        let staging = staging_of(&j.to, gogid);
+        std::fs::rename(&j.to, &staging)?;
+        materialize::remove_tree(&staging)?;
         clear_journal(gogid)?;
         recovered.push(format!(
             "removed {}, a full copy an earlier move never recorded: the game is at {}",
