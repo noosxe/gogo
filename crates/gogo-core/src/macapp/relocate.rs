@@ -243,6 +243,34 @@ fn lock_moves() -> Result<std::fs::File, MacAppError> {
     }
 }
 
+/// The game's own lock, `game-moves/<gogid>.lock`, held exclusively for the
+/// whole of a move or a recovery (design 18 section 6.1). The launcher takes it
+/// shared, without waiting, once it has registered itself: a launch that finds
+/// it held is refused, and one that got in first is seen by the move's own
+/// running-checks, which come after this. It is per game so that playing A never
+/// stops a move of B; the kernel drops it when the process dies, so an
+/// interrupted move never blocks a launch. Never waits: the launcher holds it
+/// only for the instant of its try, so a hold seen here is a launch in that
+/// instant or another process, and the move says so and can be run again.
+fn lock_game(gogid: &str) -> Result<std::fs::File, MacAppError> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(
+            crate::state::data_root()
+                .join(JOURNAL_DIR)
+                .join(format!("{gogid}.lock")),
+        )?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => Err(MacAppError::Apps(format!(
+            "{gogid} is being launched or moved by another process: quit it first, or try again"
+        ))),
+        Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
+    }
+}
+
 /// What a move would do, or why it wouldn't. Creates nothing but
 /// [`materialize::plan_tree`]'s probe files, removed again.
 pub fn plan(
@@ -373,6 +401,7 @@ pub fn move_game(
 ) -> Result<MoveOutcome, MacAppError> {
     super::compat::validate_gogid(gogid)?;
     let _lock = lock_moves()?;
+    let _game_lock = lock_game(gogid)?;
     let recovered = recover_locked(gogid, lane)?;
     let mut plan = plan(gogid, target, lane, opts)?;
     let from = GameDirs::at(plan.from.clone());
@@ -659,6 +688,7 @@ pub fn recover(gogid: &str, lane: &dyn Lane) -> Result<Vec<String>, MacAppError>
         return Ok(Vec::new());
     }
     let _lock = lock_moves()?;
+    let _game_lock = lock_game(gogid)?;
     recover_locked(gogid, lane)
 }
 

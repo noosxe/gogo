@@ -23,7 +23,7 @@ use crate::macapp::launch::GameDirs;
 /// Bumped with every change to [`TEMPLATE`] that matters to a game set up
 /// before it. Setup rewrites `launch.sh` whenever its bytes differ, so this
 /// is for people: the run log header and `launch.log` name it.
-pub const LAUNCHER_VERSION: u32 = 7;
+pub const LAUNCHER_VERSION: u32 = 8;
 
 /// `launch.sh`'s first word when a wrapper runs it for the game's own step
 /// (design 18 §7.8): the game's environment, then umu-run.
@@ -811,6 +811,16 @@ unregister_launch() {
     rm -f "$GAME_MARK" "$GAME_MARK.tmp" "$GAME_MARK.code" "$GAME_MARK.code.tmp"
     if [ "$(cat "$LIVE_DIR/$$" 2>/dev/null)" = "$ME_START" ]; then rm -f "$LIVE_DIR/$$"; fi
 }
+# A move of this game holds its lock right now. Without flock (util-linux) or
+# without the lock file, nothing says so: the launch goes on.
+moving() {
+    local lock="$ROOT/game-moves/$GOGID.lock"
+    [ -f "$lock" ] || return 1
+    if ! has flock; then log "no flock: not checking for a move"; return 1; fi
+    # 99 only when the lock is taken: any other failure isn't a move.
+    flock --shared --nonblock --conflict-exit-code 99 "$lock" true 3>&- 4>&- 2>/dev/null
+    [ $? -eq 99 ]
+}
 start_watchdog() {
     set -m
     (
@@ -992,6 +1002,28 @@ if [ "${#WRAPPER[@]}" -gt 0 ]; then log "under wrapper: ${WRAPPER[*]}"; fi
 # Registered before the game starts: a launcher killed in the gap would leave
 # a game nothing knows about. Only the watchdog needs WPID, so it follows.
 register_launch
+# Design 18 section 6.1: a `linux-app move` of this game holds
+# <root>/game-moves/<gogid>.lock for as long as it runs. Registered first, then
+# the lock: a move that took it before this try is seen here, and one that
+# takes it after is seen by its own running-check. The kernel drops the lock of
+# a move that died, so an interrupted one never gets here.
+if moving; then
+    log "a move of $GOGID is in progress: not launching"
+    unregister_launch
+    end_run_log 127 "game is being moved"
+    alert "$TITLE is being moved to another place by gogo (gogo linux-app move). Wait for it to finish, then start the game again."
+    exit 127
+fi
+# A move that began and ended since this launcher read its config: the dir it
+# runs from is gone, and the registration above has just made an empty one.
+if [ ! -f "$HERE/launch.conf" ]; then
+    log "$HERE has been moved away: not launching"
+    unregister_launch
+    rmdir "$LIVE_DIR" "$HERE" 2>/dev/null
+    end_run_log 127 "game was moved"
+    alert "$TITLE was moved to another place by gogo while this was starting. Start it again from its menu entry."
+    exit 127
+fi
 set -m
 rm -f "$GAME_MARK" "$GAME_MARK.tmp" "$GAME_MARK.code" "$GAME_MARK.code.tmp"
 ( start_game ${ARGV[@]+"${ARGV[@]}"} ) 3>&- 4>&- &

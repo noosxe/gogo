@@ -1195,6 +1195,7 @@ const LAUNCHER_TOOLS: &[&str] = &[
     "setsid",
     "printf",
     "env",
+    "flock",
 ];
 
 /// A 16×16 `.ico` (one 32 bpp DIB, opaque red).
@@ -1489,7 +1490,7 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
     // next setup, which says so; an unchanged one isn't touched.
     std::fs::write(
         &sh,
-        script.replace("LAUNCHER_VERSION=7", "LAUNCHER_VERSION=0"),
+        script.replace("LAUNCHER_VERSION=8", "LAUNCHER_VERSION=0"),
     )
     .unwrap();
     std::fs::write(&desktop, "[Desktop Entry]\nExec=/old/root/launch.sh\n").unwrap();
@@ -1497,7 +1498,7 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
     assert_eq!(std::fs::read_to_string(&sh).unwrap(), script);
     assert_eq!(std::fs::read_to_string(&desktop).unwrap(), entry);
     assert!(
-        out.notes.iter().any(|n| n == "launch.sh: launcher 0 -> 7"),
+        out.notes.iter().any(|n| n == "launch.sh: launcher 0 -> 8"),
         "{:?}",
         out.notes
     );
@@ -1562,7 +1563,7 @@ fn the_launcher_runs_umu_with_the_games_environment_and_logs_the_run() {
     let run = &runs[0];
     for want in [
         format!("# gogo run log: Test Game ({ID})\n"),
-        "# launcher: 7\n".into(),
+        "# launcher: 8\n".into(),
         format!(
             "# runtime: path:{} (1793687165 GE-Proton10-34)\n",
             w.build.display()
@@ -3703,7 +3704,7 @@ fn the_launcher_of_a_library_game_keeps_gogos_data_root() {
     );
     // Logs stay under the data root, not the library's parent.
     assert_eq!(w.runs().len(), 1, "run logs under {:?}", w.logs());
-    assert!(w.launch_log().contains("launcher 7"));
+    assert!(w.launch_log().contains("launcher 8"));
     assert!(!w.root.join("big drive/logs").exists());
 
     // Stale config: setup runs with gogo's data root as GOGO_HOME, and from
@@ -3757,6 +3758,16 @@ mod moving {
 
     fn go(target: &Target, faults: Faults) -> Result<gogo::macapp::relocate::MoveOutcome, String> {
         gogo::linuxapp::relocate::move_game(ID, target, &MoveOptions { faults }, &mut |_| {})
+            .map_err(|e| e.to_string())
+    }
+
+    fn go_with(
+        _w: &World,
+        target: &Target,
+        faults: Faults,
+        emit: &mut dyn FnMut(&MoveEvent),
+    ) -> Result<gogo::macapp::relocate::MoveOutcome, String> {
+        gogo::linuxapp::relocate::move_game(ID, target, &MoveOptions { faults }, emit)
             .map_err(|e| e.to_string())
     }
 
@@ -4280,6 +4291,147 @@ mod moving {
         assert!(home.join("launch.sh").is_file());
         assert!(!lib.dir().join(format!(".moving-{ID}")).exists());
         assert!(!lib.dir().join(ID).exists());
+    }
+
+    /// What a launch refused for a move leaves: no game, a 127 run, a dialog,
+    /// and no launcher record for `live_launcher` to find.
+    fn assert_refused_for_a_move(w: &World, out: &std::process::Output) {
+        assert_eq!(out.status.code(), Some(127), "{out:?}");
+        assert_eq!(w.game_runs(), 0);
+        assert!(
+            w.launch_log()
+                .contains(&format!("a move of {ID} is in progress")),
+            "{}",
+            w.launch_log()
+        );
+        assert!(w.dialogs()[0].contains("being moved"), "{:?}", w.dialogs());
+        assert!(
+            w.runs()
+                .last()
+                .unwrap()
+                .contains("# exit: 127 (game is being moved)")
+        );
+        assert_eq!(gogo::linuxapp::game::live_launcher(&w.game()), None);
+    }
+
+    fn hold(w: &World, name: &str) -> std::fs::File {
+        let dir = w.home.join("game-moves");
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = std::fs::File::create(dir.join(name)).unwrap();
+        f.lock().unwrap();
+        f
+    }
+
+    /// A launch while a move runs is refused, from the first copied file on;
+    /// the same launch goes ahead once the move is over.
+    #[test]
+    fn a_launch_during_a_move_is_refused_and_one_after_it_runs() {
+        let Some(w) = World::launcher("move-refuses-launch", false) else {
+            return;
+        };
+        let stub = w.dialog_stub(&["OK"]);
+        let env = [("GOGO_LAUNCHER_DIALOG", stub.to_str().unwrap())];
+        let lib = w.library();
+        let mut tried = 0;
+        go_with(&w, &Target::Library(lib), across(), &mut |ev| {
+            if matches!(ev, MoveEvent::Verifying { .. }) && tried == 0 {
+                tried += 1;
+                let out = w.launch(&env, &[]);
+                assert_refused_for_a_move(&w, &out);
+            }
+        })
+        .unwrap();
+        assert_eq!(tried, 1);
+        // The move is over: the game runs from its new place.
+        assert_eq!(w.launch(&[], &[]).status.code(), Some(0));
+        assert_eq!(w.game_runs(), 1);
+    }
+
+    /// The lock alone decides: held, a launch is refused at any point of the
+    /// move; a journal with nothing holding the lock (a dead move) blocks
+    /// nothing.
+    #[test]
+    fn only_a_held_lock_refuses_and_a_dead_moves_journal_does_not() {
+        let Some(w) = World::launcher("move-dead", false) else {
+            return;
+        };
+        let stub = w.dialog_stub(&["OK"]);
+        let env = [("GOGO_LAUNCHER_DIALOG", stub.to_str().unwrap())];
+        {
+            let _held = hold(&w, &format!("{ID}.lock"));
+            let out = w.launch(&env, &[]);
+            assert_refused_for_a_move(&w, &out);
+        }
+        // A move killed just before its commit: its journal stays, its lock is gone.
+        let lib = w.library();
+        let err = go(
+            &Target::Library(lib),
+            Faults {
+                killed_at: Some(KilledAt::BeforeCommit),
+                ..across()
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("killed"), "{err}");
+        assert!(w.home.join("game-moves").join(ID).is_file());
+        assert!(
+            w.home
+                .join("game-moves")
+                .join(format!("{ID}.lock"))
+                .is_file()
+        );
+        let out = w.launch(&env, &[]);
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        assert_eq!(w.game_runs(), 1);
+    }
+
+    /// Another game's move, or the data root's own lock, doesn't stop this
+    /// game; and a running game takes no lock a move needs.
+    #[test]
+    fn a_launch_is_stopped_by_its_own_games_lock_only() {
+        let Some(w) = World::launcher("move-other", true) else {
+            return;
+        };
+        let _other = hold(&w, "999.lock");
+        let _root = hold(&w, ".lock");
+        let mut child = w
+            .launch_cmd(&[("FAKE_GAME_HANG", "1")], &[])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        assert!(wait_until(10, || !prefix_procs(&w).is_empty()));
+        // Running: a move of another game gets past the locks (to "not built").
+        // A move of a game whose lock something holds refuses at once.
+        drop(_root);
+        let t0 = std::time::Instant::now();
+        let err = gogo::linuxapp::relocate::move_game(
+            "999",
+            &Target::Default,
+            &MoveOptions::default(),
+            &mut |_| {},
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(t0.elapsed().as_secs() < 5, "the move waited");
+        assert!(err.contains("999 is being launched or moved"), "{err}");
+        drop(_other);
+        let err = gogo::linuxapp::relocate::move_game(
+            "999",
+            &Target::Default,
+            &MoveOptions::default(),
+            &mut |_| {},
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(!err.contains("another `gogo`"), "{err}");
+        // Moving this very game is refused by the running check, not by a lock.
+        let err = go(&Target::Library(w.library()), Faults::default()).unwrap_err();
+        assert!(err.contains("is running"), "{err}");
+        let _ = std::process::Command::new("kill")
+            .args(["-TERM", &child.id().to_string()])
+            .status();
+        child.wait().unwrap();
     }
 
     #[test]
