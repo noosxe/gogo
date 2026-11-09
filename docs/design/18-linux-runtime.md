@@ -1156,7 +1156,7 @@ the menu entry are stale, and nothing else is wrong. No data moves, so there is 
 - `<dir>` is the game's **own** dir, ending in `<gogid>` (what the record holds), not its library,
   so it can't be mistaken for a `move` target. Its parent is checked as `Library::resolve` checks one;
   if that is `games/`, the adopt removes the record.
-- It checks the dir is a real dir (not a symlink) with a `gogo-launch.toml` whose `gogid` is this game.
+- It checks the dir is a real dir (not a symlink) with a readable `gogo-launch.toml` whose `gogid` is this game, and no `.gogo-moved` marker (a copy an interrupted move left). After the rewrite and before the commit, `launch.conf`'s `PREFIX` and `GAME_DIR` must name the new dir: an earlier adopt that stopped halfway can leave another, and that is refused rather than committed.
 - **Refused while the old place is reachable**: the recorded dir, or `games/<gogid>` when there is no
   record. The error names both paths. Two copies are never chosen between, so the user removes or
   renames one first.
@@ -1169,7 +1169,7 @@ the menu entry are stale, and nothing else is wrong. No data moves, so there is 
   `publish` for `launch.sh`, the icon and the menu entry. A failure of `publish` is a warning, as in
   a move. A crash after the commit leaves the record right and the menu entry stale: `setup` writes it
   again. Warnings (a path the game's registry or `args` keep) are shown as in a move.
-- `--dry-run` and `--json` as `move`. The unreachable-dir errors of `move` and `doctor` point at it.
+- `--dry-run` and `--json` as `move`; a dry run with a journal pending says it can't tell, since the real run settles it first. The unreachable-dir errors of `move` and `doctor` point at it.
 
 *The launcher and the move's lock* (`LAUNCHER_VERSION` 8, #284). The running-checks alone leave a
 window: a game launched from the old place after the last check and quitting before the source goes

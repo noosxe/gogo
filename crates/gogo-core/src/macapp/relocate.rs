@@ -59,8 +59,12 @@ pub trait Lane {
     /// Could the game run from `root`?
     fn check_target(&self, root: &Path) -> Result<(), MacAppError>;
     /// The game id `root` holds, for an adopt to compare with the one asked for.
-    /// `None`: the lane's files there don't say.
+    /// `None`: the lane's files there can't be read, and an adopt is refused.
     fn built_id(&self, root: &Path) -> Option<String>;
+    /// After `rewrite_inside` for an adopt: do the game's own files name `to`?
+    /// They may not when an earlier adopt stopped halfway, since the rewrite
+    /// only knows the old place from the record.
+    fn check_rewritten(&self, to: &GameDirs) -> Result<(), MacAppError>;
     /// Refuse while anything runs from the game's dir.
     fn refuse_running(&self, gogid: &str, dirs: &GameDirs) -> Result<(), MacAppError>;
     /// Point the game's own files at the new place. `at` is where they are
@@ -492,22 +496,49 @@ fn plan_adopt(gogid: &str, target: &Target, lane: &dyn Lane) -> Result<AdoptPlan
     }
     if launch::real_path(&from.root) == launch::real_path(&to) {
         return Err(refuse(format!(
-            "gogo already has {gogid} there: nothing to adopt (`gogo linux-app setup {gogid}`              writes its menu entry again)"
+            "gogo already has {gogid} there: nothing to adopt (`gogo linux-app setup {gogid}` writes its menu \
+             entry again)"
         )));
     }
     lane.check_built(gogid, &GameDirs::at(to.clone()))?;
-    if let Some(id) = lane.built_id(&to)
-        && id != gogid
-    {
-        return Err(refuse(format!("that is game {id}, not {gogid}")));
+    match lane.built_id(&to) {
+        Some(id) if id == gogid => {}
+        Some(id) => return Err(refuse(format!("that is game {id}, not {gogid}"))),
+        None => {
+            return Err(refuse(
+                "its game file can't be read, so gogo can't tell whose game it is".into(),
+            ));
+        }
+    }
+    // What an interrupted move left isn't a game to adopt.
+    if to.join(MARKER).symlink_metadata().is_ok() {
+        return Err(refuse(
+            "it is a copy an earlier move left (it holds a `.gogo-moved` marker): finish or \
+             clean up that move first"
+                .into(),
+        ));
     }
     lane.check_target(&to)?;
     // Two copies are never chosen between by gogo: the old one has to be gone.
-    if from.root.symlink_metadata().is_ok() {
+    // Only "not there" counts as gone: a stale mount's error says nothing.
+    let old_there = match from.root.symlink_metadata() {
+        Ok(_) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => {
+            return Err(MacAppError::Library {
+                path: from.root.clone(),
+                reason: format!(
+                    "gogo can't tell whether the old place is there ({e}): fix that, then adopt"
+                ),
+            });
+        }
+    };
+    if old_there {
         return Err(MacAppError::Library {
             path: from.root.clone(),
             reason: format!(
-                "gogo has {gogid} at {}, and it is there; {} holds a game by that id too. gogo                  won't guess which one is yours: move or remove one, then adopt the other",
+                "gogo has {gogid} at {}, and it is there; {} holds a game by that id too. gogo \
+                 won't guess which one is yours: move or remove one, then adopt the other",
                 from.root.display(),
                 to.display()
             ),
@@ -523,6 +554,14 @@ fn plan_adopt(gogid: &str, target: &Target, lane: &dyn Lane) -> Result<AdoptPlan
 /// What an adopt of `gogid` at `target` would do, or why it wouldn't.
 pub fn adopt_plan(gogid: &str, target: &Target, lane: &dyn Lane) -> Result<AdoptPlan, MacAppError> {
     super::compat::validate_gogid(gogid)?;
+    // The real run settles it first, which can change what is recorded.
+    if journal_path(gogid).exists() {
+        return Err(MacAppError::Apps(format!(
+            "an earlier move of {gogid} left a journal ({}): the adopt settles it first, so \
+             a dry run can't say what it would do",
+            journal_path(gogid).display()
+        )));
+    }
     plan_adopt(gogid, target, lane)
 }
 
@@ -544,7 +583,8 @@ pub fn adopt_game(
     // running or a source that wouldn't go: what's recorded isn't settled.
     if journal_path(gogid).exists() {
         return Err(MacAppError::Apps(format!(
-            "an earlier move of {gogid} isn't finished ({}): run `gogo linux-app move {gogid}              <dir>` or `apps remove` first",
+            "an earlier move of {gogid} isn't finished ({}): run `gogo linux-app move {gogid} \
+             <dir>` or `apps remove` first",
             journal_path(gogid).display()
         )));
     }
@@ -558,6 +598,7 @@ pub fn adopt_game(
     lane.refuse_running(gogid, &from)?;
 
     let mut warnings = lane.rewrite_inside(&from, &to, &plan.to)?;
+    lane.check_rewritten(&to)?;
     commit(gogid, &plan.to).map_err(|e| {
         MacAppError::Apps(format!(
             "gogo couldn't record that {gogid} is at {} ({e}): run the adopt again once \
