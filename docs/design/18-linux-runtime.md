@@ -2114,11 +2114,12 @@ only on Linux (`#[cfg(target_os = "linux")]`), with the same shape:
 - **Installer-lane naming (#235).** The title and slug come from the installer's file
   name (`macapp::display_name`) with GOG's tail dropped token by token from the end: `(64bit)`
   / `(32bit)`, a `(<build>)` number, a dotted version (`2.1.0.15`, `2.31a`) and a revision
-  word after one (`1.0.3_hotfix`). `setup_cyberpunk_2077_2.31a_(64bit)_(85116).exe` is
+  word after one (`1.0.3_hotfix`); at most one version, so a title that ends in
+  a dotted number keeps it. `setup_cyberpunk_2077_2.31a_(64bit)_(85116).exe` is
   `Cyberpunk 2077` / `cyberpunk-2077`, so `--name` isn't needed for it. A plain number
   (`portal_2`, `cyberpunk_2077`) is never a version. The slug fixes `C:\GOG\<slug>` before
   the install runs; after it, the title in `gogo-launch.toml` (launcher log, `doctor`, the
-  `.desktop` name) is the installed `goggame-*.info`'s `name`, unless `--name` was given. A rebuild is
+  `.desktop` name) is the installed `goggame-*.info`'s `name`, unless `--name` was given (the base game's info, never a DLC's; `--json`'s `name` is that title). A rebuild is
   keyed by the gogid, not the slug: it sets the old prefix aside and installs into a fresh one, so
   a slug that differs from an older build's (say `cyberpunk-2077-2-31a-64bit-85116`)
   changes nothing about where the game lives or which saves are kept.
