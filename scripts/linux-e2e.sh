@@ -111,6 +111,7 @@ GRACE_SECS=45 # how long a stopped run gets for the launcher's own teardown
 # Inside the sandbox's own /run: a socket path under target/ can pass the
 # kernel's 108 bytes.
 RUNTIME_DIR=/run/e2e-runtime
+OTHER_FS=/e2e-other-fs
 
 log() { printf '[linux-e2e] %s\n' "$*" >&2; }
 die() { log "error: $1"; exit "${2:-3}"; }
@@ -182,7 +183,9 @@ sandbox_args() { # mode: build | game
         fi
         [ -z "${INSTALLER_DIR:-}" ] || SB+=(--ro-bind "$INSTALLER_DIR" "$INSTALLER_MOUNT")
     else
-        SB+=(--unshare-net)
+        # Another filesystem, outside $HOME and the scratch: the `move_relaunch` step's
+        # other_fs (#278). A tmpfs costs nothing until a game is moved onto it.
+        SB+=(--unshare-net --tmpfs "$OTHER_FS")
         for d in "${GPU_BINDS[@]+"${GPU_BINDS[@]}"}"; do SB+=(--dev-bind "$d" "$d"); done
     fi
 }
@@ -1336,7 +1339,9 @@ cmd_run() {
     local game_extra
     game_extra="$(jq -cn --argjson l "$launch" --arg cwd "$launch_cwd" --argjson d "$doctor" --arg g "$game_log" \
         --argjson f "$forbidden" --arg i "${INSTALLER_FILE:+$INSTALLER_MOUNT}" --argjson p "$pre_launch" \
+        --arg lib "$RUN/library" --arg other "$OTHER_FS" \
         '{launch:$l, launch_cwd:$cwd, doctor:$d, game_log:$g, pre_launch:$p,
+          move_targets:{library:$lib, other_fs:$other},
           forbidden_paths:($f + (if $i == "" then [] else [$i] end))}')"
     if [ -n "${LIVE:-}" ]; then
         live_game_phase "$game_extra"
