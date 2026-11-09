@@ -166,6 +166,13 @@ subcommands take a GOGID: `setup`, `compat`, `doctor`, `next-renderer`, and (#23
   at any point, the game runs from where it was, and the next move cleans up. Refusals (it's
   running, the target holds that name, a recorded drive isn't mounted, not enough room) exit 7
   and touch nothing; a `<dir>` gogo won't use as a library exits 2. Linux only so far.
+  `move <gogid> --adopt <dir> [--dry-run] [--json]` (#283) moves nothing: the game's own dir (the one
+  named `<gogid>`; its parent is checked as a library, and `games/<gogid>` drops the record) is
+  already where you say, because a drive mounts at a new path or the dir was moved by hand. gogo
+  checks `gogo-launch.toml` is there and is this game's, then points the record, `launch.conf` and
+  the menu entry at it. Refused (exit 7, nothing touched) while the recorded dir (or `games/<gogid>`)
+  still exists, naming both paths, while the game runs, or while a lock is held; an interrupted move
+  is settled first.
 
 Verb-first `env list|set|unset`, as `config get|set` and `runtimes list|install`. Edits
 print `key old -> new` lines on stdout and warnings on stderr, and apply at the next launch

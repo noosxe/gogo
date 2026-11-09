@@ -840,7 +840,14 @@ pub(crate) fn check_location(gogid: &str, dirs: &GameDirs) -> Option<Finding> {
                 "recorded at {}, which isn't there (a drive not mounted?)",
                 dirs.root.display()
             ),
-            format!("mount it, or `gogo apps remove {gogid}`"),
+            if cfg!(target_os = "linux") {
+                format!(
+                    "mount it; if it is somewhere else now, `gogo linux-app move {gogid} \
+                     --adopt <its dir>`; or `gogo apps remove {gogid}`"
+                )
+            } else {
+                format!("mount it, or `gogo apps remove {gogid}`")
+            },
         )
     })
 }

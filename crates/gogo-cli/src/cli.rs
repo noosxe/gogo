@@ -390,6 +390,11 @@ pub enum LinuxAppSub {
     /// filesystem. Across filesystems, a copy compared byte for byte before
     /// the original goes; stopped at any point, the game still runs from where
     /// it was, and the next move cleans up. Refused while the game is running.
+    /// With `--adopt <DIR>`, nothing moves: the game's dir is already somewhere
+    /// else (a drive mounted at a new path, a move by hand), and gogo's
+    /// record, `launch.conf` and menu entry are pointed at it. `<DIR>` is the
+    /// game's own dir, the one ending in its id; refused while the old place is
+    /// still there.
     Move {
         /// GOG product id.
         #[arg(value_name = "GOGID")]
@@ -397,13 +402,17 @@ pub enum LinuxAppSub {
         /// The library to move it into, as for `--library`.
         #[arg(
             value_name = "DIR",
-            required_unless_present = "default",
-            conflicts_with = "default"
+            required_unless_present_any = ["default", "adopt"],
+            conflicts_with_all = ["default", "adopt"]
         )]
         dir: Option<std::path::PathBuf>,
         /// Back to `games/` in gogo's data dir.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "adopt")]
         default: bool,
+        /// The game is already at this dir (ending in its id): record that, and
+        /// move nothing.
+        #[arg(long, value_name = "DIR")]
+        adopt: Option<std::path::PathBuf>,
         /// Print what would happen, move nothing.
         #[arg(long)]
         dry_run: bool,
@@ -1427,6 +1436,19 @@ mod tests {
         ));
         assert!(parse(&[]).is_err(), "a dir or --default");
         assert!(parse(&["/big", "--default"]).is_err());
+        let Command::LinuxApp {
+            sub: Some(LinuxAppSub::Move { adopt, dir, .. }),
+            ..
+        } = parse(&["--adopt", "/mnt/x/1", "--dry-run"])
+            .unwrap()
+            .command
+        else {
+            panic!("not a move");
+        };
+        assert_eq!(adopt.as_deref(), Some(std::path::Path::new("/mnt/x/1")));
+        assert!(dir.is_none());
+        assert!(parse(&["--adopt", "/mnt/x/1", "--default"]).is_err());
+        assert!(parse(&["--adopt", "/mnt/x/1", "/big"]).is_err());
     }
 
     #[cfg(target_os = "linux")]

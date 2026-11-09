@@ -1149,6 +1149,28 @@ Only a dir with the marker, or `.moving-<gogid>` by its name, is ever deleted as
 failed `rename`, a copy error or a mismatch cleans up at once and says the game wasn't touched.
 A source that won't delete is a warning: the game has moved, and the journal stays for the next run.
 
+*Adopting (#283).* `gogo linux-app move <gogid> --adopt <dir>` is for a game whose dir moved
+without gogo knowing (a drive mounts at a new path, a move by hand): the record, `launch.conf` and
+the menu entry are stale, and nothing else is wrong. No data moves, so there is no journal. Decisions:
+
+- `<dir>` is the game's **own** dir, ending in `<gogid>` (what the record holds), not its library,
+  so it can't be mistaken for a `move` target. Its parent is checked as `Library::resolve` checks one;
+  if that is `games/`, the adopt removes the record.
+- It checks the dir is a real dir (not a symlink) with a `gogo-launch.toml` whose `gogid` is this game.
+- **Refused while the old place is reachable**: the recorded dir, or `games/<gogid>` when there is no
+  record. The error names both paths. Two copies are never chosen between, so the user removes or
+  renames one first.
+- Refused while the game runs, in the new dir or the old (`refuse_running` on both), under the same
+  global and per-game `try_lock`s a move takes, so a launch and an adopt never overlap.
+- **An interrupted move of the game is settled first** (`recover`, as `move` does). If that can't be
+  done (a full copy and no source) or leaves its journal, the adopt is refused, saying so.
+- Then the steps of a move without its data, shared with it: `rewrite_inside(from = old dir, to = new
+  dir, at = new dir)`, the commit (record written or removed, the same flushes in the same order), and
+  `publish` for `launch.sh`, the icon and the menu entry. A failure of `publish` is a warning, as in
+  a move. A crash after the commit leaves the record right and the menu entry stale: `setup` writes it
+  again. Warnings (a path the game's registry or `args` keep) are shown as in a move.
+- `--dry-run` and `--json` as `move`. The unreachable-dir errors of `move` and `doctor` point at it.
+
 *The launcher and the move's lock* (`LAUNCHER_VERSION` 8, #284). The running-checks alone leave a
 window: a game launched from the old place after the last check and quitting before the source goes
 loses what it saved. A move therefore also takes the game's own lock, `game-moves/<gogid>.lock`,

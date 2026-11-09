@@ -4574,5 +4574,279 @@ mod moving {
         assert!(gogo::macapp::apps::list(&logs).unwrap().is_empty());
     }
 
+    // — adopting a game that moved without gogo (#283) —
+
+    fn adopt(target: &Target) -> Result<gogo::macapp::relocate::AdoptOutcome, String> {
+        gogo::linuxapp::relocate::adopt_game(ID, target).map_err(|e| e.to_string())
+    }
+
+    /// Another library, on "another drive".
+    fn other_library(w: &World) -> Library {
+        Library::resolve(&w.root.join("other drive/lib"), None)
+            .unwrap()
+            .unwrap()
+    }
+
+    /// The game's dir moved by hand: `from` is gone, `to` holds it.
+    fn move_by_hand(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        std::fs::rename(from, to).unwrap();
+    }
+
+    #[test]
+    fn a_game_moved_by_hand_between_libraries_is_adopted_where_it_is() {
+        let w = built("adopt-lib");
+        dress(&w);
+        let home = w.game();
+        let (a, b) = (w.library(), other_library(&w));
+        go(&Target::Library(a.clone()), Faults::default()).unwrap();
+        let (old, new) = (a.dir().join(ID), b.dir().join(ID));
+        move_by_hand(&old, &new);
+        // Nothing knows yet: the record is stale.
+        assert_eq!(GameDirs::for_game(ID).unwrap().root, old);
+
+        let target = Target::Library(b);
+        let plan = gogo::linuxapp::relocate::adopt_plan(ID, &target).unwrap();
+        assert_eq!(
+            (plan.from.as_path(), plan.to.as_path()),
+            (old.as_path(), new.as_path())
+        );
+        assert_eq!(
+            GameDirs::for_game(ID).unwrap().root,
+            old,
+            "a plan writes nothing"
+        );
+
+        let out = adopt(&target).unwrap();
+        assert!(
+            out.recovered.is_empty() && out.warnings.is_empty(),
+            "{out:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(w.locations().join(ID)).unwrap(),
+            format!("{}\n", new.display())
+        );
+        assert_game_at(&w, &new);
+        assert_setup_agrees(&new);
+        assert!(!w.home.join("game-moves").join(ID).exists());
+        // The data wasn't touched.
+        assert!(!old.exists() && !home.exists());
+        undress(&new);
+    }
+
+    #[test]
+    fn a_game_put_back_in_games_by_hand_is_adopted_and_loses_its_record() {
+        let w = built("adopt-default");
+        dress(&w);
+        let home = w.game();
+        let conf_at_home = std::fs::read_to_string(home.join("launch.conf")).unwrap();
+        let entry_at_home =
+            std::fs::read_to_string(gogo::linuxapp::game::desktop_path(ID)).unwrap();
+        let lib = w.library();
+        go(&Target::Library(lib.clone()), Faults::default()).unwrap();
+        move_by_hand(&lib.dir().join(ID), &home);
+
+        adopt(&Target::Default).unwrap();
+        assert!(!w.locations().join(ID).exists());
+        assert_game_at(&w, &home);
+        assert_eq!(
+            std::fs::read_to_string(home.join("launch.conf")).unwrap(),
+            conf_at_home
+        );
+        assert_eq!(
+            std::fs::read_to_string(gogo::linuxapp::game::desktop_path(ID)).unwrap(),
+            entry_at_home
+        );
+        undress(&home);
+    }
+
+    /// A game moved out of `games/` by hand, with no record yet.
+    #[test]
+    fn a_game_taken_out_of_games_by_hand_is_adopted_into_a_library() {
+        let w = built("adopt-out");
+        dress(&w);
+        let home = w.game();
+        let lib = w.library();
+        let new = lib.dir().join(ID);
+        move_by_hand(&home, &new);
+        adopt(&Target::Library(lib)).unwrap();
+        assert_game_at(&w, &new);
+        assert_setup_agrees(&new);
+        undress(&new);
+    }
+
+    #[test]
+    fn an_adopted_game_launches_from_where_it_is() {
+        let Some(w) = World::launcher("adopt-launch", false) else {
+            return;
+        };
+        let (a, b) = (w.library(), other_library(&w));
+        go(&Target::Library(a.clone()), across()).unwrap();
+        let new = b.dir().join(ID);
+        move_by_hand(&a.dir().join(ID), &new);
+        adopt(&Target::Library(b)).unwrap();
+        assert!(desktop_exec().contains(&new.join("launch.sh").display().to_string()));
+
+        let out = w.launch(&[], &[]);
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        let log = w.log();
+        assert!(
+            log.contains(&format!("WINEPREFIX={} ", new.join("prefix").display())),
+            "{log}"
+        );
+        assert!(w.calls().is_empty(), "no setup: {:?}", w.calls());
+    }
+
+    /// Every refusal leaves the record, `launch.conf` and the menu entry as
+    /// they were; the last adopt, with nothing in the way, works.
+    #[test]
+    fn what_an_adopt_refuses() {
+        let w = built("adopt-refuse");
+        let (a, b) = (w.library(), other_library(&w));
+        go(&Target::Library(a.clone()), Faults::default()).unwrap();
+        let (old, new) = (a.dir().join(ID), b.dir().join(ID));
+        move_by_hand(&old, &new);
+        let target = Target::Library(b.clone());
+        let record = std::fs::read_to_string(w.locations().join(ID)).unwrap();
+        let conf = std::fs::read_to_string(new.join("launch.conf")).unwrap();
+        let entry = std::fs::read_to_string(gogo::linuxapp::game::desktop_path(ID)).unwrap();
+        let unchanged = || {
+            assert_eq!(
+                std::fs::read_to_string(w.locations().join(ID)).unwrap(),
+                record
+            );
+            assert_eq!(
+                std::fs::read_to_string(new.join("launch.conf")).unwrap(),
+                conf
+            );
+            assert_eq!(
+                std::fs::read_to_string(gogo::linuxapp::game::desktop_path(ID)).unwrap(),
+                entry
+            );
+        };
+
+        // Nowhere to adopt, or not a dir.
+        let nowhere = Target::Library(other_library_at(&w, "nowhere"));
+        let err = adopt(&nowhere).unwrap_err();
+        assert!(err.contains("no dir there"), "{err}");
+
+        // Not this game: the id inside says another.
+        let toml = new.join("gogo-launch.toml");
+        let text = std::fs::read_to_string(&toml).unwrap();
+        std::fs::write(
+            &toml,
+            text.replace(&format!("gogid = \"{ID}\""), "gogid = \"999\""),
+        )
+        .unwrap();
+        let err = adopt(&target).unwrap_err();
+        assert!(err.contains("game 999, not"), "{err}");
+        // Not a built game at all.
+        std::fs::remove_file(&toml).unwrap();
+        let err = adopt(&target).unwrap_err();
+        assert!(err.contains("gogo-launch.toml"), "{err}");
+        std::fs::write(&toml, text).unwrap();
+        unchanged();
+
+        // Its launcher is running.
+        let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+        let start = stat
+            .rsplit_once(") ")
+            .unwrap()
+            .1
+            .split_whitespace()
+            .nth(19)
+            .unwrap();
+        let live = new.join(".launchers");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::write(live.join(std::process::id().to_string()), start).unwrap();
+        let err = adopt(&target).unwrap_err();
+        assert!(err.contains("is running"), "{err}");
+        std::fs::remove_dir_all(&live).unwrap();
+        unchanged();
+
+        // A lock held: another move, or this game's own.
+        for (name, says) in [
+            (".lock", "another"),
+            (&format!("{ID}.lock"), "being launched or moved"),
+        ] {
+            let held = hold(&w, name);
+            let err = adopt(&target).unwrap_err();
+            assert!(err.contains(says), "{err}");
+            drop(held);
+        }
+        unchanged();
+
+        // The old place is still there: two copies, and gogo picks neither.
+        std::fs::create_dir_all(&old).unwrap();
+        let err = adopt(&target).unwrap_err();
+        assert!(
+            err.contains(&old.display().to_string()) && err.contains(&new.display().to_string()),
+            "{err}"
+        );
+        assert!(err.contains("won't guess"), "{err}");
+        unchanged();
+        std::fs::remove_dir(&old).unwrap();
+
+        // The old library holds nothing now.
+        let err = adopt(&Target::Library(a)).unwrap_err();
+        assert!(err.contains("no dir there"), "{err}");
+
+        adopt(&target).unwrap();
+        assert_eq!(GameDirs::for_game(ID).unwrap().root, new);
+        let err = adopt(&target).unwrap_err();
+        assert!(err.contains("nothing to adopt"), "{err}");
+    }
+
+    fn other_library_at(w: &World, name: &str) -> Library {
+        Library::resolve(&w.root.join(name), None).unwrap().unwrap()
+    }
+
+    /// A move that stopped before its commit is settled first, and the adopt
+    /// goes ahead; one that can't be settled refuses it.
+    #[test]
+    fn an_interrupted_move_is_settled_before_an_adopt_or_refuses_it() {
+        let w = built("adopt-journal");
+        let (a, b) = (w.library(), other_library(&w));
+        go(&Target::Library(a.clone()), Faults::default()).unwrap();
+        let (old, new) = (a.dir().join(ID), b.dir().join(ID));
+        let staging = b.dir().join(format!(".moving-{ID}"));
+
+        // A copy that never finished, then the dir moved by hand.
+        let faults = Faults {
+            killed_at: Some(KilledAt::Copying(2)),
+            ..across()
+        };
+        go(&Target::Library(b.clone()), faults).unwrap_err();
+        assert!(staging.exists());
+        let hand = w.root.join("by hand").join(ID);
+        move_by_hand(&old, &hand);
+        let by_hand = Target::Library(other_library_at(&w, "by hand"));
+        let out = adopt(&by_hand).unwrap();
+        assert_eq!(out.recovered.len(), 1, "{out:?}");
+        assert!(!staging.exists());
+        assert!(!w.home.join("game-moves").join(ID).exists());
+        assert_eq!(GameDirs::for_game(ID).unwrap().root, hand);
+
+        // A full copy, a source that is gone: that isn't gogo's to settle.
+        move_by_hand(&hand, &old);
+        let faults = Faults {
+            killed_at: Some(KilledAt::BeforeCommit),
+            ..across()
+        };
+        // The record still names `hand`, so put it back for this move.
+        std::fs::write(w.locations().join(ID), format!("{}\n", old.display())).unwrap();
+        go(&Target::Library(b.clone()), faults).unwrap_err();
+        assert!(new.join(".gogo-moved").exists());
+        move_by_hand(&old, &hand);
+        let err = adopt(&by_hand).unwrap_err();
+        assert!(err.contains("a full copy"), "{err}");
+        assert!(new.exists(), "nothing was deleted");
+        assert!(w.home.join("game-moves").join(ID).exists());
+        assert_eq!(
+            std::fs::read_to_string(w.locations().join(ID)).unwrap(),
+            format!("{}\n", old.display())
+        );
+    }
+
     use gogo::macapp::launch::GameDirs;
 }

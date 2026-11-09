@@ -3527,6 +3527,60 @@ fn linux_app_move(
     Ok(cli::exit::OK)
 }
 
+/// `gogo linux-app move --adopt`: `game_dir` is the game's own dir. Its parent
+/// is checked as a library, and `games/` itself means the default.
+#[cfg(target_os = "linux")]
+fn linux_app_adopt(
+    gogid: &str,
+    game_dir: &std::path::Path,
+    dry_run: bool,
+    json: bool,
+) -> Result<i32, AppError> {
+    use gogo::macapp::relocate::Target;
+    let game_dir = gogo::macapp::launch::absolute(game_dir);
+    if game_dir.file_name().is_none_or(|n| n != gogid) {
+        return Err(AppError::from(gogo::macapp::error::MacAppError::Library {
+            path: game_dir,
+            reason: format!(
+                "--adopt takes the game's own dir, the one named {gogid} (not its library)"
+            ),
+        }));
+    }
+    let parent = game_dir.parent().unwrap_or(&game_dir);
+    let target =
+        resolve_library(Some(parent.to_path_buf()))?.map_or(Target::Default, Target::Library);
+    if dry_run {
+        let plan = gogo::linuxapp::relocate::adopt_plan(gogid, &target)?;
+        if json {
+            println!("{}", serde_json::to_string(&plan).unwrap());
+        } else {
+            println!(
+                "would adopt {gogid} (nothing moves): {} -> {}",
+                plan.from.display(),
+                plan.to.display()
+            );
+        }
+        return Ok(cli::exit::OK);
+    }
+    let out = gogo::linuxapp::relocate::adopt_game(gogid, &target)?;
+    if json {
+        println!("{}", serde_json::to_string(&out).unwrap());
+        return Ok(cli::exit::OK);
+    }
+    for line in &out.recovered {
+        println!("{line}");
+    }
+    println!(
+        "adopted {gogid} (nothing moved): {} -> {}",
+        out.plan.from.display(),
+        out.plan.to.display()
+    );
+    for w in &out.warnings {
+        eprintln!("warning: {w}");
+    }
+    Ok(cli::exit::OK)
+}
+
 #[cfg(target_os = "linux")]
 /// `gogo linux-app <sub>` (no build).
 fn linux_app_sub(sub: crate::cli::LinuxAppSub) -> Result<i32, AppError> {
@@ -3582,9 +3636,13 @@ fn linux_app_sub(sub: crate::cli::LinuxAppSub) -> Result<i32, AppError> {
             gogid,
             dir,
             default: _,
+            adopt,
             dry_run,
             json,
-        } => linux_app_move(&gogid, dir, dry_run, json),
+        } => match adopt {
+            Some(game_dir) => linux_app_adopt(&gogid, &game_dir, dry_run, json),
+            None => linux_app_move(&gogid, dir, dry_run, json),
+        },
         crate::cli::LinuxAppSub::NextRenderer { gogid, dry_run } => {
             match gogo::linuxapp::manage::next_renderer(&gogid, dry_run)? {
                 Some(next) => {

@@ -45,6 +45,12 @@ impl Lane for LinuxLane {
         game::refuse_private_tmp("the game's new dir", root)
     }
 
+    fn built_id(&self, root: &Path) -> Option<String> {
+        game::read_launch_toml(&GameDirs::at(root.to_path_buf()))
+            .ok()
+            .map(|(toml, _)| toml.gogid)
+    }
+
     fn refuse_running(&self, gogid: &str, dirs: &GameDirs) -> Result<(), MacAppError> {
         game::refuse_running(gogid, &dirs.root, &dirs.prefix)
     }
@@ -131,6 +137,16 @@ pub fn move_game(
     emit: &mut dyn FnMut(&MoveEvent),
 ) -> Result<MoveOutcome, MacAppError> {
     relocate::move_game(gogid, target, &LinuxLane, opts, emit)
+}
+
+/// What `gogo linux-app move --adopt` will do.
+pub fn adopt_plan(gogid: &str, target: &Target) -> Result<relocate::AdoptPlan, MacAppError> {
+    relocate::adopt_plan(gogid, target, &LinuxLane)
+}
+
+/// `gogo linux-app move --adopt`: the game is at `target` now.
+pub fn adopt_game(gogid: &str, target: &Target) -> Result<relocate::AdoptOutcome, MacAppError> {
+    relocate::adopt_game(gogid, target, &LinuxLane)
 }
 
 /// Finish whatever interrupted moves left, before something else looks at the
