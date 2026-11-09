@@ -1037,7 +1037,7 @@ root because that's the one place every gogo run and launcher can already find.
   game's `PREFIX`, `WORKDIR`, `EXE` and `GAME_DIR` are absolute and everything else stays
   relative to `DATA_ROOT`. The `.desktop` file was already absolute.
 
-**The Linux launcher, `LAUNCHER_VERSION` 7.** v6 and earlier take their data root from their own
+**The Linux launcher, `LAUNCHER_VERSION` 7 (8 adds the move lock check, below).** v6 and earlier take their data root from their own
 path (`${HERE%/games/*}`), which outside the data root is wrong: logs would land beside the
 library and setup would run with the library's parent as `GOGO_HOME`. A library game's
 `launch.conf` carries `LIBRARY_GAME='1'` (no such line otherwise), and then the launcher reads
@@ -1149,15 +1149,31 @@ Only a dir with the marker, or `.moving-<gogid>` by its name, is ever deleted as
 failed `rename`, a copy error or a mismatch cleans up at once and says the game wasn't touched.
 A source that won't delete is a warning: the game has moved, and the journal stays for the next run.
 
-The launcher doesn't know about moves. A launch in the seconds between the last running check and
-the commit runs from the old place, and if it exits again before the source goes, what it saved goes too.
-Closing that for good means the launcher taking the move's lock; the checks leave only that window.
+*The launcher and the move's lock* (`LAUNCHER_VERSION` 8, #284). The running-checks alone leave a
+window: a game launched from the old place after the last check and quitting before the source goes
+loses what it saved. A move therefore also takes the game's own lock, `game-moves/<gogid>.lock`,
+exclusively and for its whole run (a recovery too), right after the data root's lock and before its
+first running-check. `launch.sh` registers itself (the `.launchers/<pid>` record `live_launcher`
+reads), then tries that lock shared and without waiting, and lets go at once; if a move holds it, it
+unregisters, logs it, writes a run log footer of 127 and shows the same kind of dialog as its other
+refusals. Either the launcher registered before the move's check, which then refuses, or it asked after
+the move took the lock, which then refuses the launcher: one side always sees the other. Why not the
+data root's `.lock`, shared, as #284 first suggested: a launcher would have to hold it for the whole
+session, so playing A would stop a move of B and `move` would claim another gogo was moving a game.
+Per game, and held for an instant only, a running game blocks nothing. The kernel drops a dead move's
+lock, so an interrupted move (journal left behind) never blocks a launch; the launcher looks at the
+lock, never at the journal. It finds the lock under `DATA_ROOT` from `launch.conf` (since v7), else the
+data root its own path gives; with no lock file, or no `flock` (util-linux), it launches as before.
+Launchers before 8 lack the check, so the window stays for a game whose launcher is older until its
+next setup rewrites it.
+
+A launcher that read its dir before a whole move and registers after it (a stale menu entry) finds its own `launch.conf` gone after registering, removes the empty dirs the registration made, and refuses with a dialog.
 
 *Refused:* while its launcher or anything in its prefix runs (the same check as `apps remove`, again
 after a copy); a target `Library::resolve` refuses, or under `/tmp`; where the game already is; a
 target where `<gogid>` already exists, whatever it is; a dir inside the game's own; a symlinked
 game dir; a game not built here; a recorded dir that isn't there (mount it first; `apps remove` forgets
-it); while another `move` holds the data root's lock (`flock`, so a killed one can't leave it held).
+it); while another `move` holds the data root's lock (`flock`, so a killed one can't leave it held). The game's own lock (above) is taken after that one, never the other way round.
 
 **The Mac lane's other paths:** a portable bundle ignores the setting (`--library` conflicts with
 `--portable`), since its prefix is made on the Mac it runs on. `scripts/host-pass.sh` follows
@@ -1834,7 +1850,7 @@ Two new endings, both before a game exists:
   do with.
 
 The launcher knows nothing about what a wrapper does beyond this: `launch.sh` has no gamescope
-case. `LAUNCHER_VERSION` is 7 (6: the game step stays umu-run's parent, #273; 7: a game in a library, §6.1), and `# wrapper:` is a new run log header line (only with a
+case. `LAUNCHER_VERSION` is 8 (6: the game step stays umu-run's parent, #273; 7: a game in a library, §6.1; 8: refuses while its game is being moved, §6.1), and `# wrapper:` is a new run log header line (only with a
 wrapper) that the report includes.
 
 **Live, in the harness** (2026-11-08, Right and Down, D3D11, RTX 4090; `docs/linux-e2e.md`). No
