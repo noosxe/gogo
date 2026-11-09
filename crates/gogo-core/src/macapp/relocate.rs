@@ -398,6 +398,23 @@ fn check_space(plan: &MovePlan, opts: &MoveOptions) -> Result<(), MacAppError> {
     Ok(())
 }
 
+/// An error after a recovery that did something: say what it did, so those
+/// lines aren't lost with the refusal.
+fn after_recovery(recovered: &[String], e: MacAppError) -> MacAppError {
+    if recovered.is_empty() {
+        return e;
+    }
+    let note = format!("(before that, recovery: {})", recovered.join("; "));
+    match e {
+        MacAppError::Library { path, reason } => MacAppError::Library {
+            path,
+            reason: format!("{reason} {note}"),
+        },
+        MacAppError::Apps(s) => MacAppError::Apps(format!("{s} {note}")),
+        other => MacAppError::Apps(format!("{other} {note}")),
+    }
+}
+
 /// Move `gogid` to `target`: see the module docs. An `Err` leaves the game
 /// runnable where it was, unless it says to run the move again.
 pub fn move_game(
@@ -411,10 +428,11 @@ pub fn move_game(
     let _lock = lock_moves()?;
     let _game_lock = lock_game(gogid)?;
     let recovered = recover_locked(gogid, lane)?;
-    let mut plan = plan(gogid, target, lane, opts)?;
+    let mut plan = plan(gogid, target, lane, opts).map_err(|e| after_recovery(&recovered, e))?;
     let from = GameDirs::at(plan.from.clone());
     let to = GameDirs::at(plan.to.clone());
-    lane.refuse_running(gogid, &from)?;
+    lane.refuse_running(gogid, &from)
+        .map_err(|e| after_recovery(&recovered, e))?;
 
     write_journal(
         gogid,
@@ -431,19 +449,22 @@ pub fn move_game(
             // Nothing has reached the target's name: the game never left.
             let _ = materialize::remove_tree(&staging_of(&plan.to, gogid));
             clear_journal(gogid)?;
-            return Err(e);
+            return Err(after_recovery(&recovered, e));
         }
     };
     killed(opts, KilledAt::BeforeCommit)?;
     commit(gogid, &plan.to).map_err(|e| {
-        MacAppError::Apps(format!(
-            "the data is at {} but gogo couldn't record that ({e}): run the move again once \
-             gogo's data dir takes writes",
-            plan.to.display()
-        ))
+        after_recovery(
+            &recovered,
+            MacAppError::Apps(format!(
+                "the data is at {} but gogo couldn't record that ({e}): run the move again once \
+                 gogo's data dir takes writes",
+                plan.to.display()
+            )),
+        )
     })?;
     killed(opts, KilledAt::BeforeCleanup)?;
-    warnings.extend(finish(gogid, &from, &to, lane)?);
+    warnings.extend(finish(gogid, &from, &to, lane).map_err(|e| after_recovery(&recovered, e))?);
     Ok(MoveOutcome {
         plan,
         recovered,
@@ -578,33 +599,68 @@ pub fn adopt_game(
     super::compat::validate_gogid(gogid)?;
     let _lock = lock_moves()?;
     let _game_lock = lock_game(gogid)?;
-    let recovered = recover_locked(gogid, lane)?;
+    // A full copy and no source: recovery refuses it, because the source may be
+    // on a drive that isn't mounted. Naming a path settles it (below).
+    let copy_only = copy_only_journal(gogid)?;
+    if let Some(j) = &copy_only
+        && launch::real_path(&target.root(gogid)) == launch::real_path(&j.to)
+    {
+        return adopt_the_copy(gogid, j, lane);
+    }
+    let mut recovered = if copy_only.is_some() {
+        Vec::new()
+    } else {
+        recover_locked(gogid, lane)?
+    };
     // A journal that survives a recovery has work waiting on a game that is
     // running or a source that wouldn't go: what's recorded isn't settled.
-    if journal_path(gogid).exists() {
-        return Err(MacAppError::Apps(format!(
-            "an earlier move of {gogid} isn't finished ({}): run `gogo linux-app move {gogid} \
-             <dir>` or `apps remove` first",
-            journal_path(gogid).display()
-        )));
+    if copy_only.is_none() && journal_path(gogid).exists() {
+        return Err(after_recovery(
+            &recovered,
+            MacAppError::Apps(format!(
+                "an earlier move of {gogid} isn't finished ({}): run `gogo linux-app move \
+                 {gogid} <dir>` or `apps remove` first",
+                journal_path(gogid).display()
+            )),
+        ));
     }
-    let plan = plan_adopt(gogid, target, lane)?;
+    let plan = plan_adopt(gogid, target, lane).map_err(|e| after_recovery(&recovered, e))?;
     let (from, to) = (
         GameDirs::at(plan.from.clone()),
         GameDirs::at(plan.to.clone()),
     );
-    lane.refuse_running(gogid, &to)?;
+    lane.refuse_running(gogid, &to)
+        .map_err(|e| after_recovery(&recovered, e))?;
     // The old place is gone, but a game started there may still be running.
-    lane.refuse_running(gogid, &from)?;
-
-    let mut warnings = lane.rewrite_inside(&from, &to, &plan.to)?;
-    lane.check_rewritten(&to)?;
-    commit(gogid, &plan.to).map_err(|e| {
-        MacAppError::Apps(format!(
-            "gogo couldn't record that {gogid} is at {} ({e}): run the adopt again once \
-             gogo's data dir takes writes",
+    lane.refuse_running(gogid, &from)
+        .map_err(|e| after_recovery(&recovered, e))?;
+    if let Some(j) = &copy_only {
+        // The game is at the path the user named (checked above: a real dir, this
+        // game, no marker), so the marked copy is the spare and goes. Nothing is
+        // deleted before that check; a kill here leaves the same journal.
+        materialize::remove_tree(&j.to)?;
+        clear_journal(gogid)?;
+        recovered.push(format!(
+            "removed {}, a full copy an earlier move never recorded: the game is at {}",
+            j.to.display(),
             plan.to.display()
-        ))
+        ));
+    }
+
+    let mut warnings = lane
+        .rewrite_inside(&from, &to, &plan.to)
+        .map_err(|e| after_recovery(&recovered, e))?;
+    lane.check_rewritten(&to)
+        .map_err(|e| after_recovery(&recovered, e))?;
+    commit(gogid, &plan.to).map_err(|e| {
+        after_recovery(
+            &recovered,
+            MacAppError::Apps(format!(
+                "gogo couldn't record that {gogid} is at {} ({e}): run the adopt again once \
+                 gogo's data dir takes writes",
+                plan.to.display()
+            )),
+        )
     })?;
     if let Err(e) = lane.publish(gogid, &to) {
         warnings.push(format!(
@@ -616,6 +672,66 @@ pub fn adopt_game(
         plan,
         recovered,
         warnings,
+    })
+}
+
+/// The journal of an interrupted move that left a full marked copy at its target
+/// and no source dir, the one case recovery won't settle by itself.
+fn copy_only_journal(gogid: &str) -> Result<Option<Journal>, MacAppError> {
+    let Some(j) = read_journal(gogid)? else {
+        return Ok(None);
+    };
+    let there = |p: &Path| p.symlink_metadata().is_ok();
+    let current = GameDirs::for_game(gogid)?.root;
+    Ok((current == j.from && !there(&j.from) && there(&j.to.join(MARKER))).then_some(j))
+}
+
+/// `--adopt` at the target of a copy-only move: "the copy is mine". The game's
+/// files must be this game's. The marker goes (the only change to the copy; no
+/// data is deleted), and the recovery that is left is the one a rename needs:
+/// rewrite, record, menu entry, journal. A kill after the marker is gone is
+/// settled by the next run's recovery the same way.
+fn adopt_the_copy(
+    gogid: &str,
+    j: &Journal,
+    lane: &dyn Lane,
+) -> Result<AdoptOutcome, MacAppError> {
+    let to = GameDirs::at(j.to.clone());
+    let refuse = |reason: String| MacAppError::Library {
+        path: j.to.clone(),
+        reason,
+    };
+    lane.check_built(gogid, &to)?;
+    match lane.built_id(&j.to) {
+        Some(id) if id == gogid => {}
+        Some(id) => return Err(refuse(format!("that is game {id}, not {gogid}"))),
+        None => {
+            return Err(refuse(
+                "its game file can't be read, so gogo can't tell whose game it is".into(),
+            ));
+        }
+    }
+    lane.check_target(&j.to)?;
+    lane.refuse_running(gogid, &to)?;
+    lane.refuse_running(gogid, &GameDirs::at(j.from.clone()))?;
+    std::fs::remove_file(j.to.join(MARKER))?;
+    let mut recovered = recover_locked(gogid, lane)?;
+    recovered.insert(
+        0,
+        format!(
+            "adopted the copy at {}, which an earlier move left (its source {} isn't there)",
+            j.to.display(),
+            j.from.display()
+        ),
+    );
+    Ok(AdoptOutcome {
+        plan: AdoptPlan {
+            gogid: gogid.to_string(),
+            from: j.from.clone(),
+            to: j.to.clone(),
+        },
+        recovered,
+        warnings: Vec::new(),
     })
 }
 
@@ -947,11 +1063,17 @@ fn recover_locked(gogid: &str, lane: &dyn Lane) -> Result<Vec<String>, MacAppErr
     // and may have newer saves. That isn't for gogo to settle.
     if current == j.from && !there(&j.from) && there(&j.to.join(MARKER)) {
         return Err(MacAppError::Library {
-            path: j.from,
+            path: j.from.clone(),
             reason: format!(
-                "an earlier move left a full copy at {}, and the game's own dir isn't there \
-                 (a drive not mounted?): mount it and run the move again",
-                j.to.display()
+                "an earlier move left a full copy at {to}, and the game's own dir {from} isn't \
+                 there (a drive not mounted, or mounted somewhere else now?). Nothing was \
+                 deleted, and the way out depends on which copy is the game: if the drive can \
+                 be mounted at {from} again, mount it and run `gogo linux-app move {gogid} \
+                 <dir>` again (that cleans the copy up); if the game is at another path now, \
+                 run `gogo linux-app move {gogid} --adopt <that path>` (that drops the copy); \
+                 if the copy is the one to keep, run `gogo linux-app move {gogid} --adopt {to}`",
+                to = j.to.display(),
+                from = j.from.display(),
             ),
         });
     }

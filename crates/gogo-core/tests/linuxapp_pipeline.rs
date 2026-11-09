@@ -4214,7 +4214,14 @@ mod moving {
         let away = lib.dir().join("unmounted");
         std::fs::rename(&from, &away).unwrap();
         let err = go(&target, Faults::default()).unwrap_err();
-        assert!(err.contains("mount it"), "{err}");
+        // Both paths, the other mount, and the commands out.
+        assert!(
+            err.contains(&from.display().to_string()) && err.contains(&to.display().to_string()),
+            "{err}"
+        );
+        assert!(err.contains("mounted somewhere else"), "{err}");
+        assert!(err.contains("--adopt <that path>"), "{err}");
+        assert!(err.contains(&format!("--adopt {}", to.display())), "{err}");
         assert!(to.join("launch.sh").is_file());
         assert_eq!(GameDirs::for_game(ID).unwrap().root, from);
 
@@ -4924,14 +4931,78 @@ mod moving {
         go(&Target::Library(b.clone()), faults).unwrap_err();
         assert!(new.join(".gogo-moved").exists());
         move_by_hand(&old, &hand);
-        let err = adopt(&by_hand).unwrap_err();
-        assert!(err.contains("a full copy"), "{err}");
-        assert!(new.exists(), "nothing was deleted");
-        assert!(w.home.join("game-moves").join(ID).exists());
-        assert_eq!(
-            std::fs::read_to_string(w.locations().join(ID)).unwrap(),
-            format!("{}\n", old.display())
-        );
+        // The record still names `old`; the journal blocks a plain move, and
+        // adopting the source where it is settles it: the marked copy goes.
+        let out = adopt(&by_hand).unwrap();
+        assert!(out.recovered.iter().any(|l| l.contains("removed")), "{out:?}");
+        assert!(!new.exists(), "the spare copy is removed");
+        assert!(hand.join("launch.sh").is_file(), "the named game stays");
+        assert!(!w.home.join("game-moves").join(ID).exists());
+        assert_eq!(GameDirs::for_game(ID).unwrap().root, hand);
+    }
+
+    /// A full copy, a source nobody names: `--adopt` at the copy says "the copy is
+    /// mine"; nothing is deleted, and the journal and marker go.
+    #[test]
+    fn adopting_the_copy_of_an_unfinished_move_keeps_it() {
+        let w = built("adopt-copy");
+        let (a, b) = (w.library(), other_library(&w));
+        go(&Target::Library(a.clone()), Faults::default()).unwrap();
+        let (old, new) = (a.dir().join(ID), b.dir().join(ID));
+        let faults = Faults {
+            killed_at: Some(KilledAt::BeforeCommit),
+            ..across()
+        };
+        go(&Target::Library(b.clone()), faults).unwrap_err();
+        assert!(new.join(".gogo-moved").exists());
+        let away = w.root.join("unmounted");
+        std::fs::rename(&old, &away).unwrap();
+
+        // A dir that isn't the copy is still refused, and nothing changes.
+        let err = adopt(&Target::Library(other_library_at(&w, "nowhere"))).unwrap_err();
+        assert!(err.contains("no dir there"), "{err}");
+        assert!(new.exists() && away.exists());
+
+        let out = adopt(&Target::Library(b)).unwrap();
+        assert!(out.recovered[0].contains("adopted the copy"), "{out:?}");
+        assert_eq!((out.plan.from, out.plan.to), (old, new.clone()));
+        assert!(!new.join(".gogo-moved").exists());
+        assert!(new.join("launch.sh").is_file());
+        assert!(away.exists(), "the source was never touched");
+        assert!(!w.home.join("game-moves").join(ID).exists());
+        assert_eq!(GameDirs::for_game(ID).unwrap().root, new);
+    }
+
+    /// Recovery that did something, then a refusal: the lines aren't lost.
+    #[test]
+    fn a_refusal_after_a_recovery_still_says_what_the_recovery_did() {
+        let w = built("recovered-lines");
+        let lib = w.library();
+        let faults = Faults {
+            killed_at: Some(KilledAt::BeforeCommit),
+            ..Faults::default()
+        };
+        go(&Target::Library(lib.clone()), faults).unwrap_err();
+        // The adopt's recovery records the rename, then the adopt itself is
+        // refused (nothing at the named dir).
+        let err = adopt(&Target::Library(other_library_at(&w, "nowhere"))).unwrap_err();
+        assert!(err.contains("no dir there"), "{err}");
+        assert!(err.contains("recorded now"), "{err}");
+
+    }
+
+    #[test]
+    fn a_move_refused_after_a_recovery_still_says_what_the_recovery_did() {
+        let w = built("recovered-lines-move");
+        let lib = w.library();
+        let faults = Faults {
+            killed_at: Some(KilledAt::BeforeCommit),
+            ..Faults::default()
+        };
+        go(&Target::Library(lib.clone()), faults).unwrap_err();
+        let err = go(&Target::Library(lib), Faults::default()).unwrap_err();
+        assert!(err.contains("already there"), "{err}");
+        assert!(err.contains("recorded now"), "{err}");
     }
 
     use gogo::macapp::launch::GameDirs;

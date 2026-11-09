@@ -1162,8 +1162,19 @@ the menu entry are stale, and nothing else is wrong. No data moves, so there is 
   renames one first.
 - Refused while the game runs, in the new dir or the old (`refuse_running` on both), under the same
   global and per-game `try_lock`s a move takes, so a launch and an adopt never overlap.
-- **An interrupted move of the game is settled first** (`recover`, as `move` does). If that can't be
-  done (a full copy and no source) or leaves its journal, the adopt is refused, saying so.
+- **An interrupted move of the game is settled first** (`recover`, as `move` does). If that leaves
+  its journal (a source that wouldn't go), the adopt is refused, saying so. What recovery did before
+  a refusal (a record committed, a copy removed) is appended to the error as "(before that,
+  recovery: …)", for `move` too, so those lines aren't lost.
+- **A full marked copy and no source dir (#288)** is the one case recovery won't settle on its own
+  (the source may be on a drive mounted elsewhere, with newer saves), so `move` refuses it, naming
+  both paths and the ways out. `--adopt` settles it by what the user names, never by guessing:
+  *the source's new path* (a real dir holding this game, no marker, old place gone: the usual adopt
+  checks) → the marked copy is removed, the journal dropped, the adopt goes on; *the copy itself*
+  (the move's target, which must hold this game) → "the copy is mine": the marker is removed (the
+  only change to it) and recovery finishes as for a rename (rewrite, commit, menu entry, journal). The
+  marked copy is only deleted after the named path is proved to hold the game; a kill in between
+  leaves the same journal, so the next run settles it the same way.
 - Then the steps of a move without its data, shared with it: `rewrite_inside(from = old dir, to = new
   dir, at = new dir)`, the commit (record written or removed, the same flushes in the same order), and
   `publish` for `launch.sh`, the icon and the menu entry. A failure of `publish` is a warning, as in
