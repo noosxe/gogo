@@ -58,6 +58,9 @@ pub trait Lane {
     fn check_built(&self, gogid: &str, dirs: &GameDirs) -> Result<(), MacAppError>;
     /// Could the game run from `root`?
     fn check_target(&self, root: &Path) -> Result<(), MacAppError>;
+    /// The game id `root` holds, for an adopt to compare with the one asked for.
+    /// `None`: the lane's files there don't say.
+    fn built_id(&self, root: &Path) -> Option<String>;
     /// Refuse while anything runs from the game's dir.
     fn refuse_running(&self, gogid: &str, dirs: &GameDirs) -> Result<(), MacAppError>;
     /// Point the game's own files at the new place. `at` is where they are
@@ -287,7 +290,8 @@ pub fn plan(
                 path: from.root,
                 reason: format!(
                     "{gogid} is recorded there and it isn't there (a drive not mounted?): \
-                     mount it and move it then, or `gogo apps remove {gogid}` to forget it"
+                     mount it and move it then, `gogo linux-app move {gogid} --adopt <dir>` \
+                     if it is somewhere else now, or `gogo apps remove {gogid}` to forget it"
                 ),
             }
         } else {
@@ -437,6 +441,137 @@ pub fn move_game(
     killed(opts, KilledAt::BeforeCleanup)?;
     warnings.extend(finish(gogid, &from, &to, lane)?);
     Ok(MoveOutcome {
+        plan,
+        recovered,
+        warnings,
+    })
+}
+
+/// What an adopt will do, before it does it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptPlan {
+    pub gogid: String,
+    /// Where gogo thought the game was.
+    pub from: PathBuf,
+    /// Where it is.
+    pub to: PathBuf,
+}
+
+/// What an adopt did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptOutcome {
+    #[serde(flatten)]
+    pub plan: AdoptPlan,
+    /// What an interrupted move left and what became of it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub recovered: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+/// Where an adopt would put the record, or why it can't. Reads only.
+fn plan_adopt(gogid: &str, target: &Target, lane: &dyn Lane) -> Result<AdoptPlan, MacAppError> {
+    let from = GameDirs::for_game(gogid)?;
+    let to = target.root(gogid);
+    let refuse = |reason: String| MacAppError::Library {
+        path: to.clone(),
+        reason,
+    };
+    let Ok(found) = to.symlink_metadata() else {
+        return Err(refuse(format!(
+            "there is no dir there: {gogid} has to be at the path you give (a drive not \
+             mounted?)"
+        )));
+    };
+    if found.file_type().is_symlink() || !found.is_dir() {
+        return Err(refuse(
+            "it isn't a real dir (a symlink, or a file): give the game's own dir".into(),
+        ));
+    }
+    if launch::real_path(&from.root) == launch::real_path(&to) {
+        return Err(refuse(format!(
+            "gogo already has {gogid} there: nothing to adopt (`gogo linux-app setup {gogid}`              writes its menu entry again)"
+        )));
+    }
+    lane.check_built(gogid, &GameDirs::at(to.clone()))?;
+    if let Some(id) = lane.built_id(&to)
+        && id != gogid
+    {
+        return Err(refuse(format!("that is game {id}, not {gogid}")));
+    }
+    lane.check_target(&to)?;
+    // Two copies are never chosen between by gogo: the old one has to be gone.
+    if from.root.symlink_metadata().is_ok() {
+        return Err(MacAppError::Library {
+            path: from.root.clone(),
+            reason: format!(
+                "gogo has {gogid} at {}, and it is there; {} holds a game by that id too. gogo                  won't guess which one is yours: move or remove one, then adopt the other",
+                from.root.display(),
+                to.display()
+            ),
+        });
+    }
+    Ok(AdoptPlan {
+        gogid: gogid.to_string(),
+        from: from.root,
+        to,
+    })
+}
+
+/// What an adopt of `gogid` at `target` would do, or why it wouldn't.
+pub fn adopt_plan(gogid: &str, target: &Target, lane: &dyn Lane) -> Result<AdoptPlan, MacAppError> {
+    super::compat::validate_gogid(gogid)?;
+    plan_adopt(gogid, target, lane)
+}
+
+/// Tell gogo that `gogid` is at `target` now, moving no data (design 18 §6.1):
+/// for a drive that mounts somewhere else, or a dir moved by hand. Under the
+/// same two locks a move takes, an interrupted move of the game is settled
+/// first (and one that can't be is a refusal); then the steps of a move without
+/// its data: the game's own files, the commit, the menu entry.
+pub fn adopt_game(
+    gogid: &str,
+    target: &Target,
+    lane: &dyn Lane,
+) -> Result<AdoptOutcome, MacAppError> {
+    super::compat::validate_gogid(gogid)?;
+    let _lock = lock_moves()?;
+    let _game_lock = lock_game(gogid)?;
+    let recovered = recover_locked(gogid, lane)?;
+    // A journal that survives a recovery has work waiting on a game that is
+    // running or a source that wouldn't go: what's recorded isn't settled.
+    if journal_path(gogid).exists() {
+        return Err(MacAppError::Apps(format!(
+            "an earlier move of {gogid} isn't finished ({}): run `gogo linux-app move {gogid}              <dir>` or `apps remove` first",
+            journal_path(gogid).display()
+        )));
+    }
+    let plan = plan_adopt(gogid, target, lane)?;
+    let (from, to) = (
+        GameDirs::at(plan.from.clone()),
+        GameDirs::at(plan.to.clone()),
+    );
+    lane.refuse_running(gogid, &to)?;
+    // The old place is gone, but a game started there may still be running.
+    lane.refuse_running(gogid, &from)?;
+
+    let mut warnings = lane.rewrite_inside(&from, &to, &plan.to)?;
+    commit(gogid, &plan.to).map_err(|e| {
+        MacAppError::Apps(format!(
+            "gogo couldn't record that {gogid} is at {} ({e}): run the adopt again once \
+             gogo's data dir takes writes",
+            plan.to.display()
+        ))
+    })?;
+    if let Err(e) = lane.publish(gogid, &to) {
+        warnings.push(format!(
+            "{gogid} is recorded, but its menu entry didn't follow ({e}): `gogo linux-app setup \
+             {gogid}` writes it again"
+        ));
+    }
+    Ok(AdoptOutcome {
         plan,
         recovered,
         warnings,
