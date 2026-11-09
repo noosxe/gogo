@@ -74,6 +74,18 @@ MARKED_HIT_GAP = 0.2
 SETTLE_POLL_SECS = 2.0
 SETTLE_MAX_CHANGE_PCT = 1.0
 EXIT_HOW = ("self", "signal")
+# How the game reaches the display (#264): through Xwayland, as on most desktops
+# today, or as a Wayland client with no X server in the sandbox at all.
+DISPLAYS = ("xwayland", "wayland")
+# What a process that wanted X says when there is none: Wine's X11 driver
+# loading, or Xlib, GTK, Qt and SDL failing to open a display. Proton's own
+# "failed to run xrandr" (its primary-monitor guess) is noise, and not matched.
+X_FALLBACK = re.compile(
+    r"winex11|can(?:'|no)t open display|unable to open display|failed to open display"
+    r"|Make sure that your X server is running|No protocol specified"
+    r"|could not connect to (?:any )?X display|X11 connection rejected",
+    re.I,
+)
 NULL_SINK = "e2e-null"
 BUILD_NO_DISPLAY = 3
 # The `move_relaunch` step's targets (#278): a dir on the scratch's filesystem, a
@@ -407,7 +419,10 @@ def parse_manifest(text, live=False):
         )
 
     window = raw.get("window", {})
-    _only(window, ("wait_secs", "resolution", "title", "min_fill"), "window")
+    _only(window, ("wait_secs", "resolution", "title", "min_fill", "display"), "window")
+    display = window.get("display", "xwayland")
+    if display not in DISPLAYS:
+        raise ManifestError(f"window.display: want one of {DISPLAYS}, got {display!r}")
     resolution = window.get("resolution", "1280x800")
     m = re.fullmatch(r"([1-9][0-9]{2,4})x([1-9][0-9]{2,4})", str(resolution))
     if not m:
@@ -478,6 +493,7 @@ def parse_manifest(text, live=False):
             "height": int(m.group(2)),
             "title": title,
             "min_fill": _min_fill(window.get("min_fill", {}), "window.min_fill"),
+            "display": display,
         },
         "exit": {
             "how": how,
@@ -742,6 +758,75 @@ def xwayland_displays(cmdlines):
         if argv and os.path.basename(argv[0]) == "Xwayland":
             found += [a for a in argv[1:] if re.fullmatch(r":\d+", a)]
     return found
+
+
+def parse_ss_unix(text):
+    """`ss -xapnH`'s Unix sockets by inode: {inode: {"state", "path", "peer",
+    "users": [(comm, pid)]}}. "path" is None for an unnamed socket; a connected
+    server-side socket carries its listener's path. Paths with spaces aren't read."""
+    found = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 8 or not parts[0].startswith("u_"):
+            continue
+        try:
+            inode, peer = int(parts[5]), int(parts[7])
+        except ValueError:
+            continue
+        users = re.findall(r'\("((?:[^"\\]|\\.)*)",pid=(\d+),fd=\d+\)', " ".join(parts[8:]))
+        found[inode] = {
+            "state": parts[1],
+            "path": None if parts[4] == "*" else parts[4],
+            "peer": peer,
+            "users": [(comm, int(pid)) for comm, pid in users],
+        }
+    return found
+
+
+def is_x_socket(path):
+    """An X server's socket, on the filesystem or abstract (`@/tmp/.X11-unix/X0`)."""
+    return bool(path) and "/.X11-unix/X" in path
+
+
+def is_wayland_socket(path):
+    return bool(path) and re.search(r"/wayland-[^/]*$", path) is not None and not path.endswith(".lock")
+
+
+def display_listeners(sockets):
+    """The listening display sockets: ({wayland path: [comm]}, {X path: [comm]})."""
+    wl, x = {}, {}
+    for s in sockets.values():
+        if s["state"] != "LISTEN":
+            continue
+        kind = x if is_x_socket(s["path"]) else wl if is_wayland_socket(s["path"]) else None
+        if kind is not None:
+            kind.setdefault(s["path"], set()).update(c for c, _ in s["users"])
+    return tuple({p: sorted(c) for p, c in sorted(d.items())} for d in (wl, x))
+
+
+def display_peers(sockets, pids):
+    """Which display servers the processes `pids` are connected to:
+    {"wayland": {path: [server comm]}, "x11": {…}}. The path is the listener's,
+    as its server bound it, whatever path the client dialled (pressure-vessel
+    hands its container the socket at a path of its own)."""
+    out = {"wayland": {}, "x11": {}}
+    for s in sockets.values():
+        if not any(pid in pids for _, pid in s["users"]):
+            continue
+        peer = sockets.get(s["peer"])
+        path = peer["path"] if peer else None
+        kind = "x11" if is_x_socket(path) else "wayland" if is_wayland_socket(path) else None
+        if kind is not None:
+            out[kind].setdefault(path, set()).update(c for c, _ in peer["users"])
+    return {k: {p: sorted(c) for p, c in sorted(d.items())} for k, d in out.items()}
+
+
+def x_fallback_line(text):
+    """The first line of a log that says a process wanted an X server, or None."""
+    for line in text.splitlines():
+        if X_FALLBACK.search(line) and "xrandr" not in line:
+            return line.strip()[:300]
+    return None
 
 
 def game_dir(exe):
@@ -1203,6 +1288,8 @@ class Driver:
         self.env = dict(os.environ)
         self.building = "build_command" in config
         self.prefix = "build-" if self.building else ""
+        # The build (an installer) always gets Xwayland; the game, the manifest's.
+        self.display = "xwayland" if self.building else self.manifest["window"].get("display", "xwayland")
         # A live session's (#241): its control socket, once it listens.
         self.live = config.get("live")
         self.srv = None
@@ -1230,6 +1317,7 @@ class Driver:
         self.phases = {}
         self.phase_at = time.time()
         self.result = {
+            "display": {"mode": self.display},
             "phases": self.phases,
             "isolation": {},
             "gpu": {},
@@ -1297,9 +1385,12 @@ class Driver:
         w, h = self.manifest["window"]["width"], self.manifest["window"]["height"]
         env_file = os.path.join(self.run_dir, f"{self.prefix}sway.env")
         conf = os.path.join(self.run_dir, f"{self.prefix}sway.conf")
+        # Wayland mode: no X server at all, so a fallback to X fails loudly
+        # instead of passing on Xwayland (#264).
+        xwayland = "force" if self.display == "xwayland" else "disable"
         with open(conf, "w") as f:
             f.write(
-                "xwayland force\n"
+                f"xwayland {xwayland}\n"
                 f"output HEADLESS-1 resolution {w}x{h} scale 1\n"
                 "default_border none\n"
                 "focus_follows_mouse no\n"
@@ -1331,19 +1422,29 @@ class Driver:
                 key, _, value = item.decode(errors="replace").partition("=")
                 if key in ("WAYLAND_DISPLAY", "SWAYSOCK", "DISPLAY"):
                     self.env[key] = value
+        wl = os.path.join(self.env["XDG_RUNTIME_DIR"], self.env.get("WAYLAND_DISPLAY", ""))
+        if self.display == "wayland":
+            # Nobody serves one: a client that tries X finds no DISPLAY at all.
+            self.env.pop("DISPLAY", None)
+            self.result["display"].update(socket=wl, xwayland=False)
         # Xwayland comes up after sway's config: wait for the socket and for
-        # an answer.
+        # an answer. The Wayland socket is there before the config runs.
         while time.monotonic() < deadline:
-            if self.env.get("DISPLAY"):
-                r = self.tool("xwininfo", "-root", "-display", self.env["DISPLAY"])
-                if r.returncode == 0:
-                    self.phase("xwayland")
-                    wl = os.path.join(self.env["XDG_RUNTIME_DIR"], self.env["WAYLAND_DISPLAY"])
-                    self.pointer = virtual_pointer(wl)
-                    self.keyboard = virtual_keyboard(wl, self.keymap())
-                    self.phase("input_devices")
-                    return
+            if self.display == "wayland":
+                ready = self.env.get("WAYLAND_DISPLAY") and os.path.exists(wl)
+            else:
+                ready = self.env.get("DISPLAY") and self.tool(
+                    "xwininfo", "-root", "-display", self.env["DISPLAY"]
+                ).returncode == 0
+            if ready:
+                self.phase(self.display)
+                self.pointer = virtual_pointer(wl)
+                self.keyboard = virtual_keyboard(wl, self.keymap())
+                self.phase("input_devices")
+                return
             self.sleep(0.2)
+        if self.display == "wayland":
+            raise RuntimeError(f"no Wayland socket at {wl!r} (see sway.log)")
         raise RuntimeError(f"no X server on {self.env.get('DISPLAY')!r} (see sway.log)")
 
     def keymap(self):
@@ -1501,6 +1602,31 @@ class Driver:
             problem = installer_problem(c["installer"])
             self.check("isolation_installer", problem is None, problem or f"{c['installer']}, read-only")
 
+        if self.display == "wayland":
+            self.wayland_isolation()
+        else:
+            self.xwayland_isolation()
+
+        outputs = json.loads(self.swaymsg("-t", "get_outputs", "--raw"))
+        names = [o.get("name") for o in outputs]
+        iso["outputs"] = names
+        self.check(
+            "isolation_headless",
+            bool(names) and all(str(n).startswith("HEADLESS-") for n in names),
+            names,
+        )
+
+        nodes = _device_nodes()
+        iso["gpu_nodes"] = nodes
+        self.check(
+            "isolation_gpu_nodes",
+            sorted(nodes) == sorted(c["gpu"]["nodes"]),
+            f"{nodes or 'none'}",
+        )
+
+    def xwayland_isolation(self):
+        """The display is our Xwayland, on our output's size."""
+        iso = self.result["isolation"]
         w, h = self.manifest["window"]["width"], self.manifest["window"]["height"]
         display = self.env.get("DISPLAY", "")
         info = self.tool("xwininfo", "-root", "-display", display).stdout
@@ -1521,22 +1647,87 @@ class Driver:
             f"{display} root {got}, socket {socket}, our Xwayland serves {served}",
         )
 
+    def unix_sockets(self):
+        """Every Unix socket of this sandbox's network namespace (`ss`), by inode."""
+        r = self.tool("ss", "-xapnH")
+        if r.returncode != 0:
+            raise RuntimeError(f"ss: {r.stderr.strip() or r.returncode}")
+        return parse_ss_unix(r.stdout)
+
+    def wayland_isolation(self):
+        """The only display is our sway's Wayland socket, on our output's size,
+        and there's no X server: no Xwayland, no X socket, no DISPLAY."""
+        iso = self.result["isolation"]
+        w, h = self.manifest["window"]["width"], self.manifest["window"]["height"]
+        socket_path = self.result["display"]["socket"]
+        wl, x = display_listeners(self.unix_sockets())
         outputs = json.loads(self.swaymsg("-t", "get_outputs", "--raw"))
-        names = [o.get("name") for o in outputs]
-        iso["outputs"] = names
+        sizes = [
+            f"{o.get('current_mode', {}).get('width')}x{o.get('current_mode', {}).get('height')}"
+            for o in outputs
+        ]
+        iso["display"] = {"WAYLAND_DISPLAY": self.env.get("WAYLAND_DISPLAY"), "socket": socket_path,
+                          "listeners": wl, "outputs": sizes}  # fmt: skip
         self.check(
-            "isolation_headless",
-            bool(names) and all(str(n).startswith("HEADLESS-") for n in names),
-            names,
+            "isolation_display",
+            wl == {socket_path: ["sway"]} and sizes == [f"{w}x{h}"],
+            f"Wayland listeners {wl}, outputs {sizes}",
+        )
+        xwayland = xwayland_displays(_cmdlines())
+        try:
+            x_dir = sorted(os.listdir("/tmp/.X11-unix"))
+        except OSError:
+            x_dir = []
+        leaked = "DISPLAY" in self.env or any(
+            "DISPLAY" in env for env in (self.cfg["game_env"], self.manifest["env"])
+        )
+        iso["no_x"] = {"xwayland": xwayland, "x_listeners": x, "x11_unix": x_dir, "DISPLAY": leaked}
+        self.check(
+            "isolation_no_x",
+            not (xwayland or x or x_dir or leaked),
+            "no X server, X socket or DISPLAY"
+            if not (xwayland or x or x_dir or leaked)
+            else f"Xwayland {xwayland}, X listeners {x}, /tmp/.X11-unix {x_dir}, DISPLAY set: {leaked}",
         )
 
-        nodes = _device_nodes()
-        iso["gpu_nodes"] = nodes
-        self.check(
-            "isolation_gpu_nodes",
-            sorted(nodes) == sorted(c["gpu"]["nodes"]),
-            f"{nodes or 'none'}",
+    def check_wayland_client(self, name):
+        """Wayland mode, once a window is up: it's an xdg-shell window, and what
+        the launch started talks to our sway's socket and to no X server."""
+        socket_path = self.result["display"]["socket"]
+        shell = (self.view or {}).get("shell")
+        pids = {pid for pid, _, _ in _proc_table()} - (self.before_game or set())
+        peers = display_peers(self.unix_sockets(), pids)
+        self.result["display"].setdefault("clients", {})[name] = {"shell": shell, **peers}
+        self.save()
+        return self.check(
+            name,
+            shell == "xdg_shell" and peers["wayland"] == {socket_path: ["sway"]} and not peers["x11"],
+            f"window's shell {shell}; Wayland: {peers['wayland'] or 'none'}; X11: {peers['x11'] or 'none'}",
         )
+
+    def x_fallback(self):
+        if self.display == "wayland":
+            self.check_x_fallback()
+
+    def check_x_fallback(self):
+        """Wayland mode: did any process of the game's say it wanted X? Names the
+        line (game.out, then the launcher's run log)."""
+        logs = sorted(
+            os.path.join(self.results, f)
+            for f in os.listdir(self.results)
+            if f == "game.out" or re.fullmatch(r"launch\d+-game\.out", f)
+        )
+        if self.cfg.get("game_log"):
+            logs.append(self.cfg["game_log"])
+        for path in logs:
+            try:
+                with open(path, errors="replace") as f:
+                    line = x_fallback_line(f.read())
+            except OSError:
+                continue
+            if line:
+                return self.check("no_x_fallback", False, f"{os.path.basename(path)}: {line}")
+        return self.check("no_x_fallback", True, f"nothing asked for X in {len(logs)} log(s)")
 
     # GPU -----------------------------------------------------------------
 
@@ -1637,6 +1828,11 @@ class Driver:
             self.before_game = {pid for pid, _, _ in _proc_table()}
         env = dict(self.env)
         env.update(self.cfg["game_env"])
+        if self.display == "wayland" and self.manifest["gogid"] is not None:
+            # GE-Proton's switch to Wine's Wayland driver, for this launch's
+            # process only: nothing of it is written to the game's state.
+            env["PROTON_ENABLE_WAYLAND"] = "1"
+            self.result["display"]["proton_enable_wayland"] = True
         env.update(self.manifest["env"])
         out = open(os.path.join(self.results, "game.out"), "wb")
         self.game = subprocess.Popen(
@@ -1657,12 +1853,15 @@ class Driver:
             view = pick_view(tree, window["title"])
             if view:
                 self.view = view
-                return self.check(
+                self.check(
                     name,
                     True,
                     f"{view.get('name')!r} {view['rect']['width']}x"
                     f"{view['rect']['height']} after {time.monotonic() - start:.0f}s",
                 )
+                if self.display == "wayland":
+                    self.check_wayland_client(name.replace("window", "wayland_client", 1))
+                return True
             if self.game.poll() is not None:
                 self.game_exit = self.game.returncode
                 self.result["game_exit"] = self.game_exit
@@ -2366,16 +2565,19 @@ class Driver:
                 if stuck:
                     self.finish_game("cleanup")
                     self.record_audio_streams()
+                    self.x_fallback()
                     self.check("finished", True, f"{self.steps[-1]['action']} failed, so no more steps: {self.steps[-1]['why']}")
                 else:
                     self.check_gpu_used()
                     self.finish_game(how)
                     self.check_doctor()
                     self.record_audio_streams()
+                    self.x_fallback()
                     self.check("finished", True, "every step ran")
             else:
                 self.finish_game("cleanup")
                 self.record_audio_streams()
+                self.x_fallback()
                 self.check("finished", True, "no window, so no steps")
         except Stop:
             self.check("finished", False, "stopped from outside (timeout or signal)")
@@ -2493,6 +2695,7 @@ class Driver:
             self.live_save()
             self.check_doctor()
             self.record_audio_streams()
+            self.x_fallback()
             self.check("finished", True, f"live session ended ({outcome})")
         except (Stop, LiveStop):
             self.check("finished", False, "stopped from outside (time limit or signal)")
@@ -3891,6 +4094,8 @@ def live_export(session):
         out.append(f"title = {_toml(w['title'])}")
     if w["min_fill"] != DEFAULT_MIN_FILL:
         out.append(f"min_fill = {_toml(w['min_fill'])}")
+    if w.get("display", "xwayland") != "xwayland":
+        out.append(f"display = {_toml(w['display'])}")
     if m.get("env"):
         out += ["", "[env]"] + [f"{k} = {_toml(v)}" for k, v in m["env"].items()]
     o = m.get("override") or {}

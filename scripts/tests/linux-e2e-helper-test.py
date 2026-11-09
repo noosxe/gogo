@@ -116,8 +116,13 @@ class Manifest(unittest.TestCase):
         self.assertEqual(m["title"], "42")
         self.assertEqual((m["window"]["width"], m["window"]["height"]), (1280, 800))
         self.assertEqual(m["window"]["min_fill"], {"w": 90.0, "h": 90.0})
+        self.assertEqual(m["window"]["display"], "xwayland")
         self.assertEqual(m["exit"], {"how": "signal", "wait_secs": 30.0, "code": 0})
         self.assertEqual(m["steps"], [{"screenshot": "a"}])
+
+    def test_display(self):
+        m = helper.parse_manifest('gogid = 1\n[window]\ndisplay = "wayland"\n[[step]]\nwait = 1\n')
+        self.assertEqual(m["window"]["display"], "wayland")
 
     def test_all_steps(self):
         m = helper.parse_manifest(
@@ -280,6 +285,7 @@ class Manifest(unittest.TestCase):
             "bad resolution": 'gogid = 1\n[window]\nresolution = "big"\n' + step,
             "bad exit": 'gogid = 1\n[exit]\nhow = "maybe"\n' + step,
             "bad regex": 'gogid = 1\n[window]\ntitle = "("\n' + step,
+            "bad display": 'gogid = 1\n[window]\ndisplay = "x11"\n' + step,
             "shot path": 'gogid = 1\n[[step]]\nscreenshot = "../x"\n',
             "shot twice": 'gogid = 1\n[[step]]\nscreenshot = "a"\n[[step]]\nscreenshot = "a"\n',
             "change before shot": (
@@ -485,6 +491,70 @@ class WhoseProcess(unittest.TestCase):
     def test_exe_line(self):
         self.assertEqual(helper.parse_exe("# launcher: 2\n# exe: a/b.exe\n# args: \n"), "a/b.exe")
         self.assertIsNone(helper.parse_exe("no header"))
+
+
+# `ss -xapnH`, trimmed: sway's listener and the server end of a client's
+# connection (which carries the listener's path), the client's end, an
+# Xwayland listener (filesystem and abstract), and a client of it.
+SS = """\
+u_str LISTEN 0 512 /run/e2e-runtime/wayland-1 100 * 0 users:(("sway",pid=3,fd=10))
+u_str ESTAB 0 0 /run/e2e-runtime/wayland-1 101 * 201 users:(("sway",pid=3,fd=31))
+u_str ESTAB 0 0 * 201 * 101 users:(("game.exe",pid=40,fd=7),("wineserver",pid=41,fd=9))
+u_str LISTEN 0 1 /tmp/.X11-unix/X0 300 * 0 users:(("Xwayland",pid=5,fd=6))
+u_str LISTEN 0 1 @/tmp/.X11-unix/X0 301 * 0 users:(("Xwayland",pid=5,fd=5))
+u_str ESTAB 0 0 @/tmp/.X11-unix/X0 302 * 402 users:(("Xwayland",pid=5,fd=12))
+u_str ESTAB 0 0 * 402 * 302 users:(("launcher",pid=50,fd=3))
+u_str ESTAB 0 0 * 500 * 999
+u_dgr UNCONN 0 0 /run/e2e-runtime/pulse/native 600 * 0
+garbage line
+"""
+
+
+class Displays(unittest.TestCase):
+    def test_parse_ss(self):
+        found = helper.parse_ss_unix(SS)
+        self.assertEqual(found[100], {"state": "LISTEN", "path": "/run/e2e-runtime/wayland-1", "peer": 0,
+                                      "users": [("sway", 3)]})  # fmt: skip
+        self.assertEqual(found[201]["users"], [("game.exe", 40), ("wineserver", 41)])
+        self.assertIsNone(found[201]["path"])
+        self.assertEqual(found[500]["users"], [])
+        self.assertEqual(len(found), 9)
+
+    def test_listeners(self):
+        wl, x = helper.display_listeners(helper.parse_ss_unix(SS))
+        self.assertEqual(wl, {"/run/e2e-runtime/wayland-1": ["sway"]})
+        self.assertEqual(x, {"/tmp/.X11-unix/X0": ["Xwayland"], "@/tmp/.X11-unix/X0": ["Xwayland"]})
+
+    def test_peers(self):
+        found = helper.parse_ss_unix(SS)
+        self.assertEqual(
+            helper.display_peers(found, {40}),
+            {"wayland": {"/run/e2e-runtime/wayland-1": ["sway"]}, "x11": {}},
+        )
+        self.assertEqual(
+            helper.display_peers(found, {40, 50}),
+            {"wayland": {"/run/e2e-runtime/wayland-1": ["sway"]}, "x11": {"@/tmp/.X11-unix/X0": ["Xwayland"]}},
+        )
+        # Sway's own end isn't a client's; an unknown peer is nobody's.
+        self.assertEqual(helper.display_peers(found, {3, 999}), {"wayland": {}, "x11": {}})
+
+    def test_socket_kinds(self):
+        self.assertTrue(helper.is_wayland_socket("/run/user/1000/wayland-1"))
+        self.assertFalse(helper.is_wayland_socket("/run/user/1000/wayland-1.lock"))
+        self.assertFalse(helper.is_wayland_socket(None))
+        self.assertTrue(helper.is_x_socket("@/tmp/.X11-unix/X1"))
+        self.assertFalse(helper.is_x_socket("/run/e2e-runtime/pulse/native"))
+
+    def test_x_fallback_line(self):
+        self.assertIsNone(helper.x_fallback_line("fine\nError: failed to run xrandr: Can't open display\n"))
+        for line in (
+            "xterm: Xt error: Can't open display:",
+            "0024:trace:loaddll:build_module Loaded L\"C:\\windows\\system32\\winex11.drv\" at 00006FFFF",
+            "Error: cannot open display: :0",
+            "No protocol specified",
+        ):
+            with self.subTest(line):
+                self.assertEqual(helper.x_fallback_line(f"first\n{line}\nlast\n"), line)
 
 
 class Parsers(unittest.TestCase):
@@ -1176,6 +1246,13 @@ class LiveExport(unittest.TestCase):
 
     def test_an_empty_route_is_still_a_manifest(self):
         self.assertEqual(self.steps(helper.live_export(live_session([]))), [{"wait": 1.0}])
+
+    def test_the_display_mode_exports_only_when_wayland(self):
+        session = live_session([])
+        self.assertNotIn("display", helper.live_export(session))
+        session["manifest"]["window"]["display"] = "wayland"
+        m = helper.parse_manifest(helper.live_export(session))
+        self.assertEqual(m["window"]["display"], "wayland")
 
     def test_a_command_manifest_keeps_its_commands(self):
         session = live_session([shot("a")])

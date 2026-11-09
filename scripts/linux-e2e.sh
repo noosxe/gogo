@@ -5,8 +5,9 @@
 # manifest's steps, checks the frames, then tears everything down.
 #
 #   scripts/linux-e2e.sh run <gogid> [opts]   one game, from e2e/<gogid>.toml
-#   scripts/linux-e2e.sh self-test            the harness itself: a plain xterm,
-#                                             teardown on TERM, INT, KILL, timeout,
+#   scripts/linux-e2e.sh self-test            the harness itself: a plain xterm and
+#                                             a Wayland-native client, teardown on
+#                                             TERM, INT, KILL, timeout,
 #                                             the build's display, the null audio
 #                                             sink, a live session
 #   scripts/linux-e2e.sh cleanup [--prune-installed NAME|all] [--stop-live]
@@ -30,6 +31,9 @@
 #                     node in the sandbox)
 #   --expect-gpu NODE with several GPUs, the one the game must render on
 #                     (default: any of them, and the summary says which)
+#   --display MODE    xwayland (the default) or wayland: no X server at all, and
+#                     a Proton game gets PROTON_ENABLE_WAYLAND=1, Wine's Wayland
+#                     driver (#264). Overrides the manifest's [window] display
 #   --secs N          seconds the game phase may take (default 600); over it the
 #                     run is stopped and fails
 #   --gogo PATH       this gogo (default: `nix build .#gogo-linux-app`)
@@ -428,6 +432,8 @@ write_summary() { # entry-status killed left deleted
                     else [{name:"finished",ok:false,detail:"the driver did not reach its end"}] end)) as $checks
         | ([$checks[] | select(.ok | not)] | length == 0) as $ok
         | {ok:$ok, gogid:$gogid, title:$title, gpu:$gpu,
+           # How the game reached the display (#264): the driver says, once it started.
+           display:($res.display // null),
            failed:[$checks[] | select(.ok | not) | .name],
            checks:$checks,
            screenshots:[($res.steps // [])[] | select(.action == "screenshot" and .path) | .path],
@@ -1056,7 +1062,7 @@ list_installed() {
 
 
 cmd_run() {
-    local target="" manifest="" gpu="" expect_gpu="" secs=600 out="" installer=""
+    local target="" manifest="" gpu="" expect_gpu="" secs=600 out="" installer="" display=""
     GOGO="" KEEP=0 FRESH=0 REUSE=0 INSTALLER_DIR="" INSTALLER_FILE=""
     # A live session's own (#241): only through `live start`.
     local -a live_env=() live_args=()
@@ -1085,6 +1091,7 @@ cmd_run() {
         --manifest) manifest="${2:?}"; shift 2 ;;
         --gpu) gpu="${gpu:+$gpu,}${2:?}"; shift 2 ;;
         --expect-gpu) expect_gpu="${2:?}"; shift 2 ;;
+        --display) display="${2:?}"; shift 2 ;;
         --secs) secs="${2:?}"; shift 2 ;;
         --gogo) GOGO="${2:?}"; shift 2 ;;
         --installer) installer="${2:?}"; shift 2 ;;
@@ -1099,6 +1106,7 @@ cmd_run() {
     done
     [ -n "$target" ] || usage
     case "$secs" in '' | *[!0-9]*) die "--secs wants a number" 2 ;; esac
+    case "$display" in '' | xwayland | wayland) ;; *) die "--display wants xwayland or wayland, not $display" 2 ;; esac
     case "$target" in *[!A-Za-z0-9._-]* | .*) die "not a game id: $target" 2 ;; esac
     [ -n "$manifest" ] || manifest="$REPO/e2e/$target.toml"
     if [ -n "${LIVE:-}" ]; then
@@ -1145,6 +1153,7 @@ cmd_run() {
     else
         MANIFEST_JSON="$(PATH="$TOOLS/bin" helper manifest "$manifest")" || die "bad manifest" 2
     fi
+    [ -z "$display" ] || MANIFEST_JSON="$(PATH="$TOOLS/bin" jq -c --arg d "$display" '.window.display = $d' <<<"$MANIFEST_JSON")"
     GOGID="$(PATH="$TOOLS/bin" jq -r '.gogid // empty' <<<"$MANIFEST_JSON")"
     TITLE="$(PATH="$TOOLS/bin" jq -r .title <<<"$MANIFEST_JSON")"
     if [ -n "$GOGID" ]; then
@@ -1230,6 +1239,9 @@ cmd_run() {
     if [ -n "$GOGID" ]; then PREFIX="$GOGO_HOME_DIR/games/$GOGID/prefix"; fi
     if [ "$FRESH" = 1 ]; then CACHE="$RUN/cache"; else CACHE="$ROOT/cache"; fi
     seed_scratch
+    # The self-test's Wayland-native client. Not in seed_scratch: that is part
+    # of an installed base's key, which a client no game uses shouldn't change.
+    cp "$REPO/scripts/linux-e2e-wayland-client.py" "$RUN/harness/wayland-client.py"
     log "scratch: $RUN"
     log "results: $RESULTS"
     REUSED=0 REUSE_KEY="" REUSE_BASE="" COPY_MODE="" COPY_NOTE="" COPY_SECS="" SAVED="" SAVE_NOTE=""
@@ -1350,7 +1362,7 @@ cmd_run() {
     drive_config "$RUN/drive.json" "$game_extra" "$GPU_LABEL" "$GPU_EXPECT" "${GPU_WANT:-}" "$GPUS_JSON" \
         "${GPU_NODES[@]/#/@n:}" "${GAME_ENV[@]/#/@e:}"
 
-    log "running in headless sway ($GPU_LABEL, up to $secs s)"
+    log "running in headless sway ($GPU_LABEL, $(jq -r .window.display <<<"$MANIFEST_JSON"), up to $secs s)"
     MODE_NOW=game
     start_sandbox game "$RESULTS/sandbox.log" python3 -I "$RUN/harness/helper.py" drive "$RUN/drive.json"
     local rc=0
@@ -1691,7 +1703,7 @@ live_start() {
     local target="" out="" a prev=""
     for a in "$@"; do
         case "$prev" in --out) out="$a" ;; esac
-        case "$prev" in --manifest | --gpu | --expect-gpu | --secs | --gogo | --installer | --out | --env | --arg | \
+        case "$prev" in --manifest | --gpu | --expect-gpu | --display | --secs | --gogo | --installer | --out | --env | --arg | \
             --idle-secs | --max-secs | --max-gap | --match-pct | --to-step | --to-shot) prev=""; continue ;; esac
         case "$a" in -h | --help) usage ;; -*) ;; *) [ -n "$target" ] || target="$a" ;; esac
         prev="$a"
@@ -2902,6 +2914,36 @@ cmd_self_test() {
     jq -e '.build.reused == false and .build.reuse == null' "$summary" >/dev/null ||
         st_fail "pass: a run without --reuse-install says it reused: $(jq -c .build.reuse "$summary" 2>/dev/null)"
 
+    jq -e '.display.mode == "xwayland"' "$summary" >/dev/null ||
+        st_fail "pass: the summary doesn't say Xwayland: $(jq -c .display "$summary" 2>/dev/null)"
+
+    # 1b. Wayland mode (#264): a Wayland-native client in a sway with no X
+    #     server: window, click, a pointer lock with relative motion, key, exit.
+    out="$base/wayland"; mkdir -p "$out"
+    log "self-test: Wayland mode"
+    code=0
+    env --default-signal=INT,TERM "$SELF" run self-test --manifest "$REPO/e2e/self-test-wayland.toml" --out "$out" \
+        >"$out/stdout" 2>"$out/stderr" || code=$?
+    st_assert_clean wayland "$out" "$code" 0
+    summary="$(tail -n 1 "$out/stdout")"
+    jq -e '.ok and .display.mode == "wayland" and .display.xwayland == false
+        and ([.checks[] | select(.name == "isolation_no_x" or .name == "wayland_client" or .name == "no_x_fallback") | .ok]
+             == [true, true, true])' "$summary" >/dev/null ||
+        st_fail "wayland: $(jq -c '{failed, display}' "$summary" 2>/dev/null)"
+    grep -q '^locked$' "${summary%/*}/game.out" 2>/dev/null ||
+        st_fail "wayland: the client never got its pointer lock: $(tail -n 5 "${summary%/*}/game.out" 2>&1)"
+    # An X client in Wayland mode fails loudly, and says why.
+    out="$base/wayland-x"; mkdir -p "$out"
+    log "self-test: an X client in Wayland mode"
+    code=0
+    env --default-signal=INT,TERM "$SELF" run self-test --manifest "$REPO/e2e/self-test-hold.toml" --display wayland \
+        --out "$out" >"$out/stdout" 2>"$out/stderr" || code=$?
+    st_assert_clean wayland-x "$out" "$code" 1
+    summary="$(tail -n 1 "$out/stdout")"
+    jq -e '(.failed | index("window")) and (.checks | any(.name == "no_x_fallback" and (.ok | not)
+        and (.detail | test("open display"; "i"))))' "$summary" >/dev/null ||
+        st_fail "wayland-x: no loud X failure: $(jq -c '[.checks[] | select(.ok | not)]' "$summary" 2>/dev/null)"
+
     # 2. A signal mid-run: stopped, reported as failed, nothing left. A client
     #    that never ends, so only the teardown can end it.
     local sig
@@ -2983,7 +3025,7 @@ cmd_self_test() {
     log "self-test: --gpu's usage"
     local bad
     for bad in "--expect-gpu renderD128" "--gpu renderD128,renderD128" "--gpu card1" \
-        "--gpu renderD128 --gpu renderD128"; do
+        "--gpu renderD128 --gpu renderD128" "--display x11"; do
         code=0
         # shellcheck disable=SC2086 # the words of one case
         "$SELF" run self-test --manifest "$REPO/e2e/self-test.toml" $bad >/dev/null 2>&1 || code=$?
