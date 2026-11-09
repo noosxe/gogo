@@ -68,7 +68,11 @@ pub struct ProtonDownload {
 /// Everything resolved before the long part; the CLI's confirmation.
 #[derive(Debug, Clone)]
 pub struct LinuxAppPlan {
+    /// The title. The installer lane replaces it with the installed
+    /// `goggame-*.info` name unless `--name` was given (`title_fixed`).
     pub display: String,
+    /// `--name` was given: the title is final.
+    pub title_fixed: bool,
     pub slug: String,
     /// Depot lane: known now. Installer lane: after the install.
     pub gogid: Option<String>,
@@ -515,6 +519,7 @@ pub fn plan(
 
     Ok(LinuxAppPlan {
         display,
+        title_fixed: opts.name.is_some(),
         slug,
         gogid,
         installer: install,
@@ -584,6 +589,7 @@ fn launch_toml(
     gogid: &str,
     prefix: &Path,
     install_dir: &Path,
+    title: &str,
     runtime: &str,
     selection: &renderer::Selection,
     auto: Vec<String>,
@@ -620,7 +626,7 @@ fn launch_toml(
     Ok(LaunchToml {
         schema: launch::SCHEMA,
         gogid: gogid.to_string(),
-        title: plan.display.clone(),
+        title: title.to_string(),
         runtime: runtime.to_string(),
         renderer: selection.renderer.value.clone(),
         exe,
@@ -805,6 +811,7 @@ pub fn execute(
             &gogid,
             &dirs.prefix,
             &install_dir,
+            &plan.display,
             &build.reference,
             &sel,
             auto.clone(),
@@ -886,11 +893,19 @@ pub fn execute(
         }
         materialize::remove_tree(&staging.root).ok();
         let install_dir = target.prefix.join("drive_c/GOG").join(&plan.slug);
+        // The stem only guessed the title (the slug had to be fixed before the
+        // install); the installed game's own name is the real one (#235).
+        let title = if plan.title_fixed {
+            plan.display.clone()
+        } else {
+            info::game_name(&install_dir).unwrap_or_else(|| plan.display.clone())
+        };
         let toml = launch_toml(
             plan,
             &gogid,
             &target.prefix,
             &install_dir,
+            &title,
             &build.reference,
             &sel,
             auto.clone(),

@@ -196,27 +196,68 @@ pub fn display_name(installer: &Path, name: Option<&str>) -> String {
     }
 }
 
-/// GOG offline installers are `setup_<name>_<major.minor.patch…>.exe`: drop
-/// the trailing underscore-delimited **dotted** version so the display name
-/// (bundle title + Lutris search query) is the product name —
-/// `setup_pharaoh_gold_2.1.0.15.exe` → "Pharaoh gold", not
-/// "Pharaoh gold 2 1 0 15". Only multi-part dotted numbers count: titles like
-/// "Portal 2" or "Heroes3 Gold" keep their trailing tokens.
+/// GOG offline installers are `setup_<name>_<version>[_(64bit)][_(<build>)].exe`
+/// (older ones end in the version only). Drop that tail, token by token from
+/// the end, so the display name (bundle title, Lutris search query, slug) is the
+/// product name:
+///
+/// - `setup_pharaoh_gold_2.1.0.15.exe` → "Pharaoh gold"
+/// - `setup_cyberpunk_2077_2.31a_(64bit)_(85116).exe` → "Cyberpunk 2077"
+///
+/// Stripped tokens: `(64bit)` / `(32bit)`, a parenthesised build number
+/// `(85116)`, a dotted version (`2.1.0.15`, `2.31a`), and a revision word
+/// right after a version (`1.0.3_hotfix`). A plain number is never a version
+/// (it needs a dot), so "Portal 2" and "Cyberpunk 2077" keep theirs.
 fn strip_version_tail(stem: &str) -> &str {
-    let Some(pos) = stem.rfind('_') else {
-        return stem;
-    };
-    let tail = &stem[pos + 1..];
-    let parts = tail.split('.');
-    let all_numeric = parts
-        .clone()
-        .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
-    let multi_part = parts.count() >= 2;
-    if all_numeric && multi_part {
-        &stem[..pos]
-    } else {
-        stem
+    let mut end = stem;
+    while let Some(pos) = end.rfind('_') {
+        let tail = &end[pos + 1..];
+        let before = &end[..pos];
+        if is_bitness(tail) || is_build_number(tail) || is_dotted_version(tail) {
+            end = before;
+        } else if is_revision_word(tail)
+            && before
+                .rsplit('_')
+                .next()
+                .is_some_and(|t| is_dotted_version(t))
+        {
+            end = before;
+        } else {
+            break;
+        }
     }
+    end
+}
+
+/// `(64bit)` / `(32bit)`.
+fn is_bitness(t: &str) -> bool {
+    t.strip_prefix('(')
+        .and_then(|t| t.strip_suffix("bit)"))
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// `(85116)`.
+fn is_build_number(t: &str) -> bool {
+    t.strip_prefix('(')
+        .and_then(|t| t.strip_suffix(')'))
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Two or more dot-separated parts, each starting with a digit and made of
+/// alphanumerics: `2.1.0.15`, `2.31a`, `1.0.3b`. A plain `2077` is not one.
+fn is_dotted_version(t: &str) -> bool {
+    let parts: Vec<&str> = t.split('.').collect();
+    parts.len() >= 2
+        && parts.iter().all(|p| {
+            p.as_bytes().first().is_some_and(u8::is_ascii_digit)
+                && p.bytes().all(|b| b.is_ascii_alphanumeric())
+        })
+}
+
+fn is_revision_word(t: &str) -> bool {
+    ["hotfix", "patch", "fix", "update", "beta", "rc"]
+        .iter()
+        .any(|w| t.eq_ignore_ascii_case(w))
 }
 
 /// Slug: lowercase, non-alphanumerics → `-`, collapsed, trimmed (design 10 §5).
@@ -1996,6 +2037,54 @@ fn run_recipe_phase(
 
     std::fs::remove_dir_all(&cache).ok();
     result.map(Some)
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::*;
+
+    fn name(file: &str) -> String {
+        display_name(Path::new(file), None)
+    }
+
+    #[test]
+    fn modern_gog_names_lose_version_bitness_and_build() {
+        assert_eq!(
+            name("/x/setup_cyberpunk_2077_2.31a_(64bit)_(85116).exe"),
+            "Cyberpunk 2077"
+        );
+        assert_eq!(
+            slugify(&name("setup_cyberpunk_2077_2.31a_(64bit)_(85116).exe")),
+            "cyberpunk-2077"
+        );
+        assert_eq!(
+            name("setup_some_game_1.2.3_(32bit)_(12345).exe"),
+            "Some game"
+        );
+        assert_eq!(
+            name("setup_some_game_1.0.3_hotfix_(64bit).exe"),
+            "Some game"
+        );
+    }
+
+    #[test]
+    fn older_names_lose_a_dotted_version_only() {
+        assert_eq!(name("setup_pharaoh_gold_2.1.0.15.exe"), "Pharaoh gold");
+        assert_eq!(name("setup_heroes3_gold.exe"), "Heroes3 gold");
+        assert_eq!(name("setup_old_game_1.0.exe"), "Old game");
+    }
+
+    #[test]
+    fn titles_ending_in_a_number_keep_it() {
+        assert_eq!(name("setup_portal_2_2.1.0.4.exe"), "Portal 2");
+        assert_eq!(
+            name("setup_heroes_of_might_and_magic_3_2.0.0.16.exe"),
+            "Heroes of might and magic 3"
+        );
+        assert_eq!(name("setup_cyberpunk_2077.exe"), "Cyberpunk 2077");
+        assert_eq!(name("setup_fallout_2_(64bit)_(1234).exe"), "Fallout 2");
+        assert_eq!(name("setup_game_hotfix.exe"), "Game hotfix");
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
