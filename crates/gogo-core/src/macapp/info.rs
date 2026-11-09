@@ -346,6 +346,23 @@ mod task_path_tests {
         assert!(same_file(&find_entry_point(tmp.path()).unwrap()));
         assert!(same_file(&play_variants(tmp.path())[0].exe));
     }
+
+    #[test]
+    fn game_name_ignores_a_dlcs_info() {
+        let d = tempfile::tempdir().unwrap();
+        // Named so that a DLC sorts first in any directory order.
+        std::fs::write(
+            d.path().join("goggame-100.info"),
+            r#"{"gameId":"100","rootGameId":"200","name":"Some DLC"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            d.path().join("goggame-200.info"),
+            r#"{"gameId":"200","rootGameId":"200","name":"The Game"}"#,
+        )
+        .unwrap();
+        assert_eq!(game_name(d.path()).as_deref(), Some("The Game"));
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -602,22 +619,5 @@ mod info_tests {
         assert_eq!(split_args(" -f  -w "), ["-f", "-w"]);
         assert_eq!(split_args(r#"-cfg "a b.ini" x"#), ["-cfg", "a b.ini", "x"]);
         assert_eq!(split_args(r#""""#), [""]);
-    }
-
-    #[test]
-    fn game_name_ignores_a_dlcs_info() {
-        let d = tempfile::tempdir().unwrap();
-        // Named so that a DLC sorts first in any directory order.
-        std::fs::write(
-            d.path().join("goggame-100.info"),
-            r#"{"gameId":"100","rootGameId":"200","name":"Some DLC"}"#,
-        )
-        .unwrap();
-        std::fs::write(
-            d.path().join("goggame-200.info"),
-            r#"{"gameId":"200","rootGameId":"200","name":"The Game"}"#,
-        )
-        .unwrap();
-        assert_eq!(game_name(d.path()).as_deref(), Some("The Game"));
     }
 }
