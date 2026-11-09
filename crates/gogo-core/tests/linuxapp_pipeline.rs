@@ -4934,7 +4934,10 @@ mod moving {
         // The record still names `old`; the journal blocks a plain move, and
         // adopting the source where it is settles it: the marked copy goes.
         let out = adopt(&by_hand).unwrap();
-        assert!(out.recovered.iter().any(|l| l.contains("removed")), "{out:?}");
+        assert!(
+            out.recovered.iter().any(|l| l.contains("removed")),
+            "{out:?}"
+        );
         assert!(!new.exists(), "the spare copy is removed");
         assert!(hand.join("launch.sh").is_file(), "the named game stays");
         assert!(!w.home.join("game-moves").join(ID).exists());
@@ -4988,7 +4991,6 @@ mod moving {
         let err = adopt(&Target::Library(other_library_at(&w, "nowhere"))).unwrap_err();
         assert!(err.contains("no dir there"), "{err}");
         assert!(err.contains("recorded now"), "{err}");
-
     }
 
     #[test]

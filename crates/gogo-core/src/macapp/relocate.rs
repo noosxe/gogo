@@ -691,11 +691,7 @@ fn copy_only_journal(gogid: &str) -> Result<Option<Journal>, MacAppError> {
 /// data is deleted), and the recovery that is left is the one a rename needs:
 /// rewrite, record, menu entry, journal. A kill after the marker is gone is
 /// settled by the next run's recovery the same way.
-fn adopt_the_copy(
-    gogid: &str,
-    j: &Journal,
-    lane: &dyn Lane,
-) -> Result<AdoptOutcome, MacAppError> {
+fn adopt_the_copy(gogid: &str, j: &Journal, lane: &dyn Lane) -> Result<AdoptOutcome, MacAppError> {
     let to = GameDirs::at(j.to.clone());
     let refuse = |reason: String| MacAppError::Library {
         path: j.to.clone(),
