@@ -1,0 +1,57 @@
+# The self-test's Wayland mode (#264): a Wayland-native client
+# (scripts/linux-e2e-wayland-client.py) in a sway with no Xwayland at all. It
+# turns blue when a click reaches it, then locks the pointer and turns green
+# once relative motion arrives under the lock (what Wine's Wayland driver asks
+# for when a game steers by the mouse), and exits on `q`. Each step only passes
+# if the input really went through sway to a Wayland client.
+title = "self-test: wayland"
+command = ["python3", "-I", "../harness/wayland-client.py"]
+
+[window]
+wait_secs = 30
+resolution = "1024x768"
+min_fill = { w = 95, h = 95 }
+display = "wayland"
+
+[exit]
+how = "self"
+wait_secs = 10
+
+[[step]]
+wait = 1
+
+[[step]]
+screenshot = "before-click"
+
+[[step]]
+click = { x = 50, y = 50 }
+
+[[step]]
+wait = 1
+
+[[step]]
+screenshot = "after-click"
+
+[[step]]
+expect_change = { from = "before-click", to = "after-click", min = 50 }
+
+[[step]]
+move_by = { x = 40, y = 0 }
+
+[[step]]
+move_by = { x = 0, y = 40 }
+
+[[step]]
+move_by = { x = -40, y = 0 }
+
+[[step]]
+wait = 1
+
+[[step]]
+screenshot = "after-move"
+
+[[step]]
+expect_change = { from = "after-click", to = "after-move", min = 50 }
+
+[[step]]
+type = "q"
