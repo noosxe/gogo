@@ -551,6 +551,23 @@ and a `run` still waits the whole `wait`.
 record, which no check reads, and 7 s on Cyberpunk. `doctor-after`, at a `stop`, is
 as ever, and every life still has its own isolation checks, sound check, GPU probes and sweep.
 
+#### Moving a game between launches
+
+A `move_relaunch` step (#278) is a `relaunch` with `gogo linux-app move` in the middle, and
+only in a `run`, not a live session. The game has quit by itself, a save is planted in the prefix,
+and the game is moved to `library` (`$RUN/library`, so a rename), `other_fs` (`/e2e-other-fs`, a
+tmpfs of the sandbox's own, so a copy, outside `$HOME` and the scratch: the one path that tests
+the container's share of a library) or `default` (`games/`). The copy to `other_fs` is first
+killed with `SIGKILL` 0.3 s in, and the game must still be where it was. Then the checks:
+`move`, `move_place` (`apps list` says the new dir, the old one's gone), `move_saves` (the save,
+everything under `users/`, every link and the registry match), `move_doctor` and
+`move_menu_entry`, and the next launch uses the path the menu entry runs. A tmpfs holds the game in
+memory, so pick a small one. `e2e/move-1741027632.toml` does all three in turn:
+
+```bash
+scripts/linux-e2e.sh run 1741027632 --manifest e2e/move-1741027632.toml --secs 1200
+```
+
 #### A clean stop: a kept disk and a relaunch
 
 A game that has quit from its own menu is what a snapshot of a running one isn't: its
@@ -901,6 +918,8 @@ min_fill = false                 # this frame needn't fill the window
 [[step]]
 expect_change = { from = "menu", to = "preferences", min = 20 }  # % of pixels
 [[step]]
+move_relaunch = "library"        # after the game quit: `linux-app move`, then launch it again
+[[step]]
 key = "Escape"                   # one key, held 50 ms: an XKB keysym name, as below
 [[step]]
 type = "Hello!"                  # text, a key at a time, Shift where the us layout needs it
@@ -1037,6 +1056,10 @@ These stay in the owner's host pass (#179, design 18 §11.2), and agents put the
 
 ## How it was found to work, and what to watch for
 
+- **Software rendering has only Mesa's EGL vendor** (`__EGL_VENDOR_LIBRARY_FILENAMES`), in
+  the build's display and a software game phase. Xwayland's GLX probe goes through glvnd to every
+  vendor, and on a host with nvidia 595 its `libnvidia-egl-gbm` segfaults Xwayland when
+  there's no device: `no X server on ':0'`, with `eGbmGetPlatformDisplayExport` in `sway.log`.
 - **An agent's shell is itself a bwrap** (the desktop app's FHS env), with `/etc/passwd` a
   link into `/.host-etc`. Xwayland admits clients by local user, so an unresolvable uid
   gives `Authorization required`: the sandbox makes its own `passwd` and `group`.

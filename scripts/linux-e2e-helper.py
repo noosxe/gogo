@@ -33,6 +33,7 @@ exited by itself.
 """
 
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -40,6 +41,7 @@ import re
 import shutil
 import signal
 import select
+import shlex
 import socket
 import stat
 import struct
@@ -74,6 +76,9 @@ SETTLE_MAX_CHANGE_PCT = 1.0
 EXIT_HOW = ("self", "signal")
 NULL_SINK = "e2e-null"
 BUILD_NO_DISPLAY = 3
+# The `move_relaunch` step's targets (#278): a dir on the scratch's filesystem, a
+# tmpfs of the sandbox's own (another filesystem, outside $HOME), and `games/`.
+MOVE_TARGETS = ("library", "other_fs", "default")
 # A relaunch: how long what the game left behind (wineserver lingers) gets to go.
 RELAUNCH_LEFT_SECS = 15.0
 # How the build's log says the support installer ended (build.rs).
@@ -206,6 +211,27 @@ def _wait_until(value, what):
     return step
 
 
+def tree_digest(prefix):
+    """What a move must keep of a prefix: every path under `drive_c/users` with its
+    bytes, the registry, and where every symlink outside the game's files leads."""
+    h = hashlib.sha256()
+    for top, dirs, files in os.walk(prefix):
+        dirs.sort()
+        rel = os.path.relpath(top, prefix)
+        names = sorted(files + [d for d in dirs if os.path.islink(os.path.join(top, d))])
+        if rel == os.path.join("drive_c", "GOG"):
+            del dirs[:]
+        for name in names:
+            path = os.path.join(top, name)
+            h.update(os.path.join(rel, name).encode())
+            if os.path.islink(path):
+                h.update(os.readlink(path).encode())
+            elif rel == "." and name.endswith(".reg") or rel.startswith(os.path.join("drive_c", "users")):
+                with open(path, "rb") as f:
+                    h.update(f.read())
+    return h.hexdigest()
+
+
 def _step(raw, i, shots):
     """One `[[step]]`: exactly one action key (with `screenshot`'s `min_fill`)."""
     what = f"step {i + 1}"
@@ -215,7 +241,7 @@ def _step(raw, i, shots):
     if len(actions) != 1:
         raise ManifestError(
             f"{what}: needs exactly one of click, click_here, move_to, move_by, scroll, key, "
-            f"type, hold, press_until, wait, wait_until, wait_settled, screenshot, expect_change, relaunch; got {sorted(actions)}"
+            f"type, hold, press_until, wait, wait_until, wait_settled, screenshot, expect_change, relaunch, move_relaunch; got {sorted(actions)}"
         )
     action = actions[0]
     value = raw[action]
@@ -239,6 +265,10 @@ def _step(raw, i, shots):
         if value is not True:
             raise ManifestError(f"{what}: relaunch must be true")
         return {"relaunch": True}
+    if action == "move_relaunch":
+        if value not in MOVE_TARGETS:
+            raise ManifestError(f"{what}: move_relaunch must be one of {', '.join(MOVE_TARGETS)}")
+        return {"move_relaunch": value}
     if action == "move_to":
         _only(value, ("x", "y"), f"{what}: move_to")
         if "x" not in value or "y" not in value:
@@ -432,6 +462,8 @@ def parse_manifest(text, live=False):
         raise ManifestError("needs at least one [[step]]")
     shots = set()
     steps = [_step(s, i, shots) for i, s in enumerate(steps_raw)]
+    if gogid is None and any("move_relaunch" in s for s in steps):
+        raise ManifestError("move_relaunch is for a game (gogid), not a command")
     if live:
         steps = []
 
@@ -1685,6 +1717,8 @@ class Driver:
             self.do_expect_change(step["expect_change"], record)
         elif action == "relaunch":
             self.do_relaunch(record)
+        elif action == "move_relaunch":
+            self.do_relaunch(record, move=step["move_relaunch"])
         self.save()
 
     def press_until_marked(self, marked):
@@ -2017,11 +2051,12 @@ class Driver:
         gpu.setdefault("launches", []).append(held)
         self.gpu_seen = False
 
-    def do_relaunch(self, record):
+    def do_relaunch(self, record, move=None):
         """The `relaunch` step (#252): the game has quit by itself, by [exit]'s
         wait_secs and with its code, nothing of it is left, and it's launched
         again in this sandbox, on this disk, up to its window. record["ok"] false
-        ends a run's steps: the route has no way on from there."""
+        ends a run's steps: the route has no way on from there. With `move` (#278)
+        the game is moved first, and launched from its menu entry's new path."""
         self.relaunches += 1
         tag = f"relaunch_{self.relaunches}"
         want = self.manifest["exit"]
@@ -2052,6 +2087,8 @@ class Driver:
         out = os.path.join(self.results, "game.out")
         if os.path.exists(out):
             os.replace(out, os.path.join(self.results, f"launch{self.relaunches}-game.out"))
+        if move is not None and not self.do_move(move, record):
+            return
         self.view = None
         self.game_exit = self.result["game_exit"] = None
         if self.live is not None:
@@ -2062,6 +2099,93 @@ class Driver:
         record["window_secs"] = round(time.monotonic() - started, 1)
         if not got:
             record.update(ok=False, why=f"no window after the relaunch: {self.checks[-1]['detail']}")
+
+    def moved_game_root(self):
+        """Where `gogo apps list` says the game is."""
+        c = self.cfg
+        r = self.tool(c["doctor"][0], "apps", "list", "--json", timeout=60)
+        rows = json.loads(r.stdout)
+        rows = rows if isinstance(rows, list) else rows.get("apps", [])
+        return next(a["root"] for a in rows if str(a["gogid"]) == c["doctor"][3])
+
+    def do_move(self, where, record):
+        """`gogo linux-app move` between two launches: a save planted first, a real
+        kill partway through a copy, then the checks of a game at its new place.
+        Whether it worked, record["why"] saying what didn't."""
+        c = self.cfg
+        gogo, gogid = c["doctor"][0], c["doctor"][3]
+        old = self.moved_game_root()
+        users = os.path.join(old, "prefix/drive_c/users")
+        sentinel = os.path.join("steamuser", "gogo-e2e-save.sav")
+        with open(os.path.join(users, sentinel), "w") as f:
+            f.write(f"a save from before the move to {where}\n")
+        before = tree_digest(os.path.join(old, "prefix"))
+        argv = [gogo, "linux-app", "move", gogid, "--json"]
+        argv += ["--default"] if where == "default" else [c["move_targets"][where]]
+
+        def failed(name, why):
+            self.check(name, False, why)
+            record.update(ok=False, why=f"{name}: {why}")
+            return False
+
+        if where == "other_fs":
+            # Killed for real, as a power cut or a `kill -9` would. A copy this
+            # fast may finish first: then there's nothing to check.
+            p = subprocess.Popen(argv, env=self.env, stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(0.3)
+            p.kill()
+            p.wait()
+            if self.moved_game_root() == old:
+                if tree_digest(os.path.join(old, "prefix")) != before:
+                    return failed("move_killed", "the kill changed the game's prefix")
+                report = self.doctor(f"move-killed-{self.relaunches}") or {}
+                noted = [f for f in report.get("findings", []) if f.get("check") == "move"]
+                self.check("move_killed", True,
+                           f"killed mid-copy: the game stays at {old}; doctor: "
+                           + (noted[0]["message"] if noted else "nothing left to report"))
+            else:
+                self.check("move_killed", True, "the move finished before the kill")
+
+        started = time.monotonic()
+        r = self.tool(*argv, timeout=900)
+        record["move_secs"] = round(time.monotonic() - started, 1)
+        if r.returncode != 0 and self.moved_game_root() == old:
+            return failed("move", f"exit {r.returncode}: {r.stderr.strip()[-400:]}")
+        if r.returncode != 0:
+            # Only what the kill above left: already there, nothing to do.
+            if "already there" not in r.stderr:
+                return failed("move", f"exit {r.returncode}: {r.stderr.strip()[-400:]}")
+            out = {"method": "finished before the kill", "to": self.moved_game_root()}
+        else:
+            out = json.loads(r.stdout)
+        record["move"] = {k: out.get(k) for k in ("method", "from", "to", "bytes", "warnings")}
+        self.check("move", True, f"{old} -> {out['to']}, by {out['method']}, in {record['move_secs']} s")
+
+        root = self.moved_game_root()
+        if root != out["to"] or os.path.exists(old):
+            return failed("move_place", f"apps list says {root}, wanted {out['to']}; {old} there: {os.path.exists(old)}")
+        self.check("move_place", True, f"apps list says {root}, and {old} is gone")
+        if tree_digest(os.path.join(root, "prefix")) != before:
+            return failed("move_saves", "the prefix's links, registry or saves changed")
+        self.check("move_saves", True, "the planted save, every other file under users/, the links and the registry match")
+        report = self.doctor(f"moved-{self.relaunches}") or {}
+        bad = [f for f in report.get("findings", [])
+               if f.get("check") in ("links", "location", "move", "launcher", "menu") and f.get("level") != "ok"]
+        if bad or "findings" not in report:
+            return failed("move_doctor", json.dumps(bad or report)[:400])
+        self.check("move_doctor", True, "links, location and the menu entry are ok at the new place")
+
+        # What a user launches: the menu entry's own path.
+        entry = os.path.join(self.env["GOGO_HOME"], "applications", f"gogo-{gogid}.desktop")
+        with open(entry) as f:
+            line = next(l for l in f if l.startswith("Exec="))
+        launcher = shlex.split(line[len("Exec="):])[0]
+        if launcher != os.path.join(root, "launch.sh"):
+            return failed("move_menu_entry", f"it runs {launcher}")
+        self.check("move_menu_entry", True, f"it runs {launcher}")
+        c["launch"], c["launch_cwd"] = [launcher], root
+        return True
 
     def apply_override(self):
         """The manifest's [override], through gogo in this run's scratch."""
@@ -2236,7 +2360,7 @@ class Driver:
                 stuck = False
                 for step in self.manifest["steps"]:
                     self.run_step(step)
-                    if any(k in step for k in ("relaunch", *LIVE_UNTIL)) and not self.steps[-1]["ok"]:
+                    if any(k in step for k in ("relaunch", "move_relaunch", *LIVE_UNTIL)) and not self.steps[-1]["ok"]:
                         stuck = True
                         break
                 if stuck:

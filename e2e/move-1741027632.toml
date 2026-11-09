@@ -1,0 +1,64 @@
+# Right and Down, moved between launches (#278): to a library on the scratch's
+# filesystem (a rename), to another filesystem outside $HOME (a copy, killed once
+# partway), and back to games/ (a copy). It quits by itself each time, from the
+# menu; a launch after each move has to reach the menu again.
+#   scripts/linux-e2e.sh run 1741027632 --manifest e2e/move-1741027632.toml
+title = "Right and Down"
+gogid = 1741027632
+
+[env]
+DXVK_LOG_LEVEL = "info"
+
+[window]
+wait_secs = 180
+resolution = "1280x800"
+min_fill = { w = 95, h = 95 }
+
+[exit]
+how = "self"
+wait_secs = 60
+
+[[step]]
+wait = 60
+
+[[step]]
+screenshot = "menu-from-games"
+
+[[step]]
+click = { x = 85.7, y = 95 }
+
+[[step]]
+move_relaunch = "library"
+
+[[step]]
+wait = 60
+
+[[step]]
+screenshot = "menu-from-library"
+
+[[step]]
+click = { x = 85.7, y = 95 }
+
+[[step]]
+move_relaunch = "other_fs"
+
+[[step]]
+wait = 60
+
+[[step]]
+screenshot = "menu-from-other-fs"
+
+[[step]]
+click = { x = 85.7, y = 95 }
+
+[[step]]
+move_relaunch = "default"
+
+[[step]]
+wait = 60
+
+[[step]]
+screenshot = "menu-back-in-games"
+
+[[step]]
+click = { x = 85.7, y = 95 }

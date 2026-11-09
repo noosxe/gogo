@@ -1202,6 +1202,43 @@ class Relaunch(unittest.TestCase):
             {"mark": "checkpoint", "name": "stop", "disk": self.KEPT},
         ]
 
+    def test_a_move_relaunch_names_a_target_and_needs_a_game(self):
+        for target in helper.MOVE_TARGETS:
+            self.assertEqual(
+                self.steps(f'gogid = 1\n[[step]]\nmove_relaunch = "{target}"\n'),
+                [{"move_relaunch": target}],
+            )
+        with self.assertRaises(helper.ManifestError):
+            helper.parse_manifest('gogid = 1\n[[step]]\nmove_relaunch = "/some/dir"\n')
+        with self.assertRaises(helper.ManifestError):
+            helper.parse_manifest('command = ["x"]\n[[step]]\nmove_relaunch = "library"\n')
+
+    def test_a_prefix_digest_sees_saves_links_and_the_registry_and_not_game_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            users = os.path.join(d, "drive_c", "users", "steamuser")
+            gog = os.path.join(d, "drive_c", "GOG")
+            os.makedirs(users)
+            os.makedirs(os.path.join(gog, "real"))
+            os.symlink("../../../game", os.path.join(gog, "linked"))
+            with open(os.path.join(users, "a.sav"), "w") as f:
+                f.write("1")
+            with open(os.path.join(d, "user.reg"), "w") as f:
+                f.write("x")
+            first = helper.tree_digest(d)
+            self.assertEqual(helper.tree_digest(d), first)
+            with open(os.path.join(gog, "real", "big"), "w") as f:
+                f.write("not a save")
+            self.assertEqual(helper.tree_digest(d), first)
+            for change in (
+                lambda: open(os.path.join(users, "a.sav"), "w").close(),
+                lambda: open(os.path.join(d, "user.reg"), "w").close(),
+                lambda: (os.remove(os.path.join(gog, "linked")),
+                         os.symlink("/elsewhere", os.path.join(gog, "linked"))),
+            ):
+                change()
+                self.assertNotEqual(helper.tree_digest(d), first)
+                first = helper.tree_digest(d)
+
     def test_the_step(self):
         self.assertEqual(self.steps('gogid = 1\n[[step]]\nrelaunch = true\n'), [{"relaunch": True}])
         for bad in ("false", "1", '"yes"', "{ }"):
