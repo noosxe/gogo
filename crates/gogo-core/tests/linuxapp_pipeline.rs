@@ -3622,7 +3622,7 @@ fn removing_a_symlinked_game_dir_never_follows_it() {
     }
 }
 
-/// `0o555` on `dirs`, deepest first; hands back a restore for the tempdir.
+/// `0o555` on `dirs`; `unlock_dirs` restores them so tempdir cleanup works.
 fn lock_dirs(dirs: &[&Path]) {
     use std::os::unix::fs::PermissionsExt as _;
     for d in dirs {
