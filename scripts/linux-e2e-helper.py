@@ -1740,7 +1740,21 @@ class Driver:
         env = dict(self.env)
         env.update(self.cfg["game_env"])
         gpu["gl_renderer"] = None
-        if shutil.which("glxinfo", path=env["PATH"]):
+        if self.display == "wayland":
+            # No X server to ask GLX. EGL's surfaceless platform says which
+            # driver --gpu gives; EGL on our Wayland socket is recorded beside
+            # it (NVIDIA's egl-wayland fails there with no primary DRM node).
+            if shutil.which("eglinfo", path=env["PATH"]):
+                for platform in ("surfaceless", "wayland"):
+                    r = self.tool("eglinfo", "-B", "-p", platform, env=env)
+                    m = re.search(r"OpenGL (?:core|compatibility) profile renderer:\s*(.+)", r.stdout)
+                    err = re.search(r"eglinfo: (.+)", r.stdout + r.stderr)
+                    found = m.group(1).strip() if m else None
+                    if platform == "surfaceless":
+                        gpu["gl_renderer"] = found
+                    else:
+                        gpu["egl_wayland"] = found or (err.group(1).strip() if err else f"exit {r.returncode}")
+        elif shutil.which("glxinfo", path=env["PATH"]):
             r = self.tool("glxinfo", "-B", env=env)
             m = re.search(r"OpenGL renderer string:\s*(.+)", r.stdout)
             gpu["gl_renderer"] = m.group(1).strip() if m else None
