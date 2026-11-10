@@ -553,7 +553,7 @@ mod tests {
 
     #[test]
     fn the_last_run_is_read_from_its_header() {
-        let log = "# launcher: 10\n# wrapper: gamescope --\n# display: x11 (wayland wanted, but WAYLAND_DISPLAY is unset)\n\
+        let log = "# launcher: 11\n# wrapper: gamescope --\n# display: x11 (wayland wanted, but WAYLAND_DISPLAY is unset)\n\
                    # hdr: force (not applied: not on Wayland)\n# monitor: DP-1 (not applied: not on Wayland)\n# ---\ngogo: display under the wrapper: x11\nout\n# exit: 0\n";
         assert_eq!(
             last_run(log),
@@ -564,6 +564,6 @@ mod tests {
                 "under the wrapper: x11",
             ]
         );
-        assert!(last_run("# launcher: 10\n# ---\n").is_empty());
+        assert!(last_run("# launcher: 11\n# ---\n").is_empty());
     }
 }

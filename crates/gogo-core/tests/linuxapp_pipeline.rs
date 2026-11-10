@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use gogo::engine::events::ProgressEvent;
 use gogo::linuxapp::build::{self, LinuxAppOptions};
 use gogo::linuxapp::game::LinuxState;
+use gogo::linuxapp::manage;
 use gogo::linuxapp::setup::{self, SetupOptions};
 use gogo::macapp::launch::Library;
 use gogo::macapp::{Renderer, RendererChoice};
@@ -801,6 +802,42 @@ fn wined3d_chosen_sets_the_switch_and_auto_wined3d_sets_nothing() {
     );
     build::execute(&plan, None, &mut quiet()).unwrap();
     assert_eq!(conf_value(&w.conf(), "ENV"), "()");
+    // ... and it is labelled by what runs, not "wined3d" (#229).
+    assert_eq!(conf_value(&w.conf(), "RENDERER"), "'proton-default'");
+    assert_eq!(w.state().renderer, "proton-default");
+    let r = manage::compat(ID).unwrap().renderer.unwrap();
+    assert_eq!(
+        (r.baked.as_str(), r.auto.as_str(), r.effective.as_str()),
+        ("proton-default", "proton-default", "proton-default")
+    );
+    assert_eq!(r.applied.as_deref(), Some("proton-default"));
+    let json = serde_json::to_string(&r).unwrap();
+    assert!(json.contains("\"applied\":\"proton-default\""), "{json}");
+    // The "next renderer" walk starts from L1's pick: nothing after it.
+    assert_eq!(manage::next_renderer(ID, true).unwrap(), None);
+    // Doctor says what Proton's defaults mean.
+    let host = doctor_host(&w, &[]);
+    let r = doctor(&w, &host);
+    let (_, msg) = renderer_finding(&r);
+    assert!(
+        msg.starts_with("proton-default: none (Proton's defaults: DXVK for d3d9–11)"),
+        "{msg}"
+    );
+    drop(w);
+
+    // The same ref chosen (L4) is the real thing: the switch, `wined3d`.
+    let w = World::new("wined3d-chosen-over-auto", &["kernel32.dll"]);
+    let plan = build::plan(&w.opts(), None, &mut quiet()).unwrap();
+    build::execute(&plan, None, &mut quiet()).unwrap();
+    let out = manage::retarget(
+        ID,
+        &[("renderer", Some("wined3d"))],
+        &SetupOptions::default(),
+        &mut quiet(),
+    )
+    .unwrap();
+    assert_eq!(out.setup.unwrap().unwrap().state.renderer, "wined3d");
+    assert_eq!(conf_value(&w.conf(), "ENV"), "('PROTON_USE_WINED3D=1')");
 }
 
 // — the installer lane —
@@ -879,7 +916,6 @@ fn installer_lane_titles_the_game_from_the_installed_info() {
 
 #[test]
 fn compat_next_renderer_and_retarget_work_on_the_linux_layers() {
-    use gogo::linuxapp::manage;
     let w = World::new("manage", &["d3d9.dll", "d3dx9_43.dll"]);
     let l4 = gogo::macapp::compat::user_path(ID);
 
@@ -1511,7 +1547,7 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
     // next setup, which says so; an unchanged one isn't touched.
     std::fs::write(
         &sh,
-        script.replace("LAUNCHER_VERSION=10", "LAUNCHER_VERSION=0"),
+        script.replace("LAUNCHER_VERSION=11", "LAUNCHER_VERSION=0"),
     )
     .unwrap();
     std::fs::write(&desktop, "[Desktop Entry]\nExec=/old/root/launch.sh\n").unwrap();
@@ -1519,7 +1555,7 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
     assert_eq!(std::fs::read_to_string(&sh).unwrap(), script);
     assert_eq!(std::fs::read_to_string(&desktop).unwrap(), entry);
     assert!(
-        out.notes.iter().any(|n| n == "launch.sh: launcher 0 -> 10"),
+        out.notes.iter().any(|n| n == "launch.sh: launcher 0 -> 11"),
         "{:?}",
         out.notes
     );
@@ -1584,7 +1620,7 @@ fn the_launcher_runs_umu_with_the_games_environment_and_logs_the_run() {
     let run = &runs[0];
     for want in [
         format!("# gogo run log: Test Game ({ID})\n"),
-        "# launcher: 10\n".into(),
+        "# launcher: 11\n".into(),
         format!(
             "# runtime: path:{} (1793687165 GE-Proton10-34)\n",
             w.build.display()
@@ -3787,7 +3823,7 @@ fn the_launcher_of_a_library_game_keeps_gogos_data_root() {
     );
     // Logs stay under the data root, not the library's parent.
     assert_eq!(w.runs().len(), 1, "run logs under {:?}", w.logs());
-    assert!(w.launch_log().contains("launcher 10"));
+    assert!(w.launch_log().contains("launcher 11"));
     assert!(!w.root.join("big drive/logs").exists());
 
     // Stale config: setup runs with gogo's data root as GOGO_HOME, and from

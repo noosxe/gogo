@@ -1,4 +1,6 @@
-# Treasure Adventure Game (GameMaker, legacy Direct3D, 32-bit): wined3d (L1).
+# Treasure Adventure Game (Clickteam Multimedia Fusion 2: it loads mmf2d3d9.dll; legacy
+# Direct3D, 32-bit): wined3d (L1). On the Mac that is wined3d. On Linux L1's wined3d sets
+# nothing, so Proton's defaults run it on DXVK (design 18 §3, labelled proton-default).
 # VM smoke runs (depot-lane, runtime-cx24 / runtime-cx, renderer-l1-wined3d) show its
 # title menu; input and audio were not judged (the VM runs with audio off).
 title  = "Treasure Adventure Game"

@@ -253,12 +253,25 @@ pub fn compat_with(gogid: &str, scan: &InstallScan) -> Result<CompatReport, MacA
         Some(r) => (r.clone(), Layer::User),
         None => (b.baked.renderer.clone(), baked_layer),
     };
+    // L1's own wined3d pick sets nothing, so it reads `proton-default`;
+    // a `wined3d` from any other layer sets PROTON_USE_WINED3D=1.
+    let label = |r: &str, layer: Layer| {
+        if r == renderer::Renderer::Wined3d.id() && layer == Layer::Auto {
+            renderer::PROTON_DEFAULT.to_string()
+        } else {
+            r.to_string()
+        }
+    };
     let renderer = RendererLine {
-        baked: b.baked.renderer.clone(),
+        baked: label(&b.baked.renderer, baked_layer),
         baked_layer,
-        auto: pick.renderer.default_ref(),
+        auto: if pick.renderer == renderer::Renderer::Wined3d {
+            renderer::PROTON_DEFAULT.to_string()
+        } else {
+            pick.renderer.default_ref()
+        },
         reason: pick.reason.clone(),
-        effective: effective_renderer.clone(),
+        effective: label(&effective_renderer, effective_layer),
         effective_layer,
         applied: b.state.as_ref().map(|s| s.renderer.clone()),
     };

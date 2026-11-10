@@ -33,7 +33,7 @@ use crate::macapp::compat::{self, CompatEntry, Layer, Os};
 use crate::macapp::error::MacAppError;
 use crate::macapp::launch::{GameDirs, LaunchToml, state_rel, windows_to_unix, write_atomic};
 use crate::macapp::prompt::PromptFn;
-use crate::macapp::renderer::{self, PROTON_USE_WINED3D, Renderer};
+use crate::macapp::renderer::{self, PROTON_USE_WINED3D};
 use crate::macapp::{catalog, ddraw, lutris, pe, store};
 
 /// `games/<gogid>/install/`: umu's output from the build and setup.
@@ -697,11 +697,7 @@ pub fn setup(
     }
     // `wined3d` chosen (L3, L4, a flag, the walk) moves D3D9–12 to wined3d;
     // as L1's own pick it means Proton's defaults (#172).
-    if rplan.renderer == Renderer::Wined3d.id()
-        && renderer_layer != Layer::Auto
-        && !rplan.env.contains_key(PROTON_USE_WINED3D)
-    {
-        rplan.env.insert(PROTON_USE_WINED3D.into(), "1".into());
+    if renderer::settle_wined3d(&mut rplan, renderer_layer == Layer::Auto) {
         rplan.notes.push(format!("wined3d: {PROTON_USE_WINED3D}=1"));
     }
     if rplan.ddraw == renderer::DdrawStep::LeaveDdrawCompat
