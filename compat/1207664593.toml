@@ -1,19 +1,25 @@
 # SimCity 4 Deluxe Edition (32-bit, Apps/SimCity 4.exe imports opengl32: L1 picks wined3d,
 # and the game picks its own DirectX driver on top). Its data directory is the exe's own
 # folder unless Apps/SimCity 4.ini says `[Directories] Data=`; the .dat files are in the game
-# root, so without the file it stops at "Unable to find game data". The depot tree has no
-# such file, and GOG's registry values don't steer it. `..\` is relative to Apps/.
+# root. GOG's support overlay (gog-support/…/app/) ships that ini (`Data=..\`,
+# `PlugIn=..\Plugins\`) with its GPU tables, and a depot build merges it into the game dir,
+# so no fix is needed here. (An e2e cache that had lost its gog-support/ stopped at "Unable to
+# find game data"; #316.) The script's supportData copy of the stock regions isn't run: the
+# game makes the same Documents/SimCity 4 itself on first start (design 18 §4.9).
 # e2e/1207664593.toml.
 title  = "SimCity 4 Deluxe Edition"
-source = "gogo-headless"
-files  = [
-  { path = "Apps/SimCity 4.ini", text = "[Directories]\nData=..\\\n" },
-]
+source = "gogo-host"
 
+# Xwayland only: on Wine's Wayland driver the 32-bit game gets no EGL or Vulkan and stops at
+# "Could not initialize Direct Draw" (#312), headless and on the owner's Hyprland desktop
+# alike. `x11` keeps a session-wide PROTON_ENABLE_WAYLAND from moving it there; an L4
+# `gogo linux-app display 1207664593 wayland` still wins.
 [platforms.linux]
-status = "boots"
-lane   = "depot"
-notes  = "headless sway on Xwayland: intros, the Timbuktu region view and Quit SimCity 4 work on wined3d with the files fix; on Wine's Wayland driver (gogo's display mode) it stops at \"Could not initialize Direct Draw\": the 32-bit game gets no EGL or Vulkan there (#312); audio, play and the owner's compositor not judged"
+status  = "plays"
+lane    = "depot"
+display = "x11"
+notes   = "plays on Xwayland (the owner's Hyprland desktop, and headless sway: intros, the Timbuktu region view, Quit SimCity 4) on wined3d with GOG's support overlay; on Wine's Wayland driver it stops at \"Could not initialize Direct Draw\" on the real desktop too, not only headless (#312), hence display = x11"
 tested = [
   { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/nvidia", date = 2026-11-10 },
+  { runtime = "ge-proton/GE-Proton11-12", host = "kraken-hyprland/nvidia", date = 2026-11-10 },
 ]

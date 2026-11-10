@@ -53,8 +53,8 @@ but not applied, and a key of the second row at the top level warns and is
 ignored, like an unknown key. `[platforms.linux]` tables come from a Linux run
 that has something to record (`host = "headless-sway/<gpu>"`, `docs/linux-e2e.md`).
 
-`files` writes small text files into the game dir that the depot tree lacks
-(SimCity 4's `Apps/SimCity 4.ini`). Paths are relative to the game dir, with
+`files` writes small text files into the game dir that neither the depot tree
+nor GOG's support overlay supplies. Paths are relative to the game dir, with
 `/`; absolute paths, `..` and the like are an error. The text is written as
 given (write `\r\n` for CRLF). gogo writes a file only when it's missing or
 is still the copy gogo wrote; anything else is kept with a warning. Linux
@@ -127,7 +127,9 @@ Seed (#75), see docs/19 §5:
   software, RADV and NVIDIA drivers, with no display, compositor or audio of its own.
 - `tested` rows carry no renderer: the runtime id says it, a derived
   `winecx/24.0.7_7+dxmt-v0.80` for DXMT/D3DMetal, the base id otherwise.
-  `host` is `m4pro/macos-<ver>` or `vm/macos-<ver>`.
+  `host` is `m4pro/macos-<ver>` or `vm/macos-<ver>` on the Mac;
+  `headless-sway/<gpu>` for a Linux e2e run, `<machine>-<compositor>/<gpu>`
+  (`kraken-hyprland/nvidia`) for a Linux host pass on a real desktop.
 - `status`: `plays` = rendering, input and audio judged by eye; `boots` =
   reaches the game's own UI or first-run dialog; `broken` also covers "runs
   but unplayable", with the reason in `notes`.
