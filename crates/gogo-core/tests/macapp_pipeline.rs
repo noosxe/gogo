@@ -2872,7 +2872,14 @@ fn v2_launcher_watchdog_spares_a_later_launch() {
         procs_matching(&macos)
     );
     let launch_log = std::fs::read_to_string(logs.join("launch.log")).unwrap();
-    assert!(!launch_log.contains("watchdog"), "{launch_log}");
+    // Every line the watchdog's teardown path writes (see `start_watchdog`
+    // and `teardown`): none may appear when the launcher exits normally.
+    for teardown_line in ["tearing down", "reaped", "watchdog done"] {
+        assert!(
+            !launch_log.contains(teardown_line),
+            "unexpected teardown ({teardown_line:?}): {launch_log}"
+        );
+    }
     assert!(
         !std::fs::read_to_string(&wine_log)
             .unwrap()
