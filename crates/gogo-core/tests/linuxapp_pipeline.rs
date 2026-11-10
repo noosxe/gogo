@@ -5188,6 +5188,54 @@ fn the_display_mode_reaches_the_game_with_a_socket_and_falls_back_without_one() 
         "# display: x11 (wayland wanted, but no Wayland socket at WAYLAND_DISPLAY=wayland-9)\n"
     ));
 
+    // hdr off: a session's PROTON_FORCE_HDR=1 (checked before hdr) and its
+    // alias are taken away, so the game really gets no HDR.
+    set_display(ID, None, Some(Some(Hdr::Off))).unwrap();
+    setup_again();
+    w.launch(
+        &[
+            ("XDG_RUNTIME_DIR", rd),
+            ("WAYLAND_DISPLAY", "wayland-7"),
+            ("PROTON_FORCE_HDR", "1"),
+            ("PROTON_USE_HDR", "1"),
+            ("FAKE_ENV_DUMP", dump_s),
+        ],
+        &[],
+    );
+    let env = game_env();
+    assert!(has(&env, "PROTON_ENABLE_HDR=0"), "{env}");
+    assert!(!sets(&env, "PROTON_FORCE_HDR"), "{env}");
+    assert!(!sets(&env, "PROTON_USE_HDR"), "{env}");
+    assert!(w.runs().pop().unwrap().contains("# hdr: off\n"));
+    // hdr on: the same, with the switch on.
+    set_display(ID, None, Some(Some(Hdr::On))).unwrap();
+    setup_again();
+    w.launch(
+        &[
+            ("XDG_RUNTIME_DIR", rd),
+            ("WAYLAND_DISPLAY", "wayland-7"),
+            ("PROTON_FORCE_HDR", "1"),
+            ("FAKE_ENV_DUMP", dump_s),
+        ],
+        &[],
+    );
+    let env = game_env();
+    assert!(has(&env, "PROTON_ENABLE_HDR=1"), "{env}");
+    assert!(!sets(&env, "PROTON_FORCE_HDR"), "{env}");
+    // The L4 env still wins over the HDR switch, as over the mode.
+    gogo::linuxapp::envargs::set_env(ID, &[("PROTON_FORCE_HDR".into(), "1".into())]).unwrap();
+    setup_again();
+    w.launch(
+        &[
+            ("XDG_RUNTIME_DIR", rd),
+            ("WAYLAND_DISPLAY", "wayland-7"),
+            ("FAKE_ENV_DUMP", dump_s),
+        ],
+        &[],
+    );
+    assert!(has(&game_env(), "PROTON_FORCE_HDR=1"), "{}", game_env());
+    gogo::linuxapp::envargs::unset_env(ID, &["PROTON_FORCE_HDR".into()]).unwrap();
+
     // The player's own value in the L4 env wins over the mode.
     gogo::linuxapp::envargs::set_env(ID, &[("PROTON_ENABLE_WAYLAND".into(), "0".into())]).unwrap();
     setup_again();

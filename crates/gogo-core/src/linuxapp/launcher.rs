@@ -423,10 +423,12 @@ display_env() {
             # PROTON_USE_WAYLAND=0 would undo it.
             unset PROTON_USE_WAYLAND
             export PROTON_ENABLE_WAYLAND=1
+            # forcehdr wins over hdr in Proton, and the aliases are read
+            # last: a session's own would undo on and off.
             case "$DISPLAY_HDR" in
-                on) unset PROTON_USE_HDR; export PROTON_ENABLE_HDR=1 ;;
+                on) unset PROTON_USE_HDR PROTON_FORCE_HDR; export PROTON_ENABLE_HDR=1 ;;
                 force) export PROTON_FORCE_HDR=1 ;;
-                off) unset PROTON_USE_HDR; export PROTON_ENABLE_HDR=0 ;;
+                off) unset PROTON_USE_HDR PROTON_FORCE_HDR; export PROTON_ENABLE_HDR=0 ;;
             esac
             ;;
         x11) unset PROTON_ENABLE_WAYLAND PROTON_USE_WAYLAND ;;
