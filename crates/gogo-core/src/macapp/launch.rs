@@ -1521,10 +1521,7 @@ mod launch_tests {
         let raw = flagged.to_toml();
         assert!(raw.contains("renderer_flag = true"), "{raw}");
         assert_eq!(LaunchToml::parse(&raw, Path::new("x")).unwrap(), flagged);
-        assert_eq!(
-            LaunchToml::parse(&t.to_toml(), Path::new("x")).unwrap(),
-            t
-        );
+        assert_eq!(LaunchToml::parse(&t.to_toml(), Path::new("x")).unwrap(), t);
     }
 
     #[test]
