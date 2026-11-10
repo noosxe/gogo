@@ -252,6 +252,7 @@ mod tests {
             runtime_loaded: set(runtime_loaded),
             local_overrides: BTreeSet::new(),
             ddrawcompat: false,
+            ddrawcompat_import: None,
             d3d7_confidence: None,
             dxguid_block: false,
             renderer_dlls: BTreeSet::new(),

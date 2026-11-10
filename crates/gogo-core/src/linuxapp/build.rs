@@ -132,9 +132,12 @@ pub struct BuildOutcome {
 pub fn switches(p: &LinuxPlan) -> String {
     let mut parts: Vec<String> = p.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
     match p.ddraw {
-        renderer::DdrawStep::PlaceCncDdraw => {
-            parts.push("cnc-ddraw's ddraw.dll in the game dir, ddraw=n,b".into())
-        }
+        renderer::DdrawStep::PlaceCncDdraw => match &p.stand_in {
+            Some(name) => parts.push(format!(
+                "cnc-ddraw's ddraw.dll in the game dir as {name}, in place of the game's DDrawCompat"
+            )),
+            None => parts.push("cnc-ddraw's ddraw.dll in the game dir, ddraw=n,b".into()),
+        },
         renderer::DdrawStep::KeepGames => parts.push("the game's own ddraw.dll, ddraw=n,b".into()),
         renderer::DdrawStep::LeaveDdrawCompat => {
             parts.push("the game's DDrawCompat left unloaded, Wine's builtin ddraw".into())
@@ -1066,6 +1069,7 @@ mod tests {
                 .collect(),
             dll_overrides: Default::default(),
             ddraw,
+            stand_in: None,
             notes: vec![],
             warnings: vec![],
         };
@@ -1083,6 +1087,12 @@ mod tests {
         assert_eq!(
             switches(&p(&[], renderer::DdrawStep::PlaceCncDdraw)),
             "cnc-ddraw's ddraw.dll in the game dir, ddraw=n,b"
+        );
+        let mut xdd = p(&[], renderer::DdrawStep::PlaceCncDdraw);
+        xdd.stand_in = Some("xdd.dll".into());
+        assert_eq!(
+            switches(&xdd),
+            "cnc-ddraw's ddraw.dll in the game dir as xdd.dll, in place of the game's DDrawCompat"
         );
     }
 

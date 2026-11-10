@@ -139,12 +139,106 @@ pub fn is_ddrawcompat(game_dir: &Path) -> bool {
     entries
         .flatten()
         .filter(|e| e.file_name().eq_ignore_ascii_case("ddraw.dll"))
-        .filter_map(|e| std::fs::read(e.path()).ok())
-        .any(|bytes| {
-            DDRAWCOMPAT_MARKERS
-                .iter()
-                .any(|m| bytes.windows(m.len()).any(|w| w == *m))
+        .any(|e| is_ddrawcompat_file(&e.path()))
+}
+
+/// Is the file at `path` DDrawCompat, by its log strings, whatever its name?
+pub fn is_ddrawcompat_file(path: &Path) -> bool {
+    // DDrawCompat is a few MB; a big DLL beside the exe isn't it, and isn't read.
+    if std::fs::metadata(path).map_or(true, |m| m.len() > 64 << 20) {
+        return false;
+    }
+    std::fs::read(path).is_ok_and(|bytes| {
+        DDRAWCOMPAT_MARKERS
+            .iter()
+            .any(|m| bytes.windows(m.len()).any(|w| w == *m))
+    })
+}
+
+/// What the game's DDrawCompat is renamed to while gogo's cnc-ddraw stands in
+/// under its name ([`apply_as`]): `xdd.dll` → `xdd.dll.ddrawcompat`. Wine never
+/// loads it there, and [`remove_gogo`] puts it back.
+pub const KEPT_SUFFIX: &str = ".ddrawcompat";
+
+/// The DLL in `game_dir`, other than `ddraw.dll`, that the entry exe imports
+/// (`imports`, lowercased) and that is DDrawCompat, or that gogo's cnc-ddraw
+/// already stands in for (its original kept as `<name>`[`KEPT_SUFFIX`]). Its
+/// file name as it is on disk.
+///
+/// GOG's Heroes of Might and Magic 3: Complete patches `Heroes3.exe` to import
+/// `DirectDrawCreate` from `xdd.dll`, DDrawCompat renamed (#306). DDrawCompat
+/// doesn't run under Wine (#199), and a static import can't be left unloaded
+/// the way a `ddraw.dll` can: something has to answer under that name.
+pub fn ddrawcompat_import(
+    game_dir: &Path,
+    imports: &std::collections::BTreeSet<String>,
+) -> Option<String> {
+    let names: Vec<String> = std::fs::read_dir(game_dir)
+        .ok()?
+        .flatten()
+        .filter(|e| e.path().is_file())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    let mut found: Vec<&String> = names
+        .iter()
+        .filter(|n| {
+            let lower = n.to_ascii_lowercase();
+            lower.ends_with(".dll") && lower != "ddraw.dll" && imports.contains(&lower)
         })
+        .filter(|n| {
+            let kept = format!("{n}{KEPT_SUFFIX}");
+            names.iter().any(|k| k.eq_ignore_ascii_case(&kept))
+                || is_ddrawcompat_file(&game_dir.join(n))
+        })
+        .collect();
+    found.sort();
+    found.first().map(|n| n.to_string())
+}
+
+/// [`apply`] under another name (#306): the game's DDrawCompat `name` is
+/// renamed to `name`[`KEPT_SUFFIX`], gogo's cnc-ddraw is copied in as `name`,
+/// and gogo's `ddraw.ini` (cnc-ddraw reads `ddraw.ini` beside itself, whatever
+/// its own name) is written. No DLL override: `name` has no builtin. Already
+/// done ([`is_gogo`] and the kept original there): [`Applied::AlreadyPresent`].
+pub fn apply_as(store_tree: &Path, game_dir: &Path, name: &str) -> Result<Applied, MacAppError> {
+    let target = game_dir.join(name);
+    let kept = game_dir.join(format!("{name}{KEPT_SUFFIX}"));
+    // In place unless GOG's DDrawCompat came back under the name (a repair).
+    if kept.is_file() && target.is_file() && is_gogo(game_dir) && !is_ddrawcompat_file(&target) {
+        return Ok(Applied::AlreadyPresent);
+    }
+    // gogo's ini beside a game's own ddraw.dll would make that DLL look like
+    // gogo's, and `remove_gogo` would delete it.
+    if has_dll(game_dir) {
+        return Err(MacAppError::Recipe(format!(
+            "{} has a ddraw.dll of its own: not placing cnc-ddraw as {name}",
+            game_dir.display()
+        )));
+    }
+    let dll = store_tree.join("ddraw.dll");
+    if !dll.is_file() {
+        return Err(MacAppError::Recipe(format!(
+            "cnc-ddraw store tree has no ddraw.dll: {}",
+            dll.display()
+        )));
+    }
+    if !kept.is_file() {
+        if !is_ddrawcompat_file(&target) {
+            return Err(MacAppError::Recipe(format!(
+                "{} isn't DDrawCompat: not replacing it",
+                target.display()
+            )));
+        }
+        std::fs::rename(&target, &kept)?;
+    }
+    std::fs::copy(&dll, &target)?;
+    std::fs::write(game_dir.join("ddraw.ini"), DDRAW_INI)?;
+    let mut shaders = 0;
+    let src_shaders = store_tree.join("Shaders");
+    if src_shaders.is_dir() {
+        copy_dir(&src_shaders, &game_dir.join("Shaders"), &mut shaders)?;
+    }
+    Ok(Applied::Applied { shaders })
 }
 
 /// A `ddraw.dll` in `game_dir` that isn't the one [`apply`] put there.
@@ -160,14 +254,27 @@ pub fn is_gogo(game_dir: &Path) -> bool {
 
 /// Undo [`apply`] when the game moves to another renderer: remove
 /// `ddraw.dll` and `ddraw.ini` from `game_dir`, but only when the ini is
-/// gogo's (a game's or recipe's own wrapper is never touched). `Shaders/`
-/// stays; without the dll nothing loads it. Returns whether anything went.
+/// gogo's (a game's or recipe's own wrapper is never touched), and put back
+/// a DDrawCompat [`apply_as`] set aside. `Shaders/` stays; without the dll
+/// nothing loads it. Returns whether anything went.
 pub fn remove_gogo(game_dir: &Path) -> bool {
     let ini = game_dir.join("ddraw.ini");
     if !is_gogo(game_dir) {
         return false;
     }
     let _ = std::fs::remove_file(game_dir.join("ddraw.dll"));
+    // A stand-in for the game's DDrawCompat ([`apply_as`]): the original back.
+    for e in std::fs::read_dir(game_dir).into_iter().flatten().flatten() {
+        let Some(name) = e.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let Some(orig) = name.strip_suffix(KEPT_SUFFIX) else {
+            continue;
+        };
+        if is_ddrawcompat_file(&e.path()) {
+            let _ = std::fs::rename(e.path(), game_dir.join(orig));
+        }
+    }
     std::fs::remove_file(&ini).is_ok()
 }
 
@@ -211,6 +318,111 @@ fn copy_dir(src: &Path, dst: &Path, count: &mut usize) -> Result<(), MacAppError
         }
     }
     Ok(())
+}
+
+/// #306, on both OSes: Linux setup runs these.
+#[cfg(test)]
+mod stand_in_tests {
+    use super::*;
+
+    fn tree(tmp: &Path) -> std::path::PathBuf {
+        let t = tmp.join("store");
+        std::fs::create_dir_all(t.join("Shaders/xbr")).unwrap();
+        std::fs::write(t.join("ddraw.dll"), b"MZ-dll").unwrap();
+        std::fs::write(t.join("Shaders/xbr/one.fxc"), b"shader").unwrap();
+        t
+    }
+
+    /// A DDrawCompat under another name, imported by the exe (#306).
+    fn xdd_game(tmp: &Path) -> std::path::PathBuf {
+        let game = tmp.join("game");
+        std::fs::create_dir_all(&game).unwrap();
+        std::fs::write(game.join("xdd.dll"), b"MZ..Loading DDrawCompat from..").unwrap();
+        std::fs::write(game.join("BINKW32.DLL"), b"MZ-bink").unwrap();
+        game
+    }
+
+    fn imports(names: &[&str]) -> std::collections::BTreeSet<String> {
+        names.iter().map(|n| n.to_string()).collect()
+    }
+
+    #[test]
+    fn ddrawcompat_import_finds_a_renamed_one_only_when_imported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let game = xdd_game(tmp.path());
+        let both = imports(&["xdd.dll", "binkw32.dll", "kernel32.dll"]);
+        assert_eq!(ddrawcompat_import(&game, &both).as_deref(), Some("xdd.dll"));
+        assert_eq!(ddrawcompat_import(&game, &imports(&["binkw32.dll"])), None);
+        // A DDrawCompat named ddraw.dll is #199's case, not this one.
+        std::fs::rename(game.join("xdd.dll"), game.join("ddraw.dll")).unwrap();
+        assert_eq!(ddrawcompat_import(&game, &imports(&["ddraw.dll"])), None);
+    }
+
+    #[test]
+    fn apply_as_stands_in_and_remove_gogo_puts_ddrawcompat_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = tree(tmp.path());
+        let game = xdd_game(tmp.path());
+        let orig = std::fs::read(game.join("xdd.dll")).unwrap();
+        assert!(matches!(
+            apply_as(&t, &game, "xdd.dll").unwrap(),
+            Applied::Applied { shaders: 1 }
+        ));
+        assert_eq!(std::fs::read(game.join("xdd.dll")).unwrap(), b"MZ-dll");
+        assert_eq!(
+            std::fs::read(game.join("xdd.dll.ddrawcompat")).unwrap(),
+            orig
+        );
+        assert!(is_gogo(&game) && !has_dll(&game) && !is_ddrawcompat(&game));
+        // Applied: still found (by the kept original), and a second apply is a no-op.
+        assert_eq!(
+            ddrawcompat_import(&game, &imports(&["xdd.dll"])).as_deref(),
+            Some("xdd.dll")
+        );
+        assert!(matches!(
+            apply_as(&t, &game, "xdd.dll").unwrap(),
+            Applied::AlreadyPresent
+        ));
+        assert!(remove_gogo(&game));
+        assert_eq!(std::fs::read(game.join("xdd.dll")).unwrap(), orig);
+        assert!(!game.join("xdd.dll.ddrawcompat").exists() && !game.join("ddraw.ini").exists());
+    }
+
+    #[test]
+    fn apply_as_places_again_after_a_repair_and_never_beside_a_ddraw_dll() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = tree(tmp.path());
+        let game = xdd_game(tmp.path());
+        let orig = std::fs::read(game.join("xdd.dll")).unwrap();
+        apply_as(&t, &game, "xdd.dll").unwrap();
+        // GOG's repair puts DDrawCompat back under the name.
+        std::fs::write(game.join("xdd.dll"), &orig).unwrap();
+        assert!(matches!(
+            apply_as(&t, &game, "xdd.dll").unwrap(),
+            Applied::Applied { .. }
+        ));
+        assert_eq!(std::fs::read(game.join("xdd.dll")).unwrap(), b"MZ-dll");
+        assert_eq!(
+            std::fs::read(game.join("xdd.dll.ddrawcompat")).unwrap(),
+            orig
+        );
+
+        let game = xdd_game(&tmp.path().join("other"));
+        std::fs::write(game.join("ddraw.dll"), b"own").unwrap();
+        assert!(apply_as(&t, &game, "xdd.dll").is_err());
+        assert_eq!(std::fs::read(game.join("xdd.dll")).unwrap(), orig);
+        assert!(!game.join("ddraw.ini").exists());
+    }
+
+    #[test]
+    fn apply_as_never_replaces_what_isnt_ddrawcompat() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = tree(tmp.path());
+        let game = xdd_game(tmp.path());
+        assert!(apply_as(&t, &game, "BINKW32.DLL").is_err());
+        assert_eq!(std::fs::read(game.join("BINKW32.DLL")).unwrap(), b"MZ-bink");
+        assert!(!game.join("ddraw.ini").exists());
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]

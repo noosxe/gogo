@@ -696,6 +696,75 @@ fn ddrawcompat_beside_the_exe_stays_unloaded() {
     std::fs::remove_file(&l4).unwrap();
 }
 
+/// #306: Heroes 3 Complete's exe imports DDrawCompat as `xdd.dll`. gogo's
+/// cnc-ddraw goes in under that name, whatever renderer is asked for, and
+/// GOG's file is kept beside it.
+#[test]
+fn ddrawcompat_imported_under_another_name_gets_cnc_ddraw_in_its_place() {
+    use gogo::macapp::doctor::Level;
+    const DLL: &[u8] = b"MZ\0\0Loading DDrawCompat \0";
+    let w = World::new("xdd", &["xdd.dll"]);
+    let store = w.root.join("cnc-store");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(store.join("ddraw.dll"), "cnc").unwrap();
+    // SAFETY: env mutation under ENV_LOCK, held by `w`.
+    unsafe { std::env::set_var("GOGO_CNC_DDRAW_DIR", &store) };
+    std::fs::write(w.tree.join("xdd.dll"), DLL).unwrap();
+    let plan = build::plan(&w.opts(), None, &mut quiet()).unwrap();
+    let sel = plan.renderer.as_ref().unwrap();
+    assert_eq!(sel.renderer.value, Renderer::CncDdraw.default_ref());
+    assert!(
+        sel.l1.reason.contains("DDrawCompat as xdd.dll"),
+        "{}",
+        sel.l1.reason
+    );
+    let p = plan.renderer_setup.as_ref().unwrap();
+    assert!(build::switches(p).contains("as xdd.dll"), "{p:?}");
+    build::execute(&plan, None, &mut quiet()).unwrap();
+    let tree = w.game().join("game");
+    assert_eq!(
+        std::fs::read_to_string(tree.join("xdd.dll")).unwrap(),
+        "cnc"
+    );
+    assert_eq!(
+        std::fs::read(tree.join("xdd.dll.ddrawcompat")).unwrap(),
+        DLL
+    );
+    assert!(!tree.join("ddraw.dll").exists());
+    assert_eq!(conf_value(&w.conf(), "DLL_OVERRIDES"), "''");
+    let host = doctor_host(&w, &[("radeon.x86_64", 2), ("radeon.i686", 1)]);
+    let (level, msg) = renderer_finding(&doctor(&w, &host));
+    assert!(level == Level::Ok && msg.contains("as xdd.dll"), "{msg}");
+
+    // Another renderer asked for: cnc-ddraw still, with no D7VK switch.
+    let l4 = gogo::macapp::compat::user_path(ID);
+    std::fs::create_dir_all(l4.parent().unwrap()).unwrap();
+    std::fs::write(&l4, "[platforms.linux]\nrenderer = \"d7vk\"\n").unwrap();
+    setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
+    assert!(!w.conf().contains("PROTON_USE_D7VK"));
+    assert_eq!(
+        std::fs::read_to_string(tree.join("xdd.dll")).unwrap(),
+        "cnc"
+    );
+    std::fs::remove_file(&l4).unwrap();
+
+    // GOG's DDrawCompat back in its place: doctor fails, setup fixes it.
+    std::fs::rename(tree.join("xdd.dll.ddrawcompat"), tree.join("xdd.dll")).unwrap();
+    let (level, msg) = renderer_finding(&doctor(&w, &host));
+    assert!(
+        level == Level::Fail && msg.contains("DDrawCompat as xdd.dll"),
+        "{msg}"
+    );
+    setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(tree.join("xdd.dll")).unwrap(),
+        "cnc"
+    );
+    let (level, msg) = renderer_finding(&doctor(&w, &host));
+    assert_eq!(level, Level::Ok, "{msg}");
+    unsafe { std::env::remove_var("GOGO_CNC_DDRAW_DIR") };
+}
+
 #[test]
 fn a_ddraw_dll_away_from_the_exe_is_not_the_games_own() {
     let w = World::new("root-dll", &["d3d9.dll"]);

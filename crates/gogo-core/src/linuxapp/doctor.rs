@@ -1073,6 +1073,10 @@ fn check_renderer(g: &Game, build: &Path, scan: Option<&manage::InstalledScan>) 
     let dxguid = scan
         .and_then(|(_, s)| s.as_ref().ok())
         .is_some_and(|s| s.dxguid_block);
+    // #306: the exe imports DDrawCompat under another name.
+    let stand_in = scan
+        .and_then(|(_, s)| s.as_ref().ok())
+        .and_then(|s| s.ddrawcompat_import.clone());
     let mut note = if dxguid {
         format!(
             "; L1's D3D≤7 evidence is only the dxguid GUID block, so the game may be 2D \
@@ -1152,8 +1156,26 @@ fn check_renderer(g: &Game, build: &Path, scan: Option<&manage::InstalledScan>) 
         Ok(r) => r,
         Err(e) => return Finding::fail("renderer", format!("{applied}: {e}"), setup),
     };
+    if let Some(name) = &stand_in {
+        let placed = r == Renderer::CncDdraw
+            && game_dir.as_deref().is_some_and(|d| {
+                ddraw::is_gogo(d)
+                    && d.join(format!("{name}{}", ddraw::KEPT_SUFFIX)).is_file()
+                    && !ddraw::is_ddrawcompat_file(&d.join(name))
+            });
+        if !placed {
+            return Finding::fail(
+                "renderer",
+                format!(
+                    "the exe imports DDrawCompat as {name}, which doesn't run under Wine, and \
+                     gogo's cnc-ddraw isn't standing in for it: the game exits at once"
+                ),
+                format!("{setup} (cnc-ddraw is the only renderer that can run it)"),
+            );
+        }
+    }
     match r {
-        Renderer::CncDdraw if own => {}
+        Renderer::CncDdraw if own || stand_in.is_some() => {}
         Renderer::CncDdraw => {
             let placed = dll_in_game && game_dir.as_deref().is_some_and(ddraw::is_gogo);
             if !placed {
@@ -1200,7 +1222,16 @@ fn check_renderer(g: &Game, build: &Path, scan: Option<&manage::InstalledScan>) 
             .collect::<Vec<_>>()
             .join(" ")
     };
-    let kept = if ddrawcompat {
+    let stand_in_kept = stand_in.as_ref().map(|name| {
+        format!(
+            ", gogo's cnc-ddraw as {name} in place of the game's DDrawCompat (kept as \
+             {name}{})",
+            ddraw::KEPT_SUFFIX
+        )
+    });
+    let kept = if let Some(k) = stand_in_kept.as_deref() {
+        k
+    } else if ddrawcompat {
         ", the game's DDrawCompat beside the exe left unloaded: it doesn't run under Wine"
     } else if own {
         ", the game's own ddraw.dll beside the exe with ddraw=n,b"

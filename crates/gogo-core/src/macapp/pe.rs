@@ -184,6 +184,12 @@ pub struct PeScan {
     /// which gogo leaves unloaded.
     #[serde(default)]
     pub ddrawcompat: bool,
+    /// A DLL beside the exe, other than `ddraw.dll`, that the entry exe imports
+    /// and that is DDrawCompat ([`super::ddraw::ddrawcompat_import`], #306):
+    /// Heroes 3 Complete's `xdd.dll`. The exe counts as importing `ddraw.dll`,
+    /// and the DLL itself is left out of the classification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ddrawcompat_import: Option<String>,
     /// The strongest Direct3D ≤ 7 evidence behind a [`GraphicsImport::Direct3d7`]
     /// in [`Self::graphics_imports`] or [`Self::runtime_graphics`]; `None`
     /// when there is none.
@@ -307,11 +313,23 @@ fn scan_from(root: &Path, exe: &Path, source: MainExeSource) -> Result<PeScan, S
         }
     }
 
+    // DDrawCompat and cnc-ddraw are 32-bit.
+    let ddrawcompat_import = (files[0].bitness != Bitness::X86_64)
+        .then(|| super::ddraw::ddrawcompat_import(exe_dir, &files[0].imports))
+        .flatten();
     let local_overrides: BTreeSet<String> = shipped
         .iter()
         .filter(|n| graphics_import(n).is_some() || is_helper(n))
         .cloned()
+        .chain(ddrawcompat_import.iter().map(|n| n.to_ascii_lowercase()))
         .collect();
+    // DirectDrawCreate from DDrawCompat under another name is DirectDraw.
+    let stand_in = |mut agg: Agg| {
+        if ddrawcompat_import.is_some() {
+            agg.graphics_imports.insert(GraphicsImport::Ddraw);
+        }
+        agg
+    };
 
     // The entry point decides (#226): another `.exe` beside it (a building
     // editor importing d3d6, say) only counts when the entry point, its DLLs
@@ -323,7 +341,9 @@ fn scan_from(root: &Path, exe: &Path, source: MainExeSource) -> Result<PeScan, S
             && file_name(&f.path).ends_with(".exe")
             && !unreal_exes.contains(&f.path)
     };
-    let mut agg = aggregate(&files, &local_overrides, &shipped, |f| !is_tool(f));
+    let mut agg = stand_in(aggregate(&files, &local_overrides, &shipped, |f| {
+        !is_tool(f)
+    }));
     let mut secondary_graphics = BTreeMap::new();
     let mut set_aside = BTreeSet::new();
     if agg.has_graphics() {
@@ -343,7 +363,7 @@ fn scan_from(root: &Path, exe: &Path, source: MainExeSource) -> Result<PeScan, S
             }
         }
     } else {
-        agg = aggregate(&files, &local_overrides, &shipped, |_| true);
+        agg = stand_in(aggregate(&files, &local_overrides, &shipped, |_| true));
     }
     let Agg {
         graphics_imports,
@@ -389,6 +409,7 @@ fn scan_from(root: &Path, exe: &Path, source: MainExeSource) -> Result<PeScan, S
         helpers,
         runtime_loaded,
         ddrawcompat: local_overrides.contains("ddraw.dll") && super::ddraw::is_ddrawcompat(exe_dir),
+        ddrawcompat_import,
         local_overrides,
         d3d7_confidence,
         dxguid_block,
