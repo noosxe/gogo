@@ -3675,9 +3675,11 @@ fn linux_app_sub(sub: crate::cli::LinuxAppSub) -> Result<i32, AppError> {
             gogid,
             mode,
             hdr,
+            monitor,
+            no_monitor,
             clear,
             json,
-        } => linux_app_display(&gogid, mode, hdr, clear, json),
+        } => linux_app_display(&gogid, mode, hdr, monitor, no_monitor, clear, json),
         crate::cli::LinuxAppSub::Compat { gogid, json } => {
             let r = gogo::linuxapp::manage::compat(&gogid)?;
             if json {
@@ -3947,24 +3949,32 @@ fn linux_app_wrapper(
 }
 
 #[cfg(target_os = "linux")]
-/// `gogo linux-app display <gogid> [wayland|x11] [--hdr …] [--clear]`.
+/// `gogo linux-app display <gogid> [wayland|x11] [--hdr …] [--monitor …]
+/// [--no-monitor] [--clear]`.
 fn linux_app_display(
     gogid: &str,
     mode: Option<String>,
     hdr: Option<String>,
+    monitor: Option<String>,
+    no_monitor: bool,
     clear: bool,
     json: bool,
 ) -> Result<i32, AppError> {
     use gogo::linuxapp::display;
     use gogo::macapp::compat::{DisplayMode, Hdr};
-    if clear || mode.is_some() || hdr.is_some() {
+    if clear || no_monitor || mode.is_some() || hdr.is_some() || monitor.is_some() {
         // clap only lets the spellings through.
         let mode = mode.as_deref().and_then(DisplayMode::from_key);
         let hdr = hdr.as_deref().and_then(Hdr::from_key);
         let out = if clear {
-            display::set_display(gogid, Some(None), Some(None))?
+            display::set_display(gogid, Some(None), Some(None), Some(None))?
         } else {
-            display::set_display(gogid, mode.map(Some), hdr.map(Some))?
+            let monitor = if no_monitor {
+                Some(None)
+            } else {
+                monitor.map(Some)
+            };
+            display::set_display(gogid, mode.map(Some), hdr.map(Some), monitor)?
         };
         print_edit(&out, json);
         return Ok(cli::exit::OK);
@@ -3991,8 +4001,13 @@ fn display_line(v: &gogo::linuxapp::display::DisplayView) -> String {
             .applied_hdr
             .map(|h| format!(", hdr {}", h.key()))
             .unwrap_or_default();
+        let monitor = v
+            .applied_monitor
+            .as_ref()
+            .map(|m| format!(", monitor {m}"))
+            .unwrap_or_default();
         out.push_str(&format!(
-            "pending: launch.conf has {}{hdr}; the next launch's setup writes the new one\n",
+            "pending: launch.conf has {}{hdr}{monitor}; the next launch's setup writes the new one\n",
             key(v.applied_mode)
         ));
     }
@@ -5944,21 +5959,31 @@ mod envargs_output_tests {
                 value: Hdr::Force,
                 layer: Layer::User,
             }),
+            monitor: Some(Sourced {
+                value: "DP-1".into(),
+                layer: Layer::User,
+            }),
             applied_mode: Some(DisplayMode::X11),
             applied_hdr: None,
+            applied_monitor: Some("HDMI-A-1".into()),
             pending: true,
         };
         assert_eq!(
             display_text(&report(
                 Some(view),
-                &[("PROTON_ENABLE_WAYLAND", "1"), ("PROTON_FORCE_HDR", "1")],
+                &[
+                    ("PROTON_ENABLE_WAYLAND", "1"),
+                    ("PROTON_FORCE_HDR", "1"),
+                    ("PROTON_WAYLAND_MONITOR", "DP-1")
+                ],
                 Some(DisplayMode::X11)
             )),
             format!(
-                "display: wayland (L4 user override), hdr force (L4 user override)\n\
-                 pending: launch.conf has x11; the next launch's setup writes the new one\n\
+                "display: wayland (L4 user override), hdr force (L4 user override), \
+                 monitor DP-1 (L4 user override)\n\
+                 pending: launch.conf has x11, monitor HDMI-A-1; the next launch's setup writes the new one\n\
                  with a Wayland socket at launch the game gets PROTON_ENABLE_WAYLAND=1 \
-                 PROTON_FORCE_HDR=1; without one it runs on X11, and the launcher logs why\n\
+                 PROTON_FORCE_HDR=1 PROTON_WAYLAND_MONITOR=DP-1; without one it runs on X11, and the launcher logs why\n\
                  a launch from this shell: x11 (WAYLAND_DISPLAY is unset; a desktop launch has \
                  the session's)\n{tail}"
             )
@@ -5966,8 +5991,10 @@ mod envargs_output_tests {
         let view = DisplayView {
             mode: Some(user(DisplayMode::X11)),
             hdr: None,
+            monitor: None,
             applied_mode: Some(DisplayMode::X11),
             applied_hdr: None,
+            applied_monitor: None,
             pending: false,
         };
         assert_eq!(

@@ -241,6 +241,11 @@ pub struct CompatEntry {
     /// of Proton's HDR switches (#292). Absent is [`Hdr::Auto`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hdr: Option<Hdr>,
+    /// `[platforms.linux]` only, with `display = "wayland"`: the output
+    /// (`"DP-1"`) GE-Proton's `PROTON_WAYLAND_MONITOR` names as Wine's
+    /// primary monitor (#295). Absent: GE-Proton guesses with `xrandr`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitor: Option<String>,
     /// Provenance: `gogo-vm`, `umu-protonfixes:<file>@<sha>`, …
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
@@ -397,11 +402,19 @@ const PLATFORM_KEYS: &[&str] = &[
     "wrapper",
     "display",
     "hdr",
+    "monitor",
 ];
 
 /// [`PLATFORM_KEYS`] only the Linux lane applies: under `[platforms.macos]`
 /// they warn and are ignored.
-const LINUX_ONLY_KEYS: &[&str] = &["protonfixes", "extra_args", "wrapper", "display", "hdr"];
+const LINUX_ONLY_KEYS: &[&str] = &[
+    "protonfixes",
+    "extra_args",
+    "wrapper",
+    "display",
+    "hdr",
+    "monitor",
+];
 
 /// The OS-specific keys the schema had at the top level before
 /// `[platforms.<os>]` (#166). In an L4 file they still read as
@@ -565,6 +578,9 @@ fn platform_entry(
     }
     check_items(&t, prefix, warnings);
     let e = entry_from(t).map_err(|e| format!("[platforms.{}]: {e}", os.key()))?;
+    if let Some(m) = &e.monitor {
+        check_monitor(m).map_err(|e| format!("[platforms.{}]: {e}", os.key()))?;
+    }
     if os == Os::Linux
         && let Some(r) = &e.renderer
         && let Some(why) = mac_only_renderer(r)
@@ -601,6 +617,17 @@ fn check_items(t: &toml::Table, prefix: &str, warnings: &mut Vec<String>) {
             }
         }
     }
+}
+
+/// A Wayland output's name as a compositor spells it (`DP-1`, `HDMI-A-1`,
+/// `eDP-1`, `Virtual-1`): printable ASCII, no spaces, at most 64 bytes.
+pub fn check_monitor(m: &str) -> Result<(), String> {
+    if m.is_empty() || m.len() > 64 || !m.chars().all(|c| c.is_ascii_graphic()) {
+        return Err(format!(
+            "monitor {m:?} is not an output name (`DP-1`, `HDMI-A-1`: printable ASCII, no spaces)"
+        ));
+    }
+    Ok(())
 }
 
 /// Deserialize a checked table. Through its text, not the `toml::Value`:
@@ -643,6 +670,7 @@ fn overlay(base: &mut CompatEntry, over: CompatEntry) {
         wrapper,
         display,
         hdr,
+        monitor,
         source,
     } = over;
     take(&mut base.title, title);
@@ -672,6 +700,7 @@ fn overlay(base: &mut CompatEntry, over: CompatEntry) {
     take(&mut base.wrapper, wrapper);
     take(&mut base.display, display);
     take(&mut base.hdr, hdr);
+    take(&mut base.monitor, monitor);
     take(&mut base.source, source);
 }
 
@@ -938,6 +967,8 @@ pub enum UserEdit {
     Display(Option<DisplayMode>),
     /// `hdr = "..."`; `None` drops it (#292).
     Hdr(Option<Hdr>),
+    /// `monitor = "..."`; `None` drops it (#295).
+    Monitor(Option<String>),
 }
 
 /// Apply `edits` to the L4 file for `gogid` under `[platforms.<os>]`,
@@ -1087,6 +1118,15 @@ fn edit_user_platform_at(
                 let old = now.hdr.map(Hdr::key);
                 if edit_word(t, "hdr", old, new, &mut changes) {
                     now.hdr = new.and_then(Hdr::from_key);
+                }
+            }
+            UserEdit::Monitor(new) => {
+                if let Some(m) = new {
+                    check_monitor(m).map_err(err)?;
+                }
+                let old = now.monitor.clone();
+                if edit_word(t, "monitor", old.as_deref(), new.as_deref(), &mut changes) {
+                    now.monitor.clone_from(new);
                 }
             }
         }
@@ -1241,6 +1281,9 @@ pub struct Effective {
     /// Linux only: the HDR switch, with `display = "wayland"` (#292).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hdr: Option<Sourced<Hdr>>,
+    /// Linux only: the primary monitor for the Wayland driver (#295).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monitor: Option<Sourced<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<Sourced<String>>,
 }
@@ -1321,6 +1364,7 @@ pub fn merge(layers: &[(Layer, &CompatEntry)]) -> Effective {
         take(&mut out.wrapper, &e.wrapper, layer);
         take(&mut out.display, &e.display, layer);
         take(&mut out.hdr, &e.hdr, layer);
+        take(&mut out.monitor, &e.monitor, layer);
         take(&mut out.source, &e.source, layer);
     }
     // `protonfixes = false` turns umu-protonfixes off for the game (design
@@ -1403,6 +1447,7 @@ impl Effective {
         line(&mut out, "wrapper", &self.wrapper);
         line(&mut out, "display", &self.display);
         line(&mut out, "hdr", &self.hdr);
+        line(&mut out, "monitor", &self.monitor);
         line(&mut out, "variant", &self.variant);
         line(&mut out, "replace_command", &self.replace_command);
         line(&mut out, "status", &self.status);

@@ -938,7 +938,9 @@ input methods and window icons, nothing a run needs.
 management and no HDR metadata, so `DXVK_HDR` and Wine's HDR reporting have nothing to find),
 VRR, fractional scaling, several monitors, the cursor image, and Hyprland itself. gogo's own
 per-game switch (#292) is what this mode drives; its HDR sub-option (`[override] hdr`) is
-written and shows in the header, but there is nothing headless for it to find.
+written and shows in the header, but there is nothing headless for it to find. `[override] monitor`
+(#295) is written the same way (`HEADLESS-1` is the only output there): the header shows it, and
+which of several monitors the game opens on is the owner's host pass.
 
 ## Manifests
 
@@ -964,6 +966,7 @@ extra_args = ["-skipStartScreen"] #   (`linux-app args <gogid> -- …`), before 
 wrapper = ["gamemoderun"]        #   (`linux-app wrapper <gogid> -- …`; #271)
 display = "wayland"              #   (`linux-app display <gogid> wayland`; #292; Wayland mode
 hdr = "force"                    #   sets display itself), `--hdr force`
+monitor = "HEADLESS-1"           #   `--monitor HEADLESS-1` (#295; Wayland mode only)
 [override.env]                   #   (`linux-app env set <gogid> K=V…`)
 PROTON_DLSS_INDICATOR = "1"
 

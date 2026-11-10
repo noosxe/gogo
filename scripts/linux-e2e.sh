@@ -1346,10 +1346,11 @@ cmd_run() {
              else empty end),
             (if $o.extra_args != null then [$g,"linux-app","args",$i,"--"] + $o.extra_args else empty end),
             (if $o.wrapper != null then [$g,"linux-app","wrapper",$i,"--"] + $o.wrapper else empty end),
-            (if $d != null or $o.hdr != null
+            (if $d != null or $o.hdr != null or $o.monitor != null
              then [$g,"linux-app","display",$i]
                   + (if $d != null then [$d] else [] end)
                   + (if $o.hdr != null then ["--hdr",$o.hdr] else [] end)
+                  + (if $o.monitor != null then ["--monitor",$o.monitor] else [] end)
              else empty end)
         ]' <<<"$MANIFEST_JSON")"
         game_log="$GOGO_HOME_DIR/logs/$GOGID/latest.log"

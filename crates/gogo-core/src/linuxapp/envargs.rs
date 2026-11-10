@@ -182,6 +182,10 @@ pub fn policy(key: &str) -> Policy {
             "{key} is what `gogo linux-app display <gogid> wayland|x11` sets: yours wins over \
              it, but only the display mode checks for a Wayland socket and shows in doctor"
         )),
+        super::display::MONITOR_KEY => Policy::Warn(format!(
+            "{key} is what `gogo linux-app display <gogid> wayland --monitor <output>` sets: \
+             yours wins over it, but only the flag applies in Wayland mode alone and shows in doctor"
+        )),
         renderer::PROTON_USE_D7VK | renderer::PROTON_USE_WINED3D | renderer::PROTON_DXVK_D3D8 => {
             Policy::Warn(format!(
                 "{key} is a renderer switch: yours wins over the renderer pick's \
@@ -427,8 +431,9 @@ pub fn env_report_with(
     cands.push((k.into(), v.into(), EnvSource::GogoDefault));
     if r.effective.display.as_ref().map(|m| m.value) == Some(compat::DisplayMode::Wayland) {
         let hdr = r.effective.hdr.as_ref().map(|h| h.value);
-        for (k, v) in super::display::wayland_env(hdr) {
-            cands.push((k.into(), v.into(), EnvSource::Display));
+        let monitor = r.effective.monitor.as_ref().map(|m| m.value.as_str());
+        for (k, v) in super::display::wayland_env(hdr, monitor) {
+            cands.push((k.into(), v, EnvSource::Display));
         }
     }
     for (k, s) in &r.effective.env {
@@ -969,6 +974,7 @@ mod tests {
         assert!(matches!(policy("PROTON_SET_GAME_DRIVE"), Policy::Warn(_)));
         assert!(matches!(policy("PROTON_ENABLE_WAYLAND"), Policy::Warn(_)));
         assert!(matches!(policy("PROTON_USE_WAYLAND"), Policy::Warn(_)));
+        assert!(matches!(policy("PROTON_WAYLAND_MONITOR"), Policy::Warn(_)));
         assert_eq!(policy("PROTON_ENABLE_NVAPI"), Policy::Free);
         let w = check_set(&[
             ("DXVK_HUD".into(), "fps".into()),

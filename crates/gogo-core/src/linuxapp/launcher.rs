@@ -23,7 +23,7 @@ use crate::macapp::launch::GameDirs;
 /// Bumped with every change to [`TEMPLATE`] that matters to a game set up
 /// before it. Setup rewrites `launch.sh` whenever its bytes differ, so this
 /// is for people: the run log header and `launch.log` name it.
-pub const LAUNCHER_VERSION: u32 = 9;
+pub const LAUNCHER_VERSION: u32 = 10;
 
 /// `launch.sh`'s first word when a wrapper runs it for the game's own step
 /// (design 18 §7.8): the game's environment, then umu-run.
@@ -268,7 +268,7 @@ load_conf() {
     UMU_ID="" STAMP="" UMU_RUN="" UMU_PYTHON="" PROTON_DIR="" PROTON_VERSION=""
     PROTON_SHA="" PREFIX="" WORKDIR="" EXE="" DLL_OVERRIDES=""
     RENDERER="" PROTONFIXES="1" UMU_FOLDERS="" GOGO_PATH="" DATA_ROOT="" LIBRARY_GAME=""
-    DISPLAY_MODE="" DISPLAY_HDR=""
+    DISPLAY_MODE="" DISPLAY_HDR="" DISPLAY_MONITOR=""
     ARGS=() ENV=() WRAPPER=()
     # shellcheck source=/dev/null
     source "$HERE/launch.conf"
@@ -414,6 +414,14 @@ hdr_line() {
         printf '%s (not applied: not on Wayland)' "$DISPLAY_HDR"
     fi
 }
+monitor_line() {
+    [ -n "$DISPLAY_MONITOR" ] || return 0
+    if [ "$DISPLAY_PICK" = wayland ]; then
+        printf '%s' "$DISPLAY_MONITOR"
+    else
+        printf '%s (not applied: not on Wayland)' "$DISPLAY_MONITOR"
+    fi
+}
 # Before ENV, so a player's own PROTON_* in the L4 env still wins.
 display_env() {
     pick_display
@@ -430,6 +438,9 @@ display_env() {
                 force) export PROTON_FORCE_HDR=1 ;;
                 off) unset PROTON_USE_HDR PROTON_FORCE_HDR; export PROTON_ENABLE_HDR=0 ;;
             esac
+            # GE-Proton maps it to WAYLANDDRV_PRIMARY_MONITOR, and xrandr
+            # (not there without Xwayland) is its guess only when unset.
+            if [ -n "$DISPLAY_MONITOR" ]; then export PROTON_WAYLAND_MONITOR="$DISPLAY_MONITOR"; fi
             ;;
         x11) unset PROTON_ENABLE_WAYLAND PROTON_USE_WAYLAND ;;
     esac
@@ -609,6 +620,7 @@ start_run_log() {
         if [ "${#WRAPPER[@]}" -gt 0 ]; then printf '# wrapper: %s\n' "${WRAPPER[*]}"; fi
         if [ -n "$DISPLAY_MODE" ]; then printf '# display: %s\n' "$(display_line)"; fi
         if [ -n "$DISPLAY_HDR" ]; then printf '# hdr: %s\n' "$(hdr_line)"; fi
+        if [ -n "$DISPLAY_MONITOR" ]; then printf '# monitor: %s\n' "$(monitor_line)"; fi
         printf '# renderer: %s\n' "$RENDERER"
         printf '# protonfix: %s\n' "$(state_val protonfix)"
         printf '# protonfixes: %s\n' "$([ "$PROTONFIXES" = 0 ] && echo off || echo on)"

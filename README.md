@@ -391,6 +391,8 @@ gogo linux-app wrapper 1423049311 -- gamescope -f --        # runs outside umu-r
 gogo linux-app wrapper 1423049311 -- gamemoderun
 gogo linux-app wrapper 1423049311 --clear
 gogo linux-app display 1423049311 wayland --hdr force     # Wine's Wayland driver (X11 when there's no Wayland socket)
+gogo linux-app display 1423049311 --monitor DP-1           # the output the game opens on (Wayland mode; hyprctl monitors)
+gogo linux-app display 1423049311 --no-monitor
 gogo linux-app display 1423049311                          # the mode, and what this session would get
 gogo linux-app display 1423049311 --clear
 ```
