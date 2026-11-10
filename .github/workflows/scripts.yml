@@ -62,3 +62,18 @@ jobs:
           find target/linux-e2e/self-test -path '*/live*' \( -name session.log -o -name client.stderr \
             -o -name start.stderr -o -name serve.out -o -name state.json -o -name sandbox.log \
             -o -name journal.jsonl \) -exec tail -n 30 {} +
+      # The whole of every scenario's logs (sway.log, result.json, game.out):
+      # the tails above don't show how a run got where it failed (#309).
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: linux-e2e-self-test
+          path: |
+            target/linux-e2e/self-test/**/*.log
+            target/linux-e2e/self-test/**/*.json
+            target/linux-e2e/self-test/**/*.jsonl
+            target/linux-e2e/self-test/**/game.out
+            target/linux-e2e/self-test/**/stderr
+            target/linux-e2e/self-test/**/stdout
+          retention-days: 14
+          if-no-files-found: ignore

@@ -1108,7 +1108,7 @@ all do the same thing. Exactly one of two conditions:
 | Check | Fails when | Would have caught |
 |---|---|---|
 | `override` | with `[override]`: a `gogo linux-app env set` / `args` / `wrapper` call failed (the game isn't launched) | a refused key, a gogo without #234 |
-| `window` | no window in `wait_secs`, or the game exited first | DDrawCompat's exit 9 in #199 |
+| `window` | no window in `wait_secs`, or the game exited first. On a timeout, `result.json`'s `window_diagnosis` says what each side saw: sway's windows (pid, shell, visible, size), whether sway and Xwayland are up, the X server's top-level windows and their map state, and the processes the launch started. An X window that is mapped with no sway window for it is the compositor's bug, not the game's (#309: the harness's sway carries a wlroots patch for one) | DDrawCompat's exit 9 in #199 |
 | `wayland_client` (`wayland_client_relaunch_<n>`) | Wayland mode, at the window: it isn't an xdg-shell window, or what the launch started isn't connected to our sway's socket, or is connected to an X server | a game that came up through a display it shouldn't have |
 | `gogo_display` | Wayland mode, a gogo game, at the end: the launcher's run log has no `# display: wayland …` header, so gogo didn't put the game on Wine's Wayland driver itself (#292) | the harness testing its own switch instead of gogo's |
 | `no_x_fallback` | Wayland mode, at the end: a line in `game.out` or the launcher's run log says a process wanted X (Wine's X11 driver, "can't open display" and the like), and names it | a launcher or game that silently needs X |

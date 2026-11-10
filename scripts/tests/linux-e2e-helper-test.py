@@ -605,6 +605,36 @@ class Parsers(unittest.TestCase):
             [":1"],
         )
 
+    def test_xwininfo_children(self):
+        text = (
+            "xwininfo: Window id: 0x3d5 (the root window) (has no name)\n\n"
+            "  Root window id: 0x3d5 (the root window) (has no name)\n"
+            "  Parent window id: 0x0 (none)\n"
+            "     6 children:\n"
+            "     0x40000c \"bash\": (\"xterm\" \"XTerm\")  1024x768+0+0  +0+0\n"
+            "     0x200005 (has no name): ()  10x10+-100+-100  +-100+-100\n"
+            "     0x200004 \"wlroots wm\": ()  10x10+0+0  +0+0\n"
+            "     0x400001 (has no name): ()  1x1+0+0  +0+0\n"
+        )
+        self.assertEqual(
+            helper.parse_xwininfo_children(text), [("0x40000c", "bash"), ("0x400001", None)]
+        )
+        self.assertEqual(helper.parse_map_state("  Map State: IsViewable\n"), "IsViewable")
+        self.assertIsNone(helper.parse_map_state("nothing"))
+
+    def test_tree_windows(self):
+        tree = {
+            "type": "root",
+            "nodes": [{"type": "workspace", "nodes": [
+                {"type": "con", "pid": 0, "name": None, "shell": "xwayland", "visible": False,
+                 "rect": {"width": 0, "height": 0}, "nodes": []},
+            ], "floating_nodes": []}],
+        }
+        self.assertEqual(
+            helper.tree_windows(tree),
+            [{"pid": 0, "name": None, "shell": "xwayland", "visible": False, "size": "0x0"}],
+        )
+
     def test_support_installer(self):
         start = "note: running GOG support installer into the game dir\n"
         self.assertIsNone(helper.parse_support_installer("nothing"))
