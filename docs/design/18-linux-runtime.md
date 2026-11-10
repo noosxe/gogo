@@ -2002,9 +2002,9 @@ for what undoes the mode: `hdr` without Wayland mode, gamescope without `--expos
 L4 `env` saying the opposite, a hand-set `PROTON_ENABLE_WAYLAND` with no mode. Setup prints the
 same warnings.
 
-**Not here.** A per-game monitor (`PROTON_WAYLAND_MONITOR`) stays `env`. Catalogue and compat
-entries saying a game wants or breaks on Wayland can now be an L3 `display` key, but none is
-written yet. OpenGL games on the Wayland driver go through EGL (`WINE_USE_EGL=1`), which NVIDIA
+**Not here.** A per-game monitor (`PROTON_WAYLAND_MONITOR`) stays `env` (#295). Catalogue and
+compat entries saying a game wants or breaks on Wayland can now be an L3 `display` key, but none
+is written yet (#296). OpenGL games on the Wayland driver go through EGL (`WINE_USE_EGL=1`), which NVIDIA
 can't show in the harness (#294).
 
 **The harness.** `scripts/linux-e2e.sh --display wayland` writes `linux-app display <gogid>
