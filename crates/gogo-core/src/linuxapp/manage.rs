@@ -248,7 +248,7 @@ pub fn compat_with(gogid: &str, scan: &InstallScan) -> Result<CompatReport, MacA
     };
 
     let (_, pick) = l1(&b, scan);
-    let baked_layer = setup::baked_renderer_layer(&b.baked.renderer, &pick, &db.entry);
+    let baked_layer = setup::baked_renderer_layer(&b.baked, &pick, &db.entry);
     let (effective_renderer, effective_layer) = match &l4.entry.renderer {
         Some(r) => (r.clone(), Layer::User),
         None => (b.baked.renderer.clone(), baked_layer),

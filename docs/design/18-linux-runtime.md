@@ -1287,6 +1287,13 @@ already covers, and `LIBRARY_GAME='1'`, which says `DATA_ROOT` isn't where the l
   build selected. L3's `exe`/`args`/`env`/`dll_overrides`/`registry`/`verbs` are not
   baked: setup applies them, because §4.3's ownership rule depends on which Proton build
   is chosen.
+  **The renderer's layer** is baked too when it is a flag: `renderer_flag = true` (written
+  only then) marks a `--renderer` choice, so setup, `doctor` and `compat --json` read
+  layer Flags even when the flag equals L1's pick (#300: `--renderer wined3d` on an L1
+  `wined3d` game applies the real wined3d, not `proton-default`). A file without the field
+  (built before it) infers the layer as before: L1 when the ref equals L1's pick, L3 when
+  the compat DB names it, else a flag. For other renderers the field only changes the
+  layer shown, since the ref is the same either way.
 - **Setup's order**: read `state.toml`, the TOML and L4 → the runtime (L4, else baked;
   a missing GE-Proton installed) → umu → the umu id → the prefix (`umu-run ""`: success
   is `system.reg` and `drive_c/windows`, not `drive_c`, which umu's own `setup_pfx` makes

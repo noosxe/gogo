@@ -1666,6 +1666,7 @@ fn finish_v2(
         title: plan.display.clone(),
         runtime: launch::runtime_ref(&plan.runtime),
         renderer: selection.renderer.value.clone(),
+        renderer_flag: false,
         exe,
         workdir,
         args,

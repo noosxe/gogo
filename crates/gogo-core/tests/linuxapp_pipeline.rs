@@ -840,6 +840,48 @@ fn wined3d_chosen_sets_the_switch_and_auto_wined3d_sets_nothing() {
     assert_eq!(conf_value(&w.conf(), "ENV"), "('PROTON_USE_WINED3D=1')");
 }
 
+/// #300: `--renderer wined3d` on a game whose L1 pick is already wined3d stays
+/// a flag (the real wined3d); a file baked before the field was recorded
+/// falls back to inferring the layer, as before.
+#[test]
+fn renderer_flag_equal_to_l1_pick_keeps_its_layer() {
+    use gogo::macapp::compat::Layer;
+    let w = World::new("wined3d-flag-on-l1", &["kernel32.dll"]);
+    let mut opts = w.opts();
+    opts.renderer = RendererChoice::Force(Renderer::Wined3d);
+    let plan = build::plan(&opts, None, &mut quiet()).unwrap();
+    assert_eq!(plan.renderer.as_ref().unwrap().renderer.layer, Layer::Flags);
+    assert_eq!(
+        build::switches(plan.renderer_setup.as_ref().unwrap()),
+        "PROTON_USE_WINED3D=1"
+    );
+    build::execute(&plan, None, &mut quiet()).unwrap();
+    assert_eq!(conf_value(&w.conf(), "ENV"), "('PROTON_USE_WINED3D=1')");
+    assert_eq!(conf_value(&w.conf(), "RENDERER"), "'wined3d'");
+    assert_eq!(w.state().renderer, "wined3d");
+    let r = manage::compat(ID).unwrap().renderer.unwrap();
+    assert_eq!(
+        (r.baked.as_str(), r.effective.as_str(), r.applied.as_deref()),
+        ("wined3d", "wined3d", Some("wined3d"))
+    );
+    assert_eq!((r.baked_layer, r.effective_layer), (Layer::Flags, Layer::Flags));
+    assert_eq!(r.auto, "proton-default");
+    let host = doctor_host(&w, &[]);
+    let (_, msg) = renderer_finding(&doctor(&w, &host));
+    assert!(msg.starts_with("wined3d"), "{msg}");
+
+    // A gogo-launch.toml without the field: L1's own pick, as before.
+    let toml = w.game().join("gogo-launch.toml");
+    let raw = std::fs::read_to_string(&toml).unwrap();
+    assert!(raw.contains("renderer_flag = true"), "{raw}");
+    std::fs::write(&toml, raw.replace("renderer_flag = true\n", "")).unwrap();
+    setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
+    assert_eq!(conf_value(&w.conf(), "ENV"), "()");
+    assert_eq!(conf_value(&w.conf(), "RENDERER"), "'proton-default'");
+    let r = manage::compat(ID).unwrap().renderer.unwrap();
+    assert_eq!(r.baked_layer, Layer::Auto);
+}
+
 // — the installer lane —
 
 #[test]
