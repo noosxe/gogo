@@ -801,7 +801,7 @@ launch-time network use for verbs is limited to what the static reader couldn't 
   per file (each of today's files has exactly one), so the rule takes or skips a whole
   L3 file, not single fields. On Linux, when the chosen build has a `gamefixes-gog`
   module for the game and the game's L3 file has `source = "umu-protonfixes:…"`, its
-  top-level fixes (`verbs`, `env`, `dll_overrides`, `registry`, `args`, `exe`,
+  top-level fixes (`verbs`, `env`, `dll_overrides`, `registry`, `files`, `args`, `exe`,
   `replace_command`) are not applied there; the summary shows them as "covered by
   protonfix umu-<id>". Its `[platforms.linux]` table, if any, still applies (`status`,
   `tested`, `notes`). When the build has no module (an unmanaged build, or a Steam fix
@@ -844,7 +844,7 @@ launch-time network use for verbs is limited to what the static reader couldn't 
   `protonfixes` on macOS, so the Mac lane never gets it. The summary then lists, under
   `protonfixes = false (L4 override): PROTONFIXES_DISABLE=1, so the game loses:`,
   every fix of both modules and their other code. Collisions aren't marked then.
-- **Ownership.** `compat::TOP_FIX_KEYS` (`verbs`, `dll_overrides`, `registry`, `args`,
+- **Ownership.** `compat::TOP_FIX_KEYS` (`verbs`, `dll_overrides`, `registry`, `files`, `args`,
   `exe`, `replace_command`) are what's skipped. `env` is OS-specific, so a top-level
   one is ignored anyway; `title`, `variant` and `source` stay. The rule needs a module
   for the game in the chosen build, an L3 `source` (as resolved for Linux) starting
@@ -904,6 +904,55 @@ Registry details:
   HD (9 `HKLM`: App Paths, DirectPlay), AD2044 (a delete only), Zeus & Poseidon and Pharaoh Gold
   (installer `Execute` only).
 
+### 4.10 Compat `files`: small text files in the game dir
+
+Some games need a file the depot tree lacks and nothing else supplies: SimCity 4 Deluxe
+looks for its data next to `Apps/SimCity 4.exe` unless `Apps/SimCity 4.ini` says
+`[Directories] Data=`, and stops at "Unable to find game data" without it (the GOG script's
+`supportData`/`Execute` actions don't write it either, §4.9). The compat key `files` covers
+such cases:
+
+```toml
+files = [{ path = "Apps/SimCity 4.ini", text = "[Directories]\nData=..\\\n" }]
+```
+
+- **Shape.** A list of `{ path, text }`, top level or `[platforms.<os>]`, in every layer.
+  It's a fix key (`compat::TOP_FIX_KEYS`): a protonfix that owns the game skips L3's. Like
+  `registry`, the whole list is replaced across layers and platform tables, not merged.
+  `doctor` and the setup plan show each file with its byte count and layer.
+- **Paths.** Relative to the game dir, with `/`. Refused when the file is parsed (an error
+  in that layer): empty, absolute (`/…`, `C:…`), a backslash, NUL, an empty, `.` or `..`
+  part, or the same path twice (case-insensitively, since Wine's lookup is). At write time
+  the parent dir's canonical path must still be inside the canonical game dir, so a
+  symlinked folder can't lead out; such a file is skipped with a warning.
+- **Content.** `text` is written as given, UTF-8, no line-ending conversion; a game that
+  needs CRLF writes `\r\n` in the TOML. No placeholders, as in `registry`; SimCity 4's
+  file gets by with a path relative to its own folder (`..\`).
+- **Existing files: gogo only replaces its own.** Setup records `<sha256> <path>` for each
+  file that is gogo's in `state.toml` (`files`). Each setup then, per file, with names
+  matched regardless of case as Wine does (an installer's `apps/simcity 4.ini` is the
+  file `Apps/SimCity 4.ini`): absent → written (a temp file renamed over it; parent dirs
+  made one by one, none through a link that leads out); same content → recorded as
+  gogo's, nothing written; content matches the hash gogo recorded → replaced with the
+  new text; anything else (an installer's copy, the user's edit, not a plain file) →
+  kept and no longer recorded, with a warning that says to delete it and re-run
+  `gogo linux-app setup <gogid>` to get the compat copy. gogo never deletes a file, also
+  not one dropped from the compat entry; its record stays, so the file is still known
+  as gogo's if the entry comes back. The state is saved at the end of setup: a setup
+  that fails after writing a file leaves it unrecorded, and the next one adopts it if
+  the text still matches, or keeps it as someone else's if the compat text changed in
+  between.
+  Why: the game dir is the user's (and an installer lane's) as much as gogo's. Overwriting
+  would silently undo an edit a user made to tune the game, and a file the installer put
+  there is likely more right than ours. Recording a hash lets a fixed compat entry still
+  reach the files gogo itself wrote. A file that already says exactly what the compat
+  entry says is adopted: there's nothing of anyone else's in it to lose. Deleting was
+  left out because a dropped entry can't tell gogo's copy from one the user has come to
+  rely on.
+- **Lanes.** Linux only for now (`linuxapp/setup.rs`, after the registry step, into
+  `drive_c/GOG/<tree>`). The Mac lane parses and shows the key but doesn't write the files
+  yet (Mac work is on hold).
+
 ## 5. Decision 5: `[platforms.<os>]` in the compat schema
 
 **Settled (docs/21 §8 item 6):** one file per game. Top level = every OS (the Windows-side
@@ -912,7 +961,7 @@ facts); `[platforms.macos]` / `[platforms.linux]` = per OS. OS names follow Rust
 
 | Where | Keys |
 |---|---|
-| top level | `title`, `exe`, `args`, `variant`, `replace_command`, `verbs`, `dll_overrides`, `registry`, `source` |
+| top level | `title`, `exe`, `args`, `variant`, `replace_command`, `verbs`, `dll_overrides`, `registry`, `files`, `source` |
 | `[platforms.<os>]` | `renderer`, `runtime`, `env`, `status`, `notes`, `tested`, `lane`, `lanes`, `protonfixes` and `extra_args` (Linux only, #234), plus any top-level key to override or extend it there |
 
 - The platform table merges over the top level by design 16 decision 5's rules (maps per

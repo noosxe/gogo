@@ -18,6 +18,7 @@ exe      = "RebelGalaxyGOG.exe"
 verbs    = ["d3dcompiler_43"]         # winetricks verbs, added to the L1 auto ones
 dll_overrides = { ddraw = "n,b" }
 registry = [{ key = 'HKCU\Software\Wine\Direct3D', name = "renderer", type = "REG_SZ", data = "gl" }]
+files    = [{ path = "Apps/game.ini", text = "[Video]\nWindowed=1\n" }]  # Linux writes these; see below
 args     = ["-windowed"]
 variant  = "Rebel Galaxy (safe mode)" # a goggame playTasks name; see below
 replace_command = { from = "GoGLauncher.exe", to = "RebelGalaxyGOG.exe" }
@@ -41,7 +42,7 @@ env      = { PROTON_ENABLE_NVAPI = "1" }  # `gogo linux-app env set` writes [pla
 
 | Where | Keys |
 |---|---|
-| top level | `title`, `exe`, `args`, `variant`, `replace_command`, `verbs`, `dll_overrides`, `registry`, `source` |
+| top level | `title`, `exe`, `args`, `variant`, `replace_command`, `verbs`, `dll_overrides`, `registry`, `files`, `source` |
 | `[platforms.<os>]` | `renderer`, `runtime`, `env`, `status`, `notes`, `tested`, `lane`, `lanes`, `protonfixes` and `extra_args` (Linux only), and any top-level key, to override or extend it on that OS |
 
 gogo reads the top level, then its own OS's table over it, by the same rules
@@ -51,6 +52,13 @@ entry. A table for the other OS is checked (bad values are errors there too)
 but not applied, and a key of the second row at the top level warns and is
 ignored, like an unknown key. `[platforms.linux]` tables come from a Linux run
 that has something to record (`host = "headless-sway/<gpu>"`, `docs/linux-e2e.md`).
+
+`files` writes small text files into the game dir that the depot tree lacks
+(SimCity 4's `Apps/SimCity 4.ini`). Paths are relative to the game dir, with
+`/`; absolute paths, `..` and the like are an error. The text is written as
+given (write `\r\n` for CRLF). gogo writes a file only when it's missing or
+is still the copy gogo wrote; anything else is kept with a warning. Linux
+lane only for now. Details: design 18 §4.10.
 
 *L4 files from before #166* hold `renderer` / `runtime` (written by gogo)
 and maybe `env`, `status`, … at the top level. On macOS gogo reads those as

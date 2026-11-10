@@ -507,6 +507,14 @@ fn gogo_items(e: &Effective) -> Vec<GogoItem> {
     for s in &e.verbs {
         plain(format!("verb {}", s.value), s.layer);
     }
+    if let Some(s) = &e.files {
+        for f in &s.value {
+            plain(
+                format!("file {:?} ({} bytes)", f.path, f.text.len()),
+                s.layer,
+            );
+        }
+    }
     let mut keyed = |label: String, norm: String, raw: String, text: String, layer: Layer| {
         out.push(GogoItem {
             text,

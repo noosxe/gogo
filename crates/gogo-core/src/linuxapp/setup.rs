@@ -520,6 +520,181 @@ pub(crate) fn game_files(dirs: &GameDirs, tree: Option<&str>) -> PathBuf {
     )
 }
 
+/// What [`write_files`] did: the `state.toml` lines of the files that are
+/// gogo's now, and what to tell the user.
+#[derive(Debug, Default, PartialEq)]
+pub struct FilesOutcome {
+    pub lines: Vec<String>,
+    pub notes: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+fn sha256_hex(b: &[u8]) -> String {
+    use sha2::{Digest as _, Sha256};
+    Sha256::digest(b)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// `rel` under `dir`, each part matched the way Wine looks it up: the exact
+/// name if it's there, else one that differs only in case, so an installer's
+/// `apps/simcity 4.ini` is seen as `Apps/SimCity 4.ini`.
+fn find_nocase(dir: &Path, rel: &str) -> PathBuf {
+    let mut cur = dir.to_path_buf();
+    for part in rel.split('/') {
+        let exact = cur.join(part);
+        if exact.symlink_metadata().is_ok() {
+            cur = exact;
+            continue;
+        }
+        let other = std::fs::read_dir(&cur).ok().and_then(|rd| {
+            rd.filter_map(Result::ok)
+                .find(|e| {
+                    e.file_name()
+                        .to_str()
+                        .is_some_and(|n| n.eq_ignore_ascii_case(part))
+                })
+                .map(|e| e.path())
+        });
+        cur = other.unwrap_or(exact);
+    }
+    cur
+}
+
+/// Make `parent` (under `dir`) a directory inside `root`, `dir`'s canonical
+/// path, one part at a time, so nothing is created through a link that leads
+/// out. `false`: a link out, or something else in the way.
+fn make_parent(dir: &Path, root: &Path, parent: &Path) -> std::io::Result<bool> {
+    let Ok(rel) = parent.strip_prefix(dir) else {
+        return Ok(false);
+    };
+    let mut cur = dir.to_path_buf();
+    for c in rel.components() {
+        cur.push(c);
+        match cur.symlink_metadata() {
+            Ok(m) if m.is_dir() => {}
+            Ok(m) if m.file_type().is_symlink() => match cur.canonicalize() {
+                Ok(p) if p.starts_with(root) && p.is_dir() => {}
+                _ => return Ok(false),
+            },
+            Ok(_) => return Ok(false),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::create_dir(&cur)?,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(true)
+}
+
+/// Write `text` to `target` through a fresh temp file next to it, then
+/// rename: never through a link, never half a file.
+fn write_game_file(target: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let parent = target.parent().expect("a relative path has a parent");
+    let tmp = parent.join(format!(
+        ".{}.gogo-tmp",
+        target.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    // A leftover from a crashed run (or a link someone put there): it's ours
+    // to remove; removing a link leaves what it points to alone.
+    if tmp.symlink_metadata().is_ok() {
+        std::fs::remove_file(&tmp)?;
+    }
+    let res = std::fs::OpenOptions::new()
+        .write(true)
+        // O_EXCL: fails on anything there, a link included, never follows one.
+        .create_new(true)
+        .open(&tmp)
+        .and_then(|mut f| f.write_all(text.as_bytes()))
+        .and_then(|()| std::fs::rename(&tmp, target));
+    if res.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    res
+}
+
+/// Put the compat `files` into `dir`, the game dir (design 18 §4.10). A
+/// missing file is written. One that's there is left alone unless it's
+/// gogo's: the same text already, or the hash `prior` (the last
+/// `state.toml`'s `files`) recorded for it, so a changed compat text
+/// replaces gogo's own copy and nothing else. Anyone else's (an installer
+/// put it there, the user edited it) is kept, with a warning. Paths were
+/// checked when the config was read ([`compat::check_files`]); a path that
+/// leads out of `dir` through a link is refused here. Names match without
+/// regard to case, as Wine's lookup does. `prior` lines for paths not in
+/// `files` are kept, so gogo still knows its copies if they come back.
+pub fn write_files(
+    dir: &Path,
+    files: &[compat::GameFile],
+    prior: &[String],
+    gogid: &str,
+) -> Result<FilesOutcome, MacAppError> {
+    let mut out = FilesOutcome::default();
+    let root = dir.canonicalize()?;
+    for f in files {
+        compat::check_files(Some(std::slice::from_ref(f))).map_err(|e| MacAppError::Compat {
+            path: dir.to_path_buf(),
+            reason: format!("files: {e}"),
+        })?;
+        let target = find_nocase(dir, &f.path);
+        let want = sha256_hex(f.text.as_bytes());
+        let line = format!("{want} {}", f.path);
+        let write = |out: &mut FilesOutcome, verb: &str| -> Result<(), MacAppError> {
+            let parent = target.parent().expect("a relative path has a parent");
+            if !make_parent(dir, &root, parent)? {
+                out.warnings.push(format!(
+                    "{}: leads out of the game dir through a link, or a file is in the way: \
+                     not written",
+                    f.path
+                ));
+                return Ok(());
+            }
+            write_game_file(&target, &f.text)?;
+            out.notes.push(format!("{verb} {} (compat files)", f.path));
+            out.lines.push(line.clone());
+            Ok(())
+        };
+        match target.symlink_metadata() {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => write(&mut out, "wrote")?,
+            Err(e) => return Err(e.into()),
+            Ok(m) if !m.is_file() => out.warnings.push(format!(
+                "{}: there and not a plain file: left alone",
+                f.path
+            )),
+            Ok(_) => {
+                let have = proton::sha256_of(&target)?;
+                if have == want {
+                    out.lines.push(line);
+                } else if prior.iter().any(|l| *l == format!("{have} {}", f.path)) {
+                    write(&mut out, "updated")?;
+                } else {
+                    out.warnings.push(format!(
+                        "{}: there already and not gogo's (an installer's copy or an edit): \
+                         kept; to get the compat config's, delete it and run \
+                         `gogo linux-app setup {gogid}`",
+                        f.path
+                    ));
+                }
+            }
+        }
+    }
+    out.lines.extend(carried_file_lines(prior, files));
+    Ok(out)
+}
+
+/// The `prior` state lines whose path isn't in `files`: kept as they are,
+/// since gogo deletes nothing and its copy may still be on disk.
+fn carried_file_lines(prior: &[String], files: &[compat::GameFile]) -> Vec<String> {
+    prior
+        .iter()
+        .filter(|l| {
+            let path = l.split_once(' ').map_or("", |(_, p)| p);
+            !files.iter().any(|f| f.path.eq_ignore_ascii_case(path))
+        })
+        .cloned()
+        .collect()
+}
+
 /// Bring `games/<gogid>/` up to date (see the module docs). Never deletes
 /// the prefix or anything in it but links out of the data root.
 pub fn setup(
@@ -761,6 +936,32 @@ pub fn setup(
         }
     }
 
+    // Files into the game dir (design 18 §4.10): after GOG's script, like
+    // the registry values, and never over a file gogo didn't write.
+    let prior_files = prior
+        .as_ref()
+        .map(|s| s.files.as_slice())
+        .unwrap_or_default();
+    // Not written this time (none wanted, or no game dir): what gogo knew of
+    // its copies stays.
+    let mut file_lines = prior_files.to_vec();
+    if let Some(files) = fx.effective.files.as_ref().map(|f| &f.value)
+        && !files.is_empty()
+    {
+        match &scan_dir {
+            Some(dir) => {
+                let out = write_files(dir, files, prior_files, gogid)?;
+                file_lines = out.lines;
+                notes.extend(out.notes);
+                warnings.extend(out.warnings);
+            }
+            None => warnings.push(format!(
+                "no game dir in the prefix: {} file(s) from the compat config not written",
+                files.len()
+            )),
+        }
+    }
+
     // Verbs (R12): only the missing ones, or umu's winetricks installs none.
     let verbs = fx.setup_verbs();
     let pending = fixes::pending_verbs(&dirs.prefix, &verbs);
@@ -856,6 +1057,7 @@ pub fn setup(
         protonfix: now,
         verbs,
         registry: reg_lines,
+        files: file_lines,
         stamp,
         gogo_version: env!("CARGO_PKG_VERSION").to_string(),
     };
@@ -954,5 +1156,170 @@ mod tests {
             Some(proton::BuildProblem::ProtonChanged { .. })
         ));
         assert!(changed_managed(&path, dir).is_none());
+    }
+
+    fn gf(path: &str, text: &str) -> compat::GameFile {
+        compat::GameFile {
+            path: path.into(),
+            text: text.into(),
+        }
+    }
+
+    /// Design 18 §4.10's policy: a missing file is written, gogo's own copy
+    /// follows the compat text, anyone else's stays.
+    #[test]
+    fn files_are_written_and_only_gogos_own_are_replaced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("game");
+        std::fs::create_dir_all(&dir).unwrap();
+        let ini = dir.join("Apps/SimCity 4.ini");
+        let v1 = [gf("Apps/SimCity 4.ini", "[Directories]\nData=..\\\n")];
+
+        // Missing (and its dir too): written, recorded.
+        let out = write_files(&dir, &v1, &[], "1").unwrap();
+        assert_eq!(std::fs::read_to_string(&ini).unwrap(), v1[0].text);
+        assert_eq!(out.lines.len(), 1);
+        assert!(
+            out.lines[0].ends_with(" Apps/SimCity 4.ini"),
+            "{:?}",
+            out.lines
+        );
+        assert_eq!(out.notes, ["wrote Apps/SimCity 4.ini (compat files)"]);
+        assert!(out.warnings.is_empty());
+        let recorded = out.lines;
+
+        // Again, unchanged: nothing written, still gogo's.
+        let again = write_files(&dir, &v1, &recorded, "1").unwrap();
+        assert_eq!(
+            (again.lines.clone(), again.notes.len()),
+            (recorded.clone(), 0)
+        );
+
+        // The compat text changed and the file is still what gogo wrote: updated.
+        let v2 = [gf(
+            "Apps/SimCity 4.ini",
+            "[Directories]\nData=C:\\GOG\\x\\\n",
+        )];
+        let out = write_files(&dir, &v2, &recorded, "1").unwrap();
+        assert_eq!(std::fs::read_to_string(&ini).unwrap(), v2[0].text);
+        assert_eq!(out.notes, ["updated Apps/SimCity 4.ini (compat files)"]);
+        let recorded = out.lines;
+
+        // The user edited it: kept, with a warning, and no longer gogo's.
+        std::fs::write(&ini, "[Directories]\nData=D:\\mine\\\n").unwrap();
+        let out = write_files(&dir, &v1, &recorded, "1207664593").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&ini).unwrap(),
+            "[Directories]\nData=D:\\mine\\\n"
+        );
+        assert!(out.lines.is_empty() && out.notes.is_empty());
+        assert_eq!(out.warnings.len(), 1);
+        assert!(
+            out.warnings[0].contains("not gogo's")
+                && out.warnings[0].contains("gogo linux-app setup 1207664593"),
+            "{:?}",
+            out.warnings
+        );
+
+        // An installer's copy, with no record at all: kept the same way.
+        let out = write_files(&dir, &v2, &[], "1").unwrap();
+        assert_eq!(out.warnings.len(), 1);
+        assert!(std::fs::read_to_string(&ini).unwrap().contains("mine"));
+
+        // ...unless it already says what the compat config says.
+        std::fs::write(&ini, &v1[0].text).unwrap();
+        let out = write_files(&dir, &v1, &[], "1").unwrap();
+        assert_eq!((out.lines.len(), out.warnings.len()), (1, 0));
+        assert!(!dir.join("Apps/.SimCity 4.ini.gogo-tmp").exists());
+    }
+
+    #[test]
+    fn files_never_leave_the_game_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("game");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        // A link inside the game dir that points out of it.
+        std::os::unix::fs::symlink(&outside, dir.join("Apps")).unwrap();
+        let out = write_files(&dir, &[gf("Apps/x.ini", "x")], &[], "1").unwrap();
+        assert!(!outside.join("x.ini").exists());
+        assert!(out.lines.is_empty());
+        assert!(
+            out.warnings[0].contains("out of the game dir"),
+            "{:?}",
+            out.warnings
+        );
+        // A link as the file itself: left alone.
+        std::fs::remove_file(dir.join("Apps")).unwrap();
+        std::os::unix::fs::symlink(outside.join("y.ini"), dir.join("y.ini")).unwrap();
+        let out = write_files(&dir, &[gf("y.ini", "y")], &[], "1").unwrap();
+        assert!(!outside.join("y.ini").exists());
+        assert!(
+            out.warnings[0].contains("not a plain file"),
+            "{:?}",
+            out.warnings
+        );
+        // A path the parser would refuse is refused here too.
+        assert!(write_files(&dir, &[gf("../z.ini", "z")], &[], "1").is_err());
+        assert!(!tmp.path().join("z.ini").exists());
+        // The game dir itself may be a link (the prefix's `drive_c/GOG/<tree>`).
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&dir, &link).unwrap();
+        let out = write_files(&link, &[gf("Apps/w.ini", "w")], &[], "1").unwrap();
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("Apps/w.ini")).unwrap(),
+            "w"
+        );
+        // A deeper path under a link out: not even its dirs get made there.
+        std::os::unix::fs::symlink(&outside, dir.join("Out")).unwrap();
+        let out = write_files(&dir, &[gf("Out/sub/x.ini", "x")], &[], "1").unwrap();
+        assert!(!outside.join("sub").exists());
+        assert_eq!(out.warnings.len(), 1, "{:?}", out.warnings);
+        // A leftover temp name that's a link out: removed, never written through.
+        std::os::unix::fs::symlink(outside.join("t.ini"), dir.join("Apps/.t.ini.gogo-tmp"))
+            .unwrap();
+        let out = write_files(&dir, &[gf("Apps/t.ini", "t")], &[], "1").unwrap();
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+        assert!(!outside.join("t.ini").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("Apps/t.ini")).unwrap(),
+            "t"
+        );
+        assert!(dir.join("Apps/.t.ini.gogo-tmp").symlink_metadata().is_err());
+    }
+
+    /// Names match without regard to case, as Wine's lookup does, and what
+    /// gogo knew of a file that left the compat entry stays known.
+    #[test]
+    fn files_match_any_case_and_keep_dropped_records() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("game");
+        std::fs::create_dir_all(dir.join("apps")).unwrap();
+        std::fs::write(dir.join("apps/simcity 4.ini"), "installer's").unwrap();
+        let out = write_files(&dir, &[gf("Apps/SimCity 4.ini", "ours")], &[], "1").unwrap();
+        assert_eq!(out.warnings.len(), 1, "{:?}", out.warnings);
+        assert!(
+            !dir.join("Apps").exists(),
+            "a second dir that differs in case"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("apps/simcity 4.ini")).unwrap(),
+            "installer's"
+        );
+        // A new file in a dir that's there in another case goes into that dir.
+        let out = write_files(&dir, &[gf("APPS/new.ini", "n")], &[], "1").unwrap();
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("apps/new.ini")).unwrap(),
+            "n"
+        );
+        // Dropped from the entry: neither deleted nor forgotten.
+        let recorded = out.lines;
+        let out = write_files(&dir, &[gf("other.ini", "o")], &recorded, "1").unwrap();
+        assert!(dir.join("apps/new.ini").exists());
+        assert!(out.lines.contains(&recorded[0]), "{:?}", out.lines);
+        assert_eq!(out.lines.len(), 2);
     }
 }

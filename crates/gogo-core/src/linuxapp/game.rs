@@ -325,6 +325,11 @@ pub struct LinuxState {
     /// only when these change or the prefix is new.
     #[serde(default)]
     pub registry: Vec<String>,
+    /// The compat `files` setup wrote and still holds as its own, one
+    /// `<sha256> <path>` line each ([`super::setup::write_files`]): a file
+    /// that still has that hash is gogo's to update.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
     pub stamp: String,
     pub gogo_version: String,
 }
@@ -723,6 +728,7 @@ mod tests {
             protonfix: "none".into(),
             verbs: vec!["d3dx9".into()],
             registry: vec![],
+            files: vec!["ab Apps/x.ini".into()],
             stamp: "s".into(),
             gogo_version: "0".into(),
         };
