@@ -605,6 +605,16 @@ class Parsers(unittest.TestCase):
             [":1"],
         )
 
+    def test_server_cmdlines(self):
+        x = ["/nix/store/x/bin/Xwayland", ":0", "-rootless"]
+        procs = [(10, 1, ["sway"]), (11, 10, x), (12, 11, x), (13, 11, ["xkbcomp"])]
+        self.assertEqual(helper.server_cmdlines(procs), [["sway"], x, ["xkbcomp"]])
+        self.assertEqual(helper.xwayland_displays(helper.server_cmdlines(procs)), [":0"])
+        # Two servers, neither the other's fork: both count.
+        self.assertEqual(
+            helper.xwayland_displays(helper.server_cmdlines([(11, 10, x), (12, 10, x)])), [":0", ":0"]
+        )
+
     def test_xwininfo_children(self):
         text = (
             "xwininfo: Window id: 0x3d5 (the root window) (has no name)\n\n"
