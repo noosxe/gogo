@@ -1960,8 +1960,10 @@ Wayland there. `wayland` asks for the driver.
 
 - With one, the game step exports `PROTON_ENABLE_WAYLAND=1`, plus `hdr`'s switch: `on` is
   `PROTON_ENABLE_HDR=1`, `force` `PROTON_FORCE_HDR=1`, `off` `PROTON_ENABLE_HDR=0`. It unsets
-  the aliases `PROTON_USE_WAYLAND` (and `PROTON_USE_HDR` for `on`/`off`) a session may carry:
-  Proton reads them after the switches, so a `0` there would undo the mode.
+  what a session may carry that would undo that: `PROTON_USE_WAYLAND` (Proton reads the alias
+  after the switch, so a `0` there turns Wayland off), and for `on`/`off` `PROTON_USE_HDR` (the
+  same) and `PROTON_FORCE_HDR` (Proton checks `forcehdr` before `hdr`, so a `1` there would force
+  HDR over `off`). With `force` the others don't matter.
 - Without one, the game runs on X11 (both switches unset), and `launch.log` says why
   (`display: wayland wanted, but WAYLAND_DISPLAY is unset: the game runs on X11 (Xwayland)`).
 - It's exported after gogo's `PROTON_SET_GAME_DRIVE=0` and before `ENV`, so a player's own
