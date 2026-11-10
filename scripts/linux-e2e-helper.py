@@ -838,6 +838,15 @@ def xwayland_displays(cmdlines):
     return found
 
 
+def server_cmdlines(procs):
+    """The command lines of (pid, ppid, argv) less a process's forks that
+    haven't exec'd yet: same argv as their parent. Xwayland forks to run
+    xkbcomp when a keymap comes in, and for that instant two processes say
+    `Xwayland :0` (#309)."""
+    by_pid = {pid: argv for pid, _, argv in procs}
+    return [argv for pid, ppid, argv in procs if by_pid.get(ppid) != argv]
+
+
 def parse_ss_unix(text):
     """`ss -xapnH`'s Unix sockets by inode: {inode: {"state", "path", "peer",
     "users": [(comm, pid)]}}. "path" is None for an unnamed socket; a connected
@@ -1730,7 +1739,7 @@ class Driver:
         socket = f"/tmp/.X11-unix/X{display.lstrip(':').split('.')[0]}"
         # Only this sandbox's PID namespace is in /proc, so a match is our own
         # Xwayland, and it holds the abstract socket of that number.
-        served = xwayland_displays(_cmdlines())
+        served = xwayland_displays(server_cmdlines(_procs()))
         iso["display"] = {"DISPLAY": display, "root": got, "socket": socket, "served": served}
         self.check(
             "isolation_display",
@@ -1767,7 +1776,7 @@ class Driver:
             wl == {socket_path: ["sway"]} and sizes == [f"{w}x{h}"],
             f"Wayland listeners {wl}, outputs {sizes}",
         )
-        xwayland = xwayland_displays(_cmdlines())
+        xwayland = xwayland_displays(server_cmdlines(_procs()))
         try:
             x_dir = sorted(os.listdir("/tmp/.X11-unix"))
         except OSError:
@@ -2008,7 +2017,7 @@ class Driver:
         except Exception as e:  # a dead sway is itself the answer
             diag["sway_windows"] = f"{type(e).__name__}: {e}"
         diag["sway_alive"] = self.sway is not None and self.sway.poll() is None
-        diag["xwayland"] = xwayland_displays(_cmdlines())
+        diag["xwayland"] = xwayland_displays(server_cmdlines(_procs()))
         x = None
         if self.display == "xwayland" and self.env.get("DISPLAY"):
             x = []
@@ -3753,12 +3762,16 @@ def _argv(pid):
         return f.read().decode(errors="replace").split("\0")
 
 
-def _cmdlines():
+def _procs():
+    """(pid, ppid, argv) of every process this namespace sees."""
     found = []
     for pid in filter(str.isdigit, os.listdir("/proc")):
         try:
-            found.append(_argv(pid))
-        except OSError:
+            with open(f"/proc/{pid}/stat") as f:
+                text = f.read()
+            ppid = int(text[text.rindex(")") + 2 :].split()[1])
+            found.append((int(pid), ppid, _argv(pid)))
+        except (OSError, ValueError, IndexError):
             continue
     return found
 
