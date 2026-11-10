@@ -224,6 +224,7 @@ fn report_of(
 ) -> CatalogueReport {
     let machine = Machine {
         renderer,
+        proton_default: false,
         gpus: gpus.iter().map(|g| (*g).to_string()).collect(),
         on_path: &|c| c == "mangohud",
     };
@@ -259,6 +260,29 @@ fn full_facts() -> BuildFacts {
 
 fn yes(r: &CatalogueReport, name: &str) -> bool {
     r.find(name).unwrap().applies == Applies::Yes
+}
+
+/// `proton-default` (nothing set, #229) is neither wined3d nor DXVK: the
+/// Vulkan-side variables are unknown, and the reason says why.
+#[test]
+fn proton_default_is_unknown_not_wined3d() {
+    let facts = full_facts();
+    let machine = Machine {
+        renderer: None,
+        proton_default: true,
+        gpus: vec![],
+        on_path: &|_| false,
+    };
+    let r = merge(
+        env_of(vec![]),
+        Some(&facts),
+        Some("proton-default".to_string()),
+        &machine,
+    );
+    match &r.find("DXVK_HUD").unwrap().applies {
+        Applies::Unknown { why } => assert!(why.contains("Proton's defaults"), "{why}"),
+        other => panic!("{other:?}"),
+    }
 }
 
 #[test]

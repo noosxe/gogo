@@ -139,6 +139,54 @@ fn pinned_version(id: &str) -> Option<&'static str> {
     catalog::find(id)?.discovery.as_ref()?.pinned_version()
 }
 
+/// Linux: the applied-renderer label for L1's own `wined3d` pick, where
+/// nothing is set and Proton's defaults run (DXVK for D3D9–11, Wine's
+/// builtin `ddraw`). It is a label for what setup applied (`state.toml`,
+/// `launch.conf`'s `RENDERER`), never a choice: `renderer = "wined3d"` in
+/// L3/L4 or a flag still means `PROTON_USE_WINED3D=1`, so [`RendererRef`]
+/// does not parse it (design 18 §3).
+pub const PROTON_DEFAULT: &str = "proton-default";
+
+/// For people: what [`PROTON_DEFAULT`] means.
+pub const PROTON_DEFAULT_DESC: &str = "none (Proton's defaults: DXVK for d3d9–11)";
+
+/// The renderer an applied ref (`state.toml`, `RENDERER=`) stands for:
+/// [`PROTON_DEFAULT`] is wined3d's pick with nothing set.
+pub fn applied_renderer(s: &str, os: Os) -> Result<Renderer, String> {
+    if s.trim() == PROTON_DEFAULT {
+        return Ok(Renderer::Wined3d);
+    }
+    RendererRef::parse_on(s, os).map(|r| r.renderer)
+}
+
+/// How a Linux renderer is labelled in what setup applied and in output:
+/// L1's own wined3d pick sets nothing, so it is [`PROTON_DEFAULT`]; a
+/// wined3d anyone chose, or fell back to, sets `PROTON_USE_WINED3D=1`.
+pub fn label_linux(r: Renderer, l1: &Pick) -> &'static str {
+    if r == Renderer::Wined3d && l1.renderer == Renderer::Wined3d {
+        PROTON_DEFAULT
+    } else {
+        r.id()
+    }
+}
+
+/// Setup's rule for a chosen `wined3d` (L3, L4, a flag or the walk): it
+/// moves D3D9–12 to wined3d, while L1's own pick (`layer_is_auto`) stays on
+/// Proton's defaults (#172). Turns a plan's [`PROTON_DEFAULT`] label back
+/// into `wined3d` with the switch when it was chosen. Returns whether it
+/// added the switch.
+pub fn settle_wined3d(plan: &mut LinuxPlan, layer_is_auto: bool) -> bool {
+    if plan.renderer != PROTON_DEFAULT || layer_is_auto {
+        return false;
+    }
+    plan.renderer = Renderer::Wined3d.id().into();
+    if plan.env.contains_key(PROTON_USE_WINED3D) {
+        return false;
+    }
+    plan.env.insert(PROTON_USE_WINED3D.into(), "1".into());
+    true
+}
+
 /// A renderer ref, `<id>[/<ver>]` (gogo-launch.toml `renderer`, compat
 /// `renderer`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,6 +229,9 @@ impl RendererRef {
     /// A ref of either OS (the walk's `current`).
     fn parse_any(s: &str) -> Option<Renderer> {
         let id = s.trim().split('/').next().unwrap_or_default();
+        if id == PROTON_DEFAULT {
+            return Some(Renderer::Wined3d);
+        }
         Os::ALL
             .into_iter()
             .find_map(|os| Renderer::from_id_on(id, os))
@@ -476,9 +527,23 @@ pub struct Selection {
 impl Selection {
     /// `dxmt/v0.80 (L1 auto: Direct3D 10/11: imports d3d11 (32-bit Game.exe))`.
     pub fn describe(&self) -> String {
+        self.describe_as(&self.renderer.value)
+    }
+
+    /// [`describe`](Selection::describe) for Linux: L1's own wined3d pick
+    /// reads [`PROTON_DEFAULT`] (nothing is set there).
+    pub fn describe_linux(&self) -> String {
+        if self.renderer.value == Renderer::Wined3d.id() && self.renderer.layer == Layer::Auto {
+            self.describe_as(PROTON_DEFAULT)
+        } else {
+            self.describe()
+        }
+    }
+
+    fn describe_as(&self, value: &str) -> String {
         let mut s = format!(
             "{} ({}: {})",
-            self.renderer.value,
+            value,
             self.renderer.layer.describe(),
             self.reason
         );
@@ -1093,7 +1158,8 @@ pub fn plan_linux(renderer: &str, l1: &Pick, game_dir: Option<&Path>, proton: &P
     let mut r = match RendererRef::parse_on(renderer, Os::Linux) {
         Ok(r) => r.renderer,
         Err(e) => {
-            out.warnings.push(format!("{e}: using wined3d"));
+            out.warnings
+                .push(format!("{e}: using {}", label_linux(Renderer::Wined3d, l1)));
             Renderer::Wined3d
         }
     };
@@ -1118,8 +1184,11 @@ pub fn plan_linux(renderer: &str, l1: &Pick, game_dir: Option<&Path>, proton: &P
         let next = next_after(l1, r.id(), false)
             .filter(|n| !tried.contains(n))
             .unwrap_or(Renderer::Wined3d);
-        out.warnings
-            .push(format!("{}: {why}: using {}", r.name(), next.id()));
+        out.warnings.push(format!(
+            "{}: {why}: using {}",
+            r.name(),
+            label_linux(next, l1)
+        ));
         if next == r {
             break;
         }
@@ -1161,7 +1230,11 @@ pub fn plan_linux(renderer: &str, l1: &Pick, game_dir: Option<&Path>, proton: &P
     } else if gogo && r != Renderer::CncDdraw {
         out.ddraw = DdrawStep::RemoveGogo;
     }
-    out.renderer = r.default_ref();
+    out.renderer = if r == Renderer::Wined3d {
+        label_linux(r, l1).into()
+    } else {
+        r.default_ref()
+    };
     out
 }
 
@@ -1213,7 +1286,7 @@ pub fn apply_linux(renderer: &str, l1: &Pick, game_dir: Option<&Path>, proton: &
                 .then(|| "a ddraw.dll is still in the game dir, which would win over D7VK's".into())
         });
         let Some(why) = failed else { return plan };
-        let Ok(r) = RendererRef::parse_on(&plan.renderer, Os::Linux).map(|r| r.renderer) else {
+        let Ok(r) = applied_renderer(&plan.renderer, Os::Linux) else {
             return plan;
         };
         tried.push(r);
@@ -1221,7 +1294,11 @@ pub fn apply_linux(renderer: &str, l1: &Pick, game_dir: Option<&Path>, proton: &
             .filter(|n| !tried.contains(n))
             .unwrap_or(Renderer::Wined3d);
         warnings = plan.warnings;
-        warnings.push(format!("{}: {why}: using {}", r.name(), next.id()));
+        warnings.push(format!(
+            "{}: {why}: using {}",
+            r.name(),
+            label_linux(next, l1)
+        ));
         renderer = next.default_ref();
     }
 }
@@ -2460,6 +2537,41 @@ mod linux_tests {
         let l11 = from_scan_linux(&scan(A::D3d11, I386, &[G::D3d11]));
         let x = plan_linux("d7vk", &l11, Some(g.path()), p.path());
         assert_eq!(x.renderer, "dxvk");
+    }
+
+    /// L1's own wined3d pick sets nothing: `proton-default` (#229). A wined3d
+    /// anyone chose, or fell back to under another L1, is the real one.
+    #[test]
+    fn l1s_own_wined3d_is_labelled_proton_default() {
+        let p = proton(true);
+        let g = game(Dir::Empty);
+        let none = from_scan_linux(&scan(A::Unknown, I386, &[]));
+        assert_eq!(none.renderer, Wined3d);
+        let x = plan_linux("wined3d", &none, Some(g.path()), p.path());
+        assert_eq!((x.renderer.as_str(), env(&x)), (PROTON_DEFAULT, vec![]));
+        // Chosen (not L1's own): setup turns it into the real thing.
+        let mut chosen = x.clone();
+        assert!(settle_wined3d(&mut chosen, false));
+        assert_eq!(chosen.renderer, "wined3d");
+        assert_eq!(env(&chosen), [PROTON_USE_WINED3D]);
+        let mut auto = x;
+        assert!(!settle_wined3d(&mut auto, true));
+        assert_eq!(auto.renderer, PROTON_DEFAULT);
+        // Another L1 falling back to wined3d sets the switch: wined3d.
+        let l11 = from_scan_linux(&scan(A::D3d11, I386, &[G::D3d11]));
+        let x = plan_linux("wined3d", &l11, Some(g.path()), p.path());
+        assert_eq!(
+            (x.renderer.as_str(), env(&x)),
+            ("wined3d", vec![PROTON_USE_WINED3D])
+        );
+        // Applied refs read back; the label is not a choice.
+        assert_eq!(applied_renderer(PROTON_DEFAULT, Os::Linux), Ok(Wined3d));
+        assert_eq!(applied_renderer("dxvk", Os::Linux), Ok(Dxvk));
+        assert!(RendererRef::parse_on(PROTON_DEFAULT, Os::Linux).is_err());
+        // The walk starts from L1's pick.
+        assert_eq!(next_after(&none, PROTON_DEFAULT, false), None);
+        let ddraw = from_scan_linux(&scan(A::Ddraw2d, I386, &[G::Ddraw])); // cnc-ddraw, d7vk, wined3d
+        assert_eq!(next_after(&ddraw, PROTON_DEFAULT, false), None);
     }
 
     /// L3/L4/flags over the Linux L1, from [platforms.linux] only; the

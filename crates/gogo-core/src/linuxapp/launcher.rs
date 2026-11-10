@@ -23,7 +23,7 @@ use crate::macapp::launch::GameDirs;
 /// Bumped with every change to [`TEMPLATE`] that matters to a game set up
 /// before it. Setup rewrites `launch.sh` whenever its bytes differ, so this
 /// is for people: the run log header and `launch.log` name it.
-pub const LAUNCHER_VERSION: u32 = 10;
+pub const LAUNCHER_VERSION: u32 = 11;
 
 /// `launch.sh`'s first word when a wrapper runs it for the game's own step
 /// (design 18 §7.8): the game's environment, then umu-run.
@@ -1030,7 +1030,7 @@ copy_tool() {
     fi
 }
 early_exit() {
-    local log="$LAST_RUN_LOG" gogo next="" msg choice copy copy_label
+    local log="$LAST_RUN_LOG" gogo next="" msg choice copy copy_label on
     if [ -z "${GOGO_LAUNCHER_DIALOG:-}" ] && [ -n "${GOGO_LAUNCHER_NO_DIALOG:-}" ]; then
         log "early exit: code $rc after ${RUN_SECS}s on $RENDERER (dialogs off)"
         return 0
@@ -1042,7 +1042,9 @@ early_exit() {
     log "early exit: code $rc after ${RUN_SECS}s on $RENDERER; next renderer: ${next:-none}"
     copy="$(copy_tool)"
     if [ -n "$copy" ]; then copy_label="Copy report"; else copy_label="Save report"; fi
-    msg="$TITLE quit after ${RUN_SECS}s (exit code $rc) on the $RENDERER renderer${WRAPPER[0]:+, under ${WRAPPER[0]}}.
+    # `proton-default` is L1's wined3d pick with nothing set (#229).
+    if [ "$RENDERER" = proton-default ]; then on="on Proton's default renderer"; else on="on the $RENDERER renderer"; fi
+    msg="$TITLE quit after ${RUN_SECS}s (exit code $rc) $on${WRAPPER[0]:+, under ${WRAPPER[0]}}.
 
 $(last_errors "$log")
 
@@ -1188,6 +1190,15 @@ exit "$rc"
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #229: the header keeps the machine value; the dialog says what
+    /// `proton-default` is.
+    #[test]
+    fn proton_default_reads_as_proton_defaults_in_the_dialog() {
+        let s = launch_sh();
+        assert!(s.contains("printf '# renderer: %s\\n' \"$RENDERER\""));
+        assert!(s.contains("on Proton's default renderer"));
+    }
 
     #[test]
     fn the_template_carries_its_version() {

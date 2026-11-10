@@ -3095,7 +3095,7 @@ fn linux_app_plan_lines(plan: &gogo::linuxapp::build::LinuxAppPlan) -> String {
     line(&mut out, "container:", plan.container_line.clone());
     let renderer = match &plan.renderer {
         Some(sel) => {
-            let mut r = sel.describe();
+            let mut r = sel.describe_linux();
             match &plan.renderer_setup {
                 Some(p) => r.push_str(&format!("; sets {}", build::switches(p))),
                 None if sel.renderer.value == gogo::macapp::Renderer::Wined3d.id()

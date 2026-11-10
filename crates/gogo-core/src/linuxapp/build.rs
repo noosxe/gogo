@@ -27,7 +27,7 @@ use crate::macapp::compat::{self, CompatEntry, Effective, Layer, Os};
 use crate::macapp::error::MacAppError;
 use crate::macapp::launch::{self, GameDirs, LaunchToml};
 use crate::macapp::prompt::PromptFn;
-use crate::macapp::renderer::{self, LinuxPlan, PROTON_USE_WINED3D, Renderer, RendererChoice};
+use crate::macapp::renderer::{self, LinuxPlan, RendererChoice};
 use crate::macapp::{catalog, ddraw, info, installer, lutris, pe, store, verbs};
 
 /// `gogo linux-app` inputs.
@@ -154,12 +154,7 @@ fn renderer_plan(sel: &renderer::Selection, tree: &Path, build: &Path) -> LinuxP
     let entry = info::find_entry_point(tree).ok();
     let dir = ddraw::dir_for(tree, entry.as_deref());
     let mut p = renderer::plan_linux(&sel.renderer.value, &sel.l1, Some(&dir), build);
-    if p.renderer == Renderer::Wined3d.id()
-        && sel.renderer.layer != Layer::Auto
-        && !p.env.contains_key(PROTON_USE_WINED3D)
-    {
-        p.env.insert(PROTON_USE_WINED3D.into(), "1".into());
-    }
+    renderer::settle_wined3d(&mut p, sel.renderer.layer == Layer::Auto);
     p
 }
 
@@ -1030,6 +1025,7 @@ fn restore_and_run_support(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::macapp::renderer::PROTON_USE_WINED3D;
 
     #[test]
     fn gog_key_reg_is_regedit4_in_the_32_bit_view() {

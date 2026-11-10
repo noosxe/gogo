@@ -357,9 +357,9 @@ Mac, with a Linux table:
 | Game ships DDrawCompat as `ddraw.dll` (#199) | none | keep it, unloaded: no override, Wine's builtin; no cnc-ddraw, no D7VK |
 | Game ships another `ddraw.dll` | none | keep it, `ddraw=n,b`; no cnc-ddraw, no D7VK |
 | D3D≤7 immediate mode, interface GUIDs only, or only the `dxguid` block | `d7vk` | `PROTON_USE_D7VK=1` |
-| D3D≤7 retained mode (`d3drm`/`d3dxof`) | `wined3d` | nothing: Proton's default `ddraw` |
+| D3D≤7 retained mode (`d3drm`/`d3dxof`) | `wined3d` | nothing: Proton's default `ddraw` (labelled `proton-default`, below) |
 | DirectDraw, selective DirectDraw GUIDs only, 32-bit | `cnc-ddraw` | `ddraw.dll` + gogo's `ddraw.ini` in the game dir, `ddraw=n,b` (as `ddraw.rs` does on the Mac) |
-| OpenGL, Vulkan, packed, nothing found | `wined3d` | nothing |
+| OpenGL, Vulkan, packed, nothing found, an engine's implied class (Clickteam) | `wined3d` | nothing (labelled `proton-default`, below) |
 
 - **Renderer ids on Linux:** `dxvk`, `vkd3d-proton`, `d7vk`, `cnc-ddraw[/<ver>]`,
   `wined3d`. `dxvk`/`vkd3d-proton`/`d7vk` carry no version: they are whatever the
@@ -367,6 +367,22 @@ Mac, with a Linux table:
   `0bb64c56`, D7VK's GE submodule). `renderer = "wined3d"` sets `PROTON_USE_WINED3D=1`,
   which moves D3D9–12 together; a per-API choice is a `dll_overrides` entry (R16,
   accepted).
+- **`wined3d` as L1's pick is labelled `proton-default` (#229).** The table's `wined3d`
+  rows set nothing, so Proton's defaults run: DXVK for D3D9–11 (a Clickteam game that
+  loads `mmf2d3d9.dll` renders through DXVK), Wine's builtin `ddraw` for DirectDraw. The
+  label says what happens. It is the *applied* ref, not a renderer: `state.toml`'s
+  `renderer`, `launch.conf`'s `RENDERER`, `launch.sh`'s `# renderer:` header, the logs,
+  `doctor`, `env list` and `--json` all carry `proton-default`, and people read "none
+  (Proton's defaults: DXVK for d3d9–11)". The pick and the env it sets don't change.
+  `wined3d` keeps one meaning: `PROTON_USE_WINED3D=1`, from L3, L4, a flag, the walk or
+  a fallback away from another L1. `renderer = "proton-default"` is not accepted as a
+  choice (a plain `auto` is how you get it back). Setup applies it after the layers
+  decided (`settle_wined3d`): a `wined3d` chosen over an L1 `wined3d` is still real.
+  The compat report's `baked` / `auto` / `effective` use the label for L1's own pick.
+  Readers of an applied ref (`doctor`, the walk's "current", `env list`'s applicability)
+  take it as L1's wined3d position; `env list` says the Vulkan-side variables are unknown
+  there, since which of DXVK or VKD3D-Proton runs depends on the game. `launch.sh` 11
+  words the early-exit dialog "on Proton's default renderer".
 - **Never both `ddraw.dll`s.** Setup never sets `PROTON_USE_D7VK` while a `ddraw.dll` sits
   in the game dir (the game's or gogo's), and moving a game to D7VK removes gogo's
   cnc-ddraw (`ddraw::remove_gogo`). A user `renderer = "d7vk"` on a game that ships its
@@ -512,7 +528,8 @@ Mac, with a Linux table:
     ships a `ddraw.dll` keeps its class. A cnc-ddraw gogo placed earlier isn't counted
     (`pick_linux`, as on the Mac).
   - **An engine's implied class** (Clickteam: `d3d_legacy` with no API seen) → `wined3d`,
-    with nothing set.
+    with nothing set: labelled `proton-default`, because Proton's DXVK runs it (Treasure
+    Adventure Game, Clickteam Fusion 2, #229).
 - **Reason text.** It is the Mac's `<what>: <seen> (<engine>, <bits> <exe>)`. The D3D ≤ 7
   rows add #173's wording for all three levels: "from a device/work GUID or a
   d3dim/d3drm import" or "from the renderer DLL d3ddrv.dll" (`strong`), "from interface
@@ -1543,7 +1560,7 @@ programs (editing `launch.conf` doesn't change the stamp, so no setup ran):
 
 - `cmd /c exit 3` and `cmd /c echo SMOKE` give footers `# exit: 3` and `# exit: 0`, and
   `launch.log` reads `umu-run exited <n>; waiting for the prefix's processes`, `prefix
-  idle`, `early exit: code <n> after 3s on wined3d (dialogs off)` with
+  idle`, `early exit: code <n> after 3s on <renderer> (dialogs off)` with
   `GOGO_LAUNCHER_NO_DIALOG=1`.
 - Proton's `umu.exe` starts the exe with `CREATE_NEW_CONSOLE`, so a console program
   gets a windowed `conhost`. Its output goes to that window, not to the run log. With

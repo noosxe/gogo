@@ -24,7 +24,7 @@ use crate::macapp::doctor::{Finding, Level, Report, check_log, normalize, walk_l
 use crate::macapp::error::MacAppError;
 use crate::macapp::launch::{GameDirs, LaunchToml};
 use crate::macapp::pe::{Bitness, PeScan, ScanError};
-use crate::macapp::renderer::{self, PROTON_USE_D7VK, Renderer, RendererRef};
+use crate::macapp::renderer::{self, PROTON_USE_D7VK, Renderer};
 use crate::macapp::{catalog, ddraw, store};
 
 /// The Steam Linux Runtime folder umu keeps for each `require_tool_appid`
@@ -1138,8 +1138,8 @@ fn check_renderer(g: &Game, build: &Path, scan: Option<&manage::InstalledScan>) 
             ),
         );
     }
-    let r = match RendererRef::parse_on(&applied, Os::Linux) {
-        Ok(r) => r.renderer,
+    let r = match renderer::applied_renderer(&applied, Os::Linux) {
+        Ok(r) => r,
         Err(e) => return Finding::fail("renderer", format!("{applied}: {e}"), setup),
     };
     match r {
@@ -1197,6 +1197,10 @@ fn check_renderer(g: &Game, build: &Path, scan: Option<&manage::InstalledScan>) 
     } else {
         ""
     };
+    if applied == renderer::PROTON_DEFAULT && switches.is_empty() {
+        let desc = renderer::PROTON_DEFAULT_DESC;
+        return Finding::ok("renderer", format!("{applied}: {desc}{kept}{note}"));
+    }
     Finding::ok("renderer", format!("{applied} ({sets}{kept}){note}"))
 }
 

@@ -23,7 +23,7 @@ use super::{manage, setup};
 use crate::macapp::compat::{self, Os};
 use crate::macapp::error::MacAppError;
 use crate::macapp::launch::GameDirs;
-use crate::macapp::renderer::{Renderer, RendererRef};
+use crate::macapp::renderer::Renderer;
 use scan::BuildFacts;
 use table::{Component, Kind, PLUMBING, REVIEWED_FOR, Spec, TABLE, Topic};
 
@@ -216,6 +216,10 @@ impl CatalogueReport {
 /// What applicability depends on, apart from the entry.
 pub struct Machine<'a> {
     pub renderer: Option<Renderer>,
+    /// The game runs on `proton-default`: nothing is set, so DXVK or
+    /// VKD3D-Proton run depending on the API the game opens (#229).
+    /// `renderer` is `None` then.
+    pub proton_default: bool,
     /// As [`super::doctor`] labels them: `NVIDIA`, `AMD`, `Intel`, `0x…`.
     pub gpus: Vec<String>,
     pub on_path: &'a dyn Fn(&str) -> bool,
@@ -243,6 +247,15 @@ fn applies(spec: &Spec, in_build: InBuild, m: &Machine) -> Applies {
     if !spec.renderers.is_empty() {
         let wanted = || list(spec.renderers.iter().map(|r| r.id().to_string()));
         match m.renderer {
+            None if m.proton_default => {
+                return Applies::Unknown {
+                    why: format!(
+                        "for {}; this game runs Proton's defaults (DXVK for d3d9–11, \
+                         VKD3D-Proton for d3d12), whichever it opens",
+                        wanted()
+                    ),
+                };
+            }
             None => {
                 return Applies::Unknown {
                     why: format!("for {}; this game has no renderer yet", wanted()),
@@ -610,10 +623,11 @@ pub fn report(gogid: &str, host: &Host, reveal: bool) -> Result<CatalogueReport,
                 .ok()
                 .and_then(|c| c.renderer.map(|r| r.effective))
         });
+    let proton_default = renderer.as_deref() == Some(crate::macapp::renderer::PROTON_DEFAULT);
     let parsed = renderer
         .as_deref()
-        .and_then(|r| RendererRef::parse_on(r, Os::Linux).ok())
-        .map(|r| r.renderer);
+        .filter(|_| !proton_default)
+        .and_then(|r| crate::macapp::renderer::applied_renderer(r, Os::Linux).ok());
     let mut gpus: Vec<String> = super::doctor::gpus(host)
         .into_iter()
         .map(|g| g.vendor)
@@ -622,6 +636,7 @@ pub fn report(gogid: &str, host: &Host, reveal: bool) -> Result<CatalogueReport,
     gpus.dedup();
     let machine = Machine {
         renderer: parsed,
+        proton_default,
         gpus,
         on_path: &|c| host.finds_program(c),
     };
