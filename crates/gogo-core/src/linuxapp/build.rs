@@ -27,7 +27,7 @@ use crate::macapp::compat::{self, CompatEntry, Effective, Layer, Os};
 use crate::macapp::error::MacAppError;
 use crate::macapp::launch::{self, GameDirs, LaunchToml};
 use crate::macapp::prompt::PromptFn;
-use crate::macapp::renderer::{self, LinuxPlan, RendererChoice};
+use crate::macapp::renderer::{self, LinuxPlan, Renderer, RendererChoice};
 use crate::macapp::{catalog, ddraw, info, installer, lutris, pe, store, verbs};
 
 /// `gogo linux-app` inputs.
@@ -359,7 +359,13 @@ fn select_renderer(
 ) -> renderer::Selection {
     let sel = renderer::select_on(Os::Linux, gogid, renderer::pick_linux(scan), choice);
     emit(&ProgressEvent::RendererSelected {
-        renderer: sel.renderer.value.clone(),
+        renderer: if sel.renderer.value == Renderer::Wined3d.id()
+            && sel.renderer.layer == Layer::Auto
+        {
+            renderer::PROTON_DEFAULT.to_string()
+        } else {
+            sel.renderer.value.clone()
+        },
         layer: sel.renderer.layer.describe().to_string(),
         reason: sel.reason.clone(),
     });
