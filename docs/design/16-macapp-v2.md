@@ -256,7 +256,8 @@ take different paths into the prefix.
   The runtime #72 compares for verb re-runs is the one actually run, so a switch
   onto or off DXMT re-runs winetricks once (it skips installed verbs), and the
   wrappers for a derived runtime are its own. One import scan feeds both L1
-  fields (renderer and verbs) per build.
+  fields (renderer and verbs) per build. Other exes beside the entry exe
+  count only when the entry exe gives no graphics evidence (design 18, #226).
 
 *Verbs, #72 (`macapp/verbs.rs`):*
 

@@ -1073,7 +1073,7 @@ fn check_renderer(g: &Game, build: &Path, scan: Option<&manage::InstalledScan>) 
     let dxguid = scan
         .and_then(|(_, s)| s.as_ref().ok())
         .is_some_and(|s| s.dxguid_block);
-    let note = if dxguid {
+    let mut note = if dxguid {
         format!(
             "; L1's D3D≤7 evidence is only the dxguid GUID block, so the game may be 2D \
              (`gogo linux-app next-renderer {}` tries the next one)",
@@ -1082,6 +1082,16 @@ fn check_renderer(g: &Game, build: &Path, scan: Option<&manage::InstalledScan>) 
     } else {
         String::new()
     };
+    // #226: exes beside the entry point whose imports L1 left out.
+    if let Some(Ok(sc)) = scan.map(|(_, s)| s.as_ref()) {
+        for (path, apis) in &sc.secondary_graphics {
+            let apis: Vec<String> = apis.iter().map(|a| format!("{a:?}")).collect();
+            note.push_str(&format!(
+                "; {path} (a tool, not the entry point) imports {} and was left out of L1",
+                apis.join(", ")
+            ));
+        }
+    }
 
     if d7vk_on && dll_in_game {
         return Finding::fail(
