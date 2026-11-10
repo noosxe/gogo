@@ -1,0 +1,20 @@
+# SimCity 2000 Special Edition: GOG ships the 1993 DOS game in its bundled DOSBox
+# 0.74-2 (DOSBOX/DOSBox.exe, 32-bit), with GOG's dosboxSC2000*.conf from the support
+# overlay (output=ddraw, fullscreen) and a batch launcher of its own. L1 picks wined3d
+# (DOSBox.exe imports opengl32); no compat fix is needed.
+title  = "SimCity 2000 Special Edition"
+source = "gogo-headless"
+
+# Headless sway (e2e/1207658969.toml, e2e/city-1207658969.toml), on Xwayland: GOG's
+# launcher, the menu (4:3, pillarboxed, right palette), a new city with the simulation
+# running, and Quit, then "5" in the launcher, exit 0. On Wine's Wayland driver the same
+# route works and quits cleanly, but the 32-bit DOSBox gets no GL there (#312): DOSBox's
+# ddraw output fails ("Failed to create ddraw surface") and falls back to its surface
+# output, which centres 640x480 unscaled.
+[platforms.linux]
+status = "boots"
+lane   = "depot"
+notes  = "Xwayland (headless sway): GOG's DOSBox launcher, the menu, a new city and quitting work, 4:3 scaled; on Wine's Wayland driver the game works and quits but draws 640x480 unscaled, centred, since 32-bit DOSBox gets no GL there for its ddraw output (#312)"
+tested = [
+  { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/nvidia", date = 2026-11-10 },
+]
