@@ -29,9 +29,10 @@ tested = [
 [platforms.linux]
 status = "boots"
 lane   = "depot"
-notes  = "headless sway: intro, title and the Quit dialog work on cnc-ddraw; audio and the owner's compositor not judged"
+notes  = "headless sway, on Wine's Wayland driver (gogo's display mode) and on Xwayland: intro, title and the Quit dialog work on cnc-ddraw, and Yes ends the game; audio and the owner's compositor not judged"
 tested = [
   { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/software", date = 2026-11-06 },
   { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/radv", date = 2026-11-06 },
   { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/nvidia", date = 2026-11-06 },
+  { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/nvidia", date = 2026-11-10 },
 ]

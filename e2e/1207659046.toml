@@ -1,6 +1,8 @@
 # Pharaoh + Cleopatra (2D DirectDraw: gogo's cnc-ddraw). Escape skips the logos and the
 # intro to the title; Escape there opens "Leave the Kingdom?", whose Yes ends the game.
-# 4:3 pillarboxed in 1280x800, hence the width. Coordinates are percent of the window.
+# 4:3 pillarboxed in 1280x800, hence the width. cnc-ddraw clips the pointer, so on Wine's
+# Wayland driver the game holds a pointer lock and an absolute click never lands; the
+# dialog has no key for Yes (Return, y don't), so the pointer is steered instead.
 title = "Pharaoh + Cleopatra"
 gogid = 1207659046
 
@@ -8,6 +10,11 @@ gogid = 1207659046
 wait_secs = 240
 resolution = "1280x800"
 min_fill = { w = 80, h = 95 }
+
+# cnc-ddraw draws through GDI: on Wine's Wayland driver that's shm buffers, and
+# the game never opens the GPU (on Xwayland, Wine's X11 driver opens it anyway).
+[gpu]
+wayland = "unused"
 
 [exit]
 how = "self"
@@ -37,6 +44,28 @@ screenshot = "leave-dialog"
 [[step]]
 expect_change = { from = "title", to = "leave-dialog", min = 5 }
 
-# Yes.
+# Yes, by steering the pointer: a big move_by pins it in the top-left corner, then 512,457
+# (window pixels). The pin lands on the window's edge in one launch and on the 4:3
+# picture's (x 107) in another, so the pointer ends at 512 or 619, both inside the
+# button (x 490-638, y 435-473). The game wants a pause and a nudge to see the pointer
+# over the button: without them the click came too early and Yes didn't take.
 [[step]]
-click = { x = 44, y = 57 }
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+move_by = { x = 512, y = 457 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = 2, y = 0 }
+
+[[step]]
+wait = 1
+
+[[step]]
+screenshot = "hover"
+
+[[step]]
+click_here = true
