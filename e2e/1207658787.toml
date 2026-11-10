@@ -24,6 +24,11 @@ wait_secs = 240
 resolution = "1280x800"
 min_fill = { w = 80, h = 95 }
 
+# cnc-ddraw draws through GDI: on Wine's Wayland driver that's shm buffers, and
+# the game never opens the GPU (on Xwayland, Wine's X11 driver opens it anyway).
+[gpu]
+wayland = "unused"
+
 [exit]
 how = "self"
 wait_secs = 60

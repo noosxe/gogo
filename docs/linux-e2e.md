@@ -807,6 +807,7 @@ vendor. The label in the summary comes from the node's kernel driver: `nvidia`, 
 | `gpu_gl` | `glxinfo` in the game's environment names the expected driver |
 | `gpu_vulkan` | `vulkaninfo` only lists the expected device |
 | `gpu_used_by_game` | One GPU: the game's own process holds the node open (`/dev/nvidia0` for NVIDIA). `gpu_detail.game_gpu_fds` lists those, `gpu_detail.gpu_fds` everybody |
+| `gpu_used_by_game` (`[gpu] wayland = "unused"`, Wayland mode, no `--expect-gpu`) | the game holds no GPU node: it draws through GDI into shm buffers, as declared (see [Manifests](#manifests)) |
 
 **What counts as the game:** a process whose Windows path (its `argv[0]`) is the effective exe,
 the launcher log's `# exe:` line, or lies in that exe's folder. `explorer.exe` and `xalia.exe`
@@ -958,6 +959,9 @@ title = "^SimCity"               # regex for the window; default the largest vis
 min_fill = { w = 80, h = 95 }    # % of the window; default 90 x 90
 display = "wayland"              # "xwayland" (default) or "wayland": Wayland mode, below
 
+[gpu]
+wayland = "unused"               # draws without the GPU on Wine's Wayland driver (GDI): below
+
 [env]                            # only for the game's launch: logging, for example
 DXVK_LOG_LEVEL = "info"
 
@@ -1057,9 +1061,12 @@ but the pin lands on the window's left edge on one launch and on the 4:3 picture
 keys.
 
 A game that draws through GDI (gogo's cnc-ddraw is pinned to `renderer=gdi`) never opens the GPU
-on Wine's Wayland driver: its frames go to the compositor in shared-memory buffers. So with
-`--gpu`, `gpu_used_by_game` fails there, by design, while on Xwayland Wine's X11 driver opens the
-node anyway and it passes (Heroes 3, 2026-11-10).
+on Wine's Wayland driver: its frames go to the compositor in shared-memory buffers. On Xwayland
+Wine's X11 driver opens the node anyway. So such a manifest says `[gpu] wayland = "unused"`: in
+Wayland mode, with `--gpu` and no `--expect-gpu`, `gpu_used_by_game` (and
+`gpu_used_by_game_launch_<n>`) then wants the game to hold **no** GPU node, and fails if it holds
+one, since that means it draws another way now. Xwayland mode and `--expect-gpu` are unchanged
+(Heroes 3, 2026-11-10).
 
 To write one: run it with `--keep` or a first screenshot, read the coordinates off the
 PNG, and divide by the resolution. Look at the screenshots yourself: the automatic checks
