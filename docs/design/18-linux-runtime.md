@@ -881,7 +881,8 @@ Shape: `{"productId", "actions": [{"name", "languages", "install": {"action", "a
 | `setRegistry` (`root`, `subkey`, `valueName`, `valueType`, `valueData`, `saveGameData`?, `deleteSubkeys`?) | Chaos Gate, SimCity 3000/4, Stronghold HD | applied |
 | `delRegistry` (`root`, `subkey`; `conditions: onLanguageChange`) | AD2044 | skipped, warned |
 | `Execute` (`executable`, `runAsAdmin`) | the offline installer wrappers (Zeus, Pharaoh), Chaos Gate's DirectPlay and Firewall helpers, SimCity 4 | skipped, warned |
-| `savePath`, `supportData` (`{supportDir}` → `{userdocs}` copies) | SimCity 4, Stronghold HD | skipped, warned |
+| `savePath`, `supportData` (make a folder; `{supportDir}` → `{userdocs}` copies) | SimCity 4, Stronghold HD and Crusader HD, Heroes 3 | skipped, warned (below) |
+| `installSDB` (`GUID`, `sdbFile`) | Heroes 3 | skipped, warned |
 
 Registry details:
 
@@ -904,17 +905,44 @@ Registry details:
   HD (9 `HKLM`: App Paths, DirectPlay), AD2044 (a delete only), Zeus & Poseidon and Pharaoh Gold
   (installer `Execute` only).
 
+Folder actions: not run, by decision (#316). Their shapes: `savePath` (`savePath`, `type:
+folder`) and `supportData` without a `source` make a folder; `supportData` with a `source`
+copies a folder or file from `{supportDir}` (the depot cache's
+`gog-support/<base id>/<gogid>/`) to a `target` under `{userdocs}` or `{app}`, the copy
+marked `conditions: ["onlyOnce"]` (first install only). In the cached depots:
+
+- SimCity 4: make `{userdocs}/SimCity 4` (twice), then copy the overlay's
+  `userdocs/SimCity 4/` (`SimCity 4.cfg`, `Regions/` with the six stock regions and
+  `Downloads`) there, once. The game does this itself: on a first start without it
+  (headless run, #316) it made `Documents/SimCity 4` with `Regions/` identical to GOG's
+  copy, file for file (region names, `Downloads` included), plus its own `SimCity 4.cfg`,
+  `Plugins/` and `HTTPCache/`, and played through to the region view and quit. GOG's
+  `.cfg` is a snapshot of that file (last region Timbuktu, where the game starts anyway).
+- Stronghold HD, Stronghold Crusader HD: `savePath` only (a folder the game makes when it
+  saves).
+- Heroes 3: make `{app}/random_maps` and `{app}/games`, which the depot tree already has.
+
+So nothing a cached game needs; setup keeps warning (`N supportData action(s) not run
+(only setRegistry is)`), which is accurate. If a game turns up that does need the copy,
+the shape to run is: targets only under `{app}`/`{userdocs}`, no `..`, never over an
+existing file (the user's saves), `onlyOnce` recorded per prefix so a rebuild doesn't
+bring back what the user deleted; in the Linux depot build, which alone knows the cache.
+
 ### 4.10 Compat `files`: small text files in the game dir
 
-Some games need a file the depot tree lacks and nothing else supplies: SimCity 4 Deluxe
-looks for its data next to `Apps/SimCity 4.exe` unless `Apps/SimCity 4.ini` says
-`[Directories] Data=`, and stops at "Unable to find game data" without it (the GOG script's
-`supportData`/`Execute` actions don't write it either, §4.9). The compat key `files` covers
-such cases:
+Some games need a file that neither the depot tree nor GOG's support overlay supplies. The
+compat key `files` covers such cases. For example, SimCity 4 Deluxe looks for its data next
+to `Apps/SimCity 4.exe` unless `Apps/SimCity 4.ini` says `[Directories] Data=`, and stops at
+"Unable to find game data" without it; an entry could supply it as:
 
 ```toml
 files = [{ path = "Apps/SimCity 4.ini", text = "[Directories]\nData=..\\\n" }]
 ```
+
+(SimCity 4 itself doesn't need it: GOG's support overlay ships that ini, with `Data=..\`
+and `PlugIn=..\Plugins\`, and a depot build merges it into the game dir. The key was
+added for SimCity 4 from an e2e depot cache whose `gog-support/` had been deleted by hand;
+its entry was dropped once that came to light, #316.)
 
 - **Shape.** A list of `{ path, text }`, top level or `[platforms.<os>]`, in every layer.
   It's a fix key (`compat::TOP_FIX_KEYS`): a protonfix that owns the game skips L3's. Like
@@ -926,8 +954,8 @@ files = [{ path = "Apps/SimCity 4.ini", text = "[Directories]\nData=..\\\n" }]
   the parent dir's canonical path must still be inside the canonical game dir, so a
   symlinked folder can't lead out; such a file is skipped with a warning.
 - **Content.** `text` is written as given, UTF-8, no line-ending conversion; a game that
-  needs CRLF writes `\r\n` in the TOML. No placeholders, as in `registry`; SimCity 4's
-  file gets by with a path relative to its own folder (`..\`).
+  needs CRLF writes `\r\n` in the TOML. No placeholders, as in `registry`; the SimCity 4
+  example gets by with a path relative to its own folder (`..\`).
 - **Existing files: gogo only replaces its own.** Setup records `<sha256> <path>` for each
   file that is gogo's in `state.toml` (`files`). Each setup then, per file, with names
   matched regardless of case as Wine does (an installer's `apps/simcity 4.ini` is the
@@ -2135,8 +2163,10 @@ same warnings.
 
 **Not here.** Checking `monitor` against the compositor's outputs (no cheap, portable way: Hyprland
 has `hyprctl`, wlroots `wlr-randr`, KWin neither). Catalogue and
-compat entries saying a game wants or breaks on Wayland can now be an L3 `display` key, but none
-is written yet (#296). OpenGL games on the Wayland driver go through EGL (`WINE_USE_EGL=1`), which NVIDIA
+compat entries saying a game wants or breaks on Wayland can now be an L3 `display` key; the
+first is SimCity 4 Deluxe's `display = "x11"` (#316: its 32-bit wined3d path gets no EGL or
+Vulkan on Wine's Wayland driver, on the owner's Hyprland desktop too). The rest of #296
+(Cyberpunk's choice, `tested` rows per mode, the catalogue naming a DB-set mode) is open. OpenGL games on the Wayland driver go through EGL (`WINE_USE_EGL=1`), which NVIDIA
 can't show in the harness (#294).
 
 **The harness.** `scripts/linux-e2e.sh --display wayland` writes `linux-app display <gogid>

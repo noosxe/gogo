@@ -1,7 +1,7 @@
-# SimCity 4 Deluxe Edition (wined3d, L1; compat `files` writes Apps/SimCity 4.ini, or it
-# stops at "Unable to find game data"). The intros end by themselves in the region view
-# (Timbuktu), whose water never holds still, so a plain wait. Then the exit button and
-# "Quit SimCity 4", which ends the game (Return on that menu does nothing).
+# SimCity 4 Deluxe Edition (wined3d, L1; GOG's support overlay supplies Apps/SimCity 4.ini,
+# without which it stops at "Unable to find game data"). The intros end by themselves in the
+# region view (Timbuktu), whose water never holds still, so a plain wait. Then the exit button
+# and "Quit SimCity 4", which ends the game (Return on that menu does nothing).
 #
 # 1024x768 scaled to the window's height: 1067x800 pillarboxed in 1280x800, hence a width
 # of 80%. Coordinates are percent of the window.
