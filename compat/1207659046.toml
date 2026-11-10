@@ -27,12 +27,13 @@ tested = [
 
 # Linux depot lane (e2e/1207659046.toml): no CD prompt, the overlay's Pharaoh.ini is enough.
 [platforms.linux]
-status = "boots"
+status = "plays"
 lane   = "depot"
-notes  = "headless sway, on Wine's Wayland driver (gogo's display mode) and on Xwayland: intro, title and the Quit dialog work on cnc-ddraw, and Yes ends the game; audio and the owner's compositor not judged"
+notes  = "owner's host pass on Hyprland (NVIDIA RTX 4090), built with gogo (depot lane, cnc-ddraw): everything works on both Wine's Wayland driver and Xwayland (intros and music, 4:3 scaling, mouse, a play session, quitting, pointer lock, fullscreen vs windowed); the depot build needs no CD prompt; headless sway agreed on both display modes"
 tested = [
   { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/software", date = 2026-11-06 },
   { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/radv", date = 2026-11-06 },
   { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/nvidia", date = 2026-11-06 },
   { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/nvidia", date = 2026-11-10 },
+  { runtime = "ge-proton/GE-Proton11-12", host = "kraken-hyprland/nvidia", date = 2026-11-11 },
 ]
