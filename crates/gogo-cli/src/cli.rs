@@ -497,8 +497,17 @@ pub enum LinuxAppSub {
         /// outputs that report SDR, like Hyprland's cm_auto_hdr) or `off`.
         #[arg(long, value_name = "HDR", value_parser = ["auto", "on", "force", "off"])]
         hdr: Option<String>,
-        /// Drop the mode and the HDR switch: the environment decides again.
-        #[arg(long, conflicts_with_all = ["mode", "hdr"])]
+        /// The output Wine's Wayland driver treats as primary, such as `DP-1`
+        /// (GE-Proton's PROTON_WAYLAND_MONITOR): the monitor the game opens
+        /// on. Without it GE-Proton guesses with xrandr. Wayland mode only.
+        #[arg(long, value_name = "OUTPUT", conflicts_with = "no_monitor")]
+        monitor: Option<String>,
+        /// Drop only the monitor: GE-Proton guesses again.
+        #[arg(long, conflicts_with = "clear")]
+        no_monitor: bool,
+        /// Drop the mode, the HDR switch and the monitor: the environment
+        /// decides again.
+        #[arg(long, conflicts_with_all = ["mode", "hdr", "monitor"])]
         clear: bool,
         /// Machine-readable output.
         #[arg(long)]
@@ -1574,26 +1583,35 @@ mod tests {
             "wayland",
             "--hdr",
             "force",
+            "--monitor",
+            "DP-1",
         ])
         .unwrap();
         let Command::LinuxApp {
-            sub: Some(LinuxAppSub::Display {
-                mode, hdr, clear, ..
-            }),
+            sub:
+                Some(LinuxAppSub::Display {
+                    mode,
+                    hdr,
+                    monitor,
+                    clear,
+                    ..
+                }),
             ..
         } = cli.command
         else {
             panic!("expected linux-app display");
         };
         assert_eq!(
-            (mode.as_deref(), hdr.as_deref(), clear),
-            (Some("wayland"), Some("force"), false)
+            (mode.as_deref(), hdr.as_deref(), monitor.as_deref(), clear),
+            (Some("wayland"), Some("force"), Some("DP-1"), false)
         );
         for ok in [
             &["display", "1"][..],
             &["display", "1", "x11"],
             &["display", "1", "--hdr", "off"],
             &["display", "1", "--clear"],
+            &["display", "1", "--monitor", "DP-1"],
+            &["display", "1", "--no-monitor"],
         ] {
             let argv = ["gogo", "linux-app"]
                 .iter()
@@ -1606,6 +1624,9 @@ mod tests {
             &["display", "1", "wl"][..],
             &["display", "1", "--hdr", "yes"],
             &["display", "1", "x11", "--clear"],
+            &["display", "1", "--monitor", "DP-1", "--no-monitor"],
+            &["display", "1", "--no-monitor", "--clear"],
+            &["display", "1", "--monitor", "DP-1", "--clear"],
         ] {
             let argv = ["gogo", "linux-app"]
                 .iter()

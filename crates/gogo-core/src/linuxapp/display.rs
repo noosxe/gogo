@@ -1,12 +1,16 @@
 //! A game's display mode on the Linux lane (#292, design 18 §7.9):
-//! `gogo linux-app display <gogid> [wayland|x11] [--hdr …] [--clear]`.
+//! `gogo linux-app display <gogid> [wayland|x11] [--hdr …] [--monitor …] [--clear]`.
 //!
-//! `display` and `hdr` live in the game's L4 file under `[platforms.linux]`,
+//! `display`, `hdr` and `monitor` live in the game's L4 file under `[platforms.linux]`,
 //! like `wrapper`. Setup writes them into `launch.conf` (`DISPLAY_MODE`,
-//! `DISPLAY_HDR`); the launcher checks for a Wayland socket at launch, where
+//! `DISPLAY_HDR`, `DISPLAY_MONITOR`); the launcher checks for a Wayland socket at launch, where
 //! the game's environment is, and sets GE-Proton's switches itself:
 //!
 //! - `wayland` with a socket: `PROTON_ENABLE_WAYLAND=1`, plus `hdr`'s switch.
+//!   `monitor` (#295) becomes `PROTON_WAYLAND_MONITOR`, which GE-Proton's
+//!   `proton` script copies to `WAYLANDDRV_PRIMARY_MONITOR`, the variable
+//!   winewayland reads; unset, the script guesses with `xrandr`, which a
+//!   session without an X server fails.
 //!   With none (`WAYLAND_DISPLAY` unset, or no socket there) the game runs on
 //!   X11 and the launcher logs why. GE-Proton would fall back too, silently.
 //! - `x11`: `PROTON_ENABLE_WAYLAND` and `PROTON_USE_WAYLAND` are unset, so a
@@ -30,11 +34,18 @@ use crate::macapp::launch::GameDirs;
 /// GE-Proton's Wayland switch, and its alias.
 pub const WAYLAND_KEYS: [&str; 2] = ["PROTON_ENABLE_WAYLAND", "PROTON_USE_WAYLAND"];
 
-/// What the launcher exports for `mode` and `hdr` when the game gets
+/// GE-Proton's primary-monitor switch (#295).
+pub const MONITOR_KEY: &str = "PROTON_WAYLAND_MONITOR";
+
+/// What the launcher exports for `hdr` and `monitor` when the game gets
 /// Wine's Wayland driver. Nothing for `x11` (it unsets [`WAYLAND_KEYS`]).
-pub fn wayland_env(hdr: Option<Hdr>) -> Vec<(&'static str, &'static str)> {
-    let mut out = vec![(WAYLAND_KEYS[0], "1")];
-    out.extend(hdr.and_then(Hdr::proton_env));
+pub fn wayland_env(hdr: Option<Hdr>, monitor: Option<&str>) -> Vec<(&'static str, String)> {
+    let mut out = vec![(WAYLAND_KEYS[0], "1".to_string())];
+    out.extend(
+        hdr.and_then(Hdr::proton_env)
+            .map(|(k, v)| (k, v.to_string())),
+    );
+    out.extend(monitor.map(|m| (MONITOR_KEY, m.to_string())));
     out
 }
 
@@ -46,10 +57,13 @@ pub struct DisplayView {
     pub mode: Option<Sourced<DisplayMode>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hdr: Option<Sourced<Hdr>>,
-    /// `launch.conf`'s `DISPLAY_MODE` / `DISPLAY_HDR`: what the last setup
-    /// wrote (`None`: no line).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monitor: Option<Sourced<String>>,
+    /// `launch.conf`'s `DISPLAY_MODE` / `DISPLAY_HDR` / `DISPLAY_MONITOR`:
+    /// what the last setup wrote (`None`: no line).
     pub applied_mode: Option<DisplayMode>,
     pub applied_hdr: Option<Hdr>,
+    pub applied_monitor: Option<String>,
     /// The next launch's setup changes them.
     pub pending: bool,
 }
@@ -59,24 +73,35 @@ impl DisplayView {
     pub fn of(eff: &Effective, conf: Option<&ConfValues>) -> Option<DisplayView> {
         let applied_mode = conf.and_then(|c| DisplayMode::from_key(c.get("DISPLAY_MODE")));
         let applied_hdr = conf.and_then(|c| Hdr::from_key(c.get("DISPLAY_HDR")));
+        let applied_monitor = conf
+            .map(|c| c.get("DISPLAY_MONITOR"))
+            .filter(|m| !m.is_empty())
+            .map(str::to_string);
         if eff.display.is_none()
             && eff.hdr.is_none()
+            && eff.monitor.is_none()
             && applied_mode.is_none()
             && applied_hdr.is_none()
+            && applied_monitor.is_none()
         {
             return None;
         }
         let mode = eff.display.clone();
         let hdr = eff.hdr.clone();
+        let monitor = eff.monitor.clone();
         // `hdr = "auto"` writes no line, as no `hdr` does.
         let want_hdr = hdr.as_ref().map(|h| h.value).filter(|h| *h != Hdr::Auto);
         let pending = conf.is_some()
-            && (mode.as_ref().map(|m| m.value) != applied_mode || want_hdr != applied_hdr);
+            && (mode.as_ref().map(|m| m.value) != applied_mode
+                || want_hdr != applied_hdr
+                || monitor.as_ref().map(|m| &m.value) != applied_monitor.as_ref());
         Some(DisplayView {
             mode,
             hdr,
+            monitor,
             applied_mode,
             applied_hdr,
+            applied_monitor,
             pending,
         })
     }
@@ -89,6 +114,9 @@ impl DisplayView {
         };
         if let Some(h) = &self.hdr {
             out.push_str(&format!(", hdr {} ({})", h.value.key(), h.layer.describe()));
+        }
+        if let Some(m) = &self.monitor {
+            out.push_str(&format!(", monitor {} ({})", m.value, m.layer.describe()));
         }
         out
     }
@@ -160,6 +188,26 @@ pub fn conflicts(gogid: &str, eff: &Effective) -> Vec<String> {
             h.layer.describe()
         ));
     }
+    if let Some(m) = &eff.monitor
+        && mode != Some(DisplayMode::Wayland)
+    {
+        out.push(format!(
+            "monitor {} ({}) applies only in Wayland mode: `gogo linux-app display {gogid} wayland`",
+            m.value,
+            m.layer.describe()
+        ));
+    }
+    if let Some(m) = &eff.monitor
+        && let Some(e) = eff.env.get(MONITOR_KEY)
+        && e.value != m.value
+    {
+        out.push(format!(
+            "env {MONITOR_KEY}={:?} ({}) wins over monitor {}",
+            e.value,
+            e.layer.describe(),
+            m.value
+        ));
+    }
     if mode == Some(DisplayMode::Wayland)
         && let Some(w) = &eff.wrapper
         && envargs::wrapper_runs(&w.value, "gamescope")
@@ -218,6 +266,7 @@ pub fn display_report(gogid: &str) -> Result<DisplayReport, MacAppError> {
     let view = DisplayView::of(&r.effective, conf.as_ref());
     let mode = r.effective.display.as_ref().map(|m| m.value);
     let hdr = r.effective.hdr.as_ref().map(|h| h.value);
+    let monitor = r.effective.monitor.as_ref().map(|m| m.value.as_str());
     let mut warnings = conflicts(gogid, &r.effective);
     warnings.extend(r.warnings);
     Ok(DisplayReport {
@@ -226,9 +275,9 @@ pub fn display_report(gogid: &str) -> Result<DisplayReport, MacAppError> {
         built: r.built,
         display: view,
         wayland_env: match mode {
-            Some(DisplayMode::Wayland) => wayland_env(hdr)
+            Some(DisplayMode::Wayland) => wayland_env(hdr, monitor)
                 .into_iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .map(|(k, v)| (k.to_string(), v))
                 .collect(),
             _ => vec![],
         },
@@ -238,12 +287,13 @@ pub fn display_report(gogid: &str) -> Result<DisplayReport, MacAppError> {
     })
 }
 
-/// `gogo linux-app display <gogid> …`: `mode` and `hdr` are `None` to leave
-/// as they are, `Some(None)` to drop from L4.
+/// `gogo linux-app display <gogid> …`: `mode`, `hdr` and `monitor` are
+/// `None` to leave as they are, `Some(None)` to drop from L4.
 pub fn set_display(
     gogid: &str,
     mode: Option<Option<DisplayMode>>,
     hdr: Option<Option<Hdr>>,
+    monitor: Option<Option<String>>,
 ) -> Result<EditOutcome, MacAppError> {
     compat::validate_gogid(gogid)?;
     let mut edits = Vec::new();
@@ -253,6 +303,9 @@ pub fn set_display(
     if let Some(h) = hdr {
         edits.push(UserEdit::Hdr(h));
     }
+    if let Some(m) = monitor {
+        edits.push(UserEdit::Monitor(m));
+    }
     let changes = compat::edit_user_platform_for(gogid, &edits, Os::Linux)?;
     let mut warnings = Vec::new();
     if let Ok(r) = manage::compat(gogid) {
@@ -261,6 +314,7 @@ pub fn set_display(
         for (key, layer) in [
             ("display", eff.display.as_ref().map(|m| m.layer)),
             ("hdr", eff.hdr.as_ref().map(|h| h.layer)),
+            ("monitor", eff.monitor.as_ref().map(|m| m.layer)),
         ] {
             if let Some(l) = layer.filter(|l| *l != Layer::User) {
                 warnings.push(format!("`{key}` still comes from the {}", l.describe()));
@@ -286,7 +340,8 @@ pub fn set_display(
     })
 }
 
-/// The last run's display, from its log's header (`# display:`, `# hdr:`)
+/// The last run's display, from its log's header (`# display:`, `# hdr:`,
+/// `# monitor:`)
 /// and the game step's line under a wrapper.
 pub fn last_run(log: &str) -> Vec<String> {
     log.lines()
@@ -295,6 +350,10 @@ pub fn last_run(log: &str) -> Vec<String> {
             l.strip_prefix("# display: ")
                 .map(|v| format!("display {v}"))
                 .or_else(|| l.strip_prefix("# hdr: ").map(|v| format!("hdr {v}")))
+                .or_else(|| {
+                    l.strip_prefix("# monitor: ")
+                        .map(|v| format!("monitor {v}"))
+                })
                 .or_else(|| {
                     l.strip_prefix("gogo: display under the wrapper: ")
                         .map(|v| format!("under the wrapper: {v}"))
@@ -314,22 +373,29 @@ mod tests {
 
     #[test]
     fn the_wayland_env_follows_the_hdr_switch() {
-        assert_eq!(wayland_env(None), [("PROTON_ENABLE_WAYLAND", "1")]);
+        let e = |h, m| {
+            wayland_env(h, m)
+                .into_iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(e(None, None), ["PROTON_ENABLE_WAYLAND=1"]);
+        assert_eq!(e(Some(Hdr::Auto), None), ["PROTON_ENABLE_WAYLAND=1"]);
         assert_eq!(
-            wayland_env(Some(Hdr::Auto)),
-            [("PROTON_ENABLE_WAYLAND", "1")]
+            e(Some(Hdr::On), None),
+            ["PROTON_ENABLE_WAYLAND=1", "PROTON_ENABLE_HDR=1"]
         );
         assert_eq!(
-            wayland_env(Some(Hdr::On)),
-            [("PROTON_ENABLE_WAYLAND", "1"), ("PROTON_ENABLE_HDR", "1")]
+            e(Some(Hdr::Force), None),
+            ["PROTON_ENABLE_WAYLAND=1", "PROTON_FORCE_HDR=1"]
         );
         assert_eq!(
-            wayland_env(Some(Hdr::Force)),
-            [("PROTON_ENABLE_WAYLAND", "1"), ("PROTON_FORCE_HDR", "1")]
-        );
-        assert_eq!(
-            wayland_env(Some(Hdr::Off)),
-            [("PROTON_ENABLE_WAYLAND", "1"), ("PROTON_ENABLE_HDR", "0")]
+            e(Some(Hdr::Off), Some("DP-1")),
+            [
+                "PROTON_ENABLE_WAYLAND=1",
+                "PROTON_ENABLE_HDR=0",
+                "PROTON_WAYLAND_MONITOR=DP-1"
+            ]
         );
     }
 
@@ -370,6 +436,13 @@ mod tests {
             .is_err()
         );
         assert!(compat::parse("[platforms.linux]\nhdr = true\n", Os::Linux, Layer::User).is_err());
+        for bad in ["\"\"", "\"DP 1\"", "3", "\"a\\nb\""] {
+            let raw = format!("[platforms.linux]\nmonitor = {bad}\n");
+            assert!(
+                compat::parse(&raw, Os::Linux, Layer::User).is_err(),
+                "{bad}"
+            );
+        }
         let p = compat::parse(
             "[platforms.macos]\ndisplay = \"wayland\"\n",
             Os::Macos,
@@ -392,6 +465,20 @@ mod tests {
             "{c:?}"
         );
         assert!(conflicts("1", &eff("[platforms.linux]\nhdr = \"auto\"\n")).is_empty());
+        let c = conflicts("1", &eff("[platforms.linux]\nmonitor = \"DP-1\"\n"));
+        assert!(
+            c[0].starts_with("monitor DP-1 (L4 user override) applies only in Wayland mode"),
+            "{c:?}"
+        );
+        let wl = "[platforms.linux]\ndisplay = \"wayland\"\nmonitor = \"DP-1\"\n";
+        assert!(conflicts("1", &eff(wl)).is_empty());
+        let c = conflicts(
+            "1",
+            &eff(&format!(
+                "{wl}[platforms.linux.env]\nPROTON_WAYLAND_MONITOR = \"HDMI-A-1\"\n"
+            )),
+        );
+        assert!(c[0].contains("wins over monitor DP-1"), "{c:?}");
         let c = conflicts(
             "1",
             &eff(
@@ -466,16 +553,17 @@ mod tests {
 
     #[test]
     fn the_last_run_is_read_from_its_header() {
-        let log = "# launcher: 9\n# wrapper: gamescope --\n# display: x11 (wayland wanted, but WAYLAND_DISPLAY is unset)\n\
-                   # hdr: force (not applied: not on Wayland)\n# ---\ngogo: display under the wrapper: x11\nout\n# exit: 0\n";
+        let log = "# launcher: 10\n# wrapper: gamescope --\n# display: x11 (wayland wanted, but WAYLAND_DISPLAY is unset)\n\
+                   # hdr: force (not applied: not on Wayland)\n# monitor: DP-1 (not applied: not on Wayland)\n# ---\ngogo: display under the wrapper: x11\nout\n# exit: 0\n";
         assert_eq!(
             last_run(log),
             [
                 "display x11 (wayland wanted, but WAYLAND_DISPLAY is unset)",
                 "hdr force (not applied: not on Wayland)",
+                "monitor DP-1 (not applied: not on Wayland)",
                 "under the wrapper: x11",
             ]
         );
-        assert!(last_run("# launcher: 9\n# ---\n").is_empty());
+        assert!(last_run("# launcher: 10\n# ---\n").is_empty());
     }
 }

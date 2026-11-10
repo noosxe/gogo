@@ -143,6 +143,9 @@ impl Entry {
                     "gogo linux-app display {gogid} wayland --hdr on (or --hdr off)"
                 ))
             }
+            Kind::Env if self.name == "PROTON_WAYLAND_MONITOR" => Ok(format!(
+                "gogo linux-app display {gogid} wayland --monitor <output>"
+            )),
             Kind::Env if self.name == "PROTON_FORCE_HDR" => Ok(format!(
                 "gogo linux-app display {gogid} wayland --hdr force"
             )),

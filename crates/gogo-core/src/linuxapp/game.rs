@@ -398,6 +398,8 @@ pub struct LaunchConf {
     /// The HDR switch for Wayland mode; `None` and `Auto`: no
     /// `DISPLAY_HDR=` line.
     pub hdr: Option<Hdr>,
+    /// The primary monitor for Wayland mode; `None`: no `DISPLAY_MONITOR=` line.
+    pub monitor: Option<String>,
     /// gogo's env, the renderer switches and `PROTONFIXES_DISABLE` included.
     pub env: BTreeMap<String, String>,
     pub dll_overrides: BTreeMap<String, String>,
@@ -444,6 +446,9 @@ impl LaunchConf {
         }
         if let Some(h) = self.hdr.filter(|h| *h != Hdr::Auto) {
             kv("DISPLAY_HDR", sh_quote(h.key()));
+        }
+        if let Some(m) = &self.monitor {
+            kv("DISPLAY_MONITOR", sh_quote(m));
         }
         kv(
             "ENV",
@@ -519,6 +524,7 @@ mod tests {
             wrapper: vec![],
             display: None,
             hdr: None,
+            monitor: None,
             env: [
                 ("PROTON_USE_D7VK".to_string(), "1".to_string()),
                 ("ODD".to_string(), "a 'b' $X".to_string()),
@@ -607,16 +613,25 @@ mod tests {
         assert_eq!(c.render(), plain);
         c.display = Some(DisplayMode::Wayland);
         c.hdr = Some(Hdr::Force);
+        c.monitor = Some("DP-1".into());
         let text = c.render();
         let added: Vec<&str> = text
             .lines()
             .filter(|l| !plain.lines().any(|p| p == *l))
             .collect();
-        assert_eq!(added, ["DISPLAY_MODE='wayland'", "DISPLAY_HDR='force'"]);
+        assert_eq!(
+            added,
+            [
+                "DISPLAY_MODE='wayland'",
+                "DISPLAY_HDR='force'",
+                "DISPLAY_MONITOR='DP-1'"
+            ]
+        );
         assert!(text.find("DISPLAY_MODE=").unwrap() > text.find("ARGS=").unwrap());
         let v = ConfValues::parse(&text);
         assert_eq!(v.values["DISPLAY_MODE"], "wayland");
         assert_eq!(v.values["DISPLAY_HDR"], "force");
+        assert_eq!(v.values["DISPLAY_MONITOR"], "DP-1");
         c.display = Some(DisplayMode::X11);
         c.hdr = None;
         assert!(c.render().contains("\nDISPLAY_MODE='x11'\n"));

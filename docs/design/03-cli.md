@@ -159,11 +159,15 @@ subcommands take a GOGID: `setup`, `compat`, `doctor`, `next-renderer`, and (#23
   argument and no shell. It runs outside umu-run; the game's env applies inside it. A shell
   string, a relative path or `%command%` is refused with exit 2 and nothing written. `env list`
   shows it too, and `doctor` warns when its program isn't on `PATH`.
-- `display <gogid> [wayland|x11] [--hdr auto|on|force|off] [--clear] [--json]` (#292, design 18
+- `display <gogid> [wayland|x11] [--hdr auto|on|force|off] [--monitor <output> | --no-monitor]
+  [--clear] [--json]` (#292, #295, design 18
   §7.9): show, set or clear which of Wine's display drivers the game gets. `wayland` is Wine's
   Wayland driver when the launch finds a Wayland socket, else X11 and a log line saying why;
   `x11` keeps a session-wide `PROTON_ENABLE_WAYLAND` away from the game. `--hdr` maps onto
-  GE-Proton's HDR switches in Wayland mode. `env list` and `doctor` show it.
+  GE-Proton's HDR switches in Wayland mode. `--monitor DP-1` names the output Wine's Wayland driver
+  treats as primary, i.e. the monitor the game opens on (`PROTON_WAYLAND_MONITOR`; Wine can't move a
+  window between outputs itself); `--no-monitor` drops only that, `--clear` all three. `env list`
+  and `doctor` show it.
 
 - `move <gogid> <dir> | --default [--dry-run] [--json]` (#278, design 18 §6.1): move a built game
   to `<dir>/<gogid>/` or back to `games/`, keeping its prefix and saves. A rename on one

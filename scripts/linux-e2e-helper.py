@@ -454,7 +454,7 @@ def parse_manifest(text, live=False):
     override = raw.get("override", {})
     if not isinstance(override, dict):
         raise ManifestError("override: must be a table")
-    _only(override, ("env", "extra_args", "wrapper", "display", "hdr"), "override")
+    _only(override, ("env", "extra_args", "wrapper", "display", "hdr", "monitor"), "override")
     if override and gogid is None:
         raise ManifestError("override is for a game (gogid), not a command")
     o_env = override.get("env", {})
@@ -481,6 +481,12 @@ def parse_manifest(text, live=False):
     o_hdr = override.get("hdr")
     if o_hdr is not None and o_hdr not in GOGO_HDR:
         raise ManifestError(f"override.hdr: want one of {GOGO_HDR}, got {o_hdr!r}")
+
+    o_monitor = override.get("monitor")
+    if o_monitor is not None and (
+        not isinstance(o_monitor, str) or not re.fullmatch(r"[\x21-\x7e]{1,64}", o_monitor)
+    ):
+        raise ManifestError(f"override.monitor: an output name such as \"HEADLESS-1\", got {o_monitor!r}")
 
     steps_raw = raw.get("step", [])
     if not isinstance(steps_raw, list) or not (steps_raw or live):
@@ -517,6 +523,7 @@ def parse_manifest(text, live=False):
             "wrapper": o_wrapper,
             "display": o_display,
             "hdr": o_hdr,
+            "monitor": o_monitor,
         },
         "steps": steps,
     }
@@ -4160,13 +4167,13 @@ def live_export(session):
     if m.get("env"):
         out += ["", "[env]"] + [f"{k} = {_toml(v)}" for k, v in m["env"].items()]
     o = m.get("override") or {}
-    if o.get("env") or o.get("extra_args") or o.get("wrapper") or o.get("display") or o.get("hdr"):
+    if o.get("env") or o.get("extra_args") or o.get("wrapper") or o.get("display") or o.get("hdr") or o.get("monitor"):
         out += ["", "[override]"]
         if o.get("extra_args"):
             out.append(f"extra_args = {_toml(o['extra_args'])}")
         if o.get("wrapper"):
             out.append(f"wrapper = {_toml(o['wrapper'])}")
-        for k in ("display", "hdr"):
+        for k in ("display", "hdr", "monitor"):
             if o.get(k):
                 out.append(f"{k} = {_toml(o[k])}")
         if o.get("env"):

@@ -249,15 +249,19 @@ class Manifest(unittest.TestCase):
                 "wrapper": None,
                 "display": None,
                 "hdr": None,
+                "monitor": None,
             },
         )
         m = helper.parse_manifest(MINIMAL)
         self.assertEqual(
             m["override"],
-            {"env": {}, "extra_args": None, "wrapper": None, "display": None, "hdr": None},
+            {"env": {}, "extra_args": None, "wrapper": None, "display": None, "hdr": None, "monitor": None},
         )
-        m = helper.parse_manifest('gogid = 1\n[override]\ndisplay = "wayland"\nhdr = "force"\n[[step]]\nwait = 1\n')
-        self.assertEqual((m["override"]["display"], m["override"]["hdr"]), ("wayland", "force"))
+        m = helper.parse_manifest('gogid = 1\n[override]\ndisplay = "wayland"\nhdr = "force"\nmonitor = "HEADLESS-1"\n[[step]]\nwait = 1\n')
+        self.assertEqual(
+            (m["override"]["display"], m["override"]["hdr"], m["override"]["monitor"]),
+            ("wayland", "force", "HEADLESS-1"),
+        )
         step = "[[step]]\nwait = 1\n"
         for bad in (
             'gogid = 1\n[override]\nargs = ["-x"]\n',
@@ -271,6 +275,8 @@ class Manifest(unittest.TestCase):
             'command = ["x"]\n[override]\nextra_args = ["-x"]\n',
             'gogid = 1\n[override]\ndisplay = "xwayland"\n',
             'gogid = 1\n[override]\nhdr = true\n',
+            'gogid = 1\n[override]\nmonitor = "DP 1"\n',
+            'gogid = 1\n[override]\nmonitor = 1\n',
         ):
             with self.subTest(bad):
                 with self.assertRaises(helper.ManifestError):
@@ -572,7 +578,7 @@ class Displays(unittest.TestCase):
 
 class GogoDisplay(unittest.TestCase):
     def test_parse_gogo_display(self):
-        head = "# gogo run log: X (1)\n# launcher: 9\n"
+        head = "# gogo run log: X (1)\n# launcher: 10\n"
         self.assertEqual(
             helper.parse_gogo_display(head + "# display: wayland (WAYLAND_DISPLAY=wayland-1)\n# ---\n"),
             "wayland (WAYLAND_DISPLAY=wayland-1)",
@@ -1197,7 +1203,7 @@ class LiveExport(unittest.TestCase):
         m = helper.parse_manifest(text)
         self.assertEqual(
             m["override"],
-            {"env": {"A": "1"}, "extra_args": ["-skip"], "wrapper": ["env", "B=1"], "display": None, "hdr": "on"},
+            {"env": {"A": "1"}, "extra_args": ["-skip"], "wrapper": ["env", "B=1"], "display": None, "hdr": "on", "monitor": None},
         )
         self.assertEqual((m["window"]["width"], m["window"]["height"]), (800, 600))
 

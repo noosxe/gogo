@@ -829,6 +829,7 @@ pub fn setup(
         wrapper,
         display: fx.effective.display.as_ref().map(|d| d.value),
         hdr: fx.effective.hdr.as_ref().map(|h| h.value),
+        monitor: fx.effective.monitor.as_ref().map(|m| m.value.clone()),
         env: eff.env.clone(),
         dll_overrides: eff.dll_overrides.clone(),
         renderer: rplan.renderer.clone(),
