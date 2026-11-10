@@ -211,6 +211,7 @@ fn env_of(lines: Vec<EnvLine>) -> EnvReport {
         built: true,
         lines,
         wrapper: None,
+        display: None,
         warnings: vec![],
     }
 }

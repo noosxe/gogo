@@ -808,6 +808,9 @@ pub fn setup(
         },
         None => Vec::new(),
     };
+    // A display mode something else undoes (#292): applied as written, and
+    // `doctor` says the same.
+    warnings.extend(super::display::conflicts(gogid, &fx.effective));
     let conf = LaunchConf {
         gogid: gogid.to_string(),
         title: eff.title.clone(),
@@ -824,6 +827,8 @@ pub fn setup(
         exe: unix(&eff.exe),
         args: super::envargs::launch_args(&eff.args, &fx.effective),
         wrapper,
+        display: fx.effective.display.as_ref().map(|d| d.value),
+        hdr: fx.effective.hdr.as_ref().map(|h| h.value),
         env: eff.env.clone(),
         dll_overrides: eff.dll_overrides.clone(),
         renderer: rplan.renderer.clone(),

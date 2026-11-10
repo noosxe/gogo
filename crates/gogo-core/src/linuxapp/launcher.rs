@@ -23,7 +23,7 @@ use crate::macapp::launch::GameDirs;
 /// Bumped with every change to [`TEMPLATE`] that matters to a game set up
 /// before it. Setup rewrites `launch.sh` whenever its bytes differ, so this
 /// is for people: the run log header and `launch.log` name it.
-pub const LAUNCHER_VERSION: u32 = 8;
+pub const LAUNCHER_VERSION: u32 = 9;
 
 /// `launch.sh`'s first word when a wrapper runs it for the game's own step
 /// (design 18 §7.8): the game's environment, then umu-run.
@@ -268,6 +268,7 @@ load_conf() {
     UMU_ID="" STAMP="" UMU_RUN="" UMU_PYTHON="" PROTON_DIR="" PROTON_VERSION=""
     PROTON_SHA="" PREFIX="" WORKDIR="" EXE="" DLL_OVERRIDES=""
     RENDERER="" PROTONFIXES="1" UMU_FOLDERS="" GOGO_PATH="" DATA_ROOT="" LIBRARY_GAME=""
+    DISPLAY_MODE="" DISPLAY_HDR=""
     ARGS=() ENV=() WRAPPER=()
     # shellcheck source=/dev/null
     source "$HERE/launch.conf"
@@ -363,6 +364,80 @@ run_setup() {
     load_conf
 }
 
+# Wine's display driver (design 18 section 7.9). DISPLAY_MODE is launch.conf's:
+# wayland wants a Wayland socket where the game runs (under a wrapper, the
+# wrapper's environment), x11 keeps the game off the Wayland driver whatever
+# the environment says, and "" leaves it alone. DISPLAY_PICK is what the game
+# gets, DISPLAY_WHY why it isn't what was asked. GE-Proton only uses its
+# Wayland driver with WAYLAND_DISPLAY set and never says it didn't, so the
+# check is here.
+wayland_socket() {
+    local s="${WAYLAND_DISPLAY:-}"
+    case "$s" in
+        "") return 1 ;;
+        /*) ;;
+        *) s="${XDG_RUNTIME_DIR:-}/$s" ;;
+    esac
+    [ -S "$s" ]
+}
+pick_display() {
+    DISPLAY_PICK="" DISPLAY_WHY=""
+    case "$DISPLAY_MODE" in
+        wayland)
+            if wayland_socket; then
+                DISPLAY_PICK=wayland
+            else
+                DISPLAY_PICK=x11
+                if [ -z "${WAYLAND_DISPLAY:-}" ]; then
+                    DISPLAY_WHY="WAYLAND_DISPLAY is unset"
+                else
+                    DISPLAY_WHY="no Wayland socket at WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
+                fi
+            fi
+            ;;
+        x11) DISPLAY_PICK=x11 ;;
+    esac
+}
+DISPLAY_PICK="" DISPLAY_WHY=""
+# What the run log and launch.log say about it.
+display_line() {
+    case "$DISPLAY_PICK" in
+        wayland) printf 'wayland (WAYLAND_DISPLAY=%s)' "$WAYLAND_DISPLAY" ;;
+        x11) printf 'x11%s' "${DISPLAY_WHY:+ (wayland wanted, but $DISPLAY_WHY)}" ;;
+    esac
+}
+hdr_line() {
+    [ -n "$DISPLAY_HDR" ] || return 0
+    if [ "$DISPLAY_PICK" = wayland ]; then
+        printf '%s' "$DISPLAY_HDR"
+    else
+        printf '%s (not applied: not on Wayland)' "$DISPLAY_HDR"
+    fi
+}
+# Before ENV, so a player's own PROTON_* in the L4 env still wins.
+display_env() {
+    pick_display
+    case "$DISPLAY_PICK" in
+        wayland)
+            # GE-Proton reads the alias after the switch: a session's
+            # PROTON_USE_WAYLAND=0 would undo it.
+            unset PROTON_USE_WAYLAND
+            export PROTON_ENABLE_WAYLAND=1
+            case "$DISPLAY_HDR" in
+                on) unset PROTON_USE_HDR; export PROTON_ENABLE_HDR=1 ;;
+                force) export PROTON_FORCE_HDR=1 ;;
+                off) unset PROTON_USE_HDR; export PROTON_ENABLE_HDR=0 ;;
+            esac
+            ;;
+        x11) unset PROTON_ENABLE_WAYLAND PROTON_USE_WAYLAND ;;
+    esac
+    # Under a wrapper the check ran again in the wrapper's environment
+    # (gamescope drops WAYLAND_DISPLAY without --expose-wayland): say what
+    # the game got, in the run log.
+    if [ -n "$GAME_STEP" ] && [ -n "$DISPLAY_MODE" ]; then
+        printf 'gogo: display under the wrapper: %s\n' "$(display_line)" >&2
+    fi
+}
 # The game step under a wrapper (design 18 §7.8): umu-run runs as this
 # script's child, so its exit code can be written beside the mark (a wrapper
 # like gamescope drops its child's). TERM, INT and HUP are passed on and the
@@ -400,6 +475,7 @@ GAME_STEP=""
 run_game() {
     local pair
     export @GAME_DRIVE_OFF@
+    display_env
     for pair in ${ENV[@]+"${ENV[@]}"}; do export "${pair?}"; done
     if [ -n "$DLL_OVERRIDES" ]; then
         export WINEDLLOVERRIDES="$DLL_OVERRIDES${WINEDLLOVERRIDES:+;$WINEDLLOVERRIDES}"
@@ -529,6 +605,8 @@ start_run_log() {
         printf '# umu: %s\n' "$(umu_name)"
         printf '# umu_id: %s\n' "$UMU_ID"
         if [ "${#WRAPPER[@]}" -gt 0 ]; then printf '# wrapper: %s\n' "${WRAPPER[*]}"; fi
+        if [ -n "$DISPLAY_MODE" ]; then printf '# display: %s\n' "$(display_line)"; fi
+        if [ -n "$DISPLAY_HDR" ]; then printf '# hdr: %s\n' "$(hdr_line)"; fi
         printf '# renderer: %s\n' "$RENDERER"
         printf '# protonfix: %s\n' "$(state_val protonfix)"
         printf '# protonfixes: %s\n' "$([ "$PROTONFIXES" = 0 ] && echo off || echo on)"
@@ -598,6 +676,19 @@ not_runnable() {
     exit 127
 }
 
+# The display the game gets (section 7.9): a Wayland mode with no Wayland
+# socket falls back to X11, logged; refusing would leave a player in an X11
+# session or a nested compositor with no game at all.
+pick_display
+if [ "$DISPLAY_MODE" = wayland ] && [ "$DISPLAY_PICK" != wayland ]; then
+    if [ "${#WRAPPER[@]}" -gt 0 ]; then
+        log "display: wayland wanted, but $DISPLAY_WHY here: the wrapper's environment decides (checked again under it)"
+    else
+        log "display: wayland wanted, but $DISPLAY_WHY: the game runs on X11 (Xwayland)"
+    fi
+elif [ -n "$DISPLAY_MODE" ]; then
+    log "display: $(display_line)${WRAPPER[0]:+, checked again under the wrapper}"
+fi
 # The runtime check again (§2.2), after any setup.
 check_runtime
 if [ "$RT_PROBLEM" = changed ] && ! managed; then

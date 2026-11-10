@@ -77,6 +77,9 @@ EXIT_HOW = ("self", "signal")
 # How the game reaches the display (#264): through Xwayland, as on most desktops
 # today, or as a Wayland client with no X server in the sandbox at all.
 DISPLAYS = ("xwayland", "wayland")
+# gogo's own per-game display mode and HDR switch (#292), for [override].
+GOGO_DISPLAYS = ("wayland", "x11")
+GOGO_HDR = ("auto", "on", "force", "off")
 # What a process that wanted X says when there is none: Wine's X11 driver
 # loading, or Xlib, GTK, Qt and SDL failing to open a display. Proton's own
 # "failed to run xrandr" (its primary-monitor guess) is noise, and not matched.
@@ -445,12 +448,13 @@ def parse_manifest(text, live=False):
         raise ManifestError("env: must be a table of strings")
 
     # Written into the game's override file through gogo (`linux-app env set`,
-    # `args` and `wrapper`) in this run's scratch, right before the launch
-    # (#234, #271).
+    # `args`, `wrapper` and `display`) in this run's scratch, right before the
+    # launch (#234, #271, #292). In Wayland mode the harness sets `display`
+    # itself unless the manifest does (linux-e2e.sh).
     override = raw.get("override", {})
     if not isinstance(override, dict):
         raise ManifestError("override: must be a table")
-    _only(override, ("env", "extra_args", "wrapper"), "override")
+    _only(override, ("env", "extra_args", "wrapper", "display", "hdr"), "override")
     if override and gogid is None:
         raise ManifestError("override is for a game (gogid), not a command")
     o_env = override.get("env", {})
@@ -471,6 +475,12 @@ def parse_manifest(text, live=False):
         or not all(isinstance(a, str) for a in o_wrapper)
     ):
         raise ManifestError("override.wrapper: a non-empty list of strings")
+    o_display = override.get("display")
+    if o_display is not None and o_display not in GOGO_DISPLAYS:
+        raise ManifestError(f"override.display: want one of {GOGO_DISPLAYS}, got {o_display!r}")
+    o_hdr = override.get("hdr")
+    if o_hdr is not None and o_hdr not in GOGO_HDR:
+        raise ManifestError(f"override.hdr: want one of {GOGO_HDR}, got {o_hdr!r}")
 
     steps_raw = raw.get("step", [])
     if not isinstance(steps_raw, list) or not (steps_raw or live):
@@ -501,7 +511,13 @@ def parse_manifest(text, live=False):
             "code": int(_number(exit_.get("code", 0), "exit.code")),
         },
         "env": env,
-        "override": {"env": o_env, "extra_args": o_args, "wrapper": o_wrapper},
+        "override": {
+            "env": o_env,
+            "extra_args": o_args,
+            "wrapper": o_wrapper,
+            "display": o_display,
+            "hdr": o_hdr,
+        },
         "steps": steps,
     }
 
@@ -854,6 +870,22 @@ def belongs_to_game(argv0, exe):
     if folder is None:
         return False
     return image.startswith(f"c:/{folder}/") or f"/drive_c/{folder}/" in image
+
+
+def parse_gogo_display(log_text):
+    """What gogo's launcher picked for the game (#292): under a wrapper the
+    game step's own line (the wrapper's environment decides), else the run
+    log's `# display:` header line; None when the game has no display mode."""
+    header = None
+    in_header = True
+    for line in log_text.splitlines():
+        if line == "# ---":
+            in_header = False
+        elif in_header and line.startswith("# display: "):
+            header = line[len("# display: "):].strip()
+        elif not in_header and line.startswith("gogo: display under the wrapper: "):
+            return line[len("gogo: display under the wrapper: "):].strip()
+    return header
 
 
 def parse_exe(log_text):
@@ -1707,7 +1739,24 @@ class Driver:
 
     def x_fallback(self):
         if self.display == "wayland":
+            if self.manifest["gogid"] is not None:
+                self.check_gogo_display()
             self.check_x_fallback()
+
+    def check_gogo_display(self):
+        """Wayland mode: gogo's launcher put the game on Wine's Wayland driver
+        itself (`# display: wayland …` in its run log), not the harness."""
+        try:
+            with open(self.cfg.get("game_log") or "", errors="replace") as f:
+                got = parse_gogo_display(f.read())
+        except OSError:
+            got = None
+        self.result["display"]["gogo"] = got
+        return self.check(
+            "gogo_display",
+            bool(got) and got.startswith("wayland"),
+            f"the launcher's run log: display {got}" if got else "no `# display:` line: gogo set no display mode",
+        )
 
     def check_x_fallback(self):
         """Wayland mode: did any process of the game's say it wanted X? Names the
@@ -1842,11 +1891,9 @@ class Driver:
             self.before_game = {pid for pid, _, _ in _proc_table()}
         env = dict(self.env)
         env.update(self.cfg["game_env"])
-        if self.display == "wayland" and self.manifest["gogid"] is not None:
-            # GE-Proton's switch to Wine's Wayland driver, for this launch's
-            # process only: nothing of it is written to the game's state.
-            env["PROTON_ENABLE_WAYLAND"] = "1"
-            self.result["display"]["proton_enable_wayland"] = True
+        # Wayland mode doesn't set PROTON_ENABLE_WAYLAND here: gogo's own
+        # display mode does (#292), written before the launch like the rest
+        # of [override], and gogo_display checks that it did.
         env.update(self.manifest["env"])
         out = open(os.path.join(self.results, "game.out"), "wb")
         self.game = subprocess.Popen(
@@ -4113,12 +4160,15 @@ def live_export(session):
     if m.get("env"):
         out += ["", "[env]"] + [f"{k} = {_toml(v)}" for k, v in m["env"].items()]
     o = m.get("override") or {}
-    if o.get("env") or o.get("extra_args") or o.get("wrapper"):
+    if o.get("env") or o.get("extra_args") or o.get("wrapper") or o.get("display") or o.get("hdr"):
         out += ["", "[override]"]
         if o.get("extra_args"):
             out.append(f"extra_args = {_toml(o['extra_args'])}")
         if o.get("wrapper"):
             out.append(f"wrapper = {_toml(o['wrapper'])}")
+        for k in ("display", "hdr"):
+            if o.get(k):
+                out.append(f"{k} = {_toml(o[k])}")
         if o.get("env"):
             out += ["[override.env]"] + [f"{k} = {_toml(v)}" for k, v in o["env"].items()]
     # Quit from its own menu: it exits by itself, which the export keeps.

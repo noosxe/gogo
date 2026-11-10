@@ -35,6 +35,7 @@ GAME_STEP=""
 run_game() {
     local pair
     export PROTON_SET_GAME_DRIVE=0
+    display_env
     for pair in ${ENV[@]+"${ENV[@]}"}; do export "${pair?}"; done
     if [ -n "$DLL_OVERRIDES" ]; then
         export WINEDLLOVERRIDES="$DLL_OVERRIDES${WINEDLLOVERRIDES:+;$WINEDLLOVERRIDES}"

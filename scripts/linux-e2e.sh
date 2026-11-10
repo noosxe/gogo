@@ -32,8 +32,8 @@
 #   --expect-gpu NODE with several GPUs, the one the game must render on
 #                     (default: any of them, and the summary says which)
 #   --display MODE    xwayland (the default) or wayland: no X server at all, and
-#                     a Proton game gets PROTON_ENABLE_WAYLAND=1, Wine's Wayland
-#                     driver (#264). Overrides the manifest's [window] display
+#                     a gogo game gets `linux-app display <gogid> wayland`, Wine's
+#                     Wayland driver (#264, #292). Overrides the manifest's [window] display
 #   --secs N          seconds the game phase may take (default 600); over it the
 #                     run is stopped and fails
 #   --gogo PATH       this gogo (default: `nix build .#gogo-linux-app`)
@@ -1336,12 +1336,21 @@ cmd_run() {
         launch_cwd="$GOGO_HOME_DIR/games/$GOGID"
         doctor="$(jq -cn --arg g "$GOGO" --arg i "$GOGID" '[$g,"linux-app","doctor",$i,"--json"]')"
         # The manifest's [override] (#234, #271), written by gogo itself before the launch.
-        pre_launch="$(jq -c --arg g "$GOGO" --arg i "$GOGID" '.override as $o | [
+        # Wayland mode puts the game on Wine's Wayland driver through gogo's own
+        # display mode (#292), unless the manifest names one: the harness sets no
+        # PROTON_ENABLE_WAYLAND, and gogo_display checks that gogo did.
+        pre_launch="$(jq -c --arg g "$GOGO" --arg i "$GOGID" '.override as $o
+          | ($o.display // (if .window.display == "wayland" then "wayland" else null end)) as $d | [
             (if ($o.env | length) > 0
              then [$g,"linux-app","env","set",$i] + ($o.env | to_entries | map("\(.key)=\(.value)"))
              else empty end),
             (if $o.extra_args != null then [$g,"linux-app","args",$i,"--"] + $o.extra_args else empty end),
-            (if $o.wrapper != null then [$g,"linux-app","wrapper",$i,"--"] + $o.wrapper else empty end)
+            (if $o.wrapper != null then [$g,"linux-app","wrapper",$i,"--"] + $o.wrapper else empty end),
+            (if $d != null or $o.hdr != null
+             then [$g,"linux-app","display",$i]
+                  + (if $d != null then [$d] else [] end)
+                  + (if $o.hdr != null then ["--hdr",$o.hdr] else [] end)
+             else empty end)
         ]' <<<"$MANIFEST_JSON")"
         game_log="$GOGO_HOME_DIR/logs/$GOGID/latest.log"
     else

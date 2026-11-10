@@ -243,10 +243,21 @@ class Manifest(unittest.TestCase):
         )
         self.assertEqual(
             m["override"],
-            {"env": {"DXVK_HUD": "fps"}, "extra_args": ["--launcher-skip", "a b"], "wrapper": None},
+            {
+                "env": {"DXVK_HUD": "fps"},
+                "extra_args": ["--launcher-skip", "a b"],
+                "wrapper": None,
+                "display": None,
+                "hdr": None,
+            },
         )
         m = helper.parse_manifest(MINIMAL)
-        self.assertEqual(m["override"], {"env": {}, "extra_args": None, "wrapper": None})
+        self.assertEqual(
+            m["override"],
+            {"env": {}, "extra_args": None, "wrapper": None, "display": None, "hdr": None},
+        )
+        m = helper.parse_manifest('gogid = 1\n[override]\ndisplay = "wayland"\nhdr = "force"\n[[step]]\nwait = 1\n')
+        self.assertEqual((m["override"]["display"], m["override"]["hdr"]), ("wayland", "force"))
         step = "[[step]]\nwait = 1\n"
         for bad in (
             'gogid = 1\n[override]\nargs = ["-x"]\n',
@@ -258,6 +269,8 @@ class Manifest(unittest.TestCase):
             'gogid = 1\n[override.env]\n"A-B" = "1"\n',
             'gogid = 1\n[override.env]\nA = 1\n',
             'command = ["x"]\n[override]\nextra_args = ["-x"]\n',
+            'gogid = 1\n[override]\ndisplay = "xwayland"\n',
+            'gogid = 1\n[override]\nhdr = true\n',
         ):
             with self.subTest(bad):
                 with self.assertRaises(helper.ManifestError):
@@ -555,6 +568,26 @@ class Displays(unittest.TestCase):
         ):
             with self.subTest(line):
                 self.assertEqual(helper.x_fallback_line(f"first\n{line}\nlast\n"), line)
+
+
+class GogoDisplay(unittest.TestCase):
+    def test_parse_gogo_display(self):
+        head = "# gogo run log: X (1)\n# launcher: 9\n"
+        self.assertEqual(
+            helper.parse_gogo_display(head + "# display: wayland (WAYLAND_DISPLAY=wayland-1)\n# ---\n"),
+            "wayland (WAYLAND_DISPLAY=wayland-1)",
+        )
+        self.assertIsNone(helper.parse_gogo_display(head + "# ---\n"))
+        # Only the header counts: the game's own output can say anything.
+        self.assertIsNone(helper.parse_gogo_display(head + "# ---\n# display: wayland\n"))
+        # Under a wrapper, the game step's line is what the game got.
+        self.assertEqual(
+            helper.parse_gogo_display(
+                head + "# display: wayland (WAYLAND_DISPLAY=wayland-1)\n# ---\n"
+                "gogo: display under the wrapper: x11 (wayland wanted, but WAYLAND_DISPLAY is unset)\n"
+            ),
+            "x11 (wayland wanted, but WAYLAND_DISPLAY is unset)",
+        )
 
 
 class Parsers(unittest.TestCase):
@@ -1107,7 +1140,8 @@ RECT = LiveSteps.RECT
 def live_session(path, **more):
     manifest = helper.parse_manifest(
         "gogid = 7\ntitle = \"Seven\"\n[window]\nresolution = \"800x600\"\n"
-        "[override]\nextra_args = [\"-skip\"]\nwrapper = [\"env\", \"B=1\"]\n[override.env]\nA = \"1\"\n",
+        "[override]\nextra_args = [\"-skip\"]\nwrapper = [\"env\", \"B=1\"]\nhdr = \"on\"\n"
+        "[override.env]\nA = \"1\"\n",
         live=True,
     )
     session = {
@@ -1162,7 +1196,8 @@ class LiveExport(unittest.TestCase):
         ])
         m = helper.parse_manifest(text)
         self.assertEqual(
-            m["override"], {"env": {"A": "1"}, "extra_args": ["-skip"], "wrapper": ["env", "B=1"]}
+            m["override"],
+            {"env": {"A": "1"}, "extra_args": ["-skip"], "wrapper": ["env", "B=1"], "display": None, "hdr": "on"},
         )
         self.assertEqual((m["window"]["width"], m["window"]["height"]), (800, 600))
 

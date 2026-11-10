@@ -588,7 +588,7 @@ pub const TABLE: &[Spec] = &[
         "PROTON_ENABLE_WAYLAND",
         T::Display,
         "off (X11 through XWayland)",
-        "Wine's native Wayland driver. Needed for HDR; launchers can misbehave on it.",
+        "Wine's Wayland driver, needed for HDR. `linux-app display` sets it and checks for a socket.",
     ),
     p(
         "PROTON_USE_WAYLAND",

@@ -3671,6 +3671,13 @@ fn linux_app_sub(sub: crate::cli::LinuxAppSub) -> Result<i32, AppError> {
             json,
             words,
         } => linux_app_wrapper(&gogid, clear, json, words),
+        crate::cli::LinuxAppSub::Display {
+            gogid,
+            mode,
+            hdr,
+            clear,
+            json,
+        } => linux_app_display(&gogid, mode, hdr, clear, json),
         crate::cli::LinuxAppSub::Compat { gogid, json } => {
             let r = gogo::linuxapp::manage::compat(&gogid)?;
             if json {
@@ -3940,6 +3947,110 @@ fn linux_app_wrapper(
 }
 
 #[cfg(target_os = "linux")]
+/// `gogo linux-app display <gogid> [wayland|x11] [--hdr …] [--clear]`.
+fn linux_app_display(
+    gogid: &str,
+    mode: Option<String>,
+    hdr: Option<String>,
+    clear: bool,
+    json: bool,
+) -> Result<i32, AppError> {
+    use gogo::linuxapp::display;
+    use gogo::macapp::compat::{DisplayMode, Hdr};
+    if clear || mode.is_some() || hdr.is_some() {
+        // clap only lets the spellings through.
+        let mode = mode.as_deref().and_then(DisplayMode::from_key);
+        let hdr = hdr.as_deref().and_then(Hdr::from_key);
+        let out = if clear {
+            display::set_display(gogid, Some(None), Some(None))?
+        } else {
+            display::set_display(gogid, mode.map(Some), hdr.map(Some))?
+        };
+        print_edit(&out, json);
+        return Ok(cli::exit::OK);
+    }
+    let r = display::display_report(gogid)?;
+    if json {
+        println!("{}", serde_json::json!(r));
+        return Ok(cli::exit::OK);
+    }
+    for w in &r.warnings {
+        eprintln!("warning: {w}");
+    }
+    print!("{}", display_text(&r));
+    Ok(cli::exit::OK)
+}
+
+#[cfg(target_os = "linux")]
+/// A display mode's line in `display` and `env list`.
+fn display_line(v: &gogo::linuxapp::display::DisplayView) -> String {
+    let key = |m: Option<gogo::macapp::compat::DisplayMode>| m.map_or("(none)", |m| m.key());
+    let mut out = format!("display: {}\n", v.describe());
+    if v.pending {
+        let hdr = v
+            .applied_hdr
+            .map(|h| format!(", hdr {}", h.key()))
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "pending: launch.conf has {}{hdr}; the next launch's setup writes the new one\n",
+            key(v.applied_mode)
+        ));
+    }
+    out
+}
+
+#[cfg(target_os = "linux")]
+fn display_text(r: &gogo::linuxapp::display::DisplayReport) -> String {
+    use gogo::macapp::compat::DisplayMode;
+    use std::fmt::Write as _;
+    let mut out = match &r.display {
+        Some(v) => display_line(v),
+        None => format!(
+            "display: (none)  (the environment decides; `gogo linux-app display {} wayland` \
+             sets Wine's Wayland driver)\n",
+            r.gogid
+        ),
+    };
+    let mode = r
+        .display
+        .as_ref()
+        .and_then(|v| v.mode.as_ref())
+        .map(|m| m.value);
+    match mode {
+        Some(DisplayMode::Wayland) => {
+            let env: Vec<String> = r
+                .wayland_env
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect();
+            let _ = writeln!(
+                out,
+                "with a Wayland socket at launch the game gets {}; without one it runs on X11, \
+                 and the launcher logs why",
+                env.join(" ")
+            );
+        }
+        Some(DisplayMode::X11) => {
+            let _ = writeln!(
+                out,
+                "the launcher unsets PROTON_ENABLE_WAYLAND and PROTON_USE_WAYLAND for the game"
+            );
+        }
+        None => {}
+    }
+    if let Some(p) = r.picks {
+        let _ = writeln!(
+            out,
+            "a launch from this shell: {} ({}; a desktop launch has the session's)",
+            p.key(),
+            r.session.describe()
+        );
+    }
+    let _ = writeln!(out, "your override file: {}", r.user_file.display());
+    out
+}
+
+#[cfg(target_os = "linux")]
 /// A wrapper's line in `wrapper` and `env list`.
 fn wrapper_line(v: &gogo::linuxapp::envargs::WrapperView) -> String {
     use gogo::linuxapp::envargs::shell_words;
@@ -4048,6 +4159,9 @@ fn env_list_text(r: &gogo::linuxapp::envargs::EnvReport) -> String {
     }
     if let Some(v) = &r.wrapper {
         out.push_str(&wrapper_line(v));
+    }
+    if let Some(v) = &r.display {
+        out.push_str(&display_line(v));
     }
     let _ = writeln!(
         out,
@@ -5513,7 +5627,9 @@ mod tests {
 
 #[cfg(all(test, target_os = "linux"))]
 mod envargs_output_tests {
-    use super::{args_text, env_catalogue_text, env_describe_text, env_list_text, wrapper_text};
+    use super::{
+        args_text, display_text, env_catalogue_text, env_describe_text, env_list_text, wrapper_text,
+    };
     use gogo::linuxapp::catalogue::table::{Component, Kind, Topic};
     use gogo::linuxapp::catalogue::{
         Applies, BuildSummary, CatalogueReport, Entry, InBuild, Source,
@@ -5724,6 +5840,7 @@ mod envargs_output_tests {
                 line("STORE", "gog", EnvSource::Launcher, EnvState::Applies),
             ],
             wrapper: None,
+            display: None,
             warnings: vec![],
         };
         assert_eq!(
@@ -5785,6 +5902,81 @@ mod envargs_output_tests {
                 "wrapper: (none)\n\
                  pending: launch.conf still has gamemoderun; the next launch's setup writes the \
                  new one\n{tail}"
+            )
+        );
+    }
+
+    #[test]
+    fn the_display_mode_is_shown_with_what_the_launcher_sets() {
+        use gogo::linuxapp::display::{DisplayReport, DisplayView, Session};
+        use gogo::macapp::compat::{DisplayMode, Hdr, Sourced};
+        let user = |value| Sourced {
+            value,
+            layer: Layer::User,
+        };
+        let report = |display, wayland_env: &[(&str, &str)], picks| DisplayReport {
+            gogid: "1423049311".into(),
+            user_file: "/d/compat/1423049311.toml".into(),
+            built: true,
+            display,
+            wayland_env: wayland_env
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            session: Session {
+                wayland_display: None,
+                socket: false,
+            },
+            picks,
+            warnings: vec![],
+        };
+        let tail = "your override file: /d/compat/1423049311.toml\n";
+        assert_eq!(
+            display_text(&report(None, &[], None)),
+            format!(
+                "display: (none)  (the environment decides; `gogo linux-app display 1423049311 \
+                 wayland` sets Wine's Wayland driver)\n{tail}"
+            )
+        );
+        let view = DisplayView {
+            mode: Some(user(DisplayMode::Wayland)),
+            hdr: Some(Sourced {
+                value: Hdr::Force,
+                layer: Layer::User,
+            }),
+            applied_mode: Some(DisplayMode::X11),
+            applied_hdr: None,
+            pending: true,
+        };
+        assert_eq!(
+            display_text(&report(
+                Some(view),
+                &[("PROTON_ENABLE_WAYLAND", "1"), ("PROTON_FORCE_HDR", "1")],
+                Some(DisplayMode::X11)
+            )),
+            format!(
+                "display: wayland (L4 user override), hdr force (L4 user override)\n\
+                 pending: launch.conf has x11; the next launch's setup writes the new one\n\
+                 with a Wayland socket at launch the game gets PROTON_ENABLE_WAYLAND=1 \
+                 PROTON_FORCE_HDR=1; without one it runs on X11, and the launcher logs why\n\
+                 a launch from this shell: x11 (WAYLAND_DISPLAY is unset; a desktop launch has \
+                 the session's)\n{tail}"
+            )
+        );
+        let view = DisplayView {
+            mode: Some(user(DisplayMode::X11)),
+            hdr: None,
+            applied_mode: Some(DisplayMode::X11),
+            applied_hdr: None,
+            pending: false,
+        };
+        assert_eq!(
+            display_text(&report(Some(view), &[], Some(DisplayMode::X11))),
+            format!(
+                "display: x11 (L4 user override)\n\
+                 the launcher unsets PROTON_ENABLE_WAYLAND and PROTON_USE_WAYLAND for the game\n\
+                 a launch from this shell: x11 (WAYLAND_DISPLAY is unset; a desktop launch has \
+                 the session's)\n{tail}"
             )
         );
     }

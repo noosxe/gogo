@@ -1511,7 +1511,7 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
     // next setup, which says so; an unchanged one isn't touched.
     std::fs::write(
         &sh,
-        script.replace("LAUNCHER_VERSION=8", "LAUNCHER_VERSION=0"),
+        script.replace("LAUNCHER_VERSION=9", "LAUNCHER_VERSION=0"),
     )
     .unwrap();
     std::fs::write(&desktop, "[Desktop Entry]\nExec=/old/root/launch.sh\n").unwrap();
@@ -1519,7 +1519,7 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
     assert_eq!(std::fs::read_to_string(&sh).unwrap(), script);
     assert_eq!(std::fs::read_to_string(&desktop).unwrap(), entry);
     assert!(
-        out.notes.iter().any(|n| n == "launch.sh: launcher 0 -> 8"),
+        out.notes.iter().any(|n| n == "launch.sh: launcher 0 -> 9"),
         "{:?}",
         out.notes
     );
@@ -1584,7 +1584,7 @@ fn the_launcher_runs_umu_with_the_games_environment_and_logs_the_run() {
     let run = &runs[0];
     for want in [
         format!("# gogo run log: Test Game ({ID})\n"),
-        "# launcher: 8\n".into(),
+        "# launcher: 9\n".into(),
         format!(
             "# runtime: path:{} (1793687165 GE-Proton10-34)\n",
             w.build.display()
@@ -3787,7 +3787,7 @@ fn the_launcher_of_a_library_game_keeps_gogos_data_root() {
     );
     // Logs stay under the data root, not the library's parent.
     assert_eq!(w.runs().len(), 1, "run logs under {:?}", w.logs());
-    assert!(w.launch_log().contains("launcher 8"));
+    assert!(w.launch_log().contains("launcher 9"));
     assert!(!w.root.join("big drive/logs").exists());
 
     // Stale config: setup runs with gogo's data root as GOGO_HOME, and from
@@ -5029,4 +5029,252 @@ mod moving {
     }
 
     use gogo::macapp::launch::GameDirs;
+}
+
+// — display mode (#292, design 18 §7.9) —
+
+/// A listening `wayland-7` in a dir of its own under `/tmp`: a socket's path
+/// has to fit `sun_path` (108 bytes), and the test dirs are longer.
+fn wayland_socket() -> (tempfile::TempDir, std::os::unix::net::UnixListener) {
+    let dir = tempfile::Builder::new()
+        .prefix("gogo-wl")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let l = std::os::unix::net::UnixListener::bind(dir.path().join("wayland-7")).unwrap();
+    (dir, l)
+}
+
+/// `display` and `hdr` reach `launch.conf`, and the launcher checks for a
+/// Wayland socket where the game runs: with one the game gets
+/// `PROTON_ENABLE_WAYLAND=1` and the HDR switch, without one it runs on X11
+/// and the launcher says why. `x11` strips a session's own switch, the
+/// player's L4 env wins over the mode, and a cleared mode leaves the
+/// environment alone. Doctor shows it all, the last run included.
+#[test]
+fn the_display_mode_reaches_the_game_with_a_socket_and_falls_back_without_one() {
+    use gogo::linuxapp::display::set_display;
+    use gogo::linuxapp::game::ConfValues;
+    use gogo::macapp::compat::{DisplayMode, Hdr};
+    use gogo::macapp::doctor::Level;
+    let Some(w) = World::launcher("display", false) else {
+        return;
+    };
+    let setup_again = || setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
+    let out = set_display(ID, Some(Some(DisplayMode::Wayland)), Some(Some(Hdr::Force))).unwrap();
+    let keys: Vec<&str> = out.changes.iter().map(|c| c.key.as_str()).collect();
+    assert_eq!(keys, ["display", "hdr"]);
+    setup_again();
+    let conf = ConfValues::parse(&w.conf());
+    assert_eq!(conf.get("DISPLAY_MODE"), "wayland");
+    assert_eq!(conf.get("DISPLAY_HDR"), "force");
+
+    let (run_dir, _socket) = wayland_socket();
+    let rd = run_dir.path().to_str().unwrap();
+    let dump = w.root.join("game.env");
+    let dump_s = dump.to_str().unwrap();
+    let game_env = || std::fs::read_to_string(&dump).unwrap();
+    let has = |env: &str, kv: &str| env.lines().any(|l| l == kv);
+    let sets = |env: &str, k: &str| env.lines().any(|l| l.starts_with(&format!("{k}=")));
+
+    // A socket: Wine's Wayland driver, and the HDR switch. A session's
+    // alias set to 0 doesn't undo it (Proton reads the alias last).
+    let out = w.launch(
+        &[
+            ("XDG_RUNTIME_DIR", rd),
+            ("WAYLAND_DISPLAY", "wayland-7"),
+            ("PROTON_USE_WAYLAND", "0"),
+            ("FAKE_ENV_DUMP", dump_s),
+        ],
+        &[],
+    );
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let env = game_env();
+    assert!(has(&env, "PROTON_ENABLE_WAYLAND=1"), "{env}");
+    assert!(!sets(&env, "PROTON_USE_WAYLAND"), "{env}");
+    assert!(has(&env, "PROTON_FORCE_HDR=1"), "{env}");
+    let run = w.runs().pop().unwrap();
+    assert!(
+        run.contains("# display: wayland (WAYLAND_DISPLAY=wayland-7)\n# hdr: force\n"),
+        "{run}"
+    );
+    assert!(
+        w.launch_log()
+            .contains("display: wayland (WAYLAND_DISPLAY=wayland-7)\n"),
+        "{}",
+        w.launch_log()
+    );
+
+    // Doctor, in a session with that socket (under its root) and without.
+    let mut host = doctor_host(&w, &[("radeon.x86_64", 2)]);
+    // Under the host's root, as every path doctor reads.
+    std::fs::create_dir_all(host.root.join("run/user")).unwrap();
+    std::os::unix::fs::symlink(run_dir.path(), host.root.join("run/user/1000")).unwrap();
+    host.logs = w.home.join("logs");
+    host.env = Box::new(|k| match k {
+        "WAYLAND_DISPLAY" => Some("wayland-7".into()),
+        "XDG_RUNTIME_DIR" => Some("/run/user/1000".into()),
+        _ => std::env::var_os(k),
+    });
+    let r = doctor(&w, &host);
+    let f = r.findings.iter().find(|f| f.check == "display").unwrap();
+    assert_eq!(f.level, Level::Ok, "{f:#?}");
+    assert_eq!(
+        f.message,
+        "wayland (L4 user override), hdr force (L4 user override); here: wayland \
+         (WAYLAND_DISPLAY=wayland-7, socket found)"
+    );
+    assert_eq!(
+        f.detail,
+        [
+            "last run: display wayland (WAYLAND_DISPLAY=wayland-7)",
+            "last run: hdr force"
+        ]
+    );
+    host.env = Box::new(|k| {
+        (k != "WAYLAND_DISPLAY")
+            .then(|| std::env::var_os(k))
+            .flatten()
+    });
+    let r = doctor(&w, &host);
+    let f = r.findings.iter().find(|f| f.check == "display").unwrap();
+    assert_eq!(f.level, Level::Warn, "{f:#?}");
+    assert!(
+        f.message
+            .contains("WAYLAND_DISPLAY is unset: a launch from this shell runs on X11"),
+        "{}",
+        f.message
+    );
+
+    // No WAYLAND_DISPLAY: X11, logged; a session's own switch doesn't
+    // reach the game either, and the HDR switch isn't set.
+    let out = w.launch(
+        &[
+            ("XDG_RUNTIME_DIR", rd),
+            ("PROTON_ENABLE_WAYLAND", "1"),
+            ("FAKE_ENV_DUMP", dump_s),
+        ],
+        &[],
+    );
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let env = game_env();
+    assert!(!sets(&env, "PROTON_ENABLE_WAYLAND"), "{env}");
+    assert!(!sets(&env, "PROTON_FORCE_HDR"), "{env}");
+    let run = w.runs().pop().unwrap();
+    assert!(
+        run.contains(
+            "# display: x11 (wayland wanted, but WAYLAND_DISPLAY is unset)\n\
+             # hdr: force (not applied: not on Wayland)\n"
+        ),
+        "{run}"
+    );
+    assert!(
+        w.launch_log().contains(
+            "display: wayland wanted, but WAYLAND_DISPLAY is unset: the game runs on X11 (Xwayland)"
+        ),
+        "{}",
+        w.launch_log()
+    );
+    // A WAYLAND_DISPLAY with no socket behind it: the same.
+    w.launch(
+        &[
+            ("XDG_RUNTIME_DIR", rd),
+            ("WAYLAND_DISPLAY", "wayland-9"),
+            ("FAKE_ENV_DUMP", dump_s),
+        ],
+        &[],
+    );
+    assert!(!sets(&game_env(), "PROTON_ENABLE_WAYLAND"));
+    assert!(w.runs().pop().unwrap().contains(
+        "# display: x11 (wayland wanted, but no Wayland socket at WAYLAND_DISPLAY=wayland-9)\n"
+    ));
+
+    // The player's own value in the L4 env wins over the mode.
+    gogo::linuxapp::envargs::set_env(ID, &[("PROTON_ENABLE_WAYLAND".into(), "0".into())]).unwrap();
+    setup_again();
+    let socket_env = [
+        ("XDG_RUNTIME_DIR", rd),
+        ("WAYLAND_DISPLAY", "wayland-7"),
+        ("PROTON_USE_WAYLAND", "1"),
+        ("FAKE_ENV_DUMP", dump_s),
+    ];
+    w.launch(&socket_env, &[]);
+    assert!(
+        has(&game_env(), "PROTON_ENABLE_WAYLAND=0"),
+        "{}",
+        game_env()
+    );
+    gogo::linuxapp::envargs::unset_env(ID, &["PROTON_ENABLE_WAYLAND".into()]).unwrap();
+
+    // x11: both of the session's switches are gone, with a socket there.
+    set_display(ID, Some(Some(DisplayMode::X11)), Some(None)).unwrap();
+    setup_again();
+    let conf = ConfValues::parse(&w.conf());
+    assert_eq!(conf.get("DISPLAY_MODE"), "x11");
+    assert!(!w.conf().contains("DISPLAY_HDR="), "{}", w.conf());
+    w.launch(&socket_env, &[]);
+    let env = game_env();
+    assert!(!sets(&env, "PROTON_ENABLE_WAYLAND"), "{env}");
+    assert!(!sets(&env, "PROTON_USE_WAYLAND"), "{env}");
+    let run = w.runs().pop().unwrap();
+    assert!(run.contains("# display: x11\n"), "{run}");
+    assert!(!run.contains("# hdr:"), "{run}");
+
+    // Cleared: no lines, and the environment's choice goes through.
+    let out = set_display(ID, Some(None), Some(None)).unwrap();
+    assert_eq!(out.changes.len(), 1, "{:?}", out.changes);
+    setup_again();
+    assert!(!w.conf().contains("DISPLAY_"), "{}", w.conf());
+    w.launch(&socket_env, &[]);
+    assert!(has(&game_env(), "PROTON_USE_WAYLAND=1"), "{}", game_env());
+    assert!(!w.runs().pop().unwrap().contains("# display:"));
+}
+
+/// Under a wrapper the socket check runs again in the wrapper's
+/// environment, which is the game's: gamescope without --expose-wayland
+/// drops WAYLAND_DISPLAY, so the game gets X11 and the run log says so.
+#[test]
+fn under_a_wrapper_the_display_check_is_the_wrappers() {
+    use gogo::linuxapp::display::set_display;
+    use gogo::macapp::compat::DisplayMode;
+    let Some(w) = World::launcher("display-wrap", false) else {
+        return;
+    };
+    set_display(ID, Some(Some(DisplayMode::Wayland)), None).unwrap();
+    w.wrapped(&format!("unset WAYLAND_DISPLAY\n{WRAP_EXEC}"), &[]);
+    let (run_dir, _socket) = wayland_socket();
+    let dump = w.root.join("game.env");
+    let log = w.wrap_log();
+    let out = w.launch(
+        &[
+            ("XDG_RUNTIME_DIR", run_dir.path().to_str().unwrap()),
+            ("WAYLAND_DISPLAY", "wayland-7"),
+            ("FAKE_ENV_DUMP", dump.to_str().unwrap()),
+            ("FAKE_WRAP_LOG", log.to_str().unwrap()),
+        ],
+        &[],
+    );
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let env = std::fs::read_to_string(&dump).unwrap();
+    assert!(
+        !env.lines().any(|l| l.starts_with("PROTON_ENABLE_WAYLAND=")),
+        "{env}"
+    );
+    let run = w.runs().pop().unwrap();
+    assert!(
+        run.contains("# display: wayland (WAYLAND_DISPLAY=wayland-7)\n"),
+        "{run}"
+    );
+    assert!(
+        run.contains(
+            "gogo: display under the wrapper: x11 (wayland wanted, but WAYLAND_DISPLAY is unset)\n"
+        ),
+        "{run}"
+    );
+    assert!(
+        w.launch_log().contains(
+            "display: wayland (WAYLAND_DISPLAY=wayland-7), checked again under the wrapper"
+        ),
+        "{}",
+        w.launch_log()
+    );
 }

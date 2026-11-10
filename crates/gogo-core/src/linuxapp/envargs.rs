@@ -11,7 +11,8 @@
 //!
 //! What wins at launch, lowest first (the launcher's `run_game`):
 //! the environment `launch.sh` starts with; gogo's default
-//! `PROTON_SET_GAME_DRIVE=0`; `launch.conf`'s `ENV` (the renderer's
+//! `PROTON_SET_GAME_DRIVE=0`; the display mode's switches (#292, only with
+//! a Wayland socket at launch); `launch.conf`'s `ENV` (the renderer's
 //! switches fill gaps only, so L3/L4 win over them); `WINEDLLOVERRIDES`
 //! from `DLL_OVERRIDES`; then `WINEPREFIX`, `GAMEID`, `STORE`,
 //! `PROTONPATH`, which are the launcher's. Inside umu, protonfixes sets its
@@ -177,6 +178,10 @@ pub fn policy(key: &str) -> Policy {
             setup::GAME_DRIVE_OFF.0,
             setup::GAME_DRIVE_OFF.1
         )),
+        "PROTON_ENABLE_WAYLAND" | "PROTON_USE_WAYLAND" => Policy::Warn(format!(
+            "{key} is what `gogo linux-app display <gogid> wayland|x11` sets: yours wins over \
+             it, but only the display mode checks for a Wayland socket and shows in doctor"
+        )),
         renderer::PROTON_USE_D7VK | renderer::PROTON_USE_WINED3D | renderer::PROTON_DXVK_D3D8 => {
             Policy::Warn(format!(
                 "{key} is a renderer switch: yours wins over the renderer pick's \
@@ -231,6 +236,9 @@ pub fn shell_words(words: &[String]) -> String {
 pub enum EnvSource {
     /// gogo's default (`PROTON_SET_GAME_DRIVE=0`); any layer wins over it.
     GogoDefault,
+    /// `display = "wayland"` (#292): the launcher sets it when the launch
+    /// finds a Wayland socket; `ENV` goes on after it.
+    Display,
     /// `gogo-launch.toml`'s `env`, baked at build.
     Baked,
     /// `launch.conf` has it and no layer does: the renderer's switches
@@ -255,9 +263,10 @@ impl EnvSource {
     fn rank(&self) -> u8 {
         match self {
             EnvSource::GogoDefault => 0,
-            EnvSource::Renderer { .. } | EnvSource::LastSetup => 1,
-            EnvSource::Baked => 2,
-            EnvSource::Layer { layer } => 3 + *layer as u8,
+            EnvSource::Display => 1,
+            EnvSource::Renderer { .. } | EnvSource::LastSetup => 2,
+            EnvSource::Baked => 3,
+            EnvSource::Layer { layer } => 4 + *layer as u8,
             EnvSource::DllOverrides => 20,
             EnvSource::Launcher => 21,
             EnvSource::Protonfix { .. } => 22,
@@ -269,6 +278,7 @@ impl std::fmt::Display for EnvSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             EnvSource::GogoDefault => f.write_str("gogo default"),
+            EnvSource::Display => f.write_str("display wayland, with a Wayland socket at launch"),
             EnvSource::Baked => f.write_str("gogo-launch.toml"),
             EnvSource::Renderer { renderer } => write!(f, "renderer {renderer}"),
             EnvSource::LastSetup => f.write_str("last setup; the next one may drop it"),
@@ -366,6 +376,9 @@ pub struct EnvReport {
     /// but "what's active" asks about it too.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wrapper: Option<WrapperView>,
+    /// The display mode (#292), when one is set or applied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display: Option<super::display::DisplayView>,
     pub warnings: Vec<String>,
 }
 
@@ -412,6 +425,12 @@ pub fn env_report_with(
     let mut cands: Vec<(String, String, EnvSource)> = Vec::new();
     let (k, v) = setup::GAME_DRIVE_OFF;
     cands.push((k.into(), v.into(), EnvSource::GogoDefault));
+    if r.effective.display.as_ref().map(|m| m.value) == Some(compat::DisplayMode::Wayland) {
+        let hdr = r.effective.hdr.as_ref().map(|h| h.value);
+        for (k, v) in super::display::wayland_env(hdr) {
+            cands.push((k.into(), v.into(), EnvSource::Display));
+        }
+    }
     for (k, s) in &r.effective.env {
         cands.push((
             k.clone(),
@@ -506,6 +525,8 @@ pub fn env_report_with(
     let mut warnings = r.warnings.clone();
     let (wrapper, wrapper_warnings) = wrapper_view(&r.effective, conf.as_ref());
     warnings.extend(wrapper_warnings);
+    let display = super::display::DisplayView::of(&r.effective, conf.as_ref());
+    warnings.extend(super::display::conflicts(gogid, &r.effective));
     if conf.is_none() && r.built {
         warnings.push(format!(
             "{gogid} has no launch.conf yet: `gogo linux-app setup {gogid}` writes it"
@@ -536,6 +557,7 @@ pub fn env_report_with(
         built: r.built,
         lines,
         wrapper,
+        display,
         warnings,
     })
 }
@@ -945,6 +967,8 @@ mod tests {
         assert!(matches!(policy("PROTONFIXES_DISABLE"), Policy::Refuse(_)));
         assert!(matches!(policy("PROTON_USE_D7VK"), Policy::Warn(_)));
         assert!(matches!(policy("PROTON_SET_GAME_DRIVE"), Policy::Warn(_)));
+        assert!(matches!(policy("PROTON_ENABLE_WAYLAND"), Policy::Warn(_)));
+        assert!(matches!(policy("PROTON_USE_WAYLAND"), Policy::Warn(_)));
         assert_eq!(policy("PROTON_ENABLE_NVAPI"), Policy::Free);
         let w = check_set(&[
             ("DXVK_HUD".into(), "fps".into()),

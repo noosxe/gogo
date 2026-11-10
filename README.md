@@ -390,6 +390,9 @@ gogo linux-app args 1423049311 --clear
 gogo linux-app wrapper 1423049311 -- gamescope -f --        # runs outside umu-run; one word per argument, no shell
 gogo linux-app wrapper 1423049311 -- gamemoderun
 gogo linux-app wrapper 1423049311 --clear
+gogo linux-app display 1423049311 wayland --hdr force     # Wine's Wayland driver (X11 when there's no Wayland socket)
+gogo linux-app display 1423049311                          # the mode, and what this session would get
+gogo linux-app display 1423049311 --clear
 ```
 
 `env set` refuses what the launcher sets itself (`WINEPREFIX`, `GAMEID`, `STORE`,

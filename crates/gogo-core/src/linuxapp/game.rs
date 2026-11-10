@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::macapp::compat;
+use crate::macapp::compat::{DisplayMode, Hdr};
 use crate::macapp::error::MacAppError;
 use crate::macapp::launch::{
     GameDirs, LaunchToml, in_library, sh_array, sh_quote, stamp, state_rel,
@@ -391,6 +392,12 @@ pub struct LaunchConf {
     /// The command the game runs under, one word each (#271); empty: none,
     /// and no `WRAPPER=` line.
     pub wrapper: Vec<String>,
+    /// Wine's display driver (#292); `None`: no `DISPLAY_MODE=` line, and
+    /// the launcher leaves the environment's choice alone.
+    pub display: Option<DisplayMode>,
+    /// The HDR switch for Wayland mode; `None` and `Auto`: no
+    /// `DISPLAY_HDR=` line.
+    pub hdr: Option<Hdr>,
     /// gogo's env, the renderer switches and `PROTONFIXES_DISABLE` included.
     pub env: BTreeMap<String, String>,
     pub dll_overrides: BTreeMap<String, String>,
@@ -431,6 +438,12 @@ impl LaunchConf {
         kv("ARGS", sh_array(self.args.iter().cloned()));
         if !self.wrapper.is_empty() {
             kv("WRAPPER", sh_array(self.wrapper.iter().cloned()));
+        }
+        if let Some(d) = self.display {
+            kv("DISPLAY_MODE", sh_quote(d.key()));
+        }
+        if let Some(h) = self.hdr.filter(|h| *h != Hdr::Auto) {
+            kv("DISPLAY_HDR", sh_quote(h.key()));
         }
         kv(
             "ENV",
@@ -504,6 +517,8 @@ mod tests {
                 "$HOME \"q\" `x` \\".into(),
             ],
             wrapper: vec![],
+            display: None,
+            hdr: None,
             env: [
                 ("PROTON_USE_D7VK".to_string(), "1".to_string()),
                 ("ODD".to_string(), "a 'b' $X".to_string()),
@@ -580,6 +595,31 @@ mod tests {
             include_str!("../../tests/fixtures/linuxapp/launch-wrapper.conf.golden")
         );
         assert_eq!(ConfValues::parse(&text).arrays["WRAPPER"], c.wrapper);
+    }
+
+    /// `DISPLAY_MODE=` and `DISPLAY_HDR=` only when set (#292), after any
+    /// `WRAPPER=`; `hdr = "auto"` writes nothing, as no `hdr` does.
+    #[test]
+    fn launch_conf_has_the_display_mode_only_when_set() {
+        let mut c = conf();
+        let plain = c.render();
+        c.hdr = Some(Hdr::Auto);
+        assert_eq!(c.render(), plain);
+        c.display = Some(DisplayMode::Wayland);
+        c.hdr = Some(Hdr::Force);
+        let text = c.render();
+        let added: Vec<&str> = text
+            .lines()
+            .filter(|l| !plain.lines().any(|p| p == *l))
+            .collect();
+        assert_eq!(added, ["DISPLAY_MODE='wayland'", "DISPLAY_HDR='force'"]);
+        assert!(text.find("DISPLAY_MODE=").unwrap() > text.find("ARGS=").unwrap());
+        let v = ConfValues::parse(&text);
+        assert_eq!(v.values["DISPLAY_MODE"], "wayland");
+        assert_eq!(v.values["DISPLAY_HDR"], "force");
+        c.display = Some(DisplayMode::X11);
+        c.hdr = None;
+        assert!(c.render().contains("\nDISPLAY_MODE='x11'\n"));
     }
 
     #[test]

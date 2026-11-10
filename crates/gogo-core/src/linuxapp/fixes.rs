@@ -489,6 +489,12 @@ fn gogo_items(e: &Effective) -> Vec<GogoItem> {
     if let Some(s) = &e.wrapper {
         plain(format!("wrapper = {:?}", s.value), s.layer);
     }
+    if let Some(s) = &e.display {
+        plain(format!("display = {:?}", s.value), s.layer);
+    }
+    if let Some(s) = &e.hdr {
+        plain(format!("hdr = {:?}", s.value), s.layer);
+    }
     if let Some(s) = &e.replace_command {
         plain(
             format!("replace_command {:?} -> {:?}", s.value.from, s.value.to),
@@ -687,6 +693,16 @@ mod tests {
             db: db.map(|r| ("compat DB 1".into(), r.into())),
             layers: vec![(Layer::Auto, auto), (Layer::User, l4(user))],
         }
+    }
+
+    /// #292: a layer's display mode is one of gogo's fixes in the summary.
+    #[test]
+    fn the_display_mode_is_listed() {
+        let e = l4("[platforms.linux]\ndisplay = \"x11\"\nhdr = \"off\"\n");
+        let eff = compat::merge(&[(Layer::User, &e)]);
+        let texts: Vec<String> = gogo_items(&eff).into_iter().map(|g| g.text).collect();
+        assert!(texts.iter().any(|t| t == "display = \"x11\""), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "hdr = \"off\""), "{texts:?}");
     }
 
     #[test]
