@@ -1,5 +1,15 @@
-# Stronghold Crusader HD. Not run by gogo yet.
-# umu-protonfixes installs directplay for multiplayer.
+# Stronghold Crusader HD (2D DirectDraw, 32-bit): cnc-ddraw (L1), on the launcher entry
+# Stronghold_Crusader_Extreme.exe (it imports ddraw like Stronghold Crusader.exe does).
+# e2e/1207658713.toml. umu-protonfixes installs directplay for multiplayer; the verb
+# is applied in the headless build, but multiplayer isn't tried.
 title  = "Stronghold Crusader HD"
 verbs  = ["directplay"]
 source = "umu-protonfixes:gamefixes-steam/40970.py@3603ccbbc20de88c2878306acdfdd4e9a07fc8c4"
+
+[platforms.linux]
+status = "boots"
+lane   = "depot"
+notes  = "headless sway, on Wine's Wayland driver (gogo's display mode) and on Xwayland: logos, the profile prompt, the Crusader Extreme menu, a skirmish against an AI and its map view, and Exit Crusader through Game Options work on cnc-ddraw; the first ~35 s ignore input. Audio, windowed vs fullscreen, HD resolutions, edge scroll and the owner's compositor not judged"
+tested = [
+  { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/software", date = 2026-11-10 },
+]

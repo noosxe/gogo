@@ -1,0 +1,415 @@
+# Stronghold Crusader HD (2D DirectDraw: gogo's cnc-ddraw; the launcher entry is
+# Stronghold_Crusader_Extreme.exe). The game ignores input for its first ~35 s (logos, then the
+# profile prompt): Return before that is lost, so the first step waits. Then: profile name,
+# Crusader Extreme, the skirmish tile, a 2-player map with an AI opponent, the game, and Escape
+# -> Exit Crusader -> Yes. 1280x720 picture in the 1280x800 output, letterboxed.
+# Run both ways: the default (Xwayland) and `--display wayland`.
+# Pointer: the game clips it to its 1280x720 picture, so on Wine's Wayland driver it holds a
+# pointer lock and an absolute click never lands. Every click is steered: three big move_by
+# calls with a pause between pin the pointer at the window's top-left corner (one or two left it
+# 40 px off now and then), the next goes to the target in window pixels, a pause and a
+# nudge let the game see it, click_here.
+title = "Stronghold Crusader HD"
+gogid = 1207658713
+
+[window]
+wait_secs = 240
+resolution = "1280x800"
+min_fill = { w = 90, h = 90 }
+
+# cnc-ddraw draws through GDI: on Wine's Wayland driver that's shm buffers, and
+# the game never opens the GPU (on Xwayland, Wine's X11 driver opens it anyway).
+[gpu]
+wayland = "unused"
+
+[exit]
+how = "self"
+wait_secs = 60
+
+[[step]]
+wait = 45
+
+# "Enter Your Title": Return takes the default name.
+[[step]]
+key = "Return"
+
+[[step]]
+wait = 20
+
+# warm-up: the first click the game gets is lost (the click on Crusader Extreme did nothing
+# and every later one hit the wrong screen), so spend one on empty menu space first
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 2
+
+[[step]]
+move_by = { x = 300, y = 300 }
+
+[[step]]
+wait = 1
+
+[[step]]
+click_here = true
+
+[[step]]
+wait = 2
+
+[[step]]
+screenshot = "menu"
+
+# Crusader Extreme
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = 561, y = 312 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = 2, y = 0 }
+
+[[step]]
+wait = 1
+
+[[step]]
+click_here = true
+
+[[step]]
+wait = 8
+
+[[step]]
+screenshot = "mode"
+
+# the skirmish tile
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = 781, y = 408 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = 2, y = 0 }
+
+[[step]]
+wait = 1
+
+[[step]]
+click_here = true
+
+[[step]]
+wait = 8
+
+[[step]]
+screenshot = "setup"
+
+# Look Out, a 2-player map
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = 860, y = 560 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = 2, y = 0 }
+
+[[step]]
+wait = 1
+
+[[step]]
+click_here = true
+
+[[step]]
+wait = 1
+
+# the opponents' portraits, the first one, the tick
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = 755, y = 150 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = 2, y = 0 }
+
+[[step]]
+wait = 1
+
+[[step]]
+click_here = true
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = 300, y = 362 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = 2, y = 0 }
+
+[[step]]
+wait = 1
+
+[[step]]
+click_here = true
+
+[[step]]
+wait = 2
+
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = 858, y = 635 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = 2, y = 0 }
+
+[[step]]
+wait = 1
+
+[[step]]
+click_here = true
+
+[[step]]
+wait = 1
+
+[[step]]
+screenshot = "opponent"
+
+# the right hand starts the game
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = 947, y = 670 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = 2, y = 0 }
+
+[[step]]
+wait = 1
+
+[[step]]
+click_here = true
+
+[[step]]
+wait = 30
+
+[[step]]
+screenshot = "game"
+
+[[step]]
+expect_change = { from = "setup", to = "game", min = 30 }
+
+[[step]]
+key = "Escape"
+
+[[step]]
+wait = 4
+
+[[step]]
+screenshot = "game-options"
+
+# Exit Crusader
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = 637, y = 440 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = 2, y = 0 }
+
+[[step]]
+wait = 1
+
+[[step]]
+click_here = true
+
+[[step]]
+wait = 4
+
+[[step]]
+screenshot = "exit-dialog"
+
+# Yes
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = 568, y = 368 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = 2, y = 0 }
+
+[[step]]
+wait = 1
+
+[[step]]
+click_here = true
