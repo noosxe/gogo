@@ -777,6 +777,45 @@ def pick_view(tree, title_regex=None):
     return best[1] if best else None
 
 
+def tree_windows(node):
+    """Every window-like node in a `swaymsg -t get_tree` tree, pid or not,
+    visible or not: what sway knows of, for a window that never came up (#309)."""
+    found = []
+    for child in node.get("nodes", []) + node.get("floating_nodes", []):
+        if child.get("type") in ("con", "floating_con") and not child.get("nodes"):
+            rect = child.get("rect", {})
+            found.append(
+                {
+                    "pid": child.get("pid"),
+                    "name": child.get("name"),
+                    "shell": child.get("shell"),
+                    "visible": child.get("visible"),
+                    "size": f"{rect.get('width', 0)}x{rect.get('height', 0)}",
+                }
+            )
+        found += tree_windows(child)
+    return found
+
+
+def parse_xwininfo_children(text):
+    """The root's children in `xwininfo -root -children`, (id, name) pairs,
+    less the window manager's own: those of the client that made "wlroots wm"
+    (an X client's ids share the bits above the server's 21-bit id mask)."""
+    found = []
+    for line in text.splitlines():
+        m = re.match(r"\s+(0x[0-9a-f]+) (\(has no name\)|\"(.*?)\"):", line)
+        if m:
+            found.append((m.group(1), m.group(3)))
+    wm = {int(wid, 16) >> 21 for wid, title in found if title == "wlroots wm"}
+    return [(wid, title) for wid, title in found if int(wid, 16) >> 21 not in wm]
+
+
+def parse_map_state(text):
+    """`Map State:` in `xwininfo -id`: IsViewable, IsUnMapped or IsUnviewable."""
+    m = re.search(r"Map State: (\w+)", text)
+    return m.group(1) if m else None
+
+
 def click_point(rect, x_pct, y_pct):
     """A click's output coordinates from its percentage of the window."""
     x = rect["x"] + rect["width"] * x_pct / 100.0
@@ -1953,7 +1992,50 @@ class Driver:
                     name, False, f"game exited {self.game_exit} with no window"
                 )
             self.sleep(0.5)
-        return self.check(name, False, f"none in {window['wait_secs']:.0f}s")
+        return self.check(name, False, f"none in {window['wait_secs']:.0f}s; {self.window_diagnosis(name)}")
+
+    def window_diagnosis(self, name):
+        """What each side saw of a window that never came up (#309): sway's
+        views, the X server's mapped top-level windows, and the processes.
+        In result.json under window_diagnosis; returns a one-line summary."""
+        diag = {}
+        try:
+            diag["sway_windows"] = tree_windows(json.loads(self.swaymsg("-t", "get_tree", "--raw")))
+        except Exception as e:  # a dead sway is itself the answer
+            diag["sway_windows"] = f"{type(e).__name__}: {e}"
+        diag["sway_alive"] = self.sway is not None and self.sway.poll() is None
+        diag["xwayland"] = xwayland_displays(_cmdlines())
+        x = None
+        if self.display == "xwayland" and self.env.get("DISPLAY"):
+            x = []
+            try:
+                r = self.tool("xwininfo", "-root", "-children", "-display", self.env["DISPLAY"], timeout=5)
+                for wid, title in parse_xwininfo_children(r.stdout):
+                    s = self.tool("xwininfo", "-id", wid, "-display", self.env["DISPLAY"], timeout=5)
+                    x.append({"id": wid, "name": title, "map_state": parse_map_state(s.stdout)})
+                if r.returncode != 0:
+                    x = f"xwininfo exited {r.returncode}: {r.stderr.strip()}"
+            except subprocess.TimeoutExpired:
+                x = "the X server didn't answer in 5 s"
+        diag["x_windows"] = x
+        before = self.before_game or set()
+        diag["processes"] = [
+            {"pid": pid, "comm": comm, "state": state}
+            for pid, comm, state in _proc_table()
+            if pid not in before and pid != os.getpid()
+        ]
+        self.result.setdefault("window_diagnosis", {})[name] = diag
+        self.save()
+        sway_n = len(diag["sway_windows"]) if isinstance(diag["sway_windows"], list) else diag["sway_windows"]
+        if isinstance(x, list):
+            mapped = [w for w in x if w["map_state"] == "IsViewable"]
+            x_text = f"{len(mapped)} of {len(x)} X top-level windows mapped"
+        else:
+            x_text = f"X: {x}"
+        return (
+            f"sway {'up' if diag['sway_alive'] else 'gone'} with {sway_n} windows, "
+            f"Xwayland on {diag['xwayland'] or 'nothing'}, {x_text} (result.json window_diagnosis)"
+        )
 
     def refresh_view(self):
         tree = json.loads(self.swaymsg("-t", "get_tree", "--raw"))
