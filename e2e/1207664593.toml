@@ -1,0 +1,44 @@
+# SimCity 4 Deluxe Edition (wined3d, L1; compat `files` writes Apps/SimCity 4.ini, or it
+# stops at "Unable to find game data"). The intros end by themselves in the region view
+# (Timbuktu), whose water never holds still, so a plain wait. Then the exit button and
+# "Quit SimCity 4", which ends the game (Return on that menu does nothing).
+#
+# 1024x768 scaled to the window's height: 1067x800 pillarboxed in 1280x800, hence a width
+# of 80%. Coordinates are percent of the window.
+#
+# Wine's Wayland driver: the 32-bit game gets no EGL or Vulkan there and stops at "Could
+# not initialize Direct Draw" (#312), so this passes on Xwayland only for now.
+title = "SimCity 4 Deluxe Edition"
+gogid = 1207664593
+
+[window]
+wait_secs = 180
+resolution = "1280x800"
+min_fill = { w = 80, h = 95 }
+
+[exit]
+how = "self"
+wait_secs = 60
+
+[[step]]
+wait = 120
+
+[[step]]
+screenshot = "region"
+
+# The exit button, third in the top bar.
+[[step]]
+click = { x = 63.1, y = 5 }
+
+[[step]]
+wait = 3
+
+[[step]]
+screenshot = "quit-menu"
+
+[[step]]
+expect_change = { from = "region", to = "quit-menu", min = 2 }
+
+# Quit SimCity 4.
+[[step]]
+click = { x = 50, y = 33.1 }
