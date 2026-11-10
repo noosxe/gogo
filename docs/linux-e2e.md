@@ -1049,6 +1049,18 @@ and only the deltas count. Steer it instead: a big `move_by` pins the cursor in 
 the game clamps it, a second one goes to the target, and `click_here` presses there. A unit of
 `move_by` isn't a pixel, since the game and Wine scale it, so measure it from a screenshot.
 
+A game that clips the cursor while hiding the system one (any game under gogo's cnc-ddraw, which
+clips to its window) gets a pointer lock on Wine's Wayland driver, and `click` misses it the same
+way. Heroes of Might and Magic 3 (`e2e/1207658787.toml`) takes `move_by` 1:1 in window pixels,
+but the pin lands on the window's left edge on one launch and on the 4:3 picture's (x 107 of
+1280) on another. So aim only at a button wider than the pillarbox, and prefer the game's own
+keys.
+
+A game that draws through GDI (gogo's cnc-ddraw is pinned to `renderer=gdi`) never opens the GPU
+on Wine's Wayland driver: its frames go to the compositor in shared-memory buffers. So with
+`--gpu`, `gpu_used_by_game` fails there, by design, while on Xwayland Wine's X11 driver opens the
+node anyway and it passes (Heroes 3, 2026-11-10).
+
 To write one: run it with `--keep` or a first screenshot, read the coordinates off the
 PNG, and divide by the resolution. Look at the screenshots yourself: the automatic checks
 say "a picture fills the window and it changed", not "it's the right picture".

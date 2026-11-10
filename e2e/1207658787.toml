@@ -1,0 +1,215 @@
+# Heroes of Might and Magic 3: Complete (#306). 2D DirectDraw at 800x600: the exe
+# imports DDrawCompat as xdd.dll, and gogo's cnc-ddraw stands in for it under that
+# name. The intros, the main menu, New Game > Single Scenario > Begin, the adventure
+# map, the town screen, System Options > Quit to Desktop, then a relaunch to the
+# menu and Quit there.
+#
+# 800x600 scaled to 1067x800, pillarboxed in 1280x800, hence the width.
+#
+# The route is on the game's own keys. The mouse: the game hides the system cursor
+# and draws its own, and cnc-ddraw clips the pointer, so on Wine's Wayland driver
+# it's a pointer lock and an absolute `click` never reaches the game. Steered (a big
+# `move_by` pins the cursor at the top left, a second goes to the target in window
+# pixels, `click_here` presses), it lands, but the pin ends at the window's edge on
+# one launch and at the picture's (x 107) on another. So the one mouse step aims
+# at a button wider than that.
+#
+# The scenario gives the player a random faction: the map and town differ per run.
+
+title = "Heroes of Might and Magic 3: Complete"
+gogid = 1207658787
+
+[window]
+wait_secs = 240
+resolution = "1280x800"
+min_fill = { w = 80, h = 95 }
+
+[exit]
+how = "self"
+wait_secs = 60
+
+# The logos.
+[[step]]
+wait = 10
+
+[[step]]
+screenshot = "intro"
+min_fill = false
+
+# The intros play through to the menu by themselves (about 3 minutes); every key
+# or click skips one, and one too many opens the menu's Quit dialog. The menu's
+# plain red strip right of its buttons says it's there.
+[[step]]
+wait_until = { every = 2, max = 150, marked = { x = 87.5, y = 25, w = 3, h = 40, color = "#c6554a", tol = 30, min = 80 } }
+
+[[step]]
+wait = 2
+
+[[step]]
+screenshot = "menu"
+
+# New Game (n), Single Scenario (s): Arrogance is picked.
+[[step]]
+key = "n"
+
+[[step]]
+wait = 3
+
+[[step]]
+screenshot = "new-game"
+
+[[step]]
+expect_change = { from = "menu", to = "new-game", min = 5 }
+
+[[step]]
+key = "s"
+
+[[step]]
+wait = 4
+
+[[step]]
+screenshot = "scenario"
+
+[[step]]
+expect_change = { from = "new-game", to = "scenario", min = 30 }
+
+# Begin (b): the adventure map, under the scenario's opening message.
+[[step]]
+key = "b"
+
+[[step]]
+wait = 12
+
+[[step]]
+screenshot = "map-message"
+
+[[step]]
+expect_change = { from = "scenario", to = "map-message", min = 30 }
+
+# The message's OK.
+[[step]]
+key = "Return"
+
+[[step]]
+wait = 3
+
+[[step]]
+screenshot = "map"
+
+[[step]]
+expect_change = { from = "map-message", to = "map", min = 8 }
+
+# The town: t selects it, Return opens its screen.
+[[step]]
+key = "t"
+
+[[step]]
+wait = 2
+
+[[step]]
+key = "Return"
+
+[[step]]
+wait = 4
+
+[[step]]
+screenshot = "town"
+
+[[step]]
+expect_change = { from = "map", to = "town", min = 40 }
+
+# Back to the map.
+[[step]]
+key = "Escape"
+
+[[step]]
+wait = 3
+
+[[step]]
+screenshot = "map-again"
+
+[[step]]
+expect_change = { from = "town", to = "map-again", min = 40 }
+
+# System Options (o), and its Return to Game by mouse: x 797-927 px, so either
+# pin lands on it.
+[[step]]
+key = "o"
+
+[[step]]
+wait = 3
+
+[[step]]
+screenshot = "system-options"
+
+[[step]]
+expect_change = { from = "map-again", to = "system-options", min = 20 }
+
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+move_by = { x = 805, y = 658 }
+
+[[step]]
+click_here = true
+
+[[step]]
+wait = 3
+
+[[step]]
+screenshot = "map-mouse"
+
+[[step]]
+expect_change = { from = "system-options", to = "map-mouse", min = 20 }
+
+# System Options again, Quit to Desktop (q), and Return on its "Are you sure":
+# the game exits, code 0.
+[[step]]
+key = "o"
+
+[[step]]
+wait = 3
+
+[[step]]
+key = "q"
+
+[[step]]
+wait = 3
+
+[[step]]
+screenshot = "quit-check"
+
+[[step]]
+expect_change = { from = "map-mouse", to = "quit-check", min = 20 }
+
+[[step]]
+key = "Return"
+
+# The same disk again: the intros, the menu, and Escape's Quit there.
+[[step]]
+relaunch = true
+
+[[step]]
+wait_until = { every = 2, max = 150, marked = { x = 87.5, y = 25, w = 3, h = 40, color = "#c6554a", tol = 30, min = 80 } }
+
+[[step]]
+wait = 2
+
+[[step]]
+screenshot = "menu-relaunch"
+
+[[step]]
+key = "Escape"
+
+[[step]]
+wait = 3
+
+[[step]]
+screenshot = "menu-quit-check"
+
+[[step]]
+expect_change = { from = "menu-relaunch", to = "menu-quit-check", min = 3 }
+
+[[step]]
+key = "Return"
