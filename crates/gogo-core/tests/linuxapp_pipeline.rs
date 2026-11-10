@@ -1592,7 +1592,7 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
     // next setup, which says so; an unchanged one isn't touched.
     std::fs::write(
         &sh,
-        script.replace("LAUNCHER_VERSION=11", "LAUNCHER_VERSION=0"),
+        script.replace("LAUNCHER_VERSION=12", "LAUNCHER_VERSION=0"),
     )
     .unwrap();
     std::fs::write(&desktop, "[Desktop Entry]\nExec=/old/root/launch.sh\n").unwrap();
@@ -1600,7 +1600,7 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
     assert_eq!(std::fs::read_to_string(&sh).unwrap(), script);
     assert_eq!(std::fs::read_to_string(&desktop).unwrap(), entry);
     assert!(
-        out.notes.iter().any(|n| n == "launch.sh: launcher 0 -> 11"),
+        out.notes.iter().any(|n| n == "launch.sh: launcher 0 -> 12"),
         "{:?}",
         out.notes
     );
@@ -1665,7 +1665,7 @@ fn the_launcher_runs_umu_with_the_games_environment_and_logs_the_run() {
     let run = &runs[0];
     for want in [
         format!("# gogo run log: Test Game ({ID})\n"),
-        "# launcher: 11\n".into(),
+        "# launcher: 12\n".into(),
         format!(
             "# runtime: path:{} (1793687165 GE-Proton10-34)\n",
             w.build.display()
@@ -2051,6 +2051,76 @@ fn term_hanging_launcher(w: &World, env: &[(&str, &str)]) -> (Option<i32>, u64) 
         std::thread::sleep(std::time::Duration::from_millis(100));
     };
     (code, start.elapsed().as_secs())
+}
+
+/// Like `term_hanging_launcher`, but sends `first`, then (after `gap_ms`)
+/// `second`; returns the code and how long the launcher lived after the
+/// second signal.
+fn two_signals_launcher(
+    w: &World,
+    env: &[(&str, &str)],
+    first: &str,
+    second: &str,
+    gap_ms: u64,
+) -> (Option<i32>, std::time::Duration) {
+    let mut env = env.to_vec();
+    env.push(("FAKE_GAME_HANG", "1"));
+    let mut child = w
+        .launch_cmd(&env, &[])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    assert!(
+        wait_until(10, || prefix_procs(w).len() >= 4),
+        "{:?}",
+        prefix_procs(w)
+    );
+    let send = |sig: &str| {
+        let st = std::process::Command::new("kill")
+            .args([sig, &child.id().to_string()])
+            .status()
+            .unwrap();
+        assert!(st.success());
+    };
+    send(first);
+    std::thread::sleep(std::time::Duration::from_millis(gap_ms));
+    send(second);
+    let start = std::time::Instant::now();
+    loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            return (s.code(), start.elapsed());
+        }
+        if start.elapsed().as_secs() >= 20 {
+            let _ = child.kill();
+            panic!("the launcher didn't exit");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn a_second_signal_cuts_the_close_wait_short() {
+    for (name, first, second, code) in [
+        ("sig2term", "-TERM", "-TERM", 143),
+        ("sig2int", "-TERM", "-INT", 143),
+        ("sig2intint", "-INT", "-INT", 130),
+    ] {
+        let Some(w) = World::launcher(name, true) else {
+            return;
+        };
+        let (c, after) =
+            two_signals_launcher(&w, &[("GOGO_CLOSE_GRACE_SECS", "8")], first, second, 1000);
+        assert_eq!(c, Some(code), "{name}");
+        // Torn down at once, not after the 8 s wait.
+        assert!(after.as_secs() < 6, "{name}: {after:?}");
+        assert!(prefix_procs(&w).is_empty(), "{:?}", prefix_procs(&w));
+        let log = w.launch_log();
+        assert!(log.contains("asked the game to close"), "{log}");
+        assert!(log.contains("not waiting for the game to close"), "{log}");
+        assert!(!log.contains("didn't close in"), "{log}");
+        assert!(log.contains("reaped (SIGKILL): "), "{log}");
+    }
 }
 
 #[test]
@@ -3868,7 +3938,7 @@ fn the_launcher_of_a_library_game_keeps_gogos_data_root() {
     );
     // Logs stay under the data root, not the library's parent.
     assert_eq!(w.runs().len(), 1, "run logs under {:?}", w.logs());
-    assert!(w.launch_log().contains("launcher 11"));
+    assert!(w.launch_log().contains("launcher 12"));
     assert!(!w.root.join("big drive/logs").exists());
 
     // Stale config: setup runs with gogo's data root as GOGO_HOME, and from

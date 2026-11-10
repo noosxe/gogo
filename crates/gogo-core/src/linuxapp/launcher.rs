@@ -23,7 +23,7 @@ use crate::macapp::launch::GameDirs;
 /// Bumped with every change to [`TEMPLATE`] that matters to a game set up
 /// before it. Setup rewrites `launch.sh` whenever its bytes differ, so this
 /// is for people: the run log header and `launch.log` name it.
-pub const LAUNCHER_VERSION: u32 = 11;
+pub const LAUNCHER_VERSION: u32 = 12;
 
 /// `launch.sh`'s first word when a wrapper runs it for the game's own step
 /// (design 18 §7.8): the game's environment, then umu-run.
@@ -739,6 +739,7 @@ cd "$WORKDIR_ABS" 2>/dev/null || {
 # the same time.
 CLOSE_GRACE_SECS="${GOGO_CLOSE_GRACE_SECS:-10}"
 CLOSING=""
+SKIP_WAIT=""
 # shellcheck disable=SC2329 # used by close_game
 running() {
     local s
@@ -776,7 +777,8 @@ ask_close() {
 }
 # shellcheck disable=SC2329 # called by on_signal, through the traps
 close_game() {
-    # A second signal skips the wait; no game started yet, nothing to ask.
+    # A second signal skips the wait (see on_signal); no game started yet,
+    # nothing to ask.
     [ -n "$CLOSING" ] && return 0
     CLOSING=1
     [ -n "$WPID" ] || return 0
@@ -792,6 +794,11 @@ close_game() {
         log "no wineserver of this prefix: not asking the game to close"
     fi
     while [ $((SECONDS - t0)) -lt "$CLOSE_GRACE_SECS" ]; do
+        if [ -n "$SKIP_WAIT" ]; then
+            log "second signal after $((SECONDS - t0))s: not waiting for the game to close"
+            if [ -n "$bpid" ]; then kill -KILL "$bpid" 2>/dev/null; fi
+            return 0
+        fi
         if ! running "$WPID" && { [ -z "$bpid" ] || ! running "$bpid"; } \
             && { [ -n "$(other_launcher)" ] || [ -z "$(prefix_pids)" ]; }; then
             log "closed by itself after $((SECONDS - t0))s"
@@ -959,6 +966,12 @@ stop_watchdog() {
 # shellcheck disable=SC2329 # called by the traps below
 on_signal() {
     log "got SIG$1"
+    # Bash defers a signal while its own trap runs, so a second TERM would
+    # wait for this whole handler, the close wait included. Replacing the traps
+    # first lets the second signal (of any of the three) run at once: it only
+    # flags close_game's wait to end. A wait on a child (or a sleep, within
+    # 0.25 s) gives way to it.
+    trap 'log "got another signal"; SKIP_WAIT=1' INT TERM HUP
     # The guard stays armed while the game is asked to close: a launcher
     # killed meanwhile is still torn down.
     close_game
