@@ -4,14 +4,15 @@
 # by itself and puts its cnc-ddraw in under that name (#306), so no renderer key
 # here. e2e/1207658787.toml.
 title  = "Heroes of Might and Magic 3: Complete"
-source = "gogo-headless"
+source = "gogo-host"
 
 # The Mac picks wined3d for it and can't run it yet (#307): no [platforms.macos].
 
 [platforms.linux]
-status = "boots"
+status = "plays"
 lane   = "depot"
-notes  = "headless sway, on Wine's Wayland driver (gogo's display mode) and on Xwayland: intros, menu, a scenario's adventure map, the town screen, Quit to Desktop and a relaunch work on cnc-ddraw; audio, scaling on a real desktop and the owner's compositor not judged"
+notes  = "owner's host pass on Hyprland (NVIDIA RTX 4090), built with gogo (depot lane, cnc-ddraw standing in for GOG's DDrawCompat xdd.dll): everything works on both Wine's Wayland driver and Xwayland (intros and music, 4:3 scaling, mouse, a play session, Quit to Desktop, pointer lock, fullscreen vs windowed); headless sway agreed on both display modes"
 tested = [
   { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/nvidia", date = 2026-11-10 },
+  { runtime = "ge-proton/GE-Proton11-12", host = "hyprland/nvidia", date = 2026-11-10 },
 ]
