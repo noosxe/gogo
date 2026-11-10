@@ -2081,8 +2081,13 @@ async fn resolve_game_source(
         return Err(AppError::Depot(gogo::gog::depot::DepotError::NoCacheDir));
     };
 
+    let cached_tree = find_game_tree(&root);
     let mut facts = lane::GameFacts {
-        cached_tree: find_game_tree(&root),
+        cache_gap: cached_tree
+            .as_ref()
+            .map(|_| gogo::gog::depot::check_cache(&root))
+            .filter(|c| *c != gogo::gog::depot::CacheCheck::Complete),
+        cached_tree,
         ..Default::default()
     };
     if facts.cached_tree.is_none() {
@@ -2096,9 +2101,28 @@ async fn resolve_game_source(
         let state = gogo::state::State::load().unwrap_or_default();
         facts.installer = lane::downloaded_installer(&state.installs, game.id, &download_root);
     }
+    // A cached tree that isn't known to be whole (#316): download again,
+    // which keeps what's there and fetches what's gone.
+    let mut repair = None;
     match lane::pick(facts, explicit) {
         lane::Lane::DepotCached(tree) => return Ok((None, Some(tree))),
         lane::Lane::DepotDownload => {}
+        lane::Lane::DepotRepair(tree, gap) => {
+            match &gap {
+                gogo::gog::depot::CacheCheck::Missing { shown, count } => eprintln!(
+                    "gogo: the depot cache for {title} lost {count} file(s) its download \
+                     left ({}{})",
+                    shown.join(", "),
+                    if *count > shown.len() { ", …" } else { "" }
+                ),
+                _ => eprintln!(
+                    "gogo: the depot cache for {title} has no record of a finished \
+                     download ({}), so it may lack files (such as GOG's support overlay)",
+                    root.join(gogo::gog::depot::RECORD).display()
+                ),
+            }
+            repair = Some((tree, gap));
+        }
         lane::Lane::InstallerFallback(exe) => {
             eprintln!(
                 "gogo: {title} has no depot build — using its offline installer {}",
@@ -2130,21 +2154,41 @@ async fn resolve_game_source(
         && !machine
     {
         go = dialoguer::Confirm::new()
-            .with_prompt(format!(
-                "depot cache empty for {title} — download it now? (same as `gogo depot`)"
-            ))
+            .with_prompt(if repair.is_some() {
+                format!(
+                    "check the depot cache for {title} (hashes its files once) and fetch \
+                     what's missing now? (same as `gogo depot`)"
+                )
+            } else {
+                format!("depot cache empty for {title} — download it now? (same as `gogo depot`)")
+            })
             .default(true)
             .interact()
             .unwrap_or(false);
     }
     if !go {
-        eprintln!(
-            "gogo: no depot cache for {title} — run `gogo depot {selector}` first \
-             (or pass --yes to download here)"
-        );
+        match repair {
+            // No record says what's missing: build from it, as before.
+            Some((tree, gogo::gog::depot::CacheCheck::Unrecorded)) => {
+                eprintln!(
+                    "gogo: warning: building from the unchecked depot cache; \
+                     `gogo depot {selector}` checks and completes it"
+                );
+                return Ok((None, Some(tree)));
+            }
+            Some(_) => eprintln!(
+                "gogo: the depot cache for {title} is incomplete — run \
+                 `gogo depot {selector}` first (or pass --yes to download here)"
+            ),
+            None => eprintln!(
+                "gogo: no depot cache for {title} — run `gogo depot {selector}` first \
+                 (or pass --yes to download here)"
+            ),
+        }
         return Err(AppError::Usage);
     }
 
+    let repairing = repair.is_some();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<gogo::gog::depot::DepotEvent>();
     let opts = gogo::gog::depot::DepotOptions::default();
     // Reuse the command context's cancellation (ctrl-c wiring is upstream).
@@ -2166,10 +2210,15 @@ async fn resolve_game_source(
                 if let (Some(gogo::gog::depot::DepotEvent::Plan { download_size, .. }), false) =
                     (maybe, machine)
                 {
-                    println!(
-                        "gogo: downloading {title} via depot ({})",
-                        gogo::fmt::human_size(download_size)
-                    );
+                    let size = gogo::fmt::human_size(download_size);
+                    if repairing {
+                        println!(
+                            "gogo: checking {title}'s depot cache (hashing its files), \
+                             fetching what's missing"
+                        );
+                    } else {
+                        println!("gogo: downloading {title} via depot ({size})");
+                    }
                 }
             }
         }

@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
+use gogo::gog::depot::CacheCheck;
 use gogo::state::records::InstallRecord;
 
 /// What the user pointed `mac-app` at, before any lookup.
@@ -56,6 +57,9 @@ fn is_exe(path: &Path) -> bool {
 pub struct GameFacts {
     /// The depot cache already holds its tree.
     pub cached_tree: Option<PathBuf>,
+    /// The cached tree's check against its download record
+    /// ([`gogo::gog::depot::check_cache`]); `None` when it's complete.
+    pub cache_gap: Option<CacheCheck>,
     /// GOG publishes a public Windows depot build for it.
     pub has_depot_build: bool,
     /// Its downloaded offline installer (`setup_*.exe`), if any.
@@ -67,6 +71,10 @@ pub struct GameFacts {
 pub enum Lane {
     /// Depot lane from the warm cache.
     DepotCached(PathBuf),
+    /// A cached tree that isn't known to be whole: files its download left
+    /// are gone, or it has no record. Downloading again (with consent)
+    /// fetches what's missing; existing files are kept.
+    DepotRepair(PathBuf, CacheCheck),
     /// Depot lane; the cache is cold, so download first (with consent).
     DepotDownload,
     /// No depot build: the installer lane, with a notice saying so.
@@ -81,7 +89,10 @@ pub enum Lane {
 /// §6.3); the installer lane is the fallback, except under `--from-depot`.
 pub fn pick(facts: GameFacts, explicit: bool) -> Lane {
     if let Some(tree) = facts.cached_tree {
-        return Lane::DepotCached(tree);
+        return match facts.cache_gap {
+            None | Some(CacheCheck::Complete) => Lane::DepotCached(tree),
+            Some(gap) => Lane::DepotRepair(tree, gap),
+        };
     }
     if facts.has_depot_build {
         return Lane::DepotDownload;
@@ -127,6 +138,7 @@ mod tests {
         root: tempfile::TempDir,
         games: Vec<(u64, bool)>,
         cached: Vec<u64>,
+        gaps: Vec<(u64, CacheCheck)>,
         records: Vec<InstallRecord>,
     }
 
@@ -136,6 +148,7 @@ mod tests {
                 root: tempfile::tempdir().unwrap(),
                 games: games.to_vec(),
                 cached: Vec::new(),
+                gaps: Vec::new(),
                 records: Vec::new(),
             }
         }
@@ -155,10 +168,40 @@ mod tests {
                     .cached
                     .contains(&id)
                     .then(|| PathBuf::from(format!("/cache/{id}/Game"))),
+                cache_gap: self
+                    .gaps
+                    .iter()
+                    .find(|(g, _)| *g == id)
+                    .map(|(_, c)| c.clone()),
                 has_depot_build: self.games.iter().any(|&(g, b)| g == id && b),
                 installer: downloaded_installer(&self.records, id, self.root.path()),
             }
         }
+    }
+
+    #[test]
+    fn an_incomplete_cache_is_repaired() {
+        let mut cat = FakeCatalog::new(&[(1, true), (2, true), (3, true)]);
+        cat.cached.extend([1, 2, 3]);
+        let gone = CacheCheck::Missing {
+            shown: vec!["gog-support/1/1/app/x.ini".into()],
+            count: 1,
+        };
+        cat.gaps.push((1, gone.clone()));
+        cat.gaps.push((2, CacheCheck::Unrecorded));
+        cat.gaps.push((3, CacheCheck::Complete));
+        assert_eq!(
+            pick(cat.facts(1), false),
+            Lane::DepotRepair(PathBuf::from("/cache/1/Game"), gone)
+        );
+        assert_eq!(
+            pick(cat.facts(2), false),
+            Lane::DepotRepair(PathBuf::from("/cache/2/Game"), CacheCheck::Unrecorded)
+        );
+        assert_eq!(
+            pick(cat.facts(3), false),
+            Lane::DepotCached(PathBuf::from("/cache/3/Game"))
+        );
     }
 
     fn record(id: u64, dlc: Option<u64>, kind: &str, path: PathBuf, at: &str) -> InstallRecord {
