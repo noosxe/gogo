@@ -864,7 +864,10 @@ fn renderer_flag_equal_to_l1_pick_keeps_its_layer() {
         (r.baked.as_str(), r.effective.as_str(), r.applied.as_deref()),
         ("wined3d", "wined3d", Some("wined3d"))
     );
-    assert_eq!((r.baked_layer, r.effective_layer), (Layer::Flags, Layer::Flags));
+    assert_eq!(
+        (r.baked_layer, r.effective_layer),
+        (Layer::Flags, Layer::Flags)
+    );
     assert_eq!(r.auto, "proton-default");
     let host = doctor_host(&w, &[]);
     let (_, msg) = renderer_finding(&doctor(&w, &host));
