@@ -6,7 +6,8 @@
 //! renderer itself.
 //!
 //! - **Files**: the primary exe (from `goggame-*.info`, else a size heuristic)
-//!   plus every `.exe`/`.dll` in its directory. The D3D import is often not in
+//!   plus every `.exe`/`.dll` in its directory. Other exes count only when the
+//!   entry exe and DLLs give no graphics evidence (#226). The D3D import is often not in
 //!   the exe: Rebel Galaxy's D3D11 lives in `RenderSystem_Direct3D11.dll`.
 //! - **Imports**: regular and delay-load import tables, via the `object` crate.
 //! - **Direct3D ≤ 7** has no DLL of its own (it comes from `ddraw.dll` through
@@ -28,7 +29,7 @@
 //!   they choose the API at runtime, so for Unity/Unreal the classification
 //!   runs over imports and runtime-loaded names together.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use object::read::pe::{ImageNtHeaders, PeFile};
@@ -196,6 +197,12 @@ pub struct PeScan {
     /// `d3d.ren`).
     #[serde(default)]
     pub renderer_dlls: BTreeSet<String>,
+    /// Other `.exe` files beside the entry point (editors, launchers, config
+    /// tools) whose graphics imports were left out of the classification
+    /// because the entry point and its DLLs already give evidence. Path →
+    /// graphics APIs it imports; empty when nothing was set aside.
+    #[serde(default)]
+    pub secondary_graphics: BTreeMap<String, BTreeSet<GraphicsImport>>,
     pub files: Vec<PeFileScan>,
 }
 
@@ -253,9 +260,12 @@ fn scan_from(root: &Path, exe: &Path, source: MainExeSource) -> Result<PeScan, S
     let mut files = vec![main];
 
     let mut candidates = pe_files_in(exe_dir);
+    let mut unreal_exes = BTreeSet::new();
     if engine_hint == Some(Engine::Unreal) {
         // The root stub only starts `<Project>/Binaries/Win64/<Project>-Win64-Shipping.exe`.
-        candidates.extend(unreal_binaries(root));
+        let bins = unreal_binaries(root);
+        unreal_exes.extend(bins.iter().map(|p| rel_path(root, p)));
+        candidates.extend(bins);
     }
     let mut shipped = BTreeSet::new();
     let mut renderer_dlls = BTreeSet::new();
@@ -290,50 +300,40 @@ fn scan_from(root: &Path, exe: &Path, source: MainExeSource) -> Result<PeScan, S
         .cloned()
         .collect();
 
-    let mut graphics_imports = BTreeSet::new();
-    let mut runtime_graphics = BTreeSet::new();
-    let mut helpers = BTreeSet::new();
-    let mut runtime_loaded = BTreeSet::new();
-    let mut all_imports = BTreeSet::new();
-    let mut d3d7_confidence = None;
-    let mut dxguid_block = false;
-    let mut runtime_d3d7 = false;
-    for f in &files {
-        let name = file_name(&f.path);
-        if local_overrides.contains(&name) {
-            continue;
-        }
-        all_imports.extend(f.imports.iter().cloned());
-        graphics_imports.extend(f.imports.iter().filter_map(|n| graphics_import(n)));
-        let imports_d3dim = f
-            .imports
-            .iter()
-            .any(|n| graphics_import(n) == Some(GraphicsImport::Direct3d7));
-        let d3d7 = f.d3d7.max(imports_d3dim.then_some(D3d7Confidence::Strong));
-        if let Some(c) = d3d7 {
-            // GUIDs in a file that only names ddraw.dll are as runtime as
-            // its ddraw.
-            if imports_d3dim || f.imports.contains("ddraw.dll") || is_renderer_dll(&name) {
-                graphics_imports.insert(GraphicsImport::Direct3d7);
-            } else {
-                runtime_d3d7 = true;
-            }
-            d3d7_confidence = d3d7_confidence.max(Some(c));
-        }
-        dxguid_block |= f.dxguid_block;
-        helpers.extend(
-            f.imports
+    // The entry point decides (#226): another `.exe` beside it (a building
+    // editor importing d3d6, say) only counts when the entry point, its DLLs
+    // and the engine's own binaries give no graphics evidence (a launcher
+    // stub). Without a known entry point (`Heuristic`) every exe counts.
+    let is_tool = |f: &PeFileScan| {
+        source != MainExeSource::Heuristic
+            && f.path != files[0].path
+            && file_name(&f.path).ends_with(".exe")
+            && !unreal_exes.contains(&f.path)
+    };
+    let mut agg = aggregate(&files, &local_overrides, &shipped, |f| !is_tool(f));
+    let mut secondary_graphics = BTreeMap::new();
+    if agg.has_graphics() {
+        for f in files.iter().filter(|f| is_tool(f)) {
+            let apis: BTreeSet<GraphicsImport> = f
+                .imports
                 .iter()
-                .filter(|n| is_helper(n) && !shipped.contains(*n))
-                .cloned(),
-        );
-        runtime_loaded.extend(f.runtime_loaded.iter().cloned());
+                .filter_map(|n| graphics_import(n))
+                .collect();
+            if !apis.is_empty() {
+                secondary_graphics.insert(f.path.clone(), apis);
+            }
+        }
+    } else {
+        agg = aggregate(&files, &local_overrides, &shipped, |_| true);
     }
-    runtime_loaded.retain(|n| !all_imports.contains(n));
-    runtime_graphics.extend(runtime_loaded.iter().filter_map(|n| graphics_import(n)));
-    if runtime_d3d7 {
-        runtime_graphics.insert(GraphicsImport::Direct3d7);
-    }
+    let Agg {
+        graphics_imports,
+        runtime_graphics,
+        helpers,
+        runtime_loaded,
+        d3d7_confidence,
+        dxguid_block,
+    } = agg;
 
     let clickteam = files[0].clickteam || files[0].imports.contains("mmfs2.dll");
     let engine = engine_hint.or(clickteam.then_some(Engine::Clickteam));
@@ -374,8 +374,87 @@ fn scan_from(root: &Path, exe: &Path, source: MainExeSource) -> Result<PeScan, S
         d3d7_confidence,
         dxguid_block,
         renderer_dlls,
+        secondary_graphics,
         files,
     })
+}
+
+/// What the scanned files add up to ([`scan_from`]).
+struct Agg {
+    graphics_imports: BTreeSet<GraphicsImport>,
+    runtime_graphics: BTreeSet<GraphicsImport>,
+    helpers: BTreeSet<String>,
+    runtime_loaded: BTreeSet<String>,
+    d3d7_confidence: Option<D3d7Confidence>,
+    dxguid_block: bool,
+}
+
+impl Agg {
+    fn has_graphics(&self) -> bool {
+        !self.graphics_imports.is_empty()
+            || !self.runtime_graphics.is_empty()
+            || self.d3d7_confidence.is_some()
+    }
+}
+
+fn aggregate(
+    files: &[PeFileScan],
+    local_overrides: &BTreeSet<String>,
+    shipped: &BTreeSet<String>,
+    include: impl Fn(&PeFileScan) -> bool,
+) -> Agg {
+    let mut graphics_imports = BTreeSet::new();
+    let mut runtime_graphics = BTreeSet::new();
+    let mut helpers = BTreeSet::new();
+    let mut runtime_loaded = BTreeSet::new();
+    let mut all_imports = BTreeSet::new();
+    let mut d3d7_confidence = None;
+    let mut dxguid_block = false;
+    let mut runtime_d3d7 = false;
+    for f in files.iter().filter(|f| include(f)) {
+        let name = file_name(&f.path);
+        if local_overrides.contains(&name) {
+            continue;
+        }
+        all_imports.extend(f.imports.iter().cloned());
+        graphics_imports.extend(f.imports.iter().filter_map(|n| graphics_import(n)));
+        let imports_d3dim = f
+            .imports
+            .iter()
+            .any(|n| graphics_import(n) == Some(GraphicsImport::Direct3d7));
+        let d3d7 = f.d3d7.max(imports_d3dim.then_some(D3d7Confidence::Strong));
+        if let Some(c) = d3d7 {
+            // GUIDs in a file that only names ddraw.dll are as runtime as
+            // its ddraw.
+            if imports_d3dim || f.imports.contains("ddraw.dll") || is_renderer_dll(&name) {
+                graphics_imports.insert(GraphicsImport::Direct3d7);
+            } else {
+                runtime_d3d7 = true;
+            }
+            d3d7_confidence = d3d7_confidence.max(Some(c));
+        }
+        dxguid_block |= f.dxguid_block;
+        helpers.extend(
+            f.imports
+                .iter()
+                .filter(|n| is_helper(n) && !shipped.contains(*n))
+                .cloned(),
+        );
+        runtime_loaded.extend(f.runtime_loaded.iter().cloned());
+    }
+    runtime_loaded.retain(|n| !all_imports.contains(n));
+    runtime_graphics.extend(runtime_loaded.iter().filter_map(|n| graphics_import(n)));
+    if runtime_d3d7 {
+        runtime_graphics.insert(GraphicsImport::Direct3d7);
+    }
+    Agg {
+        graphics_imports,
+        runtime_graphics,
+        helpers,
+        runtime_loaded,
+        d3d7_confidence,
+        dxguid_block,
+    }
 }
 
 /// docs/19 §6.2 order: a D3D10/11 path beats D3D12 (DXMT before consent-gated
@@ -608,11 +687,7 @@ fn scan_file(root: &Path, path: &Path) -> Result<Option<PeFileScan>, ScanError> 
         return Ok(None);
     }
     let data = std::fs::read(path).map_err(io)?;
-    let rel = path
-        .strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/");
+    let rel = rel_path(root, path);
     let parsed = match FileKind::parse(&*data) {
         Ok(FileKind::Pe32) => parse_pe::<object::pe::ImageNtHeaders32>(&data, Bitness::I386),
         Ok(FileKind::Pe64) => parse_pe::<object::pe::ImageNtHeaders64>(&data, Bitness::X86_64),
@@ -827,6 +902,13 @@ fn lower_name(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default()
+}
+
+fn rel_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 fn file_name(rel: &str) -> String {
@@ -1584,5 +1666,73 @@ mod tests {
         }
         let back: PeScan = serde_json::from_value(old).unwrap();
         assert_eq!(back.d3d7_confidence, None);
+    }
+
+    // --- #226: the entry point decides, other exes only as a fallback ---
+
+    fn imports(list: &'static [&'static str]) -> Pe<'static> {
+        Pe {
+            imports: list,
+            ..Pe::default()
+        }
+    }
+
+    #[test]
+    fn tool_exe_does_not_outweigh_the_entry_point() {
+        let tmp = tempfile::tempdir().unwrap();
+        put(tmp.path(), "Sc3k.exe", &imports(&["ddraw.dll"]));
+        put(
+            tmp.path(),
+            "Baapp.exe",
+            &imports(&["ddraw.dll", "d3dim.dll"]),
+        );
+        info(tmp.path(), "Sc3k.exe");
+        let s = scan(tmp.path()).unwrap();
+        assert_eq!(s.graphics, GraphicsApi::Ddraw2d);
+        assert!(!s.graphics_imports.contains(&GraphicsImport::Direct3d7));
+        assert_eq!(s.d3d7_confidence, None);
+        assert_eq!(
+            s.secondary_graphics["Baapp.exe"],
+            BTreeSet::from([GraphicsImport::Ddraw, GraphicsImport::Direct3d7])
+        );
+        // The same tree, entry point unknown: today's behaviour.
+        let t = scan_exe(tmp.path(), &tmp.path().join("Baapp.exe")).unwrap();
+        assert_eq!(t.graphics, GraphicsApi::D3dLegacy);
+    }
+
+    #[test]
+    fn stub_entry_point_falls_back_to_other_exes() {
+        let tmp = tempfile::tempdir().unwrap();
+        put(tmp.path(), "Launcher.exe", &imports(&["kernel32.dll"]));
+        put(tmp.path(), "Game.exe", &imports(&["d3d9.dll"]));
+        info(tmp.path(), "Launcher.exe");
+        let s = scan(tmp.path()).unwrap();
+        assert_eq!(s.graphics, GraphicsApi::D3dLegacy);
+        assert!(s.graphics_imports.contains(&GraphicsImport::D3d9));
+        assert!(s.secondary_graphics.is_empty());
+    }
+
+    #[test]
+    fn no_info_counts_every_exe_as_before() {
+        let tmp = tempfile::tempdir().unwrap();
+        put(tmp.path(), "Big.exe", &imports(&["ddraw.dll"]));
+        put(tmp.path(), "Edit.exe", &imports(&["d3d9.dll"]));
+        let s = scan(tmp.path()).unwrap();
+        assert_eq!(s.main_exe_source, MainExeSource::Heuristic);
+        assert!(s.graphics_imports.contains(&GraphicsImport::D3d9));
+        assert!(s.secondary_graphics.is_empty());
+    }
+
+    #[test]
+    fn dlls_beside_the_entry_point_still_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        put(tmp.path(), "Game.exe", &imports(&["kernel32.dll"]));
+        put(tmp.path(), "engine.dll", &imports(&["d3d9.dll"]));
+        put(tmp.path(), "Tool.exe", &imports(&["opengl32.dll"]));
+        info(tmp.path(), "Game.exe");
+        let s = scan(tmp.path()).unwrap();
+        assert!(s.graphics_imports.contains(&GraphicsImport::D3d9));
+        assert!(!s.graphics_imports.contains(&GraphicsImport::Opengl32));
+        assert!(s.secondary_graphics.contains_key("Tool.exe"));
     }
 }

@@ -366,6 +366,12 @@ fn pe_scan(
                 .collect()
         )
     );
+    for (path, apis) in &scan.secondary_graphics {
+        println!(
+            "tool       {path} imports {} (not counted: the entry point has evidence)",
+            list(apis.iter().map(|g| format!("{g:?}")).collect())
+        );
+    }
     if let Some(c) = scan.d3d7_confidence {
         let block = if scan.dxguid_block {
             " (dxguid block present)"

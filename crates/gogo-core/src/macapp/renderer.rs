@@ -1323,6 +1323,7 @@ pub(crate) fn test_scan(
         d3d7_confidence: None,
         dxguid_block: false,
         renderer_dlls: std::collections::BTreeSet::new(),
+        secondary_graphics: std::collections::BTreeMap::new(),
         files: vec![],
     }
 }

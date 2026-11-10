@@ -442,10 +442,18 @@ Mac, with a Linux table:
     D3D≤7 game carries a block), but that is one game, whose pick doesn't depend on its
     class. The Mac's "block only" row stays a host-pass decision (docs/22 §6.1).
   - **No retained mode** in the six (no `d3drm`/`d3dxof` import or name).
-  - Not changed, noted: the game-level `d3d7_confidence` is the strongest file's, so a
-    sibling tool (SimCity 3000's `Baapp.exe`) can lift it above what decided the class;
-    and Zeus's info file names `zeus.exe` for `Zeus.exe`, which `find_entry_point`
+  - Fixed in #226: the game-level evidence used to be the strongest of any file, so a
+    sibling tool (SimCity 3000's `Baapp.exe`, d3d6) lifted it above what decided the
+    class. See "The entry point decides" below. Not changed, noted: Zeus's info file names `zeus.exe` for `Zeus.exe`, which `find_entry_point`
     misses on a case-sensitive file system.
+- **The entry point decides the evidence (#226, both lanes).** When the entry exe is
+  known (the primary task of `goggame-*.info`, or a caller-given exe), a *different*
+  `.exe` beside it counts only if the entry exe, the DLLs beside it and (Unreal) the
+  `Binaries/Win*/` exes give no graphics evidence at all, as with a launcher stub. A
+  tool that is set aside is kept as `PeScan::secondary_graphics` and shown by `doctor`
+  ("`Baapp.exe` (a tool, not the entry point) imports Ddraw, Direct3d7 and was left out
+  of L1") and `__pe-scan`. DLLs always count. With no usable entry point (no info file:
+  the size heuristic) every exe counts, as before. One all-or-nothing rule: no weights.
 - **Where a `ddraw.dll` counts: beside the entry exe (#199, both lanes).** Wine loads
   DLLs from the exe's dir, and SimCity 3000 keeps its DDrawCompat in `Apps/`, beside
   `Apps/SC3U.exe`. Setup looked in the install root, so `own` was false, `ddraw=n,b` was
