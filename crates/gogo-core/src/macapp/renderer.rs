@@ -1158,8 +1158,7 @@ pub fn plan_linux(renderer: &str, l1: &Pick, game_dir: Option<&Path>, proton: &P
     let mut r = match RendererRef::parse_on(renderer, Os::Linux) {
         Ok(r) => r.renderer,
         Err(e) => {
-            out.warnings
-                .push(format!("{e}: using {}", label_linux(Renderer::Wined3d, l1)));
+            out.warnings.push(format!("{e}: using wined3d"));
             Renderer::Wined3d
         }
     };
@@ -1184,11 +1183,8 @@ pub fn plan_linux(renderer: &str, l1: &Pick, game_dir: Option<&Path>, proton: &P
         let next = next_after(l1, r.id(), false)
             .filter(|n| !tried.contains(n))
             .unwrap_or(Renderer::Wined3d);
-        out.warnings.push(format!(
-            "{}: {why}: using {}",
-            r.name(),
-            label_linux(next, l1)
-        ));
+        out.warnings
+            .push(format!("{}: {why}: using {}", r.name(), next.id()));
         if next == r {
             break;
         }
@@ -1294,11 +1290,7 @@ pub fn apply_linux(renderer: &str, l1: &Pick, game_dir: Option<&Path>, proton: &
             .filter(|n| !tried.contains(n))
             .unwrap_or(Renderer::Wined3d);
         warnings = plan.warnings;
-        warnings.push(format!(
-            "{}: {why}: using {}",
-            r.name(),
-            label_linux(next, l1)
-        ));
+        warnings.push(format!("{}: {why}: using {}", r.name(), next.id()));
         renderer = next.default_ref();
     }
 }
