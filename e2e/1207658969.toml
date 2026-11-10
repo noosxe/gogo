@@ -1,0 +1,96 @@
+# SimCity 2000 Special Edition: GOG's DOS release in its bundled DOSBox 0.74-2 (32-bit
+# Windows build, GOG's dosboxSC2000*.conf from the support overlay: output=ddraw,
+# fullscreen). gogo runs DOSBox.exe on wined3d. Its own batch launcher comes first:
+# "1" starts the game, and after the game quits "5" ends the launcher, and DOSBox with it.
+# The game draws 640x480, scaled to 4:3 and pillarboxed in 1280x800, hence the width.
+#
+# The mouse: DOSBox's autolock swallows the first click to capture the pointer, then the
+# DOS mouse moves by relative deltas only. So the pointer is steered: a big move_by pins
+# it at the picture's top-left, then one move_by unit is one game pixel (1.67 window
+# pixels on Xwayland, 1 on Wayland). The game wants a pause after the pin and a nudge before a click.
+title = "SimCity 2000 Special Edition"
+gogid = 1207658969
+
+[window]
+wait_secs = 240
+resolution = "1280x800"
+min_fill = { w = 80, h = 95 }
+
+# On Wine's Wayland driver the 32-bit DOSBox gets no GL (#312): no DirectDraw and no
+# OpenGL output, so SDL falls back to GDI (windib) and DOSBox to its surface output,
+# which centres 640x480 unscaled. So it holds no GPU node there; fills_window_* fail
+# in Wayland mode until #312 is fixed. The change checks want only 20%: there the
+# picture covers a third of the window (26% changed, against 83% on Xwayland).
+[gpu]
+wayland = "unused"
+
+[exit]
+how = "self"
+wait_secs = 60
+
+[[step]]
+wait = 20
+
+# GOG's launcher: DOS text mode, the menu box in the left half, so it doesn't fill.
+[[step]]
+screenshot = "launcher"
+min_fill = false
+
+[[step]]
+key = "1"
+
+# Maxis logo, the "registered property" splash, then the menu.
+[[step]]
+wait = 35
+
+[[step]]
+screenshot = "menu"
+
+[[step]]
+expect_change = { from = "launcher", to = "menu", min = 20 }
+
+# The capturing click, in the left pillarbox.
+[[step]]
+click = { x = 5, y = 50 }
+
+[[step]]
+wait = 2
+
+# Quit: game pixel 320,324.
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = 320, y = 324 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = 2, y = 0 }
+
+[[step]]
+wait = 1
+
+[[step]]
+screenshot = "hover-quit"
+
+[[step]]
+click_here = true
+
+[[step]]
+wait = 8
+
+# Quit has no confirmation: straight back to GOG's launcher.
+[[step]]
+screenshot = "launcher-again"
+min_fill = false
+
+[[step]]
+expect_change = { from = "hover-quit", to = "launcher-again", min = 20 }
+
+[[step]]
+key = "5"

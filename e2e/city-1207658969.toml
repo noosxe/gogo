@@ -1,0 +1,134 @@
+# SimCity 2000 Special Edition: a new city, as far as the city view (the route and the
+# pointer steering are e2e/1207658969.toml's). The city's menus are Mac-style pull-downs
+# that stay open only while the button is held, and the harness has no drag, so this
+# one ends by signal; e2e/1207658969.toml quits through the game's own UI.
+#   scripts/linux-e2e.sh run 1207658969 --manifest e2e/city-1207658969.toml
+title = "SimCity 2000 Special Edition"
+gogid = 1207658969
+
+[window]
+wait_secs = 240
+resolution = "1280x800"
+min_fill = { w = 80, h = 95 }
+
+# As e2e/1207658969.toml: GDI on Wine's Wayland driver (#312), unscaled there.
+[gpu]
+wayland = "unused"
+
+[[step]]
+wait = 20
+
+[[step]]
+key = "1"
+
+[[step]]
+wait = 35
+
+[[step]]
+screenshot = "menu"
+
+# The capturing click, in the left pillarbox.
+[[step]]
+click = { x = 5, y = 50 }
+
+[[step]]
+wait = 2
+
+# Start New City: game pixel 320,196.
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = 320, y = 196 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = 2, y = 0 }
+
+[[step]]
+wait = 1
+
+[[step]]
+click_here = true
+
+# The terrain, and the name / difficulty / year dialog.
+[[step]]
+wait = 25
+
+[[step]]
+screenshot = "new-city"
+
+[[step]]
+expect_change = { from = "menu", to = "new-city", min = 10 }
+
+# Done: game pixel 319,294. The dialog stays drawn until the next click, and the game
+# opens its newspaper on a date of its own, so it may or may not be up by the next shot.
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = 319, y = 294 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = 2, y = 0 }
+
+[[step]]
+wait = 1
+
+[[step]]
+click_here = true
+
+[[step]]
+wait = 15
+
+[[step]]
+screenshot = "after-done"
+
+# The newspaper's close box, game pixel 74,90: closes it, or takes the dialog away.
+[[step]]
+move_by = { x = -3000, y = -3000 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = 74, y = 90 }
+
+[[step]]
+wait = 1
+
+[[step]]
+move_by = { x = 1, y = 0 }
+
+[[step]]
+wait = 1
+
+[[step]]
+click_here = true
+
+[[step]]
+wait = 4
+
+[[step]]
+screenshot = "city"
+
+[[step]]
+expect_change = { from = "menu", to = "city", min = 10 }
+
+# The simulation runs: the date in the city window's title moves on.
+[[step]]
+wait = 20
+
+[[step]]
+screenshot = "city-later"
