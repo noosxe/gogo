@@ -32,6 +32,12 @@ pub struct LaunchToml {
     /// `<id>/<ver>` in the store, or `path:<dir>` for a runtime outside it.
     pub runtime: String,
     pub renderer: String,
+    /// `renderer_flag = true`: `renderer` came from a build-time flag
+    /// (`--renderer`), a choice even when it equals L1's pick. Absent in a
+    /// file written before this field: setup then infers the layer by
+    /// comparing `renderer` with L1 (#300).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub renderer_flag: bool,
     /// Windows path of the entry point (`C:\GOG\<name>\game.exe`).
     pub exe: String,
     /// Windows path the game starts in.
@@ -1468,6 +1474,7 @@ mod launch_tests {
             title: "Carmageddon TDR 2000".into(),
             runtime: "winecx/24.0.7_7".into(),
             renderer: "wined3d".into(),
+            renderer_flag: false,
             exe: r"C:\GOG\Carmageddon TDR 2000\TDR2000.exe".into(),
             workdir: r"C:\GOG\Carmageddon TDR 2000".into(),
             args: vec!["-f".into()],
@@ -1501,6 +1508,23 @@ mod launch_tests {
             ],
             ..sample()
         }
+    }
+
+    #[test]
+    fn renderer_flag_is_written_only_when_set_and_defaults_off() {
+        let t = sample();
+        assert!(!t.to_toml().contains("renderer_flag"));
+        let flagged = LaunchToml {
+            renderer_flag: true,
+            ..sample()
+        };
+        let raw = flagged.to_toml();
+        assert!(raw.contains("renderer_flag = true"), "{raw}");
+        assert_eq!(LaunchToml::parse(&raw, Path::new("x")).unwrap(), flagged);
+        assert_eq!(
+            LaunchToml::parse(&t.to_toml(), Path::new("x")).unwrap(),
+            t
+        );
     }
 
     #[test]

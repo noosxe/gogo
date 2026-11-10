@@ -444,10 +444,20 @@ pub fn restore_z(prefix: &Path) -> Result<bool, MacAppError> {
     Ok(true)
 }
 
-/// The layer a baked renderer came from, as far as setup can tell: L1 when
-/// it's the scan's pick, L3 when the compat DB names it, else a build flag.
-pub(crate) fn baked_renderer_layer(baked: &str, l1: &renderer::Pick, db: &CompatEntry) -> Layer {
-    if baked == l1.renderer.default_ref() {
+/// The layer a baked renderer came from. A build that recorded a flag
+/// (`renderer_flag`) says so; for a file without that field (written before
+/// #300) setup infers it: L1 when it's the scan's pick, L3 when the compat DB
+/// names it, else a build flag.
+pub(crate) fn baked_renderer_layer(
+    baked: &LaunchToml,
+    l1: &renderer::Pick,
+    db: &CompatEntry,
+) -> Layer {
+    let flagged = baked.renderer_flag;
+    let baked = &baked.renderer;
+    if flagged {
+        Layer::Flags
+    } else if *baked == l1.renderer.default_ref() {
         Layer::Auto
     } else if db.renderer.as_deref() == Some(baked) {
         Layer::Db
@@ -605,7 +615,7 @@ pub fn setup(
     let renderer_layer = if l4.entry.renderer.is_some() {
         Layer::User
     } else {
-        baked_renderer_layer(&baked.renderer, &l1, &db)
+        baked_renderer_layer(&baked, &l1, &db)
     };
 
     // The fixes: L1 verbs and the renderer, L3 under the ownership rule,

@@ -631,6 +631,7 @@ fn launch_toml(
         title: plan.display.clone(),
         runtime: runtime.to_string(),
         renderer: selection.renderer.value.clone(),
+        renderer_flag: selection.renderer.layer == Layer::Flags,
         exe,
         workdir,
         args,
