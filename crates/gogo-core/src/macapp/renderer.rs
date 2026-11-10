@@ -956,7 +956,7 @@ fn deciding_apis(scan: &PeScan) -> std::collections::BTreeSet<pe::GraphicsImport
 /// when those decided) outside the game's own wrapper DLLs.
 fn retained_mode(scan: &PeScan) -> bool {
     let rm = |n: &String| n == "d3drm.dll" || n == "d3dxof.dll";
-    let imported = scan.files.iter().any(|f| {
+    let imported = scan.counted_files().any(|f| {
         let name = f.path.rsplit(['/', '\\']).next().unwrap_or_default();
         !scan.local_overrides.contains(&name.to_ascii_lowercase()) && f.imports.iter().any(rm)
     });
@@ -1324,6 +1324,7 @@ pub(crate) fn test_scan(
         dxguid_block: false,
         renderer_dlls: std::collections::BTreeSet::new(),
         secondary_graphics: std::collections::BTreeMap::new(),
+        set_aside: std::collections::BTreeSet::new(),
         files: vec![],
     }
 }

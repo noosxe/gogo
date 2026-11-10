@@ -203,6 +203,10 @@ pub struct PeScan {
     /// graphics APIs it imports; empty when nothing was set aside.
     #[serde(default)]
     pub secondary_graphics: BTreeMap<String, BTreeSet<GraphicsImport>>,
+    /// Every file set aside that way (also those without graphics imports,
+    /// whose helper or retained-mode imports must not count either).
+    #[serde(default)]
+    pub set_aside: BTreeSet<String>,
     pub files: Vec<PeFileScan>,
 }
 
@@ -229,6 +233,15 @@ pub struct PeFileScan {
     pub d3d7: Option<D3d7Confidence>,
     #[serde(skip)]
     clickteam: bool,
+}
+
+impl PeScan {
+    /// The scanned files that count: [`Self::files`] minus the tools set aside.
+    pub fn counted_files(&self) -> impl Iterator<Item = &PeFileScan> {
+        self.files
+            .iter()
+            .filter(|f| !self.set_aside.contains(&f.path))
+    }
 }
 
 /// Scan a game tree, finding the main exe from `goggame-*.info` or a heuristic.
@@ -312,8 +325,10 @@ fn scan_from(root: &Path, exe: &Path, source: MainExeSource) -> Result<PeScan, S
     };
     let mut agg = aggregate(&files, &local_overrides, &shipped, |f| !is_tool(f));
     let mut secondary_graphics = BTreeMap::new();
+    let mut set_aside = BTreeSet::new();
     if agg.has_graphics() {
         for f in files.iter().filter(|f| is_tool(f)) {
+            set_aside.insert(f.path.clone());
             let mut apis: BTreeSet<GraphicsImport> = f
                 .imports
                 .iter()
@@ -379,6 +394,7 @@ fn scan_from(root: &Path, exe: &Path, source: MainExeSource) -> Result<PeScan, S
         dxguid_block,
         renderer_dlls,
         secondary_graphics,
+        set_aside,
         files,
     })
 }
@@ -1738,5 +1754,16 @@ mod tests {
         assert!(s.graphics_imports.contains(&GraphicsImport::D3d9));
         assert!(!s.graphics_imports.contains(&GraphicsImport::Opengl32));
         assert!(s.secondary_graphics.contains_key("Tool.exe"));
+    }
+
+    #[test]
+    fn set_aside_tools_leave_counted_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        put(tmp.path(), "Game.exe", &imports(&["ddraw.dll"]));
+        put(tmp.path(), "Editor.exe", &imports(&["d3drm.dll"]));
+        info(tmp.path(), "Game.exe");
+        let s = scan(tmp.path()).unwrap();
+        assert!(s.set_aside.contains("Editor.exe"));
+        assert_eq!(s.counted_files().count(), 1);
     }
 }

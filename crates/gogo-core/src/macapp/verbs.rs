@@ -84,16 +84,14 @@ const D3DX9: &[&str] = &[
 pub fn for_scan(scan: &PeScan) -> Vec<AutoVerb> {
     // 64-bit importers of an XACT DLL need `xact_x64` as well.
     let x64_imports: BTreeSet<&str> = scan
-        .files
-        .iter()
+        .counted_files()
         .filter(|f| f.bitness == Bitness::X86_64)
         .flat_map(|f| f.imports.iter().map(String::as_str))
         .collect();
     let mut out: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
     for dll in &scan.helpers {
         let x86 = scan
-            .files
-            .iter()
+            .counted_files()
             .any(|f| f.bitness != Bitness::X86_64 && f.imports.contains(dll));
         let mut push = |x64| {
             if let Some(v) = verb_for(dll, x64) {
@@ -257,6 +255,8 @@ mod tests {
             d3d7_confidence: None,
             dxguid_block: false,
             renderer_dlls: BTreeSet::new(),
+            secondary_graphics: Default::default(),
+            set_aside: BTreeSet::new(),
             files,
         }
     }
