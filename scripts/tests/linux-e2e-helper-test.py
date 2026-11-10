@@ -925,6 +925,60 @@ info:  NVIDIA GeForce RTX 4090:
             helper.renders_on([self.AMD, self.NV], {"found": [], "created": []}, {}), []
         )
 
+    def gpu_check(self, display, gpu_wayland, game_fds, given=False):
+        """check_gpu_used on a stub driver with one NVIDIA GPU, as the script
+        sets it up: `want` is that GPU, `given` says --expect-gpu named it."""
+        import tempfile
+        import types
+
+        manifest = helper.parse_manifest(
+            f'gogid = 7\n[gpu]\nwayland = "{gpu_wayland}"\n[[step]]\nwait = 1\n'
+        )
+        checks = []
+        with tempfile.TemporaryDirectory() as results:
+            stub = types.SimpleNamespace(
+                cfg={"gpu": {"gpus": [self.NV], "want": self.NV["node"], "expect_given": given}},
+                manifest=manifest,
+                display=display,
+                gpu_checked=False,
+                gpu_seen=False,
+                results=results,
+                result={"gpu": {"game_gpu_fds": game_fds, "gpu_fds": {}}},
+                check=lambda name, ok, detail="": checks.append((name, ok, detail)),
+                effective_exe=lambda: "Game.exe",
+            )
+            helper.Driver.check_gpu_used(stub)
+        (name, ok, detail), = checks
+        self.assertEqual(name, "gpu_used_by_game")
+        return ok, detail
+
+    def test_gpu_wayland_unused_wants_no_node_on_wayland_only(self):
+        holds = {"Game.exe": [self.NV["held"]]}
+        # Declared: on Wayland the game must hold none, and holding one fails.
+        self.assertEqual(self.gpu_check("wayland", "unused", {})[0], True)
+        ok, detail = self.gpu_check("wayland", "unused", holds)
+        self.assertFalse(ok)
+        self.assertIn('[gpu] wayland = "unused"', detail)
+        # Xwayland, the default and --expect-gpu are as before.
+        self.assertEqual(self.gpu_check("xwayland", "unused", {})[0], False)
+        self.assertEqual(self.gpu_check("xwayland", "unused", holds)[0], True)
+        self.assertEqual(self.gpu_check("wayland", "used", {})[0], False)
+        self.assertEqual(self.gpu_check("wayland", "unused", holds, given=True)[0], True)
+        self.assertEqual(self.gpu_check("wayland", "unused", {}, given=True)[0], False)
+
+    def test_gpu_table_parses_and_exports(self):
+        m = helper.parse_manifest('command = ["x"]\n[[step]]\nwait = 1\n')
+        self.assertEqual(m["gpu"], {"wayland": "used"})
+        for bad in ('[gpu]\nwayland = "none"\n', '[gpu]\nxwayland = "unused"\n', 'gpu = 1\n'):
+            with self.subTest(bad), self.assertRaises(helper.ManifestError):
+                helper.parse_manifest(bad + 'command = ["x"]\n[[step]]\nwait = 1\n')
+        session = live_session([])
+        self.assertNotIn("[gpu]", helper.live_export(session))
+        session["manifest"]["gpu"] = {"wayland": "unused"}
+        text = helper.live_export(session)
+        self.assertIn('[gpu]\nwayland = "unused"', text)
+        self.assertEqual(helper.parse_manifest(text, live=True)["gpu"], {"wayland": "unused"})
+
     def test_vulkan_one_gpu_lists_only_it(self):
         expect = self.NV["expect"]
         self.assertTrue(helper.vulkan_devices_ok([self.NV_NAME], expect, [self.NV]))

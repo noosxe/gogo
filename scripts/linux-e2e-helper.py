@@ -77,6 +77,9 @@ EXIT_HOW = ("self", "signal")
 # How the game reaches the display (#264): through Xwayland, as on most desktops
 # today, or as a Wayland client with no X server in the sandbox at all.
 DISPLAYS = ("xwayland", "wayland")
+# A manifest's [gpu] wayland: "unused" for a game that draws without the GPU
+# on Wine's Wayland driver (GDI into shm buffers).
+GPU_WAYLAND = ("used", "unused")
 # gogo's own per-game display mode and HDR switch (#292), for [override].
 GOGO_DISPLAYS = ("wayland", "x11")
 GOGO_HDR = ("auto", "on", "force", "off")
@@ -390,6 +393,7 @@ def parse_manifest(text, live=False):
             "command",
             "build_command",
             "window",
+            "gpu",
             "exit",
             "env",
             "override",
@@ -436,6 +440,17 @@ def parse_manifest(text, live=False):
             re.compile(title)
         except (re.error, TypeError) as e:
             raise ManifestError(f"window.title: not a regex: {e}") from e
+
+    # A game that never touches the GPU in Wayland mode: GDI drawn into shm
+    # buffers (gogo's cnc-ddraw, `renderer=gdi`). With --gpu and no
+    # --expect-gpu, gpu_used_by_game there wants it to hold no node.
+    gpu = raw.get("gpu", {})
+    if not isinstance(gpu, dict):
+        raise ManifestError("gpu: must be a table")
+    _only(gpu, ("wayland",), "gpu")
+    gpu_wayland = gpu.get("wayland", "used")
+    if gpu_wayland not in GPU_WAYLAND:
+        raise ManifestError(f"gpu.wayland: want one of {GPU_WAYLAND}, got {gpu_wayland!r}")
 
     exit_ = raw.get("exit", {})
     _only(exit_, ("how", "wait_secs", "code"), "exit")
@@ -511,6 +526,7 @@ def parse_manifest(text, live=False):
             "min_fill": _min_fill(window.get("min_fill", {}), "window.min_fill"),
             "display": display,
         },
+        "gpu": {"wayland": gpu_wayland},
         "exit": {
             "how": how,
             "wait_secs": _number(exit_.get("wait_secs", 30), "exit.wait_secs"),
@@ -2232,6 +2248,18 @@ class Driver:
             gpu["dxvk"] = parse_dxvk("")
         gpu["game_renders_on"] = renders_on(gpus, gpu["dxvk"], gpu.get("game_drm_use", {}))
         want = self.cfg["gpu"]["want"]
+        declared = (self.manifest.get("gpu") or {}).get("wayland") == "unused"
+        if self.display == "wayland" and declared and not self.cfg["gpu"].get("expect_given"):
+            # Declared: GDI into shm buffers, no GPU on Wayland. Holding a node
+            # now means the game changed how it draws: look again.
+            held = gpu["game_nodes"]
+            self.check(
+                name,
+                not held,
+                f'[gpu] wayland = "unused": the game holds {held or "no GPU node"}, want none'
+                f" (exe {self.effective_exe()})",
+            )
+            return
         if len(gpus) == 1:
             held = gpus[0]["held"]
             users = sorted(k for k, v in game_fds.items() if held in v)
@@ -4164,6 +4192,8 @@ def live_export(session):
         out.append(f"min_fill = {_toml(w['min_fill'])}")
     if w.get("display", "xwayland") != "xwayland":
         out.append(f"display = {_toml(w['display'])}")
+    if (m.get("gpu") or {}).get("wayland", "used") != "used":
+        out += ["", "[gpu]", f"wayland = {_toml(m['gpu']['wayland'])}"]
     if m.get("env"):
         out += ["", "[env]"] + [f"{k} = {_toml(v)}" for k, v in m["env"].items()]
     o = m.get("override") or {}

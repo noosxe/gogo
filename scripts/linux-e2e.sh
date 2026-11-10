@@ -567,6 +567,7 @@ gpu_setup() { # comma-joined render nodes, the compositor's first ("": software)
     GPU_NODES=()
     GPUS_JSON='[]'
     GPU_WANT=""
+    GPU_EXPECT_GIVEN=""
     COMPOSITOR_ENV=(WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1)
     GAME_ENV=(GOGO_LAUNCHER_NO_DIALOG=1)
     if [ -z "$list" ]; then
@@ -598,6 +599,8 @@ gpu_setup() { # comma-joined render nodes, the compositor's first ("": software)
     GPU_LABEL="$labels"
     GPU_EXPECT="$expects"
     GPU_WANT="$want"
+    # One GPU fills GPU_WANT in below; a manifest's [gpu] wayland asks if it was given.
+    GPU_EXPECT_GIVEN="$want"
     if [ "${#nodes[@]}" = 1 ]; then
         # The one GPU the game may find: nothing else to choose, however it looks.
         GPU_WANT="$node"
@@ -1290,9 +1293,10 @@ cmd_run() {
             --arg netns "$(readlink /proc/self/ns/net)" --arg pidns "$(readlink /proc/self/ns/pid)" \
             --argjson forbidden "$forbidden" --argjson bind_roots "$bind_roots" --argjson extra "$extra" \
             --arg label "$label" --arg expect "$expect" --arg want "$want" --argjson gpus "$gpus" --arg rt "$RUNTIME_DIR" \
+            --arg given "${GPU_EXPECT_GIVEN:-}" \
             --args '{manifest:$m, run_dir:$run, results_dir:$results, shots_dir:$shots, stop_file:$stop,
                 host_netns:$netns, host_pidns:$pidns, forbidden_paths:$forbidden, bind_roots:$bind_roots, runtime_dir:$rt,
-                gpu:{label:$label, expect:$expect, want:$want, gpus:$gpus,
+                gpu:{label:$label, expect:$expect, want:$want, expect_given:($given != ""), gpus:$gpus,
                      nodes:($ARGS.positional | map(select(startswith("@n:")) | ltrimstr("@n:")))},
                 game_env:($ARGS.positional | map(select(startswith("@e:")) | ltrimstr("@e:"))
                           | map(capture("^(?<key>[^=]+)=(?<value>.*)$")) | from_entries)} + $extra' \
