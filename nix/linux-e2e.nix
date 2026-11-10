@@ -6,10 +6,24 @@
   pkgs,
 }:
 
+let
+  # wlroots 0.20.2 can leave an X11 window unmapped for good: the
+  # WL_SURFACE_SERIAL message on the X socket and Xwayland's first buffer
+  # commit on the Wayland socket aren't ordered, and when the buffer comes
+  # first, the surface is associated with a buffer already there and no map
+  # follows. A client that draws once and idles (the self-test's xterm, a
+  # launcher dialog) never shows a window (#309). Fixed upstream in
+  # wlroots 08a9f9f1, not in a release or on the 0.20 branch yet: drop the
+  # patch once the pin's wlroots has it.
+  wlroots = pkgs.wlroots_0_20.overrideAttrs (old: {
+    patches = (old.patches or [ ]) ++ [ ./wlroots-xwm-association-map-race.patch ];
+  });
+  sway = pkgs.sway-unwrapped.override { wlroots_0_20 = wlroots; };
+in
 pkgs.buildEnv {
   name = "gogo-linux-e2e-tools";
   paths = [
-    pkgs.sway-unwrapped    # headless compositor, swaymsg; the wrapper wants a D-Bus config in /etc
+    sway                   # headless compositor, swaymsg; the wrapper wants a D-Bus config in /etc
     pkgs.xwayland
     pkgs.grim              # screenshots
     pkgs.libxkbcommon      # xkbcli: the virtual keyboard's pc105/us keymap

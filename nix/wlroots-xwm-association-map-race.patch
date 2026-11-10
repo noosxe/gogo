@@ -1,0 +1,35 @@
+From 08a9f9f14fc8fd173d1768588699d2e152b6cde6 Mon Sep 17 00:00:00 2001
+From: Isaac Freund <mail@isaacfreund.com>
+Date: Wed, 14 Oct 2026 10:40:57 +0200
+Subject: [PATCH] xwayland/xwm: fix association/map race
+
+Currently, surfaces may end up never getting mapped if this race
+condition is hit.
+
+References: https://codeberg.org/river/river/issues/1494
+---
+ xwayland/xwm.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/xwayland/xwm.c b/xwayland/xwm.c
+index bf957141..c9192d97 100644
+--- a/xwayland/xwm.c
++++ b/xwayland/xwm.c
+@@ -1347,6 +1347,14 @@ static void xwayland_surface_associate(struct wlr_xwm *xwm,
+ 	}
+ 
+ 	wl_signal_emit_mutable(&xsurface->events.associate, NULL);
++
++	// Wlroots communicates with Xwayland over both an X11 socket and a Wayland
++	// socket with no synchronization between the two. There is no guarantee that
++	// e.g. the WL_SURFACE_SERIAL X11 client message will be received on the X11
++	// socket before the first buffer attach/commit on the Wayland socket.
++	if (wlr_surface_has_buffer(surface)) {
++		wlr_surface_map(surface);
++	}
+ }
+ 
+ static void xwm_handle_create_notify(struct wlr_xwm *xwm,
+-- 
+2.56.0
+
