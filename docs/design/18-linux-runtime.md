@@ -1883,7 +1883,7 @@ Two new endings, both before a game exists:
   do with.
 
 The launcher knows nothing about what a wrapper does beyond this: `launch.sh` has no gamescope
-case. `LAUNCHER_VERSION` is 8 (6: the game step stays umu-run's parent, #273; 7: a game in a library, §6.1; 8: refuses while its game is being moved, §6.1), and `# wrapper:` is a new run log header line (only with a
+case. `LAUNCHER_VERSION` is 9 (6: the game step stays umu-run's parent, #273; 7: a game in a library, §6.1; 8: refuses while its game is being moved, §6.1; 9: the display mode, §7.9), and `# wrapper:` is a new run log header line (only with a
 wrapper) that the report includes.
 
 **Live, in the harness** (2026-11-08, Right and Down, D3D11, RTX 4090; `docs/linux-e2e.md`). No
@@ -1906,8 +1906,10 @@ the owner's host pass, #179 and the PR's steps):
 - **`PROTON_ENABLE_WAYLAND=1` under gamescope.** gamescope 3.16.31 unsets `WAYLAND_DISPLAY` for
   its child unless given `--expose-wayland`, so plain gamescope leaves winewayland no socket;
   the game gets Xwayland as `DISPLAY` says. With `--expose-wayland` the socket is gamescope's
-  own (`gamescope-0`, xdg-shell clients). Whether that works with GE-Proton isn't tested. gogo
-  doesn't warn about the combination until someone has.
+  own (`gamescope-0`, xdg-shell clients). Whether that works with GE-Proton isn't tested.
+  With gogo's Wayland mode (§7.9) the game step checks for the socket again under the wrapper,
+  so the run log says the game got X11, and `doctor` warns about gamescope without
+  `--expose-wayland`.
 - **HDR.** `--hdr-enabled` needs the gamescope WSI layer in the client (gamescope's help says
   so), `ENABLE_GAMESCOPE_WSI=1` is set by default, and DXVK/VKD3D-Proton need `DXVK_HDR=1`.
   Whether pressure-vessel's container finds the layer from a Nix-installed gamescope, and what
@@ -1931,6 +1933,93 @@ without), the argv word for word, the env split in both dumps, close and `TERM` 
 wrapper shape, a wrapper outliving the game, a killed launcher, a wrapper that left while the
 game runs, its exit code, the two new endings, doctor and catalogue with the tool on and off
 `PATH`, a hand-written bad one, and clearing.
+
+### 7.9 Display mode: Wine's Wayland driver, and HDR (#292)
+
+Every Linux-lane game ran through Xwayland. Wine's Wayland driver, the path HDR takes on the
+owner's Hyprland desktop (Cyberpunk 2077, #232), was reachable only as `env set <gogid>
+PROTON_ENABLE_WAYLAND=1`, which nothing in gogo knew about. GE-Proton11-12 acts on that switch
+only when `WAYLAND_DISPLAY` is set and says nothing when it isn't, and it keeps `DISPLAY`, so a
+fallback to X is silent on a desktop with Xwayland (#264's findings on the issue).
+
+**Storage and CLI, as §7.8's wrapper.** Two keys under `[platforms.linux]` in L4: `display =
+"wayland" | "x11"` and `hdr = "auto" | "on" | "force" | "off"`. Linux only, each replaced whole
+by a higher layer, the user's keys and not `OWNED_KEYS`; a value outside those is a parse error,
+like any bad value. The stamp covers the L4 file, so the next launch's setup writes
+`DISPLAY_MODE='…'` and `DISPLAY_HDR='…'` into `launch.conf` (no line without a mode, and none for
+`hdr = "auto"`). `gogo linux-app display <gogid> [wayland|x11] [--hdr …] [--clear] [--json]`: no
+mode shows it, a mode or `--hdr` sets that key, `--clear` drops both (`linuxapp::display`).
+
+**Three states, not two.** No `display` leaves the environment alone: what the player's session
+or the L4 `env` says reaches the game, as before. `x11` unsets `PROTON_ENABLE_WAYLAND` and
+`PROTON_USE_WAYLAND` for the game, so a session-wide switch doesn't put a game that breaks on
+Wayland there. `wayland` asks for the driver.
+
+**At launch** (`LAUNCHER_VERSION` 9). The check is the launcher's, since Proton's isn't visible:
+`WAYLAND_DISPLAY` set and a socket at it (`$XDG_RUNTIME_DIR/<name>`, or the absolute path).
+
+- With one, the game step exports `PROTON_ENABLE_WAYLAND=1`, plus `hdr`'s switch: `on` is
+  `PROTON_ENABLE_HDR=1`, `force` `PROTON_FORCE_HDR=1`, `off` `PROTON_ENABLE_HDR=0`. It unsets
+  the aliases `PROTON_USE_WAYLAND` (and `PROTON_USE_HDR` for `on`/`off`) a session may carry:
+  Proton reads them after the switches, so a `0` there would undo the mode.
+- Without one, the game runs on X11 (both switches unset), and `launch.log` says why
+  (`display: wayland wanted, but WAYLAND_DISPLAY is unset: the game runs on X11 (Xwayland)`).
+- It's exported after gogo's `PROTON_SET_GAME_DRIVE=0` and before `ENV`, so a player's own
+  `PROTON_ENABLE_WAYLAND` in L4 still wins, as over a renderer switch. `env set` warns that the
+  display mode is the switch that checks.
+- The run log header gets `# display: wayland (WAYLAND_DISPLAY=wayland-1)` or `# display: x11
+  (wayland wanted, but …)`, and `# hdr: force` (`(not applied: not on Wayland)` on X11), only
+  with a mode. The report carries them.
+- **Under a wrapper** the game step runs the check again, in the wrapper's environment, which is
+  the one the game gets: gamescope without `--expose-wayland` drops `WAYLAND_DISPLAY`. The step
+  prints `gogo: display under the wrapper: …` into the run log, and `launch.log`'s line says the
+  check runs again there (also when `launch.sh`'s own environment has no socket: a wrapper may
+  bring one). The header's `# display:` is `launch.sh`'s view; that line is the game's.
+
+**Decided: fall back, don't refuse.** The issue offered both. A refusal would leave a player with
+no game in an X11 session, over SSH with X forwarding, or in a nested compositor, for a setting
+whose only cost when missing is HDR and the native driver. GE-Proton falls back too; what it
+lacked was saying so, and now the launch log, the run log and `doctor` all do. The wrapper case
+(§7.8) refuses because a missing program is a broken command; a missing socket is a session
+without Wayland.
+
+**HDR: Proton's switches, not DXVK's.** In GE-Proton11-12, HDR is detected by itself on Wine's
+Wayland driver (shared DXGI reads the output's state), and `PROTON_ENABLE_HDR` is a legacy
+opt-in that sets `DXVK_HDR=1`. `forcehdr` also sets `WAYLANDDRV_FORCE_HDR=1`, for outputs the
+compositor reports as SDR: Hyprland's `cm_auto_hdr`, KWin at SDR brightness. gogo sets Proton's
+names and lets the build map them, so a build that changes `DXVK_HDR`'s meaning keeps working.
+`hdr` applies only on the Wayland driver: HDR on Xwayland is gamescope's (§7.8), and
+`DXVK_HDR`, `PROTON_WAYLAND_MONITOR` and the rest stay plain `env` for whoever wants them.
+Whether HDR then looks right is the owner's host pass (#179): headless sway has no colour
+management.
+
+**Visibility.** `env list` gets a `display:` line and the switches with source `display wayland,
+with a Wayland socket at launch`, and `env list --all` / `env describe` name the command for
+`PROTON_ENABLE_WAYLAND` and the HDR switches. `doctor` has a `display` check: the mode and HDR
+and their layer, what the launcher would pick in this shell's session (a menu launch has the
+desktop's), the last run's `# display:` and `# hdr:` and the line under a wrapper, and a warning
+for what undoes the mode: `hdr` without Wayland mode, gamescope without `--expose-wayland`, the
+L4 `env` saying the opposite, a hand-set `PROTON_ENABLE_WAYLAND` with no mode. Setup prints the
+same warnings.
+
+**Not here.** A per-game monitor (`PROTON_WAYLAND_MONITOR`) stays `env`. Catalogue and compat
+entries saying a game wants or breaks on Wayland can now be an L3 `display` key, but none is
+written yet. OpenGL games on the Wayland driver go through EGL (`WINE_USE_EGL=1`), which NVIDIA
+can't show in the harness (#294).
+
+**The harness.** `scripts/linux-e2e.sh --display wayland` writes `linux-app display <gogid>
+wayland` before the launch, as the rest of `[override]` (a manifest's `[override] display` or
+`hdr` wins), and no longer puts `PROTON_ENABLE_WAYLAND=1` in the launch's environment.
+`gogo_display` fails unless the run log's header says `wayland`; `isolation_no_x` and
+`no_x_fallback` are unchanged, and with Xwayland off a game gogo didn't switch has no X to fall
+back to.
+
+**Tests** (`compat`, `game`, `display`, `envargs`, `launcher`, `linuxapp_pipeline.rs`, `cli.rs`,
+`main.rs`): the keys and their errors, Linux only, the L4 edit, `launch.conf`'s lines, the
+pending view, the session check against a real socket, the conflicts, and through `launch.sh`
+the game's environment with a socket, with none, with a `WAYLAND_DISPLAY` that has no socket, the
+L4 env winning, `x11` stripping a session's switches, a cleared mode, the header and log lines,
+doctor in both sessions, and a wrapper that drops `WAYLAND_DISPLAY`.
 
 ## 8. `gogo linux-app doctor <gogid>`
 
@@ -2153,6 +2242,8 @@ only on Linux (`#[cfg(target_os = "linux")]`), with the same shape:
   - `gogo linux-app env list|set|unset <gogid>` and `gogo linux-app args <gogid>
     [-- <args…> | --clear]` (#234): §7.6.
   - `gogo linux-app wrapper <gogid> [-- <words…> | --clear]` (#271): §7.8.
+  - `gogo linux-app display <gogid> [wayland|x11] [--hdr auto|on|force|off] [--clear]` (#292):
+    §7.9.
   - `gogo linux-app env list <gogid> --all`, `env describe <gogid> <NAME>` (#233): §7.7.
   - `gogo linux-app next-renderer <gogid> [--dry-run]`: `renderer::next_renderer_on(Os::Linux,
     …)` after `state.toml`'s renderer (else the baked one), L1 from a fresh scan; written to

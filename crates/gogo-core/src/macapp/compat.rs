@@ -229,9 +229,104 @@ pub struct CompatEntry {
     /// `gogo linux-app wrapper` writes it in L4.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wrapper: Option<Vec<String>>,
+    /// `[platforms.linux]` only: which of Wine's display drivers the game
+    /// gets (#292, design 18 §7.9): `wayland` is Wine's Wayland driver
+    /// (`PROTON_ENABLE_WAYLAND=1`, when the session has a Wayland socket),
+    /// `x11` keeps it on X11 (Xwayland on a Wayland desktop) whatever the
+    /// environment says. Absent: gogo leaves the choice to the environment.
+    /// `gogo linux-app display` writes it in L4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<DisplayMode>,
+    /// `[platforms.linux]` only, with `display = "wayland"`: what gogo asks
+    /// of Proton's HDR switches (#292). Absent is [`Hdr::Auto`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hdr: Option<Hdr>,
     /// Provenance: `gogo-vm`, `umu-protonfixes:<file>@<sha>`, …
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+}
+
+/// `[platforms.linux] display` (#292, design 18 §7.9).
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DisplayMode {
+    /// Wine's X11 driver: Xwayland on a Wayland desktop.
+    X11,
+    /// Wine's Wayland driver, when the session has a Wayland socket.
+    Wayland,
+}
+
+/// `[platforms.linux] hdr` (#292): mapped onto GE-Proton's own switches,
+/// which then set `DXVK_HDR` and the Wayland driver's (design 18 §7.9).
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Hdr {
+    /// Nothing set: Proton and DXVK detect HDR from the Wayland output.
+    Auto,
+    /// `PROTON_ENABLE_HDR=1`: DXVK reports HDR (`DXVK_HDR=1`).
+    On,
+    /// `PROTON_FORCE_HDR=1`: HDR on outputs the compositor reports as SDR
+    /// too (Hyprland's `cm_auto_hdr`, KWin at SDR brightness).
+    Force,
+    /// `PROTON_ENABLE_HDR=0`: no HDR for the game.
+    Off,
+}
+
+impl DisplayMode {
+    pub const ALL: [DisplayMode; 2] = [DisplayMode::Wayland, DisplayMode::X11];
+
+    /// The schema spelling, also `launch.conf`'s `DISPLAY_MODE`.
+    pub fn key(self) -> &'static str {
+        match self {
+            DisplayMode::X11 => "x11",
+            DisplayMode::Wayland => "wayland",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<DisplayMode> {
+        Self::ALL.into_iter().find(|m| m.key() == key)
+    }
+}
+
+impl Hdr {
+    pub const ALL: [Hdr; 4] = [Hdr::Auto, Hdr::On, Hdr::Force, Hdr::Off];
+
+    /// The schema spelling, also `launch.conf`'s `DISPLAY_HDR`.
+    pub fn key(self) -> &'static str {
+        match self {
+            Hdr::Auto => "auto",
+            Hdr::On => "on",
+            Hdr::Force => "force",
+            Hdr::Off => "off",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Hdr> {
+        Self::ALL.into_iter().find(|h| h.key() == key)
+    }
+
+    /// The Proton switch this sets on Wayland, if any.
+    pub fn proton_env(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Hdr::Auto => None,
+            Hdr::On => Some(("PROTON_ENABLE_HDR", "1")),
+            Hdr::Force => Some(("PROTON_FORCE_HDR", "1")),
+            Hdr::Off => Some(("PROTON_ENABLE_HDR", "0")),
+        }
+    }
+}
+
+// As the schema spells them (`"wayland"`), in summaries and test failures.
+impl std::fmt::Debug for DisplayMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.key())
+    }
+}
+
+impl std::fmt::Debug for Hdr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.key())
+    }
 }
 
 /// In a `verbs` list: drop every verb the layers below (and the entries
@@ -300,11 +395,13 @@ const PLATFORM_KEYS: &[&str] = &[
     "protonfixes",
     "extra_args",
     "wrapper",
+    "display",
+    "hdr",
 ];
 
 /// [`PLATFORM_KEYS`] only the Linux lane applies: under `[platforms.macos]`
 /// they warn and are ignored.
-const LINUX_ONLY_KEYS: &[&str] = &["protonfixes", "extra_args", "wrapper"];
+const LINUX_ONLY_KEYS: &[&str] = &["protonfixes", "extra_args", "wrapper", "display", "hdr"];
 
 /// The OS-specific keys the schema had at the top level before
 /// `[platforms.<os>]` (#166). In an L4 file they still read as
@@ -544,6 +641,8 @@ fn overlay(base: &mut CompatEntry, over: CompatEntry) {
         protonfixes,
         extra_args,
         wrapper,
+        display,
+        hdr,
         source,
     } = over;
     take(&mut base.title, title);
@@ -571,6 +670,8 @@ fn overlay(base: &mut CompatEntry, over: CompatEntry) {
     take(&mut base.protonfixes, protonfixes);
     take(&mut base.extra_args, extra_args);
     take(&mut base.wrapper, wrapper);
+    take(&mut base.display, display);
+    take(&mut base.hdr, hdr);
     take(&mut base.source, source);
 }
 
@@ -833,6 +934,10 @@ pub enum UserEdit {
     ExtraArgs(Option<Vec<String>>),
     /// `wrapper = [...]`; `None` drops it.
     Wrapper(Option<Vec<String>>),
+    /// `display = "..."`; `None` drops it (#292).
+    Display(Option<DisplayMode>),
+    /// `hdr = "..."`; `None` drops it (#292).
+    Hdr(Option<Hdr>),
 }
 
 /// Apply `edits` to the L4 file for `gogid` under `[platforms.<os>]`,
@@ -848,6 +953,34 @@ pub fn edit_user_platform_for(
 ) -> Result<Vec<Change>, MacAppError> {
     validate_gogid(gogid)?;
     edit_user_platform_at(&user_path(gogid), edits, os)
+}
+
+/// One string key of [`edit_user_platform_at`]'s table: set or dropped,
+/// with its [`Change`]. `false`: it already was.
+fn edit_word(
+    t: &mut dyn toml_edit::TableLike,
+    key: &str,
+    old: Option<&str>,
+    new: Option<&str>,
+    changes: &mut Vec<Change>,
+) -> bool {
+    if old == new {
+        return false;
+    }
+    match new {
+        Some(v) => {
+            t.insert(key, toml_edit::value(v));
+        }
+        None => {
+            t.remove(key);
+        }
+    }
+    changes.push(Change {
+        key: key.into(),
+        old: old.map(str::to_string),
+        new: new.map(str::to_string),
+    });
+    true
 }
 
 fn edit_user_platform_at(
@@ -941,6 +1074,20 @@ fn edit_user_platform_at(
                     new: args_text(new),
                 });
                 held.clone_from(new);
+            }
+            UserEdit::Display(new) => {
+                let new = new.map(DisplayMode::key);
+                let old = now.display.map(DisplayMode::key);
+                if edit_word(t, "display", old, new, &mut changes) {
+                    now.display = new.and_then(DisplayMode::from_key);
+                }
+            }
+            UserEdit::Hdr(new) => {
+                let new = new.map(Hdr::key);
+                let old = now.hdr.map(Hdr::key);
+                if edit_word(t, "hdr", old, new, &mut changes) {
+                    now.hdr = new.and_then(Hdr::from_key);
+                }
             }
         }
     }
@@ -1088,6 +1235,12 @@ pub struct Effective {
     /// Linux only: what the launcher runs the game under (#271).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wrapper: Option<Sourced<Vec<String>>>,
+    /// Linux only: Wine's display driver for the game (#292).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display: Option<Sourced<DisplayMode>>,
+    /// Linux only: the HDR switch, with `display = "wayland"` (#292).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hdr: Option<Sourced<Hdr>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<Sourced<String>>,
 }
@@ -1166,6 +1319,8 @@ pub fn merge(layers: &[(Layer, &CompatEntry)]) -> Effective {
         take(&mut out.protonfixes, &e.protonfixes, layer);
         take(&mut out.extra_args, &e.extra_args, layer);
         take(&mut out.wrapper, &e.wrapper, layer);
+        take(&mut out.display, &e.display, layer);
+        take(&mut out.hdr, &e.hdr, layer);
         take(&mut out.source, &e.source, layer);
     }
     // `protonfixes = false` turns umu-protonfixes off for the game (design
@@ -1246,6 +1401,8 @@ impl Effective {
         line(&mut out, "args", &self.args);
         line(&mut out, "extra_args", &self.extra_args);
         line(&mut out, "wrapper", &self.wrapper);
+        line(&mut out, "display", &self.display);
+        line(&mut out, "hdr", &self.hdr);
         line(&mut out, "variant", &self.variant);
         line(&mut out, "replace_command", &self.replace_command);
         line(&mut out, "status", &self.status);

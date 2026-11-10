@@ -56,7 +56,7 @@ It needs `nix` and nothing else, and resolves its own tools, so there's no need 
 | `--manifest FILE` | default `e2e/<gogid>.toml` |
 | `--gpu NODE[,NODE]` | real GPUs, with no display output (below), comma-joined or repeated: sway renders on the first. `renderD12x` or the full path. Default: software |
 | `--expect-gpu NODE` | with several GPUs, the one the game must render on. Default: any of them, and the summary says which |
-| `--display MODE` | `xwayland` (default) or `wayland`: no X server at all, and Wine's Wayland driver for a Proton game ([Wayland mode](#wayland-mode)). Beats the manifest's `[window] display` |
+| `--display MODE` | `xwayland` (default) or `wayland`: no X server at all, and gogo's Wayland mode for a Proton game (`linux-app display <gogid> wayland`, [Wayland mode](#wayland-mode)). Beats the manifest's `[window] display` |
 | `--secs N` | the limit of the game phase, default 600. Over it, the run stops and fails |
 | `--gogo PATH` | this gogo; `.#umu-python` supplies the FHS env. Default: `nix build .#gogo-linux-app` |
 | `--installer FILE` | build from this GOG setup `.exe` ([below](#building-from-an-offline-installer)) instead of the depot |
@@ -883,8 +883,13 @@ stays Xwayland, and the build phase always has Xwayland: it runs an installer, n
   The alternative was to keep Xwayland up and catch a stray X client after the fact; that lets
   a game half-work on X and still reach its menu, which is exactly what this mode is there to
   rule out. `no_x_fallback` then names the log line that says what wanted X.
-- **A gogo game gets `PROTON_ENABLE_WAYLAND=1`** in its launch's environment only: nothing is
-  written to the game's state, the installed base or the owner's. GE-Proton11-12 (gogo's pin)
+- **A gogo game gets gogo's own Wayland mode**, `gogo linux-app display <gogid> wayland`
+  (#292), written into the run's scratch override file before the launch like the rest of
+  `[override]` (a manifest's `[override] display` wins). The harness sets no
+  `PROTON_ENABLE_WAYLAND` itself: the launcher checks for sway's socket and sets it, and
+  `gogo_display` fails when the run log's `# display:` header doesn't say `wayland`. With no
+  mode the game would try X, which `no_x_fallback` and the missing window catch. Nothing is
+  written to the installed base or the owner's games. GE-Proton11-12 (gogo's pin)
   ships `winewayland.drv` for both arches, and its `proton` script turns the switch into
   `WINE_GRAPHICS_DRIVER=wayland`, `WINE_USE_EGL=1`, `WINE_DISABLE_FULLSCREEN_HACK=1` and
   `PROTON_USE_XALIA=0`, only when `WAYLAND_DISPLAY` is set. It guesses the primary monitor with
@@ -896,7 +901,8 @@ stays Xwayland, and the build phase always has Xwayland: it runs an installer, n
   to our sway's socket and to no X server. That comes from `ss -xapn` in the sandbox's network
   namespace, by the peer of each socket, so it holds inside pressure-vessel's container too,
   where the socket has another path. `summary.json`'s `display` says the mode, the socket,
-  whether Proton got the switch, and what each window's processes were connected to.
+  what gogo's launcher picked (`gogo`, its `# display:` line), and what each window's
+  processes were connected to.
 - **Window discovery, screenshots, `fills_window`, focus and the close** never used X: sway's
   tree, `grim` on the output, and the launcher's own close request through the wineserver.
 - **`gpu_gl` asks EGL's surfaceless platform** (`eglinfo`), since there's no GLX.
@@ -931,7 +937,8 @@ input methods and window icons, nothing a run needs.
 **Not covered here,** and the owner's host pass (#179): HDR (a headless output has no colour
 management and no HDR metadata, so `DXVK_HDR` and Wine's HDR reporting have nothing to find),
 VRR, fractional scaling, several monitors, the cursor image, and Hyprland itself. gogo's own
-per-game switch is #292.
+per-game switch (#292) is what this mode drives; its HDR sub-option (`[override] hdr`) is
+written and shows in the header, but there is nothing headless for it to find.
 
 ## Manifests
 
@@ -955,6 +962,8 @@ DXVK_LOG_LEVEL = "info"
 [override]                       # games only: into the game's override file, through gogo
 extra_args = ["-skipStartScreen"] #   (`linux-app args <gogid> -- …`), before the launch
 wrapper = ["gamemoderun"]        #   (`linux-app wrapper <gogid> -- …`; #271)
+display = "wayland"              #   (`linux-app display <gogid> wayland`; #292; Wayland mode
+hdr = "force"                    #   sets display itself), `--hdr force`
 [override.env]                   #   (`linux-app env set <gogid> K=V…`)
 PROTON_DLSS_INDICATOR = "1"
 
@@ -1079,6 +1088,7 @@ all do the same thing. Exactly one of two conditions:
 | `override` | with `[override]`: a `gogo linux-app env set` / `args` / `wrapper` call failed (the game isn't launched) | a refused key, a gogo without #234 |
 | `window` | no window in `wait_secs`, or the game exited first | DDrawCompat's exit 9 in #199 |
 | `wayland_client` (`wayland_client_relaunch_<n>`) | Wayland mode, at the window: it isn't an xdg-shell window, or what the launch started isn't connected to our sway's socket, or is connected to an X server | a game that came up through a display it shouldn't have |
+| `gogo_display` | Wayland mode, a gogo game, at the end: the launcher's run log has no `# display: wayland …` header, so gogo didn't put the game on Wine's Wayland driver itself (#292) | the harness testing its own switch instead of gogo's |
 | `no_x_fallback` | Wayland mode, at the end: a line in `game.out` or the launcher's run log says a process wanted X (Wine's X11 driver, "can't open display" and the like), and names it | a launcher or game that silently needs X |
 | `settled` | `wait_settled` timed out | a game stuck in a video |
 | `not_black_<shot>` | under 1% of the window's pixels are above level 16 | a black screen |

@@ -480,6 +480,30 @@ pub enum LinuxAppSub {
         #[arg(last = true, value_name = "WORDS", allow_hyphen_values = true)]
         words: Vec<String>,
     },
+    /// Which of Wine's display drivers a game gets: show it, set it
+    /// (`wayland`: Wine's Wayland driver, the way to HDR; `x11`: X11, through
+    /// Xwayland on a Wayland desktop), or `--clear` it. Kept in the override
+    /// file as `display` and `hdr`; the next launch applies them. Without a
+    /// Wayland socket at launch, Wayland mode runs the game on X11 and logs why.
+    Display {
+        /// GOG product id.
+        #[arg(value_name = "GOGID")]
+        gogid: String,
+        /// `wayland` or `x11`.
+        #[arg(value_name = "MODE", value_parser = ["wayland", "x11"])]
+        mode: Option<String>,
+        /// HDR in Wayland mode: `auto` (Proton detects it), `on`
+        /// (PROTON_ENABLE_HDR=1), `force` (PROTON_FORCE_HDR=1: also on
+        /// outputs that report SDR, like Hyprland's cm_auto_hdr) or `off`.
+        #[arg(long, value_name = "HDR", value_parser = ["auto", "on", "force", "off"])]
+        hdr: Option<String>,
+        /// Drop the mode and the HDR switch: the environment decides again.
+        #[arg(long, conflicts_with_all = ["mode", "hdr"])]
+        clear: bool,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[cfg(target_os = "linux")]
@@ -1542,6 +1566,54 @@ mod tests {
                 .is_err()
         );
         assert!(Cli::try_parse_from(["gogo", "linux-app", "wrapper", "1", "gamescope"]).is_err());
+        let cli = Cli::try_parse_from([
+            "gogo",
+            "linux-app",
+            "display",
+            "1",
+            "wayland",
+            "--hdr",
+            "force",
+        ])
+        .unwrap();
+        let Command::LinuxApp {
+            sub: Some(LinuxAppSub::Display {
+                mode, hdr, clear, ..
+            }),
+            ..
+        } = cli.command
+        else {
+            panic!("expected linux-app display");
+        };
+        assert_eq!(
+            (mode.as_deref(), hdr.as_deref(), clear),
+            (Some("wayland"), Some("force"), false)
+        );
+        for ok in [
+            &["display", "1"][..],
+            &["display", "1", "x11"],
+            &["display", "1", "--hdr", "off"],
+            &["display", "1", "--clear"],
+        ] {
+            let argv = ["gogo", "linux-app"]
+                .iter()
+                .chain(ok)
+                .copied()
+                .collect::<Vec<_>>();
+            assert!(Cli::try_parse_from(&argv).is_ok(), "{argv:?}");
+        }
+        for bad in [
+            &["display", "1", "wl"][..],
+            &["display", "1", "--hdr", "yes"],
+            &["display", "1", "x11", "--clear"],
+        ] {
+            let argv = ["gogo", "linux-app"]
+                .iter()
+                .chain(bad)
+                .copied()
+                .collect::<Vec<_>>();
+            assert!(Cli::try_parse_from(&argv).is_err(), "{argv:?}");
+        }
         let cli = Cli::try_parse_from([
             "gogo",
             "linux-app",

@@ -129,6 +129,23 @@ impl Entry {
                     ""
                 }
             )),
+            // #292: gogo's own switches, which check for a Wayland socket.
+            Kind::Env
+                if matches!(
+                    self.name.as_str(),
+                    "PROTON_ENABLE_WAYLAND" | "PROTON_USE_WAYLAND"
+                ) =>
+            {
+                Ok(format!("gogo linux-app display {gogid} wayland"))
+            }
+            Kind::Env if matches!(self.name.as_str(), "PROTON_ENABLE_HDR" | "PROTON_USE_HDR") => {
+                Ok(format!(
+                    "gogo linux-app display {gogid} wayland --hdr on (or --hdr off)"
+                ))
+            }
+            Kind::Env if self.name == "PROTON_FORCE_HDR" => Ok(format!(
+                "gogo linux-app display {gogid} wayland --hdr force"
+            )),
             Kind::Env => match envargs::policy(&self.name) {
                 envargs::Policy::Refuse(why) => Err(why),
                 _ => Ok(set(format!("{}=<value>", self.name))),

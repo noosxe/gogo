@@ -178,6 +178,7 @@ pub fn doctor(gogid: &str, host: &Host) -> Result<Report, MacAppError> {
     if g.baked.is_some() {
         f.push(check_compat(&g, &installed));
         f.push(check_launch(&g, host, &installed));
+        f.push(check_display(&g, host, &installed));
     }
     check_umu(&g, host, &mut f);
     let build = check_runtime(&g, &mut f);
@@ -463,6 +464,70 @@ fn check_launch(g: &Game, host: &Host, scan: &manage::InstallScan) -> Finding {
             )
         }))
         .collect();
+    finding
+}
+
+// — display —
+
+/// The display mode (#292, design 18 §7.9): what's set and from where, what
+/// the launcher would pick in this session (the launch's own when it starts
+/// from this shell; a menu's is the desktop's), what the last run got, and
+/// what undoes it (`hdr` without Wayland mode, gamescope without
+/// `--expose-wayland`, the env saying otherwise).
+fn check_display(g: &Game, host: &Host, scan: &manage::InstallScan) -> Finding {
+    use super::display::{self, DisplayView, Session};
+    use compat::DisplayMode;
+    let hint = format!("gogo linux-app display {}", g.gogid);
+    let r = match manage::compat_with(&g.gogid, scan) {
+        Ok(r) => r,
+        Err(e) => return Finding::fail("display", e.to_string(), hint),
+    };
+    let eff = &r.effective;
+    let var = |k: &str| host.var(k).map(|v| v.to_string_lossy().into_owned());
+    let session = Session::from_env(|k| {
+        var(k).map(|v| {
+            // The socket is looked up under the host's root, as the rest is.
+            if k == "XDG_RUNTIME_DIR" || v.starts_with('/') {
+                host.at(&v).to_string_lossy().into_owned()
+            } else {
+                v
+            }
+        })
+    });
+    let view = DisplayView::of(eff, g.conf.as_ref());
+    let mut problems = display::conflicts(&g.gogid, eff);
+    let mut parts = vec![match &view {
+        Some(v) => v.describe(),
+        None => "no display mode: the environment decides (X11 through Xwayland unless \
+                 PROTON_ENABLE_WAYLAND=1 reaches the game)"
+            .to_string(),
+    }];
+    if let Some(m) = eff.display.as_ref().map(|m| m.value) {
+        let picks = session.picks(m);
+        parts.push(format!("here: {} ({})", picks.key(), session.describe()));
+        if m == DisplayMode::Wayland && picks != DisplayMode::Wayland {
+            problems.push(format!(
+                "{}: a launch from this shell runs on X11 (a desktop launch has the session's)",
+                session.describe()
+            ));
+        }
+    }
+    if view.as_ref().is_some_and(|v| v.pending) {
+        parts.push("applies at the next launch".into());
+    }
+    let last = std::fs::read_to_string(host.logs.join(&g.gogid).join("latest.log"))
+        .map(|log| display::last_run(&log))
+        .unwrap_or_default();
+    let mut finding = if problems.is_empty() {
+        Finding::ok("display", parts.join("; "))
+    } else {
+        Finding::warn(
+            "display",
+            format!("{}; {}", parts.join("; "), problems.join("; ")),
+            hint,
+        )
+    };
+    finding.detail = last.into_iter().map(|l| format!("last run: {l}")).collect();
     finding
 }
 
