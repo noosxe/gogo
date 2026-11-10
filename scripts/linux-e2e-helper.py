@@ -1992,7 +1992,11 @@ class Driver:
                     name, False, f"game exited {self.game_exit} with no window"
                 )
             self.sleep(0.5)
-        return self.check(name, False, f"none in {window['wait_secs']:.0f}s; {self.window_diagnosis(name)}")
+        try:
+            diag = self.window_diagnosis(name)
+        except Exception as e:  # the check still reports: only the diagnosis is lost
+            diag = f"no window diagnosis: {type(e).__name__}: {e}"
+        return self.check(name, False, f"none in {window['wait_secs']:.0f}s; {diag}")
 
     def window_diagnosis(self, name):
         """What each side saw of a window that never came up (#309): sway's
@@ -2016,7 +2020,9 @@ class Driver:
                 if r.returncode != 0:
                     x = f"xwininfo exited {r.returncode}: {r.stderr.strip()}"
             except subprocess.TimeoutExpired:
-                x = "the X server didn't answer in 5 s"
+                x = f"the X server didn't answer in 5 s, after {len(x)} windows"
+            except OSError as e:
+                x = f"xwininfo: {e}"
         diag["x_windows"] = x
         before = self.before_game or set()
         diag["processes"] = [
