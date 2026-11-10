@@ -46,6 +46,18 @@ network 4, depot failure 7 (conversion/download). (Until #175 Linux exited 2 wit
   game's own subtree (self-contained per game), while dependencies dedupe globally.
 - No `InstallRecord`, no state writes: the cache is disposable by contract (17 §3);
   a future `gogo depot prune` owns eviction.
+- **Download record (#316).** A finished download writes `depot/<id>/.gogo-depot.json`:
+  the build id and every file and link under the root (game tree and `gog-support/`),
+  sorted, relative; not gog-warp's leftovers (`.gog-warp-build`, `!Temp`, `*.download`,
+  `*.state`) or `.DS_Store`. When the record can't be written the download still counts
+  and the cache is just unrecorded. A build that reuses a cached tree (`mac-app`/`linux-app
+  <game>`, default cache root only) checks it first. All there: reused. Some gone, or no
+  record (an older gogo, or a download that never finished): it says so and downloads
+  again with the cold cache's consent (`--yes`, or the prompt). gog-warp keeps the files
+  that are there and fetches the rest, after hashing the whole tree once (its `verify`).
+  Declined: an incomplete cache is an error; an unrecorded one is built from as before,
+  with a warning. Why: a cached tree that had lost its `gog-support/` was taken as whole
+  and built without GOG's overlay, silently (SimCity 4 in the e2e cache, #316).
 
 ## 3. D3 — Build selection
 

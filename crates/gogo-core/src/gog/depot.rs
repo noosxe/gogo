@@ -344,15 +344,178 @@ pub async fn run(
     }
 
     downloader.download().await.map_err(DepotError::library)?;
+    // The download is done either way; without a record (a full disk, say)
+    // the next reuse just checks it again.
+    if write_record(&install_root, &build_id).is_err() {
+        let _ = std::fs::remove_file(install_root.join(RECORD));
+    }
     let _ = events.send(DepotEvent::Finished {
         install_dir: install_dir.clone(),
     });
     Ok(install_dir)
 }
 
+/// The record of a finished download, in the cache root next to the game
+/// tree and `gog-support/` (design 14 D2): every file and link the download
+/// left there. A reused cache is checked against it, so a tree that lost
+/// files since (a part of `gog-support/` deleted, say) isn't taken as whole.
+pub const RECORD: &str = ".gogo-depot.json";
+
+/// gog-warp's own marker of a download in progress; gone when one finishes.
+const WARP_MARKER: &str = ".gog-warp-build";
+/// gog-warp's temp dir for updates, under the cache root.
+const WARP_TEMP: &str = "!Temp";
+
+#[derive(Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Record {
+    build_id: String,
+    /// Paths relative to the cache root, `/`-separated, sorted.
+    files: Vec<String>,
+}
+
+/// What a cache root's record says about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CacheCheck {
+    /// Everything the download left is still there.
+    Complete,
+    /// No record: an older gogo downloaded it, or the download never
+    /// finished. Whether it's whole is unknown.
+    Unrecorded,
+    /// These recorded paths are gone (at most [`MISSING_SHOWN`] of them,
+    /// plus the count of all).
+    Missing { shown: Vec<String>, count: usize },
+}
+
+/// How many missing paths [`CacheCheck::Missing`] names.
+pub const MISSING_SHOWN: usize = 5;
+
+/// Record what's in `root` after a finished download (overwrites the last).
+pub fn write_record(root: &Path, build_id: &str) -> std::io::Result<()> {
+    let mut files = Vec::new();
+    walk(root, root, &mut files)?;
+    files.sort();
+    let rec = Record {
+        build_id: build_id.to_string(),
+        files,
+    };
+    let text = serde_json::to_string_pretty(&rec).map_err(std::io::Error::other)?;
+    let tmp = root.join(format!("{RECORD}.tmp"));
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, root.join(RECORD))
+}
+
+/// Files and links under `dir`, relative to `root`; links aren't followed.
+fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let rel = path.strip_prefix(root).expect("under root");
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if dir == root
+            && (name == RECORD
+                || name == WARP_MARKER
+                || name == format!("{RECORD}.tmp")
+                || name == WARP_TEMP)
+        {
+            continue;
+        }
+        // Not the download's: Finder's, and gog-warp's own leftovers.
+        if name == ".DS_Store" || name.ends_with(".download") || name.ends_with(".state") {
+            continue;
+        }
+        if entry.file_type()?.is_dir() {
+            walk(root, &path, out)?;
+        } else {
+            let parts: Vec<String> = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            out.push(parts.join("/"));
+        }
+    }
+    Ok(())
+}
+
+/// Check the cache root `root` against its record. An unreadable record
+/// counts as none.
+pub fn check_cache(root: &Path) -> CacheCheck {
+    let Ok(text) = std::fs::read_to_string(root.join(RECORD)) else {
+        return CacheCheck::Unrecorded;
+    };
+    let Ok(rec) = serde_json::from_str::<Record>(&text) else {
+        return CacheCheck::Unrecorded;
+    };
+    let missing: Vec<String> = rec
+        .files
+        .into_iter()
+        .filter(|f| root.join(f).symlink_metadata().is_err())
+        .collect();
+    if missing.is_empty() {
+        CacheCheck::Complete
+    } else {
+        CacheCheck::Missing {
+            count: missing.len(),
+            shown: missing.into_iter().take(MISSING_SHOWN).collect(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn record_round_trip_and_missing_files() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path();
+        assert_eq!(check_cache(root), CacheCheck::Unrecorded);
+        std::fs::create_dir_all(root.join("Game/Apps")).unwrap();
+        std::fs::create_dir_all(root.join("gog-support/1/1/app")).unwrap();
+        std::fs::write(root.join("Game/Apps/game.exe"), b"x").unwrap();
+        std::fs::write(root.join("gog-support/1/1/app/game.ini"), b"y").unwrap();
+        std::fs::write(root.join(WARP_MARKER), b"b1").unwrap();
+        std::fs::write(root.join("Game/x.bin.download"), b"").unwrap();
+        std::fs::write(root.join("Game/.DS_Store"), b"").unwrap();
+        write_record(root, "b1").unwrap();
+
+        let rec: Record =
+            serde_json::from_str(&std::fs::read_to_string(root.join(RECORD)).unwrap()).unwrap();
+        assert_eq!(rec.build_id, "b1");
+        assert_eq!(
+            rec.files,
+            ["Game/Apps/game.exe", "gog-support/1/1/app/game.ini"]
+        );
+        assert_eq!(check_cache(root), CacheCheck::Complete);
+
+        std::fs::remove_dir_all(root.join("gog-support")).unwrap();
+        assert_eq!(
+            check_cache(root),
+            CacheCheck::Missing {
+                shown: vec!["gog-support/1/1/app/game.ini".into()],
+                count: 1
+            }
+        );
+    }
+
+    #[test]
+    fn unreadable_record_is_unrecorded() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::write(t.path().join(RECORD), "not json").unwrap();
+        assert_eq!(check_cache(t.path()), CacheCheck::Unrecorded);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn links_are_recorded_not_followed() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path();
+        std::fs::create_dir_all(root.join("Game")).unwrap();
+        std::os::unix::fs::symlink("nowhere", root.join("Game/link")).unwrap();
+        write_record(root, "b").unwrap();
+        assert_eq!(check_cache(root), CacheCheck::Complete);
+    }
 
     fn build(id: &str, published: &str, public: bool) -> Build {
         serde_json::from_value(serde_json::json!({

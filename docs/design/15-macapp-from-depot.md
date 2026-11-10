@@ -27,7 +27,8 @@ Everything after the "install" step is shared with the offline lane (docs/18 §1
 > | an existing directory | depot, used directly (same as `--from-depot DIR`) |
 > | anything else: a game selector (id/slug/fuzzy) | depot, with the fallback below |
 >
-> For a selector: a warm depot cache wins; otherwise GOG is asked for a public
+> For a selector: a warm depot cache wins, once its download record says it's whole
+> (design 14 D2; else it's completed first, with the cold cache's consent); otherwise GOG is asked for a public
 > Windows build (`depot::has_public_build`), and when one exists the cold-cache rules
 > below apply. With **no depot build**, the game falls back to the installer lane:
 > its newest downloaded base-game `setup_*.exe` from `state.json` (resolved against
