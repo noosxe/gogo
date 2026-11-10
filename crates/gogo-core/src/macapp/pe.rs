@@ -314,11 +314,15 @@ fn scan_from(root: &Path, exe: &Path, source: MainExeSource) -> Result<PeScan, S
     let mut secondary_graphics = BTreeMap::new();
     if agg.has_graphics() {
         for f in files.iter().filter(|f| is_tool(f)) {
-            let apis: BTreeSet<GraphicsImport> = f
+            let mut apis: BTreeSet<GraphicsImport> = f
                 .imports
                 .iter()
                 .filter_map(|n| graphics_import(n))
                 .collect();
+            // Interface-GUID evidence (a tool that names ddraw and carries IIDs).
+            if f.d3d7.is_some() {
+                apis.insert(GraphicsImport::Direct3d7);
+            }
             if !apis.is_empty() {
                 secondary_graphics.insert(f.path.clone(), apis);
             }
