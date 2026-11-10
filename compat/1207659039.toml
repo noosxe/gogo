@@ -1,12 +1,17 @@
-# Zeus + Poseidon (2D DirectDraw: cnc-ddraw). e2e/1207659039.toml.
+# Zeus + Poseidon (2D DirectDraw: cnc-ddraw). e2e/1207659039.toml. Entry Zeus.exe.
+# GOG's support installer (galaxy_zeus_and_poseidon_2.1.0.10.exe) declines in the
+# build (exit 1, InitializeSetup returned False); its gog-support holds only that
+# installer, no app/ overlay files, and the game doesn't need it. The Linux rows were
+# a human-watched host pass (gogo-host) plus headless runs.
 title  = "Zeus + Poseidon"
-source = "gogo-headless"
+source = "gogo-host"
 
 [platforms.linux]
-status = "boots"
+status = "plays"
 lane   = "depot"
-notes  = "headless sway: reaches and plays the intro with a working audio device; crashes with exit 5 when no audio server is reachable (#204); menu, sound and the owner's compositor not judged"
+notes  = "owner's host pass on Hyprland (NVIDIA RTX 4090), built with gogo (depot lane, cnc-ddraw, entry Zeus.exe): everything works on both Wine's Wayland driver and Xwayland (intro with sound, menu, mouse, a play session, quitting, fullscreen vs windowed); GOG's support installer declines (exit 1, InitializeSetup returned False) and the game doesn't need it; needs an audio device (headless with none used to crash, #204, closed)"
 tested = [
   { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/software", date = 2026-11-06 },
   { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/nvidia", date = 2026-11-06 },
+  { runtime = "ge-proton/GE-Proton11-12", host = "kraken-hyprland/nvidia", date = 2026-11-11 },
 ]
