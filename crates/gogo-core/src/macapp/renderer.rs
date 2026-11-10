@@ -275,6 +275,11 @@ pub struct Pick {
     /// [`PROTON_DXVK_D3D8`]. Always `false` on the Mac.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub d3d8: bool,
+    /// Linux: the entry exe imports DDrawCompat under this name (#306,
+    /// [`pe::PeScan::ddrawcompat_import`]), so only cnc-ddraw, standing in
+    /// under it, can run the game ([`plan_linux`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ddrawcompat_as: Option<String>,
 }
 
 /// May D3DMetal be used (#71)? Only with a stored yes in gogo's config;
@@ -328,6 +333,14 @@ pub fn from_scan(scan: &PeScan, d3dmetal: bool) -> Pick {
     use Renderer::*;
     let bits64 = scan.bitness == Bitness::X86_64;
     let (renderer, alternatives, what, warning) = match scan.graphics {
+        // Linux puts cnc-ddraw in its place (#306); the Mac can't yet (#307).
+        _ if scan.ddrawcompat_import.is_some() => (
+            Wined3d,
+            vec![],
+            "DirectDraw 2D through DDrawCompat under another name, which the Mac can't replace \
+             yet (#307)",
+            None,
+        ),
         GraphicsApi::Ddraw2d if !bits64 => (CncDdraw, vec![Wined3d], "DirectDraw 2D", None),
         GraphicsApi::Ddraw2d => (Wined3d, vec![], "DirectDraw 2D (cnc-ddraw is 32-bit)", None),
         GraphicsApi::D3dLegacy => (Wined3d, vec![], "Direct3D 9 or older", None),
@@ -390,6 +403,7 @@ pub fn from_scan(scan: &PeScan, d3dmetal: bool) -> Pick {
         x86_64: bits64,
         d3dmetal,
         d3d8: false,
+        ddrawcompat_as: None,
     }
 }
 
@@ -499,6 +513,7 @@ pub fn pick_with(scan: &Result<PeScan, pe::ScanError>, d3dmetal: bool) -> Pick {
             x86_64: false,
             d3dmetal: false,
             d3d8: false,
+            ddrawcompat_as: None,
         },
     }
 }
@@ -898,6 +913,7 @@ pub fn explain(
             x86_64: false,
             d3dmetal: false,
             d3d8: false,
+            ddrawcompat_as: None,
         },
     };
     let sel = select(Some(gogid), l1, RendererChoice::Auto);
@@ -994,7 +1010,9 @@ pub fn from_scan_linux(scan: &PeScan) -> Pick {
         && !has(G::D3d9);
     let ddraw_class = scan.graphics == GraphicsApi::Ddraw2d || d3d7_class;
     let own_ddraw = ddraw_class && scan.local_overrides.contains("ddraw.dll");
+    let stand_in = scan.ddrawcompat_import.clone().filter(|_| !bits64);
     let (renderer, alternatives, what) = match scan.graphics {
+        _ if stand_in.is_some() => (CncDdraw, vec![], "DirectDraw 2D"),
         _ if own_ddraw && d3d7_class => (Wined3d, vec![], "Direct3D ≤ 7"),
         _ if own_ddraw => (Wined3d, vec![], "DirectDraw 2D"),
         GraphicsApi::Ddraw2d if !bits64 => (CncDdraw, vec![D7vk, Wined3d], "DirectDraw 2D"),
@@ -1021,7 +1039,12 @@ pub fn from_scan_linux(scan: &PeScan) -> Pick {
     if d3d7_class && let Some(note) = d3d7_note(scan, true) {
         reason.push_str(&note);
     }
-    if scan.ddrawcompat {
+    if let Some(name) = &stand_in {
+        reason.push_str(&format!(
+            "; the exe imports DDrawCompat as {name}, which doesn't run under Wine: gogo's \
+             cnc-ddraw stands in for it, no other renderer can"
+        ));
+    } else if scan.ddrawcompat {
         reason.push_str(
             "; the game's DDrawCompat stays unloaded (it doesn't run under Wine): Wine's builtin \
              ddraw, no cnc-ddraw, no D7VK",
@@ -1037,6 +1060,7 @@ pub fn from_scan_linux(scan: &PeScan) -> Pick {
         x86_64: bits64,
         d3dmetal: false,
         d3d8: renderer == Dxvk && has(G::D3d8) && !has(G::D3d9),
+        ddrawcompat_as: stand_in,
     }
 }
 
@@ -1060,6 +1084,7 @@ pub fn pick_linux(scan: &Result<PeScan, pe::ScanError>) -> Pick {
             x86_64: false,
             d3dmetal: false,
             d3d8: false,
+            ddrawcompat_as: None,
         },
     }
 }
@@ -1114,6 +1139,11 @@ pub struct LinuxPlan {
     /// `ddraw=n,b` for a game-dir `ddraw.dll` (cnc-ddraw or the game's).
     pub dll_overrides: BTreeMap<String, String>,
     pub ddraw: DdrawStep,
+    /// With [`DdrawStep::PlaceCncDdraw`]: the name cnc-ddraw goes in under,
+    /// in place of the game's DDrawCompat ([`Pick::ddrawcompat_as`], #306),
+    /// instead of `ddraw.dll`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stand_in: Option<String>,
     pub notes: Vec<String>,
     pub warnings: Vec<String>,
 }
@@ -1134,6 +1164,9 @@ pub struct LinuxPlan {
 /// - **DDrawCompat beside the exe** ([`ddraw::is_ddrawcompat`]): never loaded.
 ///   D7VK (Proton appends `ddraw=n,b` for it, which would load it) and
 ///   cnc-ddraw (never placed over a game's DLL) warn and fall back.
+/// - **DDrawCompat imported under another name** ([`Pick::ddrawcompat_as`],
+///   #306): only cnc-ddraw, placed under that name with no override; any
+///   other renderer warns and gives way to it.
 /// - **wined3d**: [`PROTON_USE_WINED3D`], except as `l1`'s own pick, where
 ///   design 18 §3 says "nothing" (Proton's defaults: a packed D3D9 game the
 ///   scan missed stays on DXVK).
@@ -1148,10 +1181,12 @@ pub fn plan_linux(renderer: &str, l1: &Pick, game_dir: Option<&Path>, proton: &P
         env: BTreeMap::new(),
         dll_overrides: BTreeMap::new(),
         ddraw: DdrawStep::None,
+        stand_in: None,
         notes: vec![],
         warnings: vec![],
     };
     let dir = game_dir.filter(|d| d.is_dir());
+    let stand_in = l1.ddrawcompat_as.clone().filter(|_| dir.is_some());
     let gogo = dir.is_some_and(ddraw::is_gogo);
     let compat = dir.is_some_and(ddraw::is_ddrawcompat);
     let own = !compat && dir.is_some_and(ddraw::is_games);
@@ -1162,10 +1197,19 @@ pub fn plan_linux(renderer: &str, l1: &Pick, game_dir: Option<&Path>, proton: &P
             Renderer::Wined3d
         }
     };
+    if let Some(name) = stand_in.as_deref().filter(|_| r != Renderer::CncDdraw) {
+        out.warnings.push(format!(
+            "{}: the exe imports DDrawCompat as {name}, which doesn't run under Wine, and only \
+             cnc-ddraw can stand in for it: using cnc-ddraw",
+            r.name()
+        ));
+        r = Renderer::CncDdraw;
+    }
     let mut tried = vec![];
     loop {
         tried.push(r);
         let unusable = match r {
+            Renderer::CncDdraw if stand_in.is_some() => None,
             Renderer::D7vk | Renderer::CncDdraw if compat => Some(DDRAWCOMPAT_STAYS.to_string()),
             Renderer::D7vk if own => Some(
                 "the game ships its own ddraw.dll, which would win over D7VK's: keeping the \
@@ -1204,6 +1248,10 @@ pub fn plan_linux(renderer: &str, l1: &Pick, game_dir: Option<&Path>, proton: &P
             out.env.insert(PROTON_USE_WINED3D.into(), "1".into());
             out.notes.push(format!("wined3d: {PROTON_USE_WINED3D}=1"));
         }
+        Renderer::CncDdraw if stand_in.is_some() => {
+            out.ddraw = DdrawStep::PlaceCncDdraw;
+            out.stand_in = stand_in.clone();
+        }
         Renderer::CncDdraw if own => {}
         Renderer::CncDdraw => {
             out.ddraw = DdrawStep::PlaceCncDdraw;
@@ -1211,7 +1259,9 @@ pub fn plan_linux(renderer: &str, l1: &Pick, game_dir: Option<&Path>, proton: &P
         }
         _ => {}
     }
-    if own {
+    if stand_in.is_some() {
+        // cnc-ddraw stands in for the game's DDrawCompat: nothing else to do.
+    } else if own {
         out.ddraw = DdrawStep::KeepGames;
         out.dll_overrides.insert("ddraw".into(), "n,b".into());
         out.notes
@@ -1255,11 +1305,22 @@ pub fn apply_linux(renderer: &str, l1: &Pick, game_dir: Option<&Path>, proton: &
                     }
                 });
                 plan.warnings.extend(provision);
-                match tree.map(|t| ddraw::apply(&t, dir)) {
+                let applied = tree.map(|t| match plan.stand_in.as_deref() {
+                    Some(name) => ddraw::apply_as(&t, dir, name),
+                    None => ddraw::apply(&t, dir),
+                });
+                match applied {
                     Some(Ok(ddraw::Applied::Applied { shaders })) => {
-                        plan.notes.push(format!(
-                            "cnc-ddraw (dll + ini, {shaders} shaders) in the game dir"
-                        ));
+                        plan.notes.push(match plan.stand_in.as_deref() {
+                            Some(name) => format!(
+                                "cnc-ddraw (dll + ini, {shaders} shaders) in the game dir as \
+                                 {name}, the game's DDrawCompat kept as {name}{}",
+                                ddraw::KEPT_SUFFIX
+                            ),
+                            None => {
+                                format!("cnc-ddraw (dll + ini, {shaders} shaders) in the game dir")
+                            }
+                        });
                         None
                     }
                     Some(Ok(ddraw::Applied::AlreadyPresent)) => None,
@@ -1282,6 +1343,17 @@ pub fn apply_linux(renderer: &str, l1: &Pick, game_dir: Option<&Path>, proton: &
                 .then(|| "a ddraw.dll is still in the game dir, which would win over D7VK's".into())
         });
         let Some(why) = failed else { return plan };
+        // Nothing else can stand in for the game's DDrawCompat: no walk (it
+        // would come back to cnc-ddraw), the game won't start until it's placed.
+        if let Some(name) = plan.stand_in.clone() {
+            plan.warnings.push(format!(
+                "cnc-ddraw can't be placed as {name} ({why}): the game's DDrawCompat stays, \
+                 and the game exits at once"
+            ));
+            plan.ddraw = DdrawStep::None;
+            plan.stand_in = None;
+            return plan;
+        }
         let Ok(r) = applied_renderer(&plan.renderer, Os::Linux) else {
             return plan;
         };
@@ -1320,6 +1392,7 @@ pub(crate) fn test_scan(
         runtime_loaded: std::collections::BTreeSet::new(),
         local_overrides: std::collections::BTreeSet::new(),
         ddrawcompat: false,
+        ddrawcompat_import: None,
         d3d7_confidence: None,
         dxguid_block: false,
         renderer_dlls: std::collections::BTreeSet::new(),
@@ -1558,6 +1631,7 @@ mod tests {
             x86_64: true,
             d3dmetal: false,
             d3d8: false,
+            ddrawcompat_as: None,
         }
     }
 
@@ -2398,6 +2472,78 @@ mod linux_tests {
         std::fs::write(g.path().join("ddraw.dll"), b"Loading DDrawCompat ").unwrap();
         std::fs::write(g.path().join("ddraw.ini"), ddraw::DDRAW_INI).unwrap();
         assert!(!ddraw::is_ddrawcompat(g.path()));
+    }
+
+    /// #306: an exe that imports DDrawCompat under another name gets gogo's
+    /// cnc-ddraw under that name, whatever is asked for, with no override;
+    /// GOG's file is kept beside it and comes back when cnc-ddraw goes.
+    #[test]
+    fn renamed_ddrawcompat_gets_cnc_ddraw_under_its_name() {
+        use crate::macapp::pe::GraphicsImport as G;
+        use Bitness::*;
+        use GraphicsApi as A;
+        use Renderer::*;
+        let tree = tempfile::tempdir().unwrap();
+        std::fs::write(tree.path().join("ddraw.dll"), "cnc").unwrap();
+        let _g = crate::test_util::env_lock();
+        // SAFETY: env mutation under the shared env mutex.
+        unsafe { std::env::set_var("GOGO_CNC_DDRAW_DIR", tree.path()) };
+        let mut sc = test_scan(A::Ddraw2d, I386, &[G::Ddraw]);
+        sc.ddrawcompat_import = Some("xdd.dll".into());
+        let l1 = from_scan_linux(&sc);
+        assert_eq!((l1.renderer, l1.alternatives.clone()), (CncDdraw, vec![]));
+        assert_eq!(l1.ddrawcompat_as.as_deref(), Some("xdd.dll"));
+        assert!(
+            l1.reason.contains("DDrawCompat as xdd.dll"),
+            "{}",
+            l1.reason
+        );
+        // The Mac can't stand in yet (#307): wined3d, nothing placed for nothing.
+        assert_eq!(from_scan(&sc, false).renderer, Wined3d);
+        let p = proton(true);
+        let orig = b"MZ\0\0Loading DDrawCompat \0".to_vec();
+        for r in Renderer::LINUX {
+            let g = tempfile::tempdir().unwrap();
+            std::fs::write(g.path().join("xdd.dll"), &orig).unwrap();
+            let x = apply_linux(&r.default_ref(), &l1, Some(g.path()), p.path());
+            let what = format!("{r:?}: {x:?}");
+            assert!(x.renderer.starts_with("cnc-ddraw"), "{what}");
+            assert_eq!(x.ddraw, DdrawStep::PlaceCncDdraw, "{what}");
+            assert_eq!(x.stand_in.as_deref(), Some("xdd.dll"), "{what}");
+            assert!(x.dll_overrides.is_empty() && x.env.is_empty(), "{what}");
+            assert_eq!(r != CncDdraw, !x.warnings.is_empty(), "{what}");
+            assert_eq!(std::fs::read(g.path().join("xdd.dll")).unwrap(), b"cnc");
+            assert_eq!(
+                std::fs::read(g.path().join("xdd.dll.ddrawcompat")).unwrap(),
+                orig
+            );
+            assert!(!ddraw::has_dll(g.path()) && ddraw::is_gogo(g.path()));
+            // Set up again: already in place.
+            let again = apply_linux(&r.default_ref(), &l1, Some(g.path()), p.path());
+            assert_eq!(again.stand_in, x.stand_in, "{what}");
+            assert!(ddraw::remove_gogo(g.path()));
+            assert_eq!(std::fs::read(g.path().join("xdd.dll")).unwrap(), orig);
+        }
+        // cnc-ddraw can't be placed (a game ddraw.dll beside it, so apply_as
+        // refuses): a warning, and setup doesn't walk in circles.
+        let g = tempfile::tempdir().unwrap();
+        std::fs::write(g.path().join("xdd.dll"), &orig).unwrap();
+        std::fs::write(g.path().join("ddraw.dll"), "own").unwrap();
+        let x = apply_linux("cnc-ddraw", &l1, Some(g.path()), p.path());
+        assert!(
+            x.warnings
+                .iter()
+                .any(|w| w.contains("can't be placed as xdd.dll")),
+            "{x:?}"
+        );
+        assert_eq!(
+            (x.ddraw, x.stand_in.as_deref()),
+            (DdrawStep::None, None),
+            "{x:?}"
+        );
+        assert_eq!(std::fs::read(g.path().join("xdd.dll")).unwrap(), orig);
+        assert_eq!(std::fs::read(g.path().join("ddraw.dll")).unwrap(), b"own");
+        unsafe { std::env::remove_var("GOGO_CNC_DDRAW_DIR") };
     }
 
     /// R17 in every direction: for every renderer × game-dir state × D7VK
