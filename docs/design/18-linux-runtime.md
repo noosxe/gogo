@@ -1354,7 +1354,11 @@ namespace above the launcher's and can't be joined, and Wine doesn't need it. No
 or no wine beside the wineserver: logged, and the teardown goes on. The game then has
 `CLOSE_GRACE_SECS` (10, env `GOGO_CLOSE_GRACE_SECS`) to end on its own, umu-run gone and the
 prefix empty; the log says `closed by itself after Ns` or `didn't close in Ns: TERM`. The
-watchdog stays armed during the wait, and a second signal skips it. The watchdog's own
+watchdog stays armed during the wait. A second signal (any of TERM, INT, HUP) skips it: the
+first handler replaces the traps before waiting, because bash holds a signal of the same
+kind back until its trap returns, and the new trap only flags the wait to end (log:
+`second signal after Ns: not waiting for the game to close`), within 0.25 s, then the
+teardown goes on. The watchdog's own
 teardown (a SIGKILLed launcher) skips the request. If the game is still there, `TERM` goes to umu-run's process group, then, after 5 s,
 `SIGKILL` to every process whose `/proc/<pid>/environ` has this `WINEPREFIX` (Linux lets a
 user read their own processes' environment, which beats design 16's cwd heuristic inside
