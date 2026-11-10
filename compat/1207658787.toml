@@ -1,0 +1,17 @@
+# Heroes of Might and Magic 3: Complete (2D DirectDraw, 32-bit). GOG patched
+# Heroes3.exe to import DirectDrawCreate from xdd.dll, which is DDrawCompat
+# renamed, and DDrawCompat doesn't run under Wine (exit 9). gogo's L1 sees that
+# by itself and puts its cnc-ddraw in under that name (#306), so no renderer key
+# here. e2e/1207658787.toml.
+title  = "Heroes of Might and Magic 3: Complete"
+source = "gogo-headless"
+
+# The Mac picks wined3d for it and can't run it yet (#307): no [platforms.macos].
+
+[platforms.linux]
+status = "boots"
+lane   = "depot"
+notes  = "headless sway, on Wine's Wayland driver (gogo's display mode) and on Xwayland: intros, menu, a scenario's adventure map, the town screen, Quit to Desktop and a relaunch work on cnc-ddraw; audio, scaling on a real desktop and the owner's compositor not judged"
+tested = [
+  { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/nvidia", date = 2026-11-10 },
+]
