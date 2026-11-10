@@ -1301,7 +1301,12 @@ mod tests {
         let out = write_files(&dir, &[gf("Apps/SimCity 4.ini", "ours")], &[], "1").unwrap();
         assert_eq!(out.warnings.len(), 1, "{:?}", out.warnings);
         assert!(
-            !dir.join("Apps").exists(),
+            // The listing, not `exists`: a case-insensitive filesystem
+            // (macOS's) finds `Apps` as `apps` either way.
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .eq([std::ffi::OsString::from("apps")]),
             "a second dir that differs in case"
         );
         assert_eq!(
