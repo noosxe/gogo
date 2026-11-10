@@ -129,6 +129,17 @@ pub struct RegistryValue {
     pub data: String,
 }
 
+/// One file to put in the game dir (`files`, design 18 §4.10): what GOG's
+/// installer would have left there and a depot build lacks (SimCity 4's
+/// `Apps/SimCity 4.ini`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GameFile {
+    /// Relative to the game dir, `/`-separated ([`check_files`]).
+    pub path: String,
+    /// The file's contents, written as given (UTF-8, line endings and all).
+    pub text: String,
+}
+
 /// umu-protonfixes' `replace_command`: substitute part of the launch command
 /// (typically a launcher exe for the real game exe).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -189,6 +200,10 @@ pub struct CompatEntry {
     pub env: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registry: Option<Vec<RegistryValue>>,
+    /// Files setup writes into the game dir. Replaced whole by a higher
+    /// layer, like `registry`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<GameFile>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<String>>,
     /// Which `[[variant]]` of the bundle to run (a `playTasks` name, #85),
@@ -383,6 +398,7 @@ const TOP_KEYS: &[&str] = &[
     "verbs",
     "dll_overrides",
     "registry",
+    "files",
     "source",
 ];
 
@@ -482,6 +498,7 @@ pub fn parse(raw: &str, os: Os, layer: Layer) -> Result<Parsed, String> {
     }
     check_items(&table, "", &mut warnings);
     let mut entry = entry_from(table)?;
+    check_files(entry.files.as_deref()).map_err(|e| format!("files: {e}"))?;
 
     let mut own = None;
     if !legacy.is_empty() {
@@ -532,6 +549,7 @@ pub const TOP_FIX_KEYS: &[&str] = &[
     "verbs",
     "dll_overrides",
     "registry",
+    "files",
     "args",
     "exe",
     "replace_command",
@@ -581,6 +599,7 @@ fn platform_entry(
     if let Some(m) = &e.monitor {
         check_monitor(m).map_err(|e| format!("[platforms.{}]: {e}", os.key()))?;
     }
+    check_files(e.files.as_deref()).map_err(|e| format!("[platforms.{}] files: {e}", os.key()))?;
     if os == Os::Linux
         && let Some(r) = &e.renderer
         && let Some(why) = mac_only_renderer(r)
@@ -590,7 +609,7 @@ fn platform_entry(
     Ok(e)
 }
 
-/// Unknown keys inside `tested` / `registry` items and `[lanes.<lane>]`
+/// Unknown keys inside `tested` / `registry` / `files` items and `[lanes.<lane>]`
 /// tables, as warnings (`tested[0].gpu`, `platforms.macos.lanes.depot.foo`).
 fn check_items(t: &toml::Table, prefix: &str, warnings: &mut Vec<String>) {
     for (key, value) in t {
@@ -607,6 +626,7 @@ fn check_items(t: &toml::Table, prefix: &str, warnings: &mut Vec<String>) {
         let item_keys: &[&str] = match key.as_str() {
             "tested" => &["runtime", "host", "date"],
             "registry" => &["key", "name", "type", "data"],
+            "files" => &["path", "text"],
             _ => continue,
         };
         for (i, item) in value.as_array().into_iter().flatten().enumerate() {
@@ -617,6 +637,36 @@ fn check_items(t: &toml::Table, prefix: &str, warnings: &mut Vec<String>) {
             }
         }
     }
+}
+
+/// `files` paths: relative to the game dir, `/`-separated, and inside it.
+/// No absolute path, drive letter or backslash, no `.`, `..` or empty
+/// part, and no path twice.
+pub fn check_files(files: Option<&[GameFile]>) -> Result<(), String> {
+    let mut seen = std::collections::BTreeSet::new();
+    for f in files.unwrap_or_default() {
+        let p = f.path.as_str();
+        let bad = |why: &str| Err(format!("path {p:?} {why}"));
+        if p.is_empty() {
+            return bad("is empty");
+        }
+        if p.contains('\\') {
+            return bad("has a backslash: use `/`");
+        }
+        if p.starts_with('/') || p.as_bytes().get(1) == Some(&b':') {
+            return bad("is absolute: give it relative to the game dir");
+        }
+        if p.contains('\0') {
+            return bad("has a NUL");
+        }
+        if p.split('/').any(|c| c.is_empty() || c == "." || c == "..") {
+            return bad("has an empty, `.` or `..` part: it must stay inside the game dir");
+        }
+        if !seen.insert(p.to_lowercase()) {
+            return bad("is given twice");
+        }
+    }
+    Ok(())
 }
 
 /// A Wayland output's name as a compositor spells it (`DP-1`, `HDMI-A-1`,
@@ -657,6 +707,7 @@ fn overlay(base: &mut CompatEntry, over: CompatEntry) {
         dll_overrides,
         env,
         registry,
+        files,
         args,
         variant,
         replace_command,
@@ -683,6 +734,7 @@ fn overlay(base: &mut CompatEntry, over: CompatEntry) {
     base.dll_overrides.extend(dll_overrides);
     base.env.extend(env);
     take(&mut base.registry, registry);
+    take(&mut base.files, files);
     take(&mut base.args, args);
     take(&mut base.variant, variant);
     take(&mut base.replace_command, replace_command);
@@ -1246,6 +1298,8 @@ pub struct Effective {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub registry: Option<Sourced<Vec<RegistryValue>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub files: Option<Sourced<Vec<GameFile>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub args: Option<Sourced<Vec<String>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub variant: Option<Sourced<String>>,
@@ -1339,6 +1393,7 @@ pub fn merge(layers: &[(Layer, &CompatEntry)]) -> Effective {
         take_map(&mut out.dll_overrides, &e.dll_overrides, layer);
         take_map(&mut out.env, &e.env, layer);
         take(&mut out.registry, &e.registry, layer);
+        take(&mut out.files, &e.files, layer);
         take(&mut out.args, &e.args, layer);
         take(&mut out.variant, &e.variant, layer);
         take(&mut out.replace_command, &e.replace_command, layer);
@@ -1442,6 +1497,16 @@ impl Effective {
             out.push(format!("env.{k} = {v}  ({})", s.layer.describe()));
         }
         line(&mut out, "registry", &self.registry);
+        if let Some(s) = &self.files {
+            for f in &s.value {
+                out.push(format!(
+                    "files {:?} ({} bytes)  ({})",
+                    f.path,
+                    f.text.len(),
+                    s.layer.describe()
+                ));
+            }
+        }
         line(&mut out, "args", &self.args);
         line(&mut out, "extra_args", &self.extra_args);
         line(&mut out, "wrapper", &self.wrapper);
@@ -2669,5 +2734,91 @@ protonfixes = false
         let eff = merge(&[(Layer::User, &l4), (Layer::Db, &l3)]);
         assert_eq!(eff.args.unwrap().value, Vec::<String>::new());
         assert_eq!(eff.extra_args.unwrap().value, ["-a"]);
+    }
+
+    #[test]
+    fn files_parse_merge_whole_and_show_their_layer() {
+        let raw = "files = [{ path = \"Apps/SimCity 4.ini\", text = \"[Directories]\\nData=..\\\\\\n\" }]\n";
+        let l3 = parse(raw, Os::Linux, Layer::Db).unwrap();
+        assert!(l3.warnings.is_empty(), "{:?}", l3.warnings);
+        let files = l3.entry.files.clone().unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "Apps/SimCity 4.ini");
+        assert_eq!(files[0].text, "[Directories]\nData=..\\\n");
+        // A fix key: an owning protonfix covers it.
+        assert!(TOP_FIX_KEYS.contains(&"files"));
+        // Valid under a platform table too, where it replaces the top level's.
+        let raw2 = "files = [{ path = \"a.ini\", text = \"1\" }]\n\
+                    [platforms.linux]\nfiles = [{ path = \"b.ini\", text = \"2\" }]\n";
+        let e = parse(raw2, Os::Linux, Layer::Db).unwrap().entry;
+        assert_eq!(e.files.unwrap()[0].path, "b.ini");
+        // An unknown item key warns.
+        let w = parse(
+            "files = [{ path = \"a.ini\", text = \"\", mode = \"crlf\" }]\n",
+            Os::Linux,
+            Layer::Db,
+        );
+        let w = w.unwrap().warnings;
+        assert!(w.iter().any(|w| w.contains("files[0].mode")), "{w:?}");
+        // L4 replaces L3's list whole, and the summary names the layer.
+        let l4 = parse(
+            "files = [{ path = \"other.ini\", text = \"x\" }]\n",
+            Os::Linux,
+            Layer::User,
+        )
+        .unwrap()
+        .entry;
+        let eff = merge(&[(Layer::Db, &l3.entry), (Layer::User, &l4)]);
+        let f = eff.files.as_ref().unwrap();
+        assert_eq!((f.value.len(), f.layer), (1, Layer::User));
+        assert_eq!(f.value[0].path, "other.ini");
+        let eff = merge(&[(Layer::Db, &l3.entry)]);
+        let lines = eff.display_lines();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("files \"Apps/SimCity 4.ini\" (23 bytes)")
+                    && l.ends_with(&format!("({})", Layer::Db.describe()))),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn files_that_would_leave_the_game_dir_are_refused() {
+        for (path, why) in [
+            ("", "empty"),
+            ("/etc/passwd", "absolute"),
+            ("C:/GOG/x.ini", "absolute"),
+            ("c:x.ini", "absolute"),
+            (r"Apps\x.ini", "backslash"),
+            ("../x.ini", "`..`"),
+            ("Apps/../../x.ini", "`..`"),
+            ("Apps//x.ini", "empty, `.`"),
+            ("./x.ini", "empty, `.`"),
+            ("Apps/", "empty, `.`"),
+        ] {
+            let raw = format!("files = [{{ path = {path:?}, text = \"x\" }}]\n");
+            for os in Os::ALL {
+                let e = parse(&raw, os, Layer::Db).unwrap_err();
+                assert!(e.starts_with("files: ") && e.contains(why), "{path:?}: {e}");
+            }
+            let raw = format!("[platforms.linux]\nfiles = [{{ path = {path:?}, text = \"x\" }}]\n");
+            let e = parse(&raw, Os::Linux, Layer::User).unwrap_err();
+            assert!(e.starts_with("[platforms.linux] files: "), "{path:?}: {e}");
+        }
+        // The same file twice, by Windows' case-blind names.
+        let raw =
+            "files = [{ path = \"a.ini\", text = \"1\" }, { path = \"A.INI\", text = \"2\" }]\n";
+        let e = parse(raw, Os::Linux, Layer::Db).unwrap_err();
+        assert!(e.contains("twice"), "{e}");
+        // Dots inside a name are fine.
+        assert!(
+            parse(
+                "files = [{ path = \"Apps/..x/a..b.ini\", text = \"\" }]\n",
+                Os::Linux,
+                Layer::Db
+            )
+            .is_ok()
+        );
     }
 }

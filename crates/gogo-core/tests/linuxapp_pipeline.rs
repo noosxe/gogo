@@ -5615,3 +5615,56 @@ fn under_a_wrapper_the_display_check_is_the_wrappers() {
         w.launch_log()
     );
 }
+
+/// SimCity 4's case (design 18 §4.10): a compat `files` entry lands in the
+/// game dir at setup, survives a re-run, and an edit of the player's stays.
+#[test]
+fn compat_files_are_written_into_the_game_dir() {
+    let w = World::new("files", &["opengl32.dll"]);
+    exe_in_apps(&w);
+    let plan = build::plan(&w.opts(), None, &mut quiet()).unwrap();
+    build::execute(&plan, None, &mut quiet()).unwrap();
+    let ini = w.game().join("game/Apps/SimCity 4.ini");
+    assert!(!ini.exists());
+
+    let l4 = gogo::macapp::compat::user_path(ID);
+    std::fs::create_dir_all(l4.parent().unwrap()).unwrap();
+    std::fs::write(
+        &l4,
+        "files = [{ path = \"Apps/SimCity 4.ini\", text = \"[Directories]\\nData=..\\\\\\n\" }]\n",
+    )
+    .unwrap();
+    let out = setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&ini).unwrap(),
+        "[Directories]\nData=..\\\n"
+    );
+    assert!(
+        out.notes
+            .iter()
+            .any(|n| n == "wrote Apps/SimCity 4.ini (compat files)"),
+        "{:?}",
+        out.notes
+    );
+    let state = w.state();
+    assert_eq!(state.files.len(), 1);
+    assert!(state.files[0].ends_with(" Apps/SimCity 4.ini"));
+
+    // Again: nothing to do.
+    let out = setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
+    assert!(!out.notes.iter().any(|n| n.contains("SimCity 4.ini")));
+    assert_eq!(w.state().files, state.files);
+
+    // The player's edit stays, said once per setup.
+    std::fs::write(&ini, "[Directories]\nData=D:\\SC4\\\n").unwrap();
+    let out = setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
+    assert!(std::fs::read_to_string(&ini).unwrap().contains("D:\\SC4"));
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.contains("Apps/SimCity 4.ini: there already")),
+        "{:?}",
+        out.warnings
+    );
+    assert!(w.state().files.is_empty());
+}
