@@ -499,9 +499,12 @@ Mac, with a Linux table:
 - DXVK's own README warns that swapping D3D DLLs in online games may count as cheating
   (R20). Proton does the same for every Steam game; gogo documents it and does nothing
   special.
-- Device choice (R18): DXVK/VKD3D pick a GPU themselves. `doctor` warns on a multi-GPU
-  machine and names the fix: L4 `env = { DXVK_FILTER_DEVICE_NAME = "…",
-  VKD3D_FILTER_DEVICE_NAME = "…" }`.
+- Device choice (R18): DXVK/VKD3D pick a GPU themselves. Measured (#219): with two GPUs
+  visible, DXVK (D3D9/D3D11) renders on the discrete one whichever GPU the compositor uses;
+  VKD3D-Proton wasn't measured. `doctor` reports a multi-GPU machine as an ok finding
+  saying nothing needs choosing, and cautions that forcing a game onto the iGPU
+  (`DXVK_FILTER_DEVICE_NAME`, an L4 `env`) while the compositor runs on NVIDIA can leave a
+  white or black window.
 
 **As built (#172)** — choices the design left open (`macapp/renderer.rs`):
 
@@ -2074,7 +2077,7 @@ a failure.
 | `runtime` | fail: Proton dir missing, `proton` or `version` changed for a managed build, `require_tool_appid` unknown to umu (R2). warn: unmanaged, or a managed build in a shared tools dir | `linux-app setup`, `--retarget --runtime ge-proton` |
 | `container` | warn: the Steam Linux Runtime variant the build needs isn't in umu's folder (first launch downloads it); else variant and size | none |
 | `renderer` | fail: cnc-ddraw without its files; `d7vk` on a build without D7VK; both a `ddraw.dll` beside the exe and `PROTON_USE_D7VK`; `ddraw=n…` loading the game's DDrawCompat beside the exe. warn: another own `ddraw.dll` with no `ddraw=` override, or a value other than `n…` (that's a choice). Notes `dxguid_block` and DDrawCompat left unloaded | `linux-app setup` |
-| `vulkan` | fail: no Vulkan ICD found (`/usr/share/vulkan/icd.d`, `/etc/vulkan/icd.d`, `/run/opengl-driver/share/vulkan/icd.d`, `VK_ICD_FILENAMES`/`VK_DRIVER_FILES`). warn: more than one GPU (R18); `vulkaninfo --summary` output when it's on `PATH` | the driver; `DXVK_FILTER_DEVICE_NAME` |
+| `vulkan` | fail: no Vulkan ICD found (`/usr/share/vulkan/icd.d`, `/etc/vulkan/icd.d`, `/run/opengl-driver/share/vulkan/icd.d`, `VK_ICD_FILENAMES`/`VK_DRIVER_FILES`). ok, with a note: more than one GPU (R18); `vulkaninfo --summary` output when it's on `PATH` | the driver; `DXVK_FILTER_DEVICE_NAME` |
 | `vulkan32` | fail: a 32-bit game and no 32-bit ICD (R19) | NixOS: `hardware.graphics.enable32Bit = true`; elsewhere the distro's 32-bit Mesa/NVIDIA package |
 | `stamp`, `links`, `processes`, `log` | as design 16 §8.3 (processes found through `/proc/<pid>/environ`; `links` skips `z:`, which stays on Linux, §7.2) | as there |
 
@@ -2151,9 +2154,10 @@ umu (the container carries its libraries), and a gogo other than the flake's `go
     manifest's `library_arch`, else the library's ELF class, else the name (`.i686.`,
     `opengl-driver-32/` → 32). The line groups by driver: `radeon (32/64), nvidia
     (32/64), …`. None → fail (NixOS: `hardware.graphics.enable`). GPUs are
-    `/sys/class/drm/card<N>` with a PCI vendor, one per device; more than one warns
-    (R18) with the `DXVK_FILTER_DEVICE_NAME` / `VKD3D_FILTER_DEVICE_NAME` L4 hint and
-    `vulkaninfo`'s device names as detail.
+    `/sys/class/drm/card<N>` with a PCI vendor, one per device; more than one is an
+    ok finding (R18): DXVK takes the discrete GPU by default, nothing to choose; the hint
+    warns about forcing the iGPU under an NVIDIA compositor; `vulkaninfo`'s device names
+    are the detail.
   - `vulkan32`: the scan's bitness. A 64-bit game needs nothing; a 32-bit one on a build
     with `files/lib/wine/i386-unix` needs a 32-bit ICD (R19): none fails, only manifests
     of unknown bitness warn. A build with `x86_64-unix` and no `i386-unix` (new WoW64)

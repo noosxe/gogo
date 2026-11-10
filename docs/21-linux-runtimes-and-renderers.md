@@ -319,8 +319,9 @@ So yes: `PROTON_*` and DXVK vars map onto the existing `env` with no schema chan
 - **Native Linux installers** (MojoSetup `.sh`) skip Wine entirely; `list --os` already
   knows about them.
 - **Vulkan driver**: this machine shows the case `doctor` has to handle: a discrete
-  NVIDIA GPU plus an AMD iGPU, both with Vulkan. DXVK and VKD3D pick a device;
-  `DXVK_FILTER_DEVICE_NAME`/`VKD3D_FILTER_DEVICE_NAME` override it. 32-bit games under
+  NVIDIA GPU plus an AMD iGPU, both with Vulkan. DXVK takes the discrete GPU by
+  default (measured for D3D9/D3D11); `DXVK_FILTER_DEVICE_NAME`/`VKD3D_FILTER_DEVICE_NAME`
+  override it, but a game forced onto the iGPU under an NVIDIA compositor can show a blank window. 32-bit games under
   classic WoW64 also need the 32-bit ICDs (on NixOS: `hardware.graphics.enable32Bit`).
 - **NixOS**: umu from nixpkgs is already FHS-wrapped; a downloaded umu zipapp or a
   Kron4ek build is not. umu is required for the Proton runtime (§8 item 1): gogo downloads

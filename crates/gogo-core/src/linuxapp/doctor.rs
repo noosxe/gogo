@@ -1460,19 +1460,23 @@ fn check_vulkan(host: &Host, f: &mut Vec<Finding>) -> Vec<Icd> {
     let gpus = gpus(host);
     let devices = vulkaninfo_devices(host);
     if gpus.len() > 1 {
-        let mut w = Finding::warn(
+        let mut w = Finding::ok(
             "vulkan",
             format!(
-                "{} GPUs ({}): DXVK and VKD3D-Proton pick one themselves (R18)",
+                "{} GPUs ({}): DXVK (D3D9/D3D11) renders on the discrete GPU by default; \
+                 nothing needs choosing (R18)",
                 gpus.len(),
                 gpus.iter()
                     .map(|g| format!("{} {}", g.card, g.vendor))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            "to choose one, set env = { DXVK_FILTER_DEVICE_NAME = \"<part of its name>\", \
-             VKD3D_FILTER_DEVICE_NAME = \"<…>\" } under [platforms.linux] in the game's \
-             override file (vulkaninfo --summary lists the names)",
+        )
+        .hint(
+            "measured with DXVK D3D9/D3D11 only; VKD3D-Proton wasn't measured. Forcing a game \
+             onto the iGPU (DXVK_FILTER_DEVICE_NAME) while the compositor runs on NVIDIA can \
+             leave a white or black window (Failed to create Vulkan swapchain: \
+             VK_ERROR_INITIALIZATION_FAILED)",
         );
         w.detail = devices.unwrap_or_default();
         f.push(w);
@@ -1818,7 +1822,7 @@ mod tests {
     }
 
     #[test]
-    fn several_gpus_warn_with_the_device_filter() {
+    fn several_gpus_are_info_not_a_to_do() {
         let tmp = tempfile::tempdir().unwrap();
         let r = tmp.path();
         write(
@@ -1836,17 +1840,32 @@ mod tests {
         let mut f = Vec::new();
         check_vulkan(&host(r, &[]), &mut f);
         assert_eq!(f[0].level, Level::Ok);
-        assert_eq!(f[1].level, Level::Warn);
+        assert_eq!(f[1].level, Level::Ok);
         assert!(
             f[1].message.starts_with("2 GPUs (card0 NVIDIA, card1 AMD)"),
             "{f:?}"
         );
-        assert!(
-            f[1].hint
-                .as_deref()
-                .unwrap()
-                .contains("DXVK_FILTER_DEVICE_NAME")
+        assert!(f[1].message.contains("discrete GPU by default"), "{f:?}");
+        assert!(f[1].message.contains("nothing needs choosing"), "{f:?}");
+        let hint = f[1].hint.as_deref().unwrap();
+        assert!(hint.contains("white or black window"), "{hint}");
+        assert!(hint.contains("VKD3D-Proton wasn't measured"), "{hint}");
+    }
+
+    #[test]
+    fn one_gpu_has_no_gpu_note() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = tmp.path();
+        write(
+            &r.join("usr/share/vulkan/icd.d/x.x86_64.json"),
+            r#"{"ICD": {"library_path": "x.so"}}"#,
         );
+        write(&r.join("sys/class/drm/card0/device/vendor"), "0x10de");
+        let mut f = Vec::new();
+        check_vulkan(&host(r, &[]), &mut f);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].level, Level::Ok);
+        assert!(f[0].hint.is_none());
     }
 
     #[test]
