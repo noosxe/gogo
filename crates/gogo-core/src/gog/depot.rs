@@ -63,6 +63,11 @@ pub enum DepotEvent {
     },
     Finished {
         install_dir: PathBuf,
+        /// Files the run wrote (new, or changed since it started) and their
+        /// bytes, from the cache root before and after (#337): all of them
+        /// for a cold download, what was missing for a repair.
+        fetched_files: u64,
+        fetched_bytes: u64,
     },
 }
 
@@ -343,7 +348,9 @@ pub async fn run(
         }
     }
 
+    let before = Snapshot::take(&install_root);
     downloader.download().await.map_err(DepotError::library)?;
+    let (fetched_files, fetched_bytes) = Snapshot::take(&install_root).fetched_since(&before);
     // The download is done either way; without a record (a full disk, say)
     // the next reuse just checks it again.
     if write_record(&install_root, &build_id).is_err() {
@@ -351,6 +358,8 @@ pub async fn run(
     }
     let _ = events.send(DepotEvent::Finished {
         install_dir: install_dir.clone(),
+        fetched_files,
+        fetched_bytes,
     });
     Ok(install_dir)
 }
@@ -438,6 +447,37 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Size and mtime of every file [`walk`] finds under a cache root, to tell
+/// what a run wrote (#337). gog-warp writes a file as `<name>.download` and
+/// renames it, so a fetched file is new or has a new mtime.
+#[derive(Debug, Default)]
+pub struct Snapshot(std::collections::HashMap<String, (u64, Option<std::time::SystemTime>)>);
+
+impl Snapshot {
+    /// An unreadable or missing root is empty.
+    pub fn take(root: &Path) -> Self {
+        let mut files = Vec::new();
+        let _ = walk(root, root, &mut files);
+        Self(
+            files
+                .into_iter()
+                .filter_map(|f| {
+                    let meta = root.join(&f).symlink_metadata().ok()?;
+                    Some((f, (meta.len(), meta.modified().ok())))
+                })
+                .collect(),
+        )
+    }
+
+    /// `(files, bytes)` in `self` that `before` lacks or had otherwise.
+    pub fn fetched_since(&self, before: &Snapshot) -> (u64, u64) {
+        self.0
+            .iter()
+            .filter(|(f, now)| before.0.get(*f) != Some(now))
+            .fold((0, 0), |(n, b), (_, (len, _))| (n + 1, b + len))
+    }
+}
+
 /// Check the cache root `root` against its record. An unreadable record
 /// counts as none.
 pub fn check_cache(root: &Path) -> CacheCheck {
@@ -496,6 +536,26 @@ mod tests {
                 shown: vec!["gog-support/1/1/app/game.ini".into()],
                 count: 1
             }
+        );
+    }
+
+    #[test]
+    fn snapshot_counts_new_and_rewritten_files() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path();
+        std::fs::create_dir_all(root.join("Game")).unwrap();
+        std::fs::write(root.join("Game/kept"), b"kept").unwrap();
+        std::fs::write(root.join("Game/rewritten"), b"old").unwrap();
+        let before = Snapshot::take(root);
+        assert_eq!(Snapshot::take(root).fetched_since(&before), (0, 0));
+
+        std::fs::write(root.join("Game/new"), b"12345").unwrap();
+        std::fs::write(root.join("Game/rewritten"), b"newer").unwrap();
+        std::fs::write(root.join("Game/x.download"), b"partial").unwrap();
+        assert_eq!(Snapshot::take(root).fetched_since(&before), (2, 10));
+        assert_eq!(
+            Snapshot::take(root).fetched_since(&Snapshot::take(&root.join("nowhere"))),
+            (3, 14)
         );
     }
 

@@ -2,6 +2,7 @@
 //! This crate is a thin shell over `gogo-core`; everything domain lives there.
 
 mod cli;
+mod depot_progress;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod lane;
 #[cfg(target_os = "macos")]
@@ -119,6 +120,21 @@ impl From<std::io::Error> for AppError {
     }
 }
 
+/// The global `--quiet` and `--no-progress`, for the depot lane's progress.
+static PROGRESS_FLAGS: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
+
+/// How a command with these flags shows the depot lane's events (#337).
+fn depot_mode(json_progress: bool, json: bool) -> depot_progress::Mode {
+    let (quiet, no_progress) = PROGRESS_FLAGS.get().copied().unwrap_or_default();
+    depot_progress::Mode::pick(
+        json_progress,
+        json,
+        quiet,
+        no_progress,
+        std::io::IsTerminal::is_terminal(&std::io::stderr()),
+    )
+}
+
 /// RUST_LOG wins if set; otherwise derive from --quiet/-v (`docs/design/07` §5).
 /// Log output goes to stderr; stdout stays results-only (`docs/design/03` §4).
 fn init_tracing(cli: &Cli) {
@@ -128,7 +144,10 @@ fn init_tracing(cli: &Cli) {
         "warn".to_string()
     } else {
         match cli.verbose {
-            0 => "info",
+            // gog-warp's info lines ("Allocating disk space", …) say what the
+            // depot progress already shows, and would break its status line
+            // (#337); `-v` brings them back.
+            0 => "info,gog_warp=warn",
             1 => "debug",
             _ => "trace",
         }
@@ -145,6 +164,7 @@ fn init_tracing(cli: &Cli) {
 /// Dispatch one command; returns its exit code (`docs/design/03-cli.md` §5).
 async fn run(cli: Cli) -> Result<i32, AppError> {
     let _ = CONFIG_PATH.set(cli.config.clone());
+    let _ = PROGRESS_FLAGS.set((cli.quiet, cli.no_progress));
     let color = cli.color;
     match cli.command {
         Command::Login {
@@ -938,30 +958,8 @@ async fn depot_cmd(args: cli::DepotArgs) -> Result<i32, AppError> {
         &ctx.cancel,
         ctx.free_space.as_ref(),
     );
-    tokio::pin!(runner);
-
-    let mut last_dl: Option<(u64, u64)> = None;
-    let install_dir = loop {
-        tokio::select! {
-            res = &mut runner => break res?,
-            maybe = rx.recv() => {
-                if let Some(e) = maybe {
-                    render_depot_event(&e, machine, &mut last_dl);
-                }
-            }
-        }
-    };
-    // The runner may out-race the last events in the channel; drain in order
-    // before the summary.
-    while let Ok(e) = rx.try_recv() {
-        render_depot_event(&e, machine, &mut last_dl);
-    }
-    if !machine {
-        // final newline after the \r counter line
-        if last_dl.is_some() {
-            println!();
-        }
-    }
+    let mut renderer = depot_mode(args.json_progress, args.json).renderer();
+    let install_dir = depot_progress::drive(runner, &mut rx, &mut renderer).await?;
 
     if args.json {
         let summary = serde_json::json!({
@@ -984,103 +982,6 @@ async fn depot_cmd(args: cli::DepotArgs) -> Result<i32, AppError> {
         );
     }
     Ok(cli::exit::OK)
-}
-
-/// One depot event → NDJSON (machine) or human lines with a \r byte counter
-/// for the download phase (design 14 D4).
-fn render_depot_event(
-    event: &gogo::gog::depot::DepotEvent,
-    machine: bool,
-    last_dl: &mut Option<(u64, u64)>,
-) {
-    use gogo::gog::depot::DepotEvent::*;
-    if machine {
-        println!("{}", serde_json::to_string(event).unwrap());
-        return;
-    }
-    match event {
-        Resolved {
-            title,
-            version,
-            generation,
-            ..
-        } => {
-            println!("gogo: {title} build {version} (generation {generation})")
-        }
-        Plan {
-            install_dir,
-            download_size,
-            disk_size,
-            language,
-            dlcs,
-            game_files,
-        } => {
-            println!(
-                "gogo: plan {} (download {}, disk {}, {}{})",
-                install_dir.display(),
-                gogo::fmt::human_size(*download_size),
-                gogo::fmt::human_size(*disk_size),
-                language,
-                if dlcs.is_empty() {
-                    String::new()
-                } else {
-                    format!(" +{} dlcs", dlcs.len())
-                }
-            );
-            if let Some(plan) = game_files {
-                println!("gogo: {}", game_files_line(plan));
-            }
-        }
-        Preparing => println!("gogo: preparing"),
-        Allocating { fraction } | Verifying { fraction } => {
-            print!(
-                "\r{}: {:.0}%",
-                if matches!(event, Allocating { .. }) {
-                    "allocating"
-                } else {
-                    "verifying"
-                },
-                fraction * 100.0
-            );
-            let _ = std::io::Write::flush(&mut std::io::stdout());
-        }
-        Downloading {
-            downloaded,
-            total_download,
-            ..
-        } => {
-            *last_dl = Some((*downloaded, *total_download));
-            print!(
-                "\rdownloading {} / {}",
-                gogo::fmt::human_size(*downloaded),
-                gogo::fmt::human_size(*total_download)
-            );
-            let _ = std::io::Write::flush(&mut std::io::stdout());
-        }
-        Finished { .. } => {}
-    }
-}
-
-/// The plan's Linux line: how a build turns the depot tree into the game's
-/// `game/` dir, and what that costs (design 18 §6).
-fn game_files_line(plan: &gogo::gog::materialize::MaterializePlan) -> String {
-    use gogo::gog::materialize::TreeMethod;
-    match plan.method {
-        TreeMethod::Reflink => format!(
-            "game files: reflink into {} (no extra disk)",
-            plan.game_dir.display()
-        ),
-        TreeMethod::Copy => format!(
-            "game files: copy into {} (+{} disk: no reflink between the cache and the {})",
-            plan.game_dir.display(),
-            gogo::fmt::human_size(plan.extra_bytes),
-            if gogo::macapp::launch::in_library(&plan.game_dir) {
-                "library"
-            } else {
-                "data dir"
-            }
-        ),
-    }
 }
 
 async fn download(
@@ -2051,8 +1952,10 @@ async fn resolve_game_source(
     selector: &str,
     explicit: bool,
     auto: bool,
-    machine: bool,
+    json_progress: bool,
+    json: bool,
 ) -> Result<(Option<std::path::PathBuf>, Option<std::path::PathBuf>), AppError> {
+    let machine = json || json_progress;
     let built = AppContext::build(load_config_from_env()?, true)
         .await
         .map_err(|e| {
@@ -2188,7 +2091,21 @@ async fn resolve_game_source(
         return Err(AppError::Usage);
     }
 
-    let repairing = repair.is_some();
+    // The same progress as `gogo depot` (#337), after a line on what this is.
+    let mode = depot_mode(json_progress, json);
+    if matches!(mode, depot_progress::Mode::Human { .. }) {
+        eprintln!(
+            "{}",
+            if repair.is_some() {
+                format!(
+                    "gogo: checking {title}'s depot cache (hashing its files) and fetching \
+                     what's missing"
+                )
+            } else {
+                format!("gogo: downloading {title} into the depot cache")
+            }
+        );
+    }
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<gogo::gog::depot::DepotEvent>();
     let opts = gogo::gog::depot::DepotOptions::default();
     // Reuse the command context's cancellation (ctrl-c wiring is upstream).
@@ -2202,27 +2119,8 @@ async fn resolve_game_source(
         &cancel,
         ctx.free_space.as_ref(),
     );
-    tokio::pin!(runner);
-    let result = loop {
-        tokio::select! {
-            res = &mut runner => break res,
-            maybe = rx.recv() => {
-                if let (Some(gogo::gog::depot::DepotEvent::Plan { download_size, .. }), false) =
-                    (maybe, machine)
-                {
-                    let size = gogo::fmt::human_size(download_size);
-                    if repairing {
-                        println!(
-                            "gogo: checking {title}'s depot cache (hashing its files), \
-                             fetching what's missing"
-                        );
-                    } else {
-                        println!("gogo: downloading {title} via depot ({size})");
-                    }
-                }
-            }
-        }
-    };
+    let mut renderer = mode.renderer();
+    let result = depot_progress::drive(runner, &mut rx, &mut renderer).await;
     result.map_err(AppError::Depot)?;
     let tree = find_game_tree(&root).ok_or_else(|| {
         eprintln!(
@@ -2742,12 +2640,11 @@ async fn mac_app(
     // Design 15 §1 / #73: exactly one source. A game selector takes the
     // depot lane (installer fallback when it has no depot build); an .exe
     // path keeps the installer lane; a directory is a ready game tree.
-    let machine = json || json_progress;
     let (installer, game_tree) = match lane::classify(input.as_deref(), from_depot.as_deref()) {
         Some(lane::Input::Installer(p)) => (Some(p), None),
         Some(lane::Input::Tree(t)) => (None, Some(t)),
         Some(lane::Input::Game { selector, explicit }) => {
-            resolve_game_source("mac-app", &selector, explicit, yes, machine).await?
+            resolve_game_source("mac-app", &selector, explicit, yes, json_progress, json).await?
         }
         None => {
             eprintln!("gogo: mac-app needs a GAME or an INSTALLER path");
@@ -3179,7 +3076,7 @@ fn linux_app_plan_lines(plan: &gogo::linuxapp::build::LinuxAppPlan) -> String {
         );
     }
     if let Some(g) = &plan.game_files {
-        out.push_str(&format!("  {}\n", game_files_line(g)));
+        out.push_str(&format!("  {}\n", depot_progress::game_files_line(g)));
     }
     match (&plan.umu_id, &plan.fixes) {
         (Some(id), Some(fx)) => {
@@ -3205,7 +3102,15 @@ async fn linux_app(a: LinuxAppArgs) -> Result<i32, AppError> {
         Some(lane::Input::Installer(p)) => (Some(p), None),
         Some(lane::Input::Tree(t)) => (None, Some(t)),
         Some(lane::Input::Game { selector, explicit }) => {
-            resolve_game_source("linux-app", &selector, explicit, a.yes, machine).await?
+            resolve_game_source(
+                "linux-app",
+                &selector,
+                explicit,
+                a.yes,
+                a.json_progress,
+                a.json,
+            )
+            .await?
         }
         None => {
             eprintln!("gogo: linux-app needs a GAME or an INSTALLER path");
@@ -5583,6 +5488,19 @@ fn emit_macapp_event(ev: &gogo::engine::events::ProgressEvent, json_progress: bo
             path.display()
         )),
         Ev::RecipeStep { verb } => Some(format!("applied {verb}")),
+        Ev::GameFilesStarted { method, bytes, dir } => Some(match method.as_str() {
+            "reflink" => format!("game files: reflinking into {}", dir.display()),
+            _ => format!(
+                "game files: copying {} into {}",
+                gogo::fmt::human_size(*bytes),
+                dir.display()
+            ),
+        }),
+        Ev::GameFilesProgress { copied, total } => Some(format!(
+            "game files: copied {} / {}",
+            gogo::fmt::human_size(*copied),
+            gogo::fmt::human_size(*total)
+        )),
         _ => None,
     };
     if let Some(l) = line {
@@ -5667,7 +5585,7 @@ mod completions_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::game_files_line;
+    use crate::depot_progress::game_files_line;
     use gogo::gog::materialize::{MaterializePlan, TreeMethod};
 
     #[test]

@@ -135,6 +135,17 @@ pub fn plan_tree(src: &Path, game_dir: &Path, tree_bytes: u64) -> MaterializePla
 /// as `cp -Rp` does on the Mac path. A failure leaves the partial tree for
 /// diagnosis, like `clone_tree`.
 pub fn materialize_tree(src: &Path, dst: &Path, reflink: Reflink) -> io::Result<MaterializeReport> {
+    materialize_tree_with(src, dst, reflink, &mut |_, _| Ok(()))
+}
+
+/// [`materialize_tree`] that tells `on_file` of each finished file and its
+/// size (a copy's progress, #337); an error from it stops the walk.
+pub fn materialize_tree_with(
+    src: &Path,
+    dst: &Path,
+    reflink: Reflink,
+    on_file: &mut dyn FnMut(&Path, u64) -> io::Result<()>,
+) -> io::Result<MaterializeReport> {
     if !src.is_dir() {
         return Err(io::Error::other(format!(
             "game tree {} is not a directory",
@@ -153,7 +164,7 @@ pub fn materialize_tree(src: &Path, dst: &Path, reflink: Reflink) -> io::Result<
     let mut walk = Walk {
         mode: reflink,
         exact: false,
-        on_file: &mut |_, _| Ok(()),
+        on_file,
         report: MaterializeReport::default(),
         skipped: Vec::new(),
         xattrs_lost: 0,
@@ -162,6 +173,38 @@ pub fn materialize_tree(src: &Path, dst: &Path, reflink: Reflink) -> io::Result<
     // it, nothing is.
     copy_dir(src, dst, &fs::metadata(src)?, &mut walk)?;
     Ok(walk.report)
+}
+
+/// Counts bytes towards `total` and says when a new tenth is reached, so a
+/// long copy reports at most ten times (#337).
+#[derive(Debug, Clone)]
+pub struct Tenths {
+    total: u64,
+    done: u64,
+    shown: u64,
+}
+
+impl Tenths {
+    pub fn new(total: u64) -> Self {
+        Self {
+            total,
+            done: 0,
+            shown: 0,
+        }
+    }
+
+    /// Add `bytes`; `Some(done)` when that crosses into a new tenth.
+    pub fn add(&mut self, bytes: u64) -> Option<u64> {
+        self.done += bytes;
+        if self.total == 0 {
+            return None;
+        }
+        let tenth = (self.done.min(self.total) as u128 * 10 / self.total as u128) as u64;
+        (tenth > self.shown).then(|| {
+            self.shown = tenth;
+            self.done
+        })
+    }
 }
 
 /// What [`copy_exact`] did, beyond the usual report.
@@ -645,6 +688,35 @@ mod tests {
         // A dangling symlink counts as existing, too.
         std::os::unix::fs::symlink("nowhere", tmp.path().join("dangling")).unwrap();
         assert!(materialize_tree(&src, &tmp.path().join("dangling"), Reflink::Never).is_err());
+    }
+
+    #[test]
+    fn tenths_report_each_new_tenth_once() {
+        let mut t = Tenths::new(100);
+        assert_eq!(t.add(5), None);
+        assert_eq!(t.add(5), Some(10));
+        assert_eq!(t.add(1), None);
+        // A big file can skip tenths: one report, at the bytes reached.
+        assert_eq!(t.add(40), Some(51));
+        assert_eq!(t.add(49), Some(100));
+        assert_eq!(t.add(10), None);
+        assert_eq!(Tenths::new(0).add(10), None);
+    }
+
+    #[test]
+    fn materialize_with_hears_every_file() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("src");
+        fs::create_dir_all(src.join("a")).unwrap();
+        fs::write(src.join("a/one"), b"12345").unwrap();
+        fs::write(src.join("two"), b"123").unwrap();
+        let mut heard = 0;
+        materialize_tree_with(&src, &t.path().join("dst"), Reflink::Never, &mut |_, n| {
+            heard += n;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(heard, 8);
     }
 
     #[test]

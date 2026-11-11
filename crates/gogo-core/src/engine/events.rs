@@ -122,6 +122,20 @@ pub enum ProgressEvent {
         new: Option<String>,
         path: std::path::PathBuf,
     },
+    /// `linux-app` from a depot tree: the game files start going into the
+    /// game's `game/` dir, by `method` (`reflink` or `copy`, the plan's
+    /// probe) (#337, design 18 §6).
+    GameFilesStarted {
+        method: String,
+        bytes: u64,
+        dir: std::path::PathBuf,
+    },
+    /// A copy's progress, at each tenth of `total` (none for a reflink,
+    /// which takes no time).
+    GameFilesProgress {
+        copied: u64,
+        total: u64,
+    },
 }
 
 /// Drive a consumer over the event stream until the engine's terminal `Done`
@@ -192,6 +206,8 @@ mod render_tests {
             ProgressEvent::ToolProvisioned { .. } => "ToolProvisioned",
             ProgressEvent::RendererSelected { .. } => "RendererSelected",
             ProgressEvent::UserOverrideSet { .. } => "UserOverrideSet",
+            ProgressEvent::GameFilesStarted { .. } => "GameFilesStarted",
+            ProgressEvent::GameFilesProgress { .. } => "GameFilesProgress",
         }
     }
 
