@@ -411,6 +411,15 @@ As built (#350): `gog/lay.rs` (not `materialize.rs`; it uses `materialize::clone
 - `Journal` is `{gogid, lane, buildId, language, adding: [{id, title}], source,
   sourceIsCache, moves, files: [{from, to}], replaced, dirs}`. `dirs` are the dirs the
   lay creates, which a rollback removes when they're empty.
+- `Journal::survey` first maps each `to` onto the casing already in `game/`, one
+  component at a time. Manifests are case-insensitive, and a DLC depot can spell a dir
+  differently from the base tree. Each component matches what exists case-insensitively
+  (an exact match first; a dir for every component but the last). A new component keeps
+  the manifest's case, and later files reuse it. Two files mapping to one path keep the
+  later one. Without this, a case-sensitive filesystem would get a second dir that Wine
+  sees as the same one, and a replaced base file would look new and miss its backup.
+  The journal stores the mapped paths, so the lay, `replaced`, `dirs` and `recover` all
+  use them.
 - `lay_files(root, journal, reflink, stop, on_file)` runs steps 1–4. `stop(Step)` is
   asked at each boundary and between files. Ctrl-C reaches it through the command's
   cancel token, and the crash tests use `AddOptions::fail_at`. `finish` is step 5's
