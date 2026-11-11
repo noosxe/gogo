@@ -312,10 +312,20 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
             refresh,
             interactive,
             yes,
+            dlc,
+            all_dlcs,
+            no_dlcs,
+            lang,
             json_progress,
             json,
         } => {
             linux_app(LinuxAppArgs {
+                dlc: DlcAsk {
+                    names: dlc,
+                    all: all_dlcs,
+                    none: no_dlcs,
+                    lang,
+                },
                 input,
                 from_depot,
                 name,
@@ -2037,6 +2047,7 @@ fn resolve_library(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn resolve_game_source(
     command: &str,
     selector: &str,
@@ -2044,7 +2055,15 @@ async fn resolve_game_source(
     auto: bool,
     json_progress: bool,
     json: bool,
-) -> Result<(Option<std::path::PathBuf>, Option<std::path::PathBuf>), AppError> {
+    dlc: Option<&DlcAsk>,
+) -> Result<
+    (
+        Option<std::path::PathBuf>,
+        Option<std::path::PathBuf>,
+        Vec<String>,
+    ),
+    AppError,
+> {
     let machine = json || json_progress;
     let built = AppContext::build(load_config_from_env()?, true)
         .await
@@ -2074,11 +2093,34 @@ async fn resolve_game_source(
         return Err(AppError::Depot(gogo::gog::depot::DepotError::NoCacheDir));
     };
 
+    // The DLC and language the build wants (design 19 §1.2); `mac-app` asks for none.
+    let interactive = !auto
+        && !machine
+        && std::io::IsTerminal::is_terminal(&std::io::stdin())
+        && std::io::IsTerminal::is_terminal(&std::io::stderr());
+    let dlc_plan = match dlc {
+        Some(ask) => prepare_dlc(&ctx, &token, session, game, ask, interactive).await?,
+        None => DlcPlan::default(),
+    };
+    let mut notes = dlc_plan.notes.clone();
+    let want_ids: Vec<String> = match &dlc_plan.opts.dlcs {
+        gogo::gog::dlc::DlcSet::Ids(ids) => ids.iter().map(u64::to_string).collect(),
+        _ => Vec::new(),
+    };
     let cached_tree = find_game_tree(&root);
     let mut facts = lane::GameFacts {
         cache_gap: cached_tree
             .as_ref()
-            .map(|_| gogo::gog::depot::check_cache(&root, &Default::default()))
+            .map(|_| {
+                gogo::gog::depot::check_cache(
+                    &root,
+                    &gogo::gog::depot::CacheWant {
+                        build_id: None,
+                        language: dlc_plan.explicit_lang.as_deref(),
+                        dlcs: &want_ids,
+                    },
+                )
+            })
             .filter(|c| *c != gogo::gog::depot::CacheCheck::Complete),
         cached_tree,
         ..Default::default()
@@ -2098,7 +2140,7 @@ async fn resolve_game_source(
     // which keeps what's there and fetches what's gone.
     let mut repair = None;
     match lane::pick(facts, explicit) {
-        lane::Lane::DepotCached(tree) => return Ok((None, Some(tree))),
+        lane::Lane::DepotCached(tree) => return Ok((None, Some(tree), notes)),
         lane::Lane::DepotDownload => {}
         lane::Lane::DepotRepair(tree, gap) => {
             match &gap {
@@ -2113,11 +2155,22 @@ async fn resolve_game_source(
                      download ({}), so it may lack files (such as GOG's support overlay)",
                     root.join(gogo::gog::depot::RECORD).display()
                 ),
-                // This caller asks for no DLC, language or build (the DLC flags
-                // come with #349), so the check can't answer these; say so if it does.
-                other => eprintln!(
-                    "gogo: the depot cache for {title} may not hold what's wanted ({other:?})"
+                gogo::gog::depot::CacheCheck::MissingDlc { missing } => eprintln!(
+                    "gogo: the depot cache for {title} lacks DLC {}: fetching only those",
+                    missing.join(", ")
                 ),
+                gogo::gog::depot::CacheCheck::UnknownContent => eprintln!(
+                    "gogo: the depot cache for {title} was downloaded before DLC and language \
+                     were recorded, so it is checked (hashing its files) against what's wanted"
+                ),
+                gogo::gog::depot::CacheCheck::OtherLanguage => eprintln!(
+                    "gogo: the depot cache for {title} is in another language than the \
+                     wanted one"
+                ),
+                gogo::gog::depot::CacheCheck::OtherBuild => eprintln!(
+                    "gogo: the depot cache for {title} holds another build than the one wanted"
+                ),
+                gogo::gog::depot::CacheCheck::Complete => {}
             }
             repair = Some((tree, gap));
         }
@@ -2126,7 +2179,10 @@ async fn resolve_game_source(
                 "gogo: {title} has no depot build — using its offline installer {}",
                 exe.display()
             );
-            return Ok((Some(exe), None));
+            if dlc.is_some_and(DlcAsk::wants_dlc) {
+                notes.push(gogo::gog::dlc::INSTALLER_LANE_NOTE.to_string());
+            }
+            return Ok((Some(exe), None, notes));
         }
         lane::Lane::NoSource => {
             eprintln!(
@@ -2172,15 +2228,23 @@ async fn resolve_game_source(
                     "gogo: warning: building from the unchecked depot cache; \
                      `gogo depot {selector}` checks and completes it"
                 );
-                return Ok((None, Some(tree)));
+                return Ok((None, Some(tree), notes));
             }
             Some(_) => eprintln!(
                 "gogo: the depot cache for {title} is incomplete — run \
-                 `gogo depot {selector}` first (or pass --yes to download here)"
+                 `gogo depot {selector}{}` first (or pass --yes to download here)",
+                want_ids
+                    .iter()
+                    .map(|id| format!(" --dlc {id}"))
+                    .collect::<String>()
             ),
             None => eprintln!(
-                "gogo: no depot cache for {title} — run `gogo depot {selector}` first \
-                 (or pass --yes to download here)"
+                "gogo: no depot cache for {title} — run `gogo depot {selector}{}` first \
+                 (or pass --yes to download here)",
+                want_ids
+                    .iter()
+                    .map(|id| format!(" --dlc {id}"))
+                    .collect::<String>()
             ),
         }
         return Err(AppError::Usage);
@@ -2202,7 +2266,7 @@ async fn resolve_game_source(
         );
     }
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<gogo::gog::depot::DepotEvent>();
-    let opts = gogo::gog::depot::DepotOptions::default();
+    let opts = dlc_plan.opts;
     // Reuse the command context's cancellation (ctrl-c wiring is upstream).
     let cancel = ctx.cancel.clone();
     let runner = gogo::gog::depot::run(
@@ -2224,7 +2288,127 @@ async fn resolve_game_source(
         );
         AppError::Usage
     })?;
-    Ok((None, Some(tree)))
+    Ok((None, Some(tree), notes))
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+/// Decide a build's DLC set and language (design 19 §1.2, §2.3) and turn them into the
+/// depot download's options. A game with no depot build yields the defaults: the
+/// installer lane takes no DLC yet.
+async fn prepare_dlc(
+    ctx: &AppContext,
+    token: &str,
+    session: &gog_warp::Core,
+    game: &gogo::gog::library::LibraryProduct,
+    ask: &DlcAsk,
+    interactive: bool,
+) -> Result<DlcPlan, AppError> {
+    use gogo::gog::dlc::{self, Basis, DlcSet, Want};
+    let usage = |e: &dyn std::fmt::Display| {
+        eprintln!("gogo: {e}");
+        AppError::Usage
+    };
+    // A rebuild keeps what the game recorded (design 19 D4, D10).
+    let dirs =
+        gogo::macapp::launch::GameDirs::for_game(&game.id.to_string()).map_err(|e| usage(&e))?;
+    let prior = if dirs.game.exists() {
+        gogo::gog::content::resolve(
+            &dirs.root,
+            &dirs.game,
+            gogo::gog::content::Lane::Depot,
+            None,
+        )
+        .ok()
+        .map(|r| r.content)
+    } else {
+        None
+    };
+    let recorded: Option<Vec<u64>> = prior.as_ref().map(|c| c.dlc.iter().map(|d| d.id).collect());
+    let language = ask
+        .lang
+        .clone()
+        .or_else(|| prior.and_then(|c| c.language))
+        .unwrap_or_else(|| "en-US".to_string());
+    let mut plan = DlcPlan {
+        opts: gogo::gog::depot::DepotOptions {
+            language: language.clone(),
+            ..Default::default()
+        },
+        explicit_lang: ask.lang.clone(),
+        notes: Vec::new(),
+    };
+    let nothing_to_fetch = ask.none
+        || (ask.names.is_empty() && !ask.all && recorded.as_ref().is_some_and(|r| r.is_empty()));
+    if nothing_to_fetch {
+        let d = dlc::decide(&Want::NoDlc, recorded.as_deref(), &[], false);
+        plan.notes = dlc::decision_notes(&d, &[]);
+        return Ok(plan);
+    }
+
+    let detail = gogo::gog::catalog::detail(&ctx.http, token, game.id).await?;
+    let owned = library::owned_ids(&ctx.http, token).await?;
+    let (build_id, mdlcs) =
+        match gogo::gog::depot::build_dlcs(session, game.id, None, &language).await {
+            Ok(b) => b,
+            // No depot build: the installer lane, which takes no DLC yet.
+            Err(gogo::gog::depot::DepotError::NoBuilds(_)) => return Ok(plan),
+            Err(e) => return Err(e.into()),
+        };
+    let infos = dlc::available(&detail.expanded_dlcs, &owned, Some(&mdlcs));
+    let lane = dlc::Lane::Depot { build_id };
+    let want = if ask.all {
+        Want::All
+    } else if !ask.names.is_empty() {
+        Want::Ids(dlc::resolve(&ask.names, &game.title, &infos, &lane).map_err(|e| usage(&e))?)
+    } else {
+        Want::Default
+    };
+    let decision = dlc::decide(&want, recorded.as_deref(), &infos, interactive);
+    let set = match &decision.basis {
+        Basis::Set(s) => s.clone(),
+        Basis::Pick(cands) => DlcSet::Ids(pick_dlc(cands, &infos)?),
+    };
+    let ids = dlc::select(&set, &game.title, &infos, &lane).map_err(|e| usage(&e))?;
+    plan.notes = dlc::decision_notes(&decision, &infos);
+    plan.opts.dlcs = if ids.is_empty() {
+        DlcSet::None
+    } else {
+        DlcSet::Ids(ids)
+    };
+    plan.opts.dlc_context = gogo::gog::depot::DlcContext {
+        owned,
+        catalog_dlcs: detail.expanded_dlcs,
+    };
+    Ok(plan)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+/// The first build's DLC picker: every owned DLC preselected (design 19 §1.2).
+fn pick_dlc(cands: &[u64], infos: &[gogo::gog::dlc::DlcInfo]) -> Result<Vec<u64>, AppError> {
+    let items: Vec<String> = cands
+        .iter()
+        .map(|id| {
+            let i = infos.iter().find(|d| d.id == *id);
+            format!(
+                "{} ({id}, {})",
+                i.map_or(id.to_string(), |d| d.title.clone()),
+                i.and_then(|d| d.download_size)
+                    .map_or("size unknown".to_string(), gogo::fmt::human_size)
+            )
+        })
+        .collect();
+    let picked = dialoguer::MultiSelect::new()
+        .with_prompt("DLC to install (space toggles, enter accepts)")
+        .items(&items)
+        .defaults(&vec![true; items.len()])
+        .interact_opt();
+    match picked {
+        Ok(Some(sel)) => Ok(sel.into_iter().map(|i| cands[i]).collect()),
+        _ => {
+            eprintln!("gogo: aborted");
+            Err(AppError::Usage)
+        }
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -2739,7 +2923,17 @@ async fn mac_app(
         Some(lane::Input::Installer(p)) => (Some(p), None),
         Some(lane::Input::Tree(t)) => (None, Some(t)),
         Some(lane::Input::Game { selector, explicit }) => {
-            resolve_game_source("mac-app", &selector, explicit, yes, json_progress, json).await?
+            let (i, t, _) = resolve_game_source(
+                "mac-app",
+                &selector,
+                explicit,
+                yes,
+                json_progress,
+                json,
+                None,
+            )
+            .await?;
+            (i, t)
         }
         None => {
             eprintln!("gogo: mac-app needs a GAME or an INSTALLER path");
@@ -3026,8 +3220,38 @@ struct LinuxAppArgs {
     refresh: bool,
     interactive: bool,
     yes: bool,
+    dlc: DlcAsk,
     json_progress: bool,
     json: bool,
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+/// A build's DLC and language flags (design 19 §1.1).
+#[derive(Default)]
+struct DlcAsk {
+    names: Vec<String>,
+    all: bool,
+    none: bool,
+    lang: Option<String>,
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+impl DlcAsk {
+    /// A flag that asks for DLC (`--no-dlcs` and a bare `--lang` don't).
+    fn wants_dlc(&self) -> bool {
+        self.all || !self.names.is_empty()
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+/// What `resolve_game_source` hands back besides the source: the depot options
+/// the download must use and the plan's DLC notes.
+#[derive(Default)]
+struct DlcPlan {
+    opts: gogo::gog::depot::DepotOptions,
+    /// `--lang`, when given: only then is a cache's language checked.
+    explicit_lang: Option<String>,
+    notes: Vec<String>,
 }
 
 #[cfg(target_os = "linux")]
@@ -3124,6 +3348,9 @@ fn linux_app_plan_lines(plan: &gogo::linuxapp::build::LinuxAppPlan) -> String {
                 .join(", ")
         },
     );
+    for note in &plan.dlc_notes {
+        out.push_str(&format!("{:<13}{note}\n", ""));
+    }
     line(
         &mut out,
         "game dir:",
@@ -3206,19 +3433,33 @@ fn linux_app_plan_lines(plan: &gogo::linuxapp::build::LinuxAppPlan) -> String {
 async fn linux_app(a: LinuxAppArgs) -> Result<i32, AppError> {
     let machine = a.json || a.json_progress;
     let library = resolve_library(a.library.clone())?;
+    let mut dlc_notes = Vec::new();
     let (installer, game_tree) = match lane::classify(a.input.as_deref(), a.from_depot.as_deref()) {
-        Some(lane::Input::Installer(p)) => (Some(p), None),
-        Some(lane::Input::Tree(t)) => (None, Some(t)),
+        Some(lane::Input::Installer(p)) => {
+            if a.dlc.wants_dlc() {
+                dlc_notes.push(gogo::gog::dlc::INSTALLER_LANE_NOTE.to_string());
+            }
+            (Some(p), None)
+        }
+        Some(lane::Input::Tree(t)) => {
+            if a.dlc.wants_dlc() {
+                dlc_notes.push("the DLC flags don't apply to a game tree you point at".to_string());
+            }
+            (None, Some(t))
+        }
         Some(lane::Input::Game { selector, explicit }) => {
-            resolve_game_source(
+            let (i, t, notes) = resolve_game_source(
                 "linux-app",
                 &selector,
                 explicit,
                 a.yes,
                 a.json_progress,
                 a.json,
+                Some(&a.dlc),
             )
-            .await?
+            .await?;
+            dlc_notes = notes;
+            (i, t)
         }
         None => {
             eprintln!("gogo: linux-app needs a GAME or an INSTALLER path");
@@ -3262,6 +3503,7 @@ async fn linux_app(a: LinuxAppArgs) -> Result<i32, AppError> {
         refresh: a.refresh,
         gogo_path: invoked_path(),
         library,
+        dlc_notes,
     };
     let jp = a.json_progress;
     let plan = {

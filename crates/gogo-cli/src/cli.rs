@@ -286,6 +286,24 @@ pub enum Command {
         /// prefix and saves stay).
         #[arg(long)]
         yes: bool,
+        /// Include this DLC (product id or title; repeatable). It must be
+        /// owned. A rebuild with `--dlc` has exactly these.
+        #[arg(
+            long = "dlc",
+            value_name = "ID|TITLE",
+            conflicts_with_all = ["all_dlcs", "no_dlcs", "retarget"]
+        )]
+        dlc: Vec<String>,
+        /// Include every DLC you own.
+        #[arg(long, conflicts_with_all = ["no_dlcs", "retarget"])]
+        all_dlcs: bool,
+        /// Include no DLC (a rebuild drops the ones it had).
+        #[arg(long, conflicts_with = "retarget")]
+        no_dlcs: bool,
+        /// Content language of the depot download (default: the game's
+        /// recorded one, else en-US).
+        #[arg(long, value_name = "CODE", conflicts_with = "retarget")]
+        lang: Option<String>,
         /// Progress events as NDJSON on stdout.
         #[arg(long)]
         json_progress: bool,
@@ -1456,6 +1474,48 @@ mod tests {
         for r in ["dxmt", "d3dmetal"] {
             assert!(Cli::try_parse_from(["gogo", "linux-app", "x", "--renderer", r]).is_err());
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_app_takes_dlc_flags_that_conflict_as_designed() {
+        let cli = Cli::try_parse_from([
+            "gogo",
+            "linux-app",
+            "tag",
+            "--dlc",
+            "REDmod",
+            "--dlc",
+            "123",
+            "--lang",
+            "de-DE",
+        ])
+        .unwrap();
+        let Command::LinuxApp {
+            dlc,
+            all_dlcs,
+            no_dlcs,
+            lang,
+            ..
+        } = cli.command
+        else {
+            panic!("expected a linux-app build");
+        };
+        assert_eq!(dlc, ["REDmod", "123"]);
+        assert!(!all_dlcs && !no_dlcs);
+        assert_eq!(lang.as_deref(), Some("de-DE"));
+        for pair in [
+            ["--dlc=1", "--all-dlcs"],
+            ["--dlc=1", "--no-dlcs"],
+            ["--all-dlcs", "--no-dlcs"],
+        ] {
+            assert!(
+                Cli::try_parse_from(["gogo", "linux-app", "tag", pair[0], pair[1]]).is_err(),
+                "{pair:?}"
+            );
+        }
+        assert!(Cli::try_parse_from(["gogo", "linux-app", "tag", "--all-dlcs"]).is_ok());
+        assert!(Cli::try_parse_from(["gogo", "linux-app", "--retarget=1", "--lang=de"]).is_err());
     }
 
     #[cfg(target_os = "linux")]

@@ -42,6 +42,42 @@ pub fn load(game_dir: &Path, gogid: &str, ctx: &Ctx) -> Option<Parsed> {
     Some(p)
 }
 
+/// The base game's script, then every DLC's (`goggame-<dlcid>.script`, by
+/// ascending id), with the same subset (design 19 §3.6). A DLC's script sits
+/// beside its info: in `game_dir` or one level down. `None` when no script
+/// exists at all.
+pub fn load_all(game_dir: &Path, gogid: &str, ctx: &Ctx) -> Option<Parsed> {
+    let mut found = false;
+    let mut all = Parsed::default();
+    let mut take = |p: Option<Parsed>| {
+        if let Some(p) = p {
+            found = true;
+            all.values.extend(p.values);
+            all.warnings.extend(p.warnings);
+        }
+    };
+    take(load(game_dir, gogid, ctx));
+    let mut dlcs: Vec<String> = super::info::gog_game_ids(game_dir)
+        .into_iter()
+        .filter(|id| id != gogid)
+        .collect();
+    dlcs.sort_by_key(|id| (id.parse::<u64>().unwrap_or(u64::MAX), id.clone()));
+    let mut dirs = vec![game_dir.to_path_buf()];
+    if let Ok(rd) = std::fs::read_dir(game_dir) {
+        let mut subs: Vec<_> = rd
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .map(|e| e.path())
+            .collect();
+        subs.sort();
+        dirs.extend(subs);
+    }
+    for id in &dlcs {
+        take(dirs.iter().find_map(|d| load(d, id, ctx)));
+    }
+    found.then_some(all)
+}
+
 /// The `setRegistry` actions of the script text `raw`.
 pub fn parse(raw: &str, ctx: &Ctx) -> Parsed {
     let mut out = Parsed::default();
@@ -361,5 +397,33 @@ mod tests {
         )
         .unwrap();
         assert_eq!(load(d.path(), "7", &CTX).unwrap().values.len(), 1);
+    }
+
+    #[test]
+    fn dlc_scripts_follow_the_base_by_id() {
+        let d = tempfile::tempdir().unwrap();
+        for id in ["5", "20", "3"] {
+            std::fs::write(d.path().join(format!("goggame-{id}.info")), "{}").unwrap();
+        }
+        let put = |dir: &Path, id: &str, v: &str| {
+            std::fs::write(
+                dir.join(format!("goggame-{id}.script")),
+                script(&[set("HKEY_CURRENT_USER", "K", id, "string", v)]),
+            )
+            .unwrap();
+        };
+        let sub = d.path().join("addon");
+        std::fs::create_dir(&sub).unwrap();
+        put(d.path(), "5", "base");
+        put(d.path(), "20", "dlc-b");
+        // beside its info, one level down
+        std::fs::write(sub.join("goggame-3.info"), "{}").unwrap();
+        put(&sub, "3", "dlc-a");
+        let p = load_all(d.path(), "5", &CTX).unwrap();
+        let datas: Vec<_> = p.values.iter().map(|v| v.data.as_str()).collect();
+        assert_eq!(datas, ["base", "dlc-a", "dlc-b"]);
+        assert!(load_all(sub.as_path(), "9", &CTX).is_some());
+        let none = tempfile::tempdir().unwrap();
+        assert!(load_all(none.path(), "5", &CTX).is_none());
     }
 }
