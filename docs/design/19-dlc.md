@@ -461,7 +461,7 @@ added    = "2026-11-11"
 
 | Where | What |
 |---|---|
-| build plan | `dlc: Phantom Liberty (19.6 GiB), REDmod` or `dlc: none (2 owned not included: --all-dlcs)`; on a rebuild, what's kept, added and dropped |
+| build plan | `dlc: Phantom Liberty (29.2 GiB), REDmod` or `dlc: none (2 owned not included: --all-dlcs)`; on a rebuild, what's kept, added and dropped |
 | `DepotEvent::Plan` / `--json-progress` | `dlcs` becomes `[{id, title, downloadSize, diskSize}]` (was titles only; the NDJSON key stays) |
 | `apps list` | a `dlc` column: `2/3` (installed/owned), `-` with none; `--json` rows gain `dlcs: [{id, title}]` |
 | `apps show` | the `content.toml` section |
@@ -475,7 +475,7 @@ added    = "2026-11-11"
   line. The build's own line before it: `gogo: downloading Phantom Liberty for Cyberpunk
   2077 (build …)`.
 - The lay reuses `GameFilesStarted`/`GameFilesProgress` (design 18 §6, #337) with a
-  `kind: "dlc"` so the human line reads `game files: adding 2,431 file(s) (19.6 GiB) to
+  `kind: "dlc"` so the human line reads `game files: adding 2,431 file(s) (29.2 GiB) to
   <dir>`.
 - New events: `DlcPlan { dlcs, source: "cache"|"staging", buildId }`, `DlcInstalled { id }`
   (one per DLC after its script ran), and on recovery `DlcRecovered { action:
