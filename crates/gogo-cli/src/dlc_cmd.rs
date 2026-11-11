@@ -173,7 +173,14 @@ fn interactive(machine: bool) -> bool {
 }
 
 /// The progress events of an add: NDJSON under `--json-progress`, else `gogo:` lines.
-fn emit(ev: &ProgressEvent, json_progress: bool, quiet: bool) {
+/// The human lines go to `notes`, for the live renderer to print above its
+/// status line.
+fn emit(
+    ev: &ProgressEvent,
+    json_progress: bool,
+    quiet: bool,
+    notes: &tokio::sync::mpsc::UnboundedSender<String>,
+) {
     if json_progress {
         if let Ok(line) = serde_json::to_string(ev) {
             println!("{line}");
@@ -212,7 +219,7 @@ fn emit(ev: &ProgressEvent, json_progress: bool, quiet: bool) {
         _ => None,
     };
     if let Some(l) = line {
-        eprintln!("gogo: {l}");
+        let _ = notes.send(format!("gogo: {l}"));
     }
 }
 
@@ -238,9 +245,15 @@ async fn add_cmd(
     let recovered = if a.dry_run {
         None
     } else {
-        match add::recover(&mut game, gogo::gog::materialize::Reflink::Try, &mut |ev| {
-            emit(ev, jp, quiet)
-        }) {
+        // No live renderer yet: the lines go straight to stderr.
+        let (rtx, mut rrx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let r = add::recover(&mut game, gogo::gog::materialize::Reflink::Try, &mut |ev| {
+            emit(ev, jp, quiet, &rtx)
+        });
+        while let Ok(l) = rrx.try_recv() {
+            eprintln!("{l}");
+        }
+        match r {
             Ok(r) => r,
             Err(e) => return Ok(report(e)),
         }
@@ -446,11 +459,12 @@ async fn add_cmd(
     };
     let stop_token = cancel.clone();
     let stop = move || stop_token.is_cancelled();
-    let mut on_event = |ev: &ProgressEvent| emit(ev, jp, quiet);
+    let (ntx, mut nrx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let mut on_event = |ev: &ProgressEvent| emit(ev, jp, quiet, &ntx);
     let opts = add::AddOptions::default();
     let runner = add::add(&mut game, &plan, fetch, &opts, &mut on_event, &stop);
     let mut renderer = mode.renderer();
-    let result = depot_progress::drive(runner, &mut rx, &mut renderer).await;
+    let result = depot_progress::drive_with_notes(runner, &mut rx, &mut nrx, &mut renderer).await;
     match result {
         Ok(out) => {
             if a.json {

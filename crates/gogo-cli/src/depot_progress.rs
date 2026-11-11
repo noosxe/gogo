@@ -87,6 +87,8 @@ pub struct Renderer<W: Write> {
     bytes: (u64, u64),
     /// `(time, downloaded)` within [`SPEED_WINDOW`].
     samples: VecDeque<(Duration, u64)>,
+    /// The first download sample, for the phase's average speed.
+    dl_first: Option<(Duration, u64)>,
     /// The tenth last reported in plain mode.
     tenth: u32,
     /// A status line is on screen (live mode).
@@ -106,6 +108,7 @@ impl<W: Write> Renderer<W> {
             fraction: 0.0,
             bytes: (0, 0),
             samples: VecDeque::new(),
+            dl_first: None,
             tenth: 0,
             drawn: false,
             last_draw: None,
@@ -217,6 +220,7 @@ impl<W: Write> Renderer<W> {
                         ),
                     );
                     self.samples.clear();
+                    self.dl_first = Some((now, *downloaded));
                 }
                 self.bytes = (*downloaded, *total_download);
                 self.samples.push_back((now, *downloaded));
@@ -270,6 +274,14 @@ impl<W: Write> Renderer<W> {
         self.draw(now, false);
     }
 
+    /// A line of the caller's own (not a depot event), printed above the live
+    /// status line like the phase lines are. Human modes only.
+    pub fn note(&mut self, text: &str) {
+        if matches!(self.mode, Mode::Human { .. }) {
+            self.line(text);
+        }
+    }
+
     /// Clears the status line; call once the run is over.
     pub fn finish(&mut self) {
         self.clear();
@@ -303,9 +315,24 @@ impl<W: Write> Renderer<W> {
         }
     }
 
-    /// Bytes per second over the window, once it spans a second.
+    /// Bytes per second over the window, once it spans a second. Once the
+    /// download is complete the window only sees the tail, so it is the
+    /// phase's average instead.
     fn speed(&self) -> Option<u64> {
+        let (d, t) = self.bytes;
+        if t > 0 && d >= t {
+            return self.average_speed();
+        }
         let (t0, d0) = *self.samples.front()?;
+        let (t1, d1) = *self.samples.back()?;
+        let span = t1.saturating_sub(t0);
+        (span >= Duration::from_secs(1))
+            .then(|| (d1.saturating_sub(d0) as f64 / span.as_secs_f64()) as u64)
+    }
+
+    /// Bytes per second since the download phase's first sample.
+    fn average_speed(&self) -> Option<u64> {
+        let (t0, d0) = self.dl_first?;
         let (t1, d1) = *self.samples.back()?;
         let span = t1.saturating_sub(t0);
         (span >= Duration::from_secs(1))
@@ -421,6 +448,20 @@ pub async fn drive<T, W: Write>(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<DepotEvent>,
     renderer: &mut Renderer<W>,
 ) -> T {
+    let (_keep, mut notes) = tokio::sync::mpsc::unbounded_channel::<String>();
+    drive_with_notes(runner, rx, &mut notes, renderer).await
+}
+
+/// [`drive`], plus lines the caller's own work prints meanwhile (`gogo dlc
+/// add`'s lay, after the download). They go through the renderer so they clear
+/// the status line, and each one first renders every depot event already
+/// queued, so a download's `Finished` precedes what the lay says.
+pub async fn drive_with_notes<T, W: Write>(
+    runner: impl std::future::Future<Output = T>,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<DepotEvent>,
+    notes: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    renderer: &mut Renderer<W>,
+) -> T {
     let start = tokio::time::Instant::now();
     let mut timer = tokio::time::interval(REDRAW);
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -429,11 +470,20 @@ pub async fn drive<T, W: Write>(
         tokio::select! {
             res = &mut runner => break res,
             Some(e) = rx.recv() => renderer.event(&e, start.elapsed()),
+            Some(n) = notes.recv() => {
+                while let Ok(e) = rx.try_recv() {
+                    renderer.event(&e, start.elapsed());
+                }
+                renderer.note(&n);
+            }
             _ = timer.tick() => renderer.tick(start.elapsed()),
         }
     };
     while let Ok(e) = rx.try_recv() {
         renderer.event(&e, start.elapsed());
+    }
+    while let Ok(n) = notes.try_recv() {
+        renderer.note(&n);
     }
     renderer.finish();
     result
@@ -685,5 +735,65 @@ mod tests {
                 "allocating"
             ]
         );
+    }
+
+    /// A status line (`\r\x1b[K` + spinner) is only ever followed by another
+    /// clear: no text, no newline, and not the end of the output.
+    fn no_text_after_a_status(out: &str) {
+        let segs: Vec<&str> = out.split("\r\x1b[K").collect();
+        for (i, seg) in segs.iter().enumerate().skip(1) {
+            if seg.starts_with(SPINNER) {
+                assert!(!seg.contains('\n') && !seg.contains("gogo:"), "{out:?}");
+                assert!(i + 1 < segs.len(), "ends on a status: {out:?}");
+            }
+        }
+    }
+
+    /// `gogo dlc add`: the download's `Finished` and the lay's notes through
+    /// the live renderer, the lay's note sent while events are still queued.
+    #[tokio::test]
+    async fn drive_orders_lay_notes_after_the_download_and_clears_the_status() {
+        const MB: u64 = 1 << 20;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (ntx, mut nrx) = tokio::sync::mpsc::unbounded_channel();
+        let mut r = Renderer::new(Mode::Human { live: true }, Vec::new());
+        let runner = async move {
+            tx.send(DepotEvent::Preparing).unwrap();
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            tx.send(dl(10 * MB, 100 * MB)).unwrap();
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            tx.send(dl(100 * MB, 100 * MB)).unwrap();
+            tx.send(DepotEvent::Finished {
+                install_dir: PathBuf::from("/c"),
+                fetched_files: 1,
+                fetched_bytes: 100 * MB,
+            })
+            .unwrap();
+            // The lay starts at once: nothing yielded since the sends.
+            ntx.send("gogo: game files: adding 1 file(s)".to_string())
+                .unwrap();
+        };
+        drive_with_notes(runner, &mut rx, &mut nrx, &mut r).await;
+        let out = String::from_utf8(r.into_inner()).unwrap();
+        no_text_after_a_status(&out);
+        let fetched = out.find("gogo: fetched 1 file(s)").expect(&out);
+        let adding = out.find("gogo: game files: adding").expect(&out);
+        assert!(fetched < adding, "{out:?}");
+        assert!(out.ends_with("adding 1 file(s)\n"), "{out:?}");
+    }
+
+    /// The last status draw shows the phase's average, not the tail window.
+    #[test]
+    fn the_final_speed_is_the_average() {
+        const MB: u64 = 1 << 20;
+        let mut r = Renderer::new(Mode::Human { live: true }, Vec::new());
+        r.event(&dl(0, 100 * MB), secs(0.0));
+        // 99 MB in the first 20 s, then a slow 1 MB tail over 10 s.
+        r.event(&dl(99 * MB, 100 * MB), secs(20.0));
+        r.event(&dl(100 * MB, 100 * MB), secs(30.0));
+        let out = String::from_utf8(r.into_inner()).unwrap();
+        let last = out.rsplit("\r\x1b[K").next().unwrap();
+        // 100 MiB / 30 s = 3.3 MiB/s; the window would say 0.1 MiB/s.
+        assert!(last.contains("3.3 MiB/s"), "{last:?}");
     }
 }
