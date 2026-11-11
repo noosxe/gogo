@@ -5251,7 +5251,7 @@ async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppEr
             };
             let mut json_rows: Vec<serde_json::Value> = Vec::new();
             let mut footnotes: Vec<String> = Vec::new();
-            let mut table = comfy_table::Table::new();
+            let mut table = output::table();
             table.set_header(vec!["ID", "STATUS", "LATEST", "SIZE", "CACHED", "USED BY"]);
             for entry in catalog::entries()
                 .iter()
@@ -5454,7 +5454,7 @@ async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppEr
                     "\nunmanaged Proton builds (not pinned, not installed by gogo, never \
                      pruned; use one with `path:<dir>`):"
                 );
-                let mut t = comfy_table::Table::new();
+                let mut t = output::table();
                 t.set_header(vec!["PATH", "VERSION", "FOUND IN", "NOTE"]);
                 for (b, default) in &unmanaged {
                     let mut note = vec!["unmanaged".to_string()];
@@ -5647,7 +5647,7 @@ fn apps_cmd(cmd: crate::cli::AppsCmd) -> Result<i32, AppError> {
                 );
                 return Ok(cli::exit::OK);
             }
-            let mut table = comfy_table::Table::new();
+            let mut table = output::table();
             table.set_header(vec![
                 "GOGID",
                 "TITLE",
@@ -5947,7 +5947,7 @@ fn recipes_cmd(args: crate::cli::RecipesArgs) -> Result<i32, AppError> {
                 return Ok(cli::exit::OK);
             }
             println!("Lutris recipes for {display} (ranked):");
-            let mut table = comfy_table::Table::new();
+            let mut table = output::table();
             table.set_header(vec![
                 "#", "SLUG", "VERSION", "AUTHOR", "UPDATED", "WINE PIN",
             ]);
@@ -6048,7 +6048,7 @@ fn recipes_cmd(args: crate::cli::RecipesArgs) -> Result<i32, AppError> {
             }
             if !plan.steps.is_empty() {
                 println!("\nplanned steps (applied):");
-                let mut table = comfy_table::Table::new();
+                let mut table = output::table();
                 table.set_header(vec!["#", "STEP", "DETAIL"]);
                 for (i, s) in &plan.steps {
                     // usize::MAX marks auto-appended steps (wine.overrides).
@@ -6063,7 +6063,7 @@ fn recipes_cmd(args: crate::cli::RecipesArgs) -> Result<i32, AppError> {
             }
             if !plan.skipped.is_empty() {
                 println!("\nskipped (with reasons):");
-                let mut table = comfy_table::Table::new();
+                let mut table = output::table();
                 table.set_header(vec!["#", "STEP", "REASON"]);
                 for s in &plan.skipped {
                     table.add_row(vec![s.index.to_string(), s.verb.clone(), s.reason.clone()]);
