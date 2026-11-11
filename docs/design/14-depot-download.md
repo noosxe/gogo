@@ -245,3 +245,30 @@ the same codes (`English` → `en-US`). `*` (v1 `Neutral`) is a depot for every 
   isn't read as a language change.
 - `mac-app` has no language flag (design 15: it builds from the cache as it is), so it
   has nothing to validate.
+- **The plan's download figure for a switch (#386).** When the cache record names another
+  language of the same build (`OtherLanguage`), the plan doesn't report the whole build:
+  that overstated Cyberpunk 2077's `pt` switch at 65 GiB for about 5 GiB of depots.
+  `language::switch_download` takes the depots the new language and the wanted DLC need
+  (v2 depot: its product is the base's or a wanted DLC's, its `languages` has `*` or the
+  code) and drops those the cached language and recorded DLC already have. Depots are
+  keyed by product and **manifest hash**, not by language tag, since a depot listed under
+  several languages can point at different depot manifests and two depots with one hash
+  hold the same files; each distinct depot counts once. It reads only the build manifest
+  the plan already has: no extra fetch. A v1 build, a record without a language and any
+  other cache answer keep the whole-build figure.
+  - *What gog-warp does* (pinned rev, read-only): a non-targeted run is `verify` with the
+    new language and no old manifest. `prepare` lists every file of the new language's
+    depots, `update_state` hashes the files already at those paths chunk by chunk, and
+    only chunks that are missing or differ are fetched; a file whose path exists in the
+    disk-space check counts as present. Nothing is deleted (the report's deleted list is
+    empty without an old manifest), so **the old language's files stay in the cache**.
+    The depot-level figure is an upper bound of the fetch: a depot the cache has some of
+    (same path, same bytes) costs less. The plan's cache note says the other language's
+    files stay.
+  - *Plan and JSON.* The human line reads `download ~4.7 GiB (estimate: after checking
+    the cache)`. The `plan` event keeps `downloadSize` (the whole build, now an upper
+    bound) and gains `estimatedDownloadSize`, present only for a switch. `disk` is the
+    new language's tree and doesn't count the old language's files that stay. The
+    free-space preflight is not this figure: it runs after `prepare` from the
+    downloader's own `get_required_space`, which counts only files not yet at their path,
+    so it already ignores what the cache holds.

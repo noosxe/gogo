@@ -148,6 +148,7 @@ impl<W: Write> Renderer<W> {
                 install_dir,
                 download_size,
                 disk_size,
+                estimated_download_size,
                 language,
                 requested_language,
                 dlcs,
@@ -157,7 +158,10 @@ impl<W: Write> Renderer<W> {
                 self.line(&format!(
                     "gogo: plan {} (download {}, disk {}, {}{}{})",
                     install_dir.display(),
-                    human_size(*download_size),
+                    estimated_download_size.map_or_else(
+                        || human_size(*download_size),
+                        |e| format!("~{} (estimate: after checking the cache)", human_size(e))
+                    ),
                     human_size(*disk_size),
                     language,
                     requested_language
@@ -553,6 +557,7 @@ mod tests {
                 DepotEvent::Plan {
                     install_dir: PathBuf::from("/c/Game"),
                     download_size: 100 * MB,
+                    estimated_download_size: None,
                     disk_size: 200 * MB,
                     language: "en-US".into(),
                     requested_language: None,
@@ -835,6 +840,33 @@ mod tests {
     }
 
     /// `--json` / `--quiet` (silent mode) print no notes.
+    #[test]
+    fn plan_line_marks_a_switch_estimate() {
+        const MB: u64 = 1 << 20;
+        let plan = |est| DepotEvent::Plan {
+            install_dir: PathBuf::from("/c/Game"),
+            download_size: 100 * MB,
+            estimated_download_size: est,
+            disk_size: 200 * MB,
+            language: "pt-BR".into(),
+            requested_language: None,
+            dlcs: vec![],
+            cache: None,
+            game_files: None,
+        };
+        let line = |e: DepotEvent| {
+            let mut r = Renderer::new(Mode::Human { live: false }, Vec::new());
+            r.event(&e, secs(0.0));
+            String::from_utf8(r.into_inner()).unwrap()
+        };
+        assert!(line(plan(None)).contains("(download 100.0 MiB, disk"));
+        let est = line(plan(Some(5 * MB)));
+        assert!(
+            est.contains("download ~5.0 MiB (estimate: after checking the cache), disk"),
+            "{est}"
+        );
+    }
+
     #[test]
     fn a_silent_renderer_prints_no_notes() {
         let mut r = Renderer::new(Mode::Silent, Vec::new());
