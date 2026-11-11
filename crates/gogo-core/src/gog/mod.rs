@@ -14,6 +14,7 @@ pub mod dlc;
 pub mod dlc_filter;
 pub mod downlink;
 pub mod error;
+pub mod language;
 pub mod lay;
 pub mod library;
 pub mod materialize;

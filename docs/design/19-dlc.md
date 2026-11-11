@@ -156,7 +156,8 @@ column is made up.)
   the newest build's manifest is used and a note says so, naming the update. The table
   has a header line (`<gogid> (<lane> lane, build <id>, <language>)`), and notes go
   under it: the build is gone, the record is derived, the language is assumed, or
-  `N owned DLC not installed`. `--json` also has `installedVersion`, plus `notes`
+  `N owned DLC not installed`, the game's language isn't offered by the build, or a DLC
+  has no files in it (design 14 §11). `--json` also has `installedVersion`, plus `notes`
   when there are any. An installer-lane game is listed from the catalog alone, with
   no sizes.
 
@@ -236,7 +237,9 @@ DLC follows the game's language, always: the build's `--lang` (new, #336; defaul
 `en-US` as `gogo depot`) is recorded in `content.toml` and in `.gogo-depot.json`, and `dlc
 add` uses the recorded one. There is no `--lang` on `dlc add`: a game with base files in
 one language and DLC in another isn't a state gogo should make. Changing the language is a
-rebuild with `--lang` (gog-warp then diffs the language depots itself). On the offline
+rebuild with `--lang` (gog-warp then diffs the language depots itself). `--lang` is
+checked against the build's languages, and `de` is taken for `de-DE` when it is the only
+match (design 14 §11, #377). On the offline
 lane, the DLC installer for the game's language is chosen, else the language-neutral one,
 else an error naming the languages there are.
 

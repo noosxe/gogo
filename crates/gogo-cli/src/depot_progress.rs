@@ -149,16 +149,20 @@ impl<W: Write> Renderer<W> {
                 download_size,
                 disk_size,
                 language,
+                requested_language,
                 dlcs,
                 cache,
                 game_files,
             } => {
                 self.line(&format!(
-                    "gogo: plan {} (download {}, disk {}, {}{})",
+                    "gogo: plan {} (download {}, disk {}, {}{}{})",
                     install_dir.display(),
                     human_size(*download_size),
                     human_size(*disk_size),
                     language,
+                    requested_language
+                        .as_ref()
+                        .map_or(String::new(), |r| format!(" from `{r}`")),
                     if dlcs.is_empty() {
                         String::new()
                     } else {
@@ -551,6 +555,7 @@ mod tests {
                     download_size: 100 * MB,
                     disk_size: 200 * MB,
                     language: "en-US".into(),
+                    requested_language: None,
                     dlcs: vec![],
                     cache: None,
                     game_files: None,

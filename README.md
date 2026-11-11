@@ -159,6 +159,7 @@ gogo download --all --yes --os windows         # everything, Windows installers
 gogo download "hot brass" --extras --patches   # + bonus content and patches
 gogo depot pharaoh --dry-run                   # plan a depot (Model B) download
 gogo depot 1207658916 --all-dlcs               # game files to ~/Library/Caches (Linux: ~/.cache)
+gogo depot 1423049311 --list-languages         # the build's languages (--json); --language is checked against them
 ```
 
 Useful flags: `--dir`, `--workers`, `--parallel-files`, `--limit 4MiB/s` (rate
