@@ -65,7 +65,7 @@ pub trait TokenStore: Send + Sync {
 Backends, selected by `auth.token_store`:
 
 - **`keyring`** (default): service `"gogo"`, account = `user_id` or `"default"` before we know
-  it. **No silent fallback** (review A6, owner decision): the config decides where tokens
+  it. **No silent fallback** (review A6, decision by @noosxe): the config decides where tokens
   live, and that decision is honored exactly. If the platform secret service is unavailable
   (headless Linux without Secret Service), fail loudly — `AuthError::Store`, exit 3 — with
   the fix in the message: `gogo config set auth.token_store file`. `gogo login` probes the

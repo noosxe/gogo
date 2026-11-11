@@ -706,7 +706,7 @@ worth knowing.
 
 | # | Risk | Severity | Why (section) |
 |---|---|---|---|
-| R22 | No Vulkan in the VM: CI and agents can't check rendering; every renderer change waits for the user's host pass | medium | §5 |
+| R22 | No Vulkan in the VM: CI and agents can't check rendering; every renderer change waits for a host pass | medium | §5 |
 | R23 | (addressed by §8 item 6 once migrated) Compat data written for the Mac (`renderer = "dxmt"`, `WINEMSYNC`, Mac `tested` entries) would apply on Linux until L3/L4 get a platform dimension | medium | §4.2 item 1 |
 | R24 | New archive formats (zstd, zip) mean new crates, which have to pass `cargo deny` | low | §3.2 |
 | R25 | GE-Proton's repo has no licence GitHub can detect; the tarball carries Valve's BSD-3 plus each component's licence. Fine for downloading; check it before gogo mirrors or redistributes anything | low | §1.1 |
@@ -742,7 +742,7 @@ which settles the details this section leaves open.
 8. `doctor` on Linux (Vulkan devices, 32-bit ICDs, umu, container, NixOS hints)
 9. Scope notes: native Linux installers (separate epic #162, §8 item 10); aarch64 kept in
    the design, nothing built for it alone (§8 item 11)
-10. Testing (unit and wiremock tests; the user's host pass; no VM rendering)
+10. Testing (unit and wiremock tests; a host pass; no VM rendering)
 11. Open items, and which risks from docs/21 §9 the design addresses
 
 ## 11. Sources

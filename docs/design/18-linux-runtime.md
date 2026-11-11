@@ -5,8 +5,8 @@ epic #155 (issues in §13).
 **Research:** [docs/21](../21-linux-runtimes-and-renderers.md) (runtimes, renderers,
 per-game fixes, the eleven decisions in §8, risks R1–R30 in §9) and
 [docs/22](../22-ddraw-renderers-d7vk-vs-cnc-ddraw.md) (the `ddraw.dll` split, §6–7).
-**Decisions:** docs/21 §8, all eleven settled by the owner on 2026-11-03. The details
-they left open (O1–O9) were settled by the owner on the same day (§12.1).
+**Decisions:** docs/21 §8, all eleven settled by @noosxe on 2026-11-03. The details
+they left open (O1–O9) were settled by @noosxe on the same day (§12.1).
 **Builds on:** design 16 (layers L0–L4, `gogo-launch.toml` + `launch.conf`, setup and
 its stamp, store and GC, logs, early-exit dialog, `doctor`), design 12 (catalog and
 store), design 06 (paths). Read design 16 first: this doc only says what differs on
@@ -221,7 +221,7 @@ unit test checks every GE-Proton entry's appid against the umu entry.
   fetches on first launch). When the zipapp can't run here and a `umu-run` is on
   `PATH`, `system` is the default and the zipapp item says why. A cancelled prompt
   stores nothing. Wiring it into the `linux-app` plan is #176's.
-- **Flake: a package of its own (owner, 2026-11-04).** `nix/umu-python.nix` is
+- **Flake: a package of its own (@noosxe, 2026-11-04).** `nix/umu-python.nix` is
   `steam.buildRuntimeEnv { extraPkgs = [ python3 ]; runScript = "python3"; }` (no
   `allowUnfree`: the env holds nothing of Steam). The env is about 1.5 GiB, so the
   default package (`default` / `gogo`, every system) stays without it, unchanged from
@@ -260,7 +260,7 @@ unit test checks every GE-Proton entry's appid against the umu entry.
   Lutris or Heroic may have a game set to one by name. `prune` lists gogo's old builds
   there with their sizes and leaves deleting them to the user (R26).
 
-**Settled (owner, 2026-11-03; O1, R27) — how gogo marks its builds there, and the launch check:**
+**Settled (@noosxe, 2026-11-03; O1, R27) — how gogo marks its builds there, and the launch check:**
 
 - gogo installs into a temporary dir inside the tools dir, then renames it to
   `GE-ProtonX-Y` (the name umu and Steam show), so a half-extracted build never appears
@@ -474,7 +474,7 @@ Mac, with a Linux table:
     can't know gogo changed. Until then `doctor` warns on `renderer` and names that setup.
   - **The Mac:** the same dir. A game's own DLL gets `ddraw=n,b` only under cnc-ddraw,
     as before.
-- **DDrawCompat stays unloaded (#199, the owner's decision, both lanes).** The first real
+- **DDrawCompat stays unloaded (#199, @noosxe's decision, both lanes).** The first real
   look past the wrong dir showed the override was the bug's other half: SimCity 3000 with
   `ddraw=n,b` exits with code 9 within 2 s on a null read in DDrawCompat's init under
   GE-Proton11-12, and its README rules Wine out. On Wine's builtin it reaches the menu,
@@ -610,7 +610,7 @@ Mac, with a Linux table:
 - **The Mac lane** keeps its table, ids, messages and JSON: `Pick.d3d8` is always
   `false` there and isn't serialized when `false`.
 
-**docs/22 §7, placed (owner, 2026-11-03; O9):**
+**docs/22 §7, placed (@noosxe, 2026-11-03; O9):**
 
 | docs/22 §7 item | Placement |
 |---|---|
@@ -644,7 +644,7 @@ as `UMU_ID` in `launch.conf`. gogo never uses the online API: it lags the CSV, a
 would send the library to a third party one game at a time. The CSV is GPL-3.0: gogo
 reads it in place or downloads it into the user's cache, and never vendors it (R13).
 
-**Settled (owner, 2026-11-03; O4) — the GitHub fallback:**
+**Settled (@noosxe, 2026-11-03; O4) — the GitHub fallback:**
 
 - Follows **`main`**:
   `https://raw.githubusercontent.com/Open-Wine-Components/umu-database/main/umu-database.csv`.
@@ -781,7 +781,7 @@ protonfixes finds them installed and doesn't download (it checks the prefix's
 `winetricks.log` before running a verb: reported, to verify in the first host pass). So
 launch-time network use for verbs is limited to what the static reader couldn't see.
 
-**Settled (owner, 2026-11-03; O2, O3) — collisions and ownership:**
+**Settled (@noosxe, 2026-11-03; O2, O3) — collisions and ownership:**
 
 - **O2, R10: an L3/L4 value that a protonfix also sets.** protonfixes assigns its env
   values unconditionally after gogo's env, so the protonfix wins on a collision.
@@ -1005,7 +1005,7 @@ facts); `[platforms.macos]` / `[platforms.linux]` = per OS. OS names follow Rust
 - gogo's L4 writes (`--retarget`, persisted build flags, "Try next renderer") go into
   `[platforms.<this os>]` (`toml_edit`, comments kept).
 
-**Settled (owner, 2026-11-03; O5) — migration:**
+**Settled (@noosxe, 2026-11-03; O5) — migration:**
 
 - **L3, one PR, all 11 files.** `title`, `verbs`, `source` stay at the top; `status`,
   `notes`, `tested`, `lane` and `[lanes.installer]` move under `[platforms.macos]`
@@ -1052,7 +1052,7 @@ tested = [
 
 ## 6. Decision 6: store and state on Linux
 
-**Settled (owner, 2026-11-03; O7) — paths:**
+**Settled (@noosxe, 2026-11-03; O7) — paths:**
 
 | What | Linux | macOS (unchanged) |
 |---|---|---|
@@ -1189,7 +1189,7 @@ mount point umu finds above it, and `drive_c/GOG/<name>` is a link out of the pr
 A library elsewhere on the root filesystem (`/games`) is none of those, so umu runs (the
 launcher's and setup's) add the game's dir to `PRESSURE_VESSEL_FILESYSTEMS_RW`, and only for a
 game outside the data root. Checked against umu's source; not yet on a real library outside
-`$HOME` (the owner's drive is under it), so the host pass names it.
+`$HOME` (the user's drive is under it), so the host pass names it.
 
 **Copying.** `game/` is a per-file `FICLONE` of the source tree where the filesystem allows,
 else a full copy (APFS clone or `cp` on the Mac). The source is the depot cache
@@ -1370,7 +1370,7 @@ the record; `scripts/vm-test.sh` works on scratch state with no library, and
   (`games/<gogid>/icon.png`, from the exe's icon resource or GOG's `.ico`),
   `Categories=Game;`, `X-Gogo-Gogid=<gogid>`. `apps remove` deletes it.
 
-**Settled (owner, 2026-11-03; O7) — relative paths:** paths under the data root are written
+**Settled (@noosxe, 2026-11-03; O7) — relative paths:** paths under the data root are written
 relative to it (`PREFIX='games/1207659013/prefix'`, `GAME_DIR`, `UMU_RUN` and
 `PROTON_DIR` for store builds), as on the Mac. The launcher resolves them against
 `DATA_ROOT` if that dir exists, else `${XDG_DATA_HOME:-$HOME/.local/share}/gogo`. Absolute:
@@ -1483,7 +1483,7 @@ unchanged. Inside the container Wine's processes carry `WINEPREFIX=<prefix>/pfx/
 **Prefix isolation (design 16 decision 4).** Proton's prefix has a `steamuser` home with
 real directories, not links into `~`, and umu links `users/<user>` and `steamuser` to each
 other (relative). Setup applies decision 4's rule (no absolute links under
-`drive_c/users/`). **Settled (owner, 2026-11-04, from #176's real smoke): `z:` → `/`
+`drive_c/users/`). **Settled (@noosxe, 2026-11-04, from #176's real smoke): `z:` → `/`
 stays on Linux.** GE-Proton's `proton` script recreates it on every run, so removing it
 would hold only between runs. Setup keeps `c:` and `z:` (`linuxapp::setup::KEPT_DRIVES`)
 and still drops every other drive letter (Wine's `x:` → `$HOME`, `com1`…); `doctor`'s
@@ -1521,7 +1521,7 @@ default; L4 `env` can set it.
 
 ### 7.4 Early-exit dialog
 
-**Settled (owner, 2026-11-03; O6):** the same trigger, message and buttons as design 16 §8.2,
+**Settled (@noosxe, 2026-11-03; O6):** the same trigger, message and buttons as design 16 §8.2,
 shown with the first tool found:
 
 1. `zenity` (GNOME and most desktops): `--question` with `--extra-button`s.
@@ -1705,11 +1705,11 @@ programs (editing `launch.conf` doesn't change the stamp, so no setup ran):
 
 **Checks the tests and the smoke don't reach**: whether Proton ends a real game cleanly on
 `TERM` given longer than 5 s, and zenity's `--switch` and kdialog's labels and the menu
-entry on GNOME and KDE, which the owner doesn't use (§11.2).
+entry on GNOME and KDE, which nobody on the project runs (§11.2).
 
 ### 7.6 Per-game env and launch args (#234)
 
-The owner's Heroic pain (#231): setting env vars and launch args is awkward, and nothing
+The user's Heroic pain (#231): setting env vars and launch args is awkward, and nothing
 shows what's active. The CLI covers it now; the TUI (#11) gets a nicer editor later, and a
 catalogue of which variables exist (#233) builds on the same report.
 
@@ -1797,7 +1797,7 @@ source) with its state. §7.7's catalogue adds the "what exists" half on top of 
 **For the e2e harness and #241.** A manifest's `[override]` (`env`, `extra_args`, `wrapper`) is
 applied by the harness through these commands, with the run's scratch `GOGO_HOME`, right
 before the launch (`docs/linux-e2e.md`). So a run (or a live session) sets a game's env
-and args without touching the owner's games, and the launch goes through the same stale
+and args without touching the user's games, and the launch goes through the same stale
 stamp and setup a player's would.
 
 **Tests.** `compat`: the writer keeps comments and other tables, reports only changes, no
@@ -1811,7 +1811,7 @@ launcher key. The CLI's parse and its human output have unit tests.
 
 ### 7.7 Which switches exist for this game's build (#233)
 
-The owner's other Heroic complaint (#231): nothing tells you what exists, and it takes
+The user's other Heroic complaint (#231): nothing tells you what exists, and it takes
 hours of searching to find what works with your Proton version. gogo knows the build a game
 runs on, so it says. `linuxapp::catalogue` is one report the CLI prints and the TUI (#11)
 can browse. It reads files and runs nothing, and it makes no network calls.
@@ -2041,11 +2041,11 @@ flake's nixpkgs, not one of the harness's tools.
 | same | the game's own Quit (clicks through gamescope) | `wrapper env exited 0`, `prefix idle`, `clean_exit`, nothing left |
 | gamescope `--backend wayland` or `headless` | none | `Failed to create backend` (the sandbox has no primary DRM node): `never ran the game`, no renderer offered |
 
-So the process model above is checked against the real thing, on a backend the owner won't use.
+So the process model above is checked against the real thing, on a backend nobody on the project will use.
 Hyprland's Wayland backend is still the host pass's.
 
 **Known and not solved** (read from source and upstream's flags, not run on real hardware;
-the owner's host pass, #179 and the PR's steps):
+a host pass, #179 and the PR's steps):
 
 - **`PROTON_ENABLE_WAYLAND=1` under gamescope.** gamescope 3.16.31 unsets `WAYLAND_DISPLAY` for
   its child unless given `--expose-wayland`, so plain gamescope leaves winewayland no socket;
@@ -2081,7 +2081,7 @@ game runs, its exit code, the two new endings, doctor and catalogue with the too
 ### 7.9 Display mode: Wine's Wayland driver, and HDR (#292)
 
 Every Linux-lane game ran through Xwayland. Wine's Wayland driver, the path HDR takes on the
-owner's Hyprland desktop (Cyberpunk 2077, #232), was reachable only as `env set <gogid>
+Hyprland desktop (Cyberpunk 2077, #232), was reachable only as `env set <gogid>
 PROTON_ENABLE_WAYLAND=1`, which nothing in gogo knew about. GE-Proton11-12 acts on that switch
 only when `WAYLAND_DISPLAY` is set and says nothing when it isn't, and it keeps `DISPLAY`, so a
 fallback to X is silent on a desktop with Xwayland (#264's findings on the issue).
@@ -2141,9 +2141,9 @@ GDI games (cnc-ddraw, which gogo pins to `renderer=gdi`: Heroes 3, Pharaoh, Zeus
 games work. So when the mode is `wayland`, the entry exe is 32-bit (the install scan) and the
 renderer setup will apply is wined3d, `proton-default`, dxvk, d7vk or vkd3d-proton,
 `display` (setting or showing) and `doctor` warn and suggest `display <gogid> x11` or `--clear`.
-It's a warning, not a refusal: the setting is still written (the owner runs SimCity 2000 on
+It's a warning, not a refusal: the setting is still written (SimCity 2000 is run on
 Wayland on purpose). A failed scan warns of nothing. No exception for a game whose compat entry
-has an owner-tested `plays` row: a row doesn't record which display mode was tested (only
+has a hand-tested `plays` row: a row doesn't record which display mode was tested (only
 free-text notes), and no key is added for it.
 
 **Decided: fall back, don't refuse.** The issue offered both. A refusal would leave a player with
@@ -2160,7 +2160,7 @@ compositor reports as SDR: Hyprland's `cm_auto_hdr`, KWin at SDR brightness. gog
 names and lets the build map them, so a build that changes `DXVK_HDR`'s meaning keeps working.
 `hdr` and `monitor` apply only on the Wayland driver: HDR on Xwayland is gamescope's (§7.8), and
 `DXVK_HDR` and the rest stay plain `env` for whoever wants them.
-Whether HDR then looks right is the owner's host pass (#179): headless sway has no colour
+Whether HDR then looks right is a host pass (#179): headless sway has no colour
 management.
 
 **Visibility.** `env list` gets a `display:` line and the switches with source `display wayland,
@@ -2177,7 +2177,7 @@ same warnings.
 has `hyprctl`, wlroots `wlr-randr`, KWin neither). Catalogue and
 compat entries saying a game wants or breaks on Wayland can now be an L3 `display` key; the
 first is SimCity 4 Deluxe's `display = "x11"` (#316: its 32-bit wined3d path gets no EGL or
-Vulkan on Wine's Wayland driver, on the owner's Hyprland desktop too). The rest of #296
+Vulkan on Wine's Wayland driver, on the Hyprland desktop too). The rest of #296
 (Cyberpunk's choice, `tested` rows per mode, the catalogue naming a DB-set mode) is open. OpenGL games on the Wayland driver go through EGL (`WINE_USE_EGL=1`), which NVIDIA
 can't show in the harness (#294).
 
@@ -2346,7 +2346,7 @@ umu (the container carries its libraries), and a gogo other than the flake's `go
 
 ## 10. CLI
 
-**Settled (owner, 2026-11-03; O8):** **`gogo linux-app`**, the sibling of `gogo mac-app`, built
+**Settled (@noosxe, 2026-11-03; O8):** **`gogo linux-app`**, the sibling of `gogo mac-app`, built
 only on Linux (`#[cfg(target_os = "linux")]`), with the same shape:
 
 - `gogo linux-app <game|setup.exe|dir>`: build from the depot (default) or the offline
@@ -2473,9 +2473,9 @@ only on Linux (`#[cfg(target_os = "linux")]`), with the same shape:
 - **Depot materialization:** reflink when the temp dir supports it, copy otherwise
   (built in #175: `tests/materialize.rs`).
 
-### 11.2 What the harness checks, and what stays the owner's
+### 11.2 What the harness checks, and what stays the user's
 
-**Agents and the owner: `scripts/linux-e2e.sh`** (#201, runbook: [docs/linux-e2e.md](../linux-e2e.md)).
+**Agents and the maintainer: `scripts/linux-e2e.sh`** (#201, runbook: [docs/linux-e2e.md](../linux-e2e.md)).
 One command builds a game in a scratch home, runs it through its generated `launch.sh` in
 headless sway inside a bwrap root with its own network, PID namespace, `/tmp` and
 `XDG_RUNTIME_DIR`, drives a per-game manifest (`e2e/<gogid>.toml`), and tears everything
@@ -2484,7 +2484,7 @@ with no display output (`--gpu renderD12x`, or several with the compositor's fir
 
 | Check | How |
 |---|---|
-| The display is the headless one, before launching | own netns with only `lo`, `xwininfo -root` at the manifest's size, `HEADLESS-*` outputs only, private `/tmp`, none of the owner's game or Steam paths visible |
+| The display is the headless one, before launching | own netns with only `lo`, `xwininfo -root` at the manifest's size, `HEADLESS-*` outputs only, private `/tmp`, none of the user's game or Steam paths visible |
 | The game reaches its window | sway's tree, within the manifest's wait |
 | Correct graphics | each screenshot: not all black, and the non-black bounding box fills the window |
 | Working input | a frame changes after a click or key (`expect_change`) |
@@ -2497,17 +2497,17 @@ A pass prints a `tested_entry` for L3 `[platforms.linux]`, with
 `host = "headless-sway/<software|nvidia|radv>"`. CI runs the harness's self-test on
 a plain xterm, never a game.
 
-**Still the owner's Linux host pass** (#179), on their real session (NixOS, RTX 4090 + RADV
+**Still the user's Linux host pass** (#179), on their real session (NixOS, RTX 4090 + RADV
 iGPU), because a headless compositor can't show it:
 
 1. **Compositor quirks:** Hyprland's tiling and fullscreen behaviour (#199's picture in the
    top-left of a tiled window didn't reproduce on sway).
 2. **Display modes and VRR:** a game changing the real mode, gamescope's need, frame pacing.
 3. **Audio:** the sandbox has no sound server.
-4. **The menu entry and icon** on the owner's desktop, launched from the launcher.
+4. **The menu entry and icon** on a real desktop, launched from the launcher.
 
 These can now run through the harness once the games are downloaded (each download is the
-owner's OK), and move to the owner only where a run shows a compositor-specific result:
+@noosxe's OK), and move to a host pass only where a run shows a compositor-specific result:
 
 - **Smoke:** one D3D11 game (DXVK) and one D3D12 game (VKD3D-Proton).
 - **Fixes:** a game with a `gamefixes-gog` module (Rebel Galaxy Outlaw, `umu-910830`), and a
@@ -2517,10 +2517,10 @@ owner's OK), and move to the owner only where a run shows a compositor-specific 
 - **Multi-GPU** (R18): `--gpu A,B` gives a sandbox with both. DXVK takes the discrete GPU
   wherever the compositor is, and `DXVK_FILTER_DEVICE_NAME` moves it, but a game on the iGPU
   with the compositor on NVIDIA shows nothing (`docs/linux-e2e.md`, Graphics). The same on the
-  owner's Hyprland stays on the host pass.
+  Hyprland stays on the host pass.
 
-The early-exit dialog on GNOME (zenity) and KDE (kdialog) isn't on any list: the owner
-uses neither. The harness turns the dialog off (`GOGO_LAUNCHER_NO_DIALOG=1`).
+The early-exit dialog on GNOME (zenity) and KDE (kdialog) isn't on any list: nobody on the
+project uses either. The harness turns the dialog off (`GOGO_LAUNCHER_NO_DIALOG=1`).
 
 ## 12. Open items and risks
 
@@ -2528,15 +2528,15 @@ uses neither. The harness turns the dialog off (`GOGO_LAUNCHER_NO_DIALOG=1`).
 
 | # | Detail (docs/21 §8 item) | Status |
 |---|---|---|
-| O1 | Marking gogo's builds in a shared tools dir; the launch check (#2, R27) | **settled** (owner, 2026-11-03), §2.2 |
-| O2 | L3/L4 vs protonfix collision (#4, R10) | **settled** (owner, 2026-11-03), §4.3 |
-| O3 | L3 fixes protonfixes already covers (#4, R11) | **settled** (owner, 2026-11-03), §4.3 |
-| O4 | GitHub fallback: `main` or pinned; refresh (#5) | **settled** (owner, 2026-11-03), §4.1 |
-| O5 | Migrating the 11 L3 files (#6) | **settled** (owner, 2026-11-03), §5 |
-| O6 | Early-exit dialog on Linux (#9) | **settled** (owner, 2026-11-03), §7.4 |
-| O7 | Relative `launch.conf` paths and the Linux data root (#9) | **settled** (owner, 2026-11-03), §6, §7.1 |
-| O8 | CLI name for the Linux lane | **settled** (owner, 2026-11-03), §10 |
-| O9 | docs/22 §7 items placed | **settled** (owner, 2026-11-03), §3 |
+| O1 | Marking gogo's builds in a shared tools dir; the launch check (#2, R27) | **settled** (@noosxe, 2026-11-03), §2.2 |
+| O2 | L3/L4 vs protonfix collision (#4, R10) | **settled** (@noosxe, 2026-11-03), §4.3 |
+| O3 | L3 fixes protonfixes already covers (#4, R11) | **settled** (@noosxe, 2026-11-03), §4.3 |
+| O4 | GitHub fallback: `main` or pinned; refresh (#5) | **settled** (@noosxe, 2026-11-03), §4.1 |
+| O5 | Migrating the 11 L3 files (#6) | **settled** (@noosxe, 2026-11-03), §5 |
+| O6 | Early-exit dialog on Linux (#9) | **settled** (@noosxe, 2026-11-03), §7.4 |
+| O7 | Relative `launch.conf` paths and the Linux data root (#9) | **settled** (@noosxe, 2026-11-03), §6, §7.1 |
+| O8 | CLI name for the Linux lane | **settled** (@noosxe, 2026-11-03), §10 |
+| O9 | docs/22 §7 items placed | **settled** (@noosxe, 2026-11-03), §3 |
 
 Still open after this doc, by design: the D3D≤7 corpus check
 (docs/22 §7 item 1), and the host-pass questions in §11.2.
@@ -2584,7 +2584,7 @@ Still open after this doc, by design: the D3D≤7 corpus check
 
 ## 13. Implementation issues (epic #155)
 
-Filed 2026-11-03 after the owner agreed; each is a sub-issue of #155.
+Filed 2026-11-03 after @noosxe agreed; each is a sub-issue of #155.
 
 | # | Title | Labels | Blocked by |
 |---|---|---|---|

@@ -5,7 +5,7 @@ source = "gogo-headless"
 [platforms.linux]
 status = "boots"
 lane   = "depot"
-notes  = "headless sway: menu, Settings and Quit work on DXVK; audio and the owner's compositor not judged"
+notes  = "headless sway: menu, Settings and Quit work on DXVK; audio and a real compositor not judged"
 tested = [
   { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/software", date = 2026-11-06 },
   { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/radv", date = 2026-11-06 },

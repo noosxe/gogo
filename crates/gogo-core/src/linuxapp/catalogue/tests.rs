@@ -706,7 +706,7 @@ fn the_table_is_well_formed() {
     }
 }
 
-/// The owner's flagship (#232): DLSS, ray tracing, Reflex must stay covered,
+/// @noosxe's flagship (#232): DLSS, ray tracing, Reflex must stay covered,
 /// on the renderer and GPU they're for.
 #[test]
 fn the_flagship_switches_stay_covered() {

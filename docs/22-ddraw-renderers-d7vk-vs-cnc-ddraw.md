@@ -290,7 +290,7 @@ Findings:
    gogo keeps both, as §6.1 says, and loads only the wrapper. For these games the class
    decides nothing. **Correction (#199):** this table read the picks off the scan, which
    looks beside the exe. Setup looked in the install root, so SimCity 3000's
-   `Apps/ddraw.dll` never got its `ddraw=n,b` and the owner's first real run was on Wine's
+   `Apps/ddraw.dll` never got its `ddraw=n,b` and @noosxe's first real run was on Wine's
    builtin ddraw. Setup, `plan` and `doctor` now look beside the exe (design 18 §3), and
    that accident turned out to be the right outcome (§5.5).
 
@@ -307,9 +307,9 @@ SimCity 3000 Unlimited in a scratch build, not on real hardware):
 
 DDrawCompat v0.5.3's README rules Wine out, and `narzoul/DDrawCompat#418` was closed "Wine
 is not supported". So gogo tells it from other wrappers by its own log strings and never
-loads it; the owner chose to leave it unloaded over moving it aside for cnc-ddraw, which
+loads it; @noosxe chose to leave it unloaded over moving it aside for cnc-ddraw, which
 is the fallback if real hardware shows a problem the builtin can't get past. The tiled
-window the owner saw under Hyprland didn't reproduce headless: that is the host pass.
+window seen under Hyprland didn't reproduce headless: that is the host pass.
 
 Seen on the way (not part of the rule):
 

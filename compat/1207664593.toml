@@ -11,14 +11,14 @@ title  = "SimCity 4 Deluxe Edition"
 source = "gogo-host"
 
 # Xwayland only: on Wine's Wayland driver the 32-bit game gets no EGL or Vulkan and stops at
-# "Could not initialize Direct Draw" (#312), headless and on the owner's Hyprland desktop
+# "Could not initialize Direct Draw" (#312), headless and on the Hyprland desktop
 # alike. `x11` keeps a session-wide PROTON_ENABLE_WAYLAND from moving it there; an L4
 # `gogo linux-app display 1207664593 wayland` still wins.
 [platforms.linux]
 status  = "plays"
 lane    = "depot"
 display = "x11"
-notes   = "plays on Xwayland (the owner's Hyprland desktop, and headless sway: intros, the Timbuktu region view, Quit SimCity 4) on wined3d with GOG's support overlay; on Wine's Wayland driver it stops at \"Could not initialize Direct Draw\" on the real desktop too, not only headless (#312), hence display = x11"
+notes   = "plays on Xwayland (the Hyprland desktop, and headless sway: intros, the Timbuktu region view, Quit SimCity 4) on wined3d with GOG's support overlay; on Wine's Wayland driver it stops at \"Could not initialize Direct Draw\" on the real desktop too, not only headless (#312), hence display = x11"
 tested = [
   { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/nvidia", date = 2026-11-10 },
   { runtime = "ge-proton/GE-Proton11-12", host = "kraken-hyprland/nvidia", date = 2026-11-10 },

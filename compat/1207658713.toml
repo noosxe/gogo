@@ -11,7 +11,7 @@ source = "umu-protonfixes:gamefixes-steam/40970.py@3603ccbbc20de88c2878306acdfdd
 [platforms.linux]
 status = "plays"
 lane   = "depot"
-notes  = "owner's host pass on Hyprland (NVIDIA RTX 4090), built with gogo (depot lane, cnc-ddraw, directplay verb, entry Stronghold_Crusader_Extreme.exe): fully working on both Wine's Wayland driver and Xwayland (intro and music, mouse and edge scroll, a skirmish, resolutions and fullscreen, quit, Wayland pointer lock); headless sway agreed on both display modes, with the first ~35 s ignoring input; multiplayer not tried"
+notes  = "host pass on Hyprland (NVIDIA RTX 4090), built with gogo (depot lane, cnc-ddraw, directplay verb, entry Stronghold_Crusader_Extreme.exe): fully working on both Wine's Wayland driver and Xwayland (intro and music, mouse and edge scroll, a skirmish, resolutions and fullscreen, quit, Wayland pointer lock); headless sway agreed on both display modes, with the first ~35 s ignoring input; multiplayer not tried"
 tested = [
   { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/software", date = 2026-11-10 },
   { runtime = "ge-proton/GE-Proton11-12", host = "kraken-hyprland/nvidia", date = 2026-11-11 },

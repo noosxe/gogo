@@ -1,17 +1,17 @@
 # Launch-testing Linux games in headless sway
 
-`scripts/linux-e2e.sh` is the one way agents launch a `gogo linux-app` game, and the owner's
+`scripts/linux-e2e.sh` is the one way agents launch a `gogo linux-app` game, and the
 quick way to check one. One command builds the game in a scratch home, runs it through its
 generated `launch.sh` in a headless compositor inside a sandbox, drives a per-game manifest,
 checks the frames, tears everything down and prints a JSON summary. Every run is set up the
 same way: the tools are pinned in the flake (`.#linux-e2e-tools`, the run's whole `PATH`).
 
-What it can't show stays the owner's: [What it doesn't cover](#what-it-doesnt-cover).
+What it can't show stays a host pass: [What it doesn't cover](#what-it-doesnt-cover).
 
 ## Policy for agents
 
 - Launch a real game **only through this script** (`AGENTS.md`).
-- **Each new game download needs the owner's OK.** A game is new when
+- **Each new game download needs @noosxe's OK.** A game is new when
   `target/linux-e2e/cache/depot/<gogid>` isn't there.
 - Screenshots stay in `target/`, and never enter git: they show copyrighted game art.
 
@@ -132,7 +132,7 @@ the game isn't started.
 | `isolation_tmp` | `/tmp` is a tmpfs with only the X server's files (none in Wayland mode) |
 | `isolation_runtime_dir` | `XDG_RUNTIME_DIR` is on the sandbox's own `/run` |
 | `isolation_env` | no `HYPRLAND_*` |
-| `isolation_paths` | the owner's game dirs, menu entries, Steam, Downloads, session bus and sound sockets aren't visible |
+| `isolation_paths` | the user's game dirs, menu entries, Steam, Downloads, session bus and sound sockets aren't visible |
 | `isolation_display` | `xwininfo -root` answers with the manifest's size, on this `/tmp`'s socket, and this sandbox's Xwayland serves that number, `:0`. In Wayland mode: the only listening Wayland socket is our sway's, in `XDG_RUNTIME_DIR`, and its one output has the manifest's size |
 | `isolation_no_x` | Wayland mode only: no Xwayland process, no listening X socket (filesystem or abstract), nothing in `/tmp/.X11-unix`, and no `DISPLAY` in the game's environment |
 | `isolation_headless` | sway's outputs are all `HEADLESS-*` |
@@ -193,7 +193,7 @@ as a `flock` on fd 9, which no sandbox inherits.
 lane (design 18 §10), instead of the depot. Inno Setup runs silently under umu in a staged
 prefix (`GAMEID=umu-0`, `/DIR=C:\GOG\<slug>`), and the game's id, entry point and renderer
 come from the tree it installed, as they do for a depot build. It uses no game download, so
-there's no `cache/depot/<gogid>` and no owner's OK to ask for, but it can only build the game
+there's no `cache/depot/<gogid>` and no @noosxe's OK to ask for, but it can only build the game
 the manifest names: another id fails the build.
 
 - **The folder is read-only, in the build only.** The `.exe`'s folder is bind-mounted at
@@ -259,7 +259,7 @@ scripts/linux-e2e.sh run 2086050016 --reuse-install
 - **Checked before every copy:** the bases' dir resolves to a
   `target/linux-e2e/cache/installed`, and the base and its `meta.json` are the harness's
   own, not links, and for this key and path; every entry in it is ours; and
-  no link leads from the run's path into the owner's home or `target/linux-e2e/` outside
+  no link leads from the run's path into the user's home or `target/linux-e2e/` outside
   the run (`tree-check` in the helper). A failure is a harness error (exit 3), and nothing
   is copied. A build that leaves such a link isn't saved. A base is only read, and
   deleting a run's scratch removes its copy only: `rm` doesn't follow links. The isolation
@@ -332,7 +332,7 @@ the slow part of a reused start or a restore (below). The gain is real for trees
 small files, such as a Wine prefix: the self-test times `copy`, `reflink` and `snapshot`
 on 20 000 small files and logs it.
 
-Measured on the owner's machine (btrfs, zstd, NVMe, kernel 7.2; 2026-11-08). The times
+Measured on a dev machine (btrfs, zstd, NVMe, kernel 7.2; 2026-11-08). The times
 are for the copy alone, then for deleting it (`rm -rf`), which a restore leaves to
 teardown in snapshot mode:
 
@@ -876,7 +876,7 @@ What a real desktop does stays on the host pass.
 
 `--display wayland` on `run` or `live start`, or `display = "wayland"` in a manifest's
 `[window]` (#264), runs the game phase with no X server at all. It's the path Wine's Wayland
-driver takes on the owner's desktop, and the one HDR needs (Cyberpunk 2077, #232). The default
+driver takes on a real desktop, and the one HDR needs (Cyberpunk 2077, #232). The default
 stays Xwayland, and the build phase always has Xwayland: it runs an installer, not the game.
 
 - **Sway starts with `xwayland disable`,** and the game's environment has no `DISPLAY`. So a
@@ -890,7 +890,7 @@ stays Xwayland, and the build phase always has Xwayland: it runs an installer, n
   `PROTON_ENABLE_WAYLAND` itself: the launcher checks for sway's socket and sets it, and
   `gogo_display` fails when the run log's `# display:` header doesn't say `wayland`. With no
   mode the game would try X, which `no_x_fallback` and the missing window catch. Nothing is
-  written to the installed base or the owner's games. GE-Proton11-12 (gogo's pin)
+  written to the installed base or any installed games. GE-Proton11-12 (gogo's pin)
   ships `winewayland.drv` for both arches, and its `proton` script turns the switch into
   `WINE_GRAPHICS_DRIVER=wayland`, `WINE_USE_EGL=1`, `WINE_DISABLE_FULLSCREEN_HACK=1` and
   `PROTON_USE_XALIA=0`, only when `WAYLAND_DISPLAY` is set. It guesses the primary monitor with
@@ -935,13 +935,13 @@ Generation and Ray Tracing offered), Quit, the relaunch on the same disk, and Qu
 X. Wine logs that sway lacks `zwp_text_input_manager_v3` and `xdg_toplevel_icon_manager_v1`:
 input methods and window icons, nothing a run needs.
 
-**Not covered here,** and the owner's host pass (#179): HDR (a headless output has no colour
+**Not covered here,** and a host pass (#179): HDR (a headless output has no colour
 management and no HDR metadata, so `DXVK_HDR` and Wine's HDR reporting have nothing to find),
 VRR, fractional scaling, several monitors, the cursor image, and Hyprland itself. gogo's own
 per-game switch (#292) is what this mode drives; its HDR sub-option (`[override] hdr`) is
 written and shows in the header, but there is nothing headless for it to find. `[override] monitor`
 (#295) is written the same way (`HEADLESS-1` is the only output there): the header shows it, and
-which of several monitors the game opens on is the owner's host pass.
+which of several monitors the game opens on is a host pass.
 
 ## Manifests
 
@@ -1132,7 +1132,7 @@ A pass prints `tested_entry`. Add it to the game's L3 file in `compat/<gogid>.to
 ```toml
 [platforms.linux]
 status = "boots"
-notes = "headless sway: menu, Preferences and Exit work; audio and the owner's compositor not judged"
+notes = "headless sway: menu, Preferences and Exit work; audio and a real compositor not judged"
 tested = [
   { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/software", date = 2026-11-06 },
   { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/nvidia", date = 2026-11-06 },
@@ -1144,7 +1144,7 @@ needs someone to have played it.
 
 ## What it doesn't cover
 
-These stay in the owner's host pass (#179, design 18 §11.2), and agents put the steps in the PR:
+These stay in a host pass (#179, design 18 §11.2), and agents put the steps in the PR:
 
 - **Compositor quirks**, such as the picture in the top-left of a tiled window on Hyprland
   (#199): that never reproduced on sway, so a pass here doesn't rule it out.
@@ -1154,7 +1154,7 @@ These stay in the owner's host pass (#179, design 18 §11.2), and agents put the
   a device, not that it sounds right.
 - **The menu entry and its icon** on a real desktop. The harness runs `launch.sh` directly,
   and writes its `.desktop` file into scratch.
-- **The early-exit dialog.** It's off here, and GNOME and KDE aren't anything the owner runs.
+- **The early-exit dialog.** It's off here, and GNOME and KDE aren't anything the maintainer runs.
 - **HDR and the rest of a real Wayland desktop.** [Wayland mode](#wayland-mode) proves the
   game runs on Wine's Wayland driver with no X server; a headless output has no HDR, no
   colour management and one scale.

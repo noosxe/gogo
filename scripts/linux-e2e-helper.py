@@ -4503,7 +4503,7 @@ def tree_problems(tree, run, guards, uid):
 
     The tree is what the build left in `run` (its `gogo`, `home`, `xdg`), and a
     reused run sees it at that same path. Every entry must be `uid`'s, and no
-    symlink may lead, from `run`, into a guard (the owner's home, the harness's
+    symlink may lead, from `run`, into a guard (the user's home, the harness's
     root) but inside `run`: such a link would let a run write into the base
     or out of scratch. Links elsewhere (`z:` to `/`, the Nix store) see only
     the sandbox's whitelist, as in a fresh run. Empty: it may be reused.

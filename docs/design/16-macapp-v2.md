@@ -4,7 +4,7 @@
 notes in *italics* say how); the rest is tracked under epic #50 (sub-epics #86–#93).
 **Research:** docs/19 (strategy, §5 test matrix, §6 recommendation, §7 macOS 28 risk);
 #94 (where DXMT's `winemetal.so` can live, tested 2026-10-23).
-**Decisions:** issue #61, settled by the owner on 2026-10-23 (1, 2, 4–7) and by #94 (3).
+**Decisions:** issue #61, settled by @noosxe on 2026-10-23 (1, 2, 4–7) and by #94 (3).
 **Amends:** design 10 §2, §3, §10 · design 11 §1 · design 12 D3, §4, §5 · design 15 §3 ·
 docs/18 §1. Each of those carries an "Amended 2026-10-23 (design 16)" note.
 **Scope:** the bundle model, the on-disk layout, and the config contract between gogo and

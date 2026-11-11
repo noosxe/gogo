@@ -1,5 +1,5 @@
 # Cyberpunk 2077 (64-bit, D3D12): gogo's Linux lane picks VKD3D-Proton by
-# default (#228). Built from the owner's offline installer, not the depot:
+# default (#228). Built from the user's offline installer, not the depot:
 #
 #   scripts/linux-e2e.sh run 1423049311 --installer <setup_cyberpunk_2077_….exe> \
 #       --gpu renderD129 --expect-gpu renderD129
@@ -7,7 +7,7 @@
 # First launch, every run (scratch is fresh): warnings, then the intro video
 # with "Press space to continue", CD Projekt Red's user agreement (the video
 # ends in it by itself, in about 90 s), then the main menu under an analytics
-# prompt. The owner OKs accepting the agreement in the harness's throw-away
+# prompt. @noosxe OKs accepting the agreement in the harness's throw-away
 # prefix (#238); analytics is declined. Then Settings -> Graphics, read only,
 # for DLSS, Frame Generation, Reflex and ray tracing (#232), Quit Game, and a
 # second launch on the disk that remembers all that: intro, menu, Quit Game.
@@ -102,7 +102,7 @@ screenshot = "agreement-end"
 [[step]]
 expect_change = { from = "agreement", to = "agreement-end", min = 5 }
 
-# Return is Accept (the owner's OK, #238), pressed once: a second one could land
+# Return is Accept (@noosxe's OK, #238), pressed once: a second one could land
 # on the analytics prompt, which is always declined. The menu comes up under the
 # prompt, with its red buttons where the agreement has white text.
 
