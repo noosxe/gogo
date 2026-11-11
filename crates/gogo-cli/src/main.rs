@@ -2112,6 +2112,9 @@ async fn resolve_game_source(
         _ => Vec::new(),
     };
     let cached_tree = find_game_tree(&root);
+    if dlc.is_some() && cached_tree.is_some() {
+        upgrade_cache_record(session, game.id, &title, &root, &dlc_plan.opts.language).await;
+    }
     let mut facts = lane::GameFacts {
         cache_gap: cached_tree
             .as_ref()
@@ -2530,6 +2533,65 @@ fn pick_dlc(cands: &[u64], infos: &[gogo::gog::dlc::DlcInfo]) -> Result<Vec<u64>
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 /// The install tree inside a depot cache root: a single child directory, or
 /// the child carrying a `goggame-*.info` (DLC-capable roots may hold more).
+/// Bring a depot cache record from before DLC and language tracking up to date
+/// (#374, design 19 §3.3), from its build's depot manifests, so a cache that holds
+/// what a build wants isn't hashed. Best effort: when it can't be decided safely
+/// (or GOG can't be reached), the record stays and the build checks the cache as
+/// before.
+async fn upgrade_cache_record(
+    session: &gog_warp::Core,
+    product_id: u64,
+    title: &str,
+    root: &std::path::Path,
+    language: &str,
+) {
+    use gogo::gog::{cache_upgrade, depot};
+    let Some(rec) = depot::read_record(root) else {
+        return;
+    };
+    if !depot::record_is_old(root, &rec.build_id) {
+        return;
+    }
+    let why = match depot::installed_build(session, product_id, Some(&rec.build_id)).await {
+        Ok(depot::InstalledBuild {
+            listed: Some((_, _, manifest)),
+            ..
+        }) => match cache_upgrade::check(
+            session.reqwest_client(),
+            root,
+            &manifest,
+            &rec.build_id,
+            language,
+        )
+        .await
+        {
+            None => return,
+            Some(Ok(up)) => match cache_upgrade::apply(root, &product_id.to_string(), &up) {
+                Ok(true) => {
+                    eprintln!(
+                        "gogo: the depot cache's record for {title} is brought up to date \
+                         ({})",
+                        up.summary()
+                    );
+                    for n in &up.notes {
+                        eprintln!("gogo: depot cache: {n}");
+                    }
+                    return;
+                }
+                Ok(false) => "the cache changed while it was checked".to_string(),
+                Err(e) => format!("the record couldn't be written: {e}"),
+            },
+            Some(Err(why)) => why,
+        },
+        Ok(_) => format!("GOG no longer lists build {}", rec.build_id),
+        Err(e) => format!("its build couldn't be looked up: {e}"),
+    };
+    eprintln!(
+        "gogo: the depot cache's record for {title} predates DLC tracking and can't be \
+         brought up to date: {why}"
+    );
+}
+
 fn find_game_tree(root: &std::path::Path) -> Option<std::path::PathBuf> {
     let mut dirs: Vec<std::path::PathBuf> = std::fs::read_dir(root)
         .ok()?

@@ -732,11 +732,50 @@ pub fn write_record(
     save_record(root, &rec)
 }
 
+/// Durably: a crash leaves the old record or the new one, never a torn one, and
+/// the new one only once the files it names are on disk (callers write it last).
 fn save_record(root: &Path, rec: &Record) -> std::io::Result<()> {
-    let text = serde_json::to_string_pretty(rec).map_err(std::io::Error::other)?;
-    let tmp = root.join(format!("{RECORD}.tmp"));
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, root.join(RECORD))
+    super::lay::write_json_durably(&root.join(RECORD), rec)
+}
+
+/// Whether cache root `root`'s record is for build `build_id` and predates DLC and
+/// language tracking (no `language` or no `dlcs`): one [`upgrade_record`] can bring
+/// up to date.
+pub fn record_is_old(root: &Path, build_id: &str) -> bool {
+    load_record(root)
+        .is_some_and(|r| r.build_id == build_id && (r.language.is_none() || r.dlcs.is_none()))
+}
+
+/// Bring an older record of build `build_id` up to date (#374): `language`, the DLC
+/// it holds and the products' file lists, its `files` as they were (the tree isn't
+/// touched). Only while it is still that old record, else `Ok(false)` and nothing
+/// changes. The caller has checked every file the new record claims.
+pub(crate) fn upgrade_record(
+    root: &Path,
+    build_id: &str,
+    language: &str,
+    dlcs: &[String],
+    products: &super::dlc_filter::ProductFiles,
+) -> std::io::Result<bool> {
+    let Some(mut rec) = load_record(root).filter(|r| {
+        r.build_id == build_id
+            && (r.language.is_none() || r.dlcs.is_none())
+            && r.language
+                .as_deref()
+                .is_none_or(|l| l.eq_ignore_ascii_case(language))
+    }) else {
+        return Ok(false);
+    };
+    let mut held = dlcs.to_vec();
+    held.sort();
+    held.dedup();
+    let mut all = rec.products.take().unwrap_or_default();
+    all.extend(products.iter().map(|(k, v)| (k.clone(), v.clone())));
+    rec.language = Some(language.to_string());
+    rec.dlcs = Some(held);
+    rec.products = Some(all);
+    save_record(root, &rec)?;
+    Ok(true)
 }
 
 /// The per-product file lists cache root `root`'s record keeps, when it is for

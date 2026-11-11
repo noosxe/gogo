@@ -7,7 +7,8 @@
 //!
 //! An add: the game's lock, any interrupted add settled first ([`recover`]); the
 //! wanted DLC fetched for the **installed** build into the depot cache (when its
-//! record is that build and language, and holds the installed DLC) or into
+//! record is that build and language, or an older record of that build is brought
+//! up to date first, #374), where it stays, or into
 //! `games/<gogid>/.dlc-staging/`, except a DLC the cache already holds whole, which
 //! isn't fetched again (#381); the files that run wrote, and the held DLC's files
 //! from their recorded lists, laid onto `game/` under a
@@ -20,6 +21,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::engine::events::ProgressEvent;
+use crate::gog::cache_upgrade::{self, OnDisk, Upgrade};
 use crate::gog::content::{self, Content, DlcRow};
 use crate::gog::depot::{self, BuildMatch, DepotError, DownloadInputs, PlanDlc, Snapshot};
 use crate::gog::dlc::DlcInfo;
@@ -286,7 +288,8 @@ pub fn refusal(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Source {
-    /// The game's depot cache: its record is this build and language.
+    /// The game's depot cache: its record is this build and language. The DLC
+    /// stays in it.
     Cache,
     /// `games/<gogid>/.dlc-staging/`.
     Staging,
@@ -341,6 +344,11 @@ pub struct AddPlan {
     pub already: Vec<u64>,
     pub source: Source,
     pub source_root: PathBuf,
+    /// What becomes of the depot cache: whether the DLC is kept in it (#374).
+    pub depot_cache: CacheFate,
+    /// The cache record upgrade [`add`] writes before anything else (#374).
+    #[serde(skip)]
+    pub upgrade: Option<Upgrade>,
     /// The DLC whose files the depot cache already holds whole (its record lists
     /// them, keeps their file lists, and every listed file is there): laid from the
     /// cache, not downloaded (#381).
@@ -406,6 +414,9 @@ pub struct PlanInput<'a> {
     pub infos: &'a [DlcInfo],
     /// Resolved names (owned, in the build); installed ones become `already`.
     pub wanted: &'a [u64],
+    /// What an older cache record of the installed build would become
+    /// ([`cache_upgrade::check`]); `None` when there's none to bring up to date.
+    pub cache_upgrade: Option<&'a Result<Upgrade, String>>,
 }
 
 /// The depot default language, for a game with none recorded.
@@ -433,12 +444,24 @@ pub fn plan_add(input: &PlanInput<'_>) -> AddPlan {
             }
         })
         .collect();
-    let (source, source_root) = pick_source(game, &build_id, &language, &input.tree_name);
+    let picked = pick_source(
+        game,
+        &build_id,
+        &language,
+        &input.tree_name,
+        input.cache_upgrade,
+    );
+    let (source, source_root) = (picked.source, picked.root.clone());
     let cached_files: Vec<(u64, Vec<String>)> = if source == Source::Cache {
         dlcs.iter()
             .filter(|d| d.download_size > 0)
             .filter_map(|d| d.id.parse::<u64>().ok())
-            .filter_map(|id| Some((id, cached_copy(&source_root, &build_id, id)?)))
+            .filter_map(|id| {
+                Some((
+                    id,
+                    cached_copy(&source_root, &picked.held, &picked.products, id)?,
+                ))
+            })
             .collect()
     } else {
         Vec::new()
@@ -476,9 +499,19 @@ pub fn plan_add(input: &PlanInput<'_>) -> AddPlan {
                 .map(|p| p.values.len()),
         })
         .collect();
-    // The DLC the cache holds count as "there" to the downloader's diff, so a mixed
-    // add fetches only the others.
-    let mut there = game.installed_strings();
+    // The diff is told what the source root holds: for staging, what the game has
+    // (only the new DLC's files are fetched); for the cache, the installed DLC it
+    // holds (one staged in an earlier add isn't in it, so a file the new DLC shares
+    // with that one is fetched into the cache too, #374), plus the DLC it holds
+    // that are added now, so a mixed add fetches only the others.
+    let mut there: Vec<String> = match source {
+        Source::Staging => game.installed_strings(),
+        Source::Cache => game
+            .installed_strings()
+            .into_iter()
+            .filter(|d| picked.held.contains(d))
+            .collect(),
+    };
     there.extend(from_cache.iter().map(u64::to_string));
     let wanted: Vec<String> = adding
         .iter()
@@ -501,6 +534,8 @@ pub fn plan_add(input: &PlanInput<'_>) -> AddPlan {
         already,
         source,
         source_root,
+        depot_cache: picked.fate,
+        upgrade: picked.upgrade,
         tree_name: input.tree_name.clone(),
         game_files: method.to_string(),
         game_dir: game.dirs.game.clone(),
@@ -525,104 +560,154 @@ fn script_dirs(tree: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-/// The cache when its record is the installed build and language, holds every
-/// installed DLC and lost no file, and its tree is there; else the staging dir. A
-/// download that stopped keeps its source, so a rerun resumes into it.
-fn pick_source(game: &Game, build_id: &str, language: &str, tree_name: &str) -> (Source, PathBuf) {
+/// What becomes of the depot cache in an add.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "action", rename_all = "camelCase")]
+pub enum CacheFate {
+    /// The cache is the source: the DLC is fetched into it (or is there already)
+    /// and stays. `upgraded`: its record from before DLC tracking is brought up to
+    /// date first (#374), with this summary.
+    #[serde(rename_all = "camelCase")]
+    Kept {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        upgraded: Option<String>,
+    },
+    /// There's no depot cache of the game: the DLC is staged and isn't kept in one.
+    None,
+    /// There's a cache, but it can't take the DLC (why).
+    NotKept { reason: String },
+}
+
+/// Where an add fetches to, and what the cache holds as the plan sees it.
+struct Picked {
+    source: Source,
+    root: PathBuf,
+    fate: CacheFate,
+    /// The DLC the cache holds (when it's the source).
+    held: Vec<String>,
+    /// Its per-product file lists (when it's the source).
+    products: crate::gog::dlc_filter::ProductFiles,
+    /// The record upgrade [`add`] writes first.
+    upgrade: Option<Upgrade>,
+}
+
+/// The cache when its record is the installed build and language (or an older
+/// record of that build that `upgrade` brings up to date, #374), has lost no file,
+/// and its tree is there; else the staging dir. The cache needn't hold every
+/// installed DLC: one added while it couldn't be the source is left to the game
+/// dir, and the diff is told only what the cache holds (§3.2). A download that
+/// stopped keeps its source, so a rerun resumes into it.
+fn pick_source(
+    game: &Game,
+    build_id: &str,
+    language: &str,
+    tree_name: &str,
+    upgrade: Option<&Result<Upgrade, String>>,
+) -> Picked {
     let staging = game.dirs.root.join(lay::STAGING);
+    let staged = |fate| Picked {
+        source: Source::Staging,
+        root: staging.clone(),
+        fate,
+        held: Vec::new(),
+        products: Default::default(),
+        upgrade: None,
+    };
+    let current = |cache: &Path| {
+        let rec = depot::read_record(cache);
+        Picked {
+            source: Source::Cache,
+            root: cache.to_path_buf(),
+            fate: CacheFate::Kept { upgraded: None },
+            held: rec.and_then(|r| r.dlcs).unwrap_or_default(),
+            products: depot::record_products(cache, build_id).unwrap_or_default(),
+            upgrade: None,
+        }
+    };
     if let Some(rec) = read_download(&game.dirs.root) {
         return if rec.source == staging {
-            (Source::Staging, staging)
+            staged(CacheFate::NotKept {
+                reason: "an earlier add that stopped staged it".into(),
+            })
         } else {
-            (Source::Cache, rec.source)
+            current(&rec.source)
         };
     }
-    if let Some(cache) = &game.cache_root
-        && !build_id.is_empty()
-        && cache.join(tree_name).is_dir()
-        && depot::check_cache(
-            cache,
-            &depot::CacheWant {
-                build_id: Some(build_id),
-                language: Some(language),
-                dlcs: &game.installed_strings(),
-            },
-        ) == depot::CacheCheck::Complete
-        && depot::read_record(cache).is_some_and(|r| r.language.is_some() && r.dlcs.is_some())
-    {
-        return (Source::Cache, cache.clone());
+    let Some(cache) = game
+        .cache_root
+        .as_ref()
+        .filter(|c| !build_id.is_empty() && c.join(tree_name).is_dir())
+    else {
+        return staged(CacheFate::None);
+    };
+    let not_kept = |reason: String| staged(CacheFate::NotKept { reason });
+    let Some(rec) = depot::read_record(cache) else {
+        return not_kept("the depot cache has no record of a finished download".into());
+    };
+    if rec.build_id != build_id {
+        return not_kept(format!("the depot cache holds build {}", rec.build_id));
     }
-    (Source::Staging, staging)
+    if let depot::CacheCheck::Missing { count, .. } = depot::check_cache(
+        cache,
+        &depot::CacheWant {
+            build_id: Some(build_id),
+            ..Default::default()
+        },
+    ) {
+        return not_kept(format!(
+            "the depot cache lost {count} file(s) its record names"
+        ));
+    }
+    match (&rec.language, &rec.dlcs) {
+        (Some(l), Some(_)) if l.eq_ignore_ascii_case(language) => current(cache),
+        (Some(l), Some(_)) => not_kept(format!("the depot cache is in {l}")),
+        _ => match upgrade {
+            Some(Ok(u)) if u.build_id == build_id && u.language.eq_ignore_ascii_case(language) => {
+                Picked {
+                    source: Source::Cache,
+                    root: cache.clone(),
+                    fate: CacheFate::Kept {
+                        upgraded: Some(u.summary()),
+                    },
+                    held: u.dlcs.clone(),
+                    products: u.products.clone(),
+                    upgrade: Some(u.clone()),
+                }
+            }
+            Some(Err(why)) => not_kept(format!(
+                "the depot cache's record predates DLC tracking and can't be brought up \
+                 to date: {why}"
+            )),
+            _ => not_kept("the depot cache's record predates DLC tracking".into()),
+        },
+    }
 }
 
 /// DLC `id`'s files in cache root `root`, as paths relative to it spelled as on
-/// disk, when the cache already holds them whole (#381): its record is build
-/// `build_id`, lists `id` in `dlcs` and keeps `id`'s file list in `products`, and
-/// every listed path is there as a file or link. `None` otherwise, and the add
-/// downloads it.
+/// disk, when the cache already holds them whole (#381): it lists `id` among the
+/// DLC it holds (`held`, from its record or the record's upgrade), keeps `id`'s
+/// file list in `products`, and every listed path is there as a file or link.
+/// `None` otherwise, and the add downloads it.
 ///
 /// Existence is the check, not a hash and not a size (the lists keep paths only):
 /// gog-warp writes a file as `<name>.download` and renames it once it's whole, so a
 /// listed path under its own name is a finished file. That's the same trust a build
 /// gives the cache tree.
-fn cached_copy(root: &Path, build_id: &str, id: u64) -> Option<Vec<String>> {
-    let rec = depot::read_record(root)?;
-    if rec.build_id != build_id || !rec.dlcs?.contains(&id.to_string()) {
+fn cached_copy(
+    root: &Path,
+    held: &[String],
+    products: &crate::gog::dlc_filter::ProductFiles,
+    id: u64,
+) -> Option<Vec<String>> {
+    if !held.contains(&id.to_string()) {
         return None;
     }
-    let list = depot::record_products(root, build_id)?.remove(&id.to_string())?;
+    let list = products.get(&id.to_string())?;
     if list.is_empty() {
         return None;
     }
-    let mut dirs = DirListing::default();
-    list.iter().map(|p| dirs.on_disk(root, p)).collect()
-}
-
-/// Case-insensitive lookups under a cache root, each dir read once.
-#[derive(Default)]
-struct DirListing(std::collections::HashMap<PathBuf, Option<Vec<(String, bool)>>>);
-
-impl DirListing {
-    /// `rel` as spelled on disk under `root`: each component as is when it's there,
-    /// else a case-insensitive match (a dir for all but the last). Manifests
-    /// are case-insensitive, and gog-warp writes a path shared between depots once,
-    /// as the first one spells it. `None` when it isn't there, or is a dir.
-    fn on_disk(&mut self, root: &Path, rel: &str) -> Option<String> {
-        let parts: Vec<&str> = rel.split('/').filter(|p| !p.is_empty()).collect();
-        let mut at = root.to_path_buf();
-        let mut out: Vec<String> = Vec::new();
-        for (i, comp) in parts.iter().enumerate() {
-            let last = i + 1 == parts.len();
-            let fits = |m: &std::fs::Metadata| last != m.is_dir();
-            let name = match at.join(comp).symlink_metadata() {
-                Ok(m) if fits(&m) => comp.to_string(),
-                _ => {
-                    let lower = comp.to_lowercase();
-                    let entries = self.0.entry(at.clone()).or_insert_with(|| {
-                        let rd = std::fs::read_dir(&at).ok()?;
-                        Some(
-                            rd.flatten()
-                                .filter_map(|e| {
-                                    let n = e.file_name().into_string().ok()?;
-                                    let dir = e.file_type().ok()?.is_dir();
-                                    Some((n, dir))
-                                })
-                                .collect(),
-                        )
-                    });
-                    entries
-                        .as_ref()?
-                        .iter()
-                        .find(|(n, dir)| last != *dir && n.to_lowercase() == lower)?
-                        .0
-                        .clone()
-                }
-            };
-            at.push(&name);
-            out.push(name);
-        }
-        (!out.is_empty()).then(|| out.join("/"))
-    }
+    let mut dirs = OnDisk::default();
+    list.iter().map(|p| dirs.find(root, p)).collect()
 }
 
 /// The plan's lines (human).
@@ -729,6 +814,9 @@ pub fn plan_lines(p: &AddPlan) -> Vec<String> {
                 String::new()
             }
         ));
+        if let Some(l) = cache_line(p) {
+            out.push(l);
+        }
     }
     for s in &p.scripts {
         if let Some(n) = s.registry_values {
@@ -739,6 +827,31 @@ pub fn plan_lines(p: &AddPlan) -> Vec<String> {
         }
     }
     out
+}
+
+/// The plan's word on the depot cache (#374): whether the DLC is kept in it, and a
+/// record brought up to date. Nothing to say when nothing is downloaded.
+fn cache_line(p: &AddPlan) -> Option<String> {
+    let rebuild = "a rebuild with it downloads it again";
+    match &p.depot_cache {
+        CacheFate::Kept { upgraded: None } if p.downloads() => {
+            Some("depot cache: the DLC is kept in it too".into())
+        }
+        CacheFate::Kept { upgraded: None } => None,
+        CacheFate::Kept {
+            upgraded: Some(summary),
+        } => Some(format!(
+            "depot cache: its record is brought up to date ({summary}), and the DLC is \
+             kept in it too"
+        )),
+        CacheFate::None if p.downloads() => Some(format!(
+            "depot cache: none, so the DLC isn't kept in one ({rebuild})"
+        )),
+        CacheFate::NotKept { reason } if p.downloads() => Some(format!(
+            "depot cache: {reason}, so the DLC isn't kept in it ({rebuild})"
+        )),
+        _ => None,
+    }
 }
 
 // — the add (§3.2, §3.4) —
@@ -995,6 +1108,19 @@ where
     game::refuse_running(&game.gogid, &root, &game.dirs.prefix)?;
     let recovered = recover_locked(game, opts.reflink, emit)?;
     let mut warnings = Vec::new();
+    // An older cache record is brought up to date before anything is fetched into
+    // the cache (#374): only the record is written, last and durably, and only
+    // while every file it will claim is there. A cache that changed since the plan
+    // isn't used.
+    if let Some(up) = &plan.upgrade {
+        let base = game.gogid.clone();
+        if !cache_upgrade::apply(&plan.source_root, &base, up)? {
+            return Err(AddError::Game(MacAppError::Apps(format!(
+                "the depot cache ({}) changed since the plan; run the add again",
+                plan.source_root.display()
+            ))));
+        }
+    }
     // What a recovery already recorded isn't added again.
     let have = game.installed();
     let adding: Vec<AddingDlc> = plan
@@ -1315,6 +1441,7 @@ mod tests {
             tree_name: "Cyberpunk 2077".into(),
             infos: &infos,
             wanted: &[1597316373, 6],
+            cache_upgrade: None,
         });
         assert_eq!(p.already, [1597316373]);
         assert_eq!(p.ids(), [6]);
