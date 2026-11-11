@@ -1,0 +1,19 @@
+# SimCity 3000 Unlimited (32-bit, a 2D DirectDraw game). It runs on Wine's builtin ddraw
+# on wined3d: the game's own DDrawCompat in Apps/ is left unloaded on purpose, since it
+# ends the game under Wine (#199, docs/22 §5.4-5.5). X11 works fine. On Wine's Wayland
+# driver nothing is drawn while the process runs, and the fullscreen surface even hides
+# the desktop's bar on that workspace (a 32-bit GPU game, #326), hence the x11 pin.
+# e2e/2086050016.toml.
+title  = "SimCity 3000 Unlimited"
+source = "gogo-host"
+
+# Xwayland only: `x11` keeps a session-wide PROTON_ENABLE_WAYLAND from moving the game to
+# Wine's Wayland driver; an L4 `gogo linux-app display 2086050016 wayland` still wins.
+[platforms.linux]
+status  = "plays"
+lane    = "depot"
+display = "x11"
+notes   = "owner's host pass on Hyprland (NVIDIA RTX 4090): plays fine on Xwayland, on Wine's builtin ddraw (wined3d) with the game's DDrawCompat left unloaded (#199); on Wine's Wayland driver nothing is drawn while the process runs, and the fullscreen surface even hides the desktop's bar on that workspace (32-bit GPU game, #326), so wayland is a no-go for this game, hence display = x11"
+tested = [
+  { runtime = "ge-proton/GE-Proton11-12", host = "kraken-hyprland/nvidia", date = 2026-11-11 },
+]
