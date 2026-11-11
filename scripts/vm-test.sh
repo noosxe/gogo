@@ -780,14 +780,14 @@ cmd_smoke() {
             echo "vm-limit: no window while wined3d had no GL context (the VM has no OpenGL); re-check on the host (#80)."
         fi
     } | tee "$dir/table.md"
-    local first host
+    local first macos
     first="$(jq -r '[.cases[] | select(.summary != "") | .summary][0] // ""' "$dir/smoke.json")"
-    host="vm/macos-$( [ -n "$first" ] && sed -n 's/^ProductVersion:[[:space:]]*//p' "$(dirname "$first")/guest-info.txt" 2>/dev/null)"
+    macos="$( [ -n "$first" ] && sed -n 's/^ProductVersion:[[:space:]]*//p' "$(dirname "$first")/guest-info.txt" 2>/dev/null)"
     # One compat line per game that started (status ok) in some case.
-    jq -r --arg host "$host" --arg date "$(date +%Y-%m-%d)" \
+    jq -r --arg macos "$macos" --arg date "$(date +%Y-%m-%d)" \
         '[.cases[] | select(.verdict == "pass" and .status == "ok" and (.gogid // "") != "")]
          | unique_by(.gogid)[]
-         | "# compat/\(.gogid).toml: tested = [{ runtime = \"\(.runtime)\", host = \"\($host)\", date = \($date) }]"' \
+         | "# compat/\(.gogid).toml: tested = [{ runtime = \"\(.runtime)\", compositor = { name = \"macos\", version = \"\($macos)\" }, gpu_driver = { vendor = \"apple-paravirtual\", version = \"\($macos)\" }, date = \($date) }]"' \
         "$dir/smoke.json"
     echo "$dir/smoke.json"
     local f i

@@ -13,6 +13,6 @@ status = "plays"
 lane   = "depot"
 notes  = "host pass on Hyprland (NVIDIA RTX 4090), built with gogo (depot lane, cnc-ddraw standing in for GOG's DDrawCompat xdd.dll): everything works on both Wine's Wayland driver and Xwayland (intros and music, 4:3 scaling, mouse, a play session, Quit to Desktop, pointer lock, fullscreen vs windowed); headless sway agreed on both display modes"
 tested = [
-  { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/nvidia", date = 2026-11-10 },
-  { runtime = "ge-proton/GE-Proton11-12", host = "kraken-hyprland/nvidia", date = 2026-11-10 },
+  { runtime = "ge-proton/GE-Proton11-12", compositor = { name = "sway", version = "1.12" }, gpu_driver = { vendor = "nvidia", version = "595.112.07" }, date = 2026-11-10 },
+  { runtime = "ge-proton/GE-Proton11-12", compositor = { name = "hyprland", version = "0.57.1" }, gpu_driver = { vendor = "nvidia", version = "595.112.07" }, date = 2026-11-10 },
 ]

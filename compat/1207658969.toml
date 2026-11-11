@@ -18,6 +18,6 @@ status = "plays"
 lane   = "depot"
 notes  = "host pass on Hyprland (NVIDIA RTX 4090): plays on both Xwayland and Wine's Wayland driver; on Wayland it draws 640x480 unscaled and centred since 32-bit DOSBox gets no GL there for its ddraw output (#312), which @noosxe accepts as a pass; headless sway (Xwayland): GOG's DOSBox launcher, the menu, a new city and quitting work, 4:3 scaled"
 tested = [
-  { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/nvidia", date = 2026-11-10 },
-  { runtime = "ge-proton/GE-Proton11-12", host = "kraken-hyprland/nvidia", date = 2026-11-11 },
+  { runtime = "ge-proton/GE-Proton11-12", compositor = { name = "sway", version = "1.12" }, gpu_driver = { vendor = "nvidia", version = "595.112.07" }, date = 2026-11-10 },
+  { runtime = "ge-proton/GE-Proton11-12", compositor = { name = "hyprland", version = "0.57.1" }, gpu_driver = { vendor = "nvidia", version = "595.112.07" }, date = 2026-11-11 },
 ]

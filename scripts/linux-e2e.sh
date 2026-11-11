@@ -422,7 +422,18 @@ write_summary() { # entry-status killed left deleted
         --arg keep "$KEEP" --arg left "$left" --arg killed "$killed" --arg excerpt "$excerpt" \
         --arg runtime "${STATE_RUNTIME:-}" --arg date "$(date -u +%F)" \
         --arg installer "${INSTALLER_FILE##*/}" --argjson reuse "$(reuse_json)" --argjson live "$(live_json)" \
-        --arg copy "${COPY_MODE:-}" --arg copy_ask "${COPY_ASK:-auto}" --arg copy_note "${COPY_NOTE:-}" '
+        --arg copy "${COPY_MODE:-}" --arg copy_ask "${COPY_ASK:-auto}" --arg copy_note "${COPY_NOTE:-}" \
+        --arg sway_version "$(sway --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+)+' | head -n1)" '
+        # A compat `tested` row (compat/README.md): no machine names, only what the run
+        # used. The compositor is always the harness sway; the GPU driver is that of the
+        # first --gpu (the one sway renders on), its version from vulkaninfo.
+        def tested_row($runtime; $gpu; $sway; $res; $date):
+            ($gpu | split("+")[0]) as $first
+            | ({nvidia:"nvidia", radv:"mesa-radv", intel:"mesa-anv", software:"mesa-llvmpipe"}[$first]) as $vendor
+            | (($res.gpu.vulkan_driver_infos // [])[0] // "" | capture("(?<v>[0-9]+(\\.[0-9]+)+)").v? // "") as $ver
+            | if $vendor == null or $ver == "" or $sway == "" then null
+              else {runtime:$runtime, compositor:{name:"sway", version:$sway},
+                    gpu_driver:{vendor:$vendor, version:$ver}, date:$date} end;
         ($r[0]) as $res
         | ($b[0]) as $bld
         | (($bld.checks // []) | map(.name = "build_" + .name)) as $build_checks
@@ -455,7 +466,7 @@ write_summary() { # entry-status killed left deleted
            # A compat entry stands on a fresh run, never a reused base or a live session.
            tested_entry:(if $ok and $gogid != "self-test" and $runtime != "" and ($reuse.reused // false | not)
                             and $live == null
-                         then {runtime:$runtime, host:("headless-sway/"+$gpu), date:$date}
+                         then tested_row($runtime; $gpu; $sway_version; $res; $date)
                          else null end),
            results:$results}' >"$summary"
     # Only a harness problem with nothing tested is 3; every other failure is 1.

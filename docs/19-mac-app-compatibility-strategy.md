@@ -485,7 +485,7 @@ exe      = "RebelGalaxyGOG.exe"        # skip GoGLauncher.exe (automatic since #
 renderer = "dxmt"
 verbs    = ["d3dcompiler_43", "d3dx11_43"]
 status   = "boots"                      # unknown | broken | boots | plays
-tested   = [{ runtime = "winecx-24.0.7_7", host = "m4pro/macos-27.0.1", date = 2026-10-22 }]
+tested   = [{ runtime = "winecx-24.0.7_7", compositor = { name = "macos", version = "27.0.1" }, gpu_driver = { vendor = "apple", version = "27.0.1" }, date = 2026-10-22 }]
 source   = "gogo-vm"                    # or "umu-protonfixes:<file>@<sha>"
 ```
 

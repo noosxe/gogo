@@ -10,8 +10,8 @@ source = "gogo-vm"
 status = "boots"
 notes  = "VM: reaches its first-run dialog; the 3D path past it needs a host pass (no OpenGL in the VM)"
 tested = [
-  { runtime = "winecx/24.0.7_7", host = "vm/macos-27.0", date = 2026-10-23 },
-  { runtime = "winecx26/26.3-20261014", host = "vm/macos-27.0", date = 2026-10-24 },
+  { runtime = "winecx/24.0.7_7", compositor = { name = "macos", version = "27.0" }, gpu_driver = { vendor = "apple-paravirtual", version = "27.0" }, date = 2026-10-23 },
+  { runtime = "winecx26/26.3-20261014", compositor = { name = "macos", version = "27.0" }, gpu_driver = { vendor = "apple-paravirtual", version = "27.0" }, date = 2026-10-24 },
 ]
 
 # Linux depot lane (e2e/1146738698.toml). wined3d, not D7VK: under D7VK the hardware check
@@ -24,7 +24,7 @@ status = "boots"
 lane   = "depot"
 notes  = "headless sway on wined3d: first-run dialogs, videos and main menu; the menu's input and the race aren't judged. Its first run hangs on black with no audio device (#203)"
 tested = [
-  { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/software", date = 2026-11-06 },
-  { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/radv", date = 2026-11-06 },
-  { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/nvidia", date = 2026-11-06 },
+  { runtime = "ge-proton/GE-Proton11-12", compositor = { name = "sway", version = "1.12" }, gpu_driver = { vendor = "mesa-llvmpipe", version = "26.2.6" }, date = 2026-11-06 },
+  { runtime = "ge-proton/GE-Proton11-12", compositor = { name = "sway", version = "1.12" }, gpu_driver = { vendor = "mesa-radv", version = "26.2.6" }, date = 2026-11-06 },
+  { runtime = "ge-proton/GE-Proton11-12", compositor = { name = "sway", version = "1.12" }, gpu_driver = { vendor = "nvidia", version = "595.112.07" }, date = 2026-11-06 },
 ]

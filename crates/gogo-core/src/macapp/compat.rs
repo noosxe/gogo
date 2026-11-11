@@ -148,12 +148,29 @@ pub struct ReplaceCommand {
     pub to: String,
 }
 
-/// Where and when an entry was tested.
+/// The compositor (or, on the Mac, the OS) a run was seen on: `sway` for
+/// the headless e2e harness, `hyprland`, `macos`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Compositor {
+    pub name: String,
+    pub version: String,
+}
+
+/// The GPU driver a run used: `nvidia`, `mesa-radv`, `mesa-llvmpipe`,
+/// `apple`, `apple-paravirtual`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GpuDriver {
+    pub vendor: String,
+    pub version: String,
+}
+
+/// What an entry was tested on and when. No machine names: only the
+/// runtime, compositor and GPU driver, so a row means the same to anyone.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Tested {
     pub runtime: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host: Option<String>,
+    pub compositor: Compositor,
+    pub gpu_driver: GpuDriver,
     /// A TOML date (`2026-10-22`); kept as its string form.
     #[serde(
         default,
@@ -600,6 +617,8 @@ fn platform_entry(
         check_monitor(m).map_err(|e| format!("[platforms.{}]: {e}", os.key()))?;
     }
     check_files(e.files.as_deref()).map_err(|e| format!("[platforms.{}] files: {e}", os.key()))?;
+    check_tested(e.tested.as_deref())
+        .map_err(|e| format!("[platforms.{}] tested: {e}", os.key()))?;
     if os == Os::Linux
         && let Some(r) = &e.renderer
         && let Some(why) = mac_only_renderer(r)
@@ -624,7 +643,7 @@ fn check_items(t: &toml::Table, prefix: &str, warnings: &mut Vec<String>) {
             continue;
         }
         let item_keys: &[&str] = match key.as_str() {
-            "tested" => &["runtime", "host", "date"],
+            "tested" => &["runtime", "compositor", "gpu_driver", "date"],
             "registry" => &["key", "name", "type", "data"],
             "files" => &["path", "text"],
             _ => continue,
@@ -633,6 +652,19 @@ fn check_items(t: &toml::Table, prefix: &str, warnings: &mut Vec<String>) {
             for k in item.as_table().into_iter().flat_map(|t| t.keys()) {
                 if !item_keys.contains(&k.as_str()) {
                     warnings.push(format!("unknown key {prefix}{key}[{i}].{k}"));
+                }
+            }
+            if key == "tested" {
+                for (sub, fields) in [
+                    ("compositor", ["name", "version"]),
+                    ("gpu_driver", ["vendor", "version"]),
+                ] {
+                    let t = item.get(sub).and_then(|v| v.as_table());
+                    for k in t.into_iter().flat_map(|t| t.keys()) {
+                        if !fields.contains(&k.as_str()) {
+                            warnings.push(format!("unknown key {prefix}{key}[{i}].{sub}.{k}"));
+                        }
+                    }
                 }
             }
         }
@@ -664,6 +696,25 @@ pub fn check_files(files: Option<&[GameFile]>) -> Result<(), String> {
         }
         if !seen.insert(p.to_lowercase()) {
             return bad("is given twice");
+        }
+    }
+    Ok(())
+}
+
+/// `tested` rows: the runtime, the compositor and the GPU driver each name
+/// something, and a version is given for both.
+pub fn check_tested(rows: Option<&[Tested]>) -> Result<(), String> {
+    for (i, t) in rows.unwrap_or_default().iter().enumerate() {
+        for (what, v) in [
+            ("runtime", &t.runtime),
+            ("compositor.name", &t.compositor.name),
+            ("compositor.version", &t.compositor.version),
+            ("gpu_driver.vendor", &t.gpu_driver.vendor),
+            ("gpu_driver.version", &t.gpu_driver.version),
+        ] {
+            if v.trim().is_empty() {
+                return Err(format!("row {i}: `{what}` is empty"));
+            }
         }
     }
     Ok(())
@@ -1730,7 +1781,7 @@ replace_command = { from = "GoGLauncher.exe", to = "RebelGalaxyGOG.exe" }
 [platforms.macos]
 renderer = "dxmt"
 status   = "boots"
-tested   = [{ runtime = "winecx-24.0.7_7", host = "m4pro/macos-27.0.1", date = 2026-10-22 }]
+tested   = [{ runtime = "winecx-24.0.7_7", compositor = { name = "macos", version = "27.0.1" }, gpu_driver = { vendor = "apple", version = "27.0.1" }, date = 2026-10-22 }]
 notes    = "boots to the main menu"
 env      = { WINEMSYNC = "1" }
 "#;
@@ -1757,7 +1808,7 @@ env      = { WINEMSYNC = "1" }
     #[test]
     fn unknown_keys_warn_not_fail() {
         let p = db("future = 1\n[platforms.macos]\nrenderer = \"wined3d\"\n\
-             tested = [{ runtime = \"x\", gpu = \"m4\" }]\n[platforms.windows]\nx = 1\n");
+             tested = [{ runtime = \"x\", compositor = { name = \"x\", version = \"1\" }, gpu_driver = { vendor = \"y\", version = \"2\" }, gpu = \"m4\" }]\n[platforms.windows]\nx = 1\n");
         assert_eq!(p.entry.renderer.as_deref(), Some("wined3d"));
         assert_eq!(
             p.warnings,
@@ -1767,6 +1818,33 @@ env      = { WINEMSYNC = "1" }
                 "unknown key platforms.windows",
             ]
         );
+    }
+
+    #[test]
+    fn tested_rows_need_a_compositor_and_a_gpu_driver_and_carry_no_host() {
+        let row = |r: &str| format!("[platforms.linux]\nstatus = \"plays\"\ntested = [{r}]\n");
+        let good = "{ runtime = \"ge-proton/GE-Proton11-12\", \
+             compositor = { name = \"hyprland\", version = \"0.57.1\" }, \
+             gpu_driver = { vendor = \"nvidia\", version = \"595.112.07\" }, date = 2026-11-11 }";
+        let p = parse(&row(good), Os::Linux, Layer::Db).unwrap();
+        let t = &p.entry.tested.unwrap()[0];
+        assert_eq!(t.compositor.name, "hyprland");
+        assert_eq!(t.gpu_driver.version, "595.112.07");
+        // Either one missing is an error, and so is an empty name or version.
+        for bad in [
+            "{ runtime = \"x\", gpu_driver = { vendor = \"nvidia\", version = \"1\" } }",
+            "{ runtime = \"x\", compositor = { name = \"sway\", version = \"1\" } }",
+            "{ runtime = \"x\", compositor = { name = \"sway\" }, \
+               gpu_driver = { vendor = \"nvidia\", version = \"1\" } }",
+            "{ runtime = \"x\", compositor = { name = \"sway\", version = \" \" }, \
+               gpu_driver = { vendor = \"nvidia\", version = \"1\" } }",
+        ] {
+            assert!(parse(&row(bad), Os::Linux, Layer::Db).is_err(), "{bad}");
+        }
+        // `host` is gone: it warns like any unknown key.
+        let with_host = good.replace("date", "host = \"m\", date");
+        let p = parse(&row(&with_host), Os::Linux, Layer::Db).unwrap();
+        assert_eq!(p.warnings, ["unknown key platforms.linux.tested[0].host"]);
     }
 
     #[test]
@@ -2027,14 +2105,14 @@ env      = { WINEMSYNC = "1" }
         assert_eq!(
             line(
                 REBEL_GALAXY,
-                "status = \"plays\"\ntested = [{ runtime = \"winecx-25\", date = 2026-11-01 }, \
-                 { runtime = \"winecx-24\", date = 2026-10-01 }]"
+                "status = \"plays\"\ntested = [{ runtime = \"winecx-25\", compositor = { name = \"x\", version = \"1\" }, gpu_driver = { vendor = \"y\", version = \"2\" }, date = 2026-11-01 }, \
+                 { runtime = \"winecx-24\", compositor = { name = \"x\", version = \"1\" }, gpu_driver = { vendor = \"y\", version = \"2\" }, date = 2026-10-01 }]"
             ),
             "known to play on winecx-25 (2026-11-01)"
         );
         assert_eq!(
             line(
-                "status = \"boots\"\ntested = [{ runtime = \"a\" }, { runtime = \"b\" }]",
+                "status = \"boots\"\ntested = [{ runtime = \"a\", compositor = { name = \"x\", version = \"1\" }, gpu_driver = { vendor = \"y\", version = \"2\" } }, { runtime = \"b\", compositor = { name = \"x\", version = \"1\" }, gpu_driver = { vendor = \"y\", version = \"2\" } }]",
                 ""
             ),
             "known to boot on b"
@@ -2086,11 +2164,11 @@ env      = { WINEMSYNC = "1" }
 status = "broken"
 notes = "asks for the CD"
 lane = "depot"
-tested = [{ runtime = "winecx/24.0.7_7", date = 2026-10-23 }]
+tested = [{ runtime = "winecx/24.0.7_7", compositor = { name = "macos", version = "27.0.1" }, gpu_driver = { vendor = "apple", version = "27.0.1" }, date = 2026-10-23 }]
 
 [lanes.installer]
 status = "plays"
-tested = [{ runtime = "winecx/24.0.7_7", host = "m4pro/macos-27.0.1", date = 2026-10-23 }]
+tested = [{ runtime = "winecx/24.0.7_7", compositor = { name = "macos", version = "27.0.1" }, gpu_driver = { vendor = "apple", version = "27.0.1" }, date = 2026-10-23 }]
 "#;
         let e = eff(pharaoh, "");
         assert_eq!(e.status_for(Some(Lane::Depot)), Status::Broken);

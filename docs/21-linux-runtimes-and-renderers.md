@@ -295,7 +295,7 @@ So yes: `PROTON_*` and DXVK vars map onto the existing `env` with no schema chan
 ### 4.2 Gaps
 
 1. **No platform dimension.** L3 files and the `tested` entries are Mac results
-   (`winecx-…`, `m4pro/macos-…`). The values gogo writes today (`WINEMSYNC`, `DXMT_*`,
+   (`winecx-…`, a macOS compositor and Apple GPU driver). The values gogo writes today (`WINEMSYNC`, `DXMT_*`,
    `renderer = "dxmt"`, `d3dmetal`) mean nothing on Linux, and `PROTON_*` means nothing on
    the Mac. `lane`/`lanes` already scope status by build lane. The same idea is needed
    per OS (e.g. `[platforms.linux]` with its own `renderer`, `env`, `status`, `tested`),
@@ -596,7 +596,7 @@ VKD3D-Proton, plain Wine needs them installed into the prefix, umu-protonfixes i
    [platforms.macos]
    status = "broken"
    notes  = "unplayable: DXMT loads ~4 min per launch then runs at slideshow speed …"
-   tested = [{ runtime = "winecx/24.0.7_7+dxmt-v0.80", host = "m4pro/macos-27.0.1", date = 2026-10-23 }]
+   tested = [{ runtime = "winecx/24.0.7_7+dxmt-v0.80", compositor = { name = "macos", version = "27.0.1" }, gpu_driver = { vendor = "apple", version = "27.0.1" }, date = 2026-10-23 }]
 
    [platforms.linux]
    renderer = "dxvk"

@@ -3653,7 +3653,7 @@ dll_overrides = { xinput1_3 = "n,b" }
                 r#"renderer = "wined3d"
 env      = { WINEMSYNC = "1" }
 status   = "boots"
-tested   = [{ runtime = "winecx-24.0.7_7", date = 2026-10-22 }]
+tested   = [{ runtime = "winecx-24.0.7_7", compositor = { name = "macos", version = "27.0.1" }, gpu_driver = { vendor = "apple", version = "27.0.1" }, date = 2026-10-22 }]
 "#,
             ),
     )
@@ -5191,7 +5191,7 @@ fn installer_lane_keeps_its_logs_and_records_the_lane() {
         "source = \"gogo-vm\"\n".to_string()
             + &on_this_os(&format!(
                 "status = \"broken\"\nlane = \"{lane}\"\nnotes = \"asks for the CD\"\n\
-                 tested = [{{ runtime = \"winecx/24.0.7_7\" }}]\n"
+                 tested = [{{ runtime = \"winecx/24.0.7_7\", compositor = {{ name = \"macos\", version = \"27.0.1\" }}, gpu_driver = {{ vendor = \"apple\", version = \"27.0.1\" }} }}]\n"
             ))
     };
     std::fs::write(compat_dir.join("1.toml"), entry("depot")).unwrap();

@@ -20,6 +20,6 @@ lane    = "depot"
 display = "x11"
 notes   = "plays on Xwayland (the Hyprland desktop, and headless sway: intros, the Timbuktu region view, Quit SimCity 4) on wined3d with GOG's support overlay; on Wine's Wayland driver it stops at \"Could not initialize Direct Draw\" on the real desktop too, not only headless (#312), hence display = x11"
 tested = [
-  { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/nvidia", date = 2026-11-10 },
-  { runtime = "ge-proton/GE-Proton11-12", host = "kraken-hyprland/nvidia", date = 2026-11-10 },
+  { runtime = "ge-proton/GE-Proton11-12", compositor = { name = "sway", version = "1.12" }, gpu_driver = { vendor = "nvidia", version = "595.112.07" }, date = 2026-11-10 },
+  { runtime = "ge-proton/GE-Proton11-12", compositor = { name = "hyprland", version = "0.57.1" }, gpu_driver = { vendor = "nvidia", version = "595.112.07" }, date = 2026-11-10 },
 ]
