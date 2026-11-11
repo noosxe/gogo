@@ -443,9 +443,9 @@ resolve game → content.toml (build B, language L, installed DLC I)
 | files missing | `Missing` | as today: full `verify` repair |
 | `dlcs`/`language` absent (an older gogo) | `UnknownContent` | first brought up to date from the build's depot manifests when that's safe (§3.2, #374), then answered again. Otherwise a full `verify` with the wanted set: gog-warp keeps what's valid and fetches the rest. That's slow, but without the record it can't know what the tree holds unless it hashes it |
 | wanted DLC not in `dlcs` | `MissingDlc(W)` | the targeted add of §3.2 on the cache (no hashing) |
-| language differs | `OtherLanguage` | rebuild-time only: a targeted diff from (old language, `dlcs`) to (new, wanted); the plan's download is an estimate from the depots the new language adds, by manifest hash (design 14 §11, #386) |
+| language differs, and not one the cache holds whole (#389) | `OtherLanguage` | rebuild-time only: a targeted diff from (old language, `dlcs`) to (new, wanted); the plan's download is an estimate from the depots the new language adds, by manifest hash (design 14 §11, #386) |
 | `buildId` differs from the build being made | `OtherBuild` | as today: the new build is fetched into the cache via `verify`, with the wanted DLC set |
-| `dlcs` ⊇ wanted, same language | `Complete` | reused. Extra DLC in the cache is fine: the materialize copies only what the build wants (below) |
+| `dlcs` ⊇ wanted, same language (or a language the cache holds whole, against that language's DLC) | `Complete` | reused. Extra DLC or languages in the cache are fine: the materialize copies only what the build wants (below) |
 
 - A cache can hold more DLC than one build wants (the user ran `gogo depot --all-dlcs`,
   or an earlier build took more). The build then materializes the base and the wanted
@@ -498,6 +498,46 @@ resolve game → content.toml (build B, language L, installed DLC I)
     and recording only the wanted set would be untrue.
   - `mac-app` (on hold) chooses no DLC and still clones the cache tree whole; this
     doesn't change it.
+- **A cache can hold several languages; builds filter by language (#389).** A language
+  switch (`gogo depot --language`, `linux-app --lang`) is gog-warp's `verify` with no old
+  manifest: it fetches what the new language lacks and deletes nothing. The cache is
+  never pruned, so the old language's files stay and a switch back costs no download.
+  As built:
+  - **The record.** `language` is the last language fetched: a path two languages share
+    holds its bytes. `otherLanguages: {<code>: {whole, dlcs, products}}` names every
+    other language whose files the cache holds, with the DLC it held and its per-product
+    file lists. Absent in records from before (#382, #385): they hold `language` only.
+    `products` stays the lists of `language`.
+  - **Whole.** Another language is whole when its files are on disk as it has them: no
+    path it shares with a language fetched since comes from another depot manifest
+    (`dlc_filter::clash`, the rule #374's upgrade uses). Only a whole language counts
+    for `check_cache` and for the switch estimate (design 14 §11). Every download sets
+    them all not whole in `write_record`, before anything else; `gogo depot` then
+    fetches the depots of the record's products in each held language and
+    `settle_languages` stores their lists and marks whole again those that were whole
+    and don't clash. A download that wrote no file keeps them as they were. A `dlc add`
+    doesn't check, so it leaves them not whole. When unsure the answer is
+    `OtherLanguage`, and a switch back is a `verify` that hashes but fetches only what
+    differs.
+  - **Another build** keeps the old languages held (their files are still there) but
+    not whole, with no DLC or lists: the next filtered build fetches the new build's.
+  - **The build's language** is `--lang`, else the game's (`content.toml`), else the
+    cache record's (a first build), else `en-US`. `linux-app` checks the cache against
+    it whenever the record names a language. `content.toml` records it, not the
+    record's last one.
+  - **The filter** (`dlc_filter::filter_languages`, the same filter as for DLC) also
+    leaves out every path the cache's other languages list for the record's products
+    (base, wanted and extra DLC), unless a kept product lists it in the build's
+    language. A path both list is kept as the cache has it; a path no list names is
+    kept. The lists come from the record, else are fetched for the record's build and
+    stored (`depot::product_lists`, per language).
+  - **The plan** says `the depot cache also holds <languages>: N file(s), <size> left
+    out of the game dir`, and the build's warning names the languages left out.
+  - **When the lists can't be had** (offline, a build GOG no longer lists), the build is
+    refused as for DLC: nothing changes, nothing untrue is recorded.
+  - `mac-app` still clones the tree whole, every language included.
+  - A cache switched by a gogo from before this names only its last language, so the
+    earlier one's files aren't known to be there and a build copies them.
 - As built (#347): `check_cache(root, &CacheWant { build_id, language, dlcs })`; a `None`
   field isn't checked, so `mac-app`/`linux-app` (which pass none until #349) see only
   `Complete`, `Unrecorded` and `Missing`. Order of answers: `Missing`, `OtherBuild`,

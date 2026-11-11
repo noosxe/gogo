@@ -344,6 +344,22 @@ pub fn switch_download(
     want_language: &str,
     want_dlcs: &[String],
 ) -> Option<u64> {
+    switch_download_held(
+        manifest,
+        &[(have_language, have_dlcs)],
+        want_language,
+        want_dlcs,
+    )
+}
+
+/// [`switch_download`] for a cache that holds several languages whole (#389), each
+/// with its DLC: a depot any of them has counts as had.
+pub fn switch_download_held(
+    manifest: &Manifest,
+    have: &[(&str, &[String])],
+    want_language: &str,
+    want_dlcs: &[String],
+) -> Option<u64> {
     let Manifest::V2(m) = manifest else {
         return None;
     };
@@ -358,7 +374,10 @@ pub fn switch_download(
             .map(|d| ((d.product_id().clone(), d.manifest().clone()), d))
             .collect::<std::collections::BTreeMap<_, _>>()
     };
-    let have = take(have_language, have_dlcs);
+    let have: std::collections::BTreeMap<_, _> = have
+        .iter()
+        .flat_map(|(language, dlcs)| take(language, dlcs))
+        .collect();
     let want = take(want_language, want_dlcs);
     Some(
         want.iter()

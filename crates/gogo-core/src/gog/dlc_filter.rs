@@ -175,17 +175,18 @@ pub struct DepotList {
 }
 
 /// Fetch the depots of `manifest`'s build with their files: every depot, or with
-/// `only = (products, language)` those of `products` in `language` (or `*`). A
-/// depot manifest backing several depots is fetched once.
+/// `only = (products, languages)` those of `products` in one of `languages` (or
+/// `*`). A depot manifest backing several depots is fetched once.
 pub async fn fetch_depots(
     http: &reqwest::Client,
     manifest: &Manifest,
-    only: Option<(&[String], &str)>,
+    only: Option<(&[String], &[String])>,
 ) -> Result<Vec<DepotList>, DepotError> {
     use gog_warp::constants::domains::GOG_CDN;
     let wanted = |product: &str, langs: &[String]| {
-        only.is_none_or(|(products, language)| {
-            products.iter().any(|p| p == product) && language_matches(langs, language)
+        only.is_none_or(|(products, languages)| {
+            products.iter().any(|p| p == product)
+                && languages.iter().any(|l| language_matches(langs, l))
         })
     };
     let install_dir = manifest.install_directory();
@@ -310,8 +311,41 @@ pub async fn fetch(
     language: &str,
     products: &[String],
 ) -> Result<ProductFiles, DepotError> {
-    let depots = fetch_depots(http, manifest, Some((products, language))).await?;
+    let depots = fetch_depots(http, manifest, Some((products, &[language.to_string()]))).await?;
     Ok(product_files(&depots, language, products))
+}
+
+/// Pure: a path that `language`'s depots share with a depot `against` picks, through
+/// another depot manifest, when there is one. The cache holds one copy of such a
+/// path, the last fetched one's, so which language's bytes are there can't be told
+/// without hashing. Paths are compared lowercased.
+pub fn clash<'a>(
+    depots: &'a [DepotList],
+    language: &str,
+    against: impl Fn(&DepotList) -> bool,
+) -> Option<(&'a DepotList, &'a str)> {
+    let ours = |d: &DepotList| language_matches(&d.languages, language);
+    let mut held: std::collections::HashMap<String, HashSet<&str>> =
+        std::collections::HashMap::new();
+    for d in depots.iter().filter(|d| ours(d)) {
+        for p in &d.paths {
+            held.entry(p.to_lowercase())
+                .or_default()
+                .insert(d.manifest.as_str());
+        }
+    }
+    depots
+        .iter()
+        .filter(|d| !ours(d) && against(d))
+        .find_map(|d| {
+            d.paths
+                .iter()
+                .find(|p| {
+                    held.get(&p.to_lowercase())
+                        .is_some_and(|m| !m.contains(d.manifest.as_str()))
+                })
+                .map(|p| (d, p.as_str()))
+        })
 }
 
 /// What a build of a cache's tree has to leave out.
@@ -323,6 +357,12 @@ pub struct TreeFilter {
     pub dropped: Vec<DlcRef>,
     /// Paths a dropped DLC shares with a kept product: kept as the cache has them.
     pub shared: usize,
+    /// The cache's other languages, left out (#389).
+    pub languages: Vec<String>,
+    /// Their paths the filter drops, as their lists spell them.
+    language_paths: Vec<String>,
+    /// Their paths a kept depot lists too: kept as the cache has them.
+    pub language_shared: usize,
 }
 
 impl TreeFilter {
@@ -351,19 +391,45 @@ impl TreeFilter {
 }
 
 /// Pure: the filter that leaves out `dropping`'s files, except the ones a kept
-/// product (`keeping`: the base and the wanted DLC) lists too. `Err` names the
-/// products `lists` has no entry for.
+/// product (`keeping`: the base and the wanted DLC) lists too. `lists` are the
+/// build's language's. `Err` names the products `lists` has no entry for.
 pub fn filter(
     lists: &ProductFiles,
     keeping: &[String],
     dropping: &[DlcRef],
 ) -> Result<TreeFilter, Vec<String>> {
-    let lacking: Vec<String> = keeping
+    filter_languages(lists, keeping, dropping, &[])
+}
+
+/// Pure: [`filter`] that also leaves out the files of the cache's other languages
+/// (#389): every path `others` (language → its products' lists) names that a kept
+/// product doesn't list in the build's language. A path both list is kept as the
+/// cache has it, and so is one no list names. `Err` names what has no list: a
+/// product, or `<product> (<language>)` for another language's.
+pub fn filter_languages(
+    lists: &ProductFiles,
+    keeping: &[String],
+    dropping: &[DlcRef],
+    others: &[(String, ProductFiles)],
+) -> Result<TreeFilter, Vec<String>> {
+    let products: Vec<String> = keeping
         .iter()
         .cloned()
         .chain(dropping.iter().map(|d| d.id.to_string()))
-        .filter(|p| !lists.contains_key(p))
         .collect();
+    let mut lacking: Vec<String> = products
+        .iter()
+        .filter(|p| !lists.contains_key(*p))
+        .cloned()
+        .collect();
+    for (language, l) in others {
+        lacking.extend(
+            products
+                .iter()
+                .filter(|p| !l.contains_key(*p))
+                .map(|p| format!("{p} ({language})")),
+        );
+    }
     if !lacking.is_empty() {
         return Err(lacking);
     }
@@ -383,11 +449,39 @@ pub fn filter(
             }
         }
     }
+    let mut language_paths = Vec::new();
+    let mut language_shared = HashSet::new();
+    for (_, l) in others {
+        for f in products.iter().flat_map(|p| &l[p]) {
+            let lower = f.to_lowercase();
+            if kept.contains(&lower) {
+                language_shared.insert(lower);
+            } else if drop.insert(lower) {
+                language_paths.push(f.clone());
+            }
+        }
+    }
     Ok(TreeFilter {
         drop,
         dropped: dropping.to_vec(),
         shared,
+        languages: others.iter().map(|(l, _)| l.clone()).collect(),
+        language_paths,
+        language_shared: language_shared.len(),
     })
+}
+
+impl TreeFilter {
+    /// `(files, bytes)` of the cache's other languages under cache root `root` that
+    /// the build leaves out: what the plan says (#389).
+    pub fn languages_left_out(&self, root: &Path) -> (u64, u64) {
+        let mut disk = super::cache_upgrade::OnDisk::default();
+        self.language_paths
+            .iter()
+            .filter_map(|p| disk.find(root, p))
+            .filter_map(|p| root.join(p).symlink_metadata().ok())
+            .fold((0, 0), |(n, b), m| (n + 1, b + m.len()))
+    }
 }
 
 /// The DLC a depot build takes from its cache tree.
@@ -395,6 +489,9 @@ pub fn filter(
 pub struct DepotContent {
     /// Installed and recorded in `content.toml`, nothing else.
     pub dlcs: Vec<DlcRef>,
+    /// The build's language, recorded in `content.toml` (#389): the cache record's
+    /// names only the last one fetched. `None`: the record's.
+    pub language: Option<String>,
     /// Leaves out the cache's other DLC; `None` when it holds no other.
     pub filter: Option<TreeFilter>,
 }
@@ -406,31 +503,34 @@ impl DepotContent {
     }
 }
 
-/// What a build has to do about the DLC a cache holds.
+/// What a build has to do about the DLC and languages a cache holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Need {
-    /// The cache holds no DLC the build doesn't take: it's materialized whole.
+    /// The cache holds no DLC or language the build doesn't take: it's materialized
+    /// whole.
     Whole,
-    /// It holds `extra` too: they're left out with the file lists of `products` (the
-    /// base, the wanted DLC and `extra`) of build `build_id` in `language`.
+    /// It holds `extra` DLC or `languages` too: they're left out with the file lists
+    /// of `products` (the base, the wanted DLC and `extra`) of build `build_id`, in
+    /// `language` (the build's) and in each of `languages`.
     Filter {
         extra: Vec<DlcRef>,
         products: Vec<String>,
         build_id: Option<String>,
-        language: Option<String>,
+        language: String,
+        /// The cache's other languages (#389).
+        languages: Vec<String>,
     },
 }
 
 /// Pure (reads the cache): what building `tree` (in cache root `root`) for base
-/// `base` with DLC `wanted` needs. The cache's DLC are its record's and those with a
-/// `goggame-<id>.info` in the tree (an older record lists none).
-pub fn need(root: &Path, tree: &Path, base: &str, wanted: &[u64]) -> Need {
+/// `base` with DLC `wanted` in `language` needs. The cache's DLC are those its
+/// record lists in any language it holds and those with a `goggame-<id>.info` in
+/// the tree (an older record lists none). Its languages are the record's: an older
+/// one names one or none, and is taken to hold only that.
+pub fn need(root: &Path, tree: &Path, base: &str, wanted: &[u64], language: &str) -> Need {
     let rec = depot::read_record(root);
     let infos = info::read_infos(tree);
-    let mut held: Vec<String> = rec
-        .as_ref()
-        .and_then(|r| r.dlcs.clone())
-        .unwrap_or_default();
+    let mut held: Vec<String> = rec.as_ref().map(|r| r.all_dlcs()).unwrap_or_default();
     held.extend(
         infos
             .iter()
@@ -452,7 +552,14 @@ pub fn need(root: &Path, tree: &Path, base: &str, wanted: &[u64]) -> Need {
                 .unwrap_or_else(|| id.to_string()),
         })
         .collect();
-    if extra.is_empty() {
+    let languages: Vec<String> = rec
+        .as_ref()
+        .map(|r| r.languages())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|l| !l.eq_ignore_ascii_case(language))
+        .collect();
+    if extra.is_empty() && languages.is_empty() {
         return Need::Whole;
     }
     let mut products = vec![base.to_string()];
@@ -467,7 +574,8 @@ pub fn need(root: &Path, tree: &Path, base: &str, wanted: &[u64]) -> Need {
         extra,
         products,
         build_id: rec.as_ref().map(|r| r.build_id.clone()).or(info_build),
-        language: rec.and_then(|r| r.language),
+        language: language.to_string(),
+        languages,
     }
 }
 
@@ -580,6 +688,64 @@ mod tests {
         assert!(f.keeps_path(Path::new("Game/goggame-2.info")));
     }
 
+    /// The other languages' files are left out (#389), except the paths a kept
+    /// product lists too, and a missing list is named with its language.
+    #[test]
+    fn the_filter_leaves_out_other_languages() {
+        let en: ProductFiles = [(
+            "1".to_string(),
+            vec![
+                "Game/bin/game.exe".to_string(),
+                "Game/lang/en.pak".into(),
+                "Game/lang/common.pak".into(),
+            ],
+        )]
+        .into();
+        let de: ProductFiles = [(
+            "1".to_string(),
+            vec![
+                "Game/bin/game.exe".to_string(),
+                "Game/lang/de.pak".into(),
+                "Game/Lang/Common.pak".into(),
+            ],
+        )]
+        .into();
+        let f = filter_languages(&en, &["1".into()], &[], &[("de-DE".into(), de.clone())]).unwrap();
+        assert!(f.keeps("Game/lang/en.pak"));
+        assert!(!f.keeps("Game/lang/de.pak"));
+        assert!(f.keeps("Game/lang/common.pak"), "shared: kept");
+        assert!(f.keeps("Game/unlisted.txt"), "no list names it: kept");
+        assert_eq!(f.languages, ["de-DE"]);
+        assert_eq!(f.language_shared, 2);
+
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("Game/LANG")).unwrap();
+        std::fs::write(d.path().join("Game/LANG/de.pak"), b"1234").unwrap();
+        assert_eq!(f.languages_left_out(d.path()), (1, 4));
+
+        let lacking = filter_languages(&en, &["1".into()], &[r(2, "A")], &[("de-DE".into(), de)])
+            .unwrap_err();
+        assert_eq!(lacking, ["2", "2 (de-DE)"]);
+    }
+
+    #[test]
+    fn a_language_clash_is_a_shared_path_through_another_manifest() {
+        let d = |l: &str, m: &str, p: &str| DepotList {
+            product: "1".into(),
+            languages: vec![l.into()],
+            manifest: m.into(),
+            paths: vec![p.into()],
+        };
+        let one = [d("en-US", "x", "G/a"), d("de-DE", "x", "G/A")];
+        assert!(clash(&one, "en-US", |_| true).is_none(), "one manifest");
+        let two = [d("en-US", "x", "G/a"), d("de-DE", "y", "G/A")];
+        assert_eq!(clash(&two, "en-US", |_| true).map(|(_, p)| p), Some("G/A"));
+        assert!(
+            clash(&two, "en-US", |d| language_matches(&d.languages, "fr-FR")).is_none(),
+            "only the depots asked about"
+        );
+    }
+
     #[test]
     fn a_product_without_a_list_is_named() {
         let mut l = lists();
@@ -604,10 +770,10 @@ mod tests {
             .unwrap();
         };
         info("1", "Game");
-        assert_eq!(need(root, &tree, "1", &[]), Need::Whole);
+        assert_eq!(need(root, &tree, "1", &[], "en-US"), Need::Whole);
         info("3", "REDmod");
         // No record: the infos say what's there.
-        match need(root, &tree, "1", &[]) {
+        match need(root, &tree, "1", &[], "en-US") {
             Need::Filter {
                 extra, build_id, ..
             } => {
@@ -616,20 +782,22 @@ mod tests {
             }
             n => panic!("{n:?}"),
         }
-        assert_eq!(need(root, &tree, "1", &[3]), Need::Whole);
+        assert_eq!(need(root, &tree, "1", &[3], "en-US"), Need::Whole);
         // The record lists one with no info (yet): it counts.
         depot::write_record(root, "88", "en-US", &["2".into(), "3".into()]).unwrap();
-        match need(root, &tree, "1", &[3]) {
+        match need(root, &tree, "1", &[3], "en-US") {
             Need::Filter {
                 extra,
                 products,
                 build_id,
                 language,
+                languages,
             } => {
                 assert_eq!(extra, [r(2, "2")]);
                 assert_eq!(products, ["1", "3", "2"]);
                 assert_eq!(build_id.as_deref(), Some("88"));
-                assert_eq!(language.as_deref(), Some("en-US"));
+                assert_eq!(language, "en-US");
+                assert!(languages.is_empty());
             }
             n => panic!("{n:?}"),
         }
