@@ -50,7 +50,8 @@ network 4, depot failure 7 (conversion/download). (Until #175 Linux exited 2 wit
 - No `InstallRecord`, no state writes: the cache is disposable by contract (17 §3);
   a future `gogo depot prune` owns eviction.
 - **Download record (#316).** A finished download writes `depot/<id>/.gogo-depot.json`:
-  the build id and every file and link under the root (game tree and `gog-support/`),
+  the build id, the language and DLC set it was asked for (design 19 §3.3; absent in
+  older records) and every file and link under the root (game tree and `gog-support/`),
   sorted, relative; not gog-warp's leftovers (`.gog-warp-build`, `!Temp`, `*.download`,
   `*.state`) or `.DS_Store`. When the record can't be written the download still counts
   and the cache is just unrecorded. A build that reuses a cached tree (`mac-app`/`linux-app

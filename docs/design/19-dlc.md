@@ -283,6 +283,16 @@ resolve game → content.toml (build B, language L, installed DLC I)
   paths), and the plan says `cache holds 2 more DLC than this build takes`. Until that
   filter exists (it needs the depot manifests, an extra fetch per build), a cache with
   extra DLC is materialized whole and the plan says so; that's today's behaviour.
+- As built (#347): `check_cache(root, &CacheWant { build_id, language, dlcs })`; a `None`
+  field isn't checked, so `mac-app`/`linux-app` (which pass none until #349) see only
+  `Complete`, `Unrecorded` and `Missing`. Order of answers: `Missing`, `OtherBuild`,
+  `UnknownContent`, `OtherLanguage`, `MissingDlc`. An old record is `UnknownContent` only to
+  a caller that wants a DLC or a language; one that asks for neither reads it as whole.
+- `gogo depot` completes the cache the targeted way (`upgrade_from` the same build,
+  `old_dlcs` = recorded, `dlcs` = recorded ∪ wanted, `old_language` = language, no
+  `verify`) only for `MissingDlc` on generation 2; every other answer, and generation 1,
+  is the full `verify` with the wanted set, as before. `OtherLanguage`'s targeted diff stays
+  with the rebuild path. The plan line says which (`cache lacks DLC …: fetching only those`).
 - The record is written after `download()` as today, now with the DLC set and language
   that run asked for. A `dlc add` into the cache rewrites it with `dlcs ∪ W` and the new
   file list.
