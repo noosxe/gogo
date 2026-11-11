@@ -66,6 +66,7 @@ in `docs/13` grounds design 10.
 | [12-runtime-catalog-and-interactive-flow](12-runtime-catalog-and-interactive-flow.md) | runtime catalog + store, recipe-first interactive selection, winetricks provisioning + Rust shims — implemented (input: docs/15) |
 | [16-macapp-v2](16-macapp-v2.md) | mac-app v2 contract: layers L0–L4, immutable launcher bundle, store-referenced runtime, per-game state dir (input: docs/19, #94) |
 | [18-linux-runtime](18-linux-runtime.md) | Linux lane (`gogo linux-app`): GE-Proton through umu, DXVK/VKD3D-Proton/D7VK/cnc-ddraw, per-game fixes from protonfixes, `[platforms.<os>]` compat tables, `.desktop` launcher (input: docs/21, docs/22) |
+| [19-dlc](19-dlc.md) | DLC: choosing it at the first build, `linux-app dlc list` / `add` onto a built game, the depot cache's DLC set (#336), the offline lane's DLC installers, `content.toml` (#343) |
 ## Key decisions (traceability)
 
 | Decision | Rationale / source |
