@@ -1,6 +1,7 @@
 # Carmageddon TDR 2000 (DirectDraw + Direct3D 6/7, 32-bit): wined3d (L1).
 # Needs the depot's gog-support overlay (ASSETS/options.txt, L2), which gogo
-# applies. In the VM it reaches its first-run "Hardware Capabilities" dialog;
+# applies. On Linux it plays on Xwayland (host pass on Hyprland/NVIDIA); on Wine's Wayland
+# driver it stops at an error dialog (#326), so it is pinned to x11. On macOS, in the VM it reaches its first-run "Hardware Capabilities" dialog;
 # past it the game dies on FindDepthBufferFormat because the guest has no
 # OpenGL, so the 3D path is unjudged until a host pass.
 title  = "Carmageddon TDR 2000"
@@ -18,13 +19,19 @@ tested = [
 # leaves the display in 320x200, and the Display Configuration dialog is magnified with Play
 # off screen and takes no input (#203). The game then needs a working audio device on its
 # first run, or its audio check hangs on a black screen.
+# Xwayland only: `x11` keeps a session-wide PROTON_ENABLE_WAYLAND from moving the game to
+# Wine's Wayland driver, where this 32-bit wined3d game stops at an error dialog (#326); an
+# L4 `gogo linux-app display 1146738698 wayland` still wins.
 [platforms.linux]
 renderer = "wined3d"
-status = "boots"
+status = "plays"
 lane   = "depot"
-notes  = "headless sway on wined3d: first-run dialogs, videos and main menu; the menu's input and the race aren't judged. Its first run hangs on black with no audio device (#203)"
+display = "x11"
+source = "gogo-host"
+notes  = "host pass on Hyprland (NVIDIA RTX 4090): plays on Xwayland on wined3d: first-run dialogs, menu, a race, sound and quitting all work; on Wine's Wayland driver it stops at an error dialog (32-bit wined3d, #326), hence display = x11. Headless sway runs reach the menu. Its first run hangs on black with no audio device (#203)"
 tested = [
   { runtime = "ge-proton/GE-Proton11-12", compositor = { name = "sway", version = "1.12" }, gpu_driver = { vendor = "mesa-llvmpipe", version = "26.2.6" }, date = 2026-11-06 },
   { runtime = "ge-proton/GE-Proton11-12", compositor = { name = "sway", version = "1.12" }, gpu_driver = { vendor = "mesa-radv", version = "26.2.6" }, date = 2026-11-06 },
   { runtime = "ge-proton/GE-Proton11-12", compositor = { name = "sway", version = "1.12" }, gpu_driver = { vendor = "nvidia", version = "595.112.07" }, date = 2026-11-06 },
+  { runtime = "ge-proton/GE-Proton11-12", compositor = { name = "hyprland", version = "0.57.1" }, gpu_driver = { vendor = "nvidia", version = "595.112.07" }, date = 2026-11-11 },
 ]
