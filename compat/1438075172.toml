@@ -1,13 +1,16 @@
 # Anno 1701 (D3D9: DXVK, the L1 default). Quit exits with code 255. e2e/1438075172.toml.
+# Plays on both Xwayland and Wine's Wayland driver on a Hyprland/NVIDIA desktop, so no `display` pin.
+# A 32-bit game on DXVK that works on Wayland: a second counterexample for #326 after Chaos Gate.
 title  = "Anno 1701 A.D."
-source = "gogo-headless"
+source = "gogo-host"
 
 [platforms.linux]
-status = "boots"
+status = "plays"
 lane   = "depot"
-notes  = "headless sway: menu, first profile and Quit work on DXVK; audio, a real game and a real compositor not judged"
+notes  = "host pass on Hyprland (NVIDIA RTX 4090): fully functional on both Xwayland and Wine's Wayland driver, on DXVK; no display pin. A 32-bit game on DXVK that works on Wayland, a second counterexample for #326 after Chaos Gate. Quit exits with code 255. Headless sway before that: menu, first profile and Quit work on DXVK"
 tested = [
   { runtime = "ge-proton/GE-Proton11-12", compositor = { name = "sway", version = "1.12" }, gpu_driver = { vendor = "mesa-llvmpipe", version = "26.2.6" }, date = 2026-11-06 },
   { runtime = "ge-proton/GE-Proton11-12", compositor = { name = "sway", version = "1.12" }, gpu_driver = { vendor = "mesa-radv", version = "26.2.6" }, date = 2026-11-06 },
   { runtime = "ge-proton/GE-Proton11-12", compositor = { name = "sway", version = "1.12" }, gpu_driver = { vendor = "nvidia", version = "595.112.07" }, date = 2026-11-06 },
+  { runtime = "ge-proton/GE-Proton11-12", compositor = { name = "hyprland", version = "0.57.1" }, gpu_driver = { vendor = "nvidia", version = "595.112.07" }, date = 2026-11-11 },
 ]
