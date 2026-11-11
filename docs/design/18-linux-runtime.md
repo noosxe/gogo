@@ -2134,6 +2134,18 @@ Wayland there. `wayland` asks for the driver.
   check runs again there (also when `launch.sh`'s own environment has no socket: a wrapper may
   bring one). The header's `# display:` is `launch.sh`'s view; that line is the game's.
 
+**Warning: 32-bit GPU games (#312).** Wine's Wayland driver can't give a 32-bit game the GPU:
+wined3d (EGL) and D7VK/DXVK (Vulkan) fail ("Could not initialize Direct Draw", SimCity 4) or
+draw unscaled (SimCity 2000), on real Hyprland/NVIDIA as headless; the cause is open research.
+GDI games (cnc-ddraw, which gogo pins to `renderer=gdi`: Heroes 3, Pharaoh, Zeus) and 64-bit
+games work. So when the mode is `wayland`, the entry exe is 32-bit (the install scan) and the
+renderer setup will apply is wined3d, `proton-default`, dxvk, d7vk or vkd3d-proton,
+`display` (setting or showing) and `doctor` warn and suggest `display <gogid> x11` or `--clear`.
+It's a warning, not a refusal: the setting is still written (the owner runs SimCity 2000 on
+Wayland on purpose). A failed scan warns of nothing. No exception for a game whose compat entry
+has an owner-tested `plays` row: a row doesn't record which display mode was tested (only
+free-text notes), and no key is added for it.
+
 **Decided: fall back, don't refuse.** The issue offered both. A refusal would leave a player with
 no game in an X11 session, over SSH with X forwarding, or in a nested compositor, for a setting
 whose only cost when missing is HDR and the native driver. GE-Proton falls back too; what it

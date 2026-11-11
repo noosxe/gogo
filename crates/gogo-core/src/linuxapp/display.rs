@@ -240,6 +240,36 @@ pub fn conflicts(gogid: &str, eff: &Effective) -> Vec<String> {
     out
 }
 
+/// #312: a 32-bit game that draws through the GPU (wined3d, DXVK, D7VK,
+/// VKD3D-Proton) mostly can't reach it on Wine's Wayland driver. cnc-ddraw
+/// draws with GDI (gogo pins `renderer=gdi`), which works there; a 64-bit
+/// game or a failed scan gets no warning. `None` unless the mode is wayland.
+pub fn gpu32_warning(
+    gogid: &str,
+    eff: &Effective,
+    line: Option<&manage::RendererLine>,
+) -> Option<String> {
+    use crate::macapp::renderer::{Renderer, applied_renderer};
+    if eff.display.as_ref().map(|m| m.value) != Some(DisplayMode::Wayland) {
+        return None;
+    }
+    let line = line?;
+    if line.x86_64 != Some(false) {
+        return None;
+    }
+    let r = applied_renderer(&line.effective, Os::Linux).ok()?;
+    if !matches!(
+        r,
+        Renderer::Wined3d | Renderer::Dxvk | Renderer::D7vk | Renderer::Vkd3dProton
+    ) {
+        return None;
+    }
+    Some(format!(
+        "this is a 32-bit game on the GPU renderer {}: 32-bit games like that usually fail or          draw unscaled on Wine's Wayland driver (#312). `gogo linux-app display {gogid} x11`          runs it on Xwayland; `gogo linux-app display {gogid} --clear` goes back",
+        r.id()
+    ))
+}
+
 /// `gogo linux-app display <gogid>`.
 #[derive(Debug, Clone, Serialize)]
 pub struct DisplayReport {
@@ -268,6 +298,7 @@ pub fn display_report(gogid: &str) -> Result<DisplayReport, MacAppError> {
     let hdr = r.effective.hdr.as_ref().map(|h| h.value);
     let monitor = r.effective.monitor.as_ref().map(|m| m.value.as_str());
     let mut warnings = conflicts(gogid, &r.effective);
+    warnings.extend(gpu32_warning(gogid, &r.effective, r.renderer.as_ref()));
     warnings.extend(r.warnings);
     Ok(DisplayReport {
         gogid: gogid.to_string(),
@@ -310,6 +341,7 @@ pub fn set_display(
     let mut warnings = Vec::new();
     if let Ok(r) = manage::compat(gogid) {
         warnings = conflicts(gogid, &r.effective);
+        warnings.extend(gpu32_warning(gogid, &r.effective, r.renderer.as_ref()));
         let eff = &r.effective;
         for (key, layer) in [
             ("display", eff.display.as_ref().map(|m| m.layer)),
@@ -369,6 +401,36 @@ mod tests {
     fn eff(raw: &str) -> Effective {
         let e = compat::parse(raw, Os::Linux, Layer::User).unwrap().entry;
         compat::merge(&[(Layer::User, &e)])
+    }
+
+    #[test]
+    fn a_32bit_gpu_game_on_wayland_is_warned_about() {
+        let line = |r: &str, x86_64| manage::RendererLine {
+            baked: r.into(),
+            baked_layer: Layer::Auto,
+            auto: r.into(),
+            reason: String::new(),
+            effective: r.into(),
+            effective_layer: Layer::Auto,
+            applied: None,
+            x86_64,
+        };
+        let wl = eff("[platforms.linux]\ndisplay = \"wayland\"\n");
+        for r in ["wined3d", "dxvk", "d7vk", "vkd3d-proton", "proton-default"] {
+            let w = gpu32_warning("7", &wl, Some(&line(r, Some(false)))).expect(r);
+            assert!(w.contains("#312") && w.contains("display 7 x11"), "{w}");
+            assert!(w.contains("display 7 --clear"), "{w}");
+            // 64-bit, an unknown scan: no warning.
+            assert!(gpu32_warning("7", &wl, Some(&line(r, Some(true)))).is_none());
+            assert!(gpu32_warning("7", &wl, Some(&line(r, None))).is_none());
+        }
+        // GDI: cnc-ddraw (Heroes 3, Pharaoh, Zeus).
+        assert!(gpu32_warning("7", &wl, Some(&line("cnc-ddraw", Some(false)))).is_none());
+        // Not in Wayland mode, or not built.
+        let x = eff("[platforms.linux]\ndisplay = \"x11\"\n");
+        assert!(gpu32_warning("7", &x, Some(&line("wined3d", Some(false)))).is_none());
+        assert!(gpu32_warning("7", &eff(""), Some(&line("wined3d", Some(false)))).is_none());
+        assert!(gpu32_warning("7", &wl, None).is_none());
     }
 
     #[test]

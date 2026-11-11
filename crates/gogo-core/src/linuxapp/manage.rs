@@ -173,6 +173,8 @@ pub struct RendererLine {
     pub effective_layer: Layer,
     /// `state.toml`'s, after any fallback.
     pub applied: Option<String>,
+    /// The entry exe is 64-bit, from the install scan; `None`: the scan failed.
+    pub x86_64: Option<bool>,
 }
 
 /// `gogo linux-app compat <gogid>`.
@@ -274,6 +276,7 @@ pub fn compat_with(gogid: &str, scan: &InstallScan) -> Result<CompatReport, MacA
         effective: label(&effective_renderer, effective_layer),
         effective_layer,
         applied: b.state.as_ref().map(|s| s.renderer.clone()),
+        x86_64: scan.get(&b.dirs, &b.baked).1.is_ok().then_some(pick.x86_64),
     };
     let runtime = l4
         .entry
