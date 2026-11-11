@@ -240,10 +240,12 @@ pub fn conflicts(gogid: &str, eff: &Effective) -> Vec<String> {
     out
 }
 
-/// #312: a 32-bit game that draws through the GPU (wined3d, DXVK, D7VK,
-/// VKD3D-Proton) mostly can't reach it on Wine's Wayland driver. cnc-ddraw
-/// draws with GDI (gogo pins `renderer=gdi`), which works there; a 64-bit
-/// game or a failed scan gets no warning. `None` unless the mode is wayland.
+/// #312, #326: a 32-bit game on wined3d (OpenGL/EGL; `proton-default`
+/// resolves to it) mostly fails or draws unscaled on Wine's Wayland driver.
+/// 32-bit DXVK games work there (Vulkan), and D7VK and VKD3D-Proton are
+/// Vulkan too, so they get no warning. cnc-ddraw draws with GDI (gogo pins
+/// `renderer=gdi`), which works there; a 64-bit game or a failed scan gets
+/// no warning. `None` unless the mode is wayland.
 pub fn gpu32_warning(
     gogid: &str,
     eff: &Effective,
@@ -258,15 +260,11 @@ pub fn gpu32_warning(
         return None;
     }
     let r = applied_renderer(&line.effective, Os::Linux).ok()?;
-    if !matches!(
-        r,
-        Renderer::Wined3d | Renderer::Dxvk | Renderer::D7vk | Renderer::Vkd3dProton
-    ) {
+    if r != Renderer::Wined3d {
         return None;
     }
     Some(format!(
-        "this is a 32-bit game on the GPU renderer {}: 32-bit games like that usually fail or draw unscaled on Wine's Wayland driver (#312). `gogo linux-app display {gogid} x11` runs it on Xwayland; `gogo linux-app display {gogid} --clear` goes back",
-        r.id()
+        "this is a 32-bit game on wined3d (OpenGL): those usually fail or draw unscaled on Wine's Wayland driver (#326). `gogo linux-app display {gogid} x11` runs it on Xwayland; `gogo linux-app display {gogid} --clear` goes back"
     ))
 }
 
@@ -416,9 +414,17 @@ mod tests {
             x86_64,
         };
         let wl = eff("[platforms.linux]\ndisplay = \"wayland\"\n");
-        for r in ["wined3d", "dxvk", "d7vk", "vkd3d-proton", "proton-default"] {
+        // Vulkan renderers: 32-bit DXVK games work on Wayland (#326).
+        for r in ["dxvk", "d7vk", "vkd3d-proton"] {
+            assert!(
+                gpu32_warning("7", &wl, Some(&line(r, Some(false)))).is_none(),
+                "{r}"
+            );
+        }
+        for r in ["wined3d", "proton-default"] {
             let w = gpu32_warning("7", &wl, Some(&line(r, Some(false)))).expect(r);
-            assert!(w.contains("#312") && w.contains("display 7 x11"), "{w}");
+            assert!(w.contains("wined3d (OpenGL)"), "{w}");
+            assert!(w.contains("#326") && w.contains("display 7 x11"), "{w}");
             assert!(!w.contains("  "), "{w}");
             assert!(w.contains("display 7 --clear"), "{w}");
             // 64-bit, an unknown scan: no warning.

@@ -485,9 +485,10 @@ pub enum LinuxAppSub {
     /// Xwayland on a Wayland desktop), or `--clear` it. Kept in the override
     /// file as `display` and `hdr`; the next launch applies them. Without a
     /// Wayland socket at launch, Wayland mode runs the game on X11 and logs why.
-    /// `wayland` on a 32-bit game that draws through the GPU (wined3d, DXVK,
-    /// D7VK, VKD3D-Proton) warns that it usually fails or draws unscaled there
-    /// and still applies, and suggests `x11`; cnc-ddraw's GDI games and 64-bit games don't warn.
+    /// `wayland` on a 32-bit game on wined3d (OpenGL) warns that it usually
+    /// fails or draws unscaled there and still applies, and suggests `x11`;
+    /// DXVK, D7VK and VKD3D-Proton (Vulkan), cnc-ddraw's GDI games and 64-bit
+    /// games don't warn.
     Display {
         /// GOG product id.
         #[arg(value_name = "GOGID")]
