@@ -79,7 +79,7 @@ a hidden alias of `--all-dlcs` (scripts and docs use it). Its meaning narrows: t
 takes every DLC in the build (`manifest.dlcs()`) or every `expanded_dlcs` entry, owned or
 not (design 17 §1: `expanded_dlcs` is not an ownership list). From now it is **owned**
 DLC only. An unowned DLC's depots can't be used anyway; whether GOG refuses them at
-secure-link time is unverified (§11 Q6), and gogo shouldn't find out by trying.
+secure-link time is unverified (§11.2 R4), and gogo shouldn't find out by trying.
 
 ### 1.2 Which DLC a build gets (D3, D4)
 
@@ -93,8 +93,11 @@ secure-link time is unverified (§11 Q6), and gogo shouldn't find out by trying.
   is a large share of Cyberpunk's build), and a script that ran `gogo linux-app <game>
   --yes` yesterday shouldn't download much more today because GOG added a DLC. The picker
   preselects all owned DLC because that's what a person installing interactively usually
-  wants (it's GOG Galaxy's default too). @noosxe may prefer all-owned for `--yes` too
-  (§11 Q1); the switch is one line.
+  wants (it's GOG Galaxy's default too). **Decided (@noosxe, 2026-11-11, §11.1):** no DLC
+  by default for `--yes` and headless first builds. For a game with one DLC, like
+  Cyberpunk 2077's, installing an owned DLC is the obvious choice, but across games it
+  isn't a rule that holds, so gogo doesn't guess. The plan's `N owned DLC not included`
+  line stays, so the choice is visible.
 - **Why a rebuild keeps the set:** a rebuild updates the game; quietly dropping
   Phantom Liberty because the flag wasn't repeated would be a regression the user only
   sees in the game. A rebuild that drops recorded DLC prints it in the plan and needs the
@@ -313,7 +316,7 @@ game's), and the plan's `game files:` line says which, as design 18 §6 does tod
 
 ### 3.5 Removal (D11): later
 
-Not in the first round. Reasons:
+Not in the first round (decided, §11.1). Reasons:
 
 - It needs the reverse of §3.4: the DLC's files, and for files it replaced, the base
   version back. gog-warp can produce that (old `dlcs = I`, new `dlcs = I \ X`: its diff
@@ -360,7 +363,7 @@ fetches DLC **for the installed build** `B`, recorded in `content.toml` (for old
   It must be the user's command. **Why not refuse whenever a newer build exists:** the
   user may hold a version back on purpose (a mod, a known regression), and GOG keeps
   older builds listed (assumed from gog-warp's `get_builds` returning the build history;
-  §11 Q4).
+  §11.2 R2).
 - An update command that patches the base in place (gog-warp's `upgrade_from` with
   xdelta patches) is the natural next step and is the same machinery; it's not designed
   here.
@@ -394,7 +397,7 @@ GOG's DLC installers are Inno Setup `.exe`s of their own (design 04 puts them un
   decision for the whole installer lane, and DLC shouldn't be the only place it differs.
 
 Verified: nothing about DLC installers' file names or whether they install into the base
-dir has been captured live (design 17; docs/03). §11 Q5 and the first host pass check
+dir has been captured live (design 17; docs/03). §11.2 R3 and the first host pass check
 it.
 
 ## 6. Record and state (D9)
@@ -528,23 +531,32 @@ What the Mac lane would need, none of it designed further now:
 asserts `content.toml` and `goggame-<dlcid>.info`, then the usual launch-and-screenshot,
 and a second run of `dlc add` that must be a no-op. It needs a game in
 `target/linux-e2e/cache` (or a new small one) with a small owned DLC on the depot lane:
-which one, and the OK to download it, is @noosxe's (§11 Q3). An interrupted-add check
+which one is §11.2 R1, and a new download still needs @noosxe's OK. An interrupted-add check
 (kill during the lay, relaunch refused, rerun finishes) fits the same step.
 
-## 11. Open questions (for @noosxe)
+## 11. Decided and open
 
-1. **Default for `--yes` first builds:** none (this design) or all owned DLC, as GOG
-   Galaxy does?
-2. **Removal:** fine as a follow-up (D11), or needed in the first round?
-3. **e2e candidate:** which game with a small owned DLC (depot lane) may the harness
-   download for the `dlc_add` step?
-4. **Old builds:** confirm on Cyberpunk that `get_builds` still lists the installed build
-   when a newer one exists (read-only API check; D5 assumes it).
-5. **DLC installers on the offline lane:** do GOG's DLC `setup_*.exe` honour `/DIR=` and
-   install beside the base under Proton? First real check is a host pass with a DLC
-   installer someone already owns and has downloaded.
-6. **Unowned DLC in a manifest:** does GOG refuse their depots at secure-link time? This
-   design never asks for them, so it's only for the error text.
+### 11.1 Decided (@noosxe, 2026-11-11)
+
+1. **`--yes` and headless first builds take no DLC** (§1.2, D3). For a game with a single
+   DLC, such as Cyberpunk 2077, installing it when it's owned is the obvious choice, but
+   that isn't a rule that holds across games, so the default is no DLC. The plan keeps
+   the `N owned DLC not included (--all-dlcs)` line.
+2. **Removal is a follow-up** (§3.5, D11; #353, low priority).
+
+### 11.2 To be settled by research
+
+A separate research pass answers these against the live API and real files. Its answers
+update this doc (and the sections that cite them).
+
+- **R1. e2e candidate:** a game with a small owned DLC on the depot lane for the
+  `dlc_add` step (§10), with Cyberpunk 2077 as the fallback. Pending that research (#352).
+- **R2. Old builds:** does `get_builds` still list the installed build when a newer one
+  exists? Checked on Cyberpunk 2077 (read-only); D5 assumes it does.
+- **R3. DLC installers on the offline lane:** do GOG's DLC `setup_*.exe` honour `/DIR=` and
+  install beside the base game under Proton?
+- **R4. Unowned DLC in a manifest:** does GOG refuse their depots at secure-link time?
+  This design never asks for them, so it only shapes the error text.
 
 ## 12. Implementation issues (sub-issues of #343)
 
