@@ -696,9 +696,12 @@ pub struct DepotArgs {
     /// Content language code (v2 manifests; v1 names are derived).
     #[arg(long, default_value = "en-US")]
     pub language: String,
-    /// Include DLC depots.
-    #[arg(long)]
-    pub with_dlcs: bool,
+    /// Include this DLC (product id or title; repeatable). It must be owned.
+    #[arg(long = "dlc", value_name = "ID|TITLE")]
+    pub dlc: Vec<String>,
+    /// Include every DLC you own (`--with-dlcs` is the old name).
+    #[arg(long, alias = "with-dlcs", conflicts_with = "dlc")]
+    pub all_dlcs: bool,
     /// Password for password-protected builds.
     #[arg(long)]
     pub password: Option<String>,
@@ -1075,9 +1078,12 @@ pub struct DownloadArgs {
     /// Language filter.
     #[arg(long)]
     pub language: Option<String>,
-    /// Include DLC installers (a DLC comes with its parent game).
-    #[arg(long)]
-    pub with_dlcs: bool,
+    /// Include this DLC installer (product id or title; repeatable). It must be owned.
+    #[arg(long = "dlc", value_name = "ID|TITLE")]
+    pub dlc: Vec<String>,
+    /// Include every DLC you own (`--with-dlcs` is the old name).
+    #[arg(long, alias = "with-dlcs", conflicts_with = "dlc")]
+    pub all_dlcs: bool,
     /// Include bonus content (extras).
     #[arg(long)]
     pub extras: bool,
@@ -1161,7 +1167,7 @@ mod tests {
         };
         assert_eq!(a.game, "pharaoh");
         assert_eq!(a.language, "en-US");
-        assert!(!a.with_dlcs && !a.dry_run && !a.json);
+        assert!(a.dlc.is_empty() && !a.all_dlcs && !a.dry_run && !a.json);
 
         let d = Cli::try_parse_from([
             "gogo",
@@ -1179,9 +1185,43 @@ mod tests {
         let Command::Depot(a) = d.command else {
             panic!("expected Depot")
         };
-        assert!(a.with_dlcs && a.dry_run && a.json_progress);
+        assert!(a.all_dlcs && a.dry_run && a.json_progress);
         assert_eq!(a.language, "fr-FR");
         assert_eq!(a.limit.as_deref(), Some("4MiB/s"));
+    }
+
+    #[test]
+    fn dlc_flags_on_depot_and_download() {
+        let Command::Depot(a) = Cli::try_parse_from([
+            "gogo",
+            "depot",
+            "g",
+            "--dlc",
+            "Phantom Liberty",
+            "--dlc",
+            "1597316373",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("expected Depot")
+        };
+        assert_eq!(a.dlc, ["Phantom Liberty", "1597316373"]);
+        assert!(!a.all_dlcs);
+
+        // `--with-dlcs` is the (hidden) old name of `--all-dlcs`
+        let Command::Download(a) = Cli::try_parse_from(["gogo", "download", "g", "--with-dlcs"])
+            .unwrap()
+            .command
+        else {
+            panic!("expected Download")
+        };
+        assert!(a.all_dlcs && a.dlc.is_empty());
+
+        assert!(Cli::try_parse_from(["gogo", "depot", "g", "--dlc", "x", "--all-dlcs"]).is_err());
+        assert!(
+            Cli::try_parse_from(["gogo", "download", "g", "--dlc", "x", "--with-dlcs"]).is_err()
+        );
     }
 
     #[cfg(target_os = "macos")]

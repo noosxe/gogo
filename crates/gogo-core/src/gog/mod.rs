@@ -8,6 +8,7 @@
 pub mod catalog;
 pub mod checksum;
 pub mod depot;
+pub mod dlc;
 pub mod downlink;
 pub mod error;
 pub mod library;
