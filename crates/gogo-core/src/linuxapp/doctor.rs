@@ -496,6 +496,7 @@ fn check_display(g: &Game, host: &Host, scan: &manage::InstallScan) -> Finding {
     });
     let view = DisplayView::of(eff, g.conf.as_ref());
     let mut problems = display::conflicts(&g.gogid, eff);
+    problems.extend(display::gpu32_warning(&g.gogid, eff, r.renderer.as_ref()));
     let mut parts = vec![match &view {
         Some(v) => v.describe(),
         None => "no display mode: the environment decides (X11 through Xwayland unless \
