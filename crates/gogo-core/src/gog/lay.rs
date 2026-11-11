@@ -75,8 +75,23 @@ pub struct Journal {
 }
 
 impl Journal {
-    /// Fill `replaced` and `dirs` from what `game` holds now.
+    /// Map every file onto `game`'s on-disk casing ([`CaseMap`]), then fill
+    /// `replaced` and `dirs` from what `game` holds now. Two files that land on one
+    /// path keep the later one (a support overlay comes after the tree).
     pub fn survey(&mut self, game: &Path) {
+        let mut case = CaseMap::new(game);
+        for f in &mut self.files {
+            f.to = case.map(&f.to);
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut kept: Vec<LayFile> = Vec::new();
+        for f in self.files.drain(..).rev() {
+            if seen.insert(f.to.clone()) {
+                kept.push(f);
+            }
+        }
+        kept.reverse();
+        self.files = kept;
         self.replaced = self
             .files
             .iter()
@@ -99,6 +114,84 @@ impl Journal {
             }
         }
         self.dirs = dirs;
+    }
+}
+
+/// Maps a manifest path onto the casing already on disk under `game/`.
+///
+/// GOG's manifests are case-insensitive (gog-warp compares paths lowercased) and a
+/// DLC depot can spell a dir differently from the base tree (`Archive/PC` against an
+/// installed `archive/pc`). Joined as is on a case-sensitive filesystem, that path
+/// would make a second dir that Wine sees as the same one, and a base file it
+/// replaces would look new and not be backed up. So each component matches,
+/// case-insensitively, what exists (an exact match first, else the first by name;
+/// a dir for every component but the last). A new component keeps the manifest's
+/// case, and later paths reuse it.
+struct CaseMap<'a> {
+    game: &'a Path,
+    /// Lowercased prefix → the prefix chosen for it.
+    chosen: std::collections::HashMap<String, String>,
+    /// A dir's entries (name, is a dir), sorted; `None` when it doesn't exist.
+    listed: std::collections::HashMap<String, Option<Vec<(String, bool)>>>,
+}
+
+impl<'a> CaseMap<'a> {
+    fn new(game: &'a Path) -> Self {
+        Self {
+            game,
+            chosen: Default::default(),
+            listed: Default::default(),
+        }
+    }
+
+    fn entries(&mut self, dir: &str) -> Option<&Vec<(String, bool)>> {
+        let game = self.game;
+        self.listed
+            .entry(dir.to_string())
+            .or_insert_with(|| {
+                let rd = fs::read_dir(game.join(dir)).ok()?;
+                let mut v: Vec<(String, bool)> = rd
+                    .flatten()
+                    .filter_map(|e| {
+                        let name = e.file_name().into_string().ok()?;
+                        Some((name, e.path().is_dir()))
+                    })
+                    .collect();
+                v.sort();
+                Some(v)
+            })
+            .as_ref()
+    }
+
+    fn map(&mut self, rel: &str) -> String {
+        let parts: Vec<&str> = rel.split('/').filter(|p| !p.is_empty()).collect();
+        let mut out = String::new();
+        for (i, comp) in parts.iter().enumerate() {
+            let last = i + 1 == parts.len();
+            let key = format!("{}/{}", out.to_lowercase(), comp.to_lowercase());
+            let name = match self.chosen.get(&key) {
+                Some(p) => p.rsplit('/').next().unwrap_or(comp).to_string(),
+                None => {
+                    let lower = comp.to_lowercase();
+                    let found = self.entries(&out).and_then(|es| {
+                        let fits =
+                            |(n, d): &&(String, bool)| (last || *d) && n.to_lowercase() == lower;
+                        es.iter()
+                            .filter(fits)
+                            .find(|(n, _)| n == comp)
+                            .or_else(|| es.iter().find(fits))
+                            .map(|(n, _)| n.clone())
+                    });
+                    found.unwrap_or_else(|| comp.to_string())
+                }
+            };
+            if !out.is_empty() {
+                out.push('/');
+            }
+            out.push_str(&name);
+            self.chosen.entry(key).or_insert_with(|| out.clone());
+        }
+        out
     }
 }
 
@@ -488,6 +581,105 @@ mod tests {
             finish(&f.root).unwrap();
             assert!(!f.root.join(BACKUP).exists() && read_journal(&f.root).unwrap().is_none());
         }
+    }
+
+    /// A DLC path that differs only in case from an existing dir and file lands on
+    /// the on-disk casing: the base file is seen as replaced and backed up, no
+    /// second dir appears, and new components keep one spelling across files.
+    #[test]
+    fn paths_map_onto_the_casing_on_disk() {
+        let f = fixture(false);
+        fs::create_dir_all(f.src.join("Data")).unwrap();
+        fs::write(f.src.join("Data/Shared.PAK"), b"new shared").unwrap();
+        fs::write(f.src.join("Data/extra.pak"), b"extra").unwrap();
+        fs::write(f.src.join("dlc/ep1/b.archive"), b"b").unwrap();
+        let mut j = journal(&f, false);
+        let src = |r: &str| f.src.join(r);
+        j.files = vec![
+            LayFile {
+                from: src("Data/Shared.PAK"),
+                to: "Data/Shared.PAK".into(),
+            },
+            LayFile {
+                from: src("Data/extra.pak"),
+                to: "DATA/extra.pak".into(),
+            },
+            LayFile {
+                from: src("dlc/ep1/a.archive"),
+                to: "Dlc/Ep1/a.archive".into(),
+            },
+            LayFile {
+                from: src("dlc/ep1/b.archive"),
+                to: "dlc/EP1/b.archive".into(),
+            },
+        ];
+        j.survey(&f.root.join("game"));
+        let tos: Vec<&str> = j.files.iter().map(|x| x.to.as_str()).collect();
+        assert_eq!(
+            tos,
+            [
+                "data/shared.pak",
+                "data/extra.pak",
+                "Dlc/Ep1/a.archive",
+                "Dlc/Ep1/b.archive"
+            ]
+        );
+        assert_eq!(j.replaced, ["data/shared.pak"]);
+        assert_eq!(j.dirs, ["Dlc", "Dlc/Ep1"]);
+
+        lay_files(&f.root, &j, Reflink::Never, &mut |_| false, &mut |_| {}).unwrap();
+        let t = tree(&f.root.join("game"));
+        let mut want = BTreeMap::new();
+        want.insert("base.dat".to_string(), Some(b"base".to_vec()));
+        want.insert("data".into(), None);
+        want.insert("data/shared.pak".into(), Some(b"new shared".to_vec()));
+        want.insert("data/extra.pak".into(), Some(b"extra".to_vec()));
+        want.insert("Dlc".into(), None);
+        want.insert("Dlc/Ep1".into(), None);
+        want.insert("Dlc/Ep1/a.archive".into(), Some(b"dlc archive".to_vec()));
+        want.insert("Dlc/Ep1/b.archive".into(), Some(b"b".to_vec()));
+        assert_eq!(t, want);
+        assert_eq!(
+            fs::read(f.root.join(BACKUP).join("data/shared.pak")).unwrap(),
+            b"old shared"
+        );
+    }
+
+    /// An exact-case match wins over another entry that differs only in case, and
+    /// a file never stands in for a dir component.
+    #[test]
+    fn an_exact_match_wins_and_files_are_not_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let game = tmp.path();
+        fs::create_dir_all(game.join("Mods")).unwrap();
+        fs::create_dir_all(game.join("mods")).unwrap();
+        fs::write(game.join("tools"), b"a file").unwrap();
+        let mut m = CaseMap::new(game);
+        assert_eq!(m.map("mods/a"), "mods/a");
+        assert_eq!(m.map("MODS/b"), "mods/b", "a later path reuses the choice");
+        assert_eq!(m.map("Tools/x.exe"), "Tools/x.exe");
+        assert_eq!(m.map("TOOLS"), "Tools", "a new spelling sticks");
+        let mut m = CaseMap::new(game);
+        assert_eq!(m.map("TOOLS"), "tools", "the last component may be a file");
+    }
+
+    /// Two files that map onto one path keep the later one.
+    #[test]
+    fn survey_keeps_the_later_of_two_files_on_one_path() {
+        let f = fixture(false);
+        let mut j = journal(&f, false);
+        j.files.push(LayFile {
+            from: f.src.join("overlay/goggame-77.info"),
+            to: "GOGGAME-77.info".into(),
+        });
+        j.survey(&f.root.join("game"));
+        let infos: Vec<&LayFile> = j
+            .files
+            .iter()
+            .filter(|x| x.to.eq_ignore_ascii_case("goggame-77.info"))
+            .collect();
+        assert_eq!(infos.len(), 1);
+        assert!(infos[0].from.ends_with("overlay/goggame-77.info"));
     }
 
     #[test]
