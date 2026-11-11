@@ -915,7 +915,7 @@ pub fn setup(
             userdocs: r"C:\users\steamuser\Documents",
             group: &baked.title,
         };
-        if let Some(script) = crate::macapp::goggame::load(dir, gogid, &ctx) {
+        if let Some(script) = crate::macapp::goggame::load_all(dir, gogid, &ctx) {
             warnings.extend(script.warnings);
             registry.extend(script.values);
         }

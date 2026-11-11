@@ -104,6 +104,14 @@ in a build rather than skip it, which is why selection is owned-only (D2).
   Phantom Liberty because the flag wasn't repeated would be a regression the user only
   sees in the game. A rebuild that drops recorded DLC prints it in the plan and needs the
   same consent as the build.
+- As built (#349): `linux-app` takes `--dlc` (repeatable), `--all-dlcs`, `--no-dlcs` (clap
+  conflicts) and `--lang`; they reach the depot download as a `DlcSet`, a language and a
+  `DlcContext`. `dlc::decide` is the table above; the picker is a `dialoguer` multi-select
+  with every owned DLC ticked. A rebuild with no `--lang` keeps the recorded language. A
+  cached tree is checked with the wanted DLC (and the language only when `--lang` was
+  given), so a cache lacking a DLC is completed the targeted way. The offline-installer
+  lane accepts the flags and the plan says DLC isn't installed there yet (#351). A failed
+  `content.toml` write at the end of a build warns.
 - A rebuild that adds DLC is a rebuild (the whole `game/` is re-materialized, design 18
   §10); `dlc add` is the cheap path for a game that's otherwise up to date.
 
@@ -372,6 +380,10 @@ applied, the rest skipped with a warning). `dlc add` runs that part of setup onc
 the lay; the combined registry list changes, so setup's existing "apply when the list
 changed" rule already covers rebuilds. No GOG Galaxy service is involved, and nothing
 here needs one.
+
+As built (#349): `goggame::load_all` returns the base's actions, then each DLC's by ascending
+id (the script is looked for in the game dir, then one level down, beside its info); setup
+applies that list.
 
 ## 4. Build matching (D5)
 

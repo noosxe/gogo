@@ -370,6 +370,111 @@ pub fn select(
     }
 }
 
+/// What a build's DLC flags ask for, names already resolved to ids (design 19 §1.2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Want {
+    /// No flag.
+    Default,
+    /// `--all-dlcs`.
+    All,
+    /// `--no-dlcs`.
+    NoDlc,
+    /// `--dlc X…`: exactly these.
+    Ids(Vec<u64>),
+}
+
+/// How a build gets its DLC set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Basis {
+    /// A set that is already decided.
+    Set(DlcSet),
+    /// Ask the person: these owned DLC, all preselected.
+    Pick(Vec<u64>),
+}
+
+/// [`decide`]'s answer: the set (or a picker) and what the plan must say about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decision {
+    pub basis: Basis,
+    /// Recorded DLC a rebuild leaves out (the plan names them).
+    pub dropped: Vec<u64>,
+    /// Owned DLC of the build that a build with no flag didn't take.
+    pub not_included: usize,
+}
+
+/// Which DLC a build gets: design 19 §1.2's table. `recorded` is the DLC the game's
+/// `content.toml` lists (`Some` for a rebuild), `infos` the game's DLC, and
+/// `interactive` a TTY without `--yes`. A game with no owned DLC in the build never
+/// asks.
+pub fn decide(
+    want: &Want,
+    recorded: Option<&[u64]>,
+    infos: &[DlcInfo],
+    interactive: bool,
+) -> Decision {
+    let takeable: Vec<u64> = infos
+        .iter()
+        .filter(|d| d.owned && d.in_build)
+        .map(|d| d.id)
+        .collect();
+    let dropped_from = |kept: &[u64]| -> Vec<u64> {
+        recorded
+            .unwrap_or_default()
+            .iter()
+            .copied()
+            .filter(|id| !kept.contains(id))
+            .collect()
+    };
+    let set = |basis, dropped| Decision {
+        basis,
+        dropped,
+        not_included: 0,
+    };
+    match want {
+        Want::Ids(ids) => set(Basis::Set(DlcSet::Ids(ids.clone())), dropped_from(ids)),
+        Want::All => set(Basis::Set(DlcSet::AllOwned), Vec::new()),
+        Want::NoDlc => set(Basis::Set(DlcSet::None), dropped_from(&[])),
+        Want::Default => match recorded {
+            Some(r) => set(Basis::Set(DlcSet::Ids(r.to_vec())), Vec::new()),
+            None if takeable.is_empty() => set(Basis::Set(DlcSet::None), Vec::new()),
+            None if interactive => set(Basis::Pick(takeable), Vec::new()),
+            None => Decision {
+                basis: Basis::Set(DlcSet::None),
+                dropped: Vec::new(),
+                not_included: takeable.len(),
+            },
+        },
+    }
+}
+
+/// The plan's lines about the DLC choice (after the `dlc:` line).
+pub fn decision_notes(d: &Decision, infos: &[DlcInfo]) -> Vec<String> {
+    let name = |id: &u64| {
+        infos
+            .iter()
+            .find(|i| i.id == *id)
+            .map_or_else(|| id.to_string(), |i| i.title.clone())
+    };
+    let mut out = Vec::new();
+    if d.not_included > 0 {
+        out.push(format!(
+            "{} owned DLC not included (--all-dlcs)",
+            d.not_included
+        ));
+    }
+    if !d.dropped.is_empty() {
+        out.push(format!(
+            "dropped from the recorded set: {}",
+            d.dropped.iter().map(name).collect::<Vec<_>>().join(", ")
+        ));
+    }
+    out
+}
+
+/// The offline-installer lane takes no DLC yet (design 19 §5, #351).
+pub const INSTALLER_LANE_NOTE: &str =
+    "DLC isn't installed on the offline-installer lane yet; the DLC flags are ignored";
+
 /// What the secure-link probe found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Licence {
@@ -681,5 +786,75 @@ mod tests {
             assert!(!text.contains("error_description"), "{text}");
         }
         assert!(e.to_string().starts_with("you don't own"));
+    }
+
+    #[test]
+    fn default_set_follows_the_table() {
+        let all = infos();
+        let takeable: Vec<u64> = all
+            .iter()
+            .filter(|d| d.owned && d.in_build)
+            .map(|d| d.id)
+            .collect();
+        assert!(!takeable.is_empty());
+        // first build, interactive: a picker with every owned DLC
+        let d = decide(&Want::Default, None, &all, true);
+        assert_eq!(d.basis, Basis::Pick(takeable.clone()));
+        // first build, --yes / no TTY: none, and the count
+        let d = decide(&Want::Default, None, &all, false);
+        assert_eq!(d.basis, Basis::Set(DlcSet::None));
+        assert_eq!(d.not_included, takeable.len());
+        assert_eq!(
+            decision_notes(&d, &all),
+            vec![format!(
+                "{} owned DLC not included (--all-dlcs)",
+                takeable.len()
+            )]
+        );
+        // no owned DLC: no picker, no note
+        let d = decide(&Want::Default, None, &[], true);
+        assert_eq!(d.basis, Basis::Set(DlcSet::None));
+        assert!(decision_notes(&d, &[]).is_empty());
+        // flags on a first build
+        assert_eq!(
+            decide(&Want::All, None, &all, false).basis,
+            Basis::Set(DlcSet::AllOwned)
+        );
+        assert_eq!(
+            decide(&Want::NoDlc, None, &all, true).basis,
+            Basis::Set(DlcSet::None)
+        );
+        assert_eq!(
+            decide(&Want::Ids(vec![7]), None, &all, true).basis,
+            Basis::Set(DlcSet::Ids(vec![7]))
+        );
+    }
+
+    #[test]
+    fn a_rebuild_keeps_narrows_or_drops_the_recorded_set() {
+        let all = infos();
+        let rec = [1256837418, 1597316373];
+        // no flag: the recorded set, whatever the terminal
+        for interactive in [true, false] {
+            let d = decide(&Want::Default, Some(&rec), &all, interactive);
+            assert_eq!(d.basis, Basis::Set(DlcSet::Ids(rec.to_vec())));
+            assert!(d.dropped.is_empty());
+        }
+        // --dlc X: exactly X, the plan names what's dropped
+        let d = decide(&Want::Ids(vec![1597316373]), Some(&rec), &all, false);
+        assert_eq!(d.basis, Basis::Set(DlcSet::Ids(vec![1597316373])));
+        assert_eq!(d.dropped, vec![1256837418]);
+        assert_eq!(
+            decision_notes(&d, &all),
+            vec!["dropped from the recorded set: Cyberpunk 2077: Phantom Liberty".to_string()]
+        );
+        // --no-dlcs: all dropped; --all-dlcs: none
+        let d = decide(&Want::NoDlc, Some(&rec), &all, false);
+        assert_eq!(d.dropped, rec.to_vec());
+        assert!(
+            decide(&Want::All, Some(&rec), &all, false)
+                .dropped
+                .is_empty()
+        );
     }
 }

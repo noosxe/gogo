@@ -54,6 +54,9 @@ pub struct LinuxAppOptions {
     pub gogo_path: Option<PathBuf>,
     /// The checked `library.dir` (design 18 §6.1). `None`: `games/`.
     pub library: Option<launch::Library>,
+    /// What the DLC choice says for the plan (design 19 §1.2): dropped DLC,
+    /// how many owned DLC weren't taken, DLC flags the lane ignores.
+    pub dlc_notes: Vec<String>,
 }
 
 /// A GE-Proton the build downloads.
@@ -119,6 +122,8 @@ pub struct LinuxAppPlan {
     /// Depot lane: the DLC already in the game tree (design 19 §6.2); the
     /// installer lane's base installer has none. Builds add none themselves yet.
     pub dlcs: Vec<content::DlcRef>,
+    /// Lines about the DLC choice, shown under `dlcs`.
+    pub dlc_notes: Vec<String>,
 }
 
 /// What [`execute`] did.
@@ -537,6 +542,7 @@ pub fn plan(
         .unwrap_or_default();
     Ok(LinuxAppPlan {
         dlcs,
+        dlc_notes: opts.dlc_notes.clone(),
         display,
         title_fixed: opts.name.is_some(),
         slug,
@@ -984,7 +990,7 @@ pub fn execute(
     let _ = auto;
 
     persist_flags(plan, &gogid, &selection, &build.reference, emit)?;
-    let outcome = setup::setup(
+    let mut outcome = setup::setup(
         &gogid,
         &SetupOptions {
             // The plan's lookup already refreshed when asked.
@@ -995,7 +1001,9 @@ pub fn execute(
     )?;
     // The last step: a game with no `content.toml` reads as derived (design 19 §6.1).
     let content = content::for_build(lane, &install_dir, cache_root.as_deref());
-    content::write(&GameDirs::for_game(&gogid)?.root, &content)?;
+    if let Some(w) = write_content_or_warn(&GameDirs::for_game(&gogid)?.root, &content) {
+        outcome.warnings.push(w);
+    }
     Ok(BuildOutcome {
         content,
         title,
@@ -1003,6 +1011,17 @@ pub fn execute(
         gogid,
         materialized,
         setup: outcome,
+    })
+}
+
+/// Write `content.toml`; a failure warns, because the finished build is playable
+/// and a game with no file reads as derived (design 19 §6.1).
+fn write_content_or_warn(root: &Path, content: &content::Content) -> Option<String> {
+    content::write(root, content).err().map(|e| {
+        format!(
+            "couldn't write {}: {e}; the game works, its content is read from its files",
+            content::path(root).display()
+        )
     })
 }
 
@@ -1102,6 +1121,19 @@ fn restore_and_run_support(
 mod tests {
     use super::*;
     use crate::macapp::renderer::PROTON_USE_WINED3D;
+
+    #[test]
+    fn a_failed_content_write_warns_instead_of_failing() {
+        let d = tempfile::tempdir().unwrap();
+        let c = content::for_build(content::Lane::Depot, d.path(), None);
+        assert!(write_content_or_warn(d.path(), &c).is_none());
+        let gone = d.path().join("no/such/dir");
+        let w = write_content_or_warn(&gone, &c).expect("a warning");
+        assert!(
+            w.contains("content.toml") && w.contains("the game works"),
+            "{w}"
+        );
+    }
 
     #[test]
     fn gog_key_reg_is_regedit4_in_the_32_bit_view() {

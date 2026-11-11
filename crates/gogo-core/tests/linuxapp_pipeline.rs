@@ -1219,8 +1219,13 @@ fn a_build_writes_content_toml_and_apps_and_doctor_show_it() {
     use gogo::macapp::{apps, doctor::Level};
     let w = World::new("content", &["d3d9.dll"]);
     dlc_info(&w.tree, "777001", "Extra Pack");
-    let plan = build::plan(&w.opts(), None, &mut quiet()).unwrap();
+    let opts = LinuxAppOptions {
+        dlc_notes: vec!["1 owned DLC not included (--all-dlcs)".into()],
+        ..w.opts()
+    };
+    let plan = build::plan(&opts, None, &mut quiet()).unwrap();
     assert_eq!(plan.dlcs.len(), 1, "the plan lists the DLC in the tree");
+    assert_eq!(plan.dlc_notes, opts.dlc_notes);
     let out = build::execute(&plan, None, &mut quiet()).unwrap();
 
     // Written, atomically (no temp file), by the depot lane.
@@ -1229,6 +1234,7 @@ fn a_build_writes_content_toml_and_apps_and_doctor_show_it() {
     assert_eq!(written.lane, content::Lane::Depot);
     assert_eq!(written.dlc.len(), 1);
     assert_eq!(written.dlc[0].title, "Extra Pack");
+    assert_eq!(written.dlc[0].build_id.as_deref(), Some("4242"));
     assert!(!w.game().join("content.toml.tmp").exists());
     // `gogo-launch.toml` doesn't carry it.
     let launch = std::fs::read_to_string(w.game().join("gogo-launch.toml")).unwrap();
