@@ -17,7 +17,7 @@ tested = [
 
 [platforms.linux.lanes.depot]
 status = "plays"
-notes  = "host pass: plays on Xwayland and on Wine's Wayland driver; DLSS, ray tracing and path tracing work, built-in benchmark at 4K ~150 fps (~100 with path tracing); HDR works on Wayland but needs `--hdr force` under Hyprland's cm_auto_hdr (#340); REDmod and Phantom Liberty added with `gogo linux-app dlc add`, the game detects Phantom Liberty (#343)"
+notes  = "host pass: plays on Xwayland and on Wine's Wayland driver; DLSS, ray tracing and path tracing work, built-in benchmark at 4K ~150 fps (~100 with path tracing); HDR works on Wayland but needs `--hdr force` under Hyprland's cm_auto_hdr (#340); REDmod and Phantom Liberty added with `gogo linux-app dlc add`, the game detects Phantom Liberty (#343); on 2026-11-11 the game was removed and rebuilt with both DLC chosen at build time through the `linux-app` DLC selection (#349): both install and work, no different from adding them later, and the rebuild reused the base game from the depot cache"
 tested = [
   { runtime = "ge-proton/GE-Proton11-12", compositor = { name = "hyprland", version = "0.57.1" }, gpu_driver = { vendor = "nvidia", version = "595.112.07" }, date = 2026-11-11 },
 ]
