@@ -422,10 +422,21 @@ pub fn clone_tree(src: &Path, dst: &Path) -> Result<(), MacAppError> {
 /// install dir). Missing directories are created; symlinks in the overlay
 /// are skipped. Returns the merged files relative to `overlay`, sorted.
 pub fn merge_overlay(overlay: &Path, dst: &Path) -> Result<Vec<PathBuf>, MacAppError> {
+    merge_overlay_with(overlay, dst, &|_| true)
+}
+
+/// [`merge_overlay`] of what `keep` says yes to (paths relative to `overlay`):
+/// the Linux depot build leaves out a DLC it doesn't take (design 19 §3.3).
+pub fn merge_overlay_with(
+    overlay: &Path,
+    dst: &Path,
+    keep: &dyn Fn(&Path) -> bool,
+) -> Result<Vec<PathBuf>, MacAppError> {
     fn walk(
         root: &Path,
         dir: &Path,
         dst: &Path,
+        keep: &dyn Fn(&Path) -> bool,
         out: &mut Vec<PathBuf>,
     ) -> Result<(), MacAppError> {
         for entry in std::fs::read_dir(dir)? {
@@ -433,10 +444,13 @@ pub fn merge_overlay(overlay: &Path, dst: &Path) -> Result<Vec<PathBuf>, MacAppE
             let path = entry.path();
             let kind = entry.file_type()?;
             let rel = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+            if !keep(&rel) {
+                continue;
+            }
             let target = dst.join(&rel);
             if kind.is_dir() {
                 std::fs::create_dir_all(&target)?;
-                walk(root, &path, dst, out)?;
+                walk(root, &path, dst, keep, out)?;
             } else if kind.is_file() {
                 // Replace rather than write through: the target is usually an
                 // APFS clone, possibly read-only, of a depot cache file.
@@ -450,7 +464,7 @@ pub fn merge_overlay(overlay: &Path, dst: &Path) -> Result<Vec<PathBuf>, MacAppE
         Ok(())
     }
     let mut merged = Vec::new();
-    walk(overlay, overlay, dst, &mut merged)?;
+    walk(overlay, overlay, dst, keep, &mut merged)?;
     merged.sort();
     Ok(merged)
 }

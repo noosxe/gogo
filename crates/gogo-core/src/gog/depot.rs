@@ -98,6 +98,10 @@ pub enum DepotError {
     NoCacheDir,
     #[error("{0}")]
     Library(String),
+    /// The cache holds DLC the build doesn't take and their files can't be told
+    /// apart (design 19 §3.3): the build is refused, nothing changed.
+    #[error("{0}")]
+    Filter(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
@@ -484,6 +488,25 @@ pub async fn run(
     let held = record_dlcs(prior.as_ref(), &build_id, &opts.language, &dlcs);
     if write_record(&install_root, &build_id, &opts.language, &held).is_err() {
         let _ = std::fs::remove_file(install_root.join(RECORD));
+    } else if !held.is_empty() {
+        // A cache with DLC: keep each product's file list, so a build that leaves
+        // one out needs no fetch (design 19 §3.3). Best effort: a build fetches
+        // what's missing.
+        let mut products = vec![manifest.product_id()];
+        products.extend(held.iter().cloned());
+        let have = record_products(&install_root, &build_id).unwrap_or_default();
+        products.retain(|p| !have.contains_key(p));
+        if !products.is_empty()
+            && let Ok(lists) = super::dlc_filter::fetch(
+                core.reqwest_client(),
+                &manifest,
+                &opts.language,
+                &products,
+            )
+            .await
+        {
+            let _ = store_products(&install_root, &build_id, &lists);
+        }
     }
     let _ = events.send(DepotEvent::Finished {
         install_dir: install_dir.clone(),
@@ -638,6 +661,11 @@ struct Record {
     /// wrote, which can't say what the tree holds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dlcs: Option<Vec<String>>,
+    /// Each product's files, from the build's depot manifests (design 19 §3.3):
+    /// what a build that leaves a cached DLC out uses to tell its files apart. Only
+    /// the products some build needed; absent until one did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    products: Option<super::dlc_filter::ProductFiles>,
     /// Paths relative to the cache root, `/`-separated, sorted.
     files: Vec<String>,
 }
@@ -677,7 +705,8 @@ pub struct CacheWant<'a> {
 pub const MISSING_SHOWN: usize = 5;
 
 /// Record what's in `root` after a finished download (overwrites the last).
-/// `dlcs` are the product ids the cache holds.
+/// `dlcs` are the product ids the cache holds. The per-product file lists of the
+/// last record stay when it was for the same build and language.
 pub fn write_record(
     root: &Path,
     build_id: &str,
@@ -690,16 +719,83 @@ pub fn write_record(
     let mut dlcs = dlcs.to_vec();
     dlcs.sort();
     dlcs.dedup();
+    let products = load_record(root)
+        .filter(|r| r.build_id == build_id && r.language.as_deref() == Some(language))
+        .and_then(|r| r.products);
     let rec = Record {
         build_id: build_id.to_string(),
         language: Some(language.to_string()),
         dlcs: Some(dlcs),
+        products,
         files,
     };
-    let text = serde_json::to_string_pretty(&rec).map_err(std::io::Error::other)?;
+    save_record(root, &rec)
+}
+
+fn save_record(root: &Path, rec: &Record) -> std::io::Result<()> {
+    let text = serde_json::to_string_pretty(rec).map_err(std::io::Error::other)?;
     let tmp = root.join(format!("{RECORD}.tmp"));
     std::fs::write(&tmp, text)?;
     std::fs::rename(&tmp, root.join(RECORD))
+}
+
+/// The per-product file lists cache root `root`'s record keeps, when it is for
+/// build `build_id`.
+pub fn record_products(root: &Path, build_id: &str) -> Option<super::dlc_filter::ProductFiles> {
+    load_record(root)
+        .filter(|r| r.build_id == build_id)
+        .and_then(|r| r.products)
+}
+
+/// Add `lists` to the record of cache root `root`, when it is for build `build_id`
+/// (there's nothing to add them to otherwise).
+pub fn store_products(
+    root: &Path,
+    build_id: &str,
+    lists: &super::dlc_filter::ProductFiles,
+) -> std::io::Result<()> {
+    let Some(mut rec) = load_record(root).filter(|r| r.build_id == build_id) else {
+        return Ok(());
+    };
+    let mut all = rec.products.take().unwrap_or_default();
+    all.extend(lists.iter().map(|(k, v)| (k.clone(), v.clone())));
+    rec.products = Some(all);
+    save_record(root, &rec)
+}
+
+/// The file lists of `products` in build `build_id` of `product_id` (design 19
+/// §3.3): from cache root `root`'s record when it has them all, else fetched from
+/// GOG (the build must still be listed) and added to the record.
+pub async fn product_lists(
+    core: &Core,
+    product_id: u64,
+    root: &Path,
+    build_id: &str,
+    language: &str,
+    products: &[String],
+) -> Result<super::dlc_filter::ProductFiles, DepotError> {
+    let have = record_products(root, build_id).unwrap_or_default();
+    if products.iter().all(|p| have.contains_key(p)) {
+        return Ok(have);
+    }
+    let found = installed_build(core, product_id, Some(build_id)).await?;
+    let Some((_, _, manifest)) = found.listed else {
+        return Err(DepotError::Library(format!(
+            "build {build_id} is no longer served by GOG, so its file lists can't be fetched"
+        )));
+    };
+    let missing: Vec<String> = products
+        .iter()
+        .filter(|p| !have.contains_key(*p))
+        .cloned()
+        .collect();
+    let fetched =
+        super::dlc_filter::fetch(core.reqwest_client(), &manifest, language, &missing).await?;
+    // A record that can't take them only costs the next build this fetch.
+    let _ = store_products(root, build_id, &fetched);
+    let mut all = have;
+    all.extend(fetched);
+    Ok(all)
 }
 
 /// The DLC a new record lists: those the old record had, when it was for the
@@ -1235,6 +1331,31 @@ mod tests {
         assert_eq!(record_dlcs(prior.as_ref(), "b2", "en-US", &w), w);
         assert_eq!(record_dlcs(prior.as_ref(), "b1", "de-DE", &w), w);
         assert_eq!(record_dlcs(None, "b1", "en-US", &w), w);
+    }
+
+    #[test]
+    fn file_lists_stay_for_the_same_build_and_language_only() {
+        let t = recorded("b1", "en-US", &["5"]);
+        let root = t.path();
+        assert!(record_products(root, "b1").is_none());
+        let mut lists = super::super::dlc_filter::ProductFiles::new();
+        lists.insert("1".into(), vec!["Game/a".into()]);
+        store_products(root, "b1", &lists).unwrap();
+        // Another build's record takes none.
+        store_products(root, "b2", &Default::default()).unwrap();
+        let mut more = super::super::dlc_filter::ProductFiles::new();
+        more.insert("5".into(), vec!["Game/b".into()]);
+        store_products(root, "b1", &more).unwrap();
+        let have = record_products(root, "b1").unwrap();
+        assert_eq!(have.keys().collect::<Vec<_>>(), ["1", "5"]);
+        assert!(record_products(root, "b2").is_none());
+        // A rewrite (a completion, a `dlc add`) keeps them; another build drops them.
+        write_record(root, "b1", "en-US", &ids(&["5", "7"])).unwrap();
+        assert_eq!(record_products(root, "b1"), Some(have));
+        write_record(root, "b1", "de-DE", &[]).unwrap();
+        assert!(record_products(root, "b1").is_none());
+        // Records without lists still read.
+        assert_eq!(read_record(root).unwrap().build_id, "b1");
     }
 
     #[test]

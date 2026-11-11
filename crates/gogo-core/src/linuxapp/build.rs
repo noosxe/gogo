@@ -24,6 +24,7 @@ use crate::config::{Config, UmuMode};
 use crate::engine::events::ProgressEvent;
 use crate::gog::content;
 use crate::gog::depot;
+pub use crate::gog::dlc_filter::DepotContent;
 use crate::gog::materialize::{self, MaterializePlan, MaterializeReport};
 use crate::macapp::compat::{self, CompatEntry, Effective, Layer, Os};
 use crate::macapp::error::MacAppError;
@@ -57,6 +58,10 @@ pub struct LinuxAppOptions {
     /// What the DLC choice says for the plan (design 19 §1.2): dropped DLC,
     /// how many owned DLC weren't taken, DLC flags the lane ignores.
     pub dlc_notes: Vec<String>,
+    /// The depot lane's DLC (design 19 §3.3): what the build installs and
+    /// records. `None`: the tree is taken whole and its infos say which DLC it
+    /// has (a tree given by path).
+    pub depot_content: Option<DepotContent>,
 }
 
 /// A GE-Proton the build downloads.
@@ -119,9 +124,12 @@ pub struct LinuxAppPlan {
     pub fixes: Option<fixes::Summary>,
     pub refresh: bool,
     pub gogo_path: PathBuf,
-    /// Depot lane: the DLC already in the game tree (design 19 §6.2); the
-    /// installer lane's base installer has none. Builds add none themselves yet.
+    /// Depot lane: the DLC the build installs (design 19 §6.2): the chosen
+    /// set, else those in the game tree. The installer lane's base installer has
+    /// none.
     pub dlcs: Vec<content::DlcRef>,
+    /// What the build takes of the tree (design 19 §3.3).
+    pub depot_content: Option<DepotContent>,
     /// Lines about the DLC choice, shown under `dlcs`.
     pub dlc_notes: Vec<String>,
 }
@@ -210,6 +218,34 @@ fn tree_bytes(p: &Path) -> u64 {
         .flatten()
         .map(|e| tree_bytes(&e.path()))
         .sum()
+}
+
+/// [`tree_bytes`] of what a build takes of the cache tree `tree`.
+fn kept_bytes(tree: &Path, content: Option<&DepotContent>) -> u64 {
+    let Some(c) = content.filter(|c| c.filter.is_some()) else {
+        return tree_bytes(tree);
+    };
+    let Some(root) = tree.parent() else {
+        return tree_bytes(tree);
+    };
+    fn walk(p: &Path, root: &Path, c: &DepotContent) -> u64 {
+        if !c.keeps(p.strip_prefix(root).unwrap_or(p)) {
+            return 0;
+        }
+        let Ok(meta) = p.symlink_metadata() else {
+            return 0;
+        };
+        if !meta.is_dir() {
+            return meta.len();
+        }
+        std::fs::read_dir(p)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| walk(&e.path(), root, c))
+            .sum()
+    }
+    walk(tree, root, c)
 }
 
 fn probe_size(entry: &catalog::CatalogEntry, version: Option<&str>) -> Result<u64, MacAppError> {
@@ -489,7 +525,11 @@ pub fn plan(
         ),
     };
     refuse_private_tmp("the game's dir", &state.root)?;
-    let game_tree_bytes = opts.game_tree.as_deref().map(tree_bytes).unwrap_or(0);
+    let game_tree_bytes = opts
+        .game_tree
+        .as_deref()
+        .map(|t| kept_bytes(t, opts.depot_content.as_ref()))
+        .unwrap_or(0);
     let game_files = opts
         .game_tree
         .as_ref()
@@ -535,13 +575,14 @@ pub fn plan(
         umu_id = Some(u);
     }
 
-    let dlcs = opts
-        .game_tree
-        .as_deref()
-        .map(|t| content::for_build(content::Lane::Depot, t, None).refs())
-        .unwrap_or_default();
+    let dlcs = match (&opts.game_tree, &opts.depot_content) {
+        (Some(_), Some(c)) => c.dlcs.clone(),
+        (Some(t), None) => content::for_build(content::Lane::Depot, t, None, None).refs(),
+        (None, _) => Vec::new(),
+    };
     Ok(LinuxAppPlan {
         dlcs,
+        depot_content: opts.game_tree.as_ref().and(opts.depot_content.clone()),
         dlc_notes: opts.dlc_notes.clone(),
         display,
         title_fixed: opts.name.is_some(),
@@ -792,10 +833,15 @@ pub fn execute(
             materialize::remove_tree(&dirs.game)?;
         }
         let mut tenths = materialize::Tenths::new(total);
-        let report = materialize::materialize_tree_with(
+        // Only the base and the wanted DLC (design 19 §3.3): the filter's paths are
+        // relative to the cache root, the tree's parent.
+        let tree_name = PathBuf::from(tree.file_name().unwrap_or_default());
+        let content_filter = plan.depot_content.clone().unwrap_or_default();
+        let report = materialize::materialize_tree_filtered(
             tree,
             &dirs.game,
             materialize::Reflink::Try,
+            &|rel| content_filter.keeps(&tree_name.join(rel)),
             &mut |_, bytes| {
                 if method == materialize::TreeMethod::Copy
                     && let Some(copied) = tenths.add(bytes)
@@ -816,8 +862,39 @@ pub fn execute(
                 ),
             });
         }
+        if report.left_out_files > 0
+            && let Some(f) = &content_filter.filter
+        {
+            emit(&ProgressEvent::Warn {
+                message: format!(
+                    "left the depot cache's other DLC out of the game dir: {} ({} file(s), {})",
+                    crate::gog::dlc_filter::names(&f.dropped),
+                    report.left_out_files,
+                    crate::fmt::human_size(report.left_out_bytes)
+                ),
+            });
+        }
         for overlay in crate::macapp::locate_support_overlays(tree) {
-            let merged = crate::macapp::bundle::merge_overlay(&overlay, &dirs.game)?;
+            // `gog-support/<base>/<product>/app`: a left-out DLC's is skipped whole.
+            let product = overlay
+                .parent()
+                .and_then(Path::file_name)
+                .map(|n| n.to_string_lossy().into_owned());
+            if content_filter.filter.as_ref().is_some_and(|f| {
+                f.dropped
+                    .iter()
+                    .any(|d| product.as_deref() == Some(d.id.to_string().as_str()))
+            }) {
+                continue;
+            }
+            let cache_root = tree.parent().unwrap_or(tree);
+            let at = overlay
+                .strip_prefix(cache_root)
+                .unwrap_or(&overlay)
+                .to_path_buf();
+            let merged = crate::macapp::bundle::merge_overlay_with(&overlay, &dirs.game, &|rel| {
+                content_filter.keeps(&at.join(rel))
+            })?;
             if !merged.is_empty() {
                 emit(&ProgressEvent::Warn {
                     message: format!(
@@ -1002,7 +1079,11 @@ pub fn execute(
         emit,
     )?;
     // The last step: a game with no `content.toml` reads as derived (design 19 §6.1).
-    let content = content::for_build(lane, &install_dir, cache_root.as_deref());
+    let installed = (lane == content::Lane::Depot)
+        .then_some(plan.depot_content.as_ref())
+        .flatten()
+        .map(|c| c.dlcs.as_slice());
+    let content = content::for_build(lane, &install_dir, cache_root.as_deref(), installed);
     if let Some(w) = write_content_or_warn(&GameDirs::for_game(&gogid)?.root, &content) {
         outcome.warnings.push(w);
     }
@@ -1127,7 +1208,7 @@ mod tests {
     #[test]
     fn a_failed_content_write_warns_instead_of_failing() {
         let d = tempfile::tempdir().unwrap();
-        let c = content::for_build(content::Lane::Depot, d.path(), None);
+        let c = content::for_build(content::Lane::Depot, d.path(), None, None);
         assert!(write_content_or_warn(d.path(), &c).is_none());
         let gone = d.path().join("no/such/dir");
         let w = write_content_or_warn(&gone, &c).expect("a warning");

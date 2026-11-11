@@ -10,6 +10,7 @@ pub mod checksum;
 pub mod content;
 pub mod depot;
 pub mod dlc;
+pub mod dlc_filter;
 pub mod downlink;
 pub mod error;
 pub mod lay;
