@@ -449,6 +449,8 @@ Details: [design 18](docs/design/18-linux-runtime.md) and
 gogo completions fish | source    # also: bash, zsh, elvish, powershell
 ```
 
+The Nix packages (`gogo`, `gogo-linux-app`) install the bash, zsh and fish completions automatically.
+
 ## Docs
 
 The design docs are the contract: [`docs/design/`](docs/design/README.md)

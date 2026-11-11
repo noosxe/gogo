@@ -47,7 +47,11 @@ rustPlatform.buildRustPackage {
   # gog-warp's reqwest keeps its default native-tls feature, which links
   # openssl-sys on Linux (macOS uses Security.framework instead). Its build
   # script also runs bindgen over xdelta3, which needs libclang.
-  nativeBuildInputs = [ pkgs.pkg-config rustPlatform.bindgenHook ];
+  nativeBuildInputs = [
+    pkgs.pkg-config
+    pkgs.installShellFiles
+    rustPlatform.bindgenHook
+  ];
   buildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.openssl ];
 
   # Panic locations in std/core point into the toolchain's rust-src
@@ -68,6 +72,17 @@ rustPlatform.buildRustPackage {
     "v2_launcher_watchdog_spares_a_later_launch"
     "v2_launcher_watchdog_tears_down_after_sigkill"
   ];
+
+  # bash/zsh/fish completions from the built binary (`gogo completions`
+  # needs no config or network). Skipped when the build host can't run it.
+  postInstall = pkgs.lib.optionalString
+    (pkgs.stdenv.buildPlatform.canExecute pkgs.stdenv.hostPlatform) ''
+      export HOME=$TMPDIR
+      installShellCompletion --cmd gogo \
+        --bash <($out/bin/gogo completions bash) \
+        --zsh <($out/bin/gogo completions zsh) \
+        --fish <($out/bin/gogo completions fish)
+    '';
 
   meta = {
     description = "GOG.com offline-installer downloader (Rust CLI)";
