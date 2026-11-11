@@ -1,13 +1,17 @@
-# Chaos Gate (own GOG D3D9 wrapper as ddraw.dll, kept). e2e/1433928487.toml.
+# Chaos Gate (32-bit, a 2D DirectDraw game). GOG's own "DirectX 1-7 wrapper" ships as
+# ddraw.dll and is kept; it draws through D3D9, which runs on Proton's DXVK. Plays on both
+# Xwayland and Wine's Wayland driver on a Hyprland/NVIDIA desktop: a 32-bit GPU game that
+# does work on Wayland, a counterexample for #326, so no `display` pin. e2e/1433928487.toml.
 title  = "Warhammer 40,000: Chaos Gate"
-source = "gogo-headless"
+source = "gogo-host"
 
 [platforms.linux]
-status = "boots"
+status = "plays"
 lane   = "depot"
-notes  = "headless sway: main menu and New Game work; audio, a mission and a real compositor not judged"
+notes  = "host pass on Hyprland (NVIDIA RTX 4090): plays on both Xwayland and Wine's Wayland driver. A 32-bit game, but GOG's ddraw wrapper draws through D3D9 on Proton's DXVK, so it is a 32-bit GPU game that does work on Wayland (a counterexample for #326); no display pin. Headless sway before that: main menu and New Game work"
 tested = [
   { runtime = "ge-proton/GE-Proton11-12", compositor = { name = "sway", version = "1.12" }, gpu_driver = { vendor = "mesa-llvmpipe", version = "26.2.6" }, date = 2026-11-06 },
   { runtime = "ge-proton/GE-Proton11-12", compositor = { name = "sway", version = "1.12" }, gpu_driver = { vendor = "mesa-radv", version = "26.2.6" }, date = 2026-11-06 },
   { runtime = "ge-proton/GE-Proton11-12", compositor = { name = "sway", version = "1.12" }, gpu_driver = { vendor = "nvidia", version = "595.112.07" }, date = 2026-11-06 },
+  { runtime = "ge-proton/GE-Proton11-12", compositor = { name = "hyprland", version = "0.57.1" }, gpu_driver = { vendor = "nvidia", version = "595.112.07" }, date = 2026-11-11 },
 ]
