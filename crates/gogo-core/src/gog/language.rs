@@ -327,6 +327,47 @@ pub fn render(l: &Listing, title_of: &dyn Fn(&str) -> Option<String>) -> String 
     out
 }
 
+/// What a language switch is estimated to download (design 14 §11, #386): the
+/// compressed bytes of the depots `want_language` (plus `want_dlcs`) takes that the
+/// cache, downloaded as `have_language` with `have_dlcs`, doesn't already hold.
+/// Depots are told apart by product and manifest hash, not by language tag: a depot
+/// tagged with several languages can point at different manifests, and two depots
+/// with one hash hold the same files. Each distinct depot counts once.
+///
+/// An upper bound of the real fetch: the downloader compares by file and chunk, so a
+/// depot whose files the cache has in part costs less. `None` for a v1 build, whose
+/// depots carry no per-depot compressed size.
+pub fn switch_download(
+    manifest: &Manifest,
+    have_language: &str,
+    have_dlcs: &[String],
+    want_language: &str,
+    want_dlcs: &[String],
+) -> Option<u64> {
+    let Manifest::V2(m) = manifest else {
+        return None;
+    };
+    let take = |language: &str, dlcs: &[String]| {
+        let language = language.to_string();
+        m.depots()
+            .iter()
+            .filter(|d| {
+                (d.product_id() == m.base_product_id() || dlcs.contains(d.product_id()))
+                    && (d.languages().iter().any(|l| l == "*") || d.languages().contains(&language))
+            })
+            .map(|d| ((d.product_id().clone(), d.manifest().clone()), d))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let have = take(have_language, have_dlcs);
+    let want = take(want_language, want_dlcs);
+    Some(
+        want.iter()
+            .filter(|(k, _)| !have.contains_key(*k))
+            .map(|(_, d)| u64::try_from(*d.compressed_size()).unwrap_or(0))
+            .sum(),
+    )
+}
+
 #[cfg(test)]
 pub(crate) mod fixtures {
     use super::*;
@@ -365,6 +406,88 @@ mod tests {
             "timestamp": 1, "depots": ds, "support_commands": [],
             "installDirectory": "G", "gameIDs": [], "rootGameID": "1"}}))
         .unwrap()
+    }
+
+    /// A v2 manifest: `(product, languages, manifest hash, compressed size)`.
+    fn v2h(depots: &[(&str, &[&str], &str, u64)]) -> Manifest {
+        let ds: Vec<_> = depots
+            .iter()
+            .map(|(p, l, h, c)| {
+                serde_json::json!({"size": 1, "compressedSize": c, "languages": l,
+                    "manifest": h, "productId": p})
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "baseProductId": "1", "depots": ds, "installDirectory": "G",
+            "platform": "windows", "products": []
+        }))
+        .unwrap()
+    }
+
+    fn sw(m: &Manifest, have: &str, want: &str, dlcs: &[&str]) -> Option<u64> {
+        let d: Vec<String> = dlcs.iter().map(|s| s.to_string()).collect();
+        switch_download(m, have, &d, want, &d)
+    }
+
+    #[test]
+    fn switch_counts_only_the_differing_depots() {
+        let m = v2h(&[
+            ("1", &["*"], "a", 100),
+            ("1", &["en-US", "pt-BR"], "b", 50),
+            ("1", &["en-US"], "c", 7),
+            ("1", &["pt-BR"], "d", 11),
+            ("1", &["pt-BR"], "e", 13),
+        ]);
+        assert_eq!(sw(&m, "en-US", "pt-BR", &[]), Some(24));
+    }
+
+    #[test]
+    fn switch_counts_a_shared_manifest_once_or_not_at_all() {
+        let m = v2h(&[
+            ("1", &["en-US"], "same", 40),
+            ("1", &["pt-BR"], "same", 40),
+            ("1", &["pt-BR"], "new", 9),
+            ("1", &["de-DE", "pt-BR"], "new", 9),
+        ]);
+        assert_eq!(sw(&m, "en-US", "pt-BR", &[]), Some(9));
+    }
+
+    #[test]
+    fn switch_counts_a_depot_whose_manifest_differs_per_language() {
+        // One depot tagged with both languages in two entries, different hashes.
+        let m = v2h(&[("1", &["en-US"], "x1", 60), ("1", &["pt-BR"], "x2", 65)]);
+        assert_eq!(sw(&m, "en-US", "pt-BR", &[]), Some(65));
+    }
+
+    #[test]
+    fn switch_to_the_same_language_costs_nothing() {
+        let m = v2h(&[("1", &["en-US"], "x1", 60), ("1", &["*"], "y", 5)]);
+        assert_eq!(sw(&m, "en-US", "en-US", &[]), Some(0));
+    }
+
+    #[test]
+    fn switch_counts_wanted_dlc_the_cache_lacks() {
+        let m = v2h(&[
+            ("1", &["*"], "a", 100),
+            ("2", &["*"], "dlc", 30),
+            ("3", &["*"], "other", 99),
+            ("1", &["pt-BR"], "p", 4),
+        ]);
+        let d = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            switch_download(&m, "en-US", &d(&["2"]), "pt-BR", &d(&["2", "3"])),
+            Some(4 + 99)
+        );
+        assert_eq!(
+            switch_download(&m, "en-US", &d(&[]), "pt-BR", &d(&["2"])),
+            Some(34)
+        );
+    }
+
+    #[test]
+    fn switch_has_no_estimate_for_v1() {
+        let m = v1m(&[(&["English"], &["1"])]);
+        assert_eq!(sw(&m, "en-US", "pt-BR", &[]), None);
     }
 
     fn cyber() -> BuildLanguages {

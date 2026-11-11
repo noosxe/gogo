@@ -443,7 +443,7 @@ resolve game → content.toml (build B, language L, installed DLC I)
 | files missing | `Missing` | as today: full `verify` repair |
 | `dlcs`/`language` absent (an older gogo) | `UnknownContent` | first brought up to date from the build's depot manifests when that's safe (§3.2, #374), then answered again. Otherwise a full `verify` with the wanted set: gog-warp keeps what's valid and fetches the rest. That's slow, but without the record it can't know what the tree holds unless it hashes it |
 | wanted DLC not in `dlcs` | `MissingDlc(W)` | the targeted add of §3.2 on the cache (no hashing) |
-| language differs | `OtherLanguage` | rebuild-time only: a targeted diff from (old language, `dlcs`) to (new, wanted) |
+| language differs | `OtherLanguage` | rebuild-time only: a targeted diff from (old language, `dlcs`) to (new, wanted); the plan's download is an estimate from the depots the new language adds, by manifest hash (design 14 §11, #386) |
 | `buildId` differs from the build being made | `OtherBuild` | as today: the new build is fetched into the cache via `verify`, with the wanted DLC set |
 | `dlcs` ⊇ wanted, same language | `Complete` | reused. Extra DLC in the cache is fine: the materialize copies only what the build wants (below) |
 

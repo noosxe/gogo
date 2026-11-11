@@ -38,9 +38,18 @@ pub enum DepotEvent {
     },
     Plan {
         install_dir: PathBuf,
+        /// The whole build for the language and DLC wanted: an upper bound when
+        /// `estimated_download_size` is present.
         download_size: u64,
         disk_size: u64,
         language: String,
+        /// An estimate of what a switch of language fetches, when the cache holds
+        /// another language of this build (design 14 §11, #386): the depots the new
+        /// language needs that the cached one lacks, by manifest hash. A guess until
+        /// the downloader has hashed the cache; the plan line shows it in place of
+        /// `download_size`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        estimated_download_size: Option<u64>,
         /// What `--language` said, when `language` is the code it resolved to
         /// (`de` → `de-DE`).
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -467,6 +476,8 @@ pub async fn run(
     let check = prior.as_ref().map_or(CacheCheck::Unrecorded, |r| {
         check_record(&install_root, r, &want)
     });
+    let estimated_download_size =
+        estimate_switch(&check, prior.as_ref(), &manifest, &language, &dlcs);
     let inputs = download_inputs(
         generation,
         &language,
@@ -495,6 +506,7 @@ pub async fn run(
         install_dir: install_dir.clone(),
         download_size,
         disk_size,
+        estimated_download_size,
         language: language.clone(),
         requested_language,
         dlcs: plan_dlcs,
@@ -1055,6 +1067,29 @@ fn check_record(root: &Path, rec: &Record, want: &CacheWant<'_>) -> CacheCheck {
     }
 }
 
+/// The plan's estimate for a language switch (#386): only when the record names the
+/// other language the cache holds; an old record without one has no estimate, and the
+/// plan keeps the whole-build figure.
+fn estimate_switch(
+    check: &CacheCheck,
+    prior: Option<&Record>,
+    manifest: &Manifest,
+    language: &str,
+    dlcs: &[String],
+) -> Option<u64> {
+    let rec = prior?;
+    if *check != CacheCheck::OtherLanguage {
+        return None;
+    }
+    super::language::switch_download(
+        manifest,
+        rec.language.as_deref()?,
+        rec.dlcs.as_deref().unwrap_or(&[]),
+        language,
+        dlcs,
+    )
+}
+
 /// What the downloader is told for a run (design 19 §3.2/§3.3): kept apart
 /// from the builder so the choice is testable without a network.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1170,9 +1205,9 @@ fn cache_note(check: &CacheCheck, inputs: &DownloadInputs) -> Option<String> {
             "cache lacks DLC {}: checking it (hashing) and fetching them",
             missing.join(", ")
         ),
-        CacheCheck::OtherLanguage => {
-            "cache holds another language: checking it (hashing) and fetching the rest".into()
-        }
+        CacheCheck::OtherLanguage => "cache holds another language: checking it (hashing) and \
+             fetching the rest; the other language's files stay in the cache"
+            .into(),
         CacheCheck::OtherBuild => {
             "cache holds another build: checking it (hashing) and fetching the new one".into()
         }
@@ -1446,6 +1481,37 @@ mod tests {
     }
 
     #[test]
+    fn switch_estimate_needs_a_record_naming_another_language() {
+        let m: Manifest = serde_json::from_value(serde_json::json!({
+            "baseProductId": "1", "installDirectory": "G", "platform": "windows",
+            "products": [], "depots": [
+                {"size": 9, "compressedSize": 9, "languages": ["en-US"], "manifest": "e", "productId": "1"},
+                {"size": 5, "compressedSize": 5, "languages": ["de-DE"], "manifest": "d", "productId": "1"}]
+        }))
+        .unwrap();
+        let rec = |language: Option<&str>| Record {
+            build_id: "b".into(),
+            language: language.map(Into::into),
+            dlcs: Some(vec![]),
+            products: None,
+            files: vec![],
+        };
+        let other = CacheCheck::OtherLanguage;
+        let est = |c: &CacheCheck, r: Option<&Record>, l: &str| estimate_switch(c, r, &m, l, &[]);
+        assert_eq!(est(&other, Some(&rec(Some("en-US"))), "de-DE"), Some(5));
+        // The same language, an old record, no record: no estimate.
+        assert_eq!(
+            est(&CacheCheck::Complete, Some(&rec(Some("en-US"))), "en-US"),
+            None
+        );
+        assert_eq!(
+            est(&CacheCheck::UnknownContent, Some(&rec(None)), "de-DE"),
+            None
+        );
+        assert_eq!(est(&CacheCheck::Unrecorded, None, "de-DE"), None);
+    }
+
+    #[test]
     fn plan_says_what_happens_to_the_cache() {
         let miss = CacheCheck::MissingDlc {
             missing: ids(&["7"]),
@@ -1606,6 +1672,7 @@ mod tests {
         let mut e = DepotEvent::Plan {
             install_dir: "/c/T".into(),
             download_size: 1,
+            estimated_download_size: None,
             disk_size: 2,
             language: "en-US".into(),
             requested_language: None,
@@ -1617,7 +1684,24 @@ mod tests {
             serde_json::to_string(&e).unwrap(),
             r#"{"type":"plan","installDir":"/c/T","downloadSize":1,"diskSize":2,"language":"en-US"}"#
         );
-        if let DepotEvent::Plan { game_files, .. } = &mut e {
+        if let DepotEvent::Plan {
+            estimated_download_size,
+            ..
+        } = &mut e
+        {
+            *estimated_download_size = Some(1);
+        }
+        assert_eq!(
+            serde_json::to_string(&e).unwrap(),
+            r#"{"type":"plan","installDir":"/c/T","downloadSize":1,"diskSize":2,"language":"en-US","estimatedDownloadSize":1}"#
+        );
+        if let DepotEvent::Plan {
+            game_files,
+            estimated_download_size,
+            ..
+        } = &mut e
+        {
+            *estimated_download_size = None;
             *game_files = Some(MaterializePlan {
                 method: super::super::materialize::TreeMethod::Copy,
                 game_dir: "/d/games/1/game".into(),
