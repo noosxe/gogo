@@ -13,7 +13,7 @@
 //! [`decide`] is pure over the fetched depot lists; [`apply`] checks the disk again
 //! and writes the record, last and durably. It never touches the tree.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use gog_warp::content_system::types::Manifest;
@@ -182,25 +182,12 @@ pub fn decide(
     }
     // A path two languages share through different depot manifests may hold
     // either one's bytes: existence can't tell.
-    let mut ours: HashMap<String, HashSet<&str>> = HashMap::new();
-    for d in depots.iter().filter(|d| matches(d)) {
-        for p in &d.paths {
-            ours.entry(p.to_lowercase())
-                .or_default()
-                .insert(d.manifest.as_str());
-        }
-    }
-    for d in depots.iter().filter(|d| !matches(d)) {
-        if let Some(p) = d.paths.iter().find(|p| {
-            ours.get(&p.to_lowercase())
-                .is_some_and(|m| !m.contains(d.manifest.as_str()))
-        }) {
-            return Err(format!(
-                "{language}'s files share a path with {}'s ({p}), so which one the cache \
-                 holds can't be told without hashing",
-                d.languages.join("/")
-            ));
-        }
+    if let Some((d, p)) = dlc_filter::clash(depots, language, |_| true) {
+        return Err(format!(
+            "{language}'s files share a path with {}'s ({p}), so which one the cache \
+             holds can't be told without hashing",
+            d.languages.join("/")
+        ));
     }
     let mut products: Vec<String> = vec![base.to_string()];
     for d in depots {

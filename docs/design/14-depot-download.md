@@ -255,13 +255,16 @@ the same codes (`English` → `en-US`). `*` (v1 `Neutral`) is a depot for every 
   several languages can point at different depot manifests and two depots with one hash
   hold the same files; each distinct depot counts once. It reads only the build manifest
   the plan already has: no extra fetch. A v1 build, a record without a language and any
-  other cache answer keep the whole-build figure.
+  other cache answer keep the whole-build figure. A cache that holds several languages
+  whole (#389) counts a depot any of them has as had.
   - *What gog-warp does* (pinned rev, read-only): a non-targeted run is `verify` with the
     new language and no old manifest. `prepare` lists every file of the new language's
     depots, `update_state` hashes the files already at those paths chunk by chunk, and
     only chunks that are missing or differ are fetched; a file whose path exists in the
     disk-space check counts as present. Nothing is deleted (the report's deleted list is
     empty without an old manifest), so **the old language's files stay in the cache**.
+    The cache is never pruned: the record keeps every language it holds, and builds
+    copy only their own language's files (design 19 §3.3, #389).
     The depot-level figure is an upper bound of the fetch: a depot the cache has some of
     (same path, same bytes) costs less. The plan's cache note says the other language's
     files stay.

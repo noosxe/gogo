@@ -2173,7 +2173,10 @@ async fn resolve_game_source(
         && std::io::IsTerminal::is_terminal(&std::io::stdin())
         && std::io::IsTerminal::is_terminal(&std::io::stderr());
     let dlc_plan = match dlc {
-        Some(ask) => prepare_dlc(&ctx, &token, session, game, ask, interactive).await?,
+        Some(ask) => {
+            let cached = gogo::gog::depot::read_record(&root).and_then(|r| r.language);
+            prepare_dlc(&ctx, &token, session, game, ask, interactive, cached).await?
+        }
         None => DlcPlan::default(),
     };
     let mut notes = dlc_plan.notes.clone();
@@ -2193,7 +2196,12 @@ async fn resolve_game_source(
                     &root,
                     &gogo::gog::depot::CacheWant {
                         build_id: None,
-                        language: dlc_plan.explicit_lang.as_deref(),
+                        // The build's language whenever the record names one: a cache
+                        // can hold several, and only a whole one builds (#389).
+                        language: dlc_plan.explicit_lang.as_deref().or((dlc.is_some()
+                            && gogo::gog::depot::read_record(&root)
+                                .is_some_and(|r| r.language.is_some()))
+                        .then_some(dlc_plan.opts.language.as_str())),
                         dlcs: &want_ids,
                     },
                 )
@@ -2405,64 +2413,113 @@ async fn take_content(
         return Ok(None);
     }
     let wanted: Vec<u64> = plan.refs.iter().map(|d| d.id).collect();
+    // The build's language (#389): `--lang`, else the game's, else the cache's.
+    let language = plan.opts.language.clone();
     let mut content = DepotContent {
         dlcs: plan.refs.clone(),
+        language: Some(language.clone()),
         filter: None,
     };
     let Need::Filter {
         extra,
         products,
         build_id,
-        language,
-    } = dlc_filter::need(root, tree, &game.id.to_string(), &wanted)
+        languages,
+        ..
+    } = dlc_filter::need(root, tree, &game.id.to_string(), &wanted, &language)
     else {
         return Ok(Some(content));
     };
-    let language = language.unwrap_or_else(|| plan.opts.language.clone());
-    let lists = match &build_id {
-        Some(b) => gogo::gog::depot::product_lists(session, game.id, root, b, &language, &products)
+    let lists_in = async |l: &str| match &build_id {
+        Some(b) => gogo::gog::depot::product_lists(session, game.id, root, b, l, &products)
             .await
             .map_err(|e| e.to_string()),
         None => Err("neither the cache record nor the game's info names its build".to_string()),
     };
+    let mut lists = lists_in(&language).await;
+    let mut others = Vec::new();
+    for l in &languages {
+        match lists_in(l).await {
+            Ok(o) => others.push((l.clone(), o)),
+            Err(e) => {
+                lists = lists.and(Err(e));
+                break;
+            }
+        }
+    }
     let keeping: Vec<String> = products
         .iter()
         .filter(|p| !extra.iter().any(|d| d.id.to_string() == **p))
         .cloned()
         .collect();
     let filter = lists.and_then(|l| {
-        dlc_filter::filter(&l, &keeping, &extra)
+        dlc_filter::filter_languages(&l, &keeping, &extra, &others)
             .map_err(|lacking| format!("no file list for {}", lacking.join(", ")))
     });
     match filter {
         Ok(f) => {
-            notes.push(format!(
-                "the depot cache also holds {}: left out of the game dir{}",
-                dlc_filter::names(&extra),
-                if f.shared > 0 {
-                    format!(" ({} file(s) it shares with the build are kept)", f.shared)
-                } else {
-                    String::new()
-                }
-            ));
+            if !extra.is_empty() {
+                notes.push(format!(
+                    "the depot cache also holds {}: left out of the game dir{}",
+                    dlc_filter::names(&extra),
+                    if f.shared > 0 {
+                        format!(" ({} file(s) it shares with the build are kept)", f.shared)
+                    } else {
+                        String::new()
+                    }
+                ));
+            }
+            if !languages.is_empty() {
+                let (files, bytes) = f.languages_left_out(root);
+                notes.push(format!(
+                    "the depot cache also holds {}: {files} file(s), {} left out of the game \
+                     dir{}",
+                    languages.join(", "),
+                    gogo::fmt::human_size(bytes),
+                    if f.language_shared > 0 {
+                        format!(
+                            " ({} file(s) {language} shares with them are kept)",
+                            f.language_shared
+                        )
+                    } else {
+                        String::new()
+                    }
+                ));
+            }
             content.filter = Some(f);
             Ok(Some(content))
         }
         Err(reason) => {
+            let mut held = Vec::new();
+            if !extra.is_empty() {
+                held.push(format!(
+                    "DLC this build doesn't take ({})",
+                    dlc_filter::names(&extra)
+                ));
+            }
+            if !languages.is_empty() {
+                held.push(format!("other languages ({})", languages.join(", ")));
+            }
             let with: String = wanted
                 .iter()
                 .chain(extra.iter().map(|d| &d.id))
                 .map(|id| format!(" --dlc {id}"))
                 .collect();
+            let hint = if extra.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    ", or build with the DLC too (`gogo linux-app {}{with}`)",
+                    game.id
+                )
+            };
             Err(AppError::Depot(gogo::gog::depot::DepotError::Filter(
                 format!(
-                    "the depot cache for {} also holds DLC this build doesn't take ({}), and \
-                 their files can't be told apart from the rest: {reason}. Nothing was \
-                 changed. Retry when GOG can be reached, or build with them too \
-                 (`gogo linux-app {}{with}`)",
+                    "the depot cache for {} also holds {}, and their files can't be told \
+                     apart from the rest: {reason}. Nothing was changed. Retry when GOG can \
+                     be reached{hint}",
                     game.title,
-                    dlc_filter::names(&extra),
-                    game.id
+                    held.join(" and "),
                 ),
             )))
         }
@@ -2480,6 +2537,7 @@ async fn prepare_dlc(
     game: &gogo::gog::library::LibraryProduct,
     ask: &DlcAsk,
     interactive: bool,
+    cache_language: Option<String>,
 ) -> Result<DlcPlan, AppError> {
     use gogo::gog::dlc::{self, Basis, DlcSet, Want};
     let usage = |e: &dyn std::fmt::Display| {
@@ -2512,9 +2570,11 @@ async fn prepare_dlc(
             .cloned()
             .unwrap_or_else(|| l.clone())
     });
+    // A first build takes the depot cache's language (#389).
     let language = asked
         .clone()
         .or(recorded_language)
+        .or(cache_language)
         .unwrap_or_else(|| gogo::gog::language::DEFAULT.to_string());
     let mut plan = DlcPlan {
         opts: gogo::gog::depot::DepotOptions {

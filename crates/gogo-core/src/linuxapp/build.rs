@@ -865,10 +865,18 @@ pub fn execute(
         if report.left_out_files > 0
             && let Some(f) = &content_filter.filter
         {
+            let what: Vec<String> = [
+                (!f.dropped.is_empty())
+                    .then(|| format!("DLC {}", crate::gog::dlc_filter::names(&f.dropped))),
+                (!f.languages.is_empty()).then(|| format!("languages {}", f.languages.join(", "))),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
             emit(&ProgressEvent::Warn {
                 message: format!(
-                    "left the depot cache's other DLC out of the game dir: {} ({} file(s), {})",
-                    crate::gog::dlc_filter::names(&f.dropped),
+                    "left the depot cache's other {} out of the game dir ({} file(s), {})",
+                    what.join(" and "),
                     report.left_out_files,
                     crate::fmt::human_size(report.left_out_bytes)
                 ),
@@ -1083,7 +1091,13 @@ pub fn execute(
         .then_some(plan.depot_content.as_ref())
         .flatten()
         .map(|c| c.dlcs.as_slice());
-    let content = content::for_build(lane, &install_dir, cache_root.as_deref(), installed);
+    let mut content = content::for_build(lane, &install_dir, cache_root.as_deref(), installed);
+    // The build's language, not the cache record's last one (#389).
+    if lane == content::Lane::Depot
+        && let Some(l) = plan.depot_content.as_ref().and_then(|c| c.language.clone())
+    {
+        content.language = Some(l);
+    }
     if let Some(w) = write_content_or_warn(&GameDirs::for_game(&gogid)?.root, &content) {
         outcome.warnings.push(w);
     }

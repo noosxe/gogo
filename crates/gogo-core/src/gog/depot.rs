@@ -7,6 +7,7 @@
 //! The heavy lifting (depots, secure links, chunk reconstruction, verification)
 //! is the library's; this module owns selection, layout, events, and limits.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -485,7 +486,7 @@ pub async fn run(
         &check,
         prior
             .as_ref()
-            .and_then(|r| r.dlcs.as_deref())
+            .and_then(|r| r.whole_dlcs(&language))
             .unwrap_or(&[]),
     );
     let install_dir = install_root.join(manifest.install_directory());
@@ -550,22 +551,60 @@ pub async fn run(
     // The download is done either way; without a record (a full disk, say)
     // the next reuse just checks it again.
     let held = record_dlcs(prior.as_ref(), &build_id, &language, &dlcs);
+    let was_whole = whole_before(prior.as_ref(), &check, &build_id, &language);
     if write_record(&install_root, &build_id, &language, &held).is_err() {
         let _ = std::fs::remove_file(install_root.join(RECORD));
-    } else if !held.is_empty() {
-        // A cache with DLC: keep each product's file list, so a build that leaves
-        // one out needs no fetch (design 19 §3.3). Best effort: a build fetches
-        // what's missing.
+    } else {
+        // Keep the products' file lists for a build that leaves a DLC or a language
+        // out, and settle the other languages (design 19 §3.3, #389). Best effort:
+        // they stay not whole, and a build fetches the lists it lacks.
+        let rec = load_record(&install_root);
+        let languages: Vec<String> = rec
+            .as_ref()
+            .map(|r| {
+                std::iter::once(language.clone())
+                    .chain(r.other_languages.keys().cloned())
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut products = vec![manifest.product_id()];
         products.extend(held.iter().cloned());
-        let have = record_products(&install_root, &build_id).unwrap_or_default();
-        products.retain(|p| !have.contains_key(p));
-        if !products.is_empty()
-            && let Ok(lists) =
-                super::dlc_filter::fetch(core.reqwest_client(), &manifest, &language, &products)
-                    .await
-        {
-            let _ = store_products(&install_root, &build_id, &lists);
+        products.extend(
+            rec.iter()
+                .flat_map(|r| r.other_languages.values())
+                .flat_map(|h| h.dlcs.iter().cloned()),
+        );
+        products.sort();
+        products.dedup();
+        let lacking = rec.as_ref().is_some_and(|r| {
+            languages.iter().any(|l| {
+                let have = r.products_in(l);
+                products
+                    .iter()
+                    .any(|p| have.is_none_or(|h| !h.contains_key(p)))
+            })
+        });
+        let several = languages.len() > 1;
+        let wrote = fetched_files > 0;
+        if (several || !held.is_empty()) && (lacking || (wrote && !was_whole.is_empty())) {
+            match super::dlc_filter::fetch_depots(
+                core.reqwest_client(),
+                &manifest,
+                Some((&products, &languages)),
+            )
+            .await
+            {
+                Ok(depots) => {
+                    let _ =
+                        settle_languages(&install_root, &build_id, &was_whole, &products, &depots);
+                }
+                Err(_) if !wrote => {
+                    let _ = keep_whole(&install_root, &build_id, &was_whole);
+                }
+                Err(_) => {}
+            }
+        } else if !wrote && !was_whole.is_empty() {
+            let _ = keep_whole(&install_root, &build_id, &was_whole);
         }
     }
     let _ = events.send(DepotEvent::Finished {
@@ -714,7 +753,9 @@ const WARP_TEMP: &str = "!Temp";
 #[serde(rename_all = "camelCase")]
 struct Record {
     build_id: String,
-    /// The language the download asked for; absent in records an older gogo wrote.
+    /// The language the last download asked for; absent in records an older gogo
+    /// wrote. A path two languages share holds this one's bytes. The cache can hold
+    /// other languages too (`other_languages`, #389): a switch deletes nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     language: Option<String>,
     /// DLC product ids the cache holds, sorted; absent in records an older gogo
@@ -726,8 +767,95 @@ struct Record {
     /// the products some build needed; absent until one did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     products: Option<super::dlc_filter::ProductFiles>,
+    /// The other languages whose files the cache still holds (#389), by code: the
+    /// cache is never pruned, so a build leaves them out and a switch back can cost
+    /// no download. Absent in records an older gogo wrote, which are taken to hold
+    /// `language` only.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    other_languages: BTreeMap<String, HeldLanguage>,
     /// Paths relative to the cache root, `/`-separated, sorted.
     files: Vec<String>,
+}
+
+/// One of a record's other languages (#389).
+#[derive(Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct HeldLanguage {
+    /// Its files are there as it has them: no path it shares with a language
+    /// fetched since holds that one's bytes (checked against the build's depot
+    /// manifests). Only then can a build in it go without a download, and only
+    /// then is `dlcs` true. Set back to false by every download that can't check.
+    #[serde(default)]
+    whole: bool,
+    /// The DLC it held whole when it was the record's language.
+    #[serde(default)]
+    dlcs: Vec<String>,
+    /// Its per-product file lists, like the record's `products`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    products: Option<super::dlc_filter::ProductFiles>,
+}
+
+impl Record {
+    /// Its other language `language` (any case).
+    fn other(&self, language: &str) -> Option<(&String, &HeldLanguage)> {
+        self.other_languages
+            .iter()
+            .find(|(l, _)| l.eq_ignore_ascii_case(language))
+    }
+
+    fn is_language(&self, language: &str) -> bool {
+        self.language
+            .as_deref()
+            .is_some_and(|l| l.eq_ignore_ascii_case(language))
+    }
+
+    /// The DLC it holds whole in `language`: its own for its language, a whole
+    /// other language's; `None` for a language it doesn't hold whole.
+    fn whole_dlcs(&self, language: &str) -> Option<&[String]> {
+        if self.is_language(language) {
+            return Some(self.dlcs.as_deref().unwrap_or(&[]));
+        }
+        self.other(language)
+            .filter(|(_, h)| h.whole)
+            .map(|(_, h)| h.dlcs.as_slice())
+    }
+
+    /// The languages it holds whole, with their DLC: its own and the whole others.
+    fn whole_languages(&self) -> Vec<(&str, &[String])> {
+        self.language
+            .as_deref()
+            .map(|l| (l, self.dlcs.as_deref().unwrap_or(&[])))
+            .into_iter()
+            .chain(
+                self.other_languages
+                    .iter()
+                    .filter(|(_, h)| h.whole)
+                    .map(|(l, h)| (l.as_str(), h.dlcs.as_slice())),
+            )
+            .collect()
+    }
+
+    /// The file lists it keeps for `language`.
+    fn products_in(&self, language: &str) -> Option<&super::dlc_filter::ProductFiles> {
+        if self.is_language(language) {
+            self.products.as_ref()
+        } else {
+            self.other(language).and_then(|(_, h)| h.products.as_ref())
+        }
+    }
+
+    fn products_in_mut(
+        &mut self,
+        language: &str,
+    ) -> Option<&mut Option<super::dlc_filter::ProductFiles>> {
+        if self.is_language(language) {
+            return Some(&mut self.products);
+        }
+        self.other_languages
+            .iter_mut()
+            .find(|(l, _)| l.eq_ignore_ascii_case(language))
+            .map(|(_, h)| &mut h.products)
+    }
 }
 
 /// What a cache root's record says about it.
@@ -764,9 +892,14 @@ pub struct CacheWant<'a> {
 /// How many missing paths [`CacheCheck::Missing`] names.
 pub const MISSING_SHOWN: usize = 5;
 
-/// Record what's in `root` after a finished download (overwrites the last).
-/// `dlcs` are the product ids the cache holds. The per-product file lists of the
-/// last record stay when it was for the same build and language.
+/// Record what's in `root` after a finished download in `language` (overwrites
+/// the last). `dlcs` are the product ids the cache holds in `language`. The
+/// per-product file lists of the last record stay when it was for the same build.
+///
+/// The languages the last record held stay held (#389): a download deletes
+/// nothing. None of them is whole any more, since the download may have written a
+/// path one shares with `language`; [`settle_languages`] checks that afterwards.
+/// For another build, they keep no DLC or lists: their files are an older build's.
 pub fn write_record(
     root: &Path,
     build_id: &str,
@@ -779,16 +912,107 @@ pub fn write_record(
     let mut dlcs = dlcs.to_vec();
     dlcs.sort();
     dlcs.dedup();
-    let products = load_record(root)
-        .filter(|r| r.build_id == build_id && r.language.as_deref() == Some(language))
-        .and_then(|r| r.products);
+    let prior = load_record(root);
+    let (products, other_languages) = match prior {
+        Some(p) => carry_languages(p, build_id, language),
+        None => (None, BTreeMap::new()),
+    };
     let rec = Record {
         build_id: build_id.to_string(),
         language: Some(language.to_string()),
         dlcs: Some(dlcs),
         products,
+        other_languages,
         files,
     };
+    save_record(root, &rec)
+}
+
+/// Pure: what a new record in `language` of `build_id` keeps of the last one
+/// `prior`: the lists of `language` (same build), and every other language it held,
+/// none of them whole.
+fn carry_languages(
+    mut prior: Record,
+    build_id: &str,
+    language: &str,
+) -> (
+    Option<super::dlc_filter::ProductFiles>,
+    BTreeMap<String, HeldLanguage>,
+) {
+    let same = prior.build_id == build_id;
+    let mut held = std::mem::take(&mut prior.other_languages);
+    if let Some(l) = prior.language.take() {
+        held.insert(
+            l,
+            HeldLanguage {
+                whole: false,
+                dlcs: prior.dlcs.take().unwrap_or_default(),
+                products: prior.products.take(),
+            },
+        );
+    }
+    let mut products = None;
+    held.retain(|l, h| {
+        if l.eq_ignore_ascii_case(language) {
+            products = h.products.take();
+            false
+        } else {
+            true
+        }
+    });
+    for h in held.values_mut() {
+        h.whole = false;
+        if !same {
+            *h = HeldLanguage::default();
+        }
+    }
+    (products.filter(|_| same), held)
+}
+
+/// After a download of `build_id` into cache root `root` and its [`write_record`],
+/// settle the record's other languages from the build's depots (#389): keep each
+/// one's file lists, and mark whole those of `was_whole` (whole before the
+/// download) that share no path with the record's language through another depot
+/// manifest ([`super::dlc_filter::clash`]). `depots` must hold every depot of
+/// `products` in each of the record's languages; every product gets a list in each,
+/// empty when it has no depots there. Also keeps the record language's lists. A
+/// no-op when the record isn't for `build_id`.
+pub fn settle_languages(
+    root: &Path,
+    build_id: &str,
+    was_whole: &[String],
+    products: &[String],
+    depots: &[super::dlc_filter::DepotList],
+) -> std::io::Result<()> {
+    let Some(mut rec) = load_record(root).filter(|r| r.build_id == build_id) else {
+        return Ok(());
+    };
+    let Some(language) = rec.language.clone() else {
+        return Ok(());
+    };
+    let lists = super::dlc_filter::product_files(depots, &language, products);
+    rec.products.get_or_insert_default().extend(lists);
+    for (l, h) in rec.other_languages.iter_mut() {
+        let lists = super::dlc_filter::product_files(depots, l, products);
+        h.products.get_or_insert_default().extend(lists);
+        h.whole = was_whole.iter().any(|w| w.eq_ignore_ascii_case(l))
+            && super::dlc_filter::clash(depots, &language, |d| {
+                super::dlc_filter::language_matches(&d.languages, l)
+            })
+            .is_none();
+    }
+    save_record(root, &rec)
+}
+
+/// Mark the record's other languages of `was_whole` whole again, after a download of
+/// `build_id` that wrote nothing (no path changed, so none was overwritten).
+fn keep_whole(root: &Path, build_id: &str, was_whole: &[String]) -> std::io::Result<()> {
+    let Some(mut rec) = load_record(root).filter(|r| r.build_id == build_id) else {
+        return Ok(());
+    };
+    for (l, h) in rec.other_languages.iter_mut() {
+        h.whole = was_whole.iter().any(|w| w.eq_ignore_ascii_case(l));
+    }
     save_record(root, &rec)
 }
 
@@ -838,27 +1062,55 @@ pub(crate) fn upgrade_record(
     Ok(true)
 }
 
-/// The per-product file lists cache root `root`'s record keeps, when it is for
-/// build `build_id`.
+/// The per-product file lists cache root `root`'s record keeps for its language,
+/// when it is for build `build_id`.
 pub fn record_products(root: &Path, build_id: &str) -> Option<super::dlc_filter::ProductFiles> {
     load_record(root)
         .filter(|r| r.build_id == build_id)
         .and_then(|r| r.products)
 }
 
-/// Add `lists` to the record of cache root `root`, when it is for build `build_id`
-/// (there's nothing to add them to otherwise).
+/// The per-product file lists cache root `root`'s record keeps for `language` (its
+/// own or another it holds, #389), when it is for build `build_id`.
+pub fn record_products_in(
+    root: &Path,
+    build_id: &str,
+    language: &str,
+) -> Option<super::dlc_filter::ProductFiles> {
+    load_record(root)
+        .filter(|r| r.build_id == build_id)
+        .and_then(|r| r.products_in(language).cloned())
+}
+
+/// Add `lists` to the record of cache root `root` for its language, when it is for
+/// build `build_id` (there's nothing to add them to otherwise).
 pub fn store_products(
     root: &Path,
     build_id: &str,
     lists: &super::dlc_filter::ProductFiles,
 ) -> std::io::Result<()> {
+    let Some(language) = load_record(root).and_then(|r| r.language) else {
+        return Ok(());
+    };
+    store_products_in(root, build_id, &language, lists)
+}
+
+/// Add `lists` of `language` to the record of cache root `root`, when it is for
+/// build `build_id` and holds `language` (#389).
+pub fn store_products_in(
+    root: &Path,
+    build_id: &str,
+    language: &str,
+    lists: &super::dlc_filter::ProductFiles,
+) -> std::io::Result<()> {
     let Some(mut rec) = load_record(root).filter(|r| r.build_id == build_id) else {
         return Ok(());
     };
-    let mut all = rec.products.take().unwrap_or_default();
-    all.extend(lists.iter().map(|(k, v)| (k.clone(), v.clone())));
-    rec.products = Some(all);
+    let Some(slot) = rec.products_in_mut(language) else {
+        return Ok(());
+    };
+    slot.get_or_insert_default()
+        .extend(lists.iter().map(|(k, v)| (k.clone(), v.clone())));
     save_record(root, &rec)
 }
 
@@ -873,7 +1125,7 @@ pub async fn product_lists(
     language: &str,
     products: &[String],
 ) -> Result<super::dlc_filter::ProductFiles, DepotError> {
-    let have = record_products(root, build_id).unwrap_or_default();
+    let have = record_products_in(root, build_id, language).unwrap_or_default();
     if products.iter().all(|p| have.contains_key(p)) {
         return Ok(have);
     }
@@ -891,14 +1143,14 @@ pub async fn product_lists(
     let fetched =
         super::dlc_filter::fetch(core.reqwest_client(), &manifest, language, &missing).await?;
     // A record that can't take them only costs the next build this fetch.
-    let _ = store_products(root, build_id, &fetched);
+    let _ = store_products_in(root, build_id, language, &fetched);
     let mut all = have;
     all.extend(fetched);
     Ok(all)
 }
 
-/// The DLC a new record lists: those the old record had, when it was for the
-/// same build and language (a completion or repair keeps them), plus `wanted`.
+/// The DLC a new record lists: those the old record held whole in `language`, when
+/// it was for the same build (a completion or repair keeps them), plus `wanted`.
 fn record_dlcs(
     prior: Option<&Record>,
     build_id: &str,
@@ -906,8 +1158,9 @@ fn record_dlcs(
     wanted: &[String],
 ) -> Vec<String> {
     let mut all: Vec<String> = prior
-        .filter(|r| r.build_id == build_id && r.language.as_deref() == Some(language))
-        .and_then(|r| r.dlcs.clone())
+        .filter(|r| r.build_id == build_id)
+        .and_then(|r| r.whole_dlcs(language))
+        .map(<[String]>::to_vec)
         .unwrap_or_default();
     all.extend(wanted.iter().cloned());
     all.sort();
@@ -999,6 +1252,33 @@ pub struct RecordSummary {
     pub language: Option<String>,
     /// DLC product ids; `None` for a record from before DLC tracking.
     pub dlcs: Option<Vec<String>>,
+    /// The other languages the cache holds (#389), with the DLC each held.
+    pub other_languages: Vec<(String, Vec<String>)>,
+}
+
+impl RecordSummary {
+    /// Every language the cache holds: the record's, then the others.
+    pub fn languages(&self) -> Vec<String> {
+        self.language
+            .iter()
+            .cloned()
+            .chain(self.other_languages.iter().map(|(l, _)| l.clone()))
+            .collect()
+    }
+
+    /// Every DLC the cache holds files of, in any language.
+    pub fn all_dlcs(&self) -> Vec<String> {
+        let mut all: Vec<String> = self
+            .dlcs
+            .iter()
+            .flatten()
+            .chain(self.other_languages.iter().flat_map(|(_, d)| d))
+            .cloned()
+            .collect();
+        all.sort();
+        all.dedup();
+        all
+    }
 }
 
 /// The record in cache root `root`, if there is a readable one.
@@ -1008,6 +1288,11 @@ pub fn read_record(root: &Path) -> Option<RecordSummary> {
         build_id: rec.build_id,
         language: rec.language,
         dlcs: rec.dlcs,
+        other_languages: rec
+            .other_languages
+            .into_iter()
+            .map(|(l, h)| (l, h.dlcs))
+            .collect(),
     })
 }
 
@@ -1048,12 +1333,14 @@ fn check_record(root: &Path, rec: &Record, want: &CacheWant<'_>) -> CacheCheck {
     {
         return CacheCheck::UnknownContent;
     }
-    if let (Some(have), Some(wanted)) = (&rec.language, want.language)
-        && !have.eq_ignore_ascii_case(wanted)
-    {
-        return CacheCheck::OtherLanguage;
-    }
-    let held = rec.dlcs.as_deref().unwrap_or(&[]);
+    // Another language the cache holds whole counts as held (#389).
+    let held = match want.language {
+        Some(wanted) if rec.language.is_some() => match rec.whole_dlcs(wanted) {
+            Some(d) => d,
+            None => return CacheCheck::OtherLanguage,
+        },
+        _ => rec.dlcs.as_deref().unwrap_or(&[]),
+    };
     let lacking: Vec<String> = want
         .dlcs
         .iter()
@@ -1065,6 +1352,31 @@ fn check_record(root: &Path, rec: &Record, want: &CacheWant<'_>) -> CacheCheck {
     } else {
         CacheCheck::MissingDlc { missing: lacking }
     }
+}
+
+/// The other languages that were whole before a download in `language` of
+/// `build_id` (#389): the last record's language and its whole others, when the
+/// cache had lost nothing and was for the same build.
+fn whole_before(
+    prior: Option<&Record>,
+    check: &CacheCheck,
+    build_id: &str,
+    language: &str,
+) -> Vec<String> {
+    let Some(rec) = prior.filter(|r| r.build_id == build_id) else {
+        return Vec::new();
+    };
+    if matches!(
+        check,
+        CacheCheck::Missing { .. } | CacheCheck::Unrecorded | CacheCheck::UnknownContent
+    ) {
+        return Vec::new();
+    }
+    rec.whole_languages()
+        .into_iter()
+        .map(|(l, _)| l.to_string())
+        .filter(|l| !l.eq_ignore_ascii_case(language))
+        .collect()
 }
 
 /// The plan's estimate for a language switch (#386): only when the record names the
@@ -1081,13 +1393,8 @@ fn estimate_switch(
     if *check != CacheCheck::OtherLanguage {
         return None;
     }
-    super::language::switch_download(
-        manifest,
-        rec.language.as_deref()?,
-        rec.dlcs.as_deref().unwrap_or(&[]),
-        language,
-        dlcs,
-    )
+    rec.language.as_ref()?;
+    super::language::switch_download_held(manifest, &rec.whole_languages(), language, dlcs)
 }
 
 /// What the downloader is told for a run (design 19 §3.2/§3.3): kept apart
@@ -1206,7 +1513,8 @@ fn cache_note(check: &CacheCheck, inputs: &DownloadInputs) -> Option<String> {
             missing.join(", ")
         ),
         CacheCheck::OtherLanguage => "cache holds another language: checking it (hashing) and \
-             fetching the rest; the other language's files stay in the cache"
+             fetching the rest; the other language's files stay in the cache, and builds \
+             leave them out"
             .into(),
         CacheCheck::OtherBuild => {
             "cache holds another build: checking it (hashing) and fetching the new one".into()
@@ -1312,6 +1620,134 @@ mod tests {
         std::fs::write(t.path().join("Game/a.bin"), b"x").unwrap();
         write_record(t.path(), build, language, &ids(dlcs)).unwrap();
         t
+    }
+
+    fn depot(
+        language: &str,
+        manifest: &str,
+        paths: &[&str],
+    ) -> super::super::dlc_filter::DepotList {
+        super::super::dlc_filter::DepotList {
+            product: "1".into(),
+            languages: vec![language.into()],
+            manifest: manifest.into(),
+            paths: paths.iter().map(|p| p.to_string()).collect(),
+        }
+    }
+
+    /// A switch keeps the old language (#389): not whole until settled, then whole
+    /// unless a path it shares with the new one comes from another depot manifest.
+    #[test]
+    fn a_switch_keeps_the_old_language_and_settles_whether_it_is_whole() {
+        let want = |language| CacheWant {
+            build_id: Some("b1"),
+            language: Some(language),
+            dlcs: &[],
+        };
+        let t = recorded("b1", "en-US", &["5"]);
+        store_products(
+            t.path(),
+            "b1",
+            &[("1".to_string(), ids(&["Game/a.bin"]))].into(),
+        )
+        .unwrap();
+        write_record(t.path(), "b1", "de-DE", &[]).unwrap();
+        let rec = load_record(t.path()).unwrap();
+        let (_, en) = rec.other("en-us").unwrap();
+        assert!(!en.whole);
+        assert_eq!(en.dlcs, ids(&["5"]));
+        assert!(en.products.is_some(), "its lists stay");
+        assert_eq!(rec.products, None, "de-DE has none yet");
+        assert_eq!(
+            check_cache(t.path(), &want("en-US")),
+            CacheCheck::OtherLanguage
+        );
+
+        let neutral = depot("*", "n", &["Game/a.bin"]);
+        // No clash: en-US is whole again, with its DLC.
+        let fine = [
+            neutral.clone(),
+            depot("en-US", "e", &["Game/en.pak"]),
+            depot("de-DE", "d", &["Game/de.pak"]),
+        ];
+        settle_languages(t.path(), "b1", &ids(&["en-US"]), &ids(&["1"]), &fine).unwrap();
+        assert_eq!(check_cache(t.path(), &want("en-US")), CacheCheck::Complete);
+        assert_eq!(
+            check_cache(
+                t.path(),
+                &CacheWant {
+                    dlcs: &ids(&["5", "6"]),
+                    ..want("en-US")
+                }
+            ),
+            CacheCheck::MissingDlc {
+                missing: ids(&["6"])
+            },
+            "against en-US's own DLC"
+        );
+        assert_eq!(
+            record_products_in(t.path(), "b1", "de-DE").unwrap()["1"],
+            ids(&["Game/a.bin", "Game/de.pak"])
+        );
+        // Settled again, only from what was whole: a language not whole stays so.
+        settle_languages(t.path(), "b1", &[], &ids(&["1"]), &fine).unwrap();
+        assert_eq!(
+            check_cache(t.path(), &want("en-US")),
+            CacheCheck::OtherLanguage
+        );
+        // One path, two depot manifests: the cache holds de-DE's bytes there.
+        let clash = [
+            neutral,
+            depot("en-US", "e", &["Game/voice.pak"]),
+            depot("de-DE", "d", &["Game/VOICE.pak"]),
+        ];
+        settle_languages(t.path(), "b1", &ids(&["en-US"]), &ids(&["1"]), &clash).unwrap();
+        assert_eq!(
+            check_cache(t.path(), &want("en-US")),
+            CacheCheck::OtherLanguage
+        );
+
+        // Another build: the old languages stay held, with nothing claimed.
+        write_record(t.path(), "b2", "de-DE", &[]).unwrap();
+        let rec = load_record(t.path()).unwrap();
+        assert_eq!(
+            rec.other("en-US").map(|(_, h)| h),
+            Some(&HeldLanguage::default())
+        );
+    }
+
+    /// The switch estimate counts a depot any whole language has as had (#389).
+    #[test]
+    fn the_switch_estimate_counts_every_whole_language() {
+        let m: Manifest = serde_json::from_value(serde_json::json!({
+            "baseProductId": "1", "installDirectory": "G", "platform": "windows",
+            "products": [], "depots": [
+                {"size": 9, "compressedSize": 9, "languages": ["en-US"], "manifest": "e", "productId": "1"},
+                {"size": 5, "compressedSize": 5, "languages": ["de-DE", "fr-FR"], "manifest": "d", "productId": "1"},
+                {"size": 3, "compressedSize": 3, "languages": ["fr-FR"], "manifest": "f", "productId": "1"}]
+        }))
+        .unwrap();
+        let mut rec = Record {
+            build_id: "b".into(),
+            language: Some("en-US".into()),
+            dlcs: Some(vec![]),
+            products: None,
+            other_languages: BTreeMap::new(),
+            files: vec![],
+        };
+        let est =
+            |r: &Record| estimate_switch(&CacheCheck::OtherLanguage, Some(r), &m, "fr-FR", &[]);
+        assert_eq!(est(&rec), Some(8));
+        rec.other_languages.insert(
+            "de-DE".into(),
+            HeldLanguage {
+                whole: false,
+                ..Default::default()
+            },
+        );
+        assert_eq!(est(&rec), Some(8), "not whole: not counted");
+        rec.other_languages.get_mut("de-DE").unwrap().whole = true;
+        assert_eq!(est(&rec), Some(3));
     }
 
     #[test]
@@ -1494,6 +1930,7 @@ mod tests {
             language: language.map(Into::into),
             dlcs: Some(vec![]),
             products: None,
+            other_languages: BTreeMap::new(),
             files: vec![],
         };
         let other = CacheCheck::OtherLanguage;

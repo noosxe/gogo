@@ -1372,7 +1372,7 @@ fn content_for(root: &Path, w: &World, wanted: &[u64]) -> build::DepotContent {
             title: titles(*id).into(),
         })
         .collect();
-    let filter = match dlc_filter::need(root, &w.tree, ID, wanted) {
+    let filter = match dlc_filter::need(root, &w.tree, ID, wanted, "en-US") {
         Need::Whole => None,
         Need::Filter {
             extra,
@@ -1389,7 +1389,11 @@ fn content_for(root: &Path, w: &World, wanted: &[u64]) -> build::DepotContent {
             Some(dlc_filter::filter(&lists, &keeping, &extra).unwrap())
         }
     };
-    build::DepotContent { dlcs, filter }
+    build::DepotContent {
+        dlcs,
+        language: None,
+        filter,
+    }
 }
 
 fn ids(c: &gogo::gog::content::Content) -> Vec<u64> {
@@ -1501,7 +1505,7 @@ fn a_cache_without_file_lists_gives_no_filter() {
         products,
         build_id,
         ..
-    } = dlc_filter::need(&root, &w.tree, ID, &[])
+    } = dlc_filter::need(&root, &w.tree, ID, &[], "en-US")
     else {
         panic!("B is extra");
     };
@@ -1510,6 +1514,243 @@ fn a_cache_without_file_lists_gives_no_filter() {
     // Without lists the CLI refuses (`take_content`): no filter can be built.
     let lacking = dlc_filter::filter(&Default::default(), &products[..1], &extra).unwrap_err();
     assert_eq!(lacking, [ID.to_string(), DLC_B.to_string()]);
+}
+
+/// The build's depots in two languages (#389): `*` files, one depot each for en-US
+/// and de-DE, and one depot both list (one manifest), so a path the two share.
+fn language_depots() -> Vec<gogo::gog::dlc_filter::DepotList> {
+    use gogo::gog::dlc_filter::DepotList;
+    let d = |languages: &[&str], manifest: &str, paths: &[&str]| DepotList {
+        product: ID.into(),
+        languages: languages.iter().map(|l| l.to_string()).collect(),
+        manifest: manifest.into(),
+        paths: paths.iter().map(|p| format!("Test Game/{p}")).collect(),
+    };
+    vec![
+        d(
+            &["*"],
+            "neutral",
+            &["game.exe", &format!("goggame-{ID}.info"), "data/base.pak"],
+        ),
+        d(&["en-US"], "en", &["lang/en.pak", "Sound/EN/voice.pak"]),
+        d(&["de-DE"], "de", &["lang/de.pak", "Sound/DE/voice.pak"]),
+        d(&["en-US", "de-DE"], "both", &["lang/common.pak"]),
+    ]
+}
+
+/// What `gogo depot` leaves after a download in `language`: its files written, the
+/// record, then the record settled from the build's depots.
+fn fetch_language(root: &Path, language: &str, was_whole: &[&str]) {
+    let write = |rel: &str| {
+        let p = root.join("Test Game").join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, rel).unwrap();
+    };
+    write("data/base.pak");
+    write("lang/common.pak");
+    if language == "en-US" {
+        write("lang/en.pak");
+        write("Sound/EN/voice.pak");
+    } else {
+        write("lang/de.pak");
+        write("Sound/DE/voice.pak");
+    }
+    gogo::gog::depot::write_record(root, "4242", language, &[]).unwrap();
+    let was: Vec<String> = was_whole.iter().map(|l| l.to_string()).collect();
+    gogo::gog::depot::settle_languages(root, "4242", &was, &[ID.into()], &language_depots())
+        .unwrap();
+}
+
+/// What the CLI hands a build in `language` (its `take_content`), from the record
+/// only: no fetch.
+fn language_content(root: &Path, w: &World, language: &str) -> build::DepotContent {
+    use gogo::gog::dlc_filter::{self, Need};
+    let filter = match dlc_filter::need(root, &w.tree, ID, &[], language) {
+        Need::Whole => None,
+        Need::Filter {
+            products,
+            build_id,
+            languages,
+            extra,
+            ..
+        } => {
+            let b = build_id.unwrap();
+            let lists = gogo::gog::depot::record_products_in(root, &b, language).unwrap();
+            let others: Vec<_> = languages
+                .iter()
+                .map(|l| {
+                    (
+                        l.clone(),
+                        gogo::gog::depot::record_products_in(root, &b, l).unwrap(),
+                    )
+                })
+                .collect();
+            Some(dlc_filter::filter_languages(&lists, &products, &extra, &others).unwrap())
+        }
+    };
+    build::DepotContent {
+        dlcs: Vec::new(),
+        language: Some(language.into()),
+        filter,
+    }
+}
+
+#[test]
+fn a_build_takes_only_its_language_from_a_cache_holding_two() {
+    use gogo::gog::{content, depot};
+    let w = World::new("language-filter", &["d3d9.dll"]);
+    let root = w.tree.parent().unwrap().to_path_buf();
+    let game = |rel: &str| w.game().join("game").join(rel);
+    let want = |language| depot::CacheWant {
+        build_id: Some("4242"),
+        language: Some(language),
+        dlcs: &[],
+    };
+    // Downloaded in en-US, then switched to de-DE: nothing deleted.
+    fetch_language(&root, "en-US", &[]);
+    fetch_language(&root, "de-DE", &["en-US"]);
+    assert!(root.join("Test Game/lang/en.pak").is_file(), "never pruned");
+    let rec = depot::read_record(&root).unwrap();
+    assert_eq!(rec.language.as_deref(), Some("de-DE"), "the last fetched");
+    assert_eq!(rec.languages(), ["de-DE", "en-US"]);
+    // Switching back fetches nothing: en-US is held whole.
+    assert_eq!(
+        depot::check_cache(&root, &want("en-US")),
+        depot::CacheCheck::Complete
+    );
+    assert_eq!(
+        depot::check_cache(&root, &want("fr-FR")),
+        depot::CacheCheck::OtherLanguage
+    );
+
+    let build = |language: &str| {
+        let opts = LinuxAppOptions {
+            depot_content: Some(language_content(&root, &w, language)),
+            ..w.opts()
+        };
+        let plan = build::plan(&opts, None, &mut quiet()).unwrap();
+        let mut warnings = Vec::new();
+        let out = build::execute(&plan, None, &mut |e| {
+            if let ProgressEvent::Warn { message } = e {
+                warnings.push(message.clone());
+            }
+        })
+        .unwrap();
+        (out, warnings)
+    };
+    for (language, ours, theirs) in [
+        (
+            "de-DE",
+            ["lang/de.pak", "Sound/DE/voice.pak"],
+            "lang/en.pak",
+        ),
+        (
+            "en-US",
+            ["lang/en.pak", "Sound/EN/voice.pak"],
+            "lang/de.pak",
+        ),
+    ] {
+        let (out, warnings) = build(language);
+        for f in ours {
+            assert!(game(f).is_file(), "{language}: {f}");
+        }
+        assert!(!game(theirs).exists(), "{language}: {theirs} left out");
+        assert!(
+            !game("Sound").read_dir().unwrap().any(|e| {
+                let n = e.unwrap().file_name();
+                !ours.iter().any(|o| o.contains(&*n.to_string_lossy()))
+            }),
+            "{language}: only its own voice dir"
+        );
+        assert!(game("lang/common.pak").is_file(), "a shared path stays");
+        assert!(game("data/base.pak").is_file() && game("game.exe").is_file());
+        let m = out.materialized.as_ref().unwrap();
+        assert_eq!(m.left_out_files, 2, "{language}: {m:?}");
+        assert!(
+            warnings.iter().any(|m| m.contains("languages")),
+            "{warnings:?}"
+        );
+        // content.toml says the build's language; the record still names the last
+        // one fetched and holds both.
+        assert_eq!(out.content.language.as_deref(), Some(language));
+        let file = content::load(&w.game()).unwrap().unwrap();
+        assert_eq!(file.language.as_deref(), Some(language));
+        let rec = depot::read_record(&root).unwrap();
+        assert_eq!(rec.language.as_deref(), Some("de-DE"));
+        assert!(rec.languages().iter().any(|l| l == language));
+    }
+
+    // Switched back: de-DE is the other language now, whole, and builds the same.
+    fetch_language(&root, "en-US", &["de-DE"]);
+    assert_eq!(
+        depot::check_cache(&root, &want("de-DE")),
+        depot::CacheCheck::Complete
+    );
+    let (out, _) = build("de-DE");
+    assert!(game("lang/de.pak").is_file() && !game("lang/en.pak").exists());
+    assert_eq!(out.content.language.as_deref(), Some("de-DE"));
+}
+
+#[test]
+fn an_older_record_holds_its_one_language() {
+    use gogo::gog::{depot, dlc_filter};
+    let w = World::new("language-old-record", &["d3d9.dll"]);
+    let root = w.tree.parent().unwrap().to_path_buf();
+    // A record from before #389: one language, its lists, no other languages.
+    std::fs::write(
+        root.join(depot::RECORD),
+        format!(
+            r#"{{"buildId":"4242","language":"en-US","dlcs":[],"products":{{"{ID}":["Test Game/game.exe"]}},"files":["Test Game/game.exe"]}}"#
+        ),
+    )
+    .unwrap();
+    let rec = depot::read_record(&root).unwrap();
+    assert_eq!(rec.languages(), ["en-US"]);
+    assert_eq!(
+        dlc_filter::need(&root, &w.tree, ID, &[], "en-US"),
+        dlc_filter::Need::Whole
+    );
+    assert_eq!(
+        depot::check_cache(
+            &root,
+            &depot::CacheWant {
+                build_id: Some("4242"),
+                language: Some("de-DE"),
+                dlcs: &[],
+            }
+        ),
+        depot::CacheCheck::OtherLanguage
+    );
+    // A switch keeps it as another language, with its lists, not whole until settled.
+    depot::write_record(&root, "4242", "de-DE", &[]).unwrap();
+    let rec = depot::read_record(&root).unwrap();
+    assert_eq!(rec.languages(), ["de-DE", "en-US"]);
+    assert!(depot::record_products_in(&root, "4242", "en-US").is_some());
+    assert!(depot::record_products_in(&root, "4242", "de-DE").is_none());
+    assert_eq!(
+        depot::check_cache(
+            &root,
+            &depot::CacheWant {
+                build_id: Some("4242"),
+                language: Some("en-US"),
+                dlcs: &[],
+            }
+        ),
+        depot::CacheCheck::OtherLanguage,
+        "not whole: the switch may have written a path they share"
+    );
+    // Offline, with de-DE's lists missing, the filter can't be built: refused.
+    let Some(en) = depot::record_products_in(&root, "4242", "en-US") else {
+        unreachable!()
+    };
+    let lacking = dlc_filter::filter_languages(
+        &Default::default(),
+        &[ID.to_string()],
+        &[],
+        &[("en-US".into(), en)],
+    )
+    .unwrap_err();
+    assert_eq!(lacking, [ID.to_string()]);
 }
 
 #[test]
@@ -6935,7 +7176,7 @@ mod dlc_add {
             "no repair: nothing hashed, nothing downloaded"
         );
         assert_eq!(
-            dlc_filter::need(root, &root.join(TREE), ID, wanted),
+            dlc_filter::need(root, &root.join(TREE), ID, wanted, "en-US"),
             Need::Whole
         );
         std::fs::remove_dir_all(w.game()).unwrap();
@@ -6949,6 +7190,7 @@ mod dlc_add {
                         title: "Extra Pack".into(),
                     })
                     .collect(),
+                language: None,
                 filter: None,
             }),
             ..w.opts()
