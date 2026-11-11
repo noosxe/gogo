@@ -25,6 +25,42 @@ pub struct GogGameInfo {
     pub root_game_id: Option<String>,
     #[serde(rename = "playTasks", default)]
     pub play_tasks: Vec<GogTask>,
+    /// The build this info came from; GOG writes it as a string, but a number
+    /// is read too.
+    #[serde(rename = "buildId", default)]
+    pub build_id: Option<serde_json::Value>,
+}
+
+impl GogGameInfo {
+    /// [`Self::build_id`] as text.
+    pub fn build_id_text(&self) -> Option<String> {
+        match self.build_id.as_ref()? {
+            serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        }
+    }
+}
+
+/// Every readable `goggame-*.info` in `dir` (and one level down), with the id
+/// in its file name (`goggame-<id>.info`), sorted by that id.
+pub fn read_infos(dir: &Path) -> Vec<(String, GogGameInfo)> {
+    let mut out: Vec<(String, GogGameInfo)> = collect_info_files(dir, 0)
+        .iter()
+        .filter_map(|p| {
+            let id = p
+                .file_name()?
+                .to_str()?
+                .strip_prefix("goggame-")?
+                .strip_suffix(".info")?
+                .to_string();
+            let info = serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()?;
+            Some((id, info))
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out.dedup_by(|a, b| a.0 == b.0);
+    out
 }
 
 #[derive(Debug, Clone, Deserialize)]

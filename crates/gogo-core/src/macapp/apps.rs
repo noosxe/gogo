@@ -12,6 +12,8 @@ use serde::Serialize;
 use super::error::MacAppError;
 use super::launch::{self, GameDirs, GameState, LaunchToml};
 use super::{compat, doctor, portable};
+use crate::gog::content::{self, Content, DlcRef, Lane};
+use crate::gog::depot;
 use crate::linuxapp::game::LinuxState;
 
 /// One set-up game.
@@ -50,6 +52,57 @@ pub struct App {
     /// Linux: `launch.sh` is there, so the menu entry was made too (#177
     /// writes both). A game built before has no menu entry to lose.
     pub launcher: bool,
+    /// The DLC the game has (design 19 §6): `content.toml`'s, else the
+    /// `goggame-*.info` files'. Empty with none.
+    pub dlcs: Vec<DlcRef>,
+    /// What the game's content is, `None` when `content.toml` can't be read.
+    pub content: Option<Content>,
+    /// `content` was derived from the cache record and the infos: no file.
+    pub content_derived: bool,
+    /// Why `content.toml` couldn't be read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_error: Option<String>,
+}
+
+/// What `apps` shows of a game's content ([`crate::gog::content`]).
+struct ContentView {
+    dlcs: Vec<DlcRef>,
+    content: Option<Content>,
+    derived: bool,
+    error: Option<String>,
+}
+
+fn content_view(gogid: &str, dirs: &GameDirs, tree_name: Option<&str>) -> ContentView {
+    let depot = dirs.game.is_dir();
+    let install = if depot {
+        dirs.game.clone()
+    } else {
+        tree_name.map_or_else(
+            || dirs.game.clone(),
+            |n| dirs.prefix.join("drive_c/GOG").join(n),
+        )
+    };
+    let lane = if depot { Lane::Depot } else { Lane::Installer };
+    let record_root = depot
+        .then(|| {
+            let id = gogid.parse().ok()?;
+            depot::cache_roots(depot::default_cache_dir().as_deref(), id, None).map(|r| r.0)
+        })
+        .flatten();
+    match content::resolve(&dirs.root, &install, lane, record_root.as_deref()) {
+        Ok(r) => ContentView {
+            dlcs: r.content.refs(),
+            content: Some(r.content),
+            derived: r.derived,
+            error: None,
+        },
+        Err(e) => ContentView {
+            dlcs: Vec::new(),
+            content: None,
+            derived: false,
+            error: Some(e.to_string()),
+        },
+    }
 }
 
 impl App {
@@ -119,7 +172,12 @@ fn read(gogid: &str, logs: &Path) -> Result<App, MacAppError> {
         .or_else(|| bundle.as_deref().and_then(bundle_title));
     let logs = Some(logs.join(gogid)).filter(|p| p.is_dir());
     let override_file = Some(compat::user_path(gogid)).filter(|p| p.is_file());
+    let view = content_view(gogid, &dirs, None);
     Ok(App {
+        dlcs: view.dlcs,
+        content: view.content,
+        content_derived: view.derived,
+        content_error: view.error,
         unreachable: !dirs.root.is_dir(),
         gogid: gogid.to_string(),
         title,
@@ -153,7 +211,15 @@ fn read_linux(gogid: &str, dirs: GameDirs, logs: &Path) -> App {
         .or_else(|| game::read_launch_toml(&dirs).ok().map(|(t, _)| t.title));
     let desktop = game::desktop_path(gogid);
     let logs = Some(logs.join(gogid)).filter(|p| p.is_dir());
+    let tree = game::read_launch_toml(&dirs)
+        .ok()
+        .and_then(|(t, _)| t.tree_name());
+    let view = content_view(gogid, &dirs, tree.as_deref());
     App {
+        dlcs: view.dlcs,
+        content: view.content,
+        content_derived: view.derived,
+        content_error: view.error,
         unreachable: false,
         gogid: gogid.to_string(),
         title,

@@ -482,6 +482,29 @@ added    = "2026-11-11"
 | `doctor` | `dlc`: ok `Phantom Liberty, REDmod (build …)`; **warn** an installed DLC's `goggame-<id>.info` missing from `game/`, or an info for a DLC `content.toml` doesn't list (added by hand); **warn** owned DLC not installed (with `dlc add`); **fail** a `dlc-journal.json` (§3.4) |
 | `--json` of the build and `dlc add` | `{gogid, buildId, language, dlcs: [...], added: [...]}` |
 
+### 6.3 As built (#348)
+
+Where the code differs from the table above, or does less for now:
+
+- `gog/content.rs` holds the record (`Content`, `DlcRow`, `load`, `write`, `resolve`).
+  A build of either lane writes it as its last step, after setup; a failed setup leaves
+  none, and the game reads as derived.
+- **Derived** (no file): the lane is `depot` when `game/` exists, else `installer`. The
+  base build comes from the base `goggame-<id>.info`'s `buildId`, and the language from
+  the depot cache record (`.gogo-depot.json` in the default cache dir for the game),
+  used only when its build is the one the infos name. Every other `goggame-*.info` is a
+  DLC row. Reading never writes the file.
+- `version` stays unset: neither the infos nor the record carry it. A later piece that
+  knows the build's version name fills it in.
+- The `apps list` column counts the DLC the game has. The `installed/owned` form needs
+  the network, so it comes with `dlc list` (#350).
+- `doctor`'s `dlc` check does the info-versus-record comparison. The owned-but-missing
+  warning and the journal `fail` row come with `dlc add` (#350).
+- A build's plan says `dlc: none` or lists the DLC already in the tree; the build flags
+  that choose DLC (#349) add the `(N owned not included)` tail and the rebuild
+  kept/added/dropped lines. The build's `--json` gains `build_id`, `language` and
+  `dlcs`.
+
 ## 7. Progress, flags, scripting
 
 - `dlc add` drives its download through `depot_progress::drive` (design 14 §4.1)

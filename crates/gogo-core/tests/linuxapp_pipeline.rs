@@ -975,6 +975,12 @@ fn installer_lane_runs_the_setup_exe_under_umu() {
     let out = build::execute(&plan, None, &mut quiet()).unwrap();
     assert_eq!(out.gogid, ID);
     assert!(!staging.exists(), "staging dir left behind");
+    // The installer lane records its content too (design 19 §6.1).
+    let c = gogo::gog::content::load(&out.dirs.root)
+        .unwrap()
+        .expect("content.toml");
+    assert_eq!(c.lane, gogo::gog::content::Lane::Installer);
+    assert!(c.dlc.is_empty());
 
     let log = w.log();
     let argv = log
@@ -1192,6 +1198,111 @@ fn apps_lists_and_removes_linux_games_with_their_menu_entry() {
     );
     assert!(!w.game().exists() && !desktop.exists());
     assert!(apps::list(&logs).unwrap().is_empty());
+}
+
+// — content.toml (design 19 §6) —
+
+fn dlc_info(dir: &Path, id: &str, name: &str) {
+    std::fs::write(
+        dir.join(format!("goggame-{id}.info")),
+        format!(
+            "{{\"gameId\":\"{id}\",\"rootGameId\":\"{ID}\",\"name\":\"{name}\",\
+             \"buildId\":\"4242\",\"playTasks\":[]}}"
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_build_writes_content_toml_and_apps_and_doctor_show_it() {
+    use gogo::gog::content;
+    use gogo::macapp::{apps, doctor::Level};
+    let w = World::new("content", &["d3d9.dll"]);
+    dlc_info(&w.tree, "777001", "Extra Pack");
+    let plan = build::plan(&w.opts(), None, &mut quiet()).unwrap();
+    assert_eq!(plan.dlcs.len(), 1, "the plan lists the DLC in the tree");
+    let out = build::execute(&plan, None, &mut quiet()).unwrap();
+
+    // Written, atomically (no temp file), by the depot lane.
+    let written = content::load(&w.game()).unwrap().expect("content.toml");
+    assert_eq!(written, out.content);
+    assert_eq!(written.lane, content::Lane::Depot);
+    assert_eq!(written.dlc.len(), 1);
+    assert_eq!(written.dlc[0].title, "Extra Pack");
+    assert!(!w.game().join("content.toml.tmp").exists());
+    // `gogo-launch.toml` doesn't carry it.
+    let launch = std::fs::read_to_string(w.game().join("gogo-launch.toml")).unwrap();
+    assert!(!launch.contains("Extra Pack"));
+
+    // apps: `dlcs` rows and the record.
+    let logs = w.root.join("logs");
+    let a = apps::get(ID, &logs).unwrap().unwrap();
+    assert_eq!(a.dlcs.len(), 1);
+    assert!(!a.content_derived && a.content_error.is_none());
+    let j = serde_json::to_value(&a).unwrap();
+    assert_eq!(j["dlcs"][0]["title"], "Extra Pack");
+    assert_eq!(j["dlcs"][0]["id"], 777001);
+    assert_eq!(j["content"]["lane"], "depot");
+
+    // doctor: ok with the list.
+    let host = doctor_host(&w, &[("radeon.x86_64", 2), ("radeon.i686", 1)]);
+    let dlc = |r: &gogo::macapp::doctor::Report| {
+        r.findings
+            .iter()
+            .find(|f| f.check == "dlc")
+            .map(|f| (f.level, f.message.clone()))
+            .unwrap()
+    };
+    let (level, msg) = dlc(&doctor(&w, &host));
+    assert!(level == Level::Ok && msg.contains("Extra Pack"), "{msg}");
+
+    // An info added by hand that the record doesn't list: warn.
+    dlc_info(&w.game().join("game"), "777002", "Hand Added");
+    let (level, msg) = dlc(&doctor(&w, &host));
+    assert!(
+        level == Level::Warn && msg.contains("Hand Added") && msg.contains("doesn't list"),
+        "{msg}"
+    );
+    // A listed DLC whose info is gone: warn.
+    std::fs::remove_file(w.game().join("game/goggame-777002.info")).unwrap();
+    std::fs::remove_file(w.game().join("game/goggame-777001.info")).unwrap();
+    let (level, msg) = dlc(&doctor(&w, &host));
+    assert!(
+        level == Level::Warn && msg.contains("Extra Pack") && msg.contains("missing"),
+        "{msg}"
+    );
+}
+
+#[test]
+fn a_game_without_content_toml_is_derived_from_its_infos_and_nothing_is_written() {
+    use gogo::macapp::{apps, doctor::Level};
+    let w = World::new("content-derived", &["d3d9.dll"]);
+    build_with(&w.opts());
+    let file = w.game().join("content.toml");
+    std::fs::remove_file(&file).unwrap();
+    dlc_info(&w.game().join("game"), "777001", "Extra Pack");
+
+    let logs = w.root.join("logs");
+    let a = apps::get(ID, &logs).unwrap().unwrap();
+    assert!(a.content_derived);
+    assert_eq!(a.dlcs.len(), 1);
+    assert_eq!(a.dlcs[0].title, "Extra Pack");
+    assert!(!file.exists(), "reading doesn't write the file");
+
+    let host = doctor_host(&w, &[("radeon.x86_64", 2), ("radeon.i686", 1)]);
+    let r = doctor(&w, &host);
+    let f = r.findings.iter().find(|f| f.check == "dlc").unwrap();
+    assert_eq!(f.level, Level::Ok);
+    assert!(f.message.contains("derived"), "{}", f.message);
+    assert!(!file.exists());
+
+    // A file this gogo can't read is a warning, not a crash.
+    std::fs::write(&file, "schema = [").unwrap();
+    let a = apps::get(ID, &logs).unwrap().unwrap();
+    assert!(a.content_error.is_some() && a.dlcs.is_empty());
+    let r = doctor(&w, &host);
+    let f = r.findings.iter().find(|f| f.check == "dlc").unwrap();
+    assert_eq!(f.level, Level::Warn);
 }
 
 // — refusals —

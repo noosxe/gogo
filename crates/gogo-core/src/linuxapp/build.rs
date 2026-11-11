@@ -22,6 +22,8 @@ use super::umu::{self, Host};
 use super::umu_id::UmuId;
 use crate::config::{Config, UmuMode};
 use crate::engine::events::ProgressEvent;
+use crate::gog::content;
+use crate::gog::depot;
 use crate::gog::materialize::{self, MaterializePlan, MaterializeReport};
 use crate::macapp::compat::{self, CompatEntry, Effective, Layer, Os};
 use crate::macapp::error::MacAppError;
@@ -114,6 +116,9 @@ pub struct LinuxAppPlan {
     pub fixes: Option<fixes::Summary>,
     pub refresh: bool,
     pub gogo_path: PathBuf,
+    /// Depot lane: the DLC already in the game tree (design 19 §6.2); the
+    /// installer lane's base installer has none. Builds add none themselves yet.
+    pub dlcs: Vec<content::DlcRef>,
 }
 
 /// What [`execute`] did.
@@ -125,6 +130,8 @@ pub struct BuildOutcome {
     pub dirs: GameDirs,
     pub materialized: Option<MaterializeReport>,
     pub setup: SetupOutcome,
+    /// What `content.toml` now says (design 19 §6.1).
+    pub content: content::Content,
 }
 
 /// The renderer line's tail: what setup sets for it (design 18 §3, #172),
@@ -523,7 +530,13 @@ pub fn plan(
         umu_id = Some(u);
     }
 
+    let dlcs = opts
+        .game_tree
+        .as_deref()
+        .map(|t| content::for_build(content::Lane::Depot, t, None).refs())
+        .unwrap_or_default();
     Ok(LinuxAppPlan {
+        dlcs,
         display,
         title_fixed: opts.name.is_some(),
         slug,
@@ -735,9 +748,16 @@ pub fn execute(
 
     let mut materialized = None;
     let mut title = plan.display.clone();
-    let (gogid, selection, auto) = if let Some(tree) = &plan.game_tree {
+    let (gogid, selection, auto, lane, install_dir, cache_root) = if let Some(tree) =
+        &plan.game_tree
+    {
         let gogid = plan.gogid.clone().expect("the depot lane knows its id");
         let dirs = &plan.state;
+        // The depot cache root the tree sits in, when its record is there.
+        let cache_root = tree
+            .parent()
+            .filter(|r| depot::read_record(r).is_some())
+            .map(Path::to_path_buf);
         let name = tree
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -851,7 +871,14 @@ pub fn execute(
             auto.clone(),
         )?;
         launch::write_atomic(&game::launch_toml_path(dirs), &toml.to_toml())?;
-        (gogid, sel, auto)
+        (
+            gogid,
+            sel,
+            auto,
+            content::Lane::Depot,
+            dirs.game.clone(),
+            cache_root,
+        )
     } else {
         let inst = plan.installer.as_ref().expect("one source");
         let staging = &plan.state;
@@ -945,7 +972,14 @@ pub fn execute(
         )?;
         toml.title = title.clone();
         launch::write_atomic(&game::launch_toml_path(&target), &toml.to_toml())?;
-        (gogid, sel, auto)
+        (
+            gogid,
+            sel,
+            auto,
+            content::Lane::Installer,
+            install_dir,
+            None,
+        )
     };
     let _ = auto;
 
@@ -959,7 +993,11 @@ pub fn execute(
         },
         emit,
     )?;
+    // The last step: a game with no `content.toml` reads as derived (design 19 §6.1).
+    let content = content::for_build(lane, &install_dir, cache_root.as_deref());
+    content::write(&GameDirs::for_game(&gogid)?.root, &content)?;
     Ok(BuildOutcome {
+        content,
         title,
         dirs: GameDirs::for_game(&gogid)?,
         gogid,
