@@ -1028,8 +1028,17 @@ pub enum AppsCmd {
     /// List every game set up here: its .app on macOS or its menu entry on
     /// Linux (and whether it is still there), runtime, renderer, disk use
     /// and last launch. Disk use counts the game files in full, though a
-    /// depot game's may share space with the depot cache.
+    /// depot game's may share space with the depot cache. Sorted by title
+    /// unless --sort says otherwise.
     List {
+        /// Comma-separated columns to sort by, each ascending; a `-` prefix
+        /// sorts that column descending. Names are the column headers,
+        /// case-insensitive, with `-` or `_` for a space: gogid, title,
+        /// menu-entry, runtime, renderer, dlc, size, last-launch. GOGID, DLC
+        /// and SIZE sort numerically, LAST LAUNCH by time (never launched
+        /// first). Ties fall back to the GOGID.
+        #[arg(long, value_name = "COLS", allow_hyphen_values = true)]
+        sort: Option<String>,
         /// Machine-readable output.
         #[arg(long)]
         json: bool,
@@ -1402,7 +1411,7 @@ mod tests {
         assert!(matches!(
             parse(&["list"]),
             Ok(Command::Apps(AppsArgs {
-                cmd: AppsCmd::List { json: false }
+                cmd: AppsCmd::List { json: false, .. }
             }))
         ));
         assert!(matches!(

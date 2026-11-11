@@ -17,7 +17,7 @@ use crate::gog::depot;
 use crate::linuxapp::game::LinuxState;
 
 /// One set-up game.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct App {
     pub gogid: String,
     pub title: Option<String>,
