@@ -64,6 +64,9 @@ Nothing below exists in gog-warp — this is the actual gap:
   Shipped 2026-10-20 via gog-warp's downloader (`gogo depot`, design 14);
   xdelta3 upgrade/patch lane still deferred
 - ratatui TUI — ships with v2
-- Cloud saves, wishlist, friends — not planned
+- ~~Cloud saves~~, wishlist, friends — not planned
+  Cloud saves moved into v1 on 2026-11-11 (#275): they replace copying saves by hand
+  for built games, let saves be tested with new DLC, match Heroic, and tie in with game
+  snapshots (#365). No design yet.
 - Movies — technically supported by the same installer path (`downloads` entries with
   `playerUrl`); scope decision at design time

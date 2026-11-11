@@ -22,6 +22,8 @@ in `docs/13` grounds design 10.
 5. **Automation** — scriptable: `--json` output, stable exit codes, `--yes`, no interactive
    prompts unless a login or an ambiguous selection demands one.
 6. **Config** — `defaults < file < env < CLI` layering, single TOML file.
+7. **Cloud saves** — GOG cloud saves sync for installed games on the Linux and Mac
+   lanes (#275, added 2026-11-11; no design yet).
 
 ## Non-goals (v1)
 
@@ -29,7 +31,9 @@ in `docs/13` grounds design 10.
 - Installing games into a managed library or launching them (we produce
   installers — plus, since design 10, one-shot conversion of an installer into
   a self-contained macOS `.app`; no library tracking, no launch management)
-- Cloud saves, wishlist, friends, movies
+- ~~Cloud saves~~, wishlist, friends, movies — cloud saves moved into v1 on 2026-11-11
+  (#275): saves for built games, testing saves with new DLC, parity with Heroic, and
+  the tie-in with game snapshots (#365)
 - Windows support — the *binary* targets **Linux and macOS only** (downloading Windows
   installers on Linux is first-class, though — they're just files; 03 §1)
 - A GUI/TUI (v2; the core is built as a library to make that cheap)
