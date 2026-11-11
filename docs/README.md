@@ -46,7 +46,7 @@ A Rust CLI app that:
 | [07-rust-ecosystem.md](07-rust-ecosystem.md) | Relevant crates (versions verified 2026-10-08), async/HTTP/CLI/limits/storage options |
 | [08-prior-art.md](08-prior-art.md) | Survey of existing GOG tools, what each does well, lessons learned |
 | [09-risks-and-open-questions.md](09-risks-and-open-questions.md) | Instability, ToS/credentials, unknowns to verify with a live account before design |
-| [10-scope-updates.md](10-scope-updates.md) | Owner decisions: CLI-first, gog-warp dependency, installers-only v1, ratatui TUI later |
+| [10-scope-updates.md](10-scope-updates.md) | Decisions by @noosxe: CLI-first, gog-warp dependency, installers-only v1, ratatui TUI later |
 | [11-open-questions-status.md](11-open-questions-status.md) | Resolution matrix for the open questions (most resolved from sources) + new findings |
 | [12-live-verification-runbook.md](12-live-verification-runbook.md) | Live API probe script (`scripts/probe.sh`) for the account-dependent checks |
 | [13-macos-app-bundles.md](13-macos-app-bundles.md) | macOS wrapper landscape (Whisky/Porting Kit/CrossOver/GPTK), installer mechanics, licensing matrix |

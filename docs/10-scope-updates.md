@@ -1,6 +1,6 @@
 # 10 — Scope Updates & Direction (2026-10-08)
 
-Decisions from the project owner, recorded so the design phase starts from the same baseline.
+Decisions by the maintainer (@noosxe), recorded so the design phase starts from the same baseline.
 
 ## 1. Decisions
 

@@ -33,16 +33,16 @@ tools, or binaries from the host system — no exceptions.**
 - **Launch-testing `.app` bundles / games**: never `open` them on the host (it steals the
   user's focus). Use `scripts/vm-test.sh run <X.app> [--secs N]` (Tart VM; how-to in
   `docs/vm-testing.md`) and read the summary JSON it prints.
-  Rendering on DXMT, D3DMetal or OpenGL needs real hardware: that is the user's host
+  Rendering on DXMT, D3DMetal or OpenGL needs real hardware: that is a host
   pass (`scripts/host-pass.sh`, `docs/vm-testing.md` "Host pass"). Agents never run it
   against a real bundle; they put its steps in the PR.
 - **Launching Linux (`linux-app`) games**: only through `scripts/linux-e2e.sh run <gogid>`
   (headless sway in a bwrap root, scratch state under `target/`, everything torn down;
   how-to in `docs/linux-e2e.md`). Never launch a game any other way, never touch the
-  owner's game dirs, `~/.local/share/applications`, Steam or `compatibilitytools.d`.
-  A game whose download isn't in `target/linux-e2e/cache` needs the owner's OK first:
-  each new game download is the owner's call. Screenshots stay in `target/`, never in git.
-  Hyprland quirks, display modes, VRR and audio are the owner's host pass (#179);
+  the user's game dirs, `~/.local/share/applications`, Steam or `compatibilitytools.d`.
+  A game whose download isn't in `target/linux-e2e/cache` needs @noosxe's OK first:
+  each new game download is @noosxe's call. Screenshots stay in `target/`, never in git.
+  Hyprland quirks, display modes, VRR and audio are a host pass (#179);
   agents put those steps in the PR.
 
 ## Canonical checks (run inside the shell)
@@ -65,6 +65,12 @@ scripts/linux-e2e.sh self-test                      # when the e2e harness chang
   land through a PR with all required checks green). An agent's job ends at opening the
   PR and verifying CI — merging is always a human decision. Never run `gh pr merge`,
   enable auto-merge, or merge on the user's behalf.
+- **Public text never says "owner".** Not in docs, compat notes, code comments, scripts,
+  commit messages, issues or PRs: reword neutrally, and when you address or attribute
+  something to the maintainer use their GitHub handle, `@noosxe`. Nor does it contain
+  hostnames, usernames, home paths or other private machine details: a `tested` row names
+  the runtime, compositor and GPU driver with versions, never the machine
+  (`compat/README.md`).
 - Secrets and personal data never enter git: `gogo-probe/` (probe output — OAuth tokens,
   account data) is gitignored by design; never print or commit token/code values; URLs in
   logs are redacted (see `docs/design/07-errors-and-observability.md` §4).

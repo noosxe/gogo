@@ -3,7 +3,7 @@
 //! The persisted value is gog-warp's `serialize_tokens()` JSON blob, stored verbatim —
 //! gog-warp owns the format, we own the at-rest location.
 //!
-//! Review A6 (owner decision 2026-10-09): the backend is **config-decided with no
+//! Review A6 (decision by @noosxe 2026-10-09): the backend is **config-decided with no
 //! silent fallback**. Keyring configured but the platform secret service is unavailable
 //! → loud `AuthError::Store` (exit 3) carrying the switch hint; `login` calls
 //! [`TokenStore::probe`] before the browser ever opens. Switching backends never

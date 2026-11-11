@@ -8,7 +8,7 @@ source = "gogo-headless"
 [platforms.linux]
 status = "boots"
 lane   = "installer"
-notes  = "headless sway: intro and the title screen on VKD3D-Proton with NVAPI and DLSS loaded, 3 runs; the title screen ignores the harness's input (#236), so the menu, play, audio and the owner's compositor are not judged"
+notes  = "headless sway: intro and the title screen on VKD3D-Proton with NVAPI and DLSS loaded, 3 runs; the title screen ignores the harness's input (#236), so the menu, play, audio and a real compositor are not judged"
 tested = [
   { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/nvidia", date = 2026-11-07 },
 ]
