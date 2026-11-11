@@ -652,11 +652,18 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let game = tmp.path();
         fs::create_dir_all(game.join("Mods")).unwrap();
-        fs::create_dir_all(game.join("mods")).unwrap();
+        // macOS's default filesystem is case-insensitive: there `mods` is `Mods`,
+        // the one dir every spelling maps onto.
+        let sensitive = fs::create_dir(game.join("mods")).is_ok();
+        let want = if sensitive { "mods" } else { "Mods" };
         fs::write(game.join("tools"), b"a file").unwrap();
         let mut m = CaseMap::new(game);
-        assert_eq!(m.map("mods/a"), "mods/a");
-        assert_eq!(m.map("MODS/b"), "mods/b", "a later path reuses the choice");
+        assert_eq!(m.map("mods/a"), format!("{want}/a"));
+        assert_eq!(
+            m.map("MODS/b"),
+            format!("{want}/b"),
+            "a later path reuses the choice"
+        );
         assert_eq!(m.map("Tools/x.exe"), "Tools/x.exe");
         assert_eq!(m.map("TOOLS"), "Tools", "a new spelling sticks");
         let mut m = CaseMap::new(game);
