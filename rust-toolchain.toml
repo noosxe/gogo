@@ -2,5 +2,5 @@
 # The nix devshell does NOT read this file — it pins the same version in
 # flake.nix; the two must be bumped together.
 [toolchain]
-channel = "1.99.0"
+channel = "1.99.1"
 components = ["clippy", "rustfmt"]

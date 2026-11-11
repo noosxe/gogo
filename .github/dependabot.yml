@@ -2,9 +2,9 @@
 #
 # - Rust: minor/patch only — majors are deliberate upgrades by hand (breaking
 #   changes, MSRV risk). The CI gate compiles everything on the pinned Rust
-#   1.99.0, so any bump that raises MSRV fails the required checks.
+#   1.99.1, so any bump that raises MSRV fails the required checks.
 # - Actions: all updates, majors included — that is how action fixes ship.
-# - The rust-toolchain ecosystem is deliberately NOT configured: the 1.99.0
+# - The rust-toolchain ecosystem is deliberately NOT configured: the 1.99.1
 #   pin must move together with flake.nix (AGENTS.md), never alone.
 
 version: 2
