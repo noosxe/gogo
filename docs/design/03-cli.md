@@ -53,7 +53,7 @@ Content selection flags (all combinable):
 |---|---|---|
 | `--os <os>` | host OS, else `windows` ↓ | `windows`/`mac`/`linux`/`all` |
 | `--language <code>` | `en`, else first available | installer language (`en`, `de`, `fr`, …) |
-| `--with-dlcs` | off | include DLC installers |
+| `--dlc <id\|title>` (repeatable), `--all-dlcs` | off | include owned DLC installers, by id or title / all of them (`--with-dlcs` is a hidden alias of `--all-dlcs`; design 19) |
 | `--include <kinds>` | off | repeatable: `patches`, `extras`, `lang-packs` |
 | `--only <kinds>` | off | exclusive selection, replaces default (installers) |
 

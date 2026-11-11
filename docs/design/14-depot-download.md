@@ -13,7 +13,7 @@ the cache is a **follow-up** (D8), not this contract.
 ## 1. Command surface
 
 ```
-gogo depot <GAME> [--language CODE] [--with-dlcs] [--password PW]
+gogo depot <GAME> [--language CODE] [--dlc ID|TITLE]... [--all-dlcs] [--password PW]
                  [--dir PATH] [--limit RATE] [--no-disk-check]
                  [--dry-run] [--json] [--json-progress]
 ```

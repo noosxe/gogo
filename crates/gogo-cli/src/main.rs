@@ -52,7 +52,9 @@ fn main() {
             cli::exit::MACAPP
         }
         Err(AppError::Depot(e)) => match e {
-            gogo::gog::depot::DepotError::NoCacheDir => {
+            // A DLC the account doesn't own, or doesn't exist (design 19 §2.2).
+            // Display only: it lists the valid DLC and never a server message.
+            gogo::gog::depot::DepotError::NoCacheDir | gogo::gog::depot::DepotError::Dlc(_) => {
                 eprintln!("gogo: {e}");
                 cli::exit::USAGE
             }
@@ -927,9 +929,43 @@ async fn depot_cmd(args: cli::DepotArgs) -> Result<i32, AppError> {
         Some(spec) => Some(gogo::config::parse_rate(spec)?),
         None => None,
     };
+    let (dlcs, dlc_context) = if args.dlc.is_empty() && !args.all_dlcs {
+        (Default::default(), Default::default())
+    } else {
+        let detail = gogo::gog::catalog::detail(&ctx.http, &token, game.id).await?;
+        let owned = library::owned_ids(&ctx.http, &token).await?;
+        let dlcs = if args.all_dlcs {
+            gogo::gog::dlc::DlcSet::AllOwned
+        } else {
+            let (build_id, mdlcs) = gogo::gog::depot::build_dlcs(
+                session,
+                game.id,
+                args.password.clone(),
+                &args.language,
+            )
+            .await?;
+            let infos = gogo::gog::dlc::available(&detail.expanded_dlcs, &owned, Some(&mdlcs));
+            let lane = gogo::gog::dlc::Lane::Depot { build_id };
+            match gogo::gog::dlc::resolve(&args.dlc, &game.title, &infos, &lane) {
+                Ok(ids) => gogo::gog::dlc::DlcSet::Ids(ids),
+                Err(e) => {
+                    eprintln!("gogo: {e}");
+                    return Ok(cli::exit::USAGE);
+                }
+            }
+        };
+        (
+            dlcs,
+            gogo::gog::depot::DlcContext {
+                owned,
+                catalog_dlcs: detail.expanded_dlcs,
+            },
+        )
+    };
     let opts = DepotOptions {
         language: args.language.clone(),
-        with_dlcs: args.with_dlcs,
+        dlcs,
+        dlc_context,
         password: args.password.clone(),
         dir: args.dir.clone(),
         // Only the plan's cost line uses it: a bad one is said (on stderr) and
@@ -940,7 +976,21 @@ async fn depot_cmd(args: cli::DepotArgs) -> Result<i32, AppError> {
         dry_run: args.dry_run,
     };
 
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DepotEvent>();
+    let (tx, mut raw_rx) = tokio::sync::mpsc::unbounded_channel::<DepotEvent>();
+    // Pass events on to the renderer, noting the plan's DLC for `--json`.
+    let (fwd_tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DepotEvent>();
+    let plan_dlcs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let plan_seen = plan_dlcs.clone();
+    let forward = tokio::spawn(async move {
+        while let Some(e) = raw_rx.recv().await {
+            if let DepotEvent::Plan { dlcs, .. } = &e {
+                *plan_seen.lock().unwrap() = dlcs.clone();
+            }
+            if fwd_tx.send(e).is_err() {
+                break;
+            }
+        }
+    });
     // Ctrl-C → cancel token; the depot driver links it to the downloader.
     let cancel_src = ctx.cancel.clone();
     tokio::spawn(async move {
@@ -959,7 +1009,10 @@ async fn depot_cmd(args: cli::DepotArgs) -> Result<i32, AppError> {
         ctx.free_space.as_ref(),
     );
     let mut renderer = depot_mode(args.json_progress, args.json).renderer();
-    let install_dir = depot_progress::drive(runner, &mut rx, &mut renderer).await?;
+    let result = depot_progress::drive(runner, &mut rx, &mut renderer).await;
+    drop(tx);
+    let _ = forward.await;
+    let install_dir = result?;
 
     if args.json {
         let summary = serde_json::json!({
@@ -967,6 +1020,7 @@ async fn depot_cmd(args: cli::DepotArgs) -> Result<i32, AppError> {
             "title": title,
             "installDir": install_dir,
             "dryRun": args.dry_run,
+            "dlcs": &*plan_dlcs.lock().unwrap(),
         });
         println!("{}", serde_json::to_string(&summary).unwrap());
     } else if !machine {
@@ -995,7 +1049,8 @@ async fn download(
         yes,
         os,
         language,
-        with_dlcs,
+        dlc,
+        all_dlcs,
         extras,
         patches,
         lang_packs,
@@ -1073,17 +1128,50 @@ async fn download(
         kinds.push(Kind::LanguagePack);
     }
     let os = os_filter_to_catalog(os).or_else(host_or_configured_os);
-    let filters = Filters {
+    let mut filters = Filters {
         os,
         language: Some(ctx.cfg.gog.language.clone()),
         kinds,
-        with_dlcs,
+        with_dlcs: all_dlcs || !dlc.is_empty(),
+        only_dlcs: None,
     };
 
     let mut products = Vec::new();
     for game in &selected {
         let detail = gogo::gog::catalog::detail(&ctx.http, &token, game.id).await?;
         products.push(detail);
+    }
+    // Owned DLC only (design 19 §1.1): `--all-dlcs` takes the owned ones, `--dlc`
+    // names them; a name that is unknown or unowned is a usage error.
+    if filters.with_dlcs {
+        if !dlc.is_empty() && products.len() != 1 {
+            eprintln!("gogo: --dlc needs exactly one game");
+            return Ok(cli::exit::USAGE);
+        }
+        let owned = library::owned_ids(&ctx.http, &token).await?;
+        let mut only = Vec::new();
+        for (game, product) in selected.iter().zip(&products) {
+            let infos = gogo::gog::dlc::available(&product.expanded_dlcs, &owned, None);
+            let lane = gogo::gog::dlc::Lane::Installer;
+            let ids = if all_dlcs {
+                gogo::gog::dlc::select(
+                    &gogo::gog::dlc::DlcSet::AllOwned,
+                    &game.title,
+                    &infos,
+                    &lane,
+                )
+            } else {
+                gogo::gog::dlc::resolve(&dlc, &game.title, &infos, &lane)
+            };
+            match ids {
+                Ok(ids) => only.extend(ids),
+                Err(e) => {
+                    eprintln!("gogo: {e}");
+                    return Ok(cli::exit::USAGE);
+                }
+            }
+        }
+        filters.only_dlcs = Some(only);
     }
 
     let inner = async {
@@ -1334,6 +1422,7 @@ async fn update(games: Vec<String>, all: bool, strict: bool) -> Result<i32, AppE
         language: Some(ctx.cfg.gog.language.clone()),
         kinds: Vec::new(),
         with_dlcs: false,
+        only_dlcs: None,
     };
     let mut products = Vec::new();
     for game in &selected {
@@ -1486,6 +1575,7 @@ async fn verify(
             kinds: Vec::new(),
             // Corrupt DLC files need their DLC planned too (A1: DLCs via parent).
             with_dlcs: true,
+            only_dlcs: None,
         };
         // force=true: bypass the present-skip so the corrupt file is replaced.
         let tasks: Vec<_> = engine::plan(&ctx, &products, &filters, true)

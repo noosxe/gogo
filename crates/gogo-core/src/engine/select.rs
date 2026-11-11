@@ -20,6 +20,9 @@ pub struct Filters {
     /// Empty = installers only (the default content selection, 03 §3).
     pub kinds: Vec<Kind>,
     pub with_dlcs: bool,
+    /// With `with_dlcs`: only these DLC ids (design 19: owned, or named by `--dlc`);
+    /// `None` takes every `expanded_dlcs` entry.
+    pub only_dlcs: Option<Vec<u64>>,
 }
 
 /// Strip filesystem-hostile characters (`/ \ : * ? " < > |`), control chars, collapse
@@ -59,6 +62,11 @@ pub fn for_product(product: &Product, filters: &Filters, download_root: &Path) -
 
     if filters.with_dlcs {
         for dlc in &product.expanded_dlcs {
+            if let Some(only) = &filters.only_dlcs
+                && !only.contains(&dlc.id)
+            {
+                continue;
+            }
             let dlc_title = dlc.title.clone().unwrap_or_else(|| dlc.id.to_string());
             let dir = dir.join(sanitize(&dlc_title));
             tasks.extend(tasks_for(product, dlc, Some(dlc.id), &dir, filters));
@@ -197,6 +205,7 @@ mod tests {
             language: Some("en".into()),
             kinds: vec![],
             with_dlcs: false,
+            only_dlcs: None,
         };
         let tasks = for_product(&product, &filters, Path::new("/dl"));
         assert_eq!(
@@ -217,6 +226,7 @@ mod tests {
             language: Some("en".into()),
             kinds: vec![],
             with_dlcs: false,
+            only_dlcs: None,
         };
         assert_eq!(for_product(&product, &filters, Path::new("/dl")).len(), 1);
     }
@@ -241,6 +251,38 @@ mod tests {
         assert_eq!(tasks[0].dlc_id, Some(2));
         assert_eq!(tasks[0].product_id, 1);
         assert_eq!(tasks[0].dir, Path::new("/dl/Game/DLC"));
+    }
+
+    #[test]
+    fn only_dlcs_narrows_the_dlc_tree() {
+        let dlc = |id: u32| {
+            format!(
+                r#"{{"id":{id},"title":"D{id}","downloads":{{"installers":[
+                    {{"id":"d{id}","os":"windows","language":"en","files":[
+                      {{"id":"d{id}","size":1,"downlink":"/p/{id}/downlink/installer/d"}}]}}]}}}}"#
+            )
+        };
+        let product: Product = serde_json::from_str(&format!(
+            r#"{{"id":1,"title":"Game","downloads":{{"installers":[]}},
+                "expanded_dlcs":[{},{}]}}"#,
+            dlc(2),
+            dlc(3)
+        ))
+        .unwrap();
+        let mut filters = Filters {
+            with_dlcs: true,
+            only_dlcs: Some(vec![3]),
+            ..Filters::default()
+        };
+        let tasks = for_product(&product, &filters, Path::new("/dl"));
+        assert_eq!(
+            tasks.iter().map(|t| t.dlc_id).collect::<Vec<_>>(),
+            [Some(3)]
+        );
+        filters.only_dlcs = Some(vec![]);
+        assert!(for_product(&product, &filters, Path::new("/dl")).is_empty());
+        filters.only_dlcs = None;
+        assert_eq!(for_product(&product, &filters, Path::new("/dl")).len(), 2);
     }
 
     #[test]

@@ -17,6 +17,7 @@ use gog_warp::content_system::downloader::Downloader;
 use gog_warp::content_system::downloader::progress::DownloadState;
 use gog_warp::content_system::types::{Build, Platform};
 
+use super::dlc::{self, DlcSelectError, DlcSet, Lane, Licence};
 use super::materialize::MaterializePlan;
 
 /// Progress surface for the depot lane (design 14 D4); NDJSON under
@@ -40,8 +41,9 @@ pub enum DepotEvent {
         download_size: u64,
         disk_size: u64,
         language: String,
+        /// The DLC the run takes (design 19), with their depot bytes.
         #[serde(skip_serializing_if = "Vec::is_empty")]
-        dlcs: Vec<String>,
+        dlcs: Vec<PlanDlc>,
         /// Linux only: how a build will turn the cache tree into
         /// `games/<gogid>/game` (reflink or copy) and the extra disk it
         /// costs (design 18 §6). macOS clones through APFS and has none.
@@ -71,8 +73,21 @@ pub enum DepotEvent {
     },
 }
 
+/// One DLC in the plan: what `--json-progress` and the plan line show.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanDlc {
+    pub id: String,
+    pub title: String,
+    pub download_size: u64,
+    pub disk_size: u64,
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum DepotError {
+    /// A DLC selection error (design 19 §2.2): a usage error, exit 2.
+    #[error(transparent)]
+    Dlc(#[from] DlcSelectError),
     #[error("no public Windows builds for product {0}")]
     NoBuilds(u64),
     #[error("no user cache directory available")]
@@ -91,11 +106,21 @@ impl DepotError {
     }
 }
 
+/// What [`run`] needs to name and check DLC (design 19 §2): the account's owned
+/// ids and the game's catalog DLC (titles).
+#[derive(Clone, Default)]
+pub struct DlcContext {
+    pub owned: Vec<u64>,
+    pub catalog_dlcs: Vec<super::catalog::Product>,
+}
+
 /// Driver options (design 14 §1); owned by the CLI layer.
 #[derive(Clone)]
 pub struct DepotOptions {
     pub language: String,
-    pub with_dlcs: bool,
+    /// Which DLC to take; `Ids`/`AllOwned` need `dlc_context`.
+    pub dlcs: DlcSet,
+    pub dlc_context: DlcContext,
     pub password: Option<String>,
     /// Replaces `<cache>/gogo/depot/<id>` as the install root.
     pub dir: Option<PathBuf>,
@@ -111,7 +136,8 @@ impl Default for DepotOptions {
     fn default() -> Self {
         Self {
             language: "en-US".into(),
-            with_dlcs: false,
+            dlcs: DlcSet::None,
+            dlc_context: DlcContext::default(),
             password: None,
             dir: None,
             library: None,
@@ -203,6 +229,29 @@ pub fn cache_roots(
     Some((base, support, deps))
 }
 
+/// The newest public build's id and its manifest's DLC with sizes, for naming DLC
+/// before a run (design 19 §1.3). No depot manifest is fetched.
+pub async fn build_dlcs(
+    core: &Core,
+    product_id: u64,
+    password: Option<String>,
+    language: &str,
+) -> Result<(String, Vec<dlc::ManifestDlc>), DepotError> {
+    let builds = core
+        .get_builds(&product_id.to_string(), Platform::Windows, password)
+        .await
+        .map_err(DepotError::library)?;
+    let build = pick_build(builds.items()).ok_or(DepotError::NoBuilds(product_id))?;
+    let manifest = core
+        .get_manifest(build)
+        .await
+        .map_err(DepotError::library)?;
+    Ok((
+        build.build_id().to_string(),
+        dlc::manifest_dlcs(&manifest, language),
+    ))
+}
+
 /// Full lane (design 14 D5). Emits events into `events`; returns the realized
 /// install directory. Stops after `Plan` when `opts.dry_run`.
 #[allow(clippy::too_many_arguments)]
@@ -243,11 +292,27 @@ pub async fn run(
         .get_manifest(build)
         .await
         .map_err(DepotError::library)?;
-    let dlcs = if opts.with_dlcs {
-        manifest.dlcs()
-    } else {
-        Vec::new()
+    let mdlcs = dlc::manifest_dlcs(&manifest, &opts.language);
+    let infos = dlc::available(
+        &opts.dlc_context.catalog_dlcs,
+        &opts.dlc_context.owned,
+        Some(&mdlcs),
+    );
+    let lane = Lane::Depot {
+        build_id: build_id.clone(),
     };
+    let chosen = dlc::select(&opts.dlcs, title, &infos, &lane)?;
+    let dlcs: Vec<String> = chosen.iter().map(u64::to_string).collect();
+    let plan_dlcs: Vec<PlanDlc> = chosen
+        .iter()
+        .filter_map(|id| infos.iter().find(|d| d.id == *id))
+        .map(|d| PlanDlc {
+            id: d.id.to_string(),
+            title: d.title.clone(),
+            download_size: d.download_size.unwrap_or(0),
+            disk_size: d.disk_size.unwrap_or(0),
+        })
+        .collect();
     let (download_size, disk_size) = manifest.install_size(&opts.language, &dlcs, None);
     let install_dir = install_root.join(manifest.install_directory());
     let game_files = cfg!(target_os = "linux").then(|| {
@@ -268,11 +333,41 @@ pub async fn run(
         download_size,
         disk_size,
         language: opts.language.clone(),
-        dlcs: dlcs.clone(),
+        dlcs: plan_dlcs,
         game_files,
     });
     if opts.dry_run {
         return Ok(install_dir);
+    }
+
+    // A stale owned set can disagree with the server: GOG refuses a DLC's secure
+    // link with 403 `invalid_licence` (design 19 §2.2). Ask before any file is
+    // fetched; only that verdict is read, never the response body.
+    if !chosen.is_empty() {
+        let token = core
+            .obtain_galaxy_token()
+            .await
+            .map_err(DepotError::library)?;
+        for id in &chosen {
+            let verdict = dlc::probe_licence(
+                core.reqwest_client(),
+                dlc::CONTENT_SYSTEM_BASE,
+                token.access_token(),
+                *id,
+                generation,
+                manifest.repository_timestamp(),
+            )
+            .await;
+            if verdict == Licence::NotOwned {
+                let mut stale = infos.clone();
+                for d in stale.iter_mut().filter(|d| d.id == *id) {
+                    d.owned = false;
+                }
+                return Err(dlc::check_id(*id, title, &stale, &lane)
+                    .expect_err("an unowned DLC is refused")
+                    .into());
+            }
+        }
     }
 
     // The preflight (and the downloader) expect the install root to exist;
@@ -294,12 +389,12 @@ pub async fn run(
         .verify();
     if generation == 1 {
         builder = builder.old_language(v1_language(&opts.language));
-        if opts.with_dlcs {
+        if !dlcs.is_empty() {
             builder = builder.old_dlcs(dlcs);
         }
     } else {
         builder = builder.language(opts.language.clone());
-        if opts.with_dlcs {
+        if !dlcs.is_empty() {
             builder = builder.dlcs(dlcs);
         }
     }

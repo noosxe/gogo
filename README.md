@@ -153,11 +153,12 @@ the full flag list, and `--json` / `--json-progress` for scripting.
 
 ```sh
 gogo download pharaoh                          # fuzzy title match
-gogo download 1207658916 --with-dlcs           # by id, include DLCs
+gogo download 1207658916 --all-dlcs            # by id, include the DLC you own
+gogo download 1207658916 --dlc "Phantom Liberty"  # one DLC, by id or title
 gogo download --all --yes --os windows         # everything, Windows installers
 gogo download "hot brass" --extras --patches   # + bonus content and patches
 gogo depot pharaoh --dry-run                   # plan a depot (Model B) download
-gogo depot 1207658916 --with-dlcs              # game files to ~/Library/Caches (Linux: ~/.cache)
+gogo depot 1207658916 --all-dlcs               # game files to ~/Library/Caches (Linux: ~/.cache)
 ```
 
 Useful flags: `--dir`, `--workers`, `--parallel-files`, `--limit 4MiB/s` (rate

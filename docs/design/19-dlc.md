@@ -189,6 +189,10 @@ Usage errors (exit 2), each listing what would have worked:
   with `error: invalid_licence` for a DLC's `productId` becomes the "you don't own" error
   above, with the same list. gogo never prints the response's `error_description`: it
   contains the account id.
+  *Implemented (#346) as a probe, not a catch:* gog-warp's downloader doesn't surface the
+  status, so before any file is fetched `depot` asks for each chosen DLC's secure link
+  itself (`dlc::probe_licence`) and reads only the status and the `error` code. Anything
+  else, including transport errors, is left to the downloader.
 
 ### 2.3 Language (D10)
 
@@ -495,10 +499,14 @@ In `gogo-core`, `dlc.rs` (lane-neutral):
   download_size: Option<u64>, disk_size: Option<u64> }`
 - `available(session, game, content) -> Vec<DlcInfo>`: catalog + owned ids + manifest
   sizes (§1.3). One network round of each; the catalog part is cached as design 06 §3.
-- `resolve(names, &[DlcInfo]) -> Result<Vec<u64>, DlcSelectError>` (§2).
+- `resolve(names, game_title, &[DlcInfo], &Lane) -> Result<Vec<u64>, DlcSelectError>` (§2);
+  `Lane::Depot { build_id }` also requires the DLC to be in the build. `select(&DlcSet, ..)`
+  gives `AllOwned`'s ids.
 - `plan_add(...)`, `add(..., events)`; `recover(game_dir)` (§3.4).
-- `depot::DepotOptions` gains `dlcs: DlcSet` (`None | Ids(Vec) | AllOwned`) in place of
-  `with_dlcs: bool`, and `upgrade_from_same_build: bool` for §3.2.
+- `depot::DepotOptions` (#346) carries `dlcs: DlcSet` and a `dlc_context` (owned ids and the
+  catalog's DLC); `DepotEvent::Plan.dlcs` is `[{id, title, downloadSize, diskSize}]`.
+  `DlcSet` is `None | Ids(Vec) | AllOwned`, in place of `with_dlcs: bool`;
+  `upgrade_from_same_build: bool` (§3.2) comes with #350.
 - The picker is in the CLI (`macapp::prompt`'s menu helpers); the TUI later uses
   `available` + `resolve` the same way.
 

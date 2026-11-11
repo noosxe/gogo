@@ -158,7 +158,13 @@ impl<W: Write> Renderer<W> {
                     if dlcs.is_empty() {
                         String::new()
                     } else {
-                        format!(" +{} dlcs", dlcs.len())
+                        format!(
+                            " +dlc: {}",
+                            dlcs.iter()
+                                .map(|d| d.title.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
                     }
                 ));
                 if let Some(plan) = game_files {
