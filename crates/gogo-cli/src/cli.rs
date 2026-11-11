@@ -438,6 +438,19 @@ pub enum LinuxAppSub {
         #[arg(long)]
         json: bool,
     },
+    /// A built game's DLC: list them, or add DLC without a rebuild (the
+    /// depot lane). The DLC is fetched for the game's installed build and
+    /// language, then laid onto its files under a journal; the prefix,
+    /// saves and settings stay. An add that stops while laying files is
+    /// finished (or undone) by the next `dlc add`; until then the game
+    /// won't start.
+    Dlc {
+        /// GOG product id.
+        #[arg(value_name = "GOGID")]
+        gogid: String,
+        #[command(subcommand)]
+        cmd: LinuxDlcCmd,
+    },
     /// Switch a game to the next renderer in its order (the launcher's
     /// "Try next renderer"): the one after what setup last applied,
     /// written to the override file as `renderer = "<id>"`. Prints the new
@@ -532,6 +545,53 @@ pub enum LinuxAppSub {
         #[arg(long, conflicts_with_all = ["mode", "hdr", "monitor"])]
         clear: bool,
         /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[cfg(target_os = "linux")]
+/// `gogo linux-app dlc <gogid> <cmd>` (design 19 §1.3, §1.4).
+#[derive(Debug, Subcommand)]
+pub enum LinuxDlcCmd {
+    /// Every DLC of the game: whether you own it, whether it's installed,
+    /// and its download and disk size for the installed build ("not in
+    /// this build" when that build can't take it; 0 for a DLC with no
+    /// files). Reads only.
+    List {
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add DLC to the built game: for its installed build and language,
+    /// into the depot cache when it holds that build (else a staging dir in
+    /// the game's dir), then onto the game's files. Refused when GOG no
+    /// longer serves the installed build (update the game with a rebuild).
+    /// With no name and no `--all`, a picker on a terminal. Run it again
+    /// after a stop: it resumes, or finishes or undoes a half-laid add.
+    Add {
+        /// DLC by product id or title (several allowed); each must be owned.
+        #[arg(value_name = "ID|TITLE", conflicts_with = "all")]
+        names: Vec<String>,
+        /// Every owned DLC of the build that isn't installed.
+        #[arg(long)]
+        all: bool,
+        /// Print the plan, change nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the confirmation.
+        #[arg(long)]
+        yes: bool,
+        /// Global rate limit, e.g. 4MiB/s.
+        #[arg(long)]
+        limit: Option<String>,
+        /// Skip the free-space preflight.
+        #[arg(long)]
+        no_disk_check: bool,
+        /// Progress events as NDJSON on stdout.
+        #[arg(long)]
+        json_progress: bool,
+        /// Machine-readable summary.
         #[arg(long)]
         json: bool,
     },

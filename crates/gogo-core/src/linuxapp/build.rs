@@ -785,6 +785,8 @@ pub fn execute(
             method: method.as_str().into(),
             bytes: total,
             dir: dirs.game.clone(),
+            kind: None,
+            files: None,
         });
         if dirs.game.symlink_metadata().is_ok() {
             materialize::remove_tree(&dirs.game)?;

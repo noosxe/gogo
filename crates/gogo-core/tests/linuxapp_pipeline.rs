@@ -1778,7 +1778,7 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
     // next setup, which says so; an unchanged one isn't touched.
     std::fs::write(
         &sh,
-        script.replace("LAUNCHER_VERSION=12", "LAUNCHER_VERSION=0"),
+        script.replace("LAUNCHER_VERSION=13", "LAUNCHER_VERSION=0"),
     )
     .unwrap();
     std::fs::write(&desktop, "[Desktop Entry]\nExec=/old/root/launch.sh\n").unwrap();
@@ -4128,7 +4128,7 @@ fn the_launcher_of_a_library_game_keeps_gogos_data_root() {
     );
     // Logs stay under the data root, not the library's parent.
     assert_eq!(w.runs().len(), 1, "run logs under {:?}", w.logs());
-    assert!(w.launch_log().contains("launcher 12"));
+    assert!(w.launch_log().contains("launcher 13"));
     assert!(!w.root.join("big drive/logs").exists());
 
     // Stale config: setup runs with gogo's data root as GOGO_HOME, and from
@@ -5791,4 +5791,533 @@ fn compat_files_are_written_into_the_game_dir() {
         out.warnings
     );
     assert!(w.state().files.is_empty());
+}
+
+// — adding DLC to a built game (design 19 §3.2, §3.4, #350) —
+
+mod dlc_add {
+    use super::*;
+    use gogo::gog::content;
+    use gogo::gog::depot::{self, DepotError, DownloadInputs};
+    use gogo::gog::dlc::{DlcInfo, ManifestDlc, available};
+    use gogo::gog::lay;
+    use gogo::linuxapp::dlc::{self, AddError, AddOptions, AddOutcome, Game, PlanInput, Source};
+    use gogo::macapp::doctor::Level;
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+
+    const DLC: u64 = 777001;
+    const ZERO: u64 = 777002;
+    const TREE: &str = "Test Game";
+    const REG_KEY: &str = r"Software\TestDlc";
+
+    /// A built game whose `content.toml` says build `B1`, `en-US`, no DLC, with a
+    /// `shared.pak` the DLC replaces.
+    fn built(name: &str) -> World {
+        let w = World::new(name, &["d3d9.dll"]);
+        std::fs::write(w.tree.join("shared.pak"), b"base shared").unwrap();
+        build_with(&w.opts());
+        let mut c = content::load(&w.game()).unwrap().unwrap();
+        c.build_id = Some("B1".into());
+        c.language = Some("en-US".into());
+        content::write(&w.game(), &c).unwrap();
+        w
+    }
+
+    fn cache_base(w: &World) -> PathBuf {
+        w.root.join("user-home/.cache")
+    }
+
+    fn cache_root(w: &World) -> PathBuf {
+        cache_base(w).join("gogo/depot").join(ID)
+    }
+
+    /// A depot cache of build B1 (en-US, no DLC) holding the game's tree.
+    fn cache(w: &World) {
+        let root = cache_root(w);
+        gogo::gog::materialize::materialize_tree(
+            &w.tree,
+            &root.join(TREE),
+            gogo::gog::materialize::Reflink::Never,
+        )
+        .unwrap();
+        depot::write_record(&root, "B1", "en-US", &[]).unwrap();
+    }
+
+    fn infos() -> Vec<DlcInfo> {
+        let m = [
+            ManifestDlc {
+                id: DLC,
+                download_size: 100,
+                disk_size: 200,
+            },
+            ManifestDlc {
+                id: ZERO,
+                download_size: 0,
+                disk_size: 0,
+            },
+        ];
+        let mut v = available(&[], &[DLC, ZERO], Some(&m));
+        v[0].title = "Extra Pack".into();
+        v[1].title = "Hot Garbage".into();
+        v
+    }
+
+    fn game(w: &World) -> Game {
+        dlc::load_game(ID, Some(&cache_base(w))).unwrap()
+    }
+
+    fn plan_for(g: &Game, wanted: &[u64]) -> dlc::AddPlan {
+        let infos = infos();
+        dlc::plan_add(&PlanInput {
+            game: g,
+            title: "Test Game",
+            version: Some("1.0".into()),
+            newer: None,
+            tree_name: TREE.into(),
+            infos: &infos,
+            wanted,
+        })
+    }
+
+    fn script(id: u64) -> String {
+        format!(
+            r#"{{"productId":"{id}","actions":[{{"name":"k","install":{{"action":"setRegistry",
+            "arguments":{{"root":"HKEY_LOCAL_MACHINE","subkey":"{}","valueName":"Dlc{id}",
+            "valueType":"string","valueData":"on"}}}}}}]}}"#,
+            REG_KEY.replace('\\', "\\\\")
+        )
+    }
+
+    /// What gog-warp's targeted diff leaves in the source root: the DLC's files.
+    fn dlc_files(root: &Path) {
+        let t = root.join(TREE);
+        std::fs::create_dir_all(t.join("dlc/ep1")).unwrap();
+        std::fs::write(t.join("dlc/ep1/a.archive"), b"dlc archive").unwrap();
+        std::fs::write(t.join("shared.pak"), b"dlc shared").unwrap();
+        std::fs::write(
+            t.join(format!("goggame-{DLC}.info")),
+            format!(
+                r#"{{"gameId":"{DLC}","rootGameId":"{ID}","name":"Extra Pack","playTasks":[]}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(t.join(format!("goggame-{DLC}.script")), script(DLC)).unwrap();
+    }
+
+    struct Run {
+        result: Result<AddOutcome, AddError>,
+        inputs: Vec<DownloadInputs>,
+        events: Vec<serde_json::Value>,
+    }
+
+    /// One add with a fake downloader: `fail` makes it stop as a Ctrl-C would.
+    fn run(g: &mut Game, plan: &dlc::AddPlan, opts: AddOptions, fail: bool) -> Run {
+        let seen: Arc<Mutex<Vec<DownloadInputs>>> = Arc::default();
+        let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (s, st) = (seen.clone(), stopped.clone());
+        let fetch = async move |inputs: DownloadInputs, root: PathBuf| {
+            s.lock().unwrap().push(inputs);
+            dlc_files(&root);
+            if fail {
+                st.store(true, std::sync::atomic::Ordering::SeqCst);
+                return Err(DepotError::Library("cancelled".into()));
+            }
+            Ok::<(), DepotError>(())
+        };
+        let mut events = Vec::new();
+        let stop = || stopped.load(std::sync::atomic::Ordering::SeqCst);
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = rt.block_on(dlc::add(
+            g,
+            plan,
+            fetch,
+            &opts,
+            &mut |e| events.push(serde_json::to_value(e).unwrap()),
+            &stop,
+        ));
+        let inputs = seen.lock().unwrap().clone();
+        Run {
+            result,
+            inputs,
+            events,
+        }
+    }
+
+    fn tree(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+        fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
+            for e in std::fs::read_dir(dir).unwrap() {
+                let p = e.unwrap().path();
+                let rel = p.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+                if p.is_dir() && !p.is_symlink() {
+                    walk(root, &p, out);
+                } else if p.is_file() {
+                    out.insert(rel, std::fs::read(&p).unwrap());
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        walk(dir, dir, &mut out);
+        out
+    }
+
+    fn no_leftovers(w: &World) {
+        for f in [lay::JOURNAL, lay::BACKUP, lay::STAGING, dlc::DOWNLOAD] {
+            assert!(!w.game().join(f).exists(), "{f} left behind");
+        }
+    }
+
+    fn dlc_finding(w: &World) -> (Level, String) {
+        let host = doctor_host(w, &[("radeon.x86_64", 2), ("radeon.i686", 1)]);
+        let r = doctor(w, &host);
+        let f = r.findings.iter().find(|f| f.check == "dlc").unwrap();
+        (f.level, f.message.clone())
+    }
+
+    fn tag(e: &serde_json::Value) -> String {
+        e.as_object()
+            .and_then(|o| o.keys().next().cloned())
+            .unwrap_or_else(|| e.as_str().unwrap_or("").to_string())
+    }
+
+    #[test]
+    fn an_add_fetches_only_the_dlc_lays_it_and_records_it() {
+        let w = built("dlc-add");
+        let mut g = game(&w);
+        let p = plan_for(&g, &[DLC]);
+        assert_eq!(
+            p.source,
+            Source::Staging,
+            "no cache: staging in the game dir"
+        );
+        assert_eq!(p.game_files, "rename");
+        let r = run(&mut g, &p, AddOptions::default(), false);
+        let out = r.result.unwrap();
+
+        // The downloader got the targeted diff for the installed build (§3.2).
+        assert_eq!(
+            r.inputs,
+            [DownloadInputs {
+                targeted: true,
+                language: Some("en-US".into()),
+                old_language: Some("en-US".into()),
+                dlcs: vec![DLC.to_string()],
+                old_dlcs: vec![],
+            }]
+        );
+        // Laid: the new files, and the replaced base file.
+        let gd = w.game().join("game");
+        assert_eq!(
+            std::fs::read(gd.join("dlc/ep1/a.archive")).unwrap(),
+            b"dlc archive"
+        );
+        assert_eq!(std::fs::read(gd.join("shared.pak")).unwrap(), b"dlc shared");
+        no_leftovers(&w);
+        // Recorded: the commit.
+        let c = content::load(&w.game()).unwrap().unwrap();
+        assert_eq!(c.dlc.len(), 1);
+        assert_eq!((c.dlc[0].id, c.dlc[0].title.as_str()), (DLC, "Extra Pack"));
+        assert_eq!(c.dlc[0].build_id.as_deref(), Some("B1"));
+        assert_eq!(out.added.len(), 1);
+        // GOG's install script ran through setup.
+        assert!(w.log().contains("TestDlc"), "{}", w.log());
+        // Events (§7).
+        let tags: Vec<String> = r.events.iter().map(tag).collect();
+        for t in ["DlcPlan", "GameFilesStarted", "DlcInstalled"] {
+            assert!(tags.contains(&t.to_string()), "{tags:?}");
+        }
+        let started = r
+            .events
+            .iter()
+            .find(|e| tag(e) == "GameFilesStarted")
+            .unwrap();
+        assert_eq!(started["GameFilesStarted"]["kind"], "dlc");
+        assert_eq!(started["GameFilesStarted"]["files"], 4);
+        let plan = r.events.iter().find(|e| tag(e) == "DlcPlan").unwrap();
+        assert_eq!(plan["DlcPlan"]["source"], "staging");
+        assert_eq!(plan["DlcPlan"]["buildId"], "B1");
+        // doctor: ok, naming it.
+        let (level, msg) = dlc_finding(&w);
+        assert!(level == Level::Ok && msg.contains("Extra Pack"), "{msg}");
+
+        // Again: installed already, a notice; nothing fetched.
+        let mut g = game(&w);
+        let p = plan_for(&g, &[DLC]);
+        assert_eq!(p.already, [DLC]);
+        assert!(p.dlcs.is_empty());
+        let r = run(&mut g, &p, AddOptions::default(), false);
+        assert!(r.result.is_ok() && r.inputs.is_empty());
+    }
+
+    #[test]
+    fn from_the_cache_the_cache_keeps_the_files_and_its_record_gains_the_dlc() {
+        let w = built("dlc-add-cache");
+        cache(&w);
+        let mut g = game(&w);
+        let p = plan_for(&g, &[DLC]);
+        assert_eq!(p.source, Source::Cache);
+        assert!(matches!(p.game_files.as_str(), "reflink" | "copy"));
+        let r = run(
+            &mut g,
+            &p,
+            AddOptions {
+                run_setup: false,
+                ..Default::default()
+            },
+            false,
+        );
+        r.result.unwrap();
+        let root = cache_root(&w);
+        assert!(root.join(TREE).join("dlc/ep1/a.archive").exists());
+        let rec = depot::read_record(&root).unwrap();
+        assert_eq!(rec.dlcs, Some(vec![DLC.to_string()]));
+        assert_eq!(
+            std::fs::read(w.game().join("game/shared.pak")).unwrap(),
+            b"dlc shared"
+        );
+        no_leftovers(&w);
+    }
+
+    #[test]
+    fn a_stop_during_the_download_leaves_the_game_untouched_and_a_rerun_resumes() {
+        let w = built("dlc-add-dl-stop");
+        let before = tree(&w.game().join("game"));
+        let mut g = game(&w);
+        let p = plan_for(&g, &[DLC]);
+        let r = run(&mut g, &p, AddOptions::default(), true);
+        assert!(
+            matches!(r.result, Err(AddError::Interrupted("download", _))),
+            "{:?}",
+            r.result.err()
+        );
+        assert_eq!(tree(&w.game().join("game")), before, "game/ untouched");
+        assert!(!w.game().join(lay::JOURNAL).exists());
+        assert!(dlc::download_pending(&w.game()));
+        let (level, msg) = dlc_finding(&w);
+        assert!(level == Level::Warn && msg.contains("download"), "{msg}");
+        // `move` refuses while the add's files are in the game dir.
+        let err = gogo::linuxapp::relocate::plan(
+            ID,
+            &gogo::macapp::relocate::Target::Default,
+            &Default::default(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("DLC add"), "{err}");
+
+        // A rerun resumes into the same staging dir and finishes.
+        let mut g = game(&w);
+        let p = plan_for(&g, &[DLC]);
+        assert_eq!(p.source, Source::Staging);
+        let r = run(&mut g, &p, AddOptions::default(), false);
+        r.result.unwrap();
+        assert_eq!(
+            std::fs::read(w.game().join("game/dlc/ep1/a.archive")).unwrap(),
+            b"dlc archive"
+        );
+        no_leftovers(&w);
+    }
+
+    /// A stop at each lay step: the journal stays, doctor fails, `move` refuses, and
+    /// the next add rolls forward to the same game as an uninterrupted add.
+    #[test]
+    fn a_stop_during_the_lay_keeps_the_journal_and_the_next_add_finishes_it() {
+        let w = built("dlc-add-lay-stop");
+        let mut reference = None;
+        for step in [
+            lay::Step::Journal,
+            lay::Step::New,
+            lay::Step::Backup,
+            lay::Step::Rename,
+        ] {
+            // Back to the base game each round.
+            let mut c = content::load(&w.game()).unwrap().unwrap();
+            c.dlc.clear();
+            content::write(&w.game(), &c).unwrap();
+            let game_dir = w.game().join("game");
+            let _ = std::fs::remove_dir_all(game_dir.join("dlc"));
+            for f in [
+                format!("goggame-{DLC}.info"),
+                format!("goggame-{DLC}.script"),
+            ] {
+                let _ = std::fs::remove_file(game_dir.join(f));
+            }
+            std::fs::write(game_dir.join("shared.pak"), b"base shared").unwrap();
+
+            let mut g = game(&w);
+            let p = plan_for(&g, &[DLC]);
+            let opts = AddOptions {
+                run_setup: false,
+                fail_at: Some(step),
+                ..Default::default()
+            };
+            let r = run(&mut g, &p, opts, false);
+            assert!(
+                matches!(r.result, Err(AddError::Interrupted("lay", _))),
+                "{step:?}: {:?}",
+                r.result.err()
+            );
+            assert!(dlc::journal_exists(&w.game()), "{step:?}");
+            let (level, msg) = dlc_finding(&w);
+            assert!(
+                level == Level::Fail && msg.contains(lay::JOURNAL),
+                "{step:?}: {msg}"
+            );
+            assert!(
+                gogo::linuxapp::relocate::plan(
+                    ID,
+                    &gogo::macapp::relocate::Target::Default,
+                    &Default::default()
+                )
+                .is_err()
+            );
+            assert!(content::load(&w.game()).unwrap().unwrap().dlc.is_empty());
+
+            // A bare rerun: the recovery is the job.
+            let mut g = game(&w);
+            let p = plan_for(&g, &[]);
+            let r = run(
+                &mut g,
+                &p,
+                AddOptions {
+                    run_setup: false,
+                    ..Default::default()
+                },
+                false,
+            );
+            let out = r.result.unwrap();
+            assert_eq!(out.recovered, Some(lay::Direction::Forward), "{step:?}");
+            assert!(
+                r.events.iter().any(|e| tag(e) == "DlcRecovered"),
+                "{:?}",
+                r.events
+            );
+            no_leftovers(&w);
+            assert_eq!(content::load(&w.game()).unwrap().unwrap().dlc.len(), 1);
+            let now = tree(&game_dir);
+            match &reference {
+                None => reference = Some(now),
+                Some(r) => assert_eq!(&now, r, "{step:?}"),
+            }
+        }
+        let r = reference.unwrap();
+        assert_eq!(r["shared.pak"], b"dlc shared");
+        assert_eq!(r["dlc/ep1/a.archive"], b"dlc archive");
+    }
+
+    #[test]
+    fn a_lay_whose_source_is_gone_rolls_back_to_the_base_game() {
+        let w = built("dlc-add-back");
+        let before = tree(&w.game().join("game"));
+        let mut g = game(&w);
+        let p = plan_for(&g, &[DLC]);
+        let opts = AddOptions {
+            run_setup: false,
+            fail_at: Some(lay::Step::Journal),
+            ..Default::default()
+        };
+        assert!(run(&mut g, &p, opts, false).result.is_err());
+        // The staging dir lost a file (deleted by hand, a full disk…).
+        std::fs::remove_file(
+            w.game()
+                .join(lay::STAGING)
+                .join(TREE)
+                .join("dlc/ep1/a.archive"),
+        )
+        .unwrap();
+        let mut g = game(&w);
+        let back =
+            dlc::recover(&mut g, gogo::gog::materialize::Reflink::Never, &mut |_| {}).unwrap();
+        assert_eq!(back, Some(lay::Direction::Back));
+        assert_eq!(tree(&w.game().join("game")), before);
+        assert!(content::load(&w.game()).unwrap().unwrap().dlc.is_empty());
+        no_leftovers(&w);
+    }
+
+    /// Design 19 §3.2: a DLC with no depot bytes runs no downloader, writes no
+    /// journal and is recorded; its `goggame` files and script come from the cache's
+    /// support overlay when it has them.
+    #[test]
+    fn a_zero_byte_dlc_is_a_record_only_add() {
+        let w = built("dlc-add-zero");
+        let mut g = game(&w);
+        let p = plan_for(&g, &[ZERO]);
+        assert!(!p.fetches());
+        let r = run(&mut g, &p, AddOptions::default(), false);
+        r.result.unwrap();
+        assert!(r.inputs.is_empty(), "no downloader");
+        assert!(
+            !r.events.iter().any(|e| tag(e) == "GameFilesStarted"),
+            "nothing laid: {:?}",
+            r.events
+        );
+        no_leftovers(&w);
+        let c = content::load(&w.game()).unwrap().unwrap();
+        assert_eq!(c.dlc.iter().map(|d| d.id).collect::<Vec<_>>(), [ZERO]);
+    }
+
+    #[test]
+    fn a_zero_byte_dlc_takes_its_goggame_files_from_the_cache_overlay() {
+        let w = built("dlc-add-zero-cache");
+        cache(&w);
+        let app = cache_root(&w).join(format!("gog-support/{ID}/{ZERO}/app"));
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(
+            app.join(format!("goggame-{ZERO}.info")),
+            format!(
+                r#"{{"gameId":"{ZERO}","rootGameId":"{ID}","name":"Hot Garbage","playTasks":[]}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(app.join(format!("goggame-{ZERO}.script")), script(ZERO)).unwrap();
+        let mut g = game(&w);
+        let p = plan_for(&g, &[ZERO]);
+        assert_eq!(p.source, Source::Cache);
+        let r = run(&mut g, &p, AddOptions::default(), false);
+        r.result.unwrap();
+        assert!(r.inputs.is_empty(), "no downloader");
+        assert!(w.game().join(format!("game/goggame-{ZERO}.info")).exists());
+        assert!(w.log().contains(&format!("Dlc{ZERO}")), "{}", w.log());
+        let rec = depot::read_record(&cache_root(&w)).unwrap();
+        assert_eq!(rec.dlcs, Some(vec![ZERO.to_string()]));
+        no_leftovers(&w);
+        let (level, _) = dlc_finding(&w);
+        assert_eq!(level, Level::Ok);
+    }
+
+    #[test]
+    fn apps_remove_takes_a_leftover_staging_dir_with_the_game() {
+        use gogo::macapp::apps;
+        let w = built("dlc-add-remove");
+        std::fs::create_dir_all(w.game().join(lay::STAGING).join(TREE)).unwrap();
+        let logs = w.root.join("logs");
+        let a = apps::get(ID, &logs).unwrap().unwrap();
+        apps::remove(&a, false).unwrap();
+        assert!(!w.game().exists());
+    }
+
+    #[test]
+    fn the_launcher_refuses_while_a_dlc_journal_exists() {
+        let Some(w) = World::launcher("dlc-launch", true) else {
+            return;
+        };
+        std::fs::write(w.game().join(lay::JOURNAL), "{}").unwrap();
+        let stub = w.dialog_stub(&["OK"]);
+        let out = w.launch(&[("GOGO_LAUNCHER_DIALOG", stub.to_str().unwrap())], &[]);
+        assert_eq!(out.status.code(), Some(1));
+        assert!(
+            w.launch_log().contains("didn't finish"),
+            "{}",
+            w.launch_log()
+        );
+        assert!(
+            w.dialogs()[0].contains(&format!("gogo linux-app dlc {ID} add")),
+            "{:?}",
+            w.dialogs()
+        );
+        assert_eq!(w.game_runs(), 0);
+        std::fs::remove_file(w.game().join(lay::JOURNAL)).unwrap();
+    }
 }

@@ -363,6 +363,24 @@ build, gogo's compat DB, then your override file,
 the Linux values. `--renderer` and `--runtime` (`ge-proton[/<version>]` or
 `path:<dir>` for a Proton build of your own) win.
 
+**DLC** on a depot-built game, without a rebuild:
+
+```sh
+gogo linux-app dlc 1423049311 list                 # owned / installed / sizes for the installed build (--json)
+gogo linux-app dlc 1423049311 add REDmod --dry-run # the plan: sizes, where the files come from, the disk
+gogo linux-app dlc 1423049311 add "Phantom Liberty" --yes
+```
+
+`dlc add` fetches only the DLC's files for the game's installed build and
+language. They go into the depot cache when it holds that build, else into a
+staging dir in the game's dir. Then they're laid onto the game's files, and the
+prefix, saves and settings stay. A DLC that replaces a game file gets that file
+backed up until the add is done. If an add stops while laying files (Ctrl-C, a
+crash), the game won't start until `dlc add` runs again: it finishes the add,
+or undoes it if the fetched files are gone. If GOG no longer serves the
+installed build, the add is refused, and the update is a rebuild:
+`gogo linux-app <gogid> --dlc ...` keeps the prefix and saves.
+
 ```sh
 gogo linux-app compat 1207659013                                    # merged config, layer per field, protonfix summary
 gogo linux-app --retarget 1207659013 --renderer wined3d             # writes the override file, re-runs setup

@@ -162,6 +162,90 @@ pub fn pick_build<'a>(items: impl IntoIterator<Item = &'a Build>) -> Option<&'a 
     })
 }
 
+/// How a built game's build stands against the builds GOG lists (design 19 §4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuildMatch {
+    /// The installed build is GOG's newest public one.
+    Newest,
+    /// Still listed; a newer public build exists.
+    Older {
+        newest_id: String,
+        newest_version: String,
+    },
+    /// No longer listed: its manifest can't be fetched.
+    Gone,
+    /// The game's build isn't known.
+    Unknown,
+}
+
+/// Pure: match the installed build `installed` against GOG's `items` (design 19 §4).
+/// The listed build is returned with the answer when there is one.
+pub fn match_build<'a>(
+    installed: Option<&str>,
+    items: &'a [Build],
+) -> (BuildMatch, Option<&'a Build>) {
+    let Some(b) = installed else {
+        return (BuildMatch::Unknown, None);
+    };
+    let Some(found) = items.iter().find(|x| x.build_id() == b) else {
+        return (BuildMatch::Gone, None);
+    };
+    match pick_build(items) {
+        Some(newest) if newest.build_id() != b => (
+            BuildMatch::Older {
+                newest_id: newest.build_id().to_string(),
+                newest_version: newest.version_name().to_string(),
+            },
+            Some(found),
+        ),
+        _ => (BuildMatch::Newest, Some(found)),
+    }
+}
+
+/// The installed build as GOG serves it: its match, and when it is listed, its
+/// version name, generation and manifest.
+pub struct InstalledBuild {
+    pub matched: BuildMatch,
+    pub listed: Option<(String, u32, Manifest)>,
+    /// The newest public build's id, for sizes when the installed one is gone.
+    pub newest: Option<(String, Manifest)>,
+}
+
+/// Fetch the build list and, for the installed build (else the newest, so a
+/// listing still has sizes), its manifest. No depot manifest is fetched.
+pub async fn installed_build(
+    core: &Core,
+    product_id: u64,
+    build_id: Option<&str>,
+) -> Result<InstalledBuild, DepotError> {
+    let builds = core
+        .get_builds(&product_id.to_string(), Platform::Windows, None)
+        .await
+        .map_err(DepotError::library)?;
+    let items: Vec<Build> = builds.items().to_vec();
+    let (matched, found) = match_build(build_id, &items);
+    let listed = match found {
+        Some(b) => Some((
+            b.version_name().to_string(),
+            *b.generation(),
+            core.get_manifest(b).await.map_err(DepotError::library)?,
+        )),
+        None => None,
+    };
+    let newest = match (&listed, pick_build(&items)) {
+        (None, Some(b)) => Some((
+            b.build_id().to_string(),
+            core.get_manifest(b).await.map_err(DepotError::library)?,
+        )),
+        _ => None,
+    };
+    Ok(InstalledBuild {
+        matched,
+        listed,
+        newest,
+    })
+}
+
 /// Whether GOG publishes a public Windows build for `product_id`, i.e.
 /// whether the depot lane can serve it (`gogo mac-app`'s default, #73).
 pub async fn has_public_build(core: &Core, product_id: u64) -> Result<bool, DepotError> {
@@ -368,37 +452,107 @@ pub async fn run(
     // A stale owned set can disagree with the server: GOG refuses a DLC's secure
     // link with 403 `invalid_licence` (design 19 §2.2). Ask before any file is
     // fetched; only that verdict is read, never the response body.
-    if !chosen.is_empty() {
-        let token = core
-            .obtain_galaxy_token()
-            .await
-            .map_err(DepotError::library)?;
-        for id in &chosen {
-            let verdict = dlc::probe_licence(
-                core.reqwest_client(),
-                dlc::CONTENT_SYSTEM_BASE,
-                token.access_token(),
-                *id,
-                generation,
-                manifest.repository_timestamp(),
-            )
-            .await;
-            if verdict == Licence::NotOwned {
-                let mut stale = infos.clone();
-                for d in stale.iter_mut().filter(|d| d.id == *id) {
-                    d.owned = false;
-                }
-                return Err(dlc::check_id(*id, title, &stale, &lane)
-                    .expect_err("an unowned DLC is refused")
-                    .into());
-            }
+    if let Some(id) = first_unowned(core, &chosen, generation, &manifest).await? {
+        let mut stale = infos.clone();
+        for d in stale.iter_mut().filter(|d| d.id == id) {
+            d.owned = false;
         }
+        return Err(dlc::check_id(id, title, &stale, &lane)
+            .expect_err("an unowned DLC is refused")
+            .into());
     }
 
+    let (fetched_files, fetched_bytes) = fetch_into(
+        core,
+        &FetchSpec {
+            manifest: &manifest,
+            build_id: &build_id,
+            inputs: &inputs,
+            install_root: &install_root,
+            support_root: &support_root,
+            deps_root: &deps_root,
+            limit: opts.limit,
+            disk_check: opts.disk_check,
+        },
+        events,
+        cancel,
+        free_space,
+    )
+    .await?;
+    // The download is done either way; without a record (a full disk, say)
+    // the next reuse just checks it again.
+    let held = record_dlcs(prior.as_ref(), &build_id, &opts.language, &dlcs);
+    if write_record(&install_root, &build_id, &opts.language, &held).is_err() {
+        let _ = std::fs::remove_file(install_root.join(RECORD));
+    }
+    let _ = events.send(DepotEvent::Finished {
+        install_dir: install_dir.clone(),
+        fetched_files,
+        fetched_bytes,
+    });
+    Ok(install_dir)
+}
+
+/// The first of `ids` whose secure link GOG refuses as not owned (design 19 §2.2),
+/// asked before any file is fetched. Only the verdict is read, never a body.
+pub async fn first_unowned(
+    core: &Core,
+    ids: &[u64],
+    generation: u32,
+    manifest: &Manifest,
+) -> Result<Option<u64>, DepotError> {
+    if ids.is_empty() {
+        return Ok(None);
+    }
+    let token = core
+        .obtain_galaxy_token()
+        .await
+        .map_err(DepotError::library)?;
+    for id in ids {
+        let verdict = dlc::probe_licence(
+            core.reqwest_client(),
+            dlc::CONTENT_SYSTEM_BASE,
+            token.access_token(),
+            *id,
+            generation,
+            manifest.repository_timestamp(),
+        )
+        .await;
+        if verdict == Licence::NotOwned {
+            return Ok(Some(*id));
+        }
+    }
+    Ok(None)
+}
+
+/// What [`fetch_into`] downloads, and where.
+pub struct FetchSpec<'a> {
+    /// The build being downloaded; also the old one for a targeted run.
+    pub manifest: &'a Manifest,
+    pub build_id: &'a str,
+    pub inputs: &'a DownloadInputs,
+    pub install_root: &'a Path,
+    pub support_root: &'a Path,
+    pub deps_root: &'a Path,
+    /// Bytes/sec; `None` = unlimited.
+    pub limit: Option<u64>,
+    pub disk_check: bool,
+}
+
+/// Run gog-warp's downloader for `spec` into its install root, forwarding its
+/// progress and `cancel`; `(files, bytes)` it wrote (#337). The shared part of
+/// [`run`] and `linux-app dlc add` (design 19 §3.2).
+pub async fn fetch_into(
+    core: &Core,
+    spec: &FetchSpec<'_>,
+    events: &tokio::sync::mpsc::UnboundedSender<DepotEvent>,
+    cancel: &CancellationToken,
+    free_space: &(dyn crate::engine::FreeSpace + Send + Sync),
+) -> Result<(u64, u64), DepotError> {
     // The preflight (and the downloader) expect the install root to exist;
     // nothing creates it before this point (live finding 2026-10-20: the
     // free-space probe on a missing path is ENOENT, not 0 free).
-    std::fs::create_dir_all(&install_root).map_err(DepotError::Io)?;
+    std::fs::create_dir_all(spec.install_root).map_err(DepotError::Io)?;
     let deps_manifest = core
         .get_dependencies_manifest()
         .await
@@ -406,15 +560,15 @@ pub async fn run(
 
     let builder = Downloader::builder()
         .core(core.clone())
-        .manifest(manifest.clone(), &build_id)
-        .install_root(install_root.clone())
-        .support_root(support_root)
-        .global_dependencies_root(deps_root)
+        .manifest(spec.manifest.clone(), spec.build_id)
+        .install_root(spec.install_root.to_path_buf())
+        .support_root(spec.support_root.to_path_buf())
+        .global_dependencies_root(spec.deps_root.to_path_buf())
         .game_dependencies(deps_manifest);
-    let builder = inputs.apply(builder, &manifest, &build_id);
+    let builder = spec.inputs.apply(builder, spec.manifest, spec.build_id);
     let mut downloader = builder.build().map_err(DepotError::library)?;
 
-    if let Some(bps) = opts.limit {
+    if let Some(bps) = spec.limit {
         let clamped = bps.min(i32::MAX as u64) as i32;
         downloader.set_max_speed(clamped).await;
     }
@@ -441,14 +595,14 @@ pub async fn run(
 
     downloader.prepare().await.map_err(DepotError::library)?;
 
-    if opts.disk_check {
+    if spec.disk_check {
         let required = downloader
             .get_required_space()
             .await
             .map_err(DepotError::library)?
             .max(0) as u64;
         let free = free_space
-            .available_bytes(&install_root)
+            .available_bytes(spec.install_root)
             .map_err(DepotError::Io)?;
         if required > free {
             return Err(DepotError::Library(format!(
@@ -457,21 +611,9 @@ pub async fn run(
         }
     }
 
-    let before = Snapshot::take(&install_root);
+    let before = Snapshot::take(spec.install_root);
     downloader.download().await.map_err(DepotError::library)?;
-    let (fetched_files, fetched_bytes) = Snapshot::take(&install_root).fetched_since(&before);
-    // The download is done either way; without a record (a full disk, say)
-    // the next reuse just checks it again.
-    let held = record_dlcs(prior.as_ref(), &build_id, &opts.language, &dlcs);
-    if write_record(&install_root, &build_id, &opts.language, &held).is_err() {
-        let _ = std::fs::remove_file(install_root.join(RECORD));
-    }
-    let _ = events.send(DepotEvent::Finished {
-        install_dir: install_dir.clone(),
-        fetched_files,
-        fetched_bytes,
-    });
-    Ok(install_dir)
+    Ok(Snapshot::take(spec.install_root).fetched_since(&before))
 }
 
 /// The record of a finished download, in the cache root next to the game
@@ -614,7 +756,7 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) -> std::io::Result<()> {
 /// Size and mtime of every file [`walk`] finds under a cache root, to tell
 /// what a run wrote (#337). gog-warp writes a file as `<name>.download` and
 /// renames it, so a fetched file is new or has a new mtime.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct Snapshot(std::collections::HashMap<String, (u64, Option<std::time::SystemTime>)>);
 
 impl Snapshot {
@@ -639,6 +781,19 @@ impl Snapshot {
             .iter()
             .filter(|(f, now)| before.0.get(*f) != Some(now))
             .fold((0, 0), |(n, b), (_, (len, _))| (n + 1, b + len))
+    }
+
+    /// The paths (relative to the root, `/`-separated, sorted) in `self` that
+    /// `before` lacks or had otherwise: what a run wrote (design 19 §3.2).
+    pub fn changed_since(&self, before: &Snapshot) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .0
+            .iter()
+            .filter(|(f, now)| before.0.get(*f) != Some(now))
+            .map(|(f, _)| f.clone())
+            .collect();
+        out.sort();
+        out
     }
 }
 
@@ -772,6 +927,21 @@ pub fn download_inputs(
             old_dlcs: Vec::new(),
         }
     }
+}
+
+/// Pure: the inputs of `linux-app dlc add` (design 19 §3.2): the installed build
+/// diffed against itself, `old_dlcs` the installed DLC, `dlcs` those plus the
+/// wanted ones, the recorded language on both sides, no `verify`.
+pub fn add_inputs(language: &str, installed: &[String], wanted: &[String]) -> DownloadInputs {
+    download_inputs(
+        2,
+        language,
+        wanted,
+        &CacheCheck::MissingDlc {
+            missing: wanted.to_vec(),
+        },
+        installed,
+    )
 }
 
 impl DownloadInputs {
@@ -1100,6 +1270,64 @@ mod tests {
             "urls": []
         }))
         .expect("Build from json")
+    }
+
+    /// Design 19 §4 as a pure function of the installed build and GOG's list.
+    #[test]
+    fn the_installed_build_is_matched_against_the_listed_ones() {
+        let items = vec![
+            build("old", "2024-01-01T00:00:00+0000", true),
+            build("new", "2025-01-01T00:00:00+0000", true),
+        ];
+        let (m, b) = match_build(Some("new"), &items);
+        assert_eq!(m, BuildMatch::Newest);
+        assert_eq!(b.unwrap().build_id(), "new");
+        let (m, b) = match_build(Some("old"), &items);
+        assert_eq!(
+            m,
+            BuildMatch::Older {
+                newest_id: "new".into(),
+                newest_version: "v1".into()
+            }
+        );
+        assert_eq!(b.unwrap().build_id(), "old");
+        let (m, b) = match_build(Some("rotated"), &items);
+        assert!(m == BuildMatch::Gone && b.is_none());
+        assert_eq!(match_build(None, &items).0, BuildMatch::Unknown);
+    }
+
+    /// `dlc add`'s downloader inputs (design 19 §3.2): the installed build against
+    /// itself, `old_dlcs` = installed, `dlcs` = installed ∪ wanted, the recorded
+    /// language on both sides, no verify.
+    #[test]
+    fn add_inputs_diff_the_installed_set_against_installed_plus_wanted() {
+        let i = add_inputs("de-DE", &ids(&["5"]), &ids(&["9", "7"]));
+        assert_eq!(
+            i,
+            DownloadInputs {
+                targeted: true,
+                language: Some("de-DE".into()),
+                old_language: Some("de-DE".into()),
+                dlcs: ids(&["5", "7", "9"]),
+                old_dlcs: ids(&["5"]),
+            }
+        );
+        // The first DLC: nothing installed, still the targeted diff.
+        let first = add_inputs("en-US", &[], &ids(&["9"]));
+        assert!(first.targeted && first.old_dlcs.is_empty());
+    }
+
+    #[test]
+    fn a_snapshot_names_what_changed_and_round_trips() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::write(t.path().join("a"), b"1").unwrap();
+        let before = Snapshot::take(t.path());
+        let back: Snapshot =
+            serde_json::from_str(&serde_json::to_string(&before).unwrap()).unwrap();
+        assert_eq!(back, before);
+        std::fs::create_dir_all(t.path().join("d")).unwrap();
+        std::fs::write(t.path().join("d/b"), b"2").unwrap();
+        assert_eq!(Snapshot::take(t.path()).changed_since(&back), ["d/b"]);
     }
 
     #[test]

@@ -12,6 +12,7 @@ pub mod depot;
 pub mod dlc;
 pub mod downlink;
 pub mod error;
+pub mod lay;
 pub mod library;
 pub mod materialize;
 

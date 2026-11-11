@@ -1736,10 +1736,36 @@ fn check_links(g: &Game, proton: Option<&Path>) -> Finding {
 /// markers, [`game::prefix_procs`]). Reported, never stopped.
 /// The DLC the game has (design 19 §6.2), from `content.toml` or, for a game built
 /// before it, from the `goggame-*.info` files. Warns on a DLC info the record doesn't
-/// list and on a listed DLC whose info is gone. (The interrupted-add journal and the
-/// owned-but-missing DLC come with `dlc add`.)
+/// list and on a listed DLC whose info is gone. Fails while an interrupted `dlc add`'s
+/// journal is there (design 19 §3.4), and warns on one that stopped during its
+/// download. (The owned-but-missing warning needs the network: `dlc list` says it.)
 fn check_dlc(g: &Game) -> Finding {
     use crate::gog::content::{self, Lane};
+    if super::dlc::journal_exists(&g.dirs.root) {
+        return Finding::fail(
+            "dlc",
+            format!(
+                "a DLC add stopped while laying its files ({} is there): the game files may \
+                 mix two versions, so the launcher won't start the game",
+                crate::gog::lay::JOURNAL
+            ),
+            format!(
+                "run `gogo linux-app dlc {} add` to finish it (or undo it, when its files \
+                 are gone)",
+                g.gogid
+            ),
+        );
+    }
+    if super::dlc::download_pending(&g.dirs.root) {
+        return Finding::warn(
+            "dlc",
+            "a DLC add stopped during its download; the game is as it was",
+            format!(
+                "run `gogo linux-app dlc {} add` again to resume it",
+                g.gogid
+            ),
+        );
+    }
     let depot = g.dirs.game.is_dir();
     let install = if depot {
         g.dirs.game.clone()

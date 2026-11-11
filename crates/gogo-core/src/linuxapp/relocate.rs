@@ -149,9 +149,31 @@ fn prefix_mentions(prefix: &Path, root: &Path) -> Vec<&'static str> {
         .collect()
 }
 
+/// A DLC add in progress or left over (design 19 §3.2, §3.4) holds files in the game
+/// dir a move must not split: its journal, its download record, its staging dir.
+fn refuse_dlc_add(gogid: &str) -> Result<(), MacAppError> {
+    let root = GameDirs::for_game(gogid)?.root;
+    let what = [
+        crate::gog::lay::JOURNAL,
+        super::dlc::DOWNLOAD,
+        crate::gog::lay::STAGING,
+    ]
+    .into_iter()
+    .find(|f| root.join(f).symlink_metadata().is_ok());
+    match what {
+        None => Ok(()),
+        Some(f) => Err(MacAppError::Apps(format!(
+            "a DLC add of {gogid} is in progress or didn't finish ({} is there): run `gogo \
+             linux-app dlc {gogid} add` to finish it, then move the game",
+            root.join(f).display()
+        ))),
+    }
+}
+
 /// What `gogo linux-app move` will do.
 pub fn plan(gogid: &str, target: &Target, opts: &MoveOptions) -> Result<MovePlan, MacAppError> {
     crate::macapp::compat::validate_gogid(gogid)?;
+    refuse_dlc_add(gogid)?;
     relocate::plan(gogid, target, &LinuxLane, opts)
 }
 
@@ -162,6 +184,8 @@ pub fn move_game(
     opts: &MoveOptions,
     emit: &mut dyn FnMut(&MoveEvent),
 ) -> Result<MoveOutcome, MacAppError> {
+    crate::macapp::compat::validate_gogid(gogid)?;
+    refuse_dlc_add(gogid)?;
     relocate::move_game(gogid, target, &LinuxLane, opts, emit)
 }
 

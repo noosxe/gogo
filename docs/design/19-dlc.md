@@ -150,6 +150,15 @@ column is made up.)
   It shows size `0`; adding it is a record-only change (§3.2).
 - `--json`: `{gogid, lane, buildId, language, dlcs: [{id, title, owned, installed,
   installedBuild, inBuild, downloadSize, diskSize}]}`.
+- As built (#350): `linuxapp::dlc::listing` and `render_list`. Rows are `available`'s
+  plus any DLC `content.toml` lists that neither the catalog nor the manifest has.
+  Sizes come from the installed build's manifest. When GOG no longer serves that build,
+  the newest build's manifest is used and a note says so, naming the update. The table
+  has a header line (`<gogid> (<lane> lane, build <id>, <language>)`), and notes go
+  under it: the build is gone, the record is derived, the language is assumed, or
+  `N owned DLC not installed`. `--json` also has `installedVersion`, plus `notes`
+  when there are any. An installer-lane game is listed from the catalog alone, with
+  no sizes.
 
 ### 1.4 `dlc add`
 
@@ -166,6 +175,23 @@ column is made up.)
 - Refused while the game runs or a `move` holds its lock (the same `refuse_running` and
   `game-moves/<gogid>.lock` a move takes, design 18 §6.1), and on a game whose recorded dir
   is unreachable.
+- As built (#350): `gogo linux-app dlc <gogid> add (<id|title>... | --all) [--dry-run]
+  [--yes] [--limit RATE] [--no-disk-check] [--json] [--json-progress]`.
+  - A bare `add` on a terminal opens the build's picker over the owned DLC not yet
+    installed. Headless, it's a usage error listing them. A bare `add` that only
+    settled an interrupted add (below) is done.
+  - `--dry-run` writes nothing, and doesn't recover either. Its `--json` is `{dryRun,
+    plan}`, where `plan` is `linuxapp::dlc::AddPlan`. The plan's lines: the DLC with
+    sizes (`0 B: record only`), the build line, the newer build with the update command
+    when there is one, `files from:` (`the depot cache` or `staging in the game dir`),
+    `game files:` (`reflink`, `copy` or `moved from staging`), the download and the
+    disk, and the number of registry values in each DLC's install script when that
+    script is already in the source.
+  - The add's `--json` is `{gogid, buildId, language, dlcs, added, recovered?, lay?,
+    warnings?}`.
+  - A generation 1 build is refused, naming a rebuild: the targeted diff is generation 2
+    only (§3.3).
+  - An installer-lane game is refused (#351).
 
 ## 2. Selection (D2)
 
@@ -264,6 +290,36 @@ resolve game → content.toml (build B, language L, installed DLC I)
 - The staging dir is named so `move`, `apps remove` and the GC know it: `move` refuses
   while it exists (an add in progress, or a leftover), `apps remove` deletes it with the
   game.
+- As built (#350): core `linuxapp::dlc` (`load_game`, `plan_add`, `add`, `recover`).
+  The network side lives in the CLI (`dlc_cmd.rs`): the catalog, the owned set,
+  `depot::installed_build` (the build list and the installed build's manifest) and the
+  secure-link probe (`depot::first_unowned`). The download is a closure over
+  `depot::fetch_into`, the downloader part of `depot::run` factored out, so the
+  tests fake it. `depot::add_inputs` gives the `DownloadInputs`.
+  - **The source is the cache** only when its record has this build and language (a
+    record without `language` doesn't count), lists every installed DLC, has lost no
+    file, and its tree is there. Otherwise it's `.dlc-staging/`.
+  - **The download's record is a file of its own,** `games/<gogid>/dlc-download.json`
+    (`{buildId, source, adding, before, fetched}`). It isn't a field in the journal: the
+    launcher and doctor read the journal's existence as "files half laid", and a stop
+    during the download must leave the game playable. It's written before the
+    downloader runs, and a rerun reuses its source and its snapshot. Once `fetched` is
+    set, a rerun lays without downloading again.
+  - **Where fetched files land in `game/`:** under `<install dir>/` they keep their
+    path, and under `gog-support/<base>/<product>/app/` they go to the game root.
+    The overlay wins on a clash, as at a build.
+  - **A record-only DLC** takes its `goggame-<dlcid>*` files from the cache's support
+    overlay, and only when the cache is the source. With nothing to lay there's no
+    journal at all.
+  - **Setup runs once after the commit** (the base's and every DLC's
+    `goggame-*.script`, §3.6). A failed setup is a warning naming `gogo linux-app
+    setup`, since the DLC is in place and recorded by then.
+  - `move` refuses while the journal, the download record or the staging dir is there.
+    `apps remove` takes them with the game dir.
+  - **Unverified, for the host pass:** gog-warp (pinned rev) keeps directory and link
+    entries in its diff's download list, and in `upgrade_from` mode it renames each
+    listed entry out of `!Temp`. A manifest with a directory entry over a non-empty dir
+    could fail that rename. This applies equally to #347's targeted cache completion.
 
 ### 3.3 The depot cache: completeness and repair (#336)
 
@@ -350,6 +406,24 @@ The game's lock (`game-moves/<gogid>.lock`, design 18 §6.1) is held exclusively
 
 With reflink the lay is near instant; with a copy it's the DLC's size once (not the
 game's), and the plan's `game files:` line says which, as design 18 §6 does today.
+
+As built (#350): `gog/lay.rs` (not `materialize.rs`; it uses `materialize::clone_file`).
+- `Journal` is `{gogid, lane, buildId, language, adding: [{id, title}], source,
+  sourceIsCache, moves, files: [{from, to}], replaced, dirs}`. `dirs` are the dirs the
+  lay creates, which a rollback removes when they're empty.
+- `lay_files(root, journal, reflink, stop, on_file)` runs steps 1–4. `stop(Step)` is
+  asked at each boundary and between files. Ctrl-C reaches it through the command's
+  cancel token, and the crash tests use `AddOptions::fail_at`. `finish` is step 5's
+  cleanup, after the caller wrote `content.toml`.
+- `recover` goes forward when every file is laid, pending, or still in its source.
+  The missing ones are staged again and swapped in, then the caller commits. It goes
+  back otherwise.
+- `syncfs` runs on the game's filesystem after step 2 and after step 4, rather than an
+  fsync per rename.
+- The game's lock is `relocate::lock_game`, now public. It creates `game-moves/` when
+  it's missing.
+- A recovery emits `DlcRecovered` and needs the game's lock. `dlc add` recovers before
+  it fetches anything, whatever DLC it was asked for.
 
 ### 3.5 Removal (D11): later
 
@@ -511,7 +585,10 @@ Where the code differs from the table above, or does less for now:
 - The `apps list` column counts the DLC the game has. The `installed/owned` form needs
   the network, so it comes with `dlc list` (#350).
 - `doctor`'s `dlc` check does the info-versus-record comparison. The owned-but-missing
-  warning and the journal `fail` row come with `dlc add` (#350).
+  warning and the journal `fail` row come with `dlc add` (#350). As built (#350): `doctor` fails
+  `dlc` while `dlc-journal.json` exists and warns while `dlc-download.json` does, each
+  naming `gogo linux-app dlc <gogid> add`. The owned-but-missing line needs the network,
+  so `dlc list` prints it as a note, not doctor.
 - A build's plan says `dlc: none` or lists the DLC already in the tree; the build flags
   that choose DLC (#349) add the `(N owned not included)` tail and the rebuild
   kept/added/dropped lines. The build's `--json` gains `build_id`, `language` and
@@ -535,6 +612,13 @@ Where the code differs from the table above, or does less for now:
   error listing the owned DLC.
 - Exit codes: 2 for a selection error (§2.2), 7 for depot/installer failures and the
   build refusal (§4), 130 on Ctrl-C (journal kept, §3.4).
+- As built (#350): the new events are `ProgressEvent` variants (the build's stream,
+  NDJSON `{"DlcPlan":{dlcs, source, buildId}}`, `{"DlcInstalled":{id}}`,
+  `{"DlcRecovered":{action}}`). `GameFilesStarted` gains optional `kind` (`"dlc"`)
+  and `files`. The download's `DepotEvent`s go through `depot_progress::drive`
+  unchanged, `Finished` included. A selection error or a licence refusal is exit 2; a
+  build refusal, a generation 1 build or a depot failure is exit 7; Ctrl-C during the
+  download or the lay is exit 130.
 
 ## 8. Core API
 
