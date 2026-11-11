@@ -80,7 +80,9 @@ Behavior flags:
 Game selectors accept **id**, **slug**, or case-insensitive title substring. Ambiguous →
 interactive pick (dialoguer) or, non-TTY, exit 2 with the candidate list. Unknown → exit 2.
 A DLC id/slug as a selector resolves to its **parent game** (with a notice); DLC content
-itself is selected via `--with-dlcs` (A1).
+itself is selected via `--with-dlcs` (A1). *(Amended, design 19 §2: `--dlc <id|title>` and
+`--all-dlcs` select owned DLC by id or title; a DLC id as the game selector still resolves
+to its parent.)*
 
 Exit summary (human): per-file lines `✓ name (size, elapsed)` / `↷ skipped (already present)` /
 `! failed (reason)` + totals. `--json` adds a machine summary with the same facts.

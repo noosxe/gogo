@@ -2377,6 +2377,10 @@ only on Linux (`#[cfg(target_os = "linux")]`), with the same shape:
 - Leftovers fixed in the same work: `depot`'s "macOS only for now" (§6), the `runtimes
   install`/`renderers install` refusal off macOS (§6).
 
+> **Amended (design 19, #343):** the build gains `--dlc`, `--all-dlcs`, `--no-dlcs` and
+> `--lang`, and `gogo linux-app dlc <gogid> list|add` adds DLC to a built game without a
+> rebuild; `doctor` gains a `dlc` check.
+
 **As built (#176)** — `linuxapp/build.rs`, `linuxapp/manage.rs`, `gogo linux-app`:
 
 - Flags: `<game|setup.exe|dir>`, `--from-depot`, `--name`, `--runtime [<ref>]`,

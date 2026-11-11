@@ -23,6 +23,9 @@ gogo depot <GAME> [--language CODE] [--with-dlcs] [--password PW]
 - `--language` — v2 code for `language()`, mapped to the v1 name for `old_language()`
   when the build is generation 1 (default `en-US`).
 - `--with-dlcs` — pass `manifest.dlcs()` (v1: `old_dlcs`) to the builder.
+  > **Amended (design 19):** `--dlc <id|title>` and `--all-dlcs` select owned DLC only;
+  > `--with-dlcs` becomes a hidden alias of `--all-dlcs`. The download record gains the
+  > DLC set and language, and a cache missing a wanted DLC is completed (design 19 §3.3).
 - `--password` — forwarded to `get_builds` for password-protected titles.
 - `--dir` — override the install root (default D2). `--limit` — same grammar as
   `download --limit` (05 §3), forwarded to `set_max_speed` (bytes/s, `-1` unlimited).
