@@ -2134,12 +2134,15 @@ Wayland there. `wayland` asks for the driver.
   check runs again there (also when `launch.sh`'s own environment has no socket: a wrapper may
   bring one). The header's `# display:` is `launch.sh`'s view; that line is the game's.
 
-**Warning: 32-bit GPU games (#312).** Wine's Wayland driver can't give a 32-bit game the GPU:
-wined3d (EGL) and D7VK/DXVK (Vulkan) fail ("Could not initialize Direct Draw", SimCity 4) or
-draw unscaled (SimCity 2000), on real Hyprland/NVIDIA as headless; the cause is open research.
-GDI games (cnc-ddraw, which gogo pins to `renderer=gdi`: Heroes 3, Pharaoh, Zeus) and 64-bit
-games work. So when the mode is `wayland`, the entry exe is 32-bit (the install scan) and the
-renderer setup will apply is wined3d, `proton-default`, dxvk, d7vk or vkd3d-proton,
+**Warning: 32-bit wined3d games (#312, #326).** Wine's Wayland driver can't give a 32-bit game
+wined3d's OpenGL (EGL): SimCity 4 fails ("Could not initialize Direct Draw"), SimCity 2000,
+SimCity 3000 and Carmageddon TDR 2000 fail or draw unscaled, on real Hyprland/NVIDIA as headless.
+32-bit games on DXVK (Vulkan) work there: Warhammer 40,000: Chaos Gate and Anno 1701 A.D. So
+the cause is the 32-bit OpenGL/EGL path, not Vulkan (4 wined3d games fail, 2 DXVK games work).
+D7VK and VKD3D-Proton are Vulkan too and are left out by analogy with DXVK; D7VK hasn't been
+tried on Wayland on a desktop. GDI games (cnc-ddraw, which gogo pins to `renderer=gdi`: Heroes 3,
+Pharaoh, Zeus) and 64-bit games work. So when the mode is `wayland`, the entry exe is 32-bit (the
+install scan) and the renderer setup will apply is wined3d or `proton-default` (which is wined3d),
 `display` (setting or showing) and `doctor` warn and suggest `display <gogid> x11` or `--clear`.
 It's a warning, not a refusal: the setting is still written (SimCity 2000 is run on
 Wayland on purpose). A failed scan warns of nothing. No exception for a game whose compat entry
