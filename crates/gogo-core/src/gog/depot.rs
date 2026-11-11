@@ -13,9 +13,9 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 use gog_warp::Core;
-use gog_warp::content_system::downloader::Downloader;
 use gog_warp::content_system::downloader::progress::DownloadState;
-use gog_warp::content_system::types::{Build, Platform};
+use gog_warp::content_system::downloader::{Builder, Downloader};
+use gog_warp::content_system::types::{Build, Manifest, Platform};
 
 use super::dlc::{self, DlcSelectError, DlcSet, Lane, Licence};
 use super::materialize::MaterializePlan;
@@ -44,6 +44,10 @@ pub enum DepotEvent {
         /// The DLC the run takes (design 19), with their depot bytes.
         #[serde(skip_serializing_if = "Vec::is_empty")]
         dlcs: Vec<PlanDlc>,
+        /// What the run does with the cache already there, when it isn't
+        /// plain (design 19 §3.3): which DLC it fetches, or why it checks.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache: Option<String>,
         /// Linux only: how a build will turn the cache tree into
         /// `games/<gogid>/game` (reflink or copy) and the extra disk it
         /// costs (design 18 §6). macOS clones through APFS and has none.
@@ -314,6 +318,26 @@ pub async fn run(
         })
         .collect();
     let (download_size, disk_size) = manifest.install_size(&opts.language, &dlcs, None);
+    // What the cache already there holds decides how it's completed (design 19 §3.3).
+    let prior = load_record(&install_root);
+    let want = CacheWant {
+        build_id: Some(&build_id),
+        language: Some(&opts.language),
+        dlcs: &dlcs,
+    };
+    let check = prior.as_ref().map_or(CacheCheck::Unrecorded, |r| {
+        check_record(&install_root, r, &want)
+    });
+    let inputs = download_inputs(
+        generation,
+        &opts.language,
+        &dlcs,
+        &check,
+        prior
+            .as_ref()
+            .and_then(|r| r.dlcs.as_deref())
+            .unwrap_or(&[]),
+    );
     let install_dir = install_root.join(manifest.install_directory());
     let game_files = cfg!(target_os = "linux").then(|| {
         let game_dir = crate::macapp::launch::GameDirs::for_build(
@@ -334,6 +358,7 @@ pub async fn run(
         disk_size,
         language: opts.language.clone(),
         dlcs: plan_dlcs,
+        cache: cache_note(&check, &inputs),
         game_files,
     });
     if opts.dry_run {
@@ -379,25 +404,14 @@ pub async fn run(
         .await
         .map_err(DepotError::library)?;
 
-    let mut builder = Downloader::builder()
+    let builder = Downloader::builder()
         .core(core.clone())
-        .manifest(manifest, &build_id)
+        .manifest(manifest.clone(), &build_id)
         .install_root(install_root.clone())
         .support_root(support_root)
         .global_dependencies_root(deps_root)
-        .game_dependencies(deps_manifest)
-        .verify();
-    if generation == 1 {
-        builder = builder.old_language(v1_language(&opts.language));
-        if !dlcs.is_empty() {
-            builder = builder.old_dlcs(dlcs);
-        }
-    } else {
-        builder = builder.language(opts.language.clone());
-        if !dlcs.is_empty() {
-            builder = builder.dlcs(dlcs);
-        }
-    }
+        .game_dependencies(deps_manifest);
+    let builder = inputs.apply(builder, &manifest, &build_id);
     let mut downloader = builder.build().map_err(DepotError::library)?;
 
     if let Some(bps) = opts.limit {
@@ -448,7 +462,8 @@ pub async fn run(
     let (fetched_files, fetched_bytes) = Snapshot::take(&install_root).fetched_since(&before);
     // The download is done either way; without a record (a full disk, say)
     // the next reuse just checks it again.
-    if write_record(&install_root, &build_id).is_err() {
+    let held = record_dlcs(prior.as_ref(), &build_id, &opts.language, &dlcs);
+    if write_record(&install_root, &build_id, &opts.language, &held).is_err() {
         let _ = std::fs::remove_file(install_root.join(RECORD));
     }
     let _ = events.send(DepotEvent::Finished {
@@ -474,6 +489,13 @@ const WARP_TEMP: &str = "!Temp";
 #[serde(rename_all = "camelCase")]
 struct Record {
     build_id: String,
+    /// The language the download asked for; absent in records an older gogo wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    language: Option<String>,
+    /// DLC product ids the cache holds, sorted; absent in records an older gogo
+    /// wrote, which can't say what the tree holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dlcs: Option<Vec<String>>,
     /// Paths relative to the cache root, `/`-separated, sorted.
     files: Vec<String>,
 }
@@ -481,7 +503,7 @@ struct Record {
 /// What a cache root's record says about it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CacheCheck {
-    /// Everything the download left is still there.
+    /// Everything the download left is still there, and it holds what's wanted.
     Complete,
     /// No record: an older gogo downloaded it, or the download never
     /// finished. Whether it's whole is unknown.
@@ -489,24 +511,71 @@ pub enum CacheCheck {
     /// These recorded paths are gone (at most [`MISSING_SHOWN`] of them,
     /// plus the count of all).
     Missing { shown: Vec<String>, count: usize },
+    /// The record predates DLC and language tracking, so what the tree holds
+    /// can't be told without hashing it.
+    UnknownContent,
+    /// These wanted DLC (product ids) aren't in the cache.
+    MissingDlc { missing: Vec<String> },
+    /// The cache was downloaded in another language.
+    OtherLanguage,
+    /// The cache holds another build than the one wanted.
+    OtherBuild,
+}
+
+/// What a caller wants from a cache; a `None` field isn't checked.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CacheWant<'a> {
+    pub build_id: Option<&'a str>,
+    pub language: Option<&'a str>,
+    /// DLC product ids.
+    pub dlcs: &'a [String],
 }
 
 /// How many missing paths [`CacheCheck::Missing`] names.
 pub const MISSING_SHOWN: usize = 5;
 
 /// Record what's in `root` after a finished download (overwrites the last).
-pub fn write_record(root: &Path, build_id: &str) -> std::io::Result<()> {
+/// `dlcs` are the product ids the cache holds.
+pub fn write_record(
+    root: &Path,
+    build_id: &str,
+    language: &str,
+    dlcs: &[String],
+) -> std::io::Result<()> {
     let mut files = Vec::new();
     walk(root, root, &mut files)?;
     files.sort();
+    let mut dlcs = dlcs.to_vec();
+    dlcs.sort();
+    dlcs.dedup();
     let rec = Record {
         build_id: build_id.to_string(),
+        language: Some(language.to_string()),
+        dlcs: Some(dlcs),
         files,
     };
     let text = serde_json::to_string_pretty(&rec).map_err(std::io::Error::other)?;
     let tmp = root.join(format!("{RECORD}.tmp"));
     std::fs::write(&tmp, text)?;
     std::fs::rename(&tmp, root.join(RECORD))
+}
+
+/// The DLC a new record lists: those the old record had, when it was for the
+/// same build and language (a completion or repair keeps them), plus `wanted`.
+fn record_dlcs(
+    prior: Option<&Record>,
+    build_id: &str,
+    language: &str,
+    wanted: &[String],
+) -> Vec<String> {
+    let mut all: Vec<String> = prior
+        .filter(|r| r.build_id == build_id && r.language.as_deref() == Some(language))
+        .and_then(|r| r.dlcs.clone())
+        .unwrap_or_default();
+    all.extend(wanted.iter().cloned());
+    all.sort();
+    all.dedup();
+    all
 }
 
 /// Files and links under `dir`, relative to `root`; links aren't followed.
@@ -573,28 +642,169 @@ impl Snapshot {
     }
 }
 
-/// Check the cache root `root` against its record. An unreadable record
-/// counts as none.
-pub fn check_cache(root: &Path) -> CacheCheck {
-    let Ok(text) = std::fs::read_to_string(root.join(RECORD)) else {
-        return CacheCheck::Unrecorded;
-    };
-    let Ok(rec) = serde_json::from_str::<Record>(&text) else {
-        return CacheCheck::Unrecorded;
-    };
+fn load_record(root: &Path) -> Option<Record> {
+    let text = std::fs::read_to_string(root.join(RECORD)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Check the cache root `root` against its record and `want`. An unreadable
+/// record counts as none.
+pub fn check_cache(root: &Path, want: &CacheWant<'_>) -> CacheCheck {
+    match load_record(root) {
+        Some(rec) => check_record(root, &rec, want),
+        None => CacheCheck::Unrecorded,
+    }
+}
+
+fn check_record(root: &Path, rec: &Record, want: &CacheWant<'_>) -> CacheCheck {
     let missing: Vec<String> = rec
         .files
-        .into_iter()
+        .iter()
         .filter(|f| root.join(f).symlink_metadata().is_err())
+        .cloned()
         .collect();
-    if missing.is_empty() {
-        CacheCheck::Complete
-    } else {
-        CacheCheck::Missing {
+    if !missing.is_empty() {
+        return CacheCheck::Missing {
             count: missing.len(),
             shown: missing.into_iter().take(MISSING_SHOWN).collect(),
+        };
+    }
+    if want.build_id.is_some_and(|b| b != rec.build_id) {
+        return CacheCheck::OtherBuild;
+    }
+    // A record from before DLC tracking only matters to a caller that wants
+    // DLC or a language: without them it holds all they ask for.
+    if (rec.dlcs.is_none() && !want.dlcs.is_empty())
+        || (rec.language.is_none() && want.language.is_some())
+    {
+        return CacheCheck::UnknownContent;
+    }
+    if let (Some(have), Some(wanted)) = (&rec.language, want.language)
+        && !have.eq_ignore_ascii_case(wanted)
+    {
+        return CacheCheck::OtherLanguage;
+    }
+    let held = rec.dlcs.as_deref().unwrap_or(&[]);
+    let lacking: Vec<String> = want
+        .dlcs
+        .iter()
+        .filter(|d| !held.contains(d))
+        .cloned()
+        .collect();
+    if lacking.is_empty() {
+        CacheCheck::Complete
+    } else {
+        CacheCheck::MissingDlc { missing: lacking }
+    }
+}
+
+/// What the downloader is told for a run (design 19 §3.2/§3.3): kept apart
+/// from the builder so the choice is testable without a network.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadInputs {
+    /// Diff against the same build with the recorded DLC (no hashing), not a
+    /// full `verify`.
+    pub targeted: bool,
+    /// `None`: the library's default (generation 1 names it by `old_language`).
+    pub language: Option<String>,
+    pub old_language: Option<String>,
+    pub dlcs: Vec<String>,
+    pub old_dlcs: Vec<String>,
+}
+
+/// Pure: pick how a run completes the cache. Only a cache of the same build and
+/// language that lacks wanted DLC is completed the targeted way, and only on
+/// generation 2 (v1's DLC are named by the old-style options and diffed by the
+/// library differently); everything else is a full `verify` with the wanted set,
+/// which keeps what's valid and fetches the rest.
+pub fn download_inputs(
+    generation: u32,
+    language: &str,
+    wanted: &[String],
+    check: &CacheCheck,
+    recorded: &[String],
+) -> DownloadInputs {
+    if generation != 1 && matches!(check, CacheCheck::MissingDlc { .. }) {
+        let mut all: Vec<String> = recorded.iter().chain(wanted).cloned().collect();
+        all.sort();
+        all.dedup();
+        return DownloadInputs {
+            targeted: true,
+            language: Some(language.to_string()),
+            old_language: Some(language.to_string()),
+            dlcs: all,
+            old_dlcs: recorded.to_vec(),
+        };
+    }
+    if generation == 1 {
+        DownloadInputs {
+            targeted: false,
+            language: None,
+            old_language: Some(v1_language(language)),
+            dlcs: Vec::new(),
+            old_dlcs: wanted.to_vec(),
+        }
+    } else {
+        DownloadInputs {
+            targeted: false,
+            language: Some(language.to_string()),
+            old_language: None,
+            dlcs: wanted.to_vec(),
+            old_dlcs: Vec::new(),
         }
     }
+}
+
+impl DownloadInputs {
+    /// Set them on the builder: `manifest` is the build being downloaded, also
+    /// the old one for a targeted run.
+    pub fn apply(&self, mut b: Builder, manifest: &Manifest, build_id: &str) -> Builder {
+        if self.targeted {
+            b = b.upgrade_from(manifest.clone(), build_id);
+        } else {
+            b = b.verify();
+        }
+        if let Some(l) = &self.language {
+            b = b.language(l.clone());
+        }
+        if let Some(l) = &self.old_language {
+            b = b.old_language(l.clone());
+        }
+        if !self.dlcs.is_empty() {
+            b = b.dlcs(self.dlcs.clone());
+        }
+        if !self.old_dlcs.is_empty() {
+            b = b.old_dlcs(self.old_dlcs.clone());
+        }
+        b
+    }
+}
+
+/// The plan line's words on what happens to the cache (`None`: nothing to say).
+fn cache_note(check: &CacheCheck, inputs: &DownloadInputs) -> Option<String> {
+    Some(match check {
+        CacheCheck::Complete | CacheCheck::Unrecorded => return None,
+        CacheCheck::Missing { count, .. } => {
+            format!("cache lost {count} file(s): checking it (hashing) and fetching them")
+        }
+        CacheCheck::UnknownContent => "cache record predates DLC tracking: checking it \
+             (hashing) and fetching what's missing"
+            .into(),
+        CacheCheck::MissingDlc { missing } if inputs.targeted => format!(
+            "cache lacks DLC {}: fetching only those (no hashing)",
+            missing.join(", ")
+        ),
+        CacheCheck::MissingDlc { missing } => format!(
+            "cache lacks DLC {}: checking it (hashing) and fetching them",
+            missing.join(", ")
+        ),
+        CacheCheck::OtherLanguage => {
+            "cache holds another language: checking it (hashing) and fetching the rest".into()
+        }
+        CacheCheck::OtherBuild => {
+            "cache holds another build: checking it (hashing) and fetching the new one".into()
+        }
+    })
 }
 
 #[cfg(test)]
@@ -605,7 +815,10 @@ mod tests {
     fn record_round_trip_and_missing_files() {
         let t = tempfile::tempdir().unwrap();
         let root = t.path();
-        assert_eq!(check_cache(root), CacheCheck::Unrecorded);
+        assert_eq!(
+            check_cache(root, &CacheWant::default()),
+            CacheCheck::Unrecorded
+        );
         std::fs::create_dir_all(root.join("Game/Apps")).unwrap();
         std::fs::create_dir_all(root.join("gog-support/1/1/app")).unwrap();
         std::fs::write(root.join("Game/Apps/game.exe"), b"x").unwrap();
@@ -613,7 +826,7 @@ mod tests {
         std::fs::write(root.join(WARP_MARKER), b"b1").unwrap();
         std::fs::write(root.join("Game/x.bin.download"), b"").unwrap();
         std::fs::write(root.join("Game/.DS_Store"), b"").unwrap();
-        write_record(root, "b1").unwrap();
+        write_record(root, "b1", "en-US", &[]).unwrap();
 
         let rec: Record =
             serde_json::from_str(&std::fs::read_to_string(root.join(RECORD)).unwrap()).unwrap();
@@ -622,11 +835,14 @@ mod tests {
             rec.files,
             ["Game/Apps/game.exe", "gog-support/1/1/app/game.ini"]
         );
-        assert_eq!(check_cache(root), CacheCheck::Complete);
+        assert_eq!(
+            check_cache(root, &CacheWant::default()),
+            CacheCheck::Complete
+        );
 
         std::fs::remove_dir_all(root.join("gog-support")).unwrap();
         assert_eq!(
-            check_cache(root),
+            check_cache(root, &CacheWant::default()),
             CacheCheck::Missing {
                 shown: vec!["gog-support/1/1/app/game.ini".into()],
                 count: 1
@@ -658,7 +874,10 @@ mod tests {
     fn unreadable_record_is_unrecorded() {
         let t = tempfile::tempdir().unwrap();
         std::fs::write(t.path().join(RECORD), "not json").unwrap();
-        assert_eq!(check_cache(t.path()), CacheCheck::Unrecorded);
+        assert_eq!(
+            check_cache(t.path(), &CacheWant::default()),
+            CacheCheck::Unrecorded
+        );
     }
 
     #[cfg(unix)]
@@ -668,8 +887,184 @@ mod tests {
         let root = t.path();
         std::fs::create_dir_all(root.join("Game")).unwrap();
         std::os::unix::fs::symlink("nowhere", root.join("Game/link")).unwrap();
-        write_record(root, "b").unwrap();
-        assert_eq!(check_cache(root), CacheCheck::Complete);
+        write_record(root, "b", "en-US", &[]).unwrap();
+        assert_eq!(
+            check_cache(root, &CacheWant::default()),
+            CacheCheck::Complete
+        );
+    }
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// A cache root with one game file, recorded as `(build, language, dlcs)`.
+    fn recorded(build: &str, language: &str, dlcs: &[&str]) -> tempfile::TempDir {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(t.path().join("Game")).unwrap();
+        std::fs::write(t.path().join("Game/a.bin"), b"x").unwrap();
+        write_record(t.path(), build, language, &ids(dlcs)).unwrap();
+        t
+    }
+
+    #[test]
+    fn record_round_trips_dlcs_and_language_and_reads_old_records() {
+        let t = recorded("b1", "de-DE", &["9", "3", "9"]);
+        let rec = load_record(t.path()).unwrap();
+        assert_eq!(rec.language.as_deref(), Some("de-DE"));
+        assert_eq!(rec.dlcs, Some(ids(&["3", "9"])));
+
+        // An older gogo's record: no `language`, no `dlcs`.
+        std::fs::write(
+            t.path().join(RECORD),
+            r#"{"buildId":"b1","files":["Game/a.bin"]}"#,
+        )
+        .unwrap();
+        let old = load_record(t.path()).unwrap();
+        assert_eq!((old.language, old.dlcs), (None, None));
+    }
+
+    #[test]
+    fn check_cache_answers() {
+        let w = ids(&["5"]);
+        let both = ids(&["5", "7"]);
+        let want = |build, language, dlcs| CacheWant {
+            build_id: build,
+            language,
+            dlcs,
+        };
+
+        // Complete, also with extra DLC in the cache.
+        let t = recorded("b1", "en-US", &["5", "6"]);
+        assert_eq!(
+            check_cache(t.path(), &want(Some("b1"), Some("en-US"), &w)),
+            CacheCheck::Complete
+        );
+        // MissingDlc: only the ones not held.
+        assert_eq!(
+            check_cache(t.path(), &want(Some("b1"), Some("en-US"), &both)),
+            CacheCheck::MissingDlc {
+                missing: ids(&["7"])
+            }
+        );
+        assert_eq!(
+            check_cache(t.path(), &want(Some("b2"), Some("en-US"), &w)),
+            CacheCheck::OtherBuild
+        );
+        assert_eq!(
+            check_cache(t.path(), &want(Some("b1"), Some("de-DE"), &w)),
+            CacheCheck::OtherLanguage
+        );
+        // Missing files win.
+        std::fs::remove_file(t.path().join("Game/a.bin")).unwrap();
+        assert!(matches!(
+            check_cache(t.path(), &want(Some("b1"), Some("en-US"), &w)),
+            CacheCheck::Missing { count: 1, .. }
+        ));
+        assert_eq!(
+            check_cache(Path::new("/nonexistent"), &want(None, None, &w)),
+            CacheCheck::Unrecorded
+        );
+
+        // An older record: unknown to a caller that wants DLC or a language,
+        // whole to one that asks for neither.
+        let old = recorded("b1", "en-US", &[]);
+        std::fs::write(
+            old.path().join(RECORD),
+            r#"{"buildId":"b1","files":["Game/a.bin"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            check_cache(old.path(), &want(Some("b1"), Some("en-US"), &w)),
+            CacheCheck::UnknownContent
+        );
+        assert_eq!(
+            check_cache(old.path(), &want(Some("b1"), Some("en-US"), &[])),
+            CacheCheck::UnknownContent
+        );
+        assert_eq!(
+            check_cache(old.path(), &CacheWant::default()),
+            CacheCheck::Complete
+        );
+    }
+
+    #[test]
+    fn targeted_completion_diffs_from_the_recorded_set_without_verify() {
+        let check = CacheCheck::MissingDlc {
+            missing: ids(&["7"]),
+        };
+        let got = download_inputs(2, "de-DE", &ids(&["7"]), &check, &ids(&["5"]));
+        assert_eq!(
+            got,
+            DownloadInputs {
+                targeted: true,
+                language: Some("de-DE".into()),
+                old_language: Some("de-DE".into()),
+                dlcs: ids(&["5", "7"]),
+                old_dlcs: ids(&["5"]),
+            }
+        );
+    }
+
+    #[test]
+    fn everything_else_is_a_full_verify_with_the_wanted_set() {
+        let w = ids(&["7"]);
+        for check in [
+            CacheCheck::UnknownContent,
+            CacheCheck::Unrecorded,
+            CacheCheck::OtherBuild,
+            CacheCheck::OtherLanguage,
+            CacheCheck::Complete,
+            CacheCheck::Missing {
+                shown: vec![],
+                count: 1,
+            },
+        ] {
+            let got = download_inputs(2, "en-US", &w, &check, &ids(&["5"]));
+            assert!(!got.targeted, "{check:?}");
+            assert_eq!(got.dlcs, w);
+            assert!(got.old_dlcs.is_empty());
+            assert_eq!(got.old_language, None);
+        }
+        // Generation 1 names language and DLC the old way, even when a DLC is missing.
+        let miss = CacheCheck::MissingDlc { missing: w.clone() };
+        let v1 = download_inputs(1, "de-DE", &w, &miss, &ids(&["5"]));
+        assert!(!v1.targeted);
+        assert_eq!(v1.old_language.as_deref(), Some("German"));
+        assert_eq!((v1.dlcs, v1.old_dlcs), (vec![], w));
+    }
+
+    #[test]
+    fn new_record_keeps_the_dlcs_of_the_same_build_and_language() {
+        let t = recorded("b1", "en-US", &["5"]);
+        let prior = load_record(t.path());
+        let w = ids(&["7"]);
+        assert_eq!(
+            record_dlcs(prior.as_ref(), "b1", "en-US", &w),
+            ids(&["5", "7"])
+        );
+        assert_eq!(record_dlcs(prior.as_ref(), "b2", "en-US", &w), w);
+        assert_eq!(record_dlcs(prior.as_ref(), "b1", "de-DE", &w), w);
+        assert_eq!(record_dlcs(None, "b1", "en-US", &w), w);
+    }
+
+    #[test]
+    fn plan_says_what_happens_to_the_cache() {
+        let miss = CacheCheck::MissingDlc {
+            missing: ids(&["7"]),
+        };
+        let t = download_inputs(2, "en-US", &ids(&["7"]), &miss, &[]);
+        assert_eq!(
+            cache_note(&miss, &t).as_deref(),
+            Some("cache lacks DLC 7: fetching only those (no hashing)")
+        );
+        let f = download_inputs(2, "en-US", &[], &CacheCheck::OtherBuild, &[]);
+        assert!(
+            cache_note(&CacheCheck::OtherBuild, &f)
+                .unwrap()
+                .contains("another build")
+        );
+        assert_eq!(cache_note(&CacheCheck::Complete, &f), None);
     }
 
     fn build(id: &str, published: &str, public: bool) -> Build {
@@ -745,6 +1140,7 @@ mod tests {
             disk_size: 2,
             language: "en-US".into(),
             dlcs: vec![],
+            cache: None,
             game_files: None,
         };
         assert_eq!(

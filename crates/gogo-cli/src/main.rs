@@ -2078,7 +2078,7 @@ async fn resolve_game_source(
     let mut facts = lane::GameFacts {
         cache_gap: cached_tree
             .as_ref()
-            .map(|_| gogo::gog::depot::check_cache(&root))
+            .map(|_| gogo::gog::depot::check_cache(&root, &Default::default()))
             .filter(|c| *c != gogo::gog::depot::CacheCheck::Complete),
         cached_tree,
         ..Default::default()
@@ -2108,10 +2108,15 @@ async fn resolve_game_source(
                     shown.join(", "),
                     if *count > shown.len() { ", …" } else { "" }
                 ),
-                _ => eprintln!(
+                gogo::gog::depot::CacheCheck::Unrecorded => eprintln!(
                     "gogo: the depot cache for {title} has no record of a finished \
                      download ({}), so it may lack files (such as GOG's support overlay)",
                     root.join(gogo::gog::depot::RECORD).display()
+                ),
+                // This caller asks for no DLC, language or build (the DLC flags
+                // come with #349), so the check can't answer these; say so if it does.
+                other => eprintln!(
+                    "gogo: the depot cache for {title} may not hold what's wanted ({other:?})"
                 ),
             }
             repair = Some((tree, gap));

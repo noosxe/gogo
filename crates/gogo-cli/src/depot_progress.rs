@@ -147,6 +147,7 @@ impl<W: Write> Renderer<W> {
                 disk_size,
                 language,
                 dlcs,
+                cache,
                 game_files,
             } => {
                 self.line(&format!(
@@ -167,6 +168,9 @@ impl<W: Write> Renderer<W> {
                         )
                     }
                 ));
+                if let Some(note) = cache {
+                    self.line(&format!("gogo: {note}"));
+                }
                 if let Some(plan) = game_files {
                     self.line(&format!("gogo: {}", game_files_line(plan)));
                 }
@@ -474,6 +478,7 @@ mod tests {
                     disk_size: 200 * MB,
                     language: "en-US".into(),
                     dlcs: vec![],
+                    cache: None,
                     game_files: None,
                 },
             ),
