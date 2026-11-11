@@ -111,10 +111,14 @@ async fn list(game: Game, json: bool) -> Result<i32, AppError> {
     let owned = library::owned_ids(&ctx.http, &token).await?;
     let language = language_of(&game);
     let mut notes = Vec::new();
+    let mut build_langs = None;
     let manifest_dlcs = if is_depot(&game) {
         let ib = depot::installed_build(core(&ctx)?, id, game.content.build_id.as_deref()).await?;
         match (ib.listed, ib.newest) {
-            (Some((_, _, m)), _) => Some(dlc::manifest_dlcs(&m, &language)),
+            (Some((_, _, m)), _) => {
+                build_langs = Some(gogo::gog::language::of_manifest(&m));
+                Some(dlc::manifest_dlcs(&m, &language))
+            }
             (None, Some((newest, m))) => {
                 notes.push(format!(
                     "build {} isn't served by GOG any more: `in this build` and the sizes \
@@ -122,6 +126,7 @@ async fn list(game: Game, json: bool) -> Result<i32, AppError> {
                     game.content.build_id.as_deref().unwrap_or("unknown"),
                     add::update_hint(&game.gogid, &game.installed())
                 ));
+                build_langs = Some(gogo::gog::language::of_manifest(&m));
                 Some(dlc::manifest_dlcs(&m, &language))
             }
             (None, None) => None,
@@ -147,6 +152,14 @@ async fn list(game: Game, json: bool) -> Result<i32, AppError> {
         ));
     }
     let infos = dlc::available(&detail.expanded_dlcs, &owned, manifest_dlcs.as_deref());
+    if let Some(b) = &build_langs {
+        notes.extend(b.notes_for(&language, &|id| {
+            infos
+                .iter()
+                .find(|i| i.id.to_string() == id)
+                .map(|i| i.title.clone())
+        }));
+    }
     let missing = infos
         .iter()
         .filter(|d| d.owned && d.in_build && !game.installed().contains(&d.id))

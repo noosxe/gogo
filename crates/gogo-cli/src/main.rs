@@ -56,7 +56,9 @@ fn main() {
         Err(AppError::Depot(e)) => match e {
             // A DLC the account doesn't own, or doesn't exist (design 19 §2.2).
             // Display only: it lists the valid DLC and never a server message.
-            gogo::gog::depot::DepotError::NoCacheDir | gogo::gog::depot::DepotError::Dlc(_) => {
+            gogo::gog::depot::DepotError::NoCacheDir
+            | gogo::gog::depot::DepotError::Dlc(_)
+            | gogo::gog::depot::DepotError::Language(_) => {
                 eprintln!("gogo: {e}");
                 cli::exit::USAGE
             }
@@ -946,6 +948,14 @@ async fn depot_cmd(args: cli::DepotArgs) -> Result<i32, AppError> {
         return Ok(cli::exit::USAGE);
     };
 
+    if args.list_languages {
+        return list_languages(&ctx, &token, session, game, &args).await;
+    }
+    let language = args
+        .language
+        .clone()
+        .unwrap_or_else(|| gogo::gog::language::DEFAULT.to_string());
+    let language_explicit = args.language.is_some();
     let limit = match &args.limit {
         Some(spec) => Some(gogo::config::parse_rate(spec)?),
         None => None,
@@ -962,7 +972,8 @@ async fn depot_cmd(args: cli::DepotArgs) -> Result<i32, AppError> {
                 session,
                 game.id,
                 args.password.clone(),
-                &args.language,
+                &language,
+                language_explicit,
             )
             .await?;
             let infos = gogo::gog::dlc::available(&detail.expanded_dlcs, &owned, Some(&mdlcs));
@@ -984,7 +995,8 @@ async fn depot_cmd(args: cli::DepotArgs) -> Result<i32, AppError> {
         )
     };
     let opts = DepotOptions {
-        language: args.language.clone(),
+        language,
+        language_explicit,
         dlcs,
         dlc_context,
         password: args.password.clone(),
@@ -1055,6 +1067,64 @@ async fn depot_cmd(args: cli::DepotArgs) -> Result<i32, AppError> {
             },
             install_dir.display()
         );
+    }
+    Ok(cli::exit::OK)
+}
+
+/// `gogo depot <GAME> --list-languages` (design 14 §11): the newest build's languages
+/// from its build manifest. Reads only: no depot manifest, no cache change.
+async fn list_languages(
+    ctx: &AppContext,
+    token: &str,
+    session: &gog_warp::Core,
+    game: &gogo::gog::library::LibraryProduct,
+    args: &cli::DepotArgs,
+) -> Result<i32, AppError> {
+    use gogo::gog::language;
+    let build = gogo::gog::depot::newest_build(session, game.id, args.password.clone()).await?;
+    let langs = language::of_manifest(&build.manifest);
+    let cached = gogo::gog::depot::cache_roots(
+        gogo::gog::depot::default_cache_dir().as_deref(),
+        game.id,
+        args.dir.as_deref(),
+    )
+    .and_then(|(root, _, _)| gogo::gog::depot::read_record(&root))
+    // A cache of another build still says which language it was asked for.
+    .and_then(|r| r.language);
+    let listing = language::listing(&langs, cached.as_deref());
+    // DLC titles are for the notes only: the listing stands without them.
+    let titles = if listing.dlcs_with_fewer.is_empty() {
+        Vec::new()
+    } else {
+        gogo::gog::catalog::detail(&ctx.http, token, game.id)
+            .await
+            .map(|d| d.expanded_dlcs)
+            .unwrap_or_default()
+    };
+    let title_of = |id: &str| {
+        titles
+            .iter()
+            .find(|p| p.id.to_string() == id)
+            .and_then(|p| p.title.clone())
+    };
+    if args.json {
+        let mut v = serde_json::to_value(&listing).unwrap();
+        v["productId"] = serde_json::json!(game.id);
+        v["title"] = serde_json::json!(game.title);
+        v["buildId"] = serde_json::json!(build.build_id);
+        v["version"] = serde_json::json!(build.version);
+        for d in v["dlcsWithFewer"].as_array_mut().into_iter().flatten() {
+            if let Some(t) = d["id"].as_str().and_then(title_of) {
+                d["title"] = serde_json::json!(t);
+            }
+        }
+        println!("{}", serde_json::to_string(&v).unwrap());
+    } else {
+        println!(
+            "{} build {} (generation {})",
+            game.title, build.version, build.generation
+        );
+        print!("{}", language::render(&listing, &title_of));
     }
     Ok(cli::exit::OK)
 }
@@ -2429,17 +2499,27 @@ async fn prepare_dlc(
         None
     };
     let recorded: Option<Vec<u64>> = prior.as_ref().map(|c| c.dlc.iter().map(|d| d.id).collect());
-    let language = ask
-        .lang
+    let recorded_language = prior.as_ref().and_then(|c| c.language.clone());
+    // A rebuild asking for what the game has (`de` for `de-DE`, any case) keeps the
+    // recorded code, so it isn't read as a language change.
+    let asked = ask.lang.as_ref().map(|l| {
+        recorded_language
+            .as_ref()
+            .filter(|r| gogo::gog::language::same_language(l, r))
+            .cloned()
+            .unwrap_or_else(|| l.clone())
+    });
+    let language = asked
         .clone()
-        .or_else(|| prior.and_then(|c| c.language))
-        .unwrap_or_else(|| "en-US".to_string());
+        .or(recorded_language)
+        .unwrap_or_else(|| gogo::gog::language::DEFAULT.to_string());
     let mut plan = DlcPlan {
         opts: gogo::gog::depot::DepotOptions {
             language: language.clone(),
+            language_explicit: ask.lang.is_some(),
             ..Default::default()
         },
-        explicit_lang: ask.lang.clone(),
+        explicit_lang: asked,
         notes: Vec::new(),
         refs: Vec::new(),
     };
@@ -2454,7 +2534,9 @@ async fn prepare_dlc(
     let detail = gogo::gog::catalog::detail(&ctx.http, token, game.id).await?;
     let owned = library::owned_ids(&ctx.http, token).await?;
     let (build_id, mdlcs) =
-        match gogo::gog::depot::build_dlcs(session, game.id, None, &language).await {
+        match gogo::gog::depot::build_dlcs(session, game.id, None, &language, ask.lang.is_some())
+            .await
+        {
             Ok(b) => b,
             // No depot build: the installer lane, which takes no DLC yet.
             Err(gogo::gog::depot::DepotError::NoBuilds(_)) => return Ok(plan),

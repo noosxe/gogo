@@ -13,7 +13,7 @@ the cache is a **follow-up** (D8), not this contract.
 ## 1. Command surface
 
 ```
-gogo depot <GAME> [--language CODE] [--dlc ID|TITLE]... [--all-dlcs] [--password PW]
+gogo depot <GAME> [--language CODE | --list-languages] [--dlc ID|TITLE]... [--all-dlcs] [--password PW]
                  [--dir PATH] [--limit RATE] [--no-disk-check]
                  [--dry-run] [--json] [--json-progress]
 ```
@@ -21,7 +21,8 @@ gogo depot <GAME> [--language CODE] [--dlc ID|TITLE]... [--all-dlcs] [--password
 - `GAME` — exactly the resolver `download` uses today (id, slug, fuzzy title;
   single game per invocation, no `--all` — depot runs are heavyweight and deliberate).
 - `--language` — v2 code for `language()`, mapped to the v1 name for `old_language()`
-  when the build is generation 1 (default `en-US`).
+  when the build is generation 1 (default `en-US`). Checked against the build's
+  languages, and `--list-languages` prints them (§11, #377).
 - `--with-dlcs` — pass `manifest.dlcs()` (v1: `old_dlcs`) to the builder.
   > **Amended (design 19):** `--dlc <id|title>` and `--all-dlcs` select owned DLC only;
   > `--with-dlcs` becomes a hidden alias of `--all-dlcs`. The download record gains the
@@ -209,3 +210,38 @@ file set, per-language control. Out of scope here.
 `docs/17` (research) + this contract + README command table row + `gogo depot --help`
 copy. `docs/10` §1/§5 amended: Model B no longer deferred to "v2 with TUI"; ships as
 CLI lane motivated by mac-app.
+
+## 11. Languages (#377)
+
+A build's languages are in the build manifest every depot run already fetches. Each v2
+depot has a `languages` array; a v1 depot has language names, which gog-warp turns into
+the same codes (`English` → `en-US`). `*` (v1 `Neutral`) is a depot for every language.
+`gog::language` reads them per product and does no I/O.
+
+- **Listing.** `gogo depot <GAME> --list-languages [--json]` fetches the newest public
+  build's manifest and stops: no depot manifest, no hashing, no change to the cache. It
+  prints each code with its English name (gog-warp's table), marks the default (`en-US`,
+  when offered) and the language the cache record holds, and notes each DLC that offers
+  only some of the base game's languages. `--json`: `{productId, title, buildId,
+  version, generation, languages: [{code, name, default, current}], languageNeutral,
+  dlcsWithFewer: [{id, title?, languages, missing}]}`. A generation 1 build lists the
+  same way; its codes are only what the manifest's names map to. A build whose depots
+  are all language-neutral lists none (`languageNeutral`): `--language` changes nothing.
+  The listing is on `depot` and not `info` because `info` reads the library and
+  installers only, and `depot` already resolves the build. `linux-app dlc <id> list`
+  adds notes (§19 §1.3) for a game language the build no longer offers and DLC with no
+  files in it.
+- **Validation.** `--language` (`depot`) and `--lang` (`linux-app`) are checked when
+  given, and only then: the default is taken as it is, so a build without `en-US` still
+  builds, and a rebuild keeps the record's language. The check runs in `depot::run` (and
+  `build_dlcs`, which names DLC sizes) right after the build manifest, before the plan,
+  any hashing or any download, so it costs no fetch the run didn't make. An unknown code
+  is `DepotError::Language`, exit 2, and the message lists the valid codes. Matching is
+  case-insensitive; a short form (`de`) is taken when exactly one code of the build has
+  that primary subtag, and is refused as ambiguous when several do (`pt` with `pt-BR` and
+  `pt-PT`). The plan line says the code chosen: `… de-DE from `de``; the `plan` event
+  gains `requestedLanguage`. `linux-app` first compares the flag with the game's recorded
+  language (same code in any case, or its short form) so asking for what the game has
+  isn't read as a language change.
+- `mac-app` has no language flag (design 15: it builds from the cache as it is), so it
+  has nothing to validate.

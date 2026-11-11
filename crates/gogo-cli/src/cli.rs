@@ -301,7 +301,9 @@ pub enum Command {
         #[arg(long, conflicts_with = "retarget")]
         no_dlcs: bool,
         /// Content language of the depot download (default: the game's
-        /// recorded one, else en-US).
+        /// recorded one, else en-US). Checked against the build's languages
+        /// (`gogo depot <game> --list-languages`); `de` is taken for `de-DE`
+        /// when it names one language.
         #[arg(long, value_name = "CODE", conflicts_with = "retarget")]
         lang: Option<String>,
         /// Progress events as NDJSON on stdout.
@@ -771,9 +773,15 @@ pub struct DepotArgs {
     /// One game by id, slug, or fuzzy title.
     #[arg(value_name = "GAME")]
     pub game: String,
-    /// Content language code (v2 manifests; v1 names are derived).
-    #[arg(long, default_value = "en-US")]
-    pub language: String,
+    /// Content language code (default en-US). Checked against the build's
+    /// languages (`--list-languages`); a short form such as `de` is taken when it
+    /// names one language.
+    #[arg(long, value_name = "CODE")]
+    pub language: Option<String>,
+    /// List the languages the newest build offers (code, name, DLC with fewer),
+    /// and stop: nothing is downloaded or hashed. With `--json`, as JSON.
+    #[arg(long, conflicts_with_all = ["dlc", "all_dlcs", "dry_run", "json_progress"])]
+    pub list_languages: bool,
     /// Include this DLC (product id or title; repeatable). It must be owned.
     #[arg(long = "dlc", value_name = "ID|TITLE")]
     pub dlc: Vec<String>,
@@ -1244,7 +1252,7 @@ mod tests {
             panic!("expected Depot");
         };
         assert_eq!(a.game, "pharaoh");
-        assert_eq!(a.language, "en-US");
+        assert_eq!(a.language, None);
         assert!(a.dlc.is_empty() && !a.all_dlcs && !a.dry_run && !a.json);
 
         let d = Cli::try_parse_from([
@@ -1264,8 +1272,23 @@ mod tests {
             panic!("expected Depot")
         };
         assert!(a.all_dlcs && a.dry_run && a.json_progress);
-        assert_eq!(a.language, "fr-FR");
+        assert_eq!(a.language.as_deref(), Some("fr-FR"));
         assert_eq!(a.limit.as_deref(), Some("4MiB/s"));
+    }
+
+    #[test]
+    fn depot_list_languages_stands_alone() {
+        let d = Cli::try_parse_from(["gogo", "depot", "1", "--list-languages", "--json"]).unwrap();
+        let Command::Depot(a) = d.command else {
+            panic!("expected Depot")
+        };
+        assert!(a.list_languages && a.json);
+        for bad in ["--dry-run", "--all-dlcs", "--json-progress"] {
+            assert!(
+                Cli::try_parse_from(["gogo", "depot", "1", "--list-languages", bad]).is_err(),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

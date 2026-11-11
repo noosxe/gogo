@@ -41,6 +41,10 @@ pub enum DepotEvent {
         download_size: u64,
         disk_size: u64,
         language: String,
+        /// What `--language` said, when `language` is the code it resolved to
+        /// (`de` → `de-DE`).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        requested_language: Option<String>,
         /// The DLC the run takes (design 19), with their depot bytes.
         #[serde(skip_serializing_if = "Vec::is_empty")]
         dlcs: Vec<PlanDlc>,
@@ -92,6 +96,9 @@ pub enum DepotError {
     /// A DLC selection error (design 19 §2.2): a usage error, exit 2.
     #[error(transparent)]
     Dlc(#[from] DlcSelectError),
+    /// `--language` names no language of the build (design 14 §11): a usage error.
+    #[error(transparent)]
+    Language(#[from] super::language::LanguageError),
     #[error("no public Windows builds for product {0}")]
     NoBuilds(u64),
     #[error("no user cache directory available")]
@@ -126,6 +133,9 @@ pub struct DlcContext {
 #[derive(Clone)]
 pub struct DepotOptions {
     pub language: String,
+    /// `language` was asked for, not the default: it is checked against the build's
+    /// languages and a short form resolved (design 14 §11).
+    pub language_explicit: bool,
     /// Which DLC to take; `Ids`/`AllOwned` need `dlc_context`.
     pub dlcs: DlcSet,
     pub dlc_context: DlcContext,
@@ -144,6 +154,7 @@ impl Default for DepotOptions {
     fn default() -> Self {
         Self {
             language: "en-US".into(),
+            language_explicit: false,
             dlcs: DlcSet::None,
             dlc_context: DlcContext::default(),
             password: None,
@@ -321,14 +332,21 @@ pub fn cache_roots(
     Some((base, support, deps))
 }
 
-/// The newest public build's id and its manifest's DLC with sizes, for naming DLC
-/// before a run (design 19 §1.3). No depot manifest is fetched.
-pub async fn build_dlcs(
+/// The newest public build: what `gogo depot` and the listings read before any
+/// depot manifest.
+pub struct NewestBuild {
+    pub build_id: String,
+    pub version: String,
+    pub generation: u32,
+    pub manifest: Manifest,
+}
+
+/// Fetch the newest public build's list entry and its build manifest.
+pub async fn newest_build(
     core: &Core,
     product_id: u64,
     password: Option<String>,
-    language: &str,
-) -> Result<(String, Vec<dlc::ManifestDlc>), DepotError> {
+) -> Result<NewestBuild, DepotError> {
     let builds = core
         .get_builds(&product_id.to_string(), Platform::Windows, password)
         .await
@@ -338,10 +356,40 @@ pub async fn build_dlcs(
         .get_manifest(build)
         .await
         .map_err(DepotError::library)?;
-    Ok((
-        build.build_id().to_string(),
-        dlc::manifest_dlcs(&manifest, language),
-    ))
+    Ok(NewestBuild {
+        build_id: build.build_id().to_string(),
+        version: build.version_name().to_string(),
+        generation: *build.generation(),
+        manifest,
+    })
+}
+
+/// The language a run takes: `requested` checked against the build's languages when
+/// it was asked for (`explicit`), else as it is (design 14 §11).
+pub fn pick_language(
+    manifest: &Manifest,
+    requested: &str,
+    explicit: bool,
+) -> Result<String, DepotError> {
+    if !explicit {
+        return Ok(requested.to_string());
+    }
+    Ok(super::language::of_manifest(manifest).resolve(requested)?)
+}
+
+/// The newest public build's id and its manifest's DLC with sizes, for naming DLC
+/// before a run (design 19 §1.3). No depot manifest is fetched. An `explicit`
+/// language is checked first, and sizes are for the code it resolves to.
+pub async fn build_dlcs(
+    core: &Core,
+    product_id: u64,
+    password: Option<String>,
+    language: &str,
+    explicit: bool,
+) -> Result<(String, Vec<dlc::ManifestDlc>), DepotError> {
+    let b = newest_build(core, product_id, password).await?;
+    let language = pick_language(&b.manifest, language, explicit)?;
+    Ok((b.build_id, dlc::manifest_dlcs(&b.manifest, &language)))
 }
 
 /// Full lane (design 14 D5). Emits events into `events`; returns the realized
@@ -384,7 +432,10 @@ pub async fn run(
         .get_manifest(build)
         .await
         .map_err(DepotError::library)?;
-    let mdlcs = dlc::manifest_dlcs(&manifest, &opts.language);
+    // Before any hashing or download: an unknown language stops the run (design 14 §11).
+    let language = pick_language(&manifest, &opts.language, opts.language_explicit)?;
+    let requested_language = (language != opts.language).then(|| opts.language.clone());
+    let mdlcs = dlc::manifest_dlcs(&manifest, &language);
     let infos = dlc::available(
         &opts.dlc_context.catalog_dlcs,
         &opts.dlc_context.owned,
@@ -405,12 +456,12 @@ pub async fn run(
             disk_size: d.disk_size.unwrap_or(0),
         })
         .collect();
-    let (download_size, disk_size) = manifest.install_size(&opts.language, &dlcs, None);
+    let (download_size, disk_size) = manifest.install_size(&language, &dlcs, None);
     // What the cache already there holds decides how it's completed (design 19 §3.3).
     let prior = load_record(&install_root);
     let want = CacheWant {
         build_id: Some(&build_id),
-        language: Some(&opts.language),
+        language: Some(&language),
         dlcs: &dlcs,
     };
     let check = prior.as_ref().map_or(CacheCheck::Unrecorded, |r| {
@@ -418,7 +469,7 @@ pub async fn run(
     });
     let inputs = download_inputs(
         generation,
-        &opts.language,
+        &language,
         &dlcs,
         &check,
         prior
@@ -444,7 +495,8 @@ pub async fn run(
         install_dir: install_dir.clone(),
         download_size,
         disk_size,
-        language: opts.language.clone(),
+        language: language.clone(),
+        requested_language,
         dlcs: plan_dlcs,
         cache: cache_note(&check, &inputs),
         game_files,
@@ -485,8 +537,8 @@ pub async fn run(
     .await?;
     // The download is done either way; without a record (a full disk, say)
     // the next reuse just checks it again.
-    let held = record_dlcs(prior.as_ref(), &build_id, &opts.language, &dlcs);
-    if write_record(&install_root, &build_id, &opts.language, &held).is_err() {
+    let held = record_dlcs(prior.as_ref(), &build_id, &language, &dlcs);
+    if write_record(&install_root, &build_id, &language, &held).is_err() {
         let _ = std::fs::remove_file(install_root.join(RECORD));
     } else if !held.is_empty() {
         // A cache with DLC: keep each product's file list, so a build that leaves
@@ -497,13 +549,9 @@ pub async fn run(
         let have = record_products(&install_root, &build_id).unwrap_or_default();
         products.retain(|p| !have.contains_key(p));
         if !products.is_empty()
-            && let Ok(lists) = super::dlc_filter::fetch(
-                core.reqwest_client(),
-                &manifest,
-                &opts.language,
-                &products,
-            )
-            .await
+            && let Ok(lists) =
+                super::dlc_filter::fetch(core.reqwest_client(), &manifest, &language, &products)
+                    .await
         {
             let _ = store_products(&install_root, &build_id, &lists);
         }
@@ -1477,6 +1525,20 @@ mod tests {
     }
 
     #[test]
+    fn an_asked_language_is_checked_against_the_build_before_anything_runs() {
+        use crate::gog::language::fixtures::v2;
+        let m = v2(&[("1", &["*"]), ("1", &["en-US"]), ("1", &["de-DE"])]);
+        // Unknown: refused (a usage error), with the valid codes.
+        let e = pick_language(&m, "xx-XX", true).unwrap_err();
+        assert!(matches!(e, DepotError::Language(_)));
+        assert!(e.to_string().contains("de-DE, en-US"), "{e}");
+        // A short form resolves; case is ignored.
+        assert_eq!(pick_language(&m, "DE", true).unwrap(), "de-DE");
+        // The default isn't asked for, so a build without it still builds.
+        assert_eq!(pick_language(&m, "fr-FR", false).unwrap(), "fr-FR");
+    }
+
+    #[test]
     fn v1_language_maps_codes() {
         assert_eq!(v1_language("en-US"), "English");
         assert_eq!(v1_language("fr"), "French");
@@ -1507,6 +1569,7 @@ mod tests {
             download_size: 1,
             disk_size: 2,
             language: "en-US".into(),
+            requested_language: None,
             dlcs: vec![],
             cache: None,
             game_files: None,
