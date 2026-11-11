@@ -409,12 +409,11 @@ async fn add_cmd(
         });
     }
     let mode = depot_mode(a.json_progress, a.json);
-    if plan.fetches() && matches!(mode, depot_progress::Mode::Human { .. }) {
+    if plan.downloads() && matches!(mode, depot_progress::Mode::Human { .. }) {
         eprintln!(
             "gogo: downloading {} for {title} (build {build})",
-            plan.dlcs
+            plan.downloading()
                 .iter()
-                .filter(|d| d.download_size > 0)
                 .map(|d| d.title.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")

@@ -183,10 +183,12 @@ column is made up.)
   - `--dry-run` writes nothing, and doesn't recover either. Its `--json` is `{dryRun,
     plan}`, where `plan` is `linuxapp::dlc::AddPlan`. The plan's lines: the DLC with
     sizes (`0 B: record only`), the build line, the newer build with the update command
-    when there is one, `files from:` (`the depot cache` or `staging in the game dir`),
-    `game files:` (`reflink`, `copy` or `moved from staging`), the download and the
-    disk, and the number of registry values in each DLC's install script when that
-    script is already in the source.
+    when there is one, `files from:` (`the depot cache` or `staging in the game dir`;
+    `the depot cache (already there, no download)` when the cache holds every DLC
+    added, §3.2), `game files:` (`reflink`, `copy` or `moved from staging`), the
+    download (`no download` when nothing is fetched) and the disk, and the number of
+    registry values in each DLC's install script when that script is already in the
+    source.
   - The add's `--json` is `{gogid, buildId, language, dlcs, added, recovered?, lay?,
     warnings?}`.
   - A generation 1 build is refused, naming a rebuild: the targeted diff is generation 2
@@ -318,6 +320,50 @@ resolve game → content.toml (build B, language L, installed DLC I)
     setup`, since the DLC is in place and recorded by then.
   - `move` refuses while the journal, the download record or the staging dir is there.
     `apps remove` takes them with the game dir.
+  - **A DLC the cache already holds is laid from it, not downloaded (#381).** Since
+    #376 a build leaves the cache's other DLC out of `game/`, so "the cache holds X,
+    the game doesn't" is an ordinary state (`gogo depot --all-dlcs`, then a build
+    with `--no-dlcs`). The targeted diff doesn't look at the disk: it would fetch X
+    again (13.3 GiB for Phantom Liberty). So when the cache is the source, the plan
+    takes X from it as is when:
+    - the record (same build and language) lists X in `dlcs`,
+    - it keeps X's file list in `products` (§3.3) and the list isn't empty,
+    - and every listed path is in the cache as a file or link.
+
+    Each path is looked up as spelled, else by a case-insensitive match per
+    component (gog-warp writes a path shared between depots once, as the first
+    depot spells it). Existence is the whole check, not a size or a hash: the lists
+    keep paths only, and gog-warp writes each file as `<name>.download` and renames
+    it once it's whole, so a listed path under its own name is a finished file. A
+    build trusts the cache tree the same way.
+    - **The lay:** X's listed paths go through `lay_list` like a download's changed
+      files (the tree's to their path, the support overlay's `app/` to the game
+      root), plus its `goggame-<X>.*` from the support overlay. Then the same journal,
+      `Journal::survey` case mapping, backups, recovery and launcher refusal as any
+      lay from the cache (§3.4). Nothing is moved out of the cache. The commit writes
+      `content.toml` and rewrites the record, which keeps `dlcs` and the file lists.
+    - **No downloader runs** when every DLC added is held, so there's no
+      `dlc-download.json` and no download status line. In a mixed add (X held, Y
+      not) the diff gets `old_dlcs = I ∪ {X}`, `dlcs = I ∪ {X, Y}`, so it fetches
+      only Y. The lay takes Y's changed files and X's listed ones.
+    - **Otherwise it downloads, as before:** no file list (a record from before
+      #376, or no build needed one yet), an empty one, or a listed path that isn't
+      there. The targeted diff with `old_dlcs = I` fetches all of X into the cache,
+      which completes a partial copy.
+    - **Files X shares with the base or an installed DLC are laid**, the one in
+      `game/` backed up as for any replaced file. That's what a build with X from
+      this cache gives: §3.3's filter keeps a shared path as the cache has it. It's
+      also what the download path does, where the diff fetches a shared path whose
+      hash differs. The cache's copy is the one gog-warp wrote for this build and
+      language (the base's, or X's when X replaces it). Skipping shared paths could
+      leave the base's version under X's other files, the mix §3.4 refuses to
+      launch. When both copies are the same, laying it costs a clone. Cyberpunk
+      2077's three products share no path (#376), so this is the general rule, and a
+      test covers it.
+    - The plan says `files from: the depot cache (already there, no download)` and
+      `no download, disk …`. A mixed add names the held DLC (`…; Phantom Liberty
+      already there, the rest downloaded into it`). The plan's `--json` has
+      `fromCache: [ids]`, and so does the `DlcPlan` event.
   - **Unverified, for the host pass:** gog-warp (pinned rev) keeps directory and link
     entries in its diff's download list, and in `upgrade_from` mode it renames each
     listed entry out of `!Temp`. A manifest with a directory entry over a non-empty dir
@@ -660,9 +706,9 @@ Where the code differs from the table above, or does less for now:
 - The lay reuses `GameFilesStarted`/`GameFilesProgress` (design 18 §6, #337) with a
   `kind: "dlc"` so the human line reads `game files: adding 2,431 file(s) (29.2 GiB) to
   <dir>`.
-- New events: `DlcPlan { dlcs, source: "cache"|"staging", buildId }`, `DlcInstalled { id }`
-  (one per DLC after its script ran), and on recovery `DlcRecovered { action:
-  "forward"|"back" }`.
+- New events: `DlcPlan { dlcs, source: "cache"|"staging", buildId, fromCache? }`,
+  `DlcInstalled { id }` (one per DLC after its script ran), and on recovery
+  `DlcRecovered { action: "forward"|"back" }`.
 - `--yes`, `--json`, `--json-progress`, `--dry-run`, `--limit`, `--no-disk-check` mean
   what they mean for `gogo depot`. `--interactive` on the build and a bare `dlc add`
   (no names, no `--all`) open the picker on a TTY; headless, a bare `add` is a usage
@@ -670,7 +716,7 @@ Where the code differs from the table above, or does less for now:
 - Exit codes: 2 for a selection error (§2.2), 7 for depot/installer failures and the
   build refusal (§4), 130 on Ctrl-C (journal kept, §3.4).
 - As built (#350): the new events are `ProgressEvent` variants (the build's stream,
-  NDJSON `{"DlcPlan":{dlcs, source, buildId}}`, `{"DlcInstalled":{id}}`,
+  NDJSON `{"DlcPlan":{dlcs, source, buildId, fromCache?}}`, `{"DlcInstalled":{id}}`,
   `{"DlcRecovered":{action}}`). `GameFilesStarted` gains optional `kind` (`"dlc"`)
   and `files`. The download's `DepotEvent`s go through `depot_progress::drive`
   unchanged, `Finished` included. A selection error or a licence refusal is exit 2; a
@@ -739,6 +785,11 @@ What the Mac lane would need, none of it designed further now:
 - Offline lane: the installer argument list for a DLC (`/DIR` = the base's), the order,
   and that a failing DLC leaves no game dir (a fake runner).
 
+- **A DLC the cache holds** (§3.2, #381): laid with no fetch, `content.toml` and the
+  install script; a shared path laid with its backup; a case-mismatched list path; a
+  partial copy and a record without file lists falling back to the download; a stop
+  mid-lay rolling forward, and back when the cache lost a file; a mixed add
+  fetching only the other DLC.
 - **The record-only add** (§3.2): a fixture manifest with a DLC whose depots are empty:
   `dlc list` shows `0`, `dlc add` runs no downloader, writes no journal, records the DLC
   and applies its script.

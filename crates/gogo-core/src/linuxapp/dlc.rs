@@ -8,7 +8,9 @@
 //! An add: the game's lock, any interrupted add settled first ([`recover`]); the
 //! wanted DLC fetched for the **installed** build into the depot cache (when its
 //! record is that build and language, and holds the installed DLC) or into
-//! `games/<gogid>/.dlc-staging/`; the files that run wrote laid onto `game/` under a
+//! `games/<gogid>/.dlc-staging/`, except a DLC the cache already holds whole, which
+//! isn't fetched again (#381); the files that run wrote, and the held DLC's files
+//! from their recorded lists, laid onto `game/` under a
 //! journal ([`crate::gog::lay`]); `content.toml` written (the commit); the cache
 //! record updated when the cache was the source; staging, backups and the journal
 //! deleted; setup run once for the DLC's install scripts.
@@ -339,6 +341,14 @@ pub struct AddPlan {
     pub already: Vec<u64>,
     pub source: Source,
     pub source_root: PathBuf,
+    /// The DLC whose files the depot cache already holds whole (its record lists
+    /// them, keeps their file lists, and every listed file is there): laid from the
+    /// cache, not downloaded (#381).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub from_cache: Vec<u64>,
+    /// Their files: paths relative to the cache root, as on disk.
+    #[serde(skip)]
+    pub cached_files: Vec<(u64, Vec<String>)>,
     /// The game tree's dir name in the source root (the manifest's install dir).
     pub tree_name: String,
     /// `reflink`, `copy` or `rename` (from staging).
@@ -355,9 +365,28 @@ pub struct AddPlan {
 }
 
 impl AddPlan {
-    /// Whether anything is downloaded at all (else a record-only add).
+    /// Whether any DLC has files to lay (else a record-only add).
     pub fn fetches(&self) -> bool {
         self.dlcs.iter().any(|d| d.download_size > 0)
+    }
+
+    /// The DLC the downloader fetches: those with files the cache doesn't hold.
+    pub fn downloading(&self) -> Vec<&PlanDlc> {
+        self.dlcs
+            .iter()
+            .filter(|d| {
+                d.download_size > 0
+                    && !d
+                        .id
+                        .parse::<u64>()
+                        .is_ok_and(|id| self.from_cache.contains(&id))
+            })
+            .collect()
+    }
+
+    /// Whether anything is downloaded at all.
+    pub fn downloads(&self) -> bool {
+        !self.downloading().is_empty()
     }
 
     pub fn ids(&self) -> Vec<u64> {
@@ -405,7 +434,21 @@ pub fn plan_add(input: &PlanInput<'_>) -> AddPlan {
         })
         .collect();
     let (source, source_root) = pick_source(game, &build_id, &language, &input.tree_name);
-    let download_size = dlcs.iter().map(|d| d.download_size).sum();
+    let cached_files: Vec<(u64, Vec<String>)> = if source == Source::Cache {
+        dlcs.iter()
+            .filter(|d| d.download_size > 0)
+            .filter_map(|d| d.id.parse::<u64>().ok())
+            .filter_map(|id| Some((id, cached_copy(&source_root, &build_id, id)?)))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let from_cache: Vec<u64> = cached_files.iter().map(|(id, _)| *id).collect();
+    let download_size = dlcs
+        .iter()
+        .filter(|d| !d.id.parse::<u64>().is_ok_and(|id| from_cache.contains(&id)))
+        .map(|d| d.download_size)
+        .sum();
     let disk_size: u64 = dlcs.iter().map(|d| d.disk_size).sum();
     let method = match source {
         Source::Staging => "rename",
@@ -433,11 +476,21 @@ pub fn plan_add(input: &PlanInput<'_>) -> AddPlan {
                 .map(|p| p.values.len()),
         })
         .collect();
-    let wanted: Vec<String> = adding.iter().map(u64::to_string).collect();
+    // The DLC the cache holds count as "there" to the downloader's diff, so a mixed
+    // add fetches only the others.
+    let mut there = game.installed_strings();
+    there.extend(from_cache.iter().map(u64::to_string));
+    let wanted: Vec<String> = adding
+        .iter()
+        .filter(|id| !from_cache.contains(id))
+        .map(u64::to_string)
+        .collect();
     AddPlan {
         gogid: game.gogid.clone(),
         title: input.title.to_string(),
-        inputs: depot::add_inputs(&language, &game.installed_strings(), &wanted),
+        inputs: depot::add_inputs(&language, &there, &wanted),
+        from_cache,
+        cached_files,
         build_id,
         version: input.version.clone(),
         newer: input.newer.clone(),
@@ -502,6 +555,76 @@ fn pick_source(game: &Game, build_id: &str, language: &str, tree_name: &str) -> 
     (Source::Staging, staging)
 }
 
+/// DLC `id`'s files in cache root `root`, as paths relative to it spelled as on
+/// disk, when the cache already holds them whole (#381): its record is build
+/// `build_id`, lists `id` in `dlcs` and keeps `id`'s file list in `products`, and
+/// every listed path is there as a file or link. `None` otherwise, and the add
+/// downloads it.
+///
+/// Existence is the check, not a hash and not a size (the lists keep paths only):
+/// gog-warp writes a file as `<name>.download` and renames it once it's whole, so a
+/// listed path under its own name is a finished file. That's the same trust a build
+/// gives the cache tree.
+fn cached_copy(root: &Path, build_id: &str, id: u64) -> Option<Vec<String>> {
+    let rec = depot::read_record(root)?;
+    if rec.build_id != build_id || !rec.dlcs?.contains(&id.to_string()) {
+        return None;
+    }
+    let list = depot::record_products(root, build_id)?.remove(&id.to_string())?;
+    if list.is_empty() {
+        return None;
+    }
+    let mut dirs = DirListing::default();
+    list.iter().map(|p| dirs.on_disk(root, p)).collect()
+}
+
+/// Case-insensitive lookups under a cache root, each dir read once.
+#[derive(Default)]
+struct DirListing(std::collections::HashMap<PathBuf, Option<Vec<(String, bool)>>>);
+
+impl DirListing {
+    /// `rel` as spelled on disk under `root`: each component as is when it's there,
+    /// else a case-insensitive match (a dir for all but the last). Manifests
+    /// are case-insensitive, and gog-warp writes a path shared between depots once,
+    /// as the first one spells it. `None` when it isn't there, or is a dir.
+    fn on_disk(&mut self, root: &Path, rel: &str) -> Option<String> {
+        let parts: Vec<&str> = rel.split('/').filter(|p| !p.is_empty()).collect();
+        let mut at = root.to_path_buf();
+        let mut out: Vec<String> = Vec::new();
+        for (i, comp) in parts.iter().enumerate() {
+            let last = i + 1 == parts.len();
+            let fits = |m: &std::fs::Metadata| last != m.is_dir();
+            let name = match at.join(comp).symlink_metadata() {
+                Ok(m) if fits(&m) => comp.to_string(),
+                _ => {
+                    let lower = comp.to_lowercase();
+                    let entries = self.0.entry(at.clone()).or_insert_with(|| {
+                        let rd = std::fs::read_dir(&at).ok()?;
+                        Some(
+                            rd.flatten()
+                                .filter_map(|e| {
+                                    let n = e.file_name().into_string().ok()?;
+                                    let dir = e.file_type().ok()?.is_dir();
+                                    Some((n, dir))
+                                })
+                                .collect(),
+                        )
+                    });
+                    entries
+                        .as_ref()?
+                        .iter()
+                        .find(|(n, dir)| last != *dir && n.to_lowercase() == lower)?
+                        .0
+                        .clone()
+                }
+            };
+            at.push(&name);
+            out.push(name);
+        }
+        (!out.is_empty()).then(|| out.join("/"))
+    }
+}
+
 /// The plan's lines (human).
 pub fn plan_lines(p: &AddPlan) -> Vec<String> {
     let size = crate::fmt::human_size;
@@ -553,9 +676,26 @@ pub fn plan_lines(p: &AddPlan) -> Vec<String> {
         out.push(format!("{id} is installed already"));
     }
     if p.fetches() {
+        let held: Vec<&str> = p
+            .dlcs
+            .iter()
+            .filter(|d| {
+                d.id.parse::<u64>()
+                    .is_ok_and(|id| p.from_cache.contains(&id))
+            })
+            .map(|d| d.title.as_str())
+            .collect();
         out.push(format!(
             "files from: {}",
             match p.source {
+                Source::Cache if !p.downloads() => {
+                    "the depot cache (already there, no download)".to_string()
+                }
+                Source::Cache if !held.is_empty() => format!(
+                    "the depot cache ({}); {} already there, the rest downloaded into it",
+                    p.source_root.display(),
+                    held.join(", ")
+                ),
                 Source::Cache => format!("the depot cache ({})", p.source_root.display()),
                 Source::Staging => format!("staging in the game dir ({})", p.source_root.display()),
             }
@@ -576,8 +716,12 @@ pub fn plan_lines(p: &AddPlan) -> Vec<String> {
             ),
         });
         out.push(format!(
-            "download {}, disk {}{}",
-            size(p.download_size),
+            "{}, disk {}{}",
+            if p.downloads() {
+                format!("download {}", size(p.download_size))
+            } else {
+                "no download".to_string()
+            },
             size(p.disk_size),
             if p.extra_bytes > 0 {
                 format!(" (+{} for the copy)", size(p.extra_bytes))
@@ -870,15 +1014,25 @@ where
             dlcs: plan.dlcs.clone(),
             source: plan.source.as_str().into(),
             build_id: plan.build_id.clone(),
+            from_cache: plan.from_cache.clone(),
         });
         let staging = plan.source == Source::Staging;
         let src = plan.source_root.clone();
         let mut files: Vec<LayFile> = Vec::new();
         let ids: Vec<u64> = adding.iter().map(|a| a.id).collect();
-        let fetches = plan
-            .dlcs
+        // The files of the DLC the cache already holds (#381): laid from it, with
+        // no download. Their paths are relative to the cache root, as a download's
+        // changed files are.
+        let mut paths: Vec<String> = plan
+            .cached_files
             .iter()
-            .any(|d| d.download_size > 0 && ids.contains(&d.id.parse().unwrap_or(0)));
+            .filter(|(id, _)| ids.contains(id))
+            .flat_map(|(_, paths)| paths.iter().cloned())
+            .collect();
+        let fetches = plan
+            .downloading()
+            .iter()
+            .any(|d| ids.contains(&d.id.parse().unwrap_or(0)));
         if fetches {
             // A record for another set of DLC (an add stopped, then other DLC asked for)
             // isn't resumed: its fetched files would be laid unrecorded.
@@ -922,11 +1076,15 @@ where
                 rec.fetched = true;
                 lay::write_json_durably(&root.join(DOWNLOAD), &rec)?;
             }
-            let changed = Snapshot::take(&src).changed_since(&rec.before);
-            files = lay_list(&src, &plan.tree_name, &changed);
+            paths.extend(Snapshot::take(&src).changed_since(&rec.before));
+        }
+        if !paths.is_empty() {
+            paths.sort();
+            paths.dedup();
+            files = lay_list(&src, &plan.tree_name, &paths);
         }
         if plan.source == Source::Cache || !fetches {
-            let base = if fetches {
+            let base = if fetches || !plan.from_cache.is_empty() {
                 &src
             } else {
                 game.cache_root.as_ref().unwrap_or(&src)

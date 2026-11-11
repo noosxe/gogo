@@ -149,6 +149,10 @@ pub enum ProgressEvent {
         source: String,
         #[serde(rename = "buildId")]
         build_id: String,
+        /// The DLC whose files the depot cache already holds: laid from it, not
+        /// downloaded (#381).
+        #[serde(rename = "fromCache", skip_serializing_if = "Vec::is_empty")]
+        from_cache: Vec<u64>,
     },
     /// One DLC is in the game and recorded, after its install script ran.
     DlcInstalled {
