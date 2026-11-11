@@ -42,6 +42,20 @@ impl GogGameInfo {
     }
 }
 
+/// Every readable `goggame-*.info` in `dir` (and one level down), with its
+/// path (task paths are relative to its dir), sorted by path.
+pub fn read_info_files(dir: &Path) -> Vec<(PathBuf, GogGameInfo)> {
+    let mut paths = collect_info_files(dir, 0);
+    paths.sort();
+    paths
+        .into_iter()
+        .filter_map(|p| {
+            let info = serde_json::from_str(&std::fs::read_to_string(&p).ok()?).ok()?;
+            Some((p, info))
+        })
+        .collect()
+}
+
 /// Every readable `goggame-*.info` in `dir` (and one level down), with the id
 /// in its file name (`goggame-<id>.info`), sorted by that id.
 pub fn read_infos(dir: &Path) -> Vec<(String, GogGameInfo)> {
@@ -302,7 +316,7 @@ pub fn split_args(raw: &str) -> Vec<String> {
 /// falls back to a case-insensitive match. On a case-sensitive filesystem the
 /// result has the on-disk spelling; a case-insensitive one (APFS) takes the info's
 /// spelling as it is, and that opens the same file.
-fn resolve_task_path(base: &Path, rel: &str) -> Option<PathBuf> {
+pub fn resolve_task_path(base: &Path, rel: &str) -> Option<PathBuf> {
     let rel = rel.replace('\\', "/");
     let exact = base.join(&rel);
     if exact.is_file() {
@@ -326,7 +340,7 @@ fn resolve_task_path(base: &Path, rel: &str) -> Option<PathBuf> {
     cur.is_file().then_some(cur)
 }
 
-fn is_runnable_file_task(task: &GogTask) -> bool {
+pub fn is_runnable_file_task(task: &GogTask) -> bool {
     task.kind.as_deref() == Some("FileTask")
         && task.path.as_deref().is_some_and(|p| p.to_lowercase().ends_with(".exe"))
         // `.lnk` shortcuts (category "game" but path to a shortcut) are skipped.

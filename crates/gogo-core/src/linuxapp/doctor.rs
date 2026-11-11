@@ -1853,6 +1853,12 @@ fn check_processes(g: &Game) -> Finding {
         return Finding::ok("processes", "no prefix yet");
     }
     if let Some(pid) = game::live_launcher(&g.dirs.root) {
+        if let Some(exe) = super::exes::running_one_off(&g.dirs.root, pid) {
+            return Finding::ok(
+                "processes",
+                format!("a one-off run of {exe} is running (launcher {pid})"),
+            );
+        }
         return Finding::ok("processes", format!("the game is running (launcher {pid})"));
     }
     let found = game::prefix_procs(&g.dirs.prefix);

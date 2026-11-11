@@ -4297,6 +4297,16 @@ fn linux_app_sub(sub: crate::cli::LinuxAppSub) -> Result<i32, AppError> {
                 }
             }
         }
+        crate::cli::LinuxAppSub::Exes { gogid, all, json } => {
+            let l = gogo::linuxapp::exes::list(&gogid, all)?;
+            if json {
+                println!("{}", serde_json::to_string(&l).unwrap());
+            } else {
+                print!("{}", gogo::linuxapp::exes::render(&l));
+            }
+            Ok(cli::exit::OK)
+        }
+        crate::cli::LinuxAppSub::Run { gogid, exe, args } => linux_app_run(&gogid, &exe, &args),
         crate::cli::LinuxAppSub::Env { cmd } => linux_app_env(cmd),
         // Async: dispatched in `run`.
         crate::cli::LinuxAppSub::Dlc { .. } => unreachable!("linux-app dlc is async"),
@@ -4587,6 +4597,27 @@ fn linux_app_wrapper(
     }
     print!("{}", wrapper_text(&r));
     Ok(cli::exit::OK)
+}
+
+#[cfg(target_os = "linux")]
+/// `gogo linux-app run <gogid> <task|path> [-- <args…>]`: the game's
+/// `launch.sh` takes this process's place (design 18 §7.10), so a TERM sent
+/// to it is the launcher's and the exit code is the run's.
+fn linux_app_run(gogid: &str, exe: &str, args: &[String]) -> Result<i32, AppError> {
+    use std::os::unix::process::CommandExt as _;
+    let plan = gogo::linuxapp::exes::plan_run(gogid, exe, args)?;
+    eprintln!(
+        "gogo: running {}{} once in {gogid}'s prefix",
+        plan.label,
+        plan.index
+            .map(|i| format!(" (play task {i})"))
+            .unwrap_or_default()
+    );
+    let err = std::process::Command::new(&plan.launch_sh)
+        .args(plan.argv())
+        .exec();
+    eprintln!("gogo: {}: {err}", plan.launch_sh.display());
+    Ok(cli::exit::FAILED)
 }
 
 #[cfg(target_os = "linux")]

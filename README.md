@@ -417,6 +417,22 @@ gogo linux-app display 1423049311                          # the mode, and what 
 gogo linux-app display 1423049311 --clear
 ```
 
+**A game's other exes** (a vendor launcher, a settings or mod tool) run once in
+the game's prefix, with everything a launch of the game gets (Proton build,
+environment, display mode, renderer, wrapper, run log, teardown), and nothing of
+its setup changes: the menu entry still starts the game. `exes` lists the play
+tasks of the game and its DLC, numbered, and which one the launcher runs;
+`--all` adds every other `.exe` with its bitness. `run` takes a number, a name
+two tasks don't share, or a path in the game's files. Its log is
+`one-off-<time>-<pid>.log` beside the game's; it's refused while the game runs.
+
+```sh
+gogo linux-app exes 1423049311                          # --all for every .exe; --json
+gogo linux-app run 1423049311 REDprelauncher.exe        # CD Projekt's launcher, once
+gogo linux-app run 1423049311 1                         # the same, by its number
+gogo linux-app run 1423049311 tools/redmod/bin/redMod.exe   # not a play task: --all lists it; args after --
+```
+
 `env set` refuses what the launcher sets itself (`WINEPREFIX`, `GAMEID`, `STORE`,
 `PROTONPATH`), `WINEDLLOVERRIDES` (use `[platforms.linux.dll_overrides]`) and
 `PROTONFIXES_DISABLE` (use `protonfixes = false`), and warns when yours beats a

@@ -1936,6 +1936,7 @@ const LAUNCHER_TOOLS: &[&str] = &[
     "date",
     "mkdir",
     "rm",
+    "rmdir",
     "ln",
     "mv",
     "cp",
@@ -1991,6 +1992,17 @@ impl World {
     }
 
     fn launcher_with(name: &str, no_gogo: bool, library: bool) -> Option<World> {
+        World::launcher_prep(name, no_gogo, library, &|_| {})
+    }
+
+    /// [`World::launcher_with`], with `prep` changing the game tree before
+    /// the build.
+    fn launcher_prep(
+        name: &str,
+        no_gogo: bool,
+        library: bool,
+        prep: &dyn Fn(&World),
+    ) -> Option<World> {
         let path = std::env::var_os("PATH").unwrap_or_default();
         let found: Vec<Option<PathBuf>> = LAUNCHER_TOOLS
             .iter()
@@ -2004,7 +2016,7 @@ impl World {
             eprintln!("no /usr/bin/env or a launcher tool missing from PATH: skipped");
             return None;
         }
-        let w = World::launcher_built_with(name, no_gogo, library);
+        let w = World::launcher_built_prep(name, no_gogo, library, prep);
         let tools = w.root.join("tools");
         std::fs::create_dir_all(&tools).unwrap();
         for (t, p) in LAUNCHER_TOOLS.iter().zip(found) {
@@ -2019,7 +2031,17 @@ impl World {
     }
 
     fn launcher_built_with(name: &str, no_gogo: bool, library: bool) -> World {
+        World::launcher_built_prep(name, no_gogo, library, &|_| {})
+    }
+
+    fn launcher_built_prep(
+        name: &str,
+        no_gogo: bool,
+        library: bool,
+        prep: &dyn Fn(&World),
+    ) -> World {
         let w = World::new(name, &["d3d9.dll"]);
+        prep(&w);
         std::fs::write(w.tree.join(format!("goggame-{ID}.ico")), tiny_ico()).unwrap();
         let gogo = w
             .root
@@ -2252,7 +2274,7 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
     // next setup, which says so; an unchanged one isn't touched.
     std::fs::write(
         &sh,
-        script.replace("LAUNCHER_VERSION=13", "LAUNCHER_VERSION=0"),
+        script.replace("LAUNCHER_VERSION=14", "LAUNCHER_VERSION=0"),
     )
     .unwrap();
     std::fs::write(&desktop, "[Desktop Entry]\nExec=/old/root/launch.sh\n").unwrap();
@@ -2260,7 +2282,7 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
     assert_eq!(std::fs::read_to_string(&sh).unwrap(), script);
     assert_eq!(std::fs::read_to_string(&desktop).unwrap(), entry);
     assert!(
-        out.notes.iter().any(|n| n == "launch.sh: launcher 0 -> 13"),
+        out.notes.iter().any(|n| n == "launch.sh: launcher 0 -> 14"),
         "{:?}",
         out.notes
     );
@@ -2325,7 +2347,7 @@ fn the_launcher_runs_umu_with_the_games_environment_and_logs_the_run() {
     let run = &runs[0];
     for want in [
         format!("# gogo run log: Test Game ({ID})\n"),
-        "# launcher: 13\n".into(),
+        "# launcher: 14\n".into(),
         format!(
             "# runtime: path:{} (1793687165 GE-Proton10-34)\n",
             w.build.display()
@@ -4602,7 +4624,7 @@ fn the_launcher_of_a_library_game_keeps_gogos_data_root() {
     );
     // Logs stay under the data root, not the library's parent.
     assert_eq!(w.runs().len(), 1, "run logs under {:?}", w.logs());
-    assert!(w.launch_log().contains("launcher 13"));
+    assert!(w.launch_log().contains("launcher 14"));
     assert!(!w.root.join("big drive/logs").exists());
 
     // Stale config: setup runs with gogo's data root as GOGO_HOME, and from
@@ -7408,5 +7430,608 @@ mod dlc_add {
         assert!(r.inputs.is_empty());
         assert_eq!(std::fs::read(root.join(depot::RECORD)).unwrap(), old);
         assert!(content::load(&w.game()).unwrap().unwrap().dlc.is_empty());
+    }
+}
+
+// — a game's exes and one-off runs (#364, design 18 §7.10) —
+
+mod one_off {
+    use super::*;
+    use gogo::linuxapp::exes;
+    use sha2::Digest as _;
+
+    const DLC: &str = "1999999902";
+
+    /// A tree shaped like Cyberpunk 2077's: a primary vendor launcher and the
+    /// game sharing one name, a tool with a working dir and quoted args, a
+    /// document, a DLC's tool, and exes no task names.
+    fn exes_tree(w: &World) {
+        let t = &w.tree;
+        let put = |rel: &str, pe64: bool| {
+            let p = t.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, pe_with_imports(pe64, &["d3d9.dll"])).unwrap();
+        };
+        put("REDprelauncher.exe", true);
+        put("bin/x64/Game64.exe", true);
+        put("tools/Config.exe", false);
+        put("tools/redmod/bin/redMod.exe", true);
+        put("unins000.exe", false);
+        put("dlc/editor.exe", false);
+        std::fs::write(
+            t.join(format!("goggame-{ID}.info")),
+            format!(
+                r#"{{"gameId":"{ID}","rootGameId":"{ID}","name":"Test Game","playTasks":[
+                {{"type":"FileTask","category":"launcher","path":"REDprelauncher.exe","isPrimary":true,"name":"Test Game"}},
+                {{"type":"FileTask","category":"game","path":"bin\\x64\\Game64.exe","arguments":"-windowed","name":"Test Game"}},
+                {{"type":"FileTask","category":"document","path":"manual.pdf","name":"Manual"}},
+                {{"type":"FileTask","category":"tool","path":"tools\\Config.exe","workingDir":"tools","arguments":"-cfg \"my file.ini\"","name":"Settings"}}
+                ]}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            t.join(format!("goggame-{DLC}.info")),
+            format!(
+                r#"{{"gameId":"{DLC}","rootGameId":"{ID}","name":"Test DLC","playTasks":[
+                {{"type":"FileTask","category":"tool","path":"dlc\\editor.exe","name":"DLC Editor"}}]}}"#
+            ),
+        )
+        .unwrap();
+    }
+
+    fn gog(w: &World) -> PathBuf {
+        w.game().join("prefix/drive_c/GOG/Test Game")
+    }
+
+    fn argv(p: &exes::RunPlan) -> Vec<String> {
+        p.argv()
+            .into_iter()
+            .map(|a| a.into_string().unwrap())
+            .collect()
+    }
+
+    fn one_off_logs(w: &World) -> Vec<String> {
+        let mut logs: Vec<PathBuf> = std::fs::read_dir(w.logs())
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with(gogo::linuxapp::launcher::ONE_OFF_LOG_PREFIX)
+            })
+            .collect();
+        logs.sort();
+        logs.iter()
+            .map(|p| std::fs::read_to_string(p).unwrap())
+            .collect()
+    }
+
+    /// The game's configuration: sha256 and mtime of each file a run must
+    /// not write (`None`: not there).
+    fn config(w: &World) -> Vec<(PathBuf, Option<(String, std::time::SystemTime)>)> {
+        let g = w.game();
+        [
+            g.join("gogo-launch.toml"),
+            g.join("launch.conf"),
+            g.join("launch.sh"),
+            g.join("state.toml"),
+            g.join("content.toml"),
+            g.join("icon.png"),
+            w.home.join(format!("compat/{ID}.toml")),
+            gogo::linuxapp::game::desktop_path(ID),
+        ]
+        .into_iter()
+        .map(|p| {
+            let v = std::fs::read(&p).ok().map(|b| {
+                (
+                    format!("{:x}", sha2::Sha256::digest(&b)),
+                    std::fs::metadata(&p).unwrap().modified().unwrap(),
+                )
+            });
+            (p, v)
+        })
+        .collect()
+    }
+
+    /// An env dump as a map, without what differs between any two runs.
+    fn env_map(p: &Path) -> std::collections::BTreeMap<String, String> {
+        std::fs::read_to_string(p)
+            .unwrap()
+            .lines()
+            .filter_map(|l| l.split_once('='))
+            .filter(|(k, _)| {
+                !matches!(*k, "PWD" | "OLDPWD" | "_" | "SHLVL") && !k.starts_with("FAKE_")
+            })
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn exes_lists_base_and_dlc_play_tasks_and_with_all_every_exe() {
+        let w = World::launcher_built_prep("exes-list", false, false, &exes_tree);
+        let l = exes::list(ID, false).unwrap();
+        type Row<'a> = (
+            Option<usize>,
+            Option<&'a str>,
+            &'a str,
+            Option<&'a str>,
+            bool,
+            bool,
+            bool,
+            Option<u8>,
+        );
+        let rows: Vec<Row> = l
+            .exes
+            .iter()
+            .map(|e| {
+                (
+                    e.index,
+                    e.name.as_deref(),
+                    e.path.as_str(),
+                    e.category.as_deref(),
+                    e.primary,
+                    e.dlc,
+                    e.launcher,
+                    e.bits,
+                )
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (
+                    Some(1),
+                    Some("Test Game"),
+                    "REDprelauncher.exe",
+                    Some("launcher"),
+                    true,
+                    false,
+                    false,
+                    Some(64)
+                ),
+                (
+                    Some(2),
+                    Some("Test Game"),
+                    "bin/x64/Game64.exe",
+                    Some("game"),
+                    false,
+                    false,
+                    true,
+                    Some(64)
+                ),
+                (
+                    Some(3),
+                    Some("Settings"),
+                    "tools/Config.exe",
+                    Some("tool"),
+                    false,
+                    false,
+                    false,
+                    Some(32)
+                ),
+                (
+                    Some(4),
+                    Some("DLC Editor"),
+                    "dlc/editor.exe",
+                    Some("tool"),
+                    false,
+                    true,
+                    false,
+                    Some(32)
+                ),
+            ]
+        );
+        assert_eq!(l.exes[1].args, ["-windowed"]);
+        assert_eq!(l.exes[2].args, ["-cfg", "my file.ini"]);
+        assert_eq!(l.exes[2].working_dir.as_deref(), Some("tools"));
+        assert_eq!(l.exes[3].game_id.as_deref(), Some(DLC));
+        assert_eq!(l.launcher_exe.as_deref(), Some("bin/x64/Game64.exe"));
+        assert_eq!(l.game_dir, w.game().join("game"));
+
+        let text = exes::render(&l);
+        for want in [
+            format!("Test Game ({ID}): game files in "),
+            "play tasks:\n".into(),
+            "   1  Test Game: REDprelauncher.exe (64-bit) [launcher, primary]\n".into(),
+            "   2  Test Game: bin/x64/Game64.exe (64-bit) [game, gogo's launcher runs this]\n      args: -windowed\n".into(),
+            "   3  Settings: tools/Config.exe (32-bit) [tool]\n      args: -cfg my file.ini\n      working dir: tools\n".into(),
+            format!("   4  DLC Editor: dlc/editor.exe (32-bit) [tool, DLC {DLC}]\n"),
+            format!("run one: gogo linux-app run {ID} <number|name|path>"),
+        ] {
+            assert!(text.contains(&want), "{want:?} in:\n{text}");
+        }
+        assert!(!text.contains("Manual"), "{text}");
+        assert!(!text.contains("other exes"), "{text}");
+
+        let json = serde_json::to_value(&l).unwrap();
+        assert_eq!(json["gogid"], ID);
+        assert_eq!(json["launcher_exe"], "bin/x64/Game64.exe");
+        assert_eq!(json["exes"][1]["index"], 2);
+        assert_eq!(json["exes"][1]["launcher"], true);
+        assert_eq!(json["exes"][1]["bits"], 64);
+        assert_eq!(json["exes"][1]["args"][0], "-windowed");
+        assert_eq!(json["exes"][3]["dlc"], true);
+        assert_eq!(json["exes"][3]["game_id"], DLC);
+        assert_eq!(json["exes"][2]["working_dir"], "tools");
+
+        // --all: the rest, by path, none of them a task again.
+        let l = exes::list(ID, true).unwrap();
+        let extra: Vec<(&str, Option<u8>, Option<usize>)> = l.exes[4..]
+            .iter()
+            .map(|e| (e.path.as_str(), e.bits, e.index))
+            .collect();
+        assert_eq!(
+            extra,
+            [
+                ("game.exe", Some(32), None),
+                ("tools/redmod/bin/redMod.exe", Some(64), None),
+                ("unins000.exe", Some(32), None),
+            ]
+        );
+        let text = exes::render(&l);
+        assert!(
+            text.contains("other exes (not play tasks):\n      game.exe (32-bit)\n      tools/redmod/bin/redMod.exe (64-bit)\n"),
+            "{text}"
+        );
+        assert_eq!(
+            serde_json::to_value(&l).unwrap()["exes"][5]["index"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn run_picks_by_number_name_or_path_and_refuses_a_shared_name() {
+        let w = World::launcher_built_prep("exes-pick", false, false, &exes_tree);
+        let gog = gog(&w);
+
+        let p = exes::plan_run(ID, "2", &[]).unwrap();
+        assert_eq!(p.exe, gog.join("bin/x64/Game64.exe"));
+        assert_eq!(p.workdir, gog.join("bin/x64"));
+        assert_eq!(p.args, ["-windowed"]);
+        assert_eq!((p.index, p.label.as_str()), (Some(2), "bin/x64/Game64.exe"));
+        assert_eq!(p.launch_sh, w.game().join("launch.sh"));
+        assert_eq!(
+            argv(&p),
+            [
+                gogo::linuxapp::launcher::ONE_OFF_ARG.to_string(),
+                gog.join("bin/x64/Game64.exe").display().to_string(),
+                gog.join("bin/x64").display().to_string(),
+                "-windowed".into()
+            ]
+        );
+
+        // Cyberpunk's two tasks share a name: refused, with how to pick.
+        let e = exes::plan_run(ID, "Test Game", &[])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains(
+                "2 play tasks are named \"Test Game\": 1 (REDprelauncher.exe), 2 (bin/x64/Game64.exe); \
+                 pick one by its number or path"
+            ),
+            "{e}"
+        );
+
+        // A name (any case): the task's working dir and args, then the extra.
+        let p = exes::plan_run(ID, "settings", &["--x".into()]).unwrap();
+        assert_eq!(p.exe, gog.join("tools/Config.exe"));
+        assert_eq!(p.workdir, gog.join("tools"));
+        assert_eq!(p.args, ["-cfg", "my file.ini", "--x"]);
+        assert_eq!(p.index, Some(3));
+        // A DLC's task.
+        assert_eq!(
+            exes::plan_run(ID, "4", &[]).unwrap().exe,
+            gog.join("dlc/editor.exe")
+        );
+
+        // A path, Windows-style and in any case: a task's exe is that task...
+        let p = exes::plan_run(ID, "REDprelauncher.exe", &[]).unwrap();
+        assert_eq!((p.index, p.args.len()), (Some(1), 0));
+        assert_eq!(p.workdir, gog);
+        let p = exes::plan_run(ID, r"BIN\x64\game64.EXE", &[]).unwrap();
+        assert_eq!(
+            (p.index, p.args.clone()),
+            (Some(2), vec!["-windowed".to_string()])
+        );
+        // ...and any other exe runs alone, in its dir, with only the extra.
+        let p = exes::plan_run(ID, r"tools\redmod\bin\REDMOD.exe", &["-h".into()]).unwrap();
+        assert_eq!(p.exe, gog.join("tools/redmod/bin/redMod.exe"));
+        assert_eq!(p.workdir, gog.join("tools/redmod/bin"));
+        assert_eq!((p.index, p.args.clone()), (None, vec!["-h".to_string()]));
+        assert_eq!(p.label, "tools/redmod/bin/redMod.exe");
+
+        for (sel, want) in [
+            ("9", "no play task 9"),
+            ("Nope", "no play task named \"Nope\""),
+            ("nope.exe", "no nope.exe in the game's files"),
+            ("../escape.exe", "inside them"),
+            ("/bin/true.exe", "inside them"),
+        ] {
+            let e = exes::plan_run(ID, sel, &[]).unwrap_err().to_string();
+            assert!(e.contains(want), "{sel}: {e}");
+        }
+    }
+
+    #[test]
+    fn a_one_off_gets_the_games_environment_and_changes_none_of_its_config() {
+        let Some(w) = World::launcher_prep("one-off-run", false, false, &exes_tree) else {
+            return;
+        };
+        // An override with env, so the L4 file is one of the files to keep.
+        gogo::linuxapp::envargs::set_env(ID, &[("FOO".into(), "from-l4".into())]).unwrap();
+        setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
+        let normal_env = w.root.join("normal.env");
+        let out = w.launch(&[("FAKE_ENV_DUMP", normal_env.to_str().unwrap())], &[]);
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        let latest = std::fs::read_link(w.logs().join("latest.log")).unwrap();
+        let before = config(&w);
+        assert!(
+            before.iter().filter(|(_, v)| v.is_some()).count() >= 7,
+            "{before:?}"
+        );
+        let calls = w.calls().len();
+
+        let plan = exes::plan_run(ID, "Settings", &["--x".into(), "a b".into()]).unwrap();
+        let one_env = w.root.join("one-off.env");
+        let args_log = w.root.join("args.log");
+        let out = w.launch(
+            &[
+                ("FAKE_ENV_DUMP", one_env.to_str().unwrap()),
+                ("FAKE_ARGS_LOG", args_log.to_str().unwrap()),
+            ],
+            &argv(&plan).iter().map(String::as_str).collect::<Vec<_>>(),
+        );
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        assert!(String::from_utf8_lossy(&out.stdout).contains("fake-game stdout line"));
+
+        // The tool, in its dir, with its args and the extra.
+        let gog = gog(&w);
+        let log = w.log();
+        let last = log.lines().rfind(|l| l.starts_with("ARGV:")).unwrap();
+        assert_eq!(
+            last,
+            format!(
+                "ARGV:{} -cfg my file.ini --x a b",
+                gog.join("tools/Config.exe").display()
+            )
+        );
+        assert_eq!(
+            std::fs::read_to_string(&args_log).unwrap(),
+            format!(
+                "{}\n-cfg\nmy file.ini\n--x\na b\n",
+                gog.join("tools/Config.exe").display()
+            )
+        );
+        let env = log.lines().rfind(|l| l.starts_with("ENV:")).unwrap();
+        assert!(
+            env.ends_with(&format!(" CWD={}", gog.join("tools").display())),
+            "{env}"
+        );
+        // The game's environment, all of it: gogo's, the L4's, the renderer's.
+        let (normal, one) = (env_map(&normal_env), env_map(&one_env));
+        assert_eq!(normal, one);
+        assert_eq!(one.get("FOO").map(String::as_str), Some("from-l4"));
+        assert_eq!(one.get("STORE").map(String::as_str), Some("gog"));
+
+        // Nothing of the game's config written; no setup; the menu entry,
+        // latest.log and the game's run logs are the game's.
+        assert_eq!(config(&w), before);
+        assert_eq!(w.calls().len(), calls, "{:?}", w.calls());
+        assert_eq!(
+            std::fs::read_link(w.logs().join("latest.log")).unwrap(),
+            latest
+        );
+        assert_eq!(w.runs().len(), 1);
+        let ones = one_off_logs(&w);
+        assert_eq!(ones.len(), 1);
+        for want in [
+            format!(
+                "# gogo run log: Test Game ({ID})\n# one-off: {}\n",
+                gog.join("tools/Config.exe").display()
+            ),
+            "# args: -cfg my file.ini --x a b\n".into(),
+            "fake-game stdout line\n".into(),
+            "# exit: 0\n".into(),
+        ] {
+            assert!(ones[0].contains(&want), "{want:?} in:\n{}", ones[0]);
+        }
+        // No early-exit dialog or renderer switch for a one-off.
+        let ll = w.launch_log();
+        assert!(ll.contains("one-off run of "), "{ll}");
+        assert!(ll.contains("one-off ended: code 0"), "{ll}");
+        assert_eq!(ll.matches("early exit").count(), 1, "{ll}");
+        // Nothing left behind.
+        assert!(
+            std::fs::read_dir(w.game().join(".launchers"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        assert!(!w.game().join(gogo::linuxapp::launcher::ONE_OFFS).exists());
+
+        // The game's own launch still runs the game.
+        assert_eq!(w.launch(&[], &[]).status.code(), Some(0));
+        let log = w.log();
+        let last = log.lines().rfind(|l| l.starts_with("ARGV:")).unwrap();
+        assert_eq!(
+            last,
+            format!(
+                "ARGV:{} -windowed",
+                gog.join("bin/x64/Game64.exe").display()
+            )
+        );
+    }
+
+    #[test]
+    fn a_one_off_is_refused_while_the_game_runs_a_dlc_add_or_a_setup_is_pending() {
+        let Some(w) = World::launcher_prep("one-off-refused", false, false, &exes_tree) else {
+            return;
+        };
+        let plan = exes::plan_run(ID, "1", &[]).unwrap();
+        let args = argv(&plan);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let runs_of = |w: &World| {
+            w.log()
+                .lines()
+                .filter(|l| l.starts_with("ARGV:") && l.contains("REDprelauncher.exe"))
+                .count()
+        };
+
+        // The game is running.
+        let mut game = w
+            .launch_cmd(&[("FAKE_GAME_SLEEP", "8")], &[])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        assert!(wait_until(10, || !prefix_procs(&w).is_empty()));
+        let e = exes::plan_run(ID, "1", &[]).unwrap_err().to_string();
+        assert!(e.contains(&format!("{ID} is running (launcher")), "{e}");
+        // A run that got past gogo's check: the launcher refuses it too.
+        let out = w.launch(&[], &args);
+        assert_eq!(out.status.code(), Some(127), "{out:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("Test Game is running (launcher "), "{err}");
+        assert_eq!(runs_of(&w), 0);
+        assert!(game.wait().unwrap().success());
+        assert!(one_off_logs(&w)[0].contains("# exit: 127 (game is running)\n"));
+
+        // A DLC add that stopped while laying files.
+        let journal = gogo::gog::lay::journal_path(&w.game());
+        std::fs::write(&journal, "{}").unwrap();
+        let e = exes::plan_run(ID, "1", &[]).unwrap_err().to_string();
+        assert!(e.contains("a DLC add of"), "{e}");
+        let out = w.launch(&[], &args);
+        assert_eq!(out.status.code(), Some(1), "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("A DLC install for Test Game stopped")
+        );
+        std::fs::remove_file(&journal).unwrap();
+
+        // A changed config that setup can't apply: not run on the old one.
+        gogo::linuxapp::envargs::set_env(ID, &[("FOO".into(), "new".into())]).unwrap();
+        let conf = w.conf();
+        let out = w.launch(&[("FAKE_SETUP_FAIL", "1")], &args);
+        assert_eq!(out.status.code(), Some(1), "{out:?}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("config changed and setup didn't apply it"),
+            "{err}"
+        );
+        assert_eq!(runs_of(&w), 0);
+        assert_eq!(w.conf(), conf);
+        // Setup that works runs first, as for a launch of the game.
+        let out = w.launch(&[], &args);
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        assert!(
+            w.calls().iter().any(|c| c.contains("linux-app setup")),
+            "{:?}",
+            w.calls()
+        );
+        assert_eq!(runs_of(&w), 1);
+
+        // A game that isn't set up.
+        std::fs::rename(w.game().join("launch.conf"), w.root.join("launch.conf")).unwrap();
+        let e = exes::plan_run(ID, "1", &[]).unwrap_err().to_string();
+        assert!(e.contains("isn't set up"), "{e}");
+    }
+
+    #[test]
+    fn a_one_off_is_closed_and_torn_down_on_term_and_doctor_names_it_meanwhile() {
+        let Some(w) = World::launcher_prep("one-off-term", false, false, &exes_tree) else {
+            return;
+        };
+        let plan = exes::plan_run(ID, "REDprelauncher.exe", &[]).unwrap();
+        let args = argv(&plan);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let mut child = w
+            .launch_cmd(&[("FAKE_GAME_HANG", "1")], &args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        assert!(hang_ready(&w), "{:?}", prefix_procs(&w));
+        let host = doctor_host(&w, &[("radeon", 2)]);
+        let r = doctor(&w, &host);
+        let procs = r.findings.iter().find(|f| f.check == "processes").unwrap();
+        assert_eq!(
+            procs.message,
+            format!(
+                "a one-off run of {} is running (launcher {})",
+                gog(&w).join("REDprelauncher.exe").display(),
+                child.id()
+            )
+        );
+        assert!(
+            std::process::Command::new("kill")
+                .args(["-TERM", &child.id().to_string()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(wait_until(20, || child.try_wait().unwrap().is_some()));
+        assert_eq!(child.wait().unwrap().code(), Some(143));
+        assert!(prefix_procs(&w).is_empty(), "{:?}", prefix_procs(&w));
+        // The close request went to the prefix's wineserver, as for the game.
+        assert!(
+            w.log().contains("CLOSE:wineboot --end-session"),
+            "{}",
+            w.log()
+        );
+        assert!(one_off_logs(&w)[0].contains("# exit: 143 (SIGTERM)\n"));
+        assert!(!w.game().join(gogo::linuxapp::launcher::ONE_OFFS).exists());
+        let r = doctor(&w, &host);
+        let procs = r.findings.iter().find(|f| f.check == "processes").unwrap();
+        assert_eq!(procs.message, "no processes left in the prefix");
+    }
+
+    #[test]
+    fn a_one_off_runs_under_the_games_wrapper() {
+        let Some(w) = World::launcher_prep("one-off-wrap", false, false, &exes_tree) else {
+            return;
+        };
+        w.wrapped(WRAP_EXEC, &[]);
+        let plan = exes::plan_run(ID, "3", &["--x".into()]).unwrap();
+        let args = argv(&plan);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let log = w.wrap_log();
+        let out = w.launch(&[("FAKE_WRAP_LOG", log.to_str().unwrap())], &args);
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        let wargv = w.wrap_file(".argv");
+        let wargv: Vec<&str> = wargv.lines().collect();
+        assert_eq!(
+            wargv[1],
+            gogo::linuxapp::launcher::RUN_ONE_OFF_ARG,
+            "{wargv:?}"
+        );
+        let gog = gog(&w);
+        let last = w.log();
+        let last = last
+            .lines()
+            .rfind(|l| l.starts_with("ARGV:"))
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            last,
+            format!(
+                "ARGV:{} -cfg my file.ini --x",
+                gog.join("tools/Config.exe").display()
+            )
+        );
+        let env = w.log();
+        let env = env
+            .lines()
+            .rfind(|l| l.starts_with("ENV:"))
+            .unwrap()
+            .to_string();
+        assert!(env.contains("FOO=from-wrapper"), "{env}");
+        assert!(
+            env.ends_with(&format!(" CWD={}", gog.join("tools").display())),
+            "{env}"
+        );
+        assert!(one_off_logs(&w)[0].contains("# wrapper: fake-wrap\n"));
     }
 }

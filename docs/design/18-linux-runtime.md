@@ -2212,6 +2212,114 @@ the game's environment with a socket, with none, with a `WAYLAND_DISPLAY` that h
 L4 env winning, `x11` stripping a session's switches, a cleared mode, the header and log lines,
 doctor in both sessions, and a wrapper that drops `WAYLAND_DISPLAY`.
 
+### 7.10 A game's other exes, run once (#364)
+
+A game's launcher runs one baked exe (§7.1), but many games ship others: a
+vendor launcher, a settings tool, a mod tool, an editor. Cyberpunk 2077 runs its
+game exe, `bin\x64\Cyberpunk2077.exe` (#107), while GOG's primary play task is
+CD Projekt's `REDprelauncher.exe`, and REDmod brings `tools\redmod\bin\redMod.exe`.
+Before this, the only way to start one was an `exe` line in the override file,
+which changes what the menu entry starts until it's taken out again.
+
+**The commands.** `gogo linux-app exes <gogid> [--all] [--json]` lists them;
+`gogo linux-app run <gogid> <task|path> [-- <args…>]` runs one once. The names
+follow the other per-game subcommands: the gogid first, then what to act on
+(`args`, `wrapper`, `display`, `dlc`). `exes` is a noun, like `env` and `args`,
+for a command that only reads; `run` is a verb, like `setup` and `move`, for
+the one that acts. `run` and not `launch`: the game is launched from its menu
+entry, and this is a different exe, once.
+
+**Listing.** The play tasks of every installed `goggame-*.info` in the game's
+files (`game/`, or the game's dir in the prefix on the installer lane): the base
+game's info first, then the DLC's, each in its own order, numbered from 1. Only
+`FileTask`s to an `.exe` (a document or URL task isn't one). Per task: number,
+name, path relative to the game's files (`/`-separated), args, working dir,
+category, GOG's `isPrimary`, the DLC it comes from, 32/64-bit from the PE
+header (the optional header's magic, read without loading the file), and which
+one gogo's launcher runs: the task whose exe is `launch.conf`'s `EXE` (the same
+file, through the prefix's `drive_c/GOG/<name>` link), and of several, the one
+with `launch.conf`'s args. `--all` adds every other `.exe` under the game's
+files, as not a play task. `--json` is the same listing.
+
+**Picking.** A number is that play task. Else a name, any case, of one task: a
+name two tasks share is refused with both numbers and paths (Cyberpunk's two
+tasks are both "Cyberpunk 2077"). Else a path relative to the game's files, `/`
+or `\`, any case (the same lookup as the info files' paths); one outside them
+(`..`, absolute) is refused. A path that is exactly one task's exe is that task;
+any other exe runs alone. The working dir is the task's `workingDir`, else the
+exe's dir. The args are the task's (none for an exe that isn't one), then
+whatever follows `--`.
+
+**Through the launcher.** `run` checks what it can (below), then execs the
+game's own `launch.sh` (`LAUNCHER_VERSION` 14) with `--gogo-one-off <exe> <workdir> [args…]` (paths
+absolute, through the prefix like the game's `EXE`; the args all the exe gets).
+The launcher's only change for it is in `load_conf`: after `launch.conf` is
+read, `EXE`, the working dir and `ARGS` are the one-off's. Everything else is
+the game's, by the same code: the stale-stamp setup and the Proton build
+check, umu and its container, the env layers, display mode and HDR, the
+renderer, the wrapper (the game step under a wrapper is
+`--gogo-run-one-off <mark> <exe> <workdir> [args…]`), the registration in
+`.launchers/`, the watchdog, the close request and teardown on TERM, the wait
+for the whole prefix to go idle (a vendor launcher that starts the game and
+exits is still tracked), and the run log. Because `run` execs, a TERM sent to
+it is the launcher's, and its exit code is the run's.
+
+What a one-off does differently:
+
+- **Its run log** is `one-off-<YYYYmmdd-HHMMSS>-<pid>.log` beside the game's,
+  its header with a `# one-off: <exe>` line; `latest.log` isn't touched and the
+  last ten are kept apart from the game's. So `doctor`'s last run, `apps`' last
+  launch and the early-exit report stay about the game.
+- **No early-exit dialog** and so no "Try next renderer": a tool may end at once,
+  and switching the renderer would write the override file. `launch.log` says
+  `one-off ended: code <rc> after <s>s`.
+- **No dialogs:** it runs from a terminal, so what would be an error dialog is a
+  `gogo: …` line on stderr (and in `launch.log`).
+- **`.one-offs/<pid>`** beside `.launchers/<pid>` holds its start time and exe
+  while it runs; `doctor`'s `processes` check says `a one-off run of <exe> is
+  running (launcher <pid>)`.
+
+**Refusals.** By `run` before the launcher, and by the launcher again (a run
+that got past the first check):
+
+- the game, another one-off, or anything left running in the prefix: `run` uses
+  `refuse_running` (as `move` and `apps remove`); the launcher, once it has
+  registered, refuses when another launcher of the game is alive or a process
+  of the prefix is there (exit 127, its run log's footer `game is running`).
+  Registered first, so of two starting at once neither runs. A launch of the
+  game from the menu while a one-off runs is let through, as a second launch of
+  the game is (#103): each tears down only its own.
+- a DLC add's journal (design 19 §3.4): the game files may mix two versions.
+- a pending setup: the stamp is stale and setup didn't apply it (it failed, or
+  no gogo was found). A launch of the game runs the last applied config then; a
+  one-off doesn't run on a config the game isn't in. A stale stamp that setup
+  applies is fine, as for the game: that is the only write a run can make to
+  the game's config, and a launch of the game would make the same one.
+- a game that isn't set up (no `launch.conf` or `launch.sh`), and an exe that
+  isn't there.
+
+**Nothing of the game's config changes.** A run writes neither the override
+file, `gogo-launch.toml`, `launch.conf`, `launch.sh`, the setup stamp,
+`state.toml`, `content.toml`, the icon nor the menu entry. Its traces are its
+run log, `launch.log` lines, and whatever the exe itself writes in the prefix
+or the game's files.
+
+**The harness.** A manifest's `[one_off]` (`exe`, `args`) launches
+`gogo linux-app run <gogid> <exe> -- <args…>` in place of `launch.sh`, and the
+checks read the newest `one-off-*.log` as the run log
+(`e2e/prelauncher-1423049311.toml`).
+
+**Tests** (`linuxapp_pipeline.rs` `one_off`, `pe.rs`, the helper's): the
+listing across base and DLC, text and JSON, `--all` with PE bitness; picking by
+number, name, a shared name, a path in any case and either separator, and paths
+outside the game; a one-off's environment equal to a launch's (an L4 env
+included), its exe, working dir and args; the config files' sha256 and mtimes
+unchanged, `latest.log` and the game's run logs untouched, the one-off's log
+header; the refusals (the game running, at `run` and in the launcher; a DLC
+journal; a setup that fails; not set up) and a stale stamp's setup first; TERM's
+close request and teardown, with `doctor` naming the one-off meanwhile; and a
+one-off under a wrapper.
+
 ## 8. `gogo linux-app doctor <gogid>`
 
 Read-only, as design 16 §8.3: one line per check, `ok`/`warn`/`fail` with a hint; exit 1 on

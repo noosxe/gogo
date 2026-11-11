@@ -1369,6 +1369,14 @@ cmd_run() {
              else empty end)
         ]' <<<"$MANIFEST_JSON")"
         game_log="$GOGO_HOME_DIR/logs/$GOGID/latest.log"
+        # A manifest's [one_off] (#364): another exe of the game, once, through
+        # `gogo linux-app run` (it execs the game's launch.sh, so the TERM and
+        # the exit code are the launcher's). Its run log is a one-off-*.log.
+        if [ "$(jq -r '.one_off != null' <<<"$MANIFEST_JSON")" = true ]; then
+            launch="$(jq -c --arg g "$GOGO" --arg i "$GOGID" \
+                '[$g,"linux-app","run",$i,.one_off.exe,"--"] + .one_off.args' <<<"$MANIFEST_JSON")"
+            game_log="$GOGO_HOME_DIR/logs/$GOGID/one-off-*.log"
+        fi
     else
         launch="$(jq -c .command <<<"$MANIFEST_JSON")"
         launch_cwd="$RUN/home"
