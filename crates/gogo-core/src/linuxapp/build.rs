@@ -744,11 +744,39 @@ pub fn execute(
             .unwrap_or_else(|| plan.slug.clone());
         launch::record_location(&gogid, &dirs.root)?;
         // A rebuild re-materializes `game/` and keeps the prefix (saves).
-        emit(&ProgressEvent::InstallStarted);
+        // A copy of a large tree takes minutes: say so, and how far (#337).
+        let method = plan
+            .game_files
+            .as_ref()
+            .map_or(materialize::TreeMethod::Copy, |p| p.method);
+        let total = plan
+            .game_files
+            .as_ref()
+            .map(|p| p.extra_bytes)
+            .filter(|b| *b > 0)
+            .unwrap_or_else(|| tree_bytes(tree));
+        emit(&ProgressEvent::GameFilesStarted {
+            method: method.as_str().into(),
+            bytes: total,
+            dir: dirs.game.clone(),
+        });
         if dirs.game.symlink_metadata().is_ok() {
             materialize::remove_tree(&dirs.game)?;
         }
-        let report = materialize::materialize_tree(tree, &dirs.game, materialize::Reflink::Try)?;
+        let mut tenths = materialize::Tenths::new(total);
+        let report = materialize::materialize_tree_with(
+            tree,
+            &dirs.game,
+            materialize::Reflink::Try,
+            &mut |_, bytes| {
+                if method == materialize::TreeMethod::Copy
+                    && let Some(copied) = tenths.add(bytes)
+                {
+                    emit(&ProgressEvent::GameFilesProgress { copied, total });
+                }
+                Ok(())
+            },
+        )?;
         if launch::in_library(&dirs.root) && report.method() == materialize::TreeMethod::Copy {
             emit(&ProgressEvent::Warn {
                 message: format!(

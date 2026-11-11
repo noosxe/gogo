@@ -1121,6 +1121,13 @@ tested = [
     `CARGO_TARGET_TMPDIR`, which skips with a `SKIP …` line where that filesystem has no
     reflink (`/tmp` is often tmpfs; CI runners are ext4). `.config/nextest.toml` shows
     that test's output on success so the skip is visible.
+  - **Progress (#337).** Materializing a depot tree emits `GameFilesStarted { method,
+    bytes, dir }` (in place of the `InstallStarted` it used to emit, whose "installing
+    silently…" line was wrong for a tree) and, for a copy, `GameFilesProgress { copied,
+    total }` at each tenth of the tree (`materialize_tree_with`'s per-file callback). The
+    human lines are `game files: reflinking into <dir>` or `game files: copying <size>
+    into <dir>`, then `game files: copied <done> / <total>`. A reflink takes no time and
+    reports no progress. The depot download before it is design 14 §4.1.
 
 - **As built (#167)** — choices the design left open:
   - `os` is stated on every catalog entry (`os = ["macos"]` for every Mac one), with no

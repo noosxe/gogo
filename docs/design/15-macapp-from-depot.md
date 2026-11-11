@@ -125,7 +125,8 @@ support installer.
 No new event kinds: depot resolution emits `gogo:`-style `Warn`-message progress
 lines via the existing channel (`DepotResolved`-style detail folded into
 `InstallStarted`'s semantics). The design 14 `DepotEvent` stream (when the CLI
-auto-downloads) is rendered by the CLI exactly like `gogo depot`.
+auto-downloads) is rendered by the CLI exactly like `gogo depot` (one renderer since #337,
+design 14 §4.1).
 
 ## 6. D6 — Out of scope (follow-ups)
 

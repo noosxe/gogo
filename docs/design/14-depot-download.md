@@ -76,13 +76,14 @@ pub enum DepotEvent {
     Resolved { product_id: u64, title: String, build_id: String, version: String, generation: u32 },
     Plan { install_dir: PathBuf, download_size: u64, disk_size: u64, language: String, dlcs: Vec<String> },
     Preparing, Allocating(f32), Downloading { downloaded: u64, written: u64, total_download: u64, total_size: u64 },
-    Verifying(f32), Finished { install_dir: PathBuf },
+    Verifying(f32), Finished { install_dir: PathBuf, fetched_files: u64, fetched_bytes: u64 },
 }
 ```
 
 - `--json-progress`: one NDJSON line per event (camelCase keys like the installer lane).
 - Human mode: plain `gogo:` lines for discrete states, a single `\r`-updated byte
-  counter line for `Downloading` (indicatif not needed for one aggregate bar).
+  counter line for `Downloading` (indicatif not needed for one aggregate bar). Replaced
+  by §4.1.
 - Progress units: `DepotEvent` fractions are always `0.0..=1.0`. gog-warp is not
   consistent — `DownloadState::Allocating(f32)` is a fraction in `0..=1`, but
   `DownloadState::Verifying(f32)` is a percentage in `0..=100` — so the mapping divides
@@ -90,6 +91,50 @@ pub enum DepotEvent {
 - `DownloadState` → `DepotEvent` is a pure function (unit-tested); `Resolved`/`Plan`
   are emitted by the driver after manifest resolution using
   `Manifest::install_directory()` + `install_size()`.
+
+### 4.1 One renderer for `gogo depot` and the builds (#337)
+
+> **Amended (#337):** builds that fill or repair the depot cache (`linux-app <game>`,
+> `mac-app <game>`) used to read only `Plan` and print one line, so a 70 GB download
+> looked frozen. Both now drive the lane through `depot_progress::drive` in the CLI, which
+> hands every event to one `Renderer`. The human form above (a `\r` counter on stdout) is
+> replaced by what follows.
+
+- **Modes**, picked from the flags and stderr:
+
+  | Mode | When | Output |
+  |---|---|---|
+  | JSON | `--json-progress` | every event as one NDJSON line on stdout, as before |
+  | live | stderr a terminal, no `--no-progress` | a `gogo:` line on stderr as each phase starts, and a `\r` status line under it |
+  | plain | stderr not a terminal, or `--no-progress` | the same phase lines, plus one line per tenth of hashing and of downloading |
+  | silent | `--quiet`, or `--json` without `--json-progress` | nothing |
+
+- **Phases.** `Resolved` and `Plan` print as before. `Preparing` → `gogo: preparing`;
+  the first `Verifying` → `gogo: hashing the files already in the cache` (gog-warp sends
+  `Verifying` while it hashes a reused tree, before it downloads, and sends no
+  `Allocating` when it verifies); `Allocating` → `gogo: allocating`; the first
+  `Downloading` → `gogo: downloading (<done> / <total>)`. The status line shows the
+  phase's percentage, or bytes, speed and ETA while downloading. Speed is taken over the
+  last 5 s of `Downloading` events (gog-warp sends one every 500 ms), so bytes already in
+  place don't count as speed.
+- **Silent phases.** gog-warp says nothing while it prepares (manifests, depots, secure
+  links) or allocates under `verify`. A 100 ms timer redraws the status line with a
+  spinner and the phase's elapsed time, so it never looks frozen. Plain mode has no timer:
+  its phase line is the last word until the next phase.
+- **What was fetched.** `Finished` gains `fetchedFiles` and `fetchedBytes`: the files the
+  run wrote, new or with a new size or mtime, found by comparing the cache root before and
+  after `download()` (gog-warp writes `<name>.download` and renames it, so a fetched file
+  always has a new mtime). The human line is `gogo: fetched N file(s), <size> (in m:ss)`,
+  or `gogo: nothing to fetch: every file was already in the cache`. For a cold download
+  that's the whole tree; for a repair, what was missing.
+- **Streams.** Human progress goes to stderr (design 03 §4), so `gogo depot`'s stdout keeps
+  only its result line (`gogo: downloaded to …`) or its `--json` summary. A build prints
+  one line of its own first (`gogo: downloading <title> into the depot cache`, or
+  `gogo: checking <title>'s depot cache (hashing its files) and fetching what's missing`),
+  then the same output as `gogo depot`, then its own plan and setup.
+- gog-warp's own `info` log lines repeat the phase lines and would break the status line,
+  so the default log filter is `info,gog_warp=warn`; `-v` shows them again.
+- `--limit` (#324) needs nothing here: the speed shown is what arrives.
 
 ## 5. D5 — Driver flow (gogo-core, UI-agnostic)
 
