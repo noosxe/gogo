@@ -453,6 +453,48 @@ pub enum LinuxAppSub {
         #[command(subcommand)]
         cmd: LinuxDlcCmd,
     },
+    /// A built game's executables: the play tasks of its `goggame-*.info`
+    /// files (base game and DLC), numbered, with their name, path (relative
+    /// to the game's files), args, working dir, category, which one is
+    /// GOG's primary and which one gogo's launcher runs. `--all` adds every
+    /// other `.exe` in the game's files. 32/64-bit from each PE header. Reads
+    /// only; `linux-app run` starts one.
+    Exes {
+        /// GOG product id.
+        #[arg(value_name = "GOGID")]
+        gogid: String,
+        /// Also list every `.exe` in the game's files that isn't a play task.
+        #[arg(long)]
+        all: bool,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run one of a game's executables once (a vendor launcher, a settings
+    /// or mod tool) in the game's prefix, through its launcher: the same
+    /// Proton build, umu container, environment, display mode and HDR,
+    /// renderer and wrapper, run log, close request on TERM and teardown as
+    /// the game, and setup first when its config changed. Nothing of the
+    /// game's config changes: the menu entry still starts the game. The run
+    /// log is `one-off-<time>-<pid>.log` beside the game's. Refused while the
+    /// game (or another run) is running, or while a DLC add or a setup is
+    /// pending.
+    Run {
+        /// GOG product id.
+        #[arg(value_name = "GOGID")]
+        gogid: String,
+        /// Which exe: a play task's number or name (as `linux-app exes`
+        /// lists them; a name two tasks share is refused), or a path relative
+        /// to the game's files (`REDprelauncher.exe`,
+        /// `tools/redmod/bin/redMod.exe`; `\` and any case work too).
+        #[arg(value_name = "TASK|PATH")]
+        exe: String,
+        /// Args after the play task's own, after `--`. An exe that isn't a
+        /// play task gets only these. It runs in the task's working dir,
+        /// else the exe's dir.
+        #[arg(last = true, value_name = "ARGS", allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Switch a game to the next renderer in its order (the launcher's
     /// "Try next renderer"): the one after what setup last applied,
     /// written to the override file as `renderer = "<id>"`. Prints the new
@@ -1669,6 +1711,47 @@ mod tests {
         assert!(dir.is_none());
         assert!(parse(&["--adopt", "/mnt/x/1", "--default"]).is_err());
         assert!(parse(&["--adopt", "/mnt/x/1", "/big"]).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_app_exes_and_run_parse() {
+        let Command::LinuxApp {
+            sub: Some(LinuxAppSub::Exes { gogid, all, json }),
+            ..
+        } = Cli::try_parse_from(["gogo", "linux-app", "exes", "1423049311", "--all", "--json"])
+            .unwrap()
+            .command
+        else {
+            panic!("not exes");
+        };
+        assert_eq!((gogid.as_str(), all, json), ("1423049311", true, true));
+        // The exe's own flags after `--`, hyphens and all.
+        let Command::LinuxApp {
+            sub: Some(LinuxAppSub::Run { gogid, exe, args }),
+            ..
+        } = Cli::try_parse_from([
+            "gogo",
+            "linux-app",
+            "run",
+            "1423049311",
+            r"tools\redmod\bin\redMod.exe",
+            "--",
+            "-x",
+            "--help",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("not run");
+        };
+        assert_eq!(gogid, "1423049311");
+        assert_eq!(exe, r"tools\redmod\bin\redMod.exe");
+        assert_eq!(args, ["-x", "--help"]);
+        assert!(Cli::try_parse_from(["gogo", "linux-app", "run", "1423049311"]).is_err());
+        assert!(
+            Cli::try_parse_from(["gogo", "linux-app", "run", "1423049311", "1", "-x"]).is_err()
+        );
     }
 
     #[cfg(target_os = "linux")]

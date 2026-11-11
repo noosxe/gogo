@@ -59,6 +59,9 @@ run_game() {
 # say it got there. The wrapper's environment reaches umu-run underneath it:
 # gamescope's DISPLAY, gamemoderun's LD_PRELOAD.
 start_game() {
+    if [ "${#WRAPPER[@]}" -gt 0 ] && [ -n "$ONE_OFF" ]; then
+        exec "${WRAPPER[@]}" "$SELF" --gogo-run-one-off "$GAME_MARK" "$ONE_EXE" "$ONE_WORKDIR" "$@"
+    fi
     if [ "${#WRAPPER[@]}" -gt 0 ]; then
         exec "${WRAPPER[@]}" "$SELF" --gogo-run-game "$GAME_MARK" "$@"
     fi
@@ -66,7 +69,12 @@ start_game() {
 }
 # The wrapper running this script for the game's step: nothing else of the
 # launcher happens here. The mark holds this pid, the parent of umu-run
-# (run_step), which is there as long as the game is.
+# (run_step), which is there as long as the game is. A one-off's step says
+# which exe first.
+if [ "${1:-}" = --gogo-run-one-off ] && [ "$#" -ge 4 ]; then
+    ONE_OFF=1 ONE_EXE="$3" ONE_WORKDIR="$4"
+    set -- --gogo-run-game "$2" "${@:5}"
+fi
 if [ "${1:-}" = --gogo-run-game ] && [ "$#" -ge 2 ]; then
     GAME_MARK="$2"
     shift 2
@@ -75,5 +83,14 @@ if [ "${1:-}" = --gogo-run-game ] && [ "$#" -ge 2 ]; then
     printf '%s' "$$" >"$GAME_MARK.tmp" && mv -f "$GAME_MARK.tmp" "$GAME_MARK"
     GAME_STEP=1
     run_game "$@"
+fi
+
+# Design 18 section 7.10: `gogo linux-app run` starts another exe of the game
+# (a vendor launcher, a tool) through this launcher, with the game's whole
+# setup: its exe, working dir and args replace the game's, and nothing of the
+# game's config is written.
+if [ "${1:-}" = --gogo-one-off ] && [ "$#" -ge 3 ]; then
+    ONE_OFF=1 ONE_EXE="$2" ONE_WORKDIR="$3"
+    GAME_ARGV=("${@:4}")
 fi
 

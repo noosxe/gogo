@@ -719,6 +719,32 @@ fn d3d7_verdict(hits: u64) -> (bool, bool, Option<D3d7Confidence>) {
 /// installer exes carry their data as an overlay, but stay well below it).
 const MAX_PE_SIZE: u64 = 1 << 30;
 
+/// 32- or 64-bit, from the PE headers of `path` only (the optional header's
+/// magic, `0x10b` or `0x20b`): a big exe isn't read whole. `None` for what
+/// isn't a PE file.
+pub fn bitness_of(path: &Path) -> Option<Bitness> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut dos = [0u8; 64];
+    f.read_exact(&mut dos).ok()?;
+    if &dos[..2] != b"MZ" {
+        return None;
+    }
+    let lfanew = u32::from_le_bytes(dos[0x3c..0x40].try_into().ok()?);
+    f.seek(SeekFrom::Start(u64::from(lfanew))).ok()?;
+    // "PE\0\0", the 20-byte file header, then the optional header's magic.
+    let mut nt = [0u8; 26];
+    f.read_exact(&mut nt).ok()?;
+    if &nt[..4] != b"PE\0\0" {
+        return None;
+    }
+    match u16::from_le_bytes([nt[24], nt[25]]) {
+        0x10b => Some(Bitness::I386),
+        0x20b => Some(Bitness::X86_64),
+        _ => None,
+    }
+}
+
 fn scan_file(root: &Path, path: &Path) -> Result<Option<PeFileScan>, ScanError> {
     let io = |source| ScanError::Io {
         path: path.to_path_buf(),
@@ -1132,6 +1158,12 @@ mod tests {
         assert_eq!(s.bitness, Bitness::X86_64);
         assert_eq!(s.main_exe, "b/b.exe");
         assert!(s.files[0].imports.contains("kernel32.dll"));
+        // From the headers alone, as `linux-app exes --all` reads them.
+        assert_eq!(bitness_of(&a), Some(Bitness::I386));
+        assert_eq!(bitness_of(&b), Some(Bitness::X86_64));
+        let txt = tmp.path().join("readme.exe");
+        std::fs::write(&txt, "MZ but not really").unwrap();
+        assert_eq!(bitness_of(&txt), None);
     }
 
     #[test]

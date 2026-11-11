@@ -33,6 +33,7 @@ exited by itself.
 """
 
 import fcntl
+import glob
 import hashlib
 import json
 import math
@@ -397,6 +398,7 @@ def parse_manifest(text, live=False):
             "exit",
             "env",
             "override",
+            "one_off",
             "step",
         ),
         "manifest",
@@ -503,6 +505,22 @@ def parse_manifest(text, live=False):
     ):
         raise ManifestError(f"override.monitor: an output name such as \"HEADLESS-1\", got {o_monitor!r}")
 
+    # Another exe of the game, run once through `gogo linux-app run` (#364,
+    # design 18 section 7.10) instead of the game's launch.
+    one_off = raw.get("one_off")
+    if one_off is not None:
+        if not isinstance(one_off, dict):
+            raise ManifestError("one_off: must be a table")
+        _only(one_off, ("exe", "args"), "one_off")
+        if gogid is None:
+            raise ManifestError("one_off is for a game (gogid), not a command")
+        if not isinstance(one_off.get("exe"), str) or not one_off["exe"]:
+            raise ManifestError("one_off.exe: a play task's number or name, or a path in the game's files")
+        oo_args = one_off.get("args", [])
+        if not isinstance(oo_args, list) or not all(isinstance(a, str) for a in oo_args):
+            raise ManifestError("one_off.args: a list of strings")
+        one_off = {"exe": one_off["exe"], "args": oo_args}
+
     steps_raw = raw.get("step", [])
     if not isinstance(steps_raw, list) or not (steps_raw or live):
         raise ManifestError("needs at least one [[step]]")
@@ -510,6 +528,8 @@ def parse_manifest(text, live=False):
     steps = [_step(s, i, shots) for i, s in enumerate(steps_raw)]
     if gogid is None and any("move_relaunch" in s for s in steps):
         raise ManifestError("move_relaunch is for a game (gogid), not a command")
+    if one_off is not None and any("move_relaunch" in s for s in steps):
+        raise ManifestError("move_relaunch launches the game: not with one_off")
     if live:
         steps = []
 
@@ -541,6 +561,7 @@ def parse_manifest(text, live=False):
             "hdr": o_hdr,
             "monitor": o_monitor,
         },
+        "one_off": one_off,
         "steps": steps,
     }
 
@@ -1818,7 +1839,7 @@ class Driver:
         """Wayland mode: gogo's launcher put the game on Wine's Wayland driver
         itself (`# display: wayland …` in its run log), not the harness."""
         try:
-            with open(self.cfg.get("game_log") or "", errors="replace") as f:
+            with open(self.game_log() or "", errors="replace") as f:
                 got = parse_gogo_display(f.read())
         except OSError:
             got = None
@@ -1837,8 +1858,8 @@ class Driver:
             for f in os.listdir(self.results)
             if f == "game.out" or re.fullmatch(r"launch\d+-game\.out", f)
         )
-        if self.cfg.get("game_log"):
-            logs.append(self.cfg["game_log"])
+        if self.game_log():
+            logs.append(self.game_log())
         for path in logs:
             try:
                 with open(path, errors="replace") as f:
@@ -1903,9 +1924,18 @@ class Driver:
             gpu["vulkan_devices"],
         )
 
+    def game_log(self):
+        """The launcher's run log: `latest.log`, or for a one-off (whose log
+        `latest.log` never names) the newest file the `game_log` glob matches."""
+        path = self.cfg.get("game_log")
+        if path and "*" in path:
+            found = sorted(glob.glob(path))
+            return found[-1] if found else None
+        return path
+
     def effective_exe(self):
         """The exe the launcher ran, from the header of its log."""
-        path = self.cfg.get("game_log")
+        path = self.game_log()
         try:
             with open(path, errors="replace") as f:
                 return parse_exe(f.read(16384))

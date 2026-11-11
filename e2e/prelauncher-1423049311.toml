@@ -1,0 +1,29 @@
+# #364's one-off run on a real game, for design 18 §7.10: Cyberpunk 2077's play
+# task 1, CD Projekt's REDprelauncher.exe, started through `gogo linux-app run`
+# instead of the game's own launch. It gets the game's prefix, Proton build and
+# environment; the harness waits for its window, takes one screenshot, then
+# sends TERM, so the close request and the teardown are the launcher's, as for
+# the game. Not the game's own manifest (e2e/1423049311.toml): pass this one
+# with --manifest, on the same build:
+#
+#   scripts/linux-e2e.sh run 1423049311 --manifest e2e/prelauncher-1423049311.toml \
+#       --installer <setup_cyberpunk_2077_….exe> --gpu renderD129
+#
+# The launcher's run log is the one-off's (`one-off-*.log`), not latest.log.
+title = "Cyberpunk 2077: REDprelauncher, one-off"
+gogid = 1423049311
+
+[one_off]
+exe = "REDprelauncher.exe"
+
+[window]
+wait_secs = 300
+resolution = "1920x1080"
+
+[[step]]
+wait = 20
+
+# A launcher window, not a full-screen game: it needn't fill the output.
+[[step]]
+screenshot = "prelauncher"
+min_fill = false

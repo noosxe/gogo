@@ -974,6 +974,10 @@ monitor = "HEADLESS-1"           #   `--monitor HEADLESS-1` (#295; Wayland mode 
 [override.env]                   #   (`linux-app env set <gogid> K=V…`)
 PROTON_DLSS_INDICATOR = "1"
 
+[one_off]                        # games only: another exe of the game, run once (#364)
+exe = "REDprelauncher.exe"       #   `gogo linux-app run <gogid> <exe> -- <args…>` instead of
+args = []                        #   launch.sh; the run log read is the newest one-off-*.log
+
 [exit]
 how = "self"                     # "self": it exits by itself after the steps, code 0
                                  # "signal" (default): the launcher gets TERM, code 143

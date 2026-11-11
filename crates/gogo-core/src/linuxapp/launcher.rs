@@ -23,11 +23,28 @@ use crate::macapp::launch::GameDirs;
 /// Bumped with every change to [`TEMPLATE`] that matters to a game set up
 /// before it. Setup rewrites `launch.sh` whenever its bytes differ, so this
 /// is for people: the run log header and `launch.log` name it.
-pub const LAUNCHER_VERSION: u32 = 13;
+pub const LAUNCHER_VERSION: u32 = 14;
 
 /// `launch.sh`'s first word when a wrapper runs it for the game's own step
 /// (design 18 §7.8): the game's environment, then umu-run.
 pub const RUN_GAME_ARG: &str = "--gogo-run-game";
+
+/// `launch.sh`'s first word for a one-off run of another exe of the game
+/// (design 18 §7.10): `--gogo-one-off <exe> <workdir> [args…]`, the paths
+/// absolute, the args all the exe gets. `gogo linux-app run` passes it.
+pub const ONE_OFF_ARG: &str = "--gogo-one-off";
+
+/// [`RUN_GAME_ARG`] for a one-off's step under a wrapper:
+/// `--gogo-run-one-off <mark> <exe> <workdir> [args…]`.
+pub const RUN_ONE_OFF_ARG: &str = "--gogo-run-one-off";
+
+/// `games/<gogid>/.one-offs/<pid>`: a running one-off's record beside its
+/// `.launchers/<pid>`: the start time, then the exe.
+pub const ONE_OFFS: &str = ".one-offs";
+
+/// A one-off's run log: `one-off-<YYYYmmdd-HHMMSS>-<pid>.log`, apart from
+/// the game's (no `latest.log`, pruned on their own).
+pub const ONE_OFF_LOG_PREFIX: &str = "one-off-";
 
 /// `games/<gogid>/icon.png`.
 pub const ICON: &str = "icon.png";
@@ -52,6 +69,8 @@ pub fn launch_sh() -> String {
             &format!("{}={}", setup::GAME_DRIVE_OFF.0, setup::GAME_DRIVE_OFF.1),
         )
         .replace("@RUN_GAME_ARG@", RUN_GAME_ARG)
+        .replace("@RUN_ONE_OFF_ARG@", RUN_ONE_OFF_ARG)
+        .replace("@ONE_OFF_ARG@", ONE_OFF_ARG)
 }
 
 /// The `LAUNCHER_VERSION=` a `launch.sh` carries.
@@ -197,6 +216,9 @@ pub const TEMPLATE: &str = r##"#!/usr/bin/env bash
 set -u
 LAUNCHER_VERSION=@LAUNCHER_VERSION@
 ARGV=("$@")
+# A one-off run (design 18 section 7.10): set from the argv further down.
+ONE_OFF="" ONE_EXE="" ONE_WORKDIR=""
+GAME_ARGV=("$@")
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 HERE="${SELF%/*}"
 GOGID="${HERE##*/}"
@@ -249,6 +271,8 @@ gui() { [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; }
 # notification, else launch.log only.
 alert() {
     log "dialog: $1"
+    # A one-off runs from a terminal: it says why there.
+    if [ -n "$ONE_OFF" ]; then printf 'gogo: %s\n' "$1" >&2; return 0; fi
     if [ -n "${GOGO_LAUNCHER_DIALOG:-}" ]; then
         "$GOGO_LAUNCHER_DIALOG" "$TITLE" "$1" "OK" >/dev/null
         return 0
@@ -280,6 +304,11 @@ load_conf() {
     UMU_RUN_ABS="$(abs "$UMU_RUN")"
     WORKDIR_ABS="$(abs "$WORKDIR")"
     EXE_ABS="$(abs "$EXE")"
+    # A one-off runs its own exe, in its own dir, with only its own args;
+    # everything else is the game's.
+    if [ -n "$ONE_OFF" ]; then
+        EXE="$ONE_EXE" EXE_ABS="$ONE_EXE" WORKDIR_ABS="$ONE_WORKDIR" ARGS=()
+    fi
 }
 # Design 16 §2.1: sha256 over gogo-launch.toml, then the L4 file if any.
 current_stamp() {
@@ -512,6 +541,9 @@ run_game() {
 # say it got there. The wrapper's environment reaches umu-run underneath it:
 # gamescope's DISPLAY, gamemoderun's LD_PRELOAD.
 start_game() {
+    if [ "${#WRAPPER[@]}" -gt 0 ] && [ -n "$ONE_OFF" ]; then
+        exec "${WRAPPER[@]}" "$SELF" @RUN_ONE_OFF_ARG@ "$GAME_MARK" "$ONE_EXE" "$ONE_WORKDIR" "$@"
+    fi
     if [ "${#WRAPPER[@]}" -gt 0 ]; then
         exec "${WRAPPER[@]}" "$SELF" @RUN_GAME_ARG@ "$GAME_MARK" "$@"
     fi
@@ -519,7 +551,12 @@ start_game() {
 }
 # The wrapper running this script for the game's step: nothing else of the
 # launcher happens here. The mark holds this pid, the parent of umu-run
-# (run_step), which is there as long as the game is.
+# (run_step), which is there as long as the game is. A one-off's step says
+# which exe first.
+if [ "${1:-}" = @RUN_ONE_OFF_ARG@ ] && [ "$#" -ge 4 ]; then
+    ONE_OFF=1 ONE_EXE="$3" ONE_WORKDIR="$4"
+    set -- @RUN_GAME_ARG@ "$2" "${@:5}"
+fi
 if [ "${1:-}" = @RUN_GAME_ARG@ ] && [ "$#" -ge 2 ]; then
     GAME_MARK="$2"
     shift 2
@@ -530,6 +567,15 @@ if [ "${1:-}" = @RUN_GAME_ARG@ ] && [ "$#" -ge 2 ]; then
     run_game "$@"
 fi
 
+# Design 18 section 7.10: `gogo linux-app run` starts another exe of the game
+# (a vendor launcher, a tool) through this launcher, with the game's whole
+# setup: its exe, working dir and args replace the game's, and nothing of the
+# game's config is written.
+if [ "${1:-}" = @ONE_OFF_ARG@ ] && [ "$#" -ge 3 ]; then
+    ONE_OFF=1 ONE_EXE="$2" ONE_WORKDIR="$3"
+    GAME_ARGV=("${@:4}")
+fi
+
 # Design 16 Open 1: nothing to run without the config setup writes.
 if [ ! -f "$HERE/launch.conf" ]; then
     log "no launch.conf in $HERE: not launching"
@@ -537,7 +583,11 @@ if [ ! -f "$HERE/launch.conf" ]; then
     exit 1
 fi
 load_conf
-log "launch $TITLE ($GOGID) from $HERE (launcher $LAUNCHER_VERSION)"
+if [ -n "$ONE_OFF" ]; then
+    log "one-off run of $ONE_EXE for $TITLE ($GOGID) from $HERE (launcher $LAUNCHER_VERSION)"
+else
+    log "launch $TITLE ($GOGID) from $HERE (launcher $LAUNCHER_VERSION)"
+fi
 # Design 19 section 3.4: a DLC add that stopped while laying its files leaves
 # dlc-journal.json. The game files may then mix two versions of the game's data,
 # which could damage a save: no launch until the add is finished or undone.
@@ -559,6 +609,18 @@ else
     why="$(umu_problem)"
 fi
 if [ -n "$why" ]; then run_setup "$why"; fi
+# A normal launch runs the last applied config when setup can't run; a one-off
+# doesn't: the game isn't in the state its config says.
+if [ -n "$ONE_OFF" ] && [ "$(current_stamp)" != "$STAMP" ]; then
+    log "one-off: setup is pending (${SETUP_ERR:-no gogo to run it}): not running"
+    alert "$TITLE's config changed and setup didn't apply it${SETUP_ERR:+ ($SETUP_ERR)}. Run: gogo linux-app setup $GOGID"
+    exit 1
+fi
+if [ -n "$ONE_OFF" ] && [ ! -f "$ONE_EXE" ]; then
+    log "one-off: no $ONE_EXE: not running"
+    alert "There is no $ONE_EXE to run."
+    exit 1
+fi
 
 # What the run log's header says beyond launch.conf: state.toml's view.
 state_val() { sed -n "s/^$1 = \"\\(.*\\)\"\$/\\1/p" "$HERE/state.toml" 2>/dev/null | head -n 1; }
@@ -600,23 +662,29 @@ umu_name() {
 }
 prune_runs() {
     local runs=("$LOG_DIR"/[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-*.log) i=0
+    if [ -n "$ONE_OFF" ]; then runs=("$LOG_DIR"/one-off-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-*.log); fi
     [ -e "${runs[0]}" ] || return 0
     while [ $((${#runs[@]} - i)) -gt "$KEEP_RUNS" ]; do
         rm -f "${runs[$i]}"
         i=$((i + 1))
     done
 }
+# A one-off's log is named apart (design 18 section 7.10): latest.log, and
+# doctor's last run with it, stay the game's.
+run_log_name() { printf '%s/%s%s-%s.log' "$LOG_DIR" "${ONE_OFF:+one-off-}" "$(date '+%Y%m%d-%H%M%S')" "$$"; }
 start_run_log() {
-    RUN_LOG="$LOG_DIR/$(date '+%Y%m%d-%H%M%S')-$$.log"
+    local all=(${ARGS[@]+"${ARGS[@]}"} "$@")
+    RUN_LOG="$(run_log_name)"
     # A relaunch (exec: the same pid) within the same second: the next
     # second's name, so names still sort by time.
     while [ -e "$RUN_LOG" ]; do
         sleep 1
-        RUN_LOG="$LOG_DIR/$(date '+%Y%m%d-%H%M%S')-$$.log"
+        RUN_LOG="$(run_log_name)"
     done
     RUN_T0=$SECONDS
     {
         printf '# gogo run log: %s (%s)\n' "$TITLE" "$GOGID"
+        if [ -n "$ONE_OFF" ]; then printf '# one-off: %s\n' "$ONE_EXE"; fi
         printf '# started: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
         if [ -n "$SETUP_ERR" ]; then printf '# setup: %s\n' "$SETUP_ERR"; fi
         printf '# launcher: %s\n' "$LAUNCHER_VERSION"
@@ -636,11 +704,11 @@ start_run_log() {
         printf '# stamp: %s\n' "$STAMP"
         printf '# os: %s\n' "$(os_name)"
         printf '# exe: %s\n' "$EXE"
-        printf '# args: %s\n' "${ARGS[*]+${ARGS[*]}}${*:+ $*}"
+        printf '# args: %s\n' "${all[*]}"
         printf '# prefix: %s\n' "$PREFIX_ABS"
         printf '# ---\n'
     } >"$RUN_LOG"
-    ln -sfn "$(basename "$RUN_LOG")" "$LOG_DIR/latest.log"
+    if [ -z "$ONE_OFF" ]; then ln -sfn "$(basename "$RUN_LOG")" "$LOG_DIR/latest.log"; fi
     prune_runs
     # tee through FIFOs (not process substitution) so the launcher can wait
     # for them to drain before it writes the footer. They ignore the signals
@@ -690,7 +758,7 @@ run_footer() {
 }
 # A launch that can't run: a run log saying why, footer 127, a dialog.
 not_runnable() {
-    start_run_log "${ARGV[@]+"${ARGV[@]}"}"
+    start_run_log "${GAME_ARGV[@]+"${GAME_ARGV[@]}"}"
     printf 'gogo: %s\n' "$1" >&2
     log "$1: not launching"
     end_run_log 127 "$2"
@@ -891,6 +959,7 @@ WATCHDOG=""
 ME_START=""
 GAME_MARK="$LOG_DIR/.run-$$.game"
 LIVE_DIR="$HERE/.launchers"
+ONE_OFF_DIR="$HERE/.one-offs"
 # Field 22 of /proc/<pid>/stat (after the parenthesized name): the start
 # time, which a reused pid doesn't share.
 proc_start() {
@@ -926,10 +995,18 @@ other_launcher() {
 register_launch() {
     ME_START="$(proc_start $$)"
     mkdir -p "$LIVE_DIR" && printf '%s' "$ME_START" >"$LIVE_DIR/$$"
+    # What doctor names while a one-off runs.
+    if [ -n "$ONE_OFF" ]; then
+        mkdir -p "$ONE_OFF_DIR" && printf '%s\n%s\n' "$ME_START" "$ONE_EXE" >"$ONE_OFF_DIR/$$"
+    fi
 }
 unregister_launch() {
     rm -f "$GAME_MARK" "$GAME_MARK.tmp" "$GAME_MARK.code" "$GAME_MARK.code.tmp"
     if [ "$(cat "$LIVE_DIR/$$" 2>/dev/null)" = "$ME_START" ]; then rm -f "$LIVE_DIR/$$"; fi
+    if [ -n "$ONE_OFF" ]; then
+        rm -f "$ONE_OFF_DIR/$$"
+        rmdir "$ONE_OFF_DIR" 2>/dev/null
+    fi
 }
 # A move of this game holds its lock right now. Without flock (util-linux) or
 # without the lock file, nothing says so: the launch goes on.
@@ -1124,7 +1201,7 @@ wrapper_ran_game() {
     return 0
 }
 
-start_run_log ${ARGV[@]+"${ARGV[@]}"}
+start_run_log ${GAME_ARGV[@]+"${GAME_ARGV[@]}"}
 log "exec umu-run $EXE_ABS (runtime $RUNTIME, prefix $PREFIX_ABS, log $RUN_LOG)"
 if [ "${#WRAPPER[@]}" -gt 0 ]; then log "under wrapper: ${WRAPPER[*]}"; fi
 # Registered before the game starts: a launcher killed in the gap would leave
@@ -1152,9 +1229,29 @@ if [ ! -f "$HERE/launch.conf" ]; then
     alert "$TITLE was moved to another place by gogo while this was starting. Start it again from its menu entry."
     exit 127
 fi
+# A one-off shares the prefix with nothing (design 18 section 7.10): not with
+# the game, not with another one-off, not with what either left running.
+# Registered first, so of two starting at once neither runs.
+if [ -n "$ONE_OFF" ]; then
+    busy="$(other_launcher)"
+    if [ -n "$busy" ]; then
+        busy="launcher $busy of this game is running"
+    else
+        busy_pids="$(prefix_pids)"
+        # shellcheck disable=SC2086
+        if [ -n "$busy_pids" ]; then busy="processes are running in its prefix: $(proc_names $busy_pids)"; fi
+    fi
+    if [ -n "$busy" ]; then
+        log "one-off: $busy: not running"
+        unregister_launch
+        end_run_log 127 "game is running"
+        alert "$TITLE is running ($busy). Quit it first."
+        exit 127
+    fi
+fi
 set -m
 rm -f "$GAME_MARK" "$GAME_MARK.tmp" "$GAME_MARK.code" "$GAME_MARK.code.tmp"
-( start_game ${ARGV[@]+"${ARGV[@]}"} ) 3>&- 4>&- &
+( start_game ${GAME_ARGV[@]+"${GAME_ARGV[@]}"} ) 3>&- 4>&- &
 WPID=$!
 set +m
 start_watchdog
@@ -1204,7 +1301,13 @@ fi
 stop_watchdog
 unregister_launch
 end_run_log "$rc"
-if [ "$rc" -ne 0 ] || [ "$RUN_SECS" -lt "$EARLY_EXIT_SECS" ]; then early_exit; fi
+# A one-off's tool may well end at once: no dialog, and never a renderer
+# switch, which would change the game's config.
+if [ -n "$ONE_OFF" ]; then
+    log "one-off ended: code $rc after ${RUN_SECS}s"
+elif [ "$rc" -ne 0 ] || [ "$RUN_SECS" -lt "$EARLY_EXIT_SECS" ]; then
+    early_exit
+fi
 exit "$rc"
 "##;
 

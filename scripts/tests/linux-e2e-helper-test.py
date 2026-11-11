@@ -816,6 +816,40 @@ class Keyboard(unittest.TestCase):
             with self.subTest(bad), self.assertRaises(helper.ManifestError):
                 helper.parse_manifest(base + bad + "\n")
 
+    def test_manifest_one_off(self):
+        base = "gogid = 7\n"
+        step = "[[step]]\nwait = 1\n"
+        m = helper.parse_manifest(base + '[one_off]\nexe = "REDprelauncher.exe"\n' + step)
+        self.assertEqual(m["one_off"], {"exe": "REDprelauncher.exe", "args": []})
+        m = helper.parse_manifest(base + '[one_off]\nexe = "2"\nargs = ["-x", "a b"]\n' + step)
+        self.assertEqual(m["one_off"], {"exe": "2", "args": ["-x", "a b"]})
+        self.assertIsNone(helper.parse_manifest(base + step)["one_off"])
+        for bad in (
+            base + '[one_off]\nexe = ""\n' + step,
+            base + "[one_off]\nargs = []\n" + step,
+            base + '[one_off]\nexe = "a"\nargs = "x"\n' + step,
+            base + '[one_off]\nexe = "a"\nwhat = 1\n' + step,
+            'command = ["x"]\n[one_off]\nexe = "a"\n' + step,
+            base + '[one_off]\nexe = "a"\n[[step]]\nmove_relaunch = "library"\n',
+        ):
+            with self.subTest(bad), self.assertRaises(helper.ManifestError):
+                helper.parse_manifest(bad)
+
+    def test_one_off_game_log_is_the_newest_match(self):
+        import types
+
+        with tempfile.TemporaryDirectory() as d:
+            stub = types.SimpleNamespace(cfg={"game_log": os.path.join(d, "one-off-*.log")})
+            self.assertIsNone(helper.Driver.game_log(stub))
+            for n in ("one-off-20261111-100000-7.log", "one-off-20261111-110000-8.log"):
+                open(os.path.join(d, n), "w").close()
+            open(os.path.join(d, "20261111-120000-9.log"), "w").close()
+            self.assertEqual(
+                helper.Driver.game_log(stub), os.path.join(d, "one-off-20261111-110000-8.log")
+            )
+            stub.cfg["game_log"] = os.path.join(d, "latest.log")
+            self.assertEqual(helper.Driver.game_log(stub), os.path.join(d, "latest.log"))
+
     def test_key_messages(self):
         self.assertEqual(
             helper.keyboard_key(57, True, 2**32 + 7),
