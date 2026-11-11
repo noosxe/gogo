@@ -6314,6 +6314,304 @@ mod dlc_add {
         no_leftovers(&w);
     }
 
+    // — a DLC the cache already holds (#381) —
+
+    /// The DLC's files as its manifest lists them, relative to the cache root.
+    fn dlc_paths() -> Vec<String> {
+        [
+            "dlc/ep1/a.archive".to_string(),
+            "shared.pak".to_string(),
+            format!("goggame-{DLC}.info"),
+            format!("goggame-{DLC}.script"),
+        ]
+        .iter()
+        .map(|p| format!("{TREE}/{p}"))
+        .collect()
+    }
+
+    /// A depot cache of build B1 that holds the DLC (a `gogo depot --all-dlcs`,
+    /// then a build without it): its files, a record listing it and, when given,
+    /// the file lists. `shared.pak` is the base's and the DLC's.
+    fn cache_with_dlc(w: &World, dlc_list: Option<Vec<String>>) -> PathBuf {
+        cache(w);
+        let root = cache_root(w);
+        dlc_files(&root);
+        depot::write_record(&root, "B1", "en-US", &[DLC.to_string()]).unwrap();
+        if let Some(list) = dlc_list {
+            let mut lists = BTreeMap::new();
+            lists.insert(DLC.to_string(), list);
+            lists.insert(
+                ID.to_string(),
+                vec![format!("{TREE}/d3d9.dll"), format!("{TREE}/shared.pak")],
+            );
+            depot::store_products(&root, "B1", &lists).unwrap();
+        }
+        root
+    }
+
+    fn no_setup() -> AddOptions {
+        AddOptions {
+            run_setup: false,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_dlc_the_cache_holds_is_laid_from_it_with_no_download() {
+        let w = built("dlc-add-held");
+        let root = cache_with_dlc(&w, Some(dlc_paths()));
+        let mut g = game(&w);
+        let p = plan_for(&g, &[DLC]);
+        assert_eq!(p.source, Source::Cache);
+        assert_eq!(p.from_cache, [DLC]);
+        assert!(!p.downloads() && p.fetches());
+        assert_eq!(p.download_size, 0);
+        let lines = dlc::plan_lines(&p);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l == "files from: the depot cache (already there, no download)"),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.starts_with("no download, disk")),
+            "{lines:?}"
+        );
+        assert_eq!(
+            serde_json::to_value(&p).unwrap()["fromCache"],
+            serde_json::json!([DLC])
+        );
+
+        let r = run(&mut g, &p, AddOptions::default(), false);
+        let out = r.result.unwrap();
+        assert!(r.inputs.is_empty(), "no download: {:?}", r.inputs);
+        assert_eq!(out.added.len(), 1);
+        let gd = w.game().join("game");
+        assert_eq!(
+            std::fs::read(gd.join("dlc/ep1/a.archive")).unwrap(),
+            b"dlc archive"
+        );
+        // A path the DLC shares with the base is laid as the cache has it.
+        assert_eq!(std::fs::read(gd.join("shared.pak")).unwrap(), b"dlc shared");
+        assert!(gd.join(format!("goggame-{DLC}.info")).exists());
+        // GOG's install script came along and ran.
+        assert!(w.log().contains("TestDlc"), "{}", w.log());
+        // The cache keeps its files, and its record its DLC and file lists.
+        assert!(root.join(TREE).join("dlc/ep1/a.archive").exists());
+        assert_eq!(
+            depot::read_record(&root).unwrap().dlcs,
+            Some(vec![DLC.to_string()])
+        );
+        assert!(
+            depot::record_products(&root, "B1")
+                .unwrap()
+                .contains_key(&DLC.to_string())
+        );
+        no_leftovers(&w);
+        let c = content::load(&w.game()).unwrap().unwrap();
+        assert_eq!(c.dlc.iter().map(|d| d.id).collect::<Vec<_>>(), [DLC]);
+        let plan = r.events.iter().find(|e| tag(e) == "DlcPlan").unwrap();
+        assert_eq!(plan["DlcPlan"]["source"], "cache");
+        assert_eq!(plan["DlcPlan"]["fromCache"], serde_json::json!([DLC]));
+        let (level, _) = dlc_finding(&w);
+        assert_eq!(level, Level::Ok);
+    }
+
+    #[test]
+    fn a_cache_missing_some_of_the_dlcs_files_falls_back_to_the_download() {
+        let w = built("dlc-add-held-partial");
+        let root = cache_with_dlc(&w, Some(dlc_paths()));
+        std::fs::remove_file(root.join(TREE).join("dlc/ep1/a.archive")).unwrap();
+        // The record is otherwise sound: it lists what's there and keeps its lists.
+        depot::write_record(&root, "B1", "en-US", &[DLC.to_string()]).unwrap();
+        let mut g = game(&w);
+        let p = plan_for(&g, &[DLC]);
+        assert_eq!(p.source, Source::Cache);
+        assert!(p.from_cache.is_empty());
+        assert!(p.downloads());
+        let lines = dlc::plan_lines(&p);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("files from: the depot cache (/")),
+            "{lines:?}"
+        );
+        let r = run(&mut g, &p, no_setup(), false);
+        r.result.unwrap();
+        assert_eq!(r.inputs.len(), 1, "the targeted diff completes it");
+        assert_eq!(r.inputs[0].old_dlcs, Vec::<String>::new());
+        assert_eq!(r.inputs[0].dlcs, [DLC.to_string()]);
+        assert_eq!(
+            std::fs::read(w.game().join("game/dlc/ep1/a.archive")).unwrap(),
+            b"dlc archive"
+        );
+        no_leftovers(&w);
+    }
+
+    #[test]
+    fn a_cache_without_file_lists_falls_back_to_the_download() {
+        let w = built("dlc-add-held-nolist");
+        cache_with_dlc(&w, None);
+        let mut g = game(&w);
+        let p = plan_for(&g, &[DLC]);
+        assert_eq!(p.source, Source::Cache);
+        assert!(p.from_cache.is_empty() && p.downloads());
+        let r = run(&mut g, &p, no_setup(), false);
+        r.result.unwrap();
+        assert_eq!(r.inputs.len(), 1);
+        assert_eq!(content::load(&w.game()).unwrap().unwrap().dlc.len(), 1);
+    }
+
+    /// The list spells a dir otherwise than the cache does, and the game has it in a
+    /// third casing: the file is found in the cache and laid into the game's dir.
+    #[test]
+    fn a_case_mismatched_path_is_found_in_the_cache_and_laid_in_the_games_casing() {
+        let w = built("dlc-add-held-case");
+        let mut list = dlc_paths();
+        list[0] = format!("{TREE}/DLC/EP1/a.archive");
+        cache_with_dlc(&w, Some(list));
+        let gd = w.game().join("game");
+        std::fs::create_dir_all(gd.join("Dlc/Ep1")).unwrap();
+        let mut g = game(&w);
+        let p = plan_for(&g, &[DLC]);
+        assert_eq!(p.from_cache, [DLC]);
+        let r = run(&mut g, &p, no_setup(), false);
+        r.result.unwrap();
+        assert!(r.inputs.is_empty());
+        assert_eq!(
+            std::fs::read(gd.join("Dlc/Ep1/a.archive")).unwrap(),
+            b"dlc archive"
+        );
+        let names: Vec<String> = std::fs::read_dir(&gd)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names.contains(&"Dlc".to_string()) && !names.contains(&"dlc".to_string()),
+            "{names:?}"
+        );
+        no_leftovers(&w);
+    }
+
+    /// A stop mid-lay from the cache: the journal and the shared file's backup
+    /// stay, nothing is fetched, and the next add rolls forward without moving the
+    /// cache's files.
+    #[test]
+    fn an_interrupted_lay_from_the_cache_recovers() {
+        let w = built("dlc-add-held-stop");
+        let root = cache_with_dlc(&w, Some(dlc_paths()));
+        let mut g = game(&w);
+        let p = plan_for(&g, &[DLC]);
+        let opts = AddOptions {
+            run_setup: false,
+            fail_at: Some(lay::Step::Backup),
+            ..Default::default()
+        };
+        let r = run(&mut g, &p, opts, false);
+        assert!(
+            matches!(r.result, Err(AddError::Interrupted("lay", _))),
+            "{:?}",
+            r.result.err()
+        );
+        assert!(r.inputs.is_empty());
+        assert!(dlc::journal_exists(&w.game()));
+        assert_eq!(
+            std::fs::read(w.game().join(lay::BACKUP).join("shared.pak")).unwrap(),
+            b"base shared"
+        );
+        let (level, _) = dlc_finding(&w);
+        assert_eq!(level, Level::Fail);
+        assert!(content::load(&w.game()).unwrap().unwrap().dlc.is_empty());
+
+        let mut g = game(&w);
+        let p = plan_for(&g, &[]);
+        let r = run(&mut g, &p, no_setup(), false);
+        let out = r.result.unwrap();
+        assert_eq!(out.recovered, Some(lay::Direction::Forward));
+        assert!(r.inputs.is_empty());
+        let gd = w.game().join("game");
+        assert_eq!(std::fs::read(gd.join("shared.pak")).unwrap(), b"dlc shared");
+        assert_eq!(
+            std::fs::read(gd.join("dlc/ep1/a.archive")).unwrap(),
+            b"dlc archive"
+        );
+        assert!(root.join(TREE).join("dlc/ep1/a.archive").exists());
+        assert_eq!(content::load(&w.game()).unwrap().unwrap().dlc.len(), 1);
+        no_leftovers(&w);
+    }
+
+    /// The cache lost a file between the stop and the rerun: rolled back, the game
+    /// as it was.
+    #[test]
+    fn an_interrupted_lay_from_a_cache_that_lost_a_file_rolls_back() {
+        let w = built("dlc-add-held-back");
+        let before = tree(&w.game().join("game"));
+        let root = cache_with_dlc(&w, Some(dlc_paths()));
+        let mut g = game(&w);
+        let p = plan_for(&g, &[DLC]);
+        let opts = AddOptions {
+            run_setup: false,
+            fail_at: Some(lay::Step::Journal),
+            ..Default::default()
+        };
+        assert!(run(&mut g, &p, opts, false).result.is_err());
+        std::fs::remove_file(root.join(TREE).join("dlc/ep1/a.archive")).unwrap();
+        let mut g = game(&w);
+        let back =
+            dlc::recover(&mut g, gogo::gog::materialize::Reflink::Never, &mut |_| {}).unwrap();
+        assert_eq!(back, Some(lay::Direction::Back));
+        assert_eq!(tree(&w.game().join("game")), before);
+        assert!(content::load(&w.game()).unwrap().unwrap().dlc.is_empty());
+        no_leftovers(&w);
+    }
+
+    /// One DLC held, one not: only the other is downloaded; the diff counts the held
+    /// one as there.
+    #[test]
+    fn a_mixed_add_downloads_only_what_the_cache_lacks() {
+        const OTHER: u64 = 777003;
+        let w = built("dlc-add-held-mixed");
+        cache_with_dlc(&w, Some(dlc_paths()));
+        let g = game(&w);
+        let m = [
+            ManifestDlc {
+                id: DLC,
+                download_size: 100,
+                disk_size: 200,
+            },
+            ManifestDlc {
+                id: OTHER,
+                download_size: 50,
+                disk_size: 60,
+            },
+        ];
+        let mut infos = available(&[], &[DLC, OTHER], Some(&m));
+        infos[0].title = "Extra Pack".into();
+        infos[1].title = "Other Pack".into();
+        let p = dlc::plan_add(&PlanInput {
+            game: &g,
+            title: "Test Game",
+            version: Some("1.0".into()),
+            newer: None,
+            tree_name: TREE.into(),
+            infos: &infos,
+            wanted: &[DLC, OTHER],
+        });
+        assert_eq!(p.from_cache, [DLC]);
+        assert_eq!(p.download_size, 50);
+        assert_eq!(p.inputs.old_dlcs, [DLC.to_string()]);
+        assert_eq!(p.inputs.dlcs, [DLC.to_string(), OTHER.to_string()]);
+        let titles: Vec<&str> = p.downloading().iter().map(|d| d.title.as_str()).collect();
+        assert_eq!(titles, ["Other Pack"]);
+        let lines = dlc::plan_lines(&p);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.ends_with("; Extra Pack already there, the rest downloaded into it")),
+            "{lines:?}"
+        );
+    }
+
     #[test]
     fn a_stop_during_the_download_leaves_the_game_untouched_and_a_rerun_resumes() {
         let w = built("dlc-add-dl-stop");
