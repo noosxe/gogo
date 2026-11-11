@@ -548,16 +548,16 @@ which one, and the OK to download it, is @noosxe's (§11 Q3). An interrupted-add
 
 ## 12. Implementation issues (sub-issues of #343)
 
-Filed with the PR; numbers in the PR body.
+Filed 2026-11-11, each a sub-issue of #343.
 
 | # | Title | Depends on |
 |---|---|---|
-| I1 | DLC core: `dlc.rs` (`available`, `resolve`, owned set, per-DLC sizes), `DlcSet` in `DepotOptions`, `--dlc`/`--all-dlcs` on `depot` and `download` (§1.1, §2, §8) | — |
-| I2 | Depot cache record: `dlcs`/`language`, `check_cache` answers, targeted completion (#336) (§3.3) | I1 |
-| I3 | `content.toml` per game, written by both build lanes; `apps list/show`, `doctor`'s `dlc` check, plan and `--json` (§6) | I1 |
-| I4 | `linux-app` build flags `--dlc`/`--all-dlcs`/`--no-dlcs`/`--lang`, the default rules and picker (§1.2), DLC scripts in setup (§3.6) | I1, I2, I3 |
-| I5 | `linux-app dlc list` and `add` on the depot lane: targeted download, staging, `lay_files`, journal, recovery, launcher refusal (§3.2, §3.4, §4, §7) | I2, I3, I4 |
-| I6 | Offline-installer lane: DLC installers at first build and `dlc add` (§5) | I3, I4 |
-| I7 | `scripts/linux-e2e.sh` `dlc_add` step (§10), once a game is agreed | I5 |
-| I8 | DLC removal (§3.5) | I5 |
-| I9 | mac-app DLC (§9) | I5, the Mac lane resuming |
+| I1 (#346) | DLC core: `dlc.rs` (`available`, `resolve`, owned set, per-DLC sizes), `DlcSet` in `DepotOptions`, `--dlc`/`--all-dlcs` on `depot` and `download` (§1.1, §2, §8) | — |
+| I2 (#347) | Depot cache record: `dlcs`/`language`, `check_cache` answers, targeted completion (#336) (§3.3) | I1 |
+| I3 (#348) | `content.toml` per game, written by both build lanes; `apps list/show`, `doctor`'s `dlc` check, plan and `--json` (§6) | I1 |
+| I4 (#349) | `linux-app` build flags `--dlc`/`--all-dlcs`/`--no-dlcs`/`--lang`, the default rules and picker (§1.2), DLC scripts in setup (§3.6) | I1, I2, I3 |
+| I5 (#350) | `linux-app dlc list` and `add` on the depot lane: targeted download, staging, `lay_files`, journal, recovery, launcher refusal (§3.2, §3.4, §4, §7) | I2, I3, I4 |
+| I6 (#351) | Offline-installer lane: DLC installers at first build and `dlc add` (§5) | I3, I4 |
+| I7 (#352) | `scripts/linux-e2e.sh` `dlc_add` step (§10), once a game is agreed | I5 |
+| I8 (#353) | DLC removal (§3.5) | I5 |
+| I9 (#354) | mac-app DLC (§9) | I5, the Mac lane resuming |
