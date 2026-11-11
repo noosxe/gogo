@@ -1,5 +1,5 @@
 # Canonical checks (AGENTS.md) on GitHub Actions — no nix here: the toolchain
-# comes from rust-toolchain.toml (same 1.99.0 as the flake) via rustup.
+# comes from rust-toolchain.toml (same 1.99.1 as the flake) via rustup.
 # Linux + macOS only (project scope); aarch64-linux cross-builds are out of
 # scope for CI — deny.toml still evaluates the full target set statically.
 
@@ -33,7 +33,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       # rustup is on every runner image: this installs what rust-toolchain.toml
-      # pins (1.99.0, clippy, rustfmt). Not setup-rust-toolchain, which spends
+      # pins (1.99.1, clippy, rustfmt). Not setup-rust-toolchain, which spends
       # a minute on `brew install bash` on macOS runners.
       - run: rustup toolchain install
       - run: cargo fmt --all --check

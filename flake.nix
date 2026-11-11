@@ -2,16 +2,16 @@
   description = "gogo — GOG.com offline-installer downloader (Rust CLI): dev environment + installable package";
 
   inputs = {
-    # Pinned by full commit hash: nixos-unstable branch, fetched 2026-10-09.
+    # Pinned by full commit hash: nixos-unstable branch, fetched 2026-11-07.
     # flake.lock additionally freezes the resolved revision — commit both.
     # All nixpkgs tools in the dev shell (nix/devshell.nix: rust-analyzer,
     # cargo-nextest, cargo-deny, git, just, pkg-config, stdenv.cc) inherit their
     # exact versions from this single pin.
-    nixpkgs.url = "github:NixOS/nixpkgs/e7439b6b14ad3cc35d05608ebca9bce01a25f5f8";
+    nixpkgs.url = "github:NixOS/nixpkgs/f4a03c008967841f2a0b3cb7c436fc6fc31671f6";
 
     # Rust toolchains with exact, text-visible versions (see rustToolchain below).
     rust-overlay = {
-      url = "github:oxalica/rust-overlay/4ca2963243427cb86bd6b4d9ca6010db0162a619";
+      url = "github:oxalica/rust-overlay/0070500a3d72ade21323092e7bdd7125c5268482";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };

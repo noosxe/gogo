@@ -19,7 +19,7 @@ tools, or binaries from the host system — no exceptions.**
   ```
 
 - The flake pins everything by commit hash (`flake.lock` is committed) and the Rust
-  toolchain **1.99.0** is written explicitly in `flake.nix`. Do not "just use" a system
+  toolchain **1.99.1** is written explicitly in `flake.nix`. Do not "just use" a system
   `cargo`/`rustc`/`cc` — inside the shell they resolve to the store paths, outside it they
   are wrong. If a tool is missing, add it to the flake (pinned), not via ad-hoc installs.
 - Toolchain/input bumps are deliberate commits: update the hash/version in `flake.nix`,
