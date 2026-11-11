@@ -173,14 +173,9 @@ fn interactive(machine: bool) -> bool {
 }
 
 /// The progress events of an add: NDJSON under `--json-progress`, else `gogo:` lines.
-/// The human lines go to `notes`, for the live renderer to print above its
-/// status line.
-fn emit(
-    ev: &ProgressEvent,
-    json_progress: bool,
-    quiet: bool,
-    notes: &tokio::sync::mpsc::UnboundedSender<String>,
-) {
+/// The human lines go to `print`: stderr, or the live renderer, which prints
+/// them above its status line.
+fn emit(ev: &ProgressEvent, json_progress: bool, quiet: bool, print: &dyn Fn(&str)) {
     if json_progress {
         if let Ok(line) = serde_json::to_string(ev) {
             println!("{line}");
@@ -219,7 +214,7 @@ fn emit(
         _ => None,
     };
     if let Some(l) = line {
-        let _ = notes.send(format!("gogo: {l}"));
+        print(&format!("gogo: {l}"));
     }
 }
 
@@ -246,14 +241,9 @@ async fn add_cmd(
         None
     } else {
         // No live renderer yet: the lines go straight to stderr.
-        let (rtx, mut rrx) = tokio::sync::mpsc::unbounded_channel::<String>();
-        let r = add::recover(&mut game, gogo::gog::materialize::Reflink::Try, &mut |ev| {
-            emit(ev, jp, quiet, &rtx)
-        });
-        while let Ok(l) = rrx.try_recv() {
-            eprintln!("{l}");
-        }
-        match r {
+        match add::recover(&mut game, gogo::gog::materialize::Reflink::Try, &mut |ev| {
+            emit(ev, jp, quiet, &|l| eprintln!("{l}"))
+        }) {
             Ok(r) => r,
             Err(e) => return Ok(report(e)),
         }
@@ -459,12 +449,12 @@ async fn add_cmd(
     };
     let stop_token = cancel.clone();
     let stop = move || stop_token.is_cancelled();
-    let (ntx, mut nrx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    let mut on_event = |ev: &ProgressEvent| emit(ev, jp, quiet, &ntx);
+    let mut renderer = mode.renderer();
+    let live = depot_progress::Live::new(&mut rx, &mut renderer);
+    let mut on_event = |ev: &ProgressEvent| emit(ev, jp, quiet, &|l| live.note(l));
     let opts = add::AddOptions::default();
     let runner = add::add(&mut game, &plan, fetch, &opts, &mut on_event, &stop);
-    let mut renderer = mode.renderer();
-    let result = depot_progress::drive_with_notes(runner, &mut rx, &mut nrx, &mut renderer).await;
+    let result = live.drive(runner).await;
     match result {
         Ok(out) => {
             if a.json {
