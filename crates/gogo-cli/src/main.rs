@@ -1,6 +1,7 @@
 //! clap parsing, tracing setup, exit-code mapping — no business logic (`docs/design/01` §1).
 //! This crate is a thin shell over `gogo-core`; everything domain lives there.
 
+mod apps_sort;
 mod cli;
 mod depot_progress;
 #[cfg(target_os = "linux")]
@@ -5634,8 +5635,17 @@ fn apps_cmd(cmd: crate::cli::AppsCmd) -> Result<i32, AppError> {
     let logs = gogo::macapp::doctor::Host::detect().logs;
     let dash = |s: Option<&str>| s.unwrap_or("-").to_string();
     match cmd {
-        crate::cli::AppsCmd::List { json } => {
-            let all = apps::list(&logs)?;
+        crate::cli::AppsCmd::List { json, sort } => {
+            let keys = match sort.as_deref().map(apps_sort::parse) {
+                None => apps_sort::default_keys(),
+                Some(Ok(k)) => k,
+                Some(Err(e)) => {
+                    eprintln!("gogo: {e}");
+                    return Ok(cli::exit::USAGE);
+                }
+            };
+            let mut all = apps::list(&logs)?;
+            apps_sort::sort(&mut all, &keys);
             if json {
                 println!("{}", serde_json::json!({ "apps": all }));
                 return Ok(cli::exit::OK);
