@@ -2,12 +2,50 @@
 //! frontend; pure formatting helpers (human sizes) live in `gogo_core`'s `fmt` module
 //! so the v2 TUI renders them identically.
 
+/// A comfy-table `Table` that prints without trailing whitespace on any line.
+pub struct Table(comfy_table::Table);
+
+impl std::ops::Deref for Table {
+    type Target = comfy_table::Table;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Table {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl std::fmt::Display for Table {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let rendered = self.0.to_string();
+        for (i, line) in rendered.lines().enumerate() {
+            if i > 0 {
+                writeln!(f)?;
+            }
+            write!(f, "{}", line.trim_end())?;
+        }
+        Ok(())
+    }
+}
+
+/// The one table style every list-style command uses: no outer border, but the dividers
+/// between columns and rows (and under the header) stay.
+pub fn table() -> Table {
+    use comfy_table::{LineStyle, presets::ASCII_NO_BORDERS};
+    let mut t = comfy_table::Table::new();
+    *t.style_mut() = ASCII_NO_BORDERS.header_separator(LineStyle::none().fill('=').junction('+'));
+    Table(t)
+}
+
 /// Render the owned-games table: `ID  TITLE  OS  INSTALLERS  SIZE  DOWNLOADED`
 /// (03 §1 — the column is DOWNLOADED, not INSTALLED: gogo never installs).
 pub fn list_table(rows: &[gogo::state::records::ListRow], _color: crate::cli::ColorWhen) -> String {
-    use comfy_table::{Cell, Color, Table};
+    use comfy_table::{Cell, Color};
 
-    let mut table = Table::new();
+    let mut table = table();
     table.set_header(vec![
         "ID",
         "TITLE",
@@ -483,5 +521,27 @@ DLC (2)
             out,
             "Other (1)\n  1000000303  Mystery Bundle  type: bundle\n"
         );
+    }
+}
+
+#[cfg(test)]
+mod table_tests {
+    #[test]
+    fn table_has_no_outer_border_but_keeps_dividers() {
+        let mut t = super::table();
+        t.set_header(vec!["GOGID", "TITLE", "DLC"]);
+        t.add_row(vec!["1423049311", "Cyberpunk 2077", "2"]);
+        t.add_row(vec!["1438075172", "Anno 1701 A.D.", "-"]);
+        let out = t.to_string();
+        let want = [
+            " GOGID      | TITLE          | DLC",
+            "============+================+=====",
+            " 1423049311 | Cyberpunk 2077 | 2",
+            "------------+----------------+-----",
+            " 1438075172 | Anno 1701 A.D. | -",
+        ]
+        .join("\n");
+        assert_eq!(out, want);
+        assert!(out.lines().all(|l| l == l.trim_end()));
     }
 }
