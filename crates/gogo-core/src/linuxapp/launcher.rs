@@ -23,7 +23,7 @@ use crate::macapp::launch::GameDirs;
 /// Bumped with every change to [`TEMPLATE`] that matters to a game set up
 /// before it. Setup rewrites `launch.sh` whenever its bytes differ, so this
 /// is for people: the run log header and `launch.log` name it.
-pub const LAUNCHER_VERSION: u32 = 12;
+pub const LAUNCHER_VERSION: u32 = 13;
 
 /// `launch.sh`'s first word when a wrapper runs it for the game's own step
 /// (design 18 §7.8): the game's environment, then umu-run.
@@ -538,6 +538,14 @@ if [ ! -f "$HERE/launch.conf" ]; then
 fi
 load_conf
 log "launch $TITLE ($GOGID) from $HERE (launcher $LAUNCHER_VERSION)"
+# Design 19 section 3.4: a DLC add that stopped while laying its files leaves
+# dlc-journal.json. The game files may then mix two versions of the game's data,
+# which could damage a save: no launch until the add is finished or undone.
+if [ -e "$HERE/dlc-journal.json" ]; then
+    log "a DLC add of $GOGID didn't finish (dlc-journal.json): not launching"
+    alert "A DLC install for $TITLE stopped before it finished, so its files may be half there. Run: gogo linux-app dlc $GOGID add (it finishes the install, or undoes it)"
+    exit 1
+fi
 want="$(current_stamp)"
 check_runtime
 why=""

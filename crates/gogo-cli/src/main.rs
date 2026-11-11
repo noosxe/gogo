@@ -3,6 +3,8 @@
 
 mod cli;
 mod depot_progress;
+#[cfg(target_os = "linux")]
+mod dlc_cmd;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod lane;
 #[cfg(target_os = "macos")]
@@ -279,6 +281,11 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
             )
             .await
         }
+        #[cfg(target_os = "linux")]
+        Command::LinuxApp {
+            sub: Some(crate::cli::LinuxAppSub::Dlc { gogid, cmd }),
+            ..
+        } => dlc_cmd::run(gogid, cmd).await,
         #[cfg(target_os = "linux")]
         Command::LinuxApp { sub: Some(sub), .. } => linux_app_sub(sub),
         #[cfg(target_os = "linux")]
@@ -3972,6 +3979,8 @@ fn linux_app_sub(sub: crate::cli::LinuxAppSub) -> Result<i32, AppError> {
             }
         }
         crate::cli::LinuxAppSub::Env { cmd } => linux_app_env(cmd),
+        // Async: dispatched in `run`.
+        crate::cli::LinuxAppSub::Dlc { .. } => unreachable!("linux-app dlc is async"),
         crate::cli::LinuxAppSub::Args {
             gogid,
             clear,
@@ -5889,7 +5898,9 @@ fn emit_macapp_event(ev: &gogo::engine::events::ProgressEvent, json_progress: bo
             path.display()
         )),
         Ev::RecipeStep { verb } => Some(format!("applied {verb}")),
-        Ev::GameFilesStarted { method, bytes, dir } => Some(match method.as_str() {
+        Ev::GameFilesStarted {
+            method, bytes, dir, ..
+        } => Some(match method.as_str() {
             "reflink" => format!("game files: reflinking into {}", dir.display()),
             _ => format!(
                 "game files: copying {} into {}",

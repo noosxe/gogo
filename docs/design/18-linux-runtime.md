@@ -1376,6 +1376,13 @@ the record; `scripts/vm-test.sh` works on scratch state with no library, and
   launch.sh>` (quoted per the Desktop Entry spec), `Icon=` the game's icon as PNG
   (`games/<gogid>/icon.png`, from the exe's icon resource or GOG's `.ico`),
   `Categories=Game;`, `X-Gogo-Gogid=<gogid>`. `apps remove` deletes it.
+- **DLC (design 19, #348/#350):** `content.toml` (the game's build, language and DLC).
+  While a `linux-app dlc add` runs or after one stopped, the game dir can also hold
+  `dlc-download.json` (a download in progress), `.dlc-staging/` (the fetched files with
+  no usable depot cache), `dlc-journal.json` and `.dlc-backup/` (files half laid).
+  `launch.sh` (`LAUNCHER_VERSION` 13) refuses to start the game while
+  `dlc-journal.json` exists, with a dialog naming `gogo linux-app dlc <gogid> add`.
+  `move` refuses while any of them is there. `apps remove` deletes them with the dir.
 
 **Settled (@noosxe, 2026-11-03; O7) — relative paths:** paths under the data root are written
 relative to it (`PREFIX='games/1207659013/prefix'`, `GAME_DIR`, `UMU_RUN` and

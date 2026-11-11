@@ -521,6 +521,31 @@ fn reflink(_src: &File, _dst: &File) -> io::Result<()> {
     Err(io::ErrorKind::Unsupported.into())
 }
 
+/// One file of `src` as `dst` (which must not exist): a clone when `mode` allows
+/// and the filesystem can, else a byte copy; mode and mtime kept, data fsynced. A
+/// symlink stays a symlink. `true` when it was cloned (or is a link).
+pub(crate) fn clone_file(src: &Path, dst: &Path, mode: Reflink) -> io::Result<bool> {
+    let meta = fs::symlink_metadata(src)?;
+    if meta.file_type().is_symlink() {
+        std::os::unix::fs::symlink(fs::read_link(src)?, dst)?;
+        return Ok(true);
+    }
+    let mut s = File::open(src)?;
+    let mut d = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(dst)?;
+    let cloned = mode == Reflink::Try && reflink(&s, &d).is_ok();
+    if !cloned {
+        io::copy(&mut s, &mut d)?;
+    }
+    d.set_modified(meta.modified()?)?;
+    d.set_permissions(meta.permissions())?;
+    d.sync_all()?;
+    Ok(cloned)
+}
+
 pub(crate) fn existing_ancestor(path: &Path) -> Option<&Path> {
     path.ancestors().find(|p| p.is_dir())
 }

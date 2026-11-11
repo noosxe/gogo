@@ -259,7 +259,8 @@ fn lock_moves() -> Result<std::fs::File, MacAppError> {
 /// interrupted move never blocks a launch. Never waits: the launcher holds it
 /// only for the instant of its try, so a hold seen here is a launch in that
 /// instant or another process, and the move says so and can be run again.
-fn lock_game(gogid: &str) -> Result<std::fs::File, MacAppError> {
+pub fn lock_game(gogid: &str) -> Result<std::fs::File, MacAppError> {
+    std::fs::create_dir_all(crate::state::data_root().join(JOURNAL_DIR))?;
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)

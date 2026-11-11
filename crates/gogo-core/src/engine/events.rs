@@ -129,12 +129,34 @@ pub enum ProgressEvent {
         method: String,
         bytes: u64,
         dir: std::path::PathBuf,
+        /// `"dlc"` for `linux-app dlc add`'s lay (design 19 §7); absent for a build.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        kind: Option<String>,
+        /// The files a DLC lay adds.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        files: Option<u64>,
     },
     /// A copy's progress, at each tenth of `total` (none for a reflink,
     /// which takes no time).
     GameFilesProgress {
         copied: u64,
         total: u64,
+    },
+    /// `linux-app dlc add` (design 19 §7): the DLC it adds, where their files
+    /// come from (`cache` or `staging`) and the installed build.
+    DlcPlan {
+        dlcs: Vec<crate::gog::depot::PlanDlc>,
+        source: String,
+        #[serde(rename = "buildId")]
+        build_id: String,
+    },
+    /// One DLC is in the game and recorded, after its install script ran.
+    DlcInstalled {
+        id: u64,
+    },
+    /// An interrupted add was settled: `forward` (finished) or `back` (undone).
+    DlcRecovered {
+        action: String,
     },
 }
 
@@ -208,6 +230,9 @@ mod render_tests {
             ProgressEvent::UserOverrideSet { .. } => "UserOverrideSet",
             ProgressEvent::GameFilesStarted { .. } => "GameFilesStarted",
             ProgressEvent::GameFilesProgress { .. } => "GameFilesProgress",
+            ProgressEvent::DlcPlan { .. } => "DlcPlan",
+            ProgressEvent::DlcInstalled { .. } => "DlcInstalled",
+            ProgressEvent::DlcRecovered { .. } => "DlcRecovered",
         }
     }
 
