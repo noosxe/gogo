@@ -448,45 +448,69 @@ pub async fn drive<T, W: Write>(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<DepotEvent>,
     renderer: &mut Renderer<W>,
 ) -> T {
-    let (_keep, mut notes) = tokio::sync::mpsc::unbounded_channel::<String>();
-    drive_with_notes(runner, rx, &mut notes, renderer).await
+    Live::new(rx, renderer).drive(runner).await
 }
 
-/// [`drive`], plus lines the caller's own work prints meanwhile (`gogo dlc
-/// add`'s lay, after the download). They go through the renderer so they clear
-/// the status line, and each one first renders every depot event already
-/// queued, so a download's `Finished` precedes what the lay says.
-pub async fn drive_with_notes<T, W: Write>(
-    runner: impl std::future::Future<Output = T>,
-    rx: &mut tokio::sync::mpsc::UnboundedReceiver<DepotEvent>,
-    notes: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
-    renderer: &mut Renderer<W>,
-) -> T {
-    let start = tokio::time::Instant::now();
-    let mut timer = tokio::time::interval(REDRAW);
-    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    tokio::pin!(runner);
-    let result = loop {
-        tokio::select! {
-            res = &mut runner => break res,
-            Some(e) = rx.recv() => renderer.event(&e, start.elapsed()),
-            Some(n) = notes.recv() => {
-                while let Ok(e) = rx.try_recv() {
-                    renderer.event(&e, start.elapsed());
-                }
-                renderer.note(&n);
-            }
-            _ = timer.tick() => renderer.tick(start.elapsed()),
+/// The depot receiver and the renderer, shared so the caller's own work can
+/// print a line from inside the runner ([`Live::note`]) while [`Live::drive`]
+/// owns the terminal. `gogo dlc add`'s lay runs synchronously after the
+/// download and never yields, so its lines must reach the terminal as it
+/// emits them, not when the runner next awaits. The locks are never held
+/// across an await.
+pub struct Live<'a, W: Write> {
+    rx: std::sync::Mutex<&'a mut tokio::sync::mpsc::UnboundedReceiver<DepotEvent>>,
+    renderer: std::sync::Mutex<&'a mut Renderer<W>>,
+    start: tokio::time::Instant,
+}
+
+impl<'a, W: Write> Live<'a, W> {
+    pub fn new(
+        rx: &'a mut tokio::sync::mpsc::UnboundedReceiver<DepotEvent>,
+        renderer: &'a mut Renderer<W>,
+    ) -> Self {
+        Self {
+            rx: std::sync::Mutex::new(rx),
+            renderer: std::sync::Mutex::new(renderer),
+            start: tokio::time::Instant::now(),
         }
-    };
-    while let Ok(e) = rx.try_recv() {
-        renderer.event(&e, start.elapsed());
     }
-    while let Ok(n) = notes.try_recv() {
-        renderer.note(&n);
+
+    /// Renders every depot event already queued (a download's `Finished`
+    /// precedes what comes after it), then `text` on its own row: the status
+    /// line is cleared first.
+    pub fn note(&self, text: &str) {
+        let mut rx = self.rx.lock().unwrap();
+        let mut r = self.renderer.lock().unwrap();
+        while let Ok(e) = rx.try_recv() {
+            r.event(&e, self.start.elapsed());
+        }
+        r.note(text);
     }
-    renderer.finish();
-    result
+
+    /// The loop of [`drive`].
+    pub async fn drive<T>(&self, runner: impl std::future::Future<Output = T>) -> T {
+        let mut timer = tokio::time::interval(REDRAW);
+        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        tokio::pin!(runner);
+        let result = loop {
+            tokio::select! {
+                res = &mut runner => break res,
+                e = std::future::poll_fn(|cx| self.rx.lock().unwrap().poll_recv(cx)) => {
+                    if let Some(e) = e {
+                        self.renderer.lock().unwrap().event(&e, self.start.elapsed());
+                    }
+                }
+                _ = timer.tick() => self.renderer.lock().unwrap().tick(self.start.elapsed()),
+            }
+        };
+        let mut rx = self.rx.lock().unwrap();
+        let mut r = self.renderer.lock().unwrap();
+        while let Ok(e) = rx.try_recv() {
+            r.event(&e, self.start.elapsed());
+        }
+        r.finish();
+        result
+    }
 }
 
 #[cfg(test)]
@@ -749,15 +773,33 @@ mod tests {
         }
     }
 
+    /// A writer that records each write's order against marks, shared so the
+    /// test can look at it from inside the runner.
+    #[derive(Clone, Default)]
+    struct Shared(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Write for Shared {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     /// `gogo dlc add`: the download's `Finished` and the lay's notes through
-    /// the live renderer, the lay's note sent while events are still queued.
+    /// the live renderer. The lay never yields, so each note must reach the
+    /// terminal as it is emitted, while the runner is still blocked.
     #[tokio::test]
-    async fn drive_orders_lay_notes_after_the_download_and_clears_the_status() {
+    async fn notes_reach_the_terminal_while_the_runner_blocks() {
         const MB: u64 = 1 << 20;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let (ntx, mut nrx) = tokio::sync::mpsc::unbounded_channel();
-        let mut r = Renderer::new(Mode::Human { live: true }, Vec::new());
-        let runner = async move {
+        let buf = Shared::default();
+        let mut r = Renderer::new(Mode::Human { live: true }, buf.clone());
+        let live = Live::new(&mut rx, &mut r);
+        let seen = buf.clone();
+        let runner = async {
             tx.send(DepotEvent::Preparing).unwrap();
             tokio::time::sleep(Duration::from_millis(250)).await;
             tx.send(dl(10 * MB, 100 * MB)).unwrap();
@@ -769,17 +811,30 @@ mod tests {
                 fetched_bytes: 100 * MB,
             })
             .unwrap();
-            // The lay starts at once: nothing yielded since the sends.
-            ntx.send("gogo: game files: adding 1 file(s)".to_string())
-                .unwrap();
+            // The lay: synchronous, no await between its lines.
+            live.note("gogo: game files: adding 1 file(s)");
+            std::thread::sleep(Duration::from_millis(250));
+            live.note("gogo: game files: copied 1 / 2");
+            let mid = String::from_utf8(seen.0.lock().unwrap().clone()).unwrap();
+            // Both lines are out before the runner has returned.
+            assert!(mid.contains("copied 1 / 2\n"), "{mid:?}");
         };
-        drive_with_notes(runner, &mut rx, &mut nrx, &mut r).await;
-        let out = String::from_utf8(r.into_inner()).unwrap();
+        live.drive(runner).await;
+        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
         no_text_after_a_status(&out);
         let fetched = out.find("gogo: fetched 1 file(s)").expect(&out);
         let adding = out.find("gogo: game files: adding").expect(&out);
-        assert!(fetched < adding, "{out:?}");
-        assert!(out.ends_with("adding 1 file(s)\n"), "{out:?}");
+        let copied = out.find("gogo: game files: copied").expect(&out);
+        assert!(fetched < adding && adding < copied, "{out:?}");
+        assert!(out.ends_with("copied 1 / 2\n"), "{out:?}");
+    }
+
+    /// `--json` / `--quiet` (silent mode) print no notes.
+    #[test]
+    fn a_silent_renderer_prints_no_notes() {
+        let mut r = Renderer::new(Mode::Silent, Vec::new());
+        r.note("gogo: hi");
+        assert!(r.into_inner().is_empty());
     }
 
     /// The last status draw shows the phase's average, not the tail window.
