@@ -880,13 +880,20 @@ where
             .iter()
             .any(|d| d.download_size > 0 && ids.contains(&d.id.parse().unwrap_or(0)));
         if fetches {
-            let prior =
-                read_download(&root).filter(|r| r.source == src && r.build_id == plan.build_id);
+            // A record for another set of DLC (an add stopped, then other DLC asked for)
+            // isn't resumed: its fetched files would be laid unrecorded.
+            let mut same = ids.clone();
+            same.sort_unstable();
+            let prior = read_download(&root).filter(|r| {
+                let mut had = r.adding.clone();
+                had.sort_unstable();
+                r.source == src && r.build_id == plan.build_id && had == same
+            });
             let mut rec = match prior {
                 Some(r) => r,
                 None => {
                     if staging && src.exists() {
-                        // A staging dir no record speaks for is a leftover.
+                        // A staging dir no (matching) record speaks for is a leftover.
                         materialize::remove_tree(&src)?;
                     }
                     let r = DownloadRecord {
@@ -985,21 +992,22 @@ where
         let _ = std::fs::remove_file(root.join(DOWNLOAD));
     }
 
-    if opts.run_setup && (!adding.is_empty() || recovered == Some(Direction::Forward)) {
-        if let Err(e) = super::setup::setup(
+    if opts.run_setup
+        && (!adding.is_empty() || recovered == Some(Direction::Forward))
+        && let Err(e) = super::setup::setup(
             &game.gogid,
             &super::setup::SetupOptions {
                 refresh: false,
                 prompt: None,
             },
             emit,
-        ) {
-            warnings.push(format!(
-                "the DLC is in place, but setup (GOG's install scripts) failed: {e}; run `gogo \
+        )
+    {
+        warnings.push(format!(
+            "the DLC is in place, but setup (GOG's install scripts) failed: {e}; run `gogo \
                  linux-app setup {}`",
-                game.gogid
-            ));
-        }
+            game.gogid
+        ));
     }
     for a in &adding {
         emit(&ProgressEvent::DlcInstalled { id: a.id });

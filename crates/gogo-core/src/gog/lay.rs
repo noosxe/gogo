@@ -342,7 +342,7 @@ pub fn recover(root: &Path, mode: Reflink) -> Result<Option<(Journal, Direction)
         if exists(&new) {
             fs::remove_file(&new)?;
         }
-        if j.replaced.iter().any(|r| *r == f.to) {
+        if j.replaced.contains(&f.to) {
             let bak = backup.join(&f.to);
             if exists(&bak) {
                 fs::rename(&bak, &cur)?;
