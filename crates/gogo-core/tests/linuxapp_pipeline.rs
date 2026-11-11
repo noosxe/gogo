@@ -2089,6 +2089,18 @@ fn prefix_procs(w: &World) -> Vec<u32> {
         .collect()
 }
 
+/// The hanging fake game is up: its fake wineserver, the last process it
+/// starts, exists. Waiting for a process count is not enough: the game and
+/// its three TERM-proof sleeps already make four, so a TERM could land
+/// before the wineserver the launcher's close request looks for.
+fn hang_ready(w: &World) -> bool {
+    wait_until(10, || {
+        gogo::linuxapp::game::prefix_procs(&w.game().join("prefix"))
+            .iter()
+            .any(|p| p.name == "wineserver")
+    })
+}
+
 /// Launch the hanging fake game, TERM the launcher, wait for it to exit
 /// (its code, the time it took).
 fn term_hanging_launcher(w: &World, env: &[(&str, &str)]) -> (Option<i32>, u64) {
@@ -2101,11 +2113,7 @@ fn term_hanging_launcher(w: &World, env: &[(&str, &str)]) -> (Option<i32>, u64) 
         .spawn()
         .unwrap();
     // The game and its TERM-proof children of other sessions.
-    assert!(
-        wait_until(10, || prefix_procs(w).len() >= 4),
-        "{:?}",
-        prefix_procs(w)
-    );
+    assert!(hang_ready(w), "{:?}", prefix_procs(w));
     let status = std::process::Command::new("kill")
         .args(["-TERM", &child.id().to_string()])
         .status()
@@ -2140,11 +2148,7 @@ fn two_signals_launcher(
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
-    assert!(
-        wait_until(10, || prefix_procs(w).len() >= 4),
-        "{:?}",
-        prefix_procs(w)
-    );
+    assert!(hang_ready(w), "{:?}", prefix_procs(w));
     let send = |sig: &str| {
         let st = std::process::Command::new("kill")
             .args([sig, &child.id().to_string()])
@@ -2242,7 +2246,7 @@ fn the_watchdog_tears_down_after_the_launcher_is_killed() {
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
-    assert!(wait_until(10, || prefix_procs(&w).len() >= 4));
+    assert!(hang_ready(&w));
     assert!(wait_until(5, || w.launch_log().contains("exec umu-run")));
     let pid = child.id();
     // A kill before the watchdog exists would leave nothing to tear down.
@@ -3292,7 +3296,7 @@ fn a_launcher_killed_under_a_wrapper_still_tears_it_all_down() {
             .stderr(std::process::Stdio::null())
             .spawn()
             .unwrap();
-        assert!(wait_until(10, || prefix_procs(&w).len() >= 4), "{name}");
+        assert!(hang_ready(&w), "{name}");
         assert!(
             wait_until(5, || w.launch_log().contains("guard armed")),
             "{name}"
