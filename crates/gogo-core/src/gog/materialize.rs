@@ -70,6 +70,15 @@ pub struct MaterializeReport {
     pub copied_bytes: u64,
     pub symlinks: u64,
     pub dirs: u64,
+    /// Files and links a filter left out (design 19 §3.3: DLC the build doesn't take).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub left_out_files: u64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub left_out_bytes: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 impl MaterializeReport {
@@ -146,6 +155,20 @@ pub fn materialize_tree_with(
     reflink: Reflink,
     on_file: &mut dyn FnMut(&Path, u64) -> io::Result<()>,
 ) -> io::Result<MaterializeReport> {
+    materialize_tree_filtered(src, dst, reflink, &|_| true, on_file)
+}
+
+/// [`materialize_tree_with`] that takes only what `keep` says yes to. `keep` gets
+/// each file's, link's and directory's path relative to `src`; a directory it
+/// refuses is skipped whole. A directory that held something but is left empty by
+/// the filter isn't created (a DLC's own dirs), while one empty in `src` is.
+pub fn materialize_tree_filtered(
+    src: &Path,
+    dst: &Path,
+    reflink: Reflink,
+    keep: &dyn Fn(&Path) -> bool,
+    on_file: &mut dyn FnMut(&Path, u64) -> io::Result<()>,
+) -> io::Result<MaterializeReport> {
     if !src.is_dir() {
         return Err(io::Error::other(format!(
             "game tree {} is not a directory",
@@ -168,10 +191,11 @@ pub fn materialize_tree_with(
         report: MaterializeReport::default(),
         skipped: Vec::new(),
         xattrs_lost: 0,
+        filter: Some((src, keep)),
     };
     // The root itself is followed (it may be a symlinked cache dir); below
-    // it, nothing is.
-    copy_dir(src, dst, &fs::metadata(src)?, &mut walk)?;
+    // it, nothing is. The root is made even when the filter empties it.
+    copy_dir(src, dst, &fs::metadata(src)?, &mut walk, true)?;
     Ok(walk.report)
 }
 
@@ -244,8 +268,9 @@ pub fn copy_exact(
         report: MaterializeReport::default(),
         skipped: Vec::new(),
         xattrs_lost: 0,
+        filter: None,
     };
-    copy_dir(src, dst, &fs::metadata(src)?, &mut walk)?;
+    copy_dir(src, dst, &fs::metadata(src)?, &mut walk, true)?;
     Ok(ExactCopy {
         report: walk.report,
         skipped: walk.skipped,
@@ -262,24 +287,57 @@ struct Walk<'a> {
     report: MaterializeReport,
     skipped: Vec<PathBuf>,
     xattrs_lost: u64,
+    /// The source root and what to take of it ([`materialize_tree_filtered`]).
+    filter: Option<(&'a Path, &'a Keep<'a>)>,
 }
 
-fn copy_dir(src: &Path, dst: &Path, meta: &fs::Metadata, walk: &mut Walk) -> io::Result<()> {
+/// Whether a walk takes a path (relative to its source root).
+type Keep<'a> = dyn Fn(&Path) -> bool + 'a;
+
+impl Walk<'_> {
+    fn keeps(&self, path: &Path) -> bool {
+        match self.filter {
+            Some((root, keep)) => keep(path.strip_prefix(root).unwrap_or(path)),
+            None => true,
+        }
+    }
+}
+
+/// Copy the directory `src` to `dst`. `false` when the filter left out everything
+/// it held: then `dst` isn't kept, unless `always` (the root).
+fn copy_dir(
+    src: &Path,
+    dst: &Path,
+    meta: &fs::Metadata,
+    walk: &mut Walk,
+    always: bool,
+) -> io::Result<bool> {
     fs::create_dir(dst)?;
     walk.report.dirs += 1;
+    let (mut held, mut kept) = (false, false);
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let from = entry.path();
         let to = dst.join(entry.file_name());
         let m = fs::symlink_metadata(&from)?;
         let kind = m.file_type();
+        held = true;
+        if !walk.keeps(&from) {
+            if !kind.is_dir() {
+                walk.report.left_out_files += 1;
+                walk.report.left_out_bytes += m.len();
+            }
+            continue;
+        }
         if kind.is_symlink() {
             std::os::unix::fs::symlink(fs::read_link(&from)?, &to)?;
             walk.report.symlinks += 1;
+            kept = true;
         } else if kind.is_dir() {
-            copy_dir(&from, &to, &m, walk)?;
+            kept |= copy_dir(&from, &to, &m, walk, false)?;
         } else if kind.is_file() {
             copy_file(&from, &to, &m, walk)?;
+            kept = true;
         } else if walk.exact {
             walk.skipped.push(from);
         } else {
@@ -289,12 +347,18 @@ fn copy_dir(src: &Path, dst: &Path, meta: &fs::Metadata, walk: &mut Walk) -> io:
             )));
         }
     }
+    if held && !kept && !always && walk.filter.is_some() {
+        fs::remove_dir(dst)?;
+        walk.report.dirs -= 1;
+        return Ok(false);
+    }
     if walk.exact {
         walk.xattrs_lost += copy_xattrs(src, dst)?;
     }
     // After the children: a read-only directory must still take them.
     File::open(dst)?.set_modified(meta.modified()?)?;
-    fs::set_permissions(dst, meta.permissions())
+    fs::set_permissions(dst, meta.permissions())?;
+    Ok(true)
 }
 
 fn copy_file(src: &Path, dst: &Path, meta: &fs::Metadata, walk: &mut Walk) -> io::Result<()> {
@@ -742,6 +806,34 @@ mod tests {
         })
         .unwrap();
         assert_eq!(heard, 8);
+    }
+
+    #[test]
+    fn a_filter_leaves_out_files_and_the_dirs_it_empties() {
+        let t = tempfile::tempdir().unwrap();
+        let src = t.path().join("src");
+        fs::create_dir_all(src.join("dlc/deep")).unwrap();
+        fs::create_dir_all(src.join("empty")).unwrap();
+        fs::create_dir_all(src.join("mixed")).unwrap();
+        fs::write(src.join("dlc/deep/x"), b"1234").unwrap();
+        fs::write(src.join("mixed/x"), b"12").unwrap();
+        fs::write(src.join("mixed/keep"), b"1").unwrap();
+        fs::write(src.join("base"), b"1").unwrap();
+        let dst = t.path().join("dst");
+        let r = materialize_tree_filtered(
+            &src,
+            &dst,
+            Reflink::Never,
+            &|rel| !rel.ends_with("x"),
+            &mut |_, _| Ok(()),
+        )
+        .unwrap();
+        assert!(dst.join("base").is_file() && dst.join("mixed/keep").is_file());
+        assert!(!dst.join("mixed/x").exists());
+        assert!(!dst.join("dlc").exists(), "emptied by the filter: not made");
+        assert!(dst.join("empty").is_dir(), "empty in the source: made");
+        assert_eq!((r.left_out_files, r.left_out_bytes), (2, 6));
+        assert_eq!(r.dirs, 3);
     }
 
     #[test]

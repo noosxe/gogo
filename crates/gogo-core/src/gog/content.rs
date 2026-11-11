@@ -169,10 +169,36 @@ fn from_infos(install_dir: &Path, added: Option<&str>) -> (Option<String>, Vec<D
 
 /// What a build of `install_dir` has. `record_root` is the depot cache root the tree
 /// came from, when there is one: its record gives the build and language.
-/// DLC already in the tree get rows (today's builds add no more).
-pub fn for_build(lane: Lane, install_dir: &Path, record_root: Option<&Path>) -> Content {
+/// `installed` is the DLC the build put in (design 19 §3.3): exactly those get rows,
+/// titled by their info when it's there. `None` (a tree given by path, the installer
+/// lane) records every DLC with an info in the tree.
+pub fn for_build(
+    lane: Lane,
+    install_dir: &Path,
+    record_root: Option<&Path>,
+    installed: Option<&[DlcRef]>,
+) -> Content {
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let (info_build, dlc) = from_infos(install_dir, Some(&today));
+    let (info_build, present) = from_infos(install_dir, Some(&today));
+    let dlc = match installed {
+        None => present,
+        Some(want) => want
+            .iter()
+            .map(|w| {
+                present
+                    .iter()
+                    .find(|p| p.id == w.id)
+                    .cloned()
+                    .unwrap_or_else(|| DlcRow {
+                        id: w.id,
+                        title: w.title.clone(),
+                        build_id: None,
+                        version: None,
+                        added: Some(today.clone()),
+                    })
+            })
+            .collect(),
+    };
     let rec = record_root.and_then(depot::read_record);
     Content {
         schema: SCHEMA,
@@ -393,9 +419,29 @@ mod tests {
         std::fs::create_dir_all(&game).unwrap();
         info(&game, "1", "1", "Base", Some("7"));
         info(&game, "12", "1", "Expansion", Some("7"));
-        let c = for_build(Lane::Installer, &game, None);
+        let c = for_build(Lane::Installer, &game, None, None);
         assert_eq!(c.build_id.as_deref(), Some("7"));
         assert_eq!(c.dlc.len(), 1);
         assert!(c.dlc[0].added.is_some());
+        // Given the installed set, exactly that is recorded: an info alone doesn't
+        // make a row, and a wanted DLC without one (zero bytes) gets its title.
+        let want = [DlcRef {
+            id: 13,
+            title: "Cosmetic".into(),
+        }];
+        let c = for_build(Lane::Depot, &game, None, Some(&want));
+        assert_eq!(c.dlc.len(), 1);
+        assert_eq!((c.dlc[0].id, c.dlc[0].title.as_str()), (13, "Cosmetic"));
+        let want = [DlcRef {
+            id: 12,
+            title: "from the catalog".into(),
+        }];
+        let c = for_build(Lane::Depot, &game, None, Some(&want));
+        assert_eq!(c.dlc[0].title, "Expansion");
+        assert!(
+            for_build(Lane::Depot, &game, None, Some(&[]))
+                .dlc
+                .is_empty()
+        );
     }
 }

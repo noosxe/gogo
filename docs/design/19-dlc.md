@@ -251,8 +251,10 @@ else an error naming the languages there are.
   `prepare()` diffs the old depot set (old language, `old_dlcs`) against the new one and
   downloads only what's new or changed, into `<install>/!Temp`, then moves each file into
   place. Paths are compared lowercased.
-- No public per-product file list: the diff report is `pub(crate)`. gogo doesn't need it
-  (§3.2 finds the new files on disk, as design 14 §4.1 already does).
+- No public per-product file list: the diff report and `FileList`'s entries are
+  `pub(crate)`. A `dlc add` doesn't need one (§3.2 finds the new files on disk, as
+  design 14 §4.1 already does). A build leaving a cached DLC out does, and reads the
+  depot manifests itself (§3.3).
 - No ownership check anywhere in the downloader.
 
 ### 3.2 Adding DLC to a built game
@@ -341,12 +343,57 @@ resolve game → content.toml (build B, language L, installed DLC I)
 | `buildId` differs from the build being made | `OtherBuild` | as today: the new build is fetched into the cache via `verify`, with the wanted DLC set |
 | `dlcs` ⊇ wanted, same language | `Complete` | reused. Extra DLC in the cache is fine: the materialize copies only what the build wants (below) |
 
-- A cache can hold more DLC than one build wants (the user ran `gogo depot --all-dlcs`).
-  The build then materializes the base and the wanted DLC's files only: `materialize_tree`
-  takes a path filter built from the manifest (`get_depots` for the wanted set, its file
-  paths), and the plan says `cache holds 2 more DLC than this build takes`. Until that
-  filter exists (it needs the depot manifests, an extra fetch per build), a cache with
-  extra DLC is materialized whole and the plan says so; that's today's behaviour.
+- A cache can hold more DLC than one build wants (the user ran `gogo depot --all-dlcs`,
+  or an earlier build took more). The build then materializes the base and the wanted
+  DLC's files only, with a path filter built from each product's file list. As built
+  (#376):
+  - **Which DLC the cache holds:** its record's `dlcs`, plus every DLC with a
+    `goggame-<id>.info` in the tree (an older record lists none). None beyond the
+    wanted set: the tree is taken whole, with no fetch (`dlc_filter::need`).
+  - **The file lists** come from the build's depot manifests. gog-warp fetches them
+    inside its downloader but keeps their entries `pub(crate)`, so
+    `gog/dlc_filter.rs` reads the same public URLs itself: v2
+    `content-system/v2/meta/<hash path>` (zlib JSON), v1
+    `content-system/v1/manifests/<game>/windows/<timestamp>/<manifest>`, for the
+    depots of each product in the record's language (or `*`). Each path is stored
+    relative to the cache root, where gog-warp puts it: `<install dir>/<path>`, a
+    support file under `gog-support/<base>/<product>/` (v2) or `gog-support/<base>/`
+    (v1).
+  - **They're kept in the record**, as `products: {<id>: [paths]}`, so a rebuild
+    from the same cache needs no fetch. `gogo depot` stores them after a download
+    that leaves DLC in the cache (best effort). A build that lacks some fetches only
+    those, for the record's build (`depot::product_lists`), and stores them.
+    `write_record` keeps the lists when the build and language stay the same, as a
+    completion or a `dlc add` does. Records written before this have none, so the
+    first filtered build from them fetches.
+  - **The filter** (`dlc_filter::filter`) leaves out every path of a DLC the build
+    doesn't take, unless a kept product (the base, a wanted DLC) lists it too. A
+    shared path is kept as the cache has it: gog-warp writes one file per path,
+    from the first depot that lists it. The left-out DLC's `goggame-<id>.*` are left
+    out by name as well. Paths are compared lowercased: manifests are
+    case-insensitive, and the tree keeps whatever casing each depot used.
+  - **The materialize** (`materialize_tree_filtered`) skips what the filter leaves
+    out. It doesn't create a dir the filter empties, so a left-out DLC leaves no
+    skeleton (`tools/redmod/`), but it does create a dir that's empty in the cache.
+    A support overlay of a left-out DLC (`gog-support/<base>/<dlc>/app`) isn't
+    merged, and the others are filtered file by file (`merge_overlay_with`).
+  - **The plan** says `the depot cache also holds <DLC>: left out of the game dir`,
+    and the build warns with the count and size left out. `game files:` counts the
+    kept bytes only.
+  - **`content.toml` lists the DLC the build took**, from the choice, not from the
+    infos present (`content::for_build`'s `installed`). A row takes its title and
+    build from the DLC's info when there is one, and the catalog title otherwise. A
+    tree given by path (`--from-depot`), where the flags don't apply, and the
+    installer lane still record the infos present. So does a game read without a
+    `content.toml` (§6.3).
+  - **When the filter can't be built** (the lists can't be fetched: no network, a
+    build GOG no longer lists, or no build named by the record or the infos), the
+    build is **refused** before anything changes (exit 7). The message names the
+    left-out DLC and the two ways on: retry when GOG can be reached, or build with
+    those DLC too (`--dlc` for each). Installing them would contradict the flags,
+    and recording only the wanted set would be untrue.
+  - `mac-app` (on hold) chooses no DLC and still clones the cache tree whole; this
+    doesn't change it.
 - As built (#347): `check_cache(root, &CacheWant { build_id, language, dlcs })`; a `None`
   field isn't checked, so `mac-app`/`linux-app` (which pass none until #349) see only
   `Complete`, `Unrecorded` and `Missing`. Order of answers: `Missing`, `OtherBuild`,
@@ -598,9 +645,10 @@ Where the code differs from the table above, or does less for now:
   `dlc` while `dlc-journal.json` exists and warns while `dlc-download.json` does, each
   naming `gogo linux-app dlc <gogid> add`. The owned-but-missing line needs the network,
   so `dlc list` prints it as a note, not doctor.
-- A build's plan says `dlc: none` or lists the DLC already in the tree; the build flags
-  that choose DLC (#349) add the `(N owned not included)` tail and the rebuild
-  kept/added/dropped lines. The build's `--json` gains `build_id`, `language` and
+- A build's plan says `dlc: none` or lists the DLC the build takes (the chosen set;
+  for a tree given by path, the DLC already in it); the build flags that choose DLC
+  (#349) add the `(N owned not included)` tail and the rebuild kept/added/dropped
+  lines, and a cache holding more DLC adds the line of §3.3. The build's `--json` gains `build_id`, `language` and
   `dlcs`.
 
 ## 7. Progress, flags, scripting

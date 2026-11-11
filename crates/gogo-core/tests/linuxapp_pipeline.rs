@@ -1279,6 +1279,239 @@ fn a_build_writes_content_toml_and_apps_and_doctor_show_it() {
     );
 }
 
+// — a cache holding more DLC than the build takes (design 19 §3.3, #376) —
+
+const DLC_A: u64 = 1999999902;
+const DLC_B: u64 = 1999999903;
+
+/// A depot cache root (the tree's parent) holding the base and DLC A and B. B's
+/// manifest spells its dir `Tools/REDmod`, the disk has `tools/redmod`, and B shares
+/// one path with the base. Both DLC have a support overlay with their script.
+/// The record lists both and keeps the per-product file lists.
+fn dlc_cache(w: &World) -> PathBuf {
+    let root = w.tree.parent().unwrap().to_path_buf();
+    let t = &w.tree;
+    let write = |rel: &str, body: &str| {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    };
+    write("Test Game/data/base.pak", "base");
+    write("Test Game/data/shared.cfg", "base's");
+    write("Test Game/dlc/a/a.pak", "a");
+    write("Test Game/tools/redmod/r.exe", "b");
+    write("Test Game/tools/redmod/sub/r.dat", "b");
+    dlc_info(t, &DLC_A.to_string(), "Expansion A");
+    dlc_info(t, &DLC_B.to_string(), "Mod Tools B");
+    write(
+        &format!("gog-support/{ID}/{ID}/app/goggame-{ID}.script"),
+        "{}",
+    );
+    write(
+        &format!("gog-support/{ID}/{DLC_A}/app/goggame-{DLC_A}.script"),
+        "{}",
+    );
+    write(
+        &format!("gog-support/{ID}/{DLC_B}/app/goggame-{DLC_B}.script"),
+        "{}",
+    );
+    gogo::gog::depot::write_record(
+        &root,
+        "4242",
+        "en-US",
+        &[DLC_A.to_string(), DLC_B.to_string()],
+    )
+    .unwrap();
+    let mut lists = gogo::gog::dlc_filter::ProductFiles::new();
+    lists.insert(
+        ID.into(),
+        vec![
+            "Test Game/game.exe".into(),
+            format!("Test Game/goggame-{ID}.info"),
+            "Test Game/data/base.pak".into(),
+            "Test Game/data/shared.cfg".into(),
+            format!("gog-support/{ID}/{ID}/app/goggame-{ID}.script"),
+        ],
+    );
+    lists.insert(
+        DLC_A.to_string(),
+        vec![
+            "Test Game/DLC/A/a.pak".into(),
+            format!("Test Game/goggame-{DLC_A}.info"),
+            format!("gog-support/{ID}/{DLC_A}/app/goggame-{DLC_A}.script"),
+        ],
+    );
+    lists.insert(
+        DLC_B.to_string(),
+        vec![
+            "Test Game/Tools/REDmod/r.exe".into(),
+            "Test Game/Tools/REDmod/sub/r.dat".into(),
+            "Test Game/data/shared.cfg".into(),
+            format!("Test Game/goggame-{DLC_B}.info"),
+            format!("gog-support/{ID}/{DLC_B}/app/goggame-{DLC_B}.script"),
+        ],
+    );
+    gogo::gog::depot::store_products(&root, "4242", &lists).unwrap();
+    root
+}
+
+/// What the CLI hands the build for `wanted` (its `take_content`), from the record.
+fn content_for(root: &Path, w: &World, wanted: &[u64]) -> build::DepotContent {
+    use gogo::gog::dlc_filter::{self, Need};
+    let titles = |id: u64| {
+        if id == DLC_A {
+            "Expansion A"
+        } else {
+            "Mod Tools B"
+        }
+    };
+    let dlcs = wanted
+        .iter()
+        .map(|id| gogo::gog::content::DlcRef {
+            id: *id,
+            title: titles(*id).into(),
+        })
+        .collect();
+    let filter = match dlc_filter::need(root, &w.tree, ID, wanted) {
+        Need::Whole => None,
+        Need::Filter {
+            extra,
+            products,
+            build_id,
+            ..
+        } => {
+            let lists =
+                gogo::gog::depot::record_products(root, build_id.as_deref().unwrap()).unwrap();
+            let keeping: Vec<String> = products
+                .into_iter()
+                .filter(|p| !extra.iter().any(|d| d.id.to_string() == *p))
+                .collect();
+            Some(dlc_filter::filter(&lists, &keeping, &extra).unwrap())
+        }
+    };
+    build::DepotContent { dlcs, filter }
+}
+
+fn ids(c: &gogo::gog::content::Content) -> Vec<u64> {
+    c.dlc.iter().map(|d| d.id).collect()
+}
+
+#[test]
+fn a_build_takes_only_the_wanted_dlc_from_a_cache_holding_more() {
+    use gogo::gog::content;
+    let w = World::new("dlc-filter", &["d3d9.dll"]);
+    let root = dlc_cache(&w);
+    let game = |rel: &str| w.game().join("game").join(rel);
+    let build = |wanted: &[u64]| {
+        let opts = LinuxAppOptions {
+            depot_content: Some(content_for(&root, &w, wanted)),
+            ..w.opts()
+        };
+        let plan = build::plan(&opts, None, &mut quiet()).unwrap();
+        assert_eq!(
+            plan.dlcs.iter().map(|d| d.id).collect::<Vec<_>>(),
+            wanted,
+            "the plan names the wanted DLC, not what the cache holds"
+        );
+        let mut warnings = Vec::new();
+        let out = build::execute(&plan, None, &mut |e| {
+            if let ProgressEvent::Warn { message } = e {
+                warnings.push(message.clone());
+            }
+        })
+        .unwrap();
+        (out, warnings)
+    };
+
+    // --no-dlcs: the base only.
+    let (out, warnings) = build(&[]);
+    assert!(game("data/base.pak").is_file() && game("game.exe").is_file());
+    assert_eq!(
+        std::fs::read_to_string(game("data/shared.cfg")).unwrap(),
+        "base's",
+        "a path the base shares with a left-out DLC stays"
+    );
+    assert!(!game("dlc").exists(), "DLC A's dir isn't created");
+    assert!(
+        !game("tools").exists(),
+        "B's dirs, cased otherwise on disk, aren't either"
+    );
+    assert!(!game(&format!("goggame-{DLC_A}.info")).exists());
+    assert!(!game(&format!("goggame-{DLC_B}.script")).exists());
+    assert!(
+        game(&format!("goggame-{ID}.script")).is_file(),
+        "the base's overlay merges"
+    );
+    assert!(ids(&out.content).is_empty());
+    assert!(ids(&content::load(&w.game()).unwrap().unwrap()).is_empty());
+    let m = out.materialized.as_ref().unwrap();
+    assert_eq!(m.left_out_files, 5, "{m:?}");
+    assert!(
+        warnings
+            .iter()
+            .any(|m| m.contains("Expansion A") && m.contains("Mod Tools B")),
+        "{warnings:?}"
+    );
+
+    // --dlc A: the base and A, with A's support files.
+    let (out, _) = build(&[DLC_A]);
+    assert!(game("dlc/a/a.pak").is_file());
+    assert!(game(&format!("goggame-{DLC_A}.info")).is_file());
+    assert!(game(&format!("goggame-{DLC_A}.script")).is_file());
+    assert!(!game("tools").exists());
+    assert!(!game(&format!("goggame-{DLC_B}.info")).exists());
+    assert_eq!(ids(&out.content), [DLC_A]);
+    assert_eq!(out.content.dlc[0].title, "Expansion A");
+
+    // --all-dlcs: nothing to leave out, the cache is taken whole.
+    let opts = content_for(&root, &w, &[DLC_A, DLC_B]);
+    assert!(opts.filter.is_none());
+    let (out, _) = build(&[DLC_A, DLC_B]);
+    assert!(game("tools/redmod/sub/r.dat").is_file());
+    assert!(game(&format!("goggame-{DLC_B}.script")).is_file());
+    assert_eq!(ids(&out.content), [DLC_A, DLC_B]);
+
+    // A rebuild with the recorded set (A) drops B again.
+    let recorded: Vec<u64> = ids(&content::load(&w.game()).unwrap().unwrap());
+    assert_eq!(recorded, [DLC_A, DLC_B]);
+    let (out, _) = build(&[DLC_A]);
+    assert!(!game("tools").exists());
+    assert_eq!(ids(&out.content), [DLC_A]);
+    assert_eq!(
+        content::mismatches(&out.content, &w.game().join("game")),
+        (Vec::new(), Vec::new()),
+        "what's recorded is what's in game/"
+    );
+}
+
+#[test]
+fn a_cache_without_file_lists_gives_no_filter() {
+    use gogo::gog::dlc_filter::{self, Need};
+    let w = World::new("dlc-filter-none", &["d3d9.dll"]);
+    let root = w.tree.parent().unwrap().to_path_buf();
+    dlc_info(&w.tree, &DLC_B.to_string(), "Mod Tools B");
+    // An older record: no DLC, no lists. The info says B is there.
+    std::fs::write(
+        root.join(gogo::gog::depot::RECORD),
+        r#"{"buildId":"4242","files":[]}"#,
+    )
+    .unwrap();
+    let Need::Filter {
+        extra,
+        products,
+        build_id,
+        ..
+    } = dlc_filter::need(&root, &w.tree, ID, &[])
+    else {
+        panic!("B is extra");
+    };
+    assert_eq!(build_id.as_deref(), Some("4242"));
+    assert!(gogo::gog::depot::record_products(&root, "4242").is_none());
+    // Without lists the CLI refuses (`take_content`): no filter can be built.
+    let lacking = dlc_filter::filter(&Default::default(), &products[..1], &extra).unwrap_err();
+    assert_eq!(lacking, [ID.to_string(), DLC_B.to_string()]);
+}
+
 #[test]
 fn a_game_without_content_toml_is_derived_from_its_infos_and_nothing_is_written() {
     use gogo::macapp::{apps, doctor::Level};
