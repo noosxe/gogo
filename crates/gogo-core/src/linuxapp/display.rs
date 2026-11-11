@@ -265,7 +265,7 @@ pub fn gpu32_warning(
         return None;
     }
     Some(format!(
-        "this is a 32-bit game on the GPU renderer {}: 32-bit games like that usually fail or          draw unscaled on Wine's Wayland driver (#312). `gogo linux-app display {gogid} x11`          runs it on Xwayland; `gogo linux-app display {gogid} --clear` goes back",
+        "this is a 32-bit game on the GPU renderer {}: 32-bit games like that usually fail or draw unscaled on Wine's Wayland driver (#312). `gogo linux-app display {gogid} x11` runs it on Xwayland; `gogo linux-app display {gogid} --clear` goes back",
         r.id()
     ))
 }
@@ -419,6 +419,7 @@ mod tests {
         for r in ["wined3d", "dxvk", "d7vk", "vkd3d-proton", "proton-default"] {
             let w = gpu32_warning("7", &wl, Some(&line(r, Some(false)))).expect(r);
             assert!(w.contains("#312") && w.contains("display 7 x11"), "{w}");
+            assert!(!w.contains("  "), "{w}");
             assert!(w.contains("display 7 --clear"), "{w}");
             // 64-bit, an unknown scan: no warning.
             assert!(gpu32_warning("7", &wl, Some(&line(r, Some(true)))).is_none());
