@@ -149,6 +149,7 @@ impl<W: Write> Renderer<W> {
                 download_size,
                 disk_size,
                 estimated_download_size,
+                cache_complete,
                 language,
                 requested_language,
                 dlcs,
@@ -158,10 +159,14 @@ impl<W: Write> Renderer<W> {
                 self.line(&format!(
                     "gogo: plan {} (download {}, disk {}, {}{}{})",
                     install_dir.display(),
-                    estimated_download_size.map_or_else(
-                        || human_size(*download_size),
-                        |e| format!("~{} (estimate: after checking the cache)", human_size(e))
-                    ),
+                    if *cache_complete {
+                        "none (cache complete)".to_string()
+                    } else {
+                        estimated_download_size.map_or_else(
+                            || human_size(*download_size),
+                            |e| format!("~{} (estimate: after checking the cache)", human_size(e)),
+                        )
+                    },
                     human_size(*disk_size),
                     language,
                     requested_language
@@ -558,6 +563,7 @@ mod tests {
                     install_dir: PathBuf::from("/c/Game"),
                     download_size: 100 * MB,
                     estimated_download_size: None,
+                    cache_complete: false,
                     disk_size: 200 * MB,
                     language: "en-US".into(),
                     requested_language: None,
@@ -847,6 +853,7 @@ mod tests {
             install_dir: PathBuf::from("/c/Game"),
             download_size: 100 * MB,
             estimated_download_size: est,
+            cache_complete: false,
             disk_size: 200 * MB,
             language: "pt-BR".into(),
             requested_language: None,
@@ -865,6 +872,32 @@ mod tests {
             est.contains("download ~5.0 MiB (estimate: after checking the cache), disk"),
             "{est}"
         );
+    }
+
+    /// A complete cache plans no download (#388), with the note why.
+    #[test]
+    fn plan_line_of_a_complete_cache() {
+        const MB: u64 = 1 << 20;
+        let e = DepotEvent::Plan {
+            install_dir: PathBuf::from("/c/Game"),
+            download_size: 100 * MB,
+            estimated_download_size: Some(0),
+            cache_complete: true,
+            disk_size: 200 * MB,
+            language: "en-US".into(),
+            requested_language: None,
+            dlcs: vec![],
+            cache: Some("cache holds this build, language and DLC: nothing to fetch".into()),
+            game_files: None,
+        };
+        let mut r = Renderer::new(Mode::Human { live: false }, Vec::new());
+        r.event(&e, secs(0.0));
+        let out = String::from_utf8(r.into_inner()).unwrap();
+        assert!(
+            out.contains("(download none (cache complete), disk 200.0 MiB, en-US)"),
+            "{out}"
+        );
+        assert!(out.contains("gogo: cache holds this build"), "{out}");
     }
 
     #[test]

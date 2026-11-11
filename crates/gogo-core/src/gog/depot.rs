@@ -51,6 +51,11 @@ pub enum DepotEvent {
         /// `download_size`.
         #[serde(skip_serializing_if = "Option::is_none")]
         estimated_download_size: Option<u64>,
+        /// The cache already holds this build, language and DLC (#388): nothing is
+        /// fetched, `estimated_download_size` is 0 and `download_size` stays the
+        /// build's size.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        cache_complete: bool,
         /// What `--language` said, when `language` is the code it resolved to
         /// (`de` → `de-DE`).
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -477,8 +482,12 @@ pub async fn run(
     let check = prior.as_ref().map_or(CacheCheck::Unrecorded, |r| {
         check_record(&install_root, r, &want)
     });
-    let estimated_download_size =
-        estimate_switch(&check, prior.as_ref(), &manifest, &language, &dlcs);
+    let cache_complete = check == CacheCheck::Complete;
+    let estimated_download_size = if cache_complete {
+        Some(0)
+    } else {
+        estimate_switch(&check, prior.as_ref(), &manifest, &language, &dlcs)
+    };
     let inputs = download_inputs(
         generation,
         &language,
@@ -508,6 +517,7 @@ pub async fn run(
         download_size,
         disk_size,
         estimated_download_size,
+        cache_complete,
         language: language.clone(),
         requested_language,
         dlcs: plan_dlcs,
@@ -1497,7 +1507,10 @@ impl DownloadInputs {
 /// The plan line's words on what happens to the cache (`None`: nothing to say).
 fn cache_note(check: &CacheCheck, inputs: &DownloadInputs) -> Option<String> {
     Some(match check {
-        CacheCheck::Complete | CacheCheck::Unrecorded => return None,
+        CacheCheck::Unrecorded => return None,
+        CacheCheck::Complete => "cache holds this build, language and DLC: nothing to fetch \
+             (a run still checks it by hashing)"
+            .into(),
         CacheCheck::Missing { count, .. } => {
             format!("cache lost {count} file(s): checking it (hashing) and fetching them")
         }
@@ -1831,6 +1844,41 @@ mod tests {
         );
     }
 
+    /// The plan's note for each answer of [`check_cache`] (#388): only a complete
+    /// cache says nothing is fetched, and only an unrecorded one says nothing.
+    #[test]
+    fn the_plan_notes_each_cache_answer() {
+        let note = |check: CacheCheck| {
+            let inputs = download_inputs(2, "en-US", &ids(&["5"]), &check, &[]);
+            cache_note(&check, &inputs)
+        };
+        let complete = note(CacheCheck::Complete).unwrap();
+        assert!(complete.contains("nothing to fetch"), "{complete}");
+        assert_eq!(note(CacheCheck::Unrecorded), None);
+        for (check, says) in [
+            (
+                CacheCheck::Missing {
+                    shown: ids(&["Game/a.bin"]),
+                    count: 1,
+                },
+                "cache lost 1 file(s)",
+            ),
+            (CacheCheck::UnknownContent, "predates DLC tracking"),
+            (
+                CacheCheck::MissingDlc {
+                    missing: ids(&["5"]),
+                },
+                "fetching only those (no hashing)",
+            ),
+            (CacheCheck::OtherLanguage, "another language"),
+            (CacheCheck::OtherBuild, "another build"),
+        ] {
+            let n = note(check.clone()).unwrap();
+            assert!(n.contains(says), "{check:?}: {n}");
+            assert!(!n.contains("nothing to fetch"), "{check:?}: {n}");
+        }
+    }
+
     #[test]
     fn targeted_completion_diffs_from_the_recorded_set_without_verify() {
         let check = CacheCheck::MissingDlc {
@@ -1964,7 +2012,12 @@ mod tests {
                 .unwrap()
                 .contains("another build")
         );
-        assert_eq!(cache_note(&CacheCheck::Complete, &f), None);
+        // A complete cache says nothing is fetched (#388).
+        assert!(
+            cache_note(&CacheCheck::Complete, &f)
+                .unwrap()
+                .contains("nothing to fetch")
+        );
     }
 
     fn build(id: &str, published: &str, public: bool) -> Build {
@@ -2110,6 +2163,7 @@ mod tests {
             install_dir: "/c/T".into(),
             download_size: 1,
             estimated_download_size: None,
+            cache_complete: false,
             disk_size: 2,
             language: "en-US".into(),
             requested_language: None,
@@ -2132,13 +2186,29 @@ mod tests {
             serde_json::to_string(&e).unwrap(),
             r#"{"type":"plan","installDir":"/c/T","downloadSize":1,"diskSize":2,"language":"en-US","estimatedDownloadSize":1}"#
         );
+        // A complete cache (#388): `downloadSize` stays the build's size.
+        if let DepotEvent::Plan {
+            estimated_download_size,
+            cache_complete,
+            ..
+        } = &mut e
+        {
+            *estimated_download_size = Some(0);
+            *cache_complete = true;
+        }
+        assert_eq!(
+            serde_json::to_string(&e).unwrap(),
+            r#"{"type":"plan","installDir":"/c/T","downloadSize":1,"diskSize":2,"language":"en-US","estimatedDownloadSize":0,"cacheComplete":true}"#
+        );
         if let DepotEvent::Plan {
             game_files,
             estimated_download_size,
+            cache_complete,
             ..
         } = &mut e
         {
             *estimated_download_size = None;
+            *cache_complete = false;
             *game_files = Some(MaterializePlan {
                 method: super::super::materialize::TreeMethod::Copy,
                 game_dir: "/d/games/1/game".into(),

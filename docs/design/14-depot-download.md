@@ -270,8 +270,16 @@ the same codes (`English` → `en-US`). `*` (v1 `Neutral`) is a depot for every 
     files stay.
   - *Plan and JSON.* The human line reads `download ~4.7 GiB (estimate: after checking
     the cache)`. The `plan` event keeps `downloadSize` (the whole build, now an upper
-    bound) and gains `estimatedDownloadSize`, present only for a switch. `disk` is the
+    bound) and gains `estimatedDownloadSize`, present for a switch and for a complete
+    cache (below). `disk` is the
     new language's tree and doesn't count the old language's files that stay. The
     free-space preflight is not this figure: it runs after `prepare` from the
     downloader's own `get_required_space`, which counts only files not yet at their path,
     so it already ignores what the cache holds.
+- **The plan of a complete cache (#388).** When `check_cache` answers `Complete` for the
+  plan's build, language and DLC, nothing is fetched, so the plan line reads `download
+  none (cache complete)`, with the note `cache holds this build, language and DLC:
+  nothing to fetch (a run still checks it by hashing)`: a run is still a `verify`. The
+  `plan` event keeps `downloadSize` as the build's size, sets `estimatedDownloadSize: 0`
+  and gains `cacheComplete: true`. `linux-app` and `mac-app` show no download figure
+  when they reuse a complete cache: they don't run the depot lane at all.
