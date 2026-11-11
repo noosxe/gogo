@@ -822,7 +822,7 @@ device:`). A Unity game's real API is in its `Player.log` (`Version: Direct3D 12
 **`--gpu renderD128,renderD129`.** The sandbox has both, and wlroots renders on the first, so
 the order is the compositor's choice: `renderD128,renderD129` is a hybrid laptop's shape,
 `renderD129,renderD128` a desktop on the dGPU. The label joins them, compositor first
-(`radv+nvidia`), and so does `tested_entry`'s host.
+(`radv+nvidia`); `tested_entry`'s `gpu_driver` is the first one's.
 
 The game gets what a desktop gives it: no `VK_DRIVER_FILES`, no GL vendor, no
 `__NV_PRIME_RENDER_OFFLOAD`, and an `XDG_DATA_DIRS` where the loader finds every ICD and
@@ -1134,12 +1134,14 @@ A pass prints `tested_entry`. Add it to the game's L3 file in `compat/<gogid>.to
 status = "boots"
 notes = "headless sway: menu, Preferences and Exit work; audio and a real compositor not judged"
 tested = [
-  { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/software", date = 2026-11-06 },
-  { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/nvidia", date = 2026-11-06 },
+  { runtime = "ge-proton/GE-Proton11-12", compositor = { name = "sway", version = "1.12" }, gpu_driver = { vendor = "mesa-llvmpipe", version = "26.2.6" }, date = 2026-11-06 },
+  { runtime = "ge-proton/GE-Proton11-12", compositor = { name = "sway", version = "1.12" }, gpu_driver = { vendor = "nvidia", version = "595.112.07" }, date = 2026-11-06 },
 ]
 ```
 
-`headless-sway/<gpu>` says what it is: not the owner's desktop. A status above `boots`
+`compositor = { name = "sway", … }` says what it is: a headless run, not a real desktop.
+The GPU driver is the first `--gpu`'s (`nvidia`, `mesa-radv`, `mesa-llvmpipe` for software), its version
+read from `vulkaninfo`; no entry is printed if the sway or driver version can't be read. A status above `boots`
 needs someone to have played it.
 
 ## What it doesn't cover

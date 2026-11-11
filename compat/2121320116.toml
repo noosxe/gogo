@@ -8,7 +8,7 @@ status = "boots"
 lane   = "depot"
 notes  = "headless sway: menu, Options and Quit Game work on DXVK; audio and a real compositor not judged"
 tested = [
-  { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/software", date = 2026-11-06 },
-  { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/radv", date = 2026-11-06 },
-  { runtime = "ge-proton/GE-Proton11-12", host = "headless-sway/nvidia", date = 2026-11-06 },
+  { runtime = "ge-proton/GE-Proton11-12", compositor = { name = "sway", version = "1.12" }, gpu_driver = { vendor = "mesa-llvmpipe", version = "26.2.6" }, date = 2026-11-06 },
+  { runtime = "ge-proton/GE-Proton11-12", compositor = { name = "sway", version = "1.12" }, gpu_driver = { vendor = "mesa-radv", version = "26.2.6" }, date = 2026-11-06 },
+  { runtime = "ge-proton/GE-Proton11-12", compositor = { name = "sway", version = "1.12" }, gpu_driver = { vendor = "nvidia", version = "595.112.07" }, date = 2026-11-06 },
 ]

@@ -473,7 +473,8 @@ JSON in a collapsed `<details>`. A pass that fails is still recorded.
 ```
 
 Each passing case becomes a compat `tested` entry for the game (#75):
-`{ runtime = "winecx-24.0.7_7", host = "m4pro/macos-27.0.1", date = 2026-10-23 }`. A
+`{ runtime = "winecx-24.0.7_7", compositor = { name = "macos", version = "27.0.1" }, gpu_driver = { vendor = "apple", version = "27.0.1" }, date = 2026-10-23 }` for a host
+pass; `vm-test.sh` prints the VM's (`vendor = "apple-paravirtual"`). A
 worked example is the Neo Cab DXMT pass in #70's comments. It was started by a
 double-click before this script existed, and recorded the same evidence: the run log's
 runtime path, DXMT's feature level with no `Failed to get metal layer`, and Unity's

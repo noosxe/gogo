@@ -1045,8 +1045,8 @@ source = "gogo-host"
 status = "broken"
 notes  = "unplayable: DXMT loads ~4 min per launch then runs at slideshow speed (32-bit on WoW64), wined3d garbles the 3D; play it elsewhere"
 tested = [
-  { runtime = "winecx/24.0.7_7+dxmt-v0.80", host = "m4pro/macos-27.0.1", date = 2026-10-23 },
-  { runtime = "winecx/24.0.7_7", host = "m4pro/macos-27.0.1", date = 2026-10-23 },
+  { runtime = "winecx/24.0.7_7+dxmt-v0.80", compositor = { name = "macos", version = "27.0.1" }, gpu_driver = { vendor = "apple", version = "27.0.1" }, date = 2026-10-23 },
+  { runtime = "winecx/24.0.7_7", compositor = { name = "macos", version = "27.0.1" }, gpu_driver = { vendor = "apple", version = "27.0.1" }, date = 2026-10-23 },
 ]
 ```
 
@@ -2494,7 +2494,7 @@ with no display output (`--gpu renderD12x`, or several with the compositor's fir
 | Nothing left | no process of the run and no scratch dir, on success, failure, timeout, `INT` and `TERM` |
 
 A pass prints a `tested_entry` for L3 `[platforms.linux]`, with
-`host = "headless-sway/<software|nvidia|radv>"`. CI runs the harness's self-test on
+`compositor = { name = "sway", … }` and a `gpu_driver` of `mesa-llvmpipe`, `nvidia` or `mesa-radv` with its version (read from `vulkaninfo`; no row when a version can't be read). CI runs the harness's self-test on
 a plain xterm, never a game.
 
 **Still the user's Linux host pass** (#179), on their real session (NixOS, RTX 4090 + RADV

@@ -1880,9 +1880,12 @@ class Driver:
             gpu["gl_renderer"] = m.group(1).strip() if m else None
         self.phase("gpu_gl")
         gpu["vulkan_devices"] = []
+        gpu["vulkan_driver_infos"] = []
         if shutil.which("vulkaninfo", path=env["PATH"]):
             r = self.tool("vulkaninfo", "--summary", env=env)
             gpu["vulkan_devices"] = re.findall(r"deviceName\s*=\s*(.+)", r.stdout)
+            # The driver's own version, in device order: a `tested` row's gpu_driver.
+            gpu["vulkan_driver_infos"] = re.findall(r"driverInfo\s*=\s*(.+)", r.stdout)
         self.phase("gpu_vulkan")
         expect = self.cfg["gpu"]["expect"]
         if self.manifest["command"] and not gpu["gl_renderer"]:

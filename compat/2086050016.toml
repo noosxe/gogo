@@ -15,5 +15,5 @@ lane    = "depot"
 display = "x11"
 notes   = "host pass on Hyprland (NVIDIA RTX 4090): plays fine on Xwayland, on Wine's builtin ddraw (wined3d) with the game's DDrawCompat left unloaded (#199); on Wine's Wayland driver nothing is drawn while the process runs, and the fullscreen surface even hides the desktop's bar on that workspace (32-bit GPU game, #326), so wayland is a no-go for this game, hence display = x11"
 tested = [
-  { runtime = "ge-proton/GE-Proton11-12", host = "kraken-hyprland/nvidia", date = 2026-11-11 },
+  { runtime = "ge-proton/GE-Proton11-12", compositor = { name = "hyprland", version = "0.57.1" }, gpu_driver = { vendor = "nvidia", version = "595.112.07" }, date = 2026-11-11 },
 ]

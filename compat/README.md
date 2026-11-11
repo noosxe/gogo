@@ -31,7 +31,7 @@ env      = { WINEMSYNC = "1" }
 status   = "boots"                    # unknown | broken | boots | plays
 notes    = "boots to the main menu"   # one line; shown as "known broken: <notes>"
 lane     = "depot"                    # depot | installer: the build lane status/notes/tested were seen on
-tested   = [{ runtime = "winecx/24.0.7_7+dxmt-v0.80", host = "m4pro/macos-27.0.1", date = 2026-10-22 }]
+tested   = [{ runtime = "winecx/24.0.7_7+dxmt-v0.80", compositor = { name = "macos", version = "27.0.1" }, gpu_driver = { vendor = "apple", version = "27.0.1" }, date = 2026-10-22 }]
 
 [platforms.linux]
 renderer = "wined3d"                  # wined3d | cnc-ddraw[/ver]; dxmt / d3dmetal are an error here
@@ -51,7 +51,7 @@ as across layers (below): maps per key, `verbs` add (`-<verb>` removes one,
 entry. A table for the other OS is checked (bad values are errors there too)
 but not applied, and a key of the second row at the top level warns and is
 ignored, like an unknown key. `[platforms.linux]` tables come from a Linux run
-that has something to record (`host = "headless-sway/<gpu>"`, `docs/linux-e2e.md`).
+that has something to record (a `sway` compositor row, `docs/linux-e2e.md`).
 
 `files` writes small text files into the game dir that neither the depot tree
 nor GOG's support overlay supplies. Paths are relative to the game dir, with
@@ -110,11 +110,11 @@ tables too.
 status = "broken"
 lane   = "depot"
 notes  = "asks for the CD"
-tested = [{ runtime = "winecx/24.0.7_7", host = "vm/macos-27.0", date = 2026-10-23 }]
+tested = [{ runtime = "winecx/24.0.7_7", compositor = { name = "macos", version = "27.0" }, gpu_driver = { vendor = "apple-paravirtual", version = "27.0" }, date = 2026-10-23 }]
 
 [platforms.macos.lanes.installer]
 status = "plays"
-tested = [{ runtime = "winecx/24.0.7_7", host = "m4pro/macos-27.0.1", date = 2026-10-23 }]
+tested = [{ runtime = "winecx/24.0.7_7", compositor = { name = "macos", version = "27.0.1" }, gpu_driver = { vendor = "apple", version = "27.0.1" }, date = 2026-10-23 }]
 ```
 
 Seed (#75), see docs/19 §5:
@@ -123,13 +123,22 @@ Seed (#75), see docs/19 §5:
   (`scripts/host-pass.sh`); `gogo-vm`: a `scripts/vm-test.sh` smoke run. The VM
   has no Metal 3 and no OpenGL, so a VM row never vouches for DXMT, D3DMetal
   or OpenGL rendering.
-- `source = "gogo-headless"`: a `scripts/linux-e2e.sh` run on this machine's
-  software, RADV and NVIDIA drivers, with no display, compositor or audio of its own.
+- `source = "gogo-headless"`: a `scripts/linux-e2e.sh` run on the software,
+  RADV or NVIDIA drivers, with no display, compositor or audio of its own.
 - `tested` rows carry no renderer: the runtime id says it, a derived
   `winecx/24.0.7_7+dxmt-v0.80` for DXMT/D3DMetal, the base id otherwise.
-  `host` is `m4pro/macos-<ver>` or `vm/macos-<ver>` on the Mac;
-  `headless-sway/<gpu>` for a Linux e2e run, `<machine>-<compositor>/<gpu>`
-  (`kraken-hyprland/nvidia`) for a Linux host pass on a real desktop.
+- `tested` rows say what the run used and nothing about whose machine it was: no
+  hostname, no username, no path. Every field but `date` is required:
+  `{ runtime = "ge-proton/GE-Proton11-12", compositor = { name = "hyprland", version = "0.57.1" },
+  gpu_driver = { vendor = "nvidia", version = "595.112.07" }, date = 2026-11-11 }`.
+  - `compositor` is the Wayland compositor (`hyprland`, `sway`, ...) with its version; on the
+    Mac it is the OS, `{ name = "macos", version = "27.0.1" }`. `sway` only ever appears as the
+    headless one of the e2e harness (`scripts/linux-e2e.sh`), so it marks a headless row.
+  - `gpu_driver` is the driver's vendor and version: `nvidia` (the proprietary driver),
+    `mesa-radv` and `mesa-llvmpipe` (Mesa's RADV and its software renderer), `apple` on a Mac
+    (the Metal driver ships with macOS, so its version is the OS's) and `apple-paravirtual`
+    in the Tart VM. A game that ran on two GPUs records the one the compositor drew on.
+  - The old `host` key is gone. It is an unknown key now: gogo warns and ignores it.
 - `status`: `plays` = rendering, input and audio judged by eye; `boots` =
   reaches the game's own UI or first-run dialog; `broken` also covers "runs
   but unplayable", with the reason in `notes`.
