@@ -78,8 +78,10 @@ the TUI and `--json` all build on it.
 a hidden alias of `--all-dlcs` (scripts and docs use it). Its meaning narrows: today it
 takes every DLC in the build (`manifest.dlcs()`) or every `expanded_dlcs` entry, owned or
 not (design 17 §1: `expanded_dlcs` is not an ownership list). From now it is **owned**
-DLC only. An unowned DLC's depots can't be used anyway; whether GOG refuses them at
-secure-link time is unverified (§11.2 R4), and gogo shouldn't find out by trying.
+DLC only. An unowned DLC's depots can't be used anyway: GOG refuses the secure link for a
+product the account doesn't own (`403`, `error: invalid_licence`, before any file is
+fetched; §11.2 R4). So today's `--with-dlcs` is expected to fail at the first unowned DLC
+in a build rather than skip it, which is why selection is owned-only (D2).
 
 ### 1.2 Which DLC a build gets (D3, D4)
 
@@ -110,12 +112,12 @@ secure-link time is unverified (§11.2 R4), and gogo shouldn't find out by tryin
 ```
 $ gogo linux-app dlc 1423049311 list
 id          title                         owned  installed      download   disk
-2000000001  Cyberpunk 2077: Phantom Lib…  yes    no             19.6 GiB   25.1 GiB
-2000000002  Cyberpunk 2077: REDmod        yes    yes (2.31a)     0.4 GiB    0.6 GiB
-...         Some Unowned DLC              no     -              -          -
+1256837418  Phantom Liberty               yes    no             29.2 GiB   30.1 GiB
+1597316373  REDmod                        yes    yes (2.5)     288.5 MiB  605.0 MiB
 ```
 
-(Ids, titles and sizes above are made up for the example, not captured.)
+(Ids and sizes are build 2.5_RedModFix's, from the research in §11.2; the `installed`
+column is made up.)
 
 - Rows: the union of the game's catalog `expanded_dlcs` (titles; design 04) and the
   installed build's manifest `products` (what can actually be downloaded on the depot
@@ -132,7 +134,12 @@ id          title                         owned  installed      download   disk
   language and Windows. Unowned rows show no size (design 17 Q2: unowned DLC sizes are
   unverified).
 - A DLC in the catalog but not in the build manifest is `not in this build`: it can't be
-  added on the depot lane (an installer-only DLC; the offline lane can take it).
+  added on the depot lane (an installer-only DLC; the offline lane can take it). On the
+  depot lane it's also what an old build shows for a newer DLC: Cyberpunk 2077's
+  1.63_Hotfix manifest lists REDmod but not Phantom Liberty (§4).
+- A DLC can be in the build's `products` with **no depot bytes** (preorder or cosmetic
+  entitlements: Journey to the Savage Planet's "Hot Garbage", Ghostrunner's "KATANA").
+  It shows size `0`; adding it is a record-only change (§3.2).
 - `--json`: `{gogid, lane, buildId, language, dlcs: [{id, title, owned, installed,
   installedBuild, inBuild, downloadSize, diskSize}]}`.
 
@@ -165,7 +172,7 @@ One resolver, `dlc::resolve(names, candidates) -> Result<Vec<DlcId>>`, used by e
 3. Two or more matches: an error listing them with ids. Never a guess: a build that
    downloads the wrong 20 GB is worse than a retyped command.
 
-A DLC id given as the **game** (`gogo linux-app 2000000001`) keeps design 03's rule: it
+A DLC id given as the **game** (`gogo linux-app 1256837418`) keeps design 03's rule: it
 resolves to its parent with a notice. It doesn't add that DLC (that would make the game
 selector also a DLC selector, and a mistyped id would choose content).
 
@@ -173,11 +180,15 @@ selector also a DLC selector, and a mistyped id would choose content).
 
 Usage errors (exit 2), each listing what would have worked:
 
-- `unknown DLC "x" for Cyberpunk 2077; its DLC: 2000000001 Phantom Liberty (owned), …`
-- `you don't own "Phantom Liberty" (2000000001); owned DLC for Cyberpunk 2077: …`
-- `"Phantom Liberty" (2000000001) isn't in build <id> on the depot lane; …` (installer-only
+- `unknown DLC "x" for Cyberpunk 2077; its DLC: 1256837418 Phantom Liberty (owned), …`
+- `you don't own "Phantom Liberty" (1256837418); owned DLC for Cyberpunk 2077: …`
+- `"Phantom Liberty" (1256837418) isn't in build <id> on the depot lane; …` (installer-only
   DLC; the hint names the offline lane).
 - `--dlc` and `--all-dlcs`/`--no-dlcs` together: clap conflict.
+- The server disagrees with the owned set (a stale `owned_ids()`): a secure-link `403`
+  with `error: invalid_licence` for a DLC's `productId` becomes the "you don't own" error
+  above, with the same list. gogo never prints the response's `error_description`: it
+  contains the account id.
 
 ### 2.3 Language (D10)
 
@@ -234,6 +245,10 @@ resolve game → content.toml (build B, language L, installed DLC I)
   cache shouldn't download it again for a DLC. The staging root gets only the diff (the
   DLC files), since the old manifest says the base is "there". It's inside the game dir
   so §3.4's moves are renames on one filesystem, and it's deleted after the lay.
+- **A DLC with no depot bytes** (§1.3): there's nothing to download or lay, so no
+  downloader runs and no journal is written. The add records it in `content.toml` (and
+  in the cache's `dlcs`), and applies its `goggame-<dlcid>` files if the build's support
+  overlay has them and its script (§3.6). A plan shows `0 B` for it.
 - The staging dir is named so `move`, `apps remove` and the GC know it: `move` refuses
   while it exists (an add in progress, or a leftover), `apps remove` deletes it with the
   game.
@@ -243,7 +258,7 @@ resolve game → content.toml (build B, language L, installed DLC I)
 `.gogo-depot.json` gains two fields, both optional so older records still read:
 
 ```json
-{ "buildId": "…", "language": "en-US", "dlcs": ["2000000001"], "files": [ … ] }
+{ "buildId": "…", "language": "en-US", "dlcs": ["1256837418"], "files": [ … ] }
 ```
 
 `check_cache` (design 14 D2) gets the wanted language and DLC set, and answers:
@@ -354,16 +369,24 @@ fetches DLC **for the installed build** `B`, recorded in `content.toml` (for old
 | Case | What `dlc add` does |
 |---|---|
 | `B` is GOG's newest public build | adds |
-| GOG has a newer build, and still lists `B` | adds for `B`; the plan notes the newer build and how to update (a rebuild, which keeps the DLC set) |
-| `get_builds` no longer lists `B` | refuses (exit 7): `build B is no longer served by GOG; update the game first: gogo linux-app <game> --dlc <names> (keeps the prefix, saves and L4)` |
+| GOG has a newer build, and still lists `B` among the recent ones | adds for `B`; the plan notes the newer build and how to update (a rebuild, which keeps the DLC set) |
+| `get_builds` no longer lists `B` (a common case, below) | refuses (exit 7): `build B is no longer served by GOG; update the game first: gogo linux-app <game> --dlc <names> (keeps the prefix, saves and L4)` |
 | `B` unknown | refuses the same way, since a DLC for a guessed build is worse than a rebuild |
+| `B` is listed but the DLC isn't in its manifest | refuses (exit 2) with `not in this build`, naming the update path as above |
+
+**GOG lists only a limited set of recent builds** (§11.2 R2): for Cyberpunk 2077, 6
+builds (2.5_RedModFix back to a 1.63_Hotfix legacy branch) of a `total_count` of 270, and
+paging returns the same 6. A manifest's URL comes from that list, so a build that has
+rotated off it can't be fetched at all. A game built some versions ago therefore can't
+take DLC without an update first: the refusal is an ordinary outcome, and its text must
+name the update path. Builds still listed do serve their manifests, including the old
+legacy-branch one.
 
 - **Why not update the base silently:** an update is a rebuild of a 70 GB tree with a
   different game version, and saves, mods and the protonfix can depend on the version.
   It must be the user's command. **Why not refuse whenever a newer build exists:** the
-  user may hold a version back on purpose (a mod, a known regression), and GOG keeps
-  older builds listed (assumed from gog-warp's `get_builds` returning the build history;
-  §11.2 R2).
+  user may hold a version back on purpose (a mod, a known regression), and while the
+  build is still among the listed ones, adding DLC to it works.
 - An update command that patches the base in place (gog-warp's `upgrade_from` with
   xdelta patches) is the natural next step and is the same machinery; it's not designed
   here.
@@ -383,9 +406,13 @@ GOG's DLC installers are Inno Setup `.exe`s of their own (design 04 puts them un
   the download engine (verified, resumable).
 - **First build:** the base installer runs as today (staging prefix, `/DIR=C:\GOG\<slug>`).
   Then each chosen DLC's installer, in catalog order, in the **same staging prefix**, with
-  the same Inno flags and `/DIR=C:\GOG\<slug>` (GOG's DLC installers would otherwise read
-  the base's path from `HKLM\Software\GOG.com\Games\<gogid>`; forcing `/DIR` makes it
-  not matter whether the base installer wrote that key under Proton). A DLC is installed
+  the same Inno flags and `/DIR=C:\GOG\<slug>`. This matches Lutris's precedent for GOG
+  add-ons (the base game's prefix, `/DIR=` the base dir, silent flags; §11.2 R3).
+  **Assumption:** a DLC installer may also check that the base game is installed (reports
+  say one run in another prefix says the base isn't found; the check itself, a
+  `HKLM\Software\GOG.com\Games\<gogid>` key, a `goggame-<id>.info` or a file, isn't
+  documented). On this lane the base's own installer ran in the same prefix, so whatever
+  it checks should be there. The depot lane never runs DLC installers. A DLC is installed
   when the installer exits 0 and `goggame-<dlcid>.info` is in the game dir. A failed DLC
   fails the build before the prefix moves into place, so no half-built game appears.
 - **Adding later:** the same installer run in the game's real prefix, under the game's
@@ -397,7 +424,7 @@ GOG's DLC installers are Inno Setup `.exe`s of their own (design 04 puts them un
   decision for the whole installer lane, and DLC shouldn't be the only place it differs.
 
 Verified: nothing about DLC installers' file names or whether they install into the base
-dir has been captured live (design 17; docs/03). §11.2 R3 and the first host pass check
+dir has been captured live (design 17; docs/03). The first host pass (§10) checks
 it.
 
 ## 6. Record and state (D9)
@@ -412,7 +439,7 @@ version  = "2.31a"
 language = "en-US"
 
 [[dlc]]
-id       = 2000000001
+id       = 1256837418
 title    = "Cyberpunk 2077: Phantom Liberty"
 build_id = "…"                # always the base's build on the depot lane; kept per DLC
 version  = "2.31a"            #   for the installer lane, where each installer has its own
@@ -518,21 +545,33 @@ What the Mac lane would need, none of it designed further now:
 - Offline lane: the installer argument list for a DLC (`/DIR` = the base's), the order,
   and that a failing DLC leaves no game dir (a fake runner).
 
-**Live, manual (needs @noosxe's OK for each download):**
+- **The record-only add** (§3.2): a fixture manifest with a DLC whose depots are empty:
+  `dlc list` shows `0`, `dlc add` runs no downloader, writes no journal, records the DLC
+  and applies its script.
+- The secure-link `403` (`invalid_licence`) maps to §2.2's error, and the output never
+  contains the response's `error_description`.
+
+**No real-account headless e2e step** (§11.2 R1): the account has no small game with a
+small owned DLC that has depot bytes. The only owned DLC with real files are Cyberpunk
+2077's, on a base of about 107 GiB compressed; the others are zero-byte entitlements. So
+selection, the targeted diff (through the downloader seam), the lay, the journal and
+interruption are covered by the synthetic manifest and fixture tests above (#352), and
+the real thing is a host pass.
+
+**Host pass (needs @noosxe's OK for each download):**
 
 - `gogo linux-app dlc <gogid> list` against the real API for Cyberpunk 2077: the rows,
   ownership and sizes, before anything downloads (read-only, no OK needed).
-- Cyberpunk 2077 + Phantom Liberty: `dlc add` on the existing depot build, then a host
-  pass (Hyprland) that the expansion shows in the game and old saves load. This is the
-  driving case and a host pass, not e2e (tens of GB).
-
-**Headless e2e (proposed):** `scripts/linux-e2e.sh` gets a `dlc_add` step after the build:
-`dlc list --json` (asserts the DLC is owned and not installed), `dlc add <id> --yes`,
-asserts `content.toml` and `goggame-<dlcid>.info`, then the usual launch-and-screenshot,
-and a second run of `dlc add` that must be a no-op. It needs a game in
-`target/linux-e2e/cache` (or a new small one) with a small owned DLC on the depot lane:
-which one is §11.2 R1, and a new download still needs @noosxe's OK. An interrupted-add check
-(kill during the lay, relaunch refused, rerun finishes) fits the same step.
+- Cyberpunk 2077 + **REDmod** first (288.5 MiB of DLC): `dlc add` on the existing depot
+  build, the journal and an interrupted add (kill during the lay, launch refused, rerun
+  finishes), then a second `dlc add` as a no-op.
+- Then **Phantom Liberty** (29.2 GiB): `dlc add`, and on Hyprland that the expansion shows
+  in the game and old saves load. The driving case.
+- **Offline lane, one DLC installer** under umu with `/DIR=` in the base game's prefix:
+  the exit code, that `goggame-<dlcid>.info` lands beside the base's, and whether it
+  prompts (and what it checks) when the base game's registry key is missing. Reading the
+  installer first with `innoextract --list` and its `[Registry]`/`[Code]` entries can
+  settle the check without running anything.
 
 ## 11. Decided and open
 
@@ -544,19 +583,22 @@ which one is §11.2 R1, and a new download still needs @noosxe's OK. An interrup
    the `N owned DLC not included (--all-dlcs)` line.
 2. **Removal is a follow-up** (§3.5, D11; #353, low priority).
 
-### 11.2 To be settled by research
+### 11.2 Settled by research (#343, comment "Research for design 19")
 
-A separate research pass answers these against the live API and real files. Its answers
-update this doc (and the sections that cite them).
+A read-only pass on 2026-11-11 (metadata and manifest JSON only, nothing downloaded):
 
-- **R1. e2e candidate:** a game with a small owned DLC on the depot lane for the
-  `dlc_add` step (§10), with Cyberpunk 2077 as the fallback. Pending that research (#352).
-- **R2. Old builds:** does `get_builds` still list the installed build when a newer one
-  exists? Checked on Cyberpunk 2077 (read-only); D5 assumes it does.
-- **R3. DLC installers on the offline lane:** do GOG's DLC `setup_*.exe` honour `/DIR=` and
-  install beside the base game under Proton?
-- **R4. Unowned DLC in a manifest:** does GOG refuse their depots at secure-link time?
-  This design never asks for them, so it only shapes the error text.
+- **R1, e2e candidate:** none. Only Cyberpunk 2077 has owned DLC with depot bytes
+  (Phantom Liberty 29.2 GiB, REDmod 288.5 MiB, on a base of about 107 GiB). Two other
+  owned DLC (Journey to the Savage Planet, Ghostrunner) have zero-byte depots. Hence
+  §10's fixture tests and host pass, and the record-only add in §3.2.
+- **R2, old builds:** GOG lists a few recent builds (6 of 270 for Cyberpunk); those still
+  serve manifests, and older ones can't be fetched. A DLC can be missing from an older
+  build's manifest. §4.
+- **R3, DLC installers:** `/DIR=` with silent flags in the base game's prefix is Inno's
+  documented flag and Lutris's precedent; what the installer checks for the base game is
+  unconfirmed. §5's assumption and the host pass in §10.
+- **R4, unowned DLC:** the secure link is refused with `403`, `error: invalid_licence`, for
+  an unowned or nonexistent product. §1.1, §2.2.
 
 ## 12. Implementation issues (sub-issues of #343)
 
@@ -564,12 +606,12 @@ Filed 2026-11-11, each a sub-issue of #343.
 
 | # | Title | Depends on |
 |---|---|---|
-| I1 (#346) | DLC core: `dlc.rs` (`available`, `resolve`, owned set, per-DLC sizes), `DlcSet` in `DepotOptions`, `--dlc`/`--all-dlcs` on `depot` and `download` (§1.1, §2, §8) | — |
+| I1 (#346) | DLC core: `dlc.rs` (`available`, `resolve`, owned set, per-DLC sizes), `DlcSet` in `DepotOptions`, `--dlc`/`--all-dlcs` on `depot` and `download` (owned only), the secure-link `403` mapping (§1.1, §2, §8) | — |
 | I2 (#347) | Depot cache record: `dlcs`/`language`, `check_cache` answers, targeted completion (#336) (§3.3) | I1 |
 | I3 (#348) | `content.toml` per game, written by both build lanes; `apps list/show`, `doctor`'s `dlc` check, plan and `--json` (§6) | I1 |
 | I4 (#349) | `linux-app` build flags `--dlc`/`--all-dlcs`/`--no-dlcs`/`--lang`, the default rules and picker (§1.2), DLC scripts in setup (§3.6) | I1, I2, I3 |
-| I5 (#350) | `linux-app dlc list` and `add` on the depot lane: targeted download, staging, `lay_files`, journal, recovery, launcher refusal (§3.2, §3.4, §4, §7) | I2, I3, I4 |
+| I5 (#350) | `linux-app dlc list` and `add` on the depot lane: targeted download, staging, `lay_files`, journal, recovery, launcher refusal, the record-only add of a zero-byte DLC (§3.2, §3.4, §4, §7) | I2, I3, I4 |
 | I6 (#351) | Offline-installer lane: DLC installers at first build and `dlc add` (§5) | I3, I4 |
-| I7 (#352) | `scripts/linux-e2e.sh` `dlc_add` step (§10), once a game is agreed | I5 |
+| I7 (#352) | DLC fixture tests (synthetic manifests: diff, lay, journal, interruption, zero-byte DLC) and the Cyberpunk host-pass runbook (§10) | I5 |
 | I8 (#353) | DLC removal (§3.5) | I5 |
 | I9 (#354) | mac-app DLC (§9) | I5, the Mac lane resuming |
