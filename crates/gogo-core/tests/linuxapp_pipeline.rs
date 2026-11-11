@@ -6110,6 +6110,7 @@ mod dlc_add {
             tree_name: TREE.into(),
             infos: &infos,
             wanted,
+            cache_upgrade: None,
         })
     }
 
@@ -6596,6 +6597,7 @@ mod dlc_add {
             tree_name: TREE.into(),
             infos: &infos,
             wanted: &[DLC, OTHER],
+            cache_upgrade: None,
         });
         assert_eq!(p.from_cache, [DLC]);
         assert_eq!(p.download_size, 50);
@@ -6850,5 +6852,319 @@ mod dlc_add {
         );
         assert_eq!(w.game_runs(), 0);
         std::fs::remove_file(w.game().join(lay::JOURNAL)).unwrap();
+    }
+
+    // — the depot cache keeps what an add fetches (#374) —
+
+    /// The cache's base files as a depot manifest would list them (relative to the
+    /// cache root), read from a cache holding only the base.
+    fn base_paths(root: &Path) -> Vec<String> {
+        tree(&root.join(TREE))
+            .into_keys()
+            .map(|p| format!("{TREE}/{p}"))
+            .collect()
+    }
+
+    /// The build's depots: the base's (every language) and the DLC's.
+    fn depots(base: Vec<String>) -> Vec<gogo::gog::dlc_filter::DepotList> {
+        use gogo::gog::dlc_filter::DepotList;
+        vec![
+            DepotList {
+                product: ID.into(),
+                languages: vec!["*".into()],
+                manifest: "m-base".into(),
+                paths: base,
+            },
+            DepotList {
+                product: DLC.to_string(),
+                languages: vec!["*".into()],
+                manifest: "m-dlc".into(),
+                paths: dlc_paths(),
+            },
+        ]
+    }
+
+    /// Rewrite the cache's record as a gogo from before #347 wrote it: `buildId`
+    /// and `files` only.
+    fn make_old(root: &Path) {
+        let path = root.join(depot::RECORD);
+        let mut v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let o = v.as_object_mut().unwrap();
+        for k in ["language", "dlcs", "products"] {
+            o.remove(k);
+        }
+        std::fs::write(&path, v.to_string()).unwrap();
+        assert!(depot::record_is_old(root, "B1"));
+    }
+
+    fn plan_with(
+        g: &Game,
+        wanted: &[u64],
+        up: &Result<gogo::gog::cache_upgrade::Upgrade, String>,
+    ) -> dlc::AddPlan {
+        let infos = infos();
+        dlc::plan_add(&PlanInput {
+            game: g,
+            title: "Test Game",
+            version: Some("1.0".into()),
+            newer: None,
+            tree_name: TREE.into(),
+            infos: &infos,
+            wanted,
+            cache_upgrade: Some(up),
+        })
+    }
+
+    /// Remove the game and build it again from the cache with `wanted`, as the CLI
+    /// would: the cache needs no repair (no hashing, no download) and no file list
+    /// fetch, since its record says it holds them.
+    fn rebuild_from_cache(w: &World, root: &Path, wanted: &[u64]) {
+        use gogo::gog::dlc_filter::{self, Need};
+        let ids: Vec<String> = wanted.iter().map(u64::to_string).collect();
+        assert_eq!(
+            depot::check_cache(
+                root,
+                &depot::CacheWant {
+                    build_id: Some("B1"),
+                    language: Some("en-US"),
+                    dlcs: &ids,
+                },
+            ),
+            depot::CacheCheck::Complete,
+            "no repair: nothing hashed, nothing downloaded"
+        );
+        assert_eq!(
+            dlc_filter::need(root, &root.join(TREE), ID, wanted),
+            Need::Whole
+        );
+        std::fs::remove_dir_all(w.game()).unwrap();
+        let opts = LinuxAppOptions {
+            game_tree: Some(root.join(TREE)),
+            depot_content: Some(build::DepotContent {
+                dlcs: wanted
+                    .iter()
+                    .map(|id| content::DlcRef {
+                        id: *id,
+                        title: "Extra Pack".into(),
+                    })
+                    .collect(),
+                filter: None,
+            }),
+            ..w.opts()
+        };
+        let out = build_with(&opts);
+        assert_eq!(
+            out.content.dlc.iter().map(|d| d.id).collect::<Vec<_>>(),
+            wanted
+        );
+        assert_eq!(
+            std::fs::read(w.game().join("game/dlc/ep1/a.archive")).unwrap(),
+            b"dlc archive"
+        );
+    }
+
+    #[test]
+    fn an_old_cache_record_is_brought_up_to_date_and_the_add_keeps_the_dlc_in_it() {
+        let w = built("dlc-add-old-record");
+        cache(&w);
+        let root = cache_root(&w);
+        make_old(&root);
+        let old = std::fs::read(root.join(depot::RECORD)).unwrap();
+        let up = gogo::gog::cache_upgrade::decide(
+            &root,
+            TREE,
+            ID,
+            "B1",
+            &depots(base_paths(&root)),
+            "en-US",
+        );
+        let mut g = game(&w);
+        let p = plan_with(&g, &[DLC], &up);
+        assert_eq!(p.source, Source::Cache);
+        let lines = dlc::plan_lines(&p);
+        assert!(
+            lines.iter().any(|l| l
+                == "depot cache: its record is brought up to date (en-US; DLC: none), and \
+                    the DLC is kept in it too"),
+            "{lines:?}"
+        );
+        assert_eq!(
+            serde_json::to_value(&p).unwrap()["depotCache"],
+            serde_json::json!({"action": "kept", "upgraded": "en-US; DLC: none"})
+        );
+        // The plan writes nothing.
+        assert_eq!(std::fs::read(root.join(depot::RECORD)).unwrap(), old);
+
+        let r = run(&mut g, &p, no_setup(), false);
+        r.result.unwrap();
+        assert_eq!(r.inputs.len(), 1);
+        assert_eq!(r.inputs[0].old_dlcs, Vec::<String>::new());
+        assert_eq!(r.inputs[0].dlcs, [DLC.to_string()]);
+        // The DLC went into the cache, and the record says so.
+        assert!(root.join(TREE).join("dlc/ep1/a.archive").is_file());
+        let rec = depot::read_record(&root).unwrap();
+        assert_eq!(rec.language.as_deref(), Some("en-US"));
+        assert_eq!(rec.dlcs, Some(vec![DLC.to_string()]));
+        let lists = depot::record_products(&root, "B1").unwrap();
+        assert!(lists.contains_key(ID) && lists.contains_key(&DLC.to_string()));
+        no_leftovers(&w);
+
+        rebuild_from_cache(&w, &root, &[DLC]);
+    }
+
+    #[test]
+    fn a_dlc_an_old_cache_holds_is_laid_from_it_after_the_upgrade() {
+        let w = built("dlc-add-old-record-held");
+        cache(&w);
+        let root = cache_root(&w);
+        let base = base_paths(&root);
+        dlc_files(&root);
+        // An older gogo downloaded it with the DLC: the record names every file.
+        depot::write_record(&root, "B1", "en-US", &[]).unwrap();
+        make_old(&root);
+        let up = gogo::gog::cache_upgrade::decide(&root, TREE, ID, "B1", &depots(base), "en-US");
+        assert_eq!(up.as_ref().unwrap().dlcs, [DLC.to_string()]);
+        let mut g = game(&w);
+        let p = plan_with(&g, &[DLC], &up);
+        assert_eq!(p.source, Source::Cache);
+        assert_eq!(p.from_cache, [DLC]);
+        assert!(!p.downloads());
+        let r = run(&mut g, &p, no_setup(), false);
+        r.result.unwrap();
+        assert!(r.inputs.is_empty(), "no download: {:?}", r.inputs);
+        assert_eq!(
+            std::fs::read(w.game().join("game/dlc/ep1/a.archive")).unwrap(),
+            b"dlc archive"
+        );
+        assert_eq!(
+            depot::read_record(&root).unwrap().dlcs,
+            Some(vec![DLC.to_string()])
+        );
+        rebuild_from_cache(&w, &root, &[DLC]);
+    }
+
+    /// A DLC staged in an earlier add (`SECOND`) isn't in the cache: the cache is
+    /// still the source of the next one, which it keeps, and its record doesn't
+    /// claim the staged one.
+    #[test]
+    fn a_cache_lacking_a_staged_dlc_is_the_source_and_keeps_the_new_one() {
+        const SECOND: u64 = 777003;
+        let w = built("dlc-add-staged-before");
+        cache(&w);
+        let root = cache_root(&w);
+        let mut c = content::load(&w.game()).unwrap().unwrap();
+        c.dlc.push(content::DlcRow {
+            id: SECOND,
+            title: "Staged Pack".into(),
+            build_id: Some("B1".into()),
+            version: None,
+            added: None,
+        });
+        content::write(&w.game(), &c).unwrap();
+        let mut g = game(&w);
+        let p = plan_for(&g, &[DLC]);
+        assert_eq!(p.source, Source::Cache);
+        assert_eq!(p.depot_cache, dlc::CacheFate::Kept { upgraded: None });
+        assert!(
+            dlc::plan_lines(&p)
+                .iter()
+                .any(|l| l == "depot cache: the DLC is kept in it too")
+        );
+        // The diff is told what the cache holds, not what the game has.
+        assert_eq!(p.inputs.old_dlcs, Vec::<String>::new());
+        assert_eq!(p.inputs.dlcs, [DLC.to_string()]);
+        let r = run(&mut g, &p, no_setup(), false);
+        r.result.unwrap();
+        assert!(root.join(TREE).join("dlc/ep1/a.archive").is_file());
+        assert_eq!(
+            depot::read_record(&root).unwrap().dlcs,
+            Some(vec![DLC.to_string()]),
+            "the staged DLC isn't claimed"
+        );
+        let c = content::load(&w.game()).unwrap().unwrap();
+        assert_eq!(
+            c.dlc.iter().map(|d| d.id).collect::<Vec<_>>(),
+            [SECOND, DLC]
+        );
+        no_leftovers(&w);
+        rebuild_from_cache(&w, &root, &[DLC]);
+    }
+
+    #[test]
+    fn an_old_record_that_cant_be_decided_is_left_alone_and_the_add_stages() {
+        let w = built("dlc-add-old-record-undecided");
+        cache(&w);
+        let root = cache_root(&w);
+        make_old(&root);
+        let old = std::fs::read(root.join(depot::RECORD)).unwrap();
+        // The build has English voice files, and the cache doesn't: it may have been
+        // downloaded in another language.
+        let mut d = depots(base_paths(&root));
+        d.push(gogo::gog::dlc_filter::DepotList {
+            product: ID.into(),
+            languages: vec!["en-US".into()],
+            manifest: "m-en".into(),
+            paths: vec![format!("{TREE}/vo/en.pak")],
+        });
+        let up = gogo::gog::cache_upgrade::decide(&root, TREE, ID, "B1", &d, "en-US");
+        assert!(up.is_err(), "{up:?}");
+        let mut g = game(&w);
+        let p = plan_with(&g, &[DLC], &up);
+        assert_eq!(p.source, Source::Staging);
+        let lines = dlc::plan_lines(&p);
+        assert!(
+            lines.iter().any(|l| l.starts_with(
+                "depot cache: the depot cache's record predates DLC tracking and can't be \
+                 brought up to date: "
+            ) && l
+                .ends_with("so the DLC isn't kept in it (a rebuild with it downloads it again)")),
+            "{lines:?}"
+        );
+        let r = run(&mut g, &p, no_setup(), false);
+        r.result.unwrap();
+        assert_eq!(
+            std::fs::read(root.join(depot::RECORD)).unwrap(),
+            old,
+            "the record is untouched"
+        );
+        assert!(!root.join(TREE).join("dlc/ep1/a.archive").exists());
+        assert!(w.game().join("game/dlc/ep1/a.archive").is_file());
+        no_leftovers(&w);
+    }
+
+    #[test]
+    fn with_no_cache_the_plan_says_the_dlc_isnt_kept() {
+        let w = built("dlc-add-no-cache");
+        let g = game(&w);
+        let p = plan_for(&g, &[DLC]);
+        assert_eq!(p.source, Source::Staging);
+        assert_eq!(p.depot_cache, dlc::CacheFate::None);
+        assert!(dlc::plan_lines(&p).iter().any(|l| l
+            == "depot cache: none, so the DLC isn't kept in one (a rebuild with it \
+                    downloads it again)"));
+    }
+
+    /// The cache changed between the plan and the add (a DLC file the upgrade
+    /// counted is gone): the record stays as it was and nothing is fetched.
+    #[test]
+    fn an_upgrade_the_cache_no_longer_bears_out_isnt_written() {
+        let w = built("dlc-add-old-record-changed");
+        cache(&w);
+        let root = cache_root(&w);
+        let base = base_paths(&root);
+        dlc_files(&root);
+        depot::write_record(&root, "B1", "en-US", &[]).unwrap();
+        make_old(&root);
+        let up = gogo::gog::cache_upgrade::decide(&root, TREE, ID, "B1", &depots(base), "en-US");
+        let mut g = game(&w);
+        let p = plan_with(&g, &[DLC], &up);
+        std::fs::remove_file(root.join(TREE).join("dlc/ep1/a.archive")).unwrap();
+        let old = std::fs::read(root.join(depot::RECORD)).unwrap();
+        let r = run(&mut g, &p, no_setup(), false);
+        assert!(r.result.is_err());
+        assert!(r.inputs.is_empty());
+        assert_eq!(std::fs::read(root.join(depot::RECORD)).unwrap(), old);
+        assert!(content::load(&w.game()).unwrap().unwrap().dlc.is_empty());
     }
 }

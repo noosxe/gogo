@@ -325,6 +325,21 @@ async fn add_cmd(
         }),
         _ => None,
     };
+    // A cache record from before DLC tracking, of this build (#374): what it would
+    // become, read from the build's depot manifests. `add` writes it.
+    let cache_upgrade = match &game.cache_root {
+        Some(root) => {
+            gogo::gog::cache_upgrade::check(
+                session.reqwest_client(),
+                root,
+                &manifest,
+                &build,
+                &language,
+            )
+            .await
+        }
+        None => None,
+    };
     let plan = add::plan_add(&add::PlanInput {
         game: &game,
         title: &title,
@@ -333,10 +348,14 @@ async fn add_cmd(
         tree_name: manifest.install_directory().to_string(),
         infos: &infos,
         wanted: &wanted,
+        cache_upgrade: cache_upgrade.as_ref(),
     });
     if !machine && !quiet {
         for l in add::plan_lines(&plan) {
             eprintln!("gogo: {l}");
+        }
+        for n in plan.upgrade.iter().flat_map(|u| &u.notes) {
+            eprintln!("gogo: depot cache: {n}");
         }
     }
     if a.dry_run {

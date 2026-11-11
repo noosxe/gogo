@@ -267,9 +267,11 @@ resolve game → content.toml (build B, language L, installed DLC I)
   → get_manifest(B) → resolve names against manifest.dlcs() ∩ owned → wanted W (W ∩ I = ∅)
   → source root R:
        the depot cache, if its record says build B and language L      (keeps the cache whole)
+         (an older record of build B brought up to date first, #374)
        else games/<gogid>/.dlc-staging/ (fresh)                        (no cache, or it moved on)
   → Downloader: manifest(B) upgrade_from(B) language(L) old_language(L)
-                dlcs(I ∪ W) old_dlcs(I) verify(false) install_root(R)
+                dlcs(O ∪ W) old_dlcs(O) verify(false) install_root(R)
+                O = I for staging, I ∩ (what the cache holds) for the cache
   → snapshot R → prepare() → download() → new/changed files F (design 14 §4.1's comparison)
   → lay F onto game/ (§3.4) → GOG's install scripts for W (§3.6) → content.toml → done
 ```
@@ -300,9 +302,62 @@ resolve game → content.toml (build B, language L, installed DLC I)
   secure-link probe (`depot::first_unowned`). The download is a closure over
   `depot::fetch_into`, the downloader part of `depot::run` factored out, so the
   tests fake it. `depot::add_inputs` gives the `DownloadInputs`.
-  - **The source is the cache** only when its record has this build and language (a
-    record without `language` doesn't count), lists every installed DLC, has lost no
-    file, and its tree is there. Otherwise it's `.dlc-staging/`.
+  - **The source is the cache** when its record has this build and language, has
+    lost no file, and its tree is there. Otherwise it's `.dlc-staging/`. A record
+    from before #347 (no `language` or `dlcs`) counts once it's brought up to date
+    (below). The cache needn't hold every installed DLC (#374): one staged by an
+    earlier add isn't in it, and the diff is told only what the cache holds
+    (`old_dlcs = I ∩ held`), so it fetches into the cache everything the new DLC
+    needs there, including a file it shares with the staged one. That file is laid
+    too, with a backup, like any shared path. The commit adds only the DLC fetched
+    or laid now to the record's `dlcs`, never the staged one.
+  - **The DLC is kept in the depot cache whenever the cache can be the source**
+    (#374). Before, a cache that lacked an installed DLC, or whose record predated
+    #347, sent the add through staging, so the DLC lived only in `game/`, and
+    removing and rebuilding the game downloaded it again (Cyberpunk 2077: about
+    10 GB). Staging is now only for no cache at all (§3.2 "No cache"), a cache of
+    another build or language, a cache that lost files, or an older record that
+    can't be brought up to date. The plan says which:
+    - `depot cache: the DLC is kept in it too`;
+    - `depot cache: its record is brought up to date (en-US; DLC: none), and the
+      DLC is kept in it too`;
+    - `depot cache: none, so the DLC isn't kept in one (a rebuild with it downloads
+      it again)`;
+    - `depot cache: <why>, so the DLC isn't kept in it (…)`.
+
+    The `--json` plan has `depotCache: {action: kept|none|notKept, upgraded?,
+    reason?}`. Disk: from the cache the game files are a reflink where the
+    filesystem allows, else a copy that the plan prices (`+N disk: no reflink from
+    the cache`), since the DLC is then on disk twice. From staging they're a rename.
+  - **Bringing an older record up to date (#374,** `gog/cache_upgrade.rs`**).** An
+    add, and a `linux-app` build, whose cache record is the installed (or cached)
+    build but has no `language` or `dlcs` read the build's depot manifests (every
+    depot, every language: `dlc_filter::fetch_depots`, the same public URLs as
+    §3.3) and decide, without hashing:
+    - **Language** L (the game's, or the build's): the base's depots in L or `*`
+      are all on disk, the build has L depots when it has language-specific ones at
+      all, and no depot of another language shares a path with them through
+      another depot manifest. The same path in two languages can't be told apart
+      by existence, so that's undecidable.
+    - **DLC held:** a product of the build with a `goggame-<id>.info` in the tree
+      (or among its listed files), and every listed file of it on disk. A DLC with
+      only some files there is left out with a note, and so is an info naming no
+      product of the build.
+    - **File lists** of every product in L go into `products`, as §3.3 keeps them.
+    - Paths are matched case-insensitively per component, as for #381 below.
+
+    When anything doesn't hold (the record lost files, the tree is gone, another
+    build, the manifests can't be fetched, the checks above fail), the record is
+    left as it is and the add stages, as before. The plan says why. The decision
+    is pure (`cache_upgrade::decide`), so a dry run writes nothing. The add writes
+    it under the game's lock before anything is fetched (`cache_upgrade::apply`).
+    It first checks again that every file the new record claims is there and the
+    record is still the old one, and refuses the add when the cache changed. The
+    record is the only write: `files` stays as it was, and it's written durably
+    (`lay::write_json_durably`, as every record write now is). A crash leaves the
+    old record or the new one, never one claiming files that aren't there. A build
+    does the same before its cache check, so a cache that holds what's wanted is
+    `Complete` instead of hashed (`UnknownContent`), and prints a line either way.
   - **The download's record is a file of its own,** `games/<gogid>/dlc-download.json`
     (`{buildId, source, adding, before, fetched}`). It isn't a field in the journal: the
     launcher and doctor read the journal's existence as "files half laid", and a stop
@@ -383,7 +438,7 @@ resolve game → content.toml (build B, language L, installed DLC I)
 |---|---|---|
 | no record | `Unrecorded` | as today (warning; repair on consent) |
 | files missing | `Missing` | as today: full `verify` repair |
-| `dlcs`/`language` absent (an older gogo) | `UnknownContent` | full `verify` with the wanted set: gog-warp keeps what's valid and fetches the rest. Slow, but it can't know what the tree holds without hashing |
+| `dlcs`/`language` absent (an older gogo) | `UnknownContent` | first brought up to date from the build's depot manifests when that's safe (§3.2, #374), then answered again. Otherwise a full `verify` with the wanted set: gog-warp keeps what's valid and fetches the rest. That's slow, but without the record it can't know what the tree holds unless it hashes it |
 | wanted DLC not in `dlcs` | `MissingDlc(W)` | the targeted add of §3.2 on the cache (no hashing) |
 | language differs | `OtherLanguage` | rebuild-time only: a targeted diff from (old language, `dlcs`) to (new, wanted) |
 | `buildId` differs from the build being made | `OtherBuild` | as today: the new build is fetched into the cache via `verify`, with the wanted DLC set |
@@ -790,6 +845,16 @@ What the Mac lane would need, none of it designed further now:
   partial copy and a record without file lists falling back to the download; a stop
   mid-lay rolling forward, and back when the cache lost a file; a mixed add
   fetching only the other DLC.
+- **The cache keeps what an add fetches** (§3.2, #374): an older record brought up
+  to date (language, DLC from the infos present, file lists), then an add with the
+  cache as its source, both downloading and laying a held DLC with no download; an
+  add while a staged DLC isn't in the cache, which keeps the new one and doesn't
+  claim the staged one; after each, the game removed and rebuilt from the cache
+  with the DLC, with the cache `Complete` (no hashing) and nothing to fetch; an
+  older record that can't be decided (a language's files missing, a path two
+  languages share through other manifests, a lost file, another build), left byte
+  for byte as it was while the add stages; a cache that changed between the plan
+  and the add, where nothing is written or fetched.
 - **The record-only add** (§3.2): a fixture manifest with a DLC whose depots are empty:
   `dlc list` shows `0`, `dlc add` runs no downloader, writes no journal, records the DLC
   and applies its script.

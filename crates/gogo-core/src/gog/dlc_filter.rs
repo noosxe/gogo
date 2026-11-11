@@ -139,7 +139,9 @@ pub fn root_path(install_dir: &str, base: &str, product: &str, v2: bool, e: &Ent
     }
 }
 
-fn language_matches(langs: &[String], language: &str) -> bool {
+/// Whether a depot of `langs` is fetched for `language`: it names it (as a v2 code
+/// or a v1 name) or `*`.
+pub fn language_matches(langs: &[String], language: &str) -> bool {
     let v1 = depot::v1_language(language);
     langs
         .iter()
@@ -159,47 +161,69 @@ async fn get(http: &reqwest::Client, url: &str) -> Result<Vec<u8>, DepotError> {
         .to_vec())
 }
 
-/// Fetch the file lists of `products` (base and DLC ids) in `manifest`'s build, for
-/// `language`. Every asked product gets an entry; one with no depots (a zero-byte
-/// DLC) gets an empty list.
-pub async fn fetch(
+/// One depot of a build and its files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DepotList {
+    /// The product it belongs to (the base game or a DLC).
+    pub product: String,
+    /// As the build manifest names them: v2 codes, v1 names, or `*`.
+    pub languages: Vec<String>,
+    /// The depot manifest's hash (v2) or name (v1): one can back several depots.
+    pub manifest: String,
+    /// Relative to the cache root, as gog-warp lays them out ([`root_path`]).
+    pub paths: Vec<String>,
+}
+
+/// Fetch the depots of `manifest`'s build with their files: every depot, or with
+/// `only = (products, language)` those of `products` in `language` (or `*`). A
+/// depot manifest backing several depots is fetched once.
+pub async fn fetch_depots(
     http: &reqwest::Client,
     manifest: &Manifest,
-    language: &str,
-    products: &[String],
-) -> Result<ProductFiles, DepotError> {
+    only: Option<(&[String], &str)>,
+) -> Result<Vec<DepotList>, DepotError> {
     use gog_warp::constants::domains::GOG_CDN;
-    let mut out: ProductFiles = products.iter().map(|p| (p.clone(), Vec::new())).collect();
+    let wanted = |product: &str, langs: &[String]| {
+        only.is_none_or(|(products, language)| {
+            products.iter().any(|p| p == product) && language_matches(langs, language)
+        })
+    };
     let install_dir = manifest.install_directory();
-    // One depot manifest can back several depots (a DLC's per-language info).
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut out: Vec<DepotList> = Vec::new();
+    let mut fetched: std::collections::HashMap<String, Vec<Entry>> =
+        std::collections::HashMap::new();
     match manifest {
         Manifest::V2(m) => {
             let base = m.base_product_id();
             for d in m.depots() {
                 let product = d.product_id();
-                if !out.contains_key(product)
-                    || !language_matches(d.languages(), language)
-                    || !seen.insert(format!("{product}/{}", d.manifest()))
-                {
+                let languages = d.languages().to_vec();
+                if !wanted(product, &languages) {
                     continue;
                 }
-                let url = format!(
-                    "{GOG_CDN}/content-system/v2/meta/{}",
-                    gog_warp::utils::hash_to_galaxy_path(d.manifest())
-                );
-                let raw = get(http, &url).await?;
-                let mut json = Vec::new();
-                flate2::read::ZlibDecoder::new(&raw[..])
-                    .read_to_end(&mut json)
-                    .map_err(|e| DepotError::Library(format!("depot manifest: {e}")))?;
-                let entries = parse_v2(&json).map_err(DepotError::Library)?;
-                let list = out.get_mut(product).expect("checked");
-                list.extend(
-                    entries
-                        .iter()
-                        .map(|e| root_path(&install_dir, base, product, true, e)),
-                );
+                let hash = d.manifest().to_string();
+                if !fetched.contains_key(&hash) {
+                    let url = format!(
+                        "{GOG_CDN}/content-system/v2/meta/{}",
+                        gog_warp::utils::hash_to_galaxy_path(&hash)
+                    );
+                    let raw = get(http, &url).await?;
+                    let mut json = Vec::new();
+                    flate2::read::ZlibDecoder::new(&raw[..])
+                        .read_to_end(&mut json)
+                        .map_err(|e| DepotError::Library(format!("depot manifest: {e}")))?;
+                    fetched.insert(hash.clone(), parse_v2(&json).map_err(DepotError::Library)?);
+                }
+                let paths = fetched[&hash]
+                    .iter()
+                    .map(|e| root_path(&install_dir, base, product, true, e))
+                    .collect();
+                out.push(DepotList {
+                    product: product.to_string(),
+                    languages,
+                    manifest: hash,
+                    paths,
+                });
             }
         }
         Manifest::V1(m) => {
@@ -219,38 +243,75 @@ pub async fn fetch(
                 let product = if game_ids.contains(base) {
                     Some(base.clone())
                 } else {
-                    game_ids.iter().find(|g| out.contains_key(*g)).cloned()
+                    match only {
+                        Some((products, _)) => {
+                            game_ids.iter().find(|g| products.contains(*g)).cloned()
+                        }
+                        None => game_ids.first().cloned(),
+                    }
                 };
-                let Some(product) = product.filter(|p| out.contains_key(p)) else {
+                let Some(product) = product else {
                     continue;
                 };
-                if !language_matches(languages, language)
-                    || !seen.insert(format!("{product}/{name}"))
-                {
+                if !wanted(&product, languages) {
                     continue;
                 }
                 let Some(first) = game_ids.first() else {
                     continue;
                 };
-                let url = format!(
-                    "{GOG_CDN}/content-system/v1/manifests/{first}/windows/{}/{name}",
-                    p.timestamp()
-                );
-                let entries = parse_v1(&get(http, &url).await?).map_err(DepotError::Library)?;
-                let list = out.get_mut(&product).expect("checked");
-                list.extend(
-                    entries
-                        .iter()
-                        .map(|e| root_path(&install_dir, base, &product, false, e)),
-                );
+                if !fetched.contains_key(name) {
+                    let url = format!(
+                        "{GOG_CDN}/content-system/v1/manifests/{first}/windows/{}/{name}",
+                        p.timestamp()
+                    );
+                    let entries = parse_v1(&get(http, &url).await?).map_err(DepotError::Library)?;
+                    fetched.insert(name.clone(), entries);
+                }
+                let paths = fetched[name]
+                    .iter()
+                    .map(|e| root_path(&install_dir, base, &product, false, e))
+                    .collect();
+                out.push(DepotList {
+                    product,
+                    languages: languages.clone(),
+                    manifest: name.clone(),
+                    paths,
+                });
             }
+        }
+    }
+    Ok(out)
+}
+
+/// Pure: each of `products`' files in `language`, from a build's depots. Every
+/// product gets an entry; one with no depots (a zero-byte DLC) gets an empty list.
+pub fn product_files(depots: &[DepotList], language: &str, products: &[String]) -> ProductFiles {
+    let mut out: ProductFiles = products.iter().map(|p| (p.clone(), Vec::new())).collect();
+    for d in depots {
+        if let Some(list) = out.get_mut(&d.product)
+            && language_matches(&d.languages, language)
+        {
+            list.extend(d.paths.iter().cloned());
         }
     }
     for list in out.values_mut() {
         list.sort();
         list.dedup();
     }
-    Ok(out)
+    out
+}
+
+/// Fetch the file lists of `products` (base and DLC ids) in `manifest`'s build, for
+/// `language`. Every asked product gets an entry; one with no depots (a zero-byte
+/// DLC) gets an empty list.
+pub async fn fetch(
+    http: &reqwest::Client,
+    manifest: &Manifest,
+    language: &str,
+    products: &[String],
+) -> Result<ProductFiles, DepotError> {
+    let depots = fetch_depots(http, manifest, Some((products, language))).await?;
+    Ok(product_files(&depots, language, products))
 }
 
 /// What a build of a cache's tree has to leave out.
