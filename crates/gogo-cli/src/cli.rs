@@ -487,7 +487,7 @@ pub enum LinuxAppSub {
     /// Wayland socket at launch, Wayland mode runs the game on X11 and logs why.
     /// `wayland` on a 32-bit game that draws through the GPU (wined3d, DXVK,
     /// D7VK, VKD3D-Proton) warns that it usually fails or draws unscaled there
-    /// (#312) and still applies; cnc-ddraw's GDI games and 64-bit games don't warn.
+    /// and still applies, and suggests `x11`; cnc-ddraw's GDI games and 64-bit games don't warn.
     Display {
         /// GOG product id.
         #[arg(value_name = "GOGID")]
