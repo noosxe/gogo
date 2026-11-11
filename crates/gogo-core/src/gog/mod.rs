@@ -7,6 +7,7 @@
 
 pub mod catalog;
 pub mod checksum;
+pub mod content;
 pub mod depot;
 pub mod dlc;
 pub mod downlink;

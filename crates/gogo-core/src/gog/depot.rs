@@ -642,6 +642,25 @@ impl Snapshot {
     }
 }
 
+/// What a cache root's record says about its download (design 19 §6.1's fallback).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordSummary {
+    pub build_id: String,
+    pub language: Option<String>,
+    /// DLC product ids; `None` for a record from before DLC tracking.
+    pub dlcs: Option<Vec<String>>,
+}
+
+/// The record in cache root `root`, if there is a readable one.
+pub fn read_record(root: &Path) -> Option<RecordSummary> {
+    let rec = load_record(root)?;
+    Some(RecordSummary {
+        build_id: rec.build_id,
+        language: rec.language,
+        dlcs: rec.dlcs,
+    })
+}
+
 fn load_record(root: &Path) -> Option<Record> {
     let text = std::fs::read_to_string(root.join(RECORD)).ok()?;
     serde_json::from_str(&text).ok()

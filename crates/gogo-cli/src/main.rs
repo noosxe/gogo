@@ -3113,6 +3113,19 @@ fn linux_app_plan_lines(plan: &gogo::linuxapp::build::LinuxAppPlan) -> String {
     line(&mut out, "source:", source);
     line(
         &mut out,
+        "dlc:",
+        if plan.dlcs.is_empty() {
+            "none".to_string()
+        } else {
+            plan.dlcs
+                .iter()
+                .map(|d| d.title.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        },
+    );
+    line(
+        &mut out,
         "game dir:",
         match &plan.gogid {
             Some(_) if plan.rebuild => format!(
@@ -3311,6 +3324,9 @@ async fn linux_app(a: LinuxAppArgs) -> Result<i32, AppError> {
         } else {
             "depot"
         });
+        v["build_id"] = serde_json::json!(out.content.build_id);
+        v["language"] = serde_json::json!(out.content.language);
+        v["dlcs"] = serde_json::json!(out.content.refs());
         v["game_files"] = serde_json::json!(out.materialized.as_ref().map(|r| serde_json::json!({
             "method": r.method().as_str(),
             "reflinked_files": r.reflinked_files,
@@ -5073,6 +5089,7 @@ fn apps_cmd(cmd: crate::cli::AppsCmd) -> Result<i32, AppError> {
                 },
                 "RUNTIME",
                 "RENDERER",
+                "DLC",
                 "SIZE",
                 "LAST LAUNCH",
             ]);
@@ -5083,6 +5100,11 @@ fn apps_cmd(cmd: crate::cli::AppsCmd) -> Result<i32, AppError> {
                     app_column(a),
                     dash(a.runtime.as_deref()),
                     dash(a.renderer.as_deref()),
+                    if a.dlcs.is_empty() {
+                        "-".to_string()
+                    } else {
+                        a.dlcs.len().to_string()
+                    },
                     gogo::fmt::human_size(a.bytes),
                     dash(a.last_launch.as_deref()),
                 ]);
@@ -5141,6 +5163,7 @@ fn apps_cmd(cmd: crate::cli::AppsCmd) -> Result<i32, AppError> {
             println!("  renderer:    {}", dash(a.renderer.as_deref()));
             println!("  size:        {}", gogo::fmt::human_size(a.bytes));
             println!("  last launch: {}", dash(a.last_launch.as_deref()));
+            print_content(&a);
             Ok(cli::exit::OK)
         }
         crate::cli::AppsCmd::Remove {
@@ -5171,6 +5194,47 @@ fn apps_cmd(cmd: crate::cli::AppsCmd) -> Result<i32, AppError> {
             }
             remove_apps(&orphans, keep_override, yes)
         }
+    }
+}
+
+/// `apps show`'s content section (design 19 §6.2).
+fn print_content(a: &gogo::macapp::apps::App) {
+    if let Some(e) = &a.content_error {
+        println!("  content:     unreadable: {e}");
+        return;
+    }
+    let Some(c) = &a.content else { return };
+    let source = if a.content_derived {
+        " (derived from the game's files; no content.toml)"
+    } else {
+        ""
+    };
+    println!(
+        "  content:     {}{}{source}",
+        c.lane.as_str(),
+        c.build_id
+            .as_deref()
+            .map_or(String::new(), |b| format!(", build {b}"))
+    );
+    if let Some(v) = &c.version {
+        println!("  version:     {v}");
+    }
+    if let Some(l) = &c.language {
+        println!("  language:    {l}");
+    }
+    if c.dlc.is_empty() {
+        println!("  dlc:         none");
+    }
+    for (i, d) in c.dlc.iter().enumerate() {
+        println!(
+            "  {:<12} {} ({}){}",
+            if i == 0 { "dlc:" } else { "" },
+            d.title,
+            d.id,
+            d.build_id
+                .as_deref()
+                .map_or(String::new(), |b| format!(", build {b}"))
+        );
     }
 }
 

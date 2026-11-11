@@ -199,6 +199,7 @@ pub fn doctor(gogid: &str, host: &Host) -> Result<Report, MacAppError> {
     if let Some((_, raw)) = &g.baked {
         f.push(check_stamp(&g, raw));
     }
+    f.push(check_dlc(&g));
     let proton_dir = build.as_ref().map(|(d, _)| d.clone()).or_else(|| {
         g.conf
             .as_ref()
@@ -1733,6 +1734,94 @@ fn check_links(g: &Game, proton: Option<&Path>) -> Finding {
 
 /// Processes left in the prefix with no launcher (the launcher's own
 /// markers, [`game::prefix_procs`]). Reported, never stopped.
+/// The DLC the game has (design 19 §6.2), from `content.toml` or, for a game built
+/// before it, from the `goggame-*.info` files. Warns on a DLC info the record doesn't
+/// list and on a listed DLC whose info is gone. (The interrupted-add journal and the
+/// owned-but-missing DLC come with `dlc add`.)
+fn check_dlc(g: &Game) -> Finding {
+    use crate::gog::content::{self, Lane};
+    let depot = g.dirs.game.is_dir();
+    let install = if depot {
+        g.dirs.game.clone()
+    } else {
+        g.baked
+            .as_ref()
+            .and_then(|(t, _)| t.tree_name())
+            .map_or_else(
+                || g.dirs.game.clone(),
+                |n| g.dirs.prefix.join("drive_c/GOG").join(n),
+            )
+    };
+    let lane = if depot { Lane::Depot } else { Lane::Installer };
+    let record_root = depot
+        .then(|| {
+            let id = g.gogid.parse().ok()?;
+            crate::gog::depot::cache_roots(
+                crate::gog::depot::default_cache_dir().as_deref(),
+                id,
+                None,
+            )
+            .map(|r| r.0)
+        })
+        .flatten();
+    let r = match content::resolve(&g.dirs.root, &install, lane, record_root.as_deref()) {
+        Ok(r) => r,
+        Err(e) => {
+            return Finding::warn(
+                "dlc",
+                format!("{e}"),
+                format!("remove {} and gogo derives it again", content::FILE),
+            );
+        }
+    };
+    let (unlisted, lost) = content::mismatches(&r.content, &install);
+    let mut problems = Vec::new();
+    for (id, title) in &unlisted {
+        problems.push(format!(
+            "{title} ({id}) has a goggame-{id}.info in the game that {} doesn't list \
+             (added by hand?)",
+            content::FILE
+        ));
+    }
+    for d in &lost {
+        problems.push(format!(
+            "{} ({}) is listed in {} but its goggame-{}.info is missing from the game",
+            d.title,
+            d.id,
+            content::FILE,
+            d.id
+        ));
+    }
+    let build = r
+        .content
+        .build_id
+        .as_deref()
+        .map_or(String::new(), |b| format!(" (build {b})"));
+    let source = if r.derived {
+        format!(" [derived: no {}]", content::FILE)
+    } else {
+        String::new()
+    };
+    let summary = if r.content.dlc.is_empty() {
+        format!("no DLC{build}{source}")
+    } else {
+        format!("{}{build}{source}", content::titles(&r.content))
+    };
+    if problems.is_empty() {
+        return Finding::ok("dlc", summary);
+    }
+    let mut f = Finding::warn(
+        "dlc",
+        problems.join("; "),
+        format!(
+            "reinstall the DLC, or remove {} to derive it from the game's files",
+            content::FILE
+        ),
+    );
+    f.detail.push(summary);
+    f
+}
+
 fn check_processes(g: &Game) -> Finding {
     if !g.dirs.prefix.is_dir() {
         return Finding::ok("processes", "no prefix yet");
