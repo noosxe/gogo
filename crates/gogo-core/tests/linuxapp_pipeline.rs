@@ -5349,11 +5349,15 @@ fn the_display_mode_reaches_the_game_with_a_socket_and_falls_back_without_one() 
     });
     let r = doctor(&w, &host);
     let f = r.findings.iter().find(|f| f.check == "display").unwrap();
-    assert_eq!(f.level, Level::Ok, "{f:#?}");
-    assert_eq!(
-        f.message,
-        "wayland (L4 user override), hdr force (L4 user override), monitor DP-1 \
-         (L4 user override); here: wayland (WAYLAND_DISPLAY=wayland-7, socket found)"
+    // The fixture is a 32-bit game on dxvk: the #312 warning is all that's wrong.
+    assert_eq!(f.level, Level::Warn, "{f:#?}");
+    assert!(
+        f.message.starts_with(
+            "wayland (L4 user override), hdr force (L4 user override), monitor DP-1 \
+             (L4 user override); here: wayland (WAYLAND_DISPLAY=wayland-7, socket found); \
+             this is a 32-bit game on the GPU renderer dxvk"
+        ),
+        "{f:#?}"
     );
     assert_eq!(
         f.detail,
