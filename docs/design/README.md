@@ -72,6 +72,7 @@ in `docs/13` grounds design 10.
 | [18-linux-runtime](18-linux-runtime.md) | Linux lane (`gogo linux-app`): GE-Proton through umu, DXVK/VKD3D-Proton/D7VK/cnc-ddraw, per-game fixes from protonfixes, `[platforms.<os>]` compat tables, `.desktop` launcher (input: docs/21, docs/22) |
 | [19-dlc](19-dlc.md) | DLC: choosing it at the first build, `linux-app dlc list` / `add` onto a built game, the depot cache's DLC set (#336), the offline lane's DLC installers, `content.toml` (#343) |
 | [20-snapshots](20-snapshots.md) | snapshots of a built Linux game on btrfs (ZFS later): the game dir as a subvolume, initial and automatic snapshots, rollback with the saves check, retention, `linux-app snapshot` (#365) |
+| [21-builds](21-builds.md) | builds of a game: `gogo builds` lists what GOG serves, `--build` picks one on `depot` / `linux-app`, the installed-vs-newest hint, the kept build manifest, and the sketch of a later `linux-app update` (#360) |
 ## Key decisions (traceability)
 
 | Decision | Rationale / source |
