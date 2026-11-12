@@ -4220,8 +4220,7 @@ fn linux_app_move(
     }
     // Deleting snapshots (design 20 §9.1, decision D5) is asked first.
     if plan.snapshots.as_ref().is_some_and(|s| s.needs_yes()) {
-        if let Some(code) = snapshot_cmd::ask(&lines, yes, "move it and delete these snapshots?")
-        {
+        if let Some(code) = snapshot_cmd::ask(&lines, yes, "move it and delete these snapshots?") {
             return Ok(code);
         }
         opts.drop_snapshots = true;

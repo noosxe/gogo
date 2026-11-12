@@ -106,6 +106,7 @@ pub trait Lane {
     /// their metadata (`steps.drop`), take the `initial` snapshot at the new
     /// place (`steps.initial`). Runs again after a crash, so each part must
     /// be safe to repeat. Failures are warnings; `killed` is a test's kill.
+    #[allow(clippy::too_many_arguments)]
     fn after_commit(
         &self,
         gogid: &str,
@@ -354,12 +355,7 @@ impl SnapshotsDone {
 
     /// One line each for what happened.
     pub fn lines(&self) -> Vec<String> {
-        let ids = |v: &[u32]| {
-            v.iter()
-                .map(u32::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
+        let ids = |v: &[u32]| v.iter().map(u32::to_string).collect::<Vec<_>>().join(", ");
         let mut out = Vec::new();
         if !self.carried.is_empty() {
             out.push(format!(
@@ -392,7 +388,10 @@ pub struct MoveOutcome {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
     /// What happened to the game's snapshots.
-    #[serde(rename = "snapshotsDone", skip_serializing_if = "SnapshotsDone::is_empty")]
+    #[serde(
+        rename = "snapshotsDone",
+        skip_serializing_if = "SnapshotsDone::is_empty"
+    )]
     pub snapshots: SnapshotsDone,
 }
 
@@ -775,7 +774,11 @@ pub fn move_game(
     let mut journal = Journal {
         from: plan.from.clone(),
         to: plan.to.clone(),
-        snapshots: plan.snapshots.as_ref().map(|s| s.steps()).unwrap_or_default(),
+        snapshots: plan
+            .snapshots
+            .as_ref()
+            .map(|s| s.steps())
+            .unwrap_or_default(),
     };
     write_journal(gogid, &journal)?;
     let mut done = SnapshotsDone::default();
@@ -834,11 +837,7 @@ pub fn move_game(
 }
 
 /// A move that would delete the game's snapshots needs the user's yes.
-fn refuse_dropping(
-    gogid: &str,
-    s: &SnapshotsPlan,
-    opts: &MoveOptions,
-) -> Result<(), MacAppError> {
+fn refuse_dropping(gogid: &str, s: &SnapshotsPlan, opts: &MoveOptions) -> Result<(), MacAppError> {
     if !s.needs_yes() || opts.drop_snapshots {
         return Ok(());
     }
@@ -935,6 +934,7 @@ fn carry_snapshots(
     if let Some(parent) = new.parent() {
         let _ = std::fs::File::open(parent).and_then(|d| d.sync_all());
     }
+    moved.sort_unstable();
     Ok(moved)
 }
 
@@ -1309,7 +1309,11 @@ fn move_data(
                 if let Some(s) = &plan.snapshots {
                     refuse_dropping(&plan.gogid, s, opts)?;
                 }
-                let steps = plan.snapshots.as_ref().map(|s| s.steps()).unwrap_or_default();
+                let steps = plan
+                    .snapshots
+                    .as_ref()
+                    .map(|s| s.steps())
+                    .unwrap_or_default();
                 if journal.snapshots != steps {
                     journal.snapshots = steps;
                     write_journal(&plan.gogid, journal)?;
@@ -1550,11 +1554,7 @@ pub fn recover_all(lane: &dyn Lane) -> Vec<String> {
     out
 }
 
-fn recover_locked(
-    gogid: &str,
-    lane: &dyn Lane,
-    guard: &Guard,
-) -> Result<Vec<String>, MacAppError> {
+fn recover_locked(gogid: &str, lane: &dyn Lane, guard: &Guard) -> Result<Vec<String>, MacAppError> {
     if !journal_path(gogid).exists() {
         return Ok(Vec::new());
     }
@@ -1612,10 +1612,12 @@ fn recover_locked(
         out.extend(lane.rewrite_inside(&from, &to, &j.to)?);
         // The snapshots follow the rename before the commit, as in the move
         // itself; the ones already there are skipped.
-        let mut done = SnapshotsDone::default();
-        done.carried = carry_snapshots(&j.from, &j.to, None).map_err(|f| match f {
-            Failure::Killed(e) | Failure::Plain(e) => e,
-        })?;
+        let mut done = SnapshotsDone {
+            carried: carry_snapshots(&j.from, &j.to, None).map_err(|f| match f {
+                Failure::Killed(e) | Failure::Plain(e) => e,
+            })?,
+            ..SnapshotsDone::default()
+        };
         commit(gogid, &j.to)?;
         out.extend(finish(
             gogid,
