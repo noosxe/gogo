@@ -195,6 +195,9 @@ subcommands take a GOGID: `setup`, `compat`, `doctor`, `next-renderer`, and (#23
   still exists, naming both paths, while the game runs, or while a lock is held; an interrupted move
   is settled first.
 
+- `snapshot <gogid> list|create|rollback|delete|auto` (#365, design 20 §8): snapshots of the built game
+  on btrfs (ZFS later); `--no-snapshots` on a build or a change skips its snapshot.
+
 Verb-first `env list|set|unset`, as `config get|set` and `runtimes list|install`. Edits
 print `key old -> new` lines on stdout and warnings on stderr, and apply at the next launch
 (it runs setup on the changed override); nothing is rebuilt.
