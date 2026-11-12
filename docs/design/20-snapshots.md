@@ -832,11 +832,19 @@ with two renames, with a `fail_at(step)` hook (as `dlc add`'s `AddOptions::fail_
   passwordless `sudo` (<https://docs.github.com/en/actions/reference/runners/github-hosted-runners>),
   so a `snapshots-btrfs` job on `ubuntu-latest` makes a 1 GiB image (`mkfs.btrfs` from the
   flake), loop-mounts it with `sudo`, `chown`s it to the runner user, and runs the btrfs tests
-  **unprivileged** against it (`GOGO_TEST_BTRFS_DIR`). A second mount with
-  `user_subvol_rm_allowed` covers the ioctl delete path. Whether the runner's Azure kernel
-  loads the btrfs module is unverified; the job's first step checks and fails clearly, and
-  the issue that adds it (I2) settles it. `btrfs-progs` (only `mkfs.btrfs`, for tests) joins
-  the dev shell, pinned.
+  **unprivileged** against it (`GOGO_TEST_BTRFS_DIR`). The first step checks that the runner
+  kernel lists btrfs in `/proc/filesystems` (after a `modprobe`) and fails with a clear
+  message if not. `scripts/ci-btrfs-tests.sh` does the mount and the run twice:
+  - `plain`: no `user_subvol_rm_allowed`, so the `SNAP_DESTROY_V2` ioctl gets `EPERM` and the
+    `rmdir` fallback is what deletes snapshots (`btrfs_delete_through_rmdir` and the store
+    test; `btrfs_delete_through_the_ioctl` takes its `EPERM` branch and checks the fallback);
+  - `rm-allowed`: `-o user_subvol_rm_allowed`, so the ioctl path runs, and
+    `GOGO_TEST_BTRFS_IOCTL_ALLOWED=1` makes an `EPERM` there a failure.
+
+  Both runs set `GOGO_TEST_BTRFS_REQUIRED=1`: a test that would print `SKIP … is not on btrfs`
+  panics instead, so the job can't pass by skipping everything. `btrfs-progs` (only
+  `mkfs.btrfs`, for the image) is in the Linux dev shell, pinned with the rest of nixpkgs.
+  What the runner kernel supports is recorded in design 08 §6.
 - **ZFS in CI** the same way if the runner can load the module (`zfsutils-linux` on Ubuntu,
   a file-backed pool, `zfs allow` to the runner user); that is also where §2.2's unverified
   points get settled. If it can't, ZFS is a host pass.

@@ -1,7 +1,9 @@
 //! Snapshots on a real btrfs, unprivileged (design 20 §10.3). They run in
 //! `CARGO_TARGET_TMPDIR` (under `target/`) when that is on btrfs, or under
 //! `GOGO_TEST_BTRFS_DIR` when it is set, and otherwise print a `SKIP …` line
-//! (nextest shows it: `.config/nextest.toml`). They only ever touch the
+//! (nextest shows it: `.config/nextest.toml`). `GOGO_TEST_BTRFS_REQUIRED=1`
+//! turns that skip into a failure, and `GOGO_TEST_BTRFS_IOCTL_ALLOWED=1` makes
+//! an EPERM from the delete ioctl one (the CI job, design 20 §10.3). They only ever touch the
 //! scratch dir they make.
 #![cfg(target_os = "linux")]
 
@@ -28,6 +30,12 @@ impl Scratch {
             .unwrap_or_else(|| PathBuf::from(env!("CARGO_TARGET_TMPDIR")));
         let dir = tempfile::tempdir_in(&base).unwrap();
         if !btrfs::is_btrfs(dir.path()).unwrap_or(false) {
+            // The CI job sets this: there a skip means the mount is missing.
+            assert!(
+                std::env::var_os("GOGO_TEST_BTRFS_REQUIRED").is_none(),
+                "{test}: {} is not on btrfs and GOGO_TEST_BTRFS_REQUIRED is set",
+                base.display()
+            );
             println!(
                 "SKIP {test}: {} is not on btrfs (set GOGO_TEST_BTRFS_DIR to a btrfs dir)",
                 base.display()
@@ -192,6 +200,12 @@ fn btrfs_delete_through_the_ioctl() {
             println!("btrfs_delete_through_the_ioctl: SNAP_DESTROY_V2 allowed here");
         }
         Err(e) if e == rustix::io::Errno::PERM => {
+            // The CI job's second mount has `user_subvol_rm_allowed`: EPERM
+            // there means the option didn't take, so don't skip quietly.
+            assert!(
+                std::env::var_os("GOGO_TEST_BTRFS_IOCTL_ALLOWED").is_none(),
+                "SNAP_DESTROY_V2 refused (EPERM) but GOGO_TEST_BTRFS_IOCTL_ALLOWED is set"
+            );
             println!(
                 "SKIP btrfs_delete_through_the_ioctl: SNAP_DESTROY_V2 needs \
                  user_subvol_rm_allowed or CAP_SYS_ADMIN here (EPERM); checking the fallback"
