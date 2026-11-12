@@ -437,8 +437,44 @@ rollback drops is saves made after the snapshot. It lists them and asks before d
 
 The **save roots**, relative to the prefix's `drive_c/users/steamuser/` (Proton's user):
 `Documents/`, `Saved Games/`, `AppData/Roaming/`, `AppData/Local/`, `AppData/LocalLow/`;
-plus `drive_c/ProgramData/`; plus, once cloud saves (#275) land, the game's own cloud-save
-locations from GOG's metadata, which may point into the game's files.
+plus `drive_c/ProgramData/`; plus **the game's own files** (below); plus, once cloud saves
+(#275) land, the game's own cloud-save locations from GOG's metadata.
+
+**The game's files are a save root too.** Many older games keep saves and settings in their
+own install dir, beside the exe: Heroes of Might and Magic 3 writes `game/Games/*.GM1`, the
+SimCity and Anno 1503/1701-era games write `SAVE/` dirs and `*.ini` files there. A rollback
+restores those files whole, so they are scanned like the prefix's user dirs. The game's files
+are `game/` on the depot lane and the install dir `drive_c/GOG/<slug>/` on the installer lane.
+There, a file is a save **candidate** by the same two tests (mtime later than the snapshot's
+`created`, or absent from the snapshot), and then the files that **belong to the build at
+that path** are taken out, using the current build's file list (the game as it is now is what
+the rollback replaces):
+
+- **Depot lane:** the build's depot manifests for the build, language and DLC set that
+  `content.toml` records (`.gogo-depot.json` names the same for the cache). gogo reads them
+  from the depot cache when the cache holds the game's build, else fetches them as
+  `depot::installed_build` does (design 19 §3.2). A path the manifests list is the build's
+  when its size is the listed size. A listed file whose size differs (a shipped `.ini` the
+  game rewrote) stays a candidate. A same-size rewrite of a shipped file is missed: the
+  snapshot still holds it on btrfs, and the plan says the check is by name and size.
+- **Installer lane:** the files the installers laid, from their Inno `/LOG` logs
+  (`install/setup.log`, design 18 §10, and the DLC installers' logs where gogo keeps them),
+  which name each destination file. A path the logs list is the build's, by the same size
+  test. Parsing those logs on real installers is checked when the finder is implemented
+  (I4).
+- **Files gogo itself writes there** are never candidates: the compat `files` (design 18
+  §4.10), renderer DLLs and configs setup places beside the exe (cnc-ddraw's `ddraw.dll` and
+  `ddraw.ini`, the D7VK/DXVK DLLs), and the support overlays.
+- **No list** (the manifests can't be read or fetched offline, a build GOG no longer serves
+  and no cache, an installer log missing or unreadable): the mtime test alone, on files that
+  also exist in the snapshot (a file the game rewrote in place), with the same exclusions.
+  New files can't be told apart from what a DLC add or update laid after the snapshot, so
+  when the build or DLC set changed since the snapshot they are shown as one summary line
+  (`312 new files in game/ gogo can't attribute: not copied`; on btrfs, `they stay in
+  snapshot <pre>`), every one with `-v` and in `--json`. When the build and DLC set are the
+  same as the snapshot's, nothing gogo laid is new, so new files are candidates as usual.
+  The plan says which way it checked (`game files: checked against the build's file list`,
+  or `game files: no file list, changed files only`).
 
 A file is **newer** when it is under a save root in the current game dir and either its
 mtime is later than the snapshot's `created`, or it doesn't exist in the snapshot. gogo
@@ -450,7 +486,10 @@ risk: the rollback brings them back.
 **Excluded** (caches and logs a game, Wine or a driver rewrites at every start, which would
 otherwise drown the real saves): `AppData/Local/Temp/`, `AppData/Local/Microsoft/`,
 `*/INetCache/`, `AppData/Local/D3DSCache/`, `AppData/Local/NVIDIA*/`, `*.dxvk-cache`,
-`vkd3d-proton.cache*`, `CrashDumps/`, `*.log`, `*.dmp`. The list is a constant in code,
+`vkd3d-proton.cache*`, `CrashDumps/`, `*.log`, `*.dmp`. In the game's files the same
+caches and logs are excluded, plus the cache files Wine, DXVK and VKD3D-Proton write beside
+the exe (`*.dxvk-cache`, `*.dxvk-state-cache`, `vkd3d-proton.cache*`, `dxgi.log`-style logs,
+covered by `*.log`) and Windows' thumbnail cache (`Thumbs.db`). The list is a constant in code,
 covered by a test, and grows as games show more; settings files (`*.ini`, `*.cfg`) are not
 excluded, because losing them is a loss too.
 
@@ -461,7 +500,8 @@ Cyberpunk 2077: 14 files, 212 MiB, newest 2026-11-12 09:58`); every file with `-
 ### 6.2 What happens to them
 
 - **Copied aside by default:** to `<data_root>/saves-aside/<gogid>/<UTC timestamp>/`, the
-  paths kept relative to `drive_c/`, with FICLONE where the filesystem allows. Saves are
+  paths kept relative to `drive_c/` (files from `game/` under `game/`), with FICLONE where
+  the filesystem allows. Saves are
   small next to a game, and "bytes are sacred": the default keeps them. `--drop-saves` skips
   the copy. The rollback's last line names the dir. `saves-aside/` is the user's: gogo never
   prunes it, `apps remove` lists it and asks before removing it with the game, and `apps
@@ -492,6 +532,9 @@ user copies what they want from the aside dir.
    writing. A sync that only adds files, or only pushes, doesn't.
 3. **The save roots come from #275 once it lands:** GOG's declared save locations are a
    better list than §6.1's guess, which stays as the fallback for games without cloud saves.
+   Those locations may point into the game's files (`game/` or the install dir); the
+   build-file filter of §6.1 still applies there, so a declared save dir that also holds
+   shipped files lists only what the game wrote.
 4. Snapshots never touch the cloud. A rollback doesn't push, and deleting a snapshot doesn't
    delete anything remote.
 
@@ -743,6 +786,12 @@ with two renames, with a `fail_at(step)` hook (as `dlc add`'s `AddOptions::fail_
   `initial`/`manual`), the on-disk vs metadata reconciliation;
 - every refusal of §5.1 (running, one-off, DLC journal, move journal, unreachable);
 - the newer-saves finder: save roots, exclusions, mtime and absent-in-snapshot, grouping;
+- saves in the game's files: a fixture `game/` with shipped files from a fake depot manifest
+  (and a fake Inno log for the installer lane), a newer `SAVE/slot1.sav`, a rewritten shipped
+  `.ini` with a new size, files a later DLC add laid, gogo's own compat and renderer files,
+  and `*.dxvk-cache` beside the exe: only the save and the `.ini` are listed. The same tree
+  without a list: only files rewritten in place are listed, and the new ones are the summary
+  line when the DLC set changed;
 - rollback: L4 restored or kept, `rewrite_inside` after a same-fs move, `launcher::write`,
   saves-aside layout, the plan and `--json` shapes, the non-TTY exit 2;
 - **crash injection at every step** of create, delete, rollback and convert, then the
