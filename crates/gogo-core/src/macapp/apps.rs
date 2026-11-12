@@ -332,6 +332,9 @@ pub fn remove_with(
         return remove_unreachable(app, keep_override);
     }
     if app.linux {
+        // A snapshot rollback that stopped is settled first (design 20
+        // §5.3.1): its staged or old tree beside the game goes with it.
+        crate::linuxapp::rollback::settle_pending(&app.gogid, backends)?;
         crate::linuxapp::game::refuse_running(&app.gogid, &app.root, &app.prefix)?;
     } else {
         // The Mac's launcher records its start from `ps -o lstart`.

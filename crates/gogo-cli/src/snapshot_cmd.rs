@@ -1,9 +1,10 @@
-//! `gogo linux-app snapshot <gogid> list|create|delete|auto` (design 20 §8):
+//! `gogo linux-app snapshot <gogid> list|create|rollback|delete|auto` (design 20 §8):
 //! the flags, the question and the output; the work is
 //! `gogo::linuxapp::snapshots`. Refusals exit 7 with nothing touched, a bad id
 //! or snapshot number exits 2, and a change without `--yes` and without a
 //! terminal prints its plan and exits 2 (design 03 §3, §5).
 
+use gogo::linuxapp::rollback::{self as rb, Planned, RollbackOptions};
 use gogo::linuxapp::snapshots::{self as snap, Backends};
 
 use crate::{AppError, cli};
@@ -16,6 +17,13 @@ pub fn run(gogid: String, cmd: cli::LinuxSnapshotCmd) -> Result<i32, AppError> {
     }
     let keep_auto = crate::load_config_from_env()?.snapshots.keep_auto;
     let backends = Backends::real();
+    // A rollback that stopped is settled before anything else (design 20
+    // §5.3.1); `list` does it itself and notes it.
+    if !matches!(cmd, cli::LinuxSnapshotCmd::List { .. }) {
+        for l in rb::settle_pending(&gogid, &backends)? {
+            eprintln!("{l}");
+        }
+    }
     match cmd {
         cli::LinuxSnapshotCmd::List { no_space, json } => {
             let v = snap::list(&gogid, &backends, keep_auto, !no_space)?;
@@ -117,6 +125,31 @@ pub fn run(gogid: String, cmd: cli::LinuxSnapshotCmd) -> Result<i32, AppError> {
             }
             Ok(cli::exit::OK)
         }
+        cli::LinuxSnapshotCmd::Rollback {
+            id,
+            drop_saves,
+            keep_override,
+            yes,
+            dry_run,
+            verbose,
+            json,
+        } => rollback(
+            &gogid,
+            &backends,
+            id,
+            RollbackOptions {
+                drop_saves,
+                keep_override,
+                keep_auto,
+                ..RollbackOptions::default()
+            },
+            Flags {
+                yes,
+                dry_run,
+                verbose,
+                json,
+            },
+        ),
         cli::LinuxSnapshotCmd::Auto {
             state,
             yes: _,
@@ -147,8 +180,214 @@ pub fn run(gogid: String, cmd: cli::LinuxSnapshotCmd) -> Result<i32, AppError> {
     }
 }
 
+/// `rollback`'s output flags.
+struct Flags {
+    yes: bool,
+    dry_run: bool,
+    verbose: bool,
+    json: bool,
+}
+
+/// `snapshot <gogid> rollback <n>` (design 20 §5.3, §6, §8): the plan first,
+/// then the question, then the rollback; its last line names the snapshot
+/// taken before and where the newer saves went.
+fn rollback(
+    gogid: &str,
+    backends: &Backends,
+    n: u32,
+    mut opts: RollbackOptions,
+    f: Flags,
+) -> Result<i32, AppError> {
+    if let Some(want) = rb::depot_fetch_wanted(gogid) {
+        opts.build_files = gogo::macapp::lutris::block_on_detached(fetch_build_files(want));
+    }
+    let plan = match rb::plan(gogid, backends, n, &opts)? {
+        Planned::Plan(p) => p,
+        Planned::Unknown(why) => {
+            eprintln!("gogo: {gogid}: {why} (see `gogo linux-app snapshot {gogid} list`)");
+            return Ok(cli::exit::USAGE);
+        }
+    };
+    if f.dry_run {
+        if f.json {
+            println!("{}", serde_json::to_string(&plan).unwrap());
+        } else {
+            println!("would do:");
+            for l in plan.lines(f.verbose) {
+                println!("{l}");
+            }
+        }
+        return Ok(cli::exit::OK);
+    }
+    if !f.yes {
+        for l in plan.lines(f.verbose) {
+            eprintln!("{l}");
+        }
+        if !interactive() {
+            eprintln!("gogo: non-interactive without --yes — aborting (plan above)");
+            return Ok(cli::exit::USAGE);
+        }
+        let confirmed = dialoguer::Confirm::new()
+            .with_prompt(plan.question())
+            .default(false)
+            .interact()
+            .unwrap_or(false);
+        if !confirmed {
+            eprintln!("gogo: aborted");
+            return Ok(cli::exit::OK);
+        }
+    } else if !f.json {
+        for l in plan.lines(f.verbose) {
+            println!("{l}");
+        }
+    }
+    let out = rb::rollback(gogid, backends, n, &plan, &opts)?;
+    if f.json {
+        println!("{}", serde_json::to_string(&out).unwrap());
+        return Ok(cli::exit::OK);
+    }
+    for l in &out.recovered {
+        println!("{l}");
+    }
+    println!(
+        "snapshot {} taken ({})",
+        out.pre,
+        gogo::snapshot::labels::rollback(n)
+    );
+    if let Some(dir) = &out.saves_copied_to {
+        println!(
+            "{} newer save file(s) copied to {}",
+            out.saves_newer.len(),
+            dir.display()
+        );
+    }
+    if out.override_restored {
+        for c in &out.override_changes {
+            println!("override restored: {}", c.line());
+        }
+    } else if !out.override_changes.is_empty() {
+        println!("override kept as it is (--keep-override): the next launch runs setup");
+    }
+    println!("launcher and menu entry written");
+    for p in &out.pruned {
+        println!("pruned snapshot {p}");
+    }
+    for w in &out.warnings {
+        eprintln!("warning: {w}");
+    }
+    println!("{}", out.last_line());
+    Ok(cli::exit::OK)
+}
+
+/// The build's file list from its depot manifests (design 20 §6.1), for a
+/// game whose depot cache doesn't hold its build. `None` (the plan then says
+/// it checked without a list) when gogo isn't signed in, GOG can't be reached
+/// or no longer lists the build.
+async fn fetch_build_files(want: rb::FetchWant) -> Option<gogo::snapshot::saves::BuildFiles> {
+    use gogo::gog::{depot, dlc_filter};
+    let ctx = crate::session_ctx().await.ok()?;
+    let core = ctx.session.as_ref().and_then(|p| p.gog_warp_core())?;
+    let depot::InstalledBuild {
+        listed: Some((_, _, manifest)),
+        ..
+    } = depot::installed_build(core, want.product_id, Some(&want.build_id))
+        .await
+        .ok()?
+    else {
+        return None;
+    };
+    let depots = dlc_filter::fetch_depots(
+        core.reqwest_client(),
+        &manifest,
+        Some((&want.products, std::slice::from_ref(&want.language))),
+    )
+    .await
+    .ok()?;
+    Some(rb::depots_list(
+        &depots,
+        &manifest.install_directory(),
+        &want.language,
+        &want.products,
+    ))
+}
+
 /// A question can be asked: stdin and stderr are terminals.
 fn interactive() -> bool {
     std::io::IsTerminal::is_terminal(&std::io::stdin())
         && std::io::IsTerminal::is_terminal(&std::io::stderr())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use gogo::snapshot::fake::Fake;
+
+    const ID: &str = "1999999902";
+
+    /// A game dir as `snapshot` commands find it, under a scratch data root,
+    /// with one snapshot. Each nextest test is its own process, so setting
+    /// `GOGO_HOME` touches no other test.
+    fn world() -> (tempfile::TempDir, Backends) {
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: nextest runs each test in its own process.
+        unsafe { std::env::set_var("GOGO_HOME", tmp.path()) };
+        let root = tmp.path().join("games").join(ID);
+        std::fs::create_dir_all(root.join("prefix/drive_c/users/steamuser/Saved Games")).unwrap();
+        std::fs::write(root.join("gogo-launch.toml"), "").unwrap();
+        let b = Backends::fixed(Arc::new(Fake::new()));
+        assert_eq!(snap::create(ID, &b, None).unwrap().snapshot.id, 1);
+        std::fs::write(
+            root.join("prefix/drive_c/users/steamuser/Saved Games/new.sav"),
+            "x",
+        )
+        .unwrap();
+        (tmp, b)
+    }
+
+    #[test]
+    fn a_rollback_without_a_terminal_or_yes_prints_the_plan_and_exits_2() {
+        let (tmp, b) = world();
+        let flags = || Flags {
+            yes: false,
+            dry_run: false,
+            verbose: false,
+            json: false,
+        };
+        // Tests run without a terminal on stdin.
+        assert!(!interactive());
+        let code = rollback(ID, &b, 1, RollbackOptions::default(), flags())
+            .unwrap_or_else(|_| panic!("the command failed"));
+        assert_eq!(code, cli::exit::USAGE);
+        // Nothing happened: no journal, no snapshot before the rollback.
+        let meta = tmp.path().join("snapshots").join(ID);
+        assert!(!meta.join("rollback.json").exists());
+        assert!(!meta.join("2.toml").exists());
+        assert!(
+            tmp.path()
+                .join("games")
+                .join(ID)
+                .join("prefix/drive_c/users/steamuser/Saved Games/new.sav")
+                .is_file()
+        );
+        // An unknown number is a usage error too, before any plan.
+        let code = rollback(ID, &b, 9, RollbackOptions::default(), flags())
+            .unwrap_or_else(|_| panic!("the command failed"));
+        assert_eq!(code, cli::exit::USAGE);
+        // --dry-run prints the plan and stops, exit 0.
+        let code = rollback(
+            ID,
+            &b,
+            1,
+            RollbackOptions::default(),
+            Flags {
+                dry_run: true,
+                ..flags()
+            },
+        )
+        .unwrap_or_else(|_| panic!("the command failed"));
+        assert_eq!(code, cli::exit::OK);
+        assert!(!meta.join("2.toml").exists());
+    }
 }

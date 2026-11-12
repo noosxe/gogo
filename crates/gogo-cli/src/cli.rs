@@ -664,6 +664,36 @@ pub enum LinuxSnapshotCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Roll the game back to snapshot N: its files, prefix and saves, and its
+    /// override file, as they were then. A snapshot of the game as it is now
+    /// is taken first, so the rollback can be undone, and save files newer
+    /// than snapshot N are copied aside first. Asks first (`--yes` doesn't);
+    /// without a terminal and without `--yes`, prints the plan and exits 2.
+    Rollback {
+        /// The snapshot's number, from `list`.
+        #[arg(value_name = "N")]
+        id: u32,
+        /// Don't copy the newer save files aside: the snapshot taken before
+        /// the rollback still holds them.
+        #[arg(long)]
+        drop_saves: bool,
+        /// Keep the override file as it is now instead of restoring the
+        /// snapshot's (the next launch then runs setup).
+        #[arg(long)]
+        keep_override: bool,
+        /// Skip the confirmation.
+        #[arg(long)]
+        yes: bool,
+        /// Print the plan, change nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// List every newer save file, not only their dirs.
+        #[arg(short, long)]
+        verbose: bool,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Automatic snapshots before each change gogo makes to the game: print
     /// the setting, or turn it on or off. `on` takes no snapshot by itself;
     /// `off` keeps the snapshots there are.

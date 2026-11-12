@@ -5966,6 +5966,14 @@ fn remove_apps(
         if let Some(n) = a.snapshots.as_ref().and_then(|s| s.remove_note()) {
             println!("    and {n}, deleted first");
         }
+        if let Some(s) = a.snapshots.as_ref().filter(|s| !s.saves_aside.is_empty()) {
+            let bytes: u64 = s.saves_aside_bytes.iter().sum();
+            println!(
+                "    its saves set aside by rollbacks ({} dir(s), {}) stay unless you say so",
+                s.saves_aside.len(),
+                gogo::fmt::human_size(bytes)
+            );
+        }
     }
     if !yes {
         if !console::Term::stdout().features().is_attended() {
@@ -5986,12 +5994,55 @@ fn remove_apps(
             return Ok(cli::exit::OK);
         }
     }
+    // The saves a rollback set aside are the user's (design 20 §6.2, §9.3):
+    // asked about apart, default no, never with `--yes` alone.
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+    let mut drop_aside: Vec<&str> = Vec::new();
+    #[cfg(target_os = "linux")]
+    if !yes && console::Term::stdout().features().is_attended() {
+        for a in targets {
+            let Some(s) = a.snapshots.as_ref().filter(|s| !s.saves_aside.is_empty()) else {
+                continue;
+            };
+            for (d, b) in s.saves_aside.iter().zip(&s.saves_aside_bytes) {
+                println!("  {} ({})", d.display(), gogo::fmt::human_size(*b));
+            }
+            let also = dialoguer::Confirm::new()
+                .with_prompt(format!(
+                    "also remove {}'s saves set aside by rollbacks (listed above)?",
+                    a.gogid
+                ))
+                .default(false)
+                .interact()
+                .unwrap_or(false);
+            if also {
+                drop_aside.push(&a.gogid);
+            }
+        }
+    }
     let mut failed = false;
     for a in targets {
         match gogo::macapp::apps::remove(a, keep_override) {
             Ok(out) => {
                 for p in &out.paths {
                     println!("removed {}", p.display());
+                }
+                #[cfg(target_os = "linux")]
+                if drop_aside.contains(&a.gogid.as_str()) {
+                    match gogo::linuxapp::rollback::remove_saves_aside(&a.gogid) {
+                        Ok(Some(d)) => println!("removed {}", d.display()),
+                        Ok(None) => {}
+                        Err(e) => {
+                            eprintln!("gogo: {e}");
+                            failed = true;
+                        }
+                    }
+                }
+                if let Some(s) = a.snapshots.as_ref().filter(|s| {
+                    !s.saves_aside.is_empty() && !drop_aside.contains(&a.gogid.as_str())
+                }) && let Some(d) = s.saves_aside.first().and_then(|d| d.parent())
+                {
+                    println!("{}: its saves set aside stay in {}", a.gogid, d.display());
                 }
                 if out.snapshots > 0 {
                     println!("{}: deleted {} snapshot(s)", a.gogid, out.snapshots);

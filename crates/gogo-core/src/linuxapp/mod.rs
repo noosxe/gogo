@@ -21,6 +21,7 @@ pub mod manage;
 pub mod proton;
 pub mod protonfix;
 pub mod relocate;
+pub mod rollback;
 pub mod setup;
 pub mod snapshots;
 pub mod umu;

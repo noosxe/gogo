@@ -127,11 +127,11 @@ impl SnapshotBackend for Unavailable {
     }
 }
 
-fn err(e: SnapshotError) -> MacAppError {
+pub(crate) fn err(e: SnapshotError) -> MacAppError {
     MacAppError::Apps(e.to_string())
 }
 
-fn store<'b>(gogid: &str, root: &Path, backend: &'b dyn SnapshotBackend) -> Store<'b> {
+pub(crate) fn store<'b>(gogid: &str, root: &Path, backend: &'b dyn SnapshotBackend) -> Store<'b> {
     Store::new(&crate::state::data_root(), gogid, root, backend)
 }
 
@@ -318,7 +318,7 @@ pub fn content_of(dirs: &GameDirs) -> Content {
 // — locks and refusals (design 20 §5.1) —
 
 /// The game `gogid` as a snapshot command finds it: built by `linux-app`.
-fn built(gogid: &str) -> Result<GameDirs, MacAppError> {
+pub(crate) fn built(gogid: &str) -> Result<GameDirs, MacAppError> {
     crate::macapp::compat::validate_gogid(gogid)?;
     let dirs = GameDirs::for_game(gogid)?;
     if !dirs.root.is_dir() && launch::recorded_location(gogid).is_some() {
@@ -377,7 +377,7 @@ pub fn refuse(gogid: &str, dirs: &GameDirs) -> Result<(), MacAppError> {
 /// Refuse a new snapshot of a game dir that can't take one: no snapshots on
 /// its filesystem (§2.4), or a plain dir on btrfs, which needs converting
 /// (§2.1), which gogo doesn't do yet.
-fn refuse_unready(
+pub(crate) fn refuse_unready(
     support: &Support,
     b: &dyn SnapshotBackend,
     root: &Path,
@@ -412,7 +412,7 @@ fn recovered_lines(r: &[Recovered]) -> Vec<String> {
 /// root's lock, then the game's, an unreachable game refused, an interrupted
 /// create or delete settled, then the other refusals (`refusals`: off for
 /// `auto off`, which changes nothing about the game).
-fn locked<T>(
+pub(crate) fn locked<T>(
     gogid: &str,
     dirs: &GameDirs,
     backends: &Backends,
@@ -425,7 +425,11 @@ fn locked<T>(
     refuse_unreachable(gogid, dirs)?;
     let (support, b) = backends.for_dir(&dirs.root);
     let s = store(gogid, &dirs.root, b);
-    let recovered = recovered_lines(&s.recover(&guard).map_err(err)?);
+    let mut recovered = recovered_lines(&s.recover(&guard).map_err(err)?);
+    // A pending rollback is settled before anything else (design 20 §5.3.1).
+    if let Some(r) = super::rollback::settle_locked(gogid, dirs, &s, b)? {
+        recovered.push(r.line());
+    }
     if refusals {
         refuse(gogid, dirs)?;
     }
@@ -684,9 +688,10 @@ pub fn list(
     measure: bool,
 ) -> Result<ListView, MacAppError> {
     let dirs = built(gogid)?;
+    // A pending rollback is settled first, as by every snapshot command.
+    let mut notes = super::rollback::settle_pending(gogid, backends)?;
     let (support, b) = backends.for_dir(&dirs.root);
     let s = store(gogid, &dirs.root, b);
-    let mut notes = Vec::new();
     let has_snapshots = dirs.root.is_dir()
         && !matches!(support, Support::None(_))
         && b.on_disk(&dirs.root).is_ok_and(|d| !d.is_empty());
@@ -1066,6 +1071,8 @@ pub struct Summary {
     pub space_checked: Option<String>,
     /// `<data_root>/saves-aside/<gogid>/<time>/` dirs, newest first.
     pub saves_aside: Vec<PathBuf>,
+    /// Their sizes, in the same order.
+    pub saves_aside_bytes: Vec<u64>,
 }
 
 impl Summary {
@@ -1117,8 +1124,15 @@ impl Summary {
                     .map_or_else(|_| checked.clone(), |t| local(t.with_timezone(&Utc)))
             ));
         }
-        for d in &self.saves_aside {
-            out.push(format!("saves set aside: {}", d.display()));
+        for (i, d) in self.saves_aside.iter().enumerate() {
+            match self.saves_aside_bytes.get(i) {
+                Some(b) => out.push(format!(
+                    "saves set aside: {} ({})",
+                    d.display(),
+                    crate::fmt::human_size(*b)
+                )),
+                None => out.push(format!("saves set aside: {}", d.display())),
+            }
         }
         if self.count > 0 {
             out.push(format!(
@@ -1127,21 +1141,6 @@ impl Summary {
         }
         out
     }
-}
-
-/// `<data_root>/saves-aside/<gogid>/`'s dirs, newest first (design 20 §6.2).
-fn saves_aside(gogid: &str) -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> =
-        std::fs::read_dir(crate::state::data_root().join("saves-aside").join(gogid))
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.is_dir())
-            .collect();
-    dirs.sort();
-    dirs.reverse();
-    dirs
 }
 
 /// What `apps show` says about the snapshots of `gogid` at `root`. Reads
@@ -1156,6 +1155,7 @@ pub fn summary(gogid: &str, root: &Path, backends: &Backends) -> Summary {
         };
     };
     let v = view(gogid, root, &support, b, listing, KEEP_AUTO);
+    let aside = super::rollback::saves_aside(gogid);
     let measured: Vec<&SpaceView> = v
         .snapshots
         .iter()
@@ -1180,7 +1180,8 @@ pub fn summary(gogid: &str, root: &Path, backends: &Backends) -> Summary {
         space_bytes: measured.iter().map(|s| s.exclusive_bytes).sum(),
         space_exact: !measured.is_empty() && measured.iter().all(|s| s.exact),
         space_checked: measured.iter().map(|s| s.checked.clone()).min(),
-        saves_aside: saves_aside(gogid),
+        saves_aside: aside.iter().map(|(d, _)| d.clone()).collect(),
+        saves_aside_bytes: aside.iter().map(|(_, b)| *b).collect(),
     }
 }
 
@@ -1281,6 +1282,7 @@ pub fn doctor(gogid: &str, root: &Path, backends: &Backends) -> Vec<Finding> {
         ));
         return out;
     }
+    out.extend(super::rollback::doctor_findings(gogid, root));
     match (&v.reason, v.ready, v.auto, has_settings) {
         (Some(reason), ..) => out.push(Finding::ok(CHECK, format!("none: {reason}; {space}"))),
         (None, false, true, _) => out.push(Finding::warn(
