@@ -137,9 +137,8 @@ pub fn depot_hint(
             }
             // A game follows its own branch (§11 Q2).
             let newest = newest_on(&l.items, h.branch.as_deref());
-            let newer = |n: &Build| {
-                (n.date_published(), n.build_id()) > (b.date_published(), b.build_id())
-            };
+            let newer =
+                |n: &Build| (n.date_published(), n.build_id()) > (b.date_published(), b.build_id());
             h.state = if newest.is_some_and(newer) {
                 State::Newer
             } else {
@@ -212,8 +211,9 @@ impl BuildHint {
     }
 
     fn checked_on(&self) -> String {
-        self.checked
-            .map_or(String::new(), |c| format!(" (checked {})", c.format("%Y-%m-%d")))
+        self.checked.map_or(String::new(), |c| {
+            format!(" (checked {})", c.format("%Y-%m-%d"))
+        })
     }
 
     /// The update path for this lane, when the game is behind or gone.
@@ -264,7 +264,11 @@ impl BuildHint {
                 out.push(format!("rebuild: {}", self.update_command(gogid)));
             }
             (State::Newer, Some(n)) => {
-                out.push(format!("newest: {} is newer{}{refresh}", n.label(), self.checked_on()));
+                out.push(format!(
+                    "newest: {} is newer{}{refresh}",
+                    n.label(),
+                    self.checked_on()
+                ));
                 out.push(format!("update: {}", self.update_command(gogid)));
             }
             (_, n) => out.push(format!(
@@ -332,7 +336,8 @@ pub fn for_content(
             if version.is_empty() {
                 return None;
             }
-            let newest = catalog.and_then(|p| catalog_installer_version(p, content.language.as_deref()));
+            let newest =
+                catalog.and_then(|p| catalog_installer_version(p, content.language.as_deref()));
             Some(installer_hint(
                 &version,
                 newest.zip(catalog_cached_at),
@@ -362,8 +367,7 @@ fn catalog_installer_version(p: &Product, language: Option<&str>) -> Option<Stri
 /// The real thing: reads the platform cache dir, the catalog cache and
 /// `catalog_ttl_hours`. No network.
 pub fn for_game(content: &Content, gogid: &str) -> Option<BuildHint> {
-    let ttl = crate::config::Config::load()
-        .map_or(24, |l| l.config.state.catalog_ttl_hours);
+    let ttl = crate::config::Config::load().map_or(24, |l| l.config.state.catalog_ttl_hours);
     let id: Option<u64> = gogid.parse().ok();
     let (product, at) = id
         .map(|n| {
@@ -418,7 +422,13 @@ mod tests {
                 b("3", "2.5_RedModFix", "2026-10-22T00:00:00Z", None, true),
                 b("2", "2.31a", "2025-09-16T00:00:00Z", None, true),
                 b("1", "2.3", "2025-07-16T00:00:00Z", None, true),
-                b("9", "1.63_Hotfix", "2025-08-01T00:00:00Z", Some("legacy"), true),
+                b(
+                    "9",
+                    "1.63_Hotfix",
+                    "2025-08-01T00:00:00Z",
+                    Some("legacy"),
+                    true,
+                ),
                 b("10", "1.62", "2025-06-01T00:00:00Z", Some("legacy"), true),
             ],
             "2026-11-12T09:00:00Z",
