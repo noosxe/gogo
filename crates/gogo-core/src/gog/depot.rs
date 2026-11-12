@@ -604,6 +604,10 @@ pub async fn run(
             .into());
     }
 
+    // The files of another build are about to be overwritten: until the record of
+    // the finished download replaces this one, the tree may mix both builds, so the
+    // record says so (design 21 §3.5). A cache nobody can vouch for is refused.
+    mark_upgrading(&install_root, &build_id)?;
     let (fetched_files, fetched_bytes) = fetch_into(
         core,
         &FetchSpec {
@@ -843,6 +847,11 @@ struct Record {
     version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     generation: Option<u32>,
+    /// Set before a download onto a cache of another build, cleared by the record
+    /// the finished download writes (design 21 §3.5). A record that has it never
+    /// counts as complete: the next run checks the tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    upgrading: Option<Upgrading>,
     /// The language the last download asked for; absent in records an older gogo
     /// wrote. A path two languages share holds this one's bytes. The cache can hold
     /// other languages too (`other_languages`, #389): a switch deletes nothing.
@@ -872,6 +881,32 @@ struct Record {
     languages_scanned: bool,
     /// Paths relative to the cache root, `/`-separated, sorted.
     files: Vec<String>,
+}
+
+/// A cache switching builds (design 21 §3.5).
+#[derive(Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+struct Upgrading {
+    from: String,
+    to: String,
+}
+
+/// Mark cache root `root`'s record as switching to build `to`, durably, before any
+/// file is written. A no-op for a record of `to` (or none): a plain repair keeps the
+/// files of its own build. Best effort: `Err` means the marker isn't there.
+fn mark_upgrading(root: &Path, to: &str) -> std::io::Result<()> {
+    let Some(mut rec) = load_record(root) else {
+        return Ok(());
+    };
+    if rec.build_id == to && rec.upgrading.is_none() {
+        return Ok(());
+    }
+    if rec.upgrading.is_none() {
+        rec.upgrading = Some(Upgrading {
+            from: rec.build_id.clone(),
+            to: to.to_string(),
+        });
+    }
+    save_record(root, &rec)
 }
 
 /// One of a record's other languages (#389).
@@ -975,6 +1010,9 @@ pub enum CacheCheck {
     OtherLanguage,
     /// The cache holds another build than the one wanted.
     OtherBuild,
+    /// A switch from build `from` to `to` started and never finished (design 21
+    /// §3.5): the tree may mix both, whatever the record's files say.
+    Interrupted { from: String, to: String },
 }
 
 /// What a caller wants from a cache; a `None` field isn't checked.
@@ -1056,6 +1094,7 @@ pub fn write_record_build(
         build_id: build_id.to_string(),
         version,
         generation,
+        upgrading: None,
         language: Some(language.to_string()),
         dlcs: Some(dlcs),
         products,
@@ -1512,6 +1551,12 @@ fn check_record(root: &Path, rec: &Record, want: &CacheWant<'_>) -> CacheCheck {
             shown: missing.into_iter().take(MISSING_SHOWN).collect(),
         };
     }
+    if let Some(u) = &rec.upgrading {
+        return CacheCheck::Interrupted {
+            from: u.from.clone(),
+            to: u.to.clone(),
+        };
+    }
     if want.build_id.is_some_and(|b| b != rec.build_id) {
         return CacheCheck::OtherBuild;
     }
@@ -1557,7 +1602,10 @@ fn whole_before(
     };
     if matches!(
         check,
-        CacheCheck::Missing { .. } | CacheCheck::Unrecorded | CacheCheck::UnknownContent
+        CacheCheck::Missing { .. }
+            | CacheCheck::Unrecorded
+            | CacheCheck::UnknownContent
+            | CacheCheck::Interrupted { .. }
     ) {
         return Vec::new();
     }
@@ -1711,6 +1759,10 @@ fn cache_note(check: &CacheCheck, inputs: &DownloadInputs) -> Option<String> {
         CacheCheck::OtherBuild => {
             "cache holds another build: checking it (hashing) and fetching the new one".into()
         }
+        CacheCheck::Interrupted { from, to } => format!(
+            "an earlier switch from build {from} to {to} didn't finish: checking the cache \
+             (hashing) and fetching what's missing"
+        ),
     })
 }
 
@@ -1924,6 +1976,7 @@ mod tests {
             build_id: "b".into(),
             version: None,
             generation: None,
+            upgrading: None,
             language: Some("en-US".into()),
             dlcs: Some(vec![]),
             products: None,
@@ -2160,6 +2213,7 @@ mod tests {
             build_id: "b".into(),
             version: None,
             generation: None,
+            upgrading: None,
             language: language.map(Into::into),
             dlcs: Some(vec![]),
             products: None,
@@ -2480,6 +2534,75 @@ mod tests {
         assert!(
             !raw.contains("version") && !raw.contains("generation"),
             "{raw}"
+        );
+    }
+
+    // ---- a switch of builds that never finished (design 21 §3.5) ----
+
+    #[test]
+    fn a_record_marked_as_switching_is_never_complete() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path();
+        std::fs::create_dir_all(root.join("Game")).unwrap();
+        std::fs::write(root.join("Game/a.bin"), b"x").unwrap();
+        write_record(root, "b1", "en-US", &[]).unwrap();
+        let want = |b| CacheWant {
+            build_id: b,
+            language: Some("en-US"),
+            dlcs: &[],
+        };
+        assert_eq!(check_cache(root, &want(Some("b1"))), CacheCheck::Complete);
+
+        // A download of b2 onto a cache of b1 marks the record first. If it stops,
+        // every later look sees a switch in progress, for either build and for none.
+        mark_upgrading(root, "b2").unwrap();
+        let stuck = CacheCheck::Interrupted {
+            from: "b1".into(),
+            to: "b2".into(),
+        };
+        for b in [Some("b1"), Some("b2"), None] {
+            assert_eq!(check_cache(root, &want(b)), stuck, "{b:?}");
+        }
+        // Marking again (a second interrupted run) keeps the first `from`.
+        mark_upgrading(root, "b3").unwrap();
+        assert_eq!(check_cache(root, &want(None)), stuck);
+        // The next run hashes the tree: no targeted fetch, and the plan says why.
+        let inputs = download_inputs(2, "en-US", &[], &stuck, &[]);
+        assert!(!inputs.targeted);
+        let note = cache_note(&stuck, &inputs).unwrap();
+        assert!(
+            note.contains("b1") && note.contains("didn't finish"),
+            "{note}"
+        );
+
+        // The record the finished download writes clears it.
+        write_record_build(
+            root,
+            &BuildStamp {
+                build_id: "b2",
+                version: Some("2.0"),
+                generation: Some(2),
+            },
+            "en-US",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(check_cache(root, &want(Some("b2"))), CacheCheck::Complete);
+        let raw = std::fs::read_to_string(root.join(RECORD)).unwrap();
+        assert!(!raw.contains("upgrading"), "{raw}");
+    }
+
+    #[test]
+    fn a_repair_of_the_same_build_or_a_cold_cache_leaves_no_mark() {
+        let t = tempfile::tempdir().unwrap();
+        mark_upgrading(t.path(), "b1").unwrap();
+        assert!(load_record(t.path()).is_none());
+        write_record(t.path(), "b1", "en-US", &[]).unwrap();
+        mark_upgrading(t.path(), "b1").unwrap();
+        assert!(
+            !std::fs::read_to_string(t.path().join(RECORD))
+                .unwrap()
+                .contains("upgrading")
         );
     }
 }
