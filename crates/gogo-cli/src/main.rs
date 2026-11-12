@@ -192,9 +192,10 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
             search,
             os,
             with_dlcs,
+            installed,
             json,
             refresh,
-        } => list(search, os, with_dlcs, json, refresh, color).await,
+        } => list(search, os, with_dlcs, installed, json, refresh, color).await,
         Command::Search(args) => search(args).await,
         Command::Info { game, json } => info(game, json).await,
         Command::Download(args) => download(args, cli.no_progress, cli.quiet).await,
@@ -593,11 +594,13 @@ async fn list(
     search: Option<String>,
     os: Option<OsFilter>,
     with_dlcs: bool,
+    installed_only: bool,
     json: bool,
     refresh: bool,
     color: ColorWhen,
 ) -> Result<i32, AppError> {
     use gogo::gog::catalog::Product;
+    use gogo::state::local::{Built, Local};
 
     let ctx = session_ctx().await?;
     let mut games = library_products(&ctx).await?;
@@ -610,6 +613,40 @@ async fn list(
                 g.slug.as_deref().unwrap_or_default()
             )))
         });
+    }
+
+    // What is set up locally (#378): built apps, depot caches, downloaded installers.
+    // Read only; a game filter by `--installed` runs before any catalog fetch.
+    let state = ctx.state.lock().unwrap().clone();
+    let built_apps = match gogo::macapp::apps::list(&gogo::macapp::doctor::Host::detect().logs) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("warn: built apps unreadable: {e}");
+            Vec::new()
+        }
+    };
+    let cache_base = gogo::gog::depot::default_cache_dir();
+    let locals: std::collections::HashMap<u64, Local> = games
+        .iter()
+        .map(|g| {
+            let local = Local {
+                built: built_apps
+                    .iter()
+                    .find(|a| a.gogid == g.id.to_string())
+                    .map(Built::from_app),
+                cache: gogo::gog::depot::cache_roots(cache_base.as_deref(), g.id, None)
+                    .and_then(|(root, _, _)| gogo::state::local::read_cache(&root)),
+                installer: state
+                    .installs
+                    .iter()
+                    .find(|r| r.product_id == g.id && r.dlc_id.is_none())
+                    .and_then(|r| r.version.clone()),
+            };
+            (g.id, local)
+        })
+        .collect();
+    if installed_only {
+        games.retain(|g| locals.get(&g.id).is_some_and(Local::any));
     }
 
     // 03 §1: the library list is always live; catalog data (os, sizes, versions)
@@ -658,7 +695,6 @@ async fn list(
         });
     }
 
-    let state = ctx.state.lock().unwrap().clone();
     let downloaded = |product_id: u64, dlc_id: Option<u64>| {
         state
             .installs
@@ -679,6 +715,7 @@ async fn list(
             installers: entry_count(product),
             total_size: product_size(product),
             installed_version: downloaded(product.id, None),
+            local: locals.get(&product.id).cloned().unwrap_or_default(),
             depth: 0,
         });
         if with_dlcs {
@@ -690,6 +727,10 @@ async fn list(
                     installers: entry_count(dlc),
                     total_size: product_size(dlc),
                     installed_version: downloaded(product.id, Some(dlc.id)),
+                    local: Local {
+                        installer: downloaded(product.id, Some(dlc.id)),
+                        ..Local::default()
+                    },
                     depth: 1,
                 });
             }
@@ -707,6 +748,8 @@ async fn list(
                     "os": product_os(p),
                     "installers": entry_count(p),
                     "size": product_size(p),
+                    "installed": locals.get(&p.id).is_some_and(Local::any),
+                    "local": locals.get(&p.id).cloned().unwrap_or_default(),
                 });
                 if with_dlcs && !p.expanded_dlcs.is_empty() {
                     v["dlcs"] = serde_json::json!(

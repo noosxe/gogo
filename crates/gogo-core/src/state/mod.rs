@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::state::records::InstallRecord;
 
 pub mod cache;
+pub mod local;
 pub mod records;
 
 /// Base dir for machine state (`docs/design/06` §1): `$XDG_STATE_HOME/gogo` on Linux,

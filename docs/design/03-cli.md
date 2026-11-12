@@ -18,7 +18,14 @@ state.json + catalog cache + verify-cache (06 §3).
 Username, user id, country, wallet balance, counts. `--json`.
 
 ### `gogo list`
-Owned games table: `ID  TITLE  OS  INSTALLERS  SIZE  DOWNLOADED(✓ version | –)`.
+Owned games table: `ID  TITLE  OS  INSTALLERS  SIZE  LOCAL`. `LOCAL` is what is set up on
+this machine, read from disk (no network): the built app leads, `linux depot · 2.31 +2 DLC`
+(platform, lane, version or `b<build>`, DLC count); a depot cache follows as
+`+ cache <build> <lang>`, a downloaded installer as `+ installer <version>`. With no app:
+`cache <build> <lang>`, or `✓ installer <version>`; `–` when nothing is local.
+`--installed` lists only games with any of these. `--json` adds `installed` and `local`
+(`built`: platform, lane, version, build_id, dlc_count; `cache`: build_id, language;
+`installer`: version) to each game.
 Sorted by title. Sources: library list (`getFilteredProducts` `mediaType=1`, always live,
 paged — **games only**) + catalog cache (sizes, versions). DLCs are part of their game:
 indented rows via `--with-dlcs`, never library entries. `--refresh` also busts the product
@@ -272,7 +279,7 @@ batch reports the worst thing that happened, so automation always sees it.
 ```
 $ gogo login            # browser opens, paste redirect URL back
 $ gogo list --search brass
-  ID          TITLE     OS                 SIZE     DOWNLOADED
+  ID          TITLE     OS                 SIZE     LOCAL
   1075439258  Hot Brass win mac linux      691 MiB  ✓ 2.2.2
 
 $ gogo download Hot Brass --with-dlcs --limit 4MiB/s --dry-run

@@ -133,7 +133,7 @@ these modules:
 
 ```
 gogo login            # sign in: browser + paste-code, tokens in the OS keychain
-gogo list             # your library (id, title, platforms)
+gogo list             # your library (id, title, platforms, what is set up locally)
 gogo download <GAME>  # offline installers, chunk-verified and resumable
 gogo depot <GAME>     # straight from GOG's depot into the user cache dir
 gogo mac-app <GAME>   # macOS: game -> .app from its depot build (no installer run)
