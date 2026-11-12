@@ -551,7 +551,10 @@ resolve game → content.toml (build B, language L, installed DLC I)
       language through another depot manifest holds that one's bytes, so only its
       presence counts. With no such base depot, the record's DLC's depots in L count
       instead; with none either, L's files can't be told from the record language's
-      and L is skipped. Sizes only: no file is read or hashed.
+      and L is skipped. At least one file L doesn't share has to be there with its size,
+      for L and for each DLC held in it: when L shares every path with the record's
+      language (an older title's one `lang/voice.dat`), the file there is that
+      language's, so L is skipped with no note. Sizes only: no file is read or hashed.
     - **Recorded** as a switch records the old language: `whole` unless it clashes
       with the record's language (`dlc_filter::clash`), `dlcs` the DLC whose L files
       are all there, `products` every product's list in L. The record language's lists
