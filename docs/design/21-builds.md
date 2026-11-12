@@ -26,7 +26,7 @@ which one is "newest", and what gogo keeps about the installed one.
 | How many | Only what GOG returns: a handful of recent builds (2–6 in the games tried), never `total_count` (5–270). Paging parameters are ignored (§1.2). The footer says how many GOG counts. |
 | Newest | The newest **public build on the default branch** (`branch` null). Builds on a named branch (Cyberpunk's `1_63_legacy_patch`) are listed, but never picked on their own (§1.3, D3). |
 | Pick | `--build <id\|version>` on `gogo depot` and `gogo linux-app <game>` (build and rebuild). It matches an exact build id, else a version name exactly. Unknown or ambiguous: exit 2 with the list (§3). |
-| Hint | `apps list`, `apps show` and `doctor` compare the installed build with a **cached listing** (`<cache>/gogo/builds/<gogid>.json`), with no network call. Commands that fetch the list anyway refresh it. `gogo builds --installed` refreshes every built game on request (§4). |
+| Hint | `apps list`, `apps show` and `doctor` compare the installed build with a **cached listing** (`<cache>/gogo/builds/<os>/<gogid>.json`), with no network call. Commands that fetch the list anyway refresh it. `gogo builds --installed` refreshes every built game on request (§4). |
 | Kept for updates | The installed build's manifest goes into the game dir as `build-manifest.json` (a few KB), so an update can diff from it after GOG stops listing the build (§5, D6). |
 | Installer lane | GOG serves the newest installer only. `gogo builds` shows its version and GOG's patch files; `--build` is refused there, and the hint compares with the catalog's version (§6). |
 | Update (later) | `gogo linux-app update <gogid> [--build X]`: gog-warp `upgrade_from(installed manifest)` on the depot cache, then design 19's journaled lay onto `game/` (now with deletions), DLC kept, and the `before update <old> → <new>` snapshot first (§7). It depends on #362. |
@@ -554,6 +554,21 @@ Decided on 2026-11-12.
 | Q5 | Run GOG's patch installers on the installer lane? | **No.** An installer-lane update is a re-download plus a rebuild (§6). |
 | Q6 | No usable cache at update time? | **Refuse and point to a rebuild.** The cache is never re-seeded from `game/` (§7.1). |
 | Q7 | `dlc add` after the build left the list? | **"Update first" stays the rule.** gogo doesn't fetch DLC depots for a build that is no longer listed (§8, design 19 §4). |
+
+## 11a. As built (I1, #424)
+
+- `gog/builds.rs` holds `pick_build` (re-exported from `gog::depot`), the `Listing` type
+  (gog-warp `Build`s plus `total_count`), `BuildEntry` rows, `Listing::resolve` with
+  `BuildResolveError` (`Unknown`, `Ambiguous`, messages as §3.3), and the cache functions.
+- The cache path is §4.2's `<cache>/gogo/builds/<os>/<gogid>.json` (the §0 summary row
+  said it without `<os>`). The file carries `schema`, `checked`, `totalCount` and `items`.
+  A listing fetched with a password is never written.
+- `builds::fetch_listing` fetches and writes the cache, best effort. `depot::installed_build`,
+  `has_public_build`, `build_version`, `newest_build` and `depot::run` fetch through it, so
+  every listing they read is cached with no extra request.
+- Version matching: an exact hit counts first, so with `Beta` and `beta` listed, `beta` picks the
+  second; `BETA` is ambiguous. An empty value never matches an empty version name.
+- A password-protected build is a listed build with `public: false`.
 
 ## 12. Implementation issues (to be filed as sub-issues of #360)
 
