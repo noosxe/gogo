@@ -328,6 +328,26 @@ pub struct FoundLanguage {
     pub products: ProductFiles,
 }
 
+/// What the scan saw of some depots' files.
+#[derive(Debug, Clone, Copy, Default)]
+struct Seen {
+    /// There as the depot has them (a contested path: present).
+    ok: usize,
+    total: usize,
+    /// Of `ok`, those that tell the language apart.
+    telling: usize,
+}
+
+impl std::iter::Sum for Seen {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::default(), |a, b| Self {
+            ok: a.ok + b.ok,
+            total: a.total + b.total,
+            telling: a.telling + b.telling,
+        })
+    }
+}
+
 /// What [`scan_languages`] found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LanguageScan {
@@ -366,8 +386,10 @@ impl LanguageScan {
 /// A language L is held when the base game has depots in L and not in the record's
 /// language, and every file of each is on disk with the size its manifest gives (a
 /// path such a depot shares with the record's language through another depot
-/// manifest holds that one's bytes, so only its presence counts). With no such base
-/// depot, the record's DLC's depots in L count instead; with none of those either,
+/// manifest holds that one's bytes, so only its presence counts). At least one file
+/// it doesn't share must be there with its size: when it shares every path, or none
+/// of its own files is there, nothing tells it apart and it is skipped, with no
+/// note. The same goes for a DLC held in L. With no such base depot, the record's DLC's depots in L count instead; with none of those either,
 /// L's files can't be told from the record language's. A language with only some of
 /// those files there is left out with a note: its files stay unknown to the filter,
 /// which keeps them, as before. Sizes, not hashes: this reads no file.
@@ -414,27 +436,35 @@ pub fn scan_languages(
         }
     }
     let mut disk = OnDisk::default();
-    // How many of `d`'s files are there as it has them, of how many.
-    let mut there = |d: &DepotList| -> (usize, usize) {
-        let ok = d
-            .paths
-            .iter()
-            .filter(|p| {
-                let Some(found) = disk.find(root, p) else {
-                    return false;
-                };
-                let contested = ours
-                    .get(&p.to_lowercase())
-                    .is_some_and(|m| m.iter().any(|m| *m != d.manifest));
-                contested
-                    || d.sizes.get(*p).is_none_or(|n| {
-                        root.join(found)
-                            .symlink_metadata()
-                            .is_ok_and(|m| m.len() == *n)
-                    })
-            })
-            .count();
-        (ok, d.paths.len())
+    // `d`'s files: how many are there as it has them, of how many, and how many of
+    // those tell its language apart. A path the record language's depots write
+    // through another manifest holds their bytes, so it counts as there when
+    // present but tells nothing; only a file no such depot writes, present with the
+    // manifest's size, does.
+    let mut there = |d: &DepotList| -> Seen {
+        let mut seen = Seen {
+            total: d.paths.len(),
+            ..Default::default()
+        };
+        for p in &d.paths {
+            let Some(found) = disk.find(root, p) else {
+                continue;
+            };
+            let contested = ours
+                .get(&p.to_lowercase())
+                .is_some_and(|m| m.iter().any(|m| *m != d.manifest));
+            if contested {
+                seen.ok += 1;
+            } else if d.sizes.get(p).is_none_or(|n| {
+                root.join(found)
+                    .symlink_metadata()
+                    .is_ok_and(|m| m.len() == *n)
+            }) {
+                seen.ok += 1;
+                seen.telling += 1;
+            }
+        }
+        seen
     };
     let mut found = Vec::new();
     let mut notes = Vec::new();
@@ -458,31 +488,36 @@ pub fn scan_languages(
         if telling.is_empty() {
             continue;
         }
-        let (ok, total) = telling
-            .iter()
-            .map(|d| there(d))
-            .fold((0, 0), |(a, b), (c, d)| (a + c, b + d));
-        if ok < total {
-            if ok > 0 {
-                notes.push(format!(
-                    "{l}: {ok} of its {total} files are there, so it isn't recorded as held \
-                     (builds keep them, as before)"
-                ));
-            }
+        let seen: Seen = telling.iter().map(|d| there(d)).sum();
+        // No file of its own is there, or every path it has is the record
+        // language's too: nothing tells it apart.
+        if seen.telling == 0 {
+            continue;
+        }
+        if seen.ok < seen.total {
+            notes.push(format!(
+                "{l}: {} of its {} files are there, so it isn't recorded as held (builds \
+                 keep them, as before)",
+                seen.ok, seen.total
+            ));
             continue;
         }
         let mut dlcs: Vec<String> = Vec::new();
         for p in products.iter().filter(|p| *p != base) {
             let of_p: Vec<&DepotList> = depots.iter().filter(|d| d.product == *p).collect();
             let mine: Vec<&DepotList> = of_p.iter().copied().filter(in_l).collect();
+            // Its depots only in L tell it apart when it has some, else its others.
+            let own: Vec<&DepotList> = mine.iter().copied().filter(only).collect();
             let held = if of_p.is_empty() {
                 rec_dlcs.contains(p)
             } else {
-                !mine.is_empty()
-                    && mine.iter().all(|d| {
-                        let (ok, total) = there(d);
-                        ok == total
-                    })
+                let all: Seen = mine.iter().map(|d| there(d)).sum();
+                let told: usize = if own.is_empty() {
+                    all.telling
+                } else {
+                    own.iter().map(|d| there(d).telling).sum()
+                };
+                !mine.is_empty() && all.ok == all.total && told > 0
             };
             if held {
                 dlcs.push(p.clone());
@@ -888,5 +923,34 @@ mod tests {
         assert!(scan.found[0].whole);
         d[2].sizes.insert("G/dlc2/fr.pak".into(), 1);
         assert!(scan_languages(root, "1", &d).unwrap().found.is_empty());
+    }
+
+    /// L's only depot writes every path the record language's does, through
+    /// another manifest (an older title's one `lang/voice.dat`): the file there is
+    /// the record language's, so nothing says L is held.
+    #[test]
+    fn a_language_sharing_every_path_is_not_found() {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path();
+        tree(root);
+        put(root, "G/lang/voice.dat");
+        depot::write_record(root, "b1", "en-US", &[]).unwrap();
+        let mut d = vec![
+            dl("1", &["*"], "m-base", &["G/bin/game.exe"]),
+            dl("1", &["en-US"], "m-en", &["G/lang/voice.dat"]),
+            dl("1", &["de-DE"], "m-de", &["G/lang/voice.dat"]),
+        ];
+        d[2].sizes.insert("G/lang/voice.dat".into(), 1);
+        let scan = scan_languages(root, "1", &d).unwrap();
+        assert!(scan.found.is_empty(), "{scan:?}");
+        assert!(scan.notes.is_empty(), "{:?}", scan.notes);
+        // One file of its own there with its size: held (not whole, it clashes).
+        put(root, "G/lang/de.pak");
+        d[2].paths.push("G/lang/de.pak".into());
+        d[2].sizes
+            .insert("G/lang/de.pak".into(), "G/lang/de.pak".len() as u64);
+        let scan = scan_languages(root, "1", &d).unwrap();
+        assert_eq!(scan.found.len(), 1);
+        assert!(!scan.found[0].whole);
     }
 }
