@@ -200,6 +200,7 @@ pub fn doctor(gogid: &str, host: &Host) -> Result<Report, MacAppError> {
         f.push(check_stamp(&g, raw));
     }
     f.push(check_dlc(&g));
+    f.extend(check_build(&g));
     f.extend(super::snapshots::doctor(
         gogid,
         &g.dirs.root,
@@ -1737,6 +1738,59 @@ fn check_links(g: &Game, proton: Option<&Path>) -> Finding {
     )
 }
 
+/// The game's install dir and whether it is a depot game.
+fn content_install(g: &Game) -> (PathBuf, bool) {
+    let depot = g.dirs.game.is_dir();
+    let install = if depot {
+        g.dirs.game.clone()
+    } else {
+        g.baked
+            .as_ref()
+            .and_then(|(t, _)| t.tree_name())
+            .map_or_else(
+                || g.dirs.game.clone(),
+                |n| g.dirs.prefix.join("drive_c/GOG").join(n),
+            )
+    };
+    (install, depot)
+}
+
+fn content_resolved(
+    g: &Game,
+    install: &Path,
+    lane: crate::gog::content::Lane,
+) -> Result<crate::gog::content::Resolved, crate::gog::content::ContentError> {
+    let record_root = (lane == crate::gog::content::Lane::Depot)
+        .then(|| {
+            let id = g.gogid.parse().ok()?;
+            crate::gog::depot::cache_roots(
+                crate::gog::depot::default_cache_dir().as_deref(),
+                id,
+                None,
+            )
+            .map(|r| r.0)
+        })
+        .flatten();
+    crate::gog::content::resolve(&g.dirs.root, install, lane, record_root.as_deref())
+}
+
+/// Installed vs newest build, from the caches only (design 21 §4, §6): an
+/// info finding when a newer build is listed, a warning when the installed one
+/// no longer is. Nothing to say with no cache or when up to date.
+fn check_build(g: &Game) -> Option<Finding> {
+    use crate::gog::content::Lane;
+    let (install, depot) = content_install(g);
+    let lane = if depot { Lane::Depot } else { Lane::Installer };
+    let r = content_resolved(g, &install, lane).ok()?;
+    let h = crate::gog::build_hint::for_game(&r.content, &g.gogid)?;
+    let (warn, msg, hint) = h.finding(&g.gogid)?;
+    Some(if warn {
+        Finding::warn("update", msg, hint)
+    } else {
+        Finding::new("update", Level::Info, msg).hint(hint)
+    })
+}
+
 /// Processes left in the prefix with no launcher (the launcher's own
 /// markers, [`game::prefix_procs`]). Reported, never stopped.
 /// The DLC the game has (design 19 §6.2), from `content.toml` or, for a game built
@@ -1771,31 +1825,9 @@ fn check_dlc(g: &Game) -> Finding {
             ),
         );
     }
-    let depot = g.dirs.game.is_dir();
-    let install = if depot {
-        g.dirs.game.clone()
-    } else {
-        g.baked
-            .as_ref()
-            .and_then(|(t, _)| t.tree_name())
-            .map_or_else(
-                || g.dirs.game.clone(),
-                |n| g.dirs.prefix.join("drive_c/GOG").join(n),
-            )
-    };
+    let (install, depot) = content_install(g);
     let lane = if depot { Lane::Depot } else { Lane::Installer };
-    let record_root = depot
-        .then(|| {
-            let id = g.gogid.parse().ok()?;
-            crate::gog::depot::cache_roots(
-                crate::gog::depot::default_cache_dir().as_deref(),
-                id,
-                None,
-            )
-            .map(|r| r.0)
-        })
-        .flatten();
-    let r = match content::resolve(&g.dirs.root, &install, lane, record_root.as_deref()) {
+    let r = match content_resolved(g, &install, lane) {
         Ok(r) => r,
         Err(e) => {
             return Finding::warn(
