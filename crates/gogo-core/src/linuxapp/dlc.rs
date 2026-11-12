@@ -885,9 +885,12 @@ fn rerun_note() -> String {
 }
 
 /// How to run an add.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct AddOptions {
     pub reflink: Reflink,
+    /// The `auto` snapshot before the add (design 20 §7.1, §9.4):
+    /// `--no-snapshots`, `keep_auto`, the backend.
+    pub snapshots: super::snapshots::AutoOptions,
     /// Run setup after the commit (GOG's install scripts). Tests of the lay alone
     /// turn it off.
     pub run_setup: bool,
@@ -900,6 +903,7 @@ impl Default for AddOptions {
     fn default() -> Self {
         Self {
             reflink: Reflink::Try,
+            snapshots: super::snapshots::AutoOptions::default(),
             run_setup: true,
             fail_at: None,
         }
@@ -920,6 +924,10 @@ pub struct AddOutcome {
     pub recovered: Option<Direction>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lay: Option<LayReport>,
+    /// The `auto` snapshot taken before the add (design 20 §7.1), if any.
+    pub snapshot: Option<super::snapshots::SnapshotRef>,
+    /// Older `auto` snapshots retention deleted after it (§7.2).
+    pub pruned: Vec<super::snapshots::SnapshotRef>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }
@@ -1110,23 +1118,10 @@ where
     {
         emit(&ProgressEvent::Warn { message });
     }
-    let _lock = crate::macapp::relocate::lock_game(&game.gogid)?;
+    let lock = crate::macapp::relocate::lock_game(&game.gogid)?;
     game::refuse_running(&game.gogid, &root, &game.dirs.prefix)?;
     let recovered = recover_locked(game, opts.reflink, emit)?;
     let mut warnings = Vec::new();
-    // An older cache record is brought up to date before anything is fetched into
-    // the cache (#374): only the record is written, last and durably, and only
-    // while every file it will claim is there. A cache that changed since the plan
-    // isn't used.
-    if let Some(up) = &plan.upgrade {
-        let base = game.gogid.clone();
-        if !cache_upgrade::apply(&plan.source_root, &base, up)? {
-            return Err(AddError::Game(MacAppError::Apps(format!(
-                "the depot cache ({}) changed since the plan; run the add again",
-                plan.source_root.display()
-            ))));
-        }
-    }
     // What a recovery already recorded isn't added again.
     let have = game.installed();
     let adding: Vec<AddingDlc> = plan
@@ -1140,6 +1135,36 @@ where
             })
         })
         .collect();
+    // The `auto` snapshot (design 20 §7.1, §9.4): after the recovery and the
+    // refusals, before anything is written for the add (the download record,
+    // the journal). A resumed download took it on its first try; a failed
+    // one stops the add with the game as it was.
+    let mut taken = None;
+    if !adding.is_empty() && read_download(&root).is_none() {
+        let titles: Vec<&str> = adding.iter().map(|a| a.title.as_str()).collect();
+        taken = super::snapshots::protect(
+            &game.gogid,
+            &game.dirs,
+            Some(&lock),
+            crate::snapshot::Trigger::DlcAdd,
+            crate::snapshot::labels::adding(&titles),
+            &opts.snapshots,
+            emit,
+        )?;
+    }
+    // An older cache record is brought up to date before anything is fetched into
+    // the cache (#374): only the record is written, last and durably, and only
+    // while every file it will claim is there. A cache that changed since the plan
+    // isn't used.
+    if let Some(up) = &plan.upgrade {
+        let base = game.gogid.clone();
+        if !cache_upgrade::apply(&plan.source_root, &base, up)? {
+            return Err(AddError::Game(MacAppError::Apps(format!(
+                "the depot cache ({}) changed since the plan; run the add again",
+                plan.source_root.display()
+            ))));
+        }
+    }
     let mut lay_report = None;
     if !adding.is_empty() {
         emit(&ProgressEvent::DlcPlan {
@@ -1289,6 +1314,8 @@ where
             &super::setup::SetupOptions {
                 refresh: false,
                 prompt: None,
+                // The add's own snapshot came first.
+                runtime_snapshot: None,
             },
             emit,
         )
@@ -1316,6 +1343,11 @@ where
             .collect(),
         recovered,
         lay: lay_report,
+        snapshot: taken.as_ref().map(super::snapshots::Taken::snapshot),
+        pruned: taken
+            .as_ref()
+            .map(super::snapshots::Taken::pruned)
+            .unwrap_or_default(),
         warnings,
     })
 }

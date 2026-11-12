@@ -312,8 +312,10 @@ pub enum Command {
         lang: Option<String>,
         /// A new game gets a plain dir, no snapshot, and autosnapshot off
         /// (default: on btrfs, the game dir is a subvolume and its first
-        /// snapshot is taken after setup; `[snapshots] auto`).
-        #[arg(long, conflicts_with = "retarget")]
+        /// snapshot is taken after setup; `[snapshots] auto`). A rebuild,
+        /// or a `--retarget` to another GE-Proton, skips its automatic
+        /// snapshot for this run; the game's setting stays.
+        #[arg(long)]
         no_snapshots: bool,
         /// Progress events as NDJSON on stdout.
         #[arg(long)]
@@ -383,6 +385,10 @@ pub enum LinuxAppSub {
         /// Re-fetch umu-database's CSV (see `linux-app --refresh`).
         #[arg(long)]
         refresh: bool,
+        /// No automatic snapshot this run when setup changes the game's
+        /// GE-Proton (the game's setting stays).
+        #[arg(long)]
+        no_snapshots: bool,
         /// Machine-readable output.
         #[arg(long)]
         json: bool,
@@ -761,6 +767,10 @@ pub enum LinuxDlcCmd {
         /// Skip the free-space preflight.
         #[arg(long)]
         no_disk_check: bool,
+        /// No automatic snapshot before the add, this run (the game's
+        /// setting stays).
+        #[arg(long)]
+        no_snapshots: bool,
         /// Progress events as NDJSON on stdout.
         #[arg(long)]
         json_progress: bool,
@@ -1783,6 +1793,19 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn no_snapshots_is_taken_by_every_command_that_snapshots() {
+        for args in [
+            &["gogo", "linux-app", "tag", "--no-snapshots"][..],
+            &["gogo", "linux-app", "--retarget=1", "--runtime=ge-proton", "--no-snapshots"],
+            &["gogo", "linux-app", "setup", "1", "--no-snapshots"],
+            &["gogo", "linux-app", "dlc", "1", "add", "--all", "--no-snapshots"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok(), "{args:?}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn linux_app_setup_takes_a_gogid() {
         let cli =
             Cli::try_parse_from(["gogo", "linux-app", "setup", "1207659013", "--json"]).unwrap();
@@ -1792,6 +1815,7 @@ mod tests {
                     gogid,
                     json,
                     refresh,
+                    no_snapshots,
                 }),
             ..
         } = cli.command
@@ -1799,7 +1823,7 @@ mod tests {
             panic!("expected linux-app setup");
         };
         assert_eq!(gogid, "1207659013");
-        assert!(json && !refresh);
+        assert!(json && !refresh && !no_snapshots);
     }
 
     #[cfg(target_os = "linux")]

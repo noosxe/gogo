@@ -731,7 +731,7 @@ What the first implementation settled where this design left room:
   succeeds and warns (the change it would protect is already done; §7.1's stop applies to
   `auto` snapshots). `settings.toml` is written at every first build: `auto = true` only
   when the game dir is a subvolume.
-- **The plan line on a rebuild:** `on (a rebuild: the game dir stays the subvolume it is)`
+- **The plan line on a rebuild:** ``on (a rebuild: `before rebuild` is taken first; the game dir stays the subvolume it is)`` (#405)
   or `off for this game (a rebuild: the game dir stays as it is)`, from the game's setting
   and its dir. `[snapshots] auto = false` shows as `off ([snapshots] auto = false)`.
 - **`[content]`'s `runtime` and `renderer`** are `state.toml`'s store references
@@ -853,6 +853,67 @@ What the rollback settled where §5.3, §5.4 and §6 left room:
   markers.
 - **`apps remove`** lists the saves-aside dirs with their size and asks about them apart,
   default no. `--yes` and a non-TTY keep them. `apps show` gives each dir with its size.
+
+### 8.3 As built (#405): autosnapshot and retention
+
+What the automatic snapshots settled where §7.1 and §7.2 left room:
+
+- **One hook.** `linuxapp::snapshots::before_change(gogid, dirs, guard, trigger, label,
+  opts, emit)` takes the `auto` snapshot and runs retention. `protect(…)` is the same for
+  a caller that doesn't hold the two locks yet: it takes them for the snapshot and its
+  retention only, and only when there is something to take. `dlc add` holds the game's
+  lock already and passes it in; `protect` then adds the data root's lock. Both locks are
+  try-locks, so taking them in this order is safe. An update (#360) and a DLC removal
+  (#353) call the hook with `Trigger::Update` / `Trigger::DlcRemove`, before their
+  journals.
+- **Skipped**, with nothing written, when: `--no-snapshots`; the backend is `none`; the
+  game's `settings.toml` says `auto = false` (or has no file); or the game dir isn't a
+  subvolume. A plain dir is never converted as a side effect (D8). `auto_skipped` gives the
+  reason.
+- **A failure stops the change**, which is a `MacAppError` (exit 7): `the snapshot before
+  this change (<label>) couldn't be taken, so nothing was changed: <why>; --no-snapshots
+  skips it for this run`. The hook also stops on a pending `rollback.json` or conversion,
+  naming `snapshot <gogid> list`. `dlc add` and a build settle those first, so in practice
+  only `setup` meets it. An interrupted create or delete is recovered first.
+- **Retention.** The newest `keep_auto` `auto` snapshots stay, the new one included.
+  `keep_auto = 0` keeps only the new one until the next change. `initial` and `manual`
+  ones are never touched. A prune that fails is a warning, since the change is protected
+  either way. A rollback runs the same retention once it is done: the pre-rollback
+  snapshot counts as the new one, and the target is spared and not counted. #404 spared
+  both without counting either, and failed the finished rollback when a prune failed.
+  Each prune emits `SnapshotPruned {id, label, created}`, printed as `pruned snapshot 2
+  (before rebuild, 2026-10-30)` (the UTC date).
+- **`dlc add`** takes `before adding <title>[, <title>…]` after its lay recovery and the
+  running-game refusal, before the download record, the cache-record upgrade and the
+  journal. So the snapshot never holds a half-fetched `.dlc-staging/`. A resumed download
+  (its `dlc-download.json` is there) took the snapshot on its first try and doesn't take
+  another. The add's own setup takes no runtime snapshot.
+- **A rebuild** takes `before rebuild` before its first write to the game dir. On the
+  depot lane that is before `game/` is replaced. On the installer lane it is after the
+  install into the staging dir, before the prefix is set aside. A Proton download goes to
+  the store, not the game, and comes first. A rebuild onto another GE-Proton takes this
+  one snapshot, not a second runtime one. The plan line is `off for this run
+  (--no-snapshots; a rebuild: the game dir stays as it is)` with `--no-snapshots`.
+- **A runtime change** is caught in `setup` itself, the one writer of `state.toml`. When
+  the previous `state.toml` names a runtime and the resolved build's reference differs,
+  setup takes `before <old> → <new>` before it writes anything in the game dir. Both names
+  are the reference's last part (`GE-Proton10-25`, also for `path:` builds). That covers
+  `--retarget`, a new pinned GE-Proton, an override edited by hand, and the launcher's own
+  setup, which runs `gogo linux-app setup`. The launcher's shell code never changes the
+  runtime: without a gogo it runs the last applied config. `SetupOptions::runtime_snapshot`
+  is `None` where the caller already protected the change (a rebuild, `dlc add`).
+  `linux-app setup` and `--retarget` take `--no-snapshots`. When the launcher's setup
+  can't take the snapshot, the setup fails and the launch runs the last applied config, on
+  the old runtime. A failed `--retarget` setup leaves the override written, as before, so
+  the next setup tries again.
+- **Output.** `--json-progress` emits `SnapshotCreated {id, label, trigger}` and
+  `SnapshotPruned`. The text lines are `snapshot <n> taken (<label>)` and the pruned
+  lines. The final JSON of `dlc add` has `snapshot` (`{id, label, created}` or `null`) and
+  `pruned`. A build's `snapshot` is the `initial` one or the rebuild's, and it gains
+  `pruned`. `SetupOutcome.snapshot` carries the runtime one.
+- **Not done here.** No §5.1 refusals run in the hook. The command's own refusals apply:
+  `dlc add` refuses a running game. A build and `setup` don't, as before #405, and the
+  launcher's own setup runs while its launch is registered.
 
 ## 9. Interplay
 

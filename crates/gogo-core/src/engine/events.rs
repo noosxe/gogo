@@ -162,6 +162,19 @@ pub enum ProgressEvent {
     DlcRecovered {
         action: String,
     },
+    /// An `auto` snapshot was taken before a change (design 20 §7.1).
+    SnapshotCreated {
+        id: u32,
+        label: String,
+        trigger: String,
+    },
+    /// Retention deleted an older `auto` snapshot (design 20 §7.2).
+    /// `created` is RFC 3339, UTC.
+    SnapshotPruned {
+        id: u32,
+        label: String,
+        created: String,
+    },
 }
 
 /// Drive a consumer over the event stream until the engine's terminal `Done`
@@ -237,6 +250,8 @@ mod render_tests {
             ProgressEvent::DlcPlan { .. } => "DlcPlan",
             ProgressEvent::DlcInstalled { .. } => "DlcInstalled",
             ProgressEvent::DlcRecovered { .. } => "DlcRecovered",
+            ProgressEvent::SnapshotCreated { .. } => "SnapshotCreated",
+            ProgressEvent::SnapshotPruned { .. } => "SnapshotPruned",
         }
     }
 
