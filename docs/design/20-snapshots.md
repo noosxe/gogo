@@ -940,6 +940,60 @@ What the automatic snapshots settled where §7.1 and §7.2 left room:
   if that's no longer the game dir's parent, `doctor` reports them as unreachable and
   `snapshot delete` can remove their metadata.
 
+**As built (#407).** The shared part is in `macapp/relocate.rs` (lane hooks
+`plan_snapshots`, `make_staging`, `after_commit`, with defaults that do nothing for the Mac
+lane); the Linux part in `linuxapp/relocate.rs`.
+
+- **The journal** `game-moves/<gogid>` gains an optional third line, `snapshots:
+  carry|drop|initial`. A journal without it (written before this) has no snapshot steps.
+- **One filesystem, for the plan.** A subvolume game dir has its own device number, so
+  `st_dev` alone called every move of a snapshotted game a copy. The plan also counts a
+  btrfs subvolume root in the same mount as the target (statx `mnt_id`) as one
+  filesystem. The move still tries a rename first and falls back to a copy on `EXDEV`; that
+  fallback re-plans the snapshots as a copy and needs the yes it then lacks. A rename that
+  succeeds always carries them.
+- **Carry.** Each `<n>` in `.gogo-snapshots/<gogid>/` is renamed on its own (a subvolume
+  root renames across the subvolumes of one mount; the plain dir holding them doesn't),
+  after `launch.conf` is rewritten and before the commit, then the old dirs are removed
+  when empty. A read-only subvolume can't move to another dir (`EROFS`: its root's `..`
+  changes), so the flag is cleared for the rename and set again; what carry moves is made
+  read-only. It skips what is already there, so recovery's "rename, not yet recorded" case
+  carries the rest before it commits; a name already taken at the target is refused, and
+  the move undoes itself (snapshots back, then the data). An error before the commit puts
+  both back.
+- **Drop** runs in step 5 after the source is deleted, under the move's locks: the old
+  place's interrupted creates and deletes are settled, then every snapshot is deleted with
+  the store's delete (the ioctl, else the unprivileged route). Snapshots already beside the
+  new place are skipped (the metadata is per game, so a recovery after `initial` mustn't
+  touch it). A delete that fails drops the metadata (nothing can be rolled back to it from
+  the new place), names the path in a warning and records it in
+  `<data_root>/snapshots/<gogid>/leftovers.toml`. `doctor` warns about each leftover still
+  there; `rollback::settle_pending` (so every `snapshot` command, a build, `dlc add`,
+  `move`, `apps remove`) tries again, deleting only paths shaped like
+  `…/.gogo-snapshots/<gogid>/<n>`.
+- **The target.** btrfs: `.moving-<gogid>/` is made with `make_game_dir` (a subvolume) when
+  autosnapshot is on or the source is a subvolume, and copied into with `copy_exact_into`;
+  a subvolume that can't be made is a warning and a plain dir. ZFS (#409) and `none`: a
+  plain dir, and the plan says snapshots are unavailable there and the setting stays as it
+  is. A game that never had snapshots going where there are none gets no line.
+- **`initial`** is taken last, with autosnapshot on and the new dir a subvolume, labelled
+  `after moving to <parent dir>`. A recovery finding the newest snapshot is already that
+  one takes no second.
+- **CLI.** `move` prints the plan's snapshot lines (with `--dry-run` too, and `snapshots` in
+  `--json`); a drop asks (`--yes` agrees; a non-TTY without it exits 2). The library refuses
+  a drop without `MoveOptions::drop_snapshots`. The outcome's `snapshotsDone` has `carried`,
+  `deleted`, `left` and `initial`.
+- **`--adopt`** is unchanged: the snapshots stay where they are, and `list` shows them as
+  `missing`. `doctor` now says when such a snapshot is still beside the place it was taken
+  (from its `game_dir`): unreachable from the game's dir, with `snapshot delete <n>` to drop
+  its metadata. After a carry and then an adopt, the place it was taken isn't where it is,
+  and `doctor` gives the plain `missing` warning.
+- **Tests.** Fake backend (`linuxapp_pipeline.rs`, `snapshot_move`): a carry both ways, a
+  rollback after it, a kill at every new step of a rename and of a copy with recovery, the
+  yes, the deletes and `initial`, a leftover, a `none` target and back, a subvolume target
+  with autosnapshot off, `--adopt`. Real btrfs: `btrfs_move_carries_snapshots_on_one_filesystem`
+  in the `snapshots-btrfs` job.
+
 ### 9.2 Libraries (#279)
 
 Snapshots follow the game dir's filesystem, never the library setting. The snapshots of a
