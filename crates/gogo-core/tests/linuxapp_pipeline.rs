@@ -4912,8 +4912,16 @@ mod moving {
     const SAVE: &str = "prefix/drive_c/users/steamuser/Saved Games/slot one.sav";
 
     fn go(target: &Target, faults: Faults) -> Result<gogo::macapp::relocate::MoveOutcome, String> {
-        gogo::linuxapp::relocate::move_game(ID, target, &MoveOptions { faults, ..MoveOptions::default() }, &mut |_| {})
-            .map_err(|e| e.to_string())
+        gogo::linuxapp::relocate::move_game(
+            ID,
+            target,
+            &MoveOptions {
+                faults,
+                ..MoveOptions::default()
+            },
+            &mut |_| {},
+        )
+        .map_err(|e| e.to_string())
     }
 
     fn go_with(
@@ -4922,8 +4930,16 @@ mod moving {
         faults: Faults,
         emit: &mut dyn FnMut(&MoveEvent),
     ) -> Result<gogo::macapp::relocate::MoveOutcome, String> {
-        gogo::linuxapp::relocate::move_game(ID, target, &MoveOptions { faults, ..MoveOptions::default() }, emit)
-            .map_err(|e| e.to_string())
+        gogo::linuxapp::relocate::move_game(
+            ID,
+            target,
+            &MoveOptions {
+                faults,
+                ..MoveOptions::default()
+            },
+            emit,
+        )
+        .map_err(|e| e.to_string())
     }
 
     fn across() -> Faults {
@@ -5063,7 +5079,15 @@ mod moving {
 
         // A dry run moves nothing.
         let target = Target::Library(lib.clone());
-        let plan = gogo::linuxapp::relocate::plan(ID, &target, &MoveOptions { faults, ..MoveOptions::default() }).unwrap();
+        let plan = gogo::linuxapp::relocate::plan(
+            ID,
+            &target,
+            &MoveOptions {
+                faults,
+                ..MoveOptions::default()
+            },
+        )
+        .unwrap();
         assert_eq!(
             (plan.from.as_path(), plan.to.as_path()),
             (home.as_path(), there.as_path())
@@ -5257,7 +5281,8 @@ mod moving {
         assert_eq!(GameDirs::for_game(ID).unwrap().root, there);
         assert!(home.is_dir(), "the source waits for the cleanup");
         let done =
-            gogo::macapp::relocate::recover(ID, &gogo::linuxapp::relocate::LinuxLane::default()).unwrap();
+            gogo::macapp::relocate::recover(ID, &gogo::linuxapp::relocate::LinuxLane::default())
+                .unwrap();
         assert_eq!(done.len(), 1, "{done:?}");
         assert!(!home.exists());
         assert_game_at(&w, &there);
@@ -5411,7 +5436,14 @@ mod moving {
             free_bytes: Some(1),
             ..across()
         };
-        match gogo::linuxapp::relocate::plan(ID, &target, &MoveOptions { faults, ..MoveOptions::default() }) {
+        match gogo::linuxapp::relocate::plan(
+            ID,
+            &target,
+            &MoveOptions {
+                faults,
+                ..MoveOptions::default()
+            },
+        ) {
             Err(e) => assert!(e.to_string().contains("is free"), "{e}"),
             Ok(plan) => assert_eq!(plan.method, Method::Reflink),
         }
@@ -5427,7 +5459,10 @@ mod moving {
         let err = gogo::linuxapp::relocate::move_game(
             ID,
             &Target::Library(lib.clone()),
-            &MoveOptions { faults: across(), ..MoveOptions::default() },
+            &MoveOptions {
+                faults: across(),
+                ..MoveOptions::default()
+            },
             &mut |ev| {
                 if game.is_none() && matches!(ev, MoveEvent::Copying { .. }) {
                     game = Some(
@@ -11316,7 +11351,12 @@ mod snapshot_move {
             let w = built(&format!("snapmove-carry-killed-{i}"), &b);
             let home = w.game();
             let there = w.library().dir().join(ID);
-            go(&b, &Target::Library(w.library()), opts(killed(at, false), false)).unwrap_err();
+            go(
+                &b,
+                &Target::Library(w.library()),
+                opts(killed(at, false), false),
+            )
+            .unwrap_err();
             assert!(!home.exists() && there.is_dir(), "{at:?}");
             let j = std::fs::read_to_string(journal(&w)).unwrap();
             assert!(j.ends_with("snapshots: carry\n"), "{at:?}: {j}");
@@ -11343,15 +11383,24 @@ mod snapshot_move {
         let there = lib.dir().join(ID);
         let target = Target::Library(lib.clone());
 
-        let plan = gogo::linuxapp::relocate::plan_with(ID, &target, &opts(across(), false), &b)
-            .unwrap();
+        let plan =
+            gogo::linuxapp::relocate::plan_with(ID, &target, &opts(across(), false), &b).unwrap();
         let s = plan.snapshots.clone().unwrap();
         assert_eq!(s.action, SnapshotAction::Drop);
         assert!(s.needs_yes() && s.subvolume && s.initial && s.unavailable.is_none());
         let lines = s.lines(&there);
-        assert!(lines[0].contains("2 snapshots can't cross filesystems"), "{lines:?}");
-        assert!(lines[1].contains("  2  ") && lines[1].contains("mine"), "{lines:?}");
-        assert!(lines.iter().any(|l| l.contains("`initial` snapshot")), "{lines:?}");
+        assert!(
+            lines[0].contains("2 snapshots can't cross filesystems"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[1].contains("  2  ") && lines[1].contains("mine"),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("`initial` snapshot")),
+            "{lines:?}"
+        );
         let json = serde_json::to_value(&plan).unwrap();
         assert_eq!(json["snapshots"]["action"], "drop");
         assert_eq!(json["snapshots"]["snapshots"][0]["id"], 2);
@@ -11381,7 +11430,10 @@ mod snapshot_move {
         assert!(!journal(&w).exists());
         let lines = out.snapshots.lines();
         assert!(lines.iter().any(|l| l.contains("deleted")), "{lines:?}");
-        assert!(lines.iter().any(|l| l.contains("snapshot 3 taken")), "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("snapshot 3 taken")),
+            "{lines:?}"
+        );
     }
 
     /// A copy killed at every step. Before the commit the game stays with its
@@ -11404,7 +11456,12 @@ mod snapshot_move {
             let w = built(&format!("snapmove-drop-killed-{i}"), &b);
             let home = w.game();
             let there = w.library().dir().join(ID);
-            go(&b, &Target::Library(w.library()), opts(killed(at, true), true)).unwrap_err();
+            go(
+                &b,
+                &Target::Library(w.library()),
+                opts(killed(at, true), true),
+            )
+            .unwrap_err();
             let j = std::fs::read_to_string(journal(&w)).unwrap();
             assert!(j.ends_with("snapshots: drop,initial\n"), "{at:?}: {j}");
             gogo::linuxapp::relocate::recover_with(ID, &b).unwrap();
@@ -11459,11 +11516,12 @@ mod snapshot_move {
         f.fail_at(FakeStep::Delete);
         let out = go(&b, &Target::Library(w.library()), opts(across(), true)).unwrap();
         assert_eq!(out.snapshots.deleted, [1]);
-        assert_eq!(out.snapshots.left, [stuck.clone()]);
+        assert_eq!(out.snapshots.left, std::slice::from_ref(&stuck));
         assert!(
             out.warnings
                 .iter()
-                .any(|w| w.contains("couldn't be deleted") && w.contains(&stuck.display().to_string())),
+                .any(|w| w.contains("couldn't be deleted")
+                    && w.contains(&stuck.display().to_string())),
             "{out:?}"
         );
         assert!(stuck.is_dir());
@@ -11543,7 +11601,10 @@ mod snapshot_move {
         let home = w.game();
         let lib = w.library();
         let there = lib.dir().join(ID);
-        let none = Backends::fixed(Arc::new(NoneUnder(Fake::subvolumes_only(), lib.dir().to_path_buf())));
+        let none = Backends::fixed(Arc::new(NoneUnder(
+            Fake::subvolumes_only(),
+            lib.dir().to_path_buf(),
+        )));
 
         let plan = gogo::linuxapp::relocate::plan_with(
             ID,
@@ -11567,7 +11628,12 @@ mod snapshot_move {
         let out = go(&none, &Target::Library(lib), opts(across(), true)).unwrap();
         assert_eq!(out.snapshots.deleted.len(), 2);
         assert!(out.snapshots.initial.is_none());
-        assert!(snap::list(ID, &none, 5, false).unwrap().snapshots.is_empty());
+        assert!(
+            snap::list(ID, &none, 5, false)
+                .unwrap()
+                .snapshots
+                .is_empty()
+        );
         let settings = std::fs::read_to_string(meta(&w).join("settings.toml")).unwrap();
         assert!(settings.contains("auto = true"), "{settings}");
 
@@ -11602,13 +11668,9 @@ mod snapshot_move {
         assert_eq!(out.snapshots.initial.as_ref().map(|t| t.id), Some(3));
 
         snap::set_auto(ID, &b, false, 5).unwrap();
-        let plan = gogo::linuxapp::relocate::plan_with(
-            ID,
-            &Target::Default,
-            &opts(across(), false),
-            &b,
-        )
-        .unwrap();
+        let plan =
+            gogo::linuxapp::relocate::plan_with(ID, &Target::Default, &opts(across(), false), &b)
+                .unwrap();
         let s = plan.snapshots.unwrap();
         assert!(s.subvolume && !s.initial, "{s:?}");
         let out = go(&b, &Target::Default, opts(across(), true)).unwrap();
@@ -11659,7 +11721,11 @@ mod snapshot_move {
 
         snap::delete(ID, &b, &[1, 2]).unwrap();
         assert!(snaps(&b).is_empty());
-        assert_eq!(on_disk(&home), [1, 2], "on disk, they are the user's to remove");
+        assert_eq!(
+            on_disk(&home),
+            [1, 2],
+            "on disk, they are the user's to remove"
+        );
         for n in [1, 2] {
             let _ = gogo::gog::materialize::remove_tree(&backend::snapshot_dir(&home, n).unwrap());
         }
@@ -11671,8 +11737,10 @@ mod snapshot_move {
     /// btrfs mount: a rename; the snapshots are read-only subvolumes beside
     /// the new place, and the game dir is still a subvolume.
     pub(super) fn real_btrfs_move() {
-        let Some(w) = World::on_btrfs("btrfs_move_carries_snapshots_on_one_filesystem", &["d3d9.dll"])
-        else {
+        let Some(w) = World::on_btrfs(
+            "btrfs_move_carries_snapshots_on_one_filesystem",
+            &["d3d9.dll"],
+        ) else {
             return;
         };
         let real = Backends::real();
@@ -11687,7 +11755,10 @@ mod snapshot_move {
         let there = lib.dir().join(ID);
         let guards = (Cleanup(home.clone()), Cleanup(there.clone()));
         std::fs::write(home.join("game/era.txt"), "then").unwrap();
-        assert_eq!(snap::create(ID, &real, Some("mine")).unwrap().snapshot.id, 2);
+        assert_eq!(
+            snap::create(ID, &real, Some("mine")).unwrap().snapshot.id,
+            2
+        );
         std::fs::write(home.join("game/era.txt"), "now").unwrap();
 
         let target = Target::Library(lib);
@@ -11708,8 +11779,12 @@ mod snapshot_move {
             assert!(gogo::snapshot::btrfs::is_readonly(&s).unwrap(), "{n}");
         }
         assert_eq!(
-            std::fs::read_to_string(backend::snapshot_dir(&there, 2).unwrap().join("game/era.txt"))
-                .unwrap(),
+            std::fs::read_to_string(
+                backend::snapshot_dir(&there, 2)
+                    .unwrap()
+                    .join("game/era.txt")
+            )
+            .unwrap(),
             "then"
         );
         assert!(!backend::snapshots_dir(&home).unwrap().exists());

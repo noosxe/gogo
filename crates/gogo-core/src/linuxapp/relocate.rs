@@ -27,7 +27,7 @@ use crate::macapp::error::MacAppError;
 use crate::macapp::launch::{GameDirs, windows_to_unix, write_atomic};
 use crate::macapp::relocate::{
     self, KilledAt, Lane, MoveEvent, MoveOptions, MoveOutcome, MovePlan, PlannedSnapshot,
-    SnapshotAction, SnapshotSteps, SnapshotsDone, SnapshotsPlan, Target, TakenSnapshot,
+    SnapshotAction, SnapshotSteps, SnapshotsDone, SnapshotsPlan, TakenSnapshot, Target,
 };
 use crate::snapshot::{Guard, Kind, NewSnapshot, State, Support, backend, labels};
 
