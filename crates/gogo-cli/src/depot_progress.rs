@@ -321,12 +321,29 @@ impl<W: Write> Renderer<W> {
             self.dl_first = None;
             self.bytes = (0, 0);
         }
+        // A count past its total (an estimated total) reads as the total.
+        let clamp = |c: Option<Count>| c.map(|(d, t)| (t.map_or(d, |t| d.min(t)), t));
+        let (files, bytes) = (clamp(files), clamp(bytes));
         self.task_files = files;
         self.task_bytes_total = bytes.is_some_and(|(_, t)| t.is_some());
         if let Some((done, total)) = bytes {
+            // A restart (a retried download) starts the rate afresh.
+            if self.samples.back().is_some_and(|(_, d)| done < *d) {
+                self.samples.clear();
+                self.dl_first = None;
+            }
             self.bytes = (done, total.unwrap_or(0));
             self.dl_first.get_or_insert((now, done));
-            self.samples.push_back((now, done));
+            // One sample per redraw interval at most (and the last one), so
+            // the window holds a bounded number however often counts come.
+            let due = self
+                .samples
+                .back()
+                .is_none_or(|(t, _)| now.saturating_sub(*t) >= REDRAW)
+                || total.is_some_and(|t| done >= t);
+            if due {
+                self.samples.push_back((now, done));
+            }
             while self
                 .samples
                 .front()
@@ -731,6 +748,17 @@ impl<W: Write + Send + 'static> Activity<W> {
     /// `text` on its own line above the status line, in either human mode.
     pub fn note(&self, text: &str) {
         self.shared.lock().unwrap().note(text);
+    }
+
+    /// A line the caller has always printed, whatever the mode: above the
+    /// status line in a human mode, else through `plain` as before (#420).
+    pub fn say(&self, text: &str, plain: &dyn Fn(&str)) {
+        let mut r = self.shared.lock().unwrap();
+        if matches!(r.mode, Mode::Human { .. }) {
+            r.note(text);
+        } else {
+            plain(text);
+        }
     }
 
     /// Run `f` with the spinner and `step` on the status line, then clear it.
@@ -1355,5 +1383,70 @@ mod tests {
             out.ends_with("\r\x1b[Kgogo: snapshot 3 taken (before dlc)\n"),
             "{out:?}"
         );
+    }
+
+    /// `--json`, `--json-progress` and `--quiet` keep the lines they always
+    /// printed: through the plain sink, not the renderer's writer.
+    #[test]
+    fn a_silent_or_json_activity_still_says_its_lines() {
+        for mode in [Mode::Silent, Mode::Json] {
+            let buf = Shared::default();
+            let act = Activity::with(mode, buf.clone());
+            let said = std::cell::RefCell::new(Vec::new());
+            act.say("gogo: note: x", &|l| said.borrow_mut().push(l.to_string()));
+            drop(act);
+            assert_eq!(said.into_inner(), ["gogo: note: x"], "{mode:?}");
+            assert_eq!(buf.text(), "", "{mode:?}");
+        }
+        for live in [true, false] {
+            let buf = Shared::default();
+            let act = Activity::with(Mode::Human { live }, buf.clone());
+            act.say("gogo: note: x", &|_| {
+                panic!("a human mode prints it itself")
+            });
+            drop(act);
+            assert_eq!(
+                buf.text().rsplit("\r\x1b[K").next().unwrap(),
+                "gogo: note: x\n"
+            );
+        }
+    }
+
+    /// A count past its known total reads as the total.
+    #[test]
+    fn a_task_count_never_passes_its_total() {
+        let mut r = Renderer::new(Mode::Human { live: true }, Vec::new());
+        r.task(
+            "game files",
+            Some((5, Some(4))),
+            Some((5000, Some(4096))),
+            secs(0.0),
+        );
+        let out = String::from_utf8(r.into_inner()).unwrap();
+        assert!(
+            out.contains("game files  4 / 4 files  4.0 KiB / 4.0 KiB"),
+            "{out:?}"
+        );
+    }
+
+    /// Counts sent per chunk keep one sample per redraw interval, and a
+    /// restart from zero (a retry) drops the old rate.
+    #[test]
+    fn task_samples_stay_bounded_and_a_restart_resets_the_rate() {
+        const MB: u64 = 1 << 20;
+        let mut r = Renderer::new(Mode::Human { live: true }, Vec::new());
+        for i in 0..10_000u64 {
+            r.task(
+                "dl",
+                None,
+                Some((i * 1024, Some(100 * MB))),
+                secs(i as f64 * 0.0004),
+            );
+        }
+        // 4 s of chunks: at most one sample per 100 ms.
+        assert!(r.samples.len() <= 41, "{}", r.samples.len());
+        r.task("dl", None, Some((0, Some(100 * MB))), secs(4.5));
+        assert_eq!(r.samples.len(), 1);
+        assert_eq!(r.dl_first, Some((secs(4.5), 0)));
     }
 }
