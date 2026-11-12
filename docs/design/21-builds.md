@@ -595,6 +595,32 @@ Decided on 2026-11-12.
 - Cache writers: `depot`, `linux-app` builds and `dlc list` / `dlc add` already fetch through
   `builds::fetch_listing`, and no direct `get_builds` call remains outside it.
 
+## 11c. As built (I2, #425)
+
+- `gogo builds <game>` and `gogo builds --installed` (`gogo-cli/src/builds_cmd.rs`); the table,
+  footer and JSON are pure code in `gog/builds_report.rs`. Every listing goes through
+  `builds::fetch_listing`, so the cache is refreshed (not with `--password`).
+- The table has an `ACCESS` column (`public` / `password`) only when a listed build is
+  password-protected, so the common table stays as §2.2 draws it.
+- The installer lane's footer line names the build whose version equals the installer's
+  (`installer: V, the version of build B (offline lane).`); `--json` marks that build with
+  `installer: true` and gives `installer: {version}`.
+- `--patches` lists the catalog's patch installers for the OS (name, the version each leads to,
+  language, size) under the footer; in JSON they are `installer.patches`.
+- `HERE` reads the built game (`content.toml`, else derived as `dlc list` does) and the depot
+  cache record. An installed or cached build that GOG no longer lists gets a row at the bottom;
+  its version comes from `content.toml` only (`build-manifest.json` is I5's), and is `-` for a
+  cache-only build.
+- A manifest that can't be fetched shows `?` for size and DLC (null in JSON), warns on stderr and
+  still exits 0. A language the build lacks shows `-`.
+- `--installed` covers each game with a location record. A depot game gets a fresh listing; an
+  installer-lane game compares with the catalog's installer version (a catalog call per game).
+  A game that can't be read, or whose check fails, is `unchecked` with the reason
+  (`error` in JSON, `checked: null`). Status: `up to date`, `newer available`,
+  `no longer listed`, `unknown`.
+- `--json` gains `withPassword`; its `builds` also hold the unlisted installed build
+  (`listed: false`, null date, sizes and DLC).
+
 ## 12. Implementation issues (to be filed as sub-issues of #360)
 
 Under epic #155 (Linux runtime) unless noted, `type:feature`, `area:depot` (+ `area:cli`

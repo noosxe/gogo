@@ -135,6 +135,10 @@ pub enum Command {
     /// Download a game's files straight from GOG's content servers (its
     /// depot build, as GOG Galaxy does) into the user cache directory.
     Depot(DepotArgs),
+    /// List the builds GOG serves for a game (version, date, size, DLC, and
+    /// which one this machine uses), or check every built game with
+    /// `--installed`.
+    Builds(BuildsArgs),
     /// Config file management.
     Config {
         #[command(subcommand)]
@@ -999,6 +1003,42 @@ pub struct DepotArgs {
     pub json: bool,
 }
 
+/// The OS a builds listing is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum BuildsOs {
+    Windows,
+    Osx,
+}
+
+/// `gogo builds` (design 21 §2.1).
+#[derive(Debug, clap::Args)]
+pub struct BuildsArgs {
+    /// One game by id, slug, or fuzzy title.
+    #[arg(value_name = "GAME", required_unless_present = "installed")]
+    pub game: Option<String>,
+    /// One row per built game on this machine: the installed build, the
+    /// newest, and whether GOG still lists it. Fetches every listing and
+    /// refreshes the listing cache.
+    #[arg(long, conflicts_with_all = ["game", "os", "lang", "password", "patches"])]
+    pub installed: bool,
+    /// The OS to list builds for.
+    #[arg(long, value_enum, default_value = "windows")]
+    pub os: BuildsOs,
+    /// The language the size column is for (default: the built game's, else
+    /// en-US). A build without it shows `-`.
+    #[arg(long, value_name = "CODE")]
+    pub lang: Option<String>,
+    /// Password for password-protected builds (such a listing is not cached).
+    #[arg(long)]
+    pub password: Option<String>,
+    /// Also list GOG's patch installers and the version each leads to.
+    #[arg(long)]
+    pub patches: bool,
+    /// Machine-readable output.
+    #[arg(long)]
+    pub json: bool,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum ConfigSub {
     /// Print the config file location (creating nothing).
@@ -1464,6 +1504,26 @@ mod tests {
         assert!(Cli::try_parse_from(["gogo", "search"]).is_err());
         assert!(Cli::try_parse_from(["gogo", "search", "x", "-c", "movies"]).is_err());
         assert!(Cli::try_parse_from(["gogo", "search", "x", "--goodies-type", "Audio!"]).is_err());
+    }
+
+    #[test]
+    fn builds_parses_a_game_or_installed() {
+        let d =
+            Cli::try_parse_from(["gogo", "builds", "cyberpunk", "--patches", "--json"]).unwrap();
+        let Command::Builds(a) = d.command else {
+            panic!("expected Builds")
+        };
+        assert_eq!(a.game.as_deref(), Some("cyberpunk"));
+        assert!(a.patches && a.json && !a.installed);
+        assert_eq!(a.os, BuildsOs::Windows);
+        let d = Cli::try_parse_from(["gogo", "builds", "--installed"]).unwrap();
+        let Command::Builds(a) = d.command else {
+            panic!("expected Builds")
+        };
+        assert!(a.installed && a.game.is_none());
+        assert!(Cli::try_parse_from(["gogo", "builds"]).is_err());
+        assert!(Cli::try_parse_from(["gogo", "builds", "x", "--installed"]).is_err());
+        assert!(Cli::try_parse_from(["gogo", "builds", "--installed", "--patches"]).is_err());
     }
 
     #[test]

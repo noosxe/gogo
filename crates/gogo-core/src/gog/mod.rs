@@ -7,6 +7,7 @@
 
 pub mod build_hint;
 pub mod builds;
+pub mod builds_report;
 pub mod cache_upgrade;
 pub mod catalog;
 pub mod checksum;
