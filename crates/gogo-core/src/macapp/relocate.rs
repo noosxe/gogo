@@ -231,9 +231,11 @@ pub fn interrupted(gogid: &str) -> Option<PathBuf> {
     None
 }
 
-/// One move at a time over a data root, whatever the game: the kernel drops the
-/// lock when the process dies, however it dies.
-fn lock_moves() -> Result<std::fs::File, MacAppError> {
+/// The data root's lock, `game-moves/.lock`: one move (or snapshot change,
+/// design 20 §5.1) at a time over a data root, whatever the game. The kernel
+/// drops the lock when the process dies, however it dies. Take it before
+/// [`lock_game`].
+pub fn lock_moves() -> Result<std::fs::File, MacAppError> {
     let dir = crate::state::data_root().join(JOURNAL_DIR);
     std::fs::create_dir_all(&dir)?;
     let file = std::fs::OpenOptions::new()
@@ -244,7 +246,8 @@ fn lock_moves() -> Result<std::fs::File, MacAppError> {
     match file.try_lock() {
         Ok(()) => Ok(file),
         Err(std::fs::TryLockError::WouldBlock) => Err(MacAppError::Apps(
-            "another `gogo` is moving a game: wait for it to finish".into(),
+            "another `gogo` is moving a game or changing its snapshots: wait for it to finish"
+                .into(),
         )),
         Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
     }

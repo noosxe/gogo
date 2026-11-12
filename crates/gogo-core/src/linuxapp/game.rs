@@ -107,10 +107,35 @@ pub fn live_launcher(game_root: &Path) -> Option<u32> {
         .find_map(|e| {
             let pid: u32 = e.file_name().to_str()?.parse().ok()?;
             let start = std::fs::read_to_string(e.path()).ok()?;
-            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-            // After the parenthesized name: state is field 3, starttime 22.
-            let rest: Vec<&str> = stat.rsplit_once(") ")?.1.split_whitespace().collect();
-            (rest.first() != Some(&"Z") && rest.get(19) == Some(&start.trim())).then_some(pid)
+            alive_since(pid, start.trim()).then_some(pid)
+        })
+}
+
+/// Is process `pid` alive, not a zombie, and started at `start` (field 22 of
+/// `/proc/<pid>/stat`)? A reused pid isn't.
+fn alive_since(pid: u32, start: &str) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    // After the parenthesized name: state is field 3, starttime 22.
+    let Some((_, rest)) = stat.rsplit_once(") ") else {
+        return false;
+    };
+    let rest: Vec<&str> = rest.split_whitespace().collect();
+    rest.first() != Some(&"Z") && rest.get(19) == Some(&start)
+}
+
+/// The pid of a running one-off of this game (`linux-app run` of another exe,
+/// design 18 §7.10): a `.one-offs/<pid>` record whose first line is the start
+/// time of a process that is still alive.
+pub fn live_one_off(game_root: &Path) -> Option<u32> {
+    std::fs::read_dir(game_root.join(super::launcher::ONE_OFFS))
+        .ok()?
+        .flatten()
+        .find_map(|e| {
+            let pid: u32 = e.file_name().to_str()?.parse().ok()?;
+            let rec = std::fs::read_to_string(e.path()).ok()?;
+            alive_since(pid, rec.lines().next()?.trim()).then_some(pid)
         })
 }
 

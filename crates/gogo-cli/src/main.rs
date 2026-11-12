@@ -12,6 +12,8 @@ mod lane;
 mod menus;
 mod output;
 mod prompt;
+#[cfg(target_os = "linux")]
+mod snapshot_cmd;
 
 use std::sync::Arc;
 
@@ -331,10 +333,12 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
             all_dlcs,
             no_dlcs,
             lang,
+            no_snapshots,
             json_progress,
             json,
         } => {
             linux_app(LinuxAppArgs {
+                no_snapshots,
                 dlc: DlcAsk {
                     names: dlc,
                     all: all_dlcs,
@@ -3567,6 +3571,7 @@ struct LinuxAppArgs {
     interactive: bool,
     yes: bool,
     dlc: DlcAsk,
+    no_snapshots: bool,
     json_progress: bool,
     json: bool,
 }
@@ -3725,6 +3730,7 @@ fn linux_app_plan_lines(plan: &gogo::linuxapp::build::LinuxAppPlan) -> String {
             c.status_line_for(Some(gogo::macapp::compat::Lane::Depot)),
         );
     }
+    line(&mut out, "snapshots:", plan.snapshots.line());
     line(&mut out, "umu:", plan.umu_line.clone());
     line(&mut out, "runtime:", plan.runtime_line.clone());
     line(&mut out, "container:", plan.container_line.clone());
@@ -3844,7 +3850,18 @@ async fn linux_app(a: LinuxAppArgs) -> Result<i32, AppError> {
     } else {
         runtime
     };
+    let snapshots = {
+        use gogo::linuxapp::snapshots::{Backends, SnapshotOptions};
+        if a.no_snapshots {
+            SnapshotOptions::off("--no-snapshots")
+        } else if !load_config_quietly()?.config.snapshots.auto {
+            SnapshotOptions::off("[snapshots] auto = false")
+        } else {
+            SnapshotOptions::on(Backends::real())
+        }
+    };
     let opts = gogo::linuxapp::build::LinuxAppOptions {
+        snapshots,
         installer,
         game_tree,
         name: a.name,
@@ -3920,6 +3937,11 @@ async fn linux_app(a: LinuxAppArgs) -> Result<i32, AppError> {
         v["build_id"] = serde_json::json!(out.content.build_id);
         v["language"] = serde_json::json!(out.content.language);
         v["dlcs"] = serde_json::json!(out.content.refs());
+        v["snapshot"] = serde_json::json!(
+            out.snapshot
+                .as_ref()
+                .map(gogo::linuxapp::snapshots::meta_view)
+        );
         v["game_files"] = serde_json::json!(out.materialized.as_ref().map(|r| serde_json::json!({
             "method": r.method().as_str(),
             "reflinked_files": r.reflinked_files,
@@ -3929,6 +3951,9 @@ async fn linux_app(a: LinuxAppArgs) -> Result<i32, AppError> {
         })));
     });
     if !a.json {
+        if let Some(m) = &out.snapshot {
+            println!("snapshot {} taken ({})", m.id, m.label);
+        }
         println!(
             "game files, prefix and saves: {}\nmenu entry: {} (runs {}){}",
             out.dirs.root.display(),
@@ -4335,6 +4360,7 @@ fn linux_app_sub(sub: crate::cli::LinuxAppSub) -> Result<i32, AppError> {
         crate::cli::LinuxAppSub::Env { cmd } => linux_app_env(cmd),
         // Async: dispatched in `run`.
         crate::cli::LinuxAppSub::Dlc { .. } => unreachable!("linux-app dlc is async"),
+        crate::cli::LinuxAppSub::Snapshot { gogid, cmd } => snapshot_cmd::run(gogid, cmd),
         crate::cli::LinuxAppSub::Args {
             gogid,
             clear,
@@ -5799,6 +5825,11 @@ fn apps_cmd(cmd: crate::cli::AppsCmd) -> Result<i32, AppError> {
             println!("  size:        {}", gogo::fmt::human_size(a.bytes));
             println!("  last launch: {}", dash(a.last_launch.as_deref()));
             print_content(&a);
+            if let Some(s) = &a.snapshots {
+                for (i, l) in s.lines(&a.gogid).iter().enumerate() {
+                    println!("  {:<12} {l}", if i == 0 { "snapshots:" } else { "" });
+                }
+            }
             Ok(cli::exit::OK)
         }
         crate::cli::AppsCmd::Remove {
@@ -5932,6 +5963,9 @@ fn remove_apps(
         if let Some(d) = a.desktop.as_ref().filter(|_| a.desktop_present) {
             println!("    its menu entry {} goes too", d.display());
         }
+        if let Some(n) = a.snapshots.as_ref().and_then(|s| s.remove_note()) {
+            println!("    and {n}, deleted first");
+        }
     }
     if !yes {
         if !console::Term::stdout().features().is_attended() {
@@ -5958,6 +5992,16 @@ fn remove_apps(
             Ok(out) => {
                 for p in &out.paths {
                     println!("removed {}", p.display());
+                }
+                if out.snapshots > 0 {
+                    println!("{}: deleted {} snapshot(s)", a.gogid, out.snapshots);
+                }
+                if let Some(p) = &out.snapshots_left {
+                    println!(
+                        "{}: its snapshots at {} weren't touched (the drive isn't there)",
+                        a.gogid,
+                        p.display()
+                    );
                 }
                 if let Some(p) = &out.left_behind {
                     println!(

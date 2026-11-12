@@ -196,7 +196,11 @@ subcommands take a GOGID: `setup`, `compat`, `doctor`, `next-renderer`, and (#23
   is settled first.
 
 - `snapshot <gogid> list|create|rollback|delete|auto` (#365, design 20 §8): snapshots of the built game
-  on btrfs (ZFS later); `--no-snapshots` on a build or a change skips its snapshot.
+  on btrfs (ZFS later); `--no-snapshots` on a build or a change skips its snapshot. `list
+  [--no-space]`, `create [--label]`, `delete <n>…` and `auto [on|off]` take `--json`; the
+  changes take `--yes` and `--dry-run`. Refusals (the game runs, a DLC add or a move isn't
+  finished, its drive isn't there, no snapshots on its filesystem) exit 7 and touch nothing.
+  `rollback` comes with #404.
 
 Verb-first `env list|set|unset`, as `config get|set` and `runtimes list|install`. Edits
 print `key old -> new` lines on stdout and warnings on stderr, and apply at the next launch

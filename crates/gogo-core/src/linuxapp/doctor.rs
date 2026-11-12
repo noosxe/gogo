@@ -200,6 +200,11 @@ pub fn doctor(gogid: &str, host: &Host) -> Result<Report, MacAppError> {
         f.push(check_stamp(&g, raw));
     }
     f.push(check_dlc(&g));
+    f.extend(super::snapshots::doctor(
+        gogid,
+        &g.dirs.root,
+        &super::snapshots::Backends::real(),
+    ));
     let proton_dir = build.as_ref().map(|(d, _)| d.clone()).or_else(|| {
         g.conf
             .as_ref()

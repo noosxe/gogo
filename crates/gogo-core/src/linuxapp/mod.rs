@@ -22,6 +22,7 @@ pub mod proton;
 pub mod protonfix;
 pub mod relocate;
 pub mod setup;
+pub mod snapshots;
 pub mod umu;
 pub mod umu_id;
 pub mod vdf;

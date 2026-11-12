@@ -699,6 +699,16 @@ impl Library {
         if has_parent(&dir) {
             return Err(refuse("`..` goes through a dir that doesn't exist".into()));
         }
+        // Snapshots live there (design 20 §2.1): never a game's or a library's dir.
+        if dir
+            .components()
+            .any(|c| c.as_os_str() == crate::snapshot::backend::SNAPSHOTS_DIR)
+        {
+            return Err(refuse(format!(
+                "it is inside a `{}` dir, where gogo keeps snapshots",
+                crate::snapshot::backend::SNAPSHOTS_DIR
+            )));
+        }
         // Location files and launch.conf hold it as one line of text.
         if dir.to_str().is_none_or(|s| s.contains('\n')) {
             return Err(refuse("the path has to be UTF-8, on one line".into()));

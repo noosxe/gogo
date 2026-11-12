@@ -22,6 +22,7 @@ pub struct Config {
     pub state: StateConfig,
     pub mac_app: MacAppConfig,
     pub linux: LinuxConfig,
+    pub snapshots: SnapshotsConfig,
 }
 
 /// No silent fallback (review A6): keyring configured but unavailable fails loudly in
@@ -133,6 +134,28 @@ pub struct LinuxConfig {
     /// (design 18 §1): `ge-proton[/<ver>]` or `path:<dir>`. Unset: the
     /// catalog's GE-Proton.
     pub default_runtime: Option<String>,
+}
+
+/// `[snapshots]`: snapshots of built Linux games (design 20 §7, §8).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct SnapshotsConfig {
+    /// New builds get a subvolume game dir and an `initial` snapshot where the
+    /// filesystem has snapshots, and their autosnapshot setting on. `false`:
+    /// as `--no-snapshots` on every build.
+    pub auto: bool,
+    /// The automatic snapshots kept per game, newest first (§7.2). `initial`
+    /// and manual ones are never pruned.
+    pub keep_auto: usize,
+}
+
+impl Default for SnapshotsConfig {
+    fn default() -> Self {
+        Self {
+            auto: true,
+            keep_auto: 5,
+        }
+    }
 }
 
 /// `[linux] proton_dir`: gogo's store, or a Steam's `compatibilitytools.d`
@@ -524,6 +547,7 @@ fn unknown_keys(table: &toml::Table) -> Vec<String> {
         ("state", &["catalog_ttl_hours"]),
         ("mac_app", &["d3dmetal"]),
         ("linux", &["umu", "proton_dir", "default_runtime"]),
+        ("snapshots", &["auto", "keep_auto"]),
     ];
     let mut out = Vec::new();
     for (section, value) in table {
@@ -724,6 +748,22 @@ mod tests {
         // An empty variable is no library, not the current directory.
         let loaded = Config::load_from(missing, envs(&[("GOGO_LIBRARY_DIR", "")])).unwrap();
         assert_eq!(loaded.config.library.dir, None);
+    }
+
+    #[test]
+    fn snapshots_are_on_by_default_and_keep_five_automatic() {
+        let no_env = |_: &str| None;
+        let loaded = Config::load_from(Path::new("/nonexistent/gogo.toml"), no_env).unwrap();
+        assert!(loaded.config.snapshots.auto);
+        assert_eq!(loaded.config.snapshots.keep_auto, 5);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "[snapshots]\nauto = false\nkeep_auto = 2\n").unwrap();
+        let loaded = Config::load_from(&path, no_env).unwrap();
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        assert!(!loaded.config.snapshots.auto);
+        assert_eq!(loaded.config.snapshots.keep_auto, 2);
     }
 
     #[test]

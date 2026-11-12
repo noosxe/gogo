@@ -643,7 +643,11 @@ seed_scratch() {
     printf '%s:x:%s:\n' "$(id -gn)" "$(id -g)" >"$RUN/etc/group"
     printf 'nameserver %s\n' "$BUILD_DNS" >"$RUN/etc/resolv.conf"
     # Answers `gogo linux-app` would ask for, and never Steam's tools dir.
-    printf '[linux]\numu = "zipapp"\nproton_dir = "store"\n' >"$GOGO_HOME_DIR/config.toml"
+    # Snapshots off (design 20 §10.4): the harness snapshots the scratch data
+    # root itself, and a game dir made as a nested subvolume would be an empty
+    # dir in those copies.
+    printf '[linux]\numu = "zipapp"\nproton_dir = "store"\n\n[snapshots]\nauto = false\n' \
+        >"$GOGO_HOME_DIR/config.toml"
 }
 
 # --- installed bases (--reuse-install, #240) ------------------------------------

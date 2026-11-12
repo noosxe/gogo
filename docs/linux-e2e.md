@@ -307,7 +307,9 @@ made one of three ways (#255):
 - **What's a subvolume:** each base's `tree/gogo`, `tree/home` and `tree/xdg`, a reused
   run's copies of them, and a live session's disk and its lives. Nothing is ever
   snapshotted with a subvolume inside it: an inner one would show up in the snapshot as an
-  empty dir. The sandbox binds the scratch once (`--bind $RUN $RUN`), so the subvolumes
+  empty dir. That is why the scratch's `config.toml` turns gogo's own snapshots off
+  (`[snapshots] auto = false`, design 20 §10.4): with them on, a build on btrfs makes the
+  game dir a subvolume. The sandbox binds the scratch once (`--bind $RUN $RUN`), so the subvolumes
   are plain dirs in there. The cache's store, depot and umu dirs are bound over empty
   dirs in `xdg` and stay out of every copy. Each subvolume is its own `st_dev`, so a
   rename between `gogo`, `home` and `xdg` is `EXDEV`, as it already is into the store's
