@@ -681,8 +681,8 @@ gogo linux-app dlc <gogid> add … --no-snapshots      # and the update and rebu
 
 - **`list`:** the backend line (`btrfs subvolume`, `zfs <dataset>`, or `none: <reason>`),
   `autosnapshot: on, keeping 5 automatic`, then one row per snapshot, newest first: `N  DATE
-  KIND  LABEL  BUILD  DLC  SPACE`. `BUILD` is the version (or the build id's tail on a depot
-  build without one), `DLC` the count, `SPACE` `~912 MiB` (btrfs) or `912 MiB` (ZFS).
+  KIND  LABEL  BUILD  DLC  SPACE`. `BUILD` is the version (or the whole build id when none is
+  recorded, `-` with neither; old snapshots of depot builds have no version), `DLC` the count, `SPACE` `~912 MiB` (btrfs) or `912 MiB` (ZFS).
 - **`create`:** takes a `manual` snapshot. On a plain btrfs game dir it converts it first
   (§2.1), after the plan and the question; `--yes` agrees.
 - **`rollback <n>`:** §5.3 and §6. Prints the done steps and, last, `rolled back to 3; the

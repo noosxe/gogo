@@ -813,8 +813,11 @@ Where the code differs from the table above, or does less for now:
   the depot cache record (`.gogo-depot.json` in the default cache dir for the game),
   used only when its build is the one the infos name. Every other `goggame-*.info` is a
   DLC row. Reading never writes the file.
-- `version` stays unset: neither the infos nor the record carry it. A later piece that
-  knows the build's version name fills it in.
+- `version`: derived content leaves it unset, as neither the infos nor the record carry
+  it. A depot build writes the version name (`2.31`) GOG's builds list gives the build
+  the cache holds (#418): `linux-app` looks it up after the download, best effort, and
+  records it only for that build id. Files from before that, and installer-lane builds
+  (the setup's version isn't known at that point), have none.
 - The `apps list` column counts the DLC the game has. The `installed/owned` form needs
   the network, so it comes with `dlc list` (#350).
 - `doctor`'s `dlc` check does the info-versus-record comparison. The owned-but-missing
