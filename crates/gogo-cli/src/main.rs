@@ -4165,9 +4165,10 @@ fn linux_app_move(
     gogid: &str,
     dir: Option<std::path::PathBuf>,
     dry_run: bool,
+    yes: bool,
     json: bool,
 ) -> Result<i32, AppError> {
-    use gogo::macapp::relocate::{MoveEvent, MoveOptions, Target};
+    use gogo::macapp::relocate::{MoveOptions, Target};
     let human = gogo::fmt::human_size;
     let library = match dir {
         // Not through `resolve_library(None)`: that would be `library.dir`.
@@ -4175,31 +4176,72 @@ fn linux_app_move(
         None => None,
     };
     let target = library.map_or(Target::Default, Target::Library);
-    let opts = MoveOptions::default();
+    let mut opts = MoveOptions {
+        drop_snapshots: yes,
+        ..MoveOptions::default()
+    };
+    // The real move settles an interrupted one before it plans: a plan that
+    // can't be made yet (a copy an earlier move left in the way) is the
+    // move's to report, after its recovery.
+    let plan = match gogo::linuxapp::relocate::plan(gogid, &target, &opts) {
+        Ok(plan) => plan,
+        Err(e) if dry_run => return Err(e.into()),
+        Err(_) => return linux_app_move_now(gogid, &target, &opts, json),
+    };
+    let mut lines = vec![format!(
+        "move {gogid} ({}) by {}: {} -> {}",
+        human(plan.bytes),
+        plan.method.as_str(),
+        plan.from.display(),
+        plan.to.display()
+    )];
+    if plan.extra_bytes > 0 {
+        lines.push(format!(
+            "it needs {} free there until the copy is checked",
+            human(plan.extra_bytes)
+        ));
+    }
+    let snapshot_lines = plan
+        .snapshots
+        .as_ref()
+        .map(|s| s.lines(&plan.to))
+        .unwrap_or_default();
+    lines.extend(snapshot_lines.iter().cloned());
     if dry_run {
-        let plan = gogo::linuxapp::relocate::plan(gogid, &target, &opts)?;
         if json {
             println!("{}", serde_json::to_string(&plan).unwrap());
         } else {
-            println!(
-                "would move {gogid} ({}) by {}: {} -> {}",
-                human(plan.bytes),
-                plan.method.as_str(),
-                plan.from.display(),
-                plan.to.display()
-            );
-            if plan.extra_bytes > 0 {
-                println!(
-                    "it needs {} free there until the copy is checked",
-                    human(plan.extra_bytes)
-                );
+            println!("would {}", lines[0]);
+            for l in &lines[1..] {
+                println!("{l}");
             }
         }
         return Ok(cli::exit::OK);
     }
+    // Deleting snapshots (design 20 §9.1, decision D5) is asked first.
+    if plan.snapshots.as_ref().is_some_and(|s| s.needs_yes()) {
+        if let Some(code) = snapshot_cmd::ask(&lines, yes, "move it and delete these snapshots?")
+        {
+            return Ok(code);
+        }
+        opts.drop_snapshots = true;
+    }
+    linux_app_move_now(gogid, &target, &opts, json)
+}
+
+/// `gogo linux-app move`, past its plan and question.
+#[cfg(target_os = "linux")]
+fn linux_app_move_now(
+    gogid: &str,
+    target: &gogo::macapp::relocate::Target,
+    opts: &gogo::macapp::relocate::MoveOptions,
+    json: bool,
+) -> Result<i32, AppError> {
+    use gogo::macapp::relocate::MoveEvent;
+    let human = gogo::fmt::human_size;
     let tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
     let mut shown = (0, 0);
-    let out = gogo::linuxapp::relocate::move_game(gogid, &target, &opts, &mut |ev| {
+    let out = gogo::linuxapp::relocate::move_game(gogid, target, opts, &mut |ev| {
         let (what, kind, done, total) = match ev {
             MoveEvent::Copying { done, total } => ("copying", 1, *done, *total),
             MoveEvent::Verifying { done, total } => ("checking the copy", 2, *done, *total),
@@ -4234,6 +4276,20 @@ fn linux_app_move(
         out.plan.from.display(),
         out.plan.to.display()
     );
+    for line in out.snapshots.lines() {
+        println!("{line}");
+    }
+    if let Some(reason) = out
+        .plan
+        .snapshots
+        .as_ref()
+        .and_then(|s| s.unavailable.as_ref())
+    {
+        println!(
+            "snapshots: unavailable at {} ({reason})",
+            out.plan.to.display()
+        );
+    }
     for w in &out.warnings {
         eprintln!("warning: {w}");
     }
@@ -4353,10 +4409,11 @@ fn linux_app_sub(sub: crate::cli::LinuxAppSub) -> Result<i32, AppError> {
             default: _,
             adopt,
             dry_run,
+            yes,
             json,
         } => match adopt {
             Some(game_dir) => linux_app_adopt(&gogid, &game_dir, dry_run, json),
-            None => linux_app_move(&gogid, dir, dry_run, json),
+            None => linux_app_move(&gogid, dir, dry_run, yes, json),
         },
         crate::cli::LinuxAppSub::NextRenderer { gogid, dry_run } => {
             match gogo::linuxapp::manage::next_renderer(&gogid, dry_run)? {

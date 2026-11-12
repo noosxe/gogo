@@ -835,7 +835,7 @@ pub fn runtime_name(reference: &str) -> &str {
 
 // — the views (`--json` and text) —
 
-fn rfc3339(t: DateTime<Utc>) -> String {
+pub(crate) fn rfc3339(t: DateTime<Utc>) -> String {
     t.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
@@ -1827,6 +1827,17 @@ pub fn doctor(gogid: &str, root: &Path, backends: &Backends) -> Vec<Finding> {
             ),
         ));
     }
+    for p in super::relocate::leftovers(gogid, root, backends) {
+        out.push(Finding::warn(
+            CHECK,
+            format!(
+                "{} is a snapshot a move across filesystems couldn't delete: it holds space on \
+                 that drive, and nothing can be rolled back to it",
+                p.display()
+            ),
+            format!("`gogo linux-app snapshot {gogid} list` tries deleting it again"),
+        ));
+    }
     if !v.reachable {
         out.push(Finding::ok(
             CHECK,
@@ -1834,6 +1845,22 @@ pub fn doctor(gogid: &str, root: &Path, backends: &Backends) -> Vec<Finding> {
         ));
         return out;
     }
+    // Where each snapshot was taken: after `move --adopt` (or a move by
+    // hand) they stay beside the old place (design 20 §9.1).
+    let taken_at: Vec<(u32, PathBuf)> = s
+        .metadata()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|m| backend::snapshot_dir(&m.game_dir, m.id).map(|p| (m.id, p)))
+        .collect();
+    let elsewhere = |id: u32| {
+        taken_at
+            .iter()
+            .find(|(n, _)| *n == id)
+            .map(|(_, p)| p.clone())
+            .filter(|p| backend::snapshot_dir(root, id).as_ref() != Some(p))
+            .filter(|p| p.symlink_metadata().is_ok())
+    };
     out.extend(super::rollback::doctor_findings(gogid, root));
     match (&v.reason, v.ready, v.auto, has_settings) {
         (Some(reason), ..) => out.push(Finding::ok(CHECK, format!("none: {reason}; {space}"))),
@@ -1884,6 +1911,21 @@ pub fn doctor(gogid: &str, root: &Path, backends: &Backends) -> Vec<Finding> {
     }
     for snap in &v.snapshots {
         match snap.presence {
+            "missing" if let Some(at) = elsewhere(snap.id) => out.push(Finding::warn(
+                CHECK,
+                format!(
+                    "snapshot {} is unreachable from the game's dir: it is at {}, beside the \
+                     place it was taken (the game was adopted or moved by hand), and can't be \
+                     rolled back to from here",
+                    snap.named(),
+                    at.display()
+                ),
+                format!(
+                    "`gogo linux-app snapshot {gogid} delete {}` removes its metadata (the \
+                     snapshot itself stays at that path)",
+                    snap.id
+                ),
+            )),
             "missing" => out.push(Finding::warn(
                 CHECK,
                 format!(

@@ -451,6 +451,10 @@ pub enum LinuxAppSub {
         /// Print what would happen, move nothing.
         #[arg(long)]
         dry_run: bool,
+        /// Agree to deleting the game's snapshots, which can't cross
+        /// filesystems, without the question.
+        #[arg(long, conflicts_with = "adopt")]
+        yes: bool,
         /// Machine-readable output.
         #[arg(long)]
         json: bool,
@@ -1901,6 +1905,14 @@ mod tests {
         ));
         assert!(parse(&[]).is_err(), "a dir or --default");
         assert!(parse(&["/big", "--default"]).is_err());
+        assert!(matches!(
+            parse(&["/big", "--yes"]).unwrap().command,
+            Command::LinuxApp {
+                sub: Some(LinuxAppSub::Move { yes: true, .. }),
+                ..
+            }
+        ));
+        assert!(parse(&["--adopt", "/mnt/x/1", "--yes"]).is_err());
         let Command::LinuxApp {
             sub: Some(LinuxAppSub::Move { adopt, dir, .. }),
             ..

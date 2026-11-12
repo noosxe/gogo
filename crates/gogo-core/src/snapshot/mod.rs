@@ -410,6 +410,12 @@ pub enum Recovered {
     Deleted(u32),
 }
 
+/// `leftovers.toml`.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Leftovers {
+    paths: Vec<PathBuf>,
+}
+
 /// One game's snapshots: the metadata dir `<data_root>/snapshots/<gogid>/` and
 /// the backend that holds the snapshots of `game_dir`.
 pub struct Store<'b> {
@@ -717,6 +723,38 @@ impl<'b> Store<'b> {
         self.step(Step::OverrideDropped)?;
         remove_file(&self.meta_path(n))?;
         Ok(())
+    }
+
+    /// Drop snapshot `n`'s metadata (its `<n>.toml` and L4 copy) and leave
+    /// whatever is on disk: a move across filesystems whose delete failed
+    /// records the snapshot as a leftover instead (design 20 §9.1).
+    pub fn forget_entry(&self, _guard: &Guard, n: u32) -> Result<()> {
+        self.drop_entry(n)
+    }
+
+    fn leftovers_path(&self) -> PathBuf {
+        self.dir.join("leftovers.toml")
+    }
+
+    /// Snapshots a move across filesystems couldn't delete, still on the old
+    /// drive with no metadata (`leftovers.toml`, design 20 §9.1).
+    pub fn leftovers(&self) -> Result<Vec<PathBuf>> {
+        Ok(read_toml::<Leftovers>(&self.leftovers_path())?
+            .map(|l| l.paths)
+            .unwrap_or_default())
+    }
+
+    /// Replace the leftover list; an empty one removes the file.
+    pub fn set_leftovers(&self, _guard: &Guard, paths: &[PathBuf]) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(remove_file(&self.leftovers_path())?);
+        }
+        write_toml(
+            &self.leftovers_path(),
+            &Leftovers {
+                paths: paths.to_vec(),
+            },
+        )
     }
 
     // — delete —
