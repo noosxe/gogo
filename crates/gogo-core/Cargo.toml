@@ -11,6 +11,10 @@ license.workspace = true
 name = "gogo"
 path = "src/lib.rs"
 
+[features]
+# Test doubles for other crates' tests (the snapshot fake backend).
+test-util = []
+
 [dependencies]
 tokio.workspace = true
 reqwest.workspace = true

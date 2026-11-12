@@ -13,6 +13,7 @@ pub mod gog;
 pub mod linuxapp;
 pub mod macapp;
 pub mod search;
+pub mod snapshot;
 pub mod state;
 
 #[cfg(test)]

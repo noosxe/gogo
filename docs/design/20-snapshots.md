@@ -587,12 +587,17 @@ What a snapshot costs is the data only it holds:
   (<https://btrfs.readthedocs.io/en/latest/Qgroups.html>). gogo doesn't use them.
 - **btrfs without quotas (what gogo does):** a FIEMAP walk, unprivileged, the method of
   `btrfs filesystem du` (<https://btrfs.readthedocs.io/en/latest/btrfs-filesystem.html>).
-  gogo collects the physical extents of the game dir and of each of its snapshots and
-  counts, per snapshot, the bytes of extents no other tree in that set references. That is
-  an **estimate**, shown with `~`: btrfs shares whole extents, so an extent that a later
-  write only partly replaced still counts as shared (a hand test saw a snapshot holding 2 MiB
-  of overwritten data report 0 B exclusive). It is also not "what deleting it frees" when two
-  snapshots share data that the game dir no longer has.
+  gogo collects the physical byte ranges the files of the game dir and of each of its
+  snapshots use, and counts, per snapshot, the bytes of ranges no other tree in that set
+  covers. Ranges rather than whole extents: btrfs reports the part of an extent a file
+  references, so the old part of an extent a later write only partly replaced counts as the
+  snapshot's (`btrfs filesystem du` compares whole extents, and a hand test saw it report
+  0 B exclusive for a snapshot holding 2 MiB of overwritten data). It is still an
+  **estimate**, shown with `~`: btrfs keeps a partly replaced extent whole until nothing
+  references any of it, compressed extents are counted by their logical length, and data
+  shared with something outside the set (a reflink copy elsewhere) counts as exclusive. It
+  is also not "what deleting it frees" when two snapshots share data that the game dir no
+  longer has.
 - Measured on `snapshot list` (skipped with `--no-space`) and stored in `<n>.toml` with its
   date; `apps show` and `doctor` show the stored values with their date rather than walking.
   The walk is fast for a game's few large files and takes seconds for a large prefix.
@@ -762,20 +767,34 @@ saves, the operations), `backend.rs` (the trait), `btrfs.rs`, `zfs.rs`, `fake.rs
 (`#[cfg(test)]` and the test-util feature). The trait:
 
 ```rust
-pub trait SnapshotBackend {
+pub trait SnapshotBackend: Send + Sync {
     fn probe(&self, dir: &Path) -> Support;                 // Btrfs | Zfs{dataset} | None(reason)
+    fn kind(&self) -> BackendKind;                          // `backend` in <n>.toml
+    fn ready(&self, game_dir: &Path) -> io::Result<bool>;   // its own subvolume / dataset (else: convert)
     fn make_game_dir(&self, dir: &Path) -> io::Result<()>;  // subvolume; ZFS: check the prepared dataset
     fn snapshot(&self, game_dir: &Path, n: u32) -> io::Result<()>;
     fn snapshot_path(&self, game_dir: &Path, n: u32) -> Option<PathBuf>; // a readable tree, for §6.1
-    fn delete(&self, game_dir: &Path, n: u32) -> io::Result<()>;
+    fn exists(&self, game_dir: &Path, n: u32) -> io::Result<bool>;       // for recovery (§5.2)
+    fn delete(&self, game_dir: &Path, n: u32) -> io::Result<()>;          // gone already: Ok
     fn rollback(&self, game_dir: &Path, n: u32, step: &mut dyn FnMut(RollbackStep) -> io::Result<()>) -> io::Result<()>;
-    fn on_disk(&self, game_dir: &Path) -> io::Result<Vec<OnDisk>>;
+    fn on_disk(&self, game_dir: &Path) -> io::Result<Vec<OnDisk>>;        // NotFound: unreachable
     fn space(&self, game_dir: &Path, ns: &[u32]) -> io::Result<Vec<Space>>;
 }
 ```
 
 `rollback` calls back at each step so the orchestration (journal, saves, override, launcher)
-stays in `mod.rs` and is the same for every backend.
+stays in `mod.rs` and is the same for every backend. `probe` is about the filesystem and
+`ready` about the one game dir: a plain dir on btrfs is `Support::Btrfs` but not ready,
+which is the "needs converting" case of §2.1. `exists` answers recovery's one question
+without listing every snapshot.
+
+The operations in `mod.rs` (`Store::create`, `delete`, `recover`, `prune`, `measure_space`,
+`set_auto`) take a `Guard` built from the two lock files of §5.1, so a caller can't reach
+them without having taken the locks; the refusals of §5.1 stay the caller's. `create` moves
+`settings.toml`'s `next` past the new number before anything else, so a number is never
+handed out twice, even after a crash; it never takes a number that is in the metadata or on
+disk (a `?` snapshot keeps its number). Retention is the caller's step after an `auto`
+snapshot (`prune(keep_auto)`), not part of `create`.
 
 ### 10.2 Unit and integration tests (any filesystem, CI on Linux and macOS for the shared code)
 
