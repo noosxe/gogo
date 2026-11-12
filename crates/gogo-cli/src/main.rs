@@ -2,6 +2,7 @@
 //! This crate is a thin shell over `gogo-core`; everything domain lives there.
 
 mod apps_sort;
+mod builds_cmd;
 mod cli;
 mod depot_progress;
 #[cfg(target_os = "linux")]
@@ -202,6 +203,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
         Command::Info { game, json } => info(game, json).await,
         Command::Download(args) => download(args, cli.no_progress, cli.quiet).await,
         Command::Depot(args) => depot_cmd(args).await,
+        Command::Builds(args) => builds_cmd::run(args).await,
         Command::Update { games, all, strict } => update(games, all, strict).await,
         Command::Verify {
             games,
