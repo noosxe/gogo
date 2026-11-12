@@ -1827,16 +1827,31 @@ pub fn doctor(gogid: &str, root: &Path, backends: &Backends) -> Vec<Finding> {
             ),
         ));
     }
-    for p in super::relocate::leftovers(gogid, root, backends) {
-        out.push(Finding::warn(
-            CHECK,
-            format!(
-                "{} is a snapshot a move across filesystems couldn't delete: it holds space on \
-                 that drive, and nothing can be rolled back to it",
-                p.display()
-            ),
-            format!("`gogo linux-app snapshot {gogid} list` tries deleting it again"),
-        ));
+    for (p, reachable) in super::relocate::leftovers(gogid, root, backends) {
+        out.push(if reachable {
+            Finding::warn(
+                CHECK,
+                format!(
+                    "{} is a snapshot a move across filesystems couldn't delete: it holds space \
+                     on that drive, and nothing can be rolled back to it",
+                    p.display()
+                ),
+                format!("`gogo linux-app snapshot {gogid} list` tries deleting it again"),
+            )
+        } else {
+            Finding::warn(
+                CHECK,
+                format!(
+                    "{} may still hold a snapshot a move across filesystems couldn't delete: \
+                     its drive isn't there (not mounted?)",
+                    p.display()
+                ),
+                format!(
+                    "mount it, then `gogo linux-app snapshot {gogid} list` tries deleting it \
+                     again"
+                ),
+            )
+        });
     }
     if !v.reachable {
         out.push(Finding::ok(
