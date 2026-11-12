@@ -124,10 +124,9 @@ impl App {
     }
 }
 
-/// Every game under `games/`, by gogid. `logs` is the launch-log root
-/// (`~/Library/Logs/gogo`).
-pub fn list(logs: &Path) -> Result<Vec<App>, MacAppError> {
-    let mut out = Vec::new();
+/// The ids of every game here: those under `games/` plus those recorded in a
+/// library (design 18 §6.1), there right now or not. Sorted, no duplicates.
+pub fn game_ids() -> Result<Vec<String>, MacAppError> {
     let entries = match std::fs::read_dir(launch::games_dir()) {
         Ok(e) => Some(e),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -143,12 +142,14 @@ pub fn list(logs: &Path) -> Result<Vec<App>, MacAppError> {
             ids.insert(gogid);
         }
     }
-    // Games in a library (design 18 §6.1), there right now or not.
     ids.extend(launch::recorded_games().into_iter().map(|(id, _)| id));
-    for gogid in &ids {
-        out.push(read(gogid, logs)?);
-    }
-    Ok(out)
+    Ok(ids.into_iter().collect())
+}
+
+/// Every game under `games/`, by gogid. `logs` is the launch-log root
+/// (`~/Library/Logs/gogo`).
+pub fn list(logs: &Path) -> Result<Vec<App>, MacAppError> {
+    game_ids()?.iter().map(|gogid| read(gogid, logs)).collect()
 }
 
 /// The game `target` (a gogid or its `.app`) names, if it is set up here.
@@ -521,5 +522,29 @@ mod tests {
         let app = get("1207659013", &logs).unwrap().unwrap();
         remove(&app, false).unwrap();
         assert!(!compat::user_path("1207659013").exists());
+    }
+}
+
+#[cfg(test)]
+mod game_ids_tests {
+    use super::*;
+
+    #[test]
+    fn ids_cover_the_games_dir_and_location_records_once() {
+        let home = tempfile::tempdir().unwrap();
+        let _g = crate::test_util::env_lock();
+        // SAFETY: env mutation under the shared env mutex.
+        unsafe { std::env::set_var("GOGO_HOME", home.path()) };
+        // One game in the default dir, one in a library (a location record), one
+        // in both, and a staging dir that is no game.
+        std::fs::create_dir_all(launch::games_dir().join("1111")).unwrap();
+        std::fs::create_dir_all(launch::games_dir().join("3333")).unwrap();
+        std::fs::create_dir_all(launch::games_dir().join(".build-x-1")).unwrap();
+        let lib = home.path().join("lib");
+        for id in ["2222", "3333"] {
+            std::fs::create_dir_all(lib.join(id)).unwrap();
+            launch::record_location(id, &lib.join(id)).unwrap();
+        }
+        assert_eq!(game_ids().unwrap(), ["1111", "2222", "3333"]);
     }
 }

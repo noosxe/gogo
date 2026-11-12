@@ -184,7 +184,7 @@ impl Report {
         );
         let access = self.rows.iter().any(|r| r.entry.password_protected());
         let mut table: Vec<Vec<String>> = Vec::new();
-        let mut head = vec!["BUILD", "VERSION", "PUBLISHED", "GEN", "BRANCH"];
+        let mut head = vec!["  BUILD", "VERSION", "PUBLISHED", "GEN", "BRANCH"];
         if access {
             head.push("ACCESS");
         }
@@ -245,7 +245,7 @@ impl Report {
             line.extend(["-".into(), "-".into(), u.here.join(", ")]);
             table.push(line);
         }
-        out.push_str(&columns(&table, true));
+        out.push_str(&columns(&table));
         for u in &self.unlisted {
             out.push_str(&format!(
                 "{} {} is installed here; GOG no longer lists it.\n",
@@ -299,7 +299,7 @@ impl Report {
                         x.size.map_or("-".into(), crate::fmt::human_size),
                     ]);
                 }
-                out.push_str(&columns(&t, false));
+                out.push_str(&columns(&t));
             }
         }
         out
@@ -391,9 +391,8 @@ fn dash(s: &str) -> String {
     }
 }
 
-/// Left-aligned columns, two spaces apart, the last one unpadded. A leading
-/// two-space gutter lines up the `*` marker (rows carry it themselves).
-fn columns(rows: &[Vec<String>], marker_gutter: bool) -> String {
+/// Left-aligned columns, two spaces apart, the last one unpadded.
+fn columns(rows: &[Vec<String>]) -> String {
     let cols = rows.iter().map(Vec::len).max().unwrap_or(0);
     let widths: Vec<usize> = (0..cols)
         .map(|c| {
@@ -405,8 +404,8 @@ fn columns(rows: &[Vec<String>], marker_gutter: bool) -> String {
         })
         .collect();
     let mut out = String::new();
-    for (i, r) in rows.iter().enumerate() {
-        let mut line = String::from(if i == 0 && marker_gutter { "  " } else { "" });
+    for r in rows {
+        let mut line = String::new();
         for (c, cell) in r.iter().enumerate() {
             if c + 1 == r.len() {
                 line.push_str(cell);
@@ -493,7 +492,7 @@ pub fn render_installed(rows: &[InstalledRow]) -> String {
             },
         ]);
     }
-    columns(&t, false)
+    columns(&t)
 }
 
 /// `--installed --json` (design 21 §2.3).
@@ -637,6 +636,18 @@ mod tests {
         ));
         assert!(!text.contains("ACCESS"));
         assert_eq!(cyberpunk().failed_manifests().len(), 1);
+    }
+
+    #[test]
+    fn the_header_lines_up_with_the_data_columns() {
+        let text = cyberpunk().render();
+        let lines: Vec<&str> = text.lines().collect();
+        let col = |line: &str, word: &str| line.find(word).unwrap();
+        assert_eq!(col(lines[1], "BUILD"), col(lines[2], "60152385347545148"));
+        assert_eq!(col(lines[1], "VERSION"), col(lines[2], "2.5_RedModFix"));
+        assert_eq!(col(lines[1], "PUBLISHED"), col(lines[2], "2026-10-22"));
+        assert_eq!(col(lines[1], "SIZE"), col(lines[2], "60.0 GiB"));
+        assert_eq!(col(lines[1], "HERE"), col(lines[2], "game, cache"));
     }
 
     #[test]
