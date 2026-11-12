@@ -1253,7 +1253,13 @@ rewrite, and so does an `env` or `args` value naming the old dir: those are the 
 user's.
 
 *Snapshots* (design 20 §9.1): on one filesystem they move with the game; across filesystems they
-are deleted after the commit, listed and confirmed first.
+are deleted after the commit, listed and confirmed first (`--yes`, or the question; a non-TTY
+without `--yes` prints the plan and exits 2). The journal's optional third line,
+`snapshots: carry|drop|initial`, tells recovery which of those steps the move has: `carry` runs
+after the data and before the commit (step 1 below), `drop` and `initial` in step 4, after the
+source is deleted. A move onto btrfs makes `.moving-<gogid>/` a subvolume. One filesystem, for
+the plan, is one device or, on btrfs, a subvolume game dir in the same mount (a subvolume has its
+own device number but its root renames across the subvolumes of one mount).
 
 *The steps.* A journal, `<data_root>/game-moves/<gogid>` (from and to), comes first. Then:
 
