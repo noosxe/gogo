@@ -1966,6 +1966,10 @@ pub(crate) mod store_tests {
         let mut events: Vec<&'static str> = Vec::new();
         let m = install(entry, None, &http, &server.uri(), false, &mut |ev| {
             use crate::engine::events::ProgressEvent as Ev;
+            // The download's running count and the other live-only steps.
+            if ev.is_live_only() {
+                return;
+            }
             let name = match ev {
                 Ev::RuntimeDownloadStarted { .. } => "started",
                 Ev::ToolProvisioned { .. } => "provisioned",
