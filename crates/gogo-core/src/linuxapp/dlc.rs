@@ -1285,12 +1285,23 @@ where
             });
             let mut tenths = materialize::Tenths::new(bytes);
             let copying = plan.game_files == "copy";
+            let files_total = j.files.len() as u64;
+            let (mut files_done, mut bytes_done) = (0u64, 0u64);
             let report = lay::lay_files(
                 &root,
                 &j,
                 opts.reflink,
                 &mut |s| opts.fail_at == Some(s) || stop(),
                 &mut |n| {
+                    files_done += 1;
+                    bytes_done += n;
+                    emit(&ProgressEvent::WorkProgress {
+                        step: crate::engine::events::step::GAME_FILES.into(),
+                        files: Some(files_done),
+                        files_total: Some(files_total),
+                        bytes: Some(bytes_done),
+                        bytes_total: Some(bytes),
+                    });
                     if copying && let Some(copied) = tenths.add(n) {
                         emit(&ProgressEvent::GameFilesProgress {
                             copied,
@@ -1298,8 +1309,11 @@ where
                         });
                     }
                 },
-            )?;
-            lay_report = Some(report);
+            );
+            emit(&ProgressEvent::WorkDone {
+                step: crate::engine::events::step::GAME_FILES.into(),
+            });
+            lay_report = Some(report?);
         }
         game.content = commit(game, &j)?;
         game.derived = false;

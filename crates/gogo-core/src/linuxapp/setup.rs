@@ -28,7 +28,7 @@ use super::proton::{self, ProtonRef};
 use super::protonfix;
 use super::umu::{self, Host, UmuRun};
 use super::umu_id::{self, UmuId};
-use crate::engine::events::ProgressEvent;
+use crate::engine::events::{ProgressEvent, step, working};
 use crate::macapp::compat::{self, CompatEntry, Layer, Os};
 use crate::macapp::error::MacAppError;
 use crate::macapp::launch::{GameDirs, LaunchToml, state_rel, windows_to_unix, write_atomic};
@@ -790,7 +790,7 @@ pub fn setup(
     umu.check()?;
     let prefix_created = !is_prefix(&dirs.prefix);
     if prefix_created {
-        umu.create_prefix()?;
+        working(emit, step::PREFIX, || umu.create_prefix())?;
     }
     crate::macapp::setup::localize_home(&dirs.prefix)?;
     if let Some(name) = &tree
@@ -1000,7 +1000,8 @@ pub fn setup(
         fixes::winetricks_command(&umu_run, &build.dir, &dirs.prefix, &umu_id.id, &pending)
     {
         restore_z(&dirs.prefix)?;
-        let status = umu.run(&format!("winetricks {}", pending.join(" ")), cmd)?;
+        let what = format!("winetricks {}", pending.join(" "));
+        let status = working(emit, &what, || umu.run(&what, cmd))?;
         let left = fixes::pending_verbs(&dirs.prefix, &pending);
         verbs_installed = pending
             .iter()

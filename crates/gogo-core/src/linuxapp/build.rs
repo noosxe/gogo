@@ -22,7 +22,7 @@ use super::snapshots::{self, BuildSnapshots, SnapshotOptions};
 use super::umu::{self, Host};
 use super::umu_id::UmuId;
 use crate::config::{Config, UmuMode};
-use crate::engine::events::ProgressEvent;
+use crate::engine::events::{ProgressEvent, step, working};
 use crate::gog::content;
 use crate::gog::depot;
 pub use crate::gog::dlc_filter::DepotContent;
@@ -877,12 +877,22 @@ pub fn execute(
         // relative to the cache root, the tree's parent.
         let tree_name = PathBuf::from(tree.file_name().unwrap_or_default());
         let content_filter = plan.depot_content.clone().unwrap_or_default();
+        let (mut files_done, mut bytes_done) = (0u64, 0u64);
         let report = materialize::materialize_tree_filtered(
             tree,
             &dirs.game,
             materialize::Reflink::Try,
             &|rel| content_filter.keeps(&tree_name.join(rel)),
             &mut |_, bytes| {
+                files_done += 1;
+                bytes_done += bytes;
+                emit(&ProgressEvent::WorkProgress {
+                    step: step::GAME_FILES.into(),
+                    files: Some(files_done),
+                    files_total: None,
+                    bytes: Some(bytes_done),
+                    bytes_total: Some(total),
+                });
                 if method == materialize::TreeMethod::Copy
                     && let Some(copied) = tenths.add(bytes)
                 {
@@ -890,7 +900,11 @@ pub fn execute(
                 }
                 Ok(())
             },
-        )?;
+        );
+        emit(&ProgressEvent::WorkDone {
+            step: step::GAME_FILES.into(),
+        });
+        let report = report?;
         if launch::in_library(&dirs.root) && report.method() == materialize::TreeMethod::Copy {
             emit(&ProgressEvent::Warn {
                 message: format!(
@@ -977,14 +991,22 @@ pub fn execute(
                 ),
             });
         } else {
-            umu.create_prefix()?;
+            working(emit, step::PREFIX, || umu.create_prefix())?;
         }
         crate::macapp::setup::localize_home(&dirs.prefix)?;
         let install_dir = crate::macapp::setup::link_game(dirs, &name)?;
 
         // GOG's support installer (design 15 D3): best-effort, as on the Mac.
         if let Some(support) = crate::macapp::locate_support_installer(tree) {
-            restore_and_run_support(plan, &umu, &support, &gogid, &name, &install_dir, emit)?;
+            emit(&ProgressEvent::WorkStarted {
+                step: step::SUPPORT.into(),
+            });
+            let r =
+                restore_and_run_support(plan, &umu, &support, &gogid, &name, &install_dir, emit);
+            emit(&ProgressEvent::WorkDone {
+                step: step::SUPPORT.into(),
+            });
+            r?;
         }
         emit(&ProgressEvent::InstallFinished {
             bytes: plan.game_tree_bytes,
@@ -1034,16 +1056,18 @@ pub fn execute(
             &mut |message| emit(&ProgressEvent::Warn { message }),
         )?;
         emit(&ProgressEvent::PrefixStaged);
-        umu.create_prefix()?;
+        working(emit, step::PREFIX, || umu.create_prefix())?;
         crate::macapp::setup::localize_home(&staging.prefix)?;
         restore_z_for_build(&staging.prefix)?;
         emit(&ProgressEvent::InstallStarted);
         let win_target = format!("C:\\GOG\\{}", plan.slug);
         let inno_log = logs.join(installer::INNO_LOG);
-        let status = umu.run(
-            "the offline installer",
-            umu.command(installer_args(inst, &win_target, &inno_log)),
-        )?;
+        let status = working(emit, step::INSTALLER, || {
+            umu.run(
+                "the offline installer",
+                umu.command(installer_args(inst, &win_target, &inno_log)),
+            )
+        })?;
         let install_dir = staging.prefix.join("drive_c/GOG").join(&plan.slug);
         if !status.success() {
             return Err(MacAppError::InstallerFailed {

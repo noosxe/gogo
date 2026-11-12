@@ -192,6 +192,9 @@ fn interactive(machine: bool) -> bool {
 /// The human lines go to `print`: stderr, or the live renderer, which prints
 /// them above its status line.
 fn emit(ev: &ProgressEvent, json_progress: bool, quiet: bool, print: &dyn Fn(&str)) {
+    if ev.is_live_only() {
+        return;
+    }
     if json_progress {
         if let Ok(line) = serde_json::to_string(ev) {
             println!("{line}");
@@ -489,9 +492,14 @@ async fn add_cmd(
     };
     let stop_token = cancel.clone();
     let stop = move || stop_token.is_cancelled();
-    let mut renderer = mode.renderer();
-    let live = depot_progress::Live::new(&mut rx, &mut renderer);
-    let mut on_event = |ev: &ProgressEvent| emit(ev, jp, quiet, &|l| live.note(l));
+    let act = depot_progress::Activity::new(mode);
+    let live = depot_progress::Live::new(&mut rx, &act);
+    // The game files' running count goes on the live status line (#420).
+    let mut on_event = |ev: &ProgressEvent| {
+        if !live.work(ev) {
+            emit(ev, jp, quiet, &|l| live.note(l))
+        }
+    };
     let opts = add::AddOptions {
         snapshots: crate::auto_snapshots(a.no_snapshots)?,
         ..Default::default()

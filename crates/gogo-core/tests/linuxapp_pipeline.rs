@@ -6939,6 +6939,24 @@ mod dlc_add {
             .unwrap();
         assert_eq!(started["GameFilesStarted"]["kind"], "dlc");
         assert_eq!(started["GameFilesStarted"]["files"], 4);
+        // The lay's running count (#420): one per file, then its end.
+        let counts: Vec<&serde_json::Value> = r
+            .events
+            .iter()
+            .filter(|e| tag(e) == "WorkProgress")
+            .map(|e| &e["WorkProgress"])
+            .collect();
+        assert_eq!(counts.len(), 4, "{tags:?}");
+        let last = counts[3];
+        assert_eq!(
+            (&last["files"], &last["files_total"]),
+            (&4.into(), &4.into())
+        );
+        assert_eq!(last["bytes"], last["bytes_total"]);
+        assert_eq!(last["step"], "game files");
+        let at = |t: &str| tags.iter().position(|x| x == t).unwrap();
+        assert!(at("GameFilesStarted") < at("WorkProgress"));
+        assert!(tags.iter().rposition(|x| x == "WorkProgress") < Some(at("WorkDone")));
         let plan = r.events.iter().find(|e| tag(e) == "DlcPlan").unwrap();
         assert_eq!(plan["DlcPlan"]["source"], "staging");
         assert_eq!(plan["DlcPlan"]["buildId"], "B1");

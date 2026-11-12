@@ -566,6 +566,16 @@ fn chunk_works(doc: &crate::gog::checksum::ChecksumDoc) -> Vec<ChunkWork> {
 /// Verify a local file against a checksum doc (per-chunk md5; size-only when
 /// the doc has neither chunks nor a root md5). Public for `gogo verify`.
 pub fn verify_against(dest: &Path, doc: &crate::gog::checksum::ChecksumDoc) -> bool {
+    verify_against_with(dest, doc, &mut |_| {})
+}
+
+/// [`verify_against`], telling `on_bytes` how many bytes it has hashed so far
+/// (of `doc.total_size`) as it goes (#420).
+pub fn verify_against_with(
+    dest: &Path,
+    doc: &crate::gog::checksum::ChecksumDoc,
+    on_bytes: &mut dyn FnMut(u64),
+) -> bool {
     let Ok(file) = std::fs::File::open(dest) else {
         return false;
     };
@@ -576,21 +586,32 @@ pub fn verify_against(dest: &Path, doc: &crate::gog::checksum::ChecksumDoc) -> b
         return false;
     }
     let mut buf = vec![0u8; 1024 * 1024];
+    let mut hashed = 0u64;
+    let mut read = |n: u64| {
+        hashed += n;
+        on_bytes(hashed);
+    };
     if doc.chunks.is_empty() {
         return match &doc.md5 {
-            Some(expected) => md5_file(&file, 0, doc.total_size, &mut buf)
+            Some(expected) => md5_file(&file, 0, doc.total_size, &mut buf, &mut read)
                 .is_some_and(|d| d.eq_ignore_ascii_case(expected)),
             None => true, // size-only
         };
     }
     doc.chunks.iter().all(|chunk| {
         let len = chunk.to + 1 - chunk.from; // inclusive end -> span length
-        md5_file(&file, chunk.from, len, &mut buf)
+        md5_file(&file, chunk.from, len, &mut buf, &mut read)
             .is_some_and(|d| d.eq_ignore_ascii_case(&chunk.md5))
     })
 }
 
-fn md5_file(file: &std::fs::File, from: u64, len: u64, buf: &mut [u8]) -> Option<String> {
+fn md5_file(
+    file: &std::fs::File,
+    from: u64,
+    len: u64,
+    buf: &mut [u8],
+    on_read: &mut dyn FnMut(u64),
+) -> Option<String> {
     use std::os::unix::fs::FileExt;
 
     use md5::{Digest, Md5};
@@ -603,6 +624,7 @@ fn md5_file(file: &std::fs::File, from: u64, len: u64, buf: &mut [u8]) -> Option
         file.read_exact_at(&mut buf[..take], pos).ok()?;
         md5.update(&buf[..take]);
         pos += take as u64;
+        on_read(take as u64);
     }
     Some(crate::fmt::md5_hex(md5))
 }
@@ -686,6 +708,10 @@ mod verify_tests {
         let dest = dir.path().join("x.bin");
         std::fs::write(&dest, [left.as_slice(), right.as_slice()].concat()).unwrap();
         assert!(verify_against(&dest, &doc), "intact file verifies");
+        let mut seen = Vec::new();
+        assert!(super::verify_against_with(&dest, &doc, &mut |b| seen.push(b)));
+        assert_eq!(seen.last(), Some(&doc.total_size), "every byte is counted");
+        assert!(seen.windows(2).all(|w| w[0] < w[1]), "{seen:?}");
 
         let mut corrupted = std::fs::read(&dest).unwrap();
         corrupted[45] = b'c'; // inside chunk 1 only

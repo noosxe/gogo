@@ -143,6 +143,21 @@ pub enum DepotEvent {
 - gog-warp's own `info` log lines repeat the phase lines and would break the status line,
   so the default log filter is `info,gog_warp=warn`; `-v` shows them again.
 - `--limit` (#324) needs nothing here: the speed shown is what arrives.
+- **Other long steps (#420).** The same status line shows a command's own long steps,
+  through `Activity` in `depot_progress.rs`: a renderer behind a lock and, in live mode
+  only, a 100 ms timer thread, so the line keeps moving while a step blocks the thread
+  (a synchronous lay, a `wineboot`). With a known total it shows a running count,
+  `⠋ game files  120 / 400 files  300.0 MiB / 605.3 MiB  45.0 MiB/s  0:07`. Without one
+  it shows the spinner, the step and its elapsed time. Core reports these steps through
+  three `ProgressEvent`s. `WorkProgress` carries the step, files and bytes with their
+  totals where known, sent per file or per chunk. `WorkStarted` marks a step with no count.
+  `WorkDone` ends either kind. They exist only for the live line: `--json-progress`
+  leaves them out, and plain mode, `--json` and `--quiet` print nothing for them, so
+  that output is what it was before. Sites: the game files of a build and of
+  `dlc add`; prefix creation, the offline installer, GOG's support installer and
+  winetricks; a runtime's download (bytes), checksum and unpacking; `snapshot`
+  space, delete and rollback, and the plain-dir conversion (bytes); `move` (bytes,
+  then its finish); `apps remove`; `verify` (bytes hashed per file); `linux-app doctor`.
 
 ## 5. D5 — Driver flow (gogo-core, UI-agnostic)
 

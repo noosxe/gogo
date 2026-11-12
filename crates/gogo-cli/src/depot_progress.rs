@@ -10,11 +10,17 @@
 //! - `Human { live: false }` (stderr not a terminal, or `--no-progress`): the
 //!   same phase lines, plus one line per tenth of hashing and downloading.
 //! - `Silent` (`--quiet`, or `--json` without `--json-progress`): nothing.
+//!
+//! Other long steps (#420) use the same status line through
+//! [`Renderer::task`]: a running count of files and bytes with a rate, or the
+//! spinner alone when the total isn't known. That line is live mode only: the
+//! other modes print what they printed before.
 
 use std::collections::VecDeque;
 use std::io::Write;
 use std::time::Duration;
 
+use gogo::engine::events::ProgressEvent;
 use gogo::fmt::human_size;
 use gogo::gog::depot::DepotEvent;
 
@@ -45,16 +51,6 @@ impl Mode {
             }
         }
     }
-
-    /// From the process's flags, writing where design 03 §4 says: NDJSON on
-    /// stdout, human progress on stderr.
-    pub fn renderer(self) -> Renderer<Box<dyn Write + Send>> {
-        let out: Box<dyn Write + Send> = match self {
-            Mode::Json => Box::new(std::io::stdout()),
-            _ => Box::new(std::io::stderr()),
-        };
-        Renderer::new(self, out)
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,8 +60,13 @@ enum Phase {
     Hashing,
     Allocating,
     Downloading,
+    /// A step of the caller's own ([`Renderer::task`]).
+    Task,
     Done,
 }
+
+/// A count so far, and its total when known.
+pub type Count = (u64, Option<u64>);
 
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 /// Samples older than this don't count towards the speed.
@@ -95,6 +96,11 @@ pub struct Renderer<W: Write> {
     drawn: bool,
     last_draw: Option<Duration>,
     spin: usize,
+    /// The [`Phase::Task`] step's name and its file count.
+    task: String,
+    task_files: Option<Count>,
+    /// The task's byte count has a total.
+    task_bytes_total: bool,
 }
 
 impl<W: Write> Renderer<W> {
@@ -113,6 +119,9 @@ impl<W: Write> Renderer<W> {
             drawn: false,
             last_draw: None,
             spin: 0,
+            task: String::new(),
+            task_files: None,
+            task_bytes_total: false,
         }
     }
 
@@ -295,8 +304,86 @@ impl<W: Write> Renderer<W> {
         }
     }
 
+    /// A step of the caller's own at `now` (#420): its name, files and bytes
+    /// so far with their totals where known, or neither for the spinner
+    /// alone. Draws the status line under the lines printed so far: live
+    /// mode only, the other modes print nothing for it. A new `step` (or one
+    /// after [`Renderer::task_done`]) starts its clock and rate afresh.
+    pub fn task(&mut self, step: &str, files: Option<Count>, bytes: Option<Count>, now: Duration) {
+        if !self.live() {
+            return;
+        }
+        if self.phase != Phase::Task || self.task != step {
+            self.phase = Phase::Task;
+            self.phase_start = now;
+            self.task = step.to_string();
+            self.samples.clear();
+            self.dl_first = None;
+            self.bytes = (0, 0);
+        }
+        self.task_files = files;
+        self.task_bytes_total = bytes.is_some_and(|(_, t)| t.is_some());
+        if let Some((done, total)) = bytes {
+            self.bytes = (done, total.unwrap_or(0));
+            self.dl_first.get_or_insert((now, done));
+            self.samples.push_back((now, done));
+            while self
+                .samples
+                .front()
+                .is_some_and(|(t, _)| now.saturating_sub(*t) > SPEED_WINDOW)
+                && self.samples.len() > 2
+            {
+                self.samples.pop_front();
+            }
+        }
+        self.draw(now, false);
+    }
+
+    /// The step [`Renderer::task`] showed is over: its status line goes.
+    pub fn task_done(&mut self) {
+        if self.phase == Phase::Task {
+            self.clear();
+            let _ = self.out.flush();
+            self.phase = Phase::Idle;
+            self.task_files = None;
+        }
+    }
+
+    /// [`ProgressEvent::WorkProgress`], [`ProgressEvent::WorkStarted`] (the
+    /// spinner alone) and [`ProgressEvent::WorkDone`] as [`Renderer::task`]
+    /// and [`Renderer::task_done`]; `false` for any other event.
+    pub fn work(&mut self, event: &ProgressEvent, now: Duration) -> bool {
+        match event {
+            ProgressEvent::WorkProgress {
+                step,
+                files,
+                files_total,
+                bytes,
+                bytes_total,
+            } => {
+                self.task(
+                    step,
+                    files.map(|f| (f, *files_total)),
+                    bytes.map(|b| (b, *bytes_total)),
+                    now,
+                );
+                true
+            }
+            ProgressEvent::WorkStarted { step } => {
+                self.task(step, None, None, now);
+                true
+            }
+            ProgressEvent::WorkDone { .. } => {
+                self.task_done();
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Clears the status line; call once the run is over.
     pub fn finish(&mut self) {
+        self.task_done();
         self.clear();
         let _ = self.out.flush();
     }
@@ -358,6 +445,7 @@ impl<W: Write> Renderer<W> {
         let pct = |f: f32| (f.clamp(0.0, 1.0) * 100.0) as u32;
         Some(match self.phase {
             Phase::Idle | Phase::Done => return None,
+            Phase::Task => self.task_status(spin, &elapsed),
             Phase::Preparing => format!("{spin} preparing  {elapsed}"),
             Phase::Hashing => format!("{spin} hashing {}%  {elapsed}", pct(self.fraction)),
             Phase::Allocating => format!("{spin} allocating {}%  {elapsed}", pct(self.fraction)),
@@ -379,6 +467,29 @@ impl<W: Write> Renderer<W> {
                 )
             }
         })
+    }
+
+    /// `⠋ game files  120 / 400 files  300.0 MiB / 605.3 MiB  45.0 MiB/s  0:07`,
+    /// with what is known of that.
+    fn task_status(&self, spin: char, elapsed: &str) -> String {
+        let mut line = format!("{spin} {}", self.task);
+        match self.task_files {
+            Some((d, Some(t))) => line += &format!("  {d} / {t} files"),
+            Some((d, None)) => line += &format!("  {d} files"),
+            None => {}
+        }
+        if self.dl_first.is_some() {
+            let (d, t) = self.bytes;
+            line += &if self.task_bytes_total {
+                format!("  {} / {}", human_size(d), human_size(t))
+            } else {
+                format!("  {}", human_size(d))
+            };
+            if let Some(s) = self.speed().filter(|s| *s > 0) {
+                line += &format!("  {}/s", human_size(s));
+            }
+        }
+        line + "  " + elapsed
     }
 
     /// Redraw the status line (live mode), at most every [`REDRAW`] unless
@@ -453,38 +564,43 @@ pub fn game_files_line(plan: &gogo::gog::materialize::MaterializePlan) -> String
 }
 
 /// Run the depot lane's future, rendering every event it sends on `rx` as
-/// it comes, and the timer in between; the events still queued when it
-/// returns are rendered too, in order. Both `gogo depot` and the builds
-/// drive the lane through this.
-pub async fn drive<T, W: Write>(
+/// it comes; the events still queued when it returns are rendered too, in
+/// order. Both `gogo depot` and the builds drive the lane through this.
+pub async fn drive<T, W: Write + Send + 'static>(
     runner: impl std::future::Future<Output = T>,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<DepotEvent>,
-    renderer: &mut Renderer<W>,
+    act: &Activity<W>,
 ) -> T {
-    Live::new(rx, renderer).drive(runner).await
+    Live::new(rx, act).drive(runner).await
 }
 
-/// The depot receiver and the renderer, shared so the caller's own work can
-/// print a line from inside the runner ([`Live::note`]) while [`Live::drive`]
-/// owns the terminal. `gogo dlc add`'s lay runs synchronously after the
-/// download and never yields, so its lines must reach the terminal as it
-/// emits them, not when the runner next awaits. The locks are never held
-/// across an await.
-pub struct Live<'a, W: Write> {
+/// The depot receiver and an [`Activity`], so the caller's own work can print
+/// a line from inside the runner ([`Live::note`]) while [`Live::drive`] owns
+/// the terminal. `gogo dlc add`'s lay runs synchronously after the download
+/// and never yields, so its lines must reach the terminal as it emits them,
+/// not when the runner next awaits; the activity's timer thread keeps the
+/// status line moving meanwhile. The lock is never held across an await.
+pub struct Live<'a, W: Write + Send + 'static> {
     rx: std::sync::Mutex<&'a mut tokio::sync::mpsc::UnboundedReceiver<DepotEvent>>,
-    renderer: std::sync::Mutex<&'a mut Renderer<W>>,
-    start: tokio::time::Instant,
+    act: &'a Activity<W>,
 }
 
-impl<'a, W: Write> Live<'a, W> {
+impl<'a, W: Write + Send + 'static> Live<'a, W> {
     pub fn new(
         rx: &'a mut tokio::sync::mpsc::UnboundedReceiver<DepotEvent>,
-        renderer: &'a mut Renderer<W>,
+        act: &'a Activity<W>,
     ) -> Self {
         Self {
             rx: std::sync::Mutex::new(rx),
-            renderer: std::sync::Mutex::new(renderer),
-            start: tokio::time::Instant::now(),
+            act,
+        }
+    }
+
+    /// Renders every depot event already queued.
+    fn drain(&self) {
+        let mut rx = self.rx.lock().unwrap();
+        while let Ok(e) = rx.try_recv() {
+            self.act.event(&e);
         }
     }
 
@@ -492,37 +608,154 @@ impl<'a, W: Write> Live<'a, W> {
     /// precedes what comes after it), then `text` on its own row: the status
     /// line is cleared first.
     pub fn note(&self, text: &str) {
-        let mut rx = self.rx.lock().unwrap();
-        let mut r = self.renderer.lock().unwrap();
-        while let Ok(e) = rx.try_recv() {
-            r.event(&e, self.start.elapsed());
+        self.drain();
+        self.act.note(text);
+    }
+
+    /// A [`ProgressEvent::WorkProgress`], [`ProgressEvent::WorkStarted`] or
+    /// [`ProgressEvent::WorkDone`] on the status line, drawn as it comes,
+    /// after the depot events queued before it. `false` for any other event.
+    pub fn work(&self, event: &ProgressEvent) -> bool {
+        if !event.is_live_only() {
+            return false;
         }
-        r.note(text);
+        self.drain();
+        self.act.work(event)
     }
 
     /// The loop of [`drive`].
     pub async fn drive<T>(&self, runner: impl std::future::Future<Output = T>) -> T {
-        let mut timer = tokio::time::interval(REDRAW);
-        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         tokio::pin!(runner);
         let result = loop {
             tokio::select! {
                 res = &mut runner => break res,
                 e = std::future::poll_fn(|cx| self.rx.lock().unwrap().poll_recv(cx)) => {
                     if let Some(e) = e {
-                        self.renderer.lock().unwrap().event(&e, self.start.elapsed());
+                        self.act.event(&e);
                     }
                 }
-                _ = timer.tick() => self.renderer.lock().unwrap().tick(self.start.elapsed()),
             }
         };
-        let mut rx = self.rx.lock().unwrap();
-        let mut r = self.renderer.lock().unwrap();
-        while let Ok(e) = rx.try_recv() {
-            r.event(&e, self.start.elapsed());
-        }
-        r.finish();
+        self.drain();
+        self.act.finish();
         result
+    }
+}
+
+/// The status line for a command's steps (#420), and the depot lane's
+/// renderer under [`drive`]: the renderer behind a lock, and in live mode a
+/// timer thread that keeps a spinner and the elapsed time moving while a step
+/// blocks. Lines go through [`Activity::note`] so they land above the status
+/// line. Dropping it clears the line.
+pub struct Activity<W: Write + Send + 'static = Box<dyn Write + Send>> {
+    shared: std::sync::Arc<std::sync::Mutex<Renderer<W>>>,
+    start: std::time::Instant,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    timer: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Activity {
+    /// Where design 03 §4 says: NDJSON on stdout, human progress on stderr.
+    pub fn new(mode: Mode) -> Self {
+        let out: Box<dyn Write + Send> = match mode {
+            Mode::Json => Box::new(std::io::stdout()),
+            _ => Box::new(std::io::stderr()),
+        };
+        Self::with(mode, out)
+    }
+}
+
+impl<W: Write + Send + 'static> Activity<W> {
+    pub fn with(mode: Mode, out: W) -> Self {
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(Renderer::new(mode, out)));
+        let start = std::time::Instant::now();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let timer = (mode == Mode::Human { live: true }).then(|| {
+            let (shared, stop) = (shared.clone(), stop.clone());
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::thread::sleep(REDRAW);
+                    if let Ok(mut r) = shared.lock() {
+                        r.tick(start.elapsed());
+                    }
+                }
+            })
+        });
+        Self {
+            shared,
+            start,
+            stop,
+            timer,
+        }
+    }
+
+    /// The status line shows it; live mode only.
+    pub fn live(&self) -> bool {
+        self.timer.is_some()
+    }
+
+    /// A depot lane event; see [`Renderer::event`].
+    pub fn event(&self, event: &DepotEvent) {
+        self.shared
+            .lock()
+            .unwrap()
+            .event(event, self.start.elapsed());
+    }
+
+    /// See [`Renderer::task`].
+    pub fn task(&self, step: &str, files: Option<Count>, bytes: Option<Count>) {
+        self.shared
+            .lock()
+            .unwrap()
+            .task(step, files, bytes, self.start.elapsed());
+    }
+
+    /// The spinner alone, for a step whose total isn't known.
+    pub fn working(&self, step: &str) {
+        self.task(step, None, None);
+    }
+
+    /// See [`Renderer::task_done`].
+    pub fn done(&self) {
+        self.shared.lock().unwrap().task_done();
+    }
+
+    /// See [`Renderer::work`].
+    pub fn work(&self, event: &ProgressEvent) -> bool {
+        self.shared
+            .lock()
+            .unwrap()
+            .work(event, self.start.elapsed())
+    }
+
+    /// `text` on its own line above the status line, in either human mode.
+    pub fn note(&self, text: &str) {
+        self.shared.lock().unwrap().note(text);
+    }
+
+    /// Run `f` with the spinner and `step` on the status line, then clear it.
+    pub fn spin<T>(&self, step: &str, f: impl FnOnce() -> T) -> T {
+        self.working(step);
+        let out = f();
+        self.done();
+        out
+    }
+
+    /// Clears the status line.
+    pub fn finish(&self) {
+        self.shared.lock().unwrap().finish();
+    }
+}
+
+impl<W: Write + Send + 'static> Drop for Activity<W> {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(t) = self.timer.take() {
+            let _ = t.join();
+        }
+        if let Ok(mut r) = self.shared.lock() {
+            r.finish();
+        }
     }
 }
 
@@ -735,7 +968,6 @@ mod tests {
     #[tokio::test]
     async fn drive_forwards_every_event() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut r = Renderer::new(Mode::Json, Vec::new());
         let runner = async move {
             for (_, e) in run() {
                 tx.send(e).unwrap();
@@ -746,8 +978,11 @@ mod tests {
             tx.send(DepotEvent::Allocating { fraction: 0.5 }).unwrap();
             42
         };
-        assert_eq!(drive(runner, &mut rx, &mut r).await, 42);
-        let out = String::from_utf8(r.into_inner()).unwrap();
+        let buf = Shared::default();
+        let act = Activity::with(Mode::Json, buf.clone());
+        assert_eq!(drive(runner, &mut rx, &act).await, 42);
+        drop(act);
+        let out = buf.text();
         let types: Vec<String> = out
             .lines()
             .map(|l| {
@@ -794,6 +1029,12 @@ mod tests {
     #[derive(Clone, Default)]
     struct Shared(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
+    impl Shared {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
     impl Write for Shared {
         fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
             self.0.lock().unwrap().extend_from_slice(b);
@@ -812,8 +1053,8 @@ mod tests {
         const MB: u64 = 1 << 20;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let buf = Shared::default();
-        let mut r = Renderer::new(Mode::Human { live: true }, buf.clone());
-        let live = Live::new(&mut rx, &mut r);
+        let act = Activity::with(Mode::Human { live: true }, buf.clone());
+        let live = Live::new(&mut rx, &act);
         let seen = buf.clone();
         let runner = async {
             tx.send(DepotEvent::Preparing).unwrap();
@@ -920,5 +1161,199 @@ mod tests {
         let last = out.rsplit("\r\x1b[K").next().unwrap();
         // 100 MiB / 30 s = 3.3 MiB/s; the window would say 0.1 MiB/s.
         assert!(last.contains("3.3 MiB/s"), "{last:?}");
+    }
+
+    /// The status of a task, with the files, the bytes, a rate and the time.
+    #[test]
+    fn a_task_counts_files_and_bytes_with_a_rate() {
+        const MB: u64 = 1 << 20;
+        let mut r = Renderer::new(Mode::Human { live: true }, Vec::new());
+        r.task(
+            "game files",
+            Some((0, Some(4))),
+            Some((0, Some(40 * MB))),
+            secs(0.0),
+        );
+        r.task(
+            "game files",
+            Some((2, Some(4))),
+            Some((20 * MB, Some(40 * MB))),
+            secs(2.0),
+        );
+        r.tick(secs(3.0));
+        r.task_done();
+        r.note("gogo: added");
+        let out = String::from_utf8(r.into_inner()).unwrap();
+        assert!(
+            out.contains(
+                "\r\x1b[K⠙ game files  2 / 4 files  20.0 MiB / 40.0 MiB  10.0 MiB/s  0:02"
+            ),
+            "{out:?}"
+        );
+        assert!(out.contains("0:03"), "the timer moves it: {out:?}");
+        no_text_after_a_status(&out);
+        assert!(out.ends_with("\r\x1b[Kgogo: added\n"), "{out:?}");
+    }
+
+    /// Unknown totals: the counts alone; neither: the spinner and the time.
+    #[test]
+    fn a_task_without_totals_spins() {
+        let mut r = Renderer::new(Mode::Human { live: true }, Vec::new());
+        r.task("game files", Some((3, None)), Some((2048, None)), secs(0.0));
+        r.task("creating the Wine prefix", None, None, secs(1.0));
+        r.tick(secs(66.0));
+        r.finish();
+        let out = String::from_utf8(r.into_inner()).unwrap();
+        assert!(
+            out.contains("⠋ game files  3 files  2.0 KiB  0:00"),
+            "{out:?}"
+        );
+        assert!(out.contains("⠙ creating the Wine prefix  0:00"), "{out:?}");
+        assert!(out.contains("⠹ creating the Wine prefix  1:05"), "{out:?}");
+        assert!(out.ends_with("\r\x1b[K"), "cleared: {out:?}");
+    }
+
+    /// Off a terminal, in `--json` and `--quiet`, a task prints nothing: the
+    /// output stays what it was before (#420).
+    #[test]
+    fn a_task_is_live_only() {
+        for mode in [Mode::Human { live: false }, Mode::Json, Mode::Silent] {
+            let mut r = Renderer::new(mode, Vec::new());
+            r.task(
+                "game files",
+                Some((1, Some(2))),
+                Some((1, Some(2))),
+                secs(0.0),
+            );
+            r.tick(secs(1.0));
+            assert!(r.work(
+                &ProgressEvent::WorkStarted {
+                    step: "unpacking".into()
+                },
+                secs(2.0)
+            ));
+            r.task_done();
+            r.finish();
+            assert!(r.into_inner().is_empty(), "{mode:?}");
+        }
+    }
+
+    /// The core's work events drive the task; others are left to the caller.
+    #[test]
+    fn work_events_map_to_the_task() {
+        let mut r = Renderer::new(Mode::Human { live: true }, Vec::new());
+        let progress = ProgressEvent::WorkProgress {
+            step: "downloading x.tar.gz".into(),
+            files: None,
+            files_total: None,
+            bytes: Some(1024),
+            bytes_total: Some(4096),
+        };
+        assert!(r.work(&progress, secs(0.0)));
+        assert!(r.work(
+            &ProgressEvent::WorkDone {
+                step: "downloading x.tar.gz".into()
+            },
+            secs(0.5)
+        ));
+        assert!(!r.work(&ProgressEvent::PrefixStaged, secs(0.6)));
+        // Done: the timer draws nothing more.
+        r.tick(secs(5.0));
+        let out = String::from_utf8(r.into_inner()).unwrap();
+        assert!(
+            out.contains("downloading x.tar.gz  1.0 KiB / 4.0 KiB  0:00"),
+            "{out:?}"
+        );
+        assert!(out.ends_with("\r\x1b[K"), "{out:?}");
+        assert_eq!(out.matches("downloading").count(), 1, "{out:?}");
+    }
+
+    /// The activity's timer thread keeps a blocked step's status moving, and
+    /// the line is gone when the step returns.
+    #[test]
+    fn an_activity_spins_while_the_step_blocks() {
+        let buf = Shared::default();
+        let act = Activity::with(Mode::Human { live: true }, buf.clone());
+        assert!(act.live());
+        let v = act.spin("removing Game", || {
+            std::thread::sleep(Duration::from_millis(350));
+            7
+        });
+        assert_eq!(v, 7);
+        act.note("removed /g");
+        drop(act);
+        let out = buf.text();
+        assert!(out.matches("removing Game  0:00").count() >= 2, "{out:?}");
+        no_text_after_a_status(&out);
+        assert!(out.ends_with("removed /g\n"), "{out:?}");
+    }
+
+    /// Off a terminal an activity has no timer and prints only notes.
+    #[test]
+    fn a_plain_activity_prints_notes_only() {
+        let buf = Shared::default();
+        let act = Activity::with(Mode::Human { live: false }, buf.clone());
+        assert!(!act.live());
+        act.spin("removing Game", || {
+            std::thread::sleep(Duration::from_millis(150))
+        });
+        act.task("hashing a.bin", None, Some((1, Some(2))));
+        act.note("  ok a.bin");
+        drop(act);
+        assert_eq!(buf.text(), "  ok a.bin\n");
+    }
+
+    /// `gogo dlc add`'s lay: the files' running count on the status line
+    /// while the runner blocks, after the download's last line; gone before
+    /// the next note.
+    #[tokio::test]
+    async fn the_lay_counts_while_the_runner_blocks() {
+        const MB: u64 = 1 << 20;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let buf = Shared::default();
+        let act = Activity::with(Mode::Human { live: true }, buf.clone());
+        let live = Live::new(&mut rx, &act);
+        let seen = buf.clone();
+        let count = |files, bytes| ProgressEvent::WorkProgress {
+            step: "game files".into(),
+            files: Some(files),
+            files_total: Some(2),
+            bytes: Some(bytes),
+            bytes_total: Some(30 * MB),
+        };
+        let runner = async {
+            tx.send(DepotEvent::Finished {
+                install_dir: PathBuf::from("/c"),
+                fetched_files: 1,
+                fetched_bytes: MB,
+            })
+            .unwrap();
+            live.note("gogo: game files: adding 2 file(s) (30.0 MiB) to /g");
+            assert!(live.work(&count(1, 10 * MB)));
+            std::thread::sleep(Duration::from_millis(250));
+            let mid = seen.text();
+            assert!(
+                mid.contains("game files  1 / 2 files  10.0 MiB / 30.0 MiB"),
+                "{mid:?}"
+            );
+            assert!(live.work(&count(2, 30 * MB)));
+            assert!(live.work(&ProgressEvent::WorkDone {
+                step: "game files".into()
+            }));
+            assert!(!live.work(&ProgressEvent::PrefixStaged));
+            live.note("gogo: snapshot 3 taken (before dlc)");
+        };
+        live.drive(runner).await;
+        drop(act);
+        let out = buf.text();
+        no_text_after_a_status(&out);
+        let fetched = out.find("gogo: fetched 1 file(s)").expect(&out);
+        let adding = out.find("game files: adding").expect(&out);
+        let counted = out.find("1 / 2 files").expect(&out);
+        assert!(fetched < adding && adding < counted, "{out:?}");
+        assert!(
+            out.ends_with("\r\x1b[Kgogo: snapshot 3 taken (before dlc)\n"),
+            "{out:?}"
+        );
     }
 }
