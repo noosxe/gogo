@@ -11,6 +11,8 @@ use std::sync::Arc;
 use chrono::{DateTime, Local, SecondsFormat, Utc};
 use serde::Serialize;
 
+use super::convert::{self, ConvertOptions, ConvertPlan};
+pub use super::convert::{ConvertProgress, Converted};
 use super::game::{self, LinuxState};
 use crate::macapp::doctor::Finding;
 use crate::macapp::error::MacAppError;
@@ -389,25 +391,95 @@ pub(crate) fn refuse_settle(gogid: &str, dirs: &GameDirs) -> Result<(), MacAppEr
     Ok(())
 }
 
-/// Refuse a new snapshot of a game dir that can't take one: no snapshots on
-/// its filesystem (§2.4), or a plain dir on btrfs, which needs converting
-/// (§2.1), which gogo doesn't do yet.
+/// Refuse a game dir that can't be snapshotted as it is: no snapshots on its
+/// filesystem (§2.4), or a plain dir on btrfs, which only `snapshot create`
+/// and `auto on` convert (§2.1).
 pub(crate) fn refuse_unready(
     support: &Support,
     b: &dyn SnapshotBackend,
     root: &Path,
 ) -> Result<(), MacAppError> {
-    if let Support::None(reason) = support {
-        return Err(MacAppError::Apps(format!("no snapshots: {reason}")));
-    }
-    if !b.ready(root)? {
+    if needs_converting(support, b, root)? {
         return Err(MacAppError::Apps(format!(
             "{} isn't a btrfs subvolume (the game was built without snapshots, or before \
-             them): it needs converting to one first, which gogo can't do yet",
+             them): it needs converting to one first; `gogo linux-app snapshot <gogid> auto \
+             on` shows the plan and asks",
             root.display()
         )));
     }
     Ok(())
+}
+
+/// Whether a game dir can take a snapshot as it is (`false`), or is a plain
+/// dir on btrfs that needs converting first (`true`, §2.1). Refused where
+/// there are no snapshots (§2.4).
+fn needs_converting(
+    support: &Support,
+    b: &dyn SnapshotBackend,
+    root: &Path,
+) -> Result<bool, MacAppError> {
+    if let Support::None(reason) = support {
+        return Err(MacAppError::Apps(format!("no snapshots: {reason}")));
+    }
+    if b.ready(root)? {
+        return Ok(false);
+    }
+    if *support == Support::Btrfs {
+        return Ok(true);
+    }
+    Err(MacAppError::Apps(format!(
+        "{} can't be snapshotted as it is",
+        root.display()
+    )))
+}
+
+/// A plain dir that needs converting, where the caller didn't agree to it:
+/// only `snapshot create` and `auto on` convert, after their plan and
+/// question (decision D8).
+fn not_agreed(gogid: &str, root: &Path) -> MacAppError {
+    MacAppError::Apps(format!(
+        "{} isn't a btrfs subvolume (the game was built without snapshots, or before them): \
+         it needs converting to one first; `gogo linux-app snapshot {gogid} auto on` shows \
+         the plan and asks",
+        root.display()
+    ))
+}
+
+/// Convert the game dir when it needs it and `conv` says the user agreed;
+/// refuse when it needs it and they didn't. Under the locks.
+fn convert_if_needed(
+    gogid: &str,
+    dirs: &GameDirs,
+    support: &Support,
+    b: &dyn SnapshotBackend,
+    guard: &Guard,
+    conv: Option<&Convert>,
+) -> Result<Option<Converted>, MacAppError> {
+    if !needs_converting(support, b, &dirs.root)? {
+        return Ok(None);
+    }
+    let Some(conv) = conv else {
+        return Err(not_agreed(gogid, &dirs.root));
+    };
+    let make = |p: &Path| b.make_game_dir(p);
+    let mut progress = |p| (conv.progress)(p);
+    convert::convert_locked(gogid, dirs, &make, guard, &conv.opts, &mut progress).map(Some)
+}
+
+/// The user's yes to converting a plain dir (design 20 §2.1), with its
+/// options and where its progress goes.
+pub struct Convert<'a> {
+    pub opts: ConvertOptions,
+    pub progress: &'a dyn Fn(ConvertProgress),
+}
+
+impl Default for Convert<'_> {
+    fn default() -> Self {
+        Self {
+            opts: ConvertOptions::default(),
+            progress: &|_| {},
+        }
+    }
 }
 
 /// A recovery's lines.
@@ -425,7 +497,7 @@ fn recovered_lines(r: &[Recovered]) -> Vec<String> {
 
 /// Run `f` the way every snapshot change runs (design 20 §5.1): the data
 /// root's lock, then the game's, an unreachable game refused, an interrupted
-/// create or delete settled, then the other refusals (`refusals`: off for
+/// create, delete or conversion settled, then the other refusals (`refusals`: off for
 /// `auto off`, which changes nothing about the game).
 pub(crate) fn locked<T>(
     gogid: &str,
@@ -449,6 +521,11 @@ pub(crate) fn locked<T>(
     if let Some(r) = super::rollback::settle_locked(gogid, dirs, &s, b)? {
         recovered.push(r.line());
     }
+    // So is an interrupted conversion (§2.1), under the same refusals.
+    if convert::pending(gogid, &dirs.root).needs_settling() {
+        refuse_settle(gogid, dirs)?;
+    }
+    recovered.extend(convert::settle_locked(gogid, &dirs.root, &guard)?);
     if refusals {
         refuse(gogid, dirs)?;
     }
@@ -650,7 +727,8 @@ impl ListView {
             (Some(b), None) if self.ready => format!("{b} subvolume"),
             (Some(b), None) => format!(
                 "{b}, but the game dir isn't a subvolume (built without snapshots): \
-                 converting it isn't supported yet"
+                 `gogo linux-app snapshot {} auto on` converts it",
+                self.gogid
             ),
             (None, None) => "none".to_string(),
         }
@@ -808,12 +886,19 @@ pub struct CreatePlan {
     pub game_dir: PathBuf,
     pub label: String,
     pub content: ContentView,
+    /// A plain dir on btrfs: the conversion that comes first (design 20 §2.1).
+    pub convert: Option<ConvertPlan>,
 }
 
 impl CreatePlan {
     pub fn lines(&self) -> Vec<String> {
         let c = &self.content;
-        vec![
+        let mut out = self
+            .convert
+            .as_ref()
+            .map(ConvertPlan::lines)
+            .unwrap_or_default();
+        out.extend([
             format!(
                 "snapshot of {} ({}), labelled \"{}\"",
                 self.game_dir.display(),
@@ -829,7 +914,8 @@ impl CreatePlan {
                 c.dlcs.len(),
                 c.runtime.as_deref().unwrap_or("no runtime recorded")
             ),
-        ]
+        ]);
+        out
     }
 }
 
@@ -840,11 +926,21 @@ pub fn plan_create(
     backends: &Backends,
     label: Option<&str>,
 ) -> Result<CreatePlan, MacAppError> {
+    plan_create_with(gogid, backends, label, &ConvertOptions::default())
+}
+
+/// [`plan_create`] with the conversion's test seams.
+pub fn plan_create_with(
+    gogid: &str,
+    backends: &Backends,
+    label: Option<&str>,
+    conv: &ConvertOptions,
+) -> Result<CreatePlan, MacAppError> {
     let dirs = built(gogid)?;
     refuse(gogid, &dirs)?;
-    let (support, b) = backends.for_dir(&dirs.root);
-    refuse_unready(&support, b, &dirs.root)?;
+    let convert = plan_convert(gogid, &dirs, backends, conv)?;
     Ok(CreatePlan {
+        convert,
         gogid: gogid.to_string(),
         label: label
             .map(str::trim)
@@ -855,37 +951,72 @@ pub fn plan_create(
     })
 }
 
+/// The conversion a plain btrfs dir needs before its first snapshot, or
+/// `None` when it can be snapshotted as it is. Reads only; refuses where there
+/// are no snapshots.
+fn plan_convert(
+    gogid: &str,
+    dirs: &GameDirs,
+    backends: &Backends,
+    conv: &ConvertOptions,
+) -> Result<Option<ConvertPlan>, MacAppError> {
+    let (support, b) = backends.for_dir(&dirs.root);
+    if !needs_converting(&support, b, &dirs.root)? {
+        return Ok(None);
+    }
+    convert::plan(gogid, dirs, conv).map(Some)
+}
+
 /// What `create` did.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Created {
     pub snapshot: SnapshotView,
+    /// The game dir was converted to a subvolume first.
+    pub converted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversion: Option<Converted>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub recovered: Vec<String>,
 }
 
 /// `snapshot <gogid> create`: a `manual` snapshot, under the locks and
-/// refusals of §5.1.
+/// refusals of §5.1. A plain dir that needs converting is refused.
 pub fn create(
     gogid: &str,
     backends: &Backends,
     label: Option<&str>,
 ) -> Result<Created, MacAppError> {
+    create_with(gogid, backends, label, None)
+}
+
+/// [`create`]; with `conv` (the user agreed to the plan), a plain dir on
+/// btrfs is converted to a subvolume first (design 20 §2.1).
+pub fn create_with(
+    gogid: &str,
+    backends: &Backends,
+    label: Option<&str>,
+    conv: Option<&Convert>,
+) -> Result<Created, MacAppError> {
     let dirs = built(gogid)?;
-    let (meta, recovered) = locked(gogid, &dirs, backends, true, |s, g, support, b| {
-        refuse_unready(support, b, &dirs.root)?;
-        s.create(
-            g,
-            NewSnapshot {
-                kind: Kind::Manual,
-                trigger: None,
-                label: label.map(str::to_string),
-                content: content_of(&dirs),
-            },
-        )
-        .map_err(err)
-    })?;
+    let ((meta, conversion), recovered) =
+        locked(gogid, &dirs, backends, true, |s, g, support, b| {
+            let conversion = convert_if_needed(gogid, &dirs, support, b, g, conv)?;
+            s.create(
+                g,
+                NewSnapshot {
+                    kind: Kind::Manual,
+                    trigger: None,
+                    label: label.map(str::to_string),
+                    content: content_of(&dirs),
+                },
+            )
+            .map(|m| (m, conversion))
+            .map_err(err)
+        })?;
     Ok(Created {
+        converted: conversion.is_some(),
+        conversion,
         snapshot: SnapshotView::of(&Entry {
             id: meta.id,
             meta: Some(meta),
@@ -1019,12 +1150,16 @@ pub fn delete(gogid: &str, backends: &Backends, ns: &[u32]) -> Result<Deleted, M
 // — auto —
 
 /// `auto`'s answer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoView {
     pub gogid: u64,
     pub auto: bool,
     pub keep_auto: usize,
+    /// `auto on` converted the game dir to a subvolume first.
+    pub converted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversion: Option<Converted>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub recovered: Vec<String>,
 }
@@ -1037,40 +1172,104 @@ pub fn auto(gogid: &str, backends: &Backends, keep_auto: usize) -> Result<AutoVi
         gogid: gogid.parse().unwrap_or(0),
         auto: store(gogid, &dirs.root, b).settings().map_err(err)?.auto,
         keep_auto,
+        converted: false,
+        conversion: None,
         recovered: Vec::new(),
     })
 }
 
-/// `on`'s refusals, checked before anything (reads only). `off` has none.
-pub fn plan_auto(gogid: &str, backends: &Backends, on: bool) -> Result<(), MacAppError> {
-    let dirs = built(gogid)?;
-    if !on {
-        return Ok(());
+/// What `auto on|off` will do (`--dry-run`'s JSON).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoPlan {
+    pub gogid: String,
+    pub game_dir: PathBuf,
+    pub auto: bool,
+    /// A plain dir on btrfs: the conversion `on` does first.
+    pub convert: Option<ConvertPlan>,
+}
+
+impl AutoPlan {
+    pub fn lines(&self) -> Vec<String> {
+        let mut out = self
+            .convert
+            .as_ref()
+            .map(ConvertPlan::lines)
+            .unwrap_or_default();
+        out.push(format!(
+            "autosnapshot {} for {}",
+            if self.auto { "on" } else { "off" },
+            self.gogid
+        ));
+        out
     }
-    refuse(gogid, &dirs)?;
-    let (support, b) = backends.for_dir(&dirs.root);
-    refuse_unready(&support, b, &dirs.root)
+}
+
+/// `on`'s refusals, checked before anything (reads only), and the conversion
+/// it needs first. `off` has neither.
+pub fn plan_auto(gogid: &str, backends: &Backends, on: bool) -> Result<AutoPlan, MacAppError> {
+    plan_auto_with(gogid, backends, on, &ConvertOptions::default())
+}
+
+/// [`plan_auto`] with the conversion's test seams.
+pub fn plan_auto_with(
+    gogid: &str,
+    backends: &Backends,
+    on: bool,
+    conv: &ConvertOptions,
+) -> Result<AutoPlan, MacAppError> {
+    let dirs = built(gogid)?;
+    let convert = if on {
+        refuse(gogid, &dirs)?;
+        plan_convert(gogid, &dirs, backends, conv)?
+    } else {
+        None
+    };
+    Ok(AutoPlan {
+        gogid: gogid.to_string(),
+        game_dir: dirs.root,
+        auto: on,
+        convert,
+    })
 }
 
 /// `snapshot <gogid> auto on|off`. `on` takes no snapshot (design 20 §8) and
-/// is refused where a snapshot couldn't be taken; `off` keeps the snapshots.
+/// is refused where a snapshot couldn't be taken, or where the game dir needs
+/// converting; `off` keeps the snapshots.
 pub fn set_auto(
     gogid: &str,
     backends: &Backends,
     on: bool,
     keep_auto: usize,
 ) -> Result<AutoView, MacAppError> {
+    set_auto_with(gogid, backends, on, keep_auto, None)
+}
+
+/// [`set_auto`]; with `conv` (the user agreed to the plan), `on` converts a
+/// plain dir on btrfs to a subvolume first (design 20 §2.1).
+pub fn set_auto_with(
+    gogid: &str,
+    backends: &Backends,
+    on: bool,
+    keep_auto: usize,
+    conv: Option<&Convert>,
+) -> Result<AutoView, MacAppError> {
     let dirs = built(gogid)?;
-    let ((), recovered) = locked(gogid, &dirs, backends, on, |s, g, support, b| {
-        if on {
-            refuse_unready(support, b, &dirs.root)?;
-        }
-        s.set_auto(g, on).map_err(err)
+    let (conversion, recovered) = locked(gogid, &dirs, backends, on, |s, g, support, b| {
+        let conversion = if on {
+            convert_if_needed(gogid, &dirs, support, b, g, conv)?
+        } else {
+            None
+        };
+        s.set_auto(g, on).map_err(err)?;
+        Ok(conversion)
     })?;
     Ok(AutoView {
         gogid: gogid.parse().unwrap_or(0),
         auto: on,
         keep_auto,
+        converted: conversion.is_some(),
+        conversion,
         recovered,
     })
 }
@@ -1298,6 +1497,35 @@ pub fn doctor(gogid: &str, root: &Path, backends: &Backends) -> Vec<Finding> {
     }
     .remove_note()
     .unwrap_or(count);
+    let pending = convert::pending(gogid, root);
+    if pending.only_foreign() {
+        out.push(Finding::fail(
+            CHECK,
+            format!(
+                "{} is beside the game dir, and nothing says gogo made it",
+                pending.describe()
+            ),
+            "gogo won't delete it: look at it and remove or rename it by hand; a conversion \
+             is refused while it is there",
+        ));
+    } else if !pending.is_empty() {
+        out.push(Finding::fail(
+            CHECK,
+            format!(
+                "a conversion of the game dir to a subvolume was interrupted: {} is still \
+                 there",
+                pending.describe()
+            ),
+            format!(
+                "`gogo linux-app snapshot {gogid} list` settles it{}",
+                if pending.marker.is_some() {
+                    " (the game is converted; only the cleanup is left)"
+                } else {
+                    " (the game is as it was; the copy is deleted)"
+                }
+            ),
+        ));
+    }
     if !v.reachable {
         out.push(Finding::ok(
             CHECK,
@@ -1316,19 +1544,26 @@ pub fn doctor(gogid: &str, root: &Path, backends: &Backends) -> Vec<Finding> {
                 root.display()
             ),
             format!(
-                "`gogo linux-app snapshot {gogid} auto on` will convert it once gogo can; \
-                 until then `auto off` silences this"
+                "`gogo linux-app snapshot {gogid} auto on` converts it again; `auto off` \
+                 silences this"
             ),
         )),
-        (None, false, false, false) => out.push(Finding::ok(
-            CHECK,
-            "built before snapshots: a plain dir, which needs converting to a subvolume \
-             before it can be snapshotted (not supported yet)",
-        )),
-        (None, false, false, true) => out.push(Finding::ok(
-            CHECK,
-            "off: built without snapshots (a plain dir)",
-        )),
+        (None, false, false, false) => out.push(
+            Finding::ok(
+                CHECK,
+                "built before snapshots: a plain dir, which needs converting to a subvolume \
+                 before it can be snapshotted",
+            )
+            .hint(format!(
+                "`gogo linux-app snapshot {gogid} auto on` converts it (a reflink copy, \
+                 almost no space) and turns autosnapshot on"
+            )),
+        ),
+        (None, false, false, true) => out.push(
+            Finding::ok(CHECK, "off: built without snapshots (a plain dir)").hint(format!(
+                "`gogo linux-app snapshot {gogid} auto on` converts it and turns autosnapshot on"
+            )),
+        ),
         (None, true, auto, _) => {
             let f = Finding::ok(
                 CHECK,

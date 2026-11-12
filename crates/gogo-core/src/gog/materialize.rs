@@ -191,6 +191,8 @@ pub fn materialize_tree_filtered(
         report: MaterializeReport::default(),
         skipped: Vec::new(),
         xattrs_lost: 0,
+        copied: Vec::new(),
+        copy_budget: None,
         filter: Some((src, keep)),
     };
     // The root itself is followed (it may be a symlinked cache dir); below
@@ -240,6 +242,10 @@ pub struct ExactCopy {
     pub skipped: Vec<PathBuf>,
     /// `user.*` extended attributes the destination wouldn't take.
     pub xattrs_lost: u64,
+    /// The source files written as byte copies rather than clones (a
+    /// clone shares the source's extents, so only these can differ in
+    /// their bytes).
+    pub copied: Vec<PathBuf>,
 }
 
 /// [`materialize_tree`] for a tree that is someone's only copy (a game being
@@ -261,20 +267,60 @@ pub fn copy_exact(
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent)?;
     }
+    fs::create_dir(dst)?;
+    copy_exact_into(
+        src,
+        dst,
+        IntoOptions {
+            reflink: Reflink::Try,
+            copy_budget: None,
+        },
+        on_file,
+    )
+}
+
+/// How [`copy_exact_into`] copies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IntoOptions {
+    pub reflink: Reflink,
+    /// The most the byte copies (FICLONE refused) may write; one that would
+    /// go past it fails with `StorageFull` before it is written.
+    pub copy_budget: Option<u64>,
+}
+
+/// [`copy_exact`] into `dst`, an empty directory that is there already (a
+/// btrfs subvolume made for the copy, design 20 §2.1). `dst` takes `src`'s
+/// mode, mtime and `user.*` attributes like every directory below it.
+pub fn copy_exact_into(
+    src: &Path,
+    dst: &Path,
+    how: IntoOptions,
+    on_file: &mut dyn FnMut(&Path, u64) -> io::Result<()>,
+) -> io::Result<ExactCopy> {
+    if fs::read_dir(dst)?.next().is_some() {
+        return Err(io::Error::other(format!(
+            "destination {} isn't empty",
+            dst.display()
+        )));
+    }
     let mut walk = Walk {
-        mode: Reflink::Try,
+        mode: how.reflink,
         exact: true,
         on_file,
         report: MaterializeReport::default(),
         skipped: Vec::new(),
         xattrs_lost: 0,
+        copied: Vec::new(),
+        copy_budget: how.copy_budget,
         filter: None,
     };
-    copy_dir(src, dst, &fs::metadata(src)?, &mut walk, true)?;
+    walk.report.dirs += 1;
+    copy_dir_contents(src, dst, &fs::metadata(src)?, &mut walk, true)?;
     Ok(ExactCopy {
         report: walk.report,
         skipped: walk.skipped,
         xattrs_lost: walk.xattrs_lost,
+        copied: walk.copied,
     })
 }
 
@@ -287,6 +333,10 @@ struct Walk<'a> {
     report: MaterializeReport,
     skipped: Vec<PathBuf>,
     xattrs_lost: u64,
+    /// [`ExactCopy::copied`].
+    copied: Vec<PathBuf>,
+    /// [`IntoOptions::copy_budget`].
+    copy_budget: Option<u64>,
     /// The source root and what to take of it ([`materialize_tree_filtered`]).
     filter: Option<(&'a Path, &'a Keep<'a>)>,
 }
@@ -314,6 +364,17 @@ fn copy_dir(
 ) -> io::Result<bool> {
     fs::create_dir(dst)?;
     walk.report.dirs += 1;
+    copy_dir_contents(src, dst, meta, walk, always)
+}
+
+/// [`copy_dir`] into `dst`, which is there already.
+fn copy_dir_contents(
+    src: &Path,
+    dst: &Path,
+    meta: &fs::Metadata,
+    walk: &mut Walk,
+    always: bool,
+) -> io::Result<bool> {
     let (mut held, mut kept) = (false, false);
     for entry in fs::read_dir(src)? {
         let entry = entry?;
@@ -375,9 +436,25 @@ fn copy_file(src: &Path, dst: &Path, meta: &fs::Metadata, walk: &mut Walk) -> io
         // A failed FICLONE leaves `d` untouched (the ioctl is all or
         // nothing). `io::copy` uses copy_file_range, which may still share
         // extents (NFS server-side copy); the report counts it as a copy.
+        if let Some(budget) = walk.copy_budget
+            && walk.report.copied_bytes + meta.len() > budget
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::StorageFull,
+                format!(
+                    "reflinks didn't work for {}, and copying it would take the byte \
+                     copies past the {} there is room for",
+                    src.display(),
+                    crate::fmt::human_size(budget)
+                ),
+            ));
+        }
         io::copy(&mut s, &mut d)?;
         walk.report.copied_files += 1;
         walk.report.copied_bytes += meta.len();
+        if walk.exact {
+            walk.copied.push(src.to_path_buf());
+        }
     }
     if walk.exact {
         walk.xattrs_lost += copy_xattrs(src, dst)?;
@@ -399,11 +476,62 @@ pub fn verify_exact(
     xattrs_lost: bool,
     on_file: &mut dyn FnMut(&Path, u64) -> io::Result<()>,
 ) -> io::Result<()> {
+    verify_tree(
+        src,
+        dst,
+        &Verify {
+            xattrs_lost,
+            modes: false,
+            bytes_of: None,
+            mtimes: false,
+            selinux: false,
+        },
+        on_file,
+    )
+}
+
+/// What [`verify_tree`] compares beyond names, kinds, sizes and link targets.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Verify<'a> {
+    /// Some `user.*` attributes didn't fit the destination: don't compare them.
+    pub xattrs_lost: bool,
+    /// Compare permission bits (`mode & 0o7777`) of files and directories:
+    /// for a copy on the same filesystem, which keeps them all.
+    pub modes: bool,
+    /// Compare the bytes only of these source files (the ones [`copy_exact`]
+    /// wrote as copies); `None`: of every file.
+    pub bytes_of: Option<&'a std::collections::HashSet<PathBuf>>,
+    /// Compare the mtimes of files and directories, which the copy keeps: a
+    /// file rewritten in place during the copy shows up here.
+    pub mtimes: bool,
+    /// Compare `security.selinux` labels, which the copy doesn't set: a new
+    /// file takes its label from the policy, and it must come out the same.
+    pub selinux: bool,
+}
+
+/// [`verify_exact`] with the comparisons `how` names. `on_file` hears each
+/// file, whether or not its bytes were read.
+pub fn verify_tree(
+    src: &Path,
+    dst: &Path,
+    how: &Verify,
+    on_file: &mut dyn FnMut(&Path, u64) -> io::Result<()>,
+) -> io::Result<()> {
     let differ = |p: &Path, what: &str| {
         io::Error::other(format!("{} differs in the copy: {what}", p.display()))
     };
-    if !xattrs_lost && user_xattrs(src)? != user_xattrs(dst)? {
+    if !how.xattrs_lost && user_xattrs(src)? != user_xattrs(dst)? {
         return Err(differ(src, "extended attributes"));
+    }
+    let (sm, dm) = (fs::symlink_metadata(src)?, fs::symlink_metadata(dst)?);
+    if how.modes && mode_of(&sm) != mode_of(&dm) {
+        return Err(differ(src, "another mode"));
+    }
+    if how.mtimes && sm.modified()? != dm.modified()? {
+        return Err(differ(src, "another mtime"));
+    }
+    if how.selinux && selinux_label(src)? != selinux_label(dst)? {
+        return Err(differ(src, "another SELinux label"));
     }
     let mut names = std::collections::BTreeSet::new();
     for entry in fs::read_dir(src)? {
@@ -422,20 +550,30 @@ pub fn verify_exact(
         if d.file_type() != kind {
             return Err(differ(&from, "another kind of file"));
         }
+        if how.selinux && !kind.is_dir() && selinux_label(&from)? != selinux_label(&to)? {
+            return Err(differ(&from, "another SELinux label"));
+        }
         if kind.is_symlink() {
             if fs::read_link(&from)? != fs::read_link(&to)? {
                 return Err(differ(&from, "another link target"));
             }
         } else if kind.is_dir() {
-            verify_exact(&from, &to, xattrs_lost, on_file)?;
+            verify_tree(&from, &to, how, on_file)?;
         } else {
             if m.len() != d.len() {
                 return Err(differ(&from, "another size"));
             }
-            if !same_bytes(&from, &to)? {
+            if how.modes && mode_of(&m) != mode_of(&d) {
+                return Err(differ(&from, "another mode"));
+            }
+            if how.mtimes && m.modified()? != d.modified()? {
+                return Err(differ(&from, "another mtime"));
+            }
+            let compare = how.bytes_of.is_none_or(|set| set.contains(&from));
+            if compare && !same_bytes(&from, &to)? {
                 return Err(differ(&from, "other bytes"));
             }
-            if !xattrs_lost && user_xattrs(&from)? != user_xattrs(&to)? {
+            if !how.xattrs_lost && user_xattrs(&from)? != user_xattrs(&to)? {
                 return Err(differ(&from, "extended attributes"));
             }
             on_file(&from, m.len())?;
@@ -448,6 +586,31 @@ pub fn verify_exact(
         }
     }
     Ok(())
+}
+
+/// `path`'s `security.selinux` label; `None` where it has none.
+#[cfg(target_os = "linux")]
+fn selinux_label(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    use rustix::io::Errno;
+    let size = match rustix::fs::lgetxattr_query(path, c"security.selinux") {
+        Ok(n) => n,
+        Err(e) if e == Errno::NODATA || e == Errno::OPNOTSUPP => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let mut value = vec![0u8; size];
+    let n = rustix::fs::lgetxattr(path, c"security.selinux", &mut value[..])?;
+    value.truncate(n);
+    Ok(Some(value))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn selinux_label(_path: &Path) -> io::Result<Option<Vec<u8>>> {
+    Ok(None)
+}
+
+fn mode_of(m: &fs::Metadata) -> u32 {
+    use std::os::unix::fs::PermissionsExt as _;
+    m.permissions().mode() & 0o7777
 }
 
 fn same_bytes(a: &Path, b: &Path) -> io::Result<bool> {
@@ -617,6 +780,68 @@ pub(crate) fn existing_ancestor(path: &Path) -> Option<&Path> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verify_tree_catches_an_mtime_a_mode_and_skips_bytes_it_isnt_asked_for() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));
+        fs::create_dir_all(src.join("d")).unwrap();
+        fs::write(src.join("d/a"), "aaaa").unwrap();
+        fs::create_dir(&dst).unwrap();
+        let how = IntoOptions {
+            reflink: Reflink::Never,
+            copy_budget: None,
+        };
+        let copied = copy_exact_into(&src, &dst, how, &mut |_, _| Ok(())).unwrap();
+        assert_eq!(copied.copied, [src.join("d/a")]);
+        let none = std::collections::HashSet::new();
+        let strict = Verify {
+            modes: true,
+            mtimes: true,
+            bytes_of: Some(&none),
+            ..Verify::default()
+        };
+        verify_tree(&src, &dst, &strict, &mut |_, _| Ok(())).unwrap();
+        // Same size, other bytes, mtime kept: only a byte compare sees it.
+        let t = fs::metadata(dst.join("d/a")).unwrap().modified().unwrap();
+        fs::write(dst.join("d/a"), "bbbb").unwrap();
+        File::options()
+            .write(true)
+            .open(dst.join("d/a"))
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+        verify_tree(&src, &dst, &strict, &mut |_, _| Ok(())).unwrap();
+        // An in-place rewrite moves the mtime.
+        fs::write(dst.join("d/a"), "cccc").unwrap();
+        let e = verify_tree(&src, &dst, &strict, &mut |_, _| Ok(())).unwrap_err();
+        assert!(e.to_string().contains("another mtime"), "{e}");
+        File::options()
+            .write(true)
+            .open(dst.join("d/a"))
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+        fs::set_permissions(dst.join("d/a"), fs::Permissions::from_mode(0o600)).unwrap();
+        let e = verify_tree(&src, &dst, &strict, &mut |_, _| Ok(())).unwrap_err();
+        assert!(e.to_string().contains("another mode"), "{e}");
+    }
+
+    #[test]
+    fn a_copy_budget_stops_byte_copies_before_they_are_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (src, dst) = (tmp.path().join("src"), tmp.path().join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("a"), vec![1u8; 4096]).unwrap();
+        fs::create_dir(&dst).unwrap();
+        let how = IntoOptions {
+            reflink: Reflink::Never,
+            copy_budget: Some(1000),
+        };
+        let e = copy_exact_into(&src, &dst, how, &mut |_, _| Ok(())).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::StorageFull);
+    }
 
     fn exact_pair(root: &Path) -> (PathBuf, PathBuf) {
         let (src, dst) = (root.join("src"), root.join("dst"));

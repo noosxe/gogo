@@ -8249,7 +8249,8 @@ mod snapshots {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
-    use super::{ID, LinuxAppOptions, World, build, quiet};
+    use super::{ID, LinuxAppOptions, World, build, build_with, quiet};
+    use gogo::linuxapp::convert::{self, ConvertOptions, ConvertStep};
     use gogo::linuxapp::snapshots::{self as snap, Backends, BuildSnapshots, SnapshotOptions};
     use gogo::macapp::apps;
     use gogo::snapshot::backend::{self, SnapshotBackend};
@@ -8736,6 +8737,688 @@ mod snapshots {
         let removed = apps::remove(&a, false).unwrap();
         assert_eq!(removed.snapshots, 1);
         assert!(!root.exists() && !one.exists());
+        drop(guard);
+    }
+
+    // — converting a plain dir (design 20 §2.1, #406) —
+
+    /// A fake where only the dirs it made are subvolumes, and the backends
+    /// around it.
+    fn strict() -> (Arc<Fake>, Backends) {
+        let f = Arc::new(Fake::subvolumes_only());
+        (f.clone(), Backends::fixed(f))
+    }
+
+    fn agreed(opts: ConvertOptions) -> snap::Convert<'static> {
+        snap::Convert {
+            opts,
+            ..Default::default()
+        }
+    }
+
+    /// What a conversion must keep: a big file with Wine's attribute, odd
+    /// modes, a link, a dangling link and a read-only dir.
+    pub(super) fn oddities(root: &Path) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let d = root.join("prefix/drive_c/odd");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("big.bin"), vec![7u8; 1 << 20]).unwrap();
+        let _ = rustix::fs::lsetxattr(
+            d.join("big.bin"),
+            "user.wine.sd",
+            b"\x01\x00\x04\x80",
+            rustix::fs::XattrFlags::empty(),
+        );
+        std::fs::write(d.join("secret"), "s").unwrap();
+        std::fs::set_permissions(d.join("secret"), std::fs::Permissions::from_mode(0o640)).unwrap();
+        std::fs::write(d.join("tool.sh"), "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(d.join("tool.sh"), std::fs::Permissions::from_mode(0o750))
+            .unwrap();
+        std::os::unix::fs::symlink("big.bin", d.join("link")).unwrap();
+        std::os::unix::fs::symlink("/nonexistent/target", d.join("dangling")).unwrap();
+        let ro = d.join("ro");
+        std::fs::create_dir(&ro).unwrap();
+        std::fs::write(ro.join("inside"), "x").unwrap();
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+    }
+
+    /// Every dir under `dir` writable again, so the world's cleanup can go.
+    pub(super) fn unlock(dir: &Path) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let Ok(m) = std::fs::symlink_metadata(dir) else {
+            return;
+        };
+        if !m.is_dir() {
+            return;
+        }
+        let _ = std::fs::set_permissions(
+            dir,
+            std::fs::Permissions::from_mode(m.permissions().mode() | 0o700),
+        );
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            unlock(&e.path());
+        }
+    }
+
+    /// Every entry below `root` with its kind, mode, size, mtime, link
+    /// target and `user.wine.sd`, sorted: what a conversion must keep. The
+    /// root itself isn't listed (the marker comes and goes in it).
+    pub(super) fn tree_of(root: &Path) -> Vec<String> {
+        use std::os::unix::fs::MetadataExt as _;
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).unwrap() {
+                let p = e.unwrap().path();
+                let m = std::fs::symlink_metadata(&p).unwrap();
+                let rel = p.strip_prefix(root).unwrap().display().to_string();
+                let link = std::fs::read_link(&p)
+                    .map(|t| t.display().to_string())
+                    .unwrap_or_default();
+                let mut sd = [0u8; 64];
+                let sd = rustix::fs::lgetxattr(&p, "user.wine.sd", &mut sd[..])
+                    .map(|n| sd[..n].to_vec())
+                    .unwrap_or_default();
+                let kind = if m.is_symlink() {
+                    "l"
+                } else if m.is_dir() {
+                    "d"
+                } else {
+                    "f"
+                };
+                let size = if m.is_dir() { 0 } else { m.len() };
+                out.push(format!(
+                    "{rel} {kind} {:o} {size} {} {link} {sd:?}",
+                    m.mode() & 0o7777,
+                    if m.is_symlink() { 0 } else { m.mtime() }
+                ));
+                if m.is_dir() {
+                    stack.push(p);
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    fn assert_settled(w: &World, root: &Path) {
+        assert!(
+            convert::pending(ID, root).is_empty(),
+            "{:?}",
+            convert::pending(ID, root)
+        );
+        assert!(!root.join(convert::MARKER).exists());
+        assert!(!convert::staging_of(root, ID).unwrap().exists());
+        assert!(!meta_dir(w).join("convert.json").exists());
+    }
+
+    #[test]
+    fn a_plain_dir_is_converted_then_snapshotted_and_still_launches() {
+        let Some(w) = World::launcher("snap-convert", false) else {
+            return;
+        };
+        let root = w.game();
+        oddities(&root);
+        let before = tree_of(&root);
+        let (f, b) = strict();
+
+        // Never without the user's yes (D8).
+        let e = snap::create(ID, &b, None).unwrap_err().to_string();
+        assert!(e.contains("needs converting"), "{e}");
+        assert!(snap::set_auto(ID, &b, true, 5).is_err());
+        assert!(!f.ready(&root).unwrap());
+
+        let plan = snap::plan_create(ID, &b, Some("first")).unwrap();
+        let conv = plan.convert.as_ref().expect("a conversion in the plan");
+        assert_eq!(conv.staging, convert::staging_of(&root, ID).unwrap());
+        let text = plan.lines().join("\n");
+        assert!(text.contains("becomes a btrfs subvolume first"), "{text}");
+        assert!(
+            text.contains("drops out of snapshots of the subvolume around it"),
+            "{text}"
+        );
+        assert!(
+            text.contains("costs almost no space") || text.contains("a full copy"),
+            "{text}"
+        );
+        let json = serde_json::to_value(&plan).unwrap();
+        assert!(
+            json["convert"]["bytes"].as_u64().unwrap() > 1 << 20,
+            "{json}"
+        );
+
+        let seen = std::cell::RefCell::new(Vec::new());
+        let progress = |p| seen.borrow_mut().push(p);
+        let out = snap::create_with(
+            ID,
+            &b,
+            Some("first"),
+            Some(&snap::Convert {
+                progress: &progress,
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        assert!(out.converted);
+        assert_eq!(out.snapshot.id, 1);
+        assert!(f.ready(&root).unwrap(), "the game dir is the new subvolume");
+        assert_settled(&w, &root);
+        assert_eq!(tree_of(&root), before);
+        assert!(matches!(
+            seen.borrow().last(),
+            Some(snap::ConvertProgress::Verifying { .. })
+        ));
+        let json = serde_json::to_value(&out).unwrap();
+        assert_eq!(json["converted"], true, "{json}");
+        assert!(json["conversion"]["seconds"].as_f64().is_some(), "{json}");
+        // The snapshot is of the converted dir.
+        assert!(
+            snap_dir(&root, 1)
+                .join("prefix/drive_c/odd/big.bin")
+                .is_file()
+        );
+
+        // A second create converts nothing.
+        let again = snap::create(ID, &b, None).unwrap();
+        assert!(!again.converted && again.conversion.is_none());
+
+        let runs = w.game_runs();
+        let launched = w.launch(&[], &[]);
+        assert_eq!(launched.status.code(), Some(0), "{launched:?}");
+        assert_eq!(w.game_runs(), runs + 1);
+        unlock(&w.root);
+    }
+
+    #[test]
+    fn auto_on_converts_and_takes_no_snapshot() {
+        let w = World::new("snap-convert-auto", &["d3d9.dll"]);
+        let root = build_with(&w.opts()).dirs.root;
+        let (f, b) = strict();
+        let plan = snap::plan_auto(ID, &b, true).unwrap();
+        assert!(plan.convert.is_some());
+        assert!(plan.lines().last().unwrap().contains("autosnapshot on"));
+        assert!(snap::plan_auto(ID, &b, false).unwrap().convert.is_none());
+        let out =
+            snap::set_auto_with(ID, &b, true, 5, Some(&agreed(ConvertOptions::default()))).unwrap();
+        assert!(out.converted && out.auto);
+        assert!(f.ready(&root).unwrap());
+        let settings = std::fs::read_to_string(meta_dir(&w).join("settings.toml")).unwrap();
+        assert!(settings.contains("auto = true"), "{settings}");
+        assert!(snap::list(ID, &b, 5, false).unwrap().snapshots.is_empty());
+        assert_settled(&w, &root);
+    }
+
+    #[test]
+    fn a_conversion_stopped_at_any_step_leaves_the_game_old_or_new() {
+        use ConvertStep::*;
+        let Some(w) = World::launcher("snap-convert-crash", false) else {
+            return;
+        };
+        let root = w.game();
+        oddities(&root);
+        let steps = [
+            Journal,
+            Subvolume,
+            Copied,
+            Verified,
+            Marked,
+            Exchanged,
+            MarkerRemoved,
+            OldTreeDeleted,
+        ];
+        for (i, step) in steps.into_iter().enumerate() {
+            let before = tree_of(&root);
+            let (f, b) = strict();
+            let conv = agreed(ConvertOptions {
+                fail_at: Some(step),
+                ..Default::default()
+            });
+            let e = snap::create_with(ID, &b, None, Some(&conv)).unwrap_err();
+            assert!(e.to_string().contains("injected stop"), "{step:?}: {e}");
+            let p = convert::pending(ID, &root);
+            assert!(p.journal.is_some(), "{step:?}: {p:?}");
+            let committed = matches!(step, Exchanged | MarkerRemoved | OldTreeDeleted);
+            assert_eq!(p.marker.is_some(), step == Exchanged, "{step:?}: {p:?}");
+            if step == Exchanged {
+                // The launcher (v15+) refuses while the conversion's own marker
+                // is in the game dir.
+                assert_eq!(convert::MARKER, backend::CONVERTED_MARKER);
+                let runs = w.game_runs();
+                let refused = w.launch(&[], &[]);
+                assert_eq!(refused.status.code(), Some(127), "{refused:?}");
+                assert_eq!(w.game_runs(), runs);
+                assert!(
+                    w.launch_log()
+                        .contains("a conversion for snapshots isn't finished: not launching"),
+                    "{}",
+                    w.launch_log()
+                );
+            }
+            // `doctor` fails, naming the command that settles it.
+            let found = snap::doctor(ID, &root, &b);
+            let fail = found
+                .iter()
+                .find(|f| f.level == gogo::macapp::doctor::Level::Fail)
+                .unwrap_or_else(|| panic!("{step:?}: {found:?}"));
+            assert!(
+                fail.hint
+                    .as_deref()
+                    .unwrap()
+                    .contains(&format!("snapshot {ID} list")),
+                "{fail:?}"
+            );
+            // Settled by the next `snapshot` command, or directly.
+            if i % 2 == 0 {
+                let v = snap::list(ID, &b, 5, false).unwrap();
+                assert!(
+                    v.notes.iter().any(|n| n.contains("interrupted conversion")),
+                    "{step:?}: {:?}",
+                    v.notes
+                );
+            } else {
+                let lines = convert::settle(ID).unwrap();
+                let word = if step == Exchanged { "finished" } else { "" };
+                assert!(lines[0].contains(word), "{lines:?}");
+            }
+            assert_settled(&w, &root);
+            assert_eq!(f.ready(&root).unwrap(), committed, "{step:?}");
+            assert_eq!(tree_of(&root), before, "{step:?}");
+            assert!(snap::list(ID, &b, 5, false).unwrap().snapshots.is_empty());
+            let runs = w.game_runs();
+            let launched = w.launch(&[], &[]);
+            assert_eq!(launched.status.code(), Some(0), "{step:?}: {launched:?}");
+            assert_eq!(w.game_runs(), runs + 1, "{step:?}");
+        }
+        // And a rerun converts.
+        let (f, b) = strict();
+        let out =
+            snap::create_with(ID, &b, None, Some(&agreed(ConvertOptions::default()))).unwrap();
+        assert!(out.converted && f.ready(&root).unwrap());
+        unlock(&w.root);
+    }
+
+    #[test]
+    fn a_conversion_is_refused_or_undone_and_the_game_kept() {
+        let w = World::new("snap-convert-refuse", &["d3d9.dll"]);
+        let root = build_with(&w.opts()).dirs.root;
+        oddities(&root);
+        let before = tree_of(&root);
+        let (f, b) = strict();
+
+        // A copy that wouldn't fit is refused in the plan, as `move`'s is.
+        let tight = ConvertOptions {
+            assume_copy: true,
+            free_bytes: Some(1024),
+            ..Default::default()
+        };
+        let e = snap::plan_create_with(ID, &b, None, &tight).unwrap_err();
+        assert!(e.to_string().contains("needs a full copy"), "{e}");
+        let e = snap::create_with(ID, &b, None, Some(&agreed(tight))).unwrap_err();
+        assert!(e.to_string().contains("needs a full copy"), "{e}");
+        let roomy = ConvertOptions {
+            assume_copy: true,
+            free_bytes: Some(u64::MAX),
+            ..Default::default()
+        };
+        let plan = snap::plan_create_with(ID, &b, None, &roomy).unwrap();
+        assert!(plan.lines().join("\n").contains("a full copy, which needs"));
+
+        // A copy that doesn't match is deleted, and the game stays as it was.
+        let bad = ConvertOptions {
+            corrupt_copy: true,
+            ..Default::default()
+        };
+        let e = snap::create_with(ID, &b, None, Some(&agreed(bad))).unwrap_err();
+        assert!(e.to_string().contains("doesn't match"), "{e}");
+        assert!(e.to_string().contains("another mode"), "{e}");
+        assert_settled(&w, &root);
+        assert!(!f.ready(&root).unwrap());
+        assert_eq!(tree_of(&root), before);
+
+        // The game running: refused before anything.
+        let me = std::process::id().to_string();
+        let launchers = root.join(".launchers");
+        std::fs::create_dir_all(&launchers).unwrap();
+        std::fs::write(launchers.join(&me), format!("{}\n", my_start())).unwrap();
+        let e = snap::plan_create(ID, &b, None).unwrap_err();
+        assert!(e.to_string().contains("is running"), "{e}");
+        let e =
+            snap::set_auto_with(ID, &b, true, 5, Some(&agreed(Default::default()))).unwrap_err();
+        assert!(e.to_string().contains("is running"), "{e}");
+        std::fs::remove_dir_all(&launchers).unwrap();
+        assert!(convert::pending(ID, &root).is_empty());
+
+        // A symlinked game dir isn't converted.
+        let real = w.root.join("elsewhere");
+        std::fs::rename(&root, &real).unwrap();
+        std::os::unix::fs::symlink(&real, &root).unwrap();
+        let e = snap::plan_create(ID, &b, None).unwrap_err();
+        assert!(e.to_string().contains("is a symlink"), "{e}");
+        std::fs::remove_file(&root).unwrap();
+        std::fs::rename(&real, &root).unwrap();
+        unlock(&w.root);
+    }
+
+    #[test]
+    fn the_plan_refuses_what_the_copy_would_walk_into_or_lose() {
+        let w = World::new("snap-convert-scan", &["d3d9.dll"]);
+        let root = build_with(&w.opts()).dirs.root;
+        let (f, b) = strict();
+        let refused = |opts: ConvertOptions, why: &str| {
+            let e = snap::plan_create_with(ID, &b, None, &opts)
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains(why), "{why}: {e}");
+            assert!(convert::pending(ID, &root).is_empty());
+        };
+        // Another filesystem or a nested subvolume inside: refused, named.
+        let nested = root.join("prefix/drive_c/mnt");
+        std::fs::create_dir_all(&nested).unwrap();
+        refused(
+            ConvertOptions {
+                other_device_at: Some(nested.clone()),
+                ..Default::default()
+            },
+            &format!("{} is on another filesystem", nested.display()),
+        );
+        // ... under the locks too.
+        let e = snap::create_with(
+            ID,
+            &b,
+            None,
+            Some(&agreed(ConvertOptions {
+                other_device_at: Some(nested.clone()),
+                ..Default::default()
+            })),
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("on another filesystem"), "{e}");
+        assert!(!convert::staging_of(&root, ID).unwrap().exists());
+        // A hard link.
+        let a = root.join("prefix/drive_c/a.dat");
+        std::fs::write(&a, "a").unwrap();
+        std::fs::hard_link(&a, root.join("prefix/drive_c/b.dat")).unwrap();
+        refused(ConvertOptions::default(), "a hard link (2 names)");
+        std::fs::remove_file(root.join("prefix/drive_c/b.dat")).unwrap();
+        // An ACL (`system.posix_acl_access`), where the filesystem takes one:
+        // user::rw-, user:<me>:r--, group::r--, mask::r--, other::r--.
+        let uid = std::os::unix::fs::MetadataExt::uid(&std::fs::metadata(&root).unwrap());
+        let mut acl = 2u32.to_le_bytes().to_vec();
+        for (tag, perm, id) in [
+            (1u16, 6u16, u32::MAX),
+            (2, 4, uid),
+            (4, 4, u32::MAX),
+            (0x10, 4, u32::MAX),
+            (0x20, 4, u32::MAX),
+        ] {
+            acl.extend(tag.to_le_bytes());
+            acl.extend(perm.to_le_bytes());
+            acl.extend(id.to_le_bytes());
+        }
+        if rustix::fs::lsetxattr(
+            &a,
+            "system.posix_acl_access",
+            &acl,
+            rustix::fs::XattrFlags::empty(),
+        )
+        .is_ok()
+        {
+            refused(ConvertOptions::default(), "system.posix_acl_access");
+        }
+        std::fs::remove_file(&a).unwrap();
+        // A `chattr` flag (+A, which an owner may set), where it is taken.
+        let flagged = root.join("prefix/drive_c/noatime.dat");
+        std::fs::write(&flagged, "x").unwrap();
+        let fd = std::fs::File::open(&flagged).unwrap();
+        if rustix::fs::ioctl_setflags(&fd, rustix::fs::IFlags::NOATIME).is_ok() {
+            refused(ConvertOptions::default(), "chattr +A");
+        }
+        drop(fd);
+        std::fs::remove_file(&flagged).unwrap();
+        // A FIFO is named in the plan, before anything, and isn't copied.
+        let fifo = root.join("prefix/drive_c/pipe");
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            &fifo,
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::from_raw_mode(0o600),
+            0,
+        )
+        .unwrap();
+        let plan = snap::plan_create(ID, &b, None).unwrap();
+        let text = plan.lines().join("\n");
+        assert!(
+            text.contains(&format!(
+                "1 socket(s) or FIFO(s) aren't copied and go with the old dir: {}",
+                fifo.display()
+            )),
+            "{text}"
+        );
+        let out =
+            snap::create_with(ID, &b, None, Some(&agreed(ConvertOptions::default()))).unwrap();
+        assert!(out.converted && f.ready(&root).unwrap());
+        assert!(fifo.symlink_metadata().is_err());
+        assert_settled(&w, &root);
+    }
+
+    #[test]
+    fn byte_copies_stop_before_the_free_space_runs_out() {
+        let w = World::new("snap-convert-budget", &["d3d9.dll"]);
+        let root = build_with(&w.opts()).dirs.root;
+        let before = tree_of(&root);
+        let (f, b) = strict();
+        // The plan expects reflinks; the copy gets none, and 256 MiB free is
+        // all margin.
+        let conv = agreed(ConvertOptions {
+            assume_reflink: true,
+            no_reflink: true,
+            free_bytes: Some(256 << 20),
+            ..Default::default()
+        });
+        let e = snap::create_with(ID, &b, None, Some(&conv)).unwrap_err();
+        assert!(e.to_string().contains("there is room for"), "{e}");
+        assert!(e.to_string().contains("the game wasn't touched"), "{e}");
+        assert_settled(&w, &root);
+        assert!(!f.ready(&root).unwrap());
+        assert_eq!(tree_of(&root), before);
+    }
+
+    #[test]
+    fn a_staging_dir_gogo_cant_tell_is_its_own_is_left_alone() {
+        let w = World::new("snap-convert-foreign", &["d3d9.dll"]);
+        let root = build_with(&w.opts()).dirs.root;
+        let (_, b) = strict();
+        let staging = convert::staging_of(&root, ID).unwrap();
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(staging.join("mine.txt"), "someone's").unwrap();
+        let p = convert::pending(ID, &root);
+        assert!(p.foreign && p.only_foreign(), "{p:?}");
+        // Settling leaves it.
+        assert!(convert::settle(ID).unwrap().is_empty());
+        snap::list(ID, &b, 5, false).unwrap();
+        assert!(staging.join("mine.txt").is_file());
+        // `doctor` says so, and a conversion is refused while it is there.
+        let found = snap::doctor(ID, &root, &b);
+        assert!(
+            found
+                .iter()
+                .any(|f| f.level == gogo::macapp::doctor::Level::Fail
+                    && f.message.contains("nothing says gogo made it")),
+            "{found:?}"
+        );
+        let e = snap::plan_create(ID, &b, None).unwrap_err();
+        assert!(e.to_string().contains("is in the way"), "{e}");
+        // A journal of its own makes it gogo's: then it goes.
+        let conv = agreed(ConvertOptions {
+            fail_at: Some(ConvertStep::Copied),
+            ..Default::default()
+        });
+        std::fs::remove_dir_all(&staging).unwrap();
+        assert!(snap::create_with(ID, &b, None, Some(&conv)).is_err());
+        assert!(!convert::pending(ID, &root).foreign);
+        convert::settle(ID).unwrap();
+        assert_settled(&w, &root);
+    }
+
+    #[test]
+    fn other_commands_settle_a_conversion_and_never_start_one() {
+        let w = World::new("snap-convert-settle", &["d3d9.dll"]);
+        let root = build_with(&w.opts()).dirs.root;
+        let stopped = |b: &Backends, at| {
+            let conv = agreed(ConvertOptions {
+                fail_at: Some(at),
+                ..Default::default()
+            });
+            assert!(snap::create_with(ID, b, None, Some(&conv)).is_err());
+            assert!(!convert::pending(ID, &root).is_empty());
+        };
+        // A rebuild settles it, and converts nothing (D8).
+        let (f, b) = strict();
+        stopped(&b, ConvertStep::Copied);
+        build_with(&w.opts());
+        assert_settled(&w, &root);
+        assert!(!f.ready(&root).unwrap());
+        // So does a move, which then moves the converted game.
+        let (_, b) = strict();
+        stopped(&b, ConvertStep::Exchanged);
+        let lib = w.library();
+        let out = gogo::linuxapp::relocate::move_game(
+            ID,
+            &gogo::macapp::relocate::Target::Library(lib),
+            &Default::default(),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(
+            out.recovered[0].contains("interrupted conversion"),
+            "{:?}",
+            out.recovered
+        );
+        assert!(!convert::staging_of(&root, ID).unwrap().exists());
+        let moved = w.game();
+        assert!(convert::pending(ID, &moved).is_empty());
+        // And `apps remove` takes what one left beside the game.
+        let (_, b) = strict();
+        let conv = agreed(ConvertOptions {
+            fail_at: Some(ConvertStep::Verified),
+            ..Default::default()
+        });
+        assert!(snap::create_with(ID, &b, None, Some(&conv)).is_err());
+        let staging = convert::staging_of(&moved, ID).unwrap();
+        assert!(staging.is_dir());
+        let a = apps::get(ID, &w.root.join("logs")).unwrap().unwrap();
+        apps::remove_with(&a, false, &b).unwrap();
+        assert!(!staging.exists() && !moved.exists());
+    }
+
+    /// On a real btrfs ([`World::on_btrfs`], else skipped): a plain game dir
+    /// with links, Wine's attribute, odd modes and a read-only dir becomes a
+    /// subvolume (inode 256) with the same tree, and its files share their
+    /// extents with what they were copied from. Run as
+    /// [`super::btrfs_convert_makes_a_plain_game_a_subvolume`].
+    pub(super) fn real_btrfs_convert() {
+        let Some(w) = World::on_btrfs(
+            "btrfs_convert_makes_a_plain_game_a_subvolume",
+            &["d3d9.dll"],
+        ) else {
+            return;
+        };
+        let root = build_with(&w.opts()).dirs.root;
+        let guard = Cleanup(root.clone());
+        assert!(!gogo::snapshot::btrfs::is_subvolume(&root).unwrap());
+        oddities(&root);
+        let big = root.join("prefix/drive_c/odd/big.bin");
+        rustix::fs::lsetxattr(
+            &big,
+            "user.wine.sd",
+            b"\x01\x00\x04\x80",
+            rustix::fs::XattrFlags::empty(),
+        )
+        .expect("btrfs takes user.* attributes");
+        // A reflinked reference of the original files, outside the game: the
+        // converted game must share its extents.
+        let reference = w.root.join("reference");
+        gogo::gog::materialize::materialize_tree(
+            &root,
+            &reference,
+            gogo::gog::materialize::Reflink::Try,
+        )
+        .unwrap();
+        let real = Backends::real();
+        // A nested subvolume inside is refused, named: the copy would walk
+        // into it, and deleting the old dir would empty it.
+        let nested = root.join("prefix/drive_c/nested");
+        gogo::snapshot::btrfs::create_subvolume(&nested).unwrap();
+        std::fs::write(nested.join("keep.txt"), "kept").unwrap();
+        let e = snap::plan_create(ID, &real, None).unwrap_err().to_string();
+        assert!(
+            e.contains(&format!("{} is on another filesystem", nested.display())),
+            "{e}"
+        );
+        let e = snap::create_with(ID, &real, None, Some(&agreed(Default::default())))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("is a subvolume of its own"), "{e}");
+        assert!(nested.join("keep.txt").is_file());
+        assert!(!gogo::snapshot::btrfs::is_subvolume(&root).unwrap());
+        std::fs::remove_file(nested.join("keep.txt")).unwrap();
+        gogo::snapshot::btrfs::destroy_by_rmdir(&nested).unwrap();
+
+        let before = tree_of(&root);
+        let plan = snap::plan_create(ID, &real, Some("first")).unwrap();
+        let conv = plan.convert.as_ref().expect("a plain dir needs converting");
+        assert_eq!(
+            conv.method,
+            gogo::gog::materialize::TreeMethod::Reflink,
+            "one btrfs filesystem: FICLONE works"
+        );
+        assert_eq!(conv.extra_bytes, 0);
+        let out =
+            snap::create_with(ID, &real, Some("first"), Some(&agreed(Default::default()))).unwrap();
+        let c = out.conversion.expect("converted");
+        assert!(c.reflinked_files > 0 && c.copied_files == 0, "{c:?}");
+        assert!(gogo::snapshot::btrfs::is_subvolume(&root).unwrap());
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            assert_eq!(std::fs::metadata(&root).unwrap().ino(), 256);
+        }
+        assert!(gogo::snapshot::btrfs::Btrfs.ready(&root).unwrap());
+        assert_settled(&w, &root);
+        assert_eq!(tree_of(&root), before);
+        assert!(
+            snap_dir(&root, 1)
+                .join("prefix/drive_c/odd/ro/inside")
+                .is_file()
+        );
+
+        // The same physical extents as the reference: nothing was written.
+        let ext = |p: &Path| {
+            gogo::snapshot::btrfs::extents(&std::fs::File::open(p).unwrap())
+                .unwrap()
+                .iter()
+                .map(|e| (e.physical, e.length))
+                .collect::<Vec<_>>()
+        };
+        let shared = ext(&big);
+        assert!(!shared.is_empty());
+        assert_eq!(shared, ext(&reference.join("prefix/drive_c/odd/big.bin")));
+        let exclusive =
+            gogo::snapshot::btrfs::estimate_exclusive(&root, std::slice::from_ref(&reference))
+                .unwrap();
+        assert!(
+            exclusive[0] < 64 * 1024,
+            "the reference holds {} bytes the converted game doesn't share",
+            exclusive[0]
+        );
+        println!(
+            "converted in {:.3} s: {} files reflinked; reference exclusive {} bytes",
+            c.seconds, c.reflinked_files, exclusive[0]
+        );
+
+        let a = apps::get(ID, &w.root.join("logs")).unwrap().unwrap();
+        apps::remove(&a, false).unwrap();
+        assert!(!root.exists());
+        unlock(&w.root);
         drop(guard);
     }
 
@@ -9718,4 +10401,9 @@ mod rollback {
 #[test]
 fn btrfs_rollback_swaps_in_a_writable_snapshot() {
     rollback::real_btrfs_rollback();
+}
+
+#[test]
+fn btrfs_convert_makes_a_plain_game_a_subvolume() {
+    snapshots::real_btrfs_convert();
 }

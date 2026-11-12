@@ -148,6 +148,61 @@ marker, so the next run knows the swap happened and finishes step 6. The launche
 while the marker is in the game dir (§5.4). A copy that has to fall back to real copies
 (FICLONE refused) needs the game's size free, and the plan says so as `move`'s does.
 
+**As built (#406).** `linuxapp/convert.rs`; the details this left open:
+
+- **The copy** is `move`'s `materialize::copy_exact`, extended with `copy_exact_into`,
+  which copies into the empty subvolume that is already there and gives its root the
+  source root's mode, mtime and `user.*` attributes. The copy records which files it wrote
+  as byte copies, and the check (`materialize::verify_tree`) reads the bytes of those
+  only. It also compares permission bits (`mode & 0o7777`), which `move`'s check across
+  filesystems doesn't. Sockets and FIFOs are skipped, as in `move`.
+- **The plan walks the tree** before anything is asked, and refuses (exit 7, no
+  `--force`):
+  - anything inside on another device (a mount, a bind mount, a nested subvolume, which
+    btrfs gives its own `st_dev`), named: the copy would walk into it, and deleting the
+    old tree would empty it;
+  - what the copy can't keep, since the old tree is deleted after it: hard links (a
+    regular file with more than one name), attributes other than `user.*`
+    (`system.posix_acl_*`, `security.capability`, `trusted.*`), and `chattr` flags (`+C`,
+    `+A`, `+i`, `+a`, compression, …). The SELinux label (`security.selinux`) is the
+    exception: a new file takes its label from the policy, so the check compares the
+    labels instead, and a copy whose labels differ is deleted;
+  - a symlinked game dir, one on another device than its parent, and a staging dir that
+    is already there.
+
+  Sockets and FIFOs are named in the plan: they aren't copied and go with the old tree.
+- **Space.** The plan probes FICLONE between the game dir and the staging name, as
+  `move`'s does, and refuses a full copy that doesn't fit with a margin (a 20th of the
+  free space, at least 256 MiB). The copy counts the bytes it writes as real copies, and
+  stops before they would pass the free space found at the start minus that margin; the
+  copy is then deleted and the game is as it was.
+- **The check** also compares mtimes of every file and dir (the copy keeps them), so a
+  file rewritten in place during the copy fails it even when it was cloned.
+- **Questions.** `create` and `auto on` print the plan (what happens, the game's size, a
+  reflink copy costing almost no space or a full one with the free space, and D1's
+  note), then ask. `--yes` agrees, `--dry-run` prints only (`auto` gained `--dry-run` for
+  this). A non-TTY without `--yes` exits 2. JSON gets `converted` and a `conversion`
+  object (`seconds`, `bytes`, `reflinkedFiles`, `copiedFiles`). A library caller that
+  doesn't pass the user's yes is refused with "needs converting" (D8).
+- **Order of step 6.** The marker goes first, then the old tree, then the journal. Recovery
+  doesn't need to know how far a run got: before the exchange the staging dir holds the
+  copy, after it the old tree, and both go. It deletes the staging dir only when the
+  journal names it, it is a subvolume root (inode 256) or it holds the marker; otherwise
+  it leaves it, and `doctor` fails asking for it to be removed by hand. Only the report differs: the marker in the
+  game dir means "finished", otherwise "undone: the game is as it was". An error (not a
+  crash) before the exchange removes the copy and the journal at once.
+- **Who settles.** `rollback::settle_pending` settles a pending rollback and then a
+  pending conversion, after the refusals settling takes (the game dir reachable, the
+  game and its one-offs not running), so whoever settles one settles both: every
+  `snapshot` command (`list` included, which says so in a note when a running game holds
+  it off), a build, `dlc add`, `move` and `move --adopt`, and `apps remove`. None of them
+  converts. The launcher (v15) refuses while `.gogo-converted` is in the game dir.
+  `doctor` reports a pending journal, the marker or a leftover staging dir as a fail whose
+  hint is `snapshot <gogid> list`.
+- **Tests.** The fake backend's `Fake::subvolumes_only` treats only the dirs it made as
+  ready (tracked by device and inode, so they follow an exchange). The real-btrfs test
+  `btrfs_convert_makes_a_plain_game_a_subvolume` runs in the `snapshots-btrfs` job.
+
 ### 2.2 ZFS (OpenZFS on Linux)
 
 **What's needed:** the game dir is the mountpoint of its own dataset, the user owns its root,
@@ -664,9 +719,8 @@ gogo linux-app dlc <gogid> add … --no-snapshots      # and the update and rebu
 What the first implementation settled where this design left room:
 
 - **Questions.** `delete` asks (TTY), `--yes` skips it, and without a TTY it prints the
-  plan and exits 2. `create` and `auto on|off` ask nothing until they convert a plain dir
-  (#406); until then they refuse it, exit 7: `<dir> isn't a btrfs subvolume …: it needs
-  converting to one first`. `--yes` is accepted on both for that.
+  plan and exits 2. `create` and `auto on|off` ask only when they convert a plain dir
+  first (#406, §2.1's "As built"); `--yes` is accepted on both for that.
 - **Refusals** are checked twice: once before anything is shown or asked (exit 7, nothing
   touched), and again under the two locks, after an interrupted create or delete is
   settled. `auto off` changes nothing about the game, so it takes the locks but, of §5.1's

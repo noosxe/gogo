@@ -1227,11 +1227,23 @@ pub(crate) fn settle_locked(
     Ok(Some(settled))
 }
 
-/// Settle a pending rollback of `gogid` before another change of the game
-/// (`dlc add`, `move`, `apps remove`, a build, any `snapshot` command):
-/// nothing when there is none, else under the locks. Returns what it says.
+/// Settle a pending rollback of `gogid`, then a pending conversion to a
+/// subvolume (§2.1, [`super::convert::settle`]), before another change of the
+/// game (`dlc add`, `move`, `apps remove`, a build, any `snapshot` command):
+/// nothing when there is none, else under the locks, after the refusals
+/// settling takes. Returns what it says.
 pub fn settle_pending(gogid: &str, backends: &Backends) -> Result<Vec<String>, MacAppError> {
-    if crate::macapp::compat::validate_gogid(gogid).is_err() || !journal_path(gogid).is_file() {
+    if crate::macapp::compat::validate_gogid(gogid).is_err() {
+        return Ok(Vec::new());
+    }
+    let mut out = settle_rollback(gogid, backends)?;
+    out.extend(super::convert::settle(gogid)?);
+    Ok(out)
+}
+
+/// [`settle_pending`]'s rollback part.
+fn settle_rollback(gogid: &str, backends: &Backends) -> Result<Vec<String>, MacAppError> {
+    if !journal_path(gogid).is_file() {
         return Ok(Vec::new());
     }
     let dirs = GameDirs::for_game(gogid)?;
