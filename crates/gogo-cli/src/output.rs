@@ -42,7 +42,7 @@ pub fn table() -> Table {
 
 /// Render the owned-games table: `ID  TITLE  OS  INSTALLERS  SIZE  LOCAL`
 /// (03 §1; LOCAL is what is set up here, see `gogo::state::local::Local::label`).
-pub fn list_table(rows: &[gogo::state::records::ListRow], _color: crate::cli::ColorWhen) -> String {
+pub fn list_table(rows: &[gogo::state::records::ListRow], color: crate::cli::ColorWhen) -> String {
     use comfy_table::{Cell, Color};
 
     let mut table = table();
@@ -72,7 +72,8 @@ pub fn list_table(rows: &[gogo::state::records::ListRow], _color: crate::cli::Co
             row.title.clone()
         };
         let installed = match row.local.label() {
-            Some(l) => Cell::new(l).fg(Color::Green),
+            Some(l) if color != crate::cli::ColorWhen::Never => Cell::new(l).fg(Color::Green),
+            Some(l) => Cell::new(l),
             None => Cell::new("–"),
         };
         table.add_row(vec![
