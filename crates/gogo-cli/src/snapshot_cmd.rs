@@ -373,7 +373,7 @@ async fn fetch_build_files(want: rb::FetchWant) -> Option<gogo::snapshot::saves:
 
 /// Show `lines` (a plan) and ask `question`, unless `yes`. `None`: go on;
 /// `Some(code)`: stop with that exit code (2 without a terminal, 0 on a no).
-fn ask(lines: &[String], yes: bool, question: &str) -> Option<i32> {
+pub(crate) fn ask(lines: &[String], yes: bool, question: &str) -> Option<i32> {
     if yes {
         return None;
     }

@@ -32,6 +32,8 @@ use super::error::MacAppError;
 use super::launch::{self, GameDirs, Library};
 use super::store;
 use crate::gog::materialize::{self, TreeMethod};
+use crate::snapshot::Guard;
+use crate::snapshot::backend::snapshots_dir;
 
 /// Where a game is going.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +80,45 @@ pub trait Lane {
     ) -> Result<Vec<String>, MacAppError>;
     /// The game now lives at `dirs`: rewrite what's outside its dir.
     fn publish(&self, gogid: &str, dirs: &GameDirs) -> Result<(), MacAppError>;
+
+    /// What a move from `from` to `to` does with the game's snapshots
+    /// (design 20 §9.1). `rename`: one filesystem. `None` for a lane without
+    /// snapshots.
+    fn plan_snapshots(
+        &self,
+        gogid: &str,
+        from: &Path,
+        to: &Path,
+        rename: bool,
+    ) -> Result<Option<SnapshotsPlan>, MacAppError> {
+        let _ = (gogid, from, to, rename);
+        Ok(None)
+    }
+
+    /// Make the copy target `staging` as a btrfs subvolume. `false`: it isn't
+    /// there, and the copy makes a plain dir (a failure is a warning).
+    fn make_staging(&self, staging: &Path, warnings: &mut Vec<String>) -> bool {
+        let _ = (staging, warnings);
+        false
+    }
+
+    /// After the commit, in step 5: delete the old place's snapshots and
+    /// their metadata (`steps.drop`), take the `initial` snapshot at the new
+    /// place (`steps.initial`). Runs again after a crash, so each part must
+    /// be safe to repeat. Failures are warnings; `killed` is a test's kill.
+    fn after_commit(
+        &self,
+        gogid: &str,
+        from: &Path,
+        to: &Path,
+        steps: SnapshotSteps,
+        guard: &Guard,
+        killed: &dyn Fn(KilledAt) -> Result<(), MacAppError>,
+        done: &mut SnapshotsDone,
+    ) -> Result<Vec<String>, MacAppError> {
+        let _ = (gogid, from, to, steps, guard, killed, done);
+        Ok(Vec::new())
+    }
 }
 
 /// How the data would move.
@@ -111,6 +152,232 @@ pub struct MovePlan {
     pub bytes: u64,
     /// Disk needed at the target while both copies exist.
     pub extra_bytes: u64,
+    /// What happens to the game's snapshots (design 20 §9.1); `None` for a
+    /// lane without them, or nothing to say.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshots: Option<SnapshotsPlan>,
+}
+
+/// What a move does with the game's snapshots (design 20 §9.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SnapshotAction {
+    /// One filesystem: they are renamed beside the game's new dir.
+    Carry,
+    /// Across filesystems: they are deleted after the commit, with their
+    /// metadata (decision D5).
+    Drop,
+    /// The game has none.
+    None,
+}
+
+/// One snapshot as a move's plan lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlannedSnapshot {
+    pub id: u32,
+    /// `None`: on disk without metadata.
+    pub label: Option<String>,
+    /// RFC 3339, UTC.
+    pub created: Option<String>,
+    /// What only it holds, last measured (or measured for the plan).
+    pub bytes: Option<u64>,
+}
+
+/// The snapshot part of a [`MovePlan`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotsPlan {
+    pub action: SnapshotAction,
+    /// Newest first.
+    pub snapshots: Vec<PlannedSnapshot>,
+    /// The sum of the known sizes.
+    pub bytes: u64,
+    /// A copy: the new game dir is made a btrfs subvolume.
+    pub subvolume: bool,
+    /// A copy: an `initial` snapshot is taken after the commit (autosnapshot
+    /// is on).
+    pub initial: bool,
+    /// A copy to a place without snapshots: why. The game's setting stays
+    /// as it is and does nothing there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<String>,
+    /// The game's autosnapshot setting.
+    pub auto: bool,
+}
+
+impl SnapshotsPlan {
+    /// Deleting snapshots needs the user's yes (`--yes`, or the question).
+    pub fn needs_yes(&self) -> bool {
+        self.action == SnapshotAction::Drop && !self.snapshots.is_empty()
+    }
+
+    /// What the journal records for recovery.
+    pub fn steps(&self) -> SnapshotSteps {
+        SnapshotSteps {
+            carry: self.action == SnapshotAction::Carry,
+            drop: self.action == SnapshotAction::Drop,
+            initial: self.initial,
+        }
+    }
+
+    /// The plan's lines about snapshots; `to` is the game's new dir.
+    pub fn lines(&self, to: &Path) -> Vec<String> {
+        let n = self.snapshots.len();
+        let plural = if n == 1 { "" } else { "s" };
+        let mut out = Vec::new();
+        match self.action {
+            SnapshotAction::Carry => out.push(format!(
+                "snapshots: {n} snapshot{plural} move with the game (one filesystem: a rename)"
+            )),
+            SnapshotAction::Drop => {
+                out.push(format!(
+                    "snapshots: {n} snapshot{plural} can't cross filesystems: deleted after the \
+                     move, with their metadata ({}{} stored)",
+                    if self.snapshots.iter().all(|s| s.bytes.is_some()) {
+                        "~"
+                    } else {
+                        "at least ~"
+                    },
+                    crate::fmt::human_size(self.bytes)
+                ));
+                for s in &self.snapshots {
+                    let day = s
+                        .created
+                        .as_deref()
+                        .map_or("-", |c| c.get(..10).unwrap_or(c));
+                    let size = s.bytes.map_or_else(
+                        || "size unknown".to_string(),
+                        |b| format!("~{}", crate::fmt::human_size(b)),
+                    );
+                    out.push(format!(
+                        "  {}  {day}  {}  {size}",
+                        s.id,
+                        s.label.as_deref().unwrap_or("(no metadata)")
+                    ));
+                }
+            }
+            SnapshotAction::None => {}
+        }
+        if let Some(reason) = &self.unavailable {
+            out.push(format!(
+                "snapshots at {}: unavailable ({reason}); autosnapshot stays {} and does \
+                 nothing there",
+                to.display(),
+                if self.auto { "on" } else { "off" }
+            ));
+        } else if self.subvolume {
+            let parent = to.parent().unwrap_or(to);
+            out.push(if self.initial {
+                format!(
+                    "snapshots at {}: the game dir is made a btrfs subvolume, and an `initial` \
+                     snapshot (after moving to {}) is taken after the move",
+                    to.display(),
+                    parent.display()
+                )
+            } else {
+                format!(
+                    "snapshots at {}: the game dir is made a btrfs subvolume (autosnapshot \
+                     stays off)",
+                    to.display()
+                )
+            });
+        }
+        out
+    }
+}
+
+/// What a move still has to do about snapshots, as its journal records it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SnapshotSteps {
+    /// Rename `.gogo-snapshots/<gogid>/` beside the new dir, before the
+    /// commit.
+    pub carry: bool,
+    /// Delete the old place's snapshots and their metadata, after the commit.
+    pub drop: bool,
+    /// Take an `initial` snapshot at the new place, after the commit.
+    pub initial: bool,
+}
+
+impl SnapshotSteps {
+    fn words(self) -> Vec<&'static str> {
+        [
+            (self.carry, "carry"),
+            (self.drop, "drop"),
+            (self.initial, "initial"),
+        ]
+        .into_iter()
+        .filter_map(|(on, w)| on.then_some(w))
+        .collect()
+    }
+
+    fn parse(line: &str) -> Self {
+        let mut s = SnapshotSteps::default();
+        for w in line.split(',').map(str::trim) {
+            match w {
+                "carry" => s.carry = true,
+                "drop" => s.drop = true,
+                "initial" => s.initial = true,
+                _ => {}
+            }
+        }
+        s
+    }
+}
+
+/// A snapshot a move took.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TakenSnapshot {
+    pub id: u32,
+    pub label: String,
+}
+
+/// What a move did with the game's snapshots.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotsDone {
+    /// Renamed beside the new dir.
+    pub carried: Vec<u32>,
+    /// Deleted with their metadata (a move across filesystems).
+    pub deleted: Vec<u32>,
+    /// Snapshots that couldn't be deleted, left on the old drive.
+    pub left: Vec<PathBuf>,
+    /// The `initial` snapshot at the new place.
+    pub initial: Option<TakenSnapshot>,
+}
+
+impl SnapshotsDone {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// One line each for what happened.
+    pub fn lines(&self) -> Vec<String> {
+        let ids = |v: &[u32]| {
+            v.iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let mut out = Vec::new();
+        if !self.carried.is_empty() {
+            out.push(format!(
+                "snapshots {} moved with the game",
+                ids(&self.carried)
+            ));
+        }
+        if !self.deleted.is_empty() {
+            out.push(format!(
+                "snapshots {} deleted (they can't cross filesystems)",
+                ids(&self.deleted)
+            ));
+        }
+        if let Some(t) = &self.initial {
+            out.push(format!("snapshot {} taken ({})", t.id, t.label));
+        }
+        out
+    }
 }
 
 /// What a move did.
@@ -124,6 +391,9 @@ pub struct MoveOutcome {
     pub recovered: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// What happened to the game's snapshots.
+    #[serde(rename = "snapshotsDone", skip_serializing_if = "SnapshotsDone::is_empty")]
+    pub snapshots: SnapshotsDone,
 }
 
 /// A long move's progress.
@@ -145,6 +415,14 @@ pub enum KilledAt {
     BeforeCommit,
     /// The record says the new place; the source is still there.
     BeforeCleanup,
+    /// A rename: the data is at the target and this many of the game's
+    /// snapshots are beside it; the rest are still beside the source.
+    Carrying(usize),
+    /// Across filesystems, after the commit: this many of the old place's
+    /// snapshots are deleted.
+    Dropping(usize),
+    /// After the commit and the deletions, before the `initial` snapshot.
+    BeforeInitial,
 }
 
 /// What tests can't get from a real disk.
@@ -165,6 +443,10 @@ pub struct Faults {
 /// How to run a move.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MoveOptions {
+    /// The user's yes to deleting the game's snapshots, which can't cross
+    /// filesystems (design 20 §9.1, decision D5). Without it, such a move is
+    /// refused.
+    pub drop_snapshots: bool,
     #[doc(hidden)]
     pub faults: Faults,
 }
@@ -188,6 +470,9 @@ fn staging_of(to: &Path, gogid: &str) -> PathBuf {
 struct Journal {
     from: PathBuf,
     to: PathBuf,
+    /// A third line, `snapshots: carry|drop|initial` (design 20 §9.1). A
+    /// journal from before snapshots has none.
+    snapshots: SnapshotSteps,
 }
 
 /// A journal whose paths aren't ones gogo would write (the same rule as a
@@ -200,14 +485,28 @@ fn read_journal(gogid: &str) -> Result<Option<Journal>, MacAppError> {
     };
     let mut lines = raw.lines();
     let mut path = || lines.next().and_then(|l| launch::parse_location(l, gogid));
-    Ok(path().zip(path()).map(|(from, to)| Journal { from, to }))
+    let Some((from, to)) = path().zip(path()) else {
+        return Ok(None);
+    };
+    let snapshots = lines
+        .next()
+        .and_then(|l| l.strip_prefix("snapshots:"))
+        .map(SnapshotSteps::parse)
+        .unwrap_or_default();
+    Ok(Some(Journal {
+        from,
+        to,
+        snapshots,
+    }))
 }
 
 fn write_journal(gogid: &str, j: &Journal) -> Result<(), MacAppError> {
-    launch::write_atomic(
-        &journal_path(gogid),
-        &format!("{}\n{}\n", j.from.display(), j.to.display()),
-    )
+    let mut text = format!("{}\n{}\n", j.from.display(), j.to.display());
+    let words = j.snapshots.words();
+    if !words.is_empty() {
+        text.push_str(&format!("snapshots: {}\n", words.join(",")));
+    }
+    launch::write_atomic(&journal_path(gogid), &text)
 }
 
 fn clear_journal(gogid: &str) -> Result<(), MacAppError> {
@@ -347,15 +646,13 @@ pub fn plan(
         path: to.clone(),
         reason: "no part of the path exists".into(),
     })?;
-    let same_fs = {
-        use std::os::unix::fs::MetadataExt as _;
-        from.root.metadata()?.dev() == near.metadata()?.dev()
-    };
-    let (method, extra_bytes) = if same_fs && !opts.faults.across_filesystems {
-        (Method::Rename, 0)
-    } else {
-        copy_cost(&from.root, &to, bytes)
-    };
+    let (method, extra_bytes) =
+        if same_filesystem(&from.root, near)? && !opts.faults.across_filesystems {
+            (Method::Rename, 0)
+        } else {
+            copy_cost(&from.root, &to, bytes)
+        };
+    let snapshots = lane.plan_snapshots(gogid, &from.root, &to, method == Method::Rename)?;
     let plan = MovePlan {
         gogid: gogid.to_string(),
         from: from.root,
@@ -363,9 +660,42 @@ pub fn plan(
         method,
         bytes,
         extra_bytes,
+        snapshots,
     };
     check_space(&plan, opts)?;
     Ok(plan)
+}
+
+/// Whether the game dir `from` can be renamed to a name under `near`: one
+/// device, or (btrfs) a subvolume root in the same mount. A btrfs subvolume
+/// has its own device number, but its root renames across the subvolumes of
+/// one mount; a plain dir doesn't.
+fn same_filesystem(from: &Path, near: &Path) -> std::io::Result<bool> {
+    use std::os::unix::fs::MetadataExt as _;
+    if from.metadata()?.dev() == near.metadata()?.dev() {
+        return Ok(true);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mount = |p: &Path| {
+            rustix::fs::statx(
+                rustix::fs::CWD,
+                p,
+                rustix::fs::AtFlags::empty(),
+                rustix::fs::StatxFlags::MNT_ID,
+            )
+            .ok()
+            .filter(|st| st.stx_mask & rustix::fs::StatxFlags::MNT_ID.bits() != 0)
+            .map(|st| st.stx_mnt_id)
+        };
+        if let (Some(a), Some(b)) = (mount(from), mount(near))
+            && a == b
+            && crate::snapshot::btrfs::is_subvolume(from).unwrap_or(false)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// How a copy would go, and the disk it costs.
@@ -429,23 +759,36 @@ pub fn move_game(
     emit: &mut dyn FnMut(&MoveEvent),
 ) -> Result<MoveOutcome, MacAppError> {
     super::compat::validate_gogid(gogid)?;
-    let _lock = lock_moves()?;
-    let _game_lock = lock_game(gogid)?;
-    let recovered = recover_locked(gogid, lane)?;
+    let lock = lock_moves()?;
+    let game_lock = lock_game(gogid)?;
+    let guard = Guard::new(&lock, &game_lock);
+    let recovered = recover_locked(gogid, lane, &guard)?;
     let mut plan = plan(gogid, target, lane, opts).map_err(|e| after_recovery(&recovered, e))?;
     let from = GameDirs::at(plan.from.clone());
     let to = GameDirs::at(plan.to.clone());
     lane.refuse_running(gogid, &from)
         .map_err(|e| after_recovery(&recovered, e))?;
+    if let Some(s) = &plan.snapshots {
+        refuse_dropping(gogid, s, opts).map_err(|e| after_recovery(&recovered, e))?;
+    }
 
-    write_journal(
-        gogid,
-        &Journal {
-            from: plan.from.clone(),
-            to: plan.to.clone(),
-        },
-    )?;
-    let moved = move_data(&mut plan, &from, &to, lane, opts, emit);
+    let mut journal = Journal {
+        from: plan.from.clone(),
+        to: plan.to.clone(),
+        snapshots: plan.snapshots.as_ref().map(|s| s.steps()).unwrap_or_default(),
+    };
+    write_journal(gogid, &journal)?;
+    let mut done = SnapshotsDone::default();
+    let moved = move_data(
+        &mut plan,
+        &mut journal,
+        &from,
+        &to,
+        lane,
+        opts,
+        emit,
+        &mut done,
+    );
     let mut warnings = match moved {
         Ok(w) => w,
         Err(Failure::Killed(e)) => return Err(e),
@@ -468,12 +811,131 @@ pub fn move_game(
         )
     })?;
     killed(opts, KilledAt::BeforeCleanup)?;
-    warnings.extend(finish(gogid, &from, &to, lane).map_err(|e| after_recovery(&recovered, e))?);
+    let kill = |at| killed(opts, at);
+    warnings.extend(
+        finish(
+            gogid,
+            &from,
+            &to,
+            lane,
+            journal.snapshots,
+            &guard,
+            &kill,
+            &mut done,
+        )
+        .map_err(|e| after_recovery(&recovered, e))?,
+    );
     Ok(MoveOutcome {
         plan,
         recovered,
         warnings,
+        snapshots: done,
     })
+}
+
+/// A move that would delete the game's snapshots needs the user's yes.
+fn refuse_dropping(
+    gogid: &str,
+    s: &SnapshotsPlan,
+    opts: &MoveOptions,
+) -> Result<(), MacAppError> {
+    if !s.needs_yes() || opts.drop_snapshots {
+        return Ok(());
+    }
+    let n = s.snapshots.len();
+    Err(MacAppError::Apps(format!(
+        "{gogid} has {n} snapshot{}, which can't cross filesystems and would be deleted after          the move: `gogo linux-app move` shows them and asks (--yes agrees)",
+        if n == 1 { "" } else { "s" }
+    )))
+}
+
+/// Rename one snapshot. A read-only btrfs subvolume can't move to another dir
+/// (`EROFS`: its root's `..` changes), so the flag is cleared for the rename
+/// and set again after it. A snapshot is always read-only, so one a crash
+/// left writable is made read-only again when it is carried.
+fn rename_snapshot(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use crate::snapshot::btrfs;
+        let subvolume = btrfs::is_subvolume(from).unwrap_or(false);
+        if subvolume && btrfs::is_readonly(from)? {
+            btrfs::set_readonly(from, false)?;
+        }
+        if let Err(e) = std::fs::rename(from, to) {
+            if subvolume {
+                let _ = btrfs::set_readonly(from, true);
+            }
+            return Err(e);
+        }
+        if subvolume {
+            btrfs::set_readonly(to, true)?;
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::fs::rename(from, to)
+    }
+}
+
+/// Rename the game's snapshots, `.gogo-snapshots/<gogid>/<n>`, from beside
+/// `from` to beside `to` (design 20 §9.1), one by one: a btrfs snapshot is a
+/// subvolume root, which renames across the subvolumes of one mount where
+/// the plain dir holding them wouldn't. Safe to run again: what is already
+/// there is skipped. Returns the numbers moved.
+fn carry_snapshots(
+    from: &Path,
+    to: &Path,
+    killed_at: Option<KilledAt>,
+) -> Result<Vec<u32>, Failure> {
+    let (Some(old), Some(new)) = (snapshots_dir(from), snapshots_dir(to)) else {
+        return Ok(Vec::new());
+    };
+    let mut names: Vec<std::ffi::OsString> = match std::fs::read_dir(&old) {
+        Ok(rd) => rd
+            .map(|e| e.map(|e| e.file_name()))
+            .collect::<std::io::Result<_>>()?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e.into()),
+    };
+    names.sort();
+    let mut moved = Vec::new();
+    if killed_at == Some(KilledAt::Carrying(0)) {
+        return Err(Failure::Killed(MacAppError::Apps(
+            "killed: carrying 0".into(),
+        )));
+    }
+    if !names.is_empty() {
+        std::fs::create_dir_all(&new)?;
+    }
+    for name in names {
+        let dst = new.join(&name);
+        if dst.symlink_metadata().is_ok() {
+            return Err(Failure::Plain(MacAppError::Library {
+                path: dst,
+                reason: "a snapshot by that name is already there: gogo won't guess which one                          is the game's; move it out of the way"
+                    .into(),
+            }));
+        }
+        rename_snapshot(&old.join(&name), &dst)?;
+        if let Some(n) = crate::snapshot::backend::parse_n(&name) {
+            moved.push(n);
+        }
+        if killed_at == Some(KilledAt::Carrying(moved.len())) {
+            return Err(Failure::Killed(MacAppError::Apps(format!(
+                "killed: carrying {}",
+                moved.len()
+            ))));
+        }
+    }
+    if let Some(parent) = old.parent() {
+        let _ = std::fs::remove_dir(&old);
+        let _ = std::fs::remove_dir(parent);
+    }
+    if let Some(parent) = new.parent() {
+        let _ = std::fs::File::open(parent).and_then(|d| d.sync_all());
+    }
+    Ok(moved)
 }
 
 /// What an adopt will do, before it does it.
@@ -601,20 +1063,21 @@ pub fn adopt_game(
     lane: &dyn Lane,
 ) -> Result<AdoptOutcome, MacAppError> {
     super::compat::validate_gogid(gogid)?;
-    let _lock = lock_moves()?;
-    let _game_lock = lock_game(gogid)?;
+    let lock = lock_moves()?;
+    let game_lock = lock_game(gogid)?;
+    let guard = Guard::new(&lock, &game_lock);
     // A full copy and no source: recovery refuses it, because the source may be
     // on a drive that isn't mounted. Naming a path settles it (below).
     let copy_only = copy_only_journal(gogid)?;
     if let Some(j) = &copy_only
         && launch::real_path(&target.root(gogid)) == launch::real_path(&j.to)
     {
-        return adopt_the_copy(gogid, j, lane);
+        return adopt_the_copy(gogid, j, lane, &guard);
     }
     let mut recovered = if copy_only.is_some() {
         Vec::new()
     } else {
-        recover_locked(gogid, lane)?
+        recover_locked(gogid, lane, &guard)?
     };
     // A journal that survives a recovery has work waiting on a game that is
     // running or a source that wouldn't go: what's recorded isn't settled.
@@ -710,7 +1173,12 @@ fn copy_only_journal(gogid: &str) -> Result<Option<Journal>, MacAppError> {
 /// data is deleted), and the recovery that is left is the one a rename needs:
 /// rewrite, record, menu entry, journal. A kill after the marker is gone is
 /// settled by the next run's recovery the same way.
-fn adopt_the_copy(gogid: &str, j: &Journal, lane: &dyn Lane) -> Result<AdoptOutcome, MacAppError> {
+fn adopt_the_copy(
+    gogid: &str,
+    j: &Journal,
+    lane: &dyn Lane,
+    guard: &Guard,
+) -> Result<AdoptOutcome, MacAppError> {
     let to = GameDirs::at(j.to.clone());
     let refuse = |reason: String| MacAppError::Library {
         path: j.to.clone(),
@@ -730,7 +1198,7 @@ fn adopt_the_copy(gogid: &str, j: &Journal, lane: &dyn Lane) -> Result<AdoptOutc
     lane.refuse_running(gogid, &to)?;
     lane.refuse_running(gogid, &GameDirs::at(j.from.clone()))?;
     std::fs::remove_file(j.to.join(MARKER))?;
-    let mut recovered = recover_locked(gogid, lane)?;
+    let mut recovered = recover_locked(gogid, lane, guard)?;
     recovered.insert(
         0,
         format!(
@@ -777,13 +1245,16 @@ fn killed(opts: &MoveOptions, at: KilledAt) -> Result<(), MacAppError> {
 
 /// Steps 2 and 3: the data at the target's name, the game's files rewritten.
 /// Returns warnings.
+#[allow(clippy::too_many_arguments)]
 fn move_data(
     plan: &mut MovePlan,
+    journal: &mut Journal,
     from: &GameDirs,
     to: &GameDirs,
     lane: &dyn Lane,
     opts: &MoveOptions,
     emit: &mut dyn FnMut(&MoveEvent),
+    done: &mut SnapshotsDone,
 ) -> Result<Vec<String>, Failure> {
     if let Some(parent) = plan.to.parent() {
         std::fs::create_dir_all(parent)?;
@@ -791,9 +1262,20 @@ fn move_data(
     if !opts.faults.across_filesystems {
         match std::fs::rename(&plan.from, &plan.to) {
             Ok(()) => {
-                return lane.rewrite_inside(from, to, &plan.to).map_err(|e| {
+                // A rename: the snapshots follow it, whatever the plan
+                // guessed.
+                let renamed = SnapshotSteps {
+                    carry: true,
+                    ..SnapshotSteps::default()
+                };
+                let back = |e: MacAppError| {
                     // Nothing else knows it's there: it goes back.
-                    match std::fs::rename(&plan.to, &plan.from) {
+                    let undone = carry_snapshots(&plan.to, &plan.from, None)
+                        .map_err(|f| match f {
+                            Failure::Killed(e) | Failure::Plain(e) => e,
+                        })
+                        .and_then(|_| Ok(std::fs::rename(&plan.to, &plan.from)?));
+                    match undone {
                         Ok(()) => Failure::Plain(e),
                         Err(back) => Failure::Killed(MacAppError::Library {
                             path: plan.to.clone(),
@@ -803,11 +1285,35 @@ fn move_data(
                             ),
                         }),
                     }
-                });
+                };
+                if journal.snapshots != renamed {
+                    journal.snapshots = renamed;
+                    if let Err(e) = write_journal(&plan.gogid, journal) {
+                        return Err(back(e));
+                    }
+                }
+                let warnings = lane.rewrite_inside(from, to, &plan.to).map_err(back)?;
+                match carry_snapshots(&plan.from, &plan.to, opts.faults.killed_at) {
+                    Ok(moved) => done.carried = moved,
+                    Err(Failure::Killed(e)) => return Err(Failure::Killed(e)),
+                    Err(Failure::Plain(e)) => return Err(back(e)),
+                }
+                return Ok(warnings);
             }
             // One device number and still no rename: a bind mount, say.
             Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
                 (plan.method, plan.extra_bytes) = copy_cost(&plan.from, &plan.to, plan.bytes);
+                // The snapshots can't follow a copy: the plan is a copy's now,
+                // and it may need the yes it didn't ask for.
+                plan.snapshots = lane.plan_snapshots(&plan.gogid, &plan.from, &plan.to, false)?;
+                if let Some(s) = &plan.snapshots {
+                    refuse_dropping(&plan.gogid, s, opts)?;
+                }
+                let steps = plan.snapshots.as_ref().map(|s| s.steps()).unwrap_or_default();
+                if journal.snapshots != steps {
+                    journal.snapshots = steps;
+                    write_journal(&plan.gogid, journal)?;
+                }
             }
             Err(e) => return Err(e.into()),
         }
@@ -834,7 +1340,12 @@ fn copy_verified(
     let total = plan.bytes;
     let (mut done, mut files) = (0u64, 0usize);
     let mut was_killed = false;
-    let copied = materialize::copy_exact(&plan.from, &staging, &mut |_, size| {
+    let mut warnings = Vec::new();
+    // On btrfs, the new game dir is a subvolume from the start (design 20
+    // §9.1), so it can have snapshots there.
+    let into = plan.snapshots.as_ref().is_some_and(|s| s.subvolume)
+        && lane.make_staging(&staging, &mut warnings);
+    let mut on_file = |_: &Path, size| {
         done += size;
         files += 1;
         emit(&MoveEvent::Copying { done, total });
@@ -846,7 +1357,20 @@ fn copy_verified(
             return Err(std::io::ErrorKind::StorageFull.into());
         }
         Ok(())
-    });
+    };
+    let copied = if into {
+        materialize::copy_exact_into(
+            &plan.from,
+            &staging,
+            materialize::IntoOptions {
+                reflink: materialize::Reflink::Try,
+                copy_budget: None,
+            },
+            &mut on_file,
+        )
+    } else {
+        materialize::copy_exact(&plan.from, &staging, &mut on_file)
+    };
     if was_killed {
         return Err(Failure::Killed(MacAppError::Apps("killed: copying".into())));
     }
@@ -889,7 +1413,7 @@ fn copy_verified(
     // comparison would be lost with the source.
     lane.refuse_running(&plan.gogid, from)?;
     std::fs::write(staging.join(MARKER), "")?;
-    let mut warnings = lane.rewrite_inside(from, to, &staging)?;
+    warnings.extend(lane.rewrite_inside(from, to, &staging)?);
     if opts.faults.killed_at == Some(KilledAt::BeforeRename) {
         return Err(Failure::Killed(MacAppError::Apps("killed: copied".into())));
     }
@@ -949,11 +1473,16 @@ fn commit(gogid: &str, to: &Path) -> Result<(), MacAppError> {
 /// keeps the journal for the next run. The source only goes when the game is at
 /// the target and nothing runs from the source: it may be all that's left of the
 /// game, if a power cut undid the rest, or have a game writing saves to it.
+#[allow(clippy::too_many_arguments)]
 fn finish(
     gogid: &str,
     from: &GameDirs,
     to: &GameDirs,
     lane: &dyn Lane,
+    steps: SnapshotSteps,
+    guard: &Guard,
+    killed: &dyn Fn(KilledAt) -> Result<(), MacAppError>,
+    done: &mut SnapshotsDone,
 ) -> Result<Vec<String>, MacAppError> {
     let mut warnings = Vec::new();
     if let Err(e) = lane.publish(gogid, to) {
@@ -980,6 +1509,9 @@ fn finish(
             return Ok(warnings);
         }
     }
+    // The snapshots, once the source is gone (so this runs once per move but
+    // for a crash): the old place's deleted, the new place's first one.
+    warnings.extend(lane.after_commit(gogid, &from.root, &to.root, steps, guard, killed, done)?);
     match std::fs::remove_file(to.root.join(MARKER)) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
         _ => {}
@@ -994,9 +1526,9 @@ pub fn recover(gogid: &str, lane: &dyn Lane) -> Result<Vec<String>, MacAppError>
     if !journal_path(gogid).exists() {
         return Ok(Vec::new());
     }
-    let _lock = lock_moves()?;
-    let _game_lock = lock_game(gogid)?;
-    recover_locked(gogid, lane)
+    let lock = lock_moves()?;
+    let game_lock = lock_game(gogid)?;
+    recover_locked(gogid, lane, &Guard::new(&lock, &game_lock))
 }
 
 /// [`recover`] for every game with a journal. One that can't be settled yet (a
@@ -1018,7 +1550,11 @@ pub fn recover_all(lane: &dyn Lane) -> Vec<String> {
     out
 }
 
-fn recover_locked(gogid: &str, lane: &dyn Lane) -> Result<Vec<String>, MacAppError> {
+fn recover_locked(
+    gogid: &str,
+    lane: &dyn Lane,
+    guard: &Guard,
+) -> Result<Vec<String>, MacAppError> {
     if !journal_path(gogid).exists() {
         return Ok(Vec::new());
     }
@@ -1052,7 +1588,18 @@ fn recover_locked(gogid: &str, lane: &dyn Lane) -> Result<Vec<String>, MacAppErr
             "an earlier move to {} had finished all but its cleanup; done now",
             j.to.display()
         ));
-        out.extend(finish(gogid, &from, &to, lane)?);
+        let mut done = SnapshotsDone::default();
+        out.extend(finish(
+            gogid,
+            &from,
+            &to,
+            lane,
+            j.snapshots,
+            guard,
+            &|_| Ok(()),
+            &mut done,
+        )?);
+        out.extend(done.lines());
         return Ok(out);
     }
     // A rename leaves no source and no marker: the game is at the target, and
@@ -1063,8 +1610,24 @@ fn recover_locked(gogid: &str, lane: &dyn Lane) -> Result<Vec<String>, MacAppErr
         && !there(&j.to.join(MARKER))
     {
         out.extend(lane.rewrite_inside(&from, &to, &j.to)?);
+        // The snapshots follow the rename before the commit, as in the move
+        // itself; the ones already there are skipped.
+        let mut done = SnapshotsDone::default();
+        done.carried = carry_snapshots(&j.from, &j.to, None).map_err(|f| match f {
+            Failure::Killed(e) | Failure::Plain(e) => e,
+        })?;
         commit(gogid, &j.to)?;
-        out.extend(finish(gogid, &from, &to, lane)?);
+        out.extend(finish(
+            gogid,
+            &from,
+            &to,
+            lane,
+            j.snapshots,
+            guard,
+            &|_| Ok(()),
+            &mut done,
+        )?);
+        out.extend(done.lines());
         out.insert(
             0,
             format!(

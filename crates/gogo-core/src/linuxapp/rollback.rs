@@ -918,7 +918,7 @@ fn finish(
 ) -> Result<Vec<String>, MacAppError> {
     check(fail_at, RbStep::Committed)?;
     let mut warnings = Vec::new();
-    let lane = super::relocate::LinuxLane;
+    let lane = super::relocate::LinuxLane::default();
     if let Some(m) = target
         && m.game_dir != dirs.root
     {
@@ -1247,6 +1247,9 @@ pub fn settle_pending(gogid: &str, backends: &Backends) -> Result<Vec<String>, M
     }
     let mut out = settle_rollback(gogid, backends)?;
     out.extend(super::convert::settle(gogid)?);
+    // Snapshots a move across filesystems couldn't delete (design 20 §9.1):
+    // tried again, and a failure leaves them for `doctor` to report.
+    out.extend(super::relocate::settle_leftovers(gogid, backends).unwrap_or_default());
     Ok(out)
 }
 
