@@ -367,6 +367,50 @@ A restore's time is the game's relaunch and the replay, which is #257.
 base is always pre-launch. A [live session](#live-sessions)'s checkpoints are routes from
 that state, and its restores roll a copy back to it.
 
+### Snapshots and rollback: `[snapshot_rollback]`
+
+The scratch's own `config.toml` turns gogo's snapshots off (above), so the step builds a
+second copy of the game with them on, in a data root of its own, and exercises
+`gogo linux-app snapshot` on it (#408, design 20 §10.4). A manifest opts in with a
+`[snapshot_rollback]` table (`dlc = <id>` names a cached DLC to add; without it the change is
+a rebuild). It runs in two halves, because the change needs the network and the launch
+needs the display:
+
+1. **Build phase** (the build's sandbox, so with the network): `gogo linux-app <gogid>
+   --yes` into `$RUN/snapshot-data`, from the cached depot; `snapshot list` must say the game
+   dir is a subvolume and hold the `initial` snapshot (`snapshot_initial`); a fake save
+   `a.sav` goes into the prefix (`drive_c/users/steamuser/Saved Games/e2e/`) and into the
+   game's own files (`game/e2e/`); `snapshot create` (`snapshot_create`); the change
+   (`snapshot_change`); and the automatic snapshot for it, `rebuild` or `dlc-add`, must be in
+   `snapshot list --json` (`snapshot_autosnapshot`).
+2. **Game phase** (after the manifest's steps, the game's exit and the `after` doctor): `b.sav`
+   goes into both places; `snapshot rollback <n> --yes --json` to the manual snapshot; the
+   JSON's `savesCopiedTo` must hold both `b.sav` (and no `a.sav`) (`snapshot_saves_aside`);
+   `content.toml`'s build id and DLC set must be the snapshot's (`snapshot_content`); `a.sav`
+   is back and `b.sav` gone (`snapshot_saves_restored`); `doctor` has no failing line
+   (`snapshot_doctor`). Then the game is launched from that data root to its window
+   (`window_snapshot_rollback`) and stopped, and the rollback is rolled back, to the
+   snapshot it took first: both `b.sav` and the earlier build and DLC set must be back
+   (`snapshot_rollback_back`, `snapshot_doctor_back`). Last, every snapshot of the data root
+   is deleted through gogo (`snapshot_cleanup`), which also exercises `delete`: a read-only
+   snapshot is more than teardown's `rm -rf` can remove.
+
+**Why a data root of its own.** The step needs a data root whose game dir can be a
+subvolume, and the scratch's `gogo/`, `home/` and `xdg/` are the harness's own subvolumes,
+copied by snapshot: a subvolume inside would be an empty dir in every copy. `$RUN/snapshot-data`
+sits beside them, is made after the base is saved, and nothing of the harness copies it
+(a live session skips the step). The scratch's config keeps `auto = false`, so no other
+run changes. The alternative, an override that turns snapshots on in the main data root, would
+have the main game's dir nested in the harness's subvolumes and its copies, which is the
+thing `auto = false` avoids.
+
+**Where it SKIPs.** If `$RUN` isn't on btrfs the step logs `snapshot_rollback: SKIP, …` and
+records a passing `snapshot_rollback` check starting `SKIP:`; nothing is built. If the
+filesystem is btrfs but gogo couldn't make a subvolume (it warns and builds a plain dir),
+`snapshot list` says `ready: false` and the step SKIPs the same way
+(`snapshot_prep_skipped`). The step adds a second build (a rebuild too) to the run, about
+as long as the game's own build from the depot cache.
+
 ## Live sessions
 
 A `run` proves a manifest; a **live session** is for writing one. The game keeps running in
@@ -980,6 +1024,9 @@ PROTON_DLSS_INDICATOR = "1"
 exe = "REDprelauncher.exe"       #   `gogo linux-app run <gogid> <exe> -- <args…>` instead of
 args = []                        #   launch.sh; the run log read is the newest one-off-*.log
 
+[snapshot_rollback]              # games only: snapshots and rollback, after the steps (#408)
+dlc = 1256837418                 #   optional: add this cached DLC as the change; else rebuild
+
 [exit]
 how = "self"                     # "self": it exits by itself after the steps, code 0
                                  # "signal" (default): the launcher gets TERM, code 143
@@ -1129,6 +1176,7 @@ all do the same thing. Exactly one of two conditions:
 | `finished` | the driver hit an error, or never got to the end | |
 | `live_idle` | a live session: no command for `--idle-secs` | an agent that went away |
 | `clean_exit_relaunch_<n>`, `nothing_left_relaunch_<n>`, `window_relaunch_<n>`, `gpu_used_by_game_launch_<n>` | a `relaunch` step: [above](#a-clean-stop-a-kept-disk-and-a-relaunch) | a Quit that hangs, a Wine process that stays and holds the prefix |
+| `snapshot_*` | a `[snapshot_rollback]` step: [below](#snapshots-and-rollback-snapshot_rollback). `snapshot_prep_skipped` and `snapshot_rollback` carry `SKIP: …` and pass where the scratch isn't btrfs | a rollback that loses a save, keeps the wrong DLC set or leaves a game that won't start |
 | `nothing_left`, `scratch_deleted` | as above | |
 
 ## From a pass to a compat entry

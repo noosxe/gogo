@@ -28,6 +28,12 @@ wayland = "unused"
 how = "self"
 wait_secs = 60
 
+# After the steps and the game's exit (#408, design 20 section 10.4): in a data root of its
+# own on btrfs, a build with snapshots on, a fake save, a snapshot, a rebuild (the
+# autosnapshot), newer saves, a rollback, a launch to the window, and the rollback undone.
+# Skipped, with a line, where the scratch isn't btrfs.
+[snapshot_rollback]
+
 [[step]]
 wait = 20
 

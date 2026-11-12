@@ -529,7 +529,7 @@ the rollback replaces):
   New files can't be told apart from what a DLC add or update laid after the snapshot, so
   when the build or DLC set changed since the snapshot they are shown as one summary line
   (`312 new files in game/ gogo can't attribute: not copied`; on btrfs, `they stay in
-  snapshot <pre>`), every one with `-v` and in `--json`. When the build and DLC set are the
+  snapshot <pre>`), every one with `--list-saves` and in `--json`. When the build and DLC set are the
   same as the snapshot's, nothing gogo laid is new, so new files are candidates as usual.
   The plan says which way it checked (`game files: checked against the build's file list`,
   or `game files: no file list, changed files only`).
@@ -552,7 +552,7 @@ covered by a test, and grows as games show more; settings files (`*.ini`, `*.cfg
 excluded, because losing them is a loss too.
 
 **Shown** grouped by dir with count, size and newest mtime (`Saved Games/CD Projekt Red/
-Cyberpunk 2077: 14 files, 212 MiB, newest 2026-11-12 09:58`); every file with `-v` and in
+Cyberpunk 2077: 14 files, 212 MiB, newest 2026-11-12 09:58`); every file with `--list-saves` and in
 `--json`.
 
 ### 6.2 What happens to them
@@ -806,7 +806,7 @@ What the rollback settled where §5.3, §5.4 and §6 left room:
 - **The registry.** `user.reg` and `system.reg` go aside under `registry/` whenever they
   changed: they are small, and older games keep settings and saves there.
 - **What isn't scanned** gets a line in the plan: the rest of `drive_c`, the prefix's other
-  files, and caches and logs (`-v` lists the exclusions).
+  files, and caches and logs (`--list-saves` lists the exclusions).
 - **The depot lane's list** comes from the depot cache when its record names the game's
   build: every file of the tree and of the support overlays (`gog-support/…/app/`, which
   the build merges into `game/`), at the size the cache holds it. Else the CLI fetches the
@@ -835,7 +835,7 @@ What the rollback settled where §5.3, §5.4 and §6 left room:
   keep their path from `drive_c/` (`GOG/<slug>/…`). Each file is synced, then the dirs
   holding it up to `saves-aside/`, before the journal records `savesAside`.
 - **Output.** The plan prints first: to stderr before the question, to stdout with
-  `--yes`. `-v` lists every file. `--dry-run --json` prints the plan, and `--json` prints
+  `--yes`. `--list-saves` lists every file. `--dry-run --json` prints the plan, and `--json` prints
   §8's shape plus `overrideChanges`, `pruned`, `warnings` and `recovered`. A number that
   isn't a snapshot, is missing on disk or has no metadata is a usage error (exit 2).
 - **The staged tree's launcher.** Before the swap, the rollback writes this gogo's
@@ -1106,6 +1106,29 @@ One new step, `snapshot_rollback`, builds a cached game with snapshots on in its
 dir, adds a DLC (or rebuilds), writes a fake save, rolls back, and checks that the game
 launches to its ready state, the DLC set matches, and the save is in the aside dir. It runs
 headless, so agents can run it on games already in the cache.
+
+**As built (#408).** `[snapshot_rollback]` in a manifest (optionally `dlc = <id>`); the
+details are in `docs/linux-e2e.md`, "Snapshots and rollback". What this left open:
+
+- **A data root of its own, not an override.** The step builds the game again into
+  `$RUN/snapshot-data` with `[snapshots] auto = true`, beside the scratch's `gogo/`, `home/`
+  and `xdg/` that the harness snapshots. The main scratch config keeps `auto = false`, and
+  the saved bases are unchanged. It costs a second build per run; an override would have
+  had the main game dir nested in the harness's own subvolumes.
+- **Two halves.** The change (`dlc add` or a rebuild) needs the network, so it runs in the
+  build phase's sandbox; the rollback, the launch (the ready state is the manifest's window
+  check) and the undo run in the game phase, after the manifest's steps.
+- **The save checks.** `a.sav` is written before the manual snapshot, `b.sav` after the change
+  (both in the prefix's `Saved Games/e2e/` and in `game/e2e/`). Rolling back to the manual
+  snapshot must copy both `b.sav` aside and none of `a.sav`; rolling back to the
+  pre-rollback snapshot, which the JSON names as `pre`, must bring `b.sav` back.
+- **A bug it found.** `snapshot rollback` declared its own `--verbose`, which clashes with the
+  global flag of that name and panicked clap when the command was read, so no rollback ran.
+  The flag is now `--list-saves` (the plan lists every newer save file), and a test builds the
+  whole command tree.
+- **SKIPs, never fails,** where the scratch isn't btrfs or the game dir didn't become a
+  subvolume. At the end every snapshot of the data root is deleted through
+  `snapshot delete`.
 
 ### 10.5 Host pass (the PR lists these; agents don't run them on real games)
 
