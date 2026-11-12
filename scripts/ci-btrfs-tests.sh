@@ -6,8 +6,12 @@
 set -euo pipefail
 
 mode=${1:?usage: ci-btrfs-tests.sh plain|rm-allowed}
-img=$(mktemp -u "${RUNNER_TEMP:-/tmp}/gogo-btrfs-XXXXXX.img")
-mnt=$(mktemp -d "${RUNNER_TEMP:-/tmp}/gogo-btrfs-mnt-XXXXXX")
+# Not /tmp outside CI: the build test runs a game's tools through umu, whose
+# container has a private /tmp, and gogo refuses it.
+tmp=${RUNNER_TEMP:-$PWD/target}
+mkdir -p "$tmp"
+img=$(mktemp -u "$tmp/gogo-btrfs-XXXXXX.img")
+mnt=$(mktemp -d "$tmp/gogo-btrfs-mnt-XXXXXX")
 opts=loop
 extra=()
 case $mode in
@@ -34,3 +38,8 @@ grep " $mnt " /proc/mounts
 
 env GOGO_TEST_BTRFS_DIR="$mnt" GOGO_TEST_BTRFS_REQUIRED=1 "${extra[@]}" \
   nix develop -c cargo nextest run -p gogo-core --test snapshot_btrfs --no-fail-fast
+# A build of a small game into the mount: its dir a subvolume, its initial
+# snapshot beside it (#403).
+env GOGO_TEST_BTRFS_DIR="$mnt" GOGO_TEST_BTRFS_REQUIRED=1 "${extra[@]}" \
+  nix develop -c cargo nextest run -p gogo-core --test linuxapp_pipeline --no-fail-fast \
+  -E 'test(/^btrfs_/)'

@@ -117,7 +117,7 @@ jobs:
       - name: Build tests and mkfs.btrfs
         run: |
           nix develop -c mkfs.btrfs --version
-          nix develop -c cargo nextest run -p gogo-core --test snapshot_btrfs --no-run
+          nix develop -c cargo nextest run -p gogo-core --test snapshot_btrfs --test linuxapp_pipeline --no-run
       - name: btrfs without user_subvol_rm_allowed (rmdir fallback)
         run: scripts/ci-btrfs-tests.sh plain
       - name: btrfs with user_subvol_rm_allowed (ioctl delete)
