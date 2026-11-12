@@ -60,6 +60,10 @@ pub struct Content {
     pub build_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
+    /// The branch of the build, only when it isn't the default one (design 21 §5.1).
+    /// An older gogo ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
     #[serde(default, rename = "dlc", skip_serializing_if = "Vec::is_empty")]
@@ -204,7 +208,8 @@ pub fn for_build(
         schema: SCHEMA,
         lane,
         build_id: rec.as_ref().map(|r| r.build_id.clone()).or(info_build),
-        version: None,
+        version: rec.as_ref().and_then(|r| r.version.clone()),
+        branch: None,
         language: rec.and_then(|r| r.language),
         dlc,
     }
@@ -235,7 +240,8 @@ pub fn resolve(
             schema: SCHEMA,
             lane,
             build_id: rec.as_ref().map(|r| r.build_id.clone()).or(info_build),
-            version: None,
+            version: rec.as_ref().and_then(|r| r.version.clone()),
+            branch: None,
             language: rec.and_then(|r| r.language),
             dlc,
         },
@@ -296,6 +302,7 @@ mod tests {
             lane: Lane::Depot,
             build_id: Some("5555".into()),
             version: Some("2.31a".into()),
+            branch: None,
             language: Some("en-US".into()),
             dlc: vec![DlcRow {
                 id: 12,
@@ -305,6 +312,34 @@ mod tests {
                 added: Some("2026-11-11".into()),
             }],
         }
+    }
+
+    #[test]
+    fn branch_is_written_only_when_set_and_old_files_read_without_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No branch: the file has no `branch` key, as before.
+        write(tmp.path(), &sample()).unwrap();
+        let raw = std::fs::read_to_string(path(tmp.path())).unwrap();
+        assert!(!raw.contains("branch"), "{raw}");
+        // A named branch round-trips.
+        let mut c = sample();
+        c.branch = Some("1_63_legacy_patch".into());
+        write(tmp.path(), &c).unwrap();
+        let raw = std::fs::read_to_string(path(tmp.path())).unwrap();
+        assert!(raw.contains("branch = \"1_63_legacy_patch\""), "{raw}");
+        assert_eq!(load(tmp.path()).unwrap(), Some(c));
+        // A file an older gogo wrote reads with `branch` None.
+        std::fs::write(
+            path(tmp.path()),
+            "schema = 1\nlane = \"depot\"\nbuild_id = \"5555\"\nversion = \"2.31a\"\n",
+        )
+        .unwrap();
+        assert_eq!(load(tmp.path()).unwrap().unwrap().branch, None);
+        // An older gogo reading a file with a branch ignores the key: `Content` has
+        // no `deny_unknown_fields`, which the same read shows.
+        let with = "schema = 1\nlane = \"depot\"\nbranch = \"x\"\nsurprise = 1\n";
+        std::fs::write(path(tmp.path()), with).unwrap();
+        assert!(load(tmp.path()).is_ok());
     }
 
     #[test]

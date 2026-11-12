@@ -1379,6 +1379,7 @@ mod tests {
                 lane: content::Lane::Depot,
                 build_id: Some("B25".into()),
                 version: None,
+                branch: None,
                 language: Some("en-US".into()),
                 dlc: dlc
                     .iter()
@@ -1552,6 +1553,7 @@ mod tests {
             lane: content::Lane::Depot,
             build_id: None,
             version: None,
+            branch: None,
             language: None,
             dlc: vec![DlcRow {
                 id: 1,

@@ -182,12 +182,66 @@ pub enum DlcSelectError {
         build_id: String,
         valid: Vec<DlcInfo>,
     },
+    /// A rebuild that keeps the recorded DLC meets one the build lacks (design 21
+    /// D8): never dropped silently.
+    #[error(
+        "{} {} in build {build}, and the game has {} installed; pass --dlc without {} \
+         (or --no-dlcs) to build without {}, or pick another build",
+        names(.missing),
+        if .missing.len() == 1 { "isn't" } else { "aren't" },
+        if .missing.len() == 1 { "it" } else { "them" },
+        if .missing.len() == 1 { "it" } else { "them" },
+        if .missing.len() == 1 { "it" } else { "them" },
+    )]
+    KeptNotInBuild {
+        /// `(id, title)` of each recorded DLC the build lacks.
+        missing: Vec<(u64, String)>,
+        build: String,
+    },
     #[error("DLC \"{name}\" is ambiguous for {game}; it matches: {}", list(.matches))]
     Ambiguous {
         name: String,
         game: String,
         matches: Vec<DlcInfo>,
     },
+}
+
+fn names(v: &[(u64, String)]) -> String {
+    v.iter()
+        .map(|(id, t)| format!("\"{t}\" ({id})"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Pure (design 21 D8): the recorded DLC `kept` that build `build` (a label) lacks
+/// are refused by name. `recorded` titles them; `infos` says what the build has.
+pub fn check_kept(
+    kept: &[u64],
+    recorded: &[(u64, String)],
+    infos: &[DlcInfo],
+    build: &str,
+) -> Result<(), DlcSelectError> {
+    let missing: Vec<(u64, String)> = kept
+        .iter()
+        .filter(|id| !infos.iter().any(|d| d.id == **id && d.in_build))
+        .map(|id| {
+            let title = recorded
+                .iter()
+                .find(|(r, _)| r == id)
+                .map(|(_, t)| t.clone())
+                .or_else(|| infos.iter().find(|d| d.id == *id).map(|d| d.title.clone()))
+                .unwrap_or_else(|| id.to_string());
+            (*id, title)
+        })
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(DlcSelectError::KeptNotInBuild {
+            missing,
+            build: build.to_string(),
+        })
+    }
 }
 
 fn one(d: &DlcInfo) -> String {
@@ -856,5 +910,30 @@ mod tests {
                 .dropped
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn a_recorded_dlc_the_build_lacks_is_refused_by_name() {
+        // Phantom Liberty is in the build; Extra Pack (installer-only) is not.
+        let recorded = vec![(6, "Extra Pack".to_string())];
+        let e = check_kept(&[1256837418, 6], &recorded, &infos(), "2.3 (588)").unwrap_err();
+        assert_eq!(
+            e,
+            DlcSelectError::KeptNotInBuild {
+                missing: vec![(6, "Extra Pack".into())],
+                build: "2.3 (588)".into(),
+            }
+        );
+        let msg = e.to_string();
+        assert!(
+            msg.contains("\"Extra Pack\" (6) isn't in build 2.3 (588)")
+                && msg.contains("pass --dlc without it"),
+            "{msg}"
+        );
+        // A DLC the catalog doesn't know at all is named by its id.
+        let e = check_kept(&[42], &[], &infos(), "b").unwrap_err();
+        assert!(e.to_string().contains("\"42\" (42)"), "{e}");
+        assert!(check_kept(&[1256837418], &[], &infos(), "b").is_ok());
+        assert!(check_kept(&[], &[], &infos(), "b").is_ok());
     }
 }

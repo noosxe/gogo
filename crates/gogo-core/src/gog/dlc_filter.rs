@@ -545,6 +545,11 @@ pub struct DepotContent {
     /// `content.toml`'s `version` (#418). Used only when the id is the build the
     /// tree holds. `None`: the list didn't answer or the build isn't in it.
     pub version: Option<(String, String)>,
+    /// The build's id and branch, when the build isn't on the default branch
+    /// (design 21 §5.1); used only when the id is the build the tree holds.
+    pub branch: Option<(String, String)>,
+    /// The plan's lines about the build (design 21 §3.4); the first is `build:`.
+    pub build_lines: Vec<String>,
     /// Leaves out the cache's other DLC; `None` when it holds no other.
     pub filter: Option<TreeFilter>,
 }

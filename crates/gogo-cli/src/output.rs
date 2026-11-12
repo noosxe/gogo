@@ -582,6 +582,7 @@ mod list_tests {
                 lane: Lane::Depot,
                 build_id: Some("900".into()),
                 version: Some("2.31".into()),
+                branch: None,
                 language: Some("en-US".into()),
                 dlc: Vec::new(),
             }),

@@ -1336,6 +1336,72 @@ fn a_build_writes_content_toml_and_apps_and_doctor_show_it() {
     );
 }
 
+#[test]
+fn a_picked_build_records_its_branch_and_version_and_the_plan_carries_the_lines() {
+    use gogo::gog::content;
+    let w = World::new("branch", &["d3d9.dll"]);
+    dlc_info(&w.tree, "777001", "Extra Pack");
+    let stamp = |w: &World| {
+        std::fs::write(
+            w.tree.parent().unwrap().join(gogo::gog::depot::RECORD),
+            r#"{"buildId":"4242","version":"2.5","generation":2,"files":[]}"#,
+        )
+        .unwrap();
+    };
+    stamp(&w);
+    let lines = vec![
+        "1.63_Hotfix (56624919703786522, picked, on branch 1_63_legacy_patch; newest is 2.5)"
+            .to_string(),
+        "downgrade from 2.5: saves made by a newer version may not load".to_string(),
+    ];
+    let with = |branch: &str| LinuxAppOptions {
+        depot_content: Some(build::DepotContent {
+            dlcs: vec![content::DlcRef {
+                id: 777001,
+                title: "Extra Pack".into(),
+            }],
+            version: Some(("4242".into(), "1.63_Hotfix".into())),
+            branch: Some((branch.into(), "1_63_legacy_patch".into())),
+            build_lines: lines.clone(),
+            ..Default::default()
+        }),
+        ..w.opts()
+    };
+    let plan = build::plan(&with("4242"), None, &mut quiet()).unwrap();
+    assert_eq!(plan.depot_content.as_ref().unwrap().build_lines, lines);
+    build::execute(&plan, None, &mut quiet()).unwrap();
+    let c = content::load(&w.game()).unwrap().unwrap();
+    assert_eq!(c.build_id.as_deref(), Some("4242"));
+    assert_eq!(c.version.as_deref(), Some("1.63_Hotfix"));
+    assert_eq!(c.branch.as_deref(), Some("1_63_legacy_patch"));
+    let raw = std::fs::read_to_string(w.game().join("content.toml")).unwrap();
+    assert!(raw.contains("branch = \"1_63_legacy_patch\""), "{raw}");
+
+    // A branch for another build than the tree holds is not recorded. A world
+    // holds the env lock, so the first one goes first.
+    drop(w);
+    let w = World::new("branch-other", &["d3d9.dll"]);
+    dlc_info(&w.tree, "777001", "Extra Pack");
+    stamp(&w);
+    let plan = build::plan(
+        &LinuxAppOptions {
+            depot_content: Some(build::DepotContent {
+                branch: Some(("999".into(), "elsewhere".into())),
+                ..Default::default()
+            }),
+            ..w.opts()
+        },
+        None,
+        &mut quiet(),
+    )
+    .unwrap();
+    build::execute(&plan, None, &mut quiet()).unwrap();
+    let c = content::load(&w.game()).unwrap().unwrap();
+    assert_eq!(c.branch, None);
+    // The version comes from the cache record's stamp when nothing names it.
+    assert_eq!(c.version.as_deref(), Some("2.5"));
+}
+
 // — a cache holding more DLC than the build takes (design 19 §3.3, #376) —
 
 const DLC_A: u64 = 1999999902;
@@ -1451,6 +1517,7 @@ fn content_for(root: &Path, w: &World, wanted: &[u64]) -> build::DepotContent {
         language: None,
         version: None,
         filter,
+        ..Default::default()
     }
 }
 
@@ -1652,6 +1719,7 @@ fn language_content(root: &Path, w: &World, language: &str) -> build::DepotConte
         language: Some(language.into()),
         version: None,
         filter,
+        ..Default::default()
     }
 }
 
@@ -7641,6 +7709,7 @@ mod dlc_add {
                 language: None,
                 version: None,
                 filter: None,
+                ..Default::default()
             }),
             ..w.opts()
         };

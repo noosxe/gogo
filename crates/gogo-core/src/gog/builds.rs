@@ -245,6 +245,170 @@ impl fmt::Display for BuildResolveError {
 
 impl std::error::Error for BuildResolveError {}
 
+// ---- what a run does with the build (design 21 §3.4, D9) ----
+
+impl BuildEntry {
+    /// `2.31a (58989493373906337)`, or the id alone for a build with no version name.
+    pub fn label(&self) -> String {
+        if self.version.is_empty() {
+            self.build_id.clone()
+        } else {
+            format!("{} ({})", self.version, self.build_id)
+        }
+    }
+
+    /// Newest first: by date, then by id (as [`pick_build`] breaks ties).
+    fn order(&self) -> (DateTime<Utc>, &str) {
+        (self.published, self.build_id.as_str())
+    }
+}
+
+/// The build a built game records in `content.toml`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledRef {
+    pub build_id: String,
+    pub version: Option<String>,
+    /// `None` on the default branch.
+    pub branch: Option<String>,
+}
+
+/// Why `--build` can't be honoured by a run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PickError {
+    /// The value names no single listed build (exit 2).
+    Resolve(BuildResolveError),
+    /// GOG lists no build: the game has no depot lane, and installers come in the
+    /// newest version only (D9, exit 2).
+    NoDepotBuild { title: String },
+}
+
+impl fmt::Display for PickError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Resolve(e) => e.fmt(f),
+            Self::NoDepotBuild { title } => write!(
+                f,
+                "--build picks a depot build, and {title} has none; {INSTALLER_NEWEST_ONLY}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PickError {}
+
+/// The offline-installer lane has no builds to pick (design 21 §6, D9).
+pub const INSTALLER_NEWEST_ONLY: &str =
+    "installers come in the newest version only; --from-depot --build X picks a depot build";
+
+/// Pure: the build a `--build <value>` run takes, or why it can't.
+pub fn pick_for_run<'a>(
+    listing: &'a Listing,
+    value: &str,
+    ctx: &ResolveCtx<'_>,
+) -> Result<&'a Build, PickError> {
+    if listing.builds.is_empty() {
+        return Err(PickError::NoDepotBuild {
+            title: ctx.title.to_string(),
+        });
+    }
+    listing.resolve(value, ctx).map_err(PickError::Resolve)
+}
+
+/// Pure: the plan's lines about the build (design 21 §3.4): the first is the
+/// `build:` line, any others follow it. `target` is the build the run takes;
+/// `picked` says `--build` chose it; `installed` is the built game's build, for a
+/// rebuild. Empty when there is nothing to say (a first build of the newest).
+pub fn plan_lines(
+    listing: &Listing,
+    target: &Build,
+    picked: bool,
+    installed: Option<&InstalledRef>,
+) -> Vec<String> {
+    let entries = listing.entries();
+    let t = BuildEntry::from_build(target);
+    let newest = listing.newest().map(BuildEntry::from_build);
+    let listed = installed.and_then(|i| entries.iter().find(|e| e.build_id == i.build_id));
+    let same = installed.is_some_and(|i| i.build_id == t.build_id);
+    let installed_name = |i: &InstalledRef| match i.version.as_deref() {
+        Some(v) if !v.is_empty() => v.to_string(),
+        _ => i.build_id.clone(),
+    };
+    let mut why: Vec<String> = Vec::new();
+    if picked {
+        let mut p = String::from("picked");
+        if let Some(b) = &t.branch {
+            p.push_str(&format!(", on branch {b}"));
+        }
+        match &newest {
+            Some(n) if n.build_id == t.build_id => p.push_str("; the newest"),
+            Some(n) => p.push_str(&format!("; newest is {}", n.label_short())),
+            None => {}
+        }
+        why.push(p);
+    } else if !same
+        && let (Some(i), Some(l)) = (installed, listed)
+        && l.order() < t.order()
+    {
+        // `--build` takes a version name only when it is unique.
+        let keep = if l.version.is_empty()
+            || entries.iter().filter(|e| e.version == l.version).count() > 1
+        {
+            l.build_id.clone()
+        } else {
+            l.version.clone()
+        };
+        why.push(format!(
+            "newer than the installed {}; --build {keep} keeps it",
+            installed_name(i)
+        ));
+    }
+    if let Some(i) = installed
+        && !same
+        && i.branch != t.branch
+    {
+        why.push(format!(
+            "the installed one is on {}, this on {}",
+            i.branch
+                .as_deref()
+                .map_or("the default branch".to_string(), |b| format!("branch {b}")),
+            t.branch
+                .as_deref()
+                .map_or("the default branch".to_string(), |b| format!("branch {b}")),
+        ));
+    }
+    let mut out = Vec::new();
+    if !why.is_empty() {
+        let why = why.join("; ");
+        out.push(if t.version.is_empty() {
+            format!("{} ({why})", t.build_id)
+        } else {
+            format!("{} ({}, {why})", t.version, t.build_id)
+        });
+    }
+    // A build older than the installed one: saves may not load (D2, §3.4).
+    if let (Some(i), Some(l)) = (installed, listed)
+        && !same
+        && t.order() < l.order()
+    {
+        out.push(format!(
+            "downgrade from {}: saves made by a newer version may not load",
+            installed_name(i)
+        ));
+    }
+    out
+}
+
+impl BuildEntry {
+    /// The version name, or the id for a build with none.
+    fn label_short(&self) -> &str {
+        if self.version.is_empty() {
+            &self.build_id
+        } else {
+            &self.version
+        }
+    }
+}
+
 // ---- the listing cache (design 21 §4.2, D7) ----
 
 /// A listing as the cache keeps it.
@@ -708,5 +872,146 @@ mod tests {
         )
         .unwrap();
         assert!(read_cache(t.path(), Platform::Windows, 7).is_none());
+    }
+
+    // ---- what a run does with the build (design 21 §3.4, D9) ----
+
+    fn installed(id: &str, version: &str, branch: Option<&str>) -> InstalledRef {
+        InstalledRef {
+            build_id: id.into(),
+            version: Some(version.into()),
+            branch: branch.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn a_picked_build_is_resolved_by_id_or_version() {
+        let l = cyberpunk();
+        assert_eq!(
+            pick_for_run(&l, "2.31a", &ctx()).unwrap().build_id(),
+            "58989493373906337"
+        );
+        assert_eq!(
+            pick_for_run(&l, "58809037770927044", &ctx())
+                .unwrap()
+                .version_name(),
+            "2.3"
+        );
+        // The newest on the default branch isn't what a legacy-branch pick means.
+        assert_eq!(
+            pick_for_run(&l, "1.63_Hotfix", &ctx()).unwrap().branch(),
+            &Some("1_63_legacy_patch".to_string())
+        );
+        let e = pick_for_run(&l, "2.2", &ctx()).unwrap_err();
+        assert!(matches!(
+            e,
+            PickError::Resolve(BuildResolveError::Unknown { .. })
+        ));
+        assert!(e.to_string().contains("no build \"2.2\""), "{e}");
+    }
+
+    #[test]
+    fn a_game_with_no_builds_refuses_build_like_the_installer_lane() {
+        let e = pick_for_run(&listing(vec![], 0), "2.5", &ctx()).unwrap_err();
+        assert_eq!(
+            e,
+            PickError::NoDepotBuild {
+                title: "Cyberpunk 2077".into()
+            }
+        );
+        let msg = e.to_string();
+        assert!(
+            msg.contains("--build picks a depot build")
+                && msg.contains("installers come in the newest version only"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn the_plan_says_which_build_was_picked_and_what_is_newest() {
+        let l = cyberpunk();
+        let t = pick_for_run(&l, "2.31a", &ctx()).unwrap();
+        assert_eq!(
+            plan_lines(&l, t, true, None),
+            ["2.31a (58989493373906337, picked; newest is 2.5_RedModFix)"]
+        );
+        let newest = pick_for_run(&l, "2.5_RedModFix", &ctx()).unwrap();
+        assert_eq!(
+            plan_lines(&l, newest, true, None),
+            ["2.5_RedModFix (60152385347545148, picked; the newest)"]
+        );
+        // A build on a named branch says so, and the branch change.
+        let legacy = pick_for_run(&l, "1.63_Hotfix", &ctx()).unwrap();
+        let lines = plan_lines(&l, legacy, true, None);
+        assert!(
+            lines[0].contains("on branch 1_63_legacy_patch"),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn an_older_pick_than_the_installed_build_is_a_downgrade() {
+        let l = cyberpunk();
+        let inst = installed("60152385347545148", "2.5_RedModFix", None);
+        let t = pick_for_run(&l, "2.31a", &ctx()).unwrap();
+        let lines = plan_lines(&l, t, true, Some(&inst));
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(
+            lines[1],
+            "downgrade from 2.5_RedModFix: saves made by a newer version may not load"
+        );
+        // Picking the installed build again is neither.
+        let same = pick_for_run(&l, "2.5_RedModFix", &ctx()).unwrap();
+        assert_eq!(plan_lines(&l, same, true, Some(&inst)).len(), 1);
+    }
+
+    #[test]
+    fn a_build_newer_than_the_installed_one_says_how_to_keep_it() {
+        let l = cyberpunk();
+        let inst = installed("58989493373906337", "2.31a", None);
+        let newest = l.newest().unwrap();
+        assert_eq!(
+            plan_lines(&l, newest, false, Some(&inst)),
+            [
+                "2.5_RedModFix (60152385347545148, newer than the installed 2.31a; --build 2.31a keeps it)"
+            ]
+        );
+        // The installed build is the one taken (a warm cache): nothing to say.
+        let same = pick_for_run(&l, "2.31a", &ctx()).unwrap();
+        assert!(plan_lines(&l, same, false, Some(&inst)).is_empty());
+        // A first build of the newest: nothing either.
+        assert!(plan_lines(&l, newest, false, None).is_empty());
+    }
+
+    #[test]
+    fn a_shared_version_name_keeps_the_installed_build_by_id() {
+        let l = listing(
+            vec![
+                b("200", "2.03", "2015-08-14T10:00:00Z", None, true),
+                b("100", "2.03", "2015-08-12T10:00:00Z", None, true),
+                b("300", "2.04", "2015-09-01T10:00:00Z", None, true),
+            ],
+            2,
+        );
+        let inst = installed("100", "2.03", None);
+        let lines = plan_lines(&l, l.newest().unwrap(), false, Some(&inst));
+        assert!(lines[0].contains("--build 100 keeps it"), "{lines:?}");
+    }
+
+    #[test]
+    fn a_game_on_a_named_branch_names_both_branches() {
+        let l = cyberpunk();
+        let inst = installed(
+            "56624919703786522",
+            "1.63_Hotfix",
+            Some("1_63_legacy_patch"),
+        );
+        let lines = plan_lines(&l, l.newest().unwrap(), false, Some(&inst));
+        assert!(
+            lines[0].contains(
+                "the installed one is on branch 1_63_legacy_patch, this on the default branch"
+            ),
+            "{lines:?}"
+        );
     }
 }

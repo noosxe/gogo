@@ -1199,6 +1199,12 @@ pub fn execute(
     {
         content.version = Some(v);
     }
+    if lane == content::Lane::Depot
+        && let Some((id, b)) = plan.depot_content.as_ref().and_then(|c| c.branch.clone())
+        && content.build_id.as_deref() == Some(id.as_str())
+    {
+        content.branch = Some(b);
+    }
     let dirs = GameDirs::for_game(&gogid)?;
     if let Some(w) = write_content_or_warn(&dirs.root, &content) {
         outcome.warnings.push(w);
