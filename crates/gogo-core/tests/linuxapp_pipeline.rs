@@ -8893,7 +8893,9 @@ mod rollback {
         assert_eq!(p.pre, n + 1);
         let lines = p.lines(false).join("\n");
         assert!(
-            lines.contains("game files: no file list, changed files only"),
+            lines.contains(
+                "game files: the same build and DLC set as the snapshot: every changed file counts"
+            ),
             "{lines}"
         );
         assert!(
@@ -9390,6 +9392,236 @@ mod rollback {
         }
         // Without them, it runs (setup first: the override changed).
         assert_runs(&w);
+    }
+
+    /// The snapshot's DLC set made another than the game's, as if a DLC was
+    /// added since: the game's files are checked without a list then.
+    fn other_content_since(w: &World, n: u32) {
+        let file = w.home.join("snapshots").join(ID).join(format!("{n}.toml"));
+        let mut meta: gogo::snapshot::Meta =
+            toml::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        meta.content.dlcs = vec![1_234_567];
+        std::fs::write(&file, toml::to_string(&meta).unwrap()).unwrap();
+    }
+
+    /// The build or DLC set changed and there is no list: new game files are
+    /// unattributed and still copied (small, or cloned) under
+    /// `unattributed/`; a changed registry file goes under `registry/`; the
+    /// `Public` user dir is a save root.
+    #[test]
+    fn unattributed_files_the_registry_and_public_go_aside() {
+        let Some(w) = World::launcher("rb-unattr", false) else {
+            return;
+        };
+        let (_, b) = fake();
+        let (root, n) = dress(&w, &b);
+        other_content_since(&w, n);
+        put(
+            &root,
+            "prefix/user.reg",
+            "WINE REGISTRY Version 2\n[after]\n",
+        );
+        put(
+            &root,
+            "prefix/drive_c/users/Public/Documents/Studio/p.sav",
+            "pub",
+        );
+        let p = plan(&b, n, &opts());
+        let un: Vec<&str> = p
+            .saves
+            .unattributed
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect();
+        assert_eq!(un, ["game/SAVE/slot1.sav"], "{un:?}");
+        assert!(p.copy_unattributed);
+        let reg: Vec<&str> = p.saves.registry.iter().map(|f| f.path.as_str()).collect();
+        assert!(reg.contains(&"user.reg"), "{reg:?}");
+        let saves: Vec<&str> = p.saves.files.iter().map(|f| f.path.as_str()).collect();
+        assert!(
+            saves.contains(&"users/Public/Documents/Studio/p.sav"),
+            "{saves:?}"
+        );
+        // era.txt was in the snapshot: changed, so it counts.
+        assert!(saves.contains(&"game/era.txt"), "{saves:?}");
+        let lines = p.lines(false).join("\n");
+        assert!(
+            lines.contains("the build or DLC set changed and there is no file list"),
+            "{lines}"
+        );
+        assert!(lines.contains("gogo can't attribute"), "{lines}");
+        assert!(lines.contains("registry changed (user.reg"), "{lines}");
+        assert!(lines.contains("not scanned: "), "{lines}");
+        assert!(
+            !p.question().contains("won't be copied"),
+            "{}",
+            p.question()
+        );
+
+        let out = rb::rollback(ID, &b, n, &p, &opts()).unwrap();
+        let aside = out.saves_copied_to.clone().unwrap();
+        assert_eq!(
+            read(&aside, "unattributed/game/SAVE/slot1.sav").as_deref(),
+            Some("slot1")
+        );
+        assert!(
+            read(&aside, "registry/user.reg")
+                .unwrap()
+                .contains("[after]")
+        );
+        assert_eq!(
+            read(&aside, "users/Public/Documents/Studio/p.sav").as_deref(),
+            Some("pub")
+        );
+        assert!(!root.join("game/SAVE/slot1.sav").exists());
+        assert_settled(&w, &root);
+    }
+
+    /// A crash right after the swap, before step 6: the game dir is the
+    /// snapshot's, whose own `launch.sh` predates the marker check. The
+    /// rollback put this gogo's into the staged tree, so a launch from the
+    /// menu is refused until the rollback is settled.
+    #[test]
+    fn right_after_the_swap_the_staged_launcher_refuses_on_the_marker() {
+        let Some(w) = World::launcher("rb-staged-sh", false) else {
+            return;
+        };
+        let stub = w.dialog_stub(&["", ""]);
+        let (_, b) = fake();
+        let (root, n) = dress(&w, &b);
+        // The snapshot's launcher: an old one that would just run the game.
+        let snap_sh = backend::snapshot_dir(&root, n).unwrap().join("launch.sh");
+        let ran = w.root.join("old-launcher-ran");
+        std::fs::write(
+            &snap_sh,
+            format!(
+                "#!/bin/sh\nLAUNCHER_VERSION=1\ntouch '{}'\nexit 0\n",
+                ran.display()
+            ),
+        )
+        .unwrap();
+        let o = RollbackOptions {
+            fail_at: Some(RbStep::Committed),
+            ..opts()
+        };
+        go(&b, n, &o).unwrap_err();
+        assert!(root.join(backend::ROLLBACK_MARKER).exists());
+        assert_eq!(read(&root, "game/era.txt").as_deref(), Some("then"));
+        let out = w.launch(&[("GOGO_LAUNCHER_DIALOG", stub.to_str().unwrap())], &[]);
+        assert_eq!(out.status.code(), Some(127), "{out:?}");
+        assert!(!ran.exists(), "the snapshot's own launch.sh ran");
+        assert_eq!(w.game_runs(), 0);
+        assert!(
+            w.launch_log()
+                .contains("a snapshot rollback isn't finished: not launching")
+        );
+        // Settled, it runs.
+        snap::list(ID, &b, 5, false).unwrap();
+        assert_settled(&w, &root);
+        assert_runs(&w);
+    }
+
+    /// A target whose override copy is gone is refused before anything is
+    /// touched; one gone after the commit leaves the current override.
+    #[test]
+    fn a_missing_override_copy_is_refused_before_the_commit() {
+        let Some(w) = World::launcher("rb-no-l4", false) else {
+            return;
+        };
+        let (_, b) = fake();
+        let (root, n) = dress(&w, &b);
+        let copy = w
+            .home
+            .join("snapshots")
+            .join(ID)
+            .join(format!("{n}.override.toml"));
+        let kept = std::fs::read(&copy).unwrap();
+        std::fs::remove_file(&copy).unwrap();
+        match rb::plan(ID, &b, n, &opts()).unwrap() {
+            Planned::Unknown(why) => {
+                assert!(why.contains("copy of the override file"), "{why}")
+            }
+            Planned::Plan(_) => panic!("planned without its override copy"),
+        }
+        assert!(
+            !w.home
+                .join("snapshots")
+                .join(ID)
+                .join(format!("{}.toml", n + 1))
+                .exists()
+        );
+        assert_eq!(read(&root, "game/era.txt").as_deref(), Some("now"));
+
+        // Gone after the commit (a crash, then a hand edit): recovery keeps
+        // the current override and finishes, every time.
+        std::fs::write(&copy, &kept).unwrap();
+        let l4_now = std::fs::read_to_string(l4(&w)).unwrap();
+        let o = RollbackOptions {
+            fail_at: Some(RbStep::Committed),
+            ..opts()
+        };
+        go(&b, n, &o).unwrap_err();
+        std::fs::remove_file(&copy).unwrap();
+        let listed = snap::list(ID, &b, 5, false).unwrap();
+        assert!(
+            listed.notes.join("\n").contains("was finished"),
+            "{:?}",
+            listed.notes
+        );
+        assert_settled(&w, &root);
+        assert_eq!(std::fs::read_to_string(l4(&w)).unwrap(), l4_now);
+        assert_eq!(read(&root, "game/era.txt").as_deref(), Some("then"));
+    }
+
+    /// Settling takes the refusals of a running game: a pending rollback
+    /// waits for it to quit, and `list` still lists.
+    #[test]
+    fn a_running_game_holds_off_settling() {
+        let w = World::new("rb-settle-running", &["d3d9.dll"]);
+        let (_, b) = fake();
+        let root = super::build_with(&w.opts()).dirs.root;
+        put(&root, "game/era.txt", "then");
+        let n = snap::create(ID, &b, None).unwrap().snapshot.id;
+        put(&root, "game/era.txt", "now");
+        let o = RollbackOptions {
+            fail_at: Some(RbStep::Staged),
+            ..opts()
+        };
+        go(&b, n, &o).unwrap_err();
+        let journal = w.home.join("snapshots").join(ID).join("rollback.json");
+        assert!(journal.exists());
+        // The game runs (its launcher's pid file).
+        let launchers = root.join(".launchers");
+        std::fs::create_dir_all(&launchers).unwrap();
+        std::fs::write(
+            launchers.join(std::process::id().to_string()),
+            format!("{}\n", my_start()),
+        )
+        .unwrap();
+        let listed = snap::list(ID, &b, 5, false).unwrap();
+        assert!(
+            listed
+                .notes
+                .join("\n")
+                .contains("an interrupted rollback isn't settled yet"),
+            "{:?}",
+            listed.notes
+        );
+        assert!(journal.exists());
+        assert!(backend::rollback_staging(&root).unwrap().exists());
+        let e = rb::settle_pending(ID, &b).unwrap_err().to_string();
+        assert!(e.contains("is running"), "{e}");
+        let e = snap::create(ID, &b, None)
+            .map(|_| ())
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("is running"), "{e}");
+        assert!(journal.exists());
+        // It quits: the next command settles it.
+        std::fs::remove_dir_all(&launchers).unwrap();
+        let listed = snap::list(ID, &b, 5, false).unwrap();
+        assert!(listed.notes.join("\n").contains("was undone"));
+        assert_settled(&w, &root);
     }
 
     fn my_start() -> String {

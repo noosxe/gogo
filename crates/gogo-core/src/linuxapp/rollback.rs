@@ -251,6 +251,9 @@ pub struct RollbackPlan {
     pub groups: Vec<Group>,
     /// Where the copy goes (`<data_root>/saves-aside/<gogid>/<UTC time>/`).
     pub saves_aside: PathBuf,
+    /// The unattributed new files are copied (under `unattributed/`): they
+    /// are small, or the copy can clone them. Else they are listed only.
+    pub copy_unattributed: bool,
     /// The game dir moved since the snapshot: `launch.conf` is rewritten.
     pub rewrite_from: Option<PathBuf>,
 }
@@ -305,22 +308,31 @@ impl RollbackPlan {
     /// The question (design 20 §6.2), without the `[y/N]` the prompt adds.
     pub fn question(&self) -> String {
         let n = self.saves.files.len();
-        let head = format!("roll back to {}?", self.target_name());
-        if n == 0 {
-            return head;
+        let mut q = format!("roll back to {}?", self.target_name());
+        if n > 0 {
+            let files = plural(n, "newer save file", "newer save files");
+            if self.drop_saves {
+                q.push_str(&format!(
+                    " {files} will be dropped from the game (kept in snapshot {} only)",
+                    self.pre
+                ));
+            } else {
+                q.push_str(&format!(
+                    " {files} will be dropped from the game (copied to {})",
+                    self.saves_aside.display()
+                ));
+            }
         }
-        let files = plural(n, "newer save file", "newer save files");
-        if self.drop_saves {
-            format!(
-                "{head} {files} will be dropped from the game (kept in snapshot {} only)",
+        let un = self.saves.unattributed.len();
+        if un > 0 && !self.drop_saves && !self.copy_unattributed {
+            q.push_str(&format!(
+                " {} gogo can't attribute ({}) won't be copied: no cheap clone there; they stay in snapshot {} only",
+                plural(un, "new game file", "new game files"),
+                crate::fmt::human_size(self.saves.unattributed_bytes()),
                 self.pre
-            )
-        } else {
-            format!(
-                "{head} {files} will be dropped from the game (copied to {})",
-                self.saves_aside.display()
-            )
+            ));
         }
+        q
     }
 
     /// The plan as lines; `verbose` lists every file (`-v`).
@@ -374,12 +386,23 @@ impl RollbackPlan {
             }
         }
         match &self.saves.game_check {
-            saves::GameCheck::List { source, .. } => out.push(format!(
-                "  game files: checked against the build's file list ({source}; by name and size)"
-            )),
-            saves::GameCheck::NoList => {
-                out.push("  game files: no file list, changed files only".into())
+            saves::GameCheck::SameContent => out.push(
+                "  game files: the same build and DLC set as the snapshot: every changed file counts"
+                    .into(),
+            ),
+            saves::GameCheck::List { source, .. } => {
+                out.push(format!(
+                    "  game files: checked against the build's file list ({source}; by name and size)"
+                ));
+                out.push(
+                    "    the build or DLC set changed: changed files matching the new build are treated as shipped"
+                        .into(),
+                );
             }
+            saves::GameCheck::NoList => out.push(
+                "  game files: the build or DLC set changed and there is no file list: changed files only"
+                    .into(),
+            ),
             saves::GameCheck::None => {}
         }
         if self.saves.files.is_empty() {
@@ -419,17 +442,62 @@ impl RollbackPlan {
         }
         let un = &self.saves.unattributed;
         if !un.is_empty() {
-            out.push(format!(
-                "  {} in {} gogo can't attribute: not copied; they stay in snapshot {}",
-                plural(un.len(), "new file", "new files"),
-                un[0].path.split('/').next().unwrap_or("game"),
-                self.pre
-            ));
+            let place = un[0].path.split('/').next().unwrap_or("game");
+            let what = plural(un.len(), "new file", "new files");
+            let size = crate::fmt::human_size(self.saves.unattributed_bytes());
+            out.push(if self.drop_saves {
+                format!(
+                    "  {what} in {place} gogo can't attribute ({size}): not copied (--drop-saves); they stay in snapshot {}",
+                    self.pre
+                )
+            } else if self.copy_unattributed {
+                format!(
+                    "  {what} in {place} gogo can't attribute ({size}): copied to {}",
+                    self.saves_aside.join("unattributed").display()
+                )
+            } else {
+                format!(
+                    "  {what} in {place} gogo can't attribute ({size}): over {} and no cheap clone there, so not copied; they stay in snapshot {}",
+                    crate::fmt::human_size(UNATTRIBUTED_COPY_MAX),
+                    self.pre
+                )
+            });
             if verbose {
                 for f in un {
-                    out.push(format!("      {}", f.path));
+                    out.push(format!(
+                        "      {} ({})",
+                        f.path,
+                        crate::fmt::human_size(f.size)
+                    ));
                 }
             }
+        }
+        if !self.saves.registry.is_empty() {
+            let names: Vec<&str> = self
+                .saves
+                .registry
+                .iter()
+                .map(|f| f.path.as_str())
+                .collect();
+            out.push(if self.drop_saves {
+                format!(
+                    "  registry changed ({}): not copied (--drop-saves)",
+                    names.join(", ")
+                )
+            } else {
+                format!(
+                    "  registry changed ({}): copied to {}",
+                    names.join(", "),
+                    self.saves_aside.join("registry").display()
+                )
+            });
+        }
+        out.push(format!("  not scanned: {}", saves::NOT_SCANNED));
+        if verbose {
+            out.push(format!(
+                "    excluded everywhere: {}",
+                saves::EXCLUDED.join(", ")
+            ));
         }
         out
     }
@@ -641,6 +709,20 @@ fn find_saves(
     })
 }
 
+/// Unattributed new files are copied up to this total even where the copy
+/// can't clone them (design 20 §6.2): above it, only a clone is cheap enough.
+pub const UNATTRIBUTED_COPY_MAX: u64 = 1 << 30;
+
+/// Whether the unattributed files go aside into `aside`: none to copy, small
+/// enough, or clonable there.
+fn copy_unattributed(found: &Found, aside: &Path) -> bool {
+    found.unattributed_bytes() <= UNATTRIBUTED_COPY_MAX
+        || found
+            .unattributed
+            .first()
+            .is_some_and(|f| saves::can_clone(&f.abs, aside))
+}
+
 /// `<data_root>/saves-aside/<gogid>/<UTC time>/`, a name not taken yet.
 fn aside_dir(gogid: &str) -> PathBuf {
     let base = crate::state::data_root().join("saves-aside").join(gogid);
@@ -683,6 +765,17 @@ fn target(
     let meta = s.load(n).map_err(snapshots::err)?;
     let on_disk = b.exists(root, n)?;
     Ok(match meta {
+        Some(m)
+            if m.state == State::Done
+                && on_disk
+                && m.override_copy == snap::OverrideCopy::Copied
+                && !s.override_copy_path(n).is_file() =>
+        {
+            Err(format!(
+                "snapshot {n}'s copy of the override file ({}) is missing: it can't be rolled back to",
+                s.override_copy_path(n).display()
+            ))
+        }
         Some(m) if m.state == State::Done && on_disk => Ok(m),
         Some(m) if m.state != State::Done => {
             Err(format!("snapshot {n} is being created or deleted"))
@@ -735,7 +828,9 @@ pub fn plan(
         snap::OverrideCopy::Absent => None,
     };
     let found = find_saves(gogid, &dirs, b, &meta, opts.build_files.clone());
+    let saves_aside = aside_dir(gogid);
     Ok(Planned::Plan(Box::new(RollbackPlan {
+        copy_unattributed: copy_unattributed(&found, &saves_aside),
         gogid: gogid.to_string(),
         to: snapshots::meta_view(&meta),
         now: ContentView::from(&snapshots::content_of(&dirs)),
@@ -746,7 +841,7 @@ pub fn plan(
         drop_saves: opts.drop_saves,
         groups: saves::groups(&found.files),
         saves: found,
-        saves_aside: aside_dir(gogid),
+        saves_aside,
         rewrite_from: (meta.game_dir != dirs.root).then(|| meta.game_dir.clone()),
         game_dir: dirs.root,
     })))
@@ -777,7 +872,13 @@ impl RolledBack {
     /// The last line (design 20 §8).
     pub fn last_line(&self) -> String {
         let saves = match &self.saves_copied_to {
-            Some(d) => format!("; newer saves copied to {}", d.display()),
+            Some(d) if !self.saves_newer.is_empty() => {
+                format!("; newer saves copied to {}", d.display())
+            }
+            Some(d) => format!(
+                "; no newer saves; other changed files copied to {}",
+                d.display()
+            ),
             None if self.saves_newer.is_empty() => "; no newer saves".to_string(),
             None => format!("; newer saves kept in snapshot {} only", self.pre),
         };
@@ -829,10 +930,19 @@ fn finish(
             Some(m) => {
                 let l4 = crate::macapp::compat::user_path(gogid);
                 match m.override_copy {
-                    snap::OverrideCopy::Copied => {
-                        let bytes = std::fs::read(s.override_copy_path(m.id))?;
-                        snap::write_atomic(&l4, &bytes)?;
-                    }
+                    snap::OverrideCopy::Copied => match std::fs::read(s.override_copy_path(m.id)) {
+                        Ok(bytes) => snap::write_atomic(&l4, &bytes)?,
+                        // Checked before the commit; gone since (a crash and
+                        // a hand edit): keep the current file, as when the
+                        // metadata is gone.
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            warnings.push(format!(
+                                "snapshot {}'s copy of the override file is gone: the override file was left as it is",
+                                m.id
+                            ))
+                        }
+                        Err(e) => return Err(e.into()),
+                    },
                     snap::OverrideCopy::Absent => snap::remove_file(&l4)?,
                 }
             }
@@ -962,7 +1072,9 @@ fn run(
     write_journal(&jpath, &j)?;
     check(opts.fail_at, RbStep::PreSnapshot)?;
 
-    let copied_to = if opts.drop_saves || found.files.is_empty() {
+    let copied_to = if opts.drop_saves
+        || (found.files.is_empty() && found.unattributed.is_empty() && found.registry.is_empty())
+    {
         None
     } else {
         let dir = if plan.saves_aside.exists() {
@@ -970,10 +1082,28 @@ fn run(
         } else {
             plan.saves_aside.clone()
         };
-        saves::copy_aside(&found.files, &dir)?;
-        j.saves_aside = Some(dir.clone());
-        write_journal(&jpath, &j)?;
-        Some(dir)
+        // The plan's choice, asked about: never copy more than was shown.
+        let unattributed = plan.copy_unattributed && copy_unattributed(&found, &dir);
+        let mut any = false;
+        if !found.files.is_empty() {
+            saves::copy_aside(&found.files, &dir)?;
+            any = true;
+        }
+        if unattributed && !found.unattributed.is_empty() {
+            saves::copy_aside_under(&found.unattributed, &dir, "unattributed")?;
+            any = true;
+        }
+        if !found.registry.is_empty() {
+            saves::copy_aside_under(&found.registry, &dir, "registry")?;
+            any = true;
+        }
+        if any {
+            j.saves_aside = Some(dir.clone());
+            write_journal(&jpath, &j)?;
+            Some(dir)
+        } else {
+            None
+        }
     };
     check(opts.fail_at, RbStep::SavesCopied)?;
 
@@ -981,7 +1111,13 @@ fn run(
     let fail_at = opts.fail_at;
     let mut step = |st: RollbackStep| -> std::io::Result<()> {
         let r = match st {
-            RollbackStep::Staged => check(fail_at, RbStep::Staged),
+            // The staged tree's `launch.sh` is the snapshot's, which may not
+            // know the marker: until step 6 rewrites it, a launch from the
+            // menu right after the swap would run the old script. This
+            // gogo's goes in first, so the marker refuses that launch.
+            RollbackStep::Staged => super::launcher::write_script(&staging)
+                .map_err(MacAppError::from)
+                .and_then(|()| check(fail_at, RbStep::Staged)),
             RollbackStep::Committed => {
                 j.committed = true;
                 write_journal(&jpath, &j)
@@ -1105,6 +1241,7 @@ pub fn settle_pending(gogid: &str, backends: &Backends) -> Result<Vec<String>, M
     let root_lock = crate::macapp::relocate::lock_moves()?;
     let game_lock = crate::macapp::relocate::lock_game(gogid)?;
     let _guard = Guard::new(&root_lock, &game_lock);
+    snapshots::refuse_settle(gogid, &dirs)?;
     let (_, b) = backends.for_dir(&dirs.root);
     let s = snapshots::store(gogid, &dirs.root, b);
     Ok(settle_locked(gogid, &dirs, &s, b)?
