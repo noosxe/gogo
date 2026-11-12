@@ -19,10 +19,13 @@ Username, user id, country, wallet balance, counts. `--json`.
 
 ### `gogo list`
 Owned games table: `ID  TITLE  OS  INSTALLERS  SIZE  LOCAL`. `LOCAL` is what is set up on
-this machine, read from disk (no network): the built app leads, `linux depot · 2.31 +2 DLC`
-(platform, lane, version or `b<build>`, DLC count); a depot cache follows as
-`+ cache <build> <lang>`, a downloaded installer as `+ installer <version>`. With no app:
-`cache <build> <lang>`, or `✓ installer <version>`; `–` when nothing is local.
+this machine, read from disk (no network): the built app leads, `linux depot 2.31 en-US +2 DLC`
+(platform, lane, then version, language and DLC count when known; a depot build has no
+version string on disk, so usually `linux depot en-US +2 DLC`). Build ids are never shown
+(they stay in `--json`). A depot cache for the built build is implied and not shown; one for
+another build follows as `+ cache (other build)`; a downloaded installer as
+`+ installer <version>`. With no app: `cache <lang>` (or `cache`), or
+`✓ installer <version>`; `–` when nothing is local.
 `--installed` lists only games with any of these. `--json` adds `installed` and `local`
 (`built`: platform, lane, version, build_id, dlc_count; `cache`: build_id, language;
 `installer`: version) to each game.
