@@ -40,20 +40,13 @@ pub fn table() -> Table {
     Table(t)
 }
 
-/// Render the owned-games table: `ID  TITLE  OS  INSTALLERS  SIZE  DOWNLOADED`
-/// (03 §1 — the column is DOWNLOADED, not INSTALLED: gogo never installs).
+/// Render the owned-games table: `ID  TITLE  OS  INSTALLERS  SIZE  LOCAL`
+/// (03 §1; LOCAL is what is set up here, see `gogo::state::local::Local::label`).
 pub fn list_table(rows: &[gogo::state::records::ListRow], _color: crate::cli::ColorWhen) -> String {
     use comfy_table::{Cell, Color};
 
     let mut table = table();
-    table.set_header(vec![
-        "ID",
-        "TITLE",
-        "OS",
-        "INSTALLERS",
-        "SIZE",
-        "DOWNLOADED",
-    ]);
+    table.set_header(vec!["ID", "TITLE", "OS", "INSTALLERS", "SIZE", "LOCAL"]);
     for row in rows {
         let os = if row.os.is_empty() {
             "—".to_string()
@@ -78,8 +71,8 @@ pub fn list_table(rows: &[gogo::state::records::ListRow], _color: crate::cli::Co
         } else {
             row.title.clone()
         };
-        let installed = match &row.installed_version {
-            Some(v) => Cell::new(format!("✓ {v}")).fg(Color::Green),
+        let installed = match row.local.label() {
+            Some(l) => Cell::new(l).fg(Color::Green),
             None => Cell::new("–"),
         };
         table.add_row(vec![
@@ -543,5 +536,132 @@ mod table_tests {
         .join("\n");
         assert_eq!(out, want);
         assert!(out.lines().all(|l| l == l.trim_end()));
+    }
+}
+
+#[cfg(test)]
+mod list_tests {
+    use super::list_table;
+    use crate::cli::ColorWhen;
+    use gogo::gog::content::{Content, Lane};
+    use gogo::macapp::apps::App;
+    use gogo::state::local::{Built, Local, read_cache};
+    use gogo::state::records::ListRow;
+
+    fn row(id: u64, title: &str, local: Local) -> ListRow {
+        ListRow {
+            id,
+            title: title.into(),
+            os: vec![gogo::gog::catalog::Os::Linux],
+            installers: 1,
+            total_size: 0,
+            installed_version: None,
+            local,
+            depth: 0,
+        }
+    }
+
+    /// One built app, one cache-only game, one installer download and one bare game.
+    fn fixture() -> Vec<ListRow> {
+        let app = App {
+            gogid: "1".into(),
+            linux: true,
+            dlcs: vec![
+                gogo::gog::content::DlcRef {
+                    id: 10,
+                    title: "A".into(),
+                },
+                gogo::gog::content::DlcRef {
+                    id: 11,
+                    title: "B".into(),
+                },
+            ],
+            content: Some(Content {
+                schema: 1,
+                lane: Lane::Depot,
+                build_id: Some("900".into()),
+                version: Some("2.31".into()),
+                language: None,
+                dlc: Vec::new(),
+            }),
+            ..App::default()
+        };
+        let cache = tempfile::tempdir().unwrap();
+        std::fs::write(
+            cache.path().join(".gogo-depot.json"),
+            r#"{"buildId":"77","language":"en-US","files":[]}"#,
+        )
+        .unwrap();
+        vec![
+            row(
+                1,
+                "Built",
+                Local {
+                    built: Some(Built::from_app(&app)),
+                    ..Local::default()
+                },
+            ),
+            row(
+                2,
+                "Cached",
+                Local {
+                    cache: read_cache(cache.path()),
+                    ..Local::default()
+                },
+            ),
+            row(
+                3,
+                "Installer",
+                Local {
+                    installer: Some("3.00".into()),
+                    ..Local::default()
+                },
+            ),
+            row(4, "Bare", Local::default()),
+        ]
+    }
+
+    #[test]
+    fn table_shows_what_is_local() {
+        let out = list_table(&fixture(), ColorWhen::Never);
+        let cells: Vec<String> = out
+            .lines()
+            .filter_map(|l| l.rsplit('|').next().map(|c| c.trim().to_string()))
+            .collect();
+        assert_eq!(cells[0], "LOCAL", "{out}");
+        assert!(
+            cells.contains(&"linux depot · 2.31 +2 DLC".to_string()),
+            "{out}"
+        );
+        assert!(cells.contains(&"cache 77 en-US".to_string()), "{out}");
+        assert!(cells.contains(&"✓ installer 3.00".to_string()), "{out}");
+        assert!(cells.contains(&"–".to_string()), "{out}");
+        assert!(!out.contains("DOWNLOADED"));
+    }
+
+    #[test]
+    fn local_json_and_filter_predicate() {
+        let rows = fixture();
+        let any: Vec<u64> = rows
+            .iter()
+            .filter(|r| r.local.any())
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(any, [1, 2, 3]);
+        let j: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|r| serde_json::to_value(&r.local).unwrap())
+            .collect();
+        assert_eq!(
+            j[0],
+            serde_json::json!({"built": {"platform": "linux", "lane": "depot",
+                "version": "2.31", "build_id": "900", "dlc_count": 2}})
+        );
+        assert_eq!(
+            j[1],
+            serde_json::json!({"cache": {"build_id": "77", "language": "en-US"}})
+        );
+        assert_eq!(j[2], serde_json::json!({"installer": "3.00"}));
+        assert_eq!(j[3], serde_json::json!({}));
     }
 }

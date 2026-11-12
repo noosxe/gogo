@@ -80,6 +80,10 @@ pub enum Command {
         /// Include DLC rows.
         #[arg(long)]
         with_dlcs: bool,
+        /// Only games set up locally: built (`linux-app` / `mac-app`), in the depot
+        /// cache, or with a downloaded installer.
+        #[arg(long)]
+        installed: bool,
         /// Machine-readable output.
         #[arg(long)]
         json: bool,

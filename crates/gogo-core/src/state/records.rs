@@ -84,7 +84,7 @@ pub fn is_outdated(
 }
 
 /// Row for the `list` table (`docs/design/03` §1:
-/// `ID  TITLE  OS  INSTALLERS  SIZE  DOWNLOADED(✓ version | –)`).
+/// `ID  TITLE  OS  INSTALLERS  SIZE  LOCAL`, #378).
 #[derive(Debug, Clone)]
 pub struct ListRow {
     pub id: u64,
@@ -94,6 +94,8 @@ pub struct ListRow {
     pub installers: u32,
     pub total_size: u64,
     pub installed_version: Option<String>,
+    /// What is set up locally: built app, depot cache, installer (#378).
+    pub local: crate::state::local::Local,
     /// 0 = game row; 1 = DLC row (indented under its game, `--with-dlcs`).
     pub depth: u8,
 }
