@@ -85,8 +85,35 @@ struct World {
 
 impl World {
     fn new(name: &str, imports: &[&str]) -> World {
+        Self::new_in(Path::new(env!("CARGO_TARGET_TMPDIR")), name, imports)
+    }
+
+    /// A world on btrfs: under `GOGO_TEST_BTRFS_DIR` when set (the
+    /// `snapshots-btrfs` CI job), else `CARGO_TARGET_TMPDIR` when that is on
+    /// btrfs. `None`, after a `SKIP …` line, elsewhere; a failure instead with
+    /// `GOGO_TEST_BTRFS_REQUIRED` set, as in `snapshot_btrfs.rs`.
+    fn on_btrfs(test: &str, imports: &[&str]) -> Option<World> {
+        let base = std::env::var_os("GOGO_TEST_BTRFS_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_TARGET_TMPDIR")));
+        if !gogo::snapshot::btrfs::is_btrfs(&base).unwrap_or(false) {
+            assert!(
+                std::env::var_os("GOGO_TEST_BTRFS_REQUIRED").is_none(),
+                "{test}: {} is not on btrfs and GOGO_TEST_BTRFS_REQUIRED is set",
+                base.display()
+            );
+            println!(
+                "SKIP {test}: {} is not on btrfs (set GOGO_TEST_BTRFS_DIR to a btrfs dir)",
+                base.display()
+            );
+            return None;
+        }
+        Some(Self::new_in(&base, test, imports))
+    }
+
+    fn new_in(base: &Path, name: &str, imports: &[&str]) -> World {
         let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let root = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        let root = base
             .join("linuxapp")
             .join(format!("{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -8682,20 +8709,15 @@ mod snapshots {
         assert!(report.findings.iter().any(|f| f.check == "snapshots"));
     }
 
-    /// On a real btrfs (`CARGO_TARGET_TMPDIR`, else skipped): the game dir is a
+    /// On a real btrfs ([`World::on_btrfs`], else skipped): the game dir is a
     /// subvolume, the initial snapshot a read-only one beside it, and `apps
-    /// remove` takes both.
-    #[test]
-    fn on_real_btrfs_the_game_dir_is_a_subvolume_with_its_initial_snapshot() {
-        let w = World::new("snap-btrfs", &["d3d9.dll"]);
-        if !gogo::snapshot::btrfs::is_btrfs(&w.root).unwrap_or(false) {
-            println!(
-                "SKIP on_real_btrfs_the_game_dir_is_a_subvolume_with_its_initial_snapshot: {} \
-                 is not on btrfs",
-                w.root.display()
-            );
+    /// remove` takes both. Run as [`super::btrfs_build_makes_a_subvolume_game_dir`]:
+    /// a top-level `btrfs_` name, which the `snapshots-btrfs` CI job selects.
+    pub(super) fn real_btrfs_build() {
+        let Some(w) = World::on_btrfs("btrfs_build_makes_a_subvolume_game_dir", &["d3d9.dll"])
+        else {
             return;
-        }
+        };
         let real = Backends::real();
         let plan = build::plan(&with(w.opts(), &real), None, &mut quiet()).unwrap();
         assert_eq!(plan.snapshots, BuildSnapshots::On);
@@ -8732,4 +8754,9 @@ mod snapshots {
             }
         }
     }
+}
+
+#[test]
+fn btrfs_build_makes_a_subvolume_game_dir() {
+    snapshots::real_btrfs_build();
 }
