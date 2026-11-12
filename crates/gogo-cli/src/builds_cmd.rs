@@ -244,7 +244,7 @@ async fn installed(
 ) -> Result<i32, AppError> {
     let cache_base = depot::default_cache_dir();
     let mut rows = Vec::new();
-    for (gogid, _) in gogo::macapp::launch::recorded_games() {
+    for gogid in gogo::macapp::apps::game_ids()? {
         let id: u64 = gogid.parse().unwrap_or(0);
         let mut row = InstalledRow {
             gogid: gogid.clone(),

@@ -613,7 +613,7 @@ Decided on 2026-11-12.
   cache-only build.
 - A manifest that can't be fetched shows `?` for size and DLC (null in JSON), warns on stderr and
   still exits 0. A language the build lacks shows `-`.
-- `--installed` covers each game with a location record. A depot game gets a fresh listing; an
+- `--installed` covers every game `apps list` does (the games dir plus location records). A depot game gets a fresh listing; an
   installer-lane game compares with the catalog's installer version (a catalog call per game).
   A game that can't be read, or whose check fails, is `unchecked` with the reason
   (`error` in JSON, `checked: null`). Status: `up to date`, `newer available`,
