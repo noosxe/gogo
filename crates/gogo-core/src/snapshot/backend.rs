@@ -13,6 +13,27 @@ use serde::{Deserialize, Serialize};
 /// The dir beside the game dirs that holds their snapshots (design 20 §2.1).
 pub const SNAPSHOTS_DIR: &str = ".gogo-snapshots";
 
+/// The marker a rollback writes into its staged tree, holding the target's
+/// number (design 20 §5.3.1). In the game dir it means the swap happened and
+/// the rollback isn't finished; the launcher refuses while it is there (§5.4).
+pub const ROLLBACK_MARKER: &str = ".gogo-rollback";
+
+/// The marker a conversion writes into its copy (design 20 §2.1, #406). In
+/// the game dir it means the swap happened and the conversion isn't finished;
+/// the launcher refuses while it is there (§5.4).
+pub const CONVERTED_MARKER: &str = ".gogo-converted";
+
+/// `<parent>/.gogo-rollback-<gogid>`: where a rollback stages the target's
+/// writable copy, and where the old tree is after the commit (design 20
+/// §5.3.1). `None` for a path without a parent or a name.
+pub fn rollback_staging(game_dir: &Path) -> Option<PathBuf> {
+    let parent = game_dir.parent()?;
+    let name = game_dir.file_name()?;
+    let mut staged = std::ffi::OsString::from(".gogo-rollback-");
+    staged.push(name);
+    Some(parent.join(staged))
+}
+
 /// What the filesystem under a dir offers (design 20 §2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Support {
@@ -73,9 +94,10 @@ pub struct Space {
 }
 
 /// The points a rollback reports back to its orchestration (design 20
-/// §5.3.1), so the journal, the saves, the override and the launcher stay in
-/// `mod.rs`. The rollback itself is #404's; the shape is settled here so
-/// backends implement it the same way.
+/// §5.3.1), so the journal, the saves, the override and the launcher stay
+/// with the caller and are the same for every backend. An error from the
+/// callback stops the rollback there, as a crash would: what follows is left
+/// for recovery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RollbackStep {
     /// A writable copy of the target is staged beside the game dir
@@ -129,8 +151,14 @@ pub trait SnapshotBackend: Send + Sync {
     /// interrupted delete can simply run again (design 20 §5.2).
     fn delete(&self, game_dir: &Path, n: u32) -> io::Result<()>;
 
-    /// Roll `game_dir` back to snapshot `n`, calling `step` after each step
-    /// (design 20 §5.3). Not implemented by any backend yet (#404).
+    /// Roll `game_dir` back to snapshot `n` (design 20 §5.3.1), calling
+    /// `step` after each step: a writable copy of `n` at
+    /// [`rollback_staging`] with [`ROLLBACK_MARKER`] (holding `n`) in it
+    /// ([`RollbackStep::Staged`]); the atomic swap of that copy and the game
+    /// dir ([`RollbackStep::Committed`]: the caller finishes the restored game
+    /// there and removes the marker); the old tree, now at the staging name,
+    /// deleted ([`RollbackStep::OldTreeDeleted`]). Refuses when the staging
+    /// name is taken: an earlier rollback's leftover is recovery's to settle.
     fn rollback(
         &self,
         game_dir: &Path,
@@ -142,6 +170,17 @@ pub trait SnapshotBackend: Send + Sync {
             io::ErrorKind::Unsupported,
             "rollback is not implemented yet",
         ))
+    }
+
+    /// Remove a tree a rollback left at `path` ([`rollback_staging`]): a
+    /// staged copy, or the old tree after the commit. A subvolume is deleted
+    /// as a snapshot is ([`Self::delete`]); gone already is `Ok`.
+    fn discard(&self, path: &Path) -> io::Result<()> {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => crate::gog::materialize::remove_tree(path),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 
     /// Every snapshot of `game_dir` on disk, by number. `ErrorKind::NotFound`
@@ -213,10 +252,41 @@ pub(crate) fn list_dir(game_dir: &Path) -> io::Result<Vec<OnDisk>> {
     Ok(out)
 }
 
+/// Write [`ROLLBACK_MARKER`] into `dir`, holding `n`, durably.
+pub(crate) fn write_rollback_marker(dir: &Path, n: u32) -> io::Result<()> {
+    use std::io::Write as _;
+    let mut f = std::fs::File::create(dir.join(ROLLBACK_MARKER))?;
+    writeln!(f, "{n}")?;
+    f.sync_all()?;
+    if let Ok(d) = std::fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
+    Ok(())
+}
+
+/// The snapshot number [`ROLLBACK_MARKER`] in `dir` holds; `None` when there
+/// is no marker (or it can't be read).
+pub fn read_rollback_marker(dir: &Path) -> Option<u32> {
+    std::fs::read_to_string(dir.join(ROLLBACK_MARKER))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+
+    #[test]
+    fn the_rollback_staging_dir_sits_beside_the_game_dir() {
+        assert_eq!(
+            rollback_staging(Path::new("/lib/games/1423049311")).unwrap(),
+            Path::new("/lib/games/.gogo-rollback-1423049311")
+        );
+        assert_eq!(rollback_staging(Path::new("/")), None);
+    }
 
     #[test]
     fn snapshot_paths_sit_beside_the_game_dir() {

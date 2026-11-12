@@ -27,7 +27,7 @@ use rustix::fs::{Mode, OFlags};
 use rustix::io::Errno;
 use rustix::ioctl::{Getter, Opcode, Setter, Updater, ioctl, opcode};
 
-use super::backend::{self, BackendKind, OnDisk, SnapshotBackend, Space, Support};
+use super::backend::{self, BackendKind, OnDisk, RollbackStep, SnapshotBackend, Space, Support};
 
 // — magic numbers (`include/uapi/linux/magic.h`) —
 
@@ -367,6 +367,26 @@ pub fn destroy_by_rmdir(path: &Path) -> io::Result<()> {
     crate::gog::materialize::remove_tree(path)
 }
 
+/// Swap `a` and `b` atomically (`renameat2(RENAME_EXCHANGE)`): two subvolume
+/// roots, two dirs, or one of each, on one filesystem. The kernel allows it
+/// for subvolumes unprivileged (`btrfs_rename_exchange`). The parent dirs are
+/// synced after, best effort.
+pub fn exchange(a: &Path, b: &Path) -> io::Result<()> {
+    rustix::fs::renameat_with(
+        rustix::fs::CWD,
+        a,
+        rustix::fs::CWD,
+        b,
+        rustix::fs::RenameFlags::EXCHANGE,
+    )?;
+    for p in [a.parent(), b.parent()].into_iter().flatten() {
+        if let Ok(d) = File::open(p) {
+            let _ = d.sync_all();
+        }
+    }
+    Ok(())
+}
+
 // — FIEMAP —
 
 /// One physical extent of a file.
@@ -582,6 +602,48 @@ impl SnapshotBackend for Btrfs {
             let _ = std::fs::remove_dir(dir);
         }
         Ok(())
+    }
+
+    fn rollback(
+        &self,
+        game_dir: &Path,
+        n: u32,
+        step: &mut dyn FnMut(RollbackStep) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let src = backend::snapshot_dir(game_dir, n).ok_or_else(|| no_parent(game_dir))?;
+        let staged = backend::rollback_staging(game_dir).ok_or_else(|| no_parent(game_dir))?;
+        if staged.symlink_metadata().is_ok() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "{} is there: an earlier rollback isn't settled",
+                    staged.display()
+                ),
+            ));
+        }
+        // A writable snapshot of a read-only one: the kernel allows it to the
+        // owner of the source, as for any snapshot.
+        snapshot(&src, &staged, false)?;
+        backend::write_rollback_marker(&staged, n)?;
+        step(RollbackStep::Staged)?;
+        exchange(&staged, game_dir)?;
+        step(RollbackStep::Committed)?;
+        self.discard(&staged)?;
+        step(RollbackStep::OldTreeDeleted)
+    }
+
+    fn discard(&self, path: &Path) -> io::Result<()> {
+        match std::fs::symlink_metadata(path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+            Ok(_) => {}
+        }
+        if is_subvolume(path)? {
+            destroy(path)?;
+            Ok(())
+        } else {
+            crate::gog::materialize::remove_tree(path)
+        }
     }
 
     fn on_disk(&self, game_dir: &Path) -> io::Result<Vec<OnDisk>> {

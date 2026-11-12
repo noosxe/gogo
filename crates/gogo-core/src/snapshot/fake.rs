@@ -8,7 +8,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use super::backend::{self, BackendKind, OnDisk, SnapshotBackend, Space, Support};
+use super::backend::{self, BackendKind, OnDisk, RollbackStep, SnapshotBackend, Space, Support};
 use crate::gog::materialize::{self, Reflink};
 
 /// Where [`Fake`] fails, once.
@@ -22,6 +22,16 @@ pub enum FakeStep {
     /// `delete` removes part of the tree, then fails, as btrfs's unprivileged
     /// file-by-file delete can.
     DeleteMidway,
+    /// `rollback` fails before staging anything.
+    RollbackStage,
+    /// `rollback` stages part of the copy, without the marker, then fails: a
+    /// btrfs snapshot is atomic, but a crash can come between it and the
+    /// marker.
+    RollbackStageMidway,
+    /// `rollback` fails after staging, before the swap.
+    RollbackExchange,
+    /// `rollback` removes part of the old tree after the commit, then fails.
+    RollbackDiscardMidway,
 }
 
 /// Snapshots as copies. [`Support::Btrfs`] for every dir, so metadata says
@@ -140,6 +150,63 @@ impl SnapshotBackend for Fake {
             let _ = std::fs::remove_dir(dir);
         }
         Ok(())
+    }
+
+    /// The swap is three renames (the game dir aside, the copy in, the old
+    /// tree to the staging name): not atomic, as btrfs's `RENAME_EXCHANGE`
+    /// is, but tests never stop inside it.
+    fn rollback(
+        &self,
+        game_dir: &Path,
+        n: u32,
+        step: &mut dyn FnMut(RollbackStep) -> io::Result<()>,
+    ) -> io::Result<()> {
+        let no_parent = || io::Error::new(io::ErrorKind::InvalidInput, "no parent");
+        let src = Self::dir(game_dir, n)?;
+        let staged = backend::rollback_staging(game_dir).ok_or_else(no_parent)?;
+        if staged.symlink_metadata().is_ok() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "{} is there: an earlier rollback isn't settled",
+                    staged.display()
+                ),
+            ));
+        }
+        if !src.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{} isn't there", src.display()),
+            ));
+        }
+        self.take(FakeStep::RollbackStage)?;
+        materialize::materialize_tree(&src, &staged, Reflink::Never)?;
+        if self.take(FakeStep::RollbackStageMidway).is_err() {
+            let all = files(&staged)?;
+            for f in all.iter().take(all.len() / 2) {
+                std::fs::remove_file(staged.join(f))?;
+            }
+            return Err(io::Error::other("injected failure at RollbackStageMidway"));
+        }
+        backend::write_rollback_marker(&staged, n)?;
+        step(RollbackStep::Staged)?;
+        self.take(FakeStep::RollbackExchange)?;
+        let aside = staged.with_extension("swap");
+        std::fs::rename(game_dir, &aside)?;
+        std::fs::rename(&staged, game_dir)?;
+        std::fs::rename(&aside, &staged)?;
+        step(RollbackStep::Committed)?;
+        if self.take(FakeStep::RollbackDiscardMidway).is_err() {
+            let all = files(&staged)?;
+            for f in all.iter().take(all.len().div_ceil(2)) {
+                std::fs::remove_file(staged.join(f))?;
+            }
+            return Err(io::Error::other(
+                "injected failure at RollbackDiscardMidway",
+            ));
+        }
+        self.discard(&staged)?;
+        step(RollbackStep::OldTreeDeleted)
     }
 
     fn on_disk(&self, game_dir: &Path) -> io::Result<Vec<OnDisk>> {

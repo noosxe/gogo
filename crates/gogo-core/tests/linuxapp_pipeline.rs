@@ -2478,7 +2478,7 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
     // next setup, which says so; an unchanged one isn't touched.
     std::fs::write(
         &sh,
-        script.replace("LAUNCHER_VERSION=14", "LAUNCHER_VERSION=0"),
+        script.replace("LAUNCHER_VERSION=15", "LAUNCHER_VERSION=0"),
     )
     .unwrap();
     std::fs::write(&desktop, "[Desktop Entry]\nExec=/old/root/launch.sh\n").unwrap();
@@ -2486,7 +2486,7 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
     assert_eq!(std::fs::read_to_string(&sh).unwrap(), script);
     assert_eq!(std::fs::read_to_string(&desktop).unwrap(), entry);
     assert!(
-        out.notes.iter().any(|n| n == "launch.sh: launcher 0 -> 14"),
+        out.notes.iter().any(|n| n == "launch.sh: launcher 0 -> 15"),
         "{:?}",
         out.notes
     );
@@ -2551,7 +2551,7 @@ fn the_launcher_runs_umu_with_the_games_environment_and_logs_the_run() {
     let run = &runs[0];
     for want in [
         format!("# gogo run log: Test Game ({ID})\n"),
-        "# launcher: 14\n".into(),
+        "# launcher: 15\n".into(),
         format!(
             "# runtime: path:{} (1793687165 GE-Proton10-34)\n",
             w.build.display()
@@ -4828,7 +4828,7 @@ fn the_launcher_of_a_library_game_keeps_gogos_data_root() {
     );
     // Logs stay under the data root, not the library's parent.
     assert_eq!(w.runs().len(), 1, "run logs under {:?}", w.logs());
-    assert!(w.launch_log().contains("launcher 14"));
+    assert!(w.launch_log().contains("launcher 15"));
     assert!(!w.root.join("big drive/logs").exists());
 
     // Stale config: setup runs with gogo's data root as GOGO_HOME, and from
@@ -8759,4 +8759,731 @@ mod snapshots {
 #[test]
 fn btrfs_build_makes_a_subvolume_game_dir() {
     snapshots::real_btrfs_build();
+}
+
+/// `snapshot <gogid> rollback <n>` (design 20 §5.3.1, §5.4, §6) with the fake
+/// backend, the real `launch.sh` and the fake umu: the rollback, a crash at
+/// every step and its recovery, the refusals, the override, `rewrite_inside`
+/// and the launcher's refusal on the markers.
+mod rollback {
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use super::{ID, World, build, quiet};
+    use gogo::linuxapp::rollback::{self as rb, Planned, RbStep, RollbackOptions, RollbackPlan};
+    use gogo::linuxapp::snapshots::{self as snap, Backends, SnapshotOptions};
+    use gogo::snapshot::backend;
+    use gogo::snapshot::fake::{Fake, FakeStep};
+
+    const SAVES: &str = "prefix/drive_c/users/steamuser/Saved Games/Studio";
+
+    fn put(root: &Path, rel: &str, body: &str) {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    fn read(root: &Path, rel: &str) -> Option<String> {
+        std::fs::read_to_string(root.join(rel)).ok()
+    }
+
+    fn l4(w: &World) -> PathBuf {
+        w.home.join("compat").join(format!("{ID}.toml"))
+    }
+
+    fn plan(b: &Backends, n: u32, opts: &RollbackOptions) -> RollbackPlan {
+        match rb::plan(ID, b, n, opts).unwrap() {
+            Planned::Plan(p) => *p,
+            Planned::Unknown(why) => panic!("{why}"),
+        }
+    }
+
+    fn go(b: &Backends, n: u32, opts: &RollbackOptions) -> Result<rb::RolledBack, String> {
+        let p = plan(b, n, opts);
+        rb::rollback(ID, b, n, &p, opts).map_err(|e| e.to_string())
+    }
+
+    /// Nothing of a rollback left: no journal, no marker, no staging dir.
+    fn assert_settled(w: &World, root: &Path) {
+        assert!(
+            !w.home
+                .join("snapshots")
+                .join(ID)
+                .join("rollback.json")
+                .exists()
+        );
+        assert!(!root.join(backend::ROLLBACK_MARKER).exists());
+        assert!(!backend::rollback_staging(root).unwrap().exists());
+    }
+
+    /// The game launches to its game step and exits 0.
+    fn assert_runs(w: &World) {
+        let before = w.game_runs();
+        let out = w.launch(&[], &[]);
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        assert_eq!(w.game_runs(), before + 1);
+    }
+
+    /// The state of the world before a rollback: a save and a setting at
+    /// snapshot time, then more saves, a rewritten setting and a new override.
+    fn dress(w: &World, b: &Backends) -> (PathBuf, u32) {
+        let root = w.game();
+        put(&root, &format!("{SAVES}/old.sav"), "old");
+        put(&root, "game/SAVE/slot0.sav", "slot0");
+        put(&root, "game/era.txt", "then");
+        gogo::linuxapp::envargs::set_env(ID, &[("FOO".into(), "then".into())]).unwrap();
+        // The launcher's config matches the override: setup ran for it.
+        gogo::linuxapp::setup::setup(ID, &Default::default(), &mut quiet()).unwrap();
+        let n = snap::create(ID, b, Some("before the change"))
+            .unwrap()
+            .snapshot
+            .id;
+        // A second apart, so mtimes are after the snapshot's `created`.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        put(&root, &format!("{SAVES}/new.sav"), "new");
+        put(&root, "game/SAVE/slot1.sav", "slot1");
+        put(&root, "game/era.txt", "now");
+        gogo::linuxapp::envargs::set_env(ID, &[("FOO".into(), "now".into())]).unwrap();
+        gogo::linuxapp::setup::setup(ID, &Default::default(), &mut quiet()).unwrap();
+        (root, n)
+    }
+
+    fn fake() -> (Arc<Fake>, Backends) {
+        let f = Arc::new(Fake::new());
+        let b = Backends::fixed(f.clone());
+        (f, b)
+    }
+
+    fn opts() -> RollbackOptions {
+        RollbackOptions {
+            keep_auto: 5,
+            ..RollbackOptions::default()
+        }
+    }
+
+    #[test]
+    fn a_rollback_restores_the_game_its_override_and_sets_the_saves_aside() {
+        let Some(w) = World::launcher("rb-full", false) else {
+            return;
+        };
+        let (_, b) = fake();
+        let (root, n) = dress(&w, &b);
+        let l4_then = std::fs::read_to_string(
+            w.home
+                .join("snapshots")
+                .join(ID)
+                .join(format!("{n}.override.toml")),
+        )
+        .unwrap();
+
+        let p = plan(&b, n, &opts());
+        let saves: Vec<&str> = p.saves.files.iter().map(|f| f.path.as_str()).collect();
+        assert!(
+            saves.contains(&"users/steamuser/Saved Games/Studio/new.sav"),
+            "{saves:?}"
+        );
+        assert!(
+            !saves.contains(&"users/steamuser/Saved Games/Studio/old.sav"),
+            "{saves:?}"
+        );
+        // No file list for a game built from a plain tree: changed files only,
+        // and the build is the snapshot's, so new files count too.
+        assert!(saves.contains(&"game/SAVE/slot1.sav"), "{saves:?}");
+        assert!(saves.contains(&"game/era.txt"), "{saves:?}");
+        assert_eq!(p.pre, n + 1);
+        let lines = p.lines(false).join("\n");
+        assert!(
+            lines.contains("game files: no file list, changed files only"),
+            "{lines}"
+        );
+        assert!(
+            lines.contains("override: restored to the snapshot's copy:"),
+            "{lines}"
+        );
+        assert!(lines.contains("FOO"), "{lines}");
+        assert!(lines.contains("Saved Games/Studio: 1 file"), "{lines}");
+        assert!(
+            !p.lines(false).iter().any(|l| l.contains("slot1.sav")),
+            "files only with -v"
+        );
+        assert!(
+            p.lines(true)
+                .iter()
+                .any(|l| l.contains("game/SAVE/slot1.sav"))
+        );
+        // The question, as design 20 §6.2 words it.
+        let q = p.question();
+        assert!(
+            q.starts_with(&format!(
+                "roll back to {n} (before the change)? {} newer save files will be dropped \
+                 from the game (copied to {}",
+                p.saves.files.len(),
+                w.home.join("saves-aside").join(ID).display()
+            )),
+            "{q}"
+        );
+        let json = serde_json::to_value(&p).unwrap();
+        assert_eq!(json["to"]["id"], n);
+        assert!(json["saves"]["files"][0]["mtime"].is_string(), "{json}");
+
+        let out = rb::rollback(ID, &b, n, &p, &opts()).unwrap();
+        assert_eq!((out.to, out.pre), (n, n + 1));
+        let aside = out.saves_copied_to.clone().expect("copied aside");
+        assert_eq!(aside, p.saves_aside);
+        assert_eq!(
+            out.last_line(),
+            format!(
+                "rolled back to {n}; the state before is snapshot {}; newer saves copied to {}",
+                n + 1,
+                aside.display()
+            )
+        );
+        let json = serde_json::to_value(&out).unwrap();
+        for k in [
+            "to",
+            "pre",
+            "savesNewer",
+            "savesCopiedTo",
+            "overrideRestored",
+            "destroyed",
+        ] {
+            assert!(json.get(k).is_some(), "{k}: {json}");
+        }
+        assert_eq!(json["savesNewer"][0]["path"], out.saves_newer[0].path);
+
+        // The game is the snapshot's, the newer saves are aside, and the pre
+        // snapshot holds them.
+        assert_eq!(read(&root, "game/era.txt").as_deref(), Some("then"));
+        assert_eq!(
+            read(&root, &format!("{SAVES}/old.sav")).as_deref(),
+            Some("old")
+        );
+        assert!(!root.join(format!("{SAVES}/new.sav")).exists());
+        assert!(!root.join("game/SAVE/slot1.sav").exists());
+        assert_eq!(
+            read(&aside, "users/steamuser/Saved Games/Studio/new.sav").as_deref(),
+            Some("new")
+        );
+        assert_eq!(
+            read(&aside, "game/SAVE/slot1.sav").as_deref(),
+            Some("slot1")
+        );
+        let pre = backend::snapshot_dir(&root, n + 1).unwrap();
+        assert_eq!(read(&pre, "game/era.txt").as_deref(), Some("now"));
+        assert_eq!(std::fs::read_to_string(l4(&w)).unwrap(), l4_then);
+        assert!(out.override_restored);
+        assert!(out.override_changes.iter().any(|c| c.key.contains("FOO")));
+        assert_settled(&w, &root);
+        assert!(
+            w.launch_log()
+                .contains(&format!("rolled back to snapshot {n} (before the change)")),
+            "{}",
+            w.launch_log()
+        );
+        // The pre snapshot is an `auto` one with its label.
+        let listed = snap::list(ID, &b, 5, false).unwrap();
+        let pre_row = listed.snapshots.iter().find(|s| s.id == n + 1).unwrap();
+        assert_eq!(pre_row.kind, Some("auto"));
+        assert_eq!(pre_row.trigger, Some("rollback"));
+        assert_eq!(
+            pre_row.label.as_deref(),
+            Some(format!("before rollback to {n}").as_str())
+        );
+
+        // It runs as the snapshot's game, with no setup: its override matches.
+        assert_runs(&w);
+        assert!(w.calls().is_empty(), "{:?}", w.calls());
+        // `apps show` names the aside dir with its size.
+        let a = gogo::macapp::apps::get(ID, &w.root.join("logs"))
+            .unwrap()
+            .unwrap();
+        let s = a.snapshots.unwrap();
+        assert_eq!(s.saves_aside, std::slice::from_ref(&aside));
+        assert!(
+            s.lines(ID)
+                .iter()
+                .any(|l| l.starts_with("saves set aside: ") && l.ends_with(" B)")),
+            "{:?}",
+            s.lines(ID)
+        );
+
+        // And the rollback is undone by rolling back to the snapshot before it.
+        let back = go(&b, n + 1, &opts()).unwrap();
+        assert_eq!(read(&root, "game/era.txt").as_deref(), Some("now"));
+        assert_eq!(
+            read(&root, &format!("{SAVES}/new.sav")).as_deref(),
+            Some("new")
+        );
+        assert_eq!(back.pre, n + 2);
+        assert_runs(&w);
+    }
+
+    #[test]
+    fn keep_override_keeps_it_and_the_launcher_runs_setup() {
+        let Some(w) = World::launcher("rb-keep", false) else {
+            return;
+        };
+        let (_, b) = fake();
+        let (root, n) = dress(&w, &b);
+        let now = std::fs::read_to_string(l4(&w)).unwrap();
+        let o = RollbackOptions {
+            keep_override: true,
+            drop_saves: true,
+            ..opts()
+        };
+        let p = plan(&b, n, &o);
+        assert!(
+            p.question().ends_with(&format!(
+                "will be dropped from the game (kept in snapshot {} only)",
+                p.pre
+            )),
+            "{}",
+            p.question()
+        );
+        assert!(
+            p.lines(false)
+                .iter()
+                .any(|l| l.contains("kept as it is now (--keep-override)"))
+        );
+        let out = rb::rollback(ID, &b, n, &p, &o).unwrap();
+        assert!(out.saves_copied_to.is_none());
+        assert!(!out.override_restored);
+        assert_eq!(std::fs::read_to_string(l4(&w)).unwrap(), now);
+        assert!(!w.home.join("saves-aside").exists());
+        assert_eq!(
+            out.last_line(),
+            format!(
+                "rolled back to {n}; the state before is snapshot {}; newer saves kept in \
+                 snapshot {} only",
+                out.pre, out.pre
+            )
+        );
+        assert_settled(&w, &root);
+        // The stamp differs now: the launcher runs setup, then the game.
+        assert_runs(&w);
+        assert!(
+            w.calls().iter().any(|c| c.contains("linux-app setup")),
+            "{:?}",
+            w.calls()
+        );
+    }
+
+    #[test]
+    fn with_no_newer_saves_the_question_is_plain() {
+        let w = World::new("rb-plain-q", &["d3d9.dll"]);
+        let (_, b) = fake();
+        super::build_with(&w.opts());
+        let n = snap::create(ID, &b, None).unwrap().snapshot.id;
+        let p = plan(&b, n, &opts());
+        assert!(p.saves.files.is_empty(), "{:?}", p.saves.files);
+        assert_eq!(p.question(), format!("roll back to {n} (manual)?"));
+        let out = go(&b, n, &opts()).unwrap();
+        assert!(out.saves_copied_to.is_none());
+        assert!(
+            out.last_line().ends_with("; no newer saves"),
+            "{}",
+            out.last_line()
+        );
+    }
+
+    /// A crash after every step of the rollback, then the recovery the next
+    /// `snapshot` command runs: the game is either the one before (a crash
+    /// before the commit) or the snapshot's (after it), with its override,
+    /// and it launches.
+    #[test]
+    fn a_crash_at_every_step_recovers_to_the_old_or_the_new_game() {
+        let Some(w) = World::launcher("rb-crash", false) else {
+            return;
+        };
+        let (f, b) = fake();
+        let (root, n) = dress(&w, &b);
+        let l4_then = std::fs::read_to_string(
+            w.home
+                .join("snapshots")
+                .join(ID)
+                .join(format!("{n}.override.toml")),
+        )
+        .unwrap();
+        enum Crash {
+            Step(RbStep),
+            Fake(FakeStep),
+        }
+        let mut crashes: Vec<(Crash, bool)> = RbStep::ALL
+            .iter()
+            .map(|s| {
+                let after_commit = !matches!(
+                    s,
+                    RbStep::Journal | RbStep::PreSnapshot | RbStep::SavesCopied | RbStep::Staged
+                );
+                (Crash::Step(*s), after_commit)
+            })
+            .collect();
+        crashes.extend([
+            (Crash::Fake(FakeStep::RollbackStage), false),
+            (Crash::Fake(FakeStep::RollbackStageMidway), false),
+            (Crash::Fake(FakeStep::RollbackExchange), false),
+            (Crash::Fake(FakeStep::RollbackDiscardMidway), true),
+        ]);
+        for (i, (crash, after_commit)) in crashes.into_iter().enumerate() {
+            // The game as it is now: another era, another override.
+            let era = format!("now-{i}");
+            put(&root, "game/era.txt", &era);
+            gogo::linuxapp::envargs::set_env(ID, &[("FOO".into(), era.clone())]).unwrap();
+            gogo::linuxapp::setup::setup(ID, &Default::default(), &mut quiet()).unwrap();
+            let l4_now = std::fs::read_to_string(l4(&w)).unwrap();
+            let mut o = opts();
+            let what = match crash {
+                Crash::Step(s) => {
+                    o.fail_at = Some(s);
+                    format!("{s:?}")
+                }
+                Crash::Fake(s) => {
+                    f.fail_at(s);
+                    format!("{s:?}")
+                }
+            };
+            let e = go(&b, n, &o).expect_err(&what);
+            assert!(e.contains("injected"), "{what}: {e}");
+
+            // The next snapshot command settles it.
+            let listed = snap::list(ID, &b, 5, false).unwrap();
+            let note = listed.notes.join("\n");
+            assert_settled(&w, &root);
+            if after_commit {
+                assert!(note.contains("was finished"), "{what}: {note}");
+                assert_eq!(
+                    read(&root, "game/era.txt").as_deref(),
+                    Some("then"),
+                    "{what}"
+                );
+                assert_eq!(std::fs::read_to_string(l4(&w)).unwrap(), l4_then, "{what}");
+                assert!(!root.join(".launchers").exists(), "{what}");
+            } else {
+                assert!(note.contains("was undone"), "{what}: {note}");
+                assert_eq!(
+                    read(&root, "game/era.txt").as_deref(),
+                    Some(era.as_str()),
+                    "{what}"
+                );
+                assert_eq!(std::fs::read_to_string(l4(&w)).unwrap(), l4_now, "{what}");
+            }
+            assert_runs(&w);
+        }
+    }
+
+    #[test]
+    fn other_changes_of_the_game_settle_a_pending_rollback_and_doctor_fails_it() {
+        let w = World::new("rb-settle", &["d3d9.dll"]);
+        let (_, b) = fake();
+        let root = super::build_with(&w.opts()).dirs.root;
+        put(&root, "game/era.txt", "then");
+        let n = snap::create(ID, &b, None).unwrap().snapshot.id;
+        put(&root, "game/era.txt", "now");
+        let o = RollbackOptions {
+            fail_at: Some(RbStep::LauncherWritten),
+            ..opts()
+        };
+        go(&b, n, &o).unwrap_err();
+        assert!(root.join(backend::ROLLBACK_MARKER).exists());
+        let f = snap::doctor(ID, &root, &b);
+        assert!(
+            f.iter()
+                .any(|f| f.level == gogo::macapp::doctor::Level::Fail
+                    && f.message
+                        .contains(&format!("a rollback to snapshot {n} didn't finish"))
+                    && f.hint
+                        .as_deref()
+                        .is_some_and(|h| h.contains("snapshot 1999999901 list"))),
+            "{f:?}"
+        );
+        // A rebuild settles it first.
+        let plan = build::plan(&w.opts(), None, &mut quiet()).unwrap();
+        let mut warns = Vec::new();
+        build::execute(&plan, None, &mut |e| {
+            if let gogo::engine::events::ProgressEvent::Warn { message } = e {
+                warns.push(message.clone());
+            }
+        })
+        .unwrap();
+        assert!(
+            warns
+                .iter()
+                .any(|m| m.contains(&format!("rollback to snapshot {n} was finished"))),
+            "{warns:?}"
+        );
+        assert_settled(&w, &root);
+        assert!(
+            !snap::doctor(ID, &root, &b)
+                .iter()
+                .any(|f| f.level == gogo::macapp::doctor::Level::Fail)
+        );
+
+        // `apps remove` too: a staged copy beside the game goes with it.
+        put(&root, "game/era.txt", "again");
+        let o = RollbackOptions {
+            fail_at: Some(RbStep::Staged),
+            ..opts()
+        };
+        go(&b, n, &o).unwrap_err();
+        assert!(backend::rollback_staging(&root).unwrap().exists());
+        let a = gogo::macapp::apps::get(ID, &w.root.join("logs"))
+            .unwrap()
+            .unwrap();
+        gogo::macapp::apps::remove_with(&a, false, &b).unwrap();
+        assert!(!backend::rollback_staging(&root).unwrap().exists());
+        assert!(!root.exists());
+    }
+
+    /// Every refusal of §5.1, before anything is touched; and numbers that
+    /// can't be rolled back to.
+    #[test]
+    fn every_refusal_of_a_rollback() {
+        let w = World::new("rb-refuse", &["d3d9.dll"]);
+        let (_, b) = fake();
+        let root = super::build_with(&w.opts_in_library()).dirs.root;
+        let n = snap::create(ID, &b, None).unwrap().snapshot.id;
+        let meta = w.home.join("snapshots").join(ID);
+        let refused = |why: &str| {
+            let e = rb::plan(ID, &b, n, &opts())
+                .map(|_| ())
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains(why), "{why}: {e}");
+            // The plan of a moment ago, then the refusal under the locks.
+            assert!(!meta.join("rollback.json").exists(), "{why}");
+            assert!(
+                !meta.join(format!("{}.toml", n + 1)).exists(),
+                "{why}: a snapshot was taken"
+            );
+        };
+        let me = std::process::id().to_string();
+        let launchers = root.join(".launchers");
+        std::fs::create_dir_all(&launchers).unwrap();
+        std::fs::write(launchers.join(&me), format!("{}\n", my_start())).unwrap();
+        refused("is running");
+        std::fs::remove_dir_all(&launchers).unwrap();
+        let one_offs = root.join(".one-offs");
+        std::fs::create_dir_all(&one_offs).unwrap();
+        std::fs::write(one_offs.join(&me), format!("{}\nx.exe\n", my_start())).unwrap();
+        refused("`gogo linux-app run`");
+        std::fs::remove_dir_all(&one_offs).unwrap();
+        for f in ["dlc-journal.json", "dlc-download.json"] {
+            std::fs::write(root.join(f), "{}").unwrap();
+            refused("DLC add");
+            std::fs::remove_file(root.join(f)).unwrap();
+        }
+        std::fs::create_dir_all(root.join(".dlc-staging")).unwrap();
+        refused("DLC add");
+        std::fs::remove_dir(root.join(".dlc-staging")).unwrap();
+        let journal = w.home.join("game-moves").join(ID);
+        std::fs::write(&journal, "x\n").unwrap();
+        refused("move");
+        std::fs::remove_file(&journal).unwrap();
+        let lib = root.parent().unwrap().to_path_buf();
+        let away = lib.with_file_name("unmounted");
+        std::fs::rename(&lib, &away).unwrap();
+        refused("isn't there");
+        std::fs::rename(&away, &lib).unwrap();
+
+        // The game's lock held by another gogo: refused under the locks.
+        let p = plan(&b, n, &opts());
+        let held = gogo::macapp::relocate::lock_game(ID).unwrap();
+        assert!(rb::rollback(ID, &b, n, &p, &opts()).is_err());
+        drop(held);
+        assert!(!meta.join(format!("{}.toml", n + 1)).exists());
+
+        // Numbers that can't be rolled back to: a usage error.
+        let unknown = |k: u32, why: &str| match rb::plan(ID, &b, k, &opts()).unwrap() {
+            Planned::Unknown(w) => assert!(w.contains(why), "{k}: {w}"),
+            Planned::Plan(_) => panic!("{k} planned"),
+        };
+        unknown(9, "there is no snapshot 9");
+        std::fs::create_dir_all(backend::snapshot_dir(&root, 7).unwrap()).unwrap();
+        unknown(7, "without metadata");
+        let m = snap::create(ID, &b, None).unwrap().snapshot.id;
+        std::fs::remove_dir_all(backend::snapshot_dir(&root, m).unwrap()).unwrap();
+        unknown(m, "not on disk");
+
+        // And with all of that settled, it works.
+        go(&b, n, &opts()).unwrap();
+    }
+
+    /// The game moved since the snapshot (on one filesystem): `launch.conf`
+    /// is rewritten for where it is now (design 20 §3).
+    #[test]
+    fn a_snapshot_taken_elsewhere_gets_its_launch_conf_rewritten() {
+        let Some(w) = World::launcher_with("rb-moved", false, true) else {
+            return;
+        };
+        let (_, b) = fake();
+        let root = w.game();
+        let n = snap::create(ID, &b, None).unwrap().snapshot.id;
+        // As if taken at another place: the metadata and the snapshot's
+        // launch.conf name it.
+        let old = w.root.join("old place").join(ID);
+        let file = w.home.join("snapshots").join(ID).join(format!("{n}.toml"));
+        let mut meta: gogo::snapshot::Meta =
+            toml::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        meta.game_dir = old.clone();
+        std::fs::write(&file, toml::to_string(&meta).unwrap()).unwrap();
+        let conf = backend::snapshot_dir(&root, n).unwrap().join("launch.conf");
+        let text = std::fs::read_to_string(&conf).unwrap();
+        let here = root.to_string_lossy().into_owned();
+        assert!(text.contains(&here), "{text}");
+        std::fs::write(&conf, text.replace(&here, &old.to_string_lossy())).unwrap();
+
+        let p = plan(&b, n, &opts());
+        assert_eq!(p.rewrite_from.as_deref(), Some(old.as_path()));
+        assert!(
+            p.lines(false)
+                .iter()
+                .any(|l| l.contains("launch.conf is rewritten"))
+        );
+        rb::rollback(ID, &b, n, &p, &opts()).unwrap();
+        let now = w.conf();
+        assert!(now.contains(&here), "{now}");
+        assert!(!now.contains(&old.to_string_lossy().into_owned()), "{now}");
+        assert_runs(&w);
+    }
+
+    /// The launcher refuses while a rollback or a conversion is unfinished
+    /// (design 20 §5.4): no setup, no game, a run log and a dialog.
+    #[test]
+    fn the_launcher_refuses_while_a_marker_is_in_the_game_dir() {
+        let Some(w) = World::launcher("rb-marker", false) else {
+            return;
+        };
+        let stub = w.dialog_stub(&["", ""]);
+        for (marker, why, says) in [
+            (
+                backend::ROLLBACK_MARKER,
+                "a snapshot rollback isn't finished",
+                "A rollback of Test Game to an earlier snapshot stopped",
+            ),
+            (
+                backend::CONVERTED_MARKER,
+                "a conversion for snapshots isn't finished",
+                "for snapshots stopped before it finished",
+            ),
+        ] {
+            std::fs::write(w.game().join(marker), "3\n").unwrap();
+            // A stale stamp, which would run setup: it doesn't.
+            gogo::linuxapp::envargs::set_env(ID, &[("FOO".into(), marker.into())]).unwrap();
+            let out = w.launch(&[("GOGO_LAUNCHER_DIALOG", stub.to_str().unwrap())], &[]);
+            assert_eq!(out.status.code(), Some(127), "{marker}: {out:?}");
+            assert_eq!(w.game_runs(), 0, "{marker}");
+            assert!(w.calls().is_empty(), "{marker}: {:?}", w.calls());
+            let last = w.dialogs().last().cloned().unwrap_or_default();
+            assert!(last.contains(says), "{marker}: {last}");
+            assert!(
+                w.runs()
+                    .last()
+                    .unwrap()
+                    .contains(&format!("# exit: 127 ({why})")),
+                "{marker}"
+            );
+            assert!(
+                w.launch_log().contains(&format!("{why}: not launching")),
+                "{marker}"
+            );
+            std::fs::remove_file(w.game().join(marker)).unwrap();
+        }
+        // Without them, it runs (setup first: the override changed).
+        assert_runs(&w);
+    }
+
+    fn my_start() -> String {
+        let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+        let rest = stat.rsplit_once(") ").unwrap().1;
+        rest.split_whitespace().nth(19).unwrap().to_string()
+    }
+
+    /// On a real btrfs ([`World::on_btrfs`], else skipped): the rollback
+    /// stages a writable snapshot, swaps it in with `RENAME_EXCHANGE`, keeps
+    /// the game dir a subvolume, deletes the old tree, and can be undone. Run
+    /// as [`super::btrfs_rollback_swaps_in_a_writable_snapshot`].
+    pub(super) fn real_btrfs_rollback() {
+        use gogo::snapshot::btrfs;
+        let Some(w) = World::on_btrfs("btrfs_rollback_swaps_in_a_writable_snapshot", &["d3d9.dll"])
+        else {
+            return;
+        };
+        let real = Backends::real();
+        let mut o = w.opts();
+        o.snapshots = SnapshotOptions::on(real.clone());
+        let built = super::build_with(&o);
+        let root = built.dirs.root.clone();
+        let _guard = Cleanup(root.clone());
+        assert!(btrfs::is_subvolume(&root).unwrap());
+        assert_eq!(built.snapshot.as_ref().map(|m| m.id), Some(1));
+        put(&root, &format!("{SAVES}/old.sav"), "old");
+        put(&root, "game/era.txt", "then");
+        let n = snap::create(ID, &real, Some("then")).unwrap().snapshot.id;
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        put(&root, &format!("{SAVES}/new.sav"), "new");
+        put(&root, "game/era.txt", "now");
+
+        let out = go(&real, n, &opts()).unwrap();
+        assert_eq!(read(&root, "game/era.txt").as_deref(), Some("then"));
+        assert!(!root.join(format!("{SAVES}/new.sav")).exists());
+        assert!(btrfs::is_subvolume(&root).unwrap(), "still a subvolume");
+        assert!(!btrfs::is_readonly(&root).unwrap(), "writable");
+        assert_settled(&w, &root);
+        let pre = backend::snapshot_dir(&root, out.pre).unwrap();
+        assert!(btrfs::is_readonly(&pre).unwrap());
+        assert_eq!(read(&pre, "game/era.txt").as_deref(), Some("now"));
+        let aside = out.saves_copied_to.clone().unwrap();
+        assert_eq!(
+            read(&aside, "users/steamuser/Saved Games/Studio/new.sav").as_deref(),
+            Some("new")
+        );
+
+        // Undone: back to the snapshot taken before it.
+        go(&real, out.pre, &opts()).unwrap();
+        assert_eq!(read(&root, "game/era.txt").as_deref(), Some("now"));
+        assert!(btrfs::is_subvolume(&root).unwrap());
+
+        // A crash after the commit: the next command finishes it, and the
+        // old tree (a subvolume) goes.
+        let o = RollbackOptions {
+            fail_at: Some(RbStep::LauncherWritten),
+            ..opts()
+        };
+        go(&real, n, &o).unwrap_err();
+        let staged = backend::rollback_staging(&root).unwrap();
+        assert!(btrfs::is_subvolume(&staged).unwrap());
+        snap::list(ID, &real, 5, false).unwrap();
+        assert_settled(&w, &root);
+        assert_eq!(read(&root, "game/era.txt").as_deref(), Some("then"));
+
+        let a = gogo::macapp::apps::get(ID, &w.root.join("logs"))
+            .unwrap()
+            .unwrap();
+        gogo::macapp::apps::remove(&a, false).unwrap();
+        assert!(!root.exists());
+    }
+
+    /// Whatever a failed btrfs test left: read-only snapshots and a staged
+    /// subvolume aren't removed by the world's cleanup.
+    struct Cleanup(PathBuf);
+
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            if let Some(dir) = backend::snapshots_dir(&self.0)
+                && let Ok(rd) = std::fs::read_dir(&dir)
+            {
+                for e in rd.flatten() {
+                    let _ = gogo::snapshot::btrfs::destroy_by_rmdir(&e.path());
+                }
+            }
+            if let Some(st) = backend::rollback_staging(&self.0) {
+                let _ = gogo::snapshot::btrfs::destroy_by_rmdir(&st);
+            }
+        }
+    }
+}
+
+#[test]
+fn btrfs_rollback_swaps_in_a_writable_snapshot() {
+    rollback::real_btrfs_rollback();
 }

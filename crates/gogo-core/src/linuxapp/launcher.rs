@@ -23,7 +23,7 @@ use crate::macapp::launch::GameDirs;
 /// Bumped with every change to [`TEMPLATE`] that matters to a game set up
 /// before it. Setup rewrites `launch.sh` whenever its bytes differ, so this
 /// is for people: the run log header and `launch.log` name it.
-pub const LAUNCHER_VERSION: u32 = 14;
+pub const LAUNCHER_VERSION: u32 = 15;
 
 /// `launch.sh`'s first word when a wrapper runs it for the game's own step
 /// (design 18 §7.8): the game's environment, then umu-run.
@@ -596,6 +596,18 @@ if [ -e "$HERE/dlc-journal.json" ]; then
     alert "A DLC install for $TITLE stopped before it finished, so its files may be half there. Run: gogo linux-app dlc $GOGID add (it finishes the install, or undoes it)"
     exit 1
 fi
+# Design 20 section 5.4: a snapshot rollback or a conversion that stopped
+# after its commit leaves its marker in the game dir. The files are the new
+# ones, but the override and launcher may not be yet: no setup and no launch
+# until gogo finishes it (refused below, with a run log and a dialog).
+UNSETTLED="" UNSETTLED_MSG=""
+if [ -e "$HERE/.gogo-rollback" ]; then
+    UNSETTLED="a snapshot rollback isn't finished"
+    UNSETTLED_MSG="A rollback of $TITLE to an earlier snapshot stopped before it finished. Run: gogo linux-app snapshot $GOGID list (it finishes the rollback), then start the game again."
+elif [ -e "$HERE/.gogo-converted" ]; then
+    UNSETTLED="a conversion for snapshots isn't finished"
+    UNSETTLED_MSG="Turning $TITLE's dir into a btrfs subvolume for snapshots stopped before it finished. Run: gogo linux-app snapshot $GOGID list (it finishes it), then start the game again."
+fi
 want="$(current_stamp)"
 check_runtime
 why=""
@@ -608,10 +620,10 @@ elif [ "$RT_PROBLEM" = missing ] || { [ "$RT_PROBLEM" = changed ] && managed; };
 else
     why="$(umu_problem)"
 fi
-if [ -n "$why" ]; then run_setup "$why"; fi
+if [ -n "$why" ] && [ -z "$UNSETTLED" ]; then run_setup "$why"; fi
 # A normal launch runs the last applied config when setup can't run; a one-off
 # doesn't: the game isn't in the state its config says.
-if [ -n "$ONE_OFF" ] && [ "$(current_stamp)" != "$STAMP" ]; then
+if [ -n "$ONE_OFF" ] && [ -z "$UNSETTLED" ] && [ "$(current_stamp)" != "$STAMP" ]; then
     log "one-off: setup is pending (${SETUP_ERR:-no gogo to run it}): not running"
     alert "$TITLE's config changed and setup didn't apply it${SETUP_ERR:+ ($SETUP_ERR)}. Run: gogo linux-app setup $GOGID"
     exit 1
@@ -765,6 +777,9 @@ not_runnable() {
     alert "$3"
     exit 127
 }
+if [ -n "$UNSETTLED" ]; then
+    not_runnable "$UNSETTLED" "$UNSETTLED" "$UNSETTLED_MSG"
+fi
 
 # The display the game gets (section 7.9): a Wayland mode with no Wayland
 # socket falls back to X11, logged; refusing would leave a player in an X11

@@ -17,6 +17,7 @@ pub mod backend;
 pub mod btrfs;
 #[cfg(any(test, feature = "test-util"))]
 pub mod fake;
+pub mod saves;
 
 use std::fs::File;
 use std::io::{self, Write as _};
@@ -469,6 +470,12 @@ impl<'b> Store<'b> {
         self.dir.join(format!("{n}.toml"))
     }
 
+    /// `rollback.json`: the journal of a rollback in progress (design 20
+    /// §5.3.1).
+    pub fn rollback_journal_path(&self) -> PathBuf {
+        self.dir.join("rollback.json")
+    }
+
     /// `<n>.override.toml`: the L4 copy taken with snapshot `n`.
     pub fn override_copy_path(&self, n: u32) -> PathBuf {
         self.dir.join(format!("{n}.override.toml"))
@@ -806,10 +813,22 @@ impl<'b> Store<'b> {
     /// first. `initial` and `manual` ones are never touched. Returns what it
     /// deleted, in order.
     pub fn prune(&self, guard: &Guard, keep_auto: usize) -> Result<Vec<Meta>> {
+        self.prune_keeping(guard, keep_auto, &[])
+    }
+
+    /// [`Self::prune`], never deleting the snapshots in `keep` (and not
+    /// counting them): a rollback keeps its target and the snapshot it took
+    /// before itself, whatever `keep_auto` says.
+    pub fn prune_keeping(
+        &self,
+        guard: &Guard,
+        keep_auto: usize,
+        keep: &[u32],
+    ) -> Result<Vec<Meta>> {
         let mut autos: Vec<Meta> = self
             .metadata()?
             .into_iter()
-            .filter(|m| m.kind == Kind::Auto && m.state == State::Done)
+            .filter(|m| m.kind == Kind::Auto && m.state == State::Done && !keep.contains(&m.id))
             .collect();
         autos.sort_by_key(|m| std::cmp::Reverse(m.id));
         let mut old: Vec<Meta> = autos.into_iter().skip(keep_auto).collect();
@@ -908,7 +927,7 @@ fn write_toml<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 
 /// Design 06 §2: `<file>.tmp`, fsync, rename over the target, fsync the dir
 /// (best effort). A leftover `.tmp` is cleared by [`Store::recover`].
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir)?;
     let mut tmp = path.as_os_str().to_os_string();
@@ -925,7 +944,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 }
 
 /// Remove `path`; gone already is fine.
-fn remove_file(path: &Path) -> io::Result<()> {
+pub(crate) fn remove_file(path: &Path) -> io::Result<()> {
     match std::fs::remove_file(path) {
         Ok(()) => {
             if let Some(dir) = path.parent() {

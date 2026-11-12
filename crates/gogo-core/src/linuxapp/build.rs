@@ -781,6 +781,13 @@ pub fn execute(
     prompt: Option<&PromptFn>,
     emit: &mut dyn FnMut(&ProgressEvent),
 ) -> Result<BuildOutcome, MacAppError> {
+    // A rebuild of a game whose snapshot rollback stopped settles it first
+    // (design 20 §5.3.1).
+    if let Some(id) = &plan.gogid {
+        for message in super::rollback::settle_pending(id, &plan.snapshot_opts.backends)? {
+            emit(&ProgressEvent::Warn { message });
+        }
+    }
     let umu_run = setup::ensure_umu(prompt, emit)?;
     let build = match (&plan.proton, &plan.proton_download) {
         (Some(b), _) => b.clone(),
@@ -1067,6 +1074,9 @@ pub fn execute(
             launch::move_tree(&staging.root, &target.root)?;
             launch::record_location(&gogid, &target.root)?;
         } else {
+            for message in super::rollback::settle_pending(&gogid, &plan.snapshot_opts.backends)? {
+                emit(&ProgressEvent::Warn { message });
+            }
             launch::record_location(&gogid, &target.root)?;
             if target.prefix.symlink_metadata().is_ok() {
                 let aside = target.root.join(format!(

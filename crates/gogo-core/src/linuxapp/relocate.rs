@@ -185,6 +185,8 @@ pub fn move_game(
     emit: &mut dyn FnMut(&MoveEvent),
 ) -> Result<MoveOutcome, MacAppError> {
     crate::macapp::compat::validate_gogid(gogid)?;
+    // A snapshot rollback that stopped is settled first (design 20 §5.3.1).
+    super::rollback::settle_pending(gogid, &super::snapshots::Backends::real())?;
     refuse_dlc_add(gogid)?;
     relocate::move_game(gogid, target, &LinuxLane, opts, emit)
 }

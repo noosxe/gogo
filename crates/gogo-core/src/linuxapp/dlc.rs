@@ -1104,6 +1104,12 @@ where
     F: AsyncFnOnce(DownloadInputs, PathBuf) -> Result<(), DepotError>,
 {
     let root = game.dirs.root.clone();
+    // A snapshot rollback that stopped is settled first (design 20 §5.3.1).
+    for message in
+        super::rollback::settle_pending(&game.gogid, &super::snapshots::Backends::real())?
+    {
+        emit(&ProgressEvent::Warn { message });
+    }
     let _lock = crate::macapp::relocate::lock_game(&game.gogid)?;
     game::refuse_running(&game.gogid, &root, &game.dirs.prefix)?;
     let recovered = recover_locked(game, opts.reflink, emit)?;

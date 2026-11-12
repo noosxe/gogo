@@ -704,6 +704,73 @@ labels, the stored space total with its date, and the saves-aside dirs. `doctor`
 | a snapshot's runtime missing from the store | warn: a rollback to it needs that GE-Proton |
 | a pending `rollback.json` or `convert.json`, a marker in the game dir, a leftover `.gogo-rollback-<gogid>` / `.gogo-convert-<gogid>` | fail, naming the command that settles it |
 
+### 8.2 As built (#404): rollback
+
+What the rollback settled where §5.3, §5.4 and §6 left room:
+
+- **Code.** The orchestration is `linuxapp/rollback.rs`; the finder and the copy-aside are
+  `snapshot/saves.rs` (no Linux-lane types, so a ZFS rollback reuses them). The trait's
+  `rollback` stages, commits and deletes; the step callback finishes the restored game at
+  `Committed`. The trait gains `discard(path)`, which removes a staged or old tree (a
+  subvolume as a snapshot is removed, a plain dir file by file).
+- **The journal** is `{to, pre, staging, gameDir, keepOverride, savesAside, committed}`.
+  `committed` is written right after the swap. Recovery, in order: the game dir holds the
+  marker → finish step 6 on (each part can run again), delete the old tree; else
+  `committed` → delete the old tree; else delete the staged copy, if any. This covers the
+  fourth row of §5.3.1's table, where a staged copy with no marker could be either a
+  half-made copy (a crash between the snapshot and the marker) or the old tree. Deleting it
+  is right both ways, and `committed` says which one happened.
+- **Settling** runs in every `snapshot` command (`list` too, as a note), `dlc add`, `move`,
+  `apps remove` and a build. Each does it under the two locks before its own work. `doctor`
+  fails a pending journal, a marker without one, or a leftover `.gogo-rollback-<gogid>`,
+  naming `gogo linux-app snapshot <gogid> list`.
+- **Retention after the pre-rollback snapshot** runs once the rollback is done, and never
+  prunes the target or the pre-rollback snapshot (`Store::prune_keeping`).
+- **The pre-rollback snapshot's number** in the plan and the `--drop-saves` question is the
+  number `create` would take; the run reports the real one.
+- **The save user.** Proton's prefixes have one real user dir, `steamuser`. Wine adds a
+  symlink to it named after the host user. The finder scans every real dir in
+  `drive_c/users/` except `Public` and never follows links, so it finds `steamuser` alone.
+- **"Newer"**, when the snapshot's tree is readable: absent from it, or a different size
+  or mtime there and an mtime after `created`. A file the snapshot holds unchanged is
+  never newer, even when it was written in the snapshot's second.
+- **The depot lane's list** comes from the depot cache when its record names the game's
+  build: every file of the tree and of the support overlays (`gog-support/…/app/`, which
+  the build merges into `game/`), at the size the cache holds it. Else the CLI fetches the
+  build's depot manifests (`installed_build`, then `fetch_depots` for the base game and its
+  DLC in the game's language). Not signed in, offline, or a build GOG no longer lists means
+  no list.
+- **The installer lane's list** is the main installer's Inno log, `install/inno.log`
+  (`install/setup.log` is setup's own log). It names each destination (`Dest filename:`)
+  but no size, so a listed file is the build's when it is no newer than the log, give or
+  take 2 s. A rewritten `.ini` is then caught by time, not size. gogo keeps no DLC
+  installer logs, so their files are unlisted. When the DLC set changed they show up as
+  unattributed, else as candidates. No real Inno log was available here: the parser
+  handles UTF-8 (with or without a BOM) and UTF-16LE, and I4's check on real installers
+  is still open.
+- **gogo's own files** in the game's files: the paths of `state.toml`'s `files` lines,
+  matched as suffixes. Also, wherever a `ddraw.ini` starts with `; gogo:`: that file,
+  `ddraw.dll`, `Shaders/`, and the stand-in DLL with the `*.ddrawcompat` original it set
+  aside. On Linux, D7VK and DXVK come through Proton's env and lay nothing beside the exe.
+- **Exclusions** (`saves::EXCLUDED`): §6.1's list plus `*.dxvk-state-cache` and
+  `Thumbs.db`. A pattern `A/B/` is anchored at the root's base (the user dir, the game's
+  files, `ProgramData`). `A/` or `*/A/` is a dir of that name anywhere. Anything else is a
+  file name. `*` stays within one name, and case is ignored.
+- **The aside dir** is `<data_root>/saves-aside/<gogid>/<YYYYmmddTHHMMSSZ>/` (`-2`, `-3`
+  when taken), chosen at plan time so the question names it. The installer lane's files
+  keep their path from `drive_c/` (`GOG/<slug>/…`).
+- **Output.** The plan prints first: to stderr before the question, to stdout with
+  `--yes`. `-v` lists every file. `--dry-run --json` prints the plan, and `--json` prints
+  §8's shape plus `overrideChanges`, `pruned`, `warnings` and `recovered`. A number that
+  isn't a snapshot, is missing on disk or has no metadata is a usage error (exit 2).
+- **The launcher (`LAUNCHER_VERSION` 15)** sees a marker before setup. It runs no setup
+  (setup would apply an override the rollback hasn't restored yet). It then refuses as a
+  launch that can't run does: a run log with `# exit: 127 (<why>)`, the dialog, and a
+  `launch.log` line. The dialog names `gogo linux-app snapshot <gogid> list` for both
+  markers.
+- **`apps remove`** lists the saves-aside dirs with their size and asks about them apart,
+  default no. `--yes` and a non-TTY keep them. `apps show` gives each dir with its size.
+
 ## 9. Interplay
 
 ### 9.1 `move` (design 18 §6.1)
