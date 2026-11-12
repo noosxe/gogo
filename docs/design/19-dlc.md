@@ -163,6 +163,10 @@ column is made up.)
 
 ### 1.4 `dlc add`
 
+> **Amended (design 20, #365):** with autosnapshot on, `dlc add` takes an automatic snapshot
+> (`before adding <title>`) after its recovery and refusals and before its journal; `--no-snapshots`
+> skips it for one run.
+
 `gogo linux-app dlc <gogid> add <id|title>... | --all [--dry-run] [--yes] [--json]
 [--json-progress] [--limit RATE] [--no-disk-check]`
 
@@ -580,6 +584,8 @@ resolve game → content.toml (build B, language L, installed DLC I)
   file list.
 
 ### 3.4 Laying files onto `game/` (D6)
+
+> No snapshot is created, deleted or rolled back while this journal is pending (design 20 §5.1).
 
 The new step, in `gog/materialize.rs` (`lay_files(src_root, files, dst, journal)`):
 

@@ -1087,6 +1087,7 @@ tested = [
   too. `games/<gogid>/game` is made with `FICLONE` (reflink) where the filesystem
   supports it (btrfs, XFS, bcachefs), else a plain copy. The plan shows which, and the
   extra disk a copy costs. `gogo depot`'s help loses "macOS only for now".
+  With snapshots on (design 20 §2.1), a game dir on btrfs is created as its own subvolume first.
 
 - **As built (#175)**:
   - Why `depot` said "macOS only": one gate (design 14 D7) in `depot::run`, nothing
@@ -1221,7 +1222,7 @@ drive that isn't mounted. The store's GC stops: `runtimes prune` refuses while a
 runtime would break it silently. `apps remove` forgets such a game, its menu entry, logs and
 L4 file, and says the files are still at that path.
 
-**Removing.** `apps remove` deletes the game's dir, then its record. A symlinked game dir goes
+**Removing.** `apps remove` deletes the game's snapshots (design 20 §9.3), the game's dir, then its record. A symlinked game dir goes
 as the link alone (as `remove_dir_all` always did): the report names the target as left behind,
 and never counts or follows it. The library dir itself stays.
 
@@ -1250,6 +1251,9 @@ setup. One thing does need care across filesystems: 34 entries in that prefix ca
 keeps `user.*` attributes. A game that wrote its own path into the registry gets a warning, not a
 rewrite, and so does an `env` or `args` value naming the old dir: those are the game's and the
 user's.
+
+*Snapshots* (design 20 §9.1): on one filesystem they move with the game; across filesystems they
+are deleted after the commit, listed and confirmed first.
 
 *The steps.* A journal, `<data_root>/game-moves/<gogid>` (from and to), comes first. Then:
 
@@ -2322,6 +2326,9 @@ one-off under a wrapper.
 
 ## 8. `gogo linux-app doctor <gogid>`
 
+> **Amended (design 20, #365):** a `snapshots` check (backend, autosnapshot, space, pending
+> rollback or conversion journals; design 20 §8).
+
 Read-only, as design 16 §8.3: one line per check, `ok`/`warn`/`fail` with a hint; exit 1 on
 a failure.
 
@@ -2491,6 +2498,9 @@ only on Linux (`#[cfg(target_os = "linux")]`), with the same shape:
   builds. A neutral alias can come later without breaking either.
 - Leftovers fixed in the same work: `depot`'s "macOS only for now" (§6), the `runtimes
   install`/`renderers install` refusal off macOS (§6).
+
+> **Amended (design 20, #365):** `gogo linux-app snapshot <gogid> list|create|rollback|delete|auto`,
+> `--no-snapshots` on builds and changes; a game dir on btrfs is created as a subvolume.
 
 > **Amended (design 19, #343):** the build gains `--dlc`, `--all-dlcs`, `--no-dlcs` and
 > `--lang`, and `gogo linux-app dlc <gogid> list|add` adds DLC to a built game without a

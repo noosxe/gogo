@@ -33,7 +33,7 @@ in `docs/13` grounds design 10.
   a self-contained macOS `.app`; no library tracking, no launch management)
 - ~~Cloud saves~~, wishlist, friends, movies — cloud saves moved into v1 on 2026-11-11
   (#275): saves for built games, testing saves with new DLC, parity with Heroic, and
-  the tie-in with game snapshots (#365)
+  the tie-in with game snapshots (#365, design 20 §6.3)
 - Windows support — the *binary* targets **Linux and macOS only** (downloading Windows
   installers on Linux is first-class, though — they're just files; 03 §1)
 - A GUI/TUI (v2; the core is built as a library to make that cheap)
@@ -71,6 +71,7 @@ in `docs/13` grounds design 10.
 | [16-macapp-v2](16-macapp-v2.md) | mac-app v2 contract: layers L0–L4, immutable launcher bundle, store-referenced runtime, per-game state dir (input: docs/19, #94) |
 | [18-linux-runtime](18-linux-runtime.md) | Linux lane (`gogo linux-app`): GE-Proton through umu, DXVK/VKD3D-Proton/D7VK/cnc-ddraw, per-game fixes from protonfixes, `[platforms.<os>]` compat tables, `.desktop` launcher (input: docs/21, docs/22) |
 | [19-dlc](19-dlc.md) | DLC: choosing it at the first build, `linux-app dlc list` / `add` onto a built game, the depot cache's DLC set (#336), the offline lane's DLC installers, `content.toml` (#343) |
+| [20-snapshots](20-snapshots.md) | snapshots of a built Linux game on btrfs (ZFS later): the game dir as a subvolume, initial and automatic snapshots, rollback with the saves check, retention, `linux-app snapshot` (#365) |
 ## Key decisions (traceability)
 
 | Decision | Rationale / source |
