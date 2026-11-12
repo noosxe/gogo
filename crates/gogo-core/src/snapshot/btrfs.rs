@@ -322,6 +322,12 @@ pub enum Destroyed {
 /// where the mount allows it, else, on `EPERM` (or `ENOTTY` from a kernel
 /// before 5.7, which lacks the v2 ioctl), [`destroy_by_rmdir`].
 pub fn destroy(path: &Path) -> io::Result<Destroyed> {
+    // With `user_subvol_rm_allowed` the kernel checks write access to the
+    // subvolume, so a read-only snapshot is refused with `EROFS` (seen on a
+    // loop mount in CI): clear the flag first, as the rmdir route does.
+    if is_subvolume(path)? {
+        set_readonly(path, false)?;
+    }
     match destroy_by_ioctl(path) {
         Ok(()) => Ok(Destroyed::Ioctl),
         Err(e) if e == Errno::PERM || e == Errno::NOTTY => {

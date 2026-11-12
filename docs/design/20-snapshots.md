@@ -844,7 +844,10 @@ with two renames, with a `fail_at(step)` hook (as `dlc add`'s `AddOptions::fail_
   Both runs set `GOGO_TEST_BTRFS_REQUIRED=1`: a test that would print `SKIP … is not on btrfs`
   panics instead, so the job can't pass by skipping everything. `btrfs-progs` (only
   `mkfs.btrfs`, for the image) is in the Linux dev shell, pinned with the rest of nixpkgs.
-  What the runner kernel supports is recorded in design 08 §6.
+  The runner kernel (Ubuntu's Azure 7.0) has btrfs and loop mounts. One thing the job showed:
+  with `user_subvol_rm_allowed` the ioctl refuses a read-only subvolume with `EROFS` (it
+  wants write access), so `destroy` clears the read-only flag before the ioctl.
+  Design 08 §6 lists the job's env hooks.
 - **ZFS in CI** the same way if the runner can load the module (`zfsutils-linux` on Ubuntu,
   a file-backed pool, `zfs allow` to the runner user); that is also where §2.2's unverified
   points get settled. If it can't, ZFS is a host pass.

@@ -194,6 +194,9 @@ fn btrfs_delete_through_the_ioctl() {
     let game = s.game();
     Btrfs.snapshot(&game, 1).unwrap();
     let snap = Btrfs.snapshot_path(&game, 1).unwrap();
+    // The kernel wants write access for an unprivileged delete: `destroy`
+    // clears read-only first, and so does this.
+    btrfs::set_readonly(&snap, false).unwrap();
     match btrfs::destroy_by_ioctl(&snap) {
         Ok(()) => {
             assert!(!snap.exists());
