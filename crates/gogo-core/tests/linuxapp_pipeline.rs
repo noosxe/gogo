@@ -83,6 +83,21 @@ struct World {
     _guard: std::sync::MutexGuard<'static, ()>,
 }
 
+/// Can a `user.*` xattr be set under `base`?
+fn xattrs_allowed(base: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(base)?;
+    let probe = base.join(format!(".xattr-probe-{}", std::process::id()));
+    std::fs::write(&probe, b"")?;
+    let r = rustix::fs::lsetxattr(
+        &probe,
+        "user.gogo.probe",
+        b"1",
+        rustix::fs::XattrFlags::empty(),
+    );
+    let _ = std::fs::remove_file(&probe);
+    r.map_err(std::io::Error::from)
+}
+
 impl World {
     fn new(name: &str, imports: &[&str]) -> World {
         Self::new_in(Path::new(env!("CARGO_TARGET_TMPDIR")), name, imports)
@@ -104,6 +119,21 @@ impl World {
             );
             println!(
                 "SKIP {test}: {} is not on btrfs (set GOGO_TEST_BTRFS_DIR to a btrfs dir)",
+                base.display()
+            );
+            return None;
+        }
+        // Some sandboxes (a Nix build's) put the scratch on the host's btrfs but
+        // refuse `user.*` xattrs, which Wine's prefix needs and the convert
+        // test sets: a missing capability, not a failure.
+        if let Err(e) = xattrs_allowed(&base) {
+            assert!(
+                std::env::var_os("GOGO_TEST_BTRFS_REQUIRED").is_none(),
+                "{test}: {} refuses user.* xattrs ({e}) and GOGO_TEST_BTRFS_REQUIRED is set",
+                base.display()
+            );
+            println!(
+                "SKIP {test}: the environment refuses user.* xattrs on {} ({e}; a Nix build sandbox?)",
                 base.display()
             );
             return None;
