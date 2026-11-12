@@ -92,7 +92,7 @@ empty stub dir (<https://btrfs.readthedocs.io/en/latest/Subvolumes.html>). Two c
   snapper or Timeshift snapshots of `/home`, and `btrfs send`-based backups (btrbk) of it,
   see an empty dir where the game was. File-level backups (restic, borg, rsync) are not
   affected. The build plan says this on its `snapshots:` line, and so does this doc's user
-  text (open question Q1). The linux-e2e harness snapshots its scratch data root, so it
+  text (decision D1). The linux-e2e harness snapshots its scratch data root, so it
   builds with snapshots off (§10.4).
 
 **Where snapshots live:** `<parent>/.gogo-snapshots/<gogid>/<n>`, where `<parent>` is the
@@ -221,7 +221,7 @@ reason, and gogo says so where it matters, without failing the command that aske
 without native snapshots, but it isn't atomic, it walks and duplicates every inode, and a
 rollback becomes a tree swap built from copies. The common case the brief names, a data dir
 on btrfs and a library on ext4, gets nothing from it either, since ext4 has no reflink. It
-stays a possible later backend behind the same trait (open question Q9), not part of this
+stays a possible later backend behind the same trait (decision D9), not part of this
 design.
 
 **The common real setup:** data dir on btrfs, library on ext4. Snapshots follow the game
@@ -341,7 +341,7 @@ An `auto` snapshot is taken by the command that is about to change the game, und
 that command already holds, after its own refusals and before its first write.
 
 A snapshot of a running game would be crash-consistent at best (a save half written), so
-`create` refuses too, rather than offering a flag (open question Q10).
+`create` refuses too, rather than offering a flag (decision D10).
 
 ### 5.2 Create, delete
 
@@ -369,7 +369,7 @@ destroy (§5.3.2). On a TTY it asks; with `--yes` it doesn't; without a TTY and 
 2. **The pre-rollback snapshot:** an `auto` snapshot (`trigger = "rollback"`, `before
    rollback to <n>`), taken whether autosnapshot is on or not. It makes the rollback
    undoable and holds the newer saves; it costs only metadata and is pruned like any `auto`
-   snapshot (open question Q3).
+   snapshot (decision D3).
 3. The copy-aside of newer saves (§6.2), unless `--drop-saves`.
 4. A writable snapshot of `<n>` at `<parent>/.gogo-rollback-<gogid>`, with the marker
    `.gogo-rollback` written into it (the target's number).
@@ -417,7 +417,7 @@ two are root-only (`zfs-allow(8)`). So:
   remove the journal; none left → after the commit, finish.
 - A copy-back from `.zfs/snapshot/gogo-<n>/` would keep the newer snapshots, but it is a
   file-by-file copy over a live tree: slow, not atomic, and an interrupted one leaves a mix.
-  Not chosen (open question Q7).
+  Not chosen (decision D7).
 
 ### 5.4 The launcher
 
@@ -505,7 +505,7 @@ Cyberpunk 2077: 14 files, 212 MiB, newest 2026-11-12 09:58`); every file with `-
   small next to a game, and "bytes are sacred": the default keeps them. `--drop-saves` skips
   the copy. The rollback's last line names the dir. `saves-aside/` is the user's: gogo never
   prunes it, `apps remove` lists it and asks before removing it with the game, and `apps
-  show` and `doctor` name it with its size (open question Q2).
+  show` and `doctor` name it with its size (decision D2).
 - **On btrfs** the pre-rollback snapshot holds them as well, so a rollback can be undone whole
   with `snapshot <gogid> rollback <pre>`.
 - **The question** (TTY, no `--yes`): `roll back to 3 (before adding Phantom Liberty)? 14
@@ -574,7 +574,7 @@ makes a plain game dir (§2.1).
   game; after a new `auto` snapshot is done, older ones beyond that are deleted, oldest first,
   each reported (`pruned snapshot 2 (before rebuild, 2026-10-30)`).
 - No pruning by age or space in v1: CoW snapshots of a game cost what changed, and the
-  space is shown (§7.3). A space-based rule can come later (open question Q6).
+  space is shown (§7.3). A space-based rule can come later (D6 keeps v1 without one).
 - `keep_auto = 0` keeps none: autosnapshot then only protects a change until the next one.
 
 ### 7.3 Space
@@ -680,7 +680,7 @@ labels, the stored space total with its date, and the saves-aside dirs. `doctor`
   `move` then needs a yes (TTY question, or `--yes`; a non-TTY without it prints the plan and
   exits 2). `move` gains `--yes` for this. Keeping them behind on the old drive was
   considered and rejected: a rollback can't cross filesystems, so they would be orphans
-  holding space (open question Q5).
+  holding space (decision D5).
 - **The target's backend:** btrfs → the copy target `.moving-<gogid>/` is created as a
   subvolume, and with autosnapshot on an `initial` snapshot (`after moving to <dir>`) is
   taken after the commit. ZFS → refused unless the target is a prepared dataset (§2.2); a
@@ -732,7 +732,7 @@ by hand is a `doctor` warning, and its rollback says that the next launch's setu
 
 They keep working as they are: `auto = false`, a plain dir, no snapshots. `doctor` and `apps
 show` mention `snapshot <gogid> auto on` where the backend has snapshots. Nothing converts
-on its own (open question Q8).
+on its own (decision D8).
 
 ## 10. Implementation and testing
 
@@ -749,7 +749,7 @@ on its own (open question Q8).
 `renameat_with(RenameFlags::EXCHANGE)` and `statfs`. Five ioctls with fixed structs are less
 than a dependency, and the e2e helper already uses two of them (`scripts/linux-e2e-helper.py`,
 "btrfs subvolumes (#255)"). The `unsafe` stays in that file. `btrfs-uapi` is the fallback if
-the module grows (open question Q13). ZFS through the `zfs` CLI with `-H -p` output.
+the module grows (decision D13). ZFS through the `zfs` CLI with `-H -p` output.
 
 **Finding `zfs` under Nix:** `[linux] zfs = "<path>"` in the config, else the first `zfs` on
 `PATH` (on NixOS the system profile's, `/run/current-system/sw/bin`). It is never added to the
@@ -843,24 +843,26 @@ headless, so agents can run it on games already in the cache.
   plan line says.
 - ZFS on a real pool with delegation (if the CI job can't).
 
-## 11. Open questions (each with a recommendation)
+## 11. Decisions
 
-| # | Question | Recommended |
+Decided on 2026-11-12: every answer below was accepted as written.
+
+| # | Question | Decision |
 |---|---|---|
-| Q1 | Make the game dir a subvolume by default on btrfs, given it then drops out of snapper/Timeshift snapshots and `btrfs send` backups of the subvolume around it? | **Yes**, it's what "on by default" needs; the plan line and user docs say it, and `--no-snapshots` keeps a plain dir. |
-| Q2 | Copy newer saves aside by default on rollback (vs only with a flag)? | **Yes, by default**; `--drop-saves` skips. Saves are small, and on ZFS it is the only copy left. |
-| Q3 | Always take a pre-rollback snapshot on btrfs, even with autosnapshot off? | **Yes**: it makes a rollback undoable at no cost, and it is pruned like any `auto` snapshot. |
-| Q4 | Restore the L4 override on rollback by default? | **Yes**, with `--keep-override`: a rebuild or `--retarget` writes keys there, so restoring it is what makes the rollback consistent. |
-| Q5 | `move` across filesystems: delete the snapshots (with a question) or leave them on the old drive? | **Delete**, listed with their space and confirmed; leftovers can't be rolled back to. |
-| Q6 | Retention: keep the last 5 automatic snapshots per game, no age or space rule in v1? | **Yes**; `keep_auto` is configurable, and space is shown. |
-| Q7 | ZFS: rollback to an older snapshot destroys the newer ones (`-r`), vs a slow non-atomic copy-back from `.zfs/snapshot`? | **Accept `-r`**, with the newer snapshots listed and confirmed. |
-| Q8 | Games built before this: convert them on their own (at the next `dlc add` or rebuild), or only when the user turns snapshots on? | **Only on request** (`auto on` / `create`), with a `doctor` hint. |
-| Q9 | A reflink-copy fallback on XFS? | **No** for now; the trait leaves room. |
-| Q10 | Allow `create` on a running game (`--allow-running`)? | **No**: a snapshot taken mid-save is the checkpoint a rollback must not hand back. |
-| Q11 | After a rollback, cloud saves (#275) treat every difference as a conflict to ask about? | **Yes** (§6.3); #275's design takes it as a requirement. |
-| Q12 | An autosnapshot before a setup that changes the game's GE-Proton? | **Yes**: a Proton upgrade changes the prefix and can't be undone otherwise. |
-| Q13 | Own btrfs ioctl module vs the `btrfs-uapi` crate? | **Own module** (five ioctls, already proven by the e2e helper); revisit if it grows. |
-| Q14 | bcachefs: implement now or on request? | **On request**: out of mainline since 6.18. |
+| D1 | Make the game dir a subvolume by default on btrfs, given it then drops out of snapper/Timeshift snapshots and `btrfs send` backups of the subvolume around it? | **Yes**, it's what "on by default" needs; the plan line and user docs say it, and `--no-snapshots` keeps a plain dir. |
+| D2 | Copy newer saves aside by default on rollback (vs only with a flag)? | **Yes, by default**; `--drop-saves` skips. Saves are small, and on ZFS it is the only copy left. |
+| D3 | Always take a pre-rollback snapshot on btrfs, even with autosnapshot off? | **Yes**: it makes a rollback undoable at no cost, and it is pruned like any `auto` snapshot. |
+| D4 | Restore the L4 override on rollback by default? | **Yes**, with `--keep-override`: a rebuild or `--retarget` writes keys there, so restoring it is what makes the rollback consistent. |
+| D5 | `move` across filesystems: delete the snapshots (with a question) or leave them on the old drive? | **Delete**, listed with their space and confirmed; leftovers can't be rolled back to. |
+| D6 | Retention: keep the last 5 automatic snapshots per game, no age or space rule in v1? | **Yes**; `keep_auto` is configurable, and space is shown. |
+| D7 | ZFS: rollback to an older snapshot destroys the newer ones (`-r`), vs a slow non-atomic copy-back from `.zfs/snapshot`? | **Accept `-r`**, with the newer snapshots listed and confirmed. |
+| D8 | Games built before this: convert them on their own (at the next `dlc add` or rebuild), or only when the user turns snapshots on? | **Only on request** (`auto on` / `create`), with a `doctor` hint. |
+| D9 | A reflink-copy fallback on XFS? | **No** for now; the trait leaves room. |
+| D10 | Allow `create` on a running game (`--allow-running`)? | **No**: a snapshot taken mid-save is the checkpoint a rollback must not hand back. |
+| D11 | After a rollback, cloud saves (#275) treat every difference as a conflict to ask about? | **Yes** (§6.3); #275's design takes it as a requirement. |
+| D12 | An autosnapshot before a setup that changes the game's GE-Proton? | **Yes**: a Proton upgrade changes the prefix and can't be undone otherwise. |
+| D13 | Own btrfs ioctl module vs the `btrfs-uapi` crate? | **Own module** (five ioctls, already proven by the e2e helper); revisit if it grows. |
+| D14 | bcachefs: implement now or on request? | **On request**: out of mainline since 6.18. |
 
 ## 12. Implementation issues (proposed; filed after this design is approved)
 
@@ -882,4 +884,4 @@ there is CLI).
 Not new issues, but requirements added to existing ones (as comments when this is approved):
 #360 (the update path takes `before update <old> → <new>` before its journal), #353
 (`before removing <title>`), #275 (§6.3's four points). bcachefs gets no issue until someone
-asks for it (Q14).
+asks for it (D14).
