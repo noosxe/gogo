@@ -14,11 +14,11 @@ use serde::Serialize;
 use super::convert::{self, ConvertOptions, ConvertPlan};
 pub use super::convert::{ConvertProgress, Converted};
 use super::game::{self, LinuxState};
+use crate::engine::events::ProgressEvent;
 use crate::macapp::doctor::Finding;
 use crate::macapp::error::MacAppError;
 use crate::macapp::launch::{self, GameDirs};
 use crate::macapp::relocate;
-use crate::engine::events::ProgressEvent;
 use crate::snapshot::{
     self, BackendKind, Content, Entry, Guard, Kind, Listing, Meta, NewSnapshot, OnDisk, Presence,
     Recovered, SnapshotBackend, SnapshotError, Space, State, Store, Support, Trigger, backend,
@@ -725,8 +725,7 @@ pub fn before_change(
     }
     let (_, b) = opts.backends.for_dir(&dirs.root);
     let s = store(gogid, &dirs.root, b);
-    if s.rollback_journal_path().is_file() || convert::pending(gogid, &dirs.root).needs_settling()
-    {
+    if s.rollback_journal_path().is_file() || convert::pending(gogid, &dirs.root).needs_settling() {
         return Err(MacAppError::Apps(format!(
             "a snapshot rollback or conversion of {gogid} isn't finished, so the snapshot \
              before this change ({label}) can't be taken and nothing was changed: `gogo \
