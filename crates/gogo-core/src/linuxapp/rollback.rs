@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use super::game;
 use super::snapshots::{self, Backends, ContentView, SnapshotView};
+use crate::engine::events::ProgressEvent;
 use crate::gog::content;
 use crate::macapp::doctor::Finding;
 use crate::macapp::error::MacAppError;
@@ -1131,12 +1132,20 @@ fn run(
     b.rollback(&dirs.root, n, &mut step)?;
     snap::remove_file(&jpath)?;
 
-    let pruned = s
-        .prune_keeping(g, opts.keep_auto, &[n, pre.id])
-        .map_err(snapshots::err)?
-        .into_iter()
-        .map(|m| m.id)
-        .collect();
+    // Retention as after any `auto` snapshot (design 20 §7.2), once the
+    // rollback is done: the pre-rollback snapshot counts as the new one, the
+    // target is never pruned. A failed prune is a warning: the rollback is
+    // done.
+    let mut retention_warnings = Vec::new();
+    let pruned = snapshots::retain(s, g, opts.keep_auto, &[pre.id, n], &mut |ev| {
+        if let ProgressEvent::Warn { message } = ev {
+            retention_warnings.push(message.clone());
+        }
+    })
+    .into_iter()
+    .map(|m| m.id)
+    .collect();
+    warnings.extend(retention_warnings);
     log_line(
         gogid,
         &format!(

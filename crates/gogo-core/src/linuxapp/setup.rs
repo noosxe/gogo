@@ -50,6 +50,11 @@ pub struct SetupOptions<'a> {
     /// The terminal's prompts, for `[linux] umu` and `[linux] proton_dir`
     /// when they're unset. `None`: headless, as the launcher runs it.
     pub prompt: Option<&'a PromptFn>,
+    /// The `auto` snapshot before a change of the game's GE-Proton (design
+    /// 20 §7.1): `before <old> → <new>`. `None`: the caller protected its
+    /// change itself (a rebuild, a DLC add) or there is nothing to protect.
+    /// `gogo linux-app setup` (the launcher's too) and `--retarget` pass it.
+    pub runtime_snapshot: Option<super::snapshots::AutoOptions>,
 }
 
 /// What [`setup`] did.
@@ -69,6 +74,9 @@ pub struct SetupOutcome {
     pub warnings: Vec<String>,
     /// `launch.sh`, the menu entry and the icon.
     pub launcher: launcher::LauncherFiles,
+    /// The `auto` snapshot taken before the GE-Proton changed, and what
+    /// retention pruned after it.
+    pub snapshot: Option<super::snapshots::Taken>,
 }
 
 /// A Proton build resolved for a game.
@@ -741,6 +749,28 @@ pub fn setup(
     let umu_run = ensure_umu(opts.prompt, emit)?;
     let umu_id = umu_id_for(gogid, &build.dir, opts.refresh, &mut warnings);
 
+    // Another GE-Proton upgrades the prefix in place and can't go back
+    // (design 20 §7.1): an `auto` snapshot first, before anything in the
+    // game dir is written. Every change of `state.toml`'s runtime comes
+    // through here: `--retarget`, a new pinned build, the launcher's setup.
+    let snapshot = match (&opts.runtime_snapshot, &prior) {
+        (Some(auto), Some(p)) if !p.runtime.is_empty() && p.runtime != build.reference => {
+            super::snapshots::protect(
+                gogid,
+                &dirs,
+                None,
+                crate::snapshot::Trigger::Runtime,
+                crate::snapshot::labels::runtime(
+                    super::snapshots::runtime_name(&p.runtime),
+                    super::snapshots::runtime_name(&build.reference),
+                ),
+                auto,
+                emit,
+            )?
+        }
+        _ => None,
+    };
+
     // The game files, for the renderer's scan and the prefix link.
     let tree = baked.tree_name();
     let game_dir = tree
@@ -1091,6 +1121,7 @@ pub fn setup(
         verbs_installed,
         notes,
         warnings,
+        snapshot,
     })
 }
 

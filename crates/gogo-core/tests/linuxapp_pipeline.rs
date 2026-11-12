@@ -4517,6 +4517,7 @@ fn a_game_builds_into_a_library_and_everything_finds_it_there() {
         &SetupOptions {
             refresh: false,
             prompt: None,
+            runtime_snapshot: None,
         },
         &mut quiet(),
     )
@@ -5010,6 +5011,7 @@ mod moving {
             &SetupOptions {
                 refresh: false,
                 prompt: None,
+                runtime_snapshot: None,
             },
             &mut quiet(),
         )
@@ -6684,6 +6686,128 @@ mod dlc_add {
             .unwrap_or_else(|| e.as_str().unwrap_or("").to_string())
     }
 
+    /// [`built`], with snapshots on (the fake backend): snapshot 1 is the
+    /// `initial` one.
+    fn built_with_snapshots(
+        name: &str,
+    ) -> (
+        World,
+        Arc<gogo::snapshot::fake::Fake>,
+        gogo::linuxapp::snapshots::Backends,
+    ) {
+        use gogo::linuxapp::snapshots::{Backends, SnapshotOptions};
+        let w = World::new(name, &["d3d9.dll"]);
+        std::fs::write(w.tree.join("shared.pak"), b"base shared").unwrap();
+        let f = Arc::new(gogo::snapshot::fake::Fake::new());
+        let b = Backends::fixed(f.clone());
+        build_with(&LinuxAppOptions {
+            snapshots: SnapshotOptions::on(b.clone()),
+            ..w.opts()
+        });
+        let mut c = content::load(&w.game()).unwrap().unwrap();
+        c.build_id = Some("B1".into());
+        c.language = Some("en-US".into());
+        content::write(&w.game(), &c).unwrap();
+        (w, f, b)
+    }
+
+    fn with_snapshots(b: &gogo::linuxapp::snapshots::Backends, skip: bool) -> AddOptions {
+        AddOptions {
+            snapshots: gogo::linuxapp::snapshots::AutoOptions {
+                skip,
+                backends: b.clone(),
+                ..Default::default()
+            },
+            ..AddOptions::default()
+        }
+    }
+
+    fn snapshot_ids(b: &gogo::linuxapp::snapshots::Backends) -> Vec<u32> {
+        let mut v: Vec<u32> = gogo::linuxapp::snapshots::list(ID, b, 5, false)
+            .unwrap()
+            .snapshots
+            .iter()
+            .map(|s| s.id)
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn an_add_takes_before_adding_first() {
+        let (w, _, b) = built_with_snapshots("dlc-autosnap");
+        let mut g = game(&w);
+        let p = plan_for(&g, &[DLC, ZERO]);
+        let r = run(&mut g, &p, with_snapshots(&b, false), false);
+        let out = r.result.unwrap();
+        let s = out.snapshot.clone().expect("before adding");
+        assert_eq!(
+            (s.id, s.label.as_str()),
+            (2, "before adding Extra Pack, Hot Garbage")
+        );
+        assert!(out.pruned.is_empty());
+        let json = serde_json::to_value(&out).unwrap();
+        assert_eq!(json["snapshot"]["id"], 2);
+        assert_eq!(json["pruned"], serde_json::json!([]));
+        let created: Vec<_> = r
+            .events
+            .iter()
+            .filter_map(|e| e.get("SnapshotCreated"))
+            .collect();
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0]["trigger"], "dlc-add");
+        // Before the download and the lay: the event comes before the plan's,
+        // and the snapshot has the game without the DLC.
+        let at = |t: &str| r.events.iter().position(|e| tag(e) == t).unwrap();
+        assert!(at("SnapshotCreated") < at("DlcPlan"));
+        let two = gogo::snapshot::backend::snapshot_dir(&w.game(), 2).unwrap();
+        assert_eq!(
+            std::fs::read(two.join("game/shared.pak")).unwrap(),
+            b"base shared"
+        );
+        assert!(!two.join("game/dlc").exists());
+        assert!(!two.join(dlc::DOWNLOAD).exists());
+        let m = gogo::linuxapp::snapshots::list(ID, &b, 5, false).unwrap();
+        let s2 = m.snapshots.iter().find(|s| s.id == 2).unwrap();
+        assert_eq!(s2.trigger, Some("dlc-add"));
+        assert_eq!(s2.content.as_ref().unwrap().dlcs, Vec::<u64>::new());
+    }
+
+    #[test]
+    fn a_failed_snapshot_stops_the_add_with_nothing_changed() {
+        let (w, f, b) = built_with_snapshots("dlc-autosnap-fail");
+        let before = tree(&w.game().join("game"));
+        let content_before = std::fs::read(w.game().join("content.toml")).unwrap();
+        let mut g = game(&w);
+        let p = plan_for(&g, &[DLC]);
+        f.fail_at(gogo::snapshot::fake::FakeStep::Snapshot);
+        let r = run(&mut g, &p, with_snapshots(&b, false), false);
+        let e = r.result.expect_err("the add stops");
+        assert!(matches!(e, AddError::Game(_)), "exit 7: {e:?}");
+        let msg = e.to_string();
+        assert!(
+            msg.contains("(before adding Extra Pack) couldn't be taken"),
+            "{msg}"
+        );
+        assert!(msg.contains("`--no-snapshots` skips it for this run"), "{msg}");
+        assert!(r.inputs.is_empty(), "nothing fetched");
+        assert_eq!(tree(&w.game().join("game")), before);
+        assert_eq!(
+            std::fs::read(w.game().join("content.toml")).unwrap(),
+            content_before
+        );
+        no_leftovers(&w);
+        assert_eq!(snapshot_ids(&b), [1]);
+
+        // `--no-snapshots`: the add goes ahead, the setting stays on.
+        let r = run(&mut g, &p, with_snapshots(&b, true), false);
+        let out = r.result.unwrap();
+        assert!(out.snapshot.is_none());
+        assert_eq!(out.added.len(), 1);
+        assert_eq!(snapshot_ids(&b), [1]);
+        assert!(gogo::linuxapp::snapshots::list(ID, &b, 5, false).unwrap().auto);
+    }
+
     #[test]
     fn an_add_fetches_only_the_dlc_lays_it_and_records_it() {
         let w = built("dlc-add");
@@ -8316,12 +8440,14 @@ mod snapshots {
         let settings = std::fs::read_to_string(meta_dir(&w).join("settings.toml")).unwrap();
         assert!(settings.contains("auto = true"), "{settings}");
 
-        // A rebuild keeps the dir and takes no initial snapshot.
+        // A rebuild keeps the dir and takes no initial snapshot: its own is
+        // `before rebuild` (#405).
         let plan = build::plan(&with(w.opts(), &b), None, &mut quiet()).unwrap();
         assert_eq!(plan.snapshots, BuildSnapshots::Kept { on: true });
         let again = build::execute(&plan, None, &mut quiet()).unwrap();
-        assert!(again.snapshot.is_none());
-        assert_eq!(snap::list(ID, &b, 5, false).unwrap().snapshots.len(), 1);
+        let m = again.snapshot.expect("before rebuild");
+        assert_eq!((m.kind, m.label.as_str()), (gogo::snapshot::Kind::Auto, "before rebuild"));
+        assert_eq!(snap::list(ID, &b, 5, false).unwrap().snapshots.len(), 2);
     }
 
     #[test]
@@ -8737,6 +8863,42 @@ mod snapshots {
         let removed = apps::remove(&a, false).unwrap();
         assert_eq!(removed.snapshots, 1);
         assert!(!root.exists() && !one.exists());
+        drop(guard);
+    }
+
+    /// A rebuild with snapshots on, on real btrfs: `before rebuild` is a
+    /// read-only snapshot of the game as it was (design 20 §7.1).
+    pub(super) fn real_btrfs_rebuild() {
+        let Some(w) = World::on_btrfs("btrfs_rebuild_leaves_a_read_only_snapshot", &["d3d9.dll"])
+        else {
+            return;
+        };
+        let real = Backends::real();
+        let out = build::execute(
+            &build::plan(&with(w.opts(), &real), None, &mut quiet()).unwrap(),
+            None,
+            &mut quiet(),
+        )
+        .unwrap();
+        let root = out.dirs.root.clone();
+        let guard = Cleanup(root.clone());
+        std::fs::write(root.join("game/old-only.txt"), "old").unwrap();
+        let plan = build::plan(&with(w.opts(), &real), None, &mut quiet()).unwrap();
+        assert_eq!(plan.snapshots, BuildSnapshots::Kept { on: true });
+        let again = build::execute(&plan, None, &mut quiet()).unwrap();
+        let m = again.snapshot.expect("before rebuild");
+        assert_eq!((m.id, m.label.as_str()), (2, "before rebuild"));
+        let two = snap_dir(&root, 2);
+        assert!(gogo::snapshot::btrfs::is_subvolume(&two).unwrap());
+        assert!(gogo::snapshot::btrfs::is_readonly(&two).unwrap());
+        assert!(two.join("game/old-only.txt").is_file());
+        assert!(!root.join("game/old-only.txt").exists());
+        assert!(gogo::snapshot::btrfs::is_subvolume(&root).unwrap());
+
+        let a = apps::get(ID, &w.root.join("logs")).unwrap().unwrap();
+        let removed = apps::remove(&a, false).unwrap();
+        assert_eq!(removed.snapshots, 2);
+        assert!(!root.exists() && !two.exists());
         drop(guard);
     }
 
@@ -9444,6 +9606,11 @@ fn btrfs_build_makes_a_subvolume_game_dir() {
     snapshots::real_btrfs_build();
 }
 
+#[test]
+fn btrfs_rebuild_leaves_a_read_only_before_rebuild() {
+    snapshots::real_btrfs_rebuild();
+}
+
 /// `snapshot <gogid> rollback <n>` (design 20 §5.3.1, §5.4, §6) with the fake
 /// backend, the real `launch.sh` and the fake umu: the rollback, a crash at
 /// every step and its recovery, the refusals, the override, `rewrite_inside`
@@ -9542,6 +9709,48 @@ mod rollback {
             keep_auto: 5,
             ..RollbackOptions::default()
         }
+    }
+
+    #[test]
+    fn retention_after_a_rollback_spares_its_target_and_counts_its_pre_snapshot() {
+        let w = World::new("rb-retain", &["d3d9.dll"]);
+        let (_, b) = fake();
+        let o = |keep_auto| super::LinuxAppOptions {
+            snapshots: SnapshotOptions {
+                keep_auto,
+                ..SnapshotOptions::on(b.clone())
+            },
+            ..w.opts()
+        };
+        let run = |keep_auto| {
+            let plan = build::plan(&o(keep_auto), None, &mut quiet()).unwrap();
+            build::execute(&plan, None, &mut quiet()).unwrap()
+        };
+        run(5); // 1: initial
+        run(5); // 2: before rebuild
+        run(5); // 3: before rebuild
+        snap::create(ID, &b, Some("mine")).unwrap(); // 4: manual
+        let out = go(
+            &b,
+            2,
+            &RollbackOptions {
+                keep_auto: 1,
+                ..opts()
+            },
+        )
+        .unwrap();
+        // The pre-rollback snapshot (5) is the one `keep_auto = 1` keeps; the
+        // target (2) is spared; 3 goes; initial and manual stay.
+        assert_eq!(out.pre, 5);
+        assert_eq!(out.pruned, [3]);
+        let mut left: Vec<u32> = snap::list(ID, &b, 1, false)
+            .unwrap()
+            .snapshots
+            .iter()
+            .map(|s| s.id)
+            .collect();
+        left.sort();
+        assert_eq!(left, [1, 2, 4, 5]);
     }
 
     #[test]
@@ -10406,4 +10615,433 @@ fn btrfs_rollback_swaps_in_a_writable_snapshot() {
 #[test]
 fn btrfs_convert_makes_a_plain_game_a_subvolume() {
     snapshots::real_btrfs_convert();
+}
+
+/// Automatic snapshots before a change and their retention (design 20 §7.1,
+/// §7.2, #405), with the fake backend: a rebuild, a setup that changes the
+/// game's GE-Proton, what skips them and what a failed one stops.
+mod autosnapshot {
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use super::{ID, LinuxAppOptions, World, build, quiet};
+    use gogo::linuxapp::snapshots::{
+        self as snap, AutoOptions, Backends, BuildSnapshots, SnapshotOptions,
+    };
+    use gogo::linuxapp::{envargs, manage, setup};
+    use gogo::macapp::error::MacAppError;
+    use gogo::snapshot::backend::{self, BackendKind, OnDisk, SnapshotBackend, Space, Support};
+    use gogo::snapshot::fake::{Fake, FakeStep};
+    use gogo::snapshot::{Kind, Trigger};
+    use serde_json::Value;
+
+    fn fake() -> (Arc<Fake>, Backends) {
+        let f = Arc::new(Fake::new());
+        (f.clone(), Backends::fixed(f))
+    }
+
+    fn on(w: &World, b: &Backends, keep_auto: usize) -> LinuxAppOptions {
+        LinuxAppOptions {
+            snapshots: SnapshotOptions {
+                keep_auto,
+                ..SnapshotOptions::on(b.clone())
+            },
+            ..w.opts()
+        }
+    }
+
+    fn auto(b: &Backends) -> AutoOptions {
+        AutoOptions {
+            backends: b.clone(),
+            ..AutoOptions::default()
+        }
+    }
+
+    /// Plan and run a build, collecting its events as `--json-progress` has
+    /// them.
+    fn build_events(o: &LinuxAppOptions) -> (Result<build::BuildOutcome, MacAppError>, Vec<Value>) {
+        let plan = build::plan(o, None, &mut quiet()).unwrap();
+        let mut events = Vec::new();
+        let r = build::execute(&plan, None, &mut |e| {
+            events.push(serde_json::to_value(e).unwrap())
+        });
+        (r, events)
+    }
+
+    /// A game built with snapshots on: snapshot 1 is its `initial` one.
+    fn built(name: &str, b: &Backends) -> World {
+        let w = World::new(name, &["d3d9.dll"]);
+        let out = build_events(&on(&w, b, 5)).0.unwrap();
+        assert_eq!(out.snapshot.map(|m| (m.id, m.kind)), Some((1, Kind::Initial)));
+        w
+    }
+
+    /// `(id, kind, label)` of the game's snapshots, oldest first.
+    fn snaps(b: &Backends) -> Vec<(u32, String, String)> {
+        let mut v: Vec<(u32, String, String)> = snap::list(ID, b, 5, false)
+            .unwrap()
+            .snapshots
+            .into_iter()
+            .map(|s| {
+                (
+                    s.id,
+                    s.kind.unwrap_or("?").to_string(),
+                    s.label.unwrap_or_default(),
+                )
+            })
+            .collect();
+        v.sort();
+        v
+    }
+
+    fn ids(b: &Backends) -> Vec<u32> {
+        snaps(b).into_iter().map(|s| s.0).collect()
+    }
+
+    /// The events of one kind.
+    fn of<'a>(events: &'a [Value], kind: &str) -> Vec<&'a Value> {
+        events.iter().filter_map(|e| e.get(kind)).collect()
+    }
+
+    fn auto_setting(w: &World) -> String {
+        std::fs::read_to_string(w.home.join("snapshots").join(ID).join("settings.toml"))
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_rebuild_takes_before_rebuild_and_retention_keeps_the_newest() {
+        let (_, b) = fake();
+        let w = built("auto-rebuild", &b);
+        let root = w.game();
+
+        let plan = build::plan(&on(&w, &b, 2), None, &mut quiet()).unwrap();
+        assert_eq!(plan.snapshots, BuildSnapshots::Kept { on: true });
+        assert!(plan.snapshots.line().contains("`before rebuild` is taken first"));
+        // A file only the old game has: the snapshot holds the game as it was.
+        std::fs::write(root.join("game/old-only.txt"), "old").unwrap();
+        let (out, events) = build_events(&on(&w, &b, 2));
+        let out = out.unwrap();
+        let m = out.snapshot.expect("before rebuild");
+        assert_eq!(
+            (m.id, m.kind, m.trigger, m.label.as_str()),
+            (2, Kind::Auto, Some(Trigger::Rebuild), "before rebuild")
+        );
+        assert!(out.pruned.is_empty());
+        let created = of(&events, "SnapshotCreated");
+        assert_eq!(created.len(), 1, "{events:?}");
+        assert_eq!(created[0]["id"], 2);
+        assert_eq!(created[0]["label"], "before rebuild");
+        assert_eq!(created[0]["trigger"], "rebuild");
+        let two = backend::snapshot_dir(&root, 2).unwrap();
+        assert!(two.join("game/old-only.txt").is_file());
+        assert!(!root.join("game/old-only.txt").exists(), "rebuilt after it");
+
+        // A manual one in between is never pruned, nor is the initial one.
+        snap::create(ID, &b, Some("mine")).unwrap();
+        build_events(&on(&w, &b, 2)).0.unwrap();
+        assert_eq!(ids(&b), [1, 2, 3, 4]);
+        let (out, events) = build_events(&on(&w, &b, 2));
+        let out = out.unwrap();
+        assert_eq!(out.snapshot.map(|m| m.id), Some(5));
+        assert_eq!(out.pruned.iter().map(|m| m.id).collect::<Vec<_>>(), [2]);
+        let pruned = of(&events, "SnapshotPruned");
+        assert_eq!(pruned.len(), 1, "{events:?}");
+        assert_eq!(pruned[0]["id"], 2);
+        assert_eq!(pruned[0]["label"], "before rebuild");
+        let line = snap::pruned_line(2, "before rebuild", pruned[0]["created"].as_str().unwrap());
+        assert!(
+            line.starts_with("pruned snapshot 2 (before rebuild, 20") && line.ends_with(')'),
+            "{line}"
+        );
+        assert_eq!(
+            snaps(&b),
+            [
+                (1, "initial".into(), "after the first build".into()),
+                (3, "manual".into(), "mine".into()),
+                (4, "auto".into(), "before rebuild".into()),
+                (5, "auto".into(), "before rebuild".into()),
+            ]
+        );
+        assert!(!backend::snapshot_dir(&root, 2).unwrap().exists());
+    }
+
+    #[test]
+    fn keep_auto_zero_keeps_only_the_newest_until_the_next() {
+        let (_, b) = fake();
+        let w = built("auto-keep0", &b);
+        build_events(&on(&w, &b, 0)).0.unwrap();
+        assert_eq!(ids(&b), [1, 2], "the new one protects this change");
+        let out = build_events(&on(&w, &b, 0)).0.unwrap();
+        assert_eq!(out.pruned.iter().map(|m| m.id).collect::<Vec<_>>(), [2]);
+        assert_eq!(ids(&b), [1, 3]);
+    }
+
+    #[test]
+    fn no_snapshots_and_autosnapshot_off_skip_it() {
+        let (_, b) = fake();
+        let w = built("auto-skip", &b);
+
+        // `--no-snapshots`: none this run, the setting stays on.
+        let o = LinuxAppOptions {
+            snapshots: SnapshotOptions {
+                backends: b.clone(),
+                ..SnapshotOptions::no_snapshots()
+            },
+            ..w.opts()
+        };
+        let plan = build::plan(&o, None, &mut quiet()).unwrap();
+        assert_eq!(plan.snapshots, BuildSnapshots::Skipped);
+        assert_eq!(
+            plan.snapshots.line(),
+            "off for this run (--no-snapshots; a rebuild: the game dir stays as it is)"
+        );
+        let (out, events) = build_events(&o);
+        assert!(out.unwrap().snapshot.is_none());
+        assert!(of(&events, "SnapshotCreated").is_empty());
+        assert_eq!(ids(&b), [1]);
+        assert!(auto_setting(&w).contains("auto = true"));
+
+        // Autosnapshot off for the game.
+        snap::set_auto(ID, &b, false, 5).unwrap();
+        assert!(build_events(&on(&w, &b, 5)).0.unwrap().snapshot.is_none());
+        assert_eq!(ids(&b), [1]);
+    }
+
+    #[test]
+    fn a_plain_dir_is_skipped_and_never_converted() {
+        let w = World::new("auto-plain", &["d3d9.dll"]);
+        // Built without snapshots: a plain dir. A setting turned on by hand
+        // doesn't make the change convert it (decision D8).
+        build_events(&w.opts()).0.unwrap();
+        std::fs::write(
+            w.home.join("snapshots").join(ID).join("settings.toml"),
+            "auto = true\nnext = 1\n",
+        )
+        .unwrap();
+        let strict = Backends::fixed(Arc::new(Fake::subvolumes_only()));
+        let dirs = gogo::macapp::launch::GameDirs::for_game(ID).unwrap();
+        assert_eq!(
+            snap::auto_skipped(ID, &dirs, &auto(&strict)).unwrap(),
+            Some("the game dir isn't a subvolume")
+        );
+        let out = build_events(&on(&w, &strict, 5)).0.unwrap();
+        assert!(out.snapshot.is_none());
+        assert!(!backend::snapshots_dir(&w.game()).unwrap().exists());
+    }
+
+    /// The fake, on a filesystem without snapshots.
+    struct NoSnapshots(Fake);
+
+    impl SnapshotBackend for NoSnapshots {
+        fn probe(&self, _dir: &Path) -> Support {
+            Support::None("tmpfs has no snapshots".into())
+        }
+        fn kind(&self) -> BackendKind {
+            self.0.kind()
+        }
+        fn ready(&self, game_dir: &Path) -> std::io::Result<bool> {
+            self.0.ready(game_dir)
+        }
+        fn make_game_dir(&self, dir: &Path) -> std::io::Result<()> {
+            self.0.make_game_dir(dir)
+        }
+        fn snapshot(&self, game_dir: &Path, n: u32) -> std::io::Result<()> {
+            self.0.snapshot(game_dir, n)
+        }
+        fn snapshot_path(&self, game_dir: &Path, n: u32) -> Option<PathBuf> {
+            self.0.snapshot_path(game_dir, n)
+        }
+        fn exists(&self, game_dir: &Path, n: u32) -> std::io::Result<bool> {
+            self.0.exists(game_dir, n)
+        }
+        fn delete(&self, game_dir: &Path, n: u32) -> std::io::Result<()> {
+            self.0.delete(game_dir, n)
+        }
+        fn on_disk(&self, game_dir: &Path) -> std::io::Result<Vec<OnDisk>> {
+            self.0.on_disk(game_dir)
+        }
+        fn space(&self, game_dir: &Path, ns: &[u32]) -> std::io::Result<Vec<Space>> {
+            self.0.space(game_dir, ns)
+        }
+    }
+
+    #[test]
+    fn a_none_backend_is_skipped() {
+        let (_, b) = fake();
+        let w = built("auto-none", &b);
+        let none = Backends::fixed(Arc::new(NoSnapshots(Fake::new())));
+        let dirs = gogo::macapp::launch::GameDirs::for_game(ID).unwrap();
+        assert_eq!(
+            snap::auto_skipped(ID, &dirs, &auto(&none)).unwrap(),
+            Some("no snapshots on this filesystem")
+        );
+        let taken = snap::protect(
+            ID,
+            &dirs,
+            None,
+            Trigger::Rebuild,
+            "before rebuild".into(),
+            &auto(&none),
+            &mut quiet(),
+        )
+        .unwrap();
+        assert!(taken.is_none());
+        assert_eq!(ids(&b), [1]);
+        drop(w);
+    }
+
+    #[test]
+    fn a_failed_snapshot_stops_a_rebuild_before_any_write() {
+        let (f, b) = fake();
+        let w = built("auto-fail", &b);
+        let root = w.game();
+        std::fs::write(root.join("game/old-only.txt"), "old").unwrap();
+        let toml = std::fs::read(root.join("gogo-launch.toml")).unwrap();
+        let state = std::fs::read(root.join("state.toml")).unwrap();
+        let umu_runs = w.log().lines().count();
+
+        f.fail_at(FakeStep::Snapshot);
+        let (out, events) = build_events(&on(&w, &b, 5));
+        let e = out.err().expect("the rebuild stops");
+        assert!(matches!(e, MacAppError::Apps(_)), "exit 7: {e:?}");
+        let msg = e.to_string();
+        assert!(msg.contains("(before rebuild) couldn't be taken"), "{msg}");
+        assert!(msg.contains("nothing was changed"), "{msg}");
+        assert!(msg.contains("`--no-snapshots` skips it for this run"), "{msg}");
+        assert!(of(&events, "SnapshotCreated").is_empty());
+        // Nothing changed: the old files, the launch config, no umu run.
+        assert!(root.join("game/old-only.txt").is_file());
+        assert_eq!(std::fs::read(root.join("gogo-launch.toml")).unwrap(), toml);
+        assert_eq!(std::fs::read(root.join("state.toml")).unwrap(), state);
+        assert_eq!(w.log().lines().count(), umu_runs);
+        assert_eq!(ids(&b), [1], "no entry left for the failed one");
+
+        // `--no-snapshots` lets it go ahead, unprotected by request.
+        let o = LinuxAppOptions {
+            snapshots: SnapshotOptions {
+                backends: b.clone(),
+                ..SnapshotOptions::no_snapshots()
+            },
+            ..w.opts()
+        };
+        build_events(&o).0.unwrap();
+        assert!(!root.join("game/old-only.txt").exists());
+    }
+
+    /// Another GE-Proton build, `path:` to it.
+    fn other_build(w: &World, name: &str) -> String {
+        let to = w.root.join(name);
+        gogo::gog::materialize::materialize_tree(
+            &w.build,
+            &to,
+            gogo::gog::materialize::Reflink::Never,
+        )
+        .unwrap();
+        std::fs::write(to.join("version"), format!("1793687166 {name}\n")).unwrap();
+        format!("path:{}", to.display())
+    }
+
+    fn retarget(
+        b: &Backends,
+        updates: &[(&str, Option<&str>)],
+        skip: bool,
+    ) -> (manage::RetargetOutcome, Vec<Value>) {
+        let mut events = Vec::new();
+        let out = manage::retarget(
+            ID,
+            updates,
+            &setup::SetupOptions {
+                refresh: false,
+                prompt: None,
+                runtime_snapshot: Some(AutoOptions {
+                    skip,
+                    ..auto(b)
+                }),
+            },
+            &mut |e| events.push(serde_json::to_value(e).unwrap()),
+        )
+        .unwrap();
+        (out, events)
+    }
+
+    #[test]
+    fn a_setup_that_changes_the_runtime_takes_before_old_to_new() {
+        let (f, b) = fake();
+        let w = built("auto-runtime", &b);
+        let old = w.state().runtime;
+        let new = other_build(&w, "GE-Proton10-40");
+
+        let (out, events) = retarget(&b, &[("runtime", Some(&new))], false);
+        let s = out.setup.unwrap().unwrap();
+        let t = s.snapshot.expect("before the runtime change");
+        assert_eq!(
+            (t.meta.id, t.meta.trigger, t.meta.label.as_str()),
+            (2, Some(Trigger::Runtime), "before GE-Proton10-34 → GE-Proton10-40")
+        );
+        // Taken before setup wrote anything: it holds the old runtime.
+        assert_eq!(t.meta.content.runtime.as_deref(), Some(old.as_str()));
+        assert_eq!(of(&events, "SnapshotCreated").len(), 1);
+        assert_eq!(w.state().runtime, new);
+
+        // Not triggers: a renderer change, an env edit (a stamp-only setup),
+        // the same setup again.
+        retarget(&b, &[("renderer", Some("wined3d"))], false);
+        envargs::set_env(ID, &[("FOO".into(), "bar".into())]).unwrap();
+        let again = setup::setup(
+            ID,
+            &setup::SetupOptions {
+                runtime_snapshot: Some(auto(&b)),
+                ..Default::default()
+            },
+            &mut quiet(),
+        )
+        .unwrap();
+        assert!(again.snapshot.is_none());
+        assert_eq!(ids(&b), [1, 2]);
+
+        // A failed one stops the setup: the runtime stays the old one.
+        let newer = other_build(&w, "GE-Proton10-41");
+        f.fail_at(FakeStep::Snapshot);
+        let (out, _) = retarget(&b, &[("runtime", Some(&newer))], false);
+        let e = out.setup.unwrap().unwrap_err().to_string();
+        assert!(e.contains("before GE-Proton10-40 → GE-Proton10-41"), "{e}");
+        assert!(e.contains("`--no-snapshots` skips it for this run"), "{e}");
+        assert_eq!(w.state().runtime, new);
+        assert_eq!(ids(&b), [1, 2]);
+
+        // The override says the new runtime (the next setup tries again);
+        // `linux-app setup --no-snapshots`: none, and the change goes ahead.
+        let mut events = Vec::new();
+        let s = setup::setup(
+            ID,
+            &setup::SetupOptions {
+                runtime_snapshot: Some(AutoOptions {
+                    skip: true,
+                    ..auto(&b)
+                }),
+                ..Default::default()
+            },
+            &mut |e| events.push(serde_json::to_value(e).unwrap()),
+        )
+        .unwrap();
+        assert!(s.snapshot.is_none());
+        assert!(of(&events, "SnapshotCreated").is_empty());
+        assert_eq!(w.state().runtime, newer);
+        assert_eq!(ids(&b), [1, 2]);
+    }
+
+    #[test]
+    fn a_rebuild_onto_another_runtime_takes_one_snapshot() {
+        let (_, b) = fake();
+        let w = built("auto-rebuild-rt", &b);
+        let new = other_build(&w, "GE-Proton10-40");
+        let o = LinuxAppOptions {
+            runtime: Some(new.clone()),
+            ..on(&w, &b, 5)
+        };
+        let (out, events) = build_events(&o);
+        assert_eq!(out.unwrap().snapshot.map(|m| m.label), Some("before rebuild".into()));
+        assert_eq!(of(&events, "SnapshotCreated").len(), 1, "{events:?}");
+        assert_eq!(w.state().runtime, new);
+    }
 }

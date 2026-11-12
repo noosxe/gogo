@@ -153,8 +153,11 @@ pub struct BuildOutcome {
     pub setup: SetupOutcome,
     /// What `content.toml` now says (design 19 §6.1).
     pub content: content::Content,
-    /// The `initial` snapshot a first build took (design 20 §7.1).
+    /// The `initial` snapshot a first build took, or the `before rebuild`
+    /// one a rebuild took (design 20 §7.1).
     pub snapshot: Option<crate::snapshot::Meta>,
+    /// Older `auto` snapshots retention deleted after a rebuild's (§7.2).
+    pub pruned: Vec<crate::snapshot::Meta>,
 }
 
 /// The renderer line's tail: what setup sets for it (design 18 §3, #172),
@@ -818,6 +821,8 @@ pub fn execute(
     // The installer lane knows whether this is the game's first build only
     // once the install has named the game.
     let mut installer_first = false;
+    // A rebuild's `before rebuild` snapshot and what retention pruned.
+    let mut rebuilt: Option<snapshots::Taken> = None;
     let (gogid, selection, auto, lane, install_dir, cache_root) = if let Some(tree) =
         &plan.game_tree
     {
@@ -832,6 +837,11 @@ pub fn execute(
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| plan.slug.clone());
+        // A rebuild's `auto` snapshot (design 20 §7.1), before its first
+        // write to the game dir.
+        if plan.rebuild {
+            rebuilt = before_rebuild(plan, &gogid, dirs, emit)?;
+        }
         // A new game dir is a subvolume with snapshots on (design 20 §2.1).
         snapshots::make_dir(
             &plan.snapshots,
@@ -1077,6 +1087,11 @@ pub fn execute(
             for message in super::rollback::settle_pending(&gogid, &plan.snapshot_opts.backends)? {
                 emit(&ProgressEvent::Warn { message });
             }
+            // A rebuild's `auto` snapshot (design 20 §7.1): the install ran
+            // in the staging dir; nothing in the game dir is written yet.
+            if !installer_first {
+                rebuilt = before_rebuild(plan, &gogid, &target, emit)?;
+            }
             launch::record_location(&gogid, &target.root)?;
             if target.prefix.symlink_metadata().is_ok() {
                 let aside = target.root.join(format!(
@@ -1135,6 +1150,9 @@ pub fn execute(
             // The plan's lookup already refreshed when asked.
             refresh: plan.refresh && plan.umu_id.is_none(),
             prompt,
+            // A rebuild took `before rebuild` already; a first build has
+            // nothing to protect.
+            runtime_snapshot: None,
         },
         emit,
     )?;
@@ -1172,8 +1190,13 @@ pub fn execute(
     } else {
         None
     };
+    let (snapshot, pruned) = match rebuilt {
+        Some(t) => (Some(t.meta), t.pruned),
+        None => (snapshot, Vec::new()),
+    };
     Ok(BuildOutcome {
         snapshot,
+        pruned,
         content,
         title,
         dirs,
@@ -1181,6 +1204,26 @@ pub fn execute(
         materialized,
         setup: outcome,
     })
+}
+
+/// A rebuild's `before rebuild` snapshot (design 20 §7.1), under the two
+/// locks for the snapshot itself. A failure stops the rebuild before its
+/// first write to the game dir.
+fn before_rebuild(
+    plan: &LinuxAppPlan,
+    gogid: &str,
+    dirs: &GameDirs,
+    emit: &mut dyn FnMut(&ProgressEvent),
+) -> Result<Option<snapshots::Taken>, MacAppError> {
+    snapshots::protect(
+        gogid,
+        dirs,
+        None,
+        crate::snapshot::Trigger::Rebuild,
+        crate::snapshot::labels::rebuild(),
+        &plan.snapshot_opts.auto(),
+        emit,
+    )
 }
 
 /// Write `content.toml`; a failure warns, because the finished build is playable

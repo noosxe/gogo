@@ -313,9 +313,17 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
             runtime,
             renderer,
             refresh,
+            no_snapshots,
             json,
             ..
-        } => linux_app_retarget(gogid, runtime.flatten(), renderer, refresh, json),
+        } => linux_app_retarget(
+            gogid,
+            runtime.flatten(),
+            renderer,
+            refresh,
+            no_snapshots,
+            json,
+        ),
         #[cfg(target_os = "linux")]
         Command::LinuxApp {
             sub: None,
@@ -3852,12 +3860,17 @@ async fn linux_app(a: LinuxAppArgs) -> Result<i32, AppError> {
     };
     let snapshots = {
         use gogo::linuxapp::snapshots::{Backends, SnapshotOptions};
-        if a.no_snapshots {
-            SnapshotOptions::off("--no-snapshots")
-        } else if !load_config_quietly()?.config.snapshots.auto {
+        let config = load_config_quietly()?.config.snapshots;
+        let opts = if a.no_snapshots {
+            SnapshotOptions::no_snapshots()
+        } else if !config.auto {
             SnapshotOptions::off("[snapshots] auto = false")
         } else {
             SnapshotOptions::on(Backends::real())
+        };
+        SnapshotOptions {
+            keep_auto: config.keep_auto,
+            ..opts
         }
     };
     let opts = gogo::linuxapp::build::LinuxAppOptions {
@@ -3942,6 +3955,12 @@ async fn linux_app(a: LinuxAppArgs) -> Result<i32, AppError> {
                 .as_ref()
                 .map(gogo::linuxapp::snapshots::meta_view)
         );
+        v["pruned"] = serde_json::json!(
+            out.pruned
+                .iter()
+                .map(gogo::linuxapp::snapshots::SnapshotRef::of)
+                .collect::<Vec<_>>()
+        );
         v["game_files"] = serde_json::json!(out.materialized.as_ref().map(|r| serde_json::json!({
             "method": r.method().as_str(),
             "reflinked_files": r.reflinked_files,
@@ -3951,7 +3970,10 @@ async fn linux_app(a: LinuxAppArgs) -> Result<i32, AppError> {
         })));
     });
     if !a.json {
-        if let Some(m) = &out.snapshot {
+        // A rebuild's `auto` snapshot and its pruning went out as events.
+        if let Some(m) = &out.snapshot
+            && m.kind == gogo::snapshot::Kind::Initial
+        {
             println!("snapshot {} taken ({})", m.id, m.label);
         }
         println!(
@@ -4034,6 +4056,7 @@ fn linux_app_retarget(
     runtime: Option<String>,
     renderer: Option<crate::cli::LinuxRendererArg>,
     refresh: bool,
+    no_snapshots: bool,
     json: bool,
 ) -> Result<i32, AppError> {
     use gogo::macapp::compat;
@@ -4073,6 +4096,7 @@ fn linux_app_retarget(
         &gogo::linuxapp::setup::SetupOptions {
             refresh,
             prompt: prompter.as_deref(),
+            runtime_snapshot: Some(auto_snapshots(no_snapshots)?),
         },
         &mut |ev| emit_macapp_event(ev, false),
     )?;
@@ -4298,6 +4322,7 @@ fn linux_app_sub(sub: crate::cli::LinuxAppSub) -> Result<i32, AppError> {
         crate::cli::LinuxAppSub::Setup {
             gogid,
             refresh,
+            no_snapshots,
             json,
         } => {
             gogo::macapp::compat::validate_gogid(&gogid)?;
@@ -4315,6 +4340,7 @@ fn linux_app_sub(sub: crate::cli::LinuxAppSub) -> Result<i32, AppError> {
                 &gogo::linuxapp::setup::SetupOptions {
                     refresh,
                     prompt: prompter.as_deref(),
+                    runtime_snapshot: Some(auto_snapshots(no_snapshots)?),
                 },
                 &mut |ev| emit_macapp_event(ev, false),
             )?;
@@ -6392,11 +6418,28 @@ fn emit_macapp_event(ev: &gogo::engine::events::ProgressEvent, json_progress: bo
             gogo::fmt::human_size(*copied),
             gogo::fmt::human_size(*total)
         )),
+        Ev::SnapshotCreated { id, label, .. } => Some(format!("snapshot {id} taken ({label})")),
+        Ev::SnapshotPruned { id, label, created } => Some(
+            gogo::linuxapp::snapshots::pruned_line(*id, label, created),
+        ),
         _ => None,
     };
     if let Some(l) = line {
         eprintln!("gogo: {l}");
     }
+}
+
+#[cfg(target_os = "linux")]
+/// The `auto` snapshot options of a command that changes a game (design 20
+/// §7.1): `--no-snapshots` and `[snapshots] keep_auto`.
+pub(crate) fn auto_snapshots(
+    no_snapshots: bool,
+) -> Result<gogo::linuxapp::snapshots::AutoOptions, AppError> {
+    Ok(gogo::linuxapp::snapshots::AutoOptions {
+        skip: no_snapshots,
+        keep_auto: load_config_quietly()?.config.snapshots.keep_auto,
+        ..Default::default()
+    })
 }
 
 /// Smoke tests for the completion generation (08 §2: thin frontend gets smoke tests):

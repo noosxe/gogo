@@ -18,9 +18,10 @@ use crate::macapp::doctor::Finding;
 use crate::macapp::error::MacAppError;
 use crate::macapp::launch::{self, GameDirs};
 use crate::macapp::relocate;
+use crate::engine::events::ProgressEvent;
 use crate::snapshot::{
     self, BackendKind, Content, Entry, Guard, Kind, Listing, Meta, NewSnapshot, OnDisk, Presence,
-    Recovered, SnapshotBackend, SnapshotError, Space, State, Store, Support, backend,
+    Recovered, SnapshotBackend, SnapshotError, Space, State, Store, Support, Trigger, backend,
 };
 
 /// `[snapshots] keep_auto`'s default (design 20 §7.2).
@@ -141,7 +142,7 @@ pub(crate) fn store<'b>(gogid: &str, root: &Path, backend: &'b dyn SnapshotBacke
 
 /// What a build does about snapshots: the config and `--no-snapshots`, and
 /// the backend.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct SnapshotOptions {
     /// A new game dir becomes a subvolume and gets its `initial` snapshot
     /// (where the filesystem has snapshots). Off: a plain dir, `auto = false`.
@@ -149,23 +150,56 @@ pub struct SnapshotOptions {
     /// Why they're off, for the plan line (`--no-snapshots`,
     /// `[snapshots] auto = false`).
     pub off_because: String,
+    /// `--no-snapshots`: on a rebuild, its `before rebuild` snapshot is
+    /// skipped for this run and the game's setting stays (design 20 §7.1).
+    pub no_snapshots: bool,
+    /// `[snapshots] keep_auto`, for the retention after a rebuild's snapshot.
+    pub keep_auto: usize,
     pub backends: Backends,
+}
+
+impl Default for SnapshotOptions {
+    fn default() -> Self {
+        Self {
+            on: false,
+            off_because: String::new(),
+            no_snapshots: false,
+            keep_auto: KEEP_AUTO,
+            backends: Backends::real(),
+        }
+    }
 }
 
 impl SnapshotOptions {
     pub fn on(backends: Backends) -> Self {
         Self {
             on: true,
-            off_because: String::new(),
             backends,
+            ..Self::default()
         }
     }
 
     pub fn off(because: impl Into<String>) -> Self {
         Self {
-            on: false,
             off_because: because.into(),
-            backends: Backends::real(),
+            ..Self::default()
+        }
+    }
+
+    /// `--no-snapshots`: a new game gets none; a rebuild skips its own.
+    pub fn no_snapshots() -> Self {
+        Self {
+            no_snapshots: true,
+            ..Self::off("--no-snapshots")
+        }
+    }
+
+    /// What a rebuild's `auto` snapshot runs with.
+    pub fn auto(&self) -> AutoOptions {
+        AutoOptions {
+            skip: self.no_snapshots,
+            keep_auto: self.keep_auto,
+            backends: self.backends.clone(),
         }
     }
 }
@@ -180,8 +214,10 @@ pub enum BuildSnapshots {
     /// The filesystem has no snapshots, and why.
     Unavailable(String),
     /// A rebuild: the game dir stays what it is. `on`: its autosnapshot is on
-    /// and the dir can be snapshotted.
+    /// and the dir can be snapshotted, so `before rebuild` is taken.
     Kept { on: bool },
+    /// A rebuild with `--no-snapshots`: no `before rebuild` this run.
+    Skipped,
 }
 
 impl BuildSnapshots {
@@ -189,6 +225,9 @@ impl BuildSnapshots {
     /// game is there already.
     pub fn plan(opts: &SnapshotOptions, gogid: Option<&str>, dir: &Path, rebuild: bool) -> Self {
         if rebuild && let Some(id) = gogid {
+            if opts.no_snapshots {
+                return BuildSnapshots::Skipped;
+            }
             let (_, b) = opts.backends.for_dir(dir);
             let auto = store(id, dir, b).settings().is_ok_and(|s| s.auto);
             return BuildSnapshots::Kept {
@@ -220,8 +259,12 @@ impl BuildSnapshots {
                 .to_string(),
             BuildSnapshots::Off(why) => format!("off ({why})"),
             BuildSnapshots::Unavailable(reason) => format!("unavailable ({reason})"),
-            BuildSnapshots::Kept { on: true } => {
-                "on (a rebuild: the game dir stays the subvolume it is)".to_string()
+            BuildSnapshots::Kept { on: true } => "on (a rebuild: `before rebuild` is taken first; \
+                                                   the game dir stays the subvolume it is)"
+                .to_string(),
+            BuildSnapshots::Skipped => {
+                "off for this run (--no-snapshots; a rebuild: the game dir stays as it is)"
+                    .to_string()
             }
             BuildSnapshots::Kept { on: false } => {
                 "off for this game (a rebuild: the game dir stays as it is)".to_string()
@@ -530,6 +573,265 @@ pub(crate) fn locked<T>(
         refuse(gogid, dirs)?;
     }
     Ok((f(&s, &guard, &support, b)?, recovered))
+}
+
+// — automatic snapshots before a change (design 20 §7.1, §7.2) —
+
+/// What a changing command does about its `auto` snapshot.
+#[derive(Debug, Clone)]
+pub struct AutoOptions {
+    /// `--no-snapshots`: this run takes none; the game's setting stays.
+    pub skip: bool,
+    /// `[snapshots] keep_auto`: the `auto` snapshots kept per game, the new
+    /// one included (design 20 §7.2).
+    pub keep_auto: usize,
+    pub backends: Backends,
+}
+
+impl Default for AutoOptions {
+    fn default() -> Self {
+        Self {
+            skip: false,
+            keep_auto: KEEP_AUTO,
+            backends: Backends::real(),
+        }
+    }
+}
+
+impl AutoOptions {
+    /// `--no-snapshots`.
+    pub fn skipped() -> Self {
+        Self {
+            skip: true,
+            ..Self::default()
+        }
+    }
+}
+
+/// A snapshot as a change's outcome names it (`--json`'s `snapshot` and
+/// `pruned`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotRef {
+    pub id: u32,
+    pub label: String,
+    /// RFC 3339, UTC.
+    pub created: String,
+}
+
+impl SnapshotRef {
+    pub fn of(m: &Meta) -> Self {
+        Self {
+            id: m.id,
+            label: m.label.clone(),
+            created: rfc3339(m.created),
+        }
+    }
+
+    /// `pruned snapshot 2 (before rebuild, 2026-10-30)` (design 20 §7.2).
+    pub fn pruned_line(&self) -> String {
+        pruned_line(self.id, &self.label, &self.created)
+    }
+}
+
+/// `pruned snapshot <n> (<label>, <UTC date>)`; `created` is RFC 3339.
+pub fn pruned_line(id: u32, label: &str, created: &str) -> String {
+    let day = created.get(..10).unwrap_or(created);
+    format!("pruned snapshot {id} ({label}, {day})")
+}
+
+/// What [`before_change`] took and pruned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Taken {
+    pub meta: Meta,
+    pub pruned: Vec<Meta>,
+}
+
+impl Taken {
+    pub fn snapshot(&self) -> SnapshotRef {
+        SnapshotRef::of(&self.meta)
+    }
+
+    pub fn pruned(&self) -> Vec<SnapshotRef> {
+        self.pruned.iter().map(SnapshotRef::of).collect()
+    }
+}
+
+/// Why [`before_change`] takes nothing for this game, or `None` when it
+/// does: `--no-snapshots`, no snapshots on the filesystem, autosnapshot off
+/// in the game's `settings.toml` (a game built before snapshots has none:
+/// off), or a game dir that isn't a subvolume (a plain dir is never
+/// converted as a side effect, decision D8). Reads only.
+pub fn auto_skipped(
+    gogid: &str,
+    dirs: &GameDirs,
+    opts: &AutoOptions,
+) -> Result<Option<&'static str>, MacAppError> {
+    if opts.skip {
+        return Ok(Some("--no-snapshots"));
+    }
+    let (support, b) = opts.backends.for_dir(&dirs.root);
+    if matches!(support, Support::None(_)) {
+        return Ok(Some("no snapshots on this filesystem"));
+    }
+    if !store(gogid, &dirs.root, b).settings().map_err(err)?.auto {
+        return Ok(Some("autosnapshot is off for this game"));
+    }
+    if !b.ready(&dirs.root).unwrap_or(false) {
+        return Ok(Some("the game dir isn't a subvolume"));
+    }
+    Ok(None)
+}
+
+/// The `auto` snapshot that protects a change gogo is about to make to a
+/// built game (design 20 §7.1), then retention (§7.2).
+///
+/// Every command that changes a game calls this under the two locks it
+/// holds (`guard`: the data root's, then the game's), after its own recovery
+/// and refusals and before its first write to the game:
+///
+/// - `dlc add`: [`Trigger::DlcAdd`], [`snapshot::labels::adding`];
+/// - a rebuild of a built game: [`Trigger::Rebuild`],
+///   [`snapshot::labels::rebuild`];
+/// - a setup that changes the game's GE-Proton (`--retarget`, a new pinned
+///   runtime, the launcher's own setup): [`Trigger::Runtime`],
+///   [`snapshot::labels::runtime`].
+///
+/// An update (#360) calls it with [`Trigger::Update`] and
+/// [`snapshot::labels::update`], and a DLC removal (#353) with
+/// [`Trigger::DlcRemove`] and [`snapshot::labels::removing`], before their
+/// journals; [`protect`] does the same for a caller that doesn't hold the
+/// locks yet.
+///
+/// `Ok(None)`: nothing to take ([`auto_skipped`]). `Ok(Some)`: the snapshot,
+/// reported as [`ProgressEvent::SnapshotCreated`], and the older `auto` ones
+/// retention deleted, each a [`ProgressEvent::SnapshotPruned`]. `initial` and
+/// `manual` snapshots are never pruned; a prune that fails is a warning (the
+/// change is protected either way). `Err`: the snapshot failed, or a pending
+/// rollback or conversion isn't settled; the caller must stop with nothing
+/// changed (exit 7). The error says `--no-snapshots` skips it for one run: a
+/// protected change never goes ahead silently unprotected.
+pub fn before_change(
+    gogid: &str,
+    dirs: &GameDirs,
+    guard: &Guard,
+    trigger: Trigger,
+    label: String,
+    opts: &AutoOptions,
+    emit: &mut dyn FnMut(&ProgressEvent),
+) -> Result<Option<Taken>, MacAppError> {
+    if auto_skipped(gogid, dirs, opts)?.is_some() {
+        return Ok(None);
+    }
+    let (_, b) = opts.backends.for_dir(&dirs.root);
+    let s = store(gogid, &dirs.root, b);
+    if s.rollback_journal_path().is_file() || convert::pending(gogid, &dirs.root).needs_settling()
+    {
+        return Err(MacAppError::Apps(format!(
+            "a snapshot rollback or conversion of {gogid} isn't finished, so the snapshot \
+             before this change ({label}) can't be taken and nothing was changed: `gogo \
+             linux-app snapshot {gogid} list` finishes it"
+        )));
+    }
+    let failed = |e: &dyn std::fmt::Display| {
+        MacAppError::Apps(format!(
+            "the snapshot before this change ({label}) couldn't be taken, so nothing was \
+             changed: {e}; `--no-snapshots` skips it for this run"
+        ))
+    };
+    for message in recovered_lines(&s.recover(guard).map_err(|e| failed(&e))?) {
+        emit(&ProgressEvent::Warn { message });
+    }
+    let meta = s
+        .create(
+            guard,
+            NewSnapshot {
+                kind: Kind::Auto,
+                trigger: Some(trigger),
+                label: Some(label.clone()),
+                content: content_of(dirs),
+            },
+        )
+        .map_err(|e| failed(&e))?;
+    emit(&ProgressEvent::SnapshotCreated {
+        id: meta.id,
+        label: meta.label.clone(),
+        trigger: trigger.as_str().to_string(),
+    });
+    let pruned = retain(&s, guard, opts.keep_auto, &[meta.id], emit);
+    Ok(Some(Taken { meta, pruned }))
+}
+
+/// [`before_change`] for a command that doesn't hold the locks: when there
+/// is something to take, the data root's lock and the game's are taken for
+/// the snapshot and its retention, then released. `game_lock`: the game's
+/// lock, when the caller holds it already (`dlc add`).
+#[allow(clippy::too_many_arguments)]
+pub fn protect(
+    gogid: &str,
+    dirs: &GameDirs,
+    game_lock: Option<&std::fs::File>,
+    trigger: Trigger,
+    label: String,
+    opts: &AutoOptions,
+    emit: &mut dyn FnMut(&ProgressEvent),
+) -> Result<Option<Taken>, MacAppError> {
+    if auto_skipped(gogid, dirs, opts)?.is_some() {
+        return Ok(None);
+    }
+    let root_lock = relocate::lock_moves()?;
+    let own;
+    let game_lock = match game_lock {
+        Some(l) => l,
+        None => {
+            own = relocate::lock_game(gogid)?;
+            &own
+        }
+    };
+    let guard = Guard::new(&root_lock, game_lock);
+    before_change(gogid, dirs, &guard, trigger, label, opts, emit)
+}
+
+/// Retention after a new `auto` snapshot (design 20 §7.2): the newest
+/// `keep_auto` `auto` snapshots stay, counting the new one, `spare[0]`; the
+/// others in `spare` (a rollback's target) stay too and don't count. With
+/// `keep_auto = 0` only the new one stays, until the next. `initial` and
+/// `manual` ones are never touched. Each pruned one is reported; a failure
+/// is a warning.
+pub(crate) fn retain(
+    s: &Store,
+    guard: &Guard,
+    keep_auto: usize,
+    spare: &[u32],
+    emit: &mut dyn FnMut(&ProgressEvent),
+) -> Vec<Meta> {
+    let keep = keep_auto.saturating_sub(usize::from(!spare.is_empty()));
+    match s.prune_keeping(guard, keep, spare) {
+        Ok(pruned) => {
+            for m in &pruned {
+                emit(&ProgressEvent::SnapshotPruned {
+                    id: m.id,
+                    label: m.label.clone(),
+                    created: rfc3339(m.created),
+                });
+            }
+            pruned
+        }
+        Err(e) => {
+            emit(&ProgressEvent::Warn {
+                message: format!("older automatic snapshots weren't pruned: {e}"),
+            });
+            Vec::new()
+        }
+    }
+}
+
+/// A runtime reference as a label shows it: its last part, the build's name
+/// (`ge-proton/GE-Proton10-25` and `path:/opt/GE-Proton10-25` are both
+/// `GE-Proton10-25`).
+pub fn runtime_name(reference: &str) -> &str {
+    let r = reference.strip_prefix("path:").unwrap_or(reference);
+    r.trim_end_matches('/').rsplit('/').next().unwrap_or(r)
 }
 
 // — the views (`--json` and text) —
@@ -1688,10 +1990,37 @@ mod tests {
             .line(),
             "unavailable (/lib is on ext4; snapshots need btrfs, or a ZFS dataset per game)"
         );
+        assert_eq!(
+            BuildSnapshots::Skipped.line(),
+            "off for this run (--no-snapshots; a rebuild: the game dir stays as it is)"
+        );
+        // `--no-snapshots` on a rebuild skips its snapshot whatever the game says.
+        assert_eq!(
+            BuildSnapshots::plan(
+                &SnapshotOptions::no_snapshots(),
+                Some("1"),
+                Path::new("/nowhere/1"),
+                true
+            ),
+            BuildSnapshots::Skipped
+        );
+        assert!(SnapshotOptions::no_snapshots().auto().skip);
+        assert_eq!(SnapshotOptions::default().keep_auto, KEEP_AUTO);
         let off = SnapshotOptions::off("[snapshots] auto = false");
         assert_eq!(
             BuildSnapshots::plan(&off, None, Path::new("/nowhere/1"), false),
             BuildSnapshots::Off("[snapshots] auto = false".into())
+        );
+    }
+
+    #[test]
+    fn labels_name_the_runtime_build_and_pruned_lines_the_day() {
+        assert_eq!(runtime_name("ge-proton/GE-Proton10-25"), "GE-Proton10-25");
+        assert_eq!(runtime_name("path:/opt/GE-Proton10-30/"), "GE-Proton10-30");
+        assert_eq!(runtime_name("GE-Proton10-25"), "GE-Proton10-25");
+        assert_eq!(
+            pruned_line(2, "before rebuild", "2026-10-30T09:12:00Z"),
+            "pruned snapshot 2 (before rebuild, 2026-10-30)"
         );
     }
 }

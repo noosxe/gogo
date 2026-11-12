@@ -26,6 +26,7 @@ pub async fn run(gogid: String, cmd: cli::LinuxDlcCmd) -> Result<i32, AppError> 
             yes,
             limit,
             no_disk_check,
+            no_snapshots,
             json_progress,
             json,
         } => {
@@ -42,6 +43,7 @@ pub async fn run(gogid: String, cmd: cli::LinuxDlcCmd) -> Result<i32, AppError> 
                     yes,
                     limit,
                     disk_check: !no_disk_check,
+                    no_snapshots,
                     json_progress,
                     json,
                 },
@@ -59,6 +61,7 @@ struct AddArgs {
     yes: bool,
     limit: Option<u64>,
     disk_check: bool,
+    no_snapshots: bool,
     json_progress: bool,
     json: bool,
 }
@@ -222,6 +225,12 @@ fn emit(ev: &ProgressEvent, json_progress: bool, quiet: bool, print: &dyn Fn(&st
                 }
             }
             .into(),
+        ),
+        ProgressEvent::SnapshotCreated { id, label, .. } => {
+            Some(format!("snapshot {id} taken ({label})"))
+        }
+        ProgressEvent::SnapshotPruned { id, label, created } => Some(
+            gogo::linuxapp::snapshots::pruned_line(*id, label, created),
         ),
         ProgressEvent::Warn { message } => Some(format!("note: {message}")),
         _ => None,
@@ -483,7 +492,10 @@ async fn add_cmd(
     let mut renderer = mode.renderer();
     let live = depot_progress::Live::new(&mut rx, &mut renderer);
     let mut on_event = |ev: &ProgressEvent| emit(ev, jp, quiet, &|l| live.note(l));
-    let opts = add::AddOptions::default();
+    let opts = add::AddOptions {
+        snapshots: crate::auto_snapshots(a.no_snapshots)?,
+        ..Default::default()
+    };
     let runner = add::add(&mut game, &plan, fetch, &opts, &mut on_event, &stop);
     let result = live.drive(runner).await;
     match result {
