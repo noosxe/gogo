@@ -310,6 +310,11 @@ pub enum Command {
         /// when it names one language.
         #[arg(long, value_name = "CODE", conflicts_with = "retarget")]
         lang: Option<String>,
+        /// A new game gets a plain dir, no snapshot, and autosnapshot off
+        /// (default: on btrfs, the game dir is a subvolume and its first
+        /// snapshot is taken after setup; `[snapshots] auto`).
+        #[arg(long, conflicts_with = "retarget")]
+        no_snapshots: bool,
         /// Progress events as NDJSON on stdout.
         #[arg(long)]
         json_progress: bool,
@@ -457,6 +462,18 @@ pub enum LinuxAppSub {
         #[command(subcommand)]
         cmd: LinuxDlcCmd,
     },
+    /// A built game's snapshots (btrfs): checkpoints of its files, prefix
+    /// and saves that the filesystem keeps beside the game dir, in
+    /// `.gogo-snapshots/`. A game built with snapshots on has its first one
+    /// from right after setup. List, take, delete them, and set whether gogo
+    /// takes one before each change it makes.
+    Snapshot {
+        /// GOG product id.
+        #[arg(value_name = "GOGID")]
+        gogid: String,
+        #[command(subcommand)]
+        cmd: LinuxSnapshotCmd,
+    },
     /// A built game's executables: the play tasks of its `goggame-*.info`
     /// files (base game and DLC), numbered, with their name, path (relative
     /// to the game's files), args, working dir, category, which one is
@@ -596,6 +613,78 @@ pub enum LinuxAppSub {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[cfg(target_os = "linux")]
+/// `gogo linux-app snapshot <gogid> <cmd>` (design 20 §8).
+#[derive(Debug, Subcommand)]
+pub enum LinuxSnapshotCmd {
+    /// The game's snapshots, newest first: number, date, kind (initial,
+    /// manual, auto), label, build, DLC count and the space each holds alone
+    /// (measured now; an estimate on btrfs, shown with `~`). Also the backend
+    /// and the autosnapshot setting.
+    List {
+        /// Don't measure the space; show the last stored measurement.
+        #[arg(long)]
+        no_space: bool,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Take a snapshot of the game as it is now: its files, prefix and saves,
+    /// and a copy of its override file. Refused while the game runs or a DLC
+    /// add or a move of it isn't finished.
+    Create {
+        /// The snapshot's label (default: `manual`).
+        #[arg(long, value_name = "TEXT")]
+        label: Option<String>,
+        /// Answer yes to any question.
+        #[arg(long)]
+        yes: bool,
+        /// Print what would happen, take nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete snapshots by number. Asks first (`--yes` doesn't); the
+    /// `initial` one is named as such in the question.
+    Delete {
+        /// Snapshot numbers, from `list`.
+        #[arg(value_name = "N", required = true)]
+        ids: Vec<u32>,
+        /// Skip the confirmation.
+        #[arg(long)]
+        yes: bool,
+        /// Print what would be deleted, delete nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Automatic snapshots before each change gogo makes to the game: print
+    /// the setting, or turn it on or off. `on` takes no snapshot by itself;
+    /// `off` keeps the snapshots there are.
+    Auto {
+        #[arg(value_enum)]
+        state: Option<OnOff>,
+        /// Answer yes to any question.
+        #[arg(long)]
+        yes: bool,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[cfg(target_os = "linux")]
+/// `on` or `off`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum OnOff {
+    On,
+    Off,
 }
 
 #[cfg(target_os = "linux")]

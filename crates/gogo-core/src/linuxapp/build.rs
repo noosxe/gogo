@@ -18,6 +18,7 @@ use super::fixes;
 use super::game::{self, refuse_private_tmp};
 use super::proton::{self, ProtonRef};
 use super::setup::{self, ProtonBuild, SetupOptions, SetupOutcome, Umu};
+use super::snapshots::{self, BuildSnapshots, SnapshotOptions};
 use super::umu::{self, Host};
 use super::umu_id::UmuId;
 use crate::config::{Config, UmuMode};
@@ -62,6 +63,10 @@ pub struct LinuxAppOptions {
     /// records. `None`: the tree is taken whole and its infos say which DLC it
     /// has (a tree given by path).
     pub depot_content: Option<DepotContent>,
+    /// Snapshots of a new game (design 20 §2.1, §7.1): a subvolume game dir
+    /// and its `initial` snapshot. The default is off; the CLI turns it on from
+    /// `[snapshots] auto` unless `--no-snapshots`.
+    pub snapshots: SnapshotOptions,
 }
 
 /// A GE-Proton the build downloads.
@@ -132,6 +137,9 @@ pub struct LinuxAppPlan {
     pub depot_content: Option<DepotContent>,
     /// Lines about the DLC choice, shown under `dlcs`.
     pub dlc_notes: Vec<String>,
+    /// The plan's `snapshots:` line (design 20 §8).
+    pub snapshots: BuildSnapshots,
+    pub snapshot_opts: SnapshotOptions,
 }
 
 /// What [`execute`] did.
@@ -145,6 +153,8 @@ pub struct BuildOutcome {
     pub setup: SetupOutcome,
     /// What `content.toml` now says (design 19 §6.1).
     pub content: content::Content,
+    /// The `initial` snapshot a first build took (design 20 §7.1).
+    pub snapshot: Option<crate::snapshot::Meta>,
 }
 
 /// The renderer line's tail: what setup sets for it (design 18 §3, #172),
@@ -525,6 +535,7 @@ pub fn plan(
         ),
     };
     refuse_private_tmp("the game's dir", &state.root)?;
+    let snapshots = BuildSnapshots::plan(&opts.snapshots, gogid.as_deref(), &state.root, rebuild);
     let game_tree_bytes = opts
         .game_tree
         .as_deref()
@@ -581,6 +592,8 @@ pub fn plan(
         (None, _) => Vec::new(),
     };
     Ok(LinuxAppPlan {
+        snapshots,
+        snapshot_opts: opts.snapshots.clone(),
         dlcs,
         depot_content: opts.game_tree.as_ref().and(opts.depot_content.clone()),
         dlc_notes: opts.dlc_notes.clone(),
@@ -795,6 +808,9 @@ pub fn execute(
 
     let mut materialized = None;
     let mut title = plan.display.clone();
+    // The installer lane knows whether this is the game's first build only
+    // once the install has named the game.
+    let mut installer_first = false;
     let (gogid, selection, auto, lane, install_dir, cache_root) = if let Some(tree) =
         &plan.game_tree
     {
@@ -809,6 +825,13 @@ pub fn execute(
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| plan.slug.clone());
+        // A new game dir is a subvolume with snapshots on (design 20 §2.1).
+        snapshots::make_dir(
+            &plan.snapshots,
+            &plan.snapshot_opts,
+            &dirs.root,
+            &mut |message| emit(&ProgressEvent::Warn { message }),
+        )?;
         launch::record_location(&gogid, &dirs.root)?;
         // A rebuild re-materializes `game/` and keeps the prefix (saves).
         // A copy of a large tree takes minutes: say so, and how far (#337).
@@ -985,7 +1008,14 @@ pub fn execute(
             log: logs.join(installer::WINE_LOG),
         };
         umu.check()?;
-        std::fs::create_dir_all(&staging.root)?;
+        // The staging dir is the game dir to be: a subvolume with snapshots on
+        // (design 20 §2.1), renamed into place below.
+        snapshots::make_dir(
+            &plan.snapshots,
+            &plan.snapshot_opts,
+            &staging.root,
+            &mut |message| emit(&ProgressEvent::Warn { message }),
+        )?;
         emit(&ProgressEvent::PrefixStaged);
         umu.create_prefix()?;
         crate::macapp::setup::localize_home(&staging.prefix)?;
@@ -1027,25 +1057,37 @@ pub fn execute(
         if let Some(message) = launch::stays_note(&target, plan.library.as_ref()) {
             emit(&ProgressEvent::Warn { message });
         }
-        std::fs::create_dir_all(&target.root)?;
-        launch::record_location(&gogid, &target.root)?;
-        if target.prefix.symlink_metadata().is_ok() {
-            let aside = target.root.join(format!(
-                "prefix.old-{}",
-                chrono::Utc::now().format("%Y%m%dT%H%M%S")
-            ));
-            std::fs::rename(&target.prefix, &aside)?;
-            emit(&ProgressEvent::Warn {
-                message: format!("previous prefix moved to {}", aside.display()),
-            });
+        installer_first = !game::launch_toml_path(&target).is_file();
+        if target.root.symlink_metadata().is_err() {
+            // A new game: the staging dir (a subvolume, with snapshots on)
+            // becomes the game dir, prefix and install logs in it.
+            if let Some(parent) = target.root.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            launch::move_tree(&staging.root, &target.root)?;
+            launch::record_location(&gogid, &target.root)?;
+        } else {
+            launch::record_location(&gogid, &target.root)?;
+            if target.prefix.symlink_metadata().is_ok() {
+                let aside = target.root.join(format!(
+                    "prefix.old-{}",
+                    chrono::Utc::now().format("%Y%m%dT%H%M%S")
+                ));
+                std::fs::rename(&target.prefix, &aside)?;
+                emit(&ProgressEvent::Warn {
+                    message: format!("previous prefix moved to {}", aside.display()),
+                });
+            }
+            // Out of a staging subvolume into another one is a copy (reflinked
+            // on one btrfs): a rename can't cross subvolumes.
+            launch::move_tree(&staging.prefix, &target.prefix)?;
+            let target_logs = target.root.join(crate::macapp::INSTALL_LOGS);
+            if logs.is_dir() {
+                materialize::remove_tree(&target_logs).ok();
+                launch::move_tree(&logs, &target_logs)?;
+            }
+            materialize::remove_tree(&staging.root).ok();
         }
-        launch::move_tree(&staging.prefix, &target.prefix)?;
-        let target_logs = target.root.join(crate::macapp::INSTALL_LOGS);
-        if logs.is_dir() {
-            materialize::remove_tree(&target_logs).ok();
-            launch::move_tree(&logs, &target_logs)?;
-        }
-        materialize::remove_tree(&staging.root).ok();
         let install_dir = target.prefix.join("drive_c/GOG").join(&plan.slug);
         // The stem only guessed the title (the slug had to be fixed before the
         // install); the installed game's own name is the real one (#235).
@@ -1098,13 +1140,33 @@ pub fn execute(
     {
         content.language = Some(l);
     }
-    if let Some(w) = write_content_or_warn(&GameDirs::for_game(&gogid)?.root, &content) {
+    let dirs = GameDirs::for_game(&gogid)?;
+    if let Some(w) = write_content_or_warn(&dirs.root, &content) {
         outcome.warnings.push(w);
     }
+    // A first build's setting and `initial` snapshot (design 20 §7.1). The
+    // game is built and plays either way: a failure warns.
+    let first = if plan.game_tree.is_some() {
+        !plan.rebuild
+    } else {
+        installer_first
+    };
+    let snapshot = if first {
+        snapshots::after_first_build(&gogid, &dirs, &plan.snapshots, &plan.snapshot_opts)
+            .unwrap_or_else(|e| {
+                outcome.warnings.push(format!(
+                    "no initial snapshot: {e}; `gogo linux-app snapshot {gogid} create` takes one"
+                ));
+                None
+            })
+    } else {
+        None
+    };
     Ok(BuildOutcome {
+        snapshot,
         content,
         title,
-        dirs: GameDirs::for_game(&gogid)?,
+        dirs,
         gogid,
         materialized,
         setup: outcome,

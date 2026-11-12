@@ -853,6 +853,38 @@ impl<'b> Store<'b> {
     }
 }
 
+/// Every snapshot's metadata under `<data_root>/snapshots/`, as `(gogid,
+/// <n>.toml, metadata)`, sorted. Reads only; a file that doesn't parse is
+/// skipped. For the readers that look across games: the store's GC counts each
+/// snapshot's runtime and renderer as in use (design 20 §9.6).
+pub fn all_metadata(data_root: &Path) -> Vec<(String, PathBuf, Meta)> {
+    let mut out = Vec::new();
+    let games = std::fs::read_dir(data_root.join("snapshots"));
+    for game in games.into_iter().flatten().flatten() {
+        let Some(gogid) = game.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        for file in std::fs::read_dir(game.path())
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let path = file.path();
+            let numbered = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_suffix(".toml"))
+                .and_then(|n| backend::parse_n(std::ffi::OsStr::new(n)))
+                .is_some();
+            if numbered && let Ok(Some(meta)) = read_toml::<Meta>(&path) {
+                out.push((gogid.clone(), path, meta));
+            }
+        }
+    }
+    out.sort_by(|a, b| (&a.0, a.2.id).cmp(&(&b.0, b.2.id)));
+    out
+}
+
 // — atomic files (design 06 §2) —
 
 fn read_toml<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {

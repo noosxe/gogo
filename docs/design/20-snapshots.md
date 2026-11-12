@@ -106,14 +106,17 @@ game dir's parent (`games/` or the library dir). Why there:
   the library check (`Library::resolve`) and `move` learn the name so they never treat it as
   a game or a target.
 
-**Game dirs become subvolumes at build time.** `GameDirs::for_build` today makes the game dir
-with `create_dir_all`. With snapshots on (the default) and a btrfs parent, it creates the
-game dir with `BTRFS_IOC_SUBVOL_CREATE` instead:
+**Game dirs become subvolumes at build time.** The build creates a new game dir (the dir
+`GameDirs::for_build` names) with a plain `mkdir`. With snapshots on (the default) and a
+btrfs parent, it creates it with `BTRFS_IOC_SUBVOL_CREATE` instead:
 
 - Depot lane: the game dir is created as a subvolume, then `game/` is materialized into it
   as now (FICLONE from the depot cache).
-- Installer lane: the staging dir `.build-<slug>-<pid>/` is created as a subvolume and
-  renamed into place as now (a subvolume renames like a dir on one filesystem).
+- Installer lane: the staging dir `.build-<slug>-<pid>/` is created as a subvolume and,
+  for a new game, renamed whole into place (a subvolume renames like a dir on one
+  filesystem). When the game is there already, its prefix is moved out of the staging
+  dir as before; a rename can't cross subvolumes, so that is a reflinked copy, and the
+  emptied staging subvolume is removed with `rmdir`.
 - A rebuild keeps the game dir, so it stays whatever it was. A depot rebuild replaces
   `game/` inside it; an installer rebuild sets the old prefix aside as `prefix.old-<time>`
   inside it, as today.
@@ -655,6 +658,37 @@ gogo linux-app dlc <gogid> add … --no-snapshots      # and the update and rebu
   `snapshots: unavailable (<reason>)`.
 - Config (design 05): `[snapshots] auto = true` (the default for new builds) and
   `keep_auto = 5`.
+
+### 8.1 As built (#403)
+
+What the first implementation settled where this design left room:
+
+- **Questions.** `delete` asks (TTY), `--yes` skips it, and without a TTY it prints the
+  plan and exits 2. `create` and `auto on|off` ask nothing until they convert a plain dir
+  (#406); until then they refuse it, exit 7: `<dir> isn't a btrfs subvolume …: it needs
+  converting to one first`. `--yes` is accepted on both for that.
+- **Refusals** are checked twice: once before anything is shown or asked (exit 7, nothing
+  touched), and again under the two locks, after an interrupted create or delete is
+  settled. `auto off` changes nothing about the game, so it takes the locks but, of §5.1's
+  refusals, only the unreachable game's. A snapshot number that isn't the game's is a usage error (exit 2).
+- **The build.** A subvolume that can't be made becomes a plain dir with a warning, and
+  the build goes on without snapshots. The `initial` snapshot is taken after setup and
+  after `content.toml` is written, so it holds both; if it fails, the build still
+  succeeds and warns (the change it would protect is already done; §7.1's stop applies to
+  `auto` snapshots). `settings.toml` is written at every first build: `auto = true` only
+  when the game dir is a subvolume.
+- **The plan line on a rebuild:** `on (a rebuild: the game dir stays the subvolume it is)`
+  or `off for this game (a rebuild: the game dir stays as it is)`, from the game's setting
+  and its dir. `[snapshots] auto = false` shows as `off ([snapshots] auto = false)`.
+- **`[content]`'s `runtime` and `renderer`** are `state.toml`'s store references
+  (`ge-proton/GE-Proton10-25`, `dxvk/<ver>`), so the store's GC and `doctor` match them
+  as they match a game's.
+- **`list --json`** also carries `ready` (the game dir is a subvolume), `gameDir`,
+  `reachable`, each snapshot's `presence` (`present`, `missing`, `stray`, `unreachable`)
+  and `notes` (a space measurement that couldn't run: the locks were held). The space is
+  measured under the locks; a game that is running doesn't stop `list`.
+- **`.gogo-snapshots`:** `apps list` only takes dirs named by a gogid, so it never sees
+  it. `Library::resolve` refuses any path with a `.gogo-snapshots` part.
 
 `apps show` gains a `snapshots` section: backend, autosnapshot, count, the newest three with
 labels, the stored space total with its date, and the saves-aside dirs. `doctor` gains a

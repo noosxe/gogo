@@ -56,7 +56,8 @@ impl Fake {
     }
 }
 
-/// The files under `root`, relative, sorted.
+/// The regular files under `root`, relative, sorted. Symlinks (a prefix's
+/// `dosdevices/`) hold no data of their own and aren't followed.
 fn files(root: &Path) -> io::Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -64,9 +65,12 @@ fn files(root: &Path) -> io::Result<Vec<PathBuf>> {
         for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;
             let path = entry.path();
-            if entry.file_type()?.is_dir() {
+            let ty = entry.file_type()?;
+            if ty.is_dir() {
                 stack.push(path);
-            } else if let Ok(rel) = path.strip_prefix(root) {
+            } else if ty.is_file()
+                && let Ok(rel) = path.strip_prefix(root)
+            {
                 out.push(rel.to_path_buf());
             }
         }

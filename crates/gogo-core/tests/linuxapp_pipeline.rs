@@ -8215,3 +8215,521 @@ mod one_off {
         assert!(one_off_logs(&w)[0].contains("# wrapper: fake-wrap\n"));
     }
 }
+
+// — snapshots (design 20 §2.1, §5.1, §7.1, §8, §9.3, §9.6) —
+
+mod snapshots {
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use super::{ID, LinuxAppOptions, World, build, quiet};
+    use gogo::linuxapp::snapshots::{self as snap, Backends, BuildSnapshots, SnapshotOptions};
+    use gogo::macapp::apps;
+    use gogo::snapshot::backend::{self, SnapshotBackend};
+    use gogo::snapshot::fake::Fake;
+
+    fn fake() -> Backends {
+        Backends::fixed(Arc::new(Fake::new()))
+    }
+
+    fn with(opts: LinuxAppOptions, b: &Backends) -> LinuxAppOptions {
+        LinuxAppOptions {
+            snapshots: SnapshotOptions::on(b.clone()),
+            ..opts
+        }
+    }
+
+    fn snap_dir(root: &Path, n: u32) -> PathBuf {
+        backend::snapshot_dir(root, n).unwrap()
+    }
+
+    fn meta_dir(w: &World) -> PathBuf {
+        w.home.join("snapshots").join(ID)
+    }
+
+    /// This process's start time, as a launcher record holds it.
+    fn my_start() -> String {
+        let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+        let rest = stat.rsplit_once(") ").unwrap().1;
+        rest.split_whitespace().nth(19).unwrap().to_string()
+    }
+
+    #[test]
+    fn a_first_build_takes_the_initial_snapshot_after_setup() {
+        let w = World::new("snap-first", &["d3d9.dll"]);
+        let b = fake();
+        let plan = build::plan(&with(w.opts(), &b), None, &mut quiet()).unwrap();
+        assert_eq!(plan.snapshots, BuildSnapshots::On);
+        assert!(
+            plan.snapshots
+                .line()
+                .contains("the game dir leaves snapshots of the subvolume around it"),
+            "{}",
+            plan.snapshots.line()
+        );
+        let out = build::execute(&plan, None, &mut quiet()).unwrap();
+        let meta = out.snapshot.expect("the initial snapshot");
+        assert_eq!(meta.id, 1);
+        assert_eq!(meta.kind, gogo::snapshot::Kind::Initial);
+        assert_eq!(meta.label, "after the first build");
+        // Taken after setup: the snapshot holds setup's state.toml and the
+        // build's content.toml.
+        let one = snap_dir(&out.dirs.root, 1);
+        for f in [
+            "gogo-launch.toml",
+            "state.toml",
+            "content.toml",
+            "launch.conf",
+        ] {
+            assert!(one.join(f).is_file(), "{f} not in the snapshot");
+        }
+        assert_eq!(meta.content.runtime, Some(w.state().runtime));
+        assert_eq!(meta.content.lane.as_deref(), Some("depot"));
+        let settings = std::fs::read_to_string(meta_dir(&w).join("settings.toml")).unwrap();
+        assert!(settings.contains("auto = true"), "{settings}");
+
+        // A rebuild keeps the dir and takes no initial snapshot.
+        let plan = build::plan(&with(w.opts(), &b), None, &mut quiet()).unwrap();
+        assert_eq!(plan.snapshots, BuildSnapshots::Kept { on: true });
+        let again = build::execute(&plan, None, &mut quiet()).unwrap();
+        assert!(again.snapshot.is_none());
+        assert_eq!(snap::list(ID, &b, 5, false).unwrap().snapshots.len(), 1);
+    }
+
+    #[test]
+    fn no_snapshots_builds_a_plain_dir_with_autosnapshot_off() {
+        let w = World::new("snap-off", &["d3d9.dll"]);
+        let opts = LinuxAppOptions {
+            snapshots: SnapshotOptions::off("--no-snapshots"),
+            ..w.opts()
+        };
+        let plan = build::plan(&opts, None, &mut quiet()).unwrap();
+        assert_eq!(plan.snapshots.line(), "off (--no-snapshots)");
+        let out = build::execute(&plan, None, &mut quiet()).unwrap();
+        assert!(out.snapshot.is_none());
+        let settings = std::fs::read_to_string(meta_dir(&w).join("settings.toml")).unwrap();
+        assert!(settings.contains("auto = false"), "{settings}");
+        assert!(!backend::snapshots_dir(&out.dirs.root).unwrap().exists());
+        // The fake can snapshot anything; the setting stays what the build said.
+        assert!(!snap::list(ID, &fake(), 5, false).unwrap().auto);
+    }
+
+    #[test]
+    fn an_installer_build_turns_its_staging_dir_into_the_game_dir() {
+        let w = World::new("snap-inst", &["d3d9.dll"]);
+        let setup_exe = w.root.join("setup_test_game_1.0.exe");
+        std::fs::write(&setup_exe, "MZ").unwrap();
+        let b = fake();
+        let opts = with(
+            LinuxAppOptions {
+                installer: Some(setup_exe),
+                runtime: Some(format!("path:{}", w.build.display())),
+                name: Some("Test Game".into()),
+                ..Default::default()
+            },
+            &b,
+        );
+        let plan = build::plan(&opts, None, &mut quiet()).unwrap();
+        assert_eq!(plan.snapshots, BuildSnapshots::On);
+        let staging = plan.state.root.clone();
+        let out = build::execute(&plan, None, &mut quiet()).unwrap();
+        assert!(!staging.exists(), "staging dir left behind");
+        assert!(out.dirs.root.join("prefix/drive_c/GOG").is_dir());
+        let meta = out.snapshot.expect("the initial snapshot");
+        assert_eq!(meta.content.lane.as_deref(), Some("installer"));
+        assert!(
+            snap_dir(&out.dirs.root, 1)
+                .join("gogo-launch.toml")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn list_create_delete_and_auto() {
+        let w = World::new("snap-cli", &["d3d9.dll"]);
+        let b = fake();
+        let root = build::execute(
+            &build::plan(&with(w.opts(), &b), None, &mut quiet()).unwrap(),
+            None,
+            &mut quiet(),
+        )
+        .unwrap()
+        .dirs
+        .root;
+
+        let v = snap::list(ID, &b, 5, true).unwrap();
+        assert_eq!((v.backend, v.ready, v.auto), (Some("btrfs"), true, true));
+        let json = serde_json::to_value(&v).unwrap();
+        assert_eq!(json["gogid"], serde_json::json!(ID.parse::<u64>().unwrap()));
+        assert_eq!(json["keepAuto"], 5);
+        assert_eq!(json["reason"], serde_json::Value::Null);
+        let s0 = &json["snapshots"][0];
+        assert_eq!(s0["id"], 1);
+        assert_eq!(s0["kind"], "initial");
+        assert_eq!(s0["state"], "done");
+        assert_eq!(s0["reachable"], true);
+        assert_eq!(s0["content"]["lane"], "depot");
+        assert_eq!(s0["space"]["exact"], false, "measured by `list`: {json}");
+        let text = snap::render_list(&v);
+        assert!(text.contains("backend:      btrfs subvolume"), "{text}");
+        assert!(
+            text.contains("autosnapshot: on, keeping 5 automatic"),
+            "{text}"
+        );
+        assert!(text.contains("after the first build"), "{text}");
+
+        // create
+        let plan = snap::plan_create(ID, &b, Some("test")).unwrap();
+        assert_eq!(plan.label, "test");
+        let made = snap::create(ID, &b, Some("test")).unwrap();
+        assert_eq!(made.snapshot.id, 2);
+        assert_eq!(made.snapshot.kind, Some("manual"));
+        assert!(snap_dir(&root, 2).is_dir());
+        let json = serde_json::to_value(&made).unwrap();
+        assert_eq!(json["snapshot"]["label"], "test");
+
+        // delete: unknown numbers are named, the initial one is called that.
+        let plan = snap::plan_delete(ID, &b, &[2, 9]).unwrap();
+        assert_eq!(plan.unknown, [9]);
+        let plan = snap::plan_delete(ID, &b, &[1]).unwrap();
+        assert!(
+            plan.question()
+                .starts_with("delete snapshot 1 (initial: after the first build)"),
+            "{}",
+            plan.question()
+        );
+        let gone = snap::delete(ID, &b, &[2]).unwrap();
+        assert_eq!(gone.deleted, [2]);
+        assert!(!snap_dir(&root, 2).exists());
+        let ids: Vec<u32> = snap::list(ID, &b, 5, false)
+            .unwrap()
+            .snapshots
+            .iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(ids, [1]);
+
+        // auto
+        assert!(snap::auto(ID, &b, 5).unwrap().auto);
+        let off = snap::set_auto(ID, &b, false, 5).unwrap();
+        assert!(!off.auto);
+        assert!(!snap::auto(ID, &b, 5).unwrap().auto);
+        assert_eq!(
+            serde_json::to_value(snap::set_auto(ID, &b, true, 5).unwrap()).unwrap()["auto"],
+            true
+        );
+        // A number is never handed out twice.
+        assert_eq!(snap::create(ID, &b, None).unwrap().snapshot.id, 3);
+    }
+
+    /// `create` (and `auto on`) refused, with nothing touched.
+    fn assert_refused(b: &Backends, root: &Path, why: &str) {
+        let before = std::fs::read_dir(backend::snapshots_dir(root).unwrap())
+            .unwrap()
+            .count();
+        for e in [
+            snap::plan_create(ID, b, None).map(|_| ()).unwrap_err(),
+            snap::create(ID, b, None).map(|_| ()).unwrap_err(),
+            snap::delete(ID, b, &[1]).map(|_| ()).unwrap_err(),
+            snap::set_auto(ID, b, true, 5).map(|_| ()).unwrap_err(),
+        ] {
+            assert!(e.to_string().contains(why), "{why}: {e}");
+        }
+        let after = std::fs::read_dir(backend::snapshots_dir(root).unwrap())
+            .unwrap()
+            .count();
+        assert_eq!(before, after, "{why}: something was touched");
+        assert!(snap_dir(root, 1).is_dir(), "{why}: snapshot 1 went");
+    }
+
+    #[test]
+    fn every_refusal_of_a_snapshot_change() {
+        let w = World::new("snap-refuse", &["d3d9.dll"]);
+        let b = fake();
+        let out = build::execute(
+            &build::plan(&with(w.opts_in_library(), &b), None, &mut quiet()).unwrap(),
+            None,
+            &mut quiet(),
+        )
+        .unwrap();
+        let root = out.dirs.root.clone();
+
+        // The game runs: its launcher, then a one-off of another exe.
+        let me = std::process::id().to_string();
+        let launchers = root.join(".launchers");
+        std::fs::create_dir_all(&launchers).unwrap();
+        std::fs::write(launchers.join(&me), format!("{}\n", my_start())).unwrap();
+        assert_refused(&b, &root, "is running");
+        std::fs::remove_dir_all(&launchers).unwrap();
+        let one_offs = root.join(".one-offs");
+        std::fs::create_dir_all(&one_offs).unwrap();
+        std::fs::write(
+            one_offs.join(&me),
+            format!("{}\nTools/Config.exe\n", my_start()),
+        )
+        .unwrap();
+        assert_refused(&b, &root, "`gogo linux-app run`");
+        std::fs::remove_dir_all(&one_offs).unwrap();
+
+        // A DLC add that isn't finished, each way it shows.
+        for (path, dir) in [
+            ("dlc-journal.json", false),
+            ("dlc-download.json", false),
+            (".dlc-staging", true),
+        ] {
+            let p = root.join(path);
+            if dir {
+                std::fs::create_dir_all(&p).unwrap();
+            } else {
+                std::fs::write(&p, "{}").unwrap();
+            }
+            assert_refused(&b, &root, "DLC add");
+            if dir {
+                std::fs::remove_dir_all(&p).unwrap();
+            } else {
+                std::fs::remove_file(&p).unwrap();
+            }
+        }
+
+        // A move that isn't settled.
+        let journal = w.home.join("game-moves").join(ID);
+        std::fs::write(&journal, "x\n").unwrap();
+        assert_refused(&b, &root, "move");
+        std::fs::remove_file(&journal).unwrap();
+
+        // Another gogo holds the game's lock.
+        let held = gogo::macapp::relocate::lock_game(ID).unwrap();
+        assert!(snap::create(ID, &b, None).is_err());
+        drop(held);
+
+        // The game's drive isn't there.
+        let lib = root.parent().unwrap().to_path_buf();
+        let away = lib.with_file_name("unmounted");
+        std::fs::rename(&lib, &away).unwrap();
+        let e = snap::create(ID, &b, None).unwrap_err().to_string();
+        assert!(e.contains("isn't there"), "{e}");
+        let listed = snap::list(ID, &b, 5, true).unwrap();
+        assert!(!listed.reachable);
+        assert_eq!(listed.snapshots[0].presence, "unreachable");
+        std::fs::rename(&away, &lib).unwrap();
+
+        // And with all of that gone, it works.
+        assert_eq!(snap::create(ID, &b, None).unwrap().snapshot.id, 2);
+    }
+
+    #[test]
+    fn a_game_built_without_snapshots_is_refused_and_never_converted() {
+        let w = World::new("snap-plain", &["d3d9.dll"]);
+        // The default options: a plain dir, as a game built before snapshots.
+        let root = build::execute(
+            &build::plan(&w.opts(), None, &mut quiet()).unwrap(),
+            None,
+            &mut quiet(),
+        )
+        .unwrap()
+        .dirs
+        .root;
+        let real = Backends::real();
+        for e in [
+            snap::create(ID, &real, None).unwrap_err().to_string(),
+            snap::set_auto(ID, &real, true, 5)
+                .map(|_| ())
+                .unwrap_err()
+                .to_string(),
+        ] {
+            // btrfs: a plain dir that needs converting; anything else: none.
+            assert!(
+                e.contains("needs converting") || e.starts_with("no snapshots: "),
+                "{e}"
+            );
+        }
+        assert!(!backend::snapshots_dir(&root).unwrap().exists());
+        // `list` still works, and says why.
+        let v = snap::list(ID, &real, 5, true).unwrap();
+        assert!(v.snapshots.is_empty() && !v.ready && !v.auto);
+        // `auto off` is never refused.
+        assert!(!snap::set_auto(ID, &real, false, 5).unwrap().auto);
+    }
+
+    #[test]
+    fn apps_remove_deletes_the_snapshots_first_and_the_metadata_last() {
+        let w = World::new("snap-remove", &["d3d9.dll"]);
+        let b = fake();
+        let root = build::execute(
+            &build::plan(&with(w.opts(), &b), None, &mut quiet()).unwrap(),
+            None,
+            &mut quiet(),
+        )
+        .unwrap()
+        .dirs
+        .root;
+        snap::create(ID, &b, Some("second")).unwrap();
+        let logs = w.root.join("logs");
+        let a = apps::get(ID, &logs).unwrap().unwrap();
+        let s = a.snapshots.clone().expect("a snapshots section");
+        assert_eq!(s.count, 2);
+        assert_eq!(s.newest[0].2, "second");
+        assert!(s.remove_note().unwrap().starts_with("2 snapshots"));
+        assert!(
+            s.lines(ID).iter().any(|l| l.contains("autosnapshot on")),
+            "{:?}",
+            s.lines(ID)
+        );
+
+        let removed = apps::remove_with(&a, false, &b).unwrap();
+        assert_eq!(removed.snapshots, 2);
+        assert!(!root.exists());
+        assert!(!backend::snapshots_dir(&root).unwrap().exists());
+        assert!(!meta_dir(&w).exists());
+        assert!(removed.paths.contains(&meta_dir(&w)));
+    }
+
+    #[test]
+    fn the_store_gc_keeps_what_a_snapshot_was_set_up_with() {
+        let w = World::new("snap-gc", &["d3d9.dll"]);
+        let b = fake();
+        build::execute(
+            &build::plan(&with(w.opts(), &b), None, &mut quiet()).unwrap(),
+            None,
+            &mut quiet(),
+        )
+        .unwrap();
+        // The world's runtime is a `path:` one, which the store never holds:
+        // point snapshot 1 at a store runtime, as a GE-Proton build's would be.
+        let file = meta_dir(&w).join("1.toml");
+        let raw = std::fs::read_to_string(&file).unwrap();
+        let mut meta: gogo::snapshot::Meta = toml::from_str(&raw).unwrap();
+        meta.content.runtime = Some("ge-proton/GE-Proton10-25".into());
+        meta.content.renderer = Some("dxvk/v2.7".into());
+        std::fs::write(&file, toml::to_string(&meta).unwrap()).unwrap();
+
+        let refs = gogo::macapp::store::references();
+        for r in ["ge-proton/GE-Proton10-25", "dxvk/v2.7"] {
+            assert!(
+                refs.iter()
+                    .any(|x| x.gogid == ID && x.reference == r && x.file == file),
+                "{r}: {refs:?}"
+            );
+        }
+        assert_eq!(gogo::macapp::store::users_of("ge-proton"), [ID]);
+        // `doctor` names a snapshot whose runtime isn't in the store.
+        let root = gogo::macapp::launch::GameDirs::for_game(ID).unwrap().root;
+        let f = snap::doctor(ID, &root, &b);
+        assert!(
+            f.iter()
+                .any(|f| f.message.contains("needs ge-proton/GE-Proton10-25")),
+            "{f:?}"
+        );
+    }
+
+    #[test]
+    fn the_snapshots_dir_is_never_a_game_or_a_library() {
+        let w = World::new("snap-skip", &["d3d9.dll"]);
+        let b = fake();
+        let root = build::execute(
+            &build::plan(&with(w.opts(), &b), None, &mut quiet()).unwrap(),
+            None,
+            &mut quiet(),
+        )
+        .unwrap()
+        .dirs
+        .root;
+        let snaps = backend::snapshots_dir(&root).unwrap();
+        assert!(snaps.is_dir());
+        let listed: Vec<String> = apps::list(&w.root.join("logs"))
+            .unwrap()
+            .into_iter()
+            .map(|a| a.gogid)
+            .collect();
+        assert_eq!(listed, [ID]);
+        for dir in [snaps.parent().unwrap().to_path_buf(), snaps.join("x")] {
+            let e = gogo::macapp::launch::Library::resolve(&dir, None).unwrap_err();
+            assert!(e.to_string().contains(".gogo-snapshots"), "{e}");
+        }
+        let elsewhere = w.root.join("lib/.gogo-snapshots");
+        assert!(gogo::macapp::launch::Library::resolve(&elsewhere, None).is_err());
+    }
+
+    #[test]
+    fn doctor_reports_the_backend_and_strays() {
+        let w = World::new("snap-doctor", &["d3d9.dll"]);
+        let b = fake();
+        let root = build::execute(
+            &build::plan(&with(w.opts(), &b), None, &mut quiet()).unwrap(),
+            None,
+            &mut quiet(),
+        )
+        .unwrap()
+        .dirs
+        .root;
+        let f = snap::doctor(ID, &root, &b);
+        assert_eq!(f[0].level, gogo::macapp::doctor::Level::Ok, "{f:?}");
+        assert!(
+            f[0].message.starts_with("btrfs subvolume, autosnapshot on"),
+            "{f:?}"
+        );
+        std::fs::create_dir_all(snap_dir(&root, 7)).unwrap();
+        let f = snap::doctor(ID, &root, &b);
+        assert!(
+            f.iter()
+                .any(|f| f.level == gogo::macapp::doctor::Level::Warn
+                    && f.message.contains("snapshot 7 is on disk without metadata")),
+            "{f:?}"
+        );
+        // The full doctor runs the check too.
+        let report =
+            gogo::linuxapp::doctor::doctor(ID, &gogo::linuxapp::doctor::Host::detect()).unwrap();
+        assert!(report.findings.iter().any(|f| f.check == "snapshots"));
+    }
+
+    /// On a real btrfs (`CARGO_TARGET_TMPDIR`, else skipped): the game dir is a
+    /// subvolume, the initial snapshot a read-only one beside it, and `apps
+    /// remove` takes both.
+    #[test]
+    fn on_real_btrfs_the_game_dir_is_a_subvolume_with_its_initial_snapshot() {
+        let w = World::new("snap-btrfs", &["d3d9.dll"]);
+        if !gogo::snapshot::btrfs::is_btrfs(&w.root).unwrap_or(false) {
+            println!(
+                "SKIP on_real_btrfs_the_game_dir_is_a_subvolume_with_its_initial_snapshot: {} \
+                 is not on btrfs",
+                w.root.display()
+            );
+            return;
+        }
+        let real = Backends::real();
+        let plan = build::plan(&with(w.opts(), &real), None, &mut quiet()).unwrap();
+        assert_eq!(plan.snapshots, BuildSnapshots::On);
+        let out = build::execute(&plan, None, &mut quiet()).unwrap();
+        let root = out.dirs.root.clone();
+        let guard = Cleanup(root.clone());
+        assert!(gogo::snapshot::btrfs::is_subvolume(&root).unwrap());
+        assert_eq!(out.snapshot.as_ref().map(|m| m.id), Some(1));
+        let one = snap_dir(&root, 1);
+        assert!(gogo::snapshot::btrfs::is_subvolume(&one).unwrap());
+        assert!(gogo::snapshot::btrfs::is_readonly(&one).unwrap());
+        assert!(one.join("state.toml").is_file());
+        assert!(gogo::snapshot::btrfs::Btrfs.ready(&root).unwrap());
+
+        let a = apps::get(ID, &w.root.join("logs")).unwrap().unwrap();
+        let removed = apps::remove(&a, false).unwrap();
+        assert_eq!(removed.snapshots, 1);
+        assert!(!root.exists() && !one.exists());
+        drop(guard);
+    }
+
+    /// Whatever a failed btrfs test left: read-only snapshots aren't removed
+    /// by the world's cleanup.
+    struct Cleanup(PathBuf);
+
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            if let Some(dir) = backend::snapshots_dir(&self.0)
+                && let Ok(rd) = std::fs::read_dir(&dir)
+            {
+                for e in rd.flatten() {
+                    let _ = gogo::snapshot::btrfs::destroy_by_rmdir(&e.path());
+                }
+            }
+        }
+    }
+}

@@ -1035,7 +1035,8 @@ pub struct Reference {
 }
 
 /// Every runtime and renderer reference: `games/*/state.toml` (runtime,
-/// renderer) and the L4 files (`runtime`, `renderer`). Unreadable files are
+/// renderer), each snapshot's `<n>.toml` (`[content]`'s runtime and renderer)
+/// and the L4 files (`runtime`, `renderer`). Unreadable files are
 /// skipped; `path:` runtimes aren't in the store and aren't listed.
 pub fn references() -> Vec<Reference> {
     let mut out = Vec::new();
@@ -1068,6 +1069,11 @@ pub fn references() -> Vec<Reference> {
             push(&s.gogid, &file, &s.runtime);
             push(&s.gogid, &file, &s.renderer);
         }
+    }
+    // What each snapshot was set up with: a rollback to it needs them
+    // (design 20 §9.6).
+    for (gogid, file, r) in crate::linuxapp::snapshots::store_references() {
+        push(&gogid, &file, &r);
     }
     let l4 = super::compat::user_dir();
     for e in std::fs::read_dir(&l4).into_iter().flatten().flatten() {

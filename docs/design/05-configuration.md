@@ -70,6 +70,15 @@ catalog_ttl_hours = 24        # catalog cache freshness (06 §3)
 #                             # unset: the store, with a note. New installs only (18 §2.2)
 # default_runtime = "ge-proton[/<ver>]" | "path:<dir>"   # the Proton build games use unless
 #                             # --runtime says otherwise; unset: the catalog's GE-Proton (18 §1)
+
+[snapshots]
+auto = true                   # a new `linux-app` game on btrfs gets a subvolume game dir,
+#                             # its `initial` snapshot after setup, and autosnapshot on
+#                             # (design 20 §2.1, §7.1). false: as `--no-snapshots` on
+#                             # every build (a plain dir, autosnapshot off). Games built
+#                             # already keep their own setting (`snapshot <gogid> auto`).
+keep_auto = 5                 # automatic snapshots kept per game, newest first (20 §7.2);
+#                             # `initial` and manual ones are never pruned
 ```
 
 ### Rate value grammar (`--limit`, `download.limit`)
@@ -110,7 +119,8 @@ offending name (env mistakes should be loud, not silently ignored).
 `--parallel-files`, `--limit`, `--language`, `--os` → overlays `gog.platform`, `--retries`);
 `Some(_)` wins over every other layer. This is the whole merge surface — no hidden
 interactions. `--library` on a `linux-app` or `mac-app` build is `library.dir`'s (not on
-`--retarget` or `--portable`: neither places a game).
+`--retarget` or `--portable`: neither places a game). `--no-snapshots` on a `linux-app`
+build turns `snapshots.auto` off for that build.
 
 ## 6. Validation & path handling
 

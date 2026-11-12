@@ -62,6 +62,9 @@ pub struct App {
     /// Why `content.toml` couldn't be read.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_error: Option<String>,
+    /// Linux: the game's snapshots (design 20 §8), from the stored metadata.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshots: Option<crate::linuxapp::snapshots::Summary>,
 }
 
 /// What `apps` shows of a game's content ([`crate::gog::content`]).
@@ -196,6 +199,7 @@ fn read(gogid: &str, logs: &Path) -> Result<App, MacAppError> {
         desktop: None,
         desktop_present: false,
         launcher: false,
+        snapshots: None,
     })
 }
 
@@ -215,7 +219,13 @@ fn read_linux(gogid: &str, dirs: GameDirs, logs: &Path) -> App {
         .ok()
         .and_then(|(t, _)| t.tree_name());
     let view = content_view(gogid, &dirs, tree.as_deref());
+    let snapshots = Some(crate::linuxapp::snapshots::summary(
+        gogid,
+        &dirs.root,
+        &crate::linuxapp::snapshots::Backends::real(),
+    ));
     App {
+        snapshots,
         dlcs: view.dlcs,
         content: view.content,
         content_derived: view.derived,
@@ -290,6 +300,11 @@ pub struct Removed {
     /// symlinked game dir, or the dir of a game that wasn't reachable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub left_behind: Option<PathBuf>,
+    /// How many snapshots were deleted with the game (design 20 §9.3).
+    pub snapshots: usize,
+    /// An unreachable game's snapshots, left on its drive with its files.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshots_left: Option<PathBuf>,
 }
 
 /// Delete `app`'s state dir (prefix and saves included), launch logs and,
@@ -299,6 +314,20 @@ pub struct Removed {
 /// the link only, never what it points at; a game whose dir isn't there is
 /// forgotten, and its files stay wherever they are.
 pub fn remove(app: &App, keep_override: bool) -> Result<Removed, MacAppError> {
+    remove_with(
+        app,
+        keep_override,
+        &crate::linuxapp::snapshots::Backends::real(),
+    )
+}
+
+/// [`remove`] with the snapshot backend given (tests). A Linux game's
+/// snapshots go before its dir, their metadata last (design 20 §9.3).
+pub fn remove_with(
+    app: &App,
+    keep_override: bool,
+    backends: &crate::linuxapp::snapshots::Backends,
+) -> Result<Removed, MacAppError> {
     if app.unreachable {
         return remove_unreachable(app, keep_override);
     }
@@ -328,6 +357,10 @@ pub fn remove(app: &App, keep_override: bool) -> Result<Removed, MacAppError> {
         ..Removed::default()
     };
     let is_link = app.root.symlink_metadata()?.file_type().is_symlink();
+    if app.linux && !is_link {
+        let gone = crate::linuxapp::snapshots::delete_all(&app.gogid, &app.root, backends)?;
+        out.snapshots = gone.len();
+    }
     if is_link {
         out.left_behind = std::fs::read_link(&app.root).ok();
         out.bytes = 0;
@@ -342,6 +375,9 @@ pub fn remove(app: &App, keep_override: bool) -> Result<Removed, MacAppError> {
         out.paths.push(entry.clone());
     }
     remove_extras(app, keep_override, &mut out)?;
+    if let Some(dir) = crate::linuxapp::snapshots::forget(&app.gogid)? {
+        out.paths.push(dir);
+    }
     Ok(out)
 }
 
@@ -365,6 +401,15 @@ fn remove_unreachable(app: &App, keep_override: bool) -> Result<Removed, MacAppE
         ..Removed::default()
     };
     launch::forget_location(&app.gogid)?;
+    let had_snapshots = crate::snapshot::all_metadata(&crate::state::data_root())
+        .iter()
+        .any(|(id, ..)| *id == app.gogid);
+    if had_snapshots {
+        out.snapshots_left = crate::snapshot::backend::snapshots_dir(&app.root);
+    }
+    if let Some(dir) = crate::linuxapp::snapshots::forget(&app.gogid)? {
+        out.paths.push(dir);
+    }
     #[cfg(target_os = "linux")]
     {
         let entry = crate::linuxapp::game::desktop_path(&app.gogid);

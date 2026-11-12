@@ -1309,6 +1309,7 @@ dependencies = [
  "fs4",
  "futures",
  "gog-warp",
+ "gogo-core",
  "gogo-shims",
  "governor",
  "keyring",
