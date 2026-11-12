@@ -5910,6 +5910,7 @@ fn apps_cmd(cmd: crate::cli::AppsCmd) -> Result<i32, AppError> {
                 "RUNTIME",
                 "RENDERER",
                 "DLC",
+                "BUILD",
                 "SIZE",
                 "LAST LAUNCH",
             ]);
@@ -5925,6 +5926,7 @@ fn apps_cmd(cmd: crate::cli::AppsCmd) -> Result<i32, AppError> {
                     } else {
                         a.dlcs.len().to_string()
                     },
+                    a.build.as_ref().map_or("-".to_string(), |b| b.column()),
                     gogo::fmt::human_size(a.bytes),
                     dash(a.last_launch.as_deref()),
                 ]);
@@ -6046,6 +6048,11 @@ fn print_content(a: &gogo::macapp::apps::App) {
     }
     if let Some(l) = &c.language {
         println!("  language:    {l}");
+    }
+    if let Some(b) = &a.build {
+        for (i, l) in b.show_lines(&a.gogid).iter().enumerate() {
+            println!("  {:<12} {l}", if i == 0 { "build:" } else { "" });
+        }
     }
     if c.dlc.is_empty() {
         println!("  dlc:         none");

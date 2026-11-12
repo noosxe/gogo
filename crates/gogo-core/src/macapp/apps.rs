@@ -62,6 +62,9 @@ pub struct App {
     /// Why `content.toml` couldn't be read.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_error: Option<String>,
+    /// Installed vs newest build, from the caches only (design 21 §4).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build: Option<crate::gog::build_hint::BuildHint>,
     /// Linux: the game's snapshots (design 20 §8), from the stored metadata.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshots: Option<crate::linuxapp::snapshots::Summary>,
@@ -73,6 +76,7 @@ struct ContentView {
     content: Option<Content>,
     derived: bool,
     error: Option<String>,
+    build: Option<crate::gog::build_hint::BuildHint>,
 }
 
 fn content_view(gogid: &str, dirs: &GameDirs, tree_name: Option<&str>) -> ContentView {
@@ -95,6 +99,7 @@ fn content_view(gogid: &str, dirs: &GameDirs, tree_name: Option<&str>) -> Conten
     match content::resolve(&dirs.root, &install, lane, record_root.as_deref()) {
         Ok(r) => ContentView {
             dlcs: r.content.refs(),
+            build: crate::gog::build_hint::for_game(&r.content, gogid),
             content: Some(r.content),
             derived: r.derived,
             error: None,
@@ -103,6 +108,7 @@ fn content_view(gogid: &str, dirs: &GameDirs, tree_name: Option<&str>) -> Conten
             dlcs: Vec::new(),
             content: None,
             derived: false,
+            build: None,
             error: Some(e.to_string()),
         },
     }
@@ -181,6 +187,7 @@ fn read(gogid: &str, logs: &Path) -> Result<App, MacAppError> {
         content: view.content,
         content_derived: view.derived,
         content_error: view.error,
+        build: view.build,
         unreachable: !dirs.root.is_dir(),
         gogid: gogid.to_string(),
         title,
@@ -230,6 +237,7 @@ fn read_linux(gogid: &str, dirs: GameDirs, logs: &Path) -> App {
         content: view.content,
         content_derived: view.derived,
         content_error: view.error,
+        build: view.build,
         unreachable: false,
         gogid: gogid.to_string(),
         title,

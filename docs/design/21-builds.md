@@ -570,6 +570,31 @@ Decided on 2026-11-12.
   second; `BETA` is ambiguous. An empty value never matches an empty version name.
 - A password-protected build is a listed build with `public: false`.
 
+## 11b. As built (I4, #427)
+
+- `gog/build_hint.rs` holds the pure comparison (`depot_hint`, `installer_hint`), the texts
+  and `for_game`, which reads only `content.toml`, the listing cache and the cached catalog
+  entry. Nothing fetches (Q4).
+- The game's branch is the **installed build's branch in the cached listing**, not a
+  `content.toml` field (it has none yet). A build the listing no longer holds is compared
+  on the default branch. "Newer" is by date, then build id, among public builds of that
+  branch.
+- `apps list`: a `BUILD` column (`2.31a ↑ 2.5_RedModFix`, `2.0 (gone)`, or the version
+  alone with no cache; a build with no version name shows its id). `--json` rows gain
+  `build` (`id`, `version`, `branch`, `published`, `state`, `listed`, `newest`,
+  `default_newer`, `checked`, `stale`); it is absent for a game with no build to compare.
+- `apps show`: a `build:` block in the content section, with `newest: unknown (gogo builds
+  checks)` with no cache, `(gogo builds --installed refreshes)` past `catalog_ttl_hours`,
+  and `default branch: X is newer` for a named-branch game.
+- `doctor` (Linux): `update` at a new **info** level (printed `info`, never fails) when a
+  newer build is listed, and `update` at **warn** when the installed build is gone. Quiet
+  with no cache or when up to date.
+- Installer lane: the installed version against the cached catalog's Windows installer
+  (the game's language when known). Versions can't be ordered, so any difference counts as
+  newer; there is no "gone". The cache time is the catalog file's mtime.
+- Cache writers: `depot`, `linux-app` builds and `dlc list` / `dlc add` already fetch through
+  `builds::fetch_listing`, and no direct `get_builds` call remains outside it.
+
 ## 12. Implementation issues (to be filed as sub-issues of #360)
 
 Under epic #155 (Linux runtime) unless noted, `type:feature`, `area:depot` (+ `area:cli`

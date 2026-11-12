@@ -24,6 +24,8 @@ use super::{catalog, d3dmetal, ddraw, installer, store};
 #[serde(rename_all = "lowercase")]
 pub enum Level {
     Ok,
+    /// Worth knowing, never a problem (an update is available).
+    Info,
     Warn,
     Fail,
 }
@@ -32,6 +34,7 @@ impl Level {
     pub fn as_str(self) -> &'static str {
         match self {
             Level::Ok => "ok",
+            Level::Info => "info",
             Level::Warn => "warn",
             Level::Fail => "fail",
         }
