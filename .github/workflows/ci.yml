@@ -94,3 +94,31 @@ jobs:
           cargo install cargo-deny@0.20.2 --locked
       # Licenses (permissive-only allowlist + gog-warp clarify) and advisories.
       - run: cargo deny check
+
+  # Real btrfs, unprivileged (design 20 §10.3). No unprivileged btrfs mount
+  # exists, so the job mounts loop images with sudo and chowns them to the
+  # runner user; the tests themselves run without privileges. Two mounts: one
+  # without `user_subvol_rm_allowed` (the rmdir delete fallback), one with it
+  # (the SNAP_DESTROY_V2 ioctl). mkfs.btrfs and cargo come from the dev shell.
+  snapshots-btrfs:
+    name: snapshots-btrfs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: DeterminateSystems/determinate-nix-action@v3
+      - name: Runner kernel has btrfs
+        run: |
+          grep -qw btrfs /proc/filesystems || sudo modprobe btrfs || true
+          if ! grep -qw btrfs /proc/filesystems; then
+            echo "::error::the runner kernel ($(uname -r)) has no btrfs support; the snapshots-btrfs job cannot run"
+            exit 1
+          fi
+          uname -r
+      - name: Build tests and mkfs.btrfs
+        run: |
+          nix develop -c mkfs.btrfs --version
+          nix develop -c cargo nextest run -p gogo-core --test snapshot_btrfs --no-run
+      - name: btrfs without user_subvol_rm_allowed (rmdir fallback)
+        run: scripts/ci-btrfs-tests.sh plain
+      - name: btrfs with user_subvol_rm_allowed (ioctl delete)
+        run: scripts/ci-btrfs-tests.sh rm-allowed
