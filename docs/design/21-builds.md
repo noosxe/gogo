@@ -650,8 +650,9 @@ Decided on 2026-11-12.
   (`DlcSelectError::KeptNotInBuild`, exit 2), naming it and the build, with the `--dlc`
   hint. `--dlc` names a DLC the build lacks: design 19's `not in this build`, with the build
   named by version and id. The check runs on every rebuild, not only with `--build`.
-- **Language.** With `--build` the language (`--lang`, else the recorded one, else the
-  default) is always checked against the picked build, so it is never replaced by another.
+- **Language.** With `--build`, `--lang` or the game's recorded language (a rebuild) must be
+  in the picked build, so it is never replaced by another (§3.4). A first build with no
+  `--lang` keeps the default language's fallback.
 - **D9.** `--build` with an installer path, a game tree path, or a game that GOG lists no
   build for is exit 2: `--build picks a depot build: installers come in the newest version
   only; --from-depot --build X picks a depot build`.
@@ -661,7 +662,12 @@ Decided on 2026-11-12.
   inherits them, and a record without them reads and writes as before. `content.toml`'s
   `version` falls back to the record's.
 - **A cache on another build** takes the existing `verify()` download (`CacheCheck::OtherBuild`
-  repair path), asked for the picked build. The `upgrade_from` path is I6.
+  repair path), asked for the picked build. The `upgrade_from` path is I6. Before the first
+  file of another build is written, the record gets `upgrading: {from, to}` (§3.5); a record
+  that has it reads as `CacheCheck::Interrupted`, never `Complete`, so the next run hashes the
+  tree, and the record the finished download writes clears it. `--build` never builds from a
+  cache with no record (exit 2, naming `gogo depot <game> --build X`), and the decline hints
+  repeat `--build`.
 
 ## 12. Implementation issues (to be filed as sub-issues of #360)
 

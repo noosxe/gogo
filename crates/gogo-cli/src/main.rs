@@ -1018,8 +1018,7 @@ async fn depot_cmd(args: cli::DepotArgs) -> Result<i32, AppError> {
         .language
         .clone()
         .unwrap_or_else(|| gogo::gog::language::DEFAULT.to_string());
-    // A picked build must hold the language (design 21 §3.4): no fallback.
-    let language_explicit = args.language.is_some() || args.build.is_some();
+    let language_explicit = args.language.is_some();
     // `--build`: resolve it first, so an unknown or ambiguous value stops the run
     // before any DLC lookup or download (exit 2, with the builds listed).
     let picked = match &args.build {
@@ -2461,6 +2460,10 @@ async fn resolve_game_source(
                 gogo::gog::depot::CacheCheck::OtherBuild => eprintln!(
                     "gogo: the depot cache for {title} holds another build than the one wanted"
                 ),
+                gogo::gog::depot::CacheCheck::Interrupted { from, to } => eprintln!(
+                    "gogo: an earlier switch of the depot cache for {title} from build {from} \
+                     to {to} didn't finish, so its files are checked (hashing) before use"
+                ),
                 gogo::gog::depot::CacheCheck::Complete => {}
             }
             repair = Some((tree, gap));
@@ -2512,8 +2515,21 @@ async fn resolve_game_source(
             .unwrap_or(false);
     }
     if !go {
+        // The hint must fetch the build that was picked.
+        let build_flag = build_value.map_or(String::new(), |v| format!(" --build {v}"));
         match repair {
             // No record says what's missing: build from it, as before.
+            Some((_, gogo::gog::depot::CacheCheck::Unrecorded)) if picked.is_some() => {
+                // A cache with no record can't be known to hold the picked build.
+                eprintln!(
+                    "gogo: the depot cache for {title} has no record, so it can't be \
+                     known to hold build {}: run `gogo depot {selector} --build {}` first \
+                     (or pass --yes to download here)",
+                    picked.as_ref().map_or("", |p| p.build_id.as_str()),
+                    build_value.unwrap_or_default()
+                );
+                return Err(AppError::Usage);
+            }
             Some((tree, gogo::gog::depot::CacheCheck::Unrecorded)) => {
                 eprintln!(
                     "gogo: warning: building from the unchecked depot cache; \
@@ -2530,15 +2546,15 @@ async fn resolve_game_source(
             }
             Some(_) => eprintln!(
                 "gogo: the depot cache for {title} is incomplete — run \
-                 `gogo depot {selector}{}` first (or pass --yes to download here)",
+                 `gogo depot {selector}{}{build_flag}` first (or pass --yes to download here)",
                 want_ids
                     .iter()
                     .map(|id| format!(" --dlc {id}"))
                     .collect::<String>()
             ),
             None => eprintln!(
-                "gogo: no depot cache for {title} — run `gogo depot {selector}{}` first \
-                 (or pass --yes to download here)",
+                "gogo: no depot cache for {title} — run `gogo depot {selector}{}{build_flag}` \
+                 first (or pass --yes to download here)",
                 want_ids
                     .iter()
                     .map(|id| format!(" --dlc {id}"))
@@ -2788,6 +2804,9 @@ async fn prepare_dlc(
     };
     let recorded: Option<Vec<u64>> = prior.as_ref().map(|c| c.dlc.iter().map(|d| d.id).collect());
     let recorded_language = prior.as_ref().and_then(|c| c.language.clone());
+    // A picked build must hold the language the game has (design 21 §3.4); a first
+    // build with no `--lang` keeps the default's fallback.
+    let language_checked = ask.lang.is_some() || (pick.is_some() && recorded_language.is_some());
     // A rebuild asking for what the game has (`de` for `de-DE`, any case) keeps the
     // recorded code, so it isn't read as a language change.
     let asked = ask.lang.as_ref().map(|l| {
@@ -2806,8 +2825,7 @@ async fn prepare_dlc(
     let mut plan = DlcPlan {
         opts: gogo::gog::depot::DepotOptions {
             language: language.clone(),
-            // A picked build must hold the language (design 21 §3.4).
-            language_explicit: ask.lang.is_some() || pick.is_some(),
+            language_explicit: language_checked,
             password: ask.password.clone(),
             build: pick.map(|p| p.build_id.clone()),
             ..Default::default()
@@ -2838,7 +2856,7 @@ async fn prepare_dlc(
         ask.password.clone(),
         pick.map(|p| p.build_id.as_str()),
         &language,
-        ask.lang.is_some() || pick.is_some(),
+        language_checked,
     )
     .await
     {
