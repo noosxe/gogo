@@ -695,8 +695,10 @@ pub enum LinuxSnapshotCmd {
         /// Print the plan, change nothing.
         #[arg(long)]
         dry_run: bool,
-        /// List every newer save file, not only their dirs.
-        #[arg(short, long)]
+        /// List every newer save file, not only their dirs. (Not `--verbose`:
+        /// that is the global logging flag, and a second `verbose` argument
+        /// panics clap when the command is read.)
+        #[arg(long = "list-saves", id = "list_saves")]
         verbose: bool,
         /// Machine-readable output.
         #[arg(long)]
@@ -1402,6 +1404,27 @@ pub struct DownloadArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A subcommand argument that shares an id with a global flag (`verbose`
+    /// once) only panics when that command's matches are read.
+    #[test]
+    fn the_command_tree_is_consistent_and_rollback_reads_its_flags() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+        let c = Cli::try_parse_from([
+            "gogo",
+            "linux-app",
+            "snapshot",
+            "7",
+            "rollback",
+            "2",
+            "--yes",
+            "--list-saves",
+            "-v",
+        ])
+        .unwrap();
+        assert_eq!(c.verbose, 1);
+    }
 
     #[test]
     fn search_parses_words_and_categories() {

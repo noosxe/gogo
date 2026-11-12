@@ -835,6 +835,95 @@ class Keyboard(unittest.TestCase):
             with self.subTest(bad), self.assertRaises(helper.ManifestError):
                 helper.parse_manifest(bad)
 
+    def test_manifest_snapshot_rollback(self):
+        base = "gogid = 7\n"
+        step = "[[step]]\nwait = 1\n"
+        m = helper.parse_manifest(base + "[snapshot_rollback]\n" + step)
+        self.assertEqual(m["snapshot_rollback"], {"dlc": None})
+        m = helper.parse_manifest(base + "[snapshot_rollback]\ndlc = 1256837418\n" + step)
+        self.assertEqual(m["snapshot_rollback"], {"dlc": 1256837418})
+        self.assertIsNone(helper.parse_manifest(base + step)["snapshot_rollback"])
+        for bad in (
+            base + "[snapshot_rollback]\ndlc = 0\n" + step,
+            base + '[snapshot_rollback]\ndlc = "a"\n' + step,
+            base + "[snapshot_rollback]\ndlc = true\n" + step,
+            base + "[snapshot_rollback]\nwhat = 1\n" + step,
+            'command = ["x"]\n[snapshot_rollback]\n' + step,
+            base + '[snapshot_rollback]\n[one_off]\nexe = "a"\n' + step,
+            base + "snapshot_rollback = 1\n" + step,
+        ):
+            with self.subTest(bad), self.assertRaises(helper.ManifestError):
+                helper.parse_manifest(bad)
+
+    def test_the_shipped_manifest_with_the_step_parses(self):
+        with open(os.path.join(REPO, "e2e", "1207658969.toml")) as f:
+            m = helper.parse_manifest(f.read())
+        self.assertEqual(m["snapshot_rollback"], {"dlc": None})
+
+    def test_snapshot_saves_and_content(self):
+        with tempfile.TemporaryDirectory() as d:
+            helper.plant_snap_saves(d, 7, "a", "then")
+            helper.plant_snap_saves(d, 7, "b", "now")
+            g = os.path.join(d, "games", "7")
+            for place in (
+                "prefix/drive_c/users/steamuser/Saved Games/e2e",
+                "game/e2e",
+            ):
+                for n in ("a.sav", "b.sav"):
+                    self.assertTrue(os.path.isfile(os.path.join(g, place, n)), (place, n))
+            with open(os.path.join(g, "content.toml"), "w") as f:
+                f.write('schema = 1\nlane = "depot"\nbuild_id = "55"\n'
+                        '[[dlc]]\nid = 9\ntitle = "x"\n[[dlc]]\nid = 3\ntitle = "y"\n')
+            self.assertEqual(helper.game_content(d, 7), {"build_id": "55", "dlcs": [3, 9]})
+
+    def test_snapshot_rollback_step_skips_and_reads_the_prep(self):
+        import types
+
+        def stub(sr):
+            calls = []
+            s = types.SimpleNamespace(
+                cfg={"snapshot_rollback": sr},
+                checks=[],
+                steps_run=0,
+                snap_tool=lambda *a, **k: calls.append(a) or types.SimpleNamespace(returncode=1, stdout="", stderr=""),
+            )
+            s.check = lambda name, ok, detail="": s.checks.append((name, ok, detail)) or ok
+            s.snapshot_rollback_steps = lambda: helper.Driver.snapshot_rollback_steps(s)
+            s.calls = calls
+            return s
+
+        # Not btrfs: a SKIP that passes, and gogo isn't called.
+        s = stub({"skip": "the scratch is on ext4, not btrfs"})
+        helper.Driver.do_snapshot_rollback(s)
+        self.assertEqual(s.checks, [("snapshot_rollback", True, "SKIP: the scratch is on ext4, not btrfs")])
+        self.assertEqual(s.calls, [])
+        with tempfile.TemporaryDirectory() as d:
+            out = os.path.join(d, "prep.json")
+            sr = {"gogo": "gogo", "gogid": 7, "root": d, "out": out, "skip": None}
+            # No result from the build phase: a failure.
+            s = stub(sr)
+            helper.Driver.snapshot_rollback_steps(s)
+            self.assertFalse(s.checks[0][1])
+            # The build phase skipped: its checks come over, and the step is a SKIP.
+            with open(out, "w") as f:
+                f.write('{"checks": [{"name": "snapshot_prep_skipped", "ok": true, "detail": "SKIP: x"}],'
+                        ' "complete": false, "skipped": "no subvolume"}')
+            s = stub(sr)
+            helper.Driver.snapshot_rollback_steps(s)
+            self.assertEqual(s.checks[-1], ("snapshot_rollback", True, "SKIP: no subvolume"))
+            # Unfinished: a failure.
+            with open(out, "w") as f:
+                f.write('{"checks": [], "complete": false, "skipped": null}')
+            s = stub(sr)
+            helper.Driver.snapshot_rollback_steps(s)
+            self.assertFalse(s.checks[-1][1])
+            # The cleanup after any of it asks gogo for the snapshots, and a failed
+            # list isn't an error.
+            s = stub(sr)
+            helper.Driver.do_snapshot_rollback(s)
+            self.assertTrue(any("list" in c for c in s.calls))
+            self.assertFalse(any(name == "snapshot_cleanup" for name, _, _ in s.checks))
+
     def test_one_off_game_log_is_the_newest_match(self):
         import types
 

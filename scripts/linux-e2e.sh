@@ -624,6 +624,57 @@ gpu_setup() { # comma-joined render nodes, the compositor's first ("": software)
     fi
 }
 
+# The build phase's half of the `snapshot_rollback` step (#408). The data root is
+# $RUN/snapshot-data: not under the scratch's gogo/, home/ or xdg/ (those are the
+# harness's own subvolumes, copied by snapshot), so the game dir can be a subvolume of
+# its own in there, and nothing of the harness ever snapshots it. It's made now and
+# lives and dies with the scratch. On a scratch that isn't btrfs the step is skipped
+# with a line in the log and a SKIP check; it never fails there. Prints the game
+# phase's config for the step in SNAP_EXTRA (not a subshell: the sandbox's state is the
+# caller's); a build failure returns 1 with BUILD_FAILED set.
+snapshot_prep_phase() {
+    local snap_root="$RUN/snapshot-data" fs
+    fs="$(stat -f -c %T "$RUN" 2>/dev/null || echo unknown)"
+    if [ "$fs" != btrfs ]; then
+        log "snapshot_rollback: SKIP, the scratch is on $fs, not btrfs"
+        SNAP_EXTRA="$(jq -cn --arg g "$GOGO" --arg i "$GOGID" --arg r "$snap_root" --arg why "the scratch is on $fs, not btrfs" \
+            '{gogo:$g, gogid:($i|tonumber), root:$r, out:"", skip:$why}')"
+        return 0
+    fi
+    local saved_home="$GOGO_HOME_DIR" saved_results="$RESULTS" out dlc rc=0
+    GOGO_HOME_DIR="$snap_root"
+    RESULTS="$saved_results/snapshot-prep"
+    mkdir -p "$GOGO_HOME_DIR" "$RESULTS/shots"
+    ln -s "$RUN/store/runtimes" "$GOGO_HOME_DIR/runtimes"
+    ln -s "$RUN/store/renderers" "$GOGO_HOME_DIR/renderers"
+    # Snapshots on, as a user has them (the default).
+    printf '[linux]\numu = "zipapp"\nproton_dir = "store"\n\n[snapshots]\nauto = true\n' \
+        >"$GOGO_HOME_DIR/config.toml"
+    out="$RESULTS/snapshot-prep.json"
+    dlc="$(jq -c '.snapshot_rollback.dlc' <<<"$MANIFEST_JSON")"
+    log "snapshot_rollback: building the game with snapshots on in $snap_root (log: $RESULTS/build.log)"
+    MODE_NOW=build
+    local extra cmd
+    cmd="$(jq -cn --arg g "$GOGO" --arg i "$GOGID" '[$g,"linux-app",$i,"--yes"]')"
+    extra="$(jq -cn --argjson c "$cmd" --arg cwd "$RUN/home" --arg g "$GOGO_HOME_DIR/games" \
+        --arg gogo "$GOGO" --arg i "$GOGID" --arg r "$snap_root" --arg o "$out" --argjson d "$dlc" \
+        '{build_command:$c, launch_cwd:$cwd, support_log:"", installer:"", games_dir:$g,
+          snapshot_prep:{gogo:$gogo, gogid:($i|tonumber), root:$r, out:$o, dlc:$d}}')"
+    drive_config "$RUN/snapshot-build.json" "$extra" software 'llvmpipe|softpipe|lavapipe' "" '[]' \
+        "${SOFTWARE_ENV[@]/#/@e:}"
+    start_sandbox build "$RESULTS/build-sandbox.log" python3 -I "$RUN/harness/helper.py" drive "$RUN/snapshot-build.json"
+    supervise "${LIVE_DEADLINE:-0}" || rc=$?
+    GOGO_HOME_DIR="$saved_home"
+    RESULTS="$saved_results"
+    MODE_NOW=game
+    if [ "$rc" != 0 ] || [ -n "$INTERRUPTED" ]; then
+        BUILD_FAILED="the snapshot_rollback build failed (exit $rc), see $RESULTS/snapshot-prep/build.log"
+        return 1
+    fi
+    SNAP_EXTRA="$(jq -cn --arg g "$GOGO" --arg i "$GOGID" --arg r "$snap_root" --arg o "$out" \
+        '{gogo:$g, gogid:($i|tonumber), root:$r, out:$o, skip:null}')"
+}
+
 # --- run ----------------------------------------------------------------------
 
 # The scratch a build starts from. Part of the installed-base key
@@ -1349,6 +1400,15 @@ cmd_run() {
         [ "$REUSE" = 0 ] || save_base "$(jq '.secs // null' "$RESULTS/build-result.json" 2>/dev/null || echo null)"
     fi
 
+    # A manifest's [snapshot_rollback] (#408): the part that needs the network, a build
+    # with snapshots on, a snapshot and a DLC add or rebuild, runs here, in a data root
+    # of its own beside the scratch's gogo/, home/ and xdg/ (design 20 §10.4).
+    local snap_extra='null'
+    if [ "$(jq -r '.snapshot_rollback != null' <<<"$MANIFEST_JSON")" = true ] && [ -z "${LIVE:-}" ]; then
+        snapshot_prep_phase || exit 1
+        snap_extra="$SNAP_EXTRA"
+    fi
+
     local launch launch_cwd doctor='null' game_log="" pre_launch='[]'
     if [ -n "$GOGID" ]; then
         launch="$(jq -cn --arg l "$GOGO_HOME_DIR/games/$GOGID/launch.sh" '[$l]')"
@@ -1388,9 +1448,9 @@ cmd_run() {
     local game_extra
     game_extra="$(jq -cn --argjson l "$launch" --arg cwd "$launch_cwd" --argjson d "$doctor" --arg g "$game_log" \
         --argjson f "$forbidden" --arg i "${INSTALLER_FILE:+$INSTALLER_MOUNT}" --argjson p "$pre_launch" \
-        --arg lib "$RUN/library" --arg other "$OTHER_FS" \
+        --arg lib "$RUN/library" --arg other "$OTHER_FS" --argjson snap "$snap_extra" \
         '{launch:$l, launch_cwd:$cwd, doctor:$d, game_log:$g, pre_launch:$p,
-          move_targets:{library:$lib, other_fs:$other},
+          move_targets:{library:$lib, other_fs:$other}, snapshot_rollback:$snap,
           forbidden_paths:($f + (if $i == "" then [] else [$i] end))}')"
     if [ -n "${LIVE:-}" ]; then
         live_game_phase "$game_extra"

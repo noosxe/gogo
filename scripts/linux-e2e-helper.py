@@ -98,6 +98,10 @@ BUILD_NO_DISPLAY = 3
 # The `move_relaunch` step's targets (#278): a dir on the scratch's filesystem, a
 # tmpfs of the sandbox's own (another filesystem, outside $HOME), and `games/`.
 MOVE_TARGETS = ("library", "other_fs", "default")
+
+# The `snapshot_rollback` step's fake saves (#408): one in the prefix, one in the
+# game's own files, both under the save roots gogo's finder looks at.
+SNAP_SAVE_DIRS = ("prefix/drive_c/users/steamuser/Saved Games/e2e", "game/e2e")
 # A relaunch: how long what the game left behind (wineserver lingers) gets to go.
 RELAUNCH_LEFT_SECS = 15.0
 # How the build's log says the support installer ended (build.rs).
@@ -133,6 +137,23 @@ def tmp_foreign(entries, bind_roots, tmp="/tmp"):
 
     walk(tmp, entries)
     return [os.path.relpath(p, tmp) for p in out]
+
+
+
+def plant_snap_saves(root, gogid, name, text):
+    """A fake save, `<name>.sav`, in each of the snapshot step's two save places."""
+    for d in SNAP_SAVE_DIRS:
+        path = os.path.join(root, "games", str(gogid), d)
+        os.makedirs(path, exist_ok=True)
+        with open(os.path.join(path, f"{name}.sav"), "w") as f:
+            f.write(f"a fake save from {text}\n")
+
+
+def game_content(root, gogid):
+    """The build and DLC set a game dir's content.toml records."""
+    with open(os.path.join(root, "games", str(gogid), "content.toml"), "rb") as f:
+        c = tomllib.load(f)
+    return {"build_id": c.get("build_id"), "dlcs": sorted(int(d["id"]) for d in c.get("dlc", []))}
 
 
 class ManifestError(Exception):
@@ -399,6 +420,7 @@ def parse_manifest(text, live=False):
             "env",
             "override",
             "one_off",
+            "snapshot_rollback",
             "step",
         ),
         "manifest",
@@ -521,6 +543,22 @@ def parse_manifest(text, live=False):
             raise ManifestError("one_off.args: a list of strings")
         one_off = {"exe": one_off["exe"], "args": oo_args}
 
+    # Snapshot, change, roll back, roll the rollback back (#408, design 20 section 10.4),
+    # in a data root of its own after the manifest's steps.
+    snap = raw.get("snapshot_rollback")
+    if snap is not None:
+        if not isinstance(snap, dict):
+            raise ManifestError("snapshot_rollback: must be a table")
+        _only(snap, ("dlc",), "snapshot_rollback")
+        if gogid is None:
+            raise ManifestError("snapshot_rollback is for a game (gogid), not a command")
+        if one_off is not None:
+            raise ManifestError("snapshot_rollback launches the game: not with one_off")
+        dlc = snap.get("dlc")
+        if dlc is not None and (isinstance(dlc, bool) or not isinstance(dlc, int) or dlc <= 0):
+            raise ManifestError("snapshot_rollback.dlc: a DLC's product id (an integer), or leave it out to rebuild")
+        snap = {"dlc": dlc}
+
     steps_raw = raw.get("step", [])
     if not isinstance(steps_raw, list) or not (steps_raw or live):
         raise ManifestError("needs at least one [[step]]")
@@ -562,6 +600,7 @@ def parse_manifest(text, live=False):
             "monitor": o_monitor,
         },
         "one_off": one_off,
+        "snapshot_rollback": snap,
         "steps": steps,
     }
 
@@ -2612,6 +2651,226 @@ class Driver:
         c["launch"], c["launch_cwd"] = [launcher], root
         return True
 
+    # snapshot_rollback (#408) --------------------------------------------
+
+    def snap_tool(self, root, *argv, timeout=120):
+        env = dict(self.env)
+        env["GOGO_HOME"] = root
+        return self.tool(*argv, timeout=timeout, env=env)
+
+    def snapshot_prep(self):
+        """The build phase's half of `snapshot_rollback`, on the network and with
+        snapshots on, in a data root of its own: the first build is done; a fake
+        save, a snapshot, then a DLC add or a rebuild (which needs the network), and
+        the autosnapshot it must take. What the game phase needs goes to sp["out"].
+        Failures are checks, so the run reports them; this never fails the build."""
+        sp = self.cfg["snapshot_prep"]
+        gogo, gogid, root = sp["gogo"], str(sp["gogid"]), sp["root"]
+        prep = {"checks": [], "complete": False, "skipped": None}
+
+        def check(name, ok, detail=""):
+            prep["checks"].append({"name": name, "ok": bool(ok), "detail": str(detail)})
+            self.check(name, ok, detail)
+            return bool(ok)
+
+        def snap(*a, timeout=120):
+            return self.snap_tool(root, gogo, "linux-app", "snapshot", gogid, *a, timeout=timeout)
+
+        def listing():
+            r = snap("list", "--json", "--no-space")
+            return json.loads(r.stdout) if r.returncode == 0 else None
+
+        try:
+            lst = listing()
+            if lst is None or not lst.get("ready"):
+                prep["skipped"] = (
+                    "the game dir isn't a btrfs subvolume here"
+                    + (f" (backend {lst.get('backend')}: {lst.get('reason')})" if lst else "")
+                )
+                check("snapshot_prep_skipped", True, "SKIP: " + prep["skipped"])
+                return
+            check("snapshot_initial", any(x.get("kind") == "initial" for x in lst["snapshots"]),
+                  f"{len(lst['snapshots'])} snapshot(s) after the build: {[x['id'] for x in lst['snapshots']]}")
+            plant_snap_saves(root, gogid, "a", "before the snapshot")
+            time.sleep(1.1)
+            r = snap("create", "--label", "e2e", "--yes", "--json", timeout=300)
+            lst = listing() or {"snapshots": []}
+            manual = [x for x in lst["snapshots"] if x.get("kind") == "manual"]
+            if not check("snapshot_create", r.returncode == 0 and bool(manual),
+                         f"exit {r.returncode}: {(r.stderr or r.stdout).strip()[-300:]}"):
+                return
+            target = manual[0]
+            before_ids = {x["id"] for x in lst["snapshots"]}
+            dlc = sp.get("dlc")
+            if dlc:
+                argv = [gogo, "linux-app", "dlc", gogid, "add", str(dlc), "--yes"]
+                trigger = "dlc-add"
+            else:
+                argv = [gogo, "linux-app", gogid, "--yes"]
+                trigger = "rebuild"
+            log_path = os.path.join(self.results, "snapshot-change.log")
+            env = dict(self.env)
+            env.update(self.cfg["game_env"])
+            env["GOGO_HOME"] = root
+            with open(log_path, "wb") as log:
+                r = subprocess.run(argv, env=env, cwd=self.cfg["launch_cwd"], stdin=subprocess.DEVNULL,
+                                   stdout=log, stderr=subprocess.STDOUT, timeout=3000, check=False)
+            after = game_content(root, gogid)
+            if not check("snapshot_change", r.returncode == 0,
+                         f"{' '.join(argv[2:])}: exit {r.returncode}, see snapshot-change.log; now {after}"):
+                return
+            lst = listing() or {"snapshots": []}
+            autos = [x for x in lst["snapshots"]
+                     if x["id"] not in before_ids and x.get("kind") == "auto" and x.get("trigger") == trigger]
+            if not check("snapshot_autosnapshot", bool(autos),
+                         f"want an auto snapshot for {trigger}; new: "
+                         f"{[(x['id'], x.get('kind'), x.get('trigger')) for x in lst['snapshots'] if x['id'] not in before_ids]}"):
+                return
+            c = target.get("content") or {}
+            prep.update(
+                target=target["id"],
+                trigger=trigger,
+                expect={"build_id": c.get("buildId"), "dlcs": sorted(int(d) for d in c.get("dlcs") or [])},
+                after=after,
+                complete=True,
+            )
+            if dlc:
+                check("snapshot_change_differs", after["dlcs"] != prep["expect"]["dlcs"],
+                      f"the snapshot has DLC {prep['expect']['dlcs']}, the game now {after['dlcs']}")
+        except Exception as e:
+            check("snapshot_prep", False, f"{type(e).__name__}: {e}")
+        finally:
+            with open(sp["out"], "w") as f:
+                json.dump(prep, f, indent=2)
+
+    def do_snapshot_rollback(self):
+        """The game phase's half of `snapshot_rollback`, then every snapshot of the
+        data root deleted through gogo: a read-only one is more than teardown's
+        `rm -rf` can take."""
+        sr = self.cfg["snapshot_rollback"]
+        if sr.get("skip"):
+            self.check("snapshot_rollback", True, "SKIP: " + sr["skip"])
+            return
+        try:
+            self.snapshot_rollback_steps()
+        finally:
+            try:
+                gogo, gogid, root = sr["gogo"], str(sr["gogid"]), sr["root"]
+                r = self.snap_tool(root, gogo, "linux-app", "snapshot", gogid, "list", "--json", "--no-space")
+                ids = [str(x["id"]) for x in json.loads(r.stdout)["snapshots"]] if r.returncode == 0 else []
+                if ids:
+                    r = self.snap_tool(root, gogo, "linux-app", "snapshot", gogid, "delete", *ids, "--yes",
+                                       timeout=600)
+                    self.check("snapshot_cleanup", r.returncode == 0,
+                               f"deleted {len(ids)} snapshot(s): exit {r.returncode} {r.stderr.strip()[-300:]}")
+            except Exception as e:
+                self.check("snapshot_cleanup", False, f"{type(e).__name__}: {e}")
+
+    def snapshot_rollback_steps(self):
+        """The body: newer saves, `snapshot rollback`, the game
+        launched from the rolled-back data root to its window, then the rollback
+        rolled back."""
+        sr = self.cfg["snapshot_rollback"]
+        gogo, gogid, root = sr["gogo"], str(sr["gogid"]), sr["root"]
+        try:
+            with open(sr["out"]) as f:
+                prep = json.load(f)
+        except (OSError, ValueError) as e:
+            self.check("snapshot_rollback", False, f"the build phase left no result: {e}")
+            return
+        for c in prep["checks"]:
+            self.checks.append(c)
+        if prep.get("skipped"):
+            self.check("snapshot_rollback", True, "SKIP: " + prep["skipped"])
+            return
+        if not prep.get("complete"):
+            self.check("snapshot_rollback", False, "the build phase didn't get as far as the change")
+            return
+        game_dir = os.path.join(root, "games", gogid)
+
+        def snap(*a, timeout=300):
+            return self.snap_tool(root, gogo, "linux-app", "snapshot", gogid, *a, timeout=timeout)
+
+        def rollback(n, name):
+            r = snap("rollback", str(n), "--yes", "--json")
+            try:
+                out = json.loads(r.stdout)
+            except ValueError:
+                out = None
+            if r.returncode != 0 or out is None:
+                self.check(name, False, f"exit {r.returncode}: {(r.stderr or r.stdout).strip()[-400:]}")
+                return None
+            return out
+
+        def doctor_ok(name):
+            r = self.snap_tool(root, *self.cfg["doctor"], timeout=120)
+            try:
+                findings = json.loads(r.stdout).get("findings", [])
+            except ValueError:
+                findings = None
+            bad = [f for f in findings or [] if f.get("level") == "fail"]
+            return self.check(name, findings is not None and not bad,
+                              json.dumps(bad)[:400] if bad else f"{len(findings or [])} findings, none failed")
+
+        plant_snap_saves(root, gogid, "b", "after the snapshot")
+        out = rollback(prep["target"], "snapshot_rollback")
+        if out is None:
+            return
+        aside = out.get("savesCopiedTo")
+        found = sorted(
+            os.path.relpath(os.path.join(d, n), aside)
+            for d, _, names in (os.walk(aside) if aside else [])
+            for n in names if n == "b.sav"
+        )
+        self.check("snapshot_saves_aside", len(found) == 2 and not any(
+            n == "a.sav" for _, _, ns in (os.walk(aside) if aside else []) for n in ns),
+            f"copied to the aside dir: {found}")
+        want = prep["expect"]
+        got = game_content(root, gogid)
+        self.check("snapshot_content", got == want, f"snapshot had {want}, the game has {got}")
+        gone = [d for d in SNAP_SAVE_DIRS if os.path.exists(os.path.join(game_dir, d, "b.sav"))]
+        kept = [d for d in SNAP_SAVE_DIRS if os.path.exists(os.path.join(game_dir, d, "a.sav"))]
+        self.check("snapshot_saves_restored", not gone and len(kept) == 2,
+                   f"b.sav still in {gone}; a.sav in {len(kept)} of 2 places")
+        doctor_ok("snapshot_doctor")
+
+        # The rolled-back game, from its own data root, to its window.
+        saved = (dict(self.cfg), self.env.get("GOGO_HOME"))
+        self.env["GOGO_HOME"] = root
+        self.cfg["launch"], self.cfg["launch_cwd"] = [os.path.join(game_dir, "launch.sh")], game_dir
+        self.relaunches += 1
+        try:
+            self.view = None
+            self.game_exit = self.result["game_exit"] = None
+            self.launch()
+            self.wait_window("window_snapshot_rollback")
+            self.finish_game("cleanup")
+            for line in self.left_of_game():
+                try:
+                    os.kill(int(line.split()[0]), signal.SIGKILL)
+                except OSError:
+                    pass
+            out_path = os.path.join(self.results, "game.out")
+            if os.path.exists(out_path):
+                os.replace(out_path, os.path.join(self.results, "launch-snapshot-rollback-game.out"))
+        finally:
+            self.cfg.update(saved[0])
+            self.env["GOGO_HOME"] = saved[1]
+
+        # Undo it: the snapshot taken first holds the state before, saves included.
+        pre = out.get("pre")
+        if pre is None:
+            self.check("snapshot_rollback_back", False, "the rollback's JSON names no pre-rollback snapshot")
+            return
+        back = rollback(pre, "snapshot_rollback_back")
+        if back is None:
+            return
+        have = [d for d in SNAP_SAVE_DIRS if os.path.exists(os.path.join(game_dir, d, "b.sav"))]
+        got = game_content(root, gogid)
+        self.check("snapshot_rollback_back", len(have) == 2 and got == prep["after"],
+                   f"b.sav back in {len(have)} of 2 places; content {got}, want {prep['after']}")
+        doctor_ok("snapshot_doctor_back")
+
     def apply_override(self):
         """The manifest's [override], through gogo in this run's scratch."""
         argvs = self.cfg.get("pre_launch") or []
@@ -2743,6 +3002,8 @@ class Driver:
             if bad:
                 raise RuntimeError(f"isolation failed: {bad[0]['name']}: {bad[0]['detail']}")
             code = self.run_build()
+            if code == 0 and self.cfg.get("snapshot_prep"):
+                self.snapshot_prep()
             self.check("finished", True, f"build exited {code}")
             return code
         except Stop:
@@ -2797,6 +3058,8 @@ class Driver:
                     self.check_gpu_used()
                     self.finish_game(how)
                     self.check_doctor()
+                    if self.cfg.get("snapshot_rollback"):
+                        self.do_snapshot_rollback()
                     self.record_audio_streams()
                     self.x_fallback()
                     self.check("finished", True, "every step ran")
