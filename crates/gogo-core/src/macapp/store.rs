@@ -846,6 +846,9 @@ fn archive_ext(name: &str) -> &'static str {
 /// Download `rel` to `part` and check it against `rel.sha256` (the upstream
 /// digest, or the catalog pin) and return its sha256. A mismatch deletes
 /// the file.
+/// How often a download's running count is sent at most (#420).
+const PROGRESS_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
+
 async fn download_verified(
     http: &reqwest::Client,
     rel: &catalog::RemoteRelease,
@@ -855,16 +858,30 @@ async fn download_verified(
 ) -> Result<String, MacAppError> {
     let what = format!("downloading {}", rel.asset_name);
     let total = (rel.size > 0).then_some(rel.size);
+    let count = |b| ProgressEvent::WorkProgress {
+        step: what.clone(),
+        files: None,
+        files_total: None,
+        bytes: Some(b),
+        bytes_total: total,
+    };
+    // The count comes per network chunk: sent at most every PROGRESS_EVERY,
+    // and always a (re)start from zero and the last count.
+    let (mut last_sent, mut latest) = (None::<std::time::Instant>, None::<u64>);
     let got = download_with_retry(http, &rel.asset_url, part, &mut |b| {
-        emit(&ProgressEvent::WorkProgress {
-            step: what.clone(),
-            files: None,
-            files_total: None,
-            bytes: Some(b),
-            bytes_total: total,
-        })
+        let now = std::time::Instant::now();
+        if b == 0 || last_sent.is_none_or(|t| now.duration_since(t) >= PROGRESS_EVERY) {
+            last_sent = Some(now);
+            emit(&count(b));
+            latest = None;
+        } else {
+            latest = Some(b);
+        }
     })
     .await;
+    if let Some(b) = latest {
+        emit(&count(b));
+    }
     emit(&ProgressEvent::WorkDone { step: what });
     got?;
     let actual = working(emit, &format!("checking {}", rel.asset_name), || {
@@ -2751,5 +2768,69 @@ pub(crate) mod store_tests {
         let plan = sweep();
         assert_eq!(plan.targets, [format!("{}/26.1", catalog::DEFAULT_RUNTIME)]);
         assert_eq!(plan.kept[0].0, format!("{}/26.3", catalog::DEFAULT_RUNTIME));
+    }
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+
+    /// A download's count (#420): a bounded number of events however many
+    /// chunks arrive, the last one the whole size, then its end.
+    #[tokio::test]
+    async fn a_download_counts_its_bytes_and_ends() {
+        let body = vec![7u8; 3 << 20];
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(body.clone()))
+            .mount(&server)
+            .await;
+        let rel = catalog::RemoteRelease {
+            tag: "t".into(),
+            asset_name: "x.bin".into(),
+            asset_url: format!("{}/x.bin", server.uri()),
+            size: body.len() as u64,
+            sha256: None,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join("x.part");
+        let mut events = Vec::new();
+        download_verified(&reqwest::Client::new(), &rel, &part, "x", &mut |e| {
+            events.push(e.clone())
+        })
+        .await
+        .unwrap();
+        let counts: Vec<u64> = events
+            .iter()
+            .filter_map(|e| match e {
+                ProgressEvent::WorkProgress {
+                    step,
+                    bytes,
+                    bytes_total,
+                    ..
+                } => {
+                    assert_eq!(step, "downloading x.bin");
+                    assert_eq!(*bytes_total, Some(rel.size));
+                    *bytes
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(counts.first(), Some(&0));
+        assert_eq!(counts.last(), Some(&rel.size), "{counts:?}");
+        assert!(counts.windows(2).all(|w| w[0] < w[1]), "{counts:?}");
+        // A local server sends it all in well under a second.
+        assert!(counts.len() <= 12, "{counts:?}");
+        let done = events
+            .iter()
+            .position(
+                |e| matches!(e, ProgressEvent::WorkDone { step } if step == "downloading x.bin"),
+            )
+            .unwrap();
+        let last_count = events
+            .iter()
+            .rposition(|e| matches!(e, ProgressEvent::WorkProgress { .. }))
+            .unwrap();
+        assert!(last_count < done);
     }
 }

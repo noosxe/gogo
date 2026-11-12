@@ -6514,7 +6514,7 @@ fn emit_live(
     act: &depot_progress::Activity,
 ) {
     if !act.work(ev) {
-        emit_macapp_to(ev, json_progress, &|l| act.note(l));
+        emit_macapp_to(ev, json_progress, &|l| act.say(l, &|l| eprintln!("{l}")));
     }
 }
 
