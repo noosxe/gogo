@@ -581,7 +581,7 @@ mod list_tests {
                 lane: Lane::Depot,
                 build_id: Some("900".into()),
                 version: Some("2.31".into()),
-                language: None,
+                language: Some("en-US".into()),
                 dlc: Vec::new(),
             }),
             ..App::default()
@@ -630,10 +630,10 @@ mod list_tests {
             .collect();
         assert_eq!(cells[0], "LOCAL", "{out}");
         assert!(
-            cells.contains(&"linux depot · 2.31 +2 DLC".to_string()),
+            cells.contains(&"linux depot 2.31 en-US +2 DLC".to_string()),
             "{out}"
         );
-        assert!(cells.contains(&"cache 77 en-US".to_string()), "{out}");
+        assert!(cells.contains(&"cache en-US".to_string()), "{out}");
         assert!(cells.contains(&"✓ installer 3.00".to_string()), "{out}");
         assert!(cells.contains(&"–".to_string()), "{out}");
         assert!(!out.contains("DOWNLOADED"));
@@ -655,7 +655,8 @@ mod list_tests {
         assert_eq!(
             j[0],
             serde_json::json!({"built": {"platform": "linux", "lane": "depot",
-                "version": "2.31", "build_id": "900", "dlc_count": 2}})
+                "version": "2.31", "build_id": "900", "language": "en-US",
+                "dlc_count": 2}})
         );
         assert_eq!(
             j[1],
