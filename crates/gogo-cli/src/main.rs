@@ -137,7 +137,7 @@ impl From<std::io::Error> for AppError {
 static PROGRESS_FLAGS: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
 
 /// How a command with these flags shows the depot lane's events (#337).
-fn depot_mode(json_progress: bool, json: bool) -> depot_progress::Mode {
+pub(crate) fn depot_mode(json_progress: bool, json: bool) -> depot_progress::Mode {
     let (quiet, no_progress) = PROGRESS_FLAGS.get().copied().unwrap_or_default();
     depot_progress::Mode::pick(
         json_progress,
@@ -1097,8 +1097,8 @@ async fn depot_cmd(args: cli::DepotArgs) -> Result<i32, AppError> {
         &ctx.cancel,
         ctx.free_space.as_ref(),
     );
-    let mut renderer = depot_mode(args.json_progress, args.json).renderer();
-    let result = depot_progress::drive(runner, &mut rx, &mut renderer).await;
+    let act = depot_progress::Activity::new(depot_mode(args.json_progress, args.json));
+    let result = depot_progress::drive(runner, &mut rx, &act).await;
     drop(tx);
     let _ = forward.await;
     let install_dir = result?;
@@ -1610,6 +1610,25 @@ async fn update(games: Vec<String>, all: bool, strict: bool) -> Result<i32, AppE
 
 // — verify: local re-check of recorded files against the verify-cache (A5) —
 
+/// [`gogo::engine::verify_against`] with the bytes hashed on the live status
+/// line (#420); the line is cleared before the caller prints the verdict.
+fn verify_live(
+    act: &depot_progress::Activity,
+    path: &std::path::Path,
+    doc: &gogo::gog::checksum::ChecksumDoc,
+) -> bool {
+    let step = format!(
+        "hashing {}",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    );
+    let total = Some(doc.total_size);
+    let ok = gogo::engine::verify_against_with(path, doc, &mut |b| {
+        act.task(&step, None, Some((b, total)))
+    });
+    act.done();
+    ok
+}
+
 async fn verify(
     games: Vec<String>,
     all: bool,
@@ -1649,6 +1668,7 @@ async fn verify(
     records.sort_by(|a, b| a.path.cmp(&b.path));
 
     let mut failed_paths: Vec<gogo::state::records::InstallRecord> = Vec::new();
+    let act = depot_progress::Activity::new(depot_mode(false, false));
     let mut missing: Vec<gogo::state::records::InstallRecord> = Vec::new();
     let mut ok = 0;
     for record in &records {
@@ -1660,7 +1680,7 @@ async fn verify(
             continue;
         };
         let dest = root.join(&record.path);
-        if gogo::engine::verify_against(&dest, &doc) {
+        if verify_live(&act, &dest, &doc) {
             println!("  ok {}", record.path.display());
             ok += 1;
         } else {
@@ -1678,7 +1698,7 @@ async fn verify(
             for record in &missing {
                 if let Some(doc) = re_resolve_doc(&ctx, &token, record).await {
                     let dest = root.join(&record.path);
-                    if gogo::engine::verify_against(&dest, &doc) {
+                    if verify_live(&act, &dest, &doc) {
                         println!("  ok {} (re-resolved)", record.path.display());
                         ok += 1;
                     } else {
@@ -1765,6 +1785,8 @@ async fn verify(
 /// checksum doc's `name` — offline, no records touched (03 §1).
 fn verify_paths(paths: &[std::path::PathBuf]) -> Result<i32, AppError> {
     let index = checksum_index();
+    let act = depot_progress::Activity::new(depot_mode(false, false));
+
     let mut ok = 0;
     let mut failed = 0;
     let mut unknown = 0;
@@ -1778,7 +1800,7 @@ fn verify_paths(paths: &[std::path::PathBuf]) -> Result<i32, AppError> {
                 unknown += 1;
             }
             Some((_, _, _, doc)) => {
-                if gogo::engine::verify_against(path, doc) {
+                if verify_live(&act, path, doc) {
                     println!("  ok {}", path.display());
                     ok += 1;
                 } else {
@@ -1938,6 +1960,7 @@ fn rebuild_records(cfg: &gogo::config::Config, root: &std::path::Path) -> Result
     let mut already = 0;
     let mut failed = 0;
     let mut unknown = 0;
+    let act = depot_progress::Activity::new(depot_mode(false, false));
     for path in files {
         let name = path
             .file_name()
@@ -1957,7 +1980,7 @@ fn rebuild_records(cfg: &gogo::config::Config, root: &std::path::Path) -> Result
             already += 1;
             continue;
         }
-        if !gogo::engine::verify_against(&path, &doc) {
+        if !verify_live(&act, &path, &doc) {
             println!("  FAIL {} (not adopted)", path.display());
             failed += 1;
             continue;
@@ -2425,8 +2448,8 @@ async fn resolve_game_source(
         &cancel,
         ctx.free_space.as_ref(),
     );
-    let mut renderer = mode.renderer();
-    let result = depot_progress::drive(runner, &mut rx, &mut renderer).await;
+    let act = depot_progress::Activity::new(mode);
+    let result = depot_progress::drive(runner, &mut rx, &act).await;
     result.map_err(AppError::Depot)?;
     let tree = find_game_tree(&root).ok_or_else(|| {
         eprintln!(
@@ -3946,8 +3969,10 @@ async fn linux_app(a: LinuxAppArgs) -> Result<i32, AppError> {
     let out = {
         let plan = plan.clone();
         let p = prompter.clone();
+        let mode = depot_mode(jp, a.json);
         tokio::task::spawn_blocking(move || {
-            gogo::linuxapp::build::execute(&plan, p.as_deref(), &mut |ev| emit_macapp_event(ev, jp))
+            let act = depot_progress::Activity::new(mode);
+            gogo::linuxapp::build::execute(&plan, p.as_deref(), &mut |ev| emit_live(ev, jp, &act))
         })
         .await
         .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))??
@@ -4103,6 +4128,7 @@ fn linux_app_retarget(
         } else {
             None
         };
+    let act = depot_progress::Activity::new(depot_mode(false, json));
     let out = gogo::linuxapp::manage::retarget(
         &gogid,
         &updates,
@@ -4111,8 +4137,9 @@ fn linux_app_retarget(
             prompt: prompter.as_deref(),
             runtime_snapshot: Some(auto_snapshots(no_snapshots)?),
         },
-        &mut |ev| emit_macapp_event(ev, false),
+        &mut |ev| emit_live(ev, false, &act),
     )?;
+    drop(act);
     if json {
         let setup = match &out.setup {
             Some(Ok(s)) => serde_json::json!({
@@ -4272,28 +4299,31 @@ fn linux_app_move_now(
 ) -> Result<i32, AppError> {
     use gogo::macapp::relocate::MoveEvent;
     let human = gogo::fmt::human_size;
-    let tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
+    // On a terminal the live status line, with a rate (#420); else each tenth.
+    let act = depot_progress::Activity::new(depot_mode(false, json));
     let mut shown = (0, 0);
     let out = gogo::linuxapp::relocate::move_game(gogid, target, opts, &mut |ev| {
         let (what, kind, done, total) = match ev {
             MoveEvent::Copying { done, total } => ("copying", 1, *done, *total),
             MoveEvent::Verifying { done, total } => ("checking the copy", 2, *done, *total),
         };
+        if act.live() {
+            if kind == 2 && done >= total {
+                // What is left: the old copy's delete and the records.
+                act.working("finishing the move");
+            } else {
+                act.task(what, None, Some((done, Some(total))));
+            }
+            return;
+        }
         let percent = (done * 100).checked_div(total).unwrap_or(100);
-        // Each percent on a terminal, each tenth in a log.
-        let step = if tty { percent } else { percent / 10 * 10 };
+        let step = percent / 10 * 10;
         if !json && (kind, step) != shown {
             shown = (kind, step);
-            if tty {
-                eprint!("\r\x1b[K{what}: {percent}% of {}", human(total));
-            } else {
-                eprintln!("{what}: {percent}% of {}", human(total));
-            }
+            eprintln!("{what}: {percent}% of {}", human(total));
         }
     });
-    if tty && shown != (0, 0) && !json {
-        eprintln!();
-    }
+    drop(act);
     if let Err(e) = &out
         && gogo::macapp::relocate::snapshots_changed(e)
     {
@@ -4394,8 +4424,11 @@ fn linux_app_adopt(
 fn linux_app_sub(sub: crate::cli::LinuxAppSub) -> Result<i32, AppError> {
     match sub {
         crate::cli::LinuxAppSub::Doctor { gogid, json } => {
-            let report =
-                gogo::linuxapp::doctor::doctor(&gogid, &gogo::linuxapp::doctor::Host::detect())?;
+            // vulkaninfo and the tree walks take seconds (#420).
+            let report = depot_progress::Activity::new(depot_mode(false, json))
+                .spin(&format!("checking {gogid}"), || {
+                    gogo::linuxapp::doctor::doctor(&gogid, &gogo::linuxapp::doctor::Host::detect())
+                })?;
             if json {
                 println!(
                     "{}",
@@ -4430,6 +4463,7 @@ fn linux_app_sub(sub: crate::cli::LinuxAppSub) -> Result<i32, AppError> {
                 } else {
                     None
                 };
+            let act = depot_progress::Activity::new(depot_mode(false, json));
             let out = gogo::linuxapp::setup::setup(
                 &gogid,
                 &gogo::linuxapp::setup::SetupOptions {
@@ -4437,8 +4471,10 @@ fn linux_app_sub(sub: crate::cli::LinuxAppSub) -> Result<i32, AppError> {
                     prompt: prompter.as_deref(),
                     runtime_snapshot: Some(auto_snapshots(no_snapshots)?),
                 },
-                &mut |ev| emit_macapp_event(ev, false),
-            )?;
+                &mut |ev| emit_live(ev, false, &act),
+            );
+            drop(act);
+            let out = out?;
             print_linux_setup(&out, json, |_| {});
             Ok(cli::exit::OK)
         }
@@ -5728,6 +5764,7 @@ async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppEr
             } else {
                 None
             };
+            let act = depot_progress::Activity::new(depot_mode(false, json));
             let m = store::install_to(
                 entry,
                 version.as_deref(),
@@ -5735,11 +5772,11 @@ async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppEr
                 catalog::GITHUB_API,
                 consent,
                 shared.as_deref(),
-                &mut |ev| {
-                    emit_macapp_event(ev, false);
-                },
+                &mut |ev| emit_live(ev, false, &act),
             )
-            .await?;
+            .await;
+            drop(act);
+            let m = m?;
             let root = store::tree_root(&m);
             if json {
                 println!(
@@ -6143,8 +6180,17 @@ fn remove_apps(
         }
     }
     let mut failed = false;
+    let act = depot_progress::Activity::new(depot_mode(false, false));
     for a in targets {
-        match gogo::macapp::apps::remove(a, keep_override) {
+        let removed = act.spin(
+            &format!(
+                "removing {} ({})",
+                a.title.as_deref().unwrap_or(&a.gogid),
+                gogo::fmt::human_size(a.bytes)
+            ),
+            || gogo::macapp::apps::remove(a, keep_override),
+        );
+        match removed {
             Ok(out) => {
                 for p in &out.paths {
                     println!("removed {}", p.display());
@@ -6457,6 +6503,30 @@ fn step_detail(step: &gogo::macapp::interpret::Step) -> String {
 
 /// mac-app events → NDJSON (`--json-progress`) or compact stderr one-liners.
 fn emit_macapp_event(ev: &gogo::engine::events::ProgressEvent, json_progress: bool) {
+    emit_macapp_to(ev, json_progress, &|l| eprintln!("{l}"));
+}
+
+/// [`emit_macapp_event`] with a live status line (#420): the running counts go
+/// on it, the lines above it.
+fn emit_live(
+    ev: &gogo::engine::events::ProgressEvent,
+    json_progress: bool,
+    act: &depot_progress::Activity,
+) {
+    if !act.work(ev) {
+        emit_macapp_to(ev, json_progress, &|l| act.note(l));
+    }
+}
+
+/// [`emit_macapp_event`]'s lines go to `print`.
+fn emit_macapp_to(
+    ev: &gogo::engine::events::ProgressEvent,
+    json_progress: bool,
+    print: &dyn Fn(&str),
+) {
+    if ev.is_live_only() {
+        return;
+    }
     if json_progress {
         if let Ok(line) = serde_json::to_string(ev) {
             println!("{line}");
@@ -6521,7 +6591,7 @@ fn emit_macapp_event(ev: &gogo::engine::events::ProgressEvent, json_progress: bo
         _ => None,
     };
     if let Some(l) = line {
-        eprintln!("gogo: {l}");
+        print(&format!("gogo: {l}"));
     }
 }
 

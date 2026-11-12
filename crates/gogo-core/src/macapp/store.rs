@@ -16,7 +16,7 @@ use sha2::{Digest as _, Sha256};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
-use crate::engine::events::ProgressEvent;
+use crate::engine::events::{ProgressEvent, working};
 
 use super::catalog::{self, CatalogEntry, Status};
 use super::error::MacAppError;
@@ -375,10 +375,13 @@ pub async fn install_to(
         Some(_) => Some(catalog::download_client()?),
         None => None,
     };
-    let actual = download_verified(long.as_ref().unwrap_or(http), &rel, &part, entry.id).await?;
+    let actual =
+        download_verified(long.as_ref().unwrap_or(http), &rel, &part, entry.id, emit).await?;
     if let Some((_, sha512)) = proton_kind {
         // The release's `.sha512sum`, beside GitHub's sha256 (design 18 §1).
-        let got = sha512_file(&part)?;
+        let got = working(emit, &format!("checking {}", rel.asset_name), || {
+            sha512_file(&part)
+        })?;
         if !got.eq_ignore_ascii_case(sha512) {
             let _ = std::fs::remove_file(&part);
             return Err(MacAppError::RuntimeDownloadFailed {
@@ -400,7 +403,7 @@ pub async fn install_to(
                 rel.tag,
                 archive_ext(&fw_rel.asset_name)
             ));
-            if let Err(e) = download_verified(http, &fw_rel, &fw_part, entry.id).await {
+            if let Err(e) = download_verified(http, &fw_rel, &fw_part, entry.id, emit).await {
                 let _ = std::fs::remove_file(&part);
                 return Err(e);
             }
@@ -431,6 +434,10 @@ pub async fn install_to(
         catalog::Kind::Renderer { subdir, .. } => subdir,
         _ => None,
     };
+    let unpacking = format!("unpacking {}", rel.asset_name);
+    emit(&ProgressEvent::WorkStarted {
+        step: unpacking.clone(),
+    });
     let bytes = tokio::task::spawn_blocking(move || -> Result<u64, MacAppError> {
         match fw_job {
             None if subdir.is_some() => {
@@ -467,7 +474,9 @@ pub async fn install_to(
     .map_err(|e| MacAppError::RuntimeDownloadFailed {
         url: rel.asset_url.clone(),
         reason: format!("extract task: {e}"),
-    })??;
+    });
+    emit(&ProgressEvent::WorkDone { step: unpacking });
+    let bytes = bytes??;
     if let Some(fw) = &entry.frameworks {
         std::fs::write(
             extract_dir.join("NOTICES.txt"),
@@ -842,9 +851,25 @@ async fn download_verified(
     rel: &catalog::RemoteRelease,
     part: &Path,
     id: &str,
+    emit: &mut dyn FnMut(&ProgressEvent),
 ) -> Result<String, MacAppError> {
-    download_with_retry(http, &rel.asset_url, part).await?;
-    let actual = sha256_file(part)?;
+    let what = format!("downloading {}", rel.asset_name);
+    let total = (rel.size > 0).then_some(rel.size);
+    let got = download_with_retry(http, &rel.asset_url, part, &mut |b| {
+        emit(&ProgressEvent::WorkProgress {
+            step: what.clone(),
+            files: None,
+            files_total: None,
+            bytes: Some(b),
+            bytes_total: total,
+        })
+    })
+    .await;
+    emit(&ProgressEvent::WorkDone { step: what });
+    got?;
+    let actual = working(emit, &format!("checking {}", rel.asset_name), || {
+        sha256_file(part)
+    })?;
     if let Some(expected) = &rel.sha256
         && !expected.eq_ignore_ascii_case(&actual)
     {
@@ -1414,6 +1439,7 @@ async fn download_with_retry(
     http: &reqwest::Client,
     url: &str,
     dst: &Path,
+    on_bytes: &mut dyn FnMut(u64),
 ) -> Result<(), MacAppError> {
     let mut last = String::new();
     for attempt in 0..3u32 {
@@ -1438,6 +1464,8 @@ async fn download_with_retry(
                     }
                 })?;
                 use tokio::io::AsyncWriteExt as _;
+                let mut written = 0u64;
+                on_bytes(written);
                 while let Some(chunk) =
                     resp.chunk()
                         .await
@@ -1452,6 +1480,8 @@ async fn download_with_retry(
                             reason: format!("write: {e}"),
                         }
                     })?;
+                    written += chunk.len() as u64;
+                    on_bytes(written);
                 }
                 file.flush()
                     .await

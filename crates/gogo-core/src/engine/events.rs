@@ -175,6 +175,61 @@ pub enum ProgressEvent {
         label: String,
         created: String,
     },
+    /// A long step's running count (#420): `files` and `bytes` done so far,
+    /// of the totals where known. Sent per file, for a live status line;
+    /// `--json-progress` leaves it out (too many lines), as it does
+    /// [`ProgressEvent::WorkDone`].
+    WorkProgress {
+        step: String,
+        files: Option<u64>,
+        files_total: Option<u64>,
+        bytes: Option<u64>,
+        bytes_total: Option<u64>,
+    },
+    /// A long step with no running count starts (#420): a subprocess, an
+    /// extraction. A live status line shows a spinner and the time it has
+    /// taken; `--json-progress` leaves it out.
+    WorkStarted {
+        step: String,
+    },
+    /// The step a [`ProgressEvent::WorkStarted`] or
+    /// [`ProgressEvent::WorkProgress`] showed is over.
+    WorkDone {
+        step: String,
+    },
+}
+
+/// The `step` names of [`ProgressEvent::WorkProgress`].
+pub mod step {
+    /// The game files going into a game's `game/` dir (a build, a DLC add).
+    pub const GAME_FILES: &str = "game files";
+    /// umu's `wineboot` making a new Wine prefix.
+    pub const PREFIX: &str = "creating the Wine prefix";
+    /// An offline installer running silently.
+    pub const INSTALLER: &str = "running the installer";
+    /// GOG's support installer and registry key.
+    pub const SUPPORT: &str = "running GOG's support installer";
+}
+
+impl ProgressEvent {
+    /// Only for a live status line (#420): not printed as NDJSON.
+    pub fn is_live_only(&self) -> bool {
+        matches!(
+            self,
+            ProgressEvent::WorkProgress { .. }
+                | ProgressEvent::WorkStarted { .. }
+                | ProgressEvent::WorkDone { .. }
+        )
+    }
+}
+
+/// Run `f` between a [`ProgressEvent::WorkStarted`] and a
+/// [`ProgressEvent::WorkDone`] of `step`, whatever it returns.
+pub fn working<T>(emit: &mut dyn FnMut(&ProgressEvent), step: &str, f: impl FnOnce() -> T) -> T {
+    emit(&ProgressEvent::WorkStarted { step: step.into() });
+    let out = f();
+    emit(&ProgressEvent::WorkDone { step: step.into() });
+    out
 }
 
 /// Drive a consumer over the event stream until the engine's terminal `Done`
@@ -252,6 +307,9 @@ mod render_tests {
             ProgressEvent::DlcRecovered { .. } => "DlcRecovered",
             ProgressEvent::SnapshotCreated { .. } => "SnapshotCreated",
             ProgressEvent::SnapshotPruned { .. } => "SnapshotPruned",
+            ProgressEvent::WorkProgress { .. } => "WorkProgress",
+            ProgressEvent::WorkStarted { .. } => "WorkStarted",
+            ProgressEvent::WorkDone { .. } => "WorkDone",
         }
     }
 

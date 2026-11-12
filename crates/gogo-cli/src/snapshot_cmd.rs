@@ -7,6 +7,7 @@
 use gogo::linuxapp::rollback::{self as rb, Planned, RollbackOptions};
 use gogo::linuxapp::snapshots::{self as snap, Backends};
 
+use crate::depot_progress::Activity;
 use crate::{AppError, cli};
 
 /// Dispatch `gogo linux-app snapshot <gogid> <cmd>`.
@@ -26,7 +27,15 @@ pub fn run(gogid: String, cmd: cli::LinuxSnapshotCmd) -> Result<i32, AppError> {
     }
     match cmd {
         cli::LinuxSnapshotCmd::List { no_space, json } => {
-            let v = snap::list(&gogid, &backends, keep_auto, !no_space)?;
+            // Measuring walks the extents of the game and every snapshot.
+            let v = if no_space {
+                snap::list(&gogid, &backends, keep_auto, false)?
+            } else {
+                Activity::new(crate::depot_mode(false, json))
+                    .spin("measuring the snapshots' space", || {
+                        snap::list(&gogid, &backends, keep_auto, true)
+                    })?
+            };
             if json {
                 println!("{}", serde_json::to_string(&v).unwrap());
             } else {
@@ -61,7 +70,8 @@ pub fn run(gogid: String, cmd: cli::LinuxSnapshotCmd) -> Result<i32, AppError> {
             {
                 return Ok(code);
             }
-            let progress = progress(json);
+            let act = Activity::new(crate::depot_mode(false, json));
+            let progress = progress(json, &act);
             let conv = snap::Convert {
                 progress: &progress,
                 ..Default::default()
@@ -134,7 +144,12 @@ pub fn run(gogid: String, cmd: cli::LinuxSnapshotCmd) -> Result<i32, AppError> {
                     return Ok(cli::exit::OK);
                 }
             }
-            let out = snap::delete(&gogid, &backends, &ids)?;
+            let act = Activity::new(crate::depot_mode(false, json));
+            let out = act.spin(&format!("deleting {} snapshot(s)", ids.len()), || {
+                snap::delete(&gogid, &backends, &ids)
+            });
+            drop(act);
+            let out = out?;
             if json {
                 println!("{}", serde_json::to_string(&out).unwrap());
                 return Ok(cli::exit::OK);
@@ -206,7 +221,8 @@ pub fn run(gogid: String, cmd: cli::LinuxSnapshotCmd) -> Result<i32, AppError> {
                     {
                         return Ok(code);
                     }
-                    let progress = progress(json);
+                    let act = Activity::new(crate::depot_mode(false, json));
+                    let progress = progress(json, &act);
                     let conv = snap::Convert {
                         progress: &progress,
                         ..Default::default()
@@ -258,10 +274,14 @@ fn rollback(
     mut opts: RollbackOptions,
     f: Flags,
 ) -> Result<i32, AppError> {
-    if let Some(want) = rb::depot_fetch_wanted(gogid) {
-        opts.build_files = gogo::macapp::lutris::block_on_detached(fetch_build_files(want));
-    }
-    let plan = match rb::plan(gogid, backends, n, &opts)? {
+    let act = Activity::new(crate::depot_mode(false, f.json));
+    let planned = act.spin("planning the rollback", || {
+        if let Some(want) = rb::depot_fetch_wanted(gogid) {
+            opts.build_files = gogo::macapp::lutris::block_on_detached(fetch_build_files(want));
+        }
+        rb::plan(gogid, backends, n, &opts)
+    });
+    let plan = match planned? {
         Planned::Plan(p) => p,
         Planned::Unknown(why) => {
             eprintln!("gogo: {gogid}: {why} (see `gogo linux-app snapshot {gogid} list`)");
@@ -301,7 +321,11 @@ fn rollback(
             println!("{l}");
         }
     }
-    let out = rb::rollback(gogid, backends, n, &plan, &opts)?;
+    let out = act.spin(&format!("rolling back to snapshot {n}"), || {
+        rb::rollback(gogid, backends, n, &plan, &opts)
+    });
+    drop(act);
+    let out = out?;
     if f.json {
         println!("{}", serde_json::to_string(&out).unwrap());
         return Ok(cli::exit::OK);
@@ -398,9 +422,10 @@ pub(crate) fn ask(lines: &[String], yes: bool, question: &str) -> Option<i32> {
     }
 }
 
-/// A conversion's progress on stderr, at most once a tenth per phase; nothing
-/// with `--json`.
-fn progress(json: bool) -> impl Fn(snap::ConvertProgress) {
+/// A conversion's progress on stderr: on a terminal the live status line
+/// with the bytes and a rate (#420), else a line at most once a tenth per
+/// phase; nothing with `--json`.
+fn progress(json: bool, act: &Activity) -> impl Fn(snap::ConvertProgress) + '_ {
     let shown = std::cell::Cell::new((0u8, 0u64));
     move |p| {
         if json {
@@ -410,6 +435,14 @@ fn progress(json: bool) -> impl Fn(snap::ConvertProgress) {
             snap::ConvertProgress::Copying { done, total } => (1, done, total, "copying"),
             snap::ConvertProgress::Verifying { done, total } => (2, done, total, "checking"),
         };
+        if act.live() {
+            act.task(
+                &format!("converting: {what}"),
+                None,
+                Some((done, Some(total))),
+            );
+            return;
+        }
         let tenth = (done.min(total) as u128 * 10 / u128::from(total.max(1))) as u64;
         let (last_phase, last) = shown.get();
         if phase != last_phase || tenth > last {
