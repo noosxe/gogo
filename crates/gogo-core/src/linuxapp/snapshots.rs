@@ -374,6 +374,21 @@ pub fn refuse(gogid: &str, dirs: &GameDirs) -> Result<(), MacAppError> {
     Ok(())
 }
 
+/// The refusals settling a pending rollback takes (design 20 §5.3.1): the
+/// game dir reachable, and neither the game nor another of its programs
+/// running in it.
+pub(crate) fn refuse_settle(gogid: &str, dirs: &GameDirs) -> Result<(), MacAppError> {
+    refuse_unreachable(gogid, dirs)?;
+    game::refuse_running(gogid, &dirs.root, &dirs.prefix)?;
+    if let Some(pid) = game::live_one_off(&dirs.root) {
+        return Err(MacAppError::Apps(format!(
+            "{gogid} is running another of its programs (`gogo linux-app run`, pid {pid}): \
+             quit it first; an interrupted rollback is settled after that"
+        )));
+    }
+    Ok(())
+}
+
 /// Refuse a new snapshot of a game dir that can't take one: no snapshots on
 /// its filesystem (§2.4), or a plain dir on btrfs, which needs converting
 /// (§2.1), which gogo doesn't do yet.
@@ -426,7 +441,11 @@ pub(crate) fn locked<T>(
     let (support, b) = backends.for_dir(&dirs.root);
     let s = store(gogid, &dirs.root, b);
     let mut recovered = recovered_lines(&s.recover(&guard).map_err(err)?);
-    // A pending rollback is settled before anything else (design 20 §5.3.1).
+    // A pending rollback is settled before anything else (design 20 §5.3.1),
+    // but never under a running game.
+    if s.rollback_journal_path().is_file() {
+        refuse_settle(gogid, dirs)?;
+    }
     if let Some(r) = super::rollback::settle_locked(gogid, dirs, &s, b)? {
         recovered.push(r.line());
     }
@@ -689,7 +708,11 @@ pub fn list(
 ) -> Result<ListView, MacAppError> {
     let dirs = built(gogid)?;
     // A pending rollback is settled first, as by every snapshot command.
-    let mut notes = super::rollback::settle_pending(gogid, backends)?;
+    // A running game holds it off: `list` still lists, and says so.
+    let mut notes = match super::rollback::settle_pending(gogid, backends) {
+        Ok(n) => n,
+        Err(e) => vec![format!("an interrupted rollback isn't settled yet: {e}")],
+    };
     let (support, b) = backends.for_dir(&dirs.root);
     let s = store(gogid, &dirs.root, b);
     let has_snapshots = dirs.root.is_dir()

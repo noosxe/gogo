@@ -60,6 +60,21 @@ pub struct LauncherFiles {
     pub updated_from: Option<String>,
 }
 
+/// Write this gogo's `launch.sh` (0755) into the game dir `dir`, synced: a
+/// rollback puts it into the staged tree before the swap.
+pub(crate) fn write_script(dir: &Path) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    let path = dir.join(LAUNCH_SH);
+    let tmp = dir.join(format!("{LAUNCH_SH}.tmp"));
+    let mut f = std::fs::File::create(&tmp)?;
+    f.write_all(launch_sh().as_bytes())?;
+    f.set_permissions(std::fs::Permissions::from_mode(0o755))?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, &path)?;
+    std::fs::File::open(dir)?.sync_all()
+}
+
 /// `launch.sh` for this gogo.
 pub fn launch_sh() -> String {
     TEMPLATE

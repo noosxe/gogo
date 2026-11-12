@@ -3,12 +3,14 @@
 //! before the rollback.
 //!
 //! The save roots are a prefix's user dirs (`drive_c/users/<user>/Documents`,
-//! `Saved Games`, `AppData/{Roaming,Local,LocalLow}`), `drive_c/ProgramData`,
-//! and the game's own files (`game/` on the depot lane, the install dir on the
-//! installer lane), where the files the build itself shipped are left out by
-//! the build's file list ([`BuildFiles`]). Paths are reported relative to
-//! `drive_c/`, the game's files under their own name (`game/…`), and set aside
-//! with the same layout.
+//! `Saved Games`, `AppData/{Roaming,Local,LocalLow}`, `Public` included),
+//! `drive_c/ProgramData`, and the game's own files (`game/` on the depot lane,
+//! the install dir on the installer lane). When the build or DLC set changed
+//! since the snapshot, the files the new build shipped are left out by its
+//! file list ([`BuildFiles`]). Paths are reported relative to `drive_c/`, the
+//! game's files under their own name (`game/…`), and set aside with the same
+//! layout. The registry files (`user.reg`, `system.reg`) are reported apart,
+//! when they changed.
 
 use std::collections::{BTreeMap, HashSet};
 use std::io;
@@ -33,7 +35,8 @@ use crate::gog::materialize::{self, Reflink};
 /// (`*.ini`, `*.cfg`) are never here: losing them is a loss too.
 pub const EXCLUDED: &[&str] = &[
     "AppData/Local/Temp/",
-    "AppData/Local/Microsoft/",
+    "AppData/Local/Microsoft/Windows/",
+    "AppData/Local/Microsoft/CLR_*/",
     "*/INetCache/",
     "AppData/Local/D3DSCache/",
     "AppData/Local/NVIDIA*/",
@@ -45,6 +48,14 @@ pub const EXCLUDED: &[&str] = &[
     "*.dmp",
     "Thumbs.db",
 ];
+
+/// The registry files at the prefix's root a rollback copies aside when they
+/// changed: older games keep settings and saves there.
+pub const REGISTRY: &[&str] = &["user.reg", "system.reg"];
+
+/// What the finder never looks at, for the plan (design 20 §6.1).
+pub const NOT_SCANNED: &str = "the rest of drive_c (windows/, other programs' dirs), \
+     the prefix's other files, and caches and logs";
 
 /// The save roots under a user dir (design 20 §6.1).
 pub const USER_ROOTS: &[&str] = &[
@@ -344,11 +355,15 @@ pub struct Scan {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase", tag = "check")]
 pub enum GameCheck {
-    /// Against the build's file list (by name and size, or, from an installer
-    /// log, by name and time).
+    /// The build and DLC set are the snapshot's: every changed or new file
+    /// counts, no list needed.
+    SameContent,
+    /// The build or DLC set changed: checked against the new build's file
+    /// list (by name and size, or, from an installer log, by name and time);
+    /// changed files that match it count as shipped.
     List { source: String, files: usize },
-    /// No list: files rewritten in place only, unless the build and DLC set
-    /// are the snapshot's.
+    /// The build or DLC set changed and there is no list: changed files
+    /// count; new ones are unattributed.
     NoList,
     /// No game files to check.
     None,
@@ -361,8 +376,11 @@ pub struct Found {
     pub files: Vec<SaveFile>,
     /// New files in the game's files gogo can't tell from what a DLC add or
     /// an update laid (no list, and the content changed since the snapshot):
-    /// shown, not copied.
+    /// copied under `unattributed/` when that is cheap or small.
     pub unattributed: Vec<SaveFile>,
+    /// The registry files ([`REGISTRY`]) that changed, by their name: copied
+    /// under `registry/`.
+    pub registry: Vec<SaveFile>,
     pub game_check: GameCheck,
     /// The user dirs looked in (`steamuser`).
     pub users: Vec<String>,
@@ -372,6 +390,10 @@ impl Found {
     pub fn bytes(&self) -> u64 {
         self.files.iter().map(|f| f.size).sum()
     }
+
+    pub fn unattributed_bytes(&self) -> u64 {
+        self.unattributed.iter().map(|f| f.size).sum()
+    }
 }
 
 fn rfc3339(t: SystemTime) -> String {
@@ -379,8 +401,8 @@ fn rfc3339(t: SystemTime) -> String {
 }
 
 /// The user dirs of a prefix's `drive_c/users/`: real dirs only (Proton's
-/// `steamuser`; Wine's link named after the host user points at it), never
-/// `Public`.
+/// `steamuser` and `Public`; Wine's link named after the host user points at
+/// `steamuser`).
 pub fn users(prefix: &Path) -> Vec<String> {
     let mut out: Vec<String> = std::fs::read_dir(prefix.join("drive_c/users"))
         .into_iter()
@@ -388,7 +410,6 @@ pub fn users(prefix: &Path) -> Vec<String> {
         .flatten()
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .filter_map(|e| e.file_name().to_str().map(str::to_string))
-        .filter(|n| !n.eq_ignore_ascii_case("public"))
         .collect();
     out.sort();
     out
@@ -420,16 +441,17 @@ fn walk(dir: &Path) -> Vec<(String, std::fs::Metadata)> {
 }
 
 /// Whether a file is newer than the snapshot (design 20 §6.1), and whether
-/// the snapshot lacks it. With the snapshot's tree: absent there, or changed
-/// (size or mtime) after `created`. Without it: the mtime test alone.
+/// the snapshot lacks it. With the snapshot's tree: absent there, or another
+/// size or mtime than there (a snapshot keeps mtimes, so any difference is a
+/// change, even to an older mtime). Without it: the mtime test alone.
 fn newer(meta: &std::fs::Metadata, in_snap: Option<&Path>, created: SystemTime) -> (bool, bool) {
     let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
     match in_snap.map(std::fs::symlink_metadata) {
         None => (mtime > created, false),
-        Some(Ok(m)) if m.is_file() => {
-            let changed = m.len() != meta.len() || m.modified().ok() != Some(mtime);
-            (changed && mtime > created, false)
-        }
+        Some(Ok(m)) if m.is_file() => (
+            m.len() != meta.len() || m.modified().ok() != Some(mtime),
+            false,
+        ),
         Some(_) => (true, true),
     }
 }
@@ -495,14 +517,19 @@ pub fn find(scan: &Scan) -> Found {
                 }
                 let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
                 let f = save_file(format!("{}/{rel}", g.label), g.dir.join(&rel), &meta);
+                // The same build and DLC set: nothing was laid since, so a
+                // changed file is the game's doing, even at a shipped size (a
+                // fixed-size save slot rewritten in place).
                 match &g.list {
+                    _ if g.same_content => files.push(f),
                     Some(list) if list.is_builds(&rel, meta.len(), mtime) => {}
                     Some(_) => files.push(f),
-                    None if absent && !g.same_content => unattributed.push(f),
+                    None if absent => unattributed.push(f),
                     None => files.push(f),
                 }
             }
             match &g.list {
+                _ if g.same_content => GameCheck::SameContent,
                 Some(l) => GameCheck::List {
                     source: l.source.clone(),
                     files: l.len(),
@@ -511,11 +538,24 @@ pub fn find(scan: &Scan) -> Found {
             }
         }
     };
+    let snap_prefix = scan.snap_prefix.as_deref();
+    let registry = REGISTRY
+        .iter()
+        .filter_map(|name| {
+            let abs = scan.prefix.join(name);
+            let meta = std::fs::metadata(&abs).ok().filter(|m| m.is_file())?;
+            let snap = snap_prefix.map(|p| p.join(name));
+            newer(&meta, snap.as_deref(), scan.created)
+                .0
+                .then(|| save_file((*name).to_string(), abs, &meta))
+        })
+        .collect();
     files.sort_by(|a, b| a.path.cmp(&b.path));
     unattributed.sort_by(|a, b| a.path.cmp(&b.path));
     Found {
         files,
         unattributed,
+        registry,
         game_check,
         users,
     }
@@ -540,9 +580,13 @@ pub struct Group {
 pub fn groups(files: &[SaveFile]) -> Vec<Group> {
     let mut by: BTreeMap<String, Group> = BTreeMap::new();
     for f in files {
+        // The user dir is dropped (`steamuser` is the only real one), but
+        // `Public` stays: its `Documents` isn't the user's.
         let shown = match f.path.strip_prefix("users/") {
-            Some(rest) => rest.split_once('/').map_or(rest, |(_, r)| r),
-            None => f.path.as_str(),
+            Some(rest) if !rest.to_ascii_lowercase().starts_with("public/") => {
+                rest.split_once('/').map_or(rest, |(_, r)| r)
+            }
+            _ => f.path.as_str(),
         };
         let dir = shown.rsplit_once('/').map_or(".", |(d, _)| d).to_string();
         let g = by.entry(dir.clone()).or_insert(Group {
@@ -573,14 +617,41 @@ pub struct Copied {
 
 /// Copy `files` into `dir` (design 20 §6.2), each at its `path`: a clone
 /// where the filesystem can, else a copy; mode and mtime kept. A file there
-/// already (a rerun into the same dir) is replaced.
+/// already (a rerun into the same dir) is replaced. Each file is synced, and
+/// so are the dirs that hold it, up to `dir`'s parent's parent
+/// (`saves-aside/`), so a journal written after this names a copy that is on
+/// disk.
 pub fn copy_aside(files: &[SaveFile], dir: &Path) -> io::Result<Copied> {
+    copy_aside_under(files, dir, "")
+}
+
+/// [`copy_aside`] with each file at `<under>/<path>` (`unattributed/`,
+/// `registry/`).
+pub fn copy_aside_under(files: &[SaveFile], dir: &Path, under: &str) -> io::Result<Copied> {
     let mut out = Copied::default();
     std::fs::create_dir_all(dir)?;
+    let mut dirs: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+    let top = dir.parent().and_then(Path::parent).unwrap_or(dir);
+    for a in dir.ancestors() {
+        dirs.insert(a.to_path_buf());
+        if a == top {
+            break;
+        }
+    }
     for f in files {
-        let dst = dir.join(&f.path);
+        let dst = if under.is_empty() {
+            dir.join(&f.path)
+        } else {
+            dir.join(under).join(&f.path)
+        };
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent)?;
+            for a in parent.ancestors() {
+                if a == dir {
+                    break;
+                }
+                dirs.insert(a.to_path_buf());
+            }
         }
         match std::fs::remove_file(&dst) {
             Ok(()) => {}
@@ -593,7 +664,37 @@ pub fn copy_aside(files: &[SaveFile], dir: &Path) -> io::Result<Copied> {
         out.files += 1;
         out.bytes += f.size;
     }
+    // Deepest first, so each dir's entry is synced after what it holds.
+    for d in dirs.iter().rev() {
+        std::fs::File::open(d)?.sync_all()?;
+    }
     Ok(out)
+}
+
+/// Whether a file at `src` can be cloned (FICLONE) into `dir`'s filesystem:
+/// tried on an unnamed temporary file there, so nothing is left behind.
+/// `dir` need not exist yet; its nearest existing ancestor is tried.
+pub fn can_clone(src: &Path, dir: &Path) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        use rustix::fs::{Mode, OFlags};
+        let Some(at) = dir.ancestors().find(|p| p.is_dir()) else {
+            return false;
+        };
+        let Ok(s) = std::fs::File::open(src) else {
+            return false;
+        };
+        let Ok(tmp) = rustix::fs::open(at, OFlags::WRONLY | OFlags::TMPFILE, Mode::from(0o600))
+        else {
+            return false;
+        };
+        rustix::fs::ioctl_ficlone(&tmp, &s).is_ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (src, dir);
+        false
+    }
 }
 
 #[cfg(test)]
@@ -608,7 +709,8 @@ mod tests {
             EXCLUDED,
             [
                 "AppData/Local/Temp/",
-                "AppData/Local/Microsoft/",
+                "AppData/Local/Microsoft/Windows/",
+                "AppData/Local/Microsoft/CLR_*/",
                 "*/INetCache/",
                 "AppData/Local/D3DSCache/",
                 "AppData/Local/NVIDIA*/",
@@ -625,6 +727,8 @@ mod tests {
             "AppData/Local/Temp/x.tmp",
             "AppData/local/temp/x.tmp",
             "AppData/Local/Microsoft/Windows/INetCache/a",
+            "AppData/Local/Microsoft/Windows/Explorer/thumbcache_32.db",
+            "AppData/Local/Microsoft/CLR_v4.0/UsageLogs/game.exe",
             "AppData/Roaming/Foo/INetCache/a",
             "AppData/Local/D3DSCache/abc/x",
             "AppData/Local/NVIDIA Corporation/GLCache/x",
@@ -647,6 +751,9 @@ mod tests {
             "Documents/My Games/x/settings.ini",
             "AppData/Local/CD Projekt Red/user.cfg",
             "AppData/LocalLow/Studio/Game/save1.sav",
+            // XNA and Microsoft-published games save here.
+            "AppData/Local/Microsoft/XNA/Game/save.dat",
+            "AppData/Local/Microsoft Games/Game/save.dat",
             "SAVE/slot1.sav",
             "Games/a.GM1",
             "Temp/not-anchored-at-AppData.sav",
@@ -739,8 +846,30 @@ mod tests {
             put(root, "game/game.exe", "MZ", THEN - 1000);
             put(root, "game/settings.ini", "a=1", THEN - 1000);
             put(root, "game/data.pak", "pak", THEN - 1000);
+            put(root, "game/SAVE/slot0.sav", "AAAA", THEN - 10);
+            put(
+                root,
+                "prefix/drive_c/users/steamuser/Saved Games/Studio/restored.sav",
+                "rrr",
+                THEN - 10,
+            );
+            put(root, "prefix/user.reg", "WINE REGISTRY 2", THEN - 10);
+            put(root, "prefix/system.reg", "WINE REGISTRY 2", THEN - 10);
             std::fs::create_dir_all(root.join("prefix/drive_c/users/Public")).unwrap();
         }
+        // A fixed-size save slot rewritten in place: the size the build
+        // shipped it at.
+        put(&now, "game/SAVE/slot0.sav", "BBBB", AFTER);
+        // A save put back from a backup, with an mtime older than the
+        // snapshot: still not the snapshot's.
+        put(
+            &now,
+            "prefix/drive_c/users/steamuser/Saved Games/Studio/restored.sav",
+            "RRR",
+            THEN - 50,
+        );
+        // The registry: user.reg rewritten, system.reg as it was.
+        put(&now, "prefix/user.reg", "WINE REGISTRY 2\n[x]", AFTER);
         #[cfg(unix)]
         std::os::unix::fs::symlink("steamuser", now.join("prefix/drive_c/users/someone")).unwrap();
         // Newer saves in each user root and ProgramData.
@@ -835,37 +964,104 @@ mod tests {
         f.iter().map(|f| f.path.as_str()).collect()
     }
 
-    const PREFIX_SAVES: [&str; 6] = [
+    const PREFIX_SAVES: [&str; 8] = [
         "ProgramData/G/shared.sav",
+        "users/Public/Documents/x.sav",
         "users/steamuser/AppData/LocalLow/G/ll.dat",
         "users/steamuser/AppData/Roaming/G/r.dat",
         "users/steamuser/Documents/My Games/g/cfg.ini",
         "users/steamuser/Saved Games/Studio/new.sav",
         "users/steamuser/Saved Games/Studio/old.sav",
+        "users/steamuser/Saved Games/Studio/restored.sav",
     ];
 
-    #[test]
-    fn the_finder_checks_the_game_files_against_the_builds_list() {
-        let (_tmp, now, snap) = fixture();
+    /// The build's list, as a manifest would give it: the shipped files at
+    /// their shipped sizes, the save slot and a DLC's file among them.
+    fn manifest() -> BuildFiles {
         let mut list = BuildFiles::new("a fake manifest");
         list.insert("game.exe", Expect::Size(2));
         list.insert("settings.ini", Expect::Size(3));
         list.insert("data.pak", Expect::Size(3));
+        list.insert("SAVE\\slot0.sav", Expect::Size(4));
         list.insert("dlc\\dlc.pak", Expect::Size(3));
-        let found = scan(&now, &snap, Some(list), false);
+        list
+    }
+
+    #[test]
+    fn the_finder_checks_the_game_files_against_the_builds_list() {
+        // Another build or DLC set: a changed file that matches the new
+        // build counts as shipped (the slot at its shipped size too).
+        let (_tmp, now, snap) = fixture();
+        let found = scan(&now, &snap, Some(manifest()), false);
         let mut want: Vec<&str> = PREFIX_SAVES.to_vec();
         want.extend(["game/SAVE/slot1.sav", "game/settings.ini"]);
         want.sort();
         assert_eq!(paths(&found.files), want);
         assert!(found.unattributed.is_empty());
-        assert_eq!(found.users, ["steamuser"]);
+        assert_eq!(found.users, ["Public", "steamuser"]);
         assert_eq!(
             found.game_check,
             GameCheck::List {
                 source: "a fake manifest".into(),
-                files: 4
+                files: 5
             }
         );
+    }
+
+    #[test]
+    fn with_the_same_build_every_changed_game_file_counts_list_or_not() {
+        // The same build and DLC set: a fixed-size slot rewritten in place
+        // is a save, though the list ships it at that size.
+        let (_tmp, now, snap) = fixture();
+        for list in [Some(manifest()), None] {
+            let found = scan(&now, &snap, list, true);
+            let game: Vec<&str> = paths(&found.files)
+                .into_iter()
+                .filter(|p| p.starts_with("game/"))
+                .collect();
+            assert_eq!(
+                game,
+                [
+                    "game/SAVE/slot0.sav",
+                    "game/SAVE/slot1.sav",
+                    "game/dlc/dlc.pak",
+                    "game/settings.ini"
+                ]
+            );
+            assert!(found.unattributed.is_empty());
+            assert_eq!(found.game_check, GameCheck::SameContent);
+        }
+    }
+
+    #[test]
+    fn a_file_the_snapshot_has_counts_at_any_other_size_or_mtime() {
+        // restored.sav's mtime is older than the snapshot: it still differs
+        // from the snapshot's copy.
+        let (_tmp, now, snap) = fixture();
+        let found = scan(&now, &snap, None, true);
+        assert!(paths(&found.files).contains(&"users/steamuser/Saved Games/Studio/restored.sav"));
+        // A file as the snapshot has it isn't.
+        assert!(!paths(&found.files).contains(&"game/game.exe"));
+    }
+
+    #[test]
+    fn the_registry_counts_when_it_changed() {
+        let (_tmp, now, snap) = fixture();
+        let found = scan(&now, &snap, None, true);
+        assert_eq!(paths(&found.registry), ["user.reg"]);
+        // Not among the saves: it goes aside apart.
+        assert!(!paths(&found.files).iter().any(|p| p.ends_with(".reg")));
+    }
+
+    #[test]
+    fn the_public_user_dir_is_a_save_root() {
+        let (_tmp, now, snap) = fixture();
+        let found = scan(&now, &snap, None, true);
+        assert!(found.users.contains(&"Public".to_string()));
+        assert!(paths(&found.files).contains(&"users/Public/Documents/x.sav"));
+        // Shown with its user dir: its Documents isn't the user's.
+        let g = groups(&found.files);
+        assert!(g.iter().any(|g| g.dir == "users/Public/Documents"));
     }
 
     #[test]
@@ -873,7 +1069,7 @@ mod tests {
         let (_tmp, now, snap) = fixture();
         let found = scan(&now, &snap, None, false);
         let mut want: Vec<&str> = PREFIX_SAVES.to_vec();
-        want.push("game/settings.ini");
+        want.extend(["game/SAVE/slot0.sav", "game/settings.ini"]);
         want.sort();
         assert_eq!(paths(&found.files), want);
         assert_eq!(
@@ -909,6 +1105,7 @@ mod tests {
         assert_eq!(
             game,
             [
+                "game/SAVE/slot0.sav",
                 "game/SAVE/slot1.sav",
                 "game/dlc/dlc.pak",
                 "game/settings.ini"
@@ -944,6 +1141,15 @@ mod tests {
         );
         // Again into the same dir: replaced, not refused.
         copy_aside(&found.files, &aside).unwrap();
+        // The registry and unattributed files go under their own dirs.
+        let un = scan(&now, &snap, None, false);
+        copy_aside_under(&un.unattributed, &aside, "unattributed").unwrap();
+        copy_aside_under(&un.registry, &aside, "registry").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(aside.join("unattributed/game/dlc/dlc.pak")).unwrap(),
+            "dlc"
+        );
+        assert!(aside.join("registry/user.reg").is_file());
     }
 
     #[test]
@@ -955,7 +1161,13 @@ mod tests {
             created: SystemTime::UNIX_EPOCH + Duration::from_secs(THEN),
             game: None,
         });
-        assert_eq!(paths(&found.files), PREFIX_SAVES);
+        // restored.sav's older mtime hides it without the snapshot's copy.
+        let want: Vec<&str> = PREFIX_SAVES
+            .into_iter()
+            .filter(|p| !p.ends_with("restored.sav"))
+            .collect();
+        assert_eq!(paths(&found.files), want);
+        assert_eq!(paths(&found.registry), ["user.reg"]);
         assert_eq!(found.game_check, GameCheck::None);
     }
 

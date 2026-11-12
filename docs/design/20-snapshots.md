@@ -721,19 +721,38 @@ What the rollback settled where §5.3, §5.4 and §6 left room:
   half-made copy (a crash between the snapshot and the marker) or the old tree. Deleting it
   is right both ways, and `committed` says which one happened.
 - **Settling** runs in every `snapshot` command (`list` too, as a note), `dlc add`, `move`,
-  `apps remove` and a build. Each does it under the two locks before its own work. `doctor`
+  `apps remove` and a build. Each does it under the two locks before its own work, after
+  the refusals settling needs: the game dir reachable, and neither the game nor a one-off
+  run of it running. While the game runs, `list` still lists and notes that the rollback
+  isn't settled yet; the others refuse. `doctor`
   fails a pending journal, a marker without one, or a leftover `.gogo-rollback-<gogid>`,
   naming `gogo linux-app snapshot <gogid> list`.
 - **Retention after the pre-rollback snapshot** runs once the rollback is done, and never
   prunes the target or the pre-rollback snapshot (`Store::prune_keeping`).
 - **The pre-rollback snapshot's number** in the plan and the `--drop-saves` question is the
   number `create` would take; the run reports the real one.
-- **The save user.** Proton's prefixes have one real user dir, `steamuser`. Wine adds a
-  symlink to it named after the host user. The finder scans every real dir in
-  `drive_c/users/` except `Public` and never follows links, so it finds `steamuser` alone.
+- **The save users.** Proton's prefixes have one real user dir, `steamuser`, plus
+  `Public`. Wine adds a symlink to `steamuser` named after the host user. The finder scans
+  every real dir in `drive_c/users/` (so `steamuser` and `Public`) and never follows
+  links. The plan shows `Public`'s files with their user dir.
 - **"Newer"**, when the snapshot's tree is readable: absent from it, or a different size
-  or mtime there and an mtime after `created`. A file the snapshot holds unchanged is
-  never newer, even when it was written in the snapshot's second.
+  or mtime there. A snapshot keeps mtimes, so any difference is a change, even to an older
+  mtime (a save put back from a backup). A file the snapshot holds unchanged is never
+  newer. Without the tree, the mtime test alone (after `created`).
+- **The game's own files and the build.** With the same build and DLC set as the
+  snapshot, nothing was laid since, so every changed or new file counts, at any size: a
+  fixed-size save slot rewritten in place is a save. No list is needed then. When the build
+  or DLC set changed, the new build's list applies: a changed file that matches it counts
+  as shipped, and the plan says so in one line. With no list, changed files count and new
+  ones are unattributed.
+- **Unattributed files** go aside under `unattributed/`: up to 1 GiB in total
+  (`UNATTRIBUTED_COPY_MAX`) always, and above that when the copy can clone them (FICLONE,
+  tried at plan time on an unnamed temporary file in the aside dir's filesystem). Else they
+  are listed, not copied, and the question says so. `--drop-saves` copies none.
+- **The registry.** `user.reg` and `system.reg` go aside under `registry/` whenever they
+  changed: they are small, and older games keep settings and saves there.
+- **What isn't scanned** gets a line in the plan: the rest of `drive_c`, the prefix's other
+  files, and caches and logs (`-v` lists the exclusions).
 - **The depot lane's list** comes from the depot cache when its record names the game's
   build: every file of the tree and of the support overlays (`gog-support/…/app/`, which
   the build merges into `game/`), at the size the cache holds it. Else the CLI fetches the
@@ -753,16 +772,26 @@ What the rollback settled where §5.3, §5.4 and §6 left room:
   `ddraw.dll`, `Shaders/`, and the stand-in DLL with the `*.ddrawcompat` original it set
   aside. On Linux, D7VK and DXVK come through Proton's env and lay nothing beside the exe.
 - **Exclusions** (`saves::EXCLUDED`): §6.1's list plus `*.dxvk-state-cache` and
-  `Thumbs.db`. A pattern `A/B/` is anchored at the root's base (the user dir, the game's
+  `Thumbs.db`, with `AppData/Local/Microsoft/` narrowed to its caches (`Windows/`,
+  `CLR_*/`; `INetCache` anywhere): XNA and Microsoft-published games save under it. A pattern `A/B/` is anchored at the root's base (the user dir, the game's
   files, `ProgramData`). `A/` or `*/A/` is a dir of that name anywhere. Anything else is a
   file name. `*` stays within one name, and case is ignored.
 - **The aside dir** is `<data_root>/saves-aside/<gogid>/<YYYYmmddTHHMMSSZ>/` (`-2`, `-3`
   when taken), chosen at plan time so the question names it. The installer lane's files
-  keep their path from `drive_c/` (`GOG/<slug>/…`).
+  keep their path from `drive_c/` (`GOG/<slug>/…`). Each file is synced, then the dirs
+  holding it up to `saves-aside/`, before the journal records `savesAside`.
 - **Output.** The plan prints first: to stderr before the question, to stdout with
   `--yes`. `-v` lists every file. `--dry-run --json` prints the plan, and `--json` prints
   §8's shape plus `overrideChanges`, `pruned`, `warnings` and `recovered`. A number that
   isn't a snapshot, is missing on disk or has no metadata is a usage error (exit 2).
+- **The staged tree's launcher.** Before the swap, the rollback writes this gogo's
+  `launch.sh` into the staged tree, beside the marker. The snapshot's own copy may predate
+  the marker check, and until step 6 republishes it, a launch from the menu right after
+  the swap would run it.
+- **A missing override copy.** A target whose metadata says `Copied` but whose
+  `<n>.override.toml` is gone is refused at plan time and under the locks, before
+  anything changes. Gone after the commit, recovery keeps the current override with a
+  warning, as when the target's metadata is gone.
 - **The launcher (`LAUNCHER_VERSION` 15)** sees a marker before setup. It runs no setup
   (setup would apply an override the rollback hasn't restored yet). It then refuses as a
   launch that can't run does: a run log with `# exit: 127 (<why>)`, the dialog, and a
