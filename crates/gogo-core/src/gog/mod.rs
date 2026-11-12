@@ -5,6 +5,7 @@
 //! - catalog:   `https://api.gog.com/products?ids=…` (Bearer) — batch product JSON
 //! - checksum:  public CDN XML — no auth (`docs/design/04` §2)
 
+pub mod builds;
 pub mod cache_upgrade;
 pub mod catalog;
 pub mod checksum;

@@ -182,15 +182,7 @@ impl Default for DepotOptions {
     }
 }
 
-/// Pure: pick the newest public build, tiebreaking on `build_id`
-/// (design 14 D3). `get_builds` already filters by platform.
-pub fn pick_build<'a>(items: impl IntoIterator<Item = &'a Build>) -> Option<&'a Build> {
-    items.into_iter().filter(|b| *b.public()).max_by(|a, b| {
-        a.date_published()
-            .cmp(b.date_published())
-            .then_with(|| a.build_id().cmp(b.build_id()))
-    })
-}
+pub use super::builds::pick_build;
 
 /// How a built game's build stands against the builds GOG lists (design 19 §4).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,11 +240,10 @@ pub async fn installed_build(
     product_id: u64,
     build_id: Option<&str>,
 ) -> Result<InstalledBuild, DepotError> {
-    let builds = core
-        .get_builds(&product_id.to_string(), Platform::Windows, None)
+    let items = super::builds::fetch_listing(core, product_id, Platform::Windows, None)
         .await
-        .map_err(DepotError::library)?;
-    let items: Vec<Build> = builds.items().to_vec();
+        .map_err(DepotError::library)?
+        .builds;
     let (matched, found) = match_build(build_id, &items);
     let listed = match found {
         Some(b) => Some((
@@ -279,11 +270,10 @@ pub async fn installed_build(
 /// Whether GOG publishes a public Windows build for `product_id`, i.e.
 /// whether the depot lane can serve it (`gogo mac-app`'s default, #73).
 pub async fn has_public_build(core: &Core, product_id: u64) -> Result<bool, DepotError> {
-    let builds = core
-        .get_builds(&product_id.to_string(), Platform::Windows, None)
+    let builds = super::builds::fetch_listing(core, product_id, Platform::Windows, None)
         .await
         .map_err(DepotError::library)?;
-    Ok(pick_build(builds.items()).is_some())
+    Ok(pick_build(&builds.builds).is_some())
 }
 
 /// Map an IETF code to the plain name the v1 (legacy XML) content system
@@ -365,12 +355,11 @@ pub async fn build_version(
     password: Option<String>,
     build_id: &str,
 ) -> Option<String> {
-    let builds = core
-        .get_builds(&product_id.to_string(), Platform::Windows, password)
+    let builds = super::builds::fetch_listing(core, product_id, Platform::Windows, password)
         .await
         .ok()?;
     builds
-        .items()
+        .builds
         .iter()
         .find(|b| b.build_id() == build_id)
         .map(|b| b.version_name().to_string())
@@ -383,11 +372,10 @@ pub async fn newest_build(
     product_id: u64,
     password: Option<String>,
 ) -> Result<NewestBuild, DepotError> {
-    let builds = core
-        .get_builds(&product_id.to_string(), Platform::Windows, password)
+    let builds = super::builds::fetch_listing(core, product_id, Platform::Windows, password)
         .await
         .map_err(DepotError::library)?;
-    let build = pick_build(builds.items()).ok_or(DepotError::NoBuilds(product_id))?;
+    let build = pick_build(&builds.builds).ok_or(DepotError::NoBuilds(product_id))?;
     let manifest = core
         .get_manifest(build)
         .await
@@ -445,15 +433,11 @@ pub async fn run(
         cache_roots(cache_base.as_deref(), product_id, opts.dir.as_deref())
             .ok_or(DepotError::NoCacheDir)?;
 
-    let builds = core
-        .get_builds(
-            &product_id.to_string(),
-            Platform::Windows,
-            opts.password.clone(),
-        )
-        .await
-        .map_err(DepotError::library)?;
-    let build = pick_build(builds.items()).ok_or(DepotError::NoBuilds(product_id))?;
+    let builds =
+        super::builds::fetch_listing(core, product_id, Platform::Windows, opts.password.clone())
+            .await
+            .map_err(DepotError::library)?;
+    let build = pick_build(&builds.builds).ok_or(DepotError::NoBuilds(product_id))?;
     let build_id = build.build_id().to_string();
     let generation = *build.generation();
     let _ = events.send(DepotEvent::Resolved {
