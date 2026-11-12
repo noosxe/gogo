@@ -1525,6 +1525,7 @@ fn language_depots() -> Vec<gogo::gog::dlc_filter::DepotList> {
         languages: languages.iter().map(|l| l.to_string()).collect(),
         manifest: manifest.into(),
         paths: paths.iter().map(|p| format!("Test Game/{p}")).collect(),
+        sizes: Default::default(),
     };
     vec![
         d(
@@ -1689,6 +1690,182 @@ fn a_build_takes_only_its_language_from_a_cache_holding_two() {
     let (out, _) = build("de-DE");
     assert!(game("lang/de.pak").is_file() && !game("lang/en.pak").exists());
     assert_eq!(out.content.language.as_deref(), Some("de-DE"));
+}
+
+/// [`language_depots`] with the sizes [`fetch_language`]'s files have.
+fn sized_language_depots() -> Vec<gogo::gog::dlc_filter::DepotList> {
+    let mut d = language_depots();
+    for l in &mut d {
+        l.sizes = l
+            .paths
+            .iter()
+            .map(|p| {
+                let rel = p.strip_prefix("Test Game/").unwrap();
+                (p.clone(), rel.len() as u64)
+            })
+            .collect();
+    }
+    d
+}
+
+/// A cache an older gogo switched from en-US to de-DE (#391): both languages' files
+/// there, the record naming de-DE only. The scan before a build finds en-US, once,
+/// and the build leaves its files out; nothing in the cache is touched.
+#[test]
+fn a_cache_switched_by_an_older_gogo_gets_its_old_language_recorded() {
+    use gogo::gog::{cache_upgrade, depot};
+    let w = World::new("language-scan", &["d3d9.dll"]);
+    let root = w.tree.parent().unwrap().to_path_buf();
+    let game = |rel: &str| w.game().join("game").join(rel);
+    fetch_language(&root, "en-US", &[]);
+    fetch_language(&root, "de-DE", &[]);
+    // What a gogo from before #389 left: de-DE only, no other languages, not scanned.
+    let rec_path = root.join(depot::RECORD);
+    let mut v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&rec_path).unwrap()).unwrap();
+    v.as_object_mut().unwrap().remove("otherLanguages");
+    v.as_object_mut().unwrap().remove("languagesScanned");
+    std::fs::write(&rec_path, v.to_string()).unwrap();
+    assert_eq!(depot::read_record(&root).unwrap().languages(), ["de-DE"]);
+    assert!(depot::languages_unscanned(&root, "4242"));
+
+    let build = |language: &str| {
+        let opts = LinuxAppOptions {
+            depot_content: Some(language_content(&root, &w, language)),
+            ..w.opts()
+        };
+        let plan = build::plan(&opts, None, &mut quiet()).unwrap();
+        build::execute(&plan, None, &mut |_| {}).unwrap()
+    };
+    // Before the scan, en-US's files go into game/ (the bug).
+    build("de-DE");
+    assert!(game("lang/en.pak").is_file());
+
+    // A fetch failure: a warning, the record byte for byte as it was, and the build
+    // goes on as before.
+    let before = std::fs::read(&rec_path).unwrap();
+    let lines =
+        cache_upgrade::bring_up_to_date(&root, "Test", "de-DE", "4242", Err("offline".into()));
+    assert!(
+        lines.len() == 1 && lines[0].contains("couldn't be looked for: offline"),
+        "{lines:?}"
+    );
+    assert_eq!(std::fs::read(&rec_path).unwrap(), before);
+    build("de-DE");
+    assert!(game("lang/en.pak").is_file());
+
+    // Every file of the cache but its record, with its bytes.
+    let files = || {
+        fn go(dir: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    go(&p, out);
+                } else if e.file_name() != depot::RECORD {
+                    out.push((p.clone(), std::fs::read(&p).unwrap()));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        go(&root, &mut out);
+        out.sort();
+        out
+    };
+    let tree_before = files();
+    let fetched = || cache_upgrade::Fetched {
+        base: ID.into(),
+        tree_name: "Test Game".into(),
+        depots: sized_language_depots(),
+    };
+    let lines = cache_upgrade::bring_up_to_date(&root, "Test", "de-DE", "4242", Ok(fetched()));
+    assert!(
+        lines.iter().any(|l| l.contains("also holds en-US from")),
+        "{lines:?}"
+    );
+    assert_eq!(files(), tree_before, "only the record is written");
+    let rec = depot::read_record(&root).unwrap();
+    assert_eq!(rec.languages(), ["de-DE", "en-US"]);
+    assert!(!depot::languages_unscanned(&root, "4242"));
+    // Whole: the one path the two share comes through one manifest.
+    assert_eq!(
+        depot::check_cache(
+            &root,
+            &depot::CacheWant {
+                build_id: Some("4242"),
+                language: Some("en-US"),
+                dlcs: &[],
+            }
+        ),
+        depot::CacheCheck::Complete
+    );
+    // Scanned once: no fetch is needed again, and a later record keeps the flag.
+    assert!(
+        cache_upgrade::bring_up_to_date(&root, "Test", "de-DE", "4242", Err("offline".into()))
+            .is_empty()
+    );
+    depot::write_record(&root, "4242", "de-DE", &[]).unwrap();
+    assert!(!depot::languages_unscanned(&root, "4242"));
+
+    let out = build("de-DE");
+    assert!(game("lang/de.pak").is_file() && game("Sound/DE/voice.pak").is_file());
+    assert!(!game("lang/en.pak").exists() && !game("Sound/EN").exists());
+    assert!(game("lang/common.pak").is_file(), "a shared path stays");
+    assert_eq!(out.materialized.as_ref().unwrap().left_out_files, 2);
+}
+
+/// Only some of an unrecorded language's files there (#391): not recorded, so its
+/// files go into game/ as before; and a wrong size counts as not there.
+#[test]
+fn a_partly_held_language_is_not_recorded() {
+    use gogo::gog::{cache_upgrade, depot};
+    let w = World::new("language-scan-partial", &["d3d9.dll"]);
+    let root = w.tree.parent().unwrap().to_path_buf();
+    fetch_language(&root, "de-DE", &[]);
+    let en = root.join("Test Game/lang/en.pak");
+    std::fs::write(&en, "lang/en.pak").unwrap();
+    let fetched =
+        |root: &Path| cache_upgrade::scan_languages(root, ID, &sized_language_depots()).unwrap();
+    let scan = fetched(&root);
+    assert!(scan.found.is_empty(), "{scan:?}");
+    assert!(
+        scan.notes.iter().any(|n| n.contains("en-US: 1 of its 2")),
+        "{:?}",
+        scan.notes
+    );
+    // Every file there, one of the wrong size.
+    let voice = root.join("Test Game/Sound/EN/voice.pak");
+    std::fs::create_dir_all(voice.parent().unwrap()).unwrap();
+    std::fs::write(&voice, "not the size").unwrap();
+    assert!(fetched(&root).found.is_empty());
+    std::fs::write(&voice, "Sound/EN/voice.pak").unwrap();
+    assert_eq!(fetched(&root).found[0].language, "en-US");
+
+    // Recorded as scanned with nothing found: the filter leaves the cache whole.
+    std::fs::remove_file(&voice).unwrap();
+    let lines = cache_upgrade::bring_up_to_date(
+        &root,
+        "Test",
+        "de-DE",
+        "4242",
+        Ok(cache_upgrade::Fetched {
+            base: ID.into(),
+            tree_name: "Test Game".into(),
+            depots: sized_language_depots(),
+        }),
+    );
+    assert!(lines.iter().all(|l| !l.contains("also holds")), "{lines:?}");
+    assert_eq!(depot::read_record(&root).unwrap().languages(), ["de-DE"]);
+    assert!(!depot::languages_unscanned(&root, "4242"));
+    let opts = LinuxAppOptions {
+        depot_content: Some(language_content(&root, &w, "de-DE")),
+        ..w.opts()
+    };
+    let plan = build::plan(&opts, None, &mut quiet()).unwrap();
+    build::execute(&plan, None, &mut |_| {}).unwrap();
+    assert!(
+        w.game().join("game/lang/en.pak").is_file(),
+        "kept, as before"
+    );
 }
 
 #[test]
@@ -7137,12 +7314,14 @@ mod dlc_add {
                 languages: vec!["*".into()],
                 manifest: "m-base".into(),
                 paths: base,
+                sizes: Default::default(),
             },
             DepotList {
                 product: DLC.to_string(),
                 languages: vec!["*".into()],
                 manifest: "m-dlc".into(),
                 paths: dlc_paths(),
+                sizes: Default::default(),
             },
         ]
     }
@@ -7370,6 +7549,7 @@ mod dlc_add {
             languages: vec!["en-US".into()],
             manifest: "m-en".into(),
             paths: vec![format!("{TREE}/vo/en.pak")],
+            sizes: Default::default(),
         });
         let up = gogo::gog::cache_upgrade::decide(&root, TREE, ID, "B1", &d, "en-US");
         assert!(up.is_err(), "{up:?}");

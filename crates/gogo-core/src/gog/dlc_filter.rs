@@ -36,6 +36,8 @@ pub struct Entry {
     pub path: String,
     /// GOG's support files go to the support root, not the install dir.
     pub support: bool,
+    /// Its size in bytes, when the manifest gives one (a link has none).
+    pub size: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -57,11 +59,23 @@ enum V2Item {
         path: String,
         #[serde(default)]
         flags: Vec<String>,
+        #[serde(default)]
+        chunks: Vec<V2Chunk>,
+        #[serde(default, rename = "sfcRef")]
+        sfc_ref: Option<V2Chunk>,
     },
     #[serde(rename = "DepotLink")]
     Link { path: String },
     #[serde(other)]
     Other,
+}
+
+/// A chunk of a v2 file, or its place in a small-files container: `size` is
+/// the uncompressed size.
+#[derive(Deserialize)]
+struct V2Chunk {
+    #[serde(default)]
+    size: u64,
 }
 
 #[derive(Deserialize)]
@@ -82,6 +96,8 @@ struct V1Item {
     directory: bool,
     #[serde(default)]
     support: bool,
+    #[serde(default)]
+    size: Option<u64>,
 }
 
 /// gog-warp's path normalization: backslashes become `/`, no `/` at either end.
@@ -97,13 +113,26 @@ pub fn parse_v2(json: &[u8]) -> Result<Vec<Entry>, String> {
         .items
         .into_iter()
         .filter_map(|i| match i {
-            V2Item::File { path, flags } => Some(Entry {
+            V2Item::File {
+                path,
+                flags,
+                chunks,
+                sfc_ref,
+            } => Some(Entry {
                 path: norm(&path),
                 support: flags.iter().any(|f| f == "support"),
+                // Its chunks add up to it; a file kept only in a small-files
+                // container has none, and its place there gives the size.
+                size: Some(if chunks.is_empty() {
+                    sfc_ref.map_or(0, |c| c.size)
+                } else {
+                    chunks.iter().map(|c| c.size).sum()
+                }),
             }),
             V2Item::Link { path } => Some(Entry {
                 path: norm(&path),
                 support: false,
+                size: None,
             }),
             V2Item::Other => None,
         })
@@ -120,6 +149,7 @@ pub fn parse_v1(json: &[u8]) -> Result<Vec<Entry>, String> {
         .map(|f| Entry {
             path: norm(&f.path),
             support: f.support,
+            size: f.size,
         })
         .collect())
 }
@@ -172,6 +202,25 @@ pub struct DepotList {
     pub manifest: String,
     /// Relative to the cache root, as gog-warp lays them out ([`root_path`]).
     pub paths: Vec<String>,
+    /// The sizes the manifest gives, by path as in `paths`; a path with none (a
+    /// link) is left out.
+    pub sizes: BTreeMap<String, u64>,
+}
+
+/// The `paths` and `sizes` of a [`DepotList`] from manifest entries.
+fn laid(entries: &[Entry], at: impl Fn(&Entry) -> String) -> (Vec<String>, BTreeMap<String, u64>) {
+    let mut sizes = BTreeMap::new();
+    let paths = entries
+        .iter()
+        .map(|e| {
+            let p = at(e);
+            if let Some(n) = e.size {
+                sizes.insert(p.clone(), n);
+            }
+            p
+        })
+        .collect();
+    (paths, sizes)
 }
 
 /// Fetch the depots of `manifest`'s build with their files: every depot, or with
@@ -215,15 +264,15 @@ pub async fn fetch_depots(
                         .map_err(|e| DepotError::Library(format!("depot manifest: {e}")))?;
                     fetched.insert(hash.clone(), parse_v2(&json).map_err(DepotError::Library)?);
                 }
-                let paths = fetched[&hash]
-                    .iter()
-                    .map(|e| root_path(&install_dir, base, product, true, e))
-                    .collect();
+                let (paths, sizes) = laid(&fetched[&hash], |e| {
+                    root_path(&install_dir, base, product, true, e)
+                });
                 out.push(DepotList {
                     product: product.to_string(),
                     languages,
                     manifest: hash,
                     paths,
+                    sizes,
                 });
             }
         }
@@ -268,15 +317,15 @@ pub async fn fetch_depots(
                     let entries = parse_v1(&get(http, &url).await?).map_err(DepotError::Library)?;
                     fetched.insert(name.clone(), entries);
                 }
-                let paths = fetched[name]
-                    .iter()
-                    .map(|e| root_path(&install_dir, base, &product, false, e))
-                    .collect();
+                let (paths, sizes) = laid(&fetched[name], |e| {
+                    root_path(&install_dir, base, &product, false, e)
+                });
                 out.push(DepotList {
                     product,
                     languages: languages.clone(),
                     manifest: name.clone(),
                     paths,
+                    sizes,
                 });
             }
         }
@@ -601,9 +650,9 @@ mod tests {
     #[test]
     fn v2_lists_files_and_links_with_support_flags() {
         let json = br#"{"depot":{"items":[
-            {"type":"DepotFile","path":"bin\\x64\\Game.exe","chunks":[],"flags":["executable"]},
+            {"type":"DepotFile","path":"bin\\x64\\Game.exe","chunks":[{"size":5,"compressedSize":3},{"size":2}],"flags":["executable"]},
             {"type":"DepotDirectory","path":"tools\\redmod"},
-            {"type":"DepotFile","path":"app/goggame-2.script","chunks":[],"flags":["support"]},
+            {"type":"DepotFile","path":"app/goggame-2.script","chunks":[],"flags":["support"],"sfcRef":{"offset":10,"size":4}},
             {"type":"DepotLink","path":"link","target":"bin"},
             {"type":"DepotDiff","path_source":"a","path_target":"b"}
         ],"smallFilesContainer":null}}"#;
@@ -613,15 +662,18 @@ mod tests {
             [
                 Entry {
                     path: "bin/x64/Game.exe".into(),
-                    support: false
+                    support: false,
+                    size: Some(7),
                 },
                 Entry {
                     path: "app/goggame-2.script".into(),
-                    support: true
+                    support: true,
+                    size: Some(4),
                 },
                 Entry {
                     path: "link".into(),
-                    support: false
+                    support: false,
+                    size: None,
                 },
             ]
         );
@@ -645,6 +697,7 @@ mod tests {
         let e = parse_v1(json).unwrap();
         assert_eq!(e.len(), 2);
         assert_eq!(e[0].path, "data/a.pak");
+        assert_eq!(e[0].size, Some(3));
         assert_eq!(
             root_path("Game", "1", "2", false, &e[1]),
             "gog-support/1/support.ico"
@@ -735,6 +788,7 @@ mod tests {
             languages: vec![l.into()],
             manifest: m.into(),
             paths: vec![p.into()],
+            sizes: BTreeMap::new(),
         };
         let one = [d("en-US", "x", "G/a"), d("de-DE", "x", "G/A")];
         assert!(clash(&one, "en-US", |_| true).is_none(), "one manifest");

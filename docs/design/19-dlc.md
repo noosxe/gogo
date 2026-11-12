@@ -536,8 +536,32 @@ resolve game → content.toml (build B, language L, installed DLC I)
   - **When the lists can't be had** (offline, a build GOG no longer lists), the build is
     refused as for DLC: nothing changes, nothing untrue is recorded.
   - `mac-app` still clones the tree whole, every language included.
-  - A cache switched by a gogo from before this names only its last language, so the
-    earlier one's files aren't known to be there and a build copies them.
+  - **Languages an older switch left (#391,** `cache_upgrade::scan_languages`**).** A
+    cache switched by a gogo from before #389 kept the old language's files but names
+    only its last language. Such a record can't be told from a new record of a cache
+    never switched, so every record gets one scan, and `languagesScanned: true` marks
+    it done. A new record keeps the last one's flag; a cache's first record has none,
+    so it's scanned once too. The scan runs where #374's upgrade does, before a
+    `linux-app` build, right after it when both apply, and both use one fetch of the
+    build's depots (every depot, every language; `cache_upgrade::bring_up_to_date`).
+    - **Held:** a language L the record doesn't name, when the base has depots in L
+      and not in the record's language, and every file of each is on disk with the
+      size the depot manifest gives (v2: the sum of its chunks, or its place in the
+      small-files container; v1: `size`). A path such a depot shares with the record's
+      language through another depot manifest holds that one's bytes, so only its
+      presence counts. With no such base depot, the record's DLC's depots in L count
+      instead; with none either, L's files can't be told from the record language's
+      and L is skipped. Sizes only: no file is read or hashed.
+    - **Recorded** as a switch records the old language: `whole` unless it clashes
+      with the record's language (`dlc_filter::clash`), `dlcs` the DLC whose L files
+      are all there, `products` every product's list in L. The record language's lists
+      go into `products` from the same fetch.
+    - **Partly there:** not recorded, with a note. No list names its files, so the
+      filter keeps them, as before.
+    - **Best effort:** a fetch failure, a build GOG no longer lists or a record that
+      changed meanwhile leaves the record as it was and unscanned, with a warning; the
+      build goes on and the next one tries again. The record is the only write: no
+      file is deleted or pruned.
 - As built (#347): `check_cache(root, &CacheWant { build_id, language, dlcs })`; a `None`
   field isn't checked, so `mac-app`/`linux-app` (which pass none until #349) see only
   `Complete`, `Unrecorded` and `Missing`. Order of answers: `Missing`, `OtherBuild`,

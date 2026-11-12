@@ -783,6 +783,13 @@ struct Record {
     /// `language` only.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     other_languages: BTreeMap<String, HeldLanguage>,
+    /// `language` and `other_languages` name every language whose files are all in
+    /// the cache (#391). A gogo from before #389 kept the old language's files on a
+    /// switch but recorded only the new one, so a record without this flag may hold
+    /// more: [`super::cache_upgrade::scan_languages`] finds those once and sets it.
+    /// A new record keeps the last one's flag; the first record of a cache hasn't it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    languages_scanned: bool,
     /// Paths relative to the cache root, `/`-separated, sorted.
     files: Vec<String>,
 }
@@ -923,6 +930,7 @@ pub fn write_record(
     dlcs.sort();
     dlcs.dedup();
     let prior = load_record(root);
+    let languages_scanned = prior.as_ref().is_some_and(|p| p.languages_scanned);
     let (products, other_languages) = match prior {
         Some(p) => carry_languages(p, build_id, language),
         None => (None, BTreeMap::new()),
@@ -933,6 +941,7 @@ pub fn write_record(
         dlcs: Some(dlcs),
         products,
         other_languages,
+        languages_scanned,
         files,
     };
     save_record(root, &rec)
@@ -1068,6 +1077,52 @@ pub(crate) fn upgrade_record(
     rec.language = Some(language.to_string());
     rec.dlcs = Some(held);
     rec.products = Some(all);
+    save_record(root, &rec)?;
+    Ok(true)
+}
+
+/// Whether cache root `root`'s record is for build `build_id` and hasn't had its
+/// languages scanned yet (#391): it may hold files of a language it doesn't name.
+/// Every older record (#374) is one.
+pub fn languages_unscanned(root: &Path, build_id: &str) -> bool {
+    load_record(root).is_some_and(|r| r.build_id == build_id && !r.languages_scanned)
+}
+
+/// Record what [`super::cache_upgrade::scan_languages`] found in cache root
+/// `root` (#391): each language of `found` the record doesn't name yet goes into
+/// `other_languages`, `lists` (the record language's) into `products`, and the
+/// record is marked scanned. Only while it is still the unscanned record of
+/// `build_id` in `language` it was scanned from, else `Ok(false)` and nothing
+/// changes. The record is the only write; `files` and the tree stay as they are.
+pub(crate) fn record_scanned_languages(
+    root: &Path,
+    build_id: &str,
+    language: &str,
+    found: &[super::cache_upgrade::FoundLanguage],
+    lists: &super::dlc_filter::ProductFiles,
+) -> std::io::Result<bool> {
+    let Some(mut rec) = load_record(root)
+        .filter(|r| r.build_id == build_id && !r.languages_scanned && r.is_language(language))
+    else {
+        return Ok(false);
+    };
+    for f in found {
+        if rec.is_language(&f.language) || rec.other(&f.language).is_some() {
+            continue;
+        }
+        rec.other_languages.insert(
+            f.language.clone(),
+            HeldLanguage {
+                whole: f.whole,
+                dlcs: f.dlcs.clone(),
+                products: Some(f.products.clone()),
+            },
+        );
+    }
+    rec.products
+        .get_or_insert_default()
+        .extend(lists.iter().map(|(k, v)| (k.clone(), v.clone())));
+    rec.languages_scanned = true;
     save_record(root, &rec)?;
     Ok(true)
 }
@@ -1645,6 +1700,7 @@ mod tests {
             languages: vec![language.into()],
             manifest: manifest.into(),
             paths: paths.iter().map(|p| p.to_string()).collect(),
+            sizes: Default::default(),
         }
     }
 
@@ -1746,6 +1802,7 @@ mod tests {
             dlcs: Some(vec![]),
             products: None,
             other_languages: BTreeMap::new(),
+            languages_scanned: false,
             files: vec![],
         };
         let est =
@@ -1979,6 +2036,7 @@ mod tests {
             dlcs: Some(vec![]),
             products: None,
             other_languages: BTreeMap::new(),
+            languages_scanned: false,
             files: vec![],
         };
         let other = CacheCheck::OtherLanguage;
