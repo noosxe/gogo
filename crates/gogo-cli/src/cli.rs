@@ -1411,6 +1411,10 @@ mod tests {
     fn the_command_tree_is_consistent_and_rollback_reads_its_flags() {
         use clap::CommandFactory;
         Cli::command().debug_assert();
+        // `linux-app` only exists on Linux.
+        if !cfg!(target_os = "linux") {
+            return;
+        }
         let c = Cli::try_parse_from([
             "gogo",
             "linux-app",
