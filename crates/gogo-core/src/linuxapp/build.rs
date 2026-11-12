@@ -1168,6 +1168,13 @@ pub fn execute(
     {
         content.language = Some(l);
     }
+    // The build's version name (#418), when it is for the build the record names.
+    if lane == content::Lane::Depot
+        && let Some((id, v)) = plan.depot_content.as_ref().and_then(|c| c.version.clone())
+        && content.build_id.as_deref() == Some(id.as_str())
+    {
+        content.version = Some(v);
+    }
     let dirs = GameDirs::for_game(&gogid)?;
     if let Some(w) = write_content_or_warn(&dirs.root, &content) {
         outcome.warnings.push(w);

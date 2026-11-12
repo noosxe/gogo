@@ -963,14 +963,14 @@ impl SnapshotView {
         }
     }
 
-    /// `BUILD`: the version, else the build id's tail.
+    /// `BUILD`: the version, else the whole build id (about 17 digits, and the
+    /// column widens to it), else `-`.
     fn build_text(&self) -> String {
         let c = self.content.as_ref();
         if let Some(v) = c.and_then(|c| c.version.as_deref()) {
             return v.to_string();
         }
         match c.and_then(|c| c.build_id.as_deref()) {
-            Some(b) if b.len() > 8 => format!("…{}", &b[b.len() - 8..]),
             Some(b) => b.to_string(),
             None => "-".to_string(),
         }
@@ -2027,6 +2027,41 @@ pub fn meta_view(meta: &Meta) -> SnapshotView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn row_with(version: Option<&str>, build_id: Option<&str>) -> SnapshotView {
+        SnapshotView {
+            id: 1,
+            created: None,
+            kind: Some("auto"),
+            trigger: None,
+            label: None,
+            state: Some("done"),
+            presence: "present",
+            reachable: true,
+            content: Some(ContentView {
+                lane: Some("depot".into()),
+                build_id: build_id.map(String::from),
+                version: version.map(String::from),
+                language: None,
+                dlcs: Vec::new(),
+                runtime: None,
+                renderer: None,
+            }),
+            space: None,
+            created_at: None,
+        }
+    }
+
+    #[test]
+    fn the_build_cell_is_the_version_the_whole_build_id_or_a_dash() {
+        let id = "1234567890147545148";
+        assert_eq!(row_with(Some("2.31"), Some(id)).build_text(), "2.31");
+        assert_eq!(row_with(None, Some(id)).build_text(), id);
+        assert_eq!(row_with(None, None).build_text(), "-");
+        let mut none = row_with(None, None);
+        none.content = None;
+        assert_eq!(none.build_text(), "-");
+    }
 
     #[test]
     fn the_plan_line_has_the_three_forms_of_design_20() {

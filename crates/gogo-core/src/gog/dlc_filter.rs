@@ -541,6 +541,10 @@ pub struct DepotContent {
     /// The build's language, recorded in `content.toml` (#389): the cache record's
     /// names only the last one fetched. `None`: the record's.
     pub language: Option<String>,
+    /// The build's id and version name (`2.31`) from GOG's builds list, for
+    /// `content.toml`'s `version` (#418). Used only when the id is the build the
+    /// tree holds. `None`: the list didn't answer or the build isn't in it.
+    pub version: Option<(String, String)>,
     /// Leaves out the cache's other DLC; `None` when it holds no other.
     pub filter: Option<TreeFilter>,
 }

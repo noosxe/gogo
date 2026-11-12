@@ -356,6 +356,27 @@ pub struct NewestBuild {
     pub manifest: Manifest,
 }
 
+/// The version name GOG's builds list gives build `build_id` of `product_id`
+/// (`2.31`), for `content.toml` (#418). `None` when the list can't be fetched or
+/// doesn't hold the build: the record then goes without a version.
+pub async fn build_version(
+    core: &Core,
+    product_id: u64,
+    password: Option<String>,
+    build_id: &str,
+) -> Option<String> {
+    let builds = core
+        .get_builds(&product_id.to_string(), Platform::Windows, password)
+        .await
+        .ok()?;
+    builds
+        .items()
+        .iter()
+        .find(|b| b.build_id() == build_id)
+        .map(|b| b.version_name().to_string())
+        .filter(|v| !v.trim().is_empty())
+}
+
 /// Fetch the newest public build's list entry and its build manifest.
 pub async fn newest_build(
     core: &Core,

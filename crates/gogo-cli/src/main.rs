@@ -2471,9 +2471,22 @@ async fn take_content(
     let wanted: Vec<u64> = plan.refs.iter().map(|d| d.id).collect();
     // The build's language (#389): `--lang`, else the game's, else the cache's.
     let language = plan.opts.language.clone();
+    // The version of the build the cache holds (#418); best effort.
+    let version = match gogo::gog::depot::read_record(root) {
+        Some(r) => gogo::gog::depot::build_version(
+            session,
+            game.id,
+            plan.opts.password.clone(),
+            &r.build_id,
+        )
+        .await
+        .map(|v| (r.build_id, v)),
+        None => None,
+    };
     let mut content = DepotContent {
         dlcs: plan.refs.clone(),
         language: Some(language.clone()),
+        version,
         filter: None,
     };
     let Need::Filter {

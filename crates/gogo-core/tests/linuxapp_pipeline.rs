@@ -1449,6 +1449,7 @@ fn content_for(root: &Path, w: &World, wanted: &[u64]) -> build::DepotContent {
     build::DepotContent {
         dlcs,
         language: None,
+        version: None,
         filter,
     }
 }
@@ -1649,6 +1650,7 @@ fn language_content(root: &Path, w: &World, language: &str) -> build::DepotConte
     build::DepotContent {
         dlcs: Vec::new(),
         language: Some(language.into()),
+        version: None,
         filter,
     }
 }
@@ -1682,8 +1684,11 @@ fn a_build_takes_only_its_language_from_a_cache_holding_two() {
     );
 
     let build = |language: &str| {
+        let mut dc = language_content(&root, &w, language);
+        // The depot build's version name reaches content.toml (#418).
+        dc.version = Some((depot::read_record(&root).unwrap().build_id, "2.31".into()));
         let opts = LinuxAppOptions {
-            depot_content: Some(language_content(&root, &w, language)),
+            depot_content: Some(dc),
             ..w.opts()
         };
         let plan = build::plan(&opts, None, &mut quiet()).unwrap();
@@ -1733,6 +1738,7 @@ fn a_build_takes_only_its_language_from_a_cache_holding_two() {
         assert_eq!(out.content.language.as_deref(), Some(language));
         let file = content::load(&w.game()).unwrap().unwrap();
         assert_eq!(file.language.as_deref(), Some(language));
+        assert_eq!(file.version.as_deref(), Some("2.31"));
         let rec = depot::read_record(&root).unwrap();
         assert_eq!(rec.language.as_deref(), Some("de-DE"));
         assert!(rec.languages().iter().any(|l| l == language));
@@ -7615,6 +7621,7 @@ mod dlc_add {
                     })
                     .collect(),
                 language: None,
+                version: None,
                 filter: None,
             }),
             ..w.opts()
