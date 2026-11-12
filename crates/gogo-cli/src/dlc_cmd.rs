@@ -229,9 +229,9 @@ fn emit(ev: &ProgressEvent, json_progress: bool, quiet: bool, print: &dyn Fn(&st
         ProgressEvent::SnapshotCreated { id, label, .. } => {
             Some(format!("snapshot {id} taken ({label})"))
         }
-        ProgressEvent::SnapshotPruned { id, label, created } => Some(
-            gogo::linuxapp::snapshots::pruned_line(*id, label, created),
-        ),
+        ProgressEvent::SnapshotPruned { id, label, created } => {
+            Some(gogo::linuxapp::snapshots::pruned_line(*id, label, created))
+        }
         ProgressEvent::Warn { message } => Some(format!("note: {message}")),
         _ => None,
     };

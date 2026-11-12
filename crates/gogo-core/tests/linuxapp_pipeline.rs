@@ -6789,7 +6789,10 @@ mod dlc_add {
             msg.contains("(before adding Extra Pack) couldn't be taken"),
             "{msg}"
         );
-        assert!(msg.contains("`--no-snapshots` skips it for this run"), "{msg}");
+        assert!(
+            msg.contains("`--no-snapshots` skips it for this run"),
+            "{msg}"
+        );
         assert!(r.inputs.is_empty(), "nothing fetched");
         assert_eq!(tree(&w.game().join("game")), before);
         assert_eq!(
@@ -6805,7 +6808,11 @@ mod dlc_add {
         assert!(out.snapshot.is_none());
         assert_eq!(out.added.len(), 1);
         assert_eq!(snapshot_ids(&b), [1]);
-        assert!(gogo::linuxapp::snapshots::list(ID, &b, 5, false).unwrap().auto);
+        assert!(
+            gogo::linuxapp::snapshots::list(ID, &b, 5, false)
+                .unwrap()
+                .auto
+        );
     }
 
     #[test]
@@ -8446,7 +8453,10 @@ mod snapshots {
         assert_eq!(plan.snapshots, BuildSnapshots::Kept { on: true });
         let again = build::execute(&plan, None, &mut quiet()).unwrap();
         let m = again.snapshot.expect("before rebuild");
-        assert_eq!((m.kind, m.label.as_str()), (gogo::snapshot::Kind::Auto, "before rebuild"));
+        assert_eq!(
+            (m.kind, m.label.as_str()),
+            (gogo::snapshot::Kind::Auto, "before rebuild")
+        );
         assert_eq!(snap::list(ID, &b, 5, false).unwrap().snapshots.len(), 2);
     }
 
@@ -10672,7 +10682,10 @@ mod autosnapshot {
     fn built(name: &str, b: &Backends) -> World {
         let w = World::new(name, &["d3d9.dll"]);
         let out = build_events(&on(&w, b, 5)).0.unwrap();
-        assert_eq!(out.snapshot.map(|m| (m.id, m.kind)), Some((1, Kind::Initial)));
+        assert_eq!(
+            out.snapshot.map(|m| (m.id, m.kind)),
+            Some((1, Kind::Initial))
+        );
         w
     }
 
@@ -10716,7 +10729,11 @@ mod autosnapshot {
 
         let plan = build::plan(&on(&w, &b, 2), None, &mut quiet()).unwrap();
         assert_eq!(plan.snapshots, BuildSnapshots::Kept { on: true });
-        assert!(plan.snapshots.line().contains("`before rebuild` is taken first"));
+        assert!(
+            plan.snapshots
+                .line()
+                .contains("`before rebuild` is taken first")
+        );
         // A file only the old game has: the snapshot holds the game as it was.
         std::fs::write(root.join("game/old-only.txt"), "old").unwrap();
         let (out, events) = build_events(&on(&w, &b, 2));
@@ -10902,12 +10919,15 @@ mod autosnapshot {
 
         f.fail_at(FakeStep::Snapshot);
         let (out, events) = build_events(&on(&w, &b, 5));
-        let e = out.err().expect("the rebuild stops");
+        let e = out.expect_err("the rebuild stops");
         assert!(matches!(e, MacAppError::Apps(_)), "exit 7: {e:?}");
         let msg = e.to_string();
         assert!(msg.contains("(before rebuild) couldn't be taken"), "{msg}");
         assert!(msg.contains("nothing was changed"), "{msg}");
-        assert!(msg.contains("`--no-snapshots` skips it for this run"), "{msg}");
+        assert!(
+            msg.contains("`--no-snapshots` skips it for this run"),
+            "{msg}"
+        );
         assert!(of(&events, "SnapshotCreated").is_empty());
         // Nothing changed: the old files, the launch config, no umu run.
         assert!(root.join("game/old-only.txt").is_file());
@@ -10953,10 +10973,7 @@ mod autosnapshot {
             &setup::SetupOptions {
                 refresh: false,
                 prompt: None,
-                runtime_snapshot: Some(AutoOptions {
-                    skip,
-                    ..auto(b)
-                }),
+                runtime_snapshot: Some(AutoOptions { skip, ..auto(b) }),
             },
             &mut |e| events.push(serde_json::to_value(e).unwrap()),
         )
@@ -10976,7 +10993,11 @@ mod autosnapshot {
         let t = s.snapshot.expect("before the runtime change");
         assert_eq!(
             (t.meta.id, t.meta.trigger, t.meta.label.as_str()),
-            (2, Some(Trigger::Runtime), "before GE-Proton10-34 → GE-Proton10-40")
+            (
+                2,
+                Some(Trigger::Runtime),
+                "before GE-Proton10-34 → GE-Proton10-40"
+            )
         );
         // Taken before setup wrote anything: it holds the old runtime.
         assert_eq!(t.meta.content.runtime.as_deref(), Some(old.as_str()));
@@ -11040,7 +11061,10 @@ mod autosnapshot {
             ..on(&w, &b, 5)
         };
         let (out, events) = build_events(&o);
-        assert_eq!(out.unwrap().snapshot.map(|m| m.label), Some("before rebuild".into()));
+        assert_eq!(
+            out.unwrap().snapshot.map(|m| m.label),
+            Some("before rebuild".into())
+        );
         assert_eq!(of(&events, "SnapshotCreated").len(), 1, "{events:?}");
         assert_eq!(w.state().runtime, new);
     }

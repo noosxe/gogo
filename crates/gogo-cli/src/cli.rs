@@ -1796,9 +1796,23 @@ mod tests {
     fn no_snapshots_is_taken_by_every_command_that_snapshots() {
         for args in [
             &["gogo", "linux-app", "tag", "--no-snapshots"][..],
-            &["gogo", "linux-app", "--retarget=1", "--runtime=ge-proton", "--no-snapshots"],
+            &[
+                "gogo",
+                "linux-app",
+                "--retarget=1",
+                "--runtime=ge-proton",
+                "--no-snapshots",
+            ],
             &["gogo", "linux-app", "setup", "1", "--no-snapshots"],
-            &["gogo", "linux-app", "dlc", "1", "add", "--all", "--no-snapshots"],
+            &[
+                "gogo",
+                "linux-app",
+                "dlc",
+                "1",
+                "add",
+                "--all",
+                "--no-snapshots",
+            ],
         ] {
             assert!(Cli::try_parse_from(args).is_ok(), "{args:?}");
         }

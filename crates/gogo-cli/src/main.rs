@@ -6419,9 +6419,9 @@ fn emit_macapp_event(ev: &gogo::engine::events::ProgressEvent, json_progress: bo
             gogo::fmt::human_size(*total)
         )),
         Ev::SnapshotCreated { id, label, .. } => Some(format!("snapshot {id} taken ({label})")),
-        Ev::SnapshotPruned { id, label, created } => Some(
-            gogo::linuxapp::snapshots::pruned_line(*id, label, created),
-        ),
+        Ev::SnapshotPruned { id, label, created } => {
+            Some(gogo::linuxapp::snapshots::pruned_line(*id, label, created))
+        }
         _ => None,
     };
     if let Some(l) = line {
