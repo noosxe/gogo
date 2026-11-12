@@ -314,6 +314,16 @@ pub enum Command {
         /// when it names one language.
         #[arg(long, value_name = "CODE", conflicts_with = "retarget")]
         lang: Option<String>,
+        /// Build from this depot build instead of the newest: a build id, or a
+        /// version name that names one build. An unknown or ambiguous value
+        /// lists the builds; an older build than the installed one is a
+        /// downgrade, and a build that lacks an installed DLC or the game's
+        /// language is refused. Not for the offline-installer lane.
+        #[arg(long, value_name = "ID|VERSION", conflicts_with = "retarget")]
+        build: Option<String>,
+        /// Password for password-protected builds (with `--build`).
+        #[arg(long, requires = "build", conflicts_with = "retarget")]
+        password: Option<String>,
         /// A new game gets a plain dir, no snapshot, and autosnapshot off
         /// (default: on btrfs, the game dir is a subvolume and its first
         /// snapshot is taken after setup; `[snapshots] auto`). A rebuild,
@@ -982,6 +992,10 @@ pub struct DepotArgs {
     /// Password for password-protected builds.
     #[arg(long)]
     pub password: Option<String>,
+    /// Download this build instead of the newest: a build id, or a version name
+    /// that names one build. An unknown or ambiguous value lists the builds.
+    #[arg(long, value_name = "ID|VERSION", conflicts_with = "list_languages")]
+    pub build: Option<String>,
     /// Install root override (default: the user cache directory).
     #[arg(long, value_name = "DIR")]
     pub dir: Option<std::path::PathBuf>,
@@ -1838,6 +1852,41 @@ mod tests {
         for r in ["dxmt", "d3dmetal"] {
             assert!(Cli::try_parse_from(["gogo", "linux-app", "x", "--renderer", r]).is_err());
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn build_and_password_parse_on_depot_and_linux_app() {
+        let Command::Depot(d) = Cli::try_parse_from(["gogo", "depot", "tag", "--build", "2.31a"])
+            .unwrap()
+            .command
+        else {
+            panic!("expected depot");
+        };
+        assert_eq!(d.build.as_deref(), Some("2.31a"));
+        let Command::LinuxApp {
+            build, password, ..
+        } = Cli::try_parse_from([
+            "gogo",
+            "linux-app",
+            "tag",
+            "--build=58989493373906337",
+            "--password=pw",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("expected a linux-app build");
+        };
+        assert_eq!(build.as_deref(), Some("58989493373906337"));
+        assert_eq!(password.as_deref(), Some("pw"));
+        // A password only goes with a build; neither goes with a retarget or a
+        // language listing.
+        assert!(Cli::try_parse_from(["gogo", "linux-app", "tag", "--password=pw"]).is_err());
+        assert!(Cli::try_parse_from(["gogo", "linux-app", "--retarget=1", "--build=2"]).is_err());
+        assert!(
+            Cli::try_parse_from(["gogo", "depot", "tag", "--list-languages", "--build=2"]).is_err()
+        );
     }
 
     #[cfg(target_os = "linux")]

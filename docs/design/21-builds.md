@@ -621,6 +621,48 @@ Decided on 2026-11-12.
 - `--json` gains `withPassword`; its `builds` also hold the unlisted installed build
   (`listed: false`, null date, sizes and DLC).
 
+## 11d. As built (I3, #426)
+
+- `--build <id|version>` is on `gogo depot` and `gogo linux-app <game>`; `--password` is on
+  `linux-app` too (it needs `--build`). Both go through `Listing::resolve`
+  (`builds::pick_for_run`), and an unknown or ambiguous value is exit 2 with the builds
+  listed. A game with no listed build at all gets the D9 message instead. The `--json`
+  error object of §3.3 isn't built: no command has one yet, so the error stays the usual
+  `gogo: …` line on stderr.
+- **Plan lines** come from `builds::plan_lines`, as the `build:` line of `linux-app`'s plan
+  (further lines are indented under it) and as `gogo: build: …` lines of `gogo depot`:
+
+  ```
+  build:     2.31a (58989493373906337, picked; newest is 2.5_RedModFix)
+             downgrade from 2.5_RedModFix: saves made by a newer version may not load
+  build:     2.5_RedModFix (60152385347545148, newer than the installed 2.31a; --build 2.31a keeps it)
+  ```
+
+  A build on a named branch adds `on branch <name>`; a rebuild across branches adds `the
+  installed one is on branch X, this on the default branch`. `gogo depot` doesn't change a
+  built game, so it prints the picked line only.
+- **Without `--build`, the build is the one the run takes.** A warm depot cache is used as
+  it is (as before), so a rebuild with a cache on the installed build says nothing, and the
+  `newer than the installed` line appears when the run downloads the newest (a cold or
+  repaired cache). §3.4's "a rebuild updates" holds for those; the cache isn't forced onto
+  the newest build here.
+- **D8.** A rebuild that keeps the recorded DLC refuses one the build lacks
+  (`DlcSelectError::KeptNotInBuild`, exit 2), naming it and the build, with the `--dlc`
+  hint. `--dlc` names a DLC the build lacks: design 19's `not in this build`, with the build
+  named by version and id. The check runs on every rebuild, not only with `--build`.
+- **Language.** With `--build` the language (`--lang`, else the recorded one, else the
+  default) is always checked against the picked build, so it is never replaced by another.
+- **D9.** `--build` with an installer path, a game tree path, or a game that GOG lists no
+  build for is exit 2: `--build picks a depot build: installers come in the newest version
+  only; --from-depot --build X picks a depot build`.
+- **Records.** `content.toml` gains `branch` (only when the build isn't on the default
+  branch; recorded when it is the build the tree holds). `.gogo-depot.json` gains `version`
+  and `generation`; a rewrite for the same build (`dlc add`) keeps them, another build never
+  inherits them, and a record without them reads and writes as before. `content.toml`'s
+  `version` falls back to the record's.
+- **A cache on another build** takes the existing `verify()` download (`CacheCheck::OtherBuild`
+  repair path), asked for the picked build. The `upgrade_from` path is I6.
+
 ## 12. Implementation issues (to be filed as sub-issues of #360)
 
 Under epic #155 (Linux runtime) unless noted, `type:feature`, `area:depot` (+ `area:cli`

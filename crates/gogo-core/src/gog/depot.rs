@@ -114,6 +114,10 @@ pub enum DepotError {
     /// `--language` names no language of the build (design 14 §11): a usage error.
     #[error(transparent)]
     Language(#[from] super::language::LanguageError),
+    /// `--build` names no single listed build, or the game has none (design 21 §3.3,
+    /// D9): a usage error, exit 2.
+    #[error(transparent)]
+    Pick(#[from] super::builds::PickError),
     #[error("no public Windows builds for product {0}")]
     NoBuilds(u64),
     #[error("no user cache directory available")]
@@ -155,6 +159,9 @@ pub struct DepotOptions {
     pub dlcs: DlcSet,
     pub dlc_context: DlcContext,
     pub password: Option<String>,
+    /// `--build`: an id or version name (design 21 §3.2). `None`: the newest public
+    /// build on the default branch.
+    pub build: Option<String>,
     /// Replaces `<cache>/gogo/depot/<id>` as the install root.
     pub dir: Option<PathBuf>,
     /// The library a build of this game would go to, for the plan's cost.
@@ -173,6 +180,7 @@ impl Default for DepotOptions {
             dlcs: DlcSet::None,
             dlc_context: DlcContext::default(),
             password: None,
+            build: None,
             dir: None,
             library: None,
             limit: None,
@@ -346,6 +354,25 @@ pub struct NewestBuild {
     pub manifest: Manifest,
 }
 
+/// The list entry GOG's builds list gives build `build_id` of `product_id` (its
+/// version name for `content.toml`, #418, and its branch). `None` when the list
+/// can't be fetched or doesn't hold the build.
+pub async fn build_info(
+    core: &Core,
+    product_id: u64,
+    password: Option<String>,
+    build_id: &str,
+) -> Option<super::builds::BuildEntry> {
+    let builds = super::builds::fetch_listing(core, product_id, Platform::Windows, password)
+        .await
+        .ok()?;
+    builds
+        .builds
+        .iter()
+        .find(|b| b.build_id() == build_id)
+        .map(super::builds::BuildEntry::from_build)
+}
+
 /// The version name GOG's builds list gives build `build_id` of `product_id`
 /// (`2.31`), for `content.toml` (#418). `None` when the list can't be fetched or
 /// doesn't hold the build: the record then goes without a version.
@@ -355,14 +382,9 @@ pub async fn build_version(
     password: Option<String>,
     build_id: &str,
 ) -> Option<String> {
-    let builds = super::builds::fetch_listing(core, product_id, Platform::Windows, password)
+    build_info(core, product_id, password, build_id)
         .await
-        .ok()?;
-    builds
-        .builds
-        .iter()
-        .find(|b| b.build_id() == build_id)
-        .map(|b| b.version_name().to_string())
+        .map(|e| e.version)
         .filter(|v| !v.trim().is_empty())
 }
 
@@ -372,10 +394,32 @@ pub async fn newest_build(
     product_id: u64,
     password: Option<String>,
 ) -> Result<NewestBuild, DepotError> {
+    chosen_build(core, product_id, "", password, None).await
+}
+
+/// The build a run takes: `want` (`--build`, design 21 §3.2) or the newest public
+/// build on the default branch, with its build manifest.
+pub async fn chosen_build(
+    core: &Core,
+    product_id: u64,
+    title: &str,
+    password: Option<String>,
+    want: Option<&str>,
+) -> Result<NewestBuild, DepotError> {
     let builds = super::builds::fetch_listing(core, product_id, Platform::Windows, password)
         .await
         .map_err(DepotError::library)?;
-    let build = pick_build(&builds.builds).ok_or(DepotError::NoBuilds(product_id))?;
+    let build = match want {
+        Some(v) => super::builds::pick_for_run(
+            &builds,
+            v,
+            &super::builds::ResolveCtx {
+                title,
+                installed: None,
+            },
+        )?,
+        None => pick_build(&builds.builds).ok_or(DepotError::NoBuilds(product_id))?,
+    };
     let manifest = core
         .get_manifest(build)
         .await
@@ -401,17 +445,20 @@ pub fn pick_language(
     Ok(super::language::of_manifest(manifest).resolve(requested)?)
 }
 
-/// The newest public build's id and its manifest's DLC with sizes, for naming DLC
-/// before a run (design 19 §1.3). No depot manifest is fetched. An `explicit`
-/// language is checked first, and sizes are for the code it resolves to.
+/// The run's build's id and its manifest's DLC with sizes, for naming DLC before a
+/// run (design 19 §1.3): the newest, or `want` (`--build`). No depot manifest is
+/// fetched. An `explicit` language is checked first, and sizes are for the code it
+/// resolves to.
 pub async fn build_dlcs(
     core: &Core,
     product_id: u64,
+    title: &str,
     password: Option<String>,
+    want: Option<&str>,
     language: &str,
     explicit: bool,
 ) -> Result<(String, Vec<dlc::ManifestDlc>), DepotError> {
-    let b = newest_build(core, product_id, password).await?;
+    let b = chosen_build(core, product_id, title, password, want).await?;
     let language = pick_language(&b.manifest, language, explicit)?;
     Ok((b.build_id, dlc::manifest_dlcs(&b.manifest, &language)))
 }
@@ -437,9 +484,20 @@ pub async fn run(
         super::builds::fetch_listing(core, product_id, Platform::Windows, opts.password.clone())
             .await
             .map_err(DepotError::library)?;
-    let build = pick_build(&builds.builds).ok_or(DepotError::NoBuilds(product_id))?;
+    let build = match opts.build.as_deref() {
+        Some(v) => super::builds::pick_for_run(
+            &builds,
+            v,
+            &super::builds::ResolveCtx {
+                title,
+                installed: None,
+            },
+        )?,
+        None => pick_build(&builds.builds).ok_or(DepotError::NoBuilds(product_id))?,
+    };
     let build_id = build.build_id().to_string();
     let generation = *build.generation();
+    let version = build.version_name().to_string();
     let _ = events.send(DepotEvent::Resolved {
         product_id,
         title: title.to_string(),
@@ -567,7 +625,18 @@ pub async fn run(
     // the next reuse just checks it again.
     let held = record_dlcs(prior.as_ref(), &build_id, &language, &dlcs);
     let was_whole = whole_before(prior.as_ref(), &check, &build_id, &language);
-    if write_record(&install_root, &build_id, &language, &held).is_err() {
+    if write_record_build(
+        &install_root,
+        &BuildStamp {
+            build_id: &build_id,
+            version: Some(&version),
+            generation: Some(generation),
+        },
+        &language,
+        &held,
+    )
+    .is_err()
+    {
         let _ = std::fs::remove_file(install_root.join(RECORD));
     } else {
         // Keep the products' file lists for a build that leaves a DLC or a language
@@ -768,6 +837,12 @@ const WARP_TEMP: &str = "!Temp";
 #[serde(rename_all = "camelCase")]
 struct Record {
     build_id: String,
+    /// The build's version name and generation (design 21 §5.3); absent in records
+    /// an older gogo wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    generation: Option<u32>,
     /// The language the last download asked for; absent in records an older gogo
     /// wrote. A path two languages share holds this one's bytes. The cache can hold
     /// other languages too (`other_languages`, #389): a switch deletes nothing.
@@ -928,6 +1003,34 @@ pub fn write_record(
     language: &str,
     dlcs: &[String],
 ) -> std::io::Result<()> {
+    write_record_build(
+        root,
+        &BuildStamp {
+            build_id,
+            version: None,
+            generation: None,
+        },
+        language,
+        dlcs,
+    )
+}
+
+/// The build a record is for. `version` and `generation` that aren't given are
+/// kept from the last record when it was for the same build.
+pub struct BuildStamp<'a> {
+    pub build_id: &'a str,
+    pub version: Option<&'a str>,
+    pub generation: Option<u32>,
+}
+
+/// [`write_record`] for a known build (design 21 §5.3).
+pub fn write_record_build(
+    root: &Path,
+    stamp: &BuildStamp<'_>,
+    language: &str,
+    dlcs: &[String],
+) -> std::io::Result<()> {
+    let build_id = stamp.build_id;
     let mut files = Vec::new();
     walk(root, root, &mut files)?;
     files.sort();
@@ -935,6 +1038,15 @@ pub fn write_record(
     dlcs.sort();
     dlcs.dedup();
     let prior = load_record(root);
+    let same_build = prior.as_ref().filter(|p| p.build_id == build_id);
+    let version = stamp
+        .version
+        .map(str::to_string)
+        .or_else(|| same_build.and_then(|p| p.version.clone()))
+        .filter(|v| !v.is_empty());
+    let generation = stamp
+        .generation
+        .or_else(|| same_build.and_then(|p| p.generation));
     let languages_scanned = prior.as_ref().is_some_and(|p| p.languages_scanned);
     let (products, other_languages) = match prior {
         Some(p) => carry_languages(p, build_id, language),
@@ -942,6 +1054,8 @@ pub fn write_record(
     };
     let rec = Record {
         build_id: build_id.to_string(),
+        version,
+        generation,
         language: Some(language.to_string()),
         dlcs: Some(dlcs),
         products,
@@ -1319,6 +1433,9 @@ impl Snapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordSummary {
     pub build_id: String,
+    /// The build's version name and generation, when the record has them.
+    pub version: Option<String>,
+    pub generation: Option<u32>,
     pub language: Option<String>,
     /// DLC product ids; `None` for a record from before DLC tracking.
     pub dlcs: Option<Vec<String>>,
@@ -1356,6 +1473,8 @@ pub fn read_record(root: &Path) -> Option<RecordSummary> {
     let rec = load_record(root)?;
     Some(RecordSummary {
         build_id: rec.build_id,
+        version: rec.version,
+        generation: rec.generation,
         language: rec.language,
         dlcs: rec.dlcs,
         other_languages: rec
@@ -1803,6 +1922,8 @@ mod tests {
         .unwrap();
         let mut rec = Record {
             build_id: "b".into(),
+            version: None,
+            generation: None,
             language: Some("en-US".into()),
             dlcs: Some(vec![]),
             products: None,
@@ -2037,6 +2158,8 @@ mod tests {
         .unwrap();
         let rec = |language: Option<&str>| Record {
             build_id: "b".into(),
+            version: None,
+            generation: None,
             language: language.map(Into::into),
             dlcs: Some(vec![]),
             products: None,
@@ -2313,5 +2436,50 @@ mod tests {
             Some(DepotEvent::Verifying { fraction }) if fraction == 1.0
         ));
         assert!(state_event(DownloadState::Finished).is_none());
+    }
+
+    // ---- the record's build stamp (design 21 §5.3) ----
+
+    #[test]
+    fn a_record_keeps_the_builds_version_and_generation() {
+        let t = tempfile::tempdir().unwrap();
+        let stamp = BuildStamp {
+            build_id: "58989493373906337",
+            version: Some("2.31a"),
+            generation: Some(2),
+        };
+        write_record_build(t.path(), &stamp, "en-US", &[]).unwrap();
+        let r = read_record(t.path()).unwrap();
+        assert_eq!(r.version.as_deref(), Some("2.31a"));
+        assert_eq!(r.generation, Some(2));
+        // A rewrite for the same build that knows no stamp (a DLC add) keeps it.
+        write_record(t.path(), "58989493373906337", "en-US", &["7".into()]).unwrap();
+        let r = read_record(t.path()).unwrap();
+        assert_eq!(r.version.as_deref(), Some("2.31a"));
+        assert_eq!(r.generation, Some(2));
+        // Another build never inherits it.
+        write_record(t.path(), "60152385347545148", "en-US", &[]).unwrap();
+        let r = read_record(t.path()).unwrap();
+        assert_eq!((r.version, r.generation), (None, None));
+    }
+
+    #[test]
+    fn a_record_an_older_gogo_wrote_reads_without_a_stamp_and_omits_it() {
+        let t = tempfile::tempdir().unwrap();
+        std::fs::write(
+            t.path().join(RECORD),
+            r#"{"buildId":"b1","language":"en-US","dlcs":[],"files":[]}"#,
+        )
+        .unwrap();
+        let r = read_record(t.path()).unwrap();
+        assert_eq!((r.version, r.generation), (None, None));
+        // An unstamped record doesn't gain empty keys, so an older gogo reads
+        // what it always did.
+        write_record(t.path(), "b1", "en-US", &[]).unwrap();
+        let raw = std::fs::read_to_string(t.path().join(RECORD)).unwrap();
+        assert!(
+            !raw.contains("version") && !raw.contains("generation"),
+            "{raw}"
+        );
     }
 }

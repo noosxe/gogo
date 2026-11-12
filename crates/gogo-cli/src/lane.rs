@@ -52,6 +52,22 @@ fn is_exe(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("exe"))
 }
 
+/// D9 (design 21): `--build` picks a depot build, so it can't go with an installer
+/// or a game tree you point at; a game selector is checked against GOG's list.
+pub fn check_build(input: &Input) -> Result<(), String> {
+    match input {
+        Input::Installer(_) => Err(format!(
+            "--build picks a depot build: {}",
+            gogo::gog::builds::INSTALLER_NEWEST_ONLY
+        )),
+        Input::Tree(_) => Err(
+            "--build picks a depot build of a game; a game tree you point at is taken as it is"
+                .to_string(),
+        ),
+        Input::Game { .. } => Ok(()),
+    }
+}
+
 /// What is known about a selected game when picking its lane.
 #[derive(Debug, Default)]
 pub struct GameFacts {
@@ -318,5 +334,23 @@ mod tests {
         let exe = cat.download(1, "setup_one_1.0.exe", "2026-10-01T00:00:00Z");
         cat.download(1, "setup_one_1.0-1.bin", "2026-10-01T00:00:00Z");
         assert_eq!(downloaded_installer(&cat.records, 1, &root), Some(exe));
+    }
+
+    #[test]
+    fn build_is_refused_on_the_installer_lane_and_for_a_tree() {
+        let e = check_build(&Input::Installer(PathBuf::from("setup_game.exe"))).unwrap_err();
+        assert!(
+            e.contains("--build picks a depot build")
+                && e.contains("installers come in the newest version only"),
+            "{e}"
+        );
+        assert!(check_build(&Input::Tree(PathBuf::from("/some/tree"))).is_err());
+        assert!(
+            check_build(&Input::Game {
+                selector: "cyberpunk".into(),
+                explicit: false,
+            })
+            .is_ok()
+        );
     }
 }
