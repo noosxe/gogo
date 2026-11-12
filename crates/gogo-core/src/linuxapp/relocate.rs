@@ -278,6 +278,22 @@ fn plan_snapshots(
             unavailable = None;
         }
     }
+    // Snapshots by this game's name beside the target already (an earlier
+    // `--adopt`, a move by hand, a delete that failed): carrying would clash
+    // with them, and a delete or `initial` would mix them up with the game's.
+    if (action != SnapshotAction::None || initial)
+        && let Some(dir) = backend::snapshots_dir(to)
+        && dir.symlink_metadata().is_ok()
+    {
+        return Err(MacAppError::Library {
+            path: dir,
+            reason: format!(
+                "snapshots of {gogid} are already there (left by an earlier `--adopt`, a move by \
+                 hand, or a delete that failed): gogo won't mix them with the game's. Look at \
+                 them, then remove or rename that dir, and move again"
+            ),
+        });
+    }
     if action == SnapshotAction::None && !subvolume && unavailable.is_none() {
         return Ok(None);
     }
@@ -308,7 +324,6 @@ fn drop_snapshots(
 ) -> Result<Vec<String>, MacAppError> {
     let mut warnings = Vec::new();
     let (_, b) = backends.for_dir(from);
-    let (_, b_to) = backends.for_dir(to);
     let s = snapshots::store(gogid, from, b);
     if let Err(e) = s.recover(guard) {
         warnings.push(format!(
@@ -326,26 +341,43 @@ fn drop_snapshots(
         }
     };
     let mut left = s.leftovers().unwrap_or_default();
-    // The metadata is the game's, wherever it is: a snapshot already beside
-    // the new place (a recovery after the `initial` one) isn't the old
-    // place's to delete.
+    // The metadata is the game's, wherever it is: a snapshot taken at the new
+    // place (the `initial` one, when a recovery runs this again) isn't the
+    // old place's to delete. The plan refused a target with snapshots of
+    // this game beside it already, so nothing else there shares a number.
     let entries: Vec<_> = entries
         .into_iter()
-        .filter(|e| !b_to.exists(to, e.id).unwrap_or(false))
+        .filter(|e| e.meta.as_ref().is_none_or(|m| m.game_dir != to))
         .collect();
+    let reachable = from.parent().is_some_and(Path::is_dir);
     for (i, e) in entries.iter().enumerate() {
         killed(KilledAt::Dropping(i))?;
         match s.delete(guard, e.id) {
             Ok(_) => done.deleted.push(e.id),
             Err(err) => {
-                let at = backend::snapshot_dir(from, e.id);
-                if let Some(at) = at.filter(|p| p.symlink_metadata().is_ok()) {
-                    warnings.push(format!(
-                        "snapshot {} couldn't be deleted ({err}): it is left at {}, holding \
-                         space on that drive; `gogo linux-app snapshot {gogid} list` tries again",
-                        e.id,
-                        at.display()
-                    ));
+                // Recorded unless it is known to be gone: a drive that isn't
+                // there (or a filesystem gogo can't delete on now) may still
+                // hold it.
+                let at = backend::snapshot_dir(from, e.id)
+                    .filter(|p| p.symlink_metadata().is_ok() || !reachable);
+                if let Some(at) = at {
+                    warnings.push(if reachable {
+                        format!(
+                            "snapshot {} couldn't be deleted ({err}): it is left at {}, holding \
+                             space on that drive; `gogo linux-app snapshot {gogid} list` tries \
+                             again",
+                            e.id,
+                            at.display()
+                        )
+                    } else {
+                        format!(
+                            "snapshot {} couldn't be deleted ({err}): the old place isn't there \
+                             (a drive not mounted?), so it may still be at {}; `gogo linux-app \
+                             snapshot {gogid} list` tries again once it is",
+                            e.id,
+                            at.display()
+                        )
+                    });
                     if !left.contains(&at) {
                         left.push(at.clone());
                     }
@@ -445,28 +477,59 @@ pub(crate) fn settle_leftovers(
     let mut keep = Vec::new();
     let mut out = Vec::new();
     for p in s.leftovers().map_err(snapshots::err)? {
-        if !is_leftover_shape(gogid, &p) || p.symlink_metadata().is_err() {
-            continue;
-        }
-        let (_, at) = backends.for_dir(&p);
-        match at.discard(&p) {
-            Ok(()) => {
-                out.push(format!(
-                    "deleted {}, a snapshot an earlier move couldn't",
-                    p.display()
-                ));
-                if let Some(dir) = p.parent() {
-                    let _ = std::fs::remove_dir(dir);
-                    if let Some(parent) = dir.parent() {
-                        let _ = std::fs::remove_dir(parent);
+        match leftover(gogid, &p, &dirs.root) {
+            Leftover::Forget => continue,
+            Leftover::Unreachable => keep.push(p),
+            Leftover::There => {
+                let (_, at) = backends.for_dir(&p);
+                match at.discard(&p) {
+                    Ok(()) => {
+                        out.push(format!(
+                            "deleted {}, a snapshot an earlier move couldn't",
+                            p.display()
+                        ));
+                        if let Some(dir) = p.parent() {
+                            let _ = std::fs::remove_dir(dir);
+                            if let Some(parent) = dir.parent() {
+                                let _ = std::fs::remove_dir(parent);
+                            }
+                        }
                     }
+                    Err(_) => keep.push(p),
                 }
             }
-            Err(_) => keep.push(p),
         }
     }
     s.set_leftovers(&guard, &keep).map_err(snapshots::err)?;
     Ok(out)
+}
+
+/// What a recorded leftover is now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Leftover {
+    /// On disk: to delete.
+    There,
+    /// Its drive isn't there: kept, and reported.
+    Unreachable,
+    /// Gone, not shaped like one of the game's snapshots, or where the game's
+    /// own snapshots live now (it moved back beside it, and a live snapshot
+    /// may have its number): dropped from the list, never deleted.
+    Forget,
+}
+
+fn leftover(gogid: &str, p: &Path, game_root: &Path) -> Leftover {
+    if !is_leftover_shape(gogid, p) || p.parent() == backend::snapshots_dir(game_root).as_deref() {
+        return Leftover::Forget;
+    }
+    if p.symlink_metadata().is_ok() {
+        return Leftover::There;
+    }
+    // `<old parent>/.gogo-snapshots/<gogid>/<n>`: the old parent there means
+    // the snapshot is gone; not there, a drive that isn't mounted.
+    match p.ancestors().nth(3) {
+        Some(parent) if !parent.is_dir() => Leftover::Unreachable,
+        _ => Leftover::Forget,
+    }
 }
 
 /// `…/.gogo-snapshots/<gogid>/<n>`.
@@ -481,14 +544,19 @@ fn is_leftover_shape(gogid: &str, p: &Path) -> bool {
         && dir.is_some_and(|d| d == backend::SNAPSHOTS_DIR)
 }
 
-/// The leftovers `doctor` reports: still on disk.
-pub(crate) fn leftovers(gogid: &str, root: &Path, backends: &Backends) -> Vec<PathBuf> {
+/// The leftovers `doctor` reports, with whether each is reachable: on disk,
+/// or on a drive that isn't there.
+pub(crate) fn leftovers(gogid: &str, root: &Path, backends: &Backends) -> Vec<(PathBuf, bool)> {
     let (_, b) = backends.for_dir(root);
     snapshots::store(gogid, root, b)
         .leftovers()
         .unwrap_or_default()
         .into_iter()
-        .filter(|p| p.symlink_metadata().is_ok())
+        .filter_map(|p| match leftover(gogid, &p, root) {
+            Leftover::There => Some((p, true)),
+            Leftover::Unreachable => Some((p, false)),
+            Leftover::Forget => None,
+        })
         .collect()
 }
 

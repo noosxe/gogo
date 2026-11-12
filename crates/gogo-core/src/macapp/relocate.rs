@@ -440,12 +440,17 @@ pub struct Faults {
 }
 
 /// How to run a move.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MoveOptions {
     /// The user's yes to deleting the game's snapshots, which can't cross
     /// filesystems (design 20 §9.1, decision D5). Without it, such a move is
     /// refused.
     pub drop_snapshots: bool,
+    /// The snapshots the user was shown and agreed to delete. When set, a
+    /// move whose own plan (after its recovery) would delete others is
+    /// refused ([`snapshots_changed`]), so the yes covers exactly what was
+    /// shown. `None`: any (a library caller's yes).
+    pub confirmed: Option<Vec<u32>>,
     #[doc(hidden)]
     pub faults: Faults,
 }
@@ -838,14 +843,42 @@ pub fn move_game(
 
 /// A move that would delete the game's snapshots needs the user's yes.
 fn refuse_dropping(gogid: &str, s: &SnapshotsPlan, opts: &MoveOptions) -> Result<(), MacAppError> {
-    if !s.needs_yes() || opts.drop_snapshots {
+    if !s.needs_yes() {
         return Ok(());
     }
     let n = s.snapshots.len();
-    Err(MacAppError::Apps(format!(
-        "{gogid} has {n} snapshot{}, which can't cross filesystems and would be deleted after          the move: `gogo linux-app move` shows them and asks (--yes agrees)",
-        if n == 1 { "" } else { "s" }
-    )))
+    if !opts.drop_snapshots {
+        return Err(MacAppError::Apps(format!(
+            "{gogid} has {n} snapshot{}, which can't cross filesystems and would be deleted \
+             after the move: `gogo linux-app move` shows them and asks (--yes agrees)",
+            if n == 1 { "" } else { "s" }
+        )));
+    }
+    let mut now: Vec<u32> = s.snapshots.iter().map(|s| s.id).collect();
+    now.sort_unstable();
+    if let Some(agreed) = &opts.confirmed {
+        let mut agreed = agreed.clone();
+        agreed.sort_unstable();
+        if agreed != now {
+            let list = |v: &[u32]| v.iter().map(u32::to_string).collect::<Vec<_>>().join(", ");
+            return Err(MacAppError::Apps(format!(
+                "{SNAPSHOTS_CHANGED}: the move would delete {} where {} were shown; nothing \
+                 was moved",
+                list(&now),
+                list(&agreed)
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The start of the refusal when the snapshots a move would delete aren't
+/// the ones the user agreed to.
+pub const SNAPSHOTS_CHANGED: &str = "the snapshots to delete changed since the plan was shown";
+
+/// Whether `e` is that refusal: the caller shows the new plan and asks again.
+pub fn snapshots_changed(e: &MacAppError) -> bool {
+    matches!(e, MacAppError::Apps(m) if m.starts_with(SNAPSHOTS_CHANGED))
 }
 
 /// Rename one snapshot. A read-only btrfs subvolume can't move to another dir
@@ -886,9 +919,10 @@ fn carry_snapshots(
     from: &Path,
     to: &Path,
     killed_at: Option<KilledAt>,
-) -> Result<Vec<u32>, Failure> {
+    moved: &mut Vec<std::ffi::OsString>,
+) -> Result<(), Failure> {
     let (Some(old), Some(new)) = (snapshots_dir(from), snapshots_dir(to)) else {
-        return Ok(Vec::new());
+        return Ok(());
     };
     let mut names: Vec<std::ffi::OsString> = match std::fs::read_dir(&old) {
         Ok(rd) => rd
@@ -898,7 +932,6 @@ fn carry_snapshots(
         Err(e) => return Err(e.into()),
     };
     names.sort();
-    let mut moved = Vec::new();
     if killed_at == Some(KilledAt::Carrying(0)) {
         return Err(Failure::Killed(MacAppError::Apps(
             "killed: carrying 0".into(),
@@ -912,14 +945,13 @@ fn carry_snapshots(
         if dst.symlink_metadata().is_ok() {
             return Err(Failure::Plain(MacAppError::Library {
                 path: dst,
-                reason: "a snapshot by that name is already there: gogo won't guess which one                          is the game's; move it out of the way"
+                reason: "a snapshot by that name is already there: gogo won't guess which one \
+                         is the game's; move it out of the way"
                     .into(),
             }));
         }
         rename_snapshot(&old.join(&name), &dst)?;
-        if let Some(n) = crate::snapshot::backend::parse_n(&name) {
-            moved.push(n);
-        }
+        moved.push(name);
         if killed_at == Some(KilledAt::Carrying(moved.len())) {
             return Err(Failure::Killed(MacAppError::Apps(format!(
                 "killed: carrying {}",
@@ -934,8 +966,36 @@ fn carry_snapshots(
     if let Some(parent) = new.parent() {
         let _ = std::fs::File::open(parent).and_then(|d| d.sync_all());
     }
-    moved.sort_unstable();
-    Ok(moved)
+    Ok(())
+}
+
+/// The snapshot numbers among carried names, in order.
+fn carried_ids(names: &[std::ffi::OsString]) -> Vec<u32> {
+    let mut ids: Vec<u32> = names
+        .iter()
+        .filter_map(|n| crate::snapshot::backend::parse_n(n))
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
+/// Put back what [`carry_snapshots`] moved from beside `from` to beside `to`:
+/// only those names, so nothing else that is there goes with them.
+fn uncarry(from: &Path, to: &Path, names: &[std::ffi::OsString]) -> std::io::Result<()> {
+    let (Some(old), Some(new)) = (snapshots_dir(from), snapshots_dir(to)) else {
+        return Ok(());
+    };
+    if !names.is_empty() {
+        std::fs::create_dir_all(&old)?;
+    }
+    for name in names {
+        rename_snapshot(&new.join(name), &old.join(name))?;
+    }
+    if let Some(parent) = new.parent() {
+        let _ = std::fs::remove_dir(&new);
+        let _ = std::fs::remove_dir(parent);
+    }
+    Ok(())
 }
 
 /// What an adopt will do, before it does it.
@@ -1268,13 +1328,22 @@ fn move_data(
                     carry: true,
                     ..SnapshotSteps::default()
                 };
-                let back = |e: MacAppError| {
-                    // Nothing else knows it's there: it goes back.
-                    let undone = carry_snapshots(&plan.to, &plan.from, None)
-                        .map_err(|f| match f {
-                            Failure::Killed(e) | Failure::Plain(e) => e,
-                        })
-                        .and_then(|_| Ok(std::fs::rename(&plan.to, &plan.from)?));
+                // What the plan guessed doesn't matter now: this is what ran.
+                (plan.method, plan.extra_bytes) = (Method::Rename, 0);
+                if plan
+                    .snapshots
+                    .as_ref()
+                    .is_some_and(|s| s.action != SnapshotAction::Carry)
+                {
+                    plan.snapshots = lane
+                        .plan_snapshots(&plan.gogid, &plan.from, &plan.to, true)
+                        .unwrap_or(None);
+                }
+                let back = |e: MacAppError, names: &[std::ffi::OsString]| {
+                    // Nothing else knows it's there: it goes back, with
+                    // the snapshots that followed it and nothing else.
+                    let undone = uncarry(&plan.from, &plan.to, names)
+                        .and_then(|()| std::fs::rename(&plan.to, &plan.from));
                     match undone {
                         Ok(()) => Failure::Plain(e),
                         Err(back) => Failure::Killed(MacAppError::Library {
@@ -1289,14 +1358,17 @@ fn move_data(
                 if journal.snapshots != renamed {
                     journal.snapshots = renamed;
                     if let Err(e) = write_journal(&plan.gogid, journal) {
-                        return Err(back(e));
+                        return Err(back(e, &[]));
                     }
                 }
-                let warnings = lane.rewrite_inside(from, to, &plan.to).map_err(back)?;
-                match carry_snapshots(&plan.from, &plan.to, opts.faults.killed_at) {
-                    Ok(moved) => done.carried = moved,
+                let warnings = lane
+                    .rewrite_inside(from, to, &plan.to)
+                    .map_err(|e| back(e, &[]))?;
+                let mut moved = Vec::new();
+                match carry_snapshots(&plan.from, &plan.to, opts.faults.killed_at, &mut moved) {
+                    Ok(()) => done.carried = carried_ids(&moved),
                     Err(Failure::Killed(e)) => return Err(Failure::Killed(e)),
-                    Err(Failure::Plain(e)) => return Err(back(e)),
+                    Err(Failure::Plain(e)) => return Err(back(e, &moved)),
                 }
                 return Ok(warnings);
             }
@@ -1612,10 +1684,12 @@ fn recover_locked(gogid: &str, lane: &dyn Lane, guard: &Guard) -> Result<Vec<Str
         out.extend(lane.rewrite_inside(&from, &to, &j.to)?);
         // The snapshots follow the rename before the commit, as in the move
         // itself; the ones already there are skipped.
+        let mut moved = Vec::new();
+        carry_snapshots(&j.from, &j.to, None, &mut moved).map_err(|f| match f {
+            Failure::Killed(e) | Failure::Plain(e) => e,
+        })?;
         let mut done = SnapshotsDone {
-            carried: carry_snapshots(&j.from, &j.to, None).map_err(|f| match f {
-                Failure::Killed(e) | Failure::Plain(e) => e,
-            })?,
+            carried: carried_ids(&moved),
             ..SnapshotsDone::default()
         };
         commit(gogid, &j.to)?;

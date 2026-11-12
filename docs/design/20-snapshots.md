@@ -945,7 +945,15 @@ What the automatic snapshots settled where §7.1 and §7.2 left room:
 lane); the Linux part in `linuxapp/relocate.rs`.
 
 - **The journal** `game-moves/<gogid>` gains an optional third line, `snapshots:
-  carry|drop|initial`. A journal without it (written before this) has no snapshot steps.
+  carry|drop|initial`. A journal without it (written before this) has no snapshot steps:
+  a copy across filesystems that was in flight when gogo was upgraded finishes without
+  deleting the old place's snapshots, and they show up as `missing` (or `?` beside the old
+  place) for `snapshot delete` to clean up. Accepted as is: it takes an interrupted move
+  and an upgrade in between.
+- **A target with snapshots of the game beside it already** (`.gogo-snapshots/<gogid>/`
+  there, left by an earlier `--adopt`, a move by hand or a delete that failed) is refused
+  by the plan, naming the dir, whenever the move would carry, delete or take `initial`:
+  carrying would clash with them, and deleting or numbering would mix them up.
 - **One filesystem, for the plan.** A subvolume game dir has its own device number, so
   `st_dev` alone called every move of a snapshotted game a copy. The plan also counts a
   btrfs subvolume root in the same mount as the target (statx `mnt_id`) as one
@@ -958,19 +966,23 @@ lane); the Linux part in `linuxapp/relocate.rs`.
   when empty. A read-only subvolume can't move to another dir (`EROFS`: its root's `..`
   changes), so the flag is cleared for the rename and set again; what carry moves is made
   read-only. It skips what is already there, so recovery's "rename, not yet recorded" case
-  carries the rest before it commits; a name already taken at the target is refused, and
-  the move undoes itself (snapshots back, then the data). An error before the commit puts
-  both back.
+  carries the rest before it commits. An error before the commit puts back the snapshots
+  this run moved (only those names), then the data. When the plan said a copy and the rename
+  worked anyway, the outcome reports the rename and the carry.
 - **Drop** runs in step 5 after the source is deleted, under the move's locks: the old
   place's interrupted creates and deletes are settled, then every snapshot is deleted with
-  the store's delete (the ioctl, else the unprivileged route). Snapshots already beside the
-  new place are skipped (the metadata is per game, so a recovery after `initial` mustn't
-  touch it). A delete that fails drops the metadata (nothing can be rolled back to it from
-  the new place), names the path in a warning and records it in
-  `<data_root>/snapshots/<gogid>/leftovers.toml`. `doctor` warns about each leftover still
-  there; `rollback::settle_pending` (so every `snapshot` command, a build, `dlc add`,
-  `move`, `apps remove`) tries again, deleting only paths shaped like
-  `…/.gogo-snapshots/<gogid>/<n>`.
+  the store's delete (the ioctl, else the unprivileged route). Snapshots taken at the new
+  place (`game_dir` is the new dir) are skipped: the metadata is per game, so a recovery
+  after `initial` mustn't touch it. A delete that fails drops the metadata (nothing can be
+  rolled back to it from the new place), names the path in a warning and records it in
+  `<data_root>/snapshots/<gogid>/leftovers.toml`, unless the snapshot is known to be gone:
+  when the old parent isn't there (a drive unmounted after the commit) the path is recorded
+  too. `doctor` warns about each leftover still there, and about each whose drive isn't
+  there; `rollback::settle_pending` (so every `snapshot` command, a build, `dlc add`, `move`,
+  `apps remove`) tries again. It deletes only paths shaped like
+  `…/.gogo-snapshots/<gogid>/<n>`, keeps those on a drive that isn't there, and forgets,
+  never deletes, one in the dir where the game's own snapshots are now (it moved back, and a
+  live snapshot may have that number).
 - **The target.** btrfs: `.moving-<gogid>/` is made with `make_game_dir` (a subvolume) when
   autosnapshot is on or the source is a subvolume, and copied into with `copy_exact_into`;
   a subvolume that can't be made is a warning and a plain dir. ZFS (#409) and `none`: a
@@ -981,7 +993,11 @@ lane); the Linux part in `linuxapp/relocate.rs`.
   one takes no second.
 - **CLI.** `move` prints the plan's snapshot lines (with `--dry-run` too, and `snapshots` in
   `--json`); a drop asks (`--yes` agrees; a non-TTY without it exits 2). The library refuses
-  a drop without `MoveOptions::drop_snapshots`. The outcome's `snapshotsDone` has `carried`,
+  a drop without `MoveOptions::drop_snapshots`, and `MoveOptions::confirmed` holds the ids
+  shown: when the move's own plan (after its recovery, or after a rename fell back to a
+  copy) lists others, it is refused with `SNAPSHOTS_CHANGED`, and the CLI shows the new
+  list and asks again (with `--yes`, it prints the list and goes on). A carry plan asks
+  nothing, so a fallback to a copy is then refused. The outcome's `snapshotsDone` has `carried`,
   `deleted`, `left` and `initial`.
 - **`--adopt`** is unchanged: the snapshots stay where they are, and `list` shows them as
   `missing`. `doctor` now says when such a snapshot is still beside the place it was taken

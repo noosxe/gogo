@@ -11192,6 +11192,7 @@ mod snapshot_move {
         MoveOptions {
             drop_snapshots: yes,
             faults,
+            ..MoveOptions::default()
         }
     }
 
@@ -11729,6 +11730,141 @@ mod snapshot_move {
         for n in [1, 2] {
             let _ = gogo::gog::materialize::remove_tree(&backend::snapshot_dir(&home, n).unwrap());
         }
+    }
+
+    // — review edge cases —
+
+    /// Snapshots by the game's name already beside the target (an earlier
+    /// `--adopt` left them): the plan refuses, naming the dir, for a rename
+    /// and for a copy, and nothing is touched.
+    #[test]
+    fn snapshots_already_at_the_target_are_refused() {
+        let (_, b) = fake();
+        let w = built("snapmove-stale", &b);
+        let home = w.game();
+        let lib = w.library();
+        let stale = backend::snapshots_dir(&lib.dir().join(ID)).unwrap();
+        std::fs::create_dir_all(stale.join("3")).unwrap();
+        std::fs::write(stale.join("3/theirs"), "x").unwrap();
+        for o in [opts(Faults::default(), false), opts(across(), true)] {
+            let target = Target::Library(lib.clone());
+            let err = gogo::linuxapp::relocate::plan_with(ID, &target, &o, &b).unwrap_err();
+            assert!(
+                err.to_string().contains(&stale.display().to_string()),
+                "{err}"
+            );
+            let err = go(&b, &target, o.clone()).unwrap_err();
+            assert!(err.contains("already there"), "{err}");
+            assert_eq!(GameDirs::for_game(ID).unwrap().root, home);
+            assert_eq!(on_disk(&home), [1, 2]);
+            assert!(stale.join("3/theirs").is_file());
+            assert!(!journal(&w).exists());
+        }
+    }
+
+    /// The yes covers the snapshots that were shown: when the move's own plan
+    /// lists others, it is refused and says so.
+    #[test]
+    fn a_yes_covers_only_the_snapshots_shown() {
+        let (_, b) = fake();
+        let w = built("snapmove-consent", &b);
+        let home = w.game();
+        let target = Target::Library(w.library());
+        let shown = |ids: Vec<u32>| MoveOptions {
+            drop_snapshots: true,
+            confirmed: Some(ids),
+            faults: across(),
+        };
+        let err =
+            gogo::linuxapp::relocate::move_game_with(ID, &target, &shown(vec![1]), &b, &mut |_| {})
+                .unwrap_err();
+        assert!(gogo::macapp::relocate::snapshots_changed(&err), "{err}");
+        assert!(
+            err.to_string().contains("delete 1, 2 where 1 were shown"),
+            "{err}"
+        );
+        assert_eq!(GameDirs::for_game(ID).unwrap().root, home);
+        assert_eq!(on_disk(&home), [1, 2]);
+        assert!(!journal(&w).exists());
+
+        let out = go(&b, &target, shown(vec![2, 1])).unwrap();
+        assert_eq!(out.snapshots.deleted.len(), 2);
+    }
+
+    /// The old place gone after the commit (its drive unmounted): the deletes
+    /// can't be confirmed, so the paths are kept as leftovers, `doctor` says
+    /// their drive isn't there, and they are deleted once it is back.
+    #[test]
+    fn deletes_on_a_drive_that_went_away_are_kept_as_leftovers() {
+        let (_, b) = fake();
+        let w = built("snapmove-unmounted", &b);
+        let home = w.game();
+        let games = home.parent().unwrap().to_path_buf();
+        let away = games.with_file_name("games-unmounted");
+        let there = w.library().dir().join(ID);
+        go(
+            &b,
+            &Target::Library(w.library()),
+            opts(killed(KilledAt::BeforeCleanup, true), true),
+        )
+        .unwrap_err();
+        std::fs::rename(&games, &away).unwrap();
+
+        gogo::linuxapp::relocate::recover_with(ID, &b).unwrap();
+        assert!(!journal(&w).exists());
+        let left = std::fs::read_to_string(meta(&w).join("leftovers.toml")).unwrap();
+        for n in [1, 2] {
+            let p = backend::snapshot_dir(&home, n).unwrap();
+            assert!(left.contains(&p.display().to_string()), "{left}");
+        }
+        let doctor = snap::doctor(ID, &there, &b);
+        assert_eq!(
+            doctor
+                .iter()
+                .filter(|f| f.message.contains("its drive isn't there"))
+                .count(),
+            2,
+            "{doctor:?}"
+        );
+        // Still away: kept.
+        rb::settle_pending(ID, &b).unwrap();
+        assert!(meta(&w).join("leftovers.toml").is_file());
+
+        // Back: deleted.
+        std::fs::rename(&away, &games).unwrap();
+        let lines = rb::settle_pending(ID, &b).unwrap();
+        assert_eq!(
+            lines.iter().filter(|l| l.contains("deleted")).count(),
+            2,
+            "{lines:?}"
+        );
+        assert!(!backend::snapshots_dir(&home).unwrap().exists());
+        assert!(!meta(&w).join("leftovers.toml").exists());
+    }
+
+    /// A leftover where the game's own snapshots live now (it moved back
+    /// beside it) is never deleted: a live snapshot may have its number.
+    #[test]
+    fn a_leftover_where_live_snapshots_are_is_never_deleted() {
+        let (_, b) = fake();
+        let w = built("snapmove-live", &b);
+        let home = w.game();
+        let live = backend::snapshot_dir(&home, 1).unwrap();
+        std::fs::write(
+            meta(&w).join("leftovers.toml"),
+            format!("paths = [\"{}\"]\n", live.display()),
+        )
+        .unwrap();
+        assert!(
+            !snap::doctor(ID, &home, &b)
+                .iter()
+                .any(|f| f.message.contains(&live.display().to_string())),
+        );
+        let lines = rb::settle_pending(ID, &b).unwrap();
+        assert!(!lines.iter().any(|l| l.contains("deleted")), "{lines:?}");
+        assert!(live.is_dir());
+        assert_eq!(on_disk(&home), [1, 2]);
+        assert!(!meta(&w).join("leftovers.toml").exists());
     }
 
     // — real btrfs (the `snapshots-btrfs` job) —

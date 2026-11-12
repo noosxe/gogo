@@ -4176,57 +4176,78 @@ fn linux_app_move(
         None => None,
     };
     let target = library.map_or(Target::Default, Target::Library);
-    let mut opts = MoveOptions {
-        drop_snapshots: yes,
-        ..MoveOptions::default()
-    };
-    // The real move settles an interrupted one before it plans: a plan that
-    // can't be made yet (a copy an earlier move left in the way) is the
-    // move's to report, after its recovery.
-    let plan = match gogo::linuxapp::relocate::plan(gogid, &target, &opts) {
-        Ok(plan) => plan,
-        Err(e) if dry_run => return Err(e.into()),
-        Err(_) => return linux_app_move_now(gogid, &target, &opts, json),
-    };
-    let mut lines = vec![format!(
-        "move {gogid} ({}) by {}: {} -> {}",
-        human(plan.bytes),
-        plan.method.as_str(),
-        plan.from.display(),
-        plan.to.display()
-    )];
-    if plan.extra_bytes > 0 {
-        lines.push(format!(
-            "it needs {} free there until the copy is checked",
-            human(plan.extra_bytes)
-        ));
-    }
-    let snapshot_lines = plan
-        .snapshots
-        .as_ref()
-        .map(|s| s.lines(&plan.to))
-        .unwrap_or_default();
-    lines.extend(snapshot_lines.iter().cloned());
-    if dry_run {
-        if json {
-            println!("{}", serde_json::to_string(&plan).unwrap());
-        } else {
-            println!("would {}", lines[0]);
-            for l in &lines[1..] {
-                println!("{l}");
+    // Twice at most: once more when the snapshots to delete changed between
+    // the plan shown and the move's own (after its recovery).
+    for attempt in 0..2 {
+        // The real move settles an interrupted one before it plans: a plan
+        // that can't be made yet (a copy an earlier move left in the way) is
+        // the move's to report, after its recovery.
+        let plan = match gogo::linuxapp::relocate::plan(gogid, &target, &MoveOptions::default()) {
+            Ok(plan) => plan,
+            Err(e) if dry_run => return Err(e.into()),
+            Err(_) => {
+                return linux_app_move_now(gogid, &target, &MoveOptions::default(), json);
             }
+        };
+        let mut lines = vec![format!(
+            "move {gogid} ({}) by {}: {} -> {}",
+            human(plan.bytes),
+            plan.method.as_str(),
+            plan.from.display(),
+            plan.to.display()
+        )];
+        if plan.extra_bytes > 0 {
+            lines.push(format!(
+                "it needs {} free there until the copy is checked",
+                human(plan.extra_bytes)
+            ));
         }
-        return Ok(cli::exit::OK);
-    }
-    // Deleting snapshots (design 20 §9.1, decision D5) is asked first.
-    if plan.snapshots.as_ref().is_some_and(|s| s.needs_yes()) {
-        if let Some(code) = snapshot_cmd::ask(&lines, yes, "move it and delete these snapshots?") {
-            return Ok(code);
+        if let Some(s) = &plan.snapshots {
+            lines.extend(s.lines(&plan.to));
         }
-        opts.drop_snapshots = true;
+        if dry_run {
+            if json {
+                println!("{}", serde_json::to_string(&plan).unwrap());
+            } else {
+                println!("would {}", lines[0]);
+                for l in &lines[1..] {
+                    println!("{l}");
+                }
+            }
+            return Ok(cli::exit::OK);
+        }
+        let mut opts = MoveOptions::default();
+        // Deleting snapshots (design 20 §9.1, decision D5) is asked first, and
+        // the yes covers the snapshots shown, no others.
+        if let Some(s) = plan.snapshots.as_ref().filter(|s| s.needs_yes()) {
+            if yes && attempt > 0 {
+                eprintln!("plan:");
+                for l in &lines {
+                    eprintln!("  {l}");
+                }
+            }
+            if let Some(code) =
+                snapshot_cmd::ask(&lines, yes, "move it and delete these snapshots?")
+            {
+                return Ok(code);
+            }
+            opts.drop_snapshots = true;
+            opts.confirmed = Some(s.snapshots.iter().map(|s| s.id).collect());
+        }
+        match linux_app_move_now(gogid, &target, &opts, json)? {
+            PLAN_CHANGED => continue,
+            code => return Ok(code),
+        }
     }
-    linux_app_move_now(gogid, &target, &opts, json)
+    Err(AppError::from(gogo::macapp::error::MacAppError::Apps(
+        format!("{gogid}'s snapshots keep changing while it is being moved: try again"),
+    )))
 }
+
+/// [`linux_app_move_now`]'s answer when the snapshots to delete aren't the
+/// ones agreed to: plan and ask again.
+#[cfg(target_os = "linux")]
+const PLAN_CHANGED: i32 = -1;
 
 /// `gogo linux-app move`, past its plan and question.
 #[cfg(target_os = "linux")]
@@ -4259,6 +4280,12 @@ fn linux_app_move_now(
     });
     if tty && shown != (0, 0) && !json {
         eprintln!();
+    }
+    if let Err(e) = &out
+        && gogo::macapp::relocate::snapshots_changed(e)
+    {
+        eprintln!("gogo: {e}");
+        return Ok(PLAN_CHANGED);
     }
     let out = out?;
     if json {
