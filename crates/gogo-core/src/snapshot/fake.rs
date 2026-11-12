@@ -39,11 +39,30 @@ pub enum FakeStep {
 #[derive(Debug, Default)]
 pub struct Fake {
     fail: Mutex<Option<FakeStep>>,
+    /// [`Fake::subvolumes_only`]: the `(dev, ino)` of every dir
+    /// `make_game_dir` made, which stay with the dir through a rename or an
+    /// exchange as a subvolume does.
+    subvolumes: Option<Mutex<std::collections::HashSet<(u64, u64)>>>,
 }
 
 impl Fake {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A fake where only the dirs it made are [`SnapshotBackend::ready`], as
+    /// on btrfs a plain dir isn't (design 20 §2.1's conversion).
+    pub fn subvolumes_only() -> Self {
+        Self {
+            subvolumes: Some(Mutex::default()),
+            ..Self::default()
+        }
+    }
+
+    fn id(dir: &Path) -> io::Result<(u64, u64)> {
+        use std::os::unix::fs::MetadataExt as _;
+        let m = std::fs::metadata(dir)?;
+        Ok((m.dev(), m.ino()))
     }
 
     /// Fail the next operation that reaches `step`, once.
@@ -99,11 +118,27 @@ impl SnapshotBackend for Fake {
     }
 
     fn ready(&self, game_dir: &Path) -> io::Result<bool> {
-        Ok(std::fs::metadata(game_dir)?.is_dir())
+        let is_dir = std::fs::metadata(game_dir)?.is_dir();
+        Ok(match &self.subvolumes {
+            Some(made) => {
+                is_dir
+                    && made
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .contains(&Self::id(game_dir)?)
+            }
+            None => is_dir,
+        })
     }
 
     fn make_game_dir(&self, dir: &Path) -> io::Result<()> {
-        std::fs::create_dir(dir)
+        std::fs::create_dir(dir)?;
+        if let Some(made) = &self.subvolumes {
+            made.lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(Self::id(dir)?);
+        }
+        Ok(())
     }
 
     fn snapshot(&self, game_dir: &Path, n: u32) -> io::Result<()> {

@@ -8,6 +8,7 @@ use crate::macapp::error::MacAppError;
 
 pub mod build;
 pub mod catalogue;
+pub mod convert;
 pub mod display;
 pub mod dlc;
 pub mod doctor;

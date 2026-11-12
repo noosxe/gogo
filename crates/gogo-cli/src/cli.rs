@@ -633,7 +633,9 @@ pub enum LinuxSnapshotCmd {
     },
     /// Take a snapshot of the game as it is now: its files, prefix and saves,
     /// and a copy of its override file. Refused while the game runs or a DLC
-    /// add or a move of it isn't finished.
+    /// add or a move of it isn't finished. A game dir built without snapshots
+    /// is converted to a btrfs subvolume first (a reflink copy), after a plan
+    /// and a question.
     Create {
         /// The snapshot's label (default: `manual`).
         #[arg(long, value_name = "TEXT")]
@@ -695,14 +697,18 @@ pub enum LinuxSnapshotCmd {
         json: bool,
     },
     /// Automatic snapshots before each change gogo makes to the game: print
-    /// the setting, or turn it on or off. `on` takes no snapshot by itself;
-    /// `off` keeps the snapshots there are.
+    /// the setting, or turn it on or off. `on` takes no snapshot by itself,
+    /// and converts a game dir built without snapshots to a btrfs subvolume
+    /// first, after a plan and a question; `off` keeps the snapshots there are.
     Auto {
         #[arg(value_enum)]
         state: Option<OnOff>,
         /// Answer yes to any question.
         #[arg(long)]
         yes: bool,
+        /// Print what `on` or `off` would do, change nothing.
+        #[arg(long)]
+        dry_run: bool,
         /// Machine-readable output.
         #[arg(long)]
         json: bool,

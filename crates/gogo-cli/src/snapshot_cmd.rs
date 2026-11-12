@@ -1,5 +1,5 @@
 //! `gogo linux-app snapshot <gogid> list|create|rollback|delete|auto` (design 20 §8):
-//! the flags, the question and the output; the work is
+//! the flags, the questions (a plain dir's conversion, §2.1) and the output; the work is
 //! `gogo::linuxapp::snapshots`. Refusals exit 7 with nothing touched, a bad id
 //! or snapshot number exits 2, and a change without `--yes` and without a
 //! terminal prints its plan and exits 2 (design 03 §3, §5).
@@ -36,7 +36,7 @@ pub fn run(gogid: String, cmd: cli::LinuxSnapshotCmd) -> Result<i32, AppError> {
         }
         cli::LinuxSnapshotCmd::Create {
             label,
-            yes: _,
+            yes,
             dry_run,
             json,
         } => {
@@ -52,13 +52,35 @@ pub fn run(gogid: String, cmd: cli::LinuxSnapshotCmd) -> Result<i32, AppError> {
                 }
                 return Ok(cli::exit::OK);
             }
-            let out = snap::create(&gogid, &backends, label.as_deref())?;
+            if plan.convert.is_some()
+                && let Some(code) = ask(
+                    &plan.lines(),
+                    yes,
+                    &format!("convert {} and take the snapshot?", plan.game_dir.display()),
+                )
+            {
+                return Ok(code);
+            }
+            let progress = progress(json);
+            let conv = snap::Convert {
+                progress: &progress,
+                ..Default::default()
+            };
+            let out = snap::create_with(
+                &gogid,
+                &backends,
+                label.as_deref(),
+                plan.convert.is_some().then_some(&conv),
+            )?;
             if json {
                 println!("{}", serde_json::to_string(&out).unwrap());
                 return Ok(cli::exit::OK);
             }
             for l in &out.recovered {
                 println!("{l}");
+            }
+            if let Some(c) = &out.conversion {
+                print_converted(c);
             }
             println!(
                 "snapshot {} of {gogid} taken ({})",
@@ -152,15 +174,50 @@ pub fn run(gogid: String, cmd: cli::LinuxSnapshotCmd) -> Result<i32, AppError> {
         ),
         cli::LinuxSnapshotCmd::Auto {
             state,
-            yes: _,
+            yes,
+            dry_run,
             json,
         } => {
             let out = match state {
                 None => snap::auto(&gogid, &backends, keep_auto)?,
                 Some(s) => {
                     let on = s == cli::OnOff::On;
-                    snap::plan_auto(&gogid, &backends, on)?;
-                    snap::set_auto(&gogid, &backends, on, keep_auto)?
+                    let plan = snap::plan_auto(&gogid, &backends, on)?;
+                    if dry_run {
+                        if json {
+                            println!("{}", serde_json::to_string(&plan).unwrap());
+                        } else {
+                            println!("would turn:");
+                            for l in plan.lines() {
+                                println!("  {l}");
+                            }
+                        }
+                        return Ok(cli::exit::OK);
+                    }
+                    if plan.convert.is_some()
+                        && let Some(code) = ask(
+                            &plan.lines(),
+                            yes,
+                            &format!(
+                                "convert {} and turn autosnapshot on?",
+                                plan.game_dir.display()
+                            ),
+                        )
+                    {
+                        return Ok(code);
+                    }
+                    let progress = progress(json);
+                    let conv = snap::Convert {
+                        progress: &progress,
+                        ..Default::default()
+                    };
+                    snap::set_auto_with(
+                        &gogid,
+                        &backends,
+                        on,
+                        keep_auto,
+                        plan.convert.is_some().then_some(&conv),
+                    )?
                 }
             };
             if json {
@@ -169,6 +226,9 @@ pub fn run(gogid: String, cmd: cli::LinuxSnapshotCmd) -> Result<i32, AppError> {
             }
             for l in &out.recovered {
                 println!("{l}");
+            }
+            if let Some(c) = &out.conversion {
+                print_converted(c);
             }
             if out.auto {
                 println!("autosnapshot: on, keeping {} automatic", out.keep_auto);
@@ -311,6 +371,67 @@ async fn fetch_build_files(want: rb::FetchWant) -> Option<gogo::snapshot::saves:
     ))
 }
 
+/// Show `lines` (a plan) and ask `question`, unless `yes`. `None`: go on;
+/// `Some(code)`: stop with that exit code (2 without a terminal, 0 on a no).
+fn ask(lines: &[String], yes: bool, question: &str) -> Option<i32> {
+    if yes {
+        return None;
+    }
+    eprintln!("plan:");
+    for l in lines {
+        eprintln!("  {l}");
+    }
+    if !interactive() {
+        eprintln!("gogo: non-interactive without --yes — aborting (plan above)");
+        return Some(cli::exit::USAGE);
+    }
+    let confirmed = dialoguer::Confirm::new()
+        .with_prompt(question)
+        .default(false)
+        .interact()
+        .unwrap_or(false);
+    if confirmed {
+        None
+    } else {
+        eprintln!("gogo: aborted");
+        Some(cli::exit::OK)
+    }
+}
+
+/// A conversion's progress on stderr, at most once a tenth per phase; nothing
+/// with `--json`.
+fn progress(json: bool) -> impl Fn(snap::ConvertProgress) {
+    let shown = std::cell::Cell::new((0u8, 0u64));
+    move |p| {
+        if json {
+            return;
+        }
+        let (phase, done, total, what) = match p {
+            snap::ConvertProgress::Copying { done, total } => (1, done, total, "copying"),
+            snap::ConvertProgress::Verifying { done, total } => (2, done, total, "checking"),
+        };
+        let tenth = (done.min(total) as u128 * 10 / u128::from(total.max(1))) as u64;
+        let (last_phase, last) = shown.get();
+        if phase != last_phase || tenth > last {
+            shown.set((phase, tenth));
+            eprintln!("converting: {what} {}%", tenth * 10);
+        }
+    }
+}
+
+fn print_converted(c: &snap::Converted) {
+    for w in &c.warnings {
+        eprintln!("warning: {w}");
+    }
+    println!(
+        "converted {} to a btrfs subvolume in {:.1} s ({} files reflinked, {} copied)",
+        c.game_dir.display(),
+        c.seconds,
+        c.reflinked_files,
+        c.copied_files
+    );
+}
+
 /// A question can be asked: stdin and stderr are terminals.
 fn interactive() -> bool {
     std::io::IsTerminal::is_terminal(&std::io::stdin())
@@ -389,5 +510,15 @@ mod tests {
         .unwrap_or_else(|_| panic!("the command failed"));
         assert_eq!(code, cli::exit::OK);
         assert!(!meta.join("2.toml").exists());
+    }
+
+    #[test]
+    fn a_conversion_without_yes_and_without_a_terminal_exits_2() {
+        let plan = ["a plan line".to_string()];
+        // Tests run with stdin not a terminal.
+        if !interactive() {
+            assert_eq!(ask(&plan, false, "convert?"), Some(cli::exit::USAGE));
+        }
+        assert_eq!(ask(&plan, true, "convert?"), None);
     }
 }

@@ -185,10 +185,13 @@ pub fn move_game(
     emit: &mut dyn FnMut(&MoveEvent),
 ) -> Result<MoveOutcome, MacAppError> {
     crate::macapp::compat::validate_gogid(gogid)?;
-    // A snapshot rollback that stopped is settled first (design 20 §5.3.1).
-    super::rollback::settle_pending(gogid, &super::snapshots::Backends::real())?;
+    // A snapshot rollback or conversion that stopped is settled first
+    // (design 20 §5.3.1, §2.1).
+    let settled = super::rollback::settle_pending(gogid, &super::snapshots::Backends::real())?;
     refuse_dlc_add(gogid)?;
-    relocate::move_game(gogid, target, &LinuxLane, opts, emit)
+    let mut out = relocate::move_game(gogid, target, &LinuxLane, opts, emit)?;
+    out.recovered.splice(0..0, settled);
+    Ok(out)
 }
 
 /// What `gogo linux-app move --adopt` will do.
@@ -198,7 +201,11 @@ pub fn adopt_plan(gogid: &str, target: &Target) -> Result<relocate::AdoptPlan, M
 
 /// `gogo linux-app move --adopt`: the game is at `target` now.
 pub fn adopt_game(gogid: &str, target: &Target) -> Result<relocate::AdoptOutcome, MacAppError> {
-    relocate::adopt_game(gogid, target, &LinuxLane)
+    crate::macapp::compat::validate_gogid(gogid)?;
+    let settled = super::rollback::settle_pending(gogid, &super::snapshots::Backends::real())?;
+    let mut out = relocate::adopt_game(gogid, target, &LinuxLane)?;
+    out.recovered.splice(0..0, settled);
+    Ok(out)
 }
 
 /// Finish whatever interrupted moves left, before something else looks at the
