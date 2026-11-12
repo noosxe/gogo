@@ -1,5 +1,8 @@
 # 21 — Builds: list them, pick one, see what's newer (#360)
 
+Status: **accepted** (2026-11-12). D1–D10 are accepted as written, and the open questions are
+answered in §11.
+
 The builds GOG serves for a game, and the choice of one: `gogo builds <game>` lists them,
 `--build <id|version>` on `gogo depot` and `gogo linux-app` picks one instead of the newest,
 and `apps list` / `apps show` / `doctor` say when a built game is behind. This is the
@@ -275,8 +278,10 @@ gogo: "2.03" names 2 builds of Anno 1701 A.D.; pick one by id:
   set, §5) and `build-manifest.json`, as it does for the newest build.
 - **Without `--build`** a build or rebuild takes the newest on the default branch, as today.
   A rebuild of a game on an older build therefore updates it, and the plan says so:
-  `build: 2.5_RedModFix (newer than the installed 2.31a; --build 2.31a keeps it)`. Whether a
-  game should remember a held build is Q1.
+  `build: 2.5_RedModFix (newer than the installed 2.31a; --build 2.31a keeps it)`. A game
+  doesn't remember a held build in this round (§11 Q1). A game on a named branch is rebuilt
+  onto the default branch's newest too, unless `--build` names a build on its branch. The plan
+  line names both branches then.
 
 ### 3.5 The depot cache on another build (D5)
 
@@ -309,8 +314,8 @@ wants X:
 
 | Where | What |
 |---|---|
-| `apps list` | a `build` column: the installed version, with `↑ 2.5_RedModFix` when the cached listing has a newer default-branch build, or `(gone)` when the installed build isn't in it. `--json` rows gain `build: {id, version, newest: {id, version} \| null, listed, checked}`. |
-| `apps show` | a `build` section: installed id, version, branch and date. Newest per the cache, when it was checked, and the command that updates (today a rebuild: `gogo linux-app <gogid> --yes`; later `linux-app update`). |
+| `apps list` | a `build` column: the installed version, with `↑ 2.5_RedModFix` when the cached listing has a newer build on the game's branch (the default branch unless `content.toml` names another, §11 Q2), or `(gone)` when the installed build isn't in it. `--json` rows gain `build: {id, version, newest: {id, version} \| null, listed, checked}`. |
+| `apps show` | a `build` section: installed id, version, branch and date. Newest on the game's branch per the cache, when it was checked; for a game on a named branch, also `default branch: 2.5_RedModFix is newer` when it is, and the command that updates (today a rebuild: `gogo linux-app <gogid> --yes`; later `linux-app update`). |
 | `doctor` | an `update` finding, **info** level (never warn or fail): `2.5_RedModFix is newer than the installed 2.31a (checked 2026-11-10)`. A **warn** when the installed build is no longer listed: `dlc add` and a later update can't fetch its files (design 19 §4), so a rebuild is the way forward. |
 | build plan | as §3.4 |
 
@@ -340,7 +345,8 @@ unknown (gogo builds <game> checks)`.
   a build's manifest after the build leaves the list (§5).
 - **Why no background check or check-on-launch**: `apps list` and `doctor` are offline today
   and should stay fast and predictable. The launcher makes no network
-  calls, and an update check at launch would make starting a game wait on GOG. A periodic check is a later option (Q4).
+  calls, and an update check at launch would make starting a game wait on GOG. There is no
+  periodic refresh either (§11 Q4).
 
 ## 5. Records (`content.toml`, `.gogo-depot.json`, `build-manifest.json`)
 
@@ -357,7 +363,7 @@ language = "en-US"
 
 `branch` is new and optional. An older gogo ignores it (no `deny_unknown_fields` on
 `Content`; only its `[[dlc]]` rows have it). It is what tells the hint to compare a legacy-branch game with the newest build on
-*its* branch (Q2), and the update to stay on the branch.
+*its* branch (§11 Q2), and the update to stay on the branch.
 
 ### 5.2 `games/<gogid>/build-manifest.json` (D6)
 
@@ -402,9 +408,8 @@ share most paths, and a second cache per build doubles 60 GB games.
 - **Mapping to depot builds**: the installer version equals the newest depot build's version
   name in every game checked, so `gogo builds` marks the matching row `installer`. Nothing
   depends on the match: it is display only.
-- **GOG's patch installers** (`patch_<game>_<from>_to_<to>.exe`) could update an
-  installer-lane game in place, run in its prefix like a DLC installer (design 19 §5). That
-  is part of the later update's design, not this one (Q5).
+- **GOG's patch installers** (`patch_<game>_<from>_to_<to>.exe`) are not run. An
+  installer-lane game is updated by re-downloading its installer and rebuilding (§11 Q5).
 
 ## 7. Basis for updates (requirement 5, a sketch, not designed here)
 
@@ -423,7 +428,8 @@ like `dlc` and `snapshot`. (`gogo update` stays the installer re-download of des
    - no installed manifest: not listed and no `build-manifest.json`;
    - a generation-1 build on either side (no patches, and gog-warp's v1/v2 diff across
      generations is untested);
-   - an installed DLC missing from the target (exit 2, named, with `--drop-dlc` as Q3);
+   - an installed DLC missing from the target (exit 2, named). There is no `--drop-dlc`: once
+     DLC removal (#353) exists, the update reuses it (§11 Q3);
    - the recorded language missing from the target (exit 2).
 4. **Plan**: gog-warp `prepare()` with `upgrade_from(installed)` gives the download size,
    with patches included. The plan shows `update: 2.31a → 2.5_RedModFix, 57.0 GiB to
@@ -434,8 +440,8 @@ like `dlc` and `snapshot`. (`gogo update` stays the installer re-download of des
    failure stops the update with exit 7. `--no-snapshots` skips it for this run (design 20
    §7.1, §9.5).
 6. **Source**: the depot cache, when its record is on the installed build with the recorded
-   language and holds the installed DLC (design 19 §3.3's test). Otherwise it is re-seeded
-   from `game/` (Q6), or the update is refused, naming a rebuild.
+   language and holds the installed DLC (design 19 §3.3's test). Otherwise the update is
+   refused, naming a rebuild. The cache is never re-seeded from `game/` (§11 Q6).
 7. **Download**: on the cache, `upgrade_from(installed manifest, installed build)`, with
    `old_dlcs` = `dlcs` = the installed set (DLC kept: their changed files come along,
    patched where GOG has patches for them) and `old_language` = `language`. Before that the
@@ -482,8 +488,8 @@ its `upgrading` marker (§3.5), and `branch` in `content.toml`.
 - **No per-file report**: the diff, its patches and `deleted` are `pub(crate)`. gogo works
   around it with its own walks (§1.4); no gog-warp change is needed.
 - **No patch opt-out**: a patch onto a locally changed cache file fails its checksum. The
-  cache is gogo's and never run, so this only matters for a cache re-seeded from `game/`
-  (Q6).
+  cache is gogo's and never run, and it is never re-seeded from `game/` (§11 Q6), so this
+  doesn't arise.
 
 No gog-warp change is made or needed for this design.
 
@@ -495,7 +501,7 @@ No gog-warp change is made or needed for this design.
 | Rebuild onto an older build | Allowed with `--build`. The plan says `downgrade` with the saves warning, and `before rebuild` is snapshotted. The cache moves to that build too (§3.5). Downgrade diffs have no GOG patches (§1.3): whole files. |
 | DLC that the chosen build lacks | Named: exit 2, `not in this build` (design 19 §2.2). Kept set on a rebuild: refused with the `--dlc` hint, never silently dropped (§3.4, D8). |
 | A language missing from a build | Exit 2 with that build's languages. There is no fallback (§3.4). `gogo builds --lang` shows `-` for it. |
-| `dlc add` on a game behind the newest | Unchanged (design 19 §4): adds for the installed build while it's listed. With `build-manifest.json` it could add after the build leaves the list, if the CDN still serves its depots. That is a follow-up (Q7), so the refusal stays for now. |
+| `dlc add` on a game behind the newest | Unchanged (design 19 §4): adds for the installed build while it's listed. Once the build leaves the list, the refusal stays: "update first" is the rule, and gogo doesn't fetch DLC depots for an unlisted build (§11 Q7). |
 | Snapshot rollback across builds | `content.toml` and `build-manifest.json` come back together. The cache stays on whatever it holds, and the next build or update handles it via §3.5. |
 | `move` / `apps remove` | `build-manifest.json` is one more file in the game dir. |
 | Mac lane | `--os osx` lists builds; nothing builds from them until the lane resumes. |
@@ -520,7 +526,9 @@ No gog-warp change is made or needed for this design.
 
 ## 10. Decisions
 
-| # | Question | Proposal |
+Decided on 2026-11-12: every answer below was accepted as written.
+
+| # | Question | Decision |
 |---|---|---|
 | D1 | Name and place of the listing? | **`gogo builds <game>`**, top level, with `--json` and `--installed`. It covers the depot and installer lanes and the built game, which `depot --list-builds` wouldn't (§2.1). |
 | D2 | What does `--build` match? | **An exact build id, else a version name that is unique** (exact, then case-insensitive). No fuzzy match and no keyword. Unknown or ambiguous is exit 2 with the list (§3.2): picking the wrong 60 GB build by a typo is the cost avoided. |
@@ -533,32 +541,21 @@ No gog-warp change is made or needed for this design.
 | D9 | `--build` on the installer lane? | **Refused**: GOG serves the newest installer only. The hint compares with the cached catalog version (§6). |
 | D10 | Name of the later update command? | **`gogo linux-app update <gogid>`**, since `gogo update` is the installer re-download (design 03) (§7). |
 
-## 11. Open questions
+## 11. Open questions, answered
 
-- **Q1. Hold a build?** Should a game remember a build picked with `--build` (a `hold` in
-  `content.toml`), so that a rebuild without `--build` keeps it and the hint reads `held at
-  2.31a; 2.5_RedModFix available`? Proposal: not in this round, because the plan line in
-  §3.4 already says what a plain rebuild does. But it fits the "user holds a version for a
-  mod" case (design 19 §4).
-- **Q2. A game on a named branch**: should its hint and update follow the newest build on its
-  branch (Cyberpunk's legacy branch has one build, so "up to date" forever), or the default
-  branch? Proposal: its own branch, with `apps show` saying the default branch has a newer
-  build.
-- **Q3. `update --drop-dlc`**: when the target build lacks an installed DLC (a downgrade to
-  `1.63_Hotfix` lacks Phantom Liberty), should the update take a flag to drop it, or stay
-  refused until DLC removal (#353) exists?
-- **Q4. A periodic check**: should `apps list` refresh listings older than
-  `catalog_ttl_hours` when online (about 40 ms a game), or stay offline as proposed?
-- **Q5. GOG's patch installers** on the installer lane: run them for an update (in the prefix,
-  like DLC installers), or treat an installer-lane update as re-download plus rebuild?
-- **Q6. No usable cache at update time**: re-seed the cache from `game/` by reflink (cheap on
-  btrfs, but a modded or game-written file breaks a patch's checksum), or refuse and send the
-  user to a rebuild (which re-downloads or hashes the whole build)?
-- **Q7. `dlc add` after the build left the list**: with `build-manifest.json`, an add could
-  still fetch the DLC's depots by hash if the CDN serves them. Worth it, or is "update first"
-  (design 19 §4) the rule?
+Decided on 2026-11-12.
 
-## 12. Implementation issues (proposed; filed after this design is approved)
+| # | Question | Decision |
+|---|---|---|
+| Q1 | Should a game remember a build picked with `--build` (a hold), so that a plain rebuild keeps it? | **No hold in this round.** The plan line says what a plain rebuild does (§3.4). A later issue may add a hold for the "held for a mod" case (design 19 §4). |
+| Q2 | Does a game on a named branch follow its own branch or the default one? | **Its own branch**, for the hint and the update. `apps show` says when the default branch has a newer build (§4.1). |
+| Q3 | `update --drop-dlc` when the target lacks an installed DLC? | **No.** The update stays refused until DLC removal (#353) exists, and then reuses it (§7.1). |
+| Q4 | Should `apps list` refresh old listings when online? | **No: it stays offline.** Only commands that fetch the list anyway, and `gogo builds --installed`, refresh the cache (§4.2). |
+| Q5 | Run GOG's patch installers on the installer lane? | **No.** An installer-lane update is a re-download plus a rebuild (§6). |
+| Q6 | No usable cache at update time? | **Refuse and point to a rebuild.** The cache is never re-seeded from `game/` (§7.1). |
+| Q7 | `dlc add` after the build left the list? | **"Update first" stays the rule.** gogo doesn't fetch DLC depots for a build that is no longer listed (§8, design 19 §4). |
+
+## 12. Implementation issues (to be filed as sub-issues of #360)
 
 Under epic #155 (Linux runtime) unless noted, `type:feature`, `area:depot` (+ `area:cli`
 where there is CLI).
@@ -568,10 +565,11 @@ where there is CLI).
 | I1 | builds: core listing, default-branch newest, `--build` resolution | `gog/builds.rs`: a listing type over gog-warp's `Build`, `pick_build` on the default branch (D3) with `match_build` following it, id/version resolution and its errors (§3.2–3.3), the listing cache (§4.2); fixture tests (§9) | — |
 | I2 | `gogo builds <game>` and `--installed` | the table, sizes and DLC from manifests in parallel, `HERE` from `content.toml` and the cache record, the installer footer and `--patches`, `--json`; refreshes the cache | I1 |
 | I3 | `--build` on `gogo depot` and `gogo linux-app` | the flag and `--password` on `linux-app`, the plan lines (picked, downgrade, newer-than-installed), DLC and language checks against the picked build (D8), `content.toml` `branch`, `.gogo-depot.json` `version`/`generation`; a cache on another build keeps `verify()` | I1 |
-| I4 | installed vs newest in `apps list` / `apps show` / `doctor` | the `build` column and section, `doctor`'s `update` (info) and gone (warn) findings, both lanes (§4, §6); cache writes from `depot`, `linux-app` and `dlc list/add` | I1 |
+| I4 | installed vs newest in `apps list` / `apps show` / `doctor` | the `build` column and section, compared on the game's own branch with the default-branch note in `apps show` (§11 Q2), `doctor`'s `update` (info) and gone (warn) findings, both lanes (§4, §6); cache writes from `depot`, `linux-app` and `dlc list/add` | I1 |
 | I5 | keep the installed build's manifest | `build-manifest.json` written by builds (§5.2), read by `gogo builds` for an unlisted installed build | I3 |
 | I6 | depot cache: switch builds with `upgrade_from` | §3.5's first row, the `upgrading` marker and its recovery, the record rewrite, fixture tests | I3, I5, #362 |
-| I7 | `gogo linux-app update` (the follow-up the issue names) | §7, its own design pass for Q3, Q5, Q6 | I4, I6, design 20's #405 |
+| I7 | `gogo linux-app update` (the follow-up the issue names) | §7 as answered in §11 (Q3, Q5, Q6): refusals for a lacking DLC and for no usable cache, the installer lane via re-download and rebuild | I4, I6, design 20's #405 |
 
-Not new issues, but requirements on existing ones (as comments when this is approved): #362
-(the update path is its biggest user; I6 waits for it), #353 (Q3).
+Not new issues, but requirements on existing ones (as comments): #362 (the update path is
+its biggest user; I6 waits for it), #353 (the update reuses DLC removal for a target that
+lacks an installed DLC, Q3). A hold (Q1) is left for a later issue.
