@@ -1,5 +1,6 @@
-//! `gogo linux-app dlc <gogid> list|add` (design 19 §1.3, §1.4, §4, §7): the network
-//! side and the output; the work is `gogo::linuxapp::dlc`.
+//! `gogo linux-app dlc <gogid> list|add|remove` (design 19 §1.3, §1.4, §3.7, §4, §7):
+//! the network side and the output; the work is `gogo::linuxapp::dlc` and
+//! `gogo::linuxapp::dlc_remove`.
 
 use std::sync::Arc;
 
@@ -39,6 +40,37 @@ pub async fn run(gogid: String, cmd: cli::LinuxDlcCmd) -> Result<i32, AppError> 
                 AddArgs {
                     names,
                     all,
+                    dry_run,
+                    yes,
+                    limit,
+                    disk_check: !no_disk_check,
+                    no_snapshots,
+                    json_progress,
+                    json,
+                },
+                cache_base,
+            )
+            .await
+        }
+        cli::LinuxDlcCmd::Remove {
+            names,
+            dry_run,
+            yes,
+            limit,
+            no_disk_check,
+            no_snapshots,
+            json_progress,
+            json,
+        } => {
+            let limit = match &limit {
+                Some(spec) => Some(gogo::config::parse_rate(spec)?),
+                None => None,
+            };
+            remove_cmd(
+                game,
+                AddArgs {
+                    names,
+                    all: false,
                     dry_run,
                     yes,
                     limit,
@@ -624,4 +656,352 @@ fn with_update_hint(e: &dlc::DlcSelectError, game: &Game, installed: &[u64]) -> 
         }
         _ => e.to_string(),
     }
+}
+
+/// The picker of a bare `remove` on a terminal: the installed DLC, none chosen.
+fn pick_installed(installed: &[gogo::gog::content::DlcRef]) -> Result<Vec<u64>, AppError> {
+    let items: Vec<String> = installed
+        .iter()
+        .map(|d| format!("{} ({})", d.title, d.id))
+        .collect();
+    let picked = crate::depot_progress::prompting(|| {
+        dialoguer::MultiSelect::new()
+            .with_prompt("DLC to remove (space toggles, enter accepts)")
+            .items(&items)
+            .interact_opt()
+    });
+    match picked {
+        Ok(Some(sel)) => Ok(sel.into_iter().map(|i| installed[i].id).collect()),
+        _ => {
+            eprintln!("gogo: aborted");
+            Err(AppError::Usage)
+        }
+    }
+}
+
+fn installed_names(installed: &[gogo::gog::content::DlcRef]) -> String {
+    if installed.is_empty() {
+        return "none".into();
+    }
+    installed
+        .iter()
+        .map(|d| format!("{} {}", d.id, d.title))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// `dlc remove` (design 19 §3.7).
+async fn remove_cmd(
+    mut game: Game,
+    a: AddArgs,
+    cache_base: Option<std::path::PathBuf>,
+) -> Result<i32, AppError> {
+    use gogo::linuxapp::dlc_remove as rm;
+    let machine = a.json || a.json_progress;
+    let (quiet, _) = crate::PROGRESS_FLAGS.get().copied().unwrap_or_default();
+    let quiet = quiet || a.json;
+    let jp = a.json_progress;
+    if !is_depot(&game) {
+        eprintln!(
+            "gogo: {} is an offline-installer game: removing DLC there runs the DLC's own \
+             uninstaller, which gogo doesn't do yet; a rebuild with --dlc naming the DLC to \
+             keep (or --no-dlcs) leaves it out and keeps the prefix and saves",
+            game.gogid
+        );
+        return Ok(cli::exit::MACAPP);
+    }
+    // A half-done add, update or removal is settled first, whatever was asked.
+    let recovered = if a.dry_run {
+        None
+    } else {
+        match add::recover(&mut game, gogo::gog::materialize::Reflink::Try, &mut |ev| {
+            emit(ev, jp, quiet, &|l| eprintln!("{l}"))
+        }) {
+            Ok(r) => r,
+            Err(e) => return Ok(report(e)),
+        }
+    };
+    let installed = game.content.refs();
+    let wanted: Vec<u64> = if !a.names.is_empty() {
+        let named = rm::resolve_installed(&a.names, &installed);
+        if !named.unmatched.is_empty() && !quiet {
+            eprintln!(
+                "gogo: not installed, nothing to remove: {} (installed: {})",
+                named.unmatched.join(", "),
+                installed_names(&installed)
+            );
+        }
+        if named.ids.is_empty() && recovered.is_none() && !named.unmatched.is_empty() {
+            // Only a name that matches nothing: likely a typo, so not a success.
+            let typo = named
+                .unmatched
+                .iter()
+                .any(|n| n.trim().parse::<u64>().is_err());
+            if typo {
+                return Ok(cli::exit::USAGE);
+            }
+        }
+        named.ids
+    } else if recovered.is_some() {
+        // A bare rerun after a stop: the recovery was the job.
+        Vec::new()
+    } else if interactive(machine) && !installed.is_empty() {
+        pick_installed(&installed)?
+    } else {
+        eprintln!(
+            "gogo: name the DLC to remove (id or title); installed: {}",
+            installed_names(&installed)
+        );
+        return Ok(cli::exit::USAGE);
+    };
+    if wanted.is_empty() {
+        if a.json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "gogid": game.gogid,
+                    "buildId": game.content.build_id,
+                    "language": game.content.language,
+                    "dlcs": game.content.refs(),
+                    "removed": [],
+                    "recovered": recovered,
+                })
+            );
+        } else if !quiet && recovered.is_none() {
+            eprintln!("gogo: nothing to remove");
+        }
+        return Ok(cli::exit::OK);
+    }
+
+    // The depot manifests need the session; the catalog isn't read.
+    let (ctx, _token) = connect_phase(machine).await?;
+    let session = core(&ctx)?;
+    let id = game_id(&game);
+    let title = title_of(&game);
+    let language = language_of(&game);
+    let Some(build) = game.content.build_id.clone() else {
+        eprintln!(
+            "gogo: the game's build isn't known (no build in {} or its goggame info), so \
+             the DLC's files can't be told apart; a rebuild without it: {}",
+            gogo::gog::content::FILE,
+            rm::rebuild_hint(&game, &wanted)
+        );
+        return Ok(cli::exit::MACAPP);
+    };
+    // The installed build's manifest: kept in the game dir, else GOG's listing.
+    let kept = gogo::gog::build_manifest::load(&game.dirs.root).filter(|s| s.build_id == build);
+    let (version, generation, manifest) = match kept {
+        Some(s) => (game.content.version.clone(), s.generation, s.manifest),
+        None => {
+            let ib = crate::phase(
+                machine,
+                "fetching the builds list",
+                depot::installed_build(session, id, Some(&build)),
+            )
+            .await?;
+            match ib.listed {
+                Some((v, g, m)) => (Some(v), g, m),
+                None => {
+                    eprintln!(
+                        "gogo: build {build} isn't served by GOG any more and the game has no \
+                         copy of its manifest, so the DLC's files can't be told apart from \
+                         the base game's; a rebuild without it: {}",
+                        rm::rebuild_hint(&game, &wanted)
+                    );
+                    return Ok(cli::exit::MACAPP);
+                }
+            }
+        }
+    };
+    let mut products = vec![game.gogid.clone()];
+    products.extend(game.installed().iter().map(u64::to_string));
+    let langs = vec![language.clone()];
+    let depots = match crate::phase(
+        machine,
+        "reading the depot manifests",
+        gogo::gog::dlc_filter::fetch_depots(
+            session.reqwest_client(),
+            &manifest,
+            Some((&products, &langs)),
+        ),
+    )
+    .await
+    {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!(
+                "gogo: the build's depot manifests can't be read ({e}), and without them the \
+                 DLC's files can't be checked before they come out; nothing was changed. Try \
+                 again when GOG can be reached, or rebuild without it: {}",
+                rm::rebuild_hint(&game, &wanted)
+            );
+            return Ok(cli::exit::MACAPP);
+        }
+    };
+    let snapshots = crate::auto_snapshots(a.no_snapshots)?;
+    let autosnapshot = gogo::linuxapp::snapshots::auto_skipped(&game.gogid, &game.dirs, &snapshots)
+        .is_ok_and(|s| s.is_none());
+    let plan = match rm::plan_remove(&rm::PlanInput {
+        game: &game,
+        title: &title,
+        version,
+        generation,
+        tree_name: manifest.install_directory().to_string(),
+        depots: &depots,
+        removing: &wanted,
+        autosnapshot,
+    }) {
+        Ok(p) => p,
+        Err(why) => {
+            eprintln!("gogo: {why}");
+            return Ok(cli::exit::MACAPP);
+        }
+    };
+    if !machine && !quiet {
+        for l in rm::plan_lines(&plan) {
+            eprintln!("gogo: {l}");
+        }
+    }
+    if a.dry_run {
+        if a.json {
+            println!("{}", serde_json::json!({ "dryRun": true, "plan": plan }));
+        }
+        return Ok(cli::exit::OK);
+    }
+    if !a.yes {
+        if !interactive(machine) {
+            eprintln!("gogo: removing DLC needs consent: pass --yes");
+            return Ok(cli::exit::USAGE);
+        }
+        let prompt = format!("{}. Remove it now?", rm::saves_warning(&plan));
+        let go = crate::depot_progress::prompting(|| {
+            dialoguer::Confirm::new()
+                .with_prompt(prompt.clone())
+                .default(false)
+                .interact()
+        })
+        .unwrap_or(false);
+        if !go {
+            eprintln!("gogo: aborted");
+            return Ok(cli::exit::USAGE);
+        }
+    }
+
+    let deps_root = depot::cache_roots(cache_base.as_deref(), id, None).map(|r| r.2);
+    if plan.downloads() && deps_root.is_none() {
+        return Err(AppError::Depot(depot::DepotError::NoCacheDir));
+    }
+    let deps_root = deps_root.unwrap_or_default();
+    let cancel = ctx.cancel.clone();
+    {
+        let c = cancel.clone();
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            c.cancel();
+        });
+    }
+    let mode = depot_mode(a.json_progress, a.json);
+    if plan.downloads() && matches!(mode, depot_progress::Mode::Human { .. }) {
+        eprintln!("gogo: downloading the base files the DLC replaced, for {title} (build {build})");
+    }
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<DepotEvent>();
+    let free_space = ctx.free_space.clone();
+    let fetch = async |inputs: depot::DownloadInputs, root: std::path::PathBuf| {
+        let (files, bytes) = depot::fetch_into(
+            session,
+            &depot::FetchSpec {
+                manifest: &manifest,
+                build_id: &build,
+                inputs: &inputs,
+                old_manifest: None,
+                install_root: &root,
+                support_root: &root.join("gog-support"),
+                deps_root: &deps_root,
+                limit: a.limit,
+                disk_check: a.disk_check,
+            },
+            &tx,
+            &cancel,
+            free_space.as_ref(),
+        )
+        .await?;
+        let _ = tx.send(DepotEvent::Finished {
+            install_dir: root.join(manifest.install_directory()),
+            fetched_files: files,
+            fetched_bytes: bytes,
+        });
+        Ok(())
+    };
+    let stop_token = cancel.clone();
+    let stop = move || stop_token.is_cancelled();
+    let act = depot_progress::Activity::new(mode);
+    let live = depot_progress::Live::new(&mut rx, &act);
+    let mut on_event = |ev: &ProgressEvent| {
+        if !live.work(ev) {
+            emit_remove(ev, jp, quiet, &|l| live.note(l))
+        }
+    };
+    let opts = add::AddOptions {
+        snapshots,
+        ..Default::default()
+    };
+    let runner = rm::remove(&mut game, &plan, fetch, &opts, &mut on_event, &stop);
+    let result = live.drive(runner).await;
+    match result {
+        Ok(out) => {
+            if a.json {
+                println!("{}", serde_json::to_string(&out).unwrap());
+            } else if !quiet {
+                for w in &out.warnings {
+                    eprintln!("gogo: warning: {w}");
+                }
+                let now = if out.dlcs.is_empty() {
+                    "none".to_string()
+                } else {
+                    out.dlcs
+                        .iter()
+                        .map(|d| d.title.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                if out.removed.is_empty() {
+                    eprintln!("gogo: nothing to remove; {title}'s DLC: {now}");
+                } else {
+                    eprintln!(
+                        "gogo: removed {} from {title} (build {build}: {} file(s) out, {} \
+                         restored); its DLC now: {now}",
+                        out.removed
+                            .iter()
+                            .map(|d| d.title.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        out.files_removed,
+                        out.files_restored
+                    );
+                }
+            }
+            Ok(cli::exit::OK)
+        }
+        Err(e) => Ok(report(e)),
+    }
+}
+
+/// [`emit`], with a removal's words for its lay.
+fn emit_remove(ev: &ProgressEvent, json_progress: bool, quiet: bool, print: &dyn Fn(&str)) {
+    if let ProgressEvent::GameFilesStarted {
+        bytes, dir, files, ..
+    } = ev
+        && !json_progress
+    {
+        if !quiet {
+            print(&format!(
+                "gogo: game files: taking the DLC out of {} ({} file(s) restored, {})",
+                dir.display(),
+                files.unwrap_or(0),
+                gogo::fmt::human_size(*bytes)
+            ));
+        }
+        return;
+    }
+    emit(ev, json_progress, quiet, print)
 }

@@ -968,7 +968,7 @@ fn read_download(root: &Path) -> Option<DownloadRecord> {
     serde_json::from_str(&std::fs::read_to_string(root.join(DOWNLOAD)).ok()?).ok()
 }
 
-/// Is a DLC add (or an update, design 21 §11g) of the game in `root` in the middle
+/// Is a DLC add (or an update, design 21 §11g, or a removal, §3.7) of the game in `root` in the middle
 /// of laying files (the launcher refuses, doctor fails)?
 pub fn journal_exists(root: &Path) -> bool {
     lay::journal_path(root).exists()
@@ -1089,9 +1089,16 @@ pub fn recover_locked(
     // An update's lay (design 21 §11g) shares the journal. Its files come from the
     // depot cache on the target build: a cache that moved since can't finish it,
     // so it goes back.
-    let moved = lay::read_journal(&root)?
-        .filter(Journal::is_update)
-        .and_then(|j| super::update::cache_moved(&j));
+    // A removal's restored files can come from the cache too (design 19 §3.7).
+    let moved = lay::read_journal(&root)?.and_then(|j| {
+        if j.is_update() {
+            super::update::cache_moved(&j)
+        } else if j.is_removal() {
+            super::dlc_remove::cache_moved(&j, game.cache_root.as_deref())
+        } else {
+            None
+        }
+    });
     let recovered = match moved {
         Some(_) => lay::roll_back(&root, reflink)?,
         None => lay::recover(&root, reflink)?,
@@ -1101,6 +1108,10 @@ pub fn recover_locked(
     };
     if j.is_update() {
         super::update::settle(game, &j, dir, moved, emit)?;
+        return Ok(Some(dir));
+    }
+    if j.is_removal() {
+        super::dlc_remove::settle(game, &j, dir, moved, emit)?;
         return Ok(Some(dir));
     }
     match dir {
@@ -1305,6 +1316,7 @@ where
             from: None,
             to: None,
             removed: Vec::new(),
+            removing: Vec::new(),
         };
         // A record-only add with nothing to lay writes no journal.
         if !j.files.is_empty() {

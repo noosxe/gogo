@@ -8012,6 +8012,444 @@ mod dlc_add {
         assert_eq!(std::fs::read(root.join(depot::RECORD)).unwrap(), old);
         assert!(content::load(&w.game()).unwrap().unwrap().dlc.is_empty());
     }
+
+    /// `dlc remove` (design 19 §3.7): the DLC [`dlc_files`] lays, taken out again.
+    mod remove {
+        use super::*;
+        use gogo::gog::dlc_filter::DepotList;
+        use gogo::linuxapp::dlc_remove::{self as rm, RemoveOutcome, RestoreFrom};
+
+        fn md5(bytes: &[u8]) -> String {
+            use md5::Digest;
+            let mut h = md5::Md5::new();
+            h.update(bytes);
+            gogo::fmt::md5_hex(h)
+        }
+
+        fn entry(path: &str, bytes: &[u8]) -> (String, u64, String) {
+            (format!("{TREE}/{path}"), bytes.len() as u64, md5(bytes))
+        }
+
+        fn depot(product: &str, files: Vec<(String, u64, String)>) -> DepotList {
+            DepotList {
+                product: product.into(),
+                languages: vec!["*".into()],
+                manifest: format!("m-{product}"),
+                paths: files.iter().map(|f| f.0.clone()).collect(),
+                sizes: files.iter().map(|f| (f.0.clone(), f.1)).collect(),
+                md5s: files.iter().map(|f| (f.0.clone(), f.2.clone())).collect(),
+            }
+        }
+
+        /// The installed build's depots, as fake manifests: the DLC's depot first
+        /// (so its `shared.pak` is the one laid), then the base's, which lists its
+        /// own `shared.pak`. The DLC's `goggame-*` files are left out of its depot:
+        /// they go by name.
+        fn depots() -> Vec<DepotList> {
+            vec![
+                depot(
+                    &DLC.to_string(),
+                    vec![
+                        entry("dlc/ep1/a.archive", b"dlc archive"),
+                        entry("shared.pak", b"dlc shared"),
+                    ],
+                ),
+                depot(ID, vec![entry("shared.pak", b"base shared")]),
+            ]
+        }
+
+        fn plan(g: &Game, removing: &[u64], generation: u32) -> Result<rm::RemovePlan, String> {
+            let depots = depots();
+            rm::plan_remove(&rm::PlanInput {
+                game: g,
+                title: "Test Game",
+                version: Some("1.0".into()),
+                generation,
+                tree_name: TREE.into(),
+                depots: &depots,
+                removing,
+                autosnapshot: false,
+            })
+        }
+
+        struct Removal {
+            result: Result<RemoveOutcome, AddError>,
+            inputs: Vec<DownloadInputs>,
+            events: Vec<serde_json::Value>,
+        }
+
+        /// One removal with a fake downloader that gives the base's `shared.pak`
+        /// (`give: false` gives nothing, as a diff that fetched nothing would).
+        fn remove(g: &mut Game, p: &rm::RemovePlan, opts: AddOptions, give: bool) -> Removal {
+            let seen: Arc<Mutex<Vec<DownloadInputs>>> = Arc::default();
+            let s = seen.clone();
+            let fetch = async move |inputs: DownloadInputs, root: PathBuf| {
+                s.lock().unwrap().push(inputs);
+                if give {
+                    std::fs::create_dir_all(root.join(TREE)).unwrap();
+                    std::fs::write(root.join(TREE).join("shared.pak"), b"base shared").unwrap();
+                }
+                Ok::<(), DepotError>(())
+            };
+            let mut events = Vec::new();
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let result = rt.block_on(rm::remove(
+                g,
+                p,
+                fetch,
+                &opts,
+                &mut |e| events.push(serde_json::to_value(e).unwrap()),
+                &|| false,
+            ));
+            let inputs = seen.lock().unwrap().clone();
+            Removal {
+                result,
+                inputs,
+                events,
+            }
+        }
+
+        fn no_setup() -> AddOptions {
+            AddOptions {
+                run_setup: false,
+                ..Default::default()
+            }
+        }
+
+        /// A built game with the DLC added from staging (no cache); the game's
+        /// files before the add.
+        fn with_dlc(name: &str) -> (World, BTreeMap<String, Vec<u8>>) {
+            let w = built(name);
+            let before = tree(&w.game().join("game"));
+            let mut g = game(&w);
+            let p = plan_for(&g, &[DLC]);
+            run(&mut g, &p, no_setup(), false).result.unwrap();
+            assert_eq!(
+                std::fs::read(w.game().join("game/shared.pak")).unwrap(),
+                b"dlc shared"
+            );
+            (w, before)
+        }
+
+        #[test]
+        fn a_removal_takes_the_dlc_out_and_restores_the_base_file_it_replaced() {
+            let (w, before) = with_dlc("dlc-remove");
+            let mut g = game(&w);
+            let p = plan(&g, &[DLC], 2).unwrap();
+            // The reverse diff: the DLC-only file out, the replaced one back, from a
+            // download (there's no cache).
+            assert_eq!(
+                p.removed
+                    .iter()
+                    .map(|e| e.path.as_str())
+                    .collect::<Vec<_>>(),
+                [format!("{TREE}/dlc/ep1/a.archive")]
+            );
+            assert_eq!(p.restored.len(), 1);
+            assert_eq!(p.restored[0].file.path, format!("{TREE}/shared.pak"));
+            assert_eq!(p.restored[0].from, RestoreFrom::Download);
+            assert_eq!(p.game_files, "rename");
+            let lines = rm::plan_lines(&p);
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l.starts_with("saves: saves made with Extra Pack")),
+                "{lines:?}"
+            );
+            assert!(
+                lines.iter().any(|l| l.contains("1 the DLC replaced")),
+                "{lines:?}"
+            );
+
+            let r = remove(&mut g, &p, AddOptions::default(), true);
+            let out = r.result.unwrap();
+            // The installed build against itself, without the DLC.
+            assert_eq!(
+                r.inputs,
+                [DownloadInputs {
+                    targeted: true,
+                    switch_from: None,
+                    language: Some("en-US".into()),
+                    old_language: Some("en-US".into()),
+                    dlcs: vec![],
+                    old_dlcs: vec![DLC.to_string()],
+                }]
+            );
+            // The game is as before the add: the archive, its dirs and the DLC's
+            // goggame files gone, the base's shared.pak back.
+            assert_eq!(tree(&w.game().join("game")), before);
+            assert!(!w.game().join("game/dlc").exists(), "an emptied dir goes");
+            assert_eq!((out.files_removed, out.files_restored), (3, 1));
+            assert_eq!(out.removed.len(), 1);
+            assert!(out.dlcs.is_empty());
+            assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+            no_leftovers(&w);
+            assert!(content::load(&w.game()).unwrap().unwrap().dlc.is_empty());
+            let started = r
+                .events
+                .iter()
+                .find(|e| tag(e) == "GameFilesStarted")
+                .unwrap();
+            assert_eq!(started["GameFilesStarted"]["kind"], "dlc-remove");
+            let (level, msg) = dlc_finding(&w);
+            assert_eq!(level, Level::Ok, "{msg}");
+
+            // Again: not installed, nothing to name.
+            let g = game(&w);
+            let named = rm::resolve_installed(&["Extra Pack".into()], &g.content.refs());
+            assert!(named.ids.is_empty());
+        }
+
+        #[test]
+        fn a_replaced_base_file_comes_from_the_cache_when_its_copy_is_right() {
+            let w = built("dlc-remove-cache");
+            cache(&w);
+            let mut g = game(&w);
+            let p = plan_for(&g, &[DLC]);
+            assert_eq!(p.source, Source::Cache);
+            run(&mut g, &p, no_setup(), false).result.unwrap();
+            // The add left the DLC's shared.pak in the cache: it can't restore it.
+            let mut g = game(&w);
+            let p = plan(&g, &[DLC], 2).unwrap();
+            assert_eq!(p.restored[0].from, RestoreFrom::Download);
+            assert_eq!(p.cache_keeps.len(), 1, "the DLC stays in the cache");
+            // A cache whose copy is the base's (its depot came first there).
+            let shared = cache_root(&w).join(TREE).join("shared.pak");
+            std::fs::write(&shared, b"base shared").unwrap();
+            let p = plan(&g, &[DLC], 1).unwrap();
+            assert_eq!(
+                p.restored[0].from,
+                RestoreFrom::Cache,
+                "no download: gen 1 is fine"
+            );
+            assert!(
+                rm::plan_lines(&p)
+                    .iter()
+                    .any(|l| l.starts_with("depot cache: Extra Pack stays in it")),
+            );
+            let r = remove(&mut g, &p, no_setup(), true);
+            r.result.unwrap();
+            assert!(r.inputs.is_empty(), "no downloader");
+            assert_eq!(
+                std::fs::read(w.game().join("game/shared.pak")).unwrap(),
+                b"base shared"
+            );
+            assert!(!w.game().join("game/dlc/ep1/a.archive").exists());
+            // The cache keeps the DLC, and its record still lists it.
+            assert!(cache_root(&w).join(TREE).join("dlc/ep1/a.archive").exists());
+            let rec = depot::read_record(&cache_root(&w)).unwrap();
+            assert_eq!(rec.dlcs, Some(vec![DLC.to_string()]));
+            no_leftovers(&w);
+        }
+
+        #[test]
+        fn a_download_on_a_generation_1_build_is_refused() {
+            let (w, _) = with_dlc("dlc-remove-gen1");
+            let g = game(&w);
+            let why = plan(&g, &[DLC], 1).unwrap_err();
+            assert!(why.contains("generation 1"), "{why}");
+            assert!(
+                why.contains(&format!("gogo linux-app {ID} --no-dlcs --yes")),
+                "{why}"
+            );
+        }
+
+        #[test]
+        fn a_base_file_already_right_isnt_restored() {
+            let (w, _) = with_dlc("dlc-remove-same");
+            std::fs::write(w.game().join("game/shared.pak"), b"base shared").unwrap();
+            let g = game(&w);
+            let p = plan(&g, &[DLC], 1).unwrap();
+            assert!(p.restored.is_empty());
+            assert!(rm::plan_lines(&p).contains(&"base files: none to restore".to_string()));
+        }
+
+        #[test]
+        fn a_changed_dlc_file_stays_with_a_warning() {
+            let (w, _) = with_dlc("dlc-remove-changed");
+            std::fs::write(w.game().join("game/dlc/ep1/a.archive"), b"modded").unwrap();
+            let mut g = game(&w);
+            let p = plan(&g, &[DLC], 2).unwrap();
+            let out = remove(&mut g, &p, no_setup(), true).result.unwrap();
+            assert_eq!(
+                std::fs::read(w.game().join("game/dlc/ep1/a.archive")).unwrap(),
+                b"modded"
+            );
+            assert!(
+                out.warnings
+                    .iter()
+                    .any(|w| w.contains("kept dlc/ep1/a.archive") && w.contains("changed")),
+                "{:?}",
+                out.warnings
+            );
+            assert!(!w.game().join(format!("game/goggame-{DLC}.info")).exists());
+            assert!(content::load(&w.game()).unwrap().unwrap().dlc.is_empty());
+        }
+
+        #[test]
+        fn a_download_without_the_base_version_changes_nothing() {
+            let (w, _) = with_dlc("dlc-remove-nofetch");
+            let before = tree(&w.game().join("game"));
+            let mut g = game(&w);
+            let p = plan(&g, &[DLC], 2).unwrap();
+            let r = remove(&mut g, &p, no_setup(), false);
+            let e = r.result.unwrap_err().to_string();
+            assert!(e.contains("nothing was changed"), "{e}");
+            assert_eq!(tree(&w.game().join("game")), before);
+            no_leftovers(&w);
+            assert_eq!(content::load(&w.game()).unwrap().unwrap().dlc.len(), 1);
+        }
+
+        #[test]
+        fn a_plan_the_game_moved_on_from_is_refused() {
+            let (w, _) = with_dlc("dlc-remove-drift");
+            let mut g = game(&w);
+            let p = plan(&g, &[DLC], 2).unwrap();
+            let mut c = content::load(&w.game()).unwrap().unwrap();
+            c.language = Some("de-DE".into());
+            content::write(&w.game(), &c).unwrap();
+            let e = remove(&mut g, &p, no_setup(), true)
+                .result
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains("changed since the plan"), "{e}");
+            assert!(w.game().join("game/dlc/ep1/a.archive").exists());
+        }
+
+        #[test]
+        fn a_stopped_removal_is_finished_by_the_next_or_undone_when_its_files_are_gone() {
+            for step in [
+                lay::Step::Journal,
+                lay::Step::File,
+                lay::Step::New,
+                lay::Step::Backup,
+                lay::Step::Rename,
+            ] {
+                for undo in [false, true] {
+                    let (w, before) = with_dlc(&format!("dlc-remove-stop-{step:?}-{undo}"));
+                    let with = tree(&w.game().join("game"));
+                    let mut g = game(&w);
+                    let p = plan(&g, &[DLC], 2).unwrap();
+                    let opts = AddOptions {
+                        run_setup: false,
+                        fail_at: Some(step),
+                        ..Default::default()
+                    };
+                    let r = remove(&mut g, &p, opts, true);
+                    assert!(
+                        matches!(&r.result, Err(AddError::Interrupted("lay", m)) if m.contains("remove")),
+                        "{step:?}: {:?}",
+                        r.result.as_ref().err()
+                    );
+                    assert!(dlc::journal_exists(&w.game()), "{step:?}");
+                    let (level, msg) = dlc_finding(&w);
+                    assert!(
+                        level == Level::Fail && msg.contains("removal"),
+                        "{step:?}: {msg}"
+                    );
+                    assert_eq!(content::load(&w.game()).unwrap().unwrap().dlc.len(), 1);
+                    if undo {
+                        // The staged base file is gone (before the swap only).
+                        if matches!(step, lay::Step::Backup | lay::Step::Rename) {
+                            continue;
+                        }
+                        let staged = w.game().join(lay::STAGING).join(TREE).join("shared.pak");
+                        let _ = std::fs::remove_file(&staged);
+                        let _ = std::fs::remove_file(w.game().join("game/shared.pak.gogo-new"));
+                    }
+                    let mut g = game(&w);
+                    let mut events = Vec::new();
+                    let dir =
+                        dlc::recover(&mut g, gogo::gog::materialize::Reflink::Try, &mut |e| {
+                            events.push(serde_json::to_value(e).unwrap())
+                        })
+                        .unwrap();
+                    no_leftovers(&w);
+                    let dlcs = content::load(&w.game()).unwrap().unwrap().dlc.len();
+                    if undo {
+                        assert_eq!(dir, Some(lay::Direction::Back), "{step:?}");
+                        assert_eq!(tree(&w.game().join("game")), with, "{step:?}");
+                        assert_eq!(dlcs, 1, "{step:?}");
+                    } else {
+                        assert_eq!(dir, Some(lay::Direction::Forward), "{step:?}");
+                        // Files only: a forward recovery leaves an emptied dir.
+                        assert_eq!(tree(&w.game().join("game")), before, "{step:?}");
+                        assert_eq!(dlcs, 0, "{step:?}");
+                    }
+                    assert!(
+                        events
+                            .iter()
+                            .any(|e| e.to_string().contains("an earlier removal")),
+                        "{events:?}"
+                    );
+                }
+            }
+        }
+
+        #[test]
+        fn a_removal_takes_before_removing_first() {
+            let (w, _, b) = built_with_snapshots("dlc-remove-autosnap");
+            let mut g = game(&w);
+            let p = plan_for(&g, &[DLC]);
+            run(&mut g, &p, with_snapshots(&b, false), false)
+                .result
+                .unwrap();
+            let mut g = game(&w);
+            let p = plan(&g, &[DLC], 2).unwrap();
+            let r = remove(&mut g, &p, with_snapshots(&b, false), true);
+            let out = r.result.unwrap();
+            let s = out.snapshot.clone().expect("before removing");
+            assert_eq!(s.label, "before removing Extra Pack");
+            let created: Vec<_> = r
+                .events
+                .iter()
+                .filter_map(|e| e.get("SnapshotCreated"))
+                .collect();
+            assert_eq!(created[0]["trigger"], "dlc-remove");
+            // Taken before the change: it holds the DLC.
+            let snap = gogo::snapshot::backend::snapshot_dir(&w.game(), s.id).unwrap();
+            assert!(snap.join("game/dlc/ep1/a.archive").exists());
+            assert!(!w.game().join("game/dlc/ep1/a.archive").exists());
+        }
+
+        #[test]
+        fn a_removal_with_no_snapshots_takes_none() {
+            let (w, _, b) = built_with_snapshots("dlc-remove-nosnap");
+            let mut g = game(&w);
+            let p = plan_for(&g, &[DLC]);
+            run(&mut g, &p, with_snapshots(&b, true), false)
+                .result
+                .unwrap();
+            let before = snapshot_ids(&b);
+            let mut g = game(&w);
+            let p = plan(&g, &[DLC], 2).unwrap();
+            let out = remove(&mut g, &p, with_snapshots(&b, true), true)
+                .result
+                .unwrap();
+            assert!(out.snapshot.is_none());
+            assert_eq!(snapshot_ids(&b), before);
+        }
+
+        #[test]
+        fn a_zero_byte_dlc_is_a_record_only_removal() {
+            let w = built("dlc-remove-zero");
+            let mut g = game(&w);
+            let p = plan_for(&g, &[ZERO]);
+            run(&mut g, &p, no_setup(), false).result.unwrap();
+            let mut g = game(&w);
+            let p = plan(&g, &[ZERO], 2).unwrap();
+            assert!(p.removed.is_empty() && p.restored.is_empty());
+            let r = remove(&mut g, &p, no_setup(), true);
+            let out = r.result.unwrap();
+            assert!(r.inputs.is_empty());
+            assert_eq!(out.removed.len(), 1);
+            assert!(content::load(&w.game()).unwrap().unwrap().dlc.is_empty());
+            no_leftovers(&w);
+        }
+    }
 }
 
 // — a game's exes and one-off runs (#364, design 18 §7.10) —
@@ -12451,7 +12889,13 @@ mod update {
         let r = update::plan_update(input(&g, &[])).unwrap_err();
         assert!(r.usage, "exit 2");
         assert!(r.message.contains("Extra Pack (777001)"), "{}", r.message);
-        assert!(r.message.contains("#353"), "{}", r.message);
+        assert!(
+            r.message.contains(
+                "gogo linux-app dlc 1999999901 remove 777001, then gogo linux-app update"
+            ),
+            "{}",
+            r.message
+        );
         assert!(
             r.message
                 .contains("gogo linux-app 1999999901 --build B2 --no-dlcs --yes"),

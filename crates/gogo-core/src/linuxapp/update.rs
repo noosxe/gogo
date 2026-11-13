@@ -372,12 +372,18 @@ pub fn plan_update(input: PlanInput<'_>) -> Result<Planned, Refusal> {
         } else {
             keep
         };
+        let ids: String = lacking.iter().map(|d| format!(" {}", d.id)).collect();
         return Err(Refusal {
             message: format!(
-                "build {to} doesn't have the installed DLC {}, and gogo can't remove a DLC \
-                 from a built game yet (gogo issue #353); a rebuild without it updates the \
-                 game: gogo linux-app {gogid} --build {to}{flags} --yes",
-                named.join(", ")
+                "build {to} doesn't have the installed DLC {}; remove it first, then update: \
+                 gogo linux-app dlc {gogid} remove{ids}, then gogo linux-app update {gogid}{}; \
+                 or a rebuild without it: gogo linux-app {gogid} --build {to}{flags} --yes",
+                named.join(", "),
+                if input.picked {
+                    format!(" --build {to}")
+                } else {
+                    String::new()
+                }
             ),
             usage: true,
         });
@@ -732,7 +738,12 @@ fn drift(game: &Game, plan: &UpdatePlan) -> Option<String> {
 /// Whether `game/<rel>` may come out: no dir on its way is a symlink (that would
 /// reach outside `game/`), and it still is the installed build's file by the MD5,
 /// else the size, that build gives it. `Err` says why it stays.
-fn removable(game: &Path, rel: &str, size: Option<u64>, md5: Option<&str>) -> Result<(), String> {
+pub(crate) fn removable(
+    game: &Path,
+    rel: &str,
+    size: Option<u64>,
+    md5: Option<&str>,
+) -> Result<(), String> {
     if let Some(link) = lay::symlinked_parent(game, rel) {
         return Err(format!("a dir on its path ({link}) is a symlink"));
     }
@@ -977,6 +988,7 @@ where
         from: Some(plan.from.build_id.clone()),
         to: Some(plan.to.build_id.clone()),
         removed,
+        removing: Vec::new(),
     };
     j.survey(&game.dirs.game);
     // A dropped file is only taken out while it is the installed build's: one the

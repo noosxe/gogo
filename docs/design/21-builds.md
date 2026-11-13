@@ -804,7 +804,7 @@ gogo linux-app update <gogid> [--build <id|version>] [--dry-run] [--yes]
 | no installed manifest: not listed and no `build-manifest.json` | 7 | a rebuild |
 | a generation-1 build on either side | 7 | a rebuild |
 | the two builds lay their tree in different dirs (§11f) | 7 | a rebuild |
-| an installed DLC missing from the target (Q3) | 2 | the DLC, that gogo can't remove one yet (#353), and the rebuild with `--build` and `--dlc` without it |
+| an installed DLC missing from the target (Q3) | 2 | the DLC, its removal first (`gogo linux-app dlc <gogid> remove <id>`, design 19 §3.7) and then the update, or the rebuild with `--build` and `--dlc` without it |
 | the recorded language missing from the target | 2 | the target's languages |
 | no usable cache (Q6): none, another build, another language, lost files, an interrupted switch, or an installed DLC it doesn't hold | 7 | `gogo linux-app <gogid> --build <target> --yes` |
 
@@ -912,7 +912,8 @@ failing as a warning), with a file of the user's own in `Save_G`:
 
 - A `prepare()`-based download size (step 1).
 - Rewriting `gogo-launch.toml` for a new entry point (step 9).
-- DLC removal for a target that lacks one (Q3, #353).
+- DLC removal inside the update for a target that lacks one (Q3). Removal itself exists
+  (#353, design 19 §3.7); the refusal names it, then the update.
 
 ## 12. Implementation issues (to be filed as sub-issues of #360)
 

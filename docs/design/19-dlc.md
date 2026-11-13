@@ -39,7 +39,8 @@ gogo download <game> [--dlc <id|title>]... [--all-dlcs | --with-dlcs]
   missing a wanted DLC is incomplete and gets completed the same targeted way.
 - **Offline-installer lane:** the DLC's own installer runs in the game's prefix into the
   base game's dir, after the base game, one at a time.
-- Removal is out of scope for the first round (§3.5).
+- Removal was out of scope for the first round (§3.5); it is built since, on the depot
+  lane (§3.7).
 
 ### Decisions table
 
@@ -674,6 +675,9 @@ As built (#350): `gog/lay.rs` (not `materialize.rs`; it uses `materialize::clone
 
 ### 3.5 Removal (D11): later
 
+> **Built since (#353):** §3.7 is the removal as built, on the depot lane. The reasons
+> below are why it wasn't in the first round.
+
 Not in the first round (decided, §11.1). Reasons:
 
 - It needs the reverse of §3.4: the DLC's files, and for files it replaced, the base
@@ -705,6 +709,138 @@ here needs one.
 As built (#349): `goggame::load_all` returns the base's actions, then each DLC's by ascending
 id (the script is looked for in the game dir, then one level down, beside its info); setup
 applies that list.
+
+### 3.7 As built (#353): DLC removal on the depot lane
+
+```
+gogo linux-app dlc <gogid> remove <id|title>... [--dry-run] [--yes] [--no-snapshots]
+                                  [--limit RATE] [--no-disk-check] [--json] [--json-progress]
+```
+
+Core `linuxapp::dlc_remove` (`resolve_installed`, `reverse_diff`, `plan_remove`,
+`remove`); the CLI side (the manifests, the question, the download) is `dlc_cmd.rs`.
+
+**Decisions (2026-11-13):**
+
+1. **Name and flags** as above. No `--all`: removal deletes, so names stay explicit. A
+   bare `remove` on a terminal opens a picker over the installed DLC with none chosen;
+   headless it is a usage error listing them. Names resolve against the **installed**
+   set (`content.toml`), not the owned one: an id, a title without case, or the one
+   installed title that contains it. A name that matches nothing installed is a notice,
+   so a rerun after a finished removal succeeds; only a title that matches nothing,
+   with nothing else to do, exits 2 (likely a typo).
+2. **The depot cache keeps the DLC.** Its files and its record (`dlcs`, `products`) are
+   not touched. A build already leaves a cached DLC the game doesn't take out of `game/`
+   (§3.3), and a later `dlc add` lays it from the cache with no download (#381). The
+   plan says `depot cache: <DLC> stays in it, so a later dlc add takes it from there (no
+   download)`. Pruning it is a possible follow-up.
+3. **Saves.** gogo can't tell which saves need a DLC. The plan has one line, and the
+   question repeats it: `saves made with <DLC> may not load without it; the snapshot
+   "before removing <DLC>" can restore the game, or gogo linux-app dlc <gogid> add <id>
+   brings it back`. The snapshot part is there only when autosnapshot is on for the run.
+   The question defaults to no; `--yes` skips it. Saves and the prefix are never
+   written. Registry values the DLC's install script set (§3.6) stay in the prefix:
+   setup applies the base's and the remaining DLC's scripts again, and has no "unset".
+4. **`linux-app update`** still refuses a target that lacks an installed DLC (design 21
+   §11 Q3), and now names the removal first: `gogo linux-app dlc <gogid> remove <id>`,
+   then the update (with `--build` when one was picked), or the rebuild without it.
+   Doing the removal inside the update (one plan, one snapshot, one journal) is a
+   follow-up.
+5. **Offline-installer lane:** refused, exit 7, nothing written, naming the rebuild
+   with `--dlc` for the DLC to keep (or `--no-dlcs`). The DLC's Inno uninstaller comes
+   after #351.
+6. **Generation 1 builds** are removed from when nothing has to be downloaded (the
+   depot manifests are enough). A base file that must be downloaded is refused, naming
+   the rebuild: the targeted diff is generation 2 only, as for an add.
+7. **No depot manifests** (offline, or neither GOG's listing nor the game's
+   `build-manifest.json` has the installed build): refused, exit 7, nothing written,
+   naming the rebuild. Without them there is no MD5 or size to check a file by before
+   it comes out.
+8. **A changed DLC file** (its MD5, else its size, isn't the manifest's) stays, with a
+   warning: `kept <path>, which <DLC> laid: changed since install`, as an update does for
+   dropped files. So does one under a symlinked dir. A base file being restored over a
+   changed one is replaced; the changed one is in the backup until the commit, then
+   only in the snapshot.
+
+**The reverse diff** (pure, `reverse_diff`). The installed build's manifest comes from
+the game's `build-manifest.json` when it names the installed build, else from GOG's
+listing. Its depots for the base and every installed DLC in the game's language
+(`dlc_filter::fetch_depots`, the public URLs of §3.3) give paths, sizes and MD5s in
+manifest order. gog-warp writes a path several depots list once, from the first depot
+that lists it (its diff downloads it with the first file list that has it), so on each
+path the first depot's entry counts, worked out twice: over the base and every
+installed DLC ("now"), and over the base and the DLC that stay ("after"). Paths compare
+without case.
+
+- A path only the removed DLC list comes out. What's checked is the "now" entry, the
+  file the build laid.
+- A path the removed DLC share with a kept product is **shared**. It is restored to the
+  "after" entry unless `game/` already holds that version (its MD5, else its size). The
+  "after" version comes from the depot cache when the cache's record is the installed
+  build and language and its copy has the "after" MD5, else from a download.
+- The removed DLC's `goggame-<id>.*` in the game root go by name too: a record-only DLC
+  (§3.2) laid them from the support overlay, and no depot lists them. Only the
+  symlink check applies to them.
+- Cyberpunk 2077's products share no path (#376), so a removal there is a pure removal:
+  no download, nothing restored.
+
+**The download** (only for a shared file the cache can't give): gog-warp's targeted diff
+of the installed build against itself, `upgrade_from(B)`, `old_dlcs` = installed,
+`dlcs` = the ones that stay, `language` = `old_language` = the game's, into
+`games/<gogid>/.dlc-staging/` (`depot::fetch_into`, as an add's staging). Its diff
+fetches the paths whose entry changes. Its delete pass looks only in the staging root,
+where the DLC's files aren't, so it deletes nothing. Every file the plan expects from
+it is checked by MD5 (else size) before anything is laid; a missing or different one
+stops the removal with the game as it was, naming the rebuild. Its record is the add's
+file (`dlc-download.json`, with `removing` instead of `adding`), so every refusal for
+a pending DLC download (a move, a snapshot, an update) applies. A removal that stops
+during it drops the record and the staging dir itself; one a crash left is dropped by
+the next removal. An add's pending download refuses a removal, naming `dlc add`; an
+update's, naming `update`.
+
+**Order:** plan (network, no write; hashes only the shared paths in `game/` and the
+cache) → question → settle a pending rollback → the game's lock → refuse a running
+game → settle any journal (an add's, an update's or a removal's) → read the game again,
+and stop when its DLC, build, language or dir differ from the plan's (`changed since
+the plan: run the removal again`) → the `auto` snapshot (`Trigger::DlcRemove`, `before
+removing <titles>`; a failure stops it, exit 7) → the download, when needed → the
+journal → each file to take out checked (MD5, else size; the progress step
+`checking the DLC's files`, since a big DLC is read whole) → the lay → the commit
+(`content.toml` without the DLC's rows) → backups, staging and the journal go → dirs
+the removed files left empty go, unless a kept product lists a file under them → setup
+once (the scripts of the base and the remaining DLC). A failed setup is a warning.
+
+**The journal** is §3.4's, with `kind = "remove"` and `removing: [{id, title}]`: `files`
+are the restored ones (from the cache or the staging dir), `replaced` their current
+copies, `removed` the DLC's files. `lay_files`, the backups, `check_links` and
+`recover` are unchanged. Recovery (any `dlc add`, `dlc remove` or `update` settles it):
+forward commits `content.toml` without the DLC; back puts the DLC's files and the
+replaced ones back from the backup, and the DLC stays installed. A journal whose
+restored files come from the cache goes back when the cache's record is on another
+build now (as an update's does). The launcher refuses while the journal is there (its
+message names `dlc add`, which settles any kind); `doctor` fails naming `dlc remove`,
+and warns on a removal's leftover download.
+
+**Output:** `--dry-run --json` prints `{dryRun, plan}` (`linuxapp::dlc_remove::RemovePlan`:
+`removing`, `keeping`, `removed` and `restored` with path, size, MD5 and, for a restored
+file, `from: cache|download`, `cacheKeeps`, `gameFiles`, `autosnapshot`). `--json`
+prints `{gogid, buildId, language, dlcs, removed, recovered?, filesRemoved,
+filesRestored, lay?, snapshot, pruned, warnings?}`. `GameFilesStarted` has `kind:
+"dlc-remove"`.
+
+**Tests:** `dlc_remove`'s unit tests (the reverse diff: a DLC-only file, a replaced base
+file, a path a kept DLC shares, products not installed; name resolution; the MD5/size
+check; casing) and `linuxapp_pipeline`'s `dlc_add::remove` on fake manifests: a DLC that
+replaced a base file, removed with the base file downloaded, and from a cache whose
+copy is right with no download; a changed DLC file kept; a download that doesn't give
+the base version; a generation 1 refusal; a plan the game moved on from; a stop at each
+lay step, finished and undone; the `before removing` snapshot and `--no-snapshots`; a
+zero-byte DLC.
+
+**Not run:** a real removal on a game with DLC (Cyberpunk 2077's Phantom Liberty or
+REDmod) is a host pass: the dry run's file count against the DLC's depot, the game
+starting without it, a save made without the DLC loading, and `dlc add` taking it back
+from the cache with no download.
 
 ## 4. Build matching (D5)
 
@@ -984,7 +1120,8 @@ the real thing is a host pass.
    DLC, such as Cyberpunk 2077, installing it when it's owned is the obvious choice, but
    that isn't a rule that holds across games, so the default is no DLC. The plan keeps
    the `N owned DLC not included (--all-dlcs)` line.
-2. **Removal is a follow-up** (§3.5, D11; #353, low priority).
+2. **Removal is a follow-up** (§3.5, D11; #353, low priority). Built since: §3.7, with
+   its own decisions (2026-11-13).
 
 ### 11.2 Settled by research (#343, comment "Research for design 19")
 
@@ -1016,5 +1153,5 @@ Filed 2026-11-11, each a sub-issue of #343.
 | I5 (#350) | `linux-app dlc list` and `add` on the depot lane: targeted download, staging, `lay_files`, journal, recovery, launcher refusal, the record-only add of a zero-byte DLC (§3.2, §3.4, §4, §7) | I2, I3, I4 |
 | I6 (#351) | Offline-installer lane: DLC installers at first build and `dlc add` (§5) | I3, I4 |
 | I7 (#352) | DLC fixture tests (synthetic manifests: diff, lay, journal, interruption, zero-byte DLC) and the Cyberpunk host-pass runbook (§10) | I5 |
-| I8 (#353) | DLC removal (§3.5) | I5 |
+| I8 (#353) | DLC removal (§3.5; as built §3.7) | I5 |
 | I9 (#354) | mac-app DLC (§9) | I5, the Mac lane resuming |
