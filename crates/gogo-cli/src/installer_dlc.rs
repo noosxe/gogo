@@ -370,6 +370,23 @@ pub(crate) async fn plan_build(
     Ok(out)
 }
 
+/// A file a DLC fetch planned: which record is its download.
+struct Wanted {
+    dlc: Option<u64>,
+    entry: String,
+    file: String,
+    version: Option<String>,
+}
+
+impl Wanted {
+    fn is(&self, r: &gogo::state::records::InstallRecord) -> bool {
+        r.dlc_id == self.dlc
+            && r.entry_id == self.entry
+            && r.file_id == self.file
+            && r.version == self.version
+    }
+}
+
 /// Download (when missing) the Windows installers of `ids`, DLC of `product`, in
 /// `language`, through the download engine; their setup `.exe`s, in `ids` order.
 pub(crate) async fn fetch(
@@ -389,6 +406,17 @@ pub(crate) async fn fetch(
     };
     let mut tasks = gogo::engine::plan(ctx, std::slice::from_ref(product), &filters, false).await;
     tasks.retain(|t| t.dlc_id.is_some());
+    // The files GOG serves now, by entry, file and version: only their records
+    // count below, never an older download of the same DLC.
+    let wanted: Vec<Wanted> = tasks
+        .iter()
+        .map(|t| Wanted {
+            dlc: t.dlc_id,
+            entry: t.entry.id.clone(),
+            file: t.file.id.clone(),
+            version: t.entry.version.clone(),
+        })
+        .collect();
     let missing: u64 = tasks
         .iter()
         .filter(|t| !matches!(t.status, Status::Present))
@@ -438,12 +466,14 @@ pub(crate) async fn fetch(
     let state = ctx.state.lock().expect("state lock");
     let mut out = Vec::new();
     for id in ids {
-        let rec = state.installs.iter().find(|r| {
+        let rec = state.installs.iter().rev().find(|r| {
             r.product_id == product.id
                 && r.dlc_id == Some(*id)
                 && r.path
                     .extension()
                     .is_some_and(|e| e.eq_ignore_ascii_case("exe"))
+                && wanted.iter().any(|w| w.is(r))
+                && root.join(&r.path).is_file()
         });
         let Some(rec) = rec else {
             return Err(gogo::macapp::MacAppError::Apps(format!(
