@@ -6,6 +6,7 @@ import importlib.util
 import io
 import os
 import re
+import signal
 import struct
 import subprocess
 import sys
@@ -128,13 +129,22 @@ class Manifest(unittest.TestCase):
         m = helper.parse_manifest(
             'gogid = 1\n[installer_dlc]\nbuild_args = ["--dlc", "X"]\n'
             '[[installer_dlc.add]]\nargs = ["Y"]\ninterrupt = "Y/setup_"\n'
-            "[[installer_dlc.add]]\n[[step]]\nwait = 1\n"
+            "[[installer_dlc.add]]\n"
+            '[[installer_dlc.remove]]\nargs = ["1"]\ninterrupt = "unins001"\ninterrupt_after = 0.5\n'
+            "[[installer_dlc.remove]]\n[[step]]\nwait = 1\n"
         )
         self.assertEqual(
             m["installer_dlc"],
             {
                 "build_args": ["--dlc", "X"],
-                "add": [{"args": ["Y"], "interrupt": "Y/setup_"}, {"args": [], "interrupt": None}],
+                "add": [
+                    {"args": ["Y"], "interrupt": "Y/setup_", "interrupt_after": 1.0},
+                    {"args": [], "interrupt": None},
+                ],
+                "remove": [
+                    {"args": ["1"], "interrupt": "unins001", "interrupt_after": 0.5},
+                    {"args": [], "interrupt": None},
+                ],
             },
         )
         for bad in (
@@ -143,6 +153,11 @@ class Manifest(unittest.TestCase):
             "[[installer_dlc.add]]\nargs = [1]\n",
             '[[installer_dlc.add]]\ninterrupt = "("\n',
             '[[installer_dlc.add]]\nwhat = 1\n',
+            "[[installer_dlc.remove]]\nargs = [1]\n",
+            "[[installer_dlc.remove]]\ninterrupt_after = 1\n",
+            '[[installer_dlc.remove]]\ninterrupt = "x"\ninterrupt_after = 99\n',
+            '[[installer_dlc.remove]]\ninterrupt = "x"\ninterrupt_after = true\n',
+            "[installer_dlc]\nremove = 1\n",
         ):
             with self.subTest(bad), self.assertRaises(helper.ManifestError):
                 helper.parse_manifest(f"gogid = 1\n{bad}[[step]]\nwait = 1\n")
@@ -151,11 +166,31 @@ class Manifest(unittest.TestCase):
 
     def test_the_repos_installer_dlc_manifests_parse(self):
         root = os.path.join(os.path.dirname(__file__), "..", "..", "e2e")
-        for name in ("dlc-1519147341.toml", "dlc-add-1519147341.toml"):
+        for name in ("dlc-1519147341.toml", "dlc-add-1519147341.toml", "dlc-remove-1519147341.toml",
+                     "dlc-remove-clean-1519147341.toml"):
             with open(os.path.join(root, name)) as f:
                 m = helper.parse_manifest(f.read())
             self.assertEqual(m["gogid"], 1519147341)
             self.assertIsNotNone(m["installer_dlc"])
+
+    def test_kill_in_prefix_takes_what_runs_in_the_prefix(self):
+        with tempfile.TemporaryDirectory() as d:
+            prefix = os.path.join(d, "prefix")
+            os.mkdir(prefix)
+            env = dict(os.environ, WINEPREFIX=prefix + "/")
+            inside = subprocess.Popen(["sleep", "60"], env=env)
+            outside = subprocess.Popen(["sleep", "60"])
+            try:
+                time.sleep(0.2)
+                self.assertIn(inside.pid, helper.prefix_pids(prefix, os.getpid()))
+                self.assertNotIn(outside.pid, helper.prefix_pids(prefix, os.getpid()))
+                self.assertEqual(helper.kill_in_prefix(prefix, os.getpid(), wait=5), [])
+                self.assertEqual(inside.wait(timeout=5), -signal.SIGKILL)
+                self.assertIsNone(outside.poll())
+            finally:
+                for p in (inside, outside):
+                    p.kill()
+                    p.wait()
 
     def test_matching_process_finds_a_command_line(self):
         # A command line no other process has.

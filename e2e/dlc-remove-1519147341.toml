@@ -1,0 +1,34 @@
+# Journey to the Savage Planet built with its Hot Garbage DLC on the offline-installer
+# lane, then the DLC removed by its own Inno uninstaller (#443, design 19 section 5.2).
+# Run with `--installer <dir>/setup_journey_to_the_savage_planet_<version>_(<build>).exe`.
+# The first removal is stopped (SIGINT to its process group) as soon as the
+# uninstaller's Wine process starts, and must leave its journal; what it left running in
+# the prefix is killed. The bare removal after it finishes: it runs the uninstaller again,
+# or only drops the record when the first one got that far (Hot Garbage's uninstaller
+# takes well under a second). `installer_dlc_removed` then checks that
+# the DLC's goggame info and its own uninstaller (unins001.*) are gone, and the game
+# must still start.
+title = "Journey to the Savage Planet"
+gogid = 1519147341
+
+[installer_dlc]
+build_args = ["--dlc", "Hot Garbage"]
+
+# By id: with --yes a name must be an id or the full title.
+[[installer_dlc.remove]]
+args = ["1240193021"]
+# The uninstaller's Wine process (its command line is the Windows one), not umu-run's.
+interrupt = '^"?C:\\GOG\\[^ ]*\\unins001\.exe'
+interrupt_after = 0
+
+# A bare removal: it finishes the stopped one.
+[[installer_dlc.remove]]
+
+[window]
+wait_secs = 300
+
+[[step]]
+wait = 45
+
+[[step]]
+screenshot = "start"

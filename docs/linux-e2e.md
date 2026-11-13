@@ -221,18 +221,33 @@ needs the network and the sign-in. No `args` is a bare add, which finishes a sto
 one. With `interrupt = "<regex>"`, the add is stopped with SIGINT to its process group
 a second after a process whose command line matches starts (the DLC's installer under
 umu: `"Hot Garbage/setup_"`), and must exit non-zero with its journal left; what it
-left running in the prefix is killed after it. The DLC installers are downloaded into
-the scratch's `~/Downloads/gogo`, and each run downloads them again.
+left running in the prefix is killed after it. `interrupt_after = <secs>` (0 to 60,
+default 1) changes that second. The DLC installers are downloaded into the scratch's
+`~/Downloads/gogo`, and each run downloads them again.
+
+Each `[[installer_dlc.remove]]` (#443, design 19 §5.2) then runs `gogo linux-app dlc
+<gogid> remove <args…> --yes` in order, after the adds, with the same `args`,
+`interrupt` and `interrupt_after`; it needs no network. Name a DLC by id there (with
+`--yes`, a name must be an id or the full title). After a stopped add or removal,
+everything still running in the game's prefix is killed too (`left_running` names what
+outlived that): an Inno uninstaller goes on as a temp copy of itself (`_iu14D2N.tmp`),
+which the regex doesn't match. A Wine process's command line is its
+Windows one, so `'^"?C:\\GOG\\[^ ]*\\unins001\.exe'` matches the uninstaller itself and not
+umu-run, whose arguments name it too.
 
 | Check | Fails when |
 |---|---|
 | `installer_dlc_add_<n>` | an add exits non-zero, or leaves `dlc-journal.json` |
 | `installer_dlc_add_<n>_interrupted` | nothing matched, the add exited 0, or no journal was left |
-| `installer_dlc_dir` | a DLC `content.toml` lists has no `goggame-<id>.info` in the base game's dir, or one elsewhere in `drive_c` (`/DIR=` not honoured), or no DLC is listed |
+| `installer_dlc_remove_<n>`, `installer_dlc_remove_<n>_interrupted` | as for an add |
+| `installer_dlc_removed` | with removals: no DLC was recorded before them, none was taken out, or one taken out had no uninstaller of its own (`unins<n>.*`, by the ini naming it) or still has its `goggame-<id>.info` in the base game's dir, its `unins<n>.dat`, or (when no removal was stopped) any other of its uninstaller's files. A stop can cut the uninstaller short after its `.dat` went and before its `.exe` and `.ini` did; gogo leaves those |
+| `installer_dlc_dir` | a DLC `content.toml` lists has no `goggame-<id>.info` in the base game's dir, or one elsewhere in `drive_c` (`/DIR=` not honoured), or no DLC is listed (fine after removals) |
 
-`build.installer_dlc` in `build-result.json` has each add (exit, seconds, what matched,
-whether a journal was left, its log `dlc-add-<n>.log`) and each DLC's record and where its
-info is. The DLC's Inno logs are copied as `install-dlc-<id>-inno.log`.
+`build.installer_dlc` in `build-result.json` has each add and removal (exit, seconds, what
+matched, whether a journal was left, its log `dlc-add-<n>.log` or `dlc-remove-<n>.log`),
+each DLC taken out (its uninstaller's files, and what was left of them), and each DLC's
+record and where its info is. The DLC's Inno logs are copied as
+`install-dlc-<id>-inno.log` and `install-dlc-<id>-uninstall.log`.
 
 ## Reusing an installed game
 
@@ -1055,6 +1070,9 @@ build_args = ["--dlc", "X"]      #   appended to the build command
 [[installer_dlc.add]]            #   `dlc <gogid> add <args…> --yes` after the build
 args = ["X"]
 interrupt = "X/setup_"           #   optional: SIGINT the add once this matches a process
+interrupt_after = 1              #   optional: seconds from the match to the SIGINT
+[[installer_dlc.remove]]         #   `dlc <gogid> remove <args…> --yes` after the adds (#443)
+args = ["1240193021"]            #   as for an add; no args finishes a stopped removal
 
 [exit]
 how = "self"                     # "self": it exits by itself after the steps, code 0

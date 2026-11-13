@@ -1,0 +1,25 @@
+# Journey to the Savage Planet built with its Hot Garbage DLC on the offline-installer
+# lane, then the DLC removed by its own Inno uninstaller, with no stop (#443, design 19
+# section 5.2). Run with
+# `--installer <dir>/setup_journey_to_the_savage_planet_<version>_(<build>).exe`.
+# `installer_dlc_removed` checks that the DLC's goggame info and every file of its own
+# uninstaller (unins001.*) are gone, and the game must still start.
+# e2e/dlc-remove-1519147341.toml is the same with a stopped removal and a rerun.
+title = "Journey to the Savage Planet"
+gogid = 1519147341
+
+[installer_dlc]
+build_args = ["--dlc", "Hot Garbage"]
+
+# By id: with --yes a name must be an id or the full title.
+[[installer_dlc.remove]]
+args = ["1240193021"]
+
+[window]
+wait_secs = 300
+
+[[step]]
+wait = 45
+
+[[step]]
+screenshot = "start"
