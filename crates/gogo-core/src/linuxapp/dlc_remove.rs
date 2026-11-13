@@ -63,12 +63,20 @@ pub struct ReverseDiff {
 
 /// Pure: the reverse diff of removing `removing` from a game of `base` with
 /// `installed` DLC, from the build's `depots` in the game's language (manifest
-/// order). On a path several depots list, the first one's entry counts: gog-warp
-/// writes such a path once, from the first depot that lists it. Paths compare
-/// without case, as gog-warp's do.
+/// order), whose install directory is `tree_name`.
+///
+/// Every entry is keyed by the path it lands on in `game/` (the tree's paths keep
+/// theirs, a support overlay's `app/` goes to the game root; anything else, such as
+/// GOG's support installers, never reaches `game/` and is left out), lowercased:
+/// gog-warp compares paths without case, and a DLC's overlay file can land on a
+/// base tree file's path. On one game path a support overlay's entry wins over a
+/// tree's, as at a build and a lay; otherwise the first depot's entry counts, since
+/// gog-warp writes a path several depots list once, from the first depot that
+/// lists it.
 pub fn reverse_diff(
     depots: &[DepotList],
     base: &str,
+    tree_name: &str,
     installed: &[u64],
     removing: &[u64],
 ) -> ReverseDiff {
@@ -84,8 +92,16 @@ pub fn reverse_diff(
         size: d.sizes.get(p).copied(),
         md5: d.md5s.get(p).map(|m| m.to_lowercase()),
     };
-    // Lowercased path → the first entry, over every installed product and over the
-    // kept ones; and the paths the removed DLC list.
+    let overlay = |e: &Expect| e.path.starts_with("gog-support/");
+    // The entry that lays a game path: an overlay's over a tree's, else the first.
+    let put = |map: &mut BTreeMap<String, Expect>, key: String, e: Expect| match map.get(&key) {
+        Some(cur) if overlay(cur) || !overlay(&e) => {}
+        _ => {
+            map.insert(key, e);
+        }
+    };
+    // Lowercased game path → its entry, over every installed product and over the
+    // kept ones; and the game paths the removed DLC lay.
     let mut now: BTreeMap<String, Expect> = BTreeMap::new();
     let mut after: BTreeMap<String, Expect> = BTreeMap::new();
     let mut theirs: HashSet<String> = HashSet::new();
@@ -94,10 +110,13 @@ pub fn reverse_diff(
             continue;
         }
         for p in &d.paths {
-            let key = p.to_lowercase();
-            now.entry(key.clone()).or_insert_with(|| entry(d, p));
+            let Some(rel) = game_path(tree_name, p) else {
+                continue;
+            };
+            let key = rel.to_lowercase();
+            put(&mut now, key.clone(), entry(d, p));
             if keep.contains(&d.product) {
-                after.entry(key).or_insert_with(|| entry(d, p));
+                put(&mut after, key, entry(d, p));
             } else {
                 theirs.insert(key);
             }
@@ -228,6 +247,10 @@ pub struct RemovePlan {
     /// on one of them is never removed when it empties.
     #[serde(skip)]
     pub kept_dirs: HashSet<String>,
+    /// The cache record's DLC set when planned: a removal that restores from the
+    /// cache stops when the record changed since.
+    #[serde(skip)]
+    pub cache_dlcs: Option<Vec<String>>,
 }
 
 impl RemovePlan {
@@ -267,12 +290,19 @@ pub struct Named {
     /// Names that match no installed DLC (a notice: a rerun after a removal
     /// finished must succeed).
     pub unmatched: Vec<String>,
+    /// Names that are part of several installed titles: (name, those titles).
+    pub ambiguous: Vec<(String, Vec<String>)>,
+    /// Names that are only part of one installed title, where no question will be
+    /// asked to confirm it: (name, that title). A usage error.
+    pub inexact: Vec<(String, String)>,
 }
 
-/// Pure: resolve `names` (product ids or titles) against the installed DLC. A title
-/// matches without case, exactly, else as the one installed title containing it.
-/// Ownership doesn't matter: an installed DLC can always come out.
-pub fn resolve_installed(names: &[String], installed: &[DlcRef]) -> Named {
+/// Pure: resolve `names` (product ids or titles) against the installed DLC. An id
+/// or a title without case matches. A name that is part of exactly one installed
+/// title matches it only with `partial` (the removal will ask before it runs);
+/// otherwise it is `inexact`. Ownership doesn't matter: an installed DLC can
+/// always come out.
+pub fn resolve_installed(names: &[String], installed: &[DlcRef], partial: bool) -> Named {
     let mut out = Named::default();
     for n in names {
         let lower = n.trim().to_lowercase();
@@ -282,17 +312,29 @@ pub fn resolve_installed(names: &[String], installed: &[DlcRef]) -> Named {
             .ok()
             .filter(|id| installed.iter().any(|d| d.id == *id));
         let exact = installed.iter().find(|d| d.title.to_lowercase() == lower);
-        let partial: Vec<&DlcRef> = installed
+        let parts: Vec<&DlcRef> = installed
             .iter()
             .filter(|d| !lower.is_empty() && d.title.to_lowercase().contains(&lower))
             .collect();
-        let id = by_id
-            .or(exact.map(|d| d.id))
-            .or((partial.len() == 1).then(|| partial[0].id));
-        match id {
-            Some(id) if !out.ids.contains(&id) => out.ids.push(id),
-            Some(_) => {}
-            None => out.unmatched.push(n.clone()),
+        let id = match (by_id.or(exact.map(|d| d.id)), parts.as_slice()) {
+            (Some(id), _) => id,
+            (None, [one]) if partial => one.id,
+            (None, [one]) => {
+                out.inexact.push((n.clone(), one.title.clone()));
+                continue;
+            }
+            (None, []) => {
+                out.unmatched.push(n.clone());
+                continue;
+            }
+            (None, many) => {
+                out.ambiguous
+                    .push((n.clone(), many.iter().map(|d| d.title.clone()).collect()));
+                continue;
+            }
+        };
+        if !out.ids.contains(&id) {
+            out.ids.push(id);
         }
     }
     out
@@ -347,12 +389,22 @@ pub fn plan_remove(input: &PlanInput<'_>) -> Result<RemovePlan, String> {
         .filter(|d| !ids.contains(&d.id))
         .cloned()
         .collect();
-    let diff = reverse_diff(input.depots, &game.gogid, &installed, &ids);
+    let diff = reverse_diff(
+        input.depots,
+        &game.gogid,
+        &input.tree_name,
+        &installed,
+        &ids,
+    );
     let cache_root = game.cache_root.clone().filter(|root| {
         depot::read_record(root).is_some_and(|r| {
             r.build_id == build_id && r.language.as_deref() == Some(language.as_str())
         })
     });
+    let plan_cache_dlcs = cache_root
+        .as_ref()
+        .and_then(|r| depot::read_record(r))
+        .and_then(|r| r.dlcs);
     let cache_keeps: Vec<DlcRef> = cache_root
         .as_ref()
         .and_then(|r| depot::read_record(r))
@@ -457,6 +509,7 @@ pub fn plan_remove(input: &PlanInput<'_>) -> Result<RemovePlan, String> {
             old_dlcs: installed.iter().map(u64::to_string).collect(),
         },
         kept_dirs,
+        cache_dlcs: plan_cache_dlcs,
     })
 }
 
@@ -614,6 +667,18 @@ pub(crate) fn settle(
             game.content = c;
             game.derived = false;
             lay::finish(&root)?;
+            // What a removal that didn't stop does after its commit: the emptied
+            // dirs, then setup for the products that stay.
+            prune_dirs(&game.dirs.game, &j.prune);
+            if let Err(e) = run_setup(&game.gogid, emit) {
+                emit(&ProgressEvent::Warn {
+                    message: format!(
+                        "the removal is finished, but setup (GOG's install scripts) failed: \
+                         {e}; run `gogo linux-app setup {}`",
+                        game.gogid
+                    ),
+                });
+            }
             format!(
                 "an earlier removal of {names} had stopped while changing the game files: finished it"
             )
@@ -629,25 +694,81 @@ pub(crate) fn settle(
     Ok(())
 }
 
-/// Why a removal's journal can't go forward: a file it restores from the depot
-/// cache (`cache`) is there, but the cache is on another build now, so the file may
-/// be another build's. `None` when it can.
+/// Why a removal's journal can't go forward, or `None` when it can: a file it
+/// restores from the depot cache (`cache`) while the cache is on another build or
+/// language now, or a source of a restored file (the cache's or the staging dir's)
+/// that no longer has the MD5 the journal recorded. Going back is then the safe
+/// way: the DLC's files and the replaced ones come back from the backup.
 pub(crate) fn cache_moved(j: &Journal, cache: Option<&Path>) -> Option<String> {
-    let cache = cache?;
-    if !j.files.iter().any(|f| f.from.starts_with(cache)) {
-        return None;
+    if let Some(cache) = cache
+        && j.files.iter().any(|f| f.from.starts_with(cache))
+    {
+        match depot::read_record(cache) {
+            Some(r)
+                if r.build_id == j.build_id
+                    && r.language.as_deref() == Some(j.language.as_str()) => {}
+            r => {
+                return Some(format!(
+                    "the depot cache is on {} now, not build {} in {}",
+                    r.map_or("no recorded build".into(), |r| format!(
+                        "build {} in {}",
+                        r.build_id,
+                        r.language.as_deref().unwrap_or("no recorded language")
+                    )),
+                    j.build_id,
+                    j.language
+                ));
+            }
+        }
     }
-    match depot::read_record(cache) {
-        Some(r) if r.build_id == j.build_id => None,
-        r => Some(format!(
-            "the depot cache is on {} now, not build {}",
-            r.map_or("no recorded build".into(), |r| format!(
-                "build {}",
-                r.build_id
-            )),
-            j.build_id
-        )),
+    for f in &j.files {
+        let Some(md5) = j.md5s.get(&f.to) else {
+            continue;
+        };
+        // A source that's gone was laid already (a staging rename), or makes
+        // the recovery go back by itself.
+        if f.from.symlink_metadata().is_err() {
+            continue;
+        }
+        let e = Expect {
+            path: f.to.clone(),
+            size: None,
+            md5: Some(md5.clone()),
+        };
+        if !holds(&f.from, &e) {
+            return Some(format!(
+                "the source of {} ({}) changed since",
+                f.to,
+                f.from.display()
+            ));
+        }
     }
+    None
+}
+
+/// Take out the dirs in `dirs` (relative to `game`, deepest first) that are empty
+/// now. Best effort: the game is whole either way.
+fn prune_dirs(game: &Path, dirs: &[String]) {
+    for d in dirs {
+        if lay::plain(d) && lay::symlinked_parent(game, &format!("{d}/x")).is_none() {
+            let _ = std::fs::remove_dir(game.join(d));
+        }
+    }
+}
+
+/// Setup once, for the products that stay (GOG's install scripts).
+fn run_setup(gogid: &str, emit: &mut dyn FnMut(&ProgressEvent)) -> Result<(), MacAppError> {
+    super::setup::setup(
+        gogid,
+        &super::setup::SetupOptions {
+            refresh: false,
+            prompt: None,
+            // The removal's own snapshot came first.
+            runtime_snapshot: None,
+        },
+        emit,
+    )
+    .map(|_| ())
 }
 
 /// Drop a removal's leftover download record and staging dir (the game wasn't
@@ -761,6 +882,33 @@ where
             &format!("it is at {} now", game.dirs.root.display()),
         ));
     }
+    // The depot cache the plan restores from must still be what it was then: the
+    // same build, language and DLC set (another command may have moved it).
+    if plan.restored.iter().any(|r| r.from == RestoreFrom::Cache) {
+        let rec = plan.cache_root.as_deref().and_then(depot::read_record);
+        let same = rec.as_ref().is_some_and(|r| {
+            r.build_id == plan.build_id
+                && r.language.as_deref() == Some(plan.language.as_str())
+                && r.dlcs == plan.cache_dlcs
+        });
+        if !same {
+            return Err(changed(&gogid, "its depot cache is another one now"));
+        }
+    }
+    // Every restored path is a plain relative one, in the cache and in `game/`: a
+    // manifest path with `..` would reach outside either.
+    for r in &plan.restored {
+        let rel = game_path(&plan.tree_name, &r.file.path);
+        if !lay::plain(&r.file.path) || !rel.as_deref().is_some_and(lay::plain) {
+            return Err(AddError::Game(MacAppError::Apps(format!(
+                "the build's manifest names {}, which isn't a plain path inside the game, so \
+                 nothing was changed; a rebuild without {}: {}",
+                r.file.path,
+                titles(&removing),
+                rebuild_hint(game, &plan.ids())
+            ))));
+        }
+    }
     // A download another command left: an add's is finished by the add, an
     // update's by the update. A removal's own leftover (a crash during its
     // download) is dropped: nothing was laid from it.
@@ -841,16 +989,17 @@ where
     }
     // The journal: restored files in, the DLC's files out.
     let mut files: Vec<LayFile> = Vec::new();
+    // Each restored file's source → what it must be.
+    let mut by_from: HashMap<PathBuf, Expect> = HashMap::new();
     for r in &plan.restored {
         let src = match (r.from, &plan.cache_root) {
             (RestoreFrom::Cache, Some(cache)) => cache.clone(),
             _ => staging.clone(),
         };
-        files.extend(dlc::lay_list(
-            &src,
-            &plan.tree_name,
-            std::slice::from_ref(&r.file.path),
-        ));
+        for f in dlc::lay_list(&src, &plan.tree_name, std::slice::from_ref(&r.file.path)) {
+            by_from.insert(f.from.clone(), r.file.clone());
+            files.push(f);
+        }
     }
     let mut expect: HashMap<String, Expect> = HashMap::new();
     let mut removed: Vec<String> = Vec::new();
@@ -905,8 +1054,15 @@ where
                 title: d.title.clone(),
             })
             .collect(),
+        md5s: Default::default(),
+        prune: Vec::new(),
     };
     j.survey(&game.dirs.game);
+    j.md5s = j
+        .files
+        .iter()
+        .filter_map(|f| Some((f.to.clone(), by_from.get(&f.from)?.md5.clone()?)))
+        .collect();
     // A file comes out only while it is the one the DLC laid: one the user or the
     // game changed stays, and so does one behind a symlinked dir.
     let total = j.removed.len() as u64;
@@ -958,6 +1114,38 @@ where
         }
         return Err(e.into());
     }
+    // Each restored file's source is checked again right before the lay, wherever
+    // it comes from: the plan's check of the cache was before the question.
+    if let Some(f) = j
+        .files
+        .iter()
+        .find(|f| !by_from.get(&f.from).is_some_and(|e| holds(&f.from, e)))
+    {
+        if downloads {
+            clear_download(&root)?;
+        }
+        return Err(changed(
+            &gogid,
+            &format!("the copy of {} it restores from changed", f.to),
+        ));
+    }
+    // Dirs the DLC's files leave empty go after the commit, unless a kept product
+    // lists a file under them; deepest first. Kept in the journal, so a recovery
+    // does the same.
+    let mut dirs: Vec<String> = Vec::new();
+    for r in &j.removed {
+        let mut parts: Vec<&str> = r.split('/').collect();
+        parts.pop();
+        while !parts.is_empty() {
+            let d = parts.join("/");
+            if !dirs.contains(&d) && !plan.kept_dirs.contains(&d.to_lowercase()) {
+                dirs.push(d);
+            }
+            parts.pop();
+        }
+    }
+    dirs.sort_by_key(|d| std::cmp::Reverse(d.matches('/').count()));
+    j.prune = dirs;
     let mut lay_report = None;
     if !j.files.is_empty() || !j.removed.is_empty() {
         let bytes: u64 = j
@@ -1007,39 +1195,9 @@ where
     game.derived = false;
     lay::finish(&root)?;
     let _ = std::fs::remove_file(root.join(dlc::DOWNLOAD));
-    // Dirs the DLC's files leave empty go, unless a kept product lists a file
-    // under them. Best effort: the game is whole either way.
-    let mut dirs: Vec<String> = Vec::new();
-    for r in &j.removed {
-        let mut parts: Vec<&str> = r.split('/').collect();
-        parts.pop();
-        while !parts.is_empty() {
-            let d = parts.join("/");
-            if !dirs.contains(&d) {
-                dirs.push(d);
-            }
-            parts.pop();
-        }
-    }
-    dirs.sort_by_key(|d| std::cmp::Reverse(d.matches('/').count()));
-    for d in dirs {
-        if !plan.kept_dirs.contains(&d.to_lowercase())
-            && lay::symlinked_parent(&game.dirs.game, &format!("{d}/x")).is_none()
-        {
-            let _ = std::fs::remove_dir(game.dirs.game.join(&d));
-        }
-    }
+    prune_dirs(&game.dirs.game, &j.prune);
     if opts.run_setup
-        && let Err(e) = super::setup::setup(
-            &gogid,
-            &super::setup::SetupOptions {
-                refresh: false,
-                prompt: None,
-                // The removal's own snapshot came first.
-                runtime_snapshot: None,
-            },
-            emit,
-        )
+        && let Err(e) = run_setup(&gogid, emit)
     {
         warnings.push(format!(
             "the DLC is removed, but setup (GOG's install scripts) failed: {e}; run `gogo \
@@ -1085,7 +1243,7 @@ mod tests {
                 &[("G/base.dat", 4, "base"), ("G/shared.pak", 11, "old")],
             ),
         ];
-        let d = reverse_diff(&depots, "1", &[77], &[77]);
+        let d = reverse_diff(&depots, "1", "G", &[77], &[77]);
         let removed: Vec<&str> = d.removed.iter().map(|e| e.path.as_str()).collect();
         assert_eq!(removed, ["G/dlc/ep1/a.archive", "G/goggame-77.info"]);
         assert_eq!(d.removed[0].md5.as_deref(), Some("aa"));
@@ -1111,16 +1269,50 @@ mod tests {
             ),
             depot("88", &[("G/dlc/common.pak", 3, "c88")]),
         ];
-        let d = reverse_diff(&depots, "1", &[77, 88], &[77]);
+        let d = reverse_diff(&depots, "1", "G", &[77, 88], &[77]);
         let removed: Vec<&str> = d.removed.iter().map(|e| e.path.as_str()).collect();
         assert_eq!(removed, ["G/dlc/77.pak"]);
         // The kept DLC's version of the shared path.
         assert_eq!(d.shared[0].md5.as_deref(), Some("c88"));
         // Removing both takes it out too.
-        let d = reverse_diff(&depots, "1", &[77, 88], &[77, 88]);
+        let d = reverse_diff(&depots, "1", "G", &[77, 88], &[77, 88]);
         let removed: Vec<&str> = d.removed.iter().map(|e| e.path.as_str()).collect();
         assert_eq!(removed, ["G/dlc/77.pak", "G/dlc/common.pak"]);
         assert!(d.shared.is_empty());
+    }
+
+    #[test]
+    fn a_dlc_overlay_file_on_a_base_tree_path_is_restored_not_just_deleted() {
+        // The DLC's support overlay lays `G/data.ini` at the game root's `data.ini`,
+        // over the base tree's own `data.ini`: one game path, two depot paths.
+        let depots = vec![
+            depot("1", &[("G/data.ini", 4, "base"), ("G/base.dat", 4, "b")]),
+            depot(
+                "77",
+                &[
+                    ("gog-support/1/77/app/data.ini", 5, "dlc"),
+                    ("gog-support/1/77/app/goggame-77.info", 2, "info"),
+                    ("gog-support/1/77/installer.exe", 9, "exe"),
+                ],
+            ),
+        ];
+        let d = reverse_diff(&depots, "1", "G", &[77], &[77]);
+        let removed: Vec<&str> = d.removed.iter().map(|e| e.path.as_str()).collect();
+        // The support installer never reaches `game/`: not listed.
+        assert_eq!(removed, ["gog-support/1/77/app/goggame-77.info"]);
+        // The base's version comes back.
+        assert_eq!(
+            d.shared,
+            [Expect {
+                path: "G/data.ini".into(),
+                size: Some(4),
+                md5: Some("base".into()),
+            }]
+        );
+        // With the DLC, the overlay's copy is the one laid there (it wins over the
+        // tree, as at a build), whatever the depot order.
+        let d = reverse_diff(&depots, "1", "G", &[77], &[]);
+        assert!(d.shared.is_empty() && d.removed.is_empty());
     }
 
     #[test]
@@ -1130,7 +1322,7 @@ mod tests {
             depot("99", &[("G/base.dat", 9, "other"), ("G/x", 1, "x")]),
             depot("77", &[("G/y", 1, "y")]),
         ];
-        let d = reverse_diff(&depots, "1", &[77], &[77]);
+        let d = reverse_diff(&depots, "1", "G", &[77], &[77]);
         let removed: Vec<&str> = d.removed.iter().map(|e| e.path.as_str()).collect();
         assert_eq!(removed, ["G/y"]);
         assert!(d.shared.is_empty());
@@ -1148,21 +1340,49 @@ mod tests {
                 title: "REDmod".into(),
             },
         ];
-        let n = |v: &[&str]| {
+        let n = |v: &[&str], partial| {
             resolve_installed(
                 &v.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
                 &installed,
+                partial,
             )
         };
-        assert_eq!(n(&["8", "phantom liberty"]).ids, [8, 7]);
-        assert_eq!(n(&["liberty", "7"]).ids, [7], "once");
-        let r = n(&["9", "Hot Garbage", "e"]);
+        assert_eq!(n(&["8", "phantom liberty"], false).ids, [8, 7]);
+        assert_eq!(n(&["liberty", "7"], true).ids, [7], "once");
+        // Part of one title: only when the removal asks first.
+        let r = n(&["liberty"], false);
         assert!(r.ids.is_empty());
+        assert_eq!(r.inexact, [("liberty".into(), "Phantom Liberty".into())]);
+        // Part of two titles: ambiguous, not "not installed".
+        let r = n(&["9", "Hot Garbage", "e"], true);
+        assert!(r.ids.is_empty());
+        assert_eq!(r.unmatched, ["9", "Hot Garbage"]);
         assert_eq!(
-            r.unmatched,
-            ["9", "Hot Garbage", "e"],
-            "`e` is in both titles"
+            r.ambiguous,
+            [(
+                "e".into(),
+                vec!["Phantom Liberty".to_string(), "REDmod".to_string()]
+            )]
         );
+    }
+
+    #[test]
+    fn a_removals_pending_download_names_dlc_remove() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(dlc::pending_kind(tmp.path()), ("add", "add"));
+        std::fs::write(
+            tmp.path().join(dlc::DOWNLOAD),
+            r#"{"buildId":"B1","source":"/x/.dlc-staging","removing":[77]}"#,
+        )
+        .unwrap();
+        assert_eq!(dlc::pending_kind(tmp.path()), ("removal", "remove"));
+        // An add's record.
+        std::fs::write(
+            tmp.path().join(dlc::DOWNLOAD),
+            r#"{"buildId":"B1","source":"/x","adding":[77],"before":{},"fetched":false}"#,
+        )
+        .unwrap();
+        assert_eq!(dlc::pending_kind(tmp.path()), ("add", "add"));
     }
 
     #[test]

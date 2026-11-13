@@ -411,9 +411,10 @@ pub fn refuse(gogid: &str, dirs: &GameDirs) -> Result<(), MacAppError> {
         || super::dlc::download_pending(root)
         || root.join(crate::gog::lay::STAGING).exists()
     {
+        let (what, cmd) = super::dlc::pending_kind(root);
         return Err(MacAppError::Apps(format!(
-            "a DLC add of {gogid} isn't finished: finish it first: `gogo linux-app dlc {gogid} \
-             add`"
+            "a DLC {what} of {gogid} isn't finished: finish it first: `gogo linux-app dlc \
+             {gogid} {cmd}`"
         )));
     }
     Ok(())

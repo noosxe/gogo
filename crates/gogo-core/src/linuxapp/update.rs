@@ -301,9 +301,10 @@ pub fn plan_update(input: PlanInput<'_>) -> Result<Planned, Refusal> {
     }
     let root = &game.dirs.root;
     if dlc::download_pending(root) || root.join(lay::STAGING).exists() {
+        let (what, cmd) = dlc::pending_kind(root);
         return Err(refuse(format!(
-            "a DLC add of {gogid} stopped during its download: finish it first with `gogo \
-             linux-app dlc {gogid} add`"
+            "a DLC {what} of {gogid} stopped during its download: finish it first with `gogo \
+             linux-app dlc {gogid} {cmd}`"
         )));
     }
     let mut notes = input.notes;
@@ -860,9 +861,10 @@ where
         Some(r) => r,
         None => {
             if dlc::download_pending(&root) {
+                let (what, cmd) = dlc::pending_kind(&root);
                 return Err(AddError::Game(MacAppError::Apps(format!(
-                    "a DLC add of {gogid} stopped during its download: finish it first with \
-                     `gogo linux-app dlc {gogid} add`"
+                    "a DLC {what} of {gogid} stopped during its download: finish it first with \
+                     `gogo linux-app dlc {gogid} {cmd}`"
                 ))));
             }
             if let Some(why) =
@@ -989,6 +991,8 @@ where
         to: Some(plan.to.build_id.clone()),
         removed,
         removing: Vec::new(),
+        md5s: Default::default(),
+        prune: Vec::new(),
     };
     j.survey(&game.dirs.game);
     // A dropped file is only taken out while it is the installed build's: one the

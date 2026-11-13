@@ -450,9 +450,10 @@ pub fn plan_run(gogid: &str, selector: &str, extra: &[String]) -> Result<RunPlan
         )));
     }
     if dlc::journal_exists(&b.dirs.root) {
+        let (what, cmd) = dlc::pending_kind(&b.dirs.root);
         return Err(MacAppError::Apps(format!(
-            "a DLC add of {gogid} stopped while laying its files, so they may mix two versions: \
-             run `gogo linux-app dlc {gogid} add` to finish it (or undo it) first"
+            "a DLC {what} of {gogid} stopped while changing its files, so they may mix two \
+             versions: run `gogo linux-app dlc {gogid} {cmd}` to finish it (or undo it) first"
         )));
     }
     let l = listing(&b, gogid, false);

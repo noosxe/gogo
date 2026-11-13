@@ -589,11 +589,14 @@ fn refuse_dlc_add(gogid: &str) -> Result<(), MacAppError> {
     .find(|f| root.join(f).symlink_metadata().is_ok());
     match what {
         None => Ok(()),
-        Some(f) => Err(MacAppError::Apps(format!(
-            "a DLC add of {gogid} is in progress or didn't finish ({} is there): run `gogo \
-             linux-app dlc {gogid} add` to finish it, then move the game",
-            root.join(f).display()
-        ))),
+        Some(f) => {
+            let (what, cmd) = super::dlc::pending_kind(&root);
+            Err(MacAppError::Apps(format!(
+                "a DLC {what} of {gogid} is in progress or didn't finish ({} is there): run \
+                 `gogo linux-app dlc {gogid} {cmd}` to finish it, then move the game",
+                root.join(f).display()
+            )))
+        }
     }
 }
 

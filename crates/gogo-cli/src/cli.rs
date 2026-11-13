@@ -854,10 +854,12 @@ pub enum LinuxDlcCmd {
     /// Offline-installer games are refused (rebuild with a smaller --dlc
     /// set instead).
     Remove {
-        /// Installed DLC by product id or title (several allowed).
+        /// Installed DLC by product id or title (several allowed). Part of
+        /// a title is enough only when the question is asked (no --yes, on a
+        /// terminal).
         #[arg(value_name = "ID|TITLE")]
         names: Vec<String>,
-        /// Print the plan, change nothing.
+        /// Print the plan, change nothing in the game.
         #[arg(long)]
         dry_run: bool,
         /// Skip the confirmation.
