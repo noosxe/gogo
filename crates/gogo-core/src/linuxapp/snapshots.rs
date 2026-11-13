@@ -391,6 +391,17 @@ fn refuse_unreachable(gogid: &str, dirs: &GameDirs) -> Result<(), MacAppError> {
 /// locks: an unreachable game, an unsettled move, the game or a one-off of it
 /// running, a DLC add that isn't finished. Reads only.
 pub fn refuse(gogid: &str, dirs: &GameDirs) -> Result<(), MacAppError> {
+    refuse_but(gogid, dirs, false)
+}
+
+/// [`refuse`] for a rollback: an offline-installer DLC add that didn't finish
+/// (design 19 §5.1) is no refusal. Restoring a snapshot taken before it is its
+/// undo, and the restored dir has no journal.
+pub fn refuse_for_rollback(gogid: &str, dirs: &GameDirs) -> Result<(), MacAppError> {
+    refuse_but(gogid, dirs, true)
+}
+
+fn refuse_but(gogid: &str, dirs: &GameDirs, installer_add_ok: bool) -> Result<(), MacAppError> {
     refuse_unreachable(gogid, dirs)?;
     if let Some(to) = relocate::interrupted(gogid) {
         return Err(MacAppError::Apps(format!(
@@ -407,7 +418,17 @@ pub fn refuse(gogid: &str, dirs: &GameDirs) -> Result<(), MacAppError> {
         )));
     }
     let root = &dirs.root;
-    if super::dlc::journal_exists(root)
+    let installer_add = crate::gog::lay::read_journal(root)
+        .ok()
+        .flatten()
+        .is_some_and(|j| j.lane == super::dlc_installer::LANE);
+    if installer_add && !installer_add_ok {
+        return Err(MacAppError::Apps(format!(
+            "a DLC add of {gogid} stopped while its installers ran: {}",
+            super::dlc_installer::ways_out(gogid)
+        )));
+    }
+    if (super::dlc::journal_exists(root) && !installer_add)
         || super::dlc::download_pending(root)
         || root.join(crate::gog::lay::STAGING).exists()
     {

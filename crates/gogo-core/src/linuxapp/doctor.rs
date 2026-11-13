@@ -1850,11 +1850,7 @@ fn check_dlc(g: &Game) -> Finding {
                  half installed, so the launcher won't start the game",
                 crate::gog::lay::JOURNAL
             ),
-            format!(
-                "run `gogo linux-app dlc {} add` to run them again (or roll back to the \
-                 snapshot taken before it, when there is one)",
-                g.gogid
-            ),
+            super::dlc_installer::ways_out(&g.gogid),
         );
     }
     if super::dlc::journal_exists(&g.dirs.root) {

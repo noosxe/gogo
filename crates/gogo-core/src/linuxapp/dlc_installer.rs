@@ -111,7 +111,8 @@ pub fn setup_command(
 /// Where [`setup_command`] links a setup's dir, under `drive_c`.
 pub const SETUP_LINK: &str = "gogo-setup";
 
-/// umu's `STEAM_COMPAT_INSTALL_PATH`, kept from the environment when set.
+/// umu's install path: the dir the runtime's container shares for the exe (umu
+/// would take the exe's own dir, but a `C:` path is no file to it).
 const INSTALL_PATH: &str = "STEAM_COMPAT_INSTALL_PATH";
 
 /// [`setup_command`]'s link: `prefix/drive_c/gogo-setup` → `setup`'s dir.
@@ -508,6 +509,19 @@ pub fn add(
         return Ok(outcome(game, &[], None, None, warnings));
     }
     let (win_target, install_dir) = install_dir(game)?;
+    // The runtime before the journal: a Proton build or umu that can't be had
+    // leaves nothing to settle.
+    let r = runner(emit)?;
+    let logs = root.join(crate::macapp::INSTALL_LOGS);
+    let umu = Umu {
+        run: &r.umu_run,
+        proton: &r.build.dir,
+        prefix: &game.dirs.prefix,
+        umu_id: &r.umu_id,
+        cwd: &root,
+        log: logs.join(installer::WINE_LOG),
+    };
+    umu.check()?;
     // The `auto` snapshot (design 20 §7.1, §9.4): after the refusals, before the
     // journal. A rerun after a stop took it on its first try, and no snapshot
     // operation runs while a journal is pending (§5.1).
@@ -543,17 +557,6 @@ pub fn add(
         });
     }
 
-    let r = runner(emit)?;
-    let logs = root.join(crate::macapp::INSTALL_LOGS);
-    let umu = Umu {
-        run: &r.umu_run,
-        proton: &r.build.dir,
-        prefix: &game.dirs.prefix,
-        umu_id: &r.umu_id,
-        cwd: &root,
-        log: logs.join(installer::WINE_LOG),
-    };
-    umu.check()?;
     let mut installed = Vec::new();
     for d in &runs {
         if stop() {
@@ -570,7 +573,12 @@ pub fn add(
                     rerun_note(&game.gogid),
                 ));
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                return Err(AddError::Game(MacAppError::Apps(format!(
+                    "{e}\n{}",
+                    ways_out(&game.gogid)
+                ))));
+            }
         }
         if opts.stop_after == Some(d.id) {
             return Err(AddError::Interrupted(
@@ -611,10 +619,64 @@ pub fn add(
 }
 
 fn rerun_note(gogid: &str) -> String {
+    format!("the game won't start until then: {}", ways_out(gogid))
+}
+
+/// The ways out of an unfinished add on this lane, for every message about one:
+/// run the installers again, give the add up, or roll back to the snapshot
+/// taken before it (restoring it is the undo, and it settles the journal).
+pub fn ways_out(gogid: &str) -> String {
     format!(
-        "the game won't start until `gogo linux-app dlc {gogid} add` runs the DLC's \
-         installers again"
+        "`gogo linux-app dlc {gogid} add` runs the DLC's installers again; `gogo \
+         linux-app dlc {gogid} add --abandon` gives the add up (what the installers wrote \
+         stays in the prefix); or roll back to the snapshot taken before the add (`gogo \
+         linux-app snapshot {gogid} list`, then `… rollback <n>`), which undoes it"
     )
+}
+
+/// What [`abandon`] gave up.
+#[derive(Debug, Clone, Serialize)]
+pub struct Abandoned {
+    pub gogid: String,
+    /// The DLC the unfinished add was installing: none of it is recorded.
+    pub dropped: Vec<content::DlcRef>,
+}
+
+/// `dlc add --abandon`: drop an unfinished installer-lane add (design 19 §5.1).
+/// Under the game's lock, refused while it runs: the journal goes and nothing is
+/// recorded for the DLC it named. What their installers wrote stays in the
+/// prefix (the snapshot taken before the add is the undo). With no such
+/// journal there's nothing to do; a depot-lane journal is refused.
+pub fn abandon(game: &mut Game) -> Result<Abandoned, MacAppError> {
+    let root = game.dirs.root.clone();
+    let _lock = crate::macapp::relocate::lock_game(&game.gogid)?;
+    game::refuse_running(&game.gogid, &root, &game.dirs.prefix)?;
+    let Some(j) = lay::read_journal(&root)? else {
+        return Ok(Abandoned {
+            gogid: game.gogid.clone(),
+            dropped: Vec::new(),
+        });
+    };
+    if j.lane != LANE {
+        return Err(MacAppError::Apps(format!(
+            "{}'s unfinished DLC change is the depot lane's: `gogo linux-app dlc {} add` \
+             finishes it; --abandon is for offline-installer adds",
+            game.gogid, game.gogid
+        )));
+    }
+    lay::finish(&root)?;
+    *game = game.reload()?;
+    Ok(Abandoned {
+        gogid: game.gogid.clone(),
+        dropped: j
+            .adding
+            .into_iter()
+            .map(|a| content::DlcRef {
+                id: a.id,
+                title: a.title,
+            })
+            .collect(),
+    })
 }
 
 fn outcome(

@@ -815,7 +815,7 @@ pub fn plan(
     opts: &RollbackOptions,
 ) -> Result<Planned, MacAppError> {
     let dirs = snapshots::built(gogid)?;
-    snapshots::refuse(gogid, &dirs)?;
+    snapshots::refuse_for_rollback(gogid, &dirs)?;
     let (support, b) = backends.for_dir(&dirs.root);
     refuse_backend(&support, b, &dirs.root)?;
     let s = snapshots::store(gogid, &dirs.root, b);
@@ -1002,7 +1002,8 @@ pub fn rollback(
 ) -> Result<RolledBack, MacAppError> {
     let dirs = snapshots::built(gogid)?;
     let (mut out, recovered) =
-        snapshots::locked(gogid, &dirs, backends, true, |s, g, support, b| {
+        snapshots::locked(gogid, &dirs, backends, false, |s, g, support, b| {
+            snapshots::refuse_for_rollback(gogid, &dirs)?;
             refuse_backend(support, b, &dirs.root)?;
             let meta = match target(s, b, &dirs.root, n)? {
                 Ok(m) => m,
