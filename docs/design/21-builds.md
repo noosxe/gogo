@@ -305,8 +305,9 @@ wants X:
   update issue can look into.
 - The `upgrade_from` path depends on #362's preflight or fix: until then, a diff with
   directory entries over non-empty directories fails at the end of the download. Cyberpunk's
-  current builds have only file entries (#362's scan). I3 ships the `verify()` row first and
-  turns the `upgrade_from` row on with #362.
+  current builds have only file entries (#362's scan). I3 shipped the `verify()` row first.
+  I6 turned the `upgrade_from` row on before #362's fix, with a fall back to `verify()` when
+  it fails (§11f).
 
 ## 4. Installed vs newest without the network (requirement 3)
 
@@ -497,7 +498,7 @@ No gog-warp change is made or needed for this design.
 
 | Case | What happens |
 |---|---|
-| Cache on another build than asked for | §3.5: `upgrade_from` when the old manifest is known (after #362), else `verify()` as today. The built game is unaffected. |
+| Cache on another build than asked for | §3.5: `upgrade_from` when the old manifest is known, falling back to `verify()` if it fails (§11f); else `verify()`. The built game is unaffected. |
 | Rebuild onto an older build | Allowed with `--build`. The plan says `downgrade` with the saves warning, and `before rebuild` is snapshotted. The cache moves to that build too (§3.5). Downgrade diffs have no GOG patches (§1.3): whole files. |
 | DLC that the chosen build lacks | Named: exit 2, `not in this build` (design 19 §2.2). Kept set on a rebuild: refused with the `--dlc` hint, never silently dropped (§3.4, D8). |
 | A language missing from a build | Exit 2 with that build's languages. There is no fallback (§3.4). `gogo builds --lang` shows `-` for it. |
@@ -692,6 +693,60 @@ Decided on 2026-11-12.
   one, counts as none). The manifest has no publish date, so `PUBLISHED` stays `-`; the footer
   gives the date the manifest was fetched, and `--json` adds `manifestFetched`, `downloadSize`,
   `diskSize` and `dlcs` to that row. A game without the file keeps the bare row.
+
+## 11f. As built (I6, #429)
+
+- **§3.5's first row is on.** A cache whose record is for another build switches with
+  `upgrade_from` when all of these hold (`depot::can_switch`):
+  - the check says `OtherBuild`: a whole cache, not interrupted, nothing lost;
+  - the wanted build is generation 2;
+  - the record names its language, the wanted one, and its DLC.
+
+  It also needs the cached build's manifest (`depot::cached_manifest`): the game dir's
+  `build-manifest.json` when its `buildId` is the cache's (no request), else GOG's listing
+  while it still lists that build. Without one, the run hashes the cache with `verify()`, as
+  before. A language switch together with a build switch also hashes.
+- **What is diffed.** The new side is the wanted DLC. The old side is the recorded DLC that
+  are still wanted (`depot::switch_inputs`). A recorded DLC the run doesn't take is neither
+  updated nor deleted: its files stay as they are, as `verify()` leaves them, and the new
+  record drops it. Files of the old build that the new one dropped are deleted by gog-warp
+  (`report.deleted`). Other held languages stay in the record, not whole, as they did with
+  `verify()`, and a later switch to one re-checks it.
+- **The plan line** says `cache holds build <id>: fetching only the files this build changed
+  (no hashing) and deleting the ones it dropped`. The download figure stays the whole
+  build's, as an upper bound.
+- **The marker.** `upgrading {from, to}` is written before the downloader starts, as in I3,
+  and only the new record clears it. A Ctrl-C or crash leaves it, and the next run hashes
+  (`Interrupted`).
+- **A failed switch falls back** (`depot::switch_or_verify`). When `upgrade_from` fails and
+  the run wasn't cancelled, the run says so (a `note` event; `gogo: switching the cache from
+  build <id> by its changed files failed (<error>); checking the cache (hashing) and fetching
+  what's missing instead`), removes gog-warp's `!Temp` and runs `verify()` against the new
+  build. The marker stays until that run's record is written, so a fallback that also fails
+  leaves a cache that the next run hashes. Files that the switch would have deleted stay,
+  because gog-warp deletes them only after a successful move.
+- **gog-warp's `!Temp`** sits in the game tree's dir (`<root>/<installDirectory>/!Temp`), not
+  at the cache root. The record's walk skips it at either level. A run that hashes, or that
+  switches builds, removes a stale one first. Only a targeted DLC run on the same build
+  resumes from it.
+- **#362 on a real switch.** Warhammer 40,000: Chaos Gate (1433928487) switched from
+  `1.2 GOG v9` (59612759543911543) to `1.2 GOG v8` (59609663239679307) and back, on a scratch
+  copy of a cache. The diffs were 670.6 KiB and 63.9 KiB. Both builds have two
+  `DepotDirectory` entries, `Save_G` and `ScreenShots`. Results:
+  - both dirs empty in the cache, as a fresh download leaves them: both directions
+    succeeded, and a hash check of the result found nothing to fetch;
+  - a file put into `Save_G`: gog-warp failed with `Directory not empty (os error 39)`, the
+    fallback hashed and fetched the 2–3 files that differed, and the result checked clean.
+
+  So the bug needs a directory entry whose dir holds files, which a cache gogo downloaded
+  only has when the build lists files inside it. None of the 26 cached test games has one,
+  and #362's scan names The Witcher EE (`Data\FX`) and XCOM 2 as such games.
+- **No offline test drives `upgrade_from` itself.** gog-warp's hosts are constants, and its
+  downloader fetches depot manifests, secure links and chunks from them. Without a TLS
+  stand-in for GOG's servers, a gogo test can't feed it local data. The test belongs in
+  gog-warp, next to the move loop (#362's fix sketch). gogo's tests cover the decision,
+  the inputs, the plan line, the fallback, the marker through failure and cancel, and the
+  record's walk.
 
 ## 12. Implementation issues (to be filed as sub-issues of #360)
 
