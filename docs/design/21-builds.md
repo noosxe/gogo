@@ -767,6 +767,138 @@ Decided on 2026-11-12.
   the inputs, the plan line, the fallback, the marker through failure and cancel, and the
   record's walk.
 
+## 11g. As designed and built (I7, #430)
+
+§7 was a sketch. This is the update command as built. Where it reads §7 one way out of
+several, the PR lists the reading under "Decisions to confirm".
+
+### The command
+
+```
+gogo linux-app update <gogid> [--build <id|version>] [--dry-run] [--yes]
+                              [--no-snapshots] [--limit RATE] [--no-disk-check]
+                              [--json-progress] [--json]
+```
+
+- **Target**: `--build` resolves as §3.2 (exit 2 on an unknown or ambiguous value), and an
+  older build is allowed (a downgrade, said in the plan). Without it, the newest public
+  build on the game's branch (§11 Q2): `content.toml`'s `branch`, else the installed
+  build's branch in the listing, else the default branch.
+- **Same build as installed**: `<title> is up to date (build <id>, <version>)`, exit 0,
+  nothing written.
+- `--dry-run` prints the plan and changes nothing (no recovery either). `--json` prints
+  the plan (`{dryRun, plan}`) or the outcome. Without `--yes`, a terminal gets the
+  question and anything else exits 2 asking for `--yes`, as `dlc add` does.
+- `--limit`, `--no-disk-check` and `--json-progress` are the download's, as in `dlc add`.
+- No `--password`: an update to a password-protected build is a rebuild with `--build`
+  and `--password`.
+
+### Refusals (before any write or download)
+
+| Case | Exit | Message names |
+|---|---|---|
+| installer-lane game (§6, Q5) | 7 | `gogo update <gogid>` then `gogo linux-app <gogid> --yes` |
+| the game is running, or another of its programs | 7 | quit it |
+| a `dlc add` stopped during its download (`dlc-download.json`) | 7 | `gogo linux-app dlc <gogid> add` |
+| an update stopped during its download, and `--build` names another target | 7 | the pending target |
+| no installed manifest: not listed and no `build-manifest.json` | 7 | a rebuild |
+| a generation-1 build on either side | 7 | a rebuild |
+| the two builds lay their tree in different dirs (§11f) | 7 | a rebuild |
+| an installed DLC missing from the target (Q3) | 2 | the DLC, that gogo can't remove one yet (#353), and the rebuild with `--build` and `--dlc` without it |
+| the recorded language missing from the target | 2 | the target's languages |
+| no usable cache (Q6): none, another build, another language, lost files, an interrupted switch, or an installed DLC it doesn't hold | 7 | `gogo linux-app <gogid> --build <target> --yes` |
+
+A pending lay journal (an add's or an update's) is settled first, whatever was asked, as
+`dlc add` does. A pending snapshot rollback too. Exit codes follow §7.1: 7 for the
+conversion class, 2 for usage, 130 for Ctrl-C.
+
+### Order
+
+1. **Plan** (network, no write): the listing (cached as every listing is), the target, both
+   build manifests (the installed one from `build-manifest.json` or the listing), the
+   refusals above, and the files the target drops, from both builds' depot manifests for
+   the game's language and DLC (`dlc_filter::fetch_depots`, `depot::dropped_paths`). A
+   failed depot listing is a note, not a refusal: the cache walk below still finds what the
+   switch deleted. The plan says the versions, `downgrade` when it is one, the DLC kept,
+   the language, the source, how the game files are laid (reflink or copy) and how many
+   files the target drops, and the download as an upper bound (the whole build; only
+   changed files are fetched). No `prepare()` call: it would need a downloader set up for
+   the plan alone.
+2. **Under the game's lock** (`relocate::lock_game`, held to the end): settle a pending
+   rollback and a pending journal, refuse a running game, and check the cache again.
+3. **Snapshot**: `snapshots::protect(…, Trigger::Update, "before update <old> → <new>")`,
+   which takes the data root's lock beside the game's. A failure stops the update with
+   exit 7 and nothing written; `--no-snapshots` skips it. A resumed download took it on
+   its first try.
+4. **Download record** `games/<gogid>/update-download.json` (`{from, to, version, branch,
+   before, dropped, fetched}`), durably, with `before` a walk of the cache (paths, sizes,
+   mtimes, as `dlc add`'s). The target's manifest goes to `build-manifest.next.json`
+   (mode 0600) beside it.
+5. **Switch the cache**: `depot::run` for the target with the recorded language and the
+   installed DLC. That is I6's path: `upgrade_from` when it can, the `upgrading` marker,
+   the `verify()` fallback with `!Temp` cleanup and the prune of dropped files. The game
+   is untouched and playable all along.
+6. **Lay** (design 19 §3.4's journal, `kind = "update"`, `from`, `to`): the files the run
+   wrote (the walk now against `before`) go onto `game/` by `dlc::lay_list` (tree paths and
+   the support overlays' `app/`), and `removed` holds the paths to take out of `game/`:
+   what `before` had and the walk now hasn't, plus the dropped list of step 1. Removed
+   paths are mapped onto the game's casing, kept only when they are files or links in
+   `game/` and no laid file takes the path, and moved into `.dlc-backup/` like a replaced
+   file. Dirs they leave empty stay.
+7. **Commit**: `build-manifest.next.json` renamed to `build-manifest.json` (or the old one
+   removed when the target's couldn't be fetched), then `content.toml`: `build_id`,
+   `version`, `branch` (cleared on the default branch), and every DLC row's `build_id`
+   and `version`. Then the backups, the journal and the download record go.
+8. **Setup** runs once, as after `dlc add`, so GOG's install scripts of the new build are
+   applied. A failure is a warning naming `gogo linux-app setup`.
+9. **Entry point**: when the new build's `goggame-<gogid>.info` points to another exe
+   than `gogo-launch.toml`'s, a warning names a rebuild (`gogo linux-app <gogid> --yes`),
+   which rewrites the launch file. The update doesn't rewrite it itself.
+
+### What it keeps (§7.2)
+
+The prefix, saves, L4, `launch.conf`, `gogo-launch.toml` and the game's settings are not
+written. In `game/` only paths the old or the new build lists are written or removed: a
+mod or a log of the game's own stays. A modded file the update replaces or removes is in
+the backup until the commit, and then only in the snapshot. Only `game/`, the backup dir,
+the journal, the two records above and the depot cache are written.
+
+### Interruption (§7.3)
+
+- **Before or during the download**: `game/` and `content.toml` are as they were, and the
+  game plays. A rerun of `update` finds `update-download.json`, takes its target (unless
+  `--build` names another: refused), skips the cache check and the snapshot, and runs the
+  download again: the cache's `upgrading` marker makes it hash. The files it wrote on the
+  first try still count, since `before` is from before it.
+- **During the lay**: the journal is there. The launcher refuses (its message names `dlc
+  add`, which settles either kind), `doctor` fails naming `gogo linux-app update`, and the
+  next `update` or `dlc add` settles it: forward commits the update as step 7 does, back
+  restores the replaced and removed files from the backup. After a back, the cache is on
+  the target already, so the next `update` refuses for the cache and names the rebuild.
+- **After a snapshot rollback** to `before update`, `content.toml` names the old build
+  again and the hint shows the update again. The cache stays on the new build, so the
+  next `update` refuses for the cache (Q6) and names the rebuild.
+
+### Real runs
+
+Warhammer 40,000: Chaos Gate (1433928487), in a scratch data root and cache, from a copy of
+an existing cache. The game dir was laid out by hand on `1.2 GOG v8` (an empty prefix, setup
+failing as a warning), with a file of the user's own in `Save_G`:
+
+| Run | Result |
+|---|---|
+| v8 → v9 (newest) | `upgrade_from` fetched 3 files (1.4 MiB); 3 laid, 0 removed. `game/` matched the cache's tree plus the user's file; `build-manifest.json` on v9, mode 0600 |
+| v9 → `--build "1.2 GOG v6"` | the plan said `downgrade` and `4 file(s) this build dropped`; 21 laid, 4 removed; `game/` matched the cache plus the user's file |
+| v6 → v9 | 24 laid, 1 removed, matched; the next run said `up to date` |
+| `--build "1.2 GOG v5"` on the real game, dry run | refused: another install directory |
+| Cyberpunk 2077 (1423049311), dry run | `up to date`; `--build 2.31a` passed the DLC check and stopped at the cache refusal (a scratch cache) |
+
+### Not built
+
+- A `prepare()`-based download size (step 1).
+- Rewriting `gogo-launch.toml` for a new entry point (step 9).
+- DLC removal for a target that lacks one (Q3, #353).
+
 ## 12. Implementation issues (to be filed as sub-issues of #360)
 
 Under epic #155 (Linux runtime) unless noted, `type:feature`, `area:depot` (+ `area:cli`
