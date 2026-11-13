@@ -173,7 +173,7 @@ fn holds(path: &Path, e: &Expect) -> bool {
 /// name, else the first one matching it without case (a DLC depot can spell a dir
 /// differently from the base tree). Listing each dir, rather than trying the
 /// name, gives the on-disk spelling on a case-insensitive filesystem too.
-fn find_ci(game: &Path, rel: &str) -> Option<PathBuf> {
+pub(crate) fn find_ci(game: &Path, rel: &str) -> Option<PathBuf> {
     let mut at = game.to_path_buf();
     for comp in rel.split('/').filter(|c| !c.is_empty()) {
         let lower = comp.to_lowercase();

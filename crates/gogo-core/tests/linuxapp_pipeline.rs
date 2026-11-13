@@ -2038,6 +2038,87 @@ fn a_dlc_without_its_own_uninstaller_or_that_replaced_game_files_is_refused() {
     assert_eq!(recorded(&w.game()), vec![INST_DLC_A]);
 }
 
+#[test]
+fn a_stale_install_log_counts_as_none_and_an_empty_journal_is_finished() {
+    use gogo::linuxapp::dlc_uninstall as du;
+    let w = World::new("instdlcrmstale", &["d3d9.dll"]);
+    // SAFETY: under ENV_LOCK (the World holds it).
+    unsafe { std::env::set_var("FAKE_DLC_REPLACES", INST_DLC_A.to_string()) };
+    let (mut game, install) = built_with_dlc(&w, &[INST_DLC_A]);
+    unsafe { std::env::remove_var("FAKE_DLC_REPLACES") };
+    assert!(
+        du::plan(&game, &[dref(INST_DLC_A)], &[], false).is_err(),
+        "the current log shows game.exe replaced"
+    );
+    // An hour older than the DLC's info: an earlier install's log.
+    let log = w
+        .game()
+        .join(gogo::macapp::INSTALL_LOGS)
+        .join(format!("dlc-{INST_DLC_A}-inno.log"));
+    let old = std::fs::metadata(install.join(format!("goggame-{INST_DLC_A}.info")))
+        .unwrap()
+        .modified()
+        .unwrap()
+        - std::time::Duration::from_secs(3600);
+    std::fs::File::options()
+        .write(true)
+        .open(&log)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    let plan = du::plan(&game, &[dref(INST_DLC_A)], &[], false).unwrap();
+    assert!(plan.removing[0].log_missing);
+    let lines = du::plan_lines(&plan).join("\n");
+    assert!(lines.contains("can trust"), "{lines}");
+
+    // A removal journal naming nothing: a rerun finishes it.
+    let j: gogo::gog::lay::Journal = serde_json::from_value(serde_json::json!({
+        "gogid": ID, "lane": "installer", "buildId": "", "language": "", "adding": [],
+        "source": "/nowhere", "sourceIsCache": false, "moves": false, "files": [],
+        "replaced": [], "dirs": [], "kind": "remove",
+    }))
+    .unwrap();
+    std::fs::write(
+        gogo::gog::lay::journal_path(&w.game()),
+        serde_json::to_string_pretty(&j).unwrap(),
+    )
+    .unwrap();
+    let out = du::remove(
+        &mut game,
+        &[],
+        &mut *test_runner(&w),
+        &remove_opts(),
+        &mut quiet(),
+        &|| false,
+    )
+    .unwrap();
+    assert!(out.removed.is_empty() && out.resumed);
+    assert!(!gogo::linuxapp::dlc::journal_exists(&w.game()));
+}
+
+#[test]
+fn a_left_file_is_found_in_any_case() {
+    use gogo::linuxapp::dlc_uninstall as du;
+    let w = World::new("instdlcrmcase", &["d3d9.dll"]);
+    let (mut game, install) = built_with_dlc(&w, &[INST_DLC_A]);
+    // On disk in another case than the install log's.
+    std::fs::rename(
+        install.join(format!("dlc-{INST_DLC_A}.pak")),
+        install.join(format!("DLC-{INST_DLC_A}.PAK")),
+    )
+    .unwrap();
+    let out = du::remove(
+        &mut game,
+        &[dref(INST_DLC_A)],
+        &mut *test_runner(&w),
+        &remove_opts(),
+        &mut quiet(),
+        &|| false,
+    )
+    .unwrap();
+    assert_eq!(out.left, vec![format!("dlc-{INST_DLC_A}.pak")]);
+}
+
 // — after the build: compat, next-renderer, --retarget (#176) —
 
 #[test]

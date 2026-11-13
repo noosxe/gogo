@@ -213,6 +213,12 @@ pub fn run_one(
     std::fs::create_dir_all(logs)?;
     let log_name = inno_log_name(d.id);
     let log = logs.join(&log_name);
+    // An earlier install's log goes first: a run that fails before Inno starts
+    // must not leave it looking like this one's (a removal reads it).
+    match std::fs::remove_file(&log) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+        _ => {}
+    }
     let (cmd, link) = setup_command(umu, &d.setup, win_target, &log)?;
     let status = working(emit, step::DLC_INSTALLER, || {
         umu.run("a DLC's installer", cmd)
