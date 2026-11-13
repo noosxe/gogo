@@ -550,7 +550,7 @@ Decided on 2026-11-12.
 |---|---|---|
 | Q1 | Should a game remember a build picked with `--build` (a hold), so that a plain rebuild keeps it? | **No hold in this round.** The plan line says what a plain rebuild does (§3.4). A later issue may add a hold for the "held for a mod" case (design 19 §4). |
 | Q2 | Does a game on a named branch follow its own branch or the default one? | **Its own branch**, for the hint and the update. `apps show` says when the default branch has a newer build (§4.1). |
-| Q3 | `update --drop-dlc` when the target lacks an installed DLC? | **No.** The update stays refused until DLC removal (#353) exists, and then reuses it (§7.1). |
+| Q3 | `update --drop-dlc` when the target lacks an installed DLC? | **No.** The update stays refused until DLC removal (#353) exists, and then reuses it (§7.1). Built (#442, §11h): the update takes such a DLC out in the same run, with no extra flag; the plan names it with the saves warning, and the question defaults to no. |
 | Q4 | Should `apps list` refresh old listings when online? | **No: it stays offline.** Only commands that fetch the list anyway, and `gogo builds --installed`, refresh the cache (§4.2). |
 | Q5 | Run GOG's patch installers on the installer lane? | **No.** An installer-lane update is a re-download plus a rebuild (§6). |
 | Q6 | No usable cache at update time? | **Refuse and point to a rebuild.** The cache is never re-seeded from `game/` (§7.1). |
@@ -804,7 +804,7 @@ gogo linux-app update <gogid> [--build <id|version>] [--dry-run] [--yes]
 | no installed manifest: not listed and no `build-manifest.json` | 7 | a rebuild |
 | a generation-1 build on either side | 7 | a rebuild |
 | the two builds lay their tree in different dirs (§11f) | 7 | a rebuild |
-| an installed DLC missing from the target (Q3) | 2 | the DLC, its removal first (`gogo linux-app dlc <gogid> remove <id>`, design 19 §3.7) and then the update, or the rebuild with `--build` and `--dlc` without it |
+| an installed DLC missing from the target (Q3), when both builds' depot lists couldn't be fetched (since #442, §11h; before it, any such DLC, exit 2) | 7 | the DLC, its removal first (`gogo linux-app dlc <gogid> remove <id>`, design 19 §3.7) and then the update, or the rebuild with `--build` and `--dlc` without it |
 | the recorded language missing from the target | 2 | the target's languages |
 | no usable cache (Q6): none, another build, another language, lost files, an interrupted switch, or an installed DLC it doesn't hold | 7 | `gogo linux-app <gogid> --build <target> --yes` |
 
@@ -912,8 +912,99 @@ failing as a warning), with a file of the user's own in `Save_G`:
 
 - A `prepare()`-based download size (step 1).
 - Rewriting `gogo-launch.toml` for a new entry point (step 9).
-- DLC removal inside the update for a target that lacks one (Q3). Removal itself exists
-  (#353, design 19 §3.7); the refusal names it, then the update.
+- DLC removal inside the update for a target that lacks one (Q3). Built since (#442,
+  §11h).
+
+## 11h. As built (#442): an update that drops a DLC
+
+When the target build doesn't have an installed DLC, `linux-app update` takes it out in
+the same run: one plan, one question, one snapshot, one journaled lay. The command and its
+flags are §11g's. Before this, such a target was refused (exit 2), naming `dlc remove` and
+then the update.
+
+**Decisions (2026-11-13):**
+
+1. **The target's file set.** The update's own diff covers most of it, as long as the
+   DLC is on the old side of gog-warp's diff. `DepotOptions::dropping` names the DLC, and
+   `depot::switch_inputs` keeps the recorded ones it names in `old_dlcs` (`dlcs`, the new
+   side, leaves them out). gog-warp then deletes the DLC's files from the cache and
+   rewrites the tree paths whose cached copy was the DLC's. The `verify()` fallback does
+   the same: its prune reads `old_dlcs`, and the hashing fixes a rewritten path. The
+   cache walk then gives the files to lay and the ones the switch deleted, as in §11g.
+   What the walk can't see is a game path the DLC shares with a product that stays
+   through another cache path: a support overlay's `app/` file laid over a base tree
+   file. Its cache path is deleted, while the base's tree file may not change at all.
+   So `dlc_remove::reverse_diff_to` works across the two builds. It keys every entry by
+   its game path, takes "now" from the installed build's depots (base and every
+   installed DLC), and "after" from the target's (base and the DLC that stay):
+   - a path only the dropped DLC lay is **removed** while it still has the installed
+     build's MD5 (else size);
+   - a path the target lays for a product that stays is **laid again** from the switched
+     cache in the target's version, unless `game/` already holds that version.
+
+   The `removed` list holds the update's dropped files, what the switch deleted, the
+   DLC's files and its `goggame-<id>.*` files by name (as design 19 §3.7). It never holds
+   a path the target lays for a product that stays.
+2. **Consent: no `--drop-dlc`** (Q3 stands). The plan names the DLC (`DLC removed: X
+   (build B doesn't have it): N file(s) out`, and how many replaced files are laid
+   again) and adds the saves line. On a terminal, the question repeats that line and
+   defaults to **no**. `--yes` agrees, and headless runs need it, as for any update.
+3. **The saves warning** is design 19 §3.7's. Its way back is the snapshot, or a rebuild on
+   the installed build with the DLC (`gogo linux-app <gogid> --build <from> --dlc … --yes`),
+   since `dlc add` can't bring the DLC back on a build that lacks it.
+4. **The snapshot** is the update's (`Trigger::Update`), labelled `before update A → B,
+   removing X`.
+5. **`content.toml`**: the commit drops the DLC's rows, together with the new build on
+   the rows that stay.
+6. **The depot cache** ends up on the target without the DLC. Its files there are deleted
+   (by gog-warp's diff, or the fallback's prune) and the new record doesn't list it. This
+   differs from `dlc remove`, which keeps the DLC in the cache: here the cached files
+   would be the old build's, and the target has no such DLC for a later `dlc add` to
+   take.
+7. **One journal**, the update's (`kind = "update"`), with `removing` (the DLC), `md5s`
+   (each file laid again, by its game path) and `prune` (the dirs the DLC's removed files
+   may leave empty, except dirs a product that stays lists a file under). The download
+   record `update-download.json` gains `removing`. Recovery:
+   - **forward** commits the build and the DLC's removal, then prunes those dirs;
+   - **back** puts the DLC's files and the replaced ones back, so the DLC stays installed
+     on the old build;
+   - it goes back when the cache isn't on the target, or a file laid again from it no
+     longer has its recorded MD5.
+
+   When both builds' depot lists can't be fetched, the update is refused, exit 7, as `dlc
+   remove`'s decision 7: without them there is nothing to check the DLC's files by. A path
+   the target lays again that isn't plain (`..`, absolute) is refused in the plan.
+8. **`--build`** shares all of it. A downgrade to a build older than the DLC is the
+   common case.
+9. **The offline-installer lane** has no update (§6, Q5). Its rebuild with `--dlc` decides
+   which DLC stay.
+
+**Order** is §11g's, with these additions:
+- the plan computes the cross-build diff and hashes only the shared paths in `game/`;
+- after the switch, each file laid again has its source in the cache checked (MD5, else
+  size) before the lay. A mismatch lays nothing and drops the download record. The game
+  stays on the old build with the DLC, and the update names the rebuild without it:
+  the cache is on the target already, so a rerun can't retry;
+- the commit is followed by the DLC's emptied dirs.
+
+**Output.** `--dry-run --json`'s plan gains `removing`, `dlcFiles` and `dlcRestored`. The
+outcome gains `dlcsRemoved`, and the human summary ends with `DLC removed: X`.
+
+**Tests** (`linuxapp_pipeline`'s `update::drops_a_dlc`, on fake depot manifests of both
+builds):
+- a base file the DLC's overlay replaced, which the target keeps as it was: laid again
+  from the cache, with no help from the switch;
+- a tree file the DLC changed, which the target changes too: the target's version;
+- a cache copy that isn't the target's after the switch: nothing laid;
+- a changed DLC file: kept, with a warning naming the DLC;
+- a stop at each lay step: forward, with the dirs pruned, and back.
+
+Also: `dlc_remove::reverse_diff_to` across two builds, `switch_inputs` with `dropping`,
+and the refusal without depot lists.
+
+**Not run:** a real update that drops a DLC. No cached test game has a listed build older
+than one of its DLC, so this is a host pass: a dry run's counts against the DLC's depot,
+then the update, the game starting, and `gogo builds` and `apps show` on the new build.
 
 ## 12. Implementation issues (to be filed as sub-issues of #360)
 

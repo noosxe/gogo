@@ -747,11 +747,11 @@ Core `linuxapp::dlc_remove` (`resolve_installed`, `reverse_diff`, `plan_remove`,
    The question defaults to no; `--yes` skips it. Saves and the prefix are never
    written. Registry values the DLC's install script set (§3.6) stay in the prefix:
    setup applies the base's and the remaining DLC's scripts again, and has no "unset".
-4. **`linux-app update`** still refuses a target that lacks an installed DLC (design 21
-   §11 Q3), and now names the removal first: `gogo linux-app dlc <gogid> remove <id>`,
-   then the update (with `--build` when one was picked), or the rebuild without it.
-   Doing the removal inside the update (one plan, one snapshot, one journal) is a
-   follow-up.
+4. **`linux-app update`** to a target that lacks an installed DLC takes it out in the
+   same run (#442, design 21 §11h): one plan, one snapshot, one journal (the update's,
+   with `removing`). It reuses this removal's reverse diff across the two builds
+   (`reverse_diff_to`), its file check and its saves line. Unlike a removal, the depot
+   cache doesn't keep the DLC: the cache moves to a build that doesn't have it.
 5. **Offline-installer lane:** refused here, exit 7, nothing written, naming the
    rebuild with `--dlc` for the DLC to keep (or `--no-dlcs`). Built since (#443): §5.2
    runs the DLC's Inno uninstaller.
