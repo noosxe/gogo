@@ -67,6 +67,9 @@ pub struct LinuxAppOptions {
     /// and its `initial` snapshot. The default is off; the CLI turns it on from
     /// `[snapshots] auto` unless `--no-snapshots`.
     pub snapshots: SnapshotOptions,
+    /// The offline-installer lane's DLC (design 19 §5): run after the base
+    /// installer, in the staging prefix.
+    pub installer_dlc: super::dlc_installer::BuildDlc,
 }
 
 /// A GE-Proton the build downloads.
@@ -140,6 +143,9 @@ pub struct LinuxAppPlan {
     /// The plan's `snapshots:` line (design 20 §8).
     pub snapshots: BuildSnapshots,
     pub snapshot_opts: SnapshotOptions,
+    /// The installer lane's DLC (design 19 §5). The caller fills in
+    /// `installers` (the downloads) between the plan and [`execute`].
+    pub installer_dlc: super::dlc_installer::BuildDlc,
 }
 
 /// What [`execute`] did.
@@ -592,9 +598,10 @@ pub fn plan(
     let dlcs = match (&opts.game_tree, &opts.depot_content) {
         (Some(_), Some(c)) => c.dlcs.clone(),
         (Some(t), None) => content::for_build(content::Lane::Depot, t, None, None).refs(),
-        (None, _) => Vec::new(),
+        (None, _) => opts.installer_dlc.refs.clone(),
     };
     Ok(LinuxAppPlan {
+        installer_dlc: opts.installer_dlc.clone(),
         snapshots,
         snapshot_opts: opts.snapshots.clone(),
         dlcs,
@@ -766,15 +773,7 @@ fn persist_flags(
 /// The installer lane's Inno flags (as on the Mac, design 10 §2.4), with
 /// its log written through `z:`.
 fn installer_args(plan: &installer::InstallPlan, win_target: &str, log: &Path) -> Vec<String> {
-    vec![
-        plan.installer.display().to_string(),
-        "/VERYSILENT".into(),
-        "/SUPPRESSMSGBOXES".into(),
-        "/NORESTART".into(),
-        "/SP-".into(),
-        format!("/DIR={win_target}"),
-        format!("/LOG={}", installer::z_path(log)),
-    ]
+    super::dlc_installer::inno_args(&plan.installer, win_target, log)
 }
 
 /// Run the plan: umu and GE-Proton (the downloads the plan named), the game
@@ -823,6 +822,8 @@ pub fn execute(
     let mut installer_first = false;
     // A rebuild's `before rebuild` snapshot and what retention pruned.
     let mut rebuilt: Option<snapshots::Taken> = None;
+    // What the DLC installers left (the installer lane).
+    let mut dlc_ran: Vec<super::dlc_installer::Installed> = Vec::new();
     let (gogid, selection, auto, lane, install_dir, cache_root) = if let Some(tree) =
         &plan.game_tree
     {
@@ -1087,6 +1088,31 @@ pub fn execute(
             info::root_game_id(&install_dir).ok_or_else(|| MacAppError::EntryPointNotFound {
                 dir: install_dir.clone(),
             })?;
+        // The DLC's installers (design 19 §5): after the base, one at a time, in
+        // the same staging prefix and into its dir. A failed one fails the build
+        // here, before the prefix moves, so no half-built game appears.
+        let dlc = &plan.installer_dlc;
+        if !dlc.installers.is_empty() {
+            if let Some(want) = &dlc.gogid
+                && *want != gogid
+            {
+                return Err(MacAppError::Apps(format!(
+                    "the setup installed game {gogid}, not {want} whose DLC were chosen; \
+                     nothing was moved into place (staging: {})",
+                    staging.root.display()
+                )));
+            }
+            for d in &dlc.installers {
+                dlc_ran.push(super::dlc_installer::run_one(
+                    &umu,
+                    d,
+                    &win_target,
+                    &install_dir,
+                    &logs,
+                    emit,
+                )?);
+            }
+        }
         let entry = info::find_entry_point(&install_dir)?;
         let scan = pe::scan_exe(&install_dir, &entry);
         let sel = select_renderer(Some(&gogid), &scan, plan.renderer_choice, emit);
@@ -1204,6 +1230,14 @@ pub fn execute(
         && content.build_id.as_deref() == Some(id.as_str())
     {
         content.version = Some(v);
+    }
+    // The installer lane (design 19 §5, §6.1): the base installer's version label
+    // and language, and each DLC's installer label and info build.
+    if lane == content::Lane::Installer {
+        let d = &plan.installer_dlc;
+        content.version = d.version.clone();
+        content.language = d.language.clone();
+        super::dlc_installer::record(&mut content, &d.installers, &dlc_ran);
     }
     if lane == content::Lane::Depot
         && let Some((id, b)) = plan.depot_content.as_ref().and_then(|c| c.branch.clone())

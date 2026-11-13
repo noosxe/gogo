@@ -98,6 +98,38 @@ pub enum MacAppError {
     #[error("proton: {0}")]
     Proton(String),
 
+    /// A DLC's offline installer that exited non-zero (design 19 §5).
+    #[error(
+        "the installer of DLC \"{title}\" ({id}) exited {exit}; its Inno log ({log}) and \
+         Wine's ({wine}) are in {logs}{last}",
+        wine = super::installer::WINE_LOG,
+        last = last_lines(.tail)
+    )]
+    DlcInstallerFailed {
+        id: u64,
+        title: String,
+        exit: i32,
+        log: String,
+        logs: PathBuf,
+        tail: String,
+    },
+
+    /// A DLC installer that ran but left no `goggame-<id>.info` in the base
+    /// game's dir: it ignored `/DIR=` (design 19 §11 Q5), or installed nothing.
+    #[error(
+        "the installer of DLC \"{title}\" ({id}) didn't install into the game's dir {dir}: {}",
+        match .found {
+            Some(p) => format!("its goggame-{id}.info is at {} instead", p.display()),
+            None => format!("no goggame-{id}.info anywhere in the prefix"),
+        }
+    )]
+    DlcNotInGameDir {
+        id: u64,
+        title: String,
+        dir: PathBuf,
+        found: Option<PathBuf>,
+    },
+
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }

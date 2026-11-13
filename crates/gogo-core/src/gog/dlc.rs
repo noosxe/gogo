@@ -525,9 +525,54 @@ pub fn decision_notes(d: &Decision, infos: &[DlcInfo]) -> Vec<String> {
     out
 }
 
-/// The offline-installer lane takes no DLC yet (design 19 §5, #351).
-pub const INSTALLER_LANE_NOTE: &str =
-    "DLC isn't installed on the offline-installer lane yet; the DLC flags are ignored";
+// — the offline-installer lane (design 19 §5, #351) —
+
+/// `product`'s Windows offline installer for `language` (the catalog's language
+/// fallback: any language when none matches), the first one GOG lists.
+pub fn windows_installer<'a>(
+    product: &'a Product,
+    language: &str,
+) -> Option<&'a crate::gog::catalog::InstallerEntry> {
+    let entries = &product.downloads.as_ref()?.installers;
+    let windows: Vec<crate::gog::catalog::InstallerEntry> = entries
+        .iter()
+        .filter(|e| e.os == Some(crate::gog::catalog::Os::Windows))
+        .cloned()
+        .collect();
+    let picked = crate::engine::select::language_fallback(&windows, Some(language))
+        .first()
+        .map(|e| e.id.clone())?;
+    entries
+        .iter()
+        .find(|e| e.id == picked && e.os == Some(crate::gog::catalog::Os::Windows))
+}
+
+/// The game's DLC as the offline-installer lane sees them (design 19 §5): a DLC
+/// "is in the build" when GOG has a Windows installer for it, and its size is that
+/// installer's (download and disk alike, since what it unpacks isn't known
+/// before it runs). Sizes are given for owned DLC only, as on the depot lane.
+pub fn installer_infos(catalog_dlcs: &[Product], owned: &[u64], language: &str) -> Vec<DlcInfo> {
+    let mut infos = available(catalog_dlcs, owned, None);
+    for d in &mut infos {
+        let entry = catalog_dlcs
+            .iter()
+            .find(|p| p.id == d.id)
+            .and_then(|p| windows_installer(p, language));
+        d.in_build = entry.is_some();
+        let size = entry.map(|e| {
+            e.total_size
+                .unwrap_or_else(|| e.files.iter().map(|f| f.size).sum())
+        });
+        d.download_size = size.filter(|_| d.owned);
+        d.disk_size = None;
+    }
+    infos
+}
+
+/// The version label of `product`'s Windows installer for `language`.
+pub fn installer_version(product: &Product, language: &str) -> Option<String> {
+    windows_installer(product, language).and_then(|e| e.version.clone())
+}
 
 /// What the secure-link probe found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -139,7 +139,7 @@ fn tasks_for(
 /// Language fallback chain (`docs/design/04` §1): prefer the requested language when
 /// any entry has it; otherwise keep everything (single-language products, or a
 /// language we don't know about — never an empty selection).
-fn language_fallback<'a>(
+pub(crate) fn language_fallback<'a>(
     entries: &'a [InstallerEntry],
     preferred: Option<&str>,
 ) -> Vec<&'a InstallerEntry> {

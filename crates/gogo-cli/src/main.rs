@@ -7,6 +7,8 @@ mod cli;
 mod depot_progress;
 #[cfg(target_os = "linux")]
 mod dlc_cmd;
+#[cfg(target_os = "linux")]
+mod installer_dlc;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod lane;
 #[cfg(target_os = "macos")]
@@ -2738,9 +2740,7 @@ async fn resolve_game_source(
                 "gogo: {title} has no depot build — using its offline installer {}",
                 exe.display()
             );
-            if dlc.is_some_and(DlcAsk::wants_dlc) {
-                notes.push(gogo::gog::dlc::INSTALLER_LANE_NOTE.to_string());
-            }
+            // The installer lane's DLC are `installer_dlc`'s (design 19 §5).
             return Ok((Some(exe), None, notes, None));
         }
         lane::Lane::NoSource => {
@@ -4383,12 +4383,7 @@ async fn linux_app(a: LinuxAppArgs) -> Result<i32, AppError> {
         return Ok(cli::exit::USAGE);
     }
     let (installer, game_tree) = match input {
-        Some(lane::Input::Installer(p)) => {
-            if a.dlc.wants_dlc() {
-                dlc_notes.push(gogo::gog::dlc::INSTALLER_LANE_NOTE.to_string());
-            }
-            (Some(p), None)
-        }
+        Some(lane::Input::Installer(p)) => (Some(p), None),
         Some(lane::Input::Tree(t)) => {
             if a.dlc.wants_dlc() {
                 dlc_notes.push("the DLC flags don't apply to a game tree you point at".to_string());
@@ -4414,6 +4409,17 @@ async fn linux_app(a: LinuxAppArgs) -> Result<i32, AppError> {
             eprintln!("gogo: linux-app needs a GAME or an INSTALLER path");
             return Ok(cli::exit::USAGE);
         }
+    };
+    // The offline-installer lane's DLC (design 19 §5): chosen now, their
+    // installers downloaded after the consent.
+    let installer_choice = match &installer {
+        Some(setup) => {
+            let interactive = !a.yes && dlc_cmd::interactive(machine);
+            let c = installer_dlc::plan_build(setup, &a.dlc, interactive, machine).await?;
+            dlc_notes.extend(c.notes.iter().cloned());
+            Some(c)
+        }
+        None => None,
     };
     let prompter: Option<std::sync::Arc<gogo::macapp::PromptFn>> =
         if std::io::IsTerminal::is_terminal(&std::io::stdin())
@@ -4470,9 +4476,13 @@ async fn linux_app(a: LinuxAppArgs) -> Result<i32, AppError> {
         library,
         dlc_notes,
         depot_content,
+        installer_dlc: installer_choice
+            .as_ref()
+            .map(|c| c.build.clone())
+            .unwrap_or_default(),
     };
     let jp = a.json_progress;
-    let plan = {
+    let mut plan = {
         let p = prompter.clone();
         let mode = depot_mode(jp, a.json);
         tokio::task::spawn_blocking(move || {
@@ -4521,6 +4531,13 @@ async fn linux_app(a: LinuxAppArgs) -> Result<i32, AppError> {
         }
     }
 
+    if let Some((ctx, _, product)) = installer_choice.and_then(|c| c.fetch) {
+        let d = &plan.installer_dlc;
+        let ids: Vec<u64> = d.refs.iter().map(|r| r.id).collect();
+        let language = d.language.clone().unwrap_or_default();
+        let got = installer_dlc::fetch(&ctx, &product, &ids, &d.refs, &language, machine).await?;
+        plan.installer_dlc.installers = got;
+    }
     let out = {
         let plan = plan.clone();
         let p = prompter.clone();
