@@ -1121,13 +1121,7 @@ async fn depot_cmd(args: cli::DepotArgs) -> Result<i32, AppError> {
     };
 
     if args.list_languages {
-        let out = act
-            .spin_async(
-                "reading the build's languages",
-                list_languages(&ctx, &token, session, game, &args),
-            )
-            .await;
-        return out;
+        return list_languages(&ctx, &token, session, game, &args, &act).await;
     }
     let language = args
         .language
@@ -1311,9 +1305,15 @@ async fn list_languages(
     session: &gog_warp::Core,
     game: &gogo::gog::library::LibraryProduct,
     args: &cli::DepotArgs,
+    act: &depot_progress::Activity,
 ) -> Result<i32, AppError> {
     use gogo::gog::language;
-    let build = gogo::gog::depot::newest_build(session, game.id, args.password.clone()).await?;
+    let build = act
+        .spin_async(
+            "reading the build's languages",
+            gogo::gog::depot::newest_build(session, game.id, args.password.clone()),
+        )
+        .await?;
     let langs = language::of_manifest(&build.manifest);
     let cached = gogo::gog::depot::cache_roots(
         gogo::gog::depot::default_cache_dir().as_deref(),
@@ -1328,11 +1328,16 @@ async fn list_languages(
     let titles = if listing.dlcs_with_fewer.is_empty() {
         Vec::new()
     } else {
-        gogo::gog::catalog::detail(&ctx.http, token, game.id)
-            .await
-            .map(|d| d.expanded_dlcs)
-            .unwrap_or_default()
+        act.spin_async(
+            "fetching the game details",
+            gogo::gog::catalog::detail(&ctx.http, token, game.id),
+        )
+        .await
+        .map(|d| d.expanded_dlcs)
+        .unwrap_or_default()
     };
+    // Nothing is printed while a spinner is up: the result comes after.
+    act.finish();
     let title_of = |id: &str| {
         titles
             .iter()
@@ -2623,10 +2628,16 @@ async fn resolve_game_source(
     };
     let cached_tree = find_game_tree(&root);
     if dlc.is_some() && cached_tree.is_some() {
-        phase(
-            machine,
+        act.spin_async(
             "checking the depot cache",
-            upgrade_cache_record(session, game.id, &title, &root, &dlc_plan.opts.language),
+            upgrade_cache_record(
+                session,
+                game.id,
+                &title,
+                &root,
+                &dlc_plan.opts.language,
+                &act,
+            ),
         )
         .await;
     }
@@ -3285,6 +3296,7 @@ async fn upgrade_cache_record(
     title: &str,
     root: &std::path::Path,
     language: &str,
+    act: &depot_progress::Activity,
 ) {
     use gogo::gog::{cache_upgrade, depot, dlc_filter};
     let Some(rec) = depot::read_record(root) else {
@@ -3309,7 +3321,7 @@ async fn upgrade_cache_record(
         Err(e) => Err(format!("its build couldn't be looked up: {e}")),
     };
     for line in cache_upgrade::bring_up_to_date(root, title, language, &rec.build_id, fetched) {
-        eprintln!("gogo: {line}");
+        act.say(&format!("gogo: {line}"), &|l| eprintln!("{l}"));
     }
 }
 

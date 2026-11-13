@@ -1601,6 +1601,25 @@ mod tests {
         no_text_after_a_status(&out);
     }
 
+    /// A line said from inside a spinning step lands on its own row, and
+    /// `finish` leaves the row clear for what the command prints next.
+    #[tokio::test]
+    async fn a_line_said_during_a_spin_has_its_own_row() {
+        let buf = Shared::default();
+        let act = Activity::with(Mode::Human { live: true }, buf.clone());
+        act.spin_async("checking the depot cache", async {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            act.say("gogo: cache upgraded", &|_| panic!("human mode"));
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        })
+        .await;
+        act.finish();
+        let out = buf.text();
+        assert!(out.contains("\r\x1b[Kgogo: cache upgraded\n"), "{out:?}");
+        assert!(out.ends_with("\r\x1b[K") || out.ends_with('\n'), "{out:?}");
+        no_text_after_a_status(&out);
+    }
+
     /// A step that ended while the prompt was open stays gone.
     #[test]
     fn a_step_ended_during_a_prompt_does_not_come_back() {
