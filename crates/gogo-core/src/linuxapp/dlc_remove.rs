@@ -80,6 +80,27 @@ pub fn reverse_diff(
     installed: &[u64],
     removing: &[u64],
 ) -> ReverseDiff {
+    reverse_diff_to(
+        (depots, tree_name),
+        (depots, tree_name),
+        base,
+        installed,
+        removing,
+    )
+}
+
+/// Pure: [`reverse_diff`] across two builds (an update that drops DLC, design 21
+/// §11h). `now` is the installed build's depots of the base and every installed
+/// DLC, with its install directory; `after` the target build's depots of the base
+/// and the DLC that stay, with its own. What the removed DLC lay comes from `now`;
+/// what a path holds without them, from `after`.
+pub fn reverse_diff_to(
+    now: (&[DepotList], &str),
+    after: (&[DepotList], &str),
+    base: &str,
+    installed: &[u64],
+    removing: &[u64],
+) -> ReverseDiff {
     let gone: HashSet<String> = removing.iter().map(u64::to_string).collect();
     let all: HashSet<String> = installed
         .iter()
@@ -102,23 +123,33 @@ pub fn reverse_diff(
     };
     // Lowercased game path → its entry, over every installed product and over the
     // kept ones; and the game paths the removed DLC lay.
+    let (now_depots, now_tree) = now;
+    let (after_depots, after_tree) = after;
     let mut now: BTreeMap<String, Expect> = BTreeMap::new();
     let mut after: BTreeMap<String, Expect> = BTreeMap::new();
     let mut theirs: HashSet<String> = HashSet::new();
-    for d in depots {
+    for d in now_depots {
         if !all.contains(&d.product) {
             continue;
         }
         for p in &d.paths {
-            let Some(rel) = game_path(tree_name, p) else {
+            let Some(rel) = game_path(now_tree, p) else {
                 continue;
             };
             let key = rel.to_lowercase();
             put(&mut now, key.clone(), entry(d, p));
-            if keep.contains(&d.product) {
-                put(&mut after, key, entry(d, p));
-            } else {
+            if !keep.contains(&d.product) {
                 theirs.insert(key);
+            }
+        }
+    }
+    for d in after_depots {
+        if !keep.contains(&d.product) {
+            continue;
+        }
+        for p in &d.paths {
+            if let Some(rel) = game_path(after_tree, p) {
+                put(&mut after, rel.to_lowercase(), entry(d, p));
             }
         }
     }
@@ -155,7 +186,7 @@ fn md5_of(path: &Path) -> std::io::Result<String> {
 
 /// Is the file at `path` the one `e` describes: its MD5 when the manifest gives one,
 /// else its size. With neither, or no file, it isn't.
-fn holds(path: &Path, e: &Expect) -> bool {
+pub(crate) fn holds(path: &Path, e: &Expect) -> bool {
     let Ok(meta) = std::fs::metadata(path) else {
         return false;
     };
@@ -341,11 +372,78 @@ pub fn resolve_installed(names: &[String], installed: &[DlcRef], partial: bool) 
 }
 
 /// The game-relative path of a cache-relative one, if it goes into `game/`.
-fn game_path(tree_name: &str, path: &str) -> Option<String> {
+pub(crate) fn game_path(tree_name: &str, path: &str) -> Option<String> {
     dlc::lay_list(Path::new(""), tree_name, &[path.to_string()])
         .into_iter()
         .next()
         .map(|f| f.to)
+}
+
+/// Every dir a kept product lists a file under (`kept`, cache-relative paths of a
+/// build whose install directory is `tree_name`), mapped into `game/` and
+/// lowercased: such a dir is never taken out when a removal empties it.
+pub(crate) fn kept_dirs(tree_name: &str, kept: &[String]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for key in kept {
+        if let Some(rel) = game_path(tree_name, key) {
+            let mut parts: Vec<&str> = rel.split('/').collect();
+            parts.pop();
+            let mut at = String::new();
+            for p in parts {
+                if !at.is_empty() {
+                    at.push('/');
+                }
+                at.push_str(p);
+                out.insert(at.to_lowercase());
+            }
+        }
+    }
+    out
+}
+
+/// The dirs the removed files `removed` (paths in `game/`) may leave empty, deepest
+/// first, but none in `kept_dirs`: the journal's `prune`.
+pub(crate) fn prune_list(removed: &[String], kept_dirs: &HashSet<String>) -> Vec<String> {
+    let mut dirs: Vec<String> = Vec::new();
+    for r in removed {
+        let mut parts: Vec<&str> = r.split('/').collect();
+        parts.pop();
+        while !parts.is_empty() {
+            let d = parts.join("/");
+            if !dirs.contains(&d) && !kept_dirs.contains(&d.to_lowercase()) {
+                dirs.push(d);
+            }
+            parts.pop();
+        }
+    }
+    dirs.sort_by_key(|d| std::cmp::Reverse(d.matches('/').count()));
+    dirs
+}
+
+/// The names in the game root (`game`) of `removing`'s `goggame-<id>.*` files that
+/// `listed` (lowercased game paths) doesn't hold already: a record-only DLC's came
+/// from the support overlay, and no depot lists them.
+pub(crate) fn goggame_files(
+    game: &Path,
+    removing: &[u64],
+    listed: &HashSet<String>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(game) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let lower = name.to_lowercase();
+            if removing
+                .iter()
+                .any(|d| lower.starts_with(&format!("goggame-{d}.")))
+                && !listed.contains(&lower)
+            {
+                out.push(name);
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// The rebuild that leaves `removing` out of the game: the workaround named when a
@@ -463,21 +561,7 @@ pub fn plan_remove(input: &PlanInput<'_>) -> Result<RemovePlan, String> {
             TreeMethod::Copy => "copy",
         }
     };
-    let mut kept_dirs = HashSet::new();
-    for key in &diff.kept {
-        if let Some(rel) = game_path(&input.tree_name, key) {
-            let mut parts: Vec<&str> = rel.split('/').collect();
-            parts.pop();
-            let mut at = String::new();
-            for p in parts {
-                if !at.is_empty() {
-                    at.push('/');
-                }
-                at.push_str(p);
-                kept_dirs.insert(at.to_lowercase());
-            }
-        }
-    }
+    let kept_dirs = kept_dirs(&input.tree_name, &diff.kept);
     let keep_ids: Vec<String> = keeping.iter().map(|d| d.id.to_string()).collect();
     Ok(RemovePlan {
         gogid: game.gogid.clone(),
@@ -726,6 +810,12 @@ pub(crate) fn cache_moved(j: &Journal, cache: Option<&Path>) -> Option<String> {
             }
         }
     }
+    sources_changed(j)
+}
+
+/// A restored file's source (the cache's or the staging dir's) that no longer has
+/// the MD5 the journal recorded for it (`md5s`), said; `None` when none.
+pub(crate) fn sources_changed(j: &Journal) -> Option<String> {
     for f in &j.files {
         let Some(md5) = j.md5s.get(&f.to) else {
             continue;
@@ -753,7 +843,7 @@ pub(crate) fn cache_moved(j: &Journal, cache: Option<&Path>) -> Option<String> {
 
 /// Take out the dirs in `dirs` (relative to `game`, deepest first) that are empty
 /// now. Best effort: the game is whole either way.
-fn prune_dirs(game: &Path, dirs: &[String]) {
+pub(crate) fn prune_dirs(game: &Path, dirs: &[String]) {
     for d in dirs {
         if lay::plain(d) && lay::symlinked_parent(game, &format!("{d}/x")).is_none() {
             let _ = std::fs::remove_dir(game.join(d));
@@ -1016,20 +1106,12 @@ where
     }
     // The DLC's `goggame-<id>.*` by name: a record-only (zero-byte) DLC's came
     // from the support overlay and no depot lists them.
+    let listed: HashSet<String> = expect.keys().cloned().collect();
+    let ids: Vec<u64> = removing.iter().map(|d| d.id).collect();
     let mut by_name: HashSet<String> = HashSet::new();
-    if let Ok(rd) = std::fs::read_dir(&game.dirs.game) {
-        for e in rd.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            let lower = name.to_lowercase();
-            if removing
-                .iter()
-                .any(|d| lower.starts_with(&format!("goggame-{}.", d.id)))
-                && !expect.contains_key(&lower)
-            {
-                by_name.insert(lower);
-                removed.push(name);
-            }
-        }
+    for name in goggame_files(&game.dirs.game, &ids, &listed) {
+        by_name.insert(name.to_lowercase());
+        removed.push(name);
     }
     let source = if downloads {
         staging.clone()
@@ -1137,20 +1219,7 @@ where
     // Dirs the DLC's files leave empty go after the commit, unless a kept product
     // lists a file under them; deepest first. Kept in the journal, so a recovery
     // does the same.
-    let mut dirs: Vec<String> = Vec::new();
-    for r in &j.removed {
-        let mut parts: Vec<&str> = r.split('/').collect();
-        parts.pop();
-        while !parts.is_empty() {
-            let d = parts.join("/");
-            if !dirs.contains(&d) && !plan.kept_dirs.contains(&d.to_lowercase()) {
-                dirs.push(d);
-            }
-            parts.pop();
-        }
-    }
-    dirs.sort_by_key(|d| std::cmp::Reverse(d.matches('/').count()));
-    j.prune = dirs;
+    j.prune = prune_list(&j.removed, &plan.kept_dirs);
     let mut lay_report = None;
     if !j.files.is_empty() || !j.removed.is_empty() {
         let bytes: u64 = j
@@ -1229,6 +1298,45 @@ mod tests {
                 .map(|(p, _, m)| (p.to_string(), m.to_string()))
                 .collect(),
         }
+    }
+
+    /// Across two builds (an update that drops the DLC): what the DLC laid comes
+    /// from the installed build, a shared path's version from the target, and a
+    /// path only the target's kept products list isn't the DLC's business.
+    #[test]
+    fn across_builds_the_shared_version_is_the_targets() {
+        let now = vec![
+            depot(
+                "77",
+                &[("Old/dlc/a.pak", 3, "aa"), ("Old/shared.pak", 10, "dlc")],
+            ),
+            depot(
+                "1",
+                &[("Old/shared.pak", 11, "b1"), ("Old/gone.dll", 1, "g")],
+            ),
+        ];
+        let after = vec![depot(
+            "1",
+            &[("New/shared.pak", 12, "b2"), ("New/new.pak", 5, "n")],
+        )];
+        let d = reverse_diff_to((&now, "Old"), (&after, "New"), "1", &[77], &[77]);
+        assert_eq!(
+            d.removed,
+            [Expect {
+                path: "Old/dlc/a.pak".into(),
+                size: Some(3),
+                md5: Some("aa".into()),
+            }]
+        );
+        assert_eq!(
+            d.shared,
+            [Expect {
+                path: "New/shared.pak".into(),
+                size: Some(12),
+                md5: Some("b2".into()),
+            }]
+        );
+        assert_eq!(d.kept, ["New/new.pak", "New/shared.pak"]);
     }
 
     #[test]

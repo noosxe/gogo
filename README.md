@@ -408,10 +408,11 @@ gogo linux-app update 1423049311 --build 2.31a --yes   # a listed build, older o
 The depot cache switches to the new build by its changed files, then the changed
 and new files are laid onto the game's files, and the ones the build dropped are
 taken out, under the same journal as `dlc add`. The prefix, saves, settings and
-DLC stay, and with snapshots on, a `before update` snapshot comes first. The
-update is refused when the build lacks an installed DLC (remove it first with
-`dlc remove`, or rebuild without it) or the depot cache isn't on the installed
-build (it names the rebuild that updates instead). A game built
+DLC stay, and with snapshots on, a `before update` snapshot comes first. An
+installed DLC the build lacks (an older `--build`, say) is taken out in the same
+run: the plan names it with a warning about saves, and the question defaults to
+no. The update is refused when the depot cache isn't on the installed build (it
+names the rebuild that updates instead). A game built
 from GOG's offline installer is updated with `gogo update <game>` and a rebuild.
 
 ```sh

@@ -13916,6 +13916,8 @@ mod update {
             download_size: 100,
             disk_size: 200,
             manifest: Some(("B2".into(), 2, manifest())),
+            depots: None,
+            autosnapshot: false,
         }
     }
 
@@ -14082,17 +14084,18 @@ mod update {
         assert_eq!(c.dlc[0].version.as_deref(), Some("1.1"));
     }
 
+    /// Without both builds' depot lists there is nothing to check the DLC's files
+    /// by before they go: refused, naming the removal and the rebuild (§11h).
     #[test]
-    fn a_target_without_an_installed_dlc_is_refused_naming_it() {
+    fn a_target_without_an_installed_dlc_and_no_depot_lists_is_refused_naming_it() {
         let w = built("update-dlc-refused", true, None);
         let g = game(&w);
         let r = update::plan_update(input(&g, &[])).unwrap_err();
-        assert!(r.usage, "exit 2");
+        assert!(!r.usage, "exit 7");
         assert!(r.message.contains("Extra Pack (777001)"), "{}", r.message);
         assert!(
-            r.message.contains(
-                "gogo linux-app dlc 1999999901 remove 777001, then gogo linux-app update"
-            ),
+            r.message
+                .contains("gogo linux-app dlc 1999999901 remove 777001, then the update"),
             "{}",
             r.message
         );
@@ -14547,6 +14550,7 @@ mod update {
             before: Default::default(),
             dropped: Vec::new(),
             fetched: true,
+            removing: Vec::new(),
         };
         std::fs::write(
             w.game().join(update::DOWNLOAD),
@@ -14569,5 +14573,389 @@ mod update {
         assert!(update::discard_stale(&w.game(), "B2").is_some());
         assert!(!update::download_pending(&w.game()));
         assert!(update::discard_stale(&w.game(), "B2").is_none());
+    }
+
+    /// An update to a build that lacks the installed DLC takes it out in the same
+    /// run (design 21 §11h), on fake depot manifests of both builds.
+    mod drops_a_dlc {
+        use super::*;
+        use gogo::gog::dlc_filter::DepotList;
+        use gogo::linuxapp::update::DepotLists;
+
+        fn md5(bytes: &[u8]) -> String {
+            use md5::Digest;
+            let mut h = md5::Md5::new();
+            h.update(bytes);
+            gogo::fmt::md5_hex(h)
+        }
+
+        fn tree_path(path: &str) -> String {
+            format!("{TREE}/{path}")
+        }
+
+        /// The DLC's support overlay file that lands on the game root's `rel`.
+        fn overlay_path(rel: &str) -> String {
+            format!("gog-support/{ID}/{DLC}/app/{rel}")
+        }
+
+        fn depot(product: &str, files: &[(String, &[u8])]) -> DepotList {
+            DepotList {
+                product: product.into(),
+                languages: vec!["*".into()],
+                manifest: format!("m-{product}"),
+                paths: files.iter().map(|f| f.0.clone()).collect(),
+                sizes: files
+                    .iter()
+                    .map(|f| (f.0.clone(), f.1.len() as u64))
+                    .collect(),
+                md5s: files.iter().map(|f| (f.0.clone(), md5(f.1))).collect(),
+            }
+        }
+
+        /// How the DLC replaced the base's `shared.pak`.
+        #[derive(Clone, Copy, PartialEq)]
+        enum Shape {
+            /// Its support overlay lays `shared.pak` over the base tree's, which
+            /// the cache keeps as the base's. B2 leaves the base file as it was,
+            /// so the cache switch writes nothing there.
+            Overlay,
+            /// Its depot comes first and lists the tree's `shared.pak`, so its
+            /// version is the one in the cache and the game. B2 changes the base
+            /// file.
+            Tree,
+        }
+
+        const DLC_SHARED: &[u8] = b"dlc shared";
+        const B2_SHARED: &[u8] = b"B2 shared, longer";
+
+        /// A game on B1 with the DLC, whose `shared.pak` is the DLC's.
+        fn with_dlc(name: &str, shape: Shape) -> World {
+            let w = built(name, true, None);
+            std::fs::write(w.game().join("game/shared.pak"), DLC_SHARED).unwrap();
+            let root = cache_root(&w);
+            match shape {
+                Shape::Overlay => {
+                    let o = root.join(overlay_path("shared.pak"));
+                    std::fs::create_dir_all(o.parent().unwrap()).unwrap();
+                    std::fs::write(o, DLC_SHARED).unwrap();
+                }
+                Shape::Tree => {
+                    std::fs::write(root.join(TREE).join("shared.pak"), DLC_SHARED).unwrap()
+                }
+            }
+            w
+        }
+
+        /// Both builds' depot lists.
+        fn lists(shape: Shape) -> (Vec<DepotList>, Vec<DepotList>) {
+            let ep1 = (tree_path("dlc/ep1.pak"), b"dlc v1".as_slice());
+            let base_b1 = depot(ID, &[(tree_path("shared.pak"), b"base shared")]);
+            let old = match shape {
+                Shape::Overlay => vec![
+                    base_b1,
+                    depot(
+                        &DLC.to_string(),
+                        &[ep1, (overlay_path("shared.pak"), DLC_SHARED)],
+                    ),
+                ],
+                Shape::Tree => vec![
+                    depot(
+                        &DLC.to_string(),
+                        &[ep1, (tree_path("shared.pak"), DLC_SHARED)],
+                    ),
+                    base_b1,
+                ],
+            };
+            let shared: &[u8] = match shape {
+                Shape::Overlay => b"base shared",
+                Shape::Tree => B2_SHARED,
+            };
+            let new = vec![depot(
+                ID,
+                &[
+                    (tree_path("shared.pak"), shared),
+                    (tree_path("data/new.pak"), b"new in B2"),
+                ],
+            )];
+            (old, new)
+        }
+
+        fn drop_plan(g: &dlc::Game, shape: Shape, autosnapshot: bool) -> Box<UpdatePlan> {
+            let (old, new) = lists(shape);
+            let dropped = depot::dropped_paths(&old, &new)
+                .into_iter()
+                .map(|path| DroppedFile {
+                    size: old.iter().find_map(|d| d.sizes.get(&path).copied()),
+                    md5: old.iter().find_map(|d| d.md5s.get(&path).cloned()),
+                    path,
+                })
+                .collect();
+            match update::plan_update(PlanInput {
+                dropped,
+                depots: Some(DepotLists {
+                    from: &old,
+                    from_tree: TREE.into(),
+                    to: &new,
+                }),
+                autosnapshot,
+                ..input(g, &[])
+            })
+            .unwrap()
+            {
+                Planned::Update(p) => p,
+                Planned::UpToDate(_) => panic!("up to date"),
+            }
+        }
+
+        /// What gog-warp's switch does with the DLC on its old side: the DLC's
+        /// files deleted, the paths it won rewritten (`rewrite`: B2's shared.pak,
+        /// or `None` to leave the cache's copy as it is), the record on B2 without
+        /// it.
+        fn switch(root: &Path, rewrite: Option<&[u8]>) {
+            let t = root.join(TREE);
+            let _ = std::fs::remove_file(t.join("dlc/ep1.pak"));
+            let _ = std::fs::remove_dir(t.join("dlc"));
+            let _ = std::fs::remove_file(root.join(overlay_path("shared.pak")));
+            if let Some(b) = rewrite {
+                std::fs::write(t.join("shared.pak"), b).unwrap();
+            }
+            std::fs::create_dir_all(t.join("data")).unwrap();
+            std::fs::write(t.join("data/new.pak"), b"new in B2").unwrap();
+            let _ = std::fs::remove_file(t.join("old.dll"));
+            depot::write_record(root, "B2", "en-US", &[]).unwrap();
+        }
+
+        fn run_drop(
+            g: &mut dlc::Game,
+            p: &UpdatePlan,
+            opts: &UpdateOptions,
+            rewrite: Option<&'static [u8]>,
+        ) -> Result<UpdateOutcome, AddError> {
+            let root = p.cache_root.clone();
+            let fetch = async move || {
+                switch(&root, rewrite);
+                Ok::<(), DepotError>(())
+            };
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(update::update(g, p, fetch, opts, &mut |_| {}, &|| false))
+        }
+
+        /// The game after the update: B2's files with `shared`, no DLC.
+        fn after(before: &BTreeMap<String, Vec<u8>>, shared: &[u8]) -> BTreeMap<String, Vec<u8>> {
+            let mut t = before.clone();
+            t.insert("shared.pak".into(), shared.to_vec());
+            t.insert("data/new.pak".into(), b"new in B2".to_vec());
+            t.remove("old.dll");
+            t.remove("dlc/ep1.pak");
+            t
+        }
+
+        fn dlc_gone(w: &World) {
+            let c = content::load(&w.game()).unwrap().unwrap();
+            assert_eq!(c.build_id.as_deref(), Some("B2"));
+            assert!(c.dlc.is_empty(), "{:?}", c.dlc);
+            assert!(!w.game().join("game/dlc").exists(), "an emptied dir goes");
+        }
+
+        /// The DLC's overlay replaced a base file the target keeps as it was: the
+        /// switch writes nothing there, so only the diff across the builds puts the
+        /// base's version back (from the switched cache).
+        #[test]
+        fn a_base_file_the_dlc_replaced_is_laid_again_from_the_cache() {
+            let w = with_dlc("update-drop-overlay", Shape::Overlay);
+            let before = tree(&w.game().join("game"));
+            let mut g = game(&w);
+            let p = drop_plan(&g, Shape::Overlay, true);
+            assert_eq!(p.removing.len(), 1);
+            assert_eq!(
+                p.dlc_files
+                    .iter()
+                    .map(|e| e.path.as_str())
+                    .collect::<Vec<_>>(),
+                [tree_path("dlc/ep1.pak")]
+            );
+            assert_eq!(
+                p.dlc_restored
+                    .iter()
+                    .map(|e| e.path.as_str())
+                    .collect::<Vec<_>>(),
+                [tree_path("shared.pak")]
+            );
+            assert_eq!(
+                p.snapshot_label(),
+                "before update 1.0 → 1.1, removing Extra Pack"
+            );
+            let lines = update::plan_lines(&p);
+            for want in [
+                "language: en-US; DLC kept: none",
+                "DLC removed: Extra Pack (build B2 doesn't have it): 1 file(s) out",
+                "1 file(s) it replaced laid again in build B2's version",
+                "saves: saves made with Extra Pack may not load without it; the snapshot \
+                 \"before update 1.0 → 1.1, removing Extra Pack\" can restore the game, or a \
+                 rebuild on build 1.0 brings it back: gogo linux-app 1999999901 --build B1 \
+                 --dlc 777001 --yes",
+            ] {
+                assert!(lines.iter().any(|l| l.contains(want)), "{want}: {lines:?}");
+            }
+            let json = serde_json::to_value(&*p).unwrap();
+            assert_eq!(json["removing"][0]["id"], DLC);
+
+            let out = run_drop(&mut g, &p, &opts(), None).unwrap();
+            assert_eq!(out.dlcs_removed.len(), 1);
+            assert!(out.dlcs.is_empty());
+            assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+            assert_eq!(tree(&w.game().join("game")), after(&before, b"base shared"));
+            dlc_gone(&w);
+            no_leftovers(&w);
+            // The cache record is on B2 without the DLC.
+            let r = depot::read_record(&cache_root(&w)).unwrap();
+            assert_eq!(r.build_id, "B2");
+            assert_eq!(r.dlcs.as_deref(), Some(&[][..]));
+        }
+
+        /// The DLC's version of a base file is in the game and the cache; B2
+        /// changes the base file. The switch rewrites it (the DLC is on its old
+        /// side), and the game gets B2's.
+        #[test]
+        fn a_file_the_dlc_changed_that_the_target_keeps_gets_the_targets_version() {
+            let w = with_dlc("update-drop-tree", Shape::Tree);
+            let before = tree(&w.game().join("game"));
+            let mut g = game(&w);
+            let p = drop_plan(&g, Shape::Tree, false);
+            assert_eq!(p.dlc_restored.len(), 1);
+            assert_eq!(
+                p.dlc_restored[0].md5.as_deref(),
+                Some(md5(B2_SHARED).as_str())
+            );
+            assert!(
+                !update::plan_lines(&p)
+                    .iter()
+                    .any(|l| l.contains("the snapshot")),
+                "no snapshot named without autosnapshot"
+            );
+            let out = run_drop(&mut g, &p, &opts(), Some(B2_SHARED)).unwrap();
+            assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+            assert_eq!(tree(&w.game().join("game")), after(&before, B2_SHARED));
+            dlc_gone(&w);
+            no_leftovers(&w);
+        }
+
+        /// A cache whose copy of a path the DLC won isn't the target's after the
+        /// switch can't restore it: nothing is laid, the game stays on B1 with the
+        /// DLC, and the update names the rebuild.
+        #[test]
+        fn a_cache_copy_that_isnt_the_targets_version_lays_nothing() {
+            let w = with_dlc("update-drop-bad-cache", Shape::Tree);
+            let before = tree(&w.game().join("game"));
+            let content_before = std::fs::read(w.game().join("content.toml")).unwrap();
+            let mut g = game(&w);
+            let p = drop_plan(&g, Shape::Tree, false);
+            let e = run_drop(&mut g, &p, &opts(), None).unwrap_err();
+            let msg = e.to_string();
+            assert!(
+                msg.contains("isn't build B2's version without Extra Pack"),
+                "{msg}"
+            );
+            assert!(
+                msg.contains("gogo linux-app 1999999901 --build B2 --no-dlcs --yes"),
+                "{msg}"
+            );
+            assert_eq!(tree(&w.game().join("game")), before);
+            assert_eq!(
+                std::fs::read(w.game().join("content.toml")).unwrap(),
+                content_before
+            );
+            no_leftovers(&w);
+        }
+
+        /// A DLC file changed since install stays, with a warning naming the DLC;
+        /// its dir stays with it. The DLC's rows still go.
+        #[test]
+        fn a_changed_dlc_file_stays_with_a_warning() {
+            let w = with_dlc("update-drop-changed", Shape::Overlay);
+            std::fs::write(w.game().join("game/dlc/ep1.pak"), b"my edit").unwrap();
+            let mut g = game(&w);
+            let p = drop_plan(&g, Shape::Overlay, false);
+            let out = run_drop(&mut g, &p, &opts(), None).unwrap();
+            assert_eq!(
+                out.warnings,
+                ["kept dlc/ep1.pak, which Extra Pack laid: changed since install"]
+            );
+            assert_eq!(
+                std::fs::read(w.game().join("game/dlc/ep1.pak")).unwrap(),
+                b"my edit"
+            );
+            assert!(content::load(&w.game()).unwrap().unwrap().dlc.is_empty());
+            no_leftovers(&w);
+        }
+
+        /// A stop during the lay: one journal, the update's, carrying the DLC.
+        /// Forward commits B2 without the DLC and prunes its dir; back (the
+        /// restored file's source changed since) leaves B1 with the DLC.
+        #[test]
+        fn a_stop_during_the_lay_is_finished_or_undone_with_the_dlc() {
+            for step in [lay::Step::Journal, lay::Step::New, lay::Step::Backup] {
+                let w = with_dlc("update-drop-stop", Shape::Overlay);
+                let before = tree(&w.game().join("game"));
+                let mut g = game(&w);
+                let p = drop_plan(&g, Shape::Overlay, false);
+                let o = UpdateOptions {
+                    fail_at: Some(step),
+                    ..opts()
+                };
+                let r = run_drop(&mut g, &p, &o, None);
+                assert!(
+                    matches!(&r, Err(AddError::Interrupted("lay", _))),
+                    "{step:?}: {r:?}"
+                );
+                let j = lay::read_journal(&w.game()).unwrap().unwrap();
+                assert!(j.is_update(), "{step:?}");
+                assert_eq!(j.removing.len(), 1);
+                assert_eq!(j.prune, ["dlc"]);
+                let mut g = game(&w);
+                let dir = dlc::recover(&mut g, gogo::gog::materialize::Reflink::Never, &mut |_| {})
+                    .unwrap();
+                assert_eq!(dir, Some(lay::Direction::Forward), "{step:?}");
+                assert_eq!(
+                    tree(&w.game().join("game")),
+                    after(&before, b"base shared"),
+                    "{step:?}"
+                );
+                dlc_gone(&w);
+                no_leftovers(&w);
+            }
+
+            let w = with_dlc("update-drop-stop-back", Shape::Overlay);
+            let before = tree(&w.game().join("game"));
+            let content_before = std::fs::read(w.game().join("content.toml")).unwrap();
+            let mut g = game(&w);
+            let p = drop_plan(&g, Shape::Overlay, false);
+            let o = UpdateOptions {
+                fail_at: Some(lay::Step::Journal),
+                ..opts()
+            };
+            let _ = run_drop(&mut g, &p, &o, None);
+            std::fs::write(cache_root(&w).join(TREE).join("shared.pak"), b"changed").unwrap();
+            let mut g = game(&w);
+            let mut said = Vec::new();
+            let dir = dlc::recover(&mut g, gogo::gog::materialize::Reflink::Never, &mut |e| {
+                said.push(serde_json::to_string(e).unwrap())
+            })
+            .unwrap();
+            assert_eq!(dir, Some(lay::Direction::Back));
+            assert!(
+                said.iter().any(|m| m.contains("removing Extra Pack")),
+                "{said:?}"
+            );
+            assert_eq!(tree(&w.game().join("game")), before);
+            assert_eq!(
+                std::fs::read(w.game().join("content.toml")).unwrap(),
+                content_before
+            );
+            no_leftovers(&w);
+        }
     }
 }
