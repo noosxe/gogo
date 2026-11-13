@@ -848,11 +848,16 @@ pub enum LinuxDlcCmd {
         /// Progress events as NDJSON on stdout.
         #[arg(long)]
         json_progress: bool,
+        /// Offline-installer games: the language of the game's installer,
+        /// which the DLC's installers must match, when gogo has none recorded
+        /// (a game built from a setup it didn't download). Asked on a terminal.
+        #[arg(long, value_name = "CODE")]
+        lang: Option<String>,
         /// Give up an offline-installer add that stopped or failed: its
         /// journal goes and none of its DLC is recorded, so the game starts
         /// again. What the DLC's installers wrote stays in the prefix; a
         /// rollback to the snapshot taken before the add undoes it.
-        #[arg(long, conflicts_with_all = ["names", "all", "dry_run"])]
+        #[arg(long, conflicts_with_all = ["names", "all", "dry_run", "lang"])]
         abandon: bool,
         /// Machine-readable summary.
         #[arg(long)]
