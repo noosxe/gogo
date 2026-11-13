@@ -1328,17 +1328,19 @@ async fn remove_abandon_cmd(mut game: Game, json: bool) -> Result<i32, AppError>
         }
         if !gone.kept.is_empty() {
             parts.push(format!(
-                "{} stays recorded (its files are there)",
-                names(&gone.kept)
+                "{} stays recorded (its info is still in the game's dir), though its \
+                 uninstaller may have taken some of its files: a rollback to the snapshot \
+                 taken before the removal (`gogo linux-app snapshot {} list`), or a rebuild \
+                 with it ({}), puts it back whole",
+                names(&gone.kept),
+                gone.gogid,
+                gogo::linuxapp::dlc_uninstall::rebuild_hint(&game, &[])
             ));
         }
         eprintln!(
-            "gogo: gave up the DLC removal of {}: {}; the game starts again. Rolling back \
-             to the snapshot taken before the removal (`gogo linux-app snapshot {} list`) \
-             undoes it",
+            "gogo: gave up the DLC removal of {}: {}; the game starts again",
             gone.gogid,
-            parts.join("; "),
-            gone.gogid
+            parts.join("; ")
         );
     }
     Ok(cli::exit::OK)
@@ -1388,6 +1390,19 @@ async fn installer_add_cmd(mut game: Game, a: AddArgs) -> Result<i32, AppError> 
     let (quiet, _) = crate::PROGRESS_FLAGS.get().copied().unwrap_or_default();
     let quiet = quiet || a.json;
     let jp = a.json_progress;
+    // An unfinished removal on this lane is settled first, by its own ways,
+    // before any network or question.
+    if gogo::gog::lay::read_journal(&game.dirs.root)?
+        .is_some_and(|j| j.lane == di::LANE && j.is_removal())
+    {
+        eprintln!(
+            "gogo: an earlier DLC removal of {} stopped while its uninstallers ran; settle \
+             it before an add: {}",
+            game.gogid,
+            gogo::linuxapp::dlc_uninstall::ways_out(&game.gogid)
+        );
+        return Ok(cli::exit::MACAPP);
+    }
     let pending = di::pending(&game.dirs.root);
     let language = match add_language(&game, a.lang.as_deref(), machine) {
         Ok(l) => l,
