@@ -31,6 +31,7 @@ pub async fn run(gogid: String, cmd: cli::LinuxDlcCmd) -> Result<i32, AppError> 
             json_progress,
             json,
             abandon,
+            lang,
         } => {
             if abandon {
                 return abandon_cmd(game, json).await;
@@ -51,6 +52,7 @@ pub async fn run(gogid: String, cmd: cli::LinuxDlcCmd) -> Result<i32, AppError> 
                     no_snapshots,
                     json_progress,
                     json,
+                    lang,
                 },
                 cache_base,
             )
@@ -82,6 +84,7 @@ pub async fn run(gogid: String, cmd: cli::LinuxDlcCmd) -> Result<i32, AppError> 
                     no_snapshots,
                     json_progress,
                     json,
+                    lang: None,
                 },
                 cache_base,
             )
@@ -100,6 +103,8 @@ struct AddArgs {
     no_snapshots: bool,
     json_progress: bool,
     json: bool,
+    /// `dlc add --lang` (offline-installer games).
+    lang: Option<String>,
 }
 
 async fn build_ctx() -> Result<Arc<AppContext>, AppError> {
@@ -156,6 +161,36 @@ fn is_depot(game: &Game) -> bool {
 
 /// An offline-installer game's language: the recorded one (the base installer's),
 /// else `[gog] language`.
+/// The language an add's DLC installers are fetched in: the game's recorded
+/// installer language, else `--lang`, else asked on a terminal. Never assumed:
+/// a DLC installer in another language than the game's may not fit it.
+fn add_language(game: &Game, lang: Option<&str>, machine: bool) -> Result<String, String> {
+    match (&game.content.language, lang) {
+        (Some(k), Some(l)) if !gogo::gog::language::same_language(l, k) => Err(format!(
+            "--lang {l}: {}'s installer is in {k}, and its DLC's installers follow it",
+            game.gogid
+        )),
+        (Some(k), _) => Ok(k.clone()),
+        (None, Some(l)) => Ok(l.to_string()),
+        (None, None) if interactive(machine) => {
+            let default = installer_language(game);
+            dialoguer::Input::<String>::new()
+                .with_prompt(format!(
+                    "Which language is {}'s installer in? Its DLC's installers must match",
+                    game.gogid
+                ))
+                .default(default)
+                .interact_text()
+                .map_err(|e| e.to_string())
+        }
+        (None, None) => Err(format!(
+            "gogo has no record of the language {}'s installer is in (it was built from a \
+             setup gogo didn't download): pass --lang <code>, its installer's language",
+            game.gogid
+        )),
+    }
+}
+
 fn installer_language(game: &Game) -> String {
     game.content.language.clone().unwrap_or_else(|| {
         crate::load_config_quietly()
@@ -313,6 +348,13 @@ async fn add_cmd(
     let jp = a.json_progress;
     if !is_depot(&game) {
         return installer_add_cmd(game, a).await;
+    }
+    if a.lang.is_some() {
+        eprintln!(
+            "gogo: --lang is for offline-installer games; {}'s DLC follow its recorded language",
+            game.gogid
+        );
+        return Ok(cli::exit::USAGE);
     }
     // A half-laid add is settled first, whatever was asked (design 19 §3.4).
     let recovered = if a.dry_run {
@@ -1078,6 +1120,13 @@ async fn installer_add_cmd(mut game: Game, a: AddArgs) -> Result<i32, AppError> 
     let quiet = quiet || a.json;
     let jp = a.json_progress;
     let pending = di::pending(&game.dirs.root);
+    let language = match add_language(&game, a.lang.as_deref(), machine) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("gogo: {e}");
+            return Ok(cli::exit::USAGE);
+        }
+    };
 
     let (ctx, token) = connect_phase(machine).await?;
     let id = game_id(&game);
@@ -1088,7 +1137,6 @@ async fn installer_add_cmd(mut game: Game, a: AddArgs) -> Result<i32, AppError> 
         Ok::<_, AppError>((detail, owned))
     })
     .await?;
-    let language = installer_language(&game);
     let infos = dlc::installer_infos(&detail.expanded_dlcs, &owned, &language);
     let installed = game.installed();
     let addable: Vec<u64> = infos
