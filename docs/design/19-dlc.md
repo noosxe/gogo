@@ -56,7 +56,7 @@ gogo download <game> [--dlc <id|title>]... [--all-dlcs | --with-dlcs]
 | D8 | Offline lane: the DLC's Inno installer under umu with `/DIR=` the base game's dir | 5 |
 | D9 | Record: new `content.toml` per game, not `gogo-launch.toml` | 6 |
 | D10 | DLC follows the game's recorded language; changing language is a rebuild | 2.3 |
-| D11 | Removal later (#343 follow-up), not in the first round | 3.5 |
+| D11 | Removal later (#343 follow-up), not in the first round; built since: depot lane (#353), offline-installer lane (#443) | 3.5, 3.7, 5.2 |
 | D12 | macOS: same core and record; only the clone call and the subcommand's home differ | 9 |
 
 ## 1. CLI
@@ -689,8 +689,9 @@ Not in the first round (decided, §11.1). Reasons:
   manifest walk.
 - Saves made with a DLC can refuse to load without it; the warning text needs a game to
   test on.
-- The offline lane would run the DLC's Inno uninstaller (`unins000.exe` beside the DLC's
-  files), which is a different mechanism with its own failure modes.
+- The offline lane would run the DLC's Inno uninstaller, which is a different mechanism
+  with its own failure modes. (Built since, #443: §5.2. GOG's DLC installers write their
+  own `unins001.exe` beside the base's `unins000.exe`.)
 - The workaround exists: a rebuild with `--dlc` naming the set without X (§1.2) gives a
   `game/` without X and keeps the prefix and saves.
 
@@ -751,9 +752,9 @@ Core `linuxapp::dlc_remove` (`resolve_installed`, `reverse_diff`, `plan_remove`,
    then the update (with `--build` when one was picked), or the rebuild without it.
    Doing the removal inside the update (one plan, one snapshot, one journal) is a
    follow-up.
-5. **Offline-installer lane:** refused, exit 7, nothing written, naming the rebuild
-   with `--dlc` for the DLC to keep (or `--no-dlcs`). The DLC's Inno uninstaller comes
-   after #351.
+5. **Offline-installer lane:** refused here, exit 7, nothing written, naming the
+   rebuild with `--dlc` for the DLC to keep (or `--no-dlcs`). Built since (#443): §5.2
+   runs the DLC's Inno uninstaller.
 6. **Generation 1 builds** are removed from when nothing has to be downloaded (the
    depot manifests are enough). A base file that must be downloaded is refused, naming
    the rebuild: the targeted diff is generation 2 only, as for an add.
@@ -1026,7 +1027,8 @@ is the CLI's `installer_dlc.rs`; `dlc add` routes there from `dlc_cmd.rs`.
    info's), `version` (decision 5) and `language`, and per DLC `id`, `title`,
    `version` (its installer's label), `build_id` (its info's, when there is one) and
    `added`.
-8. **`dlc remove`** stays refused on this lane (#443 runs the DLC's Inno uninstaller).
+8. **`dlc remove`** was refused on this lane here; §5.2 is the removal as built (#443),
+   by the DLC's own Inno uninstaller.
 
 **How a setup runs.** Every setup on this lane (the base's, a DLC's, GOG's support
 installer) runs as `C:\gogo-setup\<file>`: its dir is linked into the prefix as
@@ -1054,6 +1056,138 @@ ran the installer again and committed, and the game started with the DLC in plac
 gogo download, and its file name's `1.0.10` isn't GOG's current label `1.0.10b`, so
 the plan noted that the version isn't known (decision 5). The DLC's row has `version =
 "1.0.10"` and no `build_id` (its info has none).
+
+### 5.2 As built (#443): DLC removal on the offline-installer lane
+
+```
+gogo linux-app dlc <gogid> remove <id|title>... [--dry-run] [--yes] [--no-snapshots]
+                                  [--json] [--json-progress]
+gogo linux-app dlc <gogid> remove --abandon [--json]
+```
+
+Core `linuxapp::dlc_uninstall` (`find_uninstaller`, `log_files`, `plan`, `remove`,
+`abandon`); the CLI side is `dlc_cmd.rs`'s `installer_remove_cmd`. No network: the
+record (`content.toml`), the prefix and the install logs are all it reads.
+
+**What GOG's DLC installers leave** (seen on Journey to the Savage Planet and its Hot
+Garbage DLC, Inno Setup 5.6.1): each DLC writes an uninstaller of its own beside the
+base game's, in the base game's dir: `unins000.{exe,dat,ini,msg}` is the base's,
+`unins001.{exe,dat,ini,msg}` the DLC's. Its Inno log says `Creating new uninstall log:
+C:\GOG\<name>\unins001.dat`; its `unins001.ini` is `[InstallSettings]
+productID=<the DLC's id>`; the registry has `…\Uninstall\<id>_is1` with its
+`UninstallString`. Its uninstall log lists its `goggame-<id>.{info,hashdb,ico}`, its
+`HKLM\SOFTWARE\GOG.com\Games\<id>` key and its Start Menu group. A file the base
+already had and the DLC skipped (`onlyifdoesntexist`, Journey's `webcache.zip`) isn't
+in it.
+
+**Decisions (2026-11-13):**
+
+1. **Finding the uninstaller.** The `unins<n>.ini` in the base game's dir whose
+   `productID` is the DLC's id, with its `.exe` and `.dat` beside it. Else the
+   uninstall log the DLC's Inno log names (`install/dlc-<id>-inno.log`). The registry
+   isn't read. Neither, with the DLC's `goggame-<id>.info` still there: refused, exit
+   7, nothing written, naming the rebuild with `--dlc` for the DLC to keep (or
+   `--no-dlcs`), which keeps the prefix and saves. Neither, with the info gone too:
+   only its record goes (no runtime needed).
+2. **A DLC with no uninstaller of its own** (its Inno log says `Will append to existing
+   uninstall log`, or the log it names is another product's by its ini): refused, exit
+   7, with the rebuild. Its uninstaller is the base game's, which would take the whole
+   game out.
+3. **A DLC that replaced game files** (its Inno log has a `Dest file exists.` entry in
+   the game's dir that it then installed, other than its own `goggame-<id>.*` and
+   uninstaller): refused, exit 7, listing them, with the rebuild. Inno deletes what it
+   installed and keeps no older copy, so the game would lose those files. With no
+   install log, the plan says this can't be checked, and the consent covers it.
+4. **Order.** Plan (names against the installed set, each DLC's uninstaller, the
+   saves line) → the question (default no; `--yes`, and headless needs it) → settle
+   a pending rollback → the game's lock → refuse a running game → read the game again
+   → a depot-lane journal is refused; an unfinished installer add is refused, naming
+   the add's ways out; an unfinished removal is resumed → the plan again, under the
+   lock → the game's Proton build and umu, got and checked (none needed when only
+   records go) → the `auto` snapshot `before removing <titles>` (not on a resumed
+   run: its first run took it) → `dlc-journal.json` (`lane = "installer"`, `kind =
+   "remove"`, `removing`) → the uninstallers, newest first (the highest `unins<n>`:
+   a later DLC may sit on an earlier one, and GOG's base uninstaller goes bottom to
+   top too) → each checked → the commit (`content.toml` without the DLC's rows) →
+   the journal goes → setup (its install-script pass, §3.6, applies the base's and the
+   remaining DLC's; a failure is a warning).
+   Each runs as `C:\GOG\<name>\unins<n>.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+   /LOG=<game>/install/dlc-<id>-uninstall.log` through umu, as the game's umu id, with
+   the game's dir as umu's install path. It is in the prefix already, a short path, so
+   it needs no `C:\gogo-setup` link.
+5. **Success.** The uninstaller exits 0, and both the DLC's `goggame-<id>.info` and
+   its `unins<n>.dat` are gone from the base game's dir. Exit 0 alone isn't trusted:
+   Inno's uninstaller copies itself to a temp file and runs from there. Otherwise the
+   removal fails (exit 7, the log's tail), and the journal stays.
+6. **Recovery and the ways out**, as for an add (§5.1): a `dlc remove`, bare or naming
+   more, runs every DLC the journal names again (one whose info and uninstaller are both
+   gone counts as done); `dlc remove --abandon` drops the journal under the lock, and
+   the record follows the prefix (a DLC whose info is gone is no longer recorded, one
+   whose info is there stays); and a rollback to `before removing` undoes it, so this
+   journal doesn't refuse a rollback either. An add refuses a removal's journal and
+   `dlc add --abandon` a removal (naming `dlc remove --abandon`), and the other way
+   round. The launcher's dialog, doctor's `dlc` finding, the snapshot refusals and the
+   depot lane's recovery name the removal's ways out for a removal's journal
+   (`LAUNCHER_VERSION` 17).
+7. **Saves.** The depot lane's line (§3.7 decision 3), in the plan and in the question:
+   `saves made with <DLC> may not load without it; the snapshot "before removing <DLC>"
+   can restore the game, or gogo linux-app dlc <gogid> add <id> brings it back`.
+8. **What the uninstaller leaves.** Each game-dir file the DLC's Inno log says it
+   installed that is still there afterwards is reported (`left` in `--json`, a warning
+   otherwise); gogo deletes none of them: it didn't lay them, and a path may be the
+   base game's. Registry values are the uninstaller's business.
+9. **Version and language:** none apply. Nothing is downloaded, and no installer is
+   matched to the base.
+10. **Flags.** `--limit` and `--no-disk-check` are refused on this lane (usage, exit 2):
+    nothing is downloaded. `--dry-run --json` prints `{dryRun, plan, lines}`
+    (`dlc_uninstall::RemovePlan`: `lane`, `into`, `removing` with each DLC's
+    `uninstaller` (`number`, `exe`, `dat`, `win`) or none, `resumed`, `logMissing`, and
+    `autosnapshot`). `--json` prints `{gogid, lane, dlcs, removed, resumed, left?,
+    snapshot, pruned, warnings?}`; `--abandon --json` prints `{gogid, dropped, kept}`.
+
+**Tests:** `dlc_uninstall`'s unit tests (the ini, the log's `Creating new` and `Will
+append`, a missing `.dat`, the log's installed and replaced files, the flags) and
+`linuxapp_pipeline`'s, on a fake umu whose DLC installers write `unins<n>` and an Inno
+log and whose uninstallers take them out: two DLC removed newest first in the game's
+prefix; a stop after one, the doctor/snapshot/add/abandon refusals, and the bare rerun;
+an uninstaller that exits 4, one that leaves its info, `--abandon` keeping a DLC whose
+info is there and dropping one whose info is gone, one that leaves a file; a DLC that
+appended to the base's uninstaller, one that replaced `game.exe`, one with no
+uninstaller, and one whose files are gone already (no runtime). The launcher's dialog
+for a removal's journal.
+
+**e2e.** Through a manifest's `[[installer_dlc.remove]]` (`docs/linux-e2e.md`), with
+Journey to the Savage Planet built with Hot Garbage: `e2e/dlc-remove-clean-1519147341.toml`
+removes it, and `e2e/dlc-remove-1519147341.toml` stops a removal as soon as the
+uninstaller's Wine process starts (what it left running in the prefix killed), then
+runs the bare `dlc remove` that finishes it. Both then start the game.
+
+Run on 2026-11-13 with `setup_…_1.0.10_(44657).exe` and its Hot Garbage DLC,
+GE-Proton11-12 and umu 1.4.4, headless sway on a GPU: both pass, and the game starts
+without the DLC. What the real uninstaller did:
+
+- **Exit code:** 0 through umu, about 3 s for the whole `dlc remove`. umu warns
+  `Executable not found: C:\GOG\…\unins001.exe` (it looks for a unix file), as it does
+  for every `C:\gogo-setup` setup; Wine runs it.
+- **The self-copy:** the first phase starts its second as
+  `C:\users\steamuser\AppData\Local\Temp\_iu14D2N.tmp /SECONDPHASE="…\unins001.exe"
+  /FIRSTPHASEWND=…` with the same flags, and umu returns once both are done. A Ctrl-C
+  to gogo's process group ends umu but not that copy, which goes on in the prefix: the
+  next `dlc remove` is refused (`process(es) still running in <gogid>'s prefix`) until
+  it is done, which for Hot Garbage is well under a second.
+- **`/LOG=`** works: the second phase writes it (`install/dlc-<id>-uninstall.log`).
+- **What it deleted:** `goggame-1240193021.{ico,hashdb,info}`, `unins001.{dat,msg}`,
+  then `unins001.{exe,ini}`, and the DLC's registry keys (`GOG.com\Games\1240193021`,
+  `Uninstall\1240193021_is1`). It tries to delete the game's dir as well, which fails
+  as it isn't empty (`Failed to delete directory (145)`), and logs a harmless
+  `processSupportScript [uninstall]` error (the DLC has no support script). The base
+  game's files, `unins000.*` and `webcache.zip` stay.
+- **A stop** lands wherever the uninstaller is. In one run it came before the
+  uninstaller deleted anything, and the rerun ran it again from the start. In another
+  it cut the uninstaller at `Deleting Uninstall data files.`: the info, `.dat` and
+  `.msg` were gone, `unins001.exe` and `.ini` were left. That rerun found no
+  uninstaller to run (no `.dat`) and the info gone, so it dropped the record only and
+  warned that `unins001.exe` was left (decision 8: gogo deletes none of it).
 
 ## 6. Record and state (D9)
 
@@ -1265,7 +1399,7 @@ the real thing is a host pass.
    DLC, such as Cyberpunk 2077, installing it when it's owned is the obvious choice, but
    that isn't a rule that holds across games, so the default is no DLC. The plan keeps
    the `N owned DLC not included (--all-dlcs)` line.
-2. **Removal is a follow-up** (§3.5, D11; #353, low priority). Built since: §3.7, with
+2. **Removal is a follow-up** (§3.5, D11; #353, low priority). Built since: §3.7 (and §5.2 on the offline-installer lane, #443), with
    its own decisions (2026-11-13).
 
 ### 11.2 Settled by research (#343, comment "Research for design 19")
@@ -1299,4 +1433,5 @@ Filed 2026-11-11, each a sub-issue of #343.
 | I6 (#351) | Offline-installer lane: DLC installers at first build and `dlc add` (§5) | I3, I4 |
 | I7 (#352) | DLC fixture tests (synthetic manifests: diff, lay, journal, interruption, zero-byte DLC) and the Cyberpunk host-pass runbook (§10) | I5 |
 | I8 (#353) | DLC removal (§3.5; as built §3.7) | I5 |
+| #443 | DLC removal on the offline-installer lane (as built §5.2) | I6, I8 |
 | I9 (#354) | mac-app DLC (§9) | I5, the Mac lane resuming |

@@ -1029,8 +1029,8 @@ are still on that drive, as for its files.
 
 `dlc add` recovers an interrupted lay first, then refuses as today, then takes its `auto`
 snapshot, then writes its journal. No snapshot operation runs while a journal is pending
-(§5.1). Rolling back to before a DLC add undoes it whole; `dlc remove` (#353, design 19 §3.7)
-takes the DLC out and keeps everything since. After a
+(§5.1). Rolling back to before a DLC add undoes it whole; `dlc remove` (#353, design 19 §3.7;
+on the offline-installer lane #443, §5.2) takes the DLC out and keeps everything since. After a
 rollback to an older build, a later `dlc add` needs that build's files; GOG may no longer
 list it, and design 19's refusal already says so.
 
