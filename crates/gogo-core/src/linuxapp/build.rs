@@ -770,10 +770,15 @@ fn persist_flags(
     Ok(())
 }
 
-/// The installer lane's Inno flags (as on the Mac, design 10 §2.4), with
-/// its log written through `z:`.
-fn installer_args(plan: &installer::InstallPlan, win_target: &str, log: &Path) -> Vec<String> {
-    super::dlc_installer::inno_args(&plan.installer, win_target, log)
+/// umu running `plan`'s setup with the installer lane's Inno flags (as on
+/// the Mac, design 10 §2.4): `dlc_installer::setup_command`.
+fn installer_command(
+    umu: &Umu,
+    plan: &installer::InstallPlan,
+    win_target: &str,
+    log: &Path,
+) -> Result<(std::process::Command, super::dlc_installer::SetupLink), MacAppError> {
+    super::dlc_installer::setup_command(umu, &plan.installer, win_target, log)
 }
 
 /// Run the plan: umu and GE-Proton (the downloads the plan named), the game
@@ -1065,12 +1070,11 @@ pub fn execute(
         emit(&ProgressEvent::InstallStarted);
         let win_target = format!("C:\\GOG\\{}", plan.slug);
         let inno_log = logs.join(installer::INNO_LOG);
+        let (cmd, link) = installer_command(&umu, inst, &win_target, &inno_log)?;
         let status = working(emit, step::INSTALLER, || {
-            umu.run(
-                "the offline installer",
-                umu.command(installer_args(inst, &win_target, &inno_log)),
-            )
+            umu.run("the offline installer", cmd)
         })?;
+        drop(link);
         let install_dir = staging.prefix.join("drive_c/GOG").join(&plan.slug);
         if !status.success() {
             return Err(MacAppError::InstallerFailed {
@@ -1378,15 +1382,14 @@ fn restore_and_run_support(
         message: "running GOG support installer into the game dir".into(),
     });
     let support_plan = installer::plan(support)?;
-    let ran = umu.run_limited(
-        "GOG's support installer",
-        umu.command(installer_args(
-            &support_plan,
-            &win_path,
-            &logs.join(installer::INNO_LOG),
-        )),
-        SUPPORT_INSTALLER_LIMIT,
+    let (cmd, link) = installer_command(
+        umu,
+        &support_plan,
+        &win_path,
+        &logs.join(installer::INNO_LOG),
     )?;
+    let ran = umu.run_limited("GOG's support installer", cmd, SUPPORT_INSTALLER_LIMIT)?;
+    drop(link);
     match ran {
         Some(status) if status.success() => emit(&ProgressEvent::Warn {
             message: format!(
@@ -1501,7 +1504,11 @@ mod tests {
             installer: "/home/me/Downloads/setup_x.exe".into(),
             bin_parts: vec![],
         };
-        let args = installer_args(&plan, r"C:\GOG\x", Path::new("/home/me/g/install/inno.log"));
+        let args = super::super::dlc_installer::inno_args(
+            &plan.installer.display().to_string(),
+            r"C:\GOG\x",
+            Path::new("/home/me/g/install/inno.log"),
+        );
         assert_eq!(args[0], "/home/me/Downloads/setup_x.exe");
         assert!(args.contains(&r"/DIR=C:\GOG\x".to_string()));
         assert!(args.contains(&r"/LOG=Z:\home\me\g\install\inno.log".to_string()));

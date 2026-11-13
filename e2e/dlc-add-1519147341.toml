@@ -10,7 +10,7 @@ gogid = 1519147341
 
 [[installer_dlc.add]]
 args = ["Hot Garbage"]
-interrupt = "Hot Garbage/setup_"
+interrupt = "Hot Garbage.setup_"
 
 # A bare add: it finishes the stopped one.
 [[installer_dlc.add]]
