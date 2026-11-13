@@ -651,6 +651,20 @@ As built (#350): `gog/lay.rs` (not `materialize.rs`; it uses `materialize::clone
 - `recover` goes forward when every file is laid, pending, or still in its source.
   The missing ones are staged again and swapped in, then the caller commits. It goes
   back otherwise.
+- A symlinked dir on a laid path refuses the lay (#438). `symlinked_parent(game, rel)`
+  walks each parent under `game/` with `symlink_metadata` and names the first link;
+  `Journal::check_links` runs it over the files, the replaced and the removed paths.
+  `lay_files` runs it before the journal is written, so a refusal leaves no journal, no
+  `.gogo-new` and no backup, in `game/` or outside it. `dlc add` and `update` also run it
+  right after the survey. `recover` and `roll_back` run it before touching anything, so
+  a journal that points through a link stops with the same message and stays. The
+  error is `LayError::Symlink`, shown as "`<link>` in the game dir is a symlink, and
+  `<path>` would go through it ...; remove or replace the link, then run it again", and
+  exits 7 like the other "the game's state refuses" errors. `update`'s removals use the
+  same helper but keep their behaviour: skipped with a warning (#437). A link at the
+  final path itself is not followed: the lay moves the link into the backup and renames
+  the new file over its place (a rollback moves the link back), so the target is never
+  written.
 - `syncfs` runs on the game's filesystem after step 2 and after step 4, rather than an
   fsync per rename.
 - The game's lock is `relocate::lock_game`, now public. It creates `game-moves/` when

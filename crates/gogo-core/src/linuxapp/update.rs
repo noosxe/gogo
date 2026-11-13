@@ -733,16 +733,8 @@ fn drift(game: &Game, plan: &UpdatePlan) -> Option<String> {
 /// reach outside `game/`), and it still is the installed build's file by the MD5,
 /// else the size, that build gives it. `Err` says why it stays.
 fn removable(game: &Path, rel: &str, size: Option<u64>, md5: Option<&str>) -> Result<(), String> {
-    let mut at = game.to_path_buf();
-    let parts: Vec<&str> = rel.split('/').collect();
-    for p in &parts[..parts.len().saturating_sub(1)] {
-        at.push(p);
-        if at
-            .symlink_metadata()
-            .is_ok_and(|m| m.file_type().is_symlink())
-        {
-            return Err(format!("a dir on its path ({p}) is a symlink"));
-        }
+    if let Some(link) = lay::symlinked_parent(game, rel) {
+        return Err(format!("a dir on its path ({link}) is a symlink"));
     }
     let path = game.join(rel);
     let meta = path.symlink_metadata().map_err(|e| e.to_string())?;
@@ -1005,6 +997,8 @@ where
     });
     // Reported once, with the outcome's warnings.
     warnings.extend(kept);
+    // A laid file behind a symlinked dir refuses the update, before any write.
+    j.check_links(&game.dirs.game)?;
     let mut lay_report = None;
     if !j.files.is_empty() || !j.removed.is_empty() {
         let bytes: u64 = j
@@ -1052,6 +1046,7 @@ where
         });
         lay_report = Some(report.map_err(|e| match e {
             lay::LayError::Stopped => interrupted_lay(&gogid),
+            e @ lay::LayError::Symlink { .. } => AddError::Game(MacAppError::Apps(e.to_string())),
             lay::LayError::Io(e) => AddError::Io(e),
         })?);
     }

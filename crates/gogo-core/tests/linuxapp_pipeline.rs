@@ -7302,6 +7302,34 @@ mod dlc_add {
         no_leftovers(&w);
     }
 
+    /// A symlinked dir in `game/` that a DLC file would go through refuses the add
+    /// before anything is written, in or outside `game/` (#438).
+    #[test]
+    fn an_add_through_a_symlinked_dir_is_refused_before_any_write() {
+        let w = built("dlc-add-symlink");
+        cache_with_dlc(&w, Some(dlc_paths()));
+        let gd = w.game().join("game");
+        let outside = w.root.join("outside-dlc");
+        std::fs::create_dir_all(outside.join("ep1")).unwrap();
+        std::fs::write(outside.join("ep1/a.archive"), b"not the game's").unwrap();
+        std::os::unix::fs::symlink(&outside, gd.join("dlc")).unwrap();
+        let (game_before, out_before) = (tree(&gd), tree(&outside));
+        let mut g = game(&w);
+        let p = plan_for(&g, &[DLC]);
+        let r = run(&mut g, &p, no_setup(), false);
+        let e = r.result.unwrap_err();
+        assert!(matches!(e, AddError::Game(_)), "{e:?}");
+        let msg = e.to_string();
+        assert!(
+            msg.contains("dlc in the game dir is a symlink") && msg.contains("dlc/ep1/a.archive"),
+            "{msg}"
+        );
+        assert_eq!(tree(&gd), game_before);
+        assert_eq!(tree(&outside), out_before);
+        no_leftovers(&w);
+        assert!(content::load(&w.game()).unwrap().unwrap().dlc.is_empty());
+    }
+
     /// A stop mid-lay from the cache: the journal and the shared file's backup
     /// stay, nothing is fetched, and the next add rolls forward without moving the
     /// cache's files.
@@ -12745,6 +12773,38 @@ mod update {
         );
         assert!(warned("linked/x.dat", "is a symlink"), "{:?}", out.warnings);
         no_leftovers(&w);
+    }
+
+    /// A symlinked dir in `game/` that a laid file would go through refuses the
+    /// update before any write, in or outside `game/` (#438).
+    #[test]
+    fn an_update_through_a_symlinked_dir_is_refused_before_any_write() {
+        let w = built("update-symlink", false, None);
+        let gd = w.game().join("game");
+        let outside = w.root.join("outside-update");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("new.pak"), b"not the game's").unwrap();
+        let _ = std::fs::remove_dir_all(gd.join("data"));
+        std::os::unix::fs::symlink(&outside, gd.join("data")).unwrap();
+        let (game_before, out_before) = (tree(&gd), tree(&outside));
+        let mut g = game(&w);
+        let p = plan(&g, &[]);
+        let r = run(&mut g, &p, &opts(), false);
+        let e = r.result.unwrap_err();
+        assert!(matches!(e, AddError::Game(_)), "{e:?}");
+        assert!(
+            e.to_string()
+                .contains("data in the game dir is a symlink, and data/new.pak"),
+            "{e}"
+        );
+        assert_eq!(tree(&gd), game_before);
+        assert_eq!(tree(&outside), out_before);
+        // The download's record stays for a rerun; no lay file does.
+        for f in [lay::JOURNAL, lay::BACKUP] {
+            assert!(!w.game().join(f).exists(), "{f} written");
+        }
+        let c = content::load(&w.game()).unwrap().unwrap();
+        assert_ne!(c.build_id.as_deref(), Some("B2"));
     }
 
     /// A resumed lay checks the cache is still on the target: one another command
