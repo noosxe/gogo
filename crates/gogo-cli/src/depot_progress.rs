@@ -884,6 +884,13 @@ impl<W: Write + Send + 'static> Activity<W> {
         out
     }
 
+    /// One timer tick, run by hand and past the redraw interval, so a test
+    /// needn't wait on the timer thread.
+    #[cfg(test)]
+    fn tick_now(&self) {
+        self.shared.lock().unwrap().draw(self.start.elapsed(), true);
+    }
+
     /// Clears the status line.
     pub fn finish(&self) {
         self.shared.lock().unwrap().finish();
@@ -1422,7 +1429,7 @@ mod tests {
         let act = Activity::with(Mode::Human { live: true }, buf.clone());
         assert!(act.live());
         let v = act.spin("removing Game", || {
-            std::thread::sleep(Duration::from_millis(350));
+            act.tick_now();
             7
         });
         assert_eq!(v, 7);
@@ -1476,7 +1483,6 @@ mod tests {
             .unwrap();
             live.note("gogo: game files: adding 2 file(s) (30.0 MiB) to /g");
             assert!(live.work(&count(1, 10 * MB)));
-            std::thread::sleep(Duration::from_millis(250));
             let mid = seen.text();
             assert!(
                 mid.contains("game files  1 / 2 files  10.0 MiB / 30.0 MiB"),
@@ -1538,11 +1544,11 @@ mod tests {
         let act = Activity::with(Mode::Human { live: true }, buf.clone());
         act.register();
         act.working("planning the build");
-        std::thread::sleep(Duration::from_millis(250));
+        act.tick_now();
         let mark = buf.text().len();
         prompting(|| {
-            // The timer keeps ticking while the prompt waits.
-            std::thread::sleep(Duration::from_millis(350));
+            // A tick while the prompt waits draws nothing.
+            act.tick_now();
             let during = buf.text();
             let during = &during[mark..];
             assert!(during.ends_with("\r\x1b[K"), "{during:?}");
@@ -1550,7 +1556,7 @@ mod tests {
             // The prompt's own line.
             buf.push("? Proceed? [y/n] y\n");
         });
-        std::thread::sleep(Duration::from_millis(250));
+        act.tick_now();
         act.done();
         drop(act);
         let out = buf.text();
@@ -1628,11 +1634,11 @@ mod tests {
         act.register();
         act.working("planning the build");
         prompting(|| act.done());
-        std::thread::sleep(Duration::from_millis(250));
+        act.tick_now();
         let out = buf.text();
         assert!(out.ends_with("\r\x1b[K"), "{out:?}");
         let n = out.matches("planning").count();
-        std::thread::sleep(Duration::from_millis(250));
+        act.tick_now();
         assert_eq!(buf.text().matches("planning").count(), n);
     }
 
