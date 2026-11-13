@@ -1103,6 +1103,17 @@ pub fn recover_locked(
     emit: &mut dyn FnMut(&ProgressEvent),
 ) -> Result<Option<Direction>, AddError> {
     let root = game.dirs.root.clone();
+    // An offline-installer add's journal (design 19 §5) has no files to lay: only
+    // running its installers again settles it.
+    if let Some(j) = lay::read_journal(&root)?
+        && j.lane == super::dlc_installer::LANE
+    {
+        return Err(AddError::Game(MacAppError::Apps(format!(
+            "an earlier DLC add of {} stopped while its installers ran; `gogo linux-app dlc \
+             {} add` runs them again",
+            game.gogid, game.gogid
+        ))));
+    }
     // An update's lay (design 21 §11g) shares the journal. Its files come from the
     // depot cache on the target build: a cache that moved since can't finish it,
     // so it goes back.

@@ -150,6 +150,16 @@ fn is_depot(game: &Game) -> bool {
     game.content.lane == gogo::gog::content::Lane::Depot
 }
 
+/// An offline-installer game's language: the recorded one (the base installer's),
+/// else `[gog] language`.
+fn installer_language(game: &Game) -> String {
+    game.content.language.clone().unwrap_or_else(|| {
+        crate::load_config_quietly()
+            .map(|c| c.config.gog.language)
+            .unwrap_or_else(|_| "en".into())
+    })
+}
+
 /// `dlc list` (design 19 §1.3). Reads only.
 async fn list(game: Game, json: bool) -> Result<i32, AppError> {
     let (ctx, token) = connect().await?;
@@ -179,11 +189,6 @@ async fn list(game: Game, json: bool) -> Result<i32, AppError> {
             (None, None) => None,
         }
     } else {
-        notes.push(
-            "DLC is added to offline-installer games with their installers, which gogo \
-             doesn't do yet"
-                .into(),
-        );
         None
     };
     if game.derived {
@@ -198,7 +203,12 @@ async fn list(game: Game, json: bool) -> Result<i32, AppError> {
             add::DEFAULT_LANGUAGE
         ));
     }
-    let infos = dlc::available(&detail.expanded_dlcs, &owned, manifest_dlcs.as_deref());
+    // The installer lane: a DLC "is in the build" when it has a Windows installer.
+    let infos = if is_depot(&game) {
+        dlc::available(&detail.expanded_dlcs, &owned, manifest_dlcs.as_deref())
+    } else {
+        dlc::installer_infos(&detail.expanded_dlcs, &owned, &installer_language(&game))
+    };
     if let Some(b) = &build_langs {
         notes.extend(b.notes_for(&language, &|id| {
             infos
@@ -211,7 +221,7 @@ async fn list(game: Game, json: bool) -> Result<i32, AppError> {
         .iter()
         .filter(|d| d.owned && d.in_build && !game.installed().contains(&d.id))
         .count();
-    if missing > 0 && is_depot(&game) {
+    if missing > 0 {
         notes.push(format!(
             "{missing} owned DLC not installed: gogo linux-app dlc {} add <id|title> (or --all)",
             game.gogid
@@ -298,12 +308,7 @@ async fn add_cmd(
     let quiet = quiet || a.json;
     let jp = a.json_progress;
     if !is_depot(&game) {
-        eprintln!(
-            "gogo: {} is an offline-installer game: adding DLC there runs the DLC's \
-             installers, which gogo doesn't do yet",
-            game.gogid
-        );
-        return Ok(cli::exit::USAGE);
+        return installer_add_cmd(game, a).await;
     }
     // A half-laid add is settled first, whatever was asked (design 19 §3.4).
     let recovered = if a.dry_run {
@@ -1022,4 +1027,253 @@ fn emit_remove(ev: &ProgressEvent, json_progress: bool, quiet: bool, print: &dyn
         return;
     }
     emit(ev, json_progress, quiet, print)
+}
+
+/// `dlc add` on an offline-installer game (design 19 §5): the DLC's own installers,
+/// downloaded when missing (with the consent), run in the game's prefix under its
+/// lock, behind the `auto` snapshot and a journal. A rerun after a stop runs the
+/// stopped add's installers again.
+async fn installer_add_cmd(mut game: Game, a: AddArgs) -> Result<i32, AppError> {
+    use gogo::linuxapp::dlc_installer::{self as di, VersionCheck};
+    let machine = a.json || a.json_progress;
+    let (quiet, _) = crate::PROGRESS_FLAGS.get().copied().unwrap_or_default();
+    let quiet = quiet || a.json;
+    let jp = a.json_progress;
+    let pending = di::pending(&game.dirs.root);
+
+    let (ctx, token) = connect_phase(machine).await?;
+    let id = game_id(&game);
+    let title = title_of(&game);
+    let (detail, owned) = crate::phase(machine, "checking the game's DLC", async {
+        let detail = gogo::gog::catalog::detail(&ctx.http, &token, id).await?;
+        let owned = library::owned_ids(&ctx.http, &token).await?;
+        Ok::<_, AppError>((detail, owned))
+    })
+    .await?;
+    let language = installer_language(&game);
+    let infos = dlc::installer_infos(&detail.expanded_dlcs, &owned, &language);
+    let installed = game.installed();
+    let addable: Vec<u64> = infos
+        .iter()
+        .filter(|d| d.owned && d.in_build && !installed.contains(&d.id))
+        .map(|d| d.id)
+        .collect();
+    let asked: Vec<u64> = if a.all {
+        addable.clone()
+    } else if !a.names.is_empty() {
+        match crate::installer_dlc::resolve_names(&a.names, &title, &infos) {
+            Ok(ids) => ids,
+            Err(e) => {
+                eprintln!("gogo: {e}");
+                return Ok(cli::exit::USAGE);
+            }
+        }
+    } else if !pending.is_empty() {
+        // A bare rerun after a stop: finishing it is the job.
+        Vec::new()
+    } else if interactive(machine) && !addable.is_empty() {
+        crate::pick_dlc(&addable, &infos)?
+    } else {
+        eprintln!(
+            "gogo: name the DLC to add (id or title), or --all; DLC {title} can take: {}",
+            crate::installer_dlc::names_of(&addable, &infos)
+        );
+        return Ok(cli::exit::USAGE);
+    };
+    for already in asked.iter().filter(|i| installed.contains(i)) {
+        if !quiet {
+            eprintln!(
+                "gogo: {} is installed already",
+                infos
+                    .iter()
+                    .find(|d| d.id == *already)
+                    .map_or_else(|| already.to_string(), |d| d.title.clone())
+            );
+        }
+    }
+    let mut wanted: Vec<u64> = pending.iter().map(|p| p.id).collect();
+    for i in asked {
+        if !installed.contains(&i) && !wanted.contains(&i) {
+            wanted.push(i);
+        }
+    }
+    let refs: Vec<gogo::gog::content::DlcRef> = wanted
+        .iter()
+        .map(|i| gogo::gog::content::DlcRef {
+            id: *i,
+            title: pending
+                .iter()
+                .find(|p| p.id == *i)
+                .map(|p| p.title.clone())
+                .or_else(|| infos.iter().find(|d| d.id == *i).map(|d| d.title.clone()))
+                .unwrap_or_else(|| i.to_string()),
+        })
+        .collect();
+    if wanted.is_empty() {
+        if a.json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "gogid": game.gogid,
+                    "buildId": game.content.build_id,
+                    "language": game.content.language,
+                    "dlcs": game.content.refs(),
+                    "added": [],
+                })
+            );
+        } else if !quiet {
+            eprintln!("gogo: nothing to add");
+        }
+        return Ok(cli::exit::OK);
+    }
+
+    // Decision 5: the base's installer label against GOG's current one.
+    let current = dlc::installer_version(&detail, &language);
+    let mut notes = Vec::new();
+    match di::version_check(game.content.version.as_deref(), current.as_deref()) {
+        VersionCheck::Same => {}
+        VersionCheck::Differs { installed, current } => {
+            eprintln!(
+                "gogo: {}",
+                di::version_refusal(&game.gogid, &installed, &current)
+            );
+            return Ok(cli::exit::MACAPP);
+        }
+        VersionCheck::Unknown => notes.push(di::version_unknown_note(current.as_deref())),
+    }
+    let (win_target, _) = di::install_dir(&game)?;
+    let size = |i: u64| {
+        infos
+            .iter()
+            .find(|d| d.id == i)
+            .and_then(|d| d.download_size)
+    };
+    let mut lines: Vec<String> = refs
+        .iter()
+        .map(|r| {
+            format!(
+                "dlc: {} ({}){}",
+                r.title,
+                size(r.id).map_or("size unknown".into(), gogo::fmt::human_size),
+                if pending.iter().any(|p| p.id == r.id) {
+                    ", an earlier add of it stopped: its installer runs again"
+                } else {
+                    ""
+                }
+            )
+        })
+        .collect();
+    lines.push(format!(
+        "installers: Windows, {language}, {} (the game's installer: {})",
+        current.as_deref().unwrap_or("no version listed"),
+        game.content.version.as_deref().unwrap_or("version unknown")
+    ));
+    lines.push(format!(
+        "runs: each DLC's installer in the game's prefix, into {win_target}"
+    ));
+    lines.extend(notes.iter().map(|n| format!("note: {n}")));
+    if !machine && !quiet {
+        for l in &lines {
+            eprintln!("gogo: {l}");
+        }
+    }
+    if a.dry_run {
+        if a.json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "dryRun": true,
+                    "plan": {
+                        "lane": "installer",
+                        "dlcs": refs,
+                        "language": language,
+                        "version": current,
+                        "installed": game.content.version,
+                        "into": win_target,
+                        "lines": lines,
+                    }
+                })
+            );
+        }
+        return Ok(cli::exit::OK);
+    }
+    if !a.yes {
+        if !interactive(machine) {
+            eprintln!("gogo: adding DLC needs consent: pass --yes");
+            return Ok(cli::exit::USAGE);
+        }
+        let go = crate::depot_progress::prompting(|| {
+            dialoguer::Confirm::new()
+                .with_prompt("add it now?")
+                .default(true)
+                .interact()
+        })
+        .unwrap_or(false);
+        if !go {
+            eprintln!("gogo: aborted");
+            return Ok(cli::exit::USAGE);
+        }
+    }
+    let installers =
+        crate::installer_dlc::fetch(&ctx, &detail, &wanted, &refs, &language, machine).await?;
+
+    let cancel = ctx.cancel.clone();
+    {
+        let c = cancel.clone();
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            c.cancel();
+        });
+    }
+    let plan = di::AddPlan {
+        dlcs: installers,
+        language: Some(language),
+    };
+    let opts = di::AddOptions {
+        snapshots: crate::auto_snapshots(a.no_snapshots)?,
+        ..Default::default()
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let stop = move || cancel.is_cancelled();
+        let gogid = game.gogid.clone();
+        let dirs = game.dirs.clone();
+        let r = di::add(
+            &mut game,
+            &plan,
+            &mut |emit| gogo::linuxapp::setup::game_runner(&gogid, &dirs, emit),
+            &opts,
+            &mut |ev| emit(ev, jp, quiet, &|l| eprintln!("{l}")),
+            &stop,
+        );
+        (r, title)
+    })
+    .await
+    .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+    let (result, title) = result;
+    match result {
+        Ok(out) => {
+            if a.json {
+                println!("{}", serde_json::to_string(&out).unwrap());
+            } else if !quiet {
+                for w in &out.warnings {
+                    eprintln!("gogo: warning: {w}");
+                }
+                eprintln!(
+                    "gogo: added {} to {title}; its DLC now: {}",
+                    out.added
+                        .iter()
+                        .map(|d| d.title.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    out.dlcs
+                        .iter()
+                        .map(|d| d.title.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            Ok(cli::exit::OK)
+        }
+        Err(e) => Ok(report(e)),
+    }
 }

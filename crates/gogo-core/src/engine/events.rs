@@ -208,6 +208,8 @@ pub mod step {
     pub const PREFIX: &str = "creating the Wine prefix";
     /// An offline installer running silently.
     pub const INSTALLER: &str = "running the installer";
+    /// A DLC's offline installer running silently (design 19 §5).
+    pub const DLC_INSTALLER: &str = "running a DLC's installer";
     /// GOG's support installer and registry key.
     pub const SUPPORT: &str = "running GOG's support installer";
     /// A rebuild clearing the old `game/` dir.

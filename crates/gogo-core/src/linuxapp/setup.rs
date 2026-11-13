@@ -219,6 +219,39 @@ pub fn ensure_umu(
     ))
 }
 
+/// What runs a Windows program in a built game's prefix, resolved as [`setup`]
+/// resolves it: the game's Proton build (L4's runtime, else the baked one), umu
+/// and the umu id. A DLC's offline installer runs through it (design 19 §5).
+pub struct GameRunner {
+    pub build: ProtonBuild,
+    pub umu_run: UmuRun,
+    pub umu_id: String,
+}
+
+/// [`GameRunner`] for `gogid`; warnings go out as events.
+pub fn game_runner(
+    gogid: &str,
+    dirs: &GameDirs,
+    emit: &mut dyn FnMut(&ProgressEvent),
+) -> Result<GameRunner, MacAppError> {
+    let (baked, _) = game::read_launch_toml(dirs)?;
+    let l4 = compat::load_user_for(gogid, Os::Linux)?;
+    let runtime = l4.entry.runtime.clone().unwrap_or(baked.runtime.clone());
+    let r = ProtonRef::parse(&runtime).map_err(MacAppError::Proton)?;
+    let (build, _) = ensure_proton(&r, None, emit)?;
+    let umu_run = ensure_umu(None, emit)?;
+    let mut warnings = Vec::new();
+    let umu_id = umu_id_for(gogid, &build.dir, false, &mut warnings).id;
+    for message in warnings {
+        emit(&ProgressEvent::Warn { message });
+    }
+    Ok(GameRunner {
+        build,
+        umu_run,
+        umu_id,
+    })
+}
+
 /// One game's umu: every run against its prefix with the same build and id.
 pub struct Umu<'a> {
     pub run: &'a UmuRun,
