@@ -52,9 +52,15 @@ pub struct Uninstaller {
 pub enum Found {
     /// An uninstaller of its own.
     Own(Uninstaller),
-    /// It appended to another product's uninstall log (the base game's): its
-    /// uninstaller is that product's, `unins<n>.exe` named here.
+    /// It appended to another product's uninstall log (the base game's), or the
+    /// one it names is the base's slot (`unins000`) or another product's: its
+    /// uninstaller would be that product's, `unins<n>.exe` named here.
     Shared(String),
+    /// Several `unins<n>.ini` name it: gogo won't pick one.
+    Ambiguous(Vec<String>),
+    /// Its install log names `unins<n>.exe`, but nothing confirms it is the
+    /// DLC's: no ini names the DLC, and none names the base game at another slot.
+    Unconfirmed(String),
     /// None at all.
     None,
 }
@@ -121,31 +127,43 @@ fn log_uninstall(log: &str) -> Option<(bool, String)> {
     None
 }
 
-/// DLC `id`'s uninstaller in `install_dir` (`win_target` in Windows terms): the
-/// `unins<n>.ini` naming it, else the uninstall log its Inno log (`inno_log`)
-/// names. One that appended to another product's log is [`Found::Shared`].
+/// DLC `id`'s uninstaller in `install_dir` (`win_target` in Windows terms), the
+/// base game being `base_id`: the one `unins<n>.ini` naming it, else the uninstall
+/// log its Inno log (`inno_log`) names, when that is confirmed. Slot 0 is the base
+/// game's and is never a DLC's: running it would uninstall the whole game. One
+/// that appended to another product's log is [`Found::Shared`].
 pub fn find_uninstaller(
     install_dir: &Path,
     win_target: &str,
     id: u64,
+    base_id: u64,
     inno_log: Option<&str>,
 ) -> Found {
-    let mut inis: Vec<(u32, PathBuf)> = std::fs::read_dir(install_dir)
+    let mut inis: Vec<(u32, Option<u64>)> = std::fs::read_dir(install_dir)
         .into_iter()
         .flatten()
         .flatten()
         .filter_map(|e| {
             let n = unins_number(&e.file_name().to_string_lossy(), ".ini")?;
-            Some((n, e.path()))
+            Some((n, ini_product(&e.path())))
         })
         .collect();
     inis.sort();
-    for (n, ini) in &inis {
-        if ini_product(ini) == Some(id)
-            && let Some(u) = uninstaller(install_dir, win_target, *n)
-        {
-            return Found::Own(u);
+    let naming: Vec<u32> = inis
+        .iter()
+        .filter(|(_, p)| *p == Some(id))
+        .map(|(n, _)| *n)
+        .collect();
+    let exe = |n: u32| format!("unins{n:03}.exe");
+    match naming.as_slice() {
+        [] => {}
+        [0] => return Found::Shared(exe(0)),
+        [n] => {
+            if let Some(u) = uninstaller(install_dir, win_target, *n) {
+                return Found::Own(u);
+            }
         }
+        many => return Found::Ambiguous(many.iter().map(|n| exe(*n)).collect()),
     }
     let Some((appended, dat)) = inno_log.and_then(log_uninstall) else {
         return Found::None;
@@ -153,18 +171,25 @@ pub fn find_uninstaller(
     let Some(n) = unins_number(&dat, ".dat") else {
         return Found::None;
     };
-    let exe = format!("unins{n:03}.exe");
-    if appended {
-        return Found::Shared(exe);
+    if appended || n == 0 {
+        return Found::Shared(exe(n));
     }
-    // Its ini, when there is one, must not be another product's.
-    let other = inis
-        .iter()
-        .find(|(m, _)| *m == n)
-        .and_then(|(_, ini)| ini_product(ini))
-        .is_some_and(|p| p != id);
-    if other {
-        return Found::Shared(exe);
+    match inis.iter().find(|(m, _)| *m == n).and_then(|(_, p)| *p) {
+        // Named by its ini: the DLC's own (its files gone, else found above).
+        Some(p) if p == id => {}
+        Some(_) => return Found::Shared(exe(n)),
+        // No ini, or one gogo can't read: only when the base game's own ini, at
+        // another slot, says the slots are what they seem.
+        None => {
+            let base_elsewhere = inis.iter().any(|(m, p)| *m != n && *p == Some(base_id));
+            if !base_elsewhere {
+                return if uninstaller(install_dir, win_target, n).is_some() {
+                    Found::Unconfirmed(exe(n))
+                } else {
+                    Found::None
+                };
+            }
+        }
     }
     match uninstaller(install_dir, win_target, n) {
         Some(u) => Found::Own(u),
@@ -180,13 +205,40 @@ pub fn find_uninstaller(
 pub struct LogFiles {
     pub installed: Vec<String>,
     pub replaced: Vec<String>,
+    /// Some file entry is in the game's dir. A DLC's installer always puts its
+    /// uninstaller there, so a log with none is about another dir, or written in
+    /// a form gogo doesn't read: it says nothing about what was replaced.
+    pub matched: bool,
+}
+
+/// `path` (a Windows path) relative to `win_target`, compared by component
+/// without case (Unicode), in `/` form; `None` outside it.
+fn under(path: &str, win_target: &str) -> Option<String> {
+    let parts: Vec<&str> = path.split(['\\', '/']).collect();
+    let base: Vec<&str> = win_target
+        .split(['\\', '/'])
+        .filter(|c| !c.is_empty())
+        .collect();
+    if parts.len() <= base.len()
+        || !parts
+            .iter()
+            .zip(&base)
+            .all(|(a, b)| a.to_lowercase() == b.to_lowercase())
+    {
+        return None;
+    }
+    let rel: Vec<&str> = parts[base.len()..]
+        .iter()
+        .copied()
+        .filter(|c| !c.is_empty())
+        .collect();
+    (!rel.is_empty()).then(|| rel.join("/"))
 }
 
 /// Read [`LogFiles`] from an Inno log's `-- File entry --` blocks: `Dest
 /// filename:`, then `Dest file exists.` when it was there, then `Installing the
 /// file.` or a `Skipping` line.
 pub fn log_files(log: &str, win_target: &str, id: u64) -> LogFiles {
-    let prefix = format!("{}\\", win_target.to_ascii_lowercase());
     let own = format!("goggame-{id}.");
     let mut out = LogFiles::default();
     let mut dest: Option<String> = None;
@@ -196,18 +248,15 @@ pub fn log_files(log: &str, win_target: &str, id: u64) -> LogFiles {
             dest = None;
             existed = false;
         } else if let Some((_, d)) = l.split_once("Dest filename: ") {
-            let d = d.trim();
-            dest = d
-                .to_ascii_lowercase()
-                .starts_with(&prefix)
-                .then(|| d[prefix.len()..].replace('\\', "/"));
+            dest = under(d.trim(), win_target);
+            out.matched |= dest.is_some();
             existed = false;
         } else if l.contains("Dest file exists.") {
             existed = true;
         } else if l.contains("Installing the file.")
             && let Some(rel) = dest.take()
         {
-            let lower = rel.to_ascii_lowercase();
+            let lower = rel.to_lowercase();
             let mine = lower.starts_with(&own) || unins_number(&lower, ".exe").is_some();
             if existed && !mine {
                 out.replaced.push(rel.clone());
@@ -216,6 +265,19 @@ pub fn log_files(log: &str, win_target: &str, id: u64) -> LogFiles {
         }
     }
     out
+}
+
+/// A DLC's install log (`log`, its contents) is the one of the install recorded
+/// now: not older than the DLC's info in the game's dir (`info`), which that
+/// install wrote before it closed its log. A log that is older belongs to an
+/// earlier install. Two minutes of slack, for a copy that didn't keep times.
+fn log_is_current(log: &Path, info: Option<&Path>) -> bool {
+    let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    match (mtime(log), info.and_then(mtime)) {
+        (Some(l), Some(i)) => l + std::time::Duration::from_secs(120) >= i,
+        (Some(_), None) => true,
+        (None, _) => false,
+    }
 }
 
 /// One DLC of a removal.
@@ -229,7 +291,8 @@ pub struct RemoveDlc {
     pub uninstaller: Option<Uninstaller>,
     /// An earlier removal of it stopped: its uninstaller runs again.
     pub resumed: bool,
-    /// Its Inno log isn't there: gogo can't tell what it replaced.
+    /// No install log gogo can trust (none, an older install's, or one about
+    /// another dir): gogo can't tell what it replaced.
     pub log_missing: bool,
     /// Game-dir files its Inno log says it installed (paths relative to the
     /// game's dir): the ones still there after the uninstaller are reported.
@@ -294,6 +357,7 @@ pub fn plan(
 ) -> Result<RemovePlan, MacAppError> {
     let (win_target, install_dir) = di::install_dir(game)?;
     let logs = game.dirs.root.join(crate::macapp::INSTALL_LOGS);
+    let base_id: u64 = game.gogid.parse().unwrap_or(0);
     let ids: Vec<u64> = wanted.iter().map(|d| d.id).collect();
     let rebuild = || {
         format!(
@@ -304,21 +368,49 @@ pub fn plan(
     let mut removing = Vec::new();
     for d in wanted {
         let log_path = logs.join(di::inno_log_name(d.id));
-        let log = std::fs::read(&log_path)
-            .ok()
-            .map(|b| String::from_utf8_lossy(&b).into_owned());
-        let files = log
-            .as_deref()
-            .map(|l| log_files(l, &win_target, d.id))
-            .unwrap_or_default();
-        let info = di::info_in(&install_dir, d.id).is_some();
-        let found = find_uninstaller(&install_dir, &win_target, d.id, log.as_deref());
+        let info_path = di::info_in(&install_dir, d.id);
+        let info = info_path.is_some();
+        // The install log of the install recorded now, about the game's dir;
+        // anything else counts as no log.
+        let (log, files) = match std::fs::read(&log_path) {
+            Ok(b) if log_is_current(&log_path, info_path.as_deref()) => {
+                let text = String::from_utf8_lossy(&b).into_owned();
+                let files = log_files(&text, &win_target, d.id);
+                if files.matched {
+                    (Some(text), files)
+                } else {
+                    (None, LogFiles::default())
+                }
+            }
+            _ => (None, LogFiles::default()),
+        };
+        let found = find_uninstaller(&install_dir, &win_target, d.id, base_id, log.as_deref());
         let uninstaller = match found {
             Found::Own(u) => Some(u),
             Found::Shared(exe) => {
                 return Err(MacAppError::Apps(format!(
-                    "DLC \"{}\" ({}) has no uninstaller of its own: its installer added \
-                     itself to {exe}, which uninstalls the whole game; {}",
+                    "DLC \"{}\" ({}) has no uninstaller of its own: its uninstaller would be \
+                     {exe}, which uninstalls the whole game; {}",
+                    d.title,
+                    d.id,
+                    rebuild()
+                )));
+            }
+            Found::Ambiguous(exes) => {
+                return Err(MacAppError::Apps(format!(
+                    "DLC \"{}\" ({}) is named by several uninstallers ({}), and gogo won't \
+                     pick one; {}",
+                    d.title,
+                    d.id,
+                    exes.join(", "),
+                    rebuild()
+                )));
+            }
+            Found::Unconfirmed(exe) => {
+                return Err(MacAppError::Apps(format!(
+                    "DLC \"{}\" ({})'s install log names {exe}, but nothing confirms it is \
+                     the DLC's (no unins<n>.ini names the DLC, and none names the base game \
+                     at another slot); {}",
                     d.title,
                     d.id,
                     rebuild()
@@ -390,8 +482,9 @@ pub fn plan_lines(p: &RemovePlan) -> Vec<String> {
         }
         if d.log_missing && d.uninstaller.is_some() {
             out.push(format!(
-                "note: {}'s install log isn't there, so gogo can't tell whether it replaced \
-                 game files (its uninstaller would delete them)",
+                "note: gogo has no install log of {} it can trust (none, one older than the \
+                 DLC's install, or one about another dir), so it can't tell whether the DLC \
+                 replaced game files (its uninstaller would delete them)",
                 d.title
             ));
         }
@@ -621,7 +714,12 @@ pub fn remove(
     }
     let mut warnings = Vec::new();
     if removing.is_empty() {
-        return Ok(outcome(game, &[], false, Vec::new(), None, warnings));
+        // A journal naming nothing (written by hand, or by an older gogo) is a
+        // finished removal.
+        if resumed {
+            lay::finish(&root)?;
+        }
+        return Ok(outcome(game, &[], resumed, Vec::new(), None, warnings));
     }
     let refs: Vec<DlcRef> = removing
         .iter()
@@ -706,7 +804,9 @@ pub fn remove(
     let mut left = Vec::new();
     for d in &plan.removing {
         for rel in &d.installed {
-            if install_dir.join(rel).exists() && !left.contains(rel) {
+            if super::dlc_remove::find_ci(&install_dir, rel).is_some_and(|p| p.exists())
+                && !left.contains(rel)
+            {
                 left.push(rel.clone());
             }
         }
@@ -847,6 +947,8 @@ mod tests {
         d
     }
 
+    const BASE: u64 = 1519147341;
+
     #[test]
     fn the_ini_naming_the_dlc_finds_its_uninstaller() {
         let d = dir_with(&[
@@ -860,7 +962,7 @@ mod tests {
             ("unins001.dat", ""),
             ("unins001.ini", "[InstallSettings]\nproductID=1240193021\n"),
         ]);
-        match find_uninstaller(d.path(), WIN, 1240193021, None) {
+        match find_uninstaller(d.path(), WIN, 1240193021, BASE, None) {
             Found::Own(u) => {
                 assert_eq!(u.number, 1);
                 assert_eq!(u.win, "C:\\GOG\\journey\\UNINS001.exe");
@@ -868,41 +970,142 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        assert_eq!(find_uninstaller(d.path(), WIN, 7, None), Found::None);
+        assert_eq!(find_uninstaller(d.path(), WIN, 7, BASE, None), Found::None);
     }
 
     #[test]
-    fn the_inno_log_finds_it_without_an_ini_and_tells_a_shared_one() {
+    fn slot_0_is_never_a_dlcs() {
+        // An ini at slot 0 naming the DLC: still the base's slot.
         let d = dir_with(&[
             ("unins000.exe", "MZ"),
             ("unins000.dat", ""),
-            ("unins000.ini", "[InstallSettings]\nproductID=1\n"),
+            ("unins000.ini", "productID=5\n"),
+        ]);
+        assert_eq!(
+            find_uninstaller(d.path(), WIN, 5, BASE, None),
+            Found::Shared("unins000.exe".into())
+        );
+        // A log naming slot 0, with the base's ini missing or unreadable.
+        let log = "t   Creating new uninstall log: C:\\GOG\\journey\\unins000.dat";
+        let d = dir_with(&[("unins000.exe", "MZ"), ("unins000.dat", "")]);
+        assert_eq!(
+            find_uninstaller(d.path(), WIN, 5, BASE, Some(log)),
+            Found::Shared("unins000.exe".into())
+        );
+        let d = dir_with(&[
+            ("unins000.exe", "MZ"),
+            ("unins000.dat", ""),
+            ("unins000.ini", "garbage"),
+        ]);
+        assert_eq!(
+            find_uninstaller(d.path(), WIN, 5, BASE, Some(log)),
+            Found::Shared("unins000.exe".into())
+        );
+    }
+
+    #[test]
+    fn two_inis_naming_the_dlc_are_refused() {
+        let d = dir_with(&[
+            ("unins001.exe", "MZ"),
+            ("unins001.dat", ""),
+            ("unins001.ini", "productID=5\n"),
+            ("unins002.exe", "MZ"),
+            ("unins002.dat", ""),
+            ("unins002.ini", "productID=5\n"),
+        ]);
+        assert_eq!(
+            find_uninstaller(d.path(), WIN, 5, BASE, None),
+            Found::Ambiguous(vec!["unins001.exe".into(), "unins002.exe".into()])
+        );
+    }
+
+    #[test]
+    fn the_inno_log_finds_it_only_when_confirmed() {
+        let own = "2026-11-13 18:49:39.133   Creating new uninstall log: \
+                   C:\\GOG\\journey\\unins001.dat\n";
+        // No ini at slot 1, the base's ini at slot 0: confirmed.
+        let d = dir_with(&[
+            ("unins000.exe", "MZ"),
+            ("unins000.dat", ""),
+            ("unins000.ini", "[InstallSettings]\nproductID=1519147341\n"),
             ("unins001.exe", "MZ"),
             ("unins001.dat", ""),
         ]);
-        let own = "2026-11-13 18:49:39.133   Creating new uninstall log: \
-                   C:\\GOG\\journey\\unins001.dat\n";
         assert!(matches!(
-            find_uninstaller(d.path(), WIN, 2, Some(own)),
+            find_uninstaller(d.path(), WIN, 2, BASE, Some(own)),
             Found::Own(Uninstaller { number: 1, .. })
         ));
-        let appended = "x   Will append to existing uninstall log: C:\\GOG\\journey\\unins000.dat";
+        // No ini names the base anywhere else: unconfirmed.
+        let d = dir_with(&[
+            ("unins000.exe", "MZ"),
+            ("unins000.dat", ""),
+            ("unins001.exe", "MZ"),
+            ("unins001.dat", ""),
+            ("unins001.ini", "unreadable"),
+        ]);
         assert_eq!(
-            find_uninstaller(d.path(), WIN, 2, Some(appended)),
-            Found::Shared("unins000.exe".into())
+            find_uninstaller(d.path(), WIN, 2, BASE, Some(own)),
+            Found::Unconfirmed("unins001.exe".into())
         );
-        // A log naming another product's (its ini says so) is shared too.
-        let base = "Creating new uninstall log: C:\\GOG\\journey\\unins000.dat";
+        // The base's ini at the log's own slot doesn't confirm it either.
+        let d = dir_with(&[
+            ("unins001.exe", "MZ"),
+            ("unins001.dat", ""),
+            ("unins001.ini", "productID=1519147341\n"),
+        ]);
         assert_eq!(
-            find_uninstaller(d.path(), WIN, 2, Some(base)),
-            Found::Shared("unins000.exe".into())
+            find_uninstaller(d.path(), WIN, 2, BASE, Some(own)),
+            Found::Shared("unins001.exe".into())
+        );
+        let appended = "x   Will append to existing uninstall log: C:\\GOG\\journey\\unins003.dat";
+        assert_eq!(
+            find_uninstaller(d.path(), WIN, 2, BASE, Some(appended)),
+            Found::Shared("unins003.exe".into())
         );
     }
 
     #[test]
     fn an_uninstaller_with_its_dat_gone_isnt_one() {
         let d = dir_with(&[("unins001.exe", "MZ"), ("unins001.ini", "productID=5\n")]);
-        assert_eq!(find_uninstaller(d.path(), WIN, 5, None), Found::None);
+        assert_eq!(find_uninstaller(d.path(), WIN, 5, BASE, None), Found::None);
+    }
+
+    #[test]
+    fn a_log_about_another_dir_matches_nothing_and_case_is_unicode() {
+        let log =
+            "t   -- File entry --\nt   Dest filename: D:\\Other\\x.pak\nt   Installing the file.\n";
+        let f = log_files(log, WIN, 9);
+        assert!(!f.matched && f.installed.is_empty());
+        let log = "t   -- File entry --\nt   Dest filename: C:\\GOG\\ÉPOPÉE\\Data\\x.pak\n\
+                   t   Dest file exists.\nt   Installing the file.\n";
+        let f = log_files(log, "C:\\GOG\\épopée", 9);
+        assert!(f.matched);
+        assert_eq!(f.replaced, vec!["Data/x.pak"]);
+    }
+
+    #[test]
+    fn an_install_log_older_than_the_info_isnt_trusted() {
+        let d = dir_with(&[("log", "x"), ("info", "{}")]);
+        let (log, info) = (d.path().join("log"), d.path().join("info"));
+        let at = |p: &Path, secs: u64| {
+            let t = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+            std::fs::File::options()
+                .write(true)
+                .open(p)
+                .unwrap()
+                .set_modified(t)
+                .unwrap();
+        };
+        at(&log, 1_000_000);
+        at(&info, 1_000_060);
+        assert!(log_is_current(&log, Some(&info)), "within the slack");
+        at(&info, 1_000_000 + 3600);
+        assert!(!log_is_current(&log, Some(&info)), "an earlier install's");
+        assert!(
+            log_is_current(&log, None),
+            "the info is gone (a resumed removal)"
+        );
+        assert!(!log_is_current(&d.path().join("none"), None));
     }
 
     #[test]
@@ -932,6 +1135,7 @@ t   Dest filename: C:\\GOG\\journey\\Data\\dlc.pak
 t   Installing the file.
 ";
         let f = log_files(log, WIN, 9);
+        assert!(f.matched);
         assert_eq!(
             f.installed,
             vec![

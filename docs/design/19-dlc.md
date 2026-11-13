@@ -1082,10 +1082,14 @@ in it.
 
 **Decisions (2026-11-13):**
 
-1. **Finding the uninstaller.** The `unins<n>.ini` in the base game's dir whose
-   `productID` is the DLC's id, with its `.exe` and `.dat` beside it. Else the
-   uninstall log the DLC's Inno log names (`install/dlc-<id>-inno.log`). The registry
-   isn't read. Neither, with the DLC's `goggame-<id>.info` still there: refused, exit
+1. **Finding the uninstaller.** The one `unins<n>.ini` in the base game's dir whose
+   `productID` is the DLC's id, with its `.exe` and `.dat` beside it; several naming
+   it are refused (gogo won't pick one). Else the uninstall log the DLC's Inno log
+   names (`install/dlc-<id>-inno.log`), only when it is confirmed: its slot's ini names
+   the DLC, or, with no readable ini there, the base game's ini names the base at
+   another slot. Slot 0 (`unins000`) is the base game's and is never taken as a DLC's,
+   from an ini or a log: running it would uninstall the whole game. The registry isn't
+   read. Neither, with the DLC's `goggame-<id>.info` still there: refused, exit
    7, nothing written, naming the rebuild with `--dlc` for the DLC to keep (or
    `--no-dlcs`), which keeps the prefix and saves. Neither, with the info gone too:
    only its record goes (no runtime needed).
@@ -1096,8 +1100,13 @@ in it.
 3. **A DLC that replaced game files** (its Inno log has a `Dest file exists.` entry in
    the game's dir that it then installed, other than its own `goggame-<id>.*` and
    uninstaller): refused, exit 7, listing them, with the rebuild. Inno deletes what it
-   installed and keeps no older copy, so the game would lose those files. With no
-   install log, the plan says this can't be checked, and the consent covers it.
+   installed and keeps no older copy, so the game would lose those files. The log is
+   only trusted when it is the recorded install's and about the game's dir: an
+   installer run deletes the DLC's old log before it starts, a log older than the
+   DLC's info (by more than two minutes) is an earlier install's, and a log with no
+   file entry under the game's dir (compared by path component without case, Unicode)
+   says nothing. With no log it can trust, the plan says this can't be checked, the
+   log isn't used to find the uninstaller either, and the consent covers it.
 4. **Order.** Plan (names against the installed set, each DLC's uninstaller, the
    saves line) → the question (default no; `--yes`, and headless needs it) → settle
    a pending rollback → the game's lock → refuse a running game → read the game again
@@ -1123,8 +1132,12 @@ in it.
    more, runs every DLC the journal names again (one whose info and uninstaller are both
    gone counts as done); `dlc remove --abandon` drops the journal under the lock, and
    the record follows the prefix (a DLC whose info is gone is no longer recorded, one
-   whose info is there stays); and a rollback to `before removing` undoes it, so this
-   journal doesn't refuse a rollback either. An add refuses a removal's journal and
+   whose info is there stays, though its uninstaller may have taken some of its files,
+   so the message names the rollback and the rebuild that put it back whole; a journal
+   naming no DLC is a finished removal); and a rollback to `before removing` undoes
+   it, so this
+   journal doesn't refuse a rollback either. An add refuses a removal's journal (before
+   any network or question) and
    `dlc add --abandon` a removal (naming `dlc remove --abandon`), and the other way
    round. The launcher's dialog, doctor's `dlc` finding, the snapshot refusals and the
    depot lane's recovery name the removal's ways out for a removal's journal
@@ -1133,7 +1146,7 @@ in it.
    `saves made with <DLC> may not load without it; the snapshot "before removing <DLC>"
    can restore the game, or gogo linux-app dlc <gogid> add <id> brings it back`.
 8. **What the uninstaller leaves.** Each game-dir file the DLC's Inno log says it
-   installed that is still there afterwards is reported (`left` in `--json`, a warning
+   installed that is still there afterwards (found without case) is reported (`left` in `--json`, a warning
    otherwise); gogo deletes none of them: it didn't lay them, and a path may be the
    base game's. Registry values are the uninstaller's business.
 9. **Version and language:** none apply. Nothing is downloaded, and no installer is
@@ -1145,16 +1158,19 @@ in it.
     `autosnapshot`). `--json` prints `{gogid, lane, dlcs, removed, resumed, left?,
     snapshot, pruned, warnings?}`; `--abandon --json` prints `{gogid, dropped, kept}`.
 
-**Tests:** `dlc_uninstall`'s unit tests (the ini, the log's `Creating new` and `Will
-append`, a missing `.dat`, the log's installed and replaced files, the flags) and
+**Tests:** `dlc_uninstall`'s unit tests (the ini, slot 0 from an ini or a log, two
+inis naming the DLC, the log's `Creating new` and `Will append` with and without the
+base's ini confirming it, a missing `.dat`, the log's installed and replaced files, a
+log about another dir, Unicode case, a log older than the info, the flags) and
 `linuxapp_pipeline`'s, on a fake umu whose DLC installers write `unins<n>` and an Inno
 log and whose uninstallers take them out: two DLC removed newest first in the game's
 prefix; a stop after one, the doctor/snapshot/add/abandon refusals, and the bare rerun;
 an uninstaller that exits 4, one that leaves its info, `--abandon` keeping a DLC whose
 info is there and dropping one whose info is gone, one that leaves a file; a DLC that
 appended to the base's uninstaller, one that replaced `game.exe`, one with no
-uninstaller, and one whose files are gone already (no runtime). The launcher's dialog
-for a removal's journal.
+uninstaller, and one whose files are gone already (no runtime); an install log older
+than the info (the plan's note), a journal naming no DLC, and a left file in another
+case. The launcher's dialog for a removal's journal.
 
 **e2e.** Through a manifest's `[[installer_dlc.remove]]` (`docs/linux-e2e.md`), with
 Journey to the Savage Planet built with Hot Garbage: `e2e/dlc-remove-clean-1519147341.toml`
