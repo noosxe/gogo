@@ -132,15 +132,33 @@ pub(crate) fn names_of(ids: &[u64], infos: &[DlcInfo]) -> String {
         .join(", ")
 }
 
+/// An error's text for a plan note.
+fn error_text(e: &AppError) -> String {
+    match e {
+        AppError::Config(e) => e.to_string(),
+        AppError::Usage => "a usage error".into(),
+        AppError::Auth(e) => e.to_string(),
+        AppError::Api(e) => e.to_string(),
+        AppError::MacApp(e) => e.to_string(),
+        AppError::Depot(e) => e.to_string(),
+        AppError::Io(e) => e.to_string(),
+    }
+}
+
+/// The base installer's language as far as gogo can tell.
+struct Lang {
+    /// The language the DLC installers are fetched in.
+    code: String,
+    /// It's the base installer's own (its catalog entry's, from gogo's download
+    /// record), not a guess from `--lang` or `[gog] language`.
+    known: bool,
+    /// `--lang` differs from the known language: a usage error once DLC are chosen.
+    conflict: Option<String>,
+}
+
 /// The base installer's language: its catalog entry's (from the record), else
-/// `--lang`, else `[gog] language`. A `--lang` that differs from a known one is a
-/// usage error: the DLC follow the base.
-fn language_for(
-    facts: &SetupFacts,
-    detail: &Product,
-    ask: &DlcAsk,
-    configured: &str,
-) -> Result<String, String> {
+/// `--lang`, else `[gog] language`, unconfirmed. The DLC follow the base.
+fn language_for(facts: &SetupFacts, detail: &Product, ask: &DlcAsk, configured: &str) -> Lang {
     let known = facts.entry.as_ref().and_then(|id| {
         detail
             .downloads
@@ -151,13 +169,24 @@ fn language_for(
             .and_then(|e| e.language.clone())
     });
     match (known, &ask.lang) {
-        (Some(k), Some(l)) if !gogo::gog::language::same_language(l, &k) => Err(format!(
-            "--lang {l}: the game's installer is in {k}, and its DLC's installers follow it; \
-             download the installer in {l} to build in it"
-        )),
-        (Some(k), _) => Ok(k),
-        (None, Some(l)) => Ok(l.clone()),
-        (None, None) => Ok(configured.to_string()),
+        (Some(k), Some(l)) if !gogo::gog::language::same_language(l, &k) => Lang {
+            conflict: Some(format!(
+                "--lang {l}: the game's installer is in {k}, and its DLC's installers follow \
+                 it; download the installer in {l} to build in it"
+            )),
+            code: k,
+            known: true,
+        },
+        (Some(k), _) => Lang {
+            code: k,
+            known: true,
+            conflict: None,
+        },
+        (None, l) => Lang {
+            code: l.clone().unwrap_or_else(|| configured.to_string()),
+            known: false,
+            conflict: None,
+        },
     }
 }
 
@@ -196,7 +225,25 @@ pub(crate) async fn plan_build(
             return Ok(out);
         }
     };
-    let facts = crate::phase(machine, "checking the setup", identify(&ctx, &token, setup)).await?;
+    // Without a DLC flag every lookup is best effort: a base build needs no network.
+    let looked = |out: &mut BuildChoice, what: &str, e: AppError| -> Result<(), AppError> {
+        if asked {
+            return Err(e);
+        }
+        out.notes.push(format!(
+            "couldn't {what} ({}): building without DLC",
+            error_text(&e)
+        ));
+        Ok(())
+    };
+    let facts =
+        match crate::phase(machine, "checking the setup", identify(&ctx, &token, setup)).await {
+            Ok(f) => f,
+            Err(e) => {
+                looked(&mut out, "tell which game the setup is for", e)?;
+                return Ok(out);
+            }
+        };
     let Some(gogid) = facts.gogid else {
         soft(
             &mut out,
@@ -208,19 +255,21 @@ pub(crate) async fn plan_build(
         )?;
         return Ok(out);
     };
-    let (detail, owned) = crate::phase(machine, "checking the game's DLC", async {
+    let looked_up = crate::phase(machine, "checking the game's DLC", async {
         let detail = gogo::gog::catalog::detail(&ctx.http, &token, gogid).await?;
         let owned = gogo::gog::library::owned_ids(&ctx.http, &token).await?;
         Ok::<_, AppError>((detail, owned))
     })
-    .await?;
-    let language = match language_for(&facts, &detail, ask, &ctx.cfg.gog.language) {
-        Ok(l) => l,
+    .await;
+    let (detail, owned) = match looked_up {
+        Ok(d) => d,
         Err(e) => {
-            eprintln!("gogo: {e}");
-            return Err(AppError::Usage);
+            looked(&mut out, "look up the game's DLC", e)?;
+            return Ok(out);
         }
     };
+    let lang = language_for(&facts, &detail, ask, &ctx.cfg.gog.language);
+    let language = lang.code.clone();
     let current = dlc::installer_version(&detail, &language);
     let file = setup
         .file_name()
@@ -232,7 +281,8 @@ pub(crate) async fn plan_build(
         .or_else(|| di::setup_version(&file, current.as_deref()));
     out.build.gogid = Some(gogid.to_string());
     out.build.version = version.clone();
-    out.build.language = Some(language.clone());
+    // Recorded only when known; chosen DLC confirm it (below).
+    out.build.language = lang.known.then(|| language.clone());
 
     let title = detail.title.clone().unwrap_or_else(|| gogid.to_string());
     let infos = dlc::installer_infos(&detail.expanded_dlcs, &owned, &language);
@@ -282,6 +332,11 @@ pub(crate) async fn plan_build(
     if ids.is_empty() {
         return Ok(out);
     }
+    if let Some(e) = &lang.conflict {
+        eprintln!("gogo: {e}");
+        return Err(AppError::Usage);
+    }
+    out.build.language = Some(language.clone());
     match di::version_check(version.as_deref(), current.as_deref()) {
         VersionCheck::Same => {}
         VersionCheck::Differs { installed, current } => {
