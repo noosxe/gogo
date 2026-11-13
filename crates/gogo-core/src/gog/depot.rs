@@ -86,6 +86,11 @@ pub enum DepotEvent {
     Verifying {
         fraction: f32,
     },
+    /// Something the run says in passing: a switch of builds that fell back to
+    /// hashing the cache (design 21 §3.5, #429).
+    Note {
+        message: String,
+    },
     Finished {
         install_dir: PathBuf,
         /// Files the run wrote (new, or changed since it started) and their
@@ -573,16 +578,35 @@ pub async fn run(
     } else {
         estimate_switch(&check, prior.as_ref(), &manifest, &language, &dlcs)
     };
-    let inputs = download_inputs(
-        generation,
-        &language,
-        &dlcs,
-        &check,
-        prior
-            .as_ref()
-            .and_then(|r| r.whole_dlcs(&language))
-            .unwrap_or(&[]),
-    );
+    // A cache of another build whose manifest is known switches by its diff
+    // (design 21 §3.5, #429); without it, it is hashed.
+    let cached = prior.as_ref().map(|r| CachedBuild {
+        build_id: &r.build_id,
+        language: r.language.as_deref(),
+        dlcs: r.dlcs.as_deref(),
+    });
+    let old_manifest = match &cached {
+        Some(c) if can_switch(generation, &language, &check, c) => {
+            cached_manifest(core, product_id, c.build_id, &builds.builds).await
+        }
+        _ => None,
+    };
+    let verify_inputs = || {
+        download_inputs(
+            generation,
+            &language,
+            &dlcs,
+            &check,
+            prior
+                .as_ref()
+                .and_then(|r| r.whole_dlcs(&language))
+                .unwrap_or(&[]),
+        )
+    };
+    let inputs = match (&old_manifest, &cached) {
+        (Some(_), Some(c)) => switch_inputs(&language, &dlcs, c),
+        _ => verify_inputs(),
+    };
     let install_dir = install_root.join(manifest.install_directory());
     let game_files = cfg!(target_os = "linux").then(|| {
         let game_dir = crate::macapp::launch::GameDirs::for_build(
@@ -630,23 +654,43 @@ pub async fn run(
     // the finished download replaces this one, the tree may mix both builds, so the
     // record says so (design 21 §3.5). A cache nobody can vouch for is refused.
     mark_upgrading(&install_root, &build_id)?;
-    let (fetched_files, fetched_bytes) = fetch_into(
-        core,
-        &FetchSpec {
-            manifest: &manifest,
-            build_id: &build_id,
-            inputs: &inputs,
-            install_root: &install_root,
-            support_root: &support_root,
-            deps_root: &deps_root,
-            limit: opts.limit,
-            disk_check: opts.disk_check,
-        },
-        events,
-        cancel,
-        free_space,
-    )
-    .await?;
+    // gog-warp's `!Temp`: a hashing run never reads it, and a switch starts from a
+    // whole cache of the old build, so what's there is an earlier run's leftover
+    // (#362). Only a targeted DLC run resumes from it.
+    if inputs.switch_from.is_some() || !inputs.targeted {
+        clear_warp_temp(&install_dir);
+    }
+    let spec = FetchSpec {
+        manifest: &manifest,
+        build_id: &build_id,
+        inputs: &inputs,
+        old_manifest: old_manifest.as_ref(),
+        install_root: &install_root,
+        support_root: &support_root,
+        deps_root: &deps_root,
+        limit: opts.limit,
+        disk_check: opts.disk_check,
+    };
+    let (fetched_files, fetched_bytes) = match &inputs.switch_from {
+        Some(from) => {
+            let verify = verify_inputs();
+            let verify_spec = FetchSpec {
+                inputs: &verify,
+                old_manifest: None,
+                ..spec
+            };
+            switch_or_verify(
+                &install_dir,
+                from,
+                cancel,
+                events,
+                fetch_into(core, &spec, events, cancel, free_space),
+                || fetch_into(core, &verify_spec, events, cancel, free_space),
+            )
+            .await?
+        }
+        None => fetch_into(core, &spec, events, cancel, free_space).await?,
+    };
     // The download is done either way; without a record (a full disk, say)
     // the next reuse just checks it again.
     let held = record_dlcs(prior.as_ref(), &build_id, &language, &dlcs);
@@ -763,6 +807,8 @@ pub struct FetchSpec<'a> {
     pub manifest: &'a Manifest,
     pub build_id: &'a str,
     pub inputs: &'a DownloadInputs,
+    /// The cache's build manifest, for a switch ([`DownloadInputs::switch_from`]).
+    pub old_manifest: Option<&'a Manifest>,
     pub install_root: &'a Path,
     pub support_root: &'a Path,
     pub deps_root: &'a Path,
@@ -797,7 +843,9 @@ pub async fn fetch_into(
         .support_root(spec.support_root.to_path_buf())
         .global_dependencies_root(spec.deps_root.to_path_buf())
         .game_dependencies(deps_manifest);
-    let builder = spec.inputs.apply(builder, spec.manifest, spec.build_id);
+    let builder = spec
+        .inputs
+        .apply(builder, spec.manifest, spec.build_id, spec.old_manifest);
     let mut downloader = builder.build().map_err(DepotError::library)?;
 
     if let Some(bps) = spec.limit {
@@ -856,8 +904,14 @@ pub const RECORD: &str = ".gogo-depot.json";
 
 /// gog-warp's own marker of a download in progress; gone when one finishes.
 const WARP_MARKER: &str = ".gog-warp-build";
-/// gog-warp's temp dir for updates, under the cache root.
+/// gog-warp's temp dir for diffs from an old manifest: in the game tree's dir
+/// (`<root>/<installDirectory>/!Temp`), where its move loop renames from.
 const WARP_TEMP: &str = "!Temp";
+
+/// Remove what a diff left in gog-warp's `!Temp` of game tree `install_dir`.
+fn clear_warp_temp(install_dir: &Path) {
+    let _ = std::fs::remove_dir_all(install_dir.join(WARP_TEMP));
+}
 
 #[derive(Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1421,12 +1475,12 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) -> std::io::Result<()> {
         let rel = path.strip_prefix(root).expect("under root");
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if dir == root
-            && (name == RECORD
-                || name == WARP_MARKER
-                || name == format!("{RECORD}.tmp")
-                || name == WARP_TEMP)
+        if dir == root && (name == RECORD || name == WARP_MARKER || name == format!("{RECORD}.tmp"))
         {
+            continue;
+        }
+        // gog-warp's scratch, at the root or in the game tree's dir.
+        if name == WARP_TEMP && (dir == root || dir.parent() == Some(root)) {
             continue;
         }
         // Not the download's: Finder's, and gog-warp's own leftovers.
@@ -1661,8 +1715,11 @@ fn estimate_switch(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DownloadInputs {
     /// Diff against the same build with the recorded DLC (no hashing), not a
-    /// full `verify`.
+    /// full `verify`; against build `switch_from` when that is set.
     pub targeted: bool,
+    /// A switch of builds (design 21 §3.5): diff from this build, the cache's,
+    /// whose manifest the fetch is given.
+    pub switch_from: Option<String>,
     /// `None`: the library's default (generation 1 names it by `old_language`).
     pub language: Option<String>,
     pub old_language: Option<String>,
@@ -1688,6 +1745,7 @@ pub fn download_inputs(
         all.dedup();
         return DownloadInputs {
             targeted: true,
+            switch_from: None,
             language: Some(language.to_string()),
             old_language: Some(language.to_string()),
             dlcs: all,
@@ -1697,6 +1755,7 @@ pub fn download_inputs(
     if generation == 1 {
         DownloadInputs {
             targeted: false,
+            switch_from: None,
             language: None,
             old_language: Some(v1_language(language)),
             dlcs: Vec::new(),
@@ -1705,11 +1764,132 @@ pub fn download_inputs(
     } else {
         DownloadInputs {
             targeted: false,
+            switch_from: None,
             language: Some(language.to_string()),
             old_language: None,
             dlcs: wanted.to_vec(),
             old_dlcs: Vec::new(),
         }
+    }
+}
+
+/// What a cache record says about its build, for a switch (design 21 §3.5).
+#[derive(Debug, Clone, Copy)]
+pub struct CachedBuild<'a> {
+    pub build_id: &'a str,
+    pub language: Option<&'a str>,
+    /// `None`: a record from before DLC tracking.
+    pub dlcs: Option<&'a [String]>,
+}
+
+/// Pure: whether a cache of another build can be switched to the wanted one by
+/// diffing from its build (`upgrade_from`, design 21 §3.5) rather than hashing it.
+/// Only a generation-2 build, from a record that names its language (the wanted
+/// one) and DLC; the caller then needs the cached build's manifest.
+pub fn can_switch(
+    generation: u32,
+    language: &str,
+    check: &CacheCheck,
+    cached: &CachedBuild<'_>,
+) -> bool {
+    generation == 2
+        && *check == CacheCheck::OtherBuild
+        && cached
+            .language
+            .is_some_and(|l| l.eq_ignore_ascii_case(language))
+        && cached.dlcs.is_some()
+}
+
+/// Pure: the inputs of a switch from `cached` (see [`can_switch`]). The new side is
+/// the wanted DLC; the old side the recorded ones still wanted, so a recorded DLC
+/// the run doesn't take is left as it is (as `verify` leaves it), not deleted, and
+/// the record drops it.
+pub fn switch_inputs(
+    language: &str,
+    wanted: &[String],
+    cached: &CachedBuild<'_>,
+) -> DownloadInputs {
+    let old_dlcs: Vec<String> = cached
+        .dlcs
+        .unwrap_or(&[])
+        .iter()
+        .filter(|d| wanted.contains(d))
+        .cloned()
+        .collect();
+    DownloadInputs {
+        targeted: true,
+        switch_from: Some(cached.build_id.to_string()),
+        language: Some(language.to_string()),
+        old_language: Some(cached.language.unwrap_or(language).to_string()),
+        dlcs: wanted.to_vec(),
+        old_dlcs,
+    }
+}
+
+/// The cached build's manifest from the game dir `game_root`'s
+/// `build-manifest.json` (design 21 §5.2), when it is build `build_id`'s and of
+/// generation 2.
+pub fn kept_manifest(game_root: &Path, build_id: &str) -> Option<Manifest> {
+    super::build_manifest::load(game_root)
+        .filter(|s| s.build_id == build_id && s.generation == 2)
+        .map(|s| s.manifest)
+        .filter(|m| matches!(m, Manifest::V2(_)))
+}
+
+/// The manifest of the cache's build `from`: the one kept in the game dir, else
+/// GOG's listing. `None` when neither has it: the switch verifies.
+async fn cached_manifest(
+    core: &Core,
+    product_id: u64,
+    from: &str,
+    listed: &[Build],
+) -> Option<Manifest> {
+    let kept = crate::macapp::launch::GameDirs::for_game(&product_id.to_string())
+        .ok()
+        .and_then(|d| kept_manifest(&d.root, from));
+    if kept.is_some() {
+        return kept;
+    }
+    let b = listed.iter().find(|b| b.build_id() == from)?;
+    if *b.generation() != 2 {
+        return None;
+    }
+    core.get_manifest(b)
+        .await
+        .ok()
+        .filter(|m| matches!(m, Manifest::V2(_)))
+}
+
+/// Run `switch` (a diff from the cache's build); when it fails, and the run
+/// wasn't cancelled, say so and run `verify` instead (design 21 §3.5, #429):
+/// gog-warp's move out of `!Temp` can fail on directory entries (#362). Its
+/// `!Temp` in game tree `install_dir` is removed first: what the switch left
+/// there is redone by the check. The cache record keeps its `upgrading` marker
+/// throughout, so a cache that neither run finished is checked next time.
+pub async fn switch_or_verify<S, V>(
+    install_dir: &Path,
+    from: &str,
+    cancel: &CancellationToken,
+    events: &tokio::sync::mpsc::UnboundedSender<DepotEvent>,
+    switch: S,
+    verify: impl FnOnce() -> V,
+) -> Result<(u64, u64), DepotError>
+where
+    S: std::future::Future<Output = Result<(u64, u64), DepotError>>,
+    V: std::future::Future<Output = Result<(u64, u64), DepotError>>,
+{
+    match switch.await {
+        Err(e) if !cancel.is_cancelled() => {
+            let _ = events.send(DepotEvent::Note {
+                message: format!(
+                    "switching the cache from build {from} by its changed files failed \
+                     ({e}); checking the cache (hashing) and fetching what's missing instead"
+                ),
+            });
+            clear_warp_temp(install_dir);
+            verify().await
+        }
+        r => r,
     }
 }
 
@@ -1730,13 +1910,20 @@ pub fn add_inputs(language: &str, installed: &[String], wanted: &[String]) -> Do
 
 impl DownloadInputs {
     /// Set them on the builder: `manifest` is the build being downloaded, also
-    /// the old one for a targeted run.
-    pub fn apply(&self, mut b: Builder, manifest: &Manifest, build_id: &str) -> Builder {
-        if self.targeted {
-            b = b.upgrade_from(manifest.clone(), build_id);
-        } else {
-            b = b.verify();
-        }
+    /// the old one for a targeted run; `old` is the cache's build for a switch.
+    /// A switch without its old manifest verifies.
+    pub fn apply(
+        &self,
+        mut b: Builder,
+        manifest: &Manifest,
+        build_id: &str,
+        old: Option<&Manifest>,
+    ) -> Builder {
+        b = match (&self.switch_from, old) {
+            (Some(from), Some(old)) if self.targeted => b.upgrade_from(old.clone(), from),
+            (None, _) if self.targeted => b.upgrade_from(manifest.clone(), build_id),
+            _ => b.verify(),
+        };
         if let Some(l) = &self.language {
             b = b.language(l.clone());
         }
@@ -1778,9 +1965,13 @@ fn cache_note(check: &CacheCheck, inputs: &DownloadInputs) -> Option<String> {
              fetching the rest; the other language's files stay in the cache, and builds \
              leave them out"
             .into(),
-        CacheCheck::OtherBuild => {
-            "cache holds another build: checking it (hashing) and fetching the new one".into()
-        }
+        CacheCheck::OtherBuild => match &inputs.switch_from {
+            Some(from) if inputs.targeted => format!(
+                "cache holds build {from}: fetching only the files this build changed (no \
+                 hashing) and deleting the ones it dropped"
+            ),
+            _ => "cache holds another build: checking it (hashing) and fetching the new one".into(),
+        },
         CacheCheck::Interrupted { from, to } => format!(
             "an earlier switch from build {from} to {to} didn't finish: checking the cache \
              (hashing) and fetching what's missing"
@@ -2147,6 +2338,7 @@ mod tests {
             got,
             DownloadInputs {
                 targeted: true,
+                switch_from: None,
                 language: Some("de-DE".into()),
                 old_language: Some("de-DE".into()),
                 dlcs: ids(&["5", "7"]),
@@ -2332,6 +2524,7 @@ mod tests {
             i,
             DownloadInputs {
                 targeted: true,
+                switch_from: None,
                 language: Some("de-DE".into()),
                 old_language: Some("de-DE".into()),
                 dlcs: ids(&["5", "7", "9"]),
@@ -2626,5 +2819,247 @@ mod tests {
                 .unwrap()
                 .contains("upgrading")
         );
+    }
+
+    fn cached<'a>(language: Option<&'a str>, dlcs: Option<&'a [String]>) -> CachedBuild<'a> {
+        CachedBuild {
+            build_id: "b1",
+            language,
+            dlcs,
+        }
+    }
+
+    #[test]
+    fn only_another_generation_2_build_in_the_same_language_with_known_dlc_switches() {
+        let none: &[String] = &[];
+        let ok = cached(Some("en-US"), Some(none));
+        assert!(can_switch(2, "en-US", &CacheCheck::OtherBuild, &ok));
+        assert!(can_switch(
+            2,
+            "EN-us",
+            &CacheCheck::OtherBuild,
+            &cached(Some("en-US"), Some(none))
+        ));
+        // Generation 1, another language, a record without language or DLC: hashed.
+        assert!(!can_switch(1, "en-US", &CacheCheck::OtherBuild, &ok));
+        assert!(!can_switch(2, "de-DE", &CacheCheck::OtherBuild, &ok));
+        assert!(!can_switch(
+            2,
+            "en-US",
+            &CacheCheck::OtherBuild,
+            &cached(None, Some(none))
+        ));
+        assert!(!can_switch(
+            2,
+            "en-US",
+            &CacheCheck::OtherBuild,
+            &cached(Some("en-US"), None)
+        ));
+        // Anything but a whole cache of another build: an interrupted switch, lost
+        // files, the same build lacking DLC, are never diffed from the record.
+        for check in [
+            CacheCheck::Interrupted {
+                from: "b0".into(),
+                to: "b1".into(),
+            },
+            CacheCheck::Missing {
+                shown: vec!["a".into()],
+                count: 1,
+            },
+            CacheCheck::Unrecorded,
+            CacheCheck::Complete,
+            CacheCheck::OtherLanguage,
+            CacheCheck::UnknownContent,
+            CacheCheck::MissingDlc {
+                missing: vec!["7".into()],
+            },
+        ] {
+            assert!(!can_switch(2, "en-US", &check, &ok), "{check:?}");
+        }
+    }
+
+    #[test]
+    fn a_switch_diffs_from_the_cached_build_and_the_dlc_still_wanted() {
+        let held = ["7".to_string(), "8".to_string()];
+        let c = cached(Some("en-US"), Some(&held));
+        let got = switch_inputs("en-US", &["8".into(), "9".into()], &c);
+        assert_eq!(
+            got,
+            DownloadInputs {
+                targeted: true,
+                switch_from: Some("b1".into()),
+                language: Some("en-US".into()),
+                old_language: Some("en-US".into()),
+                // 9 is new: fetched whole; 7 isn't wanted: left alone, not deleted.
+                dlcs: vec!["8".into(), "9".into()],
+                old_dlcs: vec!["8".into()],
+            }
+        );
+        let note = cache_note(&CacheCheck::OtherBuild, &got).unwrap();
+        assert!(note.contains("b1") && note.contains("no hashing"), "{note}");
+        // Without the old manifest it's the hashing path, and the plan says so.
+        let v = download_inputs(2, "en-US", &[], &CacheCheck::OtherBuild, &[]);
+        assert!(v.switch_from.is_none() && !v.targeted);
+        assert!(
+            cache_note(&CacheCheck::OtherBuild, &v)
+                .unwrap()
+                .contains("hashing")
+        );
+    }
+
+    fn v2_manifest() -> Manifest {
+        serde_json::from_value(serde_json::json!({
+            "baseProductId": "1", "installDirectory": "G", "platform": "windows",
+            "products": [{"name": "G", "productId": "1", "temp_executable": "", "temp_arguments": ""}],
+            "depots": [{"size": 9, "compressedSize": 4, "languages": ["en-US"],
+                        "manifest": "e", "productId": "1"}]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_kept_manifest_serves_only_its_own_generation_2_build() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(kept_manifest(d.path(), "b1").is_none());
+        let m = v2_manifest();
+        assert!(matches!(m, Manifest::V2(_)));
+        super::super::build_manifest::write(d.path(), "b1", 2, &m).unwrap();
+        assert!(kept_manifest(d.path(), "b1").is_some());
+        assert!(kept_manifest(d.path(), "b2").is_none());
+        super::super::build_manifest::write(d.path(), "b1", 1, &m).unwrap();
+        assert!(kept_manifest(d.path(), "b1").is_none());
+    }
+
+    /// A cache of b1 switching to b2, marked as `run` marks it.
+    fn switching_cache() -> tempfile::TempDir {
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path();
+        std::fs::create_dir_all(root.join("Game/Data")).unwrap();
+        std::fs::write(root.join("Game/Data/a.bin"), b"x").unwrap();
+        write_record(root, "b1", "en-US", &[]).unwrap();
+        mark_upgrading(root, "b2").unwrap();
+        t
+    }
+
+    fn stuck() -> CacheCheck {
+        CacheCheck::Interrupted {
+            from: "b1".into(),
+            to: "b2".into(),
+        }
+    }
+
+    fn notes(rx: &mut tokio::sync::mpsc::UnboundedReceiver<DepotEvent>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            if let DepotEvent::Note { message } = e {
+                out.push(message);
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn a_failed_switch_says_why_and_verifies_instead() {
+        let t = switching_cache();
+        let root = t.path();
+        // What gog-warp's move loop leaves in the game tree's `!Temp` when a
+        // directory rename fails (#362, seen on a real switch).
+        let game = root.join("Game");
+        std::fs::create_dir_all(game.join("!Temp/Data")).unwrap();
+        std::fs::write(game.join("!Temp/Data/b.bin"), b"y").unwrap();
+        std::fs::write(game.join("!Temp/.gog-warp-build"), b"b2").unwrap();
+        // The record never lists it.
+        write_record(root, "b1", "en-US", &[]).unwrap();
+        mark_upgrading(root, "b2").unwrap();
+        let rec = load_record(root).unwrap();
+        assert_eq!(rec.files, ["Game/Data/a.bin"]);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        let verified = std::cell::Cell::new(false);
+        let got = switch_or_verify(
+            &game,
+            "b1",
+            &cancel,
+            &tx,
+            async {
+                Err(DepotError::Library(
+                    "Directory not empty (os error 39)".into(),
+                ))
+            },
+            || async {
+                verified.set(true);
+                // The check runs on a cache without the switch's leftovers.
+                assert!(!game.join("!Temp").exists());
+                assert!(game.join("Data/a.bin").exists());
+                Ok((3, 30))
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(got, (3, 30));
+        assert!(verified.get());
+        let n = notes(&mut rx);
+        assert_eq!(n.len(), 1, "{n:?}");
+        assert!(
+            n[0].contains("b1") && n[0].contains("os error 39") && n[0].contains("hashing"),
+            "{n:?}"
+        );
+        // Until the record of the finished download replaces it, the cache is
+        // still switching: never complete.
+        assert_eq!(check_cache(root, &CacheWant::default()), stuck());
+    }
+
+    #[tokio::test]
+    async fn a_switch_and_its_check_both_failing_leave_the_cache_marked() {
+        let t = switching_cache();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        let got = switch_or_verify(
+            t.path(),
+            "b1",
+            &cancel,
+            &tx,
+            async { Err(DepotError::Library("rename failed".into())) },
+            || async { Err(DepotError::Library("network".into())) },
+        )
+        .await;
+        assert!(matches!(got, Err(DepotError::Library(e)) if e == "network"));
+        // The next run sees the switch that didn't finish and hashes the tree.
+        let check = check_cache(t.path(), &CacheWant::default());
+        assert_eq!(check, stuck());
+        let none: &[String] = &[];
+        assert!(!can_switch(
+            2,
+            "en-US",
+            &check,
+            &cached(Some("en-US"), Some(none))
+        ));
+        assert!(!download_inputs(2, "en-US", &[], &check, &[]).targeted);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_or_finished_switch_runs_no_check() {
+        for (cancelled, result) in [
+            (true, Err(DepotError::Library("cancelled".into()))),
+            (false, Ok((5, 50))),
+        ] {
+            let t = switching_cache();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let cancel = CancellationToken::new();
+            if cancelled {
+                cancel.cancel();
+            }
+            let ok = result.is_ok();
+            let got = switch_or_verify(t.path(), "b1", &cancel, &tx, async { result }, || async {
+                panic!("no check after a cancel or a finished switch")
+            })
+            .await;
+            assert_eq!(got.is_ok(), ok);
+            assert!(notes(&mut rx).is_empty());
+            // Ctrl-C mid-switch: the marker stays, and the next run checks.
+            if cancelled {
+                assert_eq!(check_cache(t.path(), &CacheWant::default()), stuck());
+            }
+        }
     }
 }
