@@ -66,14 +66,26 @@ struct AddArgs {
     json: bool,
 }
 
-pub(crate) async fn connect() -> Result<(Arc<AppContext>, String), AppError> {
+async fn build_ctx() -> Result<Arc<AppContext>, AppError> {
     let built = AppContext::build(crate::load_config_from_env()?, true)
         .await
         .map_err(|e| {
             eprintln!("gogo: {e}");
             AppError::Usage
         })?;
-    let ctx = Arc::new(built);
+    Ok(Arc::new(built))
+}
+
+/// [`connect`] with the token refresh on a spinner (#422). The context is
+/// built first, outside it, because a failure there prints its own line.
+pub(crate) async fn connect_phase(machine: bool) -> Result<(Arc<AppContext>, String), AppError> {
+    let ctx = build_ctx().await?;
+    let token = crate::phase(machine, "refreshing the sign-in", crate::bearer(&ctx)).await?;
+    Ok((ctx, token))
+}
+
+pub(crate) async fn connect() -> Result<(Arc<AppContext>, String), AppError> {
+    let ctx = build_ctx().await?;
     let token = crate::bearer(&ctx).await?;
     Ok((ctx, token))
 }
@@ -275,7 +287,7 @@ async fn add_cmd(
     };
 
     // One spinner per phase (#422): nothing off a terminal or in a machine mode.
-    let (ctx, token) = crate::phase(machine, "refreshing the sign-in", connect()).await?;
+    let (ctx, token) = connect_phase(machine).await?;
     let session = core(&ctx)?;
     let id = game_id(&game);
     let title = title_of(&game);

@@ -10,7 +10,7 @@ use gogo::gog::{build_manifest, content, library};
 use gogo::linuxapp::dlc as add;
 use gogo::linuxapp::update::{self, BuildSide, Planned};
 
-use crate::dlc_cmd::{connect, core, interactive, report, title_of};
+use crate::dlc_cmd::{core, interactive, report, title_of};
 use crate::{AppError, cli, depot_mode, depot_progress};
 
 /// The flags of `linux-app update`.
@@ -115,7 +115,7 @@ pub async fn run(gogid: String, a: Args) -> Result<i32, AppError> {
     }
 
     // One spinner per phase (#422): nothing off a terminal or in a machine mode.
-    let (ctx, token) = crate::phase(machine, "refreshing the sign-in", connect()).await?;
+    let (ctx, token) = crate::dlc_cmd::connect_phase(machine).await?;
     let session = core(&ctx)?;
     let id: u64 = gogid.parse().unwrap_or(0);
     let title = title_of(&game);
