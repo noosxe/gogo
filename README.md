@@ -382,6 +382,22 @@ or undoes it if the fetched files are gone. If GOG no longer serves the
 installed build, the add is refused, and the update is a rebuild:
 `gogo linux-app <gogid> --dlc ...` keeps the prefix and saves.
 
+**Updates** of a depot-built game, in place:
+
+```sh
+gogo linux-app update 1423049311 --dry-run          # the plan: versions, DLC kept, files dropped
+gogo linux-app update 1423049311 --yes              # the newest build on the game's branch
+gogo linux-app update 1423049311 --build 2.31a --yes   # a listed build, older ones too
+```
+
+The depot cache switches to the new build by its changed files, then the changed
+and new files are laid onto the game's files, and the ones the build dropped are
+taken out, under the same journal as `dlc add`. The prefix, saves, settings and
+DLC stay, and with snapshots on, a `before update` snapshot comes first. The
+update is refused, naming the rebuild that updates instead, when the build lacks
+an installed DLC or the depot cache isn't on the installed build. A game built
+from GOG's offline installer is updated with `gogo update <game>` and a rebuild.
+
 ```sh
 gogo linux-app compat 1207659013                                    # merged config, layer per field, protonfix summary
 gogo linux-app --retarget 1207659013 --renderer wined3d             # writes the override file, re-runs setup

@@ -66,7 +66,7 @@ struct AddArgs {
     json: bool,
 }
 
-async fn connect() -> Result<(Arc<AppContext>, String), AppError> {
+pub(crate) async fn connect() -> Result<(Arc<AppContext>, String), AppError> {
     let built = AppContext::build(crate::load_config_from_env()?, true)
         .await
         .map_err(|e| {
@@ -78,7 +78,7 @@ async fn connect() -> Result<(Arc<AppContext>, String), AppError> {
     Ok((ctx, token))
 }
 
-fn core(ctx: &AppContext) -> Result<&gog_warp::Core, AppError> {
+pub(crate) fn core(ctx: &AppContext) -> Result<&gog_warp::Core, AppError> {
     ctx.session
         .as_ref()
         .and_then(|p| p.gog_warp_core())
@@ -89,7 +89,7 @@ fn game_id(game: &Game) -> u64 {
     game.gogid.parse().unwrap_or(0)
 }
 
-fn title_of(game: &Game) -> String {
+pub(crate) fn title_of(game: &Game) -> String {
     gogo::linuxapp::game::read_launch_toml(&game.dirs)
         .map(|(t, _)| t.title)
         .unwrap_or_else(|_| game.gogid.clone())
@@ -182,7 +182,7 @@ async fn list(game: Game, json: bool) -> Result<i32, AppError> {
     Ok(cli::exit::OK)
 }
 
-fn interactive(machine: bool) -> bool {
+pub(crate) fn interactive(machine: bool) -> bool {
     !machine
         && std::io::IsTerminal::is_terminal(&std::io::stdin())
         && std::io::IsTerminal::is_terminal(&std::io::stderr())
@@ -536,7 +536,7 @@ async fn add_cmd(
 }
 
 /// Print an add's failure; its exit code (design 19 §7).
-fn report(e: AddError) -> i32 {
+pub(crate) fn report(e: AddError) -> i32 {
     match e {
         AddError::Interrupted(..) => {
             eprintln!("gogo: {e}");
