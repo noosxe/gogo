@@ -30,7 +30,11 @@ pub async fn run(gogid: String, cmd: cli::LinuxDlcCmd) -> Result<i32, AppError> 
             no_snapshots,
             json_progress,
             json,
+            abandon,
         } => {
+            if abandon {
+                return abandon_cmd(game, json).await;
+            }
             let limit = match &limit {
                 Some(spec) => Some(gogo::config::parse_rate(spec)?),
                 None => None,
@@ -1033,6 +1037,40 @@ fn emit_remove(ev: &ProgressEvent, json_progress: bool, quiet: bool, print: &dyn
 /// downloaded when missing (with the consent), run in the game's prefix under its
 /// lock, behind the `auto` snapshot and a journal. A rerun after a stop runs the
 /// stopped add's installers again.
+/// `dlc add --abandon` (design 19 §5.1): give up an unfinished offline-installer
+/// add. No network.
+async fn abandon_cmd(mut game: Game, json: bool) -> Result<i32, AppError> {
+    if is_depot(&game) {
+        eprintln!(
+            "gogo: --abandon is for offline-installer games; on {} a stopped add is finished \
+             or undone by `gogo linux-app dlc {} add`",
+            game.gogid, game.gogid
+        );
+        return Ok(cli::exit::USAGE);
+    }
+    // A lock, a read and a delete: no need for a blocking thread.
+    let gone = gogo::linuxapp::dlc_installer::abandon(&mut game)?;
+    if json {
+        println!("{}", serde_json::to_string(&gone).unwrap());
+    } else if gone.dropped.is_empty() {
+        eprintln!(
+            "gogo: {} has no unfinished DLC add: nothing to give up",
+            gone.gogid
+        );
+    } else {
+        let titles: Vec<&str> = gone.dropped.iter().map(|d| d.title.as_str()).collect();
+        eprintln!(
+            "gogo: gave up adding {} to {}: none of it is recorded and the game starts \
+             again. What the installers wrote stays in the prefix; rolling back to the \
+             snapshot taken before the add (`gogo linux-app snapshot {} list`) undoes it",
+            titles.join(", "),
+            gone.gogid,
+            gone.gogid
+        );
+    }
+    Ok(cli::exit::OK)
+}
+
 async fn installer_add_cmd(mut game: Game, a: AddArgs) -> Result<i32, AppError> {
     use gogo::linuxapp::dlc_installer::{self as di, VersionCheck};
     let machine = a.json || a.json_progress;

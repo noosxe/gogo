@@ -820,7 +820,8 @@ pub enum LinuxDlcCmd {
     /// the game's installer isn't the version GOG serves now. With no name
     /// and no `--all`, a picker on a terminal. Run it again after a stop: it
     /// resumes, or finishes or undoes a half-laid add (on an
-    /// offline-installer game, it runs the stopped add's installers again).
+    /// offline-installer game, it runs the stopped add's installers again;
+    /// `--abandon` gives that add up instead).
     Add {
         /// DLC by product id or title (several allowed); each must be owned.
         #[arg(value_name = "ID|TITLE", conflicts_with = "all")]
@@ -847,6 +848,12 @@ pub enum LinuxDlcCmd {
         /// Progress events as NDJSON on stdout.
         #[arg(long)]
         json_progress: bool,
+        /// Give up an offline-installer add that stopped or failed: its
+        /// journal goes and none of its DLC is recorded, so the game starts
+        /// again. What the DLC's installers wrote stays in the prefix; a
+        /// rollback to the snapshot taken before the add undoes it.
+        #[arg(long, conflicts_with_all = ["names", "all", "dry_run"])]
+        abandon: bool,
         /// Machine-readable summary.
         #[arg(long)]
         json: bool,

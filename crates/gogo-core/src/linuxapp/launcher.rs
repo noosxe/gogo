@@ -23,7 +23,7 @@ use crate::macapp::launch::GameDirs;
 /// Bumped with every change to [`TEMPLATE`] that matters to a game set up
 /// before it. Setup rewrites `launch.sh` whenever its bytes differ, so this
 /// is for people: the run log header and `launch.log` name it.
-pub const LAUNCHER_VERSION: u32 = 15;
+pub const LAUNCHER_VERSION: u32 = 16;
 
 /// `launch.sh`'s first word when a wrapper runs it for the game's own step
 /// (design 18 §7.8): the game's environment, then umu-run.
@@ -608,7 +608,11 @@ fi
 # which could damage a save: no launch until the add is finished or undone.
 if [ -e "$HERE/dlc-journal.json" ]; then
     log "a DLC add of $GOGID didn't finish (dlc-journal.json): not launching"
-    alert "A DLC install for $TITLE stopped before it finished, so its files may be half there. Run: gogo linux-app dlc $GOGID add (it finishes the install, or undoes it)"
+    if grep -q '"lane": *"installer"' "$HERE/dlc-journal.json" 2>/dev/null; then
+        alert "A DLC install for $TITLE stopped before it finished, so its files may be half there. Run: gogo linux-app dlc $GOGID add (it runs the DLC's installers again), or gogo linux-app dlc $GOGID add --abandon (it gives the DLC up), or roll back to the snapshot taken before it (gogo linux-app snapshot $GOGID list)"
+    else
+        alert "A DLC install for $TITLE stopped before it finished, so its files may be half there. Run: gogo linux-app dlc $GOGID add (it finishes the install, or undoes it)"
+    fi
     exit 1
 fi
 # Design 20 section 5.4: a snapshot rollback or a conversion that stopped

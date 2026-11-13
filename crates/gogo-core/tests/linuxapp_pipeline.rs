@@ -1420,7 +1420,7 @@ fn a_stopped_dlc_add_is_finished_by_running_it_again() {
         &mut quiet(),
     );
     assert!(
-        depot.is_err_and(|e| e.to_string().contains("runs them again")),
+        depot.is_err_and(|e| e.to_string().contains("installers again")),
         "the depot lane's recovery doesn't touch it"
     );
     assert!(gogo::linuxapp::dlc::journal_exists(&root));
@@ -1486,6 +1486,84 @@ fn a_failed_dlc_add_keeps_its_journal() {
     let err = err.unwrap_err();
     assert!(err.to_string().contains("GOG Games/DLC"), "{err}");
     assert!(gogo::linuxapp::dlc::journal_exists(&w.game()));
+}
+
+#[test]
+fn a_dlc_add_that_keeps_failing_is_given_up() {
+    use gogo::linuxapp::dlc_installer as di;
+    let w = World::new("instdlcabandon", &["d3d9.dll"]);
+    let plan = build::plan(&installer_opts(&w, &[]), None, &mut quiet()).unwrap();
+    build::execute(&plan, None, &mut quiet()).unwrap();
+    let mut game = gogo::linuxapp::dlc::load_game(ID, None).unwrap();
+    let add = di::AddPlan {
+        dlcs: vec![dlc_setup(&w, INST_DLC_A)],
+        language: None,
+    };
+    // SAFETY: under ENV_LOCK (the World holds it).
+    unsafe { std::env::set_var("FAKE_DLC_FAIL", INST_DLC_A.to_string()) };
+    for _ in 0..2 {
+        // The rerun fails the same way: the add is stuck until given up.
+        let err = di::add(
+            &mut game,
+            &add,
+            &mut *test_runner(&w),
+            &add_opts(),
+            &mut quiet(),
+            &|| false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("exited 5"), "{err}");
+        assert!(
+            err.contains("--abandon") && err.contains("rollback"),
+            "{err}"
+        );
+        assert!(gogo::linuxapp::dlc::journal_exists(&w.game()));
+    }
+    unsafe { std::env::remove_var("FAKE_DLC_FAIL") };
+    let err = gogo::linuxapp::snapshots::refuse(ID, &game.dirs)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("--abandon"), "{err}");
+    // A rollback is the undo: this add doesn't refuse one.
+    gogo::linuxapp::snapshots::refuse_for_rollback(ID, &game.dirs).unwrap();
+
+    let gone = di::abandon(&mut game).unwrap();
+    assert_eq!(
+        gone.dropped.iter().map(|d| d.id).collect::<Vec<_>>(),
+        [INST_DLC_A]
+    );
+    assert!(!gogo::linuxapp::dlc::journal_exists(&w.game()));
+    assert!(game.installed().is_empty(), "nothing recorded for it");
+    gogo::linuxapp::snapshots::refuse(ID, &game.dirs).unwrap();
+    // Again: nothing to give up.
+    assert!(di::abandon(&mut game).unwrap().dropped.is_empty());
+}
+
+#[test]
+fn a_dlc_add_whose_runtime_fails_leaves_no_journal() {
+    use gogo::linuxapp::dlc_installer as di;
+    let w = World::new("instdlcnorunner", &["d3d9.dll"]);
+    let plan = build::plan(&installer_opts(&w, &[]), None, &mut quiet()).unwrap();
+    build::execute(&plan, None, &mut quiet()).unwrap();
+    let mut game = gogo::linuxapp::dlc::load_game(ID, None).unwrap();
+    let add = di::AddPlan {
+        dlcs: vec![dlc_setup(&w, INST_DLC_A)],
+        language: None,
+    };
+    let mut runner = |_: &mut dyn FnMut(&gogo::engine::events::ProgressEvent)| {
+        Err(gogo::macapp::MacAppError::Proton("no build".into()))
+    };
+    let err = di::add(
+        &mut game,
+        &add,
+        &mut runner,
+        &add_opts(),
+        &mut quiet(),
+        &|| false,
+    );
+    assert!(err.unwrap_err().to_string().contains("no build"));
+    assert!(!gogo::linuxapp::dlc::journal_exists(&w.game()));
 }
 
 // — after the build: compat, next-renderer, --retarget (#176) —
@@ -3033,7 +3111,7 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
     // next setup, which says so; an unchanged one isn't touched.
     std::fs::write(
         &sh,
-        script.replace("LAUNCHER_VERSION=15", "LAUNCHER_VERSION=0"),
+        script.replace("LAUNCHER_VERSION=16", "LAUNCHER_VERSION=0"),
     )
     .unwrap();
     std::fs::write(&desktop, "[Desktop Entry]\nExec=/old/root/launch.sh\n").unwrap();
@@ -3041,7 +3119,7 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
     assert_eq!(std::fs::read_to_string(&sh).unwrap(), script);
     assert_eq!(std::fs::read_to_string(&desktop).unwrap(), entry);
     assert!(
-        out.notes.iter().any(|n| n == "launch.sh: launcher 0 -> 15"),
+        out.notes.iter().any(|n| n == "launch.sh: launcher 0 -> 16"),
         "{:?}",
         out.notes
     );
@@ -3106,7 +3184,7 @@ fn the_launcher_runs_umu_with_the_games_environment_and_logs_the_run() {
     let run = &runs[0];
     for want in [
         format!("# gogo run log: Test Game ({ID})\n"),
-        "# launcher: 15\n".into(),
+        "# launcher: 16\n".into(),
         format!(
             "# runtime: path:{} (1793687165 GE-Proton10-34)\n",
             w.build.display()
@@ -5384,7 +5462,7 @@ fn the_launcher_of_a_library_game_keeps_gogos_data_root() {
     );
     // Logs stay under the data root, not the library's parent.
     assert_eq!(w.runs().len(), 1, "run logs under {:?}", w.logs());
-    assert!(w.launch_log().contains("launcher 15"));
+    assert!(w.launch_log().contains("launcher 16"));
     assert!(!w.root.join("big drive/logs").exists());
 
     // Stale config: setup runs with gogo's data root as GOGO_HOME, and from
@@ -8087,6 +8165,41 @@ mod dlc_add {
         );
         assert_eq!(w.game_runs(), 0);
         std::fs::remove_file(w.game().join(lay::JOURNAL)).unwrap();
+    }
+
+    #[test]
+    fn an_installer_add_journal_names_its_ways_out_and_giving_up_lets_the_game_start() {
+        let Some(w) = World::launcher("dlc-launch-inst", true) else {
+            return;
+        };
+        let journal = serde_json::json!({
+            "gogid": ID, "lane": "installer", "buildId": "", "language": "",
+            "adding": [{"id": 1999999911u64, "title": "DLC A"}], "source": "/nowhere",
+            "sourceIsCache": false, "moves": false, "files": [], "replaced": [], "dirs": [],
+        });
+        std::fs::write(
+            w.game().join(lay::JOURNAL),
+            serde_json::to_string_pretty(&journal).unwrap(),
+        )
+        .unwrap();
+        let stub = w.dialog_stub(&["OK", "OK"]);
+        let dialog = [("GOGO_LAUNCHER_DIALOG", stub.to_str().unwrap())];
+        let out = w.launch(&dialog, &[]);
+        assert_eq!(out.status.code(), Some(1));
+        let d = &w.dialogs()[0];
+        assert!(
+            d.contains(&format!("gogo linux-app dlc {ID} add --abandon")),
+            "{d}"
+        );
+        assert!(d.contains("snapshot"), "{d}");
+        assert_eq!(w.game_runs(), 0);
+
+        let mut game = gogo::linuxapp::dlc::load_game(ID, None).unwrap();
+        let gone = gogo::linuxapp::dlc_installer::abandon(&mut game).unwrap();
+        assert_eq!(gone.dropped.len(), 1);
+        let out = w.launch(&dialog, &[]);
+        assert_eq!(out.status.code(), Some(0), "{}", w.launch_log());
+        assert_eq!(w.game_runs(), 1);
     }
 
     // — the depot cache keeps what an add fetches (#374) —
