@@ -928,9 +928,13 @@ then the update.
    DLC is on the old side of gog-warp's diff. `DepotOptions::dropping` names the DLC, and
    `depot::switch_inputs` keeps the recorded ones it names in `old_dlcs` (`dlcs`, the new
    side, leaves them out). gog-warp then deletes the DLC's files from the cache and
-   rewrites the tree paths whose cached copy was the DLC's. The `verify()` fallback does
-   the same: its prune reads `old_dlcs`, and the hashing fixes a rewritten path. The
-   cache walk then gives the files to lay and the ones the switch deleted, as in §11g.
+   rewrites the tree paths whose cached copy was the DLC's. After a switch that failed,
+   the `verify()` fallback's prune reads the same `old_dlcs`, and the hashing fixes a
+   rewritten path. A run that hashes from the start never deletes anything, for example
+   when the old manifest can't be had or after an interrupted switch. For it, the update
+   also gives `depot::run` the DLC's cache paths that the target doesn't list
+   (`DepotOptions::dropping_paths`). They are removed after any finished download, before
+   the record's walk; after a switch they are gone already. The cache walk then gives the files to lay and the ones the switch deleted, as in §11g.
    What the walk can't see is a game path the DLC shares with a product that stays
    through another cache path: a support overlay's `app/` file laid over a base tree
    file. Its cache path is deleted, while the base's tree file may not change at all.
@@ -973,7 +977,12 @@ then the update.
 
    When both builds' depot lists can't be fetched, the update is refused, exit 7, as `dlc
    remove`'s decision 7: without them there is nothing to check the DLC's files by. A path
-   the target lays again that isn't plain (`..`, absolute) is refused in the plan.
+   the target lays again is refused in the plan when it isn't plain (`..`, absolute), or
+   when the target gives it neither an MD5 nor a size, since its copy couldn't be checked
+   after the switch. A stopped update resumes only while the DLC it takes out are still
+   the ones the game would drop now. Otherwise (the game's DLC changed since, by a rebuild
+   say) it is refused, naming the rebuild: the cache may be part-way to the target without
+   the DLC.
 8. **`--build`** shares all of it. A downgrade to a build older than the DLC is the
    common case.
 9. **The offline-installer lane** has no update (§6, Q5). Its rebuild with `--dlc` decides
@@ -981,10 +990,15 @@ then the update.
 
 **Order** is §11g's, with these additions:
 - the plan computes the cross-build diff and hashes only the shared paths in `game/`;
+- a resumed lay takes the cache only while its record is on the target with exactly the
+  DLC that stay;
 - after the switch, each file laid again has its source in the cache checked (MD5, else
-  size) before the lay. A mismatch lays nothing and drops the download record. The game
-  stays on the old build with the DLC, and the update names the rebuild without it:
-  the cache is on the target already, so a rerun can't retry;
+  size) before the lay. A mismatch lays nothing, and the game stays on the old build with
+  the DLC. The first time, the wrong copies go out of the cache, and the download record
+  is marked to fetch again (`refetched`). A rerun of `update` resumes it: the cache's
+  record now misses those files, so the run hashes the cache, fetches them and checks
+  them again. A second mismatch drops the download record and names the rebuild without
+  the DLC;
 - the commit is followed by the DLC's emptied dirs.
 
 **Output.** `--dry-run --json`'s plan gains `removing`, `dlcFiles` and `dlcRestored`. The
@@ -995,7 +1009,10 @@ builds):
 - a base file the DLC's overlay replaced, which the target keeps as it was: laid again
   from the cache, with no help from the switch;
 - a tree file the DLC changed, which the target changes too: the target's version;
-- a cache copy that isn't the target's after the switch: nothing laid;
+- a cache copy that isn't the target's after the switch: nothing laid, then fetched
+  again by a rerun that finishes the update; a second miss names the rebuild;
+- a stopped download that took out other DLC: not resumed;
+- a shared path with neither MD5 nor size: refused in the plan;
 - a changed DLC file: kept, with a warning naming the DLC;
 - a stop at each lay step: forward, with the dirs pruned, and back.
 
