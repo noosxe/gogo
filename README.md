@@ -390,8 +390,12 @@ back the base files it replaced, from the depot cache or a small download. The
 DLC stays in the depot cache, so adding it again downloads nothing. Saves made
 with the DLC may not load without it; with snapshots on, a `before removing`
 snapshot comes first. A removal that stops is finished or undone by the next
-`dlc remove` (or `dlc add`). Games from GOG's offline installer are refused:
-rebuild with a smaller `--dlc` set instead.
+`dlc remove` (or `dlc add`). On a game built from GOG's offline installer,
+`dlc remove` runs the DLC's own uninstaller in the game's prefix, with no
+network. It's refused when the DLC has no uninstaller of its own or replaced
+game files; rebuild with a smaller `--dlc` set instead. A removal there that
+stops is finished by the next `dlc remove`, given up by `dlc remove --abandon`,
+or undone by rolling back to its snapshot.
 
 **Updates** of a depot-built game, in place:
 

@@ -67,7 +67,36 @@ pub async fn run(gogid: String, cmd: cli::LinuxDlcCmd) -> Result<i32, AppError> 
             no_snapshots,
             json_progress,
             json,
+            abandon,
         } => {
+            if abandon {
+                return remove_abandon_cmd(game, json).await;
+            }
+            if !is_depot(&game) {
+                if limit.is_some() || no_disk_check {
+                    eprintln!(
+                        "gogo: --limit and --no-disk-check are for depot games: a removal on \
+                         an offline-installer game downloads nothing"
+                    );
+                    return Ok(cli::exit::USAGE);
+                }
+                return installer_remove_cmd(
+                    game,
+                    AddArgs {
+                        names,
+                        all: false,
+                        dry_run,
+                        yes,
+                        limit: None,
+                        disk_check: true,
+                        no_snapshots,
+                        json_progress,
+                        json,
+                        lang: None,
+                    },
+                )
+                .await;
+            }
             let limit = match &limit {
                 Some(spec) => Some(gogo::config::parse_rate(spec)?),
                 None => None,
@@ -741,43 +770,22 @@ fn installed_names(installed: &[gogo::gog::content::DlcRef]) -> String {
         .join(", ")
 }
 
-/// `dlc remove` (design 19 §3.7).
-async fn remove_cmd(
-    mut game: Game,
-    a: AddArgs,
-    cache_base: Option<std::path::PathBuf>,
-) -> Result<i32, AppError> {
+/// The DLC a `remove` names, resolved against the installed ones (`Err` is the
+/// exit code of a usage error, already printed). `resumed`: a stopped removal
+/// is being finished, so a bare rerun names none.
+fn removal_names(
+    a: &AddArgs,
+    installed: &[gogo::gog::content::DlcRef],
+    resumed: bool,
+    machine: bool,
+    quiet: bool,
+) -> Result<Result<Vec<u64>, i32>, AppError> {
     use gogo::linuxapp::dlc_remove as rm;
-    let machine = a.json || a.json_progress;
-    let (quiet, _) = crate::PROGRESS_FLAGS.get().copied().unwrap_or_default();
-    let quiet = quiet || a.json;
-    let jp = a.json_progress;
-    if !is_depot(&game) {
-        eprintln!(
-            "gogo: {} is an offline-installer game: removing DLC there runs the DLC's own \
-             uninstaller, which gogo doesn't do yet; a rebuild with --dlc naming the DLC to \
-             keep (or --no-dlcs) leaves it out and keeps the prefix and saves",
-            game.gogid
-        );
-        return Ok(cli::exit::MACAPP);
-    }
-    // A half-done add, update or removal is settled first, whatever was asked.
-    let recovered = if a.dry_run {
-        None
-    } else {
-        match add::recover(&mut game, gogo::gog::materialize::Reflink::Try, &mut |ev| {
-            emit(ev, jp, quiet, &|l| eprintln!("{l}"))
-        }) {
-            Ok(r) => r,
-            Err(e) => return Ok(report(e)),
-        }
-    };
-    let installed = game.content.refs();
-    let wanted: Vec<u64> = if !a.names.is_empty() {
+    Ok(Ok(if !a.names.is_empty() {
         // A name that is only part of a title counts only when the question
         // below will be asked to confirm it.
         let asks = !a.yes && interactive(machine);
-        let named = rm::resolve_installed(&a.names, &installed, asks);
+        let named = rm::resolve_installed(&a.names, installed, asks);
         if !named.ambiguous.is_empty() || !named.inexact.is_empty() {
             for (n, titles) in &named.ambiguous {
                 eprintln!(
@@ -791,37 +799,66 @@ async fn remove_cmd(
                      Without the question (--yes, or no terminal), name it by id or full title"
                 );
             }
-            return Ok(cli::exit::USAGE);
+            return Ok(Err(cli::exit::USAGE));
         }
         if !named.unmatched.is_empty() && !quiet {
             eprintln!(
                 "gogo: not installed, nothing to remove: {} (installed: {})",
                 named.unmatched.join(", "),
-                installed_names(&installed)
+                installed_names(installed)
             );
         }
-        if named.ids.is_empty() && recovered.is_none() && !named.unmatched.is_empty() {
+        if named.ids.is_empty() && !resumed && !named.unmatched.is_empty() {
             // Only a name that matches nothing: likely a typo, so not a success.
             let typo = named
                 .unmatched
                 .iter()
                 .any(|n| n.trim().parse::<u64>().is_err());
             if typo {
-                return Ok(cli::exit::USAGE);
+                return Ok(Err(cli::exit::USAGE));
             }
         }
         named.ids
-    } else if recovered.is_some() {
+    } else if resumed {
         // A bare rerun after a stop: the recovery was the job.
         Vec::new()
     } else if interactive(machine) && !installed.is_empty() {
-        pick_installed(&installed)?
+        pick_installed(installed)?
     } else {
         eprintln!(
             "gogo: name the DLC to remove (id or title); installed: {}",
-            installed_names(&installed)
+            installed_names(installed)
         );
-        return Ok(cli::exit::USAGE);
+        return Ok(Err(cli::exit::USAGE));
+    }))
+}
+
+/// `dlc remove` (design 19 §3.7).
+async fn remove_cmd(
+    mut game: Game,
+    a: AddArgs,
+    cache_base: Option<std::path::PathBuf>,
+) -> Result<i32, AppError> {
+    use gogo::linuxapp::dlc_remove as rm;
+    let machine = a.json || a.json_progress;
+    let (quiet, _) = crate::PROGRESS_FLAGS.get().copied().unwrap_or_default();
+    let quiet = quiet || a.json;
+    let jp = a.json_progress;
+    // A half-done add, update or removal is settled first, whatever was asked.
+    let recovered = if a.dry_run {
+        None
+    } else {
+        match add::recover(&mut game, gogo::gog::materialize::Reflink::Try, &mut |ev| {
+            emit(ev, jp, quiet, &|l| eprintln!("{l}"))
+        }) {
+            Ok(r) => r,
+            Err(e) => return Ok(report(e)),
+        }
+    };
+    let installed = game.content.refs();
+    let wanted = match removal_names(&a, &installed, recovered.is_some(), machine, quiet)? {
+        Ok(w) => w,
+        Err(code) => return Ok(code),
     };
     if wanted.is_empty() {
         if a.json {
@@ -1073,6 +1110,238 @@ fn emit_remove(ev: &ProgressEvent, json_progress: bool, quiet: bool, print: &dyn
         return;
     }
     emit(ev, json_progress, quiet, print)
+}
+
+/// `dlc remove` on an offline-installer game (design 19 §5.2): each DLC's own
+/// Inno uninstaller in the game's prefix, under its lock, behind the `auto`
+/// snapshot and a journal. No network. A rerun after a stop runs the stopped
+/// removal's uninstallers again.
+async fn installer_remove_cmd(mut game: Game, a: AddArgs) -> Result<i32, AppError> {
+    use gogo::linuxapp::dlc_uninstall as du;
+    let machine = a.json || a.json_progress;
+    let (quiet, _) = crate::PROGRESS_FLAGS.get().copied().unwrap_or_default();
+    let quiet = quiet || a.json;
+    let jp = a.json_progress;
+    let root = game.dirs.root.clone();
+    // An unfinished add on this lane is settled first, by the add's own ways.
+    if let Some(j) = gogo::gog::lay::read_journal(&root)?
+        && j.lane == gogo::linuxapp::dlc_installer::LANE
+        && !j.is_removal()
+    {
+        eprintln!(
+            "gogo: an earlier DLC add of {} stopped while its installers ran; settle it \
+             before a removal: {}",
+            game.gogid,
+            gogo::linuxapp::dlc_installer::ways_out(&game.gogid)
+        );
+        return Ok(cli::exit::MACAPP);
+    }
+    let pending = du::pending(&root);
+    let installed = game.content.refs();
+    let named = match removal_names(&a, &installed, !pending.is_empty(), machine, quiet)? {
+        Ok(w) => w,
+        Err(code) => return Ok(code),
+    };
+    let mut refs: Vec<gogo::gog::content::DlcRef> = pending
+        .iter()
+        .map(|p| gogo::gog::content::DlcRef {
+            id: p.id,
+            title: p.title.clone(),
+        })
+        .collect();
+    for id in named {
+        if !refs.iter().any(|r| r.id == id)
+            && let Some(r) = installed.iter().find(|r| r.id == id)
+        {
+            refs.push(r.clone());
+        }
+    }
+    if refs.is_empty() {
+        if a.json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "gogid": game.gogid,
+                    "lane": gogo::linuxapp::dlc_installer::LANE,
+                    "dlcs": game.content.refs(),
+                    "removed": [],
+                })
+            );
+        } else if !quiet {
+            eprintln!("gogo: nothing to remove");
+        }
+        return Ok(cli::exit::OK);
+    }
+    let snapshots = crate::auto_snapshots(a.no_snapshots)?;
+    // A rerun took its snapshot on the first try.
+    let autosnapshot = pending.is_empty()
+        && gogo::linuxapp::snapshots::auto_skipped(&game.gogid, &game.dirs, &snapshots)
+            .is_ok_and(|s| s.is_none());
+    let resumed: Vec<u64> = pending.iter().map(|p| p.id).collect();
+    let plan = match du::plan(&game, &refs, &resumed, autosnapshot) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("gogo: {e}");
+            if !pending.is_empty() {
+                eprintln!("gogo: {}", du::ways_out(&game.gogid));
+            }
+            return Ok(cli::exit::MACAPP);
+        }
+    };
+    let lines = du::plan_lines(&plan);
+    if !machine && !quiet {
+        for l in &lines {
+            eprintln!("gogo: {l}");
+        }
+    }
+    if a.dry_run {
+        if a.json {
+            println!(
+                "{}",
+                serde_json::json!({"dryRun": true, "plan": plan, "lines": lines})
+            );
+        }
+        return Ok(cli::exit::OK);
+    }
+    if !a.yes {
+        if !interactive(machine) {
+            eprintln!("gogo: removing DLC needs consent: pass --yes");
+            return Ok(cli::exit::USAGE);
+        }
+        let saves = gogo::linuxapp::dlc_remove::saves_line(&game.gogid, &plan.refs(), autosnapshot);
+        let go = crate::depot_progress::prompting(|| {
+            dialoguer::Confirm::new()
+                .with_prompt(format!("{saves}. Remove it now?"))
+                .default(false)
+                .interact()
+        })
+        .unwrap_or(false);
+        if !go {
+            eprintln!("gogo: aborted");
+            return Ok(cli::exit::USAGE);
+        }
+    }
+    let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let s = stopped.clone();
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            s.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
+    let opts = du::RemoveOptions {
+        snapshots,
+        ..Default::default()
+    };
+    let title = title_of(&game);
+    let result = tokio::task::spawn_blocking(move || {
+        let stop = move || stopped.load(std::sync::atomic::Ordering::SeqCst);
+        let gogid = game.gogid.clone();
+        let dirs = game.dirs.clone();
+        du::remove(
+            &mut game,
+            &refs,
+            &mut |emit| gogo::linuxapp::setup::game_runner(&gogid, &dirs, emit),
+            &opts,
+            &mut |ev| emit(ev, jp, quiet, &|l| eprintln!("{l}")),
+            &stop,
+        )
+    })
+    .await
+    .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+    match result {
+        Ok(out) => {
+            if a.json {
+                println!("{}", serde_json::to_string(&out).unwrap());
+            } else if !quiet {
+                for w in &out.warnings {
+                    eprintln!("gogo: warning: {w}");
+                }
+                if !out.left.is_empty() {
+                    eprintln!(
+                        "gogo: warning: the DLC's uninstaller left {} file(s) its installer \
+                         put in the game's dir; gogo leaves them: {}",
+                        out.left.len(),
+                        out.left.join(", ")
+                    );
+                }
+                let now = if out.dlcs.is_empty() {
+                    "none".to_string()
+                } else {
+                    out.dlcs
+                        .iter()
+                        .map(|d| d.title.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                if out.removed.is_empty() {
+                    eprintln!("gogo: nothing to remove; {title}'s DLC: {now}");
+                } else {
+                    eprintln!(
+                        "gogo: removed {} from {title}; its DLC now: {now}",
+                        out.removed
+                            .iter()
+                            .map(|d| d.title.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+            }
+            Ok(cli::exit::OK)
+        }
+        Err(e) => Ok(report(e)),
+    }
+}
+
+/// `dlc remove --abandon` (design 19 §5.2): give up an unfinished
+/// offline-installer removal. No network.
+async fn remove_abandon_cmd(mut game: Game, json: bool) -> Result<i32, AppError> {
+    if is_depot(&game) {
+        eprintln!(
+            "gogo: --abandon is for offline-installer games; on {} a stopped removal is \
+             finished or undone by `gogo linux-app dlc {} remove`",
+            game.gogid, game.gogid
+        );
+        return Ok(cli::exit::USAGE);
+    }
+    let gone = gogo::linuxapp::dlc_uninstall::abandon(&mut game)?;
+    if json {
+        println!("{}", serde_json::to_string(&gone).unwrap());
+    } else if gone.dropped.is_empty() && gone.kept.is_empty() {
+        eprintln!(
+            "gogo: {} has no unfinished DLC removal: nothing to give up",
+            gone.gogid
+        );
+    } else {
+        let names = |v: &[gogo::gog::content::DlcRef]| {
+            v.iter()
+                .map(|d| d.title.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let mut parts = Vec::new();
+        if !gone.dropped.is_empty() {
+            parts.push(format!(
+                "{} is no longer recorded (its files are gone)",
+                names(&gone.dropped)
+            ));
+        }
+        if !gone.kept.is_empty() {
+            parts.push(format!(
+                "{} stays recorded (its files are there)",
+                names(&gone.kept)
+            ));
+        }
+        eprintln!(
+            "gogo: gave up the DLC removal of {}: {}; the game starts again. Rolling back \
+             to the snapshot taken before the removal (`gogo linux-app snapshot {} list`) \
+             undoes it",
+            gone.gogid,
+            parts.join("; "),
+            gone.gogid
+        );
+    }
+    Ok(cli::exit::OK)
 }
 
 /// `dlc add` on an offline-installer game (design 19 §5): the DLC's own installers,

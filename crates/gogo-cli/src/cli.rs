@@ -863,17 +863,20 @@ pub enum LinuxDlcCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Remove installed DLC from the built game (depot lane), without a
-    /// rebuild: the files only the DLC has are taken out (each only while
+    /// Remove installed DLC from the built game, without a rebuild. On a
+    /// depot game the files only the DLC has are taken out (each only while
     /// it is still the DLC's file; a changed one stays, with a warning),
     /// and base files the DLC replaced are put back from the depot cache,
     /// or downloaded when the cache can't give them. The DLC stays in the
-    /// depot cache, so adding it again needs no download. Saves made with
-    /// the DLC may not load without it; with autosnapshot on, a snapshot
-    /// is taken first. With no name, a picker on a terminal. Run it again
-    /// after a stop: it finishes or undoes a half-done removal.
-    /// Offline-installer games are refused (rebuild with a smaller --dlc
-    /// set instead).
+    /// depot cache, so adding it again needs no download. On an
+    /// offline-installer game the DLC's own uninstaller runs in its prefix,
+    /// with no network; refused when the DLC has no uninstaller of its own
+    /// or replaced game files (rebuild with a smaller --dlc set instead).
+    /// Saves made with the DLC may not load without it; with autosnapshot
+    /// on, a snapshot is taken first. With no name, a picker on a terminal.
+    /// Run it again after a stop: it finishes or undoes a half-done removal
+    /// (on an offline-installer game, it runs the stopped removal's
+    /// uninstallers again; `--abandon` gives that removal up instead).
     Remove {
         /// Installed DLC by product id or title (several allowed). Part of
         /// a title is enough only when the question is asked (no --yes, on a
@@ -887,10 +890,10 @@ pub enum LinuxDlcCmd {
         #[arg(long)]
         yes: bool,
         /// Global rate limit for a download of replaced base files, e.g.
-        /// 4MiB/s.
+        /// 4MiB/s (depot games).
         #[arg(long)]
         limit: Option<String>,
-        /// Skip the free-space preflight of that download.
+        /// Skip the free-space preflight of that download (depot games).
         #[arg(long)]
         no_disk_check: bool,
         /// No automatic snapshot before the removal, this run (the game's
@@ -900,6 +903,12 @@ pub enum LinuxDlcCmd {
         /// Progress events as NDJSON on stdout.
         #[arg(long)]
         json_progress: bool,
+        /// Give up an offline-installer removal that stopped or failed: its
+        /// journal goes, a DLC whose files are gone is no longer recorded and
+        /// one whose files are there stays, and the game starts again. A
+        /// rollback to the snapshot taken before the removal undoes it.
+        #[arg(long, conflicts_with_all = ["names", "dry_run"])]
+        abandon: bool,
         /// Machine-readable summary.
         #[arg(long)]
         json: bool,

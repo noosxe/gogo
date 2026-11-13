@@ -394,8 +394,8 @@ pub fn refuse(gogid: &str, dirs: &GameDirs) -> Result<(), MacAppError> {
     refuse_but(gogid, dirs, false)
 }
 
-/// [`refuse`] for a rollback: an offline-installer DLC add that didn't finish
-/// (design 19 §5.1) is no refusal. Restoring a snapshot taken before it is its
+/// [`refuse`] for a rollback: an offline-installer DLC add or removal that
+/// didn't finish (design 19 §5.1, §5.2) is no refusal. Restoring a snapshot taken before it is its
 /// undo, and the restored dir has no journal.
 pub fn refuse_for_rollback(gogid: &str, dirs: &GameDirs) -> Result<(), MacAppError> {
     refuse_but(gogid, dirs, true)
@@ -418,15 +418,16 @@ fn refuse_but(gogid: &str, dirs: &GameDirs, installer_add_ok: bool) -> Result<()
         )));
     }
     let root = &dirs.root;
-    let installer_add = crate::gog::lay::read_journal(root)
+    let installer = crate::gog::lay::read_journal(root)
         .ok()
         .flatten()
-        .is_some_and(|j| j.lane == super::dlc_installer::LANE);
-    if installer_add && !installer_add_ok {
-        return Err(MacAppError::Apps(format!(
-            "a DLC add of {gogid} stopped while its installers ran: {}",
-            super::dlc_installer::ways_out(gogid)
-        )));
+        .filter(|j| j.lane == super::dlc_installer::LANE);
+    let installer_add = installer.is_some();
+    if let Some(j) = &installer
+        && !installer_add_ok
+    {
+        let (what, ways) = super::dlc_installer::journal_ways_out(gogid, j);
+        return Err(MacAppError::Apps(format!("{what} ({gogid}): {ways}")));
     }
     if (super::dlc::journal_exists(root) && !installer_add)
         || super::dlc::download_pending(root)
