@@ -150,23 +150,24 @@ fn holds(path: &Path, e: &Expect) -> bool {
     }
 }
 
-/// `rel` under `game`, each component matched without case when the exact one
-/// isn't there (a DLC depot can spell a dir differently from the base tree).
+/// `rel` under `game` as spelled on disk: each component is the entry of that
+/// name, else the first one matching it without case (a DLC depot can spell a dir
+/// differently from the base tree). Listing each dir, rather than trying the
+/// name, gives the on-disk spelling on a case-insensitive filesystem too.
 fn find_ci(game: &Path, rel: &str) -> Option<PathBuf> {
     let mut at = game.to_path_buf();
     for comp in rel.split('/').filter(|c| !c.is_empty()) {
-        let exact = at.join(comp);
-        if exact.symlink_metadata().is_ok() {
-            at = exact;
-            continue;
-        }
         let lower = comp.to_lowercase();
-        let found = std::fs::read_dir(&at)
+        let names: Vec<String> = std::fs::read_dir(&at)
             .ok()?
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|n| n.to_lowercase() == lower)
-            .min()?;
+            .collect();
+        let found = names
+            .iter()
+            .find(|n| n.as_str() == comp)
+            .or_else(|| names.iter().min())?;
         at = at.join(found);
     }
     Some(at)
