@@ -704,8 +704,12 @@ Decided on 2026-11-12.
 
   It also needs the cached build's manifest (`depot::cached_manifest`): the game dir's
   `build-manifest.json` when its `buildId` is the cache's (no request), else GOG's listing
-  while it still lists that build. Without one, the run hashes the cache with `verify()`, as
-  before. A language switch together with a build switch also hashes.
+  while it still lists that build. Both builds must name the same install directory
+  (`depot::same_install_dir`, any case): gog-warp joins the new build's onto the root and
+  diffs the paths below it, so across two dirs the unchanged files would be neither fetched
+  nor moved. Chaos Gate's `1.2 GOG v5` (`chaosgate`) and later builds (`WH40K Chaos Gate`)
+  are such a pair. Without all this, the run hashes the cache with `verify()`, as before. A
+  language switch together with a build switch also hashes.
 - **What is diffed.** The new side is the wanted DLC. The old side is the recorded DLC that
   are still wanted (`depot::switch_inputs`). A recorded DLC the run doesn't take is neither
   updated nor deleted: its files stay as they are, as `verify()` leaves them, and the new
@@ -723,12 +727,23 @@ Decided on 2026-11-12.
   build <id> by its changed files failed (<error>); checking the cache (hashing) and fetching
   what's missing instead`), removes gog-warp's `!Temp` and runs `verify()` against the new
   build. The marker stays until that run's record is written, so a fallback that also fails
-  leaves a cache that the next run hashes. Files that the switch would have deleted stay,
-  because gog-warp deletes them only after a successful move.
+  leaves a cache that the next run hashes.
+- **The fallback deletes what the new build dropped.** gog-warp deletes those files only
+  after a successful move, and `verify()` never removes a file. So before hashing, the
+  fallback fetches both builds' depot manifests (`dlc_filter::fetch_depots`, the run's
+  language and DLC on each side) and removes the paths the old build lays and the new one
+  doesn't, compared without case as gog-warp does (`depot::dropped_paths`,
+  `depot::remove_dropped`). It removes only plain relative paths (no `..`), only files and
+  links, never a dir, and never a path the old build doesn't list. A file of the user's own
+  stays. When a listing fails, the files stay, and a `note` says so.
 - **gog-warp's `!Temp`** sits in the game tree's dir (`<root>/<installDirectory>/!Temp`), not
-  at the cache root. The record's walk skips it at either level. A run that hashes, or that
-  switches builds, removes a stale one first. Only a targeted DLC run on the same build
-  resumes from it.
+  at the cache root. The record's walk skips it at either level. It is removed only by a
+  switch: at its start (a whole cache has none of its own, so one there is stale), unless
+  the run is already cancelled, and in the fallback. The removal is skipped, with a `note`,
+  when the install directory is empty, absolute, or has a `.` or `..` component
+  (`depot::warp_temp_dir`). A `!Temp` that a cancelled switch leaves stays until the next
+  switch. A later build would copy it into `game/`, as one from an interrupted `dlc add`
+  already can.
 - **#362 on a real switch.** Warhammer 40,000: Chaos Gate (1433928487) switched from
   `1.2 GOG v9` (59612759543911543) to `1.2 GOG v8` (59609663239679307) and back, on a scratch
   copy of a cache. The diffs were 670.6 KiB and 63.9 KiB. Both builds have two
@@ -736,7 +751,11 @@ Decided on 2026-11-12.
   - both dirs empty in the cache, as a fresh download leaves them: both directions
     succeeded, and a hash check of the result found nothing to fetch;
   - a file put into `Save_G`: gog-warp failed with `Directory not empty (os error 39)`, the
-    fallback hashed and fetched the 2–3 files that differed, and the result checked clean.
+    fallback hashed and fetched the 2–3 files that differed, and the result checked clean;
+  - `1.2 GOG v8` → `1.2 GOG v6` (55396789143644982, 26.8 MiB) with that file: ENOTEMPTY
+    again. The fallback removed the 4 files only v8 has (`Galaxy.dll`, `steam_api.dll`,
+    `steam_appid.txt`, `directplay.cmd`), hashed, and fetched 17 files. The record matched
+    v6 plus the user's file, and the result checked clean.
 
   So the bug needs a directory entry whose dir holds files, which a cache gogo downloaded
   only has when the build lists files inside it. None of the 26 cached test games has one,
