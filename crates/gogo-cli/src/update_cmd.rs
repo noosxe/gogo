@@ -319,11 +319,6 @@ pub async fn run(gogid: String, a: Args) -> Result<i32, AppError> {
         }
     }
 
-    let snapshots = crate::auto_snapshots(a.no_snapshots)?;
-    let autosnapshot = matches!(
-        gogo::linuxapp::snapshots::auto_skipped(&gogid, &game.dirs, &snapshots),
-        Ok(None)
-    );
     let planned = update::plan_update(update::PlanInput {
         game: &game,
         title: &title,
@@ -353,9 +348,8 @@ pub async fn run(gogid: String, a: Args) -> Result<i32, AppError> {
             }),
             _ => None,
         },
-        autosnapshot,
     });
-    let plan = match planned {
+    let mut plan = match planned {
         Ok(Planned::Update(p)) => p,
         Ok(Planned::UpToDate(_)) => return Ok(cli::exit::OK),
         Err(r) => {
@@ -367,6 +361,12 @@ pub async fn run(gogid: String, a: Args) -> Result<i32, AppError> {
             });
         }
     };
+    let snapshots = crate::auto_snapshots(a.no_snapshots)?;
+    plan.autosnapshot = !plan.resume
+        && matches!(
+            gogo::linuxapp::snapshots::auto_skipped(&gogid, &game.dirs, &snapshots),
+            Ok(None)
+        );
     if !machine && !quiet {
         for l in update::plan_lines(&plan) {
             eprintln!("gogo: {l}");
@@ -451,6 +451,7 @@ pub async fn run(gogid: String, a: Args) -> Result<i32, AppError> {
         disk_check: a.disk_check,
         dry_run: false,
         dropping,
+        dropping_paths: plan.dlc_cache_paths.clone(),
     };
     let cancel = ctx.cancel.clone();
     {

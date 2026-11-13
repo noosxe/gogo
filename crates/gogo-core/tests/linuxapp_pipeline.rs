@@ -13917,7 +13917,6 @@ mod update {
             disk_size: 200,
             manifest: Some(("B2".into(), 2, manifest())),
             depots: None,
-            autosnapshot: false,
         }
     }
 
@@ -14551,6 +14550,7 @@ mod update {
             dropped: Vec::new(),
             fetched: true,
             removing: Vec::new(),
+            refetched: false,
         };
         std::fs::write(
             w.game().join(update::DOWNLOAD),
@@ -14697,12 +14697,14 @@ mod update {
                     from_tree: TREE.into(),
                     to: &new,
                 }),
-                autosnapshot,
                 ..input(g, &[])
             })
             .unwrap()
             {
-                Planned::Update(p) => p,
+                Planned::Update(mut p) => {
+                    p.autosnapshot = autosnapshot;
+                    p
+                }
                 Planned::UpToDate(_) => panic!("up to date"),
             }
         }
@@ -14802,6 +14804,12 @@ mod update {
             }
             let json = serde_json::to_value(&*p).unwrap();
             assert_eq!(json["removing"][0]["id"], DLC);
+            // What the cache run takes out whichever way it goes: the DLC's own
+            // cache paths, its overlay's too, never a path the target lists.
+            assert_eq!(
+                p.dlc_cache_paths,
+                [tree_path("dlc/ep1.pak"), overlay_path("shared.pak")]
+            );
 
             let out = run_drop(&mut g, &p, &opts(), None).unwrap();
             assert_eq!(out.dlcs_removed.len(), 1);
@@ -14844,31 +14852,129 @@ mod update {
         }
 
         /// A cache whose copy of a path the DLC won isn't the target's after the
-        /// switch can't restore it: nothing is laid, the game stays on B1 with the
-        /// DLC, and the update names the rebuild.
+        /// switch: nothing is laid, the wrong copy goes out of the cache, and a
+        /// rerun fetches it again and continues. A second miss names the rebuild.
         #[test]
-        fn a_cache_copy_that_isnt_the_targets_version_lays_nothing() {
+        fn a_cache_copy_that_isnt_the_targets_version_is_fetched_again() {
             let w = with_dlc("update-drop-bad-cache", Shape::Tree);
             let before = tree(&w.game().join("game"));
             let content_before = std::fs::read(w.game().join("content.toml")).unwrap();
             let mut g = game(&w);
             let p = drop_plan(&g, Shape::Tree, false);
-            let e = run_drop(&mut g, &p, &opts(), None).unwrap_err();
-            let msg = e.to_string();
+            let msg = run_drop(&mut g, &p, &opts(), None).unwrap_err().to_string();
             assert!(
                 msg.contains("isn't build B2's version without Extra Pack"),
                 "{msg}"
             );
-            assert!(
-                msg.contains("gogo linux-app 1999999901 --build B2 --no-dlcs --yes"),
-                "{msg}"
-            );
+            assert!(msg.contains("fetches it again and continues"), "{msg}");
             assert_eq!(tree(&w.game().join("game")), before);
             assert_eq!(
                 std::fs::read(w.game().join("content.toml")).unwrap(),
                 content_before
             );
+            assert!(!cache_root(&w).join(TREE).join("shared.pak").exists());
+            let rec = update::read_download(&w.game()).unwrap();
+            assert!(!rec.fetched && rec.refetched);
+            assert_eq!(rec.removing, [DLC]);
+
+            // The rerun resumes it: the download again (this time it gives B2's
+            // copy), then the lay.
+            let mut g = game(&w);
+            let p = drop_plan(&g, Shape::Tree, false);
+            assert!(p.resume);
+            run_drop(&mut g, &p, &opts(), Some(B2_SHARED)).unwrap();
+            assert_eq!(tree(&w.game().join("game")), after(&before, B2_SHARED));
+            dlc_gone(&w);
             no_leftovers(&w);
+        }
+
+        /// A second miss: the record goes, and the rebuild is named.
+        #[test]
+        fn a_cache_copy_wrong_twice_names_the_rebuild() {
+            let w = with_dlc("update-drop-bad-cache-twice", Shape::Tree);
+            let before = tree(&w.game().join("game"));
+            let mut g = game(&w);
+            let p = drop_plan(&g, Shape::Tree, false);
+            run_drop(&mut g, &p, &opts(), None).unwrap_err();
+            let mut g = game(&w);
+            let p = drop_plan(&g, Shape::Tree, false);
+            let msg = run_drop(&mut g, &p, &opts(), None).unwrap_err().to_string();
+            assert!(msg.contains("again after fetching it anew"), "{msg}");
+            assert!(
+                msg.contains("gogo linux-app 1999999901 --build B2 --no-dlcs --yes"),
+                "{msg}"
+            );
+            assert_eq!(tree(&w.game().join("game")), before);
+            no_leftovers(&w);
+        }
+
+        /// A stopped update's download record that took out other DLC than the
+        /// game's would now: not resumed, the rebuild named.
+        #[test]
+        fn a_stopped_download_for_other_dlc_is_not_resumed() {
+            let w = with_dlc("update-drop-other-record", Shape::Overlay);
+            let rec = update::DownloadRecord {
+                from: "B1".into(),
+                to: b2(),
+                source: cache_root(&w),
+                tree_name: TREE.into(),
+                before: Default::default(),
+                dropped: Vec::new(),
+                fetched: false,
+                removing: Vec::new(),
+                refetched: false,
+            };
+            std::fs::write(
+                w.game().join(update::DOWNLOAD),
+                serde_json::to_string(&rec).unwrap(),
+            )
+            .unwrap();
+            let g = game(&w);
+            let (old, new) = lists(Shape::Overlay);
+            let r = update::plan_update(PlanInput {
+                depots: Some(DepotLists {
+                    from: &old,
+                    from_tree: TREE.into(),
+                    to: &new,
+                }),
+                ..input(&g, &[])
+            })
+            .unwrap_err();
+            assert!(
+                r.message
+                    .contains("the DLC it takes out changed since (then none, now 777001)"),
+                "{}",
+                r.message
+            );
+            assert!(
+                r.message
+                    .contains("gogo linux-app 1999999901 --build B2 --yes"),
+                "{}",
+                r.message
+            );
+        }
+
+        /// A path to lay again whose target entry gives neither MD5 nor size can't
+        /// be checked after the switch: refused in the plan.
+        #[test]
+        fn a_shared_path_with_nothing_to_check_it_by_is_refused_before_the_switch() {
+            let w = with_dlc("update-drop-unchecked", Shape::Overlay);
+            let g = game(&w);
+            let (old, mut new) = lists(Shape::Overlay);
+            new[0].sizes.clear();
+            new[0].md5s.clear();
+            let r = update::plan_update(PlanInput {
+                depots: Some(DepotLists {
+                    from: &old,
+                    from_tree: TREE.into(),
+                    to: &new,
+                }),
+                ..input(&g, &[])
+            })
+            .unwrap_err();
+            assert!(!r.usage);
+            assert!(r.message.contains("gives no MD5 or size"), "{}", r.message);
+            assert!(!w.game().join(update::DOWNLOAD).exists());
         }
 
         /// A DLC file changed since install stays, with a warning naming the DLC;

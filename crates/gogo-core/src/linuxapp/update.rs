@@ -166,8 +166,6 @@ pub struct PlanInput<'a> {
     /// Both builds' depot lists, when they could be fetched. An installed DLC the
     /// target lacks needs them: without them the update is refused.
     pub depots: Option<DepotLists<'a>>,
-    /// The `auto` snapshot will be taken first (for the saves line).
-    pub autosnapshot: bool,
 }
 
 /// What `update` will do.
@@ -205,6 +203,13 @@ pub struct UpdatePlan {
     /// stay: never taken out.
     #[serde(skip)]
     pub target_paths: HashSet<String>,
+    /// Paths in the depot cache (relative to its root) only the removed DLC list
+    /// and the target doesn't: `depot::run` takes them out of the cache whichever
+    /// way it went (`DepotOptions::dropping_paths`).
+    #[serde(skip)]
+    pub dlc_cache_paths: Vec<String>,
+    /// The `auto` snapshot will be taken first (for the saves line); the caller
+    /// sets it once it knows the snapshot settings.
     #[serde(skip)]
     pub autosnapshot: bool,
     /// An earlier run stopped during its download: this one resumes it.
@@ -376,6 +381,22 @@ pub fn plan_update(input: PlanInput<'_>) -> Result<Planned, Refusal> {
             p.from, p.to.build_id, p.to.build_id
         )));
     }
+    if let Some(p) = &pending {
+        let lacking: Vec<u64> = game
+            .installed()
+            .into_iter()
+            .filter(|d| !input.target_dlcs.contains(d))
+            .collect();
+        if let Some(why) = removing_changed(p, &lacking) {
+            return Err(refuse(format!(
+                "an update of {gogid} to build {} stopped during its download, and {why}, so \
+                 it can't be resumed: the depot cache may be part-way to that build without \
+                 the DLC it was taking out. Update with a rebuild instead: {}",
+                p.to.build_id,
+                rebuild_hint(gogid, &p.to.build_id)
+            )));
+        }
+    }
     let to = &input.to.build_id;
     let Some(from_generation) = input.from_generation else {
         return Err(refuse(format!(
@@ -466,7 +487,8 @@ pub fn plan_update(input: PlanInput<'_>) -> Result<Planned, Refusal> {
             .map_or_else(|| input.tree_name.clone(), |d| d.from_tree.clone()),
         kept_dirs: drop.kept_dirs,
         target_paths: drop.target_paths,
-        autosnapshot: input.autosnapshot,
+        dlc_cache_paths: drop.cache_paths,
+        autosnapshot: false,
         resume,
         cache_root,
         tree_name: input.tree_name,
@@ -515,6 +537,7 @@ fn rebuild_without(game: &Game, to: &str, removing: &[u64]) -> String {
 /// What taking out the DLC the target lacks changes (§11h).
 #[derive(Default)]
 struct DlcDrop {
+    cache_paths: Vec<String>,
     files: Vec<Expect>,
     restored: Vec<Expect>,
     kept_dirs: HashSet<String>,
@@ -549,12 +572,30 @@ fn plan_drop(
                 rebuild_without(game, to, removing)
             )));
         };
+        // Nothing to check the switched cache's copy by: refused before the switch.
+        if e.md5.is_none() && e.size.is_none() {
+            return Err(refuse(format!(
+                "build {to}'s manifest gives no MD5 or size for {}, which the DLC replaced, \
+                 so its version can't be checked before it is laid again; nothing was \
+                 changed. A rebuild without the DLC: {}",
+                e.path,
+                rebuild_without(game, to, removing)
+            )));
+        }
         if dlc_remove::find_ci(&game.dirs.game, &rel).is_some_and(|at| dlc_remove::holds(&at, &e)) {
             continue;
         }
         restored.push(e);
     }
+    let gone: HashSet<String> = removing.iter().map(u64::to_string).collect();
+    let theirs: Vec<DepotList> = d
+        .from
+        .iter()
+        .filter(|l| gone.contains(&l.product))
+        .cloned()
+        .collect();
     Ok(DlcDrop {
+        cache_paths: depot::dropped_paths(&theirs, d.to),
         files: diff.removed,
         restored,
         kept_dirs: dlc_remove::kept_dirs(tree_name, &diff.kept),
@@ -783,6 +824,10 @@ pub struct DownloadRecord {
     /// The DLC the update takes out (§11h).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub removing: Vec<u64>,
+    /// A file laid again in place of a removed DLC's wasn't the target's version
+    /// in the cache once already: it was taken out of the cache and fetched again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub refetched: bool,
 }
 
 /// The pending update's download record in game dir `root`.
@@ -793,6 +838,57 @@ pub fn read_download(root: &Path) -> Option<DownloadRecord> {
 /// Did an update stop before its lay (the game is untouched)?
 pub fn download_pending(root: &Path) -> bool {
     root.join(DOWNLOAD).exists()
+}
+
+/// Why a stopped update's download record `p` doesn't take out the DLC `now`
+/// says it should (the game's DLC changed since it started); `None` when it does.
+fn removing_changed(p: &DownloadRecord, now: &[u64]) -> Option<String> {
+    let mut was = p.removing.clone();
+    let mut now = now.to_vec();
+    was.sort_unstable();
+    now.sort_unstable();
+    (was != now).then(|| {
+        let list = |ids: &[u64]| {
+            if ids.is_empty() {
+                "none".to_string()
+            } else {
+                ids.iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        };
+        format!(
+            "the DLC it takes out changed since (then {}, now {})",
+            list(&was),
+            list(&now)
+        )
+    })
+}
+
+/// Why the depot cache `cache` isn't the switched source of `plan`: its record
+/// isn't on the target with exactly the DLC that stay. `None` when it is.
+fn not_switched(cache: &Path, plan: &UpdatePlan) -> Option<String> {
+    let r = depot::read_record(cache);
+    let on = r.as_ref().map(|r| r.build_id.clone());
+    if on.as_deref() != Some(plan.to.build_id.as_str()) {
+        return Some(on.map_or("no recorded build".into(), |b| format!("build {b}")));
+    }
+    let mut held: Vec<String> = r.and_then(|r| r.dlcs).unwrap_or_default();
+    let mut kept: Vec<String> = plan.keeping().iter().map(|d| d.id.to_string()).collect();
+    held.sort();
+    kept.sort();
+    (held != kept).then(|| {
+        format!(
+            "build {} with DLC {}",
+            plan.to.build_id,
+            if held.is_empty() {
+                "none".into()
+            } else {
+                held.join(", ")
+            }
+        )
+    })
 }
 
 fn stale_note(p: &DownloadRecord, installed: &str) -> String {
@@ -1094,6 +1190,19 @@ where
         r.from == plan.from.build_id && r.to.build_id == plan.to.build_id && r.source == cache
     });
     let mut taken = None;
+    let planned_removing: Vec<u64> = plan.removing.iter().map(|d| d.id).collect();
+    if let Some(why) = prior
+        .as_ref()
+        .and_then(|r| removing_changed(r, &planned_removing))
+    {
+        return Err(AddError::Game(MacAppError::Apps(format!(
+            "this update's download stopped earlier, and {why}, so it can't be resumed: \
+             the depot cache may be part-way to build {} without the DLC it was taking out. \
+             Update with a rebuild instead: {}",
+            plan.to.build_id,
+            rebuild_hint(&gogid, &plan.to.build_id)
+        ))));
+    }
     let mut rec = match prior {
         Some(r) => r,
         None => {
@@ -1139,6 +1248,7 @@ where
                 dropped: plan.dropped_paths.clone(),
                 fetched: false,
                 removing: plan.removing.iter().map(|d| d.id).collect(),
+                refetched: false,
             };
             lay::write_json_durably(&root.join(DOWNLOAD), &r)?;
             r
@@ -1155,13 +1265,11 @@ where
             }
             Err(e) => return Err(e.into()),
         }
-        let on = depot::read_record(&cache).map(|r| r.build_id);
-        if on.as_deref() != Some(plan.to.build_id.as_str()) {
+        if let Some(on) = not_switched(&cache, plan) {
             return Err(AddError::Game(MacAppError::Apps(format!(
-                "the depot cache isn't on build {} after the download (its record says {}); \
+                "the depot cache isn't on build {} after the download (its record says {on}); \
                  the game is as it was, and `gogo linux-app update {gogid}` tries again",
                 plan.to.build_id,
-                on.as_deref().unwrap_or("nothing")
             ))));
         }
         rec.fetched = true;
@@ -1170,15 +1278,13 @@ where
         // A resumed lay diffs the cache as it is now: another command may have
         // moved it since the download. Then the record can't be trusted, and the
         // update starts over.
-        let on = depot::read_record(&cache).map(|r| r.build_id);
-        if on.as_deref() != Some(plan.to.build_id.as_str()) {
+        if let Some(on) = not_switched(&cache, plan) {
             let _ = std::fs::remove_file(root.join(DOWNLOAD));
             let _ = std::fs::remove_file(root.join(NEXT_MANIFEST));
             return Err(AddError::Game(MacAppError::Apps(format!(
-                "the depot cache moved to {} since this update's download, so its files \
+                "the depot cache moved to {on} since this update's download, so its files \
                  can't be laid; the game is on build {} as it was, and `gogo linux-app \
                  update {gogid}` plans it again",
-                on.map_or("no recorded build".into(), |b| format!("build {b}")),
                 plan.from.build_id
             ))));
         }
@@ -1329,22 +1435,45 @@ where
     // A laid file behind a symlinked dir refuses the update, before any write.
     j.check_links(&game.dirs.game)?;
     // A file laid again in place of a removed DLC's must be the target's version
-    // in the switched cache; else nothing is laid, and the update stops naming the
-    // rebuild (the cache is on the target already, so it can't be retried).
-    if let Some(f) = j.files.iter().find(|f| {
-        restore
-            .get(&f.from)
-            .is_some_and(|e| !dlc_remove::holds(&f.from, e))
-    }) {
+    // in the switched cache; else nothing is laid. The first time, the wrong copy
+    // goes out of the cache and the download record says to fetch again, so a
+    // rerun hashes the cache (its record now misses the file), fetches it and
+    // checks it again. A second miss drops the record and names the rebuild.
+    let bad: Vec<&lay::LayFile> = j
+        .files
+        .iter()
+        .filter(|f| {
+            restore
+                .get(&f.from)
+                .is_some_and(|e| !dlc_remove::holds(&f.from, e))
+        })
+        .collect();
+    if let Some(f) = bad.first() {
+        let what = format!(
+            "the depot cache's copy of {} isn't build {}'s version without {names}, so \
+             nothing was laid and the game is on build {} as it was",
+            f.to, plan.to.build_id, plan.from.build_id
+        );
+        if !rec.refetched {
+            for b in &bad {
+                if b.from.starts_with(&cache)
+                    && b.from.symlink_metadata().is_ok_and(|m| m.is_file())
+                {
+                    std::fs::remove_file(&b.from)?;
+                }
+            }
+            rec.fetched = false;
+            rec.refetched = true;
+            lay::write_json_durably(&root.join(DOWNLOAD), &rec)?;
+            return Err(AddError::Game(MacAppError::Apps(format!(
+                "{what}; the wrong copy is out of the cache, and `gogo linux-app update \
+                 {gogid}` fetches it again and continues"
+            ))));
+        }
         let _ = std::fs::remove_file(root.join(DOWNLOAD));
         let _ = std::fs::remove_file(root.join(NEXT_MANIFEST));
         return Err(AddError::Game(MacAppError::Apps(format!(
-            "the depot cache's copy of {} isn't build {}'s version without {names}, so \
-             nothing was laid and the game is on build {} as it was; update with a rebuild \
-             instead: {}",
-            f.to,
-            plan.to.build_id,
-            plan.from.build_id,
+            "{what}, again after fetching it anew; update with a rebuild instead: {}",
             rebuild_without(game, &plan.to.build_id, &ids)
         ))));
     }
