@@ -17,6 +17,9 @@
 //! `removed` paths, files the new build dropped, go into the backup in step 3 like a
 //! replaced file, and come back from it on a rollback.
 //!
+//! A symlinked dir on a path under `game/` refuses the lay, and a recovery, before
+//! anything is written ([`Journal::check_links`]): nothing goes through it.
+//!
 //! Only files the journal names are ever deleted, and a replaced base file only goes
 //! back from its backup. Nothing outside `game/`, the backup and staging dirs and the
 //! journal is written.
@@ -159,6 +162,52 @@ impl Journal {
     }
 }
 
+/// The first dir on `rel`'s way under `game` that is a symlink, as a path relative to
+/// `game` (`/`-separated). A write, a backup or a restore of `game/<rel>` would go
+/// through it, and reach outside `game/` when it points there. The final component
+/// is not looked at: a link at the path itself is replaced, not followed.
+pub fn symlinked_parent(game: &Path, rel: &str) -> Option<String> {
+    let parts: Vec<&str> = rel.split('/').filter(|p| !p.is_empty()).collect();
+    let mut at = game.to_path_buf();
+    let mut seen = String::new();
+    for p in &parts[..parts.len().saturating_sub(1)] {
+        at.push(p);
+        if !seen.is_empty() {
+            seen.push('/');
+        }
+        seen.push_str(p);
+        if at
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink())
+        {
+            return Some(seen);
+        }
+    }
+    None
+}
+
+impl Journal {
+    /// Refuse a lay that would go through a symlinked dir in `game/` (#438): every
+    /// path it writes, replaces or takes out is checked. Nothing is written.
+    pub fn check_links(&self, game: &Path) -> Result<(), LayError> {
+        let paths = self
+            .files
+            .iter()
+            .map(|f| &f.to)
+            .chain(&self.replaced)
+            .chain(&self.removed);
+        for rel in paths {
+            if let Some(link) = symlinked_parent(game, rel) {
+                return Err(LayError::Symlink {
+                    link,
+                    path: rel.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 /// A `/`-separated relative path with only plain components (no `..`, `.` or
 /// empty one).
 fn plain(rel: &str) -> bool {
@@ -279,6 +328,14 @@ pub enum LayError {
     /// The stop check said so; the journal stays for [`recover`].
     #[error("stopped while laying the DLC files; the journal stays for the next run")]
     Stopped,
+    /// A dir in `game/` is a symlink, so the lay (or a recovery) would write, back up
+    /// or restore `path` through it, possibly outside `game/`. Nothing was touched.
+    #[error(
+        "{link} in the game dir is a symlink, and {path} would go through it, possibly \
+         outside the game dir; nothing was written. Remove or replace the link, then \
+         run it again"
+    )]
+    Symlink { link: String, path: String },
     #[error(transparent)]
     Io(#[from] io::Error),
 }
@@ -393,6 +450,7 @@ pub fn lay_files(
     on_file: &mut dyn FnMut(u64),
 ) -> Result<LayReport, LayError> {
     let game = root.join("game");
+    j.check_links(&game)?;
     write_json_durably(&journal_path(root), j)?;
     if stop(Step::Journal) {
         return Err(LayError::Stopped);
@@ -481,6 +539,8 @@ fn recover_as(
         return Ok(None);
     };
     let game = root.join("game");
+    // A journal from before the check may point through a link: stop, write nothing.
+    j.check_links(&game)?;
     let backup = root.join(BACKUP);
     let in_place = |rel: &str| {
         if j.replaced.iter().any(|r| r == rel) {
@@ -925,6 +985,92 @@ mod tests {
                 assert!(!f.root.join(BACKUP).exists());
             }
         }
+    }
+
+    /// `game/data` becomes a symlink to a dir outside `game/` holding a file the
+    /// lay would replace.
+    fn link_data_out(f: &Fixture) -> (PathBuf, BTreeMap<String, Option<Vec<u8>>>) {
+        let game = f.root.join("game");
+        let outside = f.root.parent().unwrap().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("shared.pak"), b"not the game's").unwrap();
+        fs::remove_dir_all(game.join("data")).unwrap();
+        std::os::unix::fs::symlink(&outside, game.join("data")).unwrap();
+        let before = tree(&outside);
+        (outside, before)
+    }
+
+    #[test]
+    fn a_lay_through_a_symlinked_dir_is_refused_before_any_write() {
+        let f = fixture(false);
+        let j = journal(&f, false);
+        let (outside, out_before) = link_data_out(&f);
+        let game_before = tree(&f.root);
+        let e = lay_files(&f.root, &j, Reflink::Never, &mut |_| false, &mut |_| {}).unwrap_err();
+        assert!(
+            matches!(&e, LayError::Symlink { link, path }
+                if link == "data" && path == "data/shared.pak"),
+            "{e:?}"
+        );
+        assert!(e.to_string().contains("Remove or replace the link"), "{e}");
+        assert_eq!(tree(&f.root), game_before, "no journal, no .gogo-new");
+        assert_eq!(tree(&outside), out_before);
+    }
+
+    #[test]
+    fn a_link_at_the_final_path_is_replaced_not_followed() {
+        let f = fixture(false);
+        let game = f.root.join("game");
+        let outside = f.root.parent().unwrap().join("outside-file");
+        fs::write(&outside, b"not the game's").unwrap();
+        fs::remove_file(game.join("data/shared.pak")).unwrap();
+        std::os::unix::fs::symlink(&outside, game.join("data/shared.pak")).unwrap();
+        let j = journal(&f, false);
+        assert!(j.replaced.contains(&"data/shared.pak".to_string()));
+        lay_files(&f.root, &j, Reflink::Never, &mut |_| false, &mut |_| {}).unwrap();
+        assert_eq!(fs::read(&outside).unwrap(), b"not the game's");
+        assert_eq!(
+            fs::read(game.join("data/shared.pak")).unwrap(),
+            b"new shared"
+        );
+        // A rollback puts the link itself back.
+        let m = game.join("data/shared.pak");
+        fs::remove_file(&m).unwrap();
+        fs::rename(f.root.join(BACKUP).join("data/shared.pak"), &m).unwrap();
+        assert!(m.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(fs::read(&outside).unwrap(), b"not the game's");
+    }
+
+    #[test]
+    fn recover_and_roll_back_never_follow_a_symlinked_dir() {
+        for back in [false, true] {
+            let f = fixture(false);
+            let j = journal(&f, false);
+            // A journal from before the check, its lay stopped before the files.
+            write_json_durably(&journal_path(&f.root), &j).unwrap();
+            let (outside, out_before) = link_data_out(&f);
+            let game_before = tree(&f.root);
+            let r = if back {
+                roll_back(&f.root, Reflink::Never)
+            } else {
+                recover(&f.root, Reflink::Never)
+            };
+            assert!(matches!(r, Err(LayError::Symlink { .. })), "{back}: {r:?}");
+            assert_eq!(tree(&f.root), game_before, "{back}: journal stays");
+            assert_eq!(tree(&outside), out_before, "{back}");
+        }
+    }
+
+    #[test]
+    fn a_plain_lay_still_checks_clean() {
+        let f = fixture(false);
+        let j = journal(&f, false);
+        j.check_links(&f.root.join("game")).unwrap();
+        lay_files(&f.root, &j, Reflink::Never, &mut |_| false, &mut |_| {}).unwrap();
+        assert_eq!(
+            symlinked_parent(&f.root.join("game"), "data/shared.pak"),
+            None
+        );
     }
 
     #[test]

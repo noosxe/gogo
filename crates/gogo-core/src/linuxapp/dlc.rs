@@ -895,6 +895,7 @@ impl From<lay::LayError> for AddError {
     fn from(e: lay::LayError) -> Self {
         match e {
             lay::LayError::Stopped => AddError::Interrupted("lay", rerun_note()),
+            lay::LayError::Symlink { .. } => AddError::Game(MacAppError::Apps(e.to_string())),
             lay::LayError::Io(e) => AddError::Io(e),
         }
     }
@@ -1308,6 +1309,7 @@ where
         // A record-only add with nothing to lay writes no journal.
         if !j.files.is_empty() {
             j.survey(&game.dirs.game);
+            j.check_links(&game.dirs.game)?;
             let bytes: u64 = j
                 .files
                 .iter()
