@@ -209,6 +209,12 @@ pub mod step {
     pub const INSTALLER: &str = "running the installer";
     /// GOG's support installer and registry key.
     pub const SUPPORT: &str = "running GOG's support installer";
+    /// A rebuild clearing the old `game/` dir.
+    pub const REMOVING_GAME: &str = "removing the old game files";
+    /// A new game's staging dir going into place.
+    pub const MOVING_GAME: &str = "moving the game into place";
+    /// A rebuild's new prefix going into place.
+    pub const MOVING_PREFIX: &str = "moving the Wine prefix into place";
 }
 
 impl ProgressEvent {

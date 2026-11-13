@@ -14,7 +14,7 @@ const NONE_ENTRY: &str = "none";
 
 /// Install the renderer: an `Arc<PromptFn>` handed to `macapp::plan`.
 pub fn renderer() -> std::sync::Arc<PromptFn> {
-    std::sync::Arc::new(render)
+    std::sync::Arc::new(|spec| crate::depot_progress::prompting(|| render(spec)))
 }
 
 fn render(spec: &PromptSpec) -> Option<PromptAnswer> {

@@ -114,14 +114,19 @@ pub async fn run(gogid: String, a: Args) -> Result<i32, AppError> {
         return Ok(report(e));
     }
 
-    let (ctx, token) = connect().await?;
+    // One spinner per phase (#422): nothing off a terminal or in a machine mode.
+    let (ctx, token) = crate::phase(machine, "refreshing the sign-in", connect()).await?;
     let session = core(&ctx)?;
     let id: u64 = gogid.parse().unwrap_or(0);
     let title = title_of(&game);
     let language = update::language_of(&game);
-    let listing = builds::fetch_listing(session, id, Platform::Windows, None)
-        .await
-        .map_err(DepotError::library)?;
+    let listing = crate::phase(
+        machine,
+        "fetching the builds list",
+        builds::fetch_listing(session, id, Platform::Windows, None),
+    )
+    .await
+    .map_err(DepotError::library)?;
     let installed_id = game.content.build_id.clone().unwrap_or_default();
     let installed = listing
         .builds
@@ -204,10 +209,13 @@ pub async fn run(gogid: String, a: Args) -> Result<i32, AppError> {
         }
         return Ok(cli::exit::OK);
     }
-    let target_manifest = session
-        .get_manifest(target)
-        .await
-        .map_err(DepotError::library)?;
+    let target_manifest = crate::phase(
+        machine,
+        "reading the build's manifest",
+        session.get_manifest(target),
+    )
+    .await
+    .map_err(DepotError::library)?;
 
     // The installed build's manifest: kept in the game dir, else GOG's listing.
     let kept = build_manifest::load(&game.dirs.root).filter(|s| s.build_id == installed_id);
@@ -217,7 +225,15 @@ pub async fn run(gogid: String, a: Args) -> Result<i32, AppError> {
         (None, Some(b)) => (
             Some(*b.generation()),
             if *b.generation() == 2 {
-                Some(session.get_manifest(b).await.map_err(DepotError::library)?)
+                Some(
+                    crate::phase(
+                        machine,
+                        "reading the installed build's manifest",
+                        session.get_manifest(b),
+                    )
+                    .await
+                    .map_err(DepotError::library)?,
+                )
             } else {
                 None
             },
@@ -262,10 +278,15 @@ pub async fn run(gogid: String, a: Args) -> Result<i32, AppError> {
         };
         let http = session.reqwest_client();
         let (op, np) = (products(old), products(&target_manifest));
-        match (
-            gogo::gog::dlc_filter::fetch_depots(http, old, Some((&op, &langs))).await,
-            gogo::gog::dlc_filter::fetch_depots(http, &target_manifest, Some((&np, &langs))).await,
-        ) {
+        match crate::phase(machine, "reading the depot manifests", async {
+            (
+                gogo::gog::dlc_filter::fetch_depots(http, old, Some((&op, &langs))).await,
+                gogo::gog::dlc_filter::fetch_depots(http, &target_manifest, Some((&np, &langs)))
+                    .await,
+            )
+        })
+        .await
+        {
             (Ok(a), Ok(b)) => {
                 // Each with what the installed build gives it, to check the copy in
                 // the game by before it comes out.
@@ -347,11 +368,13 @@ pub async fn run(gogid: String, a: Args) -> Result<i32, AppError> {
             eprintln!("gogo: updating a game needs consent: pass --yes");
             return Ok(cli::exit::USAGE);
         }
-        let go = dialoguer::Confirm::new()
-            .with_prompt("update it now?")
-            .default(true)
-            .interact()
-            .unwrap_or(false);
+        let go = crate::depot_progress::prompting(|| {
+            dialoguer::Confirm::new()
+                .with_prompt("update it now?")
+                .default(true)
+                .interact()
+        })
+        .unwrap_or(false);
         if !go {
             eprintln!("gogo: aborted");
             return Ok(cli::exit::USAGE);
@@ -363,12 +386,15 @@ pub async fn run(gogid: String, a: Args) -> Result<i32, AppError> {
     let dlc_context = if installed_dlcs.is_empty() {
         DlcContext::default()
     } else {
-        DlcContext {
-            owned: library::owned_ids(&ctx.http, &token).await?,
-            catalog_dlcs: gogo::gog::catalog::detail(&ctx.http, &token, id)
-                .await?
-                .expanded_dlcs,
-        }
+        crate::phase(machine, "checking the game's DLC", async {
+            Ok::<_, AppError>(DlcContext {
+                owned: library::owned_ids(&ctx.http, &token).await?,
+                catalog_dlcs: gogo::gog::catalog::detail(&ctx.http, &token, id)
+                    .await?
+                    .expanded_dlcs,
+            })
+        })
+        .await?
     };
     let opts = DepotOptions {
         language: language.clone(),

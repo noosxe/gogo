@@ -134,11 +134,13 @@ pub fn run(gogid: String, cmd: cli::LinuxSnapshotCmd) -> Result<i32, AppError> {
                     eprintln!("gogo: non-interactive without --yes — aborting (plan above)");
                     return Ok(cli::exit::USAGE);
                 }
-                let confirmed = dialoguer::Confirm::new()
-                    .with_prompt(plan.question())
-                    .default(false)
-                    .interact()
-                    .unwrap_or(false);
+                let confirmed = crate::depot_progress::prompting(|| {
+                    dialoguer::Confirm::new()
+                        .with_prompt(plan.question())
+                        .default(false)
+                        .interact()
+                })
+                .unwrap_or(false);
                 if !confirmed {
                     eprintln!("gogo: aborted");
                     return Ok(cli::exit::OK);
@@ -307,11 +309,13 @@ fn rollback(
             eprintln!("gogo: non-interactive without --yes — aborting (plan above)");
             return Ok(cli::exit::USAGE);
         }
-        let confirmed = dialoguer::Confirm::new()
-            .with_prompt(plan.question())
-            .default(false)
-            .interact()
-            .unwrap_or(false);
+        let confirmed = crate::depot_progress::prompting(|| {
+            dialoguer::Confirm::new()
+                .with_prompt(plan.question())
+                .default(false)
+                .interact()
+        })
+        .unwrap_or(false);
         if !confirmed {
             eprintln!("gogo: aborted");
             return Ok(cli::exit::OK);
@@ -409,11 +413,13 @@ pub(crate) fn ask(lines: &[String], yes: bool, question: &str) -> Option<i32> {
         eprintln!("gogo: non-interactive without --yes — aborting (plan above)");
         return Some(cli::exit::USAGE);
     }
-    let confirmed = dialoguer::Confirm::new()
-        .with_prompt(question)
-        .default(false)
-        .interact()
-        .unwrap_or(false);
+    let confirmed = crate::depot_progress::prompting(|| {
+        dialoguer::Confirm::new()
+            .with_prompt(question)
+            .default(false)
+            .interact()
+    })
+    .unwrap_or(false);
     if confirmed {
         None
     } else {
