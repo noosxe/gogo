@@ -180,6 +180,11 @@ pub struct DepotOptions {
     /// their files and rewrites the paths they won. Not taken (`dlcs` leaves them
     /// out).
     pub dropping: Vec<String>,
+    /// Paths (relative to the cache root) only `dropping` list and this build
+    /// doesn't: removed after the download, whichever way it went, before the
+    /// record is written. A switch has deleted them already; a run that hashed
+    /// instead (no old manifest, an interrupted switch) hasn't.
+    pub dropping_paths: Vec<String>,
 }
 
 impl Default for DepotOptions {
@@ -197,6 +202,7 @@ impl Default for DepotOptions {
             disk_check: true,
             dry_run: false,
             dropping: Vec::new(),
+            dropping_paths: Vec::new(),
         }
     }
 }
@@ -715,6 +721,14 @@ pub async fn run(
         }
         None => fetch_into(core, &spec, events, cancel, free_space).await?,
     };
+    // A dropped DLC's files a hashing run left (it never deletes): out before the
+    // record's walk, which would list them.
+    let gone = remove_dropped(&install_root, &opts.dropping_paths);
+    if gone > 0 {
+        let _ = events.send(DepotEvent::Note {
+            message: format!("removed {gone} file(s) of the DLC this build doesn't have"),
+        });
+    }
     // The download is done either way; without a record (a full disk, say)
     // the next reuse just checks it again.
     let held = record_dlcs(prior.as_ref(), &build_id, &language, &dlcs);

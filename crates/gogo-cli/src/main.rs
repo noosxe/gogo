@@ -1232,6 +1232,7 @@ async fn depot_cmd(args: cli::DepotArgs) -> Result<i32, AppError> {
         disk_check: !args.no_disk_check,
         dry_run: args.dry_run,
         dropping: Vec::new(),
+        dropping_paths: Vec::new(),
     };
 
     let (tx, mut raw_rx) = tokio::sync::mpsc::unbounded_channel::<DepotEvent>();
