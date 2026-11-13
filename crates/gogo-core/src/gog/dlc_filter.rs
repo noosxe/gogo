@@ -38,6 +38,9 @@ pub struct Entry {
     pub support: bool,
     /// Its size in bytes, when the manifest gives one (a link has none).
     pub size: Option<u64>,
+    /// Its MD5 (lowercase hex), when the manifest gives one: a v2 file's own, or
+    /// its only chunk's; a v1 file's hash.
+    pub md5: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -63,6 +66,8 @@ enum V2Item {
         chunks: Vec<V2Chunk>,
         #[serde(default, rename = "sfcRef")]
         sfc_ref: Option<V2Chunk>,
+        #[serde(default)]
+        md5: Option<String>,
     },
     #[serde(rename = "DepotLink")]
     Link { path: String },
@@ -76,6 +81,9 @@ enum V2Item {
 struct V2Chunk {
     #[serde(default)]
     size: u64,
+    /// The uncompressed chunk's MD5.
+    #[serde(default)]
+    md5: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -98,6 +106,8 @@ struct V1Item {
     support: bool,
     #[serde(default)]
     size: Option<u64>,
+    #[serde(default)]
+    hash: Option<String>,
 }
 
 /// gog-warp's path normalization: backslashes become `/`, no `/` at either end.
@@ -118,7 +128,15 @@ pub fn parse_v2(json: &[u8]) -> Result<Vec<Entry>, String> {
                 flags,
                 chunks,
                 sfc_ref,
+                md5,
             } => Some(Entry {
+                // A file of one chunk is that chunk.
+                md5: md5
+                    .or_else(|| match chunks.as_slice() {
+                        [one] => one.md5.clone(),
+                        _ => None,
+                    })
+                    .map(|m| m.to_lowercase()),
                 path: norm(&path),
                 support: flags.iter().any(|f| f == "support"),
                 // Its chunks add up to it; a file kept only in a small-files
@@ -133,6 +151,7 @@ pub fn parse_v2(json: &[u8]) -> Result<Vec<Entry>, String> {
                 path: norm(&path),
                 support: false,
                 size: None,
+                md5: None,
             }),
             V2Item::Other => None,
         })
@@ -150,6 +169,7 @@ pub fn parse_v1(json: &[u8]) -> Result<Vec<Entry>, String> {
             path: norm(&f.path),
             support: f.support,
             size: f.size,
+            md5: f.hash.map(|h| h.to_lowercase()),
         })
         .collect())
 }
@@ -205,11 +225,14 @@ pub struct DepotList {
     /// The sizes the manifest gives, by path as in `paths`; a path with none (a
     /// link) is left out.
     pub sizes: BTreeMap<String, u64>,
+    /// The MD5s the manifest gives, by path as in `paths`.
+    pub md5s: BTreeMap<String, String>,
 }
 
-/// The `paths` and `sizes` of a [`DepotList`] from manifest entries.
-fn laid(entries: &[Entry], at: impl Fn(&Entry) -> String) -> (Vec<String>, BTreeMap<String, u64>) {
+/// The `paths`, `sizes` and `md5s` of a [`DepotList`] from manifest entries.
+fn laid(entries: &[Entry], at: impl Fn(&Entry) -> String) -> Laid {
     let mut sizes = BTreeMap::new();
+    let mut md5s = BTreeMap::new();
     let paths = entries
         .iter()
         .map(|e| {
@@ -217,11 +240,17 @@ fn laid(entries: &[Entry], at: impl Fn(&Entry) -> String) -> (Vec<String>, BTree
             if let Some(n) = e.size {
                 sizes.insert(p.clone(), n);
             }
+            if let Some(m) = &e.md5 {
+                md5s.insert(p.clone(), m.clone());
+            }
             p
         })
         .collect();
-    (paths, sizes)
+    (paths, sizes, md5s)
 }
+
+/// [`laid`]'s answer: paths, sizes and MD5s.
+type Laid = (Vec<String>, BTreeMap<String, u64>, BTreeMap<String, String>);
 
 /// Fetch the depots of `manifest`'s build with their files: every depot, or with
 /// `only = (products, languages)` those of `products` in one of `languages` (or
@@ -264,7 +293,7 @@ pub async fn fetch_depots(
                         .map_err(|e| DepotError::Library(format!("depot manifest: {e}")))?;
                     fetched.insert(hash.clone(), parse_v2(&json).map_err(DepotError::Library)?);
                 }
-                let (paths, sizes) = laid(&fetched[&hash], |e| {
+                let (paths, sizes, md5s) = laid(&fetched[&hash], |e| {
                     root_path(&install_dir, base, product, true, e)
                 });
                 out.push(DepotList {
@@ -273,6 +302,7 @@ pub async fn fetch_depots(
                     manifest: hash,
                     paths,
                     sizes,
+                    md5s,
                 });
             }
         }
@@ -317,7 +347,7 @@ pub async fn fetch_depots(
                     let entries = parse_v1(&get(http, &url).await?).map_err(DepotError::Library)?;
                     fetched.insert(name.clone(), entries);
                 }
-                let (paths, sizes) = laid(&fetched[name], |e| {
+                let (paths, sizes, md5s) = laid(&fetched[name], |e| {
                     root_path(&install_dir, base, &product, false, e)
                 });
                 out.push(DepotList {
@@ -326,6 +356,7 @@ pub async fn fetch_depots(
                     manifest: name.clone(),
                     paths,
                     sizes,
+                    md5s,
                 });
             }
         }
@@ -677,16 +708,19 @@ mod tests {
                     path: "bin/x64/Game.exe".into(),
                     support: false,
                     size: Some(7),
+                    md5: None,
                 },
                 Entry {
                     path: "app/goggame-2.script".into(),
                     support: true,
                     size: Some(4),
+                    md5: None,
                 },
                 Entry {
                     path: "link".into(),
                     support: false,
                     size: None,
+                    md5: None,
                 },
             ]
         );
@@ -698,6 +732,18 @@ mod tests {
             root_path("Game", "1", "2", true, &e[0]),
             "Game/bin/x64/Game.exe"
         );
+    }
+
+    /// A file's MD5 comes from its own `md5`, else from its only chunk's, lowercased.
+    #[test]
+    fn v2_file_md5_is_its_own_or_its_single_chunks() {
+        let json = br#"{"depot":{"items":[
+            {"type":"DepotFile","path":"a","md5":"ABC","chunks":[{"size":1,"md5":"x"},{"size":1,"md5":"y"}]},
+            {"type":"DepotFile","path":"b","chunks":[{"size":1,"md5":"DEF"}]},
+            {"type":"DepotFile","path":"c","chunks":[{"size":1,"md5":"x"},{"size":1,"md5":"y"}]}
+        ]}}"#;
+        let md5: Vec<_> = parse_v2(json).unwrap().into_iter().map(|e| e.md5).collect();
+        assert_eq!(md5, [Some("abc".into()), Some("def".into()), None]);
     }
 
     #[test]
@@ -802,6 +848,7 @@ mod tests {
             manifest: m.into(),
             paths: vec![p.into()],
             sizes: BTreeMap::new(),
+            md5s: BTreeMap::new(),
         };
         let one = [d("en-US", "x", "G/a"), d("de-DE", "x", "G/A")];
         assert!(clash(&one, "en-US", |_| true).is_none(), "one manifest");

@@ -91,6 +91,26 @@ pub fn load_game(gogid: &str, cache_base: Option<&Path>) -> Result<Game, MacAppE
 }
 
 impl Game {
+    /// The game as its dir says now, with the same cache root: what a command
+    /// re-reads under the game's lock.
+    pub fn reload(&self) -> Result<Game, MacAppError> {
+        let dirs = GameDirs::for_game(&self.gogid)?;
+        let (lane, install) = if dirs.game.is_dir() {
+            (content::Lane::Depot, dirs.game.clone())
+        } else {
+            (content::Lane::Installer, dirs.prefix.join("drive_c/GOG"))
+        };
+        let r = content::resolve(&dirs.root, &install, lane, self.cache_root.as_deref())
+            .map_err(|e| MacAppError::Apps(e.to_string()))?;
+        Ok(Game {
+            gogid: self.gogid.clone(),
+            dirs,
+            content: r.content,
+            derived: r.derived,
+            cache_root: self.cache_root.clone(),
+        })
+    }
+
     pub fn installed(&self) -> Vec<u64> {
         self.content.dlc.iter().map(|d| d.id).collect()
     }
@@ -1065,13 +1085,21 @@ pub fn recover_locked(
     emit: &mut dyn FnMut(&ProgressEvent),
 ) -> Result<Option<Direction>, AddError> {
     let root = game.dirs.root.clone();
-    let Some((j, dir)) = lay::recover(&root, reflink)? else {
+    // An update's lay (design 21 §11g) shares the journal. Its files come from the
+    // depot cache on the target build: a cache that moved since can't finish it,
+    // so it goes back.
+    let moved = lay::read_journal(&root)?
+        .filter(Journal::is_update)
+        .and_then(|j| super::update::cache_moved(&j));
+    let recovered = match moved {
+        Some(_) => lay::roll_back(&root, reflink)?,
+        None => lay::recover(&root, reflink)?,
+    };
+    let Some((j, dir)) = recovered else {
         return Ok(None);
     };
-    // An update's lay (design 21 §11g) shares the journal: settled the same way,
-    // committed as an update.
     if j.is_update() {
-        super::update::settle(game, &j, dir, emit)?;
+        super::update::settle(game, &j, dir, moved, emit)?;
         return Ok(Some(dir));
     }
     match dir {

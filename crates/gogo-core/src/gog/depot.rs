@@ -1655,6 +1655,11 @@ impl Snapshot {
             .fold((0, 0), |(n, b), (_, (len, _))| (n + 1, b + len))
     }
 
+    /// The size it recorded for `path` (relative to the root), if it has it.
+    pub fn size_of(&self, path: &str) -> Option<u64> {
+        self.0.get(path).map(|(len, _)| *len)
+    }
+
     /// The paths (relative to the root, `/`-separated, sorted) `before` had and
     /// `self` hasn't: what a run deleted (design 21 §11g).
     pub fn gone_since(&self, before: &Snapshot) -> Vec<String> {
@@ -2231,6 +2236,7 @@ mod tests {
             manifest: manifest.into(),
             paths: paths.iter().map(|p| p.to_string()).collect(),
             sizes: Default::default(),
+            md5s: Default::default(),
         }
     }
 
@@ -3252,6 +3258,7 @@ mod tests {
             manifest: "m".into(),
             paths: paths.iter().map(|p| p.to_string()).collect(),
             sizes: BTreeMap::new(),
+            md5s: Default::default(),
         }
     }
 
