@@ -8199,7 +8199,7 @@ mod dlc_add {
 
             // Again: not installed, nothing to name.
             let g = game(&w);
-            let named = rm::resolve_installed(&["Extra Pack".into()], &g.content.refs());
+            let named = rm::resolve_installed(&["Extra Pack".into()], &g.content.refs(), false);
             assert!(named.ids.is_empty());
         }
 
@@ -8242,6 +8242,111 @@ mod dlc_add {
             assert!(cache_root(&w).join(TREE).join("dlc/ep1/a.archive").exists());
             let rec = depot::read_record(&cache_root(&w)).unwrap();
             assert_eq!(rec.dlcs, Some(vec![DLC.to_string()]));
+            no_leftovers(&w);
+        }
+
+        /// [`with_dlc`] from the cache, whose `shared.pak` is then the base's: a
+        /// removal restores it from there.
+        fn with_dlc_in_cache(name: &str) -> World {
+            let w = built(name);
+            cache(&w);
+            let mut g = game(&w);
+            let p = plan_for(&g, &[DLC]);
+            run(&mut g, &p, no_setup(), false).result.unwrap();
+            std::fs::write(cache_root(&w).join(TREE).join("shared.pak"), b"base shared").unwrap();
+            w
+        }
+
+        #[test]
+        fn a_cache_copy_that_changed_since_the_plan_is_refused_before_the_lay() {
+            let w = with_dlc_in_cache("dlc-remove-cache-changed");
+            let with = tree(&w.game().join("game"));
+            let mut g = game(&w);
+            let p = plan(&g, &[DLC], 2).unwrap();
+            assert_eq!(p.restored[0].from, RestoreFrom::Cache);
+            std::fs::write(
+                cache_root(&w).join(TREE).join("shared.pak"),
+                b"other shared",
+            )
+            .unwrap();
+            let e = remove(&mut g, &p, no_setup(), true)
+                .result
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains("changed since the plan"), "{e}");
+            assert_eq!(tree(&w.game().join("game")), with, "nothing laid");
+            no_leftovers(&w);
+        }
+
+        #[test]
+        fn a_cache_record_that_changed_since_the_plan_is_refused() {
+            let w = with_dlc_in_cache("dlc-remove-cache-record");
+            let mut g = game(&w);
+            let p = plan(&g, &[DLC], 2).unwrap();
+            depot::write_record(&cache_root(&w), "B1", "en-US", &[]).unwrap();
+            let e = remove(&mut g, &p, no_setup(), true)
+                .result
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains("depot cache is another one"), "{e}");
+            assert!(w.game().join("game/dlc/ep1/a.archive").exists());
+        }
+
+        #[test]
+        fn a_recovery_goes_back_when_a_cache_source_changed() {
+            let w = with_dlc_in_cache("dlc-remove-cache-recover");
+            let with = tree(&w.game().join("game"));
+            let mut g = game(&w);
+            let p = plan(&g, &[DLC], 2).unwrap();
+            let opts = AddOptions {
+                run_setup: false,
+                fail_at: Some(lay::Step::Journal),
+                ..Default::default()
+            };
+            assert!(remove(&mut g, &p, opts, true).result.is_err());
+            assert!(dlc::journal_exists(&w.game()));
+            std::fs::write(
+                cache_root(&w).join(TREE).join("shared.pak"),
+                b"other shared",
+            )
+            .unwrap();
+            let mut g = game(&w);
+            let dir =
+                dlc::recover(&mut g, gogo::gog::materialize::Reflink::Try, &mut |_| {}).unwrap();
+            assert_eq!(dir, Some(lay::Direction::Back));
+            assert_eq!(tree(&w.game().join("game")), with);
+            assert_eq!(content::load(&w.game()).unwrap().unwrap().dlc.len(), 1);
+            no_leftovers(&w);
+        }
+
+        #[test]
+        fn a_restored_path_outside_the_game_refuses_the_removal() {
+            let (w, _) = with_dlc("dlc-remove-dotdot");
+            let mut depots = depots();
+            let bad = format!("{TREE}/../outside.pak");
+            for d in &mut depots {
+                d.paths.push(bad.clone());
+                d.sizes.insert(bad.clone(), 3);
+                d.md5s.insert(bad.clone(), format!("{}{}", d.product, "0"));
+            }
+            let mut g = game(&w);
+            let p = rm::plan_remove(&rm::PlanInput {
+                game: &g,
+                title: "Test Game",
+                version: None,
+                generation: 2,
+                tree_name: TREE.into(),
+                depots: &depots,
+                removing: &[DLC],
+                autosnapshot: false,
+            })
+            .unwrap();
+            assert!(p.restored.iter().any(|r| r.file.path == bad));
+            let r = remove(&mut g, &p, no_setup(), true);
+            let e = r.result.unwrap_err().to_string();
+            assert!(e.contains("isn't a plain path"), "{e}");
+            assert!(r.inputs.is_empty(), "refused before any download");
+            assert!(w.game().join("game/dlc/ep1/a.archive").exists());
             no_leftovers(&w);
         }
 
@@ -8375,8 +8480,9 @@ mod dlc_add {
                         assert_eq!(dlcs, 1, "{step:?}");
                     } else {
                         assert_eq!(dir, Some(lay::Direction::Forward), "{step:?}");
-                        // Files only: a forward recovery leaves an emptied dir.
                         assert_eq!(tree(&w.game().join("game")), before, "{step:?}");
+                        // As a removal that didn't stop: the emptied dirs go too.
+                        assert!(!w.game().join("game/dlc").exists(), "{step:?}");
                         assert_eq!(dlcs, 0, "{step:?}");
                     }
                     assert!(

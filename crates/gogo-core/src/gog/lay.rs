@@ -91,9 +91,17 @@ pub struct Journal {
     /// into the backup with the replaced files, put back on a rollback.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub removed: Vec<String>,
-    /// The DLC a removal takes out (design 19 §3.5); empty for an add or an update.
+    /// The DLC a removal takes out (design 19 §3.7); empty for an add or an update.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub removing: Vec<AddingDlc>,
+    /// A removal's restored files: `to` → the MD5 their source must have, checked
+    /// again before a recovery lays them.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub md5s: std::collections::BTreeMap<String, String>,
+    /// Dirs under `game/` a removal takes out once its commit is done, deepest
+    /// first, each only when it is empty then.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prune: Vec<String>,
 }
 
 /// The journal kind of an update.
@@ -220,7 +228,7 @@ impl Journal {
 
 /// A `/`-separated relative path with only plain components (no `..`, `.` or
 /// empty one).
-fn plain(rel: &str) -> bool {
+pub fn plain(rel: &str) -> bool {
     !rel.is_empty()
         && !rel.starts_with('/')
         && rel
@@ -691,6 +699,8 @@ mod tests {
             to: None,
             removed: Vec::new(),
             removing: Vec::new(),
+            md5s: Default::default(),
+            prune: Vec::new(),
         };
         j.survey(&f.root.join("game"));
         j

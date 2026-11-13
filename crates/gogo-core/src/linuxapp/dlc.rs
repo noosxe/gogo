@@ -974,6 +974,23 @@ pub fn journal_exists(root: &Path) -> bool {
     lay::journal_path(root).exists()
 }
 
+/// Which DLC change is pending in the game dir `root` (a journal, a download
+/// record or a staging dir): `("removal", "remove")` for a removal's (design 19
+/// §3.7), else `("add", "add")`, for the messages that name the command that
+/// settles it. An update's journal is settled by either.
+pub fn pending_kind(root: &Path) -> (&'static str, &'static str) {
+    let removal = lay::read_journal(root)
+        .ok()
+        .flatten()
+        .is_some_and(|j| j.is_removal())
+        || super::dlc_remove::download_is_removal(root);
+    if removal {
+        ("removal", "remove")
+    } else {
+        ("add", "add")
+    }
+}
+
 /// Did an add stop during its download (the game is untouched)?
 pub fn download_pending(root: &Path) -> bool {
     root.join(DOWNLOAD).exists()
@@ -1317,6 +1334,8 @@ where
             to: None,
             removed: Vec::new(),
             removing: Vec::new(),
+            md5s: Default::default(),
+            prune: Vec::new(),
         };
         // A record-only add with nothing to lay writes no journal.
         if !j.files.is_empty() {

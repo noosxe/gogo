@@ -723,7 +723,25 @@ async fn remove_cmd(
     };
     let installed = game.content.refs();
     let wanted: Vec<u64> = if !a.names.is_empty() {
-        let named = rm::resolve_installed(&a.names, &installed);
+        // A name that is only part of a title counts only when the question
+        // below will be asked to confirm it.
+        let asks = !a.yes && interactive(machine);
+        let named = rm::resolve_installed(&a.names, &installed, asks);
+        if !named.ambiguous.is_empty() || !named.inexact.is_empty() {
+            for (n, titles) in &named.ambiguous {
+                eprintln!(
+                    "gogo: \"{n}\" is ambiguous: matches {}; name one by id or full title",
+                    titles.join(", ")
+                );
+            }
+            for (n, title) in &named.inexact {
+                eprintln!(
+                    "gogo: no installed DLC is titled \"{n}\"; did you mean \"{title}\"? \
+                     Without the question (--yes, or no terminal), name it by id or full title"
+                );
+            }
+            return Ok(cli::exit::USAGE);
+        }
         if !named.unmatched.is_empty() && !quiet {
             eprintln!(
                 "gogo: not installed, nothing to remove: {} (installed: {})",
