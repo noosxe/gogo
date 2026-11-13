@@ -1702,6 +1702,7 @@ fn language_depots() -> Vec<gogo::gog::dlc_filter::DepotList> {
         manifest: manifest.into(),
         paths: paths.iter().map(|p| format!("Test Game/{p}")).collect(),
         sizes: Default::default(),
+        md5s: Default::default(),
     };
     vec![
         d(
@@ -7682,6 +7683,7 @@ mod dlc_add {
                 manifest: "m-base".into(),
                 paths: base,
                 sizes: Default::default(),
+                md5s: Default::default(),
             },
             DepotList {
                 product: DLC.to_string(),
@@ -7689,6 +7691,7 @@ mod dlc_add {
                 manifest: "m-dlc".into(),
                 paths: dlc_paths(),
                 sizes: Default::default(),
+                md5s: Default::default(),
             },
         ]
     }
@@ -7919,6 +7922,7 @@ mod dlc_add {
             manifest: "m-en".into(),
             paths: vec![format!("{TREE}/vo/en.pak")],
             sizes: Default::default(),
+            md5s: Default::default(),
         });
         let up = gogo::gog::cache_upgrade::decide(&root, TREE, ID, "B1", &d, "en-US");
         assert!(up.is_err(), "{up:?}");
@@ -12118,7 +12122,7 @@ mod update {
     use gogo::gog::{build_manifest, content, lay};
     use gogo::linuxapp::dlc::{self, AddError};
     use gogo::linuxapp::update::{
-        self, BuildSide, PlanInput, Planned, UpdateOptions, UpdateOutcome, UpdatePlan,
+        self, BuildSide, DroppedFile, PlanInput, Planned, UpdateOptions, UpdateOutcome, UpdatePlan,
     };
     use gogo::macapp::doctor::Level;
     use std::collections::BTreeMap;
@@ -12663,5 +12667,203 @@ mod update {
         let g = game(&w);
         let r = update::plan_update(input(&g, &[])).unwrap_err();
         assert!(r.message.contains("--build B2 --yes"), "{}", r.message);
+    }
+
+    /// MD5 of `abc`.
+    const ABC_MD5: &str = "900150983cd24fb0d6963f7d28e17f72";
+
+    /// A file the target drops comes out only while it is the installed build's:
+    /// by its MD5, else its size. One the user changed stays, with a warning, and
+    /// so does one behind a symlinked dir (which would reach outside `game/`).
+    #[test]
+    fn a_dropped_file_that_changed_since_install_stays() {
+        let w = built("update-dropped-changed", false, None);
+        let gd = w.game().join("game");
+        let cache_tree = cache_root(&w).join(TREE);
+        for (rel, body) in [("same.cfg", "abc"), ("edited.cfg", "abc")] {
+            std::fs::write(gd.join(rel), body).unwrap();
+            std::fs::write(cache_tree.join(rel), body).unwrap();
+        }
+        // The user edits one (same size: only the MD5 tells) and `old.dll`, which
+        // the switch deletes (its size from the cache tells).
+        std::fs::write(gd.join("edited.cfg"), "xyz").unwrap();
+        std::fs::write(gd.join("old.dll"), b"my patched old.dll").unwrap();
+        // A dir that is a symlink to outside `game/`.
+        let outside = w.root.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("x.dat"), "abc").unwrap();
+        std::os::unix::fs::symlink(&outside, gd.join("linked")).unwrap();
+        let mut g = game(&w);
+        let dropped = |rel: &str| DroppedFile {
+            path: format!("{TREE}/{rel}"),
+            size: Some(3),
+            md5: Some(ABC_MD5.into()),
+        };
+        let p = match update::plan_update(PlanInput {
+            dropped: vec![
+                dropped("same.cfg"),
+                dropped("edited.cfg"),
+                dropped("linked/x.dat"),
+            ],
+            ..input(&g, &[])
+        })
+        .unwrap()
+        {
+            Planned::Update(p) => p,
+            Planned::UpToDate(_) => unreachable!(),
+        };
+        assert_eq!(p.dropped, 3);
+        let out = run(&mut g, &p, &opts(), false).result.unwrap();
+        assert_eq!(out.removed, 1, "{:?}", out.warnings);
+        assert!(!gd.join("same.cfg").exists());
+        assert_eq!(
+            std::fs::read_to_string(gd.join("edited.cfg")).unwrap(),
+            "xyz"
+        );
+        assert_eq!(
+            std::fs::read(gd.join("old.dll")).unwrap(),
+            b"my patched old.dll"
+        );
+        assert_eq!(
+            std::fs::read_to_string(outside.join("x.dat")).unwrap(),
+            "abc"
+        );
+        let warned = |what: &str, why: &str| {
+            out.warnings
+                .iter()
+                .any(|w| w.starts_with(&format!("kept {what},")) && w.contains(why))
+        };
+        assert!(
+            warned("edited.cfg", "changed since install"),
+            "{:?}",
+            out.warnings
+        );
+        assert!(
+            warned("old.dll", "changed since install"),
+            "{:?}",
+            out.warnings
+        );
+        assert!(warned("linked/x.dat", "is a symlink"), "{:?}", out.warnings);
+        no_leftovers(&w);
+    }
+
+    /// A resumed lay checks the cache is still on the target: one another command
+    /// moved goes back (journal) or starts over (download record), never laid.
+    #[test]
+    fn a_cache_moved_before_a_resume_is_never_laid() {
+        // A journal: `recover` goes back.
+        let w = built("update-cache-moved-journal", false, None);
+        let before = tree(&w.game().join("game"));
+        let mut g = game(&w);
+        let p = plan(&g, &[]);
+        let o = UpdateOptions {
+            fail_at: Some(lay::Step::Backup),
+            ..opts()
+        };
+        assert!(run(&mut g, &p, &o, false).result.is_err());
+        depot::write_record(&cache_root(&w), "B3", "en-US", &[]).unwrap();
+        let mut g = game(&w);
+        let mut said = Vec::new();
+        let dir = dlc::recover(&mut g, gogo::gog::materialize::Reflink::Never, &mut |e| {
+            said.push(serde_json::to_string(e).unwrap())
+        })
+        .unwrap();
+        assert_eq!(dir, Some(lay::Direction::Back));
+        assert_eq!(tree(&w.game().join("game")), before);
+        assert!(
+            said.iter().any(|m| m.contains("is on build B3 now")),
+            "{said:?}"
+        );
+        let c = content::load(&w.game()).unwrap().unwrap();
+        assert_eq!(c.build_id.as_deref(), Some("B1"));
+        no_leftovers(&w);
+        drop(w);
+
+        // A finished download and no journal yet: the update refuses and drops it.
+        let w = built("update-cache-moved-record", false, None);
+        let before = tree(&w.game().join("game"));
+        let mut g = game(&w);
+        let p = plan(&g, &[]);
+        let o = UpdateOptions {
+            fail_at: Some(lay::Step::Journal),
+            ..opts()
+        };
+        assert!(run(&mut g, &p, &o, false).result.is_err());
+        lay::roll_back(&w.game(), gogo::gog::materialize::Reflink::Never).unwrap();
+        assert!(update::read_download(&w.game()).unwrap().fetched);
+        depot::write_record(&cache_root(&w), "B3", "en-US", &[]).unwrap();
+        let mut g = game(&w);
+        let p = plan(&g, &[]);
+        assert!(p.resume);
+        let r = run(&mut g, &p, &opts(), false);
+        assert_eq!(r.fetched, 0);
+        let e = r.result.unwrap_err().to_string();
+        assert!(e.contains("moved to build B3"), "{e}");
+        assert_eq!(tree(&w.game().join("game")), before);
+        no_leftovers(&w);
+    }
+
+    /// The game is read again under the lock: a DLC added since the plan stops the
+    /// update with nothing changed.
+    #[test]
+    fn a_game_changed_since_the_plan_is_refused() {
+        let w = built("update-drift", false, None);
+        let before = tree(&w.game().join("game"));
+        let mut g = game(&w);
+        let p = plan(&g, &[]);
+        let mut c = content::load(&w.game()).unwrap().unwrap();
+        c.dlc.push(content::DlcRow {
+            id: DLC,
+            title: "Extra Pack".into(),
+            build_id: Some("B1".into()),
+            version: None,
+            added: None,
+        });
+        content::write(&w.game(), &c).unwrap();
+        let r = run(&mut g, &p, &opts(), false);
+        assert_eq!(r.fetched, 0);
+        let e = r.result.unwrap_err().to_string();
+        assert!(e.contains("changed since the plan"), "{e}");
+        assert!(e.contains("run the update again"), "{e}");
+        assert_eq!(tree(&w.game().join("game")), before);
+        assert_eq!(content::load(&w.game()).unwrap().unwrap().dlc.len(), 1);
+        no_leftovers(&w);
+    }
+
+    /// A download record from another installed build (a snapshot rollback since)
+    /// is stale: the plan notes it instead of refusing, and the update discards it.
+    #[test]
+    fn a_stale_download_record_is_discarded() {
+        let w = built("update-stale-record", false, None);
+        let stale = update::DownloadRecord {
+            from: "B0".into(),
+            to: b2(),
+            source: cache_root(&w),
+            tree_name: TREE.into(),
+            before: Default::default(),
+            dropped: Vec::new(),
+            fetched: true,
+        };
+        std::fs::write(
+            w.game().join(update::DOWNLOAD),
+            serde_json::to_string(&stale).unwrap(),
+        )
+        .unwrap();
+        let mut g = game(&w);
+        let p = plan(&g, &[]);
+        assert!(!p.resume);
+        assert!(p.notes.iter().any(|n| n.contains("stale")), "{:?}", p.notes);
+        let out = run(&mut g, &p, &opts(), false).result.unwrap();
+        assert_eq!(out.to.build_id, "B2");
+        no_leftovers(&w);
+        // `discard_stale` alone, as the CLI calls it before planning.
+        std::fs::write(
+            w.game().join(update::DOWNLOAD),
+            serde_json::to_string(&stale).unwrap(),
+        )
+        .unwrap();
+        assert!(update::discard_stale(&w.game(), "B2").is_some());
+        assert!(!update::download_pending(&w.game()));
+        assert!(update::discard_stale(&w.game(), "B2").is_none());
     }
 }

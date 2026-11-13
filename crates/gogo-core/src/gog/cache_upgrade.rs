@@ -666,6 +666,7 @@ mod tests {
             manifest: manifest.into(),
             paths: paths.iter().map(|s| s.to_string()).collect(),
             sizes: Default::default(),
+            md5s: Default::default(),
         }
     }
 

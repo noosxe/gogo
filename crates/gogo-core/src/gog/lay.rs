@@ -463,6 +463,20 @@ impl Direction {
 /// and `.gogo-new`s are removed, backups renamed back, created dirs removed when
 /// empty, and the backup and staging dirs and the journal deleted.
 pub fn recover(root: &Path, mode: Reflink) -> Result<Option<(Journal, Direction)>, LayError> {
+    recover_as(root, mode, false)
+}
+
+/// [`recover`], going back whatever the source holds: for a lay whose source no
+/// longer vouches for its files (an update's cache moved to another build).
+pub fn roll_back(root: &Path, mode: Reflink) -> Result<Option<(Journal, Direction)>, LayError> {
+    recover_as(root, mode, true)
+}
+
+fn recover_as(
+    root: &Path,
+    mode: Reflink,
+    back: bool,
+) -> Result<Option<(Journal, Direction)>, LayError> {
     let Some(j) = read_journal(root)? else {
         return Ok(None);
     };
@@ -475,10 +489,10 @@ pub fn recover(root: &Path, mode: Reflink) -> Result<Option<(Journal, Direction)
             exists(&game.join(rel))
         }
     };
-    let whole = j
-        .files
-        .iter()
-        .all(|f| exists(&new_of(&game, &f.to)) || in_place(&f.to) || exists(&f.from));
+    let whole = !back
+        && j.files
+            .iter()
+            .all(|f| exists(&new_of(&game, &f.to)) || in_place(&f.to) || exists(&f.from));
     if whole {
         for d in &j.dirs {
             fs::create_dir_all(game.join(d))?;

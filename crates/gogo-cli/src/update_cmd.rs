@@ -127,6 +127,14 @@ pub async fn run(gogid: String, a: Args) -> Result<i32, AppError> {
         .builds
         .iter()
         .find(|b| *b.build_id() == installed_id);
+    // A download record another installed build left (a snapshot rollback since) is
+    // stale: discarded, and the update plans afresh.
+    if !a.dry_run
+        && let Some(note) = update::discard_stale(&game.dirs.root, &installed_id)
+        && !quiet
+    {
+        eprintln!("gogo: note: {note}");
+    }
     let pending = update::read_download(&game.dirs.root).filter(|p| p.from == installed_id);
 
     // The target: `--build`, else a stopped update's, else the newest on the
@@ -258,7 +266,18 @@ pub async fn run(gogid: String, a: Args) -> Result<i32, AppError> {
             gogo::gog::dlc_filter::fetch_depots(http, old, Some((&op, &langs))).await,
             gogo::gog::dlc_filter::fetch_depots(http, &target_manifest, Some((&np, &langs))).await,
         ) {
-            (Ok(a), Ok(b)) => dropped = depot::dropped_paths(&a, &b),
+            (Ok(a), Ok(b)) => {
+                // Each with what the installed build gives it, to check the copy in
+                // the game by before it comes out.
+                dropped = depot::dropped_paths(&a, &b)
+                    .into_iter()
+                    .map(|path| update::DroppedFile {
+                        size: a.iter().find_map(|d| d.sizes.get(&path).copied()),
+                        md5: a.iter().find_map(|d| d.md5s.get(&path).cloned()),
+                        path,
+                    })
+                    .collect();
+            }
             (Err(e), _) | (_, Err(e)) => notes.push(format!(
                 "couldn't list the files build {} dropped ({e}); the files the cache switch \
                  deletes are still taken out of the game",

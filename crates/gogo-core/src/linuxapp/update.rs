@@ -59,6 +59,18 @@ impl BuildSide {
     }
 }
 
+/// A file the target drops, as the installed build's depot manifest gives it: a
+/// path relative to the cache root, with the size and MD5 the manifest has for
+/// it. The copy in `game/` is only taken out when it still matches (§11g).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DroppedFile {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub md5: Option<String>,
+}
+
 /// Why an update is refused before anything is written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refusal {
@@ -120,9 +132,9 @@ pub struct PlanInput<'a> {
     pub same_install_dir: bool,
     /// The target's install directory: the tree's name in the cache.
     pub tree_name: String,
-    /// Cache-root paths the installed build lays and the target doesn't, from both
+    /// The files the installed build lays and the target doesn't, from both
     /// builds' depot manifests (empty when they couldn't be listed).
-    pub dropped: Vec<String>,
+    pub dropped: Vec<DroppedFile>,
     /// Said under the plan (a depot listing that failed…).
     pub notes: Vec<String>,
     /// The target's whole download and disk size for the game's language and DLC.
@@ -152,7 +164,7 @@ pub struct UpdatePlan {
     /// How many files the target drops, by the depot manifests.
     pub dropped: usize,
     #[serde(skip)]
-    pub dropped_paths: Vec<String>,
+    pub dropped_paths: Vec<DroppedFile>,
     /// `reflink` or `copy`.
     pub game_files: String,
     pub game_dir: PathBuf,
@@ -294,9 +306,18 @@ pub fn plan_update(input: PlanInput<'_>) -> Result<Planned, Refusal> {
              linux-app dlc {gogid} add`"
         )));
     }
-    let pending = read_download(root);
+    let mut notes = input.notes;
+    // A record from another installed build (a snapshot rollback since) is stale:
+    // the update discards it (§11g).
+    let pending = match read_download(root) {
+        Some(p) if p.from != from_id => {
+            notes.push(stale_note(&p, &from_id));
+            None
+        }
+        p => p,
+    };
     if let Some(p) = &pending
-        && (p.to.build_id != input.to.build_id || p.from != from_id)
+        && p.to.build_id != input.to.build_id
     {
         return Err(refuse(format!(
             "an update of {gogid} from build {} to {} stopped during its download; finish it \
@@ -402,7 +423,7 @@ pub fn plan_update(input: PlanInput<'_>) -> Result<Planned, Refusal> {
         game_dir: game.dirs.game.clone(),
         download_size: input.download_size,
         disk_size: input.disk_size,
-        notes: input.notes,
+        notes,
         manifest: input.manifest,
     })))
 }
@@ -539,8 +560,8 @@ pub struct DownloadRecord {
     pub tree_name: String,
     /// The cache before the first try.
     pub before: Snapshot,
-    /// Cache-root paths the target drops, from the depot manifests.
-    pub dropped: Vec<String>,
+    /// The files the target drops, from the depot manifests.
+    pub dropped: Vec<DroppedFile>,
     /// The download finished: a rerun lays without fetching again.
     pub fetched: bool,
 }
@@ -553,6 +574,40 @@ pub fn read_download(root: &Path) -> Option<DownloadRecord> {
 /// Did an update stop before its lay (the game is untouched)?
 pub fn download_pending(root: &Path) -> bool {
     root.join(DOWNLOAD).exists()
+}
+
+fn stale_note(p: &DownloadRecord, installed: &str) -> String {
+    format!(
+        "an earlier update's download record (build {} to {}) is stale: the game is on \
+         build {installed} now, so it is discarded",
+        p.from, p.to.build_id
+    )
+}
+
+/// Remove a download record (and the staged manifest) that another installed build
+/// left (a snapshot rollback since), so the update plans afresh. What it said, when
+/// there was one.
+pub fn discard_stale(root: &Path, installed: &str) -> Option<String> {
+    let p = read_download(root).filter(|p| p.from != installed)?;
+    let _ = std::fs::remove_file(root.join(DOWNLOAD));
+    let _ = std::fs::remove_file(root.join(NEXT_MANIFEST));
+    Some(stale_note(&p, installed))
+}
+
+/// Why an update's journal can't go forward: its source, the depot cache, isn't
+/// on the journal's target build any more. `None` when it is.
+pub(crate) fn cache_moved(j: &Journal) -> Option<String> {
+    let to = j.to.as_deref().unwrap_or(&j.build_id);
+    match depot::read_record(&j.source) {
+        Some(r) if r.build_id == to => None,
+        r => Some(format!(
+            "the depot cache is on {} now, not build {to}",
+            r.map_or("no recorded build".into(), |r| format!(
+                "build {}",
+                r.build_id
+            ))
+        )),
+    }
 }
 
 /// The commit (§11g step 7): the target's manifest into place, then `content.toml`
@@ -588,6 +643,7 @@ pub(crate) fn settle(
     game: &mut Game,
     j: &Journal,
     dir: Direction,
+    moved: Option<String>,
     emit: &mut dyn FnMut(&ProgressEvent),
 ) -> Result<(), AddError> {
     let root = game.dirs.root.clone();
@@ -613,8 +669,9 @@ pub(crate) fn settle(
         Direction::Back => {
             let _ = std::fs::remove_file(root.join(NEXT_MANIFEST));
             format!(
-                "an earlier update to build {to_id} had stopped and the depot cache lost \
-                 files it needed: undid it, the game is on build {} as it was",
+                "an earlier update to build {to_id} had stopped and {}: undid it, the game \
+                 is on build {} as it was",
+                moved.unwrap_or_else(|| "the depot cache lost files it needed".into()),
                 j.from.as_deref().unwrap_or("?")
             )
         }
@@ -646,6 +703,74 @@ fn entry_warning(game: &Game) -> Option<String> {
     ))
 }
 
+fn changed(gogid: &str, why: &str) -> AddError {
+    AddError::Game(MacAppError::Apps(format!(
+        "{gogid} changed since the plan ({why}): run the update again"
+    )))
+}
+
+/// What differs between the game as read under the lock and the plan: its DLC,
+/// language or dirs. `None` when nothing does.
+fn drift(game: &Game, plan: &UpdatePlan) -> Option<String> {
+    let mut now = game.installed();
+    let mut planned: Vec<u64> = plan.dlcs.iter().map(|d| d.id).collect();
+    now.sort_unstable();
+    planned.sort_unstable();
+    if now != planned {
+        return Some("its DLC are not the ones planned".into());
+    }
+    let language = language_of(game);
+    if language != plan.language {
+        return Some(format!("its language is now {language}"));
+    }
+    if game.dirs.game != plan.game_dir {
+        return Some(format!("it is at {} now", game.dirs.root.display()));
+    }
+    None
+}
+
+/// Whether `game/<rel>` may come out: no dir on its way is a symlink (that would
+/// reach outside `game/`), and it still is the installed build's file by the MD5,
+/// else the size, that build gives it. `Err` says why it stays.
+fn removable(game: &Path, rel: &str, size: Option<u64>, md5: Option<&str>) -> Result<(), String> {
+    let mut at = game.to_path_buf();
+    let parts: Vec<&str> = rel.split('/').collect();
+    for p in &parts[..parts.len().saturating_sub(1)] {
+        at.push(p);
+        if at
+            .symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink())
+        {
+            return Err(format!("a dir on its path ({p}) is a symlink"));
+        }
+    }
+    let path = game.join(rel);
+    let meta = path.symlink_metadata().map_err(|e| e.to_string())?;
+    match (md5, size) {
+        (Some(want), _) if meta.is_file() => {
+            use md5::Digest;
+            let mut h = md5::Md5::new();
+            let mut f = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+            let mut buf = vec![0u8; 1 << 16];
+            loop {
+                let n = std::io::Read::read(&mut f, &mut buf).map_err(|e| e.to_string())?;
+                if n == 0 {
+                    break;
+                }
+                h.update(&buf[..n]);
+            }
+            if crate::fmt::md5_hex(h).eq_ignore_ascii_case(want) {
+                Ok(())
+            } else {
+                Err("changed since install".into())
+            }
+        }
+        (_, Some(n)) if meta.len() == n => Ok(()),
+        (_, Some(_)) => Err("changed since install".into()),
+        (_, None) => Err("the installed build gives no size or hash to check it by".into()),
+    }
+}
+
 fn interrupted_lay(gogid: &str) -> AddError {
     AddError::Interrupted(
         "lay",
@@ -675,6 +800,9 @@ where
     let lock = crate::macapp::relocate::lock_game(&gogid)?;
     game::refuse_running(&gogid, &root, &game.dirs.prefix)?;
     let recovered = dlc::recover_locked(game, opts.reflink, emit)?;
+    // The plan was made before the lock, across the network and a question: the
+    // game is read again, and a change since stops the update (§11g step 2).
+    *game = game.reload()?;
     let mut warnings = Vec::new();
     let outcome = |game: &Game,
                    recovered,
@@ -705,11 +833,20 @@ where
             return Ok(outcome(game, recovered, 0, 0, None, None, warnings));
         }
         _ => {
-            return Err(AddError::Game(MacAppError::Apps(format!(
-                "{gogid} changed since the plan (its build is now {}): run the update again",
-                game.content.build_id.as_deref().unwrap_or("unknown")
-            ))));
+            return Err(changed(
+                &gogid,
+                &format!(
+                    "its build is now {}",
+                    game.content.build_id.as_deref().unwrap_or("unknown")
+                ),
+            ));
         }
+    }
+    if let Some(why) = drift(game, plan) {
+        return Err(changed(&gogid, &why));
+    }
+    if let Some(message) = discard_stale(&root, &plan.from.build_id) {
+        emit(&ProgressEvent::Warn { message });
     }
     let cache = plan.cache_root.clone();
     let prior = read_download(&root).filter(|r| {
@@ -786,17 +923,48 @@ where
         }
         rec.fetched = true;
         lay::write_json_durably(&root.join(DOWNLOAD), &rec)?;
+    } else {
+        // A resumed lay diffs the cache as it is now: another command may have
+        // moved it since the download. Then the record can't be trusted, and the
+        // update starts over.
+        let on = depot::read_record(&cache).map(|r| r.build_id);
+        if on.as_deref() != Some(plan.to.build_id.as_str()) {
+            let _ = std::fs::remove_file(root.join(DOWNLOAD));
+            let _ = std::fs::remove_file(root.join(NEXT_MANIFEST));
+            return Err(AddError::Game(MacAppError::Apps(format!(
+                "the depot cache moved to {} since this update's download, so its files \
+                 can't be laid; the game is on build {} as it was, and `gogo linux-app \
+                 update {gogid}` plans it again",
+                on.map_or("no recorded build".into(), |b| format!("build {b}")),
+                plan.from.build_id
+            ))));
+        }
     }
 
     // What the switch wrote goes onto `game/`; what it deleted, and what the
     // target drops by its manifests, comes out of it.
     let now = Snapshot::take(&cache);
     let changed = now.changed_since(&rec.before);
-    let mut gone = now.gone_since(&rec.before);
-    gone.extend(rec.dropped.iter().cloned());
-    gone.sort();
-    gone.dedup();
+    // What to check each one by: the manifest's size and MD5 for a dropped file,
+    // the size the cache had before for one the switch deleted.
+    let mut expect: std::collections::HashMap<String, (Option<u64>, Option<String>)> =
+        Default::default();
+    for path in now.gone_since(&rec.before) {
+        expect.insert(path.clone(), (rec.before.size_of(&path), None));
+    }
+    for d in &rec.dropped {
+        expect.insert(d.path.clone(), (d.size, d.md5.clone()));
+    }
+    let mut by_game: std::collections::HashMap<String, (Option<u64>, Option<String>)> =
+        Default::default();
+    for (path, e) in &expect {
+        for f in dlc::lay_list(&cache, &rec.tree_name, std::slice::from_ref(path)) {
+            by_game.insert(f.to.to_lowercase(), e.clone());
+        }
+    }
     let files = dlc::lay_list(&cache, &rec.tree_name, &changed);
+    let mut gone: Vec<String> = expect.into_keys().collect();
+    gone.sort();
     let removed: Vec<String> = dlc::lay_list(&cache, &rec.tree_name, &gone)
         .into_iter()
         .map(|f| f.to)
@@ -819,6 +987,24 @@ where
         removed,
     };
     j.survey(&game.dirs.game);
+    // A dropped file is only taken out while it is the installed build's: one the
+    // user or the game changed stays, and so does one behind a symlinked dir.
+    let mut kept = Vec::new();
+    j.removed.retain(|r| {
+        let (size, md5) = by_game.get(&r.to_lowercase()).cloned().unwrap_or_default();
+        match removable(&game.dirs.game, r, size, md5.as_deref()) {
+            Ok(()) => true,
+            Err(why) => {
+                kept.push(format!(
+                    "kept {r}, which build {} dropped: {why}",
+                    plan.to.build_id
+                ));
+                false
+            }
+        }
+    });
+    // Reported once, with the outcome's warnings.
+    warnings.extend(kept);
     let mut lay_report = None;
     if !j.files.is_empty() || !j.removed.is_empty() {
         let bytes: u64 = j

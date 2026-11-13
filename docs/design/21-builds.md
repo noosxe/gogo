@@ -825,7 +825,12 @@ conversion class, 2 for usage, 130 for Ctrl-C.
    changed files are fetched). No `prepare()` call: it would need a downloader set up for
    the plan alone.
 2. **Under the game's lock** (`relocate::lock_game`, held to the end): settle a pending
-   rollback and a pending journal, refuse a running game, and check the cache again.
+   rollback and a pending journal, then read the game again. If its build, DLC set,
+   language or dirs differ from the plan's (another command ran in between), the update
+   stops with nothing written: `changed since the plan: run the update again`. Then
+   refuse a running game and check the cache again. A download record whose `from` is not
+   the installed build (a snapshot rollback since) is stale: it goes, with a note, and the
+   update is planned afresh rather than resumed.
 3. **Snapshot**: `snapshots::protect(…, Trigger::Update, "before update <old> → <new>")`,
    which takes the data root's lock beside the game's. A failure stops the update with
    exit 7 and nothing written; `--no-snapshots` skips it. A resumed download took it on
@@ -844,7 +849,12 @@ conversion class, 2 for usage, 130 for Ctrl-C.
    what `before` had and the walk now hasn't, plus the dropped list of step 1. Removed
    paths are mapped onto the game's casing, kept only when they are files or links in
    `game/` and no laid file takes the path, and moved into `.dlc-backup/` like a replaced
-   file. Dirs they leave empty stay.
+   file. Dirs they leave empty stay. A path is removed only while it is the installed
+   build's file: its MD5 from the old build's depot manifest when it gives one, else its
+   size (the manifest's, or the cache walk's for a file the switch deleted). A file that
+   differs, one with neither to compare, and one under a symlinked dir (which would reach
+   outside `game/`) stay in place, each a warning: `kept <path>, which build <to>
+   dropped: <why>`.
 7. **Commit**: `build-manifest.next.json` renamed to `build-manifest.json` (or the old one
    removed when the target's couldn't be fetched), then `content.toml`: `build_id`,
    `version`, `branch` (cleared on the default branch), and every DLC row's `build_id`
@@ -869,11 +879,15 @@ the journal, the two records above and the depot cache are written.
   game plays. A rerun of `update` finds `update-download.json`, takes its target (unless
   `--build` names another: refused), skips the cache check and the snapshot, and runs the
   download again: the cache's `upgrading` marker makes it hash. The files it wrote on the
-  first try still count, since `before` is from before it.
+  first try still count, since `before` is from before it. A finished download is laid
+  only while the cache record still names the target: when another command moved the
+  cache in between, the update stops, drops the record and says the cache moved.
 - **During the lay**: the journal is there. The launcher refuses (its message names `dlc
   add`, which settles either kind), `doctor` fails naming `gogo linux-app update`, and the
   next `update` or `dlc add` settles it: forward commits the update as step 7 does, back
-  restores the replaced and removed files from the backup. After a back, the cache is on
+  restores the replaced and removed files from the backup. An update journal goes forward
+  only while the cache record still names its `to`; otherwise it is rolled back, with a
+  message that the cache is on another build now. After a back, the cache is on
   the target already, so the next `update` refuses for the cache and names the rebuild.
 - **After a snapshot rollback** to `before update`, `content.toml` names the old build
   again and the hint shows the update again. The cache stays on the new build, so the
@@ -890,6 +904,7 @@ failing as a warning), with a file of the user's own in `Save_G`:
 | v8 → v9 (newest) | `upgrade_from` fetched 3 files (1.4 MiB); 3 laid, 0 removed. `game/` matched the cache's tree plus the user's file; `build-manifest.json` on v9, mode 0600 |
 | v9 → `--build "1.2 GOG v6"` | the plan said `downgrade` and `4 file(s) this build dropped`; 21 laid, 4 removed; `game/` matched the cache plus the user's file |
 | v6 → v9 | 24 laid, 1 removed, matched; the next run said `up to date` |
+| v8 → v9 → v6 again, `steam_appid.txt` (which v6 drops) edited before v9 → v6 | 21 laid, 3 removed; the edited file stayed, with the warning `kept steam_appid.txt, which build … dropped: changed since install`; `game/` matched the cache plus the user's two files |
 | `--build "1.2 GOG v5"` on the real game, dry run | refused: another install directory |
 | Cyberpunk 2077 (1423049311), dry run | `up to date`; `--build 2.31a` passed the DLC check and stopped at the cache refusal (a scratch cache) |
 
