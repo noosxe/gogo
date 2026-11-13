@@ -434,29 +434,48 @@ pub struct InstalledRow {
     pub newest_version: Option<String>,
     /// The installed build is still in GOG's list (installer lane: true).
     pub listed: bool,
+    pub state: super::build_hint::State,
     /// The check failed or wasn't possible: the reason.
     pub error: Option<String>,
 }
 
 impl InstalledRow {
+    /// A row from the comparison `build_hint` makes (the one `apps list` shows),
+    /// so both say the same about a game.
+    pub fn from_hint(
+        gogid: &str,
+        title: &str,
+        hint: &super::build_hint::BuildHint,
+        installed_id: Option<String>,
+    ) -> Self {
+        use super::build_hint::State;
+        Self {
+            gogid: gogid.to_string(),
+            title: title.to_string(),
+            lane: match hint.lane {
+                super::content::Lane::Depot => "depot",
+                super::content::Lane::Installer => "installer",
+            },
+            installed_id,
+            installed_version: Some(hint.version.clone()).filter(|v| !v.is_empty()),
+            newest_id: hint.newest.as_ref().and_then(|n| n.id.clone()),
+            newest_version: hint.newest.as_ref().map(|n| n.version.clone()),
+            listed: hint.state != State::Gone,
+            state: hint.state,
+            error: None,
+        }
+    }
+
     pub fn status(&self) -> &'static str {
+        use super::build_hint::State;
         if self.error.is_some() {
             return "unchecked";
         }
-        if !self.listed {
-            return "no longer listed";
-        }
-        let same = match (&self.installed_id, &self.newest_id) {
-            (Some(i), Some(n)) => i == n,
-            _ => match (&self.installed_version, &self.newest_version) {
-                (Some(i), Some(n)) => i == n,
-                _ => return "unknown",
-            },
-        };
-        if same {
-            "up to date"
-        } else {
-            "newer available"
+        match self.state {
+            State::Unknown => "unknown",
+            State::Current => "up to date",
+            State::Newer => "newer available",
+            State::Gone => "no longer listed",
         }
     }
 }
@@ -520,6 +539,7 @@ pub fn installed_json(rows: &[InstalledRow], checked: DateTime<Utc>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gog::build_hint::State;
 
     fn entry(
         id: &str,
@@ -762,6 +782,13 @@ mod tests {
             newest_id: Some(newest.into()),
             newest_version: Some(format!("v{newest}")),
             listed,
+            state: if !listed {
+                State::Gone
+            } else if inst == newest {
+                State::Current
+            } else {
+                State::Newer
+            },
             error: None,
         }
     }
@@ -778,10 +805,8 @@ mod tests {
         inst.installed_id = None;
         inst.newest_id = None;
         inst.newest_version = Some("v2".into());
-        inst.installed_version = Some("v1".into());
-        assert_eq!(inst.status(), "newer available");
-        inst.installed_version = Some("v2".into());
-        assert_eq!(inst.status(), "up to date");
+        inst.state = State::Unknown;
+        assert_eq!(inst.status(), "unknown");
     }
 
     #[test]

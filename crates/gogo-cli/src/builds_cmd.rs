@@ -5,6 +5,7 @@ use chrono::Utc;
 use gog_warp::Core;
 use gog_warp::content_system::types::Platform;
 use gogo::app::AppContext;
+use gogo::gog::build_hint;
 use gogo::gog::builds::{self, Listing};
 use gogo::gog::builds_report::{self as report, DlcName, InstalledRow, Patch, Report, Row};
 use gogo::gog::catalog::{self, Os, Product};
@@ -243,60 +244,47 @@ async fn installed(
     json: bool,
 ) -> Result<i32, AppError> {
     let cache_base = depot::default_cache_dir();
+    let ttl = 24;
     let mut rows = Vec::new();
     for gogid in gogo::macapp::apps::game_ids()? {
         let id: u64 = gogid.parse().unwrap_or(0);
-        let mut row = InstalledRow {
-            gogid: gogid.clone(),
-            title: gogid.clone(),
-            lane: "depot",
-            installed_id: None,
-            installed_version: None,
-            newest_id: None,
-            newest_version: None,
-            listed: true,
-            error: None,
-        };
         let game = match gogo::linuxapp::dlc::load_game(&gogid, cache_base.as_deref()) {
             Ok(g) => g,
             Err(e) => {
-                row.error = Some(e.to_string());
-                rows.push(row);
+                rows.push(unchecked(&gogid, &gogid, e.to_string()));
                 continue;
             }
         };
-        if let Ok((t, _)) = gogo::linuxapp::game::read_launch_toml(&game.dirs) {
-            row.title = t.title;
-        }
-        row.installed_id = game.content.build_id.clone();
-        row.installed_version = game.content.version.clone();
+        let title = gogo::linuxapp::game::read_launch_toml(&game.dirs)
+            .map(|(t, _)| t.title)
+            .unwrap_or_else(|_| gogid.clone());
+        // Refresh what the comparison reads: the listing cache (depot lane) or the
+        // catalog entry (installer lane); then compare as `apps list` does.
+        let now = Utc::now();
+        let mut detail = None;
+        let mut failure = None;
         if game.content.lane == content::Lane::Installer {
-            row.lane = "installer";
             match catalog::detail(&ctx.http, token, id).await {
-                Ok(d) => row.newest_version = installer_version(&d, Os::Windows),
-                Err(e) => row.error = Some(e.to_string()),
+                Ok(d) => detail = Some(d),
+                Err(e) => failure = Some(e.to_string()),
             }
-        } else {
-            match builds::fetch_listing(core, id, Platform::Windows, None).await {
-                Ok(l) => {
-                    if let Some(n) = l.newest() {
-                        row.newest_id = Some(n.build_id().clone());
-                        row.newest_version = Some(n.version_name().clone());
-                    }
-                    if let Some(b) = &row.installed_id {
-                        match l.builds.iter().find(|x| x.build_id() == b) {
-                            Some(x) => {
-                                if row.installed_version.is_none() {
-                                    row.installed_version = Some(x.version_name().clone());
-                                }
-                            }
-                            None => row.listed = false,
-                        }
-                    }
-                }
-                Err(e) => row.error = Some(e.to_string()),
-            }
+        } else if let Err(e) = builds::fetch_listing(core, id, Platform::Windows, None).await {
+            failure = Some(e.to_string());
         }
+        let hint = build_hint::for_content(
+            &game.content,
+            &gogid,
+            cache_base.as_deref(),
+            detail.as_ref(),
+            Some(now),
+            ttl,
+            now,
+        );
+        let mut row = match hint {
+            Some(h) => InstalledRow::from_hint(&gogid, &title, &h, game.content.build_id.clone()),
+            None => unchecked(&gogid, &title, "content.toml names no build".into()),
+        };
+        row.error = row.error.or(failure);
         rows.push(row);
     }
     if json {
@@ -308,4 +296,20 @@ async fn installed(
         print!("{}", report::render_installed(&rows));
     }
     Ok(cli::exit::OK)
+}
+
+/// A row for a game whose check couldn't be made.
+fn unchecked(gogid: &str, title: &str, reason: String) -> InstalledRow {
+    InstalledRow {
+        gogid: gogid.to_string(),
+        title: title.to_string(),
+        lane: "depot",
+        installed_id: None,
+        installed_version: None,
+        newest_id: None,
+        newest_version: None,
+        listed: true,
+        state: build_hint::State::Unknown,
+        error: Some(reason),
+    }
 }

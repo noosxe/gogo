@@ -616,7 +616,7 @@ Decided on 2026-11-12.
 - `--installed` covers every game `apps list` does (the games dir plus location records). A depot game gets a fresh listing; an
   installer-lane game compares with the catalog's installer version (a catalog call per game).
   A game that can't be read, or whose check fails, is `unchecked` with the reason
-  (`error` in JSON, `checked: null`). Status: `up to date`, `newer available`,
+  (`error` in JSON, `checked: null`). The status is `build_hint`'s (the one `apps list` shows, read right after the refresh):  `up to date`, `newer available`,
   `no longer listed`, `unknown`.
 - `--json` gains `withPassword`; its `builds` also hold the unlisted installed build
   (`listed: false`, null date, sizes and DLC).
