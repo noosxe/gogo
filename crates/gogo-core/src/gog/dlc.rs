@@ -981,4 +981,37 @@ mod tests {
         assert!(check_kept(&[1256837418], &[], &infos(), "b").is_ok());
         assert!(check_kept(&[], &[], &infos(), "b").is_ok());
     }
+
+    #[test]
+    fn installer_infos_take_windows_installers_in_the_language() {
+        let p: Product = serde_json::from_str(
+            r#"{"id":1,"title":"Game","downloads":{"installers":[
+                 {"id":"en1installer0","os":"windows","language":"en","version":"1.0.10b",
+                  "total_size":100,"files":[]}]},
+               "expanded_dlcs":[
+                 {"id":2,"title":"Game: Hot","downloads":{"installers":[
+                   {"id":"de1","os":"windows","language":"de","version":"1.0.10","total_size":9,"files":[]},
+                   {"id":"en1","os":"windows","language":"en","version":"1.0.10","total_size":6,"files":[]}]}},
+                 {"id":3,"title":"Game: Mac only","downloads":{"installers":[
+                   {"id":"m","os":"mac","language":"en","total_size":5,"files":[]}]}},
+                 {"id":4,"title":"Game: Unowned","downloads":{"installers":[
+                   {"id":"u","os":"windows","language":"en","total_size":7,"files":[]}]}}]}"#,
+        )
+        .unwrap();
+        let infos = installer_infos(&p.expanded_dlcs, &[2, 3], "en");
+        let row = |id: u64| infos.iter().find(|d| d.id == id).unwrap();
+        assert!(row(2).in_build && row(2).owned);
+        assert_eq!(row(2).download_size, Some(6));
+        assert!(!row(3).in_build, "no Windows installer");
+        assert!(row(4).in_build && !row(4).owned);
+        assert_eq!(row(4).download_size, None, "no size for an unowned DLC");
+        assert_eq!(installer_version(&p, "en").as_deref(), Some("1.0.10b"));
+        assert_eq!(
+            installer_version(&p.expanded_dlcs[0], "de").as_deref(),
+            Some("1.0.10")
+        );
+        // A picked set is decided as on the depot lane.
+        let d = decide(&Want::Default, None, &infos, false);
+        assert_eq!(d.not_included, 1);
+    }
 }

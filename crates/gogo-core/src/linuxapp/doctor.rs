@@ -1838,6 +1838,25 @@ fn check_dlc(g: &Game) -> Finding {
             ),
         );
     }
+    if crate::gog::lay::read_journal(&g.dirs.root)
+        .ok()
+        .flatten()
+        .is_some_and(|j| j.lane == super::dlc_installer::LANE)
+    {
+        return Finding::fail(
+            "dlc",
+            format!(
+                "a DLC add stopped while its installers ran ({} is there): the DLC may be \
+                 half installed, so the launcher won't start the game",
+                crate::gog::lay::JOURNAL
+            ),
+            format!(
+                "run `gogo linux-app dlc {} add` to run them again (or roll back to the \
+                 snapshot taken before it, when there is one)",
+                g.gogid
+            ),
+        );
+    }
     if super::dlc::journal_exists(&g.dirs.root) {
         return Finding::fail(
             "dlc",
@@ -1896,13 +1915,27 @@ fn check_dlc(g: &Game) -> Finding {
         ));
     }
     for d in &lost {
-        problems.push(format!(
-            "{} ({}) is listed in {} but its goggame-{}.info is missing from the game",
-            d.title,
-            d.id,
-            content::FILE,
-            d.id
-        ));
+        // On the installer lane, a DLC installer that ignored `/DIR=` (design 19
+        // §11 Q5) put its info somewhere else in the prefix.
+        let elsewhere = (!depot)
+            .then(|| super::dlc_installer::find_info(&g.dirs.prefix.join("drive_c"), d.id))
+            .flatten();
+        problems.push(match elsewhere {
+            Some(p) => format!(
+                "{} ({}) is installed outside the game's dir: its goggame-{}.info is at {}",
+                d.title,
+                d.id,
+                d.id,
+                p.display()
+            ),
+            None => format!(
+                "{} ({}) is listed in {} but its goggame-{}.info is missing from the game",
+                d.title,
+                d.id,
+                content::FILE,
+                d.id
+            ),
+        });
     }
     let build = r
         .content
