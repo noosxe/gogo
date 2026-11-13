@@ -199,7 +199,7 @@ column is made up.)
     warnings?}`.
   - A generation 1 build is refused, naming a rebuild: the targeted diff is generation 2
     only (§3.3).
-  - An installer-lane game is refused (#351).
+  - An installer-lane game runs the DLC's installers instead (#351, §5.1).
 
 ## 2. Selection (D2)
 
@@ -932,8 +932,86 @@ GOG's DLC installers are Inno Setup `.exe`s of their own (design 04 puts them un
   decision for the whole installer lane, and DLC shouldn't be the only place it differs.
 
 Verified: nothing about DLC installers' file names or whether they install into the base
-dir has been captured live (design 17; docs/03). The first host pass (§10) checks
-it.
+dir had been captured live (design 17; docs/03) before #351; §5.1 has what its e2e
+found.
+
+### 5.1 As built (#351)
+
+Core `linuxapp::dlc_installer` (`run_one`, `version_check`, `add`); the network side
+(which game a setup is for, the choice, the version check's catalog half, the download)
+is the CLI's `installer_dlc.rs`; `dlc add` routes there from `dlc_cmd.rs`.
+
+**Decisions (2026-11-13):**
+
+1. **First build.** After the base installer succeeds and its info names the game,
+   each chosen DLC's installer runs, one at a time in catalog order, in the staging
+   prefix with the base's Inno flags, `/DIR=C:\GOG\<slug>` and a log of its own
+   (`install/dlc-<id>-inno.log`). Then the entry-point scan, the move into place and
+   setup, as before. A DLC whose installer exits non-zero, or leaves no
+   `goggame-<id>.info` in the base dir, fails the build before the prefix moves (exit
+   7, the Inno log's tail in the message). There is no fallback to a build without the
+   failed DLC: the message names `--no-dlcs`, or dropping that `--dlc`.
+2. **Where the installers come from.** The build downloads the missing ones through the
+   download engine (verified, resumable), into `download.dir` as `gogo download --dlc`
+   does, after the build's consent and before anything runs. `linux-app` still doesn't
+   download the base installer.
+3. **Selection and language.** As the depot lane (§1.2): `--yes` and headless builds
+   take none, a terminal gets the picker with every owned DLC preselected, a rebuild
+   keeps the recorded set and refuses a kept DLC that has no Windows installer now. A
+   DLC can be taken when it is owned and GOG has a Windows installer for it. The DLC
+   installers are in the base installer's language (its catalog entry's, from gogo's
+   download record), else `--lang`, else `[gog] language`; a `--lang` that differs
+   from a known base language is a usage error. With a setup given by path, gogo
+   finds the game from its download record of the file, else from the file name
+   (`setup_<slug>_…`) against the owned games' slugs; the game the base installer
+   installs must be that one before a DLC installer runs. With no DLC flag, an
+   unknown game or no network is a plan note and the build goes on without DLC.
+4. **`dlc add`.** The plan (each DLC with its installer's size, the installers'
+   version and language, `C:\GOG\<name>`), then `--yes` or the prompt; headless
+   without `--yes` fails before any download. The download comes before the game's
+   lock: nothing in the game dir changes while it runs. Then, under the lock and
+   refused while the game runs: the `auto` snapshot `before adding <title>` (design 20
+   §7.1), `dlc-journal.json` with `lane = "installer"` and the DLC it adds, the
+   installers in the game's own prefix with its Proton build and umu id, the commit
+   (`content.toml`) and the journal deleted, then setup. While the journal is there the
+   launcher refuses, doctor fails `dlc`, and no snapshot operation runs (design 20
+   §5.1), as for the depot lane. A stop (Ctrl-C, a crash, a failed installer) leaves
+   the journal; the next `dlc add`, bare or naming more DLC, runs every DLC the
+   journal names again (Inno overwrites what it wrote), then commits. The depot
+   lane's recovery refuses such a journal rather than settling it. The error and
+   doctor also name the snapshot taken before the add. Setup's install-script pass
+   (§3.6) needs no change: it sets again what Inno already set.
+5. **Version match.** GOG serves a game's DLC installers beside its current base
+   installer only. The base's installer version label is recorded at the build
+   (`content.toml` `version`): from gogo's download record of the setup, else the
+   current label when the setup's file name contains it. A build that takes DLC and
+   an add compare it with GOG's current base installer label, the same field of the
+   same product, and refuse a difference (exit 7, nothing written), naming
+   `gogo download <gogid>` and a rebuild with `--dlc`. An unknown version is a plan
+   note, and the consent covers it. Labels of different products aren't compared, and
+   a file name's own version isn't GOG's label: Journey to the Savage Planet's
+   installer is labelled `1.0.10b` and named `…_1.0.10_(44657).exe`, and its DLC's
+   installer is labelled `1.0.10`. Each DLC row records its installer's label and its
+   info's `buildId`, unchecked.
+6. **`/DIR=` (the open question above).** A DLC is installed when its installer
+   exits 0 and its `goggame-<id>.info` is in the base game's dir. If it isn't,
+   `drive_c` (but `windows/`) is searched for it, and the error names where it went,
+   or that it went nowhere. There's no move into place: the Inno log's
+   `Dest filename` lines would allow one, if a game ever needs it. Doctor warns, for a
+   recorded DLC whose info is missing from the base dir, where in the prefix it is.
+7. **`content.toml`.** No new fields: `lane = "installer"`, the base's `build_id` (its
+   info's), `version` (decision 5) and `language`, and per DLC `id`, `title`,
+   `version` (its installer's label), `build_id` (its info's, when there is one) and
+   `added`.
+8. **`dlc remove`** stays refused on this lane (#443 runs the DLC's Inno uninstaller).
+
+`dlc list` on this lane: "in this build" means GOG has a Windows installer for the DLC,
+and both sizes are that installer's (what it unpacks isn't known before it runs).
+
+**e2e.** `e2e/dlc-1519147341.toml` (a first build with `--dlc`) and
+`e2e/dlc-add-1519147341.toml` (a base build, an add stopped once its installer runs,
+and the bare add that finishes it), through a manifest's `[installer_dlc]`
+(`docs/linux-e2e.md`). Both need `--installer` with the game's setup.
 
 ## 6. Record and state (D9)
 
@@ -991,8 +1069,8 @@ Where the code differs from the table above, or does less for now:
 - `version`: derived content leaves it unset, as neither the infos nor the record carry
   it. A depot build writes the version name (`2.31`) GOG's builds list gives the build
   the cache holds (#418): `linux-app` looks it up after the download, best effort, and
-  records it only for that build id. Files from before that, and installer-lane builds
-  (the setup's version isn't known at that point), have none.
+  records it only for that build id. Files from before that have none. An
+  installer-lane build records its installer's version label (§5.1), when gogo knows it.
 - The `apps list` column counts the DLC the game has. The `installed/owned` form needs
   the network, so it comes with `dlc list` (#350).
 - `doctor`'s `dlc` check does the info-versus-record comparison. The owned-but-missing
