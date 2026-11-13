@@ -1489,6 +1489,30 @@ fn a_failed_dlc_add_keeps_its_journal() {
 }
 
 #[test]
+fn a_wrong_guess_of_the_game_records_no_version_or_language() {
+    let w = World::new("instguess", &["d3d9.dll"]);
+    let mut opts = installer_opts(&w, &[]);
+    // gogo guessed another game from the setup's name and took no DLC.
+    opts.installer_dlc.gogid = Some("1999999999".into());
+    let plan = build::plan(&opts, None, &mut quiet()).unwrap();
+    build::execute(&plan, None, &mut quiet()).unwrap();
+    let c = gogo::gog::content::load(&w.game()).unwrap().unwrap();
+    assert_eq!((c.version, c.language), (None, None));
+    // One World at a time: it holds the env lock.
+    drop(w);
+
+    // The right game: both recorded.
+    let w = World::new("instguessright", &["d3d9.dll"]);
+    let plan = build::plan(&installer_opts(&w, &[]), None, &mut quiet()).unwrap();
+    build::execute(&plan, None, &mut quiet()).unwrap();
+    let c = gogo::gog::content::load(&w.game()).unwrap().unwrap();
+    assert_eq!(
+        (c.version.as_deref(), c.language.as_deref()),
+        (Some("1.0"), Some("en"))
+    );
+}
+
+#[test]
 fn a_dlc_add_that_keeps_failing_is_given_up() {
     use gogo::linuxapp::dlc_installer as di;
     let w = World::new("instdlcabandon", &["d3d9.dll"]);

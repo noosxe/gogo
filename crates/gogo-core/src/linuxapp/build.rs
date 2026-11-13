@@ -1237,10 +1237,15 @@ pub fn execute(
     }
     // The installer lane (design 19 §5, §6.1): the base installer's version label
     // and language, and each DLC's installer label and info build.
+    // Only for the game the setup turned out to install: a game gogo guessed
+    // from the file name (and took no DLC for) may be another, whose version and
+    // language these aren't.
     if lane == content::Lane::Installer {
         let d = &plan.installer_dlc;
-        content.version = d.version.clone();
-        content.language = d.language.clone();
+        if d.gogid.as_deref() == Some(gogid.as_str()) {
+            content.version = d.version.clone();
+            content.language = d.language.clone();
+        }
         super::dlc_installer::record(&mut content, &d.installers, &dlc_ran);
     }
     if lane == content::Lane::Depot

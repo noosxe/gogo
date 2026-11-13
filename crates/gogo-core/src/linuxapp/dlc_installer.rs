@@ -320,7 +320,9 @@ pub fn setup_version(file_name: &str, current: Option<&str>) -> Option<String> {
 }
 
 /// The owned game a setup file's name names (`setup_<slug>_…`): the longest slug
-/// of `games` the name starts with, followed by `_` or the end.
+/// of `games` the name starts with, followed by `_` or the end. A guess:
+/// `setup_fallout_2_1.2.exe` names an owned `fallout` when `fallout_2` isn't
+/// owned, so the build checks it against the installed info before trusting it.
 pub fn game_for_setup(file_name: &str, games: &[(u64, String)]) -> Option<u64> {
     let lower = file_name.to_ascii_lowercase();
     let rest = lower.strip_prefix("setup_")?;
@@ -805,6 +807,13 @@ mod tests {
             Some(2)
         );
         assert_eq!(game_for_setup("setup_journey_2.0.exe", &games), Some(1));
+        let fallout = [(1, "fallout".to_string()), (2, "fallout_2".to_string())];
+        assert_eq!(game_for_setup("setup_fallout_2_1.2.exe", &fallout), Some(2));
+        // Only `fallout` owned: the guess is wrong, and the build checks it.
+        assert_eq!(
+            game_for_setup("setup_fallout_2_1.2.exe", &fallout[..1]),
+            Some(1)
+        );
         assert_eq!(game_for_setup("setup_journeyman_1.exe", &games), None);
         assert_eq!(game_for_setup("journey_1.exe", &games), None);
     }
