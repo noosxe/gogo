@@ -587,7 +587,9 @@ pub async fn run(
     });
     let old_manifest = match &cached {
         Some(c) if can_switch(generation, &language, &check, c) => {
-            cached_manifest(core, product_id, c.build_id, &builds.builds).await
+            cached_manifest(core, product_id, c.build_id, &builds.builds)
+                .await
+                .filter(|old| same_install_dir(old, &manifest))
         }
         _ => None,
     };
@@ -654,12 +656,23 @@ pub async fn run(
     // the finished download replaces this one, the tree may mix both builds, so the
     // record says so (design 21 §3.5). A cache nobody can vouch for is refused.
     mark_upgrading(&install_root, &build_id)?;
-    // gog-warp's `!Temp`: a hashing run never reads it, and a switch starts from a
-    // whole cache of the old build, so what's there is an earlier run's leftover
-    // (#362). Only a targeted DLC run resumes from it.
-    if inputs.switch_from.is_some() || !inputs.targeted {
-        clear_warp_temp(&install_dir);
-    }
+    // A switch starts from a whole cache of the old build, so a `!Temp` there is an
+    // earlier run's leftover: gog-warp would take its files as this run's (#362).
+    let warp_temp = match &inputs.switch_from {
+        Some(_) => match warp_temp_dir(&install_root, &manifest) {
+            Ok(t) => {
+                if !cancel.is_cancelled() {
+                    let _ = std::fs::remove_dir_all(&t);
+                }
+                Some(t)
+            }
+            Err(why) => {
+                let _ = events.send(DepotEvent::Note { message: why });
+                None
+            }
+        },
+        None => None,
+    };
     let spec = FetchSpec {
         manifest: &manifest,
         build_id: &build_id,
@@ -680,12 +693,17 @@ pub async fn run(
                 ..spec
             };
             switch_or_verify(
-                &install_dir,
+                warp_temp.as_deref(),
                 from,
                 cancel,
                 events,
                 fetch_into(core, &spec, events, cancel, free_space),
-                || fetch_into(core, &verify_spec, events, cancel, free_space),
+                || async {
+                    if let Some(old) = &old_manifest {
+                        prune_dropped(core, &install_root, old, &manifest, &inputs, events).await;
+                    }
+                    fetch_into(core, &verify_spec, events, cancel, free_space).await
+                },
             )
             .await?
         }
@@ -908,9 +926,116 @@ const WARP_MARKER: &str = ".gog-warp-build";
 /// (`<root>/<installDirectory>/!Temp`), where its move loop renames from.
 const WARP_TEMP: &str = "!Temp";
 
-/// Remove what a diff left in gog-warp's `!Temp` of game tree `install_dir`.
-fn clear_warp_temp(install_dir: &Path) {
-    let _ = std::fs::remove_dir_all(install_dir.join(WARP_TEMP));
+/// A path a manifest names, to join onto a root: not empty, not absolute, and
+/// only plain components (no `..`, no `.`, no empty one). Backslashes count as
+/// separators; one trailing separator is allowed.
+fn plain_relative(path: &str) -> bool {
+    let p = path.replace('\\', "/");
+    let p = p.strip_suffix('/').unwrap_or(&p);
+    !p.is_empty() && p.split('/').all(|c| !c.is_empty() && c != "." && c != "..")
+}
+
+/// gog-warp's `!Temp` for a download of `manifest` into cache root `root`, or why
+/// it isn't removed: an install directory that isn't a plain relative path.
+pub fn warp_temp_dir(root: &Path, manifest: &Manifest) -> Result<PathBuf, String> {
+    let dir = manifest.install_directory();
+    if plain_relative(&dir) {
+        Ok(root.join(dir.replace('\\', "/")).join(WARP_TEMP))
+    } else {
+        Err(format!(
+            "not clearing the download's temp dir: the build's install directory {dir:?} \
+             isn't a plain relative path"
+        ))
+    }
+}
+
+/// Pure: whether builds `old` and `new` lay their game tree in the same dir of the
+/// cache. gog-warp joins the new build's onto the root and diffs paths below it,
+/// so a switch across two dirs would leave the unchanged files behind.
+pub fn same_install_dir(old: &Manifest, new: &Manifest) -> bool {
+    let norm = |m: &Manifest| {
+        m.install_directory()
+            .replace('\\', "/")
+            .trim_matches('/')
+            .to_string()
+    };
+    norm(old).eq_ignore_ascii_case(&norm(new))
+}
+
+/// Pure: the paths build `old` lays that build `new` doesn't, compared without
+/// case as gog-warp does: what a finished switch deletes (its `report.deleted`).
+pub fn dropped_paths(
+    old: &[super::dlc_filter::DepotList],
+    new: &[super::dlc_filter::DepotList],
+) -> Vec<String> {
+    let kept: std::collections::HashSet<String> = new
+        .iter()
+        .flat_map(|d| d.paths.iter().map(|p| p.to_lowercase()))
+        .collect();
+    let mut out: Vec<String> = old
+        .iter()
+        .flat_map(|d| d.paths.iter())
+        .filter(|p| !kept.contains(&p.to_lowercase()))
+        .cloned()
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Remove `paths` (relative to cache root `root`, from [`dropped_paths`]): only
+/// plain relative ones, and only files and links, never a dir. How many went.
+pub fn remove_dropped(root: &Path, paths: &[String]) -> usize {
+    paths
+        .iter()
+        .filter(|p| plain_relative(p))
+        .filter(|p| {
+            let at = root.join(p);
+            at.symlink_metadata().is_ok_and(|m| !m.is_dir()) && std::fs::remove_file(at).is_ok()
+        })
+        .count()
+}
+
+/// What gog-warp would have deleted after a switch that failed in its move loop
+/// (#362): the files the cache's build `old` lists and the new one doesn't, from
+/// both builds' depot manifests, for the run's language and DLC. `verify` never
+/// removes a file, so without this they would stay and the record would list them.
+/// A failed listing leaves them, and says so.
+async fn prune_dropped(
+    core: &Core,
+    root: &Path,
+    old: &Manifest,
+    new: &Manifest,
+    inputs: &DownloadInputs,
+    events: &tokio::sync::mpsc::UnboundedSender<DepotEvent>,
+) {
+    let from = inputs.switch_from.as_deref().unwrap_or("?");
+    let side = |m: &Manifest, lang: &Option<String>, dlcs: &[String]| {
+        let mut products = vec![m.product_id()];
+        products.extend(dlcs.iter().cloned());
+        (products, lang.iter().cloned().collect::<Vec<String>>())
+    };
+    let (old_products, old_langs) = side(old, &inputs.old_language, &inputs.old_dlcs);
+    let (new_products, new_langs) = side(new, &inputs.language, &inputs.dlcs);
+    let http = core.reqwest_client();
+    let lists = (
+        super::dlc_filter::fetch_depots(http, old, Some((&old_products, &old_langs))).await,
+        super::dlc_filter::fetch_depots(http, new, Some((&new_products, &new_langs))).await,
+    );
+    let message = match lists {
+        (Ok(a), Ok(b)) => {
+            let gone = remove_dropped(root, &dropped_paths(&a, &b));
+            if gone == 0 {
+                return;
+            }
+            format!("removed {gone} file(s) that build {from} had and this build dropped")
+        }
+        (Err(e), _) | (_, Err(e)) => format!(
+            "couldn't list the files build {from} had and this build dropped ({e}): they \
+             stay in the cache"
+        ),
+    };
+    let _ = events.send(DepotEvent::Note { message });
 }
 
 #[derive(Serialize, serde::Deserialize)]
@@ -1863,11 +1988,12 @@ async fn cached_manifest(
 /// Run `switch` (a diff from the cache's build); when it fails, and the run
 /// wasn't cancelled, say so and run `verify` instead (design 21 §3.5, #429):
 /// gog-warp's move out of `!Temp` can fail on directory entries (#362). Its
-/// `!Temp` in game tree `install_dir` is removed first: what the switch left
-/// there is redone by the check. The cache record keeps its `upgrading` marker
-/// throughout, so a cache that neither run finished is checked next time.
+/// `!Temp` (`warp_temp`, when [`warp_temp_dir`] vouched for it) is removed first:
+/// what the switch left there is redone by the check. The cache record keeps its
+/// `upgrading` marker throughout, so a cache that neither run finished is checked
+/// next time.
 pub async fn switch_or_verify<S, V>(
-    install_dir: &Path,
+    warp_temp: Option<&Path>,
     from: &str,
     cancel: &CancellationToken,
     events: &tokio::sync::mpsc::UnboundedSender<DepotEvent>,
@@ -1886,7 +2012,9 @@ where
                      ({e}); checking the cache (hashing) and fetching what's missing instead"
                 ),
             });
-            clear_warp_temp(install_dir);
+            if let Some(t) = warp_temp {
+                let _ = std::fs::remove_dir_all(t);
+            }
             verify().await
         }
         r => r,
@@ -2977,7 +3105,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let verified = std::cell::Cell::new(false);
         let got = switch_or_verify(
-            &game,
+            Some(&game.join("!Temp")),
             "b1",
             &cancel,
             &tx,
@@ -3015,7 +3143,7 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
         let got = switch_or_verify(
-            t.path(),
+            Some(&t.path().join("Game/!Temp")),
             "b1",
             &cancel,
             &tx,
@@ -3050,9 +3178,14 @@ mod tests {
                 cancel.cancel();
             }
             let ok = result.is_ok();
-            let got = switch_or_verify(t.path(), "b1", &cancel, &tx, async { result }, || async {
-                panic!("no check after a cancel or a finished switch")
-            })
+            let got = switch_or_verify(
+                Some(&t.path().join("Game/!Temp")),
+                "b1",
+                &cancel,
+                &tx,
+                async { result },
+                || async { panic!("no check after a cancel or a finished switch") },
+            )
             .await;
             assert_eq!(got.is_ok(), ok);
             assert!(notes(&mut rx).is_empty());
@@ -3060,6 +3193,87 @@ mod tests {
             if cancelled {
                 assert_eq!(check_cache(t.path(), &CacheWant::default()), stuck());
             }
+        }
+    }
+
+    fn manifest_in(install_dir: &str) -> Manifest {
+        serde_json::from_value(serde_json::json!({
+            "baseProductId": "1", "installDirectory": install_dir, "platform": "windows",
+            "products": [{"name": "G", "productId": "1", "temp_executable": "", "temp_arguments": ""}],
+            "depots": []
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_switch_needs_both_builds_in_the_same_install_dir() {
+        let a = manifest_in("Chaos Gate");
+        assert!(same_install_dir(&a, &manifest_in("Chaos Gate")));
+        assert!(same_install_dir(&a, &manifest_in("chaos gate")));
+        assert!(same_install_dir(&manifest_in("A\\B"), &manifest_in("a/b/")));
+        // Chaos Gate's v5 build lays its tree in `chaosgate`: no diff across.
+        assert!(!same_install_dir(&a, &manifest_in("chaosgate")));
+    }
+
+    #[test]
+    fn the_temp_dir_is_only_cleared_under_a_plain_install_dir() {
+        let root = Path::new("/cache/1");
+        assert_eq!(
+            warp_temp_dir(root, &manifest_in("WH40K Chaos Gate")).unwrap(),
+            root.join("WH40K Chaos Gate/!Temp")
+        );
+        assert_eq!(
+            warp_temp_dir(root, &manifest_in("A\\B")).unwrap(),
+            root.join("A/B/!Temp")
+        );
+        for bad in ["", "/etc", "\\etc", "../x", "a/../../x", ".", "a/./b"] {
+            let why = warp_temp_dir(root, &manifest_in(bad)).unwrap_err();
+            assert!(why.contains("not clearing"), "{bad:?}: {why}");
+        }
+    }
+
+    fn listed(paths: &[&str]) -> super::super::dlc_filter::DepotList {
+        super::super::dlc_filter::DepotList {
+            product: "1".into(),
+            languages: vec!["*".into()],
+            manifest: "m".into(),
+            paths: paths.iter().map(|p| p.to_string()).collect(),
+            sizes: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn a_failed_switch_removes_only_what_the_old_build_had_and_the_new_dropped() {
+        let old = [
+            listed(&["G/a.bin", "G/Old.dat", "G/Data/x.bin"]),
+            listed(&["gog-support/1/1/s.ini", "G/../escape.txt"]),
+        ];
+        let new = [listed(&["G/a.bin", "G/data/X.BIN", "G/new.bin"])];
+        let dropped = dropped_paths(&old, &new);
+        assert_eq!(
+            dropped,
+            ["G/../escape.txt", "G/Old.dat", "gog-support/1/1/s.ini"]
+        );
+
+        let t = tempfile::tempdir().unwrap();
+        let cache = t.path().join("cache");
+        for f in ["G/a.bin", "G/Old.dat", "G/Data/x.bin", "G/mine.sav"] {
+            let p = cache.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, b"x").unwrap();
+        }
+        // Outside the cache, reachable only through `..`.
+        std::fs::write(t.path().join("escape.txt"), b"keep").unwrap();
+        // A dropped path that is a dir on disk is never removed.
+        std::fs::create_dir_all(cache.join("gog-support/1/1/s.ini")).unwrap();
+
+        assert_eq!(remove_dropped(&cache, &dropped), 1);
+        assert!(!cache.join("G/Old.dat").exists());
+        assert!(t.path().join("escape.txt").exists());
+        assert!(cache.join("gog-support/1/1/s.ini").is_dir());
+        // What both builds list, and what neither lists, stay.
+        for f in ["G/a.bin", "G/Data/x.bin", "G/mine.sav"] {
+            assert!(cache.join(f).exists(), "{f}");
         }
     }
 }
