@@ -8,12 +8,15 @@
 title = "Journey to the Savage Planet"
 gogid = 1519147341
 
+# The base comes from the harness's mount, not a gogo download: its installer's
+# language isn't recorded, so each add names it.
 [[installer_dlc.add]]
-args = ["Hot Garbage"]
+args = ["Hot Garbage", "--lang", "en"]
 interrupt = "gogo-setup.setup_journey_to_the_savage_planet_hot_garbage"
 
-# A bare add: it finishes the stopped one.
+# A bare add (no DLC named): it finishes the stopped one.
 [[installer_dlc.add]]
+args = ["--lang", "en"]
 
 [window]
 wait_secs = 300
