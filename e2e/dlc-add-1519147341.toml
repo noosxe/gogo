@@ -1,0 +1,25 @@
+# Journey to the Savage Planet, base game only, then its Hot Garbage DLC added to the
+# built game on the offline-installer lane (#351, design 19 section 5). Run with
+# `--installer <dir>/setup_journey_to_the_savage_planet_<version>_(<build>).exe`.
+# The first add is stopped (SIGINT to its process group) once the DLC's installer
+# runs, and must leave its journal; the bare add after it runs the installer again
+# and finishes. `installer_dlc_dir` then finds the DLC's goggame info in the base
+# game's dir and nowhere else in the prefix.
+title = "Journey to the Savage Planet"
+gogid = 1519147341
+
+[[installer_dlc.add]]
+args = ["Hot Garbage"]
+interrupt = "Hot Garbage/setup_"
+
+# A bare add: it finishes the stopped one.
+[[installer_dlc.add]]
+
+[window]
+wait_secs = 300
+
+[[step]]
+wait = 45
+
+[[step]]
+screenshot = "start"

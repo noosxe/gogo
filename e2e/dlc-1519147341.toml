@@ -1,0 +1,20 @@
+# Journey to the Savage Planet with its Hot Garbage DLC, on the offline-installer
+# lane (#351, design 19 section 5). Run with
+# `--installer <dir>/setup_journey_to_the_savage_planet_<version>_(<build>).exe`:
+# the first build takes the DLC (its installer runs after the base, in the staging
+# prefix), and `installer_dlc_dir` then finds its goggame info in the base game's
+# dir and nowhere else in the prefix (design 19 section 11 Q5).
+title = "Journey to the Savage Planet"
+gogid = 1519147341
+
+[installer_dlc]
+build_args = ["--dlc", "Hot Garbage"]
+
+[window]
+wait_secs = 300
+
+[[step]]
+wait = 45
+
+[[step]]
+screenshot = "start"

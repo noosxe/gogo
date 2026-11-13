@@ -39,6 +39,8 @@
 #   --gogo PATH       this gogo (default: `nix build .#gogo-linux-app`)
 #   --installer FILE  build from this GOG setup .exe instead of the depot: its
 #                     folder is mounted read-only, in the build's sandbox only
+#                     (a manifest's [installer_dlc] adds DLC flags to that build
+#                     and runs `dlc add` after it, in the build's sandbox)
 #   --keep            keep the scratch dir, for a look around
 #   --no-cache        download Proton, umu's runtime and the game afresh, into
 #                     scratch (default: target/linux-e2e/cache, shared by runs)
@@ -1254,9 +1256,15 @@ cmd_run() {
     if [ -n "$INSTALLER_FILE" ] && [ -z "$GOGID" ] && [ "$(jq -c .build_command <<<"$MANIFEST_JSON")" = null ]; then
         die "--installer: this manifest builds nothing" 2
     fi
+    if [ "$(jq -r '.installer_dlc != null' <<<"$MANIFEST_JSON")" = true ] && [ -z "$INSTALLER_FILE" ]; then
+        die "this manifest's [installer_dlc] needs --installer (the offline-installer lane)" 2
+    fi
     if [ -n "$GOGID" ]; then
         # The installer lane reads the id from the tree it installs (design 18 §10).
-        BUILD_CMD="$(jq -cn --arg g "$GOGO" --arg i "${INSTALLER_FILE:-$GOGID}" '[$g,"linux-app",$i,"--yes"]')"
+        # [installer_dlc] build_args (#351): DLC flags for the build.
+        BUILD_CMD="$(jq -cn --arg g "$GOGO" --arg i "${INSTALLER_FILE:-$GOGID}" \
+            --argjson extra "$(jq -c '.installer_dlc.build_args // []' <<<"$MANIFEST_JSON")" \
+            '[$g,"linux-app",$i,"--yes"] + $extra')"
     else
         BUILD_CMD="$(jq -c .build_command <<<"$MANIFEST_JSON")"
     fi
