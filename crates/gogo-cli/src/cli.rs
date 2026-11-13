@@ -295,7 +295,10 @@ pub enum Command {
         #[arg(long)]
         yes: bool,
         /// Include this DLC (product id or title; repeatable). It must be
-        /// owned. A rebuild with `--dlc` has exactly these.
+        /// owned. A rebuild with `--dlc` has exactly these. From an offline
+        /// installer: the DLC's own installers (downloaded when missing) run
+        /// after the game's, into its dir; the game's installer must be the
+        /// version GOG serves now, as its DLC installers are for that one.
         #[arg(
             long = "dlc",
             value_name = "ID|TITLE",
@@ -311,7 +314,9 @@ pub enum Command {
         /// Content language of the depot download (default: the game's
         /// recorded one, else en-US). Checked against the build's languages
         /// (`gogo depot <game> --list-languages`); `de` is taken for `de-DE`
-        /// when it names one language.
+        /// when it names one language. From an offline installer, the DLC
+        /// installers follow the game installer's language, and another
+        /// `--lang` is refused.
         #[arg(long, value_name = "CODE", conflicts_with = "retarget")]
         lang: Option<String>,
         /// Build from this depot build instead of the newest: a build id, or a
@@ -810,8 +815,12 @@ pub enum LinuxDlcCmd {
     /// into the depot cache when it holds that build (else a staging dir in
     /// the game's dir), then onto the game's files. Refused when GOG no
     /// longer serves the installed build (update the game with a rebuild).
-    /// With no name and no `--all`, a picker on a terminal. Run it again
-    /// after a stop: it resumes, or finishes or undoes a half-laid add.
+    /// An offline-installer game gets the DLC's own installers (downloaded
+    /// when missing), run in its prefix into the game's dir; refused when
+    /// the game's installer isn't the version GOG serves now. With no name
+    /// and no `--all`, a picker on a terminal. Run it again after a stop: it
+    /// resumes, or finishes or undoes a half-laid add (on an
+    /// offline-installer game, it runs the stopped add's installers again).
     Add {
         /// DLC by product id or title (several allowed); each must be owned.
         #[arg(value_name = "ID|TITLE", conflicts_with = "all")]

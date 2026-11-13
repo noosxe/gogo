@@ -211,6 +211,29 @@ the manifest names: another id fails the build.
 - `build.installer` in the summary names the file. A self-test's `build_command` finds it in
   `GOGO_E2E_INSTALLER`.
 
+### DLC on the installer lane: `[installer_dlc]`
+
+A manifest's `[installer_dlc]` (#351, design 19 §5.1) needs `--installer`. `build_args`
+goes on the end of the build command (`["--dlc", "Hot Garbage"]`). Each
+`[[installer_dlc.add]]` then runs `gogo linux-app dlc <gogid> add <args…> --yes`, in
+order, after the build and in its sandbox: the add downloads the DLC's installer, which
+needs the network and the sign-in. No `args` is a bare add, which finishes a stopped
+one. With `interrupt = "<regex>"`, the add is stopped with SIGINT to its process group
+a second after a process whose command line matches starts (the DLC's installer under
+umu: `"Hot Garbage/setup_"`), and must exit non-zero with its journal left; what it
+left running in the prefix is killed after it. The DLC installers are downloaded into
+the scratch's `~/Downloads/gogo`, and each run downloads them again.
+
+| Check | Fails when |
+|---|---|
+| `installer_dlc_add_<n>` | an add exits non-zero, or leaves `dlc-journal.json` |
+| `installer_dlc_add_<n>_interrupted` | nothing matched, the add exited 0, or no journal was left |
+| `installer_dlc_dir` | a DLC `content.toml` lists has no `goggame-<id>.info` in the base game's dir, or one elsewhere in `drive_c` (`/DIR=` not honoured), or no DLC is listed |
+
+`build.installer_dlc` in `build-result.json` has each add (exit, seconds, what matched,
+whether a journal was left, its log `dlc-add-<n>.log`) and each DLC's record and where its
+info is. The DLC's Inno logs are copied as `install-dlc-<id>-inno.log`.
+
 ## Reusing an installed game
 
 `--reuse-install` is for the rounds of a manifest edit: run, read the screenshots, edit,
@@ -1026,6 +1049,12 @@ args = []                        #   launch.sh; the run log read is the newest o
 
 [snapshot_rollback]              # games only: snapshots and rollback, after the steps (#408)
 dlc = 1256837418                 #   optional: add this cached DLC as the change; else rebuild
+
+[installer_dlc]                  # games with --installer only: DLC installers (#351)
+build_args = ["--dlc", "X"]      #   appended to the build command
+[[installer_dlc.add]]            #   `dlc <gogid> add <args…> --yes` after the build
+args = ["X"]
+interrupt = "X/setup_"           #   optional: SIGINT the add once this matches a process
 
 [exit]
 how = "self"                     # "self": it exits by itself after the steps, code 0

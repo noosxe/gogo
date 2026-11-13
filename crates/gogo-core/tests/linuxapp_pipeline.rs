@@ -1277,13 +1277,10 @@ fn dlc_installers_need_the_game_they_were_chosen_for() {
 }
 
 /// The runner a test's add uses: the fake umu-run and Proton build.
-fn test_runner(
-    w: &World,
-) -> impl FnMut(&mut dyn FnMut(&ProgressEvent)) -> Result<setup::GameRunner, gogo::macapp::MacAppError>
-{
+fn test_runner(w: &World) -> Box<gogo::linuxapp::dlc_installer::Runner<'static>> {
     let build = w.build.clone();
     let umu = w.root.join("bin/umu-run");
-    move |_| {
+    Box::new(move |_| {
         Ok(setup::GameRunner {
             build: setup::ProtonBuild {
                 reference: format!("path:{}", build.display()),
@@ -1295,7 +1292,7 @@ fn test_runner(
             },
             umu_id: "umu-777001".into(),
         })
-    }
+    })
 }
 
 fn add_opts() -> gogo::linuxapp::dlc_installer::AddOptions {
@@ -1321,7 +1318,7 @@ fn dlc_add_runs_installers_in_the_games_prefix() {
     let out = di::add(
         &mut game,
         &add,
-        &mut test_runner(&w),
+        &mut *test_runner(&w),
         &add_opts(),
         &mut quiet(),
         &|| false,
@@ -1362,7 +1359,7 @@ fn dlc_add_runs_installers_in_the_games_prefix() {
     let out = di::add(
         &mut game,
         &add,
-        &mut test_runner(&w),
+        &mut *test_runner(&w),
         &add_opts(),
         &mut quiet(),
         &|| false,
@@ -1386,7 +1383,7 @@ fn a_stopped_dlc_add_is_finished_by_running_it_again() {
     let err = di::add(
         &mut game,
         &add,
-        &mut test_runner(&w),
+        &mut *test_runner(&w),
         &di::AddOptions {
             stop_after: Some(INST_DLC_A),
             ..add_opts()
@@ -1432,7 +1429,7 @@ fn a_stopped_dlc_add_is_finished_by_running_it_again() {
     let out = di::add(
         &mut game,
         &add,
-        &mut test_runner(&w),
+        &mut *test_runner(&w),
         &add_opts(),
         &mut quiet(),
         &|| false,
@@ -1479,7 +1476,7 @@ fn a_failed_dlc_add_keeps_its_journal() {
     let err = di::add(
         &mut game,
         &add,
-        &mut test_runner(&w),
+        &mut *test_runner(&w),
         &add_opts(),
         &mut quiet(),
         &|| false,
