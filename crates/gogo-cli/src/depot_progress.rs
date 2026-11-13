@@ -101,6 +101,10 @@ pub struct Renderer<W: Write> {
     task_files: Option<Count>,
     /// The task's byte count has a total.
     task_bytes_total: bool,
+    /// A prompt owns the terminal: nothing is drawn until [`Renderer::resume`].
+    paused: bool,
+    /// What the task's count counts: "files" unless [`Renderer::counting`].
+    unit: &'static str,
 }
 
 impl<W: Write> Renderer<W> {
@@ -122,7 +126,24 @@ impl<W: Write> Renderer<W> {
             task: String::new(),
             task_files: None,
             task_bytes_total: false,
+            paused: false,
+            unit: "files",
         }
+    }
+
+    /// Clears the status line and keeps it cleared, so a prompt gets the line
+    /// to itself. The step stays; [`Renderer::resume`] lets it draw again.
+    pub fn pause(&mut self) {
+        self.paused = true;
+        self.clear();
+        let _ = self.out.flush();
+    }
+
+    /// The prompt is answered: a step still running draws again on the next
+    /// tick, one that ended meanwhile stays gone.
+    pub fn resume(&mut self) {
+        self.paused = false;
+        self.last_draw = None;
     }
 
     #[cfg(test)]
@@ -357,6 +378,20 @@ impl<W: Write> Renderer<W> {
         self.draw(now, false);
     }
 
+    /// [`Renderer::task`] with a count of `unit` (games, builds …) instead
+    /// of files.
+    pub fn counting(
+        &mut self,
+        step: &str,
+        unit: &'static str,
+        done: u64,
+        total: u64,
+        now: Duration,
+    ) {
+        self.unit = unit;
+        self.task(step, Some((done, Some(total))), None, now);
+    }
+
     /// The step [`Renderer::task`] showed is over: its status line goes.
     pub fn task_done(&mut self) {
         if self.phase == Phase::Task {
@@ -364,6 +399,7 @@ impl<W: Write> Renderer<W> {
             let _ = self.out.flush();
             self.phase = Phase::Idle;
             self.task_files = None;
+            self.unit = "files";
         }
     }
 
@@ -492,8 +528,8 @@ impl<W: Write> Renderer<W> {
     fn task_status(&self, spin: char, elapsed: &str) -> String {
         let mut line = format!("{spin} {}", self.task);
         match self.task_files {
-            Some((d, Some(t))) => line += &format!("  {d} / {t} files"),
-            Some((d, None)) => line += &format!("  {d} files"),
+            Some((d, Some(t))) => line += &format!("  {d} / {t} {}", self.unit),
+            Some((d, None)) => line += &format!("  {d} {}", self.unit),
             None => {}
         }
         if self.dl_first.is_some() {
@@ -513,7 +549,7 @@ impl<W: Write> Renderer<W> {
     /// Redraw the status line (live mode), at most every [`REDRAW`] unless
     /// `force`.
     fn draw(&mut self, now: Duration, force: bool) {
-        if !self.live() {
+        if !self.live() || self.paused {
             return;
         }
         if !force
@@ -672,6 +708,50 @@ pub struct Activity<W: Write + Send + 'static = Box<dyn Write + Send>> {
     timer: Option<std::thread::JoinHandle<()>>,
 }
 
+/// What a prompt needs of a live [`Activity`].
+trait Pausable: Send + Sync {
+    fn pause(&self);
+    fn resume(&self);
+}
+
+impl<W: Write + Send> Pausable for std::sync::Mutex<Renderer<W>> {
+    fn pause(&self) {
+        if let Ok(mut r) = self.lock() {
+            r.pause();
+        }
+    }
+    fn resume(&self) {
+        if let Ok(mut r) = self.lock() {
+            r.resume();
+        }
+    }
+}
+
+/// The activities a prompt has to pause, the command's own ([`Activity::new`]).
+static REGISTRY: std::sync::Mutex<Vec<std::sync::Weak<dyn Pausable>>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Run an interactive prompt (`dialoguer` or the plan's): every live status
+/// line is cleared first and stays cleared while `f` runs, so a prompt never
+/// shares a line with a spinner; the spinner draws again afterwards if its
+/// step goes on. Use at every prompt site; it costs nothing when no activity
+/// is live.
+pub fn prompting<T>(f: impl FnOnce() -> T) -> T {
+    let live: Vec<std::sync::Arc<dyn Pausable>> = {
+        let mut reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+        reg.retain(|w| w.strong_count() > 0);
+        reg.iter().filter_map(|w| w.upgrade()).collect()
+    };
+    for p in &live {
+        p.pause();
+    }
+    let out = f();
+    for p in &live {
+        p.resume();
+    }
+    out
+}
+
 impl Activity {
     /// Where design 03 §4 says: NDJSON on stdout, human progress on stderr.
     pub fn new(mode: Mode) -> Self {
@@ -679,7 +759,9 @@ impl Activity {
             Mode::Json => Box::new(std::io::stdout()),
             _ => Box::new(std::io::stderr()),
         };
-        Self::with(mode, out)
+        let act = Self::with(mode, out);
+        act.register();
+        act
     }
 }
 
@@ -692,7 +774,14 @@ impl<W: Write + Send + 'static> Activity<W> {
             let (shared, stop) = (shared.clone(), stop.clone());
             std::thread::spawn(move || {
                 while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                    std::thread::sleep(REDRAW);
+                    // Short sleeps, so dropping the activity doesn't wait a
+                    // whole redraw interval for the thread to notice.
+                    for _ in 0..10 {
+                        std::thread::sleep(REDRAW / 10);
+                        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                            return;
+                        }
+                    }
                     if let Ok(mut r) = shared.lock() {
                         r.tick(start.elapsed());
                     }
@@ -705,6 +794,15 @@ impl<W: Write + Send + 'static> Activity<W> {
             stop,
             timer,
         }
+    }
+
+    /// Lets [`prompting`] pause this activity; [`Activity::new`] does it.
+    fn register(&self) {
+        let shared: std::sync::Arc<dyn Pausable> = self.shared.clone();
+        REGISTRY
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(std::sync::Arc::downgrade(&shared));
     }
 
     /// The status line shows it; live mode only.
@@ -731,6 +829,14 @@ impl<W: Write + Send + 'static> Activity<W> {
     /// The spinner alone, for a step whose total isn't known.
     pub fn working(&self, step: &str) {
         self.task(step, None, None);
+    }
+
+    /// See [`Renderer::counting`].
+    pub fn counting(&self, step: &str, unit: &'static str, done: u64, total: u64) {
+        self.shared
+            .lock()
+            .unwrap()
+            .counting(step, unit, done, total, self.start.elapsed());
     }
 
     /// See [`Renderer::task_done`].
@@ -766,6 +872,14 @@ impl<W: Write + Send + 'static> Activity<W> {
     pub fn spin<T>(&self, step: &str, f: impl FnOnce() -> T) -> T {
         self.working(step);
         let out = f();
+        self.done();
+        out
+    }
+
+    /// [`Activity::spin`] around a future.
+    pub async fn spin_async<T>(&self, step: &str, f: impl std::future::Future<Output = T>) -> T {
+        self.working(step);
+        let out = f.await;
         self.done();
         out
     }
@@ -1061,6 +1175,9 @@ mod tests {
     impl Shared {
         fn text(&self) -> String {
             String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+        fn push(&self, s: &str) {
+            self.0.lock().unwrap().extend_from_slice(s.as_bytes());
         }
     }
 
@@ -1411,6 +1528,93 @@ mod tests {
                 "gogo: note: x\n"
             );
         }
+    }
+
+    /// A prompt never shares a line with a spinner: the line is cleared
+    /// before it, stays clear while it runs, and the spinner is back after.
+    #[test]
+    fn a_prompt_clears_the_spinner_and_it_returns_after() {
+        let buf = Shared::default();
+        let act = Activity::with(Mode::Human { live: true }, buf.clone());
+        act.register();
+        act.working("planning the build");
+        std::thread::sleep(Duration::from_millis(250));
+        let mark = buf.text().len();
+        prompting(|| {
+            // The timer keeps ticking while the prompt waits.
+            std::thread::sleep(Duration::from_millis(350));
+            let during = buf.text();
+            let during = &during[mark..];
+            assert!(during.ends_with("\r\x1b[K"), "{during:?}");
+            assert!(!during.contains("planning"), "{during:?}");
+            // The prompt's own line.
+            buf.push("? Proceed? [y/n] y\n");
+        });
+        std::thread::sleep(Duration::from_millis(250));
+        act.done();
+        drop(act);
+        let out = buf.text();
+        let after = &out[out.find("? Proceed?").unwrap()..];
+        assert!(after.contains("planning the build"), "{out:?}");
+        // The question's row held nothing else.
+        let q = out.find("? Proceed?").unwrap();
+        assert!(out[..q].ends_with("\r\x1b[K"), "{out:?}");
+        no_text_after_a_status(&out);
+    }
+
+    /// A preflight spinner (#422): a spinner and a count on a terminal; in
+    /// every other mode nothing is written, `\r` included.
+    #[tokio::test]
+    async fn a_preflight_spinner_prints_nothing_off_a_terminal() {
+        for mode in [Mode::Silent, Mode::Json, Mode::Human { live: false }] {
+            let buf = Shared::default();
+            let act = Activity::with(mode, buf.clone());
+            let v = act
+                .spin_async("checking the library", async {
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    5
+                })
+                .await;
+            for i in 0..3 {
+                act.counting("fetching game details", "games", i, 3);
+            }
+            act.done();
+            drop(act);
+            assert_eq!(v, 5);
+            assert_eq!(buf.text(), "", "{mode:?}");
+        }
+        let buf = Shared::default();
+        let act = Activity::with(Mode::Human { live: true }, buf.clone());
+        act.spin_async("checking the library", async {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        })
+        .await;
+        std::thread::sleep(Duration::from_millis(120));
+        act.counting("fetching game details", "games", 2, 9);
+        drop(act);
+        let out = buf.text();
+        assert!(out.contains("checking the library  0:00"), "{out:?}");
+        assert!(
+            out.contains("fetching game details  2 / 9 games"),
+            "{out:?}"
+        );
+        no_text_after_a_status(&out);
+    }
+
+    /// A step that ended while the prompt was open stays gone.
+    #[test]
+    fn a_step_ended_during_a_prompt_does_not_come_back() {
+        let buf = Shared::default();
+        let act = Activity::with(Mode::Human { live: true }, buf.clone());
+        act.register();
+        act.working("planning the build");
+        prompting(|| act.done());
+        std::thread::sleep(Duration::from_millis(250));
+        let out = buf.text();
+        assert!(out.ends_with("\r\x1b[K"), "{out:?}");
+        let n = out.matches("planning").count();
+        std::thread::sleep(Duration::from_millis(250));
+        assert_eq!(buf.text().matches("planning").count(), n);
     }
 
     /// A count past its known total reads as the total.

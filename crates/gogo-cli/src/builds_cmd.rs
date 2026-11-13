@@ -21,18 +21,28 @@ pub async fn run(args: cli::BuildsArgs) -> Result<i32, AppError> {
             eprintln!("gogo: {e}");
             AppError::Usage
         })?;
-    let token = crate::bearer(&built).await?;
+    // One spinner per phase (#422); nothing off a terminal or under --json.
+    let act = crate::depot_progress::Activity::new(crate::depot_mode(false, args.json));
+    let token = act
+        .spin_async("refreshing the sign-in", crate::bearer(&built))
+        .await?;
     let core = built
         .session
         .as_ref()
         .and_then(|p| p.gog_warp_core())
         .ok_or(AppError::Usage)?;
     if args.installed {
-        return installed(&built, &token, core, args.json).await;
+        return installed(&built, &token, core, args.json, &act).await;
     }
     let name = args.game.clone().ok_or(AppError::Usage)?;
-    let selected = crate::resolve_games(&built, &token, std::slice::from_ref(&name)).await?;
+    let selected = act
+        .spin_async(
+            "checking the library",
+            crate::resolve_games(&built, &token, std::slice::from_ref(&name), &act),
+        )
+        .await?;
     let Some(game) = selected.first() else {
+        drop(act);
         eprintln!("gogo: no owned game matches {name}");
         return Ok(cli::exit::USAGE);
     };
@@ -55,23 +65,38 @@ pub async fn run(args: cli::BuildsArgs) -> Result<i32, AppError> {
         .or_else(|| built_game.as_ref().and_then(|g| g.content.language.clone()))
         .unwrap_or_else(|| gogo::gog::language::DEFAULT.to_string());
 
-    let listing = builds::fetch_listing(core, game.id, platform, args.password.clone())
+    let listing = act
+        .spin_async(
+            "fetching the builds list",
+            builds::fetch_listing(core, game.id, platform, args.password.clone()),
+        )
         .await
         .map_err(|e| AppError::Depot(DepotError::library(e)))?;
 
     // The manifests, in parallel: one that fails is `?` and a warning.
-    let facts = report::fetch_facts(core, &listing, &language).await;
+    let facts = act
+        .spin_async(
+            "fetching the build manifests",
+            report::fetch_facts(core, &listing, &language),
+        )
+        .await;
 
     // Titles, owned DLC and the installer lane come from the catalog; none of it
     // is needed for the table, so a failure only leaves it out.
-    let detail = catalog::detail(&built.http, &token, game.id).await.ok();
-    let owned = if facts.values().any(|f| !f.dlcs.is_empty()) {
-        library::owned_ids(&built.http, &token)
-            .await
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    let (detail, owned) = act
+        .spin_async("checking the catalog", async {
+            let detail = catalog::detail(&built.http, &token, game.id).await.ok();
+            let owned = if facts.values().any(|f| !f.dlcs.is_empty()) {
+                library::owned_ids(&built.http, &token)
+                    .await
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            (detail, owned)
+        })
+        .await;
+    drop(act);
     let mut dlc_names: Vec<DlcName> = Vec::new();
     for f in facts.values() {
         for id in &f.dlcs {
@@ -255,11 +280,15 @@ async fn installed(
     token: &str,
     core: &Core,
     json: bool,
+    act: &crate::depot_progress::Activity,
 ) -> Result<i32, AppError> {
     let cache_base = depot::default_cache_dir();
     let ttl = 24;
     let mut rows = Vec::new();
-    for gogid in gogo::macapp::apps::game_ids()? {
+    let ids = gogo::macapp::apps::game_ids()?;
+    let total = ids.len() as u64;
+    for (i, gogid) in ids.into_iter().enumerate() {
+        act.counting("checking the installed games", "games", i as u64, total);
         let id: u64 = gogid.parse().unwrap_or(0);
         let game = match gogo::linuxapp::dlc::load_game(&gogid, cache_base.as_deref()) {
             Ok(g) => g,
@@ -300,6 +329,7 @@ async fn installed(
         row.error = row.error.or(failure);
         rows.push(row);
     }
+    act.finish();
     if json {
         println!(
             "{}",

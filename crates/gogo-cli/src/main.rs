@@ -152,6 +152,19 @@ pub(crate) fn depot_mode(json_progress: bool, json: bool) -> depot_progress::Mod
     )
 }
 
+/// A blocking step of `step` with the spinner on a terminal (#422): nothing is
+/// printed off one, nor under `--json` or `--quiet`.
+pub(crate) fn phase_sync<T>(json: bool, step: &str, f: impl FnOnce() -> T) -> T {
+    depot_progress::Activity::new(depot_mode(false, json)).spin(step, f)
+}
+
+/// [`phase_sync`] around a future.
+pub(crate) async fn phase<T>(json: bool, step: &str, f: impl std::future::Future<Output = T>) -> T {
+    depot_progress::Activity::new(depot_mode(false, json))
+        .spin_async(step, f)
+        .await
+}
+
 /// RUST_LOG wins if set; otherwise derive from --quiet/-v (`docs/design/07` §5).
 /// Log output goes to stderr; stdout stays results-only (`docs/design/03` §4).
 fn init_tracing(cli: &Cli) {
@@ -655,7 +668,7 @@ async fn list(
     use gogo::state::local::{Built, Local};
 
     let ctx = session_ctx().await?;
-    let mut games = library_products(&ctx).await?;
+    let mut games = phase(json, "checking the library", library_products(&ctx)).await?;
     // Same normalizer as `search` (design 17 §3), on title + slug.
     if let Some(query) = search.as_deref().and_then(gogo::search::Query::parse) {
         games.retain(|g| {
@@ -670,7 +683,9 @@ async fn list(
     // What is set up locally (#378): built apps, depot caches, downloaded installers.
     // Read only; a game filter by `--installed` runs before any catalog fetch.
     let state = ctx.state.lock().unwrap().clone();
-    let built_apps = match gogo::macapp::apps::list(&gogo::macapp::doctor::Host::detect().logs) {
+    let built_apps = match phase_sync(json, "sizing the games", || {
+        gogo::macapp::apps::list(&gogo::macapp::doctor::Host::detect().logs)
+    }) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("warn: built apps unreadable: {e}");
@@ -704,25 +719,49 @@ async fn list(
     // 03 §1: the library list is always live; catalog data (os, sizes, versions)
     // comes from the product cache, fetched live on a miss or with --refresh.
     // A failed fetch degrades the row (empty os/size), never the command.
-    let token = bearer(&ctx).await?;
+    let act = depot_progress::Activity::new(depot_mode(false, json));
+    let token = act
+        .spin_async("refreshing the sign-in", bearer(&ctx))
+        .await?;
     let mut products: Vec<Product> = Vec::with_capacity(games.len());
+    let mut fetched = 0u64;
+    let missing = if refresh {
+        games.len() as u64
+    } else {
+        games
+            .iter()
+            .filter(|g| gogo::state::cache::load_typed_product(g.id).is_none())
+            .count() as u64
+    };
     for game in &games {
         let cached = if refresh {
             None
         } else {
             gogo::state::cache::load_typed_product(game.id)
         };
+        let fetch = if cached.is_none() {
+            act.counting("fetching game details", "games", fetched, missing);
+            fetched += 1;
+            Some(gogo::gog::catalog::detail(&ctx.http, &token, game.id).await)
+        } else {
+            None
+        };
         let product = match cached {
             Some(p) => p,
-            None => match gogo::gog::catalog::detail(&ctx.http, &token, game.id).await {
+            None => match fetch.expect("fetched when uncached") {
                 Ok(p) => {
                     if let Err(e) = gogo::state::cache::save_product(&p) {
-                        eprintln!("warn: catalog cache write failed: {e}");
+                        act.say(&format!("warn: catalog cache write failed: {e}"), &|l| {
+                            eprintln!("{l}")
+                        });
                     }
                     p
                 }
                 Err(e) => {
-                    eprintln!("warn: catalog fetch failed for {}: {e}", game.title);
+                    act.say(
+                        &format!("warn: catalog fetch failed for {}: {e}", game.title),
+                        &|l| eprintln!("{l}"),
+                    );
                     Product {
                         id: game.id,
                         title: Some(game.title.clone()),
@@ -736,6 +775,7 @@ async fn list(
         };
         products.push(product);
     }
+    drop(act);
 
     let os_filter = os_filter_to_catalog(os);
     // --os filters on what the catalog says the game delivers; rows with unknown
@@ -854,8 +894,17 @@ async fn search(args: cli::SearchArgs) -> Result<i32, AppError> {
     );
 
     let ctx = session_ctx().await?;
-    let token = bearer(&ctx).await?;
-    let (lib, warnings) = search::gather::gather(&ctx.http, &token, args.refresh).await?;
+    let act = depot_progress::Activity::new(depot_mode(false, args.json));
+    let token = act
+        .spin_async("refreshing the sign-in", bearer(&ctx))
+        .await?;
+    let (lib, warnings) = act
+        .spin_async(
+            "fetching the library and catalog",
+            search::gather::gather(&ctx.http, &token, args.refresh),
+        )
+        .await?;
+    drop(act);
     for w in warnings {
         eprintln!("warn: {w}");
     }
@@ -953,14 +1002,27 @@ fn product_size(product: &gogo::gog::catalog::Product) -> u64 {
 
 async fn info(game: String, json: bool) -> Result<i32, AppError> {
     let ctx = session_ctx().await?;
-    let token = bearer(ctx.as_ref()).await?;
-    let products = resolve_games(&ctx, &token, &[game]).await?;
+    let act = depot_progress::Activity::new(depot_mode(false, json));
+    let (token, products) = act
+        .spin_async("checking the library", async {
+            let token = bearer(ctx.as_ref()).await?;
+            let products = resolve_games(&ctx, &token, &[game], &act).await?;
+            Ok::<_, AppError>((token, products))
+        })
+        .await?;
     let Some(product) = products.first() else {
+        drop(act);
         eprintln!("no such game");
         return Ok(cli::exit::USAGE);
     };
     // Fresh detail (downloads + DLC tree).
-    let detail = gogo::gog::catalog::detail(&ctx.http, &token, product.id).await?;
+    let detail = act
+        .spin_async(
+            "fetching the game details",
+            gogo::gog::catalog::detail(&ctx.http, &token, product.id),
+        )
+        .await?;
+    drop(act);
     if json {
         println!("{}", serde_json::to_string_pretty(&detail).unwrap());
     } else {
@@ -988,6 +1050,7 @@ async fn resolve_games(
     ctx: &AppContext,
     token: &str,
     names: &[String],
+    act: &depot_progress::Activity,
 ) -> Result<Vec<gogo::gog::library::LibraryProduct>, AppError> {
     let lib = library::list_games(&ctx.http, token).await?;
     let mut out = Vec::new();
@@ -1004,7 +1067,10 @@ async fn resolve_games(
         match found {
             Some(game) => out.push(game.clone()),
             None => {
-                eprintln!("no game matches `{name}` — try `gogo list`");
+                act.say(
+                    &format!("no game matches `{name}` — try `gogo list`"),
+                    &|l| eprintln!("{l}"),
+                );
                 return Ok(Vec::new());
             }
         }
@@ -1030,7 +1096,11 @@ async fn depot_cmd(args: cli::DepotArgs) -> Result<i32, AppError> {
     let ctx = std::sync::Arc::new(built);
     let machine = args.json || args.json_progress;
 
-    let token = bearer(&ctx).await?;
+    // One spinner per preflight phase (#422), the lane's renderer after.
+    let act = depot_progress::Activity::new(depot_mode(args.json_progress, args.json));
+    let token = act
+        .spin_async("refreshing the sign-in", bearer(&ctx))
+        .await?;
     let session = ctx
         .session
         .as_ref()
@@ -1038,14 +1108,26 @@ async fn depot_cmd(args: cli::DepotArgs) -> Result<i32, AppError> {
         .ok_or(AppError::Usage)?;
     let _ = token; // bearer() above validates the session cheaply
 
-    let selected = resolve_games(&ctx, &token, std::slice::from_ref(&args.game)).await?;
+    let selected = act
+        .spin_async(
+            "checking the library",
+            resolve_games(&ctx, &token, std::slice::from_ref(&args.game), &act),
+        )
+        .await?;
     let Some(game) = selected.first() else {
+        drop(act);
         eprintln!("gogo: no owned game matches {}", args.game);
         return Ok(cli::exit::USAGE);
     };
 
     if args.list_languages {
-        return list_languages(&ctx, &token, session, game, &args).await;
+        let out = act
+            .spin_async(
+                "reading the build's languages",
+                list_languages(&ctx, &token, session, game, &args),
+            )
+            .await;
+        return out;
     }
     let language = args
         .language
@@ -1056,14 +1138,18 @@ async fn depot_cmd(args: cli::DepotArgs) -> Result<i32, AppError> {
     // before any DLC lookup or download (exit 2, with the builds listed).
     let picked = match &args.build {
         Some(value) => {
-            let listing = gogo::gog::builds::fetch_listing(
-                session,
-                game.id,
-                gog_warp::content_system::types::Platform::Windows,
-                args.password.clone(),
-            )
-            .await
-            .map_err(gogo::gog::depot::DepotError::library)?;
+            let listing = act
+                .spin_async(
+                    "fetching the builds list",
+                    gogo::gog::builds::fetch_listing(
+                        session,
+                        game.id,
+                        gog_warp::content_system::types::Platform::Windows,
+                        args.password.clone(),
+                    ),
+                )
+                .await
+                .map_err(gogo::gog::depot::DepotError::library)?;
             let b = gogo::gog::builds::pick_for_run(
                 &listing,
                 value,
@@ -1076,7 +1162,7 @@ async fn depot_cmd(args: cli::DepotArgs) -> Result<i32, AppError> {
             let lines = gogo::gog::builds::plan_lines(&listing, b, true, None);
             if !machine {
                 for l in &lines {
-                    eprintln!("gogo: build: {l}");
+                    act.say(&format!("gogo: build: {l}"), &|l| eprintln!("{l}"));
                 }
             }
             Some(gogo::gog::builds::BuildEntry::from_build(b))
@@ -1090,21 +1176,30 @@ async fn depot_cmd(args: cli::DepotArgs) -> Result<i32, AppError> {
     let (dlcs, dlc_context) = if args.dlc.is_empty() && !args.all_dlcs {
         (Default::default(), Default::default())
     } else {
-        let detail = gogo::gog::catalog::detail(&ctx.http, &token, game.id).await?;
-        let owned = library::owned_ids(&ctx.http, &token).await?;
+        let (detail, owned) = act
+            .spin_async("checking the game's DLC", async {
+                let detail = gogo::gog::catalog::detail(&ctx.http, &token, game.id).await?;
+                let owned = library::owned_ids(&ctx.http, &token).await?;
+                Ok::<_, AppError>((detail, owned))
+            })
+            .await?;
         let dlcs = if args.all_dlcs {
             gogo::gog::dlc::DlcSet::AllOwned
         } else {
-            let (build_id, mdlcs) = gogo::gog::depot::build_dlcs(
-                session,
-                game.id,
-                &game.title,
-                args.password.clone(),
-                picked.as_ref().map(|p| p.build_id.as_str()),
-                &language,
-                language_explicit,
-            )
-            .await?;
+            let (build_id, mdlcs) = act
+                .spin_async(
+                    "fetching the builds list",
+                    gogo::gog::depot::build_dlcs(
+                        session,
+                        game.id,
+                        &game.title,
+                        args.password.clone(),
+                        picked.as_ref().map(|p| p.build_id.as_str()),
+                        &language,
+                        language_explicit,
+                    ),
+                )
+                .await?;
             // A DLC the picked build lacks names the build by its version too.
             let build_id = picked.as_ref().map_or(build_id, |p| p.label());
             let infos = gogo::gog::dlc::available(&detail.expanded_dlcs, &owned, Some(&mdlcs));
@@ -1112,6 +1207,7 @@ async fn depot_cmd(args: cli::DepotArgs) -> Result<i32, AppError> {
             match gogo::gog::dlc::resolve(&args.dlc, &game.title, &infos, &lane) {
                 Ok(ids) => gogo::gog::dlc::DlcSet::Ids(ids),
                 Err(e) => {
+                    drop(act);
                     eprintln!("gogo: {e}");
                     return Ok(cli::exit::USAGE);
                 }
@@ -1173,7 +1269,6 @@ async fn depot_cmd(args: cli::DepotArgs) -> Result<i32, AppError> {
         &ctx.cancel,
         ctx.free_space.as_ref(),
     );
-    let act = depot_progress::Activity::new(depot_mode(args.json_progress, args.json));
     let result = depot_progress::drive(runner, &mut rx, &act).await;
     drop(tx);
     let _ = forward.await;
@@ -1334,12 +1429,20 @@ async fn download(
     };
     let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
 
-    let token = bearer(&ctx).await?;
-    let selected = if all {
-        library::list_games(&ctx.http, &token).await?
-    } else {
-        resolve_games(&ctx, &token, &games).await?
-    };
+    // One spinner per preflight phase (#422); off a terminal, and under the
+    // machine modes, it prints nothing.
+    let act = depot_progress::Activity::new(depot_mode(json_progress, json));
+    let (token, selected) = act
+        .spin_async("checking the library", async {
+            let token = bearer(&ctx).await?;
+            let selected = if all {
+                library::list_games(&ctx.http, &token).await?
+            } else {
+                resolve_games(&ctx, &token, &games, &act).await?
+            };
+            Ok::<_, AppError>((token, selected))
+        })
+        .await?;
     if selected.is_empty() && !all {
         return Ok(cli::exit::USAGE);
     }
@@ -1365,10 +1468,17 @@ async fn download(
     };
 
     let mut products = Vec::new();
-    for game in &selected {
+    for (i, game) in selected.iter().enumerate() {
+        act.counting(
+            "fetching game details",
+            "games",
+            i as u64,
+            selected.len() as u64,
+        );
         let detail = gogo::gog::catalog::detail(&ctx.http, &token, game.id).await?;
         products.push(detail);
     }
+    act.done();
     // Owned DLC only (design 19 §1.1): `--all-dlcs` takes the owned ones, `--dlc`
     // names them; a name that is unknown or unowned is a usage error.
     if filters.with_dlcs {
@@ -1376,7 +1486,12 @@ async fn download(
             eprintln!("gogo: --dlc needs exactly one game");
             return Ok(cli::exit::USAGE);
         }
-        let owned = library::owned_ids(&ctx.http, &token).await?;
+        let owned = act
+            .spin_async(
+                "checking the owned DLC",
+                library::owned_ids(&ctx.http, &token),
+            )
+            .await?;
         let mut only = Vec::new();
         for (game, product) in selected.iter().zip(&products) {
             let infos = gogo::gog::dlc::available(&product.expanded_dlcs, &owned, None);
@@ -1403,7 +1518,13 @@ async fn download(
     }
 
     let inner = async {
-        let tasks = engine::plan(&ctx, &products, &filters, force).await;
+        let tasks = act
+            .spin_async(
+                "planning the download",
+                engine::plan(&ctx, &products, &filters, force),
+            )
+            .await;
+        act.finish();
         if machine {
             print_plan_json(&tasks);
         } else {
@@ -1418,11 +1539,13 @@ async fn download(
         // with the plan printed (exit 2) — a bulk run never starts silently.
         if all && !yes {
             if console::Term::stdout().features().is_attended() {
-                let confirmed = dialoguer::Confirm::new()
-                    .with_prompt("download the plan above?")
-                    .default(false)
-                    .interact()
-                    .unwrap_or(false);
+                let confirmed = crate::depot_progress::prompting(|| {
+                    dialoguer::Confirm::new()
+                        .with_prompt("download the plan above?")
+                        .default(false)
+                        .interact()
+                })
+                .unwrap_or(false);
                 if !confirmed {
                     println!("aborted");
                     return Ok(None);
@@ -1596,6 +1719,42 @@ async fn render_bars(
     .await;
 }
 
+/// [`engine::execute`] with the download bars on a terminal, as `download`
+/// shows them (#422); off one, or under `--json`/`--quiet`, no subscriber.
+async fn execute_rendered(
+    ctx: &Arc<AppContext>,
+    tasks: Vec<gogo::engine::task::FileTask>,
+    json: bool,
+) -> gogo::engine::Summary {
+    let live = depot_mode(false, json) == depot_progress::Mode::Human { live: true };
+    with_progress(&ctx.events, live, engine::execute(ctx, tasks), render_bars).await
+}
+
+/// `work` with `render` consuming the engine's events while it runs, when
+/// `live`; subscribed before `work` starts, so nothing it sends is missed.
+async fn with_progress<T, R: std::future::Future<Output = ()>>(
+    events: &tokio::sync::broadcast::Sender<gogo::engine::events::ProgressEvent>,
+    live: bool,
+    work: impl std::future::Future<Output = T>,
+    render: impl FnOnce(
+        tokio::sync::broadcast::Receiver<gogo::engine::events::ProgressEvent>,
+        tokio::sync::oneshot::Receiver<()>,
+    ) -> R,
+) -> T {
+    if !live {
+        return work.await;
+    }
+    let rx = events.subscribe();
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+    let work = async {
+        let out = work.await;
+        let _ = done_tx.send(());
+        out
+    };
+    let (out, ()) = tokio::join!(work, render(rx, done_rx));
+    out
+}
+
 fn print_plan(tasks: &[gogo::engine::task::FileTask]) {
     use gogo::engine::task::Status;
     let mut total = 0u64;
@@ -1636,12 +1795,18 @@ fn print_plan(tasks: &[gogo::engine::task::FileTask]) {
 
 async fn update(games: Vec<String>, all: bool, strict: bool) -> Result<i32, AppError> {
     let ctx = session_ctx().await?;
-    let token = bearer(&ctx).await?;
-    let selected = if all {
-        library::list_games(&ctx.http, &token).await?
-    } else {
-        resolve_games(&ctx, &token, &games).await?
-    };
+    let act = depot_progress::Activity::new(depot_mode(false, false));
+    let (token, selected) = act
+        .spin_async("checking the library", async {
+            let token = bearer(&ctx).await?;
+            let selected = if all {
+                library::list_games(&ctx.http, &token).await?
+            } else {
+                resolve_games(&ctx, &token, &games, &act).await?
+            };
+            Ok::<_, AppError>((token, selected))
+        })
+        .await?;
     if selected.is_empty() {
         return Ok(cli::exit::USAGE);
     }
@@ -1653,13 +1818,25 @@ async fn update(games: Vec<String>, all: bool, strict: bool) -> Result<i32, AppE
         only_dlcs: None,
     };
     let mut products = Vec::new();
-    for game in &selected {
+    for (i, game) in selected.iter().enumerate() {
+        act.counting(
+            "fetching game details",
+            "games",
+            i as u64,
+            selected.len() as u64,
+        );
         products.push(gogo::gog::catalog::detail(&ctx.http, &token, game.id).await?);
     }
-    let mut tasks = engine::plan(&ctx, &products, &filters, false).await;
+    let mut tasks = act
+        .spin_async(
+            "planning the update",
+            engine::plan(&ctx, &products, &filters, false),
+        )
+        .await;
     // 06 §4 strict path: version-equal files may still have drifted — compare
     // checksum timestamp (primary) and build id via one resolution each.
     if strict {
+        act.working("checking for drift");
         for task in tasks
             .iter_mut()
             .filter(|t| matches!(t.status, gogo::engine::task::Status::Present))
@@ -1669,6 +1846,7 @@ async fn update(games: Vec<String>, all: bool, strict: bool) -> Result<i32, AppE
             }
         }
     }
+    act.finish();
     let tasks: Vec<_> = tasks
         .into_iter()
         .filter(|t| matches!(t.status, gogo::engine::task::Status::Outdated))
@@ -1678,7 +1856,8 @@ async fn update(games: Vec<String>, all: bool, strict: bool) -> Result<i32, AppE
         return Ok(cli::exit::OK);
     }
     print_plan(&tasks);
-    let summary = engine::execute(&ctx, tasks).await;
+    drop(act);
+    let summary = execute_rendered(&ctx, tasks, false).await;
     println!(
         "updated: {} ok, {} skipped, {} failed",
         summary.ok, summary.skipped, summary.failed
@@ -1803,7 +1982,8 @@ async fn verify(
     let mut fix_class: Option<i32> = None;
     if fix && !failed_paths.is_empty() {
         let ctx = session_ctx().await?;
-        let token = bearer(&ctx).await?;
+        let act = depot_progress::Activity::new(depot_mode(false, false));
+        let token = act.spin_async("checking the library", bearer(&ctx)).await?;
         let product_ids: Vec<u64> = {
             let mut ids: Vec<u64> = failed_paths.iter().map(|r| r.product_id).collect();
             ids.sort_unstable();
@@ -1811,12 +1991,21 @@ async fn verify(
             ids
         };
         let mut products = Vec::new();
-        for id in &product_ids {
+        for (i, id) in product_ids.iter().enumerate() {
+            act.counting(
+                "fetching game details",
+                "games",
+                i as u64,
+                product_ids.len() as u64,
+            );
             match gogo::gog::catalog::detail(&ctx.http, &token, *id).await {
                 Ok(p) => products.push(p),
-                Err(e) => eprintln!("warn: catalog fetch failed for {id}: {e}"),
+                Err(e) => act.say(&format!("warn: catalog fetch failed for {id}: {e}"), &|l| {
+                    eprintln!("{l}")
+                }),
             }
         }
+        act.done();
         let filters = Filters {
             os: None,
             language: Some(ctx.cfg.gog.language.clone()),
@@ -1826,7 +2015,11 @@ async fn verify(
             only_dlcs: None,
         };
         // force=true: bypass the present-skip so the corrupt file is replaced.
-        let tasks: Vec<_> = engine::plan(&ctx, &products, &filters, true)
+        let tasks: Vec<_> = act
+            .spin_async(
+                "planning the repair",
+                engine::plan(&ctx, &products, &filters, true),
+            )
             .await
             .into_iter()
             .filter(|t| {
@@ -1835,10 +2028,11 @@ async fn verify(
                 })
             })
             .collect();
+        drop(act);
         if tasks.is_empty() {
             eprintln!("gogo: --fix found no downloadable replacement for the corrupt files");
         } else {
-            let summary = engine::execute(&ctx, tasks).await;
+            let summary = execute_rendered(&ctx, tasks, false).await;
             fixed = summary.ok;
             println!(
                 "fixed: {} ok, {} skipped, {} failed",
@@ -2306,15 +2500,26 @@ async fn resolve_game_source(
             AppError::Usage
         })?;
     let ctx = std::sync::Arc::new(built);
-    let token = bearer(&ctx).await?;
+    // One spinner per phase (#422): it is cleared between them, so the lines
+    // below print on their own; prompts pause it (`depot_progress::prompting`).
+    let act = depot_progress::Activity::new(depot_mode(json_progress, json));
+    let token = act
+        .spin_async("refreshing the sign-in", bearer(&ctx))
+        .await?;
     let session = ctx
         .session
         .as_ref()
         .and_then(|p| p.gog_warp_core())
         .ok_or(AppError::Usage)?;
     let sel = selector.to_string();
-    let selected = resolve_games(&ctx, &token, std::slice::from_ref(&sel)).await?;
+    let selected = act
+        .spin_async(
+            "checking the library",
+            resolve_games(&ctx, &token, std::slice::from_ref(&sel), &act),
+        )
+        .await?;
     let Some(game) = selected.first() else {
+        act.finish();
         eprintln!("gogo: no owned game matches {selector}");
         return Err(AppError::Usage);
     };
@@ -2334,13 +2539,17 @@ async fn resolve_game_source(
     let build_value = dlc.and_then(|a| a.build.as_deref());
     let password = dlc.and_then(|a| a.password.clone());
     let listing = if dlc.is_some() && (build_value.is_some() || installed.is_some()) {
-        match gogo::gog::builds::fetch_listing(
-            session,
-            game.id,
-            gog_warp::content_system::types::Platform::Windows,
-            password.clone(),
-        )
-        .await
+        match act
+            .spin_async(
+                "fetching the builds list",
+                gogo::gog::builds::fetch_listing(
+                    session,
+                    game.id,
+                    gog_warp::content_system::types::Platform::Windows,
+                    password.clone(),
+                ),
+            )
+            .await
         {
             Ok(l) => Some(l),
             // The plan's build lines are best effort; a picked build isn't.
@@ -2384,6 +2593,7 @@ async fn resolve_game_source(
                 interactive,
                 cached,
                 picked.as_ref(),
+                machine,
             )
             .await?
         }
@@ -2413,7 +2623,12 @@ async fn resolve_game_source(
     };
     let cached_tree = find_game_tree(&root);
     if dlc.is_some() && cached_tree.is_some() {
-        upgrade_cache_record(session, game.id, &title, &root, &dlc_plan.opts.language).await;
+        phase(
+            machine,
+            "checking the depot cache",
+            upgrade_cache_record(session, game.id, &title, &root, &dlc_plan.opts.language),
+        )
+        .await;
     }
     let mut facts = lane::GameFacts {
         cache_gap: cached_tree
@@ -2440,7 +2655,11 @@ async fn resolve_game_source(
     // A picked build is a depot build, whatever the public list says.
     facts.has_depot_build = picked.is_some();
     if facts.cached_tree.is_none() && picked.is_none() {
-        facts.has_depot_build = gogo::gog::depot::has_public_build(session, game.id)
+        facts.has_depot_build = act
+            .spin_async(
+                "fetching the builds list",
+                gogo::gog::depot::has_public_build(session, game.id),
+            )
             .await
             .map_err(AppError::Depot)?;
     }
@@ -2460,8 +2679,10 @@ async fn resolve_game_source(
                     .map(|r| r.build_id)
                     .as_deref(),
             );
-            let content =
-                take_content(session, game, &root, &tree, &dlc_plan, dlc, &mut notes).await?;
+            let content = take_content(
+                session, game, &root, &tree, &dlc_plan, dlc, &mut notes, machine,
+            )
+            .await?;
             return Ok((None, Some(tree), notes, content));
         }
         lane::Lane::DepotDownload => {}
@@ -2534,7 +2755,9 @@ async fn resolve_game_source(
         && std::io::IsTerminal::is_terminal(&std::io::stderr())
         && !machine
     {
-        go = dialoguer::Confirm::new()
+        go =
+            crate::depot_progress::prompting(|| {
+                dialoguer::Confirm::new()
             .with_prompt(if repair.is_some() {
                 format!(
                     "check the depot cache for {title} (hashes its files once) and fetch \
@@ -2545,6 +2768,7 @@ async fn resolve_game_source(
             })
             .default(true)
             .interact()
+            })
             .unwrap_or(false);
     }
     if !go {
@@ -2573,8 +2797,10 @@ async fn resolve_game_source(
                         .map(|r| r.build_id)
                         .as_deref(),
                 );
-                let content =
-                    take_content(session, game, &root, &tree, &dlc_plan, dlc, &mut notes).await?;
+                let content = take_content(
+                    session, game, &root, &tree, &dlc_plan, dlc, &mut notes, machine,
+                )
+                .await?;
                 return Ok((None, Some(tree), notes, content));
             }
             Some(_) => eprintln!(
@@ -2636,7 +2862,10 @@ async fn resolve_game_source(
         );
         AppError::Usage
     })?;
-    let content = take_content(session, game, &root, &tree, &dlc_plan, dlc, &mut notes).await?;
+    let content = take_content(
+        session, game, &root, &tree, &dlc_plan, dlc, &mut notes, machine,
+    )
+    .await?;
     Ok((None, Some(tree), notes, content))
 }
 
@@ -2656,6 +2885,7 @@ type GameSource = (
 /// come from the cache record, else GOG's depot manifests (then kept in the record).
 /// A build that can't tell the other DLC's files apart is refused: installing them
 /// would go against the flags. `None` for a build that chooses no DLC (`mac-app`).
+#[allow(clippy::too_many_arguments)]
 async fn take_content(
     session: &gog_warp::Core,
     game: &gogo::gog::library::LibraryProduct,
@@ -2664,6 +2894,7 @@ async fn take_content(
     plan: &DlcPlan,
     dlc: Option<&DlcAsk>,
     notes: &mut Vec<String>,
+    machine: bool,
 ) -> Result<Option<gogo::gog::dlc_filter::DepotContent>, AppError> {
     use gogo::gog::dlc_filter::{self, DepotContent, Need};
     if dlc.is_none() {
@@ -2675,11 +2906,15 @@ async fn take_content(
     // The version of the build the cache holds (#418); best effort.
     let (info, manifest) = match gogo::gog::depot::read_record(root) {
         Some(r) => {
-            match gogo::gog::depot::build_info_with_manifest(
-                session,
-                game.id,
-                plan.opts.password.clone(),
-                &r.build_id,
+            match phase(
+                machine,
+                "reading the build's manifest",
+                gogo::gog::depot::build_info_with_manifest(
+                    session,
+                    game.id,
+                    plan.opts.password.clone(),
+                    &r.build_id,
+                ),
             )
             .await
             {
@@ -2719,10 +2954,16 @@ async fn take_content(
             .map_err(|e| e.to_string()),
         None => Err("neither the cache record nor the game's info names its build".to_string()),
     };
-    let mut lists = lists_in(&language).await;
+    let act = depot_progress::Activity::new(depot_mode(false, machine));
+    let mut lists = act
+        .spin_async("reading the depot manifests", lists_in(&language))
+        .await;
     let mut others = Vec::new();
     for l in &languages {
-        match lists_in(l).await {
+        match act
+            .spin_async("reading the depot manifests", lists_in(l))
+            .await
+        {
             Ok(o) => others.push((l.clone(), o)),
             Err(e) => {
                 lists = lists.and(Err(e));
@@ -2730,6 +2971,7 @@ async fn take_content(
             }
         }
     }
+    drop(act);
     let keeping: Vec<String> = products
         .iter()
         .filter(|p| !extra.iter().any(|d| d.id.to_string() == **p))
@@ -2823,6 +3065,7 @@ async fn prepare_dlc(
     interactive: bool,
     cache_language: Option<String>,
     pick: Option<&gogo::gog::builds::BuildEntry>,
+    machine: bool,
 ) -> Result<DlcPlan, AppError> {
     use gogo::gog::dlc::{self, Basis, DlcSet, Want};
     let usage = |e: &dyn std::fmt::Display| {
@@ -2889,24 +3132,35 @@ async fn prepare_dlc(
         return Ok(plan);
     }
 
-    let detail = gogo::gog::catalog::detail(&ctx.http, token, game.id).await?;
-    let owned = library::owned_ids(&ctx.http, token).await?;
-    let (build_id, mdlcs) = match gogo::gog::depot::build_dlcs(
-        session,
-        game.id,
-        &game.title,
-        ask.password.clone(),
-        pick.map(|p| p.build_id.as_str()),
-        &language,
-        language_checked,
-    )
-    .await
+    let act = depot_progress::Activity::new(depot_mode(false, machine));
+    let (detail, owned) = act
+        .spin_async("checking the game's DLC", async {
+            let detail = gogo::gog::catalog::detail(&ctx.http, token, game.id).await?;
+            let owned = library::owned_ids(&ctx.http, token).await?;
+            Ok::<_, AppError>((detail, owned))
+        })
+        .await?;
+    let (build_id, mdlcs) = match act
+        .spin_async(
+            "fetching the builds list",
+            gogo::gog::depot::build_dlcs(
+                session,
+                game.id,
+                &game.title,
+                ask.password.clone(),
+                pick.map(|p| p.build_id.as_str()),
+                &language,
+                language_checked,
+            ),
+        )
+        .await
     {
         Ok(b) => b,
         // No depot build: the installer lane, which takes no DLC yet.
         Err(gogo::gog::depot::DepotError::NoBuilds(_)) => return Ok(plan),
         Err(e) => return Err(e.into()),
     };
+    drop(act);
     let infos = dlc::available(&detail.expanded_dlcs, &owned, Some(&mdlcs));
     // The build is named by its version too when it was picked.
     let label = pick.map_or(build_id, |p| p.label());
@@ -3001,11 +3255,13 @@ fn pick_dlc(cands: &[u64], infos: &[gogo::gog::dlc::DlcInfo]) -> Result<Vec<u64>
             )
         })
         .collect();
-    let picked = dialoguer::MultiSelect::new()
-        .with_prompt("DLC to install (space toggles, enter accepts)")
-        .items(&items)
-        .defaults(&vec![true; items.len()])
-        .interact_opt();
+    let picked = crate::depot_progress::prompting(|| {
+        dialoguer::MultiSelect::new()
+            .with_prompt("DLC to install (space toggles, enter accepts)")
+            .items(&items)
+            .defaults(&vec![true; items.len()])
+            .interact_opt()
+    });
     match picked {
         Ok(Some(sel)) => Ok(sel.into_iter().map(|i| cands[i]).collect()),
         _ => {
@@ -3405,10 +3661,11 @@ fn mac_app_retarget(
                 && std::io::IsTerminal::is_terminal(&std::io::stderr())
                 && !json;
             let p = tty.then(prompt::renderer);
+            let act = depot_progress::Activity::new(depot_mode(false, json));
             gogo::macapp::d3dmetal::ensure(
                 &format!("--renderer d3dmetal was asked for {gogid}"),
                 p.as_deref(),
-                &mut |ev| emit_macapp_event(ev, false),
+                &mut |ev| emit_live(ev, false, &act),
             );
         }
     }
@@ -3642,8 +3899,13 @@ async fn mac_app(
         let opts = opts.clone();
         let jp = json_progress;
         let p = prompter.clone();
+        let mode = depot_mode(jp, json);
         tokio::task::spawn_blocking(move || {
-            gogo::macapp::plan(&opts, p.as_deref(), &mut |ev| emit_macapp_event(ev, jp))
+            // Prompts inside the plan pause the spinner.
+            let act = depot_progress::Activity::new(mode);
+            act.spin("planning the conversion", || {
+                gogo::macapp::plan(&opts, p.as_deref(), &mut |ev| emit_live(ev, jp, &act))
+            })
         })
         .await
         .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))??
@@ -3768,7 +4030,9 @@ async fn mac_app(
         let plan = plan.clone();
         let jp = json_progress;
         let selected = selected.clone();
+        let mode = depot_mode(jp, json);
         tokio::task::spawn_blocking(move || {
+            let act = depot_progress::Activity::new(mode);
             let policy = if cfg!(target_os = "macos") {
                 gogo::macapp::bundle::CodesignPolicy::Adhoc
             } else {
@@ -3786,7 +4050,7 @@ async fn mac_app(
                         "renderer": renderer, "layer": layer, "reason": reason,
                     }));
                 }
-                emit_macapp_event(ev, jp)
+                emit_live(ev, jp, &act)
             })
         })
         .await
@@ -4198,8 +4462,14 @@ async fn linux_app(a: LinuxAppArgs) -> Result<i32, AppError> {
     let jp = a.json_progress;
     let plan = {
         let p = prompter.clone();
+        let mode = depot_mode(jp, a.json);
         tokio::task::spawn_blocking(move || {
-            gogo::linuxapp::build::plan(&opts, p.as_deref(), &mut |ev| emit_macapp_event(ev, jp))
+            // The PE scan and the umu database take a while (#422); a prompt
+            // inside the plan pauses the spinner.
+            let act = depot_progress::Activity::new(mode);
+            act.spin("planning the build", || {
+                gogo::linuxapp::build::plan(&opts, p.as_deref(), &mut |ev| emit_live(ev, jp, &act))
+            })
         })
         .await
         .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))??
@@ -4779,7 +5049,9 @@ fn linux_app_sub(sub: crate::cli::LinuxAppSub) -> Result<i32, AppError> {
             }
         }
         crate::cli::LinuxAppSub::Exes { gogid, all, json } => {
-            let l = gogo::linuxapp::exes::list(&gogid, all)?;
+            let l = phase_sync(json, "looking for executables", || {
+                gogo::linuxapp::exes::list(&gogid, all)
+            })?;
             if json {
                 println!("{}", serde_json::to_string(&l).unwrap());
             } else {
@@ -5768,14 +6040,28 @@ async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppEr
             let mut footnotes: Vec<String> = Vec::new();
             let mut table = output::table();
             table.set_header(vec!["ID", "STATUS", "LATEST", "SIZE", "CACHED", "USED BY"]);
-            for entry in catalog::entries()
+            let shown: Vec<_> = catalog::entries()
                 .iter()
                 .filter(|e| shelf.holds(e) && listed(e, os, all))
-            {
+                .collect();
+            // One request per entry, online (#422): the count on the status line.
+            let act = depot_progress::Activity::new(depot_mode(false, json));
+            let mut probed = 0u64;
+            let probes = shown
+                .iter()
+                .filter(|e| {
+                    http.is_some()
+                        && e.discovery.is_some()
+                        && !matches!(e.kind, catalog::Kind::Tool { .. })
+                })
+                .count() as u64;
+            for entry in shown {
                 let tool = matches!(entry.kind, catalog::Kind::Tool { .. });
                 let here = entry.runs_on_os(os);
                 let latest = match &http {
                     Some(http) if entry.discovery.is_some() && !tool => {
+                        act.counting("checking for new versions", "entries", probed, probes);
+                        probed += 1;
                         catalog::probe(entry, None, http, catalog::GITHUB_API)
                             .await
                             .ok()
@@ -5924,6 +6210,7 @@ async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppEr
                     },
                 ]);
             }
+            drop(act);
             // Proton builds gogo didn't install (design 18 §1), Linux only.
             let unmanaged = if os == catalog::Os::Linux && shelf == Shelf::Runtimes {
                 unmanaged_builds(linux_default.as_deref())
@@ -6159,7 +6446,7 @@ fn apps_cmd(cmd: crate::cli::AppsCmd) -> Result<i32, AppError> {
                     return Ok(cli::exit::USAGE);
                 }
             };
-            let mut all = apps::list(&logs)?;
+            let mut all = phase_sync(json, "sizing the games", || apps::list(&logs))?;
             apps_sort::sort(&mut all, &keys);
             if json {
                 println!("{}", serde_json::json!({ "apps": all }));
@@ -6228,7 +6515,7 @@ fn apps_cmd(cmd: crate::cli::AppsCmd) -> Result<i32, AppError> {
             Ok(cli::exit::OK)
         }
         crate::cli::AppsCmd::Show { target, json } => {
-            let Some(a) = apps::get(&target, &logs)? else {
+            let Some(a) = phase_sync(json, "sizing the game", || apps::get(&target, &logs))? else {
                 eprintln!("gogo: {target} isn't set up here — see `gogo apps list`");
                 return Ok(cli::exit::USAGE);
             };
@@ -6273,7 +6560,8 @@ fn apps_cmd(cmd: crate::cli::AppsCmd) -> Result<i32, AppError> {
             yes,
         } => {
             finish_interrupted_moves()?;
-            let Some(a) = apps::get(&target, &logs)? else {
+            let Some(a) = phase_sync(false, "sizing the game", || apps::get(&target, &logs))?
+            else {
                 eprintln!("gogo: {target} isn't set up here — see `gogo apps list`");
                 return Ok(cli::exit::USAGE);
             };
@@ -6285,10 +6573,11 @@ fn apps_cmd(cmd: crate::cli::AppsCmd) -> Result<i32, AppError> {
             yes,
         } => {
             finish_interrupted_moves()?;
-            let orphans: Vec<apps::App> = apps::list(&logs)?
-                .into_iter()
-                .filter(apps::App::orphaned)
-                .collect();
+            let orphans: Vec<apps::App> =
+                phase_sync(false, "sizing the games", || apps::list(&logs))?
+                    .into_iter()
+                    .filter(apps::App::orphaned)
+                    .collect();
             if orphans.is_empty() {
                 println!("nothing to prune: no game lost its .app or menu entry");
                 return Ok(cli::exit::OK);
@@ -6420,15 +6709,17 @@ fn remove_apps(
             eprintln!("gogo: not attached to a terminal — pass --yes to remove the above");
             return Ok(cli::exit::USAGE);
         }
-        let confirmed = dialoguer::Confirm::new()
-            .with_prompt(format!(
-                "remove {} game(s), {}?",
-                targets.len(),
-                gogo::fmt::human_size(total)
-            ))
-            .default(false)
-            .interact()
-            .unwrap_or(false);
+        let confirmed = crate::depot_progress::prompting(|| {
+            dialoguer::Confirm::new()
+                .with_prompt(format!(
+                    "remove {} game(s), {}?",
+                    targets.len(),
+                    gogo::fmt::human_size(total)
+                ))
+                .default(false)
+                .interact()
+        })
+        .unwrap_or(false);
         if !confirmed {
             println!("aborted");
             return Ok(cli::exit::OK);
@@ -6447,14 +6738,16 @@ fn remove_apps(
             for (d, b) in s.saves_aside.iter().zip(&s.saves_aside_bytes) {
                 println!("  {} ({})", d.display(), gogo::fmt::human_size(*b));
             }
-            let also = dialoguer::Confirm::new()
-                .with_prompt(format!(
-                    "also remove {}'s saves set aside by rollbacks (listed above)?",
-                    a.gogid
-                ))
-                .default(false)
-                .interact()
-                .unwrap_or(false);
+            let also = crate::depot_progress::prompting(|| {
+                dialoguer::Confirm::new()
+                    .with_prompt(format!(
+                        "also remove {}'s saves set aside by rollbacks (listed above)?",
+                        a.gogid
+                    ))
+                    .default(false)
+                    .interact()
+            })
+            .unwrap_or(false);
             if also {
                 drop_aside.push(&a.gogid);
             }
@@ -6968,6 +7261,54 @@ mod completions_tests {
 mod tests {
     use crate::depot_progress::game_files_line;
     use gogo::gog::materialize::{MaterializePlan, TreeMethod};
+
+    /// `update` and `verify --fix` give `engine::execute` a subscriber, so the
+    /// download's events reach the renderer; without one (off a terminal, or a
+    /// machine mode) nothing subscribes.
+    #[tokio::test]
+    async fn a_live_run_has_its_events_rendered() {
+        use gogo::engine::events::ProgressEvent;
+        let (tx, _keep) = tokio::sync::broadcast::channel::<ProgressEvent>(16);
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let out = crate::with_progress(
+            &tx,
+            true,
+            async {
+                let _ = tx.send(ProgressEvent::Warn {
+                    message: "downloading".into(),
+                });
+                // The renderer drains what's queued before `done` wins.
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                7
+            },
+            |rx, done| {
+                gogo::engine::events::render(rx, done, move |ev| {
+                    sink.lock().unwrap().push(format!("{ev:?}"));
+                })
+            },
+        )
+        .await;
+        assert_eq!(out, 7);
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert!(seen[0].contains("downloading"), "{seen:?}");
+    }
+
+    #[tokio::test]
+    async fn a_run_off_a_terminal_subscribes_nothing() {
+        use gogo::engine::events::ProgressEvent;
+        let (tx, _keep) = tokio::sync::broadcast::channel::<ProgressEvent>(16);
+        let before = tx.receiver_count();
+        let out = crate::with_progress(
+            &tx,
+            false,
+            async { tx.receiver_count() },
+            |_rx, _done| async { panic!("no renderer off a terminal") },
+        )
+        .await;
+        assert_eq!(out, before);
+    }
 
     #[test]
     fn game_files_line_says_reflink_or_copy_and_its_cost() {

@@ -870,7 +870,9 @@ pub fn execute(
             files: None,
         });
         if dirs.game.symlink_metadata().is_ok() {
-            materialize::remove_tree(&dirs.game)?;
+            working(emit, step::REMOVING_GAME, || {
+                materialize::remove_tree(&dirs.game)
+            })?;
         }
         let mut tenths = materialize::Tenths::new(total);
         // Only the base and the wanted DLC (design 19 §3.3): the filter's paths are
@@ -1105,7 +1107,9 @@ pub fn execute(
             if let Some(parent) = target.root.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            launch::move_tree(&staging.root, &target.root)?;
+            working(emit, step::MOVING_GAME, || {
+                launch::move_tree(&staging.root, &target.root)
+            })?;
             launch::record_location(&gogid, &target.root)?;
         } else {
             for message in super::rollback::settle_pending(&gogid, &plan.snapshot_opts.backends)? {
@@ -1129,7 +1133,9 @@ pub fn execute(
             }
             // Out of a staging subvolume into another one is a copy (reflinked
             // on one btrfs): a rename can't cross subvolumes.
-            launch::move_tree(&staging.prefix, &target.prefix)?;
+            working(emit, step::MOVING_PREFIX, || {
+                launch::move_tree(&staging.prefix, &target.prefix)
+            })?;
             let target_logs = target.root.join(crate::macapp::INSTALL_LOGS);
             if logs.is_dir() {
                 materialize::remove_tree(&target_logs).ok();

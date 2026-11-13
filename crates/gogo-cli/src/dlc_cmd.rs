@@ -274,15 +274,25 @@ async fn add_cmd(
         }
     };
 
-    let (ctx, token) = connect().await?;
+    // One spinner per phase (#422): nothing off a terminal or in a machine mode.
+    let (ctx, token) = crate::phase(machine, "refreshing the sign-in", connect()).await?;
     let session = core(&ctx)?;
     let id = game_id(&game);
     let title = title_of(&game);
-    let detail = gogo::gog::catalog::detail(&ctx.http, &token, id).await?;
-    let owned = library::owned_ids(&ctx.http, &token).await?;
+    let (detail, owned) = crate::phase(machine, "checking the game's DLC", async {
+        let detail = gogo::gog::catalog::detail(&ctx.http, &token, id).await?;
+        let owned = library::owned_ids(&ctx.http, &token).await?;
+        Ok::<_, AppError>((detail, owned))
+    })
+    .await?;
     let language = language_of(&game);
     let build_id = game.content.build_id.clone();
-    let ib = depot::installed_build(session, id, build_id.as_deref()).await?;
+    let ib = crate::phase(
+        machine,
+        "fetching the builds list",
+        depot::installed_build(session, id, build_id.as_deref()),
+    )
+    .await?;
     let installed = game.installed();
 
     let Some((version, generation, manifest)) = ib.listed else {
@@ -354,12 +364,16 @@ async fn add_cmd(
     // become, read from the build's depot manifests. `add` writes it.
     let cache_upgrade = match &game.cache_root {
         Some(root) => {
-            gogo::gog::cache_upgrade::check(
-                session.reqwest_client(),
-                root,
-                &manifest,
-                &build,
-                &language,
+            crate::phase(
+                machine,
+                "checking the depot cache",
+                gogo::gog::cache_upgrade::check(
+                    session.reqwest_client(),
+                    root,
+                    &manifest,
+                    &build,
+                    &language,
+                ),
             )
             .await
         }
@@ -412,11 +426,13 @@ async fn add_cmd(
             eprintln!("gogo: adding DLC needs consent: pass --yes");
             return Ok(cli::exit::USAGE);
         }
-        let go = dialoguer::Confirm::new()
-            .with_prompt("add it now?")
-            .default(true)
-            .interact()
-            .unwrap_or(false);
+        let go = crate::depot_progress::prompting(|| {
+            dialoguer::Confirm::new()
+                .with_prompt("add it now?")
+                .default(true)
+                .interact()
+        })
+        .unwrap_or(false);
         if !go {
             eprintln!("gogo: aborted");
             return Ok(cli::exit::USAGE);
@@ -430,7 +446,13 @@ async fn add_cmd(
         .filter(|d| d.download_size > 0)
         .filter_map(|d| d.id.parse().ok())
         .collect();
-    if let Some(bad) = depot::first_unowned(session, &fetching, generation, &manifest).await? {
+    let unowned = crate::phase(
+        machine,
+        "checking the DLC is owned",
+        depot::first_unowned(session, &fetching, generation, &manifest),
+    )
+    .await?;
+    if let Some(bad) = unowned {
         let mut stale = infos.clone();
         for d in stale.iter_mut().filter(|d| d.id == bad) {
             d.owned = false;
