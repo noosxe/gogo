@@ -23,7 +23,7 @@ in `docs/13` grounds design 10.
    prompts unless a login or an ambiguous selection demands one.
 6. **Config** — `defaults < file < env < CLI` layering, single TOML file.
 7. **Cloud saves** — GOG cloud saves sync for installed games on the Linux and Mac
-   lanes (#275, added 2026-11-11; design 22, draft).
+   lanes (#275, added 2026-11-11; design 22).
 
 ## Non-goals (v1)
 
@@ -73,7 +73,7 @@ in `docs/13` grounds design 10.
 | [19-dlc](19-dlc.md) | DLC: choosing it at the first build, `linux-app dlc list` / `add` onto a built game, the depot cache's DLC set (#336), the offline lane's DLC installers, `content.toml` (#343) |
 | [20-snapshots](20-snapshots.md) | snapshots of a built Linux game on btrfs (ZFS later): the game dir as a subvolume, initial and automatic snapshots, rollback with the saves check, retention, `linux-app snapshot` (#365) |
 | [21-builds](21-builds.md) | builds of a game: `gogo builds` lists what GOG serves, `--build` picks one on `depot` / `linux-app`, the installed-vs-newest hint, the kept build manifest, and the sketch of a later `linux-app update` (#360) |
-| [22-cloud-saves](22-cloud-saves.md) | GOG cloud saves (#275): per-game token, remote-config save locations mapped into the Proton prefix / Wine bottle, per-file three-way sync, `gogo saves status/pull/push/sync`, launch-time sync, backups and the snapshot interplay (draft) |
+| [22-cloud-saves](22-cloud-saves.md) | GOG cloud saves (#275): per-game token, remote-config save locations mapped into the Proton prefix / Wine bottle, per-file three-way sync, `gogo saves status/pull/push/sync`, launch-time sync, backups and the snapshot interplay |
 ## Key decisions (traceability)
 
 | Decision | Rationale / source |

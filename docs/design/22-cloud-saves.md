@@ -1,7 +1,7 @@
 # 22 — GOG cloud saves (#275)
 
-Status: **draft** (2026-11-13). Facts in §1 are live-verified. The open questions in §12
-need a decision before the implementation issues (§13) are filed.
+Status: **accepted** (2026-11-13). Facts in §1 are live-verified; the decisions are in §12
+(D1–D13, all accepted as recommended). Writes to the cloud wait for D2's live test.
 
 Sync a built game's saves with GOG's cloud storage, the same storage GOG Galaxy and Heroic
 use, so saves follow the user between machines and launchers without copying them by hand.
@@ -81,7 +81,7 @@ only the Galaxy communication-service form used by Heroic and Lutris passed:
 installation_source/gog`, also with ` gogo/<version>` appended. Without the
 `dont_sync_marker/true installation_source/gog` suffix it fails, with or without the
 platform part, and so do other versions with the platform part alone. (Narrowing it further
-was not done; Q3.)
+was not done; D3.)
 
 **List.** `GET /v1/<userId>/<clientId>` with `Accept: application/json` → a flat JSON array
 over all locations; without `Accept` → `text/plain`, one name per line. Each entry:
@@ -115,7 +115,7 @@ files deleted locally by a client that then marked them deleted. They stay in th
 every client treats them as "deleted" (§4.2). Cyberpunk rotates its autosaves, so most of its
 history is tombstones.
 
-**Not verified (writes, need an OK first; Q2):** upload and delete. From prior art (§9):
+**Not verified (writes, need an OK first; D2):** upload and delete. From prior art (§9):
 `PUT` the gzip body with `Content-Encoding: gzip`, `Etag: <md5 of the gzip body>`,
 `X-Object-Meta-LocalLastModified: <mtime, RFC 3339 UTC, seconds>`; `DELETE` the object URL.
 Whether Galaxy writes tombstones by `PUT`ting an empty gzip or the server turns a `DELETE`
@@ -155,7 +155,7 @@ under that location.
    main session's `persist_if_changed` serializes every token in its map, so a per-game
    token obtained there would be written into the token store (keychain or file) at the next
    save; a separate `Core` keeps it in memory for this command only. One exchange per
-   command per game is cheap (one request) and avoids a new kind of stored secret (Q4).
+   command per game is cheap (one request) and avoids a new kind of stored secret (D4).
 4. If the Galaxy token needs a refresh, it is refreshed in the **main** session first
    (`bearer()`), which persists it as usual; the separate `Core` never refreshes the Galaxy
    token itself.
@@ -186,7 +186,7 @@ at `-vv`.
 ### 2.3 The HTTP client
 
 A second `reqwest::Client` for `cloudstorage.gog.com` only, with the User-Agent of §1.3
-(Q3) and no automatic decompression. `remote-config.gog.com` and `auth.gog.com` keep gogo's
+(D3) and no automatic decompression. `remote-config.gog.com` and `auth.gog.com` keep gogo's
 own UA. Storage URLs contain the user id: they are logged with the path after `/v1/`
 redacted (design 07 §4's `redact_url`, extended with this host).
 
@@ -213,7 +213,7 @@ redacted (design 07 §4's `redact_url`, extended with this host).
 Linux lane: `<prefix>` is `games/<gogid>/prefix` (umu's `pfx` links to it), the Windows user
 is Proton's fixed `steamuser`. Mac lane: `<prefix>` is the bottle in the game's state dir, the
 Windows user is `crossover`, which the CrossOver engine always uses (design 16 §4; check on
-a real bottle, Q9). `U` = `<prefix>/drive_c/users/<user>`.
+a real bottle, D9). `U` = `<prefix>/drive_c/users/<user>`.
 
 | Variable | Windows meaning | Linux lane (Proton) | Mac lane (CX bottle) |
 |---|---|---|---|
@@ -239,7 +239,7 @@ When storage is enabled and `locations` is empty, the location is named `__defau
 `<?APPLICATION_DATA_LOCAL?>/GOG.com/Galaxy/Applications/<clientId>/Storage/Shared/Files`
 (Heroic's reading; lgogdownloader stops at `…/Storage`). The five games tried all declare
 locations, so this is not verified; it ships behind the same table, and a game that needs it
-is the test case (Q10).
+is the test case (D10).
 
 ### 3.4 Excluded files
 
@@ -256,7 +256,7 @@ game, outside the game dir so a rollback doesn't restore an old one:
 
 ```toml
 schema = 1
-client_id = "<clientId>"           # public; detects a client change (Q11)
+client_id = "<clientId>"           # public; detects a client change (D11)
 auto = false                       # launch-time sync for this game (§6)
 rolled_back = 2026-11-12T10:00:00Z # set by a rollback (design 20 §6.3), cleared when settled
 pending_push = false               # a post-exit push failed or was skipped offline (§6.3)
@@ -288,7 +288,7 @@ For every path that is in the cloud listing (non-tombstone), on disk, or in the 
 | changed / new | same / absent | **upload** |
 | same / absent | changed / new | **download** |
 | same | deleted | **delete local** (to the backup dir, §7.1) |
-| deleted | same | **delete in the cloud** (Q2's mechanism) |
+| deleted | same | **delete in the cloud** (D2's mechanism) |
 | changed | changed | **conflict** |
 | changed | deleted | **conflict** |
 | deleted | changed | **conflict** |
@@ -327,7 +327,7 @@ gogo saves locations <gogid> [--json]      # resolved paths, per location, with 
 ```
 
 Top level, not under `linux-app`/`mac-app`: the game is found by gogid in either lane's
-library (`Library::resolve`), and the same command works for both (Q5).
+library (`Library::resolve`), and the same command works for both (D5).
 
 - `status` is `sync --dry-run` that never prompts: the table of actions, counts and sizes per
   location, conflicts listed, `rolled_back` and `pending_push` shown.
@@ -344,7 +344,7 @@ library (`Library::resolve`), and the same command works for both (Q5).
   [y/N]`); a plan that only adds files doesn't ask.
 - A conflict with no `--prefer`, on a TTY: asked per file (`local`, `cloud`, `both` keeps the
   local one renamed `<name>.local-<ts>` and downloads the cloud one, `skip`). Without a TTY:
-  nothing in that location's conflicts is done, the rest is, and the exit code is 8 (Q6).
+  nothing in that location's conflicts is done, the rest is, and the exit code is 8 (D6).
 
 ### 5.2 Order of a run
 
@@ -368,7 +368,7 @@ upload (a Heroic pitfall, §9).
 The plan as a table (`location  action  file  size  local mtime  cloud time`), counts per
 action, then one line per file done. `--json`: the plan and the result as objects, with the
 same fields; no token, secret or user id. Exit codes: 0 done or nothing to do, 3 auth or
-`no_license`, 4 network, 5 an object whose MD5 didn't match, 6 disk, 8 conflicts left (Q6),
+`no_license`, 4 network, 5 an object whose MD5 didn't match, 6 disk, 8 conflicts left (D6),
 1 anything else.
 
 ### 5.4 Limits
@@ -385,7 +385,7 @@ same fields; no token, secret or user id. Exit codes: 0 done or nothing to do, 3
 
 Per game, off by default: `gogo saves auto <gogid> on`, or a question at the first build of
 a game whose remote config has storage enabled (TTY only; `--cloud-saves on|off` answers it).
-`[cloud_saves] auto_default = "ask"|"on"|"off"` in the config sets the default (Q1).
+`[cloud_saves] auto_default = "ask"|"on"|"off"` in the config sets the default (D1).
 
 ### 6.2 What the launcher does
 
@@ -432,7 +432,7 @@ Before anything is overwritten or deleted, on either side, the old bytes are cop
 
 The last line of the run names the dir. Backups are pruned to the newest
 `cloud_saves.keep_backups` (default 20) dirs per game, oldest first, each reported; this is a
-separate dir from design 20's `saves-aside/`, which gogo never prunes (Q7). `apps remove`
+separate dir from design 20's `saves-aside/`, which gogo never prunes (D7). `apps remove`
 lists them with the game, like `saves-aside/`.
 
 ### 7.2 Snapshots (design 20 §6.3)
@@ -476,7 +476,7 @@ would be left).
 
 - **`apps show` / `doctor`**: cloud saves on/off, last sync, `pending_push`, `rolled_back`,
   backups and their size. `doctor` flags a record whose `client_id` no longer matches the
-  game's (a rebuilt game from another edition, Q11).
+  game's (a rebuilt game from another edition, D11).
 - **`apps remove`**: asks whether to keep `cloud-saves/<gogid>.toml` and the backups (default
   keep the backups, drop the record); never touches the cloud.
 - **`move`**: the record is outside the game dir and keyed by gogid; nothing to do.
@@ -485,7 +485,7 @@ would be left).
 - **Another client (Galaxy, Heroic) on the same account**: it sees gogo's uploads as normal
   objects with gogo's UA in `X-Object-Meta-User-Agent`, and its tombstones are honoured. gogo
   writes the same gzip format so other clients can read what it uploads (to verify with the
-  first upload, Q2).
+  first upload, D2).
 
 ## 9. Prior art
 
@@ -534,8 +534,8 @@ Read from source (2026-11-13), described in our own words; no code taken.
 - **Launcher**: the launcher test harness checks the calls' order and that a failing or
   missing gogo never blocks the start.
 - **Live**: read-only `status` on owned games in the live smoke (design 08), gated like the
-  other live tests. Writes (`push`, cloud delete) only on a test account or a game the
-  maintainer names, with an explicit OK (Q2).
+  other live tests. Writes (`push`, cloud delete) only on a test account or a game
+  @noosxe names, with an explicit OK (D2).
 - **linux-e2e**: none in the harness (no account there); the host pass lists a real
   round trip with Cyberpunk 2077: pull, play, push, check in Galaxy or Heroic.
 
@@ -543,57 +543,33 @@ Read from source (2026-11-13), described in our own words; no code taken.
 
 1. **Linux lane, Windows builds** (both depot and installer lanes): everything above.
 2. **Mac lane**: the same core with the `crossover` user and no snapshots; the launcher hooks
-   in the Mac launcher. Needs a real bottle to confirm the user and the home dirs (Q9).
+   in the Mac launcher. Needs a real bottle to confirm the user and the home dirs (D9).
 3. **Native builds** (#162 Linux games, native macOS apps): remote config's `Linux`/`MacOS`
    keys, host paths (`~/.local/share`, `~/.config`, `~/Library/Application Support`), and
    GOG's habit of declaring `enabled: false` for them (all five games tried). Later, on
    request.
 
-## 12. Open questions (each with a recommendation)
+## 12. Decisions
 
-1. **Q1 — Launch-time sync on by default?** Recommend: **off by default, per game opt-in**, asked
-   at the first build of a game with cloud storage (TTY), with `[cloud_saves] auto_default` to
-   change it. A wrong sync loses saves; the manual commands should earn trust first.
-2. **Q2 — Live writes.** Upload and delete aren't verified (§1.3). Recommend: before the
-   implementation's upload PR merges, one write test with @noosxe's OK on a game they name
-   (an owned game with no cloud saves yet, e.g. XCOM 2's empty container): PUT one file, read
-   it back, check it in Galaxy or Heroic, delete it, and see whether the delete leaves a
-   tombstone. gogo writes deletions the way that test shows other clients expect.
-3. **Q3 — User-Agent.** The storage API refuses gogo's own UA on Cyberpunk; the Galaxy
-   communication-service UA with `dont_sync_marker/true installation_source/gog` works, also
-   with ` gogo/<version>` appended. Recommend: send that UA **with `gogo/<version>` appended**
-   (the design's "identifying UA" principle as far as the API allows), only to
-   `cloudstorage.gog.com`, as a constant with a comment naming the check; re-verify it in the
-   live smoke.
-4. **Q4 — Store per-game tokens?** Recommend: **no**, a separate in-memory `Core` per command
-   (§2.1): one extra request per sync, no new secret at rest, no keychain rewrites.
-5. **Q5 — Command placement.** Recommend `gogo saves …` at the top level (lane-neutral),
-   rather than `linux-app saves` and `mac-app saves`.
-6. **Q6 — Exit code for "conflicts left".** Recommend a new **8** ("needs a decision"):
-   none of 1–7 fits, and scripts need to tell it from a failure.
-7. **Q7 — Backups: where and how long.** Recommend `cloud-saves/backups/<gogid>/` pruned to 20
-   per game, apart from design 20's never-pruned `saves-aside/` (launch-time pulls would
-   otherwise grow it forever).
-8. **Q8 — First sync of a game with local saves and cloud saves.** Recommend the per-file
-   rule of §4.2 (copy one-sided files, compare both-sided ones by plain MD5, ask on real
-   differences), never a whole-side default.
-9. **Q9 — Mac lane user dir.** Recommend mapping to `drive_c/users/crossover` as design 16
-   states, confirmed on a real bottle in the Mac issue's host pass before that issue lands.
-10. **Q10 — `__default` location.** Recommend implementing it per §3.3 but treating it as
-    unverified: `status` labels it, and the first game found that uses it is checked live
-    before writes are allowed there.
-11. **Q11 — Client id changes** (another edition rebuilt under the same gogid, Witcher 3's two
-    ids). Recommend: a record whose `client_id` differs from the game's is set aside
-    (renamed with a timestamp) and the next sync is a first sync (§4.2), with a warning.
-12. **Q12 — Push deletions in launcher mode.** Cyberpunk deletes old autosaves at every play;
-    not pushing deletions leaves the cloud with stale files that come back on the next pull.
-    Recommend: **push deletions** (backed up to `cloud/` first, §7.1), as Galaxy does;
-    `--no-delete` on the manual commands for anyone who wants additive syncs.
-13. **Q13 — Remote-config `component_version`.** `2.0.45` works today; others use
-    2.0.43–2.0.51. Recommend a constant, and a test in the live smoke that fails if GOG
-    starts answering it differently.
+Decided on 2026-11-13: every recommendation of the draft was accepted as written.
 
-## 13. Implementation issues (proposed; filed after this design is approved)
+| # | Question | Decision |
+|---|---|---|
+| D1 | Launch-time sync on by default? | **Off by default, per game opt-in** (§6.1): asked at the first build of a game with cloud storage (TTY), `--cloud-saves on\|off` answers it, `[cloud_saves] auto_default` changes the default. A wrong sync loses saves; the manual commands earn trust first. |
+| D2 | Live writes (upload, delete) aren't verified (§1.3). | **One write test, with @noosxe's explicit OK, on a game they name** (an owned game with no cloud saves yet suits it): PUT one file, read it back, check it in Galaxy or Heroic, delete it, and see whether the delete leaves a tombstone. It gates C5: until it has run, gogo writes nothing to the cloud, and deletions are written the way it shows other clients expect. |
+| D3 | User-Agent for the storage API? | **The Galaxy communication-service UA with `dont_sync_marker/true installation_source/gog` and ` gogo/<version>` appended** (§1.3), sent only to `cloudstorage.gog.com`, as a constant with a comment naming the check; re-verified in the live smoke. |
+| D4 | Store per-game tokens? | **No**: a separate in-memory `Core` per command (§2.1). One extra request per sync, no new secret at rest, no keychain rewrites. |
+| D5 | Command placement? | **Top level, `gogo saves status\|pull\|push\|sync <gogid>`** (plus `auto`, `locations`), for both lanes (§5.1). |
+| D6 | Exit code for conflicts left unresolved? | **A new 8** ("needs a decision"): none of 1–7 fits, and scripts need to tell it from a failure. |
+| D7 | Backups: where and how long? | **`<data_root>/cloud-saves/backups/<gogid>/`, the newest 20 kept per game** (`cloud_saves.keep_backups`), apart from design 20's never-pruned `saves-aside/` (§7.1). |
+| D8 | First sync with saves on both sides? | **File by file** (§4.2): one-sided files are copied, both-sided ones compared by plain MD5, real differences asked about; never a whole-side default. |
+| D9 | Mac lane user dir? | **`drive_c/users/crossover`** as design 16 §4 states, confirmed on a real bottle before the Mac lane (C8) lands. |
+| D10 | The `__default` location? | **Implemented per §3.3 and marked unverified**: `status` labels it, and the first game found that uses it is checked live before writes go there. |
+| D11 | The game's client id changes (another edition rebuilt under the same gogid)? | **The old record is set aside** (renamed with a timestamp), with a warning, and the next sync is a first sync (§4.2). |
+| D12 | Push deletions? | **Yes**, as Galaxy does, each cloud object backed up to `cloud/` first (§7.1); `--no-delete` on the manual commands keeps a sync additive. |
+| D13 | Remote-config `component_version`? | **A constant (`2.0.45`)**, with a live-smoke check that fails if GOG starts answering it differently. |
+
+## 13. Implementation issues (to be filed)
 
 Under epic #155 (Linux runtime), `type:feature`, `area:wine-runtime` + `area:auth` /
 `area:cli` where listed; the Mac one under #50 (`area:mac-app`).
@@ -604,7 +580,7 @@ Under epic #155 (Linux runtime), `type:feature`, `area:wine-runtime` + `area:aut
 | C2 | cloud saves: remote config and location resolving | remote-config fetch and cache, location parsing, variable mapping for both lanes and both build lanes, `__default`, excludes, `gogo saves locations` | — |
 | C3 | cloud saves: storage client (read side) and `gogo saves status` | list (JSON), download with MD5 check and gunzip, tombstones, the record, classification (§4.2), `status` and `--json`, mock storage tests (`area:cli`) | C1, C2 |
 | C4 | cloud saves: `pull` with backups and the `cloud-pull` snapshot | downloads and local deletes, backups and pruning, locks and refusals, `--prefer`, conflict prompts, exit 8, snapshot trigger (design 20 I5) | C3 |
-| C5 | cloud saves: `push` and `sync` (after Q2's write test) | gzip upload, cloud deletes per Q2, quota pre-check, cloud-side backups, `sync`, `--no-delete` | C3, Q2 |
+| C5 | cloud saves: `push` and `sync` (after D2's write test) | gzip upload, cloud deletes per D2, quota pre-check, cloud-side backups, `sync`, `--no-delete` | C3, D2 |
 | C6 | cloud saves: rollback interplay and save roots | `rolled_back` set by `snapshot rollback`, forced conflicts, the rollback's plan line, the locations as design 20's save roots (offline, from the cache) | C3, design 20 I4 |
 | C7 | linux-app: launch-time sync | `saves auto`, the first-build question and `--cloud-saves`, `launch.conf` key, pull before / push after in `launch.sh` (`LAUNCHER_VERSION` + 1), the dialog, `--launcher` budget, `pending_push`, `apps show`/`doctor` | C4, C5 |
 | C8 | mac-app: cloud saves | the `crossover` mapping confirmed on a real bottle, the Mac launcher's hooks, `apps show`/`doctor` (epic #50, `area:mac-app`) | C7 |
