@@ -113,7 +113,7 @@ pub const SETUP_LINK: &str = "gogo-setup";
 
 /// umu's install path: the dir the runtime's container shares for the exe (umu
 /// would take the exe's own dir, but a `C:` path is no file to it).
-const INSTALL_PATH: &str = "STEAM_COMPAT_INSTALL_PATH";
+pub(crate) const INSTALL_PATH: &str = "STEAM_COMPAT_INSTALL_PATH";
 
 /// [`setup_command`]'s link: `prefix/drive_c/gogo-setup` → `setup`'s dir.
 fn setup_link(prefix: &Path, setup: &Path) -> std::io::Result<SetupLink> {
@@ -191,7 +191,7 @@ pub fn find_info(drive_c: &Path, id: u64) -> Option<PathBuf> {
 }
 
 /// The DLC's info in `install_dir` (any case), else `None`.
-fn info_in(install_dir: &Path, id: u64) -> Option<PathBuf> {
+pub(crate) fn info_in(install_dir: &Path, id: u64) -> Option<PathBuf> {
     let name = format!("goggame-{id}.info");
     std::fs::read_dir(install_dir)
         .ok()?
@@ -405,7 +405,7 @@ pub fn pending(root: &Path) -> Vec<AddingDlc> {
     lay::read_journal(root)
         .ok()
         .flatten()
-        .filter(|j| j.lane == LANE)
+        .filter(|j| j.lane == LANE && !j.is_removal())
         .map(|j| j.adding)
         .unwrap_or_default()
 }
@@ -482,6 +482,14 @@ pub fn add(
              settled here",
             game.gogid,
             lay::journal_path(&root).display()
+        ))));
+    }
+    if prior.as_ref().is_some_and(Journal::is_removal) {
+        return Err(AddError::Game(MacAppError::Apps(format!(
+            "an earlier DLC removal of {} stopped while its uninstallers ran; settle it \
+             before an add: {}",
+            game.gogid,
+            super::dlc_uninstall::ways_out(&game.gogid)
         ))));
     }
     let resumed = prior.is_some();
@@ -636,6 +644,22 @@ pub fn ways_out(gogid: &str) -> String {
     )
 }
 
+/// The ways out of the unfinished change `j` (this lane's journal), add or
+/// removal, and what it is: for every message about one.
+pub fn journal_ways_out(gogid: &str, j: &Journal) -> (&'static str, String) {
+    if j.is_removal() {
+        (
+            "a DLC removal stopped while its uninstallers ran",
+            super::dlc_uninstall::ways_out(gogid),
+        )
+    } else {
+        (
+            "a DLC add stopped while its installers ran",
+            ways_out(gogid),
+        )
+    }
+}
+
 /// What [`abandon`] gave up.
 #[derive(Debug, Clone, Serialize)]
 pub struct Abandoned {
@@ -663,6 +687,13 @@ pub fn abandon(game: &mut Game) -> Result<Abandoned, MacAppError> {
         return Err(MacAppError::Apps(format!(
             "{}'s unfinished DLC change is the depot lane's: `gogo linux-app dlc {} add` \
              finishes it; --abandon is for offline-installer adds",
+            game.gogid, game.gogid
+        )));
+    }
+    if j.is_removal() {
+        return Err(MacAppError::Apps(format!(
+            "{}'s unfinished DLC change is a removal: `gogo linux-app dlc {} remove \
+             --abandon` gives it up",
             game.gogid, game.gogid
         )));
     }

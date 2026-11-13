@@ -1819,6 +1819,27 @@ fn check_dlc(g: &Game) -> Finding {
             ),
         );
     }
+    if let Some(j) = crate::gog::lay::read_journal(&g.dirs.root)
+        .ok()
+        .flatten()
+        .filter(|j| j.lane == super::dlc_installer::LANE)
+    {
+        let (what, ways) = super::dlc_installer::journal_ways_out(&g.gogid, &j);
+        let half = if j.is_removal() {
+            "removed"
+        } else {
+            "installed"
+        };
+        return Finding::fail(
+            "dlc",
+            format!(
+                "{what} ({} is there): the DLC may be half {half}, so the launcher won't \
+                 start the game",
+                crate::gog::lay::JOURNAL
+            ),
+            ways,
+        );
+    }
     if crate::gog::lay::read_journal(&g.dirs.root)
         .ok()
         .flatten()
@@ -1836,21 +1857,6 @@ fn check_dlc(g: &Game) -> Finding {
                  it restores are gone)",
                 g.gogid
             ),
-        );
-    }
-    if crate::gog::lay::read_journal(&g.dirs.root)
-        .ok()
-        .flatten()
-        .is_some_and(|j| j.lane == super::dlc_installer::LANE)
-    {
-        return Finding::fail(
-            "dlc",
-            format!(
-                "a DLC add stopped while its installers ran ({} is there): the DLC may be \
-                 half installed, so the launcher won't start the game",
-                crate::gog::lay::JOURNAL
-            ),
-            super::dlc_installer::ways_out(&g.gogid),
         );
     }
     if super::dlc::journal_exists(&g.dirs.root) {

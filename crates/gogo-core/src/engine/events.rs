@@ -210,6 +210,8 @@ pub mod step {
     pub const INSTALLER: &str = "running the installer";
     /// A DLC's offline installer running silently (design 19 §5).
     pub const DLC_INSTALLER: &str = "running a DLC's installer";
+    /// A DLC's own Inno uninstaller running silently (design 19 §5.2).
+    pub const DLC_UNINSTALLER: &str = "running a DLC's uninstaller";
     /// GOG's support installer and registry key.
     pub const SUPPORT: &str = "running GOG's support installer";
     /// A rebuild clearing the old `game/` dir.

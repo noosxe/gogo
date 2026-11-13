@@ -522,9 +522,15 @@ fn titles(dlcs: &[DlcRef]) -> String {
 
 /// The warning about saves (design 19 §3.7): the plan's line and the question's.
 pub fn saves_warning(p: &RemovePlan) -> String {
-    let names = titles(&p.removing);
-    let ids: String = p.removing.iter().map(|d| format!(" {}", d.id)).collect();
-    let snapshot = if p.autosnapshot {
+    saves_line(&p.gogid, &p.removing, p.autosnapshot)
+}
+
+/// [`saves_warning`]'s text, for either lane: `autosnapshot` when the `auto`
+/// snapshot will be taken.
+pub fn saves_line(gogid: &str, removing: &[DlcRef], autosnapshot: bool) -> String {
+    let names = titles(removing);
+    let ids: String = removing.iter().map(|d| format!(" {}", d.id)).collect();
+    let snapshot = if autosnapshot {
         format!(
             "the snapshot \"{}\" can restore the game, or ",
             crate::snapshot::labels::removing(&names)
@@ -533,9 +539,8 @@ pub fn saves_warning(p: &RemovePlan) -> String {
         String::new()
     };
     format!(
-        "saves made with {names} may not load without it; {snapshot}gogo linux-app dlc {} \
-         add{ids} brings it back",
-        p.gogid
+        "saves made with {names} may not load without it; {snapshot}gogo linux-app dlc {gogid} \
+         add{ids} brings it back"
     )
 }
 

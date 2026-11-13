@@ -63,22 +63,62 @@ case "$1" in
     rel=$(printf '%s' "${dir#C:\\}" | tr '\\' '/')
     target="$WINEPREFIX/drive_c/$rel"
     # A DLC's installer (design 19 §5): `setup_dlc_<id>_….exe`. FAKE_DLC_FAIL and
-    # FAKE_DLC_ELSEWHERE name a DLC id that fails, or that ignores /DIR=.
+    # FAKE_DLC_ELSEWHERE name a DLC id that fails, or that ignores /DIR=. Like
+    # GOG's, it writes an uninstaller of its own (`unins<n>`, its ini naming the
+    # DLC) and says so in its log; FAKE_DLC_SHARED names one that appends to the
+    # base's instead, FAKE_DLC_REPLACES one that replaces the game's game.exe.
     exe=$(printf '%s' "$1" | tr '\\' '/')
     case "${exe##*/}" in setup_dlc_*)
       id=$(printf '%s' "${exe##*/}" | sed 's/^setup_dlc_\([0-9]*\).*/\1/')
       inno=$(printf '%s' "${log_w#Z:}" | tr '\\' '/')
-      [ -n "$inno" ] && echo "fake inno log of DLC $id" > "$inno"
+      [ -n "$inno" ] || inno=/dev/null
+      echo "fake inno log of DLC $id" > "$inno"
       [ "$FAKE_DLC_FAIL" = "$id" ] && { echo "fake inno: DLC $id failed" >> "$inno"; exit 5; }
       [ "$FAKE_DLC_ELSEWHERE" = "$id" ] && target="$WINEPREFIX/drive_c/GOG Games/DLC $id"
       mkdir -p "$target"
+      if [ "$FAKE_DLC_SHARED" = "$id" ]; then
+        echo "t   Will append to existing uninstall log: $dir\\unins000.dat" >> "$inno"
+      else
+        n=1
+        while [ -e "$target/$(printf 'unins%03d.dat' "$n")" ]; do n=$((n + 1)); done
+        u=$(printf 'unins%03d' "$n")
+        echo "t   Creating new uninstall log: $dir\\$u.dat" >> "$inno"
+        printf 'MZ' > "$target/$u.exe"
+        echo "files of DLC $id" > "$target/$u.dat"
+        printf '[InstallSettings]\r\nproductID=%s\r\n' "$id" > "$target/$u.ini"
+      fi
+      if [ "$FAKE_DLC_REPLACES" = "$id" ]; then
+        printf 't   -- File entry --\nt   Dest filename: %s\\game.exe\nt   Dest file exists.\nt   Installing the file.\n' "$dir" >> "$inno"
+      fi
+      printf 't   -- File entry --\nt   Dest filename: %s\\dlc-%s.pak\nt   Installing the file.\n' "$dir" "$id" >> "$inno"
       echo "dlc $id" > "$target/dlc-$id.pak"
       printf '{"gameId":"%s","rootGameId":"1999999901","buildId":"77","name":"DLC %s"}' "$id" "$id" \
         > "$target/goggame-$id.info"
       exit 0 ;;
     esac
+    # A DLC's uninstaller (design 19 §5.2): `C:\GOG\<name>\unins<n>.exe`, the DLC
+    # its ini names. It deletes the DLC's files and itself. FAKE_UNINS_FAIL names a
+    # DLC whose uninstaller exits 4, FAKE_UNINS_LEAVE_INFO one that leaves its
+    # info, FAKE_UNINS_LEAVE_FILE one that leaves its dlc-<id>.pak.
+    case "${exe##*/}" in unins*.exe)
+      host="$WINEPREFIX/drive_c/$(printf '%s' "${exe#C:/}" | sed 's#/[^/]*$##')"
+      stem="${exe##*/}"; stem="${stem%.exe}"
+      id=$(sed -n 's/^productID=\([0-9]*\).*/\1/p' "$host/$stem.ini" | head -n 1)
+      unlog=$(printf '%s' "${log_w#Z:}" | tr '\\' '/')
+      [ -n "$unlog" ] || unlog=/dev/null
+      echo "fake uninstall log of DLC $id ($stem)" > "$unlog"
+      [ "$FAKE_UNINS_FAIL" = "$id" ] && { echo "fake uninstall: DLC $id failed" >> "$unlog"; exit 4; }
+      [ "$FAKE_UNINS_LEAVE_INFO" = "$id" ] || rm -f "$host/goggame-$id.info"
+      [ "$FAKE_UNINS_LEAVE_FILE" = "$id" ] || rm -f "$host/dlc-$id.pak"
+      rm -f "$host/$stem.exe" "$host/$stem.dat" "$host/$stem.ini"
+      exit 0 ;;
+    esac
     mkdir -p "$target"
     cp "$FAKE_GAME_EXE" "$target/game.exe"
+    # The base game's own uninstaller, as GOG's installers leave it.
+    printf 'MZ' > "$target/unins000.exe"
+    echo "files of the base game" > "$target/unins000.dat"
+    printf '[InstallSettings]\r\nproductID=1999999901\r\n' > "$target/unins000.ini"
     printf '%s' '{"gameId":"1999999901","rootGameId":"1999999901","name":"Test Game","playTasks":[{"type":"FileTask","category":"game","path":"game.exe","isPrimary":true}]}' \
       > "$target/goggame-1999999901.info"
     exit 0 ;;
@@ -1588,6 +1628,414 @@ fn a_dlc_add_whose_runtime_fails_leaves_no_journal() {
     );
     assert!(err.unwrap_err().to_string().contains("no build"));
     assert!(!gogo::linuxapp::dlc::journal_exists(&w.game()));
+}
+
+// — the installer lane's DLC removal (design 19 §5.2, #443) —
+
+/// An installer-lane game built with `dlcs`, loaded.
+fn built_with_dlc(w: &World, dlcs: &[u64]) -> (gogo::linuxapp::dlc::Game, PathBuf) {
+    let plan = build::plan(&installer_opts(w, dlcs), None, &mut quiet()).unwrap();
+    build::execute(&plan, None, &mut quiet()).unwrap();
+    let game = gogo::linuxapp::dlc::load_game(ID, None).unwrap();
+    let install = game.dirs.prefix.join("drive_c/GOG").join(&plan.slug);
+    (game, install)
+}
+
+fn dref(id: u64) -> gogo::gog::content::DlcRef {
+    gogo::gog::content::DlcRef {
+        id,
+        title: format!("DLC {id}"),
+    }
+}
+
+fn remove_opts() -> gogo::linuxapp::dlc_uninstall::RemoveOptions {
+    gogo::linuxapp::dlc_uninstall::RemoveOptions {
+        snapshots: gogo::linuxapp::snapshots::AutoOptions::skipped(),
+        run_setup: false,
+        stop_after: None,
+    }
+}
+
+/// The uninstallers umu-run ran, in order: `unins<n>`.
+fn uninstaller_runs(log: &str) -> Vec<String> {
+    log.lines()
+        .filter(|l| l.starts_with("ARGV:") && l.contains("\\unins"))
+        .map(|l| {
+            let at = l.find("\\unins").unwrap() + 1;
+            l[at..at + 8].to_string()
+        })
+        .collect()
+}
+
+fn recorded(root: &Path) -> Vec<u64> {
+    gogo::gog::content::load(root)
+        .unwrap()
+        .unwrap()
+        .dlc
+        .iter()
+        .map(|d| d.id)
+        .collect()
+}
+
+#[test]
+fn dlc_remove_runs_each_dlcs_own_uninstaller_newest_first() {
+    use gogo::linuxapp::dlc_uninstall as du;
+    let w = World::new("instdlcrm", &["d3d9.dll"]);
+    let (mut game, install) = built_with_dlc(&w, &[INST_DLC_A, INST_DLC_B]);
+    let plan = du::plan(&game, &[dref(INST_DLC_A), dref(INST_DLC_B)], &[], true).unwrap();
+    let order: Vec<(u64, u32)> = plan
+        .removing
+        .iter()
+        .map(|d| (d.id, d.uninstaller.as_ref().unwrap().number))
+        .collect();
+    assert_eq!(order, vec![(INST_DLC_B, 2), (INST_DLC_A, 1)]);
+    let lines = du::plan_lines(&plan).join("\n");
+    assert!(
+        lines.contains("unins002.exe runs in the game's prefix"),
+        "{lines}"
+    );
+    assert!(lines.contains("saves made with"), "{lines}");
+    assert!(lines.contains("before removing"), "{lines}");
+
+    let out = du::remove(
+        &mut game,
+        &[dref(INST_DLC_A), dref(INST_DLC_B)],
+        &mut *test_runner(&w),
+        &remove_opts(),
+        &mut quiet(),
+        &|| false,
+    )
+    .unwrap();
+    assert_eq!(
+        out.removed.iter().map(|d| d.id).collect::<Vec<_>>(),
+        vec![INST_DLC_A, INST_DLC_B]
+    );
+    assert!(!out.resumed && out.left.is_empty(), "{out:?}");
+    let log = w.log();
+    assert_eq!(
+        uninstaller_runs(&log),
+        vec!["unins002", "unins001"],
+        "{log}"
+    );
+    let run = log.lines().find(|l| l.contains("unins002.exe")).unwrap();
+    assert!(
+        run.contains("/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG=Z:"),
+        "{run}"
+    );
+    assert!(run.contains("dlc-1999999912-uninstall.log"), "{run}");
+    let env = log
+        .lines()
+        .skip_while(|l| !l.contains("unins002.exe"))
+        .nth(1)
+        .unwrap();
+    assert!(
+        env.contains(&format!("WINEPREFIX={}", w.game().join("prefix").display())),
+        "{env}"
+    );
+    for id in [INST_DLC_A, INST_DLC_B] {
+        assert!(!install.join(format!("goggame-{id}.info")).exists());
+        assert!(
+            w.game()
+                .join(gogo::macapp::INSTALL_LOGS)
+                .join(format!("dlc-{id}-uninstall.log"))
+                .is_file()
+        );
+    }
+    assert!(!install.join("unins001.exe").exists());
+    assert!(install.join("unins000.exe").is_file(), "the base's stays");
+    assert!(install.join("game.exe").is_file());
+    assert!(recorded(&w.game()).is_empty());
+    assert!(!gogo::linuxapp::dlc::journal_exists(&w.game()));
+
+    // Again: nothing installed, nothing runs.
+    let before = uninstaller_runs(&w.log()).len();
+    let out = du::remove(
+        &mut game,
+        &[dref(INST_DLC_A)],
+        &mut *test_runner(&w),
+        &remove_opts(),
+        &mut quiet(),
+        &|| false,
+    )
+    .unwrap();
+    assert!(out.removed.is_empty());
+    assert_eq!(uninstaller_runs(&w.log()).len(), before);
+}
+
+#[test]
+fn a_stopped_dlc_removal_is_finished_by_running_it_again() {
+    use gogo::linuxapp::dlc_uninstall as du;
+    let w = World::new("instdlcrmstop", &["d3d9.dll"]);
+    let (mut game, install) = built_with_dlc(&w, &[INST_DLC_A, INST_DLC_B]);
+    let both = [dref(INST_DLC_A), dref(INST_DLC_B)];
+    let err = du::remove(
+        &mut game,
+        &both,
+        &mut *test_runner(&w),
+        &du::RemoveOptions {
+            stop_after: Some(INST_DLC_B),
+            ..remove_opts()
+        },
+        &mut quiet(),
+        &|| false,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains(&format!("dlc {ID} remove --abandon")), "{err}");
+    let root = w.game();
+    assert!(gogo::linuxapp::dlc::journal_exists(&root));
+    assert_eq!(
+        du::pending(&root).iter().map(|a| a.id).collect::<Vec<_>>(),
+        vec![INST_DLC_A, INST_DLC_B]
+    );
+    assert!(gogo::linuxapp::dlc_installer::pending(&root).is_empty());
+    assert!(!install.join(format!("goggame-{INST_DLC_B}.info")).exists());
+    assert!(install.join(format!("goggame-{INST_DLC_A}.info")).exists());
+    assert_eq!(
+        recorded(&root),
+        vec![INST_DLC_A, INST_DLC_B],
+        "nothing committed"
+    );
+
+    // Doctor, the snapshot refusals and an add all name the removal's ways out.
+    let host = doctor_host(&w, &[("radeon.x86_64", 2)]);
+    let dlc = doctor(&w, &host)
+        .findings
+        .into_iter()
+        .find(|f| f.check == "dlc")
+        .unwrap();
+    assert_eq!(dlc.level, gogo::macapp::doctor::Level::Fail);
+    assert!(dlc.message.contains("half removed"), "{}", dlc.message);
+    assert!(
+        dlc.hint
+            .as_deref()
+            .unwrap_or_default()
+            .contains("remove --abandon"),
+        "{:?}",
+        dlc.hint
+    );
+    let e = gogo::linuxapp::snapshots::refuse(ID, &game.dirs)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("remove --abandon"), "{e}");
+    gogo::linuxapp::snapshots::refuse_for_rollback(ID, &game.dirs).unwrap();
+    let add = gogo::linuxapp::dlc_installer::add(
+        &mut game,
+        &gogo::linuxapp::dlc_installer::AddPlan {
+            dlcs: vec![dlc_setup(&w, INST_DLC_A)],
+            language: None,
+        },
+        &mut *test_runner(&w),
+        &add_opts(),
+        &mut quiet(),
+        &|| false,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(add.contains("removal"), "{add}");
+    let e = gogo::linuxapp::dlc_installer::abandon(&mut game)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("remove --abandon"), "{e}");
+
+    // A bare rerun: B's is gone already, A's uninstaller runs.
+    let before = uninstaller_runs(&w.log());
+    let out = du::remove(
+        &mut game,
+        &[],
+        &mut *test_runner(&w),
+        &remove_opts(),
+        &mut quiet(),
+        &|| false,
+    )
+    .unwrap();
+    assert!(out.resumed);
+    assert_eq!(&uninstaller_runs(&w.log())[before.len()..], &["unins001"]);
+    assert!(recorded(&root).is_empty());
+    assert!(!gogo::linuxapp::dlc::journal_exists(&root));
+    let dlc = doctor(&w, &host)
+        .findings
+        .into_iter()
+        .find(|f| f.check == "dlc")
+        .unwrap();
+    assert_eq!(
+        dlc.level,
+        gogo::macapp::doctor::Level::Ok,
+        "{}",
+        dlc.message
+    );
+}
+
+#[test]
+fn a_failing_uninstaller_keeps_the_journal_until_given_up() {
+    use gogo::linuxapp::dlc_uninstall as du;
+    let w = World::new("instdlcrmfail", &["d3d9.dll"]);
+    let (mut game, install) = built_with_dlc(&w, &[INST_DLC_A, INST_DLC_B]);
+    // SAFETY: under ENV_LOCK (the World holds it).
+    unsafe { std::env::set_var("FAKE_UNINS_FAIL", INST_DLC_A.to_string()) };
+    let err = du::remove(
+        &mut game,
+        &[dref(INST_DLC_A)],
+        &mut *test_runner(&w),
+        &remove_opts(),
+        &mut quiet(),
+        &|| false,
+    );
+    unsafe { std::env::remove_var("FAKE_UNINS_FAIL") };
+    let err = err.unwrap_err().to_string();
+    assert!(err.contains("exited 4"), "{err}");
+    assert!(
+        err.contains("DLC 1999999911 failed"),
+        "the log's tail: {err}"
+    );
+    assert!(err.contains("rollback"), "{err}");
+    assert!(gogo::linuxapp::dlc::journal_exists(&w.game()));
+
+    // One that exits 0 but leaves the info fails too.
+    // SAFETY: as above.
+    unsafe { std::env::set_var("FAKE_UNINS_LEAVE_INFO", INST_DLC_A.to_string()) };
+    let err = du::remove(
+        &mut game,
+        &[],
+        &mut *test_runner(&w),
+        &remove_opts(),
+        &mut quiet(),
+        &|| false,
+    );
+    unsafe { std::env::remove_var("FAKE_UNINS_LEAVE_INFO") };
+    let err = err.unwrap_err().to_string();
+    assert!(err.contains("exited 0 but left"), "{err}");
+
+    // Given up: the info is there, so the DLC stays recorded.
+    let gone = du::abandon(&mut game).unwrap();
+    assert!(gone.dropped.is_empty());
+    assert_eq!(
+        gone.kept.iter().map(|d| d.id).collect::<Vec<_>>(),
+        vec![INST_DLC_A]
+    );
+    assert!(!gogo::linuxapp::dlc::journal_exists(&w.game()));
+    assert_eq!(recorded(&w.game()), vec![INST_DLC_A, INST_DLC_B]);
+
+    // An uninstaller that leaves a file its installer put there: a warning.
+    // SAFETY: as above.
+    unsafe { std::env::set_var("FAKE_UNINS_LEAVE_FILE", INST_DLC_B.to_string()) };
+    let out = du::remove(
+        &mut game,
+        &[dref(INST_DLC_B)],
+        &mut *test_runner(&w),
+        &remove_opts(),
+        &mut quiet(),
+        &|| false,
+    );
+    unsafe { std::env::remove_var("FAKE_UNINS_LEAVE_FILE") };
+    let out = out.unwrap();
+    assert_eq!(out.left, vec![format!("dlc-{INST_DLC_B}.pak")]);
+    assert!(install.join(format!("dlc-{INST_DLC_B}.pak")).is_file());
+    assert_eq!(recorded(&w.game()), vec![INST_DLC_A]);
+
+    // A removal whose info went (by hand) with its uninstaller: given up, it
+    // is no longer recorded.
+    std::fs::remove_file(install.join(format!("goggame-{INST_DLC_A}.info"))).unwrap();
+    let mut j: gogo::gog::lay::Journal = serde_json::from_value(serde_json::json!({
+        "gogid": ID, "lane": "installer", "buildId": "", "language": "", "adding": [],
+        "source": "/nowhere", "sourceIsCache": false, "moves": false, "files": [],
+        "replaced": [], "dirs": [], "kind": "remove",
+    }))
+    .unwrap();
+    j.removing = vec![gogo::gog::lay::AddingDlc {
+        id: INST_DLC_A,
+        title: "DLC A".into(),
+    }];
+    std::fs::write(
+        gogo::gog::lay::journal_path(&w.game()),
+        serde_json::to_string_pretty(&j).unwrap(),
+    )
+    .unwrap();
+    let gone = du::abandon(&mut game).unwrap();
+    assert_eq!(
+        gone.dropped.iter().map(|d| d.id).collect::<Vec<_>>(),
+        vec![INST_DLC_A]
+    );
+    assert!(recorded(&w.game()).is_empty());
+}
+
+#[test]
+fn a_dlc_without_its_own_uninstaller_or_that_replaced_game_files_is_refused() {
+    use gogo::linuxapp::dlc_uninstall as du;
+    let w = World::new("instdlcrmrefuse", &["d3d9.dll"]);
+    // SAFETY: under ENV_LOCK (the World holds it).
+    unsafe {
+        std::env::set_var("FAKE_DLC_SHARED", INST_DLC_A.to_string());
+        std::env::set_var("FAKE_DLC_REPLACES", INST_DLC_B.to_string());
+    }
+    let (mut game, install) = built_with_dlc(&w, &[INST_DLC_A, INST_DLC_B]);
+    unsafe {
+        std::env::remove_var("FAKE_DLC_SHARED");
+        std::env::remove_var("FAKE_DLC_REPLACES");
+    }
+    let e = du::plan(&game, &[dref(INST_DLC_A)], &[], false)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("no uninstaller of its own"), "{e}");
+    assert!(e.contains("unins000.exe"), "{e}");
+    assert!(
+        e.contains(&format!("--dlc {INST_DLC_B}")),
+        "the rebuild keeps B: {e}"
+    );
+    let e = du::plan(&game, &[dref(INST_DLC_B)], &[], false)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("replaced files the game already had (game.exe)"),
+        "{e}"
+    );
+    // The removal itself refuses the same, with nothing written or run.
+    let e = du::remove(
+        &mut game,
+        &[dref(INST_DLC_B)],
+        &mut *test_runner(&w),
+        &remove_opts(),
+        &mut quiet(),
+        &|| false,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(e.contains("replaced files"), "{e}");
+    assert!(!gogo::linuxapp::dlc::journal_exists(&w.game()));
+    assert!(uninstaller_runs(&w.log()).is_empty());
+    assert!(install.join(format!("goggame-{INST_DLC_B}.info")).is_file());
+
+    // A DLC whose uninstaller can't be found while its info is there: refused.
+    for f in ["unins001.ini", "unins001.exe", "unins001.dat"] {
+        std::fs::remove_file(install.join(f)).unwrap();
+    }
+    std::fs::remove_file(
+        w.game()
+            .join(gogo::macapp::INSTALL_LOGS)
+            .join(format!("dlc-{INST_DLC_B}-inno.log")),
+    )
+    .unwrap();
+    let e = du::plan(&game, &[dref(INST_DLC_B)], &[], false)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("has no uninstaller in"), "{e}");
+
+    // With its info gone too, only its record goes: no runtime needed.
+    std::fs::remove_file(install.join(format!("goggame-{INST_DLC_B}.info"))).unwrap();
+    let mut runner = |_: &mut dyn FnMut(&gogo::engine::events::ProgressEvent)| {
+        Err(gogo::macapp::MacAppError::Proton("no build".into()))
+    };
+    let out = du::remove(
+        &mut game,
+        &[dref(INST_DLC_B)],
+        &mut runner,
+        &remove_opts(),
+        &mut quiet(),
+        &|| false,
+    )
+    .unwrap();
+    assert_eq!(out.removed.len(), 1);
+    assert_eq!(recorded(&w.game()), vec![INST_DLC_A]);
 }
 
 // — after the build: compat, next-renderer, --retarget (#176) —
@@ -3135,7 +3583,7 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
     // next setup, which says so; an unchanged one isn't touched.
     std::fs::write(
         &sh,
-        script.replace("LAUNCHER_VERSION=16", "LAUNCHER_VERSION=0"),
+        script.replace("LAUNCHER_VERSION=17", "LAUNCHER_VERSION=0"),
     )
     .unwrap();
     std::fs::write(&desktop, "[Desktop Entry]\nExec=/old/root/launch.sh\n").unwrap();
@@ -3143,7 +3591,7 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
     assert_eq!(std::fs::read_to_string(&sh).unwrap(), script);
     assert_eq!(std::fs::read_to_string(&desktop).unwrap(), entry);
     assert!(
-        out.notes.iter().any(|n| n == "launch.sh: launcher 0 -> 16"),
+        out.notes.iter().any(|n| n == "launch.sh: launcher 0 -> 17"),
         "{:?}",
         out.notes
     );
@@ -3208,7 +3656,7 @@ fn the_launcher_runs_umu_with_the_games_environment_and_logs_the_run() {
     let run = &runs[0];
     for want in [
         format!("# gogo run log: Test Game ({ID})\n"),
-        "# launcher: 16\n".into(),
+        "# launcher: 17\n".into(),
         format!(
             "# runtime: path:{} (1793687165 GE-Proton10-34)\n",
             w.build.display()
@@ -5486,7 +5934,7 @@ fn the_launcher_of_a_library_game_keeps_gogos_data_root() {
     );
     // Logs stay under the data root, not the library's parent.
     assert_eq!(w.runs().len(), 1, "run logs under {:?}", w.logs());
-    assert!(w.launch_log().contains("launcher 16"));
+    assert!(w.launch_log().contains("launcher 17"));
     assert!(!w.root.join("big drive/logs").exists());
 
     // Stale config: setup runs with gogo's data root as GOGO_HOME, and from
@@ -8224,6 +8672,35 @@ mod dlc_add {
         let out = w.launch(&dialog, &[]);
         assert_eq!(out.status.code(), Some(0), "{}", w.launch_log());
         assert_eq!(w.game_runs(), 1);
+    }
+
+    #[test]
+    fn an_installer_removal_journal_names_the_removals_ways_out() {
+        let Some(w) = World::launcher("dlc-launch-uninst", true) else {
+            return;
+        };
+        let journal = serde_json::json!({
+            "gogid": ID, "lane": "installer", "buildId": "", "language": "",
+            "adding": [], "source": "/nowhere", "sourceIsCache": false, "moves": false,
+            "files": [], "replaced": [], "dirs": [], "kind": "remove",
+            "removing": [{"id": 1999999911u64, "title": "DLC A"}],
+        });
+        std::fs::write(
+            w.game().join(lay::JOURNAL),
+            serde_json::to_string_pretty(&journal).unwrap(),
+        )
+        .unwrap();
+        let stub = w.dialog_stub(&["OK"]);
+        let out = w.launch(&[("GOGO_LAUNCHER_DIALOG", stub.to_str().unwrap())], &[]);
+        assert_eq!(out.status.code(), Some(1));
+        let d = &w.dialogs()[0];
+        assert!(d.contains("DLC removal"), "{d}");
+        assert!(
+            d.contains(&format!("gogo linux-app dlc {ID} remove --abandon")),
+            "{d}"
+        );
+        assert_eq!(w.game_runs(), 0);
+        std::fs::remove_file(w.game().join(lay::JOURNAL)).unwrap();
     }
 
     // — the depot cache keeps what an add fetches (#374) —

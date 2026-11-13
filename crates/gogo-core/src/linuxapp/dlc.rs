@@ -1108,10 +1108,10 @@ pub fn recover_locked(
     if let Some(j) = lay::read_journal(&root)?
         && j.lane == super::dlc_installer::LANE
     {
+        let (what, ways) = super::dlc_installer::journal_ways_out(&game.gogid, &j);
         return Err(AddError::Game(MacAppError::Apps(format!(
-            "an earlier DLC add of {} stopped while its installers ran: {}",
-            game.gogid,
-            super::dlc_installer::ways_out(&game.gogid)
+            "{what} ({}): {ways}",
+            game.gogid
         ))));
     }
     // An update's lay (design 21 §11g) shares the journal. Its files come from the

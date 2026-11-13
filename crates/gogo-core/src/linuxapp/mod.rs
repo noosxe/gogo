@@ -13,6 +13,7 @@ pub mod display;
 pub mod dlc;
 pub mod dlc_installer;
 pub mod dlc_remove;
+pub mod dlc_uninstall;
 pub mod doctor;
 pub mod envargs;
 pub mod exes;
