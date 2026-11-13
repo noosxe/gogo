@@ -4161,7 +4161,7 @@ struct DlcAsk {
     password: Option<String>,
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 impl DlcAsk {
     /// A flag that asks for DLC (`--no-dlcs` and a bare `--lang` don't).
     fn wants_dlc(&self) -> bool {
