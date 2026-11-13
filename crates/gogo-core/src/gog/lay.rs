@@ -91,15 +91,25 @@ pub struct Journal {
     /// into the backup with the replaced files, put back on a rollback.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub removed: Vec<String>,
+    /// The DLC a removal takes out (design 19 §3.5); empty for an add or an update.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removing: Vec<AddingDlc>,
 }
 
 /// The journal kind of an update.
 pub const KIND_UPDATE: &str = "update";
+/// The journal kind of a DLC removal.
+pub const KIND_REMOVE: &str = "remove";
 
 impl Journal {
     /// An update's journal (design 21 §11g).
     pub fn is_update(&self) -> bool {
         self.kind.as_deref() == Some(KIND_UPDATE)
+    }
+
+    /// A DLC removal's journal (design 19 §3.5).
+    pub fn is_removal(&self) -> bool {
+        self.kind.as_deref() == Some(KIND_REMOVE)
     }
 }
 
@@ -680,6 +690,7 @@ mod tests {
             from: None,
             to: None,
             removed: Vec::new(),
+            removing: Vec::new(),
         };
         j.survey(&f.root.join("game"));
         j

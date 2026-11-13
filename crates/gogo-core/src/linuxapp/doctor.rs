@@ -1796,8 +1796,8 @@ fn check_build(g: &Game) -> Option<Finding> {
 /// The DLC the game has (design 19 §6.2), from `content.toml` or, for a game built
 /// before it, from the `goggame-*.info` files. Warns on a DLC info the record doesn't
 /// list and on a listed DLC whose info is gone. Fails while an interrupted `dlc add`'s
-/// journal is there (design 19 §3.4), and warns on one that stopped during its
-/// download. (The owned-but-missing warning needs the network: `dlc list` says it.)
+/// (or `dlc remove`'s) journal is there (design 19 §3.4, §3.7), and warns on one that
+/// stopped during its download. (The owned-but-missing warning needs the network: `dlc list` says it.)
 fn check_dlc(g: &Game) -> Finding {
     use crate::gog::content::{self, Lane};
     if crate::gog::lay::read_journal(&g.dirs.root)
@@ -1819,6 +1819,25 @@ fn check_dlc(g: &Game) -> Finding {
             ),
         );
     }
+    if crate::gog::lay::read_journal(&g.dirs.root)
+        .ok()
+        .flatten()
+        .is_some_and(|j| j.is_removal())
+    {
+        return Finding::fail(
+            "dlc",
+            format!(
+                "a DLC removal stopped while changing the game files ({} is there): they may \
+                 mix two versions, so the launcher won't start the game",
+                crate::gog::lay::JOURNAL
+            ),
+            format!(
+                "run `gogo linux-app dlc {} remove` to finish it (or undo it, when the files \
+                 it restores are gone)",
+                g.gogid
+            ),
+        );
+    }
     if super::dlc::journal_exists(&g.dirs.root) {
         return Finding::fail(
             "dlc",
@@ -1830,6 +1849,17 @@ fn check_dlc(g: &Game) -> Finding {
             format!(
                 "run `gogo linux-app dlc {} add` to finish it (or undo it, when its files \
                  are gone)",
+                g.gogid
+            ),
+        );
+    }
+    if super::dlc_remove::download_is_removal(&g.dirs.root) {
+        return Finding::warn(
+            "dlc",
+            "a DLC removal stopped during its download; the game is as it was",
+            format!(
+                "run `gogo linux-app dlc {} remove` again (it drops what that download \
+                 left)",
                 g.gogid
             ),
         );

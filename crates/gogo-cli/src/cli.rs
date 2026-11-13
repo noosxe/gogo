@@ -473,12 +473,14 @@ pub enum LinuxAppSub {
         #[arg(long)]
         json: bool,
     },
-    /// A built game's DLC: list them, or add DLC without a rebuild (the
-    /// depot lane). The DLC is fetched for the game's installed build and
-    /// language, then laid onto its files under a journal; the prefix,
-    /// saves and settings stay. An add that stops while laying files is
-    /// finished (or undone) by the next `dlc add`; until then the game
-    /// won't start.
+    /// A built game's DLC: list them, or add or remove DLC without a
+    /// rebuild (the depot lane). An added DLC is fetched for the game's
+    /// installed build and language, then laid onto its files under a
+    /// journal; a removed one's files are taken out and the base files it
+    /// replaced restored, under the same journal. The prefix, saves and
+    /// settings stay. An add or removal that stops while changing files is
+    /// finished (or undone) by the next `dlc add` or `dlc remove`; until
+    /// then the game won't start.
     Dlc {
         /// GOG product id.
         #[arg(value_name = "GOGID")]
@@ -792,7 +794,7 @@ pub enum OnOff {
 }
 
 #[cfg(target_os = "linux")]
-/// `gogo linux-app dlc <gogid> <cmd>` (design 19 §1.3, §1.4).
+/// `gogo linux-app dlc <gogid> <cmd>` (design 19 §1.3, §1.4, §3.7).
 #[derive(Debug, Subcommand)]
 pub enum LinuxDlcCmd {
     /// Every DLC of the game: whether you own it, whether it's installed,
@@ -830,6 +832,45 @@ pub enum LinuxDlcCmd {
         #[arg(long)]
         no_disk_check: bool,
         /// No automatic snapshot before the add, this run (the game's
+        /// setting stays).
+        #[arg(long)]
+        no_snapshots: bool,
+        /// Progress events as NDJSON on stdout.
+        #[arg(long)]
+        json_progress: bool,
+        /// Machine-readable summary.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove installed DLC from the built game (depot lane), without a
+    /// rebuild: the files only the DLC has are taken out (each only while
+    /// it is still the DLC's file; a changed one stays, with a warning),
+    /// and base files the DLC replaced are put back from the depot cache,
+    /// or downloaded when the cache can't give them. The DLC stays in the
+    /// depot cache, so adding it again needs no download. Saves made with
+    /// the DLC may not load without it; with autosnapshot on, a snapshot
+    /// is taken first. With no name, a picker on a terminal. Run it again
+    /// after a stop: it finishes or undoes a half-done removal.
+    /// Offline-installer games are refused (rebuild with a smaller --dlc
+    /// set instead).
+    Remove {
+        /// Installed DLC by product id or title (several allowed).
+        #[arg(value_name = "ID|TITLE")]
+        names: Vec<String>,
+        /// Print the plan, change nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the confirmation.
+        #[arg(long)]
+        yes: bool,
+        /// Global rate limit for a download of replaced base files, e.g.
+        /// 4MiB/s.
+        #[arg(long)]
+        limit: Option<String>,
+        /// Skip the free-space preflight of that download.
+        #[arg(long)]
+        no_disk_check: bool,
+        /// No automatic snapshot before the removal, this run (the game's
         /// setting stays).
         #[arg(long)]
         no_snapshots: bool,

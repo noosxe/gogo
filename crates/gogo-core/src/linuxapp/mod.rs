@@ -11,6 +11,7 @@ pub mod catalogue;
 pub mod convert;
 pub mod display;
 pub mod dlc;
+pub mod dlc_remove;
 pub mod doctor;
 pub mod envargs;
 pub mod exes;

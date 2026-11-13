@@ -129,7 +129,8 @@ pub enum ProgressEvent {
         method: String,
         bytes: u64,
         dir: std::path::PathBuf,
-        /// `"dlc"` for `linux-app dlc add`'s lay (design 19 §7); absent for a build.
+        /// `"dlc"` for `linux-app dlc add`'s lay (design 19 §7), `"dlc-remove"` for a
+        /// removal's, `"update"` for an update's; absent for a build.
         #[serde(skip_serializing_if = "Option::is_none")]
         kind: Option<String>,
         /// The files a DLC lay adds.

@@ -370,6 +370,8 @@ the Linux values. `--renderer` and `--runtime` (`ge-proton[/<version>]` or
 gogo linux-app dlc 1423049311 list                 # owned / installed / sizes for the installed build (--json)
 gogo linux-app dlc 1423049311 add REDmod --dry-run # the plan: sizes, where the files come from, the disk
 gogo linux-app dlc 1423049311 add "Phantom Liberty" --yes
+gogo linux-app dlc 1423049311 remove REDmod --dry-run  # what comes out, what's restored
+gogo linux-app dlc 1423049311 remove REDmod --yes
 ```
 
 `dlc add` fetches only the DLC's files for the game's installed build and
@@ -381,6 +383,15 @@ crash), the game won't start until `dlc add` runs again: it finishes the add,
 or undoes it if the fetched files are gone. If GOG no longer serves the
 installed build, the add is refused, and the update is a rebuild:
 `gogo linux-app <gogid> --dlc ...` keeps the prefix and saves.
+
+`dlc remove` takes the DLC's own files out of the game (each only while it's
+still the file the DLC laid: one you changed stays, with a warning) and puts
+back the base files it replaced, from the depot cache or a small download. The
+DLC stays in the depot cache, so adding it again downloads nothing. Saves made
+with the DLC may not load without it; with snapshots on, a `before removing`
+snapshot comes first. A removal that stops is finished or undone by the next
+`dlc remove` (or `dlc add`). Games from GOG's offline installer are refused:
+rebuild with a smaller `--dlc` set instead.
 
 **Updates** of a depot-built game, in place:
 
@@ -394,8 +405,9 @@ The depot cache switches to the new build by its changed files, then the changed
 and new files are laid onto the game's files, and the ones the build dropped are
 taken out, under the same journal as `dlc add`. The prefix, saves, settings and
 DLC stay, and with snapshots on, a `before update` snapshot comes first. The
-update is refused, naming the rebuild that updates instead, when the build lacks
-an installed DLC or the depot cache isn't on the installed build. A game built
+update is refused when the build lacks an installed DLC (remove it first with
+`dlc remove`, or rebuild without it) or the depot cache isn't on the installed
+build (it names the rebuild that updates instead). A game built
 from GOG's offline installer is updated with `gogo update <game>` and a rebuild.
 
 ```sh
