@@ -550,6 +550,10 @@ pub struct DepotContent {
     pub branch: Option<(String, String)>,
     /// The plan's lines about the build (design 21 §3.4); the first is `build:`.
     pub build_lines: Vec<String>,
+    /// The build's id, generation and manifest, for the game dir's
+    /// `build-manifest.json` (design 21 §5.2); written only when the id is the
+    /// build the tree holds. `None`: GOG didn't answer or doesn't list the build.
+    pub manifest: Option<(String, u32, gog_warp::content_system::types::Manifest)>,
     /// Leaves out the cache's other DLC; `None` when it holds no other.
     pub filter: Option<TreeFilter>,
 }

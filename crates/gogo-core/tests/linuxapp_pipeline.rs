@@ -1402,6 +1402,57 @@ fn a_picked_build_records_its_branch_and_version_and_the_plan_carries_the_lines(
     assert_eq!(c.version.as_deref(), Some("2.5"));
 }
 
+#[test]
+fn a_depot_build_keeps_its_manifest_and_one_without_is_fine() {
+    use gogo::gog::{build_manifest, content};
+    let w = World::new("kept-manifest", &["d3d9.dll"]);
+    std::fs::write(
+        w.tree.parent().unwrap().join(gogo::gog::depot::RECORD),
+        r#"{"buildId":"4242","version":"2.5","generation":2,"files":[]}"#,
+    )
+    .unwrap();
+    let manifest: gog_warp::content_system::types::Manifest =
+        serde_json::from_value(serde_json::json!({
+            "baseProductId": "1", "installDirectory": "G", "platform": "windows",
+            "products": [], "depots": []
+        }))
+        .unwrap();
+    let with = |id: &str| LinuxAppOptions {
+        depot_content: Some(build::DepotContent {
+            manifest: Some((id.into(), 2, manifest.clone())),
+            ..Default::default()
+        }),
+        ..w.opts()
+    };
+    let plan = build::plan(&with("4242"), None, &mut quiet()).unwrap();
+    build::execute(&plan, None, &mut quiet()).unwrap();
+    let kept = build_manifest::load(&w.game()).expect("build-manifest.json");
+    let c = content::load(&w.game()).unwrap().unwrap();
+    assert_eq!(c.build_id.as_deref(), Some(kept.build_id.as_str()));
+    assert_eq!(kept.build_id, "4242");
+    assert!(!w.game().join("build-manifest.json.tmp").exists());
+
+    // A manifest for another build than the tree holds is not kept for it; a
+    // rebuild leaves the earlier file as it was.
+    std::fs::remove_file(build_manifest::path(&w.game())).unwrap();
+    let plan = build::plan(&with("999"), None, &mut quiet()).unwrap();
+    build::execute(&plan, None, &mut quiet()).unwrap();
+    assert!(build_manifest::load(&w.game()).is_none());
+
+    // No manifest at all (GOG didn't answer, an old game): no file, no warning.
+    let plan = build::plan(&w.opts(), None, &mut quiet()).unwrap();
+    let out = build::execute(&plan, None, &mut quiet()).unwrap();
+    assert!(!build_manifest::path(&w.game()).exists());
+    assert!(
+        !out.setup
+            .warnings
+            .iter()
+            .any(|m| m.contains("build-manifest")),
+        "{:?}",
+        out.setup.warnings
+    );
+}
+
 // — a cache holding more DLC than the build takes (design 19 §3.3, #376) —
 
 const DLC_A: u64 = 1999999902;

@@ -2640,13 +2640,21 @@ async fn take_content(
     // The build's language (#389): `--lang`, else the game's, else the cache's.
     let language = plan.opts.language.clone();
     // The version of the build the cache holds (#418); best effort.
-    let info = match gogo::gog::depot::read_record(root) {
+    let (info, manifest) = match gogo::gog::depot::read_record(root) {
         Some(r) => {
-            gogo::gog::depot::build_info(session, game.id, plan.opts.password.clone(), &r.build_id)
-                .await
-                .map(|e| (r.build_id, e))
+            match gogo::gog::depot::build_info_with_manifest(
+                session,
+                game.id,
+                plan.opts.password.clone(),
+                &r.build_id,
+            )
+            .await
+            {
+                Some((e, m)) => (Some((r.build_id, e)), m),
+                None => (None, None),
+            }
         }
-        None => None,
+        None => (None, None),
     };
     let version = info
         .as_ref()
@@ -2659,6 +2667,7 @@ async fn take_content(
         version,
         branch,
         build_lines: plan.build_lines.clone(),
+        manifest,
         filter: None,
     };
     let Need::Filter {
