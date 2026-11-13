@@ -12109,3 +12109,559 @@ mod snapshot_move {
 fn btrfs_move_carries_snapshots_on_one_filesystem() {
     snapshot_move::real_btrfs_move();
 }
+
+// — updating a built game in place (design 21 §11g, #430) —
+
+mod update {
+    use super::*;
+    use gogo::gog::depot::{self, DepotError};
+    use gogo::gog::{build_manifest, content, lay};
+    use gogo::linuxapp::dlc::{self, AddError};
+    use gogo::linuxapp::update::{
+        self, BuildSide, PlanInput, Planned, UpdateOptions, UpdateOutcome, UpdatePlan,
+    };
+    use gogo::macapp::doctor::Level;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    const TREE: &str = "Test Game";
+    const DLC: u64 = 777001;
+
+    fn cache_base(w: &World) -> PathBuf {
+        w.root.join("user-home/.cache")
+    }
+
+    fn cache_root(w: &World) -> PathBuf {
+        cache_base(w).join("gogo/depot").join(ID)
+    }
+
+    /// A built game on build `B1` (`1.0`, en-US) with `dlc` recorded, an
+    /// `old.dll` the next build drops, a `shared.pak` it changes, and a file of the
+    /// user's own in `game/`. `snapshots`: built with the fake backend on.
+    fn built(
+        name: &str,
+        dlc: bool,
+        snapshots: Option<&gogo::linuxapp::snapshots::Backends>,
+    ) -> World {
+        let w = World::new(name, &["d3d9.dll"]);
+        std::fs::write(w.tree.join("shared.pak"), b"base shared").unwrap();
+        std::fs::write(w.tree.join("old.dll"), b"old").unwrap();
+        if dlc {
+            std::fs::create_dir_all(w.tree.join("dlc")).unwrap();
+            std::fs::write(w.tree.join("dlc/ep1.pak"), b"dlc v1").unwrap();
+        }
+        let opts = match snapshots {
+            Some(b) => LinuxAppOptions {
+                snapshots: gogo::linuxapp::snapshots::SnapshotOptions::on(b.clone()),
+                ..w.opts()
+            },
+            None => w.opts(),
+        };
+        build_with(&opts);
+        let mut c = content::load(&w.game()).unwrap().unwrap();
+        c.build_id = Some("B1".into());
+        c.version = Some("1.0".into());
+        c.language = Some("en-US".into());
+        if dlc {
+            c.dlc = vec![content::DlcRow {
+                id: DLC,
+                title: "Extra Pack".into(),
+                build_id: Some("B1".into()),
+                version: Some("1.0".into()),
+                added: None,
+            }];
+        }
+        content::write(&w.game(), &c).unwrap();
+        std::fs::create_dir_all(w.game().join("game/mods")).unwrap();
+        std::fs::write(w.game().join("game/mods/mine.txt"), b"my mod").unwrap();
+        // The depot cache of B1 the game was built from.
+        let root = cache_root(&w);
+        gogo::gog::materialize::materialize_tree(
+            &w.tree,
+            &root.join(TREE),
+            gogo::gog::materialize::Reflink::Never,
+        )
+        .unwrap();
+        let held: Vec<String> = if dlc { vec![DLC.to_string()] } else { vec![] };
+        depot::write_record(&root, "B1", "en-US", &held).unwrap();
+        w
+    }
+
+    /// What switching the cache to B2 does: `shared.pak` (and the DLC's file)
+    /// changed, `data/new.pak` new, `old.dll` deleted, the record on B2.
+    fn switch_to_b2(root: &Path) {
+        let t = root.join(TREE);
+        std::fs::write(t.join("shared.pak"), b"B2 shared, longer").unwrap();
+        std::fs::create_dir_all(t.join("data")).unwrap();
+        std::fs::write(t.join("data/new.pak"), b"new in B2").unwrap();
+        let _ = std::fs::remove_file(t.join("old.dll"));
+        let held: Vec<String> = match depot::read_record(root).and_then(|r| r.dlcs) {
+            Some(d) if !d.is_empty() => {
+                std::fs::write(t.join("dlc/ep1.pak"), b"dlc v2, longer").unwrap();
+                d
+            }
+            _ => vec![],
+        };
+        depot::write_record(root, "B2", "en-US", &held).unwrap();
+    }
+
+    fn game(w: &World) -> dlc::Game {
+        dlc::load_game(ID, Some(&cache_base(w))).unwrap()
+    }
+
+    fn manifest() -> gog_warp::content_system::types::Manifest {
+        serde_json::from_value(serde_json::json!({
+            "baseProductId": ID, "installDirectory": TREE, "platform": "windows",
+            "products": [{"name": TREE, "productId": ID, "temp_executable": "", "temp_arguments": ""}],
+            "depots": []
+        }))
+        .unwrap()
+    }
+
+    fn b2() -> BuildSide {
+        BuildSide {
+            build_id: "B2".into(),
+            version: Some("1.1".into()),
+            branch: None,
+            generation: Some(2),
+        }
+    }
+
+    fn input<'a>(g: &'a dlc::Game, target_dlcs: &'a [u64]) -> PlanInput<'a> {
+        PlanInput {
+            game: g,
+            title: "Test Game",
+            to: b2(),
+            picked: false,
+            downgrade: false,
+            from_version: Some("1.0".into()),
+            from_generation: Some(2),
+            target_dlcs,
+            language_missing: None,
+            same_install_dir: true,
+            tree_name: TREE.into(),
+            dropped: Vec::new(),
+            notes: Vec::new(),
+            download_size: 100,
+            disk_size: 200,
+            manifest: Some(("B2".into(), 2, manifest())),
+        }
+    }
+
+    fn plan(g: &dlc::Game, target_dlcs: &[u64]) -> Box<UpdatePlan> {
+        match update::plan_update(input(g, target_dlcs)).unwrap() {
+            Planned::Update(p) => p,
+            Planned::UpToDate(_) => panic!("up to date"),
+        }
+    }
+
+    fn opts() -> UpdateOptions {
+        UpdateOptions {
+            run_setup: false,
+            reflink: gogo::gog::materialize::Reflink::Never,
+            ..Default::default()
+        }
+    }
+
+    struct Run {
+        result: Result<UpdateOutcome, AddError>,
+        fetched: usize,
+        events: Vec<serde_json::Value>,
+    }
+
+    /// One update with a fake download: `fail` stops it as a Ctrl-C would, after
+    /// half the switch.
+    fn run(g: &mut dlc::Game, p: &UpdatePlan, opts: &UpdateOptions, fail: bool) -> Run {
+        let fetched = Arc::new(AtomicUsize::new(0));
+        let stopped = Arc::new(AtomicBool::new(false));
+        let root = p.cache_root.clone();
+        let (f, st) = (fetched.clone(), stopped.clone());
+        let fetch = async move || {
+            f.fetch_add(1, Ordering::SeqCst);
+            if fail {
+                std::fs::write(root.join(TREE).join("shared.pak"), b"B2 shared, longer").unwrap();
+                st.store(true, Ordering::SeqCst);
+                return Err(DepotError::Library("cancelled".into()));
+            }
+            switch_to_b2(&root);
+            Ok::<(), DepotError>(())
+        };
+        let mut events = Vec::new();
+        let stop = || stopped.load(Ordering::SeqCst);
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = rt.block_on(update::update(
+            g,
+            p,
+            fetch,
+            opts,
+            &mut |e| events.push(serde_json::to_value(e).unwrap()),
+            &stop,
+        ));
+        Run {
+            result,
+            fetched: fetched.load(Ordering::SeqCst),
+            events,
+        }
+    }
+
+    fn tree(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+        fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
+            for e in std::fs::read_dir(dir).unwrap() {
+                let p = e.unwrap().path();
+                let rel = p.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+                if p.is_dir() && !p.is_symlink() {
+                    walk(root, &p, out);
+                } else if p.is_file() {
+                    out.insert(rel, std::fs::read(&p).unwrap());
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        walk(dir, dir, &mut out);
+        out
+    }
+
+    fn no_leftovers(w: &World) {
+        for f in [
+            lay::JOURNAL,
+            lay::BACKUP,
+            update::DOWNLOAD,
+            update::NEXT_MANIFEST,
+        ] {
+            assert!(!w.game().join(f).exists(), "{f} left behind");
+        }
+    }
+
+    /// The game after the update: B2's files, the user's mod kept, `old.dll` gone.
+    fn after_b2(before: &BTreeMap<String, Vec<u8>>) -> BTreeMap<String, Vec<u8>> {
+        let mut t = before.clone();
+        t.insert("shared.pak".into(), b"B2 shared, longer".to_vec());
+        t.insert("data/new.pak".into(), b"new in B2".to_vec());
+        t.remove("old.dll");
+        if t.contains_key("dlc/ep1.pak") {
+            t.insert("dlc/ep1.pak".into(), b"dlc v2, longer".to_vec());
+        }
+        t
+    }
+
+    #[test]
+    fn an_update_lays_changed_and_new_files_removes_dropped_ones_and_records_b2() {
+        let w = built("update-lay", false, None);
+        let before = tree(&w.game().join("game"));
+        let prefix_before = tree(&w.game().join("prefix"));
+        let mut g = game(&w);
+        let p = plan(&g, &[]);
+        let lines = update::plan_lines(&p);
+        assert!(
+            lines[0].starts_with("update Test Game (1999999901): 1.0 → 1.1 (build B1 → B2)"),
+            "{lines:?}"
+        );
+        let r = run(&mut g, &p, &opts(), false);
+        let out = r.result.unwrap();
+        assert_eq!(r.fetched, 1);
+        assert_eq!((out.laid, out.removed), (2, 1));
+        let game_tree = tree(&w.game().join("game"));
+        assert_eq!(game_tree, after_b2(&before));
+        assert_eq!(
+            game_tree["mods/mine.txt"], b"my mod",
+            "the user's file stays"
+        );
+        assert_eq!(tree(&w.game().join("prefix")), prefix_before);
+        let c = content::load(&w.game()).unwrap().unwrap();
+        assert_eq!(c.build_id.as_deref(), Some("B2"));
+        assert_eq!(c.version.as_deref(), Some("1.1"));
+        assert_eq!(c.language.as_deref(), Some("en-US"));
+        let kept = build_manifest::load(&w.game()).unwrap();
+        assert_eq!((kept.build_id.as_str(), kept.generation), ("B2", 2));
+        no_leftovers(&w);
+        let started = r
+            .events
+            .iter()
+            .find_map(|e| e.get("GameFilesStarted"))
+            .unwrap();
+        assert_eq!(started["kind"], "update");
+        // Up to date now.
+        let g = game(&w);
+        assert!(matches!(
+            update::plan_update(input(&g, &[])).unwrap(),
+            Planned::UpToDate(_)
+        ));
+    }
+
+    #[test]
+    fn a_dlc_the_target_has_is_kept_and_its_files_updated() {
+        let w = built("update-dlc", true, None);
+        let before = tree(&w.game().join("game"));
+        let mut g = game(&w);
+        let p = plan(&g, &[DLC]);
+        assert!(
+            update::plan_lines(&p)
+                .iter()
+                .any(|l| l.contains("DLC kept: Extra Pack"))
+        );
+        let out = run(&mut g, &p, &opts(), false).result.unwrap();
+        assert_eq!(out.dlcs.len(), 1);
+        assert_eq!(tree(&w.game().join("game")), after_b2(&before));
+        let c = content::load(&w.game()).unwrap().unwrap();
+        assert_eq!(c.dlc.len(), 1);
+        assert_eq!(c.dlc[0].build_id.as_deref(), Some("B2"));
+        assert_eq!(c.dlc[0].version.as_deref(), Some("1.1"));
+    }
+
+    #[test]
+    fn a_target_without_an_installed_dlc_is_refused_naming_it() {
+        let w = built("update-dlc-refused", true, None);
+        let g = game(&w);
+        let r = update::plan_update(input(&g, &[])).unwrap_err();
+        assert!(r.usage, "exit 2");
+        assert!(r.message.contains("Extra Pack (777001)"), "{}", r.message);
+        assert!(r.message.contains("#353"), "{}", r.message);
+        assert!(
+            r.message
+                .contains("gogo linux-app 1999999901 --build B2 --no-dlcs --yes"),
+            "{}",
+            r.message
+        );
+    }
+
+    #[test]
+    fn no_usable_cache_is_refused_naming_the_rebuild() {
+        let w = built("update-no-cache", false, None);
+        // A cache on another build.
+        depot::write_record(&cache_root(&w), "B0", "en-US", &[]).unwrap();
+        let g = game(&w);
+        let r = update::plan_update(input(&g, &[])).unwrap_err();
+        assert!(!r.usage, "exit 7");
+        assert!(r.message.contains("holds build B0"), "{}", r.message);
+        assert!(
+            r.message
+                .contains("gogo linux-app 1999999901 --build B2 --yes"),
+            "{}",
+            r.message
+        );
+        // No cache at all.
+        std::fs::remove_dir_all(cache_root(&w)).unwrap();
+        let g = game(&w);
+        let r = update::plan_update(input(&g, &[])).unwrap_err();
+        assert!(r.message.contains("no depot cache"), "{}", r.message);
+    }
+
+    #[test]
+    fn the_other_refusals_come_before_any_write() {
+        let w = built("update-refusals", false, None);
+        let g = game(&w);
+        let refused = |i: PlanInput<'_>| update::plan_update(i).unwrap_err();
+        let r = refused(PlanInput {
+            from_generation: None,
+            ..input(&g, &[])
+        });
+        assert!(
+            r.message.contains("no manifest to update from"),
+            "{}",
+            r.message
+        );
+        let r = refused(PlanInput {
+            from_generation: Some(1),
+            ..input(&g, &[])
+        });
+        assert!(r.message.contains("generation 1"), "{}", r.message);
+        let r = refused(PlanInput {
+            same_install_dir: false,
+            ..input(&g, &[])
+        });
+        assert!(r.message.contains("another directory"), "{}", r.message);
+        let r = refused(PlanInput {
+            language_missing: Some("de-DE".into()),
+            ..input(&g, &[])
+        });
+        assert!(
+            r.usage && r.message.contains("has no en-US"),
+            "{}",
+            r.message
+        );
+        let mut installer = g.clone();
+        installer.content.lane = content::Lane::Installer;
+        let r = refused(input(&installer, &[]));
+        assert!(
+            r.message
+                .contains("`gogo update 1999999901`, then `gogo linux-app 1999999901 --yes`"),
+            "{}",
+            r.message
+        );
+        assert!(!w.game().join(update::DOWNLOAD).exists());
+    }
+
+    #[test]
+    fn an_update_takes_before_update_first() {
+        let f = Arc::new(gogo::snapshot::fake::Fake::new());
+        let b = gogo::linuxapp::snapshots::Backends::fixed(f.clone());
+        let w = built("update-autosnap", false, Some(&b));
+        let mut g = game(&w);
+        let p = plan(&g, &[]);
+        let o = UpdateOptions {
+            snapshots: gogo::linuxapp::snapshots::AutoOptions {
+                backends: b.clone(),
+                ..Default::default()
+            },
+            ..opts()
+        };
+        let r = run(&mut g, &p, &o, false);
+        let out = r.result.unwrap();
+        let s = out.snapshot.clone().expect("before update");
+        assert_eq!((s.id, s.label.as_str()), (2, "before update 1.0 → 1.1"));
+        let created = r
+            .events
+            .iter()
+            .find_map(|e| e.get("SnapshotCreated"))
+            .unwrap();
+        assert_eq!(created["trigger"], "update");
+        // The snapshot holds the game on B1.
+        let two = gogo::snapshot::backend::snapshot_dir(&w.game(), 2).unwrap();
+        assert_eq!(std::fs::read(two.join("game/old.dll")).unwrap(), b"old");
+        assert!(!two.join(update::DOWNLOAD).exists());
+    }
+
+    #[test]
+    fn a_failed_snapshot_stops_the_update_with_nothing_changed() {
+        let f = Arc::new(gogo::snapshot::fake::Fake::new());
+        let b = gogo::linuxapp::snapshots::Backends::fixed(f.clone());
+        let w = built("update-autosnap-fail", false, Some(&b));
+        let before = tree(&w.game().join("game"));
+        let cache_before = tree(&cache_root(&w));
+        let mut g = game(&w);
+        let p = plan(&g, &[]);
+        f.fail_at(gogo::snapshot::fake::FakeStep::Snapshot);
+        let o = UpdateOptions {
+            snapshots: gogo::linuxapp::snapshots::AutoOptions {
+                backends: b.clone(),
+                ..Default::default()
+            },
+            ..opts()
+        };
+        let r = run(&mut g, &p, &o, false);
+        let e = r.result.expect_err("the update stops");
+        assert!(matches!(e, AddError::Game(_)), "exit 7: {e:?}");
+        assert!(
+            e.to_string()
+                .contains("(before update 1.0 → 1.1) couldn't be taken"),
+            "{e}"
+        );
+        assert_eq!(r.fetched, 0, "nothing fetched");
+        assert_eq!(tree(&w.game().join("game")), before);
+        assert_eq!(tree(&cache_root(&w)), cache_before);
+        no_leftovers(&w);
+        // `--no-snapshots` goes ahead.
+        let o = UpdateOptions {
+            snapshots: gogo::linuxapp::snapshots::AutoOptions {
+                skip: true,
+                backends: b.clone(),
+                ..Default::default()
+            },
+            ..opts()
+        };
+        let out = run(&mut g, &p, &o, false).result.unwrap();
+        assert!(out.snapshot.is_none());
+        assert_eq!(tree(&w.game().join("game")), after_b2(&before));
+    }
+
+    #[test]
+    fn a_stop_during_the_download_leaves_the_game_and_a_rerun_resumes() {
+        let w = built("update-stop-download", false, None);
+        let before = tree(&w.game().join("game"));
+        let mut g = game(&w);
+        let p = plan(&g, &[]);
+        let r = run(&mut g, &p, &opts(), true);
+        assert!(
+            matches!(r.result, Err(AddError::Interrupted("download", _))),
+            "{:?}",
+            r.result
+        );
+        assert_eq!(tree(&w.game().join("game")), before);
+        assert!(update::download_pending(&w.game()));
+        assert!(!dlc::journal_exists(&w.game()), "the game still plays");
+        // The rerun: the cache isn't on B1 any more, but the record resumes it.
+        let g2 = game(&w);
+        let p = plan(&g2, &[]);
+        assert!(p.resume);
+        let mut g = g2;
+        let out = run(&mut g, &p, &opts(), false).result.unwrap();
+        // `shared.pak` written on the first try still counts.
+        assert_eq!(out.laid, 2);
+        assert_eq!(tree(&w.game().join("game")), after_b2(&before));
+        no_leftovers(&w);
+    }
+
+    #[test]
+    fn a_stop_during_the_lay_is_finished_by_recover() {
+        for step in [lay::Step::Journal, lay::Step::New, lay::Step::Backup] {
+            let w = built("update-stop-lay", false, None);
+            let before = tree(&w.game().join("game"));
+            let mut g = game(&w);
+            let p = plan(&g, &[]);
+            let o = UpdateOptions {
+                fail_at: Some(step),
+                ..opts()
+            };
+            let r = run(&mut g, &p, &o, false);
+            assert!(
+                matches!(&r.result, Err(AddError::Interrupted("lay", m)) if m.contains("linux-app update")),
+                "{step:?}: {:?}",
+                r.result
+            );
+            assert!(dlc::journal_exists(&w.game()), "{step:?}");
+            let host = doctor_host(&w, &[("radeon.x86_64", 2), ("radeon.i686", 1)]);
+            let f = doctor(&w, &host);
+            let f = f.findings.iter().find(|f| f.check == "dlc").unwrap();
+            assert_eq!(f.level, Level::Fail, "{step:?}");
+            assert!(f.message.contains("an update stopped"), "{}", f.message);
+            assert!(
+                f.hint.as_deref().unwrap_or("").contains("linux-app update"),
+                "{:?}",
+                f.hint
+            );
+            let mut g = game(&w);
+            let dir =
+                dlc::recover(&mut g, gogo::gog::materialize::Reflink::Never, &mut |_| {}).unwrap();
+            assert_eq!(dir, Some(lay::Direction::Forward), "{step:?}");
+            assert_eq!(tree(&w.game().join("game")), after_b2(&before), "{step:?}");
+            let c = content::load(&w.game()).unwrap().unwrap();
+            assert_eq!(c.build_id.as_deref(), Some("B2"));
+            assert_eq!(c.version.as_deref(), Some("1.1"));
+            assert_eq!(build_manifest::load(&w.game()).unwrap().build_id, "B2");
+            no_leftovers(&w);
+        }
+    }
+
+    #[test]
+    fn a_lay_whose_cache_lost_a_file_rolls_back_to_b1() {
+        let w = built("update-stop-lay-back", false, None);
+        let before = tree(&w.game().join("game"));
+        let content_before = std::fs::read(w.game().join("content.toml")).unwrap();
+        let mut g = game(&w);
+        let p = plan(&g, &[]);
+        let o = UpdateOptions {
+            fail_at: Some(lay::Step::Journal),
+            ..opts()
+        };
+        let _ = run(&mut g, &p, &o, false);
+        std::fs::remove_file(cache_root(&w).join(TREE).join("data/new.pak")).unwrap();
+        let mut g = game(&w);
+        let dir =
+            dlc::recover(&mut g, gogo::gog::materialize::Reflink::Never, &mut |_| {}).unwrap();
+        assert_eq!(dir, Some(lay::Direction::Back));
+        assert_eq!(tree(&w.game().join("game")), before);
+        assert_eq!(
+            std::fs::read(w.game().join("content.toml")).unwrap(),
+            content_before
+        );
+        no_leftovers(&w);
+        // The cache is on B2 now: the next update names the rebuild.
+        let g = game(&w);
+        let r = update::plan_update(input(&g, &[])).unwrap_err();
+        assert!(r.message.contains("--build B2 --yes"), "{}", r.message);
+    }
+}

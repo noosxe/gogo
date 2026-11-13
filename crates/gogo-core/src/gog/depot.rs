@@ -1655,6 +1655,19 @@ impl Snapshot {
             .fold((0, 0), |(n, b), (_, (len, _))| (n + 1, b + len))
     }
 
+    /// The paths (relative to the root, `/`-separated, sorted) `before` had and
+    /// `self` hasn't: what a run deleted (design 21 §11g).
+    pub fn gone_since(&self, before: &Snapshot) -> Vec<String> {
+        let mut out: Vec<String> = before
+            .0
+            .keys()
+            .filter(|f| !self.0.contains_key(*f))
+            .cloned()
+            .collect();
+        out.sort();
+        out
+    }
+
     /// The paths (relative to the root, `/`-separated, sorted) in `self` that
     /// `before` lacks or had otherwise: what a run wrote (design 19 §3.2).
     pub fn changed_since(&self, before: &Snapshot) -> Vec<String> {

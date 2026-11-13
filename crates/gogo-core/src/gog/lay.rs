@@ -13,6 +13,10 @@
 //! 5. The caller commits (`content.toml`), then [`finish`] deletes the backups, the
 //!    staging dir and the journal.
 //!
+//! An update (design 21 §11g) uses the same journal with `kind = "update"`: its
+//! `removed` paths, files the new build dropped, go into the backup in step 3 like a
+//! replaced file, and come back from it on a rollback.
+//!
 //! Only files the journal names are ever deleted, and a replaced base file only goes
 //! back from its backup. Nothing outside `game/`, the backup and staging dirs and the
 //! journal is written.
@@ -72,6 +76,28 @@ pub struct Journal {
     pub replaced: Vec<String>,
     /// Dirs under `game/` the lay creates, parents first.
     pub dirs: Vec<String>,
+    /// `update` for an update's lay (design 21 §11g); absent for a DLC add.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// An update's builds: from, to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    /// Paths under `game/` the lay takes out (files the new build dropped): moved
+    /// into the backup with the replaced files, put back on a rollback.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed: Vec<String>,
+}
+
+/// The journal kind of an update.
+pub const KIND_UPDATE: &str = "update";
+
+impl Journal {
+    /// An update's journal (design 21 §11g).
+    pub fn is_update(&self) -> bool {
+        self.kind.as_deref() == Some(KIND_UPDATE)
+    }
 }
 
 impl Journal {
@@ -114,7 +140,33 @@ impl Journal {
             }
         }
         self.dirs = dirs;
+        // Removed paths: on the game's casing, plain, files or links that are
+        // there, and not a path a laid file takes.
+        let laid: std::collections::HashSet<String> =
+            self.files.iter().map(|f| f.to.to_lowercase()).collect();
+        let mut removed: Vec<String> = Vec::new();
+        for r in std::mem::take(&mut self.removed) {
+            if !plain(&r) {
+                continue;
+            }
+            let r = case.map(&r);
+            let there = game.join(&r).symlink_metadata().is_ok_and(|m| !m.is_dir());
+            if there && !laid.contains(&r.to_lowercase()) && !removed.contains(&r) {
+                removed.push(r);
+            }
+        }
+        self.removed = removed;
     }
+}
+
+/// A `/`-separated relative path with only plain components (no `..`, `.` or
+/// empty one).
+fn plain(rel: &str) -> bool {
+    !rel.is_empty()
+        && !rel.starts_with('/')
+        && rel
+            .split('/')
+            .all(|c| !c.is_empty() && c != "." && c != "..")
 }
 
 /// Maps a manifest path onto the casing already on disk under `game/`.
@@ -305,6 +357,15 @@ fn swap_in(root: &Path, j: &Journal, stop: &mut dyn FnMut(Step) -> bool) -> Resu
             fs::rename(&cur, &bak)?;
         }
     }
+    for rel in &j.removed {
+        let (cur, bak) = (game.join(rel), backup.join(rel));
+        if exists(&cur) && !exists(&bak) {
+            if let Some(parent) = bak.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::rename(&cur, &bak)?;
+        }
+    }
     if stop(Step::Backup) {
         return Err(LayError::Stopped);
     }
@@ -444,6 +505,15 @@ pub fn recover(root: &Path, mode: Reflink) -> Result<Option<(Journal, Direction)
             fs::remove_file(&cur)?;
         }
     }
+    for rel in &j.removed {
+        let (cur, bak) = (game.join(rel), backup.join(rel));
+        if exists(&bak) && !exists(&cur) {
+            if let Some(parent) = cur.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::rename(&bak, &cur)?;
+        }
+    }
     for d in j.dirs.iter().rev() {
         let _ = fs::remove_dir(game.join(d));
     }
@@ -532,6 +602,10 @@ mod tests {
             files,
             replaced: Vec::new(),
             dirs: Vec::new(),
+            kind: None,
+            from: None,
+            to: None,
+            removed: Vec::new(),
         };
         j.survey(&f.root.join("game"));
         j
@@ -765,6 +839,76 @@ mod tests {
                         "{case}"
                     );
                 }
+            }
+        }
+    }
+
+    /// An update's `removed` paths (design 21 §11g): mapped onto the game's casing,
+    /// only files that are there and that no laid file takes; moved into the
+    /// backup by the lay, put back by a rollback, and gone after `finish`.
+    #[test]
+    fn removed_paths_are_backed_up_and_restored_on_a_rollback() {
+        let removed_after = |f: &Fixture| {
+            let mut t = after();
+            t.remove("base.dat");
+            let _ = f;
+            t
+        };
+        for (at, lose) in [
+            (Step::Journal, false),
+            (Step::Backup, false),
+            (Step::Rename, false),
+            (Step::Journal, true),
+            (Step::Rename, true),
+        ] {
+            let f = fixture(false);
+            let before = tree(&f.root.join("game"));
+            let mut j = journal(&f, false);
+            j.kind = Some(KIND_UPDATE.into());
+            j.removed = vec![
+                "BASE.dat".into(),
+                "data/shared.pak".into(),
+                "nothing/here".into(),
+                "../outside".into(),
+                "data".into(),
+            ];
+            j.survey(&f.root.join("game"));
+            assert_eq!(
+                j.removed,
+                ["base.dat"],
+                "the one plain file, on disk's casing"
+            );
+            let err =
+                lay_files(&f.root, &j, Reflink::Never, &mut |s| s == at, &mut |_| {}).unwrap_err();
+            assert!(matches!(err, LayError::Stopped));
+            if at == Step::Rename {
+                assert!(!f.root.join("game/base.dat").exists());
+                assert_eq!(
+                    fs::read(f.root.join(BACKUP).join("base.dat")).unwrap(),
+                    b"base"
+                );
+            }
+            if lose {
+                let lost = f.src.join("goggame-77.info");
+                let laid = exists(&f.root.join("game/goggame-77.info"))
+                    || exists(&new_of(&f.root.join("game"), "goggame-77.info"));
+                if !laid {
+                    fs::remove_file(&lost).unwrap();
+                } else {
+                    continue;
+                }
+            }
+            let (back, dir) = recover(&f.root, Reflink::Never).unwrap().unwrap();
+            assert!(back.is_update());
+            let game = tree(&f.root.join("game"));
+            if lose {
+                assert_eq!(dir, Direction::Back, "{at:?}");
+                assert_eq!(game, before, "{at:?}");
+            } else {
+                assert_eq!(dir, Direction::Forward, "{at:?}");
+                assert_eq!(game, removed_after(&f), "{at:?}");
+                finish(&f.root).unwrap();
+                assert!(!f.root.join(BACKUP).exists());
             }
         }
     }
