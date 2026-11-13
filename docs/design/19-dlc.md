@@ -240,8 +240,10 @@ Usage errors (exit 2), each listing what would have worked:
 
 DLC follows the game's language, always: the build's `--lang` (new, #336; default
 `en-US` as `gogo depot`) is recorded in `content.toml` and in `.gogo-depot.json`, and `dlc
-add` uses the recorded one. There is no `--lang` on `dlc add`: a game with base files in
-one language and DLC in another isn't a state gogo should make. Changing the language is a
+add` uses the recorded one. On the depot lane there is no `--lang` on `dlc add`: a game
+with base files in one language and DLC in another isn't a state gogo should make. On
+the offline-installer lane, `dlc add --lang` only names the base installer's language
+when gogo has none recorded (§5.1), and must match a recorded one. Changing the language is a
 rebuild with `--lang` (gog-warp then diffs the language depots itself). `--lang` is
 checked against the build's languages, and `de` is taken for `de-DE` when it is the only
 match (design 14 §11, #377). On the offline
@@ -960,12 +962,20 @@ is the CLI's `installer_dlc.rs`; `dlc add` routes there from `dlc_cmd.rs`.
    keeps the recorded set and refuses a kept DLC that has no Windows installer now. A
    DLC can be taken when it is owned and GOG has a Windows installer for it. The DLC
    installers are in the base installer's language (its catalog entry's, from gogo's
-   download record), else `--lang`, else `[gog] language`; a `--lang` that differs
-   from a known base language is a usage error. With a setup given by path, gogo
-   finds the game from its download record of the file, else from the file name
-   (`setup_<slug>_…`) against the owned games' slugs; the game the base installer
-   installs must be that one before a DLC installer runs. With no DLC flag, an
-   unknown game or no network is a plan note and the build goes on without DLC.
+   download record), else `--lang`, else `[gog] language`; once DLC are chosen, a
+   `--lang` that differs from a known base language is a usage error. The language is
+   recorded in `content.toml` only when it is known: from the download record, or
+   because chosen DLC installers in it ran. With a setup given by path, gogo finds
+   the game from its download record of the file, else from the file name
+   (`setup_<slug>_…`, the longest owned slug) against the owned games' slugs. That is
+   a guess (`setup_fallout_2_…` names an owned `fallout` when `fallout_2` isn't
+   owned): the game the base installer installs must be the guessed one before a DLC
+   installer runs, and with no DLC chosen, a game that turns out to be another gets
+   no version or language from the guess. Without `--dlc`/`--all-dlcs`, every lookup
+   is best effort: an unknown game, no network or an API error is a plan note and the
+   build goes on without DLC (no picker either), so a base build needs no network.
+   The download takes the record of the file it just planned (same entry, file and
+   version label), never an older download of the same DLC.
 4. **`dlc add`.** The plan (each DLC with its installer's size, the installers'
    version and language, `C:\GOG\<name>`), then `--yes` or the prompt; headless
    without `--yes` fails before any download. The download comes before the game's
@@ -977,18 +987,29 @@ is the CLI's `installer_dlc.rs`; `dlc add` routes there from `dlc_cmd.rs`.
    launcher refuses, doctor fails `dlc`, and no snapshot operation runs (design 20
    §5.1), as for the depot lane. A stop (Ctrl-C, a crash, a failed installer) leaves
    the journal; the next `dlc add`, bare or naming more DLC, runs every DLC the
-   journal names again (Inno overwrites what it wrote), then commits. The depot
-   lane's recovery refuses such a journal rather than settling it. The error and
-   doctor also name the snapshot taken before the add. Setup's install-script pass
-   (§3.6) needs no change: it sets again what Inno already set.
+   journal names again (Inno overwrites what it wrote), then commits. The game's
+   Proton build and umu are got and checked before the journal is written, so a
+   runtime that can't be had leaves nothing behind. An add that fails every time
+   (an installer that always exits non-zero, or ignores `/DIR=`) has two other ways
+   out: `dlc add --abandon` drops the journal under the lock, records nothing for its
+   DLC and leaves what the installers wrote in the prefix; and a rollback to the
+   snapshot taken before the add is the undo, so this journal doesn't refuse a
+   rollback (the restored dir has none). The add's errors, doctor, the snapshot
+   refusals and the launcher name all three. The depot lane's recovery refuses such
+   a journal rather than settling it. The add needs the base installer's language:
+   with none recorded it asks on a terminal, or needs `--lang`, and never assumes
+   one. Setup's install-script pass (§3.6) needs no change: it sets again what Inno
+   already set.
 5. **Version match.** GOG serves a game's DLC installers beside its current base
    installer only. The base's installer version label is recorded at the build
    (`content.toml` `version`): from gogo's download record of the setup, else the
    current label when the setup's file name contains it. A build that takes DLC and
    an add compare it with GOG's current base installer label, the same field of the
    same product, and refuse a difference (exit 7, nothing written), naming
-   `gogo download <gogid>` and a rebuild with `--dlc`. An unknown version is a plan
-   note, and the consent covers it. Labels of different products aren't compared, and
+   `gogo download <gogid>` and a rebuild with `--dlc`. An unknown version (a game
+   built from a setup given by path that gogo didn't download, whose file name doesn't
+   carry the current label) is not checked at all: the plan notes it, and the consent
+   covers it. Labels of different products aren't compared, and
    a file name's own version isn't GOG's label: Journey to the Savage Planet's
    installer is labelled `1.0.10b` and named `…_1.0.10_(44657).exe`, and its DLC's
    installer is labelled `1.0.10`. Each DLC row records its installer's label and its
