@@ -15,6 +15,8 @@ mod output;
 mod prompt;
 #[cfg(target_os = "linux")]
 mod snapshot_cmd;
+#[cfg(target_os = "linux")]
+mod update_cmd;
 
 use std::sync::Arc;
 
@@ -299,6 +301,37 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
             sub: Some(crate::cli::LinuxAppSub::Dlc { gogid, cmd }),
             ..
         } => dlc_cmd::run(gogid, cmd).await,
+        #[cfg(target_os = "linux")]
+        Command::LinuxApp {
+            sub:
+                Some(crate::cli::LinuxAppSub::Update {
+                    gogid,
+                    build,
+                    dry_run,
+                    yes,
+                    limit,
+                    no_disk_check,
+                    no_snapshots,
+                    json_progress,
+                    json,
+                }),
+            ..
+        } => {
+            update_cmd::run(
+                gogid,
+                update_cmd::Args {
+                    build,
+                    dry_run,
+                    yes,
+                    limit,
+                    disk_check: !no_disk_check,
+                    no_snapshots,
+                    json_progress,
+                    json,
+                },
+            )
+            .await
+        }
         #[cfg(target_os = "linux")]
         Command::LinuxApp { sub: Some(sub), .. } => linux_app_sub(sub),
         #[cfg(target_os = "linux")]
@@ -4758,6 +4791,7 @@ fn linux_app_sub(sub: crate::cli::LinuxAppSub) -> Result<i32, AppError> {
         crate::cli::LinuxAppSub::Env { cmd } => linux_app_env(cmd),
         // Async: dispatched in `run`.
         crate::cli::LinuxAppSub::Dlc { .. } => unreachable!("linux-app dlc is async"),
+        crate::cli::LinuxAppSub::Update { .. } => unreachable!("linux-app update is async"),
         crate::cli::LinuxAppSub::Snapshot { gogid, cmd } => snapshot_cmd::run(gogid, cmd),
         crate::cli::LinuxAppSub::Args {
             gogid,
