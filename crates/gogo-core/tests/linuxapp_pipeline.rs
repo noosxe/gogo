@@ -58,10 +58,24 @@ case "$1" in
   reg) exit 0 ;;
   *.exe)
     for a in "$@"; do
-      case "$a" in /DIR=*) dir="${a#/DIR=}" ;; esac
+      case "$a" in /DIR=*) dir="${a#/DIR=}" ;; /LOG=*) log_w="${a#/LOG=}" ;; esac
     done
     rel=$(printf '%s' "${dir#C:\\}" | tr '\\' '/')
     target="$WINEPREFIX/drive_c/$rel"
+    # A DLC's installer (design 19 §5): `setup_dlc_<id>_….exe`. FAKE_DLC_FAIL and
+    # FAKE_DLC_ELSEWHERE name a DLC id that fails, or that ignores /DIR=.
+    case "${1##*/}" in setup_dlc_*)
+      id=$(printf '%s' "${1##*/}" | sed 's/^setup_dlc_\([0-9]*\).*/\1/')
+      inno=$(printf '%s' "${log_w#Z:}" | tr '\\' '/')
+      [ -n "$inno" ] && echo "fake inno log of DLC $id" > "$inno"
+      [ "$FAKE_DLC_FAIL" = "$id" ] && { echo "fake inno: DLC $id failed" >> "$inno"; exit 5; }
+      [ "$FAKE_DLC_ELSEWHERE" = "$id" ] && target="$WINEPREFIX/drive_c/GOG Games/DLC $id"
+      mkdir -p "$target"
+      echo "dlc $id" > "$target/dlc-$id.pak"
+      printf '{"gameId":"%s","rootGameId":"1999999901","buildId":"77","name":"DLC %s"}' "$id" "$id" \
+        > "$target/goggame-$id.info"
+      exit 0 ;;
+    esac
     mkdir -p "$target"
     cp "$FAKE_GAME_EXE" "$target/game.exe"
     printf '%s' '{"gameId":"1999999901","rootGameId":"1999999901","name":"Test Game","playTasks":[{"type":"FileTask","category":"game","path":"game.exe","isPrimary":true}]}' \
@@ -1087,6 +1101,393 @@ fn installer_lane_titles_the_game_from_the_installed_info() {
     // The title is the installed game's own name; the install dir keeps the slug.
     assert!(toml.contains("title = \"Test Game\""), "{toml}");
     assert!(toml.contains("test-game"), "{toml}");
+}
+
+// — the installer lane's DLC (design 19 §5, #351) —
+
+const INST_DLC_A: u64 = 1999999911;
+const INST_DLC_B: u64 = 1999999912;
+
+/// A DLC's setup `.exe` the fake umu-run takes for one (`setup_dlc_<id>_…`).
+fn dlc_setup(w: &World, id: u64) -> gogo::linuxapp::dlc_installer::InstallerDlc {
+    let dir = w.root.join("downloads/Test Game").join(format!("DLC {id}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let setup = dir.join(format!("setup_dlc_{id}_1.0_(1).exe"));
+    std::fs::write(&setup, "MZ").unwrap();
+    gogo::linuxapp::dlc_installer::InstallerDlc {
+        id,
+        title: format!("DLC {id}"),
+        setup,
+        version: Some("1.0".into()),
+    }
+}
+
+fn installer_opts(w: &World, dlcs: &[u64]) -> LinuxAppOptions {
+    let setup_exe = w.root.join("setup_test_game_1.0.exe");
+    std::fs::write(&setup_exe, "MZ").unwrap();
+    let installers: Vec<_> = dlcs.iter().map(|id| dlc_setup(w, *id)).collect();
+    LinuxAppOptions {
+        installer: Some(setup_exe),
+        runtime: Some(format!("path:{}", w.build.display())),
+        name: Some("Test Game".into()),
+        installer_dlc: gogo::linuxapp::dlc_installer::BuildDlc {
+            gogid: Some(ID.into()),
+            version: Some("1.0".into()),
+            language: Some("en".into()),
+            refs: installers
+                .iter()
+                .map(|d| gogo::gog::content::DlcRef {
+                    id: d.id,
+                    title: d.title.clone(),
+                })
+                .collect(),
+            installers,
+        },
+        ..Default::default()
+    }
+}
+
+/// The umu-run lines of the installers, in order: `base`, or a DLC's id.
+fn installer_runs(log: &str) -> Vec<String> {
+    log.lines()
+        .filter(|l| l.starts_with("ARGV:") && l.contains(".exe /VERYSILENT"))
+        .map(|l| {
+            if l.contains("setup_dlc_") {
+                l.split("setup_dlc_").nth(1).unwrap()[..10].to_string()
+            } else {
+                "base".to_string()
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn installer_lane_runs_the_chosen_dlc_after_the_base() {
+    let w = World::new("instdlc", &["d3d9.dll"]);
+    let plan = build::plan(
+        &installer_opts(&w, &[INST_DLC_A, INST_DLC_B]),
+        None,
+        &mut quiet(),
+    )
+    .unwrap();
+    assert_eq!(
+        plan.dlcs.iter().map(|d| d.id).collect::<Vec<_>>(),
+        vec![INST_DLC_A, INST_DLC_B],
+        "the plan's dlc line names them"
+    );
+    let out = build::execute(&plan, None, &mut quiet()).unwrap();
+    let log = w.log();
+    assert_eq!(
+        installer_runs(&log),
+        vec!["base", &INST_DLC_A.to_string(), &INST_DLC_B.to_string()],
+        "{log}"
+    );
+    // Every one into the base game's dir, with a log of its own.
+    let base_dir = format!("/DIR=C:\\GOG\\{}", plan.slug);
+    for l in log.lines().filter(|l| l.contains("setup_dlc_")) {
+        assert!(l.contains(&base_dir), "{l}");
+        assert!(l.contains("dlc-19999999"), "{l}");
+    }
+    let install = out.dirs.prefix.join("drive_c/GOG").join(&plan.slug);
+    for id in [INST_DLC_A, INST_DLC_B] {
+        assert!(install.join(format!("goggame-{id}.info")).is_file());
+        assert!(
+            out.dirs
+                .root
+                .join(gogo::macapp::INSTALL_LOGS)
+                .join(format!("dlc-{id}-inno.log"))
+                .is_file(),
+            "the DLC's Inno log moves with the game"
+        );
+    }
+    let c = gogo::gog::content::load(&out.dirs.root).unwrap().unwrap();
+    assert_eq!(c.lane, gogo::gog::content::Lane::Installer);
+    assert_eq!(c.version.as_deref(), Some("1.0"));
+    assert_eq!(c.language.as_deref(), Some("en"));
+    let rows: Vec<_> = c
+        .dlc
+        .iter()
+        .map(|d| (d.id, d.version.as_deref(), d.build_id.as_deref()))
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            (INST_DLC_A, Some("1.0"), Some("77")),
+            (INST_DLC_B, Some("1.0"), Some("77"))
+        ]
+    );
+}
+
+#[test]
+fn a_failed_dlc_installer_fails_the_build_before_the_move() {
+    let w = World::new("instdlcfail", &["d3d9.dll"]);
+    let plan = build::plan(
+        &installer_opts(&w, &[INST_DLC_A, INST_DLC_B]),
+        None,
+        &mut quiet(),
+    )
+    .unwrap();
+    // SAFETY: under ENV_LOCK (the World holds it).
+    unsafe { std::env::set_var("FAKE_DLC_FAIL", INST_DLC_B.to_string()) };
+    let err = build::execute(&plan, None, &mut quiet());
+    unsafe { std::env::remove_var("FAKE_DLC_FAIL") };
+    match err {
+        Err(gogo::macapp::MacAppError::DlcInstallerFailed { id, exit, tail, .. }) => {
+            assert_eq!(id, INST_DLC_B);
+            assert_eq!(exit, 5);
+            assert!(tail.contains("failed"), "{tail}");
+        }
+        other => panic!("want DlcInstallerFailed, got {other:?}"),
+    }
+    assert!(!w.game().exists(), "no half-built game appears");
+}
+
+#[test]
+fn a_dlc_that_ignores_dir_is_an_error_naming_where_it_went() {
+    let w = World::new("instdlcdir", &["d3d9.dll"]);
+    let plan = build::plan(&installer_opts(&w, &[INST_DLC_A]), None, &mut quiet()).unwrap();
+    // SAFETY: under ENV_LOCK (the World holds it).
+    unsafe { std::env::set_var("FAKE_DLC_ELSEWHERE", INST_DLC_A.to_string()) };
+    let err = build::execute(&plan, None, &mut quiet());
+    unsafe { std::env::remove_var("FAKE_DLC_ELSEWHERE") };
+    match err {
+        Err(e @ gogo::macapp::MacAppError::DlcNotInGameDir { .. }) => {
+            let msg = e.to_string();
+            assert!(msg.contains("GOG Games/DLC 1999999911"), "{msg}");
+            assert!(
+                msg.contains(&format!("C:\\GOG\\{}", plan.slug)) || msg.contains(&plan.slug),
+                "{msg}"
+            );
+        }
+        other => panic!("want DlcNotInGameDir, got {other:?}"),
+    }
+    assert!(!w.game().exists());
+}
+
+#[test]
+fn dlc_installers_need_the_game_they_were_chosen_for() {
+    let w = World::new("instdlcgame", &["d3d9.dll"]);
+    let mut opts = installer_opts(&w, &[INST_DLC_A]);
+    opts.installer_dlc.gogid = Some("1".into());
+    let plan = build::plan(&opts, None, &mut quiet()).unwrap();
+    let err = build::execute(&plan, None, &mut quiet()).unwrap_err();
+    assert!(err.to_string().contains("not 1 whose DLC"), "{err}");
+    assert!(!w.log().contains("setup_dlc_"), "no DLC installer ran");
+    assert!(!w.game().exists());
+}
+
+/// The runner a test's add uses: the fake umu-run and Proton build.
+fn test_runner(
+    w: &World,
+) -> impl FnMut(&mut dyn FnMut(&ProgressEvent)) -> Result<setup::GameRunner, gogo::macapp::MacAppError>
+{
+    let build = w.build.clone();
+    let umu = w.root.join("bin/umu-run");
+    move |_| {
+        Ok(setup::GameRunner {
+            build: setup::ProtonBuild {
+                reference: format!("path:{}", build.display()),
+                dir: build.clone(),
+                managed: false,
+            },
+            umu_run: gogo::linuxapp::umu::UmuRun::System {
+                umu_run: umu.clone(),
+            },
+            umu_id: "umu-777001".into(),
+        })
+    }
+}
+
+fn add_opts() -> gogo::linuxapp::dlc_installer::AddOptions {
+    gogo::linuxapp::dlc_installer::AddOptions {
+        snapshots: gogo::linuxapp::snapshots::AutoOptions::skipped(),
+        run_setup: false,
+        stop_after: None,
+    }
+}
+
+#[test]
+fn dlc_add_runs_installers_in_the_games_prefix() {
+    use gogo::linuxapp::dlc_installer as di;
+    let w = World::new("instdlcadd", &["d3d9.dll"]);
+    let plan = build::plan(&installer_opts(&w, &[]), None, &mut quiet()).unwrap();
+    build::execute(&plan, None, &mut quiet()).unwrap();
+    let mut game = gogo::linuxapp::dlc::load_game(ID, None).unwrap();
+    assert!(game.installed().is_empty());
+    let add = di::AddPlan {
+        dlcs: vec![dlc_setup(&w, INST_DLC_A)],
+        language: Some("en".into()),
+    };
+    let out = di::add(
+        &mut game,
+        &add,
+        &mut test_runner(&w),
+        &add_opts(),
+        &mut quiet(),
+        &|| false,
+    )
+    .unwrap();
+    assert_eq!(
+        out.added.iter().map(|d| d.id).collect::<Vec<_>>(),
+        vec![INST_DLC_A]
+    );
+    let log = w.log();
+    let run = log
+        .lines()
+        .find(|l| l.contains("setup_dlc_"))
+        .unwrap_or_else(|| panic!("{log}"));
+    assert!(
+        run.contains(&format!("/DIR=C:\\GOG\\{}", plan.slug)),
+        "{run}"
+    );
+    // In the game's own prefix, as the game's umu id.
+    let env = log
+        .lines()
+        .skip_while(|l| !l.contains("setup_dlc_"))
+        .nth(1)
+        .unwrap();
+    assert!(
+        env.contains(&format!("WINEPREFIX={}", w.game().join("prefix").display())),
+        "{env}"
+    );
+    assert!(env.contains("GAMEID=umu-777001"), "{env}");
+    assert!(!gogo::linuxapp::dlc::journal_exists(&w.game()));
+    let c = gogo::gog::content::load(&w.game()).unwrap().unwrap();
+    assert_eq!(c.dlc.len(), 1);
+    assert_eq!(c.dlc[0].version.as_deref(), Some("1.0"));
+    assert!(c.dlc[0].added.is_some());
+
+    // Again: nothing to do, nothing runs.
+    let runs = installer_runs(&w.log()).len();
+    let out = di::add(
+        &mut game,
+        &add,
+        &mut test_runner(&w),
+        &add_opts(),
+        &mut quiet(),
+        &|| false,
+    )
+    .unwrap();
+    assert!(out.added.is_empty());
+    assert_eq!(installer_runs(&w.log()).len(), runs);
+}
+
+#[test]
+fn a_stopped_dlc_add_is_finished_by_running_it_again() {
+    use gogo::linuxapp::dlc_installer as di;
+    let w = World::new("instdlcstop", &["d3d9.dll"]);
+    let plan = build::plan(&installer_opts(&w, &[]), None, &mut quiet()).unwrap();
+    build::execute(&plan, None, &mut quiet()).unwrap();
+    let mut game = gogo::linuxapp::dlc::load_game(ID, None).unwrap();
+    let add = di::AddPlan {
+        dlcs: vec![dlc_setup(&w, INST_DLC_A), dlc_setup(&w, INST_DLC_B)],
+        language: Some("en".into()),
+    };
+    let err = di::add(
+        &mut game,
+        &add,
+        &mut test_runner(&w),
+        &di::AddOptions {
+            stop_after: Some(INST_DLC_A),
+            ..add_opts()
+        },
+        &mut quiet(),
+        &|| false,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("dlc 1999999901 add"), "{err}");
+    let root = w.game();
+    assert!(gogo::linuxapp::dlc::journal_exists(&root));
+    assert_eq!(
+        di::pending(&root).iter().map(|a| a.id).collect::<Vec<_>>(),
+        vec![INST_DLC_A, INST_DLC_B]
+    );
+    assert!(
+        gogo::gog::content::load(&root)
+            .unwrap()
+            .unwrap()
+            .dlc
+            .is_empty(),
+        "nothing committed"
+    );
+    // The launcher's check, doctor and the depot lane's recovery all see it.
+    let host = doctor_host(&w, &[("radeon.x86_64", 2)]);
+    let r = doctor(&w, &host);
+    let dlc = r.findings.iter().find(|f| f.check == "dlc").unwrap();
+    assert_eq!(dlc.level, gogo::macapp::doctor::Level::Fail);
+    assert!(dlc.message.contains("installers ran"), "{}", dlc.message);
+    let depot = gogo::linuxapp::dlc::recover(
+        &mut game,
+        gogo::gog::materialize::Reflink::Never,
+        &mut quiet(),
+    );
+    assert!(
+        depot.is_err_and(|e| e.to_string().contains("runs them again")),
+        "the depot lane's recovery doesn't touch it"
+    );
+    assert!(gogo::linuxapp::dlc::journal_exists(&root));
+
+    // A bare rerun (the CLI hands it the journal's DLC) runs every one again.
+    let before = installer_runs(&w.log());
+    let out = di::add(
+        &mut game,
+        &add,
+        &mut test_runner(&w),
+        &add_opts(),
+        &mut quiet(),
+        &|| false,
+    )
+    .unwrap();
+    let after = installer_runs(&w.log());
+    assert_eq!(
+        &after[before.len()..],
+        &[INST_DLC_A.to_string(), INST_DLC_B.to_string()]
+    );
+    assert_eq!(out.recovered, Some(gogo::gog::lay::Direction::Forward));
+    assert!(!gogo::linuxapp::dlc::journal_exists(&root));
+    let ids: Vec<u64> = gogo::gog::content::load(&root)
+        .unwrap()
+        .unwrap()
+        .dlc
+        .iter()
+        .map(|d| d.id)
+        .collect();
+    assert_eq!(ids, vec![INST_DLC_A, INST_DLC_B]);
+    let r = doctor(&w, &host);
+    let dlc = r.findings.iter().find(|f| f.check == "dlc").unwrap();
+    assert_eq!(
+        dlc.level,
+        gogo::macapp::doctor::Level::Ok,
+        "{}",
+        dlc.message
+    );
+}
+
+#[test]
+fn a_failed_dlc_add_keeps_its_journal() {
+    use gogo::linuxapp::dlc_installer as di;
+    let w = World::new("instdlcaddfail", &["d3d9.dll"]);
+    let plan = build::plan(&installer_opts(&w, &[]), None, &mut quiet()).unwrap();
+    build::execute(&plan, None, &mut quiet()).unwrap();
+    let mut game = gogo::linuxapp::dlc::load_game(ID, None).unwrap();
+    let add = di::AddPlan {
+        dlcs: vec![dlc_setup(&w, INST_DLC_A)],
+        language: None,
+    };
+    // SAFETY: under ENV_LOCK (the World holds it).
+    unsafe { std::env::set_var("FAKE_DLC_ELSEWHERE", INST_DLC_A.to_string()) };
+    let err = di::add(
+        &mut game,
+        &add,
+        &mut test_runner(&w),
+        &add_opts(),
+        &mut quiet(),
+        &|| false,
+    );
+    unsafe { std::env::remove_var("FAKE_DLC_ELSEWHERE") };
+    let err = err.unwrap_err();
+    assert!(err.to_string().contains("GOG Games/DLC"), "{err}");
+    assert!(gogo::linuxapp::dlc::journal_exists(&w.game()));
 }
 
 // — after the build: compat, next-renderer, --retarget (#176) —
