@@ -1206,6 +1206,18 @@ pub fn execute(
         content.branch = Some(b);
     }
     let dirs = GameDirs::for_game(&gogid)?;
+    // The build's manifest goes first, so `content.toml` never names a build whose
+    // manifest was dropped (design 21 §5.2); the depot lane only.
+    if lane == content::Lane::Depot
+        && let Some(kept) = plan
+            .depot_content
+            .as_ref()
+            .and_then(|c| c.manifest.as_ref())
+        && let Some(w) =
+            crate::gog::build_manifest::write_or_warn(&dirs.root, content.build_id.as_deref(), kept)
+    {
+        outcome.warnings.push(w);
+    }
     if let Some(w) = write_content_or_warn(&dirs.root, &content) {
         outcome.warnings.push(w);
     }

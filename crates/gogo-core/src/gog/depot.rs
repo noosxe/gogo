@@ -373,6 +373,28 @@ pub async fn build_info(
         .map(super::builds::BuildEntry::from_build)
 }
 
+/// Build `build_id`'s list entry and, when the list holds it and the manifest
+/// can be fetched, `(id, generation, manifest)` for `build-manifest.json`
+/// (design 21 §5.2). One listing request; best effort, `None` entry as
+/// [`build_info`].
+pub async fn build_info_with_manifest(
+    core: &Core,
+    product_id: u64,
+    password: Option<String>,
+    build_id: &str,
+) -> Option<(super::builds::BuildEntry, Option<(String, u32, Manifest)>)> {
+    let builds = super::builds::fetch_listing(core, product_id, Platform::Windows, password)
+        .await
+        .ok()?;
+    let b = builds.builds.iter().find(|b| b.build_id() == build_id)?;
+    let kept = core
+        .get_manifest(b)
+        .await
+        .ok()
+        .map(|m| (b.build_id().clone(), *b.generation(), m));
+    Some((super::builds::BuildEntry::from_build(b), kept))
+}
+
 /// The version name GOG's builds list gives build `build_id` of `product_id`
 /// (`2.31`), for `content.toml` (#418). `None` when the list can't be fetched or
 /// doesn't hold the build: the record then goes without a version.

@@ -669,6 +669,30 @@ Decided on 2026-11-12.
   cache with no record (exit 2, naming `gogo depot <game> --build X`), and the decline hints
   repeat `--build`.
 
+## 11e. As built (I5, #428)
+
+- `gog/build_manifest.rs` owns `games/<gogid>/build-manifest.json`: one JSON file
+  `{schema, buildId, generation, fetched, manifest}`, where `manifest` is gog-warp's parsed
+  manifest serialized back (unknown fields kept). This replaces §5.2's "zlib as fetched plus
+  a `build-manifest.toml` header": one readable file, atomic by itself, no second file to
+  keep in step. It is written with mode `0600` (the client secret is in it), its `Debug`
+  shows only the ids, and no message or log names its contents.
+- **Where it is written.** `linux-app` from a depot, first build and rebuild, right before
+  `content.toml`, and only when its build id is the one `content.toml` records. The CLI
+  fetches it with the listing request that already looked up the version name
+  (`depot::build_info_with_manifest`), for the build the cache record names; the plan
+  carries it in `DepotContent::manifest`. A write failure, or a build GOG doesn't list (no
+  manifest to fetch), warns or stays silent and never fails the build.
+- **Not written:** the installer lane, `dlc add` (the build doesn't change; the file is
+  left alone), and old games until their next rebuild. `doctor` says nothing about a missing file.
+- **Snapshots and rollback.** The file lives in the game dir, so a snapshot of the dir holds
+  it and a rollback restores it with `content.toml`; no exclusion list touches it.
+- **`gogo builds`.** An installed build GOG doesn't list gets its size and DLC from the
+  file when its `buildId` matches `content.toml`'s (a file for another build, or an unreadable
+  one, counts as none). The manifest has no publish date, so `PUBLISHED` stays `-`; the footer
+  gives the date the manifest was fetched, and `--json` adds `manifestFetched`, `downloadSize`,
+  `diskSize` and `dlcs` to that row. A game without the file keeps the bare row.
+
 ## 12. Implementation issues (to be filed as sub-issues of #360)
 
 Under epic #155 (Linux runtime) unless noted, `type:feature`, `area:depot` (+ `area:cli`

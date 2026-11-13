@@ -116,6 +116,7 @@ pub async fn run(args: cli::BuildsArgs) -> Result<i32, AppError> {
                 .unwrap_or_default()
         }),
         dlc_names,
+        built_game.as_ref().map(|g| g.dirs.root.as_path()),
     );
 
     for e in rep.failed_manifests() {
@@ -146,6 +147,7 @@ fn assemble(
     installer: Option<String>,
     patches: Option<Vec<Patch>>,
     dlc_names: Vec<DlcName>,
+    kept_root: Option<&std::path::Path>,
 ) -> Report {
     let game_id = game_build.as_ref().map(|(b, _)| b.clone());
     let here = |id: &str| {
@@ -172,10 +174,19 @@ fn assemble(
     if let Some((id, version)) = &game_build
         && !listed(id)
     {
+        // The manifest kept with the game (design 21 §5.2); a game built before
+        // it was kept has none, and the row stays bare.
+        let kept =
+            kept_root.and_then(|root| gogo::gog::build_manifest::describe(root, id, language));
         unlisted.push(report::Unlisted {
             build_id: id.clone(),
             version: version.clone().unwrap_or_default(),
             here: here(id),
+            kept_fetched: kept
+                .as_ref()
+                .and_then(|k| k.fetched)
+                .map(|d| d.format("%Y-%m-%d").to_string()),
+            kept: kept.map(|k| k.facts),
         });
     }
     if let Some(id) = &cache_build
@@ -186,6 +197,8 @@ fn assemble(
             build_id: id.clone(),
             version: String::new(),
             here: here(id),
+            kept: None,
+            kept_fetched: None,
         });
     }
     Report {

@@ -6,6 +6,7 @@
 //! - checksum:  public CDN XML — no auth (`docs/design/04` §2)
 
 pub mod build_hint;
+pub mod build_manifest;
 pub mod builds;
 pub mod builds_report;
 pub mod cache_upgrade;

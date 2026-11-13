@@ -94,6 +94,11 @@ pub struct Unlisted {
     pub build_id: String,
     pub version: String,
     pub here: Vec<&'static str>,
+    /// What the game dir's `build-manifest.json` says of it (design 21 §5.2);
+    /// `None` for a game built before it was kept, or a cache-only build.
+    pub kept: Option<Facts>,
+    /// When that manifest was fetched, as a date: GOG's publish date isn't in it.
+    pub kept_fetched: Option<String>,
 }
 
 /// One of the catalog's patch installers.
@@ -242,7 +247,16 @@ impl Report {
             if access {
                 line.push(String::new());
             }
-            line.extend(["-".into(), "-".into(), u.here.join(", ")]);
+            line.extend([
+                u.kept
+                    .as_ref()
+                    .and_then(|f| f.download_size)
+                    .map_or("-".into(), crate::fmt::human_size),
+                u.kept
+                    .as_ref()
+                    .map_or("-".into(), |f| f.dlcs.len().to_string()),
+                u.here.join(", "),
+            ]);
             table.push(line);
         }
         out.push_str(&columns(&table));
@@ -252,6 +266,11 @@ impl Report {
                 u.build_id,
                 dash(&u.version)
             ));
+            if let Some(d) = &u.kept_fetched {
+                out.push_str(&format!(
+                    "  its size and DLC come from the manifest kept with the game (fetched {d}).\n"
+                ));
+            }
         }
         let n = self.rows.len();
         if self.with_password {
@@ -339,9 +358,13 @@ impl Report {
                     "branch": Value::Null,
                     "public": Value::Null,
                     "listed": false,
-                    "downloadSize": Value::Null,
-                    "diskSize": Value::Null,
-                    "dlcs": Value::Null,
+                    "downloadSize": u.kept.as_ref().and_then(|f| f.download_size),
+                    "diskSize": u.kept.as_ref().and_then(|f| f.disk_size),
+                    "dlcs": u.kept.as_ref().map(|f| f.dlcs.iter().map(|id| {
+                        let d = self.dlc_name(*id);
+                        json!({"id": d.id, "title": d.title, "owned": d.owned})
+                    }).collect::<Vec<_>>()),
+                    "manifestFetched": u.kept_fetched,
                     "here": u.here,
                     "installer": false,
                 })
@@ -706,6 +729,8 @@ mod tests {
             build_id: "111".into(),
             version: "2.0".into(),
             here: vec!["game"],
+            kept: None,
+            kept_fetched: None,
         }];
         let text = r.render();
         assert!(words(text.lines().nth(5).unwrap()).starts_with(&["111", "2.0"]));
@@ -714,6 +739,31 @@ mod tests {
         let last = j["builds"].as_array().unwrap().last().unwrap().clone();
         assert_eq!(last["listed"], false);
         assert_eq!(last["buildId"], "111");
+    }
+
+    #[test]
+    fn an_unlisted_build_is_described_from_its_kept_manifest() {
+        let mut r = cyberpunk();
+        r.unlisted = vec![Unlisted {
+            build_id: "111".into(),
+            version: "2.0".into(),
+            here: vec!["game"],
+            kept: Some(Facts {
+                download_size: Some(2048),
+                disk_size: Some(4096),
+                dlcs: vec![7],
+            }),
+            kept_fetched: Some("2026-11-13".into()),
+        }];
+        let text = r.render();
+        let row = words(text.lines().nth(5).unwrap());
+        assert!(row.contains(&"KiB") && row.contains(&"1"), "{row:?}");
+        assert!(text.contains("fetched 2026-11-13"));
+        let j = r.to_json();
+        let last = j["builds"].as_array().unwrap().last().unwrap().clone();
+        assert_eq!(last["downloadSize"], 2048);
+        assert_eq!(last["diskSize"], 4096);
+        assert_eq!(last["dlcs"][0]["id"], 7);
     }
 
     #[test]
