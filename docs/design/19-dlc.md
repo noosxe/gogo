@@ -995,7 +995,9 @@ is the CLI's `installer_dlc.rs`; `dlc add` routes there from `dlc_cmd.rs`.
    info's `buildId`, unchecked.
 6. **`/DIR=` (the open question above).** A DLC is installed when its installer
    exits 0 and its `goggame-<id>.info` is in the base game's dir. If it isn't,
-   `drive_c` (but `windows/`) is searched for it, and the error names where it went,
+   `drive_c` (but `windows/`, and the copy GOG's support installer keeps of every info
+   under `ProgramData/GOG.com/supportInstaller/<id>/`) is searched for it, and the
+   error names where it went,
    or that it went nowhere. There's no move into place: the Inno log's
    `Dest filename` lines would allow one, if a game ever needs it. Doctor warns, for a
    recorded DLC whose info is missing from the base dir, where in the prefix it is.
@@ -1005,6 +1007,14 @@ is the CLI's `installer_dlc.rs`; `dlc add` routes there from `dlc_cmd.rs`.
    `added`.
 8. **`dlc remove`** stays refused on this lane (#443 runs the DLC's Inno uninstaller).
 
+**How a setup runs.** Every setup on this lane (the base's, a DLC's, GOG's support
+installer) runs as `C:\gogo-setup\<file>`: its dir is linked into the prefix as
+`drive_c/gogo-setup` for the run, and named as umu's `STEAM_COMPAT_INSTALL_PATH` so
+the runtime's container shares it. A unix path would go through Proton's `umu.exe`,
+which cuts the Windows path it makes of it at 259 characters: a setup deep enough in
+a download dir is "not found" and exits 1 before Inno starts (seen with the e2e's
+scratch paths).
+
 `dlc list` on this lane: "in this build" means GOG has a Windows installer for the DLC,
 and both sizes are that installer's (what it unpacks isn't known before it runs).
 
@@ -1012,6 +1022,17 @@ and both sizes are that installer's (what it unpacks isn't known before it runs)
 `e2e/dlc-add-1519147341.toml` (a base build, an add stopped once its installer runs,
 and the bare add that finishes it), through a manifest's `[installer_dlc]`
 (`docs/linux-e2e.md`). Both need `--installer` with the game's setup.
+
+Run on 2026-11-13 with Journey to the Savage Planet (`setup_…_1.0.10_(44657).exe`) and
+its Hot Garbage DLC, GE-Proton11-12 and umu 1.4.4, headless sway on a GPU: both
+pass. The DLC's installer took `/DIR=C:\GOG\<slug>` (its Inno log's `Dest filename`
+lines and its info are in the base dir, and no other info is in the prefix but the
+support installer's copy), the stopped add left its journal (exit 130) and the bare add
+ran the installer again and committed, and the game started with the DLC in place.
+`content.toml` `version` stayed unset: the setup came from the harness's mount, not a
+gogo download, and its file name's `1.0.10` isn't GOG's current label `1.0.10b`, so
+the plan noted that the version isn't known (decision 5). The DLC's row has `version =
+"1.0.10"` and no `build_id` (its info has none).
 
 ## 6. Record and state (D9)
 

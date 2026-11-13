@@ -171,6 +171,12 @@ class Manifest(unittest.TestCase):
             if p.poll() is None:
                 p.kill()
 
+    def test_match_excerpt_keeps_the_match_and_a_little_around_it(self):
+        text = "a" * 100 + "setup_x.exe" + "b" * 100
+        m = re.search("setup_x", text)
+        self.assertEqual(helper.match_excerpt(text, m, 3), "…aaasetup_x.ex…")
+        self.assertEqual(helper.match_excerpt("abc", re.search("b", "abc")), "abc")
+
     def test_display(self):
         m = helper.parse_manifest('gogid = 1\n[window]\ndisplay = "wayland"\n[[step]]\nwait = 1\n')
         self.assertEqual(m["window"]["display"], "wayland")

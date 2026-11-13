@@ -150,7 +150,8 @@ def plant_snap_saves(root, gogid, name, text):
 
 
 def matching_process(pattern, own_pid):
-    """The command line of a process (not `own_pid`'s) that `pattern` matches, or None."""
+    """Where `pattern` matches the command line of a process (not `own_pid`'s), as
+    `match_excerpt` gives it, or None."""
     for pid in os.listdir("/proc"):
         if not pid.isdigit() or int(pid) == own_pid:
             continue
@@ -159,9 +160,17 @@ def matching_process(pattern, own_pid):
                 cmd = f.read().replace(b"\0", b" ").decode(errors="replace").strip()
         except OSError:
             continue
-        if cmd and pattern.search(cmd):
-            return cmd
+        m = pattern.search(cmd) if cmd else None
+        if m:
+            return match_excerpt(cmd, m)
     return None
+
+
+def match_excerpt(text, m, around=40):
+    """`m`'s match in `text`, with up to `around` characters each side: a launcher's
+    command line runs to kilobytes."""
+    start, end = max(m.start() - around, 0), min(m.end() + around, len(text))
+    return ("…" if start else "") + text[start:end] + ("…" if end < len(text) else "")
 
 
 def kill_matching(pattern, own_pid):
