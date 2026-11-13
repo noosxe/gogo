@@ -175,6 +175,11 @@ pub struct DepotOptions {
     pub limit: Option<u64>,
     pub disk_check: bool,
     pub dry_run: bool,
+    /// Recorded DLC a cache switch takes out (an update to a build that lacks them,
+    /// design 21 §11h): they stay on the old side of the diff, so gog-warp deletes
+    /// their files and rewrites the paths they won. Not taken (`dlcs` leaves them
+    /// out).
+    pub dropping: Vec<String>,
 }
 
 impl Default for DepotOptions {
@@ -191,6 +196,7 @@ impl Default for DepotOptions {
             limit: None,
             disk_check: true,
             dry_run: false,
+            dropping: Vec::new(),
         }
     }
 }
@@ -606,7 +612,7 @@ pub async fn run(
         )
     };
     let inputs = match (&old_manifest, &cached) {
-        (Some(_), Some(c)) => switch_inputs(&language, &dlcs, c),
+        (Some(_), Some(c)) => switch_inputs(&language, &dlcs, &opts.dropping, c),
         _ => verify_inputs(),
     };
     let install_dir = install_root.join(manifest.install_directory());
@@ -1946,17 +1952,20 @@ pub fn can_switch(
 /// Pure: the inputs of a switch from `cached` (see [`can_switch`]). The new side is
 /// the wanted DLC; the old side the recorded ones still wanted, so a recorded DLC
 /// the run doesn't take is left as it is (as `verify` leaves it), not deleted, and
-/// the record drops it.
+/// the record drops it. A recorded DLC in `dropping` stays on the old side too:
+/// gog-warp's diff then deletes its files and rewrites the paths it won, so the
+/// cache is the new build without it (an update that drops it, design 21 §11h).
 pub fn switch_inputs(
     language: &str,
     wanted: &[String],
+    dropping: &[String],
     cached: &CachedBuild<'_>,
 ) -> DownloadInputs {
     let old_dlcs: Vec<String> = cached
         .dlcs
         .unwrap_or(&[])
         .iter()
-        .filter(|d| wanted.contains(d))
+        .filter(|d| wanted.contains(d) || dropping.contains(d))
         .cloned()
         .collect();
     DownloadInputs {
@@ -3029,7 +3038,7 @@ mod tests {
     fn a_switch_diffs_from_the_cached_build_and_the_dlc_still_wanted() {
         let held = ["7".to_string(), "8".to_string()];
         let c = cached(Some("en-US"), Some(&held));
-        let got = switch_inputs("en-US", &["8".into(), "9".into()], &c);
+        let got = switch_inputs("en-US", &["8".into(), "9".into()], &[], &c);
         assert_eq!(
             got,
             DownloadInputs {
@@ -3042,6 +3051,12 @@ mod tests {
                 old_dlcs: vec!["8".into()],
             }
         );
+        // An update that drops 7 keeps it on the old side: gog-warp deletes its
+        // files and rewrites the paths it won. A dropped DLC the cache doesn't
+        // hold isn't made up.
+        let dropping = switch_inputs("en-US", &["8".into()], &["7".into(), "6".into()], &c);
+        assert_eq!(dropping.dlcs, ["8"]);
+        assert_eq!(dropping.old_dlcs, ["7", "8"]);
         let note = cache_note(&CacheCheck::OtherBuild, &got).unwrap();
         assert!(note.contains("b1") && note.contains("no hashing"), "{note}");
         // Without the old manifest it's the hashing path, and the plan says so.
