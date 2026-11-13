@@ -544,6 +544,7 @@ mod tests {
             lane: Lane::Depot,
             build_id: Some("2".into()),
             version: Some("2.31a".into()),
+            branch: None,
             language: None,
             dlc: vec![],
         };
