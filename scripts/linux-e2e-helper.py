@@ -187,6 +187,46 @@ def kill_matching(pattern, own_pid):
             continue
 
 
+def prefix_pids(prefix, own_pid):
+    """The processes (not `own_pid`) running in Wine prefix `prefix`, by their
+    environment, as gogo's own check finds them: `WINEPREFIX` the prefix (or its
+    `pfx`), or `STEAM_COMPAT_DATA_PATH` the prefix."""
+    paths = {prefix, os.path.realpath(prefix)}
+    wanted = set()
+    for p in paths:
+        p = p.rstrip("/")
+        wanted |= {f"WINEPREFIX={p}".encode(), f"WINEPREFIX={p}/pfx".encode(),
+                   f"STEAM_COMPAT_DATA_PATH={p}".encode()}
+    found = []
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit() or int(pid) == own_pid:
+            continue
+        try:
+            with open(f"/proc/{pid}/environ", "rb") as f:
+                env = f.read().split(b"\0")
+        except OSError:
+            continue
+        if any(kv.rstrip(b"/") in wanted for kv in env):
+            found.append(int(pid))
+    return found
+
+
+def kill_in_prefix(prefix, own_pid, wait=15):
+    """SIGKILL everything running in Wine prefix `prefix` (as a reboot would), and
+    wait up to `wait` seconds for it to be gone. The pids that stayed."""
+    deadline = time.monotonic() + wait
+    while True:
+        pids = prefix_pids(prefix, own_pid)
+        if not pids or time.monotonic() > deadline:
+            return pids
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        time.sleep(0.2)
+
+
 def game_content(root, gogid):
     """The build and DLC set a game dir's content.toml records."""
     with open(os.path.join(root, "games", str(gogid), "content.toml"), "rb") as f:
@@ -604,35 +644,45 @@ def parse_manifest(text, live=False):
     if idlc is not None:
         if not isinstance(idlc, dict):
             raise ManifestError("installer_dlc: must be a table")
-        _only(idlc, ("build_args", "add"), "installer_dlc")
+        _only(idlc, ("build_args", "add", "remove"), "installer_dlc")
         if gogid is None:
             raise ManifestError("installer_dlc is for a game (gogid), not a command")
         build_args = idlc.get("build_args", [])
         if not isinstance(build_args, list) or not all(isinstance(a, str) for a in build_args):
             raise ManifestError("installer_dlc.build_args: a list of strings")
-        adds_raw = idlc.get("add", [])
-        if not isinstance(adds_raw, list):
-            raise ManifestError("installer_dlc.add: an array of tables ([[installer_dlc.add]])")
-        adds = []
-        for i, a in enumerate(adds_raw):
-            what = f"installer_dlc.add[{i}]"
-            if not isinstance(a, dict):
-                raise ManifestError(f"{what}: must be a table")
-            _only(a, ("args", "interrupt"), what)
-            args = a.get("args", [])
-            # No args: a bare `add`, which finishes an interrupted one.
-            if not isinstance(args, list) or not all(isinstance(x, str) for x in args):
-                raise ManifestError(f"{what}.args: a list of strings (the DLC to add)")
-            interrupt = a.get("interrupt")
-            if interrupt is not None:
-                try:
-                    re.compile(interrupt)
-                except (re.error, TypeError) as e:
-                    raise ManifestError(f"{what}.interrupt: not a regex: {e}") from e
-            adds.append({"args": args, "interrupt": interrupt})
-        if not build_args and not adds:
-            raise ManifestError("installer_dlc: needs build_args or an add")
-        idlc = {"build_args": build_args, "add": adds}
+        runs = {}
+        for kind in ("add", "remove"):
+            raw_runs = idlc.get(kind, [])
+            if not isinstance(raw_runs, list):
+                raise ManifestError(f"installer_dlc.{kind}: an array of tables ([[installer_dlc.{kind}]])")
+            runs[kind] = []
+            for i, a in enumerate(raw_runs):
+                what = f"installer_dlc.{kind}[{i}]"
+                if not isinstance(a, dict):
+                    raise ManifestError(f"{what}: must be a table")
+                _only(a, ("args", "interrupt", "interrupt_after"), what)
+                args = a.get("args", [])
+                # No args: a bare `add` or `remove`, which finishes an interrupted one.
+                if not isinstance(args, list) or not all(isinstance(x, str) for x in args):
+                    raise ManifestError(f"{what}.args: a list of strings (the DLC to {kind})")
+                interrupt = a.get("interrupt")
+                if interrupt is not None:
+                    try:
+                        re.compile(interrupt)
+                    except (re.error, TypeError) as e:
+                        raise ManifestError(f"{what}.interrupt: not a regex: {e}") from e
+                after = a.get("interrupt_after", 1)
+                if isinstance(after, bool) or not isinstance(after, (int, float)) or not 0 <= after <= 60:
+                    raise ManifestError(f"{what}.interrupt_after: seconds, 0 to 60")
+                if "interrupt_after" in a and interrupt is None:
+                    raise ManifestError(f"{what}.interrupt_after: needs an interrupt")
+                run = {"args": args, "interrupt": interrupt}
+                if interrupt is not None:
+                    run["interrupt_after"] = float(after)
+                runs[kind].append(run)
+        if not build_args and not runs["add"] and not runs["remove"]:
+            raise ManifestError("installer_dlc: needs build_args, an add or a remove")
+        idlc = {"build_args": build_args, "add": runs["add"], "remove": runs["remove"]}
 
     steps_raw = raw.get("step", [])
     if not isinstance(steps_raw, list) or not (steps_raw or live):
@@ -2735,11 +2785,14 @@ class Driver:
         return self.tool(*argv, timeout=timeout, env=env)
 
     def installer_dlc_steps(self):
-        """`[installer_dlc]` (#351): each `dlc add` in order, in the build's sandbox (it
-        downloads), one of them stopped with SIGINT to its process group once a process
-        matching its `interrupt` regex runs; then every DLC content.toml lists must have
-        its goggame-<id>.info in the base game's dir and nowhere else in the prefix
-        (design 19 section 11 Q5). Failures are checks; this never fails the build."""
+        """`[installer_dlc]` (#351, #443): each `dlc add` in order, in the build's sandbox
+        (it downloads), then each `dlc remove`; one of them stopped with SIGINT to its
+        process group `interrupt_after` seconds after a process matching its `interrupt`
+        regex runs. Every DLC the removals took out must have lost its goggame-<id>.info
+        and its own uninstaller (`unins<n>.*`, the ini naming it); every DLC content.toml
+        still lists must have its goggame-<id>.info in the base game's dir and nowhere
+        else in the prefix (design 19 section 11 Q5). Failures are checks; this never
+        fails the build."""
         spec = self.cfg["manifest"]["installer_dlc"]
         gogid = str(self.cfg["manifest"]["gogid"])
         gogo = self.cfg["build_command"][0]
@@ -2747,56 +2800,111 @@ class Driver:
         journal = os.path.join(game, "dlc-journal.json")
         env = dict(self.env)
         env.update(self.cfg["game_env"])
-        out = {"adds": [], "dlc": [], "base_dir": None}
+        out = {"adds": [], "removes": [], "removed": [], "dlc": [], "base_dir": None}
         self.result["installer_dlc"] = out
-        try:
-            for i, step in enumerate(spec["add"], 1):
-                argv = [gogo, "linux-app", "dlc", gogid, "add", *step["args"], "--yes"]
-                log_path = os.path.join(self.results, f"dlc-add-{i}.log")
-                pat = re.compile(step["interrupt"]) if step["interrupt"] else None
-                hit = None
-                started = time.monotonic()
-                with open(log_path, "wb") as log:
-                    p = subprocess.Popen(argv, env=env, cwd=self.cfg["launch_cwd"], stdin=subprocess.DEVNULL,
-                                         stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-                    while p.poll() is None:
-                        if pat is not None and hit is None:
-                            hit = matching_process(pat, os.getpid())
-                            if hit is not None:
-                                # Into the installer's run, then a Ctrl-C to the whole group.
-                                time.sleep(1)
-                                try:
-                                    os.killpg(p.pid, signal.SIGINT)
-                                except ProcessLookupError:
-                                    pass
-                        if time.monotonic() - started > 3000:
-                            os.killpg(p.pid, signal.SIGKILL)
-                        time.sleep(0.1)
-                rec = {"argv": argv[2:], "exit": p.returncode, "log": log_path,
-                       "secs": round(time.monotonic() - started), "interrupted": hit,
-                       "journal_after": os.path.exists(journal)}
-                out["adds"].append(rec)
-                tail = ""
-                with open(log_path, errors="replace") as f:
-                    tail = " | ".join(f.read().strip().splitlines()[-3:])
-                if pat is not None:
-                    self.check(f"installer_dlc_add_{i}_interrupted",
-                               hit is not None and p.returncode != 0 and rec["journal_after"],
-                               f"exit {p.returncode}, matched {hit!r}, journal left: {rec['journal_after']}; {tail}")
-                    # What the stopped run left running in the prefix goes, as a reboot would.
-                    kill_matching(pat, os.getpid())
-                else:
-                    self.check(f"installer_dlc_add_{i}", p.returncode == 0 and not rec["journal_after"],
-                               f"exit {p.returncode}, journal left: {rec['journal_after']}; {tail}")
-            for name, path in install_logs(self.cfg["games_dir"]):
-                shutil.copy(path, os.path.join(self.results, f"install-{name}"))
-            with open(os.path.join(game, "content.toml"), "rb") as f:
-                content = tomllib.load(f)
+
+        def base_dir():
             with open(os.path.join(game, "gogo-launch.toml"), "rb") as f:
                 exe = tomllib.load(f).get("exe", "")
             parts = exe.split("\\")
+            if len(parts) < 4:
+                return None
+            return os.path.join(game, "prefix", "drive_c", "GOG", parts[2])
+
+        def recorded():
+            with open(os.path.join(game, "content.toml"), "rb") as f:
+                return tomllib.load(f)
+
+        def run(kind, i, step):
+            argv = [gogo, "linux-app", "dlc", gogid, kind, *step["args"], "--yes"]
+            log_path = os.path.join(self.results, f"dlc-{kind}-{i}.log")
+            pat = re.compile(step["interrupt"]) if step["interrupt"] else None
+            hit = None
+            started = time.monotonic()
+            with open(log_path, "wb") as log:
+                p = subprocess.Popen(argv, env=env, cwd=self.cfg["launch_cwd"], stdin=subprocess.DEVNULL,
+                                     stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                while p.poll() is None:
+                    if pat is not None and hit is None:
+                        hit = matching_process(pat, os.getpid())
+                        if hit is not None:
+                            # Into the installer's (uninstaller's) run, then a Ctrl-C to
+                            # the whole group.
+                            time.sleep(step.get("interrupt_after", 1))
+                            try:
+                                os.killpg(p.pid, signal.SIGINT)
+                            except ProcessLookupError:
+                                pass
+                    if time.monotonic() - started > 3000:
+                        os.killpg(p.pid, signal.SIGKILL)
+                    time.sleep(0.1)
+            rec = {"argv": argv[2:], "exit": p.returncode, "log": log_path,
+                   "secs": round(time.monotonic() - started), "interrupted": hit,
+                   "journal_after": os.path.exists(journal)}
+            out[f"{kind}s"].append(rec)
+            tail = ""
+            with open(log_path, errors="replace") as f:
+                tail = " | ".join(f.read().strip().splitlines()[-3:])
+            if pat is not None:
+                self.check(f"installer_dlc_{kind}_{i}_interrupted",
+                           hit is not None and p.returncode != 0 and rec["journal_after"],
+                           f"exit {p.returncode}, matched {hit!r}, journal left: {rec['journal_after']}; {tail}")
+                # What the stopped run left running goes, as a reboot would: the
+                # matched processes, and everything else in the game's prefix (an
+                # Inno uninstaller goes on as a temp copy of itself, a new name).
+                kill_matching(pat, os.getpid())
+                rec["left_running"] = kill_in_prefix(os.path.join(game, "prefix"), os.getpid())
+            else:
+                self.check(f"installer_dlc_{kind}_{i}", p.returncode == 0 and not rec["journal_after"],
+                           f"exit {p.returncode}, journal left: {rec['journal_after']}; {tail}")
+
+        try:
+            for i, step in enumerate(spec["add"], 1):
+                run("add", i, step)
+            if spec["remove"]:
+                # Each recorded DLC's uninstaller files (unins<n>.*, by the ini naming
+                # it), before the removals.
+                base = base_dir()
+                before = {d["id"]: d.get("title") for d in recorded().get("dlc", [])}
+                unins = {}
+                for n in sorted(os.listdir(base)) if base and os.path.isdir(base) else []:
+                    low = n.lower()
+                    if re.fullmatch(r"unins\d{3}\.ini", low):
+                        with open(os.path.join(base, n), errors="replace") as f:
+                            m = re.search(r"(?mi)^productID=(\d+)", f.read())
+                        if m:
+                            stem = low[:-4]
+                            unins[int(m.group(1))] = sorted(x for x in os.listdir(base)
+                                                            if x.lower().startswith(stem + "."))
+                for i, step in enumerate(spec["remove"], 1):
+                    run("remove", i, step)
+                after = {d["id"] for d in recorded().get("dlc", [])}
+                # A stop can cut the uninstaller short after its own log (.dat) went
+                # but before it deleted its .exe and .ini: gogo leaves those (design 19
+                # section 5.2 decision 8). Without a stop, every unins<n>.* must go.
+                stopped = any(r["interrupted"] for r in out["removes"])
+                ok = bool(before) and base is not None
+                for dlc_id, title in before.items():
+                    if dlc_id in after:
+                        continue
+                    info = os.path.join(base, f"goggame-{dlc_id}.info")
+                    files = unins.get(dlc_id, [])
+                    left = [x for x in files if os.path.exists(os.path.join(base, x))]
+                    out["removed"].append({"id": dlc_id, "title": title, "uninstaller": files,
+                                           "info_left": os.path.exists(info), "uninstaller_left": left})
+                    dat_left = any(x.lower().endswith(".dat") for x in left)
+                    ok = (ok and bool(files) and not os.path.exists(info) and not dat_left
+                          and (stopped or not left))
+                self.check("installer_dlc_removed", ok and bool(out["removed"]),
+                           f"{len(out['removed'])} of {len(before)} DLC removed"
+                           + (" (a removal was stopped)" if stopped else "") + "; "
+                           + "; ".join(f"{x['id']}: uninstaller {x['uninstaller']}, info left {x['info_left']}, "
+                                       f"uninstaller left {x['uninstaller_left']}" for x in out["removed"]))
+            for name, path in install_logs(self.cfg["games_dir"]):
+                shutil.copy(path, os.path.join(self.results, f"install-{name}"))
+            content = recorded()
             drive_c = os.path.join(game, "prefix", "drive_c")
-            base = os.path.join(drive_c, "GOG", parts[2]) if len(parts) >= 4 else None
+            base = base_dir()
             out["base_dir"] = base
             out["version"] = content.get("version")
             out["language"] = content.get("language")
@@ -2814,7 +2922,8 @@ class Driver:
                 out["dlc"].append({"id": d["id"], "title": d.get("title"), "version": d.get("version"),
                                    "build_id": d.get("build_id"), "in_base_dir": inside, "elsewhere": elsewhere})
                 ok = ok and inside and not elsewhere
-            self.check("installer_dlc_dir", ok and bool(out["dlc"]),
+            # A run that removed every DLC has none left to look for.
+            self.check("installer_dlc_dir", ok and (bool(out["dlc"]) or bool(spec["remove"])),
                        f"{len(out['dlc'])} DLC; base dir {base}; "
                        + "; ".join(f"{x['id']}: in base {x['in_base_dir']}, elsewhere {x['elsewhere']}"
                                    for x in out["dlc"]))
