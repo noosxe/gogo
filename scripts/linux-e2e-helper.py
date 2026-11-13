@@ -2794,8 +2794,11 @@ class Driver:
             ok = base is not None
             for d in content.get("dlc", []):
                 info = f"goggame-{d['id']}.info"
+                # GOG's support installer keeps a copy of every info it ran for.
+                support = os.path.join(drive_c, "ProgramData", "GOG.com", "supportInstaller")
                 where = [os.path.join(r, n) for r, _, ns in os.walk(drive_c)
                          if not r.startswith(os.path.join(drive_c, "windows"))
+                         and not r.startswith(support)
                          for n in ns if n.lower() == info]
                 inside = base is not None and os.path.isfile(os.path.join(base, info))
                 elsewhere = [w for w in where if os.path.dirname(w) != base]

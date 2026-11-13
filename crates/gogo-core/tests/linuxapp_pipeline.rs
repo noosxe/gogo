@@ -64,8 +64,9 @@ case "$1" in
     target="$WINEPREFIX/drive_c/$rel"
     # A DLC's installer (design 19 §5): `setup_dlc_<id>_….exe`. FAKE_DLC_FAIL and
     # FAKE_DLC_ELSEWHERE name a DLC id that fails, or that ignores /DIR=.
-    case "${1##*/}" in setup_dlc_*)
-      id=$(printf '%s' "${1##*/}" | sed 's/^setup_dlc_\([0-9]*\).*/\1/')
+    exe=$(printf '%s' "$1" | tr '\\' '/')
+    case "${exe##*/}" in setup_dlc_*)
+      id=$(printf '%s' "${exe##*/}" | sed 's/^setup_dlc_\([0-9]*\).*/\1/')
       inno=$(printf '%s' "${log_w#Z:}" | tr '\\' '/')
       [ -n "$inno" ] && echo "fake inno log of DLC $id" > "$inno"
       [ "$FAKE_DLC_FAIL" = "$id" ] && { echo "fake inno: DLC $id failed" >> "$inno"; exit 5; }

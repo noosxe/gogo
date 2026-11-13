@@ -18,6 +18,7 @@
 //! catalog half) is the caller's.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde::Serialize;
 
@@ -73,9 +74,9 @@ pub struct Installed {
 
 /// The Inno flags of the installer lane (as on the Mac, design 10 §2.4): silent,
 /// into `win_target`, its log written through `z:`.
-pub fn inno_args(setup: &Path, win_target: &str, log: &Path) -> Vec<String> {
+pub fn inno_args(exe: &str, win_target: &str, log: &Path) -> Vec<String> {
     vec![
-        setup.display().to_string(),
+        exe.to_string(),
         "/VERYSILENT".into(),
         "/SUPPRESSMSGBOXES".into(),
         "/NORESTART".into(),
@@ -85,13 +86,77 @@ pub fn inno_args(setup: &Path, win_target: &str, log: &Path) -> Vec<String> {
     ]
 }
 
+/// umu running `setup` (see [`inno_args`]), and the link it runs it
+/// through: keep that until the run ends.
+///
+/// A unix path would go through Proton's `umu.exe`, which cuts the Windows
+/// path it makes of it at 259 characters (`MAX_PATH`): a setup deep enough
+/// (a download dir's title dirs and a long file name) is "not found", exit 1
+/// before Inno starts. So the setup's dir is linked into the prefix as
+/// [`SETUP_LINK`] and the setup runs as `C:\gogo-setup\<file>`, which Wine
+/// runs itself; its `.bin` parts are beside it there. The real dir is umu's
+/// install path, which the runtime's container shares.
+pub fn setup_command(
+    umu: &Umu,
+    setup: &Path,
+    win_target: &str,
+    log: &Path,
+) -> Result<(Command, SetupLink), MacAppError> {
+    let link = setup_link(umu.prefix, setup)?;
+    let mut c = umu.command(inno_args(&link.exe, win_target, log));
+    c.env(INSTALL_PATH, &link.dir);
+    Ok((c, link))
+}
+
+/// Where [`setup_command`] links a setup's dir, under `drive_c`.
+pub const SETUP_LINK: &str = "gogo-setup";
+
+/// umu's `STEAM_COMPAT_INSTALL_PATH`, kept from the environment when set.
+const INSTALL_PATH: &str = "STEAM_COMPAT_INSTALL_PATH";
+
+/// [`setup_command`]'s link: `prefix/drive_c/gogo-setup` → `setup`'s dir.
+fn setup_link(prefix: &Path, setup: &Path) -> std::io::Result<SetupLink> {
+    let name = setup
+        .file_name()
+        .ok_or_else(|| std::io::Error::other(format!("{} names no setup file", setup.display())))?;
+    let dir = std::fs::canonicalize(setup.parent().unwrap_or(Path::new("/")))?;
+    let link = prefix.join("drive_c").join(SETUP_LINK);
+    if link.symlink_metadata().is_ok() {
+        std::fs::remove_file(&link)?;
+    }
+    std::os::unix::fs::symlink(&dir, &link)?;
+    Ok(SetupLink {
+        exe: format!("C:\\{SETUP_LINK}\\{}", name.to_string_lossy()),
+        dir,
+        link,
+    })
+}
+
+/// [`setup_command`]'s link to a setup's dir; removed when dropped.
+#[derive(Debug)]
+pub struct SetupLink {
+    link: PathBuf,
+    /// The setup's dir, resolved.
+    dir: PathBuf,
+    /// The setup as Wine runs it.
+    exe: String,
+}
+
+impl Drop for SetupLink {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.link);
+    }
+}
+
 /// The Inno log of DLC `id`'s installer, beside the base's in the install logs.
 pub fn inno_log_name(id: u64) -> String {
     format!("dlc-{id}-inno.log")
 }
 
-/// `goggame-<id>.info` anywhere under `drive_c`, but Windows' own dir: where a
-/// DLC installer that ignored `/DIR=` put its files. Bounded: five levels.
+/// `goggame-<id>.info` anywhere under `drive_c`, but Windows' own dir and
+/// the copy GOG's support installer keeps of every info it ran for
+/// (`ProgramData/GOG.com/supportInstaller/<id>/`): where a DLC installer that
+/// ignored `/DIR=` put its files. Bounded: five levels.
 pub fn find_info(drive_c: &Path, id: u64) -> Option<PathBuf> {
     let name = format!("goggame-{id}.info");
     let mut level = vec![drive_c.to_path_buf()];
@@ -109,7 +174,12 @@ pub fn find_info(drive_c: &Path, id: u64) -> Option<PathBuf> {
                 if ft.is_file() && file.to_string_lossy().eq_ignore_ascii_case(&name) {
                     return Some(e.path());
                 }
-                if ft.is_dir() && !(dir == drive_c && file.eq_ignore_ascii_case("windows")) {
+                let skip = (dir == drive_c && file.eq_ignore_ascii_case("windows"))
+                    || (file.eq_ignore_ascii_case("supportInstaller")
+                        && dir
+                            .file_name()
+                            .is_some_and(|d| d.eq_ignore_ascii_case("GOG.com")));
+                if ft.is_dir() && !skip {
                     next.push(e.path());
                 }
             }
@@ -142,12 +212,11 @@ pub fn run_one(
     std::fs::create_dir_all(logs)?;
     let log_name = inno_log_name(d.id);
     let log = logs.join(&log_name);
+    let (cmd, link) = setup_command(umu, &d.setup, win_target, &log)?;
     let status = working(emit, step::DLC_INSTALLER, || {
-        umu.run(
-            "a DLC's installer",
-            umu.command(inno_args(&d.setup, win_target, &log)),
-        )
+        umu.run("a DLC's installer", cmd)
     })?;
+    drop(link);
     if !status.success() {
         return Err(MacAppError::DlcInstallerFailed {
             id: d.id,
@@ -585,14 +654,42 @@ mod tests {
     #[test]
     fn inno_args_name_the_dir_and_log() {
         let a = inno_args(
-            Path::new("/dl/setup_x_dlc.exe"),
+            r"C:\gogo-setup\setup_x_dlc.exe",
             r"C:\GOG\x",
             Path::new("/g/install-logs/dlc-1-inno.log"),
         );
-        assert_eq!(a[0], "/dl/setup_x_dlc.exe");
+        assert_eq!(a[0], r"C:\gogo-setup\setup_x_dlc.exe");
         assert!(a.contains(&r"/DIR=C:\GOG\x".to_string()));
         assert!(a.contains(&"/VERYSILENT".to_string()));
         assert!(a.iter().any(|x| x.starts_with("/LOG=Z:")), "{a:?}");
+    }
+
+    #[test]
+    fn a_setup_runs_through_a_link_in_the_prefix() {
+        let t = tempfile::tempdir().unwrap();
+        let dl = t.path().join("Some Game/Some DLC");
+        std::fs::create_dir_all(&dl).unwrap();
+        std::fs::write(dl.join("setup_x.exe"), b"x").unwrap();
+        std::fs::write(dl.join("setup_x-1.bin"), b"b").unwrap();
+        let prefix = t.path().join("game/prefix");
+        std::fs::create_dir_all(prefix.join("drive_c")).unwrap();
+        let link = prefix.join("drive_c").join(SETUP_LINK);
+        std::fs::create_dir_all(&link).ok();
+        std::fs::remove_dir(&link).unwrap();
+        std::os::unix::fs::symlink("/nowhere", &link).unwrap();
+        {
+            let made = setup_link(&prefix, &dl.join("setup_x.exe")).unwrap();
+            assert_eq!(made.exe, r"C:\gogo-setup\setup_x.exe");
+            assert_eq!(made.dir, std::fs::canonicalize(&dl).unwrap());
+            assert!(
+                link.join("setup_x-1.bin").is_file(),
+                "a stale link is replaced"
+            );
+        }
+        assert!(
+            link.symlink_metadata().is_err(),
+            "the link goes with its run"
+        );
     }
 
     #[test]
@@ -657,6 +754,10 @@ mod tests {
         std::fs::create_dir_all(c.join("windows/system32")).unwrap();
         std::fs::write(c.join("windows/system32/goggame-7.info"), "{}").unwrap();
         assert_eq!(find_info(&c, 7), None, "Windows' own dir isn't searched");
+        let support = c.join("ProgramData/GOG.com/supportInstaller/7");
+        std::fs::create_dir_all(&support).unwrap();
+        std::fs::write(support.join("goggame-7.info"), "{}").unwrap();
+        assert_eq!(find_info(&c, 7), None, "nor the support installer's copies");
         let other = c.join("GOG Games/The DLC");
         std::fs::create_dir_all(&other).unwrap();
         std::fs::write(other.join("goggame-7.info"), "{}").unwrap();
