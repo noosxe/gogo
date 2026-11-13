@@ -947,8 +947,8 @@ fn read_download(root: &Path) -> Option<DownloadRecord> {
     serde_json::from_str(&std::fs::read_to_string(root.join(DOWNLOAD)).ok()?).ok()
 }
 
-/// Is a DLC add of the game in `root` in the middle of laying files (the launcher
-/// refuses, doctor fails)?
+/// Is a DLC add (or an update, design 21 §11g) of the game in `root` in the middle
+/// of laying files (the launcher refuses, doctor fails)?
 pub fn journal_exists(root: &Path) -> bool {
     lay::journal_path(root).exists()
 }
@@ -1068,6 +1068,12 @@ pub fn recover_locked(
     let Some((j, dir)) = lay::recover(&root, reflink)? else {
         return Ok(None);
     };
+    // An update's lay (design 21 §11g) shares the journal: settled the same way,
+    // committed as an update.
+    if j.is_update() {
+        super::update::settle(game, &j, dir, emit)?;
+        return Ok(Some(dir));
+    }
     match dir {
         Direction::Forward => {
             game.content = commit(game, &j)?;
@@ -1266,6 +1272,10 @@ where
             files,
             replaced: Vec::new(),
             dirs: Vec::new(),
+            kind: None,
+            from: None,
+            to: None,
+            removed: Vec::new(),
         };
         // A record-only add with nothing to lay writes no journal.
         if !j.files.is_empty() {

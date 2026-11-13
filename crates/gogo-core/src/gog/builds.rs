@@ -27,6 +27,19 @@ pub fn pick_build<'a>(items: impl IntoIterator<Item = &'a Build>) -> Option<&'a 
         })
 }
 
+/// Pure: the newest public build on `branch` (`None`: the default branch), by date
+/// then id: what an update of a game on that branch takes (design 21 §11 Q2).
+pub fn newest_on_branch<'a>(builds: &'a [Build], branch: Option<&str>) -> Option<&'a Build> {
+    builds
+        .iter()
+        .filter(|b| *b.public() && b.branch().as_deref() == branch)
+        .max_by(|a, b| {
+            a.date_published()
+                .cmp(b.date_published())
+                .then_with(|| a.build_id().cmp(b.build_id()))
+        })
+}
+
 /// One row of a listing: what the table and the error messages show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildEntry {

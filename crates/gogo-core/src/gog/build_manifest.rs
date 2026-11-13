@@ -51,6 +51,18 @@ pub fn write(
     generation: u32,
     manifest: &Manifest,
 ) -> std::io::Result<()> {
+    write_named(root, FILE, build_id, generation, manifest)
+}
+
+/// [`write`] under another name in `root`: an update keeps its target's manifest
+/// beside the game's until the commit renames it into place (design 21 §11g).
+pub fn write_named(
+    root: &Path,
+    name: &str,
+    build_id: &str,
+    generation: u32,
+    manifest: &Manifest,
+) -> std::io::Result<()> {
     let stored = Stored {
         schema: SCHEMA,
         build_id: build_id.to_string(),
@@ -59,9 +71,9 @@ pub fn write(
         manifest: manifest.clone(),
     };
     let bytes = serde_json::to_vec(&stored).map_err(std::io::Error::other)?;
-    let tmp = root.join(format!("{FILE}.tmp"));
+    let tmp = root.join(format!("{name}.tmp"));
     write_private(&tmp, &bytes)?;
-    std::fs::rename(&tmp, path(root)).inspect_err(|_| {
+    std::fs::rename(&tmp, root.join(name)).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
 }

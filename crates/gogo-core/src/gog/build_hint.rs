@@ -87,14 +87,7 @@ pub struct BuildHint {
 
 /// Newest public build on `branch` (`None`: the default branch), by date then id.
 fn newest_on<'a>(builds: &'a [Build], branch: Option<&str>) -> Option<&'a Build> {
-    builds
-        .iter()
-        .filter(|b| *b.public() && b.branch().as_deref() == branch)
-        .max_by(|a, b| {
-            a.date_published()
-                .cmp(b.date_published())
-                .then_with(|| a.build_id().cmp(b.build_id()))
-        })
+    builds::newest_on_branch(builds, branch)
 }
 
 fn is_stale(checked: Option<DateTime<Utc>>, ttl_hours: u32, now: DateTime<Utc>) -> bool {

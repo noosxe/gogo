@@ -27,6 +27,7 @@ pub mod setup;
 pub mod snapshots;
 pub mod umu;
 pub mod umu_id;
+pub mod update;
 pub mod vdf;
 
 /// A `[linux] <key>` string in the config at `path`, if set. An unreadable

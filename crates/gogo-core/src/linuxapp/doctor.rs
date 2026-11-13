@@ -1800,6 +1800,25 @@ fn check_build(g: &Game) -> Option<Finding> {
 /// download. (The owned-but-missing warning needs the network: `dlc list` says it.)
 fn check_dlc(g: &Game) -> Finding {
     use crate::gog::content::{self, Lane};
+    if crate::gog::lay::read_journal(&g.dirs.root)
+        .ok()
+        .flatten()
+        .is_some_and(|j| j.is_update())
+    {
+        return Finding::fail(
+            "dlc",
+            format!(
+                "an update stopped while laying its files ({} is there): the game files may \
+                 mix two builds, so the launcher won't start the game",
+                crate::gog::lay::JOURNAL
+            ),
+            format!(
+                "run `gogo linux-app update {}` to finish it (or undo it, when its files are \
+                 gone)",
+                g.gogid
+            ),
+        );
+    }
     if super::dlc::journal_exists(&g.dirs.root) {
         return Finding::fail(
             "dlc",
