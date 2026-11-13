@@ -11,7 +11,15 @@
 //! ones the target dropped taken out of it, under design 19's journal
 //! ([`crate::gog::lay`], `kind = "update"`); `build-manifest.json` and
 //! `content.toml` written (the commit); setup run once.
+//!
+//! An installed DLC the target build lacks is taken out in the same run (§11h):
+//! the cache switch keeps it on the old side of gog-warp's diff, so the cache ends
+//! up as the target without it; [`super::dlc_remove::reverse_diff_to`] across the
+//! two builds names its files (taken out of `game/` while they are still the ones
+//! it laid) and the paths it shares with a product that stays (laid again from the
+//! switched cache); the commit drops its rows from `content.toml`.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use gog_warp::content_system::types::Manifest;
@@ -20,12 +28,14 @@ use serde::{Deserialize, Serialize};
 use crate::engine::events::ProgressEvent;
 use crate::gog::content::{self, DlcRef};
 use crate::gog::depot::{self, CacheCheck, CacheWant, DepotError, Snapshot};
-use crate::gog::lay::{self, Direction, Journal, LayReport};
+use crate::gog::dlc_filter::DepotList;
+use crate::gog::lay::{self, AddingDlc, Direction, Journal, LayReport};
 use crate::gog::materialize::{self, Reflink, TreeMethod};
 use crate::gog::{build_manifest, content::Lane};
 use crate::macapp::error::MacAppError;
 
 use super::dlc::{self, AddError, Game};
+use super::dlc_remove::{self, Expect};
 use super::game;
 
 /// The update's download record in the game dir (§11g step 4).
@@ -110,6 +120,17 @@ pub fn installer_refusal(gogid: &str) -> Refusal {
     ))
 }
 
+/// Both builds' depot lists in the game's language (`dlc_filter::fetch_depots`):
+/// what a target that lacks an installed DLC is planned from (§11h).
+pub struct DepotLists<'a> {
+    /// The installed build's depots of the base and every installed DLC.
+    pub from: &'a [DepotList],
+    /// The installed build's install directory: its tree's name in those paths.
+    pub from_tree: String,
+    /// The target's depots of the base and the DLC that stay.
+    pub to: &'a [DepotList],
+}
+
 /// What [`plan_update`] needs from the network side.
 pub struct PlanInput<'a> {
     pub game: &'a Game,
@@ -142,6 +163,11 @@ pub struct PlanInput<'a> {
     pub disk_size: u64,
     /// The target's manifest, for `build-manifest.json`: `(id, generation, manifest)`.
     pub manifest: Option<(String, u32, Manifest)>,
+    /// Both builds' depot lists, when they could be fetched. An installed DLC the
+    /// target lacks needs them: without them the update is refused.
+    pub depots: Option<DepotLists<'a>>,
+    /// The `auto` snapshot will be taken first (for the saves line).
+    pub autosnapshot: bool,
 }
 
 /// What `update` will do.
@@ -155,8 +181,32 @@ pub struct UpdatePlan {
     pub picked: bool,
     pub downgrade: bool,
     pub language: String,
-    /// The DLC the game has; all kept.
+    /// The DLC the game has.
     pub dlcs: Vec<DlcRef>,
+    /// The DLC of `dlcs` the target lacks: the update takes them out (§11h).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub removing: Vec<DlcRef>,
+    /// Their files as the installed build lays them (paths in the installed
+    /// build's tree, `from_tree`), each taken out while it still matches.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub dlc_files: Vec<Expect>,
+    /// Paths they share with a product that stays, whose copy in `game/` isn't
+    /// the target's: the target's version (paths in its tree), laid from the
+    /// switched cache.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub dlc_restored: Vec<Expect>,
+    #[serde(skip)]
+    pub from_tree: String,
+    /// Dirs (in `game/`, lowercased) a product that stays lists a file under: a dir
+    /// the removed DLC's files leave empty goes unless it is one of these.
+    #[serde(skip)]
+    pub kept_dirs: HashSet<String>,
+    /// Every path (in `game/`, lowercased) the target lays for the products that
+    /// stay: never taken out.
+    #[serde(skip)]
+    pub target_paths: HashSet<String>,
+    #[serde(skip)]
+    pub autosnapshot: bool,
     /// An earlier run stopped during its download: this one resumes it.
     pub resume: bool,
     pub cache_root: PathBuf,
@@ -350,45 +400,13 @@ pub fn plan_update(input: PlanInput<'_>) -> Result<Planned, Refusal> {
             rebuild_hint(gogid, to)
         )));
     }
-    let lacking: Vec<&content::DlcRow> = game
+    let removing: Vec<DlcRef> = game
         .content
-        .dlc
-        .iter()
+        .refs()
+        .into_iter()
         .filter(|d| !input.target_dlcs.contains(&d.id))
         .collect();
-    if !lacking.is_empty() {
-        let keep: String = game
-            .content
-            .dlc
-            .iter()
-            .filter(|d| input.target_dlcs.contains(&d.id))
-            .map(|d| format!(" --dlc {}", d.id))
-            .collect();
-        let named: Vec<String> = lacking
-            .iter()
-            .map(|d| format!("{} ({})", d.title, d.id))
-            .collect();
-        let flags = if keep.is_empty() {
-            " --no-dlcs".to_string()
-        } else {
-            keep
-        };
-        let ids: String = lacking.iter().map(|d| format!(" {}", d.id)).collect();
-        return Err(Refusal {
-            message: format!(
-                "build {to} doesn't have the installed DLC {}; remove it first, then update: \
-                 gogo linux-app dlc {gogid} remove{ids}, then gogo linux-app update {gogid}{}; \
-                 or a rebuild without it: gogo linux-app {gogid} --build {to}{flags} --yes",
-                named.join(", "),
-                if input.picked {
-                    format!(" --build {to}")
-                } else {
-                    String::new()
-                }
-            ),
-            usage: true,
-        });
-    }
+    let removing_ids: Vec<u64> = removing.iter().map(|d| d.id).collect();
     let language = language_of(game);
     if let Some(langs) = &input.language_missing {
         return Err(Refusal {
@@ -398,6 +416,20 @@ pub fn plan_update(input: PlanInput<'_>) -> Result<Planned, Refusal> {
             ),
             usage: true,
         });
+    }
+    if !removing.is_empty() && input.depots.is_none() {
+        return Err(refuse(format!(
+            "build {to} doesn't have the installed DLC {}, and the files to take out with \
+             it couldn't be listed (both builds' depot manifests are needed to check them \
+             before they go), so nothing was changed; remove it first: gogo linux-app dlc \
+             {gogid} remove{}, then the update; or a rebuild without it: {}",
+            named(&removing),
+            removing_ids
+                .iter()
+                .map(|d| format!(" {d}"))
+                .collect::<String>(),
+            rebuild_without(game, to, &removing_ids)
+        )));
     }
     let resume = pending.is_some();
     if !resume && let Some(why) = cache_problem(game, &from_id, &language, &input.tree_name) {
@@ -412,6 +444,10 @@ pub fn plan_update(input: PlanInput<'_>) -> Result<Planned, Refusal> {
         TreeMethod::Reflink => "reflink",
         TreeMethod::Copy => "copy",
     };
+    let mut drop = DlcDrop::default();
+    if let (false, Some(d)) = (removing.is_empty(), &input.depots) {
+        drop = plan_drop(game, d, &input.tree_name, to, &removing_ids)?;
+    }
     Ok(Planned::Update(Box::new(UpdatePlan {
         gogid: gogid.clone(),
         title: input.title.to_string(),
@@ -421,6 +457,16 @@ pub fn plan_update(input: PlanInput<'_>) -> Result<Planned, Refusal> {
         downgrade: input.downgrade,
         language,
         dlcs: game.content.refs(),
+        removing,
+        dlc_files: drop.files,
+        dlc_restored: drop.restored,
+        from_tree: input
+            .depots
+            .as_ref()
+            .map_or_else(|| input.tree_name.clone(), |d| d.from_tree.clone()),
+        kept_dirs: drop.kept_dirs,
+        target_paths: drop.target_paths,
+        autosnapshot: input.autosnapshot,
         resume,
         cache_root,
         tree_name: input.tree_name,
@@ -433,6 +479,144 @@ pub fn plan_update(input: PlanInput<'_>) -> Result<Planned, Refusal> {
         notes,
         manifest: input.manifest,
     })))
+}
+
+/// `A (id), B (id)`.
+fn named(dlcs: &[DlcRef]) -> String {
+    dlcs.iter()
+        .map(|d| format!("{} ({})", d.title, d.id))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn titles(dlcs: &[DlcRef]) -> String {
+    dlcs.iter()
+        .map(|d| d.title.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The rebuild on build `to` that leaves `removing` out of `game`.
+fn rebuild_without(game: &Game, to: &str, removing: &[u64]) -> String {
+    let keep: String = game
+        .installed()
+        .iter()
+        .filter(|d| !removing.contains(d))
+        .map(|d| format!(" --dlc {d}"))
+        .collect();
+    let flags = if keep.is_empty() {
+        " --no-dlcs".to_string()
+    } else {
+        keep
+    };
+    format!("gogo linux-app {} --build {to}{flags} --yes", game.gogid)
+}
+
+/// What taking out the DLC the target lacks changes (§11h).
+#[derive(Default)]
+struct DlcDrop {
+    files: Vec<Expect>,
+    restored: Vec<Expect>,
+    kept_dirs: HashSet<String>,
+    target_paths: HashSet<String>,
+}
+
+/// The reverse diff of `removing` across the two builds, and the shared paths
+/// whose copy in `game/` isn't the target's version yet. Refused when a path the
+/// target lays isn't a plain one inside the game. Hashes only the shared paths.
+fn plan_drop(
+    game: &Game,
+    d: &DepotLists<'_>,
+    tree_name: &str,
+    to: &str,
+    removing: &[u64],
+) -> Result<DlcDrop, Refusal> {
+    let diff = dlc_remove::reverse_diff_to(
+        (d.from, &d.from_tree),
+        (d.to, tree_name),
+        &game.gogid,
+        &game.installed(),
+        removing,
+    );
+    let mut restored = Vec::new();
+    for e in diff.shared {
+        let rel = dlc_remove::game_path(tree_name, &e.path);
+        let Some(rel) = rel.filter(|r| lay::plain(&e.path) && lay::plain(r)) else {
+            return Err(refuse(format!(
+                "build {to}'s manifest names {}, which isn't a plain path inside the game, so \
+                 nothing was changed; a rebuild without the DLC: {}",
+                e.path,
+                rebuild_without(game, to, removing)
+            )));
+        };
+        if dlc_remove::find_ci(&game.dirs.game, &rel).is_some_and(|at| dlc_remove::holds(&at, &e)) {
+            continue;
+        }
+        restored.push(e);
+    }
+    Ok(DlcDrop {
+        files: diff.removed,
+        restored,
+        kept_dirs: dlc_remove::kept_dirs(tree_name, &diff.kept),
+        target_paths: diff
+            .kept
+            .iter()
+            .filter_map(|p| dlc_remove::game_path(tree_name, p))
+            .map(|p| p.to_lowercase())
+            .collect(),
+    })
+}
+
+impl UpdatePlan {
+    /// The `auto` snapshot's label: `before update A → B`, with `, removing X` when
+    /// the update takes DLC out.
+    pub fn snapshot_label(&self) -> String {
+        let base = crate::snapshot::labels::update(&self.from.label(), &self.to.label());
+        if self.removing.is_empty() {
+            base
+        } else {
+            format!("{base}, removing {}", titles(&self.removing))
+        }
+    }
+
+    /// The DLC that stay.
+    pub fn keeping(&self) -> Vec<DlcRef> {
+        self.dlcs
+            .iter()
+            .filter(|d| !self.removing.iter().any(|r| r.id == d.id))
+            .cloned()
+            .collect()
+    }
+
+    /// The warning about saves when the update takes DLC out (design 19 §3.7's,
+    /// with the way back an update has: the snapshot, or a rebuild on the
+    /// installed build with the DLC). `None` when it takes none out.
+    pub fn saves_warning(&self) -> Option<String> {
+        if self.removing.is_empty() {
+            return None;
+        }
+        let names = titles(&self.removing);
+        let snapshot = if self.autosnapshot {
+            format!(
+                "the snapshot \"{}\" can restore the game, or ",
+                self.snapshot_label()
+            )
+        } else {
+            String::new()
+        };
+        let dlcs: String = self
+            .dlcs
+            .iter()
+            .map(|d| format!(" --dlc {}", d.id))
+            .collect();
+        Some(format!(
+            "saves made with {names} may not load without it; {snapshot}a rebuild on build \
+             {} brings it back: gogo linux-app {} --build {}{dlcs} --yes",
+            self.from.label(),
+            self.gogid,
+            self.from.build_id
+        ))
+    }
 }
 
 /// The plan's lines (human).
@@ -464,19 +648,38 @@ pub fn plan_lines(p: &UpdatePlan) -> Vec<String> {
     if p.resume {
         out.push("resuming: an earlier run stopped during its download".into());
     }
+    let keeping = p.keeping();
     out.push(format!(
         "language: {}; DLC kept: {}",
         p.language,
-        if p.dlcs.is_empty() {
+        if keeping.is_empty() {
             "none".to_string()
         } else {
-            p.dlcs
-                .iter()
-                .map(|d| d.title.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+            titles(&keeping)
         }
     ));
+    if !p.removing.is_empty() {
+        let bytes: u64 = p.dlc_files.iter().filter_map(|e| e.size).sum();
+        out.push(format!(
+            "DLC removed: {} (build {} doesn't have it): {} file(s) out ({}){}",
+            titles(&p.removing),
+            p.to.build_id,
+            p.dlc_files.len(),
+            size(bytes),
+            if p.dlc_restored.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    ", {} file(s) it replaced laid again in build {}'s version",
+                    p.dlc_restored.len(),
+                    p.to.build_id
+                )
+            }
+        ));
+        out.push(
+            "depot cache: switched to the target without it (its files there are deleted)".into(),
+        );
+    }
     out.push(format!(
         "files from: the depot cache ({}), switched to build {} by its changed files where \
          it can",
@@ -505,6 +708,9 @@ pub fn plan_lines(p: &UpdatePlan) -> Vec<String> {
     ));
     for n in &p.notes {
         out.push(format!("note: {n}"));
+    }
+    if let Some(w) = p.saves_warning() {
+        out.push(format!("saves: {w}"));
     }
     out
 }
@@ -543,6 +749,9 @@ pub struct UpdateOutcome {
     pub from: BuildSide,
     pub to: BuildSide,
     pub dlcs: Vec<DlcRef>,
+    /// DLC the update took out (the target lacks them).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub dlcs_removed: Vec<DlcRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recovered: Option<Direction>,
     /// Files laid onto `game/`.
@@ -571,6 +780,9 @@ pub struct DownloadRecord {
     pub dropped: Vec<DroppedFile>,
     /// The download finished: a rerun lays without fetching again.
     pub fetched: bool,
+    /// The DLC the update takes out (§11h).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removing: Vec<u64>,
 }
 
 /// The pending update's download record in game dir `root`.
@@ -606,7 +818,9 @@ pub fn discard_stale(root: &Path, installed: &str) -> Option<String> {
 pub(crate) fn cache_moved(j: &Journal) -> Option<String> {
     let to = j.to.as_deref().unwrap_or(&j.build_id);
     match depot::read_record(&j.source) {
-        Some(r) if r.build_id == to => None,
+        // A file laid again in place of a removed DLC's must still be the version
+        // the journal recorded.
+        Some(r) if r.build_id == to => dlc_remove::sources_changed(j),
         r => Some(format!(
             "the depot cache is on {} now, not build {to}",
             r.map_or("no recorded build".into(), |r| format!(
@@ -618,8 +832,8 @@ pub(crate) fn cache_moved(j: &Journal) -> Option<String> {
 }
 
 /// The commit (§11g step 7): the target's manifest into place, then `content.toml`
-/// on build `to`, each DLC row with it.
-fn commit(game: &mut Game, to: &BuildSide) -> Result<(), AddError> {
+/// on build `to`, each DLC row with it, without the rows of `removing` (§11h).
+fn commit(game: &mut Game, to: &BuildSide, removing: &[AddingDlc]) -> Result<(), AddError> {
     let root = game.dirs.root.clone();
     let next = root.join(NEXT_MANIFEST);
     let kept = build_manifest::path(&root);
@@ -633,6 +847,7 @@ fn commit(game: &mut Game, to: &BuildSide) -> Result<(), AddError> {
     c.build_id = Some(to.build_id.clone());
     c.version = to.version.clone().filter(|v| !v.trim().is_empty());
     c.branch = to.branch.clone();
+    c.dlc.retain(|d| !removing.iter().any(|r| r.id == d.id));
     for d in &mut c.dlc {
         d.build_id = Some(to.build_id.clone());
         d.version = c.version.clone();
@@ -666,18 +881,21 @@ pub(crate) fn settle(
                     branch: None,
                     generation: None,
                 });
-            commit(game, &to)?;
+            commit(game, &to, &j.removing)?;
             lay::finish(&root)?;
+            dlc_remove::prune_dirs(&game.dirs.game, &j.prune);
             format!(
-                "an earlier update to build {to_id} had stopped while laying its files: \
-                 finished it"
+                "an earlier update to build {to_id}{} had stopped while laying its files: \
+                 finished it",
+                removing_note(&j.removing)
             )
         }
         Direction::Back => {
             let _ = std::fs::remove_file(root.join(NEXT_MANIFEST));
             format!(
-                "an earlier update to build {to_id} had stopped and {}: undid it, the game \
+                "an earlier update to build {to_id}{} had stopped and {}: undid it, the game \
                  is on build {} as it was",
+                removing_note(&j.removing),
                 moved.unwrap_or_else(|| "the depot cache lost files it needed".into()),
                 j.from.as_deref().unwrap_or("?")
             )
@@ -686,6 +904,22 @@ pub(crate) fn settle(
     let _ = std::fs::remove_file(root.join(DOWNLOAD));
     emit(&ProgressEvent::Warn { message });
     Ok(())
+}
+
+/// `, removing X` for a journal that takes DLC out.
+fn removing_note(removing: &[AddingDlc]) -> String {
+    if removing.is_empty() {
+        String::new()
+    } else {
+        format!(
+            ", removing {}",
+            removing
+                .iter()
+                .map(|d| d.title.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
 }
 
 /// The game's entry point after the update, when it isn't the exe
@@ -819,6 +1053,9 @@ where
         from: plan.from.clone(),
         to: plan.to.clone(),
         dlcs: game.content.refs(),
+        // Set by the run that takes them out; a recovery that finished it says so
+        // itself.
+        dlcs_removed: Vec::new(),
         recovered,
         laid,
         removed,
@@ -881,7 +1118,7 @@ where
                 &game.dirs,
                 Some(&lock),
                 crate::snapshot::Trigger::Update,
-                crate::snapshot::labels::update(&plan.from.label(), &plan.to.label()),
+                plan.snapshot_label(),
                 &opts.snapshots,
                 emit,
             )?;
@@ -901,6 +1138,7 @@ where
                 before: Snapshot::take(&cache),
                 dropped: plan.dropped_paths.clone(),
                 fetched: false,
+                removing: plan.removing.iter().map(|d| d.id).collect(),
             };
             lay::write_json_durably(&root.join(DOWNLOAD), &r)?;
             r
@@ -952,28 +1190,65 @@ where
     let changed = now.changed_since(&rec.before);
     // What to check each one by: the manifest's size and MD5 for a dropped file,
     // the size the cache had before for one the switch deleted.
-    let mut expect: std::collections::HashMap<String, (Option<u64>, Option<String>)> =
-        Default::default();
+    let mut expect: HashMap<String, (Option<u64>, Option<String>)> = Default::default();
     for path in now.gone_since(&rec.before) {
         expect.insert(path.clone(), (rec.before.size_of(&path), None));
     }
     for d in &rec.dropped {
         expect.insert(d.path.clone(), (d.size, d.md5.clone()));
     }
-    let mut by_game: std::collections::HashMap<String, (Option<u64>, Option<String>)> =
-        Default::default();
+    let mut by_game: HashMap<String, (Option<u64>, Option<String>)> = Default::default();
     for (path, e) in &expect {
         for f in dlc::lay_list(&cache, &rec.tree_name, std::slice::from_ref(path)) {
             by_game.insert(f.to.to_lowercase(), e.clone());
         }
     }
-    let files = dlc::lay_list(&cache, &rec.tree_name, &changed);
+    let mut files = dlc::lay_list(&cache, &rec.tree_name, &changed);
+    // A path a removed DLC shared with a product that stays (§11h): the target's
+    // version from the switched cache, unless the switch's own files lay it. Each
+    // source is checked by its MD5 (else size) before the lay.
+    let mut restore: HashMap<PathBuf, Expect> = HashMap::new();
+    for e in &plan.dlc_restored {
+        for f in dlc::lay_list(&cache, &rec.tree_name, std::slice::from_ref(&e.path)) {
+            match files.iter().find(|l| l.to.eq_ignore_ascii_case(&f.to)) {
+                Some(l) if l.from != f.from => {}
+                Some(_) => {
+                    restore.insert(f.from.clone(), e.clone());
+                }
+                None => {
+                    restore.insert(f.from.clone(), e.clone());
+                    files.push(f);
+                }
+            }
+        }
+    }
     let mut gone: Vec<String> = expect.into_keys().collect();
     gone.sort();
-    let removed: Vec<String> = dlc::lay_list(&cache, &rec.tree_name, &gone)
+    let mut removed: Vec<String> = dlc::lay_list(&cache, &rec.tree_name, &gone)
         .into_iter()
         .map(|f| f.to)
         .collect();
+    // The removed DLC's own files, checked by what the installed build gives them,
+    // and their `goggame-<id>.*` by name (a record-only DLC's, no depot lists them).
+    let ids: Vec<u64> = plan.removing.iter().map(|d| d.id).collect();
+    let mut theirs: HashSet<String> = HashSet::new();
+    for e in &plan.dlc_files {
+        if let Some(rel) = dlc_remove::game_path(&plan.from_tree, &e.path) {
+            let lower = rel.to_lowercase();
+            by_game.insert(lower.clone(), (e.size, e.md5.clone()));
+            theirs.insert(lower);
+            removed.push(rel);
+        }
+    }
+    let mut by_name: HashSet<String> = HashSet::new();
+    if !ids.is_empty() {
+        for name in dlc_remove::goggame_files(&game.dirs.game, &ids, &theirs) {
+            by_name.insert(name.to_lowercase());
+            removed.push(name);
+        }
+    }
+    // Never a path the target lays for a product that stays.
+    removed.retain(|r| !plan.target_paths.contains(&r.to_lowercase()));
     let mut j = Journal {
         gogid: gogid.clone(),
         lane: "depot".into(),
@@ -990,18 +1265,44 @@ where
         from: Some(plan.from.build_id.clone()),
         to: Some(plan.to.build_id.clone()),
         removed,
-        removing: Vec::new(),
+        removing: plan
+            .removing
+            .iter()
+            .map(|d| AddingDlc {
+                id: d.id,
+                title: d.title.clone(),
+            })
+            .collect(),
         md5s: Default::default(),
         prune: Vec::new(),
     };
     j.survey(&game.dirs.game);
+    j.md5s = j
+        .files
+        .iter()
+        .filter_map(|f| Some((f.to.clone(), restore.get(&f.from)?.md5.clone()?)))
+        .collect();
     // A dropped file is only taken out while it is the installed build's: one the
     // user or the game changed stays, and so does one behind a symlinked dir.
+    let names = titles(&plan.removing);
     let mut kept = Vec::new();
     j.removed.retain(|r| {
-        let (size, md5) = by_game.get(&r.to_lowercase()).cloned().unwrap_or_default();
-        match removable(&game.dirs.game, r, size, md5.as_deref()) {
+        let lower = r.to_lowercase();
+        let ok = if by_name.contains(&lower) {
+            match lay::symlinked_parent(&game.dirs.game, r) {
+                Some(link) => Err(format!("a dir on its path ({link}) is a symlink")),
+                None => Ok(()),
+            }
+        } else {
+            let (size, md5) = by_game.get(&lower).cloned().unwrap_or_default();
+            removable(&game.dirs.game, r, size, md5.as_deref())
+        };
+        match ok {
             Ok(()) => true,
+            Err(why) if theirs.contains(&lower) || by_name.contains(&lower) => {
+                kept.push(format!("kept {r}, which {names} laid: {why}"));
+                false
+            }
             Err(why) => {
                 kept.push(format!(
                     "kept {r}, which build {} dropped: {why}",
@@ -1013,8 +1314,40 @@ where
     });
     // Reported once, with the outcome's warnings.
     warnings.extend(kept);
+    // Dirs the removed DLC's files leave empty go after the commit, unless a
+    // product that stays lists a file under them.
+    let dlc_removed: Vec<String> = j
+        .removed
+        .iter()
+        .filter(|r| {
+            let l = r.to_lowercase();
+            theirs.contains(&l) || by_name.contains(&l)
+        })
+        .cloned()
+        .collect();
+    j.prune = dlc_remove::prune_list(&dlc_removed, &plan.kept_dirs);
     // A laid file behind a symlinked dir refuses the update, before any write.
     j.check_links(&game.dirs.game)?;
+    // A file laid again in place of a removed DLC's must be the target's version
+    // in the switched cache; else nothing is laid, and the update stops naming the
+    // rebuild (the cache is on the target already, so it can't be retried).
+    if let Some(f) = j.files.iter().find(|f| {
+        restore
+            .get(&f.from)
+            .is_some_and(|e| !dlc_remove::holds(&f.from, e))
+    }) {
+        let _ = std::fs::remove_file(root.join(DOWNLOAD));
+        let _ = std::fs::remove_file(root.join(NEXT_MANIFEST));
+        return Err(AddError::Game(MacAppError::Apps(format!(
+            "the depot cache's copy of {} isn't build {}'s version without {names}, so \
+             nothing was laid and the game is on build {} as it was; update with a rebuild \
+             instead: {}",
+            f.to,
+            plan.to.build_id,
+            plan.from.build_id,
+            rebuild_without(game, &plan.to.build_id, &ids)
+        ))));
+    }
     let mut lay_report = None;
     if !j.files.is_empty() || !j.removed.is_empty() {
         let bytes: u64 = j
@@ -1066,8 +1399,9 @@ where
             lay::LayError::Io(e) => AddError::Io(e),
         })?);
     }
-    commit(game, &rec.to)?;
+    commit(game, &rec.to, &j.removing)?;
     lay::finish(&root)?;
+    dlc_remove::prune_dirs(&game.dirs.game, &j.prune);
     let _ = std::fs::remove_file(root.join(DOWNLOAD));
 
     if opts.run_setup
@@ -1089,7 +1423,7 @@ where
     }
     warnings.extend(entry_warning(game));
     let (laid, removed) = (j.files.len() as u64, j.removed.len() as u64);
-    Ok(outcome(
-        game, recovered, laid, removed, lay_report, taken, warnings,
-    ))
+    let mut out = outcome(game, recovered, laid, removed, lay_report, taken, warnings);
+    out.dlcs_removed = plan.removing.clone();
+    Ok(out)
 }

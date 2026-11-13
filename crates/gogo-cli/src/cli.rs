@@ -497,9 +497,11 @@ pub enum LinuxAppSub {
     /// names) in place: the depot cache switches to it by its changed files,
     /// then the changed and new files are laid onto the game's files and the
     /// ones the build dropped are taken out, under a journal. The prefix,
-    /// saves, settings and DLC stay; an automatic snapshot comes first. An
-    /// installed DLC the build lacks, or a depot cache that isn't on the
-    /// installed build, refuses it and names the rebuild that updates
+    /// saves and settings stay; an automatic snapshot comes first. The DLC
+    /// stay, except one the build lacks: the plan names it with a warning
+    /// about saves, and the update takes it out too (the question then
+    /// defaults to no; `--yes` agrees). A depot cache that isn't on the
+    /// installed build refuses it and names the rebuild that updates
     /// instead. A game from GOG's offline installer is updated with `gogo
     /// update` and a rebuild. Run it again after a stop: it resumes the
     /// download, or finishes or undoes a half-laid update.
@@ -509,7 +511,8 @@ pub enum LinuxAppSub {
         gogid: String,
         /// Update to this build instead of the newest on the game's branch: a
         /// build id, or a version name that names one build (`gogo builds
-        /// <game>` lists them). An older build is a downgrade.
+        /// <game>` lists them). An older build is a downgrade; an installed
+        /// DLC it doesn't have is taken out.
         #[arg(long, value_name = "ID|VERSION")]
         build: Option<String>,
         /// Print the plan, change nothing.
