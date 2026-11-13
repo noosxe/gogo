@@ -5,7 +5,9 @@ import contextlib
 import importlib.util
 import io
 import os
+import re
 import struct
+import subprocess
 import sys
 import tempfile
 import time
@@ -119,6 +121,55 @@ class Manifest(unittest.TestCase):
         self.assertEqual(m["window"]["display"], "xwayland")
         self.assertEqual(m["exit"], {"how": "signal", "wait_secs": 30.0, "code": 0})
         self.assertEqual(m["steps"], [{"screenshot": "a"}])
+
+    def test_installer_dlc(self):
+        m = helper.parse_manifest(MINIMAL)
+        self.assertIsNone(m["installer_dlc"])
+        m = helper.parse_manifest(
+            'gogid = 1\n[installer_dlc]\nbuild_args = ["--dlc", "X"]\n'
+            '[[installer_dlc.add]]\nargs = ["Y"]\ninterrupt = "Y/setup_"\n'
+            "[[installer_dlc.add]]\n[[step]]\nwait = 1\n"
+        )
+        self.assertEqual(
+            m["installer_dlc"],
+            {
+                "build_args": ["--dlc", "X"],
+                "add": [{"args": ["Y"], "interrupt": "Y/setup_"}, {"args": [], "interrupt": None}],
+            },
+        )
+        for bad in (
+            "[installer_dlc]\n",
+            '[installer_dlc]\nbuild_args = "--dlc"\n',
+            "[[installer_dlc.add]]\nargs = [1]\n",
+            '[[installer_dlc.add]]\ninterrupt = "("\n',
+            '[[installer_dlc.add]]\nwhat = 1\n',
+        ):
+            with self.subTest(bad), self.assertRaises(helper.ManifestError):
+                helper.parse_manifest(f"gogid = 1\n{bad}[[step]]\nwait = 1\n")
+        with self.assertRaises(helper.ManifestError):
+            helper.parse_manifest('command = ["x"]\n[installer_dlc]\nbuild_args = ["a"]\n[[step]]\nwait = 1\n')
+
+    def test_the_repos_installer_dlc_manifests_parse(self):
+        root = os.path.join(os.path.dirname(__file__), "..", "..", "e2e")
+        for name in ("dlc-1519147341.toml", "dlc-add-1519147341.toml"):
+            with open(os.path.join(root, name)) as f:
+                m = helper.parse_manifest(f.read())
+            self.assertEqual(m["gogid"], 1519147341)
+            self.assertIsNotNone(m["installer_dlc"])
+
+    def test_matching_process_finds_a_command_line(self):
+        # A command line no other process has.
+        arg = f"30.{os.getpid()}"
+        p = subprocess.Popen(["sleep", arg])
+        pat = re.compile(rf"^sleep {re.escape(arg)}$")
+        try:
+            hit = helper.matching_process(pat, os.getpid())
+            self.assertEqual(hit, f"sleep {arg}")
+            helper.kill_matching(pat, os.getpid())
+            self.assertEqual(p.wait(timeout=5), -9)
+        finally:
+            if p.poll() is None:
+                p.kill()
 
     def test_display(self):
         m = helper.parse_manifest('gogid = 1\n[window]\ndisplay = "wayland"\n[[step]]\nwait = 1\n')

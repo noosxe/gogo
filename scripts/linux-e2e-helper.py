@@ -149,6 +149,35 @@ def plant_snap_saves(root, gogid, name, text):
             f.write(f"a fake save from {text}\n")
 
 
+def matching_process(pattern, own_pid):
+    """The command line of a process (not `own_pid`'s) that `pattern` matches, or None."""
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit() or int(pid) == own_pid:
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                cmd = f.read().replace(b"\0", b" ").decode(errors="replace").strip()
+        except OSError:
+            continue
+        if cmd and pattern.search(cmd):
+            return cmd
+    return None
+
+
+def kill_matching(pattern, own_pid):
+    """SIGKILL every process (not `own_pid`) whose command line `pattern` matches."""
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit() or int(pid) == own_pid:
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                cmd = f.read().replace(b"\0", b" ").decode(errors="replace").strip()
+            if cmd and pattern.search(cmd):
+                os.kill(int(pid), signal.SIGKILL)
+        except OSError:
+            continue
+
+
 def game_content(root, gogid):
     """The build and DLC set a game dir's content.toml records."""
     with open(os.path.join(root, "games", str(gogid), "content.toml"), "rb") as f:
@@ -421,6 +450,7 @@ def parse_manifest(text, live=False):
             "override",
             "one_off",
             "snapshot_rollback",
+            "installer_dlc",
             "step",
         ),
         "manifest",
@@ -559,6 +589,42 @@ def parse_manifest(text, live=False):
             raise ManifestError("snapshot_rollback.dlc: a DLC's product id (an integer), or leave it out to rebuild")
         snap = {"dlc": dlc}
 
+    # DLC on the offline-installer lane (#351, design 19 section 5): flags for the build
+    # (`--installer` runs), then `dlc add` runs in the build's sandbox, on the network.
+    idlc = raw.get("installer_dlc")
+    if idlc is not None:
+        if not isinstance(idlc, dict):
+            raise ManifestError("installer_dlc: must be a table")
+        _only(idlc, ("build_args", "add"), "installer_dlc")
+        if gogid is None:
+            raise ManifestError("installer_dlc is for a game (gogid), not a command")
+        build_args = idlc.get("build_args", [])
+        if not isinstance(build_args, list) or not all(isinstance(a, str) for a in build_args):
+            raise ManifestError("installer_dlc.build_args: a list of strings")
+        adds_raw = idlc.get("add", [])
+        if not isinstance(adds_raw, list):
+            raise ManifestError("installer_dlc.add: an array of tables ([[installer_dlc.add]])")
+        adds = []
+        for i, a in enumerate(adds_raw):
+            what = f"installer_dlc.add[{i}]"
+            if not isinstance(a, dict):
+                raise ManifestError(f"{what}: must be a table")
+            _only(a, ("args", "interrupt"), what)
+            args = a.get("args", [])
+            # No args: a bare `add`, which finishes an interrupted one.
+            if not isinstance(args, list) or not all(isinstance(x, str) for x in args):
+                raise ManifestError(f"{what}.args: a list of strings (the DLC to add)")
+            interrupt = a.get("interrupt")
+            if interrupt is not None:
+                try:
+                    re.compile(interrupt)
+                except (re.error, TypeError) as e:
+                    raise ManifestError(f"{what}.interrupt: not a regex: {e}") from e
+            adds.append({"args": args, "interrupt": interrupt})
+        if not build_args and not adds:
+            raise ManifestError("installer_dlc: needs build_args or an add")
+        idlc = {"build_args": build_args, "add": adds}
+
     steps_raw = raw.get("step", [])
     if not isinstance(steps_raw, list) or not (steps_raw or live):
         raise ManifestError("needs at least one [[step]]")
@@ -601,6 +667,7 @@ def parse_manifest(text, live=False):
         },
         "one_off": one_off,
         "snapshot_rollback": snap,
+        "installer_dlc": idlc,
         "steps": steps,
     }
 
@@ -2658,6 +2725,92 @@ class Driver:
         env["GOGO_HOME"] = root
         return self.tool(*argv, timeout=timeout, env=env)
 
+    def installer_dlc_steps(self):
+        """`[installer_dlc]` (#351): each `dlc add` in order, in the build's sandbox (it
+        downloads), one of them stopped with SIGINT to its process group once a process
+        matching its `interrupt` regex runs; then every DLC content.toml lists must have
+        its goggame-<id>.info in the base game's dir and nowhere else in the prefix
+        (design 19 section 11 Q5). Failures are checks; this never fails the build."""
+        spec = self.cfg["manifest"]["installer_dlc"]
+        gogid = str(self.cfg["manifest"]["gogid"])
+        gogo = self.cfg["build_command"][0]
+        game = os.path.join(self.cfg["games_dir"], gogid)
+        journal = os.path.join(game, "dlc-journal.json")
+        env = dict(self.env)
+        env.update(self.cfg["game_env"])
+        out = {"adds": [], "dlc": [], "base_dir": None}
+        self.result["installer_dlc"] = out
+        try:
+            for i, step in enumerate(spec["add"], 1):
+                argv = [gogo, "linux-app", "dlc", gogid, "add", *step["args"], "--yes"]
+                log_path = os.path.join(self.results, f"dlc-add-{i}.log")
+                pat = re.compile(step["interrupt"]) if step["interrupt"] else None
+                hit = None
+                started = time.monotonic()
+                with open(log_path, "wb") as log:
+                    p = subprocess.Popen(argv, env=env, cwd=self.cfg["launch_cwd"], stdin=subprocess.DEVNULL,
+                                         stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                    while p.poll() is None:
+                        if pat is not None and hit is None:
+                            hit = matching_process(pat, os.getpid())
+                            if hit is not None:
+                                # Into the installer's run, then a Ctrl-C to the whole group.
+                                time.sleep(1)
+                                try:
+                                    os.killpg(p.pid, signal.SIGINT)
+                                except ProcessLookupError:
+                                    pass
+                        if time.monotonic() - started > 3000:
+                            os.killpg(p.pid, signal.SIGKILL)
+                        time.sleep(0.1)
+                rec = {"argv": argv[2:], "exit": p.returncode, "log": log_path,
+                       "secs": round(time.monotonic() - started), "interrupted": hit,
+                       "journal_after": os.path.exists(journal)}
+                out["adds"].append(rec)
+                tail = ""
+                with open(log_path, errors="replace") as f:
+                    tail = " | ".join(f.read().strip().splitlines()[-3:])
+                if pat is not None:
+                    self.check(f"installer_dlc_add_{i}_interrupted",
+                               hit is not None and p.returncode != 0 and rec["journal_after"],
+                               f"exit {p.returncode}, matched {hit!r}, journal left: {rec['journal_after']}; {tail}")
+                    # What the stopped run left running in the prefix goes, as a reboot would.
+                    kill_matching(pat, os.getpid())
+                else:
+                    self.check(f"installer_dlc_add_{i}", p.returncode == 0 and not rec["journal_after"],
+                               f"exit {p.returncode}, journal left: {rec['journal_after']}; {tail}")
+            for name, path in install_logs(self.cfg["games_dir"]):
+                shutil.copy(path, os.path.join(self.results, f"install-{name}"))
+            with open(os.path.join(game, "content.toml"), "rb") as f:
+                content = tomllib.load(f)
+            with open(os.path.join(game, "gogo-launch.toml"), "rb") as f:
+                exe = tomllib.load(f).get("exe", "")
+            parts = exe.split("\\")
+            drive_c = os.path.join(game, "prefix", "drive_c")
+            base = os.path.join(drive_c, "GOG", parts[2]) if len(parts) >= 4 else None
+            out["base_dir"] = base
+            out["version"] = content.get("version")
+            out["language"] = content.get("language")
+            ok = base is not None
+            for d in content.get("dlc", []):
+                info = f"goggame-{d['id']}.info"
+                where = [os.path.join(r, n) for r, _, ns in os.walk(drive_c)
+                         if not r.startswith(os.path.join(drive_c, "windows"))
+                         for n in ns if n.lower() == info]
+                inside = base is not None and os.path.isfile(os.path.join(base, info))
+                elsewhere = [w for w in where if os.path.dirname(w) != base]
+                out["dlc"].append({"id": d["id"], "title": d.get("title"), "version": d.get("version"),
+                                   "build_id": d.get("build_id"), "in_base_dir": inside, "elsewhere": elsewhere})
+                ok = ok and inside and not elsewhere
+            self.check("installer_dlc_dir", ok and bool(out["dlc"]),
+                       f"{len(out['dlc'])} DLC; base dir {base}; "
+                       + "; ".join(f"{x['id']}: in base {x['in_base_dir']}, elsewhere {x['elsewhere']}"
+                                   for x in out["dlc"]))
+        except Exception as e:
+            self.check("installer_dlc", False, f"{type(e).__name__}: {e}")
+        finally:
+            self.save()
+
     def snapshot_prep(self):
         """The build phase's half of `snapshot_rollback`, on the network and with
         snapshots on, in a data root of its own: the first build is done; a fake
@@ -3002,6 +3155,8 @@ class Driver:
             if bad:
                 raise RuntimeError(f"isolation failed: {bad[0]['name']}: {bad[0]['detail']}")
             code = self.run_build()
+            if code == 0 and (self.cfg.get("manifest") or {}).get("installer_dlc"):
+                self.installer_dlc_steps()
             if code == 0 and self.cfg.get("snapshot_prep"):
                 self.snapshot_prep()
             self.check("finished", True, f"build exited {code}")
