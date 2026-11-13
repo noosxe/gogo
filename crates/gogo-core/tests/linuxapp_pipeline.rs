@@ -7024,6 +7024,7 @@ mod dlc_add {
             r.inputs,
             [DownloadInputs {
                 targeted: true,
+                switch_from: None,
                 language: Some("en-US".into()),
                 old_language: Some("en-US".into()),
                 dlcs: vec![DLC.to_string()],

@@ -200,6 +200,7 @@ impl<W: Write> Renderer<W> {
                     self.line(&format!("gogo: {}", game_files_line(plan)));
                 }
             }
+            Note { message } => self.line(&format!("gogo: {message}")),
             Preparing => {
                 self.enter(Phase::Preparing, now, "gogo: preparing".into());
                 self.draw(now, true);

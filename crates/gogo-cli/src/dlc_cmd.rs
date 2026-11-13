@@ -472,6 +472,7 @@ async fn add_cmd(
                 manifest: &manifest,
                 build_id: &build,
                 inputs: &inputs,
+                old_manifest: None,
                 install_root: &root,
                 support_root: &root.join("gog-support"),
                 deps_root: &deps_root,
