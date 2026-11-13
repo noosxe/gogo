@@ -578,7 +578,7 @@ user copies what they want from the aside dir.
 
 ### 6.3 Cloud saves (#275)
 
-#275 has no design yet. These are the constraints this design puts on it:
+These are the constraints this design puts on #275; design 22 §4.3 and §7.2 take them up:
 
 1. **A rollback makes local saves older than the cloud's.** The next sync must not silently
    pull the newer cloud saves back (undoing the rollback) nor push the rolled-back ones over
