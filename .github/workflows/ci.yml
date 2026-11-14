@@ -1,124 +1,39 @@
-# Canonical checks (AGENTS.md) on GitHub Actions — no nix here: the toolchain
-# comes from rust-toolchain.toml (same 1.99.1 as the flake) via rustup.
-# Linux + macOS only (project scope); aarch64-linux cross-builds are out of
-# scope for CI — deny.toml still evaluates the full target set statically.
+# Entry point for CI: pull requests, pushes to main, a weekly run and manual
+# runs. Every job lives in ci-jobs.yml; its `CI result` job (check name
+# `CI / CI result`) is the only required check.
+#
+# Pushes to main run everything. Two PRs that are green on their own can
+# still break main together, and the push run is the only one that sees the
+# combined tree. It also keeps the rust-cache entries fresh: PRs can only
+# restore caches saved on the default branch.
+#
+# The weekly run catches drift no commit causes: runner image, toolchain
+# downloads, vanished sources.
 
-name: ci
+name: CI
 
-# Docs-only changes skip CI. Pushes to main still run it: that keeps the
-# rust-cache entries PRs restore from fresh, so PR builds stay warm.
 on:
+  pull_request:
+    types: [opened, synchronize, reopened]
   push:
     branches: [main]
-    paths-ignore: ['docs/**', '**/*.md']
-  pull_request:
-    paths-ignore: ['docs/**', '**/*.md']
+  schedule:
+    - cron: "23 4 * * 0"
+  workflow_dispatch:
 
+# A newer push to a PR cancels its older run. Every other run has a group of
+# its own, so no run on main is ever cancelled or replaced while queued: each
+# merged commit gets its own full run.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: true
 
-env:
-  CARGO_TERM_COLOR: always
-  # What setup-rust-toolchain used to set: no incremental or debug info on
-  # CI (smaller, faster caches) and warnings as errors.
-  CARGO_INCREMENTAL: 0
-  CARGO_PROFILE_DEV_DEBUG: 0
-  CARGO_BUILD_WARNINGS: deny
+permissions: {}
 
 jobs:
-  rustfmt:
-    name: rustfmt
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      # rustup is on every runner image: this installs what rust-toolchain.toml
-      # pins (1.99.1, clippy, rustfmt). Not setup-rust-toolchain, which spends
-      # a minute on `brew install bash` on macOS runners.
-      - run: rustup toolchain install
-      - run: cargo fmt --all --check
-
-  clippy:
-    name: clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      # -D warnings: warnings are failures, same as locally.
-      - run: cargo clippy --all-targets -- -D warnings
-
-  test:
-    name: test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v7
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      # nextest is the canonical runner (docs/design/08); the .cargo/config.toml
-      # dev-signing runner degrades to plain exec here (no codesigning identity
-      # on CI runners) and never signs test binaries (*/deps/*).
-      - uses: taiki-e/install-action@v2
-        id: nextest
-        continue-on-error: true
-        with:
-          tool: cargo-nextest@0.9.146
-      # GitHub release assets occasionally 504; build the same version from source.
-      - name: Fallback - build cargo-nextest from source
-        if: steps.nextest.outcome == 'failure'
-        run: |
-          echo "::warning::prebuilt cargo-nextest 0.9.146 download failed; building from source"
-          cargo install cargo-nextest@0.9.146 --locked
-      - run: cargo nextest run
-
-  deny:
-    name: cargo-deny
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - run: rustup toolchain install
-      - uses: taiki-e/install-action@v2
-        id: deny
-        continue-on-error: true
-        with:
-          tool: cargo-deny@0.20.2
-      # GitHub release assets occasionally 504; build the same version from source.
-      - name: Fallback - build cargo-deny from source
-        if: steps.deny.outcome == 'failure'
-        run: |
-          echo "::warning::prebuilt cargo-deny 0.20.2 download failed; building from source"
-          cargo install cargo-deny@0.20.2 --locked
-      # Licenses (permissive-only allowlist + gog-warp clarify) and advisories.
-      - run: cargo deny check
-
-  # Real btrfs, unprivileged (design 20 §10.3). No unprivileged btrfs mount
-  # exists, so the job mounts loop images with sudo and chowns them to the
-  # runner user; the tests themselves run without privileges. Two mounts: one
-  # without `user_subvol_rm_allowed` (the rmdir delete fallback), one with it
-  # (the SNAP_DESTROY_V2 ioctl). mkfs.btrfs and cargo come from the dev shell.
-  snapshots-btrfs:
-    name: snapshots-btrfs
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: DeterminateSystems/determinate-nix-action@v3
-      - name: Runner kernel has btrfs
-        run: |
-          grep -qw btrfs /proc/filesystems || sudo modprobe btrfs || true
-          if ! grep -qw btrfs /proc/filesystems; then
-            echo "::error::the runner kernel ($(uname -r)) has no btrfs support; the snapshots-btrfs job cannot run"
-            exit 1
-          fi
-          uname -r
-      - name: Build tests and mkfs.btrfs
-        run: |
-          nix develop -c mkfs.btrfs --version
-          nix develop -c cargo nextest run -p gogo-core --test snapshot_btrfs --test linuxapp_pipeline --no-run
-      - name: btrfs without user_subvol_rm_allowed (rmdir fallback)
-        run: scripts/ci-btrfs-tests.sh plain
-      - name: btrfs with user_subvol_rm_allowed (ioctl delete)
-        run: scripts/ci-btrfs-tests.sh rm-allowed
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci-jobs.yml
+    permissions:
+      contents: read
+      pull-requests: read

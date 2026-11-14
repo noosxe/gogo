@@ -1,0 +1,28 @@
+# The `ci:full` label runs every job on a PR, whatever it changes.
+#
+# GitHub can't filter `labeled` events by label name, so every label starts
+# this workflow. Any other label leaves one skipped check named `CI`, which
+# costs no runner and is not `CI / CI result`, so it can't stand in for the
+# required check.
+
+name: CI full
+
+on:
+  pull_request:
+    types: [labeled]
+
+# Per label, so adding an unrelated label never cancels a full run.
+concurrency:
+  group: ci-full-${{ github.ref }}-${{ github.event.label.name }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  ci:
+    name: CI
+    if: "${{ github.event.label.name == 'ci:full' }}"
+    uses: ./.github/workflows/ci-jobs.yml
+    permissions:
+      contents: read
+      pull-requests: read
