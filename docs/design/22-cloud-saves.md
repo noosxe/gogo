@@ -110,7 +110,7 @@ whose MD5 no longer matches `hash`; gogo's reqwest is built without the `gzip` f
 TLS stack, `Cargo.toml`), so it gets the stored bytes.
 
 **Tombstones.** Of Cyberpunk's 231 listed objects, **168** have the hash of an **empty gzip
-stream** (`aadd8693…1f3c`, 89 bytes as Galaxy writes it, no `X-Object-Meta-LocalLastModified`):
+stream** (`aadd86936a80ee8a369579c3926f1b3c`, 89 bytes as Galaxy writes it, no `X-Object-Meta-LocalLastModified`):
 files deleted locally by a client that then marked them deleted. They stay in the listing;
 every client treats them as "deleted" (§4.2). Cyberpunk rotates its autosaves, so most of its
 history is tombstones.
@@ -620,10 +620,9 @@ Code: `gogo_core::cloud::{remote_config, locations}`, `gogo saves locations <gog
 - **Lane** is the host's (Linux → `steamuser`, macOS → `crossover`), a `Lane` value the
   tests pass explicitly. Both lanes find the game through `GameDirs::for_game`, and the Mac
   lane reuses the Linux layout helpers (`setup::game_files`, the `prefix/` and `game/` dirs of
-  `GameDirs`). `locations::LocationError` is this code's own error type, apart from
-  `cloud::error::CloudError` (auth and storage): C1's strict `info_client_id` and its
-  secret-bearing manifest reader weren't reused, because a malformed info file must fall back to
-  the manifest here and the secret must not be parsed. D9's check of the `crossover` user on a real bottle is still pending.
+  `GameDirs`). D9's check of the `crossover` user on a real bottle is still pending. (The
+  separate location error and client-id reader this shipped with were merged into C1's by C3,
+  §12b.)
 - **Client id**: the game's `goggame-<gogid>.info` (the game's files, then anywhere under
   `drive_c` for the installer lane), else the `clientId` field of the kept
   `build-manifest.json`, read through a typed struct that holds only that field, so the secret
@@ -656,6 +655,71 @@ Code: `gogo_core::cloud::{remote_config, locations}`, `gogo saves locations <gog
   `cloud::locations::excluded`. The `<?INSTALL?>` build-file filter (§3.4) is **not wired
   in yet**: it needs the build's file list design 20 §6.1 builds per game.
 - `__default` is resolved and labelled `unverified` (D10).
+
+## 12b. As built: read side and `gogo saves status` (C3, #460)
+
+Code: `gogo_core::cloud::{client_id, storage, record, scan, classify, status}`,
+`gogo saves status <gogid> [--json]`.
+
+- **One error, one reader.** `CloudError` covers every `saves` command (the location error
+  joined it) and `CloudError::exit_code()` is the only mapping: 2 a gogid with no game dir, 3
+  auth and `no_license`, 4 network (remote config too), 5 a corrupt object, 1 the rest; the
+  CLI adds 8 for conflicts. `cloud::client_id` is the one `clientId` reader: it finds
+  `goggame-<gogid>.info` in the game's files, then under `drive_c`, and reports a broken file
+  (`InfoId::Bad`: unreadable, not JSON, an id that isn't a usable client id) to the caller.
+  Credentials refuse it (§2.2's check); `saves locations` falls back to the kept manifest's
+  id-only field with a warning. `CloudAuth::credentials` takes the game: the kept manifest is
+  read from the game dir, the info file from the game's files, per lane.
+- **Order of a status.** The client id and the remote config come first, with no account: a
+  game without cloud saves (off, or a 404) never restores the session. Then the record, the
+  credentials (their client id must equal the game's, else `ClientIdMismatch`), the token,
+  one listing. The CLI restores the session only for that second half.
+- **What status writes**: the remote-config cache and, through `CloudAuth`, a refreshed Galaxy
+  token. Not the cloud, not the game's dirs or prefix (a test compares the tree before and
+  after), not the record: a client-id change is reported (`client_id_changed`) and planned as
+  a first sync; the set-aside (D11) is done by the next sync, under the lock. No lock is taken.
+- **Listing**: JSON only, read up to 32 MiB, every `hash` must be 32 lowercase hex. A listing
+  with fewer entries than `x-container-object-count` is refused (`ListingTruncated`): Swift
+  pages long listings and GOG's paging is unverified, and a missing entry would read as a
+  cloud deletion. Paging comes when a game needs it.
+- **Downloads** read at most the listed `bytes`, check the MD5 of the stored bytes, and only
+  then gunzip (multi-member gzip accepted). `status` fetches only the first sync's both-sided
+  files, four at a time, into memory, and hashes the gunzipped stream; nothing goes to disk.
+  An object that fails the check is planned as `corrupt` (exit 5) and the rest still planned.
+- **Tombstones**: the hash above (Galaxy's), the MD5 of gogo's own empty gzip
+  (`storage::gzip`: level 6, no name, mtime 0, the form C5 uploads), or a 0-byte object. A real
+  empty save file reads as deleted, as in Galaxy.
+- **Record**: as §4.1, keyed by object name, times as TOML datetimes in UTC, `mtime` to the
+  nanosecond (compared exactly; any difference means "hash it"). A record that can't be
+  parsed, or has another `schema`, is an error, not a first sync: it may hold a rollback mark.
+  Written atomically and only through `SyncLock` (`<gogid>.lock`, flock, fails at once when
+  held); a set-aside record becomes `<gogid>.client-changed-<UTC>.toml` and never overwrites
+  an older one.
+- **Matching** is by local path: every listed or recorded name goes through
+  `Location::file`, so case differences from Windows clients meet the same local file. Two
+  cloud names that land on one file are both conflicts (`case_clash`). The scan walks the
+  location's canonical path (the prefix may be reached through a link), never follows a link,
+  stops at 32 levels, and lists links, special files and non-UTF-8 names as `ignored`.
+- **Classification** adds three outcomes to §4.2's table: `record` (first sync, same
+  content), `forget` (deleted on both sides) and `corrupt`. `rolled_back` turns uploads,
+  downloads and deletions into conflicts (`rolled_back`), not `record`/`forget`; a record for
+  another client carries no rollback mark.
+- **Objects outside the plan** are listed as `unmapped` with a reason: `no_location`,
+  `skipped_location`, `bad_path`, `excluded`; never acted on. Tombstones outside every
+  location are left out.
+- **`<?INSTALL?>` locations** still lack the build-file filter (#469): until it lands their
+  build files show as uploads in `status`.
+- **Output**: text hides unchanged files and ends with counts per action, unmapped notes and
+  the container's use; `--json` has every file with `action`, `reason`, both sides and
+  `recorded`, the counts, `first_sync`, `client_id_changed`, `rolled_back`, `pending_push`,
+  `last_sync`, the skipped locations, the unmapped objects and the container. No token, secret,
+  user id or client id.
+- **Tests**: `cloud::testing` (feature `test-util`) has a main session with a made-up token,
+  a fixed exchange and a kept manifest with made-up credentials, for core and CLI tests
+  against wiremock.
+- **Live check** (2026-11-14, read-only, gogo's data and cache dirs in scratch dirs, the game
+  dir linked in): Cyberpunk 2077 with no local saves gave 63 downloads, 231 objects of which
+  168 tombstones, exit 0, as in §1.3. Nothing in the game's dirs changed.
 
 ## 13. Implementation issues (to be filed)
 
