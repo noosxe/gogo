@@ -1,6 +1,6 @@
 //! `gogo saves …` (design 22 §5): GOG cloud saves of a built game. The
-//! read-only `locations` and `status` subcommands; pull, push and sync come
-//! later.
+//! read-only `locations` and `status` subcommands, and `pull`, which writes
+//! local save files only; push and sync come later.
 
 use gogo::cloud::build_files::{self, Lookup};
 use gogo::cloud::classify::{Action, ConflictReason};
@@ -40,12 +40,50 @@ pub enum SavesCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Bring the cloud's changes here: downloads and local deletions, as
+    /// `status` plans them. Never writes to the cloud; uploads are left for
+    /// `push`. Every local file it overwrites or deletes is copied to
+    /// `cloud-saves/backups/<gogid>/` first, and on a game with snapshots
+    /// a `cloud-pull` snapshot is taken before. Refuses while the game runs.
+    /// Exits 8 when files that need a decision are left.
+    Pull(PullArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct PullArgs {
+    /// GOG product id.
+    #[arg(value_name = "GOGID")]
+    pub gogid: String,
+    /// Settle every conflict the cloud's way (`local` keeps the local file:
+    /// that is `gogo saves push`'s side).
+    #[arg(long, value_enum, value_name = "SIDE")]
+    pub prefer: Option<Prefer>,
+    /// Show what would be done; change nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Don't ask before overwriting or deleting local files.
+    #[arg(long)]
+    pub yes: bool,
+    /// Machine-readable output (no prompts).
+    #[arg(long)]
+    pub json: bool,
+    /// Skip the `cloud-pull` snapshot for this run (the backups are still
+    /// made).
+    #[arg(long)]
+    pub no_snapshots: bool,
+}
+
+/// A pull settles conflicts only the cloud's way.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Prefer {
+    Cloud,
 }
 
 pub async fn run(cmd: SavesCmd) -> Result<i32, AppError> {
     match cmd {
         SavesCmd::Locations { gogid, json } => locations(&gogid, json).await,
         SavesCmd::Status { gogid, json } => status(&gogid, json).await,
+        SavesCmd::Pull(a) => pull(a).await,
     }
 }
 
@@ -146,6 +184,350 @@ async fn status(gogid: &str, json: bool) -> Result<i32, AppError> {
     )
     .await;
     Ok(emit(status_outcome(plan, json)))
+}
+
+async fn pull(a: PullArgs) -> Result<i32, AppError> {
+    use gogo::cloud::pull::{self as cloud_pull, LiveHost, PullOptions};
+    let game = match Game::find(&a.gogid, Lane::host()) {
+        Ok(g) => g,
+        Err(e) => return Ok(emit(Outcome::failed(&e))),
+    };
+    let http = gogo::gog::http().map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+    let cache = gogo::state::cache::cache_dir();
+    let located = cloud_status::locate(&game, &http, remote_config::BASE, &cache).await;
+    let (client_id, mut resolved, source) = match located {
+        Err(e) => return Ok(emit(Outcome::failed(&e))),
+        Ok(Located::Off(plan)) => return Ok(emit(status_outcome(Ok(plan), a.json))),
+        Ok(Located::On {
+            client_id,
+            resolved,
+            source,
+        }) => (client_id, resolved, source),
+    };
+    if resolved.locations.iter().any(|l| l.in_game_files()) {
+        let list = build_list(build_files::lookup(&game), fetch_build_files).await;
+        build_files::apply(&mut resolved, &game, list);
+    }
+    let cfg = crate::load_config_from_env()?;
+    let store = gogo::auth::store::open(cfg.auth.token_store);
+    let session = match gogo::auth::Session::restore(store.clone()).await {
+        Ok(s) => s,
+        Err(e) => return Ok(emit(Outcome::failed(&gogo::cloud::auth::auth_error(e)))),
+    };
+    let auth = gogo::cloud::auth::CloudAuth::new(&session, &*store);
+    let storage = match gogo::cloud::http::StorageClient::new() {
+        Ok(s) => s,
+        Err(e) => return Ok(emit(Outcome::failed(&e))),
+    };
+    let json = a.json;
+    let mut progress = |ev: &gogo::prelude::ProgressEvent| {
+        if json {
+            return;
+        }
+        use gogo::prelude::ProgressEvent as E;
+        match ev {
+            E::SnapshotPruned { id, label, created } => eprintln!(
+                "gogo: {}",
+                gogo::linuxapp::snapshots::pruned_line(*id, label, created)
+            ),
+            E::Warn { message } => eprintln!("gogo: note: {message}"),
+            _ => {}
+        }
+    };
+    let mut host = LiveHost::new(&game, crate::auto_snapshots(a.no_snapshots)?, &mut progress);
+    let mut decide = CliDecide {
+        prefer_cloud: a.prefer == Some(Prefer::Cloud),
+        yes: a.yes,
+        interactive: !a.dry_run && crate::dlc_cmd::interactive(a.json),
+    };
+    let report = cloud_pull::pull(
+        &cloud_pull::Inputs {
+            game: &game,
+            client_id: &client_id,
+            resolved: &resolved,
+            source,
+            auth: &auth,
+            storage: &storage,
+            record_dir: &gogo::cloud::record::default_dir(),
+        },
+        &PullOptions {
+            dry_run: a.dry_run,
+            keep_backups: cfg.cloud_saves.keep_backups,
+            now: chrono::Utc::now(),
+            stop_before_rename: None,
+        },
+        &mut host,
+        &mut decide,
+    )
+    .await;
+    Ok(emit(pull_outcome(report, a.json)))
+}
+
+/// `--prefer`, `--yes` and the prompts.
+pub struct CliDecide {
+    pub prefer_cloud: bool,
+    pub yes: bool,
+    /// A TTY on stdin and stderr, no `--json`, not a dry run.
+    pub interactive: bool,
+}
+
+impl gogo::cloud::pull::Decide for CliDecide {
+    fn conflict(
+        &mut self,
+        file: &cloud_status::FilePlan,
+        choices: &[gogo::cloud::pull::Choice],
+    ) -> gogo::cloud::pull::Choice {
+        use gogo::cloud::pull::Choice;
+        if self.prefer_cloud {
+            return Choice::Cloud;
+        }
+        if !self.interactive {
+            return Choice::Skip;
+        }
+        let why = match file.action {
+            Action::Conflict(r) => conflict_text(r),
+            _ => "needs a decision",
+        };
+        let side = |s: Option<String>| s.unwrap_or_else(|| "none".into());
+        let here = side(
+            file.local
+                .as_ref()
+                .map(|l| format!("{} bytes, {}", l.size, clean(&l.mtime))),
+        );
+        let there = side(file.cloud.as_ref().map(|c| {
+            if c.tombstone {
+                "deleted".to_string()
+            } else {
+                format!(
+                    "{} bytes stored, uploaded {}",
+                    c.bytes,
+                    clean(c.last_modified.as_deref().unwrap_or("?"))
+                )
+            }
+        }));
+        let items: Vec<&str> = choices
+            .iter()
+            .map(|c| match c {
+                Choice::Cloud => "cloud: take the cloud's (the local file is backed up)",
+                Choice::Local => "local: keep this one (push it later)",
+                Choice::Both => "both: keep this one renamed, download the cloud's",
+                Choice::Skip => "skip: decide later",
+            })
+            .collect();
+        let prompt = format!(
+            "{} ({why}); here: {here}; cloud: {there}",
+            clean(&file.name)
+        );
+        let pick = crate::depot_progress::prompting(|| {
+            dialoguer::Select::new()
+                .with_prompt(prompt)
+                .items(&items)
+                .default(items.len() - 1)
+                .interact()
+        });
+        pick.ok()
+            .and_then(|i| choices.get(i).copied())
+            .unwrap_or(Choice::Skip)
+    }
+
+    fn confirm(&mut self, c: &gogo::cloud::pull::Consent) -> gogo::cloud::pull::Confirm {
+        use gogo::cloud::pull::Confirm;
+        if self.yes {
+            return Confirm::Yes;
+        }
+        if !self.interactive {
+            return Confirm::CannotAsk;
+        }
+        let prompt = format!(
+            "{}, backed up to {} first. Go ahead?",
+            consent_text(c),
+            clean(&c.backups.display().to_string())
+        );
+        let go = crate::depot_progress::prompting(|| {
+            dialoguer::Confirm::new()
+                .with_prompt(prompt)
+                .default(false)
+                .interact()
+        })
+        .unwrap_or(false);
+        if go { Confirm::Yes } else { Confirm::No }
+    }
+}
+
+fn consent_text(c: &gogo::cloud::pull::Consent) -> String {
+    let mut parts = vec![];
+    if c.overwrites > 0 {
+        parts.push(format!(
+            "{} download(s) overwrite local files",
+            c.overwrites
+        ));
+    }
+    if c.deletes > 0 {
+        parts.push(format!("{} local file(s) deleted", c.deletes));
+    }
+    parts.join(", ")
+}
+
+/// A pull's output and exit code: its error's code when it stopped (6 a
+/// failed write, 7 refused); 2 when consent was needed and couldn't be
+/// asked, or was refused; then 5 a corrupt object, 1 an unreadable file, 8
+/// files left for a decision, 0.
+pub fn pull_outcome(
+    report: Result<gogo::cloud::pull::PullReport, CloudError>,
+    json: bool,
+) -> Outcome {
+    let r = match report {
+        Ok(r) => r,
+        Err(e) => return Outcome::failed(&e),
+    };
+    let mut stderr = String::new();
+    let code = if let Some(e) = &r.error {
+        stderr.push_str(&format!("gogo: {e}\n"));
+        e.exit_code()
+    } else if r.needs_consent {
+        stderr.push_str(
+            "gogo: pulling these saves overwrites or deletes local files and needs consent: \
+             pass --yes\n",
+        );
+        cli::exit::USAGE
+    } else if r.declined {
+        stderr.push_str("gogo: aborted; nothing was changed\n");
+        cli::exit::USAGE
+    } else if r.corrupt() > 0 {
+        cli::exit::CORRUPT
+    } else if r.unreadable() > 0 {
+        cli::exit::FAILED
+    } else if r.left() > 0 {
+        cli::exit::CONFLICTS
+    } else {
+        cli::exit::OK
+    };
+    let stdout = if json {
+        format!(
+            "{}\n",
+            serde_json::to_string(&r).expect("a pull report serializes")
+        )
+    } else {
+        render_pull(&r)
+    };
+    Outcome {
+        code,
+        stdout,
+        stderr,
+    }
+}
+
+/// The plain-text report of a pull.
+pub fn render_pull(r: &gogo::cloud::pull::PullReport) -> String {
+    use gogo::cloud::pull::{LeftReason, Op, State};
+    let p = &r.plan;
+    let mut out = String::new();
+    if !p.enabled {
+        return render_status(p);
+    }
+    let dry = r.dry_run;
+    if dry {
+        out.push_str("dry run: nothing is changed\n");
+    }
+    if p.config_source == Source::StaleCache {
+        out.push_str("note: GOG's remote config couldn't be fetched; using an older cached copy\n");
+    }
+    if p.first_sync {
+        out.push_str(
+            "first sync: no record of an earlier one, so files on both sides are compared by content\n",
+        );
+    }
+    for w in &r.warnings {
+        out.push_str(&format!("note: {}\n", clean(w)));
+    }
+    for l in &p.locations {
+        if l.missing {
+            out.push_str(&format!(
+                "warning: {} ({}) is gone but the last sync recorded files in it (a moved \
+                 prefix, a drive not mounted?): nothing is downloaded there\n",
+                clean(&l.name),
+                clean(&l.path.display().to_string())
+            ));
+        }
+    }
+    let op_text = |o: Op| match o {
+        Op::Download => "download",
+        Op::Overwrite => "overwrite",
+        Op::KeepBoth => "keep both",
+        Op::DeleteLocal => "delete here",
+        Op::Record => "same",
+        Op::Forget => "forget",
+    };
+    let mut counts: std::collections::BTreeMap<&str, usize> = Default::default();
+    for f in &r.files {
+        let (tag, note) = match (&f.state, f.op) {
+            (State::Planned, Some(o)) => (op_text(o), String::new()),
+            (State::Done, Some(o)) => (op_text(o), String::new()),
+            (State::Done, None) => continue,
+            (State::Left(why), _) => (
+                "left",
+                match (why, f.planned) {
+                    (LeftReason::Undecided, Action::Conflict(c)) => {
+                        format!(" ({}: needs a decision)", conflict_text(c))
+                    }
+                    (LeftReason::Undecided, _) => " (needs a decision)".into(),
+                    (LeftReason::CaseClash, _) => {
+                        " (cloud names differing only by case: settle it by hand)".into()
+                    }
+                    (LeftReason::LocationMissing, _) => " (the save dir is gone)".into(),
+                    (LeftReason::NoPrefix, _) => {
+                        " (the game's prefix isn't there yet: run the game once)".into()
+                    }
+                    (LeftReason::ChangedSincePlan, _) => {
+                        " (changed since the plan was made: run the pull again)".into()
+                    }
+                },
+            ),
+            (State::ForPush, _) => ("for push", String::new()),
+            (State::KeptLocal, _) => ("kept here", " (push it later)".into()),
+            (State::Corrupt, _) => ("corrupt", " (failed its checksum; not downloaded)".into()),
+            (State::Unreadable, _) => ("unreadable", String::new()),
+            (State::NotDone, Some(o)) => ("not done", format!(" (would {})", op_text(o))),
+            (_, None) => continue,
+        };
+        *counts.entry(tag).or_default() += 1;
+        let extra = match &f.kept_as {
+            Some(k) => format!(" (yours kept as {})", clean(k)),
+            None => String::new(),
+        };
+        out.push_str(&format!("  {tag:<12}  {}{note}{extra}\n", clean(&f.name)));
+    }
+    if counts.is_empty() {
+        out.push_str("nothing to pull\n");
+    } else {
+        let parts: Vec<String> = counts.iter().map(|(k, n)| format!("{n} {k}")).collect();
+        out.push_str(&format!(
+            "{}: {}\n",
+            if dry { "would" } else { "pull" },
+            parts.join(", ")
+        ));
+    }
+    if let Some(s) = &r.snapshot {
+        out.push_str(&format!("{}\n", clean(s)));
+    }
+    for p in &r.pruned {
+        out.push_str(&format!(
+            "pruned an old backup: {}\n",
+            clean(&p.display().to_string())
+        ));
+    }
+    if counts.contains_key("for push") || counts.contains_key("kept here") {
+        out.push_str("local changes are left for `gogo saves push`\n");
+    }
+    if counts.contains_key("left") {
+        out.push_str(
+            "files that need a decision were left: re-run on a terminal, or with --prefer cloud\n",
+        );
+    }
+    if let Some(d) = &r.backup_dir {
+        out.push_str(&format!("backups: {}\n", clean(&d.display().to_string())));
+    }
+    out
 }
 
 /// The build-file list `lookup` leads to: as found, fetched with `fetch`
@@ -1055,5 +1437,206 @@ mod tests {
         let e = status_outcome(Err(CloudError::NoLicense { gogid: 5 }), false);
         assert_eq!(e.code, cli::exit::AUTH);
         assert!(e.stderr.starts_with("gogo: "));
+    }
+
+    #[test]
+    fn pull_parses_and_prefers_only_the_cloud() {
+        let c = cli::Cli::try_parse_from([
+            "gogo",
+            "saves",
+            "pull",
+            "123",
+            "--prefer",
+            "cloud",
+            "--dry-run",
+            "--yes",
+            "--json",
+            "--no-snapshots",
+        ])
+        .unwrap();
+        let cli::Command::Saves {
+            cmd: SavesCmd::Pull(a),
+        } = c.command
+        else {
+            panic!("expected saves pull")
+        };
+        assert_eq!(a.gogid, "123");
+        assert_eq!(a.prefer, Some(Prefer::Cloud));
+        assert!(a.dry_run && a.yes && a.json && a.no_snapshots);
+        for side in ["local", "newer"] {
+            assert!(
+                cli::Cli::try_parse_from(["gogo", "saves", "pull", "1", "--prefer", side]).is_err(),
+                "{side}"
+            );
+        }
+    }
+
+    /// `saves pull` headless against mock storage: an add-only plan runs, an
+    /// overwrite needs `--yes` (exit 2, as other commands), a conflict left
+    /// is exit 8, `--prefer cloud` settles it; nothing but GETs reach the
+    /// storage and the output holds no secret.
+    #[tokio::test]
+    async fn pull_against_mock_storage() {
+        use gogo::cloud::auth::CloudAuth;
+        use gogo::cloud::http::StorageClient;
+        use gogo::cloud::pull::{self as cloud_pull, Host, PullOptions};
+        use gogo::cloud::storage::{gzip, md5_hex};
+        use gogo::cloud::testing::{FixedExchange, MainSession, NoManifests, keep_manifest};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        struct NoHost;
+        impl Host for NoHost {
+            fn lock(&mut self) -> Result<(), CloudError> {
+                Ok(())
+            }
+            fn snapshot(&mut self) -> Result<Option<String>, CloudError> {
+                Ok(None)
+            }
+        }
+
+        const CLIENT: &str = "11111111111111111";
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let root = base.join("games/5");
+        let saves = root.join("prefix/drive_c/users/steamuser/Documents/G");
+        std::fs::create_dir_all(&saves).unwrap();
+        std::fs::create_dir_all(root.join("game")).unwrap();
+        keep_manifest(&root, CLIENT);
+        std::fs::write(saves.join("both.sav"), b"local").unwrap();
+        let game = Game {
+            gogid: "5".into(),
+            layout: Layout {
+                lane: Lane::Linux,
+                prefix: root.join("prefix"),
+                game_files: root.join("game"),
+            },
+            root: root.clone(),
+        };
+        let server = MockServer::start().await;
+        let objects = [
+            ("saves/theirs.sav", gzip(b"cloud")),
+            ("saves/both.sav", gzip(b"cloud")),
+        ];
+        let listing: Vec<serde_json::Value> = objects
+            .iter()
+            .map(|(n, b)| serde_json::json!({"name": n, "bytes": b.len(), "hash": md5_hex(b)}))
+            .collect();
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/7/{CLIENT}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(listing))
+            .mount(&server)
+            .await;
+        for (n, b) in &objects {
+            Mock::given(method("GET"))
+                .and(path(format!("/v1/7/{CLIENT}/{n}")))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(b.clone()))
+                .mount(&server)
+                .await;
+        }
+        let cfg: gogo::cloud::remote_config::RemoteConfig = serde_json::from_str(CONFIG).unwrap();
+        let resolved = resolve(&cfg, CLIENT, &game.layout);
+
+        let session = MainSession::new();
+        let exchange = FixedExchange::default();
+        let auth = CloudAuth::with_parts(&session, || Ok(()), NoManifests, &exchange);
+        let storage =
+            StorageClient::with_base(format!("{}/v1/", server.uri()).parse().unwrap()).unwrap();
+        let records = base.join("records");
+        let run = |prefer_cloud: bool, yes: bool, dry_run: bool| {
+            let (auth, storage, game, resolved, records) =
+                (&auth, &storage, &game, &resolved, &records);
+            async move {
+                cloud_pull::pull(
+                    &cloud_pull::Inputs {
+                        game,
+                        client_id: CLIENT,
+                        resolved,
+                        source: Source::Network,
+                        auth,
+                        storage,
+                        record_dir: records,
+                    },
+                    &PullOptions {
+                        dry_run,
+                        keep_backups: 20,
+                        now: chrono::Utc::now(),
+                        stop_before_rename: None,
+                    },
+                    &mut NoHost,
+                    &mut CliDecide {
+                        prefer_cloud,
+                        yes,
+                        interactive: false,
+                    },
+                )
+                .await
+            }
+        };
+
+        // No TTY, no --prefer: the add is done, the conflict left (8).
+        let o = pull_outcome(run(false, false, false).await, false);
+        assert_eq!(o.code, cli::exit::CONFLICTS, "{}{}", o.stdout, o.stderr);
+        assert!(
+            o.stdout.contains("  download      saves/theirs.sav"),
+            "{}",
+            o.stdout
+        );
+        assert!(
+            o.stdout.contains(
+                "  left          saves/both.sav (on both sides with different content: needs a decision)"
+            ),
+            "{}",
+            o.stdout
+        );
+        assert_eq!(std::fs::read(saves.join("theirs.sav")).unwrap(), b"cloud");
+        assert_eq!(std::fs::read(saves.join("both.sav")).unwrap(), b"local");
+
+        // A dry run with --prefer cloud plans the overwrite and changes nothing.
+        let o = pull_outcome(run(true, false, true).await, false);
+        assert_eq!(o.code, cli::exit::OK, "{}", o.stdout);
+        assert!(o.stdout.starts_with("dry run"), "{}", o.stdout);
+        assert!(
+            o.stdout.contains("  overwrite     saves/both.sav"),
+            "{}",
+            o.stdout
+        );
+        assert!(o.stdout.contains("would: 1 overwrite"), "{}", o.stdout);
+
+        // --prefer cloud without --yes: consent can't be asked (exit 2).
+        let o = pull_outcome(run(true, false, false).await, false);
+        assert_eq!(o.code, cli::exit::USAGE);
+        assert!(o.stderr.contains("pass --yes"), "{}", o.stderr);
+        assert!(
+            o.stdout
+                .contains("  not done      saves/both.sav (would overwrite)"),
+            "{}",
+            o.stdout
+        );
+        assert_eq!(std::fs::read(saves.join("both.sav")).unwrap(), b"local");
+
+        // With --yes: done, backed up.
+        let o = pull_outcome(run(true, true, false).await, true);
+        assert_eq!(o.code, cli::exit::OK, "{}", o.stderr);
+        let v: serde_json::Value = serde_json::from_str(&o.stdout).unwrap();
+        assert_eq!(v["files"][0]["name"], "saves/both.sav");
+        assert_eq!(v["files"][0]["op"], "overwrite");
+        assert_eq!(v["files"][0]["state"], "done");
+        let backup = std::path::PathBuf::from(v["backup_dir"].as_str().unwrap());
+        assert_eq!(
+            std::fs::read(backup.join("local/saves/both.sav")).unwrap(),
+            b"local"
+        );
+        assert_eq!(std::fs::read(saves.join("both.sav")).unwrap(), b"cloud");
+        for secret in [CLIENT, "made-up-game-token", gogo::cloud::testing::SECRET] {
+            assert!(!o.stdout.contains(secret), "{secret}");
+        }
+        for r in server.received_requests().await.unwrap() {
+            assert_eq!(r.method.as_str(), "GET");
+        }
+
+        // Errors map through the one table.
+        let e = pull_outcome(Err(CloudError::Refused("x".into())), false);
+        assert_eq!(e.code, 7);
     }
 }

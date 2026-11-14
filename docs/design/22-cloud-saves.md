@@ -835,6 +835,90 @@ Code: `gogo_core::cloud::build_files`, `Location::{in_game_files, build_file}`.
   adds files only for a user dir the generic scan doesn't list (it lists those present) and
   stays correct if the variables grow.
 
+## 12e. As built: `gogo saves pull` (C4, #461)
+
+Code: `gogo_core::cloud::{pull, write, backup}`, `gogo saves pull <gogid> [--prefer cloud]
+[--dry-run] [--yes] [--json] [--no-snapshots]`. A pull writes local save files and gogo's own
+state only; the storage host only ever sees GETs (the tests check every request).
+
+- **Order** (§5.2): the sync lock (held: exit 7), then the game's change lock
+  (`game-moves/<gogid>.lock`) and the running checks of the lane (launcher record, processes
+  in the prefix: exit 7), both held for the whole run, prompts included, so nothing else
+  changes the game meanwhile. Then `status`'s own plan (`status::plan_detailed`, the same
+  classification), the conflict answers, the one question, the D11 set-aside, the
+  `cloud-pull` snapshot (design 20's `protect`, under the change lock already held), the
+  backups, the files. `--dry-run` takes no lock and writes nothing, not even the lock file.
+- **What a pull does per action**: `download` (new file, or `overwrite` when a local file is
+  there), `delete_local`, `record` and `forget` touch the record only; `upload` and
+  `delete_cloud` are `for_push`, shown and never done (not exit 8).
+- **Conflicts**: `--prefer cloud` (the only value; `local` and `newer` are refused by the
+  parser: they are push's or sync's) takes the cloud's side: a download, or a local delete
+  when the cloud has a tombstone or no entry for a recorded file. On a TTY each conflict is
+  asked: `cloud`, `local` (kept for a push: decided, the record untouched), `both` (only when
+  both sides have a file: the local one renamed `<name>.local-<UTC>` in place, by a hard link
+  so nothing is ever overwritten, then the cloud's downloaded), `skip`. Headless, or `skip`:
+  left, exit 8. Never settled by a pull: `case_clash`, and `location_missing`, whose dir a
+  pull doesn't make again (it may be a drive not mounted): every write planned in such a
+  location is left too. `location_emptied` is settled like any conflict (the dir is there).
+  A local-only file in a conflict (no cloud entry, never recorded) has nothing to decide in a
+  pull: `for_push`.
+- **The question**: asked once when anything is overwritten or deleted, after the conflict
+  answers (they add overwrites). `--yes` skips it. Without a TTY (or with `--json`) and
+  without `--yes`, nothing is changed and the exit is 2, as for other commands that can't ask
+  (`dlc add`, `update`); exit 8 stays for conflicts. A pull that only adds files doesn't ask.
+- **Snapshot**: only when a file is overwritten or deleted (a `both` rename alone and adds
+  take none), after the set-aside and before the backups. A failure, or a rollback or
+  conversion that isn't settled, stops the pull with no save file touched (exit 7; the message
+  names `--no-snapshots`). Games without snapshots (a plain dir, autosnapshot off, the Mac lane)
+  skip it; the backups are what they have.
+- **Backups**: every file that will be overwritten or deleted is copied first, all of them
+  before the first write, empty files included (§12b), to
+  `cloud-saves/backups/<gogid>/<UTC>/local/<location>/<path>` (`-2`, `-3`… when the second is
+  taken), each fsynced. Read through the same no-link walk as the writes, and checked to be
+  the planned file (device, inode, size, mtime). A copy, never a move: the backup dir may be on
+  another filesystem than the prefix (a btrfs subvolume boundary). A run that backs nothing up
+  makes no dir; one that does prunes to `cloud_saves.keep_backups` (default 20, at least 1)
+  dirs named like backups, oldest first, each listed.
+- **Writes** (`cloud::write`): the target dir is opened from `/` one part at a time with
+  `O_DIRECTORY | O_NOFOLLOW`, so a link put in place after `Location::file`'s check is refused,
+  not followed (a test swaps a dir for a link during the question). Missing dirs are made only
+  below the prefix's `drive_c` or the game's files, which must exist: without them the file is
+  left (`no_prefix`), gogo makes no prefix. Just before each write the name is mapped again
+  (`Location::file` must give the planned path, not a build file) and the target checked
+  against the plan (device, inode, size, mtime, or absent): a file changed meanwhile is left
+  (`changed_since_plan`, exit 8). A download goes to `.gogo-pull-<pid>-<n>-<ns>.tmp` in the
+  same dir (`O_CREAT | O_EXCL | O_NOFOLLOW`, the old file's mode), is gunzipped there (MD5 of
+  the stored bytes checked before), gets the uploader's `X-Object-Meta-LocalLastModified` as
+  its mtime (none or unparseable: the write time), is fsynced, the target checked once more,
+  renamed over it, and the dir fsynced. A delete is `unlinkat` after the same check. A stop at
+  any point leaves the old file or the new one, never part of one; a left-over temp file is
+  excluded from sync by `*.tmp` and removed by the next pull that writes to that dir (tested by
+  a seam that stops after the fsync, before the rename).
+- **Record**: written after each file that was done (atomic, under the lock), so a rerun after
+  a stop sees the done files as in sync. After a download: the listing's hash, the plain MD5 of
+  what was written, the size and mtime on disk. At the end `last_sync`; `rolled_back` is
+  cleared only when every planned file was done (nothing left, kept, for push, corrupt or
+  unreadable). `pending_push` is never touched by a pull. D11: a record for another client is
+  set aside as the first write of a real run, and the run is a first sync.
+- **Errors**: a corrupt object (MD5, gzip) is skipped and the rest done (exit 5); a failed
+  write or backup stops the run (exit 6), a path that fails the walk stops it (exit 1), a
+  network error stops it (exit 4); files not reached are `not_done`, and the record holds what
+  was done. Exit precedence otherwise: 5, 1 (an unreadable local file), 8, 0.
+- **Output**: one line per file that isn't unchanged (`download`, `overwrite`, `keep both`,
+  `delete here`, `same`, `forget`, `left (why)`, `for push`, `kept here`, `corrupt`,
+  `not done (would …)`), counts, the snapshot line, pruned backups and the backup dir last;
+  `--json` is the plan and the per-file `op`, `choice`, `state`, `reason`, `backup`,
+  `kept_as`, with no token, secret, user id or client id.
+- **Not yet**: `--launcher` and its budget and dialog (C7). The launcher holds the change lock
+  shared while the game runs, so a pull from inside the launcher needs that lock handed over
+  then.
+- **Live check** (2026-11-14, a scratch copy under `target/`: gogo's data and cache dirs in a
+  scratch `GOGO_HOME`, the game's small state files and info file copied, an empty prefix):
+  Cyberpunk 2077 pulled 63 files (75 MB) with the uploaders' mtimes, a rerun had nothing to
+  pull; with the record edited by hand to fake a cloud change and a cloud deletion, the
+  headless run without `--yes` changed nothing (exit 2), and with `--yes` overwrote one file
+  and deleted one, both backed up first. Only downloads reached GOG.
+
 ## 13. Implementation issues (to be filed)
 
 Under epic #155 (Linux runtime), `type:feature`, `area:wine-runtime` + `area:auth` /

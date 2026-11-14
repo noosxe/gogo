@@ -313,6 +313,54 @@ pub async fn plan(
     storage_client: &StorageClient,
     record_dir: &Path,
 ) -> Result<Plan, CloudError> {
+    Ok(plan_detailed(
+        game,
+        client_id,
+        resolved,
+        source,
+        auth,
+        storage_client,
+        record_dir,
+    )
+    .await?
+    .plan)
+}
+
+/// What a writer (`pull`) needs beside the [`Plan`]: per planned file, what
+/// it was planned from, the token, and the record as loaded.
+pub struct Detailed {
+    pub plan: Plan,
+    /// `details[i][j]` is `plan.locations[i].files[j]`'s.
+    pub details: Vec<Vec<Detail>>,
+    pub token: super::auth::CloudToken,
+    /// The record as it was read (another client's too: D11).
+    pub record: Option<Record>,
+}
+
+/// One planned file's inputs.
+#[derive(Debug, Clone)]
+pub struct Detail {
+    pub entry: Option<Entry>,
+    /// The local file as the scan saw it.
+    pub local: Option<LocalFile>,
+    /// The plain MD5 of the local file, when the plan hashed it.
+    pub local_md5: Option<String>,
+    /// The record's entry (none for another client's record).
+    pub record: Option<FileRecord>,
+    /// The local path the name maps to ([`Location::file`]), when it maps.
+    pub path: Option<PathBuf>,
+}
+
+/// [`plan`], with the [`Detailed`] inputs of every planned file.
+pub async fn plan_detailed(
+    game: &Game,
+    client_id: &str,
+    resolved: &Resolved,
+    source: Source,
+    auth: &CloudAuth<'_>,
+    storage_client: &StorageClient,
+    record_dir: &Path,
+) -> Result<Detailed, CloudError> {
     let gogid = game.id()?;
     let record = record::load(record_dir, gogid)?;
     let installed = crate::gog::content::load(&game.root)
@@ -407,7 +455,9 @@ pub async fn plan(
     }
     let fetched = fetch_plain(storage_client, &token, client_id, pending).await?;
 
+    let mut details: Vec<Vec<Detail>> = vec![];
     for (i, (mut lp, items)) in staged.into_iter().enumerate() {
+        let mut ds = vec![];
         for (name, item) in items {
             let key = (i, name.clone());
             let cloud = cloud_of(&item);
@@ -448,6 +498,10 @@ pub async fn plan(
                 .counts
                 .entry(action_name(action).to_string())
                 .or_default() += 1;
+            let loc = &resolved.locations[i];
+            let path = name
+                .strip_prefix(&format!("{}/", loc.name))
+                .and_then(|rel| loc.file(rel).ok());
             lp.files.push(FilePlan {
                 name,
                 action,
@@ -463,11 +517,24 @@ pub async fn plan(
                 }),
                 recorded: item.record.is_some(),
             });
+            ds.push(Detail {
+                entry: item.entry,
+                local_md5: local.and_then(|l| l.md5),
+                local: item.local,
+                record: item.record,
+                path,
+            });
         }
         plan.locations.push(lp);
+        details.push(ds);
     }
     plan.unmapped.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(plan)
+    Ok(Detailed {
+        plan,
+        details,
+        token,
+        record,
+    })
 }
 
 fn cloud_of(item: &Item) -> Cloud {

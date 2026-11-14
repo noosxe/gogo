@@ -129,6 +129,17 @@ pub enum CloudError {
     /// written.
     #[error("{path}: {reason}")]
     Io { path: String, reason: String },
+
+    /// A write to a save dir or the backup dir failed (space, permissions,
+    /// I/O): exit 6.
+    #[error("{path}: {reason}")]
+    Disk { path: String, reason: String },
+
+    /// The pull can't run now and changed nothing: the game runs, another
+    /// gogo holds its locks, or the snapshot before it couldn't be taken
+    /// (exit 7, design 22 §7.2, §7.4).
+    #[error("{0}")]
+    Refused(String),
 }
 
 /// The exit class of an HTTP status (design 07 §2): 3 auth, 4 worth a retry
@@ -145,13 +156,15 @@ fn status_exit(status: u16) -> i32 {
 impl CloudError {
     /// The exit class (design 07 §2, design 22 §5.3): 2 a gogid that names no
     /// built game, 3 auth and `no_license`, 4 network (remote config too),
-    /// 5 a corrupt object, 1 anything else.
+    /// 5 a corrupt object, 6 a failed write, 7 a refused pull, 1 anything else.
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::NotBuilt(_) | Self::Game(_) => 2,
             Self::RemoteConfig(RemoteConfigError::Http(_) | RemoteConfigError::Status { .. }) => 4,
             Self::RemoteConfig(_) | Self::NoClientId(_) => 1,
             Self::Corrupt { .. } => 5,
+            Self::Disk { .. } => 6,
+            Self::Refused(_) => 7,
             Self::Io { .. } | Self::Listing(_) | Self::ListingTruncated { .. } => 1,
             Self::NotLoggedIn
             | Self::InvalidSession
@@ -242,6 +255,12 @@ mod tests {
             count: 2,
         };
         assert_eq!(truncated.exit_code(), 1);
+        let disk = CloudError::Disk {
+            path: "p".into(),
+            reason: "full".into(),
+        };
+        assert_eq!(disk.exit_code(), 6);
+        assert_eq!(CloudError::Refused("x".into()).exit_code(), 7);
     }
 
     #[test]
