@@ -25,10 +25,11 @@ use gog_warp::auth::types::Token;
 use gog_warp::constants::GALAXY_CLIENT_ID;
 use gog_warp::content_system::types::{Build, Manifest, Platform};
 use gog_warp::errors::ErrorKind;
-use serde::Deserialize;
 use zeroize::Zeroizing;
 
+use super::client_id::{self, InfoId};
 use super::error::CloudError;
+use super::locations::{Game, Layout};
 use crate::auth::store::TokenStore;
 use crate::auth::{Session, TokenProvider};
 use crate::gog::build_manifest;
@@ -134,29 +135,19 @@ pub fn from_kept_manifest(game_dir: &Path) -> Option<ClientCredentials> {
     from_manifest(&stored.manifest, CredentialSource::KeptManifest)
 }
 
-/// The `clientId` of `game_dir`'s `goggame-<gogid>.info`: `Ok(None)` when there is
-/// no such file or it has no `clientId`. A file that is there but can't be read or
-/// parsed is [`CloudError::Info`]: it is the check a fetched manifest is held to,
-/// so it is never skipped quietly.
-pub fn info_client_id(game_dir: &Path, gogid: u64) -> Result<Option<String>, CloudError> {
-    #[derive(Deserialize)]
-    struct Info {
-        #[serde(rename = "clientId")]
-        client_id: Option<String>,
+/// The `clientId` of the game's `goggame-<gogid>.info` (the one reader,
+/// [`super::client_id`]): `Ok(None)` when there is no such file or it has no
+/// `clientId`. A file that is there but can't be used is [`CloudError::Info`]:
+/// it is the check a fetched manifest is held to, so it is never skipped.
+pub fn info_client_id(layout: &Layout, gogid: u64) -> Result<Option<String>, CloudError> {
+    match client_id::info_id(layout, gogid) {
+        InfoId::Absent => Ok(None),
+        InfoId::Id(id) => Ok(Some(id)),
+        InfoId::Bad { path, reason } => Err(CloudError::Info {
+            path: path.display().to_string(),
+            reason,
+        }),
     }
-    let path = game_dir.join(format!("goggame-{gogid}.info"));
-    let info_error = |reason: String| CloudError::Info {
-        path: path.display().to_string(),
-        reason,
-    };
-    let raw = match std::fs::read(&path) {
-        Ok(r) => r,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(info_error(format!("can't be read ({e})"))),
-    };
-    let info: Info = serde_json::from_slice(&raw)
-        .map_err(|e| info_error(format!("isn't a valid info file ({e})")))?;
-    Ok(info.client_id.filter(|s| !s.is_empty()))
 }
 
 /// Pure: the build whose manifest gives the credentials, among `items` (one
@@ -359,21 +350,21 @@ impl<'a> CloudAuth<'a> {
     }
 
     /// The game's client credentials, in design 22 §2.2's order: the kept
-    /// `build-manifest.json` in `game_dir`, else the manifest of the installed
-    /// build `installed_build` (else the newest, generation 2 only) fetched for
-    /// this command and checked against `goggame-<gogid>.info`. `game_dir` holds
-    /// the game's files and its info file (the caller resolves it per lane).
+    /// `build-manifest.json` in the game's dir, else the manifest of the
+    /// installed build `installed_build` (else the newest, generation 2 only)
+    /// fetched for this command and checked against `goggame-<gogid>.info`
+    /// (found in the game's files, or under `drive_c` for the installer lane).
     pub async fn credentials(
         &self,
-        gogid: u64,
-        game_dir: &Path,
+        game: &Game,
         installed_build: Option<&str>,
     ) -> Result<ClientCredentials, CloudError> {
-        if let Some(c) = from_kept_manifest(game_dir) {
+        let gogid = game.id()?;
+        if let Some(c) = from_kept_manifest(&game.root) {
             tracing::debug!(client_id = %c.client_id, "cloud saves: credentials from the kept manifest");
             return Ok(c);
         }
-        let info_id = info_client_id(game_dir, gogid)?;
+        let info_id = info_client_id(&game.layout, gogid)?;
         let fetched = self.fetch(gogid, installed_build, info_id.as_deref()).await;
         // The fetch may have refreshed the Galaxy token, failed or not.
         self.persist()?;
@@ -682,10 +673,24 @@ mod tests {
         );
     }
 
+    /// A game whose dir, files and prefix are all `dir` (enough for these tests).
+    fn game_at(dir: &Path, gogid: u64) -> Game {
+        Game {
+            gogid: gogid.to_string(),
+            layout: Layout {
+                lane: super::super::locations::Lane::Linux,
+                prefix: dir.join("prefix"),
+                game_files: dir.to_path_buf(),
+            },
+            root: dir.to_path_buf(),
+        }
+    }
+
     #[test]
     fn info_client_id_reads_the_games_own_info() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(info_client_id(dir.path(), 100).unwrap(), None);
+        let layout = game_at(dir.path(), 100).layout;
+        assert_eq!(info_client_id(&layout, 100).unwrap(), None);
         std::fs::write(
             dir.path().join("goggame-100.info"),
             r#"{"gameId":"100","clientId":"22222222222222222","name":"G"}"#,
@@ -697,22 +702,39 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            info_client_id(dir.path(), 100).unwrap().as_deref(),
+            info_client_id(&layout, 100).unwrap().as_deref(),
             Some("22222222222222222")
+        );
+        // The installer lane: under the prefix's drive_c.
+        let other = tempfile::tempdir().unwrap();
+        let g = game_at(other.path(), 500);
+        let inst = g.layout.prefix.join("drive_c/GOG Games/G");
+        std::fs::create_dir_all(&inst).unwrap();
+        std::fs::write(inst.join("goggame-500.info"), r#"{"clientId":"4444"}"#).unwrap();
+        assert_eq!(
+            info_client_id(&g.layout, 500).unwrap().as_deref(),
+            Some("4444")
         );
     }
 
     #[test]
     fn a_bad_info_file_refuses_naming_it() {
         let dir = tempfile::tempdir().unwrap();
+        let layout = game_at(dir.path(), 300).layout;
         std::fs::write(dir.path().join("goggame-300.info"), "{").unwrap();
-        let e = info_client_id(dir.path(), 300).unwrap_err();
+        let e = info_client_id(&layout, 300).unwrap_err();
         assert!(matches!(e, CloudError::Info { .. }));
         let text = e.to_string();
         assert!(text.contains("goggame-300.info") && text.contains("isn't a valid info file"));
+        // An id that could escape a URL or a path is refused too, not skipped.
+        std::fs::write(dir.path().join("goggame-300.info"), r#"{"clientId":"../x"}"#).unwrap();
+        assert!(matches!(
+            info_client_id(&layout, 300),
+            Err(CloudError::Info { .. })
+        ));
         // Unreadable: a dir where the file should be.
         std::fs::create_dir(dir.path().join("goggame-400.info")).unwrap();
-        let e = info_client_id(dir.path(), 400).unwrap_err();
+        let e = info_client_id(&layout, 400).unwrap_err();
         assert!(
             e.to_string().contains("goggame-400.info") && e.to_string().contains("can't be read")
         );
@@ -779,7 +801,7 @@ mod tests {
         build_manifest::write(kept.path(), "2", 2, &v2_manifest(Some((CLIENT, SECRET)))).unwrap();
         let m = fetching();
         let auth = CloudAuth::with_parts(&main, persist, &m, ok_exchange());
-        let c = auth.credentials(100, kept.path(), Some("2")).await.unwrap();
+        let c = auth.credentials(&game_at(kept.path(), 100), Some("2")).await.unwrap();
         assert_eq!(
             (c.source, c.secret.expose()),
             (CredentialSource::KeptManifest, SECRET)
@@ -790,7 +812,7 @@ mod tests {
         // No kept manifest: the installed v2 build's.
         let empty = tempfile::tempdir().unwrap();
         let c = auth
-            .credentials(100, empty.path(), Some("2"))
+            .credentials(&game_at(empty.path(), 100), Some("2"))
             .await
             .unwrap();
         assert_eq!(c.secret.expose(), "installed-secret");
@@ -805,7 +827,7 @@ mod tests {
         // An installed v1 build (or none listed): the newest v2 build's; v1 skipped.
         for installed in [Some("1"), Some("gone"), None] {
             let c = auth
-                .credentials(100, empty.path(), installed)
+                .credentials(&game_at(empty.path(), 100), installed)
                 .await
                 .unwrap();
             assert_eq!(c.secret.expose(), "newest-secret");
@@ -819,7 +841,7 @@ mod tests {
         )
         .unwrap();
         let e = auth
-            .credentials(100, empty.path(), Some("2"))
+            .credentials(&game_at(empty.path(), 100), Some("2"))
             .await
             .unwrap_err();
         assert!(matches!(e, CloudError::ClientIdMismatch { gogid: 100 }));
@@ -844,7 +866,7 @@ mod tests {
             ok_exchange(),
         );
         let dir = tempfile::tempdir().unwrap();
-        let e = auth.credentials(100, dir.path(), None).await.unwrap_err();
+        let e = auth.credentials(&game_at(dir.path(), 100), None).await.unwrap_err();
         assert!(matches!(
             e,
             CloudError::Manifest {

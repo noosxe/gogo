@@ -1,13 +1,34 @@
-//! Errors of the cloud-saves code and their exit codes (design 22 §5.3).
+//! Errors of the cloud-saves code and their exit codes (design 22 §5.3): one
+//! type and one exit-code mapping for every `gogo saves` command.
 //!
 //! SECURITY (design 07 §4): nothing here holds a token, a client secret, a user id
 //! or an unredacted storage URL. gog-warp's errors carry the request URL (for the
 //! exchange: client secret and refresh token in its query), so they are mapped by
 //! kind and status only and never formatted (see [`super::auth`]).
 
-/// What went wrong getting credentials, a token, or talking to the storage host.
+use super::remote_config::RemoteConfigError;
+
+/// What went wrong finding the game, its save locations, credentials, a token,
+/// or talking to the storage host.
 #[derive(Debug, thiserror::Error)]
 pub enum CloudError {
+    /// No game dir for the gogid (exit 2: the argument is wrong).
+    #[error("{0} isn't built: no game dir for it")]
+    NotBuilt(String),
+
+    /// The gogid can't name a game dir (exit 2).
+    #[error("{0}")]
+    Game(String),
+
+    #[error(
+        "no client id for {0}: its goggame-{0}.info and build-manifest.json have none (is it built?)"
+    )]
+    NoClientId(String),
+
+    /// Fetching or reading the game's remote config (save locations).
+    #[error(transparent)]
+    RemoteConfig(#[from] RemoteConfigError),
+
     #[error("not logged in — run `gogo login`")]
     NotLoggedIn,
 
@@ -86,6 +107,28 @@ pub enum CloudError {
         url: String,
         code: Option<String>,
     },
+
+    /// The listing isn't the JSON array design 22 §1.3 describes.
+    #[error("cloud storage: the listing isn't the JSON gogo expects: {0}")]
+    Listing(String),
+
+    /// The container says it holds more objects than the listing returned.
+    /// Planning on it would take the missing ones for deleted (design 22 as built).
+    #[error(
+        "cloud storage: the listing has {listed} of the container's {count} objects; \
+         not planning on a partial listing"
+    )]
+    ListingTruncated { listed: usize, count: u64 },
+
+    /// A downloaded object whose MD5 isn't the listed `hash`, or whose gzip
+    /// doesn't decode (exit 5).
+    #[error("cloud object {name:?}: {reason}")]
+    Corrupt { name: String, reason: String },
+
+    /// A local file or gogo's own state (the sync record) can't be read or
+    /// written.
+    #[error("{path}: {reason}")]
+    Io { path: String, reason: String },
 }
 
 /// The exit class of an HTTP status (design 07 §2): 3 auth, 4 worth a retry
@@ -100,10 +143,18 @@ fn status_exit(status: u16) -> i32 {
 }
 
 impl CloudError {
-    /// The exit class (design 07 §2, design 22 §5.3): 3 auth and `no_license`,
-    /// 4 network, 1 anything else.
+    /// The exit class (design 07 §2, design 22 §5.3): 2 a gogid that names no
+    /// built game, 3 auth and `no_license`, 4 network (remote config too),
+    /// 5 a corrupt object, 1 anything else.
     pub fn exit_code(&self) -> i32 {
         match self {
+            Self::NotBuilt(_) | Self::Game(_) => 2,
+            Self::RemoteConfig(RemoteConfigError::Http(_) | RemoteConfigError::Status { .. }) => {
+                4
+            }
+            Self::RemoteConfig(_) | Self::NoClientId(_) => 1,
+            Self::Corrupt { .. } => 5,
+            Self::Io { .. } | Self::Listing(_) | Self::ListingTruncated { .. } => 1,
             Self::NotLoggedIn
             | Self::InvalidSession
             | Self::Auth(_)
@@ -171,6 +222,28 @@ mod tests {
         assert_eq!(manifest(Some(503)).exit_code(), 4);
         assert_eq!(manifest(None).exit_code(), 1);
         assert_eq!(CloudError::ClientIdMismatch { gogid: 1 }.exit_code(), 1);
+        assert_eq!(CloudError::NotBuilt("1".into()).exit_code(), 2);
+        assert_eq!(CloudError::NoClientId("1".into()).exit_code(), 1);
+        let rc = |e| CloudError::RemoteConfig(e).exit_code();
+        assert_eq!(rc(RemoteConfigError::Http("x".into())), 4);
+        assert_eq!(
+            rc(RemoteConfigError::Status {
+                client_id: "1".into(),
+                status: 500
+            }),
+            4
+        );
+        assert_eq!(rc(RemoteConfigError::Parse("x".into())), 1);
+        let corrupt = CloudError::Corrupt {
+            name: "saves/a".into(),
+            reason: "x".into(),
+        };
+        assert_eq!(corrupt.exit_code(), 5);
+        let truncated = CloudError::ListingTruncated {
+            listed: 1,
+            count: 2,
+        };
+        assert_eq!(truncated.exit_code(), 1);
     }
 
     #[test]
