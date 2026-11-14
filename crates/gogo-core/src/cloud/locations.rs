@@ -43,7 +43,7 @@ impl Lane {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum CloudError {
+pub enum LocationError {
     #[error("{0} isn't built: no game dir for it")]
     NotBuilt(String),
     #[error(
@@ -77,10 +77,10 @@ pub struct Game {
 
 impl Game {
     /// Find a built game by gogid (either lane's library), read-only.
-    pub fn find(gogid: &str, lane: Lane) -> Result<Game, CloudError> {
-        let dirs = GameDirs::for_game(gogid).map_err(|e| CloudError::Game(e.to_string()))?;
+    pub fn find(gogid: &str, lane: Lane) -> Result<Game, LocationError> {
+        let dirs = GameDirs::for_game(gogid).map_err(|e| LocationError::Game(e.to_string()))?;
         if !dirs.root.is_dir() {
-            return Err(CloudError::NotBuilt(gogid.to_string()));
+            return Err(LocationError::NotBuilt(gogid.to_string()));
         }
         let tree = crate::linuxapp::game::read_launch_toml(&dirs)
             .ok()
@@ -100,11 +100,11 @@ impl Game {
     /// The game's client id (public): its `goggame-<gogid>.info`, else the
     /// `clientId` field of the kept `build-manifest.json` (design 22 §2.2;
     /// nothing else of the manifest is read, never the secret).
-    pub fn client_id(&self) -> Result<String, CloudError> {
+    pub fn client_id(&self) -> Result<String, LocationError> {
         let id: u64 = self
             .gogid
             .parse()
-            .map_err(|_| CloudError::NoClientId(self.gogid.clone()))?;
+            .map_err(|_| LocationError::NoClientId(self.gogid.clone()))?;
         let info = find_game_info(&self.layout, id);
         if let Some(c) = info.and_then(|p| client_id_of_info(&p)) {
             return Ok(c);
@@ -113,7 +113,7 @@ impl Game {
         if let Some(c) = client_id_of_manifest(&manifest) {
             return Ok(c);
         }
-        Err(CloudError::NoClientId(self.gogid.clone()))
+        Err(LocationError::NoClientId(self.gogid.clone()))
     }
 }
 

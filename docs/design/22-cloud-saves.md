@@ -620,7 +620,10 @@ Code: `gogo_core::cloud::{remote_config, locations}`, `gogo saves locations <gog
 - **Lane** is the host's (Linux → `steamuser`, macOS → `crossover`), a `Lane` value the
   tests pass explicitly. Both lanes find the game through `GameDirs::for_game`, and the Mac
   lane reuses the Linux layout helpers (`setup::game_files`, the `prefix/` and `game/` dirs of
-  `GameDirs`). D9's check of the `crossover` user on a real bottle is still pending.
+  `GameDirs`). `locations::LocationError` is this code's own error type, apart from
+  `cloud::error::CloudError` (auth and storage): C1's strict `info_client_id` and its
+  secret-bearing manifest reader weren't reused, because a malformed info file must fall back to
+  the manifest here and the secret must not be parsed. D9's check of the `crossover` user on a real bottle is still pending.
 - **Client id**: the game's `goggame-<gogid>.info` (the game's files, then anywhere under
   `drive_c` for the installer lane), else the `clientId` field of the kept
   `build-manifest.json`, read through a typed struct that holds only that field, so the secret
