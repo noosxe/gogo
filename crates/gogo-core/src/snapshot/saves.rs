@@ -156,6 +156,18 @@ impl BuildFiles {
         self.files.is_empty()
     }
 
+    /// Whether the list names `rel` (relative to the game's files, `/` or
+    /// `\` separated), whatever its size or time: the cloud-save filter
+    /// (design 22 §3.4), which never syncs a path the build ships.
+    pub fn lists(&self, rel: &str) -> bool {
+        let key: Vec<String> = rel
+            .split(['/', '\\'])
+            .filter(|p| !p.is_empty())
+            .map(str::to_ascii_lowercase)
+            .collect();
+        !key.is_empty() && self.files.contains_key(&key.join("/"))
+    }
+
     /// Whether the file at `rel`, as it is now, is the build's own.
     fn is_builds(&self, rel: &str, size: u64, mtime: SystemTime) -> bool {
         match self.files.get(&rel.to_ascii_lowercase()) {
@@ -295,7 +307,9 @@ impl OwnFiles {
         own
     }
 
-    fn contains(&self, rel: &str) -> bool {
+    /// Whether `rel` (relative to the game's files, `/`-separated) is one of
+    /// gogo's own files.
+    pub fn contains(&self, rel: &str) -> bool {
         let rel = rel.to_ascii_lowercase();
         self.files.contains(&rel)
             || self

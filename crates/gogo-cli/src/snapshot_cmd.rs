@@ -371,7 +371,9 @@ fn rollback(
 /// game whose depot cache doesn't hold its build. `None` (the plan then says
 /// it checked without a list) when gogo isn't signed in, GOG can't be reached
 /// or no longer lists the build.
-async fn fetch_build_files(want: rb::FetchWant) -> Option<gogo::snapshot::saves::BuildFiles> {
+pub(crate) async fn fetch_build_files(
+    want: rb::FetchWant,
+) -> Option<gogo::snapshot::saves::BuildFiles> {
     use gogo::gog::{depot, dlc_filter};
     let ctx = crate::session_ctx().await.ok()?;
     let core = ctx.session.as_ref().and_then(|p| p.gog_warp_core())?;

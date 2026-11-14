@@ -27,6 +27,9 @@ pub struct Scan {
     pub files: Vec<LocalFile>,
     /// Left out by design 22 §3.4's excludes.
     pub excluded: usize,
+    /// The build's own files (and gogo's), in a location in the game's
+    /// files ([`Location::build_file`]): never synced.
+    pub build_files: usize,
     /// Links, other non-regular files, names that aren't UTF-8 and dirs past
     /// [`MAX_DEPTH`]: never synced (`/`-separated, below the location).
     pub ignored: Vec<String>,
@@ -90,6 +93,10 @@ fn walk(
                 walk(loc, &path, &format!("{rel}/"), depth + 1, out)?;
             }
         } else if ft.is_file() {
+            if loc.build_file(&rel) {
+                out.build_files += 1;
+                continue;
+            }
             if loc.excluded(&rel) {
                 out.excluded += 1;
                 continue;

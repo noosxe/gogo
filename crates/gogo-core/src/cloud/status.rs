@@ -93,6 +93,12 @@ pub struct LocationPlan {
     pub files: Vec<FilePlan>,
     /// Local files left out by the excludes.
     pub local_excluded: usize,
+    /// In the game's files: the build's own files here (and gogo's), never
+    /// synced (design 22 §3.4).
+    pub local_build_files: usize,
+    /// In the game's files: where the build's file list came from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_files: Option<super::locations::BuildNote>,
     /// Local links, special files, odd names: never synced.
     pub ignored: Vec<String>,
     /// The save dir isn't there (a moved prefix, a drive not mounted?) while
@@ -115,6 +121,9 @@ pub enum UnmappedReason {
     BadPath,
     /// The excludes leave it out.
     Excluded,
+    /// Its path is one of the build's own files in the game's files
+    /// (design 22 §3.4): never downloaded over it.
+    BuildFile,
 }
 
 /// A listed object no sync touches.
@@ -245,9 +254,12 @@ pub async fn status(inputs: &Inputs<'_>) -> Result<Plan, CloudError> {
         Located::Off(plan) => Ok(plan),
         Located::On {
             client_id,
-            resolved,
+            mut resolved,
             source,
         } => {
+            // No fetch here: a depot-lane list that needs one skips the
+            // game-files locations (the CLI fetches first).
+            super::build_files::apply_offline(&mut resolved, inputs.game);
             plan(
                 inputs.game,
                 &client_id,
@@ -538,6 +550,17 @@ fn gather(
     for (name, item) in &items {
         let rel = &name[prefix.len()..];
         let live = item.entry.as_ref().is_some_and(|e| !e.is_tombstone());
+        // The build's own files: never acted on, whatever the record says.
+        if loc.build_file(rel) {
+            if live {
+                unmapped.push(Unmapped {
+                    name: name.clone(),
+                    reason: UnmappedReason::BuildFile,
+                });
+            }
+            drop.push(name.clone());
+            continue;
+        }
         if loc.excluded(rel) {
             if live {
                 unmapped.push(Unmapped {
@@ -618,6 +641,8 @@ fn gather(
         unverified: loc.unverified,
         files: vec![],
         local_excluded: s.excluded,
+        local_build_files: s.build_files,
+        build_files: loc.build_files.clone(),
         ignored: s.ignored,
         missing: !root_there && recorded > 0,
         emptied: root_there && no_local_files && recorded > 0,

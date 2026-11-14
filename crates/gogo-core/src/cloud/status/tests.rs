@@ -731,3 +731,116 @@ async fn a_link_in_a_save_dir_is_ignored_and_nothing_changes() {
         }]
     );
 }
+
+const INSTALL_CONFIG: &str = r#"{"content":{"Windows":{"cloudStorage":{"enabled":true,
+    "locations":[{"name":"game","location":"<?INSTALL?>"},
+                 {"name":"saves","location":"<?DOCUMENTS?>/G"}]}}}}"#;
+
+/// An installer-lane game in `drive_c/GOG/G` with `shipped` (relative to it)
+/// named by its installer's log.
+fn installer_game(f: &mut Fixture, shipped: &[&str]) -> PathBuf {
+    let gf = f.game.layout.prefix.join("drive_c/GOG/G");
+    fs::create_dir_all(&gf).unwrap();
+    f.game.layout.game_files = gf.clone();
+    fs::write(
+        f.game.root.join("content.toml"),
+        "schema = 1\nlane = \"installer\"\nbuild_id = \"b1\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(f.game.root.join("install")).unwrap();
+    let log: String = shipped
+        .iter()
+        .map(|s| format!("Dest filename: C:\\GOG\\G\\{}\r\n", s.replace('/', "\\")))
+        .collect();
+    fs::write(f.game.root.join("install/inno.log"), log).unwrap();
+    gf
+}
+
+#[tokio::test]
+async fn build_files_in_the_game_dir_are_never_planned() {
+    let mut f = fixture(INSTALL_CONFIG).await;
+    let gf = installer_game(&mut f, &["Game.exe", "Data/levels.pak", "settings.ini"]);
+    fs::create_dir_all(gf.join("Data")).unwrap();
+    fs::write(gf.join("Game.exe"), b"exe").unwrap();
+    fs::write(gf.join("Data/levels.pak"), b"pak").unwrap();
+    // The game rewrote a shipped file: still the build's (path alone).
+    fs::write(gf.join("settings.ini"), b"rewritten by the game").unwrap();
+    fs::create_dir_all(gf.join("SAVE")).unwrap();
+    fs::write(gf.join("SAVE/slot1.sav"), b"mine").unwrap();
+    f.serve(&[
+        ("game/SAVE/slot2.sav", gzip(b"theirs")),
+        ("game/game.exe", gzip(b"another exe")),
+        ("game/Data/levels.pak", gzip(b"")),
+    ])
+    .await;
+    // A record of a build file (an older gogo, or a file an update started
+    // shipping): still never acted on.
+    let mut r = Record::new(CLIENT);
+    r.files.insert(
+        "game/settings.ini".into(),
+        FileRecord {
+            cloud_hash: md5_hex(b"x"),
+            local_md5: md5_hex(b"x"),
+            size: 1,
+            mtime: record::datetime(std::time::SystemTime::UNIX_EPOCH),
+        },
+    );
+    f.save_record(&r);
+    let before = tree(&f.game.root);
+
+    let plan = f.run().await.unwrap();
+    assert_eq!(
+        actions(&plan),
+        [
+            ("game/SAVE/slot1.sav".to_string(), Action::Upload),
+            ("game/SAVE/slot2.sav".to_string(), Action::Download),
+        ]
+    );
+    let lp = &plan.locations[0];
+    assert_eq!(lp.local_build_files, 3);
+    let note = lp.build_files.as_ref().unwrap();
+    assert_eq!(note.source, "the installer's log");
+    assert_eq!(note.files, Some(3));
+    assert_eq!(
+        plan.unmapped,
+        [Unmapped {
+            name: "game/game.exe".into(),
+            reason: UnmappedReason::BuildFile,
+        }],
+        "the live object over a build file is shown; the tombstone is history"
+    );
+    assert_eq!(tree(&f.game.root), before, "status writes nothing there");
+}
+
+#[tokio::test]
+async fn a_game_dir_location_without_a_list_is_skipped_not_synced_blind() {
+    let mut f = fixture(INSTALL_CONFIG).await;
+    let gf = installer_game(&mut f, &["Game.exe"]);
+    fs::remove_file(f.game.root.join("install/inno.log")).unwrap();
+    fs::write(gf.join("Game.exe"), b"exe").unwrap();
+    f.write("doc.sav", b"doc");
+    f.serve(&[
+        ("game/Game.exe", gzip(b"exe")),
+        ("saves/doc.sav", gzip(b"doc")),
+    ])
+    .await;
+    let plan = f.run().await.unwrap();
+    assert_eq!(
+        actions(&plan),
+        [("saves/doc.sav".to_string(), Action::Record)],
+        "the other location still syncs"
+    );
+    assert_eq!(plan.skipped.len(), 1);
+    assert_eq!(plan.skipped[0].name, "game");
+    assert!(matches!(
+        plan.skipped[0].reason,
+        crate::cloud::locations::SkipReason::BuildFilesUnknown(_)
+    ));
+    assert_eq!(
+        plan.unmapped,
+        [Unmapped {
+            name: "game/Game.exe".into(),
+            reason: UnmappedReason::SkippedLocation,
+        }]
+    );
+}

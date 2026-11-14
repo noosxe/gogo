@@ -1,6 +1,7 @@
 //! GOG cloud saves (`docs/design/22-cloud-saves.md`).
 
 pub mod auth;
+pub mod build_files;
 pub mod classify;
 pub mod client_id;
 pub mod error;
