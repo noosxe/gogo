@@ -333,26 +333,143 @@ fn a_dangling_link_counts_as_leaving() {
 }
 
 #[test]
-fn a_link_that_stays_inside_is_followed() {
-    let mut t = tree(Lane::Linux);
-    // The depot lane's drive_c/GOG/<name> -> game link.
-    t.layout.game_files = t.layout.prefix.parent().unwrap().join("game");
+fn a_link_to_another_dir_of_the_prefix_is_followed() {
+    let t = tree(Lane::Linux);
+    let docs = user(&t).join("Documents");
+    fs::create_dir_all(&docs).unwrap();
+    fs::create_dir_all(user(&t).join("AppData/Local/Real")).unwrap();
+    symlink(user(&t).join("AppData/Local/Real"), docs.join("Alias")).unwrap();
+    let l = one(&t, "<?DOCUMENTS?>/Alias/x").unwrap();
+    assert_eq!(l.path, docs.join("Alias/x"));
+    assert_eq!(
+        l.file("f.sav").unwrap(),
+        user(&t).join("AppData/Local/Real/x/f.sav")
+    );
+}
+
+#[test]
+fn a_prefix_link_into_the_game_dir_is_refused() {
+    // Else a save location could alias the game's own files.
+    let t = tree(Lane::Linux);
+    let docs = user(&t).join("Documents");
+    fs::create_dir_all(&docs).unwrap();
+    symlink(&t.layout.game_files, docs.join("Saves")).unwrap();
+    assert_eq!(
+        one(&t, "<?DOCUMENTS?>/Saves/slot1"),
+        Err(SkipReason::EscapesPrefix)
+    );
+    // Same for a file inside a location.
+    let l = one(&t, "<?DOCUMENTS?>").unwrap();
+    assert_eq!(l.file("Saves/x.sav"), Err(SkipReason::EscapesPrefix));
+}
+
+#[test]
+fn a_game_dir_link_into_the_prefix_is_refused() {
+    let t = tree(Lane::Linux);
+    symlink(user(&t), t.layout.game_files.join("lnk")).unwrap();
+    assert_eq!(
+        one(&t, "<?INSTALL?>/lnk/Documents"),
+        Err(SkipReason::EscapesPrefix)
+    );
+    let l = one(&t, "<?INSTALL?>/saves").unwrap();
+    assert!(l.file("ok.sav").is_ok());
+    fs::create_dir_all(t.layout.game_files.join("saves")).unwrap();
+    symlink(user(&t), t.layout.game_files.join("saves/in")).unwrap();
+    assert_eq!(l.file("in/x"), Err(SkipReason::EscapesPrefix));
+}
+
+#[test]
+fn the_depot_gog_link_is_the_one_way_into_the_game_dir() {
+    let t = tree(Lane::Linux);
     fs::create_dir_all(t.layout.prefix.join("drive_c/GOG")).unwrap();
     symlink(
         &t.layout.game_files,
         t.layout.prefix.join("drive_c/GOG/Some Game"),
     )
     .unwrap();
-    // A save dir in the prefix that is a link to the game's files.
-    let docs = user(&t).join("Documents");
-    fs::create_dir_all(&docs).unwrap();
-    symlink(&t.layout.game_files, docs.join("Saves")).unwrap();
-    let l = one(&t, "<?DOCUMENTS?>/Saves/slot1").unwrap();
-    assert_eq!(l.path, docs.join("Saves/slot1"));
-    // And a link to another dir of the prefix.
-    fs::create_dir_all(user(&t).join("AppData/Local/Real")).unwrap();
-    symlink(user(&t).join("AppData/Local/Real"), docs.join("Alias")).unwrap();
-    assert!(one(&t, "<?DOCUMENTS?>/Alias").is_ok());
+    let roots = Roots::of(&t.layout);
+    let through = t.layout.prefix.join("drive_c/GOG/Some Game/saves/a.sav");
+    assert_eq!(
+        roots.check(&through, false),
+        Some(t.layout.game_files.join("saves/a.sav"))
+    );
+    // A link elsewhere in the prefix isn't it.
+    let other = user(&t).join("Documents");
+    fs::create_dir_all(&other).unwrap();
+    symlink(&t.layout.game_files, other.join("g")).unwrap();
+    assert_eq!(roots.check(&other.join("g/saves"), false), None);
+    // An install path is in the game dir by definition.
+    assert!(roots.check(&t.layout.game_files.join("x"), true).is_some());
+    assert!(roots.check(&user(&t), true).is_none());
+}
+
+#[test]
+fn a_game_that_never_ran_has_no_prefix_yet_and_still_resolves() {
+    // A depot game before its first launch: neither `prefix/` nor `game/`.
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let root = base.join("games/9");
+    fs::create_dir_all(&root).unwrap();
+    for missing in [(true, true), (true, false), (false, true)] {
+        let layout = Layout {
+            lane: Lane::Linux,
+            prefix: root.join("prefix"),
+            game_files: root.join("game"),
+        };
+        let _ = fs::remove_dir_all(root.join("prefix"));
+        let _ = fs::remove_dir_all(root.join("game"));
+        if !missing.0 {
+            fs::create_dir_all(root.join("prefix")).unwrap();
+        }
+        if !missing.1 {
+            fs::create_dir_all(root.join("game")).unwrap();
+        }
+        let r = resolve_storage(
+            Some(&storage(&[
+                ("saves", "<?DOCUMENTS?>/G"),
+                ("inst", "<?INSTALL?>/saves"),
+            ])),
+            "42",
+            &layout,
+        );
+        assert_eq!(r.locations.len(), 2, "{missing:?}: {:?}", r.skipped);
+        assert!(r.locations.iter().all(|l| !l.exists));
+        let f = r.locations[0].file("slot/a.sav").unwrap();
+        assert!(f.starts_with(root.join("prefix")), "{f:?}");
+        assert!(
+            r.locations[1]
+                .file("a.sav")
+                .unwrap()
+                .starts_with(root.join("game"))
+        );
+    }
+}
+
+#[test]
+fn a_game_dir_under_a_linked_parent_resolves() {
+    // macOS: /var is a link to /private/var; the roots and the paths are
+    // canonicalized the same way.
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().canonicalize().unwrap().join("real");
+    fs::create_dir_all(real.join("games/3")).unwrap();
+    let via = dir.path().canonicalize().unwrap().join("via");
+    symlink(&real, &via).unwrap();
+    for exists in [false, true] {
+        let root = via.join("games/3");
+        if exists {
+            fs::create_dir_all(root.join("prefix/drive_c/users/steamuser")).unwrap();
+            fs::create_dir_all(root.join("game")).unwrap();
+        }
+        let layout = Layout {
+            lane: Lane::Linux,
+            prefix: root.join("prefix"),
+            game_files: root.join("game"),
+        };
+        let r = resolve_storage(Some(&storage(&[("s", "<?DOCUMENTS?>/G")])), "1", &layout);
+        assert_eq!(r.locations.len(), 1, "{exists}: {:?}", r.skipped);
+        // The listed path keeps the prefix as given.
+        assert!(r.locations[0].path.starts_with(&root));
+    }
 }
 
 #[test]
@@ -423,16 +540,21 @@ fn file_resolves_inside_with_case_lookup_and_either_separator() {
 }
 
 #[test]
-fn roots_contains_checks_without_creating_anything() {
+fn roots_check_does_not_create_anything() {
     let t = tree(Lane::Linux);
     let roots = Roots::of(&t.layout);
-    assert!(roots.contains(&t.layout.game_files.join("a/b/c")));
-    assert!(roots.contains(&t.layout.prefix));
-    assert!(!roots.contains(&t.outside));
-    assert!(!roots.contains(&t.layout.prefix.join("../elsewhere")));
-    assert!(!roots.contains(Path::new("/")));
-    assert!(!roots.contains(Path::new("relative")));
-    assert!(!t.layout.game_files.join("a").exists());
+    assert!(roots.check(&t.layout.prefix, false).is_some());
+    assert!(roots.check(&t.layout.prefix.join("a/b/c"), false).is_some());
+    assert!(roots.check(&t.outside, false).is_none());
+    assert!(roots.check(&t.outside, true).is_none());
+    assert!(
+        roots
+            .check(&t.layout.prefix.join("../elsewhere"), false)
+            .is_none()
+    );
+    assert!(roots.check(Path::new("/"), false).is_none());
+    assert!(roots.check(Path::new("relative"), false).is_none());
+    assert!(!t.layout.prefix.join("a").exists());
 }
 
 // — resolve —
@@ -620,5 +742,30 @@ fn the_client_id_falls_back_to_the_kept_manifest_and_never_reads_the_secret() {
     .unwrap();
     fs::remove_file(root.join("game/goggame-7.info")).unwrap();
     assert!(g.client_id().is_err());
+    unsafe { std::env::remove_var("GOGO_HOME") };
+}
+
+#[test]
+fn a_malicious_info_client_id_is_not_used() {
+    let (_g, home) = gogo_home();
+    let game = home.path().join("games/11/game");
+    fs::create_dir_all(&game).unwrap();
+    fs::create_dir_all(home.path().join("games/11/prefix")).unwrap();
+    let g = Game::find("11", Lane::Linux).unwrap();
+    for body in [
+        r#"{"clientId":"../../etc"}"#,
+        r#"{"clientId":"a/b"}"#,
+        r#"{"clientId":""}"#,
+        r#"{"clientId":12345}"#,
+        r#"{"clientId":["1"]}"#,
+        r#"{"clientId":null}"#,
+        "not json",
+    ] {
+        fs::write(game.join("goggame-11.info"), body).unwrap();
+        assert!(
+            matches!(g.client_id(), Err(CloudError::NoClientId(_))),
+            "{body}"
+        );
+    }
     unsafe { std::env::remove_var("GOGO_HOME") };
 }

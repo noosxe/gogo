@@ -618,23 +618,34 @@ Decided on 2026-11-13: every recommendation of the draft was accepted as written
 Code: `gogo_core::cloud::{remote_config, locations}`, `gogo saves locations <gogid> [--json]`.
 
 - **Lane** is the host's (Linux → `steamuser`, macOS → `crossover`), a `Lane` value the
-  tests pass explicitly. Both lanes find the game through `GameDirs::for_game`.
+  tests pass explicitly. Both lanes find the game through `GameDirs::for_game`, and the Mac
+  lane reuses the Linux layout helpers (`setup::game_files`, the `prefix/` and `game/` dirs of
+  `GameDirs`). D9's check of the `crossover` user on a real bottle is still pending.
 - **Client id**: the game's `goggame-<gogid>.info` (the game's files, then anywhere under
   `drive_c` for the installer lane), else the `clientId` field of the kept
-  `build-manifest.json`; nothing else of the manifest is read.
-- **Remote config cache**: `<cache>/remote-config/<clientId>.json`, fresh for 24 h; a failed
-  fetch falls back to an older copy (`config_source: stale_cache`), no copy is an error
-  (exit 4). `component_version` is the constant `2.0.45`; the D13 check is the ignored test
+  `build-manifest.json`, read through a typed struct that holds only that field, so the secret
+  is never parsed into a value.
+- **Remote config cache**: `<cache>/remote-config/<clientId>.json`, fresh for 24 h (a future
+  mtime counts as expired); a failed fetch falls back to an older copy (`config_source:
+  stale_cache`), no copy is an error (exit 4). An answer without a `content` object, or a
+  corrupt cache file, is no remote config: never used, never cached. A 404 from the service
+  means GOG has no config for the client: "no cloud saves", exit 0 (`no_remote_config: true`
+  in `--json`). `component_version` is the constant `2.0.45`; the D13 check is the ignored test
   `live_component_version_still_answers` (`GOGO_LIVE_CLIENT_ID=<id> cargo nextest run
   --run-ignored only live_component_version`).
 - **Lookup** is case-insensitive per part: the exact case wins; two dirs that differ only
   by case make that one location skipped (`ambiguous`); a missing part keeps its exact case.
   The variable's own dirs (`drive_c`, `users`, `Documents`, …) go through the same lookup.
-- **Escape guard** (`Roots::contains`): no `.`/`..`/`:`/NUL part, and the deepest existing
-  ancestor, links resolved, must be under the canonical prefix or game dir (a dangling link
-  counts as leaving). A link to the game dir from inside the prefix is therefore followed
-  anywhere, not only for the depot lane's `drive_c/GOG/<name>`. `Location::file(rel)` does
-  the same check for one object path; the pull and push use it for every file.
+- **Escape guard** (`Roots::check`): no `.`/`..`/`:`/NUL part, and the deepest existing
+  ancestor, links resolved, must be under the canonical prefix. A path may land in the game's
+  files only as an `<?INSTALL?>` path or through the prefix's `drive_c/GOG/<name>` link, and an
+  `<?INSTALL?>` path may not leave the game's files: a link into the game dir from elsewhere in
+  the prefix, and one from the game dir into the prefix, are refused (a save location never
+  aliases the other tree). The prefix and game dir needn't exist yet (a depot game that never
+  ran): the roots are canonicalized at their deepest existing ancestor. `Location::file(rel)`
+  does the same check for one object path and returns the canonical path for the parts that
+  exist; it is a check at one moment, so the pull and push must check again just before each
+  write and must not follow links then (`O_NOFOLLOW`, or a verified parent dir).
 - **Skipped locations** are reported with a reason (`unknown_variable`, `not_a_variable`,
   `not_for_windows_build`, `bad_path`, `bad_name`, `duplicate_name`, `ambiguous`,
   `escapes_prefix`) in `--json` and as warnings in the text output; the others still resolve.
