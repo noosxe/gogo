@@ -593,6 +593,9 @@ These are the constraints this design puts on #275; design 22 §4.3 and §7.2 ta
    Those locations may point into the game's files (`game/` or the install dir); the
    build-file filter of §6.1 still applies there, so a declared save dir that also holds
    shipped files lists only what the game wrote.
+   *As built (design 22 §12d, #463):* points 1 and 3 are in: the rollback marks the record
+   under the game's sync lock, and the cloud locations in the prefix are added to the save roots,
+   offline from the remote-config cache.
 4. Snapshots never touch the cloud. A rollback doesn't push, and deleting a snapshot doesn't
    delete anything remote.
 

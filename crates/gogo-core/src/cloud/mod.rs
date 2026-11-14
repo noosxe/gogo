@@ -9,6 +9,7 @@ pub mod http;
 pub mod locations;
 pub mod record;
 pub mod remote_config;
+pub mod save_roots;
 pub mod scan;
 pub mod status;
 pub mod storage;

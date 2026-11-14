@@ -145,6 +145,22 @@ impl SyncLock {
         crate::snapshot::write_atomic(&p, text.as_bytes()).map_err(|e| io_error(&p, e))
     }
 
+    /// A rollback (design 22 §4.3, design 20 §6.3): set `rolled_back` in the
+    /// game's record, so the next sync treats every difference as a conflict.
+    /// `Ok(false)` when there is no record (the first sync asks anyway). A
+    /// mark already set keeps its time: the earliest rollback not yet settled
+    /// stands. A record that can't be read is an error: it can't be marked.
+    pub fn mark_rolled_back(&self, now: std::time::SystemTime) -> Result<bool, CloudError> {
+        let Some(mut record) = load(&self.dir, self.gogid)? else {
+            return Ok(false);
+        };
+        if record.rolled_back.is_none() {
+            record.rolled_back = Some(datetime(now));
+            self.save(&record)?;
+        }
+        Ok(true)
+    }
+
     /// D11: the game's client id changed, so the record is set aside as
     /// `<gogid>.client-changed-<UTC timestamp>.toml` and the next sync is a
     /// first sync. The new name; `None` when there was no record.
@@ -196,6 +212,41 @@ mod tests {
             },
         );
         r
+    }
+
+    #[test]
+    fn a_rollback_marks_the_record_and_keeps_the_earliest_mark() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = SyncLock::acquire(dir.path(), 5).unwrap();
+        // No record: nothing to mark, and none is created.
+        assert!(!lock.mark_rolled_back(std::time::UNIX_EPOCH).unwrap());
+        assert_eq!(load(dir.path(), 5).unwrap(), None);
+
+        lock.save(&sample()).unwrap();
+        let t1 = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        assert!(lock.mark_rolled_back(t1).unwrap());
+        let marked = load(dir.path(), 5).unwrap().unwrap();
+        assert_eq!(marked.rolled_back, Some(datetime(t1)));
+        assert_eq!(marked.files, sample().files, "nothing else changes");
+
+        let t2 = t1 + std::time::Duration::from_secs(60);
+        assert!(lock.mark_rolled_back(t2).unwrap());
+        assert_eq!(
+            load(dir.path(), 5).unwrap().unwrap().rolled_back,
+            Some(datetime(t1))
+        );
+    }
+
+    #[test]
+    fn a_record_that_cant_be_read_cant_be_marked() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = SyncLock::acquire(dir.path(), 5).unwrap();
+        std::fs::write(path(dir.path(), 5), "not toml [").unwrap();
+        assert!(lock.mark_rolled_back(std::time::UNIX_EPOCH).is_err());
+        assert_eq!(
+            std::fs::read_to_string(path(dir.path(), 5)).unwrap(),
+            "not toml ["
+        );
     }
 
     #[test]

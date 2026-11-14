@@ -11645,6 +11645,58 @@ mod rollback {
     }
 
     #[test]
+    fn a_rollback_marks_the_cloud_saves_record_and_the_plan_says_so() {
+        use gogo::cloud::record::{Record, SyncLock, load};
+        let Some(w) = World::launcher("rb-cloud", false) else {
+            return;
+        };
+        let (_, b) = fake();
+        let (_, n) = dress(&w, &b);
+        let dir = w.home.join("cloud-saves");
+        let id: u64 = ID.parse().unwrap();
+
+        // No record: no line, nothing created.
+        let p = plan(&b, n, &opts());
+        assert!(!p.lines(false).join("\n").contains("cloud saves"));
+        let out = rb::rollback(ID, &b, n, &p, &opts()).unwrap();
+        assert!(!out.cloud_saves_marked);
+        assert!(!dir.exists());
+        let _ = go(&b, n + 1, &opts()).unwrap(); // back to the dressed state
+
+        // A record: the plan says so, and the rollback marks it.
+        SyncLock::acquire(&dir, id)
+            .unwrap()
+            .save(&Record::new("42"))
+            .unwrap();
+        let p = plan(&b, n, &opts());
+        assert!(
+            p.lines(false).join("\n").contains(
+                "cloud saves: the next sync will ask about every difference (--prefer local|cloud)"
+            ),
+            "{:?}",
+            p.lines(false)
+        );
+        assert_eq!(load(&dir, id).unwrap().unwrap().rolled_back, None);
+
+        // A sync running refuses the rollback, and nothing changed.
+        let busy = SyncLock::acquire(&dir, id).unwrap();
+        let err = rb::rollback(ID, &b, n, &p, &opts())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("nothing was changed"), "{err}");
+        assert_eq!(load(&dir, id).unwrap().unwrap().rolled_back, None);
+        drop(busy);
+
+        let out = rb::rollback(ID, &b, n, &p, &opts()).unwrap();
+        assert!(out.cloud_saves_marked, "{:?}", out.warnings);
+        assert!(load(&dir, id).unwrap().unwrap().rolled_back.is_some());
+        assert_eq!(
+            serde_json::to_value(&out).unwrap()["cloudSavesMarked"],
+            true
+        );
+    }
+
+    #[test]
     fn a_rollback_restores_the_game_its_override_and_sets_the_saves_aside() {
         let Some(w) = World::launcher("rb-full", false) else {
             return;

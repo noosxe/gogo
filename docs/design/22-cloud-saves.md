@@ -790,6 +790,32 @@ Code: `gogo_core::cloud::build_files`, `Location::{in_game_files, build_file}`.
   holds 59 shipped cities, all left out; two others plan only their saves. The two older
   builds whose info files name no build are skipped with the reason.
 
+## 12d. As built: rollback interplay and save roots (C6, #463)
+
+- **The mark**: `SyncLock::mark_rolled_back(now)` (record.rs) sets `rolled_back` in an
+  existing record and leaves a mark already set alone (the earliest unsettled rollback
+  stands). No record: nothing is written and no `cloud-saves/` dir is created. A record that
+  can't be read can't be marked: the rollback goes on, with a warning, and its plan says so.
+- **When**: `snapshot rollback` takes the game's sync lock before it changes anything (when
+  the game has a record or a lock file), so a running sync refuses the rollback (exit 7,
+  "nothing was changed"). It sets the mark right after the pre-rollback snapshot and before
+  the swap, holding the lock to the end. This is earlier than design 20 §6.3's "after": a
+  crash between the mark and the commit leaves a mark with no rollback, which costs one
+  question at the next sync, whereas a mark that is missing after a commit could let a sync
+  overwrite the rolled-back saves.
+- **Output**: the plan has `cloud saves: the next sync will ask about every difference
+  (--prefer local|cloud)` when a record exists (`cloudSaves` in `--json`: `noRecord`,
+  `record`, `unreadable`); the result has `cloudSavesMarked`.
+- **Save roots**: `cloud::save_roots::prefix_roots` resolves the cached remote config offline
+  (`remote_config::load_cached`; no cache, no extra roots, no network) and returns the
+  existing locations inside the prefix. They are unioned with design 20's generic roots (a
+  file both reach is listed once), with the same excludes, applied below the user dir the
+  location is in. Locations in the game's files (`<?INSTALL?>`, the `drive_c/GOG/<name>`
+  link) are not added: the finder already scans the game's files with the build-file filter.
+  In practice every non-`<?INSTALL?>` variable resolves under a generic root, so the union
+  adds files only for a user dir the generic scan doesn't list (it lists those present) and
+  stays correct if the variables grow.
+
 ## 13. Implementation issues (to be filed)
 
 Under epic #155 (Linux runtime), `type:feature`, `area:wine-runtime` + `area:auth` /
