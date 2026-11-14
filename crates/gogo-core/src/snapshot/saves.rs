@@ -362,6 +362,10 @@ pub struct Scan {
     /// The snapshot's time (`created`).
     pub created: SystemTime,
     pub game: Option<GameFiles>,
+    /// More save roots, absolute dirs in the prefix: the game's cloud-save
+    /// locations (design 22 §7.2), on top of the generic roots. One outside
+    /// `drive_c/` is ignored.
+    pub extra_roots: Vec<PathBuf>,
 }
 
 /// How the game's own files were checked, for the plan.
@@ -513,6 +517,37 @@ pub fn find(scan: &Scan) -> Found {
             let snap = snap_c.as_ref().map(|c| c.join(&path));
             if newer(&meta, snap.as_deref(), scan.created).0 {
                 files.push(save_file(path, drive_c.join(base).join(&in_base), &meta));
+            }
+        }
+    }
+    // The cloud-save locations, unioned with the roots above: a file both
+    // reach is reported once. The excludes apply to the path below the user
+    // dir (or `ProgramData`) the location is in, else below the location.
+    let mut seen: HashSet<String> = files.iter().map(|f: &SaveFile| f.path.clone()).collect();
+    for root in &scan.extra_roots {
+        let Ok(under_c) = root.strip_prefix(&drive_c) else {
+            continue;
+        };
+        let under_c = under_c.to_string_lossy().replace('\\', "/");
+        let base_len = match under_c.split('/').collect::<Vec<_>>().as_slice() {
+            ["users", u, ..] if users.iter().any(|x| x == u) => "users/".len() + u.len() + 1,
+            ["ProgramData", ..] => "ProgramData/".len(),
+            _ => under_c.len() + 1,
+        };
+        for (rel, meta) in walk(root) {
+            let path = if under_c.is_empty() {
+                rel.clone()
+            } else {
+                format!("{under_c}/{rel}")
+            };
+            let in_base = path.get(base_len..).unwrap_or(&rel);
+            if excluded(in_base) || seen.contains(&path) {
+                continue;
+            }
+            let snap = snap_c.as_ref().map(|c| c.join(&path));
+            if newer(&meta, snap.as_deref(), scan.created).0 {
+                seen.insert(path.clone());
+                files.push(save_file(path.clone(), drive_c.join(&path), &meta));
             }
         }
     }
@@ -970,7 +1005,56 @@ mod tests {
                 own: OwnFiles::scan(&now.join("game"), &["fix/patch.cfg".to_string()]),
                 same_content: same,
             }),
+            extra_roots: vec![],
         })
+    }
+
+    #[test]
+    fn cloud_roots_add_to_the_generic_ones_without_double_counting() {
+        let (_tmp, now, snap) = fixture();
+        let prefix = now.join("prefix");
+        let c = prefix.join("drive_c");
+        // A location outside the generic roots, one inside them, a cache in
+        // it, and one that isn't in the prefix's `drive_c/` at all.
+        let put = |p: PathBuf| {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "x").unwrap();
+        };
+        put(c.join("Program Files/Studio/Saves/new.sav"));
+        put(c.join("Program Files/Studio/Saves/debug.log"));
+        put(c.join("users/steamuser/AppData/Local/Temp/t.sav"));
+        let outside = prefix.join("not-drive-c/x.sav");
+        put(outside.clone());
+        let base = |extra: Vec<PathBuf>| {
+            find(&Scan {
+                prefix: prefix.clone(),
+                snap_prefix: Some(snap.join("prefix")),
+                created: SystemTime::UNIX_EPOCH + Duration::from_secs(THEN),
+                game: None,
+                extra_roots: extra,
+            })
+        };
+        let without = base(vec![]);
+        assert!(!paths(&without.files).contains(&"Program Files/Studio/Saves/new.sav"));
+
+        let with = base(vec![
+            c.join("Program Files/Studio/Saves"),
+            c.join("users/steamuser/Saved Games"),
+            c.join("users/steamuser/AppData/Local/Temp"),
+            outside.parent().unwrap().to_path_buf(),
+        ]);
+        let got = paths(&with.files);
+        assert!(
+            got.contains(&"Program Files/Studio/Saves/new.sav"),
+            "{got:?}"
+        );
+        assert!(!got.iter().any(|p| p.ends_with(".log")), "{got:?}");
+        assert!(!got.iter().any(|p| p.contains("Temp")), "{got:?}");
+        assert!(!got.iter().any(|p| p.contains("not-drive-c")), "{got:?}");
+        let mut want: Vec<&str> = paths(&without.files);
+        want.push("Program Files/Studio/Saves/new.sav");
+        want.sort();
+        assert_eq!(got, want, "a file both reach is reported once");
     }
 
     fn paths(f: &[SaveFile]) -> Vec<&str> {
@@ -1173,6 +1257,7 @@ mod tests {
             snap_prefix: None,
             created: SystemTime::UNIX_EPOCH + Duration::from_secs(THEN),
             game: None,
+            extra_roots: vec![],
         });
         // restored.sav's older mtime hides it without the snapshot's copy.
         let want: Vec<&str> = PREFIX_SAVES
