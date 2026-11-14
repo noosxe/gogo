@@ -122,7 +122,7 @@ async fn status(gogid: &str, json: bool) -> Result<i32, AppError> {
         let list = match build_files::lookup(&game) {
             Lookup::Known(l) => Ok(l),
             Lookup::Unknown(why) => Err(why),
-            Lookup::Fetch(want) => crate::snapshot_cmd::fetch_build_files(want)
+            Lookup::Fetch(want) => fetch_build_files(want)
                 .await
                 .filter(|l| !l.is_empty())
                 .ok_or_else(|| build_files::NOT_FETCHED.to_string()),
@@ -153,6 +153,24 @@ async fn status(gogid: &str, json: bool) -> Result<i32, AppError> {
     )
     .await;
     Ok(emit(status_outcome(plan, json)))
+}
+
+/// The build's file list from its depot manifests (the snapshot command's
+/// fetcher, Linux only): `None` when it can't be had.
+#[cfg(target_os = "linux")]
+async fn fetch_build_files(
+    want: gogo::linuxapp::rollback::FetchWant,
+) -> Option<gogo::snapshot::saves::BuildFiles> {
+    crate::snapshot_cmd::fetch_build_files(want).await
+}
+
+/// The Mac lane has no depot-lane game to fetch for: no list, and the
+/// location is skipped.
+#[cfg(not(target_os = "linux"))]
+async fn fetch_build_files(
+    _want: gogo::linuxapp::rollback::FetchWant,
+) -> Option<gogo::snapshot::saves::BuildFiles> {
+    None
 }
 
 /// A status run's output and exit code: 0 a plan with nothing to decide, 8
