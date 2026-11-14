@@ -140,6 +140,10 @@ pub enum CloudError {
     /// (exit 7, design 22 §7.2, §7.4).
     #[error("{0}")]
     Refused(String),
+    /// An upload plan that would take the container over its quota (design 22
+    /// §5.4): refused before any upload. Exit 1: a retry doesn't help.
+    #[error("{0}")]
+    Quota(String),
 }
 
 /// The exit class of an HTTP status (design 07 §2): 3 auth, 4 worth a retry
@@ -185,7 +189,8 @@ impl CloudError {
             | Self::ClientIdMismatch { .. }
             | Self::Exchange { .. }
             | Self::Info { .. }
-            | Self::ObjectName { .. } => 1,
+            | Self::ObjectName { .. }
+            | Self::Quota(_) => 1,
         }
     }
 }

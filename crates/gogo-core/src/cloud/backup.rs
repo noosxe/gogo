@@ -1,6 +1,7 @@
-//! Backups of local save files before a pull overwrites or deletes them
-//! (design 22 §7.1, D7): `<data_root>/cloud-saves/backups/<gogid>/<UTC
-//! timestamp>/local/<location>/<path>`, the newest `keep` dirs per game kept.
+//! Backups before a pull overwrites or deletes local save files, and before a
+//! push overwrites or deletes cloud objects (design 22 §7.1, D7, D12):
+//! `<data_root>/cloud-saves/backups/<gogid>/<UTC timestamp>/local/<location>/<path>`
+//! and `…/cloud/<location>/<path>`, the newest `keep` dirs per game kept.
 //! Every file is backed up, empty ones too: a tombstone may stand for
 //! someone's real empty save (design 22 §12b).
 
@@ -98,12 +99,10 @@ impl Backup {
         }
     }
 
-    /// Copy `src` (opened by the caller without following a link) to
-    /// `local/<name>` here, fsynced. `name` is the object name,
-    /// `<location>/<path>`; `/` and `\` both separate.
-    pub fn save(&mut self, name: &str, src: &mut File) -> Result<PathBuf, WriteError> {
+    /// `<dir>/<sub>/<name's parts>`, its dir made.
+    fn dest(&mut self, sub: &str, name: &str) -> Result<PathBuf, WriteError> {
         let dir = self.ensure()?;
-        let mut dst = dir.join("local");
+        let mut dst = dir.join(sub);
         for part in name.split(['/', '\\']).filter(|p| !p.is_empty()) {
             if part == "." || part == ".." {
                 return Err(WriteError::Path {
@@ -115,6 +114,14 @@ impl Backup {
         }
         let parent = dst.parent().expect("below the dir").to_path_buf();
         std::fs::create_dir_all(&parent).map_err(|e| io(&parent, e))?;
+        Ok(dst)
+    }
+
+    /// Copy `src` (opened by the caller without following a link) to
+    /// `local/<name>` here, fsynced. `name` is the object name,
+    /// `<location>/<path>`; `/` and `\` both separate.
+    pub fn save(&mut self, name: &str, src: &mut File) -> Result<PathBuf, WriteError> {
+        let dst = self.dest("local", name)?;
         let mut out = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -123,7 +130,36 @@ impl Backup {
         // `copy_file_range` underneath, which btrfs may answer with a clone.
         std::io::copy(src, &mut out).map_err(|e| io(&dst, e))?;
         out.sync_all().map_err(|e| io(&dst, e))?;
-        sync_dir(&parent)?;
+        sync_dir(dst.parent().expect("below the dir"))?;
+        self.files += 1;
+        Ok(dst)
+    }
+
+    /// Save a cloud object a push overwrites or deletes (design 22 §7.1) to
+    /// `cloud/<name>`: the stored gzip bytes as they are, so they can be
+    /// uploaded again unchanged, with its listing entry beside them
+    /// (`<leaf>.gogo-entry.json`). Both fsynced.
+    pub fn save_cloud(
+        &mut self,
+        name: &str,
+        gzip: &[u8],
+        entry: &super::storage::Entry,
+    ) -> Result<PathBuf, WriteError> {
+        let dst = self.dest("cloud", name)?;
+        let mut side = dst.clone().into_os_string();
+        side.push(".gogo-entry.json");
+        let side = PathBuf::from(side);
+        let json = serde_json::to_vec_pretty(entry).expect("an entry serializes");
+        for (path, bytes) in [(&dst, gzip), (&side, json.as_slice())] {
+            let mut out = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .map_err(|e| io(path, e))?;
+            std::io::Write::write_all(&mut out, bytes).map_err(|e| io(path, e))?;
+            out.sync_all().map_err(|e| io(path, e))?;
+        }
+        sync_dir(dst.parent().expect("below the dir"))?;
         self.files += 1;
         Ok(dst)
     }
