@@ -6,6 +6,7 @@
 
 pub mod app;
 pub mod auth;
+pub mod cloud;
 pub mod config;
 pub mod engine;
 pub mod fmt;
