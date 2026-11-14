@@ -89,6 +89,9 @@ pub struct RollbackOptions {
     /// manifests, when the depot cache doesn't hold the build); else the
     /// cache's or the installer log's, else none.
     pub build_files: Option<BuildFiles>,
+    /// How long to wait for a running cloud-save sync before refusing; `None`:
+    /// [`CLOUD_LOCK_WAIT`].
+    pub cloud_lock_wait: Option<std::time::Duration>,
     /// Crash injection: stop right after this step, leaving everything as it
     /// is (design 20 §10.2).
     #[doc(hidden)]
@@ -253,25 +256,58 @@ fn cloud_saves(gogid: &str) -> CloudSaves {
     }
 }
 
-/// The game's sync lock when it has a record (or a lock file: a first sync
-/// may be running), held over the whole rollback. A running sync refuses the
-/// rollback before anything changes; with the lock the mark can't race a
-/// sync's write of the record.
-fn cloud_lock(gogid: &str) -> Result<Option<crate::cloud::record::SyncLock>, MacAppError> {
+/// How long a rollback waits for a running sync before it refuses.
+pub const CLOUD_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The game's cloud-save sync lock (design 22 §7.4), held over the whole
+/// rollback: the lock order is this one, then the snapshot lock. A first sync
+/// could create the game's cloud-save state at any time, so it is taken
+/// whether or not a record exists (the lock file is created, never a record).
+/// A running sync is waited for briefly, then refuses the rollback before
+/// anything changes. `None` for a gogid that isn't a number: it has none.
+fn cloud_lock(
+    gogid: &str,
+    wait: std::time::Duration,
+) -> Result<Option<crate::cloud::record::SyncLock>, MacAppError> {
     let Ok(id) = gogid.parse::<u64>() else {
         return Ok(None);
     };
-    let dir = crate::cloud::record::default_dir();
-    if !crate::cloud::record::path(&dir, id).exists() && !dir.join(format!("{id}.lock")).exists() {
-        return Ok(None);
-    }
-    crate::cloud::record::SyncLock::acquire(&dir, id)
+    crate::cloud::record::SyncLock::acquire_for(&crate::cloud::record::default_dir(), id, wait)
         .map(Some)
         .map_err(|e| {
             MacAppError::Apps(format!(
-                "nothing was changed: the game's cloud saves are being synced ({e}); try again when it is done"
+                "nothing was changed: the game's cloud saves are being synced or their state can't be locked ({e}); try again when it is done"
             ))
         })
+}
+
+/// Best effort, after the swap (the game is rolled back already): set the
+/// mark again when it is missing, so recovery of a crash leaves it. Under
+/// `lock` when the rollback holds it, else the lock is waited for briefly
+/// (recovery runs under the snapshot lock, which is the wrong way round, so
+/// it doesn't wait long). A warning when it can't.
+fn mark_again(gogid: &str, lock: Option<&crate::cloud::record::SyncLock>) -> Option<String> {
+    let id: u64 = gogid.parse().ok()?;
+    let dir = crate::cloud::record::default_dir();
+    let warn = |e: String| {
+        Some(format!(
+            "cloud saves: the sync record couldn't be marked rolled back ({e}); the next sync is not forced to ask"
+        ))
+    };
+    let marked = match lock {
+        Some(l) => l.mark_rolled_back(std::time::SystemTime::now()),
+        None => match crate::cloud::record::path(&dir, id).try_exists() {
+            Ok(false) => return None,
+            Ok(true) => crate::cloud::record::SyncLock::acquire_for(
+                &dir,
+                id,
+                std::time::Duration::from_secs(1),
+            )
+            .and_then(|l| l.mark_rolled_back(std::time::SystemTime::now())),
+            Err(e) => return warn(e.to_string()),
+        },
+    };
+    marked.err().and_then(|e| warn(e.to_string()))
 }
 
 /// What a rollback will do (design 20 §5.3, §6).
@@ -465,7 +501,9 @@ impl RollbackPlan {
             for g in &self.groups {
                 out.push(format!(
                     "    {}: {}, {}, newest {}",
-                    g.dir,
+                    g.cloud
+                        .as_ref()
+                        .map_or_else(|| g.dir.clone(), |c| format!("{} (cloud: {c})", g.dir)),
                     plural(g.files, "file", "files"),
                     crate::fmt::human_size(g.bytes),
                     local(g.newest_at.into())
@@ -784,7 +822,7 @@ fn find_saves(
 
 /// The game's cloud-save locations in the prefix as extra save roots (design
 /// 22 §7.2): offline, from the remote-config cache; none without it.
-fn cloud_roots(gogid: &str) -> Vec<PathBuf> {
+fn cloud_roots(gogid: &str) -> Vec<saves::ExtraRoot> {
     crate::cloud::locations::Game::find(gogid, crate::cloud::locations::Lane::Linux)
         .map(|g| crate::cloud::save_roots::prefix_roots(&g))
         .unwrap_or_default()
@@ -998,9 +1036,13 @@ fn finish(
     j: &Journal,
     target: Option<&Meta>,
     fail_at: Option<RbStep>,
+    cloud: Option<&crate::cloud::record::SyncLock>,
 ) -> Result<Vec<String>, MacAppError> {
     check(fail_at, RbStep::Committed)?;
     let mut warnings = Vec::new();
+    // Idempotent, and what recovery re-applies if the rollback's own mark
+    // is missing.
+    warnings.extend(mark_again(gogid, cloud));
     let lane = super::relocate::LinuxLane::default();
     if let Some(m) = target
         && m.game_dir != dirs.root
@@ -1085,7 +1127,8 @@ pub fn rollback(
 ) -> Result<RolledBack, MacAppError> {
     let dirs = snapshots::built(gogid)?;
     // Before anything changes: a running sync refuses the rollback.
-    let cloud = cloud_lock(gogid)?;
+    // The cloud-save lock comes before the snapshot lock, always.
+    let cloud = cloud_lock(gogid, opts.cloud_lock_wait.unwrap_or(CLOUD_LOCK_WAIT))?;
     let (mut out, recovered) =
         snapshots::locked(gogid, &dirs, backends, false, |s, g, support, b| {
             snapshots::refuse_for_rollback(gogid, &dirs)?;
@@ -1134,6 +1177,22 @@ fn run(
     cloud: Option<&crate::cloud::record::SyncLock>,
 ) -> Result<RolledBack, MacAppError> {
     let n = meta.id;
+    // Design 22 §4.3: the rolled-back saves are older than the cloud's, so
+    // the next sync asks about every difference. Marked before anything
+    // changes, and a record that can't be marked refuses the rollback: a
+    // mark left by a rollback that then fails costs one question, a missing
+    // one could let a sync overwrite the saves.
+    let mut warnings = Vec::new();
+    let mut cloud_saves_marked = false;
+    if let Some(lock) = cloud {
+        cloud_saves_marked = lock
+            .mark_rolled_back(std::time::SystemTime::now())
+            .map_err(|e| {
+                MacAppError::Apps(format!(
+                    "nothing was changed: the cloud-save record couldn't be marked rolled back ({e})"
+                ))
+            })?;
+    }
     let jpath = s.rollback_journal_path();
     let staging = backend::rollback_staging(&dirs.root)
         .ok_or_else(|| MacAppError::Apps(format!("{} has no parent", dirs.root.display())))?;
@@ -1171,20 +1230,6 @@ fn run(
     j.pre = Some(pre.id);
     write_journal(&jpath, &j)?;
     check(opts.fail_at, RbStep::PreSnapshot)?;
-
-    // Design 22 §4.3: the rolled-back saves are older than the cloud's, so
-    // the next sync asks about every difference. Marked before the swap: a
-    // crash leaves the mark, which only costs one question, never the saves.
-    let mut warnings = Vec::new();
-    let mut cloud_saves_marked = false;
-    if let Some(lock) = cloud {
-        match lock.mark_rolled_back(std::time::SystemTime::now()) {
-            Ok(marked) => cloud_saves_marked = marked,
-            Err(e) => warnings.push(format!(
-                "cloud saves: the sync record couldn't be marked rolled back ({e}); the next sync is not forced to ask"
-            )),
-        }
-    }
 
     let copied_to = if opts.drop_saves
         || (found.files.is_empty() && found.unattributed.is_empty() && found.registry.is_empty())
@@ -1234,7 +1279,7 @@ fn run(
             RollbackStep::Committed => {
                 j.committed = true;
                 write_journal(&jpath, &j)
-                    .and_then(|()| finish(gogid, dirs, s, &j, Some(meta), fail_at))
+                    .and_then(|()| finish(gogid, dirs, s, &j, Some(meta), fail_at, cloud))
                     .map(|w| warnings.extend(w))
             }
             RollbackStep::OldTreeDeleted => check(fail_at, RbStep::OldTreeDeleted),
@@ -1325,7 +1370,7 @@ pub(crate) fn settle_locked(
     let staging = backend::rollback_staging(&dirs.root).unwrap_or_else(|| j.staging.clone());
     let settled = if dirs.root.join(ROLLBACK_MARKER).symlink_metadata().is_ok() {
         let target = s.load(j.to).map_err(snapshots::err)?;
-        finish(gogid, dirs, s, &j, target.as_ref(), None)?;
+        finish(gogid, dirs, s, &j, target.as_ref(), None, None)?;
         b.discard(&staging)?;
         Settled::Finished {
             to: j.to,

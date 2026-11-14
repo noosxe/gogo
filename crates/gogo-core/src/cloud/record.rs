@@ -116,6 +116,35 @@ pub struct SyncLock {
 impl SyncLock {
     /// Take it, or fail at once when another gogo holds it.
     pub fn acquire(dir: &Path, gogid: u64) -> Result<SyncLock, CloudError> {
+        Self::try_acquire(dir, gogid)?.ok_or_else(|| {
+            io_error(
+                &dir.join(format!("{gogid}.lock")),
+                "another gogo is syncing this game's cloud saves",
+            )
+        })
+    }
+
+    /// [`SyncLock::acquire`], retrying for up to `wait` while another gogo
+    /// holds it (a rollback waits briefly for a sync that is about to end).
+    pub fn acquire_for(
+        dir: &Path,
+        gogid: u64,
+        wait: std::time::Duration,
+    ) -> Result<SyncLock, CloudError> {
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            if let Some(lock) = Self::try_acquire(dir, gogid)? {
+                return Ok(lock);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Self::acquire(dir, gogid);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// `None` when another gogo holds the lock.
+    fn try_acquire(dir: &Path, gogid: u64) -> Result<Option<SyncLock>, CloudError> {
         std::fs::create_dir_all(dir).map_err(|e| io_error(dir, e))?;
         let p = dir.join(format!("{gogid}.lock"));
         let f = std::fs::OpenOptions::new()
@@ -125,15 +154,12 @@ impl SyncLock {
             .open(&p)
             .map_err(|e| io_error(&p, e))?;
         match f.try_lock() {
-            Ok(()) => Ok(SyncLock {
+            Ok(()) => Ok(Some(SyncLock {
                 _file: f,
                 dir: dir.to_path_buf(),
                 gogid,
-            }),
-            Err(std::fs::TryLockError::WouldBlock) => Err(io_error(
-                &p,
-                "another gogo is syncing this game's cloud saves",
-            )),
+            })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
             Err(std::fs::TryLockError::Error(e)) => Err(io_error(&p, e)),
         }
     }
@@ -235,6 +261,32 @@ mod tests {
             load(dir.path(), 5).unwrap().unwrap().rolled_back,
             Some(datetime(t1))
         );
+    }
+
+    #[test]
+    fn acquire_for_waits_for_a_lock_that_is_let_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let held = SyncLock::acquire(dir.path(), 5).unwrap();
+        let wait = std::time::Duration::from_secs(5);
+        let t = std::thread::spawn({
+            let d = dir.path().to_path_buf();
+            move || SyncLock::acquire_for(&d, 5, wait).map(|_| ())
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        drop(held);
+        t.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn acquire_for_gives_up_after_the_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let _held = SyncLock::acquire(dir.path(), 5).unwrap();
+        let t = std::time::Instant::now();
+        let err = SyncLock::acquire_for(dir.path(), 5, std::time::Duration::from_millis(300))
+            .err()
+            .unwrap();
+        assert!(t.elapsed() >= std::time::Duration::from_millis(300));
+        assert!(err.to_string().contains("another gogo is syncing"), "{err}");
     }
 
     #[test]

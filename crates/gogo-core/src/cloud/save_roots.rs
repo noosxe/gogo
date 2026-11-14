@@ -2,7 +2,7 @@
 //! §7.2): read offline, from the remote-config cache, so a rollback never
 //! needs the network.
 
-use std::path::PathBuf;
+use crate::snapshot::saves::ExtraRoot;
 
 use super::locations::{Game, Layout, resolve};
 use super::remote_config;
@@ -13,7 +13,7 @@ use super::remote_config;
 /// the game's files, with the build-file filter. Nothing without a cached
 /// remote config (or without cloud saves for the game), and never a network
 /// call.
-pub fn prefix_roots(game: &Game) -> Vec<PathBuf> {
+pub fn prefix_roots(game: &Game) -> Vec<ExtraRoot> {
     let Ok(client_id) = game.client_id() else {
         return vec![];
     };
@@ -21,7 +21,7 @@ pub fn prefix_roots(game: &Game) -> Vec<PathBuf> {
 }
 
 /// [`prefix_roots`] for a client id and layout.
-pub fn prefix_roots_of(client_id: &str, layout: &Layout) -> Vec<PathBuf> {
+pub fn prefix_roots_of(client_id: &str, layout: &Layout) -> Vec<ExtraRoot> {
     let Some(cfg) = remote_config::load_cached(client_id) else {
         return vec![];
     };
@@ -29,12 +29,17 @@ pub fn prefix_roots_of(client_id: &str, layout: &Layout) -> Vec<PathBuf> {
         .locations
         .into_iter()
         .filter(|l| l.exists && !l.in_game_files())
-        .map(|l| l.path)
+        .map(|l| ExtraRoot {
+            name: l.name,
+            dir: l.path,
+        })
         .collect()
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
     use crate::cloud::locations::Lane;
 
@@ -43,7 +48,21 @@ mod tests {
         _dir: tempfile::TempDir,
         layout: Layout,
         cache: Option<PathBuf>,
+        home: Option<std::ffi::OsString>,
         _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for World {
+        fn drop(&mut self) {
+            // SAFETY: under the shared env mutex, still held (`_guard` drops
+            // after this).
+            unsafe {
+                match &self.home {
+                    Some(h) => std::env::set_var("GOGO_HOME", h),
+                    None => std::env::remove_var("GOGO_HOME"),
+                }
+            }
+        }
     }
 
     fn world(config: Option<&str>) -> World {
@@ -63,6 +82,7 @@ mod tests {
         .unwrap();
         std::fs::create_dir_all(&layout.game_files).unwrap();
         std::fs::create_dir_all(layout.game_files.join("saves")).unwrap();
+        let home = std::env::var_os("GOGO_HOME");
         // SAFETY: under the shared env mutex, held by `_guard`.
         unsafe { std::env::set_var("GOGO_HOME", base.join("home")) };
         let cache = config.map(|c| {
@@ -75,6 +95,7 @@ mod tests {
             _dir: dir,
             layout,
             cache,
+            home,
             _guard: guard,
         }
     }
@@ -101,16 +122,20 @@ mod tests {
         // The one that exists, not the one that doesn't, not the game's own.
         assert_eq!(
             roots,
-            [w.layout
-                .prefix
-                .join("drive_c/users/steamuser/Documents/Studio")]
+            [ExtraRoot {
+                name: "docs".into(),
+                dir: w
+                    .layout
+                    .prefix
+                    .join("drive_c/users/steamuser/Documents/Studio"),
+            }]
         );
     }
 
     #[test]
     fn without_a_cache_entry_there_are_none_and_no_network_is_used() {
         let w = world(None);
-        assert_eq!(prefix_roots_of("42", &w.layout), Vec::<PathBuf>::new());
+        assert!(prefix_roots_of("42", &w.layout).is_empty());
     }
 
     #[test]
