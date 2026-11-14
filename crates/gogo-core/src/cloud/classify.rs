@@ -248,8 +248,14 @@ mod tests {
         assert_eq!(c(Same, Deleted), Some(DeleteLocal));
         assert_eq!(c(Deleted, Same), Some(DeleteCloud));
         assert_eq!(c(Changed, Changed), Some(Conflict(BothChanged)));
-        assert_eq!(c(Changed, Deleted), Some(Conflict(LocalChangedCloudDeleted)));
-        assert_eq!(c(Deleted, Changed), Some(Conflict(LocalDeletedCloudChanged)));
+        assert_eq!(
+            c(Changed, Deleted),
+            Some(Conflict(LocalChangedCloudDeleted))
+        );
+        assert_eq!(
+            c(Deleted, Changed),
+            Some(Conflict(LocalDeletedCloudChanged))
+        );
         assert_eq!(classify(New, New, Some(true), false), Some(Record));
         assert_eq!(
             classify(New, New, Some(false), false),
@@ -279,9 +285,6 @@ mod tests {
         }
         assert_eq!(classify(Same, Same, None, true), Some(Action::Nothing));
         assert_eq!(classify(Deleted, Deleted, None, true), Some(Action::Forget));
-        assert_eq!(
-            classify(New, New, Some(true), true),
-            Some(Action::Record)
-        );
+        assert_eq!(classify(New, New, Some(true), true), Some(Action::Record));
     }
 }

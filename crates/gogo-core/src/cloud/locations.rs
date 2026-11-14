@@ -101,7 +101,10 @@ impl Game {
         match client_id::info_id(&self.layout, self.id()?) {
             InfoId::Id(c) => return Ok(c),
             InfoId::Bad { path, reason } => {
-                tracing::warn!("{}: {reason}; using the kept build manifest", path.display())
+                tracing::warn!(
+                    "{}: {reason}; using the kept build manifest",
+                    path.display()
+                )
             }
             InfoId::Absent => {}
         }

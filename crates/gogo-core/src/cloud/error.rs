@@ -149,9 +149,7 @@ impl CloudError {
     pub fn exit_code(&self) -> i32 {
         match self {
             Self::NotBuilt(_) | Self::Game(_) => 2,
-            Self::RemoteConfig(RemoteConfigError::Http(_) | RemoteConfigError::Status { .. }) => {
-                4
-            }
+            Self::RemoteConfig(RemoteConfigError::Http(_) | RemoteConfigError::Status { .. }) => 4,
             Self::RemoteConfig(_) | Self::NoClientId(_) => 1,
             Self::Corrupt { .. } => 5,
             Self::Io { .. } | Self::Listing(_) | Self::ListingTruncated { .. } => 1,

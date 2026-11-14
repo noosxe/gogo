@@ -54,7 +54,10 @@ pub fn scan(loc: &Location) -> Result<Scan, CloudError> {
     }
     // Canonical, so the paths match [`Location::file`]'s for the same object
     // (the prefix may be reached through a link); nothing below is followed.
-    let root = loc.path.canonicalize().map_err(|e| io_error(&loc.path, e))?;
+    let root = loc
+        .path
+        .canonicalize()
+        .map_err(|e| io_error(&loc.path, e))?;
     walk(loc, &root, "", 0, &mut out)?;
     out.files.sort_by(|a, b| a.rel.cmp(&b.rel));
     out.ignored.sort();

@@ -95,7 +95,10 @@ pub fn load(dir: &Path, gogid: u64) -> Result<Option<Record>, CloudError> {
     if r.schema != SCHEMA {
         return Err(io_error(
             &p,
-            format!("sync record schema {} isn't {SCHEMA} (a newer gogo?)", r.schema),
+            format!(
+                "sync record schema {} isn't {SCHEMA} (a newer gogo?)",
+                r.schema
+            ),
         ));
     }
     Ok(Some(r))
@@ -204,8 +207,14 @@ mod tests {
         let back = load(dir.path(), 5).unwrap().unwrap();
         assert_eq!(back, sample());
         let text = std::fs::read_to_string(path(dir.path(), 5)).unwrap();
-        assert!(text.contains("[files.\"saves/ManualSave-12/sav.dat\"]"), "{text}");
-        assert!(text.contains("mtime = 2023-11-14T22:13:20.123456789Z"), "{text}");
+        assert!(
+            text.contains("[files.\"saves/ManualSave-12/sav.dat\"]"),
+            "{text}"
+        );
+        assert!(
+            text.contains("mtime = 2023-11-14T22:13:20.123456789Z"),
+            "{text}"
+        );
         assert!(!text.contains("rolled_back"));
         // No tmp file left.
         let names: Vec<_> = std::fs::read_dir(dir.path())
@@ -253,6 +262,9 @@ mod tests {
         );
         assert_eq!(load(dir.path(), 5).unwrap(), None);
         lock.save(&sample()).unwrap();
-        assert!(lock.set_aside(now).is_err(), "never overwrites an older one");
+        assert!(
+            lock.set_aside(now).is_err(),
+            "never overwrites an older one"
+        );
     }
 }

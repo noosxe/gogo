@@ -137,7 +137,10 @@ impl Fixture {
     }
 
     fn save_record(&self, r: &Record) {
-        SyncLock::acquire(&self.records, 5).unwrap().save(r).unwrap();
+        SyncLock::acquire(&self.records, 5)
+            .unwrap()
+            .save(r)
+            .unwrap();
     }
 }
 
@@ -183,17 +186,18 @@ async fn first_sync_decides_file_by_file_and_writes_nothing() {
     .await;
     let before = tree(&f.game.root);
     let plan = f.run().await.unwrap();
-    assert_eq!(tree(&f.game.root), before, "status writes nothing in the game");
+    assert_eq!(
+        tree(&f.game.root),
+        before,
+        "status writes nothing in the game"
+    );
     assert!(!f.records.join("5.toml").exists(), "nor the record");
 
     assert!(plan.enabled && plan.first_sync && !plan.client_id_changed);
     assert_eq!(
         actions(&plan),
         [
-            (
-                "saves/Slot 1/same.sav".to_string(),
-                Action::Record
-            ),
+            ("saves/Slot 1/same.sav".to_string(), Action::Record),
             (
                 "saves/differ.sav".into(),
                 Action::Conflict(ConflictReason::BothNewDiffer)
@@ -225,7 +229,12 @@ async fn first_sync_decides_file_by_file_and_writes_nothing() {
 
     // No user id, token or client id in the JSON.
     let json = serde_json::to_string(&plan).unwrap();
-    for secret in [CLIENT, "made-up-game-token", crate::cloud::testing::SECRET, "/v1/7"] {
+    for secret in [
+        CLIENT,
+        "made-up-game-token",
+        crate::cloud::testing::SECRET,
+        "/v1/7",
+    ] {
         assert!(!json.contains(secret), "{secret} in {json}");
     }
 }
@@ -333,7 +342,10 @@ async fn a_record_for_another_client_is_a_first_sync_and_stays_put() {
     f.serve(&[("saves/a.sav", gzip(b"v1"))]).await;
     let plan = f.run().await.unwrap();
     assert!(plan.client_id_changed && plan.first_sync);
-    assert_eq!(actions(&plan), [("saves/a.sav".to_string(), Action::Record)]);
+    assert_eq!(
+        actions(&plan),
+        [("saves/a.sav".to_string(), Action::Record)]
+    );
     assert_eq!(fs::read(f.records.join("5.toml")).unwrap(), before);
 }
 
@@ -405,7 +417,8 @@ async fn storage_off_needs_no_account() {
         .mount(&other)
         .await;
     let auth = CloudAuth::with_parts(&f.session, || Ok(()), NoManifests, &f.exchange);
-    let storage = StorageClient::with_base(format!("{}/v1/", other.uri()).parse().unwrap()).unwrap();
+    let storage =
+        StorageClient::with_base(format!("{}/v1/", other.uri()).parse().unwrap()).unwrap();
     let plan = status(&Inputs {
         game: &f.game,
         auth: &auth,
@@ -431,9 +444,7 @@ async fn no_license_and_storage_errors_stop_the_run() {
     let f = fixture(CONFIG).await;
     Mock::given(method("GET"))
         .and(path_regex("^/v1/"))
-        .respond_with(
-            ResponseTemplate::new(400).set_body_string(r#"{"error":"invalid_version"}"#),
-        )
+        .respond_with(ResponseTemplate::new(400).set_body_string(r#"{"error":"invalid_version"}"#))
         .mount(&f.server)
         .await;
     let e = f.run().await.unwrap_err();

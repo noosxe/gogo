@@ -1,10 +1,12 @@
-//! `gogo saves …` (design 22 §5): GOG cloud saves of a built game. This
-//! file holds the read-only `locations` subcommand; the status and sync
-//! commands come with the storage client.
+//! `gogo saves …` (design 22 §5): GOG cloud saves of a built game. The
+//! read-only `locations` and `status` subcommands; pull, push and sync come
+//! later.
 
+use gogo::cloud::classify::{Action, ConflictReason};
 use gogo::cloud::error::CloudError;
 use gogo::cloud::locations::{Game, Lane, Resolved, resolve};
 use gogo::cloud::remote_config::{self, Source};
+use gogo::cloud::status::{self as cloud_status, Located, Plan, UnmappedReason};
 
 use crate::{AppError, cli};
 
@@ -23,11 +25,26 @@ pub enum SavesCmd {
         #[arg(long)]
         json: bool,
     },
+    /// What a sync of a built game's cloud saves would do now, file by
+    /// file: downloads, uploads, deletions and conflicts, from GOG's cloud
+    /// listing, the local save dirs and the record of the last sync. Reads
+    /// only: nothing is written to the cloud, the game, its prefix or the
+    /// sync record. Exits 8 when files need a decision, 5 when a cloud
+    /// object fails its checksum.
+    Status {
+        /// GOG product id.
+        #[arg(value_name = "GOGID")]
+        gogid: String,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 pub async fn run(cmd: SavesCmd) -> Result<i32, AppError> {
     match cmd {
         SavesCmd::Locations { gogid, json } => locations(&gogid, json).await,
+        SavesCmd::Status { gogid, json } => status(&gogid, json).await,
     }
 }
 
@@ -77,6 +94,247 @@ async fn locations(gogid: &str, json: bool) -> Result<i32, AppError> {
     )
     .await;
     Ok(emit(out))
+}
+
+async fn status(gogid: &str, json: bool) -> Result<i32, AppError> {
+    let game = match Game::find(gogid, Lane::host()) {
+        Ok(g) => g,
+        Err(e) => return Ok(emit(Outcome::failed(&e))),
+    };
+    let http = gogo::gog::http().map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
+    let cache = gogo::state::cache::cache_dir();
+    let located = cloud_status::locate(&game, &http, remote_config::BASE, &cache).await;
+    let (client_id, resolved, source) = match located {
+        Err(e) => return Ok(emit(Outcome::failed(&e))),
+        Ok(Located::Off(plan)) => return Ok(emit(status_outcome(Ok(plan), json))),
+        Ok(Located::On {
+            client_id,
+            resolved,
+            source,
+        }) => (client_id, resolved, source),
+    };
+    let cfg = crate::load_config_from_env()?;
+    let store = gogo::auth::store::open(cfg.auth.token_store);
+    let session = match gogo::auth::Session::restore(store.clone()).await {
+        Ok(s) => s,
+        Err(e) => {
+            return Ok(emit(Outcome::failed(&gogo::cloud::auth::auth_error(e))));
+        }
+    };
+    let auth = gogo::cloud::auth::CloudAuth::new(&session, &*store);
+    let storage = match gogo::cloud::http::StorageClient::new() {
+        Ok(s) => s,
+        Err(e) => return Ok(emit(Outcome::failed(&e))),
+    };
+    let plan = cloud_status::plan(
+        &game,
+        &client_id,
+        &resolved,
+        source,
+        &auth,
+        &storage,
+        &gogo::cloud::record::default_dir(),
+    )
+    .await;
+    Ok(emit(status_outcome(plan, json)))
+}
+
+/// A status run's output and exit code: 0 a plan with nothing to decide, 8
+/// conflicts (D6: a dry run exits as the run would), 5 a corrupt object.
+pub fn status_outcome(plan: Result<Plan, CloudError>, json: bool) -> Outcome {
+    let plan = match plan {
+        Ok(p) => p,
+        Err(e) => return Outcome::failed(&e),
+    };
+    let code = if plan.corrupt() > 0 {
+        cli::exit::CORRUPT
+    } else if plan.conflicts() > 0 {
+        cli::exit::CONFLICTS
+    } else {
+        cli::exit::OK
+    };
+    let stdout = if json {
+        format!(
+            "{}\n",
+            serde_json::to_string(&plan).expect("a plan serializes")
+        )
+    } else {
+        render_status(&plan)
+    };
+    Outcome {
+        code,
+        stdout,
+        stderr: String::new(),
+    }
+}
+
+fn conflict_text(r: ConflictReason) -> &'static str {
+    match r {
+        ConflictReason::BothChanged => "changed here and in the cloud",
+        ConflictReason::LocalChangedCloudDeleted => "changed here, deleted in the cloud",
+        ConflictReason::LocalDeletedCloudChanged => "deleted here, changed in the cloud",
+        ConflictReason::BothNewDiffer => "on both sides with different content",
+        ConflictReason::RolledBack => "a rollback is pending",
+        ConflictReason::CaseClash => "cloud names differing only by case",
+    }
+}
+
+/// How each action reads in the text output, in the order shown.
+const ACTIONS: &[(&str, &str)] = &[
+    ("download", "download"),
+    ("upload", "upload"),
+    ("delete_local", "delete here"),
+    ("delete_cloud", "delete in cloud"),
+    ("conflict", "conflict"),
+    ("corrupt", "corrupt"),
+    ("record", "same"),
+    ("forget", "forget"),
+    ("nothing", "unchanged"),
+];
+
+fn label(a: Action) -> &'static str {
+    let name = cloud_status::action_name(a);
+    ACTIONS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, l)| *l)
+        .unwrap_or(name)
+}
+
+/// The plain-text plan.
+pub fn render_status(p: &Plan) -> String {
+    let mut out = String::new();
+    if !p.enabled {
+        let why = if p.no_remote_config {
+            "GOG has no remote config for this game"
+        } else {
+            "GOG has them off for its Windows build"
+        };
+        out.push_str(&format!("{}: no cloud saves ({why})\n", p.gogid));
+        return out;
+    }
+    if p.config_source == Source::StaleCache {
+        out.push_str("note: GOG's remote config couldn't be fetched; using an older cached copy\n");
+    }
+    if p.client_id_changed {
+        out.push_str(
+            "note: the sync record is for another edition's client; the next sync sets it \
+             aside and starts over\n",
+        );
+    }
+    if p.first_sync {
+        out.push_str(
+            "first sync: no record of an earlier one, so files on both sides are compared by content\n",
+        );
+    } else if let Some(t) = &p.last_sync {
+        out.push_str(&format!("last sync: {t}\n"));
+    }
+    if p.rolled_back {
+        out.push_str(
+            "note: a snapshot rollback is pending: every difference needs a decision \
+             (--prefer local|cloud)\n",
+        );
+    }
+    if p.pending_push {
+        out.push_str("note: a push from an earlier run is still pending\n");
+    }
+    for l in &p.locations {
+        let tag = if l.unverified {
+            " (unverified default location)"
+        } else {
+            ""
+        };
+        out.push_str(&format!("{}  {}{tag}\n", l.name, l.path.display()));
+        let prefix = format!("{}/", l.name);
+        for f in l.files.iter().filter(|f| f.action != Action::Nothing) {
+            let rel = f.name.strip_prefix(&prefix).unwrap_or(&f.name);
+            let local = f
+                .local
+                .as_ref()
+                .map(|x| format!("{}, {}", gogo::fmt::human_size(x.size), x.mtime))
+                .unwrap_or_else(|| "-".into());
+            let cloud = match &f.cloud {
+                Some(c) if c.tombstone => "deleted".to_string(),
+                Some(c) => format!(
+                    "{} stored, {}",
+                    gogo::fmt::human_size(c.bytes),
+                    c.last_modified.as_deref().unwrap_or("?")
+                ),
+                None => "-".into(),
+            };
+            let why = match f.action {
+                Action::Conflict(r) => format!(" ({})", conflict_text(r)),
+                _ => String::new(),
+            };
+            out.push_str(&format!(
+                "  {:<15} {rel}{why}\n  {:<15}   here: {local}; cloud: {cloud}\n",
+                label(f.action),
+                ""
+            ));
+        }
+        for i in &l.ignored {
+            out.push_str(&format!("  ignored: {i} (a link or special file)\n"));
+        }
+    }
+    let counts: Vec<String> = ACTIONS
+        .iter()
+        .filter_map(|(n, l)| {
+            let c = p.count(n);
+            (c > 0).then(|| format!("{c} {l}"))
+        })
+        .collect();
+    if counts.is_empty() {
+        out.push_str("nothing to sync: no saves on either side\n");
+    } else {
+        out.push_str(&format!("plan: {}\n", counts.join(", ")));
+    }
+    let unmapped = |r| p.unmapped.iter().filter(|u| u.reason == r).count();
+    for (r, what) in [
+        (UnmappedReason::NoLocation, "belong to no declared location"),
+        (
+            UnmappedReason::SkippedLocation,
+            "belong to a skipped location",
+        ),
+        (
+            UnmappedReason::BadPath,
+            "have a path that can't be mapped safely",
+        ),
+        (
+            UnmappedReason::Excluded,
+            "are excluded (logs, caches, partial files)",
+        ),
+    ] {
+        let n = unmapped(r);
+        if n > 0 {
+            out.push_str(&format!("note: {n} cloud objects {what}; never synced\n"));
+        }
+    }
+    for s in &p.skipped {
+        out.push_str(&format!(
+            "warning: location {:?} skipped: {}\n",
+            s.name, s.message
+        ));
+    }
+    if let Some(c) = &p.container {
+        out.push_str(&format!(
+            "cloud: {} objects ({} deletion markers){}\n",
+            c.objects,
+            c.tombstones,
+            match (c.bytes_used, c.quota_bytes) {
+                (Some(u), Some(q)) => format!(
+                    ", {} of {} used",
+                    gogo::fmt::human_size(u),
+                    gogo::fmt::human_size(q)
+                ),
+                (Some(u), None) => format!(", {} used", gogo::fmt::human_size(u)),
+                _ => String::new(),
+            }
+        ));
+    }
+    if p.conflicts() > 0 {
+        out.push_str("conflicts need a decision: a sync will ask, or take --prefer local|cloud\n");
+    }
+    out
 }
 
 fn emit(o: Outcome) -> i32 {
@@ -366,5 +624,139 @@ mod tests {
         let o = run_report(&f, "http://127.0.0.1:1", true).await;
         let v: serde_json::Value = serde_json::from_str(&o.stdout).unwrap();
         assert_eq!(v["config_source"], "stale_cache");
+    }
+
+    #[test]
+    fn status_parses() {
+        let c = cli::Cli::try_parse_from(["gogo", "saves", "status", "123"]).unwrap();
+        let cli::Command::Saves {
+            cmd: SavesCmd::Status { gogid, json },
+        } = c.command
+        else {
+            panic!("expected saves status")
+        };
+        assert_eq!(gogid, "123");
+        assert!(!json);
+    }
+
+    /// `saves status` against a mock remote config and storage, with a fake
+    /// exchange: exit codes and both outputs.
+    #[tokio::test]
+    async fn status_against_mock_storage() {
+        use gogo::cloud::auth::CloudAuth;
+        use gogo::cloud::http::StorageClient;
+        use gogo::cloud::locations::Game;
+        use gogo::cloud::storage::{gzip, md5_hex};
+        use gogo::cloud::testing::{FixedExchange, MainSession, NoManifests, keep_manifest};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        const CLIENT: &str = "11111111111111111";
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let root = base.join("games/5");
+        let saves = root.join("prefix/drive_c/users/steamuser/Documents/G");
+        std::fs::create_dir_all(&saves).unwrap();
+        std::fs::create_dir_all(root.join("game")).unwrap();
+        keep_manifest(&root, CLIENT);
+        std::fs::write(saves.join("mine.sav"), b"local").unwrap();
+        std::fs::write(saves.join("both.sav"), b"local").unwrap();
+        let game = Game {
+            gogid: "5".into(),
+            layout: Layout {
+                lane: Lane::Linux,
+                prefix: root.join("prefix"),
+                game_files: root.join("game"),
+            },
+            root: root.clone(),
+        };
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/components/galaxy_client/clients/{CLIENT}")))
+            .respond_with(ResponseTemplate::new(200).set_body_string(CONFIG))
+            .mount(&server)
+            .await;
+        let objects = [
+            ("saves/theirs.sav", gzip(b"cloud")),
+            ("saves/both.sav", gzip(b"cloud")),
+        ];
+        let listing: Vec<serde_json::Value> = objects
+            .iter()
+            .map(|(n, b)| serde_json::json!({"name": n, "bytes": b.len(), "hash": md5_hex(b)}))
+            .collect();
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/7/{CLIENT}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(listing))
+            .mount(&server)
+            .await;
+        for (n, b) in &objects {
+            Mock::given(method("GET"))
+                .and(path(format!("/v1/7/{CLIENT}/{n}")))
+                .respond_with(ResponseTemplate::new(200).set_body_bytes(b.clone()))
+                .mount(&server)
+                .await;
+        }
+
+        let session = MainSession::new();
+        let exchange = FixedExchange::default();
+        let auth = CloudAuth::with_parts(&session, || Ok(()), NoManifests, &exchange);
+        let storage =
+            StorageClient::with_base(format!("{}/v1/", server.uri()).parse().unwrap()).unwrap();
+        let run = || async {
+            cloud_status::status(&cloud_status::Inputs {
+                game: &game,
+                auth: &auth,
+                storage: &storage,
+                http: &reqwest::Client::new(),
+                config_base: &server.uri(),
+                cache_dir: &base.join("cache"),
+                record_dir: &base.join("records"),
+            })
+            .await
+        };
+
+        let text = status_outcome(run().await, false);
+        assert_eq!(text.code, cli::exit::CONFLICTS, "{}", text.stdout);
+        assert!(text.stdout.contains("first sync"), "{}", text.stdout);
+        assert!(
+            text.stdout.contains("download        theirs.sav"),
+            "{}",
+            text.stdout
+        );
+        assert!(
+            text.stdout.contains("upload          mine.sav"),
+            "{}",
+            text.stdout
+        );
+        assert!(
+            text.stdout
+                .contains("conflict        both.sav (on both sides with different content)"),
+            "{}",
+            text.stdout
+        );
+        assert!(
+            text.stdout
+                .contains("plan: 1 download, 1 upload, 1 conflict"),
+            "{}",
+            text.stdout
+        );
+
+        let json = status_outcome(run().await, true);
+        assert_eq!(json.code, cli::exit::CONFLICTS);
+        let v: serde_json::Value = serde_json::from_str(&json.stdout).unwrap();
+        assert_eq!(v["first_sync"], true);
+        assert_eq!(v["counts"]["download"], 1);
+        assert_eq!(v["locations"][0]["files"][0]["action"], "conflict");
+        assert_eq!(v["locations"][0]["files"][0]["reason"], "both_new_differ");
+        for secret in [CLIENT, "made-up-game-token", gogo::cloud::testing::SECRET] {
+            assert!(!json.stdout.contains(secret), "{secret}");
+        }
+        assert!(!base.join("records").exists(), "status writes no record");
+
+        // An error maps through the one table.
+        let e = status_outcome(Err(CloudError::NoLicense { gogid: 5 }), false);
+        assert_eq!(e.code, cli::exit::AUTH);
+        assert!(e.stderr.starts_with("gogo: "));
     }
 }
