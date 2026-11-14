@@ -10,10 +10,12 @@
 //! When gogo can't have the list, the location is skipped, never synced
 //! blind.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use super::locations::{BuildNote, Game, Resolved, SkipReason, Skipped};
 use crate::gog::content;
+use crate::gog::depot::RecordSummary;
 use crate::linuxapp::rollback::{self, FetchWant};
 use crate::macapp::launch::GameDirs;
 use crate::snapshot::saves::{BuildFiles, OwnFiles};
@@ -27,7 +29,9 @@ pub struct BuildFilter {
 
 impl BuildFilter {
     /// `list` plus gogo's own files in `game`'s files: the compat `files`
-    /// its `state.toml` records, and the cnc-ddraw files setup wrote.
+    /// its `state.toml` records, and the cnc-ddraw files setup wrote. Walks
+    /// the game's files once; [`apply`] builds one per command and shares it
+    /// between the locations.
     pub fn new(game: &Game, list: BuildFiles) -> BuildFilter {
         let dirs = GameDirs::at(game.root.clone());
         let compat: Vec<String> = crate::linuxapp::game::LinuxState::load(&dirs.state_toml)
@@ -74,13 +78,25 @@ pub enum Lookup {
 
 /// The game's build-file list, offline: the installer lane's Inno logs (the
 /// main installer's and every DLC's), or the depot cache when it holds the
-/// installed build with every DLC the game has; else what to fetch, or why
-/// there is none.
+/// installed build in the installed language with every DLC the game has;
+/// else what to fetch, or why there is none.
 pub fn lookup(game: &Game) -> Lookup {
+    lookup_in(game, crate::gog::depot::default_cache_dir().as_deref())
+}
+
+/// [`lookup`] with the user cache dir `cache_base` (the depot cache is
+/// `<cache_base>/gogo/depot/<gogid>`).
+pub fn lookup_in(game: &Game, cache_base: Option<&Path>) -> Lookup {
     let dirs = GameDirs::at(game.root.clone());
+    let cache_root = game
+        .gogid
+        .parse()
+        .ok()
+        .and_then(|id| crate::gog::depot::cache_roots(cache_base, id, None))
+        .map(|r| r.0);
     let c = match content::load(&game.root) {
         Ok(Some(c)) => c,
-        Ok(None) => match derived(game, &dirs) {
+        Ok(None) => match derived(game, &dirs, cache_root.as_deref()) {
             Ok(c) => c,
             Err(why) => return Lookup::Unknown(why),
         },
@@ -89,7 +105,7 @@ pub fn lookup(game: &Game) -> Lookup {
     let dlcs: Vec<u64> = c.dlc.iter().map(|d| d.id).collect();
     match c.lane {
         content::Lane::Installer => installer(game, &dirs, &dlcs),
-        content::Lane::Depot => depot(game, &dirs, &c, &dlcs),
+        content::Lane::Depot => depot(game, &dirs, &c, &dlcs, cache_base, cache_root.as_deref()),
     }
 }
 
@@ -98,8 +114,11 @@ pub fn lookup(game: &Game) -> Lookup {
 /// the installer's log is there, the depot lane when the game's files are
 /// `game/`; a depot-lane game counts only when its own info file names the
 /// build, so a depot cache of another build never stands in for it.
-fn derived(game: &Game, dirs: &GameDirs) -> Result<content::Content, String> {
-    use crate::gog::depot;
+fn derived(
+    game: &Game,
+    dirs: &GameDirs,
+    cache_root: Option<&Path>,
+) -> Result<content::Content, String> {
     let no_record = "no content record of how the game was built, and";
     let lane = if dirs
         .root
@@ -115,7 +134,7 @@ fn derived(game: &Game, dirs: &GameDirs) -> Result<content::Content, String> {
             "{no_record} no installer log; a rebuild writes one"
         ));
     };
-    let resolve = |record: Option<&std::path::Path>| {
+    let resolve = |record: Option<&Path>| {
         content::resolve(&game.root, &game.layout.game_files, lane, record)
             .map(|r| r.content)
             .map_err(|e| e.to_string())
@@ -130,13 +149,7 @@ fn derived(game: &Game, dirs: &GameDirs) -> Result<content::Content, String> {
     }
     // The cache's record only for its language, and only when it is for
     // the build the info names (`resolve` checks).
-    let record = game
-        .gogid
-        .parse()
-        .ok()
-        .and_then(|id| depot::cache_roots(depot::default_cache_dir().as_deref(), id, None))
-        .map(|r| r.0);
-    resolve(record.as_deref())
+    resolve(cache_root)
 }
 
 fn installer(game: &Game, dirs: &GameDirs, dlcs: &[u64]) -> Lookup {
@@ -157,17 +170,24 @@ fn installer(game: &Game, dirs: &GameDirs, dlcs: &[u64]) -> Lookup {
     }) {
         return Lookup::Unknown(format!("no installer log for DLC {id}"));
     }
-    match rollback::installer_list(dirs, &label, dlcs) {
+    match rollback::installer_list(dirs, &label, dlcs, true) {
         Some(list) => Lookup::Known(list),
         None => Lookup::Unknown(format!(
-            "the installer's log ({}/{}) is missing or names no file",
+            "an installer log in {}/ (the game's or a DLC's) can't be read or names no file \
+             in the install dir",
             crate::macapp::INSTALL_LOGS,
-            crate::macapp::installer::INNO_LOG
         )),
     }
 }
 
-fn depot(game: &Game, dirs: &GameDirs, c: &content::Content, dlcs: &[u64]) -> Lookup {
+fn depot(
+    game: &Game,
+    dirs: &GameDirs,
+    c: &content::Content,
+    dlcs: &[u64],
+    cache_base: Option<&Path>,
+    cache_root: Option<&Path>,
+) -> Lookup {
     let Some(build_id) = c.build_id.clone() else {
         return Lookup::Unknown("its content record names no build".into());
     };
@@ -177,8 +197,11 @@ fn depot(game: &Game, dirs: &GameDirs, c: &content::Content, dlcs: &[u64]) -> Lo
     let tree = crate::linuxapp::game::read_launch_toml(dirs)
         .ok()
         .and_then(|(t, _)| t.tree_name());
-    if cache_has_dlcs(product_id, dlcs)
-        && let Some(list) = rollback::cache_list(&game.gogid, c, tree.as_deref())
+    let holds = cache_root
+        .and_then(crate::gog::depot::read_record)
+        .is_some_and(|r| cache_holds(&r, c.language.as_deref(), dlcs));
+    if holds
+        && let Some(list) = rollback::cache_list_in(cache_base, &game.gogid, c, tree.as_deref())
     {
         return Lookup::Known(list);
     }
@@ -192,22 +215,26 @@ fn depot(game: &Game, dirs: &GameDirs, c: &content::Content, dlcs: &[u64]) -> Lo
     })
 }
 
-/// Whether the depot cache's record holds every DLC in `dlcs` (a cache
-/// without one has none of its files to list).
-fn cache_has_dlcs(product_id: u64, dlcs: &[u64]) -> bool {
-    use crate::gog::depot;
-    if dlcs.is_empty() {
-        return true;
-    }
-    let Some((root, ..)) =
-        depot::cache_roots(depot::default_cache_dir().as_deref(), product_id, None)
-    else {
-        return false;
+/// Whether a depot cache with record `rec` holds the files of `language`
+/// (the installed one, when known) and of every DLC in `dlcs`: its record's
+/// language, or one of the other languages it still holds (#389), each with
+/// the DLC it was filled with. A cache filled for another language, or
+/// without a DLC, lacks files the build laid.
+pub fn cache_holds(rec: &RecordSummary, language: Option<&str>, dlcs: &[u64]) -> bool {
+    let held = match (language, rec.language.as_deref()) {
+        (Some(want), Some(main)) if !want.eq_ignore_ascii_case(main) => {
+            match rec
+                .other_languages
+                .iter()
+                .find(|(l, _)| l.eq_ignore_ascii_case(want))
+            {
+                Some((_, d)) => Some(d),
+                None => return false,
+            }
+        }
+        _ => rec.dlcs.as_ref(),
     };
-    let Some(held) = depot::read_record(&root).and_then(|r| r.dlcs) else {
-        return false;
-    };
-    dlcs.iter().all(|id| held.contains(&id.to_string()))
+    dlcs.is_empty() || held.is_some_and(|h| dlcs.iter().all(|id| h.contains(&id.to_string())))
 }
 
 /// Attach `list` to every location of `resolved` in `game`'s files, or skip

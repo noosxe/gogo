@@ -27,11 +27,11 @@ pub struct Scan {
     pub files: Vec<LocalFile>,
     /// Left out by design 22 §3.4's excludes.
     pub excluded: usize,
-    /// The build's own files (and gogo's), in a location in the game's
-    /// files ([`Location::build_file`]): never synced.
+    /// The build's own files (and gogo's), in a location that reaches the
+    /// game's files ([`Location::build_path`]): never synced.
     pub build_files: usize,
-    /// Links, other non-regular files, names that aren't UTF-8 and dirs past
-    /// [`MAX_DEPTH`]: never synced (`/`-separated, below the location).
+    /// Links, other non-regular files, names that aren't UTF-8, dirs past
+    /// [`MAX_DEPTH`] and, in the game's files, hard links: never synced (`/`-separated, below the location).
     pub ignored: Vec<String>,
 }
 
@@ -93,7 +93,7 @@ fn walk(
                 walk(loc, &path, &format!("{rel}/"), depth + 1, out)?;
             }
         } else if ft.is_file() {
-            if loc.build_file(&rel) {
+            if loc.build_path(&path) {
                 out.build_files += 1;
                 continue;
             }
@@ -102,6 +102,15 @@ fn walk(
                 continue;
             }
             let meta = entry.metadata().map_err(|e| io_error(&path, e))?;
+            // A hard link in the game's files may be a build file's other
+            // name: never synced, like a link.
+            if loc.in_game_files() && {
+                use std::os::unix::fs::MetadataExt;
+                meta.nlink() > 1
+            } {
+                out.ignored.push(rel);
+                continue;
+            }
             let mtime = meta.modified().map_err(|e| io_error(&path, e))?;
             out.files.push(LocalFile {
                 rel,

@@ -119,14 +119,7 @@ async fn status(gogid: &str, json: bool) -> Result<i32, AppError> {
     // Locations in the game's files need the build's file list (design 22
     // §3.4): offline when gogo has it, else the build's depot manifests.
     if resolved.locations.iter().any(|l| l.in_game_files()) {
-        let list = match build_files::lookup(&game) {
-            Lookup::Known(l) => Ok(l),
-            Lookup::Unknown(why) => Err(why),
-            Lookup::Fetch(want) => fetch_build_files(want)
-                .await
-                .filter(|l| !l.is_empty())
-                .ok_or_else(|| build_files::NOT_FETCHED.to_string()),
-        };
+        let list = build_list(build_files::lookup(&game), fetch_build_files).await;
         build_files::apply(&mut resolved, &game, list);
     }
     let cfg = crate::load_config_from_env()?;
@@ -153,6 +146,25 @@ async fn status(gogid: &str, json: bool) -> Result<i32, AppError> {
     )
     .await;
     Ok(emit(status_outcome(plan, json)))
+}
+
+/// The build-file list `lookup` leads to: as found, fetched with `fetch`
+/// when only the build's depot manifests have it, or why there is none. A
+/// fetch that fails or gives an empty list is no list.
+pub(crate) async fn build_list(
+    lookup: Lookup,
+    fetch: impl AsyncFnOnce(
+        gogo::linuxapp::rollback::FetchWant,
+    ) -> Option<gogo::snapshot::saves::BuildFiles>,
+) -> Result<gogo::snapshot::saves::BuildFiles, String> {
+    match lookup {
+        Lookup::Known(l) => Ok(l),
+        Lookup::Unknown(why) => Err(why),
+        Lookup::Fetch(want) => fetch(want)
+            .await
+            .filter(|l| !l.is_empty())
+            .ok_or_else(|| build_files::NOT_FETCHED.to_string()),
+    }
 }
 
 /// The build's file list from its depot manifests (the snapshot command's
@@ -824,6 +836,43 @@ mod tests {
         );
         let v: serde_json::Value = serde_json::from_str(&run(&g, true).await.stdout).unwrap();
         assert_eq!(v["skipped"][0]["reason"]["kind"], "build_files_unknown");
+    }
+
+    #[tokio::test]
+    async fn the_build_list_is_found_fetched_or_refused() {
+        use gogo::linuxapp::rollback::FetchWant;
+        use gogo::snapshot::saves::{BuildFiles, Expect};
+        let want = FetchWant {
+            product_id: 5,
+            build_id: "b1".into(),
+            language: "en-US".into(),
+            products: vec!["5".into()],
+        };
+        let mut one = BuildFiles::new("the build's depot manifests");
+        one.insert("Game.exe", Expect::Size(1));
+        let never = async |_: FetchWant| -> Option<BuildFiles> { panic!("no fetch") };
+
+        let known = build_list(Lookup::Known(one.clone()), never).await;
+        assert_eq!(known.unwrap(), one);
+        let unknown = build_list(Lookup::Unknown("why".into()), never).await;
+        assert_eq!(unknown.unwrap_err(), "why");
+
+        let asked = std::cell::Cell::new(None);
+        let fetched = build_list(Lookup::Fetch(want.clone()), async |w: FetchWant| {
+            asked.set(Some(w.build_id));
+            Some(one.clone())
+        })
+        .await;
+        assert_eq!(fetched.unwrap(), one);
+        assert_eq!(asked.take().as_deref(), Some("b1"));
+
+        let failed = build_list(Lookup::Fetch(want.clone()), async |_| None).await;
+        assert_eq!(failed.unwrap_err(), build_files::NOT_FETCHED);
+        let empty = build_list(Lookup::Fetch(want), async |_| {
+            Some(BuildFiles::new("the build's depot manifests"))
+        })
+        .await;
+        assert_eq!(empty.unwrap_err(), build_files::NOT_FETCHED);
     }
 
     #[test]

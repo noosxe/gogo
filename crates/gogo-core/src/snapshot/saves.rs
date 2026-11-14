@@ -120,7 +120,9 @@ pub enum Expect {
 }
 
 /// The current build's files in the game's own files (design 20 §6.1), keyed
-/// by their path relative to the game's files, lowercased.
+/// by their path relative to the game's files, lowercased (Unicode case folding, as
+/// Windows ignores case beyond ASCII; the installer log's install-dir prefix
+/// is compared in ASCII only).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BuildFiles {
     /// Where the list came from, for the plan (`the depot cache`, `the
@@ -139,10 +141,7 @@ impl BuildFiles {
 
     /// Add `rel` (relative to the game's files, `/` or `\` separated).
     pub fn insert(&mut self, rel: &str, expect: Expect) {
-        let key = rel
-            .replace('\\', "/")
-            .trim_matches('/')
-            .to_ascii_lowercase();
+        let key = rel.replace('\\', "/").trim_matches('/').to_lowercase();
         if !key.is_empty() {
             self.files.insert(key, expect);
         }
@@ -163,14 +162,14 @@ impl BuildFiles {
         let key: Vec<String> = rel
             .split(['/', '\\'])
             .filter(|p| !p.is_empty())
-            .map(str::to_ascii_lowercase)
+            .map(str::to_lowercase)
             .collect();
         !key.is_empty() && self.files.contains_key(&key.join("/"))
     }
 
     /// Whether the file at `rel`, as it is now, is the build's own.
     fn is_builds(&self, rel: &str, size: u64, mtime: SystemTime) -> bool {
-        match self.files.get(&rel.to_ascii_lowercase()) {
+        match self.files.get(&rel.to_lowercase()) {
             Some(Expect::Size(n)) => *n == size,
             // Two seconds: a filesystem's mtime and the log's own may round.
             Some(Expect::NotAfter(t)) => mtime <= *t + std::time::Duration::from_secs(2),
@@ -261,7 +260,7 @@ impl OwnFiles {
         let mut own = OwnFiles {
             suffixes: compat
                 .iter()
-                .map(|p| p.replace('\\', "/").trim_matches('/').to_ascii_lowercase())
+                .map(|p| p.replace('\\', "/").trim_matches('/').to_lowercase())
                 .filter(|p| !p.is_empty())
                 .collect(),
             ..OwnFiles::default()
@@ -291,7 +290,7 @@ impl OwnFiles {
             let rel = |n: &str| {
                 let p = dir.join(n);
                 p.strip_prefix(game_files)
-                    .map(|r| r.to_string_lossy().to_ascii_lowercase())
+                    .map(|r| r.to_string_lossy().to_lowercase())
                     .unwrap_or_default()
             };
             own.files.insert(rel(ini));
@@ -310,7 +309,7 @@ impl OwnFiles {
     /// Whether `rel` (relative to the game's files, `/`-separated) is one of
     /// gogo's own files.
     pub fn contains(&self, rel: &str) -> bool {
-        let rel = rel.to_ascii_lowercase();
+        let rel = rel.to_lowercase();
         self.files.contains(&rel)
             || self
                 .suffixes

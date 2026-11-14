@@ -532,7 +532,7 @@ fn game_files(
                 .iter()
                 .flat_map(|c| c.dlc.iter().map(|d| d.id))
                 .collect();
-            installer_list(dirs, &label, &dlcs)
+            installer_list(dirs, &label, &dlcs, false)
         }
         _ => now
             .as_ref()
@@ -573,9 +573,24 @@ fn game_files(
 /// build: every file of the game's tree and of the support overlays there,
 /// at the size the cache holds it.
 pub fn cache_list(gogid: &str, c: &content::Content, tree: Option<&str>) -> Option<BuildFiles> {
+    cache_list_in(
+        crate::gog::depot::default_cache_dir().as_deref(),
+        gogid,
+        c,
+        tree,
+    )
+}
+
+/// [`cache_list`] with the user cache dir `cache_base`.
+pub fn cache_list_in(
+    cache_base: Option<&Path>,
+    gogid: &str,
+    c: &content::Content,
+    tree: Option<&str>,
+) -> Option<BuildFiles> {
     use crate::gog::depot;
     let id: u64 = gogid.parse().ok()?;
-    let (root, ..) = depot::cache_roots(depot::default_cache_dir().as_deref(), id, None)?;
+    let (root, ..) = depot::cache_roots(cache_base, id, None)?;
     let rec = depot::read_record(&root)?;
     if c.build_id.as_deref() != Some(rec.build_id.as_str()) {
         return None;
@@ -685,22 +700,34 @@ pub fn depot_fetch_wanted(gogid: &str) -> Option<FetchWant> {
 /// (`install/inno.log`) and the logs of DLC `dlcs` that are there
 /// (`install/dlc-<id>-inno.log`) name under the install dir (`label`,
 /// relative to `drive_c/`), each expected no newer than its log. `None`
-/// without the main log, or when it names no file.
-pub fn installer_list(dirs: &GameDirs, label: &str, dlcs: &[u64]) -> Option<BuildFiles> {
+/// without the main log, or when it names no file; with `strict` (the
+/// cloud-save filter) also when a DLC's log is missing, can't be read or
+/// names no file there, since that DLC's files would then pass for saves.
+pub fn installer_list(
+    dirs: &GameDirs,
+    label: &str,
+    dlcs: &[u64],
+    strict: bool,
+) -> Option<BuildFiles> {
     let logs = dirs.root.join(crate::macapp::INSTALL_LOGS);
     let root_win = format!("C:\\{}", label.replace('/', "\\"));
     let mut list = BuildFiles::new("the installer's log");
+    // `None`: the log can't be read or names no file under the install dir.
     let mut read = |log: &Path| -> Option<()> {
         let raw = std::fs::read(log).ok()?;
         let at = std::fs::metadata(log).ok()?.modified().ok()?;
-        for rel in saves::inno_log_files(&raw, &root_win) {
-            list.insert(&rel, Expect::NotAfter(at));
+        let files = saves::inno_log_files(&raw, &root_win);
+        for rel in &files {
+            list.insert(rel, Expect::NotAfter(at));
         }
-        Some(())
+        (!files.is_empty()).then_some(())
     };
     read(&logs.join(crate::macapp::installer::INNO_LOG))?;
     for id in dlcs {
-        read(&logs.join(super::dlc_installer::inno_log_name(*id)));
+        let read_it = read(&logs.join(super::dlc_installer::inno_log_name(*id)));
+        if strict {
+            read_it?;
+        }
     }
     (!list.is_empty()).then_some(list)
 }
@@ -1423,6 +1450,57 @@ mod tests {
         assert_eq!(
             override_changes(Some("not toml ["), None)[0].key,
             "(the whole file)"
+        );
+    }
+    /// The installer lane's list holds the DLC installers' files too, so a
+    /// rollback doesn't take them for newer saves (design 20 §6.1).
+    #[test]
+    fn dlc_installer_logs_keep_dlc_files_out_of_the_newer_saves() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let dirs = GameDirs::at(root.clone());
+        let gf = dirs.prefix.join("drive_c/GOG/G");
+        std::fs::create_dir_all(gf.join("DLC")).unwrap();
+        std::fs::create_dir_all(gf.join("SAVE")).unwrap();
+        for f in ["Game.exe", "DLC/extra.pak", "SAVE/slot1.sav"] {
+            std::fs::write(gf.join(f), b"x").unwrap();
+        }
+        let logs = root.join(crate::macapp::INSTALL_LOGS);
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(
+            logs.join(crate::macapp::installer::INNO_LOG),
+            "Dest filename: C:\\GOG\\G\\Game.exe\r\n",
+        )
+        .unwrap();
+        std::fs::write(
+            logs.join(super::super::dlc_installer::inno_log_name(9)),
+            "Dest filename: C:\\GOG\\G\\DLC\\extra.pak\r\n",
+        )
+        .unwrap();
+        let find = |list| {
+            saves::find(&saves::Scan {
+                prefix: dirs.prefix.clone(),
+                snap_prefix: None,
+                created: std::time::SystemTime::UNIX_EPOCH,
+                game: Some(GameFiles {
+                    dir: gf.clone(),
+                    snap_dir: None,
+                    label: "GOG/G".into(),
+                    list,
+                    own: OwnFiles::default(),
+                    same_content: false,
+                }),
+            })
+        };
+        let paths =
+            |found: &Found| -> Vec<String> { found.files.iter().map(|f| f.path.clone()).collect() };
+        let with_dlc = find(installer_list(&dirs, "GOG/G", &[9], false));
+        assert_eq!(paths(&with_dlc), ["GOG/G/SAVE/slot1.sav"]);
+        let without = find(installer_list(&dirs, "GOG/G", &[], false));
+        assert_eq!(
+            paths(&without),
+            ["GOG/G/DLC/extra.pak", "GOG/G/SAVE/slot1.sav"],
+            "without the DLC's log its files pass for saves"
         );
     }
 }

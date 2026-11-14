@@ -748,21 +748,33 @@ Code: `gogo_core::cloud::{client_id, storage, record, scan, classify, status}`,
 
 Code: `gogo_core::cloud::build_files`, `Location::{in_game_files, build_file}`.
 
-- **Which locations**: any location whose canonical path is in the game's files (`game/` on
-  the depot lane, `drive_c/GOG/<slug>` on the installer lane), which today means the
-  `<?INSTALL?>` ones. The path is matched relative to the game's files, so
-  `<?INSTALL?>/SAVE` and `<?INSTALL?>` see the same list.
+- **Which locations**: any location that reaches the game's files (`game/` on the depot
+  lane, `drive_c/GOG/<slug>` on the installer lane): an `<?INSTALL?>` one, one through the
+  prefix's `drive_c/GOG/<name>` (even before that link exists), one whose canonical path is
+  in them, and one that holds them (a `C:\GOG`-like dir). Each file is tested by its own
+  canonical path relative to the game's files, so `<?INSTALL?>/SAVE`, `<?INSTALL?>` and an
+  ancestor all see the same list, and a file of an ancestor outside the game's files is
+  never a build file.
+- **Links and hard links**: below such a location, `Location::file` refuses a cloud name
+  whose path goes through a link (`SAVE/x -> ../Game.exe`, a dir link to `../Data`) or lands
+  on a file with more than one hard link (`bad_path`), and the scan lists such local files
+  as `ignored`: either could be a build file under another name.
 - **The test is by path alone**: a path the list names is the build's whatever its size or
   time, unlike the rollback's name-and-size test (design 20 §6.1). A shipped `settings.ini`
   the game rewrote stays out too: syncing it would let a download overwrite a shipped file
   and an upload carry it to other machines. gogo's own files there (design 20's `OwnFiles`:
-  the compat `files`, cnc-ddraw's) are left out the same way. Matching ignores case.
+  the compat `files`, cnc-ddraw's) are left out the same way. Matching ignores case with
+  Unicode lowercasing (the rollback's list too); only the install-dir prefix of an Inno log
+  line is compared in ASCII.
 - **The list** is design 20's `BuildFiles`, read the way the rollback reads it:
   - installer lane: the main installer's Inno log (`install/inno.log`) and the log of every
     DLC the content record lists (`install/dlc-<id>-inno.log`; the rollback reads those
-    now as well). A DLC without its log, or no main log, means no list;
-  - depot lane: the depot cache when it holds the installed build (by build id) and every DLC
-    the game has, else the build's depot manifests for the base game and its DLC in the
+    now as well, leniently). For cloud saves the reading is strict: a missing main log, or
+    any of those logs missing, unreadable or naming no file in the install dir, means no
+    list;
+  - depot lane: the depot cache when it holds the installed build (by build id) in the
+    installed language (the record's own, or another language it still holds) with
+    every DLC the game has in that language, else the build's depot manifests for the base game and its DLC in the
     installed language, fetched by `saves status` with the main session (the snapshot
     command's fetcher, Linux only: on macOS such a location is skipped). The list isn't kept
     on disk;
