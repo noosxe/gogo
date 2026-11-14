@@ -235,6 +235,10 @@ fn exact_case_wins_and_ambiguity_skips_only_that_location() {
     let t = tree(Lane::Linux);
     let d = user(&t).join("Documents");
     fs::create_dir_all(d.join("Game")).unwrap();
+    if d.join("game").exists() {
+        // A case-insensitive filesystem (macOS) can't hold both dirs.
+        return;
+    }
     fs::create_dir_all(d.join("game")).unwrap();
     assert_eq!(one(&t, "<?DOCUMENTS?>/Game").unwrap().path, d.join("Game"));
     assert_eq!(one(&t, "<?DOCUMENTS?>/game").unwrap().path, d.join("game"));
