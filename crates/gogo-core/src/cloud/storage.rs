@@ -196,6 +196,34 @@ pub async fn fetch_gzip(
     client_id: &str,
     entry: &Entry,
 ) -> Result<Vec<u8>, CloudError> {
+    Ok(fetch_object(client, token, client_id, entry).await?.gzip)
+}
+
+/// A downloaded object: the stored bytes, checked, and the file's mtime as
+/// the uploader saw it.
+#[derive(Debug, Clone)]
+pub struct Object {
+    pub gzip: Vec<u8>,
+    /// `X-Object-Meta-LocalLastModified` (RFC 3339), when it parses.
+    pub local_last_modified: Option<std::time::SystemTime>,
+}
+
+/// The `X-Object-Meta-LocalLastModified` header as a time: RFC 3339, as
+/// Galaxy writes it; anything else is no time.
+pub fn local_last_modified(h: &reqwest::header::HeaderMap) -> Option<std::time::SystemTime> {
+    let v = h.get("x-object-meta-locallastmodified")?.to_str().ok()?;
+    chrono::DateTime::parse_from_rfc3339(v.trim())
+        .ok()
+        .map(|t| t.with_timezone(&chrono::Utc).into())
+}
+
+/// [`fetch_gzip`] with the object's `X-Object-Meta-LocalLastModified`.
+pub async fn fetch_object(
+    client: &StorageClient,
+    token: &CloudToken,
+    client_id: &str,
+    entry: &Entry,
+) -> Result<Object, CloudError> {
     let corrupt = |reason: String| CloudError::Corrupt {
         name: entry.name.clone(),
         reason,
@@ -208,12 +236,16 @@ pub async fn fetch_gzip(
     }
     let req = client.request(Method::GET, token, client_id, Some(&entry.name))?;
     let resp = client.send(req).await?;
+    let mtime = local_last_modified(resp.headers());
     let cap = usize::try_from(entry.bytes).unwrap_or(usize::MAX);
     let body = body_capped(resp, cap)
         .await?
         .ok_or_else(|| corrupt(format!("more than the listed {} bytes", entry.bytes)))?;
     verify(entry, &body)?;
-    Ok(body)
+    Ok(Object {
+        gzip: body,
+        local_last_modified: mtime,
+    })
 }
 
 /// Check stored bytes against the listing: the MD5 is the listed `hash`.

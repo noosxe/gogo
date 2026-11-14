@@ -23,6 +23,7 @@ pub struct Config {
     pub mac_app: MacAppConfig,
     pub linux: LinuxConfig,
     pub snapshots: SnapshotsConfig,
+    pub cloud_saves: CloudSavesConfig,
 }
 
 /// No silent fallback (review A6): keyring configured but unavailable fails loudly in
@@ -155,6 +156,22 @@ impl Default for SnapshotsConfig {
             auto: true,
             keep_auto: 5,
         }
+    }
+}
+
+/// `[cloud_saves]`: GOG cloud saves of built games (design 22).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct CloudSavesConfig {
+    /// The backup dirs kept per game under `cloud-saves/backups/<gogid>/`,
+    /// newest first (design 22 §7.1, D7). 0 counts as 1: the run's own
+    /// backup always stays.
+    pub keep_backups: usize,
+}
+
+impl Default for CloudSavesConfig {
+    fn default() -> Self {
+        Self { keep_backups: 20 }
     }
 }
 

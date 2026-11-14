@@ -19,6 +19,10 @@ pub struct LocalFile {
     pub path: PathBuf,
     pub size: u64,
     pub mtime: toml::value::Datetime,
+    /// Device and inode, so a writer can tell the file it planned on from
+    /// one put in its place since.
+    pub dev: u64,
+    pub ino: u64,
 }
 
 /// What a location holds.
@@ -112,11 +116,14 @@ fn walk(
                 continue;
             }
             let mtime = meta.modified().map_err(|e| io_error(&path, e))?;
+            use std::os::unix::fs::MetadataExt;
             out.files.push(LocalFile {
                 rel,
                 path,
                 size: meta.len(),
                 mtime: super::record::datetime(mtime),
+                dev: meta.dev(),
+                ino: meta.ino(),
             });
         } else {
             out.ignored.push(rel);

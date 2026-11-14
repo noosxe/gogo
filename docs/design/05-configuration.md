@@ -79,6 +79,10 @@ auto = true                   # a new `linux-app` game on btrfs gets a subvolume
 #                             # already keep their own setting (`snapshot <gogid> auto`).
 keep_auto = 5                 # automatic snapshots kept per game, newest first (20 §7.2);
 #                             # `initial` and manual ones are never pruned
+
+[cloud_saves]
+keep_backups = 20             # backup dirs kept per game under cloud-saves/backups/<gogid>/,
+#                             # newest first (22 §7.1, D7); 0 counts as 1
 ```
 
 ### Rate value grammar (`--limit`, `download.limit`)
