@@ -140,7 +140,8 @@ async fn status(gogid: &str, json: bool) -> Result<i32, AppError> {
 }
 
 /// A status run's output and exit code: 0 a plan with nothing to decide, 8
-/// conflicts (D6: a dry run exits as the run would), 5 a corrupt object.
+/// conflicts (D6: a dry run exits as the run would), 1 a local file that
+/// couldn't be read, 5 a corrupt object (first to win).
 pub fn status_outcome(plan: Result<Plan, CloudError>, json: bool) -> Outcome {
     let plan = match plan {
         Ok(p) => p,
@@ -148,6 +149,8 @@ pub fn status_outcome(plan: Result<Plan, CloudError>, json: bool) -> Outcome {
     };
     let code = if plan.corrupt() > 0 {
         cli::exit::CORRUPT
+    } else if plan.unreadable() > 0 {
+        cli::exit::FAILED
     } else if plan.conflicts() > 0 {
         cli::exit::CONFLICTS
     } else {
@@ -176,6 +179,8 @@ fn conflict_text(r: ConflictReason) -> &'static str {
         ConflictReason::BothNewDiffer => "on both sides with different content",
         ConflictReason::RolledBack => "a rollback is pending",
         ConflictReason::CaseClash => "cloud names differing only by case",
+        ConflictReason::LocationMissing => "the save dir is gone; not taken for a deletion",
+        ConflictReason::LocationEmptied => "the save dir is empty; not taken for a deletion",
     }
 }
 
@@ -187,6 +192,7 @@ const ACTIONS: &[(&str, &str)] = &[
     ("delete_cloud", "delete in cloud"),
     ("conflict", "conflict"),
     ("corrupt", "corrupt"),
+    ("unreadable", "unreadable"),
     ("record", "same"),
     ("forget", "forget"),
     ("nothing", "unchanged"),
@@ -199,6 +205,20 @@ fn label(a: Action) -> &'static str {
         .find(|(n, _)| *n == name)
         .map(|(_, l)| *l)
         .unwrap_or(name)
+}
+
+/// `s` with control characters escaped: names and times come from the
+/// cloud or the disk and must not move the terminal's cursor.
+fn clean(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
 }
 
 /// The plain-text plan.
@@ -227,7 +247,7 @@ pub fn render_status(p: &Plan) -> String {
             "first sync: no record of an earlier one, so files on both sides are compared by content\n",
         );
     } else if let Some(t) = &p.last_sync {
-        out.push_str(&format!("last sync: {t}\n"));
+        out.push_str(&format!("last sync: {}\n", clean(t)));
     }
     if p.rolled_back {
         out.push_str(
@@ -244,21 +264,36 @@ pub fn render_status(p: &Plan) -> String {
         } else {
             ""
         };
-        out.push_str(&format!("{}  {}{tag}\n", l.name, l.path.display()));
+        out.push_str(&format!(
+            "{}  {}{tag}\n",
+            clean(&l.name),
+            clean(&l.path.display().to_string())
+        ));
+        if l.missing {
+            out.push_str(
+                "  warning: this save dir is gone but the last sync recorded files in it \
+                 (a moved prefix, a drive not mounted?); none is taken for deleted\n",
+            );
+        } else if l.emptied {
+            out.push_str(
+                "  warning: this save dir is empty but the last sync recorded files in it; \
+                 none is taken for deleted without a decision\n",
+            );
+        }
         let prefix = format!("{}/", l.name);
         for f in l.files.iter().filter(|f| f.action != Action::Nothing) {
-            let rel = f.name.strip_prefix(&prefix).unwrap_or(&f.name);
+            let rel = clean(f.name.strip_prefix(&prefix).unwrap_or(&f.name));
             let local = f
                 .local
                 .as_ref()
-                .map(|x| format!("{}, {}", gogo::fmt::human_size(x.size), x.mtime))
+                .map(|x| format!("{}, {}", gogo::fmt::human_size(x.size), clean(&x.mtime)))
                 .unwrap_or_else(|| "-".into());
             let cloud = match &f.cloud {
                 Some(c) if c.tombstone => "deleted".to_string(),
                 Some(c) => format!(
                     "{} stored, {}",
                     gogo::fmt::human_size(c.bytes),
-                    c.last_modified.as_deref().unwrap_or("?")
+                    clean(c.last_modified.as_deref().unwrap_or("?"))
                 ),
                 None => "-".into(),
             };
@@ -273,7 +308,10 @@ pub fn render_status(p: &Plan) -> String {
             ));
         }
         for i in &l.ignored {
-            out.push_str(&format!("  ignored: {i} (a link or special file)\n"));
+            out.push_str(&format!(
+                "  ignored: {} (a link or special file)\n",
+                clean(i)
+            ));
         }
     }
     let counts: Vec<String> = ACTIONS
@@ -312,10 +350,13 @@ pub fn render_status(p: &Plan) -> String {
     for s in &p.skipped {
         out.push_str(&format!(
             "warning: location {:?} skipped: {}\n",
-            s.name, s.message
+            s.name,
+            clean(&s.message)
         ));
     }
-    if let Some(c) = &p.container {
+    if p.container.as_ref().is_some_and(|c| c.missing) {
+        out.push_str("cloud: nothing stored for this game yet\n");
+    } else if let Some(c) = &p.container {
         out.push_str(&format!(
             "cloud: {} objects ({} deletion markers){}\n",
             c.objects,
@@ -627,6 +668,12 @@ mod tests {
     }
 
     #[test]
+    fn control_characters_are_escaped() {
+        assert_eq!(clean("a\u{1b}[2Jb\n"), "a\\u{1b}[2Jb\\n");
+        assert_eq!(clean("Slot 1/sav.dat"), "Slot 1/sav.dat");
+    }
+
+    #[test]
     fn status_parses() {
         let c = cli::Cli::try_parse_from(["gogo", "saves", "status", "123"]).unwrap();
         let cli::Command::Saves {
@@ -753,6 +800,27 @@ mod tests {
             assert!(!json.stdout.contains(secret), "{secret}");
         }
         assert!(!base.join("records").exists(), "status writes no record");
+
+        // Exit precedence: a corrupt object (5) over an unreadable file (1)
+        // over conflicts (8).
+        let mut plan = run().await.unwrap();
+        plan.counts.insert("unreadable".into(), 1);
+        assert_eq!(
+            status_outcome(Ok(plan.clone()), false).code,
+            cli::exit::FAILED
+        );
+        plan.counts.insert("corrupt".into(), 1);
+        assert_eq!(status_outcome(Ok(plan), false).code, cli::exit::CORRUPT);
+
+        // A broken or newer record stops the run, naming the file.
+        std::fs::create_dir_all(base.join("records")).unwrap();
+        for body in ["schema = ", "schema = 2\nclient_id = \"1\"\n"] {
+            std::fs::write(base.join("records/5.toml"), body).unwrap();
+            let o = status_outcome(run().await, false);
+            assert_eq!(o.code, cli::exit::FAILED, "{body}");
+            assert!(o.stderr.contains("5.toml"), "{}", o.stderr);
+            assert!(o.stdout.is_empty());
+        }
 
         // An error maps through the one table.
         let e = status_outcome(Err(CloudError::NoLicense { gogid: 5 }), false);
