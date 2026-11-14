@@ -9,18 +9,18 @@
 //! 2. `status`'s plan, unchanged ([`super::status::plan_detailed`]);
 //! 3. conflicts settled (`--prefer cloud`, the prompt) or left (exit 8);
 //! 4. one question when anything is overwritten or deleted;
-//! 5. D11: a record for another client set aside (the first write);
-//! 6. the `cloud-pull` snapshot when anything is overwritten or deleted; a
+//! 5. the `cloud-pull` snapshot when anything is overwritten or deleted; a
 //!    failure stops the pull with nothing changed;
-//! 7. every file that will be overwritten or deleted copied to the backup
-//!    dir, before any of them is touched;
+//! 6. every file that will be overwritten, deleted or kept aside copied to
+//!    the backup dir, before any of them is touched;
+//! 7. D11: a record for another client set aside, just before the first
+//!    write of the record;
 //! 8. per file: the path checked again, the object fetched and checked,
 //!    written atomically ([`super::write`]), the record saved;
 //! 9. `last_sync`, `rolled_back` cleared when nothing is left, backups pruned.
 
 use std::path::{Path, PathBuf};
 
-use futures::StreamExt;
 use serde::Serialize;
 
 use super::auth::CloudAuth;
@@ -62,6 +62,11 @@ impl Op {
     fn transfers(self) -> bool {
         matches!(self, Op::Download | Op::Overwrite | Op::KeepBoth)
     }
+    /// The local file is copied to the backup dir first: the destructive
+    /// ones, and a `both`, whose kept file is the only copy otherwise.
+    fn backed_up(self) -> bool {
+        self.destructive() || self == Op::KeepBoth
+    }
 }
 
 /// An answer to a conflict.
@@ -94,6 +99,9 @@ pub enum LeftReason {
     NoPrefix,
     /// The file changed between the plan and the write.
     ChangedSincePlan,
+    /// A link, or a file where a dir should be, on the way to the file:
+    /// not followed, nothing written there.
+    PathRefused,
 }
 
 /// Where one file stands.
@@ -416,11 +424,48 @@ pub async fn pull(
         }
     }
 
-    // 5. D11: the other client's record set aside, the first write.
+    // 5. The snapshot, when anything is overwritten or deleted.
+    if overwrites + deletes > 0 {
+        report.snapshot = host.snapshot()?;
+    }
+
+    // 6. Backups of every file that will be overwritten, deleted or kept
+    // aside, first.
+    let mut bk = Backup::new(backup_root.clone(), opts.now);
+    let mut stop: Option<CloudError> = None;
+    for w in work
+        .iter_mut()
+        .filter(|w| planned(w) && w.result.op.is_some_and(Op::backed_up))
+    {
+        match back_up(w, &mut bk) {
+            Ok(p) => w.result.backup = Some(p),
+            Err(WriteError::Changed { .. }) => {
+                w.result.state = State::Left(LeftReason::ChangedSincePlan)
+            }
+            Err(WriteError::Path { path, reason }) => {
+                report.warnings.push(format!("{path}: {reason}"));
+                w.result.state = State::Left(LeftReason::PathRefused)
+            }
+            Err(e) => {
+                stop = Some(disk(e));
+                break;
+            }
+        }
+    }
+    report.backup_dir = bk.dir().map(Path::to_path_buf);
+    if let Some(e) = stop {
+        return Ok(stopped(report, work, e));
+    }
+
+    // 7. D11: the other client's record set aside, the first write of the
+    // record (nothing above wrote it).
     let mut rec = match loaded {
         Some(r) if r.client_id == inputs.client_id => r,
         Some(_) => {
-            report.record_set_aside = lock.set_aside(opts.now)?;
+            report.record_set_aside = match lock.set_aside(opts.now) {
+                Ok(p) => p,
+                Err(e) => return Ok(stopped(report, work, e)),
+            };
             report.warnings.push(format!(
                 "the game's cloud client changed since the last sync: its old sync record is \
                  kept as {}; this was a first sync",
@@ -435,34 +480,11 @@ pub async fn pull(
         None => Record::new(inputs.client_id),
     };
 
-    // 6. The snapshot, when anything is overwritten or deleted.
-    if overwrites + deletes > 0 {
-        report.snapshot = host.snapshot()?;
-    }
-
-    // 7. Backups of every file that will be overwritten or deleted, first.
-    let mut bk = Backup::new(backup_root.clone(), opts.now);
-    let mut stop: Option<CloudError> = None;
-    for w in work.iter_mut().filter(|w| destructive(&&**w)) {
-        match back_up(w, &mut bk) {
-            Ok(p) => w.result.backup = Some(p),
-            Err(WriteError::Changed { .. }) => {
-                w.result.state = State::Left(LeftReason::ChangedSincePlan)
-            }
-            Err(e) => {
-                stop = Some(disk(e));
-                break;
-            }
-        }
-    }
-    report.backup_dir = bk.dir().map(Path::to_path_buf);
-    if let Some(e) = stop {
-        return Ok(stopped(report, work, e));
-    }
-
-    // 8. The files, in plan order; objects fetched four at a time.
+    // 8. The files, in plan order; objects fetched a batch at a time (at
+    // most four, and at most `FETCH_BUDGET` bytes unless one object alone is
+    // larger), so memory stays bounded by about one batch.
     let stop_at = opts.stop_before_rename.clone();
-    let wanted: Vec<(usize, Entry)> = work
+    let mut wanted: std::collections::VecDeque<(usize, Entry)> = work
         .iter()
         .enumerate()
         .filter_map(|(k, w)| {
@@ -470,13 +492,6 @@ pub async fn pull(
             (planned(w) && w.result.op.is_some_and(Op::transfers)).then_some((k, e))
         })
         .collect();
-    let fetches = futures::stream::iter(wanted)
-        .map(|(k, e)| {
-            let (storage_c, tok, cid) = (inputs.storage, &token, inputs.client_id);
-            async move { (k, storage::fetch_object(storage_c, tok, cid, &e).await) }
-        })
-        .buffered(status::CONCURRENCY);
-    futures::pin_mut!(fetches);
     let mut fetched: std::collections::HashMap<usize, Result<storage::Object, CloudError>> =
         std::collections::HashMap::new();
     for (k, w) in work.iter_mut().enumerate() {
@@ -485,24 +500,31 @@ pub async fn pull(
         }
         let op = w.result.op.expect("planned files have an op");
         let object = if op.transfers() {
-            // Fetches come in plan order: wait for this one's.
-            loop {
-                if let Some(r) = fetched.remove(&k) {
-                    break Some(r);
-                }
-                match fetches.next().await {
-                    Some((n, r)) => {
-                        fetched.insert(n, r);
-                    }
-                    None => break None,
-                }
+            while !fetched.contains_key(&k) && !wanted.is_empty() {
+                let batch = next_batch(&mut wanted);
+                let got = futures::future::join_all(batch.into_iter().map(|(n, e)| {
+                    let (storage_c, tok, cid) = (inputs.storage, &token, inputs.client_id);
+                    async move { (n, storage::fetch_object(storage_c, tok, cid, &e).await) }
+                }))
+                .await;
+                fetched.extend(got);
             }
+            fetched.remove(&k)
         } else {
             None
         };
         let object = match object {
             None => None,
-            Some(Ok(o)) => Some(o),
+            Some(Ok(o)) => {
+                if let Some(bad) = &o.bad_local_last_modified {
+                    report.warnings.push(format!(
+                        "cloud object {:?}: its uploader's mtime {:?} is out of range; the \
+                         file gets the time of the download",
+                        w.result.name, bad
+                    ));
+                }
+                Some(o)
+            }
             Some(Err(CloudError::Corrupt { name, reason })) => {
                 report
                     .warnings
@@ -516,7 +538,15 @@ pub async fn pull(
             }
         };
         let stop_here = stop_at.as_deref() == Some(w.result.name.as_str());
-        match apply(w, op, object, opts.now, &mut rec, stop_here) {
+        match apply(
+            w,
+            op,
+            object,
+            opts.now,
+            &mut rec,
+            stop_here,
+            &mut report.warnings,
+        ) {
             Ok(()) => {
                 w.result.state = State::Done;
                 if let Err(e) = lock.save(&rec) {
@@ -546,14 +576,36 @@ pub async fn pull(
         rec.rolled_back = None;
         report.rolled_back_cleared = true;
     }
-    lock.save(&rec)?;
-    if bk.dir().is_some() {
-        let (pruned, warnings) = backup::prune(&backup_root, opts.keep_backups);
+    if let Err(e) = lock.save(&rec) {
+        return Ok(stopped(report, work, e));
+    }
+    if let Some(current) = bk.dir() {
+        let (pruned, warnings) = backup::prune(&backup_root, opts.keep_backups, current);
         report.pruned = pruned;
         report.warnings.extend(warnings);
     }
     report.files = work.into_iter().map(|w| w.result).collect();
     Ok(report)
+}
+
+/// The bytes of downloads held in memory at once, beyond one object.
+pub const FETCH_BUDGET: u64 = 256 * 1024 * 1024;
+
+/// The next fetches: up to [`status::CONCURRENCY`] objects within
+/// [`FETCH_BUDGET`] listed bytes, at least one.
+fn next_batch(wanted: &mut std::collections::VecDeque<(usize, Entry)>) -> Vec<(usize, Entry)> {
+    let mut batch = vec![];
+    let mut bytes = 0u64;
+    while let Some((_, e)) = wanted.front() {
+        let size = e.bytes.min(storage::MAX_OBJECT_GZIP);
+        if !batch.is_empty() && (batch.len() >= status::CONCURRENCY || bytes + size > FETCH_BUDGET)
+        {
+            break;
+        }
+        bytes += size;
+        batch.push(wanted.pop_front().expect("a front"));
+    }
+    batch
 }
 
 /// A run stopped by `e`: the files not reached say so.
@@ -639,10 +691,7 @@ fn target(w: &Work) -> Result<(write::Dir, std::ffi::OsString), Applied> {
         .base
         .as_deref()
         .ok_or(Applied::Left(LeftReason::NoPrefix))?;
-    let d = write::open_dir(dir, base).map_err(|e| match e {
-        WriteError::Changed { .. } => changed(),
-        e => Applied::Stop(disk(e)),
-    })?;
+    let d = write::open_dir(dir, base).map_err(refuse_or_stop)?;
     d.clear_temps();
     Ok((d, file.to_os_string()))
 }
@@ -666,6 +715,16 @@ enum Applied {
     Stop(CloudError),
 }
 
+/// A write's error for one file: changed or a refused path leaves that
+/// file (nothing was written for it), anything else stops the run.
+fn refuse_or_stop(e: WriteError) -> Applied {
+    match e {
+        WriteError::Changed { .. } => Applied::Left(LeftReason::ChangedSincePlan),
+        WriteError::Path { .. } => Applied::Left(LeftReason::PathRefused),
+        e => Applied::Stop(disk(e)),
+    }
+}
+
 /// Do one planned file, and record it.
 fn apply(
     w: &mut Work,
@@ -674,6 +733,7 @@ fn apply(
     now: chrono::DateTime<chrono::Utc>,
     rec: &mut Record,
     stop_here: bool,
+    warnings: &mut Vec<String>,
 ) -> Result<(), Applied> {
     let name = w.result.name.clone();
     let entry: Option<&Entry> = w.detail.entry.as_ref();
@@ -705,10 +765,7 @@ fn apply(
                 .as_ref()
                 .ok_or(Applied::Left(LeftReason::ChangedSincePlan))?;
             let (d, file) = target(w)?;
-            d.remove(&file, Expect::of(local)).map_err(|e| match e {
-                WriteError::Changed { .. } => Applied::Left(LeftReason::ChangedSincePlan),
-                e => Applied::Stop(disk(e)),
-            })?;
+            d.remove(&file, Expect::of(local)).map_err(refuse_or_stop)?;
             rec.files.remove(&name);
             Ok(())
         }
@@ -717,47 +774,64 @@ fn apply(
                 return Err(Applied::Left(LeftReason::ChangedSincePlan));
             };
             let (d, file) = target(w)?;
-            let mut expect = match (&w.detail.local, op) {
+            let expect = match (&w.detail.local, op) {
                 (Some(l), Op::Overwrite | Op::KeepBoth) => Expect::of(l),
                 (None, Op::Download) => Expect::Absent,
                 _ => return Err(Applied::Left(LeftReason::ChangedSincePlan)),
             };
-            if op == Op::KeepBoth {
-                let mut aside = file.clone();
-                aside.push(format!(".local-{}", now.format("%Y%m%dT%H%M%SZ")));
-                d.rename_aside(&file, expect, &aside).map_err(|e| match e {
-                    WriteError::Changed { .. } => Applied::Left(LeftReason::ChangedSincePlan),
-                    e => Applied::Stop(disk(e)),
-                })?;
-                w.result.kept_as = Some(aside.to_string_lossy().into_owned());
-                expect = Expect::Absent;
-            }
-            let mut corrupt: Option<String> = None;
+            // `both`: the local file is linked aside only once the cloud's is
+            // whole beside it, so a failure leaves it where it was.
+            let aside = (op == Op::KeepBoth).then(|| {
+                let mut a = file.clone();
+                a.push(format!(".local-{}", now.format("%Y%m%dT%H%M%SZ")));
+                a
+            });
+            let mut failed: Option<Fill> = None;
             let mut md5 = md5::Md5::default();
-            let (size, mtime) = d
+            let written = d
                 .replace(
                     &file,
                     expect,
                     object.local_last_modified,
+                    aside.as_deref(),
                     &mut |out| {
-                        let mut tee = Tee { out, md5: &mut md5 };
-                        storage::gunzip_into(&name, &object.gzip, &mut tee, storage::MAX_PLAIN)
-                            .map(|_| ())
-                            .map_err(|err| {
-                                corrupt = Some(err.to_string());
-                                WriteError::Io {
-                                    path: name.clone(),
-                                    reason: err.to_string(),
-                                }
-                            })
+                        gunzip_to(&name, &object.gzip, out, &mut md5).map_err(|f| {
+                            let reason = match &f {
+                                Fill::Corrupt(r) => r.clone(),
+                                Fill::Disk(e) => e.to_string(),
+                            };
+                            failed = Some(f);
+                            WriteError::Io {
+                                path: name.clone(),
+                                reason,
+                            }
+                        })
                     },
                     &|| stop_here,
                 )
-                .map_err(|err| match err {
-                    _ if corrupt.is_some() => Applied::Corrupt(corrupt.clone().unwrap_or_default()),
-                    WriteError::Changed { .. } => Applied::Left(LeftReason::ChangedSincePlan),
-                    err => Applied::Stop(disk(err)),
+                .map_err(|err| match (&failed, err) {
+                    (Some(Fill::Corrupt(r)), _) => {
+                        Applied::Corrupt(format!("cloud object {name:?}: {r}; not downloaded"))
+                    }
+                    (Some(Fill::Disk(io)), _) => Applied::Stop(CloudError::Disk {
+                        path: w
+                            .detail
+                            .path
+                            .as_deref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_default(),
+                        reason: io.to_string(),
+                    }),
+                    (None, err) => refuse_or_stop(err),
                 })?;
+            if let Some(m) = written.mtime_error {
+                warnings.push(m);
+            }
+            w.result.kept_as = written
+                .kept_as
+                .as_ref()
+                .map(|k| k.to_string_lossy().into_owned());
+            let (size, mtime) = (written.size, written.mtime);
             rec.files.insert(
                 name,
                 FileRecord {
@@ -772,19 +846,66 @@ fn apply(
     }
 }
 
+/// Why a download's content couldn't be written.
+#[derive(Debug)]
+enum Fill {
+    /// Not a gzip stream, or a bomb: the object's fault (exit 5, the run
+    /// goes on).
+    Corrupt(String),
+    /// The local write failed (a full disk): the run stops (exit 6).
+    Disk(std::io::Error),
+}
+
+/// Gunzip `gzip` into `out`, hashing what is written. A failure of `out`
+/// itself is [`Fill::Disk`], never taken for a corrupt object.
+fn gunzip_to(
+    name: &str,
+    gzip: &[u8],
+    out: &mut dyn std::io::Write,
+    md5: &mut md5::Md5,
+) -> Result<(), Fill> {
+    let mut tee = Tee {
+        out,
+        md5,
+        err: None,
+    };
+    match storage::gunzip_into(name, gzip, &mut tee, storage::MAX_PLAIN) {
+        Ok(_) => Ok(()),
+        Err(e) => match tee.err.take() {
+            Some(io) => Err(Fill::Disk(io)),
+            None => Err(Fill::Corrupt(match e {
+                CloudError::Corrupt { reason, .. } => reason,
+                e => e.to_string(),
+            })),
+        },
+    }
+}
+
+/// Writes through to `out` and the hash; remembers `out`'s own error.
 struct Tee<'a> {
     out: &'a mut dyn std::io::Write,
     md5: &'a mut md5::Md5,
+    err: Option<std::io::Error>,
 }
 
 impl std::io::Write for Tee<'_> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let n = self.out.write(buf)?;
-        md5::Digest::update(self.md5, &buf[..n]);
-        Ok(n)
+        match self.out.write(buf) {
+            Ok(n) => {
+                md5::Digest::update(self.md5, &buf[..n]);
+                Ok(n)
+            }
+            Err(e) => {
+                let kind = e.kind();
+                self.err = Some(e);
+                Err(std::io::Error::from(kind))
+            }
+        }
     }
     fn flush(&mut self) -> std::io::Result<()> {
-        self.out.flush()
+        self.out.flush().inspect_err(|e| {
+            self.err = Some(std::io::Error::from(e.kind()));
+        })
     }
 }
 

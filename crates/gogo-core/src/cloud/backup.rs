@@ -130,10 +130,13 @@ impl Backup {
 }
 
 /// Keep the newest `keep` backup dirs of a game (at least one), oldest
-/// removed first; the removed ones. Only dirs with a backup's name are
-/// counted or touched. A failure to remove one is a warning in the list.
-pub fn prune(root: &Path, keep: usize) -> (Vec<PathBuf>, Vec<String>) {
-    let keep = keep.max(1);
+/// removed first; the removed ones. `current`, this run's, is always kept
+/// and counted, whatever its name says (a clock that went back). Only dirs
+/// with a backup's name are counted or touched. A failure to remove one is a
+/// warning in the list.
+pub fn prune(root: &Path, keep: usize, current: &Path) -> (Vec<PathBuf>, Vec<String>) {
+    let keep = keep.max(1) - 1;
+    let current = current.file_name();
     let Ok(rd) = std::fs::read_dir(root) else {
         return (vec![], vec![]);
     };
@@ -142,6 +145,7 @@ pub fn prune(root: &Path, keep: usize) -> (Vec<PathBuf>, Vec<String>) {
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .filter_map(|e| e.file_name().to_str().map(str::to_string))
         .filter(|n| is_backup_name(n))
+        .filter(|n| Some(std::ffi::OsStr::new(n)) != current)
         .collect();
     names.sort_by_key(|n| order_key(n));
     let drop = names.len().saturating_sub(keep);
@@ -177,7 +181,7 @@ mod tests {
         ] {
             std::fs::create_dir(t.path().join(n)).unwrap();
         }
-        let (removed, w) = prune(t.path(), 2);
+        let (removed, w) = prune(t.path(), 2, &t.path().join("20261114T101500Z-10"));
         assert!(w.is_empty());
         let names: Vec<_> = removed
             .iter()
@@ -186,7 +190,26 @@ mod tests {
         assert_eq!(names, ["20261113T000000Z", "20261114T101500Z"]);
         assert!(t.path().join("keep-me").is_dir());
         assert!(t.path().join("20261114T101500Z-10").is_dir());
-        assert_eq!(prune(t.path(), 0).0.len(), 1, "0 keeps one");
+        assert_eq!(
+            prune(t.path(), 0, &t.path().join("20261114T101500Z-10"))
+                .0
+                .len(),
+            1,
+            "0 keeps this run's"
+        );
+        assert!(t.path().join("20261114T101500Z-10").is_dir());
+    }
+
+    #[test]
+    fn this_runs_backup_stays_when_the_clock_went_back() {
+        let t = tempfile::tempdir().unwrap();
+        for n in ["20200101T000000Z", "20261113T000000Z", "20261114T000000Z"] {
+            std::fs::create_dir(t.path().join(n)).unwrap();
+        }
+        let (removed, _) = prune(t.path(), 2, &t.path().join("20200101T000000Z"));
+        assert_eq!(removed, [t.path().join("20261113T000000Z")]);
+        assert!(t.path().join("20200101T000000Z").is_dir());
+        assert!(t.path().join("20261114T000000Z").is_dir());
     }
 
     #[test]

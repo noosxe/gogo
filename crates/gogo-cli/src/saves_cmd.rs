@@ -500,6 +500,10 @@ pub fn render_pull(r: &gogo::cloud::pull::PullReport) -> String {
                     (LeftReason::NoPrefix, _) => {
                         " (the game's prefix isn't there yet: run the game once)".into()
                     }
+                    (LeftReason::PathRefused, _) => {
+                        " (a link or a file on the way to it; not followed: check the save dir)"
+                            .into()
+                    }
                     (LeftReason::ChangedSincePlan, _) => {
                         " (changed since the plan was made: run the pull again)".into()
                     }
