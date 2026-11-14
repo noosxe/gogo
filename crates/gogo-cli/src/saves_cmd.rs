@@ -393,7 +393,9 @@ async fn transfer(a: Run) -> Result<i32, AppError> {
             dry_run: a.dry_run,
             no_delete: a.no_delete,
             // D2's gate: only the one live test sets this.
-            cloud_writes: std::env::var(CLOUD_WRITES_ENV).is_ok_and(|v| v == "1"),
+            cloud_writes: gogo::cloud::pull::cloud_writes_enabled(
+                std::env::var(CLOUD_WRITES_ENV).ok().as_deref(),
+            ),
             newer: a.newer,
             keep_backups: cfg.cloud_saves.keep_backups,
             now: chrono::Utc::now(),
