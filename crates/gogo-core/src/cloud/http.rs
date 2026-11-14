@@ -68,34 +68,54 @@ impl StorageClient {
     }
 
     /// `<base><userId>/<clientId>[/<object>]`; `object` is `/`-separated
-    /// (`saves/slot1/sav.dat`) and each part is percent-encoded on its own.
-    pub fn url(&self, token: &CloudToken, client_id: &str, object: Option<&str>) -> Url {
+    /// (`saves/slot1/sav.dat`) and each part is percent-encoded on its own. A part
+    /// that is empty, `.` or `..` is refused: the url crate would drop or resolve
+    /// it, naming another object than the one asked for.
+    pub fn url(
+        &self,
+        token: &CloudToken,
+        client_id: &str,
+        object: Option<&str>,
+    ) -> Result<StorageUrl, CloudError> {
+        let parts: Vec<&str> = object.map(|o| o.split('/').collect()).unwrap_or_default();
+        if parts
+            .iter()
+            .any(|p| p.is_empty() || *p == "." || *p == "..")
+        {
+            return Err(CloudError::ObjectName {
+                name: object.unwrap_or_default().to_string(),
+            });
+        }
         let mut u = self.base.clone();
         {
             let mut segs = u.path_segments_mut().expect("http base");
-            segs.pop_if_empty().push(token.user_id()).push(client_id);
-            if let Some(o) = object {
-                segs.extend(o.split('/'));
-            }
+            segs.pop_if_empty()
+                .push(token.user_id())
+                .push(client_id)
+                .extend(parts);
         }
-        u
+        Ok(StorageUrl(u))
     }
 
-    /// A request with the per-game bearer.
+    /// A request with the per-game bearer. The builder's `Debug` shows the URL,
+    /// user id included: never format it.
     pub fn request(
         &self,
         method: Method,
         token: &CloudToken,
         client_id: &str,
         object: Option<&str>,
-    ) -> RequestBuilder {
-        self.http
-            .request(method, self.url(token, client_id, object))
-            .bearer_auth(token.access_token())
+    ) -> Result<RequestBuilder, CloudError> {
+        let url = self.url(token, client_id, object)?;
+        Ok(self
+            .http
+            .request(method, url.0)
+            .bearer_auth(token.access_token()))
     }
 
     /// Send `req`; a status that isn't 2xx is [`CloudError::Storage`], with the
-    /// body's `error` code when it has one. Errors carry the redacted URL only.
+    /// body's `error` code when it has one (at most [`ERROR_BODY_CAP`] bytes are
+    /// read). Errors carry the redacted URL only.
     pub async fn send(&self, req: RequestBuilder) -> Result<Response, CloudError> {
         let resp = req.send().await.map_err(|e| {
             let at = e.url().map(redact_url).unwrap_or_default();
@@ -107,16 +127,53 @@ impl StorageClient {
             return Ok(resp);
         }
         let url = redact_url(resp.url());
-        let code = resp
-            .json::<serde_json::Value>()
-            .await
-            .ok()
-            .and_then(|v| v.get("error")?.as_str().map(short_code));
+        let code = error_code(resp).await;
         Err(CloudError::Storage {
             status: status.as_u16(),
             url,
             code,
         })
+    }
+}
+
+/// How much of an error body is read for its `error` code.
+pub const ERROR_BODY_CAP: usize = 4096;
+
+/// The `error` field of an error body's first [`ERROR_BODY_CAP`] bytes.
+async fn error_code(mut resp: Response) -> Option<String> {
+    let mut body = Vec::new();
+    while body.len() < ERROR_BODY_CAP {
+        match resp.chunk().await {
+            Ok(Some(c)) => body.extend_from_slice(&c),
+            _ => break,
+        }
+    }
+    body.truncate(ERROR_BODY_CAP);
+    let v: serde_json::Value = serde_json::from_slice(&body).ok()?;
+    v.get("error")?.as_str().map(short_code)
+}
+
+/// A storage URL. It holds the user id, so `Debug` and `Display` show only its
+/// [`redact_url`] form.
+#[derive(Clone, PartialEq, Eq)]
+pub struct StorageUrl(Url);
+
+impl StorageUrl {
+    /// The full URL, for building a request; never for output.
+    pub fn expose(&self) -> &Url {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for StorageUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&redact_url(&self.0))
+    }
+}
+
+impl std::fmt::Debug for StorageUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "StorageUrl({self})")
     }
 }
 
@@ -178,14 +235,17 @@ mod tests {
     #[test]
     fn urls_are_built_under_the_storage_host() {
         let c = StorageClient::new().unwrap();
-        let u = c.url(&token(), CLIENT, Some("saves/Slot 1/sav.dat"));
+        let u = c
+            .url(&token(), CLIENT, Some("saves/Slot 1/sav.dat"))
+            .unwrap();
+        let u = u.expose();
         assert_eq!(u.host_str(), Some(STORAGE_HOST));
         assert_eq!(
             u.path(),
             format!("/v1/{USER}/{CLIENT}/saves/Slot%201/sav.dat")
         );
         assert_eq!(
-            c.url(&token(), CLIENT, None).as_str(),
+            c.url(&token(), CLIENT, None).unwrap().expose().as_str(),
             format!("https://{STORAGE_HOST}/v1/{USER}/{CLIENT}")
         );
     }
@@ -193,7 +253,10 @@ mod tests {
     #[test]
     fn redaction_hides_everything_after_v1() {
         let c = StorageClient::new().unwrap();
-        let r = redact_url(&c.url(&token(), CLIENT, Some("saves/a/b.sav")));
+        let u = c.url(&token(), CLIENT, Some("saves/a/b.sav")).unwrap();
+        let r = redact_url(u.expose());
+        assert_eq!(u.to_string(), r);
+        assert_eq!(format!("{u:?}"), format!("StorageUrl({r})"));
         assert_eq!(r, "https://cloudstorage.gog.com/v1/[redacted 5 segments]");
         assert!(!r.contains(USER) && !r.contains(CLIENT));
         let q = Url::parse("https://cloudstorage.gog.com/v1/1/2?token=t").unwrap();
@@ -203,6 +266,54 @@ mod tests {
         );
         let bare = Url::parse("https://cloudstorage.gog.com/").unwrap();
         assert_eq!(redact_url(&bare), "https://cloudstorage.gog.com");
+    }
+
+    #[test]
+    fn dot_and_empty_segments_are_refused() {
+        let c = StorageClient::new().unwrap();
+        for bad in [
+            "saves/../x",
+            "saves/./x",
+            "saves//x",
+            "/saves/x",
+            "saves/",
+            "",
+            "..",
+        ] {
+            let e = c.url(&token(), CLIENT, Some(bad)).unwrap_err();
+            assert!(matches!(e, CloudError::ObjectName { .. }), "{bad}: {e:?}");
+        }
+        assert!(c.url(&token(), CLIENT, Some("saves/a..b/.hidden")).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_long_error_body_is_read_only_up_to_the_cap() {
+        let server = MockServer::start().await;
+        let mut body = br#"{"error":"quota_exceeded","pad":""#.to_vec();
+        body.resize(ERROR_BODY_CAP * 4, b'x');
+        body.extend_from_slice(br#""}"#);
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(507).set_body_bytes(body))
+            .mount(&server)
+            .await;
+        let c = client(&server).await;
+        let e = c
+            .send(c.request(Method::GET, &token(), CLIENT, None).unwrap())
+            .await
+            .unwrap_err();
+        // Cut at the cap, the body isn't JSON any more: no code, and no hang.
+        assert!(
+            matches!(
+                e,
+                CloudError::Storage {
+                    status: 507,
+                    code: None,
+                    ..
+                }
+            ),
+            "{e:?}"
+        );
+        assert_eq!(e.exit_code(), 1);
     }
 
     #[tokio::test]
@@ -227,7 +338,9 @@ mod tests {
             .mount(&server)
             .await;
         let c = client(&server).await;
-        let req = c.request(Method::GET, &token(), CLIENT, Some("saves/sav.dat"));
+        let req = c
+            .request(Method::GET, &token(), CLIENT, Some("saves/sav.dat"))
+            .unwrap();
         let resp = c.send(req).await.unwrap();
         assert_eq!(resp.bytes().await.unwrap().as_ref(), gz.as_slice());
         let got = &server.received_requests().await.unwrap()[0];
@@ -248,7 +361,7 @@ mod tests {
             .await;
         let c = client(&server).await;
         let e = c
-            .send(c.request(Method::GET, &token(), CLIENT, None))
+            .send(c.request(Method::GET, &token(), CLIENT, None).unwrap())
             .await
             .unwrap_err();
         let CloudError::Storage { status, url, code } = &e else {
@@ -278,7 +391,7 @@ mod tests {
             .await;
         let c = client(&server).await;
         let e = c
-            .send(c.request(Method::GET, &token(), CLIENT, None))
+            .send(c.request(Method::GET, &token(), CLIENT, None).unwrap())
             .await
             .unwrap_err();
         assert!(matches!(e, CloudError::Storage { status: 302, .. }));
@@ -293,7 +406,7 @@ mod tests {
             StorageClient::with_base(Url::parse(&format!("http://127.0.0.1:{port}/v1/")).unwrap())
                 .unwrap();
         let e = c
-            .send(c.request(Method::GET, &token(), CLIENT, None))
+            .send(c.request(Method::GET, &token(), CLIENT, None).unwrap())
             .await
             .unwrap_err();
         assert!(matches!(e, CloudError::Network(_)));

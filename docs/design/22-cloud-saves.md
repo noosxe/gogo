@@ -194,29 +194,45 @@ redacted (design 07 §4's `redact_url`, extended with this host).
 
 `gogo::cloud::{auth, http, error}`. Where it differs from, or adds to, the text above:
 
-- **`no_license` is "any 403 from the exchange".** gog-warp's `get_token_for` maps 401 and
-  400 (`invalid_session`) itself and turns every other status into a request error without
-  reading the body, so the `error` field isn't available. 403 is the only one seen live
-  (§1.1). The request error wraps a `reqwest::Error` whose text holds the request URL, client
-  secret and refresh token included: it is mapped by kind and status only, never formatted.
-- **The fetched manifest is a generation-2 build's.** The installed build when it is listed
-  and generation 2, else the newest public generation-2 build on the default branch (v1
-  manifests carry no client). The listing is fetched straight from gog-warp, so not even the
-  builds-listing cache is written.
-- **An exchange seam.** gog-warp's token endpoint is a fixed URL, so `TokenExchange` is a
-  trait: `CoreExchange` (the separate `Core`) live, fakes in tests.
-- **Errors.** `CloudError` with `exit_code()` (3 for not logged in, `invalid_session`, 401,
-  `no_license`; 4 for network; 1 otherwise). Wiring it into the CLI comes with the first
-  `gogo saves` command (C3).
+- **One entry point, `CloudAuth`.** `credentials()` and `token()` both persist the main
+  session (`persist_if_changed`, as every command does) after anything that may have
+  refreshed the Galaxy token: the builds and manifest fetch (even a failed one) and
+  `bearer()`. Callers can't skip it. The kept-manifest path touches no network and persists
+  nothing.
+- **Seams.** gog-warp's token and content-system URLs are fixed, so `TokenExchange` (live:
+  `WarpExchange`, a `SeparateCore` per exchange) and `ManifestSource` (live:
+  `WarpManifests`) are traits, with fakes in tests.
+- **Error mapping by call.** gog-warp's request errors wrap a `reqwest::Error` whose text
+  holds the request URL (for the exchange: client secret and refresh token), so they are
+  mapped by kind and status only, never formatted. For the **exchange**: a 403 is
+  `no_license` (gog-warp doesn't read the body; 403 is the only one seen live, §1.1).
+  gog-warp's 400 (`invalid_session`) and 401 become one "GOG rejected the token exchange:
+  the session or the game's client credentials are invalid; try `gogo login`, then re-run",
+  since a stale client secret plausibly answers the same. For the **builds and manifest
+  fetch**: any status is a `Manifest` error naming the status; a 403 there is not
+  `no_license`. `invalid_session` on the main session's own refresh is "run `gogo login`".
+- **Exit codes.** `CloudError::exit_code()`: 3 for not logged in, the session, the rejected
+  exchange and `no_license`; 4 for network, 429 and 5xx; 1 otherwise, 507 (quota) included.
+  Wiring it into the CLI comes with the first `gogo saves` command (C3).
+- **The fetched manifest is a Windows, generation-2 build's.** The installed build when it
+  is listed and generation 2, else the newest public generation-2 build on the default
+  branch (v1 manifests carry no client). Native builds (§11) need their own platform here
+  later. The listing comes straight from gog-warp, so not even the builds-listing cache is
+  written.
+- **A bad `goggame-<gogid>.info`** (unreadable, not JSON) stops the command with an error
+  naming the file: it is the check a fetched manifest is held to.
 - **Redaction.** design 07 §4's `redact_url` didn't exist yet; `cloud::http::redact_url`
-  keeps scheme, host and the first segment (`/v1`) and counts the rest. A crate-wide one
-  for every gog.com URL is a separate change.
-- **The client.** Redirects are not followed (the UA never reaches another host), and every
-  automatic decoding is off explicitly, whatever reqwest features other crates enable.
+  keeps scheme, host and the first segment (`/v1`) and counts the rest. Storage URLs are a
+  `StorageUrl` whose `Debug` and `Display` are that form. A crate-wide `redact_url` for every
+  gog.com URL is a separate change.
+- **The client.** Redirects are not followed (the UA never reaches another host), every
+  automatic decoding is off explicitly, object names with an empty, `.` or `..` segment are
+  refused, and at most 4 KiB of an error body is read.
 - **Live check.** `crates/gogo-core/tests/live_cloud.rs`, ignored and gated by `GOGO_LIVE=1`
-  and `GOGO_LIVE_CLOUD_GOGID`: a fetched manifest, the exchange, one listing GET, printing only
-  the status, the object count and the redacted URL. Run once on 2026-11-14 against Cyberpunk
-  2077: 200, 231 objects, as in §1.3.
+  and `GOGO_LIVE_CLOUD_GOGID`: a fetched manifest, the exchange, one listing GET, through
+  `CloudAuth` (so a refreshed session is persisted), printing only the status, the object
+  count and the redacted URL. Run once on 2026-11-14 against Cyberpunk 2077: 200, 231
+  objects, as in §1.3.
 
 ## 3. Save locations per lane
 
