@@ -613,6 +613,36 @@ Decided on 2026-11-13: every recommendation of the draft was accepted as written
 | D12 | Push deletions? | **Yes**, as Galaxy does, each cloud object backed up to `cloud/` first (§7.1); `--no-delete` on the manual commands keeps a sync additive. |
 | D13 | Remote-config `component_version`? | **A constant (`2.0.45`)**, with a live-smoke check that fails if GOG starts answering it differently. |
 
+## 12a. As built: remote config and locations (C2, #459)
+
+Code: `gogo_core::cloud::{remote_config, locations}`, `gogo saves locations <gogid> [--json]`.
+
+- **Lane** is the host's (Linux → `steamuser`, macOS → `crossover`), a `Lane` value the
+  tests pass explicitly. Both lanes find the game through `GameDirs::for_game`.
+- **Client id**: the game's `goggame-<gogid>.info` (the game's files, then anywhere under
+  `drive_c` for the installer lane), else the `clientId` field of the kept
+  `build-manifest.json`; nothing else of the manifest is read.
+- **Remote config cache**: `<cache>/remote-config/<clientId>.json`, fresh for 24 h; a failed
+  fetch falls back to an older copy (`config_source: stale_cache`), no copy is an error
+  (exit 4). `component_version` is the constant `2.0.45`; the D13 check is the ignored test
+  `live_component_version_still_answers` (`GOGO_LIVE_CLIENT_ID=<id> cargo nextest run
+  --run-ignored only live_component_version`).
+- **Lookup** is case-insensitive per part: the exact case wins; two dirs that differ only
+  by case make that one location skipped (`ambiguous`); a missing part keeps its exact case.
+  The variable's own dirs (`drive_c`, `users`, `Documents`, …) go through the same lookup.
+- **Escape guard** (`Roots::contains`): no `.`/`..`/`:`/NUL part, and the deepest existing
+  ancestor, links resolved, must be under the canonical prefix or game dir (a dangling link
+  counts as leaving). A link to the game dir from inside the prefix is therefore followed
+  anywhere, not only for the depot lane's `drive_c/GOG/<name>`. `Location::file(rel)` does
+  the same check for one object path; the pull and push use it for every file.
+- **Skipped locations** are reported with a reason (`unknown_variable`, `not_a_variable`,
+  `not_for_windows_build`, `bad_path`, `bad_name`, `duplicate_name`, `ambiguous`,
+  `escapes_prefix`) in `--json` and as warnings in the text output; the others still resolve.
+- **Excludes**: design 20's list plus `*.part`, `*.tmp`, `*.~incomplete`, as
+  `cloud::locations::excluded`. The `<?INSTALL?>` build-file filter (§3.4) is **not wired
+  in yet**: it needs the build's file list design 20 §6.1 builds per game.
+- `__default` is resolved and labelled `unverified` (D10).
+
 ## 13. Implementation issues (to be filed)
 
 Under epic #155 (Linux runtime), `type:feature`, `area:wine-runtime` + `area:auth` /

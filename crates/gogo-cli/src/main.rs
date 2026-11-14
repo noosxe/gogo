@@ -15,6 +15,7 @@ mod lane;
 mod menus;
 mod output;
 mod prompt;
+mod saves_cmd;
 #[cfg(target_os = "linux")]
 mod snapshot_cmd;
 #[cfg(target_os = "linux")]
@@ -222,6 +223,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
         Command::Download(args) => download(args, cli.no_progress, cli.quiet).await,
         Command::Depot(args) => depot_cmd(args).await,
         Command::Builds(args) => builds_cmd::run(args).await,
+        Command::Saves { cmd } => saves_cmd::run(cmd).await,
         Command::Update { games, all, strict } => update(games, all, strict).await,
         Command::Verify {
             games,
