@@ -507,7 +507,14 @@ impl Location {
                 use std::os::unix::fs::MetadataExt;
                 m.is_file() && m.nlink() > 1
             });
-            if lexical.as_ref() != Some(&canon) || hard_linked {
+            // Without regard to case: on a case-insensitive filesystem (APFS)
+            // an exact-case lookup succeeds and only the canonical form has
+            // the case on disk. A link onto a build file is caught anyway by
+            // the build-file test, which takes the canonical path.
+            let same = |a: &Path, b: &Path| {
+                a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+            };
+            if !lexical.is_some_and(|l| same(&l, &canon)) || hard_linked {
                 return Err(SkipReason::BadPath(rel.to_string()));
             }
         }
