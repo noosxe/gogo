@@ -234,11 +234,11 @@ async fn pull(a: PullArgs) -> Result<i32, AppError> {
             _ => {}
         }
     };
-    let mut host = LiveHost::new(&game, crate::auto_snapshots(a.no_snapshots)?, &mut progress);
+    let mut host = LiveHost::new(&game, auto_snapshots(a.no_snapshots)?, &mut progress);
     let mut decide = CliDecide {
         prefer_cloud: a.prefer == Some(Prefer::Cloud),
         yes: a.yes,
-        interactive: !a.dry_run && crate::dlc_cmd::interactive(a.json),
+        interactive: !a.dry_run && interactive(a.json),
     };
     let report = cloud_pull::pull(
         &cloud_pull::Inputs {
@@ -261,6 +261,28 @@ async fn pull(a: PullArgs) -> Result<i32, AppError> {
     )
     .await;
     Ok(emit(pull_outcome(report, a.json)))
+}
+
+/// A terminal on stdin and stderr, and no machine output.
+fn interactive(json: bool) -> bool {
+    !json
+        && std::io::IsTerminal::is_terminal(&std::io::stdin())
+        && std::io::IsTerminal::is_terminal(&std::io::stderr())
+}
+
+/// `[snapshots] keep_auto` and `--no-snapshots` for the `cloud-pull` snapshot.
+#[cfg(target_os = "linux")]
+fn auto_snapshots(no_snapshots: bool) -> Result<gogo::linuxapp::snapshots::AutoOptions, AppError> {
+    crate::auto_snapshots(no_snapshots)
+}
+
+/// The Mac lane has no snapshots (design 20): the backups are what it has.
+#[cfg(not(target_os = "linux"))]
+fn auto_snapshots(no_snapshots: bool) -> Result<gogo::linuxapp::snapshots::AutoOptions, AppError> {
+    Ok(gogo::linuxapp::snapshots::AutoOptions {
+        skip: no_snapshots,
+        ..Default::default()
+    })
 }
 
 /// `--prefer`, `--yes` and the prompts.
