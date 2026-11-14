@@ -1,7 +1,7 @@
 # 22 — GOG cloud saves (#275)
 
 Status: **accepted** (2026-11-13). Facts in §1 are live-verified; the decisions are in §12
-(D1–D13, all accepted as recommended). Writes to the cloud wait for D2's live test.
+(D1–D13, all accepted as recommended). Writes to the cloud wait for D2's live test (`push`/`sync` are built, §12f, and gated).
 
 Sync a built game's saves with GOG's cloud storage, the same storage GOG Galaxy and Heroic
 use, so saves follow the user between machines and launchers without copying them by hand.
@@ -934,6 +934,122 @@ state only; the storage host only ever sees GETs (the tests check every request)
   pull; with the record edited by hand to fake a cloud change and a cloud deletion, the
   headless run without `--yes` changed nothing (exit 2), and with `--yes` overwrote one file
   and deleted one, both backed up first. Only downloads reached GOG.
+
+## 12f. As built: `gogo saves push` and `sync` (C5, #462)
+
+Code: `gogo_core::cloud::pull` (one runner, `Mode::{Pull, Push, Sync}`), `storage::{put_object,
+delete_object, head_local_last_modified, gzip_reader}`, `backup::Backup::save_cloud`,
+`gogo saves push <gogid> [--prefer local] [--no-delete] [--dry-run] [--yes] [--json]` and
+`gogo saves sync <gogid> [--prefer cloud|local|newer] [--no-delete] [--dry-run] [--yes] [--json]
+[--no-snapshots]`. Everything below is tested against a wiremock storage server only; **no run
+has written to the real cloud** (D2 below).
+
+- **The gate (D2).** A real run that would write to the cloud (an upload, a cloud deletion, or
+  a `both` in a sync, which uploads the kept copy) refuses with exit 7 and "nothing was
+  changed" unless `GOGO_CLOUD_WRITES=1` is in the environment. It is checked after the plan
+  and before the quota check, the question, any backup or any write. `--dry-run` and `status`
+  never need it. The variable is for the one live test below; a later change removes the gate
+  once the test has passed.
+- **One runner.** `pull`, `push` and `sync` share the pull's order (§12e): sync lock, change
+  lock and running refusal, `status`'s plan, conflicts, quota, the one question, the
+  `cloud-pull` snapshot (only for local overwrites/deletes, so a push takes none), backups,
+  D11 set-aside, downloads and local deletions, then uploads and cloud deletions, then a
+  re-list. A push shows downloads and local deletions as `for pull`, as a pull shows uploads as
+  `for push`; neither is exit 8.
+- **Upload** (`storage::put_object`, the storage client only, so the Galaxy UA stays on that
+  host): `PUT` of gogo's deterministic gzip (level 6, no name, mtime 0) with
+  `Content-Encoding: gzip`, `Content-Type: application/octet-stream`, `Etag` (the MD5 of the
+  gzip bytes) and `X-Object-Meta-LocalLastModified` (the file's mtime, whole seconds, UTC,
+  RFC 3339). An `Etag` in the answer that isn't ours is `corrupt` (exit 5). The local file is
+  read through the pull's no-link walk, checked against the plan (device, inode, size, mtime
+  and the plain MD5 the plan took): a file changed meanwhile is left (`changed_since_plan`).
+  One at a time. A file whose gzip would exceed 200 MiB is left (`too_large`). **Empty files
+  are never uploaded** (`not_uploaded: empty_file`, exit 0): an empty gzip is a tombstone
+  (§12b), so every client would read the save as deleted.
+- **Never uploaded:** build files, excluded files and unreadable ones (the plan never lists
+  them), and anything in a location whose dir is missing or emptied. `location_missing` is
+  left by every mode; `location_emptied` is left by a push and a sync (a pull settles it like
+  any conflict), so not even `--prefer local` turns "the save dir is empty" into deleting
+  every save in the cloud.
+- **Cloud deletion** (`storage::delete_object`, **unverified live**): an HTTP `DELETE` of the
+  object URL, a 404 counting as done. Whether the cloud then lists a tombstone or nothing
+  isn't known; both read as deleted (§12b), and the post-write re-list notes a deletion that
+  left a live object (the record then keeps the file's old entry so it isn't taken for new in
+  the cloud). If the live test shows `DELETE` isn't honoured, the fallback is a `PUT` of an
+  empty gzip with no `X-Object-Meta-LocalLastModified`, which is how Galaxy's tombstones look;
+  it is one function. Just before the `DELETE` the local file is checked to still be absent.
+  `--no-delete` turns cloud deletions off (`not_uploaded: no_delete`, the record untouched);
+  local deletions of a sync stay.
+- **Cloud backups (D12):** every upload over a live cloud object and every cloud deletion
+  first downloads the object (MD5 checked) into
+  `cloud-saves/backups/<gogid>/<UTC>/cloud/<location>/<path>` as the stored gzip, with the
+  listing entry beside it (`<leaf>.gogo-entry.json`), in the same dir as the local backups
+  and pruned with them. All backups are done before the first write; a failed one stops the
+  run, an object that no longer matches its listing (another machine pushed meanwhile) is
+  never overwritten (`corrupt`, a note). A tombstone is overwritten without a backup (an
+  empty gzip holds nothing). A brand-new object can't be checked for a concurrent creation.
+- **The question:** asked once, after the conflict answers, when anything is overwritten or
+  deleted on either side; the text counts local overwrites/deletions and cloud overwrites
+  (uploads over a live object)/deletions. `--yes` skips it; with no TTY and no `--yes` the exit
+  is 2 and nothing is changed.
+- **Quota (§5.4):** before any write, the gzip size of every planned upload (counted on the
+  file as it will be uploaded, the replaced objects' sizes subtracted) plus the container's
+  `bytes_used` is held against the smaller of the container's `x-container-meta-quota-bytes`
+  and the remote config's `cloudStorage.quota` (`Resolved::quota`). Over it: exit 1 with the
+  numbers, nothing written. A kept copy of a `both` counts as its plain size plus 1%. Unknown
+  numbers skip the check.
+- **Conflicts:** `push` offers `local` (upload, or delete the cloud object when the file is
+  gone; `skip` otherwise) and `--prefer local`; a conflict it can't settle is left (exit 8).
+  `sync` offers `cloud`, `local`, `both`, `skip`. `--prefer cloud|local` settle every
+  conflict that way; `newer` `HEAD`s each conflicting object that has a file on both sides
+  and compares `X-Object-Meta-LocalLastModified` with the local mtime; within 2 s, or with no
+  usable header, the conflict stays (asked, or exit 8), and it is refused after a rollback
+  (exit 7, design 20 §6.3). `--prefer newer` is the one option that sends `HEAD`s in a dry
+  run (read-only).
+- **`both` in a sync** uploads the kept `<name>.local-<UTC>` copy in the same run (the point
+  of keeping both across machines), as a new object; a `both` in a pull doesn't.
+- **Record:** after each upload, the gzip's MD5 as `cloud_hash`, the plain MD5, size and
+  mtime; after each deletion the entry is dropped; each saved atomically right away, so a
+  failed upload (network, 5xx) stops the run with exit 4 and the record never moves past it;
+  a rerun continues. The final re-list only notes a listing that doesn't show an upload (it
+  may lag). `pending_push` is cleared by a push or sync that leaves nothing to push (every
+  file done, an empty file, or a download's business); a pull never touches it.
+  `rolled_back` is cleared when every planned file was done, as for a pull.
+- **Dry run:** a real or dry run of `push`/`sync` plans with the same code; `--dry-run` takes
+  no lock and sends only `GET`s (the tests assert that no `PUT`, `POST` or `DELETE` reaches
+  the server, with and without the gate).
+- **Output:** `upload`, `delete cloud`, `for pull`, `not uploaded` lines next to the pull's;
+  `--json` is the same report with `mode`, and `pending_push_cleared`. No token, secret, user id
+  or client id.
+
+### The live write test (D2, not run)
+
+Nothing in #462 has written to the real cloud. The test is run once, by hand, on a game the
+maintainer names, with their explicit OK, on a scratch copy of gogo's state, with a throwaway
+file. The steps:
+
+1. Pick an owned game with cloud saves enabled and an empty (or throwaway) container; point
+   `XDG_DATA_HOME`/`XDG_CACHE_HOME` at scratch dirs under `target/` so no real record or
+   backup is touched, with the game's dir linked in.
+2. `gogo saves status <gogid>` (read-only) and note the object count.
+3. Put one small file with a distinctive name in one of the game's save locations
+   (`gogo saves locations <gogid>` lists them), e.g. `gogo-d2-test.txt`.
+4. `gogo saves push <gogid> --dry-run`: only that file is planned as an upload.
+5. `GOGO_CLOUD_WRITES=1 gogo saves push <gogid> --yes`: one `PUT`. Check `status` shows the
+   file as the same on both sides, and the listing's `hash` equals the MD5 of the gzip.
+6. Read it back: `gogo saves pull <gogid> --dry-run` shows nothing to do; on a second scratch
+   state, `gogo saves pull <gogid>` downloads the same bytes and mtime (the
+   `X-Object-Meta-LocalLastModified` round trip).
+7. Check it in GOG Galaxy or Heroic (the file shows up and downloads there).
+8. Delete the local file; `GOGO_CLOUD_WRITES=1 gogo saves push <gogid> --yes`: one `DELETE`.
+   Record whether the listing then shows a tombstone (the empty-gzip hash) or no entry, and
+   that Galaxy/Heroic treat it as deleted. The cloud backup under `cloud-saves/backups/` holds
+   the deleted object.
+9. Undo: the delete in step 8 already removed the object; if anything is left, delete the test
+   file in Galaxy or Heroic, or push again with the file removed. `--no-delete` was never
+   needed. Remove the scratch dirs.
+10. Record the findings in this section (delete mechanism, tombstone or not, quota
+    behaviour) and open the change that removes the gate.
 
 ## 13. Implementation issues (to be filed)
 

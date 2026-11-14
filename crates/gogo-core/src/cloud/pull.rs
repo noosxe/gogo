@@ -1,5 +1,8 @@
-//! `gogo saves pull` (design 22 §5.1, §5.2, §7): downloads and local
-//! deletions, never a write to the cloud.
+//! `gogo saves pull`, `push` and `sync` (design 22 §5.1, §5.2, §7): one
+//! runner, three [`Mode`]s. A pull downloads and deletes local files and
+//! never writes to the cloud; a push uploads and deletes cloud objects and
+//! never writes a save file; a sync does both in one locked run. Every
+//! cloud write sits behind D2's gate ([`PullOptions::cloud_writes`]).
 //!
 //! Order of a real run:
 //!
@@ -17,7 +20,11 @@
 //!    write of the record;
 //! 8. per file: the path checked again, the object fetched and checked,
 //!    written atomically ([`super::write`]), the record saved;
-//! 9. `last_sync`, `rolled_back` cleared when nothing is left, backups pruned.
+//! 9. uploads and cloud deletions, after the quota pre-check and the backup of
+//!    every cloud object they overwrite or delete (D12): the record saved
+//!    after each; a re-list checks what the cloud now says;
+//! 10. `last_sync`, `rolled_back` and `pending_push` cleared when nothing is
+//!     left, backups pruned.
 
 use std::path::{Path, PathBuf};
 
@@ -52,12 +59,48 @@ pub enum Op {
     Record,
     /// Gone on both sides: dropped from the record.
     Forget,
+    /// The local file gzipped and `PUT` (a push or sync; the cloud object it
+    /// replaces is backed up first).
+    Upload,
+    /// The local file is gone: its cloud object deleted (a push or sync;
+    /// backed up first).
+    DeleteCloud,
+}
+
+/// What a run does: design 22 §5.1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    /// Downloads and local deletions; uploads are shown, left for a push.
+    #[default]
+    Pull,
+    /// Uploads and cloud deletions; downloads are shown, left for a pull.
+    Push,
+    /// Both, in one run.
+    Sync,
+}
+
+impl Mode {
+    fn pulls(self) -> bool {
+        self != Mode::Push
+    }
+    fn pushes(self) -> bool {
+        self != Mode::Pull
+    }
 }
 
 impl Op {
     /// Loses a local file's content unless backed up.
     pub fn destructive(self) -> bool {
         matches!(self, Op::Overwrite | Op::DeleteLocal)
+    }
+    /// Writes or removes a local file.
+    fn local_write(self) -> bool {
+        self.transfers() || self == Op::DeleteLocal
+    }
+    /// Writes to the cloud (a `both` in a sync uploads the kept copy).
+    fn writes_cloud(self, mode: Mode) -> bool {
+        matches!(self, Op::Upload | Op::DeleteCloud) || (self == Op::KeepBoth && mode.pushes())
     }
     fn transfers(self) -> bool {
         matches!(self, Op::Download | Op::Overwrite | Op::KeepBoth)
@@ -75,9 +118,12 @@ impl Op {
 pub enum Choice {
     /// The cloud's side wins: downloaded, or the local file deleted.
     Cloud,
-    /// The local file stays as it is, for a later push; nothing recorded.
+    /// The local side wins: in a pull the file stays as it is, for a later
+    /// push (nothing recorded); in a push or sync it is uploaded, or its
+    /// cloud object deleted.
     Local,
-    /// The local file renamed aside, the cloud's downloaded.
+    /// The local file renamed aside, the cloud's downloaded (and, in a sync,
+    /// the kept copy uploaded).
     Both,
     /// Left for later (exit 8).
     Skip,
@@ -94,6 +140,11 @@ pub enum LeftReason {
     /// The save dir is gone while the record has files in it (a moved
     /// prefix, a drive not mounted?): a pull doesn't make it again.
     LocationMissing,
+    /// The save dir holds no file at all while the record has files in it: a
+    /// push never turns that into deleting them all in the cloud.
+    LocationEmptied,
+    /// Its gzip form would be larger than any object the cloud holds.
+    TooLarge,
     /// The game's prefix (its `drive_c`) or files aren't there: gogo makes
     /// no prefix.
     NoPrefix,
@@ -115,6 +166,10 @@ pub enum State {
     Left(LeftReason),
     /// An upload or cloud deletion: `gogo saves push` does it.
     ForPush,
+    /// A download or local deletion: `gogo saves pull` does it.
+    ForPull,
+    /// Planned and deliberately not done (exit 0).
+    NotUploaded(NotUploaded),
     /// A conflict answered `local`: kept for a later push.
     KeptLocal,
     /// The cloud object failed its check (exit 5).
@@ -123,6 +178,18 @@ pub enum State {
     Unreadable,
     /// Not reached: the run stopped before it.
     NotDone,
+}
+
+/// Why a push leaves an upload or cloud deletion undone, without it being a
+/// conflict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotUploaded {
+    /// `--no-delete`.
+    NoDelete,
+    /// An empty file reads as a deletion marker in the cloud (design 22
+    /// §12b): never uploaded.
+    EmptyFile,
 }
 
 /// One file of the plan that isn't `nothing`.
@@ -150,6 +217,10 @@ pub struct FileResult {
 pub struct Consent {
     pub overwrites: usize,
     pub deletes: usize,
+    /// Uploads that replace a cloud object (backed up first).
+    pub cloud_overwrites: usize,
+    /// Cloud objects deleted (backed up first).
+    pub cloud_deletes: usize,
     /// Where the backups go.
     pub backups: PathBuf,
 }
@@ -183,7 +254,15 @@ pub trait Host {
 }
 
 pub struct PullOptions {
+    pub mode: Mode,
     pub dry_run: bool,
+    /// `--no-delete`: no cloud object is deleted.
+    pub no_delete: bool,
+    /// D2's gate: a real run that would write to the cloud refuses unless
+    /// this is set (the CLI sets it from `GOGO_CLOUD_WRITES=1`).
+    pub cloud_writes: bool,
+    /// `--prefer newer`: a conflict is settled by the mtimes (design 22 §5.1).
+    pub newer: bool,
     /// `cloud_saves.keep_backups`.
     pub keep_backups: usize,
     pub now: chrono::DateTime<chrono::Utc>,
@@ -208,6 +287,7 @@ pub struct Inputs<'a> {
 /// What a pull did, or would do.
 #[derive(Debug, Serialize)]
 pub struct PullReport {
+    pub mode: Mode,
     pub plan: Plan,
     pub dry_run: bool,
     pub files: Vec<FileResult>,
@@ -223,6 +303,9 @@ pub struct PullReport {
     pub pruned: Vec<PathBuf>,
     pub warnings: Vec<String>,
     pub rolled_back_cleared: bool,
+    /// A push or sync left nothing to push: the record's `pending_push` mark
+    /// was cleared.
+    pub pending_push_cleared: bool,
     /// What stopped the run part-way (its exit code wins).
     #[serde(skip)]
     pub error: Option<CloudError>,
@@ -328,22 +411,27 @@ pub async fn pull(
         record: loaded,
     } = detailed;
 
-    // 3. What the pull does with each file; conflicts decided.
+    // `--prefer newer`: the conflicts the mtimes settle.
+    let forced = if opts.newer && opts.mode.pushes() {
+        newer_choices(inputs, &plan, &details, &token).await?
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    // 3. What the run does with each file; conflicts decided.
     let mut work: Vec<Work> = vec![];
     for (i, lp) in plan.locations.iter().enumerate() {
         let loc = &inputs.resolved.locations[i];
         for (j, fp) in lp.files.iter().enumerate() {
             let d = &details[i][j];
-            let (op, choice, state) = settle(fp, d, decide);
+            let (op, choice, state) = settle(fp, d, decide, opts, forced.get(&(i, j)).copied());
             let base = d.path.as_deref().and_then(|p| base_for(inputs.game, p));
             let state = match (op, state) {
                 // A save dir the record has files in, gone: not made again.
-                (Some(o), State::Planned) if lp.missing && o != Op::Forget && o != Op::Record => {
+                (Some(o), State::Planned) if lp.missing && o.local_write() => {
                     State::Left(LeftReason::LocationMissing)
                 }
-                (Some(o), State::Planned)
-                    if o != Op::Forget && o != Op::Record && base.is_none() =>
-                {
+                (Some(o), State::Planned) if o.local_write() && base.is_none() => {
                     State::Left(LeftReason::NoPrefix)
                 }
                 (_, s) => s,
@@ -370,6 +458,7 @@ pub async fn pull(
 
     let backup_root = backup::game_dir(inputs.record_dir, gogid);
     let mut report = PullReport {
+        mode: opts.mode,
         plan,
         dry_run: opts.dry_run,
         files: vec![],
@@ -381,6 +470,7 @@ pub async fn pull(
         pruned: vec![],
         warnings: vec![],
         rolled_back_cleared: false,
+        pending_push_cleared: false,
         error: None,
         stopped: None,
     };
@@ -396,17 +486,45 @@ pub async fn pull(
         .filter(destructive)
         .filter(|w| w.result.op == Some(Op::DeleteLocal))
         .count();
+    let has_live = |w: &&Work| w.detail.entry.as_ref().is_some_and(|e| !e.is_tombstone());
+    let cloud_overwrites = work
+        .iter()
+        .filter(|w| planned(w) && w.result.op == Some(Op::Upload))
+        .filter(has_live)
+        .count();
+    let cloud_deletes = work
+        .iter()
+        .filter(|w| planned(w) && w.result.op == Some(Op::DeleteCloud))
+        .count();
 
     let Some(lock) = lock else {
-        report.files = work.into_iter().map(|w| w.result).collect();
+        report.files.extend(work.into_iter().map(|w| w.result));
         return Ok(report);
     };
 
+    // D2's gate: nothing writes to the cloud until the live test has run.
+    if !opts.cloud_writes
+        && work
+            .iter()
+            .any(|w| planned(w) && w.result.op.is_some_and(|o| o.writes_cloud(opts.mode)))
+    {
+        return Err(CloudError::Refused(format!(
+            "nothing was changed: writing to GOG's cloud isn't switched on yet (design 22 D2: \
+             one live upload/delete test comes first); set {CLOUD_WRITES_ENV}=1 only for that \
+             test. `--dry-run` shows what would be done"
+        )));
+    }
+
+    // Quota pre-check: before any write.
+    check_quota(inputs, &mut work, &report.plan, &mut report.warnings, opts)?;
+
     // 4. The one question.
-    if overwrites + deletes > 0 {
+    if overwrites + deletes + cloud_overwrites + cloud_deletes > 0 {
         match decide.confirm(&Consent {
             overwrites,
             deletes,
+            cloud_overwrites,
+            cloud_deletes,
             backups: backup_root.clone(),
         }) {
             Confirm::Yes => {}
@@ -418,19 +536,20 @@ pub async fn pull(
                         w.result.state = State::NotDone;
                     }
                 }
-                report.files = work.into_iter().map(|w| w.result).collect();
+                report.files.extend(work.into_iter().map(|w| w.result));
                 return Ok(report);
             }
         }
     }
 
-    // 5. The snapshot, when anything is overwritten or deleted.
+    // 5. The snapshot, when a local file is overwritten or deleted.
     if overwrites + deletes > 0 {
         report.snapshot = host.snapshot()?;
     }
 
     // 6. Backups of every file that will be overwritten, deleted or kept
-    // aside, first.
+    // aside, first: local files, then the cloud objects an upload replaces
+    // or a deletion removes.
     let mut bk = Backup::new(backup_root.clone(), opts.now);
     let mut stop: Option<CloudError> = None;
     for w in work
@@ -449,6 +568,39 @@ pub async fn pull(
             Err(e) => {
                 stop = Some(disk(e));
                 break;
+            }
+        }
+    }
+    if stop.is_none() {
+        for w in work.iter_mut().filter(|w| {
+            planned(w)
+                && matches!(w.result.op, Some(Op::Upload | Op::DeleteCloud))
+                && w.detail.entry.as_ref().is_some_and(|e| !e.is_tombstone())
+        }) {
+            let entry = w.detail.entry.as_ref().expect("filtered");
+            match storage::fetch_object(inputs.storage, &token, inputs.client_id, entry).await {
+                Ok(o) => match bk.save_cloud(&w.result.name, &o.gzip, entry) {
+                    Ok(p) => w.result.backup = Some(p),
+                    Err(e) => {
+                        stop = Some(disk(e));
+                        break;
+                    }
+                },
+                // Not what the listing said any more (another machine
+                // pushed meanwhile), or unreadable: never overwritten.
+                Err(CloudError::Corrupt { name, reason }) => {
+                    report.warnings.push(format!(
+                        "cloud object {name:?}: {reason}; not backed up, so left as it is"
+                    ));
+                    w.result.state = State::Corrupt;
+                }
+                Err(CloudError::Storage { status: 404, .. }) => {
+                    w.result.state = State::Left(LeftReason::ChangedSincePlan)
+                }
+                Err(e) => {
+                    stop = Some(e);
+                    break;
+                }
             }
         }
     }
@@ -499,6 +651,9 @@ pub async fn pull(
             continue;
         }
         let op = w.result.op.expect("planned files have an op");
+        if matches!(op, Op::Upload | Op::DeleteCloud) {
+            continue;
+        }
         let object = if op.transfers() {
             while !fetched.contains_key(&k) && !wanted.is_empty() {
                 let batch = next_batch(&mut wanted);
@@ -569,12 +724,115 @@ pub async fn pull(
         return Ok(stopped(report, work, e));
     }
 
-    // 9. Settled: the record's time, the rollback mark, the backups.
+    // 9. Uploads and cloud deletions; the kept copy of a `both` in a sync.
+    let mut written: Vec<(String, bool)> = vec![];
+    let mut extras: Vec<FileResult> = vec![];
+    let mut stop: Option<CloudError> = None;
+    for w in work.iter_mut() {
+        let kept = (opts.mode.pushes()
+            && w.result.op == Some(Op::KeepBoth)
+            && w.result.state == State::Done)
+            .then(|| w.result.kept_as.clone())
+            .flatten();
+        if let Some(kept) = kept {
+            let name = sibling(&w.result.name, &kept);
+            let mut res = FileResult {
+                name: name.clone(),
+                planned: Action::Upload,
+                op: Some(Op::Upload),
+                choice: None,
+                state: State::Planned,
+                backup: None,
+                kept_as: None,
+            };
+            let leaf = std::ffi::OsString::from(&kept);
+            match upload(inputs, &token, w, &name, Some(&leaf), &mut rec).await {
+                Ok(()) => {
+                    res.state = State::Done;
+                    written.push((name, true));
+                    if let Err(e) = lock.save(&rec) {
+                        stop = Some(e);
+                    }
+                }
+                Err(Applied::Left(r)) => res.state = State::Left(r),
+                Err(Applied::Corrupt(msg)) => {
+                    report.warnings.push(msg);
+                    res.state = State::Corrupt;
+                }
+                Err(Applied::Stop(e)) => stop = Some(e),
+            }
+            extras.push(res);
+            if stop.is_some() {
+                break;
+            }
+            continue;
+        }
+        if !planned(w) {
+            continue;
+        }
+        let name = w.result.name.clone();
+        let (res, is_upload) = match w.result.op {
+            Some(Op::Upload) => (upload(inputs, &token, w, &name, None, &mut rec).await, true),
+            Some(Op::DeleteCloud) => (delete_cloud(inputs, &token, w, &mut rec).await, false),
+            _ => continue,
+        };
+        match res {
+            Ok(()) => {
+                w.result.state = State::Done;
+                written.push((name, is_upload));
+                if let Err(e) = lock.save(&rec) {
+                    stop = Some(e);
+                    break;
+                }
+            }
+            Err(Applied::Left(r)) => w.result.state = State::Left(r),
+            Err(Applied::Corrupt(msg)) => {
+                report.warnings.push(msg);
+                w.result.state = State::Corrupt;
+            }
+            Err(Applied::Stop(e)) => {
+                stop = Some(e);
+                break;
+            }
+        }
+    }
+    report.files.extend(extras);
+    if let Some(e) = stop {
+        return Ok(stopped(report, work, e));
+    }
+    if !written.is_empty() {
+        verify_writes(
+            inputs,
+            &token,
+            &written,
+            &work,
+            &mut rec,
+            &mut report.warnings,
+        )
+        .await;
+        if let Err(e) = lock.save(&rec) {
+            return Ok(stopped(report, work, e));
+        }
+    }
+
+    // 10. Settled: the record's time, the marks, the backups.
     let settled = work.iter().all(|w| w.result.state == State::Done);
     rec.last_sync = Some(record::datetime(opts.now.into()));
     if rec.rolled_back.is_some() && settled {
         rec.rolled_back = None;
         report.rolled_back_cleared = true;
+    }
+    // Nothing left to push: every file is done, or deliberately not uploaded
+    // (an empty file), or only a download's business.
+    let nothing_to_push = work.iter().all(|w| {
+        matches!(
+            w.result.state,
+            State::Done | State::ForPull | State::NotUploaded(NotUploaded::EmptyFile)
+        )
+    });
+    if opts.mode.pushes() && rec.pending_push && nothing_to_push {
+        rec.pending_push = false;
+        report.pending_push_cleared = true;
     }
     if let Err(e) = lock.save(&rec) {
         return Ok(stopped(report, work, e));
@@ -584,8 +842,293 @@ pub async fn pull(
         report.pruned = pruned;
         report.warnings.extend(warnings);
     }
-    report.files = work.into_iter().map(|w| w.result).collect();
+    report.files.extend(work.into_iter().map(|w| w.result));
     Ok(report)
+}
+
+/// The env var D2's gate reads (the CLI): set only for the one live test.
+pub const CLOUD_WRITES_ENV: &str = "GOGO_CLOUD_WRITES";
+
+/// `a/b/c` with `kept` as the last part: the cloud name of a kept copy.
+fn sibling(name: &str, kept: &str) -> String {
+    match name.rsplit_once('/') {
+        Some((dir, _)) => format!("{dir}/{kept}"),
+        None => kept.to_string(),
+    }
+}
+
+/// The mtime of a record time.
+fn systime(d: &toml::value::Datetime) -> Option<std::time::SystemTime> {
+    chrono::DateTime::parse_from_rfc3339(&d.to_string())
+        .ok()
+        .map(|t| t.with_timezone(&chrono::Utc).into())
+}
+
+/// `--prefer newer`: for every conflict with a file on both sides, the cloud
+/// object's `X-Object-Meta-LocalLastModified` (a `HEAD`) against the local
+/// mtime. Within 2 s (the header's precision, FAT-era mtimes), or with no
+/// usable header, nothing is forced: the conflict stays one. Refused after a
+/// rollback (design 20 §6.3: never decided by time then).
+async fn newer_choices(
+    inputs: &Inputs<'_>,
+    plan: &Plan,
+    details: &[Vec<Detail>],
+    token: &super::auth::CloudToken,
+) -> Result<std::collections::HashMap<(usize, usize), Choice>, CloudError> {
+    if plan.rolled_back {
+        return Err(CloudError::Refused(
+            "nothing was changed: the game was rolled back since the last sync, so a conflict is \
+             never decided by time: use --prefer local or --prefer cloud"
+                .into(),
+        ));
+    }
+    let mut out = std::collections::HashMap::new();
+    for (i, lp) in plan.locations.iter().enumerate() {
+        for (j, fp) in lp.files.iter().enumerate() {
+            let Action::Conflict(c) = fp.action else {
+                continue;
+            };
+            if matches!(
+                c,
+                ConflictReason::CaseClash
+                    | ConflictReason::LocationMissing
+                    | ConflictReason::LocationEmptied
+            ) {
+                continue;
+            }
+            let d = &details[i][j];
+            let (Some(local), Some(e)) = (&d.local, &d.entry) else {
+                continue;
+            };
+            if e.is_tombstone() {
+                continue;
+            }
+            let Some(here) = systime(&local.mtime) else {
+                continue;
+            };
+            let Some(there) =
+                storage::head_local_last_modified(inputs.storage, token, inputs.client_id, &e.name)
+                    .await?
+            else {
+                continue;
+            };
+            let (newer, gap) = match here.duration_since(there) {
+                Ok(d) => (Choice::Local, d),
+                Err(e) => (Choice::Cloud, e.duration()),
+            };
+            if gap > std::time::Duration::from_secs(2) {
+                out.insert((i, j), newer);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// §5.4: an upload plan that would take the container over the smaller of the
+/// two quotas is refused before any upload, with both numbers. Reading each
+/// upload's gzip size is also the first check that the file is as planned: a
+/// file that isn't is left, as in the upload itself.
+fn check_quota(
+    inputs: &Inputs<'_>,
+    work: &mut [Work],
+    plan: &Plan,
+    warnings: &mut Vec<String>,
+    opts: &PullOptions,
+) -> Result<(), CloudError> {
+    let mut adds = 0u64;
+    let mut frees = 0u64;
+    let mut any = false;
+    for w in work.iter_mut().filter(|w| w.result.state == State::Planned) {
+        match w.result.op {
+            Some(Op::Upload) => {
+                any = true;
+                match gzip_of(w, None) {
+                    Ok(g) => adds += g.gzip.len() as u64,
+                    Err(Applied::Left(r)) => {
+                        w.result.state = State::Left(r);
+                        continue;
+                    }
+                    Err(Applied::Corrupt(m)) => {
+                        warnings.push(m);
+                        w.result.state = State::Corrupt;
+                        continue;
+                    }
+                    Err(Applied::Stop(e)) => return Err(e),
+                }
+                if let Some(e) = w.detail.entry.as_ref().filter(|e| !e.is_tombstone()) {
+                    frees += e.bytes;
+                }
+            }
+            Some(Op::KeepBoth) if opts.mode.pushes() => {
+                any = true;
+                let size = w.detail.local.as_ref().map_or(0, |l| l.size);
+                adds += size + size / 100 + 64;
+            }
+            _ => {}
+        }
+    }
+    let Some(c) = plan.container.as_ref().filter(|_| any) else {
+        return Ok(());
+    };
+    let limit = [c.quota_bytes, inputs.resolved.quota]
+        .into_iter()
+        .flatten()
+        .min();
+    let Some(limit) = limit else { return Ok(()) };
+    let used = c.bytes_used.unwrap_or(0);
+    let after = (used + adds).saturating_sub(frees);
+    if after > limit {
+        return Err(CloudError::Quota(format!(
+            "nothing was changed: uploading would take the cloud storage to about {after} bytes; \
+             the container holds {used} and the quota is {limit} (the smaller of the \
+             container's {} and the remote config's {}). Free space in GOG's cloud first",
+            c.quota_bytes.map_or("unknown".into(), |q| q.to_string()),
+            inputs
+                .resolved
+                .quota
+                .map_or("unknown".into(), |q| q.to_string())
+        )));
+    }
+    Ok(())
+}
+
+/// The planned local file read through the no-link walk, checked against the
+/// plan, in gogo's gzip form. `leaf` names another file in the same dir (a
+/// kept copy: the same inode as planned).
+fn gzip_of(w: &Work, leaf: Option<&std::ffi::OsStr>) -> Result<storage::Gzipped, Applied> {
+    let local = w
+        .detail
+        .local
+        .as_ref()
+        .ok_or(Applied::Left(LeftReason::ChangedSincePlan))?;
+    let planned = checked_path(w)?;
+    let (dir, file) = write::split(planned).ok_or(Applied::Left(LeftReason::ChangedSincePlan))?;
+    let d = write::open_dir(dir, dir).map_err(refuse_or_stop)?;
+    let mut f = d
+        .open_read(leaf.unwrap_or(file), Expect::of(local))
+        .map_err(refuse_or_stop)?;
+    let g = storage::gzip_reader(&mut f, storage::MAX_OBJECT_GZIP).map_err(|e| {
+        Applied::Stop(CloudError::Io {
+            path: w.result.name.clone(),
+            reason: e.to_string(),
+        })
+    })?;
+    let g = g.ok_or(Applied::Left(LeftReason::TooLarge))?;
+    // The file as the plan hashed it, not another one of the same size.
+    if g.plain_len != local.size
+        || w.detail
+            .local_md5
+            .as_ref()
+            .is_some_and(|m| *m != g.plain_md5)
+    {
+        return Err(Applied::Left(LeftReason::ChangedSincePlan));
+    }
+    Ok(g)
+}
+
+/// `PUT` the planned file as `cloud_name`, and record it.
+async fn upload(
+    inputs: &Inputs<'_>,
+    token: &super::auth::CloudToken,
+    w: &Work<'_>,
+    cloud_name: &str,
+    leaf: Option<&std::ffi::OsStr>,
+    rec: &mut Record,
+) -> Result<(), Applied> {
+    let g = gzip_of(w, leaf)?;
+    let local = w.detail.local.as_ref().expect("gzip_of checked");
+    let mtime = systime(&local.mtime).unwrap_or_else(std::time::SystemTime::now);
+    storage::put_object(
+        inputs.storage,
+        token,
+        inputs.client_id,
+        cloud_name,
+        g.gzip,
+        &g.gzip_md5,
+        mtime,
+    )
+    .await
+    .map_err(Applied::Stop)?;
+    rec.files.insert(
+        cloud_name.to_string(),
+        FileRecord {
+            cloud_hash: g.gzip_md5,
+            local_md5: g.plain_md5,
+            size: local.size,
+            mtime: local.mtime,
+        },
+    );
+    Ok(())
+}
+
+/// `DELETE` the cloud object of a file that is gone here, and drop its record.
+async fn delete_cloud(
+    inputs: &Inputs<'_>,
+    token: &super::auth::CloudToken,
+    w: &Work<'_>,
+    rec: &mut Record,
+) -> Result<(), Applied> {
+    let planned = checked_path(w)?;
+    // Back after the plan: nothing is deleted for a file that exists.
+    if std::fs::symlink_metadata(planned).is_ok() {
+        return Err(Applied::Left(LeftReason::ChangedSincePlan));
+    }
+    storage::delete_object(inputs.storage, token, inputs.client_id, &w.result.name)
+        .await
+        .map_err(Applied::Stop)?;
+    rec.files.remove(&w.result.name);
+    Ok(())
+}
+
+/// After the writes: one more listing says what the cloud holds now. An
+/// upload whose listed hash isn't ours is a note; a deletion that left a live object puts the
+/// old record entry back, so the file isn't taken for new in the cloud. A
+/// listing that can't be had is a note, not a failure.
+async fn verify_writes(
+    inputs: &Inputs<'_>,
+    token: &super::auth::CloudToken,
+    written: &[(String, bool)],
+    work: &[Work<'_>],
+    rec: &mut Record,
+    warnings: &mut Vec<String>,
+) {
+    let listing = match storage::list(inputs.storage, token, inputs.client_id).await {
+        Ok(l) => l,
+        Err(e) => {
+            warnings.push(format!(
+                "the cloud's listing couldn't be read to check the writes ({e}); the next run \
+                 compares everything again"
+            ));
+            return;
+        }
+    };
+    for (name, upload) in written {
+        let listed = listing.entries.iter().find(|e| &e.name == name);
+        if *upload {
+            // The listing may lag a write (Swift's container listings are
+            // eventually consistent), so the record keeps what was uploaded;
+            // a different hash is only a note.
+            let ours = rec.files.get(name).map(|f| f.cloud_hash.as_str());
+            if listed.map(|e| e.hash.as_str()) != ours {
+                warnings.push(format!(
+                    "cloud object {name:?}: the listing doesn't show the uploaded content (yet); \
+                     check it with `gogo saves status`"
+                ));
+            }
+        } else if listed.is_some_and(|e| !e.is_tombstone()) {
+            warnings.push(format!(
+                "cloud object {name:?} is still listed after its deletion; it is kept in the \
+                 record as it was"
+            ));
+            if let Some(old) = work
+                .iter()
+                .find(|w| &w.result.name == name)
+                .and_then(|w| w.detail.record.clone())
+            {
+                rec.files.insert(name.clone(), old);
+            }
+        }
+    }
 }
 
 /// The bytes of downloads held in memory at once, beyond one object.
@@ -612,32 +1155,51 @@ fn next_batch(wanted: &mut std::collections::VecDeque<(usize, Entry)>) -> Vec<(u
 fn stopped(mut report: PullReport, work: Vec<Work>, e: CloudError) -> PullReport {
     report.stopped = Some(e.to_string());
     report.error = Some(e);
-    report.files = work
-        .into_iter()
-        .map(|mut w| {
-            if w.result.state == State::Planned {
-                w.result.state = State::NotDone;
-            }
-            w.result
-        })
-        .collect();
+    report.files.extend(work.into_iter().map(|mut w| {
+        if w.result.state == State::Planned {
+            w.result.state = State::NotDone;
+        }
+        w.result
+    }));
     report
 }
 
-/// What the plan's action means for a pull, with conflicts decided.
+/// What a local-side answer to a conflict does: the file uploaded, or its
+/// cloud object deleted when the file is gone. `None`: nothing to do about
+/// it but drop the record (gone on both sides).
+fn local_op(d: &Detail, no_delete: bool) -> (Option<Op>, State) {
+    match (&d.local, d.entry.as_ref().filter(|e| !e.is_tombstone())) {
+        (Some(l), _) if l.size == 0 => (None, State::NotUploaded(NotUploaded::EmptyFile)),
+        (Some(_), _) => (Some(Op::Upload), State::Planned),
+        (None, Some(_)) if no_delete => (None, State::NotUploaded(NotUploaded::NoDelete)),
+        (None, Some(_)) => (Some(Op::DeleteCloud), State::Planned),
+        (None, None) => (Some(Op::Forget), State::Planned),
+    }
+}
+
+/// What the plan's action means for this run, with conflicts decided.
+/// `forced` is `--prefer newer`'s answer for this file.
 fn settle(
     fp: &FilePlan,
     d: &Detail,
     decide: &mut dyn Decide,
+    opts: &PullOptions,
+    forced: Option<Choice>,
 ) -> (Option<Op>, Option<Choice>, State) {
+    let mode = opts.mode;
     match fp.action {
         Action::Nothing => (None, None, State::Done),
+        Action::Download | Action::DeleteLocal if !mode.pulls() => (None, None, State::ForPull),
         Action::Download if d.local.is_some() => (Some(Op::Overwrite), None, State::Planned),
         Action::Download => (Some(Op::Download), None, State::Planned),
         Action::DeleteLocal => (Some(Op::DeleteLocal), None, State::Planned),
         Action::Record => (Some(Op::Record), None, State::Planned),
         Action::Forget => (Some(Op::Forget), None, State::Planned),
-        Action::Upload | Action::DeleteCloud => (None, None, State::ForPush),
+        Action::Upload | Action::DeleteCloud if !mode.pushes() => (None, None, State::ForPush),
+        Action::Upload | Action::DeleteCloud => {
+            let (op, state) = local_op(d, opts.no_delete);
+            (op, None, state)
+        }
         Action::Corrupt => (None, None, State::Corrupt),
         Action::Unreadable => (None, None, State::Unreadable),
         Action::Conflict(ConflictReason::CaseClash) => {
@@ -646,29 +1208,61 @@ fn settle(
         Action::Conflict(ConflictReason::LocationMissing) => {
             (None, None, State::Left(LeftReason::LocationMissing))
         }
+        // A push never turns "the save dir is empty" into deleting every
+        // save in the cloud; a pull settles it like any conflict.
+        Action::Conflict(ConflictReason::LocationEmptied) if mode.pushes() => {
+            (None, None, State::Left(LeftReason::LocationEmptied))
+        }
         Action::Conflict(_) => {
-            let Some(op) = cloud_op(d) else {
+            let cloud = cloud_op(d).filter(|_| mode.pulls());
+            let local = mode.pushes().then(|| local_op(d, opts.no_delete));
+            if cloud.is_none() && local.is_none() {
                 // Only here, never in the cloud: nothing for a pull to decide.
                 return (None, None, State::ForPush);
-            };
-            let mut choices = vec![Choice::Cloud, Choice::Local];
-            if op == Op::Overwrite {
+            }
+            let mut choices = vec![];
+            if cloud.is_some() {
+                choices.push(Choice::Cloud);
+            }
+            if mode == Mode::Pull || local.is_some() {
+                choices.push(Choice::Local);
+            }
+            if cloud == Some(Op::Overwrite) {
                 choices.push(Choice::Both);
             }
             choices.push(Choice::Skip);
-            let c = decide.conflict(fp, &choices);
+            let c = match forced.filter(|c| choices.contains(c)) {
+                Some(c) => c,
+                None => decide.conflict(fp, &choices),
+            };
             let c = if choices.contains(&c) {
                 c
             } else {
                 Choice::Skip
             };
-            match c {
-                Choice::Cloud => (Some(op), Some(c), State::Planned),
-                Choice::Both => (Some(Op::KeepBoth), Some(c), State::Planned),
-                Choice::Local => (None, Some(c), State::KeptLocal),
-                Choice::Skip => (None, Some(c), State::Left(LeftReason::Undecided)),
+            match (c, cloud, local) {
+                (Choice::Cloud, Some(op), _) => (Some(op), Some(c), State::Planned),
+                (Choice::Both, ..) => (Some(Op::KeepBoth), Some(c), State::Planned),
+                (Choice::Local, _, Some((op, state))) => (op, Some(c), state),
+                (Choice::Local, ..) => (None, Some(c), State::KeptLocal),
+                _ => (None, Some(c), State::Left(LeftReason::Undecided)),
             }
         }
+    }
+}
+
+/// The planned path of a file, the name mapped again: the same canonical
+/// path as planned, and not one of the build's files.
+fn checked_path<'w>(w: &'w Work) -> Result<&'w Path, Applied> {
+    let changed = || Applied::Left(LeftReason::ChangedSincePlan);
+    let name = &w.result.name;
+    let rel = name
+        .strip_prefix(&format!("{}/", w.loc.name))
+        .ok_or_else(changed)?;
+    let planned = w.detail.path.as_deref().ok_or_else(changed)?;
+    match w.loc.file(rel) {
+        Ok(p) if p == planned && !w.loc.build_path(&p) => Ok(planned),
+        _ => Err(changed()),
     }
 }
 
@@ -677,15 +1271,7 @@ fn settle(
 /// opened from `/` without following a link.
 fn target(w: &Work) -> Result<(write::Dir, std::ffi::OsString), Applied> {
     let changed = || Applied::Left(LeftReason::ChangedSincePlan);
-    let name = &w.result.name;
-    let rel = name
-        .strip_prefix(&format!("{}/", w.loc.name))
-        .ok_or_else(changed)?;
-    let planned = w.detail.path.as_deref().ok_or_else(changed)?;
-    match w.loc.file(rel) {
-        Ok(p) if p == planned && !w.loc.build_path(&p) => {}
-        _ => return Err(changed()),
-    }
+    let planned = checked_path(w)?;
     let (dir, file) = write::split(planned).ok_or_else(changed)?;
     let base = w
         .base
@@ -758,6 +1344,8 @@ fn apply(
             rec.files.remove(&name);
             Ok(())
         }
+        // Done by the cloud step, never here.
+        Op::Upload | Op::DeleteCloud => Err(Applied::Left(LeftReason::ChangedSincePlan)),
         Op::DeleteLocal => {
             let local = w
                 .detail

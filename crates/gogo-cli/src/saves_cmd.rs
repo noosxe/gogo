@@ -47,6 +47,85 @@ pub enum SavesCmd {
     /// a `cloud-pull` snapshot is taken before. Refuses while the game runs.
     /// Exits 8 when files that need a decision are left.
     Pull(PullArgs),
+    /// Send local changes to GOG's cloud: gzip uploads, and deletions of
+    /// objects whose local file is gone (`--no-delete` keeps those).
+    /// Every cloud object it overwrites or deletes is downloaded to
+    /// `cloud-saves/backups/<gogid>/` first, and an upload plan over the
+    /// storage quota is refused. Never writes a save file. Refuses while the
+    /// game runs. Exits 8 when files that need a decision are left.
+    ///
+    /// Cloud writes are off until the one live upload/delete test has run: a
+    /// real run that would write refuses unless `GOGO_CLOUD_WRITES=1` is set;
+    /// `--dry-run` always works and only reads.
+    Push(PushArgs),
+    /// Pull and push in one locked run: downloads and local deletions,
+    /// uploads and cloud deletions, conflicts settled per file (`--prefer`,
+    /// or asked). The backups and the `cloud-pull` snapshot of both commands
+    /// apply. Same cloud-write gate as `push`.
+    Sync(SyncArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct PushArgs {
+    /// GOG product id.
+    #[arg(value_name = "GOGID")]
+    pub gogid: String,
+    /// Settle every conflict the local way (the cloud's side is `pull`'s or
+    /// `sync`'s).
+    #[arg(long, value_enum, value_name = "SIDE")]
+    pub prefer: Option<PushPrefer>,
+    /// Never delete a cloud object, even when its local file is gone.
+    #[arg(long)]
+    pub no_delete: bool,
+    /// Show what would be done; change nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Don't ask before overwriting or deleting cloud objects.
+    #[arg(long)]
+    pub yes: bool,
+    /// Machine-readable output (no prompts).
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct SyncArgs {
+    /// GOG product id.
+    #[arg(value_name = "GOGID")]
+    pub gogid: String,
+    /// Settle every conflict one way: `newer` by the files' times (a tie
+    /// stays a conflict; refused after a rollback).
+    #[arg(long, value_enum, value_name = "SIDE")]
+    pub prefer: Option<SyncPrefer>,
+    /// Never delete a cloud object, even when its local file is gone.
+    #[arg(long)]
+    pub no_delete: bool,
+    /// Show what would be done; change nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Don't ask before overwriting or deleting files.
+    #[arg(long)]
+    pub yes: bool,
+    /// Machine-readable output (no prompts).
+    #[arg(long)]
+    pub json: bool,
+    /// Skip the `cloud-pull` snapshot for this run (the backups are still
+    /// made).
+    #[arg(long)]
+    pub no_snapshots: bool,
+}
+
+/// A push settles conflicts only the local way.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PushPrefer {
+    Local,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SyncPrefer {
+    Cloud,
+    Local,
+    Newer,
 }
 
 #[derive(clap::Args, Debug)]
@@ -83,7 +162,51 @@ pub async fn run(cmd: SavesCmd) -> Result<i32, AppError> {
     match cmd {
         SavesCmd::Locations { gogid, json } => locations(&gogid, json).await,
         SavesCmd::Status { gogid, json } => status(&gogid, json).await,
-        SavesCmd::Pull(a) => pull(a).await,
+        SavesCmd::Pull(a) => {
+            transfer(Run {
+                mode: Mode::Pull,
+                gogid: a.gogid,
+                prefer_cloud: a.prefer == Some(Prefer::Cloud),
+                prefer_local: false,
+                newer: false,
+                no_delete: false,
+                dry_run: a.dry_run,
+                yes: a.yes,
+                json: a.json,
+                no_snapshots: a.no_snapshots,
+            })
+            .await
+        }
+        SavesCmd::Push(a) => {
+            transfer(Run {
+                mode: Mode::Push,
+                gogid: a.gogid,
+                prefer_cloud: false,
+                prefer_local: a.prefer == Some(PushPrefer::Local),
+                newer: false,
+                no_delete: a.no_delete,
+                dry_run: a.dry_run,
+                yes: a.yes,
+                json: a.json,
+                no_snapshots: true,
+            })
+            .await
+        }
+        SavesCmd::Sync(a) => {
+            transfer(Run {
+                mode: Mode::Sync,
+                gogid: a.gogid,
+                prefer_cloud: a.prefer == Some(SyncPrefer::Cloud),
+                prefer_local: a.prefer == Some(SyncPrefer::Local),
+                newer: a.prefer == Some(SyncPrefer::Newer),
+                no_delete: a.no_delete,
+                dry_run: a.dry_run,
+                yes: a.yes,
+                json: a.json,
+                no_snapshots: a.no_snapshots,
+            })
+            .await
+        }
     }
 }
 
@@ -186,8 +309,22 @@ async fn status(gogid: &str, json: bool) -> Result<i32, AppError> {
     Ok(emit(status_outcome(plan, json)))
 }
 
-async fn pull(a: PullArgs) -> Result<i32, AppError> {
-    use gogo::cloud::pull::{self as cloud_pull, LiveHost, PullOptions};
+/// What `pull`, `push` and `sync` share.
+struct Run {
+    mode: Mode,
+    gogid: String,
+    prefer_cloud: bool,
+    prefer_local: bool,
+    newer: bool,
+    no_delete: bool,
+    dry_run: bool,
+    yes: bool,
+    json: bool,
+    no_snapshots: bool,
+}
+
+async fn transfer(a: Run) -> Result<i32, AppError> {
+    use gogo::cloud::pull::{self as cloud_pull, CLOUD_WRITES_ENV, LiveHost, PullOptions};
     let game = match Game::find(&a.gogid, Lane::host()) {
         Ok(g) => g,
         Err(e) => return Ok(emit(Outcome::failed(&e))),
@@ -236,7 +373,8 @@ async fn pull(a: PullArgs) -> Result<i32, AppError> {
     };
     let mut host = LiveHost::new(&game, auto_snapshots(a.no_snapshots)?, &mut progress);
     let mut decide = CliDecide {
-        prefer_cloud: a.prefer == Some(Prefer::Cloud),
+        prefer_cloud: a.prefer_cloud,
+        prefer_local: a.prefer_local,
         yes: a.yes,
         interactive: !a.dry_run && interactive(a.json),
     };
@@ -251,7 +389,12 @@ async fn pull(a: PullArgs) -> Result<i32, AppError> {
             record_dir: &gogo::cloud::record::default_dir(),
         },
         &PullOptions {
+            mode: a.mode,
             dry_run: a.dry_run,
+            no_delete: a.no_delete,
+            // D2's gate: only the one live test sets this.
+            cloud_writes: std::env::var(CLOUD_WRITES_ENV).is_ok_and(|v| v == "1"),
+            newer: a.newer,
             keep_backups: cfg.cloud_saves.keep_backups,
             now: chrono::Utc::now(),
             stop_before_rename: None,
@@ -262,6 +405,8 @@ async fn pull(a: PullArgs) -> Result<i32, AppError> {
     .await;
     Ok(emit(pull_outcome(report, a.json)))
 }
+
+use gogo::cloud::pull::Mode;
 
 /// A terminal on stdin and stderr, and no machine output.
 fn interactive(json: bool) -> bool {
@@ -288,6 +433,7 @@ fn auto_snapshots(no_snapshots: bool) -> Result<gogo::linuxapp::snapshots::AutoO
 /// `--prefer`, `--yes` and the prompts.
 pub struct CliDecide {
     pub prefer_cloud: bool,
+    pub prefer_local: bool,
     pub yes: bool,
     /// A TTY on stdin and stderr, no `--json`, not a dry run.
     pub interactive: bool,
@@ -300,8 +446,11 @@ impl gogo::cloud::pull::Decide for CliDecide {
         choices: &[gogo::cloud::pull::Choice],
     ) -> gogo::cloud::pull::Choice {
         use gogo::cloud::pull::Choice;
-        if self.prefer_cloud {
+        if self.prefer_cloud && choices.contains(&Choice::Cloud) {
             return Choice::Cloud;
+        }
+        if self.prefer_local && choices.contains(&Choice::Local) {
+            return Choice::Local;
         }
         if !self.interactive {
             return Choice::Skip;
@@ -331,7 +480,9 @@ impl gogo::cloud::pull::Decide for CliDecide {
             .iter()
             .map(|c| match c {
                 Choice::Cloud => "cloud: take the cloud's (the local file is backed up)",
-                Choice::Local => "local: keep this one (push it later)",
+                Choice::Local => {
+                    "local: keep this one (the cloud's is backed up, or push it later)"
+                }
                 Choice::Both => "both: keep this one renamed, download the cloud's",
                 Choice::Skip => "skip: decide later",
             })
@@ -387,6 +538,15 @@ fn consent_text(c: &gogo::cloud::pull::Consent) -> String {
     if c.deletes > 0 {
         parts.push(format!("{} local file(s) deleted", c.deletes));
     }
+    if c.cloud_overwrites > 0 {
+        parts.push(format!(
+            "{} upload(s) replace cloud objects",
+            c.cloud_overwrites
+        ));
+    }
+    if c.cloud_deletes > 0 {
+        parts.push(format!("{} cloud object(s) deleted", c.cloud_deletes));
+    }
     parts.join(", ")
 }
 
@@ -408,7 +568,7 @@ pub fn pull_outcome(
         e.exit_code()
     } else if r.needs_consent {
         stderr.push_str(
-            "gogo: pulling these saves overwrites or deletes local files and needs consent: \
+            "gogo: this overwrites or deletes saves (here or in the cloud) and needs consent: \
              pass --yes\n",
         );
         cli::exit::USAGE
@@ -439,7 +599,15 @@ pub fn pull_outcome(
     }
 }
 
-/// The plain-text report of a pull.
+fn mode_word(m: Mode) -> &'static str {
+    match m {
+        Mode::Pull => "pull",
+        Mode::Push => "push",
+        Mode::Sync => "sync",
+    }
+}
+
+/// The plain-text report of a pull, push or sync.
 pub fn render_pull(r: &gogo::cloud::pull::PullReport) -> String {
     use gogo::cloud::pull::{LeftReason, Op, State};
     let p = &r.plan;
@@ -479,6 +647,8 @@ pub fn render_pull(r: &gogo::cloud::pull::PullReport) -> String {
         Op::DeleteLocal => "delete here",
         Op::Record => "same",
         Op::Forget => "forget",
+        Op::Upload => "upload",
+        Op::DeleteCloud => "delete cloud",
     };
     let mut counts: std::collections::BTreeMap<&str, usize> = Default::default();
     for f in &r.files {
@@ -497,6 +667,11 @@ pub fn render_pull(r: &gogo::cloud::pull::PullReport) -> String {
                         " (cloud names differing only by case: settle it by hand)".into()
                     }
                     (LeftReason::LocationMissing, _) => " (the save dir is gone)".into(),
+                    (LeftReason::LocationEmptied, _) => {
+                        " (the save dir is empty: a push never deletes every save in the cloud)"
+                            .into()
+                    }
+                    (LeftReason::TooLarge, _) => " (larger than any object the cloud holds)".into(),
                     (LeftReason::NoPrefix, _) => {
                         " (the game's prefix isn't there yet: run the game once)".into()
                     }
@@ -510,6 +685,18 @@ pub fn render_pull(r: &gogo::cloud::pull::PullReport) -> String {
                 },
             ),
             (State::ForPush, _) => ("for push", String::new()),
+            (State::ForPull, _) => ("for pull", String::new()),
+            (State::NotUploaded(why), _) => (
+                "not uploaded",
+                match why {
+                    gogo::cloud::pull::NotUploaded::NoDelete => {
+                        " (--no-delete: the cloud object stays)".into()
+                    }
+                    gogo::cloud::pull::NotUploaded::EmptyFile => {
+                        " (an empty file reads as a deletion in the cloud)".into()
+                    }
+                },
+            ),
             (State::KeptLocal, _) => ("kept here", " (push it later)".into()),
             (State::Corrupt, _) => ("corrupt", " (failed its checksum; not downloaded)".into()),
             (State::Unreadable, _) => ("unreadable", String::new()),
@@ -524,12 +711,12 @@ pub fn render_pull(r: &gogo::cloud::pull::PullReport) -> String {
         out.push_str(&format!("  {tag:<12}  {}{note}{extra}\n", clean(&f.name)));
     }
     if counts.is_empty() {
-        out.push_str("nothing to pull\n");
+        out.push_str(&format!("nothing to {}\n", mode_word(r.mode)));
     } else {
         let parts: Vec<String> = counts.iter().map(|(k, n)| format!("{n} {k}")).collect();
         out.push_str(&format!(
             "{}: {}\n",
-            if dry { "would" } else { "pull" },
+            if dry { "would" } else { mode_word(r.mode) },
             parts.join(", ")
         ));
     }
@@ -542,12 +729,18 @@ pub fn render_pull(r: &gogo::cloud::pull::PullReport) -> String {
             clean(&p.display().to_string())
         ));
     }
+    if counts.contains_key("for pull") {
+        out.push_str("cloud changes are left for `gogo saves pull`\n");
+    }
+    if r.pending_push_cleared {
+        out.push_str("nothing is left to push: the pending-push mark is cleared\n");
+    }
     if counts.contains_key("for push") || counts.contains_key("kept here") {
         out.push_str("local changes are left for `gogo saves push`\n");
     }
     if counts.contains_key("left") {
         out.push_str(
-            "files that need a decision were left: re-run on a terminal, or with --prefer cloud\n",
+            "files that need a decision were left: re-run on a terminal, or with --prefer\n",
         );
     }
     if let Some(d) = &r.backup_dir {
@@ -1497,6 +1690,52 @@ mod tests {
         }
     }
 
+    #[test]
+    fn push_and_sync_parse_their_own_prefer_sides() {
+        let parse = |args: &[&str]| {
+            let mut v = vec!["gogo", "saves"];
+            v.extend_from_slice(args);
+            cli::Cli::try_parse_from(v)
+        };
+        let c = parse(&[
+            "push",
+            "9",
+            "--prefer",
+            "local",
+            "--no-delete",
+            "--dry-run",
+            "--yes",
+        ])
+        .unwrap();
+        let cli::Command::Saves {
+            cmd: SavesCmd::Push(a),
+        } = c.command
+        else {
+            panic!("expected saves push")
+        };
+        assert_eq!(a.prefer, Some(PushPrefer::Local));
+        assert!(a.no_delete && a.dry_run && a.yes);
+        for side in ["cloud", "newer"] {
+            assert!(parse(&["push", "1", "--prefer", side]).is_err(), "{side}");
+        }
+        for (side, want) in [
+            ("cloud", SyncPrefer::Cloud),
+            ("local", SyncPrefer::Local),
+            ("newer", SyncPrefer::Newer),
+        ] {
+            let c = parse(&["sync", "1", "--prefer", side, "--no-snapshots"]).unwrap();
+            let cli::Command::Saves {
+                cmd: SavesCmd::Sync(a),
+            } = c.command
+            else {
+                panic!("expected saves sync")
+            };
+            assert_eq!(a.prefer, Some(want));
+            assert!(a.no_snapshots);
+        }
+        assert!(parse(&["sync", "1", "--prefer", "both"]).is_err());
+    }
+
     /// `saves pull` headless against mock storage: an add-only plan runs, an
     /// overwrite needs `--yes` (exit 2, as other commands), a conflict left
     /// is exit 8, `--prefer cloud` settles it; nothing but GETs reach the
@@ -1584,6 +1823,10 @@ mod tests {
                         record_dir: records,
                     },
                     &PullOptions {
+                        mode: gogo::cloud::pull::Mode::Pull,
+                        no_delete: false,
+                        cloud_writes: false,
+                        newer: false,
                         dry_run,
                         keep_backups: 20,
                         now: chrono::Utc::now(),
@@ -1592,6 +1835,7 @@ mod tests {
                     &mut NoHost,
                     &mut CliDecide {
                         prefer_cloud,
+                        prefer_local: false,
                         yes,
                         interactive: false,
                     },

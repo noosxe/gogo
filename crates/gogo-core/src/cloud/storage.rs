@@ -5,7 +5,8 @@
 //! stored gzip bytes, so a download is checked **before** it is gunzipped:
 //! bytes whose MD5 isn't the listed one are never decoded, never written.
 //!
-//! Nothing here writes to the cloud.
+//! The write side ([`put_object`], [`delete_object`]) is only ever called by
+//! `gogo saves push|sync`, behind design 22's D2 gate.
 
 use std::io::Write;
 
@@ -365,6 +366,120 @@ pub fn gzip(plain: &[u8]) -> Vec<u8> {
     enc.finish().expect("writing to a Vec")
 }
 
+/// A local file in gogo's gzip form, with what the upload and the record
+/// need: the stored bytes' MD5 and the plain file's MD5 and size.
+#[derive(Debug)]
+pub struct Gzipped {
+    pub gzip: Vec<u8>,
+    /// MD5 of `gzip`: the `Etag` of the upload and the listing's `hash`.
+    pub gzip_md5: String,
+    pub plain_md5: String,
+    pub plain_len: u64,
+}
+
+/// Read `r` to its end into [`gzip`]'s form (the same bytes [`gzip`] gives
+/// for the same content). `Ok(None)` when the stored form would be larger
+/// than `max_gzip`: nothing that large is uploaded.
+pub fn gzip_reader(r: &mut dyn std::io::Read, max_gzip: u64) -> std::io::Result<Option<Gzipped>> {
+    let mut enc = flate2::GzBuilder::new()
+        .mtime(0)
+        .write(Vec::new(), flate2::Compression::new(6));
+    let mut plain = Md5::new();
+    let mut plain_len = 0u64;
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = r.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        plain.update(&buf[..n]);
+        plain_len += n as u64;
+        enc.write_all(&buf[..n])?;
+        if enc.get_ref().len() as u64 > max_gzip {
+            return Ok(None);
+        }
+    }
+    let gzip = enc.finish()?;
+    if gzip.len() as u64 > max_gzip {
+        return Ok(None);
+    }
+    Ok(Some(Gzipped {
+        gzip_md5: md5_hex(&gzip),
+        plain_md5: crate::fmt::md5_hex(plain),
+        plain_len,
+        gzip,
+    }))
+}
+
+/// `PUT` one object: the gzip body with `Content-Encoding: gzip`, its MD5 as
+/// `Etag` and the file's mtime (whole seconds, UTC, RFC 3339) as
+/// `X-Object-Meta-LocalLastModified` (design 22 §1.3). **Unverified live
+/// (D2)**; the caller holds the write gate. An `Etag` in the answer that
+/// isn't ours means the cloud stored something else: [`CloudError::Corrupt`].
+pub async fn put_object(
+    client: &StorageClient,
+    token: &CloudToken,
+    client_id: &str,
+    name: &str,
+    gzip: Vec<u8>,
+    gzip_md5: &str,
+    mtime: std::time::SystemTime,
+) -> Result<(), CloudError> {
+    let stamp = chrono::DateTime::<chrono::Utc>::from(mtime)
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let req = client
+        .request(Method::PUT, token, client_id, Some(name))?
+        .header(reqwest::header::CONTENT_ENCODING, "gzip")
+        .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+        .header(reqwest::header::ETAG, gzip_md5)
+        .header("X-Object-Meta-LocalLastModified", stamp)
+        .body(gzip);
+    let resp = client.send(req).await?;
+    if let Some(got) = resp
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+    {
+        let got = got.trim().trim_matches('"').to_ascii_lowercase();
+        if got != gzip_md5 {
+            return Err(CloudError::Corrupt {
+                name: name.to_string(),
+                reason: format!("the cloud stored MD5 {got}, not the uploaded {gzip_md5}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// `DELETE` one object. **Unverified live (D2)**: whether the cloud then lists
+/// a tombstone or nothing is what the live test shows; both read as deleted.
+/// A 404 is success: it is gone.
+pub async fn delete_object(
+    client: &StorageClient,
+    token: &CloudToken,
+    client_id: &str,
+    name: &str,
+) -> Result<(), CloudError> {
+    let req = client.request(Method::DELETE, token, client_id, Some(name))?;
+    match client.send(req).await {
+        Ok(_) | Err(CloudError::Storage { status: 404, .. }) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// `HEAD` one object for its `X-Object-Meta-LocalLastModified` (`--prefer
+/// newer`): `None` when it has none or an unusable one.
+pub async fn head_local_last_modified(
+    client: &StorageClient,
+    token: &CloudToken,
+    client_id: &str,
+    name: &str,
+) -> Result<Option<std::time::SystemTime>, CloudError> {
+    let req = client.request(Method::HEAD, token, client_id, Some(name))?;
+    let resp = client.send(req).await?;
+    Ok(local_last_modified(resp.headers(), std::time::SystemTime::now()).unwrap_or(None))
+}
+
 /// The MD5 of [`gzip`] of nothing.
 pub fn empty_gzip_md5() -> &'static str {
     static MD5: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -392,6 +507,82 @@ mod tests {
             hash: md5_hex(gz),
             last_modified: Some("2024-02-11T03:49:20.911250+00:00".into()),
         }
+    }
+
+    #[test]
+    fn gzip_reader_gives_the_same_bytes_as_gzip_and_stops_at_the_cap() {
+        let plain = b"some save data, some save data, some save data".to_vec();
+        let g = gzip_reader(&mut plain.as_slice(), 1 << 20)
+            .unwrap()
+            .unwrap();
+        assert_eq!(g.gzip, gzip(&plain));
+        assert_eq!(g.gzip_md5, md5_hex(&g.gzip));
+        assert_eq!(g.plain_md5, md5_hex(&plain));
+        assert_eq!(g.plain_len, plain.len() as u64);
+        assert!(gzip_reader(&mut plain.as_slice(), 4).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn put_sends_the_headers_and_refuses_a_foreign_etag() {
+        let server = MockServer::start().await;
+        let gz = gzip(b"hello");
+        let md5 = md5_hex(&gz);
+        let at = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        Mock::given(method("PUT"))
+            .and(path("/v1/7/cid/saves/a%20b.sav"))
+            .and(header("content-encoding", "gzip"))
+            .and(header("etag", md5.as_str()))
+            .and(header(
+                "x-object-meta-locallastmodified",
+                "2023-11-14T22:13:20Z",
+            ))
+            .respond_with(ResponseTemplate::new(201).insert_header("etag", format!("\"{md5}\"")))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let c = client(&server).await;
+        put_object(&c, &token(), "cid", "saves/a b.sav", gz.clone(), &md5, at)
+            .await
+            .unwrap();
+
+        let other = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(201).insert_header("etag", "0".repeat(32)))
+            .mount(&other)
+            .await;
+        let e = put_object(
+            &client(&other).await,
+            &token(),
+            "cid",
+            "saves/x",
+            gz,
+            &md5,
+            at,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(e, CloudError::Corrupt { .. }), "{e}");
+    }
+
+    #[tokio::test]
+    async fn delete_treats_a_missing_object_as_gone() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/7/cid/saves/a"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/v1/7/cid/saves/b"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+        let c = client(&server).await;
+        delete_object(&c, &token(), "cid", "saves/a").await.unwrap();
+        let e = delete_object(&c, &token(), "cid", "saves/b")
+            .await
+            .unwrap_err();
+        assert_eq!(e.exit_code(), 3);
     }
 
     #[test]

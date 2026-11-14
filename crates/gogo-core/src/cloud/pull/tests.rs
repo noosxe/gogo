@@ -17,6 +17,8 @@ const CONFIG: &str = r#"{"content":{"Windows":{"cloudStorage":{"enabled":true,
 /// The uploader's mtime the mock storage sends.
 const UPLOADED: &str = "2024-02-11T03:49:20Z";
 
+type Object = (&'static str, Vec<u8>);
+
 struct Fixture {
     _dir: tempfile::TempDir,
     config: &'static str,
@@ -138,6 +140,22 @@ impl Fixture {
     /// Serve `objects` (name → stored bytes) as the listing and as objects,
     /// each with the uploader's mtime.
     async fn serve(&self, objects: &[(&str, Vec<u8>)]) {
+        self.serve_headers(objects, &[]).await
+    }
+
+    /// [`Fixture::serve`] with more container headers (the quota).
+    async fn serve_headers(&self, objects: &[(&str, Vec<u8>)], headers: &[(&str, &str)]) {
+        self.serve_full(objects, headers, None).await
+    }
+
+    /// [`Fixture::serve_headers`], the listing answering with `after`
+    /// from its `n`-th request on (a cloud that changed meanwhile).
+    async fn serve_full(
+        &self,
+        objects: &[(&str, Vec<u8>)],
+        headers: &[(&str, &str)],
+        after: Option<(u64, &[Object])>,
+    ) {
         self.server.reset().await;
         Mock::given(method("GET"))
             .and(path(format!("/components/galaxy_client/clients/{CLIENT}")))
@@ -148,15 +166,33 @@ impl Fixture {
             .iter()
             .map(|(n, b)| serde_json::json!({"name": n, "bytes": b.len(), "hash": md5_hex(b)}))
             .collect();
-        Mock::given(method("GET"))
+        let mut resp = ResponseTemplate::new(200)
+            .insert_header("x-container-object-count", objects.len().to_string());
+        for (k, v) in headers {
+            resp = resp.insert_header(*k, *v);
+        }
+        let mut first = Mock::given(method("GET"))
             .and(path(format!("/v1/7/{CLIENT}")))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("x-container-object-count", objects.len().to_string())
-                    .set_body_json(listing),
-            )
-            .mount(&self.server)
-            .await;
+            .respond_with(resp.set_body_json(listing));
+        if let Some((n, later)) = after {
+            first = first.up_to_n_times(n);
+            let later_listing: Vec<serde_json::Value> = later
+                .iter()
+                .map(|(n, b)| serde_json::json!({"name": n, "bytes": b.len(), "hash": md5_hex(b)}))
+                .collect();
+            first.mount(&self.server).await;
+            Mock::given(method("GET"))
+                .and(path(format!("/v1/7/{CLIENT}")))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("x-container-object-count", later.len().to_string())
+                        .set_body_json(later_listing),
+                )
+                .mount(&self.server)
+                .await;
+        } else {
+            first.mount(&self.server).await;
+        }
         for (n, b) in objects {
             Mock::given(method("GET"))
                 .and(path(format!("/v1/7/{CLIENT}/{}", n.replace(' ', "%20"))))
@@ -256,7 +292,11 @@ impl Fixture {
 
 fn opts() -> PullOptions {
     PullOptions {
+        mode: Mode::Pull,
         dry_run: false,
+        no_delete: false,
+        cloud_writes: false,
+        newer: false,
         keep_backups: 20,
         now: chrono::DateTime::parse_from_rfc3339("2026-11-14T10:15:00Z")
             .unwrap()
@@ -1233,4 +1273,653 @@ async fn build_files_and_hard_linked_files_in_the_game_dir_are_never_written() {
     assert_eq!(fs::read(gf.join("Game.exe")).unwrap(), b"exe");
     assert_eq!(fs::read(gf.join("SAVE/hl.sav")).unwrap(), b"shared");
     assert_eq!(fs::read(gf.join("SAVE/keep.sav")).unwrap(), b"shared");
+}
+
+// ---- push and sync (#462) -------------------------------------------------
+
+fn mode_opts(mode: Mode) -> PullOptions {
+    PullOptions {
+        mode,
+        cloud_writes: true,
+        ..opts()
+    }
+}
+
+impl Fixture {
+    /// Accept every `PUT` and `DELETE` the way the storage API does.
+    async fn accept_writes(&self) {
+        let any = || wiremock::matchers::path_regex(format!("^/v1/7/{CLIENT}/.+"));
+        Mock::given(method("PUT"))
+            .and(any())
+            .respond_with(ResponseTemplate::new(201))
+            .mount(&self.server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(any())
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&self.server)
+            .await;
+    }
+
+    async fn requests(&self, verb: &str) -> Vec<wiremock::Request> {
+        self.server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.method.as_str() == verb)
+            .collect()
+    }
+}
+
+fn gunzip(b: &[u8]) -> Vec<u8> {
+    let mut out = vec![];
+    storage::gunzip_into("x", b, &mut out, 1 << 20).unwrap();
+    out
+}
+
+#[tokio::test]
+async fn a_push_uploads_gzip_with_etag_and_the_local_mtime() {
+    let f = fixture().await;
+    f.write("Slot 1/new.sav", b"my save");
+    f.write("noise.log", b"never");
+    f.write("half.tmp", b"never");
+    f.serve(&[("saves/theirs.sav", gzip(b"theirs"))]).await;
+    f.accept_writes().await;
+    let mtime = fs::metadata(f.saves.join("Slot 1/new.sav"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    let mut d = Script::new(Choice::Skip, Confirm::No);
+    let r = f
+        .pull(&mode_opts(Mode::Push), &mut FakeHost::default(), &mut d)
+        .await
+        .unwrap();
+    assert!(r.error.is_none(), "{:?}", r.stopped);
+    assert_eq!(state_of(&r, "saves/Slot 1/new.sav"), &State::Done);
+    assert_eq!(
+        state_of(&r, "saves/theirs.sav"),
+        &State::ForPull,
+        "a push doesn't download"
+    );
+    assert!(f.read("theirs.sav").is_none());
+    let puts = f.requests("PUT").await;
+    assert_eq!(puts.len(), 1, "excluded files are never uploaded");
+    let put = &puts[0];
+    assert!(put.url.path().ends_with("/saves/Slot%201/new.sav"));
+    assert_eq!(put.headers["content-encoding"], "gzip");
+    assert_eq!(put.headers["etag"].to_str().unwrap(), md5_hex(&put.body));
+    assert_eq!(put.body, gzip(b"my save"), "gogo's deterministic gzip");
+    assert_eq!(gunzip(&put.body), b"my save");
+    let stamp = chrono::DateTime::<chrono::Utc>::from(mtime)
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    assert_eq!(
+        put.headers["x-object-meta-locallastmodified"],
+        stamp.as_str()
+    );
+    let rec = f.record().unwrap();
+    let e = &rec.files["saves/Slot 1/new.sav"];
+    assert_eq!(e.cloud_hash, md5_hex(&gzip(b"my save")));
+    assert_eq!(e.local_md5, md5_hex(b"my save"));
+    assert!(d.consents.is_empty(), "a new object overwrites nothing");
+    assert!(r.backup_dir.is_none());
+}
+
+#[tokio::test]
+async fn the_cloud_write_gate_refuses_a_real_run_and_a_dry_run_only_reads() {
+    let f = fixture().await;
+    f.write("new.sav", b"mine");
+    let mut rec = Record::new(CLIENT);
+    f.write("gone-soon.sav", b"x");
+    f.recorded(&mut rec, "gone-soon.sav", b"x");
+    f.save_record(&rec);
+    fs::remove_file(f.saves.join("gone-soon.sav")).unwrap();
+    f.serve(&[("saves/gone-soon.sav", gzip(b"x"))]).await;
+    f.accept_writes().await;
+    let mut d = Script::new(Choice::Skip, Confirm::Yes);
+    for mode in [Mode::Push, Mode::Sync] {
+        let gate = PullOptions {
+            cloud_writes: false,
+            ..mode_opts(mode)
+        };
+        let e = f
+            .pull(&gate, &mut FakeHost::default(), &mut d)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(e.exit_code(), 7);
+        assert!(e.to_string().contains("nothing was changed"));
+        let dry = PullOptions {
+            dry_run: true,
+            ..gate
+        };
+        let r = f
+            .pull(&dry, &mut FakeHost::default(), &mut d)
+            .await
+            .unwrap();
+        assert_eq!(state_of(&r, "saves/new.sav"), &State::Planned);
+        assert_eq!(state_of(&r, "saves/gone-soon.sav"), &State::Planned);
+    }
+    for r in f.server.received_requests().await.unwrap() {
+        assert_eq!(
+            r.method.as_str(),
+            "GET",
+            "a dry run or a refusal only reads"
+        );
+    }
+    assert!(!f.backups().exists() && f.record().unwrap().files.len() == 1);
+}
+
+#[tokio::test]
+async fn a_dry_run_of_a_push_and_a_sync_sends_no_put_post_or_delete() {
+    let f = fixture().await;
+    f.write("new.sav", b"mine");
+    f.write("edited.sav", b"old");
+    let mut rec = Record::new(CLIENT);
+    f.recorded(&mut rec, "edited.sav", b"old");
+    f.save_record(&rec);
+    f.write("edited.sav", b"edited!");
+    f.serve(&[
+        ("saves/edited.sav", gzip(b"old")),
+        ("saves/theirs.sav", gzip(b"t")),
+    ])
+    .await;
+    f.accept_writes().await;
+    let mut d = Script::new(Choice::Local, Confirm::Yes);
+    for mode in [Mode::Push, Mode::Sync] {
+        let r = f
+            .pull(
+                &PullOptions {
+                    dry_run: true,
+                    ..mode_opts(mode)
+                },
+                &mut FakeHost::default(),
+                &mut d,
+            )
+            .await
+            .unwrap();
+        assert_eq!(state_of(&r, "saves/edited.sav"), &State::Planned);
+    }
+    for verb in ["PUT", "POST", "DELETE"] {
+        assert!(f.requests(verb).await.is_empty(), "{verb}");
+    }
+    for r in f.server.received_requests().await.unwrap() {
+        assert_eq!(r.method.as_str(), "GET", "{}", r.url);
+    }
+    assert!(!f.backups().exists());
+}
+
+#[tokio::test]
+async fn an_upload_over_a_cloud_object_asks_and_backs_the_old_one_up_first() {
+    let f = fixture().await;
+    f.write("a.sav", b"old");
+    let mut rec = Record::new(CLIENT);
+    f.recorded(&mut rec, "a.sav", b"old");
+    f.save_record(&rec);
+    f.write("a.sav", b"newer content");
+    f.serve(&[("saves/a.sav", gzip(b"old"))]).await;
+    f.accept_writes().await;
+
+    // Without consent nothing is written.
+    let mut d = Script::new(Choice::Skip, Confirm::CannotAsk);
+    let r = f
+        .pull(&mode_opts(Mode::Push), &mut FakeHost::default(), &mut d)
+        .await
+        .unwrap();
+    assert!(r.needs_consent);
+    assert!(f.requests("PUT").await.is_empty() && !f.backups().exists());
+
+    let mut host = FakeHost::default();
+    let mut d = Script::new(Choice::Skip, Confirm::Yes);
+    let r = f
+        .pull(&mode_opts(Mode::Push), &mut host, &mut d)
+        .await
+        .unwrap();
+    assert!(r.error.is_none(), "{:?}", r.stopped);
+    assert_eq!(d.consents.len(), 1, "the one question");
+    assert_eq!(
+        *host.log.borrow(),
+        ["lock"],
+        "no snapshot: no local file changes"
+    );
+    let dir = r.backup_dir.clone().unwrap();
+    assert_eq!(
+        fs::read(dir.join("cloud/saves/a.sav")).unwrap(),
+        gzip(b"old")
+    );
+    let entry: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("cloud/saves/a.sav.gogo-entry.json")).unwrap())
+            .unwrap();
+    assert_eq!(entry["hash"], md5_hex(&gzip(b"old")));
+    assert_eq!(f.requests("PUT").await.len(), 1);
+    let rec = f.record().unwrap();
+    assert_eq!(
+        rec.files["saves/a.sav"].cloud_hash,
+        md5_hex(&gzip(b"newer content"))
+    );
+}
+
+#[tokio::test]
+async fn a_cloud_delete_is_backed_up_first_and_no_delete_turns_it_off() {
+    let f = fixture().await;
+    f.write("gone.sav", b"bye");
+    f.write("kept.sav", b"stay");
+    let mut rec = Record::new(CLIENT);
+    f.recorded(&mut rec, "gone.sav", b"bye");
+    f.recorded(&mut rec, "kept.sav", b"stay");
+    f.save_record(&rec);
+    fs::remove_file(f.saves.join("gone.sav")).unwrap();
+    f.serve_full(
+        &[
+            ("saves/gone.sav", gzip(b"bye")),
+            ("saves/kept.sav", gzip(b"stay")),
+        ],
+        &[],
+        Some((2, &[("saves/kept.sav", gzip(b"stay"))])),
+    )
+    .await;
+    f.accept_writes().await;
+    let mut d = Script::new(Choice::Skip, Confirm::Yes);
+
+    let r = f
+        .pull(
+            &PullOptions {
+                no_delete: true,
+                ..mode_opts(Mode::Push)
+            },
+            &mut FakeHost::default(),
+            &mut d,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        state_of(&r, "saves/gone.sav"),
+        &State::NotUploaded(NotUploaded::NoDelete)
+    );
+    assert!(f.requests("DELETE").await.is_empty() && !f.backups().exists());
+    assert!(f.record().unwrap().files.contains_key("saves/gone.sav"));
+
+    let r = f
+        .pull(&mode_opts(Mode::Push), &mut FakeHost::default(), &mut d)
+        .await
+        .unwrap();
+    assert!(r.error.is_none(), "{:?}", r.stopped);
+    assert_eq!(state_of(&r, "saves/gone.sav"), &State::Done);
+    assert_eq!(d.consents.last().map(|_| ()), Some(()));
+    let del = f.requests("DELETE").await;
+    assert_eq!(del.len(), 1);
+    assert!(del[0].url.path().ends_with("/saves/gone.sav"));
+    let dir = r.backup_dir.unwrap();
+    assert_eq!(
+        fs::read(dir.join("cloud/saves/gone.sav")).unwrap(),
+        gzip(b"bye")
+    );
+    assert!(!f.record().unwrap().files.contains_key("saves/gone.sav"));
+}
+
+#[tokio::test]
+async fn an_upload_over_the_quota_is_refused_before_any_write() {
+    let f = fixture().await;
+    // Incompressible, so its gzip is about its size.
+    let mut x = 12345u32;
+    let noise: Vec<u8> = (0..4000)
+        .map(|_| {
+            x = x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (x >> 24) as u8
+        })
+        .collect();
+    f.write("big.sav", &noise);
+    f.serve_headers(
+        &[("saves/other.sav", gzip(b"o"))],
+        &[
+            ("x-container-bytes-used", "900"),
+            ("x-container-meta-quota-bytes", "1000"),
+        ],
+    )
+    .await;
+    f.accept_writes().await;
+    let mut d = Script::new(Choice::Skip, Confirm::Yes);
+    let e = f
+        .pull(&mode_opts(Mode::Push), &mut FakeHost::default(), &mut d)
+        .await
+        .err()
+        .unwrap();
+    assert!(matches!(e, CloudError::Quota(_)), "{e}");
+    assert_eq!(e.exit_code(), 1);
+    let msg = e.to_string();
+    assert!(msg.contains("900") && msg.contains("1000"), "{msg}");
+    assert!(f.requests("PUT").await.is_empty() && !f.backups().exists());
+}
+
+#[tokio::test]
+async fn a_failed_upload_stops_the_run_and_the_rerun_continues() {
+    let f = fixture().await;
+    f.write("a.sav", b"aaa");
+    f.write("b.sav", b"bbb");
+    f.serve(&[]).await;
+    Mock::given(method("PUT"))
+        .and(path(format!("/v1/7/{CLIENT}/saves/a.sav")))
+        .respond_with(ResponseTemplate::new(201))
+        .mount(&f.server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path(format!("/v1/7/{CLIENT}/saves/b.sav")))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&f.server)
+        .await;
+    let mut d = Script::new(Choice::Skip, Confirm::Yes);
+    let r = f
+        .pull(&mode_opts(Mode::Push), &mut FakeHost::default(), &mut d)
+        .await
+        .unwrap();
+    assert_eq!(r.error.as_ref().map(CloudError::exit_code), Some(4));
+    assert_eq!(state_of(&r, "saves/a.sav"), &State::Done);
+    assert_eq!(state_of(&r, "saves/b.sav"), &State::NotDone);
+    let rec = f.record().unwrap();
+    assert!(rec.files.contains_key("saves/a.sav"), "recorded when done");
+    assert!(
+        !rec.files.contains_key("saves/b.sav"),
+        "never advanced past a failed upload"
+    );
+    // The rerun sees a as listed and recorded, and uploads b.
+    f.serve(&[("saves/a.sav", gzip(b"aaa"))]).await;
+    f.accept_writes().await;
+    let r = f
+        .pull(&mode_opts(Mode::Push), &mut FakeHost::default(), &mut d)
+        .await
+        .unwrap();
+    assert!(r.error.is_none(), "{:?}", r.stopped);
+    assert_eq!(f.requests("PUT").await.len(), 1);
+    assert!(f.record().unwrap().files.contains_key("saves/b.sav"));
+}
+
+#[tokio::test]
+async fn a_missing_or_emptied_save_dir_never_deletes_in_the_cloud() {
+    let f = fixture().await;
+    f.write("a.sav", b"a");
+    f.write("b.sav", b"b");
+    let mut rec = Record::new(CLIENT);
+    f.recorded(&mut rec, "a.sav", b"a");
+    f.recorded(&mut rec, "b.sav", b"b");
+    f.save_record(&rec);
+    f.serve(&[("saves/a.sav", gzip(b"a")), ("saves/b.sav", gzip(b"b"))])
+        .await;
+    f.accept_writes().await;
+    let mut d = Script::new(Choice::Local, Confirm::Yes);
+
+    // Emptied: even `--prefer local` doesn't delete everything.
+    fs::remove_file(f.saves.join("a.sav")).unwrap();
+    fs::remove_file(f.saves.join("b.sav")).unwrap();
+    let r = f
+        .pull(&mode_opts(Mode::Push), &mut FakeHost::default(), &mut d)
+        .await
+        .unwrap();
+    assert_eq!(
+        state_of(&r, "saves/a.sav"),
+        &State::Left(LeftReason::LocationEmptied)
+    );
+    // Missing.
+    fs::remove_dir(&f.saves).unwrap();
+    let r = f
+        .pull(&mode_opts(Mode::Sync), &mut FakeHost::default(), &mut d)
+        .await
+        .unwrap();
+    assert_eq!(
+        state_of(&r, "saves/b.sav"),
+        &State::Left(LeftReason::LocationMissing)
+    );
+    assert!(f.requests("DELETE").await.is_empty());
+    assert!(f.requests("PUT").await.is_empty());
+}
+
+#[tokio::test]
+async fn an_empty_file_is_never_uploaded() {
+    let f = fixture().await;
+    f.write("empty.sav", b"");
+    f.write("real.sav", b"real");
+    f.serve(&[]).await;
+    f.accept_writes().await;
+    let mut d = Script::new(Choice::Skip, Confirm::Yes);
+    let r = f
+        .pull(&mode_opts(Mode::Push), &mut FakeHost::default(), &mut d)
+        .await
+        .unwrap();
+    assert_eq!(
+        state_of(&r, "saves/empty.sav"),
+        &State::NotUploaded(NotUploaded::EmptyFile)
+    );
+    assert_eq!(f.requests("PUT").await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_sync_pulls_and_pushes_in_one_run_and_clears_pending_push() {
+    let f = fixture().await;
+    f.write("mine.sav", b"mine");
+    f.write("old.sav", b"old");
+    let mut rec = Record::new(CLIENT);
+    f.recorded(&mut rec, "old.sav", b"old");
+    rec.pending_push = true;
+    f.save_record(&rec);
+    f.serve(&[
+        ("saves/old.sav", gzip(b"old")),
+        ("saves/theirs.sav", gzip(b"theirs")),
+    ])
+    .await;
+    f.accept_writes().await;
+    let mut d = Script::new(Choice::Skip, Confirm::Yes);
+    let r = f
+        .pull(&mode_opts(Mode::Sync), &mut FakeHost::default(), &mut d)
+        .await
+        .unwrap();
+    assert!(r.error.is_none(), "{:?}", r.stopped);
+    assert_eq!(f.read("theirs.sav").unwrap(), b"theirs");
+    assert_eq!(state_of(&r, "saves/mine.sav"), &State::Done);
+    assert_eq!(f.requests("PUT").await.len(), 1);
+    assert!(r.pending_push_cleared);
+    let rec = f.record().unwrap();
+    assert!(!rec.pending_push && rec.files.contains_key("saves/mine.sav"));
+    assert!(rec.files.contains_key("saves/theirs.sav"));
+
+    // A pull leaves `pending_push` alone, and so does a failed push.
+    let mut rec = f.record().unwrap();
+    rec.pending_push = true;
+    f.save_record(&rec);
+    f.write("more.sav", b"more");
+    let r = f
+        .pull(&mode_opts(Mode::Pull), &mut FakeHost::default(), &mut d)
+        .await
+        .unwrap();
+    assert!(!r.pending_push_cleared && f.record().unwrap().pending_push);
+}
+
+#[tokio::test]
+async fn conflicts_in_a_sync_go_each_way_and_both_uploads_the_kept_copy() {
+    let f = fixture().await;
+    f.write("c.sav", b"base");
+    let mut rec = Record::new(CLIENT);
+    f.recorded(&mut rec, "c.sav", b"base");
+    f.save_record(&rec);
+    f.write("c.sav", b"local edit");
+    f.serve(&[("saves/c.sav", gzip(b"cloud edit"))]).await;
+    f.accept_writes().await;
+
+    // Undecided (no TTY, no --prefer): left, exit 8's business.
+    let mut d = Script::new(Choice::Skip, Confirm::Yes);
+    let r = f
+        .pull(&mode_opts(Mode::Sync), &mut FakeHost::default(), &mut d)
+        .await
+        .unwrap();
+    assert_eq!(
+        state_of(&r, "saves/c.sav"),
+        &State::Left(LeftReason::Undecided)
+    );
+    assert!(f.requests("PUT").await.is_empty());
+
+    // Local wins: uploaded over the cloud's, which is backed up.
+    let mut d = Script::new(Choice::Local, Confirm::Yes);
+    let r = f
+        .pull(&mode_opts(Mode::Sync), &mut FakeHost::default(), &mut d)
+        .await
+        .unwrap();
+    assert_eq!(state_of(&r, "saves/c.sav"), &State::Done);
+    assert_eq!(f.read("c.sav").unwrap(), b"local edit");
+    let dir = r.backup_dir.unwrap();
+    assert_eq!(
+        fs::read(dir.join("cloud/saves/c.sav")).unwrap(),
+        gzip(b"cloud edit")
+    );
+    assert_eq!(f.requests("PUT").await.len(), 1);
+
+    // Both: the cloud's downloaded, the local one kept and uploaded too.
+    let f = fixture().await;
+    f.write("c.sav", b"base");
+    let mut rec = Record::new(CLIENT);
+    f.recorded(&mut rec, "c.sav", b"base");
+    f.save_record(&rec);
+    f.write("c.sav", b"local edit");
+    f.serve(&[("saves/c.sav", gzip(b"cloud edit"))]).await;
+    f.accept_writes().await;
+    let mut d = Script::new(Choice::Both, Confirm::Yes);
+    let r = f
+        .pull(&mode_opts(Mode::Sync), &mut FakeHost::default(), &mut d)
+        .await
+        .unwrap();
+    assert!(r.error.is_none(), "{:?}", r.stopped);
+    assert_eq!(f.read("c.sav").unwrap(), b"cloud edit");
+    let kept = r
+        .files
+        .iter()
+        .find(|x| x.name.starts_with("saves/c.sav.local-"))
+        .unwrap_or_else(|| panic!("{:?}", r.files));
+    assert_eq!(kept.state, State::Done);
+    let puts = f.requests("PUT").await;
+    assert_eq!(puts.len(), 1);
+    assert_eq!(gunzip(&puts[0].body), b"local edit");
+    assert!(f.record().unwrap().files.contains_key(&kept.name));
+}
+
+#[tokio::test]
+async fn a_rolled_back_push_needs_prefer_local_and_clears_the_mark() {
+    let f = fixture().await;
+    f.write("a.sav", b"a");
+    let mut rec = Record::new(CLIENT);
+    f.recorded(&mut rec, "a.sav", b"a");
+    rec.rolled_back = Some(record::datetime(std::time::SystemTime::now()));
+    f.save_record(&rec);
+    f.write("a.sav", b"rolled back");
+    f.serve(&[("saves/a.sav", gzip(b"a"))]).await;
+    f.accept_writes().await;
+    let r = f
+        .pull(
+            &mode_opts(Mode::Push),
+            &mut FakeHost::default(),
+            &mut Script::new(Choice::Skip, Confirm::Yes),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        state_of(&r, "saves/a.sav"),
+        &State::Left(LeftReason::Undecided)
+    );
+    assert!(f.record().unwrap().rolled_back.is_some());
+    let r = f
+        .pull(
+            &mode_opts(Mode::Push),
+            &mut FakeHost::default(),
+            &mut Script::new(Choice::Local, Confirm::Yes),
+        )
+        .await
+        .unwrap();
+    assert!(r.rolled_back_cleared);
+    assert!(f.record().unwrap().rolled_back.is_none());
+}
+
+#[tokio::test]
+async fn prefer_newer_decides_by_mtimes_and_a_tie_stays_a_conflict() {
+    let f = fixture().await;
+    f.write("c.sav", b"base");
+    let mut rec = Record::new(CLIENT);
+    f.recorded(&mut rec, "c.sav", b"base");
+    f.save_record(&rec);
+    f.write("c.sav", b"local edit");
+    f.serve(&[("saves/c.sav", gzip(b"cloud edit"))]).await;
+    f.accept_writes().await;
+    // The cloud's copy is from 2024; the local file was just written.
+    Mock::given(method("HEAD"))
+        .and(path(format!("/v1/7/{CLIENT}/saves/c.sav")))
+        .respond_with(
+            ResponseTemplate::new(200).insert_header("x-object-meta-locallastmodified", UPLOADED),
+        )
+        .mount(&f.server)
+        .await;
+    let newer = PullOptions {
+        newer: true,
+        ..mode_opts(Mode::Sync)
+    };
+    let mut d = Script::new(Choice::Skip, Confirm::Yes);
+    let r = f
+        .pull(&newer, &mut FakeHost::default(), &mut d)
+        .await
+        .unwrap();
+    assert!(d.asked.is_empty(), "settled by time, nobody asked");
+    assert_eq!(r.files[0].choice, Some(Choice::Local));
+    assert_eq!(f.requests("PUT").await.len(), 1);
+
+    // A tie (the cloud's time equals the local mtime) is left.
+    let f = fixture().await;
+    f.write("c.sav", b"base");
+    let mut rec = Record::new(CLIENT);
+    f.recorded(&mut rec, "c.sav", b"base");
+    f.save_record(&rec);
+    f.write("c.sav", b"local edit");
+    let mtime = chrono::DateTime::<chrono::Utc>::from(
+        fs::metadata(f.saves.join("c.sav"))
+            .unwrap()
+            .modified()
+            .unwrap(),
+    )
+    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    f.serve(&[("saves/c.sav", gzip(b"cloud edit"))]).await;
+    f.accept_writes().await;
+    Mock::given(method("HEAD"))
+        .and(path(format!("/v1/7/{CLIENT}/saves/c.sav")))
+        .respond_with(
+            ResponseTemplate::new(200).insert_header("x-object-meta-locallastmodified", mtime),
+        )
+        .mount(&f.server)
+        .await;
+    let mut d = Script::new(Choice::Skip, Confirm::Yes);
+    let r = f
+        .pull(&newer, &mut FakeHost::default(), &mut d)
+        .await
+        .unwrap();
+    assert_eq!(d.asked, ["saves/c.sav"]);
+    assert_eq!(
+        state_of(&r, "saves/c.sav"),
+        &State::Left(LeftReason::Undecided)
+    );
+}
+
+#[tokio::test]
+async fn prefer_newer_is_refused_after_a_rollback() {
+    let f = fixture().await;
+    f.write("a.sav", b"a");
+    let mut rec = Record::new(CLIENT);
+    f.recorded(&mut rec, "a.sav", b"a");
+    rec.rolled_back = Some(record::datetime(std::time::SystemTime::now()));
+    f.save_record(&rec);
+    f.serve(&[("saves/a.sav", gzip(b"a"))]).await;
+    let e = f
+        .pull(
+            &PullOptions {
+                newer: true,
+                ..mode_opts(Mode::Sync)
+            },
+            &mut FakeHost::default(),
+            &mut Script::new(Choice::Skip, Confirm::Yes),
+        )
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(e.exit_code(), 7);
 }

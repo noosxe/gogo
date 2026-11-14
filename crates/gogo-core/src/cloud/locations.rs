@@ -582,6 +582,9 @@ pub struct Resolved {
     pub enabled: bool,
     pub locations: Vec<Location>,
     pub skipped: Vec<Skipped>,
+    /// `content.cloudStorage.quota` of the remote config, bytes: a
+    /// pre-check for uploads (design 22 §5.4).
+    pub quota: Option<u64>,
 }
 
 impl Resolved {
@@ -591,6 +594,7 @@ impl Resolved {
             enabled: false,
             locations: vec![],
             skipped: vec![],
+            quota: None,
         }
     }
 }
@@ -650,6 +654,7 @@ pub fn resolve_storage(
         enabled: true,
         locations: vec![],
         skipped: vec![],
+        quota: None,
     };
     let push = |name: &str,
                 location: &str,
@@ -725,7 +730,9 @@ pub fn resolve_storage(
 
 /// Resolve a remote config's Windows locations onto `layout` (design 22 §3).
 pub fn resolve(cfg: &RemoteConfig, client_id: &str, layout: &Layout) -> Resolved {
-    resolve_storage(cfg.windows_storage(), client_id, layout)
+    let mut r = resolve_storage(cfg.windows_storage(), client_id, layout);
+    r.quota = cfg.quota();
+    r
 }
 
 #[cfg(test)]
