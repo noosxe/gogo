@@ -190,6 +190,34 @@ A second `reqwest::Client` for `cloudstorage.gog.com` only, with the User-Agent 
 own UA. Storage URLs contain the user id: they are logged with the path after `/v1/`
 redacted (design 07 §4's `redact_url`, extended with this host).
 
+### 2.4 As built (#458)
+
+`gogo::cloud::{auth, http, error}`. Where it differs from, or adds to, the text above:
+
+- **`no_license` is "any 403 from the exchange".** gog-warp's `get_token_for` maps 401 and
+  400 (`invalid_session`) itself and turns every other status into a request error without
+  reading the body, so the `error` field isn't available. 403 is the only one seen live
+  (§1.1). The request error wraps a `reqwest::Error` whose text holds the request URL, client
+  secret and refresh token included: it is mapped by kind and status only, never formatted.
+- **The fetched manifest is a generation-2 build's.** The installed build when it is listed
+  and generation 2, else the newest public generation-2 build on the default branch (v1
+  manifests carry no client). The listing is fetched straight from gog-warp, so not even the
+  builds-listing cache is written.
+- **An exchange seam.** gog-warp's token endpoint is a fixed URL, so `TokenExchange` is a
+  trait: `CoreExchange` (the separate `Core`) live, fakes in tests.
+- **Errors.** `CloudError` with `exit_code()` (3 for not logged in, `invalid_session`, 401,
+  `no_license`; 4 for network; 1 otherwise). Wiring it into the CLI comes with the first
+  `gogo saves` command (C3).
+- **Redaction.** design 07 §4's `redact_url` didn't exist yet; `cloud::http::redact_url`
+  keeps scheme, host and the first segment (`/v1`) and counts the rest. A crate-wide one
+  for every gog.com URL is a separate change.
+- **The client.** Redirects are not followed (the UA never reaches another host), and every
+  automatic decoding is off explicitly, whatever reqwest features other crates enable.
+- **Live check.** `crates/gogo-core/tests/live_cloud.rs`, ignored and gated by `GOGO_LIVE=1`
+  and `GOGO_LIVE_CLOUD_GOGID`: a fetched manifest, the exchange, one listing GET, printing only
+  the status, the object count and the redacted URL. Run once on 2026-11-14 against Cyberpunk
+  2077: 200, 231 objects, as in §1.3.
+
 ## 3. Save locations per lane
 
 ### 3.1 Resolving a location
