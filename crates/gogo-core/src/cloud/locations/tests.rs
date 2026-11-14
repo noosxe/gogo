@@ -61,6 +61,12 @@ fn one(t: &Tree, location: &str) -> Result<Location, SkipReason> {
     }
 }
 
+/// Paths equal apart from case: a case-insensitive filesystem (macOS) hands
+/// back the case the caller typed, a case-sensitive one the case on disk.
+fn same_path(a: &Path, b: &Path) -> bool {
+    a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+}
+
 // — parsing —
 
 #[test]
@@ -213,12 +219,18 @@ fn looks_parts_up_without_regard_to_case() {
     let t = tree(Lane::Linux);
     fs::create_dir_all(user(&t).join("Documents/my GAMES/xcom")).unwrap();
     let l = one(&t, "<?DOCUMENTS?>/My Games/XCom").unwrap();
-    assert_eq!(l.path, user(&t).join("Documents/my GAMES/xcom"));
+    assert!(same_path(
+        &l.path,
+        &user(&t).join("Documents/my GAMES/xcom")
+    ));
     assert!(l.exists);
     // The variable's own dir too (a prefix that spells it otherwise).
     fs::rename(user(&t).join("Documents"), user(&t).join("DOCUMENTS")).unwrap();
     let l = one(&t, "<?DOCUMENTS?>/my games/xcom").unwrap();
-    assert_eq!(l.path, user(&t).join("DOCUMENTS/my GAMES/xcom"));
+    assert!(same_path(
+        &l.path,
+        &user(&t).join("DOCUMENTS/my GAMES/xcom")
+    ));
 }
 
 #[test]
@@ -399,14 +411,14 @@ fn file_resolves_inside_with_case_lookup_and_either_separator() {
     fs::create_dir_all(loc.join("Slot1")).unwrap();
     fs::write(loc.join("Slot1/Save.dat"), "x").unwrap();
     let l = one(&t, "<?DOCUMENTS?>/G").unwrap();
-    assert_eq!(
-        l.file("slot1/save.DAT").unwrap(),
-        loc.join("Slot1/Save.dat")
-    );
-    assert_eq!(
-        l.file(r"Slot1\Save.dat").unwrap(),
-        loc.join("Slot1/Save.dat")
-    );
+    assert!(same_path(
+        &l.file("slot1/save.DAT").unwrap(),
+        &loc.join("Slot1/Save.dat")
+    ));
+    assert!(same_path(
+        &l.file(r"Slot1\Save.dat").unwrap(),
+        &loc.join("Slot1/Save.dat")
+    ));
     assert_eq!(l.file("New/f.sav").unwrap(), loc.join("New/f.sav"));
 }
 
