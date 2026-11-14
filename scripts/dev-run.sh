@@ -40,3 +40,5 @@ if command -v codesign >/dev/null 2>&1; then
 fi
 
 exec "$BIN" "$@"
+
+# CI probe: scripts-only change, do not merge
