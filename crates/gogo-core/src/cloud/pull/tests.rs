@@ -19,6 +19,7 @@ const UPLOADED: &str = "2024-02-11T03:49:20Z";
 
 struct Fixture {
     _dir: tempfile::TempDir,
+    config: &'static str,
     game: Game,
     cache: PathBuf,
     records: PathBuf,
@@ -29,6 +30,10 @@ struct Fixture {
 }
 
 async fn fixture() -> Fixture {
+    fixture_with(CONFIG).await
+}
+
+async fn fixture_with(config: &'static str) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().canonicalize().unwrap();
     let root = base.join("games/5");
@@ -41,10 +46,11 @@ async fn fixture() -> Fixture {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path(format!("/components/galaxy_client/clients/{CLIENT}")))
-        .respond_with(ResponseTemplate::new(200).set_body_string(CONFIG))
+        .respond_with(ResponseTemplate::new(200).set_body_string(config))
         .mount(&server)
         .await;
     Fixture {
+        config,
         game: Game {
             gogid: "5".into(),
             layout: Layout {
@@ -135,7 +141,7 @@ impl Fixture {
         self.server.reset().await;
         Mock::given(method("GET"))
             .and(path(format!("/components/galaxy_client/clients/{CLIENT}")))
-            .respond_with(ResponseTemplate::new(200).set_body_string(CONFIG))
+            .respond_with(ResponseTemplate::new(200).set_body_string(self.config))
             .mount(&self.server)
             .await;
         let listing: Vec<serde_json::Value> = objects
@@ -217,7 +223,8 @@ impl Fixture {
         )
         .await
         .unwrap();
-        let resolved = crate::cloud::locations::resolve(&cfg, CLIENT, &self.game.layout);
+        let mut resolved = crate::cloud::locations::resolve(&cfg, CLIENT, &self.game.layout);
+        crate::cloud::build_files::apply_offline(&mut resolved, &self.game);
         pull(
             &Inputs {
                 game: &self.game,
@@ -794,7 +801,11 @@ async fn a_dir_swapped_for_a_link_after_the_plan_is_never_followed() {
     let mut rec = Record::new(CLIENT);
     f.recorded(&mut rec, "Slot/a.sav", b"old");
     f.save_record(&rec);
-    f.serve(&[("saves/Slot/a.sav", gzip(b"new"))]).await;
+    f.serve(&[
+        ("saves/Slot/a.sav", gzip(b"new")),
+        ("saves/other.sav", gzip(b"other")),
+    ])
+    .await;
     let outside = f.game.root.join("outside");
     fs::create_dir_all(&outside).unwrap();
     fs::write(outside.join("a.sav"), b"not a save").unwrap();
@@ -819,13 +830,17 @@ async fn a_dir_swapped_for_a_link_after_the_plan_is_never_followed() {
         )
         .await
         .unwrap();
+    assert!(r.error.is_none(), "{:?}", r.stopped);
     assert_eq!(
-        r.error.as_ref().map(CloudError::exit_code),
-        Some(1),
-        "{:?}",
-        r.stopped
+        state_of(&r, "saves/Slot/a.sav"),
+        &State::Left(LeftReason::PathRefused)
     );
-    assert_eq!(state_of(&r, "saves/Slot/a.sav"), &State::NotDone);
+    assert_eq!(
+        state_of(&r, "saves/other.sav"),
+        &State::Done,
+        "the run goes on"
+    );
+    assert_eq!(r.left(), 1);
     assert_eq!(fs::read(outside.join("a.sav")).unwrap(), b"not a save");
     assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
     assert_eq!(fs::read(f.saves.join("Slot.real/a.sav")).unwrap(), b"old");
@@ -898,4 +913,324 @@ fn the_live_host_takes_a_cloud_pull_snapshot_under_the_game_lock() {
             None => std::env::remove_var("GOGO_HOME"),
         }
     }
+}
+
+/// A `both` answer, on one file.
+struct BothOn(&'static str, Option<PathBuf>);
+impl Decide for BothOn {
+    fn conflict(&mut self, file: &FilePlan, _: &[Choice]) -> Choice {
+        if let Some(dir) = &self.1 {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o555)).unwrap();
+        }
+        if file.name == self.0 {
+            Choice::Both
+        } else {
+            Choice::Skip
+        }
+    }
+    fn confirm(&mut self, _: &Consent) -> Confirm {
+        Confirm::Yes
+    }
+}
+
+#[tokio::test]
+async fn both_with_a_corrupt_object_leaves_the_local_file_where_it_was() {
+    let f = fixture().await;
+    // Synced once, then changed on both sides: a conflict the plan doesn't
+    // fetch for, so the bad object is only found while writing.
+    f.write("a.sav", b"base");
+    let mut rec = Record::new(CLIENT);
+    f.recorded(&mut rec, "a.sav", b"base");
+    f.save_record(&rec);
+    f.write("a.sav", b"mine, changed");
+    // Listed with the hash of what is served, but not a gzip stream.
+    f.server.reset().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/components/galaxy_client/clients/{CLIENT}")))
+        .respond_with(ResponseTemplate::new(200).set_body_string(CONFIG))
+        .mount(&f.server)
+        .await;
+    let junk = b"not gzip at all".to_vec();
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/7/{CLIENT}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            {"name": "saves/a.sav", "bytes": junk.len(), "hash": md5_hex(&junk)}
+        ])))
+        .mount(&f.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/7/{CLIENT}/saves/a.sav")))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(junk))
+        .mount(&f.server)
+        .await;
+    let r = f
+        .pull(
+            &opts(),
+            &mut FakeHost::default(),
+            &mut BothOn("saves/a.sav", None),
+        )
+        .await
+        .unwrap();
+    let file = r.files.iter().find(|x| x.name == "saves/a.sav").unwrap();
+    assert_eq!(file.choice, Some(Choice::Both));
+    assert_eq!(file.state, State::Corrupt);
+    assert!(r.error.is_none(), "the run goes on");
+    assert_eq!(f.read("a.sav").unwrap(), b"mine, changed");
+    assert_eq!(
+        fs::read_dir(&f.saves).unwrap().count(),
+        1,
+        "nothing beside it"
+    );
+    assert_eq!(
+        f.record().unwrap().files["saves/a.sav"].local_md5,
+        md5_hex(b"base"),
+        "the record untouched"
+    );
+}
+
+#[tokio::test]
+async fn both_whose_write_fails_leaves_the_local_file_where_it_was_and_backed_up() {
+    let f = fixture().await;
+    f.write("a.sav", b"mine");
+    f.serve(&[("saves/a.sav", gzip(b"cloud"))]).await;
+    // Can this process be refused a write at all (not as root)?
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let probe = f.game.root.join("probe");
+        fs::create_dir(&probe).unwrap();
+        fs::set_permissions(&probe, fs::Permissions::from_mode(0o555)).unwrap();
+        let refused = fs::write(probe.join("x"), b"").is_err();
+        fs::set_permissions(&probe, fs::Permissions::from_mode(0o755)).unwrap();
+        if !refused {
+            return;
+        }
+    }
+    // The save dir turns read-only while the conflict is answered.
+    let r = f
+        .pull(
+            &opts(),
+            &mut FakeHost::default(),
+            &mut BothOn("saves/a.sav", Some(f.saves.clone())),
+        )
+        .await
+        .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&f.saves, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    assert_eq!(r.error.as_ref().map(CloudError::exit_code), Some(6));
+    assert_eq!(state_of(&r, "saves/a.sav"), &State::NotDone);
+    assert_eq!(f.read("a.sav").unwrap(), b"mine");
+    assert_eq!(
+        fs::read_dir(&f.saves).unwrap().count(),
+        1,
+        "no kept copy, no temp"
+    );
+    let dir = r.backup_dir.unwrap();
+    assert_eq!(fs::read(dir.join("local/saves/a.sav")).unwrap(), b"mine");
+    assert!(
+        f.record()
+            .is_none_or(|r| !r.files.contains_key("saves/a.sav"))
+    );
+}
+
+#[tokio::test]
+async fn both_is_backed_up_and_keeps_a_free_name() {
+    let f = fixture().await;
+    f.write("a.sav", b"mine");
+    f.write("a.sav.local-20261114T101500Z", b"an earlier both");
+    f.serve(&[("saves/a.sav", gzip(b"cloud"))]).await;
+    let r = f
+        .pull(
+            &opts(),
+            &mut FakeHost::default(),
+            &mut BothOn("saves/a.sav", None),
+        )
+        .await
+        .unwrap();
+    assert_eq!(state_of(&r, "saves/a.sav"), &State::Done);
+    let kept = r.files.iter().find(|x| x.name == "saves/a.sav").unwrap();
+    assert_eq!(
+        kept.kept_as.as_deref(),
+        Some("a.sav.local-20261114T101500Z-2")
+    );
+    assert_eq!(f.read("a.sav").unwrap(), b"cloud");
+    assert_eq!(f.read("a.sav.local-20261114T101500Z-2").unwrap(), b"mine");
+    assert_eq!(
+        f.read("a.sav.local-20261114T101500Z").unwrap(),
+        b"an earlier both"
+    );
+    let dir = r.backup_dir.unwrap();
+    assert_eq!(fs::read(dir.join("local/saves/a.sav")).unwrap(), b"mine");
+}
+
+#[tokio::test]
+async fn a_client_change_with_a_failed_snapshot_leaves_the_record_in_place() {
+    let f = fixture().await;
+    f.write("a.sav", b"local");
+    let old = Record::new("22222222222222222");
+    f.save_record(&old);
+    let before = fs::read_to_string(record::path(&f.records, 5)).unwrap();
+    f.serve(&[("saves/a.sav", gzip(b"cloud"))]).await;
+    let mut host = FakeHost {
+        fail_snapshot: true,
+        ..Default::default()
+    };
+    let mut d = Script::new(Choice::Cloud, Confirm::Yes);
+    let e = f.pull(&opts(), &mut host, &mut d).await.err().unwrap();
+    assert_eq!(e.exit_code(), 7);
+    assert_eq!(
+        fs::read_to_string(record::path(&f.records, 5)).unwrap(),
+        before
+    );
+    let names: Vec<_> = fs::read_dir(&f.records)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        names.iter().all(|n| !n.contains("client-changed")),
+        "{names:?}"
+    );
+    assert_eq!(f.read("a.sav").unwrap(), b"local");
+}
+
+#[tokio::test]
+async fn an_implausible_uploader_mtime_is_ignored_with_a_note() {
+    let f = fixture().await;
+    f.server.reset().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/components/galaxy_client/clients/{CLIENT}")))
+        .respond_with(ResponseTemplate::new(200).set_body_string(CONFIG))
+        .mount(&f.server)
+        .await;
+    let body = gzip(b"a");
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/7/{CLIENT}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            {"name": "saves/a.sav", "bytes": body.len(), "hash": md5_hex(&body)}
+        ])))
+        .mount(&f.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/7/{CLIENT}/saves/a.sav")))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("x-object-meta-locallastmodified", "1901-01-01T00:00:00Z")
+                .set_body_bytes(body),
+        )
+        .mount(&f.server)
+        .await;
+    let start = std::time::SystemTime::now() - std::time::Duration::from_secs(5);
+    let mut d = Script::new(Choice::Skip, Confirm::Yes);
+    let r = f
+        .pull(&opts(), &mut FakeHost::default(), &mut d)
+        .await
+        .unwrap();
+    assert_eq!(state_of(&r, "saves/a.sav"), &State::Done);
+    let m = fs::metadata(f.saves.join("a.sav"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert!(m >= start, "the time of the download");
+    assert!(
+        r.warnings
+            .iter()
+            .any(|w| w.contains("1901-01-01T00:00:00Z")),
+        "{:?}",
+        r.warnings
+    );
+}
+
+#[test]
+fn a_failing_writer_is_a_disk_error_not_a_corrupt_object() {
+    struct Full;
+    impl std::io::Write for Full {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from(std::io::ErrorKind::StorageFull))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut md5 = md5::Md5::default();
+    let e = gunzip_to("saves/a", &gzip(b"some save"), &mut Full, &mut md5).unwrap_err();
+    assert!(
+        matches!(&e, Fill::Disk(io) if io.kind() == std::io::ErrorKind::StorageFull),
+        "{e:?}"
+    );
+    let mut out = vec![];
+    let e = gunzip_to("saves/a", b"not gzip", &mut out, &mut md5).unwrap_err();
+    assert!(matches!(e, Fill::Corrupt(_)), "{e:?}");
+}
+
+#[test]
+fn fetches_are_batched_within_the_budget() {
+    let e = |n: &str, bytes: u64| Entry {
+        name: n.into(),
+        bytes,
+        hash: "0".repeat(32),
+        last_modified: None,
+    };
+    let mib = 1024 * 1024;
+    let mut q: std::collections::VecDeque<(usize, Entry)> = [
+        (0, e("a", 10)),
+        (1, e("b", 10)),
+        (2, e("c", 10)),
+        (3, e("d", 10)),
+        (4, e("e", 10)),
+        (5, e("big", 200 * mib)),
+        (6, e("big2", 200 * mib)),
+        (7, e("huge", 900 * mib)),
+    ]
+    .into();
+    let ids = |b: Vec<(usize, Entry)>| b.into_iter().map(|(k, _)| k).collect::<Vec<_>>();
+    assert_eq!(ids(next_batch(&mut q)), [0, 1, 2, 3], "four at a time");
+    assert_eq!(ids(next_batch(&mut q)), [4, 5], "within the budget");
+    assert_eq!(ids(next_batch(&mut q)), [6]);
+    assert_eq!(ids(next_batch(&mut q)), [7], "one alone always goes");
+    assert!(next_batch(&mut q).is_empty());
+}
+
+const INSTALL_CONFIG: &str = r#"{"content":{"Windows":{"cloudStorage":{"enabled":true,
+    "locations":[{"name":"game","location":"<?INSTALL?>"}]}}}}"#;
+
+#[tokio::test]
+async fn build_files_and_hard_linked_files_in_the_game_dir_are_never_written() {
+    let mut f = fixture_with(INSTALL_CONFIG).await;
+    let gf = f.game.layout.prefix.join("drive_c/GOG/G");
+    fs::create_dir_all(gf.join("SAVE")).unwrap();
+    f.game.layout.game_files = gf.clone();
+    fs::write(
+        f.game.root.join("content.toml"),
+        "schema = 1\nlane = \"installer\"\nbuild_id = \"b1\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(f.game.root.join("install")).unwrap();
+    fs::write(
+        f.game.root.join("install/inno.log"),
+        "Dest filename: C:\\GOG\\G\\Game.exe\r\n",
+    )
+    .unwrap();
+    fs::write(gf.join("Game.exe"), b"exe").unwrap();
+    fs::write(gf.join("SAVE/keep.sav"), b"shared").unwrap();
+    fs::hard_link(gf.join("SAVE/keep.sav"), gf.join("SAVE/hl.sav")).unwrap();
+    f.serve(&[
+        ("game/Game.exe", gzip(b"another exe")),
+        ("game/SAVE/hl.sav", gzip(b"cloud")),
+        ("game/SAVE/slot.sav", gzip(b"slot")),
+    ])
+    .await;
+    let mut d = Script::new(Choice::Cloud, Confirm::Yes);
+    let r = f
+        .pull(&opts(), &mut FakeHost::default(), &mut d)
+        .await
+        .unwrap();
+    assert!(r.error.is_none(), "{:?}", r.stopped);
+    let names: Vec<_> = r.files.iter().map(|x| x.name.as_str()).collect();
+    assert_eq!(names, ["game/SAVE/slot.sav"], "{:?}", r.plan.unmapped);
+    assert_eq!(fs::read(gf.join("SAVE/slot.sav")).unwrap(), b"slot");
+    assert_eq!(fs::read(gf.join("Game.exe")).unwrap(), b"exe");
+    assert_eq!(fs::read(gf.join("SAVE/hl.sav")).unwrap(), b"shared");
+    assert_eq!(fs::read(gf.join("SAVE/keep.sav")).unwrap(), b"shared");
 }

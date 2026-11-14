@@ -845,9 +845,9 @@ state only; the storage host only ever sees GETs (the tests check every request)
   (`game-moves/<gogid>.lock`) and the running checks of the lane (launcher record, processes
   in the prefix: exit 7), both held for the whole run, prompts included, so nothing else
   changes the game meanwhile. Then `status`'s own plan (`status::plan_detailed`, the same
-  classification), the conflict answers, the one question, the D11 set-aside, the
-  `cloud-pull` snapshot (design 20's `protect`, under the change lock already held), the
-  backups, the files. `--dry-run` takes no lock and writes nothing, not even the lock file.
+  classification), the conflict answers, the one question, the `cloud-pull` snapshot (design
+  20's `protect`, under the change lock already held), the backups, the D11 set-aside (so a
+  refused snapshot leaves even the record where it was), the files. `--dry-run` takes no lock and writes nothing, not even the lock file.
 - **What a pull does per action**: `download` (new file, or `overwrite` when a local file is
   there), `delete_local`, `record` and `forget` touch the record only; `upload` and
   `delete_cloud` are `for_push`, shown and never done (not exit 8).
@@ -855,8 +855,8 @@ state only; the storage host only ever sees GETs (the tests check every request)
   parser: they are push's or sync's) takes the cloud's side: a download, or a local delete
   when the cloud has a tombstone or no entry for a recorded file. On a TTY each conflict is
   asked: `cloud`, `local` (kept for a push: decided, the record untouched), `both` (only when
-  both sides have a file: the local one renamed `<name>.local-<UTC>` in place, by a hard link
-  so nothing is ever overwritten, then the cloud's downloaded), `skip`. Headless, or `skip`:
+  both sides have a file: the local one kept as `<name>.local-<UTC>`, `-2`, `-3`… when taken,
+  and the cloud's downloaded; see the writes below), `skip`. Headless, or `skip`:
   left, exit 8. Never settled by a pull: `case_clash`, and `location_missing`, whose dir a
   pull doesn't make again (it may be a drive not mounted): every write planned in such a
   location is left too. `location_emptied` is settled like any conflict (the dir is there).
@@ -866,19 +866,21 @@ state only; the storage host only ever sees GETs (the tests check every request)
   answers (they add overwrites). `--yes` skips it. Without a TTY (or with `--json`) and
   without `--yes`, nothing is changed and the exit is 2, as for other commands that can't ask
   (`dlc add`, `update`); exit 8 stays for conflicts. A pull that only adds files doesn't ask.
-- **Snapshot**: only when a file is overwritten or deleted (a `both` rename alone and adds
-  take none), after the set-aside and before the backups. A failure, or a rollback or
+- **Snapshot**: only when a file is overwritten or deleted (a `both` and adds take none),
+  before the backups and the set-aside. A failure, or a rollback or
   conversion that isn't settled, stops the pull with no save file touched (exit 7; the message
   names `--no-snapshots`). Games without snapshots (a plain dir, autosnapshot off, the Mac lane)
   skip it; the backups are what they have.
-- **Backups**: every file that will be overwritten or deleted is copied first, all of them
-  before the first write, empty files included (§12b), to
+- **Backups**: every file that will be overwritten, deleted or kept by a `both` (cheap
+  insurance: its kept copy is otherwise the only one) is copied first, all of them before the
+  first write, empty files included (§12b), to
   `cloud-saves/backups/<gogid>/<UTC>/local/<location>/<path>` (`-2`, `-3`… when the second is
   taken), each fsynced. Read through the same no-link walk as the writes, and checked to be
   the planned file (device, inode, size, mtime). A copy, never a move: the backup dir may be on
   another filesystem than the prefix (a btrfs subvolume boundary). A run that backs nothing up
   makes no dir; one that does prunes to `cloud_saves.keep_backups` (default 20, at least 1)
-  dirs named like backups, oldest first, each listed.
+  dirs named like backups, oldest first, each listed, and never its own dir, whatever its
+  name says (a clock that went back).
 - **Writes** (`cloud::write`): the target dir is opened from `/` one part at a time with
   `O_DIRECTORY | O_NOFOLLOW`, so a link put in place after `Location::file`'s check is refused,
   not followed (a test swaps a dir for a link during the question). Missing dirs are made only
@@ -890,7 +892,14 @@ state only; the storage host only ever sees GETs (the tests check every request)
   same dir (`O_CREAT | O_EXCL | O_NOFOLLOW`, the old file's mode), is gunzipped there (MD5 of
   the stored bytes checked before), gets the uploader's `X-Object-Meta-LocalLastModified` as
   its mtime (none or unparseable: the write time), is fsynced, the target checked once more,
-  renamed over it, and the dir fsynced. A delete is `unlinkat` after the same check. A stop at
+  renamed over it, and the dir fsynced. The mtime is used only from 1980-01-01 to a day after
+  now; anything else (or an unparseable header) is a note and the file keeps the write time,
+  and a `futimens` that fails is a note too, never a stop. For a `both`, the local file is
+  hard-linked to its kept name only once the cloud's file is complete and fsynced beside it,
+  then the rename puts the cloud's in place: a corrupt object, a full disk or a failed rename
+  leaves the local file at its own path (and a link made is removed again). Where hard links
+  aren't supported, a no-replace rename stands in, undone when the second rename fails. A
+  delete is `unlinkat` after the same check. A stop at
   any point leaves the old file or the new one, never part of one; a left-over temp file is
   excluded from sync by `*.tmp` and removed by the next pull that writes to that dir (tested by
   a seam that stops after the fsync, before the rename).
@@ -900,10 +909,17 @@ state only; the storage host only ever sees GETs (the tests check every request)
   cleared only when every planned file was done (nothing left, kept, for push, corrupt or
   unreadable). `pending_push` is never touched by a pull. D11: a record for another client is
   set aside as the first write of a real run, and the run is a first sync.
-- **Errors**: a corrupt object (MD5, gzip) is skipped and the rest done (exit 5); a failed
-  write or backup stops the run (exit 6), a path that fails the walk stops it (exit 1), a
-  network error stops it (exit 4); files not reached are `not_done`, and the record holds what
-  was done. Exit precedence otherwise: 5, 1 (an unreadable local file), 8, 0.
+- **Errors**: a corrupt object (MD5, gzip) is skipped and the rest done (exit 5). Only the
+  decoder's errors count as corrupt: a failure of the local write while gunzipping (a full
+  disk) stops the run like any failed write or backup (exit 6). A path that fails the walk (a
+  link or a file where a dir should be), in a write or a backup, leaves that file
+  (`path_refused`, exit 8) with nothing written for it, and the run goes on. A network error
+  stops it (exit 4). Files not reached are `not_done`, and the record holds what was done; a
+  record that can't be written at the end still gives the report of what was. Exit
+  precedence otherwise: 5, 1 (an unreadable local file), 8, 0.
+- **Memory**: objects are fetched in batches of at most four and at most 256 MiB of listed
+  bytes (one object alone always goes; none is over 200 MiB), each batch written before the
+  next is fetched.
 - **Output**: one line per file that isn't unchanged (`download`, `overwrite`, `keep both`,
   `delete here`, `same`, `forget`, `left (why)`, `for push`, `kept here`, `corrupt`,
   `not done (would …)`), counts, the snapshot line, pruned backups and the backup dir last;

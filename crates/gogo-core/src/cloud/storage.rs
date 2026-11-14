@@ -204,17 +204,49 @@ pub async fn fetch_gzip(
 #[derive(Debug, Clone)]
 pub struct Object {
     pub gzip: Vec<u8>,
-    /// `X-Object-Meta-LocalLastModified` (RFC 3339), when it parses.
+    /// `X-Object-Meta-LocalLastModified`, when it parses and is plausible.
     pub local_last_modified: Option<std::time::SystemTime>,
+    /// The header as sent, when it was there but unusable (not RFC 3339, or
+    /// outside [`plausible_mtime`]'s window): for a warning.
+    pub bad_local_last_modified: Option<String>,
 }
 
-/// The `X-Object-Meta-LocalLastModified` header as a time: RFC 3339, as
-/// Galaxy writes it; anything else is no time.
-pub fn local_last_modified(h: &reqwest::header::HeaderMap) -> Option<std::time::SystemTime> {
-    let v = h.get("x-object-meta-locallastmodified")?.to_str().ok()?;
-    chrono::DateTime::parse_from_rfc3339(v.trim())
+/// An uploader's mtime gogo sets on a file: from 1980-01-01 (the FAT
+/// epoch, before any save of a GOG game) to a day after now (clock skew).
+pub fn plausible_mtime(t: std::time::SystemTime, now: std::time::SystemTime) -> bool {
+    let floor = std::time::UNIX_EPOCH + std::time::Duration::from_secs(315_532_800);
+    let ceiling = now + std::time::Duration::from_secs(86_400);
+    t >= floor && t <= ceiling
+}
+
+/// The `X-Object-Meta-LocalLastModified` header: `Ok(None)` when absent,
+/// `Ok(Some(t))` for an RFC 3339 time [`plausible_mtime`] accepts, `Err`
+/// with the raw value (control characters dropped) for anything else.
+pub fn local_last_modified(
+    h: &reqwest::header::HeaderMap,
+    now: std::time::SystemTime,
+) -> Result<Option<std::time::SystemTime>, String> {
+    let Some(v) = h.get("x-object-meta-locallastmodified") else {
+        return Ok(None);
+    };
+    let raw = || {
+        String::from_utf8_lossy(v.as_bytes())
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(64)
+            .collect::<String>()
+    };
+    let t: std::time::SystemTime = v
+        .to_str()
         .ok()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s.trim()).ok())
         .map(|t| t.with_timezone(&chrono::Utc).into())
+        .ok_or_else(raw)?;
+    if plausible_mtime(t, now) {
+        Ok(Some(t))
+    } else {
+        Err(raw())
+    }
 }
 
 /// [`fetch_gzip`] with the object's `X-Object-Meta-LocalLastModified`.
@@ -236,15 +268,20 @@ pub async fn fetch_object(
     }
     let req = client.request(Method::GET, token, client_id, Some(&entry.name))?;
     let resp = client.send(req).await?;
-    let mtime = local_last_modified(resp.headers());
+    let mtime = local_last_modified(resp.headers(), std::time::SystemTime::now());
     let cap = usize::try_from(entry.bytes).unwrap_or(usize::MAX);
     let body = body_capped(resp, cap)
         .await?
         .ok_or_else(|| corrupt(format!("more than the listed {} bytes", entry.bytes)))?;
     verify(entry, &body)?;
+    let (local_last_modified, bad_local_last_modified) = match mtime {
+        Ok(t) => (t, None),
+        Err(raw) => (None, Some(raw)),
+    };
     Ok(Object {
         gzip: body,
-        local_last_modified: mtime,
+        local_last_modified,
+        bad_local_last_modified,
     })
 }
 
@@ -354,6 +391,33 @@ mod tests {
             bytes: gz.len() as u64,
             hash: md5_hex(gz),
             last_modified: Some("2024-02-11T03:49:20.911250+00:00".into()),
+        }
+    }
+
+    #[test]
+    fn the_uploaders_mtime_is_used_only_when_plausible() {
+        let now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000);
+        let h = |v: &str| {
+            let mut m = reqwest::header::HeaderMap::new();
+            m.insert("x-object-meta-locallastmodified", v.parse().unwrap());
+            m
+        };
+        assert_eq!(
+            local_last_modified(&reqwest::header::HeaderMap::new(), now),
+            Ok(None)
+        );
+        assert_eq!(
+            local_last_modified(&h("2024-02-11T03:49:20Z"), now),
+            Ok(Some(
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_707_623_360)
+            ))
+        );
+        for bad in ["1970-01-01T00:00:00Z", "2099-01-01T00:00:00Z", "yesterday"] {
+            assert_eq!(
+                local_last_modified(&h(bad), now),
+                Err(bad.to_string()),
+                "{bad}"
+            );
         }
     }
 

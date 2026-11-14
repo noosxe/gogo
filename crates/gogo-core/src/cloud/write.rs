@@ -50,6 +50,23 @@ pub struct Dir {
     pub path: PathBuf,
 }
 
+/// A completed [`Dir::replace`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Written {
+    pub size: u64,
+    pub mtime: SystemTime,
+    /// The mtime couldn't be set: a note for the output.
+    pub mtime_error: Option<String>,
+    /// Where the file that was at the name was kept (`aside`).
+    pub kept_as: Option<OsString>,
+}
+
+/// How a file was kept aside.
+enum Kept {
+    Linked,
+    Renamed,
+}
+
 /// The file a writer expects at a name: the plan's view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Expect {
@@ -248,18 +265,26 @@ impl Dir {
     /// Replace (or create) `name` atomically with what `fill` writes: a
     /// temp file here, created exclusively without following a link, filled,
     /// its mtime set to `mtime` (when given), fsynced, `name` checked against
-    /// `expect` once more, renamed over it, the dir fsynced. The written
-    /// file's size and mtime. `stop` is a test seam: called after the fsync,
-    /// before the rename; `true` stops there as a crash would (the temp file
-    /// is left).
+    /// `expect` once more, renamed over it, the dir fsynced.
+    ///
+    /// `aside`: keep the file at `name` under that name (`-2`, `-3`… when
+    /// taken) instead of replacing it, linked there only once the new file is
+    /// complete, so a failure before the rename leaves it where it was. A
+    /// filesystem without hard links gets a no-replace rename instead, undone
+    /// when the rename of the new file fails.
+    ///
+    /// `stop` is a test seam: called after the fsync, before anything at
+    /// `name` changes; `true` stops there as a crash would (the temp file is
+    /// left).
     pub fn replace(
         &self,
         name: &OsStr,
         expect: Expect,
         mtime: Option<SystemTime>,
+        aside: Option<&OsStr>,
         fill: &mut dyn FnMut(&mut dyn Write) -> Result<(), WriteError>,
         stop: &dyn Fn() -> bool,
-    ) -> Result<(u64, SystemTime), WriteError> {
+    ) -> Result<Written, WriteError> {
         self.check(name, expect)?;
         let mode = match self.stat(name)? {
             Some(st) => Mode::from_raw_mode(st.st_mode & 0o7777),
@@ -273,6 +298,9 @@ impl Dir {
             mode,
         )
         .map_err(|e| io(&self.at(&tmp), e))?;
+        let drop_tmp = || {
+            let _ = rustix::fs::unlinkat(&self.fd, &tmp, AtFlags::empty());
+        };
         let result = (|| {
             let mut f = File::from(fd);
             {
@@ -284,25 +312,36 @@ impl Dir {
                 // An existing file's mode, umask aside.
                 rustix::fs::fchmod(f.as_fd(), mode).map_err(|e| io(&self.at(&tmp), e))?;
             }
+            // A time that can't be set is a note: the content is what counts.
+            let mut mtime_error = None;
             if let Some(t) = mtime {
                 let ts = timespec(t);
-                rustix::fs::futimens(
+                if let Err(e) = rustix::fs::futimens(
                     f.as_fd(),
                     &Timestamps {
                         last_access: ts,
                         last_modification: ts,
                     },
-                )
-                .map_err(|e| io(&self.at(&tmp), e))?;
+                ) {
+                    mtime_error = Some(format!(
+                        "{}: the uploader's mtime couldn't be set ({e})",
+                        self.at(name).display()
+                    ));
+                }
             }
             f.sync_all().map_err(|e| io(&self.at(&tmp), e))?;
             let st = rustix::fs::fstat(f.as_fd()).map_err(|e| io(&self.at(&tmp), e))?;
-            Ok::<_, WriteError>((st.st_size as u64, system_time(&st)))
+            Ok::<_, WriteError>(Written {
+                size: st.st_size as u64,
+                mtime: system_time(&st),
+                mtime_error,
+                kept_as: None,
+            })
         })();
-        let written = match result {
+        let mut written = match result {
             Ok(w) => w,
             Err(e) => {
-                let _ = rustix::fs::unlinkat(&self.fd, &tmp, AtFlags::empty());
+                drop_tmp();
                 return Err(e);
             }
         };
@@ -313,15 +352,79 @@ impl Dir {
             });
         }
         if let Err(e) = self.check(name, expect) {
-            let _ = rustix::fs::unlinkat(&self.fd, &tmp, AtFlags::empty());
+            drop_tmp();
             return Err(e);
         }
+        let kept = match aside {
+            None => None,
+            Some(base) => match self.keep_aside(name, base) {
+                Ok(k) => Some(k),
+                Err(e) => {
+                    drop_tmp();
+                    return Err(e);
+                }
+            },
+        };
         if let Err(e) = rustix::fs::renameat(&self.fd, &tmp, &self.fd, name) {
-            let _ = rustix::fs::unlinkat(&self.fd, &tmp, AtFlags::empty());
+            // The file at `name` stays (or goes back) where it was.
+            match &kept {
+                Some((to, Kept::Linked)) => {
+                    let _ = rustix::fs::unlinkat(&self.fd, to, AtFlags::empty());
+                }
+                Some((to, Kept::Renamed)) => {
+                    let _ = rustix::fs::renameat_with(
+                        &self.fd,
+                        to,
+                        &self.fd,
+                        name,
+                        rustix::fs::RenameFlags::NOREPLACE,
+                    );
+                }
+                None => {}
+            }
+            drop_tmp();
             return Err(io(&self.at(name), e));
         }
         self.sync()?;
+        written.kept_as = kept.map(|(n, _)| n);
         Ok(written)
+    }
+
+    /// The file at `name` also under `base` (or `base-2`, … the first free
+    /// one): a hard link, else a rename that never replaces a file.
+    fn keep_aside(&self, name: &OsStr, base: &OsStr) -> Result<(OsString, Kept), WriteError> {
+        for n in 1..=100 {
+            let mut to = base.to_os_string();
+            if n > 1 {
+                to.push(format!("-{n}"));
+            }
+            match rustix::fs::linkat(&self.fd, name, &self.fd, &to, AtFlags::empty()) {
+                Ok(()) => return Ok((to, Kept::Linked)),
+                Err(rustix::io::Errno::EXIST) => continue,
+                Err(
+                    rustix::io::Errno::PERM
+                    | rustix::io::Errno::OPNOTSUPP
+                    | rustix::io::Errno::MLINK
+                    | rustix::io::Errno::NOSYS,
+                ) => {}
+                Err(e) => return Err(io(&self.at(&to), e)),
+            }
+            match rustix::fs::renameat_with(
+                &self.fd,
+                name,
+                &self.fd,
+                &to,
+                rustix::fs::RenameFlags::NOREPLACE,
+            ) {
+                Ok(()) => return Ok((to, Kept::Renamed)),
+                Err(rustix::io::Errno::EXIST) => continue,
+                Err(e) => return Err(io(&self.at(&to), e)),
+            }
+        }
+        Err(WriteError::Io {
+            path: self.at(base).display().to_string(),
+            reason: "no free name to keep the local file under".into(),
+        })
     }
 
     /// Remove `name`, which must be what `expect` says; the dir fsynced.
@@ -329,19 +432,6 @@ impl Dir {
         self.check(name, expect)?;
         rustix::fs::unlinkat(&self.fd, name, AtFlags::empty())
             .map_err(|e| io(&self.at(name), e))?;
-        self.sync()
-    }
-
-    /// Give `name` (what `expect` says) the new name `to` here, never over
-    /// a file that is there (a hard link, then the old name removed).
-    pub fn rename_aside(&self, name: &OsStr, expect: Expect, to: &OsStr) -> Result<(), WriteError> {
-        self.check(name, expect)?;
-        rustix::fs::linkat(&self.fd, name, &self.fd, to, AtFlags::empty())
-            .map_err(|e| io(&self.at(to), e))?;
-        if let Err(e) = rustix::fs::unlinkat(&self.fd, name, AtFlags::empty()) {
-            let _ = rustix::fs::unlinkat(&self.fd, to, AtFlags::empty());
-            return Err(io(&self.at(name), e));
-        }
         self.sync()
     }
 }
@@ -447,16 +537,17 @@ mod tests {
         std::fs::write(&p, b"old").unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
         let t = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
-        let (size, mtime) = d
+        let w = d
             .replace(
                 OsStr::new("s.sav"),
                 expect_now(&p),
                 Some(t),
+                None,
                 &mut fill(b"new!"),
                 &|| false,
             )
             .unwrap();
-        assert_eq!((size, mtime), (4, t));
+        assert_eq!((w.size, w.mtime, w.kept_as), (4, t, None));
         assert_eq!(std::fs::read(&p).unwrap(), b"new!");
         let m = std::fs::metadata(&p).unwrap();
         assert_eq!(m.permissions().mode() & 0o777, 0o600);
@@ -474,6 +565,7 @@ mod tests {
             .replace(
                 OsStr::new("s.sav"),
                 expect_now(&p),
+                None,
                 None,
                 &mut fill(b"new"),
                 &|| true,
@@ -504,6 +596,7 @@ mod tests {
                 OsStr::new("s.sav"),
                 expect_now(&p),
                 None,
+                None,
                 &mut |w: &mut dyn Write| {
                     w.write_all(b"half").unwrap();
                     Err(io(Path::new("x"), "corrupt"))
@@ -526,9 +619,14 @@ mod tests {
         let before = expect_now(&p);
         std::fs::write(&p, b"other").unwrap();
         let e = d
-            .replace(OsStr::new("s.sav"), before, None, &mut fill(b"n"), &|| {
-                false
-            })
+            .replace(
+                OsStr::new("s.sav"),
+                before,
+                None,
+                None,
+                &mut fill(b"n"),
+                &|| false,
+            )
             .err()
             .unwrap();
         assert!(matches!(e, WriteError::Changed { .. }));
@@ -537,6 +635,7 @@ mod tests {
             .replace(
                 OsStr::new("s.sav"),
                 Expect::Absent,
+                None,
                 None,
                 &mut fill(b"n"),
                 &|| false,
@@ -554,24 +653,58 @@ mod tests {
     }
 
     #[test]
-    fn rename_aside_never_overwrites() {
+    fn aside_keeps_the_old_file_under_a_free_name_only_once_the_new_one_is_whole() {
         let (_t, b) = base();
         let d = open_dir(&b, &b).unwrap();
         let p = b.join("s.sav");
         std::fs::write(&p, b"mine").unwrap();
-        std::fs::write(b.join("taken"), b"x").unwrap();
+        std::fs::write(b.join("s.sav.local"), b"an older one").unwrap();
+        // A fill that fails: nothing moved, nothing kept aside.
+        let e = d
+            .replace(
+                OsStr::new("s.sav"),
+                expect_now(&p),
+                None,
+                Some(OsStr::new("s.sav.local")),
+                &mut |_: &mut dyn Write| Err(io(Path::new("x"), "no space")),
+                &|| false,
+            )
+            .err()
+            .unwrap();
+        assert!(matches!(e, WriteError::Io { .. }));
+        assert_eq!(std::fs::read(&p).unwrap(), b"mine");
+        assert_eq!(std::fs::read_dir(&b).unwrap().count(), 2);
+        // A stop before the rename: the same.
         assert!(
-            d.rename_aside(OsStr::new("s.sav"), expect_now(&p), OsStr::new("taken"))
-                .is_err()
+            d.replace(
+                OsStr::new("s.sav"),
+                expect_now(&p),
+                None,
+                Some(OsStr::new("s.sav.local")),
+                &mut fill(b"cloud"),
+                &|| true,
+            )
+            .is_err()
         );
-        assert_eq!(std::fs::read(b.join("taken")).unwrap(), b"x");
-        d.rename_aside(
-            OsStr::new("s.sav"),
-            expect_now(&p),
-            OsStr::new("s.sav.local"),
-        )
-        .unwrap();
-        assert!(!p.exists());
-        assert_eq!(std::fs::read(b.join("s.sav.local")).unwrap(), b"mine");
+        assert_eq!(std::fs::read(&p).unwrap(), b"mine");
+        d.clear_temps();
+        let w = d
+            .replace(
+                OsStr::new("s.sav"),
+                expect_now(&p),
+                None,
+                Some(OsStr::new("s.sav.local")),
+                &mut fill(b"cloud"),
+                &|| false,
+            )
+            .unwrap();
+        assert_eq!(w.kept_as.as_deref(), Some(OsStr::new("s.sav.local-2")));
+        assert_eq!(std::fs::read(&p).unwrap(), b"cloud");
+        assert_eq!(std::fs::read(b.join("s.sav.local-2")).unwrap(), b"mine");
+        assert_eq!(
+            std::fs::read(b.join("s.sav.local")).unwrap(),
+            b"an older one"
+        );
+        assert_eq!(std::fs::read_dir(&b).unwrap().count(), 3);
     }
 }
