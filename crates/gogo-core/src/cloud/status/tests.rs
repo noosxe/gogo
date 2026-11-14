@@ -844,3 +844,51 @@ async fn a_game_dir_location_without_a_list_is_skipped_not_synced_blind() {
         }]
     );
 }
+
+#[tokio::test]
+async fn links_below_the_game_dir_never_alias_a_build_file() {
+    let mut f = fixture(INSTALL_CONFIG).await;
+    let gf = installer_game(&mut f, &["Game.exe", "Data/levels.pak"]);
+    fs::create_dir_all(gf.join("Data")).unwrap();
+    fs::write(gf.join("Game.exe"), b"exe").unwrap();
+    fs::write(gf.join("Data/levels.pak"), b"pak").unwrap();
+    fs::create_dir_all(gf.join("SAVE")).unwrap();
+    std::os::unix::fs::symlink("../Game.exe", gf.join("SAVE/lnk")).unwrap();
+    std::os::unix::fs::symlink("../Data", gf.join("SAVE/d")).unwrap();
+    fs::hard_link(gf.join("Game.exe"), gf.join("SAVE/hl.sav")).unwrap();
+    fs::write(gf.join("SAVE/slot1.sav"), b"mine").unwrap();
+    f.serve_names(&[
+        "game/SAVE/lnk",
+        "game/SAVE/d/levels.pak",
+        "game/SAVE/hl.sav",
+        // Another case and Windows separators: the same build file.
+        "game/DATA\\LEVELS.PAK",
+        "game/GAME.exe",
+    ])
+    .await;
+    let plan = f.run().await.unwrap();
+    assert_eq!(
+        actions(&plan),
+        [("game/SAVE/slot1.sav".to_string(), Action::Upload)],
+        "nothing planned over a link, a hard link or a build file"
+    );
+    let unmapped: Vec<(&str, UnmappedReason)> = plan
+        .unmapped
+        .iter()
+        .map(|u| (u.name.as_str(), u.reason))
+        .collect();
+    assert_eq!(
+        unmapped,
+        [
+            ("game/DATA\\LEVELS.PAK", UnmappedReason::BuildFile),
+            // Refused before the build-file test: `SAVE/hl.sav` made it a
+            // hard link too.
+            ("game/GAME.exe", UnmappedReason::BadPath),
+            ("game/SAVE/d/levels.pak", UnmappedReason::BadPath),
+            ("game/SAVE/hl.sav", UnmappedReason::BadPath),
+            ("game/SAVE/lnk", UnmappedReason::BadPath),
+        ]
+    );
+    let lp = &plan.locations[0];
+    assert_eq!(lp.ignored, ["SAVE/d", "SAVE/hl.sav", "SAVE/lnk"]);
+}

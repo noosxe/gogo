@@ -314,11 +314,21 @@ impl Roots {
         }
     }
 
-    /// `path` relative to the game's files (`/`-separated, empty for the
-    /// dir itself) when its canonical form is in them, else `None`.
-    fn game_rel(&self, path: &Path) -> Option<String> {
-        let c = canonical_lenient(path)?;
-        let rel = c.strip_prefix(&self.game_canon).ok()?;
+    /// Whether a location at `path` reaches the game's files: an
+    /// `<?INSTALL?>` one, one through the prefix's `drive_c/GOG/<name>`
+    /// (even before that link exists), one whose canonical path is in them,
+    /// or one that holds them (`C:\GOG`). Any can hold build files.
+    fn in_game(&self, path: &Path, install: bool) -> bool {
+        install
+            || self.via_gog_link(path)
+            || canonical_lenient(path)
+                .is_some_and(|c| c.starts_with(&self.game_canon) || self.game_canon.starts_with(&c))
+    }
+
+    /// Canonical path `abs` relative to the game's files (`/`-separated),
+    /// when it is in them.
+    fn game_rel(&self, abs: &Path) -> Option<String> {
+        let rel = abs.strip_prefix(&self.game_canon).ok()?;
         Some(
             rel.components()
                 .map(|p| p.as_os_str().to_string_lossy().into_owned())
@@ -441,10 +451,9 @@ pub struct Location {
     pub build_files: Option<BuildNote>,
     #[serde(skip)]
     roots: Roots,
-    /// The location's path relative to the game's files, `/`-separated
-    /// (empty for the game's files themselves); `None` outside them.
+    /// The location reaches the game's files ([`Location::in_game_files`]).
     #[serde(skip)]
-    game_rel: Option<String>,
+    in_game: bool,
     #[serde(skip)]
     build: Option<Arc<BuildFilter>>,
 }
@@ -484,7 +493,25 @@ impl Location {
         if parts.is_empty() || rel.starts_with(['/', '\\']) {
             return Err(SkipReason::BadPath(rel.to_string()));
         }
-        join_checked(&self.roots, self.is_install(), &self.path, &parts).map(|(_, canon)| canon)
+        let (cur, canon) = join_checked(&self.roots, self.is_install(), &self.path, &parts)?;
+        if self.in_game {
+            // Below a location that reaches the game's files, a link could
+            // alias a build file (`SAVE/x -> ../Game.exe`, a dir link to
+            // `../Data`), and so could a hard link: refused, so the
+            // build-file test always sees the file's own path.
+            let lexical = cur
+                .strip_prefix(&self.path)
+                .ok()
+                .and_then(|r| canonical_lenient(&self.path).map(|root| root.join(r)));
+            let hard_linked = std::fs::symlink_metadata(&canon).is_ok_and(|m| {
+                use std::os::unix::fs::MetadataExt;
+                m.is_file() && m.nlink() > 1
+            });
+            if lexical.as_ref() != Some(&canon) || hard_linked {
+                return Err(SkipReason::BadPath(rel.to_string()));
+            }
+        }
+        Ok(canon)
     }
 
     /// Whether `rel` (below the location) is never synced (design 22 §3.4).
@@ -492,30 +519,30 @@ impl Location {
         excluded(rel)
     }
 
-    /// Whether the location is in the game's files (an `<?INSTALL?>` one),
-    /// where saves sit beside the build's own files.
+    /// Whether the location reaches the game's files, where saves sit
+    /// beside the build's own files: an `<?INSTALL?>` one, one through the
+    /// prefix's `drive_c/GOG/<name>`, one whose canonical path is in them,
+    /// or one that holds them.
     pub fn in_game_files(&self) -> bool {
-        self.game_rel.is_some()
+        self.in_game
     }
 
-    /// Whether `rel` (below the location) belongs to the build (design 22
-    /// §3.4): a path the build's file list names, or one of gogo's own
-    /// files there. Never synced: no upload, no download over it, no
-    /// deletion. In the game's files without a list attached, every file
-    /// counts as the build's, so nothing there is ever synced blind.
-    pub fn build_file(&self, rel: &str) -> bool {
-        let Some(base) = &self.game_rel else {
+    /// Whether the file at canonical path `abs` (from [`Location::file`] or
+    /// the scan) belongs to the build (design 22 §3.4): a path the build's
+    /// file list names, or one of gogo's own files, relative to the game's
+    /// files. Never synced: no upload, no download over it, no deletion. In
+    /// a location that reaches the game's files without a list attached,
+    /// every file counts as the build's, so nothing there is synced blind.
+    pub fn build_path(&self, abs: &Path) -> bool {
+        if !self.in_game {
             return false;
-        };
+        }
         let Some(filter) = &self.build else {
             return true;
         };
-        let parts = base
-            .split('/')
-            .chain(rel.split(['/', '\\']))
-            .filter(|p| !p.is_empty())
-            .collect::<Vec<_>>();
-        filter.contains(&parts.join("/"))
+        self.roots
+            .game_rel(abs)
+            .is_some_and(|rel| filter.contains(&rel))
     }
 
     /// Attach the build's file list (design 22 §3.4).
@@ -530,7 +557,7 @@ const PARTIAL: &[&str] = &[".part", ".tmp", ".~incomplete"];
 
 /// Whether a file below a save location is left out of the sync: design 20
 /// §6.1's caches and logs, and partial files. (Locations in the game's files
-/// also leave out the build's own files: [`Location::build_file`].)
+/// also leave out the build's own files: [`Location::build_path`].)
 pub fn excluded(rel: &str) -> bool {
     let name = rel
         .rsplit(['/', '\\'])
@@ -640,7 +667,7 @@ pub fn resolve_storage(
                 name: name.to_string(),
                 variable,
                 exists: path.is_dir(),
-                game_rel: roots.game_rel(&path),
+                in_game: roots.in_game(&path, variable == Variable::Install),
                 path,
                 unverified,
                 build_files: None,

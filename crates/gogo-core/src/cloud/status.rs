@@ -550,17 +550,6 @@ fn gather(
     for (name, item) in &items {
         let rel = &name[prefix.len()..];
         let live = item.entry.as_ref().is_some_and(|e| !e.is_tombstone());
-        // The build's own files: never acted on, whatever the record says.
-        if loc.build_file(rel) {
-            if live {
-                unmapped.push(Unmapped {
-                    name: name.clone(),
-                    reason: UnmappedReason::BuildFile,
-                });
-            }
-            drop.push(name.clone());
-            continue;
-        }
         if loc.excluded(rel) {
             if live {
                 unmapped.push(Unmapped {
@@ -572,6 +561,17 @@ fn gather(
             continue;
         }
         match loc.file(rel) {
+            // The build's own files, by the canonical path: never acted on,
+            // whatever the record says.
+            Ok(p) if loc.build_path(&p) => {
+                if live {
+                    unmapped.push(Unmapped {
+                        name: name.clone(),
+                        reason: UnmappedReason::BuildFile,
+                    });
+                }
+                drop.push(name.clone());
+            }
             Ok(p) => {
                 paths.insert(name.clone(), p);
             }
