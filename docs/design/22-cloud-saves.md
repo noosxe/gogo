@@ -764,7 +764,8 @@ Code: `gogo_core::cloud::build_files`, `Location::{in_game_files, build_file}`.
   - depot lane: the depot cache when it holds the installed build (by build id) and every DLC
     the game has, else the build's depot manifests for the base game and its DLC in the
     installed language, fetched by `saves status` with the main session (the snapshot
-    command's fetcher). The list isn't kept on disk;
+    command's fetcher, Linux only: on macOS such a location is skipped). The list isn't kept
+    on disk;
   - no content record (a game built before it, a Mac-lane game): the installer's log when it
     is there; else, for a `game/` tree, `content::resolve`'s derived content, used only when
     the game's own info file names the build (a cache of another build never stands in).
