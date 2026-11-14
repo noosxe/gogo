@@ -139,6 +139,12 @@ pub enum Command {
     /// which one this machine uses), or check every built game with
     /// `--installed`.
     Builds(BuildsArgs),
+    /// A built game's GOG cloud saves. Today: where they live on this
+    /// machine.
+    Saves {
+        #[command(subcommand)]
+        cmd: crate::saves_cmd::SavesCmd,
+    },
     /// Config file management.
     Config {
         #[command(subcommand)]
