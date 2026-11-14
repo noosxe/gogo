@@ -1627,6 +1627,7 @@ mod tests {
                 prefix: dirs.prefix.clone(),
                 snap_prefix: None,
                 created: std::time::SystemTime::UNIX_EPOCH,
+                extra_roots: Vec::new(),
                 game: Some(GameFiles {
                     dir: gf.clone(),
                     snap_dir: None,
