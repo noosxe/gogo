@@ -12,7 +12,7 @@
 //! layout. The registry files (`user.reg`, `system.reg`) are reported apart,
 //! when they changed.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -327,6 +327,10 @@ pub struct SaveFile {
     pub size: u64,
     /// UTC, RFC 3339.
     pub mtime: String,
+    /// The cloud-save location (its name) the file is in, when the game has
+    /// one there (design 22 §7.2); `None` for the generic roots alone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<String>,
     #[serde(skip)]
     pub abs: PathBuf,
     #[serde(skip)]
@@ -365,7 +369,16 @@ pub struct Scan {
     /// More save roots, absolute dirs in the prefix: the game's cloud-save
     /// locations (design 22 §7.2), on top of the generic roots. One outside
     /// `drive_c/` is ignored.
-    pub extra_roots: Vec<PathBuf>,
+    pub extra_roots: Vec<ExtraRoot>,
+}
+
+/// A cloud-save location as a save root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtraRoot {
+    /// The location's name in the cloud (`saves`).
+    pub name: String,
+    /// The dir, absolute, in the prefix.
+    pub dir: PathBuf,
 }
 
 /// How the game's own files were checked, for the plan.
@@ -479,6 +492,7 @@ fn save_file(path: String, abs: PathBuf, meta: &std::fs::Metadata) -> SaveFile {
         path,
         size: meta.len(),
         mtime: rfc3339(modified),
+        cloud: None,
         abs,
         modified,
     }
@@ -520,34 +534,51 @@ pub fn find(scan: &Scan) -> Found {
             }
         }
     }
-    // The cloud-save locations, unioned with the roots above: a file both
-    // reach is reported once. The excludes apply to the path below the user
-    // dir (or `ProgramData`) the location is in, else below the location.
-    let mut seen: HashSet<String> = files.iter().map(|f: &SaveFile| f.path.clone()).collect();
-    for root in &scan.extra_roots {
-        let Ok(under_c) = root.strip_prefix(&drive_c) else {
-            continue;
-        };
-        let under_c = under_c.to_string_lossy().replace('\\', "/");
-        let base_len = match under_c.split('/').collect::<Vec<_>>().as_slice() {
-            ["users", u, ..] if users.iter().any(|x| x == u) => "users/".len() + u.len() + 1,
-            ["ProgramData", ..] => "ProgramData/".len(),
-            _ => under_c.len() + 1,
-        };
-        for (rel, meta) in walk(root) {
-            let path = if under_c.is_empty() {
-                rel.clone()
-            } else {
-                format!("{under_c}/{rel}")
-            };
-            let in_base = path.get(base_len..).unwrap_or(&rel);
-            if excluded(in_base) || seen.contains(&path) {
+    // The cloud-save locations, unioned with the roots above. A file both
+    // reach is one file, even through a link in the prefix: it is found by
+    // its canonical path, listed once, and labelled with the location. The
+    // excludes apply to the path below the user dir (or `ProgramData`) the
+    // location is in, else below the location.
+    if !scan.extra_roots.is_empty() {
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let mut seen: HashMap<PathBuf, usize> = files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (canon(&f.abs), i))
+            .collect();
+        for root in &scan.extra_roots {
+            let Ok(under_c) = root.dir.strip_prefix(&drive_c) else {
                 continue;
-            }
-            let snap = snap_c.as_ref().map(|c| c.join(&path));
-            if newer(&meta, snap.as_deref(), scan.created).0 {
-                seen.insert(path.clone());
-                files.push(save_file(path.clone(), drive_c.join(&path), &meta));
+            };
+            let under_c = under_c.to_string_lossy().replace('\\', "/");
+            let base_len = match under_c.split('/').collect::<Vec<_>>().as_slice() {
+                ["users", u, ..] if users.iter().any(|x| x == u) => "users/".len() + u.len() + 1,
+                ["ProgramData", ..] => "ProgramData/".len(),
+                _ => under_c.len() + 1,
+            };
+            for (rel, meta) in walk(&root.dir) {
+                let path = if under_c.is_empty() {
+                    rel.clone()
+                } else {
+                    format!("{under_c}/{rel}")
+                };
+                let in_base = path.get(base_len..).unwrap_or(&rel);
+                if excluded(in_base) {
+                    continue;
+                }
+                let abs = drive_c.join(&path);
+                let key = canon(&abs);
+                if let Some(&i) = seen.get(&key) {
+                    files[i].cloud.get_or_insert_with(|| root.name.clone());
+                    continue;
+                }
+                let snap = snap_c.as_ref().map(|c| c.join(&path));
+                if newer(&meta, snap.as_deref(), scan.created).0 {
+                    let mut f = save_file(path, abs, &meta);
+                    f.cloud = Some(root.name.clone());
+                    seen.insert(key, files.len());
+                    files.push(f);
+                }
             }
         }
     }
@@ -616,6 +647,9 @@ pub struct Group {
     /// The dir, relative to `drive_c/` with the user dir dropped (`Saved
     /// Games/CD Projekt Red/Cyberpunk 2077`), or the game's (`game/SAVE`).
     pub dir: String,
+    /// The cloud-save location the files are in (design 22 §7.2).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<String>,
     pub files: usize,
     pub bytes: u64,
     /// UTC, RFC 3339.
@@ -626,7 +660,7 @@ pub struct Group {
 
 /// `files` grouped by dir, in path order (design 20 §6.1's display).
 pub fn groups(files: &[SaveFile]) -> Vec<Group> {
-    let mut by: BTreeMap<String, Group> = BTreeMap::new();
+    let mut by: BTreeMap<(String, Option<String>), Group> = BTreeMap::new();
     for f in files {
         // The user dir is dropped (`steamuser` is the only real one), but
         // `Public` stays: its `Documents` isn't the user's.
@@ -637,8 +671,9 @@ pub fn groups(files: &[SaveFile]) -> Vec<Group> {
             _ => f.path.as_str(),
         };
         let dir = shown.rsplit_once('/').map_or(".", |(d, _)| d).to_string();
-        let g = by.entry(dir.clone()).or_insert(Group {
+        let g = by.entry((dir.clone(), f.cloud.clone())).or_insert(Group {
             dir,
+            cloud: f.cloud.clone(),
             files: 0,
             bytes: 0,
             newest: String::new(),
@@ -1025,7 +1060,7 @@ mod tests {
         put(c.join("users/steamuser/AppData/Local/Temp/t.sav"));
         let outside = prefix.join("not-drive-c/x.sav");
         put(outside.clone());
-        let base = |extra: Vec<PathBuf>| {
+        let base = |extra: Vec<ExtraRoot>| {
             find(&Scan {
                 prefix: prefix.clone(),
                 snap_prefix: Some(snap.join("prefix")),
@@ -1037,11 +1072,15 @@ mod tests {
         let without = base(vec![]);
         assert!(!paths(&without.files).contains(&"Program Files/Studio/Saves/new.sav"));
 
+        let root = |name: &str, dir: PathBuf| ExtraRoot {
+            name: name.into(),
+            dir,
+        };
         let with = base(vec![
-            c.join("Program Files/Studio/Saves"),
-            c.join("users/steamuser/Saved Games"),
-            c.join("users/steamuser/AppData/Local/Temp"),
-            outside.parent().unwrap().to_path_buf(),
+            root("pf", c.join("Program Files/Studio/Saves")),
+            root("sg", c.join("users/steamuser/Saved Games")),
+            root("tmp", c.join("users/steamuser/AppData/Local/Temp")),
+            root("out", outside.parent().unwrap().to_path_buf()),
         ]);
         let got = paths(&with.files);
         assert!(
@@ -1055,6 +1094,61 @@ mod tests {
         want.push("Program Files/Studio/Saves/new.sav");
         want.sort();
         assert_eq!(got, want, "a file both reach is reported once");
+        // The labels: the cloud location's files carry its name, a file both
+        // reach is labelled too, and the rest has none.
+        let label = |p: &str| {
+            with.files
+                .iter()
+                .find(|f| f.path == p)
+                .unwrap()
+                .cloud
+                .clone()
+        };
+        assert_eq!(
+            label("Program Files/Studio/Saves/new.sav").as_deref(),
+            Some("pf")
+        );
+        assert_eq!(
+            label("users/steamuser/Saved Games/Studio/old.sav").as_deref(),
+            Some("sg")
+        );
+        assert!(with.files.iter().any(|f| f.cloud.is_none()));
+        let g = groups(&with.files);
+        assert!(g.iter().any(|g| g.cloud.as_deref() == Some("pf")), "{g:?}");
+    }
+
+    #[test]
+    fn a_location_reached_through_a_link_is_not_listed_twice() {
+        let (_tmp, now, snap) = fixture();
+        let prefix = now.join("prefix");
+        let c = prefix.join("drive_c");
+        std::fs::create_dir_all(c.join("Program Files")).unwrap();
+        std::os::unix::fs::symlink(
+            c.join("users/steamuser/Saved Games"),
+            c.join("Program Files/link"),
+        )
+        .unwrap();
+        let find_with = |extra: Vec<ExtraRoot>| {
+            find(&Scan {
+                prefix: prefix.clone(),
+                snap_prefix: Some(snap.join("prefix")),
+                created: SystemTime::UNIX_EPOCH + Duration::from_secs(THEN),
+                game: None,
+                extra_roots: extra,
+            })
+        };
+        let plain = find_with(vec![]);
+        let linked = find_with(vec![ExtraRoot {
+            name: "viaLink".into(),
+            dir: c.join("Program Files/link"),
+        }]);
+        assert_eq!(paths(&linked.files), paths(&plain.files));
+        assert!(
+            linked
+                .files
+                .iter()
+                .any(|f| f.cloud.as_deref() == Some("viaLink"))
+        );
     }
 
     fn paths(f: &[SaveFile]) -> Vec<&str> {
@@ -1272,6 +1366,7 @@ mod tests {
     #[test]
     fn saves_group_by_dir_without_the_user_dir() {
         let f = |path: &str, size, secs| SaveFile {
+            cloud: None,
             path: path.into(),
             size,
             mtime: rfc3339(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs)),

@@ -808,21 +808,28 @@ Code: `gogo_core::cloud::build_files`, `Location::{in_game_files, build_file}`.
   existing record and leaves a mark already set alone (the earliest unsettled rollback
   stands). No record: nothing is written and no `cloud-saves/` dir is created. A record that
   can't be read can't be marked: the rollback goes on, with a warning, and its plan says so.
-- **When**: `snapshot rollback` takes the game's sync lock before it changes anything (when
-  the game has a record or a lock file), so a running sync refuses the rollback (exit 7,
-  "nothing was changed"). It sets the mark right after the pre-rollback snapshot and before
-  the swap, holding the lock to the end. This is earlier than design 20 §6.3's "after": a
-  crash between the mark and the commit leaves a mark with no rollback, which costs one
-  question at the next sync, whereas a mark that is missing after a commit could let a sync
-  overwrite the rolled-back saves.
+- **When**: `snapshot rollback` takes the game's sync lock before it changes anything,
+  whether or not a record exists (a first sync could create one: the lock file is created,
+  never a record). A running sync is waited for 3 s, then refuses the rollback (exit 7,
+  "nothing was changed"). The mark is set as the first step of the run, before the journal
+  and the pre-rollback snapshot, and a record that can't be marked refuses the rollback.
+  `finish()`, which recovery reruns, sets it again (idempotent, best effort: a warning when
+  it fails, as the game is rolled back by then). A mark left by a rollback that then fails
+  costs one question at the next sync; a missing one could let a sync overwrite the saves.
+- **Lock order**: the cloud-save sync lock comes before the snapshot lock, in every command
+  that takes both (the rollback now; the commands of #461 and #462 must follow it, a pull taking its
+  `cloud-pull` snapshot included). Recovery of a rollback runs under the snapshot lock, so its re-mark waits only 1 s
+  and never blocks.
 - **Output**: the plan has `cloud saves: the next sync will ask about every difference
   (--prefer local|cloud)` when a record exists (`cloudSaves` in `--json`: `noRecord`,
   `record`, `unreadable`); the result has `cloudSavesMarked`.
 - **Save roots**: `cloud::save_roots::prefix_roots` resolves the cached remote config offline
   (`remote_config::load_cached`; no cache, no extra roots, no network) and returns the
   existing locations inside the prefix. They are unioned with design 20's generic roots (a
-  file both reach is listed once), with the same excludes, applied below the user dir the
-  location is in. Locations in the game's files (`<?INSTALL?>`, the `drive_c/GOG/<name>`
+  file both reach is listed once, matched by canonical path, so a location reached through a
+  link in the prefix doesn't list it twice), with the same excludes, applied below the user
+  dir the location is in. Files in a location carry its name: the plan's group line reads
+  `<dir> (cloud: <name>)` and `--json` has `cloud` on the file and the group. Locations in the game's files (`<?INSTALL?>`, the `drive_c/GOG/<name>`
   link) are not added: the finder already scans the game's files with the build-file filter.
   In practice every non-`<?INSTALL?>` variable resolves under a generic root, so the union
   adds files only for a user dir the generic scan doesn't list (it lists those present) and

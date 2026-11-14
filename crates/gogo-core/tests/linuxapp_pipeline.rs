@@ -11655,12 +11655,12 @@ mod rollback {
         let dir = w.home.join("cloud-saves");
         let id: u64 = ID.parse().unwrap();
 
-        // No record: no line, nothing created.
+        // No record: no line, and no record is created (the lock file is).
         let p = plan(&b, n, &opts());
         assert!(!p.lines(false).join("\n").contains("cloud saves"));
         let out = rb::rollback(ID, &b, n, &p, &opts()).unwrap();
         assert!(!out.cloud_saves_marked);
-        assert!(!dir.exists());
+        assert!(!gogo::cloud::record::path(&dir, id).exists());
         let _ = go(&b, n + 1, &opts()).unwrap(); // back to the dressed state
 
         // A record: the plan says so, and the rollback marks it.
@@ -11680,9 +11680,11 @@ mod rollback {
 
         // A sync running refuses the rollback, and nothing changed.
         let busy = SyncLock::acquire(&dir, id).unwrap();
-        let err = rb::rollback(ID, &b, n, &p, &opts())
-            .unwrap_err()
-            .to_string();
+        let quick = RollbackOptions {
+            cloud_lock_wait: Some(std::time::Duration::from_millis(200)),
+            ..opts()
+        };
+        let err = rb::rollback(ID, &b, n, &p, &quick).unwrap_err().to_string();
         assert!(err.contains("nothing was changed"), "{err}");
         assert_eq!(load(&dir, id).unwrap().unwrap().rolled_back, None);
         drop(busy);
@@ -11694,6 +11696,94 @@ mod rollback {
             serde_json::to_value(&out).unwrap()["cloudSavesMarked"],
             true
         );
+    }
+
+    #[test]
+    fn a_rollback_waits_briefly_for_a_sync_that_ends() {
+        use gogo::cloud::record::{Record, SyncLock, load};
+        let Some(w) = World::launcher("rb-cloud-wait", false) else {
+            return;
+        };
+        let (_, b) = fake();
+        let (_, n) = dress(&w, &b);
+        let dir = w.home.join("cloud-saves");
+        let id: u64 = ID.parse().unwrap();
+        let lock = SyncLock::acquire(&dir, id).unwrap();
+        lock.save(&Record::new("42")).unwrap();
+        let p = plan(&b, n, &opts());
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            drop(lock);
+        });
+        let out = rb::rollback(ID, &b, n, &p, &opts()).unwrap();
+        t.join().unwrap();
+        assert!(out.cloud_saves_marked);
+        assert!(load(&dir, id).unwrap().unwrap().rolled_back.is_some());
+    }
+
+    #[test]
+    fn a_record_that_cant_be_marked_refuses_the_rollback_before_anything_changes() {
+        use gogo::cloud::record::{SyncLock, path};
+        let Some(w) = World::launcher("rb-cloud-corrupt", false) else {
+            return;
+        };
+        let (_, b) = fake();
+        let (root, n) = dress(&w, &b);
+        let dir = w.home.join("cloud-saves");
+        let id: u64 = ID.parse().unwrap();
+        drop(SyncLock::acquire(&dir, id).unwrap());
+        std::fs::write(path(&dir, id), "not toml [").unwrap();
+        let p = plan(&b, n, &opts());
+        assert!(
+            p.lines(false)
+                .join("\n")
+                .contains("sync record can't be read"),
+            "{:?}",
+            p.lines(false)
+        );
+        let err = rb::rollback(ID, &b, n, &p, &opts())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("nothing was changed"), "{err}");
+        assert_eq!(read(&root, "game/era.txt").as_deref(), Some("now"));
+        let listed = snap::list(ID, &b, 5, false).unwrap();
+        assert!(
+            listed.snapshots.iter().all(|s| s.id <= n),
+            "no pre snapshot"
+        );
+    }
+
+    #[test]
+    fn recovery_of_a_rollback_marks_the_record_again() {
+        use gogo::cloud::record::{Record, SyncLock, load};
+        let Some(w) = World::launcher("rb-cloud-recover", false) else {
+            return;
+        };
+        let (_, b) = fake();
+        let (_, n) = dress(&w, &b);
+        let dir = w.home.join("cloud-saves");
+        let id: u64 = ID.parse().unwrap();
+        SyncLock::acquire(&dir, id)
+            .unwrap()
+            .save(&Record::new("42"))
+            .unwrap();
+        let o = RollbackOptions {
+            fail_at: Some(RbStep::Rewritten),
+            ..opts()
+        };
+        let p = plan(&b, n, &o);
+        rb::rollback(ID, &b, n, &p, &o).unwrap_err();
+        assert!(load(&dir, id).unwrap().unwrap().rolled_back.is_some());
+        // The mark is lost (a sync settled it, a hand edit): the recovery
+        // that finishes the rollback sets it again.
+        SyncLock::acquire(&dir, id)
+            .unwrap()
+            .save(&Record::new("42"))
+            .unwrap();
+        assert_eq!(load(&dir, id).unwrap().unwrap().rolled_back, None);
+        let said = rb::settle_pending(ID, &b).unwrap();
+        assert!(said.iter().any(|l| l.contains("was finished")), "{said:?}");
+        assert!(load(&dir, id).unwrap().unwrap().rolled_back.is_some());
     }
 
     #[test]
