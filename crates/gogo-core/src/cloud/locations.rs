@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use super::remote_config::{CloudStorage, RemoteConfig, RemoteConfigError};
+use super::client_id::{self, InfoId};
+use super::error::CloudError;
+use super::remote_config::{CloudStorage, RemoteConfig};
 use crate::macapp::launch::GameDirs;
 
 /// Which Windows user a lane's prefix has (design 22 §3.2, D9).
@@ -42,20 +44,6 @@ impl Lane {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum LocationError {
-    #[error("{0} isn't built: no game dir for it")]
-    NotBuilt(String),
-    #[error(
-        "no client id for {0}: its goggame-{0}.info and build-manifest.json have none (is it built?)"
-    )]
-    NoClientId(String),
-    #[error("{0}")]
-    Game(String),
-    #[error(transparent)]
-    RemoteConfig(#[from] RemoteConfigError),
-}
-
 /// Where a game's pieces are on disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Layout {
@@ -77,10 +65,10 @@ pub struct Game {
 
 impl Game {
     /// Find a built game by gogid (either lane's library), read-only.
-    pub fn find(gogid: &str, lane: Lane) -> Result<Game, LocationError> {
-        let dirs = GameDirs::for_game(gogid).map_err(|e| LocationError::Game(e.to_string()))?;
+    pub fn find(gogid: &str, lane: Lane) -> Result<Game, CloudError> {
+        let dirs = GameDirs::for_game(gogid).map_err(|e| CloudError::Game(e.to_string()))?;
         if !dirs.root.is_dir() {
-            return Err(LocationError::NotBuilt(gogid.to_string()));
+            return Err(CloudError::NotBuilt(gogid.to_string()));
         }
         let tree = crate::linuxapp::game::read_launch_toml(&dirs)
             .ok()
@@ -97,86 +85,29 @@ impl Game {
         })
     }
 
-    /// The game's client id (public): its `goggame-<gogid>.info`, else the
-    /// `clientId` field of the kept `build-manifest.json` (design 22 §2.2;
-    /// nothing else of the manifest is read, never the secret).
-    pub fn client_id(&self) -> Result<String, LocationError> {
-        let id: u64 = self
-            .gogid
+    /// The gogid as a number.
+    pub fn id(&self) -> Result<u64, CloudError> {
+        self.gogid
             .parse()
-            .map_err(|_| LocationError::NoClientId(self.gogid.clone()))?;
-        let info = find_game_info(&self.layout, id);
-        if let Some(c) = info.and_then(|p| client_id_of_info(&p)) {
-            return Ok(c);
-        }
-        let manifest = crate::gog::build_manifest::path(&self.root);
-        if let Some(c) = client_id_of_manifest(&manifest) {
-            return Ok(c);
-        }
-        Err(LocationError::NoClientId(self.gogid.clone()))
+            .map_err(|_| CloudError::NoClientId(self.gogid.clone()))
     }
-}
 
-fn find_game_info(layout: &Layout, id: u64) -> Option<PathBuf> {
-    crate::linuxapp::dlc_installer::info_in(&layout.game_files, id)
-        .or_else(|| crate::linuxapp::dlc_installer::find_info(&layout.prefix.join("drive_c"), id))
-}
-
-/// What gogo reads of a `goggame-*.info` or a build manifest: the client
-/// id, typed, so nothing else (the manifest's secret above all) is ever
-/// parsed into a value.
-#[derive(serde::Deserialize)]
-struct IdOnly {
-    #[serde(rename = "clientId", default)]
-    client_id: Option<serde_json::Value>,
-}
-
-/// The manifest as kept: `{"manifest": {...}}`, the manifest flat or wrapped
-/// by gog-warp's version tag (`{"V2": {...}}`), whichever gogo wrote.
-#[derive(serde::Deserialize)]
-struct ManifestIds {
-    manifest: Option<ManifestShape>,
-}
-
-#[derive(serde::Deserialize)]
-struct ManifestShape {
-    #[serde(rename = "clientId", default)]
-    client_id: Option<serde_json::Value>,
-    #[serde(rename = "V2", default)]
-    v2: Option<IdOnly>,
-    #[serde(rename = "V1", default)]
-    v1: Option<IdOnly>,
-}
-
-fn read_bytes(path: &Path) -> Option<Vec<u8>> {
-    let mut raw = std::fs::read(path).ok()?;
-    if raw.starts_with(b"\xEF\xBB\xBF") {
-        raw.drain(..3);
+    /// The game's client id (public), for commands that need no account:
+    /// its `goggame-<gogid>.info`, else the `clientId` field of the kept
+    /// `build-manifest.json` (design 22 §2.2; never the secret). An info file
+    /// that can't be used falls back to the manifest with a warning; the
+    /// credentials path refuses it instead ([`super::auth::CloudAuth`]).
+    pub fn client_id(&self) -> Result<String, CloudError> {
+        match client_id::info_id(&self.layout, self.id()?) {
+            InfoId::Id(c) => return Ok(c),
+            InfoId::Bad { path, reason } => {
+                tracing::warn!("{}: {reason}; using the kept build manifest", path.display())
+            }
+            InfoId::Absent => {}
+        }
+        client_id::kept_manifest_id(&self.root)
+            .ok_or_else(|| CloudError::NoClientId(self.gogid.clone()))
     }
-    Some(raw)
-}
-
-/// A client id: a string that is safe in a URL and a file name.
-fn usable_id(v: Option<serde_json::Value>) -> Option<String> {
-    let c = v?;
-    let c = c.as_str()?;
-    super::remote_config::check_client_id(c).ok()?;
-    Some(c.to_string())
-}
-
-fn client_id_of_info(path: &Path) -> Option<String> {
-    let info: IdOnly = serde_json::from_slice(&read_bytes(path)?).ok()?;
-    usable_id(info.client_id)
-}
-
-fn client_id_of_manifest(path: &Path) -> Option<String> {
-    let m: ManifestIds = serde_json::from_slice(&read_bytes(path)?).ok()?;
-    let m = m.manifest?;
-    usable_id(
-        m.client_id
-            .or_else(|| m.v2.and_then(|v| v.client_id))
-            .or_else(|| m.v1.and_then(|v| v.client_id)),
-    )
 }
 
 // — variables —

@@ -697,7 +697,7 @@ fn finds_a_built_depot_game_and_its_client_id_from_the_info() {
     assert_eq!(g.client_id().unwrap(), "4242");
     assert!(matches!(
         Game::find("999", Lane::Linux),
-        Err(LocationError::NotBuilt(_))
+        Err(CloudError::NotBuilt(_))
     ));
     assert!(Game::find("12x", Lane::Linux).is_err());
     unsafe { std::env::remove_var("GOGO_HOME") };
@@ -722,7 +722,7 @@ fn the_client_id_falls_back_to_the_kept_manifest_and_never_reads_the_secret() {
     fs::create_dir_all(root.join("game")).unwrap();
     fs::create_dir_all(root.join("prefix")).unwrap();
     let g = Game::find("7", Lane::Mac).unwrap();
-    assert!(matches!(g.client_id(), Err(LocationError::NoClientId(_))));
+    assert!(matches!(g.client_id(), Err(CloudError::NoClientId(_))));
     // The wrapped form gog-warp's enum serializes to, and the flat one.
     for body in [
         r#"{"schema":1,"manifest":{"V2":{"clientId":"31337","clientSecret":"made-up"}}}"#,
@@ -763,7 +763,7 @@ fn a_malicious_info_client_id_is_not_used() {
     ] {
         fs::write(game.join("goggame-11.info"), body).unwrap();
         assert!(
-            matches!(g.client_id(), Err(LocationError::NoClientId(_))),
+            matches!(g.client_id(), Err(CloudError::NoClientId(_))),
             "{body}"
         );
     }

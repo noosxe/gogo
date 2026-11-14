@@ -35,8 +35,17 @@ async fn exchange_and_list() {
 
     // An empty dir: no kept manifest, no info file, so the fetch path runs.
     let empty = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let game = gogo::cloud::locations::Game {
+        gogid: gogid.to_string(),
+        layout: gogo::cloud::locations::Layout {
+            lane: gogo::cloud::locations::Lane::host(),
+            prefix: empty.path().join("prefix"),
+            game_files: empty.path().to_path_buf(),
+        },
+        root: empty.path().to_path_buf(),
+    };
     let creds = cloud
-        .credentials(gogid, empty.path(), None)
+        .credentials(&game, None)
         .await
         .unwrap_or_else(|e| panic!("credentials: {e}"));
     let token = cloud
