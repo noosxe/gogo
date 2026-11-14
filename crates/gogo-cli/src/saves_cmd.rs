@@ -30,15 +30,30 @@ pub async fn run(cmd: SavesCmd) -> Result<i32, AppError> {
     }
 }
 
-fn fail(e: &CloudError) -> i32 {
-    eprintln!("gogo: {e}");
-    match e {
-        CloudError::RemoteConfig(remote_config::RemoteConfigError::Http(_))
-        | CloudError::RemoteConfig(remote_config::RemoteConfigError::Status { .. }) => {
-            cli::exit::NETWORK
+/// What a command prints and exits with; kept apart from the printing so
+/// tests see all three.
+#[derive(Debug, PartialEq)]
+pub struct Outcome {
+    pub code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+impl Outcome {
+    fn failed(e: &CloudError) -> Outcome {
+        let code = match e {
+            CloudError::RemoteConfig(
+                remote_config::RemoteConfigError::Http(_)
+                | remote_config::RemoteConfigError::Status { .. },
+            ) => cli::exit::NETWORK,
+            CloudError::NotBuilt(_) | CloudError::Game(_) => cli::exit::USAGE,
+            _ => cli::exit::FAILED,
+        };
+        Outcome {
+            code,
+            stdout: String::new(),
+            stderr: format!("gogo: {e}\n"),
         }
-        CloudError::NotBuilt(_) | CloudError::Game(_) => cli::exit::USAGE,
-        _ => cli::exit::FAILED,
     }
 }
 
@@ -46,29 +61,81 @@ async fn locations(gogid: &str, json: bool) -> Result<i32, AppError> {
     let lane = Lane::host();
     let game = match Game::find(gogid, lane) {
         Ok(g) => g,
-        Err(e) => return Ok(fail(&e)),
+        Err(e) => return Ok(emit(Outcome::failed(&e))),
     };
     let client_id = match game.client_id() {
         Ok(c) => c,
-        Err(e) => return Ok(fail(&e)),
+        Err(e) => return Ok(emit(Outcome::failed(&e))),
     };
     let http = gogo::gog::http().map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
-    let (cfg, source) = match remote_config::get(&http, remote_config::BASE, &client_id).await {
-        Ok(v) => v,
-        Err(e) => return Ok(fail(&e.into())),
-    };
-    let resolved = resolve(&cfg, &client_id, &game.layout);
-    if json {
+    let cache = gogo::state::cache::cache_dir();
+    let out = report(
+        &Request {
+            gogid,
+            client_id: &client_id,
+            layout: &game.layout,
+            json,
+        },
+        &cache,
+        remote_config::BASE,
+        &http,
+    )
+    .await;
+    Ok(emit(out))
+}
+
+fn emit(o: Outcome) -> i32 {
+    print!("{}", o.stdout);
+    eprint!("{}", o.stderr);
+    o.code
+}
+
+pub struct Request<'a> {
+    pub gogid: &'a str,
+    pub client_id: &'a str,
+    pub layout: &'a gogo::cloud::locations::Layout,
+    pub json: bool,
+}
+
+/// Fetch (or read from the cache) the remote config and resolve it. A 404
+/// means GOG has no config for the client: no cloud saves, exit 0. A real
+/// network failure with no cache to fall back to is exit 4.
+pub async fn report(
+    req: &Request<'_>,
+    cache: &std::path::Path,
+    base: &str,
+    http: &reqwest::Client,
+) -> Outcome {
+    let lane = req.layout.lane;
+    let (resolved, source, no_config) =
+        match remote_config::get_in(cache, http, base, req.client_id).await {
+            Ok((cfg, source)) => (resolve(&cfg, req.client_id, req.layout), source, false),
+            Err(remote_config::RemoteConfigError::Status { status: 404, .. }) => {
+                (Resolved::off(), Source::Network, true)
+            }
+            Err(e) => return Outcome::failed(&e.into()),
+        };
+    let stdout = if req.json {
         let mut report = serde_json::to_value(&resolved).unwrap();
-        report["gogid"] = serde_json::json!(gogid);
+        report["gogid"] = serde_json::json!(req.gogid);
         report["lane"] = serde_json::json!(lane);
         report["windows_user"] = serde_json::json!(lane.windows_user());
         report["config_source"] = serde_json::json!(source);
-        println!("{report}");
-        return Ok(cli::exit::OK);
+        report["no_remote_config"] = serde_json::json!(no_config);
+        format!("{report}\n")
+    } else if no_config {
+        format!(
+            "{}: no cloud saves (GOG has no remote config for this game)\n",
+            req.gogid
+        )
+    } else {
+        render(req.gogid, source, &resolved)
+    };
+    Outcome {
+        code: cli::exit::OK,
+        stdout,
+        stderr: String::new(),
     }
-    print!("{}", render(gogid, source, &resolved));
-    Ok(cli::exit::OK)
 }
 
 /// The plain-text report.
@@ -164,5 +231,145 @@ mod tests {
         assert!(d.contains("__default") && d.contains("unverified"));
         let off = render("5", Source::Cache, &resolved(false, &[]));
         assert!(off.contains("no cloud saves"));
+    }
+
+    const CONFIG: &str = r#"{"content":{"Windows":{"cloudStorage":{"enabled":true,
+        "locations":[{"name":"saves","location":"<?DOCUMENTS?>/G"}]}}}}"#;
+    const CONFIG_OFF: &str =
+        r#"{"content":{"Windows":{"cloudStorage":{"enabled":false,"locations":[]}}}}"#;
+
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        cache: std::path::PathBuf,
+        layout: gogo::cloud::locations::Layout,
+    }
+
+    fn fixture() -> Fixture {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        std::fs::create_dir_all(base.join("prefix")).unwrap();
+        std::fs::create_dir_all(base.join("game")).unwrap();
+        Fixture {
+            cache: base.join("cache"),
+            layout: Layout {
+                lane: Lane::Linux,
+                prefix: base.join("prefix"),
+                game_files: base.join("game"),
+            },
+            _dir: dir,
+        }
+    }
+
+    async fn run_report(f: &Fixture, base: &str, json: bool) -> Outcome {
+        report(
+            &Request {
+                gogid: "5",
+                client_id: "77",
+                layout: &f.layout,
+                json,
+            },
+            &f.cache,
+            base,
+            &reqwest::Client::new(),
+        )
+        .await
+    }
+
+    async fn serving(status: u16, body: &str) -> wiremock::MockServer {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(ResponseTemplate::new(status).set_body_string(body))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn locations_json_lists_resolved_and_skipped() {
+        let f = fixture();
+        let server = serving(200, CONFIG).await;
+        let o = run_report(&f, &server.uri(), true).await;
+        assert_eq!(o.code, 0);
+        assert!(o.stderr.is_empty());
+        let v: serde_json::Value = serde_json::from_str(&o.stdout).unwrap();
+        assert_eq!(v["enabled"], true);
+        assert_eq!(v["gogid"], "5");
+        assert_eq!(v["lane"], "linux");
+        assert_eq!(v["windows_user"], "steamuser");
+        assert_eq!(v["config_source"], "network");
+        assert_eq!(v["locations"][0]["name"], "saves");
+        assert_eq!(v["locations"][0]["exists"], false);
+        assert!(v.get("user_id").is_none() && v.get("token").is_none());
+    }
+
+    #[tokio::test]
+    async fn disabled_storage_is_exit_0_with_enabled_false() {
+        let f = fixture();
+        let server = serving(200, CONFIG_OFF).await;
+        let o = run_report(&f, &server.uri(), true).await;
+        assert_eq!(o.code, 0);
+        let v: serde_json::Value = serde_json::from_str(&o.stdout).unwrap();
+        assert_eq!(v["enabled"], false);
+        assert_eq!(v["locations"].as_array().unwrap().len(), 0);
+        let o = run_report(&f, &server.uri(), false).await;
+        assert_eq!(o.code, 0);
+        assert!(o.stdout.contains("no cloud saves"));
+    }
+
+    #[tokio::test]
+    async fn a_404_means_no_cloud_saves_not_a_failure() {
+        let f = fixture();
+        let server = serving(404, "").await;
+        let o = run_report(&f, &server.uri(), false).await;
+        assert_eq!(o.code, 0);
+        assert!(o.stdout.contains("no remote config"));
+        let o = run_report(&f, &server.uri(), true).await;
+        assert_eq!(o.code, 0);
+        let v: serde_json::Value = serde_json::from_str(&o.stdout).unwrap();
+        assert_eq!(v["enabled"], false);
+        assert_eq!(v["no_remote_config"], true);
+    }
+
+    #[tokio::test]
+    async fn network_failure_is_exit_4_and_server_errors_too() {
+        let f = fixture();
+        let o = run_report(&f, "http://127.0.0.1:1", false).await;
+        assert_eq!(o.code, cli::exit::NETWORK);
+        assert!(o.stdout.is_empty() && o.stderr.starts_with("gogo: "));
+        let server = serving(500, "").await;
+        assert_eq!(
+            run_report(&f, &server.uri(), false).await.code,
+            cli::exit::NETWORK
+        );
+    }
+
+    #[tokio::test]
+    async fn a_foreign_200_is_a_failure_not_no_cloud_saves() {
+        let f = fixture();
+        let server = serving(200, "{}").await;
+        let o = run_report(&f, &server.uri(), false).await;
+        assert_eq!(o.code, cli::exit::FAILED);
+    }
+
+    #[tokio::test]
+    async fn an_old_cache_stands_in_with_a_note_when_the_network_is_down() {
+        let f = fixture();
+        let server = serving(200, CONFIG).await;
+        assert_eq!(run_report(&f, &server.uri(), false).await.code, 0);
+        let cached = f.cache.join("remote-config/77.json");
+        let file = std::fs::File::options().write(true).open(&cached).unwrap();
+        file.set_modified(
+            std::time::SystemTime::now() - std::time::Duration::from_secs(3 * 24 * 3600),
+        )
+        .unwrap();
+        drop(file);
+        let o = run_report(&f, "http://127.0.0.1:1", false).await;
+        assert_eq!(o.code, 0);
+        assert!(o.stdout.contains("older cached copy"));
+        assert!(o.stdout.contains("saves  <?DOCUMENTS?>"));
+        let o = run_report(&f, "http://127.0.0.1:1", true).await;
+        let v: serde_json::Value = serde_json::from_str(&o.stdout).unwrap();
+        assert_eq!(v["config_source"], "stale_cache");
     }
 }

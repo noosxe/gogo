@@ -85,8 +85,16 @@ pub struct RemoteConfig {
 }
 
 impl RemoteConfig {
+    /// Parse an answer. One without a `content` object (`{}`, an error body,
+    /// a captive portal's JSON) isn't a remote config: it would read as "no
+    /// cloud saves" and be cached as such.
     pub fn parse(bytes: &[u8]) -> Result<Self, RemoteConfigError> {
-        serde_json::from_slice(bytes).map_err(|e| RemoteConfigError::Parse(e.to_string()))
+        let v: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(|e| RemoteConfigError::Parse(e.to_string()))?;
+        if !v.get("content").is_some_and(serde_json::Value::is_object) {
+            return Err(RemoteConfigError::Parse("no `content` object".into()));
+        }
+        serde_json::from_value(v).map_err(|e| RemoteConfigError::Parse(e.to_string()))
     }
 
     /// `content.Windows.cloudStorage`: what both lanes use (they run Windows
@@ -196,9 +204,11 @@ fn read_cache(path: &Path) -> Option<(RemoteConfig, Duration)> {
     let meta = std::fs::metadata(path).ok()?;
     let raw = std::fs::read(path).ok()?;
     let cfg = RemoteConfig::parse(&raw).ok()?;
+    // A modification time in the future (a clock that was wrong) is no
+    // proof of freshness: the entry counts as expired.
     let age = SystemTime::now()
         .duration_since(meta.modified().ok()?)
-        .unwrap_or_default();
+        .unwrap_or(Duration::MAX);
     Some((cfg, age))
 }
 
@@ -210,16 +220,22 @@ pub fn load_cached(client_id: &str) -> Option<RemoteConfig> {
 
 /// Write the answer to the cache atomically (tmp + fsync + rename).
 fn store(path: &Path, raw: &[u8]) -> std::io::Result<()> {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("json.tmp");
-    {
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("json.{}.{n}.tmp", std::process::id()));
+    let written = (|| {
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(raw)?;
         f.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
     }
-    std::fs::rename(&tmp, path)
+    written
 }
 
 /// The remote config for `client_id`: the cache when fresh, else the network
@@ -293,12 +309,28 @@ mod tests {
     }
 
     #[test]
-    fn missing_keys_are_not_errors() {
-        let c = RemoteConfig::parse(b"{}").unwrap();
+    fn missing_platform_keys_are_not_errors() {
+        let c = RemoteConfig::parse(br#"{"content":{}}"#).unwrap();
         assert!(c.windows_storage().is_none());
         let c = RemoteConfig::parse(br#"{"content":{"Windows":{}}}"#).unwrap();
         assert!(c.windows_storage().is_none());
-        assert!(RemoteConfig::parse(b"not json").is_err());
+    }
+
+    #[test]
+    fn an_answer_without_a_content_object_is_no_remote_config() {
+        for body in [
+            "{}",
+            r#"{"error":"nope"}"#,
+            r#"{"content":null}"#,
+            r#"{"content":[]}"#,
+            r#"{"content":"x"}"#,
+            "[]",
+            "null",
+            "not json",
+            "",
+        ] {
+            assert!(RemoteConfig::parse(body.as_bytes()).is_err(), "{body:?}");
+        }
     }
 
     #[test]
@@ -374,6 +406,116 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, RemoteConfigError::Status { status: 404, .. }));
+    }
+
+    async fn mock_serving(status: u16, body: &str) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(status).set_body_string(body))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn a_bodyless_or_foreign_200_is_neither_used_nor_cached() {
+        let home = tempfile::tempdir().unwrap();
+        let cache = home.path();
+        let http = reqwest::Client::new();
+        for body in ["{}", r#"{"error":"captive"}"#] {
+            let server = mock_serving(200, body).await;
+            let err = get_in(cache, &http, &server.uri(), "5").await.unwrap_err();
+            assert!(matches!(err, RemoteConfigError::Parse(_)), "{body}");
+            assert!(!cache_path_in(cache, "5").unwrap().exists());
+        }
+        // With a good (stale) cache, that answer falls back to it.
+        store(
+            &cache_path_in(cache, "5").unwrap(),
+            CYBERPUNK_LIKE.as_bytes(),
+        )
+        .unwrap();
+        age(cache, "5", CACHE_TTL + Duration::from_secs(60));
+        let server = mock_serving(200, "{}").await;
+        let (cfg, src) = get_in(cache, &http, &server.uri(), "5").await.unwrap();
+        assert_eq!(src, Source::StaleCache);
+        assert!(cfg.windows_storage().unwrap().enabled);
+    }
+
+    fn age(cache: &Path, id: &str, by: Duration) {
+        let f = std::fs::File::options()
+            .write(true)
+            .open(cache_path_in(cache, id).unwrap())
+            .unwrap();
+        f.set_modified(SystemTime::now() - by).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_cache_stamped_in_the_future_is_expired() {
+        let home = tempfile::tempdir().unwrap();
+        let cache = home.path();
+        let path = cache_path_in(cache, "6").unwrap();
+        store(&path, CYBERPUNK_LIKE.as_bytes()).unwrap();
+        let f = std::fs::File::options().write(true).open(&path).unwrap();
+        f.set_modified(SystemTime::now() + Duration::from_secs(30 * 24 * 3600))
+            .unwrap();
+        drop(f);
+        let (_, age) = read_cache(&path).unwrap();
+        assert!(age >= CACHE_TTL);
+        // So the network is asked, not the entry trusted.
+        let server = mock_serving(200, CYBERPUNK_LIKE).await;
+        let (_, src) = get_in(cache, &reqwest::Client::new(), &server.uri(), "6")
+            .await
+            .unwrap();
+        assert_eq!(src, Source::Network);
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_cache_is_a_miss_with_or_without_the_network() {
+        let home = tempfile::tempdir().unwrap();
+        let cache = home.path();
+        let http = reqwest::Client::new();
+        let path = cache_path_in(cache, "7").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for junk in [&b"\x00\xffgarbage"[..], b"{}", b"", b"{\"content\":"] {
+            std::fs::write(&path, junk).unwrap();
+            // Offline: an error, not a bogus "no cloud saves".
+            assert!(
+                get_in(cache, &http, "http://127.0.0.1:1", "7")
+                    .await
+                    .is_err(),
+                "{junk:?}"
+            );
+            // Online: refetched and the cache repaired.
+            std::fs::write(&path, junk).unwrap();
+            let server = mock_serving(200, CYBERPUNK_LIKE).await;
+            let (_, src) = get_in(cache, &http, &server.uri(), "7").await.unwrap();
+            assert_eq!(src, Source::Network);
+            assert!(read_cache(&path).is_some());
+        }
+    }
+
+    #[test]
+    fn stores_leave_no_tmp_files_and_unique_names() {
+        let home = tempfile::tempdir().unwrap();
+        let path = cache_path_in(home.path(), "8").unwrap();
+        store(&path, b"{\"content\":{}}").unwrap();
+        store(&path, b"{\"content\":{}}").unwrap();
+        let names: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["8.json"]);
+        // A failed write removes its tmp file: the target is a dir.
+        let dir_target = home.path().join("remote-config/9.json");
+        std::fs::create_dir_all(&dir_target).unwrap();
+        assert!(store(&dir_target, b"x").is_err());
+        assert!(
+            std::fs::read_dir(home.path().join("remote-config"))
+                .unwrap()
+                .flatten()
+                .all(|e| !e.file_name().to_string_lossy().ends_with(".tmp"))
+        );
     }
 
     /// Live, read-only check of design 22 D13: GOG still answers

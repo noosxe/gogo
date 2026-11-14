@@ -1289,12 +1289,14 @@ dependencies = [
  "gogo-core",
  "gogo-shims",
  "indicatif",
+ "reqwest",
  "serde_json",
  "tempfile",
  "tokio",
  "toml_edit",
  "tracing-subscriber",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]

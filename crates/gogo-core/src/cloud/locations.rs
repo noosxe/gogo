@@ -122,31 +122,61 @@ fn find_game_info(layout: &Layout, id: u64) -> Option<PathBuf> {
         .or_else(|| crate::linuxapp::dlc_installer::find_info(&layout.prefix.join("drive_c"), id))
 }
 
-fn json_of(path: &Path) -> Option<serde_json::Value> {
-    let raw = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(raw.trim_start_matches('\u{feff}')).ok()
+/// What gogo reads of a `goggame-*.info` or a build manifest: the client
+/// id, typed, so nothing else (the manifest's secret above all) is ever
+/// parsed into a value.
+#[derive(serde::Deserialize)]
+struct IdOnly {
+    #[serde(rename = "clientId", default)]
+    client_id: Option<serde_json::Value>,
+}
+
+/// The manifest as kept: `{"manifest": {...}}`, the manifest flat or wrapped
+/// by gog-warp's version tag (`{"V2": {...}}`), whichever gogo wrote.
+#[derive(serde::Deserialize)]
+struct ManifestIds {
+    manifest: Option<ManifestShape>,
+}
+
+#[derive(serde::Deserialize)]
+struct ManifestShape {
+    #[serde(rename = "clientId", default)]
+    client_id: Option<serde_json::Value>,
+    #[serde(rename = "V2", default)]
+    v2: Option<IdOnly>,
+    #[serde(rename = "V1", default)]
+    v1: Option<IdOnly>,
+}
+
+fn read_bytes(path: &Path) -> Option<Vec<u8>> {
+    let mut raw = std::fs::read(path).ok()?;
+    if raw.starts_with(b"\xEF\xBB\xBF") {
+        raw.drain(..3);
+    }
+    Some(raw)
+}
+
+/// A client id: a string that is safe in a URL and a file name.
+fn usable_id(v: Option<serde_json::Value>) -> Option<String> {
+    let c = v?;
+    let c = c.as_str()?;
+    super::remote_config::check_client_id(c).ok()?;
+    Some(c.to_string())
 }
 
 fn client_id_of_info(path: &Path) -> Option<String> {
-    let v = json_of(path)?;
-    let c = v.get("clientId")?.as_str()?;
-    super::remote_config::check_client_id(c).ok()?;
-    Some(c.to_string())
+    let info: IdOnly = serde_json::from_slice(&read_bytes(path)?).ok()?;
+    usable_id(info.client_id)
 }
 
-/// `clientId` at the top of the manifest value or inside its version
-/// wrapper (`{"V2": {...}}`), whichever gogo's serialisation produced.
 fn client_id_of_manifest(path: &Path) -> Option<String> {
-    let v = json_of(path)?;
-    let m = v.get("manifest")?;
-    let found = m.get("clientId").or_else(|| {
-        m.as_object()?
-            .values()
-            .find_map(|inner| inner.get("clientId"))
-    })?;
-    let c = found.as_str()?;
-    super::remote_config::check_client_id(c).ok()?;
-    Some(c.to_string())
+    let m: ManifestIds = serde_json::from_slice(&read_bytes(path)?).ok()?;
+    let m = m.manifest?;
+    usable_id(
+        m.client_id
+            .or_else(|| m.v2.and_then(|v| v.client_id))
+            .or_else(|| m.v1.and_then(|v| v.client_id)),
+    )
 }
 
 // — variables —
@@ -292,45 +322,82 @@ fn check_part(p: &str) -> Result<(), SkipReason> {
 
 // — the escape guard —
 
-/// The dirs a resolved path may be in: the prefix and the game's files, both
-/// canonical.
+/// `path` with its deepest existing ancestor canonicalized (every link
+/// resolved) and the parts that don't exist yet appended as they are. `None`
+/// for a path with a `..`/`.` part, and for a dangling link anywhere on it.
+fn canonical_lenient(path: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    if path
+        .components()
+        .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+    {
+        return None;
+    }
+    let mut probe = path.to_path_buf();
+    let mut tail = Vec::new();
+    loop {
+        if std::fs::symlink_metadata(&probe).is_ok() {
+            let mut c = probe.canonicalize().ok()?;
+            c.extend(tail.iter().rev());
+            return Some(c);
+        }
+        tail.push(probe.file_name()?.to_os_string());
+        if !probe.pop() {
+            return None;
+        }
+    }
+}
+
+/// Where a resolved path may land (design 22 §3.1 step 5): inside the
+/// prefix, or inside the game's files when it is an `<?INSTALL?>` path or
+/// goes through the prefix's `drive_c/GOG/<name>` link. Every other link into
+/// the game's files, and every link out of the game's files, is refused.
+/// Roots needn't exist yet (a depot game that never ran has no prefix).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Roots(Vec<PathBuf>);
+pub struct Roots {
+    prefix: PathBuf,
+    prefix_canon: PathBuf,
+    game_canon: PathBuf,
+}
 
 impl Roots {
     pub fn of(layout: &Layout) -> Roots {
-        let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-        Roots(vec![canon(&layout.prefix), canon(&layout.game_files)])
+        let canon = |p: &Path| canonical_lenient(p).unwrap_or_else(|| p.to_path_buf());
+        Roots {
+            prefix: layout.prefix.clone(),
+            prefix_canon: canon(&layout.prefix),
+            game_canon: canon(&layout.game_files),
+        }
     }
 
-    /// Whether `path` stays inside the roots: its deepest existing ancestor,
-    /// with every link resolved, must be under one of them. A dangling link
-    /// counts as leaving. Parts that don't exist yet are checked lexically
-    /// (no `..` allowed).
-    pub fn contains(&self, path: &Path) -> bool {
-        use std::path::Component;
-        if path
-            .components()
-            .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
-        {
+    /// Whether `path` goes through the prefix's `drive_c/GOG/<name>`.
+    fn via_gog_link(&self, path: &Path) -> bool {
+        let Ok(rel) = path.strip_prefix(&self.prefix) else {
             return false;
-        }
-        let mut probe = path.to_path_buf();
-        loop {
-            match std::fs::symlink_metadata(&probe) {
-                Ok(_) => {
-                    return match probe.canonicalize() {
-                        Ok(c) => self.0.iter().any(|r| c.starts_with(r)),
-                        Err(_) => false,
-                    };
-                }
-                Err(_) => {
-                    if !probe.pop() {
-                        return false;
-                    }
-                }
-            }
-        }
+        };
+        let mut parts = rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().to_lowercase());
+        parts.next().as_deref() == Some("drive_c")
+            && parts.next().as_deref() == Some("gog")
+            && parts.next().is_some()
+    }
+
+    /// The canonical form of `path` when it stays inside the roots, else
+    /// `None`: its deepest existing ancestor, with every link resolved, must
+    /// be under the prefix (or under the game's files, for an `install`
+    /// location or through the `drive_c/GOG` link). A dangling link counts
+    /// as leaving; the parts that don't exist yet are checked lexically (no
+    /// `..`).
+    pub fn check(&self, path: &Path, install: bool) -> Option<PathBuf> {
+        let c = canonical_lenient(path)?;
+        let ok = if install {
+            c.starts_with(&self.game_canon)
+        } else {
+            c.starts_with(&self.prefix_canon)
+                || (c.starts_with(&self.game_canon) && self.via_gog_link(path))
+        };
+        ok.then_some(c)
     }
 }
 
@@ -366,8 +433,14 @@ fn lookup(dir: &Path, part: &str) -> Lookup {
 
 /// Join `parts` under `base`, looking each one up case-insensitively while
 /// the dirs exist; a part that doesn't exist keeps its exact case, and so
-/// do the parts after it. Checked against `roots` at the end.
-fn join_checked(roots: &Roots, base: &Path, parts: &[String]) -> Result<PathBuf, SkipReason> {
+/// do the parts after it. Checked against `roots` at the end; returns the
+/// path as joined and its canonical form.
+fn join_checked(
+    roots: &Roots,
+    install: bool,
+    base: &Path,
+    parts: &[String],
+) -> Result<(PathBuf, PathBuf), SkipReason> {
     let mut cur = base.to_path_buf();
     let mut missing = false;
     for p in parts {
@@ -385,10 +458,9 @@ fn join_checked(roots: &Roots, base: &Path, parts: &[String]) -> Result<PathBuf,
             Lookup::Ambiguous => return Err(SkipReason::Ambiguous(p.clone())),
         }
     }
-    if roots.contains(&cur) {
-        Ok(cur)
-    } else {
-        Err(SkipReason::EscapesPrefix)
+    match roots.check(&cur, install) {
+        Some(canon) => Ok((cur, canon)),
+        None => Err(SkipReason::EscapesPrefix),
     }
 }
 
@@ -418,7 +490,12 @@ impl Location {
     /// separated) as a host path: parts looked up without regard to case,
     /// and refused when it leaves the prefix and the game's files (`..`, an
     /// absolute part, a link out). The one function the pull and push go
-    /// through for every file.
+    /// through for every file. The path returned is canonical for the parts
+    /// that exist.
+    ///
+    /// This is a check at one moment: a link can appear between it and a
+    /// write. A writer must check again just before each write and must not
+    /// follow links when it does (`O_NOFOLLOW`, or a verified parent dir).
     pub fn file(&self, rel: &str) -> Result<PathBuf, SkipReason> {
         let parts: Vec<String> = rel
             .split(['/', '\\'])
@@ -428,7 +505,7 @@ impl Location {
         if parts.is_empty() || rel.starts_with(['/', '\\']) {
             return Err(SkipReason::BadPath(rel.to_string()));
         }
-        join_checked(&self.roots, &self.path, &parts)
+        join_checked(&self.roots, self.is_install(), &self.path, &parts).map(|(_, canon)| canon)
     }
 
     /// Whether `rel` (below the location) is never synced (design 22 §3.4).
@@ -464,7 +541,8 @@ pub struct Resolved {
 }
 
 impl Resolved {
-    fn off() -> Resolved {
+    /// Cloud storage is off, or GOG has no config for the game.
+    pub fn off() -> Resolved {
         Resolved {
             enabled: false,
             locations: vec![],
@@ -511,7 +589,7 @@ fn resolve_one(
 ) -> Result<PathBuf, SkipReason> {
     let (base, mut parts) = base_of(layout, var);
     parts.extend(rest.iter().cloned());
-    join_checked(roots, &base, &parts)
+    join_checked(roots, var == Variable::Install, &base, &parts).map(|(path, _)| path)
 }
 
 /// Resolve `storage` (a game's `Windows.cloudStorage`) onto `layout`.
