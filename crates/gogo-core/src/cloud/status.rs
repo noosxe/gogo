@@ -95,6 +95,12 @@ pub struct LocationPlan {
     pub local_excluded: usize,
     /// Local links, special files, odd names: never synced.
     pub ignored: Vec<String>,
+    /// The save dir isn't there (a moved prefix, a drive not mounted?) while
+    /// the record has files in it: none of them is taken for deleted.
+    pub missing: bool,
+    /// The save dir is there but holds no file while the record has some:
+    /// none of them is taken for deleted either (design 22 as built).
+    pub emptied: bool,
 }
 
 /// Why a listed object is outside every location.
@@ -124,6 +130,8 @@ pub struct Container {
     pub tombstones: usize,
     pub bytes_used: Option<u64>,
     pub quota_bytes: Option<u64>,
+    /// The listing answered 404: no container yet (unverified live).
+    pub missing: bool,
 }
 
 /// The plan: what `gogo saves sync` would do now.
@@ -184,6 +192,11 @@ impl Plan {
         self.count("corrupt")
     }
 
+    /// Local files that couldn't be read.
+    pub fn unreadable(&self) -> usize {
+        self.count("unreadable")
+    }
+
     pub fn count(&self, action: &str) -> usize {
         self.counts.get(action).copied().unwrap_or(0)
     }
@@ -206,6 +219,7 @@ pub fn action_name(a: Action) -> &'static str {
         Action::Forget => "forget",
         Action::Conflict(_) => "conflict",
         Action::Corrupt => "corrupt",
+        Action::Unreadable => "unreadable",
     }
 }
 
@@ -306,14 +320,13 @@ pub async fn plan(
     let listing = storage::list(storage_client, &token, client_id).await?;
 
     let client_id_changed = record.as_ref().is_some_and(|r| r.client_id != client_id);
-    let rolled_back = record.as_ref().is_some_and(|r| r.rolled_back.is_some());
-    let pending_push = record.as_ref().is_some_and(|r| r.pending_push);
-    let last_sync = record
-        .as_ref()
+    // D11: a record for another client is no record, its marks included.
+    let usable: Option<&Record> = record.as_ref().filter(|_| !client_id_changed);
+    let rolled_back = usable.is_some_and(|r| r.rolled_back.is_some());
+    let pending_push = usable.is_some_and(|r| r.pending_push);
+    let last_sync = usable
         .and_then(|r| r.last_sync.as_ref())
         .map(|d| d.to_string());
-    // D11: a record for another client is no record.
-    let usable: Option<&Record> = record.as_ref().filter(|_| !client_id_changed);
 
     let mut plan = Plan {
         gogid: game.gogid.clone(),
@@ -336,6 +349,7 @@ pub async fn plan(
             tombstones: listing.entries.iter().filter(|e| e.is_tombstone()).count(),
             bytes_used: listing.bytes_used,
             quota_bytes: listing.quota_bytes,
+            missing: listing.missing,
         }),
     };
 
@@ -353,7 +367,9 @@ pub async fn plan(
 
     // Local hashes where the table needs them, and the objects a first sync
     // must compare by content.
-    let mut local_md5: HashMap<(usize, String), String> = HashMap::new();
+    // `None`: the file couldn't be read (vanished, unreadable, swapped for a
+    // link); it is reported and the rest is still planned.
+    let mut local_md5: HashMap<(usize, String), Option<String>> = HashMap::new();
     for (i, (_, items)) in staged.iter().enumerate() {
         for (name, item) in items {
             let (Some(local), cloud) = (&item.local, cloud_of(item)) else {
@@ -361,7 +377,14 @@ pub async fn plan(
             };
             let l = to_local(local, None);
             if classify::needs_local_md5(&l, &cloud, item.record.as_ref()) {
-                local_md5.insert((i, name.clone()), scan::md5_file(&local.path)?);
+                let md5 = match scan::md5_file(&local.path) {
+                    Ok(m) => Some(m),
+                    Err(e) => {
+                        tracing::warn!("{e}");
+                        None
+                    }
+                };
+                local_md5.insert((i, name.clone()), md5);
             }
             if item.record.is_none()
                 && let (Cloud::Present { .. }, Some(e)) = (&cloud, &item.entry)
@@ -376,12 +399,14 @@ pub async fn plan(
         for (name, item) in items {
             let key = (i, name.clone());
             let cloud = cloud_of(&item);
+            let hashed = local_md5.get(&key);
             let local = item
                 .local
                 .as_ref()
-                .map(|l| to_local(l, local_md5.get(&key).cloned()));
+                .map(|l| to_local(l, hashed.cloned().flatten()));
             let action = match fetched.get(&key) {
                 Some(None) => Some(Action::Corrupt),
+                _ if matches!(hashed, Some(None)) => Some(Action::Unreadable),
                 _ if item.case_clash => Some(Action::Conflict(ConflictReason::CaseClash)),
                 other => {
                     let same_content = other
@@ -391,11 +416,22 @@ pub async fn plan(
                         classify::local_side(local.as_ref(), item.record.as_ref()),
                         classify::cloud_side(&cloud, item.record.as_ref()),
                         same_content,
-                        rolled_back && usable.is_some(),
+                        rolled_back,
                     )
                 }
             };
             let Some(action) = action else { continue };
+            // A save dir that is gone or emptied never reads as "delete them
+            // all in the cloud": a moved prefix or an unmounted drive.
+            let action = match action {
+                Action::DeleteCloud if lp.missing => {
+                    Action::Conflict(ConflictReason::LocationMissing)
+                }
+                Action::DeleteCloud if lp.emptied => {
+                    Action::Conflict(ConflictReason::LocationEmptied)
+                }
+                a => a,
+            };
             *plan
                 .counts
                 .entry(action_name(action).to_string())
@@ -477,30 +513,33 @@ fn gather(
     unmapped: &mut Vec<Unmapped>,
 ) -> Result<(LocationPlan, BTreeMap<String, Item>), CloudError> {
     let s = scan::scan(loc)?;
+    let root_there = std::fs::symlink_metadata(&loc.path).is_ok_and(|m| m.is_dir());
+    let no_local_files = s.files.is_empty();
     let prefix = format!("{}/", loc.name);
     let mut items: BTreeMap<String, Item> = BTreeMap::new();
     for e in entries {
         let name = e.name.clone();
         items.entry(name).or_default().entry = Some(e);
     }
+    let mut recorded = 0;
     if let Some(r) = record {
         for (name, f) in r.files.range(prefix.clone()..) {
             if !name.starts_with(&prefix) {
                 break;
             }
+            recorded += 1;
             items.entry(name.clone()).or_default().record = Some(f.clone());
         }
     }
 
-    let mut local_by_path: HashMap<PathBuf, LocalFile> =
-        s.files.into_iter().map(|f| (f.path.clone(), f)).collect();
-    let mut claimed: HashMap<PathBuf, String> = HashMap::new();
-    let mut clashes = vec![];
+    // Each name's local path; names that can't be mapped safely drop out.
+    let mut paths: BTreeMap<String, PathBuf> = BTreeMap::new();
     let mut drop = vec![];
-    for (name, item) in items.iter_mut() {
+    for (name, item) in &items {
         let rel = &name[prefix.len()..];
+        let live = item.entry.as_ref().is_some_and(|e| !e.is_tombstone());
         if loc.excluded(rel) {
-            if item.entry.as_ref().is_some_and(|e| !e.is_tombstone()) {
+            if live {
                 unmapped.push(Unmapped {
                     name: name.clone(),
                     reason: UnmappedReason::Excluded,
@@ -509,35 +548,59 @@ fn gather(
             drop.push(name.clone());
             continue;
         }
-        let path = match loc.file(rel) {
-            Ok(p) => p,
+        match loc.file(rel) {
+            Ok(p) => {
+                paths.insert(name.clone(), p);
+            }
             Err(_) => {
-                if item.entry.as_ref().is_some_and(|e| !e.is_tombstone()) || item.record.is_some() {
+                if live || item.record.is_some() {
                     unmapped.push(Unmapped {
                         name: name.clone(),
                         reason: UnmappedReason::BadPath,
                     });
                 }
                 drop.push(name.clone());
-                continue;
             }
-        };
-        if let Some(other) = claimed.get(&path) {
-            clashes.push(other.clone());
-            item.case_clash = true;
-        } else {
-            claimed.insert(path.clone(), name.clone());
-        }
-        if let Some(f) = local_by_path.remove(&path) {
-            item.local = Some(f);
         }
     }
     for name in drop {
         items.remove(&name);
     }
-    for name in clashes {
+
+    // Names meeting on one local path. Only a live cloud object, or a
+    // recorded name whose file is there, counts: a tombstone or a record of
+    // a deleted file beside a live name of another case is history.
+    let mut local_by_path: HashMap<PathBuf, LocalFile> =
+        s.files.into_iter().map(|f| (f.path.clone(), f)).collect();
+    let mut by_path: HashMap<&PathBuf, Vec<&String>> = HashMap::new();
+    for (name, p) in &paths {
+        by_path.entry(p).or_default().push(name);
+    }
+    let mut attach: Vec<(String, Option<LocalFile>, bool)> = vec![];
+    for (p, mut names) in by_path {
+        names.sort();
+        let here = local_by_path.remove(p);
+        let counts = |n: &String| {
+            let i = &items[n];
+            i.entry.as_ref().is_some_and(|e| !e.is_tombstone())
+                || (i.record.is_some() && here.is_some())
+        };
+        let takers: Vec<&String> = names.iter().copied().filter(|n| counts(n)).collect();
+        if takers.len() > 1 {
+            // A real clash: every taker is a conflict, each with the file.
+            for n in takers {
+                attach.push((n.clone(), here.clone(), true));
+            }
+        } else {
+            // One name gets the file: the one that counts, else the first.
+            let n = takers.first().copied().unwrap_or(names[0]);
+            attach.push((n.clone(), here, false));
+        }
+    }
+    for (name, f, clash) in attach {
         if let Some(i) = items.get_mut(&name) {
-            i.case_clash = true;
+            i.local = f;
+            i.case_clash = clash;
         }
     }
     // Local files no listed or recorded name points at: new here.
@@ -556,6 +619,8 @@ fn gather(
         files: vec![],
         local_excluded: s.excluded,
         ignored: s.ignored,
+        missing: !root_there && recorded > 0,
+        emptied: root_there && no_local_files && recorded > 0,
     };
     Ok((lp, items))
 }

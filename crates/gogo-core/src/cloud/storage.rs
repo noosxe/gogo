@@ -20,6 +20,19 @@ use super::http::StorageClient;
 /// How much of a listing is read: Cyberpunk's 231 entries are about 50 KB.
 pub const LISTING_CAP: usize = 32 * 1024 * 1024;
 
+/// The largest stored object gogo downloads: the smaller of the two quotas
+/// seen live (design 22 §1.3, 200 MiB); no object of a container can be
+/// larger. The listed `bytes` is untrusted, so it is clamped to this.
+pub const MAX_OBJECT_GZIP: u64 = 209_715_200;
+
+/// The largest plain file a download may gunzip to. Real saves are a few
+/// MB; a gzip that expands past this is refused as corrupt (a bomb).
+pub const MAX_PLAIN: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Swift's default listing limit: a listing of exactly this many entries
+/// with no object count may be a first page.
+pub const SWIFT_PAGE: usize = 10_000;
+
 /// The MD5 of the empty gzip stream Galaxy writes as a deletion marker
 /// (89 bytes, design 22 §1.3). Taken from a live listing; hashes are public.
 pub const GALAXY_TOMBSTONE_MD5: &str = "aadd86936a80ee8a369579c3926f1b3c";
@@ -65,6 +78,9 @@ pub struct Listing {
     pub bytes_used: Option<u64>,
     /// `x-container-meta-quota-bytes`.
     pub quota_bytes: Option<u64>,
+    /// The listing answered 404: the container doesn't exist yet (nothing was
+    /// ever uploaded). Planned as empty; unverified live.
+    pub missing: bool,
 }
 
 fn is_md5_hex(s: &str) -> bool {
@@ -101,27 +117,44 @@ pub fn parse_listing(
     body: &[u8],
     headers: &reqwest::header::HeaderMap,
 ) -> Result<Listing, CloudError> {
-    let entries: Vec<Entry> =
+    let mut entries: Vec<Entry> =
         serde_json::from_slice(body).map_err(|e| CloudError::Listing(e.to_string()))?;
-    if let Some(bad) = entries.iter().find(|e| !is_md5_hex(&e.hash)) {
-        return Err(CloudError::Listing(format!(
-            "object {:?} has no MD5 hash",
-            bad.name
-        )));
+    let mut seen = std::collections::HashSet::new();
+    for e in &mut entries {
+        e.hash.make_ascii_lowercase();
+        if !is_md5_hex(&e.hash) {
+            return Err(CloudError::Listing(format!(
+                "object {:?} has no MD5 hash",
+                e.name
+            )));
+        }
+        if !seen.insert(e.name.clone()) {
+            return Err(CloudError::Listing(format!(
+                "object {:?} is listed twice",
+                e.name
+            )));
+        }
     }
     let listing = Listing {
         object_count: header_u64(headers, "x-container-object-count"),
         bytes_used: header_u64(headers, "x-container-bytes-used"),
         quota_bytes: header_u64(headers, "x-container-meta-quota-bytes"),
         entries,
+        missing: false,
     };
-    if let Some(count) = listing.object_count
-        && count > listing.entries.len() as u64
-    {
-        return Err(CloudError::ListingTruncated {
-            listed: listing.entries.len(),
-            count,
-        });
+    let listed = listing.entries.len();
+    match listing.object_count {
+        Some(count) if count > listed as u64 => {
+            return Err(CloudError::ListingTruncated { listed, count });
+        }
+        // No count to check against and a full first page: maybe more.
+        None if listed == SWIFT_PAGE => {
+            return Err(CloudError::ListingTruncated {
+                listed,
+                count: listed as u64 + 1,
+            });
+        }
+        _ => {}
     }
     Ok(listing)
 }
@@ -135,7 +168,20 @@ pub async fn list(
     let req = client
         .request(Method::GET, token, client_id, None)?
         .header(reqwest::header::ACCEPT, "application/json");
-    let resp = client.send(req).await?;
+    let resp = match client.send(req).await {
+        Ok(r) => r,
+        // The container is made by the first upload: none yet, nothing in it.
+        Err(CloudError::Storage { status: 404, .. }) => {
+            return Ok(Listing {
+                entries: vec![],
+                object_count: Some(0),
+                bytes_used: None,
+                quota_bytes: None,
+                missing: true,
+            });
+        }
+        Err(e) => return Err(e),
+    };
     let headers = resp.headers().clone();
     let body = body_capped(resp, LISTING_CAP)
         .await?
@@ -150,13 +196,19 @@ pub async fn fetch_gzip(
     client_id: &str,
     entry: &Entry,
 ) -> Result<Vec<u8>, CloudError> {
-    let req = client.request(Method::GET, token, client_id, Some(&entry.name))?;
-    let resp = client.send(req).await?;
-    let cap = usize::try_from(entry.bytes).unwrap_or(usize::MAX);
     let corrupt = |reason: String| CloudError::Corrupt {
         name: entry.name.clone(),
         reason,
     };
+    if entry.bytes > MAX_OBJECT_GZIP {
+        return Err(corrupt(format!(
+            "listed as {} bytes, more than any container holds ({MAX_OBJECT_GZIP})",
+            entry.bytes
+        )));
+    }
+    let req = client.request(Method::GET, token, client_id, Some(&entry.name))?;
+    let resp = client.send(req).await?;
+    let cap = usize::try_from(entry.bytes).unwrap_or(usize::MAX);
     let body = body_capped(resp, cap)
         .await?
         .ok_or_else(|| corrupt(format!("more than the listed {} bytes", entry.bytes)))?;
@@ -176,13 +228,29 @@ pub fn verify(entry: &Entry, gzip: &[u8]) -> Result<(), CloudError> {
     Ok(())
 }
 
-/// Gunzip already verified bytes into `out`; the plain size.
-pub fn gunzip_into(name: &str, gzip: &[u8], out: &mut impl Write) -> Result<u64, CloudError> {
-    let mut dec = flate2::read::MultiGzDecoder::new(gzip);
-    std::io::copy(&mut dec, out).map_err(|e| CloudError::Corrupt {
+/// Gunzip already verified bytes into `out`, at most `max_plain` bytes of
+/// them ([`MAX_PLAIN`] outside tests); the plain size. More is
+/// [`CloudError::Corrupt`] (a gzip bomb), and `out` may hold a prefix then.
+pub fn gunzip_into(
+    name: &str,
+    gzip: &[u8],
+    out: &mut impl Write,
+    max_plain: u64,
+) -> Result<u64, CloudError> {
+    use std::io::Read;
+    let corrupt = |reason: String| CloudError::Corrupt {
         name: name.to_string(),
-        reason: format!("not a gzip stream ({e})"),
-    })
+        reason,
+    };
+    let mut dec = flate2::read::MultiGzDecoder::new(gzip).take(max_plain.saturating_add(1));
+    let n =
+        std::io::copy(&mut dec, out).map_err(|e| corrupt(format!("not a gzip stream ({e})")))?;
+    if n > max_plain {
+        return Err(corrupt(format!(
+            "gunzips to more than {max_plain} bytes; not a save"
+        )));
+    }
+    Ok(n)
 }
 
 /// The plain file's MD5 and size of `entry`: downloaded into memory, checked,
@@ -195,7 +263,7 @@ pub async fn plain_md5(
 ) -> Result<(String, u64), CloudError> {
     let gzip = fetch_gzip(client, token, client_id, entry).await?;
     let mut h = HashWriter(Md5::new());
-    let size = gunzip_into(&entry.name, &gzip, &mut h)?;
+    let size = gunzip_into(&entry.name, &gzip, &mut h, MAX_PLAIN)?;
     Ok((crate::fmt::md5_hex(h.0), size))
 }
 
@@ -285,12 +353,93 @@ mod tests {
     fn gzip_is_deterministic_and_round_trips() {
         assert_eq!(gzip(b"save"), gzip(b"save"));
         let mut out = Vec::new();
-        gunzip_into("n", &gzip(b"save"), &mut out).unwrap();
+        gunzip_into("n", &gzip(b"save"), &mut out, MAX_PLAIN).unwrap();
         assert_eq!(out, b"save");
         assert!(matches!(
-            gunzip_into("n", b"plain", &mut Vec::new()),
+            gunzip_into("n", b"plain", &mut Vec::new(), MAX_PLAIN),
             Err(CloudError::Corrupt { .. })
         ));
+    }
+
+    #[test]
+    fn a_gzip_bomb_is_refused_at_the_plain_cap() {
+        // 4 MiB of zeros compress to a few KiB.
+        let bomb = gzip(&vec![0u8; 4 << 20]);
+        assert!(bomb.len() < 64 << 10);
+        let mut h = HashWriter(Md5::new());
+        let e = gunzip_into("saves/bomb", &bomb, &mut h, 1 << 20).unwrap_err();
+        assert!(e.to_string().contains("more than 1048576 bytes"), "{e}");
+        assert_eq!(e.exit_code(), 5);
+        // Exactly at the cap is fine.
+        let at = gzip(&vec![0u8; 1 << 20]);
+        assert_eq!(gunzip_into("n", &at, &mut h, 1 << 20).unwrap(), 1 << 20);
+    }
+
+    #[tokio::test]
+    async fn an_absurd_listed_size_is_refused_before_any_download() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(gzip(b"x")))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let c = client(&server).await;
+        let huge = Entry {
+            bytes: u64::MAX,
+            ..entry("saves/a", &gzip(b"x"))
+        };
+        let e = fetch_gzip(&c, &token(), "c1", &huge).await.unwrap_err();
+        assert!(matches!(e, CloudError::Corrupt { .. }), "{e}");
+    }
+
+    #[test]
+    fn hashes_are_lowercased_and_duplicates_refused() {
+        let h = reqwest::header::HeaderMap::new();
+        let l = parse_listing(
+            br#"[{"name":"a/b","bytes":1,"hash":"0123456789ABCDEF0123456789ABCDEF"}]"#,
+            &h,
+        )
+        .unwrap();
+        assert_eq!(l.entries[0].hash, "0123456789abcdef0123456789abcdef");
+        let dup = br#"[{"name":"a/b","bytes":1,"hash":"0123456789abcdef0123456789abcdef"},
+                      {"name":"a/b","bytes":1,"hash":"0123456789abcdef0123456789abcdef"}]"#;
+        let e = parse_listing(dup, &h).unwrap_err();
+        assert!(e.to_string().contains("listed twice"), "{e}");
+    }
+
+    #[test]
+    fn a_full_page_without_a_count_may_be_truncated() {
+        let one = |i: usize| {
+            serde_json::json!({"name": format!("s/{i}"), "bytes": 1,
+                               "hash": "0123456789abcdef0123456789abcdef"})
+        };
+        let full: Vec<_> = (0..SWIFT_PAGE).map(one).collect();
+        let body = serde_json::to_vec(&full).unwrap();
+        let none = reqwest::header::HeaderMap::new();
+        assert!(matches!(
+            parse_listing(&body, &none),
+            Err(CloudError::ListingTruncated { .. })
+        ));
+        let mut counted = reqwest::header::HeaderMap::new();
+        counted.insert("x-container-object-count", "10000".parse().unwrap());
+        assert_eq!(
+            parse_listing(&body, &counted).unwrap().entries.len(),
+            SWIFT_PAGE
+        );
+        let short: Vec<_> = (0..SWIFT_PAGE - 1).map(one).collect();
+        assert!(parse_listing(&serde_json::to_vec(&short).unwrap(), &none).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_missing_container_is_an_empty_listing() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/7/c1"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let l = list(&client(&server).await, &token(), "c1").await.unwrap();
+        assert!(l.missing && l.entries.is_empty());
     }
 
     const LISTING: &str = r#"[

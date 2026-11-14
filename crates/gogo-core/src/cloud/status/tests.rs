@@ -99,6 +99,20 @@ impl Fixture {
         }
     }
 
+    /// Serve a listing of `names` only (one byte of made-up gzip each); no
+    /// object is served.
+    async fn serve_names(&self, names: &[&str]) {
+        let listing: Vec<serde_json::Value> = names
+            .iter()
+            .map(|n| serde_json::json!({"name": n, "bytes": 25, "hash": md5_hex(n.as_bytes())}))
+            .collect();
+        Mock::given(method("GET"))
+            .and(path(format!("/v1/7/{CLIENT}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(listing))
+            .mount(&self.server)
+            .await;
+    }
+
     async fn run(&self) -> Result<Plan, CloudError> {
         let auth = CloudAuth::with_parts(&self.session, || Ok(()), NoManifests, &self.exchange);
         let storage =
@@ -487,4 +501,233 @@ async fn a_kept_manifest_for_another_client_than_the_info_is_refused() {
         f.run().await,
         Err(CloudError::ClientIdMismatch { gogid: 5 })
     ));
+}
+
+#[tokio::test]
+async fn a_missing_save_dir_never_plans_cloud_deletions() {
+    let f = fixture(CONFIG).await;
+    let mut r = Record::new(CLIENT);
+    for rel in ["a.sav", "b.sav"] {
+        f.write(rel, b"v1");
+        f.recorded(&mut r, rel, b"v1");
+    }
+    f.save_record(&r);
+    f.serve(&[
+        ("saves/a.sav", gzip(b"v1")),
+        ("saves/b.sav", gzip(b"v1")),
+        ("saves/new.sav", gzip(b"n")),
+    ])
+    .await;
+    // The prefix moved or the drive isn't mounted: the dir is gone.
+    fs::remove_dir_all(&f.saves).unwrap();
+    let plan = f.run().await.unwrap();
+    assert!(plan.locations[0].missing && !plan.locations[0].emptied);
+    assert_eq!(
+        actions(&plan),
+        [
+            (
+                "saves/a.sav".to_string(),
+                Action::Conflict(ConflictReason::LocationMissing)
+            ),
+            (
+                "saves/b.sav".into(),
+                Action::Conflict(ConflictReason::LocationMissing)
+            ),
+            ("saves/new.sav".into(), Action::Download),
+        ]
+    );
+    assert_eq!(plan.count("delete_cloud"), 0);
+
+    // No record: a missing dir only means downloads.
+    let f = fixture(CONFIG).await;
+    f.serve(&[("saves/a.sav", gzip(b"v1"))]).await;
+    fs::remove_dir_all(&f.saves).unwrap();
+    let plan = f.run().await.unwrap();
+    assert!(!plan.locations[0].missing);
+    assert_eq!(
+        actions(&plan),
+        [("saves/a.sav".to_string(), Action::Download)]
+    );
+}
+
+#[tokio::test]
+async fn an_emptied_save_dir_asks_before_deleting_every_save() {
+    let f = fixture(CONFIG).await;
+    let mut r = Record::new(CLIENT);
+    for rel in ["a.sav", "b.sav", "c.sav"] {
+        f.write(rel, b"v1");
+        f.recorded(&mut r, rel, b"v1");
+    }
+    f.save_record(&r);
+    f.serve(&[
+        ("saves/a.sav", gzip(b"v1")),
+        ("saves/b.sav", gzip(b"v1")),
+        ("saves/c.sav", gzip(b"")),
+    ])
+    .await;
+    for rel in ["a.sav", "b.sav", "c.sav"] {
+        fs::remove_file(f.saves.join(rel)).unwrap();
+    }
+    let plan = f.run().await.unwrap();
+    assert!(plan.locations[0].emptied);
+    let got: BTreeMap<_, _> = actions(&plan).into_iter().collect();
+    assert_eq!(
+        got["saves/a.sav"],
+        Action::Conflict(ConflictReason::LocationEmptied)
+    );
+    assert_eq!(
+        got["saves/b.sav"],
+        Action::Conflict(ConflictReason::LocationEmptied)
+    );
+    // Deleted on both sides already: nothing is lost by forgetting it.
+    assert_eq!(got["saves/c.sav"], Action::Forget);
+
+    // One file left: deletions of the others go ahead as planned.
+    let f = fixture(CONFIG).await;
+    let mut r = Record::new(CLIENT);
+    for rel in ["a.sav", "b.sav"] {
+        f.write(rel, b"v1");
+        f.recorded(&mut r, rel, b"v1");
+    }
+    f.save_record(&r);
+    f.serve(&[("saves/a.sav", gzip(b"v1")), ("saves/b.sav", gzip(b"v1"))])
+        .await;
+    fs::remove_file(f.saves.join("a.sav")).unwrap();
+    let plan = f.run().await.unwrap();
+    assert!(!plan.locations[0].emptied);
+    assert_eq!(plan.count("delete_cloud"), 1);
+}
+
+#[tokio::test]
+async fn history_of_another_case_is_no_clash() {
+    // A tombstone and a live object differing only by case.
+    let f = fixture(CONFIG).await;
+    f.write("Slot/A.sav", b"x");
+    f.serve(&[
+        ("saves/slot/a.sav", gzip(b"")),
+        ("saves/Slot/A.sav", gzip(b"x")),
+    ])
+    .await;
+    let plan = f.run().await.unwrap();
+    assert_eq!(
+        actions(&plan),
+        [("saves/Slot/A.sav".to_string(), Action::Record)]
+    );
+    assert_eq!(plan.conflicts(), 0);
+
+    // A recorded name whose file is gone, beside a live name of another case.
+    let f = fixture(CONFIG).await;
+    let mut r = Record::new(CLIENT);
+    f.write("slot/a.sav", b"x");
+    f.recorded(&mut r, "slot/a.sav", b"x");
+    fs::remove_file(f.saves.join("slot/a.sav")).unwrap();
+    f.save_record(&r);
+    f.serve(&[("saves/OTHER.sav", gzip(b"y"))]).await;
+    let plan = f.run().await.unwrap();
+    assert_eq!(plan.count("conflict"), 0, "{:?}", actions(&plan));
+}
+
+#[tokio::test]
+async fn a_set_aside_records_marks_dont_count() {
+    let f = fixture(CONFIG).await;
+    let mut r = Record::new("99999999999999999");
+    r.rolled_back = Some("2026-11-12T10:00:00Z".parse().unwrap());
+    r.pending_push = true;
+    r.last_sync = Some("2026-11-12T09:00:00Z".parse().unwrap());
+    f.save_record(&r);
+    f.serve(&[("saves/a.sav", gzip(b"v1"))]).await;
+    let plan = f.run().await.unwrap();
+    assert!(plan.client_id_changed && plan.first_sync);
+    assert!(!plan.rolled_back && !plan.pending_push && plan.last_sync.is_none());
+    assert_eq!(
+        actions(&plan),
+        [("saves/a.sav".to_string(), Action::Download)]
+    );
+}
+
+#[tokio::test]
+async fn an_unreadable_local_file_is_reported_and_the_rest_planned() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fixture(CONFIG).await;
+    let mut r = Record::new(CLIENT);
+    f.write("locked.sav", b"v1");
+    f.recorded(&mut r, "locked.sav", b"v1");
+    f.save_record(&r);
+    f.write("locked.sav", b"v2 bigger");
+    let p = f.saves.join("locked.sav");
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read(&p).is_ok() {
+        // Running as root: permissions don't stop a read.
+        return;
+    }
+    f.write("new.sav", b"n");
+    f.serve(&[("saves/locked.sav", gzip(b"v1"))]).await;
+    let plan = f.run().await.unwrap();
+    fs::set_permissions(&p, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(
+        actions(&plan),
+        [
+            ("saves/locked.sav".to_string(), Action::Unreadable),
+            ("saves/new.sav".into(), Action::Upload),
+        ]
+    );
+    assert_eq!(plan.unreadable(), 1);
+}
+
+#[tokio::test]
+async fn hostile_cloud_names_are_never_mapped() {
+    let f = fixture(CONFIG).await;
+    f.serve_names(&[
+        "saves/../escape.sav",
+        "saves/a\\..\\..\\b.sav",
+        "/saves/abs.sav",
+        "saves/nul\u{0}.sav",
+        "saves/C:drive.sav",
+        "saves/ok.sav",
+    ])
+    .await;
+    let before = tree(&f.game.root);
+    let plan = f.run().await.unwrap();
+    assert_eq!(tree(&f.game.root), before);
+    assert_eq!(
+        actions(&plan),
+        [("saves/ok.sav".to_string(), Action::Download)]
+    );
+    let un: BTreeMap<_, _> = plan
+        .unmapped
+        .iter()
+        .map(|u| (u.name.as_str(), u.reason))
+        .collect();
+    assert_eq!(un["saves/../escape.sav"], UnmappedReason::BadPath);
+    assert_eq!(un["saves/a\\..\\..\\b.sav"], UnmappedReason::BadPath);
+    assert_eq!(un["/saves/abs.sav"], UnmappedReason::NoLocation);
+    assert_eq!(un["saves/nul\u{0}.sav"], UnmappedReason::BadPath);
+    assert_eq!(un["saves/C:drive.sav"], UnmappedReason::BadPath);
+}
+
+#[tokio::test]
+async fn a_link_in_a_save_dir_is_ignored_and_nothing_changes() {
+    let f = fixture(CONFIG).await;
+    let outside = f.game.root.join("outside.sav");
+    fs::write(&outside, b"not a save").unwrap();
+    std::os::unix::fs::symlink(&outside, f.saves.join("link.sav")).unwrap();
+    f.write("real.sav", b"r");
+    f.serve(&[("saves/link.sav", gzip(b"cloud"))]).await;
+    let before = tree(&f.game.root);
+    let plan = f.run().await.unwrap();
+    assert_eq!(tree(&f.game.root), before);
+    assert_eq!(plan.locations[0].ignored, ["link.sav"]);
+    // The cloud's object of that name would be written through a link that
+    // leaves the prefix: it is never mapped, and the link is never read.
+    assert_eq!(
+        actions(&plan),
+        [("saves/real.sav".to_string(), Action::Upload)]
+    );
+    assert_eq!(
+        plan.unmapped,
+        [Unmapped {
+            name: "saves/link.sav".into(),
+            reason: UnmappedReason::BadPath
+        }]
+    );
 }

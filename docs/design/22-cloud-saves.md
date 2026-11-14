@@ -678,17 +678,24 @@ Code: `gogo_core::cloud::{client_id, storage, record, scan, classify, status}`,
   token. Not the cloud, not the game's dirs or prefix (a test compares the tree before and
   after), not the record: a client-id change is reported (`client_id_changed`) and planned as
   a first sync; the set-aside (D11) is done by the next sync, under the lock. No lock is taken.
-- **Listing**: JSON only, read up to 32 MiB, every `hash` must be 32 lowercase hex. A listing
-  with fewer entries than `x-container-object-count` is refused (`ListingTruncated`): Swift
-  pages long listings and GOG's paging is unverified, and a missing entry would read as a
-  cloud deletion. Paging comes when a game needs it.
-- **Downloads** read at most the listed `bytes`, check the MD5 of the stored bytes, and only
-  then gunzip (multi-member gzip accepted). `status` fetches only the first sync's both-sided
+- **Listing**: JSON only, read up to 32 MiB; every `hash` is lowercased and must be 32 hex
+  digits, and a name listed twice is an error. A listing with fewer entries than
+  `x-container-object-count`, or with no count and exactly 10 000 entries (Swift's page), is
+  refused (`ListingTruncated`): GOG's paging is unverified, and a missing entry would read as
+  a cloud deletion. Paging comes when a game needs it. A 404 on the container listing (and
+  only there) is an empty container, nothing ever uploaded: **unverified live**, shown as
+  "nothing stored for this game yet".
+- **Downloads** read at most the listed `bytes`, which is untrusted and clamped to
+  `MAX_OBJECT_GZIP` (200 MiB, the smaller quota seen live; a larger listing is `corrupt`
+  without a request), check the MD5 of the stored bytes, and only then gunzip (multi-member
+  gzip accepted), at most `MAX_PLAIN` (2 GiB) of output: more is `corrupt` (a gzip bomb). `status` fetches only the first sync's both-sided
   files, four at a time, into memory, and hashes the gunzipped stream; nothing goes to disk.
   An object that fails the check is planned as `corrupt` (exit 5) and the rest still planned.
 - **Tombstones**: the hash above (Galaxy's), the MD5 of gogo's own empty gzip
   (`storage::gzip`: level 6, no name, mtime 0, the form C5 uploads), or a 0-byte object. A real
-  empty save file reads as deleted, as in Galaxy.
+  empty save file reads as deleted, as in Galaxy. So pull and sync (C4, C5) **must back up
+  every local file before a `delete_local`** (§7.1), with no exception for small or empty
+  files: the tombstone may be someone's real empty save.
 - **Record**: as §4.1, keyed by object name, times as TOML datetimes in UTC, `mtime` to the
   nanosecond (compared exactly; any difference means "hash it"). A record that can't be
   parsed, or has another `schema`, is an error, not a first sync: it may hold a rollback mark.
@@ -697,19 +704,35 @@ Code: `gogo_core::cloud::{client_id, storage, record, scan, classify, status}`,
   an older one.
 - **Matching** is by local path: every listed or recorded name goes through
   `Location::file`, so case differences from Windows clients meet the same local file. Two
-  cloud names that land on one file are both conflicts (`case_clash`). The scan walks the
-  location's canonical path (the prefix may be reached through a link), never follows a link,
-  stops at 32 levels, and lists links, special files and non-UTF-8 names as `ignored`.
-- **Classification** adds three outcomes to §4.2's table: `record` (first sync, same
-  content), `forget` (deleted on both sides) and `corrupt`. `rolled_back` turns uploads,
-  downloads and deletions into conflicts (`rolled_back`), not `record`/`forget`; a record for
-  another client carries no rollback mark.
+  cloud names that land on one file are both conflicts (`case_clash`); only a live object, or
+  a recorded name whose file is there, counts, so a tombstone or a deleted file's record of
+  another case is history, not a clash. The scan walks the location's canonical path (the
+  prefix may be reached through a link), never follows a link, stops at 32 levels, and lists
+  links, special files and non-UTF-8 names as `ignored`. A cloud name that would land on a
+  link out of the prefix is `bad_path`. Hashing opens with `O_NOFOLLOW | O_NONBLOCK` after
+  checking the path is a regular file, and checks the opened file is that same one (device
+  and inode); a file that can't be read is planned `unreadable` (exit 1) and the rest is
+  still planned.
+- **A missing or emptied save dir** never plans cloud deletions. When the location's dir is
+  gone (a moved prefix, a drive not mounted) or exists with no file at all, while the record
+  has files in it, every row that would be `delete_cloud` is a conflict instead
+  (`location_missing`, `location_emptied`), with a warning on the location. With no record, a
+  missing dir only means downloads. A dir with at least one file left plans deletions
+  normally.
+- **Classification** adds four outcomes to §4.2's table: `record` (first sync, same
+  content), `forget` (deleted on both sides), `corrupt` and `unreadable`. `rolled_back` turns
+  uploads, downloads and deletions into conflicts (`rolled_back`), not `record`/`forget`. A
+  record for another client (D11) is no record: its `rolled_back`, `pending_push` and
+  `last_sync` aren't shown or used.
 - **Objects outside the plan** are listed as `unmapped` with a reason: `no_location`,
   `skipped_location`, `bad_path`, `excluded`; never acted on. Tombstones outside every
   location are left out.
 - **`<?INSTALL?>` locations** still lack the build-file filter (#469): until it lands their
   build files show as uploads in `status`.
-- **Output**: text hides unchanged files and ends with counts per action, unmapped notes and
+- **Exit codes** of `status`: 5 when any object is corrupt, else 1 when a local file was
+  unreadable, else 8 when conflicts are left, else 0.
+- **Output**: control characters in names, times and messages are escaped in the text
+  output; text hides unchanged files and ends with counts per action, unmapped notes and
   the container's use; `--json` has every file with `action`, `reason`, both sides and
   `recorded`, the counts, `first_sync`, `client_id_changed`, `rolled_back`, `pending_push`,
   `last_sync`, the skipped locations, the unmapped objects and the container. No token, secret,

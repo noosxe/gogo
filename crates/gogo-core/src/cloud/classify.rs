@@ -57,6 +57,12 @@ pub enum ConflictReason {
     RolledBack,
     /// Two cloud names that differ only by case map onto one local file.
     CaseClash,
+    /// Recorded here, but the save dir is gone (a moved prefix, a drive not
+    /// mounted?): not taken for a deletion.
+    LocationMissing,
+    /// Recorded here, but the save dir holds no file at all: not taken for a
+    /// deletion of every save without a decision.
+    LocationEmptied,
 }
 
 /// What a sync would do with one file.
@@ -79,6 +85,9 @@ pub enum Action {
     /// The cloud object failed its MD5 check when fetched for a comparison:
     /// nothing is decided for it.
     Corrupt,
+    /// The local file couldn't be read (it vanished, or isn't a regular file
+    /// any more): nothing is decided for it.
+    Unreadable,
 }
 
 impl Action {

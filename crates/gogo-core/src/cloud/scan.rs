@@ -109,14 +109,16 @@ fn walk(
     Ok(())
 }
 
-/// The plain MD5 of a local file, read without following a link: the path
-/// must be a regular file (not a link) before the open, and the file opened
-/// must be that same file (device and inode), so a link swapped in between
-/// is refused.
+/// The plain MD5 of a local file, read without following a link and
+/// without blocking on a FIFO: the path must be a regular file before the
+/// open, the open refuses a link (`O_NOFOLLOW`) and doesn't wait
+/// (`O_NONBLOCK`), and the file opened must be that same regular file
+/// (device and inode), so nothing swapped in between is read.
 pub fn md5_file(path: &Path) -> Result<String, CloudError> {
     use md5::Digest;
+    use rustix::fs::OFlags;
     use std::io::Read;
-    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let not_regular = || CloudError::Io {
         path: path.display().to_string(),
         reason: "not a regular file (a link?); not read".into(),
@@ -125,9 +127,15 @@ pub fn md5_file(path: &Path) -> Result<String, CloudError> {
     if !before.file_type().is_file() {
         return Err(not_regular());
     }
-    let mut f = std::fs::File::open(path).map_err(|e| io_error(path, e))?;
+    let flags = OFlags::NOFOLLOW | OFlags::NONBLOCK;
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(flags.bits() as i32)
+        .open(path)
+        .map_err(|e| io_error(path, e))?;
     let opened = f.metadata().map_err(|e| io_error(path, e))?;
-    if (opened.dev(), opened.ino()) != (before.dev(), before.ino()) {
+    if !opened.file_type().is_file() || (opened.dev(), opened.ino()) != (before.dev(), before.ino())
+    {
         return Err(not_regular());
     }
     let mut h = md5::Md5::new();
