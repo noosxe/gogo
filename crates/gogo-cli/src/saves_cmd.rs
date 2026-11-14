@@ -2,7 +2,7 @@
 //! file holds the read-only `locations` subcommand; the status and sync
 //! commands come with the storage client.
 
-use gogo::cloud::locations::{CloudError, Game, Lane, Resolved, resolve};
+use gogo::cloud::locations::{Game, Lane, LocationError, Resolved, resolve};
 use gogo::cloud::remote_config::{self, Source};
 
 use crate::{AppError, cli};
@@ -40,13 +40,13 @@ pub struct Outcome {
 }
 
 impl Outcome {
-    fn failed(e: &CloudError) -> Outcome {
+    fn failed(e: &LocationError) -> Outcome {
         let code = match e {
-            CloudError::RemoteConfig(
+            LocationError::RemoteConfig(
                 remote_config::RemoteConfigError::Http(_)
                 | remote_config::RemoteConfigError::Status { .. },
             ) => cli::exit::NETWORK,
-            CloudError::NotBuilt(_) | CloudError::Game(_) => cli::exit::USAGE,
+            LocationError::NotBuilt(_) | LocationError::Game(_) => cli::exit::USAGE,
             _ => cli::exit::FAILED,
         };
         Outcome {
