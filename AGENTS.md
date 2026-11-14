@@ -55,6 +55,7 @@ cargo deny check               # licenses + advisories
 shellcheck scripts/*.sh scripts/tests/*.sh   # when scripts change
 python3 -I scripts/tests/linux-e2e-helper-test.py   # when the e2e helper or a manifest changes
 scripts/linux-e2e.sh self-test                      # when the e2e harness changes (Linux)
+actionlint                                          # when .github/workflows changes
 ```
 
 ## Repo conventions

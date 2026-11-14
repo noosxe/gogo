@@ -33,3 +33,6 @@ Thumbs.db
 
 # --- macOS app bundles (gogo mac-app output; never commit game content) ---
 *.app/
+
+# --- Agent scratch (short-lived working files) ---
+/.scratch/

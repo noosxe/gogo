@@ -1,0 +1,380 @@
+name: CI jobs
+
+# All of CI, called by ci.yml (PRs, pushes to main, the weekly run, manual
+# runs) and ci-full.yml (the `ci:full` label).
+#
+# `changes` decides which jobs a run needs; `ci-result` is the only required
+# check (`CI / CI result`) and passes only if every needed job ran and
+# succeeded. Every other job must appear in three places: an output of
+# `changes` (plus its `needed` line), ci-result's `needs`, and the job list
+# in ci-result's loop. A job missing from them is not enforced.
+#
+# The canonical checks are in AGENTS.md. The Rust jobs use rustup, not nix:
+# the toolchain comes from rust-toolchain.toml (the same 1.99.1 as the
+# flake). Linux + macOS only (project scope); aarch64-linux cross-builds are
+# out of scope here, and deny.toml still evaluates the full target set.
+
+on:
+  workflow_call:
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  # No incremental builds or debug info on CI (smaller, faster caches), and
+  # warnings are errors.
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_BUILD_WARNINGS: deny
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      rustfmt: ${{ steps.decide.outputs.rustfmt }}
+      clippy: ${{ steps.decide.outputs.clippy }}
+      test: ${{ steps.decide.outputs.test }}
+      deny: ${{ steps.decide.outputs.deny }}
+      snapshots_btrfs: ${{ steps.decide.outputs.snapshots_btrfs }}
+      shellcheck: ${{ steps.decide.outputs.shellcheck }}
+      host_pass_fake: ${{ steps.decide.outputs.host_pass_fake }}
+      linux_e2e_helper: ${{ steps.decide.outputs.linux_e2e_helper }}
+      linux_e2e_self_test: ${{ steps.decide.outputs.linux_e2e_self_test }}
+    steps:
+      # On pull_request the action lists the PR's files through the API, so
+      # no checkout. Every other event, and a PR with `ci:full`, runs
+      # everything instead.
+      - name: Filter the PR's changed paths
+        id: filter
+        if: "${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'ci:full') }}"
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          predicate-quantifier: some-with-excludes
+          filters: |
+            # CI itself and the manifests and pins that can break everything.
+            force:
+              - '.github/workflows/**'
+              - '.github/actions/**'
+              - 'Cargo.lock'
+              - '**/Cargo.toml'
+              - 'rust-toolchain.toml'
+              - 'deny.toml'
+              - 'flake.nix'
+              - 'flake.lock'
+            # Default-on: anything not known to be inert for the Rust build.
+            # compat/*.toml stays in: gogo-core's build.rs compiles it in.
+            rust:
+              - '**'
+              - '!docs/**'
+              - '!**/*.md'
+              - '!.github/**'
+              - '!scripts/**'
+              - '!e2e/**'
+              - '!nix/**'
+              - '!LICENSE-*'
+              - '!.gitignore'
+              - '!.envrc'
+            # snapshots-btrfs also runs in the dev shell and its own script.
+            btrfs:
+              - 'scripts/ci-btrfs-tests.sh'
+              - 'nix/devshell.nix'
+              - 'nix/rust-toolchain.nix'
+            # The shell scripts, the e2e harness, its manifests and tools.
+            scripts:
+              - 'scripts/**'
+              - 'e2e/**'
+              - 'nix/linux-e2e.nix'
+              - 'nix/*.patch'
+              - '!**/*.md'
+
+      - name: Decide which jobs are needed
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          FULL: "${{ contains(github.event.pull_request.labels.*.name, 'ci:full') }}"
+          CHANGES: ${{ steps.filter.outputs.changes }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != pull_request ] || [ "$FULL" = true ]; then
+            echo "Event '$EVENT', full '$FULL': everything is needed"
+            CHANGES='["force"]'
+          fi
+          # Fail closed: no decision without the filter's answer.
+          if ! jq -e 'type == "array"' <<<"$CHANGES" >/dev/null 2>&1; then
+            echo "::error::No usable output from the path filter: '$CHANGES'"
+            exit 1
+          fi
+          echo "Matched filters: $CHANGES"
+          needed() {
+            local job=$1 value=false
+            shift
+            for filter in force "$@"; do
+              if jq -e --arg f "$filter" 'index($f) != null' <<<"$CHANGES" >/dev/null; then
+                value=true
+              fi
+            done
+            echo "$job=$value" | tee -a "$GITHUB_OUTPUT"
+          }
+          needed rustfmt rust
+          needed clippy rust
+          needed test rust
+          needed deny rust
+          needed snapshots_btrfs rust btrfs
+          needed shellcheck scripts
+          needed host_pass_fake scripts
+          needed linux_e2e_helper scripts
+          needed linux_e2e_self_test scripts
+
+  rustfmt:
+    name: rustfmt
+    needs: changes
+    if: needs.changes.outputs.rustfmt == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # rustup is on every runner image: this installs what rust-toolchain.toml
+      # pins (1.99.1, clippy, rustfmt). Not setup-rust-toolchain, which spends
+      # a minute on `brew install bash` on macOS runners.
+      - run: rustup toolchain install
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    needs: changes
+    if: needs.changes.outputs.clippy == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # -D warnings: warnings are failures, same as locally.
+      - run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.test == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    # A cold macOS build is the slow case.
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # nextest is the canonical runner (docs/design/08); the .cargo/config.toml
+      # dev-signing runner degrades to plain exec here (no codesigning identity
+      # on CI runners) and never signs test binaries (*/deps/*).
+      - uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2.90.4
+        id: nextest
+        continue-on-error: true
+        with:
+          tool: cargo-nextest@0.9.146
+      # GitHub release assets occasionally 504; build the same version from source.
+      - name: Fallback - build cargo-nextest from source
+        if: steps.nextest.outcome == 'failure'
+        run: |
+          echo "::warning::prebuilt cargo-nextest 0.9.146 download failed; building from source"
+          cargo install cargo-nextest@0.9.146 --locked
+      - run: cargo nextest run
+
+  deny:
+    name: cargo-deny
+    needs: changes
+    if: needs.changes.outputs.deny == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install
+      - uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2.90.4
+        id: deny
+        continue-on-error: true
+        with:
+          tool: cargo-deny@0.20.2
+      # GitHub release assets occasionally 504; build the same version from source.
+      - name: Fallback - build cargo-deny from source
+        if: steps.deny.outcome == 'failure'
+        run: |
+          echo "::warning::prebuilt cargo-deny 0.20.2 download failed; building from source"
+          cargo install cargo-deny@0.20.2 --locked
+      # Licenses (permissive-only allowlist + gog-warp clarify) and advisories.
+      - run: cargo deny check
+
+  # Real btrfs, unprivileged (design 20 §10.3). No unprivileged btrfs mount
+  # exists, so the job mounts loop images with sudo and chowns them to the
+  # runner user; the tests themselves run without privileges. Two mounts: one
+  # without `user_subvol_rm_allowed` (the rmdir delete fallback), one with it
+  # (the SNAP_DESTROY_V2 ioctl). mkfs.btrfs and cargo come from the dev shell.
+  snapshots_btrfs:
+    name: snapshots-btrfs
+    needs: changes
+    if: needs.changes.outputs.snapshots_btrfs == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: DeterminateSystems/determinate-nix-action@16f94ba7aae399b9f9077c254b6719ec6de7e3e3 # v3.24.2
+      - name: Runner kernel has btrfs
+        run: |
+          grep -qw btrfs /proc/filesystems || sudo modprobe btrfs || true
+          if ! grep -qw btrfs /proc/filesystems; then
+            echo "::error::the runner kernel ($(uname -r)) has no btrfs support; the snapshots-btrfs job cannot run"
+            exit 1
+          fi
+          uname -r
+      - name: Build tests and mkfs.btrfs
+        run: |
+          nix develop -c mkfs.btrfs --version
+          nix develop -c cargo nextest run -p gogo-core --test snapshot_btrfs --test linuxapp_pipeline --no-run
+      - name: btrfs without user_subvol_rm_allowed (rmdir fallback)
+        run: scripts/ci-btrfs-tests.sh plain
+      - name: btrfs with user_subvol_rm_allowed (ioctl delete)
+        run: scripts/ci-btrfs-tests.sh rm-allowed
+
+  shellcheck:
+    name: shellcheck
+    needs: changes
+    if: needs.changes.outputs.shellcheck == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Same version as the flake's dev shell.
+      - uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2.90.4
+        with:
+          tool: shellcheck@0.11.0
+      - run: shellcheck scripts/*.sh scripts/tests/*.sh
+
+  host_pass_fake:
+    name: host-pass fake bundles
+    needs: changes
+    if: needs.changes.outputs.host_pass_fake == 'true'
+    # The script targets macOS (bash 3.2, ps/lsof/osascript); jq is on the
+    # runner image. Stub launchers only: no Wine, no window.
+    runs-on: macos-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: scripts/tests/host-pass-fake.sh
+
+  linux_e2e_helper:
+    name: linux-e2e helper tests
+    needs: changes
+    if: needs.changes.outputs.linux_e2e_helper == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # stdlib only; the runner's Python has tomllib.
+      - run: python3 -I scripts/tests/linux-e2e-helper-test.py
+
+  linux_e2e_self_test:
+    name: linux-e2e self-test
+    needs: changes
+    if: needs.changes.outputs.linux_e2e_self_test == 'true'
+    # scripts/linux-e2e.sh's own test: headless sway on a plain xterm, software
+    # rendering, teardown on every signal. No game.
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: DeterminateSystems/determinate-nix-action@16f94ba7aae399b9f9077c254b6719ec6de7e3e3 # v3.24.2
+      # Ubuntu's AppArmor keeps unprivileged user namespaces from bwrap.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: scripts/linux-e2e.sh self-test
+      - name: Logs
+        if: failure()
+        run: |
+          find target/linux-e2e/self-test -name stderr -exec tail -n 20 {} +
+          find target/linux-e2e/self-test -name sway.log -exec tail -n 20 {} +
+          find target/linux-e2e/self-test -path '*/live*' \( -name session.log -o -name client.stderr \
+            -o -name start.stderr -o -name serve.out -o -name state.json -o -name sandbox.log \
+            -o -name journal.jsonl \) -exec tail -n 30 {} +
+      # The whole of every scenario's logs (sway.log, result.json, game.out):
+      # the tails above don't show how a run got where it failed (#309).
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: linux-e2e-self-test
+          path: |
+            target/linux-e2e/self-test/**/*.log
+            target/linux-e2e/self-test/**/*.json
+            target/linux-e2e/self-test/**/*.jsonl
+            target/linux-e2e/self-test/**/game.out
+            target/linux-e2e/self-test/**/stderr
+            target/linux-e2e/self-test/**/stdout
+          retention-days: 14
+          if-no-files-found: ignore
+
+  ci-result:
+    name: CI result
+    # Never a condition that can skip it: a skipped required check counts
+    # as success. always() also turns a cancelled run red.
+    if: always()
+    needs:
+      - changes
+      - rustfmt
+      - clippy
+      - test
+      - deny
+      - snapshots_btrfs
+      - shellcheck
+      - host_pass_fake
+      - linux_e2e_helper
+      - linux_e2e_self_test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Check that every needed job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          if [ "$(jq -r '.changes.result' <<<"$NEEDS")" != success ]; then
+            echo "::error::Change detection did not succeed; can't tell what had to run"
+            exit 1
+          fi
+          failed=0
+          for job in rustfmt clippy test deny snapshots_btrfs shellcheck \
+            host_pass_fake linux_e2e_helper linux_e2e_self_test; do
+            wanted=$(jq -r --arg j "$job" '.changes.outputs[$j] // "missing"' <<<"$NEEDS")
+            result=$(jq -r --arg j "$job" '.[$j].result // "missing"' <<<"$NEEDS")
+            case "$wanted/$result" in
+              true/success)  echo "ok    $job" ;;
+              false/skipped) echo "skip  $job (not needed)" ;;
+              true/*)        echo "::error::$job was needed but is '$result'"; failed=1 ;;
+              false/*)       echo "::error::$job wasn't needed but is '$result'"; failed=1 ;;
+              *)             echo "::error::no decision for $job ('$wanted')"; failed=1 ;;
+            esac
+          done
+          exit "$failed"
