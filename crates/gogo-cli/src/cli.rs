@@ -1516,6 +1516,9 @@ pub mod exit {
     /// Depot (Model B) conversion/download failures share the conversion class
     /// with mac-app (design 14 §1).
     pub const DEPOT: i32 = 7;
+    /// Cloud saves: files that need a decision were left (design 22 D6); a
+    /// status or dry run that would leave them exits so too.
+    pub const CONFLICTS: i32 = 8;
     /// Interrupted (SIGINT); sidecars flushed, safe to resume.
     pub const SIGINT: i32 = 130;
 }

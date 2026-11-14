@@ -49,7 +49,9 @@ impl Entry {
     /// The location name and the path below it; `None` for a name with no
     /// `/` (it belongs to no location).
     pub fn split(&self) -> Option<(&str, &str)> {
-        self.name.split_once('/').filter(|(l, r)| !l.is_empty() && !r.is_empty())
+        self.name
+            .split_once('/')
+            .filter(|(l, r)| !l.is_empty() && !r.is_empty())
     }
 }
 
@@ -79,9 +81,11 @@ async fn body_capped(
     cap: usize,
 ) -> Result<Option<Vec<u8>>, CloudError> {
     let mut body = Vec::new();
-    while let Some(chunk) = resp.chunk().await.map_err(|e| {
-        CloudError::Network(super::auth::reqwest_kind(&e).to_string())
-    })? {
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| CloudError::Network(super::auth::reqwest_kind(&e).to_string()))?
+    {
         if body.len() + chunk.len() > cap {
             return Ok(None);
         }
@@ -337,7 +341,10 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             e,
-            CloudError::ListingTruncated { listed: 2, count: 3 }
+            CloudError::ListingTruncated {
+                listed: 2,
+                count: 3
+            }
         ));
     }
 

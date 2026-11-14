@@ -416,8 +416,8 @@ impl<'a> CloudAuth<'a> {
 
 // ---------------------------------------------------------------- error maps
 
-/// The main session's refresh (`bearer()`).
-fn auth_error(e: AuthError) -> CloudError {
+/// The main session's refresh (`bearer()`) and restore.
+pub fn auth_error(e: AuthError) -> CloudError {
     match e {
         AuthError::Unauthorized => CloudError::NotLoggedIn,
         // `AuthError::Upstream` holds gog-warp's kind text only, never a URL; its
@@ -727,7 +727,11 @@ mod tests {
         let text = e.to_string();
         assert!(text.contains("goggame-300.info") && text.contains("isn't a valid info file"));
         // An id that could escape a URL or a path is refused too, not skipped.
-        std::fs::write(dir.path().join("goggame-300.info"), r#"{"clientId":"../x"}"#).unwrap();
+        std::fs::write(
+            dir.path().join("goggame-300.info"),
+            r#"{"clientId":"../x"}"#,
+        )
+        .unwrap();
         assert!(matches!(
             info_client_id(&layout, 300),
             Err(CloudError::Info { .. })
@@ -801,7 +805,10 @@ mod tests {
         build_manifest::write(kept.path(), "2", 2, &v2_manifest(Some((CLIENT, SECRET)))).unwrap();
         let m = fetching();
         let auth = CloudAuth::with_parts(&main, persist, &m, ok_exchange());
-        let c = auth.credentials(&game_at(kept.path(), 100), Some("2")).await.unwrap();
+        let c = auth
+            .credentials(&game_at(kept.path(), 100), Some("2"))
+            .await
+            .unwrap();
         assert_eq!(
             (c.source, c.secret.expose()),
             (CredentialSource::KeptManifest, SECRET)
@@ -866,7 +873,10 @@ mod tests {
             ok_exchange(),
         );
         let dir = tempfile::tempdir().unwrap();
-        let e = auth.credentials(&game_at(dir.path(), 100), None).await.unwrap_err();
+        let e = auth
+            .credentials(&game_at(dir.path(), 100), None)
+            .await
+            .unwrap_err();
         assert!(matches!(
             e,
             CloudError::Manifest {

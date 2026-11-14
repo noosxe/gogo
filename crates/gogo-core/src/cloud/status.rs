@@ -40,6 +40,19 @@ pub struct Inputs<'a> {
     pub record_dir: &'a Path,
 }
 
+/// The first, account-free half of a status: the client id and the save
+/// locations.
+pub enum Located {
+    /// Cloud storage is off for the game, or GOG has no config for it: the
+    /// plan says so and nothing else is needed.
+    Off(Plan),
+    On {
+        client_id: String,
+        resolved: Resolved,
+        source: Source,
+    },
+}
+
 /// One side of a file, as shown.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LocalInfo {
@@ -207,36 +220,80 @@ struct Item {
 
 /// Run steps 1–3 of design 22 §5.2 for `inputs.game`.
 pub async fn status(inputs: &Inputs<'_>) -> Result<Plan, CloudError> {
-    let game = inputs.game;
-    let gogid = game.id()?;
-    let record = record::load(inputs.record_dir, gogid)?;
-    let client_id = game.client_id()?;
-
-    // The remote config first: a game without cloud saves needs no account.
-    let (cfg, source) = match remote_config::get_in(
-        inputs.cache_dir,
+    match locate(
+        inputs.game,
         inputs.http,
         inputs.config_base,
-        &client_id,
+        inputs.cache_dir,
     )
-    .await
+    .await?
+    {
+        Located::Off(plan) => Ok(plan),
+        Located::On {
+            client_id,
+            resolved,
+            source,
+        } => {
+            plan(
+                inputs.game,
+                &client_id,
+                &resolved,
+                source,
+                inputs.auth,
+                inputs.storage,
+                inputs.record_dir,
+            )
+            .await
+        }
+    }
+}
+
+/// The client id (no account: [`Game::client_id`]) and the remote config's
+/// save locations. A game without cloud saves needs nothing more.
+pub async fn locate(
+    game: &Game,
+    http: &reqwest::Client,
+    config_base: &str,
+    cache_dir: &Path,
+) -> Result<Located, CloudError> {
+    let client_id = game.client_id()?;
+    let (cfg, source) = match remote_config::get_in(cache_dir, http, config_base, &client_id).await
     {
         Ok(c) => c,
         Err(RemoteConfigError::Status { status: 404, .. }) => {
-            return Ok(Plan::off(game, Source::Network, true));
+            return Ok(Located::Off(Plan::off(game, Source::Network, true)));
         }
         Err(e) => return Err(e.into()),
     };
     let resolved = resolve(&cfg, &client_id, &game.layout);
     if !resolved.enabled {
-        return Ok(Plan::off(game, source, false));
+        return Ok(Located::Off(Plan::off(game, source, false)));
     }
+    Ok(Located::On {
+        client_id,
+        resolved,
+        source,
+    })
+}
 
+/// The second half: credentials, the per-game token, the listing, the local
+/// files and the record, classified.
+pub async fn plan(
+    game: &Game,
+    client_id: &str,
+    resolved: &Resolved,
+    source: Source,
+    auth: &CloudAuth<'_>,
+    storage_client: &StorageClient,
+    record_dir: &Path,
+) -> Result<Plan, CloudError> {
+    let gogid = game.id()?;
+    let record = record::load(record_dir, gogid)?;
     let installed = crate::gog::content::load(&game.root)
         .ok()
         .flatten()
         .and_then(|c| c.build_id);
-    let creds = inputs.auth.credentials(game, installed.as_deref()).await?;
+    let creds = auth.credentials(game, installed.as_deref()).await?;
     if creds.client_id != client_id {
         tracing::debug!(
             credentials = %creds.client_id,
@@ -245,8 +302,8 @@ pub async fn status(inputs: &Inputs<'_>) -> Result<Plan, CloudError> {
         );
         return Err(CloudError::ClientIdMismatch { gogid });
     }
-    let token = inputs.auth.token(gogid, &creds).await?;
-    let listing = storage::list(inputs.storage, &token, &client_id).await?;
+    let token = auth.token(gogid, &creds).await?;
+    let listing = storage::list(storage_client, &token, client_id).await?;
 
     let client_id_changed = record.as_ref().is_some_and(|r| r.client_id != client_id);
     let rolled_back = record.as_ref().is_some_and(|r| r.rolled_back.is_some());
@@ -282,11 +339,14 @@ pub async fn status(inputs: &Inputs<'_>) -> Result<Plan, CloudError> {
         }),
     };
 
-    let by_location = group(&resolved, &listing.entries, &mut plan.unmapped);
+    let by_location = group(resolved, &listing.entries, &mut plan.unmapped);
     let mut pending: Vec<(usize, String, Entry)> = vec![];
     let mut staged: Vec<(LocationPlan, BTreeMap<String, Item>)> = vec![];
     for loc in &resolved.locations {
-        let entries = by_location.get(loc.name.as_str()).cloned().unwrap_or_default();
+        let entries = by_location
+            .get(loc.name.as_str())
+            .cloned()
+            .unwrap_or_default();
         let (lp, items) = gather(loc, entries, usable, &mut plan.unmapped)?;
         staged.push((lp, items));
     }
@@ -310,7 +370,7 @@ pub async fn status(inputs: &Inputs<'_>) -> Result<Plan, CloudError> {
             }
         }
     }
-    let fetched = fetch_plain(inputs.storage, &token, &client_id, pending).await?;
+    let fetched = fetch_plain(storage_client, &token, client_id, pending).await?;
 
     for (i, (mut lp, items)) in staged.into_iter().enumerate() {
         for (name, item) in items {
@@ -452,8 +512,7 @@ fn gather(
         let path = match loc.file(rel) {
             Ok(p) => p,
             Err(_) => {
-                if item.entry.as_ref().is_some_and(|e| !e.is_tombstone()) || item.record.is_some()
-                {
+                if item.entry.as_ref().is_some_and(|e| !e.is_tombstone()) || item.record.is_some() {
                     unmapped.push(Unmapped {
                         name: name.clone(),
                         reason: UnmappedReason::BadPath,
