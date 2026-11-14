@@ -67,6 +67,24 @@ pub enum Op {
     DeleteCloud,
 }
 
+/// Proof that the runner's gate let this run write to the cloud: only
+/// [`pull`] makes one (after [`cloud_writes_enabled`] said yes), and
+/// `storage::{put_object, delete_object}` need one, so no other path can
+/// write (design 22 D2).
+pub struct CloudWrites(());
+
+impl CloudWrites {
+    #[cfg(test)]
+    pub(crate) fn for_tests() -> Self {
+        CloudWrites(())
+    }
+}
+
+/// The value of [`CLOUD_WRITES_ENV`] that opens the gate: exactly `1`.
+pub fn cloud_writes_enabled(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
 /// What a run does: design 22 §5.1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -411,6 +429,29 @@ pub async fn pull(
         record: loaded,
     } = detailed;
 
+    // D2's gate, first look: a real run whose plan could write to the cloud
+    // (an upload, a cloud deletion, or a conflict that may be answered that
+    // way) refuses before any HEAD or question.
+    if !opts.dry_run && opts.mode.pushes() && !opts.cloud_writes {
+        let could_write = plan.locations.iter().flat_map(|l| &l.files).any(|f| {
+            matches!(
+                f.action,
+                Action::Upload
+                    | Action::DeleteCloud
+                    | Action::Conflict(
+                        ConflictReason::BothChanged
+                            | ConflictReason::LocalChangedCloudDeleted
+                            | ConflictReason::LocalDeletedCloudChanged
+                            | ConflictReason::BothNewDiffer
+                            | ConflictReason::RolledBack
+                    )
+            )
+        });
+        if could_write {
+            return Err(gate_closed());
+        }
+    }
+
     // `--prefer newer`: the conflicts the mtimes settle.
     let forced = if opts.newer && opts.mode.pushes() {
         newer_choices(inputs, &plan, &details, &token).await?
@@ -433,6 +474,14 @@ pub async fn pull(
                 }
                 (Some(o), State::Planned) if o.local_write() && base.is_none() => {
                     State::Left(LeftReason::NoPrefix)
+                }
+                // Whatever the reason or the answer, a dir that is gone or
+                // empty never deletes in the cloud.
+                (Some(Op::DeleteCloud), State::Planned) if lp.missing => {
+                    State::Left(LeftReason::LocationMissing)
+                }
+                (Some(Op::DeleteCloud), State::Planned) if lp.emptied => {
+                    State::Left(LeftReason::LocationEmptied)
                 }
                 (_, s) => s,
             };
@@ -474,7 +523,22 @@ pub async fn pull(
         error: None,
         stopped: None,
     };
+    // D2's gate: nothing writes to the cloud until the live test has run.
+    // Checked after the plan and before the quota check, the question, any
+    // backup or any write; a dry run doesn't need it.
     let planned = |w: &Work| w.result.state == State::Planned;
+    let writes = work
+        .iter()
+        .any(|w| planned(w) && w.result.op.is_some_and(|o| o.writes_cloud(opts.mode)));
+    if !opts.dry_run && writes && !opts.cloud_writes {
+        return Err(gate_closed());
+    }
+    let gate = CloudWrites(());
+
+    // Quota and size checks, a dry run's too, so its plan and the consent
+    // counts are the real run's.
+    check_quota(inputs, &mut work, &report.plan, &mut report.warnings, opts)?;
+
     let destructive = |w: &&Work| planned(w) && w.result.op.is_some_and(Op::destructive);
     let overwrites = work
         .iter()
@@ -501,22 +565,6 @@ pub async fn pull(
         report.files.extend(work.into_iter().map(|w| w.result));
         return Ok(report);
     };
-
-    // D2's gate: nothing writes to the cloud until the live test has run.
-    if !opts.cloud_writes
-        && work
-            .iter()
-            .any(|w| planned(w) && w.result.op.is_some_and(|o| o.writes_cloud(opts.mode)))
-    {
-        return Err(CloudError::Refused(format!(
-            "nothing was changed: writing to GOG's cloud isn't switched on yet (design 22 D2: \
-             one live upload/delete test comes first); set {CLOUD_WRITES_ENV}=1 only for that \
-             test. `--dry-run` shows what would be done"
-        )));
-    }
-
-    // Quota pre-check: before any write.
-    check_quota(inputs, &mut work, &report.plan, &mut report.warnings, opts)?;
 
     // 4. The one question.
     if overwrites + deletes + cloud_overwrites + cloud_deletes > 0 {
@@ -579,7 +627,8 @@ pub async fn pull(
         }) {
             let entry = w.detail.entry.as_ref().expect("filtered");
             match storage::fetch_object(inputs.storage, &token, inputs.client_id, entry).await {
-                Ok(o) => match bk.save_cloud(&w.result.name, &o.gzip, entry) {
+                Ok(o) => match bk.save_cloud(&w.result.name, &o.gzip, entry, o.local_last_modified)
+                {
                     Ok(p) => w.result.backup = Some(p),
                     Err(e) => {
                         stop = Some(disk(e));
@@ -710,6 +759,7 @@ pub async fn pull(
                 }
             }
             Err(Applied::Left(r)) => w.result.state = State::Left(r),
+            Err(Applied::NotUploaded(n)) => w.result.state = State::NotUploaded(n),
             Err(Applied::Corrupt(msg)) => {
                 report.warnings.push(msg);
                 w.result.state = State::Corrupt;
@@ -746,7 +796,17 @@ pub async fn pull(
                 kept_as: None,
             };
             let leaf = std::ffi::OsString::from(&kept);
-            match upload(inputs, &token, w, &name, Some(&leaf), &mut rec).await {
+            match upload(
+                &gate,
+                inputs,
+                &token,
+                w,
+                (&name, None),
+                Some(&leaf),
+                &mut rec,
+            )
+            .await
+            {
                 Ok(()) => {
                     res.state = State::Done;
                     written.push((name, true));
@@ -755,6 +815,7 @@ pub async fn pull(
                     }
                 }
                 Err(Applied::Left(r)) => res.state = State::Left(r),
+                Err(Applied::NotUploaded(n)) => res.state = State::NotUploaded(n),
                 Err(Applied::Corrupt(msg)) => {
                     report.warnings.push(msg);
                     res.state = State::Corrupt;
@@ -772,8 +833,26 @@ pub async fn pull(
         }
         let name = w.result.name.clone();
         let (res, is_upload) = match w.result.op {
-            Some(Op::Upload) => (upload(inputs, &token, w, &name, None, &mut rec).await, true),
-            Some(Op::DeleteCloud) => (delete_cloud(inputs, &token, w, &mut rec).await, false),
+            Some(Op::Upload) => {
+                let entry = w.detail.entry.clone();
+                (
+                    upload(
+                        &gate,
+                        inputs,
+                        &token,
+                        w,
+                        (&name, entry.as_ref()),
+                        None,
+                        &mut rec,
+                    )
+                    .await,
+                    true,
+                )
+            }
+            Some(Op::DeleteCloud) => (
+                delete_cloud(&gate, inputs, &token, w, &mut rec).await,
+                false,
+            ),
             _ => continue,
         };
         match res {
@@ -786,6 +865,7 @@ pub async fn pull(
                 }
             }
             Err(Applied::Left(r)) => w.result.state = State::Left(r),
+            Err(Applied::NotUploaded(n)) => w.result.state = State::NotUploaded(n),
             Err(Applied::Corrupt(msg)) => {
                 report.warnings.push(msg);
                 w.result.state = State::Corrupt;
@@ -816,7 +896,13 @@ pub async fn pull(
     }
 
     // 10. Settled: the record's time, the marks, the backups.
-    let settled = work.iter().all(|w| w.result.state == State::Done);
+    // The kept copies of a `both` are part of the run too.
+    let states = || {
+        work.iter()
+            .map(|w| &w.result.state)
+            .chain(report.files.iter().map(|f| &f.state))
+    };
+    let settled = states().all(|s| *s == State::Done);
     rec.last_sync = Some(record::datetime(opts.now.into()));
     if rec.rolled_back.is_some() && settled {
         rec.rolled_back = None;
@@ -824,9 +910,9 @@ pub async fn pull(
     }
     // Nothing left to push: every file is done, or deliberately not uploaded
     // (an empty file), or only a download's business.
-    let nothing_to_push = work.iter().all(|w| {
+    let nothing_to_push = states().all(|s| {
         matches!(
-            w.result.state,
+            s,
             State::Done | State::ForPull | State::NotUploaded(NotUploaded::EmptyFile)
         )
     });
@@ -844,6 +930,15 @@ pub async fn pull(
     }
     report.files.extend(work.into_iter().map(|w| w.result));
     Ok(report)
+}
+
+/// The error of a closed gate.
+fn gate_closed() -> CloudError {
+    CloudError::Refused(format!(
+        "nothing was changed: writing to GOG's cloud isn't switched on yet (design 22 D2: one \
+         live upload/delete test comes first); set {CLOUD_WRITES_ENV}=1 only for that test. \
+         `--dry-run` shows what would be done"
+    ))
 }
 
 /// The env var D2's gate reads (the CLI): set only for the one live test.
@@ -948,6 +1043,10 @@ fn check_quota(
                         w.result.state = State::Left(r);
                         continue;
                     }
+                    Err(Applied::NotUploaded(n)) => {
+                        w.result.state = State::NotUploaded(n);
+                        continue;
+                    }
                     Err(Applied::Corrupt(m)) => {
                         warnings.push(m);
                         w.result.state = State::Corrupt;
@@ -1014,6 +1113,10 @@ fn gzip_of(w: &Work, leaf: Option<&std::ffi::OsStr>) -> Result<storage::Gzipped,
         })
     })?;
     let g = g.ok_or(Applied::Left(LeftReason::TooLarge))?;
+    // An empty gzip is a deletion marker: never a save (design 22 §12b).
+    if g.plain_len == 0 {
+        return Err(Applied::NotUploaded(NotUploaded::EmptyFile));
+    }
     // The file as the plan hashed it, not another one of the same size.
     if g.plain_len != local.size
         || w.detail
@@ -1026,29 +1129,61 @@ fn gzip_of(w: &Work, leaf: Option<&std::ffi::OsStr>) -> Result<storage::Gzipped,
     Ok(g)
 }
 
-/// `PUT` the planned file as `cloud_name`, and record it.
+/// Right before an overwrite or a deletion: the object's `Etag` is still the
+/// listed hash. **Unverified live (D2)**. A mismatch or a 404 means another
+/// machine changed it since the plan: the file is left. An answer with no
+/// `Etag` can't be checked and passes (the backup's MD5 check came earlier).
+async fn still_as_listed(
+    inputs: &Inputs<'_>,
+    token: &super::auth::CloudToken,
+    entry: &Entry,
+) -> Result<(), Applied> {
+    let head = storage::head_object(inputs.storage, token, inputs.client_id, &entry.name)
+        .await
+        .map_err(Applied::Stop)?;
+    match head {
+        None => Err(Applied::Left(LeftReason::ChangedSincePlan)),
+        Some(h) if h.etag.as_deref().is_some_and(|e| e != entry.hash) => {
+            Err(Applied::Left(LeftReason::ChangedSincePlan))
+        }
+        Some(_) => Ok(()),
+    }
+}
+
+/// `PUT` the planned file as `cloud_name`, and record it. `entry` is the
+/// cloud object being replaced, `None` for a new name (created only, with
+/// `If-None-Match: *`; a 412 leaves the file, as another machine made it
+/// first: **unverified live**).
 async fn upload(
+    gate: &CloudWrites,
     inputs: &Inputs<'_>,
     token: &super::auth::CloudToken,
     w: &Work<'_>,
-    cloud_name: &str,
+    (cloud_name, entry): (&str, Option<&Entry>),
     leaf: Option<&std::ffi::OsStr>,
     rec: &mut Record,
 ) -> Result<(), Applied> {
     let g = gzip_of(w, leaf)?;
     let local = w.detail.local.as_ref().expect("gzip_of checked");
-    let mtime = systime(&local.mtime).unwrap_or_else(std::time::SystemTime::now);
+    if let Some(e) = entry {
+        still_as_listed(inputs, token, e).await?;
+    }
     storage::put_object(
+        gate,
         inputs.storage,
         token,
         inputs.client_id,
         cloud_name,
         g.gzip,
         &g.gzip_md5,
-        mtime,
+        systime(&local.mtime),
+        entry.is_none(),
     )
     .await
-    .map_err(Applied::Stop)?;
+    .map_err(|e| match e {
+        CloudError::Storage { status: 412, .. } => Applied::Left(LeftReason::ChangedSincePlan),
+        e => Applied::Stop(e),
+    })?;
     rec.files.insert(
         cloud_name.to_string(),
         FileRecord {
@@ -1063,19 +1198,31 @@ async fn upload(
 
 /// `DELETE` the cloud object of a file that is gone here, and drop its record.
 async fn delete_cloud(
+    gate: &CloudWrites,
     inputs: &Inputs<'_>,
     token: &super::auth::CloudToken,
     w: &Work<'_>,
     rec: &mut Record,
 ) -> Result<(), Applied> {
     let planned = checked_path(w)?;
-    // Back after the plan: nothing is deleted for a file that exists.
-    if std::fs::symlink_metadata(planned).is_ok() {
-        return Err(Applied::Left(LeftReason::ChangedSincePlan));
+    // Back after the plan: nothing is deleted for a file that exists, or
+    // that can't be told to be gone.
+    match std::fs::symlink_metadata(planned) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        _ => return Err(Applied::Left(LeftReason::ChangedSincePlan)),
     }
-    storage::delete_object(inputs.storage, token, inputs.client_id, &w.result.name)
-        .await
-        .map_err(Applied::Stop)?;
+    if let Some(e) = &w.detail.entry {
+        still_as_listed(inputs, token, e).await?;
+    }
+    storage::delete_object(
+        gate,
+        inputs.storage,
+        token,
+        inputs.client_id,
+        &w.result.name,
+    )
+    .await
+    .map_err(Applied::Stop)?;
     rec.files.remove(&w.result.name);
     Ok(())
 }
@@ -1171,6 +1318,8 @@ fn local_op(d: &Detail, no_delete: bool) -> (Option<Op>, State) {
     match (&d.local, d.entry.as_ref().filter(|e| !e.is_tombstone())) {
         (Some(l), _) if l.size == 0 => (None, State::NotUploaded(NotUploaded::EmptyFile)),
         (Some(_), _) => (Some(Op::Upload), State::Planned),
+        // Never here (no record): not this machine's to delete, a pull's.
+        (None, Some(_)) if d.record.is_none() => (None, State::ForPull),
         (None, Some(_)) if no_delete => (None, State::NotUploaded(NotUploaded::NoDelete)),
         (None, Some(_)) => (Some(Op::DeleteCloud), State::Planned),
         (None, None) => (Some(Op::Forget), State::Planned),
@@ -1297,6 +1446,8 @@ fn back_up(w: &Work, bk: &mut Backup) -> Result<PathBuf, WriteError> {
 
 enum Applied {
     Left(LeftReason),
+    /// Not uploaded on purpose (an empty file), not a conflict.
+    NotUploaded(NotUploaded),
     Corrupt(String),
     Stop(CloudError),
 }

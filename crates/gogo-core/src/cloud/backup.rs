@@ -137,19 +137,26 @@ impl Backup {
 
     /// Save a cloud object a push overwrites or deletes (design 22 §7.1) to
     /// `cloud/<name>`: the stored gzip bytes as they are, so they can be
-    /// uploaded again unchanged, with its listing entry beside them
-    /// (`<leaf>.gogo-entry.json`). Both fsynced.
+    /// uploaded again unchanged, with its listing entry and its
+    /// `X-Object-Meta-LocalLastModified` beside them (`<leaf>.gogo-entry.json`). Both fsynced.
     pub fn save_cloud(
         &mut self,
         name: &str,
         gzip: &[u8],
         entry: &super::storage::Entry,
+        local_last_modified: Option<std::time::SystemTime>,
     ) -> Result<PathBuf, WriteError> {
         let dst = self.dest("cloud", name)?;
         let mut side = dst.clone().into_os_string();
         side.push(".gogo-entry.json");
         let side = PathBuf::from(side);
-        let json = serde_json::to_vec_pretty(entry).expect("an entry serializes");
+        let mut value = serde_json::to_value(entry).expect("an entry serializes");
+        if let (Some(t), Some(o)) = (local_last_modified, value.as_object_mut()) {
+            let stamp = chrono::DateTime::<chrono::Utc>::from(t)
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            o.insert("local_last_modified".into(), stamp.into());
+        }
+        let json = serde_json::to_vec_pretty(&value).expect("a value serializes");
         for (path, bytes) in [(&dst, gzip), (&side, json.as_slice())] {
             let mut out = std::fs::OpenOptions::new()
                 .write(true)

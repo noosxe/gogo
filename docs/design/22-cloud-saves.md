@@ -946,10 +946,14 @@ has written to the real cloud** (D2 below).
 
 - **The gate (D2).** A real run that would write to the cloud (an upload, a cloud deletion, or
   a `both` in a sync, which uploads the kept copy) refuses with exit 7 and "nothing was
-  changed" unless `GOGO_CLOUD_WRITES=1` is in the environment. It is checked after the plan
-  and before the quota check, the question, any backup or any write. `--dry-run` and `status`
-  never need it. The variable is for the one live test below; a later change removes the gate
-  once the test has passed.
+  changed" unless `GOGO_CLOUD_WRITES=1` is in the environment (exactly `1`). It is checked
+  twice: on the plan first, before any conflict question or `--prefer newer` `HEAD` (any
+  upload, cloud deletion or conflict a push or sync could answer by writing refuses), then on
+  what is planned, before the quota check, the question, any backup or any write. Only the
+  runner can make the `CloudWrites` token that the crate-private `storage::put_object` and
+  `delete_object` require, so no other path can write. `--dry-run` and `status` never need
+  it. The variable is for the one live test below; a later change removes the gate once the
+  test has passed.
 - **One runner.** `pull`, `push` and `sync` share the pull's order (§12e): sync lock, change
   lock and running refusal, `status`'s plan, conflicts, quota, the one question, the
   `cloud-pull` snapshot (only for local overwrites/deletes, so a push takes none), backups,
@@ -963,14 +967,25 @@ has written to the real cloud** (D2 below).
   RFC 3339). An `Etag` in the answer that isn't ours is `corrupt` (exit 5). The local file is
   read through the pull's no-link walk, checked against the plan (device, inode, size, mtime
   and the plain MD5 the plan took): a file changed meanwhile is left (`changed_since_plan`).
-  One at a time. A file whose gzip would exceed 200 MiB is left (`too_large`). **Empty files
-  are never uploaded** (`not_uploaded: empty_file`, exit 0): an empty gzip is a tombstone
-  (§12b), so every client would read the save as deleted.
+  One at a time. A file whose gzip would exceed 200 MiB, or whose plain size exceeds the
+  download cap (2 GiB), is left (`too_large`). **Empty files are never uploaded**
+  (`not_uploaded: empty_file`, exit 0), checked on the file as read, so a kept copy is covered
+  too: an empty gzip is a tombstone (§12b), so every client would read the save as deleted.
+  An unknown mtime leaves `X-Object-Meta-LocalLastModified` out rather than sending the
+  current time. A weak `Etag` in the answer is compared by its value.
+- **Conditional writes (unverified live; added to the D2 test).** A `PUT` of a name with no
+  cloud entry sends `If-None-Match: *`; a 412 leaves the file (`changed_since_plan`: another
+  machine created it first). Right before each overwrite or deletion a `HEAD` compares the
+  object's `Etag` with the planned hash; a mismatch, or a 404, leaves the file. An answer
+  with no `Etag` can't be compared and passes.
 - **Never uploaded:** build files, excluded files and unreadable ones (the plan never lists
   them), and anything in a location whose dir is missing or emptied. `location_missing` is
   left by every mode; `location_emptied` is left by a push and a sync (a pull settles it like
-  any conflict), so not even `--prefer local` turns "the save dir is empty" into deleting
-  every save in the cloud.
+  any conflict). Beyond the classification, **any** cloud deletion planned in a missing or
+  emptied location is left (`location_missing`/`location_emptied`), whatever the reason (a
+  rollback, a cloud change) or the answer, `--prefer local` and the prompt's `local` included.
+  A cloud-only file this machine never had (no record) is never deleted by a local answer
+  (it is a pull's: `for pull`).
 - **Cloud deletion** (`storage::delete_object`, **unverified live**): an HTTP `DELETE` of the
   object URL, a 404 counting as done. Whether the cloud then lists a tombstone or nothing
   isn't known; both read as deleted (§12b), and the post-write re-list notes a deletion that
@@ -984,9 +999,11 @@ has written to the real cloud** (D2 below).
   first downloads the object (MD5 checked) into
   `cloud-saves/backups/<gogid>/<UTC>/cloud/<location>/<path>` as the stored gzip, with the
   listing entry beside it (`<leaf>.gogo-entry.json`), in the same dir as the local backups
-  and pruned with them. All backups are done before the first write; a failed one stops the
-  run, an object that no longer matches its listing (another machine pushed meanwhile) is
-  never overwritten (`corrupt`, a note). A tombstone is overwritten without a backup (an
+  and pruned with them; the sidecar also holds the object's `LocalLastModified`. All backups
+  are done before the first write. A backup that fails to write stops the run (exit 6); one
+  that can't be fetched leaves **that file** and the run goes on: a 404 is
+  `changed_since_plan`, an object whose bytes no longer match its listing (another machine
+  pushed meanwhile) is `corrupt` (exit 5, a note). Neither is ever overwritten or deleted. A tombstone is overwritten without a backup (an
   empty gzip holds nothing). A brand-new object can't be checked for a concurrent creation.
 - **The question:** asked once, after the conflict answers, when anything is overwritten or
   deleted on either side; the text counts local overwrites/deletions and cloud overwrites
@@ -995,15 +1012,18 @@ has written to the real cloud** (D2 below).
 - **Quota (§5.4):** before any write, the gzip size of every planned upload (counted on the
   file as it will be uploaded, the replaced objects' sizes subtracted) plus the container's
   `bytes_used` is held against the smaller of the container's `x-container-meta-quota-bytes`
-  and the remote config's `cloudStorage.quota` (`Resolved::quota`). Over it: exit 1 with the
-  numbers, nothing written. A kept copy of a `both` counts as its plain size plus 1%. Unknown
+  and the remote config's `cloudStorage.quota` (`Resolved::quota`); with no
+  `x-container-bytes-used` header, the sum of the listed sizes stands in. Over it: exit 1 with
+  the numbers, nothing written. The quota and size checks run on a dry run too, so its plan,
+  its exit code and the question's counts are the real run's. A kept copy of a `both` counts as its plain size plus 1%. Unknown
   numbers skip the check.
 - **Conflicts:** `push` offers `local` (upload, or delete the cloud object when the file is
   gone; `skip` otherwise) and `--prefer local`; a conflict it can't settle is left (exit 8).
   `sync` offers `cloud`, `local`, `both`, `skip`. `--prefer cloud|local` settle every
   conflict that way; `newer` `HEAD`s each conflicting object that has a file on both sides
   and compares `X-Object-Meta-LocalLastModified` with the local mtime; within 2 s, or with no
-  usable header, the conflict stays (asked, or exit 8), and it is refused after a rollback
+  usable header (a 404 is no header), the conflict stays (asked, or exit 8), and it is
+  refused after a rollback
   (exit 7, design 20 §6.3). `--prefer newer` is the one option that sends `HEAD`s in a dry
   run (read-only).
 - **`both` in a sync** uploads the kept `<name>.local-<UTC>` copy in the same run (the point
@@ -1013,7 +1033,8 @@ has written to the real cloud** (D2 below).
   failed upload (network, 5xx) stops the run with exit 4 and the record never moves past it;
   a rerun continues. The final re-list only notes a listing that doesn't show an upload (it
   may lag). `pending_push` is cleared by a push or sync that leaves nothing to push (every
-  file done, an empty file, or a download's business); a pull never touches it.
+  file done, an empty file, or a download's business, the kept copies of a `both` counted); a
+  pull never touches it.
   `rolled_back` is cleared when every planned file was done, as for a pull.
 - **Dry run:** a real or dry run of `push`/`sync` plans with the same code; `--dry-run` takes
   no lock and sends only `GET`s (the tests assert that no `PUT`, `POST` or `DELETE` reaches
@@ -1035,8 +1056,12 @@ file. The steps:
 3. Put one small file with a distinctive name in one of the game's save locations
    (`gogo saves locations <gogid>` lists them), e.g. `gogo-d2-test.txt`.
 4. `gogo saves push <gogid> --dry-run`: only that file is planned as an upload.
-5. `GOGO_CLOUD_WRITES=1 gogo saves push <gogid> --yes`: one `PUT`. Check `status` shows the
-   file as the same on both sides, and the listing's `hash` equals the MD5 of the gzip.
+5. `GOGO_CLOUD_WRITES=1 gogo saves push <gogid> --yes`: one `PUT`, sent with
+   `If-None-Match: *` (the name is new). Check the server accepts that header (no 4xx), that
+   `status` shows the file as the same on both sides, and that the listing's `hash` equals
+   the MD5 of the gzip. Then change the file and push again: the overwrite is preceded by a
+   `HEAD` whose `Etag` equals the listed hash (check the server answers one, and that it is
+   the MD5 of the stored bytes, not a quoted or weak variant that would never match).
 6. Read it back: `gogo saves pull <gogid> --dry-run` shows nothing to do; on a second scratch
    state, `gogo saves pull <gogid>` downloads the same bytes and mtime (the
    `X-Object-Meta-LocalLastModified` round trip).

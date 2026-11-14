@@ -29,6 +29,19 @@ struct Fixture {
     server: MockServer,
     exchange: FixedExchange,
     session: MainSession,
+    /// What `HEAD` answers as the `Etag`, instead of the listed hash.
+    head_etag: Option<String>,
+    /// What a `GET` of an object does.
+    get: Get,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Get {
+    Normal,
+    /// 404.
+    Missing,
+    /// Other bytes than the listed ones.
+    Wrong,
 }
 
 async fn fixture() -> Fixture {
@@ -67,6 +80,8 @@ async fn fixture_with(config: &'static str) -> Fixture {
         saves,
         server,
         exchange: FixedExchange::default(),
+        head_etag: None,
+        get: Get::Normal,
         session: MainSession::new(),
         _dir: dir,
     }
@@ -194,13 +209,25 @@ impl Fixture {
             first.mount(&self.server).await;
         }
         for (n, b) in objects {
-            Mock::given(method("GET"))
+            Mock::given(method("HEAD"))
                 .and(path(format!("/v1/7/{CLIENT}/{}", n.replace(' ', "%20"))))
                 .respond_with(
                     ResponseTemplate::new(200)
-                        .insert_header("x-object-meta-locallastmodified", UPLOADED)
-                        .set_body_bytes(b.clone()),
+                        .insert_header("etag", self.head_etag.clone().unwrap_or_else(|| md5_hex(b)))
+                        .insert_header("x-object-meta-locallastmodified", UPLOADED),
                 )
+                .mount(&self.server)
+                .await;
+            let answer = match self.get {
+                Get::Normal => ResponseTemplate::new(200)
+                    .insert_header("x-object-meta-locallastmodified", UPLOADED)
+                    .set_body_bytes(b.clone()),
+                Get::Missing => ResponseTemplate::new(404),
+                Get::Wrong => ResponseTemplate::new(200).set_body_bytes(gzip(b"somebody else's")),
+            };
+            Mock::given(method("GET"))
+                .and(path(format!("/v1/7/{CLIENT}/{}", n.replace(' ', "%20"))))
+                .respond_with(answer)
                 .mount(&self.server)
                 .await;
         }
@@ -1872,22 +1899,14 @@ async fn prefer_newer_decides_by_mtimes_and_a_tie_stays_a_conflict() {
     f.recorded(&mut rec, "c.sav", b"base");
     f.save_record(&rec);
     f.write("c.sav", b"local edit");
-    let mtime = chrono::DateTime::<chrono::Utc>::from(
-        fs::metadata(f.saves.join("c.sav"))
-            .unwrap()
-            .modified()
-            .unwrap(),
-    )
-    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    fs::File::options()
+        .write(true)
+        .open(f.saves.join("c.sav"))
+        .unwrap()
+        .set_modified(uploaded())
+        .unwrap();
     f.serve(&[("saves/c.sav", gzip(b"cloud edit"))]).await;
     f.accept_writes().await;
-    Mock::given(method("HEAD"))
-        .and(path(format!("/v1/7/{CLIENT}/saves/c.sav")))
-        .respond_with(
-            ResponseTemplate::new(200).insert_header("x-object-meta-locallastmodified", mtime),
-        )
-        .mount(&f.server)
-        .await;
     let mut d = Script::new(Choice::Skip, Confirm::Yes);
     let r = f
         .pull(&newer, &mut FakeHost::default(), &mut d)
@@ -1922,4 +1941,480 @@ async fn prefer_newer_is_refused_after_a_rollback() {
         .err()
         .unwrap();
     assert_eq!(e.exit_code(), 7);
+}
+
+// ---- review fixes of #479 ---------------------------------------------------
+
+#[test]
+fn the_gate_opens_only_for_exactly_one() {
+    for (v, open) in [
+        (None, false),
+        (Some(""), false),
+        (Some("0"), false),
+        (Some("true"), false),
+        (Some("yes"), false),
+        (Some("1 "), false),
+        (Some("1"), true),
+    ] {
+        assert_eq!(cloud_writes_enabled(v), open, "{v:?}");
+    }
+}
+
+/// A recorded file `a.sav` whose cloud object is `cloud`, the local file
+/// gone; `dir` says how: "missing" (no save dir), "emptied" (an empty one,
+/// the recorded file `keep.sav` is gone too).
+async fn deleted_here(f: &Fixture, dir: &str, cloud: &[u8], rolled_back: bool) {
+    f.write("a.sav", b"a");
+    f.write("keep.sav", b"k");
+    let mut rec = Record::new(CLIENT);
+    f.recorded(&mut rec, "a.sav", b"a");
+    f.recorded(&mut rec, "keep.sav", b"k");
+    if rolled_back {
+        rec.rolled_back = Some(record::datetime(std::time::SystemTime::now()));
+    }
+    f.save_record(&rec);
+    fs::remove_file(f.saves.join("a.sav")).unwrap();
+    fs::remove_file(f.saves.join("keep.sav")).unwrap();
+    if dir == "missing" {
+        fs::remove_dir(&f.saves).unwrap();
+    }
+    f.serve(&[
+        ("saves/a.sav", cloud.to_vec()),
+        ("saves/keep.sav", gzip(b"k")),
+    ])
+    .await;
+    f.accept_writes().await;
+}
+
+#[tokio::test]
+async fn a_local_answer_never_deletes_in_a_missing_or_emptied_dir_whatever_the_reason() {
+    for dir in ["missing", "emptied"] {
+        for (rolled_back, cloud) in [(true, gzip(b"a")), (false, gzip(b"changed in the cloud"))] {
+            for mode in [Mode::Push, Mode::Sync] {
+                let f = fixture().await;
+                deleted_here(&f, dir, &cloud, rolled_back).await;
+                let r = f
+                    .pull(
+                        &mode_opts(mode),
+                        &mut FakeHost::default(),
+                        &mut Script::new(Choice::Local, Confirm::Yes),
+                    )
+                    .await
+                    .unwrap();
+                let want = if dir == "missing" {
+                    LeftReason::LocationMissing
+                } else {
+                    LeftReason::LocationEmptied
+                };
+                for n in ["saves/a.sav", "saves/keep.sav"] {
+                    let st = state_of(&r, n);
+                    assert!(
+                        matches!(st, State::Left(w) if *w == want) || *st == State::ForPull,
+                        "{dir} {rolled_back} {mode:?} {n}: {st:?}"
+                    );
+                }
+                assert!(
+                    f.requests("DELETE").await.is_empty() && f.requests("PUT").await.is_empty(),
+                    "{dir} {rolled_back} {mode:?}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_cloud_only_file_this_machine_never_had_is_not_deleted_by_prefer_local() {
+    let f = fixture().await;
+    f.write("a.sav", b"a");
+    let mut rec = Record::new(CLIENT);
+    f.recorded(&mut rec, "a.sav", b"a");
+    rec.rolled_back = Some(record::datetime(std::time::SystemTime::now()));
+    f.save_record(&rec);
+    f.serve(&[
+        ("saves/a.sav", gzip(b"a")),
+        ("saves/theirs.sav", gzip(b"theirs")),
+    ])
+    .await;
+    f.accept_writes().await;
+    for mode in [Mode::Push, Mode::Sync] {
+        let r = f
+            .pull(
+                &mode_opts(mode),
+                &mut FakeHost::default(),
+                &mut Script::new(Choice::Local, Confirm::Yes),
+            )
+            .await
+            .unwrap();
+        assert_ne!(state_of(&r, "saves/theirs.sav"), &State::Done, "{mode:?}");
+        assert!(f.requests("DELETE").await.is_empty(), "{mode:?}");
+    }
+}
+
+#[tokio::test]
+async fn an_empty_kept_copy_is_never_uploaded() {
+    let f = fixture().await;
+    f.write("c.sav", b"base");
+    let mut rec = Record::new(CLIENT);
+    f.recorded(&mut rec, "c.sav", b"base");
+    f.save_record(&rec);
+    f.write("c.sav", b"");
+    f.serve(&[("saves/c.sav", gzip(b"cloud edit"))]).await;
+    f.accept_writes().await;
+    let r = f
+        .pull(
+            &mode_opts(Mode::Sync),
+            &mut FakeHost::default(),
+            &mut Script::new(Choice::Both, Confirm::Yes),
+        )
+        .await
+        .unwrap();
+    assert!(r.error.is_none(), "{:?}", r.stopped);
+    assert_eq!(f.read("c.sav").unwrap(), b"cloud edit");
+    let kept = r
+        .files
+        .iter()
+        .find(|x| x.name.starts_with("saves/c.sav.local-"))
+        .unwrap();
+    assert_eq!(kept.state, State::NotUploaded(NotUploaded::EmptyFile));
+    assert!(f.requests("PUT").await.is_empty());
+}
+
+#[tokio::test]
+async fn a_new_name_is_created_only_and_an_overwrite_is_checked_against_the_listing() {
+    let f = fixture().await;
+    f.write("new.sav", b"new");
+    f.write("edited.sav", b"old");
+    let mut rec = Record::new(CLIENT);
+    f.recorded(&mut rec, "edited.sav", b"old");
+    f.save_record(&rec);
+    f.write("edited.sav", b"edited!");
+    f.serve(&[("saves/edited.sav", gzip(b"old"))]).await;
+    f.accept_writes().await;
+    let r = f
+        .pull(
+            &mode_opts(Mode::Push),
+            &mut FakeHost::default(),
+            &mut Script::new(Choice::Skip, Confirm::Yes),
+        )
+        .await
+        .unwrap();
+    assert!(r.error.is_none(), "{:?}", r.stopped);
+    for p in f.requests("PUT").await {
+        let new = p.url.path().ends_with("/saves/new.sav");
+        assert_eq!(p.headers.contains_key("if-none-match"), new, "{}", p.url);
+    }
+    assert_eq!(
+        f.requests("HEAD").await.len(),
+        1,
+        "the overwrite was checked"
+    );
+}
+
+#[tokio::test]
+async fn a_412_or_a_changed_etag_leaves_the_file() {
+    // 412: somebody created the name since the listing.
+    let f = fixture().await;
+    f.write("new.sav", b"new");
+    f.serve(&[]).await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(412))
+        .mount(&f.server)
+        .await;
+    let r = f
+        .pull(
+            &mode_opts(Mode::Push),
+            &mut FakeHost::default(),
+            &mut Script::new(Choice::Skip, Confirm::Yes),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        state_of(&r, "saves/new.sav"),
+        &State::Left(LeftReason::ChangedSincePlan)
+    );
+    assert!(!f.record().unwrap().files.contains_key("saves/new.sav"));
+
+    // The object changed between the listing and the write: an upload over
+    // it and a deletion of it are both left.
+    let mut f = fixture().await;
+    f.head_etag = Some("0".repeat(32));
+    f.write("a.sav", b"old");
+    f.write("gone.sav", b"x");
+    let mut rec = Record::new(CLIENT);
+    f.recorded(&mut rec, "a.sav", b"old");
+    f.recorded(&mut rec, "gone.sav", b"x");
+    f.save_record(&rec);
+    f.write("a.sav", b"edited!");
+    fs::remove_file(f.saves.join("gone.sav")).unwrap();
+    f.serve(&[
+        ("saves/a.sav", gzip(b"old")),
+        ("saves/gone.sav", gzip(b"x")),
+    ])
+    .await;
+    f.accept_writes().await;
+    let r = f
+        .pull(
+            &mode_opts(Mode::Push),
+            &mut FakeHost::default(),
+            &mut Script::new(Choice::Skip, Confirm::Yes),
+        )
+        .await
+        .unwrap();
+    for n in ["saves/a.sav", "saves/gone.sav"] {
+        assert_eq!(state_of(&r, n), &State::Left(LeftReason::ChangedSincePlan));
+    }
+    assert!(f.requests("PUT").await.is_empty() && f.requests("DELETE").await.is_empty());
+    assert!(f.record().unwrap().files.contains_key("saves/gone.sav"));
+}
+
+#[tokio::test]
+async fn a_failed_cloud_backup_leaves_the_file_and_writes_nothing() {
+    for (get, want) in [
+        (Get::Missing, State::Left(LeftReason::ChangedSincePlan)),
+        (Get::Wrong, State::Corrupt),
+    ] {
+        let mut f = fixture().await;
+        f.get = get;
+        f.write("a.sav", b"old");
+        f.write("gone.sav", b"x");
+        let mut rec = Record::new(CLIENT);
+        f.recorded(&mut rec, "a.sav", b"old");
+        f.recorded(&mut rec, "gone.sav", b"x");
+        f.save_record(&rec);
+        f.write("a.sav", b"edited!");
+        fs::remove_file(f.saves.join("gone.sav")).unwrap();
+        f.serve(&[
+            ("saves/a.sav", gzip(b"old")),
+            ("saves/gone.sav", gzip(b"x")),
+        ])
+        .await;
+        f.accept_writes().await;
+        let r = f
+            .pull(
+                &mode_opts(Mode::Push),
+                &mut FakeHost::default(),
+                &mut Script::new(Choice::Skip, Confirm::Yes),
+            )
+            .await
+            .unwrap();
+        assert!(r.error.is_none(), "the run goes on: {:?}", r.stopped);
+        for n in ["saves/a.sav", "saves/gone.sav"] {
+            assert_eq!(*state_of(&r, n), want);
+        }
+        assert!(f.requests("PUT").await.is_empty(), "{want:?}");
+        assert!(f.requests("DELETE").await.is_empty(), "{want:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_file_changed_or_linked_between_the_plan_and_the_upload_is_left() {
+    // The question is where the file changes.
+    struct Swap(PathBuf, bool);
+    impl Decide for Swap {
+        fn conflict(&mut self, _: &FilePlan, _: &[Choice]) -> Choice {
+            Choice::Skip
+        }
+        fn confirm(&mut self, _: &Consent) -> Confirm {
+            if self.1 {
+                let target = self.0.with_file_name("elsewhere.txt");
+                fs::write(&target, b"another file").unwrap();
+                fs::remove_file(&self.0).unwrap();
+                std::os::unix::fs::symlink(target, &self.0).unwrap();
+            } else {
+                fs::write(&self.0, b"played meanwhile").unwrap();
+            }
+            Confirm::Yes
+        }
+    }
+    for link in [false, true] {
+        let f = fixture().await;
+        f.write("a.sav", b"old");
+        let mut rec = Record::new(CLIENT);
+        f.recorded(&mut rec, "a.sav", b"old");
+        f.save_record(&rec);
+        f.write("a.sav", b"edited!");
+        f.serve(&[("saves/a.sav", gzip(b"old"))]).await;
+        f.accept_writes().await;
+        let r = f
+            .pull(
+                &mode_opts(Mode::Push),
+                &mut FakeHost::default(),
+                &mut Swap(f.saves.join("a.sav"), link),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state_of(&r, "saves/a.sav"),
+            &State::Left(LeftReason::ChangedSincePlan),
+            "link: {link}"
+        );
+        assert!(f.requests("PUT").await.is_empty(), "link: {link}");
+    }
+}
+
+/// An upload of `payload`'s gzip against a container of `other` objects and
+/// a quota.
+async fn quota_run(
+    quota: u64,
+    dry_run: bool,
+    used: Option<&str>,
+) -> (Result<PullReport, CloudError>, usize) {
+    let f = fixture().await;
+    f.write("payload.sav", b"payload payload payload");
+    let q = quota.to_string();
+    let mut headers = vec![("x-container-meta-quota-bytes", q.as_str())];
+    if let Some(u) = used {
+        headers.push(("x-container-bytes-used", u));
+    }
+    f.serve_headers(&[("saves/o.sav", gzip(b"other object"))], &headers)
+        .await;
+    f.accept_writes().await;
+    let r = f
+        .pull(
+            &PullOptions {
+                dry_run,
+                ..mode_opts(Mode::Push)
+            },
+            &mut FakeHost::default(),
+            &mut Script::new(Choice::Skip, Confirm::Yes),
+        )
+        .await;
+    let puts = f.requests("PUT").await.len();
+    (r, puts)
+}
+
+#[tokio::test]
+async fn the_quota_edge_is_exact_and_an_unknown_use_is_summed_from_the_listing() {
+    let up = gzip(b"payload payload payload").len() as u64;
+    let other = gzip(b"other object").len() as u64;
+    // No `x-container-bytes-used`: the listing's sizes stand in.
+    let (r, puts) = quota_run(other + up, false, None).await;
+    assert!(r.unwrap().error.is_none());
+    assert_eq!(puts, 1, "exactly at the quota fits");
+    let (r, puts) = quota_run(other + up - 1, false, None).await;
+    assert!(matches!(r, Err(CloudError::Quota(_))));
+    assert_eq!(puts, 0);
+    // The header wins when there is one.
+    let (r, _) = quota_run(1000 + up, false, Some("1000")).await;
+    assert!(r.is_ok());
+    let (r, _) = quota_run(1000 + up - 1, false, Some("1000")).await;
+    assert!(matches!(r, Err(CloudError::Quota(_))));
+    // A dry run is refused the same way, and still sends nothing.
+    let (r, puts) = quota_run(1000 + up - 1, true, Some("1000")).await;
+    assert!(matches!(r, Err(CloudError::Quota(_))));
+    assert_eq!(puts, 0);
+}
+
+#[tokio::test]
+async fn an_overwrite_frees_the_replaced_objects_bytes_in_the_quota() {
+    let f = fixture().await;
+    f.write("a.sav", b"old");
+    let mut rec = Record::new(CLIENT);
+    f.recorded(&mut rec, "a.sav", b"old");
+    f.save_record(&rec);
+    f.write("a.sav", b"old but a little longer now");
+    let old = gzip(b"old");
+    let new = gzip(b"old but a little longer now");
+    let used = 5000u64;
+    let quota = (used - old.len() as u64 + new.len() as u64).to_string();
+    f.serve_headers(
+        &[("saves/a.sav", old)],
+        &[
+            ("x-container-bytes-used", "5000"),
+            ("x-container-meta-quota-bytes", quota.as_str()),
+        ],
+    )
+    .await;
+    f.accept_writes().await;
+    let r = f
+        .pull(
+            &mode_opts(Mode::Push),
+            &mut FakeHost::default(),
+            &mut Script::new(Choice::Skip, Confirm::Yes),
+        )
+        .await
+        .unwrap();
+    assert!(r.error.is_none(), "{:?}", r.stopped);
+    assert_eq!(f.requests("PUT").await.len(), 1);
+}
+
+#[tokio::test]
+async fn the_gate_refuses_before_any_question_even_with_only_a_conflict() {
+    let f = fixture().await;
+    f.write("c.sav", b"base");
+    let mut rec = Record::new(CLIENT);
+    f.recorded(&mut rec, "c.sav", b"base");
+    f.save_record(&rec);
+    f.write("c.sav", b"local edit");
+    f.serve(&[("saves/c.sav", gzip(b"cloud edit"))]).await;
+    f.accept_writes().await;
+    struct Never;
+    impl Decide for Never {
+        fn conflict(&mut self, _: &FilePlan, _: &[Choice]) -> Choice {
+            panic!("asked before the gate")
+        }
+        fn confirm(&mut self, _: &Consent) -> Confirm {
+            panic!("asked before the gate")
+        }
+    }
+    let gate = PullOptions {
+        cloud_writes: false,
+        newer: true,
+        ..mode_opts(Mode::Sync)
+    };
+    let e = f
+        .pull(&gate, &mut FakeHost::default(), &mut Never)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(e.exit_code(), 7);
+    assert!(
+        f.requests("HEAD").await.is_empty(),
+        "no HEAD before the gate"
+    );
+    // Only a keep-both copy would write: still refused, nothing changed.
+    let e = f
+        .pull(
+            &PullOptions {
+                newer: false,
+                ..gate
+            },
+            &mut FakeHost::default(),
+            &mut Script::new(Choice::Both, Confirm::Yes),
+        )
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(e.exit_code(), 7);
+    assert_eq!(f.read("c.sav").unwrap(), b"local edit");
+    for r in f.server.received_requests().await.unwrap() {
+        assert_eq!(r.method.as_str(), "GET");
+    }
+}
+
+#[tokio::test]
+async fn a_sync_never_uploads_what_it_just_downloaded() {
+    let f = fixture().await;
+    f.write("mine.sav", b"mine");
+    f.serve(&[("saves/theirs.sav", gzip(b"theirs"))]).await;
+    f.accept_writes().await;
+    for run in 0..2 {
+        let r = f
+            .pull(
+                &mode_opts(Mode::Sync),
+                &mut FakeHost::default(),
+                &mut Script::new(Choice::Skip, Confirm::Yes),
+            )
+            .await
+            .unwrap();
+        assert!(r.error.is_none(), "{:?}", r.stopped);
+        let puts = f.requests("PUT").await;
+        assert!(
+            puts.iter()
+                .all(|p| p.url.path().ends_with("/saves/mine.sav")),
+            "run {run}: {:?}",
+            puts.iter().map(|p| p.url.to_string()).collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(f.read("theirs.sav").unwrap(), b"theirs");
 }

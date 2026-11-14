@@ -407,7 +407,11 @@ pub async fn plan_detailed(
         container: Some(Container {
             objects: listing.entries.len(),
             tombstones: listing.entries.iter().filter(|e| e.is_tombstone()).count(),
-            bytes_used: listing.bytes_used,
+            // No header: the listed objects' sizes (a lower bound is still
+            // better than none for the quota check).
+            bytes_used: listing
+                .bytes_used
+                .or_else(|| Some(listing.entries.iter().map(|e| e.bytes).sum())),
             quota_bytes: listing.quota_bytes,
             missing: listing.missing,
         }),

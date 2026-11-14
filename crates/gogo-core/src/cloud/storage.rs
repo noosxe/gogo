@@ -379,7 +379,8 @@ pub struct Gzipped {
 
 /// Read `r` to its end into [`gzip`]'s form (the same bytes [`gzip`] gives
 /// for the same content). `Ok(None)` when the stored form would be larger
-/// than `max_gzip`: nothing that large is uploaded.
+/// than `max_gzip`, or the plain file than [`MAX_PLAIN`]: nothing that large
+/// is uploaded.
 pub fn gzip_reader(r: &mut dyn std::io::Read, max_gzip: u64) -> std::io::Result<Option<Gzipped>> {
     let mut enc = flate2::GzBuilder::new()
         .mtime(0)
@@ -394,6 +395,9 @@ pub fn gzip_reader(r: &mut dyn std::io::Read, max_gzip: u64) -> std::io::Result<
         }
         plain.update(&buf[..n]);
         plain_len += n as u64;
+        if plain_len > MAX_PLAIN {
+            return Ok(None);
+        }
         enc.write_all(&buf[..n])?;
         if enc.get_ref().len() as u64 > max_gzip {
             return Ok(None);
@@ -413,34 +417,45 @@ pub fn gzip_reader(r: &mut dyn std::io::Read, max_gzip: u64) -> std::io::Result<
 
 /// `PUT` one object: the gzip body with `Content-Encoding: gzip`, its MD5 as
 /// `Etag` and the file's mtime (whole seconds, UTC, RFC 3339) as
-/// `X-Object-Meta-LocalLastModified` (design 22 §1.3). **Unverified live
-/// (D2)**; the caller holds the write gate. An `Etag` in the answer that
-/// isn't ours means the cloud stored something else: [`CloudError::Corrupt`].
-pub async fn put_object(
+/// `X-Object-Meta-LocalLastModified` (design 22 §1.3; left out when the
+/// mtime is unknown). `create_only` adds `If-None-Match: *`, so a name
+/// someone else created since the listing isn't overwritten (a 412 is
+/// [`CloudError::Storage`] with that status). **Unverified live (D2)**; the
+/// `gate` can only come from the pull runner's gate check. An `Etag` in the
+/// answer that isn't ours (a weak one compared by its value) means the cloud
+/// stored something else: [`CloudError::Corrupt`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn put_object(
+    _gate: &super::pull::CloudWrites,
     client: &StorageClient,
     token: &CloudToken,
     client_id: &str,
     name: &str,
     gzip: Vec<u8>,
     gzip_md5: &str,
-    mtime: std::time::SystemTime,
+    mtime: Option<std::time::SystemTime>,
+    create_only: bool,
 ) -> Result<(), CloudError> {
-    let stamp = chrono::DateTime::<chrono::Utc>::from(mtime)
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let req = client
+    let mut req = client
         .request(Method::PUT, token, client_id, Some(name))?
         .header(reqwest::header::CONTENT_ENCODING, "gzip")
         .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
-        .header(reqwest::header::ETAG, gzip_md5)
-        .header("X-Object-Meta-LocalLastModified", stamp)
-        .body(gzip);
-    let resp = client.send(req).await?;
+        .header(reqwest::header::ETAG, gzip_md5);
+    if let Some(t) = mtime {
+        let stamp = chrono::DateTime::<chrono::Utc>::from(t)
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        req = req.header("X-Object-Meta-LocalLastModified", stamp);
+    }
+    if create_only {
+        req = req.header(reqwest::header::IF_NONE_MATCH, "*");
+    }
+    let resp = client.send(req.body(gzip)).await?;
     if let Some(got) = resp
         .headers()
         .get(reqwest::header::ETAG)
         .and_then(|v| v.to_str().ok())
     {
-        let got = got.trim().trim_matches('"').to_ascii_lowercase();
+        let got = etag_value(got);
         if got != gzip_md5 {
             return Err(CloudError::Corrupt {
                 name: name.to_string(),
@@ -451,10 +466,18 @@ pub async fn put_object(
     Ok(())
 }
 
+/// An `ETag` header's value: no quotes, no weak marker, lowercase.
+fn etag_value(h: &str) -> String {
+    let h = h.trim();
+    let h = h.strip_prefix("W/").unwrap_or(h);
+    h.trim_matches('"').to_ascii_lowercase()
+}
+
 /// `DELETE` one object. **Unverified live (D2)**: whether the cloud then lists
 /// a tombstone or nothing is what the live test shows; both read as deleted.
 /// A 404 is success: it is gone.
-pub async fn delete_object(
+pub(crate) async fn delete_object(
+    _gate: &super::pull::CloudWrites,
     client: &StorageClient,
     token: &CloudToken,
     client_id: &str,
@@ -467,17 +490,50 @@ pub async fn delete_object(
     }
 }
 
+/// What a `HEAD` of one object says.
+#[derive(Debug, Clone, Default)]
+pub struct Head {
+    /// `ETag`, normalised ([`etag_value`]): the MD5 of the stored bytes.
+    pub etag: Option<String>,
+    /// `X-Object-Meta-LocalLastModified`, when usable.
+    pub local_last_modified: Option<std::time::SystemTime>,
+}
+
+/// `HEAD` one object; `None` for a 404 (gone).
+pub async fn head_object(
+    client: &StorageClient,
+    token: &CloudToken,
+    client_id: &str,
+    name: &str,
+) -> Result<Option<Head>, CloudError> {
+    let req = client.request(Method::HEAD, token, client_id, Some(name))?;
+    let resp = match client.send(req).await {
+        Ok(r) => r,
+        Err(CloudError::Storage { status: 404, .. }) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    Ok(Some(Head {
+        etag: resp
+            .headers()
+            .get(reqwest::header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            .map(etag_value),
+        local_last_modified: local_last_modified(resp.headers(), std::time::SystemTime::now())
+            .unwrap_or(None),
+    }))
+}
+
 /// `HEAD` one object for its `X-Object-Meta-LocalLastModified` (`--prefer
-/// newer`): `None` when it has none or an unusable one.
+/// newer`): `None` when it has none, an unusable one, or is gone.
 pub async fn head_local_last_modified(
     client: &StorageClient,
     token: &CloudToken,
     client_id: &str,
     name: &str,
 ) -> Result<Option<std::time::SystemTime>, CloudError> {
-    let req = client.request(Method::HEAD, token, client_id, Some(name))?;
-    let resp = client.send(req).await?;
-    Ok(local_last_modified(resp.headers(), std::time::SystemTime::now()).unwrap_or(None))
+    Ok(head_object(client, token, client_id, name)
+        .await?
+        .and_then(|h| h.local_last_modified))
 }
 
 /// The MD5 of [`gzip`] of nothing.
@@ -541,9 +597,68 @@ mod tests {
             .mount(&server)
             .await;
         let c = client(&server).await;
-        put_object(&c, &token(), "cid", "saves/a b.sav", gz.clone(), &md5, at)
-            .await
-            .unwrap();
+        let gate = crate::cloud::pull::CloudWrites::for_tests();
+        // A weak Etag is compared by its value.
+        let weak = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(201).insert_header("etag", format!("W/\"{md5}\"")))
+            .mount(&weak)
+            .await;
+        put_object(
+            &gate,
+            &client(&weak).await,
+            &token(),
+            "cid",
+            "saves/w",
+            gz.clone(),
+            &md5,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        let sent = &weak.received_requests().await.unwrap()[0];
+        assert!(
+            !sent.headers.contains_key("x-object-meta-locallastmodified"),
+            "no mtime, no header"
+        );
+        assert!(!sent.headers.contains_key("if-none-match"));
+
+        put_object(
+            &gate,
+            &c,
+            &token(),
+            "cid",
+            "saves/a b.sav",
+            gz.clone(),
+            &md5,
+            Some(at),
+            false,
+        )
+        .await
+        .unwrap();
+
+        // A new name is created only: a 412 says someone made it meanwhile.
+        let created = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(header("if-none-match", "*"))
+            .respond_with(ResponseTemplate::new(412))
+            .mount(&created)
+            .await;
+        let e = put_object(
+            &gate,
+            &client(&created).await,
+            &token(),
+            "cid",
+            "saves/n",
+            gz.clone(),
+            &md5,
+            None,
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(e, CloudError::Storage { status: 412, .. }), "{e}");
 
         let other = MockServer::start().await;
         Mock::given(method("PUT"))
@@ -551,13 +666,15 @@ mod tests {
             .mount(&other)
             .await;
         let e = put_object(
+            &gate,
             &client(&other).await,
             &token(),
             "cid",
             "saves/x",
             gz,
             &md5,
-            at,
+            Some(at),
+            false,
         )
         .await
         .unwrap_err();
@@ -565,7 +682,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn head_reads_the_etag_and_a_404_is_gone() {
+        let server = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .and(path("/v1/7/cid/saves/a"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("etag", "\"ABCDEF00ABCDEF00ABCDEF00ABCDEF00\"")
+                    .insert_header("x-object-meta-locallastmodified", "2024-02-11T03:49:20Z"),
+            )
+            .mount(&server)
+            .await;
+        let c = client(&server).await;
+        let h = head_object(&c, &token(), "cid", "saves/a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(h.etag.as_deref(), Some("abcdef00abcdef00abcdef00abcdef00"));
+        assert!(h.local_last_modified.is_some());
+        assert!(
+            head_object(&c, &token(), "cid", "saves/none")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            head_local_last_modified(&c, &token(), "cid", "saves/none")
+                .await
+                .unwrap()
+                .is_none(),
+            "a 404 is no header, not an abort"
+        );
+    }
+
+    #[tokio::test]
     async fn delete_treats_a_missing_object_as_gone() {
+        let gate = crate::cloud::pull::CloudWrites::for_tests();
         let server = MockServer::start().await;
         Mock::given(method("DELETE"))
             .and(path("/v1/7/cid/saves/a"))
@@ -578,8 +730,10 @@ mod tests {
             .mount(&server)
             .await;
         let c = client(&server).await;
-        delete_object(&c, &token(), "cid", "saves/a").await.unwrap();
-        let e = delete_object(&c, &token(), "cid", "saves/b")
+        delete_object(&gate, &c, &token(), "cid", "saves/a")
+            .await
+            .unwrap();
+        let e = delete_object(&gate, &c, &token(), "cid", "saves/b")
             .await
             .unwrap_err();
         assert_eq!(e.exit_code(), 3);
