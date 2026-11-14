@@ -22,7 +22,7 @@ pub const LISTING_CAP: usize = 32 * 1024 * 1024;
 
 /// The MD5 of the empty gzip stream Galaxy writes as a deletion marker
 /// (89 bytes, design 22 §1.3). Taken from a live listing; hashes are public.
-pub const GALAXY_TOMBSTONE_MD5: &str = "aadd86936a80ee8a369579c3926f1f3c";
+pub const GALAXY_TOMBSTONE_MD5: &str = "aadd86936a80ee8a369579c3926f1b3c";
 
 /// One listed object.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,7 +296,7 @@ mod tests {
     const LISTING: &str = r#"[
       {"name":"saves/s1/sav.dat","bytes":4,"hash":"0123456789abcdef0123456789abcdef",
        "last_modified":"2024-02-11T03:49:20.911250+00:00","content_type":"application/octet-stream"},
-      {"name":"saves/old.dat","bytes":89,"hash":"aadd86936a80ee8a369579c3926f1f3c",
+      {"name":"saves/old.dat","bytes":89,"hash":"aadd86936a80ee8a369579c3926f1b3c",
        "last_modified":"2024-02-11T03:49:20.911250+00:00","content_type":"application/octet-stream"}
     ]"#;
 
