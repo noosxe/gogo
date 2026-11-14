@@ -8,9 +8,11 @@
 //! rely on ([`Location::file`] does it again for every file).
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::Serialize;
 
+use super::build_files::BuildFilter;
 use super::client_id::{self, InfoId};
 use super::error::CloudError;
 use super::remote_config::{CloudStorage, RemoteConfig};
@@ -185,6 +187,9 @@ pub enum SkipReason {
     Ambiguous(String),
     /// The resolved path leaves the prefix and the game's files.
     EscapesPrefix,
+    /// The location is in the game's files and gogo has no list of the
+    /// build's files there (design 22 §3.4): it is not synced blind.
+    BuildFilesUnknown(String),
 }
 
 impl std::fmt::Display for SkipReason {
@@ -207,6 +212,11 @@ impl std::fmt::Display for SkipReason {
             SkipReason::EscapesPrefix => {
                 write!(f, "the path leaves the prefix and the game's files")
             }
+            SkipReason::BuildFilesUnknown(why) => write!(
+                f,
+                "it is in the game's files and gogo can't tell the build's own files \
+                 from saves there ({why}); not synced"
+            ),
         }
     }
 }
@@ -302,6 +312,19 @@ impl Roots {
             prefix_canon: canon(&layout.prefix),
             game_canon: canon(&layout.game_files),
         }
+    }
+
+    /// `path` relative to the game's files (`/`-separated, empty for the
+    /// dir itself) when its canonical form is in them, else `None`.
+    fn game_rel(&self, path: &Path) -> Option<String> {
+        let c = canonical_lenient(path)?;
+        let rel = c.strip_prefix(&self.game_canon).ok()?;
+        Some(
+            rel.components()
+                .map(|p| p.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/"),
+        )
     }
 
     /// Whether `path` goes through the prefix's `drive_c/GOG/<name>`.
@@ -411,8 +434,30 @@ pub struct Location {
     pub exists: bool,
     /// `__default` (design 22 D10): nobody verified it against a real game.
     pub unverified: bool,
+    /// In the game's files: where the list of the build's files that is
+    /// left out came from (design 22 §3.4). `None` elsewhere, and until the
+    /// list is attached.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_files: Option<BuildNote>,
     #[serde(skip)]
     roots: Roots,
+    /// The location's path relative to the game's files, `/`-separated
+    /// (empty for the game's files themselves); `None` outside them.
+    #[serde(skip)]
+    game_rel: Option<String>,
+    #[serde(skip)]
+    build: Option<Arc<BuildFilter>>,
+}
+
+/// Where a location's build-file list came from, for the output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BuildNote {
+    /// `the depot cache`, `the build's depot manifests`, `the installer's log`.
+    pub source: String,
+    /// The paths the list names (in the whole game, not only here); `None`
+    /// when the list isn't read yet (`saves locations` leaves the fetch to
+    /// `saves status`).
+    pub files: Option<usize>,
 }
 
 impl Location {
@@ -446,15 +491,46 @@ impl Location {
     pub fn excluded(&self, rel: &str) -> bool {
         excluded(rel)
     }
+
+    /// Whether the location is in the game's files (an `<?INSTALL?>` one),
+    /// where saves sit beside the build's own files.
+    pub fn in_game_files(&self) -> bool {
+        self.game_rel.is_some()
+    }
+
+    /// Whether `rel` (below the location) belongs to the build (design 22
+    /// §3.4): a path the build's file list names, or one of gogo's own
+    /// files there. Never synced: no upload, no download over it, no
+    /// deletion. In the game's files without a list attached, every file
+    /// counts as the build's, so nothing there is ever synced blind.
+    pub fn build_file(&self, rel: &str) -> bool {
+        let Some(base) = &self.game_rel else {
+            return false;
+        };
+        let Some(filter) = &self.build else {
+            return true;
+        };
+        let parts = base
+            .split('/')
+            .chain(rel.split(['/', '\\']))
+            .filter(|p| !p.is_empty())
+            .collect::<Vec<_>>();
+        filter.contains(&parts.join("/"))
+    }
+
+    /// Attach the build's file list (design 22 §3.4).
+    pub fn set_build_filter(&mut self, filter: Arc<BuildFilter>) {
+        self.build_files = Some(filter.note());
+        self.build = Some(filter);
+    }
 }
 
 /// Partial-file patterns on top of design 20 §6.1's excludes.
 const PARTIAL: &[&str] = &[".part", ".tmp", ".~incomplete"];
 
 /// Whether a file below a save location is left out of the sync: design 20
-/// §6.1's caches and logs, and partial files. (`<?INSTALL?>` locations also
-/// leave out the build's own files; that filter isn't wired in yet, see
-/// design 22 "as built".)
+/// §6.1's caches and logs, and partial files. (Locations in the game's files
+/// also leave out the build's own files: [`Location::build_file`].)
 pub fn excluded(rel: &str) -> bool {
     let name = rel
         .rsplit(['/', '\\'])
@@ -564,9 +640,12 @@ pub fn resolve_storage(
                 name: name.to_string(),
                 variable,
                 exists: path.is_dir(),
+                game_rel: roots.game_rel(&path),
                 path,
                 unverified,
+                build_files: None,
                 roots: roots.clone(),
+                build: None,
             }),
             Err(reason) => out.skipped.push(Skipped {
                 name: name.to_string(),

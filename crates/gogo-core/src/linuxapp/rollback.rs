@@ -527,7 +527,13 @@ fn game_files(
     };
     let now = content::load(&dirs.root).ok().flatten();
     let list = list.or_else(|| match now.as_ref().map(|c| c.lane) {
-        Some(content::Lane::Installer) => installer_list(dirs, &label),
+        Some(content::Lane::Installer) => {
+            let dlcs: Vec<u64> = now
+                .iter()
+                .flat_map(|c| c.dlc.iter().map(|d| d.id))
+                .collect();
+            installer_list(dirs, &label, &dlcs)
+        }
         _ => now
             .as_ref()
             .and_then(|c| cache_list(gogid, c, tree.as_deref())),
@@ -676,19 +682,25 @@ pub fn depot_fetch_wanted(gogid: &str) -> Option<FetchWant> {
 }
 
 /// The installer lane's list: the files the main installer's Inno log
-/// (`install/inno.log`) names under the install dir, each expected no newer
-/// than the log.
-fn installer_list(dirs: &GameDirs, label: &str) -> Option<BuildFiles> {
-    let log = dirs
-        .root
-        .join(crate::macapp::INSTALL_LOGS)
-        .join(crate::macapp::installer::INNO_LOG);
-    let raw = std::fs::read(&log).ok()?;
-    let at = std::fs::metadata(&log).ok()?.modified().ok()?;
+/// (`install/inno.log`) and the logs of DLC `dlcs` that are there
+/// (`install/dlc-<id>-inno.log`) name under the install dir (`label`,
+/// relative to `drive_c/`), each expected no newer than its log. `None`
+/// without the main log, or when it names no file.
+pub fn installer_list(dirs: &GameDirs, label: &str, dlcs: &[u64]) -> Option<BuildFiles> {
+    let logs = dirs.root.join(crate::macapp::INSTALL_LOGS);
     let root_win = format!("C:\\{}", label.replace('/', "\\"));
     let mut list = BuildFiles::new("the installer's log");
-    for rel in saves::inno_log_files(&raw, &root_win) {
-        list.insert(&rel, Expect::NotAfter(at));
+    let mut read = |log: &Path| -> Option<()> {
+        let raw = std::fs::read(log).ok()?;
+        let at = std::fs::metadata(log).ok()?.modified().ok()?;
+        for rel in saves::inno_log_files(&raw, &root_win) {
+            list.insert(&rel, Expect::NotAfter(at));
+        }
+        Some(())
+    };
+    read(&logs.join(crate::macapp::installer::INNO_LOG))?;
+    for id in dlcs {
+        read(&logs.join(super::dlc_installer::inno_log_name(*id)));
     }
     (!list.is_empty()).then_some(list)
 }

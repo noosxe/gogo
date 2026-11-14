@@ -289,7 +289,8 @@ is the test case (D10).
 
 Inside a location, the same excludes as design 20 §6.1 (`*.log`, `*.dmp`, `Thumbs.db`, Wine/DXVK
 caches), plus partial files (`*.part`, `*.tmp`, `*.~incomplete`). In `<?INSTALL?>` locations,
-files that belong to the build (design 20 §6.1's build-file filter) are never pushed.
+files that belong to the build (design 20 §6.1's file list) are never synced: not pushed,
+not downloaded over, not deleted. Without that list the location is skipped (§12c).
 
 ## 4. The sync state
 
@@ -652,8 +653,8 @@ Code: `gogo_core::cloud::{remote_config, locations}`, `gogo saves locations <gog
   `not_for_windows_build`, `bad_path`, `bad_name`, `duplicate_name`, `ambiguous`,
   `escapes_prefix`) in `--json` and as warnings in the text output; the others still resolve.
 - **Excludes**: design 20's list plus `*.part`, `*.tmp`, `*.~incomplete`, as
-  `cloud::locations::excluded`. The `<?INSTALL?>` build-file filter (§3.4) is **not wired
-  in yet**: it needs the build's file list design 20 §6.1 builds per game.
+  `cloud::locations::excluded`. The `<?INSTALL?>` build-file filter (§3.4) came with #469
+  (§12c).
 - `__default` is resolved and labelled `unverified` (D10).
 
 ## 12b. As built: read side and `gogo saves status` (C3, #460)
@@ -727,8 +728,7 @@ Code: `gogo_core::cloud::{client_id, storage, record, scan, classify, status}`,
 - **Objects outside the plan** are listed as `unmapped` with a reason: `no_location`,
   `skipped_location`, `bad_path`, `excluded`; never acted on. Tombstones outside every
   location are left out.
-- **`<?INSTALL?>` locations** still lack the build-file filter (#469): until it lands their
-  build files show as uploads in `status`.
+- **`<?INSTALL?>` locations** get the build-file filter of §12c (#469).
 - **Exit codes** of `status`: 5 when any object is corrupt, else 1 when a local file was
   unreadable, else 8 when conflicts are left, else 0.
 - **Output**: control characters in names, times and messages are escaped in the text
@@ -743,6 +743,51 @@ Code: `gogo_core::cloud::{client_id, storage, record, scan, classify, status}`,
 - **Live check** (2026-11-14, read-only, gogo's data and cache dirs in scratch dirs, the game
   dir linked in): Cyberpunk 2077 with no local saves gave 63 downloads, 231 objects of which
   168 tombstones, exit 0, as in §1.3. Nothing in the game's dirs changed.
+
+## 12c. As built: build files in the game's files (#469)
+
+Code: `gogo_core::cloud::build_files`, `Location::{in_game_files, build_file}`.
+
+- **Which locations**: any location whose canonical path is in the game's files (`game/` on
+  the depot lane, `drive_c/GOG/<slug>` on the installer lane), which today means the
+  `<?INSTALL?>` ones. The path is matched relative to the game's files, so
+  `<?INSTALL?>/SAVE` and `<?INSTALL?>` see the same list.
+- **The test is by path alone**: a path the list names is the build's whatever its size or
+  time, unlike the rollback's name-and-size test (design 20 §6.1). A shipped `settings.ini`
+  the game rewrote stays out too: syncing it would let a download overwrite a shipped file
+  and an upload carry it to other machines. gogo's own files there (design 20's `OwnFiles`:
+  the compat `files`, cnc-ddraw's) are left out the same way. Matching ignores case.
+- **The list** is design 20's `BuildFiles`, read the way the rollback reads it:
+  - installer lane: the main installer's Inno log (`install/inno.log`) and the log of every
+    DLC the content record lists (`install/dlc-<id>-inno.log`; the rollback reads those
+    now as well). A DLC without its log, or no main log, means no list;
+  - depot lane: the depot cache when it holds the installed build (by build id) and every DLC
+    the game has, else the build's depot manifests for the base game and its DLC in the
+    installed language, fetched by `saves status` with the main session (the snapshot
+    command's fetcher). The list isn't kept on disk;
+  - no content record (a game built before it, a Mac-lane game): the installer's log when it
+    is there; else, for a `game/` tree, `content::resolve`'s derived content, used only when
+    the game's own info file names the build (a cache of another build never stands in).
+- **No list, no sync**: every location in the game's files is skipped (`build_files_unknown`,
+  the message says why: no content record and no build in the info file, a missing
+  installer log, manifests that couldn't be fetched offline). The others still sync. A
+  location in the game's files with no list attached counts every file as the build's, so a
+  caller that forgets the list syncs nothing there rather than everything.
+- **What a sync does with build files**: local ones are counted (`local_build_files`) and
+  never planned; a live cloud object at a build file's path is `unmapped` with reason
+  `build_file` and never acted on; tombstones and record entries there drop out of the plan
+  (the record itself is left as it is).
+- **Output**: `saves locations` (offline) names each such location's list and its size, or
+  says `saves status` fetches it, or skips the location; `--json` has `build_files: {source,
+  files}`. `saves status` prints `left out as the game's own files: N (list: …)` per location
+  and a note for `build_file` objects; `--json` has `local_build_files` and `build_files`.
+- **Live check** (2026-11-14, read-only, gogo's data and cache dirs in scratch dirs, the game
+  dirs and the depot cache linked in): eight of the thirteen built games declare
+  locations, six of them under `<?INSTALL?>`. The four with a list: Heroes of Might and Magic
+  3 (manifests fetched, 273 paths) leaves out its shipped `Games/savegames.txt`, which
+  Galaxy had uploaded (`build_file`), and plans only the save; SimCity 3000's `Cities/`
+  holds 59 shipped cities, all left out; two others plan only their saves. The two older
+  builds whose info files name no build are skipped with the reason.
 
 ## 13. Implementation issues (to be filed)
 

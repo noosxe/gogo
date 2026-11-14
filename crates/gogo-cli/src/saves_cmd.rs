@@ -2,6 +2,7 @@
 //! read-only `locations` and `status` subcommands; pull, push and sync come
 //! later.
 
+use gogo::cloud::build_files::{self, Lookup};
 use gogo::cloud::classify::{Action, ConflictReason};
 use gogo::cloud::error::CloudError;
 use gogo::cloud::locations::{Game, Lane, Resolved, resolve};
@@ -86,6 +87,7 @@ async fn locations(gogid: &str, json: bool) -> Result<i32, AppError> {
             gogid,
             client_id: &client_id,
             layout: &game.layout,
+            game: Some(&game),
             json,
         },
         &cache,
@@ -113,6 +115,20 @@ async fn status(gogid: &str, json: bool) -> Result<i32, AppError> {
             source,
         }) => (client_id, resolved, source),
     };
+    let mut resolved = resolved;
+    // Locations in the game's files need the build's file list (design 22
+    // §3.4): offline when gogo has it, else the build's depot manifests.
+    if resolved.locations.iter().any(|l| l.in_game_files()) {
+        let list = match build_files::lookup(&game) {
+            Lookup::Known(l) => Ok(l),
+            Lookup::Unknown(why) => Err(why),
+            Lookup::Fetch(want) => crate::snapshot_cmd::fetch_build_files(want)
+                .await
+                .filter(|l| !l.is_empty())
+                .ok_or_else(|| build_files::NOT_FETCHED.to_string()),
+        };
+        build_files::apply(&mut resolved, &game, list);
+    }
     let cfg = crate::load_config_from_env()?;
     let store = gogo::auth::store::open(cfg.auth.token_store);
     let session = match gogo::auth::Session::restore(store.clone()).await {
@@ -269,6 +285,13 @@ pub fn render_status(p: &Plan) -> String {
             clean(&l.name),
             clean(&l.path.display().to_string())
         ));
+        if let Some(b) = &l.build_files {
+            out.push_str(&format!(
+                "  left out as the game's own files: {} (list: {})\n",
+                l.local_build_files,
+                clean(&b.source)
+            ));
+        }
         if l.missing {
             out.push_str(
                 "  warning: this save dir is gone but the last sync recorded files in it \
@@ -341,6 +364,10 @@ pub fn render_status(p: &Plan) -> String {
             UnmappedReason::Excluded,
             "are excluded (logs, caches, partial files)",
         ),
+        (
+            UnmappedReason::BuildFile,
+            "have the path of one of the game's own files",
+        ),
     ] {
         let n = unmapped(r);
         if n > 0 {
@@ -388,6 +415,9 @@ pub struct Request<'a> {
     pub gogid: &'a str,
     pub client_id: &'a str,
     pub layout: &'a gogo::cloud::locations::Layout,
+    /// The built game, for the build-file list of locations in its files
+    /// (none in tests that only resolve).
+    pub game: Option<&'a Game>,
     pub json: bool,
 }
 
@@ -403,7 +433,13 @@ pub async fn report(
     let lane = req.layout.lane;
     let (resolved, source, no_config) =
         match remote_config::get_in(cache, http, base, req.client_id).await {
-            Ok((cfg, source)) => (resolve(&cfg, req.client_id, req.layout), source, false),
+            Ok((cfg, source)) => {
+                let mut r = resolve(&cfg, req.client_id, req.layout);
+                if let Some(g) = req.game {
+                    build_note(&mut r, g);
+                }
+                (r, source, false)
+            }
             Err(remote_config::RemoteConfigError::Status { status: 404, .. }) => {
                 (Resolved::off(), Source::Network, true)
             }
@@ -429,6 +465,27 @@ pub async fn report(
         code: cli::exit::OK,
         stdout,
         stderr: String::new(),
+    }
+}
+
+/// The build-file list of the locations in the game's files, offline
+/// (design 22 §3.4): where it comes from, or the location skipped. A list
+/// only the network has is named, and left to `saves status`.
+fn build_note(r: &mut Resolved, game: &Game) {
+    if !r.locations.iter().any(|l| l.in_game_files()) {
+        return;
+    }
+    match build_files::lookup(game) {
+        Lookup::Known(l) => build_files::apply(r, game, Ok(l)),
+        Lookup::Unknown(why) => build_files::apply(r, game, Err(why)),
+        Lookup::Fetch(_) => {
+            for l in r.locations.iter_mut().filter(|l| l.in_game_files()) {
+                l.build_files = Some(gogo::cloud::locations::BuildNote {
+                    source: "the build's depot manifests, fetched by `saves status`".into(),
+                    files: None,
+                });
+            }
+        }
     }
 }
 
@@ -460,6 +517,13 @@ pub fn render(gogid: &str, source: Source, r: &Resolved) -> String {
             l.variable.name(),
             l.path.display()
         ));
+        if let Some(b) = &l.build_files {
+            let n = b.files.map(|n| format!(", {n} listed")).unwrap_or_default();
+            out.push_str(&format!(
+                "  in the game's files: the game's own files are left out (list: {}{n})\n",
+                b.source
+            ));
+        }
     }
     for s in &r.skipped {
         out.push_str(&format!(
@@ -560,6 +624,7 @@ mod tests {
                 gogid: "5",
                 client_id: "77",
                 layout: &f.layout,
+                game: None,
                 json,
             },
             &f.cache,
@@ -665,6 +730,82 @@ mod tests {
         let o = run_report(&f, "http://127.0.0.1:1", true).await;
         let v: serde_json::Value = serde_json::from_str(&o.stdout).unwrap();
         assert_eq!(v["config_source"], "stale_cache");
+    }
+
+    const INSTALL_CONFIG: &str = r#"{"content":{"Windows":{"cloudStorage":{"enabled":true,
+        "locations":[{"name":"game","location":"<?INSTALL?>/SAVE"}]}}}}"#;
+
+    /// An installer-lane game in `f`'s prefix, `drive_c/GOG/G`.
+    fn installer_game(f: &Fixture, log: bool) -> Game {
+        let root = f.layout.prefix.parent().unwrap().to_path_buf();
+        let gf = f.layout.prefix.join("drive_c/GOG/G");
+        std::fs::create_dir_all(gf.join("SAVE")).unwrap();
+        std::fs::write(
+            root.join("content.toml"),
+            "schema = 1\nlane = \"installer\"\nbuild_id = \"b1\"\n",
+        )
+        .unwrap();
+        if log {
+            std::fs::create_dir_all(root.join("install")).unwrap();
+            std::fs::write(
+                root.join("install/inno.log"),
+                "Dest filename: C:\\GOG\\G\\Game.exe\r\n",
+            )
+            .unwrap();
+        }
+        Game {
+            gogid: "5".into(),
+            layout: Layout {
+                lane: Lane::Linux,
+                prefix: f.layout.prefix.clone(),
+                game_files: gf,
+            },
+            root,
+        }
+    }
+
+    #[tokio::test]
+    async fn locations_name_the_build_file_list_or_skip_the_location() {
+        let f = fixture();
+        let server = serving(200, INSTALL_CONFIG).await;
+        let uri = server.uri();
+        let run = async |game: &Game, json: bool| {
+            let req = Request {
+                gogid: "5",
+                client_id: "77",
+                layout: &game.layout,
+                game: Some(game),
+                json,
+            };
+            report(&req, &f.cache, &uri, &reqwest::Client::new()).await
+        };
+        let g = installer_game(&f, true);
+        let o = run(&g, false).await;
+        assert!(
+            o.stdout.contains(
+                "in the game's files: the game's own files are left out \
+                 (list: the installer's log, 1 listed)"
+            ),
+            "{}",
+            o.stdout
+        );
+        let v: serde_json::Value = serde_json::from_str(&run(&g, true).await.stdout).unwrap();
+        assert_eq!(
+            v["locations"][0]["build_files"]["source"],
+            "the installer's log"
+        );
+
+        std::fs::remove_file(g.root.join("install/inno.log")).unwrap();
+        let o = run(&g, false).await;
+        assert_eq!(o.code, 0);
+        assert!(
+            o.stdout
+                .contains("warning: location \"game\" skipped: it is in the game's files"),
+            "{}",
+            o.stdout
+        );
+        let v: serde_json::Value = serde_json::from_str(&run(&g, true).await.stdout).unwrap();
+        assert_eq!(v["skipped"][0]["reason"]["kind"], "build_files_unknown");
     }
 
     #[test]
@@ -800,6 +941,27 @@ mod tests {
             assert!(!json.stdout.contains(secret), "{secret}");
         }
         assert!(!base.join("records").exists(), "status writes no record");
+
+        // The game's own files in a location in the game's files.
+        let mut plan = run().await.unwrap();
+        plan.locations[0].local_build_files = 3;
+        plan.locations[0].build_files = Some(gogo::cloud::locations::BuildNote {
+            source: "the depot cache".into(),
+            files: Some(9),
+        });
+        plan.unmapped.push(cloud_status::Unmapped {
+            name: "saves/Game.exe".into(),
+            reason: UnmappedReason::BuildFile,
+        });
+        let t = render_status(&plan);
+        assert!(
+            t.contains("  left out as the game's own files: 3 (list: the depot cache)"),
+            "{t}"
+        );
+        assert!(
+            t.contains("note: 1 cloud objects have the path of one of the game's own files"),
+            "{t}"
+        );
 
         // Exit precedence: a corrupt object (5) over an unreadable file (1)
         // over conflicts (8).
