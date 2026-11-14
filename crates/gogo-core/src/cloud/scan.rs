@@ -109,16 +109,27 @@ fn walk(
     Ok(())
 }
 
-/// The plain MD5 of a local file, read without following a link.
+/// The plain MD5 of a local file, read without following a link: the path
+/// must be a regular file (not a link) before the open, and the file opened
+/// must be that same file (device and inode), so a link swapped in between
+/// is refused.
 pub fn md5_file(path: &Path) -> Result<String, CloudError> {
     use md5::Digest;
     use std::io::Read;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut f = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(path)
-        .map_err(|e| io_error(path, e))?;
+    use std::os::unix::fs::MetadataExt;
+    let not_regular = || CloudError::Io {
+        path: path.display().to_string(),
+        reason: "not a regular file (a link?); not read".into(),
+    };
+    let before = std::fs::symlink_metadata(path).map_err(|e| io_error(path, e))?;
+    if !before.file_type().is_file() {
+        return Err(not_regular());
+    }
+    let mut f = std::fs::File::open(path).map_err(|e| io_error(path, e))?;
+    let opened = f.metadata().map_err(|e| io_error(path, e))?;
+    if (opened.dev(), opened.ino()) != (before.dev(), before.ino()) {
+        return Err(not_regular());
+    }
     let mut h = md5::Md5::new();
     let mut buf = vec![0u8; 1 << 16];
     loop {
@@ -181,6 +192,9 @@ mod tests {
             md5_file(&s.files[1].path).unwrap(),
             crate::cloud::storage::md5_hex(b"x")
         );
-        assert!(md5_file(&loc.path.join("link.sav")).is_err(), "O_NOFOLLOW");
+        assert!(
+            md5_file(&loc.path.join("link.sav")).is_err(),
+            "links aren't read"
+        );
     }
 }
