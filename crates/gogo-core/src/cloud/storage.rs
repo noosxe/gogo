@@ -240,8 +240,8 @@ pub fn local_last_modified(
     let t: std::time::SystemTime = v
         .to_str()
         .ok()
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s.trim()).ok())
-        .map(|t| t.with_timezone(&chrono::Utc).into())
+        .and_then(|s| crate::time::parse(s.trim()))
+        .map(crate::time::to_system)
         .ok_or_else(raw)?;
     if plausible_mtime(t, now) {
         Ok(Some(t))
@@ -442,8 +442,7 @@ pub(crate) async fn put_object(
         .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
         .header(reqwest::header::ETAG, gzip_md5);
     if let Some(t) = mtime {
-        let stamp = chrono::DateTime::<chrono::Utc>::from(t)
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let stamp = crate::time::secs_z(crate::time::from_system(t));
         req = req.header("X-Object-Meta-LocalLastModified", stamp);
     }
     if create_only {

@@ -95,10 +95,7 @@ impl Expect {
 
 /// A record time (UTC, to the nanosecond) as nanoseconds since the epoch.
 fn datetime_ns(d: &toml::value::Datetime) -> i128 {
-    chrono::DateTime::parse_from_rfc3339(&d.to_string())
-        .ok()
-        .and_then(|t| t.timestamp_nanos_opt())
-        .map_or(i128::MIN, i128::from)
+    crate::time::of_toml(d).map_or(i128::MIN, jiff::Timestamp::as_nanosecond)
 }
 
 /// `st` is the regular file `expect` names.

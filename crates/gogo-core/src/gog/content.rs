@@ -182,7 +182,7 @@ pub fn for_build(
     record_root: Option<&Path>,
     installed: Option<&[DlcRef]>,
 ) -> Content {
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let today = crate::time::local_now("%Y-%m-%d");
     let (info_build, present) = from_infos(install_dir, Some(&today));
     let dlc = match installed {
         None => present,

@@ -287,7 +287,7 @@ pub struct PullOptions {
     pub newer: bool,
     /// `cloud_saves.keep_backups`.
     pub keep_backups: usize,
-    pub now: chrono::DateTime<chrono::Utc>,
+    pub now: jiff::Timestamp,
     /// A test seam: the object name whose write stops after the temp file's
     /// fsync, before the rename, as a crash there would.
     #[doc(hidden)]
@@ -936,7 +936,7 @@ pub async fn pull(
             .chain(report.files.iter().map(|f| &f.state))
     };
     let settled = states().all(|s| *s == State::Done);
-    rec.last_sync = Some(record::datetime(opts.now.into()));
+    rec.last_sync = Some(crate::time::toml_datetime(opts.now));
     if rec.rolled_back.is_some() && settled {
         rec.rolled_back = None;
         report.rolled_back_cleared = true;
@@ -1045,9 +1045,7 @@ fn sibling(name: &str, kept: &str) -> String {
 
 /// The mtime of a record time.
 fn systime(d: &toml::value::Datetime) -> Option<std::time::SystemTime> {
-    chrono::DateTime::parse_from_rfc3339(&d.to_string())
-        .ok()
-        .map(|t| t.with_timezone(&chrono::Utc).into())
+    crate::time::of_toml(d).map(crate::time::to_system)
 }
 
 /// `--prefer newer`: for every conflict with a file on both sides, the cloud
@@ -1558,7 +1556,7 @@ fn apply(
     w: &mut Work,
     op: Op,
     object: Option<storage::Object>,
-    now: chrono::DateTime<chrono::Utc>,
+    now: jiff::Timestamp,
     rec: &mut Record,
     stop_here: bool,
     warnings: &mut Vec<String>,
@@ -1613,7 +1611,7 @@ fn apply(
             // whole beside it, so a failure leaves it where it was.
             let aside = (op == Op::KeepBoth).then(|| {
                 let mut a = file.clone();
-                a.push(format!(".local-{}", now.format("%Y%m%dT%H%M%SZ")));
+                a.push(format!(".local-{}", now.strftime("%Y%m%dT%H%M%SZ")));
                 a
             });
             let mut failed: Option<Fill> = None;

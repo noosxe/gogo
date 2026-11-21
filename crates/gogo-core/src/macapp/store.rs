@@ -10,7 +10,6 @@
 //! [`derive`] builds the derived runtimes engine-overlay renderers run from
 //! (decision 3).
 
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::io::Read as _;
@@ -342,7 +341,7 @@ pub async fn install_to(
                     id: entry.id.into(),
                     version: rel.tag.clone(),
                     sha256: marker.archive_sha256,
-                    fetched_at: Utc::now().to_rfc3339(),
+                    fetched_at: crate::time::autosi_offset(jiff::Timestamp::now()),
                     upstream_url: rel.asset_url.clone(),
                     entry_rel: "proton".into(),
                     bytes: dir_size(&named)?,
@@ -604,7 +603,7 @@ pub async fn install_to(
         id: entry.id.into(),
         version: rel.tag.clone(),
         sha256: actual,
-        fetched_at: Utc::now().to_rfc3339(),
+        fetched_at: crate::time::autosi_offset(jiff::Timestamp::now()),
         upstream_url: rel.asset_url.clone(),
         entry_rel,
         bytes,
@@ -785,7 +784,7 @@ pub fn derive(
         id: base.id.clone(),
         version,
         sha256: base.sha256.clone(),
-        fetched_at: Utc::now().to_rfc3339(),
+        fetched_at: crate::time::autosi_offset(jiff::Timestamp::now()),
         upstream_url: format!(
             "derived:{}/{}+{}/{}",
             base.id, base.version, renderer.id, renderer.version

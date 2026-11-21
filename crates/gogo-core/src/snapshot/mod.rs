@@ -24,7 +24,7 @@ use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use chrono::{DateTime, SubsecRound as _, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 pub use backend::{BackendKind, OnDisk, RollbackStep, SnapshotBackend, Space, Support};
@@ -136,7 +136,7 @@ pub struct Content {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpaceRecord {
     #[serde(with = "toml_time")]
-    pub checked: DateTime<Utc>,
+    pub checked: Timestamp,
     pub exclusive_bytes: u64,
     pub exact: bool,
 }
@@ -146,7 +146,7 @@ pub struct SpaceRecord {
 pub struct Meta {
     pub id: u32,
     #[serde(with = "toml_time")]
-    pub created: DateTime<Utc>,
+    pub created: Timestamp,
     pub kind: Kind,
     /// `auto` only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -191,22 +191,20 @@ impl Default for Settings {
 /// TOML's own datetime (`created = 2026-11-12T10:41:07Z`, not a string) for a
 /// UTC time, to the second.
 mod toml_time {
-    use chrono::{DateTime, SecondsFormat, Utc};
+    use jiff::Timestamp;
     use serde::{Deserialize as _, Deserializer, Serialize as _, Serializer, de, ser};
 
-    pub fn serialize<S: Serializer>(t: &DateTime<Utc>, s: S) -> Result<S::Ok, S::Error> {
-        let dt: toml::value::Datetime = t
-            .to_rfc3339_opts(SecondsFormat::Secs, true)
+    pub fn serialize<S: Serializer>(t: &Timestamp, s: S) -> Result<S::Ok, S::Error> {
+        let dt: toml::value::Datetime = crate::time::secs_z(*t)
             .parse()
             .map_err(ser::Error::custom)?;
         dt.serialize(s)
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<DateTime<Utc>, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Timestamp, D::Error> {
         let dt = toml::value::Datetime::deserialize(d)?;
-        DateTime::parse_from_rfc3339(&dt.to_string())
-            .map(|t| t.with_timezone(&Utc))
-            .map_err(de::Error::custom)
+        crate::time::of_toml(&dt)
+            .ok_or_else(|| de::Error::custom(format!("not a datetime with an offset: {dt}")))
     }
 }
 
@@ -666,7 +664,7 @@ impl<'b> Store<'b> {
             .map_or_else(|| default_label(req.kind, req.trigger), String::from);
         let mut meta = Meta {
             id: n,
-            created: Utc::now().trunc_subsecs(0),
+            created: crate::time::now_secs(),
             kind: req.kind,
             trigger: req.trigger,
             label,
@@ -893,7 +891,7 @@ impl<'b> Store<'b> {
             .map(|o| o.n)
             .collect();
         let spaces = self.backend.space(&self.game_dir, &ns)?;
-        let checked = Utc::now().trunc_subsecs(0);
+        let checked = crate::time::now_secs();
         for s in &spaces {
             if let Some(mut m) = self.load(s.n)?
                 && m.state == State::Done

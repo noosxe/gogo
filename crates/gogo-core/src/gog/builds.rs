@@ -5,9 +5,9 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Utc};
 use gog_warp::Core;
 use gog_warp::content_system::types::{Build, Platform};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 /// Schema of the cached listing file.
@@ -40,13 +40,22 @@ pub fn newest_on_branch<'a>(builds: &'a [Build], branch: Option<&str>) -> Option
         })
 }
 
+/// A build's publish time. gog-warp hands out chrono's type; gogo keeps jiff's,
+/// read through chrono's own inherent methods (gogo doesn't depend on chrono).
+pub fn published(b: &Build) -> Timestamp {
+    let d = b.date_published();
+    // chrono encodes a leap second as nanos past 999_999_999.
+    let ns = d.timestamp_subsec_nanos().min(999_999_999);
+    Timestamp::new(d.timestamp(), ns as i32).unwrap_or(Timestamp::MAX)
+}
+
 /// One row of a listing: what the table and the error messages show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildEntry {
     pub build_id: String,
     /// The version name; may be empty (old generation-1 builds).
     pub version: String,
-    pub published: DateTime<Utc>,
+    pub published: Timestamp,
     pub generation: u32,
     /// `None` on the default branch.
     pub branch: Option<String>,
@@ -59,7 +68,7 @@ impl BuildEntry {
         Self {
             build_id: b.build_id().clone(),
             version: b.version_name().clone(),
-            published: *b.date_published(),
+            published: published(b),
             generation: *b.generation(),
             branch: b.branch().clone(),
             public: *b.public(),
@@ -196,7 +205,7 @@ fn row(e: &BuildEntry) -> String {
         "  {}  {}  {}",
         e.build_id,
         version,
-        e.published.format("%Y-%m-%d")
+        e.published.strftime("%Y-%m-%d")
     )
 }
 
@@ -271,7 +280,7 @@ impl BuildEntry {
     }
 
     /// Newest first: by date, then by id (as [`pick_build`] breaks ties).
-    fn order(&self) -> (DateTime<Utc>, &str) {
+    fn order(&self) -> (Timestamp, &str) {
         (self.published, self.build_id.as_str())
     }
 }
@@ -430,7 +439,8 @@ impl BuildEntry {
 pub struct CachedListing {
     pub schema: u32,
     /// When the listing was fetched.
-    pub checked: DateTime<Utc>,
+    #[serde(with = "crate::time::serde_autosi")]
+    pub checked: Timestamp,
     pub total_count: u32,
     /// gog-warp's `Build`, serialized as it is (manifest URLs included).
     pub items: Vec<Build>,
@@ -463,7 +473,7 @@ pub fn write_cache(
     os: Platform,
     product_id: u64,
     listing: &Listing,
-    checked: DateTime<Utc>,
+    checked: Timestamp,
 ) -> std::io::Result<bool> {
     if listing.with_password {
         return Ok(false);
@@ -512,7 +522,7 @@ pub async fn fetch_listing(
         with_password,
     };
     if let Some(base) = dirs::cache_dir() {
-        let _ = write_cache(&base, os, product_id, &listing, Utc::now());
+        let _ = write_cache(&base, os, product_id, &listing, Timestamp::now());
     }
     Ok(listing)
 }
@@ -798,7 +808,7 @@ mod tests {
 
     // ---- cache ----
 
-    fn at(s: &str) -> DateTime<Utc> {
+    fn at(s: &str) -> Timestamp {
         s.parse().unwrap()
     }
 
@@ -868,7 +878,7 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let mut l = cyberpunk();
         l.with_password = true;
-        assert!(!write_cache(t.path(), Platform::Windows, 7, &l, Utc::now()).unwrap());
+        assert!(!write_cache(t.path(), Platform::Windows, 7, &l, Timestamp::now()).unwrap());
         assert!(read_cache(t.path(), Platform::Windows, 7).is_none());
     }
 

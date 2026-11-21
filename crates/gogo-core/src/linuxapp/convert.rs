@@ -509,7 +509,7 @@ pub(crate) fn convert_locked(
         &Journal {
             game_dir: root.clone(),
             staging: staging.clone(),
-            started: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            started: crate::time::secs_z(jiff::Timestamp::now()),
         },
     )?;
     stop(opts, ConvertStep::Journal)?;

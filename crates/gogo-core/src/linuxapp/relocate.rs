@@ -238,7 +238,7 @@ fn plan_snapshots(
                 .meta
                 .as_ref()
                 .map(|m| m.created)
-                .or_else(|| e.fs_created.map(chrono::DateTime::<chrono::Utc>::from))
+                .or_else(|| e.fs_created.map(crate::time::from_system))
                 .map(snapshots::rfc3339),
             bytes: e
                 .meta

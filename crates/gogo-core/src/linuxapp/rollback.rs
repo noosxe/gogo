@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Local, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use super::game;
@@ -352,8 +352,8 @@ pub enum Planned {
     Unknown(String),
 }
 
-fn local(t: DateTime<Utc>) -> String {
-    t.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string()
+fn local(t: Timestamp) -> String {
+    crate::time::local(t, "%Y-%m-%d %H:%M")
 }
 
 fn content_line(c: &ContentView) -> String {
@@ -434,8 +434,8 @@ impl RollbackPlan {
                 self.to
                     .created
                     .as_deref()
-                    .and_then(|c| DateTime::parse_from_rfc3339(c).ok())
-                    .map_or_else(|| "-".into(), |t| local(t.with_timezone(&Utc))),
+                    .and_then(crate::time::parse)
+                    .map_or_else(|| "-".into(), local),
                 self.to
                     .content
                     .as_ref()
@@ -506,7 +506,7 @@ impl RollbackPlan {
                         .map_or_else(|| g.dir.clone(), |c| format!("{} (cloud: {c})", g.dir)),
                     plural(g.files, "file", "files"),
                     crate::fmt::human_size(g.bytes),
-                    local(g.newest_at.into())
+                    local(crate::time::from_system(g.newest_at))
                 ));
             }
             if verbose {
@@ -841,7 +841,7 @@ fn find_saves(
     saves::find(&saves::Scan {
         prefix: dirs.prefix.clone(),
         snap_prefix: snap_root.as_ref().map(|r| r.join("prefix")),
-        created: target.created.into(),
+        created: crate::time::to_system(target.created),
         game: game_files(gogid, dirs, snap_root.as_deref(), target, list),
         extra_roots: cloud_roots(gogid),
     })
@@ -872,7 +872,7 @@ fn copy_unattributed(found: &Found, aside: &Path) -> bool {
 /// `<data_root>/saves-aside/<gogid>/<UTC time>/`, a name not taken yet.
 fn aside_dir(gogid: &str) -> PathBuf {
     let base = crate::state::data_root().join("saves-aside").join(gogid);
-    let stamp = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let stamp = Timestamp::now().strftime("%Y%m%dT%H%M%SZ").to_string();
     let mut dir = base.join(&stamp);
     let mut i = 2;
     while dir.exists() {
@@ -1135,7 +1135,7 @@ fn log_line(gogid: &str, line: &str) {
         let _ = writeln!(
             f,
             "{} [{}] {line}",
-            Local::now().format("%Y-%m-%d %H:%M:%S"),
+            crate::time::local_now("%Y-%m-%d %H:%M:%S"),
             std::process::id()
         );
     }

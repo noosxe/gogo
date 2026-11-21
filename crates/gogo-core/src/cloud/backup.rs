@@ -60,10 +60,10 @@ fn order_key(n: &str) -> (String, u64) {
 }
 
 impl Backup {
-    pub fn new(root: PathBuf, now: chrono::DateTime<chrono::Utc>) -> Backup {
+    pub fn new(root: PathBuf, now: jiff::Timestamp) -> Backup {
         Backup {
             root,
-            stamp: now.format("%Y%m%dT%H%M%SZ").to_string(),
+            stamp: now.strftime("%Y%m%dT%H%M%SZ").to_string(),
             dir: None,
             files: 0,
         }
@@ -152,8 +152,7 @@ impl Backup {
         let side = PathBuf::from(side);
         let mut value = serde_json::to_value(entry).expect("an entry serializes");
         if let (Some(t), Some(o)) = (local_last_modified, value.as_object_mut()) {
-            let stamp = chrono::DateTime::<chrono::Utc>::from(t)
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let stamp = crate::time::secs_z(crate::time::from_system(t));
             o.insert("local_last_modified".into(), stamp.into());
         }
         let json = serde_json::to_vec_pretty(&value).expect("a value serializes");
@@ -258,9 +257,7 @@ mod tests {
     #[test]
     fn a_taken_stamp_gets_a_suffix_and_files_keep_their_path() {
         let t = tempfile::tempdir().unwrap();
-        let now = chrono::DateTime::parse_from_rfc3339("2026-11-14T10:15:00Z")
-            .unwrap()
-            .to_utc();
+        let now = "2026-11-14T10:15:00Z".parse::<jiff::Timestamp>().unwrap();
         std::fs::create_dir_all(t.path().join("20261114T101500Z")).unwrap();
         let src = t.path().join("src");
         std::fs::write(&src, b"").unwrap();

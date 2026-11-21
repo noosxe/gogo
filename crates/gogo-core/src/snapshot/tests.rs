@@ -144,7 +144,7 @@ fn metadata_round_trips_with_every_field() {
     // [space] round-trips too.
     let mut with_space = m.clone();
     with_space.space = Some(SpaceRecord {
-        checked: Utc::now().trunc_subsecs(0),
+        checked: crate::time::now_secs(),
         exclusive_bytes: 912_345_678,
         exact: false,
     });

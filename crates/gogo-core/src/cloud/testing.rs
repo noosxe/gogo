@@ -37,7 +37,7 @@ impl MainSession {
             "expires_in": 3600,
             "token_type": "bearer",
             "session_id": "s",
-            "login_time": chrono::Utc::now().timestamp()
+            "login_time": jiff::Timestamp::now().as_second()
         }))
         .expect("a token");
         let core = Core::new();

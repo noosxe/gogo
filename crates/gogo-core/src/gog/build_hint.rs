@@ -7,8 +7,8 @@
 
 use std::path::Path;
 
-use chrono::{DateTime, Duration, Utc};
 use gog_warp::content_system::types::{Build, Platform};
+use jiff::{SignedDuration, Timestamp};
 use serde::Serialize;
 
 use super::builds::{self, CachedListing};
@@ -35,7 +35,8 @@ pub struct BuildRef {
     /// `None` on the installer lane: it has versions, not builds.
     pub id: Option<String>,
     pub version: String,
-    pub published: Option<DateTime<Utc>>,
+    #[serde(with = "crate::time::serde_autosi::option")]
+    pub published: Option<Timestamp>,
 }
 
 impl BuildRef {
@@ -43,7 +44,7 @@ impl BuildRef {
         Self {
             id: Some(b.build_id().clone()),
             version: b.version_name().clone(),
-            published: Some(*b.date_published()),
+            published: Some(builds::published(b)),
         }
     }
 
@@ -71,7 +72,8 @@ pub struct BuildHint {
     /// The installed build's branch: `None` is the default branch (and, for a
     /// gone build, unknown, so the default branch is compared).
     pub branch: Option<String>,
-    pub published: Option<DateTime<Utc>>,
+    #[serde(with = "crate::time::serde_autosi::option")]
+    pub published: Option<Timestamp>,
     pub state: State,
     /// Whether the installed build is in the cached listing; `None` with no cache.
     pub listed: Option<bool>,
@@ -80,7 +82,8 @@ pub struct BuildHint {
     /// A named-branch game only: the default branch's newest, when it is newer.
     pub default_newer: Option<BuildRef>,
     /// When the cache was written.
-    pub checked: Option<DateTime<Utc>>,
+    #[serde(with = "crate::time::serde_autosi::option")]
+    pub checked: Option<Timestamp>,
     /// The cache is older than `catalog_ttl_hours`.
     pub stale: bool,
 }
@@ -90,8 +93,9 @@ fn newest_on<'a>(builds: &'a [Build], branch: Option<&str>) -> Option<&'a Build>
     builds::newest_on_branch(builds, branch)
 }
 
-fn is_stale(checked: Option<DateTime<Utc>>, ttl_hours: u32, now: DateTime<Utc>) -> bool {
-    checked.is_some_and(|c| now - c > Duration::hours(i64::from(ttl_hours)))
+fn is_stale(checked: Option<Timestamp>, ttl_hours: u32, now: Timestamp) -> bool {
+    checked
+        .is_some_and(|c| now.duration_since(c) > SignedDuration::from_hours(i64::from(ttl_hours)))
 }
 
 /// Depot lane: the installed build `id` (version `version` from `content.toml`)
@@ -101,7 +105,7 @@ pub fn depot_hint(
     version: &str,
     listing: Option<&CachedListing>,
     ttl_hours: u32,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> BuildHint {
     let mut h = BuildHint {
         lane: Lane::Depot,
@@ -124,7 +128,7 @@ pub fn depot_hint(
     match installed {
         Some(b) => {
             h.branch = b.branch().clone();
-            h.published = Some(*b.date_published());
+            h.published = Some(builds::published(b));
             if h.version.is_empty() {
                 h.version = b.version_name().clone();
             }
@@ -157,9 +161,9 @@ pub fn depot_hint(
 /// entry was cached. Versions can't be ordered, so any difference is "newer".
 pub fn installer_hint(
     version: &str,
-    catalog: Option<(String, DateTime<Utc>)>,
+    catalog: Option<(String, Timestamp)>,
     ttl_hours: u32,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> BuildHint {
     let mut h = BuildHint {
         lane: Lane::Installer,
@@ -205,7 +209,7 @@ impl BuildHint {
 
     fn checked_on(&self) -> String {
         self.checked.map_or(String::new(), |c| {
-            format!(" (checked {})", c.format("%Y-%m-%d"))
+            format!(" (checked {})", c.strftime("%Y-%m-%d"))
         })
     }
 
@@ -233,7 +237,7 @@ impl BuildHint {
             );
         }
         if let Some(p) = self.published {
-            extra.push(p.format("%Y-%m-%d").to_string());
+            extra.push(p.strftime("%Y-%m-%d").to_string());
         }
         if !extra.is_empty() {
             inst = format!("{inst} ({})", extra.join(", "));
@@ -312,9 +316,9 @@ pub fn for_content(
     gogid: &str,
     cache_base: Option<&Path>,
     catalog: Option<&Product>,
-    catalog_cached_at: Option<DateTime<Utc>>,
+    catalog_cached_at: Option<Timestamp>,
     ttl_hours: u32,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Option<BuildHint> {
     let version = content.version.clone().unwrap_or_default();
     match content.lane {
@@ -368,7 +372,7 @@ pub fn for_game(content: &Content, gogid: &str) -> Option<BuildHint> {
             let at = std::fs::metadata(&p)
                 .and_then(|m| m.modified())
                 .ok()
-                .map(DateTime::<Utc>::from);
+                .map(crate::time::from_system);
             (crate::state::cache::load_product(n).ok().flatten(), at)
         })
         .unwrap_or((None, None));
@@ -379,7 +383,7 @@ pub fn for_game(content: &Content, gogid: &str) -> Option<BuildHint> {
         product.as_ref(),
         at,
         ttl,
-        Utc::now(),
+        Timestamp::now(),
     )
 }
 
@@ -396,7 +400,7 @@ mod tests {
         .unwrap()
     }
 
-    fn now() -> DateTime<Utc> {
+    fn now() -> Timestamp {
         "2026-11-13T12:00:00Z".parse().unwrap()
     }
 
@@ -506,7 +510,7 @@ mod tests {
 
     #[test]
     fn the_installer_lane_compares_the_catalog_version() {
-        let at: DateTime<Utc> = "2026-11-10T00:00:00Z".parse().unwrap();
+        let at: Timestamp = "2026-11-10T00:00:00Z".parse().unwrap();
         let h = installer_hint("2.31a", Some(("2.5".into(), at)), 24, now());
         assert_eq!(h.state, State::Newer);
         assert_eq!(h.column(), "2.31a ↑ 2.5");
