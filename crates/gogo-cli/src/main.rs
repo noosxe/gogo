@@ -6168,6 +6168,17 @@ async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppEr
                     // Not a choice: gogo fetches its pinned version itself.
                     let pinned = entry.discovery.as_ref().and_then(|d| d.pinned_version());
                     let pinned = pinned.map(|p| format!(", pinned {p}")).unwrap_or_default();
+                    if entry.id == catalog::COMET {
+                        // Fetched on request, never by a game's build (#487).
+                        footnotes.push(match versions.as_slice() {
+                            [] => format!(
+                                "{}: not cached{pinned}; `gogo runtimes install {}` downloads it",
+                                entry.id, entry.id
+                            ),
+                            v => format!("{}: cached {}{pinned}", entry.id, v.join(", ")),
+                        });
+                        continue;
+                    }
                     footnotes.push(match versions.as_slice() {
                         [] => format!(
                             "{}: not cached{pinned}; downloaded when a game needs it",
@@ -6253,6 +6264,10 @@ async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppEr
             if json {
                 let mut doc = serde_json::json!({ "entries": json_rows });
                 if os == catalog::Os::Linux && shelf == Shelf::Runtimes {
+                    doc["comet"] = serde_json::json!(gogo::linuxapp::comet::status_line(
+                        &gogo::linuxapp::umu::Host::real(),
+                        &gogo::config::Config::path()
+                    ));
                     doc["unmanaged"] = unmanaged
                         .iter()
                         .map(|(b, default)| {
@@ -6283,6 +6298,15 @@ async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppEr
                 for note in footnotes {
                     println!("{note}");
                 }
+            }
+            if !json && os == catalog::Os::Linux && shelf == Shelf::Runtimes {
+                println!(
+                    "\n{}",
+                    gogo::linuxapp::comet::status_line(
+                        &gogo::linuxapp::umu::Host::real(),
+                        &gogo::config::Config::path()
+                    )
+                );
             }
             if !json && !unmanaged.is_empty() {
                 println!(
@@ -7233,7 +7257,10 @@ mod store_tests {
                 .map(|e| e.id)
                 .collect()
         };
-        assert_eq!(ids(Os::Linux, false), ["ge-proton", "umu", "cnc-ddraw"]);
+        assert_eq!(
+            ids(Os::Linux, false),
+            ["ge-proton", "umu", "comet", "cnc-ddraw"]
+        );
         assert!(ids(Os::Macos, false).contains(&"winecx26"));
         assert!(!ids(Os::Macos, false).contains(&"umu"));
         assert!(!ids(Os::Macos, false).contains(&"ge-proton"));

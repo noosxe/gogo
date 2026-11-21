@@ -716,6 +716,34 @@ static ENTRIES: &[CatalogEntry] = &[
         frameworks: None,
     },
     CatalogEntry {
+        id: COMET,
+        os: &[Os::Linux],
+        kind: Kind::Tool {
+            payload: "comet-x86_64-unknown-linux-gnu",
+            notice: Some(COMET_NOTICE),
+            runtimes: &[],
+        },
+        status: Status::Tool,
+        // The release binary (design 23 decision 4), a bare file, 14,660,192 B.
+        // The pin is GitHub's asset digest from the releases API; it has not
+        // been checked against a download (the real-binary e2e, #490, does).
+        discovery: Some(Discovery::Pinned(PinnedAsset {
+            repo: "imLinguin/comet",
+            tag: "v0.4.1",
+            asset: "comet-x86_64-unknown-linux-gnu",
+            version: "0.4.1",
+            sha256: "868dd0b510f2c1c63a524b8e0466dd92bb2aecdb697217a690bf9effd04d3a5a",
+        })),
+        license: "Apache-2.0 (Comet by imLinguin), run as a separate program",
+        redistributable: true,
+        min_macos: None,
+        arch: Some(Arch::X86_64),
+        vendor_signed: false,
+        note: "Comet, an open stand-in for the GOG Galaxy service, run beside a \
+               game so the Galaxy SDK has a signed-in user ([linux] comet = \"fetch\")",
+        frameworks: None,
+    },
+    CatalogEntry {
         id: "cnc-ddraw",
         os: &[Os::Macos, Os::Linux],
         kind: Kind::Renderer {
@@ -817,6 +845,18 @@ pub const GE_PROTON: &str = "ge-proton";
 
 /// The umu-launcher catalog id (design 18 §2.1).
 pub const UMU: &str = "umu";
+
+/// Comet, the Galaxy service stand-in (design 23 decision 4).
+pub const COMET: &str = "comet";
+
+/// Comet's licence note, for the store's `NOTICES.txt`.
+pub const COMET_NOTICE: &str = "\
+Comet (https://github.com/imLinguin/comet) is free software under the Apache
+License, version 2.0. gogo downloaded its release binary unmodified from that
+project's GitHub release and runs it as a separate program, beside a game;
+gogo links none of its code and doesn't redistribute it. The licence text and
+the source for this version are at the release tag.
+";
 
 /// umu's licence note, for the store's `NOTICES.txt`.
 pub const UMU_NOTICE: &str = "\
@@ -1317,13 +1357,13 @@ mod os_tests {
             let linux = e.runs_on_os(Os::Linux);
             assert_eq!(
                 linux,
-                ["cnc-ddraw", UMU, GE_PROTON].contains(&e.id),
+                ["cnc-ddraw", UMU, COMET, GE_PROTON].contains(&e.id),
                 "{}",
                 e.id
             );
             assert_eq!(
                 e.runs_on_os(Os::Macos),
-                ![UMU, GE_PROTON].contains(&e.id),
+                ![UMU, COMET, GE_PROTON].contains(&e.id),
                 "{}",
                 e.id
             );
@@ -1371,6 +1411,38 @@ mod os_tests {
         assert_eq!(pin.tag, pin.version);
         assert_eq!(pin.sha256.len(), 64);
         assert!(pin.sha256.starts_with("eb590691"));
+    }
+
+    /// Design 23 decision 4: Comet, pinned like umu, a bare Linux x86_64
+    /// binary with its Apache-2.0 notice.
+    #[test]
+    fn comet_is_a_pinned_linux_tool_with_its_notice() {
+        let comet = find(COMET).unwrap();
+        assert_eq!(comet.os, &[Os::Linux]);
+        assert!(comet.check_os(Os::Macos).is_err());
+        assert_eq!(comet.arch, Some(Arch::X86_64));
+        assert!(matches!(comet.status, Status::Tool));
+        assert!(comet.license.starts_with("Apache-2.0"));
+        let Kind::Tool {
+            payload,
+            notice: Some(notice),
+            runtimes,
+        } = comet.kind
+        else {
+            panic!("comet is a tool with a notice");
+        };
+        assert!(notice.contains("Apache\nLicense, version 2.0"));
+        assert!(notice.contains("separate program"));
+        assert!(runtimes.is_empty());
+        let Some(Discovery::Pinned(pin)) = &comet.discovery else {
+            panic!("pinned");
+        };
+        assert_eq!(pin.repo, "imLinguin/comet");
+        assert_eq!(pin.asset, "comet-x86_64-unknown-linux-gnu");
+        assert_eq!(pin.asset, payload);
+        assert_eq!(pin.tag, format!("v{}", pin.version));
+        assert_eq!(pin.sha256.len(), 64);
+        assert!(pin.sha256.starts_with("868dd0b5"));
     }
 
     /// Design 18 §1: GE-Proton, pinned, Linux x86_64, a Proton build with

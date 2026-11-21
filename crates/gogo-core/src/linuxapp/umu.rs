@@ -89,7 +89,7 @@ impl Host<'_> {
     }
 
     /// Every executable `name` on `PATH`, in order.
-    fn on_path(&self, name: &str) -> Vec<PathBuf> {
+    pub(crate) fn on_path(&self, name: &str) -> Vec<PathBuf> {
         self.path_dirs()
             .into_iter()
             .map(|d| d.join(name))

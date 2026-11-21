@@ -58,6 +58,8 @@
         // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") rec {
           gogo-linux-app = import ./nix/linux-app.nix { inherit pkgs gogo; };
           umu-python = gogo-linux-app.umuPython;
+          # Comet from source, what GOGO_COMET points at (nix/comet.nix).
+          comet = gogo-linux-app.comet;
           # scripts/linux-e2e.sh's PATH (docs/linux-e2e.md).
           linux-e2e-tools = import ./nix/linux-e2e.nix { inherit pkgs; };
         });
