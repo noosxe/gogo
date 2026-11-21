@@ -134,14 +134,22 @@ save, pushed to GOG like any other.
   alone doesn't obviously take 30 s.
 - A better fit: the second press loads the save list, cross-progression included; the game
   asks for a signed-in user or calls CD PROJEKT RED's service, and waits for an online
-  timeout. One cause would then explain both symptoms.
+  timeout. One cause would explain both symptoms.
 - In the e2e harness the game sandbox has **no network**, and docs/linux-e2e.md's Cyberpunk
   table shows `space` to the remembered disk's menu in about 4.5 s. Those runs pass
-  `-skipStartScreen`, so they may not walk the same screen, but they suggest the wait
-  doesn't happen offline.
-- So Comet plausibly fixes it, by giving the SDK a signed-in user at once. Unproven: #486
-  times the second press offline in e2e and has host-pass steps (sockets during the wait,
-  the network off, Heroic without Comet).
+  `-skipStartScreen`, so they may not walk the same screen.
+
+**Confirmed (host pass H3, 2026-11-21, #486).** On a Heroic install of Cyberpunk 2077,
+with only Heroic's experimental Comet support turned off (no Comet process, nothing
+listening on 127.0.0.1:9977), both symptoms of the gogo build came back: the ~30 s wait at
+the start screen's second key press, and the cross-progression saves missing from the load
+menu. With Comet on, the same install passes that press quickly and lists them. So the
+cause is the missing Galaxy service, the SDK's sign-in that Comet answers; it is nothing
+specific to gogo's build, prefix or Proton.
+
+**Still open:** whether the wait is an online timeout or a local one (H1 with the network
+off, or the offline e2e timing of the second press, would tell). It no longer changes the
+fix: Comet removes the wait.
 
 ## 5. Games that benefit
 
