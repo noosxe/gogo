@@ -6396,6 +6396,8 @@ async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppEr
             drop(act);
             let m = m?;
             let root = store::tree_root(&m);
+            // Comet's bare release file is stored without the execute bit.
+            gogo::linuxapp::comet::after_install(&m.id, &root.join(&m.entry_rel))?;
             if json {
                 println!(
                     "{}",

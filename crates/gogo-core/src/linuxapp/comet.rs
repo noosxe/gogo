@@ -162,6 +162,17 @@ pub fn resolve(
     mode: &CometMode,
     installed: Option<&Path>,
 ) -> Result<Option<CometBin>, MacAppError> {
+    resolve_with(host, mode, installed, true)
+}
+
+/// [`resolve`]; `fix` makes a store copy executable. A listing passes
+/// `false`: it never writes to the store.
+fn resolve_with(
+    host: &Host,
+    mode: &CometMode,
+    installed: Option<&Path>,
+    fix: bool,
+) -> Result<Option<CometBin>, MacAppError> {
     match mode {
         CometMode::Fetch => {
             if let Some(p) = host.var(COMET_ENV) {
@@ -184,7 +195,9 @@ pub fn resolve(
             }
             match installed {
                 Some(p) => {
-                    make_executable(p)?;
+                    if fix {
+                        make_executable(p)?;
+                    }
                     Ok(Some(CometBin {
                         path: p.to_path_buf(),
                         source: Source::Store,
@@ -248,13 +261,25 @@ pub async fn provision(
     })
 }
 
+/// What `gogo runtimes install` does after the generic tool install: the
+/// release asset is a bare file stored without the execute bit, so Comet's
+/// payload is made executable here (`store::unpack` stays as it is for every
+/// other entry).
+pub fn after_install(entry_id: &str, payload: &Path) -> Result<(), MacAppError> {
+    if entry_id == catalog::COMET {
+        make_executable(payload)?;
+    }
+    Ok(())
+}
+
 /// The Comet already available without a download, for listings and
-/// `doctor`: `None` when a `fetch` would still have to download.
+/// `doctor`: `None` when a `fetch` would still have to download. Read-only:
+/// it never changes a file's mode.
 pub fn available(host: &Host, mode: &CometMode) -> Result<Option<CometBin>, MacAppError> {
     let entry = entry();
     let version = pin(entry).map(|p| p.version);
     let stored = store::installed(entry.id, version).map(|(m, root)| root.join(&m.entry_rel));
-    resolve(host, mode, stored.as_deref())
+    resolve_with(host, mode, stored.as_deref(), false)
 }
 
 #[cfg(test)]
@@ -435,6 +460,41 @@ mod tests {
         assert_eq!(mode_at(&cfg).unwrap(), CometMode::Path("/opt/c".into()));
         std::fs::write(&cfg, "[linux]\ncomet = \"nope\"\n").unwrap();
         assert!(matches!(mode_at(&cfg), Err(MacAppError::Comet(_))));
+    }
+
+    /// `gogo runtimes install comet`: the generic install leaves 0644, and
+    /// the install command's follow-up makes Comet executable, only Comet.
+    #[test]
+    fn the_install_path_makes_the_payload_executable() {
+        let f = Fake::new();
+        let comet = f.file("store", "comet-x86_64-unknown-linux-gnu", 0o644);
+        after_install(catalog::COMET, &comet).unwrap();
+        assert_eq!(
+            std::fs::metadata(&comet).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        let other = f.file("store", "umu-run", 0o644);
+        after_install(catalog::UMU, &other).unwrap();
+        assert_eq!(
+            std::fs::metadata(&other).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+    }
+
+    /// A listing is read-only: it sees the stored file and leaves its mode.
+    #[test]
+    fn a_listing_never_changes_the_stored_mode() {
+        let f = Fake::new();
+        let stored = f.file("store", "comet-x86_64-unknown-linux-gnu", 0o644);
+        let got = f
+            .with(|h| resolve_with(h, &CometMode::Fetch, Some(&stored), false))
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.source, Source::Store);
+        assert_eq!(
+            std::fs::metadata(&stored).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
     }
 
     #[test]
