@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use chrono::{DateTime, Local, SecondsFormat, Utc};
+use jiff::Timestamp;
 use serde::Serialize;
 
 use super::convert::{self, ConvertOptions, ConvertPlan};
@@ -858,12 +858,12 @@ pub fn runtime_name(reference: &str) -> &str {
 
 // — the views (`--json` and text) —
 
-pub(crate) fn rfc3339(t: DateTime<Utc>) -> String {
-    t.to_rfc3339_opts(SecondsFormat::Secs, true)
+pub(crate) fn rfc3339(t: Timestamp) -> String {
+    crate::time::secs_z(t)
 }
 
-fn local(t: DateTime<Utc>) -> String {
-    t.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string()
+fn local(t: Timestamp) -> String {
+    crate::time::local(t, "%Y-%m-%d %H:%M")
 }
 
 fn kind_str(k: Kind) -> &'static str {
@@ -947,7 +947,7 @@ pub struct SnapshotView {
     pub content: Option<ContentView>,
     pub space: Option<SpaceView>,
     #[serde(skip)]
-    created_at: Option<DateTime<Utc>>,
+    created_at: Option<Timestamp>,
 }
 
 impl SnapshotView {
@@ -956,7 +956,7 @@ impl SnapshotView {
             .meta
             .as_ref()
             .map(|m| m.created)
-            .or_else(|| e.fs_created.map(DateTime::<Utc>::from));
+            .or_else(|| e.fs_created.map(crate::time::from_system));
         let m = e.meta.as_ref();
         SnapshotView {
             id: e.id,
@@ -1657,8 +1657,8 @@ impl Summary {
         for (id, created, label) in &self.newest {
             let date = created
                 .as_deref()
-                .and_then(|c| DateTime::parse_from_rfc3339(c).ok())
-                .map_or_else(|| "-".to_string(), |t| local(t.with_timezone(&Utc)));
+                .and_then(crate::time::parse)
+                .map_or_else(|| "-".to_string(), local);
             out.push(format!("{id}  {date}  {label}"));
         }
         if let Some(checked) = &self.space_checked {
@@ -1666,8 +1666,7 @@ impl Summary {
                 "space {}{} (measured {})",
                 if self.space_exact { "" } else { "~" },
                 crate::fmt::human_size(self.space_bytes),
-                DateTime::parse_from_rfc3339(checked)
-                    .map_or_else(|_| checked.clone(), |t| local(t.with_timezone(&Utc)))
+                crate::time::parse(checked).map_or_else(|| checked.clone(), local)
             ));
         }
         for (i, d) in self.saves_aside.iter().enumerate() {

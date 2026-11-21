@@ -330,9 +330,7 @@ fn opts() -> PullOptions {
         cloud_writes: false,
         newer: false,
         keep_backups: 20,
-        now: chrono::DateTime::parse_from_rfc3339("2026-11-14T10:15:00Z")
-            .unwrap()
-            .to_utc(),
+        now: "2026-11-14T10:15:00Z".parse::<jiff::Timestamp>().unwrap(),
         stop_before_rename: None,
     }
 }
@@ -346,10 +344,7 @@ fn state_of<'a>(r: &'a PullReport, name: &str) -> &'a State {
 }
 
 fn uploaded() -> std::time::SystemTime {
-    chrono::DateTime::parse_from_rfc3339(UPLOADED)
-        .unwrap()
-        .to_utc()
-        .into()
+    crate::time::to_system(UPLOADED.parse().unwrap())
 }
 
 #[tokio::test]
@@ -1395,8 +1390,7 @@ async fn a_push_uploads_gzip_with_etag_and_the_local_mtime() {
     assert_eq!(put.headers["etag"].to_str().unwrap(), md5_hex(&put.body));
     assert_eq!(put.body, gzip(b"my save"), "gogo's deterministic gzip");
     assert_eq!(gunzip(&put.body), b"my save");
-    let stamp = chrono::DateTime::<chrono::Utc>::from(mtime)
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let stamp = crate::time::secs_z(crate::time::from_system(mtime));
     assert_eq!(
         put.headers["x-object-meta-locallastmodified"],
         stamp.as_str()

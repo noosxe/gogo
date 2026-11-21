@@ -48,8 +48,10 @@ sha2 = "0.10"
 cab = "0.6"
 sevenz-rust2 = "0.24"
 url = "2.5.8"
-# RFC 3339 timestamps in InstallRecord (already in-tree via gog-warp).
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# Time: RFC 3339 text, file mtimes, local dates (gogo::time). No serde feature:
+# every serialized time goes through gogo's own helpers. chrono stays in the
+# tree only through gog-warp.
+jiff = { version = "1.0", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 # PE import scan for mac-app renderer selection (#63); read-only PE, no write/compression.
 # `gogo search` text matching (design 17 §4): NFKD folding, "did you mean" distance.

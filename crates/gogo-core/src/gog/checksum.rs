@@ -151,9 +151,7 @@ fn parse_timestamp(v: String) -> Option<u64> {
     if let Ok(secs) = v.parse::<u64>() {
         return Some(secs);
     }
-    chrono::NaiveDateTime::parse_from_str(&v, "%Y-%m-%d %H:%M:%S")
-        .ok()
-        .map(|t| t.and_utc().timestamp().max(0) as u64)
+    crate::time::naive_utc_secs(&v)
 }
 
 fn chunk_attrs(e: &BytesStart<'_>) -> Chunk {

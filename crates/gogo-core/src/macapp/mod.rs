@@ -1710,7 +1710,7 @@ fn finish_v2(
         if target.prefix.symlink_metadata().is_ok() {
             let aside = target.root.join(format!(
                 "prefix.old-{}",
-                chrono::Utc::now().format("%Y%m%dT%H%M%S")
+                jiff::Timestamp::now().strftime("%Y%m%dT%H%M%S")
             ));
             std::fs::rename(&target.prefix, &aside)?;
             emit(&ProgressEvent::Warn {

@@ -17,7 +17,6 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
 
 use crate::gog::materialize::{self, Reflink};
@@ -427,7 +426,7 @@ impl Found {
 }
 
 fn rfc3339(t: SystemTime) -> String {
-    DateTime::<Utc>::from(t).to_rfc3339_opts(SecondsFormat::Secs, true)
+    crate::time::secs_z(crate::time::from_system(t))
 }
 
 /// The user dirs of a prefix's `drive_c/users/`: real dirs only (Proton's

@@ -190,10 +190,7 @@ impl SyncLock {
     /// D11: the game's client id changed, so the record is set aside as
     /// `<gogid>.client-changed-<UTC timestamp>.toml` and the next sync is a
     /// first sync. The new name; `None` when there was no record.
-    pub fn set_aside(
-        &self,
-        now: chrono::DateTime<chrono::Utc>,
-    ) -> Result<Option<PathBuf>, CloudError> {
+    pub fn set_aside(&self, now: jiff::Timestamp) -> Result<Option<PathBuf>, CloudError> {
         let from = path(&self.dir, self.gogid);
         if !from.exists() {
             return Ok(None);
@@ -201,7 +198,7 @@ impl SyncLock {
         let to = self.dir.join(format!(
             "{}.client-changed-{}.toml",
             self.gogid,
-            now.format("%Y%m%dT%H%M%SZ")
+            now.strftime("%Y%m%dT%H%M%SZ")
         ));
         if to.exists() {
             return Err(io_error(&to, "exists already"));
@@ -213,10 +210,7 @@ impl SyncLock {
 
 /// A time as the record keeps it: UTC, to the nanosecond.
 pub fn datetime(t: std::time::SystemTime) -> Datetime {
-    let t: chrono::DateTime<chrono::Utc> = t.into();
-    t.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
-        .parse()
-        .expect("RFC 3339 is a TOML datetime")
+    crate::time::toml_datetime(crate::time::from_system(t))
 }
 
 #[cfg(test)]
@@ -353,9 +347,7 @@ mod tests {
     fn a_client_change_sets_the_record_aside() {
         let dir = tempfile::tempdir().unwrap();
         let lock = SyncLock::acquire(dir.path(), 5).unwrap();
-        let now = chrono::DateTime::parse_from_rfc3339("2026-11-14T10:00:00Z")
-            .unwrap()
-            .to_utc();
+        let now = "2026-11-14T10:00:00Z".parse::<jiff::Timestamp>().unwrap();
         assert_eq!(lock.set_aside(now).unwrap(), None);
         lock.save(&sample()).unwrap();
         let to = lock.set_aside(now).unwrap().unwrap();

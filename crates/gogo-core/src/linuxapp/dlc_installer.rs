@@ -351,7 +351,7 @@ pub fn game_for_setup(file_name: &str, games: &[(u64, String)]) -> Option<u64> {
 /// Record what an installer run installed: each DLC's row gets its installer's
 /// version label and its info's build, and keeps its `added` date.
 pub fn record(content: &mut Content, dlcs: &[InstallerDlc], installed: &[Installed]) {
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let today = crate::time::local_now("%Y-%m-%d");
     for d in dlcs {
         let build_id = installed
             .iter()

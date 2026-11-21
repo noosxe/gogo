@@ -663,7 +663,7 @@ pub fn append_record(
         checksum_ts: doc.timestamp,
         size: doc.total_size,
         path: relative,
-        installed_at: chrono::Utc::now().to_rfc3339(),
+        installed_at: crate::time::autosi_offset(jiff::Timestamp::now()),
     };
     {
         let mut state = ctx.state.lock().expect("state lock");

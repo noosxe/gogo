@@ -7,8 +7,8 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, SecondsFormat, Utc};
 use gog_warp::content_system::types::Manifest;
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 /// The file's name in a game dir.
@@ -67,7 +67,7 @@ pub fn write_named(
         schema: SCHEMA,
         build_id: build_id.to_string(),
         generation,
-        fetched: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+        fetched: crate::time::secs_z(Timestamp::now()),
         manifest: manifest.clone(),
     };
     let bytes = serde_json::to_vec(&stored).map_err(std::io::Error::other)?;
@@ -98,7 +98,7 @@ pub fn load(root: &Path) -> Option<Stored> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Described {
     /// When the manifest was fetched (the build's own publish date isn't in it).
-    pub fetched: Option<DateTime<Utc>>,
+    pub fetched: Option<Timestamp>,
     pub facts: super::builds_report::Facts,
 }
 
@@ -107,9 +107,7 @@ pub struct Described {
 pub fn describe(root: &Path, build_id: &str, language: &str) -> Option<Described> {
     let s = load(root).filter(|s| s.build_id == build_id)?;
     Some(Described {
-        fetched: DateTime::parse_from_rfc3339(&s.fetched)
-            .ok()
-            .map(|d| d.with_timezone(&Utc)),
+        fetched: crate::time::parse(&s.fetched),
         facts: super::builds_report::facts(&s.manifest, language),
     })
 }

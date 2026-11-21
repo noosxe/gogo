@@ -143,7 +143,7 @@ pub fn marker_for(
         proton_sha256: sha256_of(&dir.join("proton"))
             .map_err(|e| invalid(format!("proton: {e}")))?,
         version,
-        installed_at: chrono::Utc::now().to_rfc3339(),
+        installed_at: crate::time::autosi_offset(jiff::Timestamp::now()),
         gogo_version: env!("CARGO_PKG_VERSION").to_string(),
     })
 }
@@ -1208,7 +1208,7 @@ mod install_tests {
             ))
         );
         assert_eq!(mk.version, format!("1793687165 {VER}"));
-        assert!(chrono::DateTime::parse_from_rfc3339(&mk.installed_at).is_ok());
+        assert!(crate::time::parse(&mk.installed_at).is_some());
         assert_eq!(mk.gogo_version, env!("CARGO_PKG_VERSION"));
         let raw = std::fs::read_to_string(named.join(MARKER)).unwrap();
         assert!(raw.starts_with("# Installed by gogo"), "{raw}");

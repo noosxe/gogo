@@ -2,8 +2,8 @@
 //! builds, and the `--installed` overview (design 21 §2). Pure: the command
 //! fetches the listing and the manifests and hands the facts over.
 
-use chrono::{DateTime, SecondsFormat, Utc};
 use gog_warp::content_system::types::Manifest;
+use jiff::Timestamp;
 use serde_json::{Value, json};
 
 use super::builds::BuildEntry;
@@ -208,7 +208,7 @@ impl Report {
                     e.build_id
                 ),
                 dash(&e.version),
-                e.published.format("%Y-%m-%d").to_string(),
+                e.published.strftime("%Y-%m-%d").to_string(),
                 e.generation.to_string(),
                 e.branch.clone().unwrap_or_default(),
             ];
@@ -402,8 +402,8 @@ fn patches_json(p: &[Patch]) -> Value {
     )
 }
 
-fn rfc3339(d: &DateTime<Utc>) -> String {
-    d.to_rfc3339_opts(SecondsFormat::Secs, true)
+fn rfc3339(d: &Timestamp) -> String {
+    crate::time::secs_z(*d)
 }
 
 fn dash(s: &str) -> String {
@@ -538,7 +538,7 @@ pub fn render_installed(rows: &[InstalledRow]) -> String {
 }
 
 /// `--installed --json` (design 21 §2.3).
-pub fn installed_json(rows: &[InstalledRow], checked: DateTime<Utc>) -> Value {
+pub fn installed_json(rows: &[InstalledRow], checked: Timestamp) -> Value {
     Value::Array(
         rows.iter()
             .map(|r| {
@@ -868,7 +868,7 @@ mod tests {
             words(t.lines().nth(1).unwrap()),
             ["Game", "(1)", "depot", "v4", "v5", "newer", "available"]
         );
-        let when: DateTime<Utc> = "2026-11-13T09:00:00Z".parse().unwrap();
+        let when: Timestamp = "2026-11-13T09:00:00Z".parse().unwrap();
         let j = installed_json(&rows, when);
         assert_eq!(j[0]["installed"]["buildId"], "4");
         assert_eq!(j[0]["newest"]["version"], "v5");

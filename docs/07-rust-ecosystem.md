@@ -59,7 +59,7 @@ Implication: the **whole feature set needs nothing exotic** — this is a mainst
 | `toml` | 1.1.7 (spec 1.1) — candidate config format |
 | `md-5` | 0.11.0 — checksums (GOG uses MD5 everywhere) |
 | `sha2` | 0.11.0 — future-proofing only |
-| `chrono` | time math for `expires_in` |
+| `jiff` | time: RFC 3339 text, file mtimes, local dates (gogo moved off `chrono`, which RUSTSEC-2026-0543 marks unmaintained; gog-warp still uses it) |
 | `bincode`/`serde_json` | resume-state files |
 
 ### Config, dirs, errors, secrets

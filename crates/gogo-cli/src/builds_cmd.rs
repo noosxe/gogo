@@ -1,7 +1,6 @@
 //! `gogo builds <game>` and `gogo builds --installed` (design 21 §2): the network
 //! side; what is shown is `gogo::gog::builds_report`.
 
-use chrono::Utc;
 use gog_warp::Core;
 use gog_warp::content_system::types::Platform;
 use gogo::app::AppContext;
@@ -11,6 +10,7 @@ use gogo::gog::builds_report::{self as report, DlcName, InstalledRow, Patch, Rep
 use gogo::gog::catalog::{self, Os, Product};
 use gogo::gog::depot::{self, DepotError};
 use gogo::gog::{content, library};
+use jiff::Timestamp;
 
 use crate::{AppError, cli};
 
@@ -210,7 +210,7 @@ fn assemble(
             kept_fetched: kept
                 .as_ref()
                 .and_then(|k| k.fetched)
-                .map(|d| d.format("%Y-%m-%d").to_string()),
+                .map(|d| d.strftime("%Y-%m-%d").to_string()),
             kept: kept.map(|k| k.facts),
         });
     }
@@ -302,7 +302,7 @@ async fn installed(
             .unwrap_or_else(|_| gogid.clone());
         // Refresh what the comparison reads: the listing cache (depot lane) or the
         // catalog entry (installer lane); then compare as `apps list` does.
-        let now = Utc::now();
+        let now = Timestamp::now();
         let mut detail = None;
         let mut failure = None;
         if game.content.lane == content::Lane::Installer {
@@ -333,7 +333,7 @@ async fn installed(
     if json {
         println!(
             "{}",
-            serde_json::to_string(&report::installed_json(&rows, Utc::now())).unwrap()
+            serde_json::to_string(&report::installed_json(&rows, Timestamp::now())).unwrap()
         );
     } else {
         print!("{}", report::render_installed(&rows));

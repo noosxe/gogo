@@ -1053,7 +1053,7 @@ fn support_files(root: &Path, id: u64) -> Vec<LayFile> {
 
 /// `content.toml` with `adding` recorded for build `build_id` in `language`.
 fn committed(base: &Content, build_id: &str, language: &str, adding: &[AddingDlc]) -> Content {
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let today = crate::time::local_now("%Y-%m-%d");
     let mut c = base.clone();
     if c.build_id.is_none() {
         c.build_id = Some(build_id.to_string());
