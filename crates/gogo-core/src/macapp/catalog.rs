@@ -1858,7 +1858,7 @@ mod catalog_tests {
     fn entries_and_statuses() {
         assert!(find("wine-staging").is_some());
         assert!(find("nope").is_none());
-        assert_eq!(entries().len(), 13);
+        assert_eq!(entries().len(), 14);
         // The default track is the pinned CX 26.3 engine with its Frameworks
         // set (docs/20 §3.4), listed first; CX24 stays as the rollback.
         let cx = find(DEFAULT_RUNTIME).unwrap();
