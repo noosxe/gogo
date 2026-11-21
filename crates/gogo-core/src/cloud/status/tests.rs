@@ -892,3 +892,58 @@ async fn links_below_the_game_dir_never_alias_a_build_file() {
     let lp = &plan.locations[0];
     assert_eq!(lp.ignored, ["SAVE/d", "SAVE/hl.sav", "SAVE/lnk"]);
 }
+
+/// `locate` then `plan`, as `gogo saves status` drives them: the waits in
+/// order, each closed, and no transfer step.
+#[tokio::test]
+async fn locate_and_plan_report_their_waits_in_order() {
+    use crate::engine::events::{ProgressEvent as E, step};
+    let f = fixture(CONFIG).await;
+    f.serve(&[("saves/a.sav", gzip(b"first"))]).await;
+    f.write("b.sav", b"mine");
+    let auth = CloudAuth::with_parts(&f.session, || Ok(()), NoManifests, &f.exchange);
+    let storage =
+        StorageClient::with_base(format!("{}/v1/", f.server.uri()).parse().unwrap()).unwrap();
+    let mut seen: Vec<String> = vec![];
+    let mut emit = |e: &E| {
+        seen.push(match e {
+            E::WorkStarted { step } => format!("start:{step}"),
+            E::WorkDone { step } => format!("done:{step}"),
+            other => format!("{other:?}"),
+        })
+    };
+    let Located::On {
+        client_id,
+        resolved,
+        source,
+    } = locate(
+        &f.game,
+        &reqwest::Client::new(),
+        &f.server.uri(),
+        &f.cache,
+        &mut emit,
+    )
+    .await
+    .unwrap()
+    else {
+        panic!("cloud saves are on");
+    };
+    plan(
+        &f.game, &client_id, &resolved, source, &auth, &storage, &f.records, &mut emit,
+    )
+    .await
+    .unwrap();
+    let pair = |s: &str| [format!("start:{s}"), format!("done:{s}")];
+    let want: Vec<String> = [
+        step::CLOUD_CONFIG,
+        step::CLOUD_TOKEN,
+        step::CLOUD_LISTING,
+        step::LOCAL_SCAN,
+    ]
+    .iter()
+    .flat_map(|s| pair(s))
+    .collect();
+    // A first sync compares a cloud-only file's content with nothing, so no
+    // fetch: only the four waits.
+    assert_eq!(seen, want);
+}

@@ -800,19 +800,15 @@ pub async fn pull(
     let mut written: Vec<(String, bool)> = vec![];
     let mut extras: Vec<FileResult> = vec![];
     let mut stop: Option<CloudError> = None;
+    let pushes = opts.mode.pushes();
     let mut uploads = Count::of(
         step::UPLOADING_SAVES,
-        work.iter()
-            .filter(|w| {
-                opts.mode.pushes()
-                    && (planned(w) && matches!(w.result.op, Some(Op::Upload | Op::DeleteCloud))
-                        || w.result.op == Some(Op::KeepBoth)
-                            && w.result.state == State::Done
-                            && w.result.kept_as.is_some())
-            })
-            .map(|_| 0),
+        work.iter().filter(|w| upload_item(w, pushes)).map(|_| 0),
     );
     for w in work.iter_mut() {
+        if !upload_item(w, pushes) {
+            continue;
+        }
         let kept = (opts.mode.pushes()
             && w.result.op == Some(Op::KeepBoth)
             && w.result.state == State::Done)
@@ -967,6 +963,18 @@ pub async fn pull(
     }
     report.files.extend(work.into_iter().map(|w| w.result));
     Ok(report)
+}
+
+/// Whether step 9 does something for `w`: an upload or a cloud deletion
+/// that is planned, or the kept copy of a `both`. The count's total and the
+/// loop both use it, so the count ends at N/N.
+fn upload_item(w: &Work, pushes: bool) -> bool {
+    pushes
+        && (w.result.state == State::Planned
+            && matches!(w.result.op, Some(Op::Upload | Op::DeleteCloud))
+            || w.result.op == Some(Op::KeepBoth)
+                && w.result.state == State::Done
+                && w.result.kept_as.is_some())
 }
 
 /// A step's running count for the live status line: files done of the

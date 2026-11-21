@@ -968,8 +968,20 @@ fn the_live_host_takes_a_cloud_pull_snapshot_under_the_game_lock() {
     let s = v.snapshots.last().unwrap();
     assert_eq!(s.trigger, Some("cloud-pull"));
     assert_eq!(s.label.as_deref(), Some("before cloud-save download"));
+    // The step is shown around the snapshot, and its creation reported once.
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.contains("SnapshotCreated"))
+            .count(),
+        1,
+        "{events:?}"
+    );
+    let at = |p: &str| events.iter().position(|e| e.contains(p)).unwrap();
+    let step = crate::engine::events::step::CLOUD_SNAPSHOT;
     assert!(
-        events.iter().any(|e| e.contains("SnapshotCreated")),
+        at(&format!("WorkStarted {{ step: {step:?}")) < at("SnapshotCreated")
+            && at("SnapshotCreated") < at(&format!("WorkDone {{ step: {step:?}")),
         "{events:?}"
     );
 
@@ -2569,4 +2581,80 @@ async fn a_push_reports_the_cloud_backup_and_the_uploads() {
         !got.iter().any(|l| l.contains(step::DOWNLOADING_SAVES)),
         "{got:?}"
     );
+}
+
+/// Every `start:` of `got` is closed by a `done:` of the same step later on.
+fn every_step_is_closed(got: &[String]) {
+    for (i, l) in got.iter().enumerate() {
+        if let Some(step) = l.strip_prefix("start:") {
+            assert!(
+                got[i..].contains(&format!("done:{step}")),
+                "{step} never ends: {got:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_download_that_fails_midway_still_ends_its_step() {
+    use crate::engine::events::step;
+    let mut f = fixture().await;
+    f.get = Get::Missing;
+    f.serve(&[
+        ("saves/a.sav", gzip(b"first")),
+        ("saves/b.sav", gzip(b"second")),
+    ])
+    .await;
+    let mut host = FakeHost::default();
+    let mut d = Script::new(Choice::Skip, Confirm::No);
+    f.pull(&opts(), &mut host, &mut d).await.unwrap();
+    let got = shown(&host.events.borrow());
+    assert!(
+        got.iter()
+            .any(|l| l.starts_with(&format!("{} 1/2", step::DOWNLOADING_SAVES))),
+        "{got:?}"
+    );
+    assert_eq!(
+        got.last().unwrap(),
+        &format!("done:{}", step::DOWNLOADING_SAVES),
+        "{got:?}"
+    );
+    every_step_is_closed(&got);
+}
+
+#[tokio::test]
+async fn a_failed_token_or_listing_ends_its_step_before_the_error() {
+    use crate::engine::events::step;
+    // The token exchange fails.
+    let mut f = fixture().await;
+    f.serve(&[("saves/a.sav", gzip(b"first"))]).await;
+    f.exchange.fail = Some(|gogid| CloudError::Refused(format!("{gogid}: no token")));
+    let mut host = FakeHost::default();
+    let mut d = Script::new(Choice::Skip, Confirm::No);
+    assert!(f.pull(&opts(), &mut host, &mut d).await.is_err());
+    let got = shown(&host.events.borrow());
+    assert_eq!(
+        got,
+        [
+            format!("start:{}", step::CLOUD_TOKEN),
+            format!("done:{}", step::CLOUD_TOKEN)
+        ]
+    );
+
+    // The listing fails.
+    let f = fixture().await;
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/7/{CLIENT}")))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&f.server)
+        .await;
+    let mut host = FakeHost::default();
+    assert!(f.pull(&opts(), &mut host, &mut d).await.is_err());
+    let got = shown(&host.events.borrow());
+    assert_eq!(
+        got.last().unwrap(),
+        &format!("done:{}", step::CLOUD_LISTING),
+        "{got:?}"
+    );
+    every_step_is_closed(&got);
 }
