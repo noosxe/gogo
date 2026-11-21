@@ -12,10 +12,11 @@ cross-progression saves) can. gogo isn't a launcher a game is started from: the 
 
 ## 1. Decisions
 
-1. **The cause comes first.** The claim that Comet fixes Cyberpunk's ~30 s start-screen wait
-   waits for evidence: an offline e2e timing of the second press, and host-pass steps H1
-   and H3 (§4) (#486). The feature is built regardless, for sign-in, achievements and
-   cross-progression.
+1. **The cause is settled** (host pass H3, #486; docs/23 §4): on a Heroic install of
+   Cyberpunk 2077, turning off only Comet brings back the ~30 s start-screen wait and hides
+   the cross-progression saves, so the cause is the missing Galaxy service. Whether the wait
+   is an online or a local timeout stays open and no longer changes the fix. The feature is
+   built for sign-in, achievements and cross-progression.
 2. **GOG cloud saves stay gogo's** (design 22, #464). Comet has no cloud-save code, so
    there is nothing to arbitrate; only the order around a launch (§2.3).
 3. **Opt-in per game, off by default.** `gogo linux-app galaxy <gogid> on|off` writes
@@ -54,6 +55,49 @@ cross-progression saves) can. gogo isn't a launcher a game is started from: the 
     Linux builds that ship the SDK (#162).
 12. **Tests:** a fake `comet` in the launcher tests; the real pinned Comet offline in e2e
     (#490, after @noosxe's OK for the download).
+
+### 1.1 As built: the pin (#487)
+
+- **Catalog.** `comet/0.4.1` is a `Kind::Tool` (payload `comet-x86_64-unknown-linux-gnu`, no
+  `runtimes`), `os = ["linux"]`, `arch` x86_64, pinned to `868dd0b5…d3a5a` (GitHub's asset
+  digest from the releases API, 14,660,192 B). **Not yet checked against a download** (umu's
+  was); the real-binary e2e (#490) does that. The release asset is a bare file, stored as
+  `runtimes/comet/0.4.1/comet-x86_64-unknown-linux-gnu`, without the execute bit. The notice
+  (Apache-2.0, run as a separate program) goes to the store's `NOTICES.txt`.
+- **Code.** `gogo_core::linuxapp::comet`: `resolve()` finds a Comet without downloading and
+  `provision()` downloads the pin when `fetch` finds nothing. Resolving a store copy sets
+  mode 0755 (`store::unpack` is unchanged for everyone). Errors are `MacAppError::Comet`
+  (exit 7). `plan_line()` is the consent text (size, Apache-2.0, the ~100 MiB GalaxyPeer
+  redist Comet fetches itself on first start).
+- **Config.** `[linux] comet = "fetch" | "system" | "path:<file>"`, unset meaning `fetch`.
+  `fetch`: `GOGO_COMET` first (it wins over the store, so no download on NixOS), then the
+  store copy. On NixOS without `GOGO_COMET` it is refused with the two ways out, as for umu.
+  `system`: the first executable `comet` on `PATH` (absolute entries only). `path:`: an
+  absolute executable file.
+- **Consent.** The only download in this change is `gogo runtimes install comet`, an
+  explicit command. Nothing in `linux-app` asks or fetches yet: that is #489's `galaxy on`,
+  which calls `plan_line()`.
+- **`runtimes list`** shows the catalog row, a footnote, and a `comet (...)` line with the
+  mode and the binary it resolves to.
+- **Flake.** `nix/comet.nix` builds the tag with `rustPlatform.buildRustPackage` on the
+  repo's pinned toolchain; `packages.x86_64-linux.comet` is that build and
+  `gogo-linux-app` sets `GOGO_COMET` to it with `--set-default`. What the build needed:
+  - the `proto/` directory is a git submodule (Yepoleb/gog_protocols, CC0-1.0), so the
+    source is fetched with `fetchSubmodules = true`;
+  - `protobuf` (protoc) with `PROTOC` set: without it `build.rs` runs the prebuilt protoc
+    of the `protoc-bin-vendored` crate, which can't run in the sandbox;
+  - nixpkgs' cargo hook forces system libraries, so `aws-lc` (rustls) and `sqlite`
+    (sqlx) are build inputs, with `pkg-config`. No openssl, no cmake;
+  - Comet's own `Cargo.lock` has no git dependencies, so a plain `cargoHash` works; the
+    upstream test suite is not run.
+- **Contract test (decision 5).** The pin's version must equal `CONTRACT_CHECKED_AGAINST`
+  in `comet.rs`, and `nix/comet.nix` must build that same version, so a bump forces a
+  re-read. Read at v0.4.1 (source only): `--from-heroic` reads
+  `$XDG_CONFIG_PATH/heroic/gog_store/auth.json`, falling back to `~/.config` and then
+  Flatpak Heroic's path under `$HOME` (`HOME` must be set or Comet panics). **The JSON is an
+  object keyed by Comet's Galaxy client id, whose value holds `access_token`,
+  `refresh_token` and `user_id`**: decision 5's "three-field `auth.json`" means that nested
+  shape, which #488 must write.
 
 ## 2. Around a launch
 
@@ -121,8 +165,8 @@ Pull (design 22) → Comet start → game → prefix idle → push (design 22) �
   lists the cross-progression save; the cross-platform saves setting shows signed in; an
   achievement unlock reaches the GOG profile; unlocks still post after more than an hour;
   two gogo games at once, quit in either order: one Comet, gone after the last.
-- **H3, Heroic control:** with Heroic's experimental Comet support off, is the wait there,
-  and does the cross-progression save still show?
+- **H3, Heroic control** (done 2026-11-21, #486): with Heroic's experimental Comet support
+  off, the wait is back and the cross-progression saves don't show.
 - **H4, logs:** the run log, `launch.log` and `report.txt` hold no refresh token, access
   token, client secret or user id; `$XDG_RUNTIME_DIR/gogo` is empty while the game runs.
 
@@ -130,7 +174,7 @@ Pull (design 22) → Comet start → game → prefix idle → push (design 22) �
 
 | Issue | Scope | Priority |
 |---|---|---|
-| #486 | settle the cause: offline e2e timing, H1/H3 | high |
+| #486 | settle the cause: H3 done (closed by #487's PR); the online/local timeout stays open | high |
 | #487 | the Comet pin and flake build, `[linux] comet` | high |
 | #488 | `galaxy-start`, the credential hand-off, `launch.sh` start/stop | high |
 | #489 | `galaxy on/off`, compat/config keys, SDK detection, `apps show`, `doctor` | medium |
