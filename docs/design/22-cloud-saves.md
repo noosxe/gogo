@@ -531,6 +531,11 @@ would be left).
   objects with gogo's UA in `X-Object-Meta-User-Agent`, and its tombstones are honoured. gogo
   writes the same gzip format so other clients can read what it uploads (to verify with the
   first upload, D2).
+- **Comet (design 23)**: a Galaxy-service stand-in that may run beside the game. It syncs
+  no GOG cloud saves, so the pull runs before Comet starts and the push after the prefix is
+  idle, as without it. A game's own cross-progression saves (Cyberpunk 2077's, on CD PROJEKT
+  RED's service) are outside GOG's cloud; once the game downloads one into the prefix it is an
+  ordinary local save, pushed like any other.
 
 ## 9. Prior art
 

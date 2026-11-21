@@ -74,6 +74,7 @@ in `docs/13` grounds design 10.
 | [20-snapshots](20-snapshots.md) | snapshots of a built Linux game on btrfs (ZFS later): the game dir as a subvolume, initial and automatic snapshots, rollback with the saves check, retention, `linux-app snapshot` (#365) |
 | [21-builds](21-builds.md) | builds of a game: `gogo builds` lists what GOG serves, `--build` picks one on `depot` / `linux-app`, the installed-vs-newest hint, the kept build manifest, and the sketch of a later `linux-app update` (#360) |
 | [22-cloud-saves](22-cloud-saves.md) | GOG cloud saves (#275): per-game token, remote-config save locations mapped into the Proton prefix / Wine bottle, per-file three-way sync, `gogo saves status/pull/push/sync`, launch-time sync, backups and the snapshot interplay |
+| [23-galaxy-service](23-galaxy-service.md) | a Galaxy service for Linux builds (#356): Comet beside the game, opt-in per game, pinned like umu, started and stopped by `launch.sh`, credentials handed over without argv or logs, never blocking a launch |
 ## Key decisions (traceability)
 
 | Decision | Rationale / source |

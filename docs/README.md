@@ -57,6 +57,7 @@ A Rust CLI app that:
 | [20-newer-cx-engine.md](20-newer-cx-engine.md) | #83: newer CrossOver-source engines (none from Sikarugir; Highball's CX 26.3 build is the candidate), Heroic mirror as second source (no), and why `WineSikarugir11` exits outside its launcher (a deliberate env-var gate) |
 | [21-linux-runtimes-and-renderers.md](21-linux-runtimes-and-renderers.md) | #150: Linux runtimes and renderers checked live: GE-Proton through umu-launcher, umu-database's GOG coverage (210 rows, GPL-3.0) and the GOG → umu id lookup, DXVK/VKD3D-Proton/D7VK, Kron4ek Wine, how Proton env vars fit compat L3/L4; the design decisions taken (§8), risks R1–R30 (§9) and an outline for the Linux design doc |
 | [22-ddraw-renderers-d7vk-vs-cnc-ddraw.md](22-ddraw-renderers-d7vk-vs-cnc-ddraw.md) | #150 / docs/21 §8 item 8: D7VK vs cnc-ddraw for `ddraw.dll` games (2D vs D3D≤7, Proton/Wine install, no D7VK on MoltenVK), and a static rule to tell 3D from 2D (the `dxguid` GUID block is noise; device/texture GUIDs are the signal) |
+| [23-galaxy-sdk-and-comet.md](23-galaxy-sdk-and-comet.md) | #356: the GOG Galaxy SDK in Linux builds and Comet, its open-source service stand-in: licence and releases, how Heroic runs it, what it serves (no cloud saves), the secrets in its log, Cyberpunk's cross-progression and start-screen wait, games that benefit |
 
 🧪 **Launch-testing bundles:** [vm-testing.md](vm-testing.md) — Tart VM workflow
 🧪 **Launch-testing Linux games:** [linux-e2e.md](linux-e2e.md) — headless sway harness
