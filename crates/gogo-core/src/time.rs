@@ -12,7 +12,7 @@
 //!   `Display` trims to the fewest digits (`.1234`), which is a different text.
 //! - [`autosi_offset`]: the same digits with `+00:00` for `Z`.
 
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use jiff::tz::{Offset, TimeZone};
 use jiff::{Timestamp, ZonedDateTime};
@@ -60,9 +60,18 @@ pub fn from_system(t: SystemTime) -> Timestamp {
     })
 }
 
-/// Back to a `SystemTime`. On Linux and macOS it holds jiff's whole range.
+/// Back to a `SystemTime`. On Linux and macOS it holds jiff's whole range; a
+/// platform that can't is clamped to the farthest time it can hold.
 pub fn to_system(t: Timestamp) -> SystemTime {
-    SystemTime::try_from(t).expect("a 64-bit SystemTime holds every jiff time")
+    SystemTime::try_from(t).unwrap_or_else(|_| {
+        let far = Duration::from_secs(i64::MAX as u64);
+        let end = if t.as_second() >= 0 {
+            SystemTime::UNIX_EPOCH.checked_add(far)
+        } else {
+            SystemTime::UNIX_EPOCH.checked_sub(far)
+        };
+        end.unwrap_or(SystemTime::UNIX_EPOCH)
+    })
 }
 
 /// Now, to the whole second (truncated).
@@ -96,7 +105,9 @@ pub fn local_now(f: &str) -> String {
 }
 
 /// A GOG checksum file's `timestamp="2026-03-13 08:45:39"`: a naive time, read
-/// as UTC, in unix seconds (0 before the epoch).
+/// as UTC, in unix seconds (0 before the epoch). The top of jiff's range is
+/// 9999-12-30T22:00Z, so a time after it (`9999-12-31 23:59:59`) is `None`,
+/// where chrono gave a value.
 pub fn naive_utc_secs(s: &str) -> Option<u64> {
     let t = jiff::civil::DateTime::strptime("%Y-%m-%d %H:%M:%S", s).ok()?;
     let secs = t

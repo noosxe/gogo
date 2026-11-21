@@ -46,7 +46,12 @@ pub fn published(b: &Build) -> Timestamp {
     let d = b.date_published();
     // chrono encodes a leap second as nanos past 999_999_999.
     let ns = d.timestamp_subsec_nanos().min(999_999_999);
-    Timestamp::new(d.timestamp(), ns as i32).unwrap_or(Timestamp::MAX)
+    let far = if d.timestamp() >= 0 {
+        Timestamp::MAX
+    } else {
+        Timestamp::MIN
+    };
+    Timestamp::new(d.timestamp(), ns as i32).unwrap_or(far)
 }
 
 /// One row of a listing: what the table and the error messages show.
@@ -545,6 +550,17 @@ mod tests {
             "urls": []
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn a_publish_time_outside_jiffs_range_clamps_by_sign() {
+        let at = |date| published(&b("1", "1.0", date, None, true));
+        assert_eq!(
+            at("2026-11-14T10:15:00Z"),
+            "2026-11-14T10:15:00Z".parse().unwrap()
+        );
+        assert_eq!(at("+12000-01-01T00:00:00Z"), Timestamp::MAX);
+        assert_eq!(at("-12000-01-01T00:00:00Z"), Timestamp::MIN);
     }
 
     fn listing(builds: Vec<Build>, total: u32) -> Listing {
