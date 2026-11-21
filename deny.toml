@@ -24,6 +24,11 @@ ignore = [
     "RUSTSEC-2026-0370",
     "RUSTSEC-2026-0371",
     "RUSTSEC-2026-0372",
+    # chrono unmaintained (RUSTSEC-2026-0543). Unmaintained-only — not a
+    # vulnerability. chrono comes in through gog-warp (git rev-pin) as well as
+    # gogo's own crates, so gogo cannot drop it alone. Remove this ignore once
+    # gog-warp no longer depends on chrono.
+    "RUSTSEC-2026-0543",
 ]
 
 [licenses]
