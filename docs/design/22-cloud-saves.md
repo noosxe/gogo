@@ -1098,8 +1098,8 @@ progress mechanism: the core `ProgressEvent::WorkStarted` / `WorkProgress` / `Wo
   renderer): the objects a first sync fetches to compare with local files, the downloads, the
   cloud backups before an upload overwrites or a deletion removes an object, and the uploads
   (files only; cloud deletions count as files in the same step). A sync shows its download
-  step, then its upload step. Counts move per finished file; downloads run up to four at a
-  time.
+  step, then its upload step. Downloads are fetched up to four at a time and consumed in plan
+  order, so the count moves as each result is taken in turn, not at the instant a fetch ends.
 - **Where it shows.** On a terminal's stderr only. `--json`, `--quiet`, `--no-progress` and a
   non-terminal stderr print nothing for it, as for the other commands. Notes (`SnapshotPruned`,
   warnings) go above the status line. Prompts already run inside `depot_progress::prompting`,
