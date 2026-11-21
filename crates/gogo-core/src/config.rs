@@ -128,6 +128,10 @@ pub struct LinuxConfig {
     /// asks on a terminal and stores the answer; headless builds fail
     /// naming the key.
     pub umu: Option<UmuMode>,
+    /// Where Comet, the Galaxy service stand-in, comes from (design 23
+    /// decision 4): `fetch` (gogo's pinned release; the default when unset),
+    /// `system` (the `comet` on `PATH`) or `path:<file>`.
+    pub comet: Option<CometMode>,
     /// Where new GE-Proton builds go (design 18 §2.2). Unset: asked once on
     /// a terminal when a Steam install exists; otherwise the store.
     pub proton_dir: Option<ProtonDir>,
@@ -216,6 +220,50 @@ impl UmuMode {
             UmuMode::Zipapp => "zipapp",
             UmuMode::System => "system",
         }
+    }
+}
+
+/// `[linux] comet`: gogo's pinned release (or the flake's build, through
+/// `GOGO_COMET`), the `comet` on `PATH`, or one file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CometMode {
+    Fetch,
+    System,
+    Path(std::path::PathBuf),
+}
+
+impl CometMode {
+    /// The config spelling: `fetch`, `system` or `path:<file>`.
+    pub fn to_config(&self) -> String {
+        match self {
+            CometMode::Fetch => "fetch".into(),
+            CometMode::System => "system".into(),
+            CometMode::Path(p) => format!("path:{}", p.display()),
+        }
+    }
+}
+
+impl std::str::FromStr for CometMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "fetch" => Ok(CometMode::Fetch),
+            "system" => Ok(CometMode::System),
+            _ => match s.strip_prefix("path:") {
+                Some(p) if !p.is_empty() => Ok(CometMode::Path(p.into())),
+                _ => Err(format!(
+                    "unknown comet mode '{s}': use \"fetch\", \"system\" or \"path:<file>\""
+                )),
+            },
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for CometMode {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(d)?;
+        raw.parse().map_err(serde::de::Error::custom)
     }
 }
 
@@ -563,7 +611,7 @@ fn unknown_keys(table: &toml::Table) -> Vec<String> {
         ("library", &["dir"]),
         ("state", &["catalog_ttl_hours"]),
         ("mac_app", &["d3dmetal"]),
-        ("linux", &["umu", "proton_dir", "default_runtime"]),
+        ("linux", &["umu", "comet", "proton_dir", "default_runtime"]),
         ("snapshots", &["auto", "keep_auto"]),
     ];
     let mut out = Vec::new();
@@ -708,6 +756,32 @@ mod tests {
         }
         std::fs::write(&path, "[linux]\numu = \"flatpak\"\n").unwrap();
         assert!(Config::load_from(&path, no_env).is_err());
+    }
+
+    #[test]
+    fn linux_comet_mode_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let loaded = Config::load_from(&path, no_env).unwrap();
+        assert_eq!(loaded.config.linux.comet, None);
+        for (raw, mode) in [
+            ("fetch", CometMode::Fetch),
+            ("system", CometMode::System),
+            (
+                "path:/opt/comet/comet",
+                CometMode::Path("/opt/comet/comet".into()),
+            ),
+        ] {
+            std::fs::write(&path, format!("[linux]\ncomet = \"{raw}\"\n")).unwrap();
+            let loaded = Config::load_from(&path, no_env).unwrap();
+            assert_eq!(loaded.config.linux.comet, Some(mode.clone()));
+            assert_eq!(mode.to_config(), raw);
+            assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        }
+        for bad in ["flatpak", "path:", "Fetch"] {
+            std::fs::write(&path, format!("[linux]\ncomet = \"{bad}\"\n")).unwrap();
+            assert!(Config::load_from(&path, no_env).is_err(), "{bad}");
+        }
     }
 
     #[test]

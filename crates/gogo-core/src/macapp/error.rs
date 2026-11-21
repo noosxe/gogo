@@ -94,6 +94,13 @@ pub enum MacAppError {
     #[error("umu: {0}")]
     Umu(String),
 
+    /// Comet can't be provisioned or found as configured (design 23
+    /// decision 4): `[linux] comet = "system"` with none on `PATH`, a
+    /// `path:` that isn't an executable file, no way to run the release
+    /// binary on NixOS.
+    #[error("comet: {0}")]
+    Comet(String),
+
     /// A Proton build that can't be placed or used (design 18 §1, §2.2).
     #[error("proton: {0}")]
     Proton(String),
