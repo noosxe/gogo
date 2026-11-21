@@ -23,6 +23,10 @@ use super::record::{self, FileRecord, Record};
 use super::remote_config::{self, RemoteConfigError, Source};
 use super::scan::{self, LocalFile};
 use super::storage::{self, Entry};
+use crate::engine::events::{ProgressEvent, step};
+
+/// Where the slow steps report to (live status line only).
+pub type Emit<'a> = &'a mut dyn FnMut(&ProgressEvent);
 
 /// Downloads at a time (design 22 §5.4).
 pub const CONCURRENCY: usize = 4;
@@ -232,6 +236,26 @@ pub fn action_name(a: Action) -> &'static str {
     }
 }
 
+/// The game's credentials, checked against its client id, and the token.
+async fn exchange(
+    auth: &CloudAuth<'_>,
+    game: &Game,
+    gogid: u64,
+    client_id: &str,
+    installed: Option<&str>,
+) -> Result<super::auth::CloudToken, CloudError> {
+    let creds = auth.credentials(game, installed).await?;
+    if creds.client_id != client_id {
+        tracing::debug!(
+            credentials = %creds.client_id,
+            game = %client_id,
+            "cloud saves: client id mismatch"
+        );
+        return Err(CloudError::ClientIdMismatch { gogid });
+    }
+    auth.token(gogid, &creds).await
+}
+
 /// One file while it is planned.
 #[derive(Default)]
 struct Item {
@@ -248,6 +272,7 @@ pub async fn status(inputs: &Inputs<'_>) -> Result<Plan, CloudError> {
         inputs.http,
         inputs.config_base,
         inputs.cache_dir,
+        &mut |_| {},
     )
     .await?
     {
@@ -268,6 +293,7 @@ pub async fn status(inputs: &Inputs<'_>) -> Result<Plan, CloudError> {
                 inputs.auth,
                 inputs.storage,
                 inputs.record_dir,
+                &mut |_| {},
             )
             .await
         }
@@ -281,10 +307,17 @@ pub async fn locate(
     http: &reqwest::Client,
     config_base: &str,
     cache_dir: &Path,
+    emit: Emit<'_>,
 ) -> Result<Located, CloudError> {
     let client_id = game.client_id()?;
-    let (cfg, source) = match remote_config::get_in(cache_dir, http, config_base, &client_id).await
-    {
+    emit(&ProgressEvent::WorkStarted {
+        step: step::CLOUD_CONFIG.into(),
+    });
+    let got = remote_config::get_in(cache_dir, http, config_base, &client_id).await;
+    emit(&ProgressEvent::WorkDone {
+        step: step::CLOUD_CONFIG.into(),
+    });
+    let (cfg, source) = match got {
         Ok(c) => c,
         Err(RemoteConfigError::Status { status: 404, .. }) => {
             return Ok(Located::Off(Plan::off(game, Source::Network, true)));
@@ -304,6 +337,7 @@ pub async fn locate(
 
 /// The second half: credentials, the per-game token, the listing, the local
 /// files and the record, classified.
+#[allow(clippy::too_many_arguments)]
 pub async fn plan(
     game: &Game,
     client_id: &str,
@@ -312,6 +346,7 @@ pub async fn plan(
     auth: &CloudAuth<'_>,
     storage_client: &StorageClient,
     record_dir: &Path,
+    emit: Emit<'_>,
 ) -> Result<Plan, CloudError> {
     Ok(plan_detailed(
         game,
@@ -321,6 +356,7 @@ pub async fn plan(
         auth,
         storage_client,
         record_dir,
+        emit,
     )
     .await?
     .plan)
@@ -352,6 +388,7 @@ pub struct Detail {
 }
 
 /// [`plan`], with the [`Detailed`] inputs of every planned file.
+#[allow(clippy::too_many_arguments)]
 pub async fn plan_detailed(
     game: &Game,
     client_id: &str,
@@ -360,6 +397,7 @@ pub async fn plan_detailed(
     auth: &CloudAuth<'_>,
     storage_client: &StorageClient,
     record_dir: &Path,
+    emit: Emit<'_>,
 ) -> Result<Detailed, CloudError> {
     let gogid = game.id()?;
     let record = record::load(record_dir, gogid)?;
@@ -367,17 +405,22 @@ pub async fn plan_detailed(
         .ok()
         .flatten()
         .and_then(|c| c.build_id);
-    let creds = auth.credentials(game, installed.as_deref()).await?;
-    if creds.client_id != client_id {
-        tracing::debug!(
-            credentials = %creds.client_id,
-            game = %client_id,
-            "cloud saves: client id mismatch"
-        );
-        return Err(CloudError::ClientIdMismatch { gogid });
-    }
-    let token = auth.token(gogid, &creds).await?;
-    let listing = storage::list(storage_client, &token, client_id).await?;
+    emit(&ProgressEvent::WorkStarted {
+        step: step::CLOUD_TOKEN.into(),
+    });
+    let token = exchange(auth, game, gogid, client_id, installed.as_deref()).await;
+    emit(&ProgressEvent::WorkDone {
+        step: step::CLOUD_TOKEN.into(),
+    });
+    let token = token?;
+    emit(&ProgressEvent::WorkStarted {
+        step: step::CLOUD_LISTING.into(),
+    });
+    let listing = storage::list(storage_client, &token, client_id).await;
+    emit(&ProgressEvent::WorkDone {
+        step: step::CLOUD_LISTING.into(),
+    });
+    let listing = listing?;
 
     let client_id_changed = record.as_ref().is_some_and(|r| r.client_id != client_id);
     // D11: a record for another client is no record, its marks included.
@@ -420,13 +463,23 @@ pub async fn plan_detailed(
     let by_location = group(resolved, &listing.entries, &mut plan.unmapped);
     let mut pending: Vec<(usize, String, Entry)> = vec![];
     let mut staged: Vec<(LocationPlan, BTreeMap<String, Item>)> = vec![];
+    emit(&ProgressEvent::WorkStarted {
+        step: step::LOCAL_SCAN.into(),
+    });
     for loc in &resolved.locations {
         let entries = by_location
             .get(loc.name.as_str())
             .cloned()
             .unwrap_or_default();
-        let (lp, items) = gather(loc, entries, usable, &mut plan.unmapped)?;
-        staged.push((lp, items));
+        match gather(loc, entries, usable, &mut plan.unmapped) {
+            Ok(g) => staged.push(g),
+            Err(e) => {
+                emit(&ProgressEvent::WorkDone {
+                    step: step::LOCAL_SCAN.into(),
+                });
+                return Err(e);
+            }
+        }
     }
 
     // Local hashes where the table needs them, and the objects a first sync
@@ -457,7 +510,10 @@ pub async fn plan_detailed(
             }
         }
     }
-    let fetched = fetch_plain(storage_client, &token, client_id, pending).await?;
+    emit(&ProgressEvent::WorkDone {
+        step: step::LOCAL_SCAN.into(),
+    });
+    let fetched = fetch_plain(storage_client, &token, client_id, pending, emit).await?;
 
     let mut details: Vec<Vec<Detail>> = vec![];
     for (i, (mut lp, items)) in staged.into_iter().enumerate() {
@@ -729,15 +785,36 @@ async fn fetch_plain(
     token: &super::auth::CloudToken,
     client_id: &str,
     pending: Vec<(usize, String, Entry)>,
+    emit: Emit<'_>,
 ) -> Result<HashMap<(usize, String), Option<String>>, CloudError> {
-    let results: Vec<_> = futures::stream::iter(pending)
+    let total = pending.len() as u64;
+    let bytes_total: u64 = pending.iter().map(|(_, _, e)| e.bytes).sum();
+    let mut stream = futures::stream::iter(pending)
         .map(|(i, name, e)| async move {
+            let bytes = e.bytes;
             let r = storage::plain_md5(client, token, client_id, &e).await;
-            ((i, name), r)
+            ((i, name), bytes, r)
         })
-        .buffer_unordered(CONCURRENCY)
-        .collect()
-        .await;
+        .buffer_unordered(CONCURRENCY);
+    let mut results = vec![];
+    let (mut files, mut bytes) = (0u64, 0u64);
+    while let Some((key, b, r)) = stream.next().await {
+        files += 1;
+        bytes += b;
+        emit(&ProgressEvent::WorkProgress {
+            step: step::CLOUD_COMPARE.into(),
+            files: Some(files),
+            files_total: Some(total),
+            bytes: Some(bytes),
+            bytes_total: Some(bytes_total),
+        });
+        results.push((key, r));
+    }
+    if total > 0 {
+        emit(&ProgressEvent::WorkDone {
+            step: step::CLOUD_COMPARE.into(),
+        });
+    }
     let mut out = HashMap::new();
     for (key, r) in results {
         match r {

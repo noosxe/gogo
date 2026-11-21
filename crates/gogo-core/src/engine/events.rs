@@ -220,6 +220,25 @@ pub mod step {
     pub const MOVING_GAME: &str = "moving the game into place";
     /// A rebuild's new prefix going into place.
     pub const MOVING_PREFIX: &str = "moving the Wine prefix into place";
+    /// A game's cloud-save remote config being fetched (design 22 §2).
+    pub const CLOUD_CONFIG: &str = "fetching the cloud-save config";
+    /// The per-game cloud token exchange.
+    pub const CLOUD_TOKEN: &str = "getting the game's cloud token";
+    /// The cloud container's listing.
+    pub const CLOUD_LISTING: &str = "listing the cloud saves";
+    /// The local save files being scanned and hashed.
+    pub const LOCAL_SCAN: &str = "scanning the local saves";
+    /// Cloud objects fetched to compare with local files on a first sync.
+    pub const CLOUD_COMPARE: &str = "comparing with the cloud saves";
+    /// The `cloud-pull` snapshot being taken.
+    pub const CLOUD_SNAPSHOT: &str = "taking the cloud-pull snapshot";
+    /// Cloud objects fetched as backups before an upload replaces or a
+    /// deletion removes them.
+    pub const CLOUD_BACKUP: &str = "backing up the cloud saves";
+    /// Cloud objects downloaded into the local save files.
+    pub const DOWNLOADING_SAVES: &str = "downloading saves";
+    /// Local save files uploaded (and cloud objects deleted).
+    pub const UPLOADING_SAVES: &str = "uploading saves";
 }
 
 impl ProgressEvent {

@@ -266,7 +266,12 @@ async fn status(gogid: &str, json: bool) -> Result<i32, AppError> {
     };
     let http = gogo::gog::http().map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
     let cache = gogo::state::cache::cache_dir();
-    let located = cloud_status::locate(&game, &http, remote_config::BASE, &cache).await;
+    // The waits show on the live status line (stderr terminal only).
+    let act = crate::depot_progress::Activity::new(crate::depot_mode(false, json));
+    let mut live = |ev: &gogo::prelude::ProgressEvent| {
+        act.work(ev);
+    };
+    let located = cloud_status::locate(&game, &http, remote_config::BASE, &cache, &mut live).await;
     let (client_id, resolved, source) = match located {
         Err(e) => return Ok(emit(Outcome::failed(&e))),
         Ok(Located::Off(plan)) => return Ok(emit(status_outcome(Ok(plan), json))),
@@ -280,7 +285,12 @@ async fn status(gogid: &str, json: bool) -> Result<i32, AppError> {
     // Locations in the game's files need the build's file list (design 22
     // §3.4): offline when gogo has it, else the build's depot manifests.
     if resolved.locations.iter().any(|l| l.in_game_files()) {
-        let list = build_list(build_files::lookup(&game), fetch_build_files).await;
+        let list = act
+            .spin_async(
+                "reading the build's file list",
+                build_list(build_files::lookup(&game), fetch_build_files),
+            )
+            .await;
         build_files::apply(&mut resolved, &game, list);
     }
     let cfg = crate::load_config_from_env()?;
@@ -304,8 +314,10 @@ async fn status(gogid: &str, json: bool) -> Result<i32, AppError> {
         &auth,
         &storage,
         &gogo::cloud::record::default_dir(),
+        &mut live,
     )
     .await;
+    act.finish();
     Ok(emit(status_outcome(plan, json)))
 }
 
@@ -331,7 +343,13 @@ async fn transfer(a: Run) -> Result<i32, AppError> {
     };
     let http = gogo::gog::http().map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?;
     let cache = gogo::state::cache::cache_dir();
-    let located = cloud_status::locate(&game, &http, remote_config::BASE, &cache).await;
+    // Progress on the live status line: stderr terminal only, never under
+    // `--json` (the same `Activity` the other commands use).
+    let act = crate::depot_progress::Activity::new(crate::depot_mode(false, a.json));
+    let located = cloud_status::locate(&game, &http, remote_config::BASE, &cache, &mut |ev| {
+        act.work(ev);
+    })
+    .await;
     let (client_id, mut resolved, source) = match located {
         Err(e) => return Ok(emit(Outcome::failed(&e))),
         Ok(Located::Off(plan)) => return Ok(emit(status_outcome(Ok(plan), a.json))),
@@ -342,7 +360,12 @@ async fn transfer(a: Run) -> Result<i32, AppError> {
         }) => (client_id, resolved, source),
     };
     if resolved.locations.iter().any(|l| l.in_game_files()) {
-        let list = build_list(build_files::lookup(&game), fetch_build_files).await;
+        let list = act
+            .spin_async(
+                "reading the build's file list",
+                build_list(build_files::lookup(&game), fetch_build_files),
+            )
+            .await;
         build_files::apply(&mut resolved, &game, list);
     }
     let cfg = crate::load_config_from_env()?;
@@ -357,20 +380,7 @@ async fn transfer(a: Run) -> Result<i32, AppError> {
         Err(e) => return Ok(emit(Outcome::failed(&e))),
     };
     let json = a.json;
-    let mut progress = |ev: &gogo::prelude::ProgressEvent| {
-        if json {
-            return;
-        }
-        use gogo::prelude::ProgressEvent as E;
-        match ev {
-            E::SnapshotPruned { id, label, created } => eprintln!(
-                "gogo: {}",
-                gogo::linuxapp::snapshots::pruned_line(*id, label, created)
-            ),
-            E::Warn { message } => eprintln!("gogo: note: {message}"),
-            _ => {}
-        }
-    };
+    let mut progress = |ev: &gogo::prelude::ProgressEvent| show(&act, json, ev);
     let mut host = LiveHost::new(&game, auto_snapshots(a.no_snapshots)?, &mut progress);
     let mut decide = CliDecide {
         prefer_cloud: a.prefer_cloud,
@@ -405,10 +415,35 @@ async fn transfer(a: Run) -> Result<i32, AppError> {
         &mut decide,
     )
     .await;
+    act.finish();
     Ok(emit(pull_outcome(report, a.json)))
 }
 
 use gogo::cloud::pull::Mode;
+
+/// One progress event of a run: the live status line takes the work events
+/// (a terminal only), the notes go above it; nothing under `--json`.
+fn show<W: std::io::Write + Send + 'static>(
+    act: &crate::depot_progress::Activity<W>,
+    json: bool,
+    ev: &gogo::prelude::ProgressEvent,
+) {
+    if json || act.work(ev) {
+        return;
+    }
+    use gogo::prelude::ProgressEvent as E;
+    match ev {
+        E::SnapshotPruned { id, label, created } => act.say(
+            &format!(
+                "gogo: {}",
+                gogo::linuxapp::snapshots::pruned_line(*id, label, created)
+            ),
+            &|l| eprintln!("{l}"),
+        ),
+        E::Warn { message } => act.say(&format!("gogo: note: {message}"), &|l| eprintln!("{l}")),
+        _ => {}
+    }
+}
 
 /// A terminal on stdin and stderr, and no machine output.
 fn interactive(json: bool) -> bool {
@@ -1064,20 +1099,26 @@ pub async fn report(
     http: &reqwest::Client,
 ) -> Outcome {
     let lane = req.layout.lane;
-    let (resolved, source, no_config) =
-        match remote_config::get_in(cache, http, base, req.client_id).await {
-            Ok((cfg, source)) => {
-                let mut r = resolve(&cfg, req.client_id, req.layout);
-                if let Some(g) = req.game {
-                    build_note(&mut r, g);
-                }
-                (r, source, false)
+    let act = crate::depot_progress::Activity::new(crate::depot_mode(false, req.json));
+    let fetched = act
+        .spin_async(
+            gogo::engine::events::step::CLOUD_CONFIG,
+            remote_config::get_in(cache, http, base, req.client_id),
+        )
+        .await;
+    let (resolved, source, no_config) = match fetched {
+        Ok((cfg, source)) => {
+            let mut r = resolve(&cfg, req.client_id, req.layout);
+            if let Some(g) = req.game {
+                build_note(&mut r, g);
             }
-            Err(remote_config::RemoteConfigError::Status { status: 404, .. }) => {
-                (Resolved::off(), Source::Network, true)
-            }
-            Err(e) => return Outcome::failed(&e.into()),
-        };
+            (r, source, false)
+        }
+        Err(remote_config::RemoteConfigError::Status { status: 404, .. }) => {
+            (Resolved::off(), Source::Network, true)
+        }
+        Err(e) => return Outcome::failed(&e.into()),
+    };
     let stdout = if req.json {
         let mut report = serde_json::to_value(&resolved).unwrap();
         report["gogid"] = serde_json::json!(req.gogid);
@@ -1169,6 +1210,62 @@ pub fn render(gogid: &str, source: Source, r: &Resolved) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A writer the test can read back after the `Activity` took it.
+    #[derive(Clone, Default)]
+    struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Sink {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn drawn(mode: crate::depot_progress::Mode, json: bool) -> String {
+        use gogo::prelude::ProgressEvent as E;
+        let sink = Sink::default();
+        let act = crate::depot_progress::Activity::with(mode, sink.clone());
+        for ev in [
+            E::WorkStarted {
+                step: "listing the cloud saves".into(),
+            },
+            E::WorkDone {
+                step: "listing the cloud saves".into(),
+            },
+            E::WorkProgress {
+                step: "downloading saves".into(),
+                files: Some(1),
+                files_total: Some(3),
+                bytes: Some(10),
+                bytes_total: Some(30),
+            },
+        ] {
+            show(&act, json, &ev);
+        }
+        act.finish();
+        drop(act);
+        let out = sink.0.lock().unwrap().clone();
+        String::from_utf8(out).unwrap()
+    }
+
+    /// The status line is for a terminal's stderr alone: `--json`, `--quiet`
+    /// and a pipe get nothing, as for the other commands.
+    #[test]
+    fn progress_is_drawn_on_a_terminal_only() {
+        use crate::depot_progress::Mode;
+        let live = drawn(Mode::Human { live: true }, false);
+        assert!(live.contains("listing the cloud saves"), "{live:?}");
+        assert!(drawn(Mode::Human { live: true }, true).is_empty(), "--json");
+        assert!(
+            drawn(Mode::Human { live: false }, false).is_empty(),
+            "a pipe"
+        );
+        assert!(drawn(Mode::Silent, false).is_empty(), "--quiet");
+        assert!(drawn(Mode::Json, true).is_empty());
+    }
+
     use super::*;
     use clap::Parser as _;
     use gogo::cloud::locations::{Layout, resolve_storage};

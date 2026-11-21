@@ -41,6 +41,7 @@ use super::remote_config::Source;
 use super::status::{self, Detail, FilePlan, Plan};
 use super::storage::{self, Entry};
 use super::write::{self, Expect, WriteError};
+use crate::engine::events::{ProgressEvent, step};
 
 /// What a pull does to one file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -269,6 +270,9 @@ pub trait Host {
     /// The `cloud-pull` snapshot, under the lock; the line to show when one
     /// was taken. A failure is [`CloudError::Refused`].
     fn snapshot(&mut self) -> Result<Option<String>, CloudError>;
+    /// A progress event for the live status line (design 22 as-built:
+    /// progress). The default drops it.
+    fn emit(&mut self, _event: &ProgressEvent) {}
 }
 
 pub struct PullOptions {
@@ -420,6 +424,7 @@ pub async fn pull(
         inputs.auth,
         inputs.storage,
         inputs.record_dir,
+        &mut |ev| host.emit(ev),
     )
     .await?;
     let status::Detailed {
@@ -620,13 +625,24 @@ pub async fn pull(
         }
     }
     if stop.is_none() {
-        for w in work.iter_mut().filter(|w| {
+        let cloud_backup = |w: &Work| {
             planned(w)
                 && matches!(w.result.op, Some(Op::Upload | Op::DeleteCloud))
                 && w.detail.entry.as_ref().is_some_and(|e| !e.is_tombstone())
-        }) {
+        };
+        let mut count = Count::of(
+            step::CLOUD_BACKUP,
+            work.iter()
+                .filter(|w| cloud_backup(w))
+                .filter_map(|w| w.detail.entry.as_ref())
+                .map(|e| e.bytes),
+        );
+        for w in work.iter_mut().filter(|w| cloud_backup(w)) {
             let entry = w.detail.entry.as_ref().expect("filtered");
-            match storage::fetch_object(inputs.storage, &token, inputs.client_id, entry).await {
+            let fetched =
+                storage::fetch_object(inputs.storage, &token, inputs.client_id, entry).await;
+            count.one(host, entry.bytes);
+            match fetched {
                 Ok(o) => match bk.save_cloud(&w.result.name, &o.gzip, entry, o.local_last_modified)
                 {
                     Ok(p) => w.result.backup = Some(p),
@@ -652,6 +668,7 @@ pub async fn pull(
                 }
             }
         }
+        count.done(host);
     }
     report.backup_dir = bk.dir().map(Path::to_path_buf);
     if let Some(e) = stop {
@@ -695,6 +712,7 @@ pub async fn pull(
         .collect();
     let mut fetched: std::collections::HashMap<usize, Result<storage::Object, CloudError>> =
         std::collections::HashMap::new();
+    let mut downloads = Count::of(step::DOWNLOADING_SAVES, wanted.iter().map(|(_, e)| e.bytes));
     for (k, w) in work.iter_mut().enumerate() {
         if !planned(w) {
             continue;
@@ -713,7 +731,10 @@ pub async fn pull(
                 .await;
                 fetched.extend(got);
             }
-            fetched.remove(&k)
+            let got = fetched.remove(&k);
+            let bytes = w.detail.entry.as_ref().map_or(0, |e| e.bytes);
+            downloads.one(host, bytes);
+            got
         } else {
             None
         };
@@ -770,6 +791,7 @@ pub async fn pull(
             }
         }
     }
+    downloads.done(host);
     if let Some(e) = stop {
         return Ok(stopped(report, work, e));
     }
@@ -778,6 +800,18 @@ pub async fn pull(
     let mut written: Vec<(String, bool)> = vec![];
     let mut extras: Vec<FileResult> = vec![];
     let mut stop: Option<CloudError> = None;
+    let mut uploads = Count::of(
+        step::UPLOADING_SAVES,
+        work.iter()
+            .filter(|w| {
+                opts.mode.pushes()
+                    && (planned(w) && matches!(w.result.op, Some(Op::Upload | Op::DeleteCloud))
+                        || w.result.op == Some(Op::KeepBoth)
+                            && w.result.state == State::Done
+                            && w.result.kept_as.is_some())
+            })
+            .map(|_| 0),
+    );
     for w in work.iter_mut() {
         let kept = (opts.mode.pushes()
             && w.result.op == Some(Op::KeepBoth)
@@ -796,7 +830,7 @@ pub async fn pull(
                 kept_as: None,
             };
             let leaf = std::ffi::OsString::from(&kept);
-            match upload(
+            let uploaded = upload(
                 &gate,
                 inputs,
                 &token,
@@ -805,8 +839,9 @@ pub async fn pull(
                 Some(&leaf),
                 &mut rec,
             )
-            .await
-            {
+            .await;
+            uploads.one(host, 0);
+            match uploaded {
                 Ok(()) => {
                     res.state = State::Done;
                     written.push((name, true));
@@ -855,6 +890,7 @@ pub async fn pull(
             ),
             _ => continue,
         };
+        uploads.one(host, 0);
         match res {
             Ok(()) => {
                 w.result.state = State::Done;
@@ -876,6 +912,7 @@ pub async fn pull(
             }
         }
     }
+    uploads.done(host);
     report.files.extend(extras);
     if let Some(e) = stop {
         return Ok(stopped(report, work, e));
@@ -930,6 +967,52 @@ pub async fn pull(
     }
     report.files.extend(work.into_iter().map(|w| w.result));
     Ok(report)
+}
+
+/// A step's running count for the live status line: files done of the
+/// total and, where the sizes are known, bytes (design 22, progress).
+struct Count {
+    step: &'static str,
+    files: u64,
+    total: u64,
+    bytes: u64,
+    bytes_total: u64,
+}
+
+impl Count {
+    fn of(step: &'static str, sizes: impl Iterator<Item = u64>) -> Self {
+        let (total, bytes_total) = sizes.fold((0, 0), |(n, b), s| (n + 1, b + s));
+        Self {
+            step,
+            files: 0,
+            total,
+            bytes: 0,
+            bytes_total,
+        }
+    }
+
+    /// One more done, of `bytes`.
+    fn one(&mut self, host: &mut dyn Host, bytes: u64) {
+        self.files += 1;
+        self.bytes += bytes;
+        let known = self.bytes_total > 0;
+        host.emit(&ProgressEvent::WorkProgress {
+            step: self.step.into(),
+            files: Some(self.files),
+            files_total: Some(self.total),
+            bytes: known.then_some(self.bytes),
+            bytes_total: known.then_some(self.bytes_total),
+        });
+    }
+
+    /// The step is over (nothing shown when nothing was counted).
+    fn done(self, host: &mut dyn Host) {
+        if self.files > 0 {
+            host.emit(&ProgressEvent::WorkDone {
+                step: self.step.into(),
+            });
+        }
+    }
 }
 
 /// The error of a closed gate.
@@ -1712,8 +1795,15 @@ impl Host for LiveHost<'_> {
         }
     }
 
+    fn emit(&mut self, event: &ProgressEvent) {
+        (self.emit)(event);
+    }
+
     fn snapshot(&mut self) -> Result<Option<String>, CloudError> {
         let dirs = self.dirs();
+        (self.emit)(&ProgressEvent::WorkStarted {
+            step: step::CLOUD_SNAPSHOT.into(),
+        });
         let taken = crate::linuxapp::snapshots::protect(
             &self.game.gogid,
             &dirs,
@@ -1722,8 +1812,11 @@ impl Host for LiveHost<'_> {
             crate::snapshot::labels::cloud_pull(),
             &self.auto,
             self.emit,
-        )
-        .map_err(|e| CloudError::Refused(e.to_string()))?;
+        );
+        (self.emit)(&ProgressEvent::WorkDone {
+            step: step::CLOUD_SNAPSHOT.into(),
+        });
+        let taken = taken.map_err(|e| CloudError::Refused(e.to_string()))?;
         Ok(taken.map(|t| format!("snapshot {} taken ({})", t.meta.id, t.meta.label)))
     }
 }

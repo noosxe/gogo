@@ -127,9 +127,14 @@ struct FakeHost {
     refuse: bool,
     fail_snapshot: bool,
     watch: Option<PathBuf>,
+    /// The progress events, in order.
+    events: Rc<RefCell<Vec<ProgressEvent>>>,
 }
 
 impl Host for FakeHost {
+    fn emit(&mut self, event: &ProgressEvent) {
+        self.events.borrow_mut().push(event.clone());
+    }
     fn lock(&mut self) -> Result<(), CloudError> {
         self.log.borrow_mut().push("lock".into());
         if self.refuse {
@@ -2417,4 +2422,151 @@ async fn a_sync_never_uploads_what_it_just_downloaded() {
         );
     }
     assert_eq!(f.read("theirs.sav").unwrap(), b"theirs");
+}
+
+/// The progress events as short strings: `start:<step>`, `done:<step>` and
+/// `<step> <files>/<total> <bytes>/<total>`.
+fn shown(events: &[ProgressEvent]) -> Vec<String> {
+    events
+        .iter()
+        .map(|e| match e {
+            ProgressEvent::WorkStarted { step } => format!("start:{step}"),
+            ProgressEvent::WorkDone { step } => format!("done:{step}"),
+            ProgressEvent::WorkProgress {
+                step,
+                files,
+                files_total,
+                bytes,
+                bytes_total,
+            } => format!(
+                "{step} {}/{} {}/{}",
+                files.unwrap(),
+                files_total.unwrap(),
+                bytes.map_or("-".into(), |b| b.to_string()),
+                bytes_total.map_or("-".into(), |b| b.to_string()),
+            ),
+            other => panic!("unexpected {other:?}"),
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_pull_with_downloads_reports_its_steps_and_a_running_count() {
+    use crate::engine::events::step;
+    let f = fixture().await;
+    let (a, b) = (gzip(b"first"), gzip(b"second save"));
+    let total = (a.len() + b.len()) as u64;
+    f.serve(&[("saves/a.sav", a.clone()), ("saves/b.sav", b.clone())])
+        .await;
+    let mut host = FakeHost::default();
+    let mut d = Script::new(Choice::Skip, Confirm::No);
+    let r = f.pull(&opts(), &mut host, &mut d).await.unwrap();
+    assert!(r.error.is_none(), "{:?}", r.stopped);
+    let got = shown(&host.events.borrow());
+    let at = |p: &str| {
+        got.iter()
+            .position(|l| l.starts_with(p))
+            .unwrap_or_else(|| panic!("{p} in {got:?}"))
+    };
+    // The waits, in order, each closed.
+    let waits = [
+        step::CLOUD_TOKEN,
+        step::CLOUD_LISTING,
+        step::LOCAL_SCAN,
+        step::CLOUD_COMPARE,
+    ];
+    let order: Vec<usize> = waits
+        .iter()
+        .take(3)
+        .map(|s| at(&format!("start:{s}")))
+        .collect();
+    assert!(order.windows(2).all(|w| w[0] < w[1]), "{got:?}");
+    for s in &waits[..3] {
+        assert!(
+            at(&format!("start:{s}")) < at(&format!("done:{s}")),
+            "{got:?}"
+        );
+    }
+    // A first sync fetches both to compare, then downloads both.
+    let dl = step::DOWNLOADING_SAVES;
+    let counts: Vec<&String> = got.iter().filter(|l| l.starts_with(dl)).collect();
+    assert_eq!(counts.len(), 2, "{got:?}");
+    assert!(counts[0].starts_with(&format!("{dl} 1/2 ")), "{counts:?}");
+    assert_eq!(counts[1], &format!("{dl} 2/2 {total}/{total}"));
+    assert_eq!(got.last().unwrap(), &format!("done:{dl}"), "{got:?}");
+    assert!(
+        !got.iter().any(|l| l.contains(step::UPLOADING_SAVES)),
+        "a pull uploads nothing: {got:?}"
+    );
+    assert!(events_are_live_only(&host.events.borrow()));
+}
+
+fn events_are_live_only(events: &[ProgressEvent]) -> bool {
+    events.iter().all(ProgressEvent::is_live_only)
+}
+
+#[tokio::test]
+async fn a_dry_run_reports_the_waits_and_no_transfers() {
+    use crate::engine::events::step;
+    let f = fixture().await;
+    f.serve(&[("saves/a.sav", gzip(b"first"))]).await;
+    let mut host = FakeHost::default();
+    let mut d = Script::new(Choice::Skip, Confirm::No);
+    let dry = PullOptions {
+        dry_run: true,
+        ..opts()
+    };
+    f.pull(&dry, &mut host, &mut d).await.unwrap();
+    let got = shown(&host.events.borrow());
+    assert!(
+        got.contains(&format!("start:{}", step::CLOUD_LISTING)),
+        "{got:?}"
+    );
+    for s in [
+        step::DOWNLOADING_SAVES,
+        step::UPLOADING_SAVES,
+        step::CLOUD_BACKUP,
+    ] {
+        assert!(!got.iter().any(|l| l.contains(s)), "{s}: {got:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_push_reports_the_cloud_backup_and_the_uploads() {
+    use crate::engine::events::step;
+    let f = fixture().await;
+    f.write("a.sav", b"old");
+    let mut rec = Record::new(CLIENT);
+    f.recorded(&mut rec, "a.sav", b"old");
+    f.save_record(&rec);
+    f.write("a.sav", b"newer content");
+    f.write("b.sav", b"brand new");
+    let old = gzip(b"old");
+    f.serve(&[("saves/a.sav", old.clone())]).await;
+    f.accept_writes().await;
+    let mut host = FakeHost::default();
+    let mut d = Script::new(Choice::Skip, Confirm::Yes);
+    let r = f
+        .pull(&mode_opts(Mode::Push), &mut host, &mut d)
+        .await
+        .unwrap();
+    assert!(r.error.is_none(), "{:?}", r.stopped);
+    let got = shown(&host.events.borrow());
+    let n = old.len();
+    // The one replaced object is fetched as a backup first.
+    let backup = format!("{} 1/1 {n}/{n}", step::CLOUD_BACKUP);
+    let up = format!("{} 2/2 -/-", step::UPLOADING_SAVES);
+    let (b, u) = (
+        got.iter().position(|l| *l == backup),
+        got.iter().position(|l| *l == up),
+    );
+    assert!(b.is_some() && u.is_some() && b < u, "{got:?}");
+    assert!(
+        got.contains(&format!("done:{}", step::UPLOADING_SAVES)),
+        "{got:?}"
+    );
+    assert!(
+        !got.iter().any(|l| l.contains(step::DOWNLOADING_SAVES)),
+        "{got:?}"
+    );
 }
