@@ -16,6 +16,7 @@ pub mod macapp;
 pub mod search;
 pub mod snapshot;
 pub mod state;
+pub mod time;
 
 #[cfg(test)]
 pub(crate) mod test_util {
