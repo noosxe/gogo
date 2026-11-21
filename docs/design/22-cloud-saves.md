@@ -1081,6 +1081,32 @@ file. The steps:
 10. Record the findings in this section (delete mechanism, tombstone or not, quota
     behaviour) and open the change that removes the gate.
 
+## 12g. As built: progress (#482)
+
+`status`, `pull`, `push` and `sync` print nothing until the report, which looks like a hang on a
+game with many files. They use the same live status line as the other long commands, with no new
+progress mechanism: the core `ProgressEvent::WorkStarted` / `WorkProgress` / `WorkDone`
+(live-only, never NDJSON) into the CLI's `Activity`.
+
+- **Emitters.** `status::locate`, `plan` and `plan_detailed` take an `emit` callback; `pull` (and
+  so push and sync) gets it from `Host::emit`, which `LiveHost` forwards to its progress closure.
+  The step names are consts in `engine::events::step`.
+- **Spinners** (no count): the remote-config fetch, the per-game credentials and token, the
+  cloud listing, the local scan and hashing, and the `cloud-pull` snapshot. `locations` has the
+  config fetch, `status` the planning steps; both are waits only.
+- **Counted lines** (files done of total, stored-gzip bytes where known, rate from the existing
+  renderer): the objects a first sync fetches to compare with local files, the downloads, the
+  cloud backups before an upload overwrites or a deletion removes an object, and the uploads
+  (files only; cloud deletions count as files in the same step). A sync shows its download
+  step, then its upload step. Counts move per finished file; downloads run up to four at a
+  time.
+- **Where it shows.** On a terminal's stderr only. `--json`, `--quiet`, `--no-progress` and a
+  non-terminal stderr print nothing for it, as for the other commands. Notes (`SnapshotPruned`,
+  warnings) go above the status line. Prompts already run inside `depot_progress::prompting`,
+  which clears the line around them.
+- **Snapshot line.** The report's `snapshot N taken` line is unchanged; the live
+  `SnapshotCreated` event is not printed too.
+
 ## 13. Implementation issues (to be filed)
 
 Under epic #155 (Linux runtime), `type:feature`, `area:wine-runtime` + `area:auth` /
