@@ -1947,7 +1947,7 @@ mod catalog_tests {
         for e in entries() {
             match e.id {
                 "winetricks" => assert_eq!((e.arch, e.needs_rosetta()), (None, false)),
-                UMU | GE_PROTON => assert_eq!(e.arch, Some(Arch::X86_64), "{}", e.id),
+                UMU | COMET | GE_PROTON => assert_eq!(e.arch, Some(Arch::X86_64), "{}", e.id),
                 _ => assert_eq!(e.arch, Some(Arch::X86_64Rosetta), "{}", e.id),
             }
             assert_eq!(e.vendor_signed, e.id == "gptk", "{}", e.id);
