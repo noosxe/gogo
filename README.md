@@ -448,7 +448,17 @@ gogo linux-app display 1423049311 --monitor DP-1           # the output the game
 gogo linux-app display 1423049311 --no-monitor
 gogo linux-app display 1423049311                          # the mode, and what this session would get
 gogo linux-app display 1423049311 --clear
+gogo linux-app galaxy 1423049311 on                        # Comet (a Galaxy service stand-in) beside the game; off unless asked
+gogo linux-app galaxy 1423049311                           # the setting, and whether the game ships the Galaxy SDK
+gogo linux-app galaxy 1423049311 off
+gogo linux-app galaxy 1423049311 --clear                   # compat data and [linux] galaxy_default decide again
 ```
+
+`galaxy on` never downloads Comet: `gogo runtimes install comet` does, after asking.
+`[linux] galaxy_default = "on"` turns it on for games that ship `Galaxy.dll` /
+`Galaxy64.dll` (or that compat data recommends it for), `"ask"` asks once per such
+game on a terminal and keeps the answer; unset or `"off"`, a game gets Comet only
+when you say so. `gogo apps show` and `gogo linux-app doctor` report it.
 
 **A game's other exes** (a vendor launcher, a settings or mod tool) run once in
 the game's prefix, with everything a launch of the game gets (Proton build,

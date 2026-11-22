@@ -760,13 +760,63 @@ pub fn setup(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e.into()),
     };
-    let l4 = compat::load_user_for(gogid, Os::Linux)?;
+    let mut l4 = compat::load_user_for(gogid, Os::Linux)?;
+    let mut l4_raw = l4_raw;
     let mut warnings: Vec<String> = l4
         .warnings
         .iter()
         .map(|w| format!("{}: {w}", l4_path.display()))
         .collect();
     let mut notes = Vec::new();
+
+    // Galaxy (design 23 decision 3): does the game ship the SDK (kept while
+    // its inputs are unchanged), and does `galaxy_default = "ask"` need an
+    // answer from this terminal.
+    let galaxy_files = game_files(&dirs, baked.tree_name().as_deref());
+    let stamp_before = crate::macapp::launch::stamp(&raw, l4_raw.as_deref());
+    let galaxy_sdk = match prior.as_ref() {
+        Some(p) if p.stamp == stamp_before && p.galaxy_sdk.is_some() => p.galaxy_sdk,
+        _ => galaxy_files
+            .is_dir()
+            .then(|| super::galaxy_switch::detect_sdk(&galaxy_files)),
+    };
+    let (galaxy_default, galaxy_default_err) =
+        super::galaxy_switch::default_at(&crate::config::Config::path());
+    warnings.extend(galaxy_default_err);
+    let galaxy_recommended =
+        compat::db_entry_for(gogid, Os::Linux).entry.galaxy == Some(compat::GalaxyMode::Comet);
+    let galaxy_asked = super::galaxy_switch::decide(
+        l4.entry.galaxy,
+        galaxy_recommended,
+        galaxy_default,
+        galaxy_sdk,
+    );
+    if galaxy_asked.ask {
+        match super::galaxy_switch::ask_and_store(
+            gogid,
+            opts.prompt,
+            galaxy_sdk == Some(true),
+            galaxy_recommended,
+        )? {
+            Some(mode) => {
+                l4 = compat::load_user_for(gogid, Os::Linux)?;
+                l4_raw = match std::fs::read(&l4_path) {
+                    Ok(b) => Some(b),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(e) => return Err(e.into()),
+                };
+                notes.push(format!(
+                    "galaxy: {} (kept in {})",
+                    mode.key(),
+                    l4_path.display()
+                ));
+            }
+            None => notes.push(format!(
+                "galaxy: off for now ([linux] galaxy_default = \"ask\" asks on a terminal); \
+                 `gogo linux-app galaxy {gogid} on` turns Comet on"
+            )),
+        }
+    }
 
     // The runtime: L4, else what the build baked (flags > L3 > default).
     let runtime = l4.entry.runtime.clone().unwrap_or(baked.runtime.clone());
@@ -1101,6 +1151,10 @@ pub fn setup(
         display: fx.effective.display.as_ref().map(|d| d.value),
         hdr: fx.effective.hdr.as_ref().map(|h| h.value),
         monitor: fx.effective.monitor.as_ref().map(|m| m.value.clone()),
+        galaxy: {
+            let (own, rec) = super::galaxy_switch::split(&fx.effective);
+            super::galaxy_switch::decide(own, rec, galaxy_default, galaxy_sdk).on
+        },
         env: eff.env.clone(),
         dll_overrides: eff.dll_overrides.clone(),
         renderer: rplan.renderer.clone(),
@@ -1122,6 +1176,7 @@ pub fn setup(
         verbs,
         registry: reg_lines,
         files: file_lines,
+        galaxy_sdk,
         stamp,
         gogo_version: env!("CARGO_PKG_VERSION").to_string(),
     };

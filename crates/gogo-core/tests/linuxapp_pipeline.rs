@@ -4446,6 +4446,8 @@ fn doctor_host(w: &World, icds: &[(&str, u8)]) -> gogo::linuxapp::doctor::Host {
         }),
         logs: w.root.join("logs"),
         vulkaninfo: false,
+        signed_in: None,
+        probe_galaxy: false,
     }
 }
 
@@ -7340,6 +7342,90 @@ fn wayland_socket() -> (tempfile::TempDir, std::os::unix::net::UnixListener) {
         .unwrap();
     let l = std::os::unix::net::UnixListener::bind(dir.path().join("wayland-7")).unwrap();
     (dir, l)
+}
+
+/// `galaxy on|off` lives in the override file and reaches `launch.conf` as
+/// `GALAXY='1'` (design 23, #489); the setup's scan records whether the game
+/// ships the Galaxy SDK; `doctor` and `apps show` say both.
+#[test]
+fn the_galaxy_switch_reaches_launch_conf_and_the_sdk_scan_reaches_state() {
+    use gogo::linuxapp::galaxy_switch::set_galaxy;
+    use gogo::linuxapp::game::ConfValues;
+    use gogo::macapp::compat::GalaxyMode;
+    use gogo::macapp::doctor::Level;
+    let Some(w) = World::launcher("galaxy", false) else {
+        return;
+    };
+    let setup_again = || setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
+    let finding = |w: &World| {
+        let host = doctor_host(w, &[("radeon.x86_64", 2)]);
+        doctor(w, &host)
+            .findings
+            .into_iter()
+            .find(|f| f.check == "galaxy")
+            .expect("a galaxy finding")
+    };
+    // Off by default, and no SDK in the files.
+    assert_eq!(ConfValues::parse(&w.conf()).get("GALAXY"), "");
+    assert_eq!(w.state().galaxy_sdk, Some(false));
+    assert_eq!(finding(&w).level, Level::Ok);
+
+    // The SDK arrives with a game update; the switch is turned on.
+    let gog = w.game().join("prefix/drive_c/GOG/Test Game");
+    std::fs::write(gog.join("Galaxy64.dll"), "MZ").unwrap();
+    let out = set_galaxy(ID, Some(GalaxyMode::Comet)).unwrap();
+    assert_eq!(out.changes[0].key, "galaxy");
+    setup_again();
+    assert_eq!(ConfValues::parse(&w.conf()).get("GALAXY"), "1");
+    assert_eq!(w.state().galaxy_sdk, Some(true));
+    assert!(w.conf().contains("\nGALAXY='1'\n"));
+    assert_eq!(finding(&w).level, Level::Ok);
+
+    // Off again: the line goes, and the SDK with galaxy off is a hint, not
+    // a warning.
+    set_galaxy(ID, Some(GalaxyMode::Off)).unwrap();
+    setup_again();
+    assert_eq!(ConfValues::parse(&w.conf()).get("GALAXY"), "");
+    let f = finding(&w);
+    assert_eq!(f.level, Level::Info, "{f:?}");
+    assert!(f.hint.unwrap().contains("galaxy"));
+
+    // `galaxy_default = "ask"`: a game that ships the SDK and has no
+    // setting of its own is asked on a terminal and the answer is kept;
+    // headless it stays off and says how to turn it on.
+    std::fs::write(
+        w.home.join("config.toml"),
+        "[linux]\numu = \"system\"\ngalaxy_default = \"ask\"\n",
+    )
+    .unwrap();
+    set_galaxy(ID, None).unwrap();
+    let headless = setup_again();
+    assert_eq!(ConfValues::parse(&w.conf()).get("GALAXY"), "");
+    assert!(
+        headless
+            .notes
+            .iter()
+            .any(|n| n.contains("galaxy: off for now")),
+        "{:?}",
+        headless.notes
+    );
+    let yes: Box<gogo::macapp::prompt::PromptFn> =
+        Box::new(|_| Some(gogo::macapp::prompt::PromptAnswer::Index(0)));
+    let opts = SetupOptions {
+        prompt: Some(&*yes),
+        ..SetupOptions::default()
+    };
+    setup::setup(ID, &opts, &mut quiet()).unwrap();
+    assert_eq!(ConfValues::parse(&w.conf()).get("GALAXY"), "1");
+    let l4 = std::fs::read_to_string(gogo::macapp::compat::user_path(ID)).unwrap();
+    assert!(l4.contains("galaxy = \"comet\""), "{l4}");
+    // Asked once: the stored answer decides from here.
+    let no: Box<gogo::macapp::prompt::PromptFn> = Box::new(|_| panic!("asked twice"));
+    let opts = SetupOptions {
+        prompt: Some(&*no),
+        ..SetupOptions::default()
+    };
+    setup::setup(ID, &opts, &mut quiet()).unwrap();
 }
 
 /// `display` and `hdr` reach `launch.conf`, and the launcher checks for a

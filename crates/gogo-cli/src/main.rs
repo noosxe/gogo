@@ -5031,10 +5031,22 @@ fn linux_app_sub(sub: crate::cli::LinuxAppSub) -> Result<i32, AppError> {
     match sub {
         crate::cli::LinuxAppSub::Doctor { gogid, json } => {
             // vulkaninfo and the tree walks take seconds (#420).
-            let report = depot_progress::Activity::new(depot_mode(false, json))
-                .spin(&format!("checking {gogid}"), || {
-                    gogo::linuxapp::doctor::doctor(&gogid, &gogo::linuxapp::doctor::Host::detect())
-                })?;
+            let report = depot_progress::Activity::new(depot_mode(false, json)).spin(
+                &format!("checking {gogid}"),
+                || {
+                    let mut host = gogo::linuxapp::doctor::Host::detect();
+                    // A stored login, looked at only for a game with Comet on.
+                    host.signed_in = Some(Box::new(|| {
+                        load_config_quietly().is_ok_and(|c| {
+                            matches!(
+                                gogo::auth::store::open(c.config.auth.token_store).load(),
+                                Ok(Some(_))
+                            )
+                        })
+                    }));
+                    gogo::linuxapp::doctor::doctor(&gogid, &host)
+                },
+            )?;
             if json {
                 println!(
                     "{}",
@@ -5142,6 +5154,12 @@ fn linux_app_sub(sub: crate::cli::LinuxAppSub) -> Result<i32, AppError> {
             json,
             words,
         } => linux_app_wrapper(&gogid, clear, json, words),
+        crate::cli::LinuxAppSub::Galaxy {
+            gogid,
+            switch,
+            clear,
+            json,
+        } => linux_app_galaxy(&gogid, switch.as_deref(), clear, json),
         crate::cli::LinuxAppSub::Display {
             gogid,
             mode,
@@ -5438,6 +5456,52 @@ fn linux_app_run(gogid: &str, exe: &str, args: &[String]) -> Result<i32, AppErro
         .exec();
     eprintln!("gogo: {}: {err}", plan.launch_sh.display());
     Ok(cli::exit::FAILED)
+}
+
+#[cfg(target_os = "linux")]
+/// `gogo linux-app galaxy <gogid> [on|off|--clear]` (design 23, #489).
+fn linux_app_galaxy(
+    gogid: &str,
+    switch: Option<&str>,
+    clear: bool,
+    json: bool,
+) -> Result<i32, AppError> {
+    use gogo::linuxapp::galaxy_switch;
+    use gogo::macapp::compat::GalaxyMode;
+    if clear || switch.is_some() {
+        let mode = match switch {
+            Some("on") => Some(GalaxyMode::Comet),
+            _ if clear => None,
+            _ => Some(GalaxyMode::Off),
+        };
+        let out = galaxy_switch::set_galaxy(gogid, mode)?;
+        print_edit(&out, json);
+        return Ok(cli::exit::OK);
+    }
+    let dirs = gogo::macapp::launch::GameDirs::for_game(gogid)?;
+    let tree = gogo::linuxapp::game::read_launch_toml(&dirs)
+        .ok()
+        .and_then(|(t, _)| t.tree_name());
+    let Some(v) = galaxy_switch::view(gogid, &dirs, tree.as_deref(), true) else {
+        eprintln!(
+            "gogo: {gogid}'s override file doesn't load — see `gogo linux-app compat {gogid}`"
+        );
+        return Ok(cli::exit::FAILED);
+    };
+    if json {
+        println!("{}", serde_json::json!(v));
+        return Ok(cli::exit::OK);
+    }
+    println!("galaxy: {}", v.line());
+    println!("Galaxy SDK: {}", v.sdk_line());
+    println!(
+        "your override file: {}",
+        gogo::macapp::compat::user_path(gogid).display()
+    );
+    if (v.on || v.wanted) && v.comet.is_none() {
+        println!("{}", galaxy_switch::INSTALL_HINT);
+    }
+    Ok(cli::exit::OK)
 }
 
 #[cfg(target_os = "linux")]
@@ -6637,6 +6701,10 @@ fn apps_cmd(cmd: crate::cli::AppsCmd) -> Result<i32, AppError> {
             println!("  renderer:    {}", dash(a.renderer.as_deref()));
             println!("  size:        {}", gogo::fmt::human_size(a.bytes));
             println!("  last launch: {}", dash(a.last_launch.as_deref()));
+            if let Some(g) = &a.galaxy {
+                println!("  galaxy:      {}", g.line());
+                println!("  Galaxy SDK:  {}", g.sdk_line());
+            }
             print_content(&a);
             if let Some(s) = &a.snapshots {
                 for (i, l) in s.lines(&a.gogid).iter().enumerate() {

@@ -57,6 +57,13 @@ pub struct Host {
     /// Run `vulkaninfo --summary` when it's on `PATH` (it only lists the
     /// devices; off in tests).
     pub vulkaninfo: bool,
+    /// Whether gogo has a stored login (`None`: not looked at: the check
+    /// is left out). Set by the caller, which owns the token store; run only
+    /// for a game with Comet on, and it never asks GOG.
+    pub signed_in: Option<Box<dyn Fn() -> bool>>,
+    /// Look at Comet's port and `$XDG_RUNTIME_DIR` on the real machine (off
+    /// in tests).
+    pub probe_galaxy: bool,
 }
 
 impl Host {
@@ -66,6 +73,8 @@ impl Host {
             env: Box::new(|k| std::env::var_os(k)),
             logs: crate::state::logs_root(),
             vulkaninfo: true,
+            signed_in: None,
+            probe_galaxy: true,
         }
     }
 
@@ -180,6 +189,9 @@ pub fn doctor(gogid: &str, host: &Host) -> Result<Report, MacAppError> {
         f.push(check_launch(&g, host, &installed));
         f.push(check_display(&g, host, &installed));
     }
+    if g.baked.is_some() {
+        f.extend(check_galaxy(&g, host));
+    }
     check_umu(&g, host, &mut f);
     let build = check_runtime(&g, &mut f);
     if let Some((_, appid)) = &build {
@@ -221,6 +233,37 @@ pub fn doctor(gogid: &str, host: &Host) -> Result<Report, MacAppError> {
         bundle: None,
         findings: f,
     })
+}
+
+// — galaxy —
+
+/// Comet beside the game (design 23 §3): the setting against the SDK, and
+/// with it on, the binary, the login, the runtime dir and the port.
+fn check_galaxy(g: &Game, host: &Host) -> Vec<Finding> {
+    let tree = g.baked.as_ref().and_then(|(t, _)| t.tree_name());
+    let Some(view) = super::galaxy_switch::view(&g.gogid, &g.dirs, tree.as_deref(), true) else {
+        // The override file doesn't load: `compat` says so.
+        return Vec::new();
+    };
+    let facts = (view.on || view.wanted).then(|| {
+        let config = Config::path();
+        let comet = super::comet::mode_at(&config)
+            .and_then(|m| super::comet::available(&host.umu(), &m))
+            .map_err(|e| e.to_string());
+        let runtime = host.var("XDG_RUNTIME_DIR");
+        super::galaxy_switch::Facts {
+            comet,
+            signed_in: host.signed_in.as_ref().map(|f| f()),
+            runtime_problem: if host.probe_galaxy {
+                super::galaxy::runtime_dir_problem(runtime.as_deref())
+            } else {
+                None
+            },
+            port: (host.probe_galaxy && super::galaxy::listening(super::galaxy::PORT))
+                .then(|| super::galaxy::port_holder(runtime.as_deref(), super::galaxy::PORT)),
+        }
+    });
+    super::galaxy_switch::findings(&g.gogid, &view, facts.as_ref())
 }
 
 // — launcher —
@@ -2020,6 +2063,8 @@ mod tests {
             env: Box::new(move |k| env.iter().find(|(e, _)| *e == k).map(|(_, v)| v.clone())),
             logs: root.join("logs"),
             vulkaninfo: false,
+            signed_in: None,
+            probe_galaxy: false,
         }
     }
 

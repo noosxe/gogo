@@ -68,6 +68,10 @@ catalog_ttl_hours = 24        # catalog cache freshness (06 §3)
 #                             # native one, else the only one; `steam-flatpak`: Flatpak's).
 #                             # Asked once on a terminal when a Steam exists; headless and
 #                             # unset: the store, with a note. New installs only (18 §2.2)
+# galaxy_default = "off" | "on" | "ask"   # Comet beside a game that has no `galaxy` setting of its
+#                             # own and ships the Galaxy SDK (or that compat data recommends it
+#                             # for): `on` turns it on, `ask` asks once per game on a terminal
+#                             # (headless: off, with a hint), `off` (unset) leaves it off (23 §1.3)
 # default_runtime = "ge-proton[/<ver>]" | "path:<dir>"   # the Proton build games use unless
 #                             # --runtime says otherwise; unset: the catalog's GE-Proton (18 §1)
 

@@ -498,6 +498,9 @@ fn gogo_items(e: &Effective) -> Vec<GogoItem> {
     if let Some(s) = &e.monitor {
         plain(format!("monitor = {:?}", s.value), s.layer);
     }
+    if let Some(s) = &e.galaxy {
+        plain(format!("galaxy = {:?}", s.value), s.layer);
+    }
     if let Some(s) = &e.replace_command {
         plain(
             format!("replace_command {:?} -> {:?}", s.value.from, s.value.to),

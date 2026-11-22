@@ -130,6 +130,16 @@ pub fn label(bin: &CometBin) -> String {
     }
 }
 
+/// The version a `comet on (<ver>)` line shows: gogo's pin for the store's
+/// copy or the flake's build, else where the binary came from.
+pub fn version_label(bin: &CometBin) -> String {
+    match bin.source {
+        Source::Store | Source::Env => pin(entry()).map_or("?", |p| p.version).to_string(),
+        Source::System => "system".to_string(),
+        Source::Path => "path:".to_string(),
+    }
+}
+
 /// The plan's Comet line: the download (`bytes`, from the catalog probe), its
 /// licence, and what Comet fetches itself on its first start.
 pub fn plan_line(entry: &CatalogEntry, bytes: u64) -> String {

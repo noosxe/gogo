@@ -670,6 +670,30 @@ pub enum LinuxAppSub {
         #[arg(last = true, value_name = "WORDS", allow_hyphen_values = true)]
         words: Vec<String>,
     },
+    /// Run Comet, a GOG Galaxy service stand-in, beside a game: show the
+    /// setting, turn it `on` or `off` for this game, or `--clear` it. Off
+    /// unless you turn it on (or compat data recommends it and `[linux]
+    /// galaxy_default` says `on` or `ask`); kept in the override file as
+    /// `galaxy`, applied by the next launch. Comet gives the game's Galaxy SDK
+    /// your signed-in user, achievements and, for Cyberpunk 2077,
+    /// cross-progression saves. It needs `gogo login` and a Comet binary
+    /// (`gogo runtimes install comet`, which asks before downloading); without
+    /// them the launch goes on without it.
+    Galaxy {
+        /// GOG product id.
+        #[arg(value_name = "GOGID")]
+        gogid: String,
+        /// `on` or `off`.
+        #[arg(value_name = "SWITCH", value_parser = ["on", "off"])]
+        switch: Option<String>,
+        /// Drop the game's own setting: compat data and `[linux]
+        /// galaxy_default` decide again.
+        #[arg(long, conflicts_with = "switch")]
+        clear: bool,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Which of Wine's display drivers a game gets: show it, set it
     /// (`wayland`: Wine's Wayland driver, the way to HDR; `x11`: X11, through
     /// Xwayland on a Wayland desktop), or `--clear` it. Kept in the override
@@ -2098,6 +2122,35 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_app_galaxy_takes_on_off_or_clear() {
+        for ok in [
+            &["galaxy", "1"][..],
+            &["galaxy", "1", "on"],
+            &["galaxy", "1", "off"],
+            &["galaxy", "1", "--clear"],
+        ] {
+            let argv = ["gogo", "linux-app"]
+                .iter()
+                .chain(ok)
+                .copied()
+                .collect::<Vec<_>>();
+            assert!(Cli::try_parse_from(&argv).is_ok(), "{argv:?}");
+        }
+        for bad in [
+            &["galaxy", "1", "comet"][..],
+            &["galaxy", "1", "on", "--clear"],
+            &["galaxy"],
+        ] {
+            let argv = ["gogo", "linux-app"]
+                .iter()
+                .chain(bad)
+                .copied()
+                .collect::<Vec<_>>();
+            assert!(Cli::try_parse_from(&argv).is_err(), "{argv:?}");
+        }
+    }
+
     #[test]
     fn linux_app_setup_takes_a_gogid() {
         let cli =
