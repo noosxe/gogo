@@ -1270,22 +1270,22 @@ async fn get_json_opt(http: &reqwest::Client, url: &str) -> Result<Option<Value>
         {
             Ok(resp) if resp.status().as_u16() == 404 => return Ok(None),
             Ok(resp) if resp.status().is_server_error() => {
-                last = format!("{} on {url}", resp.status());
+                last = format!("{} on {}", resp.status(), crate::redact::scrub_text(url));
             }
             Ok(resp) if resp.status().is_success() => {
                 return Some(resp.json::<Value>().await.map_err(|e| {
                     MacAppError::CatalogUnreachable {
-                        detail: format!("{url}: {e}"),
+                        detail: crate::redact::describe_error(&e),
                     }
                 }))
                 .transpose();
             }
             Ok(resp) => {
                 return Err(MacAppError::CatalogUnreachable {
-                    detail: format!("{} on {url}", resp.status()),
+                    detail: format!("{} on {}", resp.status(), crate::redact::scrub_text(url)),
                 });
             }
-            Err(e) => last = format!("{e} on {url}"),
+            Err(e) => last = crate::redact::describe_error(&e),
         }
     }
     Err(MacAppError::CatalogUnreachable {

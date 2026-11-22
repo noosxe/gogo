@@ -63,7 +63,7 @@ impl Session {
             .ok_or(AuthError::Unauthorized)?;
         let core = gog_warp::Core::new();
         core.deserialize_tokens(&blob)
-            .map_err(|e| AuthError::Deserialize(e.to_string()))?;
+            .map_err(|e| AuthError::Deserialize(crate::redact::describe_error(&e)))?;
         Ok(Self {
             core,
             last_persisted: std::sync::Mutex::new(Some(blob)),

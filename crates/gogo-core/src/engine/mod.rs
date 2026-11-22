@@ -8,7 +8,7 @@ pub mod select;
 pub mod sidecar;
 pub mod task;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 pub mod worker;
 
 use std::path::{Path, PathBuf};
@@ -180,7 +180,7 @@ pub async fn strict_outdated(ctx: &Arc<AppContext>, bearer: &str, task: &FileTas
         Ok(dl) => dl,
         Err(e) => {
             let _ = ctx.events.send(ProgressEvent::Warn {
-                message: format!("strict check skipped (resolve): {e}"),
+                message: crate::redact::scrub_text(&format!("strict check skipped (resolve): {e}")),
             });
             return false;
         }
@@ -189,7 +189,9 @@ pub async fn strict_outdated(ctx: &Arc<AppContext>, bearer: &str, task: &FileTas
         Ok(raw) => raw,
         Err(e) => {
             let _ = ctx.events.send(ProgressEvent::Warn {
-                message: format!("strict check skipped (checksum): {e}"),
+                message: crate::redact::scrub_text(&format!(
+                    "strict check skipped (checksum): {e}"
+                )),
             });
             return false;
         }
@@ -200,7 +202,7 @@ pub async fn strict_outdated(ctx: &Arc<AppContext>, bearer: &str, task: &FileTas
         Ok(doc) => strict_outdated_doc(&record, &doc),
         Err(e) => {
             let _ = ctx.events.send(ProgressEvent::Warn {
-                message: format!("strict check skipped (parse): {e}"),
+                message: crate::redact::scrub_text(&format!("strict check skipped (parse): {e}")),
             });
             false
         }
@@ -238,11 +240,11 @@ pub async fn execute(ctx: &Arc<AppContext>, tasks: Vec<FileTask>) -> Summary {
             match ctx.free_space.available_bytes(&root) {
                 Ok(have) if needed > have => {
                     let _ = ctx.events.send(ProgressEvent::Warn {
-                        message: format!(
+                        message: crate::redact::scrub_text(&format!(
                             "insufficient disk space: need {}, have {}",
                             crate::fmt::human_size(needed),
                             crate::fmt::human_size(have)
-                        ),
+                        )),
                     });
                     return Summary {
                         worst_exit_class: Some(6),
@@ -319,9 +321,10 @@ async fn download_one(ctx: Arc<AppContext>, mut task: FileTask) -> (uuid::Uuid, 
     match download_one_inner(&ctx, &mut task).await {
         Ok(outcome) => (task.id, outcome),
         Err(e) => {
+            // Construction-time redaction is the rule; this is the net (07 §4).
             let _ = ctx.events.send(ProgressEvent::FileFailed {
                 id: task.id,
-                error: e.to_string(),
+                error: crate::redact::scrub_text(&e.to_string()),
             });
             (task.id, Outcome::Failed(e))
         }
@@ -366,7 +369,7 @@ async fn download_one_inner(
         .map_err(|e| DownloadError::RetriesExhausted(format!("checksum parse: {e}")))?;
     for warning in &doc.warnings {
         let _ = ctx.events.send(ProgressEvent::Warn {
-            message: format!("{}: {warning}", task.file.id),
+            message: crate::redact::scrub_text(&format!("{}: {warning}", task.file.id)),
         });
     }
 
@@ -377,7 +380,7 @@ async fn download_one_inner(
             .clone()
             .unwrap_or_else(|| "not available".into());
         let _ = ctx.events.send(ProgressEvent::Warn {
-            message: format!("{}: {message}", task.file.id),
+            message: crate::redact::scrub_text(&format!("{}: {message}", task.file.id)),
         });
         return Ok(Outcome::Skipped(format!("unavailable: {message}")));
     }
@@ -393,7 +396,10 @@ async fn download_one_inner(
             task.file.id
         );
         let _ = ctx.events.send(ProgressEvent::Warn {
-            message: format!("{}: no checksum name — using `{fallback}`", task.file.id),
+            message: crate::redact::scrub_text(&format!(
+                "{}: no checksum name — using `{fallback}`",
+                task.file.id
+            )),
         });
         fallback
     } else {
@@ -430,9 +436,9 @@ async fn download_one_inner(
     }
     if dest.is_file() && record_of(ctx, task).is_none() {
         let _ = ctx.events.send(ProgressEvent::Warn {
-            message: format!(
+            message: crate::redact::scrub_text(&format!(
                 "{save_name}: unrecorded file failed verification — redownloading over it"
-            ),
+            )),
         });
     }
 
@@ -442,7 +448,9 @@ async fn download_one_inner(
         Some(plan) if plan.layout_matches(&doc) => {}
         Some(_) => {
             let _ = ctx.events.send(ProgressEvent::Warn {
-                message: format!("{save_name}: remote layout changed — restarting"),
+                message: crate::redact::scrub_text(&format!(
+                    "{save_name}: remote layout changed — restarting"
+                )),
             });
             sidecar::save_plan(
                 &dest,

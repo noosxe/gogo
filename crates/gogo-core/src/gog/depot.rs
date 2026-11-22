@@ -138,10 +138,12 @@ pub enum DepotError {
 }
 
 impl DepotError {
-    /// Downgrade a gog-warp error into our taxonomy. Debug, not Display:
-    /// their io variants hide the source chain in Display ("io error").
-    pub fn library(e: impl std::fmt::Debug) -> Self {
-        DepotError::Library(format!("{e:?}"))
+    /// Downgrade a gog-warp error into our taxonomy. Its Display hides the
+    /// cause ("io error") and its Debug holds the request URL (a CDN token, or the
+    /// refresh token for a refresh inside a call): the redacted chain keeps the
+    /// cause without the URL (design 07 §4).
+    pub fn library<E: std::error::Error + 'static>(e: E) -> Self {
+        DepotError::Library(crate::redact::describe_error(&e))
     }
 }
 
@@ -679,7 +681,9 @@ pub async fn run(
                 Some(t)
             }
             Err(why) => {
-                let _ = events.send(DepotEvent::Note { message: why });
+                let _ = events.send(DepotEvent::Note {
+                    message: crate::redact::scrub_text(&why),
+                });
                 None
             }
         },
@@ -1055,7 +1059,9 @@ async fn prune_dropped(
              stay in the cache"
         ),
     };
-    let _ = events.send(DepotEvent::Note { message });
+    let _ = events.send(DepotEvent::Note {
+        message: crate::redact::scrub_text(&message),
+    });
 }
 
 #[derive(Serialize, serde::Deserialize)]
@@ -2048,10 +2054,10 @@ where
     match switch.await {
         Err(e) if !cancel.is_cancelled() => {
             let _ = events.send(DepotEvent::Note {
-                message: format!(
+                message: crate::redact::scrub_text(&format!(
                     "switching the cache from build {from} by its changed files failed \
                      ({e}); checking the cache (hashing) and fetching what's missing instead"
-                ),
+                )),
             });
             if let Some(t) = warp_temp {
                 let _ = std::fs::remove_dir_all(t);

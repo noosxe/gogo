@@ -86,12 +86,43 @@ progress, not retrying), and any progress resets the timer. Exceeded → `FileFa
 
 - `tracing` + `tracing-subscriber` (fmt, stderr). `-v` = info, `-vv` = debug, `-vvv` = trace.
   `--log-file PATH` mirrors everything at trace to a file.
-- **Redaction happens at construction, not at formatting**:
-  - `redact_url(u: &Url) -> String`: gog.com URLs → scheme + host + first path segment
-    (`https://gog-cdn-fastly.gog.com/secure/offline/…[redacted N segments]`); query values of
-    `code`, `token` dropped.
-  - Authorization headers are never logged; reqwest is configured without request logging.
-  - Token-bearing structs implement a redacting `Debug` (placeholders, never values).
+- **Redaction happens at construction, not at formatting** (`gogo-core/src/redact.rs`, the
+  one place for it). GOG puts secrets in URLs: the token endpoint takes the refresh token,
+  client secret and authorization code as query parameters, and CDN links carry an access
+  token in their first path segment. reqwest's error text includes the request URL, and
+  gog-warp's `Debug` and `source()` hand on the reqwest error (its `Display` is a fixed
+  phrase per kind). So library error text is never formatted as-is:
+  - `redact_url(u: &Url) -> String`: scheme + host (+ port) + the first path segment only
+    if it is a plain route word (`v1`, `secure`), then `[redacted N segments]`; userinfo,
+    query and fragment dropped. A CDN link becomes
+    `https://gog-cdn-fastly.gog.com/[redacted N segments]`.
+  - `describe_error(&dyn Error) -> String`: an error chain in gogo's words. Only known
+    types are shown: reqwest (kind or `HTTP <status>`, plus the redacted URL), gog-warp
+    (its fixed phrase), `io::Error` (an OS error's message; a custom one shows its kind and
+    goes on into its payload), serde_json (category and position, never the message, which
+    can quote a value). Any other link is skipped, ending in `[detail hidden]` when nothing
+    known follows it. There is no verbose mode that shows more: error text is the same at
+    every `-v` level.
+  - `NetError` replaces a stored `reqwest::Error` (`ApiError::Http`, `AuthError::Http`):
+    `describe_error`'s text plus the status, so neither `Display` nor `Debug` can show a
+    URL. gog-warp errors become `AuthError::Upstream(describe_error(..))`,
+    `AuthError::InvalidSession` (typed, never matched by text) or
+    `DepotError::Library(describe_error(..))`.
+  - `SecretUrl` holds a URL that carries a secret: `Debug`/`Display` are the redacted form,
+    `expose()` is for the request only. Other structs holding a token or a CDN link have a
+    hand-written redacting `Debug` (placeholders, never values).
+  - Authorization headers are never logged; reqwest is configured without request logging
+    (`connection_verbose` is never set: a test walks the sources for it).
+- **`scrub_text` is the safety net, not the mechanism.** At the outermost sinks — the CLI's
+  top-level error line, `--json` `error` fields, the engine's progress events and the depot
+  notes, and the log writer (every formatted tracing line, dependencies' included) — text
+  goes through `scrub_text`, which replaces each `http(s)://` URL by its `redact_url` form and
+  the values of `refresh_token`, `access_token`, `id_token`, `client_secret`, `code`, `token`,
+  `password`, `session_id` and `Bearer …` by `[redacted]`. Text gogo builds is already clean;
+  this catches what a later change or dependency bump lets through.
+- Tests plant made-up secrets in real reqwest errors (status, connect, decode, timeout) and
+  assert they appear in no `Display`, `Debug`, anyhow `{:#}` chain, serialized progress event
+  or captured trace output.
 - Trace logs do include: timings, status codes, byte counts, chunk ids, retry counters — enough
   to debug a flaky download without leaking credentials.
 

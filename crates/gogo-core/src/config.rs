@@ -28,7 +28,8 @@ pub struct Config {
 
 /// No silent fallback (review A6): keyring configured but unavailable fails loudly in
 /// the auth layer; this config only records the choice.
-#[derive(Debug, Clone, Deserialize)]
+/// `Debug` hides `client_secret`: public today, but a secret by name (design 07 §4).
+#[derive(Clone, Deserialize)]
 #[serde(default)]
 pub struct AuthConfig {
     pub token_store: TokenStoreKind,
@@ -37,6 +38,19 @@ pub struct AuthConfig {
     pub client_id: Option<String>,
     /// Optional override of the Galaxy public client secret (review C3).
     pub client_secret: Option<String>,
+}
+
+impl std::fmt::Debug for AuthConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthConfig")
+            .field("token_store", &self.token_store)
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]

@@ -1,8 +1,13 @@
 //! API error taxonomies (`docs/design/07` §2).
 //!
-//! SECURITY (docs/design/07 §4): `Display` impls here must never render CDN URLs —
-//! they embed access tokens in the path (`/token=…~dirs=…/`). Redaction happens at
-//! construct time; nothing token-bearing is ever formatted into an error.
+//! SECURITY (docs/design/07 §4): nothing here holds library error text or a URL
+//! as-is. CDN URLs embed access tokens in the path (`/token=…~dirs=…/`), and the
+//! token endpoint takes the refresh token and client secret in its query; reqwest's
+//! text carries the URL, and gog-warp's `Debug`/`source()` hand on reqwest's error.
+//! Network errors are stored as [`NetError`], gog-warp's as
+//! [`crate::redact::describe_error`]'s text: redaction happens at construct time.
+
+use crate::redact::{NetError, describe_error};
 
 /// Errors from GOG API calls (catalog, library, downlink, checksum).
 #[derive(Debug, thiserror::Error)]
@@ -24,27 +29,21 @@ pub enum ApiError {
     Status { status: u16, message: String },
 
     #[error("request failed: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(NetError),
 
+    /// serde's category and position only: its message can quote a value.
     #[error("unexpected API payload: {0}")]
-    Json(#[from] serde_json::Error),
+    Json(String),
 
     #[error("{0}")]
     Other(String),
 }
 
 impl ApiError {
-    /// reqwest's Display hides the serde detail ("error decoding response body");
-    /// walk the source chain so payload mismatches are debuggable.
+    /// A body that didn't decode: the redacted chain down to serde's category and
+    /// position (never its message, which can quote a value).
     pub fn decode(e: reqwest::Error) -> ApiError {
-        let mut msg = e.to_string();
-        let mut src = std::error::Error::source(&e);
-        while let Some(s) = src {
-            msg.push_str(": ");
-            msg.push_str(&s.to_string());
-            src = s.source();
-        }
-        ApiError::Other(msg)
+        ApiError::Other(describe_error(&e))
     }
 
     /// Shared response-status → taxonomy mapping (`docs/design/07` §3).
@@ -84,18 +83,43 @@ pub enum AuthError {
     #[error("stored session unreadable: {0}")]
     Deserialize(String),
 
-    #[error("network error during auth: {0}")]
-    Http(#[from] reqwest::Error),
+    /// The Galaxy refresh answered 400: only a new login helps.
+    #[error("the GOG session is no longer valid — run `gogo login`")]
+    InvalidSession,
 
+    #[error("network error during auth: {0}")]
+    Http(NetError),
+
+    /// gog-warp's error, as [`describe_error`] shows it.
     #[error("gog-warp: {0}")]
     Upstream(String),
 }
 
+impl From<reqwest::Error> for ApiError {
+    fn from(e: reqwest::Error) -> Self {
+        Self::Http(e.into())
+    }
+}
+
+impl From<serde_json::Error> for ApiError {
+    fn from(e: serde_json::Error) -> Self {
+        Self::Json(crate::redact::json_summary(&e))
+    }
+}
+
+impl From<reqwest::Error> for AuthError {
+    fn from(e: reqwest::Error) -> Self {
+        Self::Http(e.into())
+    }
+}
+
 impl From<gog_warp::Error> for AuthError {
     fn from(err: gog_warp::Error) -> Self {
+        use gog_warp::errors::ErrorKind;
         match err.kind() {
-            gog_warp::errors::ErrorKind::NotLoggedIn => Self::Unauthorized,
-            _ => Self::Upstream(err.to_string()),
+            ErrorKind::NotLoggedIn => Self::Unauthorized,
+            ErrorKind::InvalidSession => Self::InvalidSession,
+            _ => Self::Upstream(describe_error(&err)),
         }
     }
 }

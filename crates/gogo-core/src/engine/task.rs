@@ -39,8 +39,9 @@ pub struct FileTask {
     /// Plan estimate (API `files[].size`); the authoritative total comes with the
     /// checksum doc and can differ (live-verified, docs/11).
     pub total_size: u64,
-    /// Filled during resolve: pre-tokenized CDN URL (never logged/persisted).
-    pub url: Option<url::Url>,
+    /// Filled during resolve: pre-tokenized CDN URL (never logged/persisted;
+    /// `Debug` shows it redacted).
+    pub url: Option<crate::redact::SecretUrl>,
     /// Filled during resolve: authoritative layout (name, total_size, chunks).
     pub checksum: Option<crate::gog::checksum::ChecksumDoc>,
 }

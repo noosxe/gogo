@@ -692,9 +692,9 @@ pub(crate) fn report(e: AddError) -> i32 {
             eprintln!("gogo: {e}");
             cli::exit::USAGE
         }
-        // Debug for the depot: gog-warp's io variants hide their source in Display.
+        // Never Debug: it would show gog-warp's request URL (design 07 §4).
         AddError::Depot(e) => {
-            eprintln!("gogo: depot: {e:?}");
+            eprintln!("gogo: depot: {}", gogo::redact::scrub_text(&e.to_string()));
             cli::exit::DEPOT
         }
         AddError::Game(e) => {

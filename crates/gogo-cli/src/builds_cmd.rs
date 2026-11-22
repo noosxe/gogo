@@ -353,6 +353,7 @@ fn unchecked(gogid: &str, title: &str, reason: String) -> InstalledRow {
         newest_version: None,
         listed: true,
         state: build_hint::State::Unknown,
-        error: Some(reason),
+        // Shown in `--json` rows: the safety net of design 07 §4.
+        error: Some(gogo::redact::scrub_text(&reason)),
     }
 }

@@ -420,11 +420,9 @@ impl<'a> CloudAuth<'a> {
 pub fn auth_error(e: AuthError) -> CloudError {
     match e {
         AuthError::Unauthorized => CloudError::NotLoggedIn,
-        // `AuthError::Upstream` holds gog-warp's kind text only, never a URL; its
-        // `InvalidSession` text is the one asking for a re-login (pinned by a test).
-        AuthError::Upstream(m) if m.contains("re-login") => CloudError::InvalidSession,
-        // Its text would hold the request URL.
-        AuthError::Http(e) => CloudError::Network(reqwest_kind(&e).into()),
+        AuthError::InvalidSession => CloudError::InvalidSession,
+        // `NetError` and `Upstream` hold redacted text only (design 07 §4).
+        AuthError::Http(e) => CloudError::Network(e.to_string()),
         other => CloudError::Auth(other.to_string()),
     }
 }
@@ -458,12 +456,12 @@ pub fn exchange_error(e: gog_warp::Error, gogid: u64) -> CloudError {
             Some(Err(kind)) => CloudError::Network(kind.into()),
             None => CloudError::Exchange {
                 gogid,
-                kind: e.to_string(),
+                kind: crate::redact::describe_error(&e),
             },
         },
         _ => CloudError::Exchange {
             gogid,
-            kind: e.to_string(),
+            kind: crate::redact::describe_error(&e),
         },
     }
 }
@@ -497,18 +495,7 @@ pub fn content_error(e: gog_warp::Error, gogid: u64) -> CloudError {
     }
 }
 
-/// What kind of failure a status-less `reqwest::Error` is, without its URL.
-pub(crate) fn reqwest_kind(e: &reqwest::Error) -> &'static str {
-    if e.is_timeout() {
-        "timed out"
-    } else if e.is_connect() {
-        "could not connect"
-    } else if e.is_decode() || e.is_body() {
-        "the answer could not be read"
-    } else {
-        "request failed"
-    }
-}
+pub(crate) use crate::redact::reqwest_kind;
 
 #[cfg(test)]
 mod tests {

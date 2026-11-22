@@ -87,6 +87,9 @@ const READ_BUF: u64 = 64 * 1024;
 
 /// Everything one file's download needs. `url` is swapped by the caller's
 /// re-resolve loop; `bitmap` reflects previously-completed chunks (resume).
+///
+/// `url` is the pre-tokenized CDN link: `Debug` is written by hand to leave it
+/// out (design 07 §4), and so can't be derived by accident.
 pub struct Job {
     pub http: reqwest::Client,
     pub url: String,
@@ -106,6 +109,17 @@ pub struct Job {
     pub retries: u32,
 }
 
+impl std::fmt::Debug for Job {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Job")
+            .field("dest", &self.dest)
+            .field("total_size", &self.total_size)
+            .field("file_id", &self.file_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Holds the CDN link too: no `Debug` (see [`Job`]).
 struct Shared {
     http: reqwest::Client,
     dest: PathBuf,
@@ -233,7 +247,12 @@ async fn run_chunk(
         let resp = match resp {
             Ok(r) => r,
             Err(e) => {
-                backoff(shared, &mut net_attempts, format!("network: {e}")).await?;
+                backoff(
+                    shared,
+                    &mut net_attempts,
+                    format!("network: {}", crate::redact::describe_error(&e)),
+                )
+                .await?;
                 continue;
             }
         };
@@ -287,7 +306,8 @@ async fn stream_chunk(
     let mut bytes: u64 = 0;
     let mut stream = resp.bytes_stream();
     while let Some(item) = stream.next().await {
-        let buf = item.map_err(|e| Retryable(format!("stream: {e}")))?;
+        let buf =
+            item.map_err(|e| Retryable(format!("stream: {}", crate::redact::describe_error(&e))))?;
         for slice in split_reads(buf.len() as u64) {
             shared.limiter.acquire(slice).await;
         }
