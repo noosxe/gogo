@@ -132,6 +132,12 @@ pub struct LinuxConfig {
     /// decision 4): `fetch` (gogo's pinned release; the default when unset),
     /// `system` (the `comet` on `PATH`) or `path:<file>`.
     pub comet: Option<CometMode>,
+    /// Whether a game gets Comet beside it when its own `galaxy` setting
+    /// says nothing (design 23 decision 3): `off` (the default when unset),
+    /// `on` (only games that ship the Galaxy SDK) or `ask` (a terminal asks
+    /// once per such game and the answer goes in the game's override file;
+    /// headless it acts as `off`).
+    pub galaxy_default: Option<GalaxyDefault>,
     /// Where new GE-Proton builds go (design 18 §2.2). Unset: asked once on
     /// a terminal when a Steam install exists; otherwise the store.
     pub proton_dir: Option<ProtonDir>,
@@ -264,6 +270,26 @@ impl<'de> Deserialize<'de> for CometMode {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let raw = String::deserialize(d)?;
         raw.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+/// `[linux] galaxy_default` (design 23 decision 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GalaxyDefault {
+    #[default]
+    Off,
+    On,
+    Ask,
+}
+
+impl GalaxyDefault {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GalaxyDefault::Off => "off",
+            GalaxyDefault::On => "on",
+            GalaxyDefault::Ask => "ask",
+        }
     }
 }
 
@@ -611,7 +637,16 @@ fn unknown_keys(table: &toml::Table) -> Vec<String> {
         ("library", &["dir"]),
         ("state", &["catalog_ttl_hours"]),
         ("mac_app", &["d3dmetal"]),
-        ("linux", &["umu", "comet", "proton_dir", "default_runtime"]),
+        (
+            "linux",
+            &[
+                "umu",
+                "comet",
+                "galaxy_default",
+                "proton_dir",
+                "default_runtime",
+            ],
+        ),
         ("snapshots", &["auto", "keep_auto"]),
     ];
     let mut out = Vec::new();

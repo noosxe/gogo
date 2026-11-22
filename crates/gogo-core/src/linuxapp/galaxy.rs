@@ -685,6 +685,28 @@ pub fn listening(port: u16) -> bool {
     scan("/proc/net/tcp", &v4) || scan("/proc/net/tcp6", &v6)
 }
 
+/// Why Comet's runtime dir isn't usable, for `doctor`; `None` when it is.
+/// Read-only: [`private_runtime_dir`] also makes `gogo/` there.
+pub fn runtime_dir_problem(raw: Option<&std::ffi::OsStr>) -> Option<String> {
+    let Some(raw) = raw.filter(|r| !r.is_empty()) else {
+        return Some("no XDG_RUNTIME_DIR".into());
+    };
+    let rt = PathBuf::from(raw);
+    if !rt.is_absolute() || !owned_private_dir(&rt) {
+        return Some("XDG_RUNTIME_DIR isn't a private dir of this user".into());
+    }
+    let ours = rt.join(RUNTIME_SUBDIR);
+    (ours.exists() && !owned_private_dir(&ours))
+        .then(|| format!("XDG_RUNTIME_DIR/{RUNTIME_SUBDIR} isn't a private dir of this user"))
+}
+
+/// Who holds `port`, for `doctor`: gogo's own Comet, else the process
+/// `ss -ltnp` names, else `None` (it can't be said).
+pub fn port_holder(runtime_dir: Option<&std::ffi::OsStr>, port: u16) -> Option<String> {
+    let runtime = PathBuf::from(runtime_dir.filter(|r| !r.is_empty())?).join(RUNTIME_SUBDIR);
+    holder(&runtime, port)
+}
+
 /// Who holds the port, when it can be said: gogo's own Comet (the
 /// registry's `.comet`), else the process `ss -ltnp` names.
 fn holder(runtime: &Path, port: u16) -> Option<String> {

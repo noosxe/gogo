@@ -68,6 +68,10 @@ pub struct App {
     /// Linux: the game's snapshots (design 20 §8), from the stored metadata.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshots: Option<crate::linuxapp::snapshots::Summary>,
+    /// Linux: Comet beside the game and whether it ships the Galaxy SDK
+    /// (design 23 §3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub galaxy: Option<crate::linuxapp::galaxy_switch::GalaxyView>,
 }
 
 /// What `apps` shows of a game's content ([`crate::gog::content`]).
@@ -159,7 +163,19 @@ pub fn get(target: &str, logs: &Path) -> Result<Option<App>, MacAppError> {
     if !dirs.root.is_dir() && launch::recorded_location(&gogid).is_none() {
         return Ok(None);
     }
-    read(&gogid, logs).map(Some)
+    let mut app = read(&gogid, logs)?;
+    // One game: a build from before the SDK scan gets it looked at now.
+    if let Some(g) = app.galaxy.as_mut()
+        && g.sdk.is_none()
+    {
+        let tree = crate::linuxapp::game::read_launch_toml(&dirs)
+            .ok()
+            .and_then(|(t, _)| t.tree_name());
+        g.sdk = Some(crate::linuxapp::galaxy_switch::detect_sdk(
+            &crate::linuxapp::setup::game_files(&dirs, tree.as_deref()),
+        ));
+    }
+    Ok(Some(app))
 }
 
 fn read(gogid: &str, logs: &Path) -> Result<App, MacAppError> {
@@ -208,6 +224,7 @@ fn read(gogid: &str, logs: &Path) -> Result<App, MacAppError> {
         desktop_present: false,
         launcher: false,
         snapshots: None,
+        galaxy: None,
     })
 }
 
@@ -232,8 +249,10 @@ fn read_linux(gogid: &str, dirs: GameDirs, logs: &Path) -> App {
         &dirs.root,
         &crate::linuxapp::snapshots::Backends::real(),
     ));
+    let galaxy = crate::linuxapp::galaxy_switch::view(gogid, &dirs, tree.as_deref(), false);
     App {
         snapshots,
+        galaxy,
         dlcs: view.dlcs,
         content: view.content,
         content_derived: view.derived,

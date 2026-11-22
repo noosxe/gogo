@@ -37,13 +37,14 @@ tested   = [{ runtime = "winecx/24.0.7_7+dxmt-v0.80", compositor = { name = "mac
 renderer = "wined3d"                  # wined3d | cnc-ddraw[/ver]; dxmt / d3dmetal are an error here
 protonfixes = false                   # Linux only: PROTONFIXES_DISABLE=1, umu-protonfixes off (#171)
 extra_args = ["-skipStartScreen"]     # Linux only: after the game's own args (`args` replaces those; #234)
+galaxy   = "comet"                    # Linux only: recommends Comet (a Galaxy service stand-in) beside the game
 env      = { PROTON_ENABLE_NVAPI = "1" }  # `gogo linux-app env set` writes [platforms.linux.env]
 ```
 
 | Where | Keys |
 |---|---|
 | top level | `title`, `exe`, `args`, `variant`, `replace_command`, `verbs`, `dll_overrides`, `registry`, `files`, `source` |
-| `[platforms.<os>]` | `renderer`, `runtime`, `env`, `status`, `notes`, `tested`, `lane`, `lanes`, `protonfixes` and `extra_args` (Linux only), and any top-level key, to override or extend it on that OS |
+| `[platforms.<os>]` | `renderer`, `runtime`, `env`, `status`, `notes`, `tested`, `lane`, `lanes`, `protonfixes`, `extra_args` and `galaxy` (Linux only), and any top-level key, to override or extend it on that OS |
 
 gogo reads the top level, then its own OS's table over it, by the same rules
 as across layers (below): maps per key, `verbs` add (`-<verb>` removes one,
@@ -52,6 +53,12 @@ entry. A table for the other OS is checked (bad values are errors there too)
 but not applied, and a key of the second row at the top level warns and is
 ignored, like an unknown key. `[platforms.linux]` tables come from a Linux run
 that has something to record (a `sway` compositor row, `docs/linux-e2e.md`).
+
+`galaxy = "comet"` in a shipped file only *recommends* Comet: it turns nothing on
+by itself. A game's own value (`gogo linux-app galaxy <gogid> on|off`, kept as
+`galaxy = "comet" | "off"` in its override file) decides; without one, `[linux]
+galaxy_default` (`off` | `on` | `ask`) does for a game that is recommended or ships
+the Galaxy SDK (design 23).
 
 `files` writes small text files into the game dir that neither the depot tree
 nor GOG's support overlay supplies. Paths are relative to the game dir, with

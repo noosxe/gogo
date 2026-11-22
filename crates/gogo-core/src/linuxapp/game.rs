@@ -355,6 +355,10 @@ pub struct LinuxState {
     /// that still has that hash is gogo's to update.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<String>,
+    /// The game's files ship `Galaxy.dll` / `Galaxy64.dll` (design 23). `None`:
+    /// no scan has recorded it (a build from before it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub galaxy_sdk: Option<bool>,
     pub stamp: String,
     pub gogo_version: String,
 }
@@ -430,6 +434,9 @@ pub struct LaunchConf {
     pub hdr: Option<Hdr>,
     /// The primary monitor for Wayland mode; `None`: no `DISPLAY_MONITOR=` line.
     pub monitor: Option<String>,
+    /// Comet runs beside the game (design 23): `GALAXY='1'`; `false`: no
+    /// `GALAXY=` line.
+    pub galaxy: bool,
     /// gogo's env, the renderer switches and `PROTONFIXES_DISABLE` included.
     pub env: BTreeMap<String, String>,
     pub dll_overrides: BTreeMap<String, String>,
@@ -479,6 +486,9 @@ impl LaunchConf {
         }
         if let Some(m) = &self.monitor {
             kv("DISPLAY_MONITOR", sh_quote(m));
+        }
+        if self.galaxy {
+            kv("GALAXY", sh_quote("1"));
         }
         kv(
             "ENV",
@@ -555,6 +565,7 @@ mod tests {
             display: None,
             hdr: None,
             monitor: None,
+            galaxy: false,
             env: [
                 ("PROTON_USE_D7VK".to_string(), "1".to_string()),
                 ("ODD".to_string(), "a 'b' $X".to_string()),
@@ -667,6 +678,18 @@ mod tests {
         assert!(c.render().contains("\nDISPLAY_MODE='x11'\n"));
     }
 
+    /// `GALAXY='1'` only when Comet is on (design 23): `launch.sh` acts on
+    /// exactly that value, and a build without it behaves as before.
+    #[test]
+    fn launch_conf_has_galaxy_only_when_on() {
+        let mut c = conf();
+        assert!(!c.render().contains("GALAXY"));
+        c.galaxy = true;
+        let text = c.render();
+        assert!(text.contains("\nGALAXY='1'\n"));
+        assert_eq!(ConfValues::parse(&text).get("GALAXY"), "1");
+    }
+
     #[test]
     fn launch_conf_is_assignments_only_and_sources_back() {
         let tmp = tempfile::tempdir().unwrap();
@@ -754,6 +777,7 @@ mod tests {
             verbs: vec!["d3dx9".into()],
             registry: vec![],
             files: vec!["ab Apps/x.ini".into()],
+            galaxy_sdk: Some(true),
             stamp: "s".into(),
             gogo_version: "0".into(),
         };
@@ -768,6 +792,8 @@ mod tests {
         )
         .unwrap();
         assert!(LinuxState::load(&p).unwrap().unwrap().verbs.is_empty());
+        // A state from before the SDK scan has no record of it.
+        assert_eq!(LinuxState::load(&p).unwrap().unwrap().galaxy_sdk, None);
         assert_eq!(LinuxState::load(&tmp.path().join("none")).unwrap(), None);
     }
 

@@ -278,9 +278,47 @@ pub struct CompatEntry {
     /// primary monitor (#295). Absent: GE-Proton guesses with `xrandr`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub monitor: Option<String>,
+    /// `[platforms.linux]` only: whether the game runs with Comet, the
+    /// Galaxy service stand-in, beside it (design 23 decision 3). A compat
+    /// layer's `"comet"` only recommends it; the game's own L4 value
+    /// (`gogo linux-app galaxy`) decides, `"off"` included.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub galaxy: Option<GalaxyMode>,
     /// Provenance: `gogo-vm`, `umu-protonfixes:<file>@<sha>`, …
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
+}
+
+/// `[platforms.linux] galaxy` (design 23 decision 3).
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GalaxyMode {
+    /// Comet runs beside the game (`launch.conf`'s `GALAXY=1`).
+    Comet,
+    /// No Comet, whatever a lower layer or `[linux] galaxy_default` says.
+    Off,
+}
+
+impl GalaxyMode {
+    pub const ALL: [GalaxyMode; 2] = [GalaxyMode::Comet, GalaxyMode::Off];
+
+    /// The schema spelling.
+    pub fn key(self) -> &'static str {
+        match self {
+            GalaxyMode::Comet => "comet",
+            GalaxyMode::Off => "off",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<GalaxyMode> {
+        Self::ALL.into_iter().find(|m| m.key() == key)
+    }
+}
+
+impl std::fmt::Debug for GalaxyMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.key())
+    }
 }
 
 /// `[platforms.linux] display` (#292, design 18 §7.9).
@@ -436,6 +474,7 @@ const PLATFORM_KEYS: &[&str] = &[
     "display",
     "hdr",
     "monitor",
+    "galaxy",
 ];
 
 /// [`PLATFORM_KEYS`] only the Linux lane applies: under `[platforms.macos]`
@@ -447,6 +486,7 @@ const LINUX_ONLY_KEYS: &[&str] = &[
     "display",
     "hdr",
     "monitor",
+    "galaxy",
 ];
 
 /// The OS-specific keys the schema had at the top level before
@@ -773,6 +813,7 @@ fn overlay(base: &mut CompatEntry, over: CompatEntry) {
         display,
         hdr,
         monitor,
+        galaxy,
         source,
     } = over;
     take(&mut base.title, title);
@@ -804,6 +845,7 @@ fn overlay(base: &mut CompatEntry, over: CompatEntry) {
     take(&mut base.display, display);
     take(&mut base.hdr, hdr);
     take(&mut base.monitor, monitor);
+    take(&mut base.galaxy, galaxy);
     take(&mut base.source, source);
 }
 
@@ -1072,6 +1114,8 @@ pub enum UserEdit {
     Hdr(Option<Hdr>),
     /// `monitor = "..."`; `None` drops it (#295).
     Monitor(Option<String>),
+    /// `galaxy = "..."`; `None` drops it (design 23).
+    Galaxy(Option<GalaxyMode>),
 }
 
 /// Apply `edits` to the L4 file for `gogid` under `[platforms.<os>]`,
@@ -1221,6 +1265,13 @@ fn edit_user_platform_at(
                 let old = now.hdr.map(Hdr::key);
                 if edit_word(t, "hdr", old, new, &mut changes) {
                     now.hdr = new.and_then(Hdr::from_key);
+                }
+            }
+            UserEdit::Galaxy(new) => {
+                let new = new.map(GalaxyMode::key);
+                let old = now.galaxy.map(GalaxyMode::key);
+                if edit_word(t, "galaxy", old, new, &mut changes) {
+                    now.galaxy = new.and_then(GalaxyMode::from_key);
                 }
             }
             UserEdit::Monitor(new) => {
@@ -1389,6 +1440,9 @@ pub struct Effective {
     /// Linux only: the primary monitor for the Wayland driver (#295).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monitor: Option<Sourced<String>>,
+    /// Linux only: Comet beside the game (design 23); see [`CompatEntry::galaxy`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub galaxy: Option<Sourced<GalaxyMode>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<Sourced<String>>,
 }
@@ -1471,6 +1525,7 @@ pub fn merge(layers: &[(Layer, &CompatEntry)]) -> Effective {
         take(&mut out.display, &e.display, layer);
         take(&mut out.hdr, &e.hdr, layer);
         take(&mut out.monitor, &e.monitor, layer);
+        take(&mut out.galaxy, &e.galaxy, layer);
         take(&mut out.source, &e.source, layer);
     }
     // `protonfixes = false` turns umu-protonfixes off for the game (design
@@ -1564,6 +1619,7 @@ impl Effective {
         line(&mut out, "display", &self.display);
         line(&mut out, "hdr", &self.hdr);
         line(&mut out, "monitor", &self.monitor);
+        line(&mut out, "galaxy", &self.galaxy);
         line(&mut out, "variant", &self.variant);
         line(&mut out, "replace_command", &self.replace_command);
         line(&mut out, "status", &self.status);
@@ -2710,6 +2766,60 @@ protonfixes = false
             std::fs::read_to_string(&fresh).unwrap(),
             "[platforms.linux.env]\nPROTON_ENABLE_NVAPI = \"1\"\n"
         );
+    }
+
+    #[test]
+    fn galaxy_is_linux_only_layered_and_edited_as_a_word() {
+        let p = parse(
+            "[platforms.macos]\ngalaxy = \"comet\"\n",
+            Os::Macos,
+            Layer::Db,
+        )
+        .unwrap();
+        assert_eq!(p.entry.galaxy, None);
+        assert_eq!(
+            p.warnings,
+            ["`platforms.macos.galaxy` is Linux only: ignored"]
+        );
+        assert!(
+            parse(
+                "[platforms.linux]\ngalaxy = \"yes\"\n",
+                Os::Linux,
+                Layer::Db
+            )
+            .is_err()
+        );
+        let db = parse(
+            "[platforms.linux]\ngalaxy = \"comet\"\n",
+            Os::Linux,
+            Layer::Db,
+        )
+        .unwrap();
+        let user = parse(
+            "[platforms.linux]\ngalaxy = \"off\"\n",
+            Os::Linux,
+            Layer::User,
+        )
+        .unwrap();
+        let eff = merge(&[(Layer::Db, &db.entry), (Layer::User, &user.entry)]);
+        let g = eff.galaxy.unwrap();
+        assert_eq!((g.value, g.layer), (GalaxyMode::Off, Layer::User));
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("1.toml");
+        let c = edit_user_platform_at(
+            &path,
+            &[UserEdit::Galaxy(Some(GalaxyMode::Comet))],
+            Os::Linux,
+        )
+        .unwrap();
+        assert_eq!(c[0].key, "galaxy");
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("galaxy = \"comet\"")
+        );
+        edit_user_platform_at(&path, &[UserEdit::Galaxy(None)], Os::Linux).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("galaxy"));
     }
 
     #[test]
