@@ -19,6 +19,7 @@ pub mod doctor;
 pub mod envargs;
 pub mod exes;
 pub mod fixes;
+pub mod galaxy;
 pub mod game;
 pub mod icon;
 pub mod launcher;

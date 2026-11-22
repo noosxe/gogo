@@ -8,6 +8,8 @@ mod depot_progress;
 #[cfg(target_os = "linux")]
 mod dlc_cmd;
 #[cfg(target_os = "linux")]
+mod galaxy_cmd;
+#[cfg(target_os = "linux")]
 mod installer_dlc;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod lane;
@@ -35,7 +37,11 @@ use crate::cli::{Cli, ColorWhen, Command, OsFilter};
 
 fn main() {
     let cli = Cli::parse();
-    init_tracing(&cli);
+    // galaxy-start holds the session's tokens: no tracing at any verbosity
+    // (design 23 decision 7), and nothing of it may reach a log.
+    if !galaxy_start(&cli) {
+        init_tracing(&cli);
+    }
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -166,6 +172,25 @@ pub(crate) async fn phase<T>(json: bool, step: &str, f: impl std::future::Future
     depot_progress::Activity::new(depot_mode(false, json))
         .spin_async(step, f)
         .await
+}
+
+/// The internal `linux-app galaxy-start`.
+fn galaxy_start(cli: &Cli) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        matches!(
+            cli.command,
+            Command::LinuxApp {
+                sub: Some(crate::cli::LinuxAppSub::GalaxyStart { .. }),
+                ..
+            }
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = cli;
+        false
+    }
 }
 
 /// RUST_LOG wins if set; otherwise derive from --quiet/-v (`docs/design/07` §5).
@@ -349,6 +374,11 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
             )
             .await
         }
+        #[cfg(target_os = "linux")]
+        Command::LinuxApp {
+            sub: Some(crate::cli::LinuxAppSub::GalaxyStart { gogid, .. }),
+            ..
+        } => Ok(galaxy_cmd::run(&gogid).await),
         #[cfg(target_os = "linux")]
         Command::LinuxApp { sub: Some(sub), .. } => linux_app_sub(sub),
         #[cfg(target_os = "linux")]
@@ -5093,6 +5123,8 @@ fn linux_app_sub(sub: crate::cli::LinuxAppSub) -> Result<i32, AppError> {
             Ok(cli::exit::OK)
         }
         crate::cli::LinuxAppSub::Run { gogid, exe, args } => linux_app_run(&gogid, &exe, &args),
+        // Dispatched in `run`, being async.
+        crate::cli::LinuxAppSub::GalaxyStart { .. } => Ok(cli::exit::OK),
         crate::cli::LinuxAppSub::Env { cmd } => linux_app_env(cmd),
         // Async: dispatched in `run`.
         crate::cli::LinuxAppSub::Dlc { .. } => unreachable!("linux-app dlc is async"),
