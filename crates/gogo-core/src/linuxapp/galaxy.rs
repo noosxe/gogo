@@ -695,9 +695,13 @@ pub fn runtime_dir_problem(raw: Option<&std::ffi::OsStr>) -> Option<String> {
     if !rt.is_absolute() || !owned_private_dir(&rt) {
         return Some("XDG_RUNTIME_DIR isn't a private dir of this user".into());
     }
+    // As the start has it: a missing `gogo/` is made, a too-wide one of ours
+    // narrowed; only a link, a non-dir or someone else's is refused.
     let ours = rt.join(RUNTIME_SUBDIR);
-    (ours.exists() && !owned_private_dir(&ours))
-        .then(|| format!("XDG_RUNTIME_DIR/{RUNTIME_SUBDIR} isn't a private dir of this user"))
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::symlink_metadata(&ours)
+        .is_ok_and(|m| !m.is_dir() || m.uid() != rustix::process::geteuid().as_raw())
+        .then(|| format!("XDG_RUNTIME_DIR/{RUNTIME_SUBDIR} isn't a dir of this user"))
 }
 
 /// Who holds `port`, for `doctor`: gogo's own Comet, else the process

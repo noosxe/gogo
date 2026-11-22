@@ -7428,6 +7428,97 @@ fn the_galaxy_switch_reaches_launch_conf_and_the_sdk_scan_reaches_state() {
     setup::setup(ID, &opts, &mut quiet()).unwrap();
 }
 
+/// `[linux] galaxy_default` is read by every setup and the SDK is looked for
+/// again each time, so a changed default or a game update that adds or drops
+/// the DLL is picked up; a compat recommendation alone never turns Comet on
+/// (it makes a game worth asking about); and `apps show` on a build from before
+/// the scan states the change its next setup would make.
+#[test]
+fn the_galaxy_default_and_the_sdk_are_read_by_every_setup() {
+    use gogo::linuxapp::game::ConfValues;
+    let Some(mut w) = World::launcher("galaxy-default", false) else {
+        return;
+    };
+    let setup_again = || setup::setup(ID, &SetupOptions::default(), &mut quiet()).unwrap();
+    let default = |v: &str| {
+        std::fs::write(
+            w.home.join("config.toml"),
+            format!("[linux]\numu = \"system\"\ngalaxy_default = \"{v}\"\n"),
+        )
+        .unwrap();
+    };
+    let gog = w.game().join("prefix/drive_c/GOG/Test Game");
+    let dll = gog.join("Galaxy64.dll");
+    let on = |w: &World| ConfValues::parse(&w.conf()).get("GALAXY") == "1";
+
+    // No SDK: the default has nothing to turn on.
+    default("on");
+    setup_again();
+    assert!(!on(&w) && w.state().galaxy_sdk == Some(false));
+    // The game update ships the SDK; nothing else changed.
+    std::fs::write(&dll, "MZ").unwrap();
+    setup_again();
+    assert!(on(&w) && w.state().galaxy_sdk == Some(true));
+    // The default goes back to off.
+    default("off");
+    setup_again();
+    assert!(!on(&w));
+
+    // A build from before the scan: no record, and the view scans on demand
+    // and states what the next setup does.
+    default("on");
+    let state = std::fs::read_to_string(w.game().join("state.toml")).unwrap();
+    let legacy: String = state
+        .lines()
+        .filter(|l| !l.starts_with("galaxy_sdk"))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    std::fs::write(w.game().join("state.toml"), legacy).unwrap();
+    assert_eq!(w.state().galaxy_sdk, None);
+    let logs = w.root.join("logs");
+    let g = gogo::macapp::apps::get(ID, &logs)
+        .unwrap()
+        .unwrap()
+        .galaxy
+        .unwrap();
+    assert_eq!((g.sdk, g.on, g.wanted), (Some(true), false, true));
+    assert!(
+        g.line().contains("the next setup makes it on"),
+        "{}",
+        g.line()
+    );
+    let g = &gogo::macapp::apps::list(&logs).unwrap()[0].galaxy;
+    assert_eq!(g.as_ref().unwrap().sdk, None, "a listing doesn't scan");
+    setup_again();
+    assert!(on(&w));
+
+    // A shipped file recommending Comet, in a game without the SDK: `on`
+    // leaves it off, `ask` asks.
+    std::fs::remove_file(&dll).unwrap();
+    let compat = w.root.join("compat-db");
+    std::fs::create_dir_all(&compat).unwrap();
+    std::fs::write(
+        compat.join(format!("{ID}.toml")),
+        "[platforms.linux]\ngalaxy = \"comet\"\n",
+    )
+    .unwrap();
+    w.saved
+        .push(("GOGO_COMPAT_DIR", std::env::var_os("GOGO_COMPAT_DIR")));
+    // SAFETY: env mutation under the world's env lock; restored on drop.
+    unsafe { std::env::set_var("GOGO_COMPAT_DIR", &compat) };
+    setup_again();
+    assert!(!on(&w));
+    default("ask");
+    let yes: Box<gogo::macapp::prompt::PromptFn> =
+        Box::new(|_| Some(gogo::macapp::prompt::PromptAnswer::Index(0)));
+    let opts = SetupOptions {
+        prompt: Some(&*yes),
+        ..SetupOptions::default()
+    };
+    setup::setup(ID, &opts, &mut quiet()).unwrap();
+    assert!(on(&w));
+}
+
 /// `display` and `hdr` reach `launch.conf`, and the launcher checks for a
 /// Wayland socket where the game runs: with one the game gets
 /// `PROTON_ENABLE_WAYLAND=1` and the HDR switch, without one it runs on X11

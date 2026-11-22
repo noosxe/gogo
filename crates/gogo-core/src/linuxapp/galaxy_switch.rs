@@ -7,10 +7,11 @@
 //! `GALAXY=1`, which `launch.sh` acts on. Lower layers only recommend:
 //!
 //! 1. the game's own L4 value, `off` included;
-//! 2. else, for a game that is a candidate (a compat layer recommends
-//!    `comet`, or its files ship the Galaxy SDK), `[linux] galaxy_default`:
-//!    `on` turns it on, `ask` asks once on a terminal and stores the answer
-//!    in L4 (headless: off, with a hint), `off` (the default) leaves it off;
+//! 2. else `[linux] galaxy_default`: `on` turns it on for a game whose files
+//!    ship the Galaxy SDK, `ask` asks once on a terminal about a game that
+//!    ships it or that a compat layer recommends Comet for, and stores the
+//!    answer in L4 (headless: off, with a hint), `off` (the default) leaves
+//!    it off;
 //! 3. else off.
 //!
 //! Nothing here downloads Comet: a missing binary is a hint to run
@@ -40,35 +41,62 @@ const SCAN_DEPTH: usize = 8;
 const SCAN_ENTRIES: usize = 100_000;
 
 /// Does the game ship the Galaxy SDK (`Galaxy.dll` / `Galaxy64.dll`, any
-/// case, anywhere under `root`)? Symlinks are not followed.
-pub fn detect_sdk(root: &Path) -> bool {
-    let mut seen = 0;
-    walk(root, 0, &mut seen)
+/// case, anywhere under `root`)? `Some(true)` found, `Some(false)` the whole
+/// tree was looked at and it isn't there, `None` the scan hit its bounds
+/// first ([`SCAN_DEPTH`], [`SCAN_ENTRIES`]) or couldn't read a dir, so it
+/// can't say. Symlinks are not followed.
+pub fn detect_sdk(root: &Path) -> Option<bool> {
+    detect_within(root, SCAN_DEPTH, SCAN_ENTRIES)
 }
 
-fn walk(dir: &Path, depth: usize, seen: &mut usize) -> bool {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return false;
+fn detect_within(root: &Path, depth: usize, entries: usize) -> Option<bool> {
+    let mut scan = Scan {
+        left: entries,
+        complete: true,
     };
-    for e in rd.flatten() {
-        *seen += 1;
-        if *seen > SCAN_ENTRIES {
+    if scan.walk(root, depth) {
+        return Some(true);
+    }
+    scan.complete.then_some(false)
+}
+
+struct Scan {
+    left: usize,
+    complete: bool,
+}
+
+impl Scan {
+    fn walk(&mut self, dir: &Path, depth: usize) -> bool {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            self.complete = false;
             return false;
-        }
-        let Ok(t) = e.file_type() else { continue };
-        if t.is_dir() {
-            if depth < SCAN_DEPTH && walk(&e.path(), depth + 1, seen) {
+        };
+        for e in rd.flatten() {
+            if self.left == 0 {
+                self.complete = false;
+                return false;
+            }
+            self.left -= 1;
+            let Ok(t) = e.file_type() else {
+                self.complete = false;
+                continue;
+            };
+            if t.is_dir() {
+                if depth == 0 {
+                    self.complete = false;
+                } else if self.walk(&e.path(), depth - 1) {
+                    return true;
+                }
+            } else if t.is_file()
+                && e.file_name()
+                    .to_str()
+                    .is_some_and(|n| SDK_DLLS.contains(&n.to_ascii_lowercase().as_str()))
+            {
                 return true;
             }
-        } else if t.is_file()
-            && e.file_name()
-                .to_str()
-                .is_some_and(|n| SDK_DLLS.contains(&n.to_ascii_lowercase().as_str()))
-        {
-            return true;
         }
+        false
     }
-    false
 }
 
 /// What [`decide`] settled.
@@ -80,6 +108,14 @@ pub struct Decision {
     pub own: bool,
     /// `galaxy_default = "ask"` applies and nothing answered yet.
     pub ask: bool,
+}
+
+/// The merged compat (shipped data, then the game's own L4 entry) every
+/// Galaxy decision reads, so setup, its question, `apps show` and `doctor`
+/// can't disagree.
+pub fn effective(gogid: &str, l4: &compat::CompatEntry) -> Effective {
+    let db = compat::db_entry_for(gogid, Os::Linux);
+    compat::merge(&[(Layer::Db, &db.entry), (Layer::User, l4)])
 }
 
 /// The game's own value and whether a lower layer recommends Comet, from
@@ -106,11 +142,12 @@ pub fn decide(
             ask: false,
         };
     }
-    let candidate = recommended || sdk == Some(true);
+    // `on` is for the games that ship the SDK; a recommendation alone only
+    // makes a game worth asking about (and worth a hint).
     Decision {
-        on: candidate && default == GalaxyDefault::On,
+        on: sdk == Some(true) && default == GalaxyDefault::On,
         own: false,
-        ask: candidate && default == GalaxyDefault::Ask,
+        ask: (recommended || sdk == Some(true)) && default == GalaxyDefault::Ask,
     }
 }
 
@@ -198,23 +235,18 @@ pub fn set_galaxy(gogid: &str, mode: Option<GalaxyMode>) -> Result<EditOutcome, 
     if mode == Some(GalaxyMode::Comet) {
         warnings.extend(comet_hint(&super::umu::Host::real(), &Config::path()));
     }
-    if let Ok(r) = manage::compat(gogid) {
-        let (own, rec) = split(&r.effective);
-        if own.is_none() && rec && mode.is_none() {
-            warnings.push("compat data recommends Comet for this game".to_string());
-        }
-        if let Some(s) = r
+    if let Ok(r) = manage::compat(gogid)
+        && let Some(g) = r
             .effective
             .galaxy
             .as_ref()
-            .filter(|s| s.layer != Layer::User)
-        {
-            warnings.push(format!(
-                "`galaxy` still comes from the {}: {}",
-                s.layer.describe(),
-                s.value.key()
-            ));
-        }
+            .filter(|g| g.layer != Layer::User)
+    {
+        warnings.push(format!(
+            "`galaxy` is {:?} from the {} (a recommendation: `galaxy_default` decides)",
+            g.value.key(),
+            g.layer.describe()
+        ));
     }
     Ok(EditOutcome {
         gogid: gogid.to_string(),
@@ -294,14 +326,12 @@ impl GalaxyView {
 pub fn view(gogid: &str, dirs: &GameDirs, tree: Option<&str>, scan: bool) -> Option<GalaxyView> {
     let conf = ConfValues::read(&dirs.launch_conf).ok();
     let state = LinuxState::load(&dirs.state_toml).ok().flatten();
-    let db = compat::db_entry_for(gogid, Os::Linux);
     let l4 = compat::load_user_for(gogid, Os::Linux).ok()?;
-    let eff = compat::merge(&[(Layer::Db, &db.entry), (Layer::User, &l4.entry)]);
-    let (own, recommended) = split(&eff);
-    let sdk = state
-        .as_ref()
-        .and_then(|s| s.galaxy_sdk)
-        .or_else(|| scan.then(|| detect_sdk(&super::setup::game_files(dirs, tree))));
+    let (own, recommended) = split(&effective(gogid, &l4.entry));
+    let sdk = state.as_ref().and_then(|s| s.galaxy_sdk).or_else(|| {
+        scan.then(|| detect_sdk(&super::setup::game_files(dirs, tree)))
+            .flatten()
+    });
     let (default, _) = default_at(&Config::path());
     let d = decide(own, recommended, default, sdk);
     let on = conf.as_ref().is_some_and(|c| c.get("GALAXY") == "1");
@@ -457,17 +487,17 @@ mod tests {
     #[test]
     fn detects_the_sdk_by_name_in_any_case_and_depth() {
         let t = tempfile::tempdir().unwrap();
-        assert!(!detect_sdk(t.path()));
+        assert_eq!(detect_sdk(t.path()), Some(false));
         let bin = t.path().join("bin/x64");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(bin.join("game.exe"), "x").unwrap();
         std::fs::write(bin.join("galaxy-helper.dll"), "x").unwrap();
-        assert!(!detect_sdk(t.path()));
+        assert_eq!(detect_sdk(t.path()), Some(false));
         std::fs::write(bin.join("GALAXY64.DLL"), "x").unwrap();
-        assert!(detect_sdk(t.path()));
+        assert_eq!(detect_sdk(t.path()), Some(true));
         let u = tempfile::tempdir().unwrap();
         std::fs::write(u.path().join("Galaxy.dll"), "x").unwrap();
-        assert!(detect_sdk(u.path()));
+        assert_eq!(detect_sdk(u.path()), Some(true));
     }
 
     #[test]
@@ -476,7 +506,7 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("Galaxy64.dll"), "x").unwrap();
         std::os::unix::fs::symlink(outside.path(), t.path().join("link")).unwrap();
-        assert!(!detect_sdk(t.path()));
+        assert_eq!(detect_sdk(t.path()), Some(false));
     }
 
     #[test]
@@ -490,18 +520,42 @@ mod tests {
     }
 
     #[test]
-    fn a_default_only_reaches_games_that_could_use_comet() {
+    fn a_default_turns_on_only_games_that_ship_the_sdk() {
         let sdk = Some(true);
         assert!(!decide(None, false, GalaxyDefault::Off, sdk).on);
         assert!(decide(None, false, GalaxyDefault::On, sdk).on);
-        assert!(decide(None, true, GalaxyDefault::On, Some(false)).on);
+        // A recommendation without the SDK doesn't turn it on, nor does an
+        // unknown scan or no SDK.
+        assert!(!decide(None, true, GalaxyDefault::On, Some(false)).on);
+        assert!(!decide(None, true, GalaxyDefault::On, None).on);
         assert!(!decide(None, false, GalaxyDefault::On, Some(false)).on);
-        assert!(!decide(None, false, GalaxyDefault::On, None).on);
+        // `ask` asks about a game that ships it or is recommended.
         let ask = decide(None, false, GalaxyDefault::Ask, sdk);
         assert!(ask.ask && !ask.on);
+        assert!(decide(None, true, GalaxyDefault::Ask, Some(false)).ask);
         assert!(!decide(None, false, GalaxyDefault::Ask, Some(false)).ask);
-        // A recommendation alone never turns it on.
+        assert!(!decide(None, true, GalaxyDefault::Off, sdk).ask);
         assert!(!decide(None, true, GalaxyDefault::Off, None).on);
+    }
+
+    #[test]
+    fn a_scan_that_hits_its_bounds_says_unknown_not_absent() {
+        let t = tempfile::tempdir().unwrap();
+        for i in 0..5 {
+            std::fs::write(t.path().join(format!("f{i}")), "x").unwrap();
+        }
+        assert_eq!(detect_within(t.path(), 3, 100), Some(false));
+        // Too many entries.
+        assert_eq!(detect_within(t.path(), 3, 3), None);
+        // Too deep.
+        let deep = t.path().join("a/b/c");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(deep.join("Galaxy.dll"), "x").unwrap();
+        assert_eq!(detect_within(t.path(), 1, 100), None);
+        // Found before the bound is reached is still found.
+        assert_eq!(detect_within(t.path(), 3, 100), Some(true));
+        // An unreadable root can't say either.
+        assert_eq!(detect_within(&t.path().join("missing"), 3, 100), None);
     }
 
     #[test]

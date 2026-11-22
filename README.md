@@ -456,8 +456,8 @@ gogo linux-app galaxy 1423049311 --clear                   # compat data and [li
 
 `galaxy on` never downloads Comet: `gogo runtimes install comet` does, after asking.
 `[linux] galaxy_default = "on"` turns it on for games that ship `Galaxy.dll` /
-`Galaxy64.dll` (or that compat data recommends it for), `"ask"` asks once per such
-game on a terminal and keeps the answer; unset or `"off"`, a game gets Comet only
+`Galaxy64.dll`, `"ask"` asks once per such game (or one compat data recommends it
+for) on a terminal and keeps the answer; unset or `"off"`, a game gets Comet only
 when you say so. `gogo apps show` and `gogo linux-app doctor` report it.
 
 **A game's other exes** (a vendor launcher, a settings or mod tool) run once in

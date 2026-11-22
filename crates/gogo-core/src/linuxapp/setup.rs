@@ -769,28 +769,22 @@ pub fn setup(
         .collect();
     let mut notes = Vec::new();
 
-    // Galaxy (design 23 decision 3): does the game ship the SDK (kept while
-    // its inputs are unchanged), and does `galaxy_default = "ask"` need an
-    // answer from this terminal.
+    // Galaxy (design 23 decision 3): does the game ship the SDK (looked at
+    // every setup: a game update or a changed `galaxy_default` is picked up
+    // here), and does `galaxy_default = "ask"` need an answer from this
+    // terminal. `None`: the scan couldn't say.
     let galaxy_files = game_files(&dirs, baked.tree_name().as_deref());
-    let stamp_before = crate::macapp::launch::stamp(&raw, l4_raw.as_deref());
-    let galaxy_sdk = match prior.as_ref() {
-        Some(p) if p.stamp == stamp_before && p.galaxy_sdk.is_some() => p.galaxy_sdk,
-        _ => galaxy_files
-            .is_dir()
-            .then(|| super::galaxy_switch::detect_sdk(&galaxy_files)),
-    };
+    let galaxy_sdk = galaxy_files
+        .is_dir()
+        .then(|| super::galaxy_switch::detect_sdk(&galaxy_files))
+        .flatten();
     let (galaxy_default, galaxy_default_err) =
         super::galaxy_switch::default_at(&crate::config::Config::path());
     warnings.extend(galaxy_default_err);
-    let galaxy_recommended =
-        compat::db_entry_for(gogid, Os::Linux).entry.galaxy == Some(compat::GalaxyMode::Comet);
-    let galaxy_asked = super::galaxy_switch::decide(
-        l4.entry.galaxy,
-        galaxy_recommended,
-        galaxy_default,
-        galaxy_sdk,
-    );
+    let (galaxy_own, galaxy_recommended) =
+        super::galaxy_switch::split(&super::galaxy_switch::effective(gogid, &l4.entry));
+    let galaxy_asked =
+        super::galaxy_switch::decide(galaxy_own, galaxy_recommended, galaxy_default, galaxy_sdk);
     if galaxy_asked.ask {
         match super::galaxy_switch::ask_and_store(
             gogid,
@@ -1152,7 +1146,8 @@ pub fn setup(
         hdr: fx.effective.hdr.as_ref().map(|h| h.value),
         monitor: fx.effective.monitor.as_ref().map(|m| m.value.clone()),
         galaxy: {
-            let (own, rec) = super::galaxy_switch::split(&fx.effective);
+            let (own, rec) =
+                super::galaxy_switch::split(&super::galaxy_switch::effective(gogid, &l4.entry));
             super::galaxy_switch::decide(own, rec, galaxy_default, galaxy_sdk).on
         },
         env: eff.env.clone(),
