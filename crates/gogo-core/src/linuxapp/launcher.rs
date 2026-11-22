@@ -1123,8 +1123,13 @@ galaxy_start() {
                     printf '%s' "$o"
                     exit 0
                 fi
-                o="$(run_gogo timeout -k 1 8 "$gogo" linux-app galaxy-start "$GOGID" --launcher \
-                    </dev/null 2>/dev/null 3>&- 4>&- 9>&-)"
+                # gogo, and Comet after it, get the default dispositions back:
+                # an ignored TERM would be inherited all the way to Comet.
+                o="$(
+                    trap - INT TERM HUP
+                    run_gogo timeout -k 1 8 "$gogo" linux-app galaxy-start "$GOGID" --launcher \
+                        </dev/null 2>/dev/null 3>&- 4>&- 9>&-
+                )"
                 case "$o" in
                     "comet "*" started (pid "* | "reusing port "*)
                         printf '%s' "$ME_START" >"$GALAXY_DIR/.users/$$"
