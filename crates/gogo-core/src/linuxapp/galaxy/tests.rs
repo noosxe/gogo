@@ -261,6 +261,7 @@ async fn start_hands_over_through_a_private_file_and_deletes_it() {
         panic!("{out:?}");
     };
     let cap = w.capture();
+    let comet_start = proc_start(pid).unwrap();
     kill(pid);
     assert_eq!(comet, "comet 0.4.1");
     assert_eq!(note, None);
@@ -323,6 +324,10 @@ async fn start_hands_over_through_a_private_file_and_deletes_it() {
     assert_no_secret("argv", &cap.argv.join(" "));
     assert_no_secret("environ", &format!("{:?}", cap.env));
     assert_no_secret("the line", &out.line());
+
+    // gogo names the Comet it started, for the launcher's stop.
+    let owner = std::fs::read_to_string(w.runtime.join("gogo/comet/.comet")).unwrap();
+    assert_eq!(owner, format!("{pid} {comet_start}\n"));
 
     // The file and its dir are gone once the port listens.
     assert!(w.auth_dirs().is_empty(), "{:?}", w.auth_dirs());
@@ -490,15 +495,21 @@ async fn stale_credential_dirs_of_dead_runs_are_swept() {
     let dead = ours.join("auth-4194999-0badf00d0");
     std::fs::create_dir_all(dead.join("heroic/gog_store")).unwrap();
     std::fs::write(dead.join("heroic/gog_store/auth.json"), "{}").unwrap();
-    let live = ours.join(format!("auth-{}-1", std::process::id()));
-    // This process's own pid is never swept (it isn't a leftover of a dead run).
+    let me = std::process::id();
+    // A live run's dir: its pid and start time match.
+    let live = ours.join(format!("auth-{me}-{}-1", proc_start(me).unwrap()));
     std::fs::create_dir(&live).unwrap();
+    // The same pid with another start time: a dead run's, the pid reused.
+    let reused = ours.join(format!("auth-{me}-1-1"));
+    std::fs::create_dir_all(reused.join("heroic/gog_store")).unwrap();
+    std::fs::write(reused.join("heroic/gog_store/auth.json"), "{}").unwrap();
     let port = free_port();
     let bin = fake_comet(&w.bin, Fake::Exit);
     let _ = w
         .start(store_bin(bin), port, BUDGET, &FakeAccount::ok())
         .await;
     assert!(!dead.exists());
+    assert!(!reused.exists());
     assert!(live.exists());
 }
 

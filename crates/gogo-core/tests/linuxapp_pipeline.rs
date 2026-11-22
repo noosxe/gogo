@@ -3325,8 +3325,12 @@ case "$2" in
         c=$!
         i=0
         while [ "$i" -lt 50 ] && ! grep -qx "up $c" "$FAKE_COMET_LOG" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done
+        # As the real one: gogo names the Comet it started.
+        printf '%s %s\n' "$c" "$(awk '{ print $22 }' "/proc/$c/stat")" > "$XDG_RUNTIME_DIR/gogo/comet/.comet"
+        sleep "${FAKE_GALAXY_SLOW:-0}"
         echo "comet 0.4.1 started (pid $c)";;
       reuse) echo "reusing port 9977 (gogo's comet)";;
+      line) echo "$FAKE_GALAXY_LINE";;
       *) echo "skipped: $FAKE_GALAXY";;
     esac;;
 esac
@@ -3377,6 +3381,7 @@ const LAUNCHER_TOOLS: &[&str] = &[
     "printf",
     "env",
     "flock",
+    "stat",
 ];
 
 /// A 16×16 `.ico` (one 32 bpp DIB, opaque red).
@@ -15598,5 +15603,118 @@ mod galaxy {
             assert!(g.users().is_empty(), "{:?}", g.users());
             assert_eq!(g.comet_log().matches("up ").count(), 1, "{}", g.comet_log());
         }
+    }
+
+    /// A TERM to the launcher, or a Ctrl-C (INT to its process group), while
+    /// galaxy-start runs: the start finishes, the trap stops that Comet.
+    #[test]
+    fn a_signal_during_the_start_still_stops_comet() {
+        use std::os::unix::process::CommandExt as _;
+        for (sig, group) in [("-TERM", false), ("-INT", true)] {
+            let Some(g) = world(&format!("galaxy-int{sig}"), None) else {
+                return;
+            };
+            let mut c = g.w.launch_cmd(&g.env(&[("FAKE_GALAXY_SLOW", "2")]), &[]);
+            c.stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .process_group(0);
+            let mut child = c.spawn().unwrap();
+            assert!(wait_until(10, || g.comet_log().contains("up ")), "{sig}");
+            let pid: u32 = g
+                .comet_log()
+                .trim()
+                .trim_start_matches("up ")
+                .parse()
+                .unwrap();
+            let target = if group {
+                format!("-{}", child.id())
+            } else {
+                child.id().to_string()
+            };
+            let st = std::process::Command::new("kill")
+                .args([sig, "--", &target])
+                .status()
+                .unwrap();
+            assert!(st.success());
+            let code = child.wait().unwrap().code();
+            assert_eq!(code, Some(if group { 130 } else { 143 }), "{sig}");
+            let run = g.w.runs().pop().unwrap();
+            assert!(
+                run.contains(&format!("# galaxy: comet 0.4.1 started (pid {pid})\n")),
+                "{sig}: {run}"
+            );
+            assert!(
+                run.contains(&format!("# galaxy: stopped comet (pid {pid})\n")),
+                "{sig}: {run}"
+            );
+            assert!(wait_until(5, || gone(pid)), "{sig}");
+            assert!(g.users().is_empty(), "{sig}: {:?}", g.users());
+            assert!(!g.registry().join(".comet").exists(), "{sig}");
+        }
+    }
+
+    /// A port holder's name comes from `ss`, so it can say anything: the
+    /// launcher never takes a pid from gogo's line.
+    #[test]
+    fn a_foreign_name_in_the_line_is_never_a_pid_to_stop() {
+        let Some(g) = world("galaxy-foreign", None) else {
+            return;
+        };
+        let mut bystander = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let line = format!(
+            "reusing port 9977 (x started (pid {}), pid 1)",
+            bystander.id()
+        );
+        let out = g.w.launch(
+            &g.env(&[("FAKE_GALAXY", "line"), ("FAKE_GALAXY_LINE", &line)]),
+            &[],
+        );
+        assert!(out.status.success());
+        let run = g.w.runs().pop().unwrap();
+        assert!(
+            run.contains("# galaxy: nothing of gogo's to stop\n"),
+            "{run}"
+        );
+        assert!(
+            bystander.try_wait().unwrap().is_none(),
+            "the bystander was signalled"
+        );
+        bystander.kill().unwrap();
+        let _ = bystander.wait();
+        assert!(!g.registry().join(".comet").exists());
+    }
+
+    /// The shell checks the runtime dir as galaxy-start does before making
+    /// anything in it.
+    #[test]
+    fn a_runtime_dir_that_isnt_private_is_skipped_without_writing() {
+        let Some(g) = world("galaxy-open", None) else {
+            return;
+        };
+        std::fs::set_permissions(&g.runtime, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let out = g.w.launch(&g.env(&[]), &[]);
+        assert!(out.status.success());
+        let run = g.w.runs().pop().unwrap();
+        assert!(
+            run.contains("# galaxy: skipped: XDG_RUNTIME_DIR isn't a private dir of this user\n"),
+            "{run}"
+        );
+        assert!(!g.runtime.join("gogo").exists());
+        assert!(!g.w.calls().iter().any(|c| c.contains("galaxy-start")));
+
+        // A link in place of gogo's own dir.
+        std::fs::set_permissions(&g.runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let elsewhere = g.w.root.join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, g.runtime.join("gogo")).unwrap();
+        let out = g.w.launch(&g.env(&[]), &[]);
+        assert!(out.status.success());
+        let run = g.w.runs().pop().unwrap();
+        assert!(run.contains("isn't a private dir of this user"), "{run}");
+        assert!(std::fs::read_dir(&elsewhere).unwrap().next().is_none());
     }
 }

@@ -106,7 +106,9 @@ cross-progression saves) can. gogo isn't a launcher a game is started from: the 
   existing build behaves as before. Not on one-offs.
 - **`galaxy-start`** (`gogo_core::linuxapp::galaxy`, hidden `linux-app galaxy-start <gogid>
   --launcher`). Tracing is never initialised for it, whatever `RUST_LOG` or `-v` say. It
-  sets `RLIMIT_CORE` to 0 (inherited by Comet) and makes itself non-dumpable. Order: the
+  sets `RLIMIT_CORE` to 0, which exec keeps, so Comet (holding the tokens for the whole
+  game) dumps no core either; it also makes itself non-dumpable (`PR_SET_DUMPABLE`), which
+  exec resets, so that covers gogo only, not Comet. Order: the
   runtime dir check; the port (already listening: `reusing`, nothing else touched); the
   binary (`comet::available`, never a download); `HOME` (Comet panics without it); the
   session (restore, refresh ≤ 2.5 s, persist; a failed or slow refresh goes on with the
@@ -120,10 +122,12 @@ cross-progression saves) can. gogo isn't a launcher a game is started from: the 
   named from `.comet` (gogo's own) or `ss -ltnp`.
 - **The file.** `$XDG_RUNTIME_DIR` must be absolute, a real dir (not a symlink), ours, with
   no group/other bits; `$XDG_RUNTIME_DIR/gogo` is made (or narrowed to) 0700. The file is
-  `gogo/auth-<pid>-<nonce>/heroic/gog_store/auth.json`: dirs 0700 made without `-p` reuse,
+  `gogo/auth-<pid>-<start time>-<nonce>/heroic/gog_store/auth.json` (gogo's pid and its
+  start time from `/proc/<pid>/stat`): dirs 0700 made without `-p` reuse,
   the file `create_new` with 0600. It is removed (whole dir) once the port listens, when
   Comet exits or the budget runs out (Comet is then killed), on INT/TERM/HUP, and on drop;
-  each start also sweeps `auth-<pid>-*` dirs whose pid is gone (a SIGKILLed run).
+  each start also sweeps `auth-*` dirs whose pid isn't the process that started at that
+  time (a SIGKILLed run, even once its pid is reused).
 - **Comet's process.** A cleared environment plus an allowlist (`HOME`, `PATH`, locale, `TZ`,
   CA-bundle variables, `XDG_RUNTIME_DIR`), so no `WINEPREFIX` or `STEAM_COMPAT_DATA_PATH`
   makes the launcher count Comet as the game's; then the `XDG_*` and `COMET_LOG=off` of
@@ -136,24 +140,35 @@ cross-progression saves) can. gogo isn't a launcher a game is started from: the 
   port per host, so one registry per user whatever the data root, wiped at logout. It holds
   `.lock` (util-linux `flock`, fd 9, never passed to gogo or Comet; no `flock`: unlocked,
   logged), `.users/<launcher pid>` (its start time, written for `started` and `reusing`)
-  and `.comet` (pid and start time of the Comet gogo started). The last launcher out stops
+  and `.comet` (pid and start time of the Comet gogo started, written by `galaxy-start`
+  itself: the launcher never takes a pid from gogo's line, which can carry a foreign
+  process name from `ss`). Before making anything there, `launch.sh` checks
+  `$XDG_RUNTIME_DIR` and each dir as `galaxy-start` does (a real dir, ours, no group or
+  other bits; the lock not a link), else `skipped:`. The last launcher out stops
   that Comet, whoever started it: the starter quitting first
   would otherwise leave it to `--quit`, which never fires when the remaining game never
   connected. Records and `.comet` are pruned by pid and start time, so a reused pid is
-  never signalled.
+  never signalled. After a `TERM` the stop waits up to 1 s for Comet to go before it
+  releases the lock, so a launcher starting then doesn't reuse a Comet on its way out.
+- **Signals during the start.** `GALAXY_ON` is set before `galaxy-start` runs and the
+  start's subshell ignores INT, TERM and HUP, so a Ctrl-C or a `TERM` to the launcher
+  lets the start finish and record itself (start line included); bash then runs the trap,
+  whose stop covers that Comet. `timeout` keeps gogo in its own process group, so a
+  terminal's Ctrl-C doesn't reach it.
 - **Run log.** The start line is the first line after the header's `# ---`; the stop line
   is the footer's first. `run_output` skips `# galaxy:` lines (the early-exit dialog's
   errors are the game's), and the report keeps them. The run's duration and the early-exit
   clock start after Comet. Stop lines: `stopped comet (pid N)`, `comet (pid N) didn't stop
-  on INT in 2s: TERM`, `comet (pid N) left running for launcher P`, `nothing of gogo's to
+  on INT in 2s: TERM` (`, still running after 1s` if so), `comet (pid N) left running for launcher P`, `nothing of gogo's to
   stop`.
 - **#464's slots** are marked in the template: the pull right before `galaxy_start`, the
   push right before `galaxy_stop`.
 - **Tests.** `galaxy`'s unit tests run the hand-off against a fake `comet` (bash: it records
   its argv, environ, process group, the file and its modes; the test binds the port as Comet
   would) with made-up tokens; the launcher tests use a fake gogo and a fake Comet for start,
-  reuse, skip, INT and TERM stops, the signal path, the watchdog, two launchers, no runtime
-  dir, and a planted token that must not reach the run log, `launch.log`, `report.txt` or
+  reuse, skip, INT and TERM stops, the signal path, a signal during the start, the
+  watchdog, two launchers, a foreign process name in gogo's line, a runtime dir that isn't
+  private (or a link in it), no runtime dir, and a planted token that must not reach the run log, `launch.log`, `report.txt` or
   the launcher's output.
 - **Open:** the Galaxy access token Comet gets may be close to expiry (gog-warp refreshes only
   an expired one; #502, decided by H2's hour check).

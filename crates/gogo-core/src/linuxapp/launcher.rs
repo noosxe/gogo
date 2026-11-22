@@ -1060,11 +1060,12 @@ moving() {
 # (GALAXY=1 in launch.conf). One Comet per host (port 9977) serves every
 # game. Each launcher using it leaves <XDG_RUNTIME_DIR>/gogo/comet/.users/<pid>
 # (its start time); .comet names the Comet gogo started (pid, start time).
-# The last launcher out stops that one, whoever started it, and never a
-# Comet gogo didn't start. Both run under flock when there is one, on fd 9,
-# which is never passed on: Comet can't hold the lock. gogo prints the one
-# line the run log gets; its stderr and Comet's output are never kept (they
-# can hold secrets, decision 7).
+# gogo writes .comet itself, with the pid it spawned: nothing here reads a
+# pid from output. The last launcher out stops that one, whoever started
+# it, and never a Comet gogo didn't start. Both run under flock when there
+# is one, on fd 9, which is never passed on: Comet can't hold the lock. gogo
+# prints the one line the run log gets; its stderr and Comet's output are
+# never kept (they can hold secrets, decision 7).
 GALAXY_DIR="${XDG_RUNTIME_DIR:-}/gogo/comet"
 GALAXY_ON=""
 GALAXY_STOP=""
@@ -1073,12 +1074,27 @@ galaxy_lock() {
     has flock || return 0
     flock -w "$1" 9 3>&- 4>&- 2>/dev/null
 }
-# Private dirs (0700), each made only when missing.
+# $1 is a real dir (not a link) of this user that no one else can enter.
+galaxy_private() {
+    [ -d "$1" ] && [ ! -L "$1" ] && [ -O "$1" ] || return 1
+    case "$(stat -c %a "$1" 2>/dev/null)" in *00) return 0 ;; esac
+    return 1
+}
+# The registry's dirs under a private XDG_RUNTIME_DIR, each made 0700 when
+# missing and checked as galaxy-start checks its own; the lock no link.
 galaxy_dirs() {
     local d
+    galaxy_private "$XDG_RUNTIME_DIR" || return 1
     for d in "$XDG_RUNTIME_DIR/gogo" "$GALAXY_DIR" "$GALAXY_DIR/.users"; do
-        [ -d "$d" ] || mkdir -m 0700 "$d" 2>/dev/null || return 1
+        if [ ! -e "$d" ] && [ ! -L "$d" ]; then mkdir -m 0700 "$d" 2>/dev/null || return 1; fi
+        galaxy_private "$d" || return 1
     done
+    [ ! -L "$GALAXY_DIR/.lock" ]
+}
+# The run log's (and launch.log's) start line.
+galaxy_line() {
+    printf '# galaxy: %s\n' "$1" >>"$RUN_LOG"
+    log "galaxy: $1"
 }
 galaxy_start() {
     local gogo out
@@ -1089,36 +1105,42 @@ galaxy_start() {
     elif [ -z "$gogo" ]; then
         out="skipped: no gogo found (GOGO_PATH=$GOGO_PATH)"
     elif ! galaxy_dirs; then
-        out="skipped: can't make $GALAXY_DIR"
+        out="skipped: XDG_RUNTIME_DIR isn't a private dir of this user"
     else
         has flock || log "galaxy: no flock: starting Comet without the lock"
+        # Set first: a signal now is handled once the start below is done
+        # (bash runs traps after the command substitution), and its stop
+        # must see this launcher's Comet.
+        GALAXY_ON=1
         out="$(
+            # A signal (a Ctrl-C reaches this subshell) must not end the
+            # start halfway: it finishes, records, and the trap stops it.
+            trap '' INT TERM HUP
             {
                 if ! galaxy_lock 6; then
-                    printf 'skipped: another launcher held the Comet lock for 6s'
+                    o='skipped: another launcher held the Comet lock for 6s'
+                    galaxy_line "$o"
+                    printf '%s' "$o"
                     exit 0
                 fi
                 o="$(run_gogo timeout -k 1 8 "$gogo" linux-app galaxy-start "$GOGID" --launcher \
                     </dev/null 2>/dev/null 3>&- 4>&- 9>&-)"
                 case "$o" in
-                    *" started (pid "*)
-                        p="${o#* started (pid }"
-                        p="${p%%)*}"
-                        t="$(proc_start "$p")"
-                        if [ -n "$t" ]; then printf '%s %s\n' "$p" "$t" >"$GALAXY_DIR/.comet"; fi
+                    "comet "*" started (pid "* | "reusing port "*)
+                        printf '%s' "$ME_START" >"$GALAXY_DIR/.users/$$"
                         ;;
                 esac
-                case "$o" in
-                    "" | skipped:*) ;;
-                    *) printf '%s' "$ME_START" >"$GALAXY_DIR/.users/$$" ;;
-                esac
-                printf '%s' "${o:-skipped: galaxy-start printed nothing}"
+                o="${o:-skipped: galaxy-start printed nothing}"
+                # Written here: a trap that ends the launcher runs right
+                # after this subshell, before anything else in galaxy_start.
+                galaxy_line "$o"
+                printf '%s' "$o"
             } 9>>"$GALAXY_DIR/.lock"
         )"
-        case "$out" in skipped:*) ;; *) GALAXY_ON=1 ;; esac
+        case "$out" in skipped:*) GALAXY_ON="" ;; esac
+        return 0
     fi
-    printf '# galaxy: %s\n' "$out" >>"$RUN_LOG"
-    log "galaxy: $out"
+    galaxy_line "$out"
 }
 # After the game (and the prefix) are done: drop this launcher's record and,
 # when no live one is left, stop gogo's Comet (INT, then TERM after 2s).
@@ -1158,8 +1180,18 @@ galaxy_stop() {
                 sleep 0.1
             done
             kill -TERM "$owner" 2>/dev/null
+            # Gone before the lock goes: a launcher starting now mustn't
+            # reuse a Comet on its way out.
+            for _ in 1 2 3 4 5 6 7 8 9 10; do
+                alive_as "$owner" "$ostart" || break
+                sleep 0.1
+            done
             rm -f "$GALAXY_DIR/.comet"
-            printf "comet (pid %s) didn't stop on INT in 2s: TERM" "$owner"
+            if alive_as "$owner" "$ostart"; then
+                printf "comet (pid %s) didn't stop on INT in 2s: TERM, still running after 1s" "$owner"
+            else
+                printf "comet (pid %s) didn't stop on INT in 2s: TERM" "$owner"
+            fi
         } 9>>"$GALAXY_DIR/.lock" 2>/dev/null
     )"
     log "galaxy: $GALAXY_STOP"
