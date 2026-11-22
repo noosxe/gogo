@@ -2446,6 +2446,7 @@ mod tests {
         ));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn galaxy_start_is_hidden_and_needs_launcher() {
         let cli = Cli::try_parse_from([
