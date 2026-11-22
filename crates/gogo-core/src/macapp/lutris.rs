@@ -154,7 +154,9 @@ impl LutrisClient {
             .await?
             .text()
             .await
-            .map_err(|e| MacAppError::Recipe(format!("game page: {e}")))?;
+            .map_err(|e| {
+                MacAppError::Recipe(format!("game page: {}", crate::redact::describe_error(&e)))
+            })?;
         let mut out = Vec::new();
         for slug in parse_script_slugs_from_page(&html) {
             if let Ok(inst) = self.installer(&slug).await {
