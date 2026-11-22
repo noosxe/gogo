@@ -22,7 +22,7 @@ cross-progression saves) can. gogo isn't a launcher a game is started from: the 
    there is nothing to arbitrate; only the order around a launch (§2.3).
 3. **Opt-in per game, off by default.** `gogo linux-app galaxy <gogid> on|off` writes
    `GALAXY` into `launch.conf`. A compat key `[platforms.linux] galaxy = "comet"`
-   recommends it for a game (Cyberpunk once the host pass confirms); the config default is
+   recommends it for a game (Cyberpunk 2077 since the 2026-11-22 host pass, #507); the config default is
    `[linux] galaxy_default = "off"|"on"|"ask"` (`off`). Revisit on-by-default for games
    that ship the SDK after a few host passes: per-game breakage (Comet #80) and games that
    keep saves per Galaxy user (Ghostrunner) argue against it today.
