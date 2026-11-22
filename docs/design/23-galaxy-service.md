@@ -1,7 +1,7 @@
 # 23 — A Galaxy service for Linux builds: Comet (#356)
 
-Status: **accepted** (2026-11-21; decisions 1–12 accepted as recommended). Nothing is built
-yet: implementation issues are in §5. The facts behind it are in
+Status: **accepted** (2026-11-21; decisions 1–12 accepted as recommended). Built: the pin
+(#487, §1.1) and the start/stop around a launch (#488, §1.2); the rest is in §5. The facts behind it are in
 [docs/23](../23-galaxy-sdk-and-comet.md).
 
 A `gogo linux-app` game can run [Comet](https://github.com/imLinguin/comet) beside it, so
@@ -99,6 +99,65 @@ cross-progression saves) can. gogo isn't a launcher a game is started from: the 
   `refresh_token` and `user_id`**: decision 5's "three-field `auth.json`" means that nested
   shape, which #488 must write.
 
+### 1.2 As built: start and stop (#488)
+
+- **Gate.** `launch.sh` reads `GALAXY` from `launch.conf` (default empty) and acts only on
+  `GALAXY=1`. Nothing writes it yet: #489's `galaxy on` adds it to `LaunchConf`, so every
+  existing build behaves as before. Not on one-offs.
+- **`galaxy-start`** (`gogo_core::linuxapp::galaxy`, hidden `linux-app galaxy-start <gogid>
+  --launcher`). Tracing is never initialised for it, whatever `RUST_LOG` or `-v` say. It
+  sets `RLIMIT_CORE` to 0 (inherited by Comet) and makes itself non-dumpable. Order: the
+  runtime dir check; the port (already listening: `reusing`, nothing else touched); the
+  binary (`comet::available`, never a download); `HOME` (Comet panics without it); the
+  session (restore, refresh ≤ 2.5 s, persist; a failed or slow refresh goes on with the
+  stored tokens and says so); the username (≤ 1.5 s from GOG's user data, cached in
+  `<data root>/comet/username`, 0600; offline with no cache: the placeholder `gogo`); the
+  file; the spawn; the wait. One 5 s budget covers all of it; `launch.sh` adds `timeout -k 1
+  8` as a backstop.
+- **The port is read, never connected to.** Comet's `--quit` counts clients, so a probe
+  connection would start its idle clock before any game connects. "Listening" is a LISTEN
+  row for the port on 127.0.0.1 or the any-address in `/proc/net/tcp{,6}`. The holder is
+  named from `.comet` (gogo's own) or `ss -ltnp`.
+- **The file.** `$XDG_RUNTIME_DIR` must be absolute, a real dir (not a symlink), ours, with
+  no group/other bits; `$XDG_RUNTIME_DIR/gogo` is made (or narrowed to) 0700. The file is
+  `gogo/auth-<pid>-<nonce>/heroic/gog_store/auth.json`: dirs 0700 made without `-p` reuse,
+  the file `create_new` with 0600. It is removed (whole dir) once the port listens, when
+  Comet exits or the budget runs out (Comet is then killed), on INT/TERM/HUP, and on drop;
+  each start also sweeps `auth-<pid>-*` dirs whose pid is gone (a SIGKILLed run).
+- **Comet's process.** A cleared environment plus an allowlist (`HOME`, `PATH`, locale, `TZ`,
+  CA-bundle variables, `XDG_RUNTIME_DIR`), so no `WINEPREFIX` or `STEAM_COMPAT_DATA_PATH`
+  makes the launcher count Comet as the game's; then the `XDG_*` and `COMET_LOG=off` of
+  §2.1. It gets its own process group (`process_group(0)`, not `setsid()`: no `unsafe`, and
+  with stdin on `/dev/null` a group of its own is enough to miss Ctrl-C and a terminal's
+  hangup).
+- **Errors** are matched by variant into fixed reasons, never formatted: gogo's auth errors
+  can hold the refresh URL (#501).
+- **The registry** is `$XDG_RUNTIME_DIR/gogo/comet/` rather than `<data root>/comet/`: one
+  port per host, so one registry per user whatever the data root, wiped at logout. It holds
+  `.lock` (util-linux `flock`, fd 9, never passed to gogo or Comet; no `flock`: unlocked,
+  logged), `.users/<launcher pid>` (its start time, written for `started` and `reusing`)
+  and `.comet` (pid and start time of the Comet gogo started). The last launcher out stops
+  that Comet, whoever started it: the starter quitting first
+  would otherwise leave it to `--quit`, which never fires when the remaining game never
+  connected. Records and `.comet` are pruned by pid and start time, so a reused pid is
+  never signalled.
+- **Run log.** The start line is the first line after the header's `# ---`; the stop line
+  is the footer's first. `run_output` skips `# galaxy:` lines (the early-exit dialog's
+  errors are the game's), and the report keeps them. The run's duration and the early-exit
+  clock start after Comet. Stop lines: `stopped comet (pid N)`, `comet (pid N) didn't stop
+  on INT in 2s: TERM`, `comet (pid N) left running for launcher P`, `nothing of gogo's to
+  stop`.
+- **#464's slots** are marked in the template: the pull right before `galaxy_start`, the
+  push right before `galaxy_stop`.
+- **Tests.** `galaxy`'s unit tests run the hand-off against a fake `comet` (bash: it records
+  its argv, environ, process group, the file and its modes; the test binds the port as Comet
+  would) with made-up tokens; the launcher tests use a fake gogo and a fake Comet for start,
+  reuse, skip, INT and TERM stops, the signal path, the watchdog, two launchers, no runtime
+  dir, and a planted token that must not reach the run log, `launch.log`, `report.txt` or
+  the launcher's output.
+- **Open:** the Galaxy access token Comet gets may be close to expiry (gog-warp refreshes only
+  an expired one; #502, decided by H2's hour check).
+
 ## 2. Around a launch
 
 ### 2.1 Start
@@ -110,8 +169,9 @@ game's start in the run log, `launch.sh` runs the internal
 1. Restores the session as every command does; refreshes the Galaxy token in the **main**
    session and persists it (design 22 §2.1 step 4). The username comes from the session's
    user data.
-2. Checks port 9977. Taken (another gogo game's Comet, Heroic's): prints `reusing` (naming
-   the process when `ss -ltnp` can), starts nothing, done.
+2. Checks port 9977 (the kernel's socket table, never a connection: §1.2). Taken
+   (another gogo game's Comet, Heroic's): prints `reusing` (naming the process when
+   `ss -ltnp` can), starts nothing, done.
 3. Writes the credential file (decision 5).
 4. Spawns Comet in its own session (`setsid`): `--from-heroic --username <name> --quit`,
    `XDG_CONFIG_PATH=<run dir>`, `COMET_LOG=off`, stdin/stdout/stderr on `/dev/null`, and
@@ -124,14 +184,14 @@ Every failure prints one line and exits 0; `launch.sh` writes it to the run log 
 
 ### 2.2 Stop
 
-`launch.sh` registers under `<data root>/comet/.users/<launcher pid>`, with the pid it
-started (if any). Once the game's prefix is idle (where the run log's footer and design 22's
-push are), it removes its record; if it started Comet and no live record is left, it sends
-`INT`, then `TERM` after 2 s. The watchdog's teardown (a SIGKILLed launcher) does the same.
+`launch.sh` registers under `$XDG_RUNTIME_DIR/gogo/comet/.users/<launcher pid>`; the
+Comet gogo started is recorded in `.comet` beside it (§1.2). Once the game's prefix is idle
+(where the run log's footer and design 22's push are), it removes its record; if no live
+record is left and gogo's Comet still runs, whoever started it, it sends `INT`, then `TERM`
+after 2 s. The watchdog's teardown (a SIGKILLed launcher) and the signal path do the same.
 `--quit` is a backstop: Comet ends by itself after the last game disconnects, but not if
 none ever connected. Two games at once share one Comet, which outlives the first to quit.
-The template change bumps `LAUNCHER_VERSION` (to the next number after #464's, whichever
-lands first).
+The template change bumps `LAUNCHER_VERSION` (18, #488; #464 takes the next).
 
 ### 2.3 Order
 
@@ -168,7 +228,9 @@ Pull (design 22) → Comet start → game → prefix idle → push (design 22) �
 - **H3, Heroic control** (done 2026-11-21, #486): with Heroic's experimental Comet support
   off, the wait is back and the cross-progression saves don't show.
 - **H4, logs:** the run log, `launch.log` and `report.txt` hold no refresh token, access
-  token, client secret or user id; `$XDG_RUNTIME_DIR/gogo` is empty while the game runs.
+  token, client secret or user id; no `auth-*` dir is under `$XDG_RUNTIME_DIR/gogo` while
+  the game runs (only the `comet/` registry is); `ps -o args` of Comet shows only
+  `--from-heroic --username … --quit`.
 
 ## 5. Implementation issues (epic #155)
 
