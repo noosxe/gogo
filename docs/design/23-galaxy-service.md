@@ -153,8 +153,9 @@ cross-progression saves) can. gogo isn't a launcher a game is started from: the 
 - **Signals during the start.** `GALAXY_ON` is set before `galaxy-start` runs and the
   start's subshell ignores INT, TERM and HUP, so a Ctrl-C or a `TERM` to the launcher
   lets the start finish and record itself (start line included); bash then runs the trap,
-  whose stop covers that Comet. `timeout` keeps gogo in its own process group, so a
-  terminal's Ctrl-C doesn't reach it.
+  whose stop covers that Comet. gogo itself runs with the default dispositions restored
+  (an ignored TERM would be inherited by Comet, which then never stops on it). `timeout`
+  keeps gogo in its own process group, so a terminal's Ctrl-C doesn't reach it.
 - **Run log.** The start line is the first line after the header's `# ---`; the stop line
   is the footer's first. `run_output` skips `# galaxy:` lines (the early-exit dialog's
   errors are the game's), and the report keeps them. The run's duration and the early-exit

@@ -3340,6 +3340,7 @@ esac
 /// with its pid; `FAKE_COMET_DEAF` ignores INT.
 const FAKE_COMET: &str = r#"#!/usr/bin/env bash
 echo "up $$" >> "$FAKE_COMET_LOG"
+grep '^SigIgn:' /proc/$$/status >> "$FAKE_COMET_LOG"
 if [ -n "${FAKE_COMET_DEAF:-}" ]; then
   trap '' INT
 else
@@ -15395,6 +15396,16 @@ mod galaxy {
             "{}",
             g.comet_log()
         );
+        // Nothing of the start's signal shield reaches Comet: TERM (bit 15)
+        // and HUP (bit 1) are not ignored. (INT is the fake gogo's `&`,
+        // which `env --default-signal=INT` undoes.)
+        let ign = g
+            .comet_log()
+            .lines()
+            .find_map(|l| l.strip_prefix("SigIgn:"))
+            .map(|m| u64::from_str_radix(m.trim(), 16).unwrap())
+            .unwrap();
+        assert_eq!(ign & ((1 << 14) | 1), 0, "ignored by comet: {ign:x}");
         assert!(g.users().is_empty(), "{:?}", g.users());
         assert!(!g.registry().join(".comet").exists());
         let report = std::fs::read_to_string(g.w.logs().join("report.txt")).unwrap();
@@ -15624,8 +15635,9 @@ mod galaxy {
             assert!(wait_until(10, || g.comet_log().contains("up ")), "{sig}");
             let pid: u32 = g
                 .comet_log()
-                .trim()
-                .trim_start_matches("up ")
+                .lines()
+                .find_map(|l| l.strip_prefix("up "))
+                .unwrap()
                 .parse()
                 .unwrap();
             let target = if group {
