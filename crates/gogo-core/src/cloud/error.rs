@@ -63,7 +63,7 @@ pub enum CloudError {
     #[error("token exchange for product {gogid} failed: HTTP {status}")]
     ExchangeStatus { gogid: u64, status: u16 },
 
-    /// The exchange failed in some other way (gog-warp's error kind only).
+    /// The exchange failed in some other way (gog-warp's error, redacted).
     #[error("token exchange for product {gogid} failed: {kind}")]
     Exchange { gogid: u64, kind: String },
 

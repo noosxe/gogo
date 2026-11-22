@@ -1464,7 +1464,7 @@ async fn download_with_retry(
         }
         match http.get(url).send().await {
             Ok(resp) if resp.status().is_server_error() => {
-                last = format!("{} on {url}", resp.status());
+                last = format!("{} on {}", resp.status(), crate::redact::scrub_text(url));
             }
             Ok(resp) if !resp.status().is_success() => {
                 return Err(MacAppError::RuntimeDownloadFailed {
@@ -1487,7 +1487,7 @@ async fn download_with_retry(
                         .await
                         .map_err(|e| MacAppError::RuntimeDownloadFailed {
                             url: url.into(),
-                            reason: format!("download: {e}"),
+                            reason: format!("download: {}", crate::redact::describe_error(&e)),
                         })?
                 {
                     file.write_all(&chunk).await.map_err(|e| {
@@ -1507,7 +1507,7 @@ async fn download_with_retry(
                     })?;
                 return Ok(());
             }
-            Err(e) => last = format!("{e} on {url}"),
+            Err(e) => last = crate::redact::describe_error(&e),
         }
     }
     Err(MacAppError::RuntimeDownloadFailed {

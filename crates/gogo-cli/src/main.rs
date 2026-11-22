@@ -18,6 +18,7 @@ mod menus;
 mod output;
 mod prompt;
 mod saves_cmd;
+mod scrub_log;
 #[cfg(target_os = "linux")]
 mod snapshot_cmd;
 #[cfg(target_os = "linux")]
@@ -52,19 +53,19 @@ fn main() {
         Ok(code) => code,
         // C1: the error type carries the class; auth 3 < network 4 < config-usage 2.
         Err(AppError::Config(e)) => {
-            eprintln!("gogo: {e}");
+            report(&e);
             cli::exit::USAGE
         }
         Err(AppError::Auth(e)) => {
-            eprintln!("gogo: {e}");
+            report(&e);
             cli::exit::AUTH
         }
         Err(AppError::Api(e)) => {
-            eprintln!("gogo: {e}");
+            report(&e);
             cli::exit::NETWORK
         }
         Err(AppError::MacApp(e)) => {
-            eprintln!("gogo: {e}");
+            report(&e);
             // Conversion failure (exit 7) — docs/design/10 §4.
             cli::exit::MACAPP
         }
@@ -75,21 +76,21 @@ fn main() {
             | gogo::gog::depot::DepotError::Dlc(_)
             | gogo::gog::depot::DepotError::Pick(_)
             | gogo::gog::depot::DepotError::Language(_) => {
-                eprintln!("gogo: {e}");
+                report(&e);
                 cli::exit::USAGE
             }
             gogo::gog::depot::DepotError::Filter(_) => {
-                eprintln!("gogo: {e}");
+                report(&e);
                 cli::exit::DEPOT
             }
             _ => {
-                // Debug, not Display: gog-warp's io variants hide their source
-                eprintln!("gogo: depot: {e:?}");
+                // Never Debug: it would show gog-warp's request URL (design 07 §4).
+                report(&format_args!("depot: {e}"));
                 cli::exit::DEPOT
             }
         },
         Err(AppError::Io(e)) => {
-            eprintln!("gogo: {e}");
+            report(&e);
             cli::exit::FAILED
         }
         Err(AppError::Usage) => cli::exit::USAGE,
@@ -195,6 +196,16 @@ fn galaxy_start(cli: &Cli) -> bool {
 
 /// RUST_LOG wins if set; otherwise derive from --quiet/-v (`docs/design/07` §5).
 /// Log output goes to stderr; stdout stays results-only (`docs/design/03` §4).
+/// The top-level error line. gogo's errors are redacted when built (design 07
+/// §4); [`gogo::redact::scrub_text`] is the safety net for what slipped through.
+fn report(e: &dyn std::fmt::Display) {
+    eprintln!("{}", error_line(e));
+}
+
+fn error_line(e: &dyn std::fmt::Display) -> String {
+    format!("gogo: {}", gogo::redact::scrub_text(&e.to_string()))
+}
+
 fn init_tracing(cli: &Cli) {
     use tracing_subscriber::EnvFilter;
 
@@ -215,7 +226,7 @@ fn init_tracing(cli: &Cli) {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_writer(std::io::stderr)
+        .with_writer(scrub_log::Scrubbing(std::io::stderr))
         .try_init();
 }
 
@@ -3768,7 +3779,9 @@ fn mac_app_retarget(
                 "runtime_installed": s.runtime_installed,
             })
         }
-        Some(Err(e)) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        Some(Err(e)) => {
+            serde_json::json!({ "ok": false, "error": gogo::redact::scrub_text(&e.to_string()) })
+        }
         None => serde_json::Value::Null,
     };
     if json {
@@ -4756,7 +4769,9 @@ fn linux_app_retarget(
                 "runtime_installed": s.runtime_installed,
                 "warnings": s.warnings,
             }),
-            Some(Err(e)) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+            Some(Err(e)) => {
+                serde_json::json!({ "ok": false, "error": gogo::redact::scrub_text(&e.to_string()) })
+            }
             None => serde_json::Value::Null,
         };
         println!(
@@ -7421,6 +7436,15 @@ mod completions_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_error_line_is_scrubbed() {
+        let e = gogo::gog::error::AuthError::Upstream(
+            "GET https://auth.gog.com/token?refresh_token=FAKE-REFRESH-0b7d".into(),
+        );
+        let line = super::error_line(&e);
+        assert_eq!(line, "gogo: gog-warp: GET https://auth.gog.com/token");
+    }
+
     use crate::depot_progress::game_files_line;
     use gogo::gog::materialize::{MaterializePlan, TreeMethod};
 

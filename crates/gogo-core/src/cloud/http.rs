@@ -185,27 +185,8 @@ fn short_code(s: &str) -> String {
         .collect()
 }
 
-/// `u` as it may be shown or logged (design 07 §4): scheme, host (and port), the
-/// first path segment, and how many segments follow; the query is dropped. For
-/// the storage host that keeps `/v1` and hides the user id, client id and object.
-pub fn redact_url(u: &Url) -> String {
-    let mut out = format!("{}://{}", u.scheme(), u.host_str().unwrap_or(""));
-    if let Some(p) = u.port() {
-        out.push_str(&format!(":{p}"));
-    }
-    let segs: Vec<&str> = u
-        .path_segments()
-        .map(|s| s.filter(|x| !x.is_empty()).collect())
-        .unwrap_or_default();
-    if let Some((first, rest)) = segs.split_first() {
-        out.push('/');
-        out.push_str(first);
-        if !rest.is_empty() {
-            out.push_str(&format!("/[redacted {} segments]", rest.len()));
-        }
-    }
-    out
-}
+/// `u` as it may be shown or logged: the crate-wide form (design 07 §4).
+pub use crate::redact::redact_url;
 
 #[cfg(test)]
 mod tests {

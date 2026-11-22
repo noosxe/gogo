@@ -108,7 +108,7 @@ impl LutrisClient {
                     last = format!("{} on {}", resp.status(), path);
                 }
                 Ok(resp) => return Ok(resp),
-                Err(e) => last = format!("{e} on {path}"),
+                Err(e) => last = crate::redact::describe_error(&e),
             }
         }
         Err(MacAppError::Recipe(format!("lutris unreachable: {last}")))
@@ -222,11 +222,12 @@ impl LutrisClient {
             }
             match self.http.get(&url).send().await {
                 Ok(resp) if resp.status().is_server_error() => {
-                    last = format!("{} on {url}", resp.status());
+                    last = format!("{} on {}", resp.status(), crate::redact::scrub_text(&url));
                 }
                 Ok(resp) if !resp.status().is_success() => {
                     return Err(MacAppError::Recipe(format!(
-                        "download {url}: {}",
+                        "download {}: {}",
+                        crate::redact::scrub_text(&url),
                         resp.status()
                     )));
                 }
@@ -241,11 +242,12 @@ impl LutrisClient {
                         .map_err(|e| MacAppError::Recipe(format!("create: {e}")))?;
                     let mut total = 0u64;
                     let mut stream = resp;
-                    while let Some(chunk) = stream
-                        .chunk()
-                        .await
-                        .map_err(|e| MacAppError::Recipe(format!("download: {e}")))?
-                    {
+                    while let Some(chunk) = stream.chunk().await.map_err(|e| {
+                        MacAppError::Recipe(format!(
+                            "download: {}",
+                            crate::redact::describe_error(&e)
+                        ))
+                    })? {
                         file.write_all(&chunk)
                             .await
                             .map_err(|e| MacAppError::Recipe(format!("write: {e}")))?;
@@ -256,7 +258,7 @@ impl LutrisClient {
                         .map_err(|e| MacAppError::Recipe(format!("flush: {e}")))?;
                     return Ok(total);
                 }
-                Err(e) => last = format!("{e} on {url}"),
+                Err(e) => last = crate::redact::describe_error(&e),
             }
         }
         Err(MacAppError::Recipe(format!("lutris unreachable: {last}")))

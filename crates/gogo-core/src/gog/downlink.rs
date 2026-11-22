@@ -12,13 +12,23 @@ use crate::gog::error::ApiError;
 
 use serde::Deserialize;
 
-#[derive(Debug, Clone, Deserialize)]
+/// `Debug` shows the URLs redacted only (design 07 §4).
+#[derive(Clone, Deserialize)]
 pub struct Downlink {
     /// Pre-tokenized CDN URL (`gog-cdn-fastly.gog.com/token=…~dirs=…/secure/offline/…`).
     /// SECURITY: never log, never persist (`docs/design/02` §5, `07` §4).
     pub downlink: String,
     /// Public checksum XML URL (no auth needed).
     pub checksum: String,
+}
+
+impl std::fmt::Debug for Downlink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Downlink")
+            .field("downlink", &crate::redact::scrub_text(&self.downlink))
+            .field("checksum", &crate::redact::scrub_text(&self.checksum))
+            .finish()
+    }
 }
 
 /// Resolve one `files[]` entry to its CDN URL + checksum doc URL.

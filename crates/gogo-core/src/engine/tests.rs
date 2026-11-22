@@ -541,3 +541,25 @@ async fn force_redownloads_instead_of_present_skip() {
         Status::New
     ));
 }
+
+/// Run one download whose downlink resolves to `cdn` (which fails), with no
+/// retries; returns every progress event (for the redaction tests, design 07 §4).
+pub(crate) async fn failing_cdn_download(cdn: &str) -> Vec<crate::engine::events::ProgressEvent> {
+    let _env = TestEnv::new();
+    let root = tempfile::tempdir().unwrap();
+    let mut ctx = test_ctx(root.path()).await;
+    Arc::get_mut(&mut ctx).unwrap().cfg.network.retries = 0;
+    let server = MockServer::start().await;
+    let xml = checksum_xml("x.bin", &[(md5_hex(b"hello").as_str(), 0, 4)]);
+    mount_downlink_and_checksum(&server, cdn, &xml).await;
+    let mut rx = ctx.events.subscribe();
+    let mut task = task_for(format!("{}/downlink", server.uri()), 5);
+    task.dir = root.path().to_path_buf();
+    let summary = execute(&ctx, vec![task]).await;
+    assert_eq!(summary.failed, 1);
+    let mut events = Vec::new();
+    while let Ok(e) = rx.try_recv() {
+        events.push(e);
+    }
+    events
+}
