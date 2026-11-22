@@ -42,6 +42,11 @@ cross-progression saves) can. gogo isn't a launcher a game is started from: the 
    before binding). No `$XDG_RUNTIME_DIR`: Comet is skipped, never a disk-backed file. The
    contract is a Comet quirk, so a unit test ties it to the pinned version; an upstream
    fd/stdin option (draft report in #494) replaces it when there is one.
+   The username is the one value that does go on argv: Comet v0.4.1 takes it only as the
+   required `--username` argument (no environment variable, and its Heroic import reads just
+   the tokens and the user id). It is the GOG display name, not a credential; local users can
+   read it from `ps` or `/proc/<pid>/cmdline` while Comet runs. Comet sends it to the game as
+   the player's name. gogo moves it off argv once Comet accepts it another way (#510).
 6. **`launch.sh` starts and stops it** (§2).
 7. **Comet's output is never logged.** It logs game client secrets at its default level and
    token-bearing URLs at `warn` (docs/23 §2.1). The run log carries gogo's `# galaxy:` lines

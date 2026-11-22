@@ -395,6 +395,7 @@ async fn run(s: &Start<'_>, account: &dyn Account) -> Outcome {
         .env("XDG_CONFIG_HOME", &xdg[1])
         .env("XDG_CACHE_HOME", &xdg[2])
         .env("COMET_LOG", "off")
+        // The username is the one value on argv: Comet v0.4.1 takes it only as `--username` (#510).
         .args(["--from-heroic", "--username", &creds.username, "--quit"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
