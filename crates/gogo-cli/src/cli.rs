@@ -2151,6 +2151,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn linux_app_setup_takes_a_gogid() {
         let cli =
