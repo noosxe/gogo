@@ -20,7 +20,8 @@ use std::fmt;
 use url::Url;
 
 /// `u` as it may be shown or logged: scheme, host (and port), the first path
-/// segment if it is a plain word, and how many segments follow. Userinfo, the
+/// segment if it is a plain route word (`[a-z0-9_-]`, at most 16 characters),
+/// and how many segments follow. Userinfo, the
 /// query and the fragment are dropped. A CDN link's first segment is its token,
 /// so it is never kept: `https://cdn.example/[redacted 4 segments]`.
 pub fn redact_url(u: &Url) -> String {
@@ -224,7 +225,8 @@ impl fmt::Debug for SecretUrl {
     }
 }
 
-/// Query and form parameters whose values are secrets.
+/// Query, form and CDN-token parameters whose values are secrets (GOG's CDN
+/// token is `token=nva=…~dirs=…~hmac=…`, its Akamai form `acl=…~hmac=…`).
 const SECRET_PARAMS: &[&str] = &[
     "refresh_token",
     "access_token",
@@ -234,119 +236,184 @@ const SECRET_PARAMS: &[&str] = &[
     "token",
     "password",
     "session_id",
+    "hmac",
+    "nva",
+    "acl",
 ];
 
 /// `text` with anything that looks like a credential removed: every `http(s)://`
-/// URL replaced by its [`redact_url`] form, the values of [`SECRET_PARAMS`]
-/// (`name=value`, `"name":"value"`) and of `Bearer …` replaced by `[redacted]`.
+/// URL replaced by its [`redact_url`] form, and the values of [`SECRET_PARAMS`]
+/// and of `Bearer …` replaced by `[redacted]`. A parameter matches as
+/// `name=value`, `name%3Dvalue`, `"name": value` / `"name":"value"` (JSON, also
+/// with escaped quotes) and `name: "value"` (Rust `Debug`). ANSI escapes are
+/// looked through; text that needed scrubbing comes back without them.
 ///
 /// The safety net at output sinks (see the module doc); text built by gogo
 /// should already be clean.
 pub fn scrub_text(text: &str) -> String {
-    scrub_params(&scrub_urls(text))
+    let plain = strip_ansi(text);
+    let out = scrub_params(&scrub_urls(&plain));
+    if out == plain { text.to_string() } else { out }
 }
 
-/// Where a URL (or a parameter value) ends in free text.
-fn ends_token(c: char) -> bool {
-    c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | '`' | ')' | ']' | '}' | ',')
+/// `text` without ANSI CSI sequences (`ESC [ … final`), as styled logs carry.
+fn strip_ansi(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains('\u{1b}') {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for f in chars.by_ref() {
+                if ('\u{40}'..='\u{7e}').contains(&f) {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+/// Where a URL ends in free text.
+fn ends_url(c: char) -> bool {
+    c.is_whitespace()
+        || matches!(
+            c,
+            '"' | '\'' | '\\' | '<' | '>' | '`' | ')' | ']' | '}' | ','
+        )
+}
+
+/// Where an unquoted secret value ends: never at `/` or `~`, which tokens and
+/// CDN paths contain.
+fn ends_value(c: char) -> bool {
+    c.is_whitespace()
+        || matches!(
+            c,
+            '"' | '\'' | '\\' | '&' | ';' | '#' | ',' | ')' | ']' | '}' | '<' | '>' | '`'
+        )
 }
 
 fn scrub_urls(text: &str) -> String {
+    // Lowercased once: offsets match, as ASCII lowercasing keeps byte lengths.
+    let lower = text.to_ascii_lowercase();
     let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(at) = find_scheme(rest) {
-        out.push_str(&rest[..at]);
-        let tail = &rest[at..];
-        let end = tail.find(ends_token).unwrap_or(tail.len());
-        let raw = &tail[..end];
-        match Url::parse(raw) {
+    let mut pos = 0;
+    loop {
+        let rest = &lower[pos..];
+        let Some(at) = [rest.find("https://"), rest.find("http://")]
+            .into_iter()
+            .flatten()
+            .min()
+        else {
+            break;
+        };
+        let start = pos + at;
+        out.push_str(&text[pos..start]);
+        let tail = &text[start..];
+        let end = start + tail.find(ends_url).unwrap_or(tail.len());
+        match Url::parse(&text[start..end]) {
             Ok(u) => out.push_str(&redact_url(&u)),
             Err(_) => out.push_str("[redacted url]"),
         }
-        rest = &tail[end..];
+        pos = end;
     }
-    out.push_str(rest);
+    out.push_str(&text[pos..]);
     out
 }
 
-/// The byte offset of the next `http://` or `https://`, case-insensitively.
-fn find_scheme(s: &str) -> Option<usize> {
-    let lower = s.to_ascii_lowercase();
-    [lower.find("https://"), lower.find("http://")]
-        .into_iter()
-        .flatten()
-        .min()
+/// `spans` sorted, overlapping or touching ones merged into one.
+fn merge_spans(mut spans: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    spans.sort();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (s, e) in spans {
+        match merged.last_mut() {
+            Some(last) if s <= last.1 => last.1 = last.1.max(e),
+            _ => merged.push((s, e)),
+        }
+    }
+    merged
+}
+
+/// A quote as text may carry it: `"`, `'`, or JSON-escaped `\"`.
+fn strip_quote(t: &str) -> Option<&str> {
+    t.strip_prefix("\\\"")
+        .or_else(|| t.strip_prefix(['"', '\'']))
+}
+
+/// The value span after a parameter name ends at `after`, if a separator and a
+/// value follow.
+fn value_span(text: &str, after: usize) -> Option<(usize, usize)> {
+    let t = &text[after..];
+    let (key_quoted, t) = match strip_quote(t) {
+        Some(r) => (true, r),
+        None => (false, t),
+    };
+    let t = if let Some(r) = t.strip_prefix('=') {
+        r
+    } else if t.len() >= 3 && t[..3].eq_ignore_ascii_case("%3d") {
+        &t[3..]
+    } else {
+        let r = t.trim_start().strip_prefix(':')?.trim_start();
+        // `name: 3` is Debug of an ordinary field; only a quoted key or a
+        // quoted value says this is a parameter.
+        if !key_quoted && strip_quote(r).is_none() {
+            return None;
+        }
+        r
+    };
+    let (quoted, v) = match strip_quote(t) {
+        Some(r) => (true, r),
+        None => (false, t),
+    };
+    let start = text.len() - v.len();
+    let len = if quoted {
+        v.find(['"', '\'', '\\'])
+    } else {
+        v.find(ends_value)
+    }
+    .unwrap_or(v.len());
+    (len > 0).then_some((start, start + len))
 }
 
 fn scrub_params(text: &str) -> String {
     let lower = text.to_ascii_lowercase();
     let bytes = text.as_bytes();
-    // Value spans to replace, as (start, end) byte offsets.
     let mut spans: Vec<(usize, usize)> = Vec::new();
-    let value_end = |from: usize, quoted: bool| -> usize {
-        let t = &text[from..];
-        let stop = if quoted {
-            t.find(['"', '\''])
-        } else {
-            t.find(|c: char| ends_token(c) || matches!(c, '&' | '~' | '/' | ';'))
-        };
-        from + stop.unwrap_or(t.len())
-    };
     for name in SECRET_PARAMS {
         let mut from = 0;
         while let Some(i) = lower[from..].find(name) {
             let start = from + i;
             let after = start + name.len();
             from = after;
-            let boundary = start == 0
-                || !(bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
-            if !boundary {
+            let prev = start.checked_sub(1).map(|p| bytes[p]);
+            if prev.is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_') {
                 continue;
             }
-            let t = &text[after..];
-            if let Some(v) = t.strip_prefix('=') {
-                // `name="value"` is how tracing's fmt shows a string field.
-                let (v, quoted) = match v.strip_prefix(['"', '\'']) {
-                    Some(q) => (q, true),
-                    None => (v, false),
-                };
-                let vs = text.len() - v.len();
-                spans.push((vs, value_end(vs, quoted)));
-            } else if let Some(v) = strip_json_key(t) {
-                let vs = text.len() - v.len();
-                spans.push((vs, value_end(vs, true)));
-            }
+            spans.extend(value_span(text, after));
         }
     }
     let mut from = 0;
     while let Some(i) = lower[from..].find("bearer ") {
         let vs = from + i + "bearer ".len();
-        spans.push((vs, value_end(vs, false)));
+        let len = text[vs..].find(ends_value).unwrap_or(text.len() - vs);
+        if len > 0 {
+            spans.push((vs, vs + len));
+        }
         from = vs;
     }
-    spans.retain(|(s, e)| e > s);
-    spans.sort();
     let mut out = String::with_capacity(text.len());
     let mut pos = 0;
-    for (s, e) in spans {
-        if s < pos {
-            continue;
-        }
+    for (s, e) in merge_spans(spans) {
         out.push_str(&text[pos..s]);
         out.push_str("[redacted]");
         pos = e;
     }
     out.push_str(&text[pos..]);
     out
-}
-
-/// After a key: `": "`, `":"` (JSON) or `: "` (Rust `Debug`), up to the
-/// opening quote of a string value.
-fn strip_json_key(t: &str) -> Option<&str> {
-    let t = t.strip_prefix(['"', '\'']).unwrap_or(t);
-    let t = t.trim_start().strip_prefix(':')?;
-    let t = t.trim_start();
-    t.strip_prefix(['"', '\''])
 }
 
 #[cfg(test)]

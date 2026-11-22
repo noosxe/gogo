@@ -93,8 +93,8 @@ progress, not retrying), and any progress resets the timer. Exceeded → `FileFa
   gog-warp's `Debug` and `source()` hand on the reqwest error (its `Display` is a fixed
   phrase per kind). So library error text is never formatted as-is:
   - `redact_url(u: &Url) -> String`: scheme + host (+ port) + the first path segment only
-    if it is a plain route word (`v1`, `secure`), then `[redacted N segments]`; userinfo,
-    query and fragment dropped. A CDN link becomes
+    if it is a plain route word (`[a-z0-9_-]`, at most 16 characters: `v1`, `secure`), then
+    `[redacted N segments]`; userinfo, query and fragment dropped. A CDN link becomes
     `https://gog-cdn-fastly.gog.com/[redacted N segments]`.
   - `describe_error(&dyn Error) -> String`: an error chain in gogo's words. Only known
     types are shown: reqwest (kind or `HTTP <status>`, plus the redacted URL), gog-warp
@@ -118,7 +118,9 @@ progress, not retrying), and any progress resets the timer. Exceeded → `FileFa
   notes, and the log writer (every formatted tracing line, dependencies' included) — text
   goes through `scrub_text`, which replaces each `http(s)://` URL by its `redact_url` form and
   the values of `refresh_token`, `access_token`, `id_token`, `client_secret`, `code`, `token`,
-  `password`, `session_id` and `Bearer …` by `[redacted]`. Text gogo builds is already clean;
+  `password`, `session_id`, the CDN token's `nva`/`acl`/`hmac` and `Bearer …` by `[redacted]`
+  (as `name=value`, `name%3Dvalue`, JSON with plain or escaped quotes, and Rust `Debug`).
+  It looks through ANSI escapes, so styled log lines are matched too. Text gogo builds is already clean;
   this catches what a later change or dependency bump lets through.
 - Tests plant made-up secrets in real reqwest errors (status, connect, decode, timeout) and
   assert they appear in no `Display`, `Debug`, anyhow `{:#}` chain, serialized progress event

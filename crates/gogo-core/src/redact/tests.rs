@@ -382,3 +382,85 @@ fn no_crate_turns_on_verbose_connection_logging() {
     }
     assert!(seen > 50, "walked {seen} files");
 }
+
+#[test]
+fn scrub_text_cdn_token_without_a_scheme() {
+    // The token's `hmac` comes after `~`, which once ended the value.
+    let t = scrub_text(&format!(
+        "GET /token=nva=1~hmac={CDN}~dirs=/x/secure/a.bin failed"
+    ));
+    assert_clean("cdn path", &t);
+    assert_eq!(t, "GET /token=[redacted] failed");
+    let t = scrub_text(&format!("acl=/x/*~hmac={CDN}"));
+    assert_clean("akamai", &t);
+    assert_clean("hmac alone", &scrub_text(&format!("sig hmac={CDN}")));
+}
+
+#[test]
+fn scrub_text_escaped_encoded_and_numeric_values() {
+    let cases = [
+        // Debug of a JSON string inside a tracing field.
+        format!(r#"body="{{\"refresh_token\":\"{REFRESH}\",\"x\":1}}""#),
+        format!(r#"{{\"code\": \"{CODE}\"}}"#),
+        format!("q=refresh_token%3D{REFRESH}%26x%3D1"),
+        format!("q=client_secret%3d{SECRET}"),
+    ];
+    for c in &cases {
+        assert_clean(c, &scrub_text(c));
+    }
+    assert_eq!(
+        scrub_text(r#"{"code": 123456, "x": 1}"#),
+        r#"{"code": [redacted], "x": 1}"#
+    );
+    // `name: 3` unquoted is an ordinary Debug field, left alone.
+    assert_eq!(
+        scrub_text("ExitStatus { code: 3 }"),
+        "ExitStatus { code: 3 }"
+    );
+}
+
+#[test]
+fn scrub_text_values_run_past_slash_and_tilde() {
+    assert_eq!(scrub_text("code=abc/def next"), "code=[redacted] next");
+    assert_eq!(
+        scrub_text("refresh_token=a~b&x=1"),
+        "refresh_token=[redacted]&x=1"
+    );
+    assert_eq!(scrub_text("token=a/b;c"), "token=[redacted];c");
+    assert_eq!(scrub_text("password=p#frag"), "password=[redacted]#frag");
+}
+
+#[test]
+fn scrub_spans_merge_when_they_overlap() {
+    assert_eq!(merge_spans(vec![(5, 9), (0, 6)]), vec![(0, 9)]);
+    // Starts inside an earlier one and ends past it: one span to the far end.
+    assert_eq!(
+        merge_spans(vec![(0, 4), (2, 10), (12, 14)]),
+        vec![(0, 10), (12, 14)]
+    );
+    assert_eq!(merge_spans(vec![(0, 4), (4, 6)]), vec![(0, 6)]);
+}
+
+#[test]
+fn scrub_text_looks_through_ansi() {
+    // tracing's fmt styling of a field: italic name, dimmed `=`.
+    let styled = format!("\u{1b}[3mrefresh_token\u{1b}[0m\u{1b}[2m=\u{1b}[0m\"{REFRESH}\" done");
+    let t = scrub_text(&styled);
+    assert_clean("ansi", &t);
+    assert_eq!(t, "refresh_token=\"[redacted]\" done");
+    // Nothing to scrub: the styling stays.
+    let clean = "\u{1b}[2mplain\u{1b}[0m";
+    assert_eq!(scrub_text(clean), clean);
+}
+
+#[test]
+fn scrub_text_several_urls_any_case() {
+    let t = scrub_text(&format!(
+        "a HTTPS://A.example/x?token={CDN} b http://b.example/y?code={CODE} c https://c.example/v1"
+    ));
+    assert_clean("urls", &t);
+    assert_eq!(
+        t,
+        "a https://a.example/x b http://b.example/y c https://c.example/v1"
+    );
+}
