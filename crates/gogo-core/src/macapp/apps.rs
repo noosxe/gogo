@@ -153,7 +153,10 @@ pub fn game_ids() -> Result<Vec<String>, MacAppError> {
 /// Every game under `games/`, by gogid. `logs` is the launch-log root
 /// (`~/Library/Logs/gogo`).
 pub fn list(logs: &Path) -> Result<Vec<App>, MacAppError> {
-    game_ids()?.iter().map(|gogid| read(gogid, logs)).collect()
+    game_ids()?
+        .iter()
+        .map(|gogid| read(gogid, logs, false))
+        .collect()
 }
 
 /// The game `target` (a gogid or its `.app`) names, if it is set up here.
@@ -163,25 +166,16 @@ pub fn get(target: &str, logs: &Path) -> Result<Option<App>, MacAppError> {
     if !dirs.root.is_dir() && launch::recorded_location(&gogid).is_none() {
         return Ok(None);
     }
-    let mut app = read(&gogid, logs)?;
     // One game: a build from before the SDK scan gets it looked at now.
-    if let Some(g) = app.galaxy.as_mut()
-        && g.sdk.is_none()
-    {
-        let tree = crate::linuxapp::game::read_launch_toml(&dirs)
-            .ok()
-            .and_then(|(t, _)| t.tree_name());
-        g.sdk = Some(crate::linuxapp::galaxy_switch::detect_sdk(
-            &crate::linuxapp::setup::game_files(&dirs, tree.as_deref()),
-        ));
-    }
-    Ok(Some(app))
+    read(&gogid, logs, true).map(Some)
 }
 
-fn read(gogid: &str, logs: &Path) -> Result<App, MacAppError> {
+/// `scan`: look in a Linux game's files for what `state.toml` doesn't record
+/// (the Galaxy SDK of an old build); a listing leaves it.
+fn read(gogid: &str, logs: &Path, scan: bool) -> Result<App, MacAppError> {
     let dirs = GameDirs::for_game(gogid)?;
     if crate::linuxapp::game::launch_toml_path(&dirs).is_file() {
-        return Ok(read_linux(gogid, dirs, logs));
+        return Ok(read_linux(gogid, dirs, logs, scan));
     }
     // A state.toml gogo can't read still leaves a game to list or remove.
     let state = GameState::load(&dirs.state_toml).ok().flatten();
@@ -230,7 +224,7 @@ fn read(gogid: &str, logs: &Path) -> Result<App, MacAppError> {
 
 /// A `gogo linux-app` game: `state.toml` is [`LinuxState`]'s, the title
 /// falls back to the baked TOML's.
-fn read_linux(gogid: &str, dirs: GameDirs, logs: &Path) -> App {
+fn read_linux(gogid: &str, dirs: GameDirs, logs: &Path, scan: bool) -> App {
     use crate::linuxapp::game;
     let state = LinuxState::load(&dirs.state_toml).ok().flatten();
     let title = state
@@ -249,7 +243,7 @@ fn read_linux(gogid: &str, dirs: GameDirs, logs: &Path) -> App {
         &dirs.root,
         &crate::linuxapp::snapshots::Backends::real(),
     ));
-    let galaxy = crate::linuxapp::galaxy_switch::view(gogid, &dirs, tree.as_deref(), false);
+    let galaxy = crate::linuxapp::galaxy_switch::view(gogid, &dirs, tree.as_deref(), scan);
     App {
         snapshots,
         galaxy,

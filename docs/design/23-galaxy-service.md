@@ -182,10 +182,12 @@ cross-progression saves) can. gogo isn't a launcher a game is started from: the 
   can't hold the choice). `gogo linux-app galaxy <gogid> on|off|--clear` edits it; setup renders
   `GALAXY='1'` into `launch.conf` (no line when off), so `launch.sh` is unchanged and
   `LAUNCHER_VERSION` stays 18. A built game picks it up on its next launch's setup.
-- **Who decides** (`linuxapp::galaxy_switch`): the game's own L4 value, `off` included; else,
-  for a candidate (a compat layer recommends `comet`, or the game ships the SDK),
-  `[linux] galaxy_default`: `on` turns it on, `ask` asks, `off` (unset) leaves it off. A compat
-  `galaxy = "comet"` is a recommendation only and never turns anything on by itself.
+- **Who decides** (`linuxapp::galaxy_switch`, one merged compat for setup, its question,
+  `apps show` and `doctor`): the game's own L4 value, `off` included; else `[linux]
+  galaxy_default`: `on` turns it on for a game that ships the SDK, `ask` asks about a game that
+  ships it or that compat recommends Comet for, `off` (unset) leaves it off. A compat
+  `galaxy = "comet"` is a recommendation only and never turns anything on by itself; `off` is
+  the game's own override only (in a shipped file it warns and is ignored).
 - **`ask`.** Only inside setup run from a terminal (a build, `linux-app setup`): one prompt per
   candidate game, the answer stored in L4 (`on` or `off`), so it is never asked twice. Headless
   (the launcher's setup, a script) it acts as `off` and leaves a note naming the command. Never
@@ -193,10 +195,14 @@ cross-progression saves) can. gogo isn't a launcher a game is started from: the 
 - **No download.** `galaxy on` writes the switch and, when Comet isn't available, prints the
   `gogo runtimes install comet` hint; the launch skips Comet until then.
 - **SDK detection.** Setup walks the game's files (depth- and count-bounded, symlinks not
-  followed) for `Galaxy.dll` / `Galaxy64.dll` in any case and records `galaxy_sdk` in
-  `state.toml` (optional field, no schema bump; kept while the launch.toml and L4 stamp stays
-  the same, so the walk doesn't repeat). A build from before it has no record: `apps show`,
-  `linux-app galaxy` and `doctor` scan on demand and write nothing.
+  followed) for `Galaxy.dll` / `Galaxy64.dll` in any case on every setup and records
+  `galaxy_sdk` in `state.toml` (optional field, no schema bump). A scan that hits its bounds
+  (depth 8, 100,000 entries) or can't read a dir records nothing (`None`, "unknown"), not
+  "not found". A build from before it has no record: `apps show` (one game),
+  `linux-app galaxy` and `doctor` scan on demand and write nothing; `apps list` doesn't scan.
+  A changed `galaxy_default` or a game update is picked up by the next setup run (an explicit
+  `linux-app setup`, a rebuild, or any change that makes the launcher's setup run); the
+  launcher's own staleness check still covers `launch.toml` and the L4 file only.
 - **`apps show`:** `galaxy: comet on (<ver>)` / `off` (`comet on (not installed)`, `off (compat
   recommends comet)`, a pending change) and `Galaxy SDK: shipped | not found | unknown`; both in
   `--json`.

@@ -587,7 +587,13 @@ pub fn parse(raw: &str, os: Os, layer: Layer) -> Result<Parsed, String> {
             return Err(format!("`platforms.{name}` must be a table"));
         };
         let prefix = format!("platforms.{name}.");
-        let e = platform_entry(t, p, &prefix, &mut warnings)?;
+        let mut e = platform_entry(t, p, &prefix, &mut warnings)?;
+        if layer != Layer::User && e.galaxy == Some(GalaxyMode::Off) {
+            warnings.push(format!(
+                "`{prefix}galaxy = \"off\"` is only for the game's own override file: ignored"
+            ));
+            e.galaxy = None;
+        }
         if p == os {
             own = Some(e);
         }
