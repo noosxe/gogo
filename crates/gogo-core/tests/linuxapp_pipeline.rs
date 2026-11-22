@@ -15430,10 +15430,12 @@ mod galaxy {
         assert!(out.status.success());
         let run = g.w.runs().pop().unwrap();
         let pid = started_pid(&run);
+        // A loaded machine may take longer than the stop's 1 s wait after
+        // TERM to reap it: the line says so, and it goes all the same.
+        let term = format!("# galaxy: comet (pid {pid}) didn't stop on INT in 2s: TERM");
         assert!(
-            run.contains(&format!(
-                "# galaxy: comet (pid {pid}) didn't stop on INT in 2s: TERM\n"
-            )),
+            run.contains(&format!("{term}\n"))
+                || run.contains(&format!("{term}, still running after 1s\n")),
             "{run}"
         );
         assert!(wait_until(5, || gone(pid)));
