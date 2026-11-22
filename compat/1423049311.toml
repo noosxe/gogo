@@ -2,7 +2,8 @@
 # primary task is REDprelauncher.exe, a launcher, so gogo starts the game task
 # bin/x64/Cyberpunk2077.exe (#107). e2e/1423049311.toml, built from the 2.31a
 # offline installer (#228). The depot build has a host pass on Hyprland/NVIDIA:
-# it plays, with both DLC added by `gogo linux-app dlc add` (#343).
+# it plays, with both DLC added by `gogo linux-app dlc add` (#343). Comet
+# (`galaxy = "comet"`) is recommended: see the depot lane note (#507).
 title  = "Cyberpunk 2077"
 source = "gogo-headless"
 
@@ -10,6 +11,7 @@ source = "gogo-headless"
 status = "boots"
 lane   = "installer"
 source = "gogo-host"
+galaxy = "comet"
 notes  = "headless sway: intro and the title screen on VKD3D-Proton with NVAPI and DLSS loaded, 3 runs; the title screen ignores the harness's input (#236), so the menu, play, audio and a real compositor are not judged"
 tested = [
   { runtime = "ge-proton/GE-Proton11-12", compositor = { name = "sway", version = "1.12" }, gpu_driver = { vendor = "nvidia", version = "595.112.07" }, date = 2026-11-07 },
@@ -17,7 +19,8 @@ tested = [
 
 [platforms.linux.lanes.depot]
 status = "plays"
-notes  = "host pass: plays on Xwayland and on Wine's Wayland driver; DLSS, ray tracing and path tracing work, built-in benchmark at 4K ~150 fps (~100 with path tracing); HDR works on Wayland but needs `--hdr force` under Hyprland's cm_auto_hdr (#340); REDmod and Phantom Liberty added with `gogo linux-app dlc add`, the game detects Phantom Liberty (#343); on 2026-11-11 the game was removed and rebuilt with both DLC chosen at build time through the `linux-app` DLC selection (#349): both install and work, no different from adding them later, and the rebuild reused the base game from the depot cache"
+notes  = "host pass: plays on Xwayland and on Wine's Wayland driver; DLSS, ray tracing and path tracing work, built-in benchmark at 4K ~150 fps (~100 with path tracing); HDR works on Wayland but needs `--hdr force` under Hyprland's cm_auto_hdr (#340); REDmod and Phantom Liberty added with `gogo linux-app dlc add`, the game detects Phantom Liberty (#343); on 2026-11-11 the game was removed and rebuilt with both DLC chosen at build time through the `linux-app` DLC selection (#349): both install and work, no different from adding them later, and the rebuild reused the base game from the depot cache; on 2026-11-22 with Comet (`gogo linux-app galaxy <gogid> on`) the game is signed in and shows the CD PROJEKT RED cross-progression saves (not GOG cloud saves), Comet starts and stops with the game, and the start-screen wait drops from ~30 s to ~5-7 s (#508)"
 tested = [
   { runtime = "ge-proton/GE-Proton11-12", compositor = { name = "hyprland", version = "0.57.1" }, gpu_driver = { vendor = "nvidia", version = "595.112.07" }, date = 2026-11-11 },
+  { runtime = "ge-proton/GE-Proton11-12", compositor = { name = "hyprland", version = "0.57.2" }, gpu_driver = { vendor = "nvidia", version = "595.112.07" }, date = 2026-11-22 },
 ]
