@@ -59,7 +59,9 @@ pub const RUNTIME_SUBDIR: &str = "gogo";
 /// records and `.comet`, the pid and start time of the Comet gogo started.
 pub const REGISTRY: &str = "comet";
 
-/// The credential dirs, `$XDG_RUNTIME_DIR/gogo/auth-<pid>-<nonce>/`.
+/// The credential dirs, `$XDG_RUNTIME_DIR/gogo/auth-<pid>-<start time>-<nonce>/`:
+/// the writer's pid and start time, so a sweep can tell a dead run's dir
+/// from a live one's even after the pid is reused.
 const AUTH_PREFIX: &str = "auth-";
 
 /// Comet's name for the user when GOG can't be asked and none is cached.
@@ -416,6 +418,9 @@ async fn run(s: &Start<'_>, account: &dyn Account) -> Outcome {
             // Comet read the file before it bound the port.
             drop(file);
             let pid = child.disarm();
+            // The launcher stops what `.comet` names, so only gogo writes it,
+            // with the pid it spawned (never one read from output).
+            record_owner(&runtime.join(REGISTRY), pid);
             return Outcome::Started {
                 comet: super::comet::label(comet),
                 pid,
@@ -523,22 +528,43 @@ fn owned_private_dir(p: &Path) -> bool {
     m.is_dir() && m.uid() == rustix::process::geteuid().as_raw() && m.mode() & 0o077 == 0
 }
 
-/// Credential dirs a run that died (SIGKILL, power) left: their pid is gone.
+/// `<registry>/.comet`: `<pid> <start time>` of the Comet just started,
+/// written through a rename. Best effort: without it the launcher stops
+/// nothing and `--quit` is the backstop.
+fn record_owner(registry: &Path, pid: u32) {
+    let Some(start) = proc_start(pid) else {
+        return;
+    };
+    if private_dir_all(registry).is_err() || !owned_private_dir(registry) {
+        return;
+    }
+    let tmp = registry.join(format!(".comet.{}", std::process::id()));
+    if std::fs::write(&tmp, format!("{pid} {start}\n")).is_ok() {
+        let _ = std::fs::rename(&tmp, registry.join(".comet"));
+    }
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// Credential dirs a run that died (SIGKILL, power) left: the pid in their
+/// name isn't the process that started then.
 fn sweep_stale(runtime: &Path) {
     let Ok(rd) = std::fs::read_dir(runtime) else {
         return;
     };
     for e in rd.flatten() {
         let name = e.file_name();
-        let Some(pid) = name
-            .to_str()
-            .and_then(|n| n.strip_prefix(AUTH_PREFIX))
-            .and_then(|n| n.split('-').next())
-            .and_then(|p| p.parse::<u32>().ok())
-        else {
+        let Some(rest) = name.to_str().and_then(|n| n.strip_prefix(AUTH_PREFIX)) else {
             continue;
         };
-        if pid != std::process::id() && !Path::new(&format!("/proc/{pid}")).exists() {
+        let mut parts = rest.split('-');
+        let (Some(pid), start) = (
+            parts.next().and_then(|p| p.parse::<u32>().ok()),
+            parts.next(),
+        ) else {
+            let _ = std::fs::remove_dir_all(e.path());
+            continue;
+        };
+        if start.is_none() || proc_start(pid).as_deref() != start {
             let _ = std::fs::remove_dir_all(e.path());
         }
     }
@@ -586,15 +612,14 @@ impl CredentialFile {
         use std::io::Write as _;
         use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
         let mut tries = 0;
+        let me = std::process::id();
+        let start = proc_start(me).unwrap_or_else(|| "0".into());
         let root = loop {
             let nanos = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.subsec_nanos())
                 .unwrap_or(0);
-            let p = runtime.join(format!(
-                "{AUTH_PREFIX}{}-{nanos:08x}{tries}",
-                std::process::id()
-            ));
+            let p = runtime.join(format!("{AUTH_PREFIX}{me}-{start}-{nanos:08x}{tries}"));
             // Not recursive: an existing dir is never reused.
             match std::fs::DirBuilder::new().mode(0o700).create(&p) {
                 Ok(()) => break p,
@@ -712,9 +737,11 @@ fn proc_start(pid: u32) -> Option<String> {
     (f.first() != Some(&"Z")).then(|| f.get(19).map(|s| s.to_string()))?
 }
 
-/// No core dumps of this process or (the limit is inherited) of the Comet
-/// it starts, which hold the tokens; and this process not dumpable, so no
-/// other process of the user can read its memory. Best effort.
+/// No core dumps of this process or of the Comet it starts, which holds the
+/// tokens for the whole game: `RLIMIT_CORE` 0 is inherited across exec.
+/// This process is also made non-dumpable (no core, and other processes of
+/// the user can't read its memory); that one is reset by exec, so it covers
+/// gogo only, not Comet. Best effort.
 pub fn harden() {
     use rustix::process::{Resource, Rlimit, setrlimit};
     let _ = setrlimit(
