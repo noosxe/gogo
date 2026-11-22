@@ -3314,7 +3314,35 @@ case "$2" in
     if grep -q wined3d "$l4" 2>/dev/null; then echo "gogo: $3: no more renderers" >&2; exit 1; fi
     [ "${4:-}" = --dry-run ] || { mkdir -p "$GOGO_HOME/compat"; printf '[platforms.linux]\nrenderer = "wined3d"\n' > "$l4"; }
     echo wined3d;;
+  galaxy-start)
+    # What must never reach a log (design 23 decision 7).
+    echo "FAKE-REFRESH-0d15ea5e7731 on gogo's stderr" >&2
+    case "${FAKE_GALAXY:-start}" in
+      start)
+        # The launcher runs this with INT ignored (an async command): Comet's
+        # is the default.
+        setsid env --default-signal=INT "$FAKE_COMET" </dev/null >/dev/null 2>&1 &
+        c=$!
+        i=0
+        while [ "$i" -lt 50 ] && ! grep -qx "up $c" "$FAKE_COMET_LOG" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done
+        echo "comet 0.4.1 started (pid $c)";;
+      reuse) echo "reusing port 9977 (gogo's comet)";;
+      *) echo "skipped: $FAKE_GALAXY";;
+    esac;;
 esac
+"#;
+
+/// The fake Comet `galaxy-start` starts: it logs `up`, `INT` and `TERM`
+/// with its pid; `FAKE_COMET_DEAF` ignores INT.
+const FAKE_COMET: &str = r#"#!/usr/bin/env bash
+echo "up $$" >> "$FAKE_COMET_LOG"
+if [ -n "${FAKE_COMET_DEAF:-}" ]; then
+  trap '' INT
+else
+  trap 'echo "INT $$" >> "$FAKE_COMET_LOG"; exit 0' INT
+fi
+trap 'echo "TERM $$" >> "$FAKE_COMET_LOG"; exit 0' TERM
+while :; do sleep 0.1; done
 "#;
 
 /// What `launch.sh` and the fakes run, linked from the test's PATH.
@@ -3664,7 +3692,7 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
     // next setup, which says so; an unchanged one isn't touched.
     std::fs::write(
         &sh,
-        script.replace("LAUNCHER_VERSION=17", "LAUNCHER_VERSION=0"),
+        script.replace("LAUNCHER_VERSION=18", "LAUNCHER_VERSION=0"),
     )
     .unwrap();
     std::fs::write(&desktop, "[Desktop Entry]\nExec=/old/root/launch.sh\n").unwrap();
@@ -3672,7 +3700,7 @@ fn build_writes_the_launcher_menu_entry_and_icon_and_setup_keeps_them_current() 
     assert_eq!(std::fs::read_to_string(&sh).unwrap(), script);
     assert_eq!(std::fs::read_to_string(&desktop).unwrap(), entry);
     assert!(
-        out.notes.iter().any(|n| n == "launch.sh: launcher 0 -> 17"),
+        out.notes.iter().any(|n| n == "launch.sh: launcher 0 -> 18"),
         "{:?}",
         out.notes
     );
@@ -3737,7 +3765,7 @@ fn the_launcher_runs_umu_with_the_games_environment_and_logs_the_run() {
     let run = &runs[0];
     for want in [
         format!("# gogo run log: Test Game ({ID})\n"),
-        "# launcher: 17\n".into(),
+        "# launcher: 18\n".into(),
         format!(
             "# runtime: path:{} (1793687165 GE-Proton10-34)\n",
             w.build.display()
@@ -6015,7 +6043,7 @@ fn the_launcher_of_a_library_game_keeps_gogos_data_root() {
     );
     // Logs stay under the data root, not the library's parent.
     assert_eq!(w.runs().len(), 1, "run logs under {:?}", w.logs());
-    assert!(w.launch_log().contains("launcher 17"));
+    assert!(w.launch_log().contains("launcher 18"));
     assert!(!w.root.join("big drive/logs").exists());
 
     // Stale config: setup runs with gogo's data root as GOGO_HOME, and from
@@ -15204,6 +15232,371 @@ mod update {
                 content_before
             );
             no_leftovers(&w);
+        }
+    }
+}
+
+/// Comet around a launch (design 23 §2, #488) with a fake gogo and a fake
+/// Comet; the real hand-off is `gogo::linuxapp::galaxy`'s tests.
+mod galaxy {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    /// Planted where a token could leak from.
+    const PLANTED: &str = "FAKE-REFRESH-0d15ea5e7731";
+
+    struct G {
+        w: World,
+        runtime: PathBuf,
+        comet_log: PathBuf,
+        comet: PathBuf,
+    }
+
+    /// A launcher world with `GALAXY=1` and the fake Comet, sharing
+    /// `runtime` (`$XDG_RUNTIME_DIR`) when given.
+    fn world(name: &str, runtime: Option<&Path>) -> Option<G> {
+        let w = World::launcher(name, false)?;
+        let mut conf = w.conf();
+        conf.push_str("GALAXY=1\n");
+        std::fs::write(w.game().join("launch.conf"), conf).unwrap();
+        let runtime = runtime.map(Path::to_path_buf).unwrap_or_else(|| {
+            let r = w.root.join("run");
+            std::fs::create_dir(&r).unwrap();
+            r
+        });
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let comet = w.root.join("fake-comet");
+        std::fs::write(&comet, FAKE_COMET).unwrap();
+        chmod_x(&comet);
+        let comet_log = runtime.join("comet.log");
+        Some(G {
+            w,
+            runtime,
+            comet_log,
+            comet,
+        })
+    }
+
+    impl G {
+        fn env<'a>(&'a self, extra: &[(&'a str, &'a str)]) -> Vec<(&'a str, &'a str)> {
+            let mut env = vec![
+                ("XDG_RUNTIME_DIR", self.runtime.to_str().unwrap()),
+                ("FAKE_COMET", self.comet.to_str().unwrap()),
+                ("FAKE_COMET_LOG", self.comet_log.to_str().unwrap()),
+            ];
+            env.extend_from_slice(extra);
+            env
+        }
+
+        fn comet_log(&self) -> String {
+            std::fs::read_to_string(&self.comet_log).unwrap_or_default()
+        }
+
+        fn registry(&self) -> PathBuf {
+            self.runtime.join("gogo/comet")
+        }
+
+        fn users(&self) -> Vec<String> {
+            std::fs::read_dir(self.registry().join(".users"))
+                .map(|rd| {
+                    rd.flatten()
+                        .map(|e| e.file_name().to_string_lossy().to_string())
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+    }
+
+    /// The pid in `comet 0.4.1 started (pid N)`.
+    fn started_pid(run: &str) -> u32 {
+        let l = run
+            .lines()
+            .find(|l| l.starts_with("# galaxy: comet 0.4.1 started (pid "))
+            .unwrap_or_else(|| panic!("no start line in:\n{run}"));
+        l.trim_start_matches("# galaxy: comet 0.4.1 started (pid ")
+            .trim_end_matches(')')
+            .parse()
+            .unwrap()
+    }
+
+    fn gone(pid: u32) -> bool {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(s) => s.rsplit(") ").next().unwrap().starts_with('Z'),
+            Err(_) => true,
+        }
+    }
+
+    fn assert_no_secret(what: &str, text: &str) {
+        assert!(
+            !text.contains(PLANTED),
+            "{what} holds the planted secret:\n{text}"
+        );
+        assert!(!text.contains("FAKE-REFRESH"), "{what}:\n{text}");
+    }
+
+    #[test]
+    fn nothing_turns_comet_on_without_galaxy_1() {
+        let Some(w) = World::launcher("galaxy-off", false) else {
+            return;
+        };
+        let out = w.launch(&[], &[]);
+        assert!(out.status.success());
+        assert!(
+            !w.calls().iter().any(|c| c.contains("galaxy-start")),
+            "{:?}",
+            w.calls()
+        );
+        let run = w.runs().pop().unwrap();
+        assert!(!run.contains("# galaxy:"), "{run}");
+        assert!(!w.launch_log().contains("galaxy:"), "{}", w.launch_log());
+    }
+
+    #[test]
+    fn comet_starts_before_the_game_and_stops_after_it_and_no_secret_is_logged() {
+        let Some(g) = world("galaxy-start", None) else {
+            return;
+        };
+        let stub = g.w.dialog_stub(&["Save report"]);
+        let env = g.env(&[
+            ("GOGO_LAUNCHER_DIALOG", stub.to_str().unwrap()),
+            ("FAKE_GAME_EXIT", "3"),
+        ]);
+        let out = g.w.launch(&env, &[]);
+        assert_eq!(out.status.code(), Some(3));
+        let calls = g.w.calls();
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.ends_with(&format!("linux-app galaxy-start {ID} --launcher"))),
+            "{calls:?}"
+        );
+        let run = g.w.runs().pop().unwrap();
+        let pid = started_pid(&run);
+        // The first line after the header, before the game's output; the
+        // stop line in the footer.
+        let after_header = run.split("# ---\n").nth(1).unwrap();
+        assert!(
+            after_header.starts_with(&format!("# galaxy: comet 0.4.1 started (pid {pid})\n")),
+            "{run}"
+        );
+        let footer = run.split("# ---\n").nth(2).unwrap();
+        assert!(
+            footer.starts_with(&format!("# galaxy: stopped comet (pid {pid})\n# exit: 3")),
+            "{run}"
+        );
+        assert!(gone(pid));
+        assert!(
+            g.comet_log().contains(&format!("INT {pid}")),
+            "{}",
+            g.comet_log()
+        );
+        assert!(g.users().is_empty(), "{:?}", g.users());
+        assert!(!g.registry().join(".comet").exists());
+        let report = std::fs::read_to_string(g.w.logs().join("report.txt")).unwrap();
+        assert!(report.contains("# galaxy: comet 0.4.1 started"), "{report}");
+        // Comet's line isn't one of the game's errors.
+        assert!(
+            !report
+                .split("--- last 40 log lines ---")
+                .nth(1)
+                .unwrap()
+                .contains("# galaxy:"),
+            "{report}"
+        );
+        assert_no_secret("the run log", &run);
+        assert_no_secret("launch.log", &g.w.launch_log());
+        assert_no_secret("report.txt", &report);
+        assert_no_secret(
+            "the launcher's stderr",
+            &String::from_utf8_lossy(&out.stderr),
+        );
+        assert_no_secret(
+            "the launcher's stdout",
+            &String::from_utf8_lossy(&out.stdout),
+        );
+    }
+
+    #[test]
+    fn a_comet_deaf_to_int_gets_term_after_2s() {
+        let Some(g) = world("galaxy-deaf", None) else {
+            return;
+        };
+        let out = g.w.launch(&g.env(&[("FAKE_COMET_DEAF", "1")]), &[]);
+        assert!(out.status.success());
+        let run = g.w.runs().pop().unwrap();
+        let pid = started_pid(&run);
+        assert!(
+            run.contains(&format!(
+                "# galaxy: comet (pid {pid}) didn't stop on INT in 2s: TERM\n"
+            )),
+            "{run}"
+        );
+        assert!(wait_until(5, || gone(pid)));
+        assert!(g.comet_log().contains(&format!("TERM {pid}")));
+    }
+
+    #[test]
+    fn a_port_in_use_is_reused_and_nothing_is_stopped() {
+        let Some(g) = world("galaxy-reuse", None) else {
+            return;
+        };
+        let out = g.w.launch(&g.env(&[("FAKE_GALAXY", "reuse")]), &[]);
+        assert!(out.status.success());
+        let run = g.w.runs().pop().unwrap();
+        assert!(
+            run.contains("# galaxy: reusing port 9977 (gogo's comet)\n"),
+            "{run}"
+        );
+        assert!(
+            run.contains("# galaxy: nothing of gogo's to stop\n"),
+            "{run}"
+        );
+        assert!(g.users().is_empty());
+    }
+
+    #[test]
+    fn a_skip_is_one_line_and_the_game_starts() {
+        let Some(g) = world("galaxy-skip", None) else {
+            return;
+        };
+        let out = g.w.launch(
+            &g.env(&[("FAKE_GALAXY", "not signed in (gogo login)")]),
+            &[],
+        );
+        assert!(out.status.success());
+        let run = g.w.runs().pop().unwrap();
+        assert_eq!(run.matches("# galaxy:").count(), 1, "{run}");
+        assert!(
+            run.contains("# galaxy: skipped: not signed in (gogo login)\n"),
+            "{run}"
+        );
+        assert!(run.contains("fake-game stdout line"), "{run}");
+        assert!(g.users().is_empty());
+    }
+
+    #[test]
+    fn no_runtime_dir_skips_comet_without_calling_gogo() {
+        let Some(g) = world("galaxy-nort", None) else {
+            return;
+        };
+        let mut c = g.w.launch_cmd(&g.env(&[]), &[]);
+        c.env_remove("XDG_RUNTIME_DIR");
+        let out = c.output().unwrap();
+        assert!(out.status.success());
+        let run = g.w.runs().pop().unwrap();
+        assert!(
+            run.contains("# galaxy: skipped: no XDG_RUNTIME_DIR\n"),
+            "{run}"
+        );
+        assert!(!g.w.calls().iter().any(|c| c.contains("galaxy-start")));
+    }
+
+    #[test]
+    fn a_term_to_the_launcher_stops_comet() {
+        let Some(g) = world("galaxy-term", None) else {
+            return;
+        };
+        let (code, _) = term_hanging_launcher(&g.w, &g.env(&[("GOGO_CLOSE_GRACE_SECS", "1")]));
+        assert_eq!(code, Some(143));
+        let run = g.w.runs().pop().unwrap();
+        let pid = started_pid(&run);
+        assert!(
+            run.contains(&format!("# galaxy: stopped comet (pid {pid})\n")),
+            "{run}"
+        );
+        assert!(gone(pid));
+    }
+
+    #[test]
+    fn the_watchdog_stops_comet_after_the_launcher_is_killed() {
+        let Some(g) = world("galaxy-watchdog", None) else {
+            return;
+        };
+        let mut env = g.env(&[]);
+        env.push(("FAKE_GAME_HANG", "1"));
+        let mut child =
+            g.w.launch_cmd(&env, &[])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+        assert!(hang_ready(&g.w));
+        assert!(wait_until(5, || g.w.launch_log().contains("guard armed")));
+        let pid = started_pid(&g.w.runs().pop().unwrap());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(
+            wait_until(20, || g.w.launch_log().contains("watchdog done")),
+            "{}",
+            g.w.launch_log()
+        );
+        let run = g.w.runs().pop().unwrap();
+        assert!(
+            run.contains(&format!(
+                "# galaxy: stopped comet (pid {pid})\n# exit: 137 (launcher killed)\n"
+            )),
+            "{run}"
+        );
+        assert!(gone(pid));
+        assert!(g.users().is_empty());
+    }
+
+    /// Two launches share one Comet (a second launch of the game, as #103's
+    /// tests run it: only one `World` at a time can hold the process env).
+    /// Comet outlives the first to quit, whichever that is, and goes with
+    /// the last (design 23 §2.2, decision 3).
+    #[test]
+    fn two_launchers_share_one_comet_until_the_last_quits() {
+        for starter_first in [false, true] {
+            let tag = if starter_first { "a" } else { "b" };
+            let Some(g) = world(&format!("galaxy-two-{tag}"), None) else {
+                return;
+            };
+            let (a_secs, b_secs) = if starter_first {
+                ("1", "4")
+            } else {
+                ("4", "1")
+            };
+            let mut first =
+                g.w.launch_cmd(&g.env(&[("FAKE_GAME_SLEEP", a_secs)]), &[])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap();
+            let started = |r: &String| r.contains("# galaxy: comet 0.4.1 started");
+            assert!(wait_until(10, || g.w.runs().iter().any(started)), "{tag}");
+            let pid = started_pid(g.w.runs().iter().find(|r| started(r)).unwrap());
+            let mut second =
+                g.w.launch_cmd(
+                    &g.env(&[("FAKE_GALAXY", "reuse"), ("FAKE_GAME_SLEEP", b_secs)]),
+                    &[],
+                )
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            assert!(first.wait().unwrap().success(), "{tag}");
+            assert!(second.wait().unwrap().success(), "{tag}");
+            let runs = g.w.runs();
+            let ra = runs.iter().find(|r| started(r)).unwrap();
+            let rb = runs
+                .iter()
+                .find(|r| r.contains("# galaxy: reusing port 9977"))
+                .unwrap_or_else(|| panic!("{tag}: {runs:?}"));
+            let (left, last) = if starter_first { (ra, rb) } else { (rb, ra) };
+            assert!(
+                left.contains(&format!(
+                    "# galaxy: comet (pid {pid}) left running for launcher "
+                )),
+                "{tag}: {left}"
+            );
+            assert!(
+                last.contains(&format!("# galaxy: stopped comet (pid {pid})\n")),
+                "{tag}: {last}"
+            );
+            assert!(gone(pid), "{tag}");
+            assert!(g.users().is_empty(), "{:?}", g.users());
+            assert_eq!(g.comet_log().matches("up ").count(), 1, "{}", g.comet_log());
         }
     }
 }

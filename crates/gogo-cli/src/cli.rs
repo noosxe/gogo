@@ -611,6 +611,18 @@ pub enum LinuxAppSub {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Internal: the launcher starts Comet, the Galaxy service stand-in,
+    /// for a game with `GALAXY=1`. Prints one line for the
+    /// run log and exits 0 whatever happens.
+    #[command(hide = true)]
+    GalaxyStart {
+        /// GOG product id.
+        #[arg(value_name = "GOGID")]
+        gogid: String,
+        /// Run by `launch.sh` (the only caller).
+        #[arg(long, required = true)]
+        launcher: bool,
+    },
     /// A game's environment variables: list what it gets at launch and
     /// where each value comes from, or set and unset your own (kept in the
     /// game's override file, `[platforms.linux.env]`; the next launch
@@ -2432,5 +2444,32 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn galaxy_start_is_hidden_and_needs_launcher() {
+        let cli = Cli::try_parse_from([
+            "gogo",
+            "linux-app",
+            "galaxy-start",
+            "1423049311",
+            "--launcher",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::LinuxApp {
+                sub: Some(LinuxAppSub::GalaxyStart { ref gogid, launcher: true }),
+                ..
+            } if gogid == "1423049311"
+        ));
+        assert!(Cli::try_parse_from(["gogo", "linux-app", "galaxy-start", "1"]).is_err());
+        let help = <Cli as clap::CommandFactory>::command()
+            .find_subcommand("linux-app")
+            .unwrap()
+            .clone()
+            .render_long_help()
+            .to_string();
+        assert!(!help.contains("galaxy-start"), "{help}");
     }
 }

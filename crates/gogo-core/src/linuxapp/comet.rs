@@ -10,8 +10,9 @@
 //! - `system`: the `comet` on `PATH`, unpinned.
 //! - `path:<file>`: that file.
 //!
-//! Starting and stopping Comet, and the credentials it reads, are not here
-//! (#488). Everything that looks at the machine takes a [`Host`].
+//! Starting Comet and handing it the session are [`super::galaxy`]'s (#488);
+//! stopping it is the launcher's. Everything that looks at the machine takes
+//! a [`Host`].
 
 use std::path::{Path, PathBuf};
 
@@ -115,6 +116,19 @@ pub fn status_line(host: &Host, config: &Path) -> String {
 }
 
 const GOGO_COMET_LABEL: &str = "from GOGO_COMET";
+
+/// How the run log names `bin` (design 23 §2.1): `comet <ver>` for gogo's
+/// pin (the store's copy, or the flake's build of the same tag), else where
+/// it came from.
+pub fn label(bin: &CometBin) -> String {
+    match bin.source {
+        Source::Store | Source::Env => {
+            format!("comet {}", pin(entry()).map_or("?", |p| p.version))
+        }
+        Source::System => "comet (system)".to_string(),
+        Source::Path => "comet (path:)".to_string(),
+    }
+}
 
 /// The plan's Comet line: the download (`bytes`, from the catalog probe), its
 /// licence, and what Comet fetches itself on its first start.

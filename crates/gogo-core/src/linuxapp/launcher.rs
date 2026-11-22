@@ -23,7 +23,7 @@ use crate::macapp::launch::GameDirs;
 /// Bumped with every change to [`TEMPLATE`] that matters to a game set up
 /// before it. Setup rewrites `launch.sh` whenever its bytes differ, so this
 /// is for people: the run log header and `launch.log` name it.
-pub const LAUNCHER_VERSION: u32 = 17;
+pub const LAUNCHER_VERSION: u32 = 18;
 
 /// `launch.sh`'s first word when a wrapper runs it for the game's own step
 /// (design 18 §7.8): the game's environment, then umu-run.
@@ -307,7 +307,7 @@ load_conf() {
     UMU_ID="" STAMP="" UMU_RUN="" UMU_PYTHON="" PROTON_DIR="" PROTON_VERSION=""
     PROTON_SHA="" PREFIX="" WORKDIR="" EXE="" DLL_OVERRIDES=""
     RENDERER="" PROTONFIXES="1" UMU_FOLDERS="" GOGO_PATH="" DATA_ROOT="" LIBRARY_GAME=""
-    DISPLAY_MODE="" DISPLAY_HDR="" DISPLAY_MONITOR=""
+    DISPLAY_MODE="" DISPLAY_HDR="" DISPLAY_MONITOR="" GALAXY=""
     ARGS=() ENV=() WRAPPER=()
     # shellcheck source=/dev/null
     source "$HERE/launch.conf"
@@ -785,6 +785,7 @@ end_run_log() {
 run_footer() {
     {
         printf '# ---\n'
+        if [ -n "${GALAXY_STOP:-}" ]; then printf '# galaxy: %s\n' "$GALAXY_STOP"; fi
         printf '# exit: %s%s\n' "$2" "${3:+ ($3)}"
         printf '# duration: %ss\n' "$4"
         printf '# ended: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
@@ -1055,6 +1056,114 @@ moving() {
     flock --shared --nonblock --conflict-exit-code 99 "$lock" true 3>&- 4>&- 2>/dev/null
     [ $? -eq 99 ]
 }
+# Design 23 section 2: Comet, the Galaxy service stand-in, beside the game
+# (GALAXY=1 in launch.conf). One Comet per host (port 9977) serves every
+# game. Each launcher using it leaves <XDG_RUNTIME_DIR>/gogo/comet/.users/<pid>
+# (its start time); .comet names the Comet gogo started (pid, start time).
+# The last launcher out stops that one, whoever started it, and never a
+# Comet gogo didn't start. Both run under flock when there is one, on fd 9,
+# which is never passed on: Comet can't hold the lock. gogo prints the one
+# line the run log gets; its stderr and Comet's output are never kept (they
+# can hold secrets, decision 7).
+GALAXY_DIR="${XDG_RUNTIME_DIR:-}/gogo/comet"
+GALAXY_ON=""
+GALAXY_STOP=""
+# galaxy_lock <secs>: fd 9, opened by the caller. No flock: no lock.
+galaxy_lock() {
+    has flock || return 0
+    flock -w "$1" 9 3>&- 4>&- 2>/dev/null
+}
+# Private dirs (0700), each made only when missing.
+galaxy_dirs() {
+    local d
+    for d in "$XDG_RUNTIME_DIR/gogo" "$GALAXY_DIR" "$GALAXY_DIR/.users"; do
+        [ -d "$d" ] || mkdir -m 0700 "$d" 2>/dev/null || return 1
+    done
+}
+galaxy_start() {
+    local gogo out
+    [ "$GALAXY" = 1 ] && [ -z "$ONE_OFF" ] || return 0
+    gogo="$(find_gogo)"
+    if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+        out="skipped: no XDG_RUNTIME_DIR"
+    elif [ -z "$gogo" ]; then
+        out="skipped: no gogo found (GOGO_PATH=$GOGO_PATH)"
+    elif ! galaxy_dirs; then
+        out="skipped: can't make $GALAXY_DIR"
+    else
+        has flock || log "galaxy: no flock: starting Comet without the lock"
+        out="$(
+            {
+                if ! galaxy_lock 6; then
+                    printf 'skipped: another launcher held the Comet lock for 6s'
+                    exit 0
+                fi
+                o="$(run_gogo timeout -k 1 8 "$gogo" linux-app galaxy-start "$GOGID" --launcher \
+                    </dev/null 2>/dev/null 3>&- 4>&- 9>&-)"
+                case "$o" in
+                    *" started (pid "*)
+                        p="${o#* started (pid }"
+                        p="${p%%)*}"
+                        t="$(proc_start "$p")"
+                        if [ -n "$t" ]; then printf '%s %s\n' "$p" "$t" >"$GALAXY_DIR/.comet"; fi
+                        ;;
+                esac
+                case "$o" in
+                    "" | skipped:*) ;;
+                    *) printf '%s' "$ME_START" >"$GALAXY_DIR/.users/$$" ;;
+                esac
+                printf '%s' "${o:-skipped: galaxy-start printed nothing}"
+            } 9>>"$GALAXY_DIR/.lock"
+        )"
+        case "$out" in skipped:*) ;; *) GALAXY_ON=1 ;; esac
+    fi
+    printf '# galaxy: %s\n' "$out" >>"$RUN_LOG"
+    log "galaxy: $out"
+}
+# After the game (and the prefix) are done: drop this launcher's record and,
+# when no live one is left, stop gogo's Comet (INT, then TERM after 2s).
+# GALAXY_STOP is the run log footer's line.
+galaxy_stop() {
+    [ -n "${GALAXY_ON:-}" ] || return 0
+    GALAXY_ON=""
+    GALAXY_STOP="$(
+        {
+            # Can't lock in 5s: go on; a launcher starting now would just
+            # find no Comet and start one.
+            galaxy_lock 5
+            if [ "$(cat "$GALAXY_DIR/.users/$$" 2>/dev/null)" = "$ME_START" ]; then rm -f "$GALAXY_DIR/.users/$$"; fi
+            live=""
+            for f in "$GALAXY_DIR/.users"/*; do
+                [ -f "$f" ] || continue
+                if alive_as "${f##*/}" "$(cat "$f" 2>/dev/null)"; then live="$live ${f##*/}"; else rm -f "$f"; fi
+            done
+            owner="" ostart=""
+            read -r owner ostart <"$GALAXY_DIR/.comet" 2>/dev/null
+            if [ -z "$owner" ] || ! alive_as "$owner" "$ostart"; then
+                rm -f "$GALAXY_DIR/.comet"
+                printf 'nothing of gogo'"'"'s to stop'
+                exit 0
+            fi
+            if [ -n "$live" ]; then
+                printf 'comet (pid %s) left running for launcher%s' "$owner" "$live"
+                exit 0
+            fi
+            kill -INT "$owner" 2>/dev/null
+            for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+                if ! alive_as "$owner" "$ostart"; then
+                    rm -f "$GALAXY_DIR/.comet"
+                    printf 'stopped comet (pid %s)' "$owner"
+                    exit 0
+                fi
+                sleep 0.1
+            done
+            kill -TERM "$owner" 2>/dev/null
+            rm -f "$GALAXY_DIR/.comet"
+            printf "comet (pid %s) didn't stop on INT in 2s: TERM" "$owner"
+        } 9>>"$GALAXY_DIR/.lock" 2>/dev/null
+    )"
+    log "galaxy: $GALAXY_STOP"
+}
 start_watchdog() {
     set -m
     (
@@ -1071,6 +1180,7 @@ start_watchdog() {
         done
         # shellcheck disable=SC2086
         if [ -n "$TEE_PIDS" ]; then kill -KILL $TEE_PIDS 2>/dev/null; fi
+        galaxy_stop
         unregister_launch
         if [ -n "$RUN_LOG" ]; then run_footer "$RUN_LOG" 137 "launcher killed" $((SECONDS - RUN_T0)); fi
         log "watchdog done"
@@ -1099,6 +1209,7 @@ on_signal() {
     close_game
     stop_watchdog
     teardown
+    galaxy_stop
     unregister_launch
     end_run_log "$2" "SIG$1"
     exit "$2"
@@ -1138,8 +1249,9 @@ ask() {
     fi
     return 0
 }
-# The game's output in a run log: between the header's and the footer's `# ---`.
-run_output() { awk '/^# ---$/ { n++; next } n == 1' "$1"; }
+# The game's output in a run log: between the header's and the footer's `# ---`
+# (Comet's start line isn't the game's).
+run_output() { awk '/^# ---$/ { n++; next } n == 1 && !/^# galaxy: /' "$1"; }
 last_errors() {
     local errs
     errs="$(run_output "$1" | grep -E -i 'err:|error|fail|exception|cannot|not found' | tail -n 5)"
@@ -1151,7 +1263,7 @@ report() {
     local l
     {
         printf 'gogo launch report: %s (%s)\n' "$TITLE" "$GOGID"
-        grep -E '^# (setup|launcher|runtime|runtime_note|runtime_dir|umu|umu_id|wrapper|renderer|protonfix|protonfixes|verbs|stamp|os|exe|args|exit|duration):' "$1"
+        grep -E '^# (setup|launcher|runtime|runtime_note|runtime_dir|umu|umu_id|wrapper|renderer|protonfix|protonfixes|verbs|stamp|os|exe|args|galaxy|exit|duration):' "$1"
         printf -- '--- last 40 log lines ---\n'
         run_output "$1" | tail -n 40
     } | while IFS= read -r l; do printf '%s\n' "${l//"$HOME"/"~"}"; done
@@ -1286,6 +1398,11 @@ if [ -n "$ONE_OFF" ]; then
         exit 127
     fi
 fi
+# --- #464: the pre-launch cloud-save pull (design 22 section 6.2) goes here:
+# after the refusals, before Comet and the game (design 23 section 2.3).
+galaxy_start
+# The run's duration and the early-exit clock are the game's.
+RUN_T0=$SECONDS
 set -m
 rm -f "$GAME_MARK" "$GAME_MARK.tmp" "$GAME_MARK.code" "$GAME_MARK.code.tmp"
 ( start_game ${GAME_ARGV[@]+"${GAME_ARGV[@]}"} ) 3>&- 4>&- &
@@ -1299,6 +1416,7 @@ if [ "${#WRAPPER[@]}" -gt 0 ]; then
     if ! wrapper_ran_game; then
         # The renderer has nothing to do with this: no early-exit dialog.
         log "wrapper ${WRAPPER[0]} never ran the game"
+        galaxy_stop
         stop_watchdog
         unregister_launch
         if [ "$rc" -eq 0 ]; then rc=1; fi
@@ -1335,6 +1453,9 @@ if [ "${#WRAPPER[@]}" -gt 0 ]; then
             ;;
     esac
 fi
+# --- #464: the post-exit cloud-save push (design 22 section 6.2) goes here,
+# before Comet stops (design 23 section 2.3).
+galaxy_stop
 stop_watchdog
 unregister_launch
 end_run_log "$rc"
