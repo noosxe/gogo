@@ -22,12 +22,42 @@ pub struct Handle(Arc<File>);
 
 impl Write for Handle {
     fn write(&mut self, b: &[u8]) -> io::Result<usize> {
-        (&*self.0).write(b)
+        // `Line` hands over one whole event; a partial write would split an
+        // escape, so write it all and report it all.
+        (&*self.0).write_all(&neutralize(b))?;
+        Ok(b.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
         (&*self.0).flush()
     }
+}
+
+/// One event, made safe for a log file: control characters (a newline in a
+/// message, an ESC from a hostile string) become `\n`, `\x1b`, … so text from a
+/// server or dependency can neither forge a log line nor drive a terminal that
+/// `cat`s the file. Only the event's own final newline stays.
+fn neutralize(b: &[u8]) -> Vec<u8> {
+    use std::fmt::Write as _;
+    let text = String::from_utf8_lossy(b);
+    let (body, end) = match text.strip_suffix('\n') {
+        Some(body) => (body, "\n"),
+        None => (&*text, ""),
+    };
+    let mut out = String::with_capacity(text.len());
+    for c in body.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push('\t'),
+            c if c.is_control() => {
+                let _ = write!(out, "\\u{{{:x}}}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push_str(end);
+    out.into_bytes()
 }
 
 impl<'a> MakeWriter<'a> for LogFile {
@@ -48,14 +78,18 @@ impl LogFile {
             .create(true)
             .append(true)
             .mode(0o600)
-            .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+            // NONBLOCK: opening a FIFO nobody reads must fail, not hang, before
+            // the regular-file check below. Regular files ignore the flag, and
+            // only a regular file gets past that check, so it is never cleared.
+            .custom_flags(
+                (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
+            )
             .open(path)
-            .map_err(|e| {
-                if e.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error()) {
-                    fail(&"is a symbolic link")
-                } else {
-                    fail(&e)
-                }
+            .map_err(|e| match rustix::io::Errno::from_io_error(&e) {
+                Some(rustix::io::Errno::LOOP) => fail(&"is a symbolic link"),
+                // A FIFO with no reader.
+                Some(rustix::io::Errno::NXIO) => fail(&"is not a regular file"),
+                _ => fail(&e),
             })?;
         let meta = file.metadata().map_err(|e| fail(&e))?;
         if !meta.is_file() {
@@ -72,8 +106,6 @@ impl LogFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scrub_log::Scrubbing;
-    use tracing_subscriber::Layer;
     use tracing_subscriber::layer::SubscriberExt;
 
     const REFRESH: &str = "FAKE-REFRESH-4c1e9a";
@@ -155,19 +187,119 @@ mod tests {
         assert!(err.contains("not a regular file"), "{err}");
     }
 
+    #[derive(Clone, Default)]
+    struct Buf(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Write for Buf {
+        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for Buf {
+        type Writer = Buf;
+        fn make_writer(&'a self) -> Buf {
+            self.clone()
+        }
+    }
+
+    /// The subscriber `init_tracing` builds, for `args`, with a captured stderr.
+    fn built(args: &[&str], file: &Path) -> (Box<dyn tracing::Subscriber + Send + Sync>, Buf) {
+        use clap::Parser;
+        let cli = crate::Cli::try_parse_from(args).unwrap();
+        let err = Buf::default();
+        let sub = crate::build_subscriber(
+            tracing_subscriber::EnvFilter::new(crate::default_filter(&cli)),
+            err.clone(),
+            Some(LogFile::open(file).unwrap()),
+        );
+        (sub, err)
+    }
+
     #[test]
     fn file_takes_trace_while_stderr_filter_is_quiet() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("gogo.log");
-        let file = LogFile::open(&p).unwrap();
-        let sub = tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .with_writer(Scrubbing(io::sink))
-                    .with_filter(tracing_subscriber::filter::LevelFilter::ERROR),
-            )
-            .with(crate::file_layer(file));
-        tracing::subscriber::with_default(sub, || tracing::trace!("deep detail"));
+        let (sub, err) = built(&["gogo", "--quiet", "list"], &p);
+        tracing::subscriber::with_default(sub, || {
+            tracing::trace!("deep detail");
+            tracing::warn!("loud detail");
+        });
         assert!(std::fs::read_to_string(&p).unwrap().contains("deep detail"));
+        let err = String::from_utf8(err.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            err.contains("loud detail") && !err.contains("deep detail"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn control_characters_cannot_forge_lines_or_drive_a_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("gogo.log");
+        log_through(LogFile::open(&p).unwrap(), || {
+            tracing::warn!("first\n2026-01-01T00:00:00Z  INFO forged\x1b[2Jtail\r\u{9b}x");
+            tracing::warn!("second");
+        });
+        let out = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(out.lines().count(), 2, "{out:?}");
+        assert!(out.ends_with('\n'), "{out:?}");
+        assert!(
+            !out.contains('\x1b') && !out.contains('\r') && !out.contains('\u{9b}'),
+            "{out:?}"
+        );
+        assert!(out.contains("first\\n2026"), "{out:?}");
+    }
+
+    /// The writer's own guard, for text the fmt layer leaves raw (it escapes
+    /// message text itself, but not every field or dependency formatter).
+    #[test]
+    fn neutralize_escapes_raw_controls_but_keeps_the_final_newline() {
+        let got = neutralize(b"a\nb\x1b[2Jc\r\xc2\x9bd\te\n");
+        assert_eq!(
+            String::from_utf8(got).unwrap(),
+            "a\\nb\\u{1b}[2Jc\\r\\u{9b}d\te\n"
+        );
+        assert_eq!(neutralize(b"no newline"), b"no newline");
+    }
+
+    #[test]
+    fn directories_and_fifos_are_refused_without_hanging() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = LogFile::open(dir.path()).err().unwrap();
+        assert!(err.contains("--log-file"), "{err}");
+
+        let fifo = dir.path().join("pipe");
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            &fifo,
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::from_raw_mode(0o600),
+            0,
+        )
+        .unwrap();
+        // Run the opens on a thread: a regression (blocking open) fails here
+        // instead of hanging CI.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let f = fifo.clone();
+        std::thread::spawn(move || {
+            let no_reader = LogFile::open(&f).err();
+            let _reader = OpenOptions::new()
+                .read(true)
+                .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+                .open(&f)
+                .unwrap();
+            let with_reader = LogFile::open(&f).err();
+            let _ = tx.send((no_reader, with_reader));
+        });
+        let (no_reader, with_reader) = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("opening a FIFO hung");
+        assert!(no_reader.unwrap().contains("not a regular file"));
+        assert!(with_reader.unwrap().contains("not a regular file"));
     }
 }

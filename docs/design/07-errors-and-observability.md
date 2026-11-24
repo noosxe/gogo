@@ -91,7 +91,7 @@ progress, not retrying), and any progress resets the timer. Exceeded → `FileFa
   second `fmt` layer behind the same scrubbing writer as stderr, with ANSI off, written
   synchronously (no background thread to lose lines at `process::exit`). The file is opened
   before the command runs: created `0600`, appended to, an existing file tightened to `0600`,
-  a symlink (`O_NOFOLLOW`) or a non-regular file refused, a missing parent directory an error
+  a symlink (`O_NOFOLLOW`) or a non-regular file (a FIFO is opened `O_NONBLOCK`, so a reader-less one fails instead of hanging) refused, control characters in an event escaped (`\n`, `\u{1b}`) so message text can't forge lines, a missing parent directory an error
   (never created). If it can't be opened, gogo prints why and exits 2 (usage: bad flag value,
   design 03 §5) without running the command. `galaxy-start` ignores it (no tracing at all).
 - **Redaction happens at construction, not at formatting** (`gogo-core/src/redact.rs`, the
