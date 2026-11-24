@@ -15,6 +15,9 @@
 //! 3. else off.
 //!
 //! Nothing here downloads Comet: a missing binary is a hint to run
+//! `gogo runtimes install comet`. The one exception is the terminal offer
+//! after `galaxy <gogid> on` ([`offer_applies`], [`offer_install`]): the
+//! CLI downloads only after an explicit yes, with the same install code as
 //! `gogo runtimes install comet`.
 
 use std::path::Path;
@@ -25,7 +28,7 @@ use super::comet;
 use super::envargs::EditOutcome;
 use super::game::{ConfValues, LinuxState};
 use super::manage;
-use crate::config::{Config, GalaxyDefault};
+use crate::config::{CometMode, Config, GalaxyDefault};
 use crate::macapp::compat::{self, Effective, GalaxyMode, Layer, Os, UserEdit};
 use crate::macapp::doctor::{Finding, Level};
 use crate::macapp::error::MacAppError;
@@ -177,6 +180,56 @@ pub fn comet_hint(host: &super::umu::Host<'_>, config: &Path) -> Option<String> 
         Ok(Some(_)) => None,
         Ok(None) => Some(INSTALL_HINT.to_string()),
         Err(e) => Some(format!("Comet: {e}")),
+    }
+}
+
+/// Does `galaxy <gogid> on` offer to install Comet? Only when the mode would
+/// download it (`fetch`, no `GOGO_COMET`) and nothing is available yet: not
+/// for `system` or `path:`, not when the flake's build is named, and not on
+/// NixOS without one (the release binary can't run there, so that stays the
+/// error text).
+pub fn offer_applies(host: &super::umu::Host<'_>, mode: &CometMode) -> bool {
+    matches!(mode, CometMode::Fetch)
+        && host.var(comet::COMET_ENV).is_none()
+        && matches!(comet::available(host, mode), Ok(None))
+}
+
+/// The question of the install offer: the plan line, then the ask. Default no.
+pub fn offer_spec(plan_line: &str) -> PromptSpec {
+    PromptSpec {
+        kind: PromptKind::Confirm { default: false },
+        title: format!("Comet isn't installed. {plan_line}. Install it now?"),
+        items: Vec::new(),
+        allow_other: false,
+        allow_none: false,
+        default: 0,
+    }
+}
+
+/// How the install offer ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OfferOutcome {
+    /// Said no, or gave no answer.
+    Declined,
+    /// Installed.
+    Installed,
+    /// Said yes and the install failed with this (already scrubbed) reason.
+    Failed(String),
+}
+
+/// Ask `prompt` and, only on an explicit yes, run `install`. The install is
+/// the caller's: the CLI passes the code `gogo runtimes install comet` runs.
+pub async fn offer_install<F, Fut>(prompt: &PromptFn, plan_line: &str, install: F) -> OfferOutcome
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    match prompt(&offer_spec(plan_line)) {
+        Some(PromptAnswer::Confirmed(true)) => match install().await {
+            Ok(()) => OfferOutcome::Installed,
+            Err(why) => OfferOutcome::Failed(why),
+        },
+        _ => OfferOutcome::Declined,
     }
 }
 
@@ -570,6 +623,101 @@ mod tests {
             (Some(GalaxyMode::Off), false)
         );
         assert_eq!(split(&eff(&[(Layer::Db, "")])), (None, false));
+    }
+
+    fn host_with<R>(env: &[(&str, &str)], f: impl FnOnce(&super::super::umu::Host<'_>) -> R) -> R {
+        let root = tempfile::tempdir().unwrap();
+        let env: std::collections::HashMap<String, std::ffi::OsString> = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), (*v).into()))
+            .collect();
+        let look = move |k: &str| env.get(k).cloned();
+        f(&super::super::umu::Host {
+            root: root.path(),
+            env: &look,
+        })
+    }
+
+    #[test]
+    fn the_offer_is_only_for_a_fetch_that_would_download() {
+        let _g = crate::test_util::env_lock();
+        let t = tempfile::tempdir().unwrap();
+        // SAFETY: env mutation under the shared env mutex.
+        unsafe { std::env::set_var("GOGO_HOME", t.path()) };
+        // Empty store, fetch, no env: the one case that offers.
+        assert!(host_with(&[], |h| offer_applies(h, &CometMode::Fetch)));
+        // `system` and `path:` never download.
+        assert!(!host_with(&[], |h| offer_applies(h, &CometMode::System)));
+        assert!(!host_with(&[], |h| offer_applies(
+            h,
+            &CometMode::Path("/x/comet".into())
+        )));
+        // The flake's build is named (even a broken one is an error, not an offer).
+        assert!(!host_with(
+            &[("GOGO_COMET", "/no/such")],
+            |h| offer_applies(h, &CometMode::Fetch)
+        ));
+    }
+
+    #[test]
+    fn the_offer_is_not_made_on_nixos_without_a_build() {
+        let _g = crate::test_util::env_lock();
+        let t = tempfile::tempdir().unwrap();
+        // SAFETY: env mutation under the shared env mutex.
+        unsafe { std::env::set_var("GOGO_HOME", t.path()) };
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("etc")).unwrap();
+        std::fs::write(root.path().join("etc/NIXOS"), "").unwrap();
+        let look = |_: &str| None;
+        let h = super::super::umu::Host {
+            root: root.path(),
+            env: &look,
+        };
+        assert!(!offer_applies(&h, &CometMode::Fetch));
+    }
+
+    #[test]
+    fn the_offer_defaults_to_no_and_shows_the_plan_line() {
+        let spec = offer_spec("Comet 0.4.1: 14.0 MiB");
+        assert_eq!(spec.kind, PromptKind::Confirm { default: false });
+        assert!(spec.title.contains("Comet 0.4.1: 14.0 MiB"));
+        assert!(spec.title.ends_with("Install it now?"));
+    }
+
+    #[tokio::test]
+    async fn only_an_explicit_yes_installs() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = AtomicUsize::new(0);
+        let run = |ans: Option<PromptAnswer>, res: Result<(), String>| {
+            let p: Box<PromptFn> = Box::new(move |_| ans.clone());
+            let calls = &calls;
+            async move {
+                offer_install(&*p, "line", || async {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    res
+                })
+                .await
+            }
+        };
+        assert_eq!(
+            run(Some(PromptAnswer::Confirmed(false)), Ok(())).await,
+            OfferOutcome::Declined
+        );
+        assert_eq!(run(None, Ok(())).await, OfferOutcome::Declined);
+        assert_eq!(
+            run(Some(PromptAnswer::Index(0)), Ok(())).await,
+            OfferOutcome::Declined
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            run(Some(PromptAnswer::Confirmed(true)), Ok(())).await,
+            OfferOutcome::Installed
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            run(Some(PromptAnswer::Confirmed(true)), Err("boom".into())).await,
+            OfferOutcome::Failed("boom".into())
+        );
     }
 
     #[test]

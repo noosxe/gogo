@@ -391,7 +391,7 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
             ..
         } => Ok(galaxy_cmd::run(&gogid).await),
         #[cfg(target_os = "linux")]
-        Command::LinuxApp { sub: Some(sub), .. } => linux_app_sub(sub),
+        Command::LinuxApp { sub: Some(sub), .. } => linux_app_sub(sub).await,
         #[cfg(target_os = "linux")]
         Command::LinuxApp {
             retarget: Some(_),
@@ -5042,7 +5042,7 @@ fn linux_app_adopt(
 
 #[cfg(target_os = "linux")]
 /// `gogo linux-app <sub>` (no build).
-fn linux_app_sub(sub: crate::cli::LinuxAppSub) -> Result<i32, AppError> {
+async fn linux_app_sub(sub: crate::cli::LinuxAppSub) -> Result<i32, AppError> {
     match sub {
         crate::cli::LinuxAppSub::Doctor { gogid, json } => {
             // vulkaninfo and the tree walks take seconds (#420).
@@ -5174,7 +5174,7 @@ fn linux_app_sub(sub: crate::cli::LinuxAppSub) -> Result<i32, AppError> {
             switch,
             clear,
             json,
-        } => linux_app_galaxy(&gogid, switch.as_deref(), clear, json),
+        } => linux_app_galaxy(&gogid, switch.as_deref(), clear, json).await,
         crate::cli::LinuxAppSub::Display {
             gogid,
             mode,
@@ -5475,7 +5475,7 @@ fn linux_app_run(gogid: &str, exe: &str, args: &[String]) -> Result<i32, AppErro
 
 #[cfg(target_os = "linux")]
 /// `gogo linux-app galaxy <gogid> [on|off|--clear]` (design 23, #489).
-fn linux_app_galaxy(
+async fn linux_app_galaxy(
     gogid: &str,
     switch: Option<&str>,
     clear: bool,
@@ -5489,7 +5489,12 @@ fn linux_app_galaxy(
             _ if clear => None,
             _ => Some(GalaxyMode::Off),
         };
-        let out = galaxy_switch::set_galaxy(gogid, mode)?;
+        let mut out = galaxy_switch::set_galaxy(gogid, mode)?;
+        // The switch is written either way; the offer only decides whether
+        // the install hint stays in the warnings.
+        if mode == Some(GalaxyMode::Comet) && galaxy_install_offer(json).await {
+            out.warnings.retain(|w| w != galaxy_switch::INSTALL_HINT);
+        }
         print_edit(&out, json);
         return Ok(cli::exit::OK);
     }
@@ -5517,6 +5522,67 @@ fn linux_app_galaxy(
         println!("{}", galaxy_switch::INSTALL_HINT);
     }
     Ok(cli::exit::OK)
+}
+
+#[cfg(target_os = "linux")]
+/// The terminal-only "install Comet now?" after `galaxy <gogid> on`
+/// (design 23 decision 4, #504). Returns whether Comet got installed (the
+/// hint is then dropped). Never fails the command: the switch is written, and
+/// a launch goes on without Comet.
+async fn galaxy_install_offer(json: bool) -> bool {
+    use gogo::linuxapp::{comet, galaxy_switch, umu::Host};
+    use gogo::macapp::catalog;
+    let tty = std::io::IsTerminal::is_terminal(&std::io::stdin())
+        && std::io::IsTerminal::is_terminal(&std::io::stderr())
+        && !json;
+    if !tty {
+        return false;
+    }
+    let host = Host::real();
+    let Ok(mode) = comet::mode_at(&gogo::config::Config::path()) else {
+        return false;
+    };
+    if !galaxy_switch::offer_applies(&host, &mode) {
+        return false;
+    }
+    let Some(entry) = catalog::find(catalog::COMET) else {
+        return false;
+    };
+    let Ok(http) = catalog::http_client() else {
+        return false;
+    };
+    // No size, no offer: the plan line states the download's size.
+    let Ok(release) = catalog::probe(entry, None, &http, catalog::GITHUB_API).await else {
+        return false;
+    };
+    let plan = comet::plan_line(entry, release.size);
+    let prompt = prompt::renderer();
+    let outcome = galaxy_switch::offer_install(&*prompt, &plan, || async {
+        install_store_entry(entry, None, &http, false, None, false)
+            .await
+            .map(|(m, root)| {
+                println!(
+                    "cached {} {} ({}) at {}",
+                    m.id,
+                    m.version,
+                    gogo::fmt::human_size(m.bytes),
+                    root.display()
+                );
+            })
+            .map_err(|e| gogo::redact::scrub_text(&e.to_string()))
+    })
+    .await;
+    match outcome {
+        galaxy_switch::OfferOutcome::Installed => true,
+        galaxy_switch::OfferOutcome::Declined => {
+            eprintln!("Skipped: `gogo runtimes install comet` fetches it later.");
+            false
+        }
+        galaxy_switch::OfferOutcome::Failed(why) => {
+            eprintln!("gogo: Comet install failed: {why}");
+            false
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -6151,6 +6217,37 @@ fn listed(
 /// `gogo runtimes|renderers list|install|prune`. `list` checks the latest
 /// version online with a short client timeout (`--offline` skips) and shows
 /// this OS's entries (`--all`: every OS's); `install` takes this OS's.
+/// What `gogo runtimes install <id>` does once the entry is chosen: the
+/// store install with its progress output, then the post-install step.
+/// `gogo linux-app galaxy <gogid> on` runs the same code for its offer.
+async fn install_store_entry(
+    entry: &gogo::macapp::catalog::CatalogEntry,
+    version: Option<&str>,
+    http: &reqwest::Client,
+    consent: bool,
+    shared: Option<&std::path::Path>,
+    json: bool,
+) -> Result<(gogo::macapp::store::ManifestEntry, std::path::PathBuf), gogo::macapp::MacAppError> {
+    use gogo::macapp::{catalog, store};
+    let act = depot_progress::Activity::new(depot_mode(false, json));
+    let m = store::install_to(
+        entry,
+        version,
+        http,
+        catalog::GITHUB_API,
+        consent,
+        shared,
+        &mut |ev| emit_live(ev, false, &act),
+    )
+    .await;
+    drop(act);
+    let m = m?;
+    let root = store::tree_root(&m);
+    // Comet's bare release file is stored without the execute bit.
+    gogo::linuxapp::comet::after_install(&m.id, &root.join(&m.entry_rel))?;
+    Ok((m, root))
+}
+
 async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppError> {
     use gogo::macapp::{catalog, store};
 
@@ -6493,22 +6590,15 @@ async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppEr
             } else {
                 None
             };
-            let act = depot_progress::Activity::new(depot_mode(false, json));
-            let m = store::install_to(
+            let (m, root) = install_store_entry(
                 entry,
                 version.as_deref(),
                 &http,
-                catalog::GITHUB_API,
                 consent,
                 shared.as_deref(),
-                &mut |ev| emit_live(ev, false, &act),
+                json,
             )
-            .await;
-            drop(act);
-            let m = m?;
-            let root = store::tree_root(&m);
-            // Comet's bare release file is stored without the execute bit.
-            gogo::linuxapp::comet::after_install(&m.id, &root.join(&m.entry_rel))?;
+            .await?;
             if json {
                 println!(
                     "{}",
