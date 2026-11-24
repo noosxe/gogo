@@ -77,6 +77,9 @@ pub struct SetupOutcome {
     /// The `auto` snapshot taken before the GE-Proton changed, and what
     /// retention pruned after it.
     pub snapshot: Option<super::snapshots::Taken>,
+    /// `galaxy_default = "ask"` was answered "on" by this run's prompt (#514):
+    /// the CLI may then offer to install Comet. False when nothing was asked.
+    pub galaxy_asked_on: bool,
 }
 
 /// A Proton build resolved for a game.
@@ -783,6 +786,7 @@ pub fn setup(
     warnings.extend(galaxy_default_err);
     let (galaxy_own, galaxy_recommended) =
         super::galaxy_switch::split(&super::galaxy_switch::effective(gogid, &l4.entry));
+    let mut galaxy_asked_on = false;
     let galaxy_asked =
         super::galaxy_switch::decide(galaxy_own, galaxy_recommended, galaxy_default, galaxy_sdk);
     if galaxy_asked.ask {
@@ -793,6 +797,7 @@ pub fn setup(
             galaxy_recommended,
         )? {
             Some(mode) => {
+                galaxy_asked_on = mode == crate::macapp::compat::GalaxyMode::Comet;
                 l4 = compat::load_user_for(gogid, Os::Linux)?;
                 l4_raw = match std::fs::read(&l4_path) {
                     Ok(b) => Some(b),
@@ -1206,6 +1211,7 @@ pub fn setup(
         notes,
         warnings,
         snapshot,
+        galaxy_asked_on,
     })
 }
 

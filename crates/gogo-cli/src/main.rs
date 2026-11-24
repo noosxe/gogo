@@ -410,14 +410,17 @@ async fn run(cli: Cli) -> Result<i32, AppError> {
             no_snapshots,
             json,
             ..
-        } => linux_app_retarget(
-            gogid,
-            runtime.flatten(),
-            renderer,
-            refresh,
-            no_snapshots,
-            json,
-        ),
+        } => {
+            linux_app_retarget(
+                gogid,
+                runtime.flatten(),
+                renderer,
+                refresh,
+                no_snapshots,
+                json,
+            )
+            .await
+        }
         #[cfg(target_os = "linux")]
         Command::LinuxApp {
             sub: None,
@@ -4585,7 +4588,7 @@ async fn linux_app(a: LinuxAppArgs) -> Result<i32, AppError> {
         let got = installer_dlc::fetch(&ctx, &product, &ids, &d.refs, &language, machine).await?;
         plan.installer_dlc.installers = got;
     }
-    let out = {
+    let mut out = {
         let plan = plan.clone();
         let p = prompter.clone();
         let mode = depot_mode(jp, a.json);
@@ -4596,6 +4599,7 @@ async fn linux_app(a: LinuxAppArgs) -> Result<i32, AppError> {
         .await
         .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))??
     };
+    offer_after_setup(&mut out.setup, a.json).await;
     print_linux_setup(&out.setup, a.json, |v| {
         v["name"] = serde_json::json!(out.title);
         v["game_dir"] = serde_json::json!(out.dirs.root);
@@ -4708,7 +4712,7 @@ fn print_linux_setup(
 /// `gogo linux-app --retarget <gogid> --runtime <ref> --renderer <id>`
 /// (design 16 decision 7 on Linux): write the choices into L4's
 /// `[platforms.linux]`, then set the game up on them.
-fn linux_app_retarget(
+async fn linux_app_retarget(
     gogid: String,
     runtime: Option<String>,
     renderer: Option<crate::cli::LinuxRendererArg>,
@@ -4759,6 +4763,10 @@ fn linux_app_retarget(
         &mut |ev| emit_live(ev, false, &act),
     )?;
     drop(act);
+    let mut out = out;
+    if let Some(Ok(s)) = &mut out.setup {
+        offer_after_setup(s, json).await;
+    }
     if json {
         let setup = match &out.setup {
             Some(Ok(s)) => serde_json::json!({
@@ -5107,7 +5115,8 @@ async fn linux_app_sub(sub: crate::cli::LinuxAppSub) -> Result<i32, AppError> {
                 &mut |ev| emit_live(ev, false, &act),
             );
             drop(act);
-            let out = out?;
+            let mut out = out?;
+            offer_after_setup(&mut out, json).await;
             print_linux_setup(&out, json, |_| {});
             Ok(cli::exit::OK)
         }
@@ -5524,6 +5533,20 @@ async fn linux_app_galaxy(
         println!("{}", galaxy_switch::INSTALL_HINT);
     }
     Ok(cli::exit::OK)
+}
+
+#[cfg(target_os = "linux")]
+/// After setup returns (progress already dropped): when its `galaxy_default =
+/// "ask"` question was just answered "on", make #515's install offer once and
+/// fold the result into the setup's warnings (#514). The offer never fails the
+/// command.
+async fn offer_after_setup(out: &mut gogo::linuxapp::setup::SetupOutcome, json: bool) {
+    if !out.galaxy_asked_on {
+        return;
+    }
+    if let Some(o) = galaxy_install_offer(json).await {
+        gogo::linuxapp::galaxy_switch::apply_offer(&mut out.warnings, &o);
+    }
 }
 
 #[cfg(target_os = "linux")]
