@@ -1290,6 +1290,7 @@ dependencies = [
  "indicatif",
  "jiff",
  "reqwest",
+ "rustix",
  "serde_json",
  "tempfile",
  "tokio",

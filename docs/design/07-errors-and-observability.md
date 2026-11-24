@@ -84,8 +84,16 @@ progress, not retrying), and any progress resets the timer. Exceeded → `FileFa
 
 ## 4. Logging & redaction
 
-- `tracing` + `tracing-subscriber` (fmt, stderr). `-v` = info, `-vv` = debug, `-vvv` = trace.
-  `--log-file PATH` mirrors everything at trace to a file.
+- `tracing` + `tracing-subscriber` (fmt, stderr). Default is info (gog-warp at warn), `-v` =
+  debug, `-vv` = trace, `--quiet` = warn; `RUST_LOG` overrides these and shapes stderr only.
+- `--log-file PATH` (global) mirrors everything to a file, at trace, from every target
+  (dependencies included), whatever `-v`, `--quiet` and `RUST_LOG` say for stderr. It is a
+  second `fmt` layer behind the same scrubbing writer as stderr, with ANSI off, written
+  synchronously (no background thread to lose lines at `process::exit`). The file is opened
+  before the command runs: created `0600`, appended to, an existing file tightened to `0600`,
+  a symlink (`O_NOFOLLOW`) or a non-regular file refused, a missing parent directory an error
+  (never created). If it can't be opened, gogo prints why and exits 2 (usage: bad flag value,
+  design 03 §5) without running the command. `galaxy-start` ignores it (no tracing at all).
 - **Redaction happens at construction, not at formatting** (`gogo-core/src/redact.rs`, the
   one place for it). GOG puts secrets in URLs: the token endpoint takes the refresh token,
   client secret and authorization code as query parameters, and CDN links carry an access
