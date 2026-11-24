@@ -13,6 +13,7 @@ mod galaxy_cmd;
 mod installer_dlc;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod lane;
+mod log_file;
 #[cfg(target_os = "macos")]
 mod menus;
 mod output;
@@ -40,8 +41,12 @@ fn main() {
     let cli = Cli::parse();
     // galaxy-start holds the session's tokens: no tracing at any verbosity
     // (design 23 decision 7), and nothing of it may reach a log.
-    if !galaxy_start(&cli) {
-        init_tracing(&cli);
+    // A log file that was asked for and can't be written is a bad flag value.
+    if !galaxy_start(&cli)
+        && let Err(e) = init_tracing(&cli)
+    {
+        report(&e);
+        std::process::exit(cli::exit::USAGE);
     }
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -206,8 +211,23 @@ fn error_line(e: &dyn std::fmt::Display) -> String {
     format!("gogo: {}", gogo::redact::scrub_text(&e.to_string()))
 }
 
-fn init_tracing(cli: &Cli) {
-    use tracing_subscriber::EnvFilter;
+/// The `--log-file` layer: every event at trace, from every target, scrubbed,
+/// without ANSI. `-v`, `--quiet` and `RUST_LOG` only shape stderr.
+fn file_layer<S>(file: log_file::LogFile) -> impl tracing_subscriber::Layer<S>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    use tracing_subscriber::Layer;
+    tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_writer(scrub_log::Scrubbing(file))
+        .with_filter(tracing_subscriber::filter::LevelFilter::TRACE)
+}
+
+fn init_tracing(cli: &Cli) -> Result<(), String> {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::{EnvFilter, Layer};
 
     let default = if cli.quiet {
         "warn".to_string()
@@ -224,10 +244,19 @@ fn init_tracing(cli: &Cli) {
     };
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
+    let file = cli
+        .log_file
+        .as_deref()
+        .map(log_file::LogFile::open)
+        .transpose()?;
+    let stderr = tracing_subscriber::fmt::layer()
         .with_writer(scrub_log::Scrubbing(std::io::stderr))
+        .with_filter(filter);
+    let _ = tracing_subscriber::registry()
+        .with(stderr)
+        .with(file.map(file_layer))
         .try_init();
+    Ok(())
 }
 
 /// Dispatch one command; returns its exit code (`docs/design/03-cli.md` §5).

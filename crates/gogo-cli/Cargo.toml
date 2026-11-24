@@ -28,10 +28,11 @@ console.workspace = true
 dialoguer.workspace = true
 comfy-table.workspace = true
 tracing-subscriber.workspace = true
+tracing.workspace = true
+rustix.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-tracing.workspace = true
 wiremock.workspace = true
 # The rollback's command tests use the fake snapshot backend (design 20 §10.2).
 gogo-core = { workspace = true, features = ["test-util"] }

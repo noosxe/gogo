@@ -23,6 +23,11 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub config: Option<std::path::PathBuf>,
 
+    /// Also write a full trace log to this file (scrubbed, private, appended to;
+    /// the directory must exist).
+    #[arg(long, global = true, value_name = "PATH")]
+    pub log_file: Option<std::path::PathBuf>,
+
     /// When to colorize output.
     #[arg(long, global = true, value_enum, default_value_t = ColorWhen::Auto)]
     pub color: ColorWhen,
@@ -1626,6 +1631,18 @@ pub struct DownloadArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_file_is_a_global_flag() {
+        let cli = Cli::try_parse_from(["gogo", "list", "--log-file", "x.log"]).unwrap();
+        assert_eq!(cli.log_file.as_deref(), Some(std::path::Path::new("x.log")));
+        assert!(
+            Cli::try_parse_from(["gogo", "list"])
+                .unwrap()
+                .log_file
+                .is_none()
+        );
+    }
 
     /// A subcommand argument that shares an id with a global flag (`verbose`
     /// once) only panics when that command's matches are read.

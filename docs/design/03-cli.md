@@ -235,8 +235,8 @@ input for L1 renderer selection (design 16).
 | Flag | Env | Meaning |
 |---|---|---|
 | `-C, --config <path>` | `GOGO_CONFIG` | config file location (05 §2) |
-| `-v / -vv / -vvv` | — | info / debug / trace logging (stderr) |
-| `--log-file <path>` | — | full-trace log to file |
+| `-v / -vv` | — | debug / trace logging (stderr) |
+| `--log-file <path>` | — | full-trace log to file: scrubbed, `0600`, appended (07 §4) |
 | `--json` | — | machine output for results (stdout) |
 | `--json-progress` | — | NDJSON progress events on stdout (implies `--json`) |
 | `--no-progress` | — | no indicatif bars (auto when !stderr.is_terminal) |
