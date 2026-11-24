@@ -17,6 +17,28 @@ pub fn renderer() -> std::sync::Arc<PromptFn> {
     std::sync::Arc::new(|spec| crate::depot_progress::prompting(|| render(spec)))
 }
 
+/// Like [`renderer`], but a yes/no question that is cancelled (Ctrl-C, Esc,
+/// EOF) answers No instead of exiting: for an optional offer made after the
+/// command's real work is done (#504).
+pub fn declining_renderer() -> std::sync::Arc<PromptFn> {
+    std::sync::Arc::new(|spec| {
+        crate::depot_progress::prompting(|| match spec.kind {
+            PromptKind::Confirm { default } => Some(PromptAnswer::Confirmed(confirm_or_no(
+                dialoguer::Confirm::new()
+                    .with_prompt(&spec.title)
+                    .default(default)
+                    .interact(),
+            ))),
+            _ => render(spec),
+        })
+    })
+}
+
+/// A cancelled or failed confirm is a No.
+fn confirm_or_no<E>(answer: Result<bool, E>) -> bool {
+    answer.unwrap_or(false)
+}
+
 fn render(spec: &PromptSpec) -> Option<PromptAnswer> {
     use dialoguer::{Confirm, FuzzySelect, Input, Select};
 
@@ -86,4 +108,16 @@ fn read_other(spec: &PromptSpec) -> PromptAnswer {
 fn cancel(e: impl std::fmt::Display) -> ! {
     eprintln!("gogo: prompt cancelled ({e})");
     std::process::exit(crate::cli::exit::USAGE);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::confirm_or_no;
+
+    #[test]
+    fn a_cancelled_confirm_is_a_no() {
+        assert!(confirm_or_no::<()>(Ok(true)));
+        assert!(!confirm_or_no::<()>(Ok(false)));
+        assert!(!confirm_or_no(Err("interrupted")));
+    }
 }
