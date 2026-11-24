@@ -189,9 +189,25 @@ pub fn comet_hint(host: &super::umu::Host<'_>, config: &Path) -> Option<String> 
 /// NixOS without one (the release binary can't run there, so that stays the
 /// error text).
 pub fn offer_applies(host: &super::umu::Host<'_>, mode: &CometMode) -> bool {
+    offer_rule(host, mode, &comet::available(host, mode))
+}
+
+fn offer_rule(
+    host: &super::umu::Host<'_>,
+    mode: &CometMode,
+    available: &Result<Option<comet::CometBin>, MacAppError>,
+) -> bool {
     matches!(mode, CometMode::Fetch)
         && host.var(comet::COMET_ENV).is_none()
-        && matches!(comet::available(host, mode), Ok(None))
+        && matches!(available, Ok(None))
+}
+
+/// The warnings once the offer is over: the install hint stays unless Comet
+/// got installed, so it is never printed after a success.
+pub fn apply_offer(warnings: &mut Vec<String>, outcome: &OfferOutcome) {
+    if *outcome == OfferOutcome::Installed {
+        warnings.retain(|w| w != INSTALL_HINT);
+    }
 }
 
 /// The question of the install offer: the plan line, then the ask. Default no.
@@ -657,6 +673,37 @@ mod tests {
             &[("GOGO_COMET", "/no/such")],
             |h| offer_applies(h, &CometMode::Fetch)
         ));
+    }
+
+    #[test]
+    fn an_installed_comet_gets_no_offer() {
+        let bin = comet::CometBin {
+            path: "/store/comet".into(),
+            source: comet::Source::Store,
+        };
+        host_with(&[], |h| {
+            assert!(!offer_rule(h, &CometMode::Fetch, &Ok(Some(bin))));
+            assert!(offer_rule(h, &CometMode::Fetch, &Ok(None)));
+            assert!(!offer_rule(
+                h,
+                &CometMode::Fetch,
+                &Err(MacAppError::Comet("x".into()))
+            ));
+        });
+    }
+
+    #[test]
+    fn the_hint_goes_only_after_an_install() {
+        let other = "something else".to_string();
+        let base = vec![INSTALL_HINT.to_string(), other.clone()];
+        for o in [OfferOutcome::Declined, OfferOutcome::Failed("boom".into())] {
+            let mut w = base.clone();
+            apply_offer(&mut w, &o);
+            assert_eq!(w, base);
+        }
+        let mut w = base;
+        apply_offer(&mut w, &OfferOutcome::Installed);
+        assert_eq!(w, vec![other]);
     }
 
     #[test]

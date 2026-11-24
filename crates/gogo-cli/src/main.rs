@@ -5492,8 +5492,10 @@ async fn linux_app_galaxy(
         let mut out = galaxy_switch::set_galaxy(gogid, mode)?;
         // The switch is written either way; the offer only decides whether
         // the install hint stays in the warnings.
-        if mode == Some(GalaxyMode::Comet) && galaxy_install_offer(json).await {
-            out.warnings.retain(|w| w != galaxy_switch::INSTALL_HINT);
+        if mode == Some(GalaxyMode::Comet)
+            && let Some(o) = galaxy_install_offer(json).await
+        {
+            galaxy_switch::apply_offer(&mut out.warnings, &o);
         }
         print_edit(&out, json);
         return Ok(cli::exit::OK);
@@ -5529,34 +5531,38 @@ async fn linux_app_galaxy(
 /// (design 23 decision 4, #504). Returns whether Comet got installed (the
 /// hint is then dropped). Never fails the command: the switch is written, and
 /// a launch goes on without Comet.
-async fn galaxy_install_offer(json: bool) -> bool {
+async fn galaxy_install_offer(json: bool) -> Option<gogo::linuxapp::galaxy_switch::OfferOutcome> {
     use gogo::linuxapp::{comet, galaxy_switch, umu::Host};
     use gogo::macapp::catalog;
     let tty = std::io::IsTerminal::is_terminal(&std::io::stdin())
         && std::io::IsTerminal::is_terminal(&std::io::stderr())
         && !json;
     if !tty {
-        return false;
+        return None;
     }
     let host = Host::real();
     let Ok(mode) = comet::mode_at(&gogo::config::Config::path()) else {
-        return false;
+        return None;
     };
     if !galaxy_switch::offer_applies(&host, &mode) {
-        return false;
+        return None;
     }
-    let Some(entry) = catalog::find(catalog::COMET) else {
-        return false;
-    };
+    let entry = catalog::find(catalog::COMET)?;
     let Ok(http) = catalog::http_client() else {
-        return false;
+        return None;
     };
     // No size, no offer: the plan line states the download's size.
-    let Ok(release) = catalog::probe(entry, None, &http, catalog::GITHUB_API).await else {
-        return false;
+    // Offline must not stall the command: a slow probe is no offer.
+    let Ok(Ok(release)) = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        catalog::probe(entry, None, &http, catalog::GITHUB_API),
+    )
+    .await
+    else {
+        return None;
     };
     let plan = comet::plan_line(entry, release.size);
-    let prompt = prompt::renderer();
+    let prompt = prompt::declining_renderer();
     let outcome = galaxy_switch::offer_install(&*prompt, &plan, || async {
         install_store_entry(entry, None, &http, false, None, false)
             .await
@@ -5572,17 +5578,16 @@ async fn galaxy_install_offer(json: bool) -> bool {
             .map_err(|e| gogo::redact::scrub_text(&e.to_string()))
     })
     .await;
-    match outcome {
-        galaxy_switch::OfferOutcome::Installed => true,
+    match &outcome {
+        galaxy_switch::OfferOutcome::Installed => {}
         galaxy_switch::OfferOutcome::Declined => {
             eprintln!("Skipped: `gogo runtimes install comet` fetches it later.");
-            false
         }
         galaxy_switch::OfferOutcome::Failed(why) => {
             eprintln!("gogo: Comet install failed: {why}");
-            false
         }
     }
+    Some(outcome)
 }
 
 #[cfg(target_os = "linux")]
@@ -6214,9 +6219,6 @@ fn listed(
     all || entry.runs_on_os(os)
 }
 
-/// `gogo runtimes|renderers list|install|prune`. `list` checks the latest
-/// version online with a short client timeout (`--offline` skips) and shows
-/// this OS's entries (`--all`: every OS's); `install` takes this OS's.
 /// What `gogo runtimes install <id>` does once the entry is chosen: the
 /// store install with its progress output, then the post-install step.
 /// `gogo linux-app galaxy <gogid> on` runs the same code for its offer.
@@ -6248,6 +6250,9 @@ async fn install_store_entry(
     Ok((m, root))
 }
 
+/// `gogo runtimes|renderers list|install|prune`. `list` checks the latest
+/// version online with a short client timeout (`--offline` skips) and shows
+/// this OS's entries (`--all`: every OS's); `install` takes this OS's.
 async fn store_cmd(shelf: Shelf, cmd: crate::cli::StoreCmd) -> Result<i32, AppError> {
     use gogo::macapp::{catalog, store};
 
