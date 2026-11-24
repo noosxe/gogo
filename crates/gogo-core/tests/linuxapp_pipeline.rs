@@ -7415,7 +7415,9 @@ fn the_galaxy_switch_reaches_launch_conf_and_the_sdk_scan_reaches_state() {
         prompt: Some(&*yes),
         ..SetupOptions::default()
     };
-    setup::setup(ID, &opts, &mut quiet()).unwrap();
+    let answered = setup::setup(ID, &opts, &mut quiet()).unwrap();
+    assert!(answered.galaxy_asked_on);
+    assert!(!headless.galaxy_asked_on);
     assert_eq!(ConfValues::parse(&w.conf()).get("GALAXY"), "1");
     let l4 = std::fs::read_to_string(gogo::macapp::compat::user_path(ID)).unwrap();
     assert!(l4.contains("galaxy = \"comet\""), "{l4}");
@@ -7425,7 +7427,8 @@ fn the_galaxy_switch_reaches_launch_conf_and_the_sdk_scan_reaches_state() {
         prompt: Some(&*no),
         ..SetupOptions::default()
     };
-    setup::setup(ID, &opts, &mut quiet()).unwrap();
+    let again = setup::setup(ID, &opts, &mut quiet()).unwrap();
+    assert!(!again.galaxy_asked_on, "a stored answer isn't asked again");
 }
 
 /// `[linux] galaxy_default` is read by every setup and the SDK is looked for

@@ -35,7 +35,9 @@ cross-progression saves) can. gogo isn't a launcher a game is started from: the 
    On a terminal (no `--json`), `gogo linux-app galaxy <gogid> on` with Comet missing and the mode
    `fetch` (no `GOGO_COMET`) shows the plan line and asks "install now?" (default no; #504); a yes runs
    the code of `gogo runtimes install comet`, a failure leaves the switch on and exits 0. Headless
-   and `system`/`path:` only get the hint.
+   and `system`/`path:` only get the hint. The same offer follows a yes to setup's `ask` question
+   (#514): the CLI makes it once, after build, `linux-app setup` or `--retarget` returns (core only
+   reports `galaxy_asked_on`; it never downloads), never from the launcher's setup.
    `[linux] comet = "fetch"|"system"|"path:<file>"`. v0.4.1 rather than Heroic's v0.2.0:
    it is current, and the host pass checks it with Cyberpunk.
 5. **Credentials never go through argv** (`/proc/<pid>/cmdline` is readable by every local
