@@ -274,14 +274,14 @@ mod tests {
         assert!(err.contains("--log-file"), "{err}");
 
         let fifo = dir.path().join("pipe");
-        rustix::fs::mknodat(
-            rustix::fs::CWD,
-            &fifo,
-            rustix::fs::FileType::Fifo,
-            rustix::fs::Mode::from_raw_mode(0o600),
-            0,
-        )
-        .unwrap();
+        // `mkfifo(1)`: rustix has no portable mknod (not on macOS).
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
         // Run the opens on a thread: a regression (blocking open) fails here
         // instead of hanging CI.
         let (tx, rx) = std::sync::mpsc::channel();
