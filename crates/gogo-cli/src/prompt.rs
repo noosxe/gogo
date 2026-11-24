@@ -20,6 +20,7 @@ pub fn renderer() -> std::sync::Arc<PromptFn> {
 /// Like [`renderer`], but a yes/no question that is cancelled (Ctrl-C, Esc,
 /// EOF) answers No instead of exiting: for an optional offer made after the
 /// command's real work is done (#504).
+#[cfg(target_os = "linux")]
 pub fn declining_renderer() -> std::sync::Arc<PromptFn> {
     std::sync::Arc::new(|spec| {
         crate::depot_progress::prompting(|| match spec.kind {
@@ -35,6 +36,7 @@ pub fn declining_renderer() -> std::sync::Arc<PromptFn> {
 }
 
 /// A cancelled or failed confirm is a No.
+#[cfg(target_os = "linux")]
 fn confirm_or_no<E>(answer: Result<bool, E>) -> bool {
     answer.unwrap_or(false)
 }
@@ -112,8 +114,10 @@ fn cancel(e: impl std::fmt::Display) -> ! {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
     use super::confirm_or_no;
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_cancelled_confirm_is_a_no() {
         assert!(confirm_or_no::<()>(Ok(true)));
