@@ -224,12 +224,9 @@ where
         .with_filter(tracing_subscriber::filter::LevelFilter::TRACE)
 }
 
-fn init_tracing(cli: &Cli) -> Result<(), String> {
-    use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
-    use tracing_subscriber::{EnvFilter, Layer};
-
-    let default = if cli.quiet {
+/// The stderr filter without `RUST_LOG`: from `--quiet` / `-v`.
+fn default_filter(cli: &Cli) -> String {
+    if cli.quiet {
         "warn".to_string()
     } else {
         match cli.verbose {
@@ -241,21 +238,44 @@ fn init_tracing(cli: &Cli) -> Result<(), String> {
             _ => "trace",
         }
         .to_string()
-    };
+    }
+}
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default));
+/// The subscriber `init_tracing` installs: stderr (scrubbed, filtered by
+/// `filter`) plus the optional `--log-file` layer, which has its own filter.
+fn build_subscriber<W>(
+    filter: tracing_subscriber::EnvFilter,
+    stderr: W,
+    file: Option<log_file::LogFile>,
+) -> Box<dyn tracing::Subscriber + Send + Sync>
+where
+    W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
+{
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let stderr = tracing_subscriber::fmt::layer()
+        .with_writer(scrub_log::Scrubbing(stderr))
+        .with_filter(filter);
+    Box::new(
+        tracing_subscriber::registry()
+            .with(stderr)
+            .with(file.map(file_layer)),
+    )
+}
+
+fn init_tracing(cli: &Cli) -> Result<(), String> {
+    use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter(cli)));
     let file = cli
         .log_file
         .as_deref()
         .map(log_file::LogFile::open)
         .transpose()?;
-    let stderr = tracing_subscriber::fmt::layer()
-        .with_writer(scrub_log::Scrubbing(std::io::stderr))
-        .with_filter(filter);
-    let _ = tracing_subscriber::registry()
-        .with(stderr)
-        .with(file.map(file_layer))
-        .try_init();
+    let _ = build_subscriber(filter, std::io::stderr, file).try_init();
     Ok(())
 }
 
