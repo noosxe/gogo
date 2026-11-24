@@ -677,7 +677,8 @@ pub enum LinuxAppSub {
     /// `galaxy`, applied by the next launch. Comet gives the game's Galaxy SDK
     /// your signed-in user, achievements and, for Cyberpunk 2077,
     /// cross-progression saves. It needs `gogo login` and a Comet binary
-    /// (`gogo runtimes install comet`, which asks before downloading); without
+    /// (`gogo runtimes install comet`; `galaxy on` offers it on a terminal and
+    /// downloads only after a yes); without
     /// them the launch goes on without it.
     Galaxy {
         /// GOG product id.

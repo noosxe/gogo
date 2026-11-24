@@ -32,6 +32,10 @@ cross-progression saves) can. gogo isn't a launcher a game is started from: the 
    redist Comet fetches on its first start; the notice goes to `NOTICES.txt`. On NixOS the
    glibc binary doesn't start, so the flake builds Comet from source at the pinned tag and
    `gogo-linux-app` sets `GOGO_COMET=<store path>`, as it sets `GOGO_UMU_PYTHON`.
+   On a terminal (no `--json`), `gogo linux-app galaxy <gogid> on` with Comet missing and the mode
+   `fetch` (no `GOGO_COMET`) shows the plan line and asks "install now?" (default no; #504); a yes runs
+   the code of `gogo runtimes install comet`, a failure leaves the switch on and exits 0. Headless
+   and `system`/`path:` only get the hint.
    `[linux] comet = "fetch"|"system"|"path:<file>"`. v0.4.1 rather than Heroic's v0.2.0:
    it is current, and the host pass checks it with Cyberpunk.
 5. **Credentials never go through argv** (`/proc/<pid>/cmdline` is readable by every local
