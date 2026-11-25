@@ -480,7 +480,7 @@ Where each is enforced is in design 25 §4.
     cover one.
 
   A failing skin's values are replaced with the default skin's for that widget, and the
-  loader reports it.
+  loader reports it. Static checks are planned (#563).
 - **S8. Cancel is always there.** Every app dialog has a cancel control and Esc.
   Cancelling never changes anything.
 - **S9. Errors are uniform.** Every refused or failed action shows the app's `error` widget

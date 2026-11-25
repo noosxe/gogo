@@ -2820,6 +2820,26 @@ fn contract_cases() -> Vec<Case> {
             Route("game"),
             Some("\"{g.title}\""),
         ),
+        case(
+            "§7 types",
+            "a parameter used as a progress, given text at the use",
+            |f| {
+                append(
+                    f,
+                    "components/stock.kdl",
+                    "\ncomponent \"bar-of\" params=\"p\" { box style=\"bar-fill\" progress=\"{p}\" }\n",
+                );
+                rep(
+                    f,
+                    GAME,
+                    "    tabs ",
+                    "    use \"bar-of\" p=\"{g.title}\"\n    tabs ",
+                )
+            },
+            TypeMismatch,
+            Route("game"),
+            Some("\"{g.title}\""),
+        ),
         // A component passes the action's name: each `use` is checked against the
         // contract (S16).
         case(
@@ -3314,4 +3334,66 @@ fn resolved_specs_are_kept_in_the_tree() {
         panic!("not a call");
     };
     assert_eq!(source.map(|s| s.name), Some("game"));
+}
+
+/// A component that rebinds one of its own parameters before forwarding it as an action
+/// argument, then a `use` of it in the game route.
+fn shadowed_use(component: &str, use_args: &str) -> Vec<Code> {
+    let mut files = base();
+    append(&mut files, "components/stock.kdl", component);
+    game_insert(&mut files, &format!("use \"shadow\" {use_args}"));
+    let mut v: Vec<Code> = findings(load(files)).iter().map(|f| f.code).collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn a_let_over_a_parameter_hides_what_the_use_gave() {
+    // S21: `args` is a dynamic value in the body, whatever text the `use` passed.
+    let codes = shadowed_use(
+        "\ncomponent \"shadow\" params=\"action args\" {\n    let args=\"{game($id).slug}\"\n    button \"B\" action=\"{action}\" args=\"{args}\"\n}\n",
+        "action=\"settings.set\" args=\"gui.mode\"",
+    );
+    // The key is dynamic at bind; the single forwarded argument leaves `value` out.
+    assert_eq!(codes, vec![Code::ActionArgs, Code::SettingKey]);
+}
+
+#[test]
+fn an_each_over_a_parameter_hides_what_the_use_gave() {
+    let codes = shadowed_use(
+        "\ncomponent \"shadow\" params=\"action args\" {\n    each \"args\" in=\"{game.saves($id) | take 1}\" {\n        button \"B\" action=\"{action}\" args=\"{args}\"\n    }\n}\n",
+        "action=\"settings.set\" args=\"gui.mode\"",
+    );
+    // As above, and the item of the list is not a plain value.
+    assert_eq!(
+        codes,
+        vec![Code::ActionArgs, Code::SettingKey, Code::TypeMismatch]
+    );
+}
+
+#[test]
+fn a_let_over_the_action_parameter_hides_the_action_the_use_gave() {
+    // The action named at the `use` is a literal, the one in the body is a variable: it
+    // is refused, not checked as `game.verify`.
+    let codes = shadowed_use(
+        "\ncomponent \"shadow\" params=\"action args\" {\n    let action=\"{game($id).slug}\"\n    button \"B\" action=\"{action}\" args=\"{args}\"\n}\n",
+        "action=\"game.verify\" args=\"{$id}\"",
+    );
+    assert_eq!(codes, vec![Code::ActionDynamic]);
+}
+
+#[test]
+fn a_parameter_tested_by_when_takes_any_type() {
+    // A `use` may leave a parameter out, so it may be null, and `when` tests null: no
+    // type given at the `use` is a mismatch there.
+    let mut files = base();
+    append(
+        &mut files,
+        "components/stock.kdl",
+        "\ncomponent \"maybe\" params=\"p\" { text \"x\" when=\"{p}\" }\n",
+    );
+    game_insert(&mut files, "use \"maybe\" p=\"{g.title}\"");
+    game_insert(&mut files, "use \"maybe\" p=\"{game.builds($id)}\"");
+    let pkg = load(files).expect("loads");
+    assert!(pkg.report().is_clean(), "{}", pkg.report());
 }
