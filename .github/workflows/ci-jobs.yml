@@ -411,12 +411,12 @@ jobs:
       - name: Clippy
         run: |
           read -ra gui <<< "$GUI_CRATES"
-          cargo clippy "${gui[@]/#/--package=}" --all-targets -- -D warnings
+          cargo clippy "${gui[@]/#/--package=}" --all-targets --all-features -- -D warnings
       # --no-tests=pass: the skeleton crates have no tests yet (PR B1).
       - name: Test
         run: |
           read -ra gui <<< "$GUI_CRATES"
-          cargo nextest run "${gui[@]/#/--package=}" --no-tests=pass
+          cargo nextest run "${gui[@]/#/--package=}" --all-features --no-tests=pass
 
   ci-result:
     name: CI result

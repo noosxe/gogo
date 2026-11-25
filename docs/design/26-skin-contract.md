@@ -343,7 +343,7 @@ semantic tokens (§6.1). They come in three **depths**:
 | `confirm-destructive` | A | — | Always modal. Typed confirmation (the game's title) or a 1 s hold, chosen by the app per action |
 | `prompt` | B | parts `frame, label, field, hint, error, ok, cancel` | Validation is the CLI's |
 | `secret-input` | A | — | Sign-in code, env value edit. The input never enters the binding scope |
-| `picker` | B | variants `list\|grid\|keys` | Choices inside a plan flow (runtime, renderer, build, DLC). Skins build their own selectors for immediate actions from `game.runner` |
+| `picker` | B | variant `layout: list\|grid\|keys` | Choices inside a plan flow (runtime, renderer, build, DLC). Skins build their own selectors for immediate actions from `game.runner` |
 | `saves-conflicts` | B | parts `row, side.local, side.cloud, choice` | One decision per file; nothing applied until all are decided |
 | `env-table` | B | parts `frame, header, title, row, name, value, source, masked, reveal, edit`; variant `row-actions: inline\|menu` | Masking and reveal are the app's. A reveal shows the value for 30 s, inside the widget only |
 | `log-view` | B | parts `frame, line, line.warn, line.error, timestamp` | Virtualised, scrubbed text; skins never get log lines as data |

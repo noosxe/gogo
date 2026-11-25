@@ -1304,6 +1304,11 @@ dependencies = [
 [[package]]
 name = "gogo-contract"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "gogo-core"
