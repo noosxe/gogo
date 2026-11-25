@@ -15,12 +15,20 @@ dependencies:
    Dev-dependencies are free here: tests may use what the layer itself must not.
 7. gogo-gui-testkit is only ever a dev-dependency.
 
+It also checks that the lists of GUI crates elsewhere haven't drifted from GUI: every
+GUI name (and no NON_GUI name) matches GUI_NAME, the pattern nix/app.nix uses; GUI is
+exactly the GUI_CRATES list in .github/workflows/ci-jobs.yml; and that workflow's `gui`
+path filter covers every GUI crate and gogo-core, but no other crate.
+
 Prints one line per broken rule and exits 1, or exits 0 when the graph is clean.
 Run with `python3 -I`, from the workspace root.
 """
 
 import argparse
+import fnmatch
 import json
+import os
+import re
 import subprocess
 import sys
 
@@ -31,6 +39,11 @@ GUI = {
     "gogo-gui-testkit", "gogo-gui",
 }
 TESTKIT = "gogo-gui-testkit"
+# A GUI crate's name. nix/app.nix matches crate dirs with the same pattern.
+GUI_NAME = "gogo-(contract|skins?|ui-.*|render-.*|gui|gui-.*)"
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WORKFLOW = os.path.join(".github", "workflows", "ci-jobs.yml")
+APP_NIX = os.path.join("nix", "app.nix")
 CORE = "gogo-core"
 # The members that are not GUI crates.
 NON_GUI = {"gogo-core", "gogo-cli", "gogo-shims", "gogo-tui"}
@@ -128,6 +141,8 @@ def check(meta):
             if dep == CORE and name != "gogo-gui":
                 errors.append(f"{name} -> {dep}{how}: only gogo-gui depends on gogo-core (rule 1)")
                 continue
+            # Rules 2-6 are about what a layer ships with. A dev-dependency only
+            # reaches the crate's own tests, which may use what the layer can't.
             if dev:
                 continue
             internal = dep in names
@@ -139,11 +154,87 @@ def check(meta):
     return errors
 
 
+def workflow_gui_crates(text):
+    """The words of the `GUI_CRATES: >-` block in the workflow's env."""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip() == "GUI_CRATES: >-":
+            indent = len(line) - len(line.lstrip())
+            words = []
+            for more in lines[i + 1:]:
+                if more.strip() and len(more) - len(more.lstrip()) <= indent:
+                    break
+                words += more.split()
+            return words
+    return None
+
+
+def workflow_gui_filter(text):
+    """The globs of the `gui:` path filter."""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip() == "gui:":
+            indent = len(line) - len(line.lstrip())
+            globs = []
+            for more in lines[i + 1:]:
+                stripped = more.strip()
+                if stripped.startswith("#"):
+                    continue
+                if not stripped.startswith("- ") or len(more) - len(more.lstrip()) <= indent:
+                    break
+                globs.append(stripped[2:].strip().strip("'\""))
+            return globs
+    return None
+
+
+def drift(workflow, app_nix):
+    """Returns how the other lists of GUI crates differ from GUI, one message each."""
+    errors = []
+    for name in sorted(GUI):
+        if not re.fullmatch(GUI_NAME, name):
+            errors.append(f"{name}: a GUI crate that GUI_NAME doesn't match")
+    for name in sorted(NON_GUI):
+        if re.fullmatch(GUI_NAME, name):
+            errors.append(f"{name}: a non-GUI crate that GUI_NAME matches")
+    if f'"{GUI_NAME}"' not in app_nix:
+        errors.append(f"{APP_NIX}: doesn't match crates with GUI_NAME ({GUI_NAME})")
+    listed = workflow_gui_crates(workflow)
+    if listed is None:
+        errors.append(f"{WORKFLOW}: no GUI_CRATES list")
+    else:
+        if len(listed) != len(set(listed)):
+            errors.append(f"{WORKFLOW}: GUI_CRATES names a crate twice")
+        for name in sorted(GUI - set(listed)):
+            errors.append(f"{WORKFLOW}: GUI_CRATES lacks {name}")
+        for name in sorted(set(listed) - GUI):
+            errors.append(f"{WORKFLOW}: GUI_CRATES names {name}, which isn't a GUI crate")
+    globs = workflow_gui_filter(workflow)
+    if globs is None:
+        errors.append(f"{WORKFLOW}: no `gui` path filter")
+    else:
+        def covered(name):
+            return any(fnmatch.fnmatchcase(f"crates/{name}/src/lib.rs", g) for g in globs)
+        for name in sorted(GUI | {CORE}):
+            if not covered(name):
+                errors.append(f"{WORKFLOW}: the gui filter misses crates/{name}")
+        for name in sorted(NON_GUI - {CORE}):
+            if covered(name):
+                errors.append(f"{WORKFLOW}: the gui filter covers crates/{name}")
+    return errors
+
+
+def read(repo, rel):
+    with open(os.path.join(repo, rel), encoding="utf-8") as f:
+        return f.read()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--metadata", help="read cargo metadata JSON from this file")
+    ap.add_argument("--repo", default=REPO, help="repository root for the drift checks")
     args = ap.parse_args()
     errors = check(load(args.metadata))
+    errors += drift(read(args.repo, WORKFLOW), read(args.repo, APP_NIX))
     for e in errors:
         print(f"gui-deps-check: {e}")
     if errors:

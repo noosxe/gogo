@@ -208,6 +208,10 @@ Licences:
    renderer is in use.
 5. The pipeline cache is a file under the cache dir, keyed per adapter. *Measured:* it took
    a cold start on the NVIDIA GPU from 323 to 196 ms.
+6. **Who owns the surface.** The shell hands the window's raw handle (`raw-window-handle`)
+   to the injected GPU renderer, which creates and owns its wgpu surface. The shell never
+   depends on wgpu (§2.1 rule 4; CI checks it). The CPU renderer draws into a pixel
+   buffer, which the shell presents through softbuffer.
 
 wgpu's GL backend needs a loadable `libEGL.so.1` on the library path.
 - *Measured:* with it, vello_gpu ran on an integrated AMD GPU through Mesa's EGL (Instrument at 8 ms
