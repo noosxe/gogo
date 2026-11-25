@@ -1,10 +1,10 @@
 # 25 — Desktop GUI: the app layer (#520)
 
-Status: **accepted** (2026-11-25), not built yet (D1 and D2 in design 24 §8). This doc covers how the
+Status: **accepted** (2026-11-25), not built yet (PR D1 and PR D2 in design 24 §8). This doc covers how the
 GUI talks to `gogo-core`: threads, the `Backend` seam, how live data reaches a skin without
 flooding it, the safety flow, and long-running jobs. The crates are in design 24 §2. The
-contract the model implements (sources, actions, kinds, tiers, invariants S1–S20) is
-design 26.
+contract the model implements (sources, actions, kinds, tiers, invariants) is
+design 26, and the skin format design 27 (both added in #557).
 
 ## 1. Threads and runtime
 
@@ -29,12 +29,18 @@ flowchart LR
    - Input, binding, layout, scene building and rendering run there.
    - So does the model's state, so the model needs no locks of its own beyond the slots (§3).
 2. **`gogo-gui` starts a tokio multi-thread runtime before the event loop.** The features
-   are the CLI's (`rt-multi-thread`, `macros`, `fs`, `io-util`, `time`) plus `sync` (for
+   are the workspace's (`rt-multi-thread`, `macros`, `signal`, `fs`, `io-util`, `time`) plus `sync` (for
    `watch` and `oneshot`). gogo-core's async APIs run there unchanged.
-3. **Synchronous pipelines run under `tokio::task::spawn_blocking`.** These are
-   `linuxapp::build::execute`, `macapp::execute`, convert, relocate, snapshots, setup and
-   doctor. Their `emit: &mut dyn FnMut(&ProgressEvent)` callback forwards into the same path
-   as the broadcast events (§3).
+3. **Synchronous pipelines run under `tokio::task::spawn_blocking`.** They don't share
+   one callback type; the adapter maps each into the job's slot (§3):
+
+   | Pipeline | Callback | Adapter |
+   |---|---|---|
+   | `linuxapp::build::{plan, execute}`, `macapp::{plan, execute}`, `linuxapp::setup::*`, `linuxapp::snapshots::{before_change, protect}` | `emit: &mut dyn FnMut(&ProgressEvent)` | the same fold as the broadcast events, including the `Work*` step events |
+   | `linuxapp::convert` (subvolume conversion) | `emit: &mut dyn FnMut(ConvertProgress)` (`Copying`/`Verifying {done, total}`) | one step with a byte fraction |
+   | `macapp::relocate::move_game` | `emit: &mut dyn FnMut(&MoveEvent)` (`Copying`/`Verifying {done, total}`) | one step with a byte fraction |
+   | `linuxapp::snapshots::make_dir` | `warn: &mut dyn FnMut(String)` | a warning line on the job |
+   | `linuxapp::doctor::doctor` | none: returns a `Report` | no progress; the job shows a busy step until it returns |
 4. **`gogo-gui-model` has no runtime.** `Backend` methods are synchronous and return
    handles. `CoreBackend` in the binary does the spawning. The model and the safety flow
    are tested with plain `#[test]`s and a `FakeBackend`.
@@ -81,9 +87,15 @@ seconds behind a 10 Hz progress feed because every update queued a frame (design
   once.
 - **Frame pacing is the shell's.** Changes that only touch progress are drawn at most
   10 times a second per source (design 26 §3.4). Input-driven changes are drawn at once.
-- **Download progress** comes from one adapter task per job:
-  - It subscribes to `ctx.events` and folds `ProgressEvent`s into a `Job` value: bytes,
-    total, rate, ETA, files and steps.
+- **Download progress** comes from one adapter task per job. The two download lanes
+  report differently:
+  - **Offline installers** (`engine::execute`) broadcast `ProgressEvent`s on `ctx.events`.
+    The task subscribes and folds them into a `Job` value: bytes, total, rate, ETA, files
+    and steps.
+  - **Depot downloads** (`gog::depot::run`) send `DepotEvent`s (`gog/depot.rs`) on an
+    `mpsc::UnboundedSender` the caller passes in. The task owns the receiver and folds them
+    into the same `Job` shape. An unbounded channel queues, so the fold must keep up; it
+    only updates numbers, and the slot write keeps only the newest value.
   - It writes the job's slot after each event.
   - On `RecvError::Lagged` it carries on. `ChunkDone.file_bytes` is cumulative (01 §4), so
     any later event re-syncs it.
@@ -166,7 +178,7 @@ stateDiagram-v2
   events. These map onto `Job.steps`, drawn by the stock `step-list` component or by a
   skin's own rebuild.
 - **Toasts** fire on start, finish and failure only.
-- **Per-job cancellation needs a core change (D2).** `AppContext.cancel` is one
+- **Per-job cancellation needs a core change (PR D2, #532).** `AppContext.cancel` is one
   `CancellationToken`, which suits a CLI process running one command. Cancelling one GUI job
   must not stop the others.
   - **The change:** the download and pipeline entry points take a token, and the GUI passes
@@ -205,7 +217,9 @@ stateDiagram-v2
 
 ## 9. Where things are stored
 
-Paths follow 06 §1 (the `dirs` crate):
+Paths follow 06 §1 (the `dirs` crate), which lists these rows too. With `GOGO_HOME` set,
+they move under it like everything else: `$GOGO_HOME/skins/`, `$GOGO_HOME/gui/` (state)
+and `$GOGO_HOME/gui-cache/` (cache), so state and cache stay apart.
 
 | What | Linux | macOS |
 |---|---|---|

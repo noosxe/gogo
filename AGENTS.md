@@ -45,7 +45,8 @@ tools, or binaries from the host system — no exceptions.**
   Hyprland quirks, display modes, VRR and audio are a host pass (#179);
   agents put those steps in the PR.
 
-- **Running the desktop GUI** (`gogo-gui`, design 24): never on the host display. Use
+- **Running the desktop GUI** (`gogo-gui`, design 24): never on the host display. The
+  tools arrive with the GUI's PRs (B1 scaffolding, E3, E4; none exists yet). Once they land:
   `gogo-gui --render-png` (no window) or `--check-skin`, the headless compositor in
   `scripts/gui-headless.sh` (Linux), or `scripts/vm-test.sh` with the GUI's `.app` (macOS).
   Real GPU, HiDPI, IME, clipboard and screen-reader checks are a host pass by @noosxe;

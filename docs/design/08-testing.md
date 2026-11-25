@@ -90,15 +90,16 @@ so a pass also proves the bundle is self-contained. How-to, result layout and VM
 
 - **Headless only.** No test opens a window on the host. Rendering tests draw offscreen;
   window tests run in the headless compositor of `scripts/gui-headless.sh` (Linux) or the
-  Tart VM (macOS, 5.1); real displays are a host pass.
+  Tart VM (macOS, §5.1); real displays are a host pass.
 - **Golden images** on vello_cpu: small committed PNGs (@1× and @2×) for a few routes of
-  the built-in skins and an effects sheet, compared with a per-pixel tolerance. vello_cpu
-  is deterministic across OSes, so the same goldens hold on the ubuntu and macOS runners.
+  the built-in skins and an effects sheet, compared with a per-pixel tolerance. The ubuntu
+  (x86_64) and macOS (arm64) runners differ in architecture and SIMD paths, so their pixels
+  may differ slightly; the tolerance absorbs that, and one set of goldens serves both.
   Fonts come from the bundled set, never the host's.
 - **GPU tests** draw the same scenes on vello_gpu and compare against the CPU render within
   a tolerance. They skip when wgpu finds no adapter; the CI lavapipe job (Mesa's software
   Vulkan) runs them.
-- **Safety invariants** (design 26 §7) each have a test named after them (`s5_…`), at the
+- **Safety invariants** (design 26 §7, added in #557) each have a test named after them (`s5_…`), at the
   level that enforces them: the validator, the model or the interaction layer (design 25 §4).
 - **Skin fixtures** are fictional (a made-up game, a made-up account) and live in
   `gogo-gui-testkit`; covers are procedural. Validator rules each have a failing fixture.
