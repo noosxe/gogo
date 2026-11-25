@@ -95,6 +95,26 @@ class Rules(unittest.TestCase):
     def test_format_stays_free_of_layout(self):
         self.assertBroken(with_edge("gogo-skin", "taffy"), "gogo-skin -> taffy")
 
+    def test_shell_never_sees_wgpu(self):
+        self.assertBroken(with_edge("gogo-ui-shell", "wgpu"), "gogo-ui-shell -> wgpu")
+
+    def test_core_never_dev_depends_on_gui(self):
+        self.assertBroken(CLEAN, "gogo-core -> gogo-gui-testkit (dev)", dev={"gogo-core": ["gogo-gui-testkit"]})
+
+    def test_cli_never_dev_depends_on_gui(self):
+        self.assertBroken(CLEAN, "gogo-cli -> gogo-skin (dev)", dev={"gogo-cli": ["gogo-skin"]})
+
+    def test_only_gogo_gui_dev_depends_on_core(self):
+        self.assertBroken(CLEAN, "gogo-ui-layout -> gogo-core (dev)", dev={"gogo-ui-layout": ["gogo-core"]})
+
+    def test_dev_dependencies_may_use_testkit_and_layer_externals(self):
+        dev = {"gogo-gui-model": ["gogo-gui-testkit", "tokio"], "gogo-gui": ["gogo-core"]}
+        self.assertEqual(check.check(metadata(CLEAN, dev)), [])
+
+    def test_unknown_gogo_member_is_reported(self):
+        g = dict(CLEAN, **{"gogo-xtask": []})
+        self.assertBroken(g, "gogo-xtask: unknown member")
+
     def test_testkit_only_as_dev_dependency(self):
         self.assertBroken(with_edge("gogo-gui", "gogo-gui-testkit"), "testkit is dev-only")
 

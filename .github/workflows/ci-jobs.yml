@@ -95,7 +95,8 @@ jobs:
               - '!crates/gogo-gui/**'
               - '!crates/gogo-gui-*/**'
             # The desktop GUI crates, and gogo-core: a core change must still
-            # build the GUI (design 24 §7). Plus the dependency-rule check.
+            # build the GUI (design 24 §7). Plus cargo's config (the runner, the
+            # build flags) and the dependency-rule check.
             gui:
               - 'crates/gogo-contract/**'
               - 'crates/gogo-skin/**'
@@ -105,6 +106,7 @@ jobs:
               - 'crates/gogo-gui/**'
               - 'crates/gogo-gui-*/**'
               - 'crates/gogo-core/**'
+              - '.cargo/**'
               - 'scripts/gui-deps-check.py'
               - 'scripts/tests/gui-deps-check-test.py'
             # snapshots-btrfs also runs in the dev shell and its own script.
