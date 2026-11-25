@@ -17,6 +17,7 @@ use gogo_contract::{ActionSpec, AppWidget, Param, Part, RouteSpec, SourceParam, 
 use crate::diag::{Code, Collector};
 use crate::expr::{Template, TemplateError, TemplateErrorKind, parse_template};
 use crate::names::{is_ident, is_token_name};
+use crate::props;
 use crate::raw::{Lit, RawArg, RawNode};
 use crate::source::Span;
 
@@ -88,6 +89,27 @@ pub struct Prop {
     pub name: String,
     pub name_span: Span,
     pub arg: Arg,
+    /// The value as typed operands, when the property is a style property (design 27 §4):
+    /// a string such as `"0 16"` is already split and its numbers parsed. Binding resolves
+    /// the tokens and expressions among them and never re-reads text. Empty otherwise.
+    pub operands: Vec<Operand>,
+}
+
+/// One value of a style property, read once at load. A token is looked up and an
+/// expression evaluated when the route is bound, since both depend on the mode and the
+/// data; a number, a word or a flag is final.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Operand {
+    Num(f64),
+    /// A word: `auto`, `50%`, `2fr`, `center`, a `#rrggbb` colour, `transparent`, `none`,
+    /// a font family.
+    Word(String),
+    /// `@name`.
+    Token(String),
+    Bool(bool),
+    Null,
+    /// An expression or a template.
+    Dyn(Template),
 }
 
 /// A node: an element, a style declaration, a `let`, a `case`.
@@ -101,6 +123,9 @@ pub struct Node {
     pub span: Span,
     /// What the names on this node resolve to. Empty until the contract check has run.
     pub resolved: Resolved,
+    /// For a style declaration (`padding 0 16`): its values as typed operands, read once at
+    /// load. Empty for anything else.
+    pub operands: Vec<Operand>,
 }
 
 /// What a node's names resolve to in the contract (design 26 S16).
@@ -174,22 +199,29 @@ const TERM_PROPS: &[&str] = &["args", "link-args"];
 /// Convert a raw node and its subtree, parsing every string. Errors go to `col` at the
 /// scope it is in.
 pub(crate) fn convert(col: &mut Collector, raw: &RawNode) -> Node {
+    let args: Vec<Arg> = raw.args.iter().map(|a| arg(col, a, false)).collect();
+    let operands = props::operands(&raw.name, &args.iter().collect::<Vec<_>>());
     Node {
         name: raw.name.clone(),
         name_span: raw.name_span,
-        args: raw.args.iter().map(|a| arg(col, a, false)).collect(),
+        args,
         props: raw
             .props
             .iter()
-            .map(|p| Prop {
-                name: p.name.clone(),
-                name_span: p.name_span,
-                arg: arg(col, &p.value, TERM_PROPS.contains(&p.name.as_str())),
+            .map(|p| {
+                let a = arg(col, &p.value, TERM_PROPS.contains(&p.name.as_str()));
+                Prop {
+                    name: p.name.clone(),
+                    name_span: p.name_span,
+                    operands: props::operands(&p.name, &[&a]),
+                    arg: a,
+                }
             })
             .collect(),
         children: raw.children.iter().map(|c| convert(col, c)).collect(),
         span: raw.span,
         resolved: Resolved::default(),
+        operands,
     }
 }
 
