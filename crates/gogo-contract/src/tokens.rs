@@ -27,6 +27,8 @@ pub const COLOURS: &[&str] = &[
     "tone.update",
     "tone.failed",
     "tone.not_installed",
+    "tone.queued",
+    "tone.paused",
 ];
 
 /// Type roles. Each has a family, a size and a weight ([`FONT_FIELDS`]).
@@ -109,7 +111,7 @@ mod tests {
             "easing.",
             "font.body.colour",
             "brand-red",
-            "tone.queued",
+            "tone.installed",
         ] {
             assert!(!is_semantic(t), "{t}");
         }

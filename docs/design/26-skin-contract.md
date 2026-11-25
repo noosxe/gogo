@@ -314,8 +314,10 @@ that change looks or comfort, never safety. In contract 1.0 these are:
 
 A setting is **app-only** when it gates an action or weakens a confirmation. Examples are
 the cloud-writes gate on `saves.push`/`saves.sync`, anything that skips a prompt or a plan,
-and auth settings. Only the app's own settings route changes an app-only setting, through
-an app-owned control. The validator rejects a skin that binds `settings.set` to a key
+and auth settings. Today the cloud-writes gate is only the `GOGO_CLOUD_WRITES=1`
+environment variable; its settings key, `cloud_saves.writes`, is reserved as app-only now,
+so S21 covers it as soon as a settings route can change it. Only the app's own settings
+route changes an app-only setting, through an app-owned control. The validator rejects a skin that binds `settings.set` to a key
 outside the list (S21). The list only grows in minor versions (§8).
 
 ### 4.10 Deliberately not actions
@@ -348,7 +350,7 @@ semantic tokens (§6.1). They come in three **depths**:
 | `env-table` | B | parts `frame, header, title, row, name, value, source, masked, reveal, edit`; variant `row-actions: inline\|menu` | Masking and reveal are the app's. A reveal shows the value for 30 s, inside the widget only |
 | `log-view` | B | parts `frame, line, line.warn, line.error, timestamp` | Virtualised, scrubbed text; skins never get log lines as data |
 | `error` | B | parts `frame, title, message, hint, actions` | The class word is always shown |
-| `toast` | B | parts, and position (corner) | Start, finish and failure only |
+| `toast` | B | parts `frame, icon, title, message, action, dismiss`; variant `corner: bottom-right\|bottom-left\|top-right\|top-left` | Start, finish and failure only. Always an overlay on top of the page, never inline; the corner defaults to `bottom-right` |
 | `palette` | B | parts `frame, field, item, item.key-hint, group` | Ctrl K always opens it (S19) |
 | `focus-ring` | A (a skin may draw its own) | — | If a skin's focus style fails S13, the app's ring is drawn on top |
 | `step-list`, `progress`, `chunk-bar`, `game-card`, `tabs`, `status-badge`, `meter` | **C** | — | Stock components in the default skin |
@@ -377,11 +379,15 @@ app widgets ignore those.
 - **Colours:** `bg0 bg1 surface raised border outline text-hi text-md text-lo accent
   on-accent focus success warn error info scrim`, plus status tones `tone.ready
   tone.running tone.downloading tone.setting_up tone.update tone.failed
-  tone.not_installed`.
+  tone.not_installed tone.queued tone.paused`.
 - **Type roles:** `font.display font.title font.body font.label font.mono`, each with
   family, size and weight.
 - **Shape:** `radius.sm/md/lg`, `space.1…8`, `elevation.0…3`, `stroke.thin/thick`.
 - **Motion:** `motion.fast/normal/slow` and `easing.*`.
+
+Every `Status` value has exactly one tone, and `update_available` uses `tone.update`. A
+skin that doesn't define `tone.queued` or `tone.paused` gets `text-lo` for queued and `warn`
+for paused.
 
 Effects use CSS units, so every renderer draws the same width (design 27 §6). Borders
 take layout space (CSS `border-box`).

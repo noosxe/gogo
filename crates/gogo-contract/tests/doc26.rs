@@ -338,6 +338,38 @@ fn skin_settable_keys_match_section_4_9() {
 }
 
 #[test]
+fn app_only_keys_are_named_in_section_4_9() {
+    let doc = doc();
+    let text = section(&doc, "### 4.9 Queue and machine").join(" ");
+    let app_only = text
+        .split("A setting is **app-only**")
+        .nth(1)
+        .expect("app-only paragraph");
+    for key in gogo_contract::settings::APP_ONLY {
+        assert!(
+            app_only.contains(&format!("`{key}`")),
+            "{key} is not in the doc's app-only paragraph"
+        );
+    }
+}
+
+#[test]
+fn every_status_tone_is_a_colour_token_in_section_6_1() {
+    let doc = doc();
+    let text = section(&doc, "### 6.1 Semantic tokens").join(" ");
+    for s in Status::ALL {
+        assert!(text.contains(s.tone()), "{} is not in §6.1", s.tone());
+        if let Some(f) = s.tone_fallback() {
+            let sentence = format!("`{f}` for {}", s.name());
+            assert!(
+                text.contains(&sentence),
+                "§6.1 lacks the fallback `{sentence}`"
+            );
+        }
+    }
+}
+
+#[test]
 fn widgets_match_section_5() {
     let doc = doc();
     let lines = section(&doc, "## 5. App-owned widgets");

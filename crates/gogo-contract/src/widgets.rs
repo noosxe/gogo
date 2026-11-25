@@ -219,9 +219,23 @@ pub const WIDGETS: &[AppWidget] = &[
         ],
         &[],
     ),
-    // The doc gives the toast parts and a corner position, but names neither yet; they
-    // are named here when the toast is built.
-    widget("toast", Depth::B, &[], &[]),
+    // Always an overlay on top of the page, never inline, so it has no placements.
+    widget(
+        "toast",
+        Depth::B,
+        &[
+            req("frame"),
+            req("icon"),
+            req("title"),
+            req("message"),
+            req("action"),
+            req("dismiss"),
+        ],
+        &[variant(
+            "corner",
+            &["bottom-right", "bottom-left", "top-right", "top-left"],
+        )],
+    ),
     widget(
         "palette",
         Depth::B,

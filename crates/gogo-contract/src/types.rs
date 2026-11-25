@@ -129,6 +129,31 @@ impl Status {
     pub fn from_name(name: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|s| s.name() == name)
     }
+
+    /// Its tone: the colour token `status.tone(s)` returns (design 26 §6.1).
+    pub const fn tone(self) -> &'static str {
+        match self {
+            Self::Ready => "tone.ready",
+            Self::Running => "tone.running",
+            Self::Downloading => "tone.downloading",
+            Self::SettingUp => "tone.setting_up",
+            Self::UpdateAvailable => "tone.update",
+            Self::Failed => "tone.failed",
+            Self::NotInstalled => "tone.not_installed",
+            Self::Queued => "tone.queued",
+            Self::Paused => "tone.paused",
+        }
+    }
+
+    /// The token used when a skin doesn't define [`Status::tone`]: `text-lo` for queued
+    /// and `warn` for paused. A skin must define the other tones.
+    pub const fn tone_fallback(self) -> Option<&'static str> {
+        match self {
+            Self::Queued => Some("text-lo"),
+            Self::Paused => Some("warn"),
+            _ => None,
+        }
+    }
 }
 
 /// An operating system a game is built for (design 26 §2).
@@ -169,5 +194,26 @@ mod tests {
             assert_eq!(Os::from_name(o.name()), Some(*o));
         }
         assert_eq!(Status::from_name("installed"), None);
+    }
+
+    #[test]
+    fn every_status_has_its_own_tone() {
+        let tones: std::collections::HashSet<_> = Status::ALL.iter().map(|s| s.tone()).collect();
+        assert_eq!(tones.len(), Status::ALL.len());
+        for s in Status::ALL {
+            assert!(crate::tokens::COLOURS.contains(&s.tone()), "{}", s.tone());
+            if let Some(f) = s.tone_fallback() {
+                assert!(crate::tokens::is_semantic(f), "{f}");
+            }
+        }
+        let tone_tokens = crate::tokens::COLOURS
+            .iter()
+            .filter(|t| t.starts_with("tone."))
+            .count();
+        assert_eq!(
+            tone_tokens,
+            Status::ALL.len(),
+            "a tone token without a status"
+        );
     }
 }
