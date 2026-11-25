@@ -613,7 +613,8 @@ The loader is built in three PRs:
   call in an expression holds its `SourceSpec`. It checks the routes and sections of
   `nav.go` and `tabs`, parts, variant values and placements, the parts that can't be
   hidden (S5), `settings.set` keys (S21), §7's names, field paths and types, and
-  component parameters at each `use`. S7 is not checked yet.
+  component parameters at each `use`. S7 is not checked yet: its static checks land with
+  #563.
 - **B4** adds binding.
 
 Every finding is a miette diagnostic with a stable code (`gogo_skin::<rule>`), the file,

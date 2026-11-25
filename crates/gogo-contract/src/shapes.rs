@@ -115,7 +115,7 @@ impl ParamType {
                 text || matches!(field, F::OneOf(w) if w.iter().all(|x| words.contains(x)))
             }
             ParamType::UiValue | ParamType::SettingValue => {
-                text || matches!(field, F::Number | F::Bool | F::OneOf(_))
+                text || matches!(field, F::Number | F::Bool | F::OneOf(_) | F::Status | F::Os)
             }
             ParamType::BoundField => !matches!(
                 field,
@@ -881,6 +881,8 @@ mod tests {
         assert!(!ParamType::OneOf(&["a", "b"]).accepts(&F::OneOf(&["a", "c"])));
         assert!(!ParamType::BoundField.accepts(&F::Masked(&F::Text)));
         assert!(ParamType::BoundField.accepts(&F::Text));
+        assert!(ParamType::UiValue.accepts(&F::Status));
+        assert!(ParamType::SettingValue.accepts(&F::Os));
         for literal in [ParamType::Route, ParamType::UiVar, ParamType::SettingKey] {
             assert!(literal.literal_only());
             assert!(!literal.accepts(&F::Text));
