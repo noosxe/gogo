@@ -1,0 +1,111 @@
+// ---- frame and sidebar
+style "page" { fill @bg0 }
+style "frame" { grow 1; align "stretch" }
+style "sidebar" { w 224; fill @bg1; border-right 1 @border; padding 20 12; gap 2 }
+style "brand" { font-size 22; weight 800; tracking -0.02; padding 0 10 18 10 }
+style "search" { h 36; border 1 @outline; radius 8; padding 0 10; color @text-lo; font-size 13; weight 400; justify "between"; margin 0 0 16 0; fill "transparent" }
+style "kbd" { family "JetBrains Mono"; font-size 11; weight 600; border 1 @outline; radius 4; padding 0 5; color @text-md }
+style "section-head" { font-size 11; weight 700; tracking 0.08; upper #true; color @text-lo; padding 14 10 6 10 }
+style "nav" {
+    h 34; radius 7; gap 10; padding 0 10; color @text-md; weight 500; justify "start"; fill "transparent"; border 0 "transparent"
+    :on { fill @raised; color @text-hi; accent-edge "left" 3 @accent }
+}
+style "count" { family "JetBrains Mono"; font-size 11.5; weight 600; fill @surface; border 1 @border; radius 9; padding 0 7; color @text-md }
+style "mini" { fill @surface; border 1 @border; radius 10; padding 12; gap 8 }
+style "bar" { h 6; fill @raised; radius 3 }
+style "bar-fill" { h 6; fill @accent; radius 3 }
+style "mini-meta" { family "JetBrains Mono"; font-size 12; color @text-md }
+style "mini-foot" { font-size 11.5; color @text-lo }
+style "account" { padding 14 10 0 10; gap 8; color @text-md }
+style "dot-ok" { fill @success }
+
+// ---- main column
+style "outlet" { padding 22 32; gap 20 }
+style "crumb" { font-size 13; color @text-lo }
+style "cover" { radius 10; shadow 0 6 18 "#00000066" }
+style "h1" { font "@font.display"; color @text-hi }
+style "meta" { color @text-md }
+style "chip" { h 26; radius 13; padding 0 11; gap 7; font-size 12.5; weight 600; fill @surface; border 1 @border; color @text-md }
+style "chip.ready" { color @success }
+style "chip.warn" { color @warn }
+style "button" {
+    h 40; radius 8; padding 0 16; gap 10; weight 600; border 1 @outline; color @text-hi; fill @surface; key-hint #true
+    :hover { fill @raised }
+    :pressed { offset 0 1 }
+    :focus { ring 2 @focus }
+}
+style "primary" { fill @accent; color @on-accent; border 1 @accent; weight 700; padding 0 22 }
+style "ghost" { fill "transparent"; border 1 "transparent"; color @text-md }
+style "key-hint" { family "JetBrains Mono"; font-size 11; weight 600; border 1 "{@text-md alpha=.5}"; radius 4; padding 0 5 }
+style "menu" { h 40; padding 0 12; gap 6; color @text-md; weight 600 }
+style "tabs" { gap 4; border-bottom 1 @border }
+style "tab" {
+    h 40; padding 0 14; color @text-md; weight 500
+    :on { color @text-hi; weight 600; border-bottom 2 @accent }
+    :focus { ring 2 @focus }
+}
+
+// ---- cards
+style "card" { fill @surface; border 1 @border; radius 12 }
+style "card-header" { padding 14 16 10 16 }
+style "card-title" { font-size 12; weight 700; tracking 0.07; upper #true; color @text-lo }
+style "link" { color @accent; weight 600; font-size 12.5 }
+style "badge" { font-size 11.5; weight 700; padding 2 8; radius 5 }
+style "badge.warn" { fill "{@warn alpha=.15}"; color @warn }
+style "badge.success" { fill "{@success alpha=.15}"; color @success }
+
+// ---- builds table
+style "table-head" { h 34; border-bottom 1 @border }
+style "table-head-cell" { padding 0 16; font-size 11.5; weight 700; tracking 0.07; upper #true; color @text-lo }
+style "table-row" {
+    h 44; border-bottom 1 @border
+    :on { fill "{@accent alpha=.07}" }
+}
+style "table-cell" { padding 0 16; color @text-md }
+style "version" { color @text-hi; weight 600 }
+
+// ---- tiles
+style "tile" { fill @surface; border 1 @border; radius 12; padding 14 16; gap 10; align "start" }
+style "mark" { size 18; shape "circle"; align "center"; justify "center"; font-size 11; weight 700 }
+style "mark.success" { fill "{@success alpha=.18}"; color @success }
+style "mark.warn" { fill "{@warn alpha=.18}"; color @warn }
+style "mark.neutral" { fill @raised; color @text-md }
+style "tile-title" { weight 600; color @text-hi }
+style "tile-sub" { font-size 12.5; color @text-lo }
+
+// ---- runs with
+style "form" { gap 10; padding 0 18 18 18 }
+style "field" { gap 12; min-h 32 }
+style "field-label" { w 118; font-size 13; color @text-lo }
+style "select" {
+    h 32; grow 1; border 1 @outline; radius 7; padding 0 10; weight 500; color @text-hi
+    :focus { ring 2 @focus }
+}
+style "toggle" {
+    w 34; h 20; radius 10; padding 3; fill @raised
+    :on { fill @accent }
+    :focus { ring 2 @focus }
+}
+style "toggle-knob" {
+    size 14; fill @text-md
+    :on { fill @on-accent }
+}
+style "on-text" { color @success; weight 600; font-size 13 }
+style "hint" { color @text-md; font-size 13 }
+
+// ---- snapshots
+style "snap-row" { gap 10; padding 4 16 }
+style "dot.accent" { fill @accent }
+style "dot.outline" { fill @outline }
+style "mono-lo" { family "JetBrains Mono"; font-size 12; color @text-lo }
+style "snap-label" { weight 600; color @text-hi }
+
+// ---- plan card parts (depth B)
+style "plan-frame" { fill @surface; border 1 "{@warn alpha=.55}"; accent-edge "left" 3 @warn; radius 12; padding 18 20; gap 12 }
+style "plan-title" { font-size 18; weight 700; color @text-hi }
+style "plan-badge" { fill "{@warn alpha=.15}"; color @warn; font-size 11.5; weight 700; padding 2 8; radius 5 }
+style "plan-step" { color @text-md }
+style "plan-confirm" { fill @accent; color @on-accent; border 1 @accent; h 36; radius 8; padding 0 18; weight 700; gap 10; key-hint #true }
+style "plan-cancel" { h 36; padding 0 10; color @text-md; weight 600; gap 10; key-hint #true }
+style "env-head" { padding 12 14 }
+style "borrowed" { fill @surface; border 1 @border; radius 12; padding 16; color @text-lo }

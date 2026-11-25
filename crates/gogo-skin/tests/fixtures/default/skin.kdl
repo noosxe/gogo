@@ -1,0 +1,11 @@
+skin "default" {
+    title "Default"
+    version "0.1.0"
+    contract "1.0"
+    modes "dark"
+    routes "shell" "game"
+    ui {
+        var "tab" type="section" default="overview"
+        var "view" type="enum(grid list)" default="grid"
+    }
+}

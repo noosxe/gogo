@@ -11,6 +11,8 @@ gogo-contract.workspace = true
 gogo-ui-ir.workspace = true
 thiserror.workspace = true
 miette.workspace = true
+kdl.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+tempfile.workspace = true

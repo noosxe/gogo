@@ -1,0 +1,101 @@
+route "game" {
+    let g="{game($id)}" run="{game.runner($id)}" snaps="{game.snapshots($id)}"
+
+    text "Library  ›  {g.title}" style="crumb" id="crumb"
+
+    row gap=@space.6 align="start" {
+        art "{g.art.cover}" w=132 h=176 fit="cover" style="cover" label="{g.title} cover" id="cover"
+        column gap=@space.3 grow=1 {
+            text "{g.title}" style="h1" id="title"
+            text "{g.genre} · {g.year} · {fmt.hours(g.playtime)} played · last played {fmt.ago(g.last_played)} · {fmt.bytes(g.size_on_disk)}" style="meta" id="meta"
+            row gap=@space.2 id="chips" {
+                use "status-badge" status="{g.status}"
+                chip "Windows build · Linux via {g.runs_via}" when="{g.runs_via}"
+                chip "Update {g.update?.to} available" icon="dot" tone="warn" when="{g.update}"
+            }
+            row gap=@space.3 margin="6 0 0 0" {
+                button "Play" icon="play" key="P" style="primary" action="game.play" args="{$id}" id="play"
+                button "Verify files" action="game.verify" args="{$id}" id="verify"
+                button "Download files" action="nav.go" args="game {$id} files" id="files"
+                menu "More" { item "Open game folder" action="game.open_folder" args="{$id} game" }
+            }
+        }
+    }
+
+    tabs bind="ui.tab" sections="overview builds dlc saves snapshots setup files" id="tabs"
+
+    switch "{ui.tab}" {
+        case "overview" {
+            grid columns="1fr 420" gap=@space.5 align="start" id="overview" {
+                column gap=@space.4 {
+                    // app-owned: placed inline, styled by parts; content and buttons are the app's
+                    plan-card for="game.update" args="{$id}" placement="inline" labels="verb" layout="stacked" markers="number" id="plan" {
+                        part "frame" style="plan-frame"
+                        part "title" style="plan-title"
+                        part "badge" style="plan-badge"
+                        part "step" style="plan-step"
+                        part "confirm" style="plan-confirm"
+                        part "cancel" style="plan-cancel"
+                    }
+                    card title="Builds" link="All builds ›" link-action="ui.set" link-args="tab builds" id="builds" {
+                        data-table label="Builds" rows="{game.builds($id) | take 4}" highlight="{row.this_machine}" {
+                            col "Build" "{row.version}" mono=#true w=100
+                            col "Date" "{fmt.date(row.date)}" mono=#true w=157
+                            col "Size" "{fmt.bytes(row.size)}" mono=#true w=122
+                            col "Generation" "gen {row.generation}{row.legacy ? ' · legacy' : ''}" w=164
+                            col "" {
+                                badge "Newest" tone="warn" when="{row.newest}"
+                                badge "This machine" tone="success" when="{row.this_machine}"
+                            }
+                        }
+                    }
+                    grid columns=3 gap=@space.3 id="tiles" {
+                        let saves="{game.saves($id)}" dlc="{game.dlc($id)}" doc="{game.doctor($id)}"
+                        use "summary-tile" mark="check" tone="{saves.state == in_sync ? 'success' : 'warn'}" \
+                            title="{saves.state == in_sync ? 'Saves in sync' : 'Saves need attention'}" \
+                            sub="{saves.files | len} files · checked {fmt.ago(saves.last_sync)}"
+                        use "summary-tile" mark="half" title="DLC {dlc | where installed | len} of {dlc | len}" \
+                            sub="{dlc | where installed == false | first.title} missing ·" link="Add…" action="dlc.add" args="{$id}"
+                        use "summary-tile" mark="warn" tone="warn" when="{doc.summary.warn > 0}" \
+                            title="Doctor: {doc.summary.warn} warning" sub="{doc.checks | where result == warn | first.message}"
+                    }
+                }
+                column gap=@space.3 {
+                    card title="Runs with" id="runs-with" {
+                        form {
+                            field "Renderer" { select value="{run.renderer}" options="{run.renderer_options}" action="runner.set_renderer" args="{$id} {value}" }
+                            field "Runtime" { select value="{run.runtime.id}" options="{run.runtime_options}" action="runner.set_runtime" args="{$id} {value}" mono=#true }
+                            field "Display mode" { select value="{run.display.mode == wayland ? 'Wayland' : 'X11'}" options="wayland x11" action="runner.set_display" args="{$id} mode={value}" }
+                            field "Galaxy (Comet)" {
+                                toggle on="{run.galaxy.setting == on}" action="runner.set_galaxy" args="{$id} {on ? 'off' : 'on'}"
+                                text "{run.galaxy.state == signed_in ? 'On · signed in' : status.word(run.galaxy.state)}" style="on-text"
+                            }
+                            field "Autosnapshot" {
+                                toggle on="{snaps.auto}" action="snapshot.set_auto" args="{$id} {not on}"
+                                text "Before updates and rollbacks" style="hint"
+                            }
+                        }
+                    }
+                    // app-owned: values arrive masked; reveal and edit are the widget's own controls
+                    env-table game="{$id}" row-actions="menu" title="Environment" id="env" {
+                        part "title" style="card-title"
+                        part "header" style="env-head"
+                    }
+                    card title="Snapshots · {snaps.items | len}" link="Roll back…" link-action="snapshot.rollback" link-args="{$id}" id="snapshots" {
+                        column padding="0 0 12 0" {
+                            each "s" in="{snaps.items | sort -date | take 2}" {
+                                row style="snap-row" {
+                                    dot tone="{s.kind == auto ? 'accent' : 'outline'}"
+                                    text "{s.label}" style="snap-label" grow=1
+                                    text "{fmt.date(s.date)} · {s.kind}" style="mono-lo"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        case "builds" { use default "game.builds" }
+        else { use default "game.{ui.tab}" }
+    }
+}
