@@ -1,7 +1,7 @@
 //! Every row of design 26 exists in `gogo-contract`, in the doc's order, and the code has
-//! no row the doc lacks: the value types, statuses and OSes (§2), sources (§3), actions
-//! and their parameter types (§4), the settings lists (§4.9), app-owned widgets (§5),
-//! tokens (§6.1), routes (§6.2) and the invariants (§7).
+//! no row the doc lacks: the value types, statuses and OSes (§2), sources and the fields
+//! of their shapes (§3), actions and their parameter types (§4), the settings lists
+//! (§4.9), app-owned widgets (§5), tokens (§6.1), routes (§6.2) and the invariants (§7).
 //!
 //! The doc's Markdown is parsed here. The parser is deliberately small, and strict: a
 //! table is a header line followed by a `|---` separator, every row has the header's
@@ -10,6 +10,7 @@
 
 use gogo_contract::actions::{ACTIONS, ParamType};
 use gogo_contract::routes::ROUTES;
+use gogo_contract::shapes::{self, Field, FieldType};
 use gogo_contract::sources::SOURCES;
 use gogo_contract::tokens::{COLOURS, FONT_FIELDS, FONT_ROLES, MOTION, SHAPE};
 use gogo_contract::widgets::{Depth, Placement, WIDGETS};
@@ -750,4 +751,362 @@ fn version_matches_the_status_line() {
         format!("**Contract version {v}**")
     };
     assert!(doc.contains(&label), "doc lacks {label}");
+}
+
+/// A type as §3 writes it.
+#[derive(Debug, Clone)]
+enum DocType {
+    /// No type written: `Text`.
+    Untyped,
+    /// `Text`, `GameSummary`, or `source` (the type of the sibling field `source`).
+    Name(String),
+    /// `a|b|c`; digits only (`1|2`) is a `Number`.
+    Enum(Vec<String>),
+    List(Box<DocType>),
+    Masked(Box<DocType>),
+    Opt(Box<DocType>),
+    /// `Name{ … }` or `{ … }`.
+    Rec(Option<String>, Vec<(String, DocType)>),
+    /// `GameSummary + { … }`.
+    Plus(String, Vec<(String, DocType)>),
+}
+
+struct ShapeParser {
+    toks: Vec<String>,
+    i: usize,
+}
+
+impl ShapeParser {
+    fn new(src: &str) -> Self {
+        let mut toks = Vec::new();
+        let mut word = String::new();
+        for c in src.chars() {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                word.push(c);
+                continue;
+            }
+            if !word.is_empty() {
+                toks.push(std::mem::take(&mut word));
+            }
+            if !c.is_whitespace() {
+                toks.push(c.to_string());
+            }
+        }
+        if !word.is_empty() {
+            toks.push(word);
+        }
+        Self { toks, i: 0 }
+    }
+
+    fn peek(&self) -> &str {
+        self.toks.get(self.i).map_or("", String::as_str)
+    }
+
+    fn eat(&mut self, t: &str) -> bool {
+        let hit = self.peek() == t;
+        if hit {
+            self.i += 1;
+        }
+        hit
+    }
+
+    fn expect(&mut self, t: &str) {
+        assert!(
+            self.eat(t),
+            "expected `{t}` at token {} of {:?}",
+            self.i,
+            self.toks
+        );
+    }
+
+    fn word(&mut self) -> String {
+        let w = self.peek().to_owned();
+        assert!(
+            w.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !w.is_empty(),
+            "expected a name at token {} of {:?}",
+            self.i,
+            self.toks
+        );
+        self.i += 1;
+        w
+    }
+
+    fn done(&self) -> bool {
+        self.i == self.toks.len()
+    }
+
+    fn ty(&mut self) -> DocType {
+        let t = self.atom();
+        if self.eat("+") {
+            let DocType::Name(base) = t else {
+                panic!("`+` after a non-name in {:?}", self.toks)
+            };
+            self.expect("{");
+            return DocType::Plus(base, self.fields());
+        }
+        t
+    }
+
+    fn atom(&mut self) -> DocType {
+        let t = if self.eat("{") {
+            DocType::Rec(None, self.fields())
+        } else if self.eat("[") {
+            let t = self.ty();
+            self.expect("]");
+            DocType::List(Box::new(t))
+        } else {
+            let w = self.word();
+            if (w == "List" || w == "Masked") && self.eat("<") {
+                let t = self.ty();
+                self.expect(">");
+                if w == "List" {
+                    DocType::List(Box::new(t))
+                } else {
+                    DocType::Masked(Box::new(t))
+                }
+            } else if self.eat("{") {
+                DocType::Rec(Some(w), self.fields())
+            } else if self.peek() == "|" {
+                let mut words = vec![w];
+                while self.eat("|") {
+                    words.push(self.word());
+                }
+                DocType::Enum(words)
+            } else {
+                DocType::Name(w)
+            }
+        };
+        if self.eat("?") {
+            DocType::Opt(Box::new(t))
+        } else {
+            t
+        }
+    }
+
+    /// The fields up to and including the closing `}`.
+    fn fields(&mut self) -> Vec<(String, DocType)> {
+        let mut out = Vec::new();
+        loop {
+            if self.eat("}") {
+                return out;
+            }
+            let name = self.word();
+            let optional = self.eat("?");
+            let mut ty = if self.eat(":") {
+                self.ty()
+            } else if self.eat("{") {
+                DocType::Rec(None, self.fields())
+            } else {
+                DocType::Untyped
+            };
+            // A note in brackets: `progress: Fraction? (while a job runs)`.
+            if self.eat("(") {
+                while !self.eat(")") {
+                    assert!(!self.done(), "unclosed `(` in {:?}", self.toks);
+                    self.i += 1;
+                }
+            }
+            if optional {
+                ty = DocType::Opt(Box::new(ty));
+            }
+            out.push((name, ty));
+            if !self.eat(",") {
+                self.expect("}");
+                return out;
+            }
+        }
+    }
+}
+
+fn parse_shape(src: &str) -> DocType {
+    let mut p = ShapeParser::new(src);
+    let t = p.ty();
+    assert!(p.done(), "trailing tokens in `{src}`: {:?}", &p.toks[p.i..]);
+    t
+}
+
+struct ShapeCheck {
+    /// Named records the doc defines apart from where they are used (`Job` = `{ … }`).
+    defs: BTreeMap<String, DocType>,
+    /// Named records whose fields were compared.
+    checked: BTreeSet<String>,
+    /// Named records used by name only.
+    named: BTreeSet<String>,
+}
+
+impl ShapeCheck {
+    fn scalar(name: &str) -> Option<FieldType> {
+        Some(match name {
+            "Text" => FieldType::Text,
+            "Number" => FieldType::Number,
+            "Bool" => FieldType::Bool,
+            "Bytes" => FieldType::Bytes,
+            "Time" => FieldType::Time,
+            "Duration" => FieldType::Duration,
+            "Fraction" => FieldType::Fraction,
+            "GameId" => FieldType::GameId,
+            "JobId" => FieldType::JobId,
+            "Status" => FieldType::Status,
+            "Os" => FieldType::Os,
+            "RichText" => FieldType::RichText,
+            "ActionRef" => FieldType::ActionRef,
+            _ => return None,
+        })
+    }
+
+    fn check(&mut self, at: &str, doc: &DocType, code: &FieldType, siblings: &[&Field]) {
+        match (doc, code) {
+            (DocType::Untyped, FieldType::Text) => {}
+            (DocType::Opt(d), FieldType::Option(c)) => self.check(at, d, c, siblings),
+            (DocType::List(d), FieldType::List(c)) => self.check(at, d, c, siblings),
+            (DocType::Masked(d), FieldType::Masked(c)) => self.check(at, d, c, siblings),
+            (DocType::Enum(words), c) => {
+                if words.iter().all(|w| w.chars().all(|c| c.is_ascii_digit())) {
+                    assert_eq!(*c, FieldType::Number, "{at}: a numeric enum");
+                } else {
+                    assert_eq!(*c, FieldType::OneOf(leak(words)), "{at}: enum words");
+                }
+            }
+            (DocType::Name(n), c) if Self::scalar(n).is_some() => {
+                assert_eq!(Self::scalar(n).as_ref(), Some(c), "{at}: doc says {n}");
+            }
+            (DocType::Name(n), c) if n.starts_with(char::is_lowercase) => {
+                let sib = siblings
+                    .iter()
+                    .find(|f| f.name == n)
+                    .unwrap_or_else(|| panic!("{at}: `[{n}]` names no sibling field"));
+                assert_eq!(sib.ty, *c, "{at}: the type of `{n}`");
+            }
+            (DocType::Name(n), FieldType::Record(s)) => {
+                assert_eq!(s.name, n, "{at}: record");
+                if let Some(def) = self.defs.get(n).cloned()
+                    && self.checked.insert(n.clone())
+                {
+                    self.check(n, &def, code, &[]);
+                }
+                self.named.insert(n.clone());
+            }
+            (DocType::Rec(name, fields), FieldType::Record(s)) => {
+                if let Some(n) = name {
+                    assert_eq!(s.name, n, "{at}: record name");
+                    self.checked.insert(n.clone());
+                }
+                assert!(
+                    s.extends.is_none(),
+                    "{at}: the code extends {:?}",
+                    s.extends
+                );
+                // A named record's fields are reported under its name: `Setting.value`.
+                self.fields(name.as_deref().unwrap_or(at), fields, s.fields);
+            }
+            (DocType::Plus(base, fields), FieldType::Record(s)) => {
+                let ext = s.extends.unwrap_or_else(|| panic!("{at}: extends nothing"));
+                assert_eq!(ext.name, base, "{at}: extends");
+                self.named.insert(base.clone());
+                self.fields(at, fields, s.fields);
+            }
+            (d, c) => panic!("{at}: doc {d:?}, code {c:?}"),
+        }
+    }
+
+    fn fields(&mut self, at: &str, doc: &[(String, DocType)], code: &'static [Field]) {
+        let names: Vec<&str> = doc.iter().map(|(n, _)| n.as_str()).collect();
+        let code_names: Vec<&str> = code.iter().map(|f| f.name).collect();
+        assert_eq!(names, code_names, "{at}: fields");
+        let siblings: Vec<&Field> = code.iter().collect();
+        for ((name, d), f) in doc.iter().zip(code) {
+            let at = format!("{at}.{name}");
+            // A setting's value and default are typed by its `type` field.
+            if at == "Setting.value" || at == "Setting.default" {
+                assert!(matches!(d, DocType::Untyped), "{at}");
+                assert_eq!(f.ty, FieldType::Scalar, "{at}");
+                continue;
+            }
+            self.check(&at, d, &f.ty, &siblings);
+        }
+    }
+}
+
+fn leak(words: &[String]) -> &'static [&'static str] {
+    Box::leak(
+        words
+            .iter()
+            .map(|w| &*Box::leak(w.clone().into_boxed_str()))
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+    )
+}
+
+#[test]
+fn shapes_match_section_3() {
+    let doc = doc();
+    let lines = section(&doc, "## 3. Data sources");
+    let text = lines.join(" ");
+    // `Name` = `{ … }`, and standalone `Name{ … }` spans (ErrorView in §3.7).
+    let mut defs = BTreeMap::new();
+    let parts: Vec<&str> = text.split('`').collect();
+    for (i, part) in parts.iter().enumerate().skip(1).step_by(2) {
+        let after = parts.get(i + 1).copied().unwrap_or("");
+        if part.chars().all(|c| c.is_ascii_alphanumeric()) && after.trim() == "=" {
+            defs.insert((*part).to_owned(), parse_shape(parts[i + 2]));
+        } else if part.starts_with(char::is_uppercase)
+            && part.ends_with('}')
+            && !part.contains('<')
+            && let DocType::Rec(Some(n), f) = parse_shape(part)
+        {
+            defs.insert(n.clone(), DocType::Rec(Some(n), f));
+        }
+    }
+    let mut ck = ShapeCheck {
+        defs,
+        checked: BTreeSet::new(),
+        named: BTreeSet::new(),
+    };
+    for row in rows(&lines) {
+        let shape_cell = &row[1];
+        let s = spans(shape_cell);
+        for span in spans(&row[0]) {
+            let (name, _) = call(&span);
+            let code = shapes::source_shape(&name).unwrap_or_else(|| panic!("{name}: no shape"));
+            match code.inner() {
+                // The skin's own state, and what only an app widget shows.
+                FieldType::Ui | FieldType::Opaque(_) => continue,
+                _ => {}
+            }
+            let src = if shape_cell.contains("` + `") {
+                format!("{} + {}", s[0], s[1])
+            } else {
+                s[0].clone()
+            };
+            ck.check(&name, &parse_shape(&src), &code, &[]);
+        }
+    }
+    // §2 lists Art's fields in prose: `cover`, `background`, `logo`, plus `colors: …`.
+    let art = rows(&section(&doc, "## 2. Types"))
+        .into_iter()
+        .find(|r| r[0] == "`Art`")
+        .expect("an Art row");
+    let art_fields: Vec<String> = spans(&art[1])
+        .iter()
+        .map(|s| s.split(':').next().unwrap_or(s).to_owned())
+        .collect();
+    let code: Vec<&str> = shapes::ART.fields.iter().map(|f| f.name).collect();
+    assert_eq!(art_fields, code, "Art fields (§2)");
+    assert_eq!(
+        shapes::ART.field("colors").map(|f| f.ty),
+        Some(FieldType::List(&FieldType::Color))
+    );
+    ck.checked.insert("Art".to_owned());
+    let unchecked: Vec<_> = ck.named.difference(&ck.checked).collect();
+    assert!(
+        unchecked.is_empty(),
+        "named in §3, fields never compared: {unchecked:?}"
+    );
+    // Plan reaches a skin only through `plan-card`, so it has no shape in code.
+    let spare: Vec<_> = ck
+        .defs
+        .keys()
+        .filter(|k| !ck.checked.contains(*k) && *k != "Plan")
+        .collect();
+    assert!(spare.is_empty(), "defined in §3, used nowhere: {spare:?}");
 }
