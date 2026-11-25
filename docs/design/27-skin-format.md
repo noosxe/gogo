@@ -55,6 +55,7 @@ skin "default" {
 | `contract` | The contract version it needs (design 26 §8) |
 | `modes` | Token sets it provides: `dark`, `light` |
 | `routes` | The routes it covers. The rest fall back per route |
+| `extends "<skin>"` | Optional. The skin it builds on: routes and components it doesn't define come from that skin before falling back to the default. Parsed by the prototype; the lookup arrives with binding (PR B4) |
 | `ui { var … }` | Skin-local state (design 26 §6.4). Types: `bool`, `number`, `enum(a b …)`, `section` (the route's sections) |
 
 ## 3. Tokens
@@ -81,6 +82,9 @@ tokens "dark" {
   `JetBrains Mono`), never by a fontconfig alias. An unknown family is a load error.
 - **The bundled families** are Noto Sans (variable) and JetBrains Mono. A skin may ship
   more OTF/TTF files in `assets/`.
+- **A change from the prototype:** its skins used `JetBrainsMono Nerd Font`, a patched
+  build with extra icon glyphs. The port bundles plain JetBrains Mono instead (decision 10
+  in design 24), and the built-in skins' family names change with it.
 
 ## 4. Styles and states
 
@@ -108,15 +112,19 @@ Properties:
 |---|---|
 | Size | `w h min-w max-w min-h max-h size aspect` |
 | Flex and grid | `grow shrink gap row-gap direction wrap align align-self justify columns rows col-span` |
-| Box | `padding margin inset` (needs explicit positioning: see §5.1) |
-| Paint | `fill gradient` (`linear`, `radial`), `border border-top/right/bottom/left accent-edge radius opacity shape offset ring` |
-| Effects | `shadow inner-shadow glow bloom-text noise scanlines reflection blur-behind` (§6) |
+| Box | `padding margin inset` (`inset` takes the node out of the flow: see §5.1) |
+| Paint | `fill`, `gradient linear <angle> <colours…>` / `gradient radial <colours…>`, `border <w> <colour>`, `border-top/right/bottom/left`, `accent-edge <side> <w> <colour>`, `radius` (1 or 4 numbers), `opacity`, `shape circle\|rect`, `offset <x> <y>`, `ring <w> <colour>` |
+| Effects | `shadow inner-shadow glow bloom-text noise scanlines reflection blur-behind` (§6); `effects none` clears every inherited box effect, `shadow none` only shadows, `bloom-text none` the bloom |
 | Text | `font family font-size weight stretch tracking line-height color text-align upper text-wrap lines` |
+| Hints | `key-hint #true` (show a button's `key=` as a hint chip), `mono-font "<family>"` (the family used for `mono=#true` text below) |
 
 Layout follows CSS flexbox and grid as implemented by taffy:
 - `align` takes `start center end stretch baseline`;
 - `justify` takes `start center end between around`;
-- **borders take layout space** (CSS `border-box`).
+- **borders take layout space** (CSS `border-box`);
+- **position:** every node is in the flow (taffy's static position) unless it sets
+  `inset`, which makes it absolutely positioned against its parent. Insets on an in-flow
+  node would be ignored, so the loader never produces one.
 
 ## 5. Elements
 
@@ -129,8 +137,9 @@ Only the elements below exist. Anything else is a load error.
 | `column`, `box`, `form` | vertical flex container (`box` is a plain container) |
 | `row` | horizontal flex container, items centred |
 | `grid` | CSS grid: `columns="1fr 420"` or `columns=3` |
-| `layer` | children stacked on top of each other (absolute insets apply here) |
-| `scroll` | a clipping, scrolling container (arrives with scrolling, #545) |
+| `layer` | children stacked on top of each other: a one-cell grid (`1fr × 1fr`), every child in the same cell; `inset` children are placed absolutely |
+| `scroll` | a clipping, scrolling container. **Planned:** not in the prototype and not validated yet; it arrives with scrolling (#545) |
+| `outlet` | Only in the `shell` route: where the current route is drawn |
 | `spacer`, `divider` | flexible space; a rule |
 
 ### 5.2 Content
@@ -139,10 +148,13 @@ Only the elements below exist. Anything else is a load error.
 |---|---|
 | `text "<template>"` | One line, unless `text-wrap #true` (wraps at word boundaries) or `lines N` with N > 1 (wraps, at most N lines) |
 | `icon "<name>"` | A vector icon shipped with the engine (`play`, `square`, `circle`, `chevron-down`, …). An unknown name is a load error |
-| `art "{g.art.cover}"` | Game art by handle, with `fit="cover"\|"contain"` |
-| `image "assets/x.png"` | An image from the skin folder |
-| `chip`, `badge`, `dot` | Small labelled marks, with `tone=` (a status tone or semantic colour) |
-| `card` | A titled panel (`title=`, `link=`, `link-action=`) |
+| `art "{g.art.cover}"` | Game art by handle, with `fit="cover"` (default), `"contain"` or `"fill"` (stretch to the box); `label=` names it for screen readers |
+| `image src="assets/x.png"` | An image from the skin folder, by the `src` property |
+| `label "<template>"` | Text, like `text` |
+| `chip`, `badge` | Small labelled marks, with `tone=` (a status tone or semantic colour) and `icon=`; read as a label |
+| `display "<template>"` | Like `chip`, but read as a live status (an LCD-style readout) |
+| `dot`, `led` | An 8 px circle; `on="{expr}"` puts it in its `:on` state. A `led` with `label=` is read as an on/off indicator |
+| `card`, `module` | A titled panel (`title=`, `link=`, `link-action=`); `module` is the same element under a name that suits instrument-style skins |
 
 - **Text properties are inherited.**
 - **`stretch` (the `wdth` axis) applies only to variable fonts.** On a static face it is a
@@ -218,7 +230,8 @@ component "summary-tile" params="mark tone title sub link action args" {
 - **Using one.** `use "summary-tile" title="…"` instantiates a component, and parameters
   are bound like `let` values.
 - **Borrowing from the default skin.** `use default "game.builds"` embeds a named fragment
-  of the default skin (design 26 §8).
+  of the default skin (design 26 §8). The prototype only draws a labelled placeholder
+  there; real borrowing arrives with binding (PR B4).
 - **Stock components** (design 26 §5, depth C) ship with the default skin, and a skin may
   copy or replace them.
 
@@ -229,7 +242,7 @@ component "summary-tile" params="mark tone title sub link action args" {
 | `let g="{game($id)}"` | Names a source or value for the rest of the block |
 | `when="{expr}"` | Draws the element only when the expression is true |
 | `each "s" in="{list}" { … }` | One copy per item, at most the repeat limit (§8) |
-| `switch "{expr}" { case "a" { … } else { … } }` | Picks one branch |
+| `switch "{expr}" { case "a" { … } else { … } }` | Picks the first `case` whose string equals the expression's value as text (exact, case-sensitive), else the `else` branch, else nothing |
 | `id="…"` | A stable id for tests, the inspector and focus restore |
 
 ## 6. Effects
@@ -239,14 +252,14 @@ shaders.
 
 | Effect | Syntax (example) | Units and rules |
 |---|---|---|
-| `shadow` | `shadow 0 6 18 "#00000066"` (x, y, blur, colour; repeatable) | CSS blur radius r: a Gaussian with σ = r / 2 |
-| `inner-shadow` | `inner-shadow 0 1 4 "#0008"` | as `shadow`, drawn inside the box |
+| `shadow` | `shadow 0 6 18 "#00000066" [spread]` (x, y, blur, colour, optional spread in px; repeatable) | CSS blur radius r: a Gaussian with σ = r / 2 |
+| `inner-shadow` | `inner-shadow 0 1 4 "#0008"` (x, y, blur, colour) | as `shadow`, drawn inside the box |
 | `glow` | `glow 6 "{@led alpha=.8}" 18 "{@led alpha=.35}"` (radius and colour pairs) | each layer σ = r / 2 |
 | `bloom-text` | `bloom-text 8 "{@accent alpha=.6}"` | Lights **text only**, for the text runs under the node that sets it; inherited like a text property. σ = r / 2 |
-| `gradient` | `gradient linear 180 @bg1 @bg0` or `radial …` | stops in order |
-| `noise` | `noise .06` | a tiled grain at that opacity |
-| `scanlines` | `scanlines 2 "#0003"` | line period in px, and colour |
-| `reflection` | `reflection .12` | a fading mirror below the box |
+| `gradient` | `gradient linear 180 @bg1 @bg0` or `gradient radial @a @b` | a fill; stops evenly spaced, in order |
+| `noise` | `noise .06 [seed]` | a tiled grain at that opacity; the optional integer seed (default 7) picks the pattern |
+| `scanlines` | `scanlines 3 .18` (period in px, alpha) | horizontal black lines at that alpha, one every `period` px, clipped to the box |
+| `reflection` | `reflection 120 .14` (angle in degrees, alpha) | a glass sheen over the box: a white linear gradient at that angle, from `alpha` fading to nothing before the middle. Not a mirror; a mirrored copy may be added later as a separate effect |
 | `blur-behind` | `blur-behind 12` | CSS `backdrop-filter: blur(r)`: σ = r. Use sparingly: it is the most expensive effect |
 
 - **Argument forms are provisional.** The units and rules above are fixed. The exact
@@ -254,8 +267,9 @@ shaders.
   table is updated then.
 - **Reduced motion.** Under reduced motion, transforms and loops are removed and fades are
   capped at 150 ms (S15).
-- **Motion declarations** (`motion "led" { on-change duration=120 easing="ease-out" }`)
-  only take values from the motion tokens' ranges.
+- **Motion declarations** (`motion "led" { on-change duration=120 easing="ease-out" }`):
+  **planned**. The prototype doesn't handle them. When they land, they take only values
+  from the motion tokens' ranges.
 
 ## 7. Expressions
 
@@ -268,11 +282,18 @@ expression.
 | optional | `g.update?.to else "—"` | `else` gives a default when the value is null |
 | compare, logic | `g.status == ready and not g.running` | enum values are bare words |
 | ternary | `s.kind == auto ? "auto" : "manual"` | |
-| list pipes | `game.builds($id) \| sort -date \| take 4` | also `where`, `len`, `first`, `before x`, `after x` |
+| list pipes | `game.builds($id) \| sort -date \| take 4` | also `where`, `len`, `first`, `upper`, `lower`, `before x`, `after x` |
 | formatters | `fmt.bytes(x)`, `fmt.ago(t)` | the fixed list in design 26 §2 |
 | status helpers | `status.word(s)`, `status.tone(s)` | |
 | tokens | `@accent` | |
 | route parameters | `$id` | |
+
+- **`before x` / `after x`** give the item before or after `x` in the list, wrapping
+  around at the ends (cycling through tabs or modes). If `x` isn't in the list they give
+  the first item, and on an empty list null.
+- **Braces in text.** Every `{` in a template opens an expression, and the prototype has no
+  way to write a literal brace. **Planned for PR B3:** `{{` and `}}` stand for literal `{`
+  and `}`.
 
 Expressions are **total**:
 - every expression ends;
@@ -281,7 +302,8 @@ Expressions are **total**:
 
 ## 8. Limits
 
-A skin that exceeds any limit fails to load, and the default skin is used (S12).
+**Static limits** are checked at load. A skin that exceeds one fails to load, and the
+default skin is used (S12).
 
 | Limit | Value |
 |---|---|
@@ -289,8 +311,16 @@ A skin that exceeds any limit fails to load, and the default skin is used (S12).
 | Nodes per skin | 20 000 |
 | Nesting depth | 48 |
 | Expression length | 512 characters |
-| Items drawn by one `each` / `data-table` | 1 000 (lists beyond that are virtualised by `scroll`) |
-| Asset file and total sizes | per type, set at implementation and listed here then |
+| One PNG / SVG / font file | 4 MiB / 512 KiB / 8 MiB |
+| Whole skin folder | 32 MiB |
+
+The asset sizes are this design's proposal. The prototype loaded no skin assets; PR B3
+adds the checks and confirms these numbers here.
+
+**The row cap is data-dependent, so it truncates instead.** One `each` or `data-table`
+draws at most **1 000** items. A longer list is cut at 1 000, silently, at bind time: data
+can't make a valid skin fail to load. Virtualised lists, which draw only what is visible
+and lift the cap, are planned with scrolling (#545).
 
 ## 9. Loading and validation
 
