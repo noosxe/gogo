@@ -107,6 +107,9 @@ pub struct Token {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TokenSet {
     tokens: BTreeMap<String, Token>,
+    /// Names the file declares that did not make it into `tokens` (a bad value, a bad
+    /// reference): reported where they are, so not reported again as missing.
+    declared: BTreeSet<String>,
 }
 
 impl TokenSet {
@@ -264,6 +267,7 @@ pub(crate) fn parse(
 
 fn block(col: &mut Collector, n: &RawNode) -> TokenSet {
     let mut decls: BTreeMap<String, (Decl, Span)> = BTreeMap::new();
+    let mut declared: BTreeSet<String> = BTreeSet::new();
     for t in &n.children {
         if !t.children.is_empty() {
             col.error(Code::TokenStructure, t.span, "a token has no children");
@@ -301,11 +305,14 @@ fn block(col: &mut Collector, n: &RawNode) -> TokenSet {
             );
             continue;
         }
+        declared.insert(t.name.clone());
         if let Some(d) = decl(col, t) {
             decls.insert(t.name.clone(), (d, t.span));
         }
     }
-    resolve(col, decls)
+    let mut set = resolve(col, decls, &declared);
+    set.declared = declared;
+    set
 }
 
 fn decl(col: &mut Collector, t: &RawNode) -> Option<Decl> {
@@ -453,12 +460,24 @@ fn font(col: &mut Collector, t: &RawNode) -> Option<FontToken> {
 }
 
 /// Follow every reference to its final value; report unknown targets and cycles.
-fn resolve(col: &mut Collector, decls: BTreeMap<String, (Decl, Span)>) -> TokenSet {
+fn resolve(
+    col: &mut Collector,
+    decls: BTreeMap<String, (Decl, Span)>,
+    declared: &BTreeSet<String>,
+) -> TokenSet {
     let mut done: BTreeMap<String, Token> = BTreeMap::new();
     let mut failed: BTreeSet<String> = BTreeSet::new();
     for name in decls.keys() {
         let mut chain = Vec::new();
-        follow(col, &decls, name, &mut chain, &mut done, &mut failed);
+        follow(
+            col,
+            &decls,
+            declared,
+            name,
+            &mut chain,
+            &mut done,
+            &mut failed,
+        );
     }
     // The contract fixes the type of its own tokens.
     let mut tokens = BTreeMap::new();
@@ -479,12 +498,16 @@ fn resolve(col: &mut Collector, decls: BTreeMap<String, (Decl, Span)>) -> TokenS
         }
         tokens.insert(name, tok);
     }
-    TokenSet { tokens }
+    TokenSet {
+        tokens,
+        declared: BTreeSet::new(),
+    }
 }
 
 fn follow(
     col: &mut Collector,
     decls: &BTreeMap<String, (Decl, Span)>,
+    declared: &BTreeSet<String>,
     name: &str,
     chain: &mut Vec<String>,
     done: &mut BTreeMap<String, Token>,
@@ -513,9 +536,16 @@ fn follow(
             } else {
                 chain.push(name.to_owned());
                 let v = if decls.contains_key(target) {
-                    follow(col, decls, target, chain, done, failed)
+                    follow(col, decls, declared, target, chain, done, failed)
                 } else if let Some(v) = derived(decls, target) {
                     Some(v)
+                } else if declared.contains(target)
+                    || target
+                        .rsplit_once('.')
+                        .is_some_and(|(role, _)| declared.contains(role))
+                {
+                    // Declared and broken: reported where it is declared.
+                    None
                 } else {
                     let names = decls.keys().map(String::as_str);
                     let help = match crate::names::suggest(target, names) {
@@ -577,7 +607,7 @@ fn check_modes(col: &mut Collector, sets: &BTreeMap<Mode, TokenSet>, spans: &BTr
         let missing: Vec<&str> = required
             .iter()
             .copied()
-            .filter(|r| !set.tokens.contains_key(*r))
+            .filter(|r| !set.tokens.contains_key(*r) && !set.declared.contains(*r))
             .collect();
         if !missing.is_empty() {
             col.error(

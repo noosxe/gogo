@@ -116,7 +116,7 @@ fn naive_depth(text: &str) -> usize {
                     let quotes = if multi { 3 } else { 1 };
                     i = q + quotes;
                     while i < b.len() {
-                        if !multi && hashes == 0 && b[i] == b'\\' {
+                        if hashes == 0 && b[i] == b'\\' {
                             i += 2;
                             continue;
                         }
@@ -346,4 +346,70 @@ fn inner_offset(text: &str, span: Span, lit: &Lit) -> Option<usize> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod depth_tests {
+    use super::naive_depth;
+    use kdl::KdlDocument;
+    use proptest::prelude::*;
+
+    /// Argument and comment forms whose text holds braces that are not nesting. Each is
+    /// valid KDL v2 as `n <atom> {`.
+    const ATOMS: &[&str] = &[
+        "\"a { b } c\"",
+        "\"a \\\" { \"",
+        "\"\\\\\"",
+        "#\"a { \"quoted\" } \"#",
+        "##\"x\"# { \"##",
+        "#\"\\\"#",
+        "\"\"\"\n  { {\n  \"\"\"",
+        "\"\"\"\n  \\\"\"\" {\n  \"\"\"",
+        "#\"\"\"\n  {{ \"\" \"\"#\n  \"\"\"#",
+        "##\"\"\"\n  \"\"\"# {\n  \"\"\"##",
+        "\"a\" /* { */",
+        "\"a\" /* /* { */ { */",
+        "\"a\" /* \" { */",
+    ];
+
+    fn doc(atoms: &[usize]) -> (String, usize) {
+        let mut s = String::new();
+        for (d, a) in atoms.iter().enumerate() {
+            s.push_str(&format!("{}n {} {{\n", " ".repeat(d), ATOMS[*a]));
+        }
+        for d in (0..atoms.len()).rev() {
+            s.push_str(&format!("{}}}\n", " ".repeat(d)));
+        }
+        (s, atoms.len())
+    }
+
+    #[test]
+    fn every_atom_is_valid_and_skipped() {
+        for i in 0..ATOMS.len() {
+            let (text, depth) = doc(&[i, i, i]);
+            assert!(
+                KdlDocument::parse_v2(&text).is_ok(),
+                "atom {i} is not valid KDL v2:\n{text}"
+            );
+            assert_eq!(naive_depth(&text), depth, "atom {i}:\n{text}");
+        }
+    }
+
+    #[test]
+    fn a_comment_between_nodes() {
+        let text = "a {\n  /* { { { */\n  // { {\n  /* /* } */ } */\n  b {\n  }\n}\n";
+        assert!(KdlDocument::parse_v2(text).is_ok());
+        assert_eq!(naive_depth(text), 2);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        #[test]
+        fn depth_matches_construction(atoms in proptest::collection::vec(0..ATOMS.len(), 1..40)) {
+            let (text, depth) = doc(&atoms);
+            prop_assert!(KdlDocument::parse_v2(&text).is_ok(), "{}", text);
+            prop_assert_eq!(naive_depth(&text), depth, "{}", text);
+        }
+    }
 }

@@ -127,6 +127,11 @@ fn style(f: &mut Files, body: &str) {
     append(f, "styles.kdl", &format!("\nstyle \"x\" {{ {body} }}\n"));
 }
 
+/// A node added to the game route, ahead of its tabs.
+fn game_insert(f: &mut Files, node: &str) {
+    rep(f, GAME, "    tabs ", &format!("    {node}\n    tabs "));
+}
+
 const GAME: &str = "routes/game.kdl";
 const SHELL: &str = "routes/shell.kdl";
 
@@ -1625,6 +1630,483 @@ fn cases() -> Vec<Case> {
             Skin,
             Some("true"),
         ),
+        // Review gaps: switch, paths, manifest, ranges, effects, elements, tokens.
+        case(
+            "§5.8",
+            "a second else in a switch",
+            |f| {
+                game_insert(
+                    f,
+                    "switch \"{ui.tab}\" {\n case \"a\" { }\n else { }\n else { }\n }",
+                )
+            },
+            ElementChildren,
+            Route("game"),
+            Some("else"),
+        ),
+        case(
+            "§5.8",
+            "a case after the else",
+            |f| game_insert(f, "switch \"{ui.tab}\" {\n else { }\n case \"a\" { }\n }"),
+            ElementChildren,
+            Route("game"),
+            Some("case"),
+        ),
+        case(
+            "§5.8",
+            "an else with arguments",
+            |f| {
+                game_insert(
+                    f,
+                    "switch \"{ui.tab}\" {\n case \"a\" { }\n else \"x\" { }\n }",
+                )
+            },
+            ElementArguments,
+            Route("game"),
+            None,
+        ),
+        case(
+            "§1 S10",
+            "a path with a NUL byte",
+            |f| add(f, "assets/a\0.png", png()),
+            PathInvalid,
+            Skin,
+            None,
+        ),
+        case(
+            "§1 S10",
+            "a path with a control character",
+            |f| add(f, "assets/a\u{7}.png", png()),
+            PathInvalid,
+            Skin,
+            None,
+        ),
+        case(
+            "§1 S10",
+            "a path over 200 bytes",
+            |f| add(f, &format!("assets/{}.png", "a".repeat(200)), png()),
+            PathInvalid,
+            Skin,
+            None,
+        ),
+        case(
+            "§1 S10",
+            "a path with a colon",
+            |f| add(f, "assets/a:b.png", png()),
+            PathInvalid,
+            Skin,
+            None,
+        ),
+        case(
+            "§2",
+            "a mode listed twice",
+            |f| rep(f, "skin.kdl", "modes \"dark\"", "modes \"dark\" \"dark\""),
+            ManifestValue,
+            Skin,
+            Some("\"dark\""),
+        ),
+        case(
+            "§2",
+            "no modes",
+            |f| rep(f, "skin.kdl", "modes \"dark\"", "modes"),
+            ManifestValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§2",
+            "no version",
+            |f| rep(f, "skin.kdl", "    version \"0.1.0\"\n", ""),
+            ManifestStructure,
+            Skin,
+            None,
+        ),
+        case(
+            "§2",
+            "no contract",
+            |f| rep(f, "skin.kdl", "    contract \"1.0\"\n", ""),
+            ManifestStructure,
+            Skin,
+            None,
+        ),
+        case(
+            "§2",
+            "a field written twice",
+            |f| {
+                rep(
+                    f,
+                    "skin.kdl",
+                    "    title \"Default\"\n",
+                    "    title \"Default\"\n    title \"Again\"\n",
+                )
+            },
+            ManifestStructure,
+            Skin,
+            Some("title"),
+        ),
+        case(
+            "§2",
+            "a name over 64 characters",
+            |f| {
+                rep(
+                    f,
+                    "skin.kdl",
+                    "skin \"default\"",
+                    &format!("skin \"{}\"", "a".repeat(65)),
+                )
+            },
+            SkinName,
+            Skin,
+            None,
+        ),
+        // §4: every range the loader enforces.
+        case(
+            "§4",
+            "opacity over 1",
+            |f| style(f, "opacity 1.5"),
+            PropertyValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§4",
+            "weight over 1000",
+            |f| style(f, "weight 1001"),
+            PropertyValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§4",
+            "stretch over 200",
+            |f| style(f, "stretch 201"),
+            PropertyValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§4",
+            "font-size under 1",
+            |f| style(f, "font-size 0"),
+            PropertyValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§4",
+            "tracking over 5",
+            |f| style(f, "tracking 6"),
+            PropertyValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§4",
+            "line-height under 0.1",
+            |f| style(f, "line-height 0"),
+            PropertyValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§4",
+            "aspect of zero",
+            |f| style(f, "aspect 0"),
+            PropertyValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§4",
+            "a negative grow",
+            |f| style(f, "grow -1"),
+            PropertyValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§4",
+            "lines over 1000",
+            |f| style(f, "lines 1001"),
+            PropertyValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§4",
+            "col-span over 64",
+            |f| style(f, "col-span 65"),
+            PropertyValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§4",
+            "more than 64 columns",
+            |f| style(f, "columns 65"),
+            PropertyValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§4",
+            "padding with three values",
+            |f| style(f, "padding 1 2 3"),
+            PropertyValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§4",
+            "radius with two values",
+            |f| style(f, "radius 1 2"),
+            PropertyValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§4",
+            "gap with three values",
+            |f| style(f, "gap 1 2 3"),
+            PropertyValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§4 §6",
+            "a gradient over eight stops",
+            |f| {
+                style(
+                    f,
+                    "gradient radial @bg0 @bg1 @bg0 @bg1 @bg0 @bg1 @bg0 @bg1 @bg0",
+                )
+            },
+            PropertyValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§4 §6",
+            "a linear gradient angle over 3600",
+            |f| style(f, "gradient linear 3601 @bg0 @bg1"),
+            PropertyValue,
+            Skin,
+            None,
+        ),
+        // §6: effects.
+        case(
+            "§6",
+            "a shadow spread out of range",
+            |f| style(f, "shadow 0 0 4 \"#000000\" 10001"),
+            PropertyValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§6",
+            "a noise seed over u32",
+            |f| style(f, "noise 0.1 4294967296"),
+            PropertyValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§6",
+            "a scanlines period over 1000",
+            |f| style(f, "scanlines 1001 0.2"),
+            PropertyValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§6",
+            "a reflection alpha over 1",
+            |f| style(f, "reflection 90 1.5"),
+            PropertyValue,
+            Skin,
+            None,
+        ),
+        // §5: elements.
+        case(
+            "§5.3",
+            "tabs without bind",
+            |f| game_insert(f, "tabs sections=\"a b\""),
+            ElementArguments,
+            Route("game"),
+            None,
+        ),
+        case(
+            "§5.3",
+            "select without options",
+            |f| game_insert(f, "field \"Pick\" { select value=\"{ui.view}\" }"),
+            ElementArguments,
+            Route("game"),
+            None,
+        ),
+        case(
+            "§5.4",
+            "col with a template and a body",
+            |f| {
+                game_insert(
+                    f,
+                    "data-table label=\"B\" rows=\"{game.builds($id)}\" { col \"A\" \"{row.version}\" { text \"x\" } }",
+                )
+            },
+            ElementChildren,
+            Route("game"),
+            None,
+        ),
+        case(
+            "§5.4",
+            "data-table with no col",
+            |f| game_insert(f, "data-table label=\"B\" rows=\"{game.builds($id)}\""),
+            ElementChildren,
+            Route("game"),
+            None,
+        ),
+        case(
+            "§5.3",
+            "link-action without link",
+            |f| {
+                game_insert(
+                    f,
+                    "card title=\"X\" link-action=\"ui.set\" link-args=\"tab builds\"",
+                )
+            },
+            AccessibleName,
+            Route("game"),
+            None,
+        ),
+        case(
+            "§5.8",
+            "an id with a space",
+            |f| game_insert(f, "text \"x\" id=\"a b\""),
+            PropertyValue,
+            Route("game"),
+            Some("\"a b\""),
+        ),
+        case(
+            "§5.8",
+            "an each variable that is not a name",
+            |f| game_insert(f, "each \"A b\" in=\"{game.builds($id)}\" { }"),
+            ElementArguments,
+            Route("game"),
+            None,
+        ),
+        case(
+            "§5.2",
+            "art with a fit that does not exist",
+            |f| game_insert(f, "art \"{g.art.cover}\" fit=\"zoom\" label=\"x\""),
+            PropertyValue,
+            Route("game"),
+            Some("\"zoom\""),
+        ),
+        case(
+            "§5.6",
+            "a progress that is not an expression",
+            |f| game_insert(f, "box style=\"bar-fill\" progress=\"0.5\""),
+            PropertyValue,
+            Route("game"),
+            Some("\"0.5\""),
+        ),
+        // §5.3: an action is a plain name.
+        case(
+            "§5.3 S16",
+            "a button whose action is a template",
+            |f| game_insert(f, "button \"Go\" action=\"{$id}\""),
+            ActionDynamic,
+            Route("game"),
+            Some("\"{$id}\""),
+        ),
+        case(
+            "§5.3 S16",
+            "a card whose link-action is a template",
+            |f| {
+                game_insert(
+                    f,
+                    "card title=\"X\" link=\"More\" link-action=\"{$id}\" link-args=\"tab builds\"",
+                )
+            },
+            ActionDynamic,
+            Route("game"),
+            Some("\"{$id}\""),
+        ),
+        case(
+            "§5.3 S16",
+            "a component action given a template",
+            |f| {
+                game_insert(
+                    f,
+                    "use \"summary-tile\" mark=\"check\" title=\"T\" link=\"L\" action=\"{$id}\"",
+                )
+            },
+            ActionDynamic,
+            Route("game"),
+            Some("\"{$id}\""),
+        ),
+        case(
+            "§5.3 S16",
+            "a component action that is not a parameter",
+            |f| {
+                rep(
+                    f,
+                    "components/stock.kdl",
+                    "action=\"{action}\"",
+                    "action=\"{$id}\"",
+                )
+            },
+            ActionDynamic,
+            Skin,
+            Some("\"{$id}\""),
+        ),
+        // §3: tokens.
+        case(
+            "§3",
+            "a queued tone of the wrong type",
+            |f| rep(f, "tokens.kdl", "    scrim", "    tone.queued 5\n    scrim"),
+            TokenValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§3",
+            "an easing that is a number",
+            |f| rep(f, "tokens.kdl", "    scrim", "    easing.out 5\n    scrim"),
+            TokenValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§3",
+            "a motion token that is a colour",
+            |f| {
+                rep(
+                    f,
+                    "tokens.kdl",
+                    "motion.fast 120",
+                    "motion.fast \"#ffffff\"",
+                )
+            },
+            TokenValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§3 §4",
+            "a family token that is not a bundled family",
+            |f| {
+                rep(
+                    f,
+                    "tokens.kdl",
+                    "    scrim",
+                    "    easing.pick \"Comic Sans\"\n    scrim",
+                );
+                style(f, "family @easing.pick");
+            },
+            FontFamily,
+            Skin,
+            Some("@easing.pick"),
+        ),
     ]
 }
 
@@ -1653,6 +2135,16 @@ fn every_rule_reports_its_code_where_it_belongs() {
             ));
             continue;
         };
+        let fired: std::collections::BTreeSet<Code> = all.iter().map(|f| f.code).collect();
+        if fired != std::collections::BTreeSet::from([c.code]) {
+            bad.push(format!(
+                "{} ({}): expected only {}, got {:?}",
+                c.name,
+                c.section,
+                c.code,
+                fired.iter().map(|c| c.as_str()).collect::<Vec<_>>()
+            ));
+        }
         let level_ok = match (&f.level, c.at) {
             (Level::Skin, At::Skin) | (Level::Warning, At::Warn) => true,
             (Level::Route(r), At::Route(want)) => r == want,
@@ -1833,4 +2325,86 @@ fn findings_are_miette_diagnostics_with_codes_and_help() {
     assert!(f.source_code().is_some());
     assert!(f.labels().is_some_and(|mut l| l.next().is_some()));
     assert_eq!(f.severity(), Some(miette::Severity::Error));
+}
+
+fn many_warnings() -> String {
+    let mut many = String::new();
+    for i in 0..260 {
+        many.push_str(&format!(
+            "\nstyle \"w{i}\" {{ opacity 0.5; opacity 0.6 }}\n"
+        ));
+    }
+    many
+}
+
+#[test]
+fn warnings_never_hide_a_route_error() {
+    let mut files = base();
+    append(&mut files, "styles.kdl", &many_warnings());
+    rep(&mut files, GAME, "    tabs ", "    bogus\n    tabs ");
+    let pkg = load(files).expect("a route error does not fail the skin");
+    let report = pkg.report();
+    assert!(report.suppressed() > 0, "the warnings overflowed the cap");
+    assert_eq!(report.warning_total(), 260);
+    assert_eq!(report.error_total(), 1);
+    assert_eq!(report.errors().count(), 1, "the error is stored");
+    assert_eq!(
+        report.failed_routes().into_iter().collect::<Vec<_>>(),
+        ["game"]
+    );
+    assert!(!pkg.routes.contains_key("game"));
+    assert!(pkg.routes.contains_key("shell"));
+    assert!(!report.has_skin_errors());
+}
+
+#[test]
+fn warnings_never_hide_a_skin_error() {
+    let mut files = base();
+    append(&mut files, "styles.kdl", &many_warnings());
+    append(&mut files, "components/stock.kdl", "\nbogus\n");
+    let report = load(files).expect_err("a component error fails the skin");
+    assert!(report.has_skin_errors());
+    assert!(report.errors().count() >= 1);
+    assert!(report.suppressed() > 0);
+}
+
+#[test]
+fn errors_past_the_cap_still_fail_the_skin() {
+    let mut files = base();
+    let mut many = String::new();
+    for i in 0..300 {
+        many.push_str(&format!("\nstyle \"e{i}\" {{ opacity 9 }}\n"));
+    }
+    append(&mut files, "styles.kdl", &many);
+    let report = load(files).expect_err("style errors fail the skin");
+    assert_eq!(report.error_total(), 300);
+    assert!(report.errors().count() < 300, "storage is capped");
+    assert!(report.has_skin_errors());
+}
+
+#[test]
+fn the_queued_and_paused_tones_are_optional() {
+    // The default skin defines neither; adding them is accepted too.
+    let pkg = load(base()).expect("loads without them");
+    assert!(pkg.report().is_clean(), "{}", pkg.report());
+    let mut files = base();
+    rep(
+        &mut files,
+        "tokens.kdl",
+        "    scrim",
+        "    tone.queued \"@text-lo\"\n    tone.paused \"@warn\"\n    scrim",
+    );
+    let pkg = load(files).expect("loads with them");
+    assert!(pkg.report().is_clean(), "{}", pkg.report());
+}
+
+#[test]
+fn a_component_may_pass_its_action_parameter_on() {
+    let mut files = base();
+    game_insert(
+        &mut files,
+        "use \"summary-tile\" mark=\"check\" title=\"T\" link=\"L\" action=\"game.verify\" args=\"{$id}\"",
+    );
+    let pkg = load(files).expect("loads");
+    assert!(pkg.report().is_clean(), "{}", pkg.report());
 }

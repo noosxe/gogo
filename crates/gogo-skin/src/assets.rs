@@ -75,6 +75,11 @@ pub(crate) fn check(kind: AssetKind, bytes: &[u8]) -> Result<Option<(u32, u32)>,
     }
 }
 
+/// The longest side of a PNG, in pixels (design 27 §8).
+const MAX_PNG_SIDE: u32 = 16_384;
+/// Width times height of a PNG: 32 Mpx (design 27 §8).
+const MAX_PNG_PIXELS: u64 = 33_554_432;
+
 const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
 
 fn be32(b: &[u8], at: usize) -> Option<u32> {
@@ -102,6 +107,12 @@ fn check_png(b: &[u8]) -> Result<(u32, u32), AssetError> {
             };
             if w == 0 || h == 0 {
                 return Err(AssetError::Png("the image has no pixels"));
+            }
+            if w > MAX_PNG_SIDE || h > MAX_PNG_SIDE {
+                return Err(AssetError::Png("a side is longer than 16384 pixels"));
+            }
+            if u64::from(w) * u64::from(h) > MAX_PNG_PIXELS {
+                return Err(AssetError::Png("the image has more than 32 million pixels"));
             }
             size = Some((w, h));
         }
@@ -328,6 +339,9 @@ fn check_css(css: &str) -> Result<(), AssetError> {
     if lower.contains("@import") {
         return Err(AssetError::SvgReference("@import".to_owned()));
     }
+    if css.contains("&#") {
+        return Err(AssetError::SvgSyntax("a character reference in a style"));
+    }
     if css.contains('\\') {
         return Err(AssetError::SvgSyntax("a backslash escape in a style"));
     }
@@ -382,6 +396,20 @@ mod tests {
     }
 
     #[test]
+    fn png_size_caps() {
+        let with = |w: u32, h: u32| {
+            let mut v = png(&[]);
+            v[16..20].copy_from_slice(&w.to_be_bytes());
+            v[20..24].copy_from_slice(&h.to_be_bytes());
+            v
+        };
+        assert_eq!(check_png(&with(16_384, 2_048)), Ok((16_384, 2_048)));
+        assert!(check_png(&with(16_385, 1)).is_err());
+        assert!(check_png(&with(1, 16_385)).is_err());
+        assert!(check_png(&with(16_384, 2_049)).is_err());
+    }
+
+    #[test]
     fn font_headers() {
         let mut f = b"OTTO\0\x01\0\0\0\0\0\0".to_vec();
         f.extend([0; 16]);
@@ -419,6 +447,8 @@ mod tests {
             "<animate attributeName=\"x\"/>",
             "<foreignObject/>",
             "<rect x=\"&#106;\"/>",
+            "<style>.a{fill:&#117;rl(a)}</style>",
+            "<style><![CDATA[.a{fill:&#117;rl(a)}]]></style>",
         ] {
             assert!(svg(body).is_err(), "{body}");
         }

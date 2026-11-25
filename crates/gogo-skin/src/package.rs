@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use crate::assets::{self, Asset, AssetError, AssetKind};
 use crate::ast::{self, Node};
-use crate::diag::{Code, Collector, Report, Scope};
+use crate::diag::{Code, Collector, LoadScope, Report};
 use crate::elements::{Place, Sig, Walk, World};
 use crate::limits::{
     MAX_DEPTH, MAX_FILES, MAX_KDL_FILE_BYTES, MAX_NODES, MAX_PATH_BYTES, MAX_SKIN_BYTES,
@@ -207,12 +207,22 @@ struct Intake {
     seen: HashSet<String>,
     total: u64,
     stopped: bool,
+    /// Paths refused or unreadable, already reported: not reported again as missing.
+    refused: HashSet<String>,
 }
 
 impl Intake {
     /// Decide whether a file of `size` bytes at `path` is part of the package. Reports
     /// why not.
     fn admit(&mut self, path: &str, size: u64) -> Option<Slot> {
+        let slot = self.admit_checked(path, size);
+        if slot.is_none() {
+            self.refused.insert(path.to_owned());
+        }
+        slot
+    }
+
+    fn admit_checked(&mut self, path: &str, size: u64) -> Option<Slot> {
         if self.stopped {
             return None;
         }
@@ -237,7 +247,7 @@ impl Intake {
             self.col.path_error(
                 Code::DuplicatePath,
                 path,
-                format!("`{path}` appears twice, or twice differing only in case"),
+                format!("`{path}` appears twice, or twice differing only in ASCII case"),
             );
             return None;
         }
@@ -287,6 +297,9 @@ impl Intake {
 /// Walk the folder: only the layout's folders are entered, and a symlink anywhere is an
 /// error (S10).
 fn read_dir(intake: &mut Intake, root: &Path, rel: &str, depth: usize) {
+    if intake.stopped {
+        return;
+    }
     let dir = if rel.is_empty() {
         root.to_path_buf()
     } else {
@@ -303,6 +316,20 @@ fn read_dir(intake: &mut Intake, root: &Path, rel: &str, depth: usize) {
     };
     let mut names: Vec<(String, std::ffi::OsString)> = Vec::new();
     for e in entries.flatten() {
+        // Stop reading a folder that alone passes the file limit (S12): the walk would
+        // otherwise hold every entry of a hostile directory in memory.
+        if names.len() > MAX_FILES {
+            intake.stopped = true;
+            intake
+                .col
+                .path_error(
+                    Code::LimitFiles,
+                    rel,
+                    format!("more than {MAX_FILES} entries in `{rel}` (S12)"),
+                )
+                .help("a skin is a few KDL files and a handful of assets");
+            break;
+        }
         let os = e.file_name();
         match os.to_str() {
             Some(n) => names.push((n.to_owned(), os)),
@@ -368,6 +395,7 @@ fn read_dir(intake: &mut Intake, root: &Path, rel: &str, depth: usize) {
             match read {
                 Ok(_) if data.len() <= limit => intake.add(path, slot, data),
                 Ok(_) => {
+                    intake.refused.insert(path.clone());
                     intake.col.path_error(
                         Code::LimitFile,
                         &path,
@@ -375,6 +403,7 @@ fn read_dir(intake: &mut Intake, root: &Path, rel: &str, depth: usize) {
                     );
                 }
                 Err(e) => {
+                    intake.refused.insert(path.clone());
                     intake
                         .col
                         .path_error(Code::Io, &path, format!("can't read `{path}`: {e}"));
@@ -390,6 +419,36 @@ fn read_dir(intake: &mut Intake, root: &Path, rel: &str, depth: usize) {
     }
 }
 
+/// The parameters of a component that its body hands to an `action` or `link-action` as
+/// `"{param}"`: a `use` of the component must give them plain action names.
+fn action_params(nodes: &[RawNode], params: &[String]) -> Vec<String> {
+    fn walk(nodes: &[RawNode], params: &[String], out: &mut Vec<String>) {
+        for n in nodes {
+            for p in n
+                .props
+                .iter()
+                .filter(|p| matches!(p.name.as_str(), "action" | "link-action"))
+            {
+                if let Lit::Str(s) = &p.value.lit
+                    && let Some(name) = s
+                        .trim()
+                        .strip_prefix('{')
+                        .and_then(|r| r.strip_suffix('}'))
+                        .map(str::trim)
+                    && params.iter().any(|x| x == name)
+                    && !out.iter().any(|x| x == name)
+                {
+                    out.push(name.to_owned());
+                }
+            }
+            walk(&n.children, params, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(nodes, params, &mut out);
+    out
+}
+
 // ---- the stages ----
 
 /// A KDL file read and parsed.
@@ -400,7 +459,12 @@ struct Parsed {
 }
 
 fn finish(intake: Intake, name: &str) -> Result<SkinPackage, Report> {
-    let Intake { mut col, files, .. } = intake;
+    let Intake {
+        mut col,
+        files,
+        refused,
+        ..
+    } = intake;
     let mut files = files;
     files.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -447,8 +511,8 @@ fn finish(intake: Intake, name: &str) -> Result<SkinPackage, Report> {
         };
         let file = col.sources.add(path, text);
         col.scope = match slot {
-            Slot::Route(r) => Scope::Route(r.clone()),
-            _ => Scope::Skin,
+            Slot::Route(r) => LoadScope::Route(r.clone()),
+            _ => LoadScope::Skin,
         };
         let nodes = if counter.tripped {
             None
@@ -461,7 +525,7 @@ fn finish(intake: Intake, name: &str) -> Result<SkinPackage, Report> {
             nodes,
         });
     }
-    col.scope = Scope::Skin;
+    col.scope = LoadScope::Skin;
     let find = |s: Slot| parsed.iter().find(|p| p.slot == s);
 
     // The manifest.
@@ -571,7 +635,7 @@ fn finish(intake: Intake, name: &str) -> Result<SkinPackage, Report> {
         }
     }
     for r in &manifest.routes {
-        if !route_files.contains_key(r) {
+        if !route_files.contains_key(r) && !refused.contains(&format!("routes/{r}.kdl")) {
             col.skin_error(
                 Code::RouteFile,
                 manifest.span,
@@ -592,6 +656,7 @@ fn finish(intake: Intake, name: &str) -> Result<SkinPackage, Report> {
                 sigs.insert(
                     cname.clone(),
                     Sig {
+                        action_params: action_params(&n.children, &params),
                         params: params.clone(),
                     },
                 );
@@ -626,6 +691,7 @@ fn finish(intake: Intake, name: &str) -> Result<SkinPackage, Report> {
             place: Place {
                 route: None,
                 component: true,
+                params: &params,
             },
             uses: Vec::new(),
         };
@@ -651,7 +717,7 @@ fn finish(intake: Intake, name: &str) -> Result<SkinPackage, Report> {
         let Some(nodes) = p.nodes.as_deref() else {
             continue;
         };
-        col.scope = Scope::Route(r.clone());
+        col.scope = LoadScope::Route(r.clone());
         let Some(root) = route_root(&mut col, nodes, p.file, r) else {
             continue;
         };
@@ -666,6 +732,7 @@ fn finish(intake: Intake, name: &str) -> Result<SkinPackage, Report> {
             place: Place {
                 route: Some(r),
                 component: false,
+                params: &[],
             },
             uses: Vec::new(),
         };
@@ -679,7 +746,7 @@ fn finish(intake: Intake, name: &str) -> Result<SkinPackage, Report> {
             },
         );
     }
-    col.scope = Scope::Skin;
+    col.scope = LoadScope::Skin;
 
     // S20 and S12: components don't loop, and their expansion stays bounded.
     check_expansion(&mut col, &comps, &edges, &routes);
