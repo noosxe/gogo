@@ -276,8 +276,11 @@ wgpu's GL backend needs a loadable `libEGL.so.1` on the library path.
   - The same job checks the dependency rules in §2.1 with `scripts/gui-deps-check.py`
     (`cargo metadata`, direct edges only), whose own tests run first.
 - **Cost:** wgpu, naga, the shader tooling, winit and the font stack are the heaviest
-  compile in the workspace. The real CI time is measured when the scaffolding lands and
-  recorded here.
+  compile in the workspace. *Measured* with the scaffolding (PR B1, skeletons only, no
+  external GUI crate yet), the `gui` job took 1 min 57 s on ubuntu without a cache, 44 s
+  with one, and 3 min 11 s on macOS without a cache. Most of that is building gogo-core.
+  The PRs that add wgpu, winit and the font stack measure the job again and update this
+  line.
 
 ## 8. Port order
 
