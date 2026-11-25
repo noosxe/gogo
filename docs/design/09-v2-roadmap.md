@@ -37,6 +37,14 @@ Approach:
 - Input plumbing: crossterm events; render loop at ~10 fps driven by event/batch ticks;
   long operations (login) shell out to the same interactive flow as the CLI.
 
+## 2a. Desktop GUI
+
+Added 2026-11-25 (epic #520): a skinnable desktop GUI on our own engine, beside the TUI
+rather than instead of it (the TUI serves terminals and SSH sessions; its epic #11 stays).
+Design 24 (architecture), 25 (app layer), 26 (skin contract), 27 (skin format) and 28
+(rendering). Like the TUI it consumes `gogo_core`'s plan/execute APIs and the
+`ProgressEvent` stream; the one core change it needs is per-job cancellation (25 §5).
+
 ## 3. Backlog (unscheduled ideas)
 
 - `--prune-versions N` cleanup for stacked installer versions (04 §8)

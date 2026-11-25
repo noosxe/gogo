@@ -80,8 +80,27 @@ so a pass also proves the bundle is self-contained. How-to, result layout and VM
 
 - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`
 - `cargo nextest run` (unit + integration; wiremock binds 127.0.0.1 — no network needed)
-- All commands run at the workspace root (01 §1); integration tests live in `crates/gogo-core/tests/` — the CLI is too thin to warrant its own suite, the TUI mirrors `list`/`info` rendering through core APIs.
+- All commands run at the workspace root (01 §1); integration tests live in `crates/gogo-core/tests/` — the CLI is too thin to warrant its own suite, the TUI mirrors `list`/`info` rendering through core APIs. The GUI crates have their own suites (§7) and a path-filtered `gui` job (design 24 §7).
 - `cargo deny` (licenses/advisories; gog-warp git dep noted as Apache-2.0)
 - Coverage informational (target: `engine` + `gog` ≥ 80% line coverage)
 - Workflows: every job lives in `ci-jobs.yml`, called by `ci.yml` (PRs, pushes to `main`, a weekly run, manual runs) and `ci-full.yml` (the `ci:full` label). A `changes` job picks the jobs a PR needs from its changed paths: the Rust jobs (fmt, clippy, nextest on Linux and macOS, cargo-deny, snapshots-btrfs) for anything but docs, Markdown, `scripts/`, `e2e/` and `nix/`; the script jobs (shellcheck, `scripts/tests/host-pass-fake.sh` on macOS, the linux-e2e helper tests and self-test) for `scripts/`, `e2e/` and the e2e Nix. Changes to the workflows, `Cargo.toml`/`Cargo.lock`, `rust-toolchain.toml`, `deny.toml` or the flake run everything, as do pushes to `main`, the weekly run and `ci:full`. `CI / CI result` always runs and is the only required check: it fails unless every needed job succeeded. A new job must be added to `changes`' outputs, `ci-result`'s `needs` and its loop, or it isn't enforced. There is no release build yet; it comes with a release workflow.
 - The `snapshots-btrfs` job (Linux only) runs `crates/gogo-core/tests/snapshot_btrfs.rs` on real btrfs (design 20 §10.3). It loop-mounts a 1 GiB image with `sudo`, chowns it to the runner user and runs the tests unprivileged via `GOGO_TEST_BTRFS_DIR`, twice: without `user_subvol_rm_allowed` (the `rmdir` delete fallback) and with it (the ioctl delete). `GOGO_TEST_BTRFS_REQUIRED=1` turns "not on btrfs" skips into failures; `GOGO_TEST_BTRFS_IOCTL_ALLOWED=1` makes an `EPERM` from the delete ioctl one too. Runner kernel (checked on first run): Linux 7.0 (`-azure`), btrfs built in, loop mounts and `SNAP_DESTROY_V2` work; without `user_subvol_rm_allowed` the ioctl gets `EPERM`, and with it a read-only snapshot gets `EROFS` until its read-only flag is cleared (`destroy` does that first).
+
+## 7. The desktop GUI (design 24, 25)
+
+- **Headless only.** No test opens a window on the host. Rendering tests draw offscreen;
+  window tests run in the headless compositor of `scripts/gui-headless.sh` (Linux) or the
+  Tart VM (macOS, 5.1); real displays are a host pass.
+- **Golden images** on vello_cpu: small committed PNGs (@1× and @2×) for a few routes of
+  the built-in skins and an effects sheet, compared with a per-pixel tolerance. vello_cpu
+  is deterministic across OSes, so the same goldens hold on the ubuntu and macOS runners.
+  Fonts come from the bundled set, never the host's.
+- **GPU tests** draw the same scenes on vello_gpu and compare against the CPU render within
+  a tolerance. They skip when wgpu finds no adapter; the CI lavapipe job (Mesa's software
+  Vulkan) runs them.
+- **Safety invariants** (design 26 §7) each have a test named after them (`s5_…`), at the
+  level that enforces them: the validator, the model or the interaction layer (design 25 §4).
+- **Skin fixtures** are fictional (a made-up game, a made-up account) and live in
+  `gogo-gui-testkit`; covers are procedural. Validator rules each have a failing fixture.
+- **Model tests** use `FakeBackend`; nothing in the GUI's suites talks to GOG.
+

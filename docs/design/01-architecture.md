@@ -1,16 +1,21 @@
 # 01 — Architecture
 
-**Cargo workspace, three members** (decided 2026-10-09, course-corrected before any engine
-code lands — a split is only cheap while the surface is small):
+**Cargo workspace** (decided 2026-10-09, course-corrected before any engine
+code lands — a split is only cheap while the surface is small). The original three members:
 
 - `crates/gogo-core` — the product: config, auth, GOG clients, engine, state. Frontend-agnostic library; the lib name stays `gogo`.
 - `crates/gogo-cli` — thin clap frontend; produces the `gogo` binary. Parsing, prompts, progress bars, tables. No domain logic.
 - `crates/gogo-tui` — v2 ratatui frontend; workspace member reserved now, implemented in v2 (09 §2).
 
+Added since: `crates/gogo-shims` (Rust cabextract/7z shims for winetricks, design 12), and
+the desktop GUI's crates (`gogo-gui` and the `gogo-ui-*`, `gogo-render-*`, `gogo-skin*`
+crates it is built from; design 24 §2). The GUI is a frontend like the CLI: only the
+`gogo-gui` binary crate depends on `gogo-core`, and the CLI depends on no GUI crate.
+
 Rules that keep the frontends interchangeable:
 
 - `gogo-core` depends on **no frontend**, ever. Its frontend interface is the library API
-  plus the typed `ProgressEvent` broadcast stream (§4) — both CLI and TUI consume exactly that.
+  plus the typed `ProgressEvent` broadcast stream (§4) — CLI, TUI and GUI consume exactly that.
 - Frontends never depend on each other; no domain logic in a frontend, no rendering in core.
 - Every shared dependency version is declared once, in the root `[workspace.dependencies]`;
   members inherit with `dep.workspace = true` — one place to bump and audit pins.
@@ -173,6 +178,15 @@ re-verify at implementation time.
 | Logging | tracing, tracing-subscriber | ~0.1 / ~0.3 | |
 | PE parsing | object | 0.40 | `read_core` + `pe` only: import / delay-load tables for the mac-app PE scan (#63, docs/19 §6.2) |
 | GOG | gog-warp | git rev-pin | auth/token/user data only (library list is ours — review A1) |
+| GUI (design 24 §3; `=`-pinned, bumped as one batch) | taffy | 0.16.0 | layout |
+| | parley (+ fontique) | 0.13.0 | text, `PlainEditor` |
+| | vello_gpu / vello_cpu | 0.4.0 | GPU / no-GPU renderers |
+| | wgpu | 30.0.2 | matched to vello_gpu |
+| | winit | 0.30.13 | windowing; 0.31 once accesskit_winit supports it |
+| | accesskit / accesskit_winit | 0.25.2 / 0.34.2 | accessibility |
+| | kdl / miette | 6.7.1 / 7.6.0 | skin files, diagnostics |
+| | notify | 9.0.0 | skin hot reload (CC0-1.0) |
+| | softbuffer · smithay-clipboard · arboard · image | at impl | CPU presentation; clipboard (Wayland / macOS); cover decoding (`jpeg`, `webp`) |
 
 **Not used in v1**: async-compression (depot-only), crossterm, rpassword, `ctrlc`
 (`tokio::signal` covers it), figment/config (hand-rolled 3-step merge is ~60 lines and fully
@@ -182,7 +196,8 @@ Where each dependency lives (workspace members, §1): **gogo-core** gets tokio, 
 futures, tokio-util, async-trait, governor, serde/serde_json, toml, quick-xml, md-5, url,
 uuid, thiserror, keyring, zeroize, dirs, fs4, tracing, bytesize, gog-warp. **gogo-cli** gets
 clap, clap_complete, indicatif, console, dialoguer, comfy-table, tracing-subscriber (anyhow
-and tokio land in both). Versions are pinned once in the root `[workspace.dependencies]`;
+and tokio land in both). The GUI crates' dependencies are listed per crate in design 24 §2;
+none of them reaches `gogo-core` or `gogo-cli`. Versions are pinned once in the root `[workspace.dependencies]`;
 member manifests only say `dep.workspace = true`.
 
 Note (review D10): gog-warp's `Core` ships its own reqwest client (10 s timeouts,

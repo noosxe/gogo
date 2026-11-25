@@ -258,12 +258,14 @@ input for L1 renderer selection (design 16).
 | Stream | Contents |
 |---|---|
 | stdout | tables (list/info), `--json` results, `--json-progress` NDJSON |
+| stderr | progress bars, warnings, log output, prompts |
 
 `--json-progress` emits one externally-tagged JSON object per event per line
-(e.g. `{"ChunkDone":{…}}`), flushed per line; `PlanReady` fires during planning
-(so `--dry-run` still yields one event) and `Done` is terminal. The same stream
-feeds the v2 TUI (`docs/design/01` §4).
-| stderr | progress bars, warnings, log output, prompts |
+(e.g. `{"ChunkDone":{…}}`), flushed per line; unit variants (`PrefixStaged`,
+`InstallStarted`, …) are bare JSON strings. `PlanReady` fires during planning
+(so `--dry-run` still yields one event) and `Done` is terminal. This section is the one
+place that defines the shape. In-process frontends (the desktop GUI, design 25) consume
+the Rust `ProgressEvent` type directly, not this stream.
 
 ## 5. Exit codes
 
