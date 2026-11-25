@@ -41,6 +41,7 @@ pub enum Display {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum Direction {
+    /// Horizontal.
     Row,
     /// Vertical. The default: `column`, `box` and `form` are vertical (design 27 §5.1).
     #[default]
@@ -51,10 +52,15 @@ pub enum Direction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum Align {
+    /// The start of the cross axis.
     Start,
+    /// The middle of the cross axis.
     Center,
+    /// The end of the cross axis.
     End,
+    /// Fill the cross axis.
     Stretch,
+    /// Align the first text baselines.
     Baseline,
 }
 
@@ -62,8 +68,11 @@ pub enum Align {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum Justify {
+    /// Items packed at the start.
     Start,
+    /// Items packed in the middle.
     Center,
+    /// Items packed at the end.
     End,
     /// `between`: free space between the items.
     SpaceBetween,
@@ -86,9 +95,13 @@ pub enum Position {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Sides<T> {
+    /// The top side.
     pub top: T,
+    /// The right side.
     pub right: T,
+    /// The bottom side.
     pub bottom: T,
+    /// The left side.
     pub left: T,
 }
 
@@ -114,11 +127,15 @@ impl<T: Copy> Sides<T> {
     }
 }
 
-/// Everything layout needs to know about one node. [`Default`] is a vertical flex
+/// Everything layout needs to know about one node. Other crates build it from
+/// [`LayoutStyle::default`], [`row`](LayoutStyle::row), [`column`](LayoutStyle::column)
+/// or [`grid`](LayoutStyle::grid) and set the public fields; the struct is
+/// `#[non_exhaustive]` because scroll and overflow arrive later. [`Default`] is a vertical flex
 /// container with no sizes, gaps or spacing, as CSS defines an initial flex item
 /// (`shrink` is 1).
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
 pub struct LayoutStyle {
     /// How the children are laid out. Default [`Display::Flex`].
     pub display: Display,
@@ -141,11 +158,17 @@ pub struct LayoutStyle {
     pub padding: Sides<f32>,
     /// Outside spacing in px. May be negative.
     pub margin: Sides<f32>,
+    /// Width, border box. Default [`Dim::Auto`].
     pub width: Dim,
+    /// Height, border box. Default [`Dim::Auto`].
     pub height: Dim,
+    /// Smallest width. Default [`Dim::Auto`] (no minimum).
     pub min_width: Dim,
+    /// Smallest height. Default [`Dim::Auto`] (no minimum).
     pub min_height: Dim,
+    /// Largest width. Default [`Dim::Auto`] (no maximum).
     pub max_width: Dim,
+    /// Largest height. Default [`Dim::Auto`] (no maximum).
     pub max_height: Dim,
     /// Share of the free main-axis space this node takes. Default 0.
     pub grow: f32,

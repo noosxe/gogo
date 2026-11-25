@@ -3,30 +3,44 @@
 /// What a node is, for assistive technology.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
 pub enum Role {
     /// No semantics of its own. The default; a screen reader skips it.
     #[default]
     Generic,
+    /// A set of related nodes.
     Group,
+    /// A landmark region of a page.
     Region,
+    /// A heading.
     Heading,
     /// Static text.
     Label,
+    /// A picture with a text alternative.
     Image,
+    /// A button.
     Button,
     /// An on/off control; see [`A11y::checked`].
     Switch,
+    /// A select or combo box.
     ComboBox,
+    /// The container of a set of tabs.
     TabList,
+    /// One tab of a tab list; see [`A11y::selected`].
     Tab,
+    /// A button that opens a menu.
     MenuButton,
+    /// A table of rows and cells.
     Table,
+    /// A row of a table.
     Row,
+    /// A cell of a table row.
     Cell,
     /// A live readout, announced when it changes.
     Status,
     /// A progress bar; its value is [`A11y::value`].
     ProgressBar,
+    /// An editable text field.
     TextInput,
 }
 
@@ -35,6 +49,7 @@ pub enum Role {
 #[derive(Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct A11y {
+    /// What the node is. Default [`Role::Generic`].
     pub role: Role,
     /// The accessible name. `None`: the node's own text, if any.
     pub name: Option<String>,

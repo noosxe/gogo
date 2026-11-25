@@ -11,7 +11,7 @@ license.workspace = true
 serde = ["dep:serde"]
 
 [dependencies]
-serde = { workspace = true, optional = true }
+serde = { workspace = true, features = ["rc"], optional = true }
 thiserror.workspace = true
 
 [dev-dependencies]

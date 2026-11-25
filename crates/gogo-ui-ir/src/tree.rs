@@ -1,28 +1,77 @@
 //! The tree: an arena of nodes with unique keys (design 24 §2).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use crate::{A11y, LayoutStyle, Paint, TextStyle};
+use crate::{A11y, Effect, Fill, GradientStop, LayoutStyle, Paint, TextStyle, Track};
 
 /// An opaque id for "activating this node does something".
 ///
 /// The engine never looks inside: it reports the id of the node that was activated, and
 /// the binder that built the tree maps it back to a resolved action and its arguments
-/// (design 24 §2.1, rule 6). Ids are only meaningful for the tree that carries them.
+/// (design 24 §2.1, rule 6).
+///
+/// An id is valid for one tree only. The binder owns the side table that maps it to the
+/// action spec and its arguments (design 26 §4, §5); the table and the tree are built
+/// together and dropped together, so an id from an older tree must never be looked up
+/// in a newer table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-pub struct ActionRef(pub u32);
+pub struct ActionRef(u32);
+
+impl ActionRef {
+    /// An id with this index. Only the binder that owns the side table makes these.
+    pub const fn new(index: u32) -> Self {
+        ActionRef(index)
+    }
+
+    /// The index the binder gave this id.
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    /// [`ActionRef::get`] as a `usize`, for indexing a side table.
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
 
 /// An opaque id for an app-drawn widget, assigned by the binder. The engine treats
-/// two nodes with the same id as parts of one widget and nothing more.
+/// two nodes with the same id as parts of one widget and nothing more. Valid for one tree
+/// only; the binder owns the table behind it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-pub struct WidgetId(pub u32);
+pub struct WidgetId(u32);
 
-/// An opaque id for one named part of an app-drawn widget, assigned by the binder.
+impl WidgetId {
+    /// An id with this index.
+    pub const fn new(index: u32) -> Self {
+        WidgetId(index)
+    }
+
+    /// The index the binder gave this id.
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+/// An opaque id for one named part of an app-drawn widget, assigned by the binder. Valid
+/// for one tree only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
-pub struct PartId(pub u32);
+pub struct PartId(u32);
+
+impl PartId {
+    /// An id with this index.
+    pub const fn new(index: u32) -> Self {
+        PartId(index)
+    }
+
+    /// The index the binder gave this id.
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
 
 /// An app widget's part as it appears in the tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +88,7 @@ pub struct AppPart {
 /// already merged from the skin's part styles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
 pub enum DrawnBy {
     /// Drawn from the skin's own elements. The default.
     #[default]
@@ -51,6 +101,7 @@ pub enum DrawnBy {
 /// How an image fills its box (design 27 §5.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
 pub enum Fit {
     /// Scale to cover the box, cropping the overflow. The default.
     #[default]
@@ -64,26 +115,39 @@ pub enum Fit {
 /// Where an image's pixels come from. Never a URL or a file system path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
 pub enum ImageSource {
     /// A handle into the image store the app fills (design 25 §7).
-    Handle(String),
+    Handle(Arc<str>),
     /// A file inside the skin package, by its package-relative path.
-    Asset(String),
+    Asset(Arc<str>),
 }
 
 /// What a node is.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
 pub enum Kind {
     /// A container. The default; the only kind that may have children.
     Box,
     /// One text run, a leaf.
-    Text { text: String, style: TextStyle },
+    Text {
+        /// The text to draw.
+        text: String,
+        /// How to draw it.
+        style: TextStyle,
+    },
     /// An image, a leaf.
-    Image { source: ImageSource, fit: Fit },
+    Image {
+        /// Where the pixels come from.
+        source: ImageSource,
+        /// How the image fills the box.
+        fit: Fit,
+    },
     /// A vector icon the engine ships, by name, a leaf. Drawn filled in
-    /// [`Paint::fill`]'s colour when it is a solid fill.
-    Icon(String),
+    /// [`Paint::fill`]'s colour when it is a solid fill. The scene crate owns the list
+    /// of names; an unknown name draws nothing and is not an error.
+    Icon(Arc<str>),
 }
 
 impl Kind {
@@ -99,16 +163,21 @@ impl Kind {
 pub struct Node {
     /// The skin's own `id=` name, for tests, the inspector and focus restore across
     /// re-binds. Not unique across repeats. `None`: unnamed.
-    pub name: Option<String>,
+    pub name: Option<Arc<str>>,
+    /// What the node is.
     pub kind: Kind,
+    /// How the node and its children are laid out.
     pub layout: LayoutStyle,
+    /// How the node's box looks.
     pub paint: Paint,
     /// What [`Paint`] becomes while keyboard focus is on this node (`:focus`). `None`:
     /// the focus state changes nothing.
     pub focus_paint: Option<Paint>,
+    /// What assistive technology is told.
     pub a11y: A11y,
     /// What activating the node does. `None`: nothing.
     pub action: Option<ActionRef>,
+    /// Who drew the node. Default [`DrawnBy::Skin`].
     pub drawn_by: DrawnBy,
     /// For a bar's fill: the fraction done, 0 to 1, as a share of its track. A live
     /// update finds the node by this and changes the value without a re-bind (design 27
@@ -145,31 +214,37 @@ impl Node {
         })
     }
 
-    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+    /// Sets the skin name.
+    pub fn with_name(mut self, name: impl Into<Arc<str>>) -> Self {
         self.name = Some(name.into());
         self
     }
 
+    /// Sets the layout style.
     pub fn with_layout(mut self, layout: LayoutStyle) -> Self {
         self.layout = layout;
         self
     }
 
+    /// Sets the paint.
     pub fn with_paint(mut self, paint: Paint) -> Self {
         self.paint = paint;
         self
     }
 
+    /// Sets the accessibility facts.
     pub fn with_a11y(mut self, a11y: A11y) -> Self {
         self.a11y = a11y;
         self
     }
 
+    /// Sets the action.
     pub fn with_action(mut self, action: ActionRef) -> Self {
         self.action = Some(action);
         self
     }
 
+    /// Sets who drew the node.
     pub fn drawn_by(mut self, drawn_by: DrawnBy) -> Self {
         self.drawn_by = drawn_by;
         self
@@ -188,7 +263,8 @@ impl Default for Node {
 pub struct NodeId(u32);
 
 impl NodeId {
-    /// The position in document order of creation (the root is 0).
+    /// The position in insertion order: the order nodes were added, root first (0). It
+    /// is not document order, since a child can be added to an earlier node later.
     pub fn index(self) -> usize {
         self.0 as usize
     }
@@ -196,18 +272,33 @@ impl NodeId {
 
 /// Why a tree operation was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum TreeError {
+    /// The key is already used by another node.
     #[error("node key `{0}` is already used in this tree")]
     DuplicateKey(String),
+    /// The id is not a node of this tree.
     #[error("no such node in this tree")]
     NoSuchNode,
+    /// A text, image or icon was given children; carries the node's key.
     #[error("node `{0}` is a text, image or icon and cannot have children")]
     LeafParent(String),
+    /// The tree would need more than `u32::MAX` nodes.
+    #[error("the tree has too many nodes")]
+    TooManyNodes,
+    /// A value is outside its documented range ([`Tree::validate`]).
+    #[error("node `{key}`: {field} is out of range")]
+    OutOfRange {
+        /// The node's key.
+        key: String,
+        /// What is out of range, in words.
+        field: &'static str,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 struct Slot {
-    key: String,
+    key: Arc<str>,
     node: Node,
     parent: Option<NodeId>,
     children: Vec<NodeId>,
@@ -226,15 +317,15 @@ struct Slot {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tree {
     slots: Vec<Slot>,
-    by_key: HashMap<String, NodeId>,
+    by_key: HashMap<Arc<str>, NodeId>,
 }
 
 impl Tree {
     /// A tree with only a root.
-    pub fn new(root_key: impl Into<String>, root: Node) -> Self {
-        let key = root_key.into();
+    pub fn new(root_key: impl Into<Arc<str>>, root: Node) -> Self {
+        let key: Arc<str> = root_key.into();
         let mut by_key = HashMap::new();
-        by_key.insert(key.clone(), NodeId(0));
+        by_key.insert(Arc::clone(&key), NodeId(0));
         Tree {
             slots: vec![Slot {
                 key,
@@ -251,26 +342,26 @@ impl Tree {
     /// # Errors
     /// [`TreeError::DuplicateKey`] if `key` is taken, [`TreeError::NoSuchNode`] if
     /// `parent` is not in this tree, [`TreeError::LeafParent`] if `parent` is a text,
-    /// image or icon.
+    /// image or icon, [`TreeError::TooManyNodes`] past `u32::MAX` nodes.
     pub fn add_child(
         &mut self,
         parent: NodeId,
-        key: impl Into<String>,
+        key: impl Into<Arc<str>>,
         node: Node,
     ) -> Result<NodeId, TreeError> {
-        let key = key.into();
+        let key: Arc<str> = key.into();
         let p = self
             .slots
             .get(parent.index())
             .ok_or(TreeError::NoSuchNode)?;
         if !p.node.kind.is_container() {
-            return Err(TreeError::LeafParent(p.key.clone()));
+            return Err(TreeError::LeafParent(p.key.to_string()));
         }
         if self.by_key.contains_key(&key) {
-            return Err(TreeError::DuplicateKey(key));
+            return Err(TreeError::DuplicateKey(key.to_string()));
         }
-        let id = NodeId(u32::try_from(self.slots.len()).map_err(|_| TreeError::NoSuchNode)?);
-        self.by_key.insert(key.clone(), id);
+        let id = NodeId(u32::try_from(self.slots.len()).map_err(|_| TreeError::TooManyNodes)?);
+        self.by_key.insert(Arc::clone(&key), id);
         self.slots.push(Slot {
             key,
             node,
@@ -296,6 +387,7 @@ impl Tree {
         false
     }
 
+    /// The node, or `None` for an id from another tree.
     pub fn get(&self, id: NodeId) -> Option<&Node> {
         self.slots.get(id.index()).map(|s| &s.node)
     }
@@ -306,10 +398,12 @@ impl Tree {
         self.slots.get_mut(id.index()).map(|s| &mut s.node)
     }
 
+    /// The node's key.
     pub fn key(&self, id: NodeId) -> Option<&str> {
-        self.slots.get(id.index()).map(|s| s.key.as_str())
+        self.slots.get(id.index()).map(|s| &*s.key)
     }
 
+    /// The node's parent; `None` for the root and for a missing node.
     pub fn parent(&self, id: NodeId) -> Option<NodeId> {
         self.slots.get(id.index()).and_then(|s| s.parent)
     }
@@ -344,26 +438,123 @@ impl Tree {
         })
     }
 
-    /// Nodes with an action, in document (= focus) order.
+    /// Nodes with an action, in document order. Disabled and unfocusable nodes are
+    /// included; see [`Tree::focus_order`] for the keyboard order.
     pub fn action_nodes(&self) -> Vec<NodeId> {
         self.iter()
             .filter(|&id| self.get(id).is_some_and(|n| n.action.is_some()))
             .collect()
     }
 
-    /// Checks the invariants that [`Tree::node_mut`] can break: only containers have
-    /// children. Returns the first offender.
+    /// The nodes the keyboard visits, in document order: [`A11y::focusable`] and not
+    /// [`A11y::disabled`].
+    pub fn focus_order(&self) -> Vec<NodeId> {
+        self.iter()
+            .filter(|&id| {
+                self.get(id)
+                    .is_some_and(|n| n.a11y.focusable && !n.a11y.disabled)
+            })
+            .collect()
+    }
+
+    /// Checks what [`Tree::node_mut`] and the public fields can break: only containers
+    /// have children, and every value is inside its documented range (gradients have 2
+    /// to 8 stops with offsets 0 to 1 in ascending order, a glow 1 to 4 layers, opacity,
+    /// progress, noise amount and effect alphas are 0 to 1, a scanline period is at
+    /// least 1, text size, weight, width and tracking are in their ranges, a column span
+    /// is at least 1, a grid `fr` track is above 0). NaN and infinity are out of range.
+    /// Returns the first offender in insertion order.
     ///
     /// # Errors
-    /// [`TreeError::LeafParent`] naming the node's key.
+    /// [`TreeError::LeafParent`] or [`TreeError::OutOfRange`] naming the node's key.
     pub fn validate(&self) -> Result<(), TreeError> {
         for s in &self.slots {
             if !s.children.is_empty() && !s.node.kind.is_container() {
-                return Err(TreeError::LeafParent(s.key.clone()));
+                return Err(TreeError::LeafParent(s.key.to_string()));
+            }
+            if let Err(field) = check_node(&s.node) {
+                return Err(TreeError::OutOfRange {
+                    key: s.key.to_string(),
+                    field,
+                });
             }
         }
         Ok(())
     }
+}
+
+fn unit(v: f32) -> bool {
+    (0.0..=1.0).contains(&v)
+}
+
+fn check_node(n: &Node) -> Result<(), &'static str> {
+    check_paint(&n.paint)?;
+    if let Some(p) = &n.focus_paint {
+        check_paint(p)?;
+    }
+    if n.progress.is_some_and(|p| !unit(p)) {
+        return Err("progress");
+    }
+    if n.layout.col_span < 1 {
+        return Err("column span");
+    }
+    if n.layout
+        .columns
+        .iter()
+        .chain(&n.layout.rows)
+        .any(|t| matches!(t, Track::Fr(f) if !(f.is_finite() && *f > 0.0)))
+    {
+        return Err("grid fr track");
+    }
+    if let Kind::Text { style, .. } = &n.kind {
+        let ok = (1.0..=1024.0).contains(&style.size)
+            && (1.0..=1000.0).contains(&style.weight)
+            && (25.0..=200.0).contains(&style.width)
+            && (-5.0..=5.0).contains(&style.tracking);
+        if !ok {
+            return Err("text size, weight, width or tracking");
+        }
+    }
+    Ok(())
+}
+
+fn check_stops(stops: &[GradientStop]) -> Result<(), &'static str> {
+    if !(2..=8).contains(&stops.len()) {
+        return Err("gradient stop count");
+    }
+    if stops.iter().any(|s| !unit(s.offset)) || stops.windows(2).any(|w| w[0].offset > w[1].offset)
+    {
+        return Err("gradient stop offset");
+    }
+    Ok(())
+}
+
+fn check_paint(p: &Paint) -> Result<(), &'static str> {
+    if !unit(p.opacity) {
+        return Err("opacity");
+    }
+    if let Some(Fill::Linear { stops, .. } | Fill::Radial { stops }) = &p.fill {
+        check_stops(stops)?;
+    }
+    for e in &p.effects {
+        match e {
+            Effect::Glow { layers } if !(1..=4).contains(&layers.len()) => {
+                return Err("glow layer count");
+            }
+            Effect::Noise { amount, .. } if !unit(*amount) => return Err("noise amount"),
+            Effect::Scanlines { period, alpha } => {
+                if !(period.is_finite() && *period >= 1.0) {
+                    return Err("scanline period");
+                }
+                if !unit(*alpha) {
+                    return Err("scanline alpha");
+                }
+            }
+            Effect::Reflection { alpha, .. } if !unit(*alpha) => return Err("reflection alpha"),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 #[cfg(feature = "serde")]
