@@ -3741,6 +3741,38 @@ fn a_spliced_term_of_the_wrong_type_is_refused() {
     );
 }
 
+#[test]
+fn style_values_are_typed_once_at_load() {
+    use gogo_skin::ast::Operand;
+    let pkg = load(base()).expect("loads");
+    // A style declaration: `padding 0 16` is two numbers.
+    let button = &pkg.styles["button"];
+    let padding = button.props.iter().find(|p| p.name == "padding").unwrap();
+    assert_eq!(padding.operands, [Operand::Num(0.0), Operand::Num(16.0)]);
+    // An inline property: a string is split and parsed, a token is named, an expression
+    // is kept.
+    let mut rows = Vec::new();
+    find(&pkg.routes["game"].children, "row", &mut rows);
+    let get = |name: &str| {
+        rows.iter()
+            .find_map(|r| r.props.iter().find(|p| p.name == name))
+            .unwrap_or_else(|| panic!("no `{name}`"))
+    };
+    assert_eq!(
+        get("margin").operands,
+        [
+            Operand::Num(6.0),
+            Operand::Num(0.0),
+            Operand::Num(0.0),
+            Operand::Num(0.0)
+        ]
+    );
+    assert_eq!(get("gap").operands, [Operand::Token("space.6".into())]);
+    assert_eq!(get("align").operands, [Operand::Word("start".into())]);
+    // Not a style property: nothing to type.
+    assert!(get("id").operands.is_empty());
+}
+
 const OUTER: &str = "\ncomponent \"outer\" params=\"action args\" {\n    use \"summary-tile\" mark=\"check\" title=\"T\" link=\"L\" action=\"{action}\" args=\"{args}\"\n}\n";
 
 #[test]

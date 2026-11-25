@@ -8,7 +8,7 @@
 //! The checked value is not kept in a typed form here: the typed output depends on the
 //! IR types (PR B4). The tree keeps the parsed arguments, and binding reads them again.
 
-use crate::ast::{Arg, Val};
+use crate::ast::{Arg, Operand, Val};
 use crate::diag::{Code, Collector};
 use crate::expr::Template;
 use crate::fonts;
@@ -466,6 +466,33 @@ fn atoms(args: &[&Arg], split: bool) -> Option<Vec<Atom>> {
         }
     }
     Some(out)
+}
+
+/// The typed operands of property `name`, read once at load (design 27 §4): empty when
+/// `name` is not a style property or a value didn't parse (that was reported).
+pub(crate) fn operands(name: &str, args: &[&Arg]) -> Vec<Operand> {
+    let Some(spec) = style_prop(name) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for a in args {
+        match &a.val {
+            Val::Num(n) => out.push(Operand::Num(*n)),
+            Val::Bool(b) => out.push(Operand::Bool(*b)),
+            Val::Null => out.push(Operand::Null),
+            Val::Token(t) => out.push(Operand::Token(t.clone())),
+            Val::Text(Template::Text(s)) if spec.splits => {
+                out.extend(s.split_whitespace().map(|w| match w.parse::<f64>() {
+                    Ok(n) if n.is_finite() => Operand::Num(n),
+                    _ => Operand::Word(w.to_owned()),
+                }));
+            }
+            Val::Text(Template::Text(s)) => out.push(Operand::Word(s.clone())),
+            Val::Text(t) => out.push(Operand::Dyn(t.clone())),
+            Val::Terms(_) | Val::Invalid => return Vec::new(),
+        }
+    }
+    out
 }
 
 /// Check the values `args` of property `spec`, written at `at`. Reports the first problem.
