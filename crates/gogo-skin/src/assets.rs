@@ -76,9 +76,9 @@ pub(crate) fn check(kind: AssetKind, bytes: &[u8]) -> Result<Option<(u32, u32)>,
 }
 
 /// The longest side of a PNG, in pixels (design 27 §8).
-const MAX_PNG_SIDE: u32 = 16_384;
-/// Width times height of a PNG: 32 Mpx (design 27 §8).
-const MAX_PNG_PIXELS: u64 = 33_554_432;
+const MAX_PNG_SIDE: u32 = 4_096;
+/// Width times height of a PNG: 16 Mpx (design 27 §8).
+const MAX_PNG_PIXELS: u64 = 16_000_000;
 
 const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
 
@@ -109,10 +109,10 @@ fn check_png(b: &[u8]) -> Result<(u32, u32), AssetError> {
                 return Err(AssetError::Png("the image has no pixels"));
             }
             if w > MAX_PNG_SIDE || h > MAX_PNG_SIDE {
-                return Err(AssetError::Png("a side is longer than 16384 pixels"));
+                return Err(AssetError::Png("a side is longer than 4096 pixels"));
             }
             if u64::from(w) * u64::from(h) > MAX_PNG_PIXELS {
-                return Err(AssetError::Png("the image has more than 32 million pixels"));
+                return Err(AssetError::Png("the image has more than 16 million pixels"));
             }
             size = Some((w, h));
         }
@@ -403,10 +403,10 @@ mod tests {
             v[20..24].copy_from_slice(&h.to_be_bytes());
             v
         };
-        assert_eq!(check_png(&with(16_384, 2_048)), Ok((16_384, 2_048)));
-        assert!(check_png(&with(16_385, 1)).is_err());
-        assert!(check_png(&with(1, 16_385)).is_err());
-        assert!(check_png(&with(16_384, 2_049)).is_err());
+        assert_eq!(check_png(&with(4_096, 3_906)), Ok((4_096, 3_906)));
+        assert!(check_png(&with(4_097, 1)).is_err());
+        assert!(check_png(&with(1, 4_097)).is_err());
+        assert!(check_png(&with(4_096, 3_907)).is_err());
     }
 
     #[test]

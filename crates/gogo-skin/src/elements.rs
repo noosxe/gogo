@@ -118,7 +118,7 @@ static ELEMENTS: &[Spec] = &[
     el(
         "button",
         Args::ZeroOrOne,
-        &["action", "args", "icon", "key"],
+        &["action", "args", "icon", "key", "on"],
         Kids::Any,
     ),
     req(

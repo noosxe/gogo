@@ -85,6 +85,12 @@ Columns: **Source** (name and parameters), **Shape**, **Live** (how it updates),
 | `account` | `{ signed_in: Bool, username: Text?, avatar: Art? }` | event | `whoami` |
 | `app` | `{ version, contract, os: Os, reduced_motion: Bool, high_contrast: Bool, big_screen: Bool, locale }` | event (OS setting change) | — |
 | `ui` | the skin's own declared local state (§6.4) | on write | — |
+| `route` | `{ current: shell\|sign-in\|library\|game\|queue\|updates\|saves\|apps\|runtimes\|doctor\|settings\|about }` | event (navigation) | — |
+
+`route.current` is the name of the route on screen (§6.2). A skin tests it to show which
+nav button is current: `button … on="{route.current == library}"`. The route's own
+parameters are not in the shape: they differ per route and have no one type, and a route reads its own
+as `$name` (design 27 §7).
 
 ### 3.2 Library and search
 
@@ -490,6 +496,8 @@ Where each is enforced is in design 25 §4.
     paths, no symlinks out.
   - There are per-file and total size limits.
   - Allowed types: KDL, PNG, SVG (static, no scripts or external references) and OTF/TTF.
+  - Plain-text licence files (`LICENSE*`, `*.txt`, at most 64 KiB, UTF-8) are allowed at the
+    skin root and under `assets/`. They are never rendered or parsed.
 - **S11. No network for skins.** No remote assets, fonts or links. The loader rejects any
   URL scheme.
 - **S12. Bounded loading.** The static limits on file size, node count, depth, expression
