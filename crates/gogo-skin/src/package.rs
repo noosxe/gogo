@@ -13,7 +13,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::Read;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::assets::{self, Asset, AssetError, AssetKind};
 use crate::ast::{self, Node};
@@ -69,6 +69,8 @@ pub struct SkinPackage {
     pub assets: BTreeMap<String, Asset>,
     sources: Sources,
     report: Report,
+    /// What binding derives from the files once and keeps: the tokens as values.
+    tables: OnceLock<crate::bind::Tables>,
 }
 
 impl SkinPackage {
@@ -123,6 +125,11 @@ impl SkinPackage {
     /// The KDL files the spans of the tree point into.
     pub fn sources(&self) -> &Sources {
         &self.sources
+    }
+
+    pub(crate) fn tables(&self) -> &crate::bind::Tables {
+        self.tables
+            .get_or_init(|| crate::bind::Tables::of(&self.tokens))
     }
 }
 
@@ -837,6 +844,7 @@ fn finish(intake: Intake, name: &str) -> Result<SkinPackage, Report> {
         assets: assets_map,
         sources: col.sources,
         report: col.report,
+        tables: OnceLock::new(),
     })
 }
 
@@ -890,7 +898,9 @@ fn declare(
         return None;
     }
     let name = match (n.args.as_slice(), n.str_arg(0)) {
-        ([_], Some(s)) if is_style_name(s) && !s.contains('.') => s,
+        // A dot is allowed: the default skin's components that others borrow are named
+        // `game.builds` (design 27 §5.7).
+        ([_], Some(s)) if is_style_name(s) => s,
         _ => {
             col.error(
                 Code::ComponentParam,

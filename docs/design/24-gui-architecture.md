@@ -91,7 +91,7 @@ flowchart LR
 | Crate | Purpose | Public surface (sketch) | External deps |
 |---|---|---|---|
 | `gogo-contract` | The skin contract (design 26) as typed data, no I/O | `ContractVersion`, `Value` and the contract types, source and action catalogues (`ActionSpec {params, kind, tier}`), routes and sections, app widgets with parts/variants/depth, semantic tokens, invariant ids | — |
-| `gogo-skin` | The skin format (design 27): load, validate, bind | `SkinPackage::{load, from_files} -> Result<SkinPackage, Report>`, `Report` of `Finding`s (miette `Diagnostic`s with a stable `Code` and a `Level`), `Manifest`, the `ast` with each node's `Resolved` contract specs, `expr::{parse, eval, Scope}` (data lookup); planned (B4): `SkinPackage::bind(route, &dyn Scope, &UiState) -> ir::Tree` | kdl, miette, thiserror |
+| `gogo-skin` | The skin format (design 27): load, validate, bind | `SkinPackage::{load, from_files} -> Result<SkinPackage, Report>`, `Report` of `Finding`s (miette `Diagnostic`s with a stable `Code` and a `Level`), `Manifest`, the `ast` with each node's `Resolved` contract specs, `expr::{parse, eval, Scope}` (data lookup); `SkinPackage::bind(route, &Binding) -> Result<Bound, BindError>` and `bind_with_fallback`, with `Binding {scope: &dyn Scope, ui: &UiState, mode, default}`, `Bound {tree, actions: ActionTable, widgets, fallbacks}`, `UiState` (the values of the skin's own `ui` variables) | kdl, miette, thiserror |
 | `gogo-ui-ir` | The resolved tree: the boundary between "a skin" and "an engine" | `Tree` (an arena keyed by stable path ids; `NodeId`), `Node`, `Kind::{Box, Text, Image, Icon}`, `LayoutStyle`, `Paint`, `Effect`, `TextStyle`, `Role`/`A11y`, `ActionRef(u32)`, `DrawnBy::{Skin, App(AppPart {WidgetId, PartId})}` (all ids opaque to the engine) | — (optional `serde`) |
 | `gogo-ui-text` | Fonts, shaping, line breaking, the edit buffer | `FontSet`, `TextLayout`, `GlyphRun`, `EditBuffer` (over parley's `PlainEditor`) | parley, fontique |
 | `gogo-ui-layout` | IR → taffy → positioned boxes | `layout(&Tree, &mut FontSet, viewport, scale) -> Laid`, `Laid::{rect, hit}` | taffy |
@@ -101,10 +101,10 @@ flowchart LR
 | `gogo-ui-interact` | Input → intents: hit-testing, focus, key routing, scroll state, layer stack, input provenance | `Interaction`, `Intent`, `InputProvenance`, `FocusOrder` | — |
 | `gogo-ui-a11y` | IR + layout → AccessKit tree; requests → intents | `tree_update`, `map_request` | accesskit |
 | `gogo-ui-shell` | The window: winit loop, surfaces, frame pacing, damage, IME, clipboard, platform a11y, hot-reload watching | `Shell::run(impl ShellApp, RendererChoice)`, `ShellApp`, `Waker` | winit, accesskit_winit, notify, softbuffer, smithay-clipboard (Linux), arboard (macOS) |
-| `gogo-gui-model` | The app layer (design 25): sources, dispatch, the safety flow, jobs | `Model`, `trait Backend`, `SourceStore`, `SafetyFlow`, `JobTable`, `UiState` | — |
+| `gogo-gui-model` | The app layer (design 25): sources, dispatch, the safety flow, jobs | `Model`, `trait Backend`, `SourceStore`, `SafetyFlow`, `JobTable`, and the persistence of each skin's `ui` values (handed to the binder as its `UiState`) | — |
 | `gogo-skins` | Built-in skins as data | `builtin()` (embedded with `include_str!`) | — |
 | `gogo-gui` | The binary: wires gogo-core in, owns the tokio runtime, picks a renderer | bin `gogo-gui`, `CoreBackend: Backend` | tokio, image (`jpeg`, `webp`) |
-| `gogo-gui-testkit` | Test support, dev-dependency only | fixture `Scope`, `FakeBackend`, procedural covers, golden compare, headless render | png |
+| `gogo-gui-testkit` | Test support, dev-dependency only | `FixtureScope` (fictional data a skin binds against), `FakeBackend`, procedural covers, golden compare, headless render | png |
 
 Built-in skins and bundled fonts live under `crates/`, because the nix package's source
 fileset is `Cargo.toml`, `Cargo.lock`, `crates/` and `compat/` (`nix/app.nix`).

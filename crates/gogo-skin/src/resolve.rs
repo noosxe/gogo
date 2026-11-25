@@ -119,6 +119,24 @@ pub(crate) fn components(
     }
 }
 
+/// Check a fragment of the default skin against another skin's manifest (design 27 §5.7):
+/// its `ui.*` paths and enum words resolve against `manifest`, not against the skin the
+/// fragment was written in. The findings land in `col`, with the codes the loader uses.
+pub(crate) fn fragment(col: &mut Collector, manifest: &Manifest, comp: &Component) {
+    let words = enum_words(manifest);
+    let params: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut ck = Checker::new(col, manifest, &words, &params, None, Pass::Generic, None);
+    ck.comp = Some(comp.name.clone());
+    ck.env = comp
+        .params
+        .iter()
+        .map(|p| (p.clone(), Ty::default()))
+        .collect();
+    ck.nparams = ck.env.len();
+    let mut body = comp.body.clone();
+    ck.nodes(&mut body, Parent::default());
+}
+
 /// Check every route's tree, following each `use` into its component with the types of
 /// the arguments given. `follow` is false when the components loop or are too large to
 /// expand.

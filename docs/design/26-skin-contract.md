@@ -549,8 +549,11 @@ Where each is enforced is in design 25 §4.
 - **Deprecation.** A name to be removed in the next major is marked deprecated for at
   least one minor, and the loader warns.
 - **Fallback is per route.** A route a skin doesn't cover, or covers with a route that
-  fails validation, uses the default skin's version, drawn with the active skin's
-  *tokens*. New features then appear in every skin at once and look roughly at home.
+  fails validation or whose binding fails, uses the default skin's version, drawn with the
+  active skin's *tokens*. New features then appear in every skin at once and look roughly
+  at home. The routes of one page fall back separately: the `shell` can be the skin's own
+  around a `game` route that is the default skin's. A route whose binding fails is
+  reported with the file and line (design 27 §9.1).
 - **Borrowing is explicit, per fragment.** Inside a route it covers, a skin may embed a
   named fragment of the default skin (`use default "game.saves-summary"`). There is no
   silent per-widget fallback: a broken binding fails the route at load, loudly, instead of

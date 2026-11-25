@@ -16,13 +16,14 @@
 //!   its `&'static` contract spec, every field path is checked against the contract's
 //!   shapes, and the types an element needs are checked (design 27 §7).
 //!
-//! Binding and the typed styles are PR B4's.
-//!
-//! Filled in further by PRs B3 (#525) and B4 (#526).
+//! - [`bind`] (PR B4b): [`SkinPackage::bind`] evaluates a route against the app's data and
+//!   the skin's `ui` state into the IR tree and the tables behind its ids, with per-route
+//!   fallback to the default skin (design 26 §8).
 #![deny(unsafe_code)]
 
 pub mod assets;
 pub mod ast;
+pub mod bind;
 pub mod diag;
 pub mod expr;
 pub mod fonts;
@@ -42,8 +43,17 @@ mod resolve;
 mod typing;
 
 pub use assets::{Asset, AssetKind};
-pub use ast::{Arg, Node, Prop, Term, Val};
+pub use ast::{Arg, Node, Operand, Prop, Term, Val};
+pub use bind::{
+    ActionCall, ActionTable, ArgValue, BindError, BindErrorKind, Binding, Bound, CallArg,
+    DefaultSkin, Fallback, FallbackWhy, Input, PartStyle, PendingArg, UiState, UiStateError,
+    WidgetSlot,
+};
 pub use diag::{Code, Finding, Level, Report};
+/// The dynamic value expressions compute with: what a source answers and a scope lends.
+pub use gogo_contract::Value;
+/// The IR the binder builds (design 24 §2), for code that only depends on this crate.
+pub use gogo_ui_ir as ir;
 pub use manifest::{Manifest, Mode, SkinVersion, UiDefault, UiType, UiVar};
 pub use package::{Component, Route, SkinPackage};
 pub use source::{SourceFile, Sources, Span};

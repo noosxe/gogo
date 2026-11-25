@@ -76,6 +76,24 @@ impl Template {
         }
     }
 
+    /// Every bare name the template's expressions use, in source order (see
+    /// [`Expr::names`]).
+    pub fn names(&self) -> Vec<&str> {
+        match self {
+            Template::Text(_) => Vec::new(),
+            Template::Expr(e) => e.names().into_iter().map(|n| n.name).collect(),
+            Template::Interp(segs) => segs
+                .iter()
+                .filter_map(|s| match s {
+                    Seg::Expr(e) => Some(e.names()),
+                    Seg::Lit(_) => None,
+                })
+                .flatten()
+                .map(|n| n.name)
+                .collect(),
+        }
+    }
+
     /// True if any expression in the template mentions the bare name `name`.
     pub fn mentions(&self, name: &str) -> bool {
         match self {

@@ -104,6 +104,21 @@ seconds behind a 10 Hz progress feed because every update queued a frame (design
 - **Re-binding cost.** Templates are parsed once at load (design 27 §9), so a re-bind only
   evaluates. If that ever shows up in a profile, progress nodes are marked in the IR
   (design 27 §5.6) and can be patched without a full bind.
+- **How the app binds.** To draw the window it calls `bind_with_fallback("shell", …)` on
+  the active skin with a `Binding`:
+  - `scope`: the model's read side, an `expr::Scope` that answers the sources
+    (`game($id)`, `queue.summary`, `route`, …), the route's parameters (`$id`) and `now`
+    from the slots above. The binder adds its own variables, the `ui` source and the
+    tokens, and asks the scope for the rest;
+  - `ui`: the active skin's `UiState`, which the model restores from disk (§9) and changes
+    only on `ui.set` from user input;
+  - `mode`: the token set to draw with;
+  - `default`: the default skin and its own `UiState`, for fallback and for `use default`.
+
+  What it gets back is a `Bound`: the tree for the engine, an `ActionTable` the shell
+  reads when the engine reports an `ActionRef` (the spec, and each argument evaluated; an
+  argument that reads a toggle's `on` or a select's `value` is a `PendingArg` the model
+  evaluates with the input), the app widgets to fill in, and the routes that fell back.
 
 ## 4. The safety flow
 
@@ -149,6 +164,7 @@ stateDiagram-v2
 | S8 cancel always there | every dialog state has a cancel edge that changes nothing | model test: cancel from each state leaves the backend untouched |
 | S9 uniform errors | every `Refused`/failure becomes an `ErrorView` in the app's `error` widget | model test |
 | S19 global keys | the shell routes Ctrl K, Esc and the plan card's Enter before the skin sees them | interact test |
+| S1, S2, S5, S14, S21 again at bind | the binder (`gogo-skin`): a masked value is never an action argument and reads as its mask, a part that can't be hidden isn't, every control has a non-empty accessible name once its text is known, a `settings.set` key is on the skin-settable list | binding tests over the fixture scope, with the invariant named |
 | S1–S3 nothing secret or path-like in sources or args | `CoreBackend` builds sources from typed views; action params have no path/URL/shell types | S1 test over a fixture account with known secret strings |
 
 - **The plan the user confirmed is the plan that runs.** Confirming re-plans and compares.
