@@ -1,5 +1,6 @@
 //! Elements to nodes (design 27 §5): control flow, containers, content and controls.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use gogo_contract::Value;
@@ -11,6 +12,7 @@ use gogo_ui_ir::{
 use super::actions::{ActionCall, BoundTerm, PendingArg, TermVal, assign, capture};
 use super::style::{Computed, TextCtx, apply};
 use super::{BindErrorKind, Binder, Cx, R, Var, term};
+
 use crate::ast::{Node as AstNode, Term, Val};
 use crate::diag::{Collector, LoadScope};
 use crate::expr::{Expr, Template};
@@ -21,6 +23,10 @@ use crate::styles::State;
 
 /// The most items one `each` or `data-table` draws (design 27 §8).
 pub const MAX_ROWS: usize = crate::expr::MAX_LIST;
+
+/// How far outside 0 to 1 a `progress` may be and still count as the end it is next to
+/// (design 27 §5.6).
+pub const PROGRESS_EPSILON: f64 = 1e-6;
 
 impl<'a> Binder<'a> {
     // ---- lists of elements ----
@@ -50,6 +56,8 @@ impl<'a> Binder<'a> {
         {
             return Ok(());
         }
+        self.step(n.span)?;
+        self.step(n.span)?;
         let key = format!("{path}/{}.{i}", n.name);
         self.enter(n.span)?;
         let r = match n.name.as_str() {
@@ -84,9 +92,11 @@ impl<'a> Binder<'a> {
                     ));
                 }
             };
-            if !(0.0..=1.0).contains(&f) {
+            // A ratio of two sums can overshoot by rounding: a hair outside is clamped.
+            if !f.is_finite() || !(-PROGRESS_EPSILON..=1.0 + PROGRESS_EPSILON).contains(&f) {
                 return Err(self.fail(BindErrorKind::Progress(f), Some(p.arg.span)));
             }
+            let f = f.clamp(0.0, 1.0);
             if let Some(node) = self.tree.node_mut(id) {
                 node.progress = Some(f as f32);
                 node.layout.width = Dim::Pct(f as f32 * 100.0);
@@ -100,11 +110,7 @@ impl<'a> Binder<'a> {
     fn let_(&mut self, n: &'a AstNode) -> R<()> {
         for p in &n.props {
             let value = self.val(&p.arg.val, p.arg.span)?;
-            self.vars.push(Var {
-                name: p.name.clone(),
-                value,
-                terms: None,
-            });
+            self.vars.push(Var::plain(p.name.clone(), value));
         }
         Ok(())
     }
@@ -113,33 +119,54 @@ impl<'a> Binder<'a> {
         let (Some(var), Some(p)) = (n.plain_arg(0), n.prop("in")) else {
             return Ok(());
         };
-        let list = match self.val(&p.arg.val, p.arg.span)? {
-            Value::List(l) => l,
-            Value::Null => Vec::new(),
-            other => {
-                return Err(self.fail(
-                    BindErrorKind::NotAList {
-                        what: "each",
-                        got: other.type_name(),
-                    },
-                    Some(p.arg.span),
-                ));
-            }
-        };
         // Data can't fail a valid skin, so a long list is cut, silently (design 27 §8).
-        for (k, item) in list.into_iter().take(MAX_ROWS).enumerate() {
+        let list = self.items(&p.arg.val, p.arg.span, "each")?;
+        for (k, item) in list.into_iter().enumerate() {
+            self.step(n.span)?;
             let mark = self.vars.len();
-            self.vars.push(Var {
-                name: var.to_owned(),
-                value: item,
-                terms: None,
-            });
+            self.vars.push(Var::plain(var, item));
             let path = format!("{key}#{k}");
             let r = self.children(&n.children, parent, &path, cx);
             self.vars.truncate(mark);
             r?;
         }
         Ok(())
+    }
+
+    /// The first [`MAX_ROWS`] items of the list `v` evaluates to (a null is no items). Only
+    /// those are copied out of the data (design 27 §8).
+    fn items(&self, v: &Val, at: Span, what: &'static str) -> R<Vec<Value>> {
+        let not_a_list = |got: &Value| {
+            self.fail(
+                BindErrorKind::NotAList {
+                    what,
+                    got: got.type_name(),
+                },
+                Some(at),
+            )
+        };
+        if let Val::Text(t) = v {
+            let sc = self.scope();
+            let found = t.eval(&sc).map_err(|e| self.fail(e.into(), Some(at)))?;
+            return match found {
+                Cow::Borrowed(Value::List(l)) => Ok(l.iter().take(MAX_ROWS).cloned().collect()),
+                Cow::Owned(Value::List(mut l)) => {
+                    l.truncate(MAX_ROWS);
+                    Ok(l)
+                }
+                Cow::Borrowed(Value::Null) | Cow::Owned(Value::Null) => Ok(Vec::new()),
+                Cow::Borrowed(other) => Err(not_a_list(other)),
+                Cow::Owned(other) => Err(not_a_list(&other)),
+            };
+        }
+        match self.val(v, at)? {
+            Value::List(mut l) => {
+                l.truncate(MAX_ROWS);
+                Ok(l)
+            }
+            Value::Null => Ok(Vec::new()),
+            other => Err(not_a_list(&other)),
+        }
     }
 
     fn switch(&mut self, n: &'a AstNode, parent: NodeId, key: &str, cx: &Cx) -> R<()> {
@@ -182,7 +209,7 @@ impl<'a> Binder<'a> {
                     format!("the default skin has no fragment `{name}`"),
                 ));
             };
-            self.check_fragment(&name, c, n.span)?;
+            self.check_fragment(&name, n.span)?;
             (c, d)
         } else {
             let Some(c) = self.code.components.get(&name) else {
@@ -194,11 +221,7 @@ impl<'a> Binder<'a> {
         let mut params: Vec<Var> = Vec::new();
         for pname in &comp.params {
             let var = match n.prop(pname) {
-                None => Var {
-                    name: pname.clone(),
-                    value: Value::Null,
-                    terms: None,
-                },
+                None => Var::plain(pname.clone(), Value::Null),
                 Some(p) => match &p.arg.val {
                     Val::Terms(ts) => {
                         let terms = self.terms(ts, true)?;
@@ -206,12 +229,14 @@ impl<'a> Binder<'a> {
                             name: pname.clone(),
                             value: terms_value(&terms),
                             terms: Some(terms),
+                            spec: None,
                         }
                     }
                     v => Var {
                         name: pname.clone(),
                         value: self.val(v, p.arg.span)?,
                         terms: None,
+                        spec: self.action_given(n, pname, v),
                     },
                 },
             };
@@ -220,12 +245,15 @@ impl<'a> Binder<'a> {
         // The body sees its parameters and the app's data, not the caller's variables.
         let saved_vars = std::mem::replace(&mut self.vars, params);
         let saved_code = std::mem::replace(&mut self.code, code);
+        // The nodes the body adds under `parent` come after the ones already there, and
+        // the first of them is what `id=` names.
+        let before = self.tree.children(parent).len();
         let r = self.children(&comp.body, parent, key, cx);
         self.code = saved_code;
         self.vars = saved_vars;
         r?;
         if let Some(name) = self.prop_text(n, "id")?
-            && let Some(first) = self.first_child_after(parent, key)
+            && let Some(&first) = self.tree.children(parent).get(before)
             && let Some(node) = self.tree.node_mut(first)
         {
             node.name = Some(Arc::from(name.as_str()));
@@ -233,41 +261,65 @@ impl<'a> Binder<'a> {
         Ok(())
     }
 
-    /// The first node under `parent` whose key starts with `key/`.
-    fn first_child_after(&self, parent: NodeId, key: &str) -> Option<NodeId> {
-        let prefix = format!("{key}/");
-        self.tree
-            .children(parent)
+    /// The action a component parameter stands for, as the loader resolved it: the one a
+    /// `use` named in plain text, or the one a parameter of the caller handed on with
+    /// `action="{p}"`. A variable that hides the caller's parameter has none (S16).
+    fn action_given(
+        &self,
+        n: &AstNode,
+        pname: &str,
+        v: &Val,
+    ) -> Option<&'static gogo_contract::ActionSpec> {
+        if let Some((_, spec)) = n.resolved.use_actions.iter().find(|(p, _)| p == pname) {
+            return Some(*spec);
+        }
+        let Val::Text(Template::Expr(Expr::Name { name, .. })) = v else {
+            return None;
+        };
+        self.vars
             .iter()
-            .copied()
-            .find(|&c| self.tree.key(c).is_some_and(|k| k.starts_with(&prefix)))
+            .rev()
+            .find(|x| &x.name == name)
+            .and_then(|x| x.spec)
     }
 
     /// A borrowed fragment holds against this skin's manifest (design 27 §5.7): its `ui.*`
     /// paths and enum words are this skin's, checked with the loader's own rules.
-    fn check_fragment(&mut self, name: &str, comp: &'a Component, at: Span) -> R<()> {
+    ///
+    /// The fragment and every component it leads to are checked, once for each skin that
+    /// borrows them: the result is kept in that skin's package.
+    fn check_fragment(&mut self, name: &str, at: Span) -> R<()> {
         if !self.checked().insert(name.to_owned()) {
             return Ok(());
         }
         let Some(default) = self.default_skin() else {
             return Ok(());
         };
-        let mut col = Collector::default();
-        col.sources = default.sources().clone();
-        col.scope = LoadScope::Route(self.route.clone());
-        crate::resolve::fragment(&mut col, self.ui_manifest(), comp);
-        let errors: Vec<_> = col
-            .report
-            .findings()
-            .iter()
-            .filter(|f| f.is_error())
-            .cloned()
-            .collect();
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(self.fail(BindErrorKind::Borrow(errors), Some(at)))
+        let manifest = self.ui_manifest();
+        let found = self.route_code().fragments().get_or_check(name, || {
+            let mut col = Collector::default();
+            col.sources = default.sources().clone();
+            col.scope = LoadScope::Route(String::new());
+            crate::resolve::fragment(&mut col, manifest, &default.components, name);
+            col.report
+                .findings()
+                .iter()
+                .filter(|f| f.is_error())
+                .cloned()
+                .collect()
+        });
+        if found.is_empty() {
+            return Ok(());
         }
+        let errors = found
+            .iter()
+            .cloned()
+            .map(|mut f| {
+                f.level = crate::diag::Level::Route(self.route.clone());
+                f
+            })
+            .collect();
+        Err(self.fail(BindErrorKind::Borrow(errors), Some(at)))
     }
 
     // ---- action arguments ----
@@ -307,6 +359,19 @@ impl<'a> Binder<'a> {
         Ok(out)
     }
 
+    /// The action a bare `{p}` stands for, when `p` is a component parameter that was given
+    /// one at load.
+    fn action_of(&self, v: &Val) -> Option<&'static gogo_contract::ActionSpec> {
+        let Val::Text(Template::Expr(Expr::Name { name, .. })) = v else {
+            return None;
+        };
+        self.vars
+            .iter()
+            .rev()
+            .find(|x| &x.name == name)
+            .and_then(|x| x.spec)
+    }
+
     /// The call an element's `action` (and `args`) stand for, entered in the table.
     pub(crate) fn call(
         &mut self,
@@ -320,19 +385,25 @@ impl<'a> Binder<'a> {
         let spec = match n.resolved.actions.iter().find(|b| b.prop == act) {
             Some(b) => b.spec,
             None => {
-                // An action named through a component parameter (`action="{action}"`).
-                let name = self.val(&p.arg.val, p.arg.span)?.display();
-                if name.is_empty() {
+                // An action named through a component parameter (`action="{action}"`) is
+                // the one the loader resolved at the `use` that gave it (S16). A name that
+                // wasn't resolved there is never looked up: the loader refuses the skin
+                // first, so this is unreachable for a loaded one.
+                if self.val(&p.arg.val, p.arg.span)?.display().is_empty() {
                     return Ok(None);
                 }
-                gogo_contract::actions::skin_action(&name).ok_or_else(|| {
-                    self.fail(
-                        BindErrorKind::Action(format!(
-                            "`{name}` is not an action a skin may bind (S16)"
-                        )),
-                        Some(p.arg.span),
-                    )
-                })?
+                match self.action_of(&p.arg.val) {
+                    Some(spec) => spec,
+                    None => {
+                        return Err(self.fail(
+                            BindErrorKind::Action(
+                                "this action was not resolved when the skin loaded (S16)"
+                                    .to_owned(),
+                            ),
+                            Some(p.arg.span),
+                        ));
+                    }
+                }
             }
         };
         let terms = match n.prop(args).map(|p| &p.arg.val) {
@@ -369,8 +440,8 @@ impl<'a> Binder<'a> {
     ) -> R<Vec<String>> {
         let mut v = vec![kind.to_owned()];
         v.extend(extra.iter().cloned());
-        if let Some(s) = n.and_then(|n| n.plain_prop("style")) {
-            v.extend(s.split_whitespace().map(str::to_owned));
+        if let Some(n) = n {
+            v.extend(n.resolved.style_words.iter().cloned());
         }
         if let Some(n) = n
             && let Some(tone) = self.prop_text(n, "tone")?
@@ -449,23 +520,23 @@ impl<'a> Binder<'a> {
         self.compute_with(&layers, n, true, states, &cx.text, init)
     }
 
-    /// The paint a node has while it has keyboard focus, if a style gives it one.
+    /// The paint a node has while it has keyboard focus, if a style gives it one. `layers`
+    /// are the ones the node was computed with.
     fn focus_paint(
         &self,
-        kind: &str,
+        layers: &[String],
         n: Option<&'a AstNode>,
         states: &[State],
         cx: &Cx,
         init: impl FnOnce(&mut Computed),
     ) -> R<Option<gogo_ui_ir::Paint>> {
-        let layers = self.layers(kind, n, &[])?;
-        if !self.has_state(&layers, State::Focus) {
+        if !self.has_state(layers, State::Focus) {
             return Ok(None);
         }
         let mut st = states.to_vec();
         st.push(State::Focus);
         Ok(Some(
-            self.compute_with(&layers, n, true, &st, &cx.text, init)?
+            self.compute_with(layers, n, true, &st, &cx.text, init)?
                 .paint,
         ))
     }
@@ -808,7 +879,8 @@ impl<'a> Binder<'a> {
             c.layout.align_items = Some(Align::Center);
             c.layout.justify = Some(Justify::Center);
         };
-        let c = self.compute("button", Some(n), &states, cx, init)?;
+        let layers = self.layers("button", Some(n), &[])?;
+        let c = self.compute_with(&layers, Some(n), true, &states, &cx.text, init)?;
         let text = self.arg_text(n)?;
         let name = self.name_of(n, Some(&text), cx)?;
         let Some(name) = name else {
@@ -831,7 +903,7 @@ impl<'a> Binder<'a> {
             self.key_hint(id, &format!("{key}/key"), h, &cx2, &c.text, n.span)?;
         }
         let action = self.call(n, "action", "args")?;
-        let focus = self.focus_paint("button", Some(n), &states, cx, init)?;
+        let focus = self.focus_paint(&layers, Some(n), &states, cx, init)?;
         if let Some(node) = self.tree.node_mut(id) {
             node.a11y.role = Role::Button;
             node.a11y.name = Some(name);
@@ -855,7 +927,8 @@ impl<'a> Binder<'a> {
             c.layout.padding = gogo_ui_ir::Sides::all(2.0);
             c.layout.shrink = 0.0;
         };
-        let mut c = self.compute("toggle", Some(n), &states, cx, init)?;
+        let layers = self.layers("toggle", Some(n), &[])?;
+        let mut c = self.compute_with(&layers, Some(n), true, &states, &cx.text, init)?;
         if on {
             c.layout.justify = Some(Justify::End);
         }
@@ -871,7 +944,7 @@ impl<'a> Binder<'a> {
         })?;
         self.add(id, &format!("{key}/knob"), Self::node_of(&k), n.span)?;
         let action = self.call(n, "action", "args")?;
-        let focus = self.focus_paint("toggle", Some(n), &states, cx, init)?;
+        let focus = self.focus_paint(&layers, Some(n), &states, cx, init)?;
         if let Some(node) = self.tree.node_mut(id) {
             node.a11y.role = Role::Switch;
             node.a11y.name = Some(name);
@@ -888,7 +961,8 @@ impl<'a> Binder<'a> {
             c.layout.direction = Direction::Row;
             c.layout.align_items = Some(Align::Center);
         };
-        let mut c = self.compute("select", Some(n), &[], cx, init)?;
+        let layers = self.layers("select", Some(n), &[])?;
+        let mut c = self.compute_with(&layers, Some(n), true, &[], &cx.text, init)?;
         if self.prop(n, "mono")?.is_some_and(|v| v.truthy())
             && let Some(m) = c.text.mono.clone()
         {
@@ -917,7 +991,7 @@ impl<'a> Binder<'a> {
             n.span,
         )?;
         let action = self.call(n, "action", "args")?;
-        let focus = self.focus_paint("select", Some(n), &[], cx, init)?;
+        let focus = self.focus_paint(&layers, Some(n), &[], cx, init)?;
         if let Some(node) = self.tree.node_mut(id) {
             node.a11y.role = Role::ComboBox;
             node.a11y.name = Some(name);
@@ -941,10 +1015,14 @@ impl<'a> Binder<'a> {
             .unwrap_or_default()
             .split_whitespace()
             .collect();
-        let current = match self.current_ui().clone() {
+        let current = match self.current_ui() {
             Value::Map(m) => m.get(&var).map(Value::display).unwrap_or_default(),
             _ => String::new(),
         };
+        // A tab looks the same whichever it is but for being the current one, so the two
+        // looks are computed at most once each.
+        let tab_layers = self.layers("tab", None, &[])?;
+        let mut focus_of: [Option<Option<gogo_ui_ir::Paint>>; 2] = [None, None];
         let c = self.compute("tabs", Some(n), &[], cx, |c| {
             c.layout.direction = Direction::Row;
             c.layout.align_items = Some(Align::End);
@@ -966,8 +1044,7 @@ impl<'a> Binder<'a> {
                 c.layout.direction = Direction::Row;
                 c.layout.align_items = Some(Align::Center);
             };
-            let layers = self.layers("tab", None, &[])?;
-            let tc = self.compute_with(&layers, None, false, &states, &c.text, init)?;
+            let tc = self.compute_with(&tab_layers, None, false, &states, &c.text, init)?;
             let tkey = format!("{key}/tab.{s}");
             let tid = self.add(id, &tkey, Self::node_of(&tc), at)?;
             let title = section_title(s);
@@ -994,17 +1071,21 @@ impl<'a> Binder<'a> {
                 },
                 at,
             )?;
-            let focus = {
-                let layers = self.layers("tab", None, &[])?;
-                if self.has_state(&layers, State::Focus) {
-                    let mut st = states.clone();
-                    st.push(State::Focus);
-                    Some(
-                        self.compute_with(&layers, None, false, &st, &c.text, init)?
-                            .paint,
-                    )
-                } else {
-                    None
+            let focus = match &focus_of[usize::from(on)] {
+                Some(done) => done.clone(),
+                None => {
+                    let made = if self.has_state(&tab_layers, State::Focus) {
+                        let mut st = states.clone();
+                        st.push(State::Focus);
+                        Some(
+                            self.compute_with(&tab_layers, None, false, &st, &c.text, init)?
+                                .paint,
+                        )
+                    } else {
+                        None
+                    };
+                    focus_of[usize::from(on)] = Some(made.clone());
+                    made
                 }
             };
             if let Some(t) = self.tree.node_mut(tid) {
@@ -1204,19 +1285,7 @@ impl<'a> Binder<'a> {
         let layers = self.layers("table", Some(n), &[])?;
         let c = self.compute_with(&layers, Some(n), false, &[], &cx.text, |_| {})?;
         let rows = match n.prop("rows") {
-            Some(p) => match self.val(&p.arg.val, p.arg.span)? {
-                Value::List(l) => l,
-                Value::Null => Vec::new(),
-                other => {
-                    return Err(self.fail(
-                        BindErrorKind::NotAList {
-                            what: "rows",
-                            got: other.type_name(),
-                        },
-                        Some(p.arg.span),
-                    ));
-                }
-            },
+            Some(p) => self.items(&p.arg.val, p.arg.span, "rows")?,
             None => Vec::new(),
         };
         let cols: Vec<&'a AstNode> = n.children.iter().filter(|c| c.name == "col").collect();
@@ -1245,13 +1314,10 @@ impl<'a> Binder<'a> {
             self.text_child(cid, &format!("{ckey}/text"), &title, &cc.text, col.span)?;
         }
 
-        for (i, row) in rows.into_iter().take(MAX_ROWS).enumerate() {
+        for (i, row) in rows.into_iter().enumerate() {
+            self.step(at)?;
             let mark = self.vars.len();
-            self.vars.push(Var {
-                name: "row".to_owned(),
-                value: row,
-                terms: None,
-            });
+            self.vars.push(Var::plain("row", row));
             let r = self.table_row(n, &cols, id, key, i, &c.text);
             self.vars.truncate(mark);
             r?;

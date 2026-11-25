@@ -122,19 +122,65 @@ pub(crate) fn components(
 /// Check a fragment of the default skin against another skin's manifest (design 27 §5.7):
 /// its `ui.*` paths and enum words resolve against `manifest`, not against the skin the
 /// fragment was written in. The findings land in `col`, with the codes the loader uses.
-pub(crate) fn fragment(col: &mut Collector, manifest: &Manifest, comp: &Component) {
+///
+/// The fragment's own body is checked, and so is every component its `use`s lead to, at
+/// any depth: they are the same skin text, and a `ui.*` path in one of them is as much the
+/// borrower's as one in the fragment.
+pub(crate) fn fragment(
+    col: &mut Collector,
+    manifest: &Manifest,
+    comps: &BTreeMap<String, Component>,
+    name: &str,
+) {
     let words = enum_words(manifest);
-    let params: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    let mut ck = Checker::new(col, manifest, &words, &params, None, Pass::Generic, None);
-    ck.comp = Some(comp.name.clone());
-    ck.env = comp
-        .params
+    let params: BTreeMap<String, Vec<String>> = comps
         .iter()
-        .map(|p| (p.clone(), Ty::default()))
+        .map(|(n, c)| (n.clone(), c.params.clone()))
         .collect();
-    ck.nparams = ck.env.len();
-    let mut body = comp.body.clone();
-    ck.nodes(&mut body, Parent::default());
+    for comp in reachable(comps, name) {
+        let mut ck = Checker::new(col, manifest, &words, &params, None, Pass::Generic, None);
+        ck.comp = Some(comp.name.clone());
+        ck.env = comp
+            .params
+            .iter()
+            .map(|p| (p.clone(), Ty::default()))
+            .collect();
+        ck.nparams = ck.env.len();
+        let mut body = comp.body.clone();
+        ck.nodes(&mut body, Parent::default());
+    }
+}
+
+/// The component `name` and every component a `use` in it leads to, each once.
+fn reachable<'c>(comps: &'c BTreeMap<String, Component>, name: &str) -> Vec<&'c Component> {
+    fn uses<'c>(list: &[Node], comps: &'c BTreeMap<String, Component>, out: &mut Vec<&'c str>) {
+        for n in list {
+            if n.name == "use"
+                && let [a] = n.args.as_slice()
+                && let Some(used) = a.val.plain()
+                && let Some((key, _)) = comps.get_key_value(used)
+            {
+                out.push(key.as_str());
+            }
+            uses(&n.children, comps, out);
+        }
+    }
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut todo: Vec<&str> = comps
+        .get_key_value(name)
+        .map(|(k, _)| k.as_str())
+        .into_iter()
+        .collect();
+    let mut out = Vec::new();
+    while let Some(n) = todo.pop() {
+        if !seen.insert(n) {
+            continue;
+        }
+        let Some(c) = comps.get(n) else { continue };
+        out.push(c);
+        uses(&c.body, comps, &mut todo);
+    }
+    out
 }
 
 /// Check every route's tree, following each `use` into its component with the types of
@@ -277,6 +323,10 @@ impl<'a> Checker<'a> {
     }
 
     fn node(&mut self, n: &mut Node, parent: Parent) {
+        n.resolved.style_words = n
+            .plain_prop("style")
+            .map(|s| s.split_whitespace().map(str::to_owned).collect())
+            .unwrap_or_default();
         match n.name.as_str() {
             "let" => self.let_(n),
             "each" => self.each(n),
@@ -455,6 +505,7 @@ impl<'a> Checker<'a> {
         self.arg_templates(n);
         let mut binds: Vec<(String, Ty)> = Vec::new();
         let mut givens: Vec<(String, Given)> = Vec::new();
+        let mut use_actions: Vec<(String, &'static ActionSpec)> = Vec::new();
         for i in 0..n.props.len() {
             let name = n.props[i].name.clone();
             let span = n.props[i].arg.span;
@@ -474,6 +525,9 @@ impl<'a> Checker<'a> {
                         }
                         Template::Text(s) => {
                             givens.push((name.clone(), Given::Text(s.clone())));
+                            if let Some(spec) = actions::skin_action(s) {
+                                use_actions.push((name.clone(), spec));
+                            }
                             Ty::text()
                         }
                         Template::Interp(_) => Ty::text().not_plain(),
@@ -532,6 +586,7 @@ impl<'a> Checker<'a> {
                 ));
             }
         }
+        n.resolved.use_actions = use_actions;
         let Some(comp) = comp else { return };
         if self.depth >= MAX_USE_DEPTH {
             return;
@@ -730,11 +785,24 @@ impl<'a> Checker<'a> {
         let words: Vec<(usize, &str)> = word_offsets(text);
         let mut found = Vec::new();
         let mut errors = Vec::new();
+        let mut dups = Vec::new();
         for (at, w) in words {
             match route.sections.iter().find(|s| **s == w) {
+                Some(s) if found.contains(s) => {
+                    dups.push((self.inner_span(arg, at, Some(w.len())), w.to_owned()));
+                }
                 Some(s) => found.push(*s),
                 None => errors.push((self.inner_span(arg, at, Some(w.len())), w.to_owned())),
             }
+        }
+        for (span, w) in dups {
+            self.emit(
+                None,
+                Code::UnknownSection,
+                span,
+                format!("`{w}` is listed twice in `sections` (S16)"),
+                Some("each section is one tab; list it once".to_owned()),
+            );
         }
         for (span, w) in errors {
             let help = if route.sections.is_empty() {
@@ -1519,7 +1587,7 @@ fn term_value_span(t: &crate::ast::Term) -> Span {
 }
 
 /// Why `text` is not a value of a `ui` variable of type `ty`.
-fn ui_value_error(ty: &UiType, text: &str) -> Option<String> {
+pub(crate) fn ui_value_error(ty: &UiType, text: &str) -> Option<String> {
     match ty {
         UiType::Bool if text != "true" && text != "false" => Some("it is a bool".to_owned()),
         UiType::Number if text.parse::<f64>().is_err() => Some("it is a number".to_owned()),

@@ -59,6 +59,9 @@ pub enum BindErrorKind {
     /// The route binds to more nodes than the limit (design 27 §8).
     #[error("the route binds to more than {0} nodes")]
     TooManyNodes(usize),
+    /// The route takes more steps to bind than the limit (design 27 §8).
+    #[error("the route takes more than {0} steps to bind")]
+    TooManySteps(usize),
     /// Components, `each` or the outlet nest deeper than the limit.
     #[error("the route nests more than {0} levels deep when bound")]
     TooDeep(usize),
@@ -86,6 +89,7 @@ impl BindErrorKind {
             BindErrorKind::Progress(_) => "gogo_skin::bind::progress",
             BindErrorKind::NoMode(_) => "gogo_skin::bind::no_mode",
             BindErrorKind::TooManyNodes(_) => "gogo_skin::bind::too_many_nodes",
+            BindErrorKind::TooManySteps(_) => "gogo_skin::bind::too_many_steps",
             BindErrorKind::TooDeep(_) => "gogo_skin::bind::too_deep",
             BindErrorKind::Tree(_) => "gogo_skin::bind::tree",
             BindErrorKind::Borrow(_) => "gogo_skin::bind::borrow",

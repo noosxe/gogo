@@ -9,7 +9,7 @@ use gogo_skin::expr::Scope;
 use gogo_skin::ir::{DrawnBy, Fill, Kind, NodeId, Tree};
 use gogo_skin::{
     ArgValue, BindErrorKind, Binding, Bound, Code, DefaultSkin, FallbackWhy, Input, Mode,
-    SkinPackage, UiState, Value,
+    PendingError, SkinPackage, UiState, Value,
 };
 
 type Files = Vec<(String, Vec<u8>)>;
@@ -995,4 +995,341 @@ fn ui_state_takes_defaults_and_refuses_what_does_not_fit() {
     assert_eq!(r.get("view"), Some(&Value::str("list")));
     assert_eq!(r.get("tab"), Some(&Value::str("overview")));
     assert_eq!(r.get("gone"), None);
+}
+
+// ---- an argument read from the input gets the checks a known one gets ----
+
+/// The first argument of a call to `action` that waits for the input.
+fn pending<'b>(b: &'b Bound, action: &str) -> &'b gogo_skin::PendingArg {
+    b.actions
+        .iter()
+        .filter(|(_, c)| c.spec.name == action)
+        .flat_map(|(_, c)| c.args.iter())
+        .find_map(|a| match &a.value {
+            ArgValue::OnInput(p) => Some(p),
+            ArgValue::Value(_) => None,
+        })
+        .unwrap_or_else(|| panic!("no pending argument of {action}"))
+}
+
+fn chosen(v: Value) -> Input {
+    Input {
+        on: None,
+        value: Some(v),
+    }
+}
+
+#[test]
+fn a_name_the_skin_must_write_out_cannot_be_read_from_the_input() {
+    // S21, S16: a settings key, a `ui` variable and a route are checked by name at load,
+    // so `select … args="key={value}"` can't pick one from data.
+    let cases = [
+        (
+            "settings.set key",
+            "field \"F\" { select value=\"{ui.view}\" options=\"a b\" action=\"settings.set\" args=\"key={value} on\" }",
+            Code::SettingKey,
+        ),
+        (
+            "settings.set first term",
+            "field \"F\" { select value=\"{ui.view}\" options=\"a b\" action=\"settings.set\" args=\"{value} on\" }",
+            Code::SettingKey,
+        ),
+        (
+            "ui.set variable",
+            "field \"F\" { select value=\"{ui.view}\" options=\"a b\" action=\"ui.set\" args=\"{value} grid\" }",
+            Code::TypeMismatch,
+        ),
+        (
+            "nav.go route",
+            "field \"F\" { select value=\"{ui.view}\" options=\"a b\" action=\"nav.go\" args=\"{value}\" }",
+            Code::TypeMismatch,
+        ),
+    ];
+    for (what, node, code) in cases {
+        let mut f = base();
+        game_insert(&mut f, node);
+        let pkg = skin_loose("default", f);
+        assert!(!pkg.routes.contains_key("game"), "{what}: the route loaded");
+        assert!(
+            pkg.report()
+                .findings()
+                .iter()
+                .any(|f| f.code == code && f.is_error()),
+            "{what}: {}",
+            pkg.report()
+        );
+    }
+}
+
+#[test]
+fn an_argument_read_from_the_input_is_checked_when_the_input_comes() {
+    let mut f = base();
+    game_insert(
+        &mut f,
+        "field \"V\" { select value=\"{ui.view}\" options=\"grid list\" action=\"ui.set\" args=\"view {value}\" }",
+    );
+    game_insert(
+        &mut f,
+        "field \"S\" { select value=\"{ui.view}\" options=\"a b\" action=\"nav.go\" args=\"game {$id} section={value}\" }",
+    );
+    let pkg = skin("default", f);
+    let scope = FixtureScope::new();
+    let b = bind(&pkg, "game", &scope);
+
+    // A word of a fixed set (`runner.set_display`'s `mode`).
+    let mode = pending(&b, "runner.set_display");
+    assert_eq!(
+        mode.eval(&scope, &chosen(Value::str("x11"))).unwrap(),
+        Value::str("x11")
+    );
+    let err = mode
+        .eval(&scope, &chosen(Value::str("fullscreen")))
+        .unwrap_err();
+    assert!(matches!(err, PendingError::Rejected(_)), "{err}");
+    assert!(err.to_string().contains("fullscreen"), "{err}");
+
+    // The value of a `ui` variable fits its type (`grid` or `list`).
+    let view = pending(&b, "ui.set");
+    assert!(view.eval(&scope, &chosen(Value::str("list"))).is_ok());
+    for bad in [Value::str("tiles"), Value::Num(3.0), Value::Bool(true)] {
+        let err = view.eval(&scope, &chosen(bad)).unwrap_err();
+        assert!(matches!(err, PendingError::Rejected(_)), "{err}");
+    }
+
+    // A route's section is one of its sections.
+    let section = b
+        .actions
+        .iter()
+        .filter(|(_, c)| c.spec.name == "nav.go")
+        .flat_map(|(_, c)| c.args.iter())
+        .find_map(|a| match (&a.value, a.route_param) {
+            (ArgValue::OnInput(p), Some(sp)) if sp.name == "section" => Some(p),
+            _ => None,
+        })
+        .expect("a pending section");
+    assert!(section.eval(&scope, &chosen(Value::str("builds"))).is_ok());
+    let err = section
+        .eval(&scope, &chosen(Value::str("nothing")))
+        .unwrap_err();
+    assert!(matches!(err, PendingError::Rejected(_)), "{err}");
+
+    // S1, S2: a masked value never gets through, and neither does a null for a required
+    // parameter.
+    let err = mode.eval(&scope, &chosen(Value::Masked)).unwrap_err();
+    assert!(matches!(err, PendingError::Masked(_)), "{err}");
+    let err = mode.eval(&scope, &chosen(Value::Null)).unwrap_err();
+    assert!(matches!(err, PendingError::Rejected(_)), "{err}");
+}
+
+#[test]
+fn a_forwarded_action_is_the_one_the_use_named_through_three_levels() {
+    let mut f = base();
+    append(
+        &mut f,
+        "components/stock.kdl",
+        "\ncomponent \"mid\" params=\"action args\" {\n    use \"summary-tile\" mark=\"check\" title=\"T\" link=\"L\" action=\"{action}\" args=\"{args}\"\n}\ncomponent \"top\" params=\"action args\" {\n    use \"mid\" action=\"{action}\" args=\"{args}\"\n}\n",
+    );
+    game_insert(&mut f, "use \"top\" action=\"game.verify\" args=\"{$id}\"");
+    let pkg = skin("default", f);
+    let b = bind(&pkg, "game", &FixtureScope::new());
+    // The fixture's own verify button, and the one through three components.
+    let verifies = b
+        .actions
+        .iter()
+        .filter(|(_, c)| c.spec.name == "game.verify")
+        .count();
+    assert_eq!(verifies, 2);
+}
+
+// ---- app widgets (design 26 §5) ----
+
+/// The `game` route with `style "plan-card" { <decls> }` added: a style named after the
+/// element applies to every plan card, and an app widget takes no style property inline.
+fn plan_slot(decls: &str) -> (Bound, usize) {
+    let mut f = base();
+    append(
+        &mut f,
+        "styles.kdl",
+        &format!("\nstyle \"plan-card\" {{ {decls} }}\n"),
+    );
+    let pkg = skin("default", f);
+    let b = bind(&pkg, "game", &FixtureScope::new());
+    let ix = b
+        .widgets
+        .iter()
+        .position(|w| w.widget.name == "plan-card")
+        .expect("the plan card");
+    (b, ix)
+}
+
+#[test]
+fn a_skin_cannot_hide_move_or_obscure_an_app_widget() {
+    use gogo_skin::ir::{Dim, Paint, Position, Sides};
+    // Every one of these is a way to make the widget transparent, move it off screen,
+    // shrink it away or draw over it.
+    let (b, ix) = plan_slot(
+        "opacity 0.05; inset 0 0 0 -5000; offset 9999 9999; w 0; h 0; min-w 0; max-w 0; \
+         max-h 0; aspect 3; fill \"#00000000\"; border 4 \"#ffffff\"; radius 40; \
+         ring 3 \"#ff0000\"; shape circle; blur-behind 30; scanlines 2 0.9; noise 0.9; \
+         shadow 0 0 30 \"#000000\"; inner-shadow 0 0 30 \"#000000\"; glow 20 \"#ff0000\"; \
+         reflection 45 0.9; padding 500; margin -900; direction row; justify end; gap 900",
+    );
+    let node = b.tree.get(b.widgets[ix].node).expect("the node");
+    assert_eq!(node.paint, Paint::default(), "no paint reaches the slot");
+    let l = &node.layout;
+    assert_eq!(l.position, Position::Relative);
+    assert_eq!(l.inset, Sides::all(Dim::Auto));
+    assert_eq!(l.width, Dim::Auto);
+    assert_eq!(l.height, Dim::Auto);
+    assert_eq!(l.min_width, Dim::Auto);
+    assert_eq!(l.max_width, Dim::Auto);
+    assert_eq!(l.max_height, Dim::Auto);
+    assert_eq!(l.aspect, None);
+    assert_eq!(l.padding, Sides::all(0.0));
+    assert_eq!(l.margin, Sides::all(0.0), "a negative margin is zero");
+    assert_eq!(l.row_gap, 0.0);
+    assert_eq!(l.column_gap, 0.0);
+}
+
+#[test]
+fn the_parts_of_an_app_widget_are_what_a_skin_styles() {
+    use gogo_skin::ir::Paint;
+    let (b, ix) = plan_slot("opacity 0.05");
+    let frame = b.widgets[ix]
+        .parts
+        .iter()
+        .find(|p| p.part.name == "frame")
+        .expect("the frame part");
+    assert_ne!(frame.paint, Paint::default());
+}
+
+#[test]
+fn a_skin_may_place_an_app_widget_in_its_slot() {
+    let (b, ix) = plan_slot("grow 2; shrink 0; align-self center; margin 4 5 6 7");
+    let node = b.tree.get(b.widgets[ix].node).expect("the node");
+    assert_eq!(node.layout.grow, 2.0);
+    assert_eq!(node.layout.shrink, 0.0);
+    assert_eq!(node.layout.align_self, Some(gogo_skin::ir::Align::Center));
+    assert_eq!(node.layout.margin.top, 4.0);
+    assert_eq!(node.layout.margin.right, 5.0);
+    assert_eq!(node.layout.margin.bottom, 6.0);
+    assert_eq!(node.layout.margin.left, 7.0);
+}
+
+// ---- borrowed fragments reach into the components they use ----
+
+const NESTED: &str = "\ncomponent \"game.builds\" {\n    use \"frag-inner\"\n}\ncomponent \"frag-inner\" {\n    text \"x is {ui.mode_x == b ? 'b' : 'not b'}\" id=\"frag\"\n}\n";
+
+#[test]
+fn a_component_a_borrowed_fragment_uses_is_checked_against_the_borrower() {
+    // The `ui` variable is read two components down from the fragment.
+    let (default, other) = borrower_and_default(NESTED, "");
+    let err = page_with_builds_tab(&default, &other, None).unwrap_err();
+    let BindErrorKind::Borrow(found) = err.kind() else {
+        panic!("{err}")
+    };
+    assert!(
+        found.iter().any(|f| f.code == Code::UnknownField),
+        "{found:?}"
+    );
+    // The borrower that declares it binds the same fragment, and again after the check
+    // was kept.
+    let (default, other) =
+        borrower_and_default(NESTED, "var \"mode_x\" type=\"enum(a b)\" default=\"a\"");
+    for _ in 0..2 {
+        let b = page_with_builds_tab(&default, &other, Some("b")).unwrap();
+        assert!(texts(&b.tree).contains(&"x is b".to_owned()));
+    }
+}
+
+// ---- limits at bind (design 27 §8) ----
+
+fn long_list(n: usize) -> Value {
+    Value::List((0..n).map(|i| Value::Num(i as f64)).collect())
+}
+
+#[test]
+fn nested_lists_with_empty_bodies_are_stopped_by_the_step_budget() {
+    let mut f = base();
+    game_insert(
+        &mut f,
+        "each \"a\" in=\"{game.env($id)}\" { each \"b\" in=\"{game.env($id)}\" { each \"c\" in=\"{game.env($id)}\" { let x=\"1\" } } }",
+    );
+    let pkg = skin("default", f);
+    let mut scope = FixtureScope::new();
+    scope.set_call("game.env", GAME_ID, long_list(1000));
+    let ui = UiState::defaults(&pkg.manifest);
+    let started = std::time::Instant::now();
+    let err = bind_in(&pkg, "game", &scope, &ui).unwrap_err();
+    assert!(
+        matches!(err.kind(), BindErrorKind::TooManySteps(n) if *n == gogo_skin::bind::MAX_BIND_STEPS),
+        "{err}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(60),
+        "it stopped"
+    );
+    // A list under the budget binds.
+    scope.set_call("game.env", GAME_ID, long_list(1000));
+    let mut f = base();
+    game_insert(&mut f, "each \"a\" in=\"{game.env($id)}\" { let x=\"1\" }");
+    let pkg = skin("default", f);
+    assert!(bind_in(&pkg, "game", &scope, &ui).is_ok());
+}
+
+/// What the shell's transfer strip shows when the queue's current job is at `fraction`.
+fn strip_progress(fraction: f64) -> Result<Option<f32>, gogo_skin::BindError> {
+    let pkg = default_skin();
+    let mut scope = FixtureScope::new();
+    let ui = UiState::defaults(&pkg.manifest);
+    let Value::Map(mut q) = scope.var("queue.summary").cloned().unwrap() else {
+        panic!("not a record")
+    };
+    let Some(Value::Map(mut cur)) = q.remove("current") else {
+        panic!("no current job")
+    };
+    cur.insert("fraction".to_owned(), Value::Num(fraction));
+    q.insert("current".to_owned(), Value::Map(cur));
+    scope.set_var("queue.summary", Value::Map(q));
+    let b = bind_in(&pkg, "shell", &scope, &ui)?;
+    Ok(b.tree.iter().find_map(|id| b.tree.get(id)?.progress))
+}
+
+#[test]
+fn a_progress_a_hair_over_one_is_one_and_further_is_an_error() {
+    assert_eq!(strip_progress(1.0000001).unwrap(), Some(1.0));
+    assert_eq!(strip_progress(-0.0000001).unwrap(), Some(0.0));
+    assert_eq!(strip_progress(0.5).unwrap(), Some(0.5));
+    for bad in [1.01, -0.01, f64::NAN, f64::INFINITY] {
+        let err = strip_progress(bad).unwrap_err();
+        assert!(
+            matches!(err.kind(), BindErrorKind::Progress(_)),
+            "{bad}: {err}"
+        );
+    }
+}
+
+#[test]
+fn a_state_beats_the_base_of_every_style_on_the_element() {
+    // Design 27 §9.1: all the bases left to right, then the states in effect, so the `:on`
+    // of the first style wins over the base of the second.
+    let mut f = base();
+    append(
+        &mut f,
+        "styles.kdl",
+        "\nstyle \"first\" { fill \"#111111\"; :on { fill \"#222222\" } }\nstyle \"second\" { fill \"#333333\" }\n",
+    );
+    game_insert(
+        &mut f,
+        "button \"On\" on=#true style=\"first second\" action=\"game.verify\" args=\"{$id}\" id=\"o\"",
+    );
+    let pkg = skin("default", f);
+    let b = bind(&pkg, "game", &FixtureScope::new());
+    let node = b.tree.get(b.tree.by_name("o").unwrap()).unwrap();
+    assert_eq!(
+        node.paint.fill,
+        Some(Fill::Solid(gogo_skin::ir::Color::rgba(
+            0x22, 0x22, 0x22, 255
+        )))
+    );
 }
