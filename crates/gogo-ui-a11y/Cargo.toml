@@ -1,0 +1,12 @@
+[package]
+name = "gogo-ui-a11y"
+description = "IR and layout to an AccessKit tree; requests back to intents"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+gogo-ui-ir.workspace = true
+gogo-ui-layout.workspace = true
+gogo-ui-interact.workspace = true

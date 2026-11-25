@@ -270,9 +270,11 @@ wgpu's GL backend needs a loadable `libEGL.so.1` on the library path.
     macOS. Today clippy runs on ubuntu only.
   - `cargo-deny` stays workspace-wide: it compiles nothing, and every dependency's licence
     and advisories must be checked.
-  - A lavapipe job runs the vello_gpu tests in the nix shell.
+  - A lavapipe job runs the vello_gpu tests in the nix shell. It arrives with the GPU
+    renderer's tests; PR B1 wires the rest.
   - All of it is wired into `CI result` (`ci-jobs.yml` names the three places).
-  - The same job checks the dependency rules in §2.1.
+  - The same job checks the dependency rules in §2.1 with `scripts/gui-deps-check.py`
+    (`cargo metadata`, direct edges only), whose own tests run first.
 - **Cost:** wgpu, naga, the shader tooling, winit and the font stack are the heaviest
   compile in the workspace. The real CI time is measured when the scaffolding lands and
   recorded here.

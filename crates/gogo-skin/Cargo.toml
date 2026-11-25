@@ -1,0 +1,11 @@
+[package]
+name = "gogo-skin"
+description = "The KDL skin format: load, validate, bind to the IR"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+gogo-contract.workspace = true
+gogo-ui-ir.workspace = true

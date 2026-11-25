@@ -1,0 +1,12 @@
+[package]
+name = "gogo-ui-scene"
+description = "The display list and the Renderer trait"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+gogo-ui-ir.workspace = true
+gogo-ui-layout.workspace = true
+gogo-ui-text.workspace = true

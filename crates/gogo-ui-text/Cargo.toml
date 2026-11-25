@@ -1,0 +1,10 @@
+[package]
+name = "gogo-ui-text"
+description = "Fonts, shaping, line breaking and the edit buffer (parley)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+gogo-ui-ir.workspace = true

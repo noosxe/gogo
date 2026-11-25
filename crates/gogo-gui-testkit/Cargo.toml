@@ -1,0 +1,13 @@
+[package]
+name = "gogo-gui-testkit"
+description = "Test support for the GUI crates (dev-dependency only)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+gogo-skin.workspace = true
+gogo-gui-model.workspace = true
+gogo-ui-scene.workspace = true
+gogo-render-cpu.workspace = true

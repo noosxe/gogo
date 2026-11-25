@@ -44,6 +44,17 @@ rustPlatform.buildRustPackage {
     };
   };
 
+  # The CLI only (design 24 §7): the desktop GUI crates are workspace members
+  # too, and without these flags they would be built and tested into this
+  # package. Tests stay what they were before the GUI crates joined.
+  cargoBuildFlags = [ "-p" "gogo-cli" ];
+  cargoTestFlags = [
+    "-p" "gogo-cli"
+    "-p" "gogo-core"
+    "-p" "gogo-shims"
+    "-p" "gogo-tui"
+  ];
+
   # gog-warp's reqwest keeps its default native-tls feature, which links
   # openssl-sys on Linux (macOS uses Security.framework instead). Its build
   # script also runs bindgen over xdelta3, which needs libclang.

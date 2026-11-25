@@ -1,0 +1,13 @@
+[package]
+name = "gogo-ui-shell"
+description = "The window: winit loop, surfaces, frame pacing, IME, clipboard"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+gogo-ui-scene.workspace = true
+gogo-ui-layout.workspace = true
+gogo-ui-interact.workspace = true
+gogo-ui-a11y.workspace = true
