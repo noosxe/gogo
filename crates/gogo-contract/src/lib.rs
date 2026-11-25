@@ -9,6 +9,7 @@
 //! - [`settings`]: the keys a skin may set (§4.9, S21).
 //! - [`widgets`]: the app-owned widgets with their depth, parts and variants (§5).
 //! - [`tokens`], [`routes`]: semantic tokens and routes (§6).
+//! - [`value`]: the dynamic [`Value`] an expression computes with (§2, design 27 §7).
 //! - [`invariants`]: the safety invariants S1–S21 (§7).
 //!
 //! Lookups by name (`action`, `source`, `widget_spec`, …) scan their tables. The
@@ -26,6 +27,7 @@ pub mod settings;
 pub mod sources;
 pub mod tokens;
 pub mod types;
+pub mod value;
 pub mod version;
 pub mod widgets;
 
@@ -36,5 +38,6 @@ pub use invariants::Invariant;
 pub use routes::RouteSpec;
 pub use sources::{Live, SourceParam, SourceSpec};
 pub use types::{Os, Status, ValueType};
+pub use value::Value;
 pub use version::{ContractVersion, VersionError};
 pub use widgets::{AppWidget, Depth, Part, Placement, Variant};

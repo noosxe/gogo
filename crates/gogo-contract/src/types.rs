@@ -70,7 +70,7 @@ impl ValueType {
     /// expressions (`fmt.bytes(x)`, `?.`).
     pub const fn helpers(self) -> &'static [&'static str] {
         match self {
-            Self::Text => &["upper", "lower", "trim(n)"],
+            Self::Text => &["upper", "lower", "trim n"],
             Self::Bytes => &["fmt.bytes(x)", "fmt.rate(x)"],
             Self::Time => &["fmt.date", "fmt.ago"],
             Self::Duration => &["fmt.hours", "fmt.eta"],
@@ -128,6 +128,21 @@ impl Status {
 
     pub fn from_name(name: &str) -> Option<Self> {
         Self::ALL.iter().copied().find(|s| s.name() == name)
+    }
+
+    /// The word it shows as: what `status.word(s)` returns (design 26 §2).
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Ready => "Ready",
+            Self::Running => "Running",
+            Self::Downloading => "Downloading",
+            Self::SettingUp => "Setting up",
+            Self::UpdateAvailable => "Update available",
+            Self::Failed => "Failed",
+            Self::NotInstalled => "Not installed",
+            Self::Queued => "Queued",
+            Self::Paused => "Paused",
+        }
     }
 
     /// Its tone: the colour token `status.tone(s)` returns (design 26 §6.1).
