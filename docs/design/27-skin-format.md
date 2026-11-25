@@ -361,7 +361,12 @@ component "summary-tile" params="mark tone title sub link action args" {
   component or route whose uses, once expanded, pass the node or depth limits of §8 is too.
 - **Borrowing from the default skin.** `use default "game.builds"` embeds a named fragment
   of the default skin (design 26 §8). Until then a labelled placeholder is drawn
-  there; real borrowing arrives with binding (PR B4).
+  there; real borrowing arrives with binding (PR B4). What is checked today: the form
+  (`default` and one fragment name) and the `when=` and `id=` expressions on the `use`.
+  The fragment itself is not read at load, and its name is not yet checked against the
+  default skin's list. A borrowed fragment's `ui.*` variables and enum words (statuses,
+  tones, sections) resolve against the borrowing skin's manifest, not the default skin's,
+  and that check lands with binding (B4).
 - **Stock components** (design 26 §5, depth C) ship with the default skin, and a skin may
   copy or replace them.
 
@@ -531,6 +536,9 @@ checks pass, these can still fail, because they depend on the data:
   `take n` with a non-number, `<` between a number and text, an `alpha=` that is not a
   number, a status helper on a word that is not a status;
 - a list stage (`sort`, `where`, `take`, …) on a value that is not a list or null.
+- an action argument a component receives as an optional field: a required parameter given
+  a field that may be null passes the load check (the type is right) but fails when the
+  action is bound, if the field is null.
 
 Every evaluation ends: there is no assignment, no user function and no I/O, and the only
 loops are pipe stages over a list the app hands in.

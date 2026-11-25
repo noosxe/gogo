@@ -95,8 +95,14 @@ impl ParamType {
     }
 
     /// Whether a field of type `field` may be passed for this parameter (design 27 §7).
-    /// A null is the binding's concern, so `Option` is looked through. Parameters the
-    /// action validates itself (route parameters, a download selection) take anything.
+    ///
+    /// This is the load-time check only, and is deliberately lenient: `Option` is looked
+    /// through, so a field that may be null passes and the binding layer must still fail
+    /// the action when the value is null at run time (design 27 §7, "Failures"). Text and
+    /// scalars pass wherever text may, because the app parses the value when it binds.
+    /// `RouteParams` and `Selection` take anything, as the action validates them itself.
+    /// `Route`, `UiVar`, `SettingKey` and `PaletteScope` are names, written as plain
+    /// text in the skin and never taken from a field, so no field type is accepted.
     pub fn accepts(self, field: &FieldType) -> bool {
         use FieldType as F;
         let field = field.inner();

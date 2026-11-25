@@ -17,19 +17,28 @@ use crate::resolve::Checker;
 use crate::source::Span;
 
 /// What is known of a value at one point of the walk.
+///
+/// This is a load-time approximation, not the value's type at run time: binding (design
+/// 27 §9, B4) must not rely on `ft` being present or exact. `None` means "not known",
+/// never "any", and every flag below defaults to the safe reading when it is unset.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Ty {
-    /// The contract type, when it is known.
+    /// The contract type, when it is known. A value whose type depends on the data
+    /// (a `let` of an unknown source, a parameter nobody gave) has none, and is not checked.
     pub ft: Option<FieldType>,
     /// Derived from a component parameter, so a problem with it is reported at the
-    /// argument that gave the parameter its type.
+    /// argument that gave the parameter its type. Set only on a parameter's own entry in
+    /// an instance walk; a `let` or `each` of the same name starts over without it.
     pub param: bool,
     /// A plain field path (possibly with `?.` and `else`), not a computed value: only
-    /// these are checked against an action parameter's type.
+    /// these are checked against an action parameter's type, because a computed value's
+    /// type here is a guess. Binding evaluates the value either way.
     pub plain: bool,
     /// The argument at the `use` that gave the parameter its type.
     pub origin: Option<Span>,
-    /// A component parameter: a `use` may leave it out, so it may be null.
+    /// A component parameter: a `use` may leave it out, so it may be null. A required
+    /// action parameter given a nullable value passes the load check and can still fail
+    /// at bind time (design 27 §7, "Failures").
     pub nullable: bool,
 }
 

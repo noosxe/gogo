@@ -73,6 +73,10 @@ pub(crate) struct Checker<'a> {
     comp: Option<String>,
     /// The plain text each component parameter was given at the `use` being followed.
     lits: BTreeMap<String, String>,
+    /// How many leading entries of `env` are the component's own parameters. A name
+    /// found further in is a `let`, `each` or input variable that shadows a parameter,
+    /// and then `lits` no longer applies to it.
+    nparams: usize,
     /// The parameter a dynamically named action came from: what its argument errors
     /// depend on.
     dep: Option<Ty>,
@@ -99,6 +103,7 @@ pub(crate) fn components(
             .iter()
             .map(|p| (p.clone(), Ty::default()))
             .collect();
+        ck.nparams = ck.env.len();
         ck.nodes(&mut c.body, Parent::default());
     }
 }
@@ -191,6 +196,7 @@ impl<'a> Checker<'a> {
             comps,
             comp: None,
             lits: BTreeMap::new(),
+            nparams: 0,
             dep: None,
             depth: 0,
             visits: 0,
@@ -502,6 +508,7 @@ impl<'a> Checker<'a> {
             self.pass,
             self.comp.replace(comp),
             std::mem::replace(&mut self.lits, lits),
+            std::mem::replace(&mut self.nparams, declared.len()),
         );
         self.pass = Pass::Instance;
         self.depth += 1;
@@ -513,6 +520,7 @@ impl<'a> Checker<'a> {
         self.pass = saved.2;
         self.comp = saved.3;
         self.lits = saved.4;
+        self.nparams = saved.5;
     }
 
     // ---- app widgets ----
@@ -723,8 +731,28 @@ impl<'a> Checker<'a> {
                         dynamic = Some(ty);
                         name
                     }
-                    // Anything else is the format-level pass's error.
+                    // Anything else is the format-level pass's error, except a name that
+                    // a `let` or `each` has taken over from the parameter: the format
+                    // pass can't tell, and the action would not be a fixed one.
                     None => {
+                        if let Val::Text(Template::Expr(crate::expr::Expr::Name { name, .. })) =
+                            &p.arg.val
+                            && self
+                                .env
+                                .iter()
+                                .rposition(|(x, _)| x == name)
+                                .is_some_and(|i| i >= self.nparams)
+                            && self.comp.is_some()
+                        {
+                            let at = self.inner_span(&p.arg, 0, None);
+                            self.emit(
+                                None,
+                                Code::ActionDynamic,
+                                at,
+                                format!("`{act}` is `{{{name}}}`, a variable that hides the component parameter of that name (S16)"),
+                                Some("a skin binds actions by fixed name".to_owned()),
+                            );
+                        }
                         self.check_terms_only(n, args);
                         continue;
                     }
@@ -783,17 +811,20 @@ impl<'a> Checker<'a> {
         let Val::Text(Template::Expr(crate::expr::Expr::Name { name, .. })) = v else {
             return None;
         };
-        let lit = self.lits.get(name)?;
-        let ty = self.lookup_ty(name)?;
-        Some((lit.clone(), ty))
+        let (lit, ty) = self.param_lit(name)?;
+        Some((lit.to_owned(), ty))
     }
 
-    fn lookup_ty(&self, name: &str) -> Option<Ty> {
-        self.env
-            .iter()
-            .rev()
-            .find(|(n, _)| n == name)
-            .map(|(_, t)| *t)
+    /// The text a component parameter was given at the `use` being followed, with its
+    /// type, when `name` still means the parameter: a `let`, `each` or input variable of
+    /// the same name in between hides it.
+    fn param_lit(&self, name: &str) -> Option<(&str, Ty)> {
+        let ix = self.env.iter().rposition(|(n, _)| n == name)?;
+        if ix >= self.nparams {
+            return None;
+        }
+        let lit = self.lits.get(name)?;
+        Some((lit, self.env[ix].1))
     }
 
     /// Check the names in the terms of `args` when there is no action to match them to.
@@ -876,13 +907,15 @@ impl<'a> Checker<'a> {
         let seen: Vec<crate::ast::Term> = terms
             .iter()
             .map(|t| match &t.value {
-                Template::Expr(crate::expr::Expr::Name { name, .. }) => match self.lits.get(name) {
-                    Some(lit) => crate::ast::Term {
-                        value: Template::Text(lit.clone()),
-                        ..t.clone()
-                    },
-                    None => t.clone(),
-                },
+                Template::Expr(crate::expr::Expr::Name { name, .. }) => {
+                    match self.param_lit(name) {
+                        Some((lit, _)) => crate::ast::Term {
+                            value: Template::Text(lit.to_owned()),
+                            ..t.clone()
+                        },
+                        None => t.clone(),
+                    }
+                }
                 _ => t.clone(),
             })
             .collect();
