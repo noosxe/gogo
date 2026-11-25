@@ -36,7 +36,7 @@ in `docs/13` grounds design 10.
   the tie-in with game snapshots (#365, design 20 §6.3)
 - Windows support — the *binary* targets **Linux and macOS only** (downloading Windows
   installers on Linux is first-class, though — they're just files; 03 §1)
-- A GUI/TUI (v2; the core is built as a library to make that cheap)
+- A GUI/TUI in v1 (both are v2: the TUI in 09 §2, the desktop GUI in designs 24–28; the core is built as a library to make that cheap)
 
 ## Principles
 
@@ -68,13 +68,19 @@ in `docs/13` grounds design 10.
 | [10-macos-app-bundles](10-macos-app-bundles.md) | `gogo mac-app`: installer → self-contained .app (Wine runtime resolution, silent install, codesign) |
 | [11-recipes](11-recipes.md) | per-game fixes for `mac-app` by consuming Lutris installer scripts (discovery, declarative-subset interpreter) |
 | [12-runtime-catalog-and-interactive-flow](12-runtime-catalog-and-interactive-flow.md) | runtime catalog + store, recipe-first interactive selection, winetricks provisioning + Rust shims — implemented (input: docs/15) |
+| [13-gog-specific-solidification](13-gog-specific-solidification.md) | GOG-specific solidification, phase 1: cnc-ddraw and the gog ranking |
+| [14-depot-download](14-depot-download.md) | depot downloads on the CLI lane |
+| [15-macapp-from-depot](15-macapp-from-depot.md) | `mac-app` from a depot tree |
 | [16-macapp-v2](16-macapp-v2.md) | mac-app v2 contract: layers L0–L4, immutable launcher bundle, store-referenced runtime, per-game state dir (input: docs/19, #94) |
+| [17-search](17-search.md) | `gogo search` |
 | [18-linux-runtime](18-linux-runtime.md) | Linux lane (`gogo linux-app`): GE-Proton through umu, DXVK/VKD3D-Proton/D7VK/cnc-ddraw, per-game fixes from protonfixes, `[platforms.<os>]` compat tables, `.desktop` launcher (input: docs/21, docs/22) |
 | [19-dlc](19-dlc.md) | DLC: choosing it at the first build, `linux-app dlc list` / `add` onto a built game, the depot cache's DLC set (#336), the offline lane's DLC installers, `content.toml` (#343) |
 | [20-snapshots](20-snapshots.md) | snapshots of a built Linux game on btrfs (ZFS later): the game dir as a subvolume, initial and automatic snapshots, rollback with the saves check, retention, `linux-app snapshot` (#365) |
 | [21-builds](21-builds.md) | builds of a game: `gogo builds` lists what GOG serves, `--build` picks one on `depot` / `linux-app`, the installed-vs-newest hint, the kept build manifest, and the sketch of a later `linux-app update` (#360) |
 | [22-cloud-saves](22-cloud-saves.md) | GOG cloud saves (#275): per-game token, remote-config save locations mapped into the Proton prefix / Wine bottle, per-file three-way sync, `gogo saves status/pull/push/sync`, launch-time sync, backups and the snapshot interplay |
 | [23-galaxy-service](23-galaxy-service.md) | a Galaxy service for Linux builds (#356): Comet beside the game, opt-in per game, pinned like umu, started and stopped by `launch.sh`, credentials handed over without argv or logs, never blocking a launch |
+| [24-gui-architecture](24-gui-architecture.md) | desktop GUI (#520): why our own engine, the crate split and its dependency rules, the library stack, renderer selection, platforms, measured budgets, CI, port order |
+| [25-gui-app-layer](25-gui-app-layer.md) | the GUI's app layer: threads and the tokio runtime, the `Backend` seam, latest-value sources and coalescing, the safety flow, jobs and per-job cancel, prompts from core pipelines |
 ## Key decisions (traceability)
 
 | Decision | Rationale / source |

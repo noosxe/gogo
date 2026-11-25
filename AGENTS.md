@@ -45,6 +45,12 @@ tools, or binaries from the host system — no exceptions.**
   Hyprland quirks, display modes, VRR and audio are a host pass (#179);
   agents put those steps in the PR.
 
+- **Running the desktop GUI** (`gogo-gui`, design 24): never on the host display. Use
+  `gogo-gui --render-png` (no window) or `--check-skin`, the headless compositor in
+  `scripts/gui-headless.sh` (Linux), or `scripts/vm-test.sh` with the GUI's `.app` (macOS).
+  Real GPU, HiDPI, IME, clipboard and screen-reader checks are a host pass by @noosxe;
+  agents put the steps in the PR.
+
 ## Canonical checks (run inside the shell)
 
 ```sh
@@ -90,11 +96,11 @@ actionlint                                          # when .github/workflows cha
 
 - Every issue gets one or two `type:` labels (bug, feature, docs, chore, ci, release, research)
   and one or more `area:` labels (auth, library, downloads, depot, mac-app, wine-runtime, cli,
-  tui, packaging, licensing). Add `phase:v1` / `phase:v2` only for roadmap-scoped items (design 09).
+  tui, gui, skin, packaging, licensing). Add `phase:v1` / `phase:v2` only for roadmap-scoped items (design 09).
 - Work is grouped under `epic` issues using GitHub's native sub-issues (not task lists):
   v0.1.0 release (#49), mac-app & Wine runtime (#50), docs/research/hygiene (#51),
   depot downloads (#10), TUI (#11), v2 backlog (#12),
-  Linux runtime (#155), native Linux games (#162). File the issue, then link it:
+  Linux runtime (#155), native Linux games (#162), desktop GUI (#520). File the issue, then link it:
 
   ```sh
   p=$(gh api repos/noosxe/gogo/issues/<epic> --jq .node_id)
