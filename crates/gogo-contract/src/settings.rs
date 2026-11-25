@@ -16,14 +16,14 @@ pub const SKIN_SETTABLE: &[&str] = &[
 ];
 
 /// Key prefixes that are app-only whatever the key: auth settings.
-///
-/// The cloud-writes gate on `saves.push`/`saves.sync` is app-only too. Today it is the
-/// `GOGO_CLOUD_WRITES=1` environment variable, not a config key; the GUI's key for it is
-/// added to [`APP_ONLY`] when the GUI's settings route lands.
 pub const APP_ONLY_PREFIXES: &[&str] = &["auth."];
 
-/// Exact keys that are app-only. None in contract 1.0 beyond [`APP_ONLY_PREFIXES`].
-pub const APP_ONLY: &[&str] = &[];
+/// Exact keys that are app-only.
+///
+/// `cloud_saves.writes` is the cloud-writes gate on `saves.push`/`saves.sync`. Today the
+/// gate is only the `GOGO_CLOUD_WRITES=1` environment variable; the key is reserved here
+/// so S21 covers it as soon as a settings route can change it.
+pub const APP_ONLY: &[&str] = &["cloud_saves.writes"];
 
 /// Whether a skin may bind `settings.set` to `key` (S21). The validator rejects a route
 /// that binds any other key.
@@ -59,6 +59,8 @@ mod tests {
     #[test]
     fn no_app_only_key_is_skin_settable() {
         assert!(is_app_only("auth.token_store"));
+        assert!(is_app_only("cloud_saves.writes"));
+        assert!(!skin_may_set("cloud_saves.writes"));
         for key in SKIN_SETTABLE {
             assert!(!is_app_only(key), "{key}");
         }
