@@ -3044,7 +3044,7 @@ fn contract_cases() -> Vec<Case> {
             },
             ActionArgs,
             Route("game"),
-            Some("\"dlc.add\""),
+            Some("\"{$id}\""),
         ),
         case(
             "§5.7 S16",
@@ -3803,4 +3803,195 @@ fn a_component_may_pass_its_args_on_to_another_component() {
         run("use \"outer\" action=\"dlc.add\" args=\"{$id}\""),
         vec![Code::ActionArgs]
     );
+}
+
+// ---- design 27 §5.7: what is spliced, and what stays dynamic ----
+
+/// The findings of the game route with `components` added to the stock ones and one more
+/// node, sorted by code.
+fn spliced(components: &str, node: &str) -> Vec<gogo_skin::Finding> {
+    let mut files = base();
+    append(&mut files, "components/stock.kdl", components);
+    game_insert(&mut files, node);
+    let mut v = findings(load(files));
+    v.sort_by_key(|f| f.code);
+    v
+}
+
+fn codes(v: &[gogo_skin::Finding]) -> Vec<Code> {
+    v.iter().map(|f| f.code).collect()
+}
+
+/// A component `name` whose one button gets its action and `args` from its parameters,
+/// with `body` as the `args` it writes (`{args}` forwards the `use`'s terms).
+fn forwarder(name: &str, params: &str, body: &str) -> String {
+    format!(
+        "\ncomponent \"{name}\" params=\"{params}\" {{\n    button \"B\" action=\"{{action}}\" args=\"{body}\"\n}}\n"
+    )
+}
+
+#[test]
+fn a_missing_forwarded_argument_is_reported_at_the_use() {
+    let fixed = forwarder("fixed", "action args", "{args}");
+    let all = spliced(&fixed, "use \"fixed\" action=\"dlc.add\" args=\"{$id}\"");
+    assert_eq!(codes(&all), vec![Code::ActionArgs], "{all:?}");
+    // The `args` of the `use`, not the component's own.
+    assert_eq!(all[0].text.as_deref(), Some("\"{$id}\""));
+    assert_eq!(all[0].level, Level::Route("game".into()));
+    assert!(all[0].message.contains("needs `dlc`"), "{}", all[0].message);
+    assert!(all[0].message.contains("in component `fixed`"));
+    assert!(
+        spliced(
+            &fixed,
+            "use \"fixed\" action=\"dlc.add\" args=\"{$id} all\""
+        )
+        .is_empty()
+    );
+    // A `nav.go` route parameter that is missing is reported there too.
+    let go = forwarder("go", "action args", "{args}");
+    let all = spliced(&go, "use \"go\" action=\"nav.go\" args=\"game\"");
+    assert_eq!(codes(&all), vec![Code::ActionArgs], "{all:?}");
+    assert_eq!(all[0].text.as_deref(), Some("\"game\""));
+}
+
+#[test]
+fn only_a_bare_parameter_is_spliced() {
+    // S21: a key reaches `settings.set` as a literal or not at all. A `{args}` that has
+    // more around it stays dynamic, so the literal-only `key` rejects it, though the
+    // `use` wrote a listed key.
+    let run = |body: &str| {
+        let comp = forwarder("setter", "action args", body);
+        spliced(
+            &comp,
+            "use \"setter\" action=\"settings.set\" args=\"gui.mode\"",
+        )
+    };
+    assert!(run("{args} dark").is_empty());
+    assert!(run("key={args} value=dark").is_empty());
+    for body in [
+        "{args}x dark",
+        "{args.x} dark",
+        "\\\"{args} dark\\\" dark",
+        "key={args}x value=dark",
+    ] {
+        let all = run(body);
+        // Reported at the `use`, where the key was written.
+        assert!(
+            all.iter()
+                .any(|f| f.code == Code::SettingKey && f.level == Level::Route("game".into())),
+            "`{body}`: {all:?}"
+        );
+    }
+}
+
+#[test]
+fn a_named_term_takes_one_unnamed_term_only() {
+    let comp = forwarder("named", "action args", "id={args} dlc=all");
+    let run = |given: &str| {
+        spliced(
+            &comp,
+            &format!("use \"named\" action=\"dlc.add\" args=\"{given}\""),
+        )
+    };
+    // One unnamed term: spliced, and checked as a game id.
+    assert!(run("{$id}").is_empty());
+    assert_eq!(codes(&run("{g.playtime}")), vec![Code::TypeMismatch]);
+    // Several terms, or a named one, have no single value to give `id`.
+    for given in ["dlc=all", "{$id} all", "{$id} {$id}"] {
+        let all = run(given);
+        let hit = all
+            .iter()
+            .find(|f| f.code == Code::ActionArgs && f.message.contains("takes one unnamed term"));
+        let hit = hit.unwrap_or_else(|| panic!("`{given}`: {all:?}"));
+        assert_eq!(hit.level, Level::Route("game".into()));
+    }
+}
+
+#[test]
+fn a_plain_text_parameter_is_one_term_and_is_never_split() {
+    let comp = forwarder("one", "action k", "{k}");
+    // `gui.mode dark` is one key to `settings.set`, and it isn't on the list.
+    let all = spliced(
+        &comp,
+        "use \"one\" action=\"settings.set\" k=\"gui.mode dark\"",
+    );
+    let c = codes(&all);
+    assert!(c.contains(&Code::SettingKey), "{all:?}");
+    // The one term takes `key` and nothing else, so `value` is missing.
+    assert!(c.contains(&Code::ActionArgs), "{all:?}");
+}
+
+#[test]
+fn components_that_forward_to_each_other_are_a_cycle() {
+    let comps = "\ncomponent \"ping\" params=\"action args\" {\n    use \"pong\" action=\"{action}\" args=\"{args}\"\n}\ncomponent \"pong\" params=\"action args\" {\n    use \"ping\" action=\"{action}\" args=\"{args}\"\n}\n";
+    let all = spliced(comps, "use \"ping\" action=\"dlc.add\" args=\"{$id} all\"");
+    assert!(codes(&all).contains(&Code::ComponentCycle), "{all:?}");
+    let own = "\ncomponent \"self\" params=\"action args\" {\n    use \"self\" action=\"{action}\" args=\"{args}\"\n}\n";
+    let all = spliced(own, "use \"self\" action=\"dlc.add\" args=\"{$id} all\"");
+    assert!(codes(&all).contains(&Code::ComponentCycle), "{all:?}");
+}
+
+#[test]
+fn a_let_over_one_parameter_leaves_the_others_spliced() {
+    // `k` is rebound, so `{k}` is a variable and the key is dynamic; `{args}` still
+    // stands for what the `use` wrote.
+    let comp = "\ncomponent \"mix\" params=\"action k args\" {\n    let k=\"{game($id).slug}\"\n    button \"B\" action=\"{action}\" args=\"{k} {args}\"\n}\n";
+    let use_ =
+        |args: &str| format!("use \"mix\" action=\"settings.set\" k=\"gui.mode\" args=\"{args}\"");
+    let all = spliced(comp, &use_("dark"));
+    assert_eq!(codes(&all), vec![Code::SettingKey], "{all:?}");
+    // Without the `let` the same component is clean.
+    let plain = comp.replace("    let k=\"{game($id).slug}\"\n", "");
+    assert!(spliced(&plain, &use_("dark")).is_empty());
+    // And the spliced `args` is still checked: one term too many.
+    let all = spliced(&plain, &use_("dark extra"));
+    assert_eq!(codes(&all), vec![Code::ActionArgs], "{all:?}");
+}
+
+#[test]
+fn a_spliced_route_and_a_spliced_ui_variable_are_checked() {
+    let go = forwarder("go", "action args", "{args}");
+    let run = |args: &str| {
+        spliced(
+            &go,
+            &format!("use \"go\" action=\"nav.go\" args=\"{args}\""),
+        )
+    };
+    assert!(run("game {$id} files").is_empty());
+    assert_eq!(codes(&run("nowhere")), vec![Code::UnknownRoute]);
+    assert_eq!(
+        codes(&run("game {$id} nothing")),
+        vec![Code::UnknownSection]
+    );
+    let set = forwarder("setui", "action args", "{args}");
+    let run = |args: &str| {
+        spliced(
+            &set,
+            &format!("use \"setui\" action=\"ui.set\" args=\"{args}\""),
+        )
+    };
+    assert!(run("view list").is_empty());
+    assert_eq!(codes(&run("nothing list")), vec![Code::ActionArgs]);
+    // The variable is a literal at the `use`, not a value read from data.
+    let all = run("{g.title} list");
+    assert!(!all.is_empty(), "{all:?}");
+}
+
+#[test]
+fn a_mixed_forward_is_checked_at_two_levels() {
+    // `top` adds `all` to what its `use` wrote, `mid` adds `extra`.
+    let comps = "\ncomponent \"mid\" params=\"action args\" {\n    use \"summary-tile\" mark=\"check\" title=\"T\" link=\"L\" action=\"{action}\" args=\"{args} extra\"\n}\ncomponent \"top\" params=\"action args\" {\n    use \"mid\" action=\"{action}\" args=\"{args} all\"\n}\n";
+    // `dlc.add` takes an id and a dlc: `{$id}`, `all`, and `extra` is one too many.
+    let all = spliced(comps, "use \"top\" action=\"dlc.add\" args=\"{$id}\"");
+    assert_eq!(codes(&all), vec![Code::ActionArgs], "{all:?}");
+    assert!(all[0].message.contains("found more"), "{}", all[0].message);
+    // Two added terms after an id leave `game.verify` with a surplus of two.
+    let all = spliced(comps, "use \"top\" action=\"game.verify\" args=\"{$id}\"");
+    assert_eq!(codes(&all).len(), 2, "{all:?}");
+    // A type error in what the outermost `use` wrote is still found.
+    let all = spliced(
+        comps,
+        "use \"top\" action=\"dlc.add\" args=\"{g.playtime}\"",
+    );
+    assert!(codes(&all).contains(&Code::TypeMismatch), "{all:?}");
 }

@@ -369,13 +369,26 @@ component "summary-tile" params="mark tone title sub link action args" {
 - **Forwarding `args`.** A bare `{p}` term in an action's `args`, where `p` is a parameter
   of the component, stands for the terms the `use` wrote for `p`, and they are checked
   against the action's parameters as if written there: `use "tile" action="dlc.add"
-  args="{$id} all"` checks `id` and `dlc`. A `name={p}` term takes the one term the `use`
-  gave. A `let` or `each` over `p` hides the parameter, so there is nothing to splice. The
-  terms are evaluated where the `use` is, with the variables in scope there. Two levels
-  work the same way: a component may pass `action="{action}" args="{args}"` on in its own
-  `use` of another component, and what the first `use` wrote is checked against the action
-  at the end of the chain.
-- **No loops.** Components that use each other, or themselves, are a load error (S20). A
+  args="{$id} all"` checks `id` and `dlc`. What the check records is the spliced list of
+  terms, with each matched parameter pointing into it, so binding never splits a forwarded
+  `args` again. A parameter that is missing is reported at the `args` of the `use`.
+  - Only a bare `{p}` is spliced. `{p}x`, `"{p} {q}"` and `{p.x}` stay dynamic, so a
+    position that must be a literal (a route, a `ui` variable, a settings key, a section)
+    rejects them, even when the `use` wrote a literal there.
+  - `name={p}` takes the one unnamed term the `use` gave for `p`. If it gave several
+    terms, or a named one, there is no single value for `name`, and that is an error at the
+    `use`. `name={p}x` is not spliced.
+  - A parameter given as plain text, such as `k="gui.mode dark"`, is one term and is
+    never split at spaces.
+  - A `let` or `each` over `p` hides the parameter, so there is nothing to splice; the
+    other parameters still are.
+  - The terms are evaluated where the `use` is, with the variables in scope there. Two
+    levels work the same way, with terms added around `{args}` at each level: a component
+    may pass `action="{action}" args="{args} extra"` on in its own `use` of another
+    component, and what the first `use` wrote is checked against the action at the end of
+    the chain.
+- **No loops.** Components that use each other, or themselves, are a load error (S20), also
+  when each passes `action` and `args` on to the other. A
   component or route whose uses, once expanded, pass the node or depth limits of §8 is too.
 - **Borrowing from the default skin.** `use default "game.builds"` embeds a named fragment
   of the default skin (design 26 §8). Until then a labelled placeholder is drawn

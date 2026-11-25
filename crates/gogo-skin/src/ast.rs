@@ -150,14 +150,23 @@ pub struct BoundAction {
     /// The property that names it: `action`, `link-action` or `for`.
     pub prop: String,
     pub spec: &'static ActionSpec,
-    /// The arguments (`args`, `link-args`), matched to the action's parameters.
+    /// The terms of `args` (`link-args`) as they were matched: every bare `{p}` that
+    /// stands for a component parameter is already replaced by the terms the `use` wrote
+    /// for it (design 27 §5.7), so this list is what the action sees, and a consumer
+    /// never splits a forwarded `args` again. Outside a component instance it is the
+    /// property's own terms.
+    pub terms: Vec<Term>,
+    /// The arguments, matched to the action's parameters.
     pub args: Vec<BoundArg>,
 }
 
 /// One argument term of a bound action.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BoundArg {
-    /// Index into the property's [`Val::Terms`].
+    /// Index into [`BoundAction::terms`], the spliced list, not into the property's own
+    /// [`Val::Terms`]: after a splice several arguments come from one written term, and
+    /// only this list says which forwarded term goes to which parameter. A `RouteParams`
+    /// parameter has one `BoundArg` per term it took.
     pub term: usize,
     pub param: &'static Param,
     pub value: ArgRef,
