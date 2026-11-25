@@ -9,3 +9,8 @@ license.workspace = true
 [dependencies]
 gogo-contract.workspace = true
 gogo-ui-ir.workspace = true
+thiserror.workspace = true
+miette.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

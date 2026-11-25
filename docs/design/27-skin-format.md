@@ -285,7 +285,7 @@ expression.
 | optional | `g.update?.to else "—"` | `else` gives a default when the value is null |
 | compare, logic | `g.status == ready and not g.running` | enum values are bare words |
 | ternary | `s.kind == auto ? "auto" : "manual"` | |
-| list pipes | `game.builds($id) \| sort -date \| take 4` | also `where`, `len`, `first`, `upper`, `lower`, `before x`, `after x` |
+| list pipes | `game.builds($id) \| sort -date \| take 4` | also `where`, `len`, `first`, `upper`, `lower`, `trim n` (at most n characters, an ellipsis last when cut), `before x`, `after x` |
 | formatters | `fmt.bytes(x)`, `fmt.ago(t)` | the fixed list in design 26 §2 |
 | status helpers | `status.word(s)`, `status.tone(s)` | |
 | tokens | `@accent` | |
@@ -294,9 +294,12 @@ expression.
 - **`before x` / `after x`** give the item before or after `x` in the list, wrapping
   around at the ends (cycling through tabs or modes). If `x` isn't in the list they give
   the first item, and on an empty list null.
-- **Braces in text.** Every `{` in a template opens an expression, and the prototype has no
-  way to write a literal brace. **Planned for PR B3:** `{{` and `}}` stand for literal `{`
-  and `}`.
+- **Braces in text.** Every `{` in a template opens an expression, up to the first `}`
+  outside a quoted string. `{{` and `}}` stand for a literal `{` and `}`: `"{{x}}"` is the
+  text `{x}`. A lone `}` outside an expression, or a `{` that is never closed, is a load
+  error that points at the brace.
+- **Parsed once.** Every template and expression is parsed at load (§9 step 3) and the
+  tree is kept; evaluating never parses text. That includes action arguments.
 
 Expressions are **total**:
 - every expression ends;
@@ -314,6 +317,7 @@ default skin is used (S12).
 | Nodes per skin | 20 000 |
 | Nesting depth | 48 |
 | Expression length | 512 characters |
+| Expression nesting depth | 32 |
 | One PNG / SVG / font file | 4 MiB / 512 KiB / 8 MiB |
 | Whole skin folder | 32 MiB |
 

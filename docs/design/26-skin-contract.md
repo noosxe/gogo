@@ -41,7 +41,7 @@ flowchart LR
 
 | Type | Meaning | Helpers a skin may call |
 |---|---|---|
-| `Text` | display string, already localised | `upper`, `lower`, `trim(n)` |
+| `Text` | display string, already localised | pipe stages `upper`, `lower`, `trim n` (design 27 §7) |
 | `Bytes` | u64 | `fmt.bytes(x)` → "18.6 GB", `fmt.rate(x)` → "48.2 MB/s" |
 | `Time` | instant | `fmt.date`, `fmt.ago` → "2 days ago" |
 | `Duration` | span | `fmt.hours` → "41 h", `fmt.eta` |
