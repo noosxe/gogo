@@ -502,6 +502,15 @@ pub(crate) fn check(
         if let Some(h) = b.help {
             f.help(h);
         }
+    } else if let Some((name, span)) = args.iter().find_map(|a| family_token(spec, ctx, a))
+        && fonts::family(&name).is_none()
+    {
+        col.error(
+            Code::FontFamily,
+            span,
+            format!("font family `{name}` (from a token) is not bundled with the app"),
+        )
+        .help(format!("the bundled families are {}", fonts::names()));
     } else if let Some(a) = args.iter().find_map(|a| family_of(spec, a)) {
         // A family is checked where it is named.
         let (name, span) = a;
@@ -513,6 +522,19 @@ pub(crate) fn check(
             )
             .help(format!("the bundled families are {}", fonts::names()));
         }
+    }
+}
+
+/// The family a `family @token` names, when the token is a text token: checked like a
+/// written name. A template (`family="{…}"`) is only known when bound (design 27 §4).
+fn family_token(spec: &PropSpec, ctx: &Ctx<'_>, a: &Arg) -> Option<(String, Span)> {
+    if !matches!(spec.shape, Shape::Family) || !ctx.tokens_ok {
+        return None;
+    }
+    let Val::Token(t) = &a.val else { return None };
+    match ctx.tokens.get(t).map(|t| &t.value) {
+        Some(TokenValue::Text(s)) => Some((s.clone(), a.span)),
+        _ => None,
     }
 }
 

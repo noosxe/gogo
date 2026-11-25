@@ -126,3 +126,22 @@ fn an_unreadable_folder_is_an_error_not_a_panic() {
     let report = SkinPackage::load(&tmp.path().join("missing")).expect_err("no such folder");
     assert!(report.findings().iter().any(|f| f.code == Code::Io));
 }
+
+#[test]
+fn a_folder_with_too_many_entries_stops_at_the_limit() {
+    let (_tmp, dir) = skin_dir();
+    let assets = dir.join("assets");
+    std::fs::create_dir_all(&assets).unwrap();
+    for i in 0..1500 {
+        std::fs::write(assets.join(format!("f{i}.png")), b"x").unwrap();
+    }
+    let report = SkinPackage::load(&dir).expect_err("too many files fail the skin");
+    assert!(
+        report.findings().iter().any(|f| f.code == Code::LimitFiles),
+        "{report}"
+    );
+    assert!(
+        report.findings().len() < 50,
+        "the walk stops, it does not list 1500 files"
+    );
+}

@@ -14,7 +14,7 @@ use gogo_contract::widgets::{Depth, WIDGETS};
 use crate::assets::{Asset, AssetKind};
 use crate::ast::{Node, Prop, Val};
 use crate::diag::{Code, Collector};
-use crate::expr::Template;
+use crate::expr::{Expr, Template};
 use crate::icons;
 use crate::names::{is_element_id, is_ident, suggest};
 use crate::props::{self, Ctx, Dynamic, Facts};
@@ -190,6 +190,9 @@ fn element_names() -> Vec<&'static str> {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Sig {
     pub params: Vec<String>,
+    /// Parameters the body passes on as an `action` or `link-action` (`action="{action}"`):
+    /// a `use` must give them plain action names.
+    pub action_params: Vec<String>,
 }
 
 /// What the checks look up.
@@ -212,6 +215,8 @@ pub(crate) struct Place<'a> {
     pub route: Option<&'a str>,
     /// Inside a component.
     pub component: bool,
+    /// The parameters of the component the tree belongs to (none in a route).
+    pub params: &'a [String],
 }
 
 pub(crate) struct Walk<'a, 'c> {
@@ -573,6 +578,27 @@ impl Walk<'_, '_> {
                         format!("`{name}` takes an action name"),
                     ),
                 }
+                // An action is a fixed name, so S16 and S21 can be checked at load. The one
+                // template allowed is a component's own parameter, passed on
+                // (`action="{action}"`): each `use` must give that parameter a plain name.
+                if let Val::Text(t) = &a.val
+                    && a.val.plain().is_none()
+                {
+                    let passed_on = matches!(
+                        t,
+                        Template::Expr(Expr::Name { name: p, .. })
+                            if self.place.params.iter().any(|x| x == p)
+                    );
+                    if !passed_on {
+                        self.col
+                            .error(
+                                Code::ActionDynamic,
+                                a.span,
+                                format!("`{name}` is a plain action name, not a template (S16)"),
+                            )
+                            .help("a skin binds actions by fixed name; pass values in `args`");
+                    }
+                }
                 if let Some(action) = a.val.plain()
                     && gogo_contract::actions::skin_action(action).is_none()
                 {
@@ -777,7 +803,7 @@ impl Walk<'_, '_> {
             ),
             "art" | "image" => (true, explicit || me.in_field, "`label=`"),
             "card" | "module" if n.prop("link-action").is_some() => {
-                (true, explicit || non_empty(prop("link")), "`link=` text")
+                (true, non_empty(prop("link")), "`link=` text")
             }
             _ => (false, true, ""),
         };
@@ -1069,6 +1095,21 @@ impl Walk<'_, '_> {
             match p.name.as_str() {
                 "when" | "id" => self.value(p),
                 name => {
+                    if let Some(sig) = sig
+                        && sig.action_params.iter().any(|x| x == name)
+                        && p.arg.val.plain().is_none()
+                        && matches!(p.arg.val, Val::Text(_))
+                        && !matches!(&p.arg.val, Val::Text(Template::Expr(Expr::Name { name: q, .. }))
+                            if self.place.params.iter().any(|x| x == q))
+                    {
+                        self.col
+                            .error(
+                                Code::ActionDynamic,
+                                p.arg.span,
+                                format!("`{name}` is passed to an action: it is a plain action name, not a template (S16)"),
+                            )
+                            .help("a skin binds actions by fixed name; pass values in `args`");
+                    }
                     if let Some(sig) = sig
                         && self.world.components_ok
                         && !sig.params.iter().any(|x| x == name)

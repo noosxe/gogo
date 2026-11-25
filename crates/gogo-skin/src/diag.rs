@@ -50,7 +50,7 @@ codes! {
     Symlink = "symlink",
     /// A file that is not KDL, PNG, SVG, OTF or TTF, or is outside the layout (S10).
     FileType = "file_type",
-    /// Two files with the same path, or paths that differ only by case.
+    /// Two files with the same path, or paths that differ only in ASCII case.
     DuplicatePath = "duplicate_path",
     /// A file could not be read.
     Io = "io",
@@ -151,6 +151,9 @@ codes! {
     EachSource = "each_source",
     /// An action name no skin can bind (S16).
     UnknownAction = "unknown_action",
+    /// An `action` or `link-action` that is a template, so no load-time check can bind it
+    /// (S16, S21).
+    ActionDynamic = "action_dynamic",
     // Components.
     /// `use` of a component the skin doesn't define.
     UnknownComponent = "unknown_component",
@@ -262,7 +265,9 @@ impl Diagnostic for Finding {
     }
 }
 
-/// How many findings a report keeps; the rest are counted in [`Report::suppressed`].
+/// How many warnings and how many errors a report stores, each; the rest are counted in
+/// [`Report::suppressed`]. An error is never lost: the skin-failed flag, the failed routes
+/// and the error count are tracked as findings arrive, whether or not they are stored.
 pub const MAX_FINDINGS: usize = 200;
 
 /// Every finding of one load.
@@ -270,6 +275,12 @@ pub const MAX_FINDINGS: usize = 200;
 pub struct Report {
     findings: Vec<Finding>,
     suppressed: usize,
+    stored_errors: usize,
+    stored_warnings: usize,
+    error_total: usize,
+    warning_total: usize,
+    skin_failed: bool,
+    failed: BTreeSet<String>,
 }
 
 impl Report {
@@ -277,7 +288,7 @@ impl Report {
         &self.findings
     }
 
-    /// Findings dropped after [`MAX_FINDINGS`].
+    /// Findings not stored after [`MAX_FINDINGS`] of their kind (errors and warnings).
     pub fn suppressed(&self) -> usize {
         self.suppressed
     }
@@ -313,26 +324,50 @@ impl Report {
             .filter(|f| matches!(f.level, Level::Route(_)))
     }
 
+    /// Whether any skin error was found, stored or not.
     pub fn has_skin_errors(&self) -> bool {
-        self.skin_errors().next().is_some()
+        self.skin_failed
     }
 
-    /// The routes that fell back, sorted.
+    /// The routes that fell back, sorted: every one, stored or not.
     pub fn failed_routes(&self) -> BTreeSet<&str> {
-        self.findings
-            .iter()
-            .filter_map(|f| match &f.level {
-                Level::Route(r) => Some(r.as_str()),
-                _ => None,
-            })
-            .collect()
+        self.failed.iter().map(String::as_str).collect()
+    }
+
+    /// How many errors there are in all, stored or not.
+    pub fn error_total(&self) -> usize {
+        self.error_total
+    }
+
+    /// How many warnings there are in all, stored or not.
+    pub fn warning_total(&self) -> usize {
+        self.warning_total
     }
 
     fn push(&mut self, f: Finding) -> Option<usize> {
-        if self.findings.len() >= MAX_FINDINGS {
+        let is_error = f.is_error();
+        if is_error {
+            self.error_total += 1;
+            match &f.level {
+                Level::Skin => self.skin_failed = true,
+                Level::Route(r) => {
+                    self.failed.insert(r.clone());
+                }
+                Level::Warning => {}
+            }
+        } else {
+            self.warning_total += 1;
+        }
+        let stored = if is_error {
+            &mut self.stored_errors
+        } else {
+            &mut self.stored_warnings
+        };
+        if *stored >= MAX_FINDINGS {
             self.suppressed += 1;
             None
         } else {
+            *stored += 1;
             self.findings.push(f);
             Some(self.findings.len() - 1)
         }
@@ -341,8 +376,8 @@ impl Report {
 
 impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let errors = self.errors().count();
-        let warnings = self.warnings().count();
+        let errors = self.error_total;
+        let warnings = self.warning_total;
         write!(f, "skin: {errors} error(s), {warnings} warning(s)")?;
         if self.suppressed > 0 {
             write!(f, ", {} more not shown", self.suppressed)?;
@@ -369,7 +404,7 @@ impl Diagnostic for Report {
 
 /// Where the loader is when it finds something: decides the [`Level`] of an error.
 #[derive(Debug, Clone, Default)]
-pub(crate) enum Scope {
+pub(crate) enum LoadScope {
     /// skin.kdl, tokens.kdl, styles.kdl, components and assets.
     #[default]
     Skin,
@@ -382,15 +417,15 @@ pub(crate) enum Scope {
 pub(crate) struct Collector {
     pub sources: Sources,
     pub report: Report,
-    pub scope: Scope,
+    pub scope: LoadScope,
     cache: HashMap<usize, NamedSource<Arc<str>>>,
 }
 
 impl Collector {
     fn level(&self) -> Level {
         match &self.scope {
-            Scope::Skin => Level::Skin,
-            Scope::Route(r) => Level::Route(r.clone()),
+            LoadScope::Skin => Level::Skin,
+            LoadScope::Route(r) => Level::Route(r.clone()),
         }
     }
 
@@ -441,7 +476,7 @@ impl Collector {
 
     /// How many errors there are so far, at any level: a stage tells whether it added one.
     pub fn error_count(&self) -> usize {
-        self.report.errors().count() + self.report.suppressed
+        self.report.error_total
     }
 }
 
