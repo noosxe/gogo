@@ -96,12 +96,13 @@ fn names_that_escape_or_are_not_text_are_errors() {
     std::fs::create_dir_all(dir.join("assets")).unwrap();
     std::fs::write(dir.join("assets").join("a\\b.png"), b"x").unwrap();
     std::fs::write(dir.join("assets").join("c:d.png"), b"x").unwrap();
+    // Some filesystems (APFS) refuse a name that isn't UTF-8; check it where it exists.
     let bad = std::ffi::OsStr::from_bytes(b"bad\xff.png");
-    std::fs::write(dir.join("assets").join(bad), b"x").unwrap();
+    let not_text = std::fs::write(dir.join("assets").join(bad), b"x").is_ok();
     let c = codes(SkinPackage::load(&dir));
     assert_eq!(
         c.iter().filter(|c| **c == Code::PathInvalid).count(),
-        3,
+        2 + usize::from(not_text),
         "{c:?}"
     );
 }
