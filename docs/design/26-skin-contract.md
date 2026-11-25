@@ -46,10 +46,15 @@ flowchart LR
 | `Time` | instant | `fmt.date`, `fmt.ago` → "2 days ago" |
 | `Duration` | span | `fmt.hours` → "41 h", `fmt.eta` |
 | `Fraction` | 0.0–1.0 | `fmt.pct` → "62%" |
+| `Number` | a count or another plain number | compared and negated; there is no arithmetic |
+| `Bool` | yes or no | `not`, `and`, `or` |
 | `GameId` | numeric GOG id | opaque in skins: only passed to actions |
+| `JobId` | a job's id | opaque in skins: only passed to actions |
 | `Art` | image handles `cover`, `background`, `logo`, plus `colors: [Color; 2]` | used by `art`/`image` elements only; never a URL |
 | `Status` | `ready · running · downloading · setting_up · update_available · failed · not_installed · queued · paused` | `status.word(s)`, `status.tone(s)` → a token name |
 | `Os` | `windows · mac · linux` | |
+| `RichText` | a game's description as paragraphs, with links and HTML removed | shown whole, as text; never parsed by a skin |
+| `ActionRef` | an action and its arguments, chosen by the app (a doctor check's fix) | opaque in skins: only tested for null in contract 1.0 |
 | `Masked<T>` | a value, or `•••` with `secret: true`; the clear value is never in the binding scope | |
 | `List<T>` | ordered, virtualised | `where`, `sort`, `take`, `len`, `first` in expressions |
 | `Option<T>` | may be null | `?.` and `else` in expressions |
@@ -59,13 +64,17 @@ draw an LCD readout, a bar or a sentence from the same field.
 
 ## 3. Data sources
 
+**Field types.** A field written without a type is `Text`, and `name?` is `name: Text?`.
+`gogo_contract::shapes` holds the same shapes as data; a test keeps the two in step. The
+loader checks every field path a skin names against them (S16, design 27 §7).
+
 Columns: **Source** (name and parameters), **Shape**, **Live** (how it updates), **From**
 (the CLI command it stands for).
 
 - **Event:** the source updates when the engine reports a change: a job event, a setting
   written, a refresh finished.
 - **On demand:** the source is computed when a route asks for it and when its refresh
-  action runs. It carries `checked_at: Time`.
+  action runs. A record-shaped one carries `checked_at: Time`.
 - **Live** job sources update at most 10 times a second each, and only the newest value is
   kept (design 25 §3).
 
@@ -73,8 +82,8 @@ Columns: **Source** (name and parameters), **Shape**, **Live** (how it updates),
 
 | Source | Shape | Live | From |
 |---|---|---|---|
-| `account` | `{ signed_in, username: Text?, avatar: Art? }` | event | `whoami` |
-| `app` | `{ version, contract, os: Os, reduced_motion, high_contrast, big_screen, locale }` | event (OS setting change) | — |
+| `account` | `{ signed_in: Bool, username: Text?, avatar: Art? }` | event | `whoami` |
+| `app` | `{ version, contract, os: Os, reduced_motion: Bool, high_contrast: Bool, big_screen: Bool, locale }` | event (OS setting change) | — |
 | `ui` | the skin's own declared local state (§6.4) | on write | — |
 
 ### 3.2 Library and search
@@ -82,29 +91,29 @@ Columns: **Source** (name and parameters), **Shape**, **Live** (how it updates),
 | Source | Shape | Live | From |
 |---|---|---|---|
 | `library(filter?, sort?)` | `List<GameSummary>`; filter `{ text, os, installed, with_dlc, category }` | event | `list` |
-| `library.stats` | `{ count, installed, disk_bytes: Bytes, updates }` | event | `list` |
-| `search(query, categories?, os?, owned?)` | `List<SearchHit{ kind: game\|dlc\|pack\|goodie, id, title, owned, os: [Os], art }>` | on demand, debounced | `search` |
+| `library.stats` | `{ count: Number, installed: Number, disk_bytes: Bytes, updates: Number }` | event | `list` |
+| `search(query, categories?, os?, owned?)` | `List<SearchHit{ kind: game\|dlc\|pack\|goodie, id: GameId, title, owned: Bool, os: [Os], art: Art }>` | on demand, debounced | `search` |
 
-`GameSummary` = `{ id, title, art, status, platforms: [Os], runs_via: Text?, size_on_disk:
+`GameSummary` = `{ id: GameId, title, art: Art, status: Status, platforms: [Os], runs_via: Text?, size_on_disk:
 Bytes?, playtime: Duration?, last_played: Time?, progress: Fraction? (while a job runs),
-update: UpdateHint? }`.
+update: UpdateHint? }`. `BuildRef` = `{ version, build_id }`.
 
 ### 3.3 One game
 
 | Source | Shape | Live | From |
 |---|---|---|---|
-| `game(id)` | `GameSummary` + `{ slug, genre, year, developer, publisher, description: RichText, languages, installed_build: BuildRef?, lane: installer\|depot\|linux_app\|mac_app\|none, running }` | event | `info`, `apps show` |
-| `game.builds(id, os?)` | `List<Build{ version, build_id, date, size, generation: 1\|2, legacy, newest, this_machine }>` | on demand | `builds` |
-| `game.files(id)` | `List<FileEntry{ kind: installer\|patch\|extra\|lang_pack, os, lang, name, size, downloaded, verified? }>` | event | `download --dry-run`, `verify` |
-| `game.dlc(id)` | `List<Dlc{ id, title, owned, installed, download_size, disk_size, in_this_build }>` | event | `linux-app dlc list` |
-| `game.saves(id)` | `{ state: in_sync\|to_pull\|to_push\|conflicts\|disabled\|no_remote_config, last_sync?, counts{pull, push, delete, conflict}, files: List<SaveFile{ display_path, action, conflict, local_time?, cloud_time? }>, quota? }` | on demand + event | `saves status`, `saves locations` |
-| `game.snapshots(id)` | `{ auto, items: List<Snapshot{ n, date, kind: initial\|manual\|auto, label, build, dlc_count, exclusive?, estimate }> }` | event | `snapshot list` |
-| `game.runner(id)` | `{ platform: linux\|mac, renderer, renderer_options, runtime{id, version}, runtime_options, display{mode: wayland\|x11, hdr, monitor?}, galaxy{setting: on\|off\|default, state: signed_in\|signed_out\|not_installed}, wrapper: [Text], args: [Text] }` | event | `compat`, `galaxy`, `display`, `args`, `wrapper` |
-| `game.env(id)` | `List<EnvVar{ name, value: Masked<Text>, source: default\|renderer\|compat\|override\|launcher\|protonfix, beats: [source], locked }>` | event | `env list` |
-| `game.exes(id)` | `List<Exe{ n, name, category, primary, launched, bits }>` | on demand | `exes` |
-| `game.doctor(id)` | `{ checked_at, summary{ok, warn, fail}, checks: List<Check{ name, result: ok\|warn\|fail, message, hint, fix: ActionRef? }> }` | on demand | `linux-app doctor`, `mac-app doctor` |
-| `game.compat(id)` | `List<CompatValue{ key, value, source }>` + `protonfix: Text?` | on demand | `compat` |
-| `game.recipes(id)` | `List<Recipe{ slug, rank, steps: [{verb, applied, reason}] }>` | on demand | `recipes list/show` |
+| `game(id)` | `GameSummary` + `{ slug, genre, year: Number, developer, publisher, description: RichText, languages: [Text], installed_build: BuildRef?, lane: installer\|depot\|linux_app\|mac_app\|none, running: Bool }` | event | `info`, `apps show` |
+| `game.builds(id, os?)` | `List<Build{ version, build_id, date: Time, size: Bytes, generation: 1\|2, legacy: Bool, newest: Bool, this_machine: Bool }>` | on demand | `builds` |
+| `game.files(id)` | `List<FileEntry{ kind: installer\|patch\|extra\|lang_pack, os: Os, lang, name, size: Bytes, downloaded: Bool, verified: Bool? }>` | event | `download --dry-run`, `verify` |
+| `game.dlc(id)` | `List<Dlc{ id: GameId, title, owned: Bool, installed: Bool, download_size: Bytes, disk_size: Bytes, in_this_build: Bool }>` | event | `linux-app dlc list` |
+| `game.saves(id)` | `{ state: in_sync\|to_pull\|to_push\|conflicts\|disabled\|no_remote_config, last_sync: Time?, counts{pull: Number, push: Number, delete: Number, conflict: Number}, files: List<SaveFile{ display_path, action, conflict: Bool, local_time: Time?, cloud_time: Time? }>, quota: Bytes?, checked_at: Time }` | on demand + event | `saves status`, `saves locations` |
+| `game.snapshots(id)` | `{ auto: Bool, items: List<Snapshot{ n: Number, date: Time, kind: initial\|manual\|auto, label, build, dlc_count: Number, exclusive: Bytes?, estimate: Bool }> }` | event | `snapshot list` |
+| `game.runner(id)` | `{ platform: linux\|mac, renderer, renderer_options: [Text], runtime{id, version}, runtime_options: [Text], display{mode: wayland\|x11, hdr: Bool, monitor?}, galaxy{setting: on\|off\|default, state: signed_in\|signed_out\|not_installed}, wrapper: [Text], args: [Text] }` | event | `compat`, `galaxy`, `display`, `args`, `wrapper` |
+| `game.env(id)` | `List<EnvVar{ name, value: Masked<Text>, source: default\|renderer\|compat\|override\|launcher\|protonfix, beats: [source], locked: Bool }>` | event | `env list` |
+| `game.exes(id)` | `List<Exe{ n: Number, name, category, primary: Bool, launched: Bool, bits: Number }>` | on demand | `exes` |
+| `game.doctor(id)` | `{ checked_at: Time, summary{ok: Number, warn: Number, fail: Number}, checks: List<Check{ name, result: ok\|warn\|fail, message, hint, fix: ActionRef? }> }` | on demand | `linux-app doctor`, `mac-app doctor` |
+| `game.compat(id)` | `{ items: List<CompatValue{ key, value, source }>, protonfix: Text?, checked_at: Time }` | on demand | `compat` |
+| `game.recipes(id)` | `List<Recipe{ slug, rank: Number, steps: [{verb, applied: Bool, reason}] }>` | on demand | `recipes list/show` |
 
 ### 3.4 Jobs
 
@@ -114,14 +123,14 @@ Live job sources update at most 10 times a second each, and keep only the newest
 | Source | Shape | Live | From |
 |---|---|---|---|
 | `queue` | `List<Job>` | live | `ProgressEvent`, depot and `Work*` events |
-| `queue.summary` | `{ active, queued, rate: Bytes, rate_limit: Bytes?, current: Job? }` | live | same |
+| `queue.summary` | `{ active: Number, queued: Number, rate: Bytes, rate_limit: Bytes?, current: Job? }` | live | same |
 | `job(id)` | `Job` | live | same |
 | `job.log(id)` | log lines, **only** through the app-owned `log-view` widget | live | run logs, setup output |
 
-`Job` = `{ id, kind: download|depot|update|setup|dlc_add|dlc_remove|saves|runtime_install|move|rollback|verify,
+`Job` = `{ id: JobId, kind: download|depot|update|setup|dlc_add|dlc_remove|saves|runtime_install|move|rollback|verify,
 game: GameSummary?, state: queued|running|paused|failed|done|cancelled, steps: List<Step{ name,
-state: done|now|pending|failed|asks_first, took? }>, bytes, total?, rate, eta?, fraction?,
-files: List<FileProgress{ name, bytes, total, chunks_done, chunks_total, state }>, error: ErrorView? }`.
+state: done|now|pending|failed|asks_first, took: Duration? }>, bytes: Bytes, total: Bytes?, rate: Bytes, eta: Duration?, fraction: Fraction?,
+files: List<FileProgress{ name, bytes: Bytes, total: Bytes, chunks_done: Number, chunks_total: Number, state }>, error: ErrorView? }`.
 
 Every long-running action becomes a job. A skin may draw the step list as a list, a row of
 pads or a table of contents (§5: these are stock components).
@@ -130,11 +139,11 @@ pads or a table of contents (§5: these are stock components).
 
 | Source | Shape | Live | From |
 |---|---|---|---|
-| `updates` | `List<UpdateHint{ game, from, to, size, removes_dlc }>` | on demand + event | `update`, `builds --installed` |
-| `apps` | `List<App{ game, entry_kind: menu\|app_bundle, runtime, renderer, dlc, size, last_launch }>` | event | `apps list` |
-| `runtimes`, `renderers` | `List<CatalogEntry{ id, latest, cached: [version], used_by: [GameSummary], os }>` | on demand | `runtimes list`, `renderers list` |
-| `doctor.all` | `List<{ game, summary }>` | on demand | `doctor` for every app |
-| `settings` | `List<Setting{ key, type, value, default, source: file\|env\|default, description, choices? }>` | event | `config get` |
+| `updates` | `List<UpdateHint{ game: GameSummary, from, to, size: Bytes, removes_dlc: Bool }>` | on demand + event | `update`, `builds --installed` |
+| `apps` | `List<App{ game: GameSummary, entry_kind: menu\|app_bundle, runtime, renderer, dlc: Number, size: Bytes, last_launch: Time? }>` | event | `apps list` |
+| `runtimes`, `renderers` | `List<CatalogEntry{ id, latest, cached: [Text], used_by: [GameSummary], os: Os }>` | on demand | `runtimes list`, `renderers list` |
+| `doctor.all` | `List<{ game: GameSummary, summary{ok: Number, warn: Number, fail: Number} }>` | on demand | `doctor` for every app |
+| `settings` | `List<Setting{ key, type, value, default, source: file\|env\|default, description, choices: [Text]? }>`; `value` and `default` are text, a number or a yes/no, as `type` says | event | `config get` |
 
 ### 3.6 Plan previews
 
@@ -499,6 +508,8 @@ Where each is enforced is in design 25 §4.
   and fades are capped at 150 ms, whatever the skin declares.
 - **S16. The contract is checked before use.** A route that names an unknown source, field,
   action, or a contract version the app doesn't support isn't used; its fallback is (§8).
+  Every field path is checked against the shapes of §3. Types are checked where an
+  element needs one (design 27 §7); full type inference is planned (#564).
 - **S17. No private shortcuts.** The default skin loads through the same loader and
   validator, names only public sources and actions, and passes S1–S16.
 - **S18. Status never by colour alone.** `status-badge` and every stock component show the

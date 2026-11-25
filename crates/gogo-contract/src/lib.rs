@@ -6,6 +6,7 @@
 //! - [`sources`]: the data sources (§3).
 //! - [`actions`]: the actions with their kind and tier (§4), and how the plan decides the
 //!   tier an action really gets.
+//! - [`shapes`]: the fields of every source, with their types (§3).
 //! - [`settings`]: the keys a skin may set (§4.9, S21).
 //! - [`widgets`]: the app-owned widgets with their depth, parts and variants (§5).
 //! - [`tokens`], [`routes`]: semantic tokens and routes (§6).
@@ -24,6 +25,7 @@ pub mod actions;
 pub mod invariants;
 pub mod routes;
 pub mod settings;
+pub mod shapes;
 pub mod sources;
 pub mod tokens;
 pub mod types;
@@ -36,6 +38,7 @@ pub use actions::{
 };
 pub use invariants::Invariant;
 pub use routes::RouteSpec;
+pub use shapes::{Field, FieldType, Shape};
 pub use sources::{Live, SourceParam, SourceSpec};
 pub use types::{Os, Status, ValueType};
 pub use value::Value;

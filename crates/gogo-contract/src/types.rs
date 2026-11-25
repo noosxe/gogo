@@ -14,8 +14,14 @@ pub enum ValueType {
     Duration,
     /// 0.0–1.0.
     Fraction,
+    /// A count or another plain number.
+    Number,
+    /// Yes or no.
+    Bool,
     /// A numeric GOG id. Opaque in skins: only passed to actions.
     GameId,
+    /// A job's id. Opaque in skins: only passed to actions.
+    JobId,
     /// Image handles (`cover`, `background`, `logo`) and two colours. Used by the `art`
     /// and `image` elements only; never a URL.
     Art,
@@ -23,6 +29,11 @@ pub enum ValueType {
     Status,
     /// An [`Os`].
     Os,
+    /// A game's description as paragraphs, with links and HTML removed.
+    RichText,
+    /// An action and its arguments, chosen by the app (a doctor check's fix). Opaque in
+    /// skins: only tested for null in contract 1.0.
+    ActionRef,
     /// A value, or `•••` with `secret: true`. The clear value is never in the binding
     /// scope (S2).
     Masked,
@@ -39,10 +50,15 @@ impl ValueType {
         Self::Time,
         Self::Duration,
         Self::Fraction,
+        Self::Number,
+        Self::Bool,
         Self::GameId,
+        Self::JobId,
         Self::Art,
         Self::Status,
         Self::Os,
+        Self::RichText,
+        Self::ActionRef,
         Self::Masked,
         Self::List,
         Self::Option,
@@ -56,7 +72,12 @@ impl ValueType {
             Self::Time => "Time",
             Self::Duration => "Duration",
             Self::Fraction => "Fraction",
+            Self::Number => "Number",
+            Self::Bool => "Bool",
             Self::GameId => "GameId",
+            Self::JobId => "JobId",
+            Self::RichText => "RichText",
+            Self::ActionRef => "ActionRef",
             Self::Art => "Art",
             Self::Status => "Status",
             Self::Os => "Os",
@@ -78,7 +99,15 @@ impl ValueType {
             Self::Status => &["status.word(s)", "status.tone(s)"],
             Self::List => &["where", "sort", "take", "len", "first"],
             Self::Option => &["?.", "else"],
-            Self::GameId | Self::Art | Self::Os | Self::Masked => &[],
+            Self::Bool => &["not", "and", "or"],
+            Self::Number
+            | Self::GameId
+            | Self::JobId
+            | Self::Art
+            | Self::Os
+            | Self::RichText
+            | Self::ActionRef
+            | Self::Masked => &[],
         }
     }
 }

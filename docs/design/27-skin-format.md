@@ -470,6 +470,21 @@ The loader checks every name of every expression (§9; `Expr::names` lists them)
 the variables in scope at that point. A `where` predicate also accepts the fields of the
 list's items.
 
+### What the loader checks
+
+- **Every name**, as above.
+- **Every field path**, from its root: a source, a `let`, an `each` item, a `data-table`
+  `row`, or a component parameter. A path into a parameter is checked at each use of the
+  component, with the type of the argument given there. An unknown field is a load error
+  (design 26 S16).
+- **Types where an element needs one:**
+  - `when` and `on` take a `Bool`, something that may be null, or a list (empty or not);
+  - `each` and `rows` take a list;
+  - `progress` takes a `Fraction`;
+  - an action argument takes the type of that action's parameter (design 26 §4).
+- **Everything else is typed when it is evaluated** (below). Full type inference is
+  planned (#564).
+
 ### Failures
 
 `eval` returns a result. A failure at run time fails the binding of the route that
