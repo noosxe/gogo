@@ -91,7 +91,7 @@ flowchart LR
 | Crate | Purpose | Public surface (sketch) | External deps |
 |---|---|---|---|
 | `gogo-contract` | The skin contract (design 26) as typed data, no I/O | `ContractVersion`, `Value` and the contract types, source and action catalogues (`ActionSpec {params, kind, tier}`), routes and sections, app widgets with parts/variants/depth, semantic tokens, invariant ids | — |
-| `gogo-skin` | The skin format (design 27): load, validate, bind | `SkinPackage::load`, `ParsedSkin`, `Diagnostic` (miette), `Scope` (data lookup), `ParsedSkin::bind(route, &dyn Scope, &UiState) -> ir::Tree`, `validate`, `expr` | kdl, miette, thiserror |
+| `gogo-skin` | The skin format (design 27): load, validate, bind | `SkinPackage::{load, from_files} -> Result<SkinPackage, Report>`, `Report` of `Finding`s (miette `Diagnostic`s with a stable `Code` and a `Level`), `Manifest`, the `ast` with each node's `Resolved` contract specs, `expr::{parse, eval, Scope}` (data lookup); planned (B4): `SkinPackage::bind(route, &dyn Scope, &UiState) -> ir::Tree` | kdl, miette, thiserror |
 | `gogo-ui-ir` | The resolved tree: the boundary between "a skin" and "an engine" | `Tree`, `Node`, `Kind`, `LayoutStyle`, `Paint`, `Effect`, `TextStyle`, `Role`/`A11y`, `ActionRef`, `DrawnBy::{App, Skin}` | — |
 | `gogo-ui-text` | Fonts, shaping, line breaking, the edit buffer | `FontSet`, `TextLayout`, `GlyphRun`, `EditBuffer` (over parley's `PlainEditor`) | parley, fontique |
 | `gogo-ui-layout` | IR → taffy → positioned boxes | `layout(&Tree, &mut FontSet, viewport, scale) -> Laid`, `Laid::{rect, hit}` | taffy |
