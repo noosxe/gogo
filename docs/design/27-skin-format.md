@@ -40,10 +40,12 @@ Only these files are read. Asset references are relative to the skin root (S10).
 - **Anything else is an error** (S10): a file of another type (only KDL, PNG, SVG, OTF and
   TTF are allowed), a file outside the layout above, a symbolic link, a path with `..`, an
   absolute path, a backslash or a `:`, a path longer than 200 bytes, a file name that isn't
-  UTF-8, and two paths that differ only in case.
+  UTF-8, and two paths that differ only in ASCII case (`A.png` and `a.png`; other letters
+  are compared as they are).
 - **Assets are checked by what they are, not by their name:**
   - a **PNG** has the PNG signature and a chunk list that starts with `IHDR` and ends
-    exactly at `IEND`;
+    exactly at `IEND`, and its header gives a width and a height of at most 16 384 pixels
+    each and at most 33 554 432 pixels (32 Mpx) together (§8);
   - an **SVG** is static and refers to nothing outside itself (S10, S11): no `<script>`,
     no event attributes (`onclick`, …), no animation elements, no `<foreignObject>` or
     other embedding, no DOCTYPE or entity declaration. Every `href` and every `url(…)` points
@@ -74,7 +76,7 @@ skin "default" {
 | `contract` | The contract version it needs, `MAJOR.MINOR` (design 26 §8). It loads when the major is the app's and the minor is not newer (S16) |
 | `modes` | Token sets it provides: `dark`, `light`, each at most once, at least one |
 | `routes` | The routes it covers, each a route of design 26 §6.2 and each with its `routes/<name>.kdl`. The rest fall back per route. A route file that isn't listed isn't loaded, and the loader warns |
-| `extends "<skin>"` | Optional. The skin it builds on: routes and components it doesn't define come from that skin before falling back to the default. Parsed by the prototype; the lookup arrives with binding (PR B4) |
+| `extends "<skin>"` | Optional. The skin it builds on: routes and components it doesn't define come from that skin before falling back to the default. Parsed, but not yet used; the lookup arrives with binding (PR B4) |
 | `ui { var … }` | Skin-local state (design 26 §6.4). Types: `bool`, `number`, `enum(a b …)`, `section` (the route's sections). Each `var` has a unique name, `type=` and a `default=` that fits the type: `#true`/`#false`, a number, one of the enum's words, or one of the contract's section names |
 
 `title`, `version`, `contract` and `modes` are required, each is written once, and any
@@ -118,7 +120,7 @@ tokens "dark" {
   version a `family` must still name a bundled family: reading a family name out of a
   skin's own font needs a font parser, which the loader doesn't have, so a skin's own
   fonts can't be named yet.
-- **A change from the prototype:** its skins used `JetBrainsMono Nerd Font`, a patched
+- **A change from an earlier prototype:** its skins used `JetBrainsMono Nerd Font`, a patched
   build with extra icon glyphs. The port bundles plain JetBrains Mono instead (decision 10
   in design 24), and the built-in skins' family names change with it.
 
@@ -165,10 +167,33 @@ its range is a load error that names the property.
   `inset` takes 1, 2 or 4.
 - **`columns` and `rows`** take a count (`columns 3`: three equal columns) or tracks: a
   number (pixels), `auto` or `<n>fr`. At most 64.
-- **Ranges.** `opacity` 0–1; `weight` 1–1000; `stretch` 25–200 (100 is normal); `font-size`
-  1–1024; `lines` and `col-span` are whole numbers of 1 or more.
+- **Ranges.** A value outside its range is a load error. Lengths and counts are in
+  logical pixels unless noted.
+
+  | Property | Range |
+  |---|---|
+  | `opacity` | 0 to 1 |
+  | `weight` | 1 to 1000 |
+  | `stretch` | 25 to 200 (100 is normal) |
+  | `font-size` | 1 to 1024 |
+  | `tracking` | -5 to 5 (em) |
+  | `line-height` | 0.1 to 1000 (a multiple of the font size) |
+  | `aspect` | 0.01 to 100 (width over height) |
+  | `grow`, `shrink` | 0 to 1000 |
+  | `lines` | a whole number, 1 to 1000 |
+  | `col-span` | a whole number, 1 to 64 |
+  | `columns`, `rows` | a count of 1 to 64, or 1 to 64 tracks; a track is 0 to 100 000 or `<n>fr` with n above 0 |
+  | `padding`, `gap`, `row-gap`, `radius` | 0 to 10 000 |
+  | `margin`, `offset` | -10 000 to 10 000 |
+  | `w h min-w max-w min-h max-h size`, `inset` | -100 000 to 100 000, `auto`, or a percentage |
+  | `border`, `ring`, `accent-edge` width | 0 to 1000 |
+  | angles (`gradient linear`, `reflection`) | -3600 to 3600 degrees |
+
+  The effects' ranges are in §6.
 - **`font @role`** applies a type role token (family, size and weight); `family` takes a
-  bundled family name; `mono-font` the same.
+  bundled family name; `mono-font` the same. A family written out, or a text token
+  (`family @easing.x`), is checked against the bundled families at load. A template
+  (`family="{…}"`) can't be known then: it is checked when the route is bound (PR B4).
 - **Colours** are a literal, `transparent`, a colour token, or in a style one
   `"{@token alpha=.5}"`. A style is static: no other `{…}` expression is allowed in one.
   An element's inline properties may be expressions.
@@ -195,7 +220,7 @@ Only the elements below exist. Anything else is a load error.
 | `row` | horizontal flex container, items centred |
 | `grid` | CSS grid: `columns="1fr 420"` or `columns=3` |
 | `layer` | children stacked on top of each other: a one-cell grid (`1fr × 1fr`), every child in the same cell; `inset` children are placed absolutely |
-| `scroll` | a clipping, scrolling container. **Planned:** not in the prototype and not validated yet; it arrives with scrolling (#545) |
+| `scroll` | a clipping, scrolling container. **Planned:** not validated yet; it arrives with scrolling (#545) |
 | `outlet` | Only in the `shell` route: where the current route is drawn |
 | `spacer`, `divider` | flexible space; a rule |
 
@@ -234,7 +259,12 @@ Only the elements below exist. Anything else is a load error.
 | `menu "<label>" { item … }` | activate | each `item` has its own `action`/`args` |
 | `field "<label>" { … }` | — | labels a control (also its accessible name) |
 
-- `action` must name an action from design 26 §4 that a skin may bind. `args` is split at
+- `action` (and `link-action`) is a plain action name, never a template: `action="{$id}"`
+  is an error, so S16 and S21 can be checked at load. The one exception is a component's
+  own parameter passed on (`action="{action}"` inside a component that declares `action`):
+  each `use` must then give that parameter a plain name, and a template there is an error
+  too. It must name an action from design 26
+  §4 that a skin may bind. `args` is split at
   whitespace outside `{…}` into terms; a term `name=value` names a parameter; each term is
   a template, parsed at load. That `args` type-check against the action is checked with the
   contract (PR B3c).
@@ -316,7 +346,7 @@ component "summary-tile" params="mark tone title sub link action args" {
 - **No loops.** Components that use each other, or themselves, are a load error (S20). A
   component or route whose uses, once expanded, pass the node or depth limits of §8 is too.
 - **Borrowing from the default skin.** `use default "game.builds"` embeds a named fragment
-  of the default skin (design 26 §8). The prototype only draws a labelled placeholder
+  of the default skin (design 26 §8). Until then a labelled placeholder is drawn
   there; real borrowing arrives with binding (PR B4).
 - **Stock components** (design 26 §5, depth C) ship with the default skin, and a skin may
   copy or replace them.
@@ -335,8 +365,10 @@ component "summary-tile" params="mark tone title sub link action args" {
   a missing `in` is a load error (S20). It is the only loop in the format.
 - **`case`** takes one plain string, written as a KDL string (`case "overview"`). It is
   compared with the `switch` value as text, so `case "1"` matches the number 1. A number or
-  a template isn't a `case` value. `else` takes none and comes last, once. A `case` equal
-  to an earlier one can never match, and the loader warns.
+  a template isn't a `case` value. `else` takes no arguments and comes last, once. A `switch` holds only `case` and `else`
+  children: a `case` after the `else`, a second `else`, an `else` with arguments, and any
+  other child are load errors. A `case` equal to an earlier one can never match, and the
+  loader warns.
 - **`let`** takes `name="{…}"` properties, each a lowercase name, bound once.
 
 ## 6. Effects
@@ -346,15 +378,15 @@ shaders.
 
 | Effect | Syntax (example) | Units and rules |
 |---|---|---|
-| `shadow` | `shadow 0 6 18 "#00000066" [spread]` (x, y, blur, colour, optional spread in px; repeatable) | CSS blur radius r: a Gaussian with σ = r / 2. Blur is 0 or more |
+| `shadow` | `shadow 0 6 18 "#00000066" [spread]` (x, y, blur, colour, optional spread in px; repeatable) | CSS blur radius r: a Gaussian with σ = r / 2. Offsets and spread are -10 000 to 10 000, blur 0 to 10 000 |
 | `inner-shadow` | `inner-shadow 0 1 4 "#00000088"` (x, y, blur, colour) | as `shadow`, drawn inside the box |
-| `glow` | `glow 6 "{@led alpha=.8}" 18 "{@led alpha=.35}"` (radius and colour pairs, 1 to 4) | each layer σ = r / 2 |
-| `bloom-text` | `bloom-text 8 "{@accent alpha=.6}"` | Lights **text only**, for the text runs under the node that sets it; inherited like a text property. σ = r / 2 |
+| `glow` | `glow 6 "{@led alpha=.8}" 18 "{@led alpha=.35}"` (radius and colour pairs, 1 to 4) | each layer σ = r / 2; a radius is 0 to 10 000 |
+| `bloom-text` | `bloom-text 8 "{@accent alpha=.6}"` | Lights **text only**, for the text runs under the node that sets it; inherited like a text property. σ = r / 2; the radius is 0 to 10 000 |
 | `gradient` | `gradient linear 180 @bg1 @bg0` or `gradient radial @a @b` | a fill; 2 to 8 colour stops evenly spaced, in order |
-| `noise` | `noise 0.06 [seed]` | a tiled grain at that opacity (0 to 1); the optional whole-number seed (default 7) picks the pattern |
-| `scanlines` | `scanlines 3 0.18` (period in px, alpha) | horizontal black lines at that alpha (0 to 1), one every `period` px (1 or more), clipped to the box |
-| `reflection` | `reflection 120 0.14` (angle in degrees, alpha) | a glass sheen over the box: a white linear gradient at that angle, from `alpha` (0 to 1) fading to nothing before the middle. Not a mirror; a mirrored copy may be added later as a separate effect |
-| `blur-behind` | `blur-behind 12` | CSS `backdrop-filter: blur(r)`: σ = r. Use sparingly: it is the most expensive effect |
+| `noise` | `noise 0.06 [seed]` | a tiled grain at that opacity (0 to 1); the optional whole-number seed (0 to 4 294 967 295, default 7) picks the pattern |
+| `scanlines` | `scanlines 3 0.18` (period in px, alpha) | horizontal black lines at that alpha (0 to 1), one every `period` px (1 to 1000), clipped to the box |
+| `reflection` | `reflection 120 0.14` (angle in degrees, alpha) | a glass sheen over the box: a white linear gradient at that angle, from `alpha` (0 to 1) fading to nothing before the middle; the angle is -3600 to 3600. Not a mirror; a mirrored copy may be added later as a separate effect |
+| `blur-behind` | `blur-behind 12` | CSS `backdrop-filter: blur(r)`: σ = r; the radius is 0 to 1000. Use sparingly: it is the most expensive effect |
 
 - **Argument forms** are the ones in the table, checked at load: the count, the numbers and
   their ranges, and the colours (a literal, `transparent`, a colour token, or one
@@ -367,7 +399,7 @@ shaders.
 - **Reduced motion.** Under reduced motion, transforms and loops are removed and fades are
   capped at 150 ms (S15).
 - **Motion declarations** (`motion "led" { on-change duration=120 easing="ease-out" }`):
-  **planned**. The prototype doesn't handle them. When they land, they take only values
+  **planned**: nothing handles them yet. When they land, they take only values
   from the motion tokens' ranges.
 
 ## 7. Expressions
@@ -469,13 +501,21 @@ default skin is used (S12).
 | Expression length | 512 characters |
 | Expression depth | 32 |
 | One PNG / SVG / font file | 4 MiB / 512 KiB / 8 MiB |
+| PNG width and height | 16 384 px each |
+| PNG width × height | 32 Mpx (33 554 432 pixels) |
 | Whole skin folder | 32 MiB |
 
 - **Nodes** count over every KDL file of the skin. **KDL node nesting depth** counts the
   levels of nested nodes, a file's top-level node being level 1.
 - **Expansion.** A `use` stands for its component's nodes and levels, so a component or a
   route whose expanded tree passes the node or depth limit fails the skin.
-- **Paths** are at most 200 bytes. A file over its size limit is refused unread.
+- **Paths** are at most 200 bytes. A file over its size limit is refused unread, and a
+  folder holding more entries than the file limit stops the walk there.
+- **SVG text.** `&#` character references are refused in attribute values and in
+  `<style>` text, so a name can't be spelled in a way the check does not see.
+- **Zip import.** The loader sees only the files it is given and their sizes. A caller of
+  `SkinPackage::from_files` that unpacks a zip must bound the decompression itself (total
+  size, entry count and ratio) before it hands the bytes over.
 
 The asset sizes are the ones the loader checks. A PNG up to 4 MiB holds a full-screen
 background, an SVG up to 512 KiB a detailed illustration, and a font up to 8 MiB a full CJK
@@ -514,10 +554,16 @@ and lift the cap, are planned with scrolling (#545).
    §2). A route whose binding fails falls back (design 26 §8). The loader reports why, with
    file and line.
 
-The loader (PR B3b) does steps 1 and 3 and the structural part of step 2: names, shapes,
-types, ranges, token references, limits and the accessible-name rule. Resolving a name to
-the contract (an action's parameters, a route's sections, a widget's parts and variants),
-the field and type checks of expressions, and S7 come with PR B3c, and binding with PR B4.
+The finished loader does all of the steps above. They land in two PRs:
+- **B3b (this PR)** does steps 1 and 3 and the structural part of step 2: names, shapes,
+  types, ranges, token references, limits and the accessible-name rule. Every template
+  and expression is parsed here, but its names are not resolved yet: §7's check of every
+  name against the variables in scope, and the field and type checks of expressions,
+  are not made.
+- **B3c** adds resolving names to the contract (an action's parameters, a route's
+  sections, a widget's parts and variants), §7's name check, the field and type checks
+  of expressions, and S7.
+- **B4** adds binding.
 
 Every finding is a miette diagnostic with a stable code (`gogo_skin::<rule>`), the file,
 line and span, and a help line:
