@@ -1,0 +1,1836 @@
+//! One failing skin per rule of the loader, built in memory with `from_files`.
+//!
+//! Each case edits the Default skin (the fixture in `tests/fixtures/default`), loads it,
+//! and checks the diagnostic's stable code, whether it fails the skin or one route, and
+//! that its span points at the right text. The section names are those of design 27 and
+//! the invariants those of design 26 §7.
+
+use std::path::Path;
+
+use gogo_skin::{Code, Level, SkinPackage};
+
+type Files = Vec<(String, Vec<u8>)>;
+
+fn base() -> Files {
+    fn walk(root: &Path, dir: &Path, out: &mut Files) {
+        let mut entries: Vec<_> = std::fs::read_dir(dir).unwrap().flatten().collect();
+        entries.sort_by_key(|e| e.file_name());
+        for e in entries {
+            let p = e.path();
+            if p.is_dir() {
+                walk(root, &p, out);
+            } else {
+                let rel = p
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .replace('\\', "/");
+                out.push((rel, std::fs::read(&p).unwrap()));
+            }
+        }
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/default");
+    let mut out = Vec::new();
+    walk(&root, &root, &mut out);
+    out
+}
+
+fn rep(f: &mut Files, path: &str, from: &str, to: &str) {
+    let (_, data) = f
+        .iter_mut()
+        .find(|(p, _)| p == path)
+        .unwrap_or_else(|| panic!("no file {path}"));
+    let text = String::from_utf8(std::mem::take(data)).unwrap();
+    assert!(text.contains(from), "`{from}` is not in {path}");
+    *data = text.replacen(from, to, 1).into_bytes();
+}
+
+fn append(f: &mut Files, path: &str, extra: &str) {
+    let (_, data) = f.iter_mut().find(|(p, _)| p == path).unwrap();
+    data.extend(extra.as_bytes());
+}
+
+fn add(f: &mut Files, path: &str, data: impl Into<Vec<u8>>) {
+    f.push((path.to_owned(), data.into()));
+}
+
+fn rm(f: &mut Files, path: &str) {
+    let n = f.len();
+    f.retain(|(p, _)| p != path);
+    assert!(f.len() < n, "no file {path}");
+}
+
+fn png() -> Vec<u8> {
+    let mut v = b"\x89PNG\r\n\x1a\n".to_vec();
+    v.extend([0, 0, 0, 13]);
+    v.extend(b"IHDR");
+    v.extend([0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0]);
+    v.extend([0; 4]);
+    v.extend([0, 0, 0, 0]);
+    v.extend(b"IEND");
+    v.extend([0; 4]);
+    v
+}
+
+fn font() -> Vec<u8> {
+    let mut v = b"OTTO\0\x01\0\0\0\0\0\0".to_vec();
+    v.extend([0; 16]);
+    v
+}
+
+const SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 8 8\"><rect width=\"8\" height=\"8\"/></svg>";
+
+fn load(f: Files) -> Result<SkinPackage, gogo_skin::Report> {
+    SkinPackage::from_files("default", f)
+}
+
+/// Where a case's finding must land.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum At {
+    Skin,
+    Route(&'static str),
+    Warn,
+}
+
+struct Case {
+    /// Design 27 section (and invariant) the rule comes from.
+    section: &'static str,
+    name: &'static str,
+    edit: fn(&mut Files),
+    code: Code,
+    at: At,
+    /// The text the span must cover; `None` for a finding about a path.
+    text: Option<&'static str>,
+}
+
+const fn case(
+    section: &'static str,
+    name: &'static str,
+    edit: fn(&mut Files),
+    code: Code,
+    at: At,
+    text: Option<&'static str>,
+) -> Case {
+    Case {
+        section,
+        name,
+        edit,
+        code,
+        at,
+        text,
+    }
+}
+
+/// A style appended to styles.kdl.
+fn style(f: &mut Files, body: &str) {
+    append(f, "styles.kdl", &format!("\nstyle \"x\" {{ {body} }}\n"));
+}
+
+const GAME: &str = "routes/game.kdl";
+const SHELL: &str = "routes/shell.kdl";
+
+fn cases() -> Vec<Case> {
+    use At::*;
+    use Code::*;
+    vec![
+        // §1 and S10: the layout and the paths.
+        case(
+            "§1 S10",
+            "dotdot path",
+            |f| add(f, "routes/../x.kdl", ""),
+            PathInvalid,
+            Skin,
+            None,
+        ),
+        case(
+            "§1 S10",
+            "absolute path",
+            |f| add(f, "/etc/x.kdl", ""),
+            PathInvalid,
+            Skin,
+            None,
+        ),
+        case(
+            "§1 S10",
+            "backslash path",
+            |f| add(f, "assets\\a.png", png()),
+            PathInvalid,
+            Skin,
+            None,
+        ),
+        case(
+            "§1 S10",
+            "other file type",
+            |f| add(f, "assets/run.js", "x"),
+            FileType,
+            Skin,
+            None,
+        ),
+        case(
+            "§1 S10",
+            "file outside the layout",
+            |f| add(f, "extra.kdl", ""),
+            FileType,
+            Skin,
+            None,
+        ),
+        case(
+            "§1 S10",
+            "folder in components",
+            |f| add(f, "components/sub/x.kdl", ""),
+            FileType,
+            Skin,
+            None,
+        ),
+        case(
+            "§1",
+            "kdl in assets",
+            |f| add(f, "assets/x.kdl", ""),
+            FileType,
+            Skin,
+            None,
+        ),
+        case(
+            "§1",
+            "same path twice",
+            |f| {
+                add(f, "assets/a.png", png());
+                add(f, "assets/a.png", png());
+            },
+            DuplicatePath,
+            Skin,
+            None,
+        ),
+        case(
+            "§1",
+            "paths differing in case",
+            |f| {
+                add(f, "assets/a.png", png());
+                add(f, "assets/A.png", png());
+            },
+            DuplicatePath,
+            Skin,
+            None,
+        ),
+        // §1, S10, S11: assets.
+        case(
+            "§1 S10",
+            "png without the signature",
+            |f| add(f, "assets/a.png", "GIF89a"),
+            AssetPng,
+            Skin,
+            None,
+        ),
+        case(
+            "§1 S10",
+            "truncated png",
+            |f| add(f, "assets/a.png", &png()[..20]),
+            AssetPng,
+            Skin,
+            None,
+        ),
+        case(
+            "§1 S10",
+            "svg with a script",
+            |f| {
+                add(
+                    f,
+                    "assets/a.svg",
+                    "<svg xmlns=\"http://www.w3.org/2000/svg\"><script>x()</script></svg>",
+                )
+            },
+            AssetSvg,
+            Skin,
+            None,
+        ),
+        case(
+            "§1 S10",
+            "svg with an event attribute",
+            |f| {
+                add(
+                    f,
+                    "assets/a.svg",
+                    "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect onclick=\"x()\"/></svg>",
+                )
+            },
+            AssetSvg,
+            Skin,
+            None,
+        ),
+        case(
+            "§1 S11",
+            "svg with an external href",
+            |f| {
+                add(
+                    f,
+                    "assets/a.svg",
+                    "<svg xmlns=\"http://www.w3.org/2000/svg\"><image href=\"https://e.example/a.png\"/></svg>",
+                )
+            },
+            AssetSvg,
+            Skin,
+            None,
+        ),
+        case(
+            "§1 S11",
+            "svg with an external url()",
+            |f| {
+                add(
+                    f,
+                    "assets/a.svg",
+                    "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect fill=\"url(http://e.example/x)\"/></svg>",
+                )
+            },
+            AssetSvg,
+            Skin,
+            None,
+        ),
+        case(
+            "§1 S10",
+            "svg that is animated",
+            |f| {
+                add(
+                    f,
+                    "assets/a.svg",
+                    "<svg xmlns=\"http://www.w3.org/2000/svg\"><animate/></svg>",
+                )
+            },
+            AssetSvg,
+            Skin,
+            None,
+        ),
+        case(
+            "§1 S10",
+            "font that is not one",
+            |f| add(f, "assets/a.ttf", "not a font"),
+            AssetFont,
+            Skin,
+            None,
+        ),
+        // §8 and S12: limits.
+        case(
+            "§8 S12",
+            "kdl file over 256 KiB",
+            |f| append(f, GAME, &format!("\n// {}\n", "x".repeat(300_000))),
+            LimitFile,
+            Skin,
+            None,
+        ),
+        case(
+            "§8 S12",
+            "png over 4 MiB",
+            |f| add(f, "assets/a.png", vec![0u8; 4 * 1024 * 1024 + 1]),
+            LimitFile,
+            Skin,
+            None,
+        ),
+        case(
+            "§8 S12",
+            "svg over 512 KiB",
+            |f| add(f, "assets/a.svg", vec![b' '; 512 * 1024 + 1]),
+            LimitFile,
+            Skin,
+            None,
+        ),
+        case(
+            "§8 S12",
+            "font over 8 MiB",
+            |f| add(f, "assets/a.otf", vec![0u8; 8 * 1024 * 1024 + 1]),
+            LimitFile,
+            Skin,
+            None,
+        ),
+        case(
+            "§8 S12",
+            "folder over 32 MiB",
+            |f| {
+                for i in 0..5 {
+                    let mut data = font();
+                    data.resize(8 * 1024 * 1024, 0);
+                    add(f, &format!("assets/f{i}.ttf"), data);
+                }
+            },
+            LimitFolder,
+            Skin,
+            None,
+        ),
+        case(
+            "§8 S12",
+            "more than 1024 files",
+            |f| {
+                for i in 0..1030 {
+                    add(f, &format!("assets/f{i}.svg"), SVG);
+                }
+            },
+            LimitFiles,
+            Skin,
+            None,
+        ),
+        case(
+            "§8 S12",
+            "more than 20000 nodes",
+            |f| {
+                let body = "spacer\n".repeat(20_001);
+                rm(f, SHELL);
+                add(f, SHELL, format!("route \"shell\" {{\n{body}outlet\n}}\n"));
+            },
+            LimitNodes,
+            Skin,
+            None,
+        ),
+        case(
+            "§8 S12",
+            "nested deeper than 48",
+            |f| {
+                let n = 49;
+                rm(f, GAME);
+                add(
+                    f,
+                    GAME,
+                    format!(
+                        "route \"game\" {{\n{}{}}}\n",
+                        "column {\n".repeat(n),
+                        "}\n".repeat(n)
+                    ),
+                );
+            },
+            LimitDepth,
+            Skin,
+            None,
+        ),
+        case(
+            "§8 S12",
+            "nesting that would overflow the parser",
+            |f| {
+                let n = 20_000;
+                rm(f, GAME);
+                add(
+                    f,
+                    GAME,
+                    format!(
+                        "route \"game\" {{\n{}{}}}\n",
+                        "a {\n".repeat(n),
+                        "}\n".repeat(n)
+                    ),
+                );
+            },
+            LimitDepth,
+            Skin,
+            None,
+        ),
+        case(
+            "§8 S12",
+            "expression over 512 characters",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "{g.title}\" style=\"crumb\"",
+                    &format!("{{{}}}\" style=\"crumb\"", "a".repeat(600)),
+                );
+            },
+            Expression,
+            Route("game"),
+            None,
+        ),
+        case(
+            "§8 S12",
+            "expression nested over 32 levels",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "{g.title}\" style=\"crumb\"",
+                    &format!(
+                        "{{{}1{}}}\" style=\"crumb\"",
+                        "(".repeat(40),
+                        ")".repeat(40)
+                    ),
+                );
+            },
+            Expression,
+            Route("game"),
+            None,
+        ),
+        case(
+            "§8 S12",
+            "components that expand past the node limit",
+            |f| {
+                // Eleven levels of three uses each: 3^11 > 20000 nodes once expanded.
+                let mut text = String::from("component \"c0\" { spacer }\n");
+                for i in 1..=11 {
+                    text.push_str(&format!(
+                        "component \"c{i}\" {{ use \"c{}\"; use \"c{}\"; use \"c{}\" }}\n",
+                        i - 1,
+                        i - 1,
+                        i - 1
+                    ));
+                }
+                add(f, "components/big.kdl", text);
+            },
+            LimitNodes,
+            Skin,
+            None,
+        ),
+        // §2: the manifest.
+        case(
+            "§2",
+            "no title",
+            |f| rep(f, "skin.kdl", "    title \"Default\"\n", ""),
+            ManifestStructure,
+            Skin,
+            None,
+        ),
+        case(
+            "§2",
+            "unknown manifest field",
+            |f| rep(f, "skin.kdl", "    title", "    colour \"x\"\n    title"),
+            ManifestStructure,
+            Skin,
+            Some("colour"),
+        ),
+        case(
+            "§2",
+            "version that is not semver",
+            |f| rep(f, "skin.kdl", "\"0.1.0\"", "\"1.0\""),
+            ManifestValue,
+            Skin,
+            Some("\"1.0\""),
+        ),
+        case(
+            "§2",
+            "name is not the folder",
+            |f| rep(f, "skin.kdl", "skin \"default\"", "skin \"other\""),
+            SkinName,
+            Skin,
+            Some("\"other\""),
+        ),
+        case(
+            "§2",
+            "name with capitals",
+            |f| rep(f, "skin.kdl", "skin \"default\"", "skin \"Default\""),
+            SkinName,
+            Skin,
+            Some("\"Default\""),
+        ),
+        case(
+            "§2 S16",
+            "contract that is not MAJOR.MINOR",
+            |f| rep(f, "skin.kdl", "\"1.0\"", "\"one\""),
+            ContractVersion,
+            Skin,
+            Some("\"one\""),
+        ),
+        case(
+            "§2 S16",
+            "contract of another major",
+            |f| rep(f, "skin.kdl", "contract \"1.0\"", "contract \"2.0\""),
+            ContractVersion,
+            Skin,
+            Some("\"2.0\""),
+        ),
+        case(
+            "§2 S16",
+            "contract newer than the app",
+            |f| rep(f, "skin.kdl", "contract \"1.0\"", "contract \"1.7\""),
+            ContractVersion,
+            Skin,
+            Some("\"1.7\""),
+        ),
+        case(
+            "§2",
+            "unknown mode",
+            |f| rep(f, "skin.kdl", "modes \"dark\"", "modes \"dark\" \"sepia\""),
+            ManifestValue,
+            Skin,
+            Some("\"sepia\""),
+        ),
+        case(
+            "§2 S16",
+            "unknown route in the manifest",
+            |f| rep(f, "skin.kdl", "\"game\"", "\"gam\""),
+            UnknownRoute,
+            Skin,
+            Some("\"gam\""),
+        ),
+        case(
+            "§2",
+            "covered route without a file",
+            |f| {
+                rep(
+                    f,
+                    "skin.kdl",
+                    "\"shell\" \"game\"",
+                    "\"shell\" \"game\" \"queue\"",
+                )
+            },
+            RouteFile,
+            Skin,
+            None,
+        ),
+        case(
+            "§2",
+            "route file that is not a contract route",
+            |f| add(f, "routes/lobby.kdl", "route \"lobby\" { }"),
+            UnknownRoute,
+            Skin,
+            None,
+        ),
+        case(
+            "§2",
+            "skin extends itself",
+            |f| {
+                rep(
+                    f,
+                    "skin.kdl",
+                    "    title",
+                    "    extends \"default\"\n    title",
+                )
+            },
+            ManifestValue,
+            Skin,
+            Some("\"default\""),
+        ),
+        case(
+            "§2",
+            "ui var of an unknown type",
+            |f| rep(f, "skin.kdl", "type=\"enum(grid list)\"", "type=\"colour\""),
+            UiVar,
+            Skin,
+            Some("\"colour\""),
+        ),
+        case(
+            "§2",
+            "ui var default outside its enum",
+            |f| rep(f, "skin.kdl", "default=\"grid\"", "default=\"table\""),
+            UiVar,
+            Skin,
+            Some("\"table\""),
+        ),
+        case(
+            "§2",
+            "section var with no such section",
+            |f| rep(f, "skin.kdl", "default=\"overview\"", "default=\"nowhere\""),
+            UiVar,
+            Skin,
+            Some("\"nowhere\""),
+        ),
+        case(
+            "§2",
+            "ui var declared twice",
+            |f| {
+                rep(
+                    f,
+                    "skin.kdl",
+                    "        var \"view\"",
+                    "        var \"tab\" type=\"bool\" default=#true\n        var \"view\"",
+                )
+            },
+            UiVar,
+            Skin,
+            None,
+        ),
+        // §3: tokens.
+        case(
+            "§3",
+            "colour that is not a colour",
+            |f| {
+                rep(
+                    f,
+                    "tokens.kdl",
+                    "\"#7aa2ff\"\n    on-accent",
+                    "\"#7aa2f\"\n    on-accent",
+                )
+            },
+            TokenValue,
+            Skin,
+            Some("\"#7aa2f\""),
+        ),
+        case(
+            "§3",
+            "reference to nothing",
+            |f| rep(f, "tokens.kdl", "\"@success\"", "\"@sucess\""),
+            TokenRef,
+            Skin,
+            Some("\"@sucess\""),
+        ),
+        case(
+            "§3",
+            "references in a loop",
+            |f| {
+                rep(
+                    f,
+                    "tokens.kdl",
+                    "    scrim",
+                    "    ping \"@pong\"\n    pong \"@ping\"\n    scrim",
+                )
+            },
+            TokenRef,
+            Skin,
+            None,
+        ),
+        case(
+            "§3",
+            "a required token missing",
+            |f| rep(f, "tokens.kdl", "    space.4 16\n", ""),
+            TokenMissing,
+            Skin,
+            None,
+        ),
+        case(
+            "§3",
+            "required token of the wrong type",
+            |f| rep(f, "tokens.kdl", "radius.md 8", "radius.md \"#ffffff\""),
+            TokenValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§3",
+            "modes that define different tokens",
+            |f| {
+                rep(f, "skin.kdl", "modes \"dark\"", "modes \"dark\" \"light\"");
+                let dark =
+                    String::from_utf8(f.iter().find(|(p, _)| p == "tokens.kdl").unwrap().1.clone())
+                        .unwrap();
+                append(
+                    f,
+                    "tokens.kdl",
+                    &dark
+                        .replace("tokens \"dark\"", "tokens \"light\"")
+                        .replace("    scrim", "    extra \"#ffffff\"\n    scrim"),
+                );
+            },
+            TokenMode,
+            Skin,
+            None,
+        ),
+        case(
+            "§3",
+            "a listed mode without tokens",
+            |f| rep(f, "skin.kdl", "modes \"dark\"", "modes \"dark\" \"light\""),
+            TokenStructure,
+            Skin,
+            None,
+        ),
+        case(
+            "§3",
+            "tokens for a mode the manifest lacks",
+            |f| append(f, "tokens.kdl", "tokens \"light\" { }\n"),
+            TokenMode,
+            Skin,
+            None,
+        ),
+        case(
+            "§3 D3",
+            "font family that is not bundled",
+            |f| {
+                rep(
+                    f,
+                    "tokens.kdl",
+                    "family=\"Noto Sans\" size=14",
+                    "family=\"Comic Sans\" size=14",
+                )
+            },
+            FontFamily,
+            Skin,
+            Some("\"Comic Sans\""),
+        ),
+        case(
+            "§3 D3",
+            "the old nerd font family",
+            |f| {
+                rep(
+                    f,
+                    "tokens.kdl",
+                    "\"JetBrains Mono\"",
+                    "\"JetBrainsMono Nerd Font\"",
+                )
+            },
+            FontFamily,
+            Skin,
+            Some("\"JetBrainsMono Nerd Font\""),
+        ),
+        case(
+            "§3 §5.2",
+            "stretch on a static family",
+            |f| {
+                rep(
+                    f,
+                    "tokens.kdl",
+                    "family=\"JetBrains Mono\" size=13 weight=400",
+                    "family=\"JetBrains Mono\" size=13 weight=400 stretch=90",
+                )
+            },
+            FontStretch,
+            Skin,
+            Some("90"),
+        ),
+        case(
+            "§3",
+            "a type role's field defined alone",
+            |f| {
+                rep(
+                    f,
+                    "tokens.kdl",
+                    "    scrim",
+                    "    font.body.size 14\n    scrim",
+                )
+            },
+            TokenName,
+            Skin,
+            Some("font.body.size"),
+        ),
+        case(
+            "§3",
+            "a font without a size",
+            |f| {
+                rep(
+                    f,
+                    "tokens.kdl",
+                    "family=\"Noto Sans\" size=18 weight=700",
+                    "family=\"Noto Sans\" weight=700",
+                )
+            },
+            TokenValue,
+            Skin,
+            None,
+        ),
+        // §4 and §6: styles.
+        case(
+            "§4",
+            "unknown style property",
+            |f| {
+                rep(
+                    f,
+                    "styles.kdl",
+                    "style \"page\" { fill @bg0 }",
+                    "style \"page\" { fil @bg0 }",
+                )
+            },
+            UnknownProperty,
+            Skin,
+            Some("fil"),
+        ),
+        case(
+            "§4",
+            "value of the wrong type",
+            |f| rep(f, "styles.kdl", "grow 1;", "grow \"wide\";"),
+            PropertyValue,
+            Skin,
+            Some("\"wide\""),
+        ),
+        case(
+            "§4",
+            "too many values",
+            |f| rep(f, "styles.kdl", "padding 0 5 }", "padding 0 5 1 2 3 }"),
+            PropertyValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§4",
+            "unknown state",
+            |f| style(f, ":active { fill @bg0 }"),
+            UnknownState,
+            Skin,
+            Some(":active"),
+        ),
+        case(
+            "§4",
+            "unknown token in a style",
+            |f| {
+                rep(
+                    f,
+                    "styles.kdl",
+                    "style \"page\" { fill @bg0 }",
+                    "style \"page\" { fill @bg9 }",
+                )
+            },
+            TokenRef,
+            Skin,
+            Some("@bg9"),
+        ),
+        case(
+            "§4",
+            "token of the wrong type in a style",
+            |f| {
+                rep(
+                    f,
+                    "styles.kdl",
+                    "style \"page\" { fill @bg0 }",
+                    "style \"page\" { fill @space.4 }",
+                )
+            },
+            TokenRef,
+            Skin,
+            Some("@space.4"),
+        ),
+        case(
+            "§4",
+            "style defined twice",
+            |f| append(f, "styles.kdl", "style \"page\" { fill @bg1 }\n"),
+            StyleName,
+            Skin,
+            Some("\"page\""),
+        ),
+        case(
+            "§4",
+            "style named with capitals",
+            |f| append(f, "styles.kdl", "style \"Page2\" { }\n"),
+            StyleName,
+            Skin,
+            Some("\"Page2\""),
+        ),
+        case(
+            "§4",
+            "style that is used and not defined",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "style=\"crumb\" id=\"crumb\"",
+                    "style=\"crumbs\" id=\"crumb\"",
+                )
+            },
+            UnknownStyle,
+            Route("game"),
+            Some("\"crumbs\""),
+        ),
+        case(
+            "§4 §5.2",
+            "stretch on a static family in a style",
+            |f| style(f, "family \"JetBrains Mono\"; stretch 90"),
+            FontStretch,
+            Skin,
+            Some("90"),
+        ),
+        case(
+            "§4",
+            "family that is not bundled in a style",
+            |f| style(f, "family \"Liberation Sans\""),
+            FontFamily,
+            Skin,
+            Some("\"Liberation Sans\""),
+        ),
+        case(
+            "§4",
+            "a state declaration with a nested state",
+            |f| style(f, ":on { :hover { fill @bg0 } }"),
+            StyleStructure,
+            Skin,
+            None,
+        ),
+        case(
+            "§4",
+            "an expression in a number slot of a style",
+            |f| style(f, "gap \"{1}\""),
+            PropertyValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§4",
+            "a property set twice",
+            |f| style(f, "fill @bg0; fill @bg1"),
+            DuplicateProperty,
+            Warn,
+            Some("fill"),
+        ),
+        case(
+            "§4 §3",
+            "a short hex colour",
+            |f| style(f, "fill \"#0008\""),
+            PropertyValue,
+            Skin,
+            Some("\"#0008\""),
+        ),
+        // §6: effects.
+        case(
+            "§6",
+            "shadow without a colour",
+            |f| style(f, "shadow 0 6 18"),
+            PropertyValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§6",
+            "shadow with a negative blur",
+            |f| style(f, "shadow 0 6 -1 \"#000000\""),
+            PropertyValue,
+            Skin,
+            Some("-1"),
+        ),
+        case(
+            "§6",
+            "glow with an odd number of values",
+            |f| style(f, "glow 6 \"#ffffff\" 18"),
+            PropertyValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§6",
+            "glow with too many layers",
+            |f| style(f, "glow 1 @bg0 2 @bg0 3 @bg0 4 @bg0 5 @bg0"),
+            PropertyValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§6",
+            "noise amount over 1",
+            |f| style(f, "noise 2"),
+            PropertyValue,
+            Skin,
+            Some("2"),
+        ),
+        case(
+            "§6",
+            "scanlines without an alpha",
+            |f| style(f, "scanlines 3"),
+            PropertyValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§6",
+            "reflection with a missing alpha",
+            |f| style(f, "reflection 120"),
+            PropertyValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§6",
+            "blur-behind negative",
+            |f| style(f, "blur-behind -4"),
+            PropertyValue,
+            Skin,
+            Some("-4"),
+        ),
+        case(
+            "§6",
+            "gradient with one colour",
+            |f| style(f, "gradient linear 180 @bg1"),
+            PropertyValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§6",
+            "gradient of an unknown kind",
+            |f| style(f, "gradient conic @bg1 @bg0"),
+            PropertyValue,
+            Skin,
+            Some("conic"),
+        ),
+        case(
+            "§6",
+            "effects with a value other than none",
+            |f| style(f, "effects 1"),
+            PropertyValue,
+            Skin,
+            Some("1"),
+        ),
+        // §5: elements.
+        case(
+            "§5",
+            "unknown element",
+            |f| {
+                rep(
+                    f,
+                    SHELL,
+                    "        outlet",
+                    "        banner \"x\"\n        outlet",
+                )
+            },
+            UnknownElement,
+            Route("shell"),
+            Some("banner"),
+        ),
+        case(
+            "§5.1",
+            "scroll",
+            |f| {
+                rep(
+                    f,
+                    SHELL,
+                    "        outlet",
+                    "        scroll { }\n        outlet",
+                )
+            },
+            PlannedElement,
+            Route("shell"),
+            Some("scroll"),
+        ),
+        case(
+            "§5.1",
+            "outlet outside the shell",
+            |f| rep(f, GAME, "    tabs ", "    outlet\n    tabs "),
+            ElementPlacement,
+            Route("game"),
+            Some("outlet"),
+        ),
+        case(
+            "§5.1",
+            "outlet in a component",
+            |f| append(f, "components/stock.kdl", "component \"o\" { outlet }\n"),
+            ElementPlacement,
+            Skin,
+            Some("outlet"),
+        ),
+        case(
+            "§5.4",
+            "data-table holding something else",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "highlight=\"{row.this_machine}\" {",
+                    "highlight=\"{row.this_machine}\" {\n text \"x\"",
+                )
+            },
+            ElementChildren,
+            Route("game"),
+            Some("text"),
+        ),
+        case(
+            "§5.4",
+            "use of data-table",
+            |f| rep(f, GAME, "    tabs ", "    use \"data-table\"\n    tabs "),
+            DataTableUse,
+            Route("game"),
+            Some("\"data-table\""),
+        ),
+        case(
+            "§5.4",
+            "data-table without rows",
+            |f| rep(f, GAME, "rows=\"{game.builds($id) | take 4}\" ", ""),
+            ElementArguments,
+            Route("game"),
+            None,
+        ),
+        case(
+            "§5.5",
+            "part outside an app widget",
+            |f| rep(f, GAME, "    tabs ", "    part \"frame\"\n    tabs "),
+            ElementPlacement,
+            Route("game"),
+            Some("part"),
+        ),
+        case(
+            "§5.3",
+            "item outside a menu",
+            |f| rep(f, GAME, "    tabs ", "    item \"x\"\n    tabs "),
+            ElementPlacement,
+            Route("game"),
+            Some("item"),
+        ),
+        case(
+            "§5.3",
+            "args using value on a button",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "action=\"game.verify\" args=\"{$id}\"",
+                    "action=\"game.verify\" args=\"{$id} {value}\"",
+                )
+            },
+            InputScope,
+            Route("game"),
+            Some("{value}"),
+        ),
+        case(
+            "§5.3",
+            "value on something that is not a select",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "    tabs ",
+                    "    text \"x\" value=\"{a}\"\n    tabs ",
+                )
+            },
+            UnknownProperty,
+            Route("game"),
+            Some("value"),
+        ),
+        case(
+            "§5.3 S14",
+            "button without a name",
+            |f| {
+                rep(
+                    f,
+                    SHELL,
+                    "button \"Settings\" icon=\"circle\"",
+                    "button icon=\"circle\"",
+                )
+            },
+            AccessibleName,
+            Route("shell"),
+            Some("button"),
+        ),
+        case(
+            "§5.3 S14",
+            "button with an empty name",
+            |f| {
+                rep(
+                    f,
+                    SHELL,
+                    "button \"Settings\" icon=\"circle\"",
+                    "button \"\" icon=\"circle\"",
+                )
+            },
+            AccessibleName,
+            Route("shell"),
+            Some("button"),
+        ),
+        case(
+            "§5.2 S14",
+            "art without a label",
+            |f| rep(f, GAME, " label=\"{g.title} cover\"", ""),
+            AccessibleName,
+            Route("game"),
+            Some("art"),
+        ),
+        case(
+            "§5.3 S14",
+            "toggle outside a field without a label",
+            |f| rep(f, GAME, "    tabs ", "    toggle on=\"{a}\"\n    tabs "),
+            AccessibleName,
+            Route("game"),
+            Some("toggle"),
+        ),
+        case(
+            "§5.8 S20",
+            "each over a literal",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "in=\"{snaps.items | sort -date | take 2}\"",
+                    "in=\"snaps\"",
+                )
+            },
+            EachSource,
+            Route("game"),
+            Some("\"snaps\""),
+        ),
+        case(
+            "§5.8 S20",
+            "each without in",
+            |f| rep(f, GAME, " in=\"{snaps.items | sort -date | take 2}\"", ""),
+            EachSource,
+            Route("game"),
+            Some("each"),
+        ),
+        case(
+            "§5.7 S20",
+            "components that use each other",
+            |f| {
+                append(
+                    f,
+                    "components/stock.kdl",
+                    "component \"ping\" { use \"pong\" }\ncomponent \"pong\" { use \"ping\" }\n",
+                )
+            },
+            ComponentCycle,
+            Skin,
+            None,
+        ),
+        case(
+            "§5.7 S20",
+            "a component that uses itself",
+            |f| {
+                append(
+                    f,
+                    "components/stock.kdl",
+                    "component \"me\" { use \"me\" }\n",
+                )
+            },
+            ComponentCycle,
+            Skin,
+            None,
+        ),
+        case(
+            "§5.7",
+            "use of an unknown component",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "use \"summary-tile\" mark=\"check\"",
+                    "use \"summary-tle\" mark=\"check\"",
+                )
+            },
+            UnknownComponent,
+            Route("game"),
+            Some("\"summary-tle\""),
+        ),
+        case(
+            "§5.7",
+            "use with an unknown parameter",
+            |f| rep(f, GAME, " title=\"DLC", " titel=\"DLC"),
+            ComponentParam,
+            Route("game"),
+            Some("titel"),
+        ),
+        case(
+            "§5.7",
+            "component with a reserved parameter",
+            |f| {
+                append(
+                    f,
+                    "components/stock.kdl",
+                    "component \"r\" params=\"when\" { }\n",
+                )
+            },
+            ComponentParam,
+            Skin,
+            None,
+        ),
+        case(
+            "§5.7",
+            "component defined twice",
+            |f| {
+                append(
+                    f,
+                    "components/stock.kdl",
+                    "component \"status-badge\" { }\n",
+                )
+            },
+            ComponentParam,
+            Skin,
+            Some("\"status-badge\""),
+        ),
+        case(
+            "§5",
+            "unknown element property",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "style=\"crumb\" id=\"crumb\"",
+                    "style=\"crumb\" id=\"crumb\" colr=@accent",
+                )
+            },
+            UnknownProperty,
+            Route("game"),
+            Some("colr"),
+        ),
+        case(
+            "§5.3 S16",
+            "unknown action",
+            |f| rep(f, GAME, "action=\"game.verify\"", "action=\"game.verfy\""),
+            UnknownAction,
+            Route("game"),
+            Some("\"game.verfy\""),
+        ),
+        case(
+            "§5.2",
+            "unknown icon",
+            |f| rep(f, GAME, "icon=\"play\"", "icon=\"plai\""),
+            PropertyValue,
+            Route("game"),
+            Some("\"plai\""),
+        ),
+        case(
+            "§5.2",
+            "arguments an element doesn't take",
+            |f| rep(f, GAME, "    tabs ", "    row \"x\"\n    tabs "),
+            ElementArguments,
+            Route("game"),
+            None,
+        ),
+        case(
+            "§5",
+            "a required property missing",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    " sections=\"overview builds dlc saves snapshots setup files\"",
+                    "",
+                )
+            },
+            ElementArguments,
+            Route("game"),
+            None,
+        ),
+        case(
+            "§5.2 S10",
+            "image of an asset that is not there",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "    tabs ",
+                    "    image src=\"assets/none.png\" label=\"x\"\n    tabs ",
+                )
+            },
+            AssetMissing,
+            Route("game"),
+            Some("\"assets/none.png\""),
+        ),
+        case(
+            "§5.2 S11",
+            "image from a URL",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "    tabs ",
+                    "    image src=\"https://e.example/a.png\" label=\"x\"\n    tabs ",
+                )
+            },
+            UrlScheme,
+            Route("game"),
+            Some("\"https://e.example/a.png\""),
+        ),
+        case(
+            "§5.2 S10",
+            "image path that escapes the skin",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "    tabs ",
+                    "    image src=\"../a.png\" label=\"x\"\n    tabs ",
+                )
+            },
+            PathInvalid,
+            Route("game"),
+            Some("\"../a.png\""),
+        ),
+        case(
+            "§5.2",
+            "image path from an expression",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "    tabs ",
+                    "    image src=\"{g.title}\" label=\"x\"\n    tabs ",
+                )
+            },
+            AssetDynamic,
+            Route("game"),
+            Some("\"{g.title}\""),
+        ),
+        case(
+            "§5.2",
+            "image of a font file",
+            |f| {
+                add(f, "assets/f.ttf", font());
+                rep(
+                    f,
+                    GAME,
+                    "    tabs ",
+                    "    image src=\"assets/f.ttf\" label=\"x\"\n    tabs ",
+                );
+            },
+            AssetMissing,
+            Route("game"),
+            Some("\"assets/f.ttf\""),
+        ),
+        case(
+            "§5.8",
+            "case with a number",
+            |f| rep(f, GAME, "case \"builds\"", "case 1"),
+            ElementArguments,
+            Route("game"),
+            None,
+        ),
+        case(
+            "§5.8",
+            "a case that can never match",
+            |f| rep(f, GAME, "case \"builds\"", "case \"overview\""),
+            DuplicateCase,
+            Warn,
+            Some("\"overview\""),
+        ),
+        case(
+            "§5.8",
+            "switch holding something else",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "        else { use default",
+                    "        text \"x\"\n        else { use default",
+                )
+            },
+            ElementChildren,
+            Route("game"),
+            Some("text"),
+        ),
+        case(
+            "§5.8",
+            "let binding a name twice",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "    let g=\"{game($id)}\"",
+                    "    let g=\"{game($id)}\" g=\"{x}\"",
+                )
+            },
+            PropertyValue,
+            Route("game"),
+            Some("g"),
+        ),
+        case(
+            "§5.8",
+            "switch on a plain string",
+            |f| rep(f, GAME, "switch \"{ui.tab}\"", "switch \"tab\""),
+            ElementArguments,
+            Route("game"),
+            None,
+        ),
+        case(
+            "S18",
+            "a status shown by colour alone",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "    tabs ",
+                    "    chip \"x\" tone=\"{g.status}\"\n    tabs ",
+                )
+            },
+            StatusByColour,
+            Warn,
+            Some("\"{g.status}\""),
+        ),
+        case(
+            "§5.7 §9",
+            "an error in a component fails the skin",
+            |f| rep(f, "components/stock.kdl", "icon=\"dot\"", "icon=\"dott\""),
+            PropertyValue,
+            Skin,
+            Some("\"dott\""),
+        ),
+        // §7 and §9 step 3: templates and expressions are parsed at load.
+        case(
+            "§7",
+            "a brace that is never closed",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "{g.title}\" style=\"crumb\"",
+                    "{g.title\" style=\"crumb\"",
+                )
+            },
+            Template,
+            Route("game"),
+            Some("{"),
+        ),
+        case(
+            "§7",
+            "a lone closing brace",
+            |f| rep(f, GAME, "Library  ›  ", "Library } "),
+            Template,
+            Route("game"),
+            Some("}"),
+        ),
+        case(
+            "§7",
+            "an expression that doesn't parse",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "{g.title}\" style=\"crumb\"",
+                    "{g.title +}\" style=\"crumb\"",
+                )
+            },
+            Expression,
+            Route("game"),
+            Some("+"),
+        ),
+        case(
+            "§7",
+            "an expression in an action argument",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "args=\"game {$id} files\"",
+                    "args=\"game {$id +} files\"",
+                )
+            },
+            Expression,
+            Route("game"),
+            None,
+        ),
+        case(
+            "§7",
+            "an unknown pipe stage",
+            |f| rep(f, GAME, "sort -date", "sortt -date"),
+            Expression,
+            Route("game"),
+            Some("sortt"),
+        ),
+        case(
+            "§7",
+            "an expression in a style colour",
+            |f| style(f, "fill \"{@warn alpha=}\""),
+            Expression,
+            Skin,
+            None,
+        ),
+        // The route file itself.
+        case(
+            "§1",
+            "route file that names another route",
+            |f| rep(f, GAME, "route \"game\"", "route \"queue\""),
+            RouteFile,
+            Route("game"),
+            Some("\"queue\""),
+        ),
+        case(
+            "§1",
+            "route file with two nodes",
+            |f| append(f, GAME, "route \"game\" { }\n"),
+            RouteFile,
+            Route("game"),
+            None,
+        ),
+        case(
+            "§9",
+            "KDL that doesn't parse, in a route",
+            |f| append(f, GAME, "\ntext \"unterminated\n"),
+            KdlSyntax,
+            Route("game"),
+            None,
+        ),
+        case(
+            "§9",
+            "KDL that doesn't parse, in the tokens",
+            |f| append(f, "tokens.kdl", "\ntokens \"dark\" {\n"),
+            KdlSyntax,
+            Skin,
+            None,
+        ),
+        case(
+            "§9",
+            "KDL v1 syntax",
+            |f| rep(f, "skin.kdl", "modes \"dark\"", "modes \"dark\" true"),
+            KdlSyntax,
+            Skin,
+            Some("true"),
+        ),
+    ]
+}
+
+fn findings(r: Result<SkinPackage, gogo_skin::Report>) -> Vec<gogo_skin::Finding> {
+    match r {
+        Ok(p) => p.report().findings().to_vec(),
+        Err(r) => r.findings().to_vec(),
+    }
+}
+
+#[test]
+fn every_rule_reports_its_code_where_it_belongs() {
+    let mut bad = Vec::new();
+    for c in cases() {
+        let mut files = base();
+        (c.edit)(&mut files);
+        let all = findings(load(files));
+        let Some(f) = all.iter().find(|f| f.code == c.code) else {
+            let got: Vec<String> = all
+                .iter()
+                .map(|f| format!("{} {:?} {:?}", f.code, f.text, f.message))
+                .collect();
+            bad.push(format!(
+                "{} ({}): no {}; got {got:?}",
+                c.name, c.section, c.code
+            ));
+            continue;
+        };
+        let level_ok = match (&f.level, c.at) {
+            (Level::Skin, At::Skin) | (Level::Warning, At::Warn) => true,
+            (Level::Route(r), At::Route(want)) => r == want,
+            _ => false,
+        };
+        if !level_ok {
+            bad.push(format!(
+                "{} ({}): {} is {:?}, wanted {:?}",
+                c.name, c.section, c.code, f.level, c.at
+            ));
+        }
+        if let Some(want) = c.text
+            && f.text.as_deref() != Some(want)
+        {
+            bad.push(format!(
+                "{} ({}): span covers {:?}, wanted {want:?}",
+                c.name, c.section, f.text
+            ));
+        }
+        if c.text.is_none() && c.at == At::Skin && f.span.is_some() && f.text.is_none() {
+            bad.push(format!("{}: span points outside the file", c.name));
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "{} case(s) failed:\n{}",
+        bad.len(),
+        bad.join("\n")
+    );
+}
+
+#[test]
+fn every_code_has_a_case_or_a_reason() {
+    // Codes no table case can reach on its own: they need a folder on disk (symlinks,
+    // read errors), covered in `load_dir.rs`.
+    let on_disk = [Code::Symlink, Code::Io];
+    let covered: std::collections::HashSet<Code> = cases().iter().map(|c| c.code).collect();
+    let missing: Vec<_> = Code::ALL
+        .iter()
+        .filter(|c| !covered.contains(c) && !on_disk.contains(c))
+        .collect();
+    assert!(missing.is_empty(), "no failing fixture for {missing:?}");
+}
+
+#[test]
+fn a_route_error_drops_the_route_and_keeps_the_skin() {
+    let mut files = base();
+    rep(&mut files, GAME, "icon=\"play\"", "icon=\"plai\"");
+    let pkg = load(files).expect("a route error does not fail the skin");
+    assert!(pkg.routes.contains_key("shell"));
+    assert!(
+        !pkg.routes.contains_key("game"),
+        "the failed route is not offered"
+    );
+    assert_eq!(
+        pkg.report().failed_routes().into_iter().collect::<Vec<_>>(),
+        ["game"]
+    );
+    assert!(!pkg.report().has_skin_errors());
+}
+
+#[test]
+fn a_skin_error_fails_the_skin() {
+    let mut files = base();
+    rep(&mut files, "tokens.kdl", "    space.4 16\n", "");
+    let report = load(files).expect_err("a missing token fails the skin");
+    assert!(report.has_skin_errors());
+    assert!(report.errors().count() >= 1);
+}
+
+#[test]
+fn assets_that_are_valid_are_accepted_and_referenced() {
+    let mut files = base();
+    add(&mut files, "assets/logo.png", png());
+    add(&mut files, "assets/icons/mark.svg", SVG);
+    add(&mut files, "assets/fonts/extra.otf", font());
+    rep(
+        &mut files,
+        GAME,
+        "    tabs ",
+        "    image src=\"assets/logo.png\" label=\"Logo\"\n    image src=\"assets/icons/mark.svg\" label=\"Mark\"\n    tabs ",
+    );
+    let pkg = load(files).expect("loads");
+    assert!(pkg.report().is_clean(), "{}", pkg.report());
+    assert_eq!(pkg.assets.len(), 3);
+    assert_eq!(pkg.assets["assets/logo.png"].size, Some((1, 1)));
+}
+
+#[test]
+fn effects_and_stretch_forms_are_accepted() {
+    let mut files = base();
+    append(
+        &mut files,
+        "styles.kdl",
+        r##"
+style "fx" {
+    shadow 0 6 18 "#00000066"
+    shadow 0 1 2 "#000000" 3
+    inner-shadow 0 1 4 "#00000088"
+    glow 6 "{@accent alpha=.8}" 18 "{@accent alpha=.35}"
+    bloom-text 8 "{@accent alpha=.6}"
+    noise 0.06
+    scanlines 3 0.18
+    reflection 120 0.14
+    blur-behind 12
+    gradient linear 180 @bg1 @bg0
+    fill transparent
+    border 1 transparent
+    stretch 90
+    font @font.title
+    :hover { gradient radial @bg1 @bg0 "#00000000"; effects none }
+    :on { shadow none; bloom-text none }
+}
+style "wide" { noise 0.06 7; family "Noto Sans"; stretch 87.5; padding 1 2; margin -4 0 1 2; radius 1 2 3 4 }
+"##,
+    );
+    let pkg = load(files).expect("loads");
+    assert!(pkg.report().is_clean(), "{}", pkg.report());
+    assert_eq!(pkg.styles["fx"].states.len(), 2);
+}
+
+#[test]
+fn template_and_expression_errors_point_inside_the_string() {
+    let mut files = base();
+    rep(
+        &mut files,
+        GAME,
+        "{g.title}\" style=\"crumb\"",
+        "{g.title + }\" style=\"crumb\"",
+    );
+    let all = findings(load(files));
+    let f = all
+        .iter()
+        .find(|f| f.code == Code::Expression)
+        .expect("expression error");
+    let text = f.text.as_deref().unwrap_or_default();
+    assert!(
+        text.len() <= 3,
+        "the span is a token, not the whole string: {text:?}"
+    );
+    assert!(f.location.starts_with("routes/game.kdl:"), "{}", f.location);
+}
+
+#[test]
+fn route_files_not_listed_are_a_warning() {
+    let mut files = base();
+    add(&mut files, "routes/queue.kdl", "route \"queue\" { }");
+    let pkg = load(files).expect("loads");
+    let w: Vec<_> = pkg.report().warnings().collect();
+    assert_eq!(w.len(), 1, "{}", pkg.report());
+    assert_eq!(w[0].code, Code::RouteFile);
+    assert!(!pkg.routes.contains_key("queue"));
+}
+
+#[test]
+fn findings_are_miette_diagnostics_with_codes_and_help() {
+    use miette::Diagnostic;
+    let mut files = base();
+    rep(
+        &mut files,
+        GAME,
+        "action=\"game.verify\"",
+        "action=\"game.verfy\"",
+    );
+    let all = findings(load(files));
+    let f = all
+        .iter()
+        .find(|f| f.code == Code::UnknownAction)
+        .expect("finding");
+    assert_eq!(
+        f.code().expect("a code").to_string(),
+        "gogo_skin::unknown_action"
+    );
+    assert!(
+        f.help().is_some(),
+        "every finding says how to fix it where it can"
+    );
+    assert!(f.source_code().is_some());
+    assert!(f.labels().is_some_and(|mut l| l.next().is_some()));
+    assert_eq!(f.severity(), Some(miette::Severity::Error));
+}

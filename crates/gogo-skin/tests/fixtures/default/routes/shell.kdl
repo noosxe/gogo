@@ -1,0 +1,49 @@
+route "shell" {
+    row style="frame" {
+        column style="sidebar" id="nav" {
+            row style="brand" { text "go"; text "go" color=@accent }
+            button "Search…" style="search" key="Ctrl K" action="palette.open" label="Search and commands" id="search"
+            button "Library" icon="square" style="nav" action="nav.go" args="library" id="nav-library" {
+                spacer
+                badge "{library.stats.count}" style="count"
+            }
+            button "Queue" icon="circle" style="nav" action="nav.go" args="queue" {
+                spacer
+                badge "{queue.summary.active}" style="count"
+            }
+            button "Updates" icon="square" style="nav" action="nav.go" args="updates" {
+                spacer
+                badge "{library.stats.updates}" style="count" color=@warn
+            }
+            button "Cloud saves" icon="square" style="nav" action="nav.go" args="saves"
+            text "This machine" style="section-head"
+            button "Installed apps" icon="square" style="nav" action="nav.go" args="apps"
+            button "Runtimes & renderers" icon="square" style="nav" action="nav.go" args="runtimes"
+            button "Doctor" icon="square" style="nav" action="nav.go" args="doctor" {
+                spacer
+                badge "{doctor.all | where summary.warn > 0 | len}" style="count" color=@warn
+            }
+            text "App" style="section-head"
+            button "Settings" icon="circle" style="nav" action="nav.go" args="settings"
+            spacer
+            let q="{queue.summary}"
+            column style="mini" id="transfer" when="{q.current}" {
+                row {
+                    text "{q.current.game.title}" weight=700 grow=1
+                    text "{fmt.pct(q.current.fraction)}" style="mini-meta"
+                }
+                box style="bar" { box style="bar-fill" progress="{q.current.fraction}" }
+                row {
+                    text "{fmt.rate(q.rate)}" style="mini-meta" grow=1
+                    text "{fmt.eta(q.current.eta)}" style="mini-meta"
+                }
+                text "+{q.queued} queued · rate limit {q.rate_limit ? fmt.rate(q.rate_limit) : 'off'}" style="mini-foot"
+            }
+            row style="account" {
+                dot tone="ready" style="dot-ok"
+                text "{account.username}"
+            }
+        }
+        outlet
+    }
+}
