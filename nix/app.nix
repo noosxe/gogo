@@ -14,6 +14,11 @@ let
     cargo = rustToolchain;
     rustc = rustToolchain;
   };
+  # The desktop GUI crates (design 24 §2), by the same name patterns as the
+  # `gui` filter in .github/workflows/ci-jobs.yml.
+  guiCrates = builtins.filter
+    (name: builtins.match "gogo-(contract|skins?|ui-.*|render-.*|gui|gui-.*)" name != null)
+    (builtins.attrNames (pkgs.lib.filterAttrs (_: type: type == "directory") (builtins.readDir ../crates)));
 in
 rustPlatform.buildRustPackage {
   pname = "gogo";
@@ -46,14 +51,10 @@ rustPlatform.buildRustPackage {
 
   # The CLI only (design 24 §7): the desktop GUI crates are workspace members
   # too, and without these flags they would be built and tested into this
-  # package. Tests stay what they were before the GUI crates joined.
+  # package. Every other member is tested, so a new non-GUI crate needs no
+  # edit here.
   cargoBuildFlags = [ "-p" "gogo-cli" ];
-  cargoTestFlags = [
-    "-p" "gogo-cli"
-    "-p" "gogo-core"
-    "-p" "gogo-shims"
-    "-p" "gogo-tui"
-  ];
+  cargoTestFlags = [ "--workspace" ] ++ map (name: "--exclude=${name}") guiCrates;
 
   # gog-warp's reqwest keeps its default native-tls feature, which links
   # openssl-sys on Linux (macOS uses Security.framework instead). Its build

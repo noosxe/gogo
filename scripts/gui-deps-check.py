@@ -5,11 +5,14 @@ Reads `cargo metadata --format-version 1` (runs it, or reads a file given with
 `--metadata FILE`, which the tests use) and checks every workspace member's direct
 dependencies:
 
+0. Every `gogo-*` member is known: a GUI crate or one of NON_GUI. A new crate must
+   be classified here before it joins the workspace.
 1. gogo-core and the other non-GUI members depend on no GUI crate; among the GUI
-   crates only gogo-gui depends on gogo-core.
+   crates only gogo-gui depends on gogo-core. This holds for dev-dependencies too.
 2-6. Each GUI crate depends only on the internal crates its layer allows, and on
    none of the external crates its layer must stay free of (for example: renderers
    never see winit, the model never sees tokio, data crates never see a renderer).
+   Dev-dependencies are free here: tests may use what the layer itself must not.
 7. gogo-gui-testkit is only ever a dev-dependency.
 
 Prints one line per broken rule and exits 1, or exits 0 when the graph is clean.
@@ -28,6 +31,9 @@ GUI = {
     "gogo-gui-testkit", "gogo-gui",
 }
 TESTKIT = "gogo-gui-testkit"
+CORE = "gogo-core"
+# The members that are not GUI crates.
+NON_GUI = {"gogo-core", "gogo-cli", "gogo-shims", "gogo-tui"}
 
 # Internal (workspace) crates each GUI crate may use as a normal or build dependency.
 # gogo-gui may use every GUI crate except the testkit, plus gogo-core.
@@ -75,7 +81,9 @@ FORBIDDEN_EXTERNAL = {
     "gogo-render-gpu": WINDOW | A11Y | FORMAT | {"tokio", "taffy", "parley", "fontique", "vello_cpu"},
     "gogo-ui-interact": RENDER | WINDOW | A11Y | ASYNC | FORMAT,
     "gogo-ui-a11y": RENDER | WINDOW | ASYNC | FORMAT,
-    "gogo-ui-shell": {"vello_cpu", "vello_gpu", "tokio"} | FORMAT,
+    # The GPU renderer creates its own wgpu surface from the window handle (design 24
+    # §2 lists the shell's dependencies), so the shell never sees wgpu (rule 4).
+    "gogo-ui-shell": {"vello_cpu", "vello_gpu", "wgpu", "tokio"} | FORMAT,
     "gogo-gui-model": RENDER | WINDOW | A11Y | ENGINE | ASYNC | FORMAT,
     "gogo-gui-testkit": WINDOW | {"tokio", "vello_gpu", "wgpu"},
     "gogo-gui": set(),
@@ -101,6 +109,9 @@ def check(meta):
     errors = []
     for gui in sorted(GUI - names):
         errors.append(f"{gui}: missing from the workspace (design 24 §2 lists it)")
+    for name in sorted(names - GUI - NON_GUI):
+        if name.startswith("gogo-"):
+            errors.append(f"{name}: unknown member, add it to GUI or NON_GUI in this script (rule 0)")
     for p in sorted(pkgs, key=lambda p: p["name"]):
         name = p["name"]
         for d in p.get("dependencies", []):
@@ -109,13 +120,17 @@ def check(meta):
             if dep == TESTKIT and not dev:
                 errors.append(f"{name} -> {dep}: the testkit is dev-only (rule 7)")
                 continue
+            how = " (dev)" if dev else ""
+            if name not in GUI:
+                if dep in GUI:
+                    errors.append(f"{name} -> {dep}{how}: non-GUI crates never depend on a GUI crate (rule 1)")
+                continue
+            if dep == CORE and name != "gogo-gui":
+                errors.append(f"{name} -> {dep}{how}: only gogo-gui depends on gogo-core (rule 1)")
+                continue
             if dev:
                 continue
             internal = dep in names
-            if name not in GUI:
-                if dep in GUI:
-                    errors.append(f"{name} -> {dep}: non-GUI crates never depend on a GUI crate (rule 1)")
-                continue
             if internal:
                 if dep not in ALLOWED_INTERNAL[name]:
                     errors.append(f"{name} -> {dep}: not an allowed internal dependency (design 24 §2.1)")

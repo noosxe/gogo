@@ -217,10 +217,6 @@ pub(crate) fn parse_n(name: &std::ffi::OsStr) -> Option<u32> {
 
 /// The snapshots under [`snapshots_dir`], for backends that keep them as dirs
 /// there.
-#[cfg_attr(
-    not(any(target_os = "linux", test, feature = "test-util")),
-    allow(dead_code)
-)]
 pub(crate) fn list_dir(game_dir: &Path) -> io::Result<Vec<OnDisk>> {
     let parent = game_dir
         .parent()
@@ -253,10 +249,8 @@ pub(crate) fn list_dir(game_dir: &Path) -> io::Result<Vec<OnDisk>> {
 }
 
 /// Write [`ROLLBACK_MARKER`] into `dir`, holding `n`, durably.
-#[cfg_attr(
-    not(any(target_os = "linux", test, feature = "test-util")),
-    allow(dead_code)
-)]
+// Its callers are the btrfs backend (Linux) and the fake one (tests, test-util).
+#[cfg(any(target_os = "linux", test, feature = "test-util"))]
 pub(crate) fn write_rollback_marker(dir: &Path, n: u32) -> io::Result<()> {
     use std::io::Write as _;
     let mut f = std::fs::File::create(dir.join(ROLLBACK_MARKER))?;
