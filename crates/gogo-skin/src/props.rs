@@ -133,7 +133,7 @@ pub(crate) static STYLE_PROPS: &[PropSpec] = &[
     p("weight", Shape::Num(1.0, 1000.0)),
     p("stretch", Shape::Num(25.0, 200.0)),
     p("tracking", Shape::Num(-5.0, 5.0)),
-    p("line-height", Shape::Num(0.1, 1000.0)),
+    p("line-height", Shape::Num(0.5, 4.0)),
     p("color", Shape::Colour),
     p("text-align", Shape::Choice(&["start", "center", "end"])),
     p("upper", Shape::Flag),

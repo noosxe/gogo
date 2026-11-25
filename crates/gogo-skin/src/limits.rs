@@ -13,6 +13,8 @@ pub const MAX_PNG_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_SVG_BYTES: usize = 512 * 1024;
 /// One OTF or TTF file.
 pub const MAX_FONT_BYTES: usize = 8 * 1024 * 1024;
+/// One licence file: `LICENSE*` or `*.txt`, at the root or in `assets/` (design 27 §1).
+pub const MAX_LICENCE_BYTES: usize = 64 * 1024;
 /// The whole skin folder, every file counted.
 pub const MAX_SKIN_BYTES: usize = 32 * 1024 * 1024;
 /// Files in the package.

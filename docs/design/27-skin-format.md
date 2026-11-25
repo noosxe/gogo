@@ -28,6 +28,7 @@ call except bound actions on input, and nothing to loop over except bounded `eac
   components/*.kdl  components (stock ones copied or rebuilt, or the skin's own)
   routes/*.kdl      one file per covered route: game.kdl, library.kdl, …
   assets/           png, svg, otf/ttf
+  LICENSE*, *.txt   licence texts, at the root or in assets/ (never read as skin data)
 ```
 
 Only these files are read. Asset references are relative to the skin root (S10).
@@ -37,15 +38,21 @@ Only these files are read. Asset references are relative to the skin root (S10).
   `routes/<name>.kdl` exactly one `route "<name>" { … }` node, named like its file.
 - **Assets** may sit in sub-folders of `assets/` (`assets/fonts/…`). A reference is the
   path from the skin root: `assets/logo.png`.
+- **Licence files.** A font's licence travels with it: `LICENSE*` (any extension or none)
+  and `*.txt` may sit at the skin root and anywhere under `assets/`. They are plain text,
+  valid UTF-8, at most 64 KiB each. They are never rendered or parsed, and they count
+  towards the folder size and the file count (§8). A `.txt` or `LICENSE*` anywhere else
+  is a file outside the layout. Bytes that are not UTF-8 are an `asset_text` error; a file
+  over 64 KiB is `limit_file`.
 - **Anything else is an error** (S10): a file of another type (only KDL, PNG, SVG, OTF and
-  TTF are allowed), a file outside the layout above, a symbolic link, a path with `..`, an
+  TTF, and the licence files above, are allowed), a file outside the layout above, a symbolic link, a path with `..`, an
   absolute path, a backslash or a `:`, a path longer than 200 bytes, a file name that isn't
   UTF-8, and two paths that differ only in ASCII case (`A.png` and `a.png`; other letters
   are compared as they are).
 - **Assets are checked by what they are, not by their name:**
   - a **PNG** has the PNG signature and a chunk list that starts with `IHDR` and ends
-    exactly at `IEND`, and its header gives a width and a height of at most 16 384 pixels
-    each and at most 33 554 432 pixels (32 Mpx) together (§8);
+    exactly at `IEND`, and its header gives a width and a height of at most 4 096 pixels
+    each and at most 16 000 000 pixels (16 Mpx) together (§8);
   - an **SVG** is static and refers to nothing outside itself (S10, S11): no `<script>`,
     no event attributes (`onclick`, …), no animation elements, no `<foreignObject>` or
     other embedding, no DOCTYPE or entity declaration. Every `href` and every `url(…)` points
@@ -104,11 +111,13 @@ tokens "dark" {
   style or an element's property the word `transparent` is a colour too.
 - **Lengths** are logical pixels. HiDPI scaling is the app's. Shape and motion tokens
   (`radius`, `space`, `elevation`, `stroke`) are numbers; `motion.*` are milliseconds.
+  `elevation.*` stays a plain number.
 - **A token is** a colour, a number, a font (`family=`, `size=`, `weight=`, and for a
   variable family an optional `stretch=`) or an `@ref`. References are followed at load, so
   a reference to another token, or to a field of a type role (`@font.body.size`), reads
   that token's value. A reference to nothing, or a loop of references, is an error.
-  `easing.<name>` tokens hold a curve name as text.
+  `easing.<name>` tokens hold a curve name as text: one of `linear`, `ease`, `ease-in`,
+  `ease-out` and `ease-in-out`. Any other word is a load error.
 - **Every mode defines the same tokens**, with the same types. The tokens of design 26 §6.1
   are required in every mode, except `tone.queued` and `tone.paused`, which fall back to
   `text-lo` and `warn`. `font.<role>.size` and its siblings are fields of a role, not tokens
@@ -142,7 +151,7 @@ style "primary" { fill @accent; color @on-accent; border 1 @accent }
   error.
 - **Names.** A style name is lowercase letters, digits, `-`, `_` and `.`, and is defined
   once.
-- **States:** `:hover`, `:pressed`, `:focus`, `:on` (toggles, current tab, highlighted
+- **States:** `:hover`, `:pressed`, `:focus`, `:on` (toggles, current tab or nav button, highlighted
   row) and `:disabled`. A state holds properties, not states, and is set once per style.
 - **Element defaults.** A style named after an element applies to every element of that
   kind (`style "button"`).
@@ -177,7 +186,7 @@ its range is a load error that names the property.
   | `stretch` | 25 to 200 (100 is normal) |
   | `font-size` | 1 to 1024 |
   | `tracking` | -5 to 5 (em) |
-  | `line-height` | 0.1 to 1000 (a multiple of the font size) |
+  | `line-height` | 0.5 to 4 (a multiple of the font size) |
   | `aspect` | 0.01 to 100 (width over height) |
   | `grow`, `shrink` | 0 to 1000 |
   | `lines` | a whole number, 1 to 1000 |
@@ -252,7 +261,7 @@ Only the elements below exist. Anything else is a load error.
 
 | Element | Input | Binding |
 |---|---|---|
-| `button "<label>"` | activate | `action="game.play" args="{$id}"`, plus `icon=`, `key="P"` (a key hint and shortcut) |
+| `button "<label>"` | activate | `action="game.play" args="{$id}"`, plus `icon=`, `key="P"` (a key hint and shortcut), and `on="{expr}"`, which puts the button in its `:on` state: `on="{route.current == library}"` marks the current route of a nav button (design 26 §3.1). `on=` is a testable expression like a toggle's; it is not the input variable `on` of `args` |
 | `toggle` | on/off | `on="{expr}"`, `action=…`; `args` may use `on` (the state before the input) |
 | `select` | choice | `value="{expr}" options="{list}"`, `action=…`; `args` may use `value` |
 | `tabs` | section | `bind="ui.tab" sections="overview builds …"` |
@@ -557,8 +566,9 @@ default skin is used (S12).
 | Expression length | 512 characters |
 | Expression depth | 32 |
 | One PNG / SVG / font file | 4 MiB / 512 KiB / 8 MiB |
-| PNG width and height | 16 384 px each |
-| PNG width × height | 32 Mpx (33 554 432 pixels) |
+| One licence file (`LICENSE*`, `*.txt`) | 64 KiB, valid UTF-8 |
+| PNG width and height | 4 096 px each |
+| PNG width × height | 16 Mpx (16 000 000 pixels) |
 | Whole skin folder | 32 MiB |
 
 - **Nodes** count over every KDL file of the skin. **KDL node nesting depth** counts the

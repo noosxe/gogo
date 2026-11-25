@@ -48,7 +48,7 @@ codes! {
     PathInvalid = "path_invalid",
     /// A symbolic link (S10).
     Symlink = "symlink",
-    /// A file that is not KDL, PNG, SVG, OTF or TTF, or is outside the layout (S10).
+    /// A file that is not KDL, PNG, SVG, OTF, TTF or a licence file, or is outside the layout (S10).
     FileType = "file_type",
     /// Two files with the same path, or paths that differ only in ASCII case.
     DuplicatePath = "duplicate_path",
@@ -71,6 +71,8 @@ codes! {
     AssetSvg = "asset_svg",
     /// An OTF or TTF that is not one.
     AssetFont = "asset_font",
+    /// A licence file (`LICENSE*`, `*.txt`) that is not UTF-8 text (design 27 §1).
+    AssetText = "asset_text",
     /// A reference to an asset the package does not have, or of the wrong type.
     AssetMissing = "asset_missing",
     /// An asset reference that is not plain text.

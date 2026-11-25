@@ -781,7 +781,7 @@ impl ShapeParser {
         let mut toks = Vec::new();
         let mut word = String::new();
         for c in src.chars() {
-            if c.is_ascii_alphanumeric() || c == '_' {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
                 word.push(c);
                 continue;
             }
@@ -822,7 +822,9 @@ impl ShapeParser {
     fn word(&mut self) -> String {
         let w = self.peek().to_owned();
         assert!(
-            w.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !w.is_empty(),
+            w.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                && !w.is_empty(),
             "expected a name at token {} of {:?}",
             self.i,
             self.toks

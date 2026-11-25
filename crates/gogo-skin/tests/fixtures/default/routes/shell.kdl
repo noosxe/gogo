@@ -3,28 +3,28 @@ route "shell" {
         column style="sidebar" id="nav" {
             row style="brand" { text "go"; text "go" color=@accent }
             button "Search…" style="search" key="Ctrl K" action="palette.open" label="Search and commands" id="search"
-            button "Library" icon="square" style="nav" action="nav.go" args="library" id="nav-library" {
+            button "Library" icon="square" style="nav" action="nav.go" args="library" on="{route.current == library}" id="nav-library" {
                 spacer
                 badge "{library.stats.count}" style="count"
             }
-            button "Queue" icon="circle" style="nav" action="nav.go" args="queue" {
+            button "Queue" icon="circle" style="nav" action="nav.go" args="queue" on="{route.current == queue}" {
                 spacer
                 badge "{queue.summary.active}" style="count"
             }
-            button "Updates" icon="square" style="nav" action="nav.go" args="updates" {
+            button "Updates" icon="square" style="nav" action="nav.go" args="updates" on="{route.current == updates}" {
                 spacer
                 badge "{library.stats.updates}" style="count" color=@warn
             }
-            button "Cloud saves" icon="square" style="nav" action="nav.go" args="saves"
+            button "Cloud saves" icon="square" style="nav" action="nav.go" args="saves" on="{route.current == saves}"
             text "This machine" style="section-head"
-            button "Installed apps" icon="square" style="nav" action="nav.go" args="apps"
-            button "Runtimes & renderers" icon="square" style="nav" action="nav.go" args="runtimes"
-            button "Doctor" icon="square" style="nav" action="nav.go" args="doctor" {
+            button "Installed apps" icon="square" style="nav" action="nav.go" args="apps" on="{route.current == apps}"
+            button "Runtimes & renderers" icon="square" style="nav" action="nav.go" args="runtimes" on="{route.current == runtimes}"
+            button "Doctor" icon="square" style="nav" action="nav.go" args="doctor" on="{route.current == doctor}" {
                 spacer
                 badge "{doctor.all | where summary.warn > 0 | len}" style="count" color=@warn
             }
             text "App" style="section-head"
-            button "Settings" icon="circle" style="nav" action="nav.go" args="settings"
+            button "Settings" icon="circle" style="nav" action="nav.go" args="settings" on="{route.current == settings}"
             spacer
             let q="{queue.summary}"
             column style="mini" id="transfer" when="{q.current}" {

@@ -66,6 +66,12 @@ pub const ROUTES: &[RouteSpec] = &[
     route("about", &[], &[]),
 ];
 
+/// The names of [`ROUTES`], in the same order: the words `route.current` may be.
+pub static ROUTE_NAMES: &[&str] = &[
+    "shell", "sign-in", "library", "game", "queue", "updates", "saves", "apps", "runtimes",
+    "doctor", "settings", "about",
+];
+
 /// The route called `name`.
 pub fn route_spec(name: &str) -> Option<&'static RouteSpec> {
     ROUTES.iter().find(|r| r.name == name)
@@ -74,6 +80,12 @@ pub fn route_spec(name: &str) -> Option<&'static RouteSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn route_names_are_the_routes() {
+        let names: Vec<&str> = ROUTES.iter().map(|r| r.name).collect();
+        assert_eq!(names, ROUTE_NAMES);
+    }
 
     #[test]
     fn game_route_has_its_sections() {

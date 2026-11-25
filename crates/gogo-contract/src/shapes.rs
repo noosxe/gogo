@@ -292,6 +292,13 @@ pub static APP: Shape = shape(
     ],
 );
 
+/// The route on screen. Its parameters are not part of the shape: they differ per route and
+/// no type of a field covers them (design 26 §3.1).
+pub static ROUTE: Shape = shape(
+    "route",
+    &[f("current", T::OneOf(crate::routes::ROUTE_NAMES))],
+);
+
 pub static LIBRARY_STATS: Shape = shape(
     "library.stats",
     &[
@@ -711,6 +718,7 @@ pub static SHAPES: &[&Shape] = &[
     &UPDATE_HINT,
     &ACCOUNT,
     &APP,
+    &ROUTE,
     &LIBRARY_STATS,
     &SEARCH_HIT,
     &BUILD_REF,
@@ -766,6 +774,7 @@ pub fn source_shape(source: &str) -> Option<FieldType> {
         "account" => T::Record(&ACCOUNT),
         "app" => T::Record(&APP),
         "ui" => T::Ui,
+        "route" => T::Record(&ROUTE),
         "library" => GAMES,
         "library.stats" => T::Record(&LIBRARY_STATS),
         "search" => T::List(&SEARCH),

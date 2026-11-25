@@ -46,6 +46,17 @@ fn rep(f: &mut Files, path: &str, from: &str, to: &str) {
     *data = text.replacen(from, to, 1).into_bytes();
 }
 
+/// Every occurrence of `from` in `path`, so a token lands in each mode.
+fn rep_all(f: &mut Files, path: &str, from: &str, to: &str) {
+    let (_, data) = f
+        .iter_mut()
+        .find(|(p, _)| p == path)
+        .unwrap_or_else(|| panic!("no file {path}"));
+    let text = String::from_utf8(std::mem::take(data)).unwrap();
+    assert!(text.contains(from), "`{from}` is not in {path}");
+    *data = text.replace(from, to).into_bytes();
+}
+
 fn append(f: &mut Files, path: &str, extra: &str) {
     let (_, data) = f.iter_mut().find(|(p, _)| p == path).unwrap();
     data.extend(extra.as_bytes());
@@ -70,6 +81,14 @@ fn png() -> Vec<u8> {
     v.extend([0, 0, 0, 0]);
     v.extend(b"IEND");
     v.extend([0; 4]);
+    v
+}
+
+/// A PNG whose header says `w` by `h`.
+fn png_sized(w: u32, h: u32) -> Vec<u8> {
+    let mut v = png();
+    v[16..20].copy_from_slice(&w.to_be_bytes());
+    v[20..24].copy_from_slice(&h.to_be_bytes());
     v
 }
 
@@ -2106,7 +2125,7 @@ fn cases() -> Vec<Case> {
                     f,
                     "tokens.kdl",
                     "    scrim",
-                    "    easing.pick \"Comic Sans\"\n    scrim",
+                    "    easing.pick \"ease\"\n    scrim",
                 );
                 style(f, "family @easing.pick");
             },
@@ -2116,7 +2135,118 @@ fn cases() -> Vec<Case> {
         ),
     ];
     v.extend(contract_cases());
+    v.extend(small_rule_cases());
     v
+}
+
+/// Design 26 §3.1 and S10, design 27 §1, §3, §4 and §8: the current route on a nav
+/// button, licence files, the pixel cap and the token forms.
+fn small_rule_cases() -> Vec<Case> {
+    use At::*;
+    use Code::*;
+    vec![
+        case(
+            "§5.3 §7",
+            "on= on a button that is not testable",
+            |f| {
+                rep(
+                    f,
+                    SHELL,
+                    "args=\"library\" on=\"{route.current == library}\"",
+                    "args=\"library\" on=\"{library.stats.count}\"",
+                )
+            },
+            TypeMismatch,
+            Route("shell"),
+            Some("\"{library.stats.count}\""),
+        ),
+        case(
+            "§7 names",
+            "route.current against a word that is no route",
+            |f| {
+                rep(
+                    f,
+                    SHELL,
+                    "route.current == library",
+                    "route.current == libary",
+                )
+            },
+            UnknownName,
+            Route("shell"),
+            Some("libary"),
+        ),
+        case(
+            "§1 §8 S10",
+            "a licence file over 64 KiB",
+            |f| add(f, "LICENSE", vec![b'x'; 64 * 1024 + 1]),
+            LimitFile,
+            Skin,
+            None,
+        ),
+        case(
+            "§1 S10",
+            "a licence file that is not UTF-8",
+            |f| add(f, "assets/OFL.txt", vec![0xff, 0xfe, 0xfd]),
+            AssetText,
+            Skin,
+            None,
+        ),
+        case(
+            "§1 S10",
+            "a .txt where licence files are not allowed",
+            |f| add(f, "routes/notes.txt", "x"),
+            FileType,
+            Skin,
+            None,
+        ),
+        case(
+            "§1 §8",
+            "a png 4097 px wide",
+            |f| add(f, "assets/a.png", png_sized(4097, 1)),
+            AssetPng,
+            Skin,
+            None,
+        ),
+        case(
+            "§1 §8",
+            "a png of 4096 by 4096, over 16 Mpx",
+            |f| add(f, "assets/a.png", png_sized(4096, 4096)),
+            AssetPng,
+            Skin,
+            None,
+        ),
+        case(
+            "§3",
+            "an easing outside the set",
+            |f| {
+                rep(
+                    f,
+                    "tokens.kdl",
+                    "    scrim",
+                    "    easing.out \"bounce\"\n    scrim",
+                )
+            },
+            TokenValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§4",
+            "line-height under 0.5",
+            |f| style(f, "line-height 0.4"),
+            PropertyValue,
+            Skin,
+            None,
+        ),
+        case(
+            "§4",
+            "line-height over 4",
+            |f| style(f, "line-height 4.1"),
+            PropertyValue,
+            Skin,
+            None,
+        ),
+    ]
 }
 
 /// The contract check (design 27 §7, §9 step 2; design 26 S5, S16, S21): one failing
@@ -3394,6 +3524,74 @@ fn a_parameter_tested_by_when_takes_any_type() {
     );
     game_insert(&mut files, "use \"maybe\" p=\"{g.title}\"");
     game_insert(&mut files, "use \"maybe\" p=\"{game.builds($id)}\"");
+    let pkg = load(files).expect("loads");
+    assert!(pkg.report().is_clean(), "{}", pkg.report());
+}
+
+#[test]
+fn licence_files_are_accepted_at_the_root_and_under_assets() {
+    let mut files = base();
+    for path in [
+        "LICENSE",
+        "OFL.txt",
+        "LICENSE.md",
+        "assets/LICENSE",
+        "assets/OFL.txt",
+        "assets/fonts/LICENSE-OFL",
+        "assets/fonts/notes.TXT",
+    ] {
+        add(&mut files, path, "SIL Open Font License");
+    }
+    // The size limit is inclusive, and a non-ASCII text is still text.
+    add(&mut files, "assets/big.txt", vec![b'x'; 64 * 1024]);
+    add(&mut files, "assets/utf8.txt", "Gro\u{df}e Schrift");
+    let pkg = load(files).expect("loads");
+    assert!(pkg.report().is_clean(), "{}", pkg.report());
+    assert!(pkg.assets.is_empty(), "a licence file is not an asset");
+}
+
+#[test]
+fn a_png_at_the_pixel_cap_is_accepted() {
+    let mut files = base();
+    add(&mut files, "assets/a.png", png_sized(4096, 3906));
+    add(&mut files, "assets/b.png", png_sized(4096, 1));
+    let pkg = load(files).expect("loads");
+    assert!(pkg.report().is_clean(), "{}", pkg.report());
+    assert_eq!(pkg.assets["assets/a.png"].size, Some((4096, 3906)));
+}
+
+#[test]
+fn every_easing_word_and_the_line_height_bounds_are_accepted() {
+    let mut files = base();
+    let words = ["linear", "ease", "ease-in", "ease-out", "ease-in-out"];
+    let tokens: String = words
+        .iter()
+        .map(|w| format!("    easing.{w} \"{w}\"\n"))
+        .collect();
+    rep_all(
+        &mut files,
+        "tokens.kdl",
+        "    scrim",
+        &format!("{tokens}    scrim"),
+    );
+    append(
+        &mut files,
+        "styles.kdl",
+        "\nstyle \"lh\" { line-height 0.5 }\nstyle \"lh2\" { line-height 4 }\n",
+    );
+    let pkg = load(files).expect("loads");
+    assert!(pkg.report().is_clean(), "{}", pkg.report());
+}
+
+#[test]
+fn route_current_compares_with_a_bare_or_a_quoted_route_word() {
+    let mut files = base();
+    rep(
+        &mut files,
+        SHELL,
+        "route.current == library",
+        "route.current == 'sign-in' or route.current == 'queue' or route.current == queue or route.current == game",
+    );
     let pkg = load(files).expect("loads");
     assert!(pkg.report().is_clean(), "{}", pkg.report());
 }

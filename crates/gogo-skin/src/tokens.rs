@@ -189,6 +189,9 @@ fn expected_kind(name: &str) -> Option<TokenKind> {
     }
 }
 
+/// The curves an `easing.*` token may name (design 27 §3).
+pub const EASINGS: &[&str] = &["linear", "ease", "ease-in", "ease-out", "ease-in-out"];
+
 /// A declaration before references are followed.
 enum Decl {
     Value(TokenValue),
@@ -352,6 +355,15 @@ fn decl(col: &mut Collector, t: &RawNode) -> Option<Decl> {
                 return None;
             }
             if expected_kind(&t.name) == Some(TokenKind::Text) {
+                if !EASINGS.contains(&s.as_str()) {
+                    col.error(
+                        Code::TokenValue,
+                        a.span,
+                        format!("`{s}` is not an easing curve"),
+                    )
+                    .help(format!("an easing is one of {}", EASINGS.join(", ")));
+                    return None;
+                }
                 return Some(Decl::Value(TokenValue::Text(s.clone())));
             }
             match Rgba::parse(s) {

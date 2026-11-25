@@ -20,7 +20,8 @@ use crate::ast::{self, Node};
 use crate::diag::{Code, Collector, LoadScope, Report};
 use crate::elements::{Place, Sig, Walk, World};
 use crate::limits::{
-    MAX_DEPTH, MAX_FILES, MAX_KDL_FILE_BYTES, MAX_NODES, MAX_PATH_BYTES, MAX_SKIN_BYTES,
+    MAX_DEPTH, MAX_FILES, MAX_KDL_FILE_BYTES, MAX_LICENCE_BYTES, MAX_NODES, MAX_PATH_BYTES,
+    MAX_SKIN_BYTES,
 };
 use crate::manifest::{self, Manifest, Mode};
 use crate::names::{is_ident, is_style_name, suggest};
@@ -168,6 +169,24 @@ enum Slot {
     Component,
     Route(String),
     Asset(AssetKind),
+    /// A plain-text licence file (design 27 §1): kept out of every parser.
+    Licence,
+}
+
+impl Slot {
+    fn max_bytes(&self) -> usize {
+        match self {
+            Slot::Asset(k) => k.max_bytes(),
+            Slot::Licence => MAX_LICENCE_BYTES,
+            _ => MAX_KDL_FILE_BYTES,
+        }
+    }
+}
+
+/// `LICENSE*` (any extension or none) and `*.txt`, whatever the case.
+fn is_licence_name(file: &str) -> bool {
+    let lower = file.to_ascii_lowercase();
+    lower.starts_with("license") || lower.ends_with(".txt")
 }
 
 const LAYOUT_HELP: &str = "a skin holds skin.kdl, tokens.kdl, styles.kdl, components/*.kdl, routes/*.kdl and assets/ (design 27 §1)";
@@ -178,6 +197,13 @@ fn classify(path: &str) -> Result<Slot, String> {
         "tokens.kdl" => return Ok(Slot::Tokens),
         "styles.kdl" => return Ok(Slot::Styles),
         _ => {}
+    }
+    // Licence files sit at the root or in `assets/`, at any depth below it.
+    if let Some((dir, file)) = path.rsplit_once('/').or(Some(("", path)))
+        && (dir.is_empty() || dir == "assets" || dir.starts_with("assets/"))
+        && is_licence_name(file)
+    {
+        return Ok(Slot::Licence);
     }
     let ext = path
         .rsplit_once('.')
@@ -263,10 +289,7 @@ impl Intake {
                 return None;
             }
         };
-        let limit = match &slot {
-            Slot::Asset(k) => k.max_bytes(),
-            _ => MAX_KDL_FILE_BYTES,
-        };
+        let limit = slot.max_bytes();
         if size > limit as u64 {
             self.col
                 .path_error(
@@ -388,10 +411,7 @@ fn read_dir(intake: &mut Intake, root: &Path, rel: &str, depth: usize) {
             let Some(slot) = intake.admit(&path, meta.len()) else {
                 continue;
             };
-            let limit = match &slot {
-                Slot::Asset(k) => k.max_bytes(),
-                _ => MAX_KDL_FILE_BYTES,
-            };
+            let limit = slot.max_bytes();
             let mut data = Vec::new();
             let read = std::fs::File::open(&full)
                 .and_then(|f| f.take(limit as u64 + 1).read_to_end(&mut data));
@@ -502,6 +522,17 @@ fn finish(intake: Intake, name: &str) -> Result<SkinPackage, Report> {
     let mut parsed: Vec<Parsed> = Vec::new();
     for (path, slot, data) in &files {
         if matches!(slot, Slot::Asset(_)) {
+            continue;
+        }
+        if *slot == Slot::Licence {
+            if std::str::from_utf8(data).is_err() {
+                col.path_error(
+                    Code::AssetText,
+                    path,
+                    format!("`{path}` is not valid UTF-8"),
+                )
+                .help("a licence file is plain text (design 27 §1)");
+            }
             continue;
         }
         let Ok(text) = std::str::from_utf8(data) else {

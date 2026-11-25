@@ -108,6 +108,7 @@ pub const SOURCES: &[SourceSpec] = &[
     src("account", &[], Live::Event, &["whoami"]),
     src("app", &[], Live::Event, &[]),
     src("ui", &[], Live::OnWrite, &[]),
+    src("route", &[], Live::Event, &[]),
     // §3.2 Library and search
     src(
         "library",
