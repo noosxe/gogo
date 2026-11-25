@@ -12,7 +12,7 @@ use gogo_contract::actions::{ACTIONS, ParamType};
 use gogo_contract::routes::ROUTES;
 use gogo_contract::shapes::{self, Field, FieldType};
 use gogo_contract::sources::SOURCES;
-use gogo_contract::tokens::{COLOURS, FONT_FIELDS, FONT_ROLES, MOTION, SHAPE};
+use gogo_contract::tokens::{COLOURS, EASINGS, FONT_FIELDS, FONT_ROLES, MOTION, SHAPE};
 use gogo_contract::widgets::{Depth, Placement, WIDGETS};
 use gogo_contract::{Invariant, Os, Status, ValueType};
 use std::collections::{BTreeMap, BTreeSet};
@@ -628,7 +628,7 @@ fn tokens_match_section_6_1() {
         spans(&bullets[label])
             .iter()
             .flat_map(|s| s.split_whitespace().map(str::to_owned).collect::<Vec<_>>())
-            .filter(|t| t != "easing.*")
+            .filter(|t| t != "easing.*" && !EASINGS.contains(&t.as_str()))
             .flat_map(|t| expand(&t))
             .collect()
     };
@@ -636,9 +636,19 @@ fn tokens_match_section_6_1() {
     same_set("type roles", words("Type roles"), FONT_ROLES);
     same_set("shape tokens", words("Shape"), SHAPE);
     same_set("motion tokens", words("Motion"), MOTION);
+    let easing_words: BTreeSet<String> = spans(&bullets["Motion"])
+        .iter()
+        .flat_map(|s| s.split_whitespace().map(str::to_owned).collect::<Vec<_>>())
+        .filter(|t| EASINGS.contains(&t.as_str()))
+        .collect();
+    same_set("easing words", easing_words, EASINGS);
     assert!(
         bullets["Motion"].contains("`easing.*`"),
-        "easing.* is open-ended in code"
+        "easing.* names a curve"
+    );
+    assert!(
+        bullets["Shape"].contains("`elevation.0…3` (a number)"),
+        "elevation is a number"
     );
     assert!(
         bullets["Type roles"].contains("each with family, size and weight"),
