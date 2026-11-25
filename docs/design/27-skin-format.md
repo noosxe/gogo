@@ -1,8 +1,8 @@
 # 27 — Skin format (#520)
 
-Status: **accepted** (2026-11-25). The loader and structural validator are built
-(`gogo-skin`, design 24 §8 stack B, PR B3b); resolving names against the contract and
-binding are not yet. This is the reference for skin authors.
+Status: **accepted** (2026-11-25). The loader and validator are built (`gogo-skin`,
+design 24 §8 stack B, PRs B3b and B3c), including the check of names, fields and types
+against the contract; binding is not yet. This is the reference for skin authors.
 
 A skin is a folder of [KDL](https://kdl.dev) v2 files: a declarative tree, styles and
 tokens. It is written against the contract (design 26): it binds sources, places app
@@ -266,8 +266,21 @@ Only the elements below exist. Anything else is a load error.
   too. It must name an action from design 26
   §4 that a skin may bind. `args` is split at
   whitespace outside `{…}` into terms; a term `name=value` names a parameter; each term is
-  a template, parsed at load. That `args` type-check against the action is checked with the
-  contract (PR B3c).
+  a template, parsed at load. The terms are matched to the action's parameters (design 26
+  §4): `name=value` by name, the others in order. A parameter that doesn't exist, one given
+  twice, one too many and one that is required and missing are errors. Each term is then
+  checked against its parameter:
+  - a **field** passed where the parameter has a type must have that type;
+  - a parameter that names a route, a `ui` variable or a setting key (S21) is written out
+    in the skin as a literal, and so is checked at load: a route must be one of design 26
+    §6.2, a variable one the manifest declares and a key one a skin may set;
+  - a word where the parameter takes a fixed set is one of its words.
+
+  For `nav.go` the terms after the route are the route's parameters (`game {$id} files`):
+  its required ones must be there, and a `section` is one of the route's sections.
+  An action named by a component's parameter is checked at every `use`: the name that
+  `use` gave the parameter, and the term `{param}` as the text it gave, so a key can't be
+  smuggled to `settings.set` through a parameter.
 - **Inputs.** `value` belongs to `select` and `on` to `toggle` (and `dot`, `led`). Only
   `toggle` and `select` may use `value` and `on` in `args`; any other element that does is a
   load error.
@@ -321,8 +334,8 @@ env-table game="{$id}" row-actions="menu" title="Environment"
 - **Depth-A widgets** (`confirm-destructive`, `secret-input`, `focus-ring`) take no parts.
   Skins reach them only through tokens, and writing one as an element is a load error.
 - **Where parts go.** `part` goes only inside a depth-B widget, and a depth-B widget holds
-  only `part`s. The loader keeps part names and variant values as written; the contract
-  check above is PR B3c's.
+  only `part`s. The loader resolves each part name, variant value and `placement` to the
+  contract's entry and keeps it in the tree.
 
 ### 5.6 Progress
 
@@ -340,7 +353,8 @@ component "summary-tile" params="mark tone title sub link action args" {
 ```
 
 - **Using one.** `use "summary-tile" title="…"` instantiates a component, and parameters
-  are bound like `let` values. A component the skin doesn't define, or a parameter it
+  are bound like `let` values. A parameter a `use` leaves out is null, so `when="{param}"`
+  is allowed on any parameter. A component the skin doesn't define, or a parameter it
   doesn't declare, is a load error; `when=` and `id=` work on any `use`. A parameter name
   is lowercase letters, digits and `_`, and `when` and `id` are reserved.
 - **No loops.** Components that use each other, or themselves, are a load error (S20). A
@@ -459,29 +473,48 @@ association.
 
 A bare name resolves in this order:
 
-1. a **variable**, when one is bound by that name: a `let`, a parameter, an input
-   variable (`value`, `on`), or, inside a `where` predicate, a field of the item;
-2. otherwise it must be an **enum word of the contract**: a status (design 26 §2), an OS,
-   or a word of the fixed set of a field in design 26 §3 (`ready`, `linux`, …). It is the
-   text of that word, so `g.status == ready` compares the status with `ready`;
-3. anything else is a load error, "unknown name", pointing at the name.
+1. a **variable**, when one is bound by that name: a `let`, a parameter, an `each`
+   variable, a `data-table`'s `row`, an input variable (`value`, `on`), or, inside a
+   `where` predicate, a field of the item;
+2. a **source** that takes no argument (`ui`, `app`, `account`, `queue.summary`, …);
+3. otherwise it must be an **enum word of the contract**: a status (design 26 §2), an OS,
+   or a word of the fixed set of a field in design 26 §3 (`ready`, `linux`, …), and also a
+   word of one of the skin's own `enum` variables and a route section name. It is the text
+   of that word, so `g.status == ready` compares the status with `ready`;
+4. anything else is a load error, "unknown name", pointing at the name.
 
-The loader checks every name of every expression (§9; `Expr::names` lists them) against
-the variables in scope at that point. A `where` predicate also accepts the fields of the
-list's items.
+The loader checks every name of every expression (§9) against the variables in scope at
+that point. A `where` predicate also accepts the fields of the list's items; when the
+type of the list is unknown, it accepts any name. The first name of a field path is a
+variable or a source, never a word: `game.title` without `($id)` is an unknown name. A
+source's name may have a dot (`library.stats`); the loader reads `library.stats.count` as
+that source and the field `count`.
+
+A source call is checked too: the source must exist, can't be one that reaches a skin
+only through an app widget (`job.log`), and takes the number of arguments it declares.
+A formatter or status helper is checked by name only.
 
 ### What the loader checks
 
 - **Every name**, as above.
 - **Every field path**, from its root: a source, a `let`, an `each` item, a `data-table`
-  `row`, or a component parameter. A path into a parameter is checked at each use of the
-  component, with the type of the argument given there. An unknown field is a load error
-  (design 26 S16).
-- **Types where an element needs one:**
-  - `when` and `on` take a `Bool`, something that may be null, or a list (empty or not);
+  `row`, `ui` (the manifest's variables) or a component parameter. Each step is looked up
+  in the type of the step before (design 26 §3), looking through `Option`; the fields of a
+  `sort` key are checked the same way. An unknown field is a load error that lists the
+  record's fields (design 26 S16). A value with no fields (text, a number, an opaque value
+  an app widget draws) has none to name. A value whose type the loader can't tell, such
+  as a computed one, ends the check of its path without an error.
+  A path into a parameter is checked at each use of the component, with the type of the
+  argument given there (if known); the finding points at that argument and says where the
+  path is.
+- **Types where an element needs one,** when the loader knows the type of the expression:
+  - `when`, `on` and `highlight` take a `Bool`, something that may be null, or a list
+    (empty or not). A component parameter counts as something that may be null, since a
+    `use` can leave it out;
   - `each` and `rows` take a list;
   - `progress` takes a `Fraction`;
-  - an action argument takes the type of that action's parameter (design 26 §4).
+  - an action argument that is a plain field path takes the type of that action's
+    parameter (design 26 §4); a computed value (`not on`, `a ? b : c`) is not checked.
 - **Everything else is typed when it is evaluated** (below). Full type inference is
   planned (#564).
 
@@ -569,15 +602,18 @@ and lift the cap, are planned with scrolling (#545).
    §2). A route whose binding fails falls back (design 26 §8). The loader reports why, with
    file and line.
 
-The finished loader does all of the steps above. They land in two PRs:
-- **B3b (this PR)** does steps 1 and 3 and the structural part of step 2: names, shapes,
-  types, ranges, token references, limits and the accessible-name rule. Every template
-  and expression is parsed here, but its names are not resolved yet: §7's check of every
-  name against the variables in scope, and the field and type checks of expressions,
-  are not made.
-- **B3c** adds resolving names to the contract (an action's parameters, a route's
-  sections, a widget's parts and variants), §7's name check, the field and type checks
-  of expressions, and S7.
+The loader is built in three PRs:
+- **B3b** does steps 1 and 3 and the structural part of step 2: names, shapes, types,
+  ranges, token references, limits and the accessible-name rule. Every template and
+  expression is parsed there.
+- **B3c** does the contract part of step 2. Every name resolves once to its `&'static`
+  contract entry, kept in the tree so binding never looks a name up by string: an
+  element's `Resolved` holds its actions with their arguments matched to the action's
+  parameters, its app widget, part, variants and `tabs` sections, and a source name or
+  call in an expression holds its `SourceSpec`. It checks the routes and sections of
+  `nav.go` and `tabs`, parts, variant values and placements, the parts that can't be
+  hidden (S5), `settings.set` keys (S21), §7's names, field paths and types, and
+  component parameters at each `use`. S7 is not checked yet.
 - **B4** adds binding.
 
 Every finding is a miette diagnostic with a stable code (`gogo_skin::<rule>`), the file,
