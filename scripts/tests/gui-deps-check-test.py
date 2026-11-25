@@ -60,6 +60,54 @@ def with_edge(src, dep):
     return g
 
 
+def repo_file(rel):
+    with open(os.path.join(REPO, rel), encoding="utf-8") as f:
+        return f.read()
+
+
+WORKFLOW = repo_file(check.WORKFLOW)
+APP_NIX = repo_file(check.APP_NIX)
+
+
+class Drift(unittest.TestCase):
+    def assertDrift(self, needle, workflow=WORKFLOW, app_nix=APP_NIX):
+        errors = check.drift(workflow, app_nix)
+        self.assertTrue(any(needle in e for e in errors), errors)
+
+    def test_repo_has_no_drift(self):
+        self.assertEqual(check.drift(WORKFLOW, APP_NIX), [])
+
+    def test_names_match_the_pattern(self):
+        for name in check.GUI:
+            self.assertRegex(name, "^" + check.GUI_NAME + "$")
+        for name in check.NON_GUI:
+            self.assertNotRegex(name, "^" + check.GUI_NAME + "$")
+
+    def test_gui_crates_list_missing_a_crate(self):
+        self.assertDrift("GUI_CRATES lacks gogo-ui-a11y", workflow=WORKFLOW.replace(" gogo-ui-a11y", "", 1))
+
+    def test_gui_crates_list_with_an_extra_crate(self):
+        wf = WORKFLOW.replace("gogo-gui-testkit gogo-gui\n", "gogo-gui-testkit gogo-gui gogo-cli\n", 1)
+        self.assertNotEqual(wf, WORKFLOW)
+        self.assertDrift("GUI_CRATES names gogo-cli", workflow=wf)
+
+    def test_gui_filter_missing_a_crate(self):
+        wf = WORKFLOW.replace("              - 'crates/gogo-render-*/**'\n", "", 1)
+        self.assertNotEqual(wf, WORKFLOW)
+        self.assertDrift("the gui filter misses crates/gogo-render-cpu", workflow=wf)
+
+    def test_gui_filter_missing_core(self):
+        wf = WORKFLOW.replace("              - 'crates/gogo-core/**'\n", "", 1)
+        self.assertDrift("the gui filter misses crates/gogo-core", workflow=wf)
+
+    def test_gui_filter_covering_a_non_gui_crate(self):
+        wf = WORKFLOW.replace("              - 'crates/gogo-core/**'\n", "              - 'crates/gogo-core/**'\n              - 'crates/gogo-c*/**'\n", 1)
+        self.assertDrift("the gui filter covers crates/gogo-cli", workflow=wf)
+
+    def test_app_nix_pattern_changed(self):
+        self.assertDrift("doesn't match crates with GUI_NAME", app_nix=APP_NIX.replace("ui-.*|", "ui-.+|"))
+
+
 class Rules(unittest.TestCase):
     def assertBroken(self, graph, needle, dev=None):
         errors = check.check(metadata(graph, dev))
