@@ -253,6 +253,10 @@ pub(crate) fn list_dir(game_dir: &Path) -> io::Result<Vec<OnDisk>> {
 }
 
 /// Write [`ROLLBACK_MARKER`] into `dir`, holding `n`, durably.
+#[cfg_attr(
+    not(any(target_os = "linux", test, feature = "test-util")),
+    allow(dead_code)
+)]
 pub(crate) fn write_rollback_marker(dir: &Path, n: u32) -> io::Result<()> {
     use std::io::Write as _;
     let mut f = std::fs::File::create(dir.join(ROLLBACK_MARKER))?;
