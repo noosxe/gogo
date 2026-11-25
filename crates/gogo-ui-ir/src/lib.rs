@@ -35,12 +35,17 @@
 //! - **Angles** are degrees, CSS style: 0 points up, 90 right, 180 down.
 //! - **Paint order** per node is design 28 §1: shadows, glow, backdrop, fill, noise,
 //!   scanlines, reflection, inner shadow, border, the node's text, children, focus ring.
-//! - **Document order** of a [`Tree`] (pre-order) is the paint order of siblings and the
-//!   focus order.
+//! - **Document order** of a [`Tree`] (pre-order) is the paint order of siblings. The
+//!   keyboard visits the focusable, enabled nodes in the same order
+//!   ([`Tree::focus_order`]).
+//!
+//! The crate depends on no other gogo crate and on no layout, text, render or window
+//! crate. Its only dependencies are `thiserror` and, behind the `serde` feature, `serde`.
 //!
 //! With the `serde` feature every type serializes (the dev inspector); nothing reads
 //! a tree back.
 #![deny(unsafe_code)]
+#![warn(missing_docs)]
 
 mod a11y;
 mod layout;

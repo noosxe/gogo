@@ -6,8 +6,11 @@
 pub struct Color(pub [u8; 4]);
 
 impl Color {
+    /// Fully transparent black.
     pub const TRANSPARENT: Color = Color([0, 0, 0, 0]);
+    /// Opaque black.
     pub const BLACK: Color = Color([0, 0, 0, 255]);
+    /// Opaque white.
     pub const WHITE: Color = Color([255, 255, 255, 255]);
 
     /// An opaque colour.
@@ -15,6 +18,7 @@ impl Color {
         Color([r, g, b, 255])
     }
 
+    /// A colour with an alpha channel (straight, not premultiplied).
     pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Color {
         Color([r, g, b, a])
     }
@@ -26,22 +30,28 @@ impl Color {
 pub struct GradientStop {
     /// Position along the gradient, 0 to 1. Stops are in ascending order.
     pub offset: f32,
+    /// The colour at that position.
     pub color: Color,
 }
 
 /// What fills a node's box.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
 pub enum Fill {
+    /// One colour.
     Solid(Color),
     /// CSS angle in degrees (180 runs top to bottom). Two to eight stops.
     Linear {
+        /// The gradient line's angle in degrees.
         angle: f32,
+        /// The colour stops, ascending by offset.
         stops: Vec<GradientStop>,
     },
     /// Centred ellipse over the box, from the middle (offset 0) to the farthest corner
     /// (offset 1). Two to eight stops.
     Radial {
+        /// The colour stops, ascending by offset.
         stops: Vec<GradientStop>,
     },
 }
@@ -52,12 +62,14 @@ pub enum Fill {
 pub struct Stroke {
     /// Logical pixels. A border's width also counts in layout.
     pub width: f32,
+    /// The line colour.
     pub color: Color,
 }
 
 /// The outline of a node's box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
 pub enum Shape {
     /// A rectangle with [`Paint::radius`] corners. The default.
     #[default]
@@ -73,6 +85,7 @@ pub enum Shape {
 pub struct GlowLayer {
     /// CSS blur radius in px: sigma is half of it.
     pub radius: f32,
+    /// The halo colour.
     pub color: Color,
 }
 
@@ -80,6 +93,7 @@ pub struct GlowLayer {
 /// text it lights ([`crate::Bloom`]).
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
 pub enum Effect {
     /// A drop shadow behind the box.
     Shadow {
@@ -91,18 +105,25 @@ pub enum Effect {
         blur: f32,
         /// Growth of the shadow's box in px before blurring.
         spread: f32,
+        /// The shadow colour.
         color: Color,
     },
     /// A shadow drawn inside the box, clipped to it.
     InnerShadow {
+        /// Offset in px, positive right.
         dx: f32,
+        /// Offset in px, positive down.
         dy: f32,
         /// CSS blur radius in px.
         blur: f32,
+        /// The shadow colour.
         color: Color,
     },
     /// One to four halos around the box, innermost first.
-    Glow { layers: Vec<GlowLayer> },
+    Glow {
+        /// The halos, one to four.
+        layers: Vec<GlowLayer>,
+    },
     /// A tiled grain over the fill.
     Noise {
         /// Opacity of the grain, 0 to 1.
@@ -119,10 +140,18 @@ pub enum Effect {
     },
     /// A glass sheen: a white linear gradient at `angle` degrees, from `alpha` fading to
     /// nothing before the middle. Not a mirror.
-    Reflection { angle: f32, alpha: f32 },
+    Reflection {
+        /// CSS angle in degrees.
+        angle: f32,
+        /// Opacity at the brightest point, 0 to 1.
+        alpha: f32,
+    },
     /// Blurs what is already drawn behind the box (`backdrop-filter: blur(radius)`:
     /// sigma is `radius`, not half of it). The most expensive effect.
-    BackdropBlur { radius: f32 },
+    BackdropBlur {
+        /// The blur radius in px (sigma).
+        radius: f32,
+    },
 }
 
 /// How a node's box looks. [`Default`] draws nothing: no fill, no border, square corners,
@@ -138,6 +167,7 @@ pub struct Paint {
     pub radius: [f32; 4],
     /// 0 to 1, for the node and everything under it (a layer, design 28 §1). Default 1.
     pub opacity: f32,
+    /// The outline of the box. Default [`Shape::Rect`].
     pub shape: Shape,
     /// A visual offset in px for the node and its descendants (a pressed key). It never
     /// changes layout or hit areas.
