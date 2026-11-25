@@ -1489,6 +1489,11 @@ dependencies = [
 [[package]]
 name = "gogo-ui-ir"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "gogo-ui-layout"
