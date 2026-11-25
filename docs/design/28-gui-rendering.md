@@ -17,6 +17,10 @@ Renderers never see the IR, a skin or the contract (design 24 §2.1).
   the app fills (design 25 §7). Each renderer turns ids into its own form: a pixmap on the
   CPU, a texture on the GPU.
 
+The op names below are this design's. The prototype's differ slightly (`Bloom` where this
+has `PushFilter`, no separate `Image` op); PR C3 settles the final names and updates this
+table.
+
 | Op | Meaning |
 |---|---|
 | `Fill { shape, brush }` | A path or rounded rect with a solid colour, gradient or image brush |
@@ -36,8 +40,9 @@ Renderers never see the IR, a skin or the contract (design 24 §2.1).
 7. reflection;
 8. inner shadow;
 9. border;
-10. children;
-11. focus ring.
+10. the node's own text runs (after the border, so a border never covers text);
+11. children;
+12. focus ring.
 
 App-owned widgets are appended after the skin's tree, so they are always on top (S7).
 
@@ -53,14 +58,14 @@ Units follow CSS (design 27 §6): a shadow, glow or bloom radius r is a Gaussian
 | Text bloom | `PushFilter(blur)` over the glyph runs, then the sharp text | same (a native filter layer) |
 | Gradient | peniko gradient brush | same |
 | Noise | a tiled noise image brush | same |
-| Scanlines | geometry (thin fills), clipped | same; **no mask layers** (§5) |
-| Reflection | a mirrored, faded copy through clip + opacity | same; **no mask layers** |
+| Scanlines | thin black fills, one every `period` px at the given alpha, clipped to the box | same; **no mask layers** (§5) |
+| Reflection | a glass sheen: a white linear gradient fill over the box at the given angle, fading out before the middle (not a mirror) | same |
 | Backdrop blur | §3 | §3 |
 
 - *Measured:* both renderers scored the same on an effects sheet and on the three prototype
   skins, within a few levels per pixel.
-- **vello_cpu's blurred rounded rect is a little narrower than a true Gaussian** (an
-  upstream bug). Goldens are taken from vello_cpu itself, so tests compare like with like.
+- **vello_cpu's blurred rounded rect is a little narrower than a true Gaussian**
+  (upstream bug [linebender/vello#2043](https://github.com/linebender/vello/issues/2043)). Goldens are taken from vello_cpu itself, so tests compare like with like.
 
 ## 3. Backdrop blur
 
@@ -77,8 +82,11 @@ in one frame is an open optimisation (#543).
 
 - **vello_gpu 0.4 takes images only as GPU textures**, not CPU pixmaps.
   - `gogo-render-gpu` uploads each `ImageId` once into a `TextureCache`.
-  - It evicts least-recently-used textures beyond a **byte budget**, so a scrolling library
-    of covers can't grow without bound (#541).
+  - **Today (prototype):** after each frame it drops every texture that frame didn't use.
+    That is right for one page, but a scrolling library would re-upload covers constantly.
+  - **Target (#541):** keep textures across frames and evict least-recently-used ones
+    beyond a **byte budget**, so a library of covers neither re-uploads nor grows without
+    bound.
   - vello_gpu has no image atlas, so the "image blank from the second frame" bug of compute
     vello can't happen.
 - **The CPU path** keeps decoded pixmaps under the same budget.
@@ -93,7 +101,7 @@ in one frame is an open optimisation (#543).
 
 | Limit | Effect on us |
 |---|---|
-| vello_gpu panics on mask layers and on multi-primitive filters | No effect uses them. A new effect must avoid them, or wait for upstream |
+| vello_gpu 0.4 is a beta. Mask layers are known to panic, so the prototype never uses them. A panic with filter layers that wrap more than one primitive came up while researching the library, but has no upstream issue we can cite, and the prototype never hit it | No effect uses mask layers. A new effect avoids them, and multi-primitive filter layers get a test on both renderers before they ship |
 | vello_cpu filters panic in its multithreading mode | The CPU renderer is single-threaded (*measured* 70 ms for the heaviest page @2×) until upstream fixes it (#555) |
 | No backdrop filter upstream | §3 |
 | Hinting through parley → vello glyph runs is unconfirmed | Small text (10–11 px) is soft at @1× (#553) |

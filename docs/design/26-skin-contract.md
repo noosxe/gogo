@@ -108,6 +108,9 @@ update: UpdateHint? }`.
 
 ### 3.4 Jobs
 
+Live job sources update at most 10 times a second each, and keep only the newest value
+(design 25 §3).
+
 | Source | Shape | Live | From |
 |---|---|---|---|
 | `queue` | `List<Job>` | live | `ProgressEvent`, depot and `Work*` events |
@@ -181,6 +184,18 @@ An action is invoked by name from a bound user input (S4). It has typed paramete
   - `destructive`: strong confirmation (S6).
   - `gated`: also needs a setting to be on, such as cloud writes.
 
+**The app decides kind and tier from the computed plan, never from the skin.** The tables
+below give each action's usual kind and tier, but some depend on what the plan turns out
+to contain:
+- `game.update` is destructive when its plan removes DLC or downgrades;
+- `runner.set_runtime` and `runner.set_galaxy` become plan → job when a download is
+  needed;
+- `game.move` is destructive when its plan crosses filesystems (snapshots are deleted);
+- `account.sign_out` is destructive with `purge_state`.
+
+The app plans first, then applies the strongest tier the plan calls for. A skin can't ask
+for a weaker one; nothing in the format can name a kind or a tier.
+
 **Input variables.** Two names are bound to a control's input when its action fires:
 - `value`: the option a `select` was set to;
 - `on`: a `toggle`'s state before the input.
@@ -200,6 +215,7 @@ on any other element.
 | `nav.go` | `route, params` | immediate / safe |
 | `nav.back` | — | immediate / safe |
 | `palette.open` | `scope?` | immediate / safe (the app-owned palette) |
+| `account.menu` | — | immediate / safe: opens the app-owned account menu (who is signed in, sign in or out, which lead to the `account.*` actions below) |
 | `ui.set` | `var, value` (skin-local state only) | immediate / safe |
 | `clipboard.copy` | a bound non-secret field | immediate / safe |
 
@@ -244,8 +260,8 @@ on any other element.
 | `runner.set_display` | `id, mode?, hdr?, monitor?` | immediate / safe | |
 | `runner.set_galaxy` | `id, on\|off\|default` | immediate; plan if Comet must be downloaded | |
 | `runner.edit_args`, `runner.edit_wrapper` | `id` | prompt / safe | App-owned input with the CLI's validation |
-| `env.edit` | `id, name?` | prompt / safe | App-owned editor; launcher-owned names refused |
-| `env.unset` | `id, name` | immediate / safe | |
+| `env.edit` | `id, name?` | prompt / safe | App-owned editor. `name` must be an existing row of `game.env(id)` (bound as `{row.name}`); without it the editor asks for a new name itself. Launcher-owned names refused |
+| `env.unset` | `id, name` | plan / confirm | `name` must be an existing `game.env(id)` row. Confirm, because unsetting an override can lose a value (a secret can't be shown again) and changes how the game starts; the plan names the variable and what takes its place |
 | `env.reveal` | `id, name` | **app-only** | Not bindable by skins; only the env widget's own control |
 | `exe.run` | `id, n` | immediate / safe | Refused while the game or another run is active |
 
@@ -285,14 +301,28 @@ on any other element.
 | `runtimes.prune`, `renderers.prune` | `unused\|id` | plan / confirm (never removes versions in use) |
 | `doctor.run` | `id?` | immediate / safe |
 | `doctor.stop_leftovers` | `id` (mac) | plan / confirm |
-| `settings.set` | `key, value` | immediate / safe (validated like `config set`) |
+| `settings.set` | `key, value` | immediate / safe, **only for the skin-settable keys below**; validated like `config set` |
 | `settings.open_file` | — | immediate / safe |
 | `app.open_url` | `kind: store_page\|support\|login\|docs, id?` | immediate / safe |
+
+**Skin-settable settings.** `settings.set` from a skin accepts only an allow-list of keys
+that change looks or comfort, never safety. In contract 1.0 these are:
+
+- the GUI's own appearance keys, added with the GUI: `gui.skin`, `gui.mode` (dark or
+  light), `gui.reduced_motion`, `gui.big_screen`;
+- `download.limit` (05; also reachable through `queue.set_rate_limit`).
+
+A setting is **app-only** when it gates an action or weakens a confirmation. Examples are
+the cloud-writes gate on `saves.push`/`saves.sync`, anything that skips a prompt or a plan,
+and auth settings. Only the app's own settings route changes an app-only setting, through
+an app-owned control. The validator rejects a skin that binds `settings.set` to a key
+outside the list (S21). The list only grows in minor versions (§8).
 
 ### 4.10 Deliberately not actions
 
 - Anything that takes a path, URL, shell command or environment value **from the skin**.
 - Reading a secret, the clipboard or any file.
+- Changing an app-only setting (§4.9, S21).
 - Starting another skin, loading code, or changing the active skin's files.
 - The CLI's internal commands (`__shim`, `__pe-scan`) and `completions`.
 
@@ -323,6 +353,13 @@ semantic tokens (§6.1). They come in three **depths**:
 | `focus-ring` | A (a skin may draw its own) | — | If a skin's focus style fails S13, the app's ring is drawn on top |
 | `step-list`, `progress`, `chunk-bar`, `game-card`, `tabs`, `status-badge`, `meter` | **C** | — | Stock components in the default skin |
 
+- **What the prototype has proven.** `plan-card` with `placement=inline`, the `labels`,
+  `layout` and `markers` variants, and the parts `frame, body, header, title, badge, steps,
+  step, footnote, actions, confirm, cancel`. `env-table` with every part listed here except
+  `source`. Everything else in this table is **specified but not yet built**: the other
+  widgets, `placement=modal`, `density`, `step.kind-icon`, `totals`, `warning`, and
+  `env-table`'s `source`. PR B2 encodes the table, and each is reconciled when its widget
+  is built.
 - **Optional parts** are the ones marked `*`. A skin may hide them with
   `part "badge" hidden=#true`. Every other part is always drawn. The plan card's `footnote`
   and `confirm` can never be hidden, and the loader rejects a skin that tries (S5).
@@ -404,17 +441,24 @@ Where each is enforced is in design 25 §4.
 - **S4. Actions fire only from user input.** An action runs only when a click, key or
   activate event lands on an element whose binding names it. Never from load, conditions,
   timers, focus or hover, and at most one action per input event.
-- **S5. Every plan action shows its plan first.** Nothing changes until the user confirms
-  on the app-owned `plan-card` confirm control, or presses its Enter binding while it has
-  focus. A skin button can call an action; it can never *be* the confirmation.
+- **S5. Every action whose computed plan is non-empty shows its plan first.** Whatever
+  the action's usual kind (§4), if the app's plan for it would change anything, nothing
+  changes until the user confirms on the app-owned `plan-card` confirm control, or presses
+  its Enter binding while it has focus. A skin button can call an action; it can never *be* the confirmation.
 - **S6. Destructive actions need strong confirmation.** A typed name or a 1 s hold on
   `confirm-destructive`. The default answer is no.
 - **S7. App widgets stay legible.** At load the app checks the tokens and part styles of
   every app-owned widget:
-  - text contrast ≥ 4.5:1;
-  - borders and focus ≥ 3:1;
-  - minimum sizes;
-  - not transparent, not clipped, not covered (app widgets are on top).
+  - text contrast ≥ 4.5:1 against the fill actually under it;
+  - borders and focus indicators ≥ 3:1;
+  - minimum sizes: text ≥ 11 logical px, every control (confirm, cancel, field) a target of
+    at least 24 × 24 logical px, and the plan card ≥ 280 px wide;
+  - opacity of every part ≥ 0.9;
+  - not clipped: after layout, each part's box lies wholly inside its ancestors' clips and
+    the window;
+  - not covered: hit-testing the centre and the four inset corners of each control returns
+    that control. App widgets are drawn on the top layer, so only another app widget can
+    cover one.
 
   A failing skin's values are replaced with the default skin's for that widget, and the
   loader reports it.
@@ -429,11 +473,16 @@ Where each is enforced is in design 25 §4.
   - Allowed types: KDL, PNG, SVG (static, no scripts or external references) and OTF/TTF.
 - **S11. No network for skins.** No remote assets, fonts or links. The loader rejects any
   URL scheme.
-- **S12. Bounded loading.** The parser is memory-safe. There are limits on file size, node
-  count, depth, expression length and list repeat size (design 27 §8). A skin that exceeds
-  them fails to load, and the default skin is used.
-- **S13. Keyboard reachable.** Every element with an action is focusable, in a sensible
-  order. The focus indicator is ≥ 2 px and ≥ 3:1, or the app's ring is drawn.
+- **S12. Bounded loading.** The static limits on file size, node count, depth, expression
+  length and asset sizes (design 27 §8) are checked at load. A skin that exceeds one fails
+  to load, and the default skin is used. Lists bound at runtime are capped instead, with
+  the cap stated (design 27 §8). The KDL parser is a safe-Rust crate with no `unsafe` in our
+  walker; that is a property of the implementation, not something this invariant tests.
+- **S13. Keyboard reachable.** Every element with an action is focusable. **The focus
+  order is the depth-first order of the bound tree** (document order), which for rows and
+  columns is reading order; app widgets come after the skin's tree, modal ones trap focus
+  until closed. The focus indicator is ≥ 2 px and ≥ 3:1, or the app's ring is drawn. Tests
+  compare Tab order with the tree order and check every actionable node is in it.
 - **S14. Named for screen readers.** Every element with an action has an accessible name:
   its text, or an explicit `label`. The validator rejects one without.
 - **S15. Reduced motion wins.** With reduced motion on, transforms and loops are removed,
@@ -453,6 +502,10 @@ Where each is enforced is in design 25 §4.
   - no I/O and no eval.
 
   Expressions are total and side-effect-free.
+- **S21. Skins can't weaken the safety flow through settings.** `settings.set` from a skin
+  takes only keys on the contract's skin-settable list (§4.9). An app-only setting (one
+  that gates an action or weakens a confirmation, such as cloud writes) can't be bound by a
+  skin; the validator rejects the skin's route.
 
 ## 8. Versioning and fallback
 
