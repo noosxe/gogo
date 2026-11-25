@@ -207,6 +207,9 @@ env-table game="{$id}" row-actions="menu" title="Environment"
 
 - **Checked against the contract.** Part names and variant values are checked, and an
   unknown one is a load error.
+- **Variant names belong to their widget.** `layout` on `plan-card` (`stacked`, `side`)
+  and `layout` on `picker` (`list`, `grid`, `keys`) are two different variants, each
+  checked against its own widget's values.
 - **What can't be hidden.** Hiding a non-optional part, the plan card's `footnote` or
   `confirm` included, is a load error (S5).
 - **Depth-A widgets** (`confirm-destructive`, `secret-input`, `focus-ring`) take no parts.

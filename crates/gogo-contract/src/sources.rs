@@ -27,6 +27,7 @@ pub enum Live {
 
 impl Live {
     /// The words the doc's Live column uses.
+    #[doc(hidden)]
     pub const fn doc(self) -> &'static str {
         match self {
             Self::Event => "event",

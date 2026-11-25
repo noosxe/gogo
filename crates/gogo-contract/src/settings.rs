@@ -57,6 +57,15 @@ mod tests {
     }
 
     #[test]
+    fn nothing_about_cloud_writes_is_skin_settable() {
+        // S21: the cloud-writes gate must never become skin-settable.
+        for key in SKIN_SETTABLE {
+            assert!(!key.contains("cloud"), "{key}");
+            assert!(!APP_ONLY.contains(key), "{key}");
+        }
+    }
+
+    #[test]
     fn no_app_only_key_is_skin_settable() {
         assert!(is_app_only("auth.token_store"));
         assert!(is_app_only("cloud_saves.writes"));

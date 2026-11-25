@@ -188,13 +188,17 @@ An action is invoked by name from a bound user input (S4). It has typed paramete
 below give each action's usual kind and tier, but some depend on what the plan turns out
 to contain:
 - `game.update` is destructive when its plan removes DLC or downgrades;
-- `runner.set_runtime` and `runner.set_galaxy` become plan → job when a download is
-  needed;
+- `runner.set_runtime` becomes plan → job when a download is needed, and
+  `runner.set_galaxy` becomes a plan when Comet must be downloaded;
 - `game.move` is destructive when its plan crosses filesystems (snapshots are deleted);
 - `account.sign_out` is destructive with `purge_state`.
 
 The app plans first, then applies the strongest tier the plan calls for. A skin can't ask
 for a weaker one; nothing in the format can name a kind or a tier.
+- A plan that changes anything is always shown and confirmed, even for an action that is
+  usually immediate (S5). A plan with nothing to do runs nothing.
+- A `gated` action is refused while its setting is off. The app checks the gate before it
+  plans, whatever the skin binds.
 
 **Input variables.** Two names are bound to a control's input when its action fires:
 - `value`: the option a `select` was set to;
