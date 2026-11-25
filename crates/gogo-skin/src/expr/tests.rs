@@ -4,26 +4,31 @@ use gogo_contract::{Status, Value};
 
 use super::*;
 
-pub(super) struct S(pub BTreeMap<String, Value>);
+pub(super) struct S {
+    vars: BTreeMap<String, Value>,
+    id: Value,
+    warn: Value,
+    accent: Value,
+}
 
 impl Scope for S {
-    fn var(&self, n: &str) -> Option<Value> {
-        self.0.get(n).cloned()
+    fn var(&self, n: &str) -> Option<&Value> {
+        self.vars.get(n)
     }
-    fn param(&self, n: &str) -> Option<Value> {
-        (n == "id").then_some(Value::Num(7.0))
+    fn param(&self, n: &str) -> Option<&Value> {
+        (n == "id").then_some(&self.id)
     }
-    fn token(&self, n: &str) -> Option<Value> {
+    fn token(&self, n: &str) -> Option<&Value> {
         match n {
-            "warn" => Some(Value::str("#e0a040")),
-            "accent" => Some(Value::Num(1.0)),
+            "warn" => Some(&self.warn),
+            "accent" => Some(&self.accent),
             _ => None,
         }
     }
-    fn call(&self, n: &str, a: &[Value]) -> Option<Result<Value, CallError>> {
+    fn call(&self, n: &str, a: &[&Value]) -> Option<Result<Value, CallError>> {
         match n {
             "game.builds" => {
-                assert_eq!(a, &[Value::Num(7.0)]);
+                assert_eq!(a, &[&Value::Num(7.0)]);
                 Some(Ok(Value::List(
                     [3.0, 1.0, 2.0]
                         .iter()
@@ -43,7 +48,7 @@ impl Scope for S {
                 ["a", "b", "c"].iter().map(|s| Value::str(*s)).collect(),
             ))),
             "none" => Some(Ok(Value::List(vec![]))),
-            "boom" => Some(Err(CallError::new("it broke"))),
+            "boom" => Some(Err(CallError::Unavailable)),
             _ => None,
         }
     }
@@ -61,11 +66,18 @@ pub(super) fn scope() -> S {
     m.insert("g".into(), Value::Map(g));
     m.insert("tab".into(), Value::str("b"));
     m.insert("count".into(), Value::Num(3.0));
-    S(m)
+    S {
+        vars: m,
+        id: Value::Num(7.0),
+        warn: Value::str("#e0a040"),
+        accent: Value::Num(1.0),
+    }
 }
 
 fn ev(src: &str) -> Result<Value, EvalError> {
-    eval(&parse(src).unwrap(), &scope())
+    let e = parse(src).unwrap();
+    let sc = scope();
+    eval(&e, &sc).map(std::borrow::Cow::into_owned)
 }
 
 fn parse_kind(src: &str) -> ParseErrorKind {
@@ -93,7 +105,10 @@ fn typos_are_errors() {
     let e = ev("g.titel").unwrap_err();
     assert!(e.to_string().contains("no field `titel`"), "{e}");
     assert!(ev("g.update.to").is_err());
-    assert!(matches!(ev("nosuch.fn(1)"), Err(EvalError::UnknownCall(_))));
+    assert!(matches!(
+        ev("nosuch.fn(1)"),
+        Err(EvalError::UnknownCall { .. })
+    ));
     assert!(matches!(ev("$nope"), Err(EvalError::UnknownParam(_))));
     assert!(matches!(ev("@nope"), Err(EvalError::UnknownToken(_))));
     assert!(matches!(ev("boom()"), Err(EvalError::Call { .. })));
@@ -121,10 +136,10 @@ fn parse_errors_carry_spans() {
     assert_eq!(e.span, Span { offset: 2, len: 1 });
     assert_eq!(parse_kind("'abc"), ParseErrorKind::UnterminatedString);
     assert_eq!(parse_kind("@"), ParseErrorKind::MissingName('@'));
-    assert!(matches!(parse_kind("1.2.3"), ParseErrorKind::BadNumber(_)));
+    assert!(matches!(parse_kind("1.2.3"), ParseErrorKind::BadNumber));
     assert!(matches!(
         parse_kind(&"9".repeat(400)),
-        ParseErrorKind::BadNumber(_)
+        ParseErrorKind::BadNumber
     ));
     // Diagnostics expose the span as a label.
     use miette::Diagnostic;
@@ -247,11 +262,11 @@ fn status_helpers_use_the_contract() {
     assert_eq!(ev("status.word(g.status)").unwrap(), Value::str("Ready"));
     for st in Status::ALL {
         let mut sc = scope();
-        sc.0.insert("s".into(), Value::str(st.name()));
-        let got = eval(&parse("status.tone(s)").unwrap(), &sc).unwrap();
-        assert_eq!(got, Value::str(st.tone()));
-        let word = eval(&parse("status.word(s)").unwrap(), &sc).unwrap();
-        assert!(!word.display().is_empty());
+        sc.vars.insert("s".into(), Value::str(st.name()));
+        let tone = parse("status.tone(s)").unwrap();
+        assert_eq!(*eval(&tone, &sc).unwrap(), Value::str(st.tone()));
+        let word = parse("status.word(s)").unwrap();
+        assert!(!eval(&word, &sc).unwrap().display().is_empty());
     }
     // An enum word as a bare name works too.
     assert_eq!(
@@ -260,11 +275,11 @@ fn status_helpers_use_the_contract() {
     );
     assert!(matches!(
         ev("status.tone('installed')"),
-        Err(EvalError::UnknownStatus(_))
+        Err(EvalError::UnknownStatus { .. })
     ));
     assert!(matches!(
         ev("status.word(3)"),
-        Err(EvalError::UnknownStatus(_))
+        Err(EvalError::UnknownStatus { .. })
     ));
 }
 
@@ -289,11 +304,14 @@ fn templates() {
 fn templates_evaluate() {
     let sc = scope();
     let t = parse_template("{g.title} is {g.status | upper}!").unwrap();
-    assert_eq!(t.eval(&sc).unwrap(), Value::str("Hollow Lantern is READY!"));
+    assert_eq!(
+        *t.eval(&sc).unwrap(),
+        Value::str("Hollow Lantern is READY!")
+    );
     let t = parse_template("{count}").unwrap();
-    assert_eq!(t.eval(&sc).unwrap(), Value::Num(3.0));
+    assert_eq!(*t.eval(&sc).unwrap(), Value::Num(3.0));
     let t = parse_template("{'}'} and {\"{\"}").unwrap();
-    assert_eq!(t.eval(&sc).unwrap(), Value::str("} and {"));
+    assert_eq!(*t.eval(&sc).unwrap(), Value::str("} and {"));
     let t = parse_template("n = {count}").unwrap();
     assert!(t.mentions("count") && !t.mentions("g"));
 }
@@ -311,9 +329,9 @@ fn doubled_braces_are_literal() {
     assert_eq!(text("a {{ b }} c"), "a { b } c");
     assert_eq!(text("{{{{"), "{{");
     let t = parse_template("{{{count}}}").unwrap();
-    assert_eq!(t.eval(&sc).unwrap(), Value::str("{3}"));
+    assert_eq!(*t.eval(&sc).unwrap(), Value::str("{3}"));
     let t = parse_template("{{ {count} }}").unwrap();
-    assert_eq!(t.eval(&sc).unwrap(), Value::str("{ 3 }"));
+    assert_eq!(*t.eval(&sc).unwrap(), Value::str("{ 3 }"));
 }
 
 #[test]
@@ -408,8 +426,9 @@ fn mentions_finds_variables() {
 fn eval_never_reparses() {
     // A string value that looks like an expression stays a string.
     let mut sc = scope();
-    sc.0.insert("x".into(), Value::str("1 +"));
-    assert_eq!(eval(&parse("x").unwrap(), &sc).unwrap(), Value::str("1 +"));
+    sc.vars.insert("x".into(), Value::str("1 +"));
+    let x = parse("x").unwrap();
+    assert_eq!(*eval(&x, &sc).unwrap(), Value::str("1 +"));
 }
 
 #[test]
@@ -432,4 +451,124 @@ fn trim_cuts_text_with_an_ellipsis() {
         ev("g.title | trim 'x'"),
         Err(EvalError::StageNeedsNumber { stage: "trim", .. })
     ));
+}
+
+#[test]
+fn comparisons_do_not_chain() {
+    assert_eq!(parse_kind("a < b < c"), ParseErrorKind::ChainedComparison);
+    assert_eq!(parse_kind("a == b != c"), ParseErrorKind::ChainedComparison);
+    assert_eq!(
+        parse("a < b < c").unwrap_err().span,
+        Span { offset: 6, len: 1 }
+    );
+    // Parentheses, and `and`/`or` between comparisons, are fine.
+    assert!(parse("(a < b) == c").is_ok());
+    assert!(parse("a < b and b < c").is_ok());
+}
+
+/// The tree of `src` as text, without the spans, so two spellings of one tree compare.
+fn tree(src: &str) -> String {
+    let mut out = String::new();
+    let mut rest = format!("{:?}", parse(src).unwrap());
+    while let Some(i) = rest.find(", span: Span {") {
+        out.push_str(&rest[..i]);
+        let j = rest[i..].find('}').unwrap();
+        rest = rest[i + j + 1..].to_string();
+    }
+    out.push_str(&rest);
+    out
+}
+
+#[test]
+fn the_ternary_is_right_associative() {
+    assert_eq!(tree("a ? b : c ? d : e"), tree("a ? b : (c ? d : e)"));
+    assert_eq!(ev("false ? 1 : false ? 2 : 3").unwrap(), Value::Num(3.0));
+}
+
+#[test]
+fn precedence_matches_the_documented_table() {
+    // `else` is looser than a pipe, a pipe looser than `or`, `or` looser than `and`.
+    assert_eq!(tree("a else b | len"), tree("a else (b | len)"));
+    assert_eq!(tree("a or b | len"), tree("(a or b) | len"));
+    assert_eq!(tree("a or b and c"), tree("a or (b and c)"));
+    assert_eq!(tree("not a == b"), tree("not (a == b)"));
+    assert_eq!(tree("-a == b"), tree("(-a) == b"));
+}
+
+#[test]
+fn nodes_carry_spans() {
+    let Expr::Call { span, .. } = parse("  game.builds($id)").unwrap() else {
+        panic!("not a call")
+    };
+    assert_eq!(span, Span { offset: 2, len: 16 });
+    let Expr::Field { span, .. } = parse("g.title").unwrap() else {
+        panic!("not a field")
+    };
+    assert_eq!(span, Span { offset: 1, len: 6 });
+    let Expr::Field { span, .. } = parse("g?.title").unwrap() else {
+        panic!("not a field")
+    };
+    assert_eq!(span, Span { offset: 1, len: 7 });
+    let Expr::Name { span, .. } = parse("  ready").unwrap() else {
+        panic!("not a name")
+    };
+    assert_eq!(span, Span { offset: 2, len: 5 });
+}
+
+#[test]
+fn eval_errors_carry_spans_and_codes() {
+    use miette::Diagnostic;
+    let e = ev("g.titel").unwrap_err();
+    assert_eq!(e.span(), Some(Span { offset: 1, len: 6 }));
+    assert_eq!(
+        e.code().map(|c| c.to_string()).as_deref(),
+        Some("gogo_skin::eval::no_field")
+    );
+    assert_eq!(e.labels().map(Iterator::count), Some(1));
+    let e = ev("boom()").unwrap_err();
+    assert_eq!(e.span(), Some(Span { offset: 0, len: 6 }));
+}
+
+#[test]
+fn names_lists_bare_names_in_source_order() {
+    let e = parse("g.status == ready and tab | where installed").unwrap();
+    let got: Vec<_> = e
+        .names()
+        .iter()
+        .map(|n| (n.name, n.in_item_scope))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("g", false),
+            ("ready", false),
+            ("tab", false),
+            ("installed", true)
+        ]
+    );
+    // Sort keys, parameters, tokens and literals are not names.
+    let e = parse("$id == 3 and @warn and true and x | sort -date").unwrap();
+    assert_eq!(e.names().len(), 1);
+    let src = "a ? b : c";
+    let e = parse(src).unwrap();
+    let spans: Vec<_> = e
+        .names()
+        .iter()
+        .map(|n| &src[n.span.offset..n.span.offset + n.span.len])
+        .collect();
+    assert_eq!(spans, ["a", "b", "c"]);
+}
+
+#[test]
+fn eval_lends_what_it_does_not_compute() {
+    use std::borrow::Cow;
+    let sc = scope();
+    let e = parse("g.title").unwrap();
+    assert!(matches!(eval(&e, &sc).unwrap(), Cow::Borrowed(_)));
+    let e = parse("g.title | upper").unwrap();
+    assert!(matches!(eval(&e, &sc).unwrap(), Cow::Owned(_)));
+    let t = parse_template("plain").unwrap();
+    assert!(matches!(t.eval_text(&sc).unwrap(), Cow::Borrowed("plain")));
+    let t = parse_template("{g.title}").unwrap();
+    assert!(matches!(t.eval_text(&sc).unwrap(), Cow::Borrowed(_)));
 }

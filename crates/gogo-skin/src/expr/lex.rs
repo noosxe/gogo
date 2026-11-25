@@ -1,6 +1,6 @@
 //! The lexer. Works on characters, reports byte spans.
 
-use super::error::{ParseError, ParseErrorKind, Span};
+use super::error::{Found, ParseError, ParseErrorKind, Span};
 use super::parse::BinOp;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -25,24 +25,24 @@ pub(super) enum Tok {
 
 impl Tok {
     /// How the token reads in an error message.
-    pub(super) fn describe(&self) -> String {
+    pub(super) fn found(&self) -> Found {
         match self {
-            Tok::Ident(w) => format!("`{w}`"),
-            Tok::Num(_) => "a number".into(),
-            Tok::Str(_) => "a string".into(),
-            Tok::Param(p) => format!("`${p}`"),
-            Tok::Token(t) => format!("`@{t}`"),
-            Tok::Dot => "`.`".into(),
-            Tok::QDot => "`?.`".into(),
-            Tok::LParen => "`(`".into(),
-            Tok::RParen => "`)`".into(),
-            Tok::Comma => "`,`".into(),
-            Tok::Pipe => "`|`".into(),
-            Tok::Question => "`?`".into(),
-            Tok::Colon => "`:`".into(),
-            Tok::Assign => "`=`".into(),
-            Tok::Op(op) => format!("`{}`", op.symbol()),
-            Tok::Minus => "`-`".into(),
+            Tok::Ident(w) => Found::Ident(w.clone()),
+            Tok::Num(_) => Found::Number,
+            Tok::Str(_) => Found::Str,
+            Tok::Param(p) => Found::Param(p.clone()),
+            Tok::Token(t) => Found::Token(t.clone()),
+            Tok::Dot => Found::Dot,
+            Tok::QDot => Found::QDot,
+            Tok::LParen => Found::LParen,
+            Tok::RParen => Found::RParen,
+            Tok::Comma => Found::Comma,
+            Tok::Pipe => Found::Pipe,
+            Tok::Question => Found::Question,
+            Tok::Colon => Found::Colon,
+            Tok::Assign => Found::Assign,
+            Tok::Op(op) => Found::Op(*op),
+            Tok::Minus => Found::Minus,
         }
     }
 }
@@ -217,9 +217,6 @@ pub(super) fn lex(src: &str) -> Result<Lexed, ParseError> {
 fn number(t: &str, span: Span) -> Result<Tok, ParseError> {
     match t.parse::<f64>() {
         Ok(n) if n.is_finite() => Ok(Tok::Num(n)),
-        _ => Err(ParseError::new(
-            ParseErrorKind::BadNumber(t.to_string()),
-            span,
-        )),
+        _ => Err(ParseError::new(ParseErrorKind::BadNumber, span)),
     }
 }
