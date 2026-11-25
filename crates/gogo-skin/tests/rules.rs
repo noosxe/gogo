@@ -3645,3 +3645,130 @@ fn route_current_compares_with_a_bare_or_a_quoted_route_word() {
     let pkg = load(files).expect("loads");
     assert!(pkg.report().is_clean(), "{}", pkg.report());
 }
+
+// ---- design 27 §5.7: a bare `{p}` in `args` stands for the terms the `use` wrote ----
+
+const TILE: &str = "use \"summary-tile\" mark=\"check\" title=\"T\" link=\"L\"";
+
+/// The codes the game route reports for one more `use`, sorted.
+fn codes_of_use(node: &str) -> Vec<Code> {
+    let mut files = base();
+    game_insert(&mut files, node);
+    let mut v: Vec<Code> = findings(load(files)).iter().map(|f| f.code).collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn a_forwarded_args_of_several_terms_is_checked_term_by_term() {
+    // `dlc.add` takes `id` and `dlc`: both terms of the `use` land on them.
+    assert_eq!(
+        codes_of_use(&format!("{TILE} action=\"dlc.add\" args=\"{{$id}} all\"")),
+        vec![]
+    );
+    // Named terms keep their names, so they may come in any order.
+    assert_eq!(
+        codes_of_use(&format!(
+            "{TILE} action=\"dlc.add\" args=\"dlc=all id={{$id}}\""
+        )),
+        vec![]
+    );
+    // The second term is missing.
+    assert_eq!(
+        codes_of_use(&format!("{TILE} action=\"dlc.add\" args=\"{{$id}}\"")),
+        vec![Code::ActionArgs]
+    );
+    // One term too many.
+    assert_eq!(
+        codes_of_use(&format!(
+            "{TILE} action=\"dlc.add\" args=\"{{$id}} all extra\""
+        )),
+        vec![Code::ActionArgs]
+    );
+}
+
+#[test]
+fn a_spliced_settings_key_that_is_app_only_is_refused() {
+    let mut files = base();
+    game_insert(
+        &mut files,
+        &format!("{TILE} action=\"settings.set\" args=\"cloud_saves.writes on\""),
+    );
+    let all = findings(load(files));
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert_eq!(all[0].code, Code::SettingKey);
+    assert_eq!(all[0].level, Level::Route("game".into()));
+    assert!(all[0].message.contains("app-only"), "{}", all[0].message);
+    assert_eq!(all[0].text.as_deref(), Some("\"cloud_saves.writes on\""));
+}
+
+#[test]
+fn a_spliced_settings_key_that_is_not_listed_is_refused() {
+    // S21: a key that is on neither list is not a key a skin may set.
+    let mut files = base();
+    game_insert(
+        &mut files,
+        &format!("{TILE} action=\"settings.set\" args=\"gui.nonsense on\""),
+    );
+    let all = findings(load(files));
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert_eq!(all[0].code, Code::SettingKey);
+    assert!(!all[0].message.contains("app-only"), "{}", all[0].message);
+    // A listed key goes through.
+    assert_eq!(
+        codes_of_use(&format!(
+            "{TILE} action=\"settings.set\" args=\"gui.mode dark\""
+        )),
+        vec![]
+    );
+}
+
+#[test]
+fn a_spliced_term_of_the_wrong_type_is_refused() {
+    // `id` is a game id; `g.playtime` is a number.
+    assert_eq!(
+        codes_of_use(&format!(
+            "{TILE} action=\"dlc.add\" args=\"{{g.playtime}} all\""
+        )),
+        vec![Code::TypeMismatch]
+    );
+    // A word outside a fixed set, spliced from the `use`, is checked as well.
+    assert_eq!(
+        codes_of_use(&format!(
+            "{TILE} action=\"game.open_folder\" args=\"{{$id}} attic\""
+        )),
+        vec![Code::TypeMismatch]
+    );
+}
+
+const OUTER: &str = "\ncomponent \"outer\" params=\"action args\" {\n    use \"summary-tile\" mark=\"check\" title=\"T\" link=\"L\" action=\"{action}\" args=\"{args}\"\n}\n";
+
+#[test]
+fn a_component_may_pass_its_args_on_to_another_component() {
+    // Two levels: `outer` hands `action` and `args` on to `summary-tile`. What the `use`
+    // of `outer` wrote is still checked against the action.
+    let run = |node: &str| {
+        let mut files = base();
+        append(&mut files, "components/stock.kdl", OUTER);
+        game_insert(&mut files, node);
+        let mut v: Vec<Code> = findings(load(files)).iter().map(|f| f.code).collect();
+        v.sort();
+        v
+    };
+    assert_eq!(
+        run("use \"outer\" action=\"dlc.add\" args=\"{$id} all\""),
+        vec![]
+    );
+    assert_eq!(
+        run("use \"outer\" action=\"settings.set\" args=\"cloud_saves.writes on\""),
+        vec![Code::SettingKey]
+    );
+    assert_eq!(
+        run("use \"outer\" action=\"dlc.add\" args=\"{g.playtime} all\""),
+        vec![Code::TypeMismatch]
+    );
+    assert_eq!(
+        run("use \"outer\" action=\"dlc.add\" args=\"{$id}\""),
+        vec![Code::ActionArgs]
+    );
+}

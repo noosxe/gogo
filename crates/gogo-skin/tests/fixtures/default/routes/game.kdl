@@ -55,7 +55,7 @@ route "game" {
                             title="{saves.state == in_sync ? 'Saves in sync' : 'Saves need attention'}" \
                             sub="{saves.files | len} files · checked {fmt.ago(saves.last_sync)}"
                         use "summary-tile" mark="half" title="DLC {dlc | where installed | len} of {dlc | len}" \
-                            sub="{dlc | where installed == false | first.title} missing ·" link="Verify…" action="game.verify" args="{$id}"
+                            sub="{dlc | where installed == false | first.title} missing ·" link="Add…" action="dlc.add" args="{$id} all"
                         use "summary-tile" mark="warn" tone="warn" when="{doc.summary.warn > 0}" \
                             title="Doctor: {doc.summary.warn} warning" sub="{doc.checks | where result == warn | first.message}"
                     }

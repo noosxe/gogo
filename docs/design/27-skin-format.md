@@ -366,6 +366,15 @@ component "summary-tile" params="mark tone title sub link action args" {
   is allowed on any parameter. A component the skin doesn't define, or a parameter it
   doesn't declare, is a load error; `when=` and `id=` work on any `use`. A parameter name
   is lowercase letters, digits and `_`, and `when` and `id` are reserved.
+- **Forwarding `args`.** A bare `{p}` term in an action's `args`, where `p` is a parameter
+  of the component, stands for the terms the `use` wrote for `p`, and they are checked
+  against the action's parameters as if written there: `use "tile" action="dlc.add"
+  args="{$id} all"` checks `id` and `dlc`. A `name={p}` term takes the one term the `use`
+  gave. A `let` or `each` over `p` hides the parameter, so there is nothing to splice. The
+  terms are evaluated where the `use` is, with the variables in scope there. Two levels
+  work the same way: a component may pass `action="{action}" args="{args}"` on in its own
+  `use` of another component, and what the first `use` wrote is checked against the action
+  at the end of the chain.
 - **No loops.** Components that use each other, or themselves, are a load error (S20). A
   component or route whose uses, once expanded, pass the node or depth limits of §8 is too.
 - **Borrowing from the default skin.** `use default "game.builds"` embeds a named fragment
