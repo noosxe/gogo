@@ -58,6 +58,17 @@ pub(crate) struct Parent {
     widget: Option<&'static AppWidget>,
 }
 
+/// What a `use` wrote for one component parameter, as far as the checks of the component's
+/// body can know it (design 27 §5.3, §5.7).
+#[derive(Clone)]
+enum Given {
+    /// Plain text: an action name, or a literal for an argument.
+    Text(String),
+    /// The terms of an `args`, each with the type it has where the `use` wrote it. A bare
+    /// `{p}` term in the body stands for all of them.
+    Terms(Vec<(crate::ast::Term, Ty)>),
+}
+
 pub(crate) struct Checker<'a> {
     pub col: &'a mut Collector,
     pub manifest: &'a Manifest,
@@ -71,11 +82,11 @@ pub(crate) struct Checker<'a> {
     params: &'a BTreeMap<String, Vec<String>>,
     comps: Option<&'a BTreeMap<String, Component>>,
     comp: Option<String>,
-    /// The plain text each component parameter was given at the `use` being followed.
-    lits: BTreeMap<String, String>,
+    /// What each component parameter was given at the `use` being followed.
+    given: BTreeMap<String, Given>,
     /// How many leading entries of `env` are the component's own parameters. A name
     /// found further in is a `let`, `each` or input variable that shadows a parameter,
-    /// and then `lits` no longer applies to it.
+    /// and then `given` no longer applies to it.
     nparams: usize,
     /// The parameter a dynamically named action came from: what its argument errors
     /// depend on.
@@ -195,7 +206,7 @@ impl<'a> Checker<'a> {
             params,
             comps,
             comp: None,
-            lits: BTreeMap::new(),
+            given: BTreeMap::new(),
             nparams: 0,
             dep: None,
             depth: 0,
@@ -425,6 +436,7 @@ impl<'a> Checker<'a> {
         };
         self.arg_templates(n);
         let mut binds: Vec<(String, Ty)> = Vec::new();
+        let mut givens: Vec<(String, Given)> = Vec::new();
         for i in 0..n.props.len() {
             let name = n.props[i].name.clone();
             let span = n.props[i].arg.span;
@@ -433,8 +445,19 @@ impl<'a> Checker<'a> {
                 Val::Text(t) => {
                     let ty = self.template(t, &loc);
                     match t {
-                        Template::Expr(_) => ty,
-                        Template::Text(_) => Ty::text(),
+                        Template::Expr(e) => {
+                            // `action="{action}"` passed on: the name it stands for.
+                            if let crate::expr::Expr::Name { name: q, .. } = e
+                                && let Some(Given::Text(s)) = self.param_given(q)
+                            {
+                                givens.push((name.clone(), Given::Text(s.clone())));
+                            }
+                            ty
+                        }
+                        Template::Text(s) => {
+                            givens.push((name.clone(), Given::Text(s.clone())));
+                            Ty::text()
+                        }
                         Template::Interp(_) => Ty::text().not_plain(),
                     }
                 }
@@ -444,17 +467,33 @@ impl<'a> Checker<'a> {
                     self.with_inputs("use", |ck| {
                         for t in terms.iter_mut() {
                             let loc = ck.loc_term(t);
-                            tys.push((
-                                ck.template(&mut t.value, &loc),
-                                matches!(t.value, Template::Expr(_)),
-                            ));
+                            tys.push(ck.template(&mut t.value, &loc));
                         }
                     });
-                    match tys.as_slice() {
-                        [(ty, true)] => *ty,
+                    // A bare `{p}` here, in a component that forwards its own parameter
+                    // to another component, stands for what that parameter was given.
+                    let list = self.splice(terms, &tys);
+                    let ty = match list.as_slice() {
+                        [(t, ty, _)] if matches!(t.value, Template::Expr(_)) => *ty,
                         [_] => Ty::text(),
                         _ => Ty::text().not_plain(),
-                    }
+                    };
+                    let kept = list
+                        .into_iter()
+                        .map(|(t, ty, _)| {
+                            let origin = ty.origin.or(Some(span));
+                            (
+                                t,
+                                Ty {
+                                    param: true,
+                                    origin,
+                                    ..ty
+                                },
+                            )
+                        })
+                        .collect();
+                    givens.push((name.clone(), Given::Terms(kept)));
+                    ty
                 }
                 Val::Num(_) => Ty::of(FieldType::Number),
                 Val::Bool(_) => Ty::of(FieldType::Bool),
@@ -496,10 +535,8 @@ impl<'a> Checker<'a> {
                 (p.clone(), ty)
             })
             .collect();
-        let lits: BTreeMap<String, String> = n
-            .props
-            .iter()
-            .filter_map(|p| Some((p.name.clone(), param_text(&p.arg.val)?)))
+        let given: BTreeMap<String, Given> = givens
+            .into_iter()
             .filter(|(name, _)| declared.contains(name))
             .collect();
         let saved = (
@@ -507,7 +544,7 @@ impl<'a> Checker<'a> {
             std::mem::take(&mut self.items),
             self.pass,
             self.comp.replace(comp),
-            std::mem::replace(&mut self.lits, lits),
+            std::mem::replace(&mut self.given, given),
             std::mem::replace(&mut self.nparams, declared.len()),
         );
         self.pass = Pass::Instance;
@@ -519,7 +556,7 @@ impl<'a> Checker<'a> {
         self.items = saved.1;
         self.pass = saved.2;
         self.comp = saved.3;
-        self.lits = saved.4;
+        self.given = saved.4;
         self.nparams = saved.5;
     }
 
@@ -811,20 +848,61 @@ impl<'a> Checker<'a> {
         let Val::Text(Template::Expr(crate::expr::Expr::Name { name, .. })) = v else {
             return None;
         };
-        let (lit, ty) = self.param_lit(name)?;
-        Some((lit.to_owned(), ty))
+        let Given::Text(lit) = self.param_given(name)? else {
+            return None;
+        };
+        let ix = self.env.iter().rposition(|(n, _)| n == name)?;
+        Some((lit.clone(), self.env[ix].1))
     }
 
-    /// The text a component parameter was given at the `use` being followed, with its
-    /// type, when `name` still means the parameter: a `let`, `each` or input variable of
-    /// the same name in between hides it.
-    fn param_lit(&self, name: &str) -> Option<(&str, Ty)> {
+    /// What a component parameter was given at the `use` being followed, when `name`
+    /// still means the parameter: a `let`, `each` or input variable of the same name in
+    /// between hides it (design 27 §5.7).
+    fn param_given(&self, name: &str) -> Option<&Given> {
         let ix = self.env.iter().rposition(|(n, _)| n == name)?;
         if ix >= self.nparams {
             return None;
         }
-        let lit = self.lits.get(name)?;
-        Some((lit, self.env[ix].1))
+        self.given.get(name)
+    }
+
+    /// The terms of an `args` with every bare `{p}` that stands for a parameter of the
+    /// component being followed replaced by the terms its `use` wrote for `p` (design 27
+    /// §5.7). Each result carries the type it has where it was written, and the index of
+    /// the term it came from. A `name={p}` term takes the one term the `use` gave, if
+    /// it gave just one. Anything else stays as it is.
+    fn splice(&self, terms: &[crate::ast::Term], tys: &[Ty]) -> Vec<(crate::ast::Term, Ty, usize)> {
+        let mut out = Vec::new();
+        for (i, (t, ty)) in terms.iter().zip(tys).enumerate() {
+            let given = match &t.value {
+                Template::Expr(crate::expr::Expr::Name { name, .. }) => self.param_given(name),
+                _ => None,
+            };
+            match (given, &t.name) {
+                (Some(Given::Terms(list)), None) => {
+                    out.extend(list.iter().map(|(t, ty)| (t.clone(), *ty, i)));
+                }
+                (Some(Given::Terms(list)), Some(_))
+                    if list.len() == 1 && list[0].0.name.is_none() =>
+                {
+                    let (one, one_ty) = &list[0];
+                    let term = crate::ast::Term {
+                        value: one.value.clone(),
+                        ..t.clone()
+                    };
+                    out.push((term, *one_ty, i));
+                }
+                (Some(Given::Text(lit)), _) => {
+                    let term = crate::ast::Term {
+                        value: Template::Text(lit.clone()),
+                        ..t.clone()
+                    };
+                    out.push((term, *ty, i));
+                }
+                _ => out.push((t.clone(), *ty, i)),
+            }
+        }
+        out
     }
 
     /// Check the names in the terms of `args` when there is no action to match them to.
@@ -902,39 +980,26 @@ impl<'a> Checker<'a> {
             spec,
             args_span: args_span.unwrap_or(at),
         };
-        // A term that is just a component parameter is, at this `use`, the text it was
-        // given: check that, as the action will get it.
-        let seen: Vec<crate::ast::Term> = terms
-            .iter()
-            .map(|t| match &t.value {
-                Template::Expr(crate::expr::Expr::Name { name, .. }) => {
-                    match self.param_lit(name) {
-                        Some((lit, _)) => crate::ast::Term {
-                            value: Template::Text(lit.to_owned()),
-                            ..t.clone()
-                        },
-                        None => t.clone(),
-                    }
-                }
-                _ => t.clone(),
-            })
-            .collect();
+        // A bare `{p}` that is a component parameter stands for the terms the `use` wrote
+        // for it: they are checked here as if written in this `args` (design 27 §5.7).
+        let spliced = self.splice(&terms, &tys);
         // On an element with no input, `value` and `on` in a term were reported by the
         // format-level pass: they stay out of the matching.
         let no_input = !gogo_contract::actions::INPUT_ELEMENTS.contains(&n.name.as_str());
-        let keep: Vec<usize> = (0..seen.len())
-            .filter(|&i| {
+        let spliced: Vec<(crate::ast::Term, Ty, usize)> = spliced
+            .into_iter()
+            .filter(|(t, _, _)| {
                 !(no_input
                     && gogo_contract::actions::INPUT_VARS
                         .iter()
-                        .any(|v| seen[i].value.mentions(v)))
+                        .any(|v| t.value.mentions(v)))
             })
             .collect();
-        let seen: Vec<crate::ast::Term> = keep.iter().map(|&i| seen[i].clone()).collect();
-        let tys: Vec<Ty> = keep.iter().map(|&i| tys[i]).collect();
+        let seen: Vec<crate::ast::Term> = spliced.iter().map(|(t, _, _)| t.clone()).collect();
+        let tys: Vec<Ty> = spliced.iter().map(|(_, ty, _)| *ty).collect();
         out.args = self.match_terms(&m, &seen, &tys);
         for b in &mut out.args {
-            b.term = keep[b.term];
+            b.term = spliced[b.term].2;
         }
         if let Some(p) = n.props.iter_mut().rfind(|p| p.name == args)
             && let Val::Terms(slot) = &mut p.arg.val
@@ -1366,19 +1431,6 @@ struct Matcher {
     spec: &'static ActionSpec,
     /// The `args` value, or the action's name when there is none.
     args_span: Span,
-}
-
-/// The text a `use` gave a parameter, when it is plain text: a string, or the one term of
-/// an `args`.
-fn param_text(v: &Val) -> Option<String> {
-    match v {
-        Val::Text(Template::Text(s)) => Some(s.clone()),
-        Val::Terms(ts) => match ts.as_slice() {
-            [t] if t.name.is_none() => plain_text(&t.value).map(str::to_owned),
-            _ => None,
-        },
-        _ => None,
-    }
 }
 
 fn plain_text(t: &Template) -> Option<&str> {
