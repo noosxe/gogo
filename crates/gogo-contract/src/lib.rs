@@ -1,7 +1,36 @@
-//! gogo-contract: the skin contract as typed data: sources, actions, routes, app widgets, tokens, invariants (docs/design/24-gui-architecture.md §2).
+//! The skin contract (design 26) as typed data: what the app guarantees every skin, and
+//! what every skin has to go through.
 //!
-//! The skin contract (design 26) as typed data, with no I/O: value types, the source and
-//! action catalogues (each action's kind and tier), routes and sections, app-owned widgets
-//! with their parts, variants and depth, semantic tokens and the safety invariant ids.
-//! Filled in by PR B2 (#524).
+//! - [`version`]: the contract version and which skin versions it accepts (§8).
+//! - [`types`]: the value types a skin sees (§2), [`Status`] and [`Os`].
+//! - [`sources`]: the data sources (§3).
+//! - [`actions`]: the actions with their kind and tier (§4), and how the plan decides the
+//!   tier an action really gets.
+//! - [`settings`]: the keys a skin may set (§4.9, S21).
+//! - [`widgets`]: the app-owned widgets with their depth, parts and variants (§5).
+//! - [`tokens`], [`routes`]: semantic tokens and routes (§6).
+//! - [`invariants`]: the safety invariants S1–S21 (§7).
+//!
+//! No I/O. The tables are `static` data; `tests/doc26.rs` checks them against the doc,
+//! row by row. Serialization is behind the `serde` feature.
 #![deny(unsafe_code)]
+
+pub mod actions;
+pub mod invariants;
+pub mod routes;
+pub mod settings;
+pub mod sources;
+pub mod tokens;
+pub mod types;
+pub mod version;
+pub mod widgets;
+
+pub use actions::{
+    ActionSpec, Binding, Decision, Escalation, Kind, Param, ParamType, PlanFacts, Tier,
+};
+pub use invariants::Invariant;
+pub use routes::RouteSpec;
+pub use sources::{Live, SourceParam, SourceSpec};
+pub use types::{Os, Status, ValueType};
+pub use version::{ContractVersion, VersionError};
+pub use widgets::{AppWidget, Depth, Part, Placement, Variant};
