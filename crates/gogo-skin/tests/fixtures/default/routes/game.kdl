@@ -55,7 +55,7 @@ route "game" {
                             title="{saves.state == in_sync ? 'Saves in sync' : 'Saves need attention'}" \
                             sub="{saves.files | len} files · checked {fmt.ago(saves.last_sync)}"
                         use "summary-tile" mark="half" title="DLC {dlc | where installed | len} of {dlc | len}" \
-                            sub="{dlc | where installed == false | first.title} missing ·" link="Add…" action="dlc.add" args="{$id}"
+                            sub="{dlc | where installed == false | first.title} missing ·" link="Verify…" action="game.verify" args="{$id}"
                         use "summary-tile" mark="warn" tone="warn" when="{doc.summary.warn > 0}" \
                             title="Doctor: {doc.summary.warn} warning" sub="{doc.checks | where result == warn | first.message}"
                     }
@@ -81,7 +81,7 @@ route "game" {
                         part "title" style="card-title"
                         part "header" style="env-head"
                     }
-                    card title="Snapshots · {snaps.items | len}" link="Roll back…" link-action="snapshot.rollback" link-args="{$id}" id="snapshots" {
+                    card title="Snapshots · {snaps.items | len}" link="Roll back…" link-action="nav.go" link-args="game {$id} snapshots" id="snapshots" {
                         column padding="0 0 12 0" {
                             each "s" in="{snaps.items | sort -date | take 2}" {
                                 row style="snap-row" {

@@ -6,7 +6,7 @@ component "status-badge" params="status" {
 
 component "summary-tile" params="mark tone title sub link action args" {
     row style="tile" grow=1 {
-        badge "{mark == check ? '✓' : (mark == half ? '½' : '!')}" style="mark" tone="{tone else 'neutral'}"
+        badge "{mark == 'check' ? '✓' : (mark == 'half' ? '½' : '!')}" style="mark" tone="{tone else 'neutral'}"
         column gap=2 grow=1 {
             text "{title}" style="tile-title"
             text "{sub}" style="tile-sub" when="{sub}"

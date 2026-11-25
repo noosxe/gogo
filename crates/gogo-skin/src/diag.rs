@@ -154,6 +154,30 @@ codes! {
     /// An `action` or `link-action` that is a template, so no load-time check can bind it
     /// (S16, S21).
     ActionDynamic = "action_dynamic",
+    // The contract check (design 27 §7; design 26 S5, S16, S21).
+    /// Action arguments that don't fit the action's parameters: unknown, repeated, extra
+    /// or missing (S16).
+    ActionArgs = "action_args",
+    /// A section the route doesn't have (S16).
+    UnknownSection = "unknown_section",
+    /// A part the app widget doesn't have (S16).
+    UnknownPart = "unknown_part",
+    /// A variant value or placement the app widget doesn't allow (S16).
+    UnknownVariant = "unknown_variant",
+    /// A part that can't be hidden, hidden (S5).
+    HiddenPart = "hidden_part",
+    /// `settings.set` with a key a skin may not set, or one that isn't written out (S21).
+    SettingKey = "setting_key",
+    /// A bare name that is no variable, source or word of the contract.
+    UnknownName = "unknown_name",
+    /// A field the value's type doesn't have (S16).
+    UnknownField = "unknown_field",
+    /// A call to a source or helper the contract doesn't have (S16).
+    UnknownSource = "unknown_source",
+    /// A source called with the wrong number of arguments (S16).
+    SourceArgs = "source_args",
+    /// A value of the wrong type where an element or an action parameter needs one.
+    TypeMismatch = "type_mismatch",
     // Components.
     /// `use` of a component the skin doesn't define.
     UnknownComponent = "unknown_component",

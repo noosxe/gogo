@@ -87,7 +87,9 @@ pub fn eval<'a>(e: &'a Expr, s: &'a dyn Scope) -> Result<Cow<'a, Value>, EvalErr
             optional,
             span,
         } => field(eval(base, s)?, name, *optional, *span)?,
-        Expr::Call { name, args, span } => Cow::Owned(call(name, args, *span, s)?),
+        Expr::Call {
+            name, args, span, ..
+        } => Cow::Owned(call(name, args, *span, s)?),
         Expr::Not(e) => Cow::Owned(Value::Bool(!eval(e, s)?.truthy())),
         Expr::Neg(e) => match &*eval(e, s)? {
             Value::Num(n) => Cow::Owned(Value::Num(-n)),

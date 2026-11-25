@@ -1,6 +1,6 @@
 //! The AST and the recursive-descent parser.
 
-use gogo_contract::Value;
+use gogo_contract::{SourceSpec, Value};
 
 use super::error::{Found, ParseError, ParseErrorKind, Span};
 use super::lex::{Lexed, Tok, lex};
@@ -15,6 +15,9 @@ pub enum Expr {
         name: String,
         /// Where the name is in the expression text.
         span: Span,
+        /// The source this name stands for (`ui`, `library.stats`), set by the loader's
+        /// contract check. `None` for a variable or an enum word.
+        source: Option<&'static SourceSpec>,
     },
     /// A route parameter, `$id`.
     Param(String),
@@ -38,6 +41,9 @@ pub enum Expr {
         args: Vec<Expr>,
         /// Where the call is, from its name to its closing parenthesis.
         span: Span,
+        /// The source it calls, set by the loader's contract check. `None` for a
+        /// formatter or status helper.
+        source: Option<&'static SourceSpec>,
     },
     Not(Box<Expr>),
     Neg(Box<Expr>),
@@ -136,7 +142,7 @@ impl Expr {
 
     pub(super) fn collect_names<'a>(&'a self, item: bool, out: &mut Vec<NameUse<'a>>) {
         match self {
-            Expr::Name { name, span } => out.push(NameUse {
+            Expr::Name { name, span, .. } => out.push(NameUse {
                 name,
                 span: *span,
                 in_item_scope: item,
@@ -522,6 +528,7 @@ impl Parser {
             return Ok(Expr::Name {
                 name: first,
                 span: first_span,
+                source: None,
             });
         }
         let mut args = Vec::new();
@@ -539,6 +546,7 @@ impl Parser {
             name: path,
             args,
             span,
+            source: None,
         })
     }
 

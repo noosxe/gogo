@@ -26,6 +26,7 @@ use crate::manifest::{self, Manifest, Mode};
 use crate::names::{is_ident, is_style_name, suggest};
 use crate::props::{Ctx, Dynamic};
 use crate::raw::{Counter, Lit, RawNode};
+use crate::resolve;
 use crate::source::{Sources, Span};
 use crate::styles::{self, Style};
 use crate::tokens::{self, TokenSet};
@@ -44,6 +45,8 @@ pub struct Component {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Route {
     pub name: String,
+    /// The contract's route of that name.
+    pub spec: &'static gogo_contract::RouteSpec,
     pub children: Vec<Node>,
     pub span: Span,
 }
@@ -721,6 +724,9 @@ fn finish(intake: Intake, name: &str) -> Result<SkinPackage, Report> {
         let Some(root) = route_root(&mut col, nodes, p.file, r) else {
             continue;
         };
+        let Some(spec) = gogo_contract::routes::route_spec(r) else {
+            continue;
+        };
         let children: Vec<Node> = root
             .children
             .iter()
@@ -741,6 +747,7 @@ fn finish(intake: Intake, name: &str) -> Result<SkinPackage, Report> {
             r.clone(),
             Route {
                 name: r.clone(),
+                spec,
                 children,
                 span: root.span,
             },
@@ -750,6 +757,25 @@ fn finish(intake: Intake, name: &str) -> Result<SkinPackage, Report> {
 
     // S20 and S12: components don't loop, and their expansion stays bounded.
     check_expansion(&mut col, &comps, &edges, &routes);
+
+    // The contract: names resolved, field paths and types checked (design 27 §7).
+    let looped = col.report.findings().iter().any(|f| {
+        matches!(
+            f.code,
+            Code::ComponentCycle | Code::LimitNodes | Code::LimitDepth
+        )
+    });
+    col.scope = LoadScope::Skin;
+    resolve::components(&mut col, &manifest, &mut comps);
+    resolve::routes(
+        &mut col,
+        &manifest,
+        &comps,
+        &mut routes,
+        !looped,
+        |col, r| col.scope = LoadScope::Route(r.to_owned()),
+    );
+    col.scope = LoadScope::Skin;
 
     // A route with an error falls back, so it is not offered.
     let failed: BTreeSet<String> = col

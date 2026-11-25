@@ -3,8 +3,8 @@
 //!
 //! The checks here are structural. Resolving names against the contract (an action's
 //! parameters, a route's sections, a widget's parts and variants, field paths and their
-//! types, a component parameter's type) is PR B3c: this pass keeps names as strings with
-//! spans in the tree, and B3c adds the resolution on top.
+//! types, a component parameter's type) is `resolve`'s: it runs after this pass on the same
+//! tree and reads only what this pass accepted (see [`takes_prop`]).
 
 use std::collections::BTreeMap;
 
@@ -1243,6 +1243,28 @@ fn mentions_word(s: &str, word: &str) -> bool {
         let after = s[i + word.len()..].chars().next();
         !before.is_some_and(id) && !after.is_some_and(id)
     })
+}
+
+/// Whether the element `element` takes the property `prop`. The contract check reads only
+/// properties the format-level pass accepted, so a misplaced one is reported once.
+pub(crate) fn takes_prop(element: &str, prop: &str) -> bool {
+    if let Some(w) = WIDGETS
+        .iter()
+        .find(|w| w.name == element && w.depth == Depth::B)
+    {
+        return COMMON.contains(&prop) || WIDGET_PROPS.contains(&prop) || w.variant(prop).is_some();
+    }
+    let spec = match element {
+        "item" => &ITEM,
+        "col" => &COL,
+        name => match ELEMENTS.iter().find(|s| s.name == name) {
+            Some(s) => s,
+            None => return false,
+        },
+    };
+    COMMON.contains(&prop)
+        || spec.props.contains(&prop)
+        || (spec.styled && props::style_prop(prop).is_some())
 }
 
 #[cfg(test)]
