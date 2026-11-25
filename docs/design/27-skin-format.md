@@ -1,8 +1,8 @@
 # 27 — Skin format (#520)
 
-Status: **accepted** (2026-11-25). The loader and validator are built (`gogo-skin`,
-design 24 §8 stack B, PRs B3b and B3c), including the check of names, fields and types
-against the contract; binding is not yet. This is the reference for skin authors.
+Status: **accepted** (2026-11-25). The loader, validator and binder are built
+(`gogo-skin`, design 24 §8 stack B, PRs B3b, B3c and B4b), including the check of names,
+fields and types against the contract. This is the reference for skin authors.
 
 A skin is a folder of [KDL](https://kdl.dev) v2 files: a declarative tree, styles and
 tokens. It is written against the contract (design 26): it binds sources, places app
@@ -83,7 +83,7 @@ skin "default" {
 | `contract` | The contract version it needs, `MAJOR.MINOR` (design 26 §8). It loads when the major is the app's and the minor is not newer (S16) |
 | `modes` | Token sets it provides: `dark`, `light`, each at most once, at least one |
 | `routes` | The routes it covers, each a route of design 26 §6.2 and each with its `routes/<name>.kdl`. The rest fall back per route. A route file that isn't listed isn't loaded, and the loader warns |
-| `extends "<skin>"` | Optional. The skin it builds on: routes and components it doesn't define come from that skin before falling back to the default. Parsed, but not yet used; the lookup arrives with binding (PR B4) |
+| `extends "<skin>"` | Optional. The skin it builds on: routes and components it doesn't define come from that skin before falling back to the default. Parsed, but not used yet: binding falls back to the default skin only (the `extends` lookup is planned) |
 | `ui { var … }` | Skin-local state (design 26 §6.4). Types: `bool`, `number`, `enum(a b …)`, `section` (the route's sections). Each `var` has a unique name, `type=` and a `default=` that fits the type: `#true`/`#false`, a number, one of the enum's words, or one of the contract's section names |
 
 `title`, `version`, `contract` and `modes` are required, each is written once, and any
@@ -164,7 +164,7 @@ Properties:
 | Flex and grid | `grow shrink gap row-gap direction wrap align align-self justify columns rows col-span` |
 | Box | `padding margin inset` (`inset` takes the node out of the flow: see §5.1) |
 | Paint | `fill`, `gradient linear <angle> <colours…>` / `gradient radial <colours…>`, `border <w> <colour>`, `border-top/right/bottom/left`, `accent-edge <side> <w> <colour>`, `radius` (1 or 4 numbers), `opacity`, `shape circle\|rect`, `offset <x> <y>`, `ring <w> <colour>` |
-| Effects | `shadow inner-shadow glow bloom-text noise scanlines reflection blur-behind` (§6); `effects none` clears every inherited box effect, `shadow none` only shadows, `bloom-text none` the bloom |
+| Effects | `shadow inner-shadow glow bloom-text noise scanlines reflection blur-behind` (§6); `effects none` clears every box effect an earlier style set, `shadow none` only shadows, `bloom-text none` the bloom |
 | Text | `font family font-size weight stretch tracking line-height color text-align upper text-wrap lines` |
 | Hints | `key-hint #true` (show a button's `key=` as a hint chip), `mono-font "<family>"` (the family used for `mono=#true` text below) |
 
@@ -202,7 +202,8 @@ its range is a load error that names the property.
 - **`font @role`** applies a type role token (family, size and weight); `family` takes a
   bundled family name; `mono-font` the same. A family written out, or a text token
   (`family @easing.x`), is checked against the bundled families at load. A template
-  (`family="{…}"`) can't be known then: it is checked when the route is bound (PR B4).
+  (`family="{…}"`) can't be known then: it is checked when the route is bound, and a
+  family that is not bundled fails the route.
 - **Colours** are a literal, `transparent`, a colour token, or in a style one
   `"{@token alpha=.5}"`. A style is static: no other `{…}` expression is allowed in one.
   An element's inline properties may be expressions.
@@ -242,9 +243,9 @@ Only the elements below exist. Anything else is a load error.
 | `art "{g.art.cover}"` | Game art by handle, with `fit="cover"` (default), `"contain"` or `"fill"` (stretch to the box); `label=` names it for screen readers (S14) |
 | `image src="assets/x.png"` | A PNG or SVG from the skin folder, by the `src` property: plain text, a path from the skin root that names an asset the skin has. A URL (`https:`, `data:`, any scheme), a path with `..`, or a file that isn't an image is a load error (S10, S11). Needs `label=` (S14) |
 | `label "<template>"` | Text, like `text` |
-| `chip`, `badge` | Small labelled marks, with `tone=` (a status tone or semantic colour) and `icon=`; read as a label |
+| `chip`, `badge` | Small labelled marks, with `tone=` (a word, usually a status or a semantic colour, that picks style variants such as `chip.warn`: §9.1) and `icon=`; read as a label |
 | `display "<template>"` | Like `chip`, but read as a live status (an LCD-style readout) |
-| `dot`, `led` | An 8 px circle; `on="{expr}"` puts it in its `:on` state, and `tone=` colours it like a `chip`'s. A `led` with `label=` is read as an on/off indicator |
+| `dot`, `led` | An 8 px circle; `on="{expr}"` puts it in its `:on` state, and `tone=` picks variants such as `dot.accent` like a `chip`'s. A `led` with `label=` is read as an on/off indicator |
 | `card`, `module` | A titled panel (`title=`, `link=`, `link-action=`); `module` is the same element under a name that suits instrument-style skins |
 
 - **Text properties are inherited.**
@@ -391,13 +392,20 @@ component "summary-tile" params="mark tone title sub link action args" {
   when each passes `action` and `args` on to the other. A
   component or route whose uses, once expanded, pass the node or depth limits of §8 is too.
 - **Borrowing from the default skin.** `use default "game.builds"` embeds a named fragment
-  of the default skin (design 26 §8). Until then a labelled placeholder is drawn
-  there; real borrowing arrives with binding (PR B4). What is checked today: the form
-  (`default` and one fragment name) and the `when=` and `id=` expressions on the `use`.
-  The fragment itself is not read at load, and its name is not yet checked against the
-  default skin's list. A borrowed fragment's `ui.*` variables and enum words (statuses,
-  tones, sections) resolve against the borrowing skin's manifest, not the default skin's,
-  and that check lands with binding (B4).
+  of the default skin (design 26 §8). A fragment is a component of the default skin, and
+  a component's name may contain a `.` so that the fragments of a route group together
+  (`game.builds`, `game.saves-summary`). The fragment name may be a template
+  (`use default "game.{ui.tab}"`), evaluated when the route is bound. At load, what is
+  checked is the form (`default` and one fragment name) and the `when=` and `id=`
+  expressions on the `use`: the default skin isn't there yet.
+  - **At bind**, the fragment is looked up in the default skin (an error when it has no
+    such component, or there is no default skin), then checked against the *borrowing*
+    skin's manifest with the loader's own rules: its `ui.*` variables and enum words
+    (statuses, tones, sections, the words of the skin's own `enum` variables) are the
+    borrowing skin's, so a missing variable is `unknown_field` and a word that is not
+    one is `unknown_name`. A fragment that fails fails the route, which falls back.
+  - It then draws with the default skin's styles and components, the active skin's tokens,
+    and the borrowing skin's `ui` state.
 - **Stock components** (design 26 §5, depth C) ship with the default skin, and a skin may
   copy or replace them.
 
@@ -443,7 +451,7 @@ shaders.
   `"{@token alpha=…}"`). Anything else is a load error that names the effect. A KDL number
   can't start with `.`, so write `0.06`, not `.06`; inside a `"{…}"` string `alpha=.55` is
   fine.
-- **Clearing.** `effects none` clears every inherited box effect, `shadow none` only
+- **Clearing.** `effects none` clears every box effect an earlier style set, `shadow none` only
   shadows, `bloom-text none` the bloom. Every effect but `shadow` is set once per block; a
   second one wins and the loader warns.
 - **Reduced motion.** Under reduced motion, transforms and loops are removed and fades are
@@ -655,7 +663,8 @@ The loader is built in three PRs:
   hidden (S5), `settings.set` keys (S21), §7's names, field paths and types, and
   component parameters at each `use`. S7 is not checked yet: its static checks land with
   #563.
-- **B4** adds binding.
+- **B4a** adds the IR crate and **B4b** binding (§9.1 describes what it does, and
+  design 24 §2 its API).
 
 Every finding is a miette diagnostic with a stable code (`gogo_skin::<rule>`), the file,
 line and span, and a help line:
@@ -667,6 +676,54 @@ line and span, and a help line:
   list.
 
 `gogo-gui --check-skin <dir>` prints them without opening a window.
+
+### 9.1 What binding does
+
+Binding evaluates; it parses nothing (§7). A bound route is an IR tree (design 24 §2) and
+the tables behind its ids: each action of the tree with its arguments, and each app widget
+with the skin's variants and part styles.
+
+- **Keys.** Each node has a stable path id: `root/row.0/button.2`, with the element's
+  index among its siblings, `each.1#3` for the fourth item of a repeat, and `use.4` for a
+  component. The same skin and the same data give the same keys, and a `when` that is
+  false leaves the indices of its siblings as they are.
+- **Style order.** A node gets its kind's style (`style "button"`), then the styles of
+  `style=` left to right (the base properties of each, then the states in effect), then,
+  last, its own inline properties (§4). A node with a `tone` also gets the `<name>.<tone>`
+  variant of each of those styles that exists (`chip.warn`, `mark.success`), after them
+  all. `tone` colours nothing by itself.
+- **Inheritance.** Text properties (§5.2) and `bloom-text` pass from an element to its
+  children, starting from `font.body` and `text-hi`. Nothing else passes down, and box
+  effects don't: they accumulate only through the style order above.
+- **States.** `:on` is in effect for an element whose `on=` (a `button`, `toggle`, `dot`,
+  `led`), the current `tabs` section, or `highlight=` row says so, and `:focus` becomes the
+  node's focus paint. `:hover`, `:pressed` and `:disabled` are read and checked at load,
+  and have no place in the IR yet.
+- **Element defaults,** before any style: `row`, `button`, `chip`, `badge`, `display`,
+  `menu`, `select`, `field`, `tabs` and `tab` lay their children out in a row with centred
+  items (`tabs` aligns to the end, `button` also centres its content); `column`, `box`,
+  `form` and the rest are vertical. `spacer` has `grow 1` and `divider` a height of 1 that
+  stretches. `dot` and `led` are 8 px circles that don't shrink, `toggle` is 34 × 18 with
+  a 14 px circular knob, and an `icon` is 0.9 of its text size square.
+- **Position.** Every node is in the flow (§4) unless it has `inset`, which makes it
+  absolutely positioned against its parent; in a `layer` every child is in the one cell.
+- **The page.** The root node fills the window and takes the style `page`, if the skin
+  has one. The `shell` route draws the route named by the `route.current` source in its
+  `outlet`; that route is read from the skin, or falls back, on its own.
+- **Limits at bind.** A list of more than 1 000 items is cut at 1 000 in an `each` and a
+  `data-table`, silently (§8). A route that binds to more than 100 000 nodes, or nests
+  deeper than 96 levels of components, repeats and outlets, fails to bind.
+- **What still fails the route** is whatever the data can break after the loader's checks
+  (§7, "Failures"), and: a control whose accessible name comes out empty (S14), a masked
+  value as an action argument (S1, S2), a `settings.set` key off the skin-settable list
+  (S21), a null for an action parameter that is required, a `progress` outside 0 to 1, a
+  hidden part that can't be hidden (S5) and a borrowed fragment that does not hold for the
+  skin (§5.7).
+- **Fallback** (design 26 §8) is per route: a route the skin doesn't cover, or that failed
+  to load or to bind, is the default skin's route, drawn with the active skin's tokens
+  (a token only the default skin defines reads from the default skin) and the default
+  skin's own `ui` state. The binder reports which routes fell back and why, with file and
+  line.
 
 ## 10. Installing
 
