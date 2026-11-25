@@ -81,6 +81,9 @@ in `docs/13` grounds design 10.
 | [23-galaxy-service](23-galaxy-service.md) | a Galaxy service for Linux builds (#356): Comet beside the game, opt-in per game, pinned like umu, started and stopped by `launch.sh`, credentials handed over without argv or logs, never blocking a launch |
 | [24-gui-architecture](24-gui-architecture.md) | desktop GUI (#520): why our own engine, the crate split and its dependency rules, the library stack, renderer selection, platforms, measured budgets, CI, port order |
 | [25-gui-app-layer](25-gui-app-layer.md) | the GUI's app layer: threads and the tokio runtime, the `Backend` seam, latest-value sources and coalescing, the safety flow, jobs and per-job cancel, prompts from core pipelines |
+| [26-skin-contract](26-skin-contract.md) | the skin contract, version 1.0 (draft): sources, actions with kind and tier, app-owned widgets and restyle depths, routes, tokens, skin state, safety invariants S1–S20, versioning and per-route fallback |
+| [27-skin-format](27-skin-format.md) | the KDL skin format for skin authors: package, manifest, tokens, styles, elements, `data-table`, app widgets, effects with units, expressions, limits, loading and installing |
+| [28-gui-rendering](28-gui-rendering.md) | the display list and the two renderers: ops and paint order, each effect per renderer, our backdrop blur, image and pipeline caches, upstream limits, goldens |
 ## Key decisions (traceability)
 
 | Decision | Rationale / source |
