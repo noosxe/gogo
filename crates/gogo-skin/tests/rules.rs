@@ -138,7 +138,7 @@ const SHELL: &str = "routes/shell.kdl";
 fn cases() -> Vec<Case> {
     use At::*;
     use Code::*;
-    vec![
+    let mut v = vec![
         // §1 and S10: the layout and the paths.
         case(
             "§1 S10",
@@ -1205,7 +1205,14 @@ fn cases() -> Vec<Case> {
         case(
             "§5.3 S14",
             "toggle outside a field without a label",
-            |f| rep(f, GAME, "    tabs ", "    toggle on=\"{a}\"\n    tabs "),
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "    tabs ",
+                    "    toggle on=\"{snaps.auto}\"\n    tabs ",
+                )
+            },
             AccessibleName,
             Route("game"),
             Some("toggle"),
@@ -1481,7 +1488,7 @@ fn cases() -> Vec<Case> {
                     f,
                     GAME,
                     "    let g=\"{game($id)}\"",
-                    "    let g=\"{game($id)}\" g=\"{x}\"",
+                    "    let g=\"{game($id)}\" g=\"{game($id)}\"",
                 )
             },
             PropertyValue,
@@ -1930,7 +1937,7 @@ fn cases() -> Vec<Case> {
         case(
             "§5.3",
             "tabs without bind",
-            |f| game_insert(f, "tabs sections=\"a b\""),
+            |f| game_insert(f, "tabs sections=\"overview builds\""),
             ElementArguments,
             Route("game"),
             None,
@@ -2106,6 +2113,753 @@ fn cases() -> Vec<Case> {
             FontFamily,
             Skin,
             Some("@easing.pick"),
+        ),
+    ];
+    v.extend(contract_cases());
+    v
+}
+
+/// The contract check (design 27 §7, §9 step 2; design 26 S5, S16, S21): one failing
+/// skin per rule. Each fires its own code and nothing else.
+fn contract_cases() -> Vec<Case> {
+    use At::*;
+    use Code::*;
+    vec![
+        // §5.3 and S16: actions and their arguments.
+        case(
+            "§5.3 S16",
+            "action without a required argument",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "action=\"game.verify\" args=\"{$id}\"",
+                    "action=\"game.verify\"",
+                )
+            },
+            ActionArgs,
+            Route("game"),
+            Some("game.verify"),
+        ),
+        case(
+            "§5.3 S16",
+            "action argument the action has not got",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "action=\"game.verify\" args=\"{$id}\"",
+                    "action=\"game.verify\" args=\"{$id} fast=1\"",
+                )
+            },
+            ActionArgs,
+            Route("game"),
+            Some("fast=1"),
+        ),
+        case(
+            "§5.3 S16",
+            "more arguments than the action takes",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "action=\"game.verify\" args=\"{$id}\"",
+                    "action=\"game.verify\" args=\"{$id} 3\"",
+                )
+            },
+            ActionArgs,
+            Route("game"),
+            Some("3"),
+        ),
+        case(
+            "§5.3 S16",
+            "a parameter given twice",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "action=\"game.verify\" args=\"{$id}\"",
+                    "action=\"game.verify\" args=\"id={$id} id={$id}\"",
+                )
+            },
+            ActionArgs,
+            Route("game"),
+            Some("id={$id}"),
+        ),
+        case(
+            "§5.3 S16",
+            "args without an action",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "action=\"game.verify\" args=\"{$id}\"",
+                    "args=\"{$id}\"",
+                )
+            },
+            ActionArgs,
+            Route("game"),
+            Some("args"),
+        ),
+        case(
+            "§5.3 S16",
+            "a widget's action without its arguments",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "for=\"game.update\" args=\"{$id}\"",
+                    "for=\"game.update\"",
+                )
+            },
+            ActionArgs,
+            Route("game"),
+            Some("game.update"),
+        ),
+        case(
+            "§6.2 S16",
+            "nav.go to a route the contract hasn't got",
+            |f| rep(f, SHELL, "args=\"library\"", "args=\"libary\""),
+            UnknownRoute,
+            Route("shell"),
+            Some("libary"),
+        ),
+        case(
+            "§6.2 S16",
+            "nav.go without a route's required parameter",
+            |f| rep(f, SHELL, "args=\"library\"", "args=\"game\""),
+            ActionArgs,
+            Route("shell"),
+            Some("\"game\""),
+        ),
+        case(
+            "§6.2 S16",
+            "nav.go to a section the route hasn't got",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "args=\"game {$id} files\"",
+                    "args=\"game {$id} fils\"",
+                )
+            },
+            UnknownSection,
+            Route("game"),
+            Some("fils"),
+        ),
+        case(
+            "§5.3 S16",
+            "a route that is not written out",
+            |f| rep(f, SHELL, "args=\"library\"", "args=\"{app.version}\""),
+            TypeMismatch,
+            Route("shell"),
+            Some("{app.version}"),
+        ),
+        case(
+            "§5.3 S16",
+            "tabs with a section the route hasn't got",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "sections=\"overview builds dlc",
+                    "sections=\"overview builds dlcs",
+                )
+            },
+            UnknownSection,
+            Route("game"),
+            Some("dlcs"),
+        ),
+        case(
+            "§5.3 S16",
+            "tabs bound to a variable the skin hasn't got",
+            |f| rep(f, GAME, "bind=\"ui.tab\"", "bind=\"ui.tabb\""),
+            UnknownField,
+            Route("game"),
+            Some("ui.tabb"),
+        ),
+        case(
+            "§5.3 S16",
+            "tabs bound to a variable that isn't a section",
+            |f| rep(f, GAME, "bind=\"ui.tab\"", "bind=\"ui.view\""),
+            TypeMismatch,
+            Route("game"),
+            Some("ui.view"),
+        ),
+        case(
+            "§4.1 S16",
+            "ui.set of a variable the skin hasn't declared",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "link-args=\"tab builds\"",
+                    "link-args=\"tabb builds\"",
+                )
+            },
+            ActionArgs,
+            Route("game"),
+            Some("tabb"),
+        ),
+        case(
+            "§4.1 S16",
+            "ui.set to a value the variable doesn't take",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "link-args=\"tab builds\"",
+                    "link-args=\"tab buildz\"",
+                )
+            },
+            TypeMismatch,
+            Route("game"),
+            Some("buildz"),
+        ),
+        case(
+            "§4.3 S16",
+            "a word the parameter doesn't take",
+            |f| rep(f, GAME, "args=\"{$id} game\"", "args=\"{$id} gam\""),
+            TypeMismatch,
+            Route("game"),
+            Some("gam"),
+        ),
+        case(
+            "§4.3 S16",
+            "a field of the wrong type for an action parameter",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "action=\"game.verify\" args=\"{$id}\"",
+                    "action=\"game.verify\" args=\"{g.title}\"",
+                )
+            },
+            TypeMismatch,
+            Route("game"),
+            Some("{g.title}"),
+        ),
+        // §5.5 and S5: app widgets.
+        case(
+            "§5.5 S16",
+            "an unknown part",
+            |f| rep(f, GAME, "part \"frame\"", "part \"frmae\""),
+            UnknownPart,
+            Route("game"),
+            Some("frmae"),
+        ),
+        case(
+            "§5.5 S16",
+            "a variant of another widget",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "row-actions=\"menu\"",
+                    "row-actions=\"menu\" layout=\"stacked\"",
+                )
+            },
+            UnknownProperty,
+            Route("game"),
+            Some("layout"),
+        ),
+        case(
+            "§5.5 S16",
+            "a variant value of another widget",
+            |f| rep(f, GAME, "layout=\"stacked\"", "layout=\"list\""),
+            UnknownVariant,
+            Route("game"),
+            Some("list"),
+        ),
+        case(
+            "§5.5 S16",
+            "a placement the widget doesn't take",
+            |f| rep(f, GAME, "placement=\"inline\"", "placement=\"floating\""),
+            UnknownVariant,
+            Route("game"),
+            Some("floating"),
+        ),
+        case(
+            "§5.5 S5",
+            "hiding the plan card's footnote",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "part \"frame\" style=\"plan-frame\"",
+                    "part \"footnote\" hidden=#true",
+                )
+            },
+            HiddenPart,
+            Route("game"),
+            Some("#true"),
+        ),
+        case(
+            "§5.5 S5",
+            "hiding the plan card's confirm button",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "part \"confirm\" style=\"plan-confirm\"",
+                    "part \"confirm\" hidden=#true",
+                )
+            },
+            HiddenPart,
+            Route("game"),
+            Some("#true"),
+        ),
+        // §4.9 and S21: settings.
+        case(
+            "§4.9 S21",
+            "settings.set of an app-only key",
+            |f| {
+                rep(
+                    f,
+                    SHELL,
+                    "action=\"nav.go\" args=\"saves\"",
+                    "action=\"settings.set\" args=\"cloud_saves.writes on\"",
+                )
+            },
+            SettingKey,
+            Route("shell"),
+            Some("cloud_saves.writes"),
+        ),
+        case(
+            "§4.9 S21",
+            "settings.set of an auth key",
+            |f| {
+                rep(
+                    f,
+                    SHELL,
+                    "action=\"nav.go\" args=\"saves\"",
+                    "action=\"settings.set\" args=\"auth.token_store file\"",
+                )
+            },
+            SettingKey,
+            Route("shell"),
+            Some("auth.token_store"),
+        ),
+        case(
+            "§4.9 S21",
+            "settings.set of a key that is not listed",
+            |f| {
+                rep(
+                    f,
+                    SHELL,
+                    "action=\"nav.go\" args=\"saves\"",
+                    "action=\"settings.set\" args=\"download.workers 8\"",
+                )
+            },
+            SettingKey,
+            Route("shell"),
+            Some("download.workers"),
+        ),
+        case(
+            "§4.9 S21",
+            "settings.set with a key read from a field",
+            |f| {
+                rep(
+                    f,
+                    SHELL,
+                    "action=\"nav.go\" args=\"saves\"",
+                    "action=\"settings.set\" args=\"{account.username} on\"",
+                )
+            },
+            SettingKey,
+            Route("shell"),
+            Some("{account.username}"),
+        ),
+        case(
+            "§4.9 S21",
+            "settings.set with a key built from a template",
+            |f| {
+                rep(
+                    f,
+                    SHELL,
+                    "action=\"nav.go\" args=\"saves\"",
+                    "action=\"settings.set\" args=\"gui.{app.os} on\"",
+                )
+            },
+            SettingKey,
+            Route("shell"),
+            Some("gui.{app.os}"),
+        ),
+        case(
+            "§4.9 S21",
+            "settings.set with the key by name from a template",
+            |f| {
+                rep(
+                    f,
+                    SHELL,
+                    "action=\"nav.go\" args=\"saves\"",
+                    "action=\"settings.set\" args=\"value={account.username} key={app.version}\"",
+                )
+            },
+            SettingKey,
+            Route("shell"),
+            Some("{app.version}"),
+        ),
+        // §7: names.
+        case(
+            "§7 names",
+            "an unknown name",
+            |f| rep(f, GAME, "when=\"{g.runs_via}\"", "when=\"{runs}\""),
+            UnknownName,
+            Route("game"),
+            Some("runs"),
+        ),
+        case(
+            "§7 names",
+            "a source named without its arguments",
+            |f| rep(f, GAME, "when=\"{g.runs_via}\"", "when=\"{game.title}\""),
+            UnknownName,
+            Route("game"),
+            Some("game"),
+        ),
+        case(
+            "§7 names",
+            "a name outside the predicate's item",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "where installed == false",
+                    "where instaled == false",
+                )
+            },
+            UnknownName,
+            Route("game"),
+            Some("instaled"),
+        ),
+        case(
+            "§7 names",
+            "an each variable used after its block",
+            |f| rep(f, GAME, "    tabs ", "    text \"{s.label}\"\n    tabs "),
+            UnknownName,
+            Route("game"),
+            Some("s"),
+        ),
+        // §7: field paths from each kind of root.
+        case(
+            "§7 fields",
+            "an unknown field of a let",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "text \"{g.title}\" style=\"h1\"",
+                    "text \"{g.titel}\" style=\"h1\"",
+                )
+            },
+            UnknownField,
+            Route("game"),
+            Some(".titel"),
+        ),
+        case(
+            "§7 fields",
+            "an unknown field of a source call",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "    tabs ",
+                    "    text \"{game($id).titel}\"\n    tabs ",
+                )
+            },
+            UnknownField,
+            Route("game"),
+            Some(".titel"),
+        ),
+        case(
+            "§7 fields",
+            "an unknown field of an each item",
+            |f| rep(f, GAME, "{s.label}", "{s.lable}"),
+            UnknownField,
+            Route("game"),
+            Some(".lable"),
+        ),
+        case(
+            "§7 fields",
+            "an unknown field of a data-table row",
+            |f| rep(f, GAME, "{row.version}", "{row.verzion}"),
+            UnknownField,
+            Route("game"),
+            Some(".verzion"),
+        ),
+        case(
+            "§7 fields",
+            "an unknown field of ui",
+            |f| rep(f, GAME, "switch \"{ui.tab}\"", "switch \"{ui.tabb}\""),
+            UnknownField,
+            Route("game"),
+            Some(".tabb"),
+        ),
+        case(
+            "§7 fields",
+            "an unknown field of app",
+            |f| {
+                rep(
+                    f,
+                    SHELL,
+                    "        outlet",
+                    "        text \"{app.versoin}\"\n        outlet",
+                )
+            },
+            UnknownField,
+            Route("shell"),
+            Some(".versoin"),
+        ),
+        case(
+            "§7 fields",
+            "an unknown field of a source that has no arguments",
+            |f| rep(f, SHELL, "{account.username}", "{account.usernam}"),
+            UnknownField,
+            Route("shell"),
+            Some(".usernam"),
+        ),
+        case(
+            "§7 fields",
+            "an unknown field of a source named with a dot",
+            |f| rep(f, SHELL, "{library.stats.count}", "{library.stats.cnt}"),
+            UnknownField,
+            Route("shell"),
+            Some(".cnt"),
+        ),
+        case(
+            "§7 fields",
+            "an unknown field deep in a path",
+            |f| rep(f, GAME, "{g.art.cover}", "{g.art.covr}"),
+            UnknownField,
+            Route("game"),
+            Some(".covr"),
+        ),
+        case(
+            "§7 fields",
+            "a field of a value that has none",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "{g.title}\" style=\"h1\"",
+                    "{g.title.size}\" style=\"h1\"",
+                )
+            },
+            UnknownField,
+            Route("game"),
+            Some(".size"),
+        ),
+        case(
+            "§7 fields",
+            "a field of an opaque value",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "    tabs ",
+                    "    text \"{plan.preview('game.update', $id).x}\"\n    tabs ",
+                )
+            },
+            UnknownField,
+            Route("game"),
+            Some(".x"),
+        ),
+        case(
+            "§7 fields",
+            "an unknown sort key",
+            |f| rep(f, GAME, "sort -date | take 2", "sort -dat | take 2"),
+            UnknownField,
+            Route("game"),
+            Some("\"{snaps.items | sort -dat | take 2}\""),
+        ),
+        case(
+            "§7 fields",
+            "a field path checked at each use of a component",
+            |f| {
+                append(
+                    f,
+                    "components/stock.kdl",
+                    "\ncomponent \"who\" params=\"g\" { text \"{g.title}\" }\n",
+                );
+                rep(
+                    f,
+                    GAME,
+                    "    tabs ",
+                    "    use \"who\" g=\"{game($id)}\"\n    use \"who\" g=\"{account}\"\n    tabs ",
+                )
+            },
+            UnknownField,
+            Route("game"),
+            Some("\"{account}\""),
+        ),
+        // §7: sources.
+        case(
+            "§7 S16",
+            "a source the contract hasn't got",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "{game.builds($id) | take 4}",
+                    "{game.buidls($id) | take 4}",
+                )
+            },
+            UnknownSource,
+            Route("game"),
+            Some("game.buidls($id)"),
+        ),
+        case(
+            "§7 S16",
+            "a source that is only a widget's",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "    tabs ",
+                    "    text \"{job.log($id)}\"\n    tabs ",
+                )
+            },
+            UnknownSource,
+            Route("game"),
+            Some("job.log($id)"),
+        ),
+        case(
+            "§7 S16",
+            "a source with the wrong number of arguments",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "{game.builds($id) | take 4}",
+                    "{game.builds($id, 1, 2) | take 4}",
+                )
+            },
+            SourceArgs,
+            Route("game"),
+            Some("game.builds($id, 1, 2)"),
+        ),
+        // §7: types where an element needs one.
+        case(
+            "§7 types",
+            "when on text",
+            |f| rep(f, GAME, "when=\"{g.runs_via}\"", "when=\"{g.title}\""),
+            TypeMismatch,
+            Route("game"),
+            Some("\"{g.title}\""),
+        ),
+        case(
+            "§7 types",
+            "on with a number",
+            |f| rep(f, GAME, "on=\"{snaps.auto}\"", "on=\"{g.year}\""),
+            TypeMismatch,
+            Route("game"),
+            Some("\"{g.year}\""),
+        ),
+        case(
+            "§7 types",
+            "each over something that is not a list",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "in=\"{snaps.items | sort -date | take 2}\"",
+                    "in=\"{snaps}\"",
+                )
+            },
+            TypeMismatch,
+            Route("game"),
+            Some("\"{snaps}\""),
+        ),
+        case(
+            "§7 types",
+            "rows that are not a list",
+            |f| {
+                rep(
+                    f,
+                    GAME,
+                    "rows=\"{game.builds($id) | take 4}\"",
+                    "rows=\"{g}\"",
+                )
+            },
+            TypeMismatch,
+            Route("game"),
+            Some("\"{g}\""),
+        ),
+        case(
+            "§7 types",
+            "progress that is not a fraction",
+            |f| {
+                rep(
+                    f,
+                    SHELL,
+                    "progress=\"{q.current.fraction}\"",
+                    "progress=\"{q.queued}\"",
+                )
+            },
+            TypeMismatch,
+            Route("shell"),
+            Some("\"{q.queued}\""),
+        ),
+        case(
+            "§7 types",
+            "a parameter's type checked at the use",
+            |f| {
+                append(
+                    f,
+                    "components/stock.kdl",
+                    "\ncomponent \"each-of\" params=\"xs\" { each \"x\" in=\"{xs}\" { text \"{x}\" } }\n",
+                );
+                rep(
+                    f,
+                    GAME,
+                    "    tabs ",
+                    "    use \"each-of\" xs=\"{g.title}\"\n    use \"each-of\" xs=\"{game.builds($id)}\"\n    tabs ",
+                )
+            },
+            TypeMismatch,
+            Route("game"),
+            Some("\"{g.title}\""),
+        ),
+        // A component passes the action's name: each `use` is checked against the
+        // contract (S16).
+        case(
+            "§5.7 S16",
+            "a component given an action the contract hasn't got",
+            |f| {
+                game_insert(
+                    f,
+                    "use \"summary-tile\" mark=\"check\" title=\"T\" link=\"L\" action=\"game.verfy\" args=\"{$id}\"",
+                )
+            },
+            UnknownAction,
+            Route("game"),
+            Some("\"game.verfy\""),
+        ),
+        case(
+            "§5.7 S16",
+            "a component given an action without all its arguments",
+            |f| {
+                game_insert(
+                    f,
+                    "use \"summary-tile\" mark=\"check\" title=\"T\" link=\"L\" action=\"dlc.add\" args=\"{$id}\"",
+                )
+            },
+            ActionArgs,
+            Route("game"),
+            Some("\"dlc.add\""),
+        ),
+        case(
+            "§5.7 S16",
+            "a component given a route that isn't one",
+            |f| {
+                game_insert(
+                    f,
+                    "use \"summary-tile\" mark=\"check\" title=\"T\" link=\"L\" action=\"nav.go\" args=\"libary\"",
+                )
+            },
+            UnknownRoute,
+            Route("game"),
+            Some("\"libary\""),
         ),
     ]
 }
@@ -2407,4 +3161,157 @@ fn a_component_may_pass_its_action_parameter_on() {
     );
     let pkg = load(files).expect("loads");
     assert!(pkg.report().is_clean(), "{}", pkg.report());
+}
+
+// ---- the contract check: what it accepts, what it keeps, and the S21 paths ----
+
+/// The route nodes whose name is `name`, anywhere in the tree.
+fn find<'a>(nodes: &'a [gogo_skin::Node], name: &str, out: &mut Vec<&'a gogo_skin::Node>) {
+    for n in nodes {
+        if n.name == name {
+            out.push(n);
+        }
+        find(&n.children, name, out);
+    }
+}
+
+#[test]
+fn what_the_contract_allows_loads_clean() {
+    let mut files = base();
+    // An optional part hidden, a skin-settable key, a status and an OS as bare words, a
+    // `where` over a value of unknown type, an optional route parameter by name, and a
+    // section by name.
+    rep(
+        &mut files,
+        GAME,
+        "part \"badge\" style=\"plan-badge\"",
+        "part \"badge\" hidden=#true",
+    );
+    game_insert(
+        &mut files,
+        "button \"Dark\" action=\"settings.set\" args=\"gui.mode dark\"",
+    );
+    game_insert(
+        &mut files,
+        "text \"{g.status == setting_up and app.os == linux ? 'a' : 'b'}\"",
+    );
+    game_insert(&mut files, "text \"{$id | where whatever | len}\"");
+    game_insert(
+        &mut files,
+        "button \"Section\" action=\"nav.go\" args=\"game id={$id} section=builds\"",
+    );
+    let pkg = load(files).expect("loads");
+    assert!(pkg.report().is_clean(), "{}", pkg.report());
+}
+
+#[test]
+fn a_component_may_be_passed_an_action_that_fits() {
+    let mut files = base();
+    game_insert(
+        &mut files,
+        "use \"summary-tile\" mark=\"check\" title=\"T\" link=\"L\" action=\"game.verify\" args=\"{$id}\"",
+    );
+    game_insert(
+        &mut files,
+        "use \"summary-tile\" mark=\"check\" title=\"T\" link=\"L\" action=\"nav.go\" args=\"library\"",
+    );
+    let pkg = load(files).expect("loads");
+    assert!(pkg.report().is_clean(), "{}", pkg.report());
+}
+
+#[test]
+fn a_settings_key_passed_through_a_component_is_checked_at_the_use() {
+    // S21: the key reaches `settings.set` through a parameter, and is checked as the text
+    // the `use` gave. The single forwarded argument leaves `value` out, so that is an
+    // argument error as well.
+    let mut files = base();
+    game_insert(
+        &mut files,
+        "use \"summary-tile\" mark=\"check\" title=\"T\" link=\"L\" action=\"settings.set\" args=\"cloud_saves.writes\"",
+    );
+    let all = findings(load(files));
+    let codes: std::collections::BTreeSet<Code> = all.iter().map(|f| f.code).collect();
+    assert_eq!(
+        codes,
+        std::collections::BTreeSet::from([Code::SettingKey, Code::ActionArgs]),
+        "{all:?}"
+    );
+    let key = all.iter().find(|f| f.code == Code::SettingKey).unwrap();
+    assert_eq!(key.level, Level::Route("game".into()));
+    assert_eq!(key.text.as_deref(), Some("\"cloud_saves.writes\""));
+    assert!(key.message.contains("app-only"), "{}", key.message);
+
+    // And one that is not a literal at the use can't be checked, so it is refused.
+    let mut files = base();
+    game_insert(
+        &mut files,
+        "use \"summary-tile\" mark=\"check\" title=\"T\" link=\"L\" action=\"settings.set\" args=\"{account.username}\"",
+    );
+    let all = findings(load(files));
+    let key = all
+        .iter()
+        .find(|f| f.code == Code::SettingKey)
+        .expect("refused");
+    assert_eq!(key.text.as_deref(), Some("\"{account.username}\""));
+}
+
+#[test]
+fn resolved_specs_are_kept_in_the_tree() {
+    use gogo_skin::ast::ArgRef;
+    use gogo_skin::expr::{Expr, Template};
+    let pkg = load(base()).expect("loads");
+    let game = &pkg.routes["game"];
+
+    let mut buttons = Vec::new();
+    find(&game.children, "button", &mut buttons);
+    let play = buttons
+        .iter()
+        .find(|b| b.plain_prop("action") == Some("game.play"))
+        .expect("play");
+    assert_eq!(play.resolved.actions.len(), 1);
+    assert_eq!(play.resolved.actions[0].spec.name, "game.play");
+    assert_eq!(play.resolved.actions[0].args[0].param.name, "id");
+
+    // `nav.go args="game {$id} files"`: the route, then its parameters.
+    let files = buttons
+        .iter()
+        .find(|b| b.plain_prop("args").is_none() && b.plain_arg(0) == Some("Download files"))
+        .expect("files");
+    let args = &files.resolved.actions[0].args;
+    assert!(matches!(&args[0].value, ArgRef::Route(r) if r.name == "game"));
+    assert!(matches!(&args[1].value, ArgRef::RouteParam(p) if p.name == "id"));
+    assert!(matches!(&args[2].value, ArgRef::RouteParam(p) if p.name == "section"));
+
+    let mut cards = Vec::new();
+    find(&game.children, "plan-card", &mut cards);
+    let card = cards[0];
+    assert_eq!(card.resolved.widget.map(|w| w.name), Some("plan-card"));
+    assert_eq!(card.resolved.actions[0].spec.name, "game.update");
+    assert!(
+        card.resolved
+            .variants
+            .iter()
+            .any(|(v, x)| v.name == "layout" && *x == "stacked")
+    );
+    let mut parts = Vec::new();
+    find(&card.children, "part", &mut parts);
+    assert!(parts.iter().all(|p| p.resolved.part.is_some()));
+
+    let mut tabs = Vec::new();
+    find(&game.children, "tabs", &mut tabs);
+    assert_eq!(tabs[0].resolved.sections.len(), 7);
+
+    // Sources named in an expression hold their spec.
+    let Some(let_) = game.children.iter().find(|n| n.name == "let") else {
+        panic!("no let");
+    };
+    let Some(Template::Expr(Expr::Call { source, .. })) =
+        let_.props.first().map(|p| match &p.arg.val {
+            gogo_skin::Val::Text(t) => t.clone(),
+            _ => panic!("not text"),
+        })
+    else {
+        panic!("not a call");
+    };
+    assert_eq!(source.map(|s| s.name), Some("game"));
 }

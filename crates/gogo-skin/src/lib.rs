@@ -12,8 +12,11 @@
 //! - [`ast`]: the skin's own tree, with spans, in which every template and expression is
 //!   already parsed.
 //!
-//! The contract-level checks that need resolution (names to specs, field paths, types)
-//! are PR B3c's; binding and the typed styles are PR B4's.
+//! - The contract check (PR B3c, in `resolve` and `typing`): every name resolves once to
+//!   its `&'static` contract spec, every field path is checked against the contract's
+//!   shapes, and the types an element needs are checked (design 27 §7).
+//!
+//! Binding and the typed styles are PR B4's.
 //!
 //! Filled in further by PRs B3 (#525) and B4 (#526).
 #![deny(unsafe_code)]
@@ -35,6 +38,8 @@ mod elements;
 mod names;
 mod props;
 mod raw;
+mod resolve;
+mod typing;
 
 pub use assets::{Asset, AssetKind};
 pub use ast::{Arg, Node, Prop, Term, Val};

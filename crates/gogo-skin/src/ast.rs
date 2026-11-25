@@ -6,9 +6,13 @@
 //! `args` is a list of [`Term`]s, and `@token` is a [`Val::Token`]. Binding evaluates
 //! these trees and never parses text.
 //!
-//! Names stay strings with spans. Resolving an action, route, section, part, variant or
-//! setting name to its `&'static` contract spec, and the field and type checks, are
-//! PR B3c's: they walk this tree and report at the span kept here.
+//! Names keep their spans, and the contract check (PR B3c, the `resolve` module) fills in
+//! what each resolves to: an element's [`Resolved`] holds the `&'static` action, widget,
+//! part, variant and section it names, and an expression's source names and calls hold
+//! their [`SourceSpec`](gogo_contract::SourceSpec). Binding reads those and never looks a
+//! name up by string (design 26 S16).
+
+use gogo_contract::{ActionSpec, AppWidget, Param, Part, RouteSpec, SourceParam, Variant};
 
 use crate::diag::{Code, Collector};
 use crate::expr::{Template, TemplateError, TemplateErrorKind, parse_template};
@@ -66,12 +70,17 @@ pub struct Term {
     pub name: Option<String>,
     pub value: Template,
     pub span: Span,
+    /// `span` covers exactly the term as written, so a finding can point inside it.
+    pub(crate) exact: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Arg {
     pub val: Val,
     pub span: Span,
+    /// A string's content starts this many bytes into `span`, when `span` is the string
+    /// as written (no escapes): lets a finding point inside it.
+    pub(crate) inner: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -90,6 +99,58 @@ pub struct Node {
     pub props: Vec<Prop>,
     pub children: Vec<Node>,
     pub span: Span,
+    /// What the names on this node resolve to. Empty until the contract check has run.
+    pub resolved: Resolved,
+}
+
+/// What a node's names resolve to in the contract (design 26 S16).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Resolved {
+    /// The actions the node binds (`action`, `link-action`, a widget's `for`), with their
+    /// arguments matched to the action's parameters.
+    pub actions: Vec<BoundAction>,
+    /// The app widget a depth-B widget element places.
+    pub widget: Option<&'static AppWidget>,
+    /// For a `part`: its widget and the part it names.
+    pub part: Option<(&'static AppWidget, &'static Part)>,
+    /// A widget's variants with the value each is set to.
+    pub variants: Vec<(&'static Variant, &'static str)>,
+    /// A `tabs` element's sections, as the route's contract names them.
+    pub sections: Vec<&'static str>,
+}
+
+/// An action a node binds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoundAction {
+    /// The property that names it: `action`, `link-action` or `for`.
+    pub prop: String,
+    pub spec: &'static ActionSpec,
+    /// The arguments (`args`, `link-args`), matched to the action's parameters.
+    pub args: Vec<BoundArg>,
+}
+
+/// One argument term of a bound action.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoundArg {
+    /// Index into the property's [`Val::Terms`].
+    pub term: usize,
+    pub param: &'static Param,
+    pub value: ArgRef,
+}
+
+/// What a literal argument resolved to.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ArgRef {
+    /// A value computed at bind time, or a literal with nothing to resolve.
+    Value,
+    /// `nav.go`'s route.
+    Route(&'static RouteSpec),
+    /// One of that route's parameters.
+    RouteParam(&'static SourceParam),
+    /// A `settings.set` key on the skin-settable list (S21).
+    SettingKey(&'static str),
+    /// A `ui.set` variable the manifest declares.
+    UiVar(String),
 }
 
 impl Node {
@@ -128,6 +189,7 @@ pub(crate) fn convert(col: &mut Collector, raw: &RawNode) -> Node {
             .collect(),
         children: raw.children.iter().map(|c| convert(col, c)).collect(),
         span: raw.span,
+        resolved: Resolved::default(),
     }
 }
 
@@ -151,7 +213,11 @@ fn arg(col: &mut Collector, a: &RawArg, terms: bool) -> Arg {
             },
         },
     };
-    Arg { val, span: a.span }
+    Arg {
+        val,
+        span: a.span,
+        inner: a.inner,
+    }
 }
 
 /// `@name` as a whole string.
@@ -224,7 +290,12 @@ fn parse_terms(col: &mut Collector, a: &RawArg, s: &str) -> Option<Vec<Term>> {
                     Some(i) => Span::new(a.span.file, a.span.offset + i + at, text.len()),
                     None => a.span,
                 };
-                out.push(Term { name, value, span });
+                out.push(Term {
+                    name,
+                    value,
+                    span,
+                    exact: a.inner.is_some(),
+                });
             }
             Err(e) => {
                 report(col, a, at + off, &e);
