@@ -64,7 +64,8 @@ pub const SHAPE: &[&str] = &[
     "stroke.thick",
 ];
 
-/// Motion tokens. Easing curves are open-ended: any `easing.<name>` ([`EASING_PREFIX`]).
+/// Motion tokens. Easing curves are open-ended: any `easing.<name>`, one segment
+/// ([`EASING_PREFIX`]).
 pub const MOTION: &[&str] = &["motion.fast", "motion.normal", "motion.slow"];
 
 /// The prefix of easing tokens (`easing.*`).
@@ -81,7 +82,7 @@ pub fn is_semantic(name: &str) -> bool {
         return true;
     }
     if let Some(curve) = name.strip_prefix(EASING_PREFIX) {
-        return !curve.is_empty();
+        return !curve.is_empty() && !curve.contains('.');
     }
     FONT_ROLES.iter().any(|role| {
         name.strip_prefix(role)
@@ -112,6 +113,7 @@ mod tests {
             "font.body.colour",
             "brand-red",
             "tone.installed",
+            "easing.a.b",
         ] {
             assert!(!is_semantic(t), "{t}");
         }

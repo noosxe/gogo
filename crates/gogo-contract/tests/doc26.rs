@@ -1,17 +1,19 @@
-//! Every row of design 26 exists in `gogo-contract`, and the code has no row the doc
-//! lacks: sources (§3), actions (§4), app-owned widgets (§5), tokens (§6.1), routes
-//! (§6.2), the value types (§2), the statuses and the invariants (§7).
+//! Every row of design 26 exists in `gogo-contract`, in the doc's order, and the code has
+//! no row the doc lacks: the value types, statuses and OSes (§2), sources (§3), actions
+//! and their parameter types (§4), the settings lists (§4.9), app-owned widgets (§5),
+//! tokens (§6.1), routes (§6.2) and the invariants (§7).
 //!
-//! The doc's Markdown tables are parsed here. The parser is deliberately small: a row is
-//! a line starting with `|`, cells split on `|` not preceded by `\`, and names are read
-//! from backtick spans.
+//! The doc's Markdown is parsed here. The parser is deliberately small, and strict: a
+//! table is a header line followed by a `|---` separator, every row has the header's
+//! number of cells, and anything it doesn't recognise fails the test instead of being
+//! skipped.
 
 use gogo_contract::actions::{ACTIONS, ParamType};
 use gogo_contract::routes::ROUTES;
 use gogo_contract::sources::SOURCES;
-use gogo_contract::tokens::{COLOURS, FONT_ROLES, MOTION, SHAPE};
+use gogo_contract::tokens::{COLOURS, FONT_FIELDS, FONT_ROLES, MOTION, SHAPE};
 use gogo_contract::widgets::{Depth, Placement, WIDGETS};
-use gogo_contract::{Invariant, Status, ValueType};
+use gogo_contract::{Invariant, Os, Status, ValueType};
 use std::collections::{BTreeMap, BTreeSet};
 
 fn doc() -> String {
@@ -47,25 +49,52 @@ fn section<'a>(doc: &'a str, heading: &str) -> Vec<&'a str> {
     out
 }
 
-/// The body rows of every table in `lines`, as cells (header and separator skipped).
-fn rows(lines: &[&str]) -> Vec<Vec<String>> {
-    let mut out = Vec::new();
+struct Table {
+    header: Vec<String>,
+    rows: Vec<Vec<String>>,
+}
+
+/// The tables in `lines`. A header is a `|` line whose next line is a `|---` separator;
+/// any other `|` line must belong to a table, and have the header's number of cells.
+fn tables(lines: &[&str]) -> Vec<Table> {
+    let mut out: Vec<Table> = Vec::new();
     let mut in_table = false;
-    for line in lines {
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
         if !line.starts_with('|') {
             in_table = false;
+            i += 1;
             continue;
         }
         if !in_table {
-            in_table = true; // the header row
+            let sep = lines.get(i + 1).copied().unwrap_or("");
+            assert!(
+                sep.starts_with("|---"),
+                "a table row without a header: {line}"
+            );
+            let header = cells(line);
+            assert_eq!(cells(sep).len(), header.len(), "separator of {line}");
+            out.push(Table {
+                header,
+                rows: Vec::new(),
+            });
+            in_table = true;
+            i += 2;
             continue;
         }
-        if line.starts_with("|---") {
-            continue;
-        }
-        out.push(cells(line));
+        let row = cells(line);
+        let table = out.last_mut().expect("a table");
+        assert_eq!(row.len(), table.header.len(), "cell count of {line}");
+        table.rows.push(row);
+        i += 1;
     }
     out
+}
+
+/// The body rows of every table in `lines`.
+fn rows(lines: &[&str]) -> Vec<Vec<String>> {
+    tables(lines).into_iter().flat_map(|t| t.rows).collect()
 }
 
 fn cells(line: &str) -> Vec<String> {
@@ -118,14 +147,14 @@ fn split_top(s: &str) -> Vec<String> {
     out
 }
 
-/// A parameter as the doc writes it.
-#[derive(Debug, PartialEq, Eq)]
-enum DocParam {
-    /// `name`, `name?`, `name: type`, `name{…}`: the name, whether it is optional, and
-    /// the alternatives when the type is a list of plain words (`which: game|prefix`).
-    Named(String, bool, Option<Vec<String>>),
-    /// Written by its values alone (`on|off|default`).
-    Positional(String),
+/// A parameter as the doc writes it: `name`, `name?`, `name: type`, `name{…}`, or by its
+/// values alone (`on|off|default`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DocParam {
+    name: Option<String>,
+    optional: bool,
+    /// The written type: after `:`, the `{…}` after a name, or the positional values.
+    ty: Option<String>,
 }
 
 fn doc_params(code: &str) -> Vec<DocParam> {
@@ -134,28 +163,29 @@ fn doc_params(code: &str) -> Vec<DocParam> {
         .map(|piece| {
             if let Some((name, ty)) = piece.split_once(':') {
                 let ty = ty.trim();
-                let optional = ty.ends_with('?');
-                let words: Vec<String> = ty
-                    .trim_end_matches('?')
-                    .split('|')
-                    .map(str::to_owned)
-                    .collect();
-                let plain_words = words.len() > 1
-                    && words
-                        .iter()
-                        .all(|w| w.chars().all(|c| c.is_ascii_lowercase() || c == '_'));
-                DocParam::Named(
-                    name.trim().to_owned(),
-                    optional,
-                    plain_words.then_some(words),
-                )
-            } else if let Some((name, _)) = piece.split_once('{') {
-                DocParam::Named(name.trim().to_owned(), false, None)
+                DocParam {
+                    name: Some(name.trim().to_owned()),
+                    optional: ty.ends_with('?'),
+                    ty: Some(ty.trim_end_matches('?').to_owned()),
+                }
+            } else if let Some((name, rest)) = piece.split_once('{') {
+                DocParam {
+                    name: Some(name.trim().to_owned()),
+                    optional: false,
+                    ty: Some(format!("{{{rest}")),
+                }
             } else if piece.contains('|') {
-                DocParam::Positional(piece)
+                DocParam {
+                    name: None,
+                    optional: false,
+                    ty: Some(piece),
+                }
             } else {
-                let optional = piece.ends_with('?');
-                DocParam::Named(piece.trim_end_matches('?').to_owned(), optional, None)
+                DocParam {
+                    name: Some(piece.trim_end_matches('?').to_owned()),
+                    optional: piece.ends_with('?'),
+                    ty: None,
+                }
             }
         })
         .collect()
@@ -169,22 +199,48 @@ fn call(span: &str) -> (String, Vec<DocParam>) {
     }
 }
 
-fn names_differ(what: &str, doc: BTreeSet<String>, code: BTreeSet<String>) {
-    let missing: Vec<_> = doc.difference(&code).collect();
-    let extra: Vec<_> = code.difference(&doc).collect();
+/// `(name, optional)` of a source's or route's params, from the doc.
+fn names_only(params: &[DocParam]) -> Vec<(String, bool)> {
+    params
+        .iter()
+        .map(|p| {
+            assert!(p.ty.is_none(), "a typed source or route param: {p:?}");
+            (p.name.clone().expect("named param"), p.optional)
+        })
+        .collect()
+}
+
+/// The doc's names, in order, equal the code's: same set, then same order.
+fn same_list(what: &str, doc: &[String], code: &[&str]) {
+    let doc_set: BTreeSet<&str> = doc.iter().map(String::as_str).collect();
+    let code_set: BTreeSet<&str> = code.iter().copied().collect();
+    let missing: Vec<_> = doc_set.difference(&code_set).collect();
+    let extra: Vec<_> = code_set.difference(&doc_set).collect();
     assert!(
         missing.is_empty() && extra.is_empty(),
         "{what}: in the doc, not in code: {missing:?}; in code, not in the doc: {extra:?}"
     );
+    assert_eq!(doc.len(), doc_set.len(), "{what}: the doc names one twice");
+    let code_order: Vec<&str> = code.to_vec();
+    let doc_order: Vec<&str> = doc.iter().map(String::as_str).collect();
+    assert_eq!(doc_order, code_order, "{what}: order");
+}
+
+fn same_set(what: &str, doc: BTreeSet<String>, code: &[&str]) {
+    let doc: Vec<String> = doc.into_iter().collect();
+    let mut code: Vec<&str> = code.to_vec();
+    code.sort_unstable();
+    same_list(what, &doc, &code);
 }
 
 #[test]
 fn sources_match_section_3() {
     let doc = doc();
-    let mut seen = BTreeSet::new();
+    let mut order = Vec::new();
     let mut prev_from: Vec<String> = Vec::new();
     for row in rows(&section(&doc, "## 3. Data sources")) {
         let names = spans(&row[0]);
+        assert!(!names.is_empty(), "a source row without a name: {row:?}");
         let live = plain(&row[2]);
         let from = if row[3] == "same" {
             prev_from.clone()
@@ -199,91 +255,156 @@ fn sources_match_section_3() {
                 .iter()
                 .find(|s| s.name == name)
                 .unwrap_or_else(|| panic!("source {name} is in the doc, not in code"));
-            let code_params: Vec<DocParam> = spec
+            let code_params: Vec<(String, bool)> = spec
                 .params
                 .iter()
-                .map(|p| DocParam::Named(p.name.to_owned(), p.optional, None))
+                .map(|p| (p.name.to_owned(), p.optional))
                 .collect();
-            assert_eq!(params, code_params, "source {name}: params");
+            assert_eq!(names_only(&params), code_params, "source {name}: params");
             let doc_live = spec.live.doc();
             assert!(
                 live == doc_live || live.starts_with(&format!("{doc_live} (")),
                 "source {name}: doc says `{live}`, code says `{doc_live}`"
             );
             code_from.extend(spec.from.iter().map(|s| (*s).to_owned()));
-            seen.insert(name);
+            order.push(name);
         }
         assert_eq!(from, code_from, "sources {names:?}: From column");
     }
-    names_differ(
-        "sources",
-        seen,
-        SOURCES.iter().map(|s| s.name.to_owned()).collect(),
-    );
+    let code: Vec<&str> = SOURCES.iter().map(|s| s.name).collect();
+    same_list("sources", &order, &code);
+}
+
+/// What a parameter's type should be, from how the doc writes it. A param the doc leaves
+/// untyped gets the type its name has everywhere in §4 (checked list below).
+#[derive(Debug, PartialEq, Eq)]
+enum Expect {
+    Exact(ParamType),
+    Words(Vec<String>),
+}
+
+fn words(s: &str) -> Option<Vec<String>> {
+    let w: Vec<String> = s.split('|').map(str::to_owned).collect();
+    (w.len() > 1
+        && w.iter()
+            .all(|w| !w.is_empty() && w.chars().all(|c| c.is_ascii_lowercase() || c == '_')))
+    .then_some(w)
+}
+
+fn expected(action: &str, p: &DocParam) -> Expect {
+    use ParamType as T;
+    if let Some(ty) = &p.ty {
+        return match ty.as_str() {
+            "Bytes" => Expect::Exact(T::Bytes),
+            "[id]|all" => Expect::Exact(T::DlcIdsOrAll),
+            "[id]" => Expect::Exact(T::DlcIds),
+            "[n]" => Expect::Exact(T::Indices),
+            "{os, lang, kinds, dlc}" => Expect::Exact(T::Selection),
+            "unused|id" => Expect::Exact(T::UnusedOrCatalogId),
+            other => Expect::Words(
+                words(other).unwrap_or_else(|| panic!("{action}: unknown doc type `{other}`")),
+            ),
+        };
+    }
+    let name = p.name.as_deref().expect("named");
+    let w = |xs: &[&str]| Expect::Words(xs.iter().map(|x| (*x).to_owned()).collect());
+    Expect::Exact(match (action, name) {
+        ("runtimes.install" | "renderers.install", "id") => T::CatalogId,
+        (_, "id") => T::GameId,
+        (_, "ids") => T::GameIds,
+        (_, "job") => T::JobId,
+        (_, "route") => T::Route,
+        (_, "params") => T::RouteParams,
+        (_, "scope") => T::PaletteScope,
+        (_, "var") => T::UiVar,
+        ("ui.set", "value") => T::UiValue,
+        ("settings.set", "value") => T::SettingValue,
+        (_, "key") => T::SettingKey,
+        (_, "purge_state" | "keep_override" | "drop_saves" | "on" | "hdr" | "no_delete") => T::Bool,
+        (_, "exe" | "n") => T::Index,
+        (_, "build") => T::BuildId,
+        (_, "runtime" | "renderer") => T::CatalogId,
+        (_, "lang") => T::Lang,
+        (_, "version") => T::Version,
+        (_, "name") => T::EnvName,
+        (_, "monitor") => T::Monitor,
+        (_, "dlc") => T::DlcIdsOrAll,
+        // The values `game.runner` reports (§3.3) and the CLI's `--prefer` (design 22).
+        (_, "platform") => return w(&["linux", "mac"]),
+        (_, "mode") => return w(&["wayland", "x11"]),
+        (_, "prefer") => return w(&["local", "cloud", "newer"]),
+        _ => panic!("{action}: no expected type for untyped param `{name}`"),
+    })
+}
+
+fn matches(ty: ParamType, e: &Expect) -> bool {
+    match (ty, e) {
+        (ParamType::OneOf(values), Expect::Words(w)) => {
+            values.iter().copied().eq(w.iter().map(String::as_str))
+        }
+        (ty, Expect::Exact(t)) => ty == *t,
+        _ => false,
+    }
 }
 
 #[test]
 fn actions_match_section_4() {
     let doc = doc();
-    let mut seen = BTreeSet::new();
+    let mut order = Vec::new();
     for row in rows(&section(&doc, "## 4. Actions")) {
         let names = spans(&row[0]);
-        let params = if row[1] == "—" {
-            Some(Vec::new())
-        } else {
-            spans(&row[1]).first().map(|s| doc_params(s))
-        };
+        assert!(!names.is_empty(), "an action row without a name: {row:?}");
         let kind_tier = plain(&row[2]);
         for name in names {
             let spec = ACTIONS
                 .iter()
                 .find(|a| a.name == name)
                 .unwrap_or_else(|| panic!("action {name} is in the doc, not in code"));
-            // `clipboard.copy` takes "a bound non-secret field", in words.
-            match &params {
-                Some(params) => {
-                    let code: Vec<DocParam> = spec
-                        .params
-                        .iter()
-                        .map(|p| match (p.positional, p.ty) {
-                            (true, ParamType::OneOf(values)) => {
-                                DocParam::Positional(values.join("|"))
-                            }
-                            (true, ParamType::UnusedOrCatalogId) => {
-                                DocParam::Positional("unused|id".into())
-                            }
-                            (true, other) => panic!("{name}: positional {other:?} has no doc form"),
-                            (false, ty) => {
-                                let words = match ty {
-                                    ParamType::OneOf(values) => {
-                                        Some(values.iter().map(|v| (*v).to_owned()).collect())
-                                    }
-                                    _ => None,
-                                };
-                                DocParam::Named(p.name.to_owned(), p.optional, words)
-                            }
-                        })
-                        .collect();
-                    // The doc names only the alternatives it spells out as words.
-                    let code: Vec<DocParam> = code
-                        .into_iter()
-                        .zip(params.iter())
-                        .map(|(c, d)| match (c, d) {
-                            (DocParam::Named(n, o, _), DocParam::Named(_, _, None)) => {
-                                DocParam::Named(n, o, None)
-                            }
-                            (c, _) => c,
-                        })
-                        .chain(
-                            spec.params
-                                .iter()
-                                .skip(params.len())
-                                .map(|p| DocParam::Named(p.name.into(), p.optional, None)),
-                        )
-                        .collect();
-                    assert_eq!(params, &code, "action {name}: params");
+            if row[1] == "—" {
+                assert!(
+                    spec.params.is_empty(),
+                    "action {name}: the doc has no params"
+                );
+            } else if let Some(code) = spans(&row[1]).first() {
+                let params = doc_params(code);
+                assert_eq!(
+                    params.len(),
+                    spec.params.len(),
+                    "action {name}: param count"
+                );
+                for (d, c) in params.iter().zip(spec.params) {
+                    match &d.name {
+                        Some(n) => {
+                            assert!(
+                                !c.positional,
+                                "action {name}: {} is positional in code",
+                                c.name
+                            );
+                            assert_eq!(n, c.name, "action {name}: param name");
+                        }
+                        None => assert!(
+                            c.positional,
+                            "action {name}: {} is positional in the doc",
+                            c.name
+                        ),
+                    }
+                    assert_eq!(d.optional, c.optional, "action {name}: {} optional", c.name);
+                    let e = expected(&name, d);
+                    assert!(
+                        matches(c.ty, &e),
+                        "action {name}: {} is {:?}, the doc says {e:?}",
+                        c.name,
+                        c.ty
+                    );
                 }
-                None => assert_eq!(name, "clipboard.copy", "action {name}: params in words"),
+            } else {
+                // Only clipboard.copy describes its param in words.
+                assert_eq!(
+                    row[1], "a bound non-secret field",
+                    "action {name}: params in words"
+                );
+                assert_eq!(spec.params.len(), 1);
+                assert_eq!(spec.params[0].ty, ParamType::BoundField);
             }
             let code = spec.doc_kind_tier();
             let rest = kind_tier.strip_prefix(&code).unwrap_or_else(|| {
@@ -297,14 +418,11 @@ fn actions_match_section_4() {
                     || rest.starts_with(", only"),
                 "action {name}: unexpected `{rest}` after `{code}`"
             );
-            seen.insert(name);
+            order.push(name);
         }
     }
-    names_differ(
-        "actions",
-        seen,
-        ACTIONS.iter().map(|a| a.name.to_owned()).collect(),
-    );
+    let code: Vec<&str> = ACTIONS.iter().map(|a| a.name).collect();
+    same_list("actions", &order, &code);
 }
 
 #[test]
@@ -320,20 +438,27 @@ fn skin_settable_keys_match_section_4_9() {
         .position(|l| l.starts_with("A setting is **app-only**"))
         .expect("end")
         + start;
-    let keys: BTreeSet<String> = lines[start + 1..end]
-        .iter()
-        .filter(|l| l.starts_with("- ") || l.starts_with("  "))
-        .flat_map(|l| spans(l))
-        // Keys, not the action the doc mentions beside one.
-        .filter(|s| s.contains('.') && gogo_contract::actions::action(s).is_none())
-        .collect();
-    names_differ(
+    let mut keys = Vec::new();
+    for line in &lines[start + 1..end] {
+        if !(line.starts_with("- ") || line.starts_with("  ")) {
+            continue;
+        }
+        for span in spans(line) {
+            // The doc mentions the action that also sets `download.limit`.
+            if gogo_contract::actions::action(&span).is_some() {
+                continue;
+            }
+            assert!(
+                span.contains('.'),
+                "`{span}` in the allow-list is not a key"
+            );
+            keys.push(span);
+        }
+    }
+    same_list(
         "skin-settable keys",
-        keys,
-        gogo_contract::settings::SKIN_SETTABLE
-            .iter()
-            .map(|k| (*k).to_owned())
-            .collect(),
+        &keys,
+        gogo_contract::settings::SKIN_SETTABLE,
     );
 }
 
@@ -373,37 +498,45 @@ fn every_status_tone_is_a_colour_token_in_section_6_1() {
 fn widgets_match_section_5() {
     let doc = doc();
     let lines = section(&doc, "## 5. App-owned widgets");
-    let mut seen = BTreeSet::new();
-    for row in rows(&lines).into_iter().filter(|r| r.len() == 4) {
+    let all = tables(&lines);
+    let table = all
+        .iter()
+        .find(|t| t.header[0] == "Widget")
+        .expect("the widget table");
+    let mut order = Vec::new();
+    for row in &table.rows {
         let depth = match row[1].trim_start_matches("**").chars().next() {
             Some('A') => Depth::A,
             Some('B') => Depth::B,
             Some('C') => Depth::C,
-            _ => continue, // the depth table
+            _ => panic!("unknown depth `{}`", row[1]),
         };
         let mut parts: Vec<(String, bool)> = Vec::new();
-        let mut variants: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut variants: Vec<(String, Vec<String>)> = Vec::new();
         let mut placements = Vec::new();
         for clause in row[2].split("; ") {
             let clause = clause.trim();
-            if let Some(rest) = clause.strip_prefix("parts ") {
-                for span in spans(rest) {
-                    for part in span.split(", ") {
-                        let optional = part.ends_with('*');
-                        parts.push((part.trim_end_matches('*').to_owned(), optional));
-                    }
+            if clause.is_empty() || clause == "—" {
+                continue;
+            } else if let Some(rest) = clause.strip_prefix("parts ") {
+                let list = spans(rest);
+                assert_eq!(list.len(), 1, "parts clause `{clause}`");
+                for part in list[0].split(", ") {
+                    parts.push((part.trim_end_matches('*').to_owned(), part.ends_with('*')));
                 }
-            } else if clause.starts_with("variant") {
-                for span in spans(clause) {
+            } else if clause.starts_with("variants ") || clause.starts_with("variant ") {
+                let list = spans(clause);
+                assert!(!list.is_empty(), "variant clause `{clause}`");
+                for span in list {
                     let (name, values) = span
                         .split_once(": ")
                         .unwrap_or_else(|| panic!("unnamed variant {span}"));
-                    variants.insert(
+                    variants.push((
                         name.to_owned(),
                         values.split('|').map(str::to_owned).collect(),
-                    );
+                    ));
                 }
-            } else if clause.starts_with("placement") {
+            } else if clause.starts_with("placement ") {
                 for span in spans(clause) {
                     placements.push(match span.split('(').next() {
                         Some("inline") => Placement::Inline,
@@ -411,9 +544,13 @@ fn widgets_match_section_5() {
                         other => panic!("placement {other:?}"),
                     });
                 }
+            } else {
+                panic!("unrecognised clause `{clause}` in the row of {}", row[0]);
             }
         }
-        for name in spans(&row[0]) {
+        let names = spans(&row[0]);
+        assert!(!names.is_empty(), "a widget row without a name: {row:?}");
+        for name in names {
             let w = WIDGETS
                 .iter()
                 .find(|w| w.name == name)
@@ -425,7 +562,7 @@ fn widgets_match_section_5() {
                 .map(|p| (p.name.to_owned(), p.optional))
                 .collect();
             assert_eq!(parts, code_parts, "widget {name}: parts");
-            let code_variants: BTreeMap<String, Vec<String>> = w
+            let code_variants: Vec<(String, Vec<String>)> = w
                 .variants
                 .iter()
                 .map(|v| {
@@ -437,14 +574,11 @@ fn widgets_match_section_5() {
                 .collect();
             assert_eq!(variants, code_variants, "widget {name}: variants");
             assert_eq!(placements, w.placements, "widget {name}: placements");
-            seen.insert(name);
+            order.push(name);
         }
     }
-    names_differ(
-        "widgets",
-        seen,
-        WIDGETS.iter().map(|w| w.name.to_owned()).collect(),
-    );
+    let code: Vec<&str> = WIDGETS.iter().map(|w| w.name).collect();
+    same_list("widgets", &order, &code);
 }
 
 /// Expands the doc's shorthand: `radius.sm/md/lg`, `space.1…8`, `motion.fast/normal/slow`.
@@ -483,32 +617,39 @@ fn tokens_match_section_6_1() {
             current = None;
         }
     }
+    let labels: Vec<&str> = bullets.keys().map(String::as_str).collect();
+    assert_eq!(
+        labels,
+        ["Colours", "Motion", "Shape", "Type roles"],
+        "token bullets"
+    );
     let words = |label: &str| -> BTreeSet<String> {
-        let body = bullets
-            .get(label)
-            .unwrap_or_else(|| panic!("no {label} bullet"));
-        spans(body)
+        spans(&bullets[label])
             .iter()
             .flat_map(|s| s.split_whitespace().map(str::to_owned).collect::<Vec<_>>())
             .filter(|t| t != "easing.*")
             .flat_map(|t| expand(&t))
             .collect()
     };
-    let set = |xs: &[&str]| xs.iter().map(|x| (*x).to_owned()).collect::<BTreeSet<_>>();
-    names_differ("colour tokens", words("Colours"), set(COLOURS));
-    names_differ("type roles", words("Type roles"), set(FONT_ROLES));
-    names_differ("shape tokens", words("Shape"), set(SHAPE));
-    names_differ("motion tokens", words("Motion"), set(MOTION));
+    same_set("colour tokens", words("Colours"), COLOURS);
+    same_set("type roles", words("Type roles"), FONT_ROLES);
+    same_set("shape tokens", words("Shape"), SHAPE);
+    same_set("motion tokens", words("Motion"), MOTION);
     assert!(
         bullets["Motion"].contains("`easing.*`"),
         "easing.* is open-ended in code"
     );
+    assert!(
+        bullets["Type roles"].contains("each with family, size and weight"),
+        "type-role fields"
+    );
+    assert_eq!(FONT_FIELDS, ["family", "size", "weight"]);
 }
 
 #[test]
 fn routes_match_section_6_2() {
     let doc = doc();
-    let mut seen = BTreeSet::new();
+    let mut order = Vec::new();
     for row in rows(&section(&doc, "### 6.2 Routes")) {
         let name = spans(&row[0]).remove(0);
         let r = ROUTES
@@ -518,12 +659,12 @@ fn routes_match_section_6_2() {
         let params = if row[1] == "—" {
             Vec::new()
         } else {
-            doc_params(&spans(&row[1])[0])
+            names_only(&doc_params(&spans(&row[1])[0]))
         };
-        let code: Vec<DocParam> = r
+        let code: Vec<(String, bool)> = r
             .params
             .iter()
-            .map(|p| DocParam::Named(p.name.into(), p.optional, None))
+            .map(|p| (p.name.to_owned(), p.optional))
             .collect();
         assert_eq!(params, code, "route {name}: params");
         // Only a cell made of code spans is a list of sections; prose describes the route.
@@ -536,19 +677,16 @@ fn routes_match_section_6_2() {
             Vec::new()
         };
         assert_eq!(sections, r.sections, "route {name}: sections");
-        seen.insert(name);
+        order.push(name);
     }
-    names_differ(
-        "routes",
-        seen,
-        ROUTES.iter().map(|r| r.name.to_owned()).collect(),
-    );
+    let code: Vec<&str> = ROUTES.iter().map(|r| r.name).collect();
+    same_list("routes", &order, &code);
 }
 
 #[test]
-fn types_and_statuses_match_section_2() {
+fn types_statuses_and_oses_match_section_2() {
     let doc = doc();
-    let mut seen = BTreeSet::new();
+    let mut order = Vec::new();
     for row in rows(&section(&doc, "## 2. Types")) {
         let name = spans(&row[0]).remove(0);
         let t = ValueType::ALL
@@ -563,18 +701,20 @@ fn types_and_statuses_match_section_2() {
         if name != "Art" {
             assert_eq!(helpers, t.helpers(), "type {name}: helpers");
         }
+        let values =
+            || -> Vec<String> { spans(&row[1])[0].split(" · ").map(str::to_owned).collect() };
         if name == "Status" {
-            let words: Vec<String> = spans(&row[1])[0].split(" · ").map(str::to_owned).collect();
-            let code: Vec<String> = Status::ALL.iter().map(|s| s.name().to_owned()).collect();
-            assert_eq!(words, code, "Status values");
+            let code: Vec<&str> = Status::ALL.iter().map(|s| s.name()).collect();
+            same_list("Status values", &values(), &code);
         }
-        seen.insert(name);
+        if name == "Os" {
+            let code: Vec<&str> = Os::ALL.iter().map(|o| o.name()).collect();
+            same_list("Os values", &values(), &code);
+        }
+        order.push(name);
     }
-    names_differ(
-        "types",
-        seen,
-        ValueType::ALL.iter().map(|t| t.name().to_owned()).collect(),
-    );
+    let code: Vec<&str> = ValueType::ALL.iter().map(|t| t.name()).collect();
+    same_list("types", &order, &code);
 }
 
 #[test]

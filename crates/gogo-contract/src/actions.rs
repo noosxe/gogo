@@ -30,6 +30,7 @@ pub enum Kind {
 }
 
 impl Kind {
+    #[doc(hidden)]
     pub const fn doc(self) -> &'static str {
         match self {
             Self::Immediate => "immediate",
@@ -67,6 +68,7 @@ pub enum Tier {
 }
 
 impl Tier {
+    #[doc(hidden)]
     pub const fn doc(self) -> &'static str {
         match self {
             Self::Safe => "safe",
@@ -96,28 +98,91 @@ pub enum Escalation {
 }
 
 /// What the computed plan contains, as far as kind and tier depend on it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+///
+/// There is no `Default`: a caller states whether the plan changes anything
+/// ([`PlanFacts::nothing_to_do`] or [`PlanFacts::changes`]) and adds the details with
+/// struct update syntax. Every detail that means a change (DLC removed, a downgrade, a
+/// download, a filesystem crossing, purged state) counts as one even if `changes` is
+/// false, so a forgotten flag fails closed: the plan is shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlanFacts {
-    /// The plan would change something. Empty plans (nothing to do) show nothing.
-    pub non_empty: bool,
+    /// The plan would change something.
+    pub changes: bool,
     pub removes_dlc: bool,
     pub downgrades: bool,
     pub needs_download: bool,
     pub crosses_filesystems: bool,
     /// The action's `purge_state` argument is set.
     pub purge_state: bool,
-    /// The action turns something off (`on` is false).
+    /// The action turns something off (`on` is false). Not a change by itself.
     pub turning_off: bool,
 }
 
-/// The kind and tier the app applies to one invocation.
+impl PlanFacts {
+    /// A plan with nothing to do, or an action that has no plan.
+    pub const fn nothing_to_do() -> Self {
+        Self {
+            changes: false,
+            removes_dlc: false,
+            downgrades: false,
+            needs_download: false,
+            crosses_filesystems: false,
+            purge_state: false,
+            turning_off: false,
+        }
+    }
+
+    /// A plan that changes something, with no further detail.
+    pub const fn changes() -> Self {
+        Self {
+            changes: true,
+            ..Self::nothing_to_do()
+        }
+    }
+
+    /// Whether the plan changes anything: `changes`, or any detail that implies a change.
+    pub const fn any_change(&self) -> bool {
+        self.changes
+            || self.removes_dlc
+            || self.downgrades
+            || self.needs_download
+            || self.crosses_filesystems
+            || self.purge_state
+    }
+}
+
+/// The state of the settings that gate actions (tier [`Tier::Gated`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Gates {
+    /// Cloud writes (`saves.push`, `saves.sync`). Off unless the user turned it on.
+    pub cloud_writes: bool,
+}
+
+/// A setting that gates an action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub enum Gate {
+    /// The cloud-writes setting (today `GOGO_CLOUD_WRITES=1`; key `cloud_saves.writes`).
+    CloudWrites,
+}
+
+/// What the app does with one invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Decision {
-    pub kind: Kind,
-    pub tier: Tier,
-    /// The plan is shown on the app's `plan-card`, and nothing changes until it is
-    /// confirmed there (S5).
-    pub shows_plan: bool,
+pub enum Decision {
+    /// Run it as `kind`, asking at `tier`. A planning kind shows the plan on the app's
+    /// `plan-card`, and nothing changes until it is confirmed there (S5).
+    Run { kind: Kind, tier: Tier },
+    /// The plan has nothing to do: nothing runs.
+    NothingToDo,
+    /// Refused: the gate is off.
+    Blocked(Gate),
+}
+
+impl Decision {
+    /// Whether the plan is shown before anything changes.
+    pub const fn shows_plan(&self) -> bool {
+        matches!(self, Self::Run { kind, .. } if kind.plans())
+    }
 }
 
 /// Who may bind an action.
@@ -208,10 +273,34 @@ impl ActionSpec {
         self.params.iter().find(|p| p.name == name)
     }
 
-    /// The kind and tier for one invocation, from what its plan contains: the usual ones,
-    /// changed by the escalation, then raised so that a non-empty plan is always shown
-    /// and confirmed (S5).
-    pub fn decide(&self, facts: &PlanFacts) -> Decision {
+    /// The setting that gates this action, if its tier is [`Tier::Gated`].
+    pub const fn gate(&self) -> Option<Gate> {
+        match self.tier {
+            Tier::Gated => Some(Gate::CloudWrites),
+            _ => None,
+        }
+    }
+
+    /// What the app does with one invocation, from what its plan contains and the gates:
+    ///
+    /// 1. A gated action whose gate is off is [`Decision::Blocked`], before anything else.
+    /// 2. The usual kind and tier, changed by the escalation.
+    /// 3. A plan that changes anything is shown and at least confirmed, whatever the kind:
+    ///    an immediate action becomes a plan, a job a plan → job, a prompt a prompt →
+    ///    plan (S5).
+    /// 4. A planning kind whose plan changes nothing is [`Decision::NothingToDo`].
+    ///
+    /// Who may bind the action ([`Binding`]) is checked by the validator at load, not
+    /// here.
+    pub fn decide(&self, facts: &PlanFacts, gates: &Gates) -> Decision {
+        if let Some(gate) = self.gate() {
+            let open = match gate {
+                Gate::CloudWrites => gates.cloud_writes,
+            };
+            if !open {
+                return Decision::Blocked(gate);
+            }
+        }
         let (mut kind, mut tier) = (self.kind, self.tier);
         match self.escalation {
             Some(Escalation::DestructiveIfRemovesDlcOrDowngrades)
@@ -236,19 +325,23 @@ impl ActionSpec {
             }
             _ => {}
         }
-        let shows_plan = facts.non_empty;
-        if shows_plan {
+        if facts.any_change() {
+            kind = match kind {
+                Kind::Immediate => Kind::Plan,
+                Kind::Job => Kind::PlanThenJob,
+                Kind::Prompt => Kind::PromptThenPlan,
+                planning => planning,
+            };
             tier = tier.max(Tier::Confirm);
+        } else if kind.plans() {
+            return Decision::NothingToDo;
         }
-        Decision {
-            kind,
-            tier,
-            shows_plan,
-        }
+        Decision::Run { kind, tier }
     }
 
     /// The doc's Kind / tier cell for this action, as §4's tables write it (without the
     /// `**` emphasis and backticks).
+    #[doc(hidden)]
     pub fn doc_kind_tier(&self) -> String {
         if self.binding == Binding::AppOnly {
             return "app-only".to_owned();
@@ -674,6 +767,30 @@ mod tests {
         action(name).unwrap_or_else(|| panic!("no action {name}"))
     }
 
+    const OPEN: Gates = Gates { cloud_writes: true };
+
+    fn run(d: Decision) -> (Kind, Tier) {
+        match d {
+            Decision::Run { kind, tier } => (kind, tier),
+            other => panic!("expected Run, got {other:?}"),
+        }
+    }
+
+    /// Every combination of the facts.
+    fn all_facts() -> Vec<PlanFacts> {
+        (0u8..128)
+            .map(|bits| PlanFacts {
+                changes: bits & 1 != 0,
+                removes_dlc: bits & 2 != 0,
+                downgrades: bits & 4 != 0,
+                needs_download: bits & 8 != 0,
+                crosses_filesystems: bits & 16 != 0,
+                purge_state: bits & 32 != 0,
+                turning_off: bits & 64 != 0,
+            })
+            .collect()
+    }
+
     #[test]
     fn names_are_unique() {
         let mut seen = HashSet::new();
@@ -698,85 +815,113 @@ mod tests {
     #[test]
     fn update_is_destructive_when_it_removes_dlc_or_downgrades() {
         let a = get("game.update");
-        let plain = PlanFacts {
-            non_empty: true,
-            ..Default::default()
-        };
-        assert_eq!(a.decide(&plain).tier, Tier::Confirm);
+        assert_eq!(run(a.decide(&PlanFacts::changes(), &OPEN)).1, Tier::Confirm);
         for facts in [
             PlanFacts {
                 removes_dlc: true,
-                ..plain
+                ..PlanFacts::changes()
             },
             PlanFacts {
                 downgrades: true,
-                ..plain
+                ..PlanFacts::changes()
             },
         ] {
-            assert_eq!(a.decide(&facts).tier, Tier::Destructive);
+            assert_eq!(run(a.decide(&facts, &OPEN)).1, Tier::Destructive);
         }
     }
 
     #[test]
     fn move_is_destructive_across_filesystems() {
         let facts = PlanFacts {
-            non_empty: true,
             crosses_filesystems: true,
-            ..Default::default()
+            ..PlanFacts::changes()
         };
-        assert_eq!(get("game.move").decide(&facts).tier, Tier::Destructive);
-    }
-
-    #[test]
-    fn sign_out_is_destructive_with_purge_state() {
-        let a = get("account.sign_out");
-        let plain = PlanFacts {
-            non_empty: true,
-            ..Default::default()
-        };
-        assert_eq!(a.decide(&plain).tier, Tier::Confirm);
         assert_eq!(
-            a.decide(&PlanFacts {
-                purge_state: true,
-                ..plain
-            })
-            .tier,
+            run(get("game.move").decide(&facts, &OPEN)).1,
             Tier::Destructive
         );
     }
 
     #[test]
+    fn sign_out_is_destructive_with_purge_state() {
+        let a = get("account.sign_out");
+        assert_eq!(run(a.decide(&PlanFacts::changes(), &OPEN)).1, Tier::Confirm);
+        let purge = PlanFacts {
+            purge_state: true,
+            ..PlanFacts::changes()
+        };
+        assert_eq!(run(a.decide(&purge, &OPEN)).1, Tier::Destructive);
+    }
+
+    #[test]
     fn runtime_and_galaxy_plan_when_a_download_is_needed() {
-        let none = PlanFacts::default();
+        let none = PlanFacts::nothing_to_do();
         let dl = PlanFacts {
-            non_empty: true,
             needs_download: true,
-            ..Default::default()
+            ..PlanFacts::changes()
         };
         let rt = get("runner.set_runtime");
+        assert_eq!(run(rt.decide(&none, &OPEN)), (Kind::Immediate, Tier::Safe));
         assert_eq!(
-            rt.decide(&none),
-            Decision {
-                kind: Kind::Immediate,
-                tier: Tier::Safe,
-                shows_plan: false
-            }
-        );
-        assert_eq!(
-            rt.decide(&dl),
-            Decision {
-                kind: Kind::PlanThenJob,
-                tier: Tier::Confirm,
-                shows_plan: true
-            }
+            run(rt.decide(&dl, &OPEN)),
+            (Kind::PlanThenJob, Tier::Confirm)
         );
         let gx = get("runner.set_galaxy");
+        assert_eq!(run(gx.decide(&dl, &OPEN)), (Kind::Plan, Tier::Confirm));
+    }
+
+    #[test]
+    fn a_change_turns_an_immediate_action_into_a_plan() {
+        // runner.set_galaxy without a download, but with a plan that changes something.
+        let d = get("runner.set_galaxy").decide(&PlanFacts::changes(), &OPEN);
         assert_eq!(
-            gx.decide(&dl),
-            Decision {
+            d,
+            Decision::Run {
                 kind: Kind::Plan,
-                tier: Tier::Confirm,
-                shows_plan: true
+                tier: Tier::Confirm
+            }
+        );
+        assert!(d.shows_plan());
+        assert_eq!(
+            run(get("game.verify").decide(&PlanFacts::changes(), &OPEN)).0,
+            Kind::PlanThenJob
+        );
+        assert_eq!(
+            run(get("env.edit").decide(&PlanFacts::changes(), &OPEN)).0,
+            Kind::PromptThenPlan
+        );
+    }
+
+    #[test]
+    fn a_download_alone_counts_as_a_change() {
+        // needs_download without `changes`: still shown, never Plan with no plan shown.
+        let facts = PlanFacts {
+            needs_download: true,
+            ..PlanFacts::nothing_to_do()
+        };
+        let d = get("runner.set_galaxy").decide(&facts, &OPEN);
+        assert_eq!(
+            d,
+            Decision::Run {
+                kind: Kind::Plan,
+                tier: Tier::Confirm
+            }
+        );
+        assert!(d.shows_plan());
+    }
+
+    #[test]
+    fn an_empty_plan_runs_nothing() {
+        let none = PlanFacts::nothing_to_do();
+        assert_eq!(
+            get("game.download").decide(&none, &OPEN),
+            Decision::NothingToDo
+        );
+        assert_eq!(
+            get("nav.back").decide(&none, &OPEN),
+            Decision::Run {
+                kind: Kind::Immediate,
+                tier: Tier::Safe
             }
         );
     }
@@ -786,70 +931,83 @@ mod tests {
         let a = get("snapshot.set_auto");
         let off = PlanFacts {
             turning_off: true,
-            ..Default::default()
+            ..PlanFacts::nothing_to_do()
         };
         assert_eq!(
-            a.decide(&off),
-            Decision {
+            a.decide(&off, &OPEN),
+            Decision::Run {
                 kind: Kind::Immediate,
-                tier: Tier::Safe,
-                shows_plan: false
+                tier: Tier::Safe
             }
         );
-        let on = PlanFacts {
-            non_empty: true,
-            ..Default::default()
-        };
-        assert_eq!(a.decide(&on).tier, Tier::Confirm);
+        assert_eq!(run(a.decide(&PlanFacts::changes(), &OPEN)).1, Tier::Confirm);
     }
 
     #[test]
-    fn a_non_empty_plan_is_always_shown_and_confirmed() {
-        // S5: whatever the usual kind and tier.
-        let facts = PlanFacts {
-            non_empty: true,
-            ..Default::default()
-        };
-        for a in ACTIONS {
-            let d = a.decide(&facts);
-            assert!(d.shows_plan, "{}", a.name);
-            assert!(d.tier >= Tier::Confirm, "{}", a.name);
-            assert!(
-                d.tier >= a.tier,
-                "{}: the plan never weakens the tier",
-                a.name
-            );
+    fn gated_actions_are_blocked_while_the_gate_is_off() {
+        for name in ["saves.push", "saves.sync"] {
+            let a = get(name);
+            assert_eq!(a.gate(), Some(Gate::CloudWrites));
+            for facts in all_facts() {
+                assert_eq!(
+                    a.decide(&facts, &Gates::default()),
+                    Decision::Blocked(Gate::CloudWrites),
+                    "{name}"
+                );
+            }
+            assert_eq!(run(a.decide(&PlanFacts::changes(), &OPEN)).1, Tier::Gated);
         }
+        assert_eq!(get("saves.pull").gate(), None);
     }
 
+    /// The decision for every action, every combination of facts and both gate states.
     #[test]
-    fn gated_actions_stay_gated() {
-        // No escalation may turn a gated action into one that skips its setting.
-        for a in ACTIONS.iter().filter(|a| a.tier == Tier::Gated) {
-            assert_eq!(a.escalation, None, "{}", a.name);
-            let facts = PlanFacts {
-                non_empty: true,
-                ..Default::default()
-            };
-            assert_eq!(a.decide(&facts).tier, Tier::Gated, "{}", a.name);
-        }
-    }
-
-    #[test]
-    fn destructive_tier_needs_a_plan() {
-        // A destructive action always shows what it deletes first.
+    fn decisions_never_fail_open() {
         for a in ACTIONS {
-            let worst = PlanFacts {
-                non_empty: true,
-                removes_dlc: true,
-                downgrades: true,
-                crosses_filesystems: true,
-                purge_state: true,
-                ..Default::default()
-            };
-            let d = a.decide(&worst);
-            if d.tier == Tier::Destructive {
-                assert!(d.kind.plans(), "{}", a.name);
+            for facts in all_facts() {
+                for gates in [Gates::default(), OPEN] {
+                    let d = a.decide(&facts, &gates);
+                    let ctx = format!("{} {facts:?} {gates:?} → {d:?}", a.name);
+                    match d {
+                        Decision::Blocked(gate) => {
+                            assert_eq!(Some(gate), a.gate(), "{ctx}");
+                            assert!(!gates.cloud_writes, "{ctx}");
+                        }
+                        Decision::NothingToDo => {
+                            assert!(!facts.any_change(), "{ctx}");
+                            assert!(a.gate().is_none() || gates.cloud_writes, "{ctx}");
+                        }
+                        Decision::Run { kind, tier } => {
+                            assert!(a.gate().is_none() || gates.cloud_writes, "{ctx}: gate off");
+                            // S5: a change is always shown and confirmed, and kind and
+                            // shows_plan agree.
+                            assert_eq!(d.shows_plan(), kind.plans(), "{ctx}");
+                            if facts.any_change() {
+                                assert!(kind.plans(), "{ctx}: a change without a plan");
+                            }
+                            if kind.plans() {
+                                assert!(
+                                    tier >= Tier::Confirm,
+                                    "{ctx}: a plan without confirmation"
+                                );
+                            }
+                            if tier == Tier::Destructive {
+                                assert!(kind.plans(), "{ctx}: destructive without a plan");
+                            }
+                            // The plan never weakens the tier, except turning auto
+                            // snapshots off with nothing to do.
+                            let off = a.escalation == Some(Escalation::ImmediateWhenOff)
+                                && facts.turning_off;
+                            assert!(
+                                tier >= a.tier || (off && !facts.any_change()),
+                                "{ctx}: weaker than usual"
+                            );
+                            if a.tier == Tier::Gated {
+                                assert_eq!(tier, Tier::Gated, "{ctx}");
+                            }
+                        }
+                    }
+                }
             }
         }
     }
