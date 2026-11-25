@@ -58,7 +58,7 @@ use crate::source::Span;
 use crate::styles::State;
 use crate::tokens::TokenSet;
 
-pub use actions::{ActionCall, ActionTable, ArgValue, CallArg, Input, PendingArg};
+pub use actions::{ActionCall, ActionTable, ArgValue, CallArg, Input, PendingArg, PendingError};
 pub use error::{BindError, BindErrorKind};
 pub use state::{UiState, UiStateError};
 pub use widgets::{PartStyle, WidgetSlot};
@@ -69,6 +69,11 @@ use style::TextCtx;
 /// How many nodes one bound route may have (design 27 §8). A longer result is a failed
 /// binding, not a truncated one: only a list is cut (at 1 000).
 pub const MAX_BOUND_NODES: usize = 100_000;
+
+/// How many steps one bind may take (design 27 §8): each element met and each item of an
+/// `each` or `data-table` is one, so nested lists with empty bodies can't spin for ever.
+/// More than this is a failed binding, like too many nodes.
+pub const MAX_BIND_STEPS: usize = 500_000;
 
 /// How many components, repeats and outlets may nest when bound.
 const MAX_DEPTH: usize = 96;
@@ -240,8 +245,9 @@ pub(crate) struct Cx {
 /// The state of the route being bound, kept while an `outlet` binds another.
 pub(crate) struct SavedRoute<'a> {
     code: &'a SkinPackage,
+    route_code: &'a SkinPackage,
     ui_manifest: &'a Manifest,
-    ui: Value,
+    ui: &'a Value,
     route: String,
     vars: Vec<Var>,
 }
@@ -253,6 +259,22 @@ pub(crate) struct Var {
     /// For a component parameter given an `args`: the terms, which a bare `{name}` in an
     /// action's `args` stands for (design 27 §5.7).
     pub terms: Option<Vec<BoundTerm>>,
+    /// For a component parameter given an action's name: the action the loader resolved
+    /// it to, which an `action="{name}"` in the body binds (design 26 S16). A variable
+    /// that hides the parameter has none.
+    pub spec: Option<&'static gogo_contract::ActionSpec>,
+}
+
+impl Var {
+    /// A variable that is a plain value.
+    pub(crate) fn plain(name: impl Into<String>, value: Value) -> Self {
+        Var {
+            name: name.into(),
+            value,
+            terms: None,
+            spec: None,
+        }
+    }
 }
 
 pub(crate) type R<T> = Result<T, BindError>;
@@ -267,9 +289,11 @@ pub(crate) struct Binder<'a> {
     /// The skin whose files the node being bound was read from: its styles, components
     /// and spans.
     pub(crate) code: &'a SkinPackage,
+    /// The skin the route being bound belongs to: its manifest is `ui_manifest`.
+    route_code: &'a SkinPackage,
     /// The skin whose `ui` variables the route reads: the route's own.
     ui_manifest: &'a Manifest,
-    ui: Value,
+    ui: &'a Value,
     /// The route being bound, for errors.
     pub(crate) route: String,
     pub(crate) vars: Vec<Var>,
@@ -278,6 +302,7 @@ pub(crate) struct Binder<'a> {
     pub(crate) widgets: Vec<WidgetSlot>,
     notes: Vec<Fallback>,
     nodes: usize,
+    steps: usize,
     depth: usize,
     /// Borrowed fragments already checked against this skin's manifest in this bind.
     checked: BTreeSet<String>,
@@ -349,6 +374,7 @@ impl<'a> Binder<'a> {
             overrides,
             fallback,
             code: active,
+            route_code: active,
             ui_manifest: &active.manifest,
             ui: b.ui.as_value(),
             route: route.to_owned(),
@@ -358,6 +384,7 @@ impl<'a> Binder<'a> {
             widgets: Vec::new(),
             notes: Vec::new(),
             nodes: 1,
+            steps: 0,
             depth: 0,
             checked: BTreeSet::new(),
         })
@@ -394,6 +421,7 @@ impl<'a> Binder<'a> {
     /// Switch to the files and `ui` state of the skin that owns `route`.
     pub(crate) fn enter_route(&mut self, code: &'a SkinPackage, route: &str) {
         self.code = code;
+        self.route_code = code;
         self.ui_manifest = &code.manifest;
         self.route = route.to_owned();
         self.ui = match self.b.default {
@@ -408,8 +436,9 @@ impl<'a> Binder<'a> {
     pub(crate) fn save_route(&mut self) -> SavedRoute<'a> {
         SavedRoute {
             code: self.code,
+            route_code: self.route_code,
             ui_manifest: self.ui_manifest,
-            ui: self.ui.clone(),
+            ui: self.ui,
             route: self.route.clone(),
             vars: std::mem::take(&mut self.vars),
         }
@@ -417,6 +446,7 @@ impl<'a> Binder<'a> {
 
     pub(crate) fn restore_route(&mut self, s: SavedRoute<'a>) {
         self.code = s.code;
+        self.route_code = s.route_code;
         self.ui_manifest = s.ui_manifest;
         self.ui = s.ui;
         self.route = s.route;
@@ -454,7 +484,7 @@ impl<'a> Binder<'a> {
         EnvScope {
             data: self.b.scope,
             vars: &self.vars,
-            ui: &self.ui,
+            ui: self.ui,
             tokens: &self.tokens,
         }
     }
@@ -610,8 +640,22 @@ impl<'a> Binder<'a> {
         &mut self.checked
     }
 
-    pub(crate) fn current_ui(&self) -> &Value {
-        &self.ui
+    pub(crate) fn current_ui(&self) -> &'a Value {
+        self.ui
+    }
+
+    /// The skin whose manifest the route being bound is checked against.
+    pub(crate) fn route_code(&self) -> &'a SkinPackage {
+        self.route_code
+    }
+
+    /// One step of the bind budget.
+    pub(crate) fn step(&mut self, at: Span) -> R<()> {
+        self.steps += 1;
+        if self.steps > MAX_BIND_STEPS {
+            return Err(self.fail(BindErrorKind::TooManySteps(MAX_BIND_STEPS), Some(at)));
+        }
+        Ok(())
     }
 }
 

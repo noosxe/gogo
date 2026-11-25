@@ -74,7 +74,13 @@ impl<'a> Binder<'a> {
     ) -> R<NodeId> {
         let at = n.span;
         let c = self.compute(w.name, Some(n), &[], cx, |_| {})?;
-        let wid = WidgetId::new(u32::try_from(self.widgets.len()).unwrap_or(u32::MAX));
+        let Ok(index) = u32::try_from(self.widgets.len()) else {
+            return Err(self.fail(
+                BindErrorKind::TooManyNodes(super::MAX_BOUND_NODES),
+                Some(at),
+            ));
+        };
+        let wid = WidgetId::new(index);
         let mut node = Self::slot_node(&c);
         node.drawn_by = DrawnBy::App(AppPart {
             widget: wid,
@@ -139,7 +145,9 @@ impl<'a> Binder<'a> {
             }
             let own = format!("{}.{}", w.name, part.name);
             let layers = self.layers(&own, Some(p), &[])?;
-            let pc = self.compute_with(&layers, Some(p), true, &[], &c.text, |_| {})?;
+            // The text a part starts from is the page's, not what the element set for
+            // itself: the part's own styles are what a skin may change (design 26 §5).
+            let pc = self.compute_with(&layers, Some(p), true, &[], &cx.text, |_| {})?;
             let mut set: Vec<String> = Vec::new();
             for l in &layers {
                 if let Some(s) = self.code.styles.get(l) {
@@ -154,8 +162,14 @@ impl<'a> Binder<'a> {
             );
             set.sort();
             set.dedup();
+            let Ok(part_index) = u32::try_from(index) else {
+                return Err(self.fail(
+                    BindErrorKind::TooManyNodes(super::MAX_BOUND_NODES),
+                    Some(p.span),
+                ));
+            };
             parts.push(PartStyle {
-                id: PartId::new(u32::try_from(index).unwrap_or(u32::MAX)),
+                id: PartId::new(part_index),
                 part,
                 hidden,
                 layout: pc.layout,
@@ -178,10 +192,26 @@ impl<'a> Binder<'a> {
         Ok(id)
     }
 
+    /// The node a widget occupies. The app draws the widget, so the skin's styles for the
+    /// element place the slot and nothing more (design 26 §5): of what the skin set, only
+    /// `grow`, `shrink`, `align-self`, `col-span` and a `margin` of at least zero reach the
+    /// node. Its size, position (`inset`), `opacity`, `offset`, fill, border, ring, shape
+    /// and effects stay at the defaults, so no skin can hide, move, clip or obscure the
+    /// widget; the part styles and the tokens are what it may change.
     fn slot_node(c: &super::style::Computed) -> gogo_ui_ir::Node {
         let mut n = gogo_ui_ir::Node::container();
-        n.layout = c.layout.clone();
-        n.paint = c.paint.clone();
+        let l = &c.layout;
+        n.layout.grow = l.grow;
+        n.layout.shrink = l.shrink;
+        n.layout.align_self = l.align_self;
+        n.layout.col_span = l.col_span;
+        let m = &l.margin;
+        n.layout.margin = gogo_ui_ir::Sides {
+            top: m.top.max(0.0),
+            right: m.right.max(0.0),
+            bottom: m.bottom.max(0.0),
+            left: m.left.max(0.0),
+        };
         n
     }
 }

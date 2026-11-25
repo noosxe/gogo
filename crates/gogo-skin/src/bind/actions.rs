@@ -18,7 +18,7 @@ use gogo_contract::{ActionSpec, Value, routes, settings};
 use gogo_ui_ir::ActionRef;
 
 use crate::expr::{EvalError, Scope, Template};
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, UiType};
 
 /// Every action call of one bound tree. An [`ActionRef`] indexes it, and is valid for that
 /// tree only (design 24 §2).
@@ -101,24 +101,74 @@ pub struct Input {
 }
 
 /// An argument that reads an input variable.
+///
+/// The value is only known when the user acts, so the checks a known value gets at bind
+/// (S1, S16, S21: a masked value, a fixed set of words, the type of a `ui` value, a
+/// route's section) are kept here and run on the value [`eval`](Self::eval) computes. An
+/// argument that must be written out in the skin (a route, a `ui` variable, a settings key)
+/// can't be pending at all: binding refuses it.
 #[derive(Debug, Clone)]
 pub struct PendingArg {
     template: Template,
     captured: Vec<(String, Value)>,
+    /// What the value must satisfy; set when the term is matched to its parameter.
+    check: Option<Check>,
+}
+
+/// What a pending value must satisfy once it is known.
+#[derive(Debug, Clone)]
+enum Check {
+    /// A parameter of the action; a `ui` value also knows the type of its variable.
+    Param {
+        spec: &'static ActionSpec,
+        param: &'static Param,
+        ui: Option<UiType>,
+    },
+    /// A parameter of a `nav.go` route.
+    Route {
+        route: &'static routes::RouteSpec,
+        param: &'static SourceParam,
+    },
+}
+
+/// Why a [`PendingArg`] gives no value.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum PendingError {
+    /// The expression failed on the data, like any evaluation.
+    #[error("{0}")]
+    Eval(#[from] EvalError),
+    /// The input makes a value the action may not take: the call fails and nothing runs.
+    #[error("{0}")]
+    Rejected(String),
+    /// The input makes a masked value (S1, S2).
+    #[error("{0}")]
+    Masked(String),
 }
 
 impl PendingArg {
     pub(crate) fn new(template: Template, captured: Vec<(String, Value)>) -> Self {
-        PendingArg { template, captured }
+        PendingArg {
+            template,
+            captured,
+            check: None,
+        }
+    }
+
+    fn checked(mut self, check: Check) -> Self {
+        self.check = Some(check);
+        self
     }
 
     /// Evaluate against the input. `data` answers what the skin's expressions read from the
     /// app (sources, route parameters, `now`); the variables the route had in scope when
-    /// it was bound are the ones kept here.
+    /// it was bound are the ones kept here. The value then gets the checks its parameter
+    /// has (S1, S16, S21), as a value known at bind does.
     ///
     /// # Errors
-    /// An [`EvalError`] when the expression fails on the data, like any evaluation.
-    pub fn eval(&self, data: &dyn Scope, input: &Input) -> Result<Value, EvalError> {
+    /// [`PendingError::Eval`] when the expression fails on the data, like any evaluation;
+    /// [`PendingError::Rejected`] or [`PendingError::Masked`] when the input makes a value
+    /// the action may not take. The call must not run then.
+    pub fn eval(&self, data: &dyn Scope, input: &Input) -> Result<Value, PendingError> {
         let mut vars = self.captured.clone();
         if let Some(on) = input.on {
             vars.push(("on".to_owned(), Value::Bool(on)));
@@ -127,7 +177,64 @@ impl PendingArg {
             vars.push(("value".to_owned(), v.clone()));
         }
         let scope = Captured { data, vars };
-        Ok(self.template.eval(&scope)?.into_owned())
+        let v = self.template.eval(&scope)?.into_owned();
+        let checked = match &self.check {
+            Some(Check::Param { spec, param, ui }) => {
+                check_value(spec, param, &v, None, ui.as_ref()).and_then(|()| {
+                    not_null(&v, param.optional, || {
+                        format!(
+                            "`{}` of `{}` is null here, and the action needs it",
+                            param.name, spec.name
+                        )
+                    })
+                })
+            }
+            Some(Check::Route { route, param }) => check_route_param(route, param, &v),
+            None if matches!(v, Value::Masked) => Err(Problem::Masked(
+                "a masked value can't be an argument (S1, S2)".to_owned(),
+            )),
+            None => Ok(()),
+        };
+        match checked {
+            Ok(()) => Ok(v),
+            Err(Problem::Masked(m)) => Err(PendingError::Masked(m)),
+            Err(Problem::Other(m)) => Err(PendingError::Rejected(m)),
+        }
+    }
+}
+
+/// A null is only fine for an optional parameter.
+fn not_null(v: &Value, optional: bool, msg: impl FnOnce() -> String) -> Result<(), Problem> {
+    if matches!(v, Value::Null) && !optional {
+        return other(msg());
+    }
+    Ok(())
+}
+
+/// A value for one parameter of a `nav.go` route (S1, S16).
+fn check_route_param(
+    route: &'static routes::RouteSpec,
+    sp: &'static SourceParam,
+    v: &Value,
+) -> Result<(), Problem> {
+    match v {
+        Value::Null if sp.optional => Ok(()),
+        Value::Null => other(format!(
+            "`{}` of the `{}` route is null here",
+            sp.name, route.name
+        )),
+        Value::Masked => Err(Problem::Masked(format!(
+            "a masked value can't be an argument (`{}`, S1)",
+            sp.name
+        ))),
+        v if sp.name == "section" && !v.as_str().is_some_and(|s| route.sections.contains(&s)) => {
+            other(format!(
+                "`{}` is not a section of `{}`",
+                v.display(),
+                route.name
+            ))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -222,6 +329,20 @@ pub(crate) fn assign(
         }
     }
 
+    // The type of the `ui` variable a `ui.set` names, for the value it is given.
+    let ui_ty: Option<UiType> = params
+        .iter()
+        .position(|p| p.ty == ParamType::UiVar)
+        .and_then(|vi| match slots.get(vi) {
+            Some(Some(BoundTerm {
+                val: TermVal::Value(v),
+                ..
+            })) => v
+                .as_str()
+                .and_then(|name| manifest.ui.iter().find(|u| u.name == name))
+                .map(|u| u.ty.clone()),
+            _ => None,
+        });
     let mut out = Vec::new();
     let mut route: Option<&'static routes::RouteSpec> = None;
     for (p, slot) in params.iter().zip(slots) {
@@ -232,7 +353,18 @@ pub(crate) fn assign(
             continue;
         };
         let arg = match t.val {
-            TermVal::Pending(pa) => ArgValue::OnInput(pa),
+            // A name the skin writes out is checked at bind, so it can't wait for input.
+            TermVal::Pending(_) if p.ty.literal_only() => {
+                return other(format!(
+                    "`{}` of `{}` is written out in the skin, never read from the input (S16, S21)",
+                    p.name, spec.name
+                ));
+            }
+            TermVal::Pending(pa) => ArgValue::OnInput(pa.checked(Check::Param {
+                spec,
+                param: p,
+                ui: ui_ty.clone(),
+            })),
             TermVal::Value(Value::Null) if p.optional => continue,
             TermVal::Value(Value::Null) => {
                 return other(format!(
@@ -241,7 +373,7 @@ pub(crate) fn assign(
                 ));
             }
             TermVal::Value(v) => {
-                check_value(spec, p, &v, manifest)?;
+                check_value(spec, p, &v, Some(manifest), ui_ty.as_ref())?;
                 if p.ty == ParamType::Route {
                     route = v.as_str().and_then(routes::route_spec);
                 }
@@ -283,7 +415,9 @@ pub(crate) fn assign(
             }
             taken.push(sp);
             let value = match t.val {
-                TermVal::Pending(pa) => ArgValue::OnInput(pa),
+                TermVal::Pending(pa) => {
+                    ArgValue::OnInput(pa.checked(Check::Route { route, param: sp }))
+                }
                 TermVal::Value(Value::Null) if sp.optional => continue,
                 TermVal::Value(Value::Null) => {
                     return other(format!(
@@ -327,12 +461,15 @@ pub(crate) fn assign(
     Ok(out)
 }
 
-/// What only the data can show about one value (S1, S16, S21).
+/// What only the data can show about one value (S1, S16, S21). `manifest` is there for a
+/// value known at bind; a pending one can't be a `ui` variable, so it has none. `ui` is the
+/// type of the variable a `ui.set` value is for.
 fn check_value(
     spec: &'static ActionSpec,
     p: &'static Param,
     v: &Value,
-    manifest: &Manifest,
+    manifest: Option<&Manifest>,
+    ui: Option<&UiType>,
 ) -> Result<(), Problem> {
     if matches!(v, Value::Masked) {
         return Err(Problem::Masked(format!(
@@ -345,11 +482,23 @@ fn check_value(
         ParamType::Route if !text.is_some_and(|t| routes::route_spec(t).is_some()) => {
             other(format!("`{}` is not a route", v.display()))
         }
-        ParamType::UiVar if !text.is_some_and(|t| manifest.ui.iter().any(|u| u.name == t)) => {
+        ParamType::UiVar
+            if !text
+                .is_some_and(|t| manifest.is_some_and(|m| m.ui.iter().any(|u| u.name == t))) =>
+        {
             other(format!(
                 "`{}` is not a `ui` variable of this skin",
                 v.display()
             ))
+        }
+        ParamType::UiValue => {
+            match ui.and_then(|ty| crate::resolve::ui_value_error(ty, &v.display())) {
+                Some(why) => other(format!(
+                    "`{}` is not a value of that variable: {why}",
+                    v.display()
+                )),
+                None => Ok(()),
+            }
         }
         // S21: only the keys on the skin-settable list, whatever the arguments said.
         ParamType::SettingKey if !text.is_some_and(|t| settings::SKIN_SETTABLE.contains(&t)) => {
@@ -509,5 +658,34 @@ mod tests {
     fn a_ui_variable_is_one_the_manifest_declares() {
         assert!(assign_named("ui.set", vec![v(None, "tab"), v(None, "builds")]).is_ok());
         assert!(assign_named("ui.set", vec![v(None, "nope"), v(None, "builds")]).is_err());
+    }
+
+    fn pending() -> BoundTerm {
+        BoundTerm {
+            name: None,
+            val: TermVal::Pending(PendingArg::new(Template::Text(String::new()), Vec::new())),
+        }
+    }
+
+    #[test]
+    fn a_name_the_skin_writes_out_cannot_wait_for_the_input() {
+        // S16, S21: a settings key, a `ui` variable and a route are checked by name.
+        for (action, terms) in [
+            ("settings.set", vec![pending(), v(None, "on")]),
+            ("ui.set", vec![pending(), v(None, "builds")]),
+            ("nav.go", vec![pending()]),
+        ] {
+            let r = assign_named(action, terms);
+            assert!(matches!(r, Err(Problem::Other(_))), "{action}");
+        }
+    }
+
+    #[test]
+    fn a_value_for_a_ui_variable_that_waits_for_the_input_keeps_the_variables_type() {
+        let out = assign_named("ui.set", vec![v(None, "tab"), pending()]).unwrap();
+        assert!(matches!(out[1].value, ArgValue::OnInput(_)));
+        // A value known now is checked against the variable's type too.
+        assert!(assign_named("ui.set", vec![v(None, "tab"), v(None, "builds")]).is_ok());
+        assert!(assign_named("ui.set", vec![v(None, "tab"), v(None, "nothing")]).is_err());
     }
 }

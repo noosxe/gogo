@@ -142,6 +142,12 @@ pub struct Resolved {
     pub variants: Vec<(&'static Variant, &'static str)>,
     /// A `tabs` element's sections, as the route's contract names them.
     pub sections: Vec<&'static str>,
+    /// For a `use`: each parameter given an action's name as plain text, with the action
+    /// it names. The binder takes a component's `action="{p}"` from here, not from a
+    /// lookup by name (design 26 S16).
+    pub use_actions: Vec<(String, &'static ActionSpec)>,
+    /// The words of a literal `style=`, read once at load.
+    pub style_words: Vec<String>,
 }
 
 /// An action a node binds.

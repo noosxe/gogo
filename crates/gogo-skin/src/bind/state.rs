@@ -13,9 +13,20 @@ use crate::manifest::{Manifest, UiDefault, UiType};
 /// enum words, booleans and numbers, never data from a source (design 26 §6.4). The app
 /// persists this per skin (design 25 §9) and hands it to the binder, which exposes it to
 /// expressions as the `ui` source.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct UiState {
     values: BTreeMap<String, Value>,
+    /// `values` as the `ui` source, kept so a bind borrows it instead of building it.
+    source: Value,
+}
+
+impl Default for UiState {
+    fn default() -> Self {
+        UiState {
+            values: BTreeMap::new(),
+            source: Value::Map(BTreeMap::new()),
+        }
+    }
 }
 
 /// Why a value is not one of a `ui` variable.
@@ -34,12 +45,14 @@ pub enum UiStateError {
 impl UiState {
     /// Every variable at the default its manifest declares.
     pub fn defaults(manifest: &Manifest) -> Self {
+        let values: BTreeMap<String, Value> = manifest
+            .ui
+            .iter()
+            .map(|v| (v.name.clone(), default_value(&v.default)))
+            .collect();
         UiState {
-            values: manifest
-                .ui
-                .iter()
-                .map(|v| (v.name.clone(), default_value(&v.default)))
-                .collect(),
+            source: Value::Map(values.clone()),
+            values,
         }
     }
 
@@ -89,12 +102,13 @@ impl UiState {
             });
         }
         self.values.insert(name.to_owned(), value);
+        self.source = Value::Map(self.values.clone());
         Ok(())
     }
 
     /// The state as the `ui` source: a record of the variables.
-    pub(crate) fn as_value(&self) -> Value {
-        Value::Map(self.values.clone())
+    pub(crate) fn as_value(&self) -> &Value {
+        &self.source
     }
 }
 

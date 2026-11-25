@@ -3995,3 +3995,22 @@ fn a_mixed_forward_is_checked_at_two_levels() {
     );
     assert!(codes(&all).contains(&Code::TypeMismatch), "{all:?}");
 }
+
+#[test]
+fn a_section_listed_twice_in_tabs_is_refused() {
+    let mut files = base();
+    rep(
+        &mut files,
+        GAME,
+        "sections=\"overview builds",
+        "sections=\"overview overview builds",
+    );
+    let all = findings(load(files));
+    let dup = all
+        .iter()
+        .find(|f| f.code == Code::UnknownSection)
+        .unwrap_or_else(|| panic!("{all:?}"));
+    assert!(dup.message.contains("twice"), "{}", dup.message);
+    assert_eq!(dup.level, Level::Route("game".into()));
+    assert_eq!(dup.text.as_deref(), Some("overview"));
+}

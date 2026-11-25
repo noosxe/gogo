@@ -295,7 +295,8 @@ Only the elements below exist. Anything else is a load error.
   `toggle` and `select` may use `value` and `on` in `args`; any other element that does is a
   load error.
 - **Required.** `toggle` needs `on`, `select` needs `value` and `options`, `tabs` needs
-  `bind` and `sections`, `image` needs `src`, `data-table` needs `rows`.
+  `bind` and `sections`, `image` needs `src`, `data-table` needs `rows`. A section listed
+  twice in `sections` is a load error: each is one tab.
 - Every element with an action needs an accessible name (S14), and so does every `art` and
   `image`. The name is the element's own text, a non-empty `label=` or `title=`, or an
   enclosing `field "<label>"`. A `card` or `module` with `link-action` needs `link=` text.
@@ -341,6 +342,15 @@ env-table game="{$id}" row-actions="menu" title="Environment"
   checked against its own widget's values.
 - **What can't be hidden.** Hiding a non-optional part, the plan card's `footnote` or
   `confirm` included, is a load error (S5).
+- **What the element's own styles place.** An app widget takes no style property written
+  on it, but a style named after it (`style "plan-card"`) or a `style=` reaches the
+  element. At bind, of those only `grow`, `shrink`, `align-self`, `col-span` and a
+  `margin` that is not negative reach the widget's node: it can be placed in its slot,
+  not hidden, moved, shrunk or drawn over. The size, `inset`, `opacity`, `offset`, `fill`,
+  border, `ring`, `shape`, padding, gaps and every effect (`shadow`, `glow`, `blur-behind`,
+  `noise`, `scanlines`, `reflection`) a style gives the element are dropped there. What a
+  skin changes about the widget is its parts' styles and the semantic tokens (design 26
+  §5).
 - **Depth-A widgets** (`confirm-destructive`, `secret-input`, `focus-ring`) take no parts.
   Skins reach them only through tokens, and writing one as an element is a load error.
 - **Where parts go.** `part` goes only inside a depth-B widget, and a depth-B widget holds
@@ -351,7 +361,9 @@ env-table game="{$id}" row-actions="menu" title="Environment"
 
 `box style="bar-fill" progress="{job.fraction}"` sets the fill's width to that share of
 its track.
-- The value must be between 0 and 1.
+- The value must be between 0 and 1. A value up to 0.000001 outside it, which a ratio of
+  two sums can give by rounding, counts as the end it is next to; anything further, or
+  not a number, fails the route at bind.
 - The node is marked, so live progress can find it without a full re-bind (design 25 §3).
 
 ### 5.7 Components
@@ -404,6 +416,9 @@ component "summary-tile" params="mark tone title sub link action args" {
     (statuses, tones, sections, the words of the skin's own `enum` variables) are the
     borrowing skin's, so a missing variable is `unknown_field` and a word that is not
     one is `unknown_name`. A fragment that fails fails the route, which falls back.
+  - The check covers the whole fragment: every component its `use`s lead to, at any depth,
+    is checked the same way. The result is kept for the borrowing skin, so a fragment is
+    checked once, not at every bind.
   - It then draws with the default skin's styles and components, the active skin's tokens,
     and the borrowing skin's `ui` state.
 - **Stock components** (design 26 §5, depth C) ship with the default skin, and a skin may
@@ -625,6 +640,12 @@ sit inside one another in a file. An expression deeper than 32 levels is a load 
 the parser, the evaluator and everything that walks the tree stay within a known stack
 use.
 
+**Work at bind is bounded too.** A bind takes at most **500 000 steps**: each element it
+meets and each item of an `each` or `data-table` is one. A route that needs more, say
+three nested `each`es over lists of 1 000 whose bodies draw nothing, fails to bind (and so
+falls back) instead of running for as long as the data allows. The node and depth limits of
+§9.1 apply as well.
+
 **The row cap is data-dependent, so it truncates instead.** One `each` or `data-table`
 draws at most **1 000** items. A longer list is cut at 1 000, silently, at bind time: data
 can't make a valid skin fail to load. Virtualised lists, which draw only what is visible
@@ -687,9 +708,12 @@ with the skin's variants and part styles.
   index among its siblings, `each.1#3` for the fourth item of a repeat, and `use.4` for a
   component. The same skin and the same data give the same keys, and a `when` that is
   false leaves the indices of its siblings as they are.
-- **Style order.** A node gets its kind's style (`style "button"`), then the styles of
-  `style=` left to right (the base properties of each, then the states in effect), then,
-  last, its own inline properties (§4). A node with a `tone` also gets the `<name>.<tone>`
+- **Style order.** A node gets, in this order: the base properties of its kind's style
+  (`style "button"`) and of the styles of `style=`, left to right; then the states in
+  effect, of the same styles in the same order; then, last, its own inline properties
+  (§4). A state always beats a base, whichever style the base is in: with
+  `style="first second"`, `first`'s `:on` beats `second`'s plain `fill`, as `:hover`
+  does over a base in CSS. A node with a `tone` also gets the `<name>.<tone>`
   variant of each of those styles that exists (`chip.warn`, `mark.success`), after them
   all. `tone` colours nothing by itself.
 - **Inheritance.** Text properties (§5.2) and `bloom-text` pass from an element to its
@@ -711,8 +735,19 @@ with the skin's variants and part styles.
   has one. The `shell` route draws the route named by the `route.current` source in its
   `outlet`; that route is read from the skin, or falls back, on its own.
 - **Limits at bind.** A list of more than 1 000 items is cut at 1 000 in an `each` and a
-  `data-table`, silently (§8). A route that binds to more than 100 000 nodes, or nests
-  deeper than 96 levels of components, repeats and outlets, fails to bind.
+  `data-table`, silently (§8). A route that binds to more than 100 000 nodes, takes more
+  than 500 000 steps (§8), or nests deeper than 96 levels of components, repeats and
+  outlets, fails to bind.
+- **Input arguments.** An argument that reads `on` or `value` can't be known at bind, so
+  it is kept with what its parameter requires, and checked when the value is computed
+  (`PendingArg::eval`): a masked value (S1, S2), one of a fixed set of words, the type of
+  a `ui` value, a route's section, a required parameter that comes out null. A value that
+  fails makes the call fail with an error, and nothing runs. A parameter the skin must
+  write out (a route, a `ui` variable, a settings key, a palette scope) can't read the
+  input at all: `args="key={value}"` on `settings.set` is a load error.
+- **Actions through components.** `action="{p}"` in a component is the action the `use`
+  named, resolved once at load and kept with that `use`; bind never looks an action up by
+  its name.
 - **What still fails the route** is whatever the data can break after the loader's checks
   (§7, "Failures"), and: a control whose accessible name comes out empty (S14), a masked
   value as an action argument (S1, S2), a `settings.set` key off the skin-settable list

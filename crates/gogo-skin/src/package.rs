@@ -13,11 +13,11 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::Read;
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use crate::assets::{self, Asset, AssetError, AssetKind};
 use crate::ast::{self, Node};
-use crate::diag::{Code, Collector, LoadScope, Report};
+use crate::diag::{Code, Collector, Finding, LoadScope, Report};
 use crate::elements::{Place, Sig, Walk, World};
 use crate::limits::{
     MAX_DEPTH, MAX_FILES, MAX_KDL_FILE_BYTES, MAX_LICENCE_BYTES, MAX_NODES, MAX_PATH_BYTES,
@@ -71,6 +71,50 @@ pub struct SkinPackage {
     report: Report,
     /// What binding derives from the files once and keeps: the tokens as values.
     tables: OnceLock<crate::bind::Tables>,
+    /// What checking a fragment of the default skin against this skin's manifest found,
+    /// by fragment name: worked out once, the first time a route borrows it.
+    fragments: FragmentCache,
+}
+
+/// The errors of each borrowed fragment against one skin's manifest (design 27 §5.7).
+/// A copy of a package starts with none.
+#[derive(Default)]
+pub(crate) struct FragmentCache(Mutex<BTreeMap<String, Arc<Vec<Finding>>>>);
+
+impl Clone for FragmentCache {
+    fn clone(&self) -> Self {
+        FragmentCache::default()
+    }
+}
+
+impl std::fmt::Debug for FragmentCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FragmentCache")
+    }
+}
+
+impl FragmentCache {
+    /// The findings for `name`, from `check` the first time.
+    pub(crate) fn get_or_check(
+        &self,
+        name: &str,
+        check: impl FnOnce() -> Vec<Finding>,
+    ) -> Arc<Vec<Finding>> {
+        if let Some(found) = self
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(name)
+        {
+            return Arc::clone(found);
+        }
+        let found = Arc::new(check());
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(name.to_owned(), Arc::clone(&found));
+        found
+    }
 }
 
 impl SkinPackage {
@@ -125,6 +169,10 @@ impl SkinPackage {
     /// The KDL files the spans of the tree point into.
     pub fn sources(&self) -> &Sources {
         &self.sources
+    }
+
+    pub(crate) fn fragments(&self) -> &FragmentCache {
+        &self.fragments
     }
 
     pub(crate) fn tables(&self) -> &crate::bind::Tables {
@@ -845,6 +893,7 @@ fn finish(intake: Intake, name: &str) -> Result<SkinPackage, Report> {
         sources: col.sources,
         report: col.report,
         tables: OnceLock::new(),
+        fragments: FragmentCache::default(),
     })
 }
 
@@ -1087,5 +1136,30 @@ fn check_expansion(
                 format!("route `{name}` expands to more than {MAX_DEPTH} levels (S12)"),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod fragment_cache_tests {
+    use super::FragmentCache;
+
+    #[test]
+    fn a_fragment_is_checked_once_and_a_copy_starts_empty() {
+        let cache = FragmentCache::default();
+        let mut runs = 0;
+        for _ in 0..3 {
+            let found = cache.get_or_check("game.builds", || {
+                runs += 1;
+                Vec::new()
+            });
+            assert!(found.is_empty());
+        }
+        assert_eq!(runs, 1);
+        let mut copy_runs = 0;
+        let _ = cache.clone().get_or_check("game.builds", || {
+            copy_runs += 1;
+            Vec::new()
+        });
+        assert_eq!(copy_runs, 1, "a clone has its own cache");
     }
 }
