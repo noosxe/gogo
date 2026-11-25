@@ -1,0 +1,9 @@
+[package]
+name = "gogo-ui-ir"
+description = "The resolved, renderer-neutral tree between a skin and the engine"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]

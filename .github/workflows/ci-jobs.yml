@@ -26,6 +26,13 @@ env:
   CARGO_INCREMENTAL: 0
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_BUILD_WARNINGS: deny
+  # The desktop GUI crates (docs/design/24 §2). The `gui` job builds, lints and
+  # tests them; `clippy` and `test` exclude them (design 24 §7). cargo-deny
+  # stays workspace-wide. Keep in sync with scripts/gui-deps-check.py.
+  GUI_CRATES: >-
+    gogo-contract gogo-ui-ir gogo-skin gogo-skins gogo-ui-text gogo-ui-layout
+    gogo-ui-scene gogo-render-cpu gogo-render-gpu gogo-ui-interact gogo-ui-a11y
+    gogo-ui-shell gogo-gui-model gogo-gui-testkit gogo-gui
 
 jobs:
   changes:
@@ -45,6 +52,7 @@ jobs:
       host_pass_fake: ${{ steps.decide.outputs.host_pass_fake }}
       linux_e2e_helper: ${{ steps.decide.outputs.linux_e2e_helper }}
       linux_e2e_self_test: ${{ steps.decide.outputs.linux_e2e_self_test }}
+      gui: ${{ steps.decide.outputs.gui }}
     steps:
       # On pull_request the action lists the PR's files through the API, so
       # no checkout. Every other event, and a PR with `ci:full`, runs
@@ -79,6 +87,26 @@ jobs:
               - '!LICENSE-*'
               - '!.gitignore'
               - '!.envrc'
+              - '!crates/gogo-contract/**'
+              - '!crates/gogo-skin/**'
+              - '!crates/gogo-skins/**'
+              - '!crates/gogo-ui-*/**'
+              - '!crates/gogo-render-*/**'
+              - '!crates/gogo-gui/**'
+              - '!crates/gogo-gui-*/**'
+            # The desktop GUI crates, and gogo-core: a core change must still
+            # build the GUI (design 24 §7). Plus the dependency-rule check.
+            gui:
+              - 'crates/gogo-contract/**'
+              - 'crates/gogo-skin/**'
+              - 'crates/gogo-skins/**'
+              - 'crates/gogo-ui-*/**'
+              - 'crates/gogo-render-*/**'
+              - 'crates/gogo-gui/**'
+              - 'crates/gogo-gui-*/**'
+              - 'crates/gogo-core/**'
+              - 'scripts/gui-deps-check.py'
+              - 'scripts/tests/gui-deps-check-test.py'
             # snapshots-btrfs also runs in the dev shell and its own script.
             btrfs:
               - 'scripts/ci-btrfs-tests.sh'
@@ -120,15 +148,16 @@ jobs:
             done
             echo "$job=$value" | tee -a "$GITHUB_OUTPUT"
           }
-          needed rustfmt rust
+          needed rustfmt rust gui
           needed clippy rust
           needed test rust
-          needed deny rust
+          needed deny rust gui
           needed snapshots_btrfs rust btrfs
           needed shellcheck scripts
           needed host_pass_fake scripts
           needed linux_e2e_helper scripts
           needed linux_e2e_self_test scripts
+          needed gui gui
 
   rustfmt:
     name: rustfmt
@@ -158,8 +187,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      # -D warnings: warnings are failures, same as locally.
-      - run: cargo clippy --all-targets -- -D warnings
+      # -D warnings: warnings are failures, same as locally. The GUI crates
+      # are linted by the `gui` job, on both OSes.
+      - run: |
+          read -ra gui <<< "$GUI_CRATES"
+          cargo clippy --workspace "${gui[@]/#/--exclude=}" --all-targets -- -D warnings
 
   test:
     name: test (${{ matrix.os }})
@@ -192,7 +224,10 @@ jobs:
         run: |
           echo "::warning::prebuilt cargo-nextest 0.9.146 download failed; building from source"
           cargo install cargo-nextest@0.9.146 --locked
-      - run: cargo nextest run
+      # The GUI crates are tested by the `gui` job.
+      - run: |
+          read -ra gui <<< "$GUI_CRATES"
+          cargo nextest run --workspace "${gui[@]/#/--exclude=}"
 
   deny:
     name: cargo-deny
@@ -335,6 +370,54 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
+  # The desktop GUI crates (design 24 §7): the dependency rules, then build,
+  # clippy and nextest on both OSes. macOS is where warnings in GUI code that
+  # only compiles there would show.
+  gui:
+    name: gui (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.gui == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install
+      - name: Dependency rules (design 24 §2.1)
+        if: runner.os == 'Linux'
+        run: |
+          python3 -I scripts/tests/gui-deps-check-test.py
+          python3 -I scripts/gui-deps-check.py
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        id: nextest
+        continue-on-error: true
+        with:
+          tool: cargo-nextest@0.9.146
+      - name: Fallback - build cargo-nextest from source
+        if: steps.nextest.outcome == 'failure'
+        run: |
+          echo "::warning::prebuilt cargo-nextest 0.9.146 download failed; building from source"
+          cargo install cargo-nextest@0.9.146 --locked
+      - name: Build
+        run: |
+          read -ra gui <<< "$GUI_CRATES"
+          cargo build "${gui[@]/#/--package=}" --all-targets
+      - name: Clippy
+        run: |
+          read -ra gui <<< "$GUI_CRATES"
+          cargo clippy "${gui[@]/#/--package=}" --all-targets -- -D warnings
+      # --no-tests=pass: the skeleton crates have no tests yet (PR B1).
+      - name: Test
+        run: |
+          read -ra gui <<< "$GUI_CRATES"
+          cargo nextest run "${gui[@]/#/--package=}" --no-tests=pass
+
   ci-result:
     name: CI result
     # Never a condition that can skip it: a skipped required check counts
@@ -351,6 +434,7 @@ jobs:
       - host_pass_fake
       - linux_e2e_helper
       - linux_e2e_self_test
+      - gui
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
@@ -366,7 +450,7 @@ jobs:
           fi
           failed=0
           for job in rustfmt clippy test deny snapshots_btrfs shellcheck \
-            host_pass_fake linux_e2e_helper linux_e2e_self_test; do
+            host_pass_fake linux_e2e_helper linux_e2e_self_test gui; do
             wanted=$(jq -r --arg j "$job" '.changes.outputs[$j] // "missing"' <<<"$NEEDS")
             result=$(jq -r --arg j "$job" '.[$j].result // "missing"' <<<"$NEEDS")
             case "$wanted/$result" in

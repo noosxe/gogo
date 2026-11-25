@@ -1,0 +1,10 @@
+[package]
+name = "gogo-render-gpu"
+description = "vello_gpu renderer on wgpu"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+gogo-ui-scene.workspace = true

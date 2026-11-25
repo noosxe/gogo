@@ -1,0 +1,21 @@
+[package]
+name = "gogo-gui"
+description = "The desktop GUI binary: wires gogo-core into the skin engine"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "gogo-gui"
+path = "src/main.rs"
+
+[dependencies]
+gogo-ui-shell.workspace = true
+gogo-skin.workspace = true
+gogo-skins.workspace = true
+gogo-gui-model.workspace = true
+gogo-render-cpu.workspace = true
+gogo-render-gpu.workspace = true
+gogo-contract.workspace = true
+gogo-core.workspace = true

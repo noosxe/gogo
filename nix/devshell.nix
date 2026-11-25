@@ -35,6 +35,19 @@ pkgs.mkShell {
 
   env = {
     RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
+  } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+    # The desktop GUI (design 24 §5, §7): winit dlopens wayland and
+    # libxkbcommon, wgpu dlopens the Vulkan loader and libEGL (libglvnd, for
+    # its GL fallback), fontique reads fontconfig. WAYLAND_DISPLAY and DISPLAY
+    # stay set: this shell is used interactively, and agents run the GUI only
+    # through its headless tools (AGENTS.md).
+    LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+      pkgs.wayland
+      pkgs.libxkbcommon
+      pkgs.vulkan-loader
+      pkgs.libglvnd
+      pkgs.fontconfig
+    ];
   };
 
   shellHook = ''

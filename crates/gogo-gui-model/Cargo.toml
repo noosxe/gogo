@@ -1,0 +1,10 @@
+[package]
+name = "gogo-gui-model"
+description = "The app layer: sources, dispatch, the safety flow, jobs"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+gogo-contract.workspace = true

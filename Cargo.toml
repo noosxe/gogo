@@ -5,6 +5,22 @@ members = [
     "crates/gogo-cli",
     "crates/gogo-shims",
     "crates/gogo-tui",
+    # Desktop GUI (docs/design/24 §2).
+    "crates/gogo-contract",
+    "crates/gogo-ui-ir",
+    "crates/gogo-skin",
+    "crates/gogo-skins",
+    "crates/gogo-ui-text",
+    "crates/gogo-ui-layout",
+    "crates/gogo-ui-scene",
+    "crates/gogo-render-cpu",
+    "crates/gogo-render-gpu",
+    "crates/gogo-ui-interact",
+    "crates/gogo-ui-a11y",
+    "crates/gogo-ui-shell",
+    "crates/gogo-gui-model",
+    "crates/gogo-gui-testkit",
+    "crates/gogo-gui",
 ]
 
 [workspace.package]
@@ -23,6 +39,22 @@ publish = false
 # — internal —
 gogo-core = { path = "crates/gogo-core", version = "0.1.0" }
 gogo-shims = { path = "crates/gogo-shims", version = "0.1.0" }
+# Desktop GUI crates (docs/design/24 §2; dependency rules in §2.1, checked by
+# scripts/gui-deps-check.py).
+gogo-contract = { path = "crates/gogo-contract", version = "0.1.0" }
+gogo-ui-ir = { path = "crates/gogo-ui-ir", version = "0.1.0" }
+gogo-skin = { path = "crates/gogo-skin", version = "0.1.0" }
+gogo-skins = { path = "crates/gogo-skins", version = "0.1.0" }
+gogo-ui-text = { path = "crates/gogo-ui-text", version = "0.1.0" }
+gogo-ui-layout = { path = "crates/gogo-ui-layout", version = "0.1.0" }
+gogo-ui-scene = { path = "crates/gogo-ui-scene", version = "0.1.0" }
+gogo-render-cpu = { path = "crates/gogo-render-cpu", version = "0.1.0" }
+gogo-render-gpu = { path = "crates/gogo-render-gpu", version = "0.1.0" }
+gogo-ui-interact = { path = "crates/gogo-ui-interact", version = "0.1.0" }
+gogo-ui-a11y = { path = "crates/gogo-ui-a11y", version = "0.1.0" }
+gogo-ui-shell = { path = "crates/gogo-ui-shell", version = "0.1.0" }
+gogo-gui-model = { path = "crates/gogo-gui-model", version = "0.1.0" }
+gogo-gui-testkit = { path = "crates/gogo-gui-testkit", version = "0.1.0" }
 
 # — async / HTTP (rustls only: one TLS stack shared with gog-warp; no gzip) —
 tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "signal", "fs", "io-util", "time"] }
@@ -89,6 +121,32 @@ clap_complete = "4.6.11"
 # Pinned at the merge of playtron-os/gog-warp#5 (macOS file pre-allocation;
 # docs/17 §5, design 14).
 gog-warp = { git = "https://github.com/playtron-os/gog-warp", rev = "26c9e671589edf643fdb36678848f4420f9d3d41" }
+
+# — desktop GUI stack (docs/design/24 §3, decision 7) —
+# Exact pins, bumped together as one batch in a deliberate PR (they move in
+# lockstep: vello pins a wgpu major, accesskit_winit pins winit 0.30). Declared
+# here so each GUI PR only references them; cargo resolves a workspace
+# dependency into Cargo.lock only once a member uses it.
+taffy = "=0.16.0"
+parley = "=0.13.0"
+fontique = "=0.13.0"
+kurbo = "=0.13.1"
+peniko = "=0.6.1"
+vello_cpu = "=0.4.0"
+vello_gpu = "=0.4.0"
+wgpu = "=30.0.2"
+pollster = "=1.0.3"
+winit = { version = "=0.30.13", default-features = false, features = ["rwh_06", "wayland", "wayland-dlopen", "wayland-csd-adwaita", "x11"] }
+accesskit = "=0.25.2"
+accesskit_winit = "=0.34.2"
+accesskit_consumer = "=0.39.2"
+kdl = "=6.7.1"
+miette = { version = "=7.6.0", features = ["fancy"] }
+notify = "=9.0.0"
+png = "=0.18.1"
+smithay-clipboard = "=0.7.3"
+arboard = "=3.7.0"
+image = { version = "=0.25.10", default-features = false, features = ["jpeg", "webp"] }
 
 # — dev —
 wiremock = "0.6"

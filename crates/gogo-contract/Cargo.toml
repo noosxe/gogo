@@ -1,0 +1,9 @@
+[package]
+name = "gogo-contract"
+description = "The skin contract as typed data: sources, actions, routes, app widgets, tokens, invariants"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]

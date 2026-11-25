@@ -1,0 +1,11 @@
+[package]
+name = "gogo-ui-layout"
+description = "IR to taffy to positioned boxes"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+gogo-ui-ir.workspace = true
+gogo-ui-text.workspace = true

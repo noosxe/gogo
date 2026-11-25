@@ -1,0 +1,10 @@
+[package]
+name = "gogo-render-cpu"
+description = "vello_cpu renderer: reference, no-GPU path, golden tests"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+gogo-ui-scene.workspace = true

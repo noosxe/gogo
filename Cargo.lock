@@ -1302,6 +1302,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "gogo-contract"
+version = "0.1.0"
+
+[[package]]
 name = "gogo-core"
 version = "0.1.0"
 dependencies = [
@@ -1347,6 +1351,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "gogo-gui"
+version = "0.1.0"
+dependencies = [
+ "gogo-contract",
+ "gogo-core",
+ "gogo-gui-model",
+ "gogo-render-cpu",
+ "gogo-render-gpu",
+ "gogo-skin",
+ "gogo-skins",
+ "gogo-ui-shell",
+]
+
+[[package]]
+name = "gogo-gui-model"
+version = "0.1.0"
+dependencies = [
+ "gogo-contract",
+]
+
+[[package]]
+name = "gogo-gui-testkit"
+version = "0.1.0"
+dependencies = [
+ "gogo-gui-model",
+ "gogo-render-cpu",
+ "gogo-skin",
+ "gogo-ui-scene",
+]
+
+[[package]]
+name = "gogo-render-cpu"
+version = "0.1.0"
+dependencies = [
+ "gogo-ui-scene",
+]
+
+[[package]]
+name = "gogo-render-gpu"
+version = "0.1.0"
+dependencies = [
+ "gogo-ui-scene",
+]
+
+[[package]]
 name = "gogo-shims"
 version = "0.1.0"
 dependencies = [
@@ -1356,8 +1405,75 @@ dependencies = [
 ]
 
 [[package]]
+name = "gogo-skin"
+version = "0.1.0"
+dependencies = [
+ "gogo-contract",
+ "gogo-ui-ir",
+]
+
+[[package]]
+name = "gogo-skins"
+version = "0.1.0"
+
+[[package]]
 name = "gogo-tui"
 version = "0.1.0"
+
+[[package]]
+name = "gogo-ui-a11y"
+version = "0.1.0"
+dependencies = [
+ "gogo-ui-interact",
+ "gogo-ui-ir",
+ "gogo-ui-layout",
+]
+
+[[package]]
+name = "gogo-ui-interact"
+version = "0.1.0"
+dependencies = [
+ "gogo-ui-ir",
+ "gogo-ui-layout",
+]
+
+[[package]]
+name = "gogo-ui-ir"
+version = "0.1.0"
+
+[[package]]
+name = "gogo-ui-layout"
+version = "0.1.0"
+dependencies = [
+ "gogo-ui-ir",
+ "gogo-ui-text",
+]
+
+[[package]]
+name = "gogo-ui-scene"
+version = "0.1.0"
+dependencies = [
+ "gogo-ui-ir",
+ "gogo-ui-layout",
+ "gogo-ui-text",
+]
+
+[[package]]
+name = "gogo-ui-shell"
+version = "0.1.0"
+dependencies = [
+ "gogo-ui-a11y",
+ "gogo-ui-interact",
+ "gogo-ui-layout",
+ "gogo-ui-scene",
+]
+
+[[package]]
+name = "gogo-ui-text"
+version = "0.1.0"
+dependencies = [
+ "gogo-ui-ir",
+]
 
 [[package]]
 name = "governor"
