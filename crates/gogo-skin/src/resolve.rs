@@ -905,6 +905,33 @@ impl<'a> Checker<'a> {
         out
     }
 
+    /// A `name={p}` term takes the one unnamed term the `use` wrote for `p`; for several
+    /// terms, or a named one, there is no single value to give `name`, so it is refused
+    /// where the `use` wrote them (design 27 §5.7).
+    fn named_forward(&mut self, t: &crate::ast::Term, ty: &Ty) {
+        let (Some(name), Template::Expr(crate::expr::Expr::Name { name: p, .. })) =
+            (&t.name, &t.value)
+        else {
+            return;
+        };
+        let Some(Given::Terms(list)) = self.param_given(p) else {
+            return;
+        };
+        if list.len() == 1 && list[0].0.name.is_none() {
+            return;
+        }
+        let msg = format!("`{name}={{{p}}}` takes one unnamed term, and `{p}` is not one (S16)");
+        let help =
+            format!("pass a single value, or write `{{{p}}}` on its own to forward every term");
+        self.emit(
+            Some(ty),
+            Code::ActionArgs,
+            term_value_span(t),
+            msg,
+            Some(help),
+        );
+    }
+
     /// Check the names in the terms of `args` when there is no action to match them to.
     fn check_terms_only(&mut self, n: &mut Node, args: &str) {
         let Some(i) = n.props.iter().rposition(|p| p.name == args) else {
@@ -951,6 +978,7 @@ impl<'a> Checker<'a> {
         let mut out = BoundAction {
             prop: prop.to_owned(),
             spec,
+            terms: Vec::new(),
             args: Vec::new(),
         };
         // A string that didn't parse was reported already.
@@ -976,12 +1004,12 @@ impl<'a> Checker<'a> {
                 tys.push(ty);
             }
         });
-        let m = Matcher {
-            spec,
-            args_span: args_span.unwrap_or(at),
-        };
+        let args_span = args_span.unwrap_or(at);
         // A bare `{p}` that is a component parameter stands for the terms the `use` wrote
         // for it: they are checked here as if written in this `args` (design 27 §5.7).
+        for (t, ty) in terms.iter().zip(&tys) {
+            self.named_forward(t, ty);
+        }
         let spliced = self.splice(&terms, &tys);
         // On an element with no input, `value` and `on` in a term were reported by the
         // format-level pass: they stay out of the matching.
@@ -995,12 +1023,21 @@ impl<'a> Checker<'a> {
                         .any(|v| t.value.mentions(v)))
             })
             .collect();
+        // What is missing is reported at the `use` that gave the forwarded terms, not at
+        // the component's own `args`, which the author of the `use` can't change.
+        let use_at = spliced
+            .iter()
+            .find(|(_, ty, _)| ty.param)
+            .and_then(|(_, ty, _)| ty.origin);
+        let m = Matcher {
+            spec,
+            args_span,
+            use_at,
+        };
         let seen: Vec<crate::ast::Term> = spliced.iter().map(|(t, _, _)| t.clone()).collect();
         let tys: Vec<Ty> = spliced.iter().map(|(_, ty, _)| *ty).collect();
         out.args = self.match_terms(&m, &seen, &tys);
-        for b in &mut out.args {
-            b.term = spliced[b.term].2;
-        }
+        out.terms = seen;
         if let Some(p) = n.props.iter_mut().rfind(|p| p.name == args)
             && let Val::Terms(slot) = &mut p.arg.val
         {
@@ -1088,7 +1125,7 @@ impl<'a> Checker<'a> {
         for (pi, p) in params.iter().enumerate() {
             if assigned[pi].is_none() && !p.optional && p.ty != ParamType::RouteParams {
                 self.emit(
-                    None,
+                    m.missing_ty().as_ref(),
                     Code::ActionArgs,
                     m.args_span,
                     format!("`{}` needs `{}` (S16)", spec.name, p.name),
@@ -1200,7 +1237,7 @@ impl<'a> Checker<'a> {
         for sp in route.params.iter().filter(|p| !p.optional) {
             if !taken.contains(&sp) {
                 self.emit(
-                    None,
+                    m.missing_ty().as_ref(),
                     Code::ActionArgs,
                     m.args_span,
                     format!("the `{}` route needs `{}` (S16)", route.name, sp.name),
@@ -1431,6 +1468,19 @@ struct Matcher {
     spec: &'static ActionSpec,
     /// The `args` value, or the action's name when there is none.
     args_span: Span,
+    /// The `use` argument that gave the terms spliced into `args`, if any were.
+    use_at: Option<Span>,
+}
+
+impl Matcher {
+    /// The type that places a missing-argument error at the `use`, in an instance walk.
+    fn missing_ty(&self) -> Option<Ty> {
+        self.use_at.map(|origin| Ty {
+            param: true,
+            origin: Some(origin),
+            ..Ty::default()
+        })
+    }
 }
 
 fn plain_text(t: &Template) -> Option<&str> {
