@@ -8,8 +8,10 @@ code lands — a split is only cheap while the surface is small). The original t
 - `crates/gogo-tui` — v2 ratatui frontend; workspace member reserved now, implemented in v2 (09 §2).
 
 Added since: `crates/gogo-shims` (Rust cabextract/7z shims for winetricks, design 12), and
-the desktop GUI's crates (`gogo-gui` and the `gogo-ui-*`, `gogo-render-*`, `gogo-skin*`
-crates it is built from; design 24 §2). The GUI is a frontend like the CLI: only the
+the desktop GUI's crates (design 24 §2): `gogo-contract`, `gogo-skin`, `gogo-skins`,
+`gogo-ui-ir`, `gogo-ui-text`, `gogo-ui-layout`, `gogo-ui-scene`, `gogo-render-cpu`,
+`gogo-render-gpu`, `gogo-ui-interact`, `gogo-ui-a11y`, `gogo-ui-shell`, `gogo-gui-model`,
+`gogo-gui` and the dev-only `gogo-gui-testkit`. The GUI is a frontend like the CLI: only the
 `gogo-gui` binary crate depends on `gogo-core`, and the CLI depends on no GUI crate.
 
 Rules that keep the frontends interchangeable:

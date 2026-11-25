@@ -1,10 +1,14 @@
 # 24 — Desktop GUI: architecture (#520)
 
-Status: **accepted** (2026-11-25; decisions D1–D16 accepted as recommended). Nothing is
-built yet; the port order is §8 and the epic is #520. Numbers marked *measured* come
-from a prototype built before this design (2026-11, Linux, an RTX 4090 and Mesa's lavapipe),
-the same crates and versions as §3. The app layer is design 25. The skin contract is
-design 26, the skin format design 27 and the renderers design 28.
+Status: **accepted** (2026-11-25; decisions 1–12 in §1 accepted as recommended). Nothing
+is built yet; the port order is §8 and the epic is #520. Numbers marked *measured* come
+from a prototype built before this design (2026-11, Linux, a discrete NVIDIA GPU and Mesa's
+lavapipe), the same crates and versions as §3. The app layer is design 25. The skin contract
+is design 26, the skin format design 27 and the renderers design 28 (all three added in
+#557).
+
+Naming: "decision N" is a numbered item of §1. "PR B1", "PR D1" and so on are the port
+order's PRs (§8), never decisions.
 
 gogo gets an official desktop GUI for Linux and macOS with **real skins**: not colour
 themes, but declarative files that decide layout and look. The app owns the data, the
@@ -37,8 +41,8 @@ flowchart LR
      effects, and skins would always be translated into immediate-mode calls.
    - **Slint** was last. Skins would have to be translated into `.slint`. Its licences are
      GPLv3, which doesn't fit gogo's MIT/Apache-2.0, or a royalty-free licence that is
-     unclear about apps that let third parties write UI. And it is a sold toolkit to
-     depend on.
+     unclear about apps that let third parties write UI. And it is a toolkit with a
+     paid commercial edition to depend on.
    - **The cost** is that a v1 has to build what a toolkit would have given: text input
      and IME, scrolling, popups, focus traversal, AccessKit wiring and damage tracking.
      Sub-issues of #520 track each one.
@@ -75,7 +79,7 @@ flowchart LR
     SIL OFL 1.1, ship with their licence texts. System fonts are a fallback only, for
     glyphs the bundled set lacks. Rendering and golden tests are then identical across
     machines, at about 1 MB.
-11. **Golden PNGs are committed and compared with a tolerance on vello_cpu** (08 §8). Pixels
+11. **Golden PNGs are committed and compared with a tolerance on vello_cpu** (08 §7). Pixels
     catch effect and font regressions that structural snapshots miss.
 12. **GUI CI is path-filtered** (§7), with a lavapipe job for the GPU renderer.
 
@@ -136,6 +140,7 @@ flowchart TD
   model[gogo-gui-model]
   gui[gogo-gui]
   core[gogo-core]
+  tk[gogo-gui-testkit, dev-only]
   skin --> contract
   skin --> ir
   text --> ir
@@ -149,6 +154,7 @@ flowchart TD
   shell --> a11y
   model --> contract
   gui --> shell & skin & skins & model & cpu & gpu & core
+  tk -.-> skin & model & cpu
 ```
 
 ### 2.2 What each seam lets us swap
@@ -170,7 +176,7 @@ Not split, on purpose:
 
 ## 3. Library stack
 
-Versions are the ones the prototype ran, pinned with `=` (D7). The 01 §5 table lists
+Versions are the ones the prototype ran, pinned with `=` (decision 7). The 01 §5 table lists
 them under "GUI".
 
 | Layer | Crate | Version | Note |
@@ -182,15 +188,15 @@ them under "GUI".
 | Windowing | winit | 0.30.13 | Move to 0.31 once accesskit_winit supports it |
 | Accessibility | accesskit + accesskit_winit | 0.25.2 / 0.34.2 | AT-SPI on Linux, NSAccessibility on macOS. Pinned together |
 | Skin files | kdl + miette | 6.7.1 / 7.6.0 | The only KDL v2 parser; errors are miette diagnostics with spans |
-| Hot reload | notify | 9.0.0 | CC0-1.0 (allowed in `deny.toml`) |
-| Present (no GPU) | softbuffer | at impl | D5 |
+| Hot reload | notify | 9.0.0 | CC0-1.0: not yet in `deny.toml`'s allow-list; PR B1 adds it |
+| Present (no GPU) | softbuffer | at impl | decision 5 |
 | Clipboard | smithay-clipboard / arboard | 0.7.3 / 3.7.0 | Wayland via `wl_data_device` (works on GNOME, which lacks the data-control protocols); arboard on macOS |
 | Images | image (`jpeg`, `webp` only) | 0.25.10 | Decode limits, and `catch_unwind` around decoders for cover art |
 
 Licences:
 - Everything on this path is permissive. The vello_gpu shader build tooling (wesl,
   lalrpop and friends) is MIT/Apache.
-- The one new licence for `deny.toml` is CC0-1.0, for notify.
+- The one new licence for `deny.toml` is CC0-1.0, for notify. PR B1 adds it to the allow-list.
 - The full graph is about 400 crates across all targets.
 
 ## 4. Renderer selection
@@ -201,10 +207,10 @@ Licences:
 4. `GOGO_GUI_RENDERER=gpu|cpu` overrides the choice, and the about route shows which
    renderer is in use.
 5. The pipeline cache is a file under the cache dir, keyed per adapter. *Measured:* it took
-   a cold start on NVIDIA from 323 to 196 ms.
+   a cold start on the NVIDIA GPU from 323 to 196 ms.
 
 wgpu's GL backend needs a loadable `libEGL.so.1` on the library path.
-- *Measured:* with it, vello_gpu ran on an AMD iGPU through Mesa's EGL (Instrument at 8 ms
+- *Measured:* with it, vello_gpu ran on an integrated AMD GPU through Mesa's EGL (Instrument at 8 ms
   @1×, 22 ms @2×).
 - Through NVIDIA's EGL vendor library, device creation fails with "Parent device is lost".
   This is tracked as research in #520's sub-issues.
@@ -223,19 +229,19 @@ wgpu's GL backend needs a loadable `libEGL.so.1` on the library path.
   - Metal through wgpu, AppKit through winit, VoiceOver through accesskit_macos.
   - Nothing GUI-specific is in the dev shell beyond the SDK.
   - Builds must stay warning-free (CI denies warnings, and §7 adds clippy on macOS).
-- **Never on the host display.** Agents run the GUI only:
-  - headlessly, with `gogo-gui --render-png` (no window), or
-  - inside the headless compositor of `scripts/gui-headless.sh` (Linux), or
-  - in the Tart VM (`scripts/vm-test.sh`, macOS, needs an `.app`).
+- **Never on the host display.** Once they exist, agents run the GUI only:
+  - headlessly, with `gogo-gui --render-png` (no window; PR E4), or
+  - inside the headless compositor of `scripts/gui-headless.sh` (Linux; PR E3), or
+  - in the Tart VM (`scripts/vm-test.sh`, macOS, needs an `.app`; PR G8).
 
   Real Metal, HiDPI, VoiceOver, IME and clipboard are a host pass by @noosxe, with the
   steps written into the PR (as in AGENTS.md).
 
 ## 6. Performance budgets (measured)
 
-| Measure | vello_gpu (RTX 4090) | vello_gpu (lavapipe) | vello_cpu | compute vello (old path) |
+| Measure | vello_gpu (discrete NVIDIA GPU) | vello_gpu (lavapipe) | vello_cpu | compute vello (old path) |
 |---|---|---|---|---|
-| Instrument frame @2×, all effects | 7.4 ms | 61 ms | 70–71 ms | 15.8 ms (4090) / 241 ms (lavapipe) |
+| Instrument frame @2×, all effects | 7.4 ms | 61 ms | 70–71 ms | 15.8 ms (NVIDIA) / 241 ms (lavapipe) |
 | First frame after process start | ~190 ms | ~130–200 ms | — | ~220 ms |
 
 - The budget is 33 ms per frame for animation and 100 ms for a progress update.
@@ -251,14 +257,19 @@ wgpu's GL backend needs a loadable `libEGL.so.1` on the library path.
 - **Dev shell (Linux):** wayland, libxkbcommon, vulkan-loader, libglvnd and fontconfig, on
   `LD_LIBRARY_PATH`. `WAYLAND_DISPLAY` and `DISPLAY` stay set, because the shell is used
   interactively; scripts that run the GUI clear them.
-- **`nix/app.nix`** builds `-p gogo-cli` only, so the CLI closure doesn't change. A
-  separate `gogo-gui` package wraps the runtime libraries.
+- **`nix/app.nix` must change in PR B1.** Today it sets no `cargoBuildFlags`, so it builds
+  the whole workspace, and GUI crates would land in the CLI package. PR B1 restricts it to
+  `-p gogo-cli` (and its tests to the CLI and core), so the CLI closure doesn't change. A
+  separate `gogo-gui` package (#552) wraps the runtime libraries.
 - **CI:**
   - A `gui` path filter covers the GUI crates, `gogo-core` (core changes must still build
     the GUI) and the force files.
-  - The existing `test` job excludes the GUI crates.
-  - A new `gui` job runs nextest for the GUI crates on ubuntu and macOS, plus clippy
-    `-D warnings` on macOS. Today clippy runs on ubuntu only.
+  - The existing `test` and `clippy` jobs exclude the GUI crates
+    (`--workspace --exclude …`).
+  - A new `gui` job runs nextest and clippy `-D warnings` for the GUI crates on ubuntu and
+    macOS. Today clippy runs on ubuntu only.
+  - `cargo-deny` stays workspace-wide: it compiles nothing, and every dependency's licence
+    and advisories must be checked.
   - A lavapipe job runs the vello_gpu tests in the nix shell.
   - All of it is wired into `CI result` (`ci-jobs.yml` names the three places).
   - The same job checks the dependency rules in §2.1.
@@ -271,9 +282,9 @@ wgpu's GL backend needs a loadable `libEGL.so.1` on the library path.
 As a PR stack, docs first. Each PR is green on its own, and each item is a sub-issue of
 #520.
 
-| Stack | PRs |
+| Stack | PRs ("PR B1" etc.; these ids name PRs, not decisions) |
 |---|---|
-| A docs | A1 this doc + 25 + updates to 01/03/07/08/09; A2 designs 26, 27, 28 |
+| A docs | PR A1 this doc + 25 + updates to 01/03/07/08/09; A2 designs 26, 27, 28 |
 | B format | B1 scaffolding (crates, dev shell, deny, CI, `app.nix`); B2 contract; B3 loader, validator, expressions; B4 IR + binding; B5 Default skin |
 | C engine | C1 text; C2 layout; C3 scene + `Renderer`; C4 vello_cpu + goldens; C5 vello_gpu |
 | D app | D1 model + safety flow; D2 per-job cancellation in gogo-core |

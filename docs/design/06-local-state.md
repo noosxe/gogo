@@ -13,6 +13,9 @@ gogo keeps four classes of local data. Paths resolve via `dirs` (platform table 
 | data root (design 18 §6) | `$XDG_DATA_HOME/gogo`, else `~/.local/share/gogo` | `~/Library/Application Support/gogo` (the state dir) | `runtimes/`, `renderers/`, `games/<gogid>/` (prefixes, saves), `compat/` (L4), `snapshots/<gogid>/` (design 20 §4), `saves-aside/<gogid>/` |
 | game library (design 18 §6.1), only when `library.dir` is set | user-chosen | same | `<library.dir>/<gogid>/`: a game's dir, as it would be under `games/`. `<data root>/game-locations/<gogid>` records where it is. `<data root>/game-moves/` holds a move's locks (`.lock` for the data root, `<gogid>.lock` for the game, which the launcher checks) and, while one runs or after it was interrupted, its journal |
 | logs | `$XDG_STATE_HOME/gogo/logs/<gogid>/` | `~/Library/Logs/gogo/<gogid>/` | per-game run logs (`launch.log`, `latest.log`) |
+| GUI skins (design 25 §9) | `$XDG_DATA_HOME/gogo/skins/<name>/` | `~/Library/Application Support/gogo/skins/<name>/` | third-party skins, imported from a folder or zip |
+| GUI state | `$XDG_STATE_HOME/gogo/gui/` | `~/Library/Application Support/gogo/gui/` | the active skin, per-skin UI state |
+| GUI cache | `$XDG_CACHE_HOME/gogo/gui/` | `~/Library/Caches/gogo/gui/` | wgpu pipeline cache, decoded covers |
 
 **Resolution rules (normative).** All paths resolve through the `dirs` crate, which implements
 both standards: the XDG base-directory spec on Linux (`config_dir`, `cache_dir`, `state_dir`,
@@ -31,7 +34,8 @@ both standards: the XDG base-directory spec on Linux (`config_dir`, `cache_dir`,
 - `GOGO_HOME` (env override) flattens config + state + cache + data root (and Linux logs,
   `$GOGO_HOME/logs/`) into a single directory —
   `config.toml`, tokens file, `state.json`, and the catalog cache sit side by side in
-  `$GOGO_HOME/`. Purpose: tests, portable/USB setups, containers. It never touches
+  `$GOGO_HOME/`. The GUI's rows become `$GOGO_HOME/skins/`, `$GOGO_HOME/gui/` and
+  `$GOGO_HOME/gui-cache/`. Purpose: tests, portable/USB setups, containers. It never touches
   `download.dir` (data stays where the user chose it).
 
 Locking (two levels, review B5): an advisory `fs4` lock `state.lock` guards each state.json

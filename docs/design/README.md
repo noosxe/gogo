@@ -36,7 +36,7 @@ in `docs/13` grounds design 10.
   the tie-in with game snapshots (#365, design 20 §6.3)
 - Windows support — the *binary* targets **Linux and macOS only** (downloading Windows
   installers on Linux is first-class, though — they're just files; 03 §1)
-- A GUI/TUI in v1 (both are v2: the TUI in 09 §2, the desktop GUI in designs 24–28; the core is built as a library to make that cheap)
+- A GUI/TUI in v1 (both are v2: the TUI in 09 §2, the desktop GUI in designs 24–25 and the skin designs 26–28 added in #557; the core is built as a library to make that cheap)
 
 ## Principles
 

@@ -142,8 +142,9 @@ progress, not retrying), and any progress resets the timer. Exceeded → `FileFa
   - one aggregate bar: `⟨bar⟩ 512 MiB / 1.2 GiB  24.1 MiB/s  eta 00:31`
   - one bar per active file (default 1): `⟨bar⟩ setup_hot_brass…  512/691 MiB  chunk 49/70`
 - Non-TTY: no bars; a `Warn`-level line per file completion on stderr.
-- `--json-progress`: every `ProgressEvent` (01 §4) as one NDJSON line on stdout,
-  externally tagged with the Rust variant name, e.g.
+- `--json-progress`: every printed `ProgressEvent` (01 §4) as one NDJSON line on stdout,
+  externally tagged with the Rust variant name (live-only `Work*` events are skipped; depot
+  downloads print `DepotEvent`s in their own internally tagged shape), e.g.
   `{"ChunkDone":{"id":"…","chunk":49,"bytes":10485760,"file_bytes":51380224,"md5_ok":true}}`;
   final `{"Done":{"ok":1,"failed":0,"skipped":0}}`. Unit variants are bare strings
   (`"PrefixStaged"`). Design 03 §4 is the one place that defines the shape. Consumers can
