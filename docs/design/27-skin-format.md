@@ -301,10 +301,62 @@ expression.
 - **Parsed once.** Every template and expression is parsed at load (§9 step 3) and the
   tree is kept; evaluating never parses text. That includes action arguments.
 
-Expressions are **total**:
-- every expression ends;
-- there is no assignment, no user function and no I/O;
-- a type error is a load error, and a null is handled with `?.`/`else`.
+### Grammar
+
+Loosest binding first. Operators on one row bind equally; "left" and "right" give the
+association.
+
+| Level | Form | Association |
+|---|---|---|
+| 1 | `c ? a : b` | right: `a ? b : c ? d : e` is `a ? b : (c ? d : e)` |
+| 2 | `a else b` | left |
+| 3 | `x \| stage …` | left; a stage may be followed by `.field` |
+| 4 | `a or b` | left |
+| 5 | `a and b` | left |
+| 6 | `not a` | prefix |
+| 7 | `==` `!=` `<` `<=` `>` `>=` | none: `a < b < c` is a load error, write `(a < b) and (b < c)` |
+| 8 | `-a` | prefix |
+| 9 | `.field`, `?.field`, `name.path(args)` | left |
+| 10 | literals, names, `$param`, `@token`, `( … )` | |
+
+- A pipe is looser than `or`, so `a or b | len` is `(a or b) | len`. `not` is looser
+  than a comparison, so `not a == b` is `not (a == b)`.
+- Special syntax: `sort key.path` and `sort -key.path` (the key is a field path, not an
+  expression), and `@token alpha=x`, where `x` is a number expression.
+- `true`, `false` and `null` are literals. Numbers, `'…'` and `"…"` strings are literals
+  too; a string has no escapes.
+
+### Names
+
+A bare name resolves in this order:
+
+1. a **variable**, when one is bound by that name: a `let`, a parameter, an input
+   variable (`value`, `on`), or, inside a `where` predicate, a field of the item;
+2. otherwise it must be an **enum word of the contract**: a status (design 26 §2), an OS,
+   or a word of the fixed set of a field in design 26 §3 (`ready`, `linux`, …). It is the
+   text of that word, so `g.status == ready` compares the status with `ready`;
+3. anything else is a load error, "unknown name", pointing at the name.
+
+The loader checks every name of every expression (§9; `Expr::names` lists them) against
+the variables in scope at that point. A `where` predicate also accepts the fields of the
+list's items.
+
+### Failures
+
+`eval` returns a result. A failure at run time fails the binding of the route that
+evaluated the expression, and the route falls back (design 26 §8). Once the loader's
+checks pass, these can still fail, because they depend on the data:
+
+- a field of a null, without `?.` (`g.update.to` when `update` is null);
+- a field that a record does not have, or a field of a value that has none;
+- a call that returns an error, or a source the app cannot answer;
+- a type mismatch the load-time checks don't cover: `-x` or `fmt.bytes(x)` on text,
+  `take n` with a non-number, `<` between a number and text, an `alpha=` that is not a
+  number, a status helper on a word that is not a status;
+- a list stage (`sort`, `where`, `take`, …) on a value that is not a list or null.
+
+Every evaluation ends: there is no assignment, no user function and no I/O, and the only
+loops are pipe stages over a list the app hands in.
 
 ## 8. Limits
 
@@ -315,11 +367,19 @@ default skin is used (S12).
 |---|---|
 | One KDL file | 256 KiB |
 | Nodes per skin | 20 000 |
-| Nesting depth | 48 |
+| KDL node nesting depth | 48 |
 | Expression length | 512 characters |
-| Expression nesting depth | 32 |
+| Expression depth | 32 |
 | One PNG / SVG / font file | 4 MiB / 512 KiB / 8 MiB |
 | Whole skin folder | 32 MiB |
+
+**Expression depth** counts the levels of one expression's tree, the root as level 1:
+every operator, field access, call, pipe stage, `else` and `?:` adds a level over its
+operands, so `a | len | len` and `a.b.c` are three levels deep, and a parenthesis counts
+too. It is a different limit from the node nesting depth, which counts how deep KDL nodes
+sit inside one another in a file. An expression deeper than 32 levels is a load error, so
+the parser, the evaluator and everything that walks the tree stay within a known stack
+use.
 
 The asset sizes are this design's proposal. The prototype loaded no skin assets; PR B3
 adds the checks and confirms these numbers here.

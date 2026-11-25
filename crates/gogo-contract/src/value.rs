@@ -102,6 +102,9 @@ impl Value {
 
 /// A number as text: whole numbers without a decimal point, others with at most three
 /// decimals and no trailing zeros.
+///
+/// Public because the skin formatters (`fmt.bytes`, `fmt.hours`, …) in `gogo-skin` print
+/// their rounded numbers the same way [`Value::display`] does.
 pub fn fmt_num(n: f64) -> String {
     if n.fract() == 0.0 && n.abs() < 1e15 {
         format!("{}", n as i64)

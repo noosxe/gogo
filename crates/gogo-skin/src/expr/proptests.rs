@@ -7,7 +7,7 @@ use super::tests::scope;
 use super::*;
 
 fn cfg() -> ProptestConfig {
-    ProptestConfig::with_cases(96)
+    ProptestConfig::with_cases(256)
 }
 
 /// Source text built from the language's own pieces, to get past the lexer often.
@@ -113,8 +113,62 @@ fn expressions() -> impl Strategy<Value = String> {
     })
 }
 
+/// A chain of `k` links on `a`, each adding one tree level: the shapes the parser builds
+/// in a loop (`|` stages, fields, `and`, `or`, `else`), plus nested calls.
+fn chain(shape: usize, k: usize) -> String {
+    match shape {
+        0 => format!("a{}", "|len".repeat(k)),
+        1 => format!("a{}", ".b".repeat(k)),
+        2 => format!("a{}", " and a".repeat(k)),
+        3 => format!("a{}", " or a".repeat(k)),
+        4 => format!("a{}", " else a".repeat(k)),
+        5 => format!("{}a{}", "f(".repeat(k), ")".repeat(k)),
+        _ => format!("a{}", "?.b".repeat(k)),
+    }
+}
+
 proptest! {
     #![proptest_config(cfg())]
+
+    #[test]
+    fn template_with_unbalanced_braces_and_quotes_never_panics(
+        s in "[{}'\" a-z]{0,200}",
+    ) {
+        let _ = parse_template(&s);
+        let _ = parse_template(&format!("{{{s}"));
+        let _ = parse_template(&format!("{s}}}"));
+    }
+
+    #[test]
+    fn left_nested_chains_are_capped_at_the_depth_limit(shape in 0usize..7, k in 0usize..70) {
+        let src = chain(shape, k);
+        prop_assume!(src.chars().count() <= MAX_EXPR_LEN);
+        match parse(&src) {
+            Ok(e) => {
+                // At the cap: accepted, and every walk of the tree is bounded by it.
+                prop_assert!(k < MAX_EXPR_DEPTH, "{}", src);
+                prop_assert!(e.depth() <= MAX_EXPR_DEPTH);
+                prop_assert_eq!(&e, &e.clone());
+                let _ = e.mentions("a");
+                let _ = e.names();
+                let _ = eval(&e, &scope());
+            }
+            Err(err) => {
+                // Above it: rejected for depth, never anything else.
+                prop_assert!(k >= MAX_EXPR_DEPTH, "{}", src);
+                let too_deep = matches!(err.kind, ParseErrorKind::TooDeep { .. });
+                prop_assert!(too_deep, "{}: {}", src, err);
+            }
+        }
+    }
+
+    #[test]
+    fn a_chain_exactly_at_the_cap_is_accepted(shape in 0usize..7) {
+        let at = chain(shape, MAX_EXPR_DEPTH - 1);
+        let over = chain(shape, MAX_EXPR_DEPTH);
+        prop_assert!(parse(&at).is_ok(), "{}", at);
+        prop_assert!(parse(&over).is_err(), "{}", over);
+    }
 
     #[test]
     fn parsers_never_panic_on_any_text(s in any::<String>()) {
