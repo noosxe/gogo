@@ -2200,6 +2200,54 @@ fn small_rule_cases() -> Vec<Case> {
             None,
         ),
         case(
+            "§1 S10",
+            "a LICENSE in routes",
+            |f| add(f, "routes/LICENSE", "x"),
+            FileType,
+            Skin,
+            None,
+        ),
+        case(
+            "§1 S10",
+            "a .txt in components",
+            |f| add(f, "components/x.txt", "x"),
+            FileType,
+            Skin,
+            None,
+        ),
+        case(
+            "§1 S10",
+            "a LICENSE.kdl is no licence file",
+            |f| add(f, "LICENSE.kdl", "x"),
+            FileType,
+            Skin,
+            None,
+        ),
+        case(
+            "§1 S10",
+            "assets/license.png is handled as a PNG",
+            |f| add(f, "assets/license.png", "not a png"),
+            AssetPng,
+            Skin,
+            None,
+        ),
+        case(
+            "§1 S10",
+            "assets/x.txt.png is handled as a PNG",
+            |f| add(f, "assets/x.txt.png", "not a png"),
+            AssetPng,
+            Skin,
+            None,
+        ),
+        case(
+            "§3",
+            "elevation given text",
+            |f| rep(f, "tokens.kdl", "elevation.1 1", "elevation.1 \"high\""),
+            TokenValue,
+            Skin,
+            None,
+        ),
+        case(
             "§1 §8",
             "a png 4097 px wide",
             |f| add(f, "assets/a.png", png_sized(4097, 1)),
@@ -3539,6 +3587,8 @@ fn licence_files_are_accepted_at_the_root_and_under_assets() {
         "assets/OFL.txt",
         "assets/fonts/LICENSE-OFL",
         "assets/fonts/notes.TXT",
+        "LICENCE",
+        "assets/LICENCE-OFL.md",
     ] {
         add(&mut files, path, "SIL Open Font License");
     }

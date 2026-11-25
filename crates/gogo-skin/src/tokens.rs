@@ -190,7 +190,7 @@ fn expected_kind(name: &str) -> Option<TokenKind> {
 }
 
 /// The curves an `easing.*` token may name (design 27 §3).
-pub const EASINGS: &[&str] = &["linear", "ease", "ease-in", "ease-out", "ease-in-out"];
+pub const EASINGS: &[&str] = contract::EASINGS;
 
 /// A declaration before references are followed.
 enum Decl {

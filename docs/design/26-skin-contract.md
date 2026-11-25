@@ -401,8 +401,9 @@ app widgets ignore those.
   tone.not_installed tone.queued tone.paused`.
 - **Type roles:** `font.display font.title font.body font.label font.mono`, each with
   family, size and weight.
-- **Shape:** `radius.sm/md/lg`, `space.1…8`, `elevation.0…3`, `stroke.thin/thick`.
-- **Motion:** `motion.fast/normal/slow` and `easing.*`.
+- **Shape:** `radius.sm/md/lg`, `space.1…8`, `elevation.0…3` (a number), `stroke.thin/thick`.
+- **Motion:** `motion.fast/normal/slow` and `easing.*`, whose value is one of `linear`,
+  `ease`, `ease-in`, `ease-out`, `ease-in-out`.
 
 Every `Status` value has exactly one tone, and `update_available` uses `tone.update`. A
 skin that doesn't define `tone.queued` or `tone.paused` gets `text-lo` for queued and `warn`

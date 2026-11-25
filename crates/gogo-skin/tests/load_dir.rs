@@ -62,6 +62,7 @@ fn a_symlink_out_of_the_skin_is_an_error() {
     std::fs::create_dir(dir.join("assets")).unwrap();
     std::os::unix::fs::symlink(&secret, dir.join("assets/logo.png")).unwrap();
     std::os::unix::fs::symlink(tmp.path(), dir.join("assets/up")).unwrap();
+    std::os::unix::fs::symlink(&secret, dir.join("LICENSE")).unwrap();
     let report = SkinPackage::load(&dir).expect_err("symlinks fail the skin");
     let symlinks: Vec<_> = report
         .findings()
@@ -71,6 +72,7 @@ fn a_symlink_out_of_the_skin_is_an_error() {
         .collect();
     assert!(symlinks.contains(&"assets/logo.png"), "{symlinks:?}");
     assert!(symlinks.contains(&"assets/up"), "{symlinks:?}");
+    assert!(symlinks.contains(&"LICENSE"), "{symlinks:?}");
     // The top-level link is outside the layout, and a symlink first.
     assert!(symlinks.contains(&"assets_link.png"), "{symlinks:?}");
 }

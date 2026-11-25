@@ -28,7 +28,7 @@ call except bound actions on input, and nothing to loop over except bounded `eac
   components/*.kdl  components (stock ones copied or rebuilt, or the skin's own)
   routes/*.kdl      one file per covered route: game.kdl, library.kdl, …
   assets/           png, svg, otf/ttf
-  LICENSE*, *.txt   licence texts, at the root or in assets/ (never read as skin data)
+  LICENSE*, LICENCE*, *.txt   licence texts, at the root or in assets/ (never read as skin data)
 ```
 
 Only these files are read. Asset references are relative to the skin root (S10).
@@ -38,10 +38,10 @@ Only these files are read. Asset references are relative to the skin root (S10).
   `routes/<name>.kdl` exactly one `route "<name>" { … }` node, named like its file.
 - **Assets** may sit in sub-folders of `assets/` (`assets/fonts/…`). A reference is the
   path from the skin root: `assets/logo.png`.
-- **Licence files.** A font's licence travels with it: `LICENSE*` (any extension or none)
-  and `*.txt` may sit at the skin root and anywhere under `assets/`. They are plain text,
+- **Licence files.** A font's licence travels with it: `LICENSE*` or `LICENCE*` (any
+  extension but kdl, png, svg, otf and ttf, or none; `license.png` is an asset) and `*.txt` may sit at the skin root and anywhere under `assets/`. They are plain text,
   valid UTF-8, at most 64 KiB each. They are never rendered or parsed, and they count
-  towards the folder size and the file count (§8). A `.txt` or `LICENSE*` anywhere else
+  towards the folder size and the file count (§8). A `.txt`, `LICENSE*` or `LICENCE*` anywhere else
   is a file outside the layout. Bytes that are not UTF-8 are an `asset_text` error; a file
   over 64 KiB is `limit_file`.
 - **Anything else is an error** (S10): a file of another type (only KDL, PNG, SVG, OTF and
@@ -566,7 +566,7 @@ default skin is used (S12).
 | Expression length | 512 characters |
 | Expression depth | 32 |
 | One PNG / SVG / font file | 4 MiB / 512 KiB / 8 MiB |
-| One licence file (`LICENSE*`, `*.txt`) | 64 KiB, valid UTF-8 |
+| One licence file (`LICENSE*`, `LICENCE*`, `*.txt`) | 64 KiB, valid UTF-8 |
 | PNG width and height | 4 096 px each |
 | PNG width × height | 16 Mpx (16 000 000 pixels) |
 | Whole skin folder | 32 MiB |

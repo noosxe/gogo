@@ -64,12 +64,15 @@ pub const SHAPE: &[&str] = &[
     "stroke.thick",
 ];
 
-/// Motion tokens. Easing curves are open-ended: any `easing.<name>`, one segment
-/// ([`EASING_PREFIX`]).
+/// Motion tokens. Easing tokens are open-ended in name: any `easing.<name>`, one
+/// segment ([`EASING_PREFIX`]); their value is one of [`EASINGS`].
 pub const MOTION: &[&str] = &["motion.fast", "motion.normal", "motion.slow"];
 
 /// The prefix of easing tokens (`easing.*`).
 pub const EASING_PREFIX: &str = "easing.";
+
+/// The curves an `easing.*` token's value may name.
+pub const EASINGS: &[&str] = &["linear", "ease", "ease-in", "ease-out", "ease-in-out"];
 
 /// Whether `name` is a semantic token: one of the lists above, a type role's field, or
 /// an `easing.*` curve.

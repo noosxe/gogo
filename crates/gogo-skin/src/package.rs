@@ -183,10 +183,18 @@ impl Slot {
     }
 }
 
-/// `LICENSE*` (any extension or none) and `*.txt`, whatever the case.
+/// `LICENSE*` or `LICENCE*` (any extension but a skin file type, or none) and `*.txt`,
+/// whatever the case. `license.png` or `licenses.svg` is an asset, not a licence text.
 fn is_licence_name(file: &str) -> bool {
     let lower = file.to_ascii_lowercase();
-    lower.starts_with("license") || lower.ends_with(".txt")
+    if lower.ends_with(".txt") {
+        return true;
+    }
+    if !(lower.starts_with("license") || lower.starts_with("licence")) {
+        return false;
+    }
+    let ext = lower.rsplit_once('.').map(|(_, e)| e).unwrap_or_default();
+    !matches!(ext, "kdl" | "png" | "svg" | "otf" | "ttf")
 }
 
 const LAYOUT_HELP: &str = "a skin holds skin.kdl, tokens.kdl, styles.kdl, components/*.kdl, routes/*.kdl and assets/ (design 27 §1)";
