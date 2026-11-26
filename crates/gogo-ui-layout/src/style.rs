@@ -135,6 +135,8 @@ pub(crate) fn style(key: &str, n: &Node) -> Result<Style, LayoutError> {
             .collect::<Result<_, _>>()?,
         // Always set: since taffy 0.15 an inset does nothing without it.
         position: taffy::Position::Relative,
+        // Always set: the IR's sizes include the border (taffy's default, spelled out).
+        box_sizing: taffy::BoxSizing::BorderBox,
         ..Style::default()
     };
     if l.position == Position::Absolute {

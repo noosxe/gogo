@@ -30,6 +30,9 @@
 //!   container's box. The IR has no overflow property yet, so layout does not clamp or
 //!   measure scrollable content; the interaction crate owns the scroll state.
 //! - **`Paint::offset` is not layout.** A visual offset never moves a box or a hit area.
+//! - **Depth is capped** at [`MAX_DEPTH`] (128) levels: taffy recurses once per level and a
+//!   tree about a thousand levels deep overflows the stack. A deeper tree is
+//!   [`LayoutError::TooDeep`].
 //! - **Errors, not panics.** A non-finite length, a non-finite viewport or a taffy
 //!   failure is a [`LayoutError`]; no input of a valid tree panics.
 //!
@@ -42,4 +45,4 @@ mod solve;
 mod style;
 
 pub use laid::{Laid, Placed, Rect, Scroll};
-pub use solve::{LayoutError, Viewport, layout};
+pub use solve::{LayoutError, MAX_DEPTH, Viewport, layout};
