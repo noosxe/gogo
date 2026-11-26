@@ -112,6 +112,9 @@ rustix = { version = "1.1.5", features = ["fs", "process"] }
 # — logging —
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Tests only: dependencies (gog-warp) log through `log`, bridged into tracing.
+log = "0.4"
+tracing-log = "0.2"
 
 # — CLI —
 clap = { version = "4.6.7", features = ["derive"] }

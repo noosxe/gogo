@@ -211,17 +211,25 @@ fn error_line(e: &dyn std::fmt::Display) -> String {
     format!("gogo: {}", gogo::redact::scrub_text(&e.to_string()))
 }
 
-/// The `--log-file` layer: every event at trace, from every target, scrubbed,
+/// What no setting can turn on: see [`gogo::redact::log_record_allowed`].
+fn allowed<S>() -> impl tracing_subscriber::layer::Filter<S> {
+    tracing_subscriber::filter::filter_fn(|meta| {
+        gogo::redact::log_record_allowed(meta.target(), meta.level())
+    })
+}
+
+/// The `--log-file` layer: every allowed event at trace, scrubbed,
 /// without ANSI. `-v`, `--quiet` and `RUST_LOG` only shape stderr.
 fn file_layer<S>(file: log_file::LogFile) -> impl tracing_subscriber::Layer<S>
 where
     S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
 {
     use tracing_subscriber::Layer;
+    use tracing_subscriber::filter::FilterExt;
     tracing_subscriber::fmt::layer()
         .with_ansi(false)
         .with_writer(scrub_log::Scrubbing(file))
-        .with_filter(tracing_subscriber::filter::LevelFilter::TRACE)
+        .with_filter(tracing_subscriber::filter::LevelFilter::TRACE.and(allowed()))
 }
 
 /// The stderr filter without `RUST_LOG`: from `--quiet` / `-v`.
@@ -230,9 +238,8 @@ fn default_filter(cli: &Cli) -> String {
         "warn".to_string()
     } else {
         match cli.verbose {
-            // gog-warp's info lines ("Allocating disk space", …) say what the
-            // depot progress already shows, and would break its status line
-            // (#337); `-v` brings them back.
+            // gog-warp's lines below warn are never written ([`allowed`]); the
+            // directive keeps the filter's level hint honest.
             0 => "info,gog_warp=warn",
             1 => "debug",
             _ => "trace",
@@ -252,11 +259,12 @@ where
     W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
 {
     use tracing_subscriber::Layer;
+    use tracing_subscriber::filter::FilterExt;
     use tracing_subscriber::layer::SubscriberExt;
 
     let stderr = tracing_subscriber::fmt::layer()
         .with_writer(scrub_log::Scrubbing(stderr))
-        .with_filter(filter);
+        .with_filter(filter.and(allowed()));
     Box::new(
         tracing_subscriber::registry()
             .with(stderr)

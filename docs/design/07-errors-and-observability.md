@@ -86,7 +86,10 @@ progress, not retrying), and any progress resets the timer. Exceeded → `FileFa
 
 - `tracing` + `tracing-subscriber` (fmt, stderr). Default is info (gog-warp at warn), `-v` =
   debug, `-vv` = trace, `--quiet` = warn; `RUST_LOG` overrides these and shapes stderr only.
-- `--log-file PATH` (global) mirrors everything to a file, at trace, from every target
+- **gog-warp below warn is never written**, by any sink (stderr, `--log-file`, the GUI's),
+  whatever `-v`, `--log-file` or `RUST_LOG` ask for (`redact::log_record_allowed`): its debug
+  lines carry the sign-in code and the start of an access token.
+- `--log-file PATH` (global) mirrors everything allowed to a file, at trace, from every target
   (dependencies included), whatever `-v`, `--quiet` and `RUST_LOG` say for stderr. It is a
   second `fmt` layer behind the same scrubbing writer as stderr, with ANSI off, written
   synchronously (no background thread to lose lines at `process::exit`). The file is opened
@@ -127,7 +130,9 @@ progress, not retrying), and any progress resets the timer. Exceeded → `FileFa
   goes through `scrub_text`, which replaces each `http(s)://` URL by its `redact_url` form and
   the values of `refresh_token`, `access_token`, `id_token`, `client_secret`, `code`, `token`,
   `password`, `session_id`, the CDN token's `nva`/`acl`/`hmac` and `Bearer …` by `[redacted]`
-  (as `name=value`, `name%3Dvalue`, JSON with plain or escaped quotes, and Rust `Debug`).
+  (as `name=value`, `name%3Dvalue`, JSON with plain or escaped quotes, and Rust `Debug`),
+  and a sign-in code written as `code <value>` (16 or more token characters with a digit or a
+  capital, so `exit code 1` stays).
   It looks through ANSI escapes, so styled log lines are matched too. Text gogo builds is already clean;
   this catches what a later change or dependency bump lets through.
 - Tests plant made-up secrets in real reqwest errors (status, connect, decode, timeout) and

@@ -29,6 +29,10 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use gogo_ui_shell::{RendererChoice, Shell};
+use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::util::SubscriberInitExt as _;
+use tracing_subscriber::{EnvFilter, Layer as _, filter::FilterExt as _, filter::filter_fn};
 
 const USAGE: u8 = 2;
 
@@ -68,15 +72,29 @@ struct Cli {
     check_skin: Option<PathBuf>,
 }
 
+/// The log subscriber. Whatever `filter` asks for, the records
+/// [`gogo::redact::log_record_allowed`] refuses are never written.
+fn subscriber<W>(filter: EnvFilter, writer: W, ansi: bool) -> impl tracing::Subscriber + Send + Sync
+where
+    W: for<'a> MakeWriter<'a> + Send + Sync + 'static,
+{
+    let allowed = filter_fn(|meta| gogo::redact::log_record_allowed(meta.target(), meta.level()));
+    tracing_subscriber::registry().with(
+        tracing_subscriber::fmt::layer()
+            .with_writer(writer)
+            .with_ansi(ansi)
+            .with_filter(filter.and(allowed)),
+    )
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
-        )
-        .with_writer(std::io::stderr)
-        .with_ansi(std::io::stderr().is_terminal())
-        .init();
+    subscriber(
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
+        std::io::stderr,
+        std::io::stderr().is_terminal(),
+    )
+    .init();
 
     if let Some(dir) = &cli.check_skin {
         return if check::run(dir) {
@@ -146,4 +164,49 @@ fn window(dev: Option<&Path>, choice: RendererChoice) -> Result<(), Failure> {
     let app = app::App::new(dev, data::Data::fixture(move || waker.wake())?)?;
     shell.run(app, choice)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+
+    #[derive(Clone, Default)]
+    struct Buf(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for Buf {
+        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+            self.0.lock().expect("buffer").extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for Buf {
+        type Writer = Buf;
+        fn make_writer(&'a self) -> Buf {
+            self.clone()
+        }
+    }
+
+    #[test]
+    fn no_filter_turns_on_gog_warps_sign_in_line() {
+        const CODE: &str = "FAKE-Code_0123456789abcdefXYZ";
+        // The bridge `init` installs; here it feeds the scoped subscriber.
+        let _ = tracing_log::LogTracer::init();
+        log::set_max_level(log::LevelFilter::Trace);
+        let buf = Buf::default();
+        let sub = subscriber(EnvFilter::new("trace,gog_warp=trace"), buf.clone(), false);
+        tracing::subscriber::with_default(sub, || {
+            log::debug!(target: "gog_warp::core", "Requesting token with code {}", CODE);
+            log::warn!(target: "gog_warp::core", "a warning stays");
+        });
+        let out = String::from_utf8(buf.0.lock().expect("buffer").clone()).expect("utf-8");
+        assert!(out.contains("a warning stays"), "{out}");
+        assert!(!out.contains(CODE), "{out}");
+    }
 }
