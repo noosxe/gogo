@@ -63,6 +63,7 @@ shellcheck scripts/*.sh scripts/tests/*.sh   # when scripts change
 python3 -I scripts/tests/linux-e2e-helper-test.py   # when the e2e helper or a manifest changes
 python3 -I scripts/tests/gui-deps-check-test.py     # when the GUI dependency check changes
 python3 -I scripts/gui-deps-check.py                # when a GUI crate's or gogo-core's deps change
+nix develop .#lavapipe -c cargo nextest run -p gogo-render-gpu   # when the GPU renderer changes (Linux)
 scripts/linux-e2e.sh self-test                      # when the e2e harness changes (Linux)
 actionlint                                          # when .github/workflows changes
 ```

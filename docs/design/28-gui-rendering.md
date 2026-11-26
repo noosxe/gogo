@@ -1,7 +1,7 @@
 # 28 — GUI rendering: the scene and the renderers (#520)
 
 Status: **accepted** (2026-11-25). The scene and the vello_cpu renderer are built (design 24
-§8 stack C); the vello_gpu renderer is not yet. Facts marked
+§8 stack C), and so is the vello_gpu renderer; the pipeline cache (§4) is not. Facts marked
 *measured* come from the prototype described in design 24.
 
 The engine turns the IR (design 24 §2) into a **display list**. Each renderer draws that
@@ -104,7 +104,7 @@ process.
 ## 4. Images and caches
 
 - **vello_gpu 0.4 takes images only as GPU textures**, not CPU pixmaps.
-  - `gogo-render-gpu` uploads each `ImageId` once into a `TextureCache`.
+  - `gogo-render-gpu` uploads each `ImageKey` once, premultiplied, into its image cache.
   - Textures are kept across frames and the least recently used are evicted beyond a
     **byte budget**, so a library of covers neither re-uploads nor grows without bound.
   - vello_gpu has no image atlas, so the "image blank from the second frame" bug of compute
@@ -115,7 +115,7 @@ process.
 - **A key names one image** while it is cached: a store with new pixels for something
   gives them a new key. An asset path can't, so a skin change or reload calls the
   renderer's `clear_images`.
-- **Pipeline cache.** vello_gpu's pipelines are cached through wgpu's pipeline cache, in a
+- **Pipeline cache** (#540, not built yet). vello_gpu's pipelines are cached through wgpu's pipeline cache, in a
   file under the cache dir keyed with `wgpu::util::pipeline_cache_key`.
   - It is written atomically, and a corrupt or foreign file is ignored.
   - Creating the cache from bytes is an `unsafe` wgpu call. It is the one `unsafe` in the
@@ -127,6 +127,10 @@ process.
 | Limit | Effect on us |
 |---|---|
 | vello_gpu 0.4 is a beta. Mask layers are known to panic, so the prototype never uses them. A panic with filter layers that wrap more than one primitive came up while researching the library, but has no upstream issue we can cite, and the prototype never hit it | No effect uses mask layers. A new effect avoids them, and multi-primitive filter layers get a test on both renderers before they ship |
+| vello_gpu takes no CPU pixmap as an image: it accepts the paint, then panics when rendering | The GPU renderer only paints textures it uploaded |
+| vello_gpu caps its intermediate textures at 4096 px by default and refuses a larger layer | The GPU renderer raises the cap to the device's own limit, and blurs a backdrop only 3 sigma around its shape |
+| Only single filter primitives work (no filter graphs, no colour matrix), on both renderers | The effects need only a Gaussian blur |
+| vello_gpu does not re-export the glyph type its glyph builder takes | `gogo-render-gpu` pins `glifo` too, at the version vello_gpu uses |
 | vello_cpu filters panic in its multithreading mode | The CPU renderer is single-threaded (*measured* 70 ms for the heaviest page @2×) until upstream fixes it (#555) |
 | No backdrop filter upstream | §3 |
 | vello's blurred rounded rect takes **one corner radius** | A `BlurRect` (shadow, glow, inner shadow) whose four radii differ is drawn with the largest |
@@ -152,6 +156,7 @@ process.
     A failed run leaves the render and a diff picture in `target/tmp/golden/`, which CI
     uploads.
 - **GPU vs CPU.** The same scenes are drawn on vello_gpu and diffed against vello_cpu within
-  a tolerance. This runs on lavapipe in CI and is skipped without an adapter.
+  a tolerance (08 §7). This runs on lavapipe in CI and is skipped without an adapter.
+  `nix develop .#lavapipe` gives the same software Vulkan on a Linux machine.
 - **Structure.** Op counts and kinds per route catch lowering changes that don't move
   pixels much.

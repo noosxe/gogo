@@ -136,6 +136,8 @@ kurbo = "=0.13.1"
 peniko = "=0.6.1"
 vello_cpu = "=0.4.0"
 vello_gpu = "=0.4.0"
+# The glyph type vello_gpu's builder takes, which it does not re-export.
+glifo = { version = "=0.5.0", default-features = false, features = ["std"] }
 wgpu = "=30.0.2"
 pollster = "=1.0.3"
 winit = { version = "=0.30.13", default-features = false, features = ["rwh_06", "wayland", "wayland-dlopen", "wayland-csd-adwaita", "x11"] }

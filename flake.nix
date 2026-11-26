@@ -32,14 +32,19 @@
           overlays = [ rust-overlay.overlays.default ];
         };
 
-      mkDevShell = system:
-        import ./nix/devshell.nix { pkgs = pkgsFor system; };
+      mkDevShell = system: args:
+        import ./nix/devshell.nix ({ pkgs = pkgsFor system; } // args);
 
       packageFor = system:
         import ./nix/app.nix { pkgs = pkgsFor system; };
     in
     {
-      devShells = forAllSystems (system: { default = mkDevShell system; });
+      devShells = forAllSystems (system:
+        { default = mkDevShell system { }; }
+        # `nix develop .#lavapipe`: the GPU renderer's tests on software Vulkan.
+        // nixpkgs.lib.optionalAttrs (nixpkgs.lib.hasSuffix "-linux" system) {
+          lavapipe = mkDevShell system { lavapipe = true; };
+        });
 
       packages = forAllSystems (system:
         let

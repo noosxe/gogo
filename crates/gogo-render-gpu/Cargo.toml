@@ -7,4 +7,13 @@ publish.workspace = true
 license.workspace = true
 
 [dependencies]
+glifo.workspace = true
 gogo-ui-scene.workspace = true
+pollster.workspace = true
+thiserror.workspace = true
+vello_gpu.workspace = true
+wgpu.workspace = true
+
+[dev-dependencies]
+gogo-gui-testkit.workspace = true
+gogo-render-cpu.workspace = true

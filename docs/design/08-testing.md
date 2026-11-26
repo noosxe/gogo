@@ -98,9 +98,11 @@ so a pass also proves the bundle is self-contained. How-to, result layout and VM
   more than 2 levels on at most 0.05% of pixels, none above 8, mean at most 0.1. Measured:
   the two runners draw identical pixels, and another SIMD level on x86_64 moves a pixel by
   at most 1. Fonts come from the bundled set, never the host's.
-- **GPU tests** draw the same scenes on vello_gpu and compare against the CPU render within
-  a tolerance. They skip when wgpu finds no adapter; the CI lavapipe job (Mesa's software
-  Vulkan) runs them.
+- **GPU tests** draw the same scenes on vello_gpu, offscreen, and compare against the CPU
+  render: more than 4 levels on at most 0.5% of pixels, none above 8, mean at most 0.35.
+  Measured on lavapipe: at most 4 levels, mean at most 0.154. They skip when wgpu finds no
+  adapter; the CI `gui-lavapipe` job (Mesa's software Vulkan, `nix develop .#lavapipe`)
+  runs them with `GOGO_GPU_REQUIRED=1`, which fails instead.
 - **Safety invariants** (design 26 §7, added in #557) each have a test named after them (`s5_…`), at the
   level that enforces them: the validator, the model or the interaction layer (design 25 §4).
 - **Skin fixtures** are fictional (a made-up game, a made-up account) and live in
