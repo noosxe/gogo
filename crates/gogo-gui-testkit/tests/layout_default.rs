@@ -1,8 +1,6 @@
-//! The Default skin fixture's `game` and `shell` routes through layout (design 24 §8 PR C2):
+//! The Default skin's `game` and `shell` routes through layout (design 24 §8 PR C2):
 //! every node is placed, boxes stay sane, and a few text-driven sizes are pinned so a font
 //! or measure change shows up.
-
-use std::path::Path;
 
 use gogo_gui_testkit::FixtureScope;
 use gogo_skin::{Binding, Bound, Mode, SkinPackage, UiState};
@@ -10,8 +8,8 @@ use gogo_ui_layout::{Laid, Scroll, Viewport, layout};
 use gogo_ui_text::FontSet;
 
 fn bind(route: &str) -> Bound {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../gogo-skin/tests/fixtures/default");
-    let pkg = SkinPackage::load(&dir).unwrap_or_else(|r| panic!("{r}"));
+    let d = gogo_skins::default();
+    let pkg = SkinPackage::from_files(d.name, d.to_files()).unwrap_or_else(|r| panic!("{r}"));
     let scope = FixtureScope::new();
     let ui = UiState::defaults(&pkg.manifest);
     let b = Binding {
