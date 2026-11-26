@@ -238,6 +238,12 @@ app control is told apart by its `DrawnBy::App` part and tree key.
   to Cancel, any other key or button, the window losing input, the control or the dialog
   changing). The second activation is the press the model checks.
 - **Setting a text field** through AccessKit is not a press and answers nothing.
+- **Screen readers (`gogo-ui-a11y`).** The AccessKit tree comes from the same layers.
+  Click, focus and set-value requests become interact input, so they are numbered and
+  checked like any press. Under a dialog only the dialog is exposed, as a modal dialog or
+  alert named by its root, which also has focus while no control does. A node's id covers
+  what its action does, so a late request for a control that has since changed reaches
+  nothing, even before the next tree update. A hold control's description says how to confirm.
 
 ### Answers
 

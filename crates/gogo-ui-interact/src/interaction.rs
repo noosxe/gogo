@@ -237,6 +237,11 @@ impl Interaction {
         self.armed.as_ref().map(|a| &a.target)
     }
 
+    /// The hold control being held.
+    pub fn holding(&self) -> Option<&Target> {
+        self.hold.as_ref().map(|h| &h.target)
+    }
+
     /// The number of the latest input: what the app records when it has drawn a screen,
     /// so only later input can answer it.
     pub fn latest(&self) -> InputEvent {
