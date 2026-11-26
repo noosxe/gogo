@@ -9,3 +9,11 @@ license.workspace = true
 [dependencies]
 gogo-ui-ir.workspace = true
 gogo-ui-layout.workspace = true
+
+[dev-dependencies]
+gogo-contract.workspace = true
+gogo-gui-model = { workspace = true, features = ["fake"] }
+gogo-gui-testkit.workspace = true
+gogo-skin.workspace = true
+gogo-skins.workspace = true
+gogo-ui-text.workspace = true

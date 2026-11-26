@@ -100,7 +100,7 @@ flowchart LR
 | `gogo-ui-scene` | The display list and the `Renderer` trait | `DisplayList`, `Op`, `build(&Tree, &Laid, &SceneState)`, `ImageId`/`ImageKey`/`ImageStore`, `trait Renderer` + `Surface`, `icons` (the icon names and paths; an unknown name draws nothing) | kurbo, peniko |
 | `gogo-render-cpu` | vello_cpu renderer | `CpuRenderer: Renderer`, `render_to_rgba` | vello_cpu |
 | `gogo-render-gpu` | vello_gpu renderer on wgpu | `GpuRenderer: Renderer`, `GpuSurface`, readback; a pipeline cache later (#540) | vello_gpu, wgpu, glifo |
-| `gogo-ui-interact` | Input → intents: hit-testing, focus, key routing, scroll state, layer stack, input provenance | `Interaction`, `Intent`, `InputProvenance`, `FocusOrder` | — |
+| `gogo-ui-interact` | Input → intents: hit-testing, focus, key routing, layer stack, input provenance (design 25 §4); scroll state later (#545) | `Interaction::{handle, sync, focus, focus_visible, latest}`, `Frame`/`Layer`, `Input`, `Intent`, `InputProvenance`, `FocusOrder` | — |
 | `gogo-ui-a11y` | IR + layout → AccessKit tree; requests → intents | `tree_update`, `map_request` | accesskit |
 | `gogo-ui-shell` | The window: winit loop, surfaces, frame pacing, damage, IME, clipboard, platform a11y, hot-reload watching | `Shell::run(impl ShellApp, RendererChoice)`, `ShellApp`, `Waker` | winit, accesskit_winit, notify, softbuffer, smithay-clipboard (Linux), arboard (macOS) |
 | `gogo-gui-model` | The app layer (design 25): sources, dispatch, the safety flow, jobs | `Model`, `trait Backend`, `SourceStore`, `SafetyFlow`, `JobTable`, its own `Invocation` and `Effect` types (`gogo-gui` translates them from and to the engine's), `FakeBackend` behind the `fake` feature; later, the persistence of each skin's `ui` values | — |

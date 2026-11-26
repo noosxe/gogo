@@ -1802,8 +1802,14 @@ dependencies = [
 name = "gogo-ui-interact"
 version = "0.1.0"
 dependencies = [
+ "gogo-contract",
+ "gogo-gui-model",
+ "gogo-gui-testkit",
+ "gogo-skin",
+ "gogo-skins",
  "gogo-ui-ir",
  "gogo-ui-layout",
+ "gogo-ui-text",
 ]
 
 [[package]]

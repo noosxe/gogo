@@ -143,9 +143,11 @@ seconds behind a 10 Hz progress feed because every update queued a frame (design
 The safety flow lives in `gogo-gui-model` (`SafetyFlow`), between the dispatcher and the
 backend.
 
-- A skin's only way to cause anything is an `Intent::Invoke(ActionRef, args, provenance)`.
+- A skin's only way to cause anything is an `Intent::Invoke` (the control, its
+  `ActionRef`, the control's input and an `InputProvenance`).
 - `gogo-ui-interact` creates one only for a real pointer, key or AccessKit activation on a
-  node whose binding names the action. It creates at most one per input event (S4).
+  node whose binding names the action. It creates at most one per input event (S4). See
+  "Input" below.
 - `gogo-gui` turns it into the model's `Invocation` and `InputEvent`. The model takes each
   event once, checks the action and every argument against `gogo-contract` again, and goes
   through the states below.
@@ -190,10 +192,51 @@ stateDiagram-v2
 | S6 strong confirmation | `StrongConfirm` state; the default answer is no | model test per destructive action |
 | S8 cancel always there | every dialog state has a cancel edge that changes nothing | model test: cancel from each state leaves the backend untouched |
 | S9 uniform errors | every `Refused`/failure becomes an `ErrorView` in the app's `error` widget | model test |
-| S19 global keys | the shell routes Ctrl K, Esc and the plan card's Enter before the skin sees them; the model's `dismiss` and `enter` consult no skin | interact test; model test |
+| S19 global keys | `gogo-ui-interact` routes the palette key, Esc and the plan card's Enter before any skin shortcut; the model's `dismiss` and `enter` consult no skin | interact test; model test |
 | S21 settings can't weaken the flow | `Call::check` refuses a key that isn't skin-settable; gates are read from the backend at invoke, after planning, at confirm, and on resume and retry | model tests |
 | S1, S2, S5, S14, S21 again at bind | the binder (`gogo-skin`): a masked value is never an action argument and reads as its mask, a part that can't be hidden isn't, every control has a non-empty accessible name once its text is known, a `settings.set` key is on the skin-settable list | binding tests over the fixture scope, with the invariant named |
 | S1–S3 nothing secret or path-like in sources or args | `CoreBackend` builds sources from typed views; action params have no path/URL/shell types | S1 test over a fixture account with known secret strings |
+
+### Input (`gogo-ui-interact`)
+
+The shell feeds platform-neutral input and the layers on screen (the page, then dialogs and
+toasts, each a tree and its layout); intents come out. The crate knows no gogo concept: an
+app control is told apart by its `DrawnBy::App` part and tree key.
+
+- **Provenance.** Pointer, key and AccessKit input share one counter. A press gets its
+  number and time when it goes down, even if it acts on release. `InputProvenance` can only
+  be made by the crate and can't be copied. The shell reports a drawn screen with the
+  latest number.
+- **Repeat.** A repeating key gets no number and activates nothing; it only moves focus. A
+  key already down counts as repeating whether or not the platform says so. The shell does
+  not forward key events the platform synthesizes on a focus change.
+- **Activation.** A pointer press acts on release over the same control, Enter on the way
+  down, Space on release. A press whose control changed in between (layer, key, what the
+  action does, on/off state) does nothing: rows of a repeat are keyed by index, so a
+  reordered list must not move a press to another game. For that the app gives each layer
+  a value per action that changes when the call does.
+- **Global keys (S19).** Esc is a dismiss intent; Ctrl K (Cmd K on macOS) is the palette;
+  neither repeats. Under a dialog a focused control takes Enter, so Enter on Cancel
+  cancels; with nothing focused, Enter is the plan card's confirm. The app starts a plan
+  card on nothing, and a destructive confirmation or a prompt on Cancel (the default
+  answer is no).
+- **Skin shortcuts** (`key=`) work on the page only, never under a dialog, in a text field
+  or on repeat. Esc, Enter, Space, Tab and the palette key are never a skin's. The first in
+  document order wins.
+- **Focus.** Tab walks document order over the layers that take input; the topmost dialog
+  traps focus and pointer. Left and Right move among the tabs of a tab list without
+  activating; there is no other arrow navigation. The ring shows after the keyboard or a
+  screen reader moved focus, not after a click. A route starts on nothing; a rebuild keeps
+  focus by key, else the nearest earlier control; closing a dialog gives focus back.
+- **Holds.** A hold control is held while the key is down, or the pointer is down and on
+  it (also when the control moves or is covered), and never activates. A screen reader has only a discrete activation, so it takes two: the first
+  arms the control, which says so; a second one at least 500 ms and at most 10 s later
+  starts the 1 s hold, which completes unless it is cancelled (Esc, a focus move including
+  to Cancel, any other key or button, the window losing input, the control or the dialog
+  changing). The second activation is the press the model checks.
+- **Setting a text field** through AccessKit is not a press and answers nothing.
+
+### Answers
 
 - **What an answer needs.** Each screen has a new ticket, and the shell reports when it
   has drawn it, with the time on a monotonic clock. A `Press` answers it only if all of
