@@ -109,3 +109,9 @@ style "plan-confirm" { fill @accent; color @on-accent; border 1 @accent; h 36; r
 style "plan-cancel" { h 36; padding 0 10; color @text-md; weight 600; gap 10; key-hint #true }
 style "env-head" { padding 12 14 }
 style "borrowed" { fill @surface; border 1 @border; radius 12; padding 16; color @text-lo }
+
+// ---- panels, the game grid and compact buttons
+style "panel" { fill @surface; border 1 @border; radius 12; padding 16; gap 10 }
+style "game-card" { fill @surface; border 1 @border; radius 12; padding 12; gap 8 }
+style "small" { h 28; padding 0 10; font-size 12.5; radius 7 }
+style "problem" { weight 600; color @error }

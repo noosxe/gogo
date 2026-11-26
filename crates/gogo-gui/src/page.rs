@@ -119,6 +119,14 @@ impl Page {
         Ok(())
     }
 
+    /// Puts a scratch skin where the built-in one is, so a test can have a route with
+    /// nothing to fall back to.
+    #[cfg(test)]
+    pub(crate) fn replace_built_in(&mut self, files: Vec<(String, Vec<u8>)>) {
+        let package = SkinPackage::from_files("default", files).expect("the scratch skin loads");
+        self.default = Skin::new(package);
+    }
+
     /// A `ui` variable of the skin on screen.
     #[cfg(test)]
     pub(crate) fn ui(&self, var: &str) -> Option<&Value> {
@@ -280,7 +288,7 @@ mod tests {
     fn every_route_of_the_default_skin_draws_on_the_fixture() {
         let mut data = Data::fixture(|| {}).expect("fixture data");
         let mut page = Page::new().expect("the built-in skin");
-        for route in ["shell", "game"] {
+        for route in ["shell", "game", "sign-in", "library", "queue", "updates"] {
             let list = page.draw(&mut data, route, (960.0, 600.0)).expect(route);
             assert!(!list.ops.is_empty(), "{route}");
         }

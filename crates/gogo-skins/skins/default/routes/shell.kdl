@@ -39,10 +39,11 @@ route "shell" {
                 }
                 text "+{q.queued} queued · rate limit {q.rate_limit ? fmt.rate(q.rate_limit) : 'off'}" style="mini-foot"
             }
-            row style="account" {
+            row style="account" when="{account.signed_in}" {
                 dot tone="ready" style="dot-ok"
                 text "{account.username}"
             }
+            button "Sign in" style="nav" action="nav.go" args="sign-in" on="{route.current == 'sign-in'}" when="{not account.signed_in}"
         }
         outlet
     }

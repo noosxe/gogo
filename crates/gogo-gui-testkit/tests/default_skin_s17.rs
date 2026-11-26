@@ -22,10 +22,7 @@ fn skin() -> SkinPackage {
 /// Tracking issue: #576. Until a route is covered, binding it returns a bind error (the
 /// skin has no such route), even through `bind_with_fallback`: the Default skin has nothing
 /// to fall back to.
-const NOT_YET_COVERED: &[&str] = &[
-    "sign-in", "library", "queue", "updates", "saves", "apps", "runtimes", "doctor", "settings",
-    "about",
-];
+const NOT_YET_COVERED: &[&str] = &["saves", "apps", "runtimes", "doctor", "settings", "about"];
 
 fn scope_on(route: &str) -> FixtureScope {
     FixtureScope::new().on(route, (route == "game").then_some(GAME_ID))

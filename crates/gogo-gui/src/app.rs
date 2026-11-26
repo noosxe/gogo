@@ -465,7 +465,6 @@ mod tests {
         let mut app = app();
         assert_eq!(app.data.location().route, "game");
         let good = app.list.clone();
-        // No skin draws the library yet (#576): the last screen stays, with the reason.
         click(&mut app, "nav-library", 10);
         assert_eq!(app.data.location().route, "library");
         assert_ne!(app.list, good);
@@ -561,9 +560,23 @@ mod tests {
         assert!(app.data.backend().runs.is_empty());
     }
 
+    /// The built-in skin with a `library` route that loads and never binds: `$nope` is no
+    /// parameter of it.
+    fn with_an_unbindable_library() -> Vec<(String, Vec<u8>)> {
+        let mut files = gogo_skins::default().to_files();
+        files.retain(|(path, _)| path != "routes/library.kdl");
+        files.push((
+            "routes/library.kdl".to_owned(),
+            b"route \"library\" { text \"{$nope}\" }".to_vec(),
+        ));
+        files
+    }
+
     #[test]
     fn the_error_panel_takes_the_input() {
         let mut app = app();
+        app.page.replace_built_in(with_an_unbindable_library());
+        frame(&mut app);
         let verify = bounds(&mut app, Role::Button, "Verify files");
         click(&mut app, "nav-library", 10);
         assert_eq!(app.data.location().route, "library");

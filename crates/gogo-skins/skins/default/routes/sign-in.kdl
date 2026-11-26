@@ -1,0 +1,25 @@
+route "sign-in" {
+    let who="{account}"
+
+    column style="panel" w=520 gap=@space.3 id="signed-out" when="{not who.signed_in}" {
+        text "Sign in to GOG" style="h1"
+        text "The app opens the GOG login page in your browser, then asks for the code it gives you." style="meta"
+        // The code is typed into the app's own secret input (design 26 §5); a skin never sees it.
+        button "Sign in" style="primary" action="account.sign_in" id="sign-in"
+        row gap=@space.3 {
+            button "Login page" style="ghost" action="app.open_url" args="login"
+            button "Documentation" style="ghost" action="app.open_url" args="docs"
+            button "Support" style="ghost" action="app.open_url" args="support"
+        }
+    }
+
+    column style="panel" w=520 gap=@space.3 id="signed-in" when="{who.signed_in}" {
+        text "Signed in" style="h1"
+        text "{who.username}" style="meta"
+        button "Go to library" style="primary" action="nav.go" args="library"
+        row gap=@space.3 {
+            button "Sign out" action="account.sign_out" args="false"
+            button "Sign out and delete local data" style="ghost" action="account.sign_out" args="true"
+        }
+    }
+}

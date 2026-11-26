@@ -1,0 +1,17 @@
+route "queue" {
+    let q="{queue.summary}" jobs="{queue}"
+
+    text "Queue" style="h1"
+    text "{q.active} active · {q.queued} queued · {fmt.rate(q.rate)}" style="meta"
+
+    row gap=@space.3 id="rate-limit" {
+        text "Rate limit: {q.rate_limit ? fmt.rate(q.rate_limit) : 'off'}" style="hint" grow=1
+        button "Unlimited" style="small" action="queue.set_rate_limit" on="{q.rate_limit == null}" label="Download without a rate limit"
+        button "1 MB/s" style="small" action="queue.set_rate_limit" args="1000000" on="{q.rate_limit == 1000000}" label="Limit downloads to 1 MB/s"
+        button "10 MB/s" style="small" action="queue.set_rate_limit" args="10000000" on="{q.rate_limit == 10000000}" label="Limit downloads to 10 MB/s"
+        button "50 MB/s" style="small" action="queue.set_rate_limit" args="50000000" on="{q.rate_limit == 50000000}" label="Limit downloads to 50 MB/s"
+    }
+
+    text "Nothing is queued." style="hint" id="empty" when="{(jobs | len) == 0}"
+    each "j" in="{jobs}" { use "queue-job" job="{j}" }
+}
