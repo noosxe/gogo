@@ -347,7 +347,8 @@ impl<'a> Binder<'a> {
                         .find(|v| v.name == n)
                         .map(|v| &v.value)
                 });
-                TermVal::Pending(PendingArg::new(t.value.clone(), captured))
+                let params = self.scope().route_params;
+                TermVal::Pending(PendingArg::new(t.value.clone(), captured).on_route(params))
             } else {
                 TermVal::Value(self.eval(&t.value, t.span)?)
             };

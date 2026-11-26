@@ -72,6 +72,7 @@ static NULL: Value = Value::Null;
 pub fn eval<'a>(e: &'a Expr, s: &'a dyn Scope) -> Result<Cow<'a, Value>, EvalError> {
     Ok(match e {
         Expr::Lit(v) => Cow::Borrowed(v),
+        Expr::Word { name, .. } => Cow::Owned(Value::Str(name.clone())),
         Expr::Name { name, .. } => match s.var(name) {
             Some(v) => Cow::Borrowed(v),
             None => Cow::Owned(Value::Str(name.clone())),
