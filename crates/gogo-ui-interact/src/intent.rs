@@ -117,6 +117,11 @@ pub enum Intent {
         /// The press.
         provenance: InputProvenance,
     },
+    /// The paste shortcut under a dialog: its widget may take the clipboard.
+    Paste {
+        /// The press.
+        provenance: InputProvenance,
+    },
     /// Open the command palette.
     Palette {
         /// The press.

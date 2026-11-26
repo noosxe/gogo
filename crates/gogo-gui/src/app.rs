@@ -10,9 +10,10 @@
 //! While a source the route reads has no value yet, the app's own "Loading" panel is
 //! over the last screen.
 //!
-//! The safety flow's own screens are not drawn yet (#536, #614). Whatever raises one, a control,
-//! a job's question or a failed job, it is cancelled at once, which answers a question
-//! with a cancel, and the model is never told that a screen was shown.
+//! Of the safety flow's screens the app draws the sign-in dialog and the error screen
+//! ([`crate::dialog`]). The others are not drawn yet (#536, #614): whatever raises one
+//! is cancelled at once, which answers a question with a cancel, and the model is never
+//! told that it was shown.
 
 use std::borrow::Cow;
 use std::io::Write as _;
@@ -21,16 +22,18 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gogo_contract::{Value, actions};
-use gogo_gui_model::{Effect, InputEvent, Invocation, Outcome};
+use gogo_gui_model::{DWELL, Effect, InputEvent, Invocation, Outcome, Press, Secret, Ticket};
 use gogo_ui_a11y::A11yTree;
 use gogo_ui_interact::{Config, Frame as Layers, Intent, Interaction, Layer, Primary};
 use gogo_ui_scene::DisplayList;
 use gogo_ui_shell::accesskit::{ActionRequest, TreeUpdate};
 use gogo_ui_shell::{
-    Frame, Input, PixelRenderer, RenderError, ShellApp, WindowOptions, WindowRenderer, WindowTarget,
+    Frame, Input, PixelRenderer, RenderError, ShellApp, WindowOptions, WindowRenderer,
+    WindowTarget, Zeroizing,
 };
 
-use crate::data::{Data, Images};
+use crate::data::{Data, Drawn, Images};
+use crate::dialog::{self, Content, Dialog, Field};
 use crate::page::{DrawError, Page, Screen};
 use crate::panel::Panel;
 use crate::{act, render};
@@ -48,9 +51,17 @@ const PRIMARY: Primary = Primary::Meta;
 #[cfg(not(target_os = "macos"))]
 const PRIMARY: Primary = Primary::Ctrl;
 
+/// What was said, for the test that looks for secrets in it.
+#[cfg(test)]
+pub(crate) static SAID: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
 /// A line for whoever watches the run. A closed stream is no reason to stop drawing,
 /// which `println!` would do by panicking.
 fn say(line: std::fmt::Arguments<'_>) {
+    #[cfg(test)]
+    if let Ok(mut said) = SAID.lock() {
+        said.push(line.to_string());
+    }
     let _ = writeln!(std::io::stdout(), "{line}");
 }
 
@@ -61,6 +72,8 @@ struct View {
     screen: Option<Rc<Screen>>,
     /// What is wrong, over it.
     panel: Option<Rc<Panel>>,
+    /// The app's own dialog, over everything.
+    dialog: Option<Rc<Dialog>>,
     scale: f64,
 }
 
@@ -68,8 +81,20 @@ impl View {
     /// The layers, bottom first.
     fn layers(&self) -> Vec<Layer<'_>> {
         let screen = self.screen.iter().map(|s| s.layer());
-        screen.chain(self.panel.iter().map(|p| p.layer())).collect()
+        screen
+            .chain(self.panel.iter().map(|p| p.layer()))
+            .chain(self.dialog.iter().map(|d| d.layer()))
+            .collect()
     }
+}
+
+/// What the sign-in dialog holds. The code stays here, in the app's own memory, until
+/// it is sent or dropped (S1).
+#[derive(Default)]
+struct Entry {
+    ticket: Option<Ticket>,
+    code: Option<Secret>,
+    field: Field,
 }
 
 pub(crate) struct App {
@@ -83,6 +108,11 @@ pub(crate) struct App {
     pending: View,
     interaction: Interaction,
     a11y: A11yTree,
+    entry: Entry,
+    /// Since when a dialog has been on the display.
+    since: Option<(Ticket, Duration)>,
+    /// A press asked to paste into the dialog of this ticket.
+    paste: Option<Ticket>,
     /// The kinds of the safety screens cancelled so far.
     #[cfg(test)]
     cancelled: Vec<&'static str>,
@@ -105,6 +135,9 @@ impl App {
             pending: View::default(),
             interaction: Interaction::new(Config::new(PRIMARY)),
             a11y: A11yTree::new(TITLE),
+            entry: Entry::default(),
+            since: None,
+            paste: None,
             #[cfg(test)]
             cancelled: Vec::new(),
             dev: dev.map(Path::to_owned),
@@ -142,8 +175,29 @@ impl App {
         }
     }
 
+    /// The text of everything on the display, for the test that looks for secrets.
+    #[cfg(test)]
+    pub(crate) fn dump(&self) -> String {
+        let mut out = format!("{:?}", self.problems);
+        if let Some(screen) = &self.shown.screen {
+            out += &format!("{:?}", screen.tree);
+        }
+        if let Some(panel) = &self.shown.panel {
+            out += &format!("{:?}", panel.tree());
+        }
+        if let Some(dialog) = &self.shown.dialog {
+            out += &format!("{:?}", dialog.tree());
+        }
+        out
+    }
+
     /// Does what one intent asks.
     fn act(&mut self, intent: Intent) {
+        if let Some(dialog) = self.shown.dialog.clone() {
+            self.act_on_dialog(dialog.ticket(), intent);
+            self.effects();
+            return;
+        }
         // Under the error panel only Esc does anything.
         if self.shown.panel.is_some() && !matches!(intent, Intent::Dismiss { .. }) {
             return;
@@ -173,13 +227,73 @@ impl App {
             Intent::Palette { provenance } => {
                 self.invoke_named("palette.open", act::number(provenance.event()));
             }
-            // Enter, holds and app controls answer the app's own screens, none of which
-            // is drawn yet; no skin has a text field yet.
+            // Enter, holds and the rest belong to screens that are not drawn yet; no
+            // skin has a text field yet.
             _ => {}
         }
         self.effects();
         if self.data.location().route != route {
             say(format_args!("gui: route {}", self.data.location().route));
+        }
+    }
+
+    /// Does what one intent asks while the dialog of `ticket` is on the display.
+    /// Nothing under it can be reached.
+    fn act_on_dialog(&mut self, ticket: Ticket, intent: Intent) {
+        match intent {
+            Intent::App {
+                target, provenance, ..
+            } => match target.key.as_str() {
+                dialog::PASTE => self.ask_to_paste(ticket, provenance.at()),
+                dialog::CLEAR => {
+                    self.entry.code = None;
+                    self.entry.field = Field::Empty;
+                }
+                dialog::OPEN => self.data.open_sign_in_page(),
+                dialog::SUBMIT => {
+                    let press = Press {
+                        event: act::number(provenance.event()),
+                        at: provenance.at(),
+                        repeat: provenance.repeat(),
+                    };
+                    let code = self
+                        .entry
+                        .code
+                        .clone()
+                        .filter(|_| self.entry.ticket == Some(ticket));
+                    // Too soon after the dialog appeared, it is ignored and the code
+                    // stays.
+                    if let Some(code) = code
+                        && self.data.answer(ticket, code, press) != Outcome::Ignored
+                    {
+                        self.entry = Entry::default();
+                    }
+                }
+                dialog::CANCEL | dialog::CLOSE => self.close(ticket),
+                _ => {}
+            },
+            Intent::Paste { provenance } => self.ask_to_paste(ticket, provenance.at()),
+            Intent::Dismiss { .. } => self.close(ticket),
+            _ => {}
+        }
+    }
+
+    /// Cancels the screen of `ticket` and forgets what was pasted for it.
+    fn close(&mut self, ticket: Ticket) {
+        self.data.cancel(ticket);
+        if self.entry.ticket == Some(ticket) {
+            self.entry = Entry::default();
+        }
+    }
+
+    /// The clipboard is read only for a press made after the dialog had been up long
+    /// enough to be seen, as for any answer.
+    fn ask_to_paste(&mut self, ticket: Ticket, pressed: Duration) {
+        let seen = self.since.is_some_and(|(shown, since)| {
+            shown == ticket && pressed.checked_sub(since).is_some_and(|up| up >= DWELL)
+        });
+        if seen && self.entry.ticket == Some(ticket) {
+            self.paste = Some(ticket);
         }
     }
 
@@ -202,13 +316,14 @@ impl App {
     fn cancel_modals(&mut self) -> bool {
         let mut any = false;
         for _ in 0..MODALS {
+            // The app draws these; a planning screen on its way to run is left alone.
+            if self.data.screen_to_draw().is_some() || self.data.passing() {
+                break;
+            }
             let Some(kind) = self.data.modal_kind() else {
                 break;
             };
             say(format_args!("gui: {kind} is not drawn yet: cancelled"));
-            if let Some(title) = self.data.error_title() {
-                tracing::warn!("{title}");
-            }
             #[cfg(test)]
             self.cancelled.push(kind);
             any = true;
@@ -281,8 +396,13 @@ impl App {
             problems.to_mut().push(failure);
         }
         self.pending.panel = None;
-        if problems.is_empty() && loading {
-            match Panel::loading(&mut self.page.fonts, size) {
+        let waiting = if self.data.signing_in() {
+            Some("Signing in…")
+        } else {
+            loading.then_some("Loading…")
+        };
+        if let Some(waiting) = waiting.filter(|_| problems.is_empty()) {
+            match Panel::waiting(&mut self.page.fonts, size, waiting) {
                 Ok(panel) => self.pending.panel = Some(Rc::new(panel)),
                 Err(e) => {
                     tracing::error!("the loading panel could not be drawn: {e}");
@@ -307,7 +427,11 @@ impl App {
                 let focus = self
                     .interaction
                     .focus_visible()
-                    .filter(|t| self.pending.panel.is_none() && t.layer == screen.layer().id)
+                    .filter(|t| {
+                        self.pending.panel.is_none()
+                            && self.data.screen_to_draw().is_none()
+                            && t.layer == screen.layer().id
+                    })
                     .and_then(|t| screen.tree.by_key(&t.key));
                 screen.list(focus)
             }
@@ -316,14 +440,70 @@ impl App {
         if let Some(panel) = &self.pending.panel {
             panel.draw(&mut self.list);
         }
+        self.draw_dialog(size);
     }
 
-    /// The pending frame is on the screen. Returns whether focus moved with it, so that it
-    /// has to be drawn again.
-    fn show(&mut self) -> bool {
+    /// Adds the safety screen on top, if the app draws it.
+    fn draw_dialog(&mut self, size: (f32, f32)) {
+        self.pending.dialog = None;
+        let Some((ticket, drawn)) = self.data.screen_to_draw() else {
+            return;
+        };
+        let content = match drawn {
+            Drawn::SignIn(label) => {
+                if self.entry.ticket != Some(ticket) {
+                    self.entry = Entry {
+                        ticket: Some(ticket),
+                        ..Entry::default()
+                    };
+                }
+                Content::SignIn {
+                    label,
+                    field: self.entry.field,
+                }
+            }
+            Drawn::Error(error) => Content::Error {
+                class: error.class,
+                title: error.title,
+                message: error.message,
+                hint: error.hint,
+            },
+        };
+        match Dialog::new(&mut self.page.fonts, size, ticket, &content) {
+            Ok(drawn) => {
+                let focus = self
+                    .interaction
+                    .focus_visible()
+                    .filter(|t| t.layer == drawn.layer().id)
+                    .map(|t| t.key.as_str());
+                drawn.draw(&mut self.list, focus);
+                self.pending.dialog = Some(Rc::new(drawn));
+            }
+            Err(e) => {
+                tracing::error!("a dialog could not be drawn: {e}");
+                // Nothing can be answered that was not seen.
+                self.close(ticket);
+                self.pending.screen = None;
+            }
+        }
+    }
+
+    /// The pending frame is on the screen, since `at`. Returns whether focus moved with
+    /// it, so that it has to be drawn again.
+    fn show(&mut self, at: Duration) -> bool {
         self.shown = self.pending.clone();
         let layers = self.shown.layers();
-        self.interaction.sync(&Layers { layers: &layers }).redraw
+        let redraw = self.interaction.sync(&Layers { layers: &layers }).redraw;
+        match self.shown.dialog.as_ref().map(|d| d.ticket()) {
+            Some(ticket) if self.since.is_none_or(|(shown, _)| shown != ticket) => {
+                self.since = Some((ticket, at));
+                let latest = act::number(self.interaction.latest());
+                self.data.presented(ticket, latest, at);
+            }
+            Some(_) => {}
+            None => self.since = None,
+        }
+        redraw
     }
 }
 
@@ -376,9 +556,35 @@ impl ShellApp for App {
         true
     }
 
-    fn presented(&mut self, _at: Duration, renderer: &'static str) -> bool {
+    fn presented(&mut self, at: Duration, renderer: &'static str) -> bool {
         say(format_args!("gui: frame presented renderer={renderer}"));
-        self.show()
+        self.show(at)
+    }
+
+    fn wants_paste(&mut self) -> bool {
+        self.paste.is_some()
+    }
+
+    fn pasted(&mut self, text: Option<Zeroizing<String>>) -> bool {
+        let Some(ticket) = self.paste.take() else {
+            return false;
+        };
+        // For the dialog that asked, and no other.
+        if self.entry.ticket != Some(ticket)
+            || self.data.screen_to_draw().map(|(t, _)| t) != Some(ticket)
+        {
+            return false;
+        }
+        let code = text
+            .as_deref()
+            .and_then(|text| gogo::auth::browser::code_from_input(text));
+        self.entry.field = match (&text, &code) {
+            (None, _) => Field::NothingToPaste,
+            (Some(_), None) => Field::Rejected,
+            (Some(_), Some(_)) => Field::Pasted,
+        };
+        self.entry.code = code.map(|code| Secret::new(code.as_str()));
+        true
     }
 
     fn input(&mut self, input: Input, at: Duration) -> bool {
@@ -422,7 +628,7 @@ mod tests {
     /// A frame built and presented.
     fn frame(app: &mut App) {
         app.draw(SIZE);
-        app.show();
+        app.show(Duration::ZERO);
     }
 
     /// The middle of the node the skin calls `name`.
@@ -673,6 +879,6 @@ mod tests {
         let mut app = app();
         key(&mut app, Key::Tab, 10);
         app.draw(SIZE);
-        assert!(!app.show());
+        assert!(!app.show(Duration::ZERO));
     }
 }

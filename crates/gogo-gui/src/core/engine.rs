@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use gogo::auth::TokenProvider;
@@ -16,8 +17,10 @@ use gogo::gog::overview::Overview;
 use gogo_contract::Value;
 use gogo_gui_model::{ErrorView, SourceKey};
 use tokio::sync::OnceCell;
+use zeroize::Zeroizing;
 
 use super::account::Account;
+use super::browser::Browser;
 use super::errors;
 use super::local::{Local, Machine};
 use super::text;
@@ -33,6 +36,7 @@ pub(crate) struct Parts {
     /// The preferred installer language (config `gog.language`).
     pub language: String,
     pub download_dir: PathBuf,
+    pub browser: Arc<dyn Browser>,
 }
 
 /// The owned games and what is set up of them.
@@ -66,6 +70,10 @@ pub(crate) struct Engine {
     overviews: Mutex<HashMap<u64, Cell<Option<Overview>>>>,
     /// One token refresh at a time: gog-warp has no lock of its own.
     refresh: tokio::sync::Mutex<()>,
+    /// What the last read of the account found.
+    signed_in: AtomicBool,
+    /// Why a sign-in could not be kept.
+    cannot_sign_in: Mutex<Option<ErrorView>>,
 }
 
 /// A source's value, and what to tell the user if it could not be read.
@@ -82,7 +90,36 @@ impl Engine {
             snapshot: Mutex::default(),
             overviews: Mutex::default(),
             refresh: tokio::sync::Mutex::new(()),
+            signed_in: AtomicBool::new(false),
+            cannot_sign_in: Mutex::new(None),
         }
+    }
+
+    pub(crate) fn signed_in(&self) -> bool {
+        self.signed_in.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn cannot_sign_in(&self) -> Option<ErrorView> {
+        lock(&self.cannot_sign_in).clone()
+    }
+
+    /// Opens the sign-in page. `false` when no browser could be started.
+    pub(crate) fn open_sign_in_page(&self) -> bool {
+        self.parts
+            .browser
+            .open(&gogo::auth::browser::authorize_url())
+    }
+
+    /// Exchange `code` for a session, and drop what was read without one.
+    pub(crate) async fn sign_in(&self, code: Zeroizing<String>) -> Result<(), ErrorView> {
+        self.parts
+            .account
+            .login(code)
+            .await
+            .map_err(|e| errors::view("Sign-in failed", &e))?;
+        self.signed_in.store(true, Ordering::Release);
+        self.forget();
+        Ok(())
     }
 
     /// Drop what was read, so that the next read asks again.
@@ -128,13 +165,26 @@ impl Engine {
 
     async fn take_snapshot(&self) -> Snapshot {
         let mut failures = Vec::new();
+        let mut cannot = None;
         let session = match self.parts.account.session().await {
             Ok(session) => session,
             Err(e) => {
-                failures.push(errors::view("The sign-in could not be read", &e));
+                let view = errors::view("The sign-in could not be read", &e);
+                failures.push(view.clone());
+                cannot = Some(view);
                 None
             }
         };
+        self.signed_in.store(session.is_some(), Ordering::Release);
+        if session.is_none() && cannot.is_none() {
+            let account = Arc::clone(&self.parts.account);
+            cannot = tokio::task::spawn_blocking(move || account.probe())
+                .await
+                .ok()
+                .and_then(Result::err)
+                .map(|e| errors::view("A sign-in could not be kept here", &e));
+        }
+        *lock(&self.cannot_sign_in) = cannot;
         let mut username = None;
         let mut products = Vec::new();
         if let Some(session) = &session {

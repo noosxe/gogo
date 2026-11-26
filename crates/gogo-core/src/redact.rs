@@ -252,6 +252,44 @@ pub fn log_record_allowed(target: &str, level: &tracing::Level) -> bool {
     !gog_warp || *level <= tracing::Level::WARN
 }
 
+/// One log event's bytes, written out through [`scrub_text`] when dropped: what every
+/// frontend's log writer hands each event to.
+pub struct ScrubbedLine<W: std::io::Write> {
+    buf: Vec<u8>,
+    out: W,
+}
+
+impl<W: std::io::Write> ScrubbedLine<W> {
+    pub fn new(out: W) -> Self {
+        ScrubbedLine {
+            buf: Vec::new(),
+            out,
+        }
+    }
+}
+
+impl<W: std::io::Write> std::io::Write for ScrubbedLine<W> {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.buf.extend_from_slice(b);
+        Ok(b.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<W: std::io::Write> Drop for ScrubbedLine<W> {
+    fn drop(&mut self) {
+        if self.buf.is_empty() {
+            return;
+        }
+        let text = String::from_utf8_lossy(&self.buf);
+        let _ = self.out.write_all(scrub_text(&text).as_bytes());
+        let _ = self.out.flush();
+    }
+}
+
 // The bare `code <value>` rule is a narrow backstop for gog-warp's one wording. It
 // misses other forms (`code '…'`, a short value, a code with no digit or capital).
 // What keeps gog-warp's secrets out of a log is the level filter,

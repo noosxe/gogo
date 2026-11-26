@@ -154,7 +154,8 @@ notify = "=9.0.0"
 softbuffer = { version = "=0.4.8", default-features = false, features = ["x11", "x11-dlopen", "wayland", "wayland-dlopen"] }
 png = "=0.18.1"
 smithay-clipboard = "=0.7.3"
-arboard = "=3.7.0"
+# No `image-data`: only text is read.
+arboard = { version = "=3.7.0", default-features = false }
 image = { version = "=0.25.10", default-features = false, features = ["jpeg", "webp"] }
 
 # — dev —

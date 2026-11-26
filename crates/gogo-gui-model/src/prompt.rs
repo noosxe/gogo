@@ -3,6 +3,8 @@
 
 use std::fmt;
 
+use zeroize::Zeroizing;
+
 /// A question.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PromptSpec {
@@ -57,14 +59,14 @@ pub enum Side {
     Cloud,
 }
 
-/// A typed secret. It never prints.
+/// A typed secret. It never prints, and its memory is wiped when it is dropped.
 #[derive(Clone, PartialEq)]
-pub struct Secret(String);
+pub struct Secret(Zeroizing<String>);
 
 impl Secret {
     /// Wrap a typed secret.
     pub fn new(value: impl Into<String>) -> Self {
-        Secret(value.into())
+        Secret(Zeroizing::new(value.into()))
     }
 
     /// The clear value, for the backend to hand to the core.

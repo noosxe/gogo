@@ -11,6 +11,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowAttributes, WindowId};
 
+use crate::clipboard::Clipboard;
 use crate::cpu::CpuWindow;
 use crate::input::Translator;
 use crate::output::{self, Output, Recovery};
@@ -107,6 +108,8 @@ type AnyOutput = Output<Box<dyn WindowRenderer>, CpuWindow>;
 
 /// The open window.
 struct Open {
+    // Dropped before the window. Opened on the first paste.
+    clipboard: Option<Clipboard>,
     // Dropped before the window.
     output: Option<AnyOutput>,
     accessibility: accesskit_winit::Adapter,
@@ -193,6 +196,21 @@ impl<A: ShellApp> Runner<A> {
         event_loop.exit();
     }
 
+    /// Reads the clipboard for the application, if it asked.
+    fn paste_if_asked(&mut self) {
+        if !self.app.wants_paste() {
+            return;
+        }
+        let Some(open) = &mut self.open else { return };
+        if open.clipboard.is_none() {
+            open.clipboard = Clipboard::open(&open.window);
+        }
+        let text = open.clipboard.as_mut().and_then(Clipboard::text);
+        if self.app.pasted(text) {
+            self.redraw();
+        }
+    }
+
     fn redraw(&self) {
         if let Some(open) = &self.open {
             open.window.request_redraw();
@@ -211,6 +229,7 @@ impl<A: ShellApp> Runner<A> {
             make_output(&mut self.app, &window, self.choice).map_err(ShellError::Renderer)?;
         window.request_redraw();
         self.open = Some(Open {
+            clipboard: None,
             output: Some(output),
             accessibility,
             window,
@@ -335,6 +354,7 @@ impl<A: ShellApp> ApplicationHandler<UserEvent> for Runner<A> {
             if self.app.input(input, self.started.elapsed()) {
                 open.window.request_redraw();
             }
+            self.paste_if_asked();
             return;
         }
         match event {
@@ -364,9 +384,13 @@ impl<A: ShellApp> ApplicationHandler<UserEvent> for Runner<A> {
                     }
                     false
                 }
-                accesskit_winit::WindowEvent::ActionRequested(request) => self
-                    .app
-                    .accessibility_action(request, self.started.elapsed()),
+                accesskit_winit::WindowEvent::ActionRequested(request) => {
+                    let redraw = self
+                        .app
+                        .accessibility_action(request, self.started.elapsed());
+                    self.paste_if_asked();
+                    redraw
+                }
                 accesskit_winit::WindowEvent::AccessibilityDeactivated => false,
             },
         };

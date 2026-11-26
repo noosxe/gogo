@@ -24,9 +24,12 @@ mod app;
 mod check;
 mod core;
 mod data;
+mod dialog;
 mod page;
 mod panel;
 mod render;
+#[cfg(test)]
+mod s1;
 
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
@@ -79,8 +82,20 @@ struct Cli {
     check_skin: Option<PathBuf>,
 }
 
+/// Every event is scrubbed on its way out (design 07 §4).
+struct Scrubbing<M>(M);
+
+impl<'a, M: MakeWriter<'a>> MakeWriter<'a> for Scrubbing<M> {
+    type Writer = gogo::redact::ScrubbedLine<M::Writer>;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        gogo::redact::ScrubbedLine::new(self.0.make_writer())
+    }
+}
+
 /// The log subscriber. Whatever `filter` asks for, the records
-/// [`gogo::redact::log_record_allowed`] refuses are never written.
+/// [`gogo::redact::log_record_allowed`] refuses are never written, and the rest go
+/// through [`Scrubbing`].
 fn subscriber<W>(filter: EnvFilter, writer: W, ansi: bool) -> impl tracing::Subscriber + Send + Sync
 where
     W: for<'a> MakeWriter<'a> + Send + Sync + 'static,
@@ -88,7 +103,7 @@ where
     let allowed = filter_fn(|meta| gogo::redact::log_record_allowed(meta.target(), meta.level()));
     tracing_subscriber::registry().with(
         tracing_subscriber::fmt::layer()
-            .with_writer(writer)
+            .with_writer(Scrubbing(writer))
             .with_ansi(ansi)
             .with_filter(filter.and(allowed)),
     )

@@ -25,6 +25,12 @@ hand-roll the exchange behind `Session`; decide at implementation time.
 
 ## 2. Login flow (`gogo login`)
 
+As built: the authorize URL (`layout=client2`) and the reading of the pasted text are in
+`gogo-core` (`auth::browser`), shared by the CLI and the GUI. A pasted address must be
+`https://embed.gog.com/on_login_success` with a `code`; a bare code is also taken, and
+anything else is refused without being quoted. `--code` is used as given. The CLI prints
+the URL without opening a browser and asks once.
+
 1. Build the authorize URL (query-encoded):
    ```
    https://auth.gog.com/auth?client_id=46899977096215655

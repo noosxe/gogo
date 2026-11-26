@@ -5,57 +5,24 @@
 //! dependency's log line (reqwest, hyper, gog-warp through the `log` bridge)
 //! that a later version might start writing with a URL in it.
 
-use std::io::{self, Write};
-
+use gogo::redact::ScrubbedLine;
 use tracing_subscriber::fmt::MakeWriter;
 
 /// Wraps a [`MakeWriter`]: each event is buffered, scrubbed and written whole.
 pub struct Scrubbing<M>(pub M);
 
 impl<'a, M: MakeWriter<'a>> MakeWriter<'a> for Scrubbing<M> {
-    type Writer = Line<M::Writer>;
+    type Writer = ScrubbedLine<M::Writer>;
 
     fn make_writer(&'a self) -> Self::Writer {
-        Line {
-            buf: Vec::new(),
-            out: self.0.make_writer(),
-        }
-    }
-}
-
-/// One event's bytes; written out, scrubbed, on drop.
-pub struct Line<W: Write> {
-    buf: Vec<u8>,
-    out: W,
-}
-
-impl<W: Write> Write for Line<W> {
-    fn write(&mut self, b: &[u8]) -> io::Result<usize> {
-        self.buf.extend_from_slice(b);
-        Ok(b.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<W: Write> Drop for Line<W> {
-    fn drop(&mut self) {
-        if self.buf.is_empty() {
-            return;
-        }
-        let text = String::from_utf8_lossy(&self.buf);
-        let _ = self
-            .out
-            .write_all(gogo::redact::scrub_text(&text).as_bytes());
-        let _ = self.out.flush();
+        ScrubbedLine::new(self.0.make_writer())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{self, Write};
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone, Default)]

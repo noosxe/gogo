@@ -250,6 +250,7 @@ pub fn names(intents: &[Intent]) -> Vec<String> {
             Intent::Dismiss { .. } => "dismiss".to_owned(),
             Intent::Enter { .. } => "enter".to_owned(),
             Intent::Palette { .. } => "palette".to_owned(),
+            Intent::Paste { .. } => "paste".to_owned(),
             other => format!("{other:?}"),
         })
         .collect()

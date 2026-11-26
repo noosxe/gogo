@@ -3,18 +3,19 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use gogo_contract::{Gates, Value};
 use gogo_gui_model::{
     Backend, Call, Effect, ErrorView, Failures, InputEvent, Invocation, Jobs, Location, Modal,
-    Model, Outcome, PlanReply, PromptAnswer, PromptSpec, Run, Slot, SourceKey, Subscription,
+    Model, Outcome, PlanReply, Press, PromptAnswer, PromptSpec, Run, Secret, Slot, SourceKey,
+    Subscription, Ticket,
 };
 use gogo_skin::expr::{CallError, Scope};
 use gogo_ui_scene::{Image, ImageKey, ImageStore, MemoryStore};
 
-use crate::core::CoreBackend;
 use crate::core::art::ArtStore;
+use crate::core::{CoreBackend, SignIn};
 
 #[cfg(feature = "fixture")]
 use fictional::FixtureData;
@@ -80,6 +81,7 @@ pub(crate) struct Data {
     fixture: Option<FixtureData>,
     watched: HashSet<SourceKey>,
     art: Option<ArtStore>,
+    sign_in: Option<SignIn>,
 }
 
 impl Data {
@@ -89,7 +91,9 @@ impl Data {
         art: Option<ArtStore>,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Data {
+        let sign_in = Some(backend.sign_in());
         Data {
+            sign_in,
             model: Model::new(Engine::Core(Box::new(backend)), wake),
             #[cfg(feature = "fixture")]
             fixture: None,
@@ -160,6 +164,65 @@ impl Data {
         outcome
     }
 
+    /// The safety screen on top, if it is one the app draws.
+    pub(crate) fn screen_to_draw(&self) -> Option<(Ticket, Drawn)> {
+        match self.model.modal()? {
+            // A job's questions come with the jobs (#536).
+            Modal::Prompt {
+                ticket,
+                spec: PromptSpec::Secret { label },
+                job: None,
+            } => Some((ticket, Drawn::SignIn(label.clone()))),
+            Modal::Error { ticket, error } => Some((ticket, Drawn::Error(error.clone()))),
+            _ => None,
+        }
+    }
+
+    /// Whether the screen on top is one that passes by itself: planning the sign-in
+    /// that was just asked for.
+    pub(crate) fn passing(&self) -> bool {
+        matches!(
+            self.model.modal(),
+            Some(Modal::Planning {
+                action: "account.sign_in",
+                ..
+            })
+        )
+    }
+
+    /// The screen with `ticket` is on the display.
+    pub(crate) fn presented(&mut self, ticket: Ticket, latest: InputEvent, at: Duration) {
+        self.model.presented(ticket, latest, at);
+    }
+
+    /// Answer the question on screen with a secret.
+    pub(crate) fn answer(&mut self, ticket: Ticket, secret: Secret, press: Press) -> Outcome {
+        let outcome = self
+            .model
+            .answer(ticket, PromptAnswer::Secret(secret), press);
+        // The plan of a sign-in is there at once.
+        self.model.pump();
+        outcome
+    }
+
+    pub(crate) fn cancel(&mut self, ticket: Ticket) {
+        self.model.cancel(ticket);
+        self.model.pump();
+    }
+
+    pub(crate) fn signing_in(&self) -> bool {
+        self.sign_in.as_ref().is_some_and(SignIn::running)
+    }
+
+    /// "Open the page again".
+    pub(crate) fn open_sign_in_page(&self) {
+        if let Some(sign_in) = &self.sign_in
+            && !sign_in.open_page()
+        {
+            tracing::warn!("no browser could be started");
+        }
+    }
+
     /// What the safety flow wants on screen, by kind: never its content, which can hold
     /// the user's data.
     pub(crate) fn modal_kind(&self) -> Option<&'static str> {
@@ -170,14 +233,6 @@ impl Data {
             Modal::Strong { .. } => "a destructive confirmation",
             Modal::Error { .. } => "an error",
         })
-    }
-
-    /// The error on screen, by its class and title, which are the app's own words.
-    pub(crate) fn error_title(&self) -> Option<String> {
-        match self.model.modal()? {
-            Modal::Error { error, .. } => Some(format!("{}: {}", error.class, error.title)),
-            _ => None,
-        }
     }
 
     /// The fake, to script it and see what ran.
@@ -219,6 +274,13 @@ impl Data {
         let _ = name;
         false
     }
+}
+
+/// A safety screen the app draws.
+pub(crate) enum Drawn {
+    /// The sign-in dialog, with what it says.
+    SignIn(String),
+    Error(ErrorView),
 }
 
 /// The sources the model answers from the job table.
@@ -367,6 +429,7 @@ mod fictional {
                 }),
                 watched: HashSet::new(),
                 art: None,
+                sign_in: None,
             })
         }
     }

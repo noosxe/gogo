@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use gogo::auth::{Session, TokenProvider, store::TokenStore};
 use gogo::gog::error::AuthError;
 use tokio::sync::Mutex;
+use zeroize::Zeroizing;
 
 #[async_trait]
 pub(crate) trait Account: Send + Sync {
@@ -18,6 +19,15 @@ pub(crate) trait Account: Send + Sync {
     async fn username(&self, session: &dyn TokenProvider) -> Result<Option<String>, AuthError> {
         gogo::auth::username(session).await
     }
+
+    /// Whether a sign-in could be kept: asked before the browser opens (design 02
+    /// §3). Blocks.
+    fn probe(&self) -> Result<(), AuthError> {
+        Ok(())
+    }
+
+    /// Exchange a pasted code for a session and keep it.
+    async fn login(&self, code: Zeroizing<String>) -> Result<(), AuthError>;
 
     /// Keep a refreshed token (design 02 §4).
     async fn persist(&self) -> Result<(), AuthError> {
@@ -60,6 +70,23 @@ impl StoredAccount {
 impl Account for StoredAccount {
     async fn session(&self) -> Result<Option<Arc<dyn TokenProvider>>, AuthError> {
         Ok(self.restored().await?.map(|s| s as Arc<dyn TokenProvider>))
+    }
+
+    fn probe(&self) -> Result<(), AuthError> {
+        self.store.probe()
+    }
+
+    async fn login(&self, code: Zeroizing<String>) -> Result<(), AuthError> {
+        let store = Arc::clone(&self.store);
+        let runtime = tokio::runtime::Handle::current();
+        // The keychain write inside can wait for the user: not on a runtime worker.
+        let session = tokio::task::spawn_blocking(move || {
+            runtime.block_on(Session::login(&code, store.as_ref()))
+        })
+        .await
+        .map_err(|_| AuthError::Upstream("the sign-in did not finish".into()))??;
+        *self.session.lock().await = Some(Some(Arc::new(session)));
+        Ok(())
     }
 
     async fn persist(&self) -> Result<(), AuthError> {
