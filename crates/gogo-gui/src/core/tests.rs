@@ -144,6 +144,13 @@ pub(crate) async fn gog() -> MockServer {
     server
 }
 
+/// A scratch folder under `target/`, removed when dropped.
+pub(crate) fn scratch() -> tempfile::TempDir {
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/gui-tests");
+    std::fs::create_dir_all(&base).expect("a folder under target");
+    tempfile::tempdir_in(base).expect("a scratch folder")
+}
+
 pub(crate) struct Rig {
     pub model: Model<CoreBackend>,
     pub engine: Arc<Engine>,
@@ -151,7 +158,7 @@ pub(crate) struct Rig {
 }
 
 pub(crate) fn rig(server: &MockServer, account: Arc<dyn Account>) -> Rig {
-    let dir = tempfile::tempdir().expect("a scratch folder");
+    let dir = scratch();
     let engine = Arc::new(Engine::new(Parts {
         account,
         local: Arc::new(Canned),
@@ -393,14 +400,23 @@ async fn a_cover_is_fetched_once_kept_and_never_follows_a_redirect_away() {
     assert!(art.take_arrived());
     let image = art.get(&cover).expect("arrived");
     assert_eq!((image.width, image.height), (40, 60));
-    assert!(cache.join("10-cover.jpg").is_file());
+    let kept = |kind: &str| {
+        let prefix = format!("10-{kind}-");
+        std::fs::read_dir(&cache)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+            .count()
+    };
+    assert_eq!(kept("cover"), 1);
 
     // The background redirects elsewhere: refused, and nothing kept.
     let background = ImageKey::Handle("art:10:background".into());
     assert!(art.get(&background).is_none());
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(art.get(&background).is_none());
-    assert!(!cache.join("10-background.jpg").exists());
+    assert_eq!(kept("background"), 0);
 
     // A second run reads the cover from the cache.
     let again = store(cache, Arc::default());

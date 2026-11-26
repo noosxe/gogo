@@ -80,6 +80,22 @@ pub(crate) fn unavailable() -> ErrorView {
 mod tests {
     use super::*;
 
+    /// A real reqwest error, whose own text carries the whole address.
+    #[tokio::test]
+    async fn a_connect_errors_address_never_reaches_the_view() {
+        // Port 1 on this machine: nothing listens there.
+        let address = "http://FAKE-USER:FAKE-PASS@127.0.0.1:1/token=FAKE-PATH/x?access_token=FAKE-QUERY&code=FAKE-CODE#FAKE-FRAGMENT";
+        let raw = reqwest::Client::new()
+            .get(address)
+            .send()
+            .await
+            .expect_err("nothing listens");
+        assert!(raw.to_string().contains("FAKE-"), "{raw}");
+        let v = view("The library could not be read", &ApiError::from(raw));
+        assert_eq!(v.class, "Network", "{v:?}");
+        assert!(!format!("{v:?}").contains("FAKE-"), "{v:?}");
+    }
+
     #[test]
     fn views_lose_secrets_and_cli_advice() {
         let e = ApiError::Other(
