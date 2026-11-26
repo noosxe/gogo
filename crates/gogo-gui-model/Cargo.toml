@@ -6,5 +6,13 @@ edition.workspace = true
 publish.workspace = true
 license.workspace = true
 
+[features]
+# A scripted backend (`fake::FakeBackend`) for tests and engine-less drawing.
+fake = []
+
 [dependencies]
 gogo-contract.workspace = true
+
+[dev-dependencies]
+# The crate's own tests in `tests/` use the fake.
+gogo-gui-model = { path = ".", features = ["fake"] }

@@ -1,7 +1,8 @@
 # 25 — Desktop GUI: the app layer (#520)
 
-Status: **accepted** (2026-11-25), not built yet (PR D1 and PR D2 in design 24 §8). This doc covers how the
-GUI talks to `gogo-core`: threads, the `Backend` seam, how live data reaches a skin without
+Status: **accepted** (2026-11-25). The model (`gogo-gui-model`, PR D1 in design 24 §8) is
+built; the core adapter, the shell wiring and per-job cancellation in core (PR D2) are not.
+This doc covers how the GUI talks to `gogo-core`: threads, the `Backend` seam, how live data reaches a skin without
 flooding it, the safety flow, and long-running jobs. The crates are in design 24 §2. The
 contract the model implements (sources, actions, kinds, tiers, invariants) is
 design 26, and the skin format design 27 (both added in #557).
@@ -42,7 +43,7 @@ flowchart LR
    | `linuxapp::snapshots::make_dir` | `warn: &mut dyn FnMut(String)` | a warning line on the job |
    | `linuxapp::doctor::doctor` | none: returns a `Report` | no progress; the job shows a busy step until it returns |
 4. **`gogo-gui-model` has no runtime.** `Backend` methods are synchronous and return
-   handles. `CoreBackend` in the binary does the spawning. The model and the safety flow
+   at once. `CoreBackend` in the binary does the spawning. The model and the safety flow
    are tested with plain `#[test]`s and a `FakeBackend`.
 
 ## 2. The `Backend` seam
@@ -53,14 +54,29 @@ not after gogo-core:
 ```rust
 pub trait Backend {
     /// Start feeding a source; values arrive through the slot (§3).
-    fn subscribe(&self, source: &SourceKey, slot: Slot) -> Subscription;
-    /// Pure planning for a `plan` action: computes, changes nothing (design 26 §4).
-    fn plan(&self, action: &ActionCall) -> Result<PlanHandle, ErrorView>;
-    /// Run an immediate action, or a confirmed plan.
-    fn run(&self, call: Run, job: JobSink) -> Result<JobId, ErrorView>;
-    fn cancel(&self, job: JobId);
+    fn subscribe(&mut self, key: &SourceKey, slot: Slot) -> Subscription;
+    /// The settings that gate actions, as they are now.
+    fn gates(&self) -> Gates;
+    fn rate_limit(&self) -> Option<u64>;
+    /// Pure planning: computes, changes nothing (design 26 §4). The plan arrives later.
+    fn plan(&mut self, call: &Call, answer: Option<&PromptAnswer>, reply: PlanReply);
+    /// What a `prompt` action asks.
+    fn prompt_for(&mut self, call: &Call) -> Result<PromptSpec, ErrorView>;
+    /// Run an immediate action, or a confirmed plan, adding a job for what reports back.
+    fn run(&mut self, run: Run, jobs: &mut Jobs<'_>) -> Result<(), ErrorView>;
 }
+
+/// Given with each job; `cancel`, `pause`, `resume` and `retry` act on that job alone.
+pub trait JobControl: Send { /* … */ }
 ```
+
+- **`Call` and `Run`.** `Call` is the model's own checked form of an action call. A `Run`
+  can only be made by the safety flow, so nothing else reaches `Backend::run`.
+- **`Planned`** is the `Plan` the card shows, its `PlanFacts`, a digest of the inputs it
+  was computed from, and an opaque handle. A `Run` carries the handle, and the backend
+  runs that plan without planning again.
+- **`PlanFacts::changes`** means there is something to show on a plan card. A setting the
+  user just picked is not a change by itself.
 
 - **`CoreBackend`** maps each source to gogo-core reads:
   - `library` → `gog::library::list_games` plus `state` records;
@@ -70,8 +86,9 @@ pub trait Backend {
   Each `plan` action maps to the core's pure `plan()` function. That pattern already exists:
   `engine::plan`, `linuxapp::build::plan` ("downloads nothing"), `cloud::status::plan`.
   Running a plan maps to the matching `execute()`.
-- **`FakeBackend`** (in `gogo-gui-testkit`) serves fixture data and records calls. Tests,
-  `gogo-gui --render-png` and skin dev mode (§8) all use it.
+- **`FakeBackend`** (in `gogo-gui-model`, behind the `fake` feature) answers what a test
+  scripts and records what it is asked. It is not in the testkit, which is dev-only
+  (design 24 §2.1), so `gogo-gui --render-png` and skin dev mode (§8) can use it too.
 
 ## 3. Sources, coalescing and wakeups
 
@@ -106,7 +123,8 @@ seconds behind a 10 Hz progress feed because every update queued a frame (design
   (design 27 §5.6) and can be patched without a full bind.
 - **How the app binds.** To draw the window it calls `bind_with_fallback("shell", …)` on
   the active skin with a `Binding`:
-  - `scope`: the model's read side, an `expr::Scope` that answers the sources
+  - `scope`: the model's read side, an `expr::Scope` that `gogo-gui` wraps round the model
+    (the model can't see `gogo-skin`) and that answers the sources
     (`game($id)`, `queue.summary`, `route`, …), the route's parameters (`$id`) and `now`
     from the slots above. The binder adds its own variables, the `ui` source and the
     tokens, and asks the scope for the rest;
@@ -128,8 +146,13 @@ backend.
 - A skin's only way to cause anything is an `Intent::Invoke(ActionRef, args, provenance)`.
 - `gogo-ui-interact` creates one only for a real pointer, key or AccessKit activation on a
   node whose binding names the action. It creates at most one per input event (S4).
-- The model looks up the action's kind and tier in `gogo-contract` and goes through the
-  states below.
+- `gogo-gui` turns it into the model's `Invocation` and `InputEvent`. The model takes each
+  event once, checks the action and every argument against `gogo-contract` again, and goes
+  through the states below.
+- **Which actions are planned:** every planning or prompt kind, the actions whose
+  escalation depends on the plan (`runner.set_runtime`, `runner.set_galaxy`,
+  `snapshot.set_auto`), and anything not on the model's short list of immediate, safe
+  actions that run directly.
 - App-owned widgets are built as IR by the app, not by the skin. They are styled by the
   skin's tokens and part styles, and drawn on top of the skin's tree (S7).
 
@@ -142,14 +165,18 @@ stateDiagram-v2
   Idle --> Planning: kind plan / job-with-plan
   Planning --> PlanCard: plan ready
   Planning --> Error: plan refused
-  PlanCard --> StrongConfirm: tier destructive
-  PlanCard --> Running: confirm on the app's plan card (S5)
+  PlanCard --> StrongConfirm: confirm, tier destructive
   PlanCard --> Idle: cancel / Esc (S8)
-  StrongConfirm --> Running: typed name or 1 s hold (S6)
   StrongConfirm --> Idle: cancel (default)
   Idle --> Prompt: kind prompt
   Prompt --> Planning: answer
+  Prompt --> Running: answer, and nothing to show
   Prompt --> Idle: cancel
+  Planning --> Idle: cancel, or nothing to do
+  PlanCard --> Planning: confirmed, so plan again
+  StrongConfirm --> Planning: confirmed, so plan again
+  Planning --> Running: confirmed plan unchanged
+  Planning --> PlanCard: confirmed plan changed
   Running --> Prompt: core asks (PromptFn / Decide)
   Running --> Error: Refused / failed (S9)
   Running --> Idle: done / cancelled
@@ -158,18 +185,29 @@ stateDiagram-v2
 
 | Invariant (design 26 §7) | Enforced in | Proven by |
 |---|---|---|
-| S4 actions only from input | `gogo-ui-interact` creates provenance; the model rejects an `Invoke` without it | interact test: load, hover, focus and timers fire nothing; one action per event |
-| S5 every plan shows first | `SafetyFlow` runs a plan only on `Intent::Confirm` from the app-drawn (`DrawnBy::App`) plan-card confirm control. The skin format has no "confirm" action | model test: a skin button bound to the action leads to `PlanCard`, never `Running` |
+| S4 actions only from input | `gogo-ui-interact` creates provenance; the model takes each input event once | interact test: load, hover, focus and timers fire nothing; model test: one action per event |
+| S5 every plan shows first | `SafetyFlow` runs a plan only on `confirm`, which the shell calls from the app-drawn (`DrawnBy::App`) control; an `Invocation` can't express it | model tests: a skin button leads to `PlanCard`, never `Running`; a confirmation can't be skipped, replayed or aimed at another plan |
 | S6 strong confirmation | `StrongConfirm` state; the default answer is no | model test per destructive action |
 | S8 cancel always there | every dialog state has a cancel edge that changes nothing | model test: cancel from each state leaves the backend untouched |
 | S9 uniform errors | every `Refused`/failure becomes an `ErrorView` in the app's `error` widget | model test |
-| S19 global keys | the shell routes Ctrl K, Esc and the plan card's Enter before the skin sees them | interact test |
+| S19 global keys | the shell routes Ctrl K, Esc and the plan card's Enter before the skin sees them; the model's `dismiss` and `enter` consult no skin | interact test; model test |
+| S21 settings can't weaken the flow | `Call::check` refuses a key that isn't skin-settable; gates are read from the backend at invoke, after planning, at confirm, and on resume and retry | model tests |
 | S1, S2, S5, S14, S21 again at bind | the binder (`gogo-skin`): a masked value is never an action argument and reads as its mask, a part that can't be hidden isn't, every control has a non-empty accessible name once its text is known, a `settings.set` key is on the skin-settable list | binding tests over the fixture scope, with the invariant named |
 | S1–S3 nothing secret or path-like in sources or args | `CoreBackend` builds sources from typed views; action params have no path/URL/shell types | S1 test over a fixture account with known secret strings |
 
-- **The plan the user confirmed is the plan that runs.** Confirming re-plans and compares.
-  If the plan changed meanwhile, the run is refused and the new plan is shown. A
-  `plan.preview` placed inline by a skin is read-only until confirmed the same way.
+- **What an answer needs.** Each screen has a new ticket. The shell reports when it has
+  drawn one, and only an input newer than that answers it, so a double click can't pass
+  through a card.
+- **The plan the user confirmed is the plan that runs.** Confirming (after the strong
+  confirmation, if the tier asks for one) re-plans and compares the plan, its facts, tier
+  and input digest. Any difference shows the new plan, which needs confirming again; an
+  empty plan runs nothing. A `plan.preview` placed inline by a skin is read-only until
+  confirmed the same way.
+- **Strong confirmation.** Removing, moving, updating, DLC removal and snapshot actions on
+  one game ask for its title to be typed; other destructive actions, and a plan without a
+  title, ask for a 1 s hold. Enter on a destructive plan card only moves on to it.
+- **One screen at a time.** Behind a dialog or an error, skins can only pause or cancel a
+  job. A job's questions and later errors wait their turn.
 - **Prompts from core pipelines.**
   - The core asks through `PromptFn` (`macapp::prompt`) and the cloud-save `Decide` trait.
   - `CoreBackend` implements both. It blocks the worker thread on a `oneshot`, and the model
@@ -183,11 +221,14 @@ stateDiagram-v2
 
 ## 5. Jobs, progress and cancellation
 
+- **A strong confirmation covers one run.** `job.retry` and `job.resume` of a failed or
+  cancelled destructive job are refused: the action is started again and plans afresh. A
+  paused job carries on.
 - **The job table.** `JobTable` in the model holds one entry per long-running action:
   - an id and the action;
   - a state: `queued`, `running`, `paused`, `failed`, `done` or `cancelled`;
-  - a progress slot;
-  - a cancel handle.
+  - a progress slot, where a terminal state is final until a resume or retry;
+  - a control handle (cancel, pause, resume, retry).
 
   It feeds the `queue`, `queue.summary` and `job(id)` sources (design 26 §3.4).
 - **Steps.** Install pipelines report `WorkStarted/WorkProgress/WorkDone` and their step

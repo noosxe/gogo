@@ -1,0 +1,321 @@
+//! The model the shell drives: sources, the safety flow, jobs and the route history,
+//! over one [`Backend`].
+
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
+use std::time::Duration;
+
+use gogo_contract::Value;
+
+use crate::backend::{Backend, Subscription};
+use crate::call::{Call, Invocation};
+use crate::error::ErrorView;
+use crate::jobs::{JobId, JobTable};
+use crate::prompt::PromptAnswer;
+use crate::safety::{
+    Effect, Engine, InputEvent, Modal, Outcome, Preview, Route, SafetyFlow, Ticket, route,
+};
+use crate::source::{Signal, SourceKey, SourceStore};
+
+/// How many places `nav.back` remembers.
+const HISTORY: usize = 64;
+
+/// A route and its parameters.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Location {
+    pub route: String,
+    pub params: BTreeMap<&'static str, Value>,
+}
+
+/// The app layer. It lives on the main thread.
+pub struct Model<B: Backend> {
+    backend: B,
+    signal: Arc<Signal>,
+    sources: SourceStore,
+    subscriptions: HashMap<SourceKey, Subscription>,
+    jobs: JobTable,
+    flow: SafetyFlow,
+    history: Vec<Location>,
+    /// The sources the model answers itself, kept so they can be lent out.
+    own: HashMap<SourceKey, Value>,
+}
+
+impl<B: Backend> Model<B> {
+    /// `wake` is called from any thread, at most once between two [`pump`](Self::pump)
+    /// calls.
+    pub fn new(backend: B, wake: impl Fn() + Send + Sync + 'static) -> Self {
+        let signal = Signal::new(wake);
+        let mut model = Model {
+            backend,
+            sources: SourceStore::new(Arc::clone(&signal)),
+            subscriptions: HashMap::new(),
+            jobs: JobTable::new(Arc::clone(&signal)),
+            flow: SafetyFlow::new(Arc::clone(&signal)),
+            history: vec![Location {
+                route: "library".to_owned(),
+                params: BTreeMap::new(),
+            }],
+            own: HashMap::new(),
+            signal,
+        };
+        model.refresh_own();
+        model
+    }
+
+    pub fn backend(&self) -> &B {
+        &self.backend
+    }
+
+    /// For wiring and tests. Nothing here can make a [`Run`](crate::Run), so it opens no
+    /// way round the safety flow.
+    pub fn backend_mut(&mut self) -> &mut B {
+        &mut self.backend
+    }
+
+    pub fn jobs(&self) -> &JobTable {
+        &self.jobs
+    }
+
+    pub fn location(&self) -> &Location {
+        // `history` is never empty: `nav.back` keeps the last one.
+        &self.history[self.history.len() - 1]
+    }
+
+    // --- sources ---
+
+    /// Make sure `key` is being fed.
+    pub fn watch(&mut self, key: &SourceKey) {
+        if is_own(key.name()) || self.subscriptions.contains_key(key) {
+            return;
+        }
+        let slot = self.sources.slot(key);
+        let subscription = self.backend.subscribe(key, slot);
+        self.subscriptions.insert(key.clone(), subscription);
+    }
+
+    pub fn unwatch(&mut self, key: &SourceKey) {
+        self.subscriptions.remove(key);
+        self.sources.close(key);
+    }
+
+    /// A source's value as of the last [`pump`](Self::pump).
+    pub fn value(&self, key: &SourceKey) -> Option<&Value> {
+        if is_own(key.name()) {
+            self.own.get(key)
+        } else {
+            self.sources.get(key)
+        }
+    }
+
+    fn refresh_own(&mut self) {
+        let mut own = HashMap::new();
+        let mut put = |name: &str, args: &[&str], value: Value| {
+            if let Some(key) = SourceKey::new(name, args) {
+                own.insert(key, value);
+            }
+        };
+        let current = Value::str(&self.location().route);
+        put(
+            "route",
+            &[],
+            Value::Map(BTreeMap::from([("current".to_owned(), current)])),
+        );
+        put("queue", &[], self.jobs.queue_value());
+        put(
+            "queue.summary",
+            &[],
+            self.jobs.summary_value(self.backend.rate_limit()),
+        );
+        for id in self.jobs.ids() {
+            if let Some(job) = self.jobs.job_value(id) {
+                put("job", &[id.as_str()], job);
+            }
+        }
+        self.own = own;
+    }
+
+    /// Take everything that arrived since the last call. Returns the sources whose
+    /// values changed.
+    pub fn pump(&mut self) -> Vec<SourceKey> {
+        self.signal.take();
+        let mut changed = self.sources.drain();
+        // Questions first: draining forgets unlisted jobs that ended.
+        let questions = self.jobs.take_prompts();
+        let transitions = self.jobs.drain();
+        let (flow, mut engine) = self.split();
+        flow.pump(&mut engine, questions, &transitions);
+
+        let before = std::mem::take(&mut self.own);
+        self.refresh_own();
+        changed.extend(
+            self.own
+                .iter()
+                .filter(|(k, v)| before.get(*k) != Some(*v))
+                .map(|(k, _)| k.clone()),
+        );
+        changed.extend(before.into_keys().filter(|k| !self.own.contains_key(k)));
+        changed.sort();
+        changed
+    }
+
+    fn split(&mut self) -> (&mut SafetyFlow, Engine<'_, B>) {
+        (
+            &mut self.flow,
+            Engine {
+                backend: &mut self.backend,
+                jobs: &mut self.jobs,
+            },
+        )
+    }
+
+    // --- what a skin asks for ---
+
+    /// An action a skin's control invoked, from one real input (S4).
+    pub fn invoke(&mut self, invocation: &Invocation, event: InputEvent) -> Outcome {
+        let (flow, mut engine) = self.split();
+        let call = match flow.invoke(&mut engine, invocation, event) {
+            Ok(call) => call,
+            Err(outcome) => return outcome,
+        };
+        if route(call.spec()) == Route::Shell {
+            self.shell(&call);
+            return Outcome::Accepted;
+        }
+        flow.dispatch(&mut engine, call)
+    }
+
+    fn shell(&mut self, call: &Call) {
+        let text = |name: &str| call.text(name).map(str::to_owned);
+        match call.name() {
+            "nav.go" => {
+                if let Some(route) = text("route") {
+                    self.history.push(Location {
+                        route,
+                        params: call.route_params().clone(),
+                    });
+                    if self.history.len() > HISTORY {
+                        self.history.remove(0);
+                    }
+                }
+            }
+            "nav.back" => {
+                if self.history.len() > 1 {
+                    self.history.pop();
+                }
+            }
+            "palette.open" => self.flow.push_effect(Effect::OpenPalette {
+                scope: text("scope"),
+            }),
+            "account.menu" => self.flow.push_effect(Effect::AccountMenu),
+            "ui.set" => {
+                if let (Some(var), Some(value)) = (text("var"), call.arg("value")) {
+                    self.flow.push_effect(Effect::SetUi {
+                        var,
+                        value: value.clone(),
+                    });
+                }
+            }
+            "clipboard.copy" => {
+                if let Some(value) = call.arg("field") {
+                    self.flow.push_effect(Effect::Copy(value.display()));
+                }
+            }
+            _ => {}
+        }
+        self.signal.raise();
+    }
+
+    /// Plan an action to show inline. See [`SafetyFlow`].
+    ///
+    /// # Errors
+    /// The call is refused, has no plan, or its gate is off.
+    pub fn preview(&mut self, invocation: &Invocation) -> Result<Ticket, ErrorView> {
+        let (flow, mut engine) = self.split();
+        flow.preview(&mut engine, invocation)
+    }
+
+    pub fn preview_state(&self, ticket: Ticket) -> Option<Preview<'_>> {
+        self.flow.preview_state(ticket)
+    }
+
+    pub fn clear_previews(&mut self) {
+        self.flow.clear_previews();
+    }
+
+    // --- the app's own widgets ---
+
+    /// The screen on top.
+    pub fn modal(&self) -> Option<Modal<'_>> {
+        self.flow.modal()
+    }
+
+    pub fn take_effects(&mut self) -> Vec<Effect> {
+        self.flow.take_effects()
+    }
+
+    /// The screen with `ticket` is drawn; `latest` is the last input event numbered.
+    pub fn presented(&mut self, ticket: Ticket, latest: InputEvent) {
+        self.flow.presented(ticket, latest);
+    }
+
+    /// The plan card's confirm control (S5).
+    pub fn confirm(&mut self, ticket: Ticket, event: InputEvent) -> Outcome {
+        let (flow, mut engine) = self.split();
+        flow.confirm(&mut engine, ticket, event)
+    }
+
+    /// Enter. It confirms a plan card and answers nothing else (S19).
+    pub fn enter(&mut self, event: InputEvent) -> Outcome {
+        match self.flow.modal() {
+            Some(Modal::PlanCard { ticket, .. }) => self.confirm(ticket, event),
+            _ => Outcome::Ignored,
+        }
+    }
+
+    /// Submit the typed strong confirmation.
+    pub fn type_name(&mut self, ticket: Ticket, typed: &str, event: InputEvent) -> Outcome {
+        let (flow, mut engine) = self.split();
+        flow.type_name(&mut engine, ticket, typed, event)
+    }
+
+    pub fn hold_start(&mut self, ticket: Ticket, event: InputEvent, now: Duration) -> Outcome {
+        self.flow.hold_start(ticket, event, now)
+    }
+
+    pub fn hold_stop(&mut self, ticket: Ticket) {
+        self.flow.hold_stop(ticket);
+    }
+
+    /// Call while a hold is down, with the clock [`hold_start`](Self::hold_start) got.
+    pub fn tick(&mut self, now: Duration) {
+        let (flow, mut engine) = self.split();
+        flow.tick(&mut engine, now);
+    }
+
+    /// Answer the prompt on screen.
+    pub fn answer(&mut self, ticket: Ticket, answer: PromptAnswer, event: InputEvent) -> Outcome {
+        let (flow, mut engine) = self.split();
+        flow.answer(&mut engine, ticket, answer, event)
+    }
+
+    /// Cancel a screen or preview, or dismiss an error (S8).
+    pub fn cancel(&mut self, ticket: Ticket) {
+        self.flow.cancel(ticket);
+    }
+
+    /// Esc (S8, S19).
+    pub fn dismiss(&mut self) -> Outcome {
+        self.flow.dismiss()
+    }
+
+    /// Stop a job from the app's own control, whatever is on screen.
+    pub fn cancel_job(&mut self, id: &JobId) {
+        let (flow, mut engine) = self.split();
+        flow.cancel_job(&mut engine, id);
+    }
+}
+
+/// The sources the model answers from its own state.
+fn is_own(name: &str) -> bool {
+    matches!(name, "route" | "queue" | "queue.summary" | "job")
+}

@@ -1494,6 +1494,7 @@ name = "gogo-gui-model"
 version = "0.1.0"
 dependencies = [
  "gogo-contract",
+ "gogo-gui-model",
 ]
 
 [[package]]

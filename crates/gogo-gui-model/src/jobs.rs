@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use gogo_contract::Value;
 
 use crate::error::ErrorView;
+use crate::prompt::{PromptReply, PromptSpec};
 use crate::source::{Signal, lock};
 
 /// A job's id. The model assigns it.
@@ -233,6 +234,8 @@ struct Latest {
     run: u64,
     version: u64,
     status: JobStatus,
+    /// Questions not yet picked up. They are never coalesced.
+    prompts: Vec<(PromptSpec, PromptReply)>,
 }
 
 /// The writer's end of one job's progress. Cheap to clone and `Send`.
@@ -248,6 +251,7 @@ impl JobSink {
     /// ended or this sink belongs to an earlier run: a late progress report can't hide a
     /// failure.
     pub fn report(&self, status: JobStatus) -> bool {
+        let ended;
         {
             let mut latest = lock(&self.latest);
             if latest.run != self.run || latest.status.state.is_terminal() {
@@ -255,9 +259,33 @@ impl JobSink {
             }
             latest.version += 1;
             latest.status = status;
+            ended = if latest.status.state.is_terminal() {
+                std::mem::take(&mut latest.prompts)
+            } else {
+                Vec::new()
+            };
         }
+        // Outside the lock: dropping a reply calls back into the pipeline.
+        drop(ended);
         self.signal.raise();
         true
+    }
+
+    /// Ask the user something on this job's behalf. The reply gets `None` at once if the
+    /// job has ended or this sink belongs to an earlier run.
+    pub fn ask(&self, spec: PromptSpec, reply: PromptReply) {
+        let refused = {
+            let mut latest = lock(&self.latest);
+            if latest.run != self.run || latest.status.state.is_terminal() {
+                Some(reply)
+            } else {
+                latest.prompts.push((spec, reply));
+                None
+            }
+        };
+        if refused.is_none() {
+            self.signal.raise();
+        }
     }
 }
 
@@ -335,6 +363,7 @@ impl JobTable {
             run: 0,
             version: 1,
             status: status.clone(),
+            prompts: Vec::new(),
         }));
         // The reader starts at `queued`, so a job added further on is still reported.
         let status = JobStatus {
@@ -367,11 +396,27 @@ impl JobTable {
         let Some(e) = self.find(id) else {
             return false;
         };
-        let ended = lock(&e.latest).status.state.is_terminal();
+        let (ended, prompts) = {
+            let mut latest = lock(&e.latest);
+            let prompts = std::mem::take(&mut latest.prompts);
+            (latest.status.state.is_terminal(), prompts)
+        };
+        drop(prompts);
         if !ended {
             e.control.cancel();
         }
         true
+    }
+
+    /// The questions asked since the last call, by job, oldest job first. Call it before
+    /// [`drain`](Self::drain), which forgets unlisted jobs that ended.
+    pub fn take_prompts(&mut self) -> Vec<(JobId, PromptSpec, PromptReply)> {
+        let mut out = Vec::new();
+        for e in &self.entries {
+            let prompts = std::mem::take(&mut lock(&e.latest).prompts);
+            out.extend(prompts.into_iter().map(|(s, r)| (e.id.clone(), s, r)));
+        }
+        out
     }
 
     /// Pause a queued or running job. `false` if there is none to pause.
@@ -411,6 +456,7 @@ impl JobTable {
         let Some(e) = self.find(id) else {
             return false;
         };
+        let stale;
         let run = {
             let mut latest = lock(&e.latest);
             // Only from a state the reader has seen: an unreported end must not be
@@ -423,8 +469,10 @@ impl JobTable {
             latest.version += 1;
             latest.status.state = JobState::Queued;
             latest.status.error = None;
+            stale = std::mem::take(&mut latest.prompts);
             latest.run
         };
+        drop(stale);
         // So that ending again before the next drain is still a transition.
         e.status.state = JobState::Queued;
         e.status.error = None;
