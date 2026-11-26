@@ -1,7 +1,7 @@
 //! The browser paste-code flow's two ends (design 02 §2), shared by every frontend:
 //! the address to open, and what the user pastes back.
 
-use zeroize::Zeroizing;
+use zeroize::{Zeroize as _, Zeroizing};
 
 /// Where GOG sends the browser after sign-in, with the code in its query. gog-warp's
 /// token exchange sends this value verbatim.
@@ -27,26 +27,35 @@ pub fn code_from_input(input: &str) -> Option<Zeroizing<String>> {
     }
     if input.contains("://") {
         let url = reqwest::Url::parse(input).ok()?;
-        if url.scheme() != "https"
-            || url.host_str() != Some("embed.gog.com")
-            || url.path() != "/on_login_success"
-        {
-            return None;
-        }
-        let mut pairs = url.query_pairs();
-        let code = pairs.find(|(name, _)| name == "code")?.1;
-        return plain(&code);
+        let code = redirect_code(&url);
+        // The parsed address holds the code too.
+        String::from(url).zeroize();
+        return code.and_then(plain);
     }
-    plain(input)
+    plain(Zeroizing::new(input.to_string()))
+}
+
+/// The `code` of the address the sign-in ends on.
+fn redirect_code(url: &reqwest::Url) -> Option<Zeroizing<String>> {
+    if url.scheme() != "https"
+        || url.host_str() != Some("embed.gog.com")
+        || url.path() != "/on_login_success"
+    {
+        return None;
+    }
+    let mut pairs = url.query_pairs();
+    let code = pairs.find(|(name, _)| name == "code")?.1;
+    // A decoded value is taken over as it is, a borrowed one is copied once.
+    Some(Zeroizing::new(code.into_owned()))
 }
 
 /// A code is one word of characters that need no escaping in a query.
-fn plain(code: &str) -> Option<Zeroizing<String>> {
+fn plain(code: Zeroizing<String>) -> Option<Zeroizing<String>> {
     let ok = !code.is_empty()
         && code
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"-_.~".contains(&b));
-    ok.then(|| Zeroizing::new(code.to_string()))
+    ok.then_some(code)
 }
 
 #[cfg(test)]
