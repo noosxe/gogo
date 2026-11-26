@@ -6,6 +6,7 @@
 //! - [`jobs`]: the job table, with progress and a control handle per job (§5).
 //! - [`error`]: [`ErrorView`], the one shape every failure takes (§6).
 #![deny(unsafe_code)]
+#![warn(missing_docs)]
 
 pub mod error;
 pub mod jobs;
@@ -13,7 +14,7 @@ pub mod source;
 
 pub use error::ErrorView;
 pub use jobs::{
-    FileProgress, JobControl, JobId, JobKind, JobSink, JobState, JobStatus, JobTable, Jobs, Step,
-    StepState, Transition,
+    FileProgress, JobControl, JobId, JobKind, JobSink, JobState, JobStatus, JobTable, Jobs,
+    MAX_ENDED, Step, StepState, Transition,
 };
 pub use source::{Signal, Slot, SourceKey, SourceStore};

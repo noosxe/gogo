@@ -81,12 +81,13 @@ fn keys_follow_the_contract() {
 
 #[test]
 fn a_closed_slot_takes_writes_into_nothing() {
-    let (signal, _) = counting_signal();
+    let (signal, wakes) = counting_signal();
     let mut store = SourceStore::new(signal);
     let key = SourceKey::new("apps", &[]).unwrap();
     let slot = store.slot(&key);
     store.close(&key);
     slot.set(Value::Num(1.0));
+    assert_eq!(wakes.load(Ordering::SeqCst), 0, "and wakes nobody");
     assert!(store.drain().is_empty());
     assert_eq!(store.get(&key), None);
     assert!(!store.is_open(&key));

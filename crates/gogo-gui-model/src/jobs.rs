@@ -21,6 +21,7 @@ impl JobId {
         JobId(id.into())
     }
 
+    /// The id as the sources show it.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -31,10 +32,14 @@ macro_rules! words {
         $(#[$doc])*
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
         pub enum $name {
-            $($variant),+
+            $(
+                #[doc = concat!("`", $word, "`")]
+                $variant
+            ),+
         }
 
         impl $name {
+            /// Every value.
             pub const ALL: &[$name] = &[$($name::$variant),+];
 
             /// The word a skin reads.
@@ -97,7 +102,9 @@ impl JobState {
 /// One step of a job.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Step {
+    /// What the step is.
     pub name: String,
+    /// Where it is.
     pub state: StepState,
     /// Seconds it took, once done.
     pub took: Option<f64>,
@@ -106,23 +113,34 @@ pub struct Step {
 /// One file of a job.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileProgress {
+    /// The file's name.
     pub name: String,
+    /// Bytes done.
     pub bytes: u64,
+    /// Bytes in all.
     pub total: u64,
+    /// Chunks done.
     pub chunks_done: u32,
+    /// Chunks in all.
     pub chunks_total: u32,
+    /// A word for what is happening to it.
     pub state: String,
 }
 
 /// Everything a job reports. Each report replaces the one before.
 #[derive(Debug, Clone, PartialEq)]
 pub struct JobStatus {
+    /// What the job does.
     pub kind: JobKind,
     /// The game's `GameSummary` record, if the job is about a game.
     pub game: Option<Value>,
+    /// Where it is.
     pub state: JobState,
+    /// Its steps, in order.
     pub steps: Vec<Step>,
+    /// Bytes done.
     pub bytes: u64,
+    /// Bytes in all, if known.
     pub total: Option<u64>,
     /// Bytes per second.
     pub rate: u64,
@@ -130,7 +148,9 @@ pub struct JobStatus {
     pub eta: Option<f64>,
     /// 0.0–1.0.
     pub fraction: Option<f64>,
+    /// The files in progress.
     pub files: Vec<FileProgress>,
+    /// Why it failed.
     pub error: Option<ErrorView>,
 }
 
@@ -199,6 +219,7 @@ fn record<const N: usize>(fields: [(&str, Value); N]) -> Value {
 pub trait JobControl: Send {
     /// Stop the job, leaving it resumable.
     fn cancel(&mut self);
+    /// Hold the job where it is.
     fn pause(&mut self);
     /// Carry on a paused or cancelled job, reporting to `sink` from now on.
     fn resume(&mut self, sink: JobSink);
@@ -266,12 +287,20 @@ impl fmt::Debug for Entry {
 /// reported; a terminal state always is.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Transition {
+    /// Which job.
     pub id: JobId,
+    /// Whether it is in `queue`.
     pub listed: bool,
+    /// The state as of the drain before.
     pub from: JobState,
+    /// The state now.
     pub to: JobState,
+    /// Why it failed, if it did.
     pub error: Option<ErrorView>,
 }
+
+/// How many ended jobs `queue` keeps.
+pub const MAX_ENDED: usize = 64;
 
 /// Every job, oldest first.
 #[derive(Debug)]
@@ -282,6 +311,7 @@ pub struct JobTable {
 }
 
 impl JobTable {
+    /// An empty table whose jobs raise `signal`.
     pub fn new(signal: Arc<Signal>) -> Self {
         JobTable {
             signal,
@@ -303,9 +333,14 @@ impl JobTable {
         self.next += 1;
         let latest = Arc::new(Mutex::new(Latest {
             run: 0,
-            version: 0,
+            version: 1,
             status: status.clone(),
         }));
+        // The reader starts at `queued`, so a job added further on is still reported.
+        let status = JobStatus {
+            state: JobState::Queued,
+            ..status
+        };
         self.entries.push(Entry {
             id: JobId(format!("job-{}", self.next)),
             listed,
@@ -352,14 +387,16 @@ impl JobTable {
         ok
     }
 
-    /// Carry on a paused or cancelled job. `false` if there is none to resume.
+    /// Carry on a paused or cancelled job. `false` if there is none to resume, or its
+    /// state changed since the last [`drain`](Self::drain).
     pub fn resume(&mut self, id: &JobId) -> bool {
         self.restart(id, &[JobState::Paused, JobState::Cancelled], |c, s| {
             c.resume(s)
         })
     }
 
-    /// Run a failed job again. `false` if there is none to retry.
+    /// Run a failed job again. `false` if there is none to retry, or the failure has not
+    /// been taken by [`drain`](Self::drain) yet: restarting it would hide it.
     pub fn retry(&mut self, id: &JobId) -> bool {
         self.restart(id, &[JobState::Failed], |c, s| c.retry(s))
     }
@@ -376,7 +413,10 @@ impl JobTable {
         };
         let run = {
             let mut latest = lock(&e.latest);
-            if !from.contains(&latest.status.state) {
+            // Only from a state the reader has seen: an unreported end must not be
+            // overwritten.
+            let state = latest.status.state;
+            if state != e.status.state || !from.contains(&state) {
                 return false;
             }
             latest.run += 1;
@@ -385,6 +425,9 @@ impl JobTable {
             latest.status.error = None;
             latest.run
         };
+        // So that ending again before the next drain is still a transition.
+        e.status.state = JobState::Queued;
+        e.status.error = None;
         let sink = JobSink {
             latest: Arc::clone(&e.latest),
             signal: Arc::clone(&signal),
@@ -395,9 +438,20 @@ impl JobTable {
         true
     }
 
-    /// Take the newest status of every job written since the last call. Unlisted jobs
-    /// that have ended are dropped after they are reported. The caller takes the
-    /// [`Signal`] first.
+    /// Whether the table still holds the job.
+    pub fn contains(&self, id: &JobId) -> bool {
+        self.entries.iter().any(|e| e.id == *id)
+    }
+
+    /// Where a job is now, ahead of the next drain.
+    pub fn state(&self, id: &JobId) -> Option<JobState> {
+        let e = self.entries.iter().find(|e| e.id == *id)?;
+        Some(lock(&e.latest).status.state)
+    }
+
+    /// Take the newest status of every job written since the last call. After they are
+    /// reported, unlisted jobs that have ended are dropped, and so are the oldest ended
+    /// jobs beyond [`MAX_ENDED`]. The caller takes the [`Signal`] first.
     pub fn drain(&mut self) -> Vec<Transition> {
         let mut moved = Vec::new();
         for e in &mut self.entries {
@@ -420,6 +474,18 @@ impl JobTable {
         }
         self.entries
             .retain(|e| e.listed || !e.status.state.is_terminal());
+        let ended = |e: &Entry| e.status.state.is_terminal();
+        let mut excess = self
+            .entries
+            .iter()
+            .filter(|e| ended(e))
+            .count()
+            .saturating_sub(MAX_ENDED);
+        self.entries.retain(|e| {
+            let drop = excess > 0 && ended(e);
+            excess -= usize::from(drop);
+            !drop
+        });
         moved
     }
 
