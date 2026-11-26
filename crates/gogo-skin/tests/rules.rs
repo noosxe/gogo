@@ -1491,8 +1491,8 @@ fn cases() -> Vec<Case> {
                 rep(
                     f,
                     GAME,
-                    "        else { use default",
-                    "        text \"x\"\n        else { use default",
+                    "        else { use \"game.files\"",
+                    "        text \"x\"\n        else { use \"game.files\"",
                 )
             },
             ElementChildren,

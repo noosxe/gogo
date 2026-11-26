@@ -245,6 +245,18 @@ fn game_calls() -> Vec<(&'static str, Value)> {
             ]),
         ),
         (
+            "game.files",
+            list(vec![map(vec![
+                ("kind", text("installer")),
+                ("os", text("linux")),
+                ("lang", text("en")),
+                ("name", text("example_quest_1.1.0.sh")),
+                ("size", num(18_700_000_000.0)),
+                ("downloaded", Value::Bool(true)),
+                ("verified", Value::Bool(true)),
+            ])]),
+        ),
+        (
             "game.dlc",
             list(vec![
                 dlc("2", "Bonus Pack", true),

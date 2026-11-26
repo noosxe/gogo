@@ -95,7 +95,11 @@ route "game" {
                 }
             }
         }
-        case "builds" { use default "game.builds" }
-        else { use default "game.{ui.tab}" }
+        case "builds" { use "game.builds" }
+        case "dlc" { use "game.dlc" }
+        case "saves" { use "game.saves" }
+        case "snapshots" { use "game.snapshots" }
+        case "setup" { use "game.setup" }
+        else { use "game.files" }
     }
 }

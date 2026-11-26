@@ -19,7 +19,9 @@ fn skin() -> SkinPackage {
 /// The routes of contract 1.0 the Default skin has no route file for yet. It is the
 /// fallback for every route (design 26 §8), so this list only shrinks: a route that
 /// becomes covered must be removed from it, and every route is either covered or listed.
-/// Tracking issue: #576.
+/// Tracking issue: #576. Until a route is covered, binding it returns a bind error (the
+/// skin has no such route), even through `bind_with_fallback`: the Default skin has nothing
+/// to fall back to.
 const NOT_YET_COVERED: &[&str] = &[
     "sign-in", "library", "queue", "updates", "saves", "apps", "runtimes", "doctor", "settings",
     "about",
@@ -119,5 +121,69 @@ fn every_route_is_covered_or_listed_as_not_yet_covered() {
     assert!(
         missing.is_empty(),
         "neither covered nor listed: {missing:?}"
+    );
+}
+
+#[test]
+fn the_game_route_binds_on_every_tab_without_falling_back() {
+    let pkg = skin();
+    let tabs = [
+        "overview",
+        "builds",
+        "dlc",
+        "saves",
+        "snapshots",
+        "setup",
+        "files",
+    ];
+    for tab in tabs {
+        let scope = scope_on("game");
+        let mut ui = UiState::defaults(&pkg.manifest);
+        ui.set(
+            &pkg.manifest,
+            "tab",
+            gogo_contract::Value::Str(tab.to_owned()),
+        )
+        .unwrap_or_else(|e| panic!("{tab}: {e}"));
+        let b = Binding {
+            scope: &scope,
+            ui: &ui,
+            mode: Mode::Dark,
+            default: Some(DefaultSkin {
+                skin: &pkg,
+                ui: &ui,
+            }),
+        };
+        let bound = match pkg.bind_with_fallback("game", &b) {
+            Ok(b) => b,
+            Err(e) => panic!("game tab {tab}: {e}"),
+        };
+        bound.tree.validate().expect("a valid tree");
+        assert!(bound.fallbacks.is_empty(), "{tab}: {:?}", bound.fallbacks);
+    }
+}
+
+#[test]
+fn an_uncovered_route_returns_a_bind_error() {
+    let pkg = skin();
+    let route = NOT_YET_COVERED[0];
+    let scope = scope_on(route);
+    let ui = UiState::defaults(&pkg.manifest);
+    let b = Binding {
+        scope: &scope,
+        ui: &ui,
+        mode: Mode::Dark,
+        default: Some(DefaultSkin {
+            skin: &pkg,
+            ui: &ui,
+        }),
+    };
+    let Err(e) = pkg.bind_with_fallback(route, &b) else {
+        panic!("{route} bound, remove it from NOT_YET_COVERED");
+    };
+    assert!(
+        e.to_string()
+            .contains(&format!("the skin has no `{route}` route")),
+        "{e}"
     );
 }
