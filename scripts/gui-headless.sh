@@ -189,6 +189,27 @@ leftovers() { # run-id
     "$TOOLS/bin/grep" -lzxF "GUI_HEADLESS_RUN=$1" /proc/[0-9]*/environ 2>/dev/null || true
 }
 
+# The path of COMMAND as the sandbox sees it. A bare name is looked up in the
+# harness's tools first: the caller's PATH may lead outside what is bound.
+sandbox_command() {
+    local command
+    case "$1" in
+    */*) command="$1" ;;
+    *) command="$(PATH="$TOOLS/bin:$PATH" type -P -- "$1")" || die "no such command: $1" 2 ;;
+    esac
+    [ -x "$command" ] || die "not a program: $1" 2
+    # Not the resolved path: a multi-call binary goes by its link's name.
+    command="$("$TOOLS/bin/realpath" -s -- "$command")"
+    case "$command" in
+    "$REPO"/* | /nix/store/*) ;;
+    *) command="$("$TOOLS/bin/realpath" -- "$command")" ;;
+    esac
+    case "$command" in
+    "$REPO"/* | /nix/store/*) printf '%s' "$command" ;;
+    *) die "$1 is outside the repository and /nix: the sandbox cannot see it" 2 ;;
+    esac
+}
+
 cmd_run() {
     local renderer=auto vulkan=1 size=1280x800 ready="gui: frame presented" timeout=120 name=run
     while [ $# -gt 0 ]; do
@@ -221,9 +242,8 @@ cmd_run() {
     fi
 
     local command
-    command="$(type -P -- "$1")" || die "no such command: $1" 2
+    command="$(sandbox_command "$1")" || exit 2
     shift
-    command="$("$TOOLS/bin/realpath" -s -- "$command")"
 
     mkdir -p "$ROOT"
     OUT="$ROOT/$name.$$"
@@ -344,6 +364,11 @@ cmd_self_test() {
     [ $((SECONDS - start)) -lt 30 ] || st_fail "the signal did not end the run"
     ! grep -q "left behind" "$ROOT/st-signal.err" || st_fail "processes were left behind"
     rm -f "$ROOT/st-signal.out" "$ROOT/st-signal.err"
+
+    log "self-test: a program the sandbox cannot see is refused"
+    status=0
+    "$SELF" run --name st-outside -- /nonexistent >/dev/null 2>&1 || status=$?
+    [ "$status" = 2 ] || st_fail "a missing program gave $status, not 2"
 
     log "self-test: gpu without software Vulkan is refused"
     status=0
