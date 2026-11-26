@@ -27,8 +27,9 @@
 # ended early or ran out of time; 2 usage; 3 the harness itself failed.
 #
 # The sandbox has no network, no host sockets, no home folder and no host
-# graphics driver: the repository read-only and the output folder are all it can
-# reach besides /nix. COMMAND must therefore be in the repository or /nix.
+# graphics driver. Besides /nix it sees only the output folder and, read-only,
+# the repository's scripts/ and COMMAND itself: nothing else of the repository.
+# COMMAND must therefore be in the repository or /nix.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -41,7 +42,7 @@ SHOWN_PCT=2
 
 log() { printf '[gui-headless] %s\n' "$*" >&2; }
 die() { log "error: $1"; exit "${2:-3}"; }
-usage() { sed -n '2,/^# reach besides/p' "$SELF" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+usage() { sed -n '2,/^# COMMAND must therefore/p' "$SELF" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
 # --- inside the sandbox -------------------------------------------------------
 
@@ -255,7 +256,11 @@ cmd_run() {
         --unshare-cgroup-try --die-with-parent --new-session
         --ro-bind /nix /nix --proc /proc --dev /dev --tmpfs /tmp --tmpfs /run
         --perms 0700 --dir "$RUNTIME_DIR"
-        --ro-bind "$REPO" "$REPO" --bind "$OUT" "$OUT" --chdir "$OUT")
+        --ro-bind "$REPO/scripts" "$REPO/scripts" --bind "$OUT" "$OUT" --chdir "$OUT")
+    # Never the whole repository: ignored folders in it can hold secrets.
+    case "$command" in
+    "$REPO"/*) sandbox+=(--ro-bind "$command" "$command") ;;
+    esac
     local env=(HOME="$OUT/home" PATH="$TOOLS/bin" LANG=C.UTF-8
         XDG_RUNTIME_DIR="$RUNTIME_DIR" XDG_CONFIG_HOME="$OUT/home/config"
         XDG_CACHE_HOME="$OUT/home/cache" XDG_DATA_HOME="$OUT/home/data"
@@ -319,7 +324,8 @@ cmd_self_test() {
     # shellcheck disable=SC2016  # expanded inside the sandbox
     out="$(WAYLAND_DISPLAY=host-decoy DISPLAY=:99 GOGO_DECOY=1 \
         "$SELF" run --name st-window --ready "" --timeout 60 -- \
-        bash -c 'env >"$GUI_OUT/env.txt"; exec python3 -I "$0"' "$client" | tail -n 1)" || status=$?
+        bash -c 'env >"$GUI_OUT/env.txt"; ls -A "$1" >"$GUI_OUT/repo.txt"; exec python3 -I "$0"' \
+        "$client" "$REPO" | tail -n 1)" || status=$?
     [ "$status" = 0 ] || st_fail "the window run ended with $status"
     if [ -f "$out/env.txt" ]; then
         ! grep -qE 'host-decoy|^DISPLAY=|GOGO_DECOY' "$out/env.txt" ||
@@ -327,6 +333,9 @@ cmd_self_test() {
     else
         st_fail "the application did not run"
     fi
+    # The scripts, and the way to the output folder: nothing else.
+    [ "$(cat "$out/repo.txt" 2>/dev/null)" = "scripts
+target" ] || st_fail "more of the repository than scripts/ is visible"
     if [ -f "$out/frame.png" ]; then
         # The client draws white: most of the screen changed.
         "$TOOLS/bin/python3" -I "$HELPER" image "$out/frame.png" |
