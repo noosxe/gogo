@@ -1,0 +1,23 @@
+// Pieces of the `library` route. `game-card` is the stock widget of design 26 §5, depth C.
+
+component "game-card" params="game" {
+    column style="game-card" {
+        art "{game.art.cover}" h=140 fit="cover" style="cover" label="{game.title} cover"
+        text "{game.title}" style="tile-title"
+        row { use "status-badge" status="{game.status}" }
+        column gap=4 when="{game.progress}" {
+            box style="bar" { box style="bar-fill" progress="{game.progress}" }
+            text "{fmt.pct(game.progress)} done" style="tile-sub"
+        }
+        text "Update {game.update?.to} available" style="tile-sub" when="{game.update}"
+        use "game-actions" game="{game}"
+    }
+}
+
+component "game-actions" params="game" {
+    row gap=6 {
+        button "Play" style="small" action="game.play" args="{game.id}" label="Play {game.title}" when="{game.status == ready or game.status == update_available}"
+        button "Update" style="small" action="game.update" args="{game.id}" label="Update {game.title}" when="{game.update}"
+        button "Details" style="small" action="nav.go" args="game {game.id}" label="Details of {game.title}"
+    }
+}

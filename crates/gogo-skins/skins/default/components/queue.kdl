@@ -1,0 +1,46 @@
+// One job of the `queue` route.
+
+component "queue-job" params="job" {
+    let name="{job.game?.title else job.kind}"
+    column style="panel" gap=@space.3 {
+        row gap=@space.3 {
+            text "{name}" style="tile-title"
+            text "{job.kind}" style="mono-lo" grow=1
+            badge "{job.state}" tone="{job.state == failed ? 'error' : 'neutral'}"
+        }
+        column gap=4 {
+            box style="bar" when="{job.fraction != null}" { box style="bar-fill" progress="{job.fraction}" }
+            row gap=@space.3 {
+                text "{fmt.pct(job.fraction)}" style="mono-lo" when="{job.fraction != null}"
+                text "{fmt.bytes(job.bytes)}" style="mono-lo"
+                text "of {fmt.bytes(job.total)}" style="mono-lo" when="{job.total}"
+                text "{fmt.rate(job.rate)} · {fmt.eta(job.eta)}" style="mono-lo" when="{job.state == running}"
+            }
+        }
+        column gap=2 when="{job.steps}" {
+            each "s" in="{job.steps}" {
+                row gap=@space.3 {
+                    text "{s.name}" style="hint" grow=1
+                    text "{s.state}" style="mono-lo"
+                }
+            }
+        }
+        data-table label="Files of {name}" rows="{job.files}" when="{job.files}" {
+            col "File" "{row.name}" mono=#true grow=1
+            col "Done" "{fmt.bytes(row.bytes)} of {fmt.bytes(row.total)}" mono=#true w=210
+            col "Chunks" "{row.chunks_done} / {row.chunks_total}" mono=#true w=100
+        }
+        column gap=2 when="{job.error}" {
+            text "{job.error?.title}" style="problem"
+            text "{job.error?.message}" style="hint"
+            text "{job.error?.hint}" style="tile-sub"
+        }
+        row gap=6 {
+            button "Pause" style="small" action="job.pause" args="{job.id}" label="Pause {name}" when="{job.state == running or job.state == queued}"
+            button "Resume" style="small" action="job.resume" args="{job.id}" label="Resume {name}" when="{job.state == paused or job.state == cancelled}"
+            button "Retry" style="small" action="job.retry" args="{job.id}" label="Retry {name}" when="{job.state == failed}"
+            button "Repair" style="small" action="game.verify_fix" args="{job.game?.id}" label="Repair {name}" when="{job.state == failed and job.kind == verify and job.error?.class == 'CORRUPT' and job.game}"
+            button "Cancel" style="small ghost" action="job.cancel" args="{job.id}" label="Cancel {name}" when="{job.state == running or job.state == queued or job.state == paused}"
+        }
+    }
+}

@@ -1,0 +1,39 @@
+route "library" {
+    let stats="{library.stats}" games="{library}"
+
+    row gap=@space.3 {
+        text "Library" style="h1" grow=1
+        button "Search…" action="palette.open" label="Search the library"
+        button "Refresh" action="library.refresh" label="Refresh the library"
+    }
+    text "{stats.count} games · {stats.installed} installed · {fmt.bytes(stats.disk_bytes)} on disk · updates: {stats.updates}" style="meta" id="stats"
+
+    row gap=@space.3 id="views" {
+        button "Grid" style="tab" action="ui.set" args="view grid" on="{ui.view == grid}"
+        button "List" style="tab" action="ui.set" args="view list" on="{ui.view == list}"
+    }
+
+    row style="panel" gap=@space.3 id="signed-out" when="{not account.signed_in}" {
+        text "You are signed out." style="hint" grow=1
+        button "Sign in" action="nav.go" args="sign-in"
+    }
+    text "No games yet. Refresh the library after signing in." style="hint" id="empty" when="{(games | len) == 0}"
+
+    switch "{ui.view}" {
+        case "list" {
+            card title="Games" when="{games}" id="list" {
+                data-table label="Games" rows="{games}" {
+                    col "Game" "{row.title}" grow=1
+                    col "Status" w=180 { use "status-badge" status="{row.status}" }
+                    col "Size" "{row.size_on_disk ? fmt.bytes(row.size_on_disk) : '—'}" mono=#true w=110
+                    col "" w=220 { use "game-actions" game="{row}" }
+                }
+            }
+        }
+        else {
+            grid columns=4 gap=@space.3 align="start" id="grid" {
+                each "g" in="{games}" { use "game-card" game="{g}" }
+            }
+        }
+    }
+}

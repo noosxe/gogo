@@ -17,6 +17,6 @@ fn default_skin_loads_clean() {
     };
     assert!(pkg.report().is_clean(), "{}", pkg.report());
     assert_eq!(pkg.manifest.name, "default");
-    assert_eq!(pkg.routes.len(), 2);
+    assert_eq!(pkg.routes.len(), 6);
     assert!(pkg.components.contains_key("status-badge"));
 }

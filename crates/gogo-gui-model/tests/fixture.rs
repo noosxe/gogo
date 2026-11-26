@@ -16,7 +16,7 @@ fn a_watched_source_gets_the_fixture_value() {
     let account = key("account", &[]);
     let game = key("game", &[GAME_ID]);
     let unknown_game = key("game", &["404"]);
-    let lacking = key("apps", &[]);
+    let lacking = key("game.exes", &["1"]);
     for k in [&account, &game, &unknown_game, &lacking] {
         model.watch(k);
     }

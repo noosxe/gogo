@@ -1,0 +1,33 @@
+route "updates" {
+    let hints="{updates}"
+
+    row gap=@space.3 {
+        text "Updates" style="h1" grow=1
+        button "Update all" style="primary" action="updates.apply_all" when="{hints}" id="apply-all"
+    }
+    text "Everything is up to date." style="hint" id="empty" when="{(hints | len) == 0}"
+
+    card title="Available updates" when="{hints}" id="available" {
+        data-table label="Updates" rows="{hints}" highlight="{row.removes_dlc}" {
+            col "Game" "{row.game.title}" grow=1
+            col "Installed" "{row.from}" mono=#true w=100
+            col "New" "{row.to}" mono=#true w=100
+            col "Download" "{fmt.bytes(row.size)}" mono=#true w=110
+            col "" w=260 {
+                badge "Removes DLC" tone="warn" when="{row.removes_dlc}"
+                button "Update" style="small" action="game.update" args="{row.game.id}" label="Update {row.game.title}"
+                button "Builds" style="small" action="nav.go" args="game {row.game.id} builds" label="Builds of {row.game.title}"
+            }
+        }
+    }
+
+    // app-owned (design 26 §5): what updating everything would change, confirmed on the app's control
+    plan-card for="updates.apply_all" args="" placement="inline" labels="verb" layout="stacked" markers="number" id="plan" when="{hints}" {
+        part "frame" style="plan-frame"
+        part "title" style="plan-title"
+        part "badge" style="plan-badge"
+        part "step" style="plan-step"
+        part "confirm" style="plan-confirm"
+        part "cancel" style="plan-cancel"
+    }
+}

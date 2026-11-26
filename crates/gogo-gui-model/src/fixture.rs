@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use gogo_contract::Value;
 
 pub mod art;
+mod routes;
 
 /// The id of the one fixture game with all its sources filled in.
 pub const GAME_ID: &str = "1";
@@ -385,6 +386,7 @@ impl Fixture {
         for (name, v) in game_calls() {
             s.set_call(name, GAME_ID, v);
         }
+        routes::install(&mut s);
         s.set_route("game", Some(GAME_ID));
         s
     }

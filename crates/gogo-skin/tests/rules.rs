@@ -581,14 +581,7 @@ fn cases() -> Vec<Case> {
         case(
             "§2",
             "covered route without a file",
-            |f| {
-                rep(
-                    f,
-                    "skin.kdl",
-                    "\"shell\" \"game\"",
-                    "\"shell\" \"game\" \"queue\"",
-                )
-            },
+            |f| rm(f, "routes/queue.kdl"),
             RouteFile,
             Skin,
             None,
@@ -3296,7 +3289,7 @@ fn template_and_expression_errors_point_inside_the_string() {
 #[test]
 fn route_files_not_listed_are_a_warning() {
     let mut files = base();
-    add(&mut files, "routes/queue.kdl", "route \"queue\" { }");
+    rep(&mut files, "skin.kdl", " \"queue\"", "");
     let pkg = load(files).expect("loads");
     let w: Vec<_> = pkg.report().warnings().collect();
     assert_eq!(w.len(), 1, "{}", pkg.report());
