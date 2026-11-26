@@ -17,6 +17,7 @@ pkgs.buildEnv {
     pkgs.coreutils
     pkgs.gnugrep
     pkgs.gnused            # the reload check edits a skin
+    pkgs.wtype             # the input check's keys (a virtual keyboard)
     pkgs.util-linux        # setpriv --pdeathsig
   ];
   meta = {

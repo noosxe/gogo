@@ -15,6 +15,7 @@
 //! Agents never run the window on the host display: `scripts/gui-headless.sh`.
 #![deny(unsafe_code)]
 
+mod act;
 mod app;
 mod check;
 mod data;

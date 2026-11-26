@@ -19,21 +19,30 @@
 //! fails later is made again once; if that fails too, `Auto` carries on with the CPU.
 //! [`RendererChoice::Gpu`] never falls back: it ends with an error.
 //!
-//! Input is not delivered yet: it arrives with `gogo-ui-interact` (#533).
+//! # Input and accessibility
+//!
+//! Pointer and keyboard events reach the application as [`gogo_ui_interact::Input`], in
+//! logical px, with a time on the shell's monotonic clock: the clock [`ShellApp::presented`]
+//! is told too. Key events the platform makes up on focus changes are left out. The
+//! application's accessibility tree goes to the platform's adapter after every frame, and
+//! requests from assistive technology come back through
+//! [`ShellApp::accessibility_action`].
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
 mod a11y;
 mod cpu;
+mod input;
 mod output;
 mod run;
 mod watch;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::Duration;
 
 pub use accesskit;
+pub use gogo_ui_interact::Input;
 use gogo_ui_scene::{DisplayList, ImageStore};
 use winit::raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, WindowHandle,
@@ -227,8 +236,15 @@ pub trait ShellApp {
     }
 
     /// A frame drawn by `renderer` was presented at `at`.
-    fn presented(&mut self, at: Instant, renderer: &'static str) {
+    fn presented(&mut self, at: Duration, renderer: &'static str) {
         let _ = (at, renderer);
+    }
+
+    /// The user did something, at `at`. The frame on screen is the last one
+    /// [`ShellApp::frame`] returned. Returns whether to draw again.
+    fn input(&mut self, input: Input, at: Duration) -> bool {
+        let _ = (input, at);
+        false
     }
 
     /// The accessibility tree of what is on screen. The default is the window alone.
@@ -236,9 +252,9 @@ pub trait ShellApp {
         a11y::window_only(&self.window().title)
     }
 
-    /// Assistive technology asks for something. Returns whether to draw again.
-    fn accessibility_action(&mut self, request: accesskit::ActionRequest) -> bool {
-        let _ = request;
+    /// Assistive technology asks for something, at `at`. Returns whether to draw again.
+    fn accessibility_action(&mut self, request: accesskit::ActionRequest, at: Duration) -> bool {
+        let _ = (request, at);
         false
     }
 }

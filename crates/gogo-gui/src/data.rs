@@ -7,9 +7,13 @@ use std::collections::HashSet;
 use gogo_contract::{Value, actions};
 use gogo_gui_model::fake::FakeBackend;
 use gogo_gui_model::fixture::{self, Fixture, GAME_ID, NOW};
-use gogo_gui_model::{InputEvent, Invocation, Model, Outcome, SourceKey};
+use gogo_gui_model::{Effect, InputEvent, Invocation, Location, Model, Outcome, SourceKey};
 use gogo_skin::expr::{CallError, Scope};
 use gogo_ui_scene::{Image, ImageKey, ImageStore, MemoryStore};
+
+/// The number of the input that puts the fixture on its game: the model takes nothing
+/// numbered at or below it.
+pub(crate) const FIXTURE_EVENT: u64 = 1;
 
 /// The model could not be put on the fixture's game.
 #[derive(Debug, thiserror::Error)]
@@ -36,8 +40,7 @@ impl Data {
                     .route_arg("id", Value::str(GAME_ID))
             })
             .ok_or_else(|| DataError("the contract has no nav.go".to_owned()))?;
-        // The first input number: real input is numbered after it (#533).
-        match model.invoke(&go, InputEvent(1)) {
+        match model.invoke(&go, InputEvent(FIXTURE_EVENT)) {
             Outcome::Accepted => {}
             other => return Err(DataError(format!("nav.go: {other:?}"))),
         }
@@ -75,6 +78,31 @@ impl Data {
     /// Takes what arrived. Returns whether anything changed.
     pub(crate) fn pump(&mut self) -> bool {
         !self.model.pump().is_empty()
+    }
+
+    /// The route on screen.
+    pub(crate) fn location(&self) -> &Location {
+        self.model.location()
+    }
+
+    /// An action a control invoked.
+    pub(crate) fn invoke(&mut self, invocation: &Invocation, event: InputEvent) -> Outcome {
+        self.model.invoke(invocation, event)
+    }
+
+    /// Esc.
+    pub(crate) fn dismiss(&mut self) -> Outcome {
+        self.model.dismiss()
+    }
+
+    /// Whether the safety flow has a screen up.
+    pub(crate) fn has_modal(&self) -> bool {
+        self.model.modal().is_some()
+    }
+
+    /// What the app has to do since the last call.
+    pub(crate) fn take_effects(&mut self) -> Vec<Effect> {
+        self.model.take_effects()
     }
 
     /// The pictures for the handles the data names.

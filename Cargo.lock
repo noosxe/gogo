@@ -2073,6 +2073,8 @@ dependencies = [
  "gogo-render-gpu",
  "gogo-skin",
  "gogo-skins",
+ "gogo-ui-a11y",
+ "gogo-ui-interact",
  "gogo-ui-ir",
  "gogo-ui-layout",
  "gogo-ui-scene",

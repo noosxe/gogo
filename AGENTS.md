@@ -49,7 +49,8 @@ tools, or binaries from the host system — no exceptions.**
   `gogo-gui --render-png <out>` (no window) and `--check-skin <dir>` are safe anywhere. A
   window only in the headless compositor of `scripts/gui-headless.sh` (Linux; `nix develop
   .#lavapipe -c scripts/gui-headless.sh run -- target/debug/gogo-gui --fixture`, or
-  `reload -- target/debug/gogo-gui` for hot reload), or `scripts/vm-test.sh` with the GUI's
+  `reload -- target/debug/gogo-gui` for hot reload, `input -- target/debug/gogo-gui` for
+  pointer and keys), or `scripts/vm-test.sh` with the GUI's
   `.app` (macOS).
   Real GPU, HiDPI, IME, clipboard and screen-reader checks are a host pass by @noosxe;
   agents put the steps in the PR.

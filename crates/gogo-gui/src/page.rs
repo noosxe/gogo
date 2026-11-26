@@ -1,10 +1,16 @@
-//! From a skin and the model's data to a display list: bind, lay out, build (design 24 §2,
+//! From a skin and the model's data to a screen: bind, lay out, build (design 24 §2,
 //! design 25 §5), and which skin is on screen.
 
+use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::path::Path;
 
-use gogo_skin::{BindError, Binding, Bound, DefaultSkin, FallbackWhy, Mode, SkinPackage, UiState};
-use gogo_ui_layout::{LayoutError, Scroll, Viewport, layout};
+use gogo_skin::{
+    ActionTable, BindError, Binding, Bound, DefaultSkin, FallbackWhy, Mode, SkinPackage, UiState,
+    UiStateError, Value,
+};
+use gogo_ui_interact::{Layer, LayerId, LayerKind};
+use gogo_ui_ir::{NodeId, Tree};
+use gogo_ui_layout::{Laid, LayoutError, Scroll, Viewport, layout};
 use gogo_ui_scene::{DisplayList, SceneState, build};
 use gogo_ui_text::FontSet;
 
@@ -39,6 +45,40 @@ impl Skin {
     }
 }
 
+/// A route bound and laid out: what is drawn, and what input lands on.
+pub(crate) struct Screen {
+    pub(crate) tree: Tree,
+    pub(crate) laid: Laid,
+    pub(crate) actions: ActionTable,
+    /// A hash of each action's call, so that a press on a control that came to do
+    /// something else is dropped.
+    identity: Vec<u64>,
+    /// Another screen for another route.
+    id: LayerId,
+}
+
+impl Screen {
+    /// The page layer of this screen.
+    pub(crate) fn layer(&self) -> Layer<'_> {
+        Layer::new(self.id, LayerKind::Page, &self.tree, &self.laid).identity(&self.identity)
+    }
+
+    /// The display list, with the focus ring on `focus`.
+    pub(crate) fn list(&self, focus: Option<NodeId>) -> DisplayList {
+        let state = match focus {
+            Some(node) => SceneState::new().with_focus(node),
+            None => SceneState::new(),
+        };
+        build(&self.tree, &self.laid, &state)
+    }
+}
+
+fn hash(text: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// The skins and the fonts.
 pub(crate) struct Page {
     default: Skin,
@@ -67,8 +107,28 @@ impl Page {
         if package.report().error_total() > 0 {
             return Err(error_lines(package.report()));
         }
-        self.active = Some(Skin::new(package));
+        let mut skin = Skin::new(package);
+        // A reload keeps the tab the user was on, where the skin still has it.
+        if let Some(old) = &self.active {
+            skin.ui = UiState::restore(
+                &skin.package.manifest,
+                old.ui.iter().map(|(k, v)| (k.to_owned(), v.clone())),
+            );
+        }
+        self.active = Some(skin);
         Ok(())
+    }
+
+    /// A `ui` variable of the skin on screen.
+    #[cfg(test)]
+    pub(crate) fn ui(&self, var: &str) -> Option<&Value> {
+        self.active.as_ref().unwrap_or(&self.default).ui.get(var)
+    }
+
+    /// `ui.set`: a variable of the skin on screen.
+    pub(crate) fn set_ui(&mut self, var: &str, value: Value) -> Result<(), UiStateError> {
+        let skin = self.active.as_mut().unwrap_or(&mut self.default);
+        skin.ui.set(&skin.package.manifest, var, value)
     }
 
     /// Like [`load`](Self::load), for a reload: the new skin must also bind `route`.
@@ -79,6 +139,11 @@ impl Page {
         route: &str,
     ) -> Result<(), Vec<String>> {
         let before = self.active.take();
+        // `load` carries the `ui` values over from the skin it replaces.
+        self.active = before.as_ref().map(|s| Skin {
+            package: s.package.clone(),
+            ui: s.ui.clone(),
+        });
         let result = self.load(dir).and_then(|()| {
             let bound = self.bind(data, route).map_err(|e| vec![e.to_string()])?;
             // A route the skin leaves to the default one is not a mistake.
@@ -135,8 +200,18 @@ impl Page {
         &mut self,
         data: &mut Data,
         route: &str,
-        (width, height): (f32, f32),
+        size: (f32, f32),
     ) -> Result<DisplayList, DrawError> {
+        Ok(self.screen(data, route, size)?.list(None))
+    }
+
+    /// `route` bound and laid out for a window of `size` logical px.
+    pub(crate) fn screen(
+        &mut self,
+        data: &mut Data,
+        route: &str,
+        (width, height): (f32, f32),
+    ) -> Result<Screen, DrawError> {
         let bound = self.bind(data, route)?;
         let laid = layout(
             &bound.tree,
@@ -144,7 +219,20 @@ impl Page {
             Viewport::new(width, height),
             &Scroll::none(),
         )?;
-        Ok(build(&bound.tree, &laid, &SceneState::new()))
+        let identity = bound
+            .actions
+            .iter()
+            .map(|(_, call)| hash(&format!("{} {:?}", call.spec.name, call.args)))
+            .collect();
+        let location = data.location();
+        let id = LayerId(hash(&format!("{} {:?}", location.route, location.params)));
+        Ok(Screen {
+            tree: bound.tree,
+            laid,
+            actions: bound.actions,
+            identity,
+            id,
+        })
     }
 }
 
