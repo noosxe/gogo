@@ -3,7 +3,8 @@
 //!
 //! [`GpuRenderer`] draws into a [`GpuSurface`]: one it made offscreen
 //! ([`GpuRenderer::offscreen`], which can be read back) or a texture view someone else owns,
-//! such as a window's current frame ([`GpuSurface::from_view`]).
+//! such as a window's current frame ([`GpuSurface::from_view`]). [`GpuWindow`] does that for
+//! a window: it makes the surface from the window's handles and presents to it.
 //!
 //! # How the ops are drawn
 //!
@@ -23,6 +24,10 @@
 //! Errors from the GPU are returned, not panicked on.
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
+
+mod window;
+
+pub use window::{GpuWindow, Shown};
 
 use glifo::Glyph;
 use gogo_ui_scene::{
@@ -71,6 +76,9 @@ pub enum GpuError {
     /// wgpu reported an error.
     #[error("the GPU reported an error: {0}")]
     Device(String),
+    /// A window cannot be drawn to.
+    #[error("the window surface cannot be used: {0}")]
+    Surface(String),
     /// The surface's pixels cannot be read.
     #[error("only an offscreen surface can be read back")]
     NotReadable,
@@ -273,7 +281,7 @@ impl GpuRenderer {
         }
     }
 
-    /// The adapter of a [`GpuRenderer::headless`] renderer.
+    /// The adapter of a [`GpuRenderer::headless`] renderer or a [`GpuWindow`].
     pub fn adapter_info(&self) -> Option<&wgpu::AdapterInfo> {
         self.adapter.as_ref()
     }

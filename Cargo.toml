@@ -147,6 +147,8 @@ accesskit_consumer = "=0.39.2"
 kdl = "=6.7.1"
 miette = { version = "=7.6.0", features = ["fancy"] }
 notify = "=9.0.0"
+# The CPU path of the window (design 24 decision 5). No `kms`: no DRM presentation.
+softbuffer = { version = "=0.4.8", default-features = false, features = ["x11", "x11-dlopen", "wayland", "wayland-dlopen"] }
 png = "=0.18.1"
 smithay-clipboard = "=0.7.3"
 arboard = "=3.7.0"

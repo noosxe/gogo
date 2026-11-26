@@ -54,6 +54,7 @@ jobs:
       linux_e2e_self_test: ${{ steps.decide.outputs.linux_e2e_self_test }}
       gui: ${{ steps.decide.outputs.gui }}
       gui_gpu: ${{ steps.decide.outputs.gui_gpu }}
+      gui_headless: ${{ steps.decide.outputs.gui_headless }}
     steps:
       # On pull_request the action lists the PR's files through the API, so
       # no checkout. Every other event, and a PR with `ci:full`, runs
@@ -114,6 +115,13 @@ jobs:
             gpu_shell:
               - 'nix/devshell.nix'
               - 'nix/rust-toolchain.nix'
+            # The headless runner, its tools and the helpers it borrows from the
+            # e2e harness.
+            headless:
+              - 'scripts/gui-headless.sh'
+              - 'scripts/linux-e2e-helper.py'
+              - 'scripts/linux-e2e-wayland-client.py'
+              - 'nix/gui-headless.nix'
             # snapshots-btrfs also runs in the dev shell and its own script.
             btrfs:
               - 'scripts/ci-btrfs-tests.sh'
@@ -166,6 +174,7 @@ jobs:
           needed linux_e2e_self_test scripts
           needed gui gui
           needed gui_gpu gui gpu_shell
+          needed gui_headless gui gpu_shell headless
 
   rustfmt:
     name: rustfmt
@@ -463,6 +472,37 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
+  # scripts/gui-headless.sh (design 24 §5): its self-test, then the window in a
+  # headless sway, with the application's libraries from the dev shell.
+  gui_headless:
+    name: gui-headless
+    needs: changes
+    if: needs.changes.outputs.gui_headless == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: DeterminateSystems/determinate-nix-action@16f94ba7aae399b9f9077c254b6719ec6de7e3e3 # v3.24.2
+      # Ubuntu's AppArmor keeps unprivileged user namespaces from bwrap.
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: scripts/gui-headless.sh self-test
+      - name: The shell's window
+        run: |
+          nix develop .#lavapipe -c cargo build -p gogo-ui-shell --example window
+          nix develop .#lavapipe -c scripts/gui-headless.sh run --name shell -- \
+            target/debug/examples/window
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: gui-headless
+          path: |
+            target/gui-headless/*/*.log
+            target/gui-headless/*/*.png
+          retention-days: 14
+          if-no-files-found: ignore
+
   ci-result:
     name: CI result
     # Never a condition that can skip it: a skipped required check counts
@@ -481,6 +521,7 @@ jobs:
       - linux_e2e_self_test
       - gui
       - gui_gpu
+      - gui_headless
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
@@ -496,7 +537,8 @@ jobs:
           fi
           failed=0
           for job in rustfmt clippy test deny snapshots_btrfs shellcheck \
-            host_pass_fake linux_e2e_helper linux_e2e_self_test gui gui_gpu; do
+            host_pass_fake linux_e2e_helper linux_e2e_self_test gui gui_gpu \
+            gui_headless; do
             wanted=$(jq -r --arg j "$job" '.changes.outputs[$j] // "missing"' <<<"$NEEDS")
             result=$(jq -r --arg j "$job" '.[$j].result // "missing"' <<<"$NEEDS")
             case "$wanted/$result" in

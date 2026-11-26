@@ -11,3 +11,15 @@ gogo-ui-scene.workspace = true
 gogo-ui-layout.workspace = true
 gogo-ui-interact.workspace = true
 gogo-ui-a11y.workspace = true
+winit.workspace = true
+accesskit.workspace = true
+accesskit_winit.workspace = true
+notify.workspace = true
+softbuffer.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+gogo-ui-ir.workspace = true
+gogo-ui-text.workspace = true

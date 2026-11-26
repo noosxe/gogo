@@ -102,7 +102,7 @@ flowchart LR
 | `gogo-render-gpu` | vello_gpu renderer on wgpu | `GpuRenderer: Renderer`, `GpuSurface`, readback; a pipeline cache later (#540) | vello_gpu, wgpu, glifo |
 | `gogo-ui-interact` | Input → intents: hit-testing, focus, key routing, layer stack, input provenance (design 25 §4); scroll state later (#545) | `Interaction::{handle, sync, focus, focus_visible, latest}`, `Frame`/`Layer`, `Input`, `Intent`, `InputProvenance`, `FocusOrder` | — |
 | `gogo-ui-a11y` | IR + layout → AccessKit tree; requests → input for `gogo-ui-interact` | `A11yTree::{new, update, map_request}` | accesskit |
-| `gogo-ui-shell` | The window: winit loop, surfaces, frame pacing, damage, IME, clipboard, platform a11y, hot-reload watching | `Shell::run(impl ShellApp, RendererChoice)`, `ShellApp`, `Waker` | winit, accesskit_winit, notify, softbuffer, smithay-clipboard (Linux), arboard (macOS) |
+| `gogo-ui-shell` | The window: winit loop, surfaces, frame pacing, damage, IME, clipboard, platform a11y, hot-reload watching | `Shell::{new, waker, run(app, RendererChoice)}`, `ShellApp`, `Waker`, `WindowRenderer`, `PixelRenderer`, `WindowTarget` | winit, accesskit, accesskit_winit, notify, softbuffer; later smithay-clipboard (Linux), arboard (macOS) (#544) |
 | `gogo-gui-model` | The app layer (design 25): sources, dispatch, the safety flow, jobs | `Model`, `trait Backend`, `SourceStore`, `SafetyFlow`, `JobTable`, its own `Invocation` and `Effect` types (`gogo-gui` translates them from and to the engine's), `FakeBackend` behind the `fake` feature; later, the persistence of each skin's `ui` values | — |
 | `gogo-skins` | Built-in skins as data | `builtin()`, `default()`: each skin as a name and a static list of `(path, bytes)` embedded with `include_bytes!`, the shape `SkinPackage::from_files` takes. The Default skin is `crates/gogo-skins/skins/default/` | — |
 | `gogo-gui` | The binary: wires gogo-core in, owns the tokio runtime, picks a renderer | bin `gogo-gui`, `CoreBackend: Backend` | tokio, image (`jpeg`, `webp`) |
@@ -192,7 +192,7 @@ them under "GUI".
 | Accessibility | accesskit + accesskit_winit | 0.25.2 / 0.34.2 | AT-SPI on Linux, NSAccessibility on macOS. Pinned together |
 | Skin files | kdl + miette | 6.7.1 / 7.6.0 | The only KDL v2 parser; errors are miette diagnostics with spans |
 | Hot reload | notify | 9.0.0 | CC0-1.0: not yet in `deny.toml`'s allow-list; PR B1 adds it |
-| Present (no GPU) | softbuffer | at impl | decision 5 |
+| Present (no GPU) | softbuffer | 0.4.8 | decision 5; features `x11`, `x11-dlopen`, `wayland`, `wayland-dlopen` (no `kms`) |
 | Clipboard | smithay-clipboard / arboard | 0.7.3 / 3.7.0 | Wayland via `wl_data_device` (works on GNOME, which lacks the data-control protocols); arboard on macOS |
 | Images | image (`jpeg`, `webp` only) | 0.25.10 | Decode limits, and `catch_unwind` around decoders for cover art |
 
@@ -211,10 +211,13 @@ Licences:
    renderer is in use.
 5. The pipeline cache is a file under the cache dir, keyed per adapter. *Measured:* it took
    a cold start on the NVIDIA GPU from 323 to 196 ms.
-6. **Who owns the surface.** The shell hands the window's raw handle (`raw-window-handle`)
-   to the injected GPU renderer, which creates and owns its wgpu surface. The shell never
+6. **Who owns the surface.** The shell hands the window's handles (`WindowTarget`, through
+   `raw-window-handle`) to the application's `ShellApp::gpu`, and the GPU renderer
+   (`gogo_render_gpu::GpuWindow`) creates and owns its wgpu surface. The shell never
    depends on wgpu (§2.1 rule 4; CI checks it). The CPU renderer draws into a pixel
-   buffer, which the shell presents through softbuffer.
+   buffer (`PixelRenderer`), which the shell presents through softbuffer.
+7. **A failure later.** A GPU renderer that fails on a frame is made again once. If that
+   fails too, the run carries on with the CPU; with `gpu` forced it ends with an error.
 
 wgpu's GL backend needs a loadable `libEGL.so.1` on the library path.
 - *Measured:* with it, vello_gpu ran on an integrated AMD GPU through Mesa's EGL (Instrument at 8 ms
@@ -238,7 +241,9 @@ wgpu's GL backend needs a loadable `libEGL.so.1` on the library path.
   - Builds must stay warning-free (CI denies warnings, and §7 adds clippy on macOS).
 - **Never on the host display.** Once they exist, agents run the GUI only:
   - headlessly, with `gogo-gui --render-png` (no window; PR E4), or
-  - inside the headless compositor of `scripts/gui-headless.sh` (Linux; PR E3), or
+  - inside the headless compositor of `scripts/gui-headless.sh` (Linux): sway in a
+    sandbox with no host display, network or home folder, software rendering (lavapipe for
+    the GPU path), screenshots under `target/gui-headless/`, or
   - in the Tart VM (`scripts/vm-test.sh`, macOS, needs an `.app`; PR G8).
 
   Real Metal, HiDPI, VoiceOver, IME and clipboard are a host pass by @noosxe, with the
@@ -261,7 +266,8 @@ wgpu's GL backend needs a loadable `libEGL.so.1` on the library path.
 
 ## 7. Build and CI
 
-- **Dev shell (Linux):** wayland, libxkbcommon, vulkan-loader, libglvnd and fontconfig, on
+- **Dev shell (Linux):** wayland, libxkbcommon, vulkan-loader, libglvnd, fontconfig and
+  the X11 client libraries (libX11, libxcb, libXcursor, libXi, libXrandr), on
   `LD_LIBRARY_PATH`. `WAYLAND_DISPLAY` and `DISPLAY` stay set, because the shell is used
   interactively; scripts that run the GUI clear them.
 - **`nix/app.nix` must change in PR B1.** Today it sets no `cargoBuildFlags`, so it builds
@@ -280,6 +286,9 @@ wgpu's GL backend needs a loadable `libEGL.so.1` on the library path.
   - A `gui-lavapipe` job runs the vello_gpu tests on ubuntu in the nix shell
     (`.#lavapipe`: the dev shell with Mesa's software Vulkan as the only Vulkan driver). It
     runs for the same changes as `gui`, and for the shell's own files.
+  - A `gui-headless` job runs `scripts/gui-headless.sh self-test` and shows the shell's
+    window in the headless compositor. It runs for the same changes as `gui-lavapipe`, and
+    for the script, its tools and the helpers it borrows from the e2e harness.
   - All of it is wired into `CI result` (`ci-jobs.yml` names the three places).
   - The same job checks the dependency rules in §2.1 with `scripts/gui-deps-check.py`
     (`cargo metadata`, direct edges only), whose own tests run first.

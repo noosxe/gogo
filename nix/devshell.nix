@@ -19,6 +19,12 @@ let
     pkgs.vulkan-loader
     pkgs.libglvnd
     pkgs.fontconfig
+    # winit and softbuffer on X11.
+    pkgs.libx11
+    pkgs.libxcb
+    pkgs.libxcursor
+    pkgs.libxi
+    pkgs.libxrandr
   ];
 in
 pkgs.mkShell {
@@ -51,9 +57,9 @@ pkgs.mkShell {
     WGPU_BACKEND = "vulkan";
   };
 
-  # The desktop GUI (design 24 §5, §7): winit dlopens wayland and libxkbcommon,
-  # wgpu dlopens the Vulkan loader and libEGL (libglvnd, for its GL fallback),
-  # fontique reads fontconfig. Prepended in the hook, so a library path set
+  # The desktop GUI (design 24 §5, §7): winit dlopens wayland and libxkbcommon
+  # (and the X11 libraries on X11), wgpu dlopens the Vulkan loader and libEGL
+  # (libglvnd, for its GL fallback), fontique reads fontconfig. Prepended in the hook, so a library path set
   # outside the shell survives. WAYLAND_DISPLAY and DISPLAY stay set: this
   # shell is used interactively, and agents run the GUI only through its
   # headless tools (AGENTS.md).

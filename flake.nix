@@ -55,6 +55,10 @@
           default = gogo;
           inherit gogo;
         }
+        # scripts/gui-headless.sh's PATH (design 24 §5).
+        // nixpkgs.lib.optionalAttrs (nixpkgs.lib.hasSuffix "-linux" system) {
+          gui-headless-tools = import ./nix/gui-headless.nix { inherit pkgs; };
+        }
         # x86_64 Linux: gogo for the Linux game lane, wrapped to run umu's
         # zipapp in nixpkgs' Steam runtime FHS env (design 18 §2.1), and that
         # env on its own, for a dev-shell run: `export GOGO_UMU_PYTHON=$(nix

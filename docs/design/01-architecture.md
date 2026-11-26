@@ -188,7 +188,7 @@ re-verify at implementation time.
 | | accesskit / accesskit_winit | 0.25.2 / 0.34.2 | accessibility |
 | | kdl / miette | 6.7.1 / 7.6.0 | skin files, diagnostics |
 | | notify | 9.0.0 | skin hot reload (CC0-1.0) |
-| | softbuffer · smithay-clipboard · arboard · image | at impl | CPU presentation; clipboard (Wayland / macOS); cover decoding (`jpeg`, `webp`) |
+| | softbuffer · smithay-clipboard · arboard · image | 0.4.8 · at impl · at impl · at impl | CPU presentation; clipboard (Wayland / macOS); cover decoding (`jpeg`, `webp`) |
 
 **Not used in v1**: async-compression (depot-only), crossterm, rpassword, `ctrlc`
 (`tokio::signal` covers it), figment/config (hand-rolled 3-step merge is ~60 lines and fully
