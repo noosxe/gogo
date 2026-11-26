@@ -34,5 +34,7 @@ rustix.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 wiremock.workspace = true
+log.workspace = true
+tracing-log.workspace = true
 # The rollback's command tests use the fake snapshot backend (design 20 §10.2).
 gogo-core = { workspace = true, features = ["test-util"] }

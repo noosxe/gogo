@@ -464,3 +464,45 @@ fn scrub_text_several_urls_any_case() {
         "a https://a.example/x b http://b.example/y c https://c.example/v1"
     );
 }
+
+/// gog-warp's wording, exactly: `log::debug!("Requesting token with code {}", code)`.
+#[test]
+fn gog_warps_code_line_is_scrubbed() {
+    let code = "FAKE-Code_0123456789abcdefXYZ";
+    let line = format!("Requesting token with code {code}");
+    assert_eq!(scrub_text(&line), "Requesting token with code [redacted]");
+    let sentence = format!("could not use code {code}.");
+    assert_eq!(scrub_text(&sentence), "could not use code [redacted].");
+    assert_clean("short fake", &scrub_text(&format!("with code {CODE}")));
+}
+
+#[test]
+fn ordinary_uses_of_code_are_kept() {
+    for text in [
+        "exit code 1",
+        "status code 401 Unauthorized",
+        "error code 0x80070005",
+        "code signing/notarization",
+        "the code responsibility-of-the-caller",
+        "exit_code 1234567890123456",
+        "unicode ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    ] {
+        assert_eq!(scrub_text(text), text);
+    }
+}
+
+#[test]
+fn gog_warp_records_below_warn_are_never_written() {
+    use tracing::Level;
+    for target in ["gog_warp", "gog_warp::core", "gog_warp::auth"] {
+        for level in [Level::TRACE, Level::DEBUG, Level::INFO] {
+            assert!(!log_record_allowed(target, &level), "{target} {level}");
+        }
+        for level in [Level::WARN, Level::ERROR] {
+            assert!(log_record_allowed(target, &level), "{target} {level}");
+        }
+    }
+    for target in ["gogo::auth", "gog_warped", "reqwest::connect"] {
+        assert!(log_record_allowed(target, &Level::TRACE), "{target}");
+    }
+}

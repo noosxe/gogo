@@ -237,6 +237,49 @@ mod tests {
         );
     }
 
+    /// gog-warp's own lines, as they arrive through the `log` bridge, with every
+    /// way of asking for more: `-v`, `-vv`, `--log-file` and a `RUST_LOG` filter.
+    #[test]
+    fn gog_warps_sign_in_line_is_never_written() {
+        const CODE: &str = "FAKE-Code_0123456789abcdefXYZ";
+        const PREFIX: &str = "Zq9x";
+        // The bridge `try_init` installs; here it feeds the scoped subscriber.
+        let _ = tracing_log::LogTracer::init();
+        log::set_max_level(log::LevelFilter::Trace);
+        let emit = || {
+            log::debug!(target: "gog_warp::core", "Requesting token with code {}", CODE);
+            log::debug!(target: "gog_warp::core", "Found token for {}: {}", 4, PREFIX);
+            log::warn!(target: "gog_warp::core", "a warning stays");
+        };
+        let rust_log = tracing_subscriber::EnvFilter::new("trace,gog_warp::core=trace");
+        let dir = tempfile::tempdir().unwrap();
+        for (i, args) in [
+            &["gogo", "list"][..],
+            &["gogo", "-v", "list"],
+            &["gogo", "-vv", "list"],
+        ]
+        .iter()
+        .enumerate()
+        {
+            let p = dir.path().join(format!("{i}.log"));
+            let (sub, err) = built(args, &p);
+            tracing::subscriber::with_default(sub, emit);
+            let err = String::from_utf8(err.0.lock().unwrap().clone()).unwrap();
+            let file = std::fs::read_to_string(&p).unwrap();
+            for out in [&err, &file] {
+                assert!(out.contains("a warning stays"), "{args:?}: {out}");
+                assert!(!out.contains(CODE), "{args:?}: {out}");
+                assert!(!out.contains(PREFIX), "{args:?}: {out}");
+            }
+        }
+        let err = Buf::default();
+        let sub = crate::build_subscriber(rust_log, err.clone(), None);
+        tracing::subscriber::with_default(sub, emit);
+        let err = String::from_utf8(err.0.lock().unwrap().clone()).unwrap();
+        assert!(err.contains("a warning stays"), "{err}");
+        assert!(!err.contains(CODE) && !err.contains(PREFIX), "{err}");
+    }
+
     #[test]
     fn control_characters_cannot_forge_lines_or_drive_a_terminal() {
         let dir = tempfile::tempdir().unwrap();

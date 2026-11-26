@@ -241,11 +241,41 @@ const SECRET_PARAMS: &[&str] = &[
     "acl",
 ];
 
+/// Whether a log record from `target` at `level` may be written at all.
+///
+/// gog-warp logs the sign-in code and the start of an access token at debug
+/// level, through the `log` bridge. Every log sink drops its records below warn,
+/// whatever `-v`, `--log-file` or `RUST_LOG` ask for (design 07 §4).
+pub fn log_record_allowed(target: &str, level: &tracing::Level) -> bool {
+    let gog_warp = target == "gog_warp" || target.starts_with("gog_warp::");
+    // A more verbose level compares greater.
+    !gog_warp || *level <= tracing::Level::WARN
+}
+
+/// The shortest value taken as a sign-in code in `code <value>`.
+const BARE_CODE_MIN: usize = 16;
+
+/// The length of a sign-in code at the start of `t`, as in `code <value>`: a long
+/// run of token characters with a digit or a capital in it, so that `exit code 1`
+/// and `code signing` stay as they are.
+fn bare_code_len(t: &str) -> Option<usize> {
+    let end = t
+        .find(|c: char| !(c.is_ascii_alphanumeric() || "-_.%".contains(c)))
+        .unwrap_or(t.len());
+    let value = t[..end].trim_end_matches('.');
+    let looks_secret = value.len() >= BARE_CODE_MIN
+        && value
+            .bytes()
+            .any(|b| b.is_ascii_digit() || b.is_ascii_uppercase());
+    looks_secret.then_some(value.len())
+}
+
 /// `text` with anything that looks like a credential removed: every `http(s)://`
 /// URL replaced by its [`redact_url`] form, and the values of [`SECRET_PARAMS`]
 /// and of `Bearer …` replaced by `[redacted]`. A parameter matches as
 /// `name=value`, `name%3Dvalue`, `"name": value` / `"name":"value"` (JSON, also
-/// with escaped quotes) and `name: "value"` (Rust `Debug`). ANSI escapes are
+/// with escaped quotes) and `name: "value"` (Rust `Debug`). A sign-in code also
+/// matches as `code <value>`, gog-warp's wording. ANSI escapes are
 /// looked through; text that needed scrubbing comes back without them.
 ///
 /// The safety net at output sinks (see the module doc); text built by gogo
@@ -404,6 +434,19 @@ fn scrub_params(text: &str) -> String {
             spans.push((vs, vs + len));
         }
         from = vs;
+    }
+    let mut from = 0;
+    while let Some(i) = lower[from..].find("code ") {
+        let start = from + i;
+        let vs = start + "code ".len();
+        from = vs;
+        let prev = start.checked_sub(1).map(|p| bytes[p]);
+        if prev.is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_') {
+            continue;
+        }
+        if let Some(len) = bare_code_len(&text[vs..]) {
+            spans.push((vs, vs + len));
+        }
     }
     let mut out = String::with_capacity(text.len());
     let mut pos = 0;
