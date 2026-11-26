@@ -6,7 +6,7 @@ mod common;
 use common::*;
 use gogo_gui_testkit::FixtureScope;
 use gogo_skin::{Binding, Bound, Mode, SkinPackage, UiState};
-use gogo_ui_interact::{FocusOrder, Frame, Intent, Key, LayerKind};
+use gogo_ui_interact::{FocusOrder, Frame, Intent, Key, Layer, LayerKind};
 use gogo_ui_ir::{NodeId, Tree};
 use gogo_ui_layout::{Laid, Rect, Scroll, Viewport, layout};
 use gogo_ui_text::FontSet;
@@ -92,23 +92,43 @@ fn s13_default_focus_order_is_reading_order() {
     }
 }
 
+/// The focusable keys at and under `node` as they read, worked out from the geometry
+/// alone: a control before what is inside it, then the children by where they are.
+fn read(tree: &Tree, laid: &Laid, node: NodeId, out: &mut Vec<String>) {
+    if tree.get(node).is_some_and(|n| n.a11y.focusable) {
+        out.push(tree.key(node).unwrap().to_owned());
+    }
+    // Backwards to start with, so that nothing rests on the tree's own order.
+    let mut left: Vec<(NodeId, Rect)> = tree
+        .children(node)
+        .iter()
+        .rev()
+        .filter_map(|&c| Some((c, controls(tree, laid, c)?)))
+        .collect();
+    while !left.is_empty() {
+        let first = (0..left.len())
+            .find(|&i| {
+                left.iter()
+                    .enumerate()
+                    .all(|(j, other)| i == j || !reads_before(&other.1, &left[i].1))
+            })
+            .expect("one reads first");
+        let (child, _) = left.remove(first);
+        read(tree, laid, child, out);
+    }
+}
+
 #[test]
-fn s13_default_tab_walks_the_tree_order_and_reaches_every_action() {
+fn s13_default_tab_walks_in_reading_order_and_reaches_every_action() {
     for name in ["game", "shell"] {
         let (bound, laid) = route(name, 1280.0);
         let tree = &bound.tree;
-        let layers = [gogo_ui_interact::Layer::new(
-            PAGE,
-            LayerKind::Page,
-            tree,
-            &laid,
-        )];
+        let identity = identities(tree);
+        let layers = [Layer::new(PAGE, LayerKind::Page, tree, &laid).identity(&identity)];
         let frame = Frame { layers: &layers };
-        let expected: Vec<&str> = tree
-            .iter()
-            .filter(|&id| tree.get(id).is_some_and(|n| n.a11y.focusable))
-            .filter_map(|id| tree.key(id))
-            .collect();
+        let mut expected = Vec::new();
+        read(tree, &laid, tree.root(), &mut expected);
+        assert!(expected.len() > 5, "{name}");
         let order = FocusOrder::of(&frame);
         let keys: Vec<&str> = order.targets().iter().map(|t| t.key.as_str()).collect();
         assert_eq!(keys, expected, "{name}");
@@ -129,12 +149,8 @@ fn s19_default_play_and_search_keys() {
         ("shell", Key::Char('k'), CTRL, None),
     ] {
         let (bound, laid) = route(name, 1280.0);
-        let layers = [gogo_ui_interact::Layer::new(
-            PAGE,
-            LayerKind::Page,
-            &bound.tree,
-            &laid,
-        )];
+        let identity = identities(&bound.tree);
+        let layers = [Layer::new(PAGE, LayerKind::Page, &bound.tree, &laid).identity(&identity)];
         let mut d = Driver::new();
         let out = d.down(&Frame { layers: &layers }, key, mods);
         match (node, &out[..]) {

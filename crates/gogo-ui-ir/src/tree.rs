@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{A11y, Effect, Fill, GradientStop, LayoutStyle, Paint, TextStyle, Track};
 
@@ -318,6 +319,24 @@ struct Slot {
 pub struct Tree {
     slots: Vec<Slot>,
     by_key: HashMap<Arc<str>, NodeId>,
+    stamp: Stamp,
+}
+
+/// Which build of a tree this is. It takes no part in comparing trees.
+#[derive(Debug, Clone, Copy)]
+struct Stamp(u64);
+
+impl Stamp {
+    fn next() -> Stamp {
+        static LAST: AtomicU64 = AtomicU64::new(0);
+        Stamp(LAST.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+impl PartialEq for Stamp {
+    fn eq(&self, _: &Stamp) -> bool {
+        true
+    }
 }
 
 impl Tree {
@@ -334,7 +353,14 @@ impl Tree {
                 children: Vec::new(),
             }],
             by_key,
+            stamp: Stamp::next(),
         }
+    }
+
+    /// A number that is new for every tree built and after every change to one: two
+    /// equal stamps mean the same content. A clone keeps it; comparing trees ignores it.
+    pub fn stamp(&self) -> u64 {
+        self.stamp.0
     }
 
     /// Adds `node` as the last child of `parent` and returns its id.
@@ -369,6 +395,7 @@ impl Tree {
             children: Vec::new(),
         });
         self.slots[parent.index()].children.push(id);
+        self.stamp = Stamp::next();
         Ok(id)
     }
 
@@ -395,6 +422,7 @@ impl Tree {
     /// Edits a node in place. Do not turn a container with children into a leaf kind;
     /// [`Tree::validate`] reports it.
     pub fn node_mut(&mut self, id: NodeId) -> Option<&mut Node> {
+        self.stamp = Stamp::next();
         self.slots.get_mut(id.index()).map(|s| &mut s.node)
     }
 

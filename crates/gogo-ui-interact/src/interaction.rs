@@ -6,7 +6,7 @@ use std::time::Duration;
 use gogo_ui_ir::{AppPart, DrawnBy, NodeId, Role};
 
 use crate::focus::FocusOrder;
-use crate::frame::{Frame, Layer, LayerId, LayerKind, Target, activatable, control};
+use crate::frame::{Frame, Identity, Layer, LayerId, LayerKind, Target, activatable, control};
 use crate::input::{Input, Key, Modifiers, PointerButton, Request, RequestKind};
 use crate::intent::{ControlInput, InputEvent, InputProvenance, Intent, Response};
 use crate::keys;
@@ -18,6 +18,7 @@ pub const ARM_EXPIRES: Duration = Duration::from_secs(10);
 
 /// The modifier of the platform's shortcuts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Primary {
     /// Ctrl (Linux).
     #[default]
@@ -28,15 +29,26 @@ pub enum Primary {
 
 /// What differs between platforms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct Config {
     /// The palette is this modifier with K.
     pub primary: Primary,
 }
 
+impl Config {
+    /// A configuration with this primary modifier.
+    pub fn new(primary: Primary) -> Self {
+        Config { primary }
+    }
+}
+
+/// How many character keys are tracked as held; more only means releases were lost.
+const MAX_HELD_CHARS: usize = 32;
+
 /// What a control was when a press went down.
 #[derive(Debug, Clone, PartialEq)]
 struct Signature {
-    identity: Option<u64>,
+    identity: Option<Identity>,
     app: Option<AppPart>,
     checked: Option<bool>,
     activatable: bool,
@@ -97,13 +109,7 @@ pub struct Interaction {
 fn signature(layer: &Layer<'_>, node: NodeId) -> Option<Signature> {
     let n = layer.tree.get(node)?;
     Some(Signature {
-        identity: n.action.map(|a| {
-            layer
-                .identity
-                .get(a.index())
-                .copied()
-                .unwrap_or(u64::from(a.get()))
-        }),
+        identity: layer.action_identity(node),
         app: match n.drawn_by {
             DrawnBy::App(part) => Some(part),
             _ => None,
@@ -130,6 +136,17 @@ fn unchanged(frame: &Frame<'_>, target: &Target, was: &Signature) -> bool {
 
 /// The control under a point: the nearest control at or above the topmost node there.
 fn control_at(frame: &Frame<'_>, x: f64, y: f64) -> Option<Target> {
+    // What is drawn over a dialog takes no input, and a click on it must not reach the
+    // dialog control it covers.
+    let covered = frame.over_modal().iter().any(|layer| {
+        layer
+            .laid
+            .hit(x, y)
+            .is_some_and(|n| layer.kind != LayerKind::Overlay || n != layer.tree.root())
+    });
+    if covered {
+        return None;
+    }
     for layer in frame.interactive().iter().rev() {
         let Some(mut node) = layer.laid.hit(x, y) else {
             continue;
@@ -354,6 +371,13 @@ impl Interaction {
     }
 
     fn refresh(&mut self, frame: &Frame<'_>, out: &mut Response) {
+        debug_assert!(
+            frame
+                .interactive()
+                .iter()
+                .all(Layer::identifies_every_action),
+            "Layer::identity needs an entry for every action"
+        );
         let order = FocusOrder::of(frame);
         let modal = frame.modal().map(|l| l.id);
         let current = |t: &Target| order.position(t).map(|i| order.targets()[i].clone());
@@ -579,6 +603,13 @@ impl Interaction {
     ) {
         // Unnamed keys (bare modifiers among them, which screen readers hold for their
         // own commands) share one value: they can't be tracked and cancel nothing.
+        let chars = |k: &&Key| matches!(k, Key::Char(_));
+        if matches!(key, Key::Char(_))
+            && !self.down.contains(&key)
+            && self.down.iter().filter(chars).count() >= MAX_HELD_CHARS
+        {
+            self.down.retain(|k| !matches!(k, Key::Char(_)));
+        }
         let again = key != Key::Other && !self.down.insert(key);
         if again && !repeat {
             // Down twice with no release and no repeat flag: a release was lost, so a
@@ -772,7 +803,8 @@ impl Interaction {
         let (Some(n), Some(target)) = (layer.tree.get(node), layer.target(node)) else {
             return;
         };
-        if !control(n) {
+        // Requests arrive late: the control must still do what it did when it was read.
+        if !control(n) || request.identity != layer.action_identity(node) {
             return;
         }
         let focusable = n.a11y.focusable;
@@ -847,5 +879,65 @@ impl Interaction {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gogo_ui_ir::{A11y, ActionRef, Node, Role, Tree};
+    use gogo_ui_layout::{Scroll, Viewport, layout};
+    use gogo_ui_text::FontSet;
+
+    use super::*;
+
+    fn tree() -> Tree {
+        let button = Node::container()
+            .with_a11y(A11y::control(Role::Button, "Play"))
+            .with_action(ActionRef::new(0));
+        let mut tree = Tree::new("root", Node::container());
+        let root = tree.root();
+        tree.add_child(root, "play", button).expect("add");
+        tree
+    }
+
+    /// Whether a press on `play` of one tree still stands on the other.
+    fn survives(before: &Tree, after: &Tree, identity: &[u64]) -> bool {
+        let lay = |t: &Tree| {
+            let view = Viewport::new(100.0, 100.0);
+            layout(t, &mut FontSet::bundled(), view, &Scroll::none()).expect("layout")
+        };
+        let (a, b) = (lay(before), lay(after));
+        let layer = |t, l| Layer::new(LayerId(1), LayerKind::Page, t, l).identity(identity);
+        let (old, new) = ([layer(before, &a)], [layer(after, &b)]);
+        let node = before.by_key("play").expect("node");
+        let target = old[0].target(node).expect("target");
+        let was = signature(&old[0], node).expect("signature");
+        unchanged(&Frame { layers: &new }, &target, &was)
+    }
+
+    #[test]
+    fn s4_without_an_identity_no_press_outlives_a_rebuild() {
+        let first = tree();
+        let rebuilt = tree();
+        assert_eq!(first, rebuilt, "the same content");
+        assert!(survives(&first, &first, &[]), "the same build");
+        assert!(survives(&first, &first.clone(), &[]));
+        assert!(!survives(&first, &rebuilt, &[]));
+        assert!(survives(&first, &rebuilt, &[7]), "the app vouches for it");
+        let mut changed = first.clone();
+        let root = changed.root();
+        changed.node_mut(root);
+        assert!(!survives(&first, &changed, &[]));
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "an entry for every action")]
+    fn debug_builds_insist_on_an_identity_per_action() {
+        let tree = tree();
+        let view = Viewport::new(100.0, 100.0);
+        let laid = layout(&tree, &mut FontSet::bundled(), view, &Scroll::none()).expect("layout");
+        let layers = [Layer::new(LayerId(1), LayerKind::Page, &tree, &laid)];
+        Interaction::new(Config::default()).sync(&Frame { layers: &layers });
     }
 }

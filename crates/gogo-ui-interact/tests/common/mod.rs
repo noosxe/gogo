@@ -17,6 +17,7 @@ use gogo_ui_text::FontSet;
 
 pub const PAGE: LayerId = LayerId(1);
 pub const DIALOG: LayerId = LayerId(2);
+pub const TOAST: LayerId = LayerId(3);
 
 pub const NONE: Modifiers = Modifiers {
     ctrl: false,
@@ -69,6 +70,17 @@ pub fn part_of(part: u32) -> AppPart {
 pub struct Screen {
     pub tree: Tree,
     pub laid: Laid,
+    identity: Vec<u64>,
+}
+
+/// An identity per action, as the app records them.
+pub fn identities(tree: &Tree) -> Vec<u64> {
+    let top = tree
+        .iter()
+        .filter_map(|id| tree.get(id)?.action)
+        .map(|a| a.index() + 1)
+        .max();
+    (0..top.unwrap_or(0) as u64).collect()
 }
 
 impl Screen {
@@ -90,11 +102,16 @@ impl Screen {
             &Scroll::none(),
         )
         .expect("layout");
-        Screen { tree, laid }
+        let identity = identities(&tree);
+        Screen {
+            tree,
+            laid,
+            identity,
+        }
     }
 
     pub fn layer(&self, id: LayerId, kind: LayerKind) -> Layer<'_> {
-        Layer::new(id, kind, &self.tree, &self.laid)
+        Layer::new(id, kind, &self.tree, &self.laid).identity(&self.identity)
     }
 
     pub fn center(&self, key: &str) -> (f64, f64) {
@@ -199,9 +216,16 @@ impl Driver {
         key: &str,
         kind: RequestKind,
     ) -> Vec<Intent> {
+        // What a screen reader that is up to date would send.
+        let identity = frame
+            .layers
+            .iter()
+            .find(|l| l.id == layer)
+            .and_then(|l| l.action_identity(l.tree.by_key(key)?));
         let request = Request {
             layer,
             key: key.to_owned(),
+            identity,
             kind,
         };
         self.intents(frame, vec![Input::Accessibility(request)])

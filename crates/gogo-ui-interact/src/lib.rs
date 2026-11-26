@@ -32,7 +32,8 @@
 //!   primary modifier with K is [`Intent::Palette`], and Enter under a dialog with
 //!   nothing focused is [`Intent::Enter`]. No skin shortcut can take them.
 //! - **Focus order is document order** (S13), over the layers that take input. The
-//!   topmost dialog traps focus and pointer: nothing below it can be reached.
+//!   topmost dialog traps focus and pointer: only it takes input, not what is below it
+//!   nor what is drawn over it.
 //! - **Focus-visible.** The focus ring shows after the keyboard or a screen reader moved
 //!   focus, not after a click.
 //! - **Not here yet:** opening a select or menu, text editing, and scrolling. A select
@@ -48,7 +49,7 @@ mod interaction;
 mod keys;
 
 pub use focus::FocusOrder;
-pub use frame::{Frame, Layer, LayerId, LayerKind, Target};
+pub use frame::{Frame, Identity, Layer, LayerId, LayerKind, Target};
 pub use input::{Input, Key, Modifiers, PointerButton, Request, RequestKind};
 pub use intent::{ControlInput, InputEvent, InputProvenance, Intent, Response};
 pub use interaction::{ARM_EXPIRES, Config, HOLD_ARM, Interaction, Primary};
