@@ -3,7 +3,7 @@ skin "default" {
     version "0.1.0"
     contract "1.0"
     modes "dark"
-    routes "shell" "game" "sign-in" "library" "queue" "updates"
+    routes "shell" "game" "sign-in" "library" "queue" "updates" "saves" "apps" "runtimes" "doctor" "settings" "about"
     ui {
         var "tab" type="section" default="overview"
         var "view" type="enum(grid list)" default="grid"

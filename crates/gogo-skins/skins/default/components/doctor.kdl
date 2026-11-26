@@ -1,0 +1,28 @@
+// The checks of one game on the `doctor` route.
+
+component "doctor-detail" params="game_id" {
+    let doc="{game.doctor(game_id)}" found="{doctor.all | where game.id == game_id | first}"
+    column style="panel" {
+        row gap=@space.3 {
+            text "{found?.game.title else 'This game'}" style="tile-title" grow=1
+            text "checked {fmt.ago(doc.checked_at)}" style="tile-sub"
+        }
+        each "c" in="{doc.checks}" {
+            column gap=2 {
+                row gap=@space.3 {
+                    dot tone="{c.result == ok ? 'success' : (c.result == warn ? 'warn' : 'error')}"
+                    text "{c.name}" style="snap-label"
+                    text "{c.result}" style="mono-lo"
+                    text "{c.message}" style="hint" grow=1
+                }
+                text "{c.hint}" style="tile-sub" when="{c.hint != ''}"
+            }
+        }
+        row gap=6 {
+            button "Run again" style="small" action="doctor.run" args="{game_id}"
+            button "Run setup" style="small" action="game.setup" args="{game_id}"
+            button "Stop leftover processes" style="small ghost" action="doctor.stop_leftovers" args="{game_id}" when="{app.os == mac}"
+            button "Close" style="small ghost" action="nav.go" args="doctor"
+        }
+    }
+}

@@ -1,0 +1,24 @@
+// One entry of the runtime or renderer catalog.
+
+component "catalog-entry" params="entry install prune" {
+    column style="panel" {
+        row gap=@space.3 {
+            text "{entry.id}" style="tile-title"
+            text "latest {entry.latest} · {entry.os}" style="mono-lo" grow=1
+        }
+        row gap=6 {
+            text "Cached" style="field-label"
+            each "v" in="{entry.cached}" { chip "{v}" }
+            text "none" style="tile-sub" when="{(entry.cached | len) == 0}"
+        }
+        row gap=6 {
+            text "Used by" style="field-label"
+            each "g" in="{entry.used_by}" { chip "{g.title}" }
+            text "no game" style="tile-sub" when="{(entry.used_by | len) == 0}"
+        }
+        row gap=6 {
+            button "Install latest" style="small" action="{install}" args="{entry.id}" label="Install the latest {entry.id}"
+            button "Remove unused versions" style="small ghost" action="{prune}" args="{entry.id}" label="Remove unused versions of {entry.id}" when="{entry.cached}"
+        }
+    }
+}

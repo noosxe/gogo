@@ -2,6 +2,7 @@
 //! "Failures"): numbers that are NaN, infinite or huge, very long strings, nulls and masks
 //! in the places a skin reads them.
 
+use gogo_contract::routes::ROUTE_NAMES;
 use gogo_gui_testkit::{FixtureScope, GAME_ID};
 use gogo_skin::expr::Scope;
 use gogo_skin::{Binding, Mode, SkinPackage, UiState, Value};
@@ -15,7 +16,7 @@ fn skin() -> SkinPackage {
     }
 }
 
-/// The sources with an argument the game route reads, answered for the fixture game.
+/// The sources with an argument the routes read, answered for the fixture game.
 const CALLS: &[&str] = &[
     "game",
     "game.runner",
@@ -27,8 +28,21 @@ const CALLS: &[&str] = &[
     "game.env",
 ];
 
-/// The sources without one the shell reads.
-const VARS: &[&str] = &["queue.summary", "account", "app", "library.stats"];
+/// The sources without one the routes read.
+const VARS: &[&str] = &[
+    "queue.summary",
+    "account",
+    "app",
+    "library.stats",
+    "library",
+    "queue",
+    "updates",
+    "apps",
+    "runtimes",
+    "renderers",
+    "doctor.all",
+    "settings",
+];
 
 const SECTIONS: &[&str] = &[
     "overview",
@@ -85,14 +99,15 @@ fn replace(v: &mut Value, at: &mut usize, with: &Value) {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(48))]
+    #![proptest_config(ProptestConfig::with_cases(192))]
 
     /// A scalar of some source in place of what the fixture has there.
     #[test]
     fn hostile_data_never_panics_the_binder(
         edits in prop::collection::vec((0..CALLS.len() + VARS.len(), any::<usize>(), hostile()), 1..4),
         section in 0..SECTIONS.len(),
-        shell in any::<bool>(),
+        route in 0..ROUTE_NAMES.len(),
+        listed in any::<bool>(),
     ) {
         let pkg = skin();
         let mut scope = FixtureScope::new();
@@ -113,8 +128,9 @@ proptest! {
         }
         let mut ui = UiState::defaults(&pkg.manifest);
         let _ = ui.set(&pkg.manifest, "tab", Value::str(SECTIONS[section]));
+        let _ = ui.set(&pkg.manifest, "view", Value::str(if listed { "list" } else { "grid" }));
         let b = Binding { scope: &scope, ui: &ui, mode: Mode::Dark, default: None };
-        let route = if shell { "shell" } else { "game" };
+        let route = ROUTE_NAMES[route];
         if let Ok(bound) = pkg.bind(route, &b) {
             // What binds is a tree the engine can take.
             prop_assert!(bound.tree.validate().is_ok());

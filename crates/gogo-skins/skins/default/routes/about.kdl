@@ -1,0 +1,15 @@
+route "about" {
+    let info="{app}"
+
+    text "About gogo" style="h1"
+    column style="panel" w=520 id="versions" {
+        text "Version {info.version}" style="tile-title"
+        text "Skin contract {info.contract}" style="hint"
+        text "System: {info.os} · locale {info.locale}" style="hint"
+        row gap=6 {
+            button "Documentation" style="small" action="app.open_url" args="docs"
+            button "Support" style="small" action="app.open_url" args="support"
+            button "Back" style="small ghost" action="nav.back"
+        }
+    }
+}

@@ -1,0 +1,9 @@
+route "saves" {
+    let installed="{apps}"
+
+    text "Cloud saves" style="h1"
+    // No source says whether cloud writes are on (design 26 §4): the app refuses and explains.
+    text "Push and sync need cloud writes turned on in the app's own settings." style="hint"
+    text "No installed games." style="hint" id="empty" when="{(installed | len) == 0}"
+    each "a" in="{installed}" { use "game-cloud-saves" entry="{a.game}" }
+}

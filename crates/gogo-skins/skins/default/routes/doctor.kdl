@@ -1,0 +1,21 @@
+route "doctor" {
+    let rows="{doctor.all}"
+
+    row gap=@space.3 {
+        text "Doctor" style="h1" grow=1
+        button "Run all checks" style="primary" action="doctor.run" id="run-all"
+    }
+    column when="{$id != null}" { use "doctor-detail" game_id="{$id}" }
+
+    text "Nothing to check yet." style="hint" id="empty" when="{(rows | len) == 0}"
+    card title="Games" when="{rows}" id="games" {
+        data-table label="Doctor results" rows="{rows}" highlight="{row.summary.fail > 0}" {
+            col "Game" "{row.game.title}" grow=1
+            col "Result" "{row.summary.ok} ok · {row.summary.warn} warnings · {row.summary.fail} failed" w=260
+            col "" w=200 {
+                button "Details" style="small" action="nav.go" args="doctor {row.game.id}" label="Checks of {row.game.title}"
+                button "Setup" style="small" action="nav.go" args="game {row.game.id} setup" label="Setup of {row.game.title}"
+            }
+        }
+    }
+}
