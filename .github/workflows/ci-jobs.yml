@@ -485,12 +485,20 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: DeterminateSystems/determinate-nix-action@16f94ba7aae399b9f9077c254b6719ec6de7e3e3 # v3.24.2
-      # Ubuntu's AppArmor keeps unprivileged user namespaces from bwrap.
-      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - run: scripts/gui-headless.sh self-test
+      # Ubuntu's AppArmor keeps unprivileged user namespaces from bwrap. Lifting
+      # that is deliberate and only for CI's throwaway runner: each step that runs
+      # the sandbox lifts it and puts it back.
+      - name: Self-test
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          trap 'sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1' EXIT
+          scripts/gui-headless.sh self-test
+      - name: Build the shell's example
+        run: nix develop .#lavapipe -c cargo build -p gogo-ui-shell --example window
       - name: The shell's window
         run: |
-          nix develop .#lavapipe -c cargo build -p gogo-ui-shell --example window
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          trap 'sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1' EXIT
           nix develop .#lavapipe -c scripts/gui-headless.sh run --name shell -- \
             target/debug/examples/window
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

@@ -112,6 +112,8 @@ struct Open {
     remade: bool,
     /// Cached images are out of date and no frame has been presented since.
     images_stale: bool,
+    /// A CPU frame failed and was asked for again.
+    cpu_retried: bool,
 }
 
 struct Runner<A> {
@@ -197,6 +199,7 @@ impl<A: ShellApp> Runner<A> {
             window,
             remade: false,
             images_stale: false,
+            cpu_retried: false,
         });
         if let Some(dir) = self.app.watch() {
             let proxy = self.proxy.clone();
@@ -248,6 +251,7 @@ impl<A: ShellApp> Runner<A> {
         match drawn {
             Ok(Presented::Shown) => {
                 open.remade = false;
+                open.cpu_retried = false;
                 open.images_stale = false;
                 self.app.presented(Instant::now(), name);
                 let app = &mut self.app;
@@ -256,8 +260,12 @@ impl<A: ShellApp> Runner<A> {
             }
             Ok(Presented::Skipped) => {}
             Err(e) if matches!(output, Output::Cpu(_)) => {
-                // Nothing to fall back to. The next event draws again.
+                // Nothing to fall back to: once more, then wait for the next event.
                 tracing::error!("the frame could not be drawn: {e}");
+                if !open.cpu_retried {
+                    open.cpu_retried = true;
+                    open.window.request_redraw();
+                }
             }
             Err(e) => self.recover(event_loop, e),
         }
