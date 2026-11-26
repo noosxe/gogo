@@ -20,9 +20,9 @@ struct Entry<V> {
 ///
 /// Images the current frame uses are never evicted, so a frame that needs more than the
 /// budget keeps everything it draws until the next one. A key names one image for as long
-/// as it is cached: a store that has new pixels gives them a new key, or the owner of the
-/// renderer [clears](ImageCache::clear) the cache (an asset path means another file after a
-/// skin change or reload).
+/// as it is cached: a store that has new pixels gives them a new key, or the code that holds
+/// the renderer [clears](ImageCache::clear) the cache (an asset path means another file after
+/// a skin change or reload).
 #[derive(Debug)]
 pub struct ImageCache<V> {
     entries: HashMap<ImageKey, Entry<V>>,

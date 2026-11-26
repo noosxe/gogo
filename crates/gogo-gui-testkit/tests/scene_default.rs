@@ -78,7 +78,7 @@ fn check(route: &str) {
     let path: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/snapshots")
         .join(format!("default-{route}.txt"));
-    if std::env::var_os("GOGO_BLESS").is_some() {
+    if gogo_gui_testkit::env_flag("GOGO_BLESS") {
         std::fs::write(&path, &got).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         return;
     }
