@@ -252,6 +252,11 @@ pub fn log_record_allowed(target: &str, level: &tracing::Level) -> bool {
     !gog_warp || *level <= tracing::Level::WARN
 }
 
+// The bare `code <value>` rule is a narrow backstop for gog-warp's one wording. It
+// misses other forms (`code '…'`, a short value, a code with no digit or capital).
+// What keeps gog-warp's secrets out of a log is the level filter,
+// [`log_record_allowed`].
+
 /// The shortest value taken as a sign-in code in `code <value>`.
 const BARE_CODE_MIN: usize = 16;
 
