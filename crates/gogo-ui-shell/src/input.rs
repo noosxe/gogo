@@ -28,19 +28,16 @@ impl Translator {
                 Some(Input::PointerLeft)
             }
             WindowEvent::MouseInput { state, button, .. } => self.button(*state, *button),
-            // The platform makes up key events when the window gains or loses focus: they
-            // are not presses.
             WindowEvent::KeyboardInput {
                 event,
-                is_synthetic: false,
+                is_synthetic,
                 ..
-            } => Some(key_input(
-                map_key(&event.logical_key),
-                event.state,
-                event.repeat,
-                self.modifiers,
-            )),
-            WindowEvent::Focused(false) => Some(Input::FocusLost),
+            } => self.key(&event.logical_key, event.state, event.repeat, *is_synthetic),
+            WindowEvent::Focused(false) => {
+                // What was held is released somewhere else.
+                self.modifiers = ModifiersState::empty();
+                Some(Input::FocusLost)
+            }
             _ => None,
         }
     }
@@ -49,6 +46,18 @@ impl Translator {
         let (x, y) = (position.x / scale, position.y / scale);
         self.pointer = Some((x, y));
         Input::PointerMoved { x, y }
+    }
+
+    fn key(
+        &self,
+        key: &WinitKey,
+        state: ElementState,
+        repeat: bool,
+        synthetic: bool,
+    ) -> Option<Input> {
+        // The platform makes up key events when the window gains or loses focus: they are
+        // not presses.
+        (!synthetic).then(|| key_input(map_key(key), state, repeat, self.modifiers))
     }
 
     fn button(&self, state: ElementState, button: MouseButton) -> Option<Input> {
@@ -195,6 +204,27 @@ mod tests {
             key_input(Key::Tab, ElementState::Released, false, held),
             Input::KeyUp { key: Key::Tab }
         );
+    }
+
+    #[test]
+    fn a_key_the_platform_made_up_is_dropped() {
+        let t = Translator::default();
+        let enter = WinitKey::Named(NamedKey::Enter);
+        assert_eq!(t.key(&enter, ElementState::Pressed, false, true), None);
+        assert_eq!(t.key(&enter, ElementState::Released, false, true), None);
+        assert!(t.key(&enter, ElementState::Pressed, false, false).is_some());
+    }
+
+    #[test]
+    fn losing_focus_lets_go_of_the_modifiers() {
+        let mut t = Translator::default();
+        t.translate(
+            &WindowEvent::ModifiersChanged(ModifiersState::CONTROL.into()),
+            1.0,
+        );
+        assert_eq!(t.modifiers, ModifiersState::CONTROL);
+        t.translate(&WindowEvent::Focused(false), 1.0);
+        assert_eq!(t.modifiers, ModifiersState::empty());
     }
 
     #[test]

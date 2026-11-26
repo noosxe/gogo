@@ -104,8 +104,9 @@ impl ShellApp for App {
         Box::new(Stripes::default())
     }
 
-    fn presented(&mut self, _at: std::time::Duration, renderer: &'static str) {
+    fn presented(&mut self, _at: std::time::Duration, renderer: &'static str) -> bool {
         println!("gui: frame presented renderer={renderer}");
+        false
     }
 }
 

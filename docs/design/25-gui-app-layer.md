@@ -370,10 +370,14 @@ As built (input and AccessKit wiring):
   monotonic clock. `gogo-gui` owns the `Interaction` and the `A11yTree` and resolves an
   `ActionRef` against the screen the press was on.
 - `ui.set` writes the skin's value; a reload keeps it where the new skin still has it.
-- The safety flow's screens are not drawn yet (#536). An action that needs one is
-  cancelled at once, and the model is never told a screen was presented.
-- A route that no skin draws leaves the last screen up, with the reason over it; Esc goes
-  back.
+- A frame is built as pending and becomes the one input and assistive technology act on
+  only when the shell reports it presented; a skipped or failed frame changes nothing.
+- The safety flow's screens are not drawn yet (#536, #614). Whatever raises one (a
+  control, a job's question, a failed job) it is cancelled at once, and the model is never
+  told a screen was presented.
+- The error panel is an alert layer: while it is up only Esc does anything, nothing under
+  it can be pressed, and assistive technology reads its lines. A route that no skin draws
+  leaves the last screen in sight under it.
 - Touch, the palette, the account menu and the clipboard are not wired in.
 
 ## 9. Where things are stored

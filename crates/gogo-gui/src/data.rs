@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use gogo_contract::{Value, actions};
 use gogo_gui_model::fake::FakeBackend;
 use gogo_gui_model::fixture::{self, Fixture, GAME_ID, NOW};
-use gogo_gui_model::{Effect, InputEvent, Invocation, Location, Model, Outcome, SourceKey};
+use gogo_gui_model::{Effect, InputEvent, Invocation, Location, Modal, Model, Outcome, SourceKey};
 use gogo_skin::expr::{CallError, Scope};
 use gogo_ui_scene::{Image, ImageKey, ImageStore, MemoryStore};
 
@@ -87,17 +87,36 @@ impl Data {
 
     /// An action a control invoked.
     pub(crate) fn invoke(&mut self, invocation: &Invocation, event: InputEvent) -> Outcome {
-        self.model.invoke(invocation, event)
+        let outcome = self.model.invoke(invocation, event);
+        // What the model answers itself (the route on screen, the jobs) is only current
+        // after a pump, and the next bind must not wait for the wake.
+        self.model.pump();
+        outcome
     }
 
     /// Esc.
     pub(crate) fn dismiss(&mut self) -> Outcome {
-        self.model.dismiss()
+        let outcome = self.model.dismiss();
+        self.model.pump();
+        outcome
     }
 
-    /// Whether the safety flow has a screen up.
-    pub(crate) fn has_modal(&self) -> bool {
-        self.model.modal().is_some()
+    /// What the safety flow wants on screen, by kind: never its content, which can hold
+    /// the user's data.
+    pub(crate) fn modal_kind(&self) -> Option<&'static str> {
+        Some(match self.model.modal()? {
+            Modal::Prompt { .. } => "a prompt",
+            Modal::Planning { .. } => "a planning screen",
+            Modal::PlanCard { .. } => "a plan card",
+            Modal::Strong { .. } => "a destructive confirmation",
+            Modal::Error { .. } => "an error",
+        })
+    }
+
+    /// The fake, to script it and see what ran.
+    #[cfg(test)]
+    pub(crate) fn backend(&self) -> &FakeBackend {
+        self.model.backend()
     }
 
     /// What the app has to do since the last call.
