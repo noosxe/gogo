@@ -12,8 +12,8 @@ use gogo_ui_scene::{DisplayList, Op, SceneState, build};
 use gogo_ui_text::FontSet;
 
 fn bind(route: &str) -> Bound {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../gogo-skin/tests/fixtures/default");
-    let pkg = SkinPackage::load(&dir).unwrap_or_else(|r| panic!("{r}"));
+    let d = gogo_skins::default();
+    let pkg = SkinPackage::from_files(d.name, d.to_files()).unwrap_or_else(|r| panic!("{r}"));
     let scope = FixtureScope::new();
     let ui = UiState::defaults(&pkg.manifest);
     let b = Binding {
