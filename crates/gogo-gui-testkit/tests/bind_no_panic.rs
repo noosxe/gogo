@@ -2,16 +2,14 @@
 //! "Failures"): numbers that are NaN, infinite or huge, very long strings, nulls and masks
 //! in the places a skin reads them.
 
-use std::path::Path;
-
 use gogo_gui_testkit::{FixtureScope, GAME_ID};
 use gogo_skin::expr::Scope;
 use gogo_skin::{Binding, Mode, SkinPackage, UiState, Value};
 use proptest::prelude::*;
 
 fn skin() -> SkinPackage {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../gogo-skin/tests/fixtures/default");
-    match SkinPackage::load(&dir) {
+    let d = gogo_skins::default();
+    match SkinPackage::from_files(d.name, d.to_files()) {
         Ok(p) => p,
         Err(r) => panic!("{r}"),
     }

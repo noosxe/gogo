@@ -28,7 +28,7 @@ route "game" {
         case "overview" {
             grid columns="1fr 420" gap=@space.5 align="start" id="overview" {
                 column gap=@space.4 {
-                    // app-owned: placed inline, styled by parts; content and buttons are the app's
+                    // app-owned (design 26 §5): placed inline, styled by parts; the content and buttons are the app's
                     plan-card for="game.update" args="{$id}" placement="inline" labels="verb" layout="stacked" markers="number" id="plan" {
                         part "frame" style="plan-frame"
                         part "title" style="plan-title"
@@ -76,7 +76,7 @@ route "game" {
                             }
                         }
                     }
-                    // app-owned: values arrive masked; reveal and edit are the widget's own controls
+                    // app-owned (design 26 §5): values arrive masked; reveal and edit are the widget's own controls
                     env-table game="{$id}" row-actions="menu" title="Environment" id="env" {
                         part "title" style="card-title"
                         part "header" style="env-head"

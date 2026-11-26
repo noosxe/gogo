@@ -4,35 +4,13 @@
 //! `cargo nextest run --release -p gogo-gui-testkit bind_timing --no-capture` to see them.
 
 use std::collections::BTreeMap;
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use gogo_gui_testkit::{FixtureScope, GAME_ID};
 use gogo_skin::{Binding, Mode, SkinPackage, UiState, Value};
 
 fn files() -> Vec<(String, Vec<u8>)> {
-    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
-        let mut entries: Vec<_> = std::fs::read_dir(dir).unwrap().flatten().collect();
-        entries.sort_by_key(|e| e.file_name());
-        for e in entries {
-            let p = e.path();
-            if p.is_dir() {
-                walk(root, &p, out);
-            } else {
-                let rel = p
-                    .strip_prefix(root)
-                    .unwrap()
-                    .to_str()
-                    .unwrap()
-                    .replace('\\', "/");
-                out.push((rel, std::fs::read(&p).unwrap()));
-            }
-        }
-    }
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../gogo-skin/tests/fixtures/default");
-    let mut out = Vec::new();
-    walk(&root, &root, &mut out);
-    out
+    gogo_skins::default().to_files()
 }
 
 fn skin(extra_game_nodes: &str) -> SkinPackage {

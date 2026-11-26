@@ -1500,9 +1500,11 @@ dependencies = [
 name = "gogo-gui-testkit"
 version = "0.1.0"
 dependencies = [
+ "gogo-contract",
  "gogo-gui-model",
  "gogo-render-cpu",
  "gogo-skin",
+ "gogo-skins",
  "gogo-ui-layout",
  "gogo-ui-scene",
  "gogo-ui-text",

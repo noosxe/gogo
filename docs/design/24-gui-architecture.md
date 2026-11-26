@@ -104,7 +104,7 @@ flowchart LR
 | `gogo-ui-a11y` | IR + layout → AccessKit tree; requests → intents | `tree_update`, `map_request` | accesskit |
 | `gogo-ui-shell` | The window: winit loop, surfaces, frame pacing, damage, IME, clipboard, platform a11y, hot-reload watching | `Shell::run(impl ShellApp, RendererChoice)`, `ShellApp`, `Waker` | winit, accesskit_winit, notify, softbuffer, smithay-clipboard (Linux), arboard (macOS) |
 | `gogo-gui-model` | The app layer (design 25): sources, dispatch, the safety flow, jobs | `Model`, `trait Backend`, `SourceStore`, `SafetyFlow`, `JobTable`, and the persistence of each skin's `ui` values (handed to the binder as its `UiState`) | — |
-| `gogo-skins` | Built-in skins as data | `builtin()` (embedded with `include_str!`) | — |
+| `gogo-skins` | Built-in skins as data | `builtin()`, `default()`: each skin as a name and a static list of `(path, bytes)` embedded with `include_bytes!`, the shape `SkinPackage::from_files` takes. The Default skin is `crates/gogo-skins/skins/default/` | — |
 | `gogo-gui` | The binary: wires gogo-core in, owns the tokio runtime, picks a renderer | bin `gogo-gui`, `CoreBackend: Backend` | tokio, image (`jpeg`, `webp`) |
 | `gogo-gui-testkit` | Test support, dev-dependency only | `FixtureScope` (fictional data a skin binds against), `FakeBackend`, procedural covers, golden compare, headless render | png |
 

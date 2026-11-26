@@ -764,7 +764,10 @@ with the skin's variants and part styles.
 
 ## 10. Installing
 
-- **Built-in skins** are embedded in the app and load through the same loader (S17).
+- **Built-in skins** are embedded in the app and load through the same loader (S17). The
+  Default skin lives in `crates/gogo-skins/skins/default/`; `gogo_skins::builtin()` returns
+  its files as `(path, bytes)` for `SkinPackage::from_files`. It is also the skin the loader's
+  and binder's tests use, so there is one copy of it.
 - **Third-party skins** live in the skin folder (design 25 §9).
 - **Installing** means importing a folder or a zip:
   - the app validates it;
