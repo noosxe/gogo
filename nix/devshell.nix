@@ -5,6 +5,9 @@
 # which assembles `pkgs` per system and imports this file.
 {
   pkgs,
+  # Linux: make Mesa's software Vulkan (lavapipe) the only Vulkan device, for
+  # the GPU renderer's tests (design 24 §7).
+  lavapipe ? false,
 }:
 
 let
@@ -42,6 +45,10 @@ pkgs.mkShell {
 
   env = {
     RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
+  } // pkgs.lib.optionalAttrs lavapipe {
+    VK_DRIVER_FILES = "${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.${pkgs.stdenv.hostPlatform.parsed.cpu.name}.json";
+    # Or wgpu could pick the host's GL instead.
+    WGPU_BACKEND = "vulkan";
   };
 
   # The desktop GUI (design 24 §5, §7): winit dlopens wayland and libxkbcommon,

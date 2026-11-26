@@ -99,7 +99,7 @@ flowchart LR
 | `gogo-ui-layout` | IR → taffy → positioned boxes | `layout(&Tree, &mut FontSet, Viewport, &Scroll) -> Result<Laid, LayoutError>`, `Laid::{rect, content, text, hit, order}`, `Scroll` (offsets as input). Layout is in logical px; there is no scale argument, because the renderer applies the scale (design 28 §1) | taffy |
 | `gogo-ui-scene` | The display list and the `Renderer` trait | `DisplayList`, `Op`, `build(&Tree, &Laid, &SceneState)`, `ImageId`/`ImageKey`/`ImageStore`, `trait Renderer` + `Surface`, `icons` (the icon names and paths; an unknown name draws nothing) | kurbo, peniko |
 | `gogo-render-cpu` | vello_cpu renderer | `CpuRenderer: Renderer`, `render_to_rgba` | vello_cpu |
-| `gogo-render-gpu` | vello_gpu renderer on wgpu | `GpuRenderer: Renderer`, `TextureCache`, `PipelineCache`, readback | vello_gpu, wgpu |
+| `gogo-render-gpu` | vello_gpu renderer on wgpu | `GpuRenderer: Renderer`, `GpuSurface`, readback; a pipeline cache later (#540) | vello_gpu, wgpu, glifo |
 | `gogo-ui-interact` | Input → intents: hit-testing, focus, key routing, scroll state, layer stack, input provenance | `Interaction`, `Intent`, `InputProvenance`, `FocusOrder` | — |
 | `gogo-ui-a11y` | IR + layout → AccessKit tree; requests → intents | `tree_update`, `map_request` | accesskit |
 | `gogo-ui-shell` | The window: winit loop, surfaces, frame pacing, damage, IME, clipboard, platform a11y, hot-reload watching | `Shell::run(impl ShellApp, RendererChoice)`, `ShellApp`, `Waker` | winit, accesskit_winit, notify, softbuffer, smithay-clipboard (Linux), arboard (macOS) |
@@ -186,6 +186,7 @@ them under "GUI".
 | Layout | taffy | 0.16.0 | Flex, grid, block, absolute insets and measure callbacks. Pitfalls: since 0.15 insets are ignored unless `position` is set explicitly; `add_child` doesn't detach (it panics later); `remove` is quadratic |
 | Text | parley + fontique | 0.13.0 | HarfRust shaping, skrifa fonts, variable axes, OS fallback (off in `gogo-ui-text`'s default features; its `system-fonts` feature turns it on). `PlainEditor` gives selection, motion and IME composition; undo, clipboard and AccessKit wiring are ours |
 | GPU render | vello_gpu (+ vello_common) on wgpu | 0.4.0 / 30.0.2 | No compute shaders; native blur and drop-shadow filters. Beta caveats are in design 28 §5 |
+| Glyphs (GPU) | glifo | 0.5.0 | vello_gpu's glyph builder takes its glyph type without re-exporting it |
 | CPU render | vello_cpu | 0.4.0 | Single-threaded: filters panic in its multithreading mode today |
 | Windowing | winit | 0.30.13 | Move to 0.31 once accesskit_winit supports it |
 | Accessibility | accesskit + accesskit_winit | 0.25.2 / 0.34.2 | AT-SPI on Linux, NSAccessibility on macOS. Pinned together |
@@ -276,8 +277,9 @@ wgpu's GL backend needs a loadable `libEGL.so.1` on the library path.
     macOS. Today clippy runs on ubuntu only.
   - `cargo-deny` stays workspace-wide: it compiles nothing, and every dependency's licence
     and advisories must be checked.
-  - A lavapipe job runs the vello_gpu tests in the nix shell. It arrives with the GPU
-    renderer's tests; PR B1 wires the rest.
+  - A `gui-lavapipe` job runs the vello_gpu tests on ubuntu in the nix shell
+    (`.#lavapipe`: the dev shell with Mesa's software Vulkan as the only Vulkan driver). It
+    runs for the same changes as `gui`, and for the shell's own files.
   - All of it is wired into `CI result` (`ci-jobs.yml` names the three places).
   - The same job checks the dependency rules in §2.1 with `scripts/gui-deps-check.py`
     (`cargo metadata`, direct edges only), whose own tests run first.
