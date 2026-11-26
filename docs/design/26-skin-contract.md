@@ -202,7 +202,8 @@ An action is invoked by name from a bound user input (S4). It has typed paramete
 **The app decides kind and tier from the computed plan, never from the skin.** The tables
 below give each action's usual kind and tier, but some depend on what the plan turns out
 to contain:
-- `game.update` is destructive when its plan removes DLC or downgrades;
+- `game.update` is destructive when its plan removes DLC or downgrades, and so is
+  `updates.apply_all` when that is true of any game in the batch;
 - `runner.set_runtime` becomes plan → job when a download is needed, and
   `runner.set_galaxy` becomes a plan when Comet must be downloaded;
 - `game.move` is destructive when its plan crosses filesystems (snapshots are deleted);
@@ -261,7 +262,7 @@ on any other element.
 | Action | Params | Kind / tier | Notes |
 |---|---|---|---|
 | `game.update` | `id, build?` | plan → job / confirm; **destructive** if the plan removes DLC or downgrades | The plan shows size, files changed or removed, a snapshot first, and DLC removed. With DLC removal the default answer is no, as in the CLI |
-| `updates.apply_all` | `ids?` | plan → jobs / confirm | One combined plan card |
+| `updates.apply_all` | `ids?` | plan → jobs / confirm; **destructive** if the plan removes DLC or downgrades | One combined plan card. One game that loses DLC or downgrades makes the whole batch destructive |
 | `game.update_finish`, `game.update_undo` | `id` | plan / confirm | For half-laid updates |
 
 ### 4.5 Set up for this machine (Linux, Mac)
