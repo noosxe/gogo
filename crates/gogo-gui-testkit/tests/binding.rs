@@ -810,9 +810,29 @@ fn borrower_and_default(
         "var \"view\"",
         "var \"mode_x\" type=\"enum(a b)\" default=\"a\"\n        var \"view\"",
     );
+    // The Default skin has its own `game.builds`: rename it so the test's fragment (or its
+    // absence) is what the borrowing skin gets.
+    rep(
+        &mut df,
+        "components/game.kdl",
+        "component \"game.builds\"",
+        "component \"game.builds-own\"",
+    );
+    rep(
+        &mut df,
+        GAME,
+        "use \"game.builds\"",
+        "use \"game.builds-own\"",
+    );
     append(&mut df, "components/stock.kdl", default_extra);
     let default = skin("default", df);
     let mut of = base();
+    rep(
+        &mut of,
+        GAME,
+        "use \"game.builds\"",
+        "use default \"game.builds\"",
+    );
     if !other_manifest_ui.is_empty() {
         rep(
             &mut of,

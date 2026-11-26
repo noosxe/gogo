@@ -1,0 +1,100 @@
+// The fragments of the `game` route (design 27 §5.7): one component per tab, so a skin may
+// borrow them with `use default "game.<tab>"`. Plain layouts, built from the contract's data.
+
+component "game.builds" {
+    card title="Builds" {
+        data-table label="Builds" rows="{game.builds($id)}" highlight="{row.this_machine}" {
+            col "Build" "{row.version}" mono=#true w=100
+            col "Date" "{fmt.date(row.date)}" mono=#true w=157
+            col "Size" "{fmt.bytes(row.size)}" mono=#true w=122
+            col "Generation" "gen {row.generation}{row.legacy ? ' · legacy' : ''}" w=164
+            col "" {
+                badge "Newest" tone="warn" when="{row.newest}"
+                badge "This machine" tone="success" when="{row.this_machine}"
+            }
+        }
+    }
+}
+
+component "game.dlc" {
+    card title="DLC" {
+        data-table label="DLC" rows="{game.dlc($id)}" {
+            col "Title" "{row.title}" grow=1
+            col "Size" "{fmt.bytes(row.download_size)}" mono=#true w=122
+            col "" {
+                badge "Installed" tone="success" when="{row.installed}"
+                badge "Owned" tone="neutral" when="{row.owned and not row.installed}"
+            }
+        }
+        button "Add…" style="ghost link" action="dlc.add" args="{$id} all"
+    }
+}
+
+component "game.saves" {
+    let s="{game.saves($id)}"
+    card title="Cloud saves" {
+        row gap=@space.3 {
+            text "{s.state == in_sync ? 'In sync' : 'Needs attention'}" style="tile-title"
+            text "checked {fmt.ago(s.checked_at)}" style="tile-sub"
+            spacer
+            button "Check now" action="saves.check" args="{$id}"
+        }
+        data-table label="Save files" rows="{s.files}" {
+            col "File" "{row.display_path}" mono=#true grow=1
+            col "Action" "{row.action}" w=122
+            col "" { badge "Conflict" tone="warn" when="{row.conflict}" }
+        }
+    }
+}
+
+component "game.snapshots" {
+    let snaps="{game.snapshots($id)}"
+    card title="Snapshots · {snaps.items | len}" {
+        row gap=@space.3 {
+            text "Autosnapshot {snaps.auto ? 'on' : 'off'}" style="hint"
+            spacer
+            button "Create snapshot" action="snapshot.create" args="{$id}"
+        }
+        each "s" in="{snaps.items | sort -date}" {
+            row style="snap-row" {
+                dot tone="{s.kind == auto ? 'accent' : 'outline'}"
+                text "{s.label}" style="snap-label" grow=1
+                text "{fmt.date(s.date)} · {s.kind}" style="mono-lo"
+            }
+        }
+    }
+}
+
+component "game.setup" {
+    let doc="{game.doctor($id)}"
+    card title="Setup" {
+        row gap=@space.3 {
+            text "Doctor: {doc.summary.ok} ok · {doc.summary.warn} warnings · {doc.summary.fail} failed" style="hint"
+            spacer
+            button "Run setup" action="game.setup" args="{$id}"
+            button "Run doctor" action="doctor.run" args="{$id}"
+        }
+        each "c" in="{doc.checks}" {
+            row style="snap-row" {
+                dot tone="{c.result == ok ? 'success' : (c.result == warn ? 'warn' : 'error')}"
+                text "{c.name}" style="snap-label" grow=1
+                text "{c.message}" style="mono-lo"
+            }
+        }
+    }
+}
+
+component "game.files" {
+    card title="Files" {
+        row gap=@space.3 {
+            spacer
+            button "Verify files" action="game.verify" args="{$id}"
+        }
+        data-table label="Files" rows="{game.files($id)}" {
+            col "Name" "{row.name}" mono=#true grow=1
+            col "Kind" "{row.kind}" w=122
+            col "Size" "{fmt.bytes(row.size)}" mono=#true w=122
+            col "" { badge "Downloaded" tone="success" when="{row.downloaded}" }
+        }
+    }
+}

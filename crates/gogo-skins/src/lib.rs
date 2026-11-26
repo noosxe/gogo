@@ -41,6 +41,7 @@ pub const DEFAULT: BuiltinSkin = BuiltinSkin {
         file!("tokens.kdl"),
         file!("styles.kdl"),
         file!("components/stock.kdl"),
+        file!("components/game.kdl"),
         file!("routes/shell.kdl"),
         file!("routes/game.kdl"),
     ],

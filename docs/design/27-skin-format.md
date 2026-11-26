@@ -768,6 +768,8 @@ with the skin's variants and part styles.
   Default skin lives in `crates/gogo-skins/skins/default/`; `gogo_skins::builtin()` returns
   its files as `(path, bytes)` for `SkinPackage::from_files`. It is also the skin the loader's
   and binder's tests use, so there is one copy of it.
+  Until it covers every route (#576), binding a route it has no file for returns a bind
+  error, as there is no other skin to fall back to.
 - **Third-party skins** live in the skin folder (design 25 §9).
 - **Installing** means importing a folder or a zip:
   - the app validates it;
