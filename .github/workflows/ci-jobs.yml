@@ -495,7 +495,7 @@ jobs:
           trap 'sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1' EXIT
           scripts/gui-headless.sh self-test
       - name: Build gogo-gui
-        run: nix develop .#lavapipe -c cargo build -p gogo-gui
+        run: nix develop .#lavapipe -c cargo build -p gogo-gui --features fixture
       - name: Hot reload on the GPU and CPU paths
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0

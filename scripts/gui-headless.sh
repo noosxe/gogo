@@ -3,6 +3,7 @@
 # (design 24 §5). Linux only. Run it inside the dev shell, which provides the
 # libraries the application loads:
 #
+#   cargo build -p gogo-gui --features fixture   (without it there is no --fixture)
 #   nix develop .#lavapipe -c scripts/gui-headless.sh run -- target/debug/gogo-gui --fixture
 #   nix develop -c scripts/gui-headless.sh self-test
 #

@@ -10,6 +10,11 @@ license.workspace = true
 name = "gogo-gui"
 path = "src/main.rs"
 
+[features]
+# Fictional data (`--fixture`, `--render-png`) for skin work, tests and screenshots.
+# Off in a normal build, which carries none of it.
+fixture = ["gogo-gui-model/fake"]
+
 [dependencies]
 gogo-ui-shell.workspace = true
 gogo-ui-interact.workspace = true
@@ -20,13 +25,17 @@ gogo-ui-layout.workspace = true
 gogo-ui-scene.workspace = true
 gogo-skin.workspace = true
 gogo-skins.workspace = true
-# `fake`: skin development and screenshots run without an engine (design 25 §1).
-gogo-gui-model = { workspace = true, features = ["fake"] }
+gogo-gui-model.workspace = true
 gogo-render-cpu.workspace = true
 gogo-render-gpu.workspace = true
 gogo-contract.workspace = true
 gogo-core.workspace = true
+async-trait.workspace = true
 clap.workspace = true
+image.workspace = true
+jiff.workspace = true
+reqwest.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 miette.workspace = true
 png.workspace = true
 thiserror.workspace = true
@@ -34,6 +43,10 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+# The tests run on fictional data too.
+gogo-gui = { path = ".", features = ["fixture"] }
+gogo-core = { workspace = true, features = ["test-util"] }
+wiremock.workspace = true
 gogo-gui-testkit.workspace = true
 tempfile.workspace = true
 log.workspace = true

@@ -7,6 +7,7 @@ use gogo_contract::Gates;
 
 use crate::call::Call;
 use crate::error::ErrorView;
+use crate::failures::Failures;
 use crate::jobs::Jobs;
 use crate::plan::{PlanHandle, PlanReply};
 use crate::prompt::{PromptAnswer, PromptSpec};
@@ -17,6 +18,12 @@ pub type Subscription = Box<dyn Any + Send>;
 
 /// Every method returns at once.
 pub trait Backend {
+    /// Called once, before anything else: where to report what fails when no call
+    /// is waiting for it.
+    fn attach(&mut self, failures: Failures) {
+        let _ = failures;
+    }
+
     /// Start feeding a source; values arrive through the slot.
     fn subscribe(&mut self, key: &SourceKey, slot: Slot) -> Subscription;
 

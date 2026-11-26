@@ -30,6 +30,9 @@ pub(crate) enum DrawError {
     Bind(#[from] BindError),
     #[error(transparent)]
     Layout(#[from] LayoutError),
+    /// A source the route reads has no value yet.
+    #[error("waiting for data")]
+    Loading,
 }
 
 /// A loaded skin and the values of its `ui` variables.
@@ -153,7 +156,12 @@ impl Page {
             ui: s.ui.clone(),
         });
         let result = self.load(dir).and_then(|()| {
-            let bound = self.bind(data, route).map_err(|e| vec![e.to_string()])?;
+            let bound = match self.bind(data, route) {
+                (Ok(bound), _) => bound,
+                // What fails while data is on the way says nothing about the skin.
+                (Err(_), true) => return Ok(()),
+                (Err(e), false) => return Err(vec![e.to_string()]),
+            };
             // A route the skin leaves to the default one is not a mistake.
             let broken: Vec<String> = bound
                 .fallbacks
@@ -176,8 +184,9 @@ impl Page {
         result
     }
 
-    /// Binds `route`, watching every source the skin reads along the way.
-    fn bind(&self, data: &mut Data, route: &str) -> Result<Bound, BindError> {
+    /// Binds `route`, watching every source the skin reads along the way. The flag
+    /// says that one of them has no value yet.
+    fn bind(&self, data: &mut Data, route: &str) -> (Result<Bound, BindError>, bool) {
         let skin = self.active.as_ref().unwrap_or(&self.default);
         let default = DefaultSkin {
             skin: &self.default.package,
@@ -197,13 +206,15 @@ impl Page {
             );
             let asked = scope.asked();
             passes += 1;
+            let missing = data.arrives_later() && !asked.is_empty();
             if !data.watch(asked) || passes == PASSES {
-                return bound;
+                return (bound, missing);
             }
         }
     }
 
     /// The display list of `route` for a window of `size` logical px.
+    #[cfg(any(feature = "fixture", test))]
     pub(crate) fn draw(
         &mut self,
         data: &mut Data,
@@ -220,7 +231,10 @@ impl Page {
         route: &str,
         (width, height): (f32, f32),
     ) -> Result<Screen, DrawError> {
-        let bound = self.bind(data, route)?;
+        let bound = match self.bind(data, route) {
+            (_, true) => return Err(DrawError::Loading),
+            (bound, false) => bound?,
+        };
         let laid = layout(
             &bound.tree,
             &mut self.fonts,

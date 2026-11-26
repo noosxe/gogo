@@ -109,6 +109,19 @@ impl TokenProvider for Session {
     }
 }
 
+/// The account's user name, from GOG's user data. The rest of that answer (the
+/// email among it) is dropped here. `None` for a provider with no live session.
+pub async fn username(session: &dyn TokenProvider) -> Result<Option<String>, AuthError> {
+    let Some(core) = session.gog_warp_core() else {
+        return Ok(None);
+    };
+    let data = core
+        .get_user_data()
+        .await
+        .map_err(|e| AuthError::Upstream(crate::redact::describe_error(&e)))?;
+    Ok(Some(data.username().to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

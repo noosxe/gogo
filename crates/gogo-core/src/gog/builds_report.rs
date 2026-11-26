@@ -2,7 +2,7 @@
 //! builds, and the `--installed` overview (design 21 §2). Pure: the command
 //! fetches the listing and the manifests and hands the facts over.
 
-use gog_warp::content_system::types::Manifest;
+use gog_warp::content_system::types::{Manifest, Platform};
 use jiff::Timestamp;
 use serde_json::{Value, json};
 
@@ -68,6 +68,48 @@ pub async fn fetch_facts(
         }
     }
     out
+}
+
+/// One build for a frontend's list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Overview {
+    pub entry: BuildEntry,
+    /// `None`: the manifest couldn't be fetched, or lacks the language.
+    pub download_size: Option<u64>,
+    /// The build an update of an unbranched game takes.
+    pub newest: bool,
+}
+
+/// The builds of a product, newest first, with their download sizes. `mac`: the
+/// macOS builds, else the Windows ones. Empty for a provider with no live session.
+pub async fn list(
+    session: &dyn crate::auth::TokenProvider,
+    product_id: u64,
+    mac: bool,
+    language: &str,
+) -> Result<Vec<Overview>, crate::gog::depot::DepotError> {
+    let Some(core) = session.gog_warp_core() else {
+        return Ok(Vec::new());
+    };
+    let os = if mac {
+        Platform::OsX
+    } else {
+        Platform::Windows
+    };
+    let listing = super::builds::fetch_listing(core, product_id, os, None)
+        .await
+        .map_err(|e| crate::gog::depot::DepotError::Library(crate::redact::describe_error(&e)))?;
+    let facts = fetch_facts(core, &listing, language).await;
+    let newest = listing.newest().map(|b| b.build_id().clone());
+    Ok(listing
+        .entries()
+        .into_iter()
+        .map(|entry| Overview {
+            download_size: facts.get(&entry.build_id).and_then(|f| f.download_size),
+            newest: newest.as_deref() == Some(entry.build_id.as_str()),
+            entry,
+        })
+        .collect())
 }
 
 /// A DLC's name for the table's JSON.

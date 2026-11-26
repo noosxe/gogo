@@ -341,6 +341,25 @@ app control is told apart by its `DrawnBy::App` part and tree key.
 - The decoded image reaches the scene as an `ImageId`, and skins never see a URL (S3).
 - The GPU renderer uploads it into a texture cache with a byte budget (design 28 §4).
 
+As built (PR F1, `CoreBackend`, read-only):
+
+- **Sources read:** `account`, `app`, `library` (its filter and sort arguments are not
+  applied yet), `library.stats`, `game`, `game.builds`, `game.dlc`, `game.files`. Every
+  other source gets a well-shaped empty value, so no screen waits for ever.
+- **Loading.** While a source the route reads has no value, an app-owned "Loading" layer
+  is over the last screen; only Esc acts. A read that fails still writes an empty value.
+- **Failures** that no call waits for go through `Failures`, which the model hands the
+  backend in `Backend::attach` and turns into error screens.
+- **Covers** are asked for by the renderers (a handle `art:<id>:cover` or
+  `:background`), so only drawn ones are fetched: the address comes from the product's
+  public page (`GET /v2/games/{id}`, no credential), https and GOG's image hosts only,
+  redirects included; body at most 8 MiB, at most 4096 px a side and 16 MP checked
+  before decoding, an allocation limit, `catch_unwind`; shrunk to about twice the drawn
+  size, 128 MiB in memory, and kept as JPEG under the cover cache (§9). The logo is a
+  PNG, so it has no picture.
+- **Description** HTML becomes plain text without addresses.
+- Reads only. Plans and runs other than `library.refresh` are refused.
+
 ## 8. Skin dev mode
 
 - **`gogo-gui --dev <skin dir>`:**
@@ -355,8 +374,9 @@ app control is told apart by its `DrawnBy::App` part and tree key.
 
 As built (PR E4):
 
-- Only `--fixture` runs until real data is wired in (#535); without it the window is
-  refused.
+- `--fixture` and `--render-png` need the binary's `fixture` feature, which a normal
+  build leaves off with all the fictional data. Without `--fixture` the window runs on
+  `CoreBackend` (PR F1).
 - A reload takes the new skin only if it loads with no errors and its routes bind.
   Otherwise the last good skin stays, and the errors are listed over it. The inspector
   and app-widget content are not built yet.

@@ -17,11 +17,13 @@ pub mod depot;
 pub mod dlc;
 pub mod dlc_filter;
 pub mod downlink;
+pub mod endpoints;
 pub mod error;
 pub mod language;
 pub mod lay;
 pub mod library;
 pub mod materialize;
+pub mod overview;
 
 pub const EMBED_BASE: &str = "https://embed.gog.com";
 pub const API_BASE: &str = "https://api.gog.com";

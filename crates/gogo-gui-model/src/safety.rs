@@ -556,7 +556,7 @@ impl SafetyFlow {
         Outcome::Refused(error)
     }
 
-    fn fail(&mut self, error: ErrorView) {
+    pub(crate) fn fail(&mut self, error: ErrorView) {
         // The same error again, straight after, says nothing new.
         if self.errors.back().is_some_and(|(_, last)| *last == error) {
             return;

@@ -16,6 +16,8 @@ const LINES: usize = 8;
 
 const BACKGROUND: Color = Color([0x2a, 0x10, 0x14, 0xf2]);
 const HEADING: Color = Color([0xff, 0x8a, 0x80, 0xff]);
+/// Behind [`Panel::loading`], which is no error.
+const QUIET: Color = Color([0x14, 0x16, 0x1b, 0xf2]);
 const TEXT: Color = Color([0xf5, 0xf5, 0xf5, 0xff]);
 
 /// Why the panel could not be drawn.
@@ -54,8 +56,23 @@ impl Panel {
     /// The panel along the bottom of a window of `width` by `height` logical px.
     pub(crate) fn new(
         fonts: &mut FontSet,
-        (width, height): (f32, f32),
+        size: (f32, f32),
         heading: &str,
+        lines: &[String],
+    ) -> Result<Panel, PanelError> {
+        Panel::styled(fonts, size, (heading, HEADING), BACKGROUND, lines)
+    }
+
+    /// The app's "Loading" screen: while it is up nothing under it takes input.
+    pub(crate) fn loading(fonts: &mut FontSet, size: (f32, f32)) -> Result<Panel, PanelError> {
+        Panel::styled(fonts, size, ("Loading…", TEXT), QUIET, &[])
+    }
+
+    fn styled(
+        fonts: &mut FontSet,
+        (width, height): (f32, f32),
+        (heading, colour): (&str, Color),
+        background: Color,
         lines: &[String],
     ) -> Result<Panel, PanelError> {
         let mut root = Node::new(Kind::Box);
@@ -81,11 +98,11 @@ impl Panel {
         };
         let mut panel = Node::new(Kind::Box);
         panel.layout = style;
-        panel.paint = Paint::solid(BACKGROUND);
+        panel.paint = Paint::solid(background);
         let root = tree.root();
         let panel = tree.add_child(root, "panel/box", panel)?;
 
-        tree.add_child(panel, "panel/heading", text(heading, 15.0, HEADING))?;
+        tree.add_child(panel, "panel/heading", text(heading, 15.0, colour))?;
         for (i, line) in lines.iter().take(LINES).enumerate() {
             tree.add_child(panel, format!("panel/{i}"), text(line, 13.0, TEXT))?;
         }

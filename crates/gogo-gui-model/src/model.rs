@@ -10,6 +10,7 @@ use gogo_contract::Value;
 use crate::backend::{Backend, Subscription};
 use crate::call::{Call, Invocation};
 use crate::error::ErrorView;
+use crate::failures::Failures;
 use crate::jobs::{JobId, JobTable};
 use crate::prompt::PromptAnswer;
 use crate::safety::{
@@ -37,6 +38,7 @@ pub struct Model<B: Backend> {
     subscriptions: HashMap<SourceKey, Subscription>,
     jobs: JobTable,
     flow: SafetyFlow,
+    failures: Failures,
     history: Vec<Location>,
     /// The sources the model answers itself, kept so they can be lent out.
     own: HashMap<SourceKey, Value>,
@@ -45,14 +47,17 @@ pub struct Model<B: Backend> {
 impl<B: Backend> Model<B> {
     /// `wake` is called from any thread, at most once between two [`pump`](Self::pump)
     /// calls.
-    pub fn new(backend: B, wake: impl Fn() + Send + Sync + 'static) -> Self {
+    pub fn new(mut backend: B, wake: impl Fn() + Send + Sync + 'static) -> Self {
         let signal = Signal::new(wake);
+        let failures = Failures::new(Arc::clone(&signal));
+        backend.attach(failures.clone());
         let mut model = Model {
             backend,
             sources: SourceStore::new(Arc::clone(&signal)),
             subscriptions: HashMap::new(),
             jobs: JobTable::new(Arc::clone(&signal)),
             flow: SafetyFlow::new(Arc::clone(&signal)),
+            failures,
             history: vec![Location {
                 route: "library".to_owned(),
                 params: BTreeMap::new(),
@@ -73,6 +78,11 @@ impl<B: Backend> Model<B> {
     /// way round the safety flow.
     pub fn backend_mut(&mut self) -> &mut B {
         &mut self.backend
+    }
+
+    /// Where to report what fails when no call is waiting for it.
+    pub fn failures(&self) -> Failures {
+        self.failures.clone()
     }
 
     /// The job table.
@@ -148,7 +158,11 @@ impl<B: Backend> Model<B> {
         // Questions first: draining forgets unlisted jobs that ended.
         let questions = self.jobs.take_prompts();
         let transitions = self.jobs.drain();
+        let failed = self.failures.take();
         let (flow, mut engine) = self.split();
+        for error in failed {
+            flow.fail(error);
+        }
         flow.pump(&mut engine, questions, &transitions);
 
         let before = std::mem::take(&mut self.own);
