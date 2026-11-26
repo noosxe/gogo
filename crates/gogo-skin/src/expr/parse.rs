@@ -10,6 +10,12 @@ use super::{MAX_EXPR_DEPTH, MAX_EXPR_LEN};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Lit(Value),
+    /// An enum word the loader settled as one: a bare operand of `==` or `!=` (design
+    /// 27 §7). The parser never builds it. It is its own text whatever the scope answers.
+    Word {
+        name: String,
+        span: Span,
+    },
     /// A bare name: a bound variable, or else an enum word such as `ready`.
     Name {
         name: String,
@@ -120,7 +126,7 @@ impl Expr {
     pub fn mentions(&self, name: &str) -> bool {
         match self {
             Expr::Name { name: n, .. } => n == name,
-            Expr::Lit(_) | Expr::Param(_) => false,
+            Expr::Lit(_) | Expr::Param(_) | Expr::Word { .. } => false,
             Expr::Token { alpha, .. } => alpha.as_ref().is_some_and(|a| a.mentions(name)),
             Expr::Field { base, .. } => base.mentions(name),
             Expr::Call { args, .. } => args.iter().any(|a| a.mentions(name)),
@@ -147,7 +153,7 @@ impl Expr {
                 span: *span,
                 in_item_scope: item,
             }),
-            Expr::Lit(_) | Expr::Param(_) => {}
+            Expr::Lit(_) | Expr::Param(_) | Expr::Word { .. } => {}
             Expr::Token { alpha, .. } => {
                 if let Some(a) = alpha {
                     a.collect_names(item, out);
@@ -179,7 +185,7 @@ impl Expr {
     /// tree: evaluation, [`Expr::mentions`], `Drop` and `PartialEq`.
     pub fn depth(&self) -> usize {
         1 + match self {
-            Expr::Lit(_) | Expr::Param(_) | Expr::Name { .. } => 0,
+            Expr::Lit(_) | Expr::Param(_) | Expr::Name { .. } | Expr::Word { .. } => 0,
             Expr::Token { alpha, .. } => alpha.as_ref().map_or(0, |a| a.depth()),
             Expr::Field { base, .. } => base.depth(),
             Expr::Call { args, .. } => args.iter().map(Expr::depth).max().unwrap_or(0),

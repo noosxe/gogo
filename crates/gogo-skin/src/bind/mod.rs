@@ -47,7 +47,8 @@ mod widgets;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use gogo_contract::Value;
+use gogo_contract::routes::route_spec;
+use gogo_contract::{SourceParam, Value};
 use gogo_ui_ir::{A11y, ActionRef, Color, Dim, Node, NodeId, Role, Tree};
 
 use crate::ast::{Node as AstNode, Operand, Val};
@@ -315,6 +316,18 @@ pub(crate) struct EnvScope<'x> {
     vars: &'x [Var],
     ui: &'x Value,
     tokens: &'x [&'x tokens::Values],
+    /// The parameters of the route being bound.
+    pub(crate) route_params: &'static [SourceParam],
+}
+
+/// What an absent route parameter reads as: null when the contract declares it optional
+/// for the route, and nothing otherwise.
+pub(crate) fn absent_param(params: &[SourceParam], name: &str) -> Option<&'static Value> {
+    static NULL: Value = Value::Null;
+    params
+        .iter()
+        .any(|p| p.name == name && p.optional)
+        .then_some(&NULL)
 }
 
 impl Scope for EnvScope<'_> {
@@ -328,7 +341,9 @@ impl Scope for EnvScope<'_> {
         self.data.var(name)
     }
     fn param(&self, name: &str) -> Option<&Value> {
-        self.data.param(name)
+        self.data
+            .param(name)
+            .or_else(|| absent_param(self.route_params, name))
     }
     fn token(&self, name: &str) -> Option<&Value> {
         self.tokens.iter().find_map(|t| t.get(name))
@@ -486,6 +501,7 @@ impl<'a> Binder<'a> {
             vars: &self.vars,
             ui: self.ui,
             tokens: &self.tokens,
+            route_params: route_spec(&self.route).map_or(&[], |r| r.params),
         }
     }
 

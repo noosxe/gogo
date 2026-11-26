@@ -6,11 +6,11 @@
 //! only as far as it is certain: a type it can't tell is `None` and stops the check of
 //! that path without an error (full inference is planned, #564).
 
-use gogo_contract::{FieldType, SourceSpec, shapes, sources};
+use gogo_contract::{FieldType, Os, SourceSpec, Status, Value, shapes, sources};
 
 use crate::ast::{Arg, Term};
 use crate::diag::Code;
-use crate::expr::{Expr, Seg, Stage, Template};
+use crate::expr::{BinOp, Expr, Seg, Stage, Template};
 use crate::manifest::UiType;
 use crate::names::suggest;
 use crate::resolve::Checker;
@@ -242,6 +242,14 @@ impl Checker<'_> {
                 Ty::default()
             }
             Expr::Name { .. } => self.name(e, loc, k, false),
+            // Checked again for a fragment borrowed into a skin with other words.
+            Expr::Word { name, span } => {
+                if !self.words.contains(name.as_str()) {
+                    let at = loc.span(k, *span);
+                    self.unknown_name(&name.clone(), at);
+                }
+                Ty::text()
+            }
             Expr::Field { .. } => self.field(e, loc, k),
             Expr::Call { .. } => self.call(e, loc, k),
             Expr::Not(a) => {
@@ -252,9 +260,17 @@ impl Checker<'_> {
                 self.expr(a, loc, k);
                 Ty::computed(Some(FieldType::Number))
             }
-            Expr::Bin(_, a, b) => {
-                self.expr(a, loc, k);
-                self.expr(b, loc, k);
+            Expr::Bin(op, a, b) => {
+                let equality = matches!(op, BinOp::Eq | BinOp::Ne);
+                if equality {
+                    self.word_operand(a, loc, k);
+                    self.word_operand(b, loc, k);
+                }
+                let (ta, tb) = (self.expr(a, loc, k), self.expr(b, loc, k));
+                if equality {
+                    self.compared(a, b, tb, loc);
+                    self.compared(b, a, ta, loc);
+                }
                 Ty::computed(Some(FieldType::Bool))
             }
             Expr::Ternary(c, a, b) => {
@@ -276,6 +292,94 @@ impl Checker<'_> {
                 }
             }
             Expr::Pipe(..) => self.pipe(e, loc, k),
+        }
+    }
+
+    // ---- comparisons ----
+
+    /// An operand of `==` or `!=` that is a bare enum word is that word, never the source
+    /// of the same name (design 27 §7, "Names"). A variable of the name still wins. The
+    /// tree keeps the word as a text literal, so evaluation never asks the scope for it.
+    fn word_operand(&mut self, e: &mut Expr, loc: &Loc, k: usize) {
+        let Expr::Name {
+            name,
+            span,
+            source: None,
+        } = e
+        else {
+            return;
+        };
+        if !self.words.contains(name.as_str()) {
+            return;
+        }
+        match self.lookup(name) {
+            (Some(_), _) => {}
+            (None, false) => {
+                *e = Expr::Word {
+                    name: name.clone(),
+                    span: *span,
+                };
+            }
+            // A `where` over items of unknown type: the name may be one of their fields.
+            // Only a word that is also a source could then be read two ways.
+            (None, true) if bare_source(name).is_some() => {
+                let at = loc.span(k, *span);
+                let msg = format!("`{name}` may be a field, a source or the word here");
+                let help = format!("write the word as `'{name}'`");
+                self.emit(None, Code::UnknownName, at, msg, Some(help));
+            }
+            (None, true) => {}
+        }
+    }
+
+    /// Check a text literal compared with a value of a known type: the value must be able
+    /// to equal it.
+    fn compared(&mut self, lit: &Expr, other: &Expr, ty: Ty, loc: &Loc) {
+        let word = match lit {
+            Expr::Lit(Value::Str(word)) => word,
+            Expr::Word { name, .. } if self.words.contains(name.as_str()) => name,
+            _ => return,
+        };
+        let Some(ft) = ty.ft else {
+            return;
+        };
+        let ui_words = self.ui_words(other);
+        let msg = match ft.inner() {
+            _ if ui_words.is_some_and(|w| !w.iter().any(|w| w == word)) => {
+                format!("`{word}` is no value of that `ui` variable")
+            }
+            FieldType::OneOf(words) if !words.contains(&word.as_str()) => {
+                format!("{} is never `{word}`", type_name(&ft))
+            }
+            FieldType::Status if !Status::ALL.iter().any(|s| s.name() == word) => {
+                format!("`{word}` is no status")
+            }
+            FieldType::Os if !Os::ALL.iter().any(|o| o.name() == word) => {
+                format!("`{word}` is no OS")
+            }
+            FieldType::List(_)
+            | FieldType::Bool
+            | FieldType::Number
+            | FieldType::Bytes
+            | FieldType::Time
+            | FieldType::Duration
+            | FieldType::Fraction => format!("{} is never the text `{word}`", type_name(&ft)),
+            _ => return,
+        };
+        self.emit(Some(&ty), Code::TypeMismatch, loc.whole, msg, None);
+    }
+
+    /// The words of the `enum` variable `e` reads, if it is `ui.<name>`.
+    fn ui_words(&self, e: &Expr) -> Option<&[String]> {
+        let Expr::Field { base, name, .. } = e else {
+            return None;
+        };
+        if !matches!(&**base, Expr::Name { name, .. } if name == "ui") {
+            return None;
+        }
+        match &self.ui_var(name)?.ty {
+            UiType::Enum(words) => Some(words),
+            _ => None,
         }
     }
 

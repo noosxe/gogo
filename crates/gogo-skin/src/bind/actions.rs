@@ -17,6 +17,7 @@ use gogo_contract::actions::{Param, ParamType};
 use gogo_contract::{ActionSpec, Value, routes, settings};
 use gogo_ui_ir::ActionRef;
 
+use super::absent_param;
 use crate::expr::{EvalError, Scope, Template};
 use crate::manifest::{Manifest, UiType};
 
@@ -113,6 +114,8 @@ pub struct PendingArg {
     captured: Vec<(String, Value)>,
     /// What the value must satisfy; set when the term is matched to its parameter.
     check: Option<Check>,
+    /// The parameters of the route that was bound: an absent optional one reads as null.
+    route_params: &'static [SourceParam],
 }
 
 /// What a pending value must satisfy once it is known.
@@ -151,7 +154,13 @@ impl PendingArg {
             template,
             captured,
             check: None,
+            route_params: &[],
         }
+    }
+
+    pub(crate) fn on_route(mut self, params: &'static [SourceParam]) -> Self {
+        self.route_params = params;
+        self
     }
 
     fn checked(mut self, check: Check) -> Self {
@@ -176,7 +185,11 @@ impl PendingArg {
         if let Some(v) = &input.value {
             vars.push(("value".to_owned(), v.clone()));
         }
-        let scope = Captured { data, vars };
+        let scope = Captured {
+            data,
+            vars,
+            route_params: self.route_params,
+        };
         let v = self.template.eval(&scope)?.into_owned();
         let checked = match &self.check {
             Some(Check::Param { spec, param, ui }) => {
@@ -241,6 +254,7 @@ fn check_route_param(
 struct Captured<'a> {
     data: &'a dyn Scope,
     vars: Vec<(String, Value)>,
+    route_params: &'static [SourceParam],
 }
 
 impl Scope for Captured<'_> {
@@ -251,7 +265,9 @@ impl Scope for Captured<'_> {
         }
     }
     fn param(&self, name: &str) -> Option<&Value> {
-        self.data.param(name)
+        self.data
+            .param(name)
+            .or_else(|| absent_param(self.route_params, name))
     }
     fn token(&self, name: &str) -> Option<&Value> {
         self.data.token(name)

@@ -37,7 +37,9 @@
 //!
 //! A bare name is a variable when the scope binds one; otherwise it is an enum word of
 //! the contract. The loader checks that every name is one or the other, with
-//! [`Expr::names`] (design 27 §7); evaluating an unbound name gives its text.
+//! [`Expr::names`] (design 27 §7); evaluating an unbound name gives its text. A bare
+//! operand of `==` or `!=` that is an enum word becomes [`Expr::Word`] at load, so it is
+//! never read as the source of the same name.
 //!
 //! # Errors
 //!

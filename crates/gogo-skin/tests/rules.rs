@@ -2426,6 +2426,59 @@ fn contract_cases() -> Vec<Case> {
             Some("fils"),
         ),
         case(
+            "§7",
+            "a route name that route.current never is",
+            |f| rep(f, SHELL, "current == library}", "current == ready}"),
+            TypeMismatch,
+            Route("shell"),
+            Some("\"{route.current == ready}\""),
+        ),
+        case(
+            "§7",
+            "a quoted route name that is misspelt",
+            |f| rep(f, SHELL, "current == library}", "current == 'libary'}"),
+            TypeMismatch,
+            Route("shell"),
+            Some("\"{route.current == 'libary'}\""),
+        ),
+        case(
+            "§7",
+            "a number compared with a word",
+            |f| {
+                rep(
+                    f,
+                    SHELL,
+                    "route.current == library}",
+                    "library.stats.count == queue}",
+                )
+            },
+            TypeMismatch,
+            Route("shell"),
+            Some("\"{library.stats.count == queue}\""),
+        ),
+        case(
+            "§7",
+            "a ui enum compared with another variable's word",
+            |f| game_insert(f, "text \"x\" when=\"{ui.view == ready}\""),
+            TypeMismatch,
+            Route("game"),
+            Some("\"{ui.view == ready}\""),
+        ),
+        case(
+            "§7",
+            "a word that is a source, in a where over unknown items",
+            |f| {
+                append(
+                    f,
+                    "components/game.kdl",
+                    "\ncomponent \"words\" params=\"rows\" {\n    text \"{rows | where kind == queue | len}\"\n}\n",
+                )
+            },
+            UnknownName,
+            Skin,
+            Some("queue"),
+        ),
+        case(
             "§5.3 S16",
             "a route that is not written out",
             |f| rep(f, SHELL, "args=\"library\"", "args=\"{app.version}\""),

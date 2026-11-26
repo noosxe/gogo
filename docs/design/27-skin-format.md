@@ -492,7 +492,7 @@ expression.
 | formatters | `fmt.bytes(x)`, `fmt.ago(t)` | the fixed list in design 26 §2 |
 | status helpers | `status.word(s)`, `status.tone(s)` | |
 | tokens | `@accent` | |
-| route parameters | `$id` | |
+| route parameters | `$id` | an optional parameter of the route (design 26 §6.2) that wasn't given is null; any other missing one fails |
 
 - **`before x` / `after x`** give the item before or after `x` in the list, wrapping
   around at the ends (cycling through tabs or modes). If `x` isn't in the list they give
@@ -531,6 +531,19 @@ association.
   too; a string has no escapes.
 
 ### Names
+
+A bare name that is an operand of `==` or `!=` and is a word of rule 3 below is that
+word, unless a variable has the name (rule 1). So `route.current == library` compares
+with the word `library`, never with the `library` source of the same name. The loader
+settles this once, and binding never asks the app for the word. Everywhere else the name
+resolves as follows, so `library | len` and `each "g" in="{library}"` read the source.
+
+- Where the other side has a known set of values, the word (or a quoted text) must be one
+  of them: `route.current == ready` and `route.current == 'libary'` are load errors, and
+  so is comparing a number, a boolean or a list with a word.
+- Inside a `where` over items of unknown type, a word that is also a source could be a
+  field, so it is a load error; quote it (`kind == 'queue'`).
+- A word with a hyphen (`sign-in`) is not a name; quote it.
 
 A bare name resolves in this order:
 
