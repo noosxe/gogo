@@ -6,5 +6,13 @@ edition.workspace = true
 publish.workspace = true
 license.workspace = true
 
+[features]
+# System fonts as a fallback for glyphs the bundled set lacks (design 24 decision 10).
+# Off in tests, so every machine shapes with the same fonts. fontconfig is loaded at run
+# time on Linux, so the build needs no fontconfig headers.
+system-fonts = ["parley/system", "dep:fontique", "fontique/system", "fontique/fontconfig-dlopen"]
+
 [dependencies]
 gogo-ui-ir.workspace = true
+parley.workspace = true
+fontique = { workspace = true, optional = true }

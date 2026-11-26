@@ -124,7 +124,8 @@ tokens "dark" {
   to define.
 - **Font families are named as the font files name themselves** (`Noto Sans`,
   `JetBrains Mono`), never by a fontconfig alias. An unknown family is a load error.
-- **The bundled families** are Noto Sans (variable) and JetBrains Mono (static). A skin
+- **The bundled families** are Noto Sans (variable on `wght` and `wdth`) and JetBrains Mono (variable on `wght` only,
+  so it has no `wdth` axis). A skin
   may ship OTF/TTF files in `assets/`, and the loader checks them as files. In this
   version a `family` must still name a bundled family: reading a family name out of a
   skin's own font needs a font parser, which the loader doesn't have, so a skin's own
@@ -207,7 +208,7 @@ its range is a load error that names the property.
 - **Colours** are a literal, `transparent`, a colour token, or in a style one
   `"{@token alpha=.5}"`. A style is static: no other `{…}` expression is allowed in one.
   An element's inline properties may be expressions.
-- **`stretch` on a static family** is an error when the same block sets both. An inherited
+- **`stretch` on a family without a `wdth` axis** is an error when the same block sets both. An inherited
   `stretch` is not checked (§5.2).
 
 Layout follows CSS flexbox and grid as implemented by taffy:
@@ -255,8 +256,9 @@ Only the elements below exist. Anything else is a load error.
 - **Properties.** An element takes the properties its row names, `id`, `style`, `when`,
   `label`, and the style properties of §4 inline. Any other property is a load error that
   names the closest known one.
-- **`stretch` (the `wdth` axis) applies only to variable fonts.** On a static face it is a
-  load error. An inherited `stretch` stops at a child that switches to a static family.
+- **`stretch` (the `wdth` axis) applies only to variable fonts.** On a face without a `wdth`
+  axis (JetBrains Mono) it is a load error. An inherited `stretch` stops at a child that
+  switches to such a family.
 
 ### 5.3 Controls and actions
 
