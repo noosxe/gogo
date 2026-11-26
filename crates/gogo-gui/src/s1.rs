@@ -359,7 +359,8 @@ impl Driven {
         let (id, _) = tree
             .nodes
             .iter()
-            .find(|(_, n)| n.role() == Role::Button && n.label() == Some(label))
+            // The last one: a page's button comes after the shell's of the same name.
+            .rfind(|(_, n)| n.role() == Role::Button && n.label() == Some(label))
             .unwrap_or_else(|| panic!("no button {label}: {:?}", words(&tree)));
         let request = ActionRequest {
             action: Action::Click,
@@ -402,6 +403,58 @@ fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
             out.push(path);
         }
     }
+}
+
+/// Remembers what it was asked to open, and opens nothing.
+#[derive(Default)]
+struct Recorded(Mutex<Vec<String>>);
+
+impl Browser for Recorded {
+    fn open(&self, url: &str) -> bool {
+        self.0.lock().expect("urls").push(url.to_string());
+        true
+    }
+}
+
+/// The built-in skin's own sign-in page, reached as a user would, opens the app's dialog.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_default_skins_sign_in_route_opens_the_dialog() {
+    let dir = scratch();
+    let server = gog().await;
+    let browser = Arc::new(Recorded::default());
+    let engine = Arc::new(Engine::new(Parts {
+        account: Exchange::new(),
+        local: Arc::new(Nothing),
+        http: reqwest::Client::new(),
+        endpoints: Endpoints::at(&server.uri()),
+        language: "en".to_string(),
+        download_dir: dir.path().join("downloads"),
+        browser: browser.clone(),
+    }));
+    let backend = CoreBackend::new(engine, tokio::runtime::Handle::current(), None);
+    let data = Data::core(backend, None, || {});
+    let mut ui = Driven {
+        app: App::new(None, data).expect("the app"),
+        now: Duration::from_secs(1),
+        seen: String::new(),
+    };
+    // Signed out, the library says so and links to the sign-in page.
+    ui.until("You are signed out.").await;
+    ui.press("Sign in");
+    ui.until("The app opens the GOG login page").await;
+    assert!(browser.0.lock().expect("urls").is_empty());
+
+    ui.press("Sign in");
+    ui.until("No code pasted yet.").await;
+    assert_eq!(
+        *browser.0.lock().expect("urls"),
+        [gogo::auth::browser::authorize_url()]
+    );
+    // Only the dialog takes input, and it pastes.
+    ui.paste(&redirect(CODE));
+    ui.until("A code is pasted.").await;
+    ui.press("Cancel");
+    ui.until("The app opens the GOG login page").await;
 }
 
 /// A press that began before the dialog was on the display reaches nothing on it, however
