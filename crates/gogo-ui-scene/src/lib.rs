@@ -38,6 +38,10 @@
 //!   filled. **An unknown icon name, or an icon without a solid fill, draws nothing and is
 //!   not an error** (design 27 §5.2 makes unknown names a skin load error; the engine
 //!   itself stays quiet).
+//! - **Nothing is drawn for nothing.** A node with no area, or whose paint holds a NaN or
+//!   infinity (the skin loader keeps paints finite; a hand-built tree might not), draws no
+//!   ops of its own, though its children still do. A glow layer, backdrop or text bloom of
+//!   radius 0 emits no op.
 //! - **Sigma.** Blur values in the list are sigmas (design 28 §2): the IR's CSS radius `r`
 //!   becomes `r / 2` for shadows, glow and bloom, and stays `r` for backdrop blur.
 //!

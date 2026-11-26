@@ -32,8 +32,10 @@ pub enum ImageKey {
     },
 }
 
-/// Straight-alpha RGBA8 pixels, row by row from the top-left.
+/// Straight-alpha RGBA8 pixels, row by row from the top-left. Made with [`Image::new`],
+/// which checks the byte count; more fields (a colour space, say) may follow.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Image {
     /// Width in pixels.
     pub width: u32,
@@ -67,7 +69,8 @@ pub trait ImageStore {
 }
 
 /// A store in memory. [`ImageKey::Noise`] tiles are made on demand, so a store that only
-/// holds covers still serves noise effects.
+/// holds covers still serves noise effects. A noise tile is rebuilt on every `get`, which is
+/// why a renderer caches images by key instead of asking each frame.
 #[derive(Debug, Clone, Default)]
 pub struct MemoryStore {
     images: HashMap<ImageKey, Image>,

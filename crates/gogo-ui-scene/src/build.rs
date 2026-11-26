@@ -131,16 +131,21 @@ impl Builder<'_> {
         ) + offset;
         let geo = Geo::new(rect, paint);
 
-        let opacity = paint.opacity < 1.0;
+        // A node with no area, or a paint with a non-finite number, draws nothing of its own;
+        // its children still get their turn.
+        let draws = rect.width() > 0.0 && rect.height() > 0.0 && paint_is_finite(paint);
+        let opacity = draws && paint.opacity < 1.0;
         if opacity {
             self.ops.push(Op::PushOpacity {
                 alpha: paint.opacity.clamp(0.0, 1.0),
             });
         }
-        self.outer_effects(paint, &geo);
-        self.body(node, paint, placed, &geo, offset);
-        self.border(paint, &geo);
-        self.text(node, placed, offset);
+        if draws {
+            self.outer_effects(paint, &geo);
+            self.body(node, paint, placed, &geo, offset);
+            self.border(paint, &geo);
+            self.text(node, placed, offset);
+        }
 
         let clip = placed.clips;
         if clip {
@@ -148,7 +153,7 @@ impl Builder<'_> {
                 shape: Shape::Rect(rect),
             });
         }
-        let ring = if focused {
+        let ring = if focused && draws {
             paint.ring.map(|r| (rect, geo.radii, r))
         } else {
             None
@@ -227,6 +232,9 @@ impl Builder<'_> {
             // Outermost first, so the innermost halo ends on top.
             for layer in layers.iter().rev() {
                 let sigma = f64::from(layer.radius) / 2.0;
+                if sigma <= 0.0 {
+                    continue; // a zero-radius halo is invisible
+                }
                 self.ops.push(Op::BlurRect {
                     rect: geo.rect,
                     radii: geo.radii,
@@ -238,7 +246,9 @@ impl Builder<'_> {
             }
         }
         for e in &paint.effects {
-            if let Effect::BackdropBlur { radius } = e {
+            if let Effect::BackdropBlur { radius } = e
+                && *radius > 0.0
+            {
                 self.ops.push(Op::Backdrop {
                     shape: geo.shape(),
                     sigma: f64::from(*radius),
@@ -467,7 +477,8 @@ impl Builder<'_> {
         };
         let origin = Point::new(placed.content.x0 + offset.x, placed.content.y0 + offset.y);
         let runs: Vec<Arc<_>> = layout.runs().into_iter().map(Arc::new).collect();
-        if let Some(bloom) = style.bloom {
+        // A bloom of radius 0 is the sharp text again: skip the blurred pass.
+        if let Some(bloom) = style.bloom.filter(|b| b.radius > 0.0) {
             // One filter layer per run: a layer wraps one primitive (design 28 §5).
             for run in &runs {
                 self.ops.push(Op::PushFilter {
@@ -614,4 +625,41 @@ fn fill_brush(f: &Fill, r: Rect) -> Option<Brush> {
         }
         _ => return None,
     })
+}
+
+/// Whether every number the scene reads from a paint is finite. The skin loader keeps them
+/// in range, but a hand-built tree might not, and a NaN must never reach a renderer.
+fn paint_is_finite(p: &Paint) -> bool {
+    let fin = |v: &f32| v.is_finite();
+    let effects = p.effects.iter().all(|e| match e {
+        Effect::Shadow {
+            dx,
+            dy,
+            blur,
+            spread,
+            ..
+        } => [dx, dy, blur, spread].into_iter().all(fin),
+        Effect::InnerShadow { dx, dy, blur, .. } => [dx, dy, blur].into_iter().all(fin),
+        Effect::Glow { layers } => layers.iter().all(|l| l.radius.is_finite()),
+        Effect::Noise { amount, .. } => amount.is_finite(),
+        Effect::Scanlines { period, alpha } => period.is_finite() && alpha.is_finite(),
+        Effect::Reflection { angle, alpha } => angle.is_finite() && alpha.is_finite(),
+        Effect::BackdropBlur { radius } => radius.is_finite(),
+        _ => true,
+    });
+    let fill = match &p.fill {
+        Some(Fill::Linear { angle, stops }) => {
+            angle.is_finite() && stops.iter().all(|s| s.offset.is_finite())
+        }
+        Some(Fill::Radial { stops }) => stops.iter().all(|s| s.offset.is_finite()),
+        _ => true,
+    };
+    effects
+        && fill
+        && p.opacity.is_finite()
+        && p.radius.iter().all(fin)
+        && p.offset.0.is_finite()
+        && p.offset.1.is_finite()
+        && p.border.iter().flatten().all(|s| s.width.is_finite())
+        && p.ring.is_none_or(|r| r.width.is_finite())
 }
