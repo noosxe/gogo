@@ -103,5 +103,6 @@ so a pass also proves the bundle is self-contained. How-to, result layout and VM
   level that enforces them: the validator, the model or the interaction layer (design 25 §4).
 - **Skin fixtures** are fictional (a made-up game, a made-up account) and live in
   `gogo-gui-testkit`; covers are procedural. Validator rules each have a failing fixture.
-- **Model tests** use `FakeBackend`; nothing in the GUI's suites talks to GOG.
+- **Model tests** use `FakeBackend`, which lives in `gogo-gui-model` behind its `fake`
+  feature; nothing in the GUI's suites talks to GOG.
 

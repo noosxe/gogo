@@ -11,11 +11,13 @@
 //!
 //! - the [`Ticket`] of the screen it answers, which is new for every screen;
 //! - a screen the shell has reported as [`presented`](SafetyFlow::presented);
-//! - an [`InputEvent`] later than any that existed when it was presented, and never used
-//!   before.
+//! - a [`Press`] that began after that, is not a key repeat, and whose [`InputEvent`]
+//!   was never used before;
+//! - the screen to have been up for [`DWELL`] when the press began.
 //!
 //! So an answer can't be skipped, replayed, aimed at another plan, or be the tail of the
-//! click that opened the screen. Confirming plans again, and runs only if nothing the
+//! click that opened the screen, and a double click or a repeating Enter can't confirm a
+//! plan that appeared between its two halves. Confirming plans again, and runs only if nothing the
 //! user saw has changed. [`cancel`](SafetyFlow::cancel) has no preconditions at all.
 
 use std::collections::{HashMap, VecDeque};
@@ -36,14 +38,32 @@ use crate::source::Signal;
 /// How long a hold must last (S6).
 pub const HOLD: Duration = Duration::from_secs(1);
 
+/// How long a screen must have been up before a press can answer it (S5).
+pub const DWELL: Duration = Duration::from_millis(500);
+
 /// How many inline previews are kept.
 const MAX_PREVIEWS: usize = 16;
+
+/// How many previews may be waiting for their plan at once.
+const MAX_PLANNING: usize = 4;
 
 /// One real user input: a click, a key press or an accessibility activation. The shell
 /// numbers them from 1, each larger than the one before, and gives one to exactly one
 /// call (S4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct InputEvent(pub u64);
+
+/// A press that answers one of the app's own screens: a pointer or key going down, or an
+/// accessibility activation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Press {
+    /// The number the press got **when it went down**, not when it was released.
+    pub event: InputEvent,
+    /// When it went down, on the monotonic clock given to `presented` and `tick`.
+    pub at: Duration,
+    /// A key repeating while held. It never answers anything.
+    pub repeat: bool,
+}
 
 /// Names one screen the safety flow shows. Never reused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -64,7 +84,9 @@ pub enum Outcome {
 /// What the strong confirmation asks for (S6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Strength {
-    /// Type this text.
+    /// Type this text, the game's title. The match is exact once outer spaces are
+    /// trimmed: no case folding and no Unicode normalisation, so a title that can't be
+    /// typed as stored can't be confirmed. That fails closed, and cancel is there.
     Typed(String),
     /// Hold the button for [`HOLD`].
     Hold,
@@ -73,38 +95,57 @@ pub enum Strength {
 /// The screen on top, for the app's widgets.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Modal<'a> {
+    /// A question.
     Prompt {
+        /// The screen's ticket.
         ticket: Ticket,
+        /// What is asked.
         spec: &'a PromptSpec,
         /// Set when a running job asks.
         job: Option<&'a JobId>,
     },
     /// Waiting for a plan; `confirming` when it is the check after a confirmation.
     Planning {
+        /// The screen's ticket.
         ticket: Ticket,
+        /// The action being planned.
         action: &'static str,
+        /// This is the check after a confirmation.
         confirming: bool,
     },
+    /// `plan-card`: confirm or cancel.
     PlanCard {
+        /// The screen's ticket.
         ticket: Ticket,
+        /// The action planned.
         action: &'static str,
+        /// The plan.
         plan: &'a Plan,
+        /// The tier the plan calls for.
         tier: Tier,
     },
     /// `confirm-destructive`. Its default is to cancel.
     Strong {
+        /// The screen's ticket.
         ticket: Ticket,
+        /// The action to confirm.
         action: &'static str,
+        /// The plan being confirmed.
         plan: &'a Plan,
+        /// What it takes.
         strength: &'a Strength,
     },
+    /// The `error` widget.
     Error {
+        /// The ticket that dismisses it.
         ticket: Ticket,
+        /// What failed.
         error: &'a ErrorView,
     },
 }
 
 impl Modal<'_> {
+    /// The ticket that answers or cancels this screen.
     pub fn ticket(&self) -> Ticket {
         match self {
             Modal::Prompt { ticket, .. }
@@ -120,48 +161,67 @@ impl Modal<'_> {
 /// until the user confirms it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Preview<'a> {
+    /// Still being planned.
     Pending,
+    /// A plan to show.
     Ready {
+        /// The plan.
         plan: &'a Plan,
+        /// The tier it calls for.
         tier: Tier,
     },
     /// The action has nothing to do.
     Empty,
+    /// Planning was refused.
     Failed(&'a ErrorView),
 }
 
 /// Something the shell has to do.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
+    /// Open the command palette.
     OpenPalette {
+        /// What it is limited to.
         scope: Option<String>,
     },
+    /// Open the account menu.
     AccountMenu,
+    /// Put this text on the clipboard.
     Copy(String),
     /// Write a skin's `ui` variable.
     SetUi {
+        /// The variable.
         var: String,
+        /// Its new value.
         value: gogo_contract::Value,
     },
     /// Jobs start, finish and fail with a toast, and nothing else does.
     Toast {
+        /// The job.
         job: JobId,
+        /// What happened to it.
         toast: Toast,
     },
     /// The action's plan turned out to be empty.
     NothingToDo {
+        /// The action.
         action: &'static str,
     },
     /// The confirmed plan was no longer the plan; the new one is on screen.
     PlanChanged {
+        /// The action.
         action: &'static str,
     },
 }
 
+/// What a toast says happened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Toast {
+    /// A job began.
     Started,
+    /// A job finished.
     Finished,
+    /// A job failed.
     Failed,
 }
 
@@ -321,11 +381,26 @@ enum Stage {
     },
 }
 
+/// When a screen was presented.
+#[derive(Debug, Clone, Copy)]
+struct Armed {
+    /// The last input event there was.
+    after: InputEvent,
+    at: Duration,
+}
+
+impl Armed {
+    fn takes(self, press: Press) -> bool {
+        !press.repeat
+            && press.event > self.after
+            && press.at.checked_sub(self.at).is_some_and(|up| up >= DWELL)
+    }
+}
+
 #[derive(Debug)]
 struct Dialog {
     ticket: Ticket,
-    /// The last input event there was when the screen was presented.
-    armed: Option<InputEvent>,
+    armed: Option<Armed>,
     stage: Stage,
 }
 
@@ -340,7 +415,9 @@ enum PreviewState {
 #[derive(Debug)]
 struct Inline {
     ticket: Ticket,
-    armed: Option<InputEvent>,
+    armed: Option<Armed>,
+    /// The last frame it was asked for.
+    used: u64,
     call: Call,
     state: PreviewState,
 }
@@ -370,6 +447,8 @@ pub struct SafetyFlow {
     questions: VecDeque<(JobId, PromptSpec, PromptReply)>,
     errors: VecDeque<(Ticket, ErrorView)>,
     previews: Vec<Inline>,
+    /// Counts [`pump`](SafetyFlow::pump)s, to tell which previews are still on screen.
+    frame: u64,
     /// Where each job came from, for resume and retry.
     origins: HashMap<JobId, Origin>,
     effects: Vec<Effect>,
@@ -385,6 +464,7 @@ impl SafetyFlow {
             questions: VecDeque::new(),
             errors: VecDeque::new(),
             previews: Vec::new(),
+            frame: 0,
             origins: HashMap::new(),
             effects: Vec::new(),
         }
@@ -449,6 +529,7 @@ impl SafetyFlow {
         })
     }
 
+    /// Where an inline preview is; `None` once it is used or dropped.
     pub fn preview_state(&self, ticket: Ticket) -> Option<Preview<'_>> {
         let p = self.previews.iter().find(|p| p.ticket == ticket)?;
         Some(match &p.state {
@@ -476,6 +557,10 @@ impl SafetyFlow {
     }
 
     fn fail(&mut self, error: ErrorView) {
+        // The same error again, straight after, says nothing new.
+        if self.errors.back().is_some_and(|(_, last)| *last == error) {
+            return;
+        }
         let ticket = self.ticket();
         self.errors.push_back((ticket, error));
         self.signal.raise();
@@ -515,12 +600,13 @@ impl SafetyFlow {
         if !self.fresh(event) {
             return Err(Outcome::Ignored);
         }
-        let call = Call::check(invocation).map_err(|e| self.refuse(e))?;
-        // Behind a dialog only stopping work is allowed.
-        let stops = matches!(call.name(), "job.cancel" | "job.pause");
+        // Behind a dialog only stopping work is allowed. This is decided before the
+        // call is checked, so a skin can't queue up errors behind one.
+        let stops = matches!(invocation.spec.name, "job.cancel" | "job.pause");
         if self.modal().is_some() && !stops {
             return Err(Outcome::Ignored);
         }
+        let call = Call::check(invocation).map_err(|e| self.refuse(e))?;
         if let Some(gate) = closed_gate(call.spec(), engine.backend.gates()) {
             return Err(self.refuse(gate_error(gate)));
         }
@@ -555,8 +641,8 @@ impl SafetyFlow {
                 let spec = request.call.spec();
                 let facts = facts_for(&request.call, PlanFacts::nothing_to_do());
                 match spec.decide(&facts, &engine.backend.gates()) {
-                    Decision::Run { kind, .. } if !kind.plans() => {
-                        match self.run(engine, request, None, kind, Tier::Safe) {
+                    Decision::Run { kind, tier } if runs_unplanned(kind, tier) => {
+                        match self.run(engine, request, None, kind, tier) {
                             Ok(()) => Outcome::Accepted,
                             Err(e) => self.refuse(e),
                         }
@@ -574,7 +660,14 @@ impl SafetyFlow {
     fn control<B: Backend>(&mut self, engine: &mut Engine<'_, B>, call: &Call) -> Outcome {
         let id = JobId::new(call.text("job").unwrap_or_default());
         let restarts = matches!(call.name(), "job.resume" | "job.retry");
-        if restarts && let Some(origin) = self.origins.get(&id) {
+        if restarts {
+            // Without knowing how a job was started, it is not started again.
+            let Some(origin) = self.origins.get(&id).copied() else {
+                return self.refuse(ErrorView::usage(
+                    "This job can't be restarted",
+                    "there is no such job",
+                ));
+            };
             if let Some(gate) = closed_gate(origin.action, engine.backend.gates()) {
                 return self.refuse(gate_error(gate));
             }
@@ -682,28 +775,33 @@ impl SafetyFlow {
 
     // --- what the app's own widgets answer ---
 
-    /// The screen with `ticket` is now drawn. `latest` is the last input event the shell
-    /// has numbered; only a later one can answer it. The first report counts.
-    pub fn presented(&mut self, ticket: Ticket, latest: InputEvent) {
+    /// The screen with `ticket` is now drawn, at `now`. `latest` is the last input event
+    /// the shell has numbered; only a later one can answer. The first report counts.
+    pub fn presented(&mut self, ticket: Ticket, latest: InputEvent, now: Duration) {
+        let armed = Armed {
+            // An event already used counts even if the shell reports an older one.
+            after: latest.max(self.last_event),
+            at: now,
+        };
         if let Some(d) = self.dialog.as_mut().filter(|d| d.ticket == ticket) {
-            d.armed.get_or_insert(latest);
+            d.armed.get_or_insert(armed);
         } else if let Some(p) = self
             .previews
             .iter_mut()
             .find(|p| p.ticket == ticket && matches!(p.state, PreviewState::Ready(_)))
         {
-            p.armed.get_or_insert(latest);
+            p.armed.get_or_insert(armed);
         }
     }
 
-    /// Take the dialog if `event` may answer it.
-    fn answerable(&mut self, ticket: Ticket, event: InputEvent) -> Option<Dialog> {
-        let fresh = self.fresh(event);
+    /// Take the dialog if `press` may answer it.
+    fn answerable(&mut self, ticket: Ticket, press: Press) -> Option<Dialog> {
+        let fresh = self.fresh(press.event);
         let ok = fresh
             && self
                 .dialog
                 .as_ref()
-                .is_some_and(|d| d.ticket == ticket && d.armed.is_some_and(|a| event > a));
+                .is_some_and(|d| d.ticket == ticket && d.armed.is_some_and(|a| a.takes(press)));
         if ok { self.dialog.take() } else { None }
     }
 
@@ -712,12 +810,12 @@ impl SafetyFlow {
         &mut self,
         engine: &mut Engine<'_, B>,
         ticket: Ticket,
-        event: InputEvent,
+        press: Press,
     ) -> Outcome {
         if self.previews.iter().any(|p| p.ticket == ticket) {
-            return self.confirm_preview(engine, ticket, event);
+            return self.confirm_preview(engine, ticket, press);
         }
-        match self.answerable(ticket, event) {
+        match self.answerable(ticket, press) {
             Some(Dialog {
                 stage: Stage::Card { request, shown },
                 ..
@@ -735,14 +833,14 @@ impl SafetyFlow {
         &mut self,
         engine: &mut Engine<'_, B>,
         ticket: Ticket,
-        event: InputEvent,
+        press: Press,
     ) -> Outcome {
-        if !self.fresh(event) || self.modal().is_some() {
+        if !self.fresh(press.event) || self.modal().is_some() {
             return Outcome::Ignored;
         }
         let Some(i) = self.previews.iter().position(|p| {
             p.ticket == ticket
-                && p.armed.is_some_and(|a| event > a)
+                && p.armed.is_some_and(|a| a.takes(press))
                 && matches!(p.state, PreviewState::Ready(_))
         }) else {
             return Outcome::Ignored;
@@ -805,9 +903,9 @@ impl SafetyFlow {
         engine: &mut Engine<'_, B>,
         ticket: Ticket,
         typed: &str,
-        event: InputEvent,
+        press: Press,
     ) -> Outcome {
-        match self.answerable(ticket, event) {
+        match self.answerable(ticket, press) {
             Some(Dialog {
                 stage:
                     Stage::Strong {
@@ -826,10 +924,10 @@ impl SafetyFlow {
         }
     }
 
-    /// The hold button went down. `now` is a monotonic clock, the same one
+    /// The hold button went down. The hold is timed from [`Press::at`] against what
     /// [`Model::tick`](crate::Model::tick) gets.
-    pub fn hold_start(&mut self, ticket: Ticket, event: InputEvent, now: Duration) -> Outcome {
-        let Some(mut dialog) = self.answerable(ticket, event) else {
+    pub fn hold_start(&mut self, ticket: Ticket, press: Press) -> Outcome {
+        let Some(mut dialog) = self.answerable(ticket, press) else {
             return Outcome::Ignored;
         };
         let outcome = match &mut dialog.stage {
@@ -838,7 +936,7 @@ impl SafetyFlow {
                 held_since,
                 ..
             } => {
-                *held_since = Some(now);
+                *held_since = Some(press.at);
                 Outcome::Accepted
             }
             _ => Outcome::Ignored,
@@ -894,9 +992,9 @@ impl SafetyFlow {
         engine: &mut Engine<'_, B>,
         ticket: Ticket,
         answer: PromptAnswer,
-        event: InputEvent,
+        press: Press,
     ) -> Outcome {
-        let Some(dialog) = self.answerable(ticket, event) else {
+        let Some(dialog) = self.answerable(ticket, press) else {
             return Outcome::Ignored;
         };
         match dialog.stage {
@@ -957,6 +1055,10 @@ impl SafetyFlow {
 
     /// Plan an action to show inline, before the user asks for it. Planning changes
     /// nothing, so this needs no input. The same call keeps its preview.
+    ///
+    /// Only [`MAX_PLANNING`] plans are waited for at once, and a preview asked for since
+    /// the frame before is never dropped to make room, so a page with more previews than
+    /// fit refuses the extra ones instead of planning all of them over and over.
     pub(crate) fn preview<B: Backend>(
         &mut self,
         engine: &mut Engine<'_, B>,
@@ -972,11 +1074,26 @@ impl SafetyFlow {
         if let Some(gate) = closed_gate(call.spec(), engine.backend.gates()) {
             return Err(gate_error(gate));
         }
-        if let Some(p) = self.previews.iter().find(|p| p.call == call) {
+        let frame = self.frame;
+        if let Some(p) = self.previews.iter_mut().find(|p| p.call == call) {
+            p.used = frame;
             return Ok(p.ticket);
         }
+        let busy = || ErrorView::failed("No preview yet", "too many plans are being shown");
+        let pending = |p: &Inline| matches!(p.state, PreviewState::Pending(_));
+        if self.previews.iter().filter(|p| pending(p)).count() >= MAX_PLANNING {
+            return Err(busy());
+        }
         if self.previews.len() >= MAX_PREVIEWS {
-            self.previews.remove(0);
+            let oldest = self
+                .previews
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| !pending(p) && p.used + 1 < frame)
+                .min_by_key(|(_, p)| p.used)
+                .map(|(i, _)| i)
+                .ok_or_else(busy)?;
+            self.previews.remove(oldest);
         }
         let (reply, wait) = PlanReply::channel(Arc::clone(&self.signal));
         engine.backend.plan(&call, None, reply);
@@ -984,6 +1101,7 @@ impl SafetyFlow {
         self.previews.push(Inline {
             ticket,
             armed: None,
+            used: frame,
             call,
             state: PreviewState::Pending(wait),
         });
@@ -1003,10 +1121,13 @@ impl SafetyFlow {
         questions: Vec<(JobId, PromptSpec, PromptReply)>,
         transitions: &[Transition],
     ) {
+        self.frame += 1;
         self.questions.extend(questions);
         for t in transitions {
             self.moved(t);
         }
+        // Forget only the jobs the table has forgotten.
+        self.origins.retain(|id, _| engine.jobs.contains(id));
         self.receive_plan(engine);
         self.receive_previews(engine.backend.gates());
         self.advance();
@@ -1034,9 +1155,6 @@ impl SafetyFlow {
                 job: t.id.clone(),
                 toast,
             });
-        }
-        if !t.listed {
-            self.origins.remove(&t.id);
         }
     }
 
@@ -1097,11 +1215,15 @@ impl SafetyFlow {
             )),
             None if kind.plans() => self.show(Stage::Card { request, shown }),
             // The plan holds no change, so the action is as immediate as it looks.
-            None => {
+            None if runs_unplanned(kind, tier) => {
                 if let Err(e) = self.run(engine, request, Some(handle), kind, tier) {
                     self.fail(e);
                 }
             }
+            None => self.fail(ErrorView::failed(
+                "This action can't run",
+                "it needs a confirmation and has no plan to show",
+            )),
         }
     }
 
@@ -1150,5 +1272,36 @@ fn judge(call: &Call, result: Result<Planned, ErrorView>, gates: Gates) -> Judge
         },
         Decision::NothingToDo => Judged::Nothing,
         Decision::Blocked(gate) => Judged::Refused(gate_error(gate)),
+    }
+}
+
+/// Whether something may run with no plan card: only what is safe and plans nothing.
+fn runs_unplanned(kind: Kind, tier: Tier) -> bool {
+    !kind.plans() && tier == Tier::Safe
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// No action of contract 1.0 reaches an unplanned run above `Safe`, so the rule is
+    /// checked on its own: a future one fails closed.
+    #[test]
+    fn only_safe_unplanned_kinds_run_without_a_card() {
+        use Kind::{Immediate, Job, Plan, PlanThenJob, PlanThenJobs, Prompt, PromptThenPlan};
+        for kind in [
+            Immediate,
+            Plan,
+            Prompt,
+            Job,
+            PlanThenJob,
+            PlanThenJobs,
+            PromptThenPlan,
+        ] {
+            for tier in [Tier::Safe, Tier::Confirm, Tier::Gated, Tier::Destructive] {
+                let expected = tier == Tier::Safe && matches!(kind, Immediate | Prompt | Job);
+                assert_eq!(runs_unplanned(kind, tier), expected, "{kind:?} {tier:?}");
+            }
+        }
     }
 }

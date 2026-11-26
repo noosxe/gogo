@@ -37,6 +37,7 @@ pub use model::{Location, Model};
 pub use plan::{Plan, PlanHandle, PlanReply, PlanStep, Planned, StepKind};
 pub use prompt::{ConflictFile, PromptAnswer, PromptReply, PromptSpec, Secret, Side};
 pub use safety::{
-    Effect, HOLD, InputEvent, Modal, Outcome, Preview, Route, SafetyFlow, Strength, Ticket, Toast,
+    DWELL, Effect, HOLD, InputEvent, Modal, Outcome, Press, Preview, Route, SafetyFlow, Strength,
+    Ticket, Toast,
 };
 pub use source::{Signal, Slot, SourceKey, SourceStore};

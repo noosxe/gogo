@@ -2,8 +2,8 @@
 
 Status: **accepted** (2026-11-25). The model (`gogo-gui-model`, PR D1 in design 24 §8) is
 built; the core adapter, the shell wiring and per-job cancellation in core (PR D2) are not.
-This doc covers how the GUI talks to `gogo-core`: threads, the `Backend` seam, how live data reaches a skin without
-flooding it, the safety flow, and long-running jobs. The crates are in design 24 §2. The
+This doc covers how the GUI talks to `gogo-core`: threads, the `Backend` seam, how live
+data reaches a skin without flooding it, the safety flow, and long-running jobs. The crates are in design 24 §2. The
 contract the model implements (sources, actions, kinds, tiers, invariants) is
 design 26, and the skin format design 27 (both added in #557).
 
@@ -195,9 +195,17 @@ stateDiagram-v2
 | S1, S2, S5, S14, S21 again at bind | the binder (`gogo-skin`): a masked value is never an action argument and reads as its mask, a part that can't be hidden isn't, every control has a non-empty accessible name once its text is known, a `settings.set` key is on the skin-settable list | binding tests over the fixture scope, with the invariant named |
 | S1–S3 nothing secret or path-like in sources or args | `CoreBackend` builds sources from typed views; action params have no path/URL/shell types | S1 test over a fixture account with known secret strings |
 
-- **What an answer needs.** Each screen has a new ticket. The shell reports when it has
-  drawn one, and only an input newer than that answers it, so a double click can't pass
-  through a card.
+- **What an answer needs.** Each screen has a new ticket, and the shell reports when it
+  has drawn it, with the time on a monotonic clock. A `Press` answers it only if all of
+  these hold, so a double click or a repeating Enter can't confirm a plan that appeared
+  between its two halves:
+  - it **began** after the screen was presented (the shell numbers a press when it goes
+    down, not when it is released), and after every input the model has already used;
+  - it is not a key repeat;
+  - the screen had been up for at least 500 ms when it began.
+
+  This covers every screen that is answered: plan cards (modal and inline), the strong
+  confirmation and prompts. Cancel and Esc need none of it.
 - **The plan the user confirmed is the plan that runs.** Confirming (after the strong
   confirmation, if the tier asks for one) re-plans and compares the plan, its facts, tier
   and input digest. Any difference shows the new plan, which needs confirming again; an
@@ -205,9 +213,22 @@ stateDiagram-v2
   confirmed the same way.
 - **Strong confirmation.** Removing, moving, updating, DLC removal and snapshot actions on
   one game ask for its title to be typed; other destructive actions, and a plan without a
-  title, ask for a 1 s hold. Enter on a destructive plan card only moves on to it.
+  title, ask for a 1 s hold. Enter on a destructive plan card only moves on to it. The
+  typed title must match exactly once outer spaces are trimmed, with no case folding and
+  no Unicode normalisation: a title that can't be typed as stored can't be confirmed,
+  which fails closed, and cancel is always there.
 - **One screen at a time.** Behind a dialog or an error, skins can only pause or cancel a
-  job. A job's questions and later errors wait their turn.
+  job; anything else is ignored before it is even checked, so a skin can't queue up errors.
+  An error identical to the one before it is not repeated. A job's questions wait their
+  turn, in the order they were asked, and so do later errors.
+- **Nothing runs without a card unless it is safe.** A path that would run with no plan
+  card refuses any tier but safe.
+- **Batches.** For `updates.apply_all` the plan's facts are the OR over its games, so one
+  game that loses DLC or downgrades makes the batch destructive.
+- **Previews are bounded.** The model keeps 16 and waits for at most 4 plans at once. It
+  never drops a preview that is still planning or was asked for since the frame before;
+  past the limit a new one is refused, so a page with too many doesn't plan them all on
+  every frame.
 - **Prompts from core pipelines.**
   - The core asks through `PromptFn` (`macapp::prompt`) and the cloud-save `Decide` trait.
   - `CoreBackend` implements both. It blocks the worker thread on a `oneshot`, and the model
@@ -224,6 +245,9 @@ stateDiagram-v2
 - **A strong confirmation covers one run.** `job.retry` and `job.resume` of a failed or
   cancelled destructive job are refused: the action is started again and plans afresh. A
   paused job carries on.
+- **A restart never hides an end.** `job.retry` and `job.resume` are refused until the
+  model has taken the job's current state, so a failure is always reported first (S9).
+- **The table is bounded.** It keeps the newest 64 ended jobs; live ones are never dropped.
 - **The job table.** `JobTable` in the model holds one entry per long-running action:
   - an id and the action;
   - a state: `queued`, `running`, `paused`, `failed`, `done` or `cancelled`;

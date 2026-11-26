@@ -6,24 +6,33 @@ use std::fmt;
 /// A question.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PromptSpec {
+    /// One line of text.
     Text {
+        /// The question.
         label: String,
+        /// What the field starts with.
         default: String,
     },
     /// Typed into `secret-input`; the value never enters a source (S1, S2).
     Secret {
+        /// The question.
         label: String,
     },
+    /// One of a list.
     Choice {
+        /// The question.
         label: String,
+        /// What to pick from.
         options: Vec<String>,
     },
     /// Yes or no. The widget's default is no.
     Confirm {
+        /// The question.
         label: String,
     },
     /// One decision per cloud-save conflict; nothing applies until all are decided.
     Conflicts {
+        /// The conflicting files.
         files: Vec<ConflictFile>,
     },
 }
@@ -31,15 +40,20 @@ pub enum PromptSpec {
 /// A file that changed on both sides.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConflictFile {
+    /// The file.
     pub name: String,
+    /// What the local copy is.
     pub local: String,
+    /// What the cloud copy is.
     pub cloud: String,
 }
 
 /// Which copy of a conflicting file to keep.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
+    /// The copy on this machine.
     Local,
+    /// The cloud's copy.
     Cloud,
 }
 
@@ -48,6 +62,7 @@ pub enum Side {
 pub struct Secret(String);
 
 impl Secret {
+    /// Wrap a typed secret.
     pub fn new(value: impl Into<String>) -> Self {
         Secret(value.into())
     }
@@ -67,12 +82,17 @@ impl fmt::Debug for Secret {
 /// An answer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PromptAnswer {
+    /// What was typed.
     Text(String),
+    /// A typed secret.
     Secret(Secret),
     /// An index into the options.
     Choice(usize),
+    /// Yes.
     Yes,
+    /// No.
     No,
+    /// One side per conflicting file, in order.
     Sides(Vec<Side>),
 }
 

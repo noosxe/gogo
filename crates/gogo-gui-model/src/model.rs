@@ -13,7 +13,7 @@ use crate::error::ErrorView;
 use crate::jobs::{JobId, JobTable};
 use crate::prompt::PromptAnswer;
 use crate::safety::{
-    Effect, Engine, InputEvent, Modal, Outcome, Preview, Route, SafetyFlow, Ticket, route,
+    Effect, Engine, InputEvent, Modal, Outcome, Press, Preview, Route, SafetyFlow, Ticket, route,
 };
 use crate::source::{Signal, SourceKey, SourceStore};
 
@@ -23,7 +23,9 @@ const HISTORY: usize = 64;
 /// A route and its parameters.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Location {
+    /// The route's name.
     pub route: String,
+    /// Its parameters.
     pub params: BTreeMap<&'static str, Value>,
 }
 
@@ -62,6 +64,7 @@ impl<B: Backend> Model<B> {
         model
     }
 
+    /// The engine behind the model.
     pub fn backend(&self) -> &B {
         &self.backend
     }
@@ -72,10 +75,12 @@ impl<B: Backend> Model<B> {
         &mut self.backend
     }
 
+    /// The job table.
     pub fn jobs(&self) -> &JobTable {
         &self.jobs
     }
 
+    /// The route on screen.
     pub fn location(&self) -> &Location {
         // `history` is never empty: `nav.back` keeps the last one.
         &self.history[self.history.len() - 1]
@@ -93,6 +98,7 @@ impl<B: Backend> Model<B> {
         self.subscriptions.insert(key.clone(), subscription);
     }
 
+    /// Stop feeding `key` and forget its value.
     pub fn unwatch(&mut self, key: &SourceKey) {
         self.subscriptions.remove(key);
         self.sources.close(key);
@@ -234,10 +240,12 @@ impl<B: Backend> Model<B> {
         flow.preview(&mut engine, invocation)
     }
 
+    /// Where an inline preview is; `None` once it is used or dropped.
     pub fn preview_state(&self, ticket: Ticket) -> Option<Preview<'_>> {
         self.flow.preview_state(ticket)
     }
 
+    /// Forget every preview: the data they were computed from changed.
     pub fn clear_previews(&mut self) {
         self.flow.clear_previews();
     }
@@ -249,53 +257,57 @@ impl<B: Backend> Model<B> {
         self.flow.modal()
     }
 
+    /// What the shell has to do since the last call.
     pub fn take_effects(&mut self) -> Vec<Effect> {
         self.flow.take_effects()
     }
 
-    /// The screen with `ticket` is drawn; `latest` is the last input event numbered.
-    pub fn presented(&mut self, ticket: Ticket, latest: InputEvent) {
-        self.flow.presented(ticket, latest);
+    /// The screen with `ticket` is drawn at `now`; `latest` is the last input event
+    /// numbered.
+    pub fn presented(&mut self, ticket: Ticket, latest: InputEvent, now: Duration) {
+        self.flow.presented(ticket, latest, now);
     }
 
     /// The plan card's confirm control (S5).
-    pub fn confirm(&mut self, ticket: Ticket, event: InputEvent) -> Outcome {
+    pub fn confirm(&mut self, ticket: Ticket, press: Press) -> Outcome {
         let (flow, mut engine) = self.split();
-        flow.confirm(&mut engine, ticket, event)
+        flow.confirm(&mut engine, ticket, press)
     }
 
     /// Enter. It confirms a plan card and answers nothing else (S19).
-    pub fn enter(&mut self, event: InputEvent) -> Outcome {
+    pub fn enter(&mut self, press: Press) -> Outcome {
         match self.flow.modal() {
-            Some(Modal::PlanCard { ticket, .. }) => self.confirm(ticket, event),
+            Some(Modal::PlanCard { ticket, .. }) => self.confirm(ticket, press),
             _ => Outcome::Ignored,
         }
     }
 
     /// Submit the typed strong confirmation.
-    pub fn type_name(&mut self, ticket: Ticket, typed: &str, event: InputEvent) -> Outcome {
+    pub fn type_name(&mut self, ticket: Ticket, typed: &str, press: Press) -> Outcome {
         let (flow, mut engine) = self.split();
-        flow.type_name(&mut engine, ticket, typed, event)
+        flow.type_name(&mut engine, ticket, typed, press)
     }
 
-    pub fn hold_start(&mut self, ticket: Ticket, event: InputEvent, now: Duration) -> Outcome {
-        self.flow.hold_start(ticket, event, now)
+    /// The hold button of a strong confirmation went down (S6).
+    pub fn hold_start(&mut self, ticket: Ticket, press: Press) -> Outcome {
+        self.flow.hold_start(ticket, press)
     }
 
+    /// The hold button came up, or the window lost the input.
     pub fn hold_stop(&mut self, ticket: Ticket) {
         self.flow.hold_stop(ticket);
     }
 
-    /// Call while a hold is down, with the clock [`hold_start`](Self::hold_start) got.
+    /// Call while a hold is down, with the clock of its [`Press::at`].
     pub fn tick(&mut self, now: Duration) {
         let (flow, mut engine) = self.split();
         flow.tick(&mut engine, now);
     }
 
     /// Answer the prompt on screen.
-    pub fn answer(&mut self, ticket: Ticket, answer: PromptAnswer, event: InputEvent) -> Outcome {
+    pub fn answer(&mut self, ticket: Ticket, answer: PromptAnswer, press: Press) -> Outcome {
         let (flow, mut engine) = self.split();
-        flow.answer(&mut engine, ticket, answer, event)
+        flow.answer(&mut engine, ticket, answer, press)
     }
 
     /// Cancel a screen or preview, or dismiss an error (S8).

@@ -2,13 +2,18 @@
 
 #![allow(dead_code)] // Each test file uses its own part.
 
+use std::time::Duration;
+
 use gogo_contract::{PlanFacts, Value, actions};
 use gogo_gui_model::fake::{FakeBackend, FakePlan};
-use gogo_gui_model::{InputEvent, Invocation, Modal, Model, Outcome, Strength, Ticket};
+use gogo_gui_model::{
+    DWELL, InputEvent, Invocation, Modal, Model, Outcome, Press, Strength, Ticket,
+};
 
 pub struct App {
     pub model: Model<FakeBackend>,
     last: u64,
+    pub now: Duration,
 }
 
 impl App {
@@ -16,7 +21,11 @@ impl App {
         let mut model = Model::new(FakeBackend::new(), || {});
         // So that gated actions can be tried; the gate has its own tests.
         model.backend_mut().gates.cloud_writes = true;
-        App { model, last: 0 }
+        App {
+            model,
+            last: 0,
+            now: Duration::ZERO,
+        }
     }
 
     pub fn fake(&mut self) -> &mut FakeBackend {
@@ -45,18 +54,33 @@ impl App {
         self.model.modal().expect("a screen").ticket()
     }
 
+    /// A new press, now.
+    pub fn press(&mut self) -> Press {
+        Press {
+            event: self.input(),
+            at: self.now,
+            repeat: false,
+        }
+    }
+
+    /// The shell draws `ticket` now, and the user takes their time over it.
+    pub fn show(&mut self, ticket: Ticket) {
+        self.model.presented(ticket, self.last_input(), self.now);
+        self.now += DWELL;
+    }
+
     /// The shell has drawn the screen on top.
     pub fn draw(&mut self) -> Ticket {
         let ticket = self.ticket();
-        self.model.presented(ticket, self.last_input());
+        self.show(ticket);
         ticket
     }
 
     /// Draw the plan card and press its confirm control.
     pub fn confirm(&mut self) -> Outcome {
         let ticket = self.draw();
-        let event = self.input();
-        let outcome = self.model.confirm(ticket, event);
+        let press = self.press();
+        let outcome = self.model.confirm(ticket, press);
         self.model.pump();
         outcome
     }

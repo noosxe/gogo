@@ -28,6 +28,10 @@ pub trait Backend {
 
     /// Compute what `call` would do and **change nothing**. `answer` is the prompt's, for
     /// an action that asks first.
+    ///
+    /// For an action on several games (`updates.apply_all`) the plan's facts are the
+    /// **or** over all of them: one game that loses DLC or downgrades sets the flag for
+    /// the batch, and so makes it destructive.
     fn plan(&mut self, call: &Call, answer: Option<&PromptAnswer>, reply: PlanReply);
 
     /// What an action of kind `prompt` asks.
@@ -60,10 +64,12 @@ impl Run {
         Run { call, answer, plan }
     }
 
+    /// The checked call being run.
     pub fn call(&self) -> &Call {
         &self.call
     }
 
+    /// The prompt's answer, for an action that asked.
     pub fn answer(&self) -> Option<&PromptAnswer> {
         self.answer.as_ref()
     }

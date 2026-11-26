@@ -12,8 +12,9 @@ use gogo_contract::{Binding, PlanFacts, Tier, Value};
 use gogo_gui_model::fake::FakePlan;
 use gogo_gui_model::safety::route;
 use gogo_gui_model::{
-    Effect, ErrorView, HOLD, InputEvent, Invocation, JobKind, JobState, JobStatus, Modal, Outcome,
-    Preview, PromptAnswer, PromptReply, PromptSpec, Route, Secret, SourceKey, Strength,
+    DWELL, Effect, ErrorView, HOLD, InputEvent, Invocation, JobId, JobKind, JobState, JobStatus,
+    Modal, Outcome, Press, Preview, PromptAnswer, PromptReply, PromptSpec, Route, Secret,
+    SourceKey, Strength,
 };
 
 fn status(state: JobState) -> JobStatus {
@@ -120,9 +121,9 @@ fn s5_every_action_in_the_contract() {
             Route::Plan | Route::Prompt => {
                 if app.screen() == "prompt" {
                     let ticket = app.draw();
-                    let event = app.input();
+                    let press = app.press();
                     let answer = PromptAnswer::Text("x".into());
-                    app.model.answer(ticket, answer, event);
+                    app.model.answer(ticket, answer, press);
                     app.model.pump();
                 }
                 assert_eq!(app.runs(), 0, "{} ran without its plan", spec.name);
@@ -209,24 +210,157 @@ fn s5_confirm_needs_a_card_that_was_shown() {
     let mut app = App::new();
     app.invoke(&call("game.update"));
     let ticket = app.ticket();
-    let event = app.input();
-    assert_eq!(app.model.confirm(ticket, event), Outcome::Ignored);
+    let press = app.press();
+    assert_eq!(app.model.confirm(ticket, press), Outcome::Ignored);
     assert_eq!(app.runs(), 0);
 }
 
 #[test]
 fn s5_confirm_cannot_come_from_the_input_that_opened_the_card() {
     let mut app = App::new();
-    // A double click: both inputs exist before the card is drawn.
-    let first = app.input();
-    let second = app.input();
-    app.model.invoke(&call("game.update"), first);
+    // A double click: both presses exist before the card is drawn.
+    let first = app.press();
+    let second = app.press();
+    app.model.invoke(&call("game.update"), first.event);
     app.model.pump();
     let ticket = app.draw();
-    assert_eq!(app.model.confirm(ticket, second), Outcome::Ignored);
-    assert_eq!(app.model.confirm(ticket, first), Outcome::Ignored);
+    // However late they are delivered.
+    for press in [second, first] {
+        let late = Press {
+            at: app.now,
+            ..press
+        };
+        assert_eq!(app.model.confirm(ticket, late), Outcome::Ignored);
+    }
     assert_eq!(app.runs(), 0);
     assert_eq!(app.screen(), "card");
+}
+
+/// A double click, or Enter repeating: the first confirms, the plan turns out to have
+/// changed, and the second lands on a card the user has not read.
+#[test]
+fn s5_a_second_click_cannot_confirm_the_changed_plan() {
+    let mut app = App::new();
+    app.invoke(&call("game.update"));
+    app.draw();
+    app.fake().set_plan(
+        "game.update",
+        FakePlan {
+            inputs: 1,
+            ..FakePlan::default()
+        },
+    );
+    assert_eq!(app.confirm(), Outcome::Accepted);
+    // The new card is drawn, and 80 ms later the second click goes down.
+    let changed = app.ticket();
+    let drawn = app.now;
+    app.model.presented(changed, app.last_input(), drawn);
+    app.now = drawn + Duration::from_millis(80);
+    let second = app.press();
+    assert_eq!(app.model.confirm(changed, second), Outcome::Ignored);
+    let enter = app.press();
+    assert_eq!(app.model.enter(enter), Outcome::Ignored);
+    app.model.pump();
+    assert_eq!(app.runs(), 0);
+    assert_eq!(app.screen(), "card");
+}
+
+#[test]
+fn s5_confirm_needs_the_card_to_have_been_up_for_a_while() {
+    let mut app = App::new();
+    app.invoke(&call("game.update"));
+    let ticket = app.ticket();
+    app.model.presented(ticket, app.last_input(), app.now);
+    let shown = app.now;
+    // A second report of the same screen doesn't restart the wait.
+    app.model
+        .presented(ticket, app.last_input(), shown + DWELL * 4);
+    app.now = shown + DWELL - Duration::from_millis(1);
+    let early = app.press();
+    assert_eq!(app.model.confirm(ticket, early), Outcome::Ignored);
+    app.now = shown + DWELL;
+    let press = app.press();
+    assert_eq!(app.model.confirm(ticket, press), Outcome::Accepted);
+    app.model.pump();
+    assert_eq!(app.runs(), 1);
+}
+
+#[test]
+fn s5_a_repeating_key_never_confirms() {
+    let mut app = App::new();
+    app.invoke(&call("game.update"));
+    app.draw();
+    app.now += Duration::from_secs(10);
+    let repeat = Press {
+        repeat: true,
+        ..app.press()
+    };
+    assert_eq!(app.model.enter(repeat), Outcome::Ignored);
+    assert_eq!(app.runs(), 0);
+}
+
+/// A press that existed before the card stays useless even if the shell reports an older
+/// number than the model has already taken.
+#[test]
+fn s5_an_older_press_cannot_confirm_whatever_the_shell_reports() {
+    let mut app = App::new();
+    let before = app.press();
+    app.invoke(&call("game.update"));
+    let ticket = app.ticket();
+    app.model.presented(ticket, InputEvent(0), app.now);
+    app.now += DWELL;
+    let late = Press {
+        at: app.now,
+        ..before
+    };
+    assert_eq!(app.model.confirm(ticket, late), Outcome::Ignored);
+    assert_eq!(app.runs(), 0);
+}
+
+#[test]
+fn s5_previews_that_do_not_fit_are_not_planned_over_and_over() {
+    let mut app = App::new();
+    let card = |n: u32| {
+        Invocation::new(actions::action("game.update").unwrap())
+            .arg("id", Value::str(n.to_string()))
+    };
+    // Each frame the page asks for all twenty of its cards.
+    let frame = |app: &mut App| {
+        let held = (0..20)
+            .filter(|n| app.model.preview(&card(*n)).is_ok())
+            .count();
+        app.model.pump();
+        held
+    };
+    for _ in 0..8 {
+        frame(&mut app);
+    }
+    let planned = app.fake().planned.len();
+    assert_eq!(planned, 16, "as many as are kept, each once");
+    for _ in 0..8 {
+        assert_eq!(frame(&mut app), 16);
+    }
+    assert_eq!(app.fake().planned.len(), planned);
+
+    // Once the page is gone its previews make room.
+    app.model.pump();
+    app.model.pump();
+    assert!(app.model.preview(&card(100)).is_ok());
+}
+
+#[test]
+fn s5_only_a_few_previews_wait_for_a_plan_at_once() {
+    let mut app = App::new();
+    app.fake().hold_plans = true;
+    let results: Vec<bool> = (0..6)
+        .map(|n| {
+            let i = Invocation::new(actions::action("game.update").unwrap())
+                .arg("id", Value::str(n.to_string()));
+            app.model.preview(&i).is_ok()
+        })
+        .collect();
+    assert_eq!(results, [true, true, true, true, false, false]);
+    assert_eq!(app.fake().planned.len(), 4);
 }
 
 #[test]
@@ -234,14 +368,14 @@ fn s5_confirm_cannot_be_replayed() {
     let mut app = App::new();
     app.invoke(&call("game.update"));
     let ticket = app.draw();
-    let event = app.input();
-    assert_eq!(app.model.confirm(ticket, event), Outcome::Accepted);
+    let press = app.press();
+    assert_eq!(app.model.confirm(ticket, press), Outcome::Accepted);
     // Again while the plan is checked, and again after it ran.
-    assert_eq!(app.model.confirm(ticket, event), Outcome::Ignored);
-    let later = app.input();
+    assert_eq!(app.model.confirm(ticket, press), Outcome::Ignored);
+    let later = app.press();
     assert_eq!(app.model.confirm(ticket, later), Outcome::Ignored);
     app.model.pump();
-    let latest = app.input();
+    let latest = app.press();
     assert_eq!(app.model.confirm(ticket, latest), Outcome::Ignored);
     assert_eq!(app.runs(), 1);
 }
@@ -256,8 +390,8 @@ fn s5_confirm_answers_only_the_plan_it_was_shown_for() {
     app.invoke(&call("game.move"));
     let new = app.draw();
     assert_ne!(old, new);
-    let event = app.input();
-    assert_eq!(app.model.confirm(old, event), Outcome::Ignored);
+    let press = app.press();
+    assert_eq!(app.model.confirm(old, press), Outcome::Ignored);
     assert_eq!(app.runs(), 0);
     assert_eq!(app.screen(), "card");
 }
@@ -326,14 +460,14 @@ fn s5_inline_preview_needs_the_same_confirm() {
         Some(Preview::Ready { .. })
     ));
     // Not before it was drawn, and not by invoking the action.
-    let early = app.input();
+    let early = app.press();
     assert_eq!(app.model.confirm(ticket, early), Outcome::Ignored);
     assert_eq!(app.runs(), 0);
 
-    app.model.presented(ticket, app.last_input());
+    app.show(ticket);
     assert_eq!(app.model.confirm(ticket, early), Outcome::Ignored);
-    let event = app.input();
-    assert_eq!(app.model.confirm(ticket, event), Outcome::Accepted);
+    let press = app.press();
+    assert_eq!(app.model.confirm(ticket, press), Outcome::Accepted);
     app.model.pump();
     assert_eq!(app.ran(), ["game.update"]);
     assert!(app.model.preview_state(ticket).is_none(), "used up");
@@ -344,7 +478,7 @@ fn s5_a_stale_preview_cannot_be_confirmed() {
     let mut app = App::new();
     let ticket = app.model.preview(&call("game.update")).unwrap();
     app.model.pump();
-    app.model.presented(ticket, app.last_input());
+    app.show(ticket);
     app.fake().set_plan(
         "game.update",
         FakePlan {
@@ -352,8 +486,8 @@ fn s5_a_stale_preview_cannot_be_confirmed() {
             ..FakePlan::default()
         },
     );
-    let event = app.input();
-    app.model.confirm(ticket, event);
+    let press = app.press();
+    app.model.confirm(ticket, press);
     app.model.pump();
     assert_eq!(app.runs(), 0);
     assert_eq!(app.screen(), "card");
@@ -364,9 +498,9 @@ fn s5_a_prompt_action_with_changes_still_shows_them() {
     let mut app = App::new();
     app.invoke(&call("env.edit"));
     let ticket = app.draw();
-    let event = app.input();
+    let press = app.press();
     app.model
-        .answer(ticket, PromptAnswer::Text("1".into()), event);
+        .answer(ticket, PromptAnswer::Text("1".into()), press);
     app.model.pump();
     assert_eq!(app.screen(), "card");
     assert_eq!(app.runs(), 0);
@@ -388,13 +522,13 @@ fn s5_a_prompt_action_without_changes_runs_after_the_answer() {
     );
     app.invoke(&call("account.sign_in"));
     let ticket = app.draw();
-    let event = app.input();
+    let press = app.press();
     let plain = PromptAnswer::Text("code".into());
-    assert_eq!(app.model.answer(ticket, plain, event), Outcome::Ignored);
-    let event = app.input();
+    assert_eq!(app.model.answer(ticket, plain, press), Outcome::Ignored);
+    let press = app.press();
     let secret = PromptAnswer::Secret(Secret::new("a-code"));
     assert_eq!(
-        app.model.answer(ticket, secret.clone(), event),
+        app.model.answer(ticket, secret.clone(), press),
         Outcome::Accepted
     );
     app.model.pump();
@@ -427,25 +561,25 @@ fn s6_typed(name: &str, plan: FakePlan) {
     assert_eq!(app.strength(), Strength::Typed("Example Game".into()));
     let ticket = app.draw();
     // The default is no: neither Enter nor a plain confirm does anything.
-    let event = app.input();
-    assert_eq!(app.model.enter(event), Outcome::Ignored);
-    let event = app.input();
-    assert_eq!(app.model.confirm(ticket, event), Outcome::Ignored);
+    let press = app.press();
+    assert_eq!(app.model.enter(press), Outcome::Ignored);
+    let press = app.press();
+    assert_eq!(app.model.confirm(ticket, press), Outcome::Ignored);
     // Nor does a hold, or a wrong name.
-    let event = app.input();
-    app.model.hold_start(ticket, event, Duration::ZERO);
-    app.model.tick(Duration::from_secs(5));
+    let press = app.press();
+    app.model.hold_start(ticket, press);
+    app.model.tick(press.at + Duration::from_secs(5));
     for wrong in ["", "example game", "Example Gam", "Example Game 2"] {
-        let event = app.input();
-        assert_eq!(app.model.type_name(ticket, wrong, event), Outcome::Ignored);
+        let press = app.press();
+        assert_eq!(app.model.type_name(ticket, wrong, press), Outcome::Ignored);
     }
     app.model.pump();
     assert_eq!(app.runs(), 0, "{name}");
     assert_eq!(app.screen(), "strong", "{name}");
 
-    let event = app.input();
+    let press = app.press();
     assert_eq!(
-        app.model.type_name(ticket, "  Example Game ", event),
+        app.model.type_name(ticket, "  Example Game ", press),
         Outcome::Accepted
     );
     app.model.pump();
@@ -456,16 +590,16 @@ fn s6_hold(name: &str, plan: FakePlan) {
     let mut app = to_strong(name, plan);
     assert_eq!(app.strength(), Strength::Hold, "{name}");
     let ticket = app.draw();
-    let event = app.input();
-    assert_eq!(app.model.enter(event), Outcome::Ignored);
-    let event = app.input();
+    let press = app.press();
+    assert_eq!(app.model.enter(press), Outcome::Ignored);
+    let press = app.press();
     assert_eq!(
-        app.model.type_name(ticket, "Example Game", event),
+        app.model.type_name(ticket, "Example Game", press),
         Outcome::Ignored
     );
-    let event = app.input();
-    app.model.hold_start(ticket, event, Duration::ZERO);
-    app.model.tick(HOLD);
+    let press = app.press();
+    app.model.hold_start(ticket, press);
+    app.model.tick(press.at + HOLD);
     app.model.pump();
     assert_eq!(app.ran(), [name]);
 }
@@ -530,6 +664,15 @@ fn s6_apply_all_that_removes_dlc() {
 }
 
 #[test]
+fn s6_apply_all_that_downgrades() {
+    let downgrade = PlanFacts {
+        downgrades: true,
+        ..PlanFacts::changes()
+    };
+    s6_hold("updates.apply_all", FakePlan::with(downgrade));
+}
+
+#[test]
 fn s6_without_a_title_it_asks_for_a_hold() {
     let mut plan = FakePlan::default();
     plan.plan.subject = "  ".into();
@@ -560,28 +703,44 @@ fn s6_covers_every_destructive_action() {
 fn s6_a_short_or_broken_hold_does_nothing() {
     let mut app = to_strong("apps.prune_orphaned", FakePlan::default());
     let ticket = app.draw();
-    let ms = Duration::from_millis;
+    let start = app.now;
+    let ms = |n| start + Duration::from_millis(n);
+    let hold = |app: &mut App, at| {
+        app.now = at;
+        let press = app.press();
+        app.model.hold_start(ticket, press);
+        press
+    };
 
     // Released early.
-    let event = app.input();
-    app.model.hold_start(ticket, event, ms(0));
+    hold(&mut app, ms(0));
     app.model.tick(ms(999));
     app.model.hold_stop(ticket);
     app.model.tick(ms(5_000));
     // A clock that goes back.
-    let event = app.input();
-    app.model.hold_start(ticket, event, ms(10_000));
+    let used = hold(&mut app, ms(10_000));
     app.model.tick(ms(9_000));
     app.model.tick(ms(20_000));
-    // A used input can't start one.
-    app.model.hold_start(ticket, event, ms(30_000));
+    // A used input can't start one, nor can a repeating key.
+    app.model.hold_start(
+        ticket,
+        Press {
+            at: ms(30_000),
+            ..used
+        },
+    );
+    app.now = ms(31_000);
+    let repeat = Press {
+        repeat: true,
+        ..app.press()
+    };
+    app.model.hold_start(ticket, repeat);
     app.model.tick(ms(40_000));
     app.model.pump();
     assert_eq!(app.runs(), 0);
 
     // A new press starts from its own time.
-    let event = app.input();
-    app.model.hold_start(ticket, event, ms(50_000));
+    hold(&mut app, ms(50_000));
     app.model.tick(ms(50_500));
     app.model.pump();
     assert_eq!(app.runs(), 0);
@@ -595,12 +754,16 @@ fn s6_the_second_screen_cannot_be_passed_by_the_first_inputs() {
     let mut app = App::new();
     app.invoke(&call("game.remove"));
     let card = app.draw();
-    let confirm = app.input();
-    let queued = app.input();
+    let confirm = app.press();
+    let queued = app.press();
     app.model.confirm(card, confirm);
     let strong = app.draw();
+    let late = Press {
+        at: app.now,
+        ..queued
+    };
     assert_eq!(
-        app.model.type_name(strong, "Example Game", queued),
+        app.model.type_name(strong, "Example Game", late),
         Outcome::Ignored
     );
     assert_eq!(app.runs(), 0);
@@ -635,8 +798,8 @@ fn s6_a_destructive_job_cannot_be_restarted() {
     ] {
         let mut app = to_strong("dlc.remove", FakePlan::default());
         let ticket = app.draw();
-        let event = app.input();
-        app.model.type_name(ticket, "Example Game", event);
+        let press = app.press();
+        app.model.type_name(ticket, "Example Game", press);
         app.model.pump();
         app.fake().sink(0).report(status(state));
         app.model.pump();
@@ -652,8 +815,8 @@ fn s6_a_destructive_job_cannot_be_restarted() {
 fn s6_a_paused_destructive_job_can_carry_on() {
     let mut app = to_strong("dlc.remove", FakePlan::default());
     let ticket = app.draw();
-    let event = app.input();
-    app.model.type_name(ticket, "Example Game", event);
+    let press = app.press();
+    app.model.type_name(ticket, "Example Game", press);
     app.model.pump();
     app.fake().sink(0).report(status(JobState::Paused));
     app.model.pump();
@@ -695,10 +858,10 @@ fn s8_cancel_from_every_state_runs_nothing() {
     // Strong confirmation, also mid-hold.
     let mut app = to_strong("apps.prune_orphaned", FakePlan::default());
     let ticket = app.draw();
-    let event = app.input();
-    app.model.hold_start(ticket, event, Duration::ZERO);
+    let press = app.press();
+    app.model.hold_start(ticket, press);
     app.model.cancel(ticket);
-    app.model.tick(Duration::from_secs(5));
+    app.model.tick(press.at + Duration::from_secs(5));
     app.model.pump();
     assert_eq!((app.screen(), app.runs()), ("none", 0));
 
@@ -723,10 +886,10 @@ fn s8_cancel_from_every_state_runs_nothing() {
     let mut app = App::new();
     let ticket = app.model.preview(&call("game.update")).unwrap();
     app.model.pump();
-    app.model.presented(ticket, app.last_input());
+    app.show(ticket);
     app.model.cancel(ticket);
-    let event = app.input();
-    assert_eq!(app.model.confirm(ticket, event), Outcome::Ignored);
+    let press = app.press();
+    assert_eq!(app.model.confirm(ticket, press), Outcome::Ignored);
     assert_eq!(app.runs(), 0);
 }
 
@@ -741,8 +904,8 @@ fn s8_a_no_to_an_actions_question_cancels() {
     );
     app.invoke(&call("env.edit"));
     let ticket = app.draw();
-    let event = app.input();
-    app.model.answer(ticket, PromptAnswer::No, event);
+    let press = app.press();
+    app.model.answer(ticket, PromptAnswer::No, press);
     app.model.pump();
     assert_eq!((app.screen(), app.runs()), ("none", 0));
     assert!(app.fake().planned.is_empty());
@@ -763,22 +926,26 @@ fn s8_cancelling_a_jobs_question_answers_none() {
 fn s8_a_jobs_question_needs_a_shown_screen_and_a_new_input() {
     let (mut app, _) = with_job();
     let answers = Answers::default();
-    let queued = app.input();
+    let queued = app.press();
     ask(&mut app, &answers);
     let ticket = app.ticket();
-    let event = app.input();
+    let press = app.press();
     assert_eq!(
-        app.model.answer(ticket, PromptAnswer::Yes, event),
+        app.model.answer(ticket, PromptAnswer::Yes, press),
         Outcome::Ignored
     );
-    app.model.presented(ticket, app.last_input());
+    app.show(ticket);
+    let late = Press {
+        at: app.now,
+        ..queued
+    };
     assert_eq!(
-        app.model.answer(ticket, PromptAnswer::Yes, queued),
+        app.model.answer(ticket, PromptAnswer::Yes, late),
         Outcome::Ignored
     );
     assert!(answers.lock().unwrap().is_empty());
-    let event = app.input();
-    app.model.answer(ticket, PromptAnswer::Yes, event);
+    let press = app.press();
+    app.model.answer(ticket, PromptAnswer::Yes, press);
     assert_eq!(*answers.lock().unwrap(), [Some(PromptAnswer::Yes)]);
 }
 
@@ -928,6 +1095,61 @@ fn s9_a_failure_behind_a_dialog_is_shown_after_it() {
     assert_eq!(error(&app), disk());
 }
 
+/// A restart asked for before the frame that reports the end must not swallow it.
+#[test]
+fn s9_a_restart_cannot_hide_an_end_not_yet_reported() {
+    for (end, control) in [
+        (JobState::Failed, "job.retry"),
+        (JobState::Cancelled, "job.resume"),
+    ] {
+        let (mut app, id) = with_job();
+        app.fake().sink(0).report(JobStatus {
+            error: Some(disk()),
+            ..status(end)
+        });
+        // No frame in between.
+        let event = app.input();
+        let outcome = app.model.invoke(&job_call(control, &id), event);
+        assert!(matches!(outcome, Outcome::Refused(_)), "{control}");
+        assert!(app.fake().controls.lock().unwrap().is_empty(), "{control}");
+        app.model.pump();
+        assert_eq!(
+            app.model.jobs().state(&JobId::new(&id)),
+            Some(end),
+            "{control}"
+        );
+        if end == JobState::Failed {
+            app.model.dismiss();
+            assert_eq!(error(&app), disk(), "the failure is still told");
+        }
+    }
+}
+
+#[test]
+fn s9_a_skin_cannot_pile_up_errors() {
+    let bad = || Invocation::new(actions::action("game.play").unwrap());
+    // Behind a dialog nothing is even checked.
+    let mut app = App::new();
+    app.invoke(&call("game.update"));
+    for _ in 0..50 {
+        assert_eq!(app.invoke(&bad()), Outcome::Ignored);
+        assert_eq!(app.invoke(&call("env.reveal")), Outcome::Ignored);
+    }
+    app.model.dismiss();
+    assert_eq!(app.screen(), "none");
+
+    // The same refusal over and over, even from the actions allowed behind a dialog,
+    // is one error.
+    app.invoke(&call("game.update"));
+    for _ in 0..50 {
+        app.invoke(&job_call("job.cancel", "no-such-job"));
+    }
+    app.model.dismiss();
+    assert_eq!(app.screen(), "error");
+    app.model.dismiss();
+    assert_eq!(app.screen(), "none");
+}
+
 // --- S19: global keys are the app's ---
 
 /// The model's half: Esc and Enter act on the app's own state, whatever a skin bound.
@@ -936,8 +1158,8 @@ fn s9_a_failure_behind_a_dialog_is_shown_after_it() {
 fn s19_esc_and_enter_reach_the_dialog() {
     let mut app = App::new();
     assert_eq!(app.model.dismiss(), Outcome::Ignored);
-    let event = app.input();
-    assert_eq!(app.model.enter(event), Outcome::Ignored);
+    let press = app.press();
+    assert_eq!(app.model.enter(press), Outcome::Ignored);
 
     app.invoke(&call("game.update"));
     assert_eq!(app.model.dismiss(), Outcome::Accepted);
@@ -945,8 +1167,8 @@ fn s19_esc_and_enter_reach_the_dialog() {
 
     app.invoke(&call("game.update"));
     app.draw();
-    let event = app.input();
-    assert_eq!(app.model.enter(event), Outcome::Accepted);
+    let press = app.press();
+    assert_eq!(app.model.enter(press), Outcome::Accepted);
     app.model.pump();
     assert_eq!(app.ran(), ["game.update"]);
 }
@@ -956,12 +1178,12 @@ fn s19_enter_on_a_destructive_card_only_moves_on() {
     let mut app = App::new();
     app.invoke(&call("game.remove"));
     app.draw();
-    let event = app.input();
-    app.model.enter(event);
+    let press = app.press();
+    app.model.enter(press);
     assert_eq!(app.screen(), "strong");
     app.draw();
-    let event = app.input();
-    assert_eq!(app.model.enter(event), Outcome::Ignored);
+    let press = app.press();
+    assert_eq!(app.model.enter(press), Outcome::Ignored);
     assert_eq!(app.runs(), 0);
 }
 
