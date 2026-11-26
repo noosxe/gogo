@@ -20,6 +20,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::account::Account;
 use super::art::ArtStore;
+use super::browser::Browser;
 use super::local::{Built, Local, Machine};
 use super::{CoreBackend, Engine, Parts};
 
@@ -48,6 +49,19 @@ impl Account for SignedIn {
 
     async fn username(&self, _: &dyn TokenProvider) -> Result<Option<String>, AuthError> {
         Ok(Some("made_up_player".to_string()))
+    }
+
+    async fn login(&self, _: zeroize::Zeroizing<String>) -> Result<(), AuthError> {
+        Err(AuthError::LoginAborted)
+    }
+}
+
+/// Opens nothing.
+pub(crate) struct NoBrowser;
+
+impl Browser for NoBrowser {
+    fn open(&self, _: &str) -> bool {
+        true
     }
 }
 
@@ -166,6 +180,7 @@ pub(crate) fn rig(server: &MockServer, account: Arc<dyn Account>) -> Rig {
         endpoints: Endpoints::at(&server.uri()),
         language: "en".to_string(),
         download_dir: PathBuf::from(dir.path()),
+        browser: Arc::new(NoBrowser),
     }));
     let backend = CoreBackend::new(Arc::clone(&engine), tokio::runtime::Handle::current(), None);
     Rig {

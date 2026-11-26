@@ -620,8 +620,6 @@ fn pe_scan(
 
 // — login (A6: config-decided store, probe before the browser, no fallback) —
 
-const REDIRECT_URI: &str = "https://embed.gog.com/on_login_success?origin=client";
-
 async fn login(code: Option<String>, print_url: bool, force: bool) -> Result<i32, AppError> {
     let cfg = load_config_from_env()?;
     let store = gogo::auth::store::open(cfg.auth.token_store);
@@ -635,11 +633,7 @@ async fn login(code: Option<String>, print_url: bool, force: bool) -> Result<i32
         return Ok(cli::exit::OK);
     }
 
-    // Raw redirect, matching gog-warp's token exchange verbatim (live-verified shape).
-    let auth_url = format!(
-        "https://auth.gog.com/auth?client_id={}&redirect_uri={REDIRECT_URI}&response_type=code&layout=client2",
-        gog_warp::constants::GALAXY_CLIENT_ID,
-    );
+    let auth_url = gogo::auth::browser::authorize_url();
     if print_url {
         println!("{auth_url}");
         return Ok(cli::exit::OK);
@@ -654,11 +648,10 @@ async fn login(code: Option<String>, print_url: bool, force: bool) -> Result<i32
             std::io::stdout().flush().ok();
             let mut line = String::new();
             std::io::stdin().read_line(&mut line)?;
-            line.split("code=")
-                .nth(1)
-                .unwrap_or(&line)
-                .trim()
-                .to_owned()
+            match gogo::auth::browser::code_from_input(&line) {
+                Some(code) => code.to_string(),
+                None => return Err(gogo::gog::error::AuthError::NotACode.into()),
+            }
         }
     };
 

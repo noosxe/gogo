@@ -636,7 +636,26 @@ impl Interaction {
                 Primary::Ctrl => mods.ctrl && !mods.meta,
                 Primary::Meta => mods.meta && !mods.ctrl,
             };
+        // Only under a dialog, where no skin control can be reached by it.
+        let paste = matches!(key, Key::Char('v' | 'V'))
+            && !mods.alt
+            && !mods.shift
+            && match self.config.primary {
+                Primary::Ctrl => mods.ctrl && !mods.meta,
+                Primary::Meta => mods.meta && !mods.ctrl,
+            }
+            && frame
+                .modal()
+                .is_some_and(|layer| layer.kind == LayerKind::Dialog);
         match key {
+            _ if paste => {
+                out.consumed = true;
+                if !repeat {
+                    self.cancel_presses(out);
+                    let provenance = self.provenance(at);
+                    out.intents.push(Intent::Paste { provenance });
+                }
+            }
             Key::Escape => {
                 out.consumed = true;
                 if !repeat {

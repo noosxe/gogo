@@ -31,6 +31,7 @@
 #![warn(missing_docs)]
 
 mod a11y;
+mod clipboard;
 mod cpu;
 mod input;
 mod output;
@@ -48,7 +49,9 @@ use winit::raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, WindowHandle,
 };
 
+pub use clipboard::CLIPBOARD_MAX;
 pub use run::{Shell, Waker};
+pub use zeroize::Zeroizing;
 
 /// An error of an application's renderer.
 pub type RenderError = Box<dyn std::error::Error + Send + Sync + 'static>;
@@ -247,6 +250,20 @@ pub trait ShellApp {
     /// of. Returns whether to draw again.
     fn input(&mut self, input: Input, at: Duration) -> bool {
         let _ = (input, at);
+        false
+    }
+
+    /// Whether the user has just asked to paste. Asked after each input and
+    /// accessibility action; the clipboard is read only when this says so.
+    fn wants_paste(&mut self) -> bool {
+        false
+    }
+
+    /// The clipboard's text after [`ShellApp::wants_paste`], at most
+    /// [`CLIPBOARD_MAX`] bytes; `None` when there is none to give. Returns whether to
+    /// draw again.
+    fn pasted(&mut self, text: Option<Zeroizing<String>>) -> bool {
+        let _ = text;
         false
     }
 

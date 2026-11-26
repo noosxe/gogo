@@ -359,7 +359,27 @@ As built (PR F1, `CoreBackend`, read-only):
   the cover cache (§9), named by a hash of its address, so a changed picture is fetched
   again; offline, whatever is kept is shown. The logo is a PNG, so it has no picture.
 - **Description** HTML becomes plain text without addresses.
-- Reads only. Plans and runs other than `library.refresh` are refused.
+- Reads only. Plans and runs other than `library.refresh` and `account.sign_in` are
+  refused.
+
+As built (PR F2, sign-in):
+
+- **Flow.** `prompt_for(account.sign_in)` opens GOG's page (`xdg-open` / `open`; the
+  address is shown only if that fails) and asks for a secret. A token store that could
+  not keep the result refuses before the browser opens. The plan has nothing to show, so
+  the answer runs it at once; the exchange runs on the runtime under an app-owned
+  "Signing in…" layer, and a failure comes back through `Failures`. Success reads every
+  source again. Sign-out waits for the plan card (#536).
+- **The dialog** is the app's own layer: Paste, Clear, Open the page again, Sign in,
+  Cancel (initial focus). Paste only (also the primary modifier and V). The clipboard is
+  read only for a press made after the dialog had been up for the dwell time; the shell
+  reads it and hands the app at most 4 KiB. The app keeps the parsed code, never the
+  pasted text, and the screen and assistive technology are told only whether a code is
+  there. Fixed colours: skin tokens are a follow-up.
+- **Error screens** (S9) are drawn the same way, with Close. Plan cards, destructive
+  confirmations and job questions are still cancelled (#614).
+- **Secrets in memory.** The model's `Secret` and the copies the app makes are wiped on
+  drop; gogo-core and gog-warp take the code as an ordinary string.
 
 ## 8. Skin dev mode
 
@@ -393,9 +413,9 @@ As built (input and AccessKit wiring):
 - `ui.set` writes the skin's value; a reload keeps it where the new skin still has it.
 - A frame is built as pending and becomes the one input and assistive technology act on
   only when the shell reports it presented; a skipped or failed frame changes nothing.
-- The safety flow's screens are not drawn yet (#536, #614). Whatever raises one (a
-  control, a job's question, a failed job) it is cancelled at once, and the model is never
-  told a screen was presented.
+- The safety flow's screens are not drawn yet (#536, #614), except the two of PR F2
+  below. Whatever raises another (a control, a job's question) it is cancelled at once,
+  and the model is never told that it was presented.
 - The error panel is an alert layer: while it is up only Esc does anything, nothing under
   it can be pressed, and assistive technology reads its lines. A route that no skin draws
   leaves the last screen in sight under it.

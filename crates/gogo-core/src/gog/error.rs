@@ -74,6 +74,10 @@ pub enum AuthError {
     #[error("login aborted")]
     LoginAborted,
 
+    /// The pasted text holds no code. It is never quoted.
+    #[error("that is not a GOG sign-in address or code")]
+    NotACode,
+
     #[error("unauthorized — run `gogo login`")]
     Unauthorized,
 

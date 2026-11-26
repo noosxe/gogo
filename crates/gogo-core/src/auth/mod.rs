@@ -11,6 +11,7 @@
 //! upstream. The config keys stay reserved (05 §3) and apply only if we ever vendor the
 //! auth files (09 §4).
 
+pub mod browser;
 pub mod store;
 
 use crate::gog::error::AuthError;

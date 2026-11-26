@@ -13,6 +13,7 @@ fake = []
 
 [dependencies]
 gogo-contract.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 # The crate's own tests in `tests/` use the fake.

@@ -16,8 +16,13 @@ accesskit.workspace = true
 accesskit_winit.workspace = true
 notify.workspace = true
 softbuffer.workspace = true
+arboard.workspace = true
+zeroize.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+smithay-clipboard.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

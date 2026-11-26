@@ -16,7 +16,7 @@ const LINES: usize = 8;
 
 const BACKGROUND: Color = Color([0x2a, 0x10, 0x14, 0xf2]);
 const HEADING: Color = Color([0xff, 0x8a, 0x80, 0xff]);
-/// Behind [`Panel::loading`], which is no error.
+/// Behind [`Panel::waiting`], which is no error.
 const QUIET: Color = Color([0x14, 0x16, 0x1b, 0xf2]);
 const TEXT: Color = Color([0xf5, 0xf5, 0xf5, 0xff]);
 
@@ -63,9 +63,14 @@ impl Panel {
         Panel::styled(fonts, size, (heading, HEADING), BACKGROUND, lines)
     }
 
-    /// The app's "Loading" screen: while it is up nothing under it takes input.
-    pub(crate) fn loading(fonts: &mut FontSet, size: (f32, f32)) -> Result<Panel, PanelError> {
-        Panel::styled(fonts, size, ("Loading…", TEXT), QUIET, &[])
+    /// The app's "Loading" screen and its like: while it is up nothing under it
+    /// takes input.
+    pub(crate) fn waiting(
+        fonts: &mut FontSet,
+        size: (f32, f32),
+        heading: &str,
+    ) -> Result<Panel, PanelError> {
+        Panel::styled(fonts, size, (heading, TEXT), QUIET, &[])
     }
 
     fn styled(
@@ -123,6 +128,12 @@ impl Panel {
 
     pub(crate) fn layer(&self) -> Layer<'_> {
         Layer::new(self.id, LayerKind::Alert, &self.tree, &self.laid)
+    }
+
+    /// The tree, for tests.
+    #[cfg(test)]
+    pub(crate) fn tree(&self) -> &Tree {
+        &self.tree
     }
 
     /// Adds the panel's drawing to `list`.
