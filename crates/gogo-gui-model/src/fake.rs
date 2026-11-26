@@ -17,8 +17,11 @@ use crate::source::{Slot, SourceKey, lock};
 /// The plan the fake answers with.
 #[derive(Debug, Clone)]
 pub struct FakePlan {
+    /// What the card shows.
     pub plan: Plan,
+    /// What the plan contains.
     pub facts: PlanFacts,
+    /// The digest of its inputs.
     pub inputs: u64,
 }
 
@@ -56,7 +59,9 @@ impl FakePlan {
 /// One call of [`Backend::run`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunRecord {
+    /// What was run.
     pub call: Call,
+    /// The prompt's answer.
     pub answer: Option<PromptAnswer>,
     /// Which computed plan ran, counting from 1.
     pub plan: Option<u64>,
@@ -91,12 +96,15 @@ impl JobControl for Control {
 /// The fake. Its fields script what it answers and record what it was asked.
 #[derive(Default)]
 pub struct FakeBackend {
+    /// What [`Backend::gates`] says.
     pub gates: Gates,
+    /// What [`Backend::rate_limit`] says.
     pub rate_limit: Option<u64>,
     /// The plan per action name; actions not here get [`FakePlan::default`].
     pub plans: HashMap<&'static str, Result<FakePlan, ErrorView>>,
     /// Keep plan requests in [`held`](Self::held) instead of answering at once.
     pub hold_plans: bool,
+    /// Requests waiting for [`reply_next`](Self::reply_next), oldest first.
     pub held: VecDeque<(&'static str, PlanReply)>,
     /// The question per action name.
     pub prompts: HashMap<&'static str, PromptSpec>,
@@ -108,12 +116,15 @@ pub struct FakeBackend {
     pub runs: Vec<RunRecord>,
     /// The sink of each job, by number.
     pub sinks: Arc<Mutex<Vec<JobSink>>>,
+    /// What the jobs' controls were asked to do.
     pub controls: ControlLog,
+    /// Every subscription made, with the slot to feed it.
     pub subscriptions: Vec<(SourceKey, Slot)>,
     serial: u64,
 }
 
 impl FakeBackend {
+    /// A fake that plans every action as [`FakePlan::default`].
     pub fn new() -> Self {
         FakeBackend::default()
     }

@@ -16,19 +16,23 @@ use crate::error::ErrorView;
 pub struct Invocation {
     /// Only its name is used: the contract's own entry decides kind, tier and parameters.
     pub spec: &'static ActionSpec,
+    /// The arguments, in any order.
     pub args: Vec<Arg>,
 }
 
 /// One argument of an [`Invocation`].
 #[derive(Debug, Clone)]
 pub struct Arg {
+    /// The parameter's name.
     pub name: String,
     /// For a `nav.go` route parameter, which parameter of the route it is.
     pub route_param: Option<String>,
+    /// What was given.
     pub value: Value,
 }
 
 impl Invocation {
+    /// An invocation with no arguments yet.
     pub fn new(spec: &'static ActionSpec) -> Self {
         Invocation {
             spec,
@@ -137,22 +141,27 @@ impl Call {
         })
     }
 
+    /// The contract's entry for the action.
     pub fn spec(&self) -> &'static ActionSpec {
         self.spec
     }
 
+    /// The action's name.
     pub fn name(&self) -> &'static str {
         self.spec.name
     }
 
+    /// An argument, normalised; `None` if it was left out.
     pub fn arg(&self, name: &str) -> Option<&Value> {
         self.args.get(name)
     }
 
+    /// An argument that is text.
     pub fn text(&self, name: &str) -> Option<&str> {
         self.arg(name).and_then(Value::as_str)
     }
 
+    /// An argument that is a yes or no.
     pub fn bool(&self, name: &str) -> Option<bool> {
         match self.arg(name) {
             Some(Value::Bool(b)) => Some(*b),

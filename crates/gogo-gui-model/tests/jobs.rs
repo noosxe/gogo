@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use gogo_contract::{Value, shapes};
 use gogo_gui_model::{
     ErrorView, FileProgress, JobControl, JobId, JobKind, JobSink, JobState, JobStatus, JobTable,
-    MAX_ENDED, Signal, Step, StepState,
+    MAX_ENDED, PromptReply, PromptSpec, Signal, Step, StepState,
 };
 
 type Calls = Arc<Mutex<Vec<(&'static str, &'static str)>>>;
@@ -312,4 +312,27 @@ fn only_the_newest_ended_jobs_are_kept() {
     assert!(rig.table.contains(&live), "a live job is never dropped");
     assert!(!rig.table.contains(&ids[2]));
     assert!(rig.table.contains(&ids[3]));
+}
+
+#[test]
+fn questions_come_in_the_order_they_were_asked() {
+    let mut rig = Rig::new();
+    let (a, sink_a) = rig.add("a", true);
+    let (b, sink_b) = rig.add("b", true);
+    for (sink, label) in [(&sink_b, "1"), (&sink_a, "2"), (&sink_b, "3")] {
+        sink.ask(
+            PromptSpec::Confirm {
+                label: label.into(),
+            },
+            PromptReply::new(|_| {}),
+        );
+    }
+    let asked: Vec<_> = rig
+        .table
+        .take_prompts()
+        .into_iter()
+        .map(|(id, spec, _)| (id, spec))
+        .collect();
+    let ids: Vec<_> = asked.iter().map(|(id, _)| id.clone()).collect();
+    assert_eq!(ids, [b.clone(), a, b]);
 }

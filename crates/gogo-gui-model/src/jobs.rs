@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use gogo_contract::Value;
@@ -234,8 +235,9 @@ struct Latest {
     run: u64,
     version: u64,
     status: JobStatus,
-    /// Questions not yet picked up. They are never coalesced.
-    prompts: Vec<(PromptSpec, PromptReply)>,
+    /// Questions not yet picked up, each with its place in the order asked. They are
+    /// never coalesced.
+    prompts: Vec<(u64, PromptSpec, PromptReply)>,
 }
 
 /// The writer's end of one job's progress. Cheap to clone and `Send`.
@@ -244,6 +246,8 @@ pub struct JobSink {
     latest: Arc<Mutex<Latest>>,
     signal: Arc<Signal>,
     run: u64,
+    /// Numbers the questions of every job.
+    asked: Arc<AtomicU64>,
 }
 
 impl JobSink {
@@ -279,7 +283,8 @@ impl JobSink {
             if latest.run != self.run || latest.status.state.is_terminal() {
                 Some(reply)
             } else {
-                latest.prompts.push((spec, reply));
+                let place = self.asked.fetch_add(1, Ordering::Relaxed);
+                latest.prompts.push((place, spec, reply));
                 None
             }
         };
@@ -336,6 +341,7 @@ pub struct JobTable {
     signal: Arc<Signal>,
     entries: Vec<Entry>,
     next: u64,
+    asked: Arc<AtomicU64>,
 }
 
 impl JobTable {
@@ -345,6 +351,7 @@ impl JobTable {
             signal,
             entries: Vec::new(),
             next: 0,
+            asked: Arc::default(),
         }
     }
 
@@ -383,6 +390,7 @@ impl JobTable {
             latest,
             signal: Arc::clone(&self.signal),
             run: 0,
+            asked: Arc::clone(&self.asked),
         }
     }
 
@@ -408,15 +416,16 @@ impl JobTable {
         true
     }
 
-    /// The questions asked since the last call, by job, oldest job first. Call it before
-    /// [`drain`](Self::drain), which forgets unlisted jobs that ended.
+    /// The questions asked since the last call, in the order they were asked. Call it
+    /// before [`drain`](Self::drain), which forgets unlisted jobs that ended.
     pub fn take_prompts(&mut self) -> Vec<(JobId, PromptSpec, PromptReply)> {
         let mut out = Vec::new();
         for e in &self.entries {
             let prompts = std::mem::take(&mut lock(&e.latest).prompts);
-            out.extend(prompts.into_iter().map(|(s, r)| (e.id.clone(), s, r)));
+            out.extend(prompts.into_iter().map(|(n, s, r)| (n, e.id.clone(), s, r)));
         }
-        out
+        out.sort_by_key(|(n, ..)| *n);
+        out.into_iter().map(|(_, id, s, r)| (id, s, r)).collect()
     }
 
     /// Pause a queued or running job. `false` if there is none to pause.
@@ -453,6 +462,7 @@ impl JobTable {
         start: impl FnOnce(&mut dyn JobControl, JobSink),
     ) -> bool {
         let signal = Arc::clone(&self.signal);
+        let asked = Arc::clone(&self.asked);
         let Some(e) = self.find(id) else {
             return false;
         };
@@ -480,6 +490,7 @@ impl JobTable {
             latest: Arc::clone(&e.latest),
             signal: Arc::clone(&signal),
             run,
+            asked,
         };
         start(e.control.as_mut(), sink);
         signal.raise();

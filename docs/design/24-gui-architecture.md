@@ -170,7 +170,7 @@ flowchart TD
 | render-gpu as its own crate | A CPU-only build carries no wgpu, naga or shader tooling |
 | interact, a11y | Input policy, and AccessKit's lockstep bumps, stay out of the window code. Both are testable without winit |
 | shell | winit 0.30 → 0.31 touches one crate. A headless shell drives the same `ShellApp` |
-| model ↔ `Backend` | `FakeBackend` serves tests, skin dev mode and screenshots. The safety flow is tested without gogo-core or a window |
+| model ↔ `Backend` | `FakeBackend` (in `gogo-gui-model`, behind the `fake` feature) serves tests, skin dev mode and screenshots. The safety flow is tested without gogo-core or a window |
 
 Not split, on purpose:
 - Binding and the expression language stay inside `gogo-skin`. They walk the KDL AST and

@@ -13,19 +13,28 @@ use crate::source::{Signal, lock};
 /// What one step of a plan does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepKind {
+    /// Something is downloaded.
     Download,
+    /// A file is replaced.
     Replace,
+    /// Something is removed.
     Delete,
+    /// A snapshot is taken.
     Snapshot,
+    /// Something moves.
     Move,
+    /// A line that changes nothing.
     Info,
 }
 
 /// One line of a plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanStep {
+    /// What the step does.
     pub kind: StepKind,
+    /// The line to show.
     pub text: String,
+    /// The bytes it is about, if any.
     pub bytes: Option<u64>,
 }
 
@@ -39,10 +48,15 @@ pub struct Plan {
     /// The game's title, which a strong confirmation asks the user to type. Empty when
     /// the plan is not about one game.
     pub subject: String,
+    /// What would happen, in order.
     pub steps: Vec<PlanStep>,
+    /// Bytes to download.
     pub download: Option<u64>,
+    /// Change in disk use, in bytes.
     pub disk_delta: Option<i64>,
+    /// What the user should know first.
     pub warnings: Vec<String>,
+    /// Whether it can be undone.
     pub reversible: bool,
 }
 
@@ -51,6 +65,7 @@ pub struct Plan {
 pub struct PlanHandle(Box<dyn Any + Send>);
 
 impl PlanHandle {
+    /// Wrap what the backend keeps.
     pub fn new(planned: impl Any + Send) -> Self {
         PlanHandle(Box::new(planned))
     }
@@ -70,6 +85,7 @@ impl fmt::Debug for PlanHandle {
 /// A computed plan.
 #[derive(Debug)]
 pub struct Planned {
+    /// What the card shows.
     pub plan: Plan,
     /// What the plan contains. `changes` means "there is something to show on a plan
     /// card": a setting the user just picked is not a change by itself.
@@ -77,6 +93,7 @@ pub struct Planned {
     /// A digest of everything the plan was computed from. Together with the plan and the
     /// facts it tells whether a plan the user saw is still the plan.
     pub inputs: u64,
+    /// What runs the plan.
     pub handle: PlanHandle,
 }
 
@@ -101,6 +118,7 @@ impl PlanReply {
         (reply, wait)
     }
 
+    /// Hand the plan, or why there is none, to the model.
     pub fn send(mut self, result: Result<Planned, ErrorView>) {
         self.put(result);
     }
