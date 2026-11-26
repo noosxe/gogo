@@ -93,9 +93,11 @@ so a pass also proves the bundle is self-contained. How-to, result layout and VM
   Tart VM (macOS, §5.1); real displays are a host pass.
 - **Golden images** on vello_cpu: small committed PNGs (@1× and @2×) for a few routes of
   the built-in skins and an effects sheet, compared with a per-pixel tolerance. The ubuntu
-  (x86_64) and macOS (arm64) runners differ in architecture and SIMD paths, so their pixels
-  may differ slightly; the tolerance absorbs that, and one set of goldens serves both.
-  Fonts come from the bundled set, never the host's.
+  (x86_64) and macOS (arm64) runners differ in architecture and SIMD paths; one set of
+  goldens serves both. A pixel's difference is the largest difference of its RGBA channels:
+  more than 2 levels on at most 0.05% of pixels, none above 8, mean at most 0.1. Measured:
+  the two runners draw identical pixels, and another SIMD level on x86_64 moves a pixel by
+  at most 1. Fonts come from the bundled set, never the host's.
 - **GPU tests** draw the same scenes on vello_gpu and compare against the CPU render within
   a tolerance. They skip when wgpu finds no adapter; the CI lavapipe job (Mesa's software
   Vulkan) runs them.

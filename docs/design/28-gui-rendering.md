@@ -1,6 +1,7 @@
 # 28 — GUI rendering: the scene and the renderers (#520)
 
-Status: **accepted** (2026-11-25), not built yet (design 24 §8 stack C). Facts marked
+Status: **accepted** (2026-11-25). The scene and the vello_cpu renderer are built (design 24
+§8 stack C); the vello_gpu renderer is not yet. Facts marked
 *measured* come from the prototype described in design 24.
 
 The engine turns the IR (design 24 §2) into a **display list**. Each renderer draws that
@@ -90,6 +91,9 @@ A backdrop can sit inside open layers: its node's `PushOpacity`, an ancestor's `
 `DisplayList::open_layers` lists outermost first, so the opacity and the clip still apply to it.
 A backdrop with sigma 0 (radius 0) is not emitted, and neither are glow layers or bloom with radius 0.
 
+The renderers give a filter layer (bloom, backdrop) a sigma of at most 256 device px: a layer
+is padded by 3 sigma, and the format allows radii in the thousands.
+
 Each backdrop re-renders everything below it. Sharing the below-target between backdrops
 in one frame is an open optimisation (#543).
 
@@ -97,14 +101,16 @@ in one frame is an open optimisation (#543).
 
 - **vello_gpu 0.4 takes images only as GPU textures**, not CPU pixmaps.
   - `gogo-render-gpu` uploads each `ImageId` once into a `TextureCache`.
-  - **Today (prototype):** after each frame it drops every texture that frame didn't use.
-    That is right for one page, but a scrolling library would re-upload covers constantly.
-  - **Target (#541):** keep textures across frames and evict least-recently-used ones
-    beyond a **byte budget**, so a library of covers neither re-uploads nor grows without
-    bound.
+  - Textures are kept across frames and the least recently used are evicted beyond a
+    **byte budget**, so a library of covers neither re-uploads nor grows without bound.
   - vello_gpu has no image atlas, so the "image blank from the second frame" bug of compute
     vello can't happen.
-- **The CPU path** keeps decoded pixmaps under the same budget.
+- **The CPU path** keeps premultiplied pixmaps under the same budget. Both use
+  `gogo-ui-scene`'s `ImageCache` (256 MiB by default). Images the current frame uses are
+  never evicted.
+- **A key names one image** while it is cached: a store with new pixels for something
+  gives them a new key. An asset path can't, so a skin change or reload calls the
+  renderer's `clear_images`.
 - **Pipeline cache.** vello_gpu's pipelines are cached through wgpu's pipeline cache, in a
   file under the cache dir keyed with `wgpu::util::pipeline_cache_key`.
   - It is written atomically, and a corrupt or foreign file is ignored.
@@ -119,6 +125,8 @@ in one frame is an open optimisation (#543).
 | vello_gpu 0.4 is a beta. Mask layers are known to panic, so the prototype never uses them. A panic with filter layers that wrap more than one primitive came up while researching the library, but has no upstream issue we can cite, and the prototype never hit it | No effect uses mask layers. A new effect avoids them, and multi-primitive filter layers get a test on both renderers before they ship |
 | vello_cpu filters panic in its multithreading mode | The CPU renderer is single-threaded (*measured* 70 ms for the heaviest page @2×) until upstream fixes it (#555) |
 | No backdrop filter upstream | §3 |
+| vello's blurred rounded rect takes **one corner radius** | A `BlurRect` (shadow, glow, inner shadow) whose four radii differ is drawn with the largest |
+| vello has no mipmaps | A cover scaled far down aliases |
 | Hinting through parley → vello glyph runs is unconfirmed | Small text (10–11 px) is soft at @1× (#553) |
 | wgpu's GL backend fails through NVIDIA's EGL vendor library ("Parent device is lost") | GL works through Mesa. On NVIDIA, Vulkan is used (#542) |
 
@@ -136,6 +144,9 @@ in one frame is an open optimisation (#543).
   - Small PNGs are drawn by vello_cpu at @1× and @2× and compared with a tolerance (08 §7):
     an effects sheet, and the built-in skins' game and shell routes on fixture data.
   - Fonts are the bundled set, and covers are procedural.
+  - They are in `crates/gogo-gui-testkit/tests/goldens/`; `GOGO_BLESS=1` rewrites them.
+    A failed run leaves the render and a diff picture in `target/tmp/golden/`, which CI
+    uploads.
 - **GPU vs CPU.** The same scenes are drawn on vello_gpu and diffed against vello_cpu within
   a tolerance. This runs on lavapipe in CI and is skipped without an adapter.
 - **Structure.** Op counts and kinds per route catch lowering changes that don't move
