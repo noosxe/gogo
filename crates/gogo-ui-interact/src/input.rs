@@ -1,6 +1,6 @@
 //! What the shell feeds in. Platform-neutral: the shell translates its own events.
 
-use crate::frame::LayerId;
+use crate::frame::{Identity, LayerId};
 
 /// A pointer button.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +125,10 @@ pub struct Request {
     pub layer: LayerId,
     /// Its tree key.
     pub key: String,
+    /// What its action did when assistive technology read it
+    /// ([`Layer::action_identity`](crate::Layer::action_identity)). A request whose
+    /// control does something else by now is dropped.
+    pub identity: Option<Identity>,
     /// What to do.
     pub kind: RequestKind,
 }

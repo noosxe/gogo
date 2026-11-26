@@ -60,9 +60,7 @@ fn s19_the_palette_key_follows_the_platform() {
     let layers = [s.layer(PAGE, LayerKind::Page)];
     let frame = Frame { layers: &layers };
     let mut d = Driver::new();
-    d.ix = Interaction::new(Config {
-        primary: Primary::Meta,
-    });
+    d.ix = Interaction::new(Config::new(Primary::Meta));
     let meta = Modifiers { meta: true, ..NONE };
     assert_eq!(names(&d.down(&frame, Key::Char('K'), meta)), ["palette"]);
     d.up(&frame, Key::Char('K'));

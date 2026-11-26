@@ -83,6 +83,43 @@ fn s13_a_dialog_traps_focus_and_pointer() {
 }
 
 #[test]
+fn s13_what_is_drawn_over_a_dialog_takes_no_input() {
+    let s = page();
+    let dialog = Screen::new(vec![
+        ("ok", app_button("Remove", 0)),
+        ("cancel", app_button("Cancel", 1)),
+    ]);
+    // Drawn over the dialog, and over its first control.
+    let toast = Screen::new(vec![("undo", app_button("Undo", 2))]);
+    let layers = [
+        s.layer(PAGE, LayerKind::Page),
+        dialog.layer(DIALOG, LayerKind::Dialog),
+        toast.layer(TOAST, LayerKind::Overlay),
+    ];
+    let frame = Frame { layers: &layers };
+    assert_eq!(keys(&FocusOrder::of(&frame)), ["ok", "cancel"]);
+    let mut d = Driver::new();
+    let walked: Vec<String> = (0..3).map(|_| d.tab(&frame)).collect();
+    assert_eq!(walked, ["ok", "cancel", "ok"]);
+    // Neither the toast's control nor the dialog's one under it.
+    assert!(d.click(&frame, toast.center("undo")).is_empty());
+    assert!(
+        d.assist(&frame, TOAST, "undo", RequestKind::Activate)
+            .is_empty()
+    );
+    assert!(
+        d.assist(&frame, TOAST, "undo", RequestKind::Focus)
+            .is_empty()
+    );
+    assert_eq!(d.focused(), "ok");
+    // Beside the toast the dialog still works.
+    assert_eq!(
+        names(&d.click(&frame, dialog.center("cancel"))),
+        ["app cancel"]
+    );
+}
+
+#[test]
 fn s13_an_overlay_adds_to_the_order_and_lets_clicks_through() {
     let s = page();
     let toast = {
@@ -95,7 +132,7 @@ fn s13_an_overlay_adds_to_the_order_and_lets_clicks_through() {
     };
     let layers = [
         s.layer(PAGE, LayerKind::Page),
-        toast.layer(DIALOG, LayerKind::Overlay),
+        toast.layer(TOAST, LayerKind::Overlay),
     ];
     let frame = Frame { layers: &layers };
     assert_eq!(keys(&FocusOrder::of(&frame)), ["a", "b", "c", "x"]);

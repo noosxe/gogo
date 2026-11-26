@@ -214,7 +214,9 @@ app control is told apart by its `DrawnBy::App` part and tree key.
   down, Space on release. A press whose control changed in between (layer, key, what the
   action does, on/off state) does nothing: rows of a repeat are keyed by index, so a
   reordered list must not move a press to another game. For that the app gives each layer
-  a value per action that changes when the call does.
+  a value per action that changes when the call does, for every action; without one,
+  nothing pressed on that control outlives a rebuild. A late accessibility request for a
+  control that has changed is dropped the same way.
 - **Global keys (S19).** Esc is a dismiss intent; Ctrl K (Cmd K on macOS) is the palette;
   neither repeats. Under a dialog a focused control takes Enter, so Enter on Cancel
   cancels; with nothing focused, Enter is the plan card's confirm. The app starts a plan
@@ -224,7 +226,8 @@ app control is told apart by its `DrawnBy::App` part and tree key.
   or on repeat. Esc, Enter, Space, Tab and the palette key are never a skin's. The first in
   document order wins.
 - **Focus.** Tab walks document order over the layers that take input; the topmost dialog
-  traps focus and pointer. Left and Right move among the tabs of a tab list without
+  traps focus and pointer, and while it is up only it takes input: what is drawn over it
+  (a toast) is shown but can't be reached, and a click on it goes nowhere. Left and Right move among the tabs of a tab list without
   activating; there is no other arrow navigation. The ring shows after the keyboard or a
   screen reader moved focus, not after a click. A route starts on nothing; a rebuild keeps
   focus by key, else the nearest earlier control; closing a dialog gives focus back.

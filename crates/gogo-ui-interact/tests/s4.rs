@@ -5,7 +5,7 @@ mod common;
 use std::time::Duration;
 
 use common::*;
-use gogo_ui_interact::{Frame, Input, Intent, Key, LayerKind, PointerButton, RequestKind};
+use gogo_ui_interact::{Frame, Input, Intent, Key, LayerKind, PointerButton, Request, RequestKind};
 use gogo_ui_ir::{A11y, Node, Role};
 
 fn page() -> Screen {
@@ -235,4 +235,27 @@ fn s4_set_value_carries_no_press() {
     assert_eq!(names(&set), ["set field Doom"]);
     assert_eq!(d.ix.latest().get(), 0);
     assert_eq!(d.focused(), "field");
+}
+
+#[test]
+fn s4_a_late_request_for_a_changed_control_is_dropped() {
+    let s = page();
+    let (one, other) = ([1, 2], [9, 2]);
+    let before = [s.layer(PAGE, LayerKind::Page).identity(&one)];
+    let after = [s.layer(PAGE, LayerKind::Page).identity(&other)];
+    let (before, after) = (Frame { layers: &before }, Frame { layers: &after });
+    let mut d = Driver::new();
+    // Read on the old frame, delivered after the new one.
+    let request = Request {
+        layer: PAGE,
+        key: "a".into(),
+        identity: before.layers[0].action_identity(s.tree.by_key("a").unwrap()),
+        kind: RequestKind::Activate,
+    };
+    d.ix.sync(&after);
+    let out = d.send(&after, Input::Accessibility(request.clone()));
+    assert!(out.intents.is_empty());
+    assert_eq!(d.ix.latest().get(), 0);
+    let out = d.send(&before, Input::Accessibility(request));
+    assert_eq!(names(&out.intents), ["invoke a"]);
 }
