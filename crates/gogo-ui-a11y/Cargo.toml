@@ -7,6 +7,16 @@ publish.workspace = true
 license.workspace = true
 
 [dependencies]
+accesskit.workspace = true
 gogo-ui-ir.workspace = true
 gogo-ui-layout.workspace = true
 gogo-ui-interact.workspace = true
+
+[dev-dependencies]
+accesskit_consumer.workspace = true
+gogo-contract.workspace = true
+gogo-gui-model = { workspace = true, features = ["fake"] }
+gogo-gui-testkit.workspace = true
+gogo-skin.workspace = true
+gogo-skins.workspace = true
+gogo-ui-text.workspace = true

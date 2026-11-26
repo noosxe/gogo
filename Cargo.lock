@@ -3,6 +3,25 @@
 version = 4
 
 [[package]]
+name = "accesskit"
+version = "0.25.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e883d1d28c5fd5568c79ed2d2bd48d9f2fd3945c8974ed0f53690ceddb051be"
+dependencies = [
+ "uuid",
+]
+
+[[package]]
+name = "accesskit_consumer"
+version = "0.39.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f3da8f27636015191b2264ee1df681503170a632cafd832fdc1edfdd4e3a2fd3"
+dependencies = [
+ "accesskit",
+ "hashbrown 0.17.1",
+]
+
+[[package]]
 name = "addr2line"
 version = "0.27.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1793,9 +1812,17 @@ version = "0.1.0"
 name = "gogo-ui-a11y"
 version = "0.1.0"
 dependencies = [
+ "accesskit",
+ "accesskit_consumer",
+ "gogo-contract",
+ "gogo-gui-model",
+ "gogo-gui-testkit",
+ "gogo-skin",
+ "gogo-skins",
  "gogo-ui-interact",
  "gogo-ui-ir",
  "gogo-ui-layout",
+ "gogo-ui-text",
 ]
 
 [[package]]
