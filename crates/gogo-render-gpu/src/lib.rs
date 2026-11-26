@@ -12,8 +12,9 @@
 //! - A `BlurRect` with four different corner radii is drawn with the largest one.
 //! - A [`Op::Backdrop`] is cut and blurred (design 28 §3): the ops before it are drawn into
 //!   an offscreen texture, which is then painted blurred inside the shape, through the layers
-//!   open around it. Each backdrop is one extra submission; earlier backdrops' textures are
-//!   reused.
+//!   open around it. Each backdrop is one more surface-sized texture, outside the image
+//!   cache's budget, and one more submission of every op before it, so the replayed ops
+//!   grow with the square of the number of backdrops (#543).
 //! - vello_gpu takes images only as textures, so each [`ImageKey`] is uploaded once and kept
 //!   in a byte-budget cache (design 28 §4).
 //! - Intermediate layers may be as large as the device allows: vello_gpu's own cap of 4096 px

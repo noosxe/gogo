@@ -100,7 +100,9 @@ so a pass also proves the bundle is self-contained. How-to, result layout and VM
   at most 1. Fonts come from the bundled set, never the host's.
 - **GPU tests** draw the same scenes on vello_gpu, offscreen, and compare against the CPU
   render: more than 4 levels on at most 0.5% of pixels, none above 8, mean at most 0.35.
-  Measured on lavapipe: at most 4 levels, mean at most 0.154. They skip when wgpu finds no
+  Measured on lavapipe: at most 4 levels, mean at most 0.154. The comparisons run only on a
+  software adapter, where that tolerance was measured; `GOGO_GPU_ANY_ADAPTER=1` runs them on
+  a hardware one, for a local or host pass. They skip when wgpu finds no
   adapter; the CI `gui-lavapipe` job (Mesa's software Vulkan, `nix develop .#lavapipe`)
   runs them with `GOGO_GPU_REQUIRED=1`, which fails instead.
 - **Safety invariants** (design 26 §7, added in #557) each have a test named after them (`s5_…`), at the

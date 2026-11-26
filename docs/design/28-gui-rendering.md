@@ -156,7 +156,9 @@ process.
     A failed run leaves the render and a diff picture in `target/tmp/golden/`, which CI
     uploads.
 - **GPU vs CPU.** The same scenes are drawn on vello_gpu and diffed against vello_cpu within
-  a tolerance (08 §7). This runs on lavapipe in CI and is skipped without an adapter.
+  a tolerance (08 §7). This runs on lavapipe in CI. The comparisons skip on a hardware
+  adapter unless `GOGO_GPU_ANY_ADAPTER=1` (a local or host pass), and all GPU tests skip
+  without an adapter.
   `nix develop .#lavapipe` gives the same software Vulkan on a Linux machine.
 - **Structure.** Op counts and kinds per route catch lowering changes that don't move
   pixels much.
