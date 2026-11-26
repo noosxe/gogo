@@ -72,7 +72,7 @@ pub async fn fetch_facts(
 
 /// One build for a frontend's list.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Overview {
+pub struct ListedBuild {
     pub entry: BuildEntry,
     /// `None`: the manifest couldn't be fetched, or lacks the language.
     pub download_size: Option<u64>,
@@ -87,7 +87,7 @@ pub async fn list(
     product_id: u64,
     mac: bool,
     language: &str,
-) -> Result<Vec<Overview>, crate::gog::depot::DepotError> {
+) -> Result<Vec<ListedBuild>, crate::gog::depot::DepotError> {
     let Some(core) = session.gog_warp_core() else {
         return Ok(Vec::new());
     };
@@ -104,7 +104,7 @@ pub async fn list(
     Ok(listing
         .entries()
         .into_iter()
-        .map(|entry| Overview {
+        .map(|entry| ListedBuild {
             download_size: facts.get(&entry.build_id).and_then(|f| f.download_size),
             newest: newest.as_deref() == Some(entry.build_id.as_str()),
             entry,

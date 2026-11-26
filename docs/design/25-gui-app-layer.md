@@ -355,8 +355,9 @@ As built (PR F1, `CoreBackend`, read-only):
   public page (`GET /v2/games/{id}`, no credential), https and GOG's image hosts only,
   redirects included; body at most 8 MiB, at most 4096 px a side and 16 MP checked
   before decoding, an allocation limit, `catch_unwind`; shrunk to about twice the drawn
-  size, 128 MiB in memory, and kept as JPEG under the cover cache (§9). The logo is a
-  PNG, so it has no picture.
+  size, 128 MiB in memory (least recently asked for goes first), and kept as JPEG under
+  the cover cache (§9), named by a hash of its address, so a changed picture is fetched
+  again; offline, whatever is kept is shown. The logo is a PNG, so it has no picture.
 - **Description** HTML becomes plain text without addresses.
 - Reads only. Plans and runs other than `library.refresh` are refused.
 

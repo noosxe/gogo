@@ -11,7 +11,7 @@ mod engine;
 mod errors;
 mod local;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 mod text;
 mod values;
 
@@ -176,6 +176,7 @@ impl Backend for CoreBackend {
     fn subscribe(&mut self, key: &SourceKey, slot: Slot) -> Subscription {
         let feed = Arc::new(Feed::default());
         self.feed(key.clone(), slot.clone(), &feed);
+        self.fed.retain(|f| f.alive.strong_count() > 0);
         self.fed.push(Fed {
             key: key.clone(),
             slot,

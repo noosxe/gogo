@@ -161,3 +161,8 @@ image = { version = "=0.25.10", default-features = false, features = ["jpeg", "w
 wiremock = "0.6"
 tempfile = "3"
 proptest = "1"
+
+[profile.release]
+# The default, written down because it is relied on: the GUI's cover decoder runs inside
+# `catch_unwind`, which catches nothing when panics abort.
+panic = "unwind"

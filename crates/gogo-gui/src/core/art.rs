@@ -178,7 +178,7 @@ fn pixels(image: DynamicImage) -> Option<Image> {
 #[derive(Default)]
 struct Inner {
     images: HashMap<Key, Image>,
-    /// Oldest first.
+    /// Least recently asked for first.
     order: VecDeque<Key>,
     bytes: usize,
     pending: HashSet<Key>,
@@ -187,6 +187,18 @@ struct Inner {
 }
 
 impl Inner {
+    /// The picture of `key`, which is now the last to be dropped.
+    fn get(&mut self, key: Key) -> Option<Image> {
+        let image = self.images.get(&key)?.clone();
+        if self.order.back() != Some(&key)
+            && let Some(at) = self.order.iter().position(|k| *k == key)
+        {
+            self.order.remove(at);
+            self.order.push_back(key);
+        }
+        Some(image)
+    }
+
     fn insert(&mut self, key: Key, image: Image) {
         self.bytes += image.rgba.len();
         if let Some(old) = self.images.insert(key, image) {
@@ -194,7 +206,11 @@ impl Inner {
         } else {
             self.order.push_back(key);
         }
-        while self.bytes > BUDGET {
+        self.trim(BUDGET);
+    }
+
+    fn trim(&mut self, budget: usize) {
+        while self.bytes > budget {
             let Some(oldest) = self.order.pop_front() else {
                 break;
             };
@@ -300,8 +316,8 @@ impl ImageStore for ArtStore {
         match key {
             ImageKey::Handle(name) => {
                 let key = parse(name)?;
-                if let Some(image) = lock(&self.shared.inner).images.get(&key) {
-                    return Some(image.clone());
+                if let Some(image) = lock(&self.shared.inner).get(key) {
+                    return Some(image);
                 }
                 self.request(key);
                 None
@@ -316,28 +332,37 @@ impl Shared {
     async fn load(&self, key: Key) -> Result<Image, ArtError> {
         let _slot = self.gate.acquire().await.map_err(|_| ArtError::Fetch)?;
         let (id, kind) = key;
-        let file = self
-            .disk
-            .as_ref()
-            .map(|dir| dir.join(format!("{id}-{}.jpg", kind.word())));
-        if let Some(file) = &file {
-            let file = file.clone();
-            let kept = tokio::task::spawn_blocking(move || read_kept(&file, kind)).await;
-            // An unreadable cache is ignored.
-            if let Ok(Some(image)) = kept {
-                return Ok(image);
-            }
-        }
         let page = self.engine.overview(id).await;
         let address = page.as_ref().as_ref().and_then(|o| match kind {
             Kind::Cover => o.cover.clone(),
             Kind::Background => o.background.clone(),
         });
+        // With the page read, only the picture of its present address will do, so a
+        // changed one is fetched. Without it (offline), any kept one is better than
+        // none.
+        let offline = page.is_none();
+        let prefix = format!("{id}-{}-", kind.word());
+        let file = self
+            .disk
+            .as_ref()
+            .zip(address.as_deref())
+            .map(|(dir, a)| dir.join(format!("{prefix}{:016x}.jpg", fnv1a(a))));
+        let kept_in = self.disk.clone().filter(|_| offline);
+        let (wanted, any) = (file.clone(), prefix.clone());
+        let kept = tokio::task::spawn_blocking(move || {
+            let file = wanted.or_else(|| kept_of(&kept_in?, &any).next())?;
+            read_kept(&file, kind)
+        })
+        .await;
+        // An unreadable cache is ignored.
+        if let Ok(Some(image)) = kept {
+            return Ok(image);
+        }
         let bytes = self.fetch(&address.ok_or(ArtError::None)?).await?;
         tokio::task::spawn_blocking(move || {
             let image = decode(&bytes, kind.bounds())?;
             if let Some(file) = &file {
-                keep(file, &image);
+                keep(file, &prefix, &image);
             }
             pixels(image).ok_or(ArtError::Decode)
         })
@@ -376,6 +401,27 @@ impl Shared {
     }
 }
 
+/// FNV-1a: a name for an address that stays the same from build to build.
+fn fnv1a(text: &str) -> u64 {
+    text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, b| {
+        (hash ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+/// The kept pictures whose names start with `prefix`.
+fn kept_of(dir: &Path, prefix: &str) -> impl Iterator<Item = PathBuf> {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(move |path| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(prefix) && n.ends_with(".jpg"))
+        })
+}
+
 /// A picture from the disk cache, decoded with the same limits as a fetched one.
 fn read_kept(file: &Path, kind: Kind) -> Option<Image> {
     use std::io::Read as _;
@@ -388,8 +434,9 @@ fn read_kept(file: &Path, kind: Kind) -> Option<Image> {
     pixels(decode(&bytes, kind.bounds()).ok()?)
 }
 
-/// Writes the shrunk picture, atomically. Best effort.
-fn keep(file: &Path, image: &DynamicImage) {
+/// Writes the shrunk picture, atomically, and drops the ones of earlier addresses.
+/// Best effort.
+fn keep(file: &Path, prefix: &str, image: &DynamicImage) {
     let Some(dir) = file.parent() else { return };
     let mut bytes = Cursor::new(Vec::new());
     if DynamicImage::ImageRgb8(image.to_rgb8())
@@ -405,6 +452,12 @@ fn keep(file: &Path, image: &DynamicImage) {
     if written.is_err() {
         let _ = std::fs::remove_file(&tmp);
         tracing::debug!("a picture could not be kept in the cache");
+        return;
+    }
+    for old in kept_of(dir, prefix) {
+        if old != file {
+            let _ = std::fs::remove_file(old);
+        }
     }
 }
 
@@ -464,6 +517,36 @@ pub(crate) mod tests {
         ] {
             assert_eq!(parse(no), None, "{no}");
         }
+    }
+
+    #[test]
+    fn the_picture_dropped_is_the_one_asked_for_longest_ago() {
+        let image = Image::new(1, 1, vec![0; 4]).expect("a pixel");
+        let mut inner = Inner::default();
+        for id in 1..=3 {
+            inner.insert((id, Kind::Cover), image.clone());
+        }
+        assert!(inner.get((1, Kind::Cover)).is_some());
+        inner.trim(8);
+        assert!(inner.get((2, Kind::Cover)).is_none());
+        assert!(inner.get((1, Kind::Cover)).is_some());
+        assert!(inner.get((3, Kind::Cover)).is_some());
+    }
+
+    #[test]
+    fn a_new_address_replaces_the_kept_picture() {
+        assert_eq!(fnv1a(""), 0xcbf2_9ce4_8422_2325);
+        assert_ne!(fnv1a("a"), fnv1a("b"));
+        let dir = crate::core::tests::scratch();
+        let image = DynamicImage::new_rgb8(2, 2);
+        let name = |a: &str| dir.path().join(format!("7-cover-{:016x}.jpg", fnv1a(a)));
+        let other = dir.path().join("70-cover-0.jpg");
+        std::fs::write(&other, "another game's").expect("a write");
+        keep(&name("old"), "7-cover-", &image);
+        keep(&name("new"), "7-cover-", &image);
+        let kept: Vec<_> = kept_of(dir.path(), "7-cover-").collect();
+        assert_eq!(kept, [name("new")]);
+        assert!(other.is_file());
     }
 
     #[test]

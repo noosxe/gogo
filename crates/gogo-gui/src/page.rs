@@ -278,7 +278,7 @@ mod tests {
 
     #[test]
     fn a_broken_edit_keeps_the_last_good_skin() {
-        let dir = tempfile::tempdir().expect("a temporary folder");
+        let dir = crate::core::tests::scratch();
         let skin = copy_of_default(dir.path());
         let mut data = Data::fixture(|| {}).expect("fixture data");
         let mut page = Page::new().expect("the built-in skin");

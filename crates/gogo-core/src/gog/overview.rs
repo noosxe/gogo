@@ -4,7 +4,7 @@
 //! dates, genre, description and the links to its pictures. Every field is optional
 //! in what is read, so a product missing one still shows the rest.
 
-use serde::Deserialize;
+use serde_json::Value;
 
 use crate::gog::error::ApiError;
 
@@ -31,122 +31,57 @@ pub struct Overview {
     pub background: Option<String>,
 }
 
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct Page {
-    description: Option<String>,
-    #[serde(rename = "_links")]
-    links: Links,
-    #[serde(rename = "_embedded")]
-    embedded: Embedded,
+// Read from untyped JSON, one field at a time: a `null`, a missing key or a value of
+// another type loses that field only, never the page.
+
+/// A text with something in it.
+fn text(v: &Value) -> Option<String> {
+    v.as_str().filter(|s| !s.is_empty()).map(str::to_string)
 }
 
-#[derive(Deserialize, Default)]
-#[serde(default, rename_all = "camelCase")]
-struct Links {
-    store: Option<Link>,
-    box_art_image: Option<Link>,
-    background_image: Option<Link>,
-    galaxy_background_image: Option<Link>,
-}
-
-#[derive(Deserialize)]
-struct Link {
-    href: String,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default, rename_all = "camelCase")]
-struct Embedded {
-    product: Product,
-    developers: Vec<Named>,
-    publishers: Vec<Named>,
-    publisher: Option<Named>,
-    tags: Vec<Named>,
-    localizations: Vec<Localization>,
-    supported_operating_systems: Vec<Supported>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default, rename_all = "camelCase")]
-struct Product {
-    title: Option<String>,
-    global_release_date: Option<String>,
-    gog_release_date: Option<String>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct Named {
-    name: String,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct Localization {
-    #[serde(rename = "_embedded")]
-    embedded: LocalizationEmbedded,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct LocalizationEmbedded {
-    language: Named,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default, rename_all = "camelCase")]
-struct Supported {
-    operating_system: Named,
-}
-
-fn names(list: Vec<Named>) -> Vec<String> {
-    let mut out: Vec<String> = Vec::with_capacity(list.len());
-    for n in list {
-        if !n.name.is_empty() && !out.contains(&n.name) {
-            out.push(n.name);
+/// The texts `name` finds in the entries of a list, without repeats.
+fn names(list: &Value, name: impl Fn(&Value) -> &Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for entry in list.as_array().into_iter().flatten() {
+        if let Some(text) = text(name(entry))
+            && !out.contains(&text)
+        {
+            out.push(text);
         }
     }
     out
 }
 
-impl From<Page> for Overview {
-    fn from(p: Page) -> Overview {
-        let e = p.embedded;
-        let publishers = if e.publishers.is_empty() {
-            names(e.publisher.into_iter().collect())
-        } else {
-            names(e.publishers)
-        };
-        let href = |l: Option<Link>| l.map(|l| l.href);
-        let slug = p.links.store.and_then(|l| {
-            let path = l.href.split(['?', '#']).next()?.trim_end_matches('/');
-            Some(path.rsplit('/').next()?.to_string())
-        });
-        Overview {
-            title: e.product.title,
-            release_date: e.product.global_release_date.or(e.product.gog_release_date),
-            developers: names(e.developers),
-            publishers,
-            genres: names(e.tags),
-            description: p.description,
-            languages: names(
-                e.localizations
-                    .into_iter()
-                    .map(|l| l.embedded.language)
-                    .collect(),
-            ),
-            systems: names(
-                e.supported_operating_systems
-                    .into_iter()
-                    .map(|s| s.operating_system)
-                    .collect(),
-            ),
-            slug,
-            cover: href(p.links.box_art_image),
-            background: href(p.links.galaxy_background_image)
-                .or_else(|| href(p.links.background_image)),
-        }
+fn read(page: &Value) -> Overview {
+    let links = &page["_links"];
+    let href = |name: &str| text(&links[name]["href"]);
+    let embedded = &page["_embedded"];
+    let product = &embedded["product"];
+    let mut publishers = names(&embedded["publishers"], |p| &p["name"]);
+    if publishers.is_empty() {
+        publishers.extend(text(&embedded["publisher"]["name"]));
+    }
+    let slug = href("store").and_then(|address| {
+        let path = address.split(['?', '#']).next()?.trim_end_matches('/');
+        Some(path.rsplit('/').next()?.to_string())
+    });
+    Overview {
+        title: text(&product["title"]),
+        release_date: text(&product["globalReleaseDate"])
+            .or_else(|| text(&product["gogReleaseDate"])),
+        developers: names(&embedded["developers"], |d| &d["name"]),
+        publishers,
+        genres: names(&embedded["tags"], |t| &t["name"]),
+        description: text(&page["description"]),
+        languages: names(&embedded["localizations"], |l| {
+            &l["_embedded"]["language"]["name"]
+        }),
+        systems: names(&embedded["supportedOperatingSystems"], |s| {
+            &s["operatingSystem"]["name"]
+        }),
+        slug,
+        cover: href("boxArtImage"),
+        background: href("galaxyBackgroundImage").or_else(|| href("backgroundImage")),
     }
 }
 
@@ -158,8 +93,8 @@ pub(crate) async fn overview_at(
 ) -> Result<Overview, ApiError> {
     let url = format!("{base}/v2/games/{product_id}?locale=en-US");
     let resp = ApiError::check(http.get(url).send().await?).await?;
-    let page: Page = resp.json().await.map_err(ApiError::decode)?;
-    Ok(page.into())
+    let page: Value = resp.json().await.map_err(ApiError::decode)?;
+    Ok(read(&page))
 }
 
 #[cfg(test)]
@@ -213,6 +148,35 @@ mod tests {
             o.background.as_deref(),
             Some("https://images.gog-statics.com/back.jpg")
         );
+    }
+
+    #[test]
+    fn a_bad_field_loses_only_itself() {
+        let page = serde_json::json!({
+            "description": 7,
+            "_links": {
+                "store": {"href": null},
+                "boxArtImage": {"href": "https://images.gog-statics.com/box.jpg"},
+                "backgroundImage": "not a link"
+            },
+            "_embedded": {
+                "product": {"title": "Made Up", "globalReleaseDate": null},
+                "developers": [{"name": null}, {"name": "Nobody"}, "x", null],
+                "publishers": {"name": "not a list"},
+                "publisher": {"name": "No One"},
+                "tags": {"name": "an object, not a list"},
+                "localizations": "none",
+                "supportedOperatingSystems": [{"operatingSystem": null}]
+            }
+        });
+        let o = read(&page);
+        assert_eq!(o.title.as_deref(), Some("Made Up"));
+        assert_eq!(o.developers, ["Nobody"]);
+        assert_eq!(o.publishers, ["No One"]);
+        assert!(o.genres.is_empty() && o.languages.is_empty() && o.systems.is_empty());
+        assert_eq!((o.description, o.slug, o.background), (None, None, None));
+        assert!(o.cover.is_some());
+        assert_eq!(read(&serde_json::json!([1])), Overview::default());
     }
 
     #[tokio::test]
