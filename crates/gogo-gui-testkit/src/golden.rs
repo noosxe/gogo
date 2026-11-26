@@ -221,8 +221,8 @@ pub fn load_png(path: &Path) -> Result<Image, GoldenError> {
     Image::new(info.width, info.height, rgba).ok_or_else(|| file_error(path, "empty image"))
 }
 
-/// Compares `actual` with the golden `<goldens>/<name>.png`. With the environment variable
-/// `GOGO_BLESS` set, writes it as the golden instead.
+/// Compares `actual` with the golden `<goldens>/<name>.png`. With `GOGO_BLESS=1`, writes it
+/// as the golden instead.
 ///
 /// On a mismatch the render and a diff picture are written to `out`.
 ///
@@ -236,7 +236,7 @@ pub fn check(
     t: &Tolerance,
 ) -> Result<Diff, GoldenError> {
     let path = goldens.join(format!("{name}.png"));
-    if std::env::var_os("GOGO_BLESS").is_some() {
+    if crate::env_flag("GOGO_BLESS") {
         save_png(&path, actual)?;
         return Ok(Diff {
             share: 0.0,
@@ -289,7 +289,7 @@ mod tests {
     const T: Tolerance = Tolerance {
         level: 2,
         share: 0.01,
-        max: 24,
+        max: 8,
         mean: 1.0,
     };
 
@@ -317,15 +317,15 @@ mod tests {
     #[test]
     fn few_pixels_may_differ_more_but_not_many() {
         // 100 pixels are 1% of the image.
-        assert!(within(|b| b[..100 * 4].fill(120)));
-        assert!(!within(|b| b[..101 * 4].fill(120)));
+        assert!(within(|b| b[..100 * 4].fill(106)));
+        assert!(!within(|b| b[..101 * 4].fill(106)));
     }
 
     #[test]
     fn one_pixel_over_the_maximum_fails() {
-        assert!(within(|b| b[2] = 124));
-        assert!(!within(|b| b[2] = 125));
-        assert!(!within(|b| b[3] = 75), "alpha counts too");
+        assert!(within(|b| b[2] = 108));
+        assert!(!within(|b| b[2] = 109));
+        assert!(!within(|b| b[3] = 91), "alpha counts too");
     }
 
     #[test]

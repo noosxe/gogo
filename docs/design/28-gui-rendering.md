@@ -94,8 +94,12 @@ A backdrop with sigma 0 (radius 0) is not emitted, and neither are glow layers o
 The renderers give a filter layer (bloom, backdrop) a sigma of at most 256 device px: a layer
 is padded by 3 sigma, and the format allows radii in the thousands.
 
-Each backdrop re-renders everything below it. Sharing the below-target between backdrops
-in one frame is an open optimisation (#543).
+Each backdrop re-renders everything below it, into one more surface-sized target. Those
+targets are **outside** the image cache's byte budget (§4), and the replayed ops grow with the
+square of the number of backdrops. Sharing the below-target between backdrops in one frame is
+an open optimisation (#543). The CPU renderer refuses a frame whose surface and backdrop
+pixmaps would exceed 16384 x 16384 pixels (1 GiB), because a failed allocation aborts the
+process.
 
 ## 4. Images and caches
 

@@ -11,8 +11,9 @@
 //! - A `BlurRect` with four different corner radii is drawn with the **largest** one: vello's
 //!   blurred rect takes a single radius (design 28 §5).
 //! - A [`Op::Backdrop`] is drawn from an offscreen pixmap of the ops before it (design 28
-//!   §3), through the layers open around it. Each backdrop is one extra render; earlier
-//!   backdrops' pixmaps are reused, so the cost grows with their number, not its square.
+//!   §3), through the layers open around it. Each backdrop is one more surface-sized pixmap,
+//!   outside the image cache's budget, and one more render of every op before it, so the
+//!   replayed ops grow with the square of the number of backdrops (#543).
 //! - Images are cached as premultiplied pixmaps under their [`ImageKey`] (design 28 §4).
 //!   There are no mipmaps: an image scaled far down aliases.
 //! - It is **single-threaded**: vello_cpu's filters panic in its multithreading mode
@@ -41,8 +42,9 @@ use vello_cpu::{
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum CpuError {
-    /// A side is 0 or above 65535 device pixels.
-    #[error("a surface of {width}x{height} device pixels is not possible")]
+    /// A side is 0 or above 65535 device pixels, or the surface and the pixmaps under its
+    /// backdrops would hold more than [`MAX_FRAME_PIXELS`].
+    #[error("a frame of {width}x{height} device pixels is not possible")]
     Size {
         /// The width asked for.
         width: u32,
@@ -57,6 +59,13 @@ pub enum CpuError {
     Glyphs(String),
 }
 
+/// The most device pixels a frame may hold: the surface plus one pixmap of its size for
+/// each backdrop. 16384 x 16384, which is 1 GiB.
+///
+/// Allocating a pixmap cannot fail gracefully (the process aborts), so a larger frame is
+/// refused before anything is allocated.
+pub const MAX_FRAME_PIXELS: u64 = 16384 * 16384;
+
 /// A pixel buffer in memory.
 #[derive(Debug)]
 pub struct CpuSurface {
@@ -67,9 +76,10 @@ impl CpuSurface {
     /// A transparent surface of `width` by `height` device pixels.
     ///
     /// # Errors
-    /// [`CpuError::Size`] when a side is 0 or above 65535.
+    /// [`CpuError::Size`] when a side is 0 or above 65535, or the surface has more than
+    /// [`MAX_FRAME_PIXELS`].
     pub fn new(width: u32, height: u32) -> Result<CpuSurface, CpuError> {
-        let (w, h) = sides(width, height)?;
+        let (w, h) = sides(width, height, 1)?;
         Ok(CpuSurface {
             pixmap: Pixmap::new(w, h),
         })
@@ -99,9 +109,11 @@ impl Surface for CpuSurface {
     }
 }
 
-fn sides(width: u32, height: u32) -> Result<(u16, u16), CpuError> {
+/// The sides as vello's, for a frame of `pixmaps` pixmaps of that size.
+fn sides(width: u32, height: u32, pixmaps: u64) -> Result<(u16, u16), CpuError> {
+    let pixels = (u64::from(width) * u64::from(height)).saturating_mul(pixmaps);
     match (u16::try_from(width), u16::try_from(height)) {
-        (Ok(w), Ok(h)) if w > 0 && h > 0 => Ok((w, h)),
+        (Ok(w), Ok(h)) if w > 0 && h > 0 && pixels <= MAX_FRAME_PIXELS => Ok((w, h)),
         _ => Err(CpuError::Size { width, height }),
     }
 }
@@ -210,7 +222,12 @@ impl Renderer for CpuRenderer {
             return Err(CpuError::Scale(scale));
         }
         let (width, height) = surface.size();
-        let (w, h) = sides(width, height)?;
+        let backdrops = list
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Backdrop { .. }))
+            .count();
+        let (w, h) = sides(width, height, 1 + backdrops as u64)?;
         let mut frame = Frame {
             list,
             store: images,
