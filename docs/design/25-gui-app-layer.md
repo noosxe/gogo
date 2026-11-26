@@ -373,7 +373,10 @@ As built (PR F2, sign-in):
 - **The dialog** is the app's own layer: Paste, Clear, Open the page again, Sign in,
   Cancel (initial focus). Paste only (also the primary modifier and V). The clipboard is
   read only for a press made after the dialog had been up for the dwell time; the shell
-  reads it and hands the app at most 4 KiB. The app keeps the parsed code, never the
+  reads it and hands the app at most 4 KiB. That cap is applied after the library has
+  read the whole clipboard, the libraries' own copies are not wiped, and the clipboard
+  is deliberately left as it is after a paste. The press must also be a fresh one, as
+  for any answer. The app keeps the parsed code, never the
   pasted text, and the screen and assistive technology are told only whether a code is
   there. Fixed colours: skin tokens are a follow-up.
 - **Error screens** (S9) are drawn the same way, with Close. Plan cards, destructive

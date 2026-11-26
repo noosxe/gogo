@@ -31,6 +31,10 @@ As built: the authorize URL (`layout=client2`) and the reading of the pasted tex
 anything else is refused without being quoted. `--code` is used as given. The CLI prints
 the URL without opening a browser and asks once.
 
+Login CSRF: GOG's flow has no `state` parameter, so gogo cannot tell that a pasted code
+came from the sign-in it started. Someone who gets the user to paste their code signs gogo
+in to their account; the user name shown after sign-in is what makes that visible.
+
 1. Build the authorize URL (query-encoded):
    ```
    https://auth.gog.com/auth?client_id=46899977096215655

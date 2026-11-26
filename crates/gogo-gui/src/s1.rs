@@ -20,8 +20,9 @@ use gogo::gog::endpoints::Endpoints;
 use gogo::gog::error::AuthError;
 use gogo_contract::sources;
 use gogo_gui_model::{Model, SourceKey};
+use gogo_ui_interact::PointerButton;
 use gogo_ui_shell::accesskit::{Action, ActionRequest, Role, TreeId, TreeUpdate};
-use gogo_ui_shell::{ShellApp as _, Zeroizing};
+use gogo_ui_shell::{Input, ShellApp as _, Zeroizing};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::MakeWriter;
 use wiremock::matchers::path;
@@ -41,6 +42,14 @@ const REFRESH: &str = "FAKE-REFRESH-Zk3v8n5d1f6h";
 const SESSION: &str = "FAKE-SESSION-Lp2w9s4g7j0t";
 const BAD_CODE: &str = "FAKE-BADCODE-Rt5y8u1i4o7p";
 const CODE: &str = "FAKE-CODE-Hn6b3v0c9x2z5m";
+
+/// A gog-warp line that must get through: the bridge from `log` is in place.
+const GOG_WARP_WARNING: &str = "a gog-warp warning";
+
+/// A line that carries a code past [`gogo::redact::scrub_text`].
+fn unscrubbed(code: &str) -> String {
+    format!("exchanging code '{code}'")
+}
 
 /// Every credential, and enough of each to catch one that was cut short.
 fn sentinels() -> Vec<String> {
@@ -146,6 +155,11 @@ impl Account for Exchange {
             codes.push(code.to_string());
             codes.len() == 1
         };
+        // What gog-warp itself logs during the exchange this stands in for, and a
+        // wording the scrubber does not know: only the level filter stops them.
+        log::debug!(target: "gog_warp::core", "Requesting token with code {}", *code);
+        log::debug!(target: "gog_warp::core", "{}", unscrubbed(&code));
+        log::warn!(target: "gog_warp::core", "{GOG_WARP_WARNING}");
         if first {
             // The worst a library could say: nothing about it redacted.
             let secret = gog_warp::constants::GALAXY_CLIENT_SECRET;
@@ -390,6 +404,59 @@ fn files_under(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// A press that began before the dialog was on the display reaches nothing on it, however
+/// late it ends.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_press_begun_before_the_dialog_cannot_paste() {
+    let dir = scratch();
+    let server = gog().await;
+    let engine = Arc::new(Engine::new(Parts {
+        account: Exchange::new(),
+        local: Arc::new(Nothing),
+        http: reqwest::Client::new(),
+        endpoints: Endpoints::at(&server.uri()),
+        language: "en".to_string(),
+        download_dir: dir.path().join("downloads"),
+        browser: Arc::new(NoBrowser),
+    }));
+    let backend = CoreBackend::new(engine, tokio::runtime::Handle::current(), None);
+    let data = Data::core(backend, None, || {});
+    let mut ui = Driven {
+        app: App::new(Some(&skin(dir.path())), data).expect("the app"),
+        now: Duration::from_secs(1),
+        seen: String::new(),
+    };
+    ui.until("Connect account").await;
+
+    // Where Paste will be.
+    ui.press("Connect account");
+    let tree = ui.step();
+    let bounds = tree
+        .nodes
+        .iter()
+        .find(|(_, n)| n.label() == Some("Paste"))
+        .and_then(|(_, n)| n.bounds())
+        .expect("a paste button");
+    let (x, y) = ((bounds.x0 + bounds.x1) / 2.0, (bounds.y0 + bounds.y1) / 2.0);
+    ui.press("Cancel");
+    ui.until("Connect account").await;
+
+    // The button goes down before the next dialog is shown, and comes up long after.
+    let button = PointerButton::Primary;
+    ui.press("Connect account");
+    ui.app.input(Input::PointerMoved { x, y }, ui.now);
+    ui.app.input(Input::PointerDown { button, x, y }, ui.now);
+    ui.step();
+    ui.now += Duration::from_secs(2);
+    ui.app.input(Input::PointerUp { button, x, y }, ui.now);
+    assert!(!ui.app.wants_paste());
+
+    // The same press made afresh does ask.
+    ui.app.input(Input::PointerDown { button, x, y }, ui.now);
+    ui.app.input(Input::PointerUp { button, x, y }, ui.now);
+    assert!(ui.app.wants_paste());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn s1_no_credential_reaches_anything() {
     // The whole log, every level and every target, through the app's own subscriber.
@@ -528,6 +595,10 @@ async fn s1_no_credential_reaches_anything() {
         "the access token was used"
     );
     assert!(!leaks(&format!("x{CODE}x")).is_empty(), "the scan finds");
+    assert!(
+        gogo::redact::scrub_text(&unscrubbed(CODE)).contains(CODE),
+        "the scrubber would not have caught this line"
+    );
 
     // And nowhere else.
     let log = String::from_utf8_lossy(&log.0.lock().expect("log")).into_owned();
@@ -535,6 +606,12 @@ async fn s1_no_credential_reaches_anything() {
         log.contains("Sign-in failed"),
         "the log was captured: {log}"
     );
+    assert!(
+        log.contains(GOG_WARP_WARNING),
+        "`log` records arrive: {log}"
+    );
+    assert!(!log.contains("Requesting token with code"), "{log}");
+    assert!(!log.contains("exchanging code"), "{log}");
     assert!(ui.seen.contains("Sign-in failed"));
     let said = SAID.lock().expect("said").join("\n");
     assert!(said.contains("gui: route game"), "{said}");

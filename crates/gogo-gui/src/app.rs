@@ -24,7 +24,9 @@ use std::time::{Duration, Instant};
 use gogo_contract::{Value, actions};
 use gogo_gui_model::{DWELL, Effect, InputEvent, Invocation, Outcome, Press, Secret, Ticket};
 use gogo_ui_a11y::A11yTree;
-use gogo_ui_interact::{Config, Frame as Layers, Intent, Interaction, Layer, Primary};
+use gogo_ui_interact::{
+    Config, Frame as Layers, InputProvenance, Intent, Interaction, Layer, Primary,
+};
 use gogo_ui_scene::DisplayList;
 use gogo_ui_shell::accesskit::{ActionRequest, TreeUpdate};
 use gogo_ui_shell::{
@@ -97,6 +99,27 @@ struct Entry {
     field: Field,
 }
 
+/// When the dialog on the display got there.
+#[derive(Debug, Clone, Copy)]
+struct Shown {
+    ticket: Ticket,
+    at: Duration,
+    /// The last input there had been.
+    after: u64,
+}
+
+impl Shown {
+    /// Whether a press may act on the dialog, by the rule the model has for an answer:
+    /// it went down after the dialog was up, not as a key repeating, and not before the
+    /// dialog had been there long enough to be seen.
+    fn takes(self, ticket: Ticket, press: u64, at: Duration, repeat: bool) -> bool {
+        self.ticket == ticket
+            && !repeat
+            && press > self.after
+            && at.checked_sub(self.at).is_some_and(|up| up >= DWELL)
+    }
+}
+
 pub(crate) struct App {
     page: Page,
     data: Data,
@@ -110,7 +133,7 @@ pub(crate) struct App {
     a11y: A11yTree,
     entry: Entry,
     /// Since when a dialog has been on the display.
-    since: Option<(Ticket, Duration)>,
+    since: Option<Shown>,
     /// A press asked to paste into the dialog of this ticket.
     paste: Option<Ticket>,
     /// The kinds of the safety screens cancelled so far.
@@ -244,7 +267,7 @@ impl App {
             Intent::App {
                 target, provenance, ..
             } => match target.key.as_str() {
-                dialog::PASTE => self.ask_to_paste(ticket, provenance.at()),
+                dialog::PASTE => self.ask_to_paste(ticket, &provenance),
                 dialog::CLEAR => {
                     self.entry.code = None;
                     self.entry.field = Field::Empty;
@@ -272,7 +295,7 @@ impl App {
                 dialog::CANCEL | dialog::CLOSE => self.close(ticket),
                 _ => {}
             },
-            Intent::Paste { provenance } => self.ask_to_paste(ticket, provenance.at()),
+            Intent::Paste { provenance } => self.ask_to_paste(ticket, &provenance),
             Intent::Dismiss { .. } => self.close(ticket),
             _ => {}
         }
@@ -286,13 +309,13 @@ impl App {
         }
     }
 
-    /// The clipboard is read only for a press made after the dialog had been up long
-    /// enough to be seen, as for any answer.
-    fn ask_to_paste(&mut self, ticket: Ticket, pressed: Duration) {
-        let seen = self.since.is_some_and(|(shown, since)| {
-            shown == ticket && pressed.checked_sub(since).is_some_and(|up| up >= DWELL)
+    /// The clipboard is read only for a press that could answer the dialog
+    /// ([`Shown::takes`]).
+    fn ask_to_paste(&mut self, ticket: Ticket, press: &InputProvenance) {
+        let fresh = self.since.is_some_and(|shown| {
+            shown.takes(ticket, press.event().get(), press.at(), press.repeat())
         });
-        if seen && self.entry.ticket == Some(ticket) {
+        if fresh && self.entry.ticket == Some(ticket) {
             self.paste = Some(ticket);
         }
     }
@@ -495,10 +518,14 @@ impl App {
         let layers = self.shown.layers();
         let redraw = self.interaction.sync(&Layers { layers: &layers }).redraw;
         match self.shown.dialog.as_ref().map(|d| d.ticket()) {
-            Some(ticket) if self.since.is_none_or(|(shown, _)| shown != ticket) => {
-                self.since = Some((ticket, at));
-                let latest = act::number(self.interaction.latest());
-                self.data.presented(ticket, latest, at);
+            Some(ticket) if self.since.is_none_or(|shown| shown.ticket != ticket) => {
+                let latest = self.interaction.latest();
+                self.since = Some(Shown {
+                    ticket,
+                    at,
+                    after: latest.get(),
+                });
+                self.data.presented(ticket, act::number(latest), at);
             }
             Some(_) => {}
             None => self.since = None,
@@ -696,6 +723,39 @@ mod tests {
         assert_ne!(app.list, good);
         key(&mut app, Key::Escape, 20);
         assert_eq!(app.data.location().route, "game");
+    }
+
+    #[test]
+    fn only_a_fresh_press_acts_on_a_dialog() {
+        let model = |n: u64| {
+            let mut model =
+                gogo_gui_model::Model::new(gogo_gui_model::fake::FakeBackend::new(), || {});
+            let failures = model.failures();
+            let mut ticket = None;
+            for i in 0..n {
+                failures.report(gogo_gui_model::ErrorView::failed("x", i.to_string()));
+                model.pump();
+                ticket = model.modal().map(|m| m.ticket());
+                model.dismiss();
+            }
+            ticket.expect("a ticket")
+        };
+        let (ticket, other) = (model(1), model(2));
+        let shown = Shown {
+            ticket,
+            at: at(1000),
+            after: 5,
+        };
+        let seen = at(1000) + DWELL;
+        assert!(shown.takes(ticket, 6, seen, false));
+        // Numbered when it went down, which was before the dialog appeared.
+        assert!(!shown.takes(ticket, 5, seen, false));
+        assert!(!shown.takes(ticket, 4, at(9000), false));
+        // Too soon, before it was shown at all, repeating, or for another screen.
+        assert!(!shown.takes(ticket, 6, seen - at(1), false));
+        assert!(!shown.takes(ticket, 6, at(10), false));
+        assert!(!shown.takes(ticket, 6, seen, true));
+        assert!(!shown.takes(other, 6, seen, false));
     }
 
     #[test]

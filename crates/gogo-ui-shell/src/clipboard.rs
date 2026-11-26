@@ -1,6 +1,15 @@
 //! Reading the system clipboard's text, when the application asks (design 24 §3):
 //! smithay-clipboard on Wayland (`wl_data_device`, which every compositor has), arboard
 //! on X11 and macOS. Nothing is ever written to it.
+//!
+//! What this does not do, since the text can be a sign-in code:
+//!
+//! - [`CLIPBOARD_MAX`] is applied **after** the library has read the whole clipboard
+//!   into memory: it bounds what the application gets, not what is allocated.
+//! - Only the returned `String` is wiped. Copies the libraries make on the way (pipe
+//!   and X11 buffers, conversions) are not.
+//! - The clipboard is **not cleared** after a paste, on purpose: it is the user's, may
+//!   have changed since, and clearing it would also surprise them.
 
 use winit::raw_window_handle::{HasDisplayHandle as _, RawDisplayHandle};
 use winit::window::Window;
