@@ -364,6 +364,18 @@ As built (PR E4):
   without an engine.
 - A skin's own asset files are not decoded yet.
 
+As built (input and AccessKit wiring):
+
+- The shell translates winit events into `gogo-ui-interact`'s input and times them on one
+  monotonic clock. `gogo-gui` owns the `Interaction` and the `A11yTree` and resolves an
+  `ActionRef` against the screen the press was on.
+- `ui.set` writes the skin's value; a reload keeps it where the new skin still has it.
+- The safety flow's screens are not drawn yet (#536). An action that needs one is
+  cancelled at once, and the model is never told a screen was presented.
+- A route that no skin draws leaves the last screen up, with the reason over it; Esc goes
+  back.
+- Touch, the palette, the account menu and the clipboard are not wired in.
+
 ## 9. Where things are stored
 
 Paths follow 06 §1 (the `dirs` crate), which lists these rows too. With `GOGO_HOME` set,

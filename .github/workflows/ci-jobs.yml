@@ -505,6 +505,10 @@ jobs:
               --renderer "$renderer" --name "reload-$renderer" -- target/debug/gogo-gui
             grep -F "renderer=$renderer" target/gui-headless/reload-"$renderer".*/app.log
           done
+      - name: Pointer and keyboard input
+        run: |
+          nix develop .#lavapipe -c scripts/gui-headless.sh input \
+            --name input -- target/debug/gogo-gui
       - name: Fallback without a Vulkan driver
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0

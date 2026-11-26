@@ -23,6 +23,12 @@
 #   built-in skin, edits the copy, breaks it and mends it, with a screenshot of
 #   each (1-start, 2-edited, 3-broken, 4-mended). Takes run's options.
 #
+# input [options] -- GOGO_GUI
+#   the input check: starts GOGO_GUI on fictional data, clicks a tab and a
+#   navigation entry with a virtual pointer, goes back with Esc and moves focus
+#   with Tab, with a screenshot of each (1-start, 2-tab, 3-route, 4-back,
+#   5-focus). Takes run's options; the click points assume the default size.
+#
 # self-test
 #   checks the sandbox, the screenshot and the teardown with a small Wayland
 #   client, so it needs no build.
@@ -219,6 +225,66 @@ scenario_reload() {
         test "$(changed "$OUT/2-edited.png" "$OUT/4-mended.png")" = 0 || return 1
     stop_app
     grep -F "gui: skin" "$OUT/app.log" >&2
+}
+
+# A pointer for the seat: a headless sway has no input devices, and sway's own
+# `cursor` commands reach nobody without one. Lasts until the sandbox ends.
+start_pointer() {
+    python3 -I -c '
+import importlib.util, sys, time
+spec = importlib.util.spec_from_file_location("helper", sys.argv[1])
+helper = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helper)
+device = helper.virtual_pointer(sys.argv[2])
+print("ready", flush=True)
+time.sleep(3600)
+' "$HELPER" "$RUNTIME_DIR/$WAYLAND_DISPLAY" >"$OUT/pointer.log" 2>&1 &
+    for _ in $(seq 100); do
+        grep -q ready "$OUT/pointer.log" && return 0
+        sleep 0.1
+    done
+    log "no virtual pointer (see pointer.log)"
+    return 1
+}
+
+click() { # x y
+    swaymsg -q seat - cursor set "$1" "$2"
+    sleep 0.2
+    swaymsg -q seat - cursor press button1
+    sleep 0.1
+    swaymsg -q seat - cursor release button1
+}
+
+# The same for keys: `wtype` takes its keyboard away when it ends, so one that only
+# sleeps keeps the seat's keyboard (and the window's focus on it) in place.
+start_keyboard() {
+    wtype -s 3600000 >"$OUT/keyboard.log" 2>&1 &
+}
+
+key() { wtype -s 200 -k "$1" -s 200; }
+
+scenario_input() {
+    start_pointer || return 1
+    start_keyboard
+    start_app "$@" --fixture
+    wait_log "gui: frame presented" || return 1
+    wait_shown 1-start || return 1
+
+    click 378 276 # the Builds tab
+    shot_changed 2-tab 1-start || return 1
+
+    click 60 141 # Library, in the navigation
+    wait_log "gui: route library" || return 1
+    shot_changed 3-route 2-tab || return 1
+
+    key Escape
+    wait_log "gui: route game" || return 1
+    shot_changed 4-back 3-route || return 1
+
+    key Tab
+    shot_changed 5-focus 4-back || return 1
+    stop_app
+    grep -F "gui: route" "$OUT/app.log" >&2
 }
 
 inside() {
@@ -469,7 +535,7 @@ target" ] || st_fail "more of the repository than scripts/ is visible"
 cmd="$1"
 shift
 case "$cmd" in
-run | reload) cmd_run "$cmd" "$@" ;;
+run | reload | input) cmd_run "$cmd" "$@" ;;
 self-test) cmd_self_test "$@" ;;
 __inside) inside "$@" ;;
 -h | --help | help) usage ;;

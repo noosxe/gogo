@@ -12,6 +12,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::cpu::CpuWindow;
+use crate::input::Translator;
 use crate::output::{self, Output, Recovery};
 use crate::watch::{self, Watch};
 use crate::{
@@ -91,6 +92,8 @@ impl Shell {
             open: None,
             watch: None,
             error: None,
+            started: Instant::now(),
+            input: Translator::default(),
         };
         self.event_loop.run_app(&mut runner)?;
         match runner.error {
@@ -124,6 +127,9 @@ struct Runner<A> {
     open: Option<Open>,
     watch: Option<Watch>,
     error: Option<ShellError>,
+    /// The zero of the clock input and presented frames are timed on.
+    started: Instant,
+    input: Translator,
 }
 
 fn attributes(options: &WindowOptions) -> WindowAttributes {
@@ -253,7 +259,7 @@ impl<A: ShellApp> Runner<A> {
                 open.remade = false;
                 open.cpu_retried = false;
                 open.images_stale = false;
-                self.app.presented(Instant::now(), name);
+                self.app.presented(self.started.elapsed(), name);
                 let app = &mut self.app;
                 open.accessibility
                     .update_if_active(|| app.accessibility_tree());
@@ -311,6 +317,12 @@ impl<A: ShellApp> ApplicationHandler<UserEvent> for Runner<A> {
             return;
         }
         open.accessibility.process_event(&open.window, &event);
+        if let Some(input) = self.input.translate(&event, open.window.scale_factor()) {
+            if self.app.input(input, self.started.elapsed()) {
+                open.window.request_redraw();
+            }
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(_)
@@ -338,9 +350,9 @@ impl<A: ShellApp> ApplicationHandler<UserEvent> for Runner<A> {
                     }
                     false
                 }
-                accesskit_winit::WindowEvent::ActionRequested(request) => {
-                    self.app.accessibility_action(request)
-                }
+                accesskit_winit::WindowEvent::ActionRequested(request) => self
+                    .app
+                    .accessibility_action(request, self.started.elapsed()),
                 accesskit_winit::WindowEvent::AccessibilityDeactivated => false,
             },
         };

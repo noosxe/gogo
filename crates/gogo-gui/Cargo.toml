@@ -12,6 +12,8 @@ path = "src/main.rs"
 
 [dependencies]
 gogo-ui-shell.workspace = true
+gogo-ui-interact.workspace = true
+gogo-ui-a11y.workspace = true
 gogo-ui-ir.workspace = true
 gogo-ui-text.workspace = true
 gogo-ui-layout.workspace = true
