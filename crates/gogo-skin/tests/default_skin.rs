@@ -6,7 +6,7 @@ use std::path::Path;
 use gogo_skin::SkinPackage;
 
 fn fixture() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/default")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../gogo-skins/skins/default")
 }
 
 #[test]

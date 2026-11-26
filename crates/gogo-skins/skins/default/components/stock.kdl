@@ -1,4 +1,4 @@
-// Stock components (depth C): other skins may copy, change or replace them.
+// Stock components (design 26 §5, depth C): ordinary components that other skins may copy, change or replace.
 
 component "status-badge" params="status" {
     chip "{status.word(status)}" icon="dot" tone="{status}"

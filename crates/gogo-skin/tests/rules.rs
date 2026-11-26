@@ -1,6 +1,6 @@
 //! One failing skin per rule of the loader, built in memory with `from_files`.
 //!
-//! Each case edits the Default skin (the fixture in `tests/fixtures/default`), loads it,
+//! Each case edits the Default skin (`crates/gogo-skins/skins/default`), loads it,
 //! and checks the diagnostic's stable code, whether it fails the skin or one route, and
 //! that its span points at the right text. The section names are those of design 27 and
 //! the invariants those of design 26 §7.
@@ -30,7 +30,7 @@ fn base() -> Files {
             }
         }
     }
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/default");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../gogo-skins/skins/default");
     let mut out = Vec::new();
     walk(&root, &root, &mut out);
     out

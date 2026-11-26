@@ -243,6 +243,8 @@ and `$GOGO_HOME/gui-cache/` (cache), so state and cache stay apart.
 | Per-skin UI state (design 26 §6.4) and the active skin | `$XDG_STATE_HOME/gogo/gui/` | `~/Library/Application Support/gogo/gui/` |
 | Pipeline cache, decoded covers | `$XDG_CACHE_HOME/gogo/gui/` | `~/Library/Caches/gogo/gui/` |
 
+- Built-in skins are not in the skin folder: they are embedded (`gogo-skins`, design 24 §2)
+  and load through the same loader. The Default skin is `crates/gogo-skins/skins/default/`.
 - Every file is written atomically (tmp, fsync, rename) like `state.json`.
 - An unreadable cache is ignored.
 - Unreadable UI state falls back to the skin's declared defaults.

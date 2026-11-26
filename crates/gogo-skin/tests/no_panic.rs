@@ -6,7 +6,7 @@ use gogo_skin::SkinPackage;
 use proptest::prelude::*;
 
 fn base() -> Vec<(String, Vec<u8>)> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/default");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../gogo-skins/skins/default");
     let mut out = Vec::new();
     for rel in [
         "skin.kdl",

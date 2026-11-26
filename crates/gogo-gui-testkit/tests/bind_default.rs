@@ -1,14 +1,12 @@
-//! The Default skin fixture binds its `game` and `shell` routes against the fixture scope
+//! The built-in Default skin binds its `game` and `shell` routes against the fixture scope
 //! (design 27 §9 step 4, issue #526): no errors, and a tree that passes `Tree::validate`.
-
-use std::path::Path;
 
 use gogo_gui_testkit::FixtureScope;
 use gogo_skin::{Binding, Mode, SkinPackage, UiState};
 
 fn skin() -> SkinPackage {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../gogo-skin/tests/fixtures/default");
-    match SkinPackage::load(&dir) {
+    let d = gogo_skins::default();
+    match SkinPackage::from_files(d.name, d.to_files()) {
         Ok(p) => p,
         Err(r) => panic!("{r}"),
     }

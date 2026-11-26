@@ -1,8 +1,7 @@
-//! Binding (design 24 §2, design 27 §9 step 4, design 26 §8): the skin is the Default
-//! skin fixture edited in memory, the data is the fixture scope.
+//! Binding (design 24 §2, design 27 §9 step 4, design 26 §8): the skin is the built-in Default
+//! skin (`gogo_skins`) edited in memory, the data is the fixture scope.
 
 use std::collections::BTreeMap;
-use std::path::Path;
 
 use gogo_gui_testkit::{FixtureScope, GAME_ID};
 use gogo_skin::expr::Scope;
@@ -15,28 +14,7 @@ use gogo_skin::{
 type Files = Vec<(String, Vec<u8>)>;
 
 fn base() -> Files {
-    fn walk(root: &Path, dir: &Path, out: &mut Files) {
-        let mut entries: Vec<_> = std::fs::read_dir(dir).unwrap().flatten().collect();
-        entries.sort_by_key(|e| e.file_name());
-        for e in entries {
-            let p = e.path();
-            if p.is_dir() {
-                walk(root, &p, out);
-            } else {
-                let rel = p
-                    .strip_prefix(root)
-                    .unwrap()
-                    .to_str()
-                    .unwrap()
-                    .replace('\\', "/");
-                out.push((rel, std::fs::read(&p).unwrap()));
-            }
-        }
-    }
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../gogo-skin/tests/fixtures/default");
-    let mut out = Vec::new();
-    walk(&root, &root, &mut out);
-    out
+    gogo_skins::default().to_files()
 }
 
 fn rep(f: &mut Files, path: &str, from: &str, to: &str) {

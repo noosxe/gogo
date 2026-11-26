@@ -22,7 +22,7 @@ fn skin_dir() -> (tempfile::TempDir, std::path::PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("default");
     copy(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/default"),
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../gogo-skins/skins/default"),
         &dir,
     );
     std::fs::write(tmp.path().join("secret.png"), b"outside the skin").unwrap();

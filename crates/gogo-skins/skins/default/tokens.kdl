@@ -1,4 +1,4 @@
-// Round-1 Atelier dark set, as in the Default mockup.
+// Default skin tokens (design 27 §4): the dark set. Colours are `#rrggbb[aa]`; `@name` aliases another token.
 tokens "dark" {
     bg0 "#121314"
     bg1 "#17181a"
@@ -24,6 +24,7 @@ tokens "dark" {
     tone.update "@warn"
     tone.failed "@error"
     tone.not_installed "@text-lo"
+    // tone.queued and tone.paused are optional (design 26 §3): text-lo and warn apply
     radius.sm 5
     radius.md 8
     radius.lg 12
