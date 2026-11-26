@@ -115,3 +115,5 @@ style "panel" { fill @surface; border 1 @border; radius 12; padding 16; gap 10 }
 style "game-card" { fill @surface; border 1 @border; radius 12; padding 12; gap 8 }
 style "small" { h 28; padding 0 10; font-size 12.5; radius 7 }
 style "problem" { weight 600; color @error }
+style "badge.error" { fill "{@error alpha=.15}"; color @error }
+style "flush" { padding 0 }

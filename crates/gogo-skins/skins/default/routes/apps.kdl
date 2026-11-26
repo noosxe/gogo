@@ -1,0 +1,11 @@
+route "apps" {
+    let installed="{apps}"
+
+    row gap=@space.3 {
+        text "Installed apps" style="h1" grow=1
+        button "Prune orphaned" action="apps.prune_orphaned" args="false" id="prune"
+        button "Prune, keep overrides" style="ghost" action="apps.prune_orphaned" args="true"
+    }
+    text "No installed games." style="hint" id="empty" when="{(installed | len) == 0}"
+    each "a" in="{installed}" { use "app-entry" entry="{a}" }
+}

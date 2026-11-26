@@ -1,0 +1,58 @@
+route "settings" {
+    let all="{settings}"
+    let skin_choice="{all | where key == 'gui.skin' | first}"
+    let mode="{all | where key == 'gui.mode' | first}"
+    let motion="{all | where key == 'gui.reduced_motion' | first}"
+    let big="{all | where key == 'gui.big_screen' | first}"
+    let limit="{all | where key == 'download.limit' | first}"
+
+    row gap=@space.3 {
+        text "Settings" style="h1" grow=1
+        button "Account" action="nav.go" args="sign-in"
+        button "About" action="nav.go" args="about"
+        button "Open settings file" action="settings.open_file"
+    }
+
+    // Only the keys a skin may set have controls here (design 26 §4.9); the rest are listed.
+    column style="panel" id="appearance" {
+        text "Appearance and comfort" style="card-title"
+        row gap=6 when="{skin_choice}" {
+            text "Skin" style="field-label"
+            each "c" in="{skin_choice?.choices}" {
+                button "{c}" style="small" action="settings.set" args="gui.skin {c}" on="{skin_choice?.value == c}" label="Use the {c} skin"
+            }
+        }
+        row gap=6 when="{mode}" {
+            text "Mode" style="field-label"
+            text "{mode?.value}" style="hint"
+        }
+        form style="flush" {
+            field "Reduced motion" when="{motion}" {
+                toggle on="{motion?.value == true}" action="settings.set" args="gui.reduced_motion {not on}"
+            }
+            field "Big screen" when="{big}" {
+                toggle on="{big?.value == true}" action="settings.set" args="gui.big_screen {not on}"
+            }
+        }
+    }
+
+    column style="panel" id="downloads" when="{limit}" {
+        text "Downloads" style="card-title"
+        text "Rate limit in bytes per second: {limit?.value == 0 ? 'unlimited' : limit?.value}" style="hint"
+        row gap=6 {
+            button "Unlimited" style="small" action="settings.set" args="download.limit 0" on="{limit?.value == 0}" label="Download without a rate limit"
+            button "1 MB/s" style="small" action="settings.set" args="download.limit 1000000" on="{limit?.value == 1000000}" label="Limit downloads to 1 MB/s"
+            button "10 MB/s" style="small" action="settings.set" args="download.limit 10000000" on="{limit?.value == 10000000}" label="Limit downloads to 10 MB/s"
+            button "50 MB/s" style="small" action="settings.set" args="download.limit 50000000" on="{limit?.value == 50000000}" label="Limit downloads to 50 MB/s"
+        }
+    }
+
+    card title="All settings" id="all" {
+        data-table label="All settings" rows="{all}" {
+            col "Key" "{row.key}" mono=#true w=190
+            col "Value" "{row.value}" mono=#true w=90
+            col "From" "{row.source}" w=80
+            col "What it does" "{row.description}" grow=1
+        }
+    }
+}

@@ -1,0 +1,17 @@
+route "runtimes" {
+    let run="{runtimes}" draw="{renderers}"
+
+    row gap=@space.3 {
+        text "Runtimes" style="h1" grow=1
+        button "Remove unused runtimes" action="runtimes.prune" args="unused"
+    }
+    text "No runtimes." style="hint" when="{(run | len) == 0}"
+    each "e" in="{run}" { use "catalog-entry" entry="{e}" install="runtimes.install" prune="runtimes.prune" }
+
+    row gap=@space.3 {
+        text "Renderers" style="h1" grow=1
+        button "Remove unused renderers" action="renderers.prune" args="unused"
+    }
+    text "No renderers." style="hint" when="{(draw | len) == 0}"
+    each "e" in="{draw}" { use "catalog-entry" entry="{e}" install="renderers.install" prune="renderers.prune" }
+}

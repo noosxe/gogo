@@ -1,0 +1,29 @@
+// One game of the `apps` route.
+
+component "app-entry" params="entry" {
+    let id="{entry.game.id}" title="{entry.game.title}"
+    column style="panel" {
+        row gap=@space.3 {
+            text "{title}" style="tile-title" grow=1
+            use "status-badge" status="{entry.game.status}"
+        }
+        text "{entry.runtime} · {entry.renderer} · DLC {entry.dlc} · {fmt.bytes(entry.size)}" style="mono-lo"
+        row gap=@space.3 {
+            text "{entry.entry_kind == app_bundle ? 'App bundle' : 'Menu entry'}" style="tile-sub"
+            text "Last launched {fmt.ago(entry.last_launch)}" style="tile-sub" when="{entry.last_launch != null}"
+            text "Never launched" style="tile-sub" when="{entry.last_launch == null}"
+        }
+        row gap=6 {
+            button "Play" style="small" action="game.play" args="{id}" label="Play {title}" when="{entry.game.status == ready or entry.game.status == update_available}"
+            button "Details" style="small" action="nav.go" args="game {id}" label="Details of {title}"
+            button "Open folder" style="small" action="game.open_folder" args="{id} game" label="Open the folder of {title}"
+            button "Verify" style="small" action="game.verify" args="{id}" label="Verify {title}"
+            button "Run setup" style="small" action="game.setup" args="{id}" label="Run setup for {title}"
+            button "Move…" style="small" action="game.move" args="{id} chosen" label="Move {title}"
+        }
+        row gap=6 {
+            button "Remove" style="small ghost" action="game.remove" args="{id} false" label="Remove {title}"
+            button "Remove, keep overrides" style="small ghost" action="game.remove" args="{id} true" label="Remove {title}, keep its overrides"
+        }
+    }
+}

@@ -1,0 +1,39 @@
+// One game of the `saves` route.
+
+component "game-cloud-saves" params="entry" {
+    let s="{game.saves(entry.id)}"
+    column style="panel" {
+        row gap=@space.3 {
+            text "{entry.title}" style="tile-title" grow=1
+            switch "{s.state}" {
+                case "in_sync" { badge "In sync" tone="success" }
+                case "to_pull" { badge "Newer in the cloud" tone="warn" }
+                case "to_push" { badge "Newer on this machine" tone="warn" }
+                case "conflicts" { badge "Conflicts" tone="error" }
+                case "disabled" { badge "Cloud saves off" tone="neutral" }
+                else { badge "No cloud saves for this game" tone="neutral" }
+            }
+        }
+        text "To pull {s.counts.pull} · to push {s.counts.push} · to delete {s.counts.delete} · conflicts {s.counts.conflict}" style="mono-lo"
+        row gap=@space.3 {
+            text "Checked {fmt.ago(s.checked_at)}" style="tile-sub"
+            text "Last sync {fmt.ago(s.last_sync)}" style="tile-sub" when="{s.last_sync != null}"
+        }
+        data-table label="Save files of {entry.title}" rows="{s.files}" when="{s.files}" {
+            col "File" "{row.display_path}" mono=#true grow=1
+            col "Action" "{row.action}" w=122
+            col "" w=110 { badge "Conflict" tone="warn" when="{row.conflict}" }
+        }
+        // app-owned (design 26 §5): the choice between the two sides is the app's
+        saves-conflicts game="{entry.id}" when="{s.state == conflicts}" {
+            part "row" style="snap-row"
+        }
+        row gap=6 {
+            button "Check now" style="small" action="saves.check" args="{entry.id}" label="Check saves of {entry.title}"
+            button "Pull" style="small" action="saves.pull" args="{entry.id}" label="Pull saves of {entry.title}" when="{s.state != disabled and s.state != no_remote_config}"
+            button "Push" style="small" action="saves.push" args="{entry.id}" label="Push saves of {entry.title}" when="{s.state != disabled and s.state != no_remote_config}"
+            button "Sync" style="small" action="saves.sync" args="{entry.id}" label="Sync saves of {entry.title}" when="{s.state != disabled and s.state != no_remote_config}"
+            button "Open folder" style="small ghost" action="game.open_folder" args="{entry.id} saves" label="Open the save folder of {entry.title}"
+        }
+    }
+}

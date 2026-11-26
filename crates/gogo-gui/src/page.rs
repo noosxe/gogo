@@ -288,7 +288,7 @@ mod tests {
     fn every_route_of_the_default_skin_draws_on_the_fixture() {
         let mut data = Data::fixture(|| {}).expect("fixture data");
         let mut page = Page::new().expect("the built-in skin");
-        for route in ["shell", "game", "sign-in", "library", "queue", "updates"] {
+        for route in gogo_contract::routes::ROUTE_NAMES {
             let list = page.draw(&mut data, route, (960.0, 600.0)).expect(route);
             assert!(!list.ops.is_empty(), "{route}");
         }

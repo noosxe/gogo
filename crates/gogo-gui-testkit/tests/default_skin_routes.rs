@@ -1,7 +1,7 @@
 //! What the Default skin shows on each route beyond the game page, state by state: the
 //! content is there, not only a tree that binds.
 
-use gogo_gui_testkit::FixtureScope;
+use gogo_gui_testkit::{FixtureScope, GAME_ID};
 use gogo_skin::ir::{Kind, Tree};
 use gogo_skin::{Binding, DefaultSkin, Mode, SkinPackage, UiState, Value};
 
@@ -204,4 +204,140 @@ fn the_shell_offers_signing_in_only_when_signed_out() {
     hides(&words(&bind("shell", &scope, &[])), &["Sign in"]);
     scope.set_field("account", "signed_in", Value::Bool(false));
     shows(&words(&bind("shell", &scope, &[])), &["Sign in"]);
+}
+
+#[test]
+fn saves_shows_each_installed_games_state_and_offers_what_it_allows() {
+    let w = words(&bind("saves", &on("saves"), &[]));
+    shows(
+        &w,
+        &[
+            "In sync",
+            "Newer on this machine",
+            "Conflicts",
+            "Cloud saves off",
+            "No cloud saves for this game",
+            "Saves/campaign.sav",
+            "cloud writes",
+            "Push saves of Example Quest",
+            "Check saves of Stub Valley",
+        ],
+    );
+    // Off or unsupported: nothing to move.
+    hides(
+        &w,
+        &["Push saves of Mock Harbor", "Pull saves of Stub Valley"],
+    );
+
+    let mut scope = on("saves");
+    scope.set_var("apps", list(Vec::new()));
+    shows(&words(&bind("saves", &scope, &[])), &["No installed games"]);
+}
+
+#[test]
+fn apps_lists_installed_games_and_their_actions() {
+    let w = words(&bind("apps", &on("apps"), &[]));
+    shows(
+        &w,
+        &[
+            "proton-9",
+            "Never launched",
+            "Play Placeholder Tactics",
+            "Remove Example Quest",
+            "keep its overrides",
+            "Prune orphaned",
+        ],
+    );
+    hides(&w, &["Play Mock Harbor"]);
+
+    let mut scope = on("apps");
+    scope.set_var("apps", list(Vec::new()));
+    shows(&words(&bind("apps", &scope, &[])), &["No installed games"]);
+}
+
+#[test]
+fn runtimes_lists_both_catalogs() {
+    let w = words(&bind("runtimes", &on("runtimes"), &[]));
+    shows(
+        &w,
+        &[
+            "proton-8",
+            "vkd3d",
+            "8.0-5",
+            "no game",
+            "none",
+            "Install the latest d7vk",
+            "Remove unused versions of dxvk",
+        ],
+    );
+    hides(&w, &["Remove unused versions of d7vk"]);
+
+    let mut scope = on("runtimes");
+    scope.set_var("runtimes", list(Vec::new()));
+    scope.set_var("renderers", list(Vec::new()));
+    shows(
+        &words(&bind("runtimes", &scope, &[])),
+        &["No runtimes", "No renderers"],
+    );
+}
+
+#[test]
+fn doctor_shows_one_games_checks_only_when_asked_for_it() {
+    let all = words(&bind("doctor", &on("doctor"), &[]));
+    shows(&all, &["Sample Racer", "3 ok · 1 warnings · 0 failed"]);
+    hides(&all, &["No Vulkan device found", "Run again"]);
+
+    let one = FixtureScope::new().on("doctor", Some(GAME_ID));
+    let one = words(&bind("doctor", &one, &[]));
+    shows(
+        &one,
+        &["Example Quest", "No Vulkan device found", "Run again"],
+    );
+    // Leftover processes are a macOS matter.
+    hides(&one, &["Stop leftover processes"]);
+
+    let mut mac = FixtureScope::new().on("doctor", Some(GAME_ID));
+    mac.set_field("app", "os", Value::str("mac"));
+    shows(
+        &words(&bind("doctor", &mac, &[])),
+        &["Stop leftover processes"],
+    );
+
+    let mut empty = on("doctor");
+    empty.set_var("doctor.all", list(Vec::new()));
+    shows(
+        &words(&bind("doctor", &empty, &[])),
+        &["Nothing to check yet"],
+    );
+}
+
+#[test]
+fn settings_has_controls_for_the_skin_keys_and_lists_the_rest() {
+    let w = words(&bind("settings", &on("settings"), &[]));
+    shows(
+        &w,
+        &[
+            "Use the default skin",
+            "Reduced motion",
+            "Big screen",
+            "Limit downloads to 10 MB/s",
+            "snapshots.keep_auto",
+            "Open settings file",
+        ],
+    );
+    // The mode is shown, not offered: the skin has no light tokens.
+    hides(&w, &["Use the light"]);
+
+    // With no settings at all there is nothing to control, and nothing fails.
+    let mut scope = on("settings");
+    scope.set_var("settings", list(Vec::new()));
+    let w = words(&bind("settings", &scope, &[]));
+    shows(&w, &["Open settings file"]);
+    hides(&w, &["Reduced motion", "Limit downloads"]);
+}
+
+#[test]
+fn about_shows_what_the_app_says_of_itself() {
+    let w = words(&bind("about", &on("about"), &[]));
+    shows(&w, &["Version 0.0.0-test", "Skin contract 1.0", "linux"]);
 }
