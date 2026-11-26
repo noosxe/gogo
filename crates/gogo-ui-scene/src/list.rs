@@ -184,6 +184,18 @@ pub struct DisplayList {
 }
 
 impl DisplayList {
+    /// A frame that draws nothing over opaque black: what is left to show when no tree
+    /// could be built.
+    pub fn blank(width: f64, height: f64) -> DisplayList {
+        DisplayList {
+            width,
+            height,
+            background: Color::BLACK,
+            ops: Vec::new(),
+            images: Vec::new(),
+        }
+    }
+
     /// The key of an image id of this list.
     pub fn image(&self, id: ImageId) -> Option<&ImageKey> {
         self.images.get(id.index())

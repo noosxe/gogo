@@ -89,6 +89,8 @@ pub trait JobControl: Send { /* … */ }
 - **`FakeBackend`** (in `gogo-gui-model`, behind the `fake` feature) answers what a test
   scripts and records what it is asked. It is not in the testkit, which is dev-only
   (design 24 §2.1), so `gogo-gui --render-png` and skin dev mode (§8) can use it too.
+  `FakeBackend::with_fixture()` answers sources with the fictional data of its `fixture`
+  module (cover art included), which the testkit's `FixtureScope` shares.
 
 ## 3. Sources, coalescing and wakeups
 
@@ -347,6 +349,20 @@ app control is told apart by its `DrawnBy::App` part and tree key.
   - adds an inspector that shows each node's bindings and their current values.
 - **Data.** Dev mode runs on `CoreBackend`, or on fixture data with `--fixture`.
 - **`gogo-gui --check-skin <dir>`** validates without a window, for skin authors and CI.
+  Exit 0: no errors (warnings allowed); 1: a skin or route error; 2: bad usage.
+- **`gogo-gui --render-png <out> [--route R] [--scale N] [--skin <dir>]`** draws a route on
+  fixture data without a window, on vello_cpu, at 960×600 logical px (the golden images).
+
+As built (PR E4):
+
+- Only `--fixture` runs until real data is wired in (#535); without it the window is
+  refused.
+- A reload takes the new skin only if it loads with no errors and its routes bind.
+  Otherwise the last good skin stays, and the errors are listed over it. The inspector
+  and app-widget content are not built yet.
+- In fixture mode the queue a skin shows is the fixture's: the model's job table is empty
+  without an engine.
+- A skin's own asset files are not decoded yet.
 
 ## 9. Where things are stored
 

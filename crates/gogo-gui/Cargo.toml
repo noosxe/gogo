@@ -12,10 +12,25 @@ path = "src/main.rs"
 
 [dependencies]
 gogo-ui-shell.workspace = true
+gogo-ui-ir.workspace = true
+gogo-ui-text.workspace = true
+gogo-ui-layout.workspace = true
+gogo-ui-scene.workspace = true
 gogo-skin.workspace = true
 gogo-skins.workspace = true
-gogo-gui-model.workspace = true
+# `fake`: skin development and screenshots run without an engine (design 25 §1).
+gogo-gui-model = { workspace = true, features = ["fake"] }
 gogo-render-cpu.workspace = true
 gogo-render-gpu.workspace = true
 gogo-contract.workspace = true
 gogo-core.workspace = true
+clap.workspace = true
+miette.workspace = true
+png.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+gogo-gui-testkit.workspace = true
+tempfile.workspace = true

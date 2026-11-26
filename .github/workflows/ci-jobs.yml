@@ -472,8 +472,9 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
-  # scripts/gui-headless.sh (design 24 §5): its self-test, then the window in a
-  # headless sway, with the application's libraries from the dev shell.
+  # scripts/gui-headless.sh (design 24 §5): its self-test, then gogo-gui in a
+  # headless sway, with the application's libraries from the dev shell: hot reload
+  # on the GPU path (lavapipe) and the CPU path, and the fallback without Vulkan.
   gui_headless:
     name: gui-headless
     needs: changes
@@ -493,14 +494,24 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           trap 'sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1' EXIT
           scripts/gui-headless.sh self-test
-      - name: Build the shell's example
-        run: nix develop .#lavapipe -c cargo build -p gogo-ui-shell --example window
-      - name: The shell's window
+      - name: Build gogo-gui
+        run: nix develop .#lavapipe -c cargo build -p gogo-gui
+      - name: Hot reload on the GPU and CPU paths
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           trap 'sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1' EXIT
-          nix develop .#lavapipe -c scripts/gui-headless.sh run --name shell -- \
-            target/debug/examples/window
+          for renderer in gpu cpu; do
+            nix develop .#lavapipe -c scripts/gui-headless.sh reload \
+              --renderer "$renderer" --name "reload-$renderer" -- target/debug/gogo-gui
+            grep -F "renderer=$renderer" target/gui-headless/reload-"$renderer".*/app.log
+          done
+      - name: Fallback without a Vulkan driver
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          trap 'sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1' EXIT
+          nix develop .#lavapipe -c scripts/gui-headless.sh run --no-vulkan \
+            --name fallback -- target/debug/gogo-gui --fixture
+          grep -F "renderer=cpu" target/gui-headless/fallback.*/app.log
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: failure()
         with:

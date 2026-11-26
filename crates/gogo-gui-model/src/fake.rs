@@ -1,5 +1,7 @@
 //! A scripted [`Backend`] that records what it is asked, for tests and for drawing the
 //! app without an engine. It does no I/O. Behind the `fake` feature.
+//!
+//! [`FakeBackend::with_fixture`] also feeds sources from the [`fixture`](crate::fixture).
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -9,6 +11,7 @@ use gogo_contract::{Gates, PlanFacts};
 use crate::backend::{Backend, Run, Subscription};
 use crate::call::Call;
 use crate::error::ErrorView;
+use crate::fixture::Fixture;
 use crate::jobs::{JobControl, JobKind, JobSink, JobStatus, Jobs};
 use crate::plan::{Plan, PlanHandle, PlanReply, PlanStep, Planned, StepKind};
 use crate::prompt::{PromptAnswer, PromptSpec};
@@ -120,6 +123,8 @@ pub struct FakeBackend {
     pub controls: ControlLog,
     /// Every subscription made, with the slot to feed it.
     pub subscriptions: Vec<(SourceKey, Slot)>,
+    /// The data a subscription is fed at once; `None` leaves every slot to the caller.
+    pub fixture: Option<Fixture>,
     serial: u64,
 }
 
@@ -127,6 +132,18 @@ impl FakeBackend {
     /// A fake that plans every action as [`FakePlan::default`].
     pub fn new() -> Self {
         FakeBackend::default()
+    }
+
+    /// A fake that also answers every subscription at once from [`Fixture::new`].
+    /// Sources the fixture lacks stay unset.
+    ///
+    /// The model answers `route`, `queue`, `queue.summary` and `job` itself and never
+    /// subscribes to them, so the fixture's values for those don't reach it.
+    pub fn with_fixture() -> Self {
+        FakeBackend {
+            fixture: Some(Fixture::new()),
+            ..FakeBackend::default()
+        }
     }
 
     /// Script the plan of an action.
@@ -168,6 +185,15 @@ impl FakeBackend {
 
 impl Backend for FakeBackend {
     fn subscribe(&mut self, key: &SourceKey, slot: Slot) -> Subscription {
+        if let Some(fixture) = &self.fixture {
+            let value = match key.args().first() {
+                None => fixture.var(key.name()),
+                Some(arg) => fixture.call(key.name(), arg),
+            };
+            if let Some(value) = value {
+                slot.set(value.clone());
+            }
+        }
         self.subscriptions.push((key.clone(), slot));
         Box::new(())
     }

@@ -25,6 +25,20 @@ pub struct Tolerance {
     pub mean: f64,
 }
 
+/// What the goldens allow: a pixel may differ by up to 2 levels freely, 0.05% of the pixels
+/// by more, none by more than 8.
+///
+/// Measured: the ubuntu (x86_64) and macOS (arm64) runners draw all six goldens identically,
+/// and on x86_64 drawing at the baseline SIMD level instead of the detected one moves no
+/// pixel by more than 1 level. `level` is twice that; `share` and `max` leave a little room
+/// for a runner whose math library rounds differently.
+pub const GOLDEN_TOLERANCE: Tolerance = Tolerance {
+    level: 2,
+    share: 0.0005,
+    max: 8,
+    mean: 0.1,
+};
+
 /// How far two renders of one size are apart under a [`Tolerance`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Diff {

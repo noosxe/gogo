@@ -16,6 +16,7 @@ pkgs.buildEnv {
     pkgs.bash
     pkgs.coreutils
     pkgs.gnugrep
+    pkgs.gnused            # the reload check edits a skin
     pkgs.util-linux        # setpriv --pdeathsig
   ];
   meta = {

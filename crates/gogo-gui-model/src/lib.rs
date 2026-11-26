@@ -11,6 +11,7 @@
 //! - [`jobs`]: the job table, with progress and a control handle per job (§5).
 //! - [`error`]: [`ErrorView`], the one shape every failure takes (§6).
 //! - `fake` (feature `fake`): a scripted backend for tests.
+//! - `fixture` (feature `fake`): fictional data and procedural art for it to serve.
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -19,6 +20,8 @@ pub mod call;
 pub mod error;
 #[cfg(feature = "fake")]
 pub mod fake;
+#[cfg(feature = "fake")]
+pub mod fixture;
 pub mod jobs;
 pub mod model;
 pub mod plan;

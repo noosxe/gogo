@@ -45,10 +45,12 @@ tools, or binaries from the host system — no exceptions.**
   Hyprland quirks, display modes, VRR and audio are a host pass (#179);
   agents put those steps in the PR.
 
-- **Running the desktop GUI** (`gogo-gui`, design 24): never on the host display. Only the
-  headless compositor of `scripts/gui-headless.sh` (Linux; `nix develop .#lavapipe -c
-  scripts/gui-headless.sh run -- <command>`), or `scripts/vm-test.sh` with the GUI's `.app`
-  (macOS). `gogo-gui --render-png` (no window) and `--check-skin` arrive with PR E4.
+- **Running the desktop GUI** (`gogo-gui`, design 24): never on the host display.
+  `gogo-gui --render-png <out>` (no window) and `--check-skin <dir>` are safe anywhere. A
+  window only in the headless compositor of `scripts/gui-headless.sh` (Linux; `nix develop
+  .#lavapipe -c scripts/gui-headless.sh run -- target/debug/gogo-gui --fixture`, or
+  `reload -- target/debug/gogo-gui` for hot reload), or `scripts/vm-test.sh` with the GUI's
+  `.app` (macOS).
   Real GPU, HiDPI, IME, clipboard and screen-reader checks are a host pass by @noosxe;
   agents put the steps in the PR.
 
