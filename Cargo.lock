@@ -1482,7 +1482,9 @@ dependencies = [
  "gogo-gui-model",
  "gogo-render-cpu",
  "gogo-skin",
+ "gogo-ui-layout",
  "gogo-ui-scene",
+ "gogo-ui-text",
  "proptest",
 ]
 
@@ -1562,6 +1564,8 @@ version = "0.1.0"
 dependencies = [
  "gogo-ui-ir",
  "gogo-ui-text",
+ "taffy",
+ "thiserror",
 ]
 
 [[package]]
@@ -3552,6 +3556,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
+name = "slotmap"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bdd58c3c93c3d278ca835519292445cb4b0d4dc59ccfdf7ceadaab3f8aeb4038"
+dependencies = [
+ "version_check",
+]
+
+[[package]]
 name = "smallvec"
 version = "1.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3687,6 +3700,18 @@ checksum = "8e1d1b10ced5ca923a1fcb8d03e96b8d3268065d724548c0211415ff6ac6bac4"
 dependencies = [
  "core-foundation-sys",
  "libc",
+]
+
+[[package]]
+name = "taffy"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cae92eb1b204bfd239b5c463e1bd2c3ce4913d2d3abfb5c64f5cfee9d65e5c68"
+dependencies = [
+ "rustc-hash",
+ "serde",
+ "slotmap",
+ "smallvec",
 ]
 
 [[package]]
