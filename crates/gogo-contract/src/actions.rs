@@ -83,7 +83,8 @@ impl Tier {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum Escalation {
-    /// Destructive when the plan removes DLC or downgrades (`game.update`).
+    /// Destructive when the plan removes DLC or downgrades (`game.update`, and
+    /// `updates.apply_all` for any game in the batch).
     DestructiveIfRemovesDlcOrDowngrades,
     /// Destructive when the plan crosses filesystems: snapshots are deleted (`game.move`).
     DestructiveAcrossFilesystems,
@@ -506,11 +507,12 @@ pub const ACTIONS: &[ActionSpec] = &[
         Confirm,
         Escalation::DestructiveIfRemovesDlcOrDowngrades,
     ),
-    act(
+    esc(
         "updates.apply_all",
         &[o("ids", T::GameIds)],
         PlanThenJobs,
         Confirm,
+        Escalation::DestructiveIfRemovesDlcOrDowngrades,
     ),
     act("game.update_finish", ID, Plan, Confirm),
     act("game.update_undo", ID, Plan, Confirm),
@@ -814,19 +816,21 @@ mod tests {
 
     #[test]
     fn update_is_destructive_when_it_removes_dlc_or_downgrades() {
-        let a = get("game.update");
-        assert_eq!(run(a.decide(&PlanFacts::changes(), &OPEN)).1, Tier::Confirm);
-        for facts in [
-            PlanFacts {
-                removes_dlc: true,
-                ..PlanFacts::changes()
-            },
-            PlanFacts {
-                downgrades: true,
-                ..PlanFacts::changes()
-            },
-        ] {
-            assert_eq!(run(a.decide(&facts, &OPEN)).1, Tier::Destructive);
+        for name in ["game.update", "updates.apply_all"] {
+            let a = get(name);
+            assert_eq!(run(a.decide(&PlanFacts::changes(), &OPEN)).1, Tier::Confirm);
+            for facts in [
+                PlanFacts {
+                    removes_dlc: true,
+                    ..PlanFacts::changes()
+                },
+                PlanFacts {
+                    downgrades: true,
+                    ..PlanFacts::changes()
+                },
+            ] {
+                assert_eq!(run(a.decide(&facts, &OPEN)).1, Tier::Destructive, "{name}");
+            }
         }
     }
 
