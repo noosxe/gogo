@@ -16,6 +16,16 @@ fn skin() -> SkinPackage {
     }
 }
 
+/// A dark binding with the skin itself as the fallback.
+fn binding<'a>(pkg: &'a SkinPackage, scope: &'a FixtureScope, ui: &'a UiState) -> Binding<'a> {
+    Binding {
+        scope,
+        ui,
+        mode: Mode::Dark,
+        default: Some(DefaultSkin { skin: pkg, ui }),
+    }
+}
+
 fn scope_on(route: &str) -> FixtureScope {
     FixtureScope::new().on(route, (route == "game").then_some(GAME_ID))
 }
@@ -34,15 +44,7 @@ fn every_route_the_default_skin_covers_binds_without_falling_back() {
     for route in pkg.routes.keys().filter(|r| *r != "shell") {
         let scope = scope_on(route);
         let ui = UiState::defaults(&pkg.manifest);
-        let b = Binding {
-            scope: &scope,
-            ui: &ui,
-            mode: Mode::Dark,
-            default: Some(DefaultSkin {
-                skin: &pkg,
-                ui: &ui,
-            }),
-        };
+        let b = binding(&pkg, &scope, &ui);
         let bound = match pkg.bind_with_fallback(route, &b) {
             Ok(b) => b,
             Err(e) => panic!("{route}: {e}"),
@@ -59,15 +61,7 @@ fn the_shell_binds_with_each_covered_route_in_its_outlet() {
     for route in pkg.routes.keys().filter(|r| *r != "shell") {
         let scope = scope_on(route);
         let ui = UiState::defaults(&pkg.manifest);
-        let b = Binding {
-            scope: &scope,
-            ui: &ui,
-            mode: Mode::Dark,
-            default: Some(DefaultSkin {
-                skin: &pkg,
-                ui: &ui,
-            }),
-        };
+        let b = binding(&pkg, &scope, &ui);
         let bound = match pkg.bind_with_fallback("shell", &b) {
             Ok(b) => b,
             Err(e) => panic!("shell around {route}: {e}"),
@@ -110,15 +104,7 @@ fn the_game_route_binds_on_every_tab_without_falling_back() {
             gogo_contract::Value::Str(tab.to_owned()),
         )
         .unwrap_or_else(|e| panic!("{tab}: {e}"));
-        let b = Binding {
-            scope: &scope,
-            ui: &ui,
-            mode: Mode::Dark,
-            default: Some(DefaultSkin {
-                skin: &pkg,
-                ui: &ui,
-            }),
-        };
+        let b = binding(&pkg, &scope, &ui);
         let bound = match pkg.bind_with_fallback("game", &b) {
             Ok(b) => b,
             Err(e) => panic!("game tab {tab}: {e}"),
