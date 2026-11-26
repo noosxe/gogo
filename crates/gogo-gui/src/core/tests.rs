@@ -525,11 +525,5 @@ async fn every_route_of_the_default_skin_draws_over_the_engine() {
             }
         }
     }
-    // One known failure, the skin's own (#645): it takes `first.title` of the DLC not yet
-    // installed, which fails when there is none. Drop this with the fix.
-    let (known, others): (Vec<_>, Vec<_>) = failures.into_iter().partition(|f| {
-        f.starts_with("signed out game overview:") && f.ends_with("`.title` on a null value")
-    });
-    assert!(others.is_empty(), "{}", others.join("\n"));
-    assert_eq!(known.len(), 1, "#645 is fixed: remove its exception");
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

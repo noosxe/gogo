@@ -34,8 +34,8 @@ component "game.saves" {
     let s="{game.saves($id)}"
     card title="Cloud saves" {
         row gap=@space.3 {
-            text "{s.state == in_sync ? 'In sync' : 'Needs attention'}" style="tile-title"
-            text "checked {fmt.ago(s.checked_at)}" style="tile-sub"
+            text "{s.state == in_sync ? 'In sync' : (s.state == disabled ? 'Cloud saves off' : (s.state == no_remote_config ? 'No cloud saves for this game' : 'Needs attention'))}" style="tile-title"
+            text "checked {fmt.ago(s.checked_at)}" style="tile-sub" when="{s.checked_at > 0}"
             spacer
             button "Check now" action="saves.check" args="{$id}"
         }

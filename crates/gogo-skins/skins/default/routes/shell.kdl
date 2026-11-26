@@ -29,19 +29,20 @@ route "shell" {
             let q="{queue.summary}"
             column style="mini" id="transfer" when="{q.current}" {
                 row {
-                    text "{q.current.game.title}" weight=700 grow=1
-                    text "{fmt.pct(q.current.fraction)}" style="mini-meta"
+                    text "{q.current.game?.title else q.current.kind}" weight=700 grow=1
+                    text "{fmt.pct(q.current.fraction)}" style="mini-meta" when="{q.current.fraction != null}"
                 }
-                box style="bar" { box style="bar-fill" progress="{q.current.fraction}" }
+                box style="bar" when="{q.current.fraction != null}" { box style="bar-fill" progress="{q.current.fraction}" }
                 row {
                     text "{fmt.rate(q.rate)}" style="mini-meta" grow=1
-                    text "{fmt.eta(q.current.eta)}" style="mini-meta"
+                    text "{fmt.eta(q.current.eta)}" style="mini-meta" when="{q.current.eta != null}"
                 }
                 text "+{q.queued} queued · rate limit {q.rate_limit ? fmt.rate(q.rate_limit) : 'off'}" style="mini-foot"
             }
             row style="account" when="{account.signed_in}" {
                 dot tone="ready" style="dot-ok"
-                text "{account.username}"
+                text "{account.username}" when="{account.username}"
+                text "Signed in" when="{not account.username}"
             }
             button "Sign in" style="nav" action="nav.go" args="sign-in" on="{route.current == 'sign-in'}" when="{not account.signed_in}"
         }

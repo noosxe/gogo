@@ -14,7 +14,7 @@ component "queue-job" params="job" {
                 text "{fmt.pct(job.fraction)}" style="mono-lo" when="{job.fraction != null}"
                 text "{fmt.bytes(job.bytes)}" style="mono-lo"
                 text "of {fmt.bytes(job.total)}" style="mono-lo" when="{job.total}"
-                text "{fmt.rate(job.rate)} · {fmt.eta(job.eta)}" style="mono-lo" when="{job.state == running}"
+                text "{fmt.rate(job.rate)}{job.eta != null ? ' · ' : ''}{fmt.eta(job.eta)}" style="mono-lo" when="{job.state == running}"
             }
         }
         column gap=2 when="{job.steps}" {

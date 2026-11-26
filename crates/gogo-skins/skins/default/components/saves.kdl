@@ -16,7 +16,7 @@ component "game-cloud-saves" params="entry" {
         }
         text "To pull {s.counts.pull} · to push {s.counts.push} · to delete {s.counts.delete} · conflicts {s.counts.conflict}" style="mono-lo"
         row gap=@space.3 {
-            text "Checked {fmt.ago(s.checked_at)}" style="tile-sub"
+            text "Checked {fmt.ago(s.checked_at)}" style="tile-sub" when="{s.checked_at > 0}"
             text "Last sync {fmt.ago(s.last_sync)}" style="tile-sub" when="{s.last_sync != null}"
         }
         data-table label="Save files of {entry.title}" rows="{s.files}" when="{s.files}" {

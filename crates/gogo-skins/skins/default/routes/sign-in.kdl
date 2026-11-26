@@ -15,7 +15,7 @@ route "sign-in" {
 
     column style="panel" w=520 gap=@space.3 id="signed-in" when="{who.signed_in}" {
         text "Signed in" style="h1"
-        text "{who.username}" style="meta"
+        text "{who.username}" style="meta" when="{who.username}"
         button "Go to library" style="primary" action="nav.go" args="library"
         row gap=@space.3 {
             button "Sign out" action="account.sign_out" args="false"
