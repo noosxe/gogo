@@ -159,6 +159,9 @@ impl Laid {
     /// The topmost node at a point in logical px: the last in paint order whose visible
     /// area holds it. `None` when nothing does. A scroll container hides what its
     /// descendants scroll out of its box, so a point outside the box never hits them.
+    ///
+    /// This is a linear scan over every node, last to first: call it once per pointer
+    /// event, never once per node.
     pub fn hit(&self, x: f64, y: f64) -> Option<NodeId> {
         self.order
             .iter()

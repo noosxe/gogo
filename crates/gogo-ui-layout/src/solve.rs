@@ -8,8 +8,10 @@ use taffy::{Layout as TaffyLayout, NodeId as TaffyId};
 use crate::laid::{Laid, Placed, Rect, Scroll};
 use crate::style::style;
 
-/// The window's size in logical px.
+/// The window's size in logical px. Build it with [`Viewport::new`]: more fields (a safe
+/// area, say) may follow.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct Viewport {
     /// Width in logical px.
     pub width: f32,
@@ -39,6 +41,10 @@ pub enum LayoutError {
         /// What is not finite, in words.
         field: &'static str,
     },
+    /// The tree is nested deeper than [`MAX_DEPTH`]. taffy recurses once per level, so a
+    /// deeper tree could overflow the stack.
+    #[error("the tree is nested deeper than {MAX_DEPTH} levels")]
+    TooDeep,
     /// taffy refused the tree or the pass; its message.
     #[error("the layout solver failed: {0}")]
     Solver(String),
@@ -58,6 +64,11 @@ const EVERYWHERE: Rect = Rect::new(
     f64::INFINITY,
 );
 
+/// The deepest nesting `layout` accepts (the root is level 1). The skin loader allows far
+/// less (design 27 §8); this bounds hand-built trees, where about a thousand levels
+/// overflow the stack inside taffy.
+pub const MAX_DEPTH: usize = 128;
+
 /// Slack added to a text node's final width before it is broken again, so a line that
 /// measured exactly this wide never wraps on rounding.
 const SLACK: f32 = 0.5;
@@ -67,7 +78,7 @@ const SLACK: f32 = 0.5;
 /// scroll containers it names.
 ///
 /// # Errors
-/// [`LayoutError::BadViewport`], [`LayoutError::NotFinite`] for a NaN or infinite length,
+/// [`LayoutError::TooDeep`] past [`MAX_DEPTH`] levels, [`LayoutError::BadViewport`], [`LayoutError::NotFinite`] for a NaN or infinite length,
 /// or [`LayoutError::Solver`] if taffy fails.
 pub fn layout(
     tree: &Tree,
@@ -81,6 +92,14 @@ pub fn layout(
     }
     let n = tree.len();
     let ids: Vec<NodeId> = nodes_by_index(tree);
+    let mut depth = vec![0usize; n];
+    for &id in &ids {
+        let d = tree.parent(id).map_or(1, |p| depth[p.index()] + 1);
+        if d > MAX_DEPTH {
+            return Err(LayoutError::TooDeep);
+        }
+        depth[id.index()] = d;
+    }
 
     // Shape the text leaves once; taffy's measure breaks them at the widths it asks for.
     let mut texts: Vec<Option<TextLayout>> = (0..n).map(|_| None).collect();

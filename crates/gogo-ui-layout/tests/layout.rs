@@ -534,11 +534,11 @@ fn layout_is_deterministic_and_the_font_set_is_reusable() {
 #[test]
 fn a_big_flat_tree_lays_out() {
     let mut t = Tree::new("root", boxed(LayoutStyle::default()));
-    for i in 0..5000 {
+    for i in 0..20_000 {
         add_root(&mut t, &format!("n{i}"), boxed(px(10.0, 2.0)));
     }
     let l = lay(&t, 100.0, 100.0);
-    assert_eq!(l.order().len(), 5001);
+    assert_eq!(l.order().len(), 20_001);
 }
 
 #[test]
@@ -604,4 +604,57 @@ fn huge_and_zero_sizes_do_not_panic() {
     assert_eq!(l.size(), (0.0, 0.0));
     let l = lay(&t, 100.0, 100.0);
     assert_eq!(l.order().len(), 4);
+}
+
+#[test]
+fn nesting_up_to_the_cap_lays_out_and_deeper_is_an_error() {
+    let build = |depth: usize| {
+        let mut t = Tree::new("root", Node::container());
+        let mut parent = t.root();
+        for i in 1..depth {
+            parent = add(&mut t, parent, &format!("d{i}"), Node::container());
+        }
+        add(&mut t, parent, "leaf", text("deep", 12.0));
+        t
+    };
+    // The leaf is one level below the last container.
+    let ok = build(gogo_ui_layout::MAX_DEPTH - 1);
+    let l = layout(
+        &ok,
+        &mut FontSet::bundled(),
+        Viewport::new(100.0, 100.0),
+        &Scroll::none(),
+    )
+    .expect("at the cap");
+    assert_eq!(l.order().len(), gogo_ui_layout::MAX_DEPTH);
+    let deep = build(gogo_ui_layout::MAX_DEPTH + 1);
+    let e = layout(
+        &deep,
+        &mut FontSet::bundled(),
+        Viewport::new(100.0, 100.0),
+        &Scroll::none(),
+    );
+    assert_eq!(e.err(), Some(LayoutError::TooDeep));
+}
+
+#[test]
+fn many_text_leaves_in_nested_rows_lay_out() {
+    let mut t = Tree::new("root", Node::container());
+    for i in 0..300 {
+        let row = add_root(&mut t, &format!("row{i}"), boxed(LayoutStyle::row()));
+        let inner = add(
+            &mut t,
+            row,
+            &format!("in{i}"),
+            boxed(LayoutStyle::default()),
+        );
+        add(
+            &mut t,
+            inner,
+            &format!("t{i}"),
+            text(&format!("Game {i}"), 13.0),
+        );
+    }
+    let l = lay(&t, 400.0, 600.0);
+    assert_eq!(l.order().len(), 901);
 }
