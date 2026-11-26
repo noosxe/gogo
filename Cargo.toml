@@ -128,8 +128,10 @@ gog-warp = { git = "https://github.com/playtron-os/gog-warp", rev = "26c9e671589
 # here so each GUI PR only references them; cargo resolves a workspace
 # dependency into Cargo.lock only once a member uses it.
 taffy = "=0.16.0"
-parley = "=0.13.0"
-fontique = "=0.13.0"
+# Text: no system fonts by default (decision 10); gogo-ui-text's `system-fonts`
+# feature turns them on as a fallback.
+parley = { version = "=0.13.0", default-features = false, features = ["std"] }
+fontique = { version = "=0.13.0", default-features = false, features = ["std"] }
 kurbo = "=0.13.1"
 peniko = "=0.6.1"
 vello_cpu = "=0.4.0"

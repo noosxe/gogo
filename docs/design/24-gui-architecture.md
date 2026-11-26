@@ -78,7 +78,9 @@ flowchart LR
 10. **Fonts are bundled.** Noto Sans (variable, so `wdth` works) and JetBrains Mono, both
     SIL OFL 1.1, ship with their licence texts. System fonts are a fallback only, for
     glyphs the bundled set lacks. Rendering and golden tests are then identical across
-    machines, at about 1 MB.
+    machines, at about 1.9 MB (Noto Sans 1.58 MB, JetBrains Mono 0.29 MB: one variable
+    file each, from the pinned nixpkgs). Noto Sans covers Latin, Greek and Cyrillic; the
+    system fallback (`gogo-ui-text`'s `system-fonts` feature, never on in tests) covers the rest.
 11. **Golden PNGs are committed and compared with a tolerance on vello_cpu** (08 §7). Pixels
     catch effect and font regressions that structural snapshots miss.
 12. **GUI CI is path-filtered** (§7), with a lavapipe job for the GPU renderer.
@@ -93,7 +95,7 @@ flowchart LR
 | `gogo-contract` | The skin contract (design 26) as typed data, no I/O | `ContractVersion`, `Value` and the contract types, source and action catalogues (`ActionSpec {params, kind, tier}`), routes and sections, app widgets with parts/variants/depth, semantic tokens, invariant ids | — |
 | `gogo-skin` | The skin format (design 27): load, validate, bind | `SkinPackage::{load, from_files} -> Result<SkinPackage, Report>`, `Report` of `Finding`s (miette `Diagnostic`s with a stable `Code` and a `Level`), `Manifest`, the `ast` with each node's `Resolved` contract specs, `expr::{parse, eval, Scope}` (data lookup); `SkinPackage::bind(route, &Binding) -> Result<Bound, BindError>` and `bind_with_fallback`, with `Binding {scope: &dyn Scope, ui: &UiState, mode, default}`, `Bound {tree, actions: ActionTable, widgets, fallbacks}`, `UiState` (the values of the skin's own `ui` variables) | kdl, miette, thiserror |
 | `gogo-ui-ir` | The resolved tree: the boundary between "a skin" and "an engine" | `Tree` (an arena keyed by stable path ids; `NodeId`), `Node`, `Kind::{Box, Text, Image, Icon}`, `LayoutStyle`, `Paint`, `Effect`, `TextStyle`, `Role`/`A11y`, `ActionRef(u32)`, `DrawnBy::{Skin, App(AppPart {WidgetId, PartId})}` (all ids opaque to the engine) | — (optional `serde`) |
-| `gogo-ui-text` | Fonts, shaping, line breaking, the edit buffer | `FontSet`, `TextLayout`, `GlyphRun`, `EditBuffer` (over parley's `PlainEditor`) | parley, fontique |
+| `gogo-ui-text` | Fonts, shaping, line breaking, the edit buffer | `FontSet::{bundled, with_system_fallback}`, `FontSet::layout -> TextLayout` (`break_lines`, `ellipsize`, `size`, `hit`, `runs`), `GlyphRun`, and later `EditBuffer` (over parley's `PlainEditor`, #544) | parley, fontique |
 | `gogo-ui-layout` | IR → taffy → positioned boxes | `layout(&Tree, &mut FontSet, viewport, scale) -> Laid`, `Laid::{rect, hit}` | taffy |
 | `gogo-ui-scene` | The display list and the `Renderer` trait | `DisplayList`, `Op`, `build(&Tree, &Laid)`, `ImageId`, `trait Renderer`, icon paths | kurbo, peniko |
 | `gogo-render-cpu` | vello_cpu renderer | `CpuRenderer: Renderer`, `render_to_rgba` | vello_cpu |
@@ -182,7 +184,7 @@ them under "GUI".
 | Layer | Crate | Version | Note |
 |---|---|---|---|
 | Layout | taffy | 0.16.0 | Flex, grid, block, absolute insets and measure callbacks. Pitfalls: since 0.15 insets are ignored unless `position` is set explicitly; `add_child` doesn't detach (it panics later); `remove` is quadratic |
-| Text | parley + fontique | 0.13.0 | HarfRust shaping, skrifa fonts, variable axes, OS fallback. `PlainEditor` gives selection, motion and IME composition; undo, clipboard and AccessKit wiring are ours |
+| Text | parley + fontique | 0.13.0 | HarfRust shaping, skrifa fonts, variable axes, OS fallback (off in `gogo-ui-text`'s default features; its `system-fonts` feature turns it on). `PlainEditor` gives selection, motion and IME composition; undo, clipboard and AccessKit wiring are ours |
 | GPU render | vello_gpu (+ vello_common) on wgpu | 0.4.0 / 30.0.2 | No compute shaders; native blur and drop-shadow filters. Beta caveats are in design 28 §5 |
 | CPU render | vello_cpu | 0.4.0 | Single-threaded: filters panic in its multithreading mode today |
 | Windowing | winit | 0.30.13 | Move to 0.31 once accesskit_winit supports it |

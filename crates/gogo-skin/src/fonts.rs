@@ -1,7 +1,7 @@
 //! The font families a skin may name (design 27 §3, design 24 decision 10).
 //!
 //! The app bundles two families and names them as their font files name themselves:
-//! Noto Sans, a variable font with a `wdth` axis, and JetBrains Mono, which is static.
+//! Noto Sans, a variable font with a `wdth` axis, and JetBrains Mono, a variable font with a `wght` axis only (no `wdth`).
 //! A `font-family` must be one of these.
 //!
 //! Skin-shipped OTF/TTF files are accepted as assets, but reading the family name out of
