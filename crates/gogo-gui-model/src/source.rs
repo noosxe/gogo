@@ -41,7 +41,7 @@ impl Signal {
 
     /// Mark that something changed.
     pub fn raise(&self) {
-        if !self.dirty.swap(true, Ordering::SeqCst) {
+        if !self.dirty.swap(true, Ordering::AcqRel) {
             (self.wake)();
         }
     }
@@ -49,7 +49,7 @@ impl Signal {
     /// Clear the flag and say whether it was set. The reader clears **before** it reads,
     /// so a write that lands during the read raises it again and nothing is lost.
     pub fn take(&self) -> bool {
-        self.dirty.swap(false, Ordering::SeqCst)
+        self.dirty.swap(false, Ordering::AcqRel)
     }
 }
 
@@ -61,7 +61,7 @@ pub struct SourceKey {
 }
 
 impl SourceKey {
-    /// `None` when the contract has no such source, the arguments don't fit its
+    /// The key of source `name` with `args`. `None` when the contract has no such source, the arguments don't fit its
     /// parameters, or its data only reaches a skin through an app widget.
     pub fn new(name: &str, args: &[&str]) -> Option<Self> {
         let spec: &'static SourceSpec = sources::source(name)?;
@@ -75,10 +75,12 @@ impl SourceKey {
         })
     }
 
+    /// The source's name, as the contract spells it.
     pub fn name(&self) -> &'static str {
         self.name
     }
 
+    /// The arguments, in the order of the source's parameters.
     pub fn args(&self) -> &[String] {
         &self.args
     }
@@ -88,6 +90,8 @@ impl SourceKey {
 struct Cell {
     generation: u64,
     value: Option<Value>,
+    /// The store forgot this slot: nobody will read it.
+    closed: bool,
 }
 
 /// The writer's end of one source. Cheap to clone and `Send`.
@@ -98,10 +102,13 @@ pub struct Slot {
 }
 
 impl Slot {
-    /// Replace the value.
+    /// Replace the value. On a closed slot this does nothing and wakes nobody.
     pub fn set(&self, value: Value) {
         {
             let mut cell = lock(&self.cell);
+            if cell.closed {
+                return;
+            }
             cell.generation += 1;
             cell.value = Some(value);
         }
@@ -125,6 +132,7 @@ pub struct SourceStore {
 }
 
 impl SourceStore {
+    /// An empty store whose slots raise `signal`.
     pub fn new(signal: Arc<Signal>) -> Self {
         SourceStore {
             signal,
@@ -145,13 +153,18 @@ impl SourceStore {
         }
     }
 
+    /// Whether `key` has a slot.
     pub fn is_open(&self, key: &SourceKey) -> bool {
         self.entries.contains_key(key)
     }
 
     /// Forget `key`. A writer that still holds its slot writes into nothing.
     pub fn close(&mut self, key: &SourceKey) {
-        self.entries.remove(key);
+        if let Some(entry) = self.entries.remove(key) {
+            let mut cell = lock(&entry.cell);
+            cell.closed = true;
+            cell.value = None;
+        }
     }
 
     /// Take the newest value of every slot written since the last call, and name them.

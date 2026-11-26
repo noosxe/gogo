@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use gogo_contract::{Value, shapes};
 use gogo_gui_model::{
     ErrorView, FileProgress, JobControl, JobId, JobKind, JobSink, JobState, JobStatus, JobTable,
-    Signal, Step, StepState,
+    MAX_ENDED, Signal, Step, StepState,
 };
 
 type Calls = Arc<Mutex<Vec<(&'static str, &'static str)>>>;
@@ -133,6 +133,7 @@ fn retry_and_resume_start_a_new_run_and_shut_out_the_old_one() {
     let mut rig = Rig::new();
     let (id, old) = rig.add("a", true);
     old.report(status(JobState::Failed));
+    rig.table.drain();
     assert!(rig.table.retry(&id));
     rig.table.drain();
     assert_eq!(rig.table.status(&id).unwrap().state, JobState::Queued);
@@ -140,6 +141,7 @@ fn retry_and_resume_start_a_new_run_and_shut_out_the_old_one() {
 
     let new = rig.restarted.lock().unwrap()[0].clone();
     assert!(new.report(status(JobState::Cancelled)));
+    rig.table.drain();
     assert!(rig.table.resume(&id));
     assert!(!new.report(status(JobState::Done)));
 }
@@ -231,4 +233,83 @@ fn job_values_have_the_contract_shape() {
     assert_eq!(s["active"], Value::Num(1.0));
     assert_eq!(s["rate"], Value::Num(10.0));
     assert_eq!(s["current"], job);
+}
+
+#[test]
+fn ending_again_before_the_next_drain_is_still_reported() {
+    let mut rig = Rig::new();
+    let (id, sink) = rig.add("a", true);
+    sink.report(status(JobState::Failed));
+    assert_eq!(rig.table.drain().len(), 1);
+    assert!(rig.table.retry(&id));
+    let again = rig.restarted.lock().unwrap()[0].clone();
+    again.report(status(JobState::Failed));
+    assert!(!rig.table.retry(&id), "that failure is unseen");
+    let moved = rig.table.drain();
+    assert_eq!(moved.len(), 1, "the second failure is not lost");
+    assert_eq!(moved[0].to, JobState::Failed);
+}
+
+/// A restart can't overwrite an end nobody has been told about (S9).
+#[test]
+fn a_job_cannot_be_restarted_before_its_end_is_drained() {
+    for (end, restart) in [
+        (
+            JobState::Failed,
+            JobTable::retry as fn(&mut JobTable, &JobId) -> bool,
+        ),
+        (JobState::Cancelled, JobTable::resume),
+    ] {
+        let mut rig = Rig::new();
+        let (id, sink) = rig.add("a", true);
+        sink.report(status(JobState::Running));
+        rig.table.drain();
+        sink.report(status(end));
+        assert!(!restart(&mut rig.table, &id), "{end:?}");
+        assert!(rig.calls().is_empty(), "{end:?}");
+        let moved = rig.table.drain();
+        assert_eq!(moved[0].to, end);
+        assert!(restart(&mut rig.table, &id), "{end:?}");
+    }
+}
+
+#[test]
+fn a_job_added_already_failed_is_reported() {
+    let mut rig = Rig::new();
+    let calls = Arc::clone(&rig.calls);
+    let restarted = Arc::clone(&rig.restarted);
+    rig.table.jobs(true).add(
+        status(JobState::Failed),
+        Box::new(Control {
+            name: "a",
+            calls,
+            restarted,
+        }),
+    );
+    let moved = rig.table.drain();
+    assert_eq!(moved.len(), 1);
+    assert_eq!(moved[0].to, JobState::Failed);
+}
+
+#[test]
+fn only_the_newest_ended_jobs_are_kept() {
+    let mut rig = Rig::new();
+    let (live, running) = rig.add("live", true);
+    running.report(status(JobState::Running));
+    let ids: Vec<JobId> = (0..MAX_ENDED + 3)
+        .map(|_| {
+            let (id, sink) = rig.add("a", true);
+            sink.report(status(JobState::Done));
+            id
+        })
+        .collect();
+    assert_eq!(
+        rig.table.drain().len(),
+        MAX_ENDED + 4,
+        "each is reported first"
+    );
+    assert_eq!(rig.table.ids().count(), MAX_ENDED + 1);
+    assert!(rig.table.contains(&live), "a live job is never dropped");
+    assert!(!rig.table.contains(&ids[2]));
+    assert!(rig.table.contains(&ids[3]));
 }
