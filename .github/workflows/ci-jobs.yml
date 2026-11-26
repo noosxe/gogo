@@ -419,6 +419,15 @@ jobs:
         run: |
           read -ra gui <<< "$GUI_CRATES"
           cargo nextest run "${gui[@]/#/--package=}" --all-features --no-tests=pass
+      # What a golden test drew, what it expected and where they differ
+      # (design 08 §7).
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: golden-${{ matrix.os }}
+          path: target/tmp/golden/
+          retention-days: 14
+          if-no-files-found: ignore
 
   ci-result:
     name: CI result

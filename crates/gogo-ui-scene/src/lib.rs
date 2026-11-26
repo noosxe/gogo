@@ -50,6 +50,8 @@
 #![warn(missing_docs)]
 
 mod build;
+mod cache;
+mod geometry;
 pub mod icons;
 mod image;
 mod list;
@@ -57,6 +59,11 @@ mod noise;
 mod render;
 
 pub use build::{SceneState, build};
+pub use cache::{DEFAULT_IMAGE_BUDGET, ImageCache};
+pub use geometry::{blur_radius, filter_sigma, image_placement};
+// What the ops are made of, so a renderer needs this crate only (design 24 §2.1 rule 3).
+pub use gogo_ui_ir::Fit;
+pub use gogo_ui_text::{FontData, Glyph, GlyphRun};
 pub use image::{Image, ImageId, ImageKey, ImageStore, MemoryStore};
 pub use list::{Brush, DisplayList, Op, OpSummary, Shape};
 pub use noise::{NOISE_SIZE, noise_tile};

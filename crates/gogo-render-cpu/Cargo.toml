@@ -8,3 +8,8 @@ license.workspace = true
 
 [dependencies]
 gogo-ui-scene.workspace = true
+thiserror.workspace = true
+vello_cpu.workspace = true
+
+[dev-dependencies]
+gogo-gui-testkit.workspace = true
