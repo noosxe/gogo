@@ -334,3 +334,27 @@ fn the_font_set_is_reusable_across_layouts() {
     let b = fonts.layout("Play", &style(14.0)).width();
     assert_eq!(a, b);
 }
+
+#[test]
+fn truncated_text_with_trailing_spaces_measures_only_the_kept_lines() {
+    let st = TextStyle {
+        wrap: true,
+        max_lines: 2,
+        ..style(14.0)
+    };
+    let text = "alpha beta gamma delta   epsilon zeta   eta theta   iota kappa   ";
+    let mut fonts = FontSet::bundled();
+    let mut t = fonts.layout(text, &st);
+    t.break_lines(Some(90.0));
+    assert!(t.is_truncated());
+    assert_eq!(t.line_count(), 2);
+    let lines = t.lines();
+    // The size is that of the two kept lines, not of the whole text.
+    let widest = lines.iter().map(|l| l.width).fold(0.0, f32::max);
+    assert!((t.width() - widest).abs() < 0.01, "{} {widest}", t.width());
+    assert!((t.height() - lines[1].bottom).abs() < 0.01);
+    assert!(t.width() <= 90.0 + 0.01);
+    let mut free = fonts.layout(text, &TextStyle { max_lines: 0, ..st });
+    free.break_lines(Some(90.0));
+    assert!(t.height() < free.height());
+}
