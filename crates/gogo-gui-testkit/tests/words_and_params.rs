@@ -3,7 +3,7 @@
 
 use gogo_gui_testkit::FixtureScope;
 use gogo_skin::expr::{CallError, Scope};
-use gogo_skin::ir::Tree;
+use gogo_skin::ir::{Kind, Tree};
 use gogo_skin::{Binding, DefaultSkin, Mode, SkinPackage, UiState, Value};
 
 /// The route names the Default shell compares with that are also sources.
@@ -106,7 +106,7 @@ fn the_nav_marks_the_current_route_when_the_sources_of_those_names_are_answered(
 }
 
 #[test]
-fn an_absent_optional_route_parameter_is_null_and_others_still_fail() {
+fn an_absent_optional_route_parameter_is_null() {
     let with = |expr: &'static str| {
         load(move |path, text| match path {
             "routes/game.kdl" => {
@@ -123,9 +123,73 @@ fn an_absent_optional_route_parameter_is_null_and_others_still_fail() {
             .filter_map(|id| tree.get(id))
             .any(|n| format!("{:?}", n.kind).contains("no section")),
     );
-    // A name the route doesn't declare, and a required one, are still errors.
-    let err = bind(&with("{$nope else 'x'}"), "game", &scope).expect_err("unknown");
-    assert!(err.contains("nope"), "{err}");
-    let err = bind(&with("x"), "game", &FixtureScope::new().on("queue", None)).expect_err("no id");
-    assert!(err.contains("id"), "{err}");
+}
+
+/// The Default skin with its `game` route's file replaced by `source`.
+fn with_game_route(source: &'static str) -> SkinPackage {
+    load(move |path, text| match path {
+        "routes/game.kdl" => source.to_owned(),
+        _ => text,
+    })
+}
+
+#[test]
+fn an_undeclared_or_missing_required_route_parameter_still_fails() {
+    // Nothing but the expression reads a parameter, so the error is its own.
+    let pkg = with_game_route("route \"game\" {\n    text \"{$nope else 'x'}\"\n}\n");
+    let err = bind(&pkg, "game", &FixtureScope::new()).expect_err("unknown");
+    assert_eq!(
+        err,
+        "route `game` (routes/game.kdl:2:10): unknown route parameter `$nope`"
+    );
+    // `id` is required on `game`.
+    let pkg = with_game_route("route \"game\" {\n    text \"{$id}\"\n}\n");
+    let scope = FixtureScope::new().on("game", None);
+    let err = bind(&pkg, "game", &scope).expect_err("no id");
+    assert_eq!(
+        err,
+        "route `game` (routes/game.kdl:2:10): unknown route parameter `$id`"
+    );
+}
+
+#[test]
+fn a_null_optional_parameter_cannot_reach_a_required_action_argument() {
+    let pkg = with_game_route(
+        "route \"game\" {\n    button \"Verify\" action=\"game.verify\" args=\"{$section}\"\n}\n",
+    );
+    let err = bind(&pkg, "game", &FixtureScope::new()).expect_err("null id");
+    assert!(
+        err.contains("`id` of `game.verify` is null here, and the action needs it"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_bound_variable_beats_the_enum_word_of_the_same_name() {
+    // `route.current` is `game`. As words, `library` and `queue` would not equal it; the
+    // variables of those names hold `game`.
+    let pkg = load(|path, text| match path {
+        "routes/game.kdl" => "route \"game\" {\n    \
+             column {\n        \
+             let library=\"game\"\n        \
+             text \"{route.current == library ? 'let wins' : 'word'}\"\n    \
+             }\n    \
+             use \"probe\" queue=\"game\"\n}\n"
+            .to_owned(),
+        "components/game.kdl" => format!(
+            "{text}\ncomponent \"probe\" params=\"queue\" {{\n    \
+             text \"{{route.current == queue ? 'param wins' : 'word'}}\"\n}}\n"
+        ),
+        _ => text,
+    });
+    let tree = bind(&pkg, "game", &FixtureScope::new()).expect("binds");
+    let texts: Vec<String> = tree
+        .iter()
+        .filter_map(|id| tree.get(id))
+        .filter_map(|n| match &n.kind {
+            Kind::Text { text, .. } => Some(text.to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, ["let wins", "param wins"]);
 }
