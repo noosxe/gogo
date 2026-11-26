@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
@@ -176,6 +176,17 @@ fn make_output<A: ShellApp>(
     )
 }
 
+/// Tells the application about a frame only when it is on its way to the screen. Returns
+/// whether it wants another.
+fn report_shown(
+    app: &mut impl ShellApp,
+    drawn: &Result<Presented, RenderError>,
+    at: Duration,
+    renderer: &'static str,
+) -> bool {
+    matches!(drawn, Ok(Presented::Shown)) && app.presented(at, renderer)
+}
+
 impl<A: ShellApp> Runner<A> {
     fn stop(&mut self, event_loop: &ActiveEventLoop, error: ShellError) {
         self.error = Some(error);
@@ -254,15 +265,18 @@ impl<A: ShellApp> Runner<A> {
             ),
         };
 
+        let again = report_shown(&mut self.app, &drawn, self.started.elapsed(), name);
         match drawn {
             Ok(Presented::Shown) => {
                 open.remade = false;
                 open.cpu_retried = false;
                 open.images_stale = false;
-                self.app.presented(self.started.elapsed(), name);
                 let app = &mut self.app;
                 open.accessibility
                     .update_if_active(|| app.accessibility_tree());
+                if again {
+                    open.window.request_redraw();
+                }
             }
             Ok(Presented::Skipped) => {}
             Err(e) if matches!(output, Output::Cpu(_)) => {
@@ -364,5 +378,74 @@ impl<A: ShellApp> ApplicationHandler<UserEvent> for Runner<A> {
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.watch = None;
         self.open = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gogo_ui_scene::{DisplayList, MemoryStore};
+
+    use super::*;
+    use crate::{Frame, PixelRenderer};
+
+    struct Counting {
+        list: DisplayList,
+        images: MemoryStore,
+        presented: usize,
+    }
+
+    impl ShellApp for Counting {
+        fn window(&self) -> WindowOptions {
+            WindowOptions {
+                title: String::new(),
+                app_id: String::new(),
+                size: (1.0, 1.0),
+                min_size: None,
+            }
+        }
+
+        fn frame(&mut self, _width: f32, _height: f32, _scale: f64) -> Frame<'_> {
+            Frame {
+                list: &self.list,
+                images: &self.images,
+                images_changed: false,
+            }
+        }
+
+        fn gpu(
+            &mut self,
+            _target: WindowTarget,
+            _width: u32,
+            _height: u32,
+        ) -> Result<Box<dyn WindowRenderer>, RenderError> {
+            Err("none".into())
+        }
+
+        fn cpu(&mut self) -> Box<dyn PixelRenderer> {
+            unreachable!("no window is opened")
+        }
+
+        fn presented(&mut self, _at: Duration, _renderer: &'static str) -> bool {
+            self.presented += 1;
+            true
+        }
+    }
+
+    #[test]
+    fn only_a_shown_frame_is_presented() {
+        let mut app = Counting {
+            list: DisplayList::blank(1.0, 1.0),
+            images: MemoryStore::new(),
+            presented: 0,
+        };
+        let skipped = Ok(Presented::Skipped);
+        let failed = Err(RenderError::from("lost"));
+        for drawn in [&skipped, &failed] {
+            assert!(!report_shown(&mut app, drawn, Duration::ZERO, "cpu"));
+        }
+        assert_eq!(app.presented, 0);
+        let shown = Ok(Presented::Shown);
+        assert!(report_shown(&mut app, &shown, Duration::ZERO, "cpu"));
+        assert_eq!(app.presented, 1);
     }
 }

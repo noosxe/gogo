@@ -235,13 +235,16 @@ pub trait ShellApp {
         false
     }
 
-    /// A frame drawn by `renderer` was presented at `at`.
-    fn presented(&mut self, at: Duration, renderer: &'static str) {
+    /// The frame [`ShellApp::frame`] last returned was drawn by `renderer` and is on its way
+    /// to the screen, at `at`. Not called for a frame that was skipped or failed. Returns
+    /// whether to draw again.
+    fn presented(&mut self, at: Duration, renderer: &'static str) -> bool {
         let _ = (at, renderer);
+        false
     }
 
-    /// The user did something, at `at`. The frame on screen is the last one
-    /// [`ShellApp::frame`] returned. Returns whether to draw again.
+    /// The user did something, at `at`, to the last frame [`ShellApp::presented`] was told
+    /// of. Returns whether to draw again.
     fn input(&mut self, input: Input, at: Duration) -> bool {
         let _ = (input, at);
         false
