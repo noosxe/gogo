@@ -371,7 +371,7 @@ semantic tokens (§6.1). They come in three **depths**:
 | `log-view` | B | parts `frame, line, line.warn, line.error, timestamp` | Virtualised, scrubbed text; skins never get log lines as data |
 | `error` | B | parts `frame, title, message, hint, actions` | The class word is always shown |
 | `toast` | B | parts `frame, icon, title, message, action, dismiss`; variant `corner: bottom-right\|bottom-left\|top-right\|top-left` | Start, finish and failure only. Always an overlay on top of the page, never inline; the corner defaults to `bottom-right` |
-| `palette` | B | parts `frame, field, item, item.key-hint, group` | Ctrl K always opens it (S19) |
+| `palette` | B | parts `frame, field, item, item.key-hint, group` | Ctrl K (Cmd K on macOS) always opens it (S19) |
 | `focus-ring` | A (a skin may draw its own) | — | If a skin's focus style fails S13, the app's ring is drawn on top |
 | `step-list`, `progress`, `chunk-bar`, `game-card`, `tabs`, `status-badge`, `meter` | **C** | — | Stock components in the default skin |
 
@@ -509,9 +509,11 @@ Where each is enforced is in design 25 §4.
   walker; that is a property of the implementation, not something this invariant tests.
 - **S13. Keyboard reachable.** Every element with an action is focusable. **The focus
   order is the depth-first order of the bound tree** (document order), which for rows and
-  columns is reading order; app widgets come after the skin's tree, modal ones trap focus
-  until closed. The focus indicator is ≥ 2 px and ≥ 3:1, or the app's ring is drawn. Tests
-  compare Tab order with the tree order and check every actionable node is in it.
+  columns is reading order. An app widget placed inline stays where the skin put it;
+  dialogs and overlays come after the page, and modal ones trap focus until closed. The
+  focus indicator is ≥ 2 px and ≥ 3:1, or the app's ring is drawn (the app's ring is not
+  built yet, #600). Tests compare Tab order with the tree order and check every actionable
+  node is in it.
 - **S14. Named for screen readers.** Every element with an action has an accessible name:
   its text, or an explicit `label`. The validator rejects one without.
 - **S15. Reduced motion wins.** With reduced motion on, transforms and loops are removed,
@@ -525,8 +527,8 @@ Where each is enforced is in design 25 §4.
 - **S18. Status never by colour alone.** `status-badge` and every stock component show the
   status word or mark. A skin's own status display must bind `status.word` somewhere
   visible or in its accessible name (a validator warning, not an error).
-- **S19. Global keys are the app's.** A skin can't rebind or swallow Ctrl K (palette), Esc
-  (back / cancel) or the plan card's Enter.
+- **S19. Global keys are the app's.** A skin can't rebind or swallow Ctrl K (palette; Cmd K
+  on macOS), Esc (back / cancel) or the plan card's Enter.
 - **S20. Skins don't run code.** The format has:
   - no loops beyond bounded `each`;
   - no assignment except `ui.set` from input;
