@@ -19,7 +19,7 @@ fn skin() -> SkinPackage {
 /// The routes of contract 1.0 the Default skin has no route file for yet. It is the
 /// fallback for every route (design 26 §8), so this list only shrinks: a route that
 /// becomes covered must be removed from it, and every route is either covered or listed.
-/// Tracking issue: #TBD.
+/// Tracking issue: #576.
 const NOT_YET_COVERED: &[&str] = &[
     "sign-in", "library", "queue", "updates", "saves", "apps", "runtimes", "doctor", "settings",
     "about",
