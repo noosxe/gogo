@@ -23,6 +23,8 @@ use super::art::ArtStore;
 use super::browser::Browser;
 use super::local::{Built, Local, Machine};
 use super::{CoreBackend, Engine, Parts};
+use crate::data::Data;
+use crate::page::{DrawError, Page};
 
 pub(crate) const ACCESS: &str = "FAKE-ACCESS-5b1f0c9d2e";
 
@@ -446,4 +448,88 @@ async fn a_cover_is_fetched_once_kept_and_never_follows_a_redirect_away() {
         boxes.iter().filter(|r| r.url.path() == "/box.jpg").count(),
         1
     );
+}
+
+/// Every route of the contract, and every view of those with several, binds and lays out
+/// on the built-in skin over the real adapter: no source it reads is missing a value or a
+/// field, whether the engine has one yet or not.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_route_of_the_default_skin_draws_over_the_engine() {
+    let server = gog().await;
+    let signed_out = MockServer::start().await;
+    let mut failures = Vec::new();
+    for (who, server, account) in [
+        ("signed in", &server, true),
+        ("signed out", &signed_out, false),
+    ] {
+        let rig = rig(server, Arc::new(SignedIn(account)));
+        let backend = CoreBackend::new(
+            Arc::clone(&rig.engine),
+            tokio::runtime::Handle::current(),
+            None,
+        );
+        let mut data = Data::core(backend, None, || {});
+        let mut page = Page::new().expect("the built-in skin");
+        let mut event = 1;
+        for route in gogo_contract::routes::ROUTES {
+            let name = route.name;
+            if name == "shell" {
+                continue;
+            }
+            let go = actions::action("nav.go").expect("an action");
+            let mut invocation = Invocation::new(go).arg("route", Value::str(name));
+            if name == "game" {
+                invocation = invocation.route_arg("id", Value::str("10"));
+            }
+            event += 1;
+            data.invoke(&invocation, InputEvent(event));
+            assert_eq!(data.location().route, name);
+            let views: &[(&str, &str)] = match name {
+                "game" => &[
+                    ("tab", "overview"),
+                    ("tab", "builds"),
+                    ("tab", "dlc"),
+                    ("tab", "saves"),
+                    ("tab", "snapshots"),
+                    ("tab", "setup"),
+                    ("tab", "files"),
+                ],
+                "library" => &[("view", "grid"), ("view", "list")],
+                _ => &[("view", "grid")],
+            };
+            for (var, word) in views {
+                page.set_ui(var, Value::str(*word)).expect("a ui value");
+                let started = Instant::now();
+                loop {
+                    data.pump();
+                    match page.screen(&mut data, "shell", (1280.0, 800.0)) {
+                        Ok(_) => break,
+                        Err(DrawError::Loading) => {
+                            assert!(
+                                started.elapsed() < Duration::from_secs(20),
+                                "{who} {name} {word}: still loading"
+                            );
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                        Err(e) => {
+                            failures.push(format!("{who} {name} {word}: {e}"));
+                            break;
+                        }
+                    }
+                }
+                data.pump();
+                if data.screen_to_draw().is_some() {
+                    failures.push(format!("{who} {name} {word}: an error screen"));
+                    break;
+                }
+            }
+        }
+    }
+    // One known failure, the skin's own (#645): it takes `first.title` of the DLC not yet
+    // installed, which fails when there is none. Drop this with the fix.
+    let (known, others): (Vec<_>, Vec<_>) = failures.into_iter().partition(|f| {
+        f.starts_with("signed out game overview:") && f.ends_with("`.title` on a null value")
+    });
+    assert!(others.is_empty(), "{}", others.join("\n"));
+    assert_eq!(known.len(), 1, "#645 is fixed: remove its exception");
 }
