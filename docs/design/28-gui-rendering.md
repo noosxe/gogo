@@ -68,7 +68,7 @@ Units follow CSS (design 27 §6): a shadow, glow or bloom radius r is a Gaussian
 | Text bloom | one `PushFilter(blur)` layer around *each* glyph run (one primitive per layer, §5), then the sharp text | same (a native filter layer) |
 | Gradient | peniko gradient brush | same |
 | Noise | a tiled noise image brush; the tile is `ImageKey::Noise { seed }`, made by `noise_tile(seed)` | same |
-| Scanlines | thin black fills, one every `period` px at the given alpha, clipped to the box | same; **no mask layers** (§5) |
+| Scanlines | thin black fills, each `period / 2` px tall, one every `period` px at the given alpha, clipped to the box (only the lines that can be seen) | same; **no mask layers** (§5) |
 | Reflection | a glass sheen: a white linear gradient fill over the box at the given angle, fading out before the middle (not a mirror) | same |
 | Backdrop blur | §3 | §3 |
 
@@ -81,9 +81,14 @@ Units follow CSS (design 27 §6): a shadow, glow or bloom radius r is a Gaussian
 
 No Vello renderer has a backdrop filter upstream, so `Backdrop` is ours on both renderers:
 
-1. Render everything below the backdrop into an offscreen target (a pixmap, or a texture).
+1. Render everything below the backdrop into an offscreen target (a pixmap, or a texture): the ops before it (`DisplayList::prefix`).
 2. Draw that target back through a blur filter layer, clipped to the backdrop's shape.
 3. Continue with the rest of the list on top.
+
+A backdrop can sit inside open layers: its node's `PushOpacity`, an ancestor's `PushClip`
+(a scroll container). Step 2 draws the blurred copy through those layers, which
+`DisplayList::open_layers` lists outermost first, so the opacity and the clip still apply to it.
+A backdrop with sigma 0 (radius 0) is not emitted, and neither are glow layers or bloom with radius 0.
 
 Each backdrop re-renders everything below it. Sharing the below-target between backdrops
 in one frame is an open optimisation (#543).

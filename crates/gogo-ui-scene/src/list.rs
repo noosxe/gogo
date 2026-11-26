@@ -189,6 +189,31 @@ impl DisplayList {
         self.images.get(id.index())
     }
 
+    /// The ops before `index`: what is already drawn when `ops[index]` runs. A renderer
+    /// draws this into an offscreen target to blur it for an [`Op::Backdrop`].
+    pub fn prefix(&self, index: usize) -> &[Op] {
+        &self.ops[..index.min(self.ops.len())]
+    }
+
+    /// The layers still open at `index`, outermost first: the `Push…` ops before it that no
+    /// `Pop` has closed yet. A backdrop inside a node's opacity or an ancestor's clip needs
+    /// these replayed around the blurred copy (design 28 §3).
+    pub fn open_layers(&self, index: usize) -> Vec<&Op> {
+        let mut stack: Vec<&Op> = Vec::new();
+        for op in self.prefix(index) {
+            match op {
+                Op::PushClip { .. } | Op::PushOpacity { .. } | Op::PushFilter { .. } => {
+                    stack.push(op)
+                }
+                Op::Pop => {
+                    stack.pop();
+                }
+                _ => {}
+            }
+        }
+        stack
+    }
+
     /// How many ops of each kind: a compact structure for snapshot tests.
     pub fn summary(&self) -> OpSummary {
         let mut counts = BTreeMap::new();
@@ -203,8 +228,9 @@ impl DisplayList {
     }
 }
 
-/// Op counts by kind, printed one per line.
+/// Op counts by kind, printed one per line. More fields may follow.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct OpSummary {
     /// All ops.
     pub total: usize,

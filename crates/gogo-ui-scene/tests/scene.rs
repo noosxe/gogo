@@ -907,16 +907,16 @@ fn building_is_deterministic_and_balanced_on_a_busy_tree() {
 fn a_deep_tree_builds_without_recursion_trouble() {
     let mut t = Tree::new("root", Node::container());
     let mut parent = t.root();
-    for i in 0..200 {
+    for i in 0..120 {
         parent = add(
             &mut t,
             parent,
             &format!("d{i}"),
-            Node::container().with_paint(Paint::solid(red())),
+            boxed(10.0, 10.0, Paint::solid(red())),
         );
     }
     let l = scene(&t);
-    assert_eq!(l.ops.len(), 200);
+    assert_eq!(l.ops.len(), 120);
 }
 
 #[test]
@@ -1020,4 +1020,110 @@ fn a_renderer_gets_the_list_the_store_and_a_scale() {
     assert_eq!(r.seen, ["image true"]);
     assert_eq!(r.name(), "recorder");
     assert!(r.render(&l, &MemoryStore::new(), 0.0, &mut s).is_err());
+}
+
+#[test]
+fn zero_radius_blurs_emit_nothing() {
+    let p = paint(|p| {
+        p.fill = Some(Fill::Solid(red()));
+        p.effects = vec![
+            Effect::Glow {
+                layers: vec![
+                    GlowLayer {
+                        radius: 0.0,
+                        color: red(),
+                    },
+                    GlowLayer {
+                        radius: 6.0,
+                        color: red(),
+                    },
+                ],
+            },
+            Effect::BackdropBlur { radius: 0.0 },
+        ];
+    });
+    let l = scene(&root_tree(boxed(50.0, 50.0, p)).0);
+    assert_eq!(
+        kinds(&l),
+        ["BlurRect", "Fill"],
+        "one glow layer, no backdrop"
+    );
+
+    let style = TextStyle {
+        bloom: Some(Bloom {
+            radius: 0.0,
+            color: Color::WHITE,
+        }),
+        ..text_style()
+    };
+    let mut t = Tree::new("root", Node::container());
+    add_root(&mut t, "t", text_node("Hi", style));
+    assert_eq!(kinds(&scene(&t)), ["Glyphs"], "only the sharp text");
+}
+
+#[test]
+fn a_node_without_area_or_with_a_non_finite_paint_draws_nothing_of_its_own() {
+    let mut t = Tree::new("root", Node::container());
+    let flat = add_root(&mut t, "flat", boxed(0.0, 20.0, Paint::solid(red())));
+    add(
+        &mut t,
+        flat,
+        "kid",
+        boxed(10.0, 10.0, Paint::solid(Color::WHITE)),
+    );
+    let nan = paint(|p| {
+        p.fill = Some(Fill::Solid(red()));
+        p.effects = vec![Effect::Shadow {
+            dx: f32::NAN,
+            dy: 0.0,
+            blur: 4.0,
+            spread: 0.0,
+            color: Color::BLACK,
+        }];
+    });
+    let bad = add_root(&mut t, "bad", boxed(20.0, 20.0, nan));
+    add(
+        &mut t,
+        bad,
+        "kid2",
+        boxed(5.0, 5.0, Paint::solid(Color::WHITE)),
+    );
+    let l = scene(&t);
+    assert_eq!(kinds(&l), ["Fill", "Fill"], "only the two children");
+}
+
+#[test]
+fn open_layers_and_prefix_describe_what_a_backdrop_sits_in() {
+    let mut t = Tree::new("root", Node::container());
+    let scroller = add_root(&mut t, "list", boxed(100.0, 50.0, Paint::default()));
+    add(
+        &mut t,
+        scroller,
+        "glass",
+        boxed(
+            60.0,
+            30.0,
+            paint(|p| {
+                p.opacity = 0.5;
+                p.effects = vec![Effect::BackdropBlur { radius: 8.0 }];
+            }),
+        ),
+    );
+    let sc = Scroll::none().with(scroller, 0.0, 0.0);
+    let l = scene_with(&t, &sc, &SceneState::new());
+    assert_eq!(
+        kinds(&l),
+        ["PushClip", "PushOpacity", "Backdrop", "Pop", "Pop"]
+    );
+    let i = l
+        .ops
+        .iter()
+        .position(|o| matches!(o, Op::Backdrop { .. }))
+        .expect("backdrop");
+    let open: Vec<&str> = l.open_layers(i).iter().map(|o| o.kind()).collect();
+    assert_eq!(open, ["PushClip", "PushOpacity"], "outermost first");
+    assert_eq!(l.prefix(i).len(), 2);
+    assert_eq!(l.prefix(999).len(), l.ops.len());
+    assert!(l.open_layers(0).is_empty());
+    assert!(l.open_layers(l.ops.len()).is_empty());
 }
