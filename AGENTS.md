@@ -45,8 +45,10 @@ tools, or binaries from the host system — no exceptions.**
   Hyprland quirks, display modes, VRR and audio are a host pass (#179);
   agents put those steps in the PR.
 
-- **Running the desktop GUI** (`gogo-gui`, design 24): never on the host display.
-  `gogo-gui --render-png <out>` (no window) and `--check-skin <dir>` are safe anywhere. A
+- **Running the desktop GUI** (`gogo-gui`, design 24): never on the host display. Without
+  `--fixture` its window reads the real account and this machine's games.
+  `gogo-gui --render-png <out>` (no window) and `--check-skin <dir>` are safe anywhere.
+  `--fixture` and `--render-png` need `cargo build -p gogo-gui --features fixture`. A
   window only in the headless compositor of `scripts/gui-headless.sh` (Linux; `nix develop
   .#lavapipe -c scripts/gui-headless.sh run -- target/debug/gogo-gui --fixture`, or
   `reload -- target/debug/gogo-gui` for hot reload, `input -- target/debug/gogo-gui` for

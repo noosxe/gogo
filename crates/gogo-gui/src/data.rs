@@ -1,54 +1,101 @@
-//! The app model as a skin reads it (design 25 §3, §5), on the fake backend's fictional
-//! data until real data is wired in (#535).
+//! The app model as a skin reads it (design 25 §3, §5): over [`CoreBackend`], or, in a
+//! build with the `fixture` feature, over fictional data.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use gogo_contract::{Value, actions};
-use gogo_gui_model::fake::FakeBackend;
-use gogo_gui_model::fixture::{self, Fixture, GAME_ID, NOW};
-use gogo_gui_model::{Effect, InputEvent, Invocation, Location, Modal, Model, Outcome, SourceKey};
+use gogo_contract::{Gates, Value};
+use gogo_gui_model::{
+    Backend, Call, Effect, ErrorView, Failures, InputEvent, Invocation, Jobs, Location, Modal,
+    Model, Outcome, PlanReply, PromptAnswer, PromptSpec, Run, Slot, SourceKey, Subscription,
+};
 use gogo_skin::expr::{CallError, Scope};
 use gogo_ui_scene::{Image, ImageKey, ImageStore, MemoryStore};
 
-/// The number of the input that puts the fixture on its game: the model takes nothing
-/// numbered at or below it.
+use crate::core::CoreBackend;
+use crate::core::art::ArtStore;
+
+#[cfg(feature = "fixture")]
+use fictional::FixtureData;
+
+/// Input numbers start above this: the fixture spends it to get to its game, and the
+/// model takes nothing numbered at or below an input it has used.
 pub(crate) const FIXTURE_EVENT: u64 = 1;
 
-/// The model could not be put on the fixture's game.
-#[derive(Debug, thiserror::Error)]
-#[error("the fixture data could not be set up: {0}")]
-pub(crate) struct DataError(String);
+/// The engine the model runs on.
+pub(crate) enum Engine {
+    #[cfg(feature = "fixture")]
+    Fixture(Box<gogo_gui_model::fake::FakeBackend>),
+    Core(Box<CoreBackend>),
+}
+
+/// Calls the same method on whichever engine there is.
+macro_rules! engine {
+    ($self:ident, $e:ident => $call:expr) => {
+        match $self {
+            #[cfg(feature = "fixture")]
+            Engine::Fixture($e) => $call,
+            Engine::Core($e) => $call,
+        }
+    };
+}
+
+impl Backend for Engine {
+    fn attach(&mut self, failures: Failures) {
+        engine!(self, e => e.attach(failures))
+    }
+
+    fn subscribe(&mut self, key: &SourceKey, slot: Slot) -> Subscription {
+        engine!(self, e => e.subscribe(key, slot))
+    }
+
+    fn gates(&self) -> Gates {
+        engine!(self, e => e.gates())
+    }
+
+    fn rate_limit(&self) -> Option<u64> {
+        engine!(self, e => e.rate_limit())
+    }
+
+    fn plan(&mut self, call: &Call, answer: Option<&PromptAnswer>, reply: PlanReply) {
+        engine!(self, e => e.plan(call, answer, reply))
+    }
+
+    fn prompt_for(&mut self, call: &Call) -> Result<PromptSpec, ErrorView> {
+        engine!(self, e => e.prompt_for(call))
+    }
+
+    fn run(&mut self, run: Run, jobs: &mut Jobs<'_>) -> Result<(), ErrorView> {
+        engine!(self, e => e.run(run, jobs))
+    }
+}
 
 /// The model, and what the screen needs beside it.
 pub(crate) struct Data {
-    model: Model<FakeBackend>,
-    /// The queue the skin shows. The model answers the queue from its own job table, which
-    /// is empty without an engine.
-    queue: Fixture,
+    model: Model<Engine>,
+    /// Over fictional data the queue is the fixture's: the model answers the queue from
+    /// its own job table, which is empty without an engine.
+    #[cfg(feature = "fixture")]
+    fixture: Option<FixtureData>,
     watched: HashSet<SourceKey>,
+    art: Option<ArtStore>,
 }
 
 impl Data {
-    /// Fictional data, showing the fixture's game. `wake` is the model's (design 25 §3).
-    pub(crate) fn fixture(wake: impl Fn() + Send + Sync + 'static) -> Result<Data, DataError> {
-        let mut model = Model::new(FakeBackend::with_fixture(), wake);
-        let go = actions::action("nav.go")
-            .map(|spec| {
-                Invocation::new(spec)
-                    .arg("route", Value::str("game"))
-                    .route_arg("id", Value::str(GAME_ID))
-            })
-            .ok_or_else(|| DataError("the contract has no nav.go".to_owned()))?;
-        match model.invoke(&go, InputEvent(FIXTURE_EVENT)) {
-            Outcome::Accepted => {}
-            other => return Err(DataError(format!("nav.go: {other:?}"))),
-        }
-        Ok(Data {
-            model,
-            queue: Fixture::new(),
+    /// Real data. `wake` is the model's (design 25 §3).
+    pub(crate) fn core(
+        backend: CoreBackend,
+        art: Option<ArtStore>,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Data {
+        Data {
+            model: Model::new(Engine::Core(Box::new(backend)), wake),
+            #[cfg(feature = "fixture")]
+            fixture: None,
             watched: HashSet::new(),
-        })
+            art,
+        }
     }
 
     /// What one bind reads from.
@@ -77,7 +124,19 @@ impl Data {
 
     /// Takes what arrived. Returns whether anything changed.
     pub(crate) fn pump(&mut self) -> bool {
-        !self.model.pump().is_empty()
+        let sources = !self.model.pump().is_empty();
+        let pictures = self.art.as_ref().is_some_and(ArtStore::take_arrived);
+        sources || pictures
+    }
+
+    /// Whether a source with no value is still on its way. Over fictional data every
+    /// value there will ever be is there at once.
+    pub(crate) fn arrives_later(&self) -> bool {
+        #[cfg(feature = "fixture")]
+        if self.fixture.is_some() {
+            return false;
+        }
+        true
     }
 
     /// The route on screen.
@@ -113,10 +172,21 @@ impl Data {
         })
     }
 
+    /// The error on screen, by its class and title, which are the app's own words.
+    pub(crate) fn error_title(&self) -> Option<String> {
+        match self.model.modal()? {
+            Modal::Error { error, .. } => Some(format!("{}: {}", error.class, error.title)),
+            _ => None,
+        }
+    }
+
     /// The fake, to script it and see what ran.
     #[cfg(test)]
-    pub(crate) fn backend(&self) -> &FakeBackend {
-        self.model.backend()
+    pub(crate) fn backend(&self) -> &gogo_gui_model::fake::FakeBackend {
+        match self.model.backend() {
+            Engine::Fixture(fake) => fake,
+            Engine::Core(_) => panic!("not on fictional data"),
+        }
     }
 
     /// What the app has to do since the last call.
@@ -126,7 +196,28 @@ impl Data {
 
     /// The pictures for the handles the data names.
     pub(crate) fn images(&self) -> Images {
-        Images
+        match &self.art {
+            Some(art) => Images::Art(art.clone()),
+            None => Images::Other,
+        }
+    }
+
+    fn queue(&self, name: &str) -> Option<&Value> {
+        #[cfg(feature = "fixture")]
+        if let Some(fixture) = &self.fixture {
+            return fixture.queue_var(name);
+        }
+        let _ = name;
+        None
+    }
+
+    fn is_fixture_queue(&self, name: &str) -> bool {
+        #[cfg(feature = "fixture")]
+        if self.fixture.is_some() {
+            return is_queue(name);
+        }
+        let _ = name;
+        false
     }
 }
 
@@ -148,14 +239,17 @@ impl ModelScope<'_> {
     }
 
     fn ask(&self, key: SourceKey) {
-        self.asked.borrow_mut().push(key);
+        // The model answers these itself: they are never on the way.
+        if !is_queue(key.name()) && key.name() != "route" {
+            self.asked.borrow_mut().push(key);
+        }
     }
 }
 
 impl Scope for ModelScope<'_> {
     fn var(&self, name: &str) -> Option<&Value> {
-        if is_queue(name) {
-            return self.data.queue.var(name);
+        if self.data.is_fixture_queue(name) {
+            return self.data.queue(name);
         }
         let key = SourceKey::new(name, &[])?;
         let value = self.data.model.value(&key);
@@ -176,9 +270,11 @@ impl Scope for ModelScope<'_> {
     fn call(&self, name: &str, args: &[&Value]) -> Option<Result<Value, CallError>> {
         let args: Vec<String> = args.iter().map(|a| a.display()).collect();
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        if is_queue(name) {
-            let value = self.data.queue.call(name, args.first()?);
-            return Some(value.cloned().ok_or(CallError::NotFound));
+        #[cfg(feature = "fixture")]
+        if self.data.is_fixture_queue(name)
+            && let Some(fixture) = &self.data.fixture
+        {
+            return Some(fixture.queue_call(name, args.first()?));
         }
         let key = SourceKey::new(name, &args)?;
         Some(match self.data.model.value(&key) {
@@ -191,26 +287,97 @@ impl Scope for ModelScope<'_> {
     }
 
     fn now(&self) -> f64 {
-        NOW
+        #[cfg(feature = "fixture")]
+        if self.data.fixture.is_some() {
+            return gogo_gui_model::fixture::NOW;
+        }
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0.0, |d| d.as_secs_f64())
     }
 }
 
-/// Procedural art for the fixture's handles. A skin's own asset files are not decoded yet.
-pub(crate) struct Images;
+/// The pictures of the data: the covers over real data, and procedural art for the
+/// fixture's handles. A skin's own asset files are not decoded yet.
+pub(crate) enum Images {
+    Art(ArtStore),
+    Other,
+}
 
 impl ImageStore for Images {
     fn get(&self, key: &ImageKey) -> Option<Image> {
-        match key {
-            ImageKey::Handle(name) => {
-                let art = if &**name == fixture::art::CHECKER {
-                    fixture::art::checker()
-                } else {
-                    fixture::art::cover(name)
-                };
-                Image::new(art.width, art.height, art.rgba)
-            }
-            ImageKey::Noise { .. } => MemoryStore::new().get(key),
+        match (self, key) {
+            (Images::Art(art), _) => art.get(key),
+            #[cfg(feature = "fixture")]
+            (Images::Other, ImageKey::Handle(name)) => fictional::picture(name),
+            (Images::Other, ImageKey::Noise { .. }) => MemoryStore::new().get(key),
             _ => None,
         }
+    }
+}
+
+#[cfg(feature = "fixture")]
+mod fictional {
+    use gogo_contract::actions;
+    use gogo_gui_model::fake::FakeBackend;
+    use gogo_gui_model::fixture::{self, Fixture, GAME_ID};
+
+    use super::*;
+
+    /// The model could not be put on the fixture's game.
+    #[derive(Debug, thiserror::Error)]
+    #[error("the fixture data could not be set up: {0}")]
+    pub(crate) struct DataError(String);
+
+    pub(crate) struct FixtureData {
+        queue: Fixture,
+    }
+
+    impl FixtureData {
+        pub(super) fn queue_var(&self, name: &str) -> Option<&Value> {
+            self.queue.var(name)
+        }
+
+        pub(super) fn queue_call(&self, name: &str, arg: &str) -> Result<Value, CallError> {
+            let value = self.queue.call(name, arg);
+            value.cloned().ok_or(CallError::NotFound)
+        }
+    }
+
+    impl Data {
+        /// Fictional data, showing the fixture's game. `wake` is the model's.
+        pub(crate) fn fixture(wake: impl Fn() + Send + Sync + 'static) -> Result<Data, DataError> {
+            let fake = Engine::Fixture(Box::new(FakeBackend::with_fixture()));
+            let mut model = Model::new(fake, wake);
+            let go = actions::action("nav.go")
+                .map(|spec| {
+                    Invocation::new(spec)
+                        .arg("route", Value::str("game"))
+                        .route_arg("id", Value::str(GAME_ID))
+                })
+                .ok_or_else(|| DataError("the contract has no nav.go".to_owned()))?;
+            match model.invoke(&go, InputEvent(FIXTURE_EVENT)) {
+                Outcome::Accepted => {}
+                other => return Err(DataError(format!("nav.go: {other:?}"))),
+            }
+            Ok(Data {
+                model,
+                fixture: Some(FixtureData {
+                    queue: Fixture::new(),
+                }),
+                watched: HashSet::new(),
+                art: None,
+            })
+        }
+    }
+
+    /// Procedural art for the fixture's handles.
+    pub(super) fn picture(name: &str) -> Option<Image> {
+        let art = if name == fixture::art::CHECKER {
+            fixture::art::checker()
+        } else {
+            fixture::art::cover(name)
+        };
+        Image::new(art.width, art.height, art.rgba)
     }
 }

@@ -7,6 +7,9 @@
 //! Input and accessibility act only on what was presented: a frame is built as pending and
 //! takes over when the shell says it reached the screen.
 //!
+//! While a source the route reads has no value yet, the app's own "Loading" panel is
+//! over the last screen.
+//!
 //! The safety flow's own screens are not drawn yet (#536, #614). Whatever raises one, a control,
 //! a job's question or a failed job, it is cancelled at once, which answers a question
 //! with a cancel, and the model is never told that a screen was shown.
@@ -203,6 +206,9 @@ impl App {
                 break;
             };
             say(format_args!("gui: {kind} is not drawn yet: cancelled"));
+            if let Some(title) = self.data.error_title() {
+                tracing::warn!("{title}");
+            }
             #[cfg(test)]
             self.cancelled.push(kind);
             any = true;
@@ -254,9 +260,15 @@ impl App {
 
     /// Binds, lays out and builds the next frame for a window of `size` logical px.
     fn draw(&mut self, size: (f32, f32)) {
+        let mut loading = false;
         let failure = match self.page.screen(&mut self.data, SHELL_ROUTE, size) {
             Ok(screen) => {
                 self.pending.screen = Some(Rc::new(screen));
+                None
+            }
+            // The last screen stays in sight under the app's own "Loading".
+            Err(DrawError::Loading) => {
+                loading = true;
                 None
             }
             // The last screen stays in sight, under the panel; Esc goes back.
@@ -269,7 +281,15 @@ impl App {
             problems.to_mut().push(failure);
         }
         self.pending.panel = None;
-        if !problems.is_empty() {
+        if problems.is_empty() && loading {
+            match Panel::loading(&mut self.page.fonts, size) {
+                Ok(panel) => self.pending.panel = Some(Rc::new(panel)),
+                Err(e) => {
+                    tracing::error!("the loading panel could not be drawn: {e}");
+                    self.pending.screen = None;
+                }
+            }
+        } else if !problems.is_empty() {
             let heading = "Something is wrong with this screen";
             match Panel::new(&mut self.page.fonts, size, heading, &problems) {
                 Ok(panel) => self.pending.panel = Some(Rc::new(panel)),

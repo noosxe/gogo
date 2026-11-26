@@ -1,10 +1,10 @@
 //! gogo-gui: the desktop GUI binary (docs/design/24-gui-architecture.md §2, design 25).
 //!
-//! It draws a skin over the app model and puts it in a window, picking the renderer. For now
-//! the model runs on the fake backend with fictional data (`--fixture`); real data comes
-//! with PR F1 (#535), through `gogo-core`.
+//! It draws a skin over the app model and puts it in a window, picking the renderer. The
+//! model runs on [`core::CoreBackend`], over `gogo-core`: for now the library and game
+//! pages, read-only.
 //!
-//! - `gogo-gui --fixture [--dev <skin dir>]` opens the window. With `--dev` the folder is
+//! - `gogo-gui [--dev <skin dir>]` opens the window. With `--dev` the folder is
 //!   watched and reloaded; a broken edit keeps the last good skin and shows why.
 //! - `gogo-gui --render-png <out>` draws a route without a window, on vello_cpu.
 //! - `gogo-gui --check-skin <dir>` prints what the loader finds.
@@ -12,12 +12,17 @@
 //! `GOGO_GUI_RENDERER=auto|gpu|cpu` picks the window's renderer (design 24 §4). Exit
 //! codes: 0, 1 on failure (skin errors included), 2 on usage.
 //!
-//! Agents never run the window on the host display: `scripts/gui-headless.sh`.
+//! `--fixture` (the window on fictional data) and `--render-png` need a build with the
+//! `fixture` feature.
+//!
+//! Agents never run the window on the host display: `scripts/gui-headless.sh`, and only
+//! with `--fixture`: without it the window reads the real account.
 #![deny(unsafe_code)]
 
 mod act;
 mod app;
 mod check;
+mod core;
 mod data;
 mod page;
 mod panel;
@@ -26,6 +31,7 @@ mod render;
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use clap::Parser;
 use gogo_ui_shell::{RendererChoice, Shell};
@@ -37,12 +43,13 @@ use tracing_subscriber::{EnvFilter, Layer as _, filter::FilterExt as _, filter::
 const USAGE: u8 = 2;
 
 /// The size `--render-png` draws, in logical px: the size of the golden images.
+#[cfg(feature = "fixture")]
 const PNG_SIZE: (f32, f32) = (960.0, 600.0);
 
 #[derive(Debug, Parser)]
 #[command(name = "gogo-gui", version, about = "The gogo desktop GUI")]
 struct Cli {
-    /// Run on fictional data. Needed for the window: real data is not wired in yet.
+    /// Run on fictional data (a build with the `fixture` feature).
     #[arg(long)]
     fixture: bool,
 
@@ -103,14 +110,14 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         };
     }
+    if !cfg!(feature = "fixture") && (cli.fixture || cli.render_png.is_some()) {
+        eprintln!("gogo-gui was built without fictional data (the `fixture` feature)");
+        return ExitCode::from(USAGE);
+    }
     let done = match &cli.render_png {
         Some(out) => render_png(out, &cli),
-        None if !cli.fixture => {
-            eprintln!("gogo-gui has no real data yet: run it with --fixture");
-            return ExitCode::from(USAGE);
-        }
         None => match renderer_choice() {
-            Ok(choice) => window(cli.dev.as_deref(), choice),
+            Ok(choice) => window(&cli, choice),
             Err(e) => {
                 eprintln!("GOGO_GUI_RENDERER: {e}");
                 return ExitCode::from(USAGE);
@@ -135,6 +142,7 @@ fn renderer_choice() -> Result<RendererChoice, gogo_ui_shell::UnknownRenderer> {
 
 type Failure = Box<dyn std::error::Error>;
 
+#[cfg(feature = "fixture")]
 fn render_png(out: &Path, cli: &Cli) -> Result<(), Failure> {
     let mut data = data::Data::fixture(|| {})?;
     let mut page = page::Page::new()?;
@@ -158,12 +166,47 @@ fn render_png(out: &Path, cli: &Cli) -> Result<(), Failure> {
     Ok(())
 }
 
-fn window(dev: Option<&Path>, choice: RendererChoice) -> Result<(), Failure> {
+/// Unreachable: `main` refuses the arguments first.
+#[cfg(not(feature = "fixture"))]
+fn render_png(_out: &Path, _cli: &Cli) -> Result<(), Failure> {
+    Err("built without fictional data".into())
+}
+
+fn window(cli: &Cli, choice: RendererChoice) -> Result<(), Failure> {
     let shell = Shell::new()?;
+    #[cfg(feature = "fixture")]
+    if cli.fixture {
+        let waker = shell.waker();
+        let data = data::Data::fixture(move || waker.wake())?;
+        shell.run(app::App::new(cli.dev.as_deref(), data)?, choice)?;
+        return Ok(());
+    }
+    // The engine's work runs here; the UI thread only reads what arrives.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let data = engine_data(&shell, runtime.handle())?;
+    let ran = app::App::new(cli.dev.as_deref(), data)
+        .map_err(Failure::from)
+        .and_then(|app| shell.run(app, choice).map_err(Failure::from));
+    // A keychain nobody answers parks its thread: do not wait for it.
+    runtime.shutdown_background();
+    ran
+}
+
+fn engine_data(shell: &Shell, runtime: &tokio::runtime::Handle) -> Result<data::Data, Failure> {
+    let engine = Arc::new(core::Engine::new(core::parts()?));
+    let arrived = shell.waker();
+    let art = core::art::ArtStore::new(
+        Arc::clone(&engine),
+        runtime.clone(),
+        Arc::new(core::art::gog_images),
+        core::cover_cache(),
+        move || arrived.wake(),
+    )?;
+    let backend = core::CoreBackend::new(engine, runtime.clone(), Some(art.clone()));
     let waker = shell.waker();
-    let app = app::App::new(dev, data::Data::fixture(move || waker.wake())?)?;
-    shell.run(app, choice)?;
-    Ok(())
+    Ok(data::Data::core(backend, Some(art), move || waker.wake()))
 }
 
 #[cfg(test)]

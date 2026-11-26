@@ -103,9 +103,9 @@ fn check_skin_exit_codes() {
 
 #[test]
 fn usage_errors_exit_2() {
+    // Never without arguments: that opens a window over the real account.
     for args in [
-        &[][..],
-        &["--route", "game"],
+        &["--route", "game"][..],
         &["--render-png", "a.png", "--scale", "9"],
         &["--check-skin", "a", "--render-png", "b"],
         &["--unknown"],

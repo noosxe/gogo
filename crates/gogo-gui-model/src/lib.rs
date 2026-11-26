@@ -10,6 +10,7 @@
 //! - [`source`]: one latest-value slot per source key and one wake per frame (§3).
 //! - [`jobs`]: the job table, with progress and a control handle per job (§5).
 //! - [`error`]: [`ErrorView`], the one shape every failure takes (§6).
+//! - [`failures`]: [`Failures`], for what fails when no call is waiting.
 //! - `fake` (feature `fake`): a scripted backend for tests.
 //! - `fixture` (feature `fake`): fictional data and procedural art for it to serve.
 #![deny(unsafe_code)]
@@ -18,6 +19,7 @@
 pub mod backend;
 pub mod call;
 pub mod error;
+pub mod failures;
 #[cfg(feature = "fake")]
 pub mod fake;
 #[cfg(feature = "fake")]
@@ -32,6 +34,7 @@ pub mod source;
 pub use backend::{Backend, Run, Subscription};
 pub use call::{Arg, Call, Invocation};
 pub use error::ErrorView;
+pub use failures::Failures;
 pub use jobs::{
     FileProgress, JobControl, JobId, JobKind, JobSink, JobState, JobStatus, JobTable, Jobs,
     MAX_ENDED, Step, StepState, Transition,
