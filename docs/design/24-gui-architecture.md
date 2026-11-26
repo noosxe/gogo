@@ -287,8 +287,10 @@ wgpu's GL backend needs a loadable `libEGL.so.1` on the library path.
   compile in the workspace. *Measured* with the scaffolding (PR B1, skeletons only, no
   external GUI crate yet), the `gui` job took 1 min 57 s on ubuntu without a cache, 44 s
   with one, and 3 min 11 s on macOS without a cache. Most of that is building gogo-core.
-  The PRs that add wgpu, winit and the font stack measure the job again and update this
-  line.
+  With the two renderers (vello and wgpu, PRs C4 and C5) the `gui` job took 2 min 52 s on
+  ubuntu and 4 min 9 s on macOS with a partial cache, and `gui-lavapipe` 2 min 8 s without a
+  cargo cache. The PRs that add winit and the rest of the shell measure again and update
+  this line.
 
 ## 8. Port order
 

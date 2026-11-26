@@ -436,8 +436,8 @@ jobs:
           if-no-files-found: ignore
 
   # The vello_gpu renderer against vello_cpu on Mesa's software Vulkan
-  # (design 24 §7, 08 §7). The `gui` job runs the same tests on whatever
-  # adapter its runner has and skips them without one; here a missing or
+  # (design 24 §7, 08 §7). The `gui` job runs the same tests but compares only
+  # on a software adapter and skips without one; here a missing or
   # non-software adapter fails.
   gui_gpu:
     name: gui-lavapipe

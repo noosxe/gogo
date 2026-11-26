@@ -1,11 +1,16 @@
 //! vello_gpu against vello_cpu, the reference, on the test scenes (design 28 §7, 08 §7).
 //!
-//! Everything renders offscreen. Without a GPU adapter the tests skip; with
-//! `GOGO_GPU_REQUIRED=1` (the CI lavapipe job) a missing adapter, or one that is not a
-//! software one, fails them instead.
+//! Everything renders offscreen. Without a GPU adapter or device the tests skip; with
+//! `GOGO_GPU_REQUIRED=1` (the CI lavapipe job) that, or an adapter that is not a software
+//! one, fails them instead.
+//!
+//! The comparisons with vello_cpu run **only on a software adapter**, where their
+//! tolerance is measured and the result does not depend on a driver. `GOGO_GPU_ANY_ADAPTER=1`
+//! runs them on whatever adapter there is, for a local or host pass.
 
 use std::path::Path;
 
+use gogo_gui_testkit::env_flag;
 use gogo_gui_testkit::golden::{self, Tolerance};
 use gogo_gui_testkit::scenes::{self, Scene};
 use gogo_render_cpu::CpuRenderer;
@@ -29,23 +34,28 @@ const TOLERANCE: Tolerance = Tolerance {
 };
 
 fn gpu() -> Option<GpuRenderer> {
-    let required = std::env::var_os("GOGO_GPU_REQUIRED").is_some();
+    let required = env_flag("GOGO_GPU_REQUIRED");
     match GpuRenderer::headless() {
         Ok(r) => {
             let info = r.adapter_info().cloned();
             println!("adapter: {info:?}");
             assert!(
-                !required || info.is_some_and(|i| i.device_type == wgpu::DeviceType::Cpu),
+                !required || is_software(&r),
                 "GOGO_GPU_REQUIRED asks for a software adapter"
             );
             Some(r)
         }
-        Err(e @ GpuError::NoAdapter(_)) if !required => {
+        Err(e @ (GpuError::NoAdapter(_) | GpuError::NoDevice(_))) if !required => {
             println!("skipped: {e}");
             None
         }
         Err(e) => panic!("{e}"),
     }
+}
+
+fn is_software(gpu: &GpuRenderer) -> bool {
+    gpu.adapter_info()
+        .is_some_and(|i| i.device_type == wgpu::DeviceType::Cpu)
 }
 
 fn compare(scene: Scene) {
@@ -54,6 +64,10 @@ fn compare(scene: Scene) {
 
 fn compare_within(scene: Scene, tolerance: &Tolerance) {
     let Some(mut gpu) = gpu() else { return };
+    if !is_software(&gpu) && !env_flag("GOGO_GPU_ANY_ADAPTER") {
+        println!("skipped: not a software adapter (GOGO_GPU_ANY_ADAPTER=1 compares anyway)");
+        return;
+    }
     let mut cpu = CpuRenderer::new();
     let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("golden");
     let mut failures = Vec::new();
