@@ -29,6 +29,11 @@ ignore = [
     # gogo's own crates, so gogo cannot drop it alone. Remove this ignore once
     # gog-warp no longer depends on chrono.
     "RUSTSEC-2026-0543",
+    # ttf-parser unmaintained (RUSTSEC-2026-0192). Unmaintained-only — not a
+    # vulnerability. Comes in through winit's adwaita client-side decorations
+    # (sctk-adwaita), which stay on so GNOME windows get a title bar (design 24
+    # decision 9). Revisit when winit or sctk-adwaita drops it.
+    "RUSTSEC-2026-0192",
 ]
 
 [licenses]

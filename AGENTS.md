@@ -45,10 +45,10 @@ tools, or binaries from the host system — no exceptions.**
   Hyprland quirks, display modes, VRR and audio are a host pass (#179);
   agents put those steps in the PR.
 
-- **Running the desktop GUI** (`gogo-gui`, design 24): never on the host display. The
-  tools arrive with the GUI's PRs (B1 scaffolding, E3, E4; none exists yet). Once they land:
-  `gogo-gui --render-png` (no window) or `--check-skin`, the headless compositor in
-  `scripts/gui-headless.sh` (Linux), or `scripts/vm-test.sh` with the GUI's `.app` (macOS).
+- **Running the desktop GUI** (`gogo-gui`, design 24): never on the host display. Only the
+  headless compositor of `scripts/gui-headless.sh` (Linux; `nix develop .#lavapipe -c
+  scripts/gui-headless.sh run -- <command>`), or `scripts/vm-test.sh` with the GUI's `.app`
+  (macOS). `gogo-gui --render-png` (no window) and `--check-skin` arrive with PR E4.
   Real GPU, HiDPI, IME, clipboard and screen-reader checks are a host pass by @noosxe;
   agents put the steps in the PR.
 
@@ -65,6 +65,7 @@ python3 -I scripts/tests/gui-deps-check-test.py     # when the GUI dependency ch
 python3 -I scripts/gui-deps-check.py                # when a GUI crate's or gogo-core's deps change
 nix develop .#lavapipe -c cargo nextest run -p gogo-render-gpu   # when the GPU renderer changes (Linux)
 scripts/linux-e2e.sh self-test                      # when the e2e harness changes (Linux)
+scripts/gui-headless.sh self-test                   # when the headless GUI runner changes (Linux)
 actionlint                                          # when .github/workflows changes
 ```
 
