@@ -9,6 +9,8 @@ license.workspace = true
 [dependencies]
 gogo-skin.workspace = true
 gogo-gui-model.workspace = true
+gogo-ui-text.workspace = true
+gogo-ui-layout.workspace = true
 gogo-ui-scene.workspace = true
 gogo-render-cpu.workspace = true
 

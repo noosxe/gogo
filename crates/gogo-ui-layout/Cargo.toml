@@ -9,3 +9,5 @@ license.workspace = true
 [dependencies]
 gogo-ui-ir.workspace = true
 gogo-ui-text.workspace = true
+taffy.workspace = true
+thiserror.workspace = true
