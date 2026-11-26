@@ -4,6 +4,8 @@
 //! It prints a line on stdout when a frame is presented and when the skin is reloaded;
 //! `scripts/gui-headless.sh` waits for them.
 
+use std::borrow::Cow;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -15,6 +17,12 @@ use gogo_ui_shell::{
 use crate::data::{Data, Images};
 use crate::page::{DrawError, Page};
 use crate::{panel, render};
+
+/// A line for whoever watches the run. A closed stream is no reason to stop drawing,
+/// which `println!` would do by panicking.
+fn say(line: std::fmt::Arguments<'_>) {
+    let _ = writeln!(std::io::stdout(), "{line}");
+}
 
 pub(crate) struct App {
     page: Page,
@@ -57,15 +65,15 @@ impl App {
             Ok(()) => {
                 self.problems.clear();
                 self.images_changed = true;
-                println!("gui: skin {done} in {ms:.1} ms");
+                say(format_args!("gui: skin {done} in {ms:.1} ms"));
             }
             Err(problems) => {
-                println!(
+                say(format_args!(
                     "gui: skin reload failed in {ms:.1} ms: {} errors",
                     problems.len()
-                );
+                ));
                 for line in &problems {
-                    eprintln!("{line}");
+                    let _ = writeln!(std::io::stderr(), "{line}");
                 }
                 self.problems = problems;
             }
@@ -87,11 +95,11 @@ impl ShellApp for App {
     }
 
     fn frame(&mut self, width: f32, height: f32, _scale: f64) -> Frame<'_> {
-        let mut problems = self.problems.clone();
+        let mut problems = Cow::Borrowed(self.problems.as_slice());
         self.list = match self.page.draw(&mut self.data, SHELL_ROUTE, (width, height)) {
             Ok(list) => list,
             Err(e) => {
-                problems.push(e.to_string());
+                problems.to_mut().push(e.to_string());
                 DisplayList::blank(f64::from(width), f64::from(height))
             }
         };
@@ -140,6 +148,6 @@ impl ShellApp for App {
     }
 
     fn presented(&mut self, _at: Instant, renderer: &'static str) {
-        println!("gui: frame presented renderer={renderer}");
+        say(format_args!("gui: frame presented renderer={renderer}"));
     }
 }

@@ -184,7 +184,7 @@ shot_changed() { # name before
 check() { # what command…
     local what="$1"
     shift
-    "$@" || { log "reload: $what"; return 1; }
+    "$@" || { log "reload check failed: $what"; return 1; }
 }
 
 scenario_reload() {
