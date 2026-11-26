@@ -16,7 +16,7 @@ route "settings" {
     // Only the keys a skin may set have controls here (design 26 §4.9); the rest are listed.
     column style="panel" id="appearance" {
         text "Appearance and comfort" style="card-title"
-        row gap=6 when="{skin_choice}" {
+        row gap=6 when="{skin_choice?.choices}" {
             text "Skin" style="field-label"
             each "c" in="{skin_choice?.choices}" {
                 button "{c}" style="small" action="settings.set" args="gui.skin {c}" on="{skin_choice?.value == c}" label="Use the {c} skin"

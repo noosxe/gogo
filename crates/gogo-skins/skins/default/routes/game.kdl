@@ -1,5 +1,7 @@
 route "game" {
     let g="{game($id)}" run="{game.runner($id)}" snaps="{game.snapshots($id)}"
+    // What the meta line has so far, so a part that is missing leaves no separator (design 27 §7).
+    let named="{g.genre or g.year > 0}" played="{g.genre or g.year > 0 or g.playtime != null}" seen="{g.genre or g.year > 0 or g.playtime != null or g.last_played != null}"
 
     text "Library  ›  {g.title}" style="crumb" id="crumb"
 
@@ -7,7 +9,7 @@ route "game" {
         art "{g.art.cover}" w=132 h=176 fit="cover" style="cover" label="{g.title} cover" id="cover"
         column gap=@space.3 grow=1 {
             text "{g.title}" style="h1" id="title"
-            text "{g.genre} · {g.year} · {fmt.hours(g.playtime)} played · last played {fmt.ago(g.last_played)} · {fmt.bytes(g.size_on_disk)}" style="meta" id="meta"
+            text "{g.genre}{g.year > 0 and g.genre ? ' · ' : ''}{g.year > 0 ? g.year : ''}{g.playtime != null and named ? ' · ' : ''}{fmt.hours(g.playtime)}{g.playtime != null ? ' played' : ''}{g.last_played != null and played ? ' · ' : ''}{g.last_played != null ? 'last played ' : ''}{fmt.ago(g.last_played)}{g.size_on_disk != null and seen ? ' · ' : ''}{fmt.bytes(g.size_on_disk)}" style="meta" id="meta" when="{seen or g.size_on_disk != null}"
             row gap=@space.2 id="chips" {
                 use "status-badge" status="{g.status}"
                 chip "Windows build · Linux via {g.runs_via}" when="{g.runs_via}"
@@ -50,14 +52,15 @@ route "game" {
                         }
                     }
                     grid columns=3 gap=@space.3 id="tiles" {
-                        let saves="{game.saves($id)}" dlc="{game.dlc($id)}" doc="{game.doctor($id)}"
+                        let saves="{game.saves($id)}" dlc="{game.dlc($id)}" doc="{game.doctor($id)}" missing="{dlc | where installed == false | first}"
                         use "summary-tile" mark="check" tone="{saves.state == in_sync ? 'success' : 'warn'}" \
+                            when="{saves.state != disabled and saves.state != no_remote_config}" \
                             title="{saves.state == in_sync ? 'Saves in sync' : 'Saves need attention'}" \
-                            sub="{saves.files | len} files · checked {fmt.ago(saves.last_sync)}"
-                        use "summary-tile" mark="half" title="DLC {dlc | where installed | len} of {dlc | len}" \
-                            sub="{dlc | where installed == false | first.title} missing ·" link="Add…" action="dlc.add" args="{$id} all"
+                            sub="{saves.files | len} files{saves.last_sync != null ? ' · checked ' : ''}{fmt.ago(saves.last_sync)}"
+                        use "summary-tile" mark="half" when="{dlc}" title="DLC {dlc | where installed | len} of {dlc | len}" \
+                            sub="{missing?.title}{missing ? ' missing ·' : ''}" link="{missing ? 'Add…' : ''}" action="dlc.add" args="{$id} all"
                         use "summary-tile" mark="warn" tone="warn" when="{doc.summary.warn > 0}" \
-                            title="Doctor: {doc.summary.warn} warning" sub="{doc.checks | where result == warn | first.message}"
+                            title="Doctor: {doc.summary.warn} warning" sub="{doc.checks | where result == warn | first?.message}"
                     }
                 }
                 column gap=@space.3 {
@@ -68,7 +71,7 @@ route "game" {
                             field "Display mode" { select value="{run.display.mode == wayland ? 'Wayland' : 'X11'}" options="wayland x11" action="runner.set_display" args="{$id} mode={value}" }
                             field "Galaxy (Comet)" {
                                 toggle on="{run.galaxy.setting == on}" action="runner.set_galaxy" args="{$id} {on ? 'off' : 'on'}"
-                                text "{run.galaxy.state == signed_in ? 'On · signed in' : status.word(run.galaxy.state)}" style="on-text"
+                                text "{run.galaxy.state == signed_in ? 'On · signed in' : (run.galaxy.state == signed_out ? 'Signed out' : status.word(run.galaxy.state))}" style="on-text"
                             }
                             field "Autosnapshot" {
                                 toggle on="{snaps.auto}" action="snapshot.set_auto" args="{$id} {not on}"
