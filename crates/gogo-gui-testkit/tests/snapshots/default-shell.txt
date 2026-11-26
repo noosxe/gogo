@@ -1,0 +1,10 @@
+total 194
+images 1
+BlurRect 1
+Fill 81
+Glyphs 93
+Image 1
+Pop 9
+PushClip 9
+
+Fillx2 PushClip Fill Pop Glyphsx2 Fill Glyphs Fill Glyphs Fill Glyphs Fillx2 Glyphs Fill Glyphs Fillx2 Glyphs Fill Glyphs Fillx2 Glyphs Fill Glyphsx2 Fill Glyphs Fill Glyphs Fill Glyphs Fillx2 Glyphsx2 Fill Glyphs Fillx2 Glyphsx2 Fillx2 Glyphsx3 Fill Glyphsx2 BlurRect PushClip Image Pop Glyphsx2 Fillx3 Glyphs Fillx2 Glyphs Fillx3 Glyphs Fillx3 Glyphs Fill Glyphs Fillx2 Glyphs Fillx2 Glyphsx2 Fill PushClip Fill Pop PushClip Fill Pop Glyphsx7 Fillx2 Glyphsx2 PushClip Fill Pop Glyphsx4 PushClip Fill Pop Glyphsx4 Fill Glyphs Fill PushClip Fill Pop Glyphsx4 Fill Glyphs PushClip Fill Pop Glyphsx4 PushClip Fill Pop Glyphsx4 Fillx3 Glyphsx3 Fillx3 Glyphsx3 Fill Glyphs Fillx3 Glyphsx3 Fillx2 Glyphsx2 Fill Glyphs Fill Glyphs Fill Glyphs Fill Glyphs Fill Glyphs Fill Glyphs Fillx2 Glyphsx2 Fillx2 Glyphs Fillx2 Glyphsx2 Fill Glyphsx2 Fill Glyphsx2

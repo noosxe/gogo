@@ -17,24 +17,29 @@ Renderers never see the IR, a skin or the contract (design 24 §2.1).
   the app fills (design 25 §7). Each renderer turns ids into its own form: a pixmap on the
   CPU, a texture on the GPU.
 
-The op names below are this design's. The prototype's differ slightly (`Bloom` where this
-has `PushFilter`, no separate `Image` op); PR C3 settles the final names and updates this
-table.
+These are the final op names (settled in PR C3; `gogo-ui-scene`). `Shape` is a rect, a
+rounded rect, an ellipse or a path with a fill rule; `Brush` is a solid colour, a gradient
+or an image brush.
 
 | Op | Meaning |
 |---|---|
-| `Fill { shape, brush }` | A path or rounded rect with a solid colour, gradient or image brush |
-| `BlurRect { rect, radii, sigma, colour, inset }` | A blurred rounded rect (shadows, glow, inner shadow) |
-| `Glyphs { run, brush }` | A shaped glyph run from `gogo-ui-text`: font blob, glyph ids, positions |
-| `Image { id, rect, fit }` | An image from the store |
-| `PushClip { shape }` / `PushOpacity { alpha }` / `PushFilter { blur sigma }` | Layers, closed by `Pop` |
+| `Fill { shape, brush }` | A shape with a solid colour, gradient or image brush. Borders and the focus ring are even-odd paths |
+| `BlurRect { rect, radii, sigma, color, inset, bounds }` | A blurred rounded rect (shadows, glow, inner shadow), painted inside `bounds`. With `inset` it paints the inverse (`1 - coverage`) and always sits inside a `PushClip` of the box |
+| `Glyphs { run, origin, brush }` | A shaped glyph run from `gogo-ui-text`: font, size, variation coordinates and positioned glyph ids, relative to `origin` |
+| `Image { id, rect, fit }` | An image from the store, wrapped by the scene in a `PushClip` of the node's shape because `Cover` crops |
+| `PushClip { shape }` / `PushOpacity { alpha }` / `PushFilter { sigma }` | Layers, closed by `Pop`. A `PushFilter` wraps exactly one primitive |
 | `Backdrop { shape, sigma }` | Blur whatever is already drawn under `shape` (§3) |
+
+The list also carries `images`, the table behind each `ImageId` (an `ImageKey`: a handle, an
+asset path or a noise seed), and the frame's `background`. A renderer looks images up in an
+`ImageStore` by key and caches under the key, because an `ImageId` is only valid for its own
+list. `Renderer::render(&DisplayList, &dyn ImageStore, scale, &mut Surface)` draws a list.
 
 **Paint order per node:**
 1. shadows;
 2. glow;
 3. backdrop;
-4. fill;
+4. fill, and the node's image or icon;
 5. noise;
 6. scanlines;
 7. reflection;
@@ -43,6 +48,11 @@ table.
 10. the node's own text runs (after the border, so a border never covers text);
 11. children;
 12. focus ring.
+
+The effects of one node are drawn in this fixed order, not in the order the skin wrote them.
+A scroll container's children are drawn inside a `PushClip` of its box. A node with
+`opacity` below 1 is one `PushOpacity` layer with its children, and `Paint::offset` moves the
+node and its descendants without touching layout.
 
 App-owned widgets are appended after the skin's tree, so they are always on top (S7).
 
@@ -55,9 +65,9 @@ Units follow CSS (design 27 §6): a shadow, glow or bloom radius r is a Gaussian
 |---|---|---|
 | Shadow, glow | `BlurRect` (blurred rounded rect) | same |
 | Inner shadow | `BlurRect` with `inset` (inverted, clipped to the box) | same |
-| Text bloom | `PushFilter(blur)` over the glyph runs, then the sharp text | same (a native filter layer) |
+| Text bloom | one `PushFilter(blur)` layer around *each* glyph run (one primitive per layer, §5), then the sharp text | same (a native filter layer) |
 | Gradient | peniko gradient brush | same |
-| Noise | a tiled noise image brush | same |
+| Noise | a tiled noise image brush; the tile is `ImageKey::Noise { seed }`, made by `noise_tile(seed)` | same |
 | Scanlines | thin black fills, one every `period` px at the given alpha, clipped to the box | same; **no mask layers** (§5) |
 | Reflection | a glass sheen: a white linear gradient fill over the box at the given angle, fading out before the middle (not a mirror) | same |
 | Backdrop blur | §3 | §3 |

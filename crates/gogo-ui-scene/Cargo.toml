@@ -10,3 +10,5 @@ license.workspace = true
 gogo-ui-ir.workspace = true
 gogo-ui-layout.workspace = true
 gogo-ui-text.workspace = true
+kurbo.workspace = true
+peniko.workspace = true
