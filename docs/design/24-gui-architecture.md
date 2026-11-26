@@ -106,7 +106,7 @@ flowchart LR
 | `gogo-gui-model` | The app layer (design 25): sources, dispatch, the safety flow, jobs | `Model`, `trait Backend`, `SourceStore`, `SafetyFlow`, `JobTable`, its own `Invocation` and `Effect` types (`gogo-gui` translates them from and to the engine's), `FakeBackend` behind the `fake` feature; later, the persistence of each skin's `ui` values | — |
 | `gogo-skins` | Built-in skins as data | `builtin()`, `default()`: each skin as a name and a static list of `(path, bytes)` embedded with `include_bytes!`, the shape `SkinPackage::from_files` takes. The Default skin is `crates/gogo-skins/skins/default/` | — |
 | `gogo-gui` | The binary: wires gogo-core in, owns the tokio runtime, picks a renderer | bin `gogo-gui`, `CoreBackend: Backend` | tokio, image (`jpeg`, `webp`) |
-| `gogo-gui-testkit` | Test support, dev-dependency only | `FixtureScope` (fictional data a skin binds against), procedural covers, golden compare, headless render | png |
+| `gogo-gui-testkit` | Test support, dev-dependency only | `FixtureScope` (a skin scope over `gogo-gui-model`'s fixture data), `covers`, golden compare, headless render | png |
 
 Built-in skins and bundled fonts live under `crates/`, because the nix package's source
 fileset is `Cargo.toml`, `Cargo.lock`, `crates/` and `compat/` (`nix/app.nix`).
@@ -240,7 +240,7 @@ wgpu's GL backend needs a loadable `libEGL.so.1` on the library path.
   - Nothing GUI-specific is in the dev shell beyond the SDK.
   - Builds must stay warning-free (CI denies warnings, and §7 adds clippy on macOS).
 - **Never on the host display.** Once they exist, agents run the GUI only:
-  - headlessly, with `gogo-gui --render-png` (no window; PR E4), or
+  - headlessly, with `gogo-gui --render-png` (no window), or
   - inside the headless compositor of `scripts/gui-headless.sh` (Linux): sway in a
     sandbox with no host display, network or home folder, software rendering (lavapipe for
     the GPU path), screenshots under `target/gui-headless/`, or
@@ -286,8 +286,9 @@ wgpu's GL backend needs a loadable `libEGL.so.1` on the library path.
   - A `gui-lavapipe` job runs the vello_gpu tests on ubuntu in the nix shell
     (`.#lavapipe`: the dev shell with Mesa's software Vulkan as the only Vulkan driver). It
     runs for the same changes as `gui`, and for the shell's own files.
-  - A `gui-headless` job runs `scripts/gui-headless.sh self-test` and shows the shell's
-    window in the headless compositor. It runs for the same changes as `gui-lavapipe`, and
+  - A `gui-headless` job runs `scripts/gui-headless.sh self-test`, then `gogo-gui` in the
+    headless compositor: hot reload on the GPU path (lavapipe) and the CPU path, and the
+    fallback without a Vulkan driver. It runs for the same changes as `gui-lavapipe`, and
     for the script, its tools and the helpers it borrows from the e2e harness.
   - All of it is wired into `CI result` (`ci-jobs.yml` names the three places).
   - The same job checks the dependency rules in §2.1 with `scripts/gui-deps-check.py`

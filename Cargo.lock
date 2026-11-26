@@ -2064,14 +2064,26 @@ dependencies = [
 name = "gogo-gui"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "gogo-contract",
  "gogo-core",
  "gogo-gui-model",
+ "gogo-gui-testkit",
  "gogo-render-cpu",
  "gogo-render-gpu",
  "gogo-skin",
  "gogo-skins",
+ "gogo-ui-ir",
+ "gogo-ui-layout",
+ "gogo-ui-scene",
  "gogo-ui-shell",
+ "gogo-ui-text",
+ "miette",
+ "png",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

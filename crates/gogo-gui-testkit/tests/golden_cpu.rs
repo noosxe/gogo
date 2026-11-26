@@ -3,23 +3,9 @@
 
 use std::path::Path;
 
-use gogo_gui_testkit::golden::{self, Tolerance};
+use gogo_gui_testkit::golden::{self, GOLDEN_TOLERANCE};
 use gogo_gui_testkit::scenes::{self, Scene};
 use gogo_render_cpu::CpuRenderer;
-
-/// What the goldens allow: a pixel may differ by up to 2 levels freely, 0.05% of the pixels
-/// by more, none by more than 8.
-///
-/// Measured: the ubuntu (x86_64) and macOS (arm64) runners draw all six goldens identically,
-/// and on x86_64 drawing at the baseline SIMD level instead of the detected one moves no
-/// pixel by more than 1 level. `level` is twice that; `share` and `max` leave a little room
-/// for a runner whose math library rounds differently.
-const TOLERANCE: Tolerance = Tolerance {
-    level: 2,
-    share: 0.0005,
-    max: 8,
-    mean: 0.1,
-};
 
 fn check(scene: Scene) {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/goldens");
@@ -31,7 +17,7 @@ fn check(scene: Scene) {
         let image = renderer
             .render_to_rgba(&scene.list, &scene.images, f64::from(scale))
             .unwrap_or_else(|e| panic!("{name}: {e}"));
-        match golden::check(&dir, &out, &name, &image, &TOLERANCE) {
+        match golden::check(&dir, &out, &name, &image, &GOLDEN_TOLERANCE) {
             Ok(diff) => println!("{name}: {diff}"),
             Err(e) => failures.push(e.to_string()),
         }

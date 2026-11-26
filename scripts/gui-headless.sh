@@ -18,6 +18,11 @@
 #     --timeout SECS           the whole run (120)
 #     --name NAME              names the output folder
 #
+# reload [options] -- GOGO_GUI
+#   the hot-reload check: starts GOGO_GUI on fictional data over a copy of the
+#   built-in skin, edits the copy, breaks it and mends it, with a screenshot of
+#   each (1-start, 2-edited, 3-broken, 4-mended). Takes run's options.
+#
 # self-test
 #   checks the sandbox, the screenshot and the teardown with a small Wayland
 #   client, so it needs no build.
@@ -28,7 +33,8 @@
 #
 # The sandbox has no network, no host sockets, no home folder and no host
 # graphics driver. Besides /nix it sees only the output folder and, read-only,
-# the repository's scripts/ and COMMAND itself: nothing else of the repository.
+# the repository's scripts/ and COMMAND itself (and for reload the built-in
+# skin): nothing else of the repository.
 # COMMAND must therefore be in the repository or /nix.
 set -euo pipefail
 
@@ -153,14 +159,76 @@ scenario_run() {
     stop_app
 }
 
+# Whether the top halves of two screenshots are the same pixels.
+same_top() { # a b
+    python3 -I -c '
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("helper", sys.argv[1])
+helper = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helper)
+a, b = (helper.read_png(p) for p in sys.argv[2:4])
+half = a[1] // 2
+sys.exit(a[:3] != b[:3] or a[3][:half] != b[3][:half])
+' "$HELPER" "$OUT/$1.png" "$OUT/$2.png"
+}
+
+# Waits until the screen differs from the screenshot BEFORE, then shoots it.
+shot_changed() { # name before
+    until shot "$1" && [ "$(helper diff "$OUT/$2.png" "$OUT/$1.png")" != '{"changed_pct": 0.0}' ]; do
+        app_alive || { log "the application ended (see app.log)"; return 1; }
+        sleep 0.1
+    done
+    settle "$1"
+}
+
+check() { # what command…
+    local what="$1"
+    shift
+    "$@" || { log "reload: $what"; return 1; }
+}
+
+scenario_reload() {
+    local skin="$OUT/skin/default" route
+    mkdir -p "$OUT/skin"
+    cp -r --no-preserve=mode "$REPO/crates/gogo-skins/skins/default" "$skin"
+    route="$skin/routes/game.kdl"
+    cp "$route" "$OUT/game.kdl.good"
+
+    start_app "$@" --fixture --dev "$skin"
+    wait_log "gui: skin loaded" || return 1
+    wait_log "gui: frame presented" || return 1
+    wait_shown 1-start || return 1
+
+    # A colour edit shows.
+    sed -i 's/accent "#7aa2ff"/accent "#ff7a45"/' "$skin/tokens.kdl"
+    wait_log "gui: skin reloaded" || return 1
+    shot_changed 2-edited 1-start || return 1
+
+    # A broken edit keeps the last good skin, with the error over it.
+    printf '\nnonsense {\n' >>"$route"
+    wait_log "gui: skin reload failed" || return 1
+    shot_changed 3-broken 2-edited || return 1
+    check "the broken edit changed the skin on screen" same_top 2-edited 3-broken || return 1
+    check "the error does not name the file" grep -qF "routes/game.kdl" "$OUT/app.log" || return 1
+
+    # Mended, the panel goes.
+    cp "$OUT/game.kdl.good" "$route"
+    wait_log "gui: skin reloaded" 2 || return 1
+    shot_changed 4-mended 3-broken || return 1
+    check "mending did not bring the edited skin back" \
+        test "$(changed "$OUT/2-edited.png" "$OUT/4-mended.png")" = 0 || return 1
+    stop_app
+    grep -F "gui: skin" "$OUT/app.log" >&2
+}
+
 inside() {
-    OUT="$1" SIZE="$2" RENDERER="$3" READY="$4"
-    shift 4
+    OUT="$1" SIZE="$2" RENDERER="$3" READY="$4" SCENARIO="$5"
+    shift 5
     start_sway
     check_isolation
     shot blank
     local status=0
-    scenario_run "$@" || status=1
+    "scenario_$SCENARIO" "$@" || status=1
     swaymsg exit >/dev/null 2>&1 || true
     wait "$SWAY_PID" 2>/dev/null || true
     exit "$status"
@@ -211,8 +279,10 @@ sandbox_command() {
     esac
 }
 
-cmd_run() {
-    local renderer=auto vulkan=1 size=1280x800 ready="gui: frame presented" timeout=120 name=run
+cmd_run() { # scenario [options] -- command…
+    local scenario="$1"
+    shift
+    local renderer=auto vulkan=1 size=1280x800 ready="gui: frame presented" timeout=120 name="$scenario"
     while [ $# -gt 0 ]; do
         case "$1" in
         --renderer) renderer="${2:?}"; shift 2 ;;
@@ -261,6 +331,11 @@ cmd_run() {
     case "$command" in
     "$REPO"/*) sandbox+=(--ro-bind "$command" "$command") ;;
     esac
+    # The reload check copies the built-in skin into its output folder.
+    if [ "$scenario" = reload ]; then
+        local builtin="$REPO/crates/gogo-skins/skins/default"
+        sandbox+=(--ro-bind "$builtin" "$builtin")
+    fi
     local env=(HOME="$OUT/home" PATH="$TOOLS/bin" LANG=C.UTF-8
         XDG_RUNTIME_DIR="$RUNTIME_DIR" XDG_CONFIG_HOME="$OUT/home/config"
         XDG_CACHE_HOME="$OUT/home/cache" XDG_DATA_HOME="$OUT/home/data"
@@ -278,7 +353,7 @@ cmd_run() {
         "$TOOLS/bin/timeout" --kill-after=5 "$timeout" \
         "$TOOLS/bin/env" -i "${env[@]}" \
         "$TOOLS/bin/bwrap" "${sandbox[@]}" \
-        "$TOOLS/bin/bash" "$SELF" __inside "$OUT" "$size" "$renderer" "$ready" "$command" "$@" \
+        "$TOOLS/bin/bash" "$SELF" __inside "$OUT" "$size" "$renderer" "$ready" "$scenario" "$command" "$@" \
         </dev/null &
     pid=$!
     trap 'kill -TERM "$pid" 2>/dev/null || true' INT TERM HUP
@@ -394,7 +469,7 @@ target" ] || st_fail "more of the repository than scripts/ is visible"
 cmd="$1"
 shift
 case "$cmd" in
-run) cmd_run "$@" ;;
+run | reload) cmd_run "$cmd" "$@" ;;
 self-test) cmd_self_test "$@" ;;
 __inside) inside "$@" ;;
 -h | --help | help) usage ;;
