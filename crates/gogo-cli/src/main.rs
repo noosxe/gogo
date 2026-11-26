@@ -238,8 +238,8 @@ fn default_filter(cli: &Cli) -> String {
         "warn".to_string()
     } else {
         match cli.verbose {
-            // gog-warp's lines below warn are never written ([`allowed`]); the
-            // directive keeps the filter's level hint honest.
+            // The `gog_warp` directive is redundant: [`allowed`] drops those
+            // lines whatever this filter says.
             0 => "info,gog_warp=warn",
             1 => "debug",
             _ => "trace",
