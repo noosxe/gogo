@@ -37,12 +37,17 @@
 
       packageFor = system:
         import ./nix/app.nix { pkgs = pkgsFor system; };
+
+      guiFor = system: args:
+        import ./nix/gui.nix ({ pkgs = pkgsFor system; } // args);
+
+      isLinux = nixpkgs.lib.hasSuffix "-linux";
     in
     {
       devShells = forAllSystems (system:
         { default = mkDevShell system { }; }
         # `nix develop .#lavapipe`: the GPU renderer's tests on software Vulkan.
-        // nixpkgs.lib.optionalAttrs (nixpkgs.lib.hasSuffix "-linux" system) {
+        // nixpkgs.lib.optionalAttrs (isLinux system) {
           lavapipe = mkDevShell system { lavapipe = true; };
         });
 
@@ -55,8 +60,11 @@
           default = gogo;
           inherit gogo;
         }
-        # scripts/gui-headless.sh's PATH (design 24 §5).
-        // nixpkgs.lib.optionalAttrs (nixpkgs.lib.hasSuffix "-linux" system) {
+        # The desktop GUI (nix/gui.nix), and scripts/gui-headless.sh's PATH
+        # (design 24 §5).
+        // nixpkgs.lib.optionalAttrs (isLinux system) {
+          gogo-gui = guiFor system { };
+          gogo-gui-fixture = guiFor system { fixture = true; };
           gui-headless-tools = import ./nix/gui-headless.nix { inherit pkgs; };
         }
         # x86_64 Linux: gogo for the Linux game lane, wrapped to run umu's
@@ -74,7 +82,8 @@
         });
 
       # `nixpkgs.overlays = [ gogo.overlays.default ]` (NixOS, home-manager):
-      # `pkgs.gogo`, and `pkgs.gogo-linux-app` on x86_64 Linux. Re-exports
+      # `pkgs.gogo`, `pkgs.gogo-gui` on Linux and `pkgs.gogo-linux-app` on x86_64
+      # Linux. Re-exports
       # `packages` rather than rebuilding against the consumer's `pkgs`: the
       # same store paths as `nix profile install`, and nothing depends on
       # which channel they're on (`steam.buildRuntimeEnv` in umu-python.nix
@@ -86,19 +95,30 @@
           system = prev.stdenv.hostPlatform.system;
           pick = name:
             self.packages.${system}.${name}
-              or (throw "gogo: no ${name} for ${system} (packages: ${nixpkgs.lib.concatStringsSep ", " systems}; gogo-linux-app: x86_64-linux)");
+              or (throw "gogo: no ${name} for ${system} (packages: ${nixpkgs.lib.concatStringsSep ", " systems}; gogo-gui: Linux; gogo-linux-app: x86_64-linux)");
         in
         {
           gogo = pick "gogo";
+          gogo-gui = pick "gogo-gui";
           gogo-linux-app = pick "gogo-linux-app";
         };
 
       # `nix run .` / `nix run github:noosxe/gogo`
+      # `nix run .#gogo-gui`, `nix run .#gogo-gui-fixture` (Linux): the desktop GUI.
       # `nix run .#gogo-linux-app` (x86_64 Linux): the Linux game lane's gogo.
       apps = forAllSystems (system: {
         default = {
           type = "app";
           program = "${packageFor system}/bin/gogo";
+        };
+      } // nixpkgs.lib.optionalAttrs (isLinux system) {
+        gogo-gui = {
+          type = "app";
+          program = "${self.packages.${system}.gogo-gui}/bin/gogo-gui";
+        };
+        gogo-gui-fixture = {
+          type = "app";
+          program = "${self.packages.${system}.gogo-gui-fixture}/bin/gogo-gui-fixture";
         };
       } // nixpkgs.lib.optionalAttrs (system == "x86_64-linux") {
         gogo-linux-app = {

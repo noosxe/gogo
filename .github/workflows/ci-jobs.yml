@@ -55,6 +55,7 @@ jobs:
       gui: ${{ steps.decide.outputs.gui }}
       gui_gpu: ${{ steps.decide.outputs.gui_gpu }}
       gui_headless: ${{ steps.decide.outputs.gui_headless }}
+      gui_package: ${{ steps.decide.outputs.gui_package }}
     steps:
       # On pull_request the action lists the PR's files through the API, so
       # no checkout. Every other event, and a PR with `ci:full`, runs
@@ -127,6 +128,15 @@ jobs:
               - 'scripts/ci-btrfs-tests.sh'
               - 'nix/devshell.nix'
               - 'nix/rust-toolchain.nix'
+            # What only gui-package builds with. Not the GUI's sources: the `gui`
+            # job tests those, and the runs of everything build the package.
+            package:
+              - 'nix/gui.nix'
+              - 'nix/gui-golden-check.py'
+              - 'nix/rust-common.nix'
+              - 'nix/rust-toolchain.nix'
+              - 'nix/app.nix'
+              - 'scripts/linux-e2e-helper.py'
             # The shell scripts, the e2e harness, its manifests and tools.
             scripts:
               - 'scripts/**'
@@ -175,6 +185,7 @@ jobs:
           needed gui gui
           needed gui_gpu gui gpu_shell
           needed gui_headless gui gpu_shell headless
+          needed gui_package package
 
   rustfmt:
     name: rustfmt
@@ -528,6 +539,22 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
+  # The desktop GUI's Nix packages (nix/gui.nix, design 24 §7): their tests and
+  # install checks run in the build sandbox. No Nix store cache, so each run is
+  # a from-scratch release build of both.
+  gui_package:
+    name: gui-package
+    needs: changes
+    if: needs.changes.outputs.gui_package == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: DeterminateSystems/determinate-nix-action@16f94ba7aae399b9f9077c254b6719ec6de7e3e3 # v3.24.2
+      - run: nix build -L --no-link .#gogo-gui .#gogo-gui-fixture
+
   ci-result:
     name: CI result
     # Never a condition that can skip it: a skipped required check counts
@@ -547,6 +574,7 @@ jobs:
       - gui
       - gui_gpu
       - gui_headless
+      - gui_package
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
@@ -563,7 +591,7 @@ jobs:
           failed=0
           for job in rustfmt clippy test deny snapshots_btrfs shellcheck \
             host_pass_fake linux_e2e_helper linux_e2e_self_test gui gui_gpu \
-            gui_headless; do
+            gui_headless gui_package; do
             wanted=$(jq -r --arg j "$job" '.changes.outputs[$j] // "missing"' <<<"$NEEDS")
             result=$(jq -r --arg j "$job" '.[$j].result // "missing"' <<<"$NEEDS")
             case "$wanted/$result" in

@@ -26,6 +26,9 @@ nix run github:noosxe/gogo -- --version
 nix profile install github:noosxe/gogo
 # Nix, x86_64 Linux: with the FHS env `linux-app` needs on NixOS (umu; ~1.5 GiB more)
 nix profile install github:noosxe/gogo#gogo-linux-app
+# Nix, Linux: the desktop GUI, a separate package (early, see below)
+nix run github:noosxe/gogo#gogo-gui
+nix profile install github:noosxe/gogo#gogo-gui
 
 # or build from source (Rust 1.99+)
 cargo install --locked --git https://github.com/noosxe/gogo
@@ -38,6 +41,12 @@ one, never both:** `gogo-linux-app` already contains gogo, and both ship
 `bin/gogo`, so listing both in one profile, `home.packages` or
 `environment.systemPackages` fails the build with a `collision between …`
 error (`nix build --dry-run` doesn't catch it).
+
+`gogo-gui` (Linux; `pkgs.gogo-gui` with the overlay) is the desktop GUI, still
+early: library and game pages, sign-in, downloads and Linux install. It installs
+beside either package above. It uses the system's GPU drivers where NixOS puts
+them (`/run/opengl-driver`); on other distributions the GPU renderer is untested
+and may need a wrapper such as nixGL, with the CPU renderer as the fallback.
 
 ### As a flake input (NixOS, home-manager)
 

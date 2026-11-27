@@ -232,8 +232,8 @@ wgpu's GL backend needs a loadable `libEGL.so.1` on the library path.
 - **Linux.**
   - winit dlopens wayland, libxkbcommon and the X11 libraries.
   - wgpu dlopens vulkan-loader and libEGL.
-  - The dev shell puts them on `LD_LIBRARY_PATH`. The nix package wraps the binary the same
-    way.
+  - The dev shell puts them on `LD_LIBRARY_PATH`. The nix package adds them to the
+    binary's RUNPATH instead, so nothing the GUI starts inherits them.
   - IME works through winit; X11 IME has open upstream bugs.
 - **macOS.**
   - Metal through wgpu, AppKit through winit, VoiceOver through accesskit_macos.
@@ -272,8 +272,18 @@ wgpu's GL backend needs a loadable `libEGL.so.1` on the library path.
   interactively; scripts that run the GUI clear them.
 - **`nix/app.nix` must change in PR B1.** Today it sets no `cargoBuildFlags`, so it builds
   the whole workspace, and GUI crates would land in the CLI package. PR B1 restricts it to
-  `-p gogo-cli` (and its tests to the CLI and core), so the CLI closure doesn't change. A
-  separate `gogo-gui` package (#552) wraps the runtime libraries.
+  `-p gogo-cli` (and its tests to the CLI and core), so the CLI closure doesn't change.
+- **GUI packages** (`nix/gui.nix`, #552, Linux only; aarch64 untested):
+  - `gogo-gui` builds without `fixture`. Its check phase runs the binary's CLI tests,
+    which turn `fixture` on for their own build and compare `--render-png` with the
+    goldens. Its install check runs `--version` and `--check-skin` on the installed
+    binary, and checks that `--render-png` is refused and that the RUNPATH is complete.
+  - `gogo-gui-fixture` is the same built with `fixture`; its command `gogo-gui-fixture`
+    always passes `--fixture`. `nix run .#gogo-gui-fixture` gives a host pass a window on
+    fictional data. Its install check draws a golden with the installed binary. It is
+    not in the overlay.
+  - CI's `gui-package` job builds both when the packaging files, the flake, the lockfiles
+    or the workflows change, and in every run of everything.
 - **CI:**
   - A `gui` path filter covers the GUI crates, `gogo-core` (core changes must still build
     the GUI) and the force files.
