@@ -871,28 +871,37 @@ impl Interaction {
                     && !n.a11y.disabled
             })
         };
+        // The focused node among its siblings: its place, and which of them are items.
         let focused = self
             .focus
             .as_ref()
             .and_then(|f| find(frame, f.layer, &f.key))
-            .map(|(_, node)| node)
-            .filter(is_item);
-        let next = match focused.and_then(|node| Some((node, layer.tree.parent(node)?))) {
-            Some((node, parent)) => {
-                let items: Vec<NodeId> = layer
-                    .tree
-                    .children(parent)
+            .and_then(|(_, node)| {
+                let children = layer.tree.children(layer.tree.parent(node)?);
+                let at = children.iter().position(|&c| c == node)?;
+                let items: Vec<(usize, NodeId)> = children
                     .iter()
                     .copied()
-                    .filter(is_item)
+                    .enumerate()
+                    .filter(|(_, c)| is_item(c))
                     .collect();
-                let at = items.iter().position(|&i| i == node);
-                at.and_then(|i| match step {
+                (!items.is_empty()).then_some((node, at, items))
+            });
+        let next = match focused {
+            Some((node, at, items)) if is_item(&node) => {
+                let i = items.iter().position(|&(place, _)| place == at);
+                i.and_then(|i| match step {
                     Step::Prev => i.checked_sub(1),
                     Step::Next => Some(i + 1),
                 })
-                .and_then(|i| items.get(i).copied())
+                .and_then(|i| items.get(i))
+                .map(|&(_, item)| item)
             }
+            // On a button at an end of the list: the row nearest to it.
+            Some((_, at, items)) => items
+                .into_iter()
+                .min_by_key(|&(place, _)| place.abs_diff(at))
+                .map(|(_, item)| item),
             // On nothing yet: the first item.
             None => layer.tree.focus_order().into_iter().find(is_item),
         };
