@@ -334,6 +334,22 @@ impl<B: Backend> Model<B> {
         self.flow.dismiss()
     }
 
+    /// Asked before the window closes. `true`: a job is running something that must
+    /// not be stopped, so the window stays and the app says why.
+    pub fn refuse_close(&mut self) -> bool {
+        if !self.jobs.unstoppable() {
+            return false;
+        }
+        self.flow.fail(ErrorView::new(
+            "Usage",
+            "The window stays open for now",
+            "a job is running something that can't be stopped half way",
+            "Close the window again once the job has ended",
+            "2",
+        ));
+        true
+    }
+
     /// Stop a job from the app's own control, whatever is on screen.
     pub fn cancel_job(&mut self, id: &JobId) {
         let (flow, mut engine) = self.split();

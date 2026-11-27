@@ -136,7 +136,11 @@ Live job sources update at most 10 times a second each, and keep only the newest
 `Job` = `{ id: JobId, kind: download|depot|update|setup|dlc_add|dlc_remove|saves|runtime_install|move|rollback|verify,
 game: GameSummary?, state: queued|running|paused|failed|done|cancelled, steps: List<Step{ name,
 state: done|now|pending|failed|asks_first, took: Duration? }>, bytes: Bytes, total: Bytes?, rate: Bytes, eta: Duration?, fraction: Fraction?,
-files: List<FileProgress{ name, bytes: Bytes, total: Bytes, chunks_done: Number, chunks_total: Number, state }>, error: ErrorView? }`.
+files: List<FileProgress{ name, bytes: Bytes, total: Bytes, chunks_done: Number, chunks_total: Number, state }>, error: ErrorView?, stoppable: Bool }`.
+
+While `stoppable` is false the job is in a step that must not be cut short: the app refuses
+`job.cancel` and `job.pause` for it and refuses to close its window, and a skin shows
+neither button.
 
 Every long-running action becomes a job. A skin may draw the step list as a list, a row of
 pads or a table of contents (§5: these are stock components).
@@ -269,8 +273,8 @@ on any other element.
 
 | Action | Params | Kind / tier | Notes |
 |---|---|---|---|
-| `game.build` | `id, platform, runtime?, renderer?, dlc?, lang?, build?` | plan → job / confirm | Choices not yet made open the app's picker. D3DMetal consent and Galaxy `ask` are app prompts |
-| `game.setup` | `id` | job / safe | |
+| `game.build` | `id, platform, runtime?, renderer?, dlc?, lang?, build?` | plan → job / confirm | Choices not yet made open the app's picker. D3DMetal consent, Galaxy `ask` and the other asked-once choices are app prompts, all asked before the plan card |
+| `game.setup` | `id` | plan → job / confirm | It can download a runtime and create a prefix. Its questions are asked before the plan card |
 | `game.move` | `id, target: default\|chosen` | plan → job / confirm; **destructive** across filesystems (snapshots are deleted) | The folder is chosen in the app's native dialog |
 | `game.remove` | `id, keep_override` | plan / **destructive** | Deletes prefix and saves; refused while running |
 | `apps.prune_orphaned` | `keep_override` | plan / **destructive** | |

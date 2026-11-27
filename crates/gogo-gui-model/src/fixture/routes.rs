@@ -155,6 +155,7 @@ fn job(j: Job) -> Value {
         ("fraction", num(j.bytes / j.total)),
         ("files", list(vec![])),
         ("error", Value::Null),
+        ("stoppable", Value::Bool(true)),
     ])
 }
 

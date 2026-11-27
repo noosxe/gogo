@@ -151,7 +151,6 @@ fn s5_every_action_is_classified() {
             "game.play",
             "game.verify",
             "game.open_folder",
-            "game.setup",
             "runner.set_renderer",
             "runner.next_renderer",
             "runner.set_display",

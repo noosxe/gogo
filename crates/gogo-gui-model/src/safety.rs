@@ -31,7 +31,7 @@ use crate::backend::{Backend, Run};
 use crate::call::{Call, Invocation};
 use crate::error::ErrorView;
 use crate::jobs::{JobId, JobState, JobTable, Transition};
-use crate::plan::{Plan, PlanHandle, PlanReply, PlanWait, Planned};
+use crate::plan::{Plan, PlanHandle, PlanReply, PlanWait, Planned, Planning};
 use crate::prompt::{PromptAnswer, PromptReply, PromptSpec};
 use crate::source::Signal;
 
@@ -261,7 +261,6 @@ const DIRECT: &[&str] = &[
     "game.play",
     "game.verify",
     "game.open_folder",
-    "game.setup",
     "runner.set_renderer",
     "runner.next_renderer",
     "runner.set_display",
@@ -358,12 +357,26 @@ impl Shown {
 struct Request {
     call: Call,
     answer: Option<PromptAnswer>,
+    /// The answers to what planning asked; kept for the check after a confirmation.
+    asked: Vec<PromptAnswer>,
+}
+
+impl Request {
+    fn new(call: Call, answer: Option<PromptAnswer>) -> Self {
+        Request {
+            call,
+            answer,
+            asked: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug)]
 enum Asking {
     /// An action asks before it plans.
     Action(Call),
+    /// Planning asks.
+    Planning(Request),
     /// A running job asks.
     Job { job: JobId, reply: PromptReply },
 }
@@ -519,11 +532,12 @@ impl SafetyFlow {
                 spec,
                 action: match asking {
                     Asking::Action(call) => Some(call.name()),
+                    Asking::Planning(request) => Some(request.call.name()),
                     Asking::Job { .. } => None,
                 },
                 job: match asking {
                     Asking::Job { job, .. } => Some(job),
-                    Asking::Action(_) => None,
+                    Asking::Action(_) | Asking::Planning(_) => None,
                 },
             },
             Stage::Planning {
@@ -654,7 +668,7 @@ impl SafetyFlow {
         engine: &mut Engine<'_, B>,
         call: Call,
     ) -> Outcome {
-        let request = Request { call, answer: None };
+        let request = Request::new(call, None);
         match route(request.call.spec()) {
             Route::Shell => Outcome::Ignored,
             Route::JobControl => self.control(engine, &request.call),
@@ -713,6 +727,12 @@ impl SafetyFlow {
                     "it removes data: start the action again to see what it would do now",
                 ));
             }
+        }
+        if matches!(call.name(), "job.cancel" | "job.pause") && !engine.jobs.stoppable(&id) {
+            return self.refuse(ErrorView::usage(
+                "This job can't be stopped now",
+                "stopping it here would leave it half done",
+            ));
         }
         let done = match call.name() {
             "job.cancel" => engine.jobs.cancel(&id),
@@ -785,7 +805,7 @@ impl SafetyFlow {
         request: Request,
         confirmed: Option<Shown>,
     ) {
-        let (reply, wait) = PlanReply::channel(Arc::clone(&self.signal));
+        let (reply, wait) = PlanReply::channel(Arc::clone(&self.signal), request.asked.clone());
         engine
             .backend
             .plan(&request.call, request.answer.as_ref(), reply);
@@ -932,10 +952,7 @@ impl SafetyFlow {
         let PreviewState::Ready(shown) = preview.state else {
             return Outcome::Ignored;
         };
-        let request = Request {
-            call: preview.call,
-            answer: None,
-        };
+        let request = Request::new(preview.call, None);
         self.agreed(engine, request, shown)
     }
 
@@ -1086,6 +1103,16 @@ impl SafetyFlow {
                 if !matches!(spec, PromptSpec::Plan(_)) && spec.accepts(&answer) =>
             {
                 match asking {
+                    Asking::Planning(mut request) => {
+                        // "No" is an answer here; cancelling is what gives up.
+                        if let Some(gate) = closed_gate(request.call.spec(), engine.backend.gates())
+                        {
+                            return self.refuse(gate_error(gate));
+                        }
+                        request.asked.push(answer);
+                        self.plan(engine, request, None);
+                        Outcome::Accepted
+                    }
                     Asking::Job { reply, .. } => {
                         reply.answer(answer);
                         self.advance();
@@ -1100,10 +1127,7 @@ impl SafetyFlow {
                         if let Some(gate) = closed_gate(call.spec(), engine.backend.gates()) {
                             return self.refuse(gate_error(gate));
                         }
-                        let request = Request {
-                            call,
-                            answer: Some(answer),
-                        };
+                        let request = Request::new(call, Some(answer));
                         self.plan(engine, request, None);
                         Outcome::Accepted
                     }
@@ -1183,7 +1207,7 @@ impl SafetyFlow {
                 .ok_or_else(busy)?;
             self.previews.remove(oldest);
         }
-        let (reply, wait) = PlanReply::channel(Arc::clone(&self.signal));
+        let (reply, wait) = PlanReply::channel(Arc::clone(&self.signal), Vec::new());
         engine.backend.plan(&call, None, reply);
         let ticket = self.ticket();
         self.previews.push(Inline {
@@ -1265,8 +1289,29 @@ impl SafetyFlow {
         }) = self.dialog.take()
         {
             self.signal.raise();
-            self.planned(engine, request, confirmed, result);
+            match result {
+                Planning::Done(result) => self.planned(engine, request, confirmed, result),
+                Planning::Ask(spec) => self.ask_for_plan(request, spec),
+            }
         }
+    }
+
+    /// Planning needs an answer first. A confirmation given before is forgotten: the
+    /// plan that follows is shown again.
+    fn ask_for_plan(&mut self, request: Request, spec: PromptSpec) {
+        if !matches!(
+            spec,
+            PromptSpec::Choice { .. } | PromptSpec::Confirm { .. } | PromptSpec::Text { .. }
+        ) {
+            return self.fail(ErrorView::failed(
+                "This action can't run",
+                "planning asked something the app can't answer",
+            ));
+        }
+        self.show(Stage::Prompt {
+            spec,
+            asking: Asking::Planning(request),
+        });
     }
 
     fn planned<B: Backend>(
@@ -1321,6 +1366,12 @@ impl SafetyFlow {
                 continue;
             };
             let Some(result) = wait.take() else {
+                continue;
+            };
+            // An inline preview can't ask, so a plan that needs an answer shows none.
+            let Planning::Done(result) = result else {
+                p.state = PreviewState::Empty;
+                self.signal.raise();
                 continue;
             };
             p.state = match judge(&p.call, result, gates) {

@@ -342,6 +342,7 @@ impl Fixture {
             ("fraction", num(0.62)),
             ("files", list(vec![])),
             ("error", Value::Null),
+            ("stoppable", Value::Bool(true)),
         ]);
         s.set_var(
             "queue.summary",

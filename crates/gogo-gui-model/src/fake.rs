@@ -111,6 +111,10 @@ pub struct FakeBackend {
     pub held: VecDeque<(&'static str, PlanReply)>,
     /// The question per action name.
     pub prompts: HashMap<&'static str, PromptSpec>,
+    /// What planning an action asks, in order, before it plans.
+    pub plan_questions: HashMap<&'static str, Vec<PromptSpec>>,
+    /// The answers each plan request came with.
+    pub plan_answers: Vec<Vec<PromptAnswer>>,
     /// Refuse every run with this.
     pub run_error: Option<ErrorView>,
     /// The actions planned, in order.
@@ -208,7 +212,14 @@ impl Backend for FakeBackend {
 
     fn plan(&mut self, call: &Call, _answer: Option<&PromptAnswer>, reply: PlanReply) {
         self.planned.push(call.name());
-        if self.hold_plans {
+        self.plan_answers.push(reply.answers().to_vec());
+        let next = self
+            .plan_questions
+            .get(call.name())
+            .and_then(|q| q.get(reply.answers().len()));
+        if let Some(question) = next {
+            reply.ask(question.clone());
+        } else if self.hold_plans {
             self.held.push_back((call.name(), reply));
         } else {
             self.reply(call.name(), reply);

@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use gogo_contract::PlanFacts;
 
 use crate::error::ErrorView;
+use crate::prompt::{PromptAnswer, PromptSpec};
 use crate::source::{Signal, lock};
 
 /// What one step of a plan does.
@@ -100,30 +101,57 @@ pub struct Planned {
     pub handle: PlanHandle,
 }
 
-type PlanResult = Result<Planned, ErrorView>;
+/// What the backend came back with.
+#[derive(Debug)]
+pub(crate) enum Planning {
+    Done(Result<Planned, ErrorView>),
+    /// It needs an answer before it can plan.
+    Ask(PromptSpec),
+}
 
 /// Where the backend puts one plan, from any thread. Dropping it unanswered is a failure.
 pub struct PlanReply {
-    cell: Arc<Mutex<Option<PlanResult>>>,
+    cell: Arc<Mutex<Option<Planning>>>,
     signal: Arc<Signal>,
+    answers: Vec<PromptAnswer>,
     sent: bool,
 }
 
 impl PlanReply {
-    pub(crate) fn channel(signal: Arc<Signal>) -> (PlanReply, PlanWait) {
-        let cell: Arc<Mutex<Option<PlanResult>>> = Arc::default();
+    pub(crate) fn channel(
+        signal: Arc<Signal>,
+        answers: Vec<PromptAnswer>,
+    ) -> (PlanReply, PlanWait) {
+        let cell: Arc<Mutex<Option<Planning>>> = Arc::default();
         let wait = PlanWait(Arc::clone(&cell));
         let reply = PlanReply {
             cell,
             signal,
+            answers,
             sent: false,
         };
         (reply, wait)
     }
 
+    /// The answers to the questions this planning has [`ask`](Self::ask)ed, in the
+    /// order asked.
+    pub fn answers(&self) -> &[PromptAnswer] {
+        &self.answers
+    }
+
     /// Hand the plan, or why there is none, to the model.
     pub fn send(mut self, result: Result<Planned, ErrorView>) {
-        self.put(result);
+        self.put(Planning::Done(result));
+    }
+
+    /// There is no plan without an answer to `spec`. The app asks it and plans the
+    /// same call again, with the answer at the end of [`answers`](Self::answers).
+    /// Cancelling it drops the request, so **plan nothing and store nothing** before
+    /// every question is answered and the plan is confirmed.
+    ///
+    /// Only a choice, a yes or no, or a line of text can be asked this way.
+    pub fn ask(mut self, spec: PromptSpec) {
+        self.put(Planning::Ask(spec));
     }
 
     /// Nobody waits for this plan any more: the user cancelled.
@@ -131,7 +159,7 @@ impl PlanReply {
         Arc::strong_count(&self.cell) == 1
     }
 
-    fn put(&mut self, result: PlanResult) {
+    fn put(&mut self, result: Planning) {
         self.sent = true;
         *lock(&self.cell) = Some(result);
         self.signal.raise();
@@ -141,10 +169,10 @@ impl PlanReply {
 impl Drop for PlanReply {
     fn drop(&mut self) {
         if !self.sent {
-            self.put(Err(ErrorView::failed(
+            self.put(Planning::Done(Err(ErrorView::failed(
                 "Planning failed",
                 "no plan came back",
-            )));
+            ))));
         }
     }
 }
@@ -157,10 +185,10 @@ impl fmt::Debug for PlanReply {
 
 /// The model's end. Dropping it abandons the request.
 #[derive(Debug)]
-pub(crate) struct PlanWait(Arc<Mutex<Option<PlanResult>>>);
+pub(crate) struct PlanWait(Arc<Mutex<Option<Planning>>>);
 
 impl PlanWait {
-    pub(crate) fn take(&self) -> Option<PlanResult> {
+    pub(crate) fn take(&self) -> Option<Planning> {
         lock(&self.0).take()
     }
 }
