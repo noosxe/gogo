@@ -184,6 +184,7 @@ pub(crate) struct Dialog {
     identity: Vec<u64>,
     /// Everything there is to read is on the card or on one of its pages.
     complete: bool,
+    error: bool,
     page: usize,
     pages: usize,
 }
@@ -918,6 +919,7 @@ impl Dialog {
             initial,
             identity: built.identity,
             complete,
+            error: matches!(content, Content::Error(_)),
             page: page_at,
             pages,
         })
@@ -931,6 +933,12 @@ impl Dialog {
     /// is not told it was presented.
     pub(crate) fn answerable(&self) -> bool {
         self.complete
+    }
+
+    /// Whether it is an error alert, which is closed only by a press made once it has
+    /// had time to be read.
+    pub(crate) fn is_error(&self) -> bool {
+        self.error
     }
 
     /// The page on screen, and how many there are.

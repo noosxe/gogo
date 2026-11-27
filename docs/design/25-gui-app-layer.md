@@ -264,7 +264,10 @@ app control is told apart by its `DrawnBy::App` part and tree key.
   - the screen had been up for at least 500 ms when it began.
 
   This covers every screen that is answered: plan cards (modal and inline), the strong
-  confirmation and prompts. Cancel and Esc need none of it.
+  confirmation and prompts. Cancel and Esc need none of it, except on an **error alert**:
+  closing one (Close, Esc, Enter on Close) takes the same press. An error can appear
+  between the two halves of a double Enter or Esc (a confirmation that is then refused, an
+  error queued behind a dialog), and the second half would dismiss it unread (S9).
 - **The plan the user confirmed is the plan that runs.** Confirming (after the strong
   confirmation, if the tier asks for one) re-plans and compares the plan, its facts, tier
   and input digest. Any difference shows the new plan, which needs confirming again; an
@@ -329,7 +332,9 @@ cancels none of them: only the user does. Fixed colours (#640).
   dialog says to enlarge it, its confirm is disabled and the model is not told it was
   presented.
 - **A dialog that can't be built** stays pending: a panel says so, nothing can answer it,
-  and Esc cancels it.
+  and Esc cancels it. If the panel can't be built either, an empty layer made at startup
+  takes its place, so that Esc still has something to reach.
+- **An error too large for the window** starts its wait all the same, so it can be closed.
 - **The typed title** can be typed, pasted (first line) or set through AccessKit. A title
   holding characters the user's keyboard can't type needs one of the last two, or can't
   be confirmed.
