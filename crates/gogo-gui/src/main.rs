@@ -27,6 +27,7 @@ mod data;
 mod dialog;
 mod page;
 mod panel;
+mod popup;
 mod render;
 #[cfg(test)]
 mod s1;

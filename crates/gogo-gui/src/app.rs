@@ -12,8 +12,13 @@
 //!
 //! Every screen of the safety flow is the app's own modal dialog ([`crate::dialog`]),
 //! wired in [`answer`]. None is cancelled except by the user.
+//!
+//! A skin's menus and selects open the app's popup ([`crate::popup`]) over the page. A
+//! safety screen or a panel always wins: it closes the popup, which does not come back.
 
 mod answer;
+#[cfg(test)]
+mod menus;
 #[cfg(test)]
 mod safety;
 
@@ -25,8 +30,9 @@ use std::time::{Duration, Instant};
 
 use gogo_contract::{Value, actions};
 use gogo_gui_model::{Effect, InputEvent, Invocation, Outcome, Ticket};
+use gogo_skin::ActionCall;
 use gogo_ui_a11y::A11yTree;
-use gogo_ui_interact::{Config, Frame as Layers, Intent, Interaction, Layer, Primary};
+use gogo_ui_interact::{Config, Frame as Layers, Intent, Interaction, Layer, PopupStack, Primary};
 use gogo_ui_scene::DisplayList;
 use gogo_ui_shell::accesskit::{ActionRequest, TreeUpdate};
 use gogo_ui_shell::{
@@ -38,6 +44,7 @@ use crate::data::{Data, Images};
 use crate::dialog::{self, Dialog};
 use crate::page::{DrawError, Page, Screen};
 use crate::panel::Panel;
+use crate::popup;
 use crate::{act, render};
 
 /// The route the window shows: it draws the model's route in its outlet.
@@ -69,13 +76,17 @@ fn say(line: std::fmt::Arguments<'_>) {
 struct View {
     /// The last screen that bound.
     screen: Option<Rc<Screen>>,
-    /// What is wrong, over it.
+    /// A menu or a select's list, over it.
+    popup: Option<Rc<popup::Drawn>>,
+    /// What is wrong, over them.
     panel: Option<Rc<Panel>>,
     /// The app's own dialog, over everything.
     dialog: Option<Rc<Dialog>>,
     /// The screen whose dialog could not be built: the panel stands for it.
     stuck: Option<Ticket>,
     scale: f64,
+    /// The window's size in logical px.
+    size: (f32, f32),
 }
 
 impl View {
@@ -83,6 +94,7 @@ impl View {
     fn layers(&self) -> Vec<Layer<'_>> {
         let screen = self.screen.iter().map(|s| s.layer());
         screen
+            .chain(self.popup.iter().map(|p| p.layer()))
             .chain(self.panel.iter().map(|p| p.layer()))
             .chain(self.dialog.iter().map(|d| d.layer()))
             .collect()
@@ -101,6 +113,8 @@ pub(crate) struct App {
     /// What `list` draws, not yet presented.
     pending: View,
     interaction: Interaction,
+    /// What is open over the page.
+    popups: PopupStack<popup::Open>,
     a11y: A11yTree,
     entry: Entry,
     /// Since when a dialog has been on the display.
@@ -147,6 +161,7 @@ impl App {
             shown: View::default(),
             pending: View::default(),
             interaction: Interaction::new(Config::new(PRIMARY)),
+            popups: PopupStack::default(),
             a11y: A11yTree::new(TITLE),
             entry: Entry::default(),
             since: None,
@@ -179,6 +194,8 @@ impl App {
             Ok(()) => {
                 self.problems.clear();
                 self.images_changed = true;
+                // It hung from a control of the old skin.
+                self.popups.clear();
                 say(format_args!("gui: skin {done} in {ms:.1} ms"));
             }
             Err(problems) => {
@@ -200,6 +217,9 @@ impl App {
         let mut out = format!("{:?}", self.problems);
         if let Some(screen) = &self.shown.screen {
             out += &format!("{:?}", screen.tree);
+        }
+        if let Some(popup) = &self.shown.popup {
+            out += &format!("{:?}", popup.tree());
         }
         if let Some(panel) = &self.shown.panel {
             out += &format!("{:?}", panel.tree());
@@ -236,6 +256,26 @@ impl App {
             return;
         }
         let route = self.data.location().route.clone();
+        let open = self.popups.top().map(|(id, _)| id);
+        match (open, self.shown.popup.clone()) {
+            (None, None) => self.act_on_page(intent),
+            (Some(id), Some(popup)) if popup.id == id => self.act_on_popup(&popup, intent),
+            // A popup is on its way to the display or off it: what was pressed was meant
+            // for what is still there, so it does nothing, but for Esc closing the popup.
+            _ => {
+                if matches!(intent, Intent::Dismiss { .. }) {
+                    self.popups.dismiss_top();
+                }
+            }
+        }
+        self.effects();
+        if self.data.location().route != route {
+            say(format_args!("gui: route {}", self.data.location().route));
+        }
+    }
+
+    /// What an intent asks of the page.
+    fn act_on_page(&mut self, intent: Intent) {
         match intent {
             Intent::Invoke {
                 action,
@@ -247,9 +287,20 @@ impl App {
                 let screen = self.shown.screen.clone();
                 let call = screen.as_ref().and_then(|s| s.actions.get(action));
                 let Some(call) = call else { return };
-                match act::invocation(call, &self.data.scope(), input.on) {
-                    Ok(invocation) => self.invoke(&invocation, act::number(provenance.event())),
-                    Err(e) => tracing::warn!("{}: {e}", call.location),
+                let input = gogo_skin::Input {
+                    on: input.on,
+                    value: None,
+                };
+                self.invoke_call(call, &input, act::number(provenance.event()));
+            }
+            Intent::Open { target, .. } => {
+                let screen = self.shown.screen.as_ref();
+                if let Some(page) = screen.map(|s| s.layer().id)
+                    && page == target.layer
+                {
+                    self.popups.clear();
+                    self.popups
+                        .open(popup::Open::new(page, target.key, self.shown.size));
                 }
             }
             Intent::Dismiss { provenance } => {
@@ -261,9 +312,44 @@ impl App {
             // Enter, holds and text belong to dialogs; no skin has a text field yet.
             _ => {}
         }
-        self.effects();
-        if self.data.location().route != route {
-            say(format_args!("gui: route {}", self.data.location().route));
+    }
+
+    /// What an intent asks of the popup `drawn`, which takes input alone.
+    fn act_on_popup(&mut self, drawn: &popup::Drawn, intent: Intent) {
+        match intent {
+            Intent::Dismiss { .. } => {
+                self.popups.dismiss_top();
+            }
+            Intent::Palette { provenance } => {
+                self.popups.clear();
+                self.invoke_named("palette.open", act::number(provenance.event()));
+            }
+            Intent::App {
+                target, provenance, ..
+            } => {
+                if matches!(target.key.as_str(), popup::EARLIER | popup::LATER) {
+                    if let Some(open) = self.popups.top_mut() {
+                        open.turn(&target.key);
+                    }
+                } else if let Some(choice) = drawn.choice(&target.key) {
+                    // Closed first: whatever the call raises is over the page.
+                    self.popups.clear();
+                    let input = gogo_skin::Input {
+                        on: None,
+                        value: choice.value.clone(),
+                    };
+                    self.invoke_call(&choice.call, &input, act::number(provenance.event()));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Runs a skin's call: of a control, or of a popup's entry.
+    fn invoke_call(&mut self, call: &ActionCall, input: &gogo_skin::Input, event: InputEvent) {
+        match act::invocation(call, &self.data.scope(), input) {
+            Ok(invocation) => self.invoke(&invocation, event),
+            Err(e) => tracing::warn!("{}: {e}", call.location),
         }
     }
 
@@ -372,6 +458,12 @@ impl App {
                 }
             }
         }
+        // A safety screen or a panel wins over a popup, for good.
+        if self.data.modal_ticket().is_some() || self.pending.panel.is_some() {
+            self.popups.clear();
+        }
+        self.pending.size = size;
+        self.pending.popup = self.build_popup(size);
         self.list = match &self.pending.screen {
             Some(screen) => {
                 // The ring goes where focus will be once this frame is presented: on the
@@ -381,6 +473,7 @@ impl App {
                     .focus_visible()
                     .filter(|t| {
                         self.pending.panel.is_none()
+                            && self.pending.popup.is_none()
                             && self.data.modal_ticket().is_none()
                             && t.layer == screen.layer().id
                     })
@@ -389,10 +482,49 @@ impl App {
             }
             None => DisplayList::blank(f64::from(size.0), f64::from(size.1)),
         };
+        if let Some(popup) = &self.pending.popup {
+            let focus = self
+                .interaction
+                .focus_visible()
+                .filter(|t| t.layer == popup.id)
+                .map(|t| t.key.as_str());
+            popup.draw(&mut self.list, focus);
+        }
         if let Some(panel) = &self.pending.panel {
             panel.draw(&mut self.list);
         }
         self.draw_dialog(size);
+    }
+
+    /// The open popup over the screen about to be shown. One that can't hang from it
+    /// any more is closed.
+    fn build_popup(&mut self, size: (f32, f32)) -> Option<Rc<popup::Drawn>> {
+        let (id, _) = self.popups.top()?;
+        let screen = self.pending.screen.clone();
+        let focus = self
+            .interaction
+            .focus()
+            .filter(|t| t.layer == id)
+            .map(|t| t.key.clone());
+        let fonts = &mut self.page.fonts;
+        let drawn = match (self.popups.top_mut(), screen) {
+            (Some(open), Some(screen)) if open.size == size => {
+                popup::Drawn::new(fonts, open, id, &screen, focus.as_deref())
+            }
+            _ => Ok(None),
+        };
+        match drawn {
+            Ok(Some(drawn)) => Some(Rc::new(drawn)),
+            Ok(None) => {
+                self.popups.clear();
+                None
+            }
+            Err(e) => {
+                tracing::error!("a popup could not be drawn: {e}");
+                self.popups.clear();
+                None
+            }
+        }
     }
 
     /// The pending frame is on the screen, since `at`. Returns whether to draw again.

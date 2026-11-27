@@ -414,6 +414,23 @@ cancels none of them: only the user does. Fixed colours (#640).
 - **Not drawn yet:** inline `plan-card` previews, so a skin's slot for one stays empty;
   toasts, so a confirmed plan that turned out empty closes without a word.
 
+### As built: popups (#546)
+
+- A skin `menu` or `select` opens the app's popup by the control, from the items and
+  options the binder kept, in fixed colours (#640). It is below the control, or above when
+  only that fits, and kept inside the window.
+- It starts on the menu's first item or the select's current option. Choosing closes it
+  and runs the control's call through the same `Model::invoke` as a button, so the same
+  checks, plan card and confirmation apply. A press opens, another chooses (S4).
+- **A safety screen or a panel always wins.** The page, then the popup, then the panel or
+  dialog: a modal ticket or a panel closes the popup, and it does not come back.
+- It also closes on Esc, a press outside, a route change, a skin reload, a window resize,
+  and when its control is gone or came to list something else.
+- Between opening and presentation, and between closing and the next frame, input does
+  nothing, but for Esc closing a popup that is opening.
+- Nothing scrolls yet: a long list shows a window of rows that follows focus, with a
+  button at an end that has more.
+
 ## 5. Jobs, progress and cancellation
 
 - **A strong confirmation covers one run.** `job.retry` and `job.resume` of a failed or
