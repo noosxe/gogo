@@ -13,16 +13,17 @@
 //! Fixed colours for now; styling them with a skin's tokens is a follow-up (#640).
 
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
+use std::ops::Range;
 
 use gogo_gui_model::{ConflictFile, ErrorView, Plan, PlanStep, Side, StepKind, Ticket};
 use gogo_ui_interact::{Layer, LayerId, LayerKind};
 use gogo_ui_ir::{
     A11y, ActionRef, Align, AppPart, Color, Dim, Direction, DrawnBy, Justify, Kind, Node, NodeId,
-    Paint, Role, Sides, Stroke, TextStyle, Tree, WidgetId,
+    Paint, Role, Sides, Stroke, TextMarks, TextStyle, Tree, WidgetId,
 };
-use gogo_ui_layout::{Laid, Scroll, Viewport, layout};
+use gogo_ui_layout::{Laid, Placed, Scroll, Viewport, layout};
 use gogo_ui_scene::{DisplayList, SceneState, build};
-use gogo_ui_text::FontSet;
+use gogo_ui_text::{FontSet, TextLayout};
 
 use crate::panel::PanelError;
 
@@ -44,6 +45,8 @@ pub(crate) const TYPED: &str = "dialog/typed";
 pub(crate) const HOLD_BUTTON: &str = "dialog/hold";
 /// The text field.
 pub(crate) const FIELD: &str = "dialog/field";
+/// The text inside it.
+const FIELD_TEXT: &str = "dialog/field/text";
 pub(crate) const OK: &str = "dialog/ok";
 pub(crate) const YES: &str = "dialog/yes";
 pub(crate) const NO: &str = "dialog/no";
@@ -79,6 +82,7 @@ const PRIMARY: Color = Color([0x2b, 0x50, 0xa8, 0xff]);
 const DANGER: Color = Color([0x8e, 0x2f, 0x2a, 0xff]);
 const FIELD_FILL: Color = Color([0x10, 0x12, 0x17, 0xff]);
 const RING: Color = Color([0x9d, 0xba, 0xff, 0xff]);
+const SELECTED: Color = Color([0x2b, 0x50, 0xa8, 0xff]);
 const TEXT: Color = Color([0xf5, 0xf5, 0xf5, 0xff]);
 const DIM: Color = Color([0xa6, 0xad, 0xbd, 0xff]);
 const WARN: Color = Color([0xff, 0xcf, 0x70, 0xff]);
@@ -122,21 +126,38 @@ pub(crate) enum Hold {
     Holding(f32),
 }
 
+/// A text field as it is drawn.
+#[derive(Clone, PartialEq, Default)]
+pub(crate) struct FieldView {
+    /// The text that would be answered: without a composition.
+    pub(crate) text: String,
+    /// The text on screen.
+    pub(crate) shown: String,
+    /// The selected bytes of `shown`.
+    pub(crate) selection: Range<usize>,
+    /// Where the caret is, while the field has focus.
+    pub(crate) caret: Option<usize>,
+    /// The IME's composition.
+    pub(crate) preedit: Option<Range<usize>>,
+    /// How far the text had moved left.
+    pub(crate) scroll: f32,
+}
+
 /// What a plan's dialog asks for.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub(crate) enum Ask {
     /// The plan card.
     Confirm,
     /// Type `want`.
     Typed {
         want: String,
-        typed: String,
+        typed: FieldView,
     },
     Hold(Hold),
 }
 
 /// What a dialog shows.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub(crate) enum Content {
     /// Waiting for a plan.
     Planning {
@@ -157,7 +178,7 @@ pub(crate) enum Content {
     },
     Text {
         label: String,
-        value: String,
+        value: FieldView,
     },
     Choice {
         label: String,
@@ -171,6 +192,80 @@ pub(crate) enum Content {
         picks: Vec<Option<Side>>,
     },
     Error(ErrorView),
+}
+
+// What the user typed, and what a screen says about their games and files, stays out of
+// `Debug` output: lengths and counts only.
+
+impl std::fmt::Debug for FieldView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FieldView")
+            .field("bytes", &self.text.len())
+            .field("shown_bytes", &self.shown.len())
+            .field("selection", &self.selection)
+            .field("caret", &self.caret)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for Ask {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Ask::Confirm => f.write_str("Confirm"),
+            Ask::Typed { want, typed } => f
+                .debug_struct("Typed")
+                .field("want_bytes", &want.len())
+                .field("typed", typed)
+                .finish(),
+            Ask::Hold(hold) => f.debug_tuple("Hold").field(hold).finish(),
+        }
+    }
+}
+
+impl std::fmt::Debug for Content {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Content::Planning { confirming } => f
+                .debug_struct("Planning")
+                .field("confirming", confirming)
+                .finish(),
+            Content::Plan { changed, ask, .. } => f
+                .debug_struct("Plan")
+                .field("changed", changed)
+                .field("ask", ask)
+                .finish_non_exhaustive(),
+            Content::Secret {
+                label,
+                field,
+                sign_in,
+            } => f
+                .debug_struct("Secret")
+                .field("label_bytes", &label.len())
+                .field("field", field)
+                .field("sign_in", sign_in)
+                .finish(),
+            Content::Text { label, value } => f
+                .debug_struct("Text")
+                .field("label_bytes", &label.len())
+                .field("value", value)
+                .finish(),
+            Content::Choice { label, options } => f
+                .debug_struct("Choice")
+                .field("label_bytes", &label.len())
+                .field("options", &options.len())
+                .finish(),
+            Content::YesNo { label } => f
+                .debug_struct("YesNo")
+                .field("label_bytes", &label.len())
+                .finish(),
+            Content::Conflicts { files, picks } => f
+                .debug_struct("Conflicts")
+                .field("files", &files.len())
+                .field("picks", &picks.len())
+                .finish(),
+            Content::Error(_) => f.write_str("Error"),
+        }
+    }
 }
 
 /// A dialog laid out over a window: while it is up only it takes input.
@@ -414,8 +509,8 @@ impl Builder {
         self.text(id, &format!("{key}/text"), label, colour)
     }
 
-    /// A one-line field. It has no caret: typing adds at the end.
-    fn field(&mut self, parent: NodeId, name: &str, value: &str) -> Result<(), PanelError> {
+    /// A one-line field.
+    fn field(&mut self, parent: NodeId, name: &str, field: &FieldView) -> Result<(), PanelError> {
         let mut node = Node::new(Kind::Box);
         node.layout.padding = sides(10.0);
         node.layout.min_height = Dim::Px(40.0);
@@ -432,15 +527,43 @@ impl Builder {
         });
         node.focus_paint = Some(paint);
         node.a11y = A11y::control(Role::TextInput, name);
-        node.a11y.value = Some(value.to_owned());
+        node.a11y.value = Some(field.text.clone());
         self.control(&mut node, FIELD);
         let id = self.add(parent, FIELD, node)?;
-        let (shown, colour) = if value.is_empty() {
+        let empty = field.shown.is_empty();
+        let (shown, color) = if empty {
             ("Type here", DIM)
         } else {
-            (value, TEXT)
+            (field.shown.as_str(), TEXT)
         };
-        self.text(id, "dialog/field/text", shown, colour)
+        let mut text = Node::new(Kind::Text {
+            text: shown.to_owned(),
+            style: field_style(color),
+        });
+        // As wide as the field, however long the text is.
+        text.layout.min_width = Dim::Px(0.0);
+        text.marks = Some(Box::new(TextMarks {
+            caret: field.caret.map(|at| if empty { 0 } else { at }),
+            selection: if empty { 0..0 } else { field.selection.clone() },
+            preedit: field.preedit.clone(),
+            scroll: field.scroll,
+            caret_color: TEXT,
+            selection_color: SELECTED,
+        }));
+        self.add(id, FIELD_TEXT, text)?;
+        Ok(())
+    }
+}
+
+/// The colour of what is typed.
+pub(crate) const FIELD_TEXT_COLOR: Color = TEXT;
+
+/// How a field's text is shaped: by the drawing and by the edit buffer alike.
+pub(crate) fn field_style(color: Color) -> TextStyle {
+    TextStyle {
+        size: 14.0,
+        color,
+        ..TextStyle::default()
     }
 }
 
@@ -666,7 +789,7 @@ fn buttons(
         Content::Plan { plan, ask, .. } => match ask {
             Ask::Confirm => b.button(at, CONFIRM, verb(plan), enabled_if(complete, MAIN))?,
             Ask::Typed { want, typed } => {
-                let matches = complete && typed.trim() == want;
+                let matches = complete && typed.text.trim() == want;
                 b.button(at, TYPED, verb(plan), enabled_if(matches, GRAVE))?;
             }
             Ask::Hold(_) => {
@@ -962,6 +1085,36 @@ impl Dialog {
         }
     }
 
+    /// The field's text node, with its layout and how far it is moved left.
+    fn field_text(&self) -> Option<(&Placed, &TextLayout, f32)> {
+        let node = self.tree.by_key(FIELD_TEXT)?;
+        let marks = self.tree.get(node)?.marks.as_deref()?;
+        let placed = self.laid.get(node)?;
+        let layout = self.laid.text(node)?;
+        let width = (placed.content.x1 - placed.content.x0) as f32;
+        let offset = marks.caret.unwrap_or(marks.selection.end);
+        Some((
+            placed,
+            layout,
+            layout.scroll_for(marks.scroll, offset, width),
+        ))
+    }
+
+    /// How far the field's text is moved left, to carry on from in the next frame.
+    pub(crate) fn field_scroll(&self) -> Option<f32> {
+        self.field_text().map(|(.., scroll)| scroll)
+    }
+
+    /// A point from the corner of the field's box as one in its text.
+    pub(crate) fn field_point(&self, x: f64, y: f64) -> Option<(f32, f32)> {
+        let field = self.laid.rect(self.tree.by_key(FIELD)?)?;
+        let (placed, _, scroll) = self.field_text()?;
+        Some((
+            (field.x0 + x - placed.content.x0) as f32 + scroll,
+            (field.y0 + y - placed.content.y0) as f32,
+        ))
+    }
+
     /// Adds the dialog's drawing to `list`, with the ring on the control `focus` names.
     pub(crate) fn draw(&self, list: &mut DisplayList, focus: Option<&str>) {
         let state = match focus.and_then(|key| self.tree.by_key(key)) {
@@ -982,6 +1135,35 @@ impl Dialog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_output_of_a_screen_holds_no_text() {
+        let typed = FieldView {
+            text: "hush".to_owned(),
+            shown: "hushed".to_owned(),
+            ..FieldView::default()
+        };
+        let screens = [
+            Content::Text {
+                label: "private".to_owned(),
+                value: typed.clone(),
+            },
+            Content::Plan {
+                plan: Plan::default(),
+                changed: false,
+                ask: Ask::Typed {
+                    want: "private".to_owned(),
+                    typed,
+                },
+            },
+        ];
+        let printed = format!("{screens:?}");
+        assert!(printed.contains("bytes: 4"), "{printed}");
+        assert!(
+            !printed.contains("hush") && !printed.contains("private"),
+            "{printed}"
+        );
+    }
 
     #[test]
     fn pages_fill_the_room_and_no_entry_is_lost() {

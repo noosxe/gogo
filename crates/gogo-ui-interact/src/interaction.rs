@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use gogo_ui_ir::{AppPart, DrawnBy, NodeId, Role};
 
+use crate::editing::Click;
 use crate::focus::FocusOrder;
 use crate::frame::{Frame, Identity, Layer, LayerId, LayerKind, Target, activatable, control};
 use crate::input::{Input, Key, Modifiers, PointerButton, Request, RequestKind};
@@ -87,7 +88,12 @@ struct Armed {
 /// Input state kept across frames.
 #[derive(Debug, Default)]
 pub struct Interaction {
-    config: Config,
+    pub(crate) config: Config,
+    /// The modifiers held, as last told.
+    pub(crate) mods: Modifiers,
+    /// The text field a pointer drag is selecting in.
+    pub(crate) drag: Option<Target>,
+    pub(crate) last_click: Option<Click>,
     latest: InputEvent,
     focus: Option<Target>,
     visible: bool,
@@ -124,7 +130,11 @@ fn signature(layer: &Layer<'_>, node: NodeId) -> Option<Signature> {
 }
 
 /// The layer and node a target names in this frame, if it can still take input.
-fn find<'a>(frame: &Frame<'a>, layer: LayerId, key: &str) -> Option<(&'a Layer<'a>, NodeId)> {
+pub(crate) fn find<'a>(
+    frame: &Frame<'a>,
+    layer: LayerId,
+    key: &str,
+) -> Option<(&'a Layer<'a>, NodeId)> {
     let layer = frame.layer(layer)?;
     Some((layer, layer.tree.by_key(key)?))
 }
@@ -296,7 +306,9 @@ impl Interaction {
                     self.edit(TextEdit::Insert(text), frame, &mut out);
                 }
             }
+            Input::Modifiers(mods) => self.mods = mods,
             Input::FocusLost => {
+                self.mods = Modifiers::default();
                 self.down.clear();
                 self.cancel_presses(&mut out);
             }
@@ -335,7 +347,8 @@ impl Interaction {
         }
     }
 
-    fn cancel_presses(&mut self, out: &mut Response) {
+    pub(crate) fn cancel_presses(&mut self, out: &mut Response) {
+        self.drag = None;
         self.pointer = None;
         self.space = None;
         self.armed = None;
@@ -507,6 +520,7 @@ impl Interaction {
         self.pointer_at = Some((x, y));
         self.hovered = control_at(frame, x, y);
         self.follow_pointer(out);
+        self.field_drag(x, y, frame, out);
     }
 
     fn pointer_down(
@@ -532,6 +546,7 @@ impl Interaction {
         if layer.tree.get(node).is_some_and(|n| n.a11y.focusable) {
             self.set_focus(Some(target.clone()), out);
         }
+        self.field_press(&target, (x, y), at, frame, out);
         let Some(signature) = signature(layer, node) else {
             return;
         };
@@ -549,6 +564,7 @@ impl Interaction {
     }
 
     fn pointer_up(&mut self, x: f64, y: f64, frame: &Frame<'_>, out: &mut Response) {
+        self.drag = None;
         self.pointer_at = Some((x, y));
         self.hovered = control_at(frame, x, y);
         self.end_hold_by(HoldBy::Pointer, out);
@@ -654,6 +670,9 @@ impl Interaction {
             && frame.modal().is_some_and(|layer| {
                 layer.kind == LayerKind::Dialog || self.field(frame).is_some()
             });
+        if self.field_key(key, mods, repeat, at, frame, out) {
+            return;
+        }
         match key {
             _ if paste => {
                 out.consumed = true;
@@ -700,17 +719,13 @@ impl Interaction {
                     self.activate_focus(key, at, frame, out);
                 }
             }
-            // Repeats: holding it clears the field.
-            Key::Backspace if !(mods.ctrl || mods.alt || mods.meta) => {
-                self.edit(TextEdit::Backspace, frame, out);
-            }
             Key::Char(_) if !repeat => self.shortcut(key, mods, at, frame, out),
             _ => {}
         }
     }
 
     /// The focused control, when it is a text field the app drew.
-    fn field(&self, frame: &Frame<'_>) -> Option<Target> {
+    pub(crate) fn field(&self, frame: &Frame<'_>) -> Option<Target> {
         let focus = self.focus.as_ref()?;
         let (layer, node) = find(frame, focus.layer, &focus.key)?;
         let n = layer.tree.get(node)?;
@@ -720,7 +735,7 @@ impl Interaction {
         .then(|| layer.target(node))?
     }
 
-    fn edit(&mut self, edit: TextEdit, frame: &Frame<'_>, out: &mut Response) {
+    pub(crate) fn edit(&mut self, edit: TextEdit, frame: &Frame<'_>, out: &mut Response) {
         if let Some(target) = self.field(frame) {
             out.consumed = true;
             self.visible = true;
@@ -728,7 +743,7 @@ impl Interaction {
         }
     }
 
-    fn provenance(&mut self, at: Duration) -> InputProvenance {
+    pub(crate) fn provenance(&mut self, at: Duration) -> InputProvenance {
         InputProvenance {
             event: self.number(),
             at,

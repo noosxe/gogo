@@ -4,12 +4,14 @@
 use gogo_ui_interact::{Input, Key, Modifiers, PointerButton};
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, MouseButton, WindowEvent};
-use winit::keyboard::{Key as WinitKey, ModifiersState, NamedKey};
+use winit::keyboard::{Key as WinitKey, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 
 /// What translating needs to remember between events.
 #[derive(Debug, Default)]
 pub(crate) struct Translator {
     modifiers: ModifiersState,
+    /// Keys down that were read by where they are, to be let go of as the same key.
+    chords: Vec<(PhysicalKey, Key)>,
     /// The last position of the pointer in the window, in logical px.
     pointer: Option<(f64, f64)>,
 }
@@ -20,7 +22,7 @@ impl Translator {
         match event {
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
-                None
+                Some(Input::Modifiers(held(self.modifiers)))
             }
             WindowEvent::CursorMoved { position, .. } => Some(self.moved(*position, scale)),
             WindowEvent::CursorLeft { .. } => {
@@ -32,10 +34,17 @@ impl Translator {
                 event,
                 is_synthetic,
                 ..
-            } => self.key(&event.logical_key, event.state, event.repeat, *is_synthetic),
+            } => self.key(
+                &event.logical_key,
+                event.physical_key,
+                event.state,
+                event.repeat,
+                *is_synthetic,
+            ),
             WindowEvent::Focused(false) => {
                 // What was held is released somewhere else.
                 self.modifiers = ModifiersState::empty();
+                self.chords.clear();
                 Some(Input::FocusLost)
             }
             _ => None,
@@ -67,15 +76,48 @@ impl Translator {
     }
 
     fn key(
-        &self,
+        &mut self,
         key: &WinitKey,
+        physical: PhysicalKey,
         state: ElementState,
         repeat: bool,
         synthetic: bool,
     ) -> Option<Input> {
         // The platform makes up key events when the window gains or loses focus: they are
         // not presses.
-        (!synthetic).then(|| key_input(map_key(key), state, repeat, self.modifiers))
+        if synthetic {
+            return None;
+        }
+        let key = self.chord(map_key(key), physical, state);
+        Some(key_input(key, state, repeat, self.modifiers))
+    }
+
+    /// An editing chord on a layout that types other letters there (Cyrillic, Greek,
+    /// Armenian) is read by the key's place: Ctrl and the key left of V still copies.
+    fn chord(&mut self, key: Key, physical: PhysicalKey, state: ElementState) -> Key {
+        let kept = self.chords.iter().position(|(p, _)| *p == physical);
+        if state == ElementState::Released {
+            return kept.map_or(key, |i| self.chords.swap_remove(i).1);
+        }
+        if let Some(i) = kept {
+            self.chords.swap_remove(i);
+        }
+        let chord = self.modifiers.control_key() || self.modifiers.super_key();
+        let foreign = matches!(key, Key::Char(c) if !c.is_ascii());
+        let letter = match physical {
+            PhysicalKey::Code(KeyCode::KeyA) => 'a',
+            PhysicalKey::Code(KeyCode::KeyC) => 'c',
+            PhysicalKey::Code(KeyCode::KeyV) => 'v',
+            PhysicalKey::Code(KeyCode::KeyX) => 'x',
+            PhysicalKey::Code(KeyCode::KeyY) => 'y',
+            PhysicalKey::Code(KeyCode::KeyZ) => 'z',
+            _ => return key,
+        };
+        if !(chord && foreign) {
+            return key;
+        }
+        self.chords.push((physical, Key::Char(letter)));
+        Key::Char(letter)
     }
 
     fn button(&self, state: ElementState, button: MouseButton) -> Option<Input> {
@@ -97,15 +139,19 @@ fn key_input(key: Key, state: ElementState, repeat: bool, held: ModifiersState) 
     match state {
         ElementState::Pressed => Input::KeyDown {
             key,
-            mods: Modifiers {
-                ctrl: held.control_key(),
-                shift: held.shift_key(),
-                alt: held.alt_key(),
-                meta: held.super_key(),
-            },
+            mods: self::held(held),
             repeat,
         },
         ElementState::Released => Input::KeyUp { key },
+    }
+}
+
+fn held(held: ModifiersState) -> Modifiers {
+    Modifiers {
+        ctrl: held.control_key(),
+        shift: held.shift_key(),
+        alt: held.alt_key(),
+        meta: held.super_key(),
     }
 }
 
@@ -131,6 +177,9 @@ fn map_key(key: &WinitKey) -> Key {
             NamedKey::Space => Key::Space,
             NamedKey::Escape => Key::Escape,
             NamedKey::Backspace => Key::Backspace,
+            NamedKey::Delete => Key::Delete,
+            NamedKey::Home => Key::Home,
+            NamedKey::End => Key::End,
             NamedKey::Tab => Key::Tab,
             NamedKey::ArrowLeft => Key::ArrowLeft,
             NamedKey::ArrowRight => Key::ArrowRight,
@@ -261,11 +310,21 @@ mod tests {
 
     #[test]
     fn a_key_the_platform_made_up_is_dropped() {
-        let t = Translator::default();
+        let mut t = Translator::default();
         let enter = WinitKey::Named(NamedKey::Enter);
-        assert_eq!(t.key(&enter, ElementState::Pressed, false, true), None);
-        assert_eq!(t.key(&enter, ElementState::Released, false, true), None);
-        assert!(t.key(&enter, ElementState::Pressed, false, false).is_some());
+        let place = PhysicalKey::Code(KeyCode::Enter);
+        assert_eq!(
+            t.key(&enter, place, ElementState::Pressed, false, true),
+            None
+        );
+        assert_eq!(
+            t.key(&enter, place, ElementState::Released, false, true),
+            None
+        );
+        assert!(
+            t.key(&enter, place, ElementState::Pressed, false, false)
+                .is_some()
+        );
     }
 
     #[test]
@@ -288,5 +347,27 @@ mod tests {
             Some(Input::FocusLost)
         );
         assert_eq!(t.translate(&WindowEvent::Focused(true), 1.0), None);
+    }
+
+    #[test]
+    fn a_chord_on_a_foreign_layout_is_read_by_the_keys_place() {
+        let mut t = Translator::default();
+        let v = PhysicalKey::Code(KeyCode::KeyV);
+        let foreign = Key::Char('м');
+        let down = ElementState::Pressed;
+        let up = ElementState::Released;
+        assert_eq!(t.chord(foreign, v, down), foreign, "typing is left alone");
+        assert_eq!(t.chord(foreign, v, up), foreign);
+        t.modifiers = ModifiersState::CONTROL;
+        assert_eq!(t.chord(foreign, v, down), Key::Char('v'));
+        assert_eq!(t.chord(foreign, v, down), Key::Char('v'), "repeating");
+        // Ctrl is let go first: the release is still of the same key.
+        t.modifiers = ModifiersState::empty();
+        assert_eq!(t.chord(foreign, v, up), Key::Char('v'));
+        assert_eq!(t.chord(foreign, v, up), foreign);
+        // A layout with Latin letters keeps its own.
+        t.modifiers = ModifiersState::CONTROL;
+        assert_eq!(t.chord(Key::Char('k'), v, down), Key::Char('k'));
+        assert_eq!(map_key(&WinitKey::Named(NamedKey::Delete)), Key::Delete);
     }
 }

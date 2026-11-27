@@ -1022,3 +1022,121 @@ fn under_a_dialog_the_page_takes_nothing() {
     assert_eq!(app.page.ui("tab"), Some(&Value::str("overview")));
     assert_eq!(screen(&app), "card");
 }
+
+/// A press of `key` with the platform's shortcut modifier.
+fn chord(app: &mut App, key: char, shift: bool, ms: u64) {
+    let mods = Modifiers {
+        ctrl: cfg!(not(target_os = "macos")),
+        meta: cfg!(target_os = "macos"),
+        shift,
+        ..Modifiers::default()
+    };
+    let key = Key::Char(key);
+    app.input(
+        Input::KeyDown {
+            key,
+            mods,
+            repeat: false,
+        },
+        at(ms),
+    );
+    app.input(Input::KeyUp { key }, at(ms + 1));
+    see(app, ms + 2);
+}
+
+fn type_text(app: &mut App, text: &str, ms: u64) {
+    app.input(Input::Text(text.to_owned()), at(ms));
+    see(app, ms + 1);
+}
+
+fn copied(app: &mut App) -> Option<String> {
+    app.copied().map(|text| text.as_str().to_owned())
+}
+
+fn field_text(app: &App) -> String {
+    app.entry.buffer.as_ref().expect("a field").text()
+}
+
+#[test]
+fn a_field_is_edited_at_its_caret_and_copied_from() {
+    let (mut app, answered) = app_with_text_prompt();
+    see(&mut app, 1000);
+    click_field(&mut app, "Name", 1100);
+    assert_eq!(copied(&mut app), None, "a click copies nothing");
+    tap(&mut app, Key::Home, 1110);
+    type_text(&mut app, "A ", 1120);
+    assert_eq!(field_text(&app), "A before");
+    chord(&mut app, 'a', false, 1130);
+    chord(&mut app, 'c', false, 1140);
+    assert_eq!(copied(&mut app).as_deref(), Some("A before"));
+    assert_eq!(copied(&mut app), None, "handed over once");
+    chord(&mut app, 'x', false, 1150);
+    assert_eq!(copied(&mut app).as_deref(), Some("A before"));
+    assert_eq!(field_text(&app), "");
+    chord(&mut app, 'c', false, 1160);
+    assert_eq!(copied(&mut app), None, "nothing selected");
+    chord(&mut app, 'z', false, 1170);
+    assert_eq!(field_text(&app), "A before");
+    chord(&mut app, 'z', true, 1180);
+    assert_eq!(field_text(&app), "");
+    // Pasted where the caret is.
+    type_text(&mut app, "[]", 1190);
+    tap(&mut app, Key::ArrowLeft, 1200);
+    chord(&mut app, 'v', false, 1600);
+    app.pasted(Some(Zeroizing::new("in".to_owned())));
+    see(&mut app, 1610);
+    assert_eq!(field_text(&app), "[in]");
+    assert!(heard(&mut app, "[in]"));
+    click(&mut app, "OK", 1700);
+    assert_eq!(
+        answers(&answered),
+        [Some(PromptAnswer::Text("[in]".to_owned()))]
+    );
+}
+
+#[test]
+fn a_long_value_stays_in_the_field_with_its_caret() {
+    let (mut app, _) = app_with_text_prompt();
+    see(&mut app, 1000);
+    click_field(&mut app, "Name", 1100);
+    let narrow = bounds(&mut app, Role::TextInput, "Name");
+    type_text(&mut app, &"m".repeat(200), 1110);
+    assert_eq!(bounds(&mut app, Role::TextInput, "Name"), narrow);
+    assert!(app.entry.scroll > 0.0);
+    // A click at the left edge puts the caret into the part that is in view.
+    tap(&mut app, Key::Home, 1120);
+    assert_eq!(app.entry.scroll, 0.0);
+    assert!(app.shown.dialog.as_ref().is_some_and(|d| d.answerable()));
+}
+
+#[test]
+fn nothing_can_be_typed_edited_or_copied_on_the_secret_screen() {
+    let mut app = app();
+    let answered = job_asks(
+        &mut app,
+        PromptSpec::Secret {
+            label: "The key".to_owned(),
+        },
+    );
+    app.wake();
+    see(&mut app, 1000);
+    click(&mut app, "Paste", 1600);
+    app.pasted(Some(Zeroizing::new("sesame".to_owned())));
+    see(&mut app, 1610);
+    assert!(app.entry.buffer.is_none(), "no editor holds a secret");
+    type_text(&mut app, "typed", 1620);
+    for (i, key) in ['a', 'c', 'x', 'z', 'y'].into_iter().enumerate() {
+        chord(&mut app, key, false, 1630 + 10 * i as u64);
+        assert_eq!(copied(&mut app), None, "{key}");
+    }
+    tap(&mut app, Key::Delete, 1690);
+    assert!(app.entry.buffer.is_none());
+    assert!(!app.dump().contains("sesame"));
+    click(&mut app, "Send", 1700);
+    assert_eq!(
+        answers(&answered),
+        [Some(PromptAnswer::Secret(gogo_gui_model::Secret::new(
+            "sesame"
+        )))]
+    );
+}

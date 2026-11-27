@@ -1,5 +1,7 @@
 //! What the shell feeds in. Platform-neutral: the shell translates its own events.
 
+use std::fmt;
+
 use crate::frame::{Identity, LayerId};
 
 /// A pointer button.
@@ -36,6 +38,12 @@ pub enum Key {
     ArrowDown,
     /// Backspace.
     Backspace,
+    /// Delete, forward.
+    Delete,
+    /// Home.
+    Home,
+    /// End.
+    End,
     /// A key that types a character: what it types without Ctrl, Alt or Meta.
     Char(char),
     /// Any other key.
@@ -70,7 +78,7 @@ pub struct Modifiers {
 ///
 /// The shell does not forward key events the platform synthesizes (winit's
 /// `is_synthetic`, sent when the window gains or loses focus).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Input {
     /// The pointer moved.
@@ -118,6 +126,9 @@ pub enum Input {
     /// composed dead keys included. Sent after the press's [`Input::KeyDown`], and
     /// not while Ctrl or Meta is held. Only a focused text field takes it.
     Text(String),
+    /// The modifier keys held changed. A pointer press has no other way to tell
+    /// whether Shift was down.
+    Modifiers(Modifiers),
     /// The window stopped receiving input: presses and holds are cancelled.
     FocusLost,
     /// Assistive technology asked for something.
@@ -140,7 +151,7 @@ pub struct Request {
 }
 
 /// What assistive technology asks of a control.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RequestKind {
     /// Press it. Counts as real input.
@@ -149,4 +160,44 @@ pub enum RequestKind {
     Focus,
     /// Put this text in a text field.
     SetValue(String),
+}
+
+/// Never what was typed: it may be a password, and ends up in logs and test output.
+impl fmt::Debug for Input {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Input::PointerMoved { x, y } => write!(f, "PointerMoved({x}, {y})"),
+            Input::PointerLeft => f.write_str("PointerLeft"),
+            Input::PointerDown { button, x, y } => {
+                write!(f, "PointerDown({button:?}, {x}, {y})")
+            }
+            Input::PointerUp { button, x, y } => write!(f, "PointerUp({button:?}, {x}, {y})"),
+            // A character key is what was typed, too.
+            Input::KeyDown { key, mods, repeat } => {
+                write!(f, "KeyDown({:?}, {mods:?}, repeat: {repeat})", hidden(*key))
+            }
+            Input::KeyUp { key } => write!(f, "KeyUp({:?})", hidden(*key)),
+            Input::Text(text) => write!(f, "Text({} bytes)", text.len()),
+            Input::Modifiers(mods) => write!(f, "Modifiers({mods:?})"),
+            Input::FocusLost => f.write_str("FocusLost"),
+            Input::Accessibility(request) => write!(f, "Accessibility({request:?})"),
+        }
+    }
+}
+
+fn hidden(key: Key) -> Key {
+    match key {
+        Key::Char(_) => Key::Char('_'),
+        k => k,
+    }
+}
+
+impl fmt::Debug for RequestKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RequestKind::Activate => f.write_str("Activate"),
+            RequestKind::Focus => f.write_str("Focus"),
+            RequestKind::SetValue(value) => write!(f, "SetValue({} bytes)", value.len()),
+        }
+    }
 }

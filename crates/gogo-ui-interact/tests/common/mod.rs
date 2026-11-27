@@ -251,6 +251,8 @@ pub fn names(intents: &[Intent]) -> Vec<String> {
             Intent::Enter { .. } => "enter".to_owned(),
             Intent::Palette { .. } => "palette".to_owned(),
             Intent::Paste { .. } => "paste".to_owned(),
+            Intent::Copy { cut: false, .. } => "copy".to_owned(),
+            Intent::Copy { cut: true, .. } => "cut".to_owned(),
             Intent::Edit { target, edit } => format!("edit {} {edit:?}", target.key),
             other => format!("{other:?}"),
         })

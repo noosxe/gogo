@@ -273,6 +273,12 @@ pub trait ShellApp {
         false
     }
 
+    /// Text to put on the clipboard: what a copy or cut press took. Asked as
+    /// [`ShellApp::wants_paste`] is. `None` writes nothing.
+    fn copied(&mut self) -> Option<Zeroizing<String>> {
+        None
+    }
+
     /// The accessibility tree of what is on screen. The default is the window alone.
     fn accessibility_tree(&mut self) -> accesskit::TreeUpdate {
         a11y::window_only(&self.window().title)
