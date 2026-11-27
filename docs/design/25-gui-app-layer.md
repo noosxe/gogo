@@ -429,7 +429,11 @@ cancels none of them: only the user does. Fixed colours (#640).
 - Between opening and presentation, and between closing and the next frame, input does
   nothing, but for Esc closing a popup that is opening.
 - Nothing scrolls yet: a long list shows a window of rows that follows focus, with a
-  button at an end that has more.
+  button at an end that has more. It stays in the window: where there is no room beside
+  the control it covers it.
+- On real data the Default skin's "Open game folder" answers "unavailable", and its
+  renderer, runtime and display-mode selects are empty, until the backend runs those
+  actions (#703).
 
 ## 5. Jobs, progress and cancellation
 
