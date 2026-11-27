@@ -579,6 +579,110 @@ async fn too_little_space_is_refused_before_the_card() {
     assert!(rig.scratch.fake.ran().is_empty());
 }
 
+/// A rig whose server also serves one slow download of product 10.
+async fn downloading_rig() -> (Rig, wiremock::MockServer) {
+    use super::super::download::tests::{NEVER, product, serve};
+    let server = wiremock::MockServer::start().await;
+    product(&server, 10, &["aaa"], "1.0").await;
+    serve(&server, "aaa", [NEVER; 3]).await;
+    let scratch = Scratch::new();
+    let backend = scratch.backend(Endpoints::at(&server.uri()), u64::MAX);
+    let installs = backend.installs();
+    let rig = Rig {
+        model: Model::new(backend, || {}),
+        installs,
+        scratch,
+        input: 0,
+        now: Duration::ZERO,
+    };
+    (rig, server)
+}
+
+/// How often file bytes were asked for.
+async fn file_requests(server: &wiremock::MockServer) -> usize {
+    let requests = server.received_requests().await.expect("recording");
+    requests
+        .iter()
+        .filter(|r| r.url.path().starts_with("/cdn/"))
+        .count()
+}
+
+impl Rig {
+    async fn start_download(&mut self, id: u64) {
+        let before = self.ids().len();
+        let spec = actions::action("game.download").expect("an action");
+        let invocation = Invocation::new(spec).arg("id", Value::str(id.to_string()));
+        assert_eq!(self.invoke(&invocation), Outcome::Accepted);
+        self.shows("card").await;
+        self.confirm();
+        self.until("a download job", |r| r.ids().len() > before)
+            .await;
+    }
+}
+
+/// What `main` does once the window is gone: the install queued behind a download
+/// of its game must not start when that download stops.
+#[tokio::test(flavor = "multi_thread")]
+async fn closing_never_starts_an_install_that_waited_for_a_download() {
+    let (mut rig, _server) = downloading_rig().await;
+    rig.start_download(10).await;
+    rig.job_is(0, JobState::Running).await;
+    rig.start(10).await;
+    assert_eq!(rig.statuses()[1].state, JobState::Queued);
+    // Were it run, it would end at once and be counted.
+    rig.scratch.end.send(Ok(())).unwrap();
+
+    let downloads = rig.model.backend().downloads();
+    tokio::time::timeout(SOON, crate::core::shutdown(&downloads, &rig.installs))
+        .await
+        .expect("closed");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(rig.scratch.fake.ran().is_empty(), "it ran with no window");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_set_up_waits_for_a_download_of_its_game() {
+    let (mut rig, _server) = downloading_rig().await;
+    rig.start_download(10).await;
+    rig.job_is(0, JobState::Running).await;
+    rig.start(10).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(rig.statuses()[1].state, JobState::Queued);
+    assert!(rig.scratch.fake.ran().is_empty());
+
+    assert_eq!(rig.job("job.cancel", 0), Outcome::Accepted);
+    rig.running(1).await;
+    rig.scratch.end.send(Ok(())).unwrap();
+    rig.job_is(1, JobState::Done).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_download_waits_for_a_set_up_of_its_game() {
+    let (mut rig, server) = downloading_rig().await;
+    rig.start(10).await;
+    rig.running(1).await;
+    rig.start_download(10).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(rig.statuses()[1].state, JobState::Queued);
+    assert_eq!(file_requests(&server).await, 0, "not beside the set-up");
+
+    rig.scratch.end.send(Ok(())).unwrap();
+    rig.job_is(1, JobState::Running).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_download_and_a_set_up_of_different_games_run_together() {
+    let (mut rig, _server) = downloading_rig().await;
+    rig.start_download(10).await;
+    rig.job_is(0, JobState::Running).await;
+    rig.start(11).await;
+    rig.running(1).await;
+    assert_eq!(rig.statuses()[0].state, JobState::Running);
+    assert_eq!(rig.statuses()[1].state, JobState::Running);
+    rig.scratch.end.send(Ok(())).unwrap();
+    rig.job_is(1, JobState::Done).await;
+}
+
 /// Drawn, through the Default skin's Linux set-up tab.
 #[cfg(target_os = "linux")]
 mod drawn {

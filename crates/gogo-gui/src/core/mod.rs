@@ -52,6 +52,15 @@ pub(crate) enum SetupError {
     Client,
 }
 
+/// Stop the app's work once its window is gone.
+pub(crate) async fn shutdown(downloads: &Downloads, installs: &Installs) {
+    // Installs close first: a download that stops frees its game, and an install
+    // waiting for it must not take that as its turn.
+    installs.close();
+    downloads.shutdown().await;
+    installs.wait().await;
+}
+
 /// The engine as the user has it configured, shared with the CLI.
 pub(crate) fn parts() -> Result<Parts, SetupError> {
     // The message can quote a line of the file: name the problem by kind only.

@@ -395,10 +395,15 @@ impl Installs {
         }
     }
 
-    /// Stop what waits, and wait for a running pipeline to end: it can't be cut short
-    /// without leaving a game half set up. The app refuses to close while one runs, so
-    /// this waits only when the window went some other way.
+    /// [`close`](Self::close), then [`wait`](Self::wait).
+    #[cfg(test)]
     pub(crate) async fn shutdown(&self) {
+        self.close();
+        self.wait().await;
+    }
+
+    /// Start nothing more, and stop what can be stopped.
+    pub(crate) fn close(&self) {
         self.closing.store(true, Ordering::Release);
         for job in self.jobs() {
             let state = lock(&job.state);
@@ -408,6 +413,12 @@ impl Installs {
                 tracing::warn!("waiting for a set-up to end");
             }
         }
+    }
+
+    /// Wait for a running pipeline to end: it can't be cut short without leaving a
+    /// game half set up. The app refuses to close while one runs, so this waits only
+    /// when the window went some other way.
+    pub(crate) async fn wait(&self) {
         let mut going = self.going.subscribe();
         // The sender lives as long as `self`, so this only ends at zero.
         let _ = going.wait_for(|&n| n == 0).await;

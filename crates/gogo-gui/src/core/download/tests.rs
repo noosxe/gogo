@@ -25,7 +25,7 @@ use crate::data::Data;
 use crate::s1::Driven;
 
 /// Far longer than any test waits: a request that only a cancel ends.
-const NEVER: Duration = Duration::from_secs(60);
+pub(in crate::core) const NEVER: Duration = Duration::from_secs(60);
 const SOON: Duration = Duration::from_secs(20);
 /// Bytes of one file, in three chunks.
 const SIZE: usize = 15;
@@ -71,7 +71,7 @@ fn listing_sized(
     ResponseTemplate::new(200).set_body_raw(body, "application/json")
 }
 
-async fn product(server: &MockServer, id: u64, files: &[&str], version: &str) {
+pub(in crate::core) async fn product(server: &MockServer, id: u64, files: &[&str], version: &str) {
     Mock::given(path(format!("/products/{id}")))
         .and(header("authorization", format!("Bearer {ACCESS}").as_str()))
         .respond_with(listing(server, id, files, version))
@@ -120,7 +120,7 @@ fn chunk(name: &str, i: usize) -> ResponseTemplate {
 }
 
 /// Chunk `i` of file `name` answers after `delay`.
-async fn serve(server: &MockServer, name: &str, delays: [Duration; 3]) {
+pub(in crate::core) async fn serve(server: &MockServer, name: &str, delays: [Duration; 3]) {
     links(server, name).await;
     for (i, delay) in delays.into_iter().enumerate() {
         Mock::given(path(format!("/cdn/{name}")))
