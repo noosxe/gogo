@@ -26,6 +26,13 @@ pub struct PlanDoc {
     pub dest_name: String,
     /// Authoritative XML total_size (can exceed the API's — live-verified).
     pub total_size: u64,
+    /// The catalog's version and size of the file this was written for, so that a
+    /// local read can tell it from a later listing under the same file id. The
+    /// catalog's size can differ from `total_size`. Absent in older sidecars.
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub listed_size: Option<u64>,
     /// Chunk table: `from`/`to` inclusive, aligned with the bitmap bits.
     pub chunks: Vec<ChunkRow>,
 }
@@ -70,6 +77,8 @@ impl PlanDoc {
             file_id: file_id.to_owned(),
             dest_name: doc.name.clone(),
             total_size: doc.total_size,
+            version: None,
+            listed_size: None,
             chunks: doc
                 .chunks
                 .iter()
@@ -80,6 +89,22 @@ impl PlanDoc {
                     md5: c.md5.clone(),
                 })
                 .collect(),
+        }
+    }
+
+    /// Record what the catalog listed.
+    pub fn listed(mut self, size: u64, version: Option<String>) -> Self {
+        self.listed_size = Some(size);
+        self.version = version;
+        self
+    }
+
+    /// Whether this was written for the file listed with `size` and `version`. An
+    /// older sidecar says only its checksum size.
+    pub fn is_for(&self, size: u64, version: Option<&str>) -> bool {
+        match self.listed_size {
+            Some(listed) => listed == size && self.version.as_deref() == version,
+            None => self.total_size == size,
         }
     }
 
@@ -186,6 +211,19 @@ mod tests {
         let mut replaced = doc();
         replaced.total_size += 1;
         assert!(!plan.layout_matches(&replaced));
+    }
+
+    #[test]
+    fn a_sidecar_knows_which_listing_it_was_written_for() {
+        let plan = PlanDoc::from_checksum(7, None, "en1installer0", &doc());
+        // Without the listing: only the checksum size.
+        assert!(plan.is_for(10_485_760, Some("1.0")));
+        assert!(!plan.is_for(10_000_000, Some("1.0")));
+        // The catalog's size need not be the checksum's.
+        let plan = plan.listed(10_000_000, Some("1.0".into()));
+        assert!(plan.is_for(10_000_000, Some("1.0")));
+        assert!(!plan.is_for(10_485_760, Some("1.0")));
+        assert!(!plan.is_for(10_000_000, Some("2.0")));
     }
 
     #[test]

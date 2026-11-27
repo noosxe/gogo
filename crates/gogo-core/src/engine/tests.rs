@@ -23,7 +23,7 @@ impl TokenProvider for StaticToken {
     }
 }
 
-pub(super) struct TinySpace(u64);
+pub(super) struct TinySpace(pub(super) u64);
 impl FreeSpace for TinySpace {
     fn available_bytes(&self, _path: &std::path::Path) -> std::io::Result<u64> {
         Ok(self.0)

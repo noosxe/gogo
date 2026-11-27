@@ -1789,6 +1789,7 @@ async fn render_bars(
             id,
             name,
             total_bytes,
+            ..
         } => {
             let bar = target.add(ProgressBar::new(*total_bytes));
             bar.set_style(style.clone());

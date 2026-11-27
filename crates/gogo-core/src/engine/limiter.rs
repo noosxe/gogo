@@ -7,7 +7,7 @@
 //! *exactly*, even at the floor. `limit = 0` keeps `None` — no limiter object at all
 //! (zero overhead path).
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use governor::{DefaultDirectRateLimiter, Quota, RateLimiter};
 
@@ -34,12 +34,36 @@ pub fn split_ask(ask: u64, burst: u64) -> Vec<u64> {
 
 /// The shared limiter handle: `None` = unlimited (zero overhead).
 pub struct GlobalLimiter {
-    inner: Option<Arc<Direct>>,
-    burst: u64,
+    /// Swapped by [`GlobalLimiter::set_rate`], so a new rate reaches the workers
+    /// already holding the limiter.
+    inner: RwLock<Option<Limit>>,
     /// Callers inside [`GlobalLimiter::acquire`] on a limited rate, so a test can
     /// tell that one is waiting for budget.
     #[cfg(test)]
     waiting: std::sync::atomic::AtomicUsize,
+}
+
+/// One configured rate.
+#[derive(Clone)]
+struct Limit {
+    direct: Arc<Direct>,
+    burst: u64,
+}
+
+impl Limit {
+    fn new(bytes_per_second: u64) -> Option<Self> {
+        if bytes_per_second == 0 {
+            return None;
+        }
+        let rate = u32::try_from(bytes_per_second.min(u32::MAX as u64)).expect("clamped to u32");
+        let quota = Quota::per_second(rate.try_into().expect("> 0"));
+        // governor's default burst equals the refill rate; cap it at 1 MiB (04 §6).
+        let burst = bytes_per_second.clamp(1, MAX_BURST);
+        Some(Self {
+            direct: Arc::new(RateLimiter::direct(quota)),
+            burst,
+        })
+    }
 }
 
 impl GlobalLimiter {
@@ -50,24 +74,17 @@ impl GlobalLimiter {
 
     /// `bytes_per_second == 0` → unlimited.
     pub fn new(bytes_per_second: u64) -> Self {
-        if bytes_per_second == 0 {
-            return Self {
-                inner: None,
-                burst: 0,
-                #[cfg(test)]
-                waiting: Default::default(),
-            };
-        }
-        let rate = u32::try_from(bytes_per_second.min(u32::MAX as u64)).expect("clamped to u32");
-        let quota = Quota::per_second(rate.try_into().expect("> 0"));
-        // governor's default burst equals the refill rate; cap it at 1 MiB (04 §6).
-        let burst = bytes_per_second.clamp(1, MAX_BURST);
         Self {
-            inner: Some(Arc::new(RateLimiter::direct(quota))),
-            burst,
+            inner: RwLock::new(Limit::new(bytes_per_second)),
             #[cfg(test)]
             waiting: Default::default(),
         }
+    }
+
+    /// Change the rate while workers run (`0` → unlimited). An ask already
+    /// waiting finishes at the old rate.
+    pub fn set_rate(&self, bytes_per_second: u64) {
+        *self.inner.write().expect("limiter lock") = Limit::new(bytes_per_second);
     }
 
     pub fn unlimited() -> Self {
@@ -77,15 +94,16 @@ impl GlobalLimiter {
     /// Consume `ask` cells, splitting into ≤ burst-sized slices so governor never sees
     /// an over-capacity ask (A4). Unlimited → returns immediately.
     pub async fn acquire(&self, ask: u64) {
-        let Some(limiter) = &self.inner else {
+        let limit = self.inner.read().expect("limiter lock").clone();
+        let Some(Limit { direct, burst }) = limit else {
             return;
         };
         #[cfg(test)]
         let _waiting = Waiting::enter(&self.waiting);
-        for take in split_ask(ask, self.burst) {
+        for take in split_ask(ask, burst) {
             let cells = u32::try_from(take).expect("≤ burst ≤ 1 MiB");
             let cells = std::num::NonZero::new(cells).expect("split yields ≥ 1");
-            let _ = limiter.until_n_ready(cells).await;
+            let _ = direct.until_n_ready(cells).await;
         }
     }
 }
@@ -112,6 +130,19 @@ impl Drop for Waiting<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_new_rate_applies_to_a_limiter_already_shared() {
+        let limiter = Arc::new(GlobalLimiter::new(32 * 1024));
+        let held = Arc::clone(&limiter);
+        limiter.set_rate(0);
+        // At the old rate this would take over half a minute.
+        tokio::time::timeout(std::time::Duration::from_secs(5), held.acquire(1 << 20))
+            .await
+            .expect("unlimited after set_rate");
+        limiter.set_rate(1 << 30);
+        held.acquire(64 * 1024).await;
+    }
 
     #[test]
     fn split_never_exceeds_burst() {

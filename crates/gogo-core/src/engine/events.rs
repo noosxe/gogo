@@ -21,6 +21,9 @@ pub enum ProgressEvent {
         id: Uuid,
         name: String,
         total_bytes: u64,
+        /// Already on disk from an earlier run; `ChunkDone::file_bytes` counts
+        /// only what this run fetches.
+        done_bytes: u64,
     },
     ChunkDone {
         id: Uuid,

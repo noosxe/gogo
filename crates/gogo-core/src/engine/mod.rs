@@ -61,6 +61,10 @@ enum Outcome {
     Failed(DownloadError),
 }
 
+/// The `FileSkipped` reason when another run holds the destination: the file
+/// was not downloaded, so a frontend can report it as unfinished.
+pub const LOCKED_SKIP: &str = "destination locked by another gogo process";
+
 /// Build the work list: filters over catalog → `FileTask`s with plan-time statuses
 /// (`docs/design/04` §2). Review B4: O(1) per task — no checksum fetches, no file
 /// reads (a `stat` for skip-rule 1 is metadata only). Plan totals may overstate while
@@ -213,6 +217,51 @@ pub async fn strict_outdated(ctx: &Arc<AppContext>, bearer: &str, task: &FileTas
     }
 }
 
+/// The bytes of a file an earlier run left on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Partial {
+    /// The file's name, from the checksum document of that run.
+    pub name: String,
+    /// Bytes in chunks recorded as done.
+    pub done: u64,
+    /// The file's size in that checksum document.
+    pub total: u64,
+}
+
+/// What `task` has on disk from an earlier run: local reads only. The next run
+/// still checks the layout against a fresh checksum document (04 §3).
+pub fn partial(task: &FileTask) -> Option<Partial> {
+    let entries = std::fs::read_dir(&task.dir).ok()?;
+    entries.filter_map(Result::ok).find_map(|entry| {
+        let name = entry.file_name();
+        let dest = task.dir.join(name.to_str()?.strip_suffix(".part.json")?);
+        let plan = sidecar::load_plan(&dest)?;
+        let same = plan.product_id == task.product_id
+            && plan.dlc_id == task.dlc_id
+            && plan.file_id == task.file.id
+            // GOG keeps file ids across versions.
+            && plan.is_for(task.total_size, task.entry.version.as_deref());
+        if !same || !sidecar::part_path(&dest).is_file() {
+            return None;
+        }
+        let bitmap = sidecar::load_bitmap(&dest, plan.chunks.len());
+        let spans = plan.chunks.iter().map(|c| (c.id, c.from, c.to));
+        Some(Partial {
+            done: done_bytes(&bitmap, spans),
+            name: plan.dest_name,
+            total: plan.total_size,
+        })
+    })
+}
+
+/// Sum of the (inclusive) spans whose done-bit is set.
+fn done_bytes(bitmap: &[u8], spans: impl Iterator<Item = (u32, u64, u64)>) -> u64 {
+    spans
+        .filter(|(id, _, _)| sidecar::is_done(bitmap, *id))
+        .map(|(_, from, to)| (to + 1).saturating_sub(from))
+        .sum()
+}
+
 fn dir_contains(dir: &Path, suffix: &str) -> bool {
     std::fs::read_dir(dir)
         .map(|entries| {
@@ -241,10 +290,14 @@ pub async fn execute(ctx: &Arc<AppContext>, tasks: Vec<FileTask>) -> Summary {
 pub async fn execute_job(ctx: &Arc<AppContext>, scope: &JobScope, tasks: Vec<FileTask>) -> Summary {
     // D4: disk preflight — exit 6, nothing written.
     if ctx.disk_check {
+        // What a resumed file already holds is not needed a second time.
         let needed: u64 = tasks
             .iter()
             .filter(|t| !matches!(t.status, Status::Present))
-            .map(|t| t.total_size)
+            .map(|t| {
+                let done = partial(t).map_or(0, |p| p.done);
+                t.total_size.saturating_sub(done)
+            })
             .sum();
         if needed > 0 {
             let root = download_root(ctx);
@@ -457,9 +510,7 @@ async fn download_one_inner(
         .open(&part)?;
     {
         if dest_lock.try_lock().is_err() {
-            return Ok(Outcome::Skipped(
-                "destination locked by another gogo process".into(),
-            ));
+            return Ok(Outcome::Skipped(LOCKED_SKIP.into()));
         }
     }
 
@@ -488,21 +539,27 @@ async fn download_one_inner(
             });
             sidecar::save_plan(
                 &dest,
-                &PlanDoc::from_checksum(task.product_id, task.dlc_id, &task.file.id, &doc),
+                &PlanDoc::from_checksum(task.product_id, task.dlc_id, &task.file.id, &doc)
+                    .listed(task.total_size, task.entry.version.clone()),
             )?;
         }
         None => {
             sidecar::save_plan(
                 &dest,
-                &PlanDoc::from_checksum(task.product_id, task.dlc_id, &task.file.id, &doc),
+                &PlanDoc::from_checksum(task.product_id, task.dlc_id, &task.file.id, &doc)
+                    .listed(task.total_size, task.entry.version.clone()),
             )?;
         }
     }
 
+    let spans = chunks
+        .iter()
+        .map(|c| (c.spec.index, c.spec.start, c.spec.end));
     let _ = scope.events().send(ProgressEvent::FileStart {
         id: task.id,
         name: save_name.clone(),
         total_bytes: doc.total_size,
+        done_bytes: done_bytes(&sidecar::load_bitmap(&dest, chunks.len()), spans),
     });
 
     // B3/C5: bounded re-resolve loop. Budget = `network.retries`; a 404 link gets
@@ -709,13 +766,15 @@ pub fn append_record(
     {
         let mut state = ctx.state.lock().expect("state lock");
         // Replace-or-append keyed on identity (06 §3).
-        state.installs.retain(|r| {
-            !(r.product_id == record.product_id
-                && r.dlc_id == record.dlc_id
-                && r.file_id == record.file_id)
+        let saved = state.update(|state| {
+            state.installs.retain(|r| {
+                !(r.product_id == record.product_id
+                    && r.dlc_id == record.dlc_id
+                    && r.file_id == record.file_id)
+            });
+            state.installs.push(record);
         });
-        state.installs.push(record);
-        if let Err(e) = state.save() {
+        if let Err(e) = saved {
             tracing::error!("state save failed: {e}");
         }
     }

@@ -9,7 +9,7 @@ use crate::gog::catalog::Product;
 
 /// Cache base dir (`docs/design/06` §1; `GOGO_HOME` flattens).
 pub fn cache_dir() -> std::path::PathBuf {
-    if let Some(home) = std::env::var_os("GOGO_HOME") {
+    if let Some(home) = crate::state::gogo_home() {
         return std::path::PathBuf::from(home).join("cache");
     }
     dirs::cache_dir()
