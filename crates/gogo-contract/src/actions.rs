@@ -484,7 +484,7 @@ pub const ACTIONS: &[ActionSpec] = &[
     ),
     act(
         "game.download",
-        &[p("id", T::GameId), p("selection", T::Selection)],
+        &[p("id", T::GameId), o("selection", T::Selection)],
         PlanThenJob,
         Confirm,
     ),

@@ -252,7 +252,7 @@ on any other element.
 | Action | Params | Kind / tier | Notes |
 |---|---|---|---|
 | `game.play` | `id, exe?` | immediate / safe | Refused while running, or while setup or a DLC add is pending (the CLI's rule) |
-| `game.download` | `id, selection{os, lang, kinds, dlc}` | plan → job / confirm | The plan shows size and the disk check. Too little space → `Refused` (class DISK) |
+| `game.download` | `id, selection: {os, lang, kinds, dlc}?` | plan → job / confirm | Without a selection: installers for this system (Windows ones, with a warning, when the game has none) in the configured language, no extras and no DLC. The plan shows size and the disk check. Too little space → `Refused` (class Disk) |
 | `game.verify` | `id` | job / safe | Corrupt files end the job `failed` (class CORRUPT) and offer `game.verify_fix` |
 | `game.verify_fix` | `id` | plan → job / confirm | The plan lists files to re-download |
 | `game.open_folder` | `id, which: game\|prefix\|logs\|saves` | immediate / safe | The app resolves the path; the skin never sees it |

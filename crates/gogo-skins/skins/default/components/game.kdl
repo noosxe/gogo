@@ -88,6 +88,7 @@ component "game.files" {
     card title="Files" {
         row gap=@space.3 {
             spacer
+            button "Download" action="game.download" args="{$id}" style="primary"
             button "Verify files" action="game.verify" args="{$id}"
         }
         data-table label="Files" rows="{game.files($id)}" {
