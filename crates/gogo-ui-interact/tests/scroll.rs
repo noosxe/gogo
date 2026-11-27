@@ -438,3 +438,80 @@ fn under_a_dialog_the_page_does_not_scroll() {
     );
     assert_eq!(page(&d, &tree).offset(), 0.0);
 }
+
+/// A button, an 80 px container of five 40 px buttons and another button, all inside a
+/// container 100 px high: both containers scroll.
+fn nested_tree() -> Tree {
+    let mut style = LayoutStyle::default();
+    style.width = Dim::Px(800.0);
+    style.height = Dim::Px(600.0);
+    style.direction = Direction::Column;
+    let mut tree = Tree::new("root", Node::container().with_layout(style));
+    let root = tree.root();
+    tree.add_child(root, "top", button("top", 20)).expect("add");
+    let container = |height: f32| {
+        let mut node = Node::container();
+        node.layout.width = Dim::Px(200.0);
+        node.layout.height = Dim::Px(height);
+        node.layout.shrink = 0.0;
+        node.scroll = Some(ScrollSpec::default());
+        node
+    };
+    let outer = tree
+        .add_child(root, "outer", container(100.0))
+        .expect("add");
+    tree.add_child(outer, "above", button("above", 10))
+        .expect("add");
+    let inner = tree
+        .add_child(outer, "inner", container(80.0))
+        .expect("add");
+    for i in 0..5 {
+        tree.add_child(inner, format!("b{i}"), plain(i))
+            .expect("add");
+    }
+    tree.add_child(outer, "below", button("below", 11))
+        .expect("add");
+    tree
+}
+
+fn offsets(p: &Page) -> (f64, f64) {
+    let at = |key: &str| {
+        let node = p.tree.by_key(key).expect(key);
+        p.laid.scroll_box(node).expect("a box").offset
+    };
+    (at("outer"), at("inner"))
+}
+
+#[test]
+fn the_wheel_goes_on_to_the_outer_container_at_the_inner_ones_end() {
+    let tree = nested_tree();
+    let mut d = Driver::new();
+    let p = page(&d, &tree);
+    // Inside the inner container.
+    wheel(&mut d, &p, (50.0, 100.0), 1_000.0);
+    let p = page(&d, &tree);
+    assert_eq!(offsets(&p), (0.0, 120.0), "the inner one first, alone");
+    wheel(&mut d, &p, (50.0, 100.0), 1_000.0);
+    let p = page(&d, &tree);
+    assert_eq!(offsets(&p), (60.0, 120.0));
+    // And back the same way: the inner one, now higher up, then the outer.
+    wheel(&mut d, &p, (50.0, 60.0), -1_000.0);
+    let p = page(&d, &tree);
+    assert_eq!(offsets(&p), (60.0, 0.0));
+    wheel(&mut d, &p, (50.0, 60.0), -1_000.0);
+    assert_eq!(offsets(&page(&d, &tree)), (0.0, 0.0));
+}
+
+#[test]
+fn a_focus_move_brings_a_control_into_view_through_both_containers() {
+    let tree = nested_tree();
+    let mut d = Driver::new();
+    let p = page(&d, &tree);
+    assert_eq!(p.seen("b4"), 0.0);
+    on(&p, |f| d.assist(f, PAGE, "b4", RequestKind::Focus));
+    let p = page(&d, &tree);
+    let (outer, inner) = offsets(&p);
+    assert_eq!(inner, 120.0);
+    assert!(outer > 0.0 && outer <= 60.0, "{outer}");
+    assert_eq!(p.seen("b4"), 40.0, "wholly in view");
+}

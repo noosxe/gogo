@@ -613,6 +613,35 @@ pub(super) mod tests {
         frame(app);
     }
 
+    /// How far the route on the display is scrolled.
+    fn scrolled(app: &App) -> f64 {
+        let screen = app.shown.screen.as_ref().expect("a screen");
+        let main = screen.tree.by_name("main").expect("the route's container");
+        screen.laid.scroll_box(main).expect("a scroll box").offset
+    }
+
+    #[test]
+    fn going_back_restores_where_a_route_was_scrolled() {
+        let mut app = app();
+        click(&mut app, "nav-library", 1_000);
+        let (x, y) = (700.0, 500.0);
+        app.input(Input::Wheel { x, y, dy: 200.0 }, at(2_000));
+        frame(&mut app);
+        assert_eq!(scrolled(&app), 200.0);
+
+        let settings = bounds(&mut app, Role::Button, "Settings");
+        click_at(&mut app, settings, 3_000);
+        frame(&mut app);
+        assert_eq!(app.data.location().route, "settings");
+        assert_eq!(scrolled(&app), 0.0, "another route has its own offset");
+        app.input(Input::Wheel { x, y, dy: 20.0 }, at(4_000));
+        frame(&mut app);
+
+        key(&mut app, Key::Escape, 5_000);
+        assert_eq!(app.data.location().route, "library");
+        assert_eq!(scrolled(&app), 200.0);
+    }
+
     #[test]
     fn a_click_goes_to_a_route_and_esc_goes_back() {
         let mut app = app();
