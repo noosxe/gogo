@@ -25,6 +25,7 @@ pub mod game;
 pub mod icon;
 pub mod launcher;
 pub mod manage;
+pub mod preview;
 pub mod proton;
 pub mod protonfix;
 pub mod relocate;

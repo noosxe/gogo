@@ -538,6 +538,19 @@ pub fn prompt_spec(
     }
 }
 
+/// The Steam a `proton_dir` choice names, if it's installed. `steam`: the native
+/// one, else the only one there is.
+pub(super) fn root_for(choice: ProtonDir, roots: &[SteamRoot]) -> Option<&SteamRoot> {
+    match choice {
+        ProtonDir::Store => None,
+        ProtonDir::Steam => roots
+            .iter()
+            .find(|r| r.kind == SteamKind::Native)
+            .or(roots.first()),
+        ProtonDir::SteamFlatpak => roots.iter().find(|r| r.kind == SteamKind::Flatpak),
+    }
+}
+
 /// Where a new GE-Proton build goes: `None` for gogo's store, else the
 /// tools dir (created if its Steam is there but the dir isn't).
 ///
@@ -585,16 +598,10 @@ pub fn placement(
             choice
         }
     };
-    let root = match choice {
-        ProtonDir::Store => return Ok(None),
-        // `steam`: the native one, else the only one there is.
-        ProtonDir::Steam => roots
-            .iter()
-            .find(|r| r.kind == SteamKind::Native)
-            .or(roots.first()),
-        ProtonDir::SteamFlatpak => roots.iter().find(|r| r.kind == SteamKind::Flatpak),
-    };
-    let Some(root) = root else {
+    if choice == ProtonDir::Store {
+        return Ok(None);
+    }
+    let Some(root) = root_for(choice, &roots) else {
         emit(&ProgressEvent::Warn {
             message: format!(
                 "{KEY} = \"{}\" but no such Steam is installed: installing {} into \

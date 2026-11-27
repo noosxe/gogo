@@ -510,6 +510,12 @@ impl GameDirs {
     /// game recorded somewhere that isn't there is refused: a build would
     /// fill the mount point of a drive that isn't mounted.
     pub fn for_build(gogid: &str, library: Option<&Library>) -> Result<GameDirs, MacAppError> {
+        GameDirs::for_build_in(gogid, library.map(Library::dir))
+    }
+
+    /// [`for_build`](Self::for_build) from the library's dir alone, for a caller
+    /// that must not probe it ([`Library::resolve`] writes and removes a probe).
+    pub fn for_build_in(gogid: &str, library: Option<&Path>) -> Result<GameDirs, MacAppError> {
         let found = GameDirs::for_game(gogid)?;
         let recorded = recorded_location(gogid).is_some();
         if recorded && !found.root.is_dir() {
@@ -523,7 +529,7 @@ impl GameDirs {
         }
         let placed = recorded || found.root.symlink_metadata().is_ok();
         Ok(match library {
-            Some(l) if !placed => GameDirs::at(l.dir().join(gogid)),
+            Some(dir) if !placed => GameDirs::at(dir.join(gogid)),
             _ => found,
         })
     }

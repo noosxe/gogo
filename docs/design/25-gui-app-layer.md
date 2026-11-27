@@ -298,6 +298,10 @@ app control is told apart by its `DrawnBy::App` part and tree key.
   - The prompt is drawn with the same app-owned `prompt`/`picker`/`saves-conflicts`
     widgets as a skin-started prompt.
   - Cancel answers `None` or `Confirm::No`, and the pipeline stops without changes (S8).
+  - **Linux build and set-up ask before the confirm** (PR F4, #537). The core pipelines
+    store each answer as soon as they get it, so the GUI doesn't ask through them:
+    `linuxapp::preview` asks the same questions in the same order and writes nothing. The
+    answers stay in memory until the user confirms, then go to the pipeline.
 - **Secret input** (the sign-in code, revealing or editing an env value) stays inside
   depth-A app widgets. The value goes straight to the core and never enters a source or the
   binding scope (S1, S2).
