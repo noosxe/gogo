@@ -36,6 +36,7 @@ image.workspace = true
 jiff.workspace = true
 reqwest.workspace = true
 tokio = { workspace = true, features = ["sync"] }
+tokio-util.workspace = true
 zeroize.workspace = true
 miette.workspace = true
 png.workspace = true
@@ -51,6 +52,7 @@ wiremock.workspace = true
 # The S1 test checks that GOG's client secret reaches nothing either.
 gog-warp.workspace = true
 gogo-gui-testkit.workspace = true
+md-5.workspace = true
 tempfile.workspace = true
 log.workspace = true
 tracing-log.workspace = true

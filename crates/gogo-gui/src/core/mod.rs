@@ -2,12 +2,13 @@
 //! its children speak to the engine.
 //!
 //! Every [`Backend`] method returns at once: it spawns on the runtime, and what comes
-//! back is written to the source's slot, which wakes the UI. Reading only: plans,
-//! downloads and the rest come with later PRs.
+//! back is written to the source's slot, which wakes the UI. Downloads are the first
+//! thing it changes ([`download`]); installs and the rest come with later PRs.
 
 pub(crate) mod account;
 pub(crate) mod art;
 pub(crate) mod browser;
+mod download;
 mod engine;
 mod errors;
 mod local;
@@ -31,6 +32,7 @@ use tokio::runtime::Handle;
 use tokio::task::AbortHandle;
 use zeroize::Zeroizing;
 
+pub(crate) use download::Downloads;
 pub(crate) use engine::{Engine, Parts};
 #[cfg(test)]
 pub(crate) use local::{Local, Machine};
@@ -70,9 +72,11 @@ pub(crate) fn parts() -> Result<Parts, SetupError> {
         }),
         http,
         endpoints: Endpoints::default(),
-        language: cfg.gog.language,
+        language: cfg.gog.language.clone(),
         download_dir,
         browser: Arc::new(browser::SystemBrowser),
+        config: cfg,
+        free_space: Arc::new(gogo::engine::Fs4FreeSpace),
     })
 }
 
@@ -154,6 +158,21 @@ impl Shared {
         feed.replace(Some(task.abort_handle()));
     }
 
+    /// Read the file list of `product` again, if it is being fed.
+    fn refresh_files(self: &Arc<Self>, product: u64) {
+        let product = product.to_string();
+        let mut fed = lock(&self.fed);
+        fed.retain(|f| f.alive.strong_count() > 0);
+        for f in fed.iter() {
+            if f.key.name() == "game.files"
+                && f.key.args().first() == Some(&product)
+                && let Some(feed) = f.alive.upgrade()
+            {
+                self.feed(f.key.clone(), f.slot.clone(), &feed);
+            }
+        }
+    }
+
     /// Read everything that is being fed again.
     fn refresh(self: &Arc<Self>) {
         self.generation.fetch_add(1, Ordering::AcqRel);
@@ -173,6 +192,7 @@ impl Shared {
 
 pub(crate) struct CoreBackend {
     shared: Arc<Shared>,
+    downloads: Arc<Downloads>,
 }
 
 /// What the window needs of sign-in beside the model.
@@ -210,17 +230,25 @@ fn sign_in_label(opened: bool) -> String {
 
 impl CoreBackend {
     pub(crate) fn new(engine: Arc<Engine>, runtime: Handle, art: Option<art::ArtStore>) -> Self {
-        CoreBackend {
-            shared: Arc::new(Shared {
-                engine,
-                runtime,
-                art,
-                failures: Mutex::default(),
-                fed: Mutex::default(),
-                generation: AtomicU64::new(0),
-                signing_in: Arc::default(),
-            }),
-        }
+        let shared = Arc::new(Shared {
+            engine: Arc::clone(&engine),
+            runtime: runtime.clone(),
+            art,
+            failures: Mutex::default(),
+            fed: Mutex::default(),
+            generation: AtomicU64::new(0),
+            signing_in: Arc::default(),
+        });
+        let files = Arc::clone(&shared);
+        let downloads = Downloads::new(engine, runtime, move |product| {
+            files.refresh_files(product);
+        });
+        CoreBackend { shared, downloads }
+    }
+
+    /// The downloads, for closing the app: [`Downloads::shutdown`].
+    pub(crate) fn downloads(&self) -> Arc<Downloads> {
+        Arc::clone(&self.downloads)
     }
 
     pub(crate) fn sign_in(&self) -> SignIn {
@@ -291,13 +319,14 @@ impl Backend for CoreBackend {
     }
 
     fn rate_limit(&self) -> Option<u64> {
-        None
+        self.downloads.rate_limit()
     }
 
     fn plan(&mut self, call: &Call, _answer: Option<&PromptAnswer>, reply: PlanReply) {
-        if call.name() != "account.sign_in" {
-            reply.send(Err(errors::unavailable()));
-            return;
+        match call.name() {
+            "game.download" => return self.downloads.plan(call, reply),
+            "account.sign_in" => {}
+            _ => return reply.send(Err(errors::unavailable())),
         }
         // Nothing to show on a card: facts that report a change would make the model
         // ask for a confirmation, and the user has just given the answer.
@@ -332,8 +361,14 @@ impl Backend for CoreBackend {
         })
     }
 
-    fn run(&mut self, run: Run, _jobs: &mut Jobs<'_>) -> Result<(), ErrorView> {
+    fn run(&mut self, run: Run, jobs: &mut Jobs<'_>) -> Result<(), ErrorView> {
         match run.call().name() {
+            "game.download" => self.downloads.run(run, jobs),
+            "queue.set_rate_limit" => {
+                self.downloads
+                    .set_rate_limit(download::rate_arg(run.call()));
+                Ok(())
+            }
             "library.refresh" => {
                 self.shared.refresh();
                 Ok(())

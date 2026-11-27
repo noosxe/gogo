@@ -384,7 +384,7 @@ cancels none of them: only the user does. Fixed colours (#640).
     yet started leave nothing behind.
   - Builds, setup, rollback, move, runtime installs and cloud saves take no token yet (#652).
   - The CLI calls `execute`, which uses `ctx.cancel` and `ctx.events` as before.
-- **What `CoreBackend` must do (PR F3).**
+- **What `CoreBackend` must do.**
   - Build one `AppContext` and share it: two would each save their own copy of the install
     records over the other's.
   - Give it the core's own client (`gog::http()`). A client with a total request timeout
@@ -398,6 +398,43 @@ cancels none of them: only the user does. Fixed colours (#640).
     limit is per download, not shared (#656).
 - **Cancel leaves resumable state**, as Ctrl C does in the CLI: sidecars stay (04 §4), and
   the job shows `cancelled` with a resume action.
+
+As built (PR F3, downloads, `core/download/`):
+
+- **Lane.** `game.download` uses the offline installers only. Depot downloads come with the
+  install flows.
+- **Selection.** `selection` is optional. Without it: installers for this system
+  (`gog.platform`), in the configured language, no extras and no DLC; a game with none
+  for this system gets the Windows installers, with a warning.
+- **Planning** reads the product (and the owned ids, for DLC) and local files. It resolves
+  no link, fetches no checksum and creates nothing, so sizes are GOG's listing figures and
+  file names appear when the download starts. The card shows the folder, what is missing of
+  each file, what is already there, DLC left out and the free space. Too little space
+  refuses the plan (class Disk); what other live downloads still need counts against it.
+  A product with a queued, running or paused download is refused a second one.
+- **Running.** One `AppContext`, made at the first plan, on `gog::http()`; its token
+  provider takes the app's refresh lock. A job runs exactly the confirmed files; files that
+  arrived since are left out and nothing is added.
+- **Turns.** Two jobs download at once, first come first served, and never two of one
+  product. The others show `queued`.
+- **Progress** is folded from the job's events, latest value wins, and reported at most
+  every 100 ms, all jobs on the same ticks. The rate is over the last 5 s; there is no ETA
+  without a rate.
+- **Cancel and pause** only cancel the job's token and show the state at once. Core has no
+  true pause: both keep the `.part` and sidecars, and a resume fetches the checksum again
+  and loses the chunks that were in flight.
+- **Resume and retry** take a new scope and plan again. The same files or fewer run
+  without a card; anything added or changed is shown on the job's plan card (§4), and
+  saying no puts the job back to paused or cancelled.
+- **Rate limit.** `queue.set_rate_limit` changes the one limiter every download shares, for
+  this session.
+- **Errors** are a fixed phrase per exit class and the file's name. A file held by another
+  gogo fails the job.
+- **Closing the app** cancels every job's token and waits up to 5 s for the files to be
+  closed.
+- **Not done:** the queue's Repair button (`game.verify_fix`), a "downloads are running"
+  question on close, stopping cleanly on a signal, game status badges while downloading,
+  and keeping the queue across restarts (the sidecars stay, so a new download resumes).
 
 ## 6. Errors
 
@@ -435,8 +472,8 @@ As built (PR F1, `CoreBackend`, read-only):
   the cover cache (§9), named by a hash of its address, so a changed picture is fetched
   again; offline, whatever is kept is shown. The logo is a PNG, so it has no picture.
 - **Description** HTML becomes plain text without addresses.
-- Reads only. Plans and runs other than `library.refresh` and `account.sign_in` are
-  refused.
+- F1 read only. Besides `library.refresh`, `account.sign_in`, `game.download` and
+  `queue.set_rate_limit`, plans and runs are refused.
 
 As built (PR F2, sign-in):
 
