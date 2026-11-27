@@ -24,6 +24,7 @@ use zeroize::Zeroizing;
 use super::account::Account;
 use super::browser::Browser;
 use super::errors;
+use super::install::Pipelines;
 use super::local::{Local, Machine};
 use super::text;
 use super::values;
@@ -42,6 +43,8 @@ pub(crate) struct Parts {
     /// The configuration downloads run with; `download.dir` is [`Parts::download_dir`].
     pub config: Config,
     pub free_space: Arc<dyn FreeSpace>,
+    /// The install pipelines.
+    pub pipelines: Arc<dyn Pipelines>,
 }
 
 /// The owned games and what is set up of them.
@@ -109,6 +112,10 @@ impl Engine {
         Arc::clone(&self.parts.free_space)
     }
 
+    pub(super) fn pipelines(&self) -> Arc<dyn Pipelines> {
+        Arc::clone(&self.parts.pipelines)
+    }
+
     /// A current access token of whoever is signed in.
     pub(super) async fn access_token(&self) -> Result<String, AuthError> {
         let Some(session) = self.parts.account.session().await? else {
@@ -132,13 +139,22 @@ impl Engine {
 
     /// The `GameSummary` a job about `id` shows, from what was last read.
     pub(super) fn job_game(&self, id: u64, title: &str) -> Value {
+        self.game_as(id, title, "downloading")
+    }
+
+    /// [`job_game`](Self::job_game) for a set-up.
+    pub(super) fn setup_game(&self, id: u64, title: &str) -> Value {
+        self.game_as(id, title, "setting_up")
+    }
+
+    fn game_as(&self, id: u64, title: &str, status: &str) -> Value {
         let cell = Arc::clone(&lock(&self.snapshot));
         let none = Machine::default();
         let machine = cell.get().map_or(&none, |s| &s.library.machine);
         let mut fields = summary(id, title, machine);
         for (name, value) in &mut fields {
             if *name == "status" {
-                *value = str("downloading");
+                *value = str(status);
             }
         }
         record(fields)

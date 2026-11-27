@@ -21,6 +21,7 @@ use super::proton::{self, ProtonRef};
 use super::setup;
 use super::umu::{self, Host};
 use crate::config::{Config, GalaxyDefault, ProtonDir, UmuMode};
+use crate::engine::events::ProgressEvent;
 use crate::macapp::catalog::{self, CatalogEntry};
 use crate::macapp::compat::{self, GalaxyMode, Layer, Os};
 use crate::macapp::error::MacAppError;
@@ -362,6 +363,21 @@ pub fn build(
         },
         dirs,
     }))
+}
+
+/// Install Comet as `gogo runtimes install comet` does: what a yes to
+/// [`Ask::InstallComet`] runs, after the build or set-up.
+pub fn install_comet(
+    env: &Env<'_>,
+    emit: &mut dyn FnMut(&ProgressEvent),
+) -> Result<(), MacAppError> {
+    let entry = entry(catalog::COMET)?;
+    let installed = lutris::block_on_detached(store::install_to(
+        entry, None, &env.http, &env.api, false, None, emit,
+    ))?;
+    let file = store::tree_root(&installed).join(&installed.entry_rel);
+    // Comet's bare release file is stored without the execute bit.
+    comet::after_install(&installed.id, &file)
 }
 
 fn entry(id: &str) -> Result<&'static CatalogEntry, MacAppError> {

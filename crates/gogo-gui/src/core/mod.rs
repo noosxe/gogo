@@ -2,8 +2,8 @@
 //! its children speak to the engine.
 //!
 //! Every [`Backend`] method returns at once: it spawns on the runtime, and what comes
-//! back is written to the source's slot, which wakes the UI. Downloads are the first
-//! thing it changes ([`download`]); installs and the rest come with later PRs.
+//! back is written to the source's slot, which wakes the UI. What it changes: downloads
+//! ([`download`]) and Linux set-up ([`install`]); the rest comes with later PRs.
 
 pub(crate) mod account;
 pub(crate) mod art;
@@ -11,6 +11,7 @@ pub(crate) mod browser;
 mod download;
 mod engine;
 mod errors;
+mod install;
 mod local;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -34,6 +35,9 @@ use zeroize::Zeroizing;
 
 pub(crate) use download::Downloads;
 pub(crate) use engine::{Engine, Parts};
+pub(crate) use install::Installs;
+#[cfg(test)]
+pub(crate) use install::NoPipelines;
 #[cfg(test)]
 pub(crate) use local::{Local, Machine};
 
@@ -65,7 +69,12 @@ pub(crate) fn parts() -> Result<Parts, SetupError> {
         .timeout(TIMEOUT)
         .build()
         .map_err(|_| SetupError::Client)?;
+    let pipelines = Arc::new(install::Core {
+        snapshots: cfg.snapshots.auto,
+        keep_auto: cfg.snapshots.keep_auto,
+    });
     Ok(Parts {
+        pipelines,
         account: Arc::new(account::StoredAccount::new(store)),
         local: Arc::new(local::ThisMachine {
             download_dir: download_dir.clone(),
@@ -193,6 +202,7 @@ impl Shared {
 pub(crate) struct CoreBackend {
     shared: Arc<Shared>,
     downloads: Arc<Downloads>,
+    installs: Arc<Installs>,
 }
 
 /// What the window needs of sign-in beside the model.
@@ -240,10 +250,23 @@ impl CoreBackend {
             signing_in: Arc::default(),
         });
         let files = Arc::clone(&shared);
-        let downloads = Downloads::new(engine, runtime, move |product| {
+        let downloads = Downloads::new(Arc::clone(&engine), runtime.clone(), move |product| {
             files.refresh_files(product);
         });
-        CoreBackend { shared, downloads }
+        let installed = Arc::clone(&shared);
+        let installs = Installs::new(engine, runtime, Arc::clone(&downloads), move |_| {
+            installed.refresh();
+        });
+        CoreBackend {
+            shared,
+            downloads,
+            installs,
+        }
+    }
+
+    /// The installs, for closing the app: [`Installs::shutdown`].
+    pub(crate) fn installs(&self) -> Arc<Installs> {
+        Arc::clone(&self.installs)
     }
 
     /// The downloads, for closing the app: [`Downloads::shutdown`].
@@ -325,6 +348,7 @@ impl Backend for CoreBackend {
     fn plan(&mut self, call: &Call, _answer: Option<&PromptAnswer>, reply: PlanReply) {
         match call.name() {
             "game.download" => return self.downloads.plan(call, reply),
+            "game.setup" => return self.installs.plan(call, reply),
             "account.sign_in" => {}
             _ => return reply.send(Err(errors::unavailable())),
         }
@@ -364,6 +388,7 @@ impl Backend for CoreBackend {
     fn run(&mut self, run: Run, jobs: &mut Jobs<'_>) -> Result<(), ErrorView> {
         match run.call().name() {
             "game.download" => self.downloads.run(run, jobs),
+            "game.setup" => self.installs.run(run, jobs),
             "queue.set_rate_limit" => {
                 self.downloads
                     .set_rate_limit(download::rate_arg(run.call()));

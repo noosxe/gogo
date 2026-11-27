@@ -31,7 +31,8 @@ use tokio_util::sync::CancellationToken;
 
 use self::plan::{Computed, Request, Wanted};
 use self::progress::Progress;
-use self::schedule::{Place, Schedule};
+use self::schedule::Place;
+pub(crate) use self::schedule::Schedule;
 use super::engine::Engine;
 use super::{errors, lock};
 
@@ -190,6 +191,11 @@ impl Downloads {
         let ctx = Arc::clone(made.await?);
         ctx.limiter.set_rate(self.rate.load(Ordering::Acquire));
         Ok(ctx)
+    }
+
+    /// Hold `product` against downloads of it, without taking a download slot.
+    pub(super) fn lease(&self, product: u64) -> Place {
+        self.schedule.lease(product)
     }
 
     pub(crate) fn rate_limit(&self) -> Option<u64> {

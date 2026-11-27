@@ -162,6 +162,11 @@ impl Data {
         self.model.modal()
     }
 
+    /// [`Model::refuse_close`](gogo_gui_model::Model::refuse_close).
+    pub(crate) fn refuse_close(&mut self) -> bool {
+        self.model.refuse_close()
+    }
+
     pub(crate) fn modal_ticket(&self) -> Option<Ticket> {
         self.model.modal().map(|m| m.ticket())
     }

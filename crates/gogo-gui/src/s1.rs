@@ -433,6 +433,7 @@ async fn the_default_skins_sign_in_route_opens_the_dialog() {
         download_dir: dir.path().join("downloads"),
         browser: browser.clone(),
         config: gogo::config::Config::default(),
+        pipelines: Arc::new(crate::core::NoPipelines),
         free_space: Arc::new(gogo::engine::Fs4FreeSpace),
     }));
     let backend = CoreBackend::new(engine, tokio::runtime::Handle::current(), None);
@@ -476,6 +477,7 @@ async fn a_press_begun_before_the_dialog_cannot_paste() {
         download_dir: dir.path().join("downloads"),
         browser: Arc::new(NoBrowser),
         config: gogo::config::Config::default(),
+        pipelines: Arc::new(crate::core::NoPipelines),
         free_space: Arc::new(gogo::engine::Fs4FreeSpace),
     }));
     let backend = CoreBackend::new(engine, tokio::runtime::Handle::current(), None);
@@ -539,6 +541,7 @@ async fn s1_no_credential_reaches_anything() {
         download_dir: dir.path().join("downloads"),
         browser: Arc::new(NoBrowser) as Arc<dyn Browser>,
         config: gogo::config::Config::default(),
+        pipelines: Arc::new(crate::core::NoPipelines),
         free_space: Arc::new(gogo::engine::Fs4FreeSpace),
     };
     let engine = Arc::new(Engine::new(parts(account.clone())));

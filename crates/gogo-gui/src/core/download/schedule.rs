@@ -12,23 +12,24 @@ pub(super) const SLOTS: usize = 2;
 
 #[derive(Default)]
 struct Queue {
-    /// Ticket and product, in ticket order.
-    waiting: Vec<(u64, u64)>,
-    /// The products downloading.
-    active: Vec<u64>,
+    /// Ticket, product and whether it takes a slot, in ticket order.
+    waiting: Vec<(u64, u64, bool)>,
+    /// The products being worked on, and whether each takes a slot.
+    active: Vec<(u64, bool)>,
     tickets: u64,
+    slots: usize,
 }
 
 impl Queue {
     /// The ticket that may start now.
     fn next(&self) -> Option<u64> {
-        if self.active.len() >= SLOTS {
-            return None;
-        }
+        let free = self.active.iter().filter(|(_, slot)| *slot).count() < self.slots;
         self.waiting
             .iter()
-            .find(|(_, product)| !self.active.contains(product))
-            .map(|(ticket, _)| *ticket)
+            .find(|(_, product, slot)| {
+                (free || !slot) && self.active.iter().all(|(p, _)| p != product)
+            })
+            .map(|(ticket, ..)| *ticket)
     }
 }
 
@@ -47,52 +48,71 @@ impl Shared {
 }
 
 #[derive(Clone)]
-pub(super) struct Schedule(Arc<Shared>);
+pub(crate) struct Schedule(Arc<Shared>);
 
 impl Default for Schedule {
     fn default() -> Self {
-        Schedule(Arc::new(Shared {
-            queue: Mutex::default(),
-            changed: watch::Sender::new(0),
-        }))
+        Schedule::with_slots(SLOTS)
     }
 }
 
 impl Schedule {
+    pub(crate) fn with_slots(slots: usize) -> Self {
+        Schedule(Arc::new(Shared {
+            queue: Mutex::new(Queue {
+                slots,
+                ..Queue::default()
+            }),
+            changed: watch::Sender::new(0),
+        }))
+    }
+
     /// A place in the line, taken now.
-    pub(super) fn join(&self, product: u64) -> Place {
+    pub(crate) fn join(&self, product: u64) -> Place {
+        self.enter(product, true)
+    }
+
+    /// A place that waits only for `product` to be free and takes no slot: for work on
+    /// a game that isn't a download.
+    pub(crate) fn lease(&self, product: u64) -> Place {
+        self.enter(product, false)
+    }
+
+    fn enter(&self, product: u64, slot: bool) -> Place {
         let ticket = self.0.edit(|q| {
             q.tickets += 1;
-            q.waiting.push((q.tickets, product));
+            q.waiting.push((q.tickets, product, slot));
             q.tickets
         });
         Place {
             shared: Arc::clone(&self.0),
             ticket,
             product,
+            slot,
             running: false,
         }
     }
 }
 
 /// A place in the line, then a slot. Dropping it gives either up.
-pub(super) struct Place {
+pub(crate) struct Place {
     shared: Arc<Shared>,
     ticket: u64,
     product: u64,
+    slot: bool,
     running: bool,
 }
 
 impl Place {
     /// Wait for the turn. Safe to drop half way.
-    pub(super) async fn turn(&mut self) {
+    pub(crate) async fn turn(&mut self) {
         let mut changed = self.shared.changed.subscribe();
         while !self.running {
             {
                 let mut q = lock(&self.shared.queue);
                 if q.next() == Some(self.ticket) {
-                    q.waiting.retain(|(t, _)| *t != self.ticket);
-                    q.active.push(self.product);
+                    q.waiting.retain(|(t, ..)| *t != self.ticket);
+                    q.active.push((self.product, self.slot));
                     self.running = true;
                 }
             }
@@ -110,8 +130,8 @@ impl Drop for Place {
     fn drop(&mut self) {
         let (ticket, product, running) = (self.ticket, self.product, self.running);
         self.shared.edit(|q| {
-            q.waiting.retain(|(t, _)| *t != ticket);
-            if running && let Some(at) = q.active.iter().position(|p| *p == product) {
+            q.waiting.retain(|(t, ..)| *t != ticket);
+            if running && let Some(at) = q.active.iter().position(|(p, _)| *p == product) {
                 q.active.remove(at);
             }
         });
@@ -149,6 +169,24 @@ mod tests {
         assert!(ready(&mut same));
         drop(same);
         assert!(ready(&mut c));
+    }
+
+    #[test]
+    fn a_lease_takes_no_slot_but_holds_its_game() {
+        let schedule = Schedule::default();
+        let mut a = schedule.join(1);
+        let mut b = schedule.join(2);
+        let mut held = schedule.lease(3);
+        let mut after = schedule.join(3);
+        let mut taken = schedule.lease(1);
+        assert!(ready(&mut a) && ready(&mut b));
+        assert!(ready(&mut held), "with both slots taken");
+        assert!(!ready(&mut taken), "game 1 is downloading");
+        drop(a);
+        assert!(ready(&mut taken));
+        assert!(!ready(&mut after), "game 3 is leased");
+        drop(held);
+        assert!(ready(&mut after));
     }
 
     #[test]

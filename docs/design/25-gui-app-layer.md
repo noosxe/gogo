@@ -447,6 +447,29 @@ As built (PR F3, downloads, `core/download/`):
   question on close, stopping cleanly on a signal, game status badges while downloading,
   and keeping the queue across restarts (the sidecars stay, so a new download resumes).
 
+As built (PR F4, install flows, `core/install/`):
+
+- **Platform.** Linux only. macOS build and set-up from the GUI are issue #676; there the
+  actions answer "not available".
+- **Questions.** `game.setup` plans through `linuxapp::preview`, which asks the questions
+  the pipeline would ask (umu, where GE-Proton goes, Galaxy, installing Comet) and writes
+  nothing. The run stores the answers, then calls `linuxapp::setup::setup`; the only
+  question still open there is Galaxy's, answered from memory. A running job never asks.
+- **Card.** Verb "Run setup", tier confirm: the downloads and where they go, the runtime
+  and umu, the prefix (created or kept), the snapshot before a runtime change, the
+  choices that will be saved, and the free space. Downloads larger than the free space
+  are refused.
+- **Jobs.** Kind `setup`. One install at a time, and never beside a download of the same
+  game; an install takes no download slot. Once the pipeline runs the job is not
+  stoppable (#652), so closing the window is refused. A waiting job can be cancelled or
+  paused; resume and retry preview again, ask on the plan card if the run would do more,
+  and fail if it would need a new answer.
+- **Steps.** The phases the plan expects are listed up front and moved by the pipeline's
+  events, under the app's own names: event texts can hold paths. Silent phases show no
+  fraction.
+- **Errors.** Fixed phrases per class. The core's text goes to the log only.
+- **Not done.** Setup's warnings and notes have nowhere to show.
+
 ## 6. Errors
 
 - Every failure reaches the model as an `ErrorView {class, title, message, hint, exit_class}`.

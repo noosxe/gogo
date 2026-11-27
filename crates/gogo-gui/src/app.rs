@@ -453,6 +453,10 @@ impl ShellApp for App {
         Box::new(render::Cpu::default())
     }
 
+    fn close_requested(&mut self) -> bool {
+        !self.data.refuse_close()
+    }
+
     fn wake(&mut self) -> bool {
         let changed = self.data.pump();
         self.effects();
