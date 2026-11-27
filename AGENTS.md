@@ -55,7 +55,9 @@ tools, or binaries from the host system — no exceptions.**
   pointer and keys), or `scripts/vm-test.sh` with the GUI's
   `.app` (macOS).
   Real GPU, HiDPI, IME, clipboard and screen-reader checks are a host pass by @noosxe;
-  agents put the steps in the PR.
+  agents put the steps in the PR. For a host-pass window on fictional data, the steps use
+  `nix run .#gogo-gui-fixture` (Linux, always `--fixture`); agents don't run it outside
+  the headless compositor either.
 
 ## Canonical checks (run inside the shell)
 
@@ -71,6 +73,7 @@ python3 -I scripts/gui-deps-check.py                # when a GUI crate's or gogo
 nix develop .#lavapipe -c cargo nextest run -p gogo-render-gpu   # when the GPU renderer changes (Linux)
 scripts/linux-e2e.sh self-test                      # when the e2e harness changes (Linux)
 scripts/gui-headless.sh self-test                   # when the headless GUI runner changes (Linux)
+nix build .#gogo-gui .#gogo-gui-fixture             # when nix/gui*.nix or rust-common.nix change (Linux, outside the shell)
 actionlint                                          # when .github/workflows changes
 ```
 
