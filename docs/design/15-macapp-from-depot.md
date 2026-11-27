@@ -35,7 +35,7 @@ Everything after the "install" step is shared with the offline lane (docs/18 §1
 > `download.dir`), announced with a notice on stderr; with no such download it is a
 > usage error pointing at `gogo download <GAME>`. `--from-depot` stays as the
 > explicit form: same resolution, but **no fallback** (no depot build → usage
-> error). The pure decisions live in `gogo-cli/src/lane.rs`.
+> error). The pure decisions live in `gogo-core`'s `gog::lane`.
 
 ```
 gogo mac-app <GAME|INSTALLER|DIR> [--name NAME] [--runtime …] [--out DIR] …

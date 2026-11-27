@@ -12,7 +12,6 @@ mod galaxy_cmd;
 #[cfg(target_os = "linux")]
 mod installer_dlc;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-mod lane;
 mod log_file;
 #[cfg(target_os = "macos")]
 mod menus;
@@ -33,6 +32,7 @@ use gogo::config::{Config, ConfigError};
 use gogo::engine::task::Kind;
 use gogo::engine::{self, select::Filters};
 use gogo::gog::error::{ApiError, AuthError};
+use gogo::gog::lane;
 use gogo::gog::library;
 
 use crate::cli::{Cli, ColorWhen, Command, OsFilter};
