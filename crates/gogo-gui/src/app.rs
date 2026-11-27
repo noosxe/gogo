@@ -13,10 +13,13 @@
 //! Every screen of the safety flow is the app's own modal dialog ([`crate::dialog`]),
 //! wired in [`answer`]. None is cancelled except by the user.
 //!
-//! A skin's menus and selects open the app's popup ([`crate::popup`]) over the page. A
-//! safety screen or a panel always wins: it closes the popup, which does not come back.
+//! A skin's menus and selects open the app's popup ([`crate::popup`]) over the page, and
+//! Ctrl K the app's command palette ([`crate::palette`]). A safety screen or a panel
+//! always wins: it closes the popup, which does not come back.
 
 mod answer;
+#[cfg(test)]
+mod commands;
 #[cfg(test)]
 mod menus;
 #[cfg(test)]
@@ -39,10 +42,12 @@ use gogo_ui_shell::{
     Frame, ImeArea, Input, PixelRenderer, RenderError, ShellApp, WindowOptions, WindowRenderer,
     WindowTarget, Zeroizing,
 };
+use gogo_ui_text::EditOp;
 
 use crate::data::{Data, Images};
 use crate::dialog::{self, Dialog};
 use crate::page::{DrawError, Page, Screen};
+use crate::palette;
 use crate::panel::Panel;
 use crate::popup;
 use crate::{act, render};
@@ -71,12 +76,19 @@ fn say(line: std::fmt::Arguments<'_>) {
     let _ = writeln!(std::io::stdout(), "{line}");
 }
 
+/// What is open over the page.
+enum Over {
+    /// A menu or a select's list, by its control.
+    Anchored(popup::Open),
+    Palette(Box<palette::Open>),
+}
+
 /// What one frame holds that input can land on.
 #[derive(Clone, Default)]
 struct View {
     /// The last screen that bound.
     screen: Option<Rc<Screen>>,
-    /// A menu or a select's list, over it.
+    /// A menu, a select's list or the palette, over it.
     popup: Option<Rc<popup::Drawn>>,
     /// What is wrong, over them.
     panel: Option<Rc<Panel>>,
@@ -114,7 +126,7 @@ pub(crate) struct App {
     pending: View,
     interaction: Interaction,
     /// What is open over the page.
-    popups: PopupStack<popup::Open>,
+    popups: PopupStack<Over>,
     a11y: A11yTree,
     entry: Entry,
     /// Since when a dialog has been on the display.
@@ -123,6 +135,8 @@ pub(crate) struct App {
     paste: Option<Ticket>,
     /// What a press copied from a field, for the clipboard.
     copied: Option<Zeroizing<String>>,
+    /// A press asked to paste into the palette's field.
+    paste_search: bool,
     /// The hold the model has accepted, while it is down.
     holding: Option<Holding>,
     /// When the last frame reached the display.
@@ -167,6 +181,7 @@ impl App {
             since: None,
             paste: None,
             copied: None,
+            paste_search: false,
             holding: None,
             now: None,
             changed: None,
@@ -299,8 +314,8 @@ impl App {
                     && page == target.layer
                 {
                     self.popups.clear();
-                    self.popups
-                        .open(popup::Open::new(page, target.key, self.shown.size));
+                    let open = popup::Open::new(page, target.key, self.shown.size);
+                    self.popups.open(Over::Anchored(open));
                 }
             }
             Intent::Dismiss { provenance } => {
@@ -321,27 +336,98 @@ impl App {
                 self.popups.dismiss_top();
             }
             Intent::Palette { provenance } => {
+                // Over the palette it closes it; over a menu it opens the palette.
+                let palette = self.palette().is_some();
                 self.popups.clear();
-                self.invoke_named("palette.open", act::number(provenance.event()));
+                if !palette {
+                    self.invoke_named("palette.open", act::number(provenance.event()));
+                }
             }
             Intent::App {
                 target, provenance, ..
-            } => {
-                if matches!(target.key.as_str(), popup::EARLIER | popup::LATER) {
-                    if let Some(open) = self.popups.top_mut() {
-                        open.turn(&target.key);
-                    }
-                } else if let Some(choice) = drawn.choice(&target.key) {
-                    // Closed first: whatever the call raises is over the page.
-                    self.popups.clear();
-                    let input = gogo_skin::Input {
-                        on: None,
-                        value: choice.value.clone(),
-                    };
-                    self.invoke_call(&choice.call, &input, act::number(provenance.event()));
+            } => self.choose(drawn, &target.key, act::number(provenance.event())),
+            Intent::Move { step, .. } => {
+                if let Some(palette) = self.palette() {
+                    palette.step(step);
                 }
             }
+            Intent::Edit { target, edit } if target.key == palette::FIELD => {
+                if let Some(op) = answer::edit_op(&edit, |x, y| drawn.field().point(x, y)) {
+                    self.edit_search(op);
+                }
+            }
+            Intent::SetValue { target, value } if target.key == palette::FIELD => {
+                self.edit_search(EditOp::Set(&value));
+            }
+            Intent::Copy { target, cut, .. } if target.key == palette::FIELD => {
+                self.copy_search(cut);
+            }
+            Intent::Paste { .. } => self.paste_search = self.palette().is_some(),
             _ => {}
+        }
+    }
+
+    /// Edits the palette's field. Whether the palette is open to take it.
+    fn edit_search(&mut self, op: EditOp<'_>) -> bool {
+        let Some(Over::Palette(palette)) = self.popups.top_mut() else {
+            return false;
+        };
+        palette.edit(&mut self.page.fonts, op);
+        true
+    }
+
+    /// Takes the selection of the palette's field for the clipboard.
+    fn copy_search(&mut self, cut: bool) {
+        let Some(text) = self.palette().and_then(|p| p.selected()) else {
+            return;
+        };
+        let text = Zeroizing::new(text.to_owned());
+        self.copied = Some(text);
+        if cut {
+            self.edit_search(EditOp::Delete {
+                forward: false,
+                word: false,
+            });
+        }
+    }
+
+    /// The palette, when it is the open popup.
+    fn palette(&mut self) -> Option<&mut palette::Open> {
+        match self.popups.top_mut() {
+            Some(Over::Palette(palette)) => Some(palette),
+            _ => None,
+        }
+    }
+
+    /// A row or a button of the popup `drawn` was activated.
+    fn choose(&mut self, drawn: &popup::Drawn, key: &str, event: InputEvent) {
+        if matches!(key, popup::EARLIER | popup::LATER) {
+            match self.popups.top_mut() {
+                Some(Over::Anchored(open)) => open.turn(key),
+                Some(Over::Palette(palette)) => palette.turn(key),
+                None => {}
+            }
+            return;
+        }
+        // The search or the highlight changed since this frame was built: the press
+        // was made on a list that is not the one asked for any more.
+        if self
+            .palette()
+            .is_some_and(|p| p.revision() != drawn.revision)
+        {
+            return;
+        }
+        let Some(choice) = drawn.choice(key).cloned() else {
+            return;
+        };
+        // Closed first: whatever the call raises is over the page.
+        self.popups.clear();
+        match choice {
+            popup::Choice::Call { call, value } => {
+                let input = gogo_skin::Input { on: None, value };
+                self.invoke_call(&call, &input, event);
+            }
+            popup::Choice::Command(invocation) => self.invoke(&invocation, event),
         }
     }
 
@@ -371,8 +457,12 @@ impl App {
             match effect {
                 Effect::SetUi { var, value } => self.set_ui(&var, value),
                 // Named only: an effect can carry the user's data.
+                // The scope is not used: the palette lists everything.
                 Effect::OpenPalette { .. } => {
-                    say(format_args!("gui: the palette is not built yet"))
+                    self.popups.clear();
+                    let open = palette::Open::new(&mut self.page.fonts);
+                    self.popups.open(Over::Palette(Box::new(open)));
+                    say(format_args!("gui: palette opened"));
                 }
                 Effect::AccountMenu => say(format_args!("gui: the account menu is not built yet")),
                 Effect::Copy(_) => say(format_args!("gui: the clipboard is not wired in yet")),
@@ -483,9 +573,11 @@ impl App {
             None => DisplayList::blank(f64::from(size.0), f64::from(size.1)),
         };
         if let Some(popup) = &self.pending.popup {
+            // A text field shows where typing goes however it got focus.
             let focus = self
                 .interaction
                 .focus_visible()
+                .or_else(|| self.interaction.focus().filter(|t| t.key == palette::FIELD))
                 .filter(|t| t.layer == popup.id)
                 .map(|t| t.key.as_str());
             popup.draw(&mut self.list, focus);
@@ -496,10 +588,14 @@ impl App {
         self.draw_dialog(size);
     }
 
-    /// The open popup over the screen about to be shown. One that can't hang from it
-    /// any more is closed.
+    /// The open popup over the screen about to be shown. One that can't be drawn over
+    /// it is closed.
     fn build_popup(&mut self, size: (f32, f32)) -> Option<Rc<popup::Drawn>> {
-        let (id, _) = self.popups.top()?;
+        let (id, over) = self.popups.top()?;
+        let commands = match over {
+            Over::Palette(_) => palette::commands(&mut self.data),
+            Over::Anchored(_) => Vec::new(),
+        };
         let screen = self.pending.screen.clone();
         let focus = self
             .interaction
@@ -508,8 +604,20 @@ impl App {
             .map(|t| t.key.clone());
         let fonts = &mut self.page.fonts;
         let drawn = match (self.popups.top_mut(), screen) {
-            (Some(open), Some(screen)) if open.size == size => {
+            (Some(Over::Anchored(open)), Some(screen)) if open.size == size => {
                 popup::Drawn::new(fonts, open, id, &screen, focus.as_deref())
+            }
+            (Some(Over::Palette(open)), screen) => {
+                let page = screen.map(|s| s.layer().id);
+                // The caret shows in the field however it got focus, from the start.
+                let focused = focus.as_deref().is_none_or(|key| key == palette::FIELD);
+                let drawn = open.draw(fonts, id, page, size, commands, focused);
+                if let Ok(Some(drawn)) = &drawn
+                    && let Some(scroll) = drawn.field().scroll()
+                {
+                    open.scroll = scroll;
+                }
+                drawn
             }
             _ => Ok(None),
         };
@@ -618,16 +726,20 @@ impl ShellApp for App {
     }
 
     fn wants_paste(&mut self) -> bool {
-        self.paste.is_some()
+        self.paste.is_some() || self.paste_search
     }
 
     fn ime_area(&self) -> Option<ImeArea> {
-        let dialog = self.shown.dialog.as_ref()?;
         let focus = self.interaction.focus()?;
-        if focus.key != dialog::FIELD || focus.layer != dialog.layer().id {
-            return None;
-        }
-        let caret = dialog.field_caret()?;
+        // The dialog's field, or with no dialog the palette's.
+        let caret = if let Some(dialog) = &self.shown.dialog {
+            (focus.key == dialog::FIELD && focus.layer == dialog.layer().id)
+                .then(|| dialog.field_caret())??
+        } else {
+            let popup = self.shown.popup.as_ref()?;
+            (focus.key == palette::FIELD && focus.layer == popup.id)
+                .then(|| popup.field().caret())??
+        };
         Some(ImeArea {
             x: caret.x0.into(),
             y: caret.y0.into(),
@@ -641,6 +753,10 @@ impl ShellApp for App {
     }
 
     fn pasted(&mut self, text: Option<Zeroizing<String>>) -> bool {
+        if std::mem::take(&mut self.paste_search) {
+            // A palette that closed meanwhile takes nothing.
+            return text.is_some_and(|text| self.edit_search(EditOp::Paste(&text)));
+        }
         self.take_paste(text)
     }
 

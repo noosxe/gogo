@@ -26,12 +26,15 @@
 #
 # input [options] -- GOGO_GUI
 #   the input check: starts GOGO_GUI on fictional data, clicks a tab and a
+#   the input check: starts GOGO_GUI on fictional data, clicks a tab and a
 #   navigation entry with a virtual pointer, scrolls that page with the wheel and
 #   back, goes back with Esc and moves focus with Tab, then answers a dialog by
-#   typing into it and confirms the plan card that follows with Enter. A
-#   screenshot of each (1-start, 2-tab, 3-route, 3-scrolled, 3-top,
-#   4-back, 5-focus, 6-snapshots, 7-prompt, 8-typed, 9-card, 10-done). Takes
-#   run's options; the click points assume the default size.
+#   typing into it and confirms the plan card that follows with Enter. Then the
+#   command palette: Ctrl K, a search, Enter, and Esc. A screenshot of each
+#   (1-start, 2-tab, 3-route, 3-scrolled, 3-top, 4-back, 5-focus, 6-snapshots,
+#   7-prompt, 8-typed, 9-card, 10-done, 11-palette, 12-search, 13-chosen,
+#   14-again, 15-closed). Takes run's options; the click points assume the
+#   default size.
 #
 # self-test
 #   checks the sandbox, the screenshot and the teardown with a small Wayland
@@ -278,6 +281,7 @@ start_keyboard() {
 }
 
 key() { wtype -s 200 -k "$1" -s 200; }
+ctrl_k() { wtype -s 200 -M ctrl -k k -m ctrl -s 200; }
 
 scenario_input() {
     start_pointer || return 1
@@ -338,6 +342,22 @@ scenario_input() {
     sleep 0.7
     key Return # nothing is focused: the card's confirm
     shot_changed 10-done 9-card || return 1
+
+    # The command palette: Ctrl K, a search, Enter on what it highlights, Esc.
+    ctrl_k
+    wait_log "gui: palette opened" || return 1
+    shot_changed 11-palette 10-done || return 1
+    wtype -s 200 "queue" -s 200
+    shot_changed 12-search 11-palette || return 1
+    key Down
+    key Up
+    key Return
+    wait_log "gui: route queue" || return 1
+    shot_changed 13-chosen 12-search || return 1
+    ctrl_k
+    shot_changed 14-again 13-chosen || return 1
+    key Escape
+    shot_changed 15-closed 14-again || return 1
     stop_app
     grep -F "gui: route" "$OUT/app.log" >&2
 }

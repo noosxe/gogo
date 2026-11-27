@@ -195,7 +195,7 @@ stateDiagram-v2
 | S6 strong confirmation | `StrongConfirm` state; the default answer is no | model test per destructive action |
 | S8 cancel always there | every dialog state has a cancel edge that changes nothing | model test: cancel from each state leaves the backend untouched |
 | S9 uniform errors | every `Refused`/failure becomes an `ErrorView` in the app's `error` widget | model test |
-| S19 global keys | `gogo-ui-interact` routes the palette key, Esc and the plan card's Enter before any skin shortcut; the model's `dismiss` and `enter` consult no skin | interact test; model test |
+| S19 global keys | `gogo-ui-interact` routes the palette key, Esc and the plan card's Enter before any skin shortcut; the model's `dismiss` and `enter` consult no skin, and the palette lists only the app's own entries | interact test; model test; app test |
 | S21 settings can't weaken the flow | `Call::check` refuses a key that isn't skin-settable; gates are read from the backend at invoke, after planning, at confirm, and on resume and retry | model tests |
 | S1, S2, S5, S14, S21 again at bind | the binder (`gogo-skin`): a masked value is never an action argument and reads as its mask, a part that can't be hidden isn't, every control has a non-empty accessible name once its text is known, a `settings.set` key is on the skin-settable list | binding tests over the fixture scope, with the invariant named |
 | S22 input reaches only what is seen | `gogo-ui-interact`: hit-testing the clipped frame, the seen rule for keys and shortcuts, a scroll cancelling presses | interaction tests over scrolled frames |
@@ -428,12 +428,32 @@ cancels none of them: only the user does. Fixed colours (#640).
   and when its control is gone or came to list something else.
 - Between opening and presentation, and between closing and the next frame, input does
   nothing, but for Esc closing a popup that is opening.
-- Nothing scrolls yet: a long list shows a window of rows that follows focus, with a
+- Popups don't scroll yet: a long list shows a window of rows that follows focus, with a
   button at an end that has more. It stays in the window: where there is no room beside
   the control it covers it.
 - On real data the Default skin's "Open game folder" answers "unavailable", and its
   renderer, runtime and display-mode selects are empty, until the backend runs those
   actions (#703).
+
+**The command palette.** Ctrl K (Cmd K on macOS) or a `palette.open` control opens it
+over any route; Ctrl K or Esc closes it. Under a safety screen or a panel it does not
+open.
+
+- **The app alone builds the entries**, from its own table and the app's data. It reads
+  nothing of the skin.
+- **Entries:** on a game page, downloading its files, installing it when it is not
+  installed, and setting it up (the last two on Linux); refreshing the library; signing in
+  when signed out; going to each route that needs no parameter; going to each game of the
+  library. Only what the engine can run today, and nothing gated or destructive.
+- **Choosing** an entry closes the palette and calls `Model::invoke` with that press, so
+  the plan card and confirmation apply as for a button.
+- **Search** is case-insensitive over the labels; entries where it starts a word come
+  first. The field is the app's own and edits like a dialog's (#544): caret and selection,
+  clipboard, undo, input methods and assistive technology. A composition is not searched
+  for until it is committed.
+- **Keys:** focus stays in the field; Up and Down move the highlight and Enter chooses it.
+  A press made before the list it answers was on the display does nothing.
+- `palette.open`'s `scope` is not used yet.
 
 ## 5. Jobs, progress and cancellation
 
@@ -655,8 +675,8 @@ As built (input and AccessKit wiring):
 - The error panel is an alert layer: while it is up only Esc does anything, nothing under
   it can be pressed, and assistive technology reads its lines. A route that no skin draws
   leaves the last screen in sight under it.
-- Touch, the palette and the account menu are not wired in; the clipboard is read only by
-  a dialog's paste and written only by copy or cut in a text field.
+- Touch and the account menu are not wired in; the clipboard is read only by a paste (in a
+  dialog or the palette's field) and written only by copy or cut in a text field.
 
 ## 9. Where things are stored
 

@@ -238,7 +238,7 @@ on any other element.
 |---|---|---|
 | `nav.go` | `route, params` | immediate / safe |
 | `nav.back` | — | immediate / safe |
-| `palette.open` | `scope?` | immediate / safe (the app-owned palette) |
+| `palette.open` | `scope?` | immediate / safe (the app-owned palette; `scope` is not used yet) |
 | `account.menu` | — | immediate / safe: opens the app-owned account menu (who is signed in, sign in or out, which lead to the `account.*` actions below) |
 | `ui.set` | `var, value` (skin-local state only) | immediate / safe |
 | `clipboard.copy` | a bound non-secret field | immediate / safe |
@@ -375,7 +375,7 @@ semantic tokens (§6.1). They come in three **depths**:
 | `log-view` | B | parts `frame, line, line.warn, line.error, timestamp` | Virtualised, scrubbed text; skins never get log lines as data |
 | `error` | B | parts `frame, title, message, hint, actions` | The class word is always shown |
 | `toast` | B | parts `frame, icon, title, message, action, dismiss`; variant `corner: bottom-right\|bottom-left\|top-right\|top-left` | Start, finish and failure only. Always an overlay on top of the page, never inline; the corner defaults to `bottom-right` |
-| `palette` | B | parts `frame, field, item, item.key-hint, group` | Ctrl K (Cmd K on macOS) always opens it (S19) |
+| `palette` | B | parts `frame, field, item, item.key-hint, group` | Ctrl K (Cmd K on macOS) always opens it (S19). The app builds its entries: a skin can open it and can't add, hide, reorder or relabel them. Drawn in fixed colours for now |
 | `focus-ring` | A (a skin may draw its own) | — | If a skin's focus style fails S13, the app's ring is drawn on top |
 | `step-list`, `progress`, `chunk-bar`, `game-card`, `tabs`, `status-badge`, `meter` | **C** | — | Stock components in the default skin |
 

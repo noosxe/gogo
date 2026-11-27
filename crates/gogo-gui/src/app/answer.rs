@@ -96,24 +96,37 @@ impl Entry {
     }
 
     fn field_view(&self, focused: bool) -> FieldView {
-        let Some(buffer) = &self.buffer else {
-            return FieldView::default();
-        };
-        FieldView {
-            text: buffer.text(),
-            shown: buffer.shown().to_owned(),
-            selection: buffer.selected_range(),
-            // A composition is not part of what assistive technology reads: the caret
-            // is where it will go.
-            ends: match buffer.preedit() {
-                Some(preedit) => (preedit.start, preedit.start),
-                None => buffer.selection(),
-            },
-            caret: buffer.caret().filter(|_| focused),
-            preedit: buffer.preedit(),
-            scroll: self.scroll,
-        }
+        self.buffer
+            .as_ref()
+            .map_or_else(FieldView::default, |buffer| {
+                FieldView::of(buffer, focused, self.scroll)
+            })
     }
+}
+
+/// What an edit of a field does to its buffer. `point` finds a pointer's place in the
+/// field's text.
+pub(super) fn edit_op<'a>(
+    edit: &'a TextEdit,
+    point: impl FnOnce(f64, f64) -> Option<(f32, f32)>,
+) -> Option<EditOp<'a>> {
+    Some(match *edit {
+        TextEdit::Insert(ref text) => EditOp::Type(text),
+        TextEdit::Delete { forward, word } => EditOp::Delete { forward, word },
+        TextEdit::Move { motion, extend } => EditOp::Move { motion, extend },
+        TextEdit::SelectAll => EditOp::SelectAll,
+        TextEdit::Undo => EditOp::Undo,
+        TextEdit::Redo => EditOp::Redo,
+        TextEdit::Preedit { ref text, cursor } => EditOp::Preedit { text, cursor },
+        TextEdit::Commit(ref text) => EditOp::Commit(text),
+        TextEdit::Select { anchor, focus } => EditOp::Select { anchor, focus },
+        TextEdit::Replace(ref text) => EditOp::Paste(text),
+        TextEdit::Point { x, y, gesture } => {
+            let (x, y) = point(x, y)?;
+            EditOp::Point { x, y, gesture }
+        }
+        _ => return None,
+    })
 }
 
 /// The kind of a screen, for the run's output: never its content, which can hold the
@@ -451,26 +464,9 @@ impl App {
 
     /// An edit made in the field of the dialog `drawn`.
     fn edit_field(&mut self, drawn: &Dialog, edit: &TextEdit) {
-        let op = match *edit {
-            TextEdit::Insert(ref text) => EditOp::Type(text),
-            TextEdit::Delete { forward, word } => EditOp::Delete { forward, word },
-            TextEdit::Move { motion, extend } => EditOp::Move { motion, extend },
-            TextEdit::SelectAll => EditOp::SelectAll,
-            TextEdit::Undo => EditOp::Undo,
-            TextEdit::Redo => EditOp::Redo,
-            TextEdit::Preedit { ref text, cursor } => EditOp::Preedit { text, cursor },
-            TextEdit::Commit(ref text) => EditOp::Commit(text),
-            TextEdit::Select { anchor, focus } => EditOp::Select { anchor, focus },
-            TextEdit::Replace(ref text) => EditOp::Paste(text),
-            TextEdit::Point { x, y, gesture } => {
-                let Some((x, y)) = drawn.field_point(x, y) else {
-                    return;
-                };
-                EditOp::Point { x, y, gesture }
-            }
-            _ => return,
-        };
-        self.change_field(op);
+        if let Some(op) = edit_op(edit, |x, y| drawn.field_point(x, y)) {
+            self.change_field(op);
+        }
     }
 
     /// Takes the field's selection for the clipboard.

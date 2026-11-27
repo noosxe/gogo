@@ -23,7 +23,7 @@ use gogo_ui_ir::{
 };
 use gogo_ui_layout::{Laid, Placed, Scroll, Viewport, layout};
 use gogo_ui_scene::{DisplayList, SceneState, build};
-use gogo_ui_text::{FontSet, TextLayout, TextRect};
+use gogo_ui_text::{EditBuffer, FontSet, TextLayout, TextRect};
 
 use crate::panel::PanelError;
 
@@ -144,6 +144,26 @@ pub(crate) struct FieldView {
     pub(crate) preedit: Option<Range<usize>>,
     /// How far the text had moved left.
     pub(crate) scroll: f32,
+}
+
+impl FieldView {
+    /// What `buffer` holds, as it is drawn; the caret shows while `focused`.
+    pub(crate) fn of(buffer: &EditBuffer, focused: bool, scroll: f32) -> FieldView {
+        FieldView {
+            text: buffer.text(),
+            shown: buffer.shown().to_owned(),
+            selection: buffer.selected_range(),
+            // A composition is not part of what assistive technology reads: the caret
+            // is where it will go.
+            ends: match buffer.preedit() {
+                Some(preedit) => (preedit.start, preedit.start),
+                None => buffer.selection(),
+            },
+            caret: buffer.caret().filter(|_| focused),
+            preedit: buffer.preedit(),
+            scroll,
+        }
+    }
 }
 
 /// What a plan's dialog asks for.
@@ -534,28 +554,96 @@ impl Builder {
         node.a11y.text_selection = Some(field.ends);
         self.control(&mut node, FIELD);
         let id = self.add(parent, FIELD, node)?;
-        let empty = field.shown.is_empty();
-        let (shown, color) = if empty {
-            ("Type here", DIM)
-        } else {
-            (field.shown.as_str(), TEXT)
-        };
-        let mut text = Node::new(Kind::Text {
-            text: shown.to_owned(),
-            style: field_style(color),
-        });
-        // As wide as the field, however long the text is.
-        text.layout.min_width = Dim::Px(0.0);
-        text.marks = Some(Box::new(TextMarks {
-            caret: field.caret.map(|at| if empty { 0 } else { at }),
-            selection: if empty { 0..0 } else { field.selection.clone() },
-            preedit: field.preedit.clone(),
-            scroll: field.scroll,
-            caret_color: TEXT,
-            selection_color: SELECTED,
-        }));
+        let text = field_text_node(field, "Type here");
         self.add(id, FIELD_TEXT, text)?;
         Ok(())
+    }
+}
+
+/// The text of a field as it is drawn: what is typed, or `placeholder` while there is
+/// nothing, with the caret, the selection and a composition.
+pub(crate) fn field_text_node(field: &FieldView, placeholder: &str) -> Node {
+    let empty = field.shown.is_empty();
+    let (shown, color) = if empty {
+        (placeholder, DIM)
+    } else {
+        (field.shown.as_str(), TEXT)
+    };
+    let mut text = Node::new(Kind::Text {
+        text: shown.to_owned(),
+        style: field_style(color),
+    });
+    // As wide as the field, however long the text is.
+    text.layout.min_width = Dim::Px(0.0);
+    text.marks = Some(Box::new(TextMarks {
+        caret: field.caret.map(|at| if empty { 0 } else { at }),
+        selection: if empty { 0..0 } else { field.selection.clone() },
+        preedit: field.preedit.clone(),
+        scroll: field.scroll,
+        caret_color: TEXT,
+        selection_color: SELECTED,
+    }));
+    text
+}
+
+/// A laid-out field: the keys of its box and of its text.
+pub(crate) struct FieldAt<'a> {
+    pub(crate) tree: &'a Tree,
+    pub(crate) laid: &'a Laid,
+    pub(crate) field: &'a str,
+    pub(crate) text: &'a str,
+}
+
+impl<'a> FieldAt<'a> {
+    /// The text node, with its layout and how far it is moved left.
+    fn placed(&self) -> Option<(&'a Placed, &'a TextLayout, f32)> {
+        let node = self.tree.by_key(self.text)?;
+        let marks = self.tree.get(node)?.marks.as_deref()?;
+        let placed = self.laid.get(node)?;
+        let layout = self.laid.text(node)?;
+        let width = (placed.content.x1 - placed.content.x0) as f32;
+        let offset = marks.caret.unwrap_or(marks.selection.end);
+        Some((
+            placed,
+            layout,
+            layout.scroll_for(marks.scroll, offset, width),
+        ))
+    }
+
+    /// How far the text is moved left, to carry on from in the next frame.
+    pub(crate) fn scroll(&self) -> Option<f32> {
+        self.placed().map(|(.., scroll)| scroll)
+    }
+
+    /// Where the caret is in the window, for an input method.
+    pub(crate) fn caret(&self) -> Option<TextRect> {
+        let (placed, layout, scroll) = self.placed()?;
+        let marks = self
+            .tree
+            .get(self.tree.by_key(self.text)?)?
+            .marks
+            .as_deref()?;
+        let at = layout.caret_rect(marks.preedit.as_ref().map_or_else(
+            || marks.caret.unwrap_or(marks.selection.end),
+            |preedit| preedit.start,
+        ));
+        let (x, y) = (placed.content.x0 as f32 - scroll, placed.content.y0 as f32);
+        Some(TextRect {
+            x0: x + at.x0,
+            y0: y + at.y0,
+            x1: x + at.x1,
+            y1: y + at.y1,
+        })
+    }
+
+    /// A point from the corner of the field's box as one in its text.
+    pub(crate) fn point(&self, x: f64, y: f64) -> Option<(f32, f32)> {
+        let field = self.laid.rect(self.tree.by_key(self.field)?)?;
+        let (placed, _, scroll) = self.placed()?;
+        Some((
+            (field.x0 + x - placed.content.x0) as f32 + scroll,
+            (field.y0 + y - placed.content.y0) as f32,
+        ))
     }
 }
 
@@ -1089,55 +1177,28 @@ impl Dialog {
         }
     }
 
-    /// The field's text node, with its layout and how far it is moved left.
-    fn field_text(&self) -> Option<(&Placed, &TextLayout, f32)> {
-        let node = self.tree.by_key(FIELD_TEXT)?;
-        let marks = self.tree.get(node)?.marks.as_deref()?;
-        let placed = self.laid.get(node)?;
-        let layout = self.laid.text(node)?;
-        let width = (placed.content.x1 - placed.content.x0) as f32;
-        let offset = marks.caret.unwrap_or(marks.selection.end);
-        Some((
-            placed,
-            layout,
-            layout.scroll_for(marks.scroll, offset, width),
-        ))
+    fn field(&self) -> FieldAt<'_> {
+        FieldAt {
+            tree: &self.tree,
+            laid: &self.laid,
+            field: FIELD,
+            text: FIELD_TEXT,
+        }
     }
 
     /// How far the field's text is moved left, to carry on from in the next frame.
     pub(crate) fn field_scroll(&self) -> Option<f32> {
-        self.field_text().map(|(.., scroll)| scroll)
+        self.field().scroll()
     }
 
     /// Where the field's caret is in the window, for an input method.
     pub(crate) fn field_caret(&self) -> Option<TextRect> {
-        let (placed, layout, scroll) = self.field_text()?;
-        let marks = self
-            .tree
-            .get(self.tree.by_key(FIELD_TEXT)?)?
-            .marks
-            .as_deref()?;
-        let at = layout.caret_rect(marks.preedit.as_ref().map_or_else(
-            || marks.caret.unwrap_or(marks.selection.end),
-            |preedit| preedit.start,
-        ));
-        let (x, y) = (placed.content.x0 as f32 - scroll, placed.content.y0 as f32);
-        Some(TextRect {
-            x0: x + at.x0,
-            y0: y + at.y0,
-            x1: x + at.x1,
-            y1: y + at.y1,
-        })
+        self.field().caret()
     }
 
     /// A point from the corner of the field's box as one in its text.
     pub(crate) fn field_point(&self, x: f64, y: f64) -> Option<(f32, f32)> {
-        let field = self.laid.rect(self.tree.by_key(FIELD)?)?;
-        let (placed, _, scroll) = self.field_text()?;
-        Some((
-            (field.x0 + x - placed.content.x0) as f32 + scroll,
-            (field.y0 + y - placed.content.y0) as f32,
-        ))
+        self.field().point(x, y)
     }
 
     /// Adds the dialog's drawing to `list`, with the ring on the control `focus` names.
