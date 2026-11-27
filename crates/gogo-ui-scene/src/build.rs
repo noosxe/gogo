@@ -6,6 +6,7 @@ use std::sync::Arc;
 use gogo_ui_ir as ir;
 use gogo_ui_ir::{Effect, Fill, ImageSource, Kind, Node, NodeId, Paint, Tree};
 use gogo_ui_layout::{Laid, Placed};
+use gogo_ui_text::TextRect;
 use kurbo::{
     Affine, BezPath, Ellipse, Point, Rect, RoundedRect, RoundedRectRadii, Shape as _, Vec2,
 };
@@ -475,7 +476,27 @@ impl Builder<'_> {
         let (Kind::Text { style, .. }, Some(layout)) = (&node.kind, &placed.text) else {
             return;
         };
-        let origin = Point::new(placed.content.x0 + offset.x, placed.content.y0 + offset.y);
+        let mut origin = Point::new(placed.content.x0 + offset.x, placed.content.y0 + offset.y);
+        let marks = node.marks.as_deref();
+        if let Some(marks) = marks {
+            let content = to_rect(
+                placed.content.x0,
+                placed.content.y0,
+                placed.content.x1,
+                placed.content.y1,
+            ) + offset;
+            self.ops.push(Op::PushClip {
+                shape: Shape::Rect(content),
+            });
+            origin.x -= f64::from(layout.scroll_for(
+                marks.scroll,
+                marks.caret.unwrap_or(marks.selection.end),
+                content.width() as f32,
+            ));
+            for rect in layout.selection_rects(marks.selection.clone()) {
+                self.mark(origin, rect, marks.selection_color);
+            }
+        }
         let runs: Vec<Arc<_>> = layout.runs().into_iter().map(Arc::new).collect();
         // A bloom of radius 0 is the sharp text again: skip the blurred pass.
         if let Some(bloom) = style.bloom.filter(|b| b.radius > 0.0) {
@@ -499,6 +520,30 @@ impl Builder<'_> {
                 brush: Brush::Solid(pcolor(style.color)),
             });
         }
+        if let Some(marks) = marks {
+            for mut rect in layout.selection_rects(marks.preedit.clone().unwrap_or_default()) {
+                rect.y0 = rect.y1 - 1.0;
+                self.mark(origin, rect, marks.caret_color);
+            }
+            if let Some(caret) = marks.caret {
+                self.mark(origin, layout.caret_rect(caret), marks.caret_color);
+            }
+            self.ops.push(Op::Pop);
+        }
+    }
+
+    /// A solid box over or under the text at `origin`.
+    fn mark(&mut self, origin: Point, rect: TextRect, color: ir::Color) {
+        let rect = to_rect(
+            rect.x0.into(),
+            rect.y0.into(),
+            rect.x1.into(),
+            rect.y1.into(),
+        ) + origin.to_vec2();
+        self.ops.push(Op::Fill {
+            shape: Shape::Rect(rect),
+            brush: Brush::Solid(pcolor(color)),
+        });
     }
 }
 

@@ -9,6 +9,8 @@
 //!   width: measured, hit-tested and turned into [`GlyphRun`]s.
 //! - [`GlyphRun`]: positioned glyphs of one font, what the scene hands a renderer
 //!   (design 28 §1, the `Glyphs` op).
+//! - [`EditBuffer`]: the text of a one-line field as it is edited, over parley's
+//!   `PlainEditor`: caret, selection, IME composition and undo.
 //!
 //! # Rules
 //!
@@ -28,15 +30,17 @@
 //!   it the text is one line, however wide. With `wrap` and `max_lines > 0`, only that many
 //!   lines are kept, the last one ending in an ellipsis (`…`) when text was cut.
 //!
-//! The crate knows nothing about gogo (design 24 §2.1 rule 6). The edit buffer (selection,
-//! IME composition) arrives with text input (#544).
+//! The crate knows nothing about gogo (design 24 §2.1 rule 6).
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+mod edit;
 mod fonts;
 mod layout;
 mod run;
 
+pub use edit::{EditBuffer, EditOp, UNDO_STEPS};
 pub use fonts::{BUNDLED_FAMILIES, DEFAULT_FAMILY, FontSet};
-pub use layout::{LineMetrics, TextLayout};
+pub use gogo_ui_ir::{Gesture, Motion};
+pub use layout::{CARET_WIDTH, LineMetrics, TextLayout, TextRect};
 pub use run::{FontData, Glyph, GlyphRun};

@@ -77,3 +77,56 @@ impl Default for TextStyle {
         }
     }
 }
+
+/// What an edited text run shows besides its glyphs. Offsets are bytes of the run's
+/// text; one that is not inside it is taken as its end.
+///
+/// A run with marks is one line, clipped to its box and moved left so that the caret
+/// shows.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct TextMarks {
+    /// Where the caret is drawn; `None` draws none.
+    pub caret: Option<usize>,
+    /// The selected bytes; empty for none.
+    pub selection: std::ops::Range<usize>,
+    /// The IME's preedit, drawn underlined.
+    pub preedit: Option<std::ops::Range<usize>>,
+    /// Where the text was last moved to, in px. It moves from there only as far as the
+    /// caret needs.
+    pub scroll: f32,
+    /// The colour of the caret and of the preedit's underline.
+    pub caret_color: Color,
+    /// The colour behind the selection.
+    pub selection_color: Color,
+}
+
+/// Where a caret motion goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Motion {
+    /// One cluster left.
+    Left,
+    /// One cluster right.
+    Right,
+    /// To the previous word.
+    WordLeft,
+    /// To the next word.
+    WordRight,
+    /// To the start of the line.
+    Start,
+    /// To its end.
+    End,
+}
+
+/// What a pointer does at a point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gesture {
+    /// A click: the caret goes there.
+    Place,
+    /// A Shift click, or a drag: the selection reaches there.
+    Extend,
+    /// A double click: the word there.
+    Word,
+    /// A triple click: everything.
+    All,
+}

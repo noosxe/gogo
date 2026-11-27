@@ -3,7 +3,7 @@
 use std::ops::Range;
 
 use gogo_ui_ir::{TextAlign, TextStyle};
-use parley::{Alignment, AlignmentOptions, Cursor, PositionedLayoutItem};
+use parley::{Affinity, Alignment, AlignmentOptions, Cursor, PositionedLayoutItem, Selection};
 
 use crate::{FontSet, Glyph, GlyphRun};
 
@@ -27,6 +27,33 @@ pub struct LineMetrics {
     /// The bytes of [`TextLayout::text`] on this line.
     pub text: Range<usize>,
 }
+
+/// A box in logical px from the text box's top-left corner.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextRect {
+    /// Left edge.
+    pub x0: f32,
+    /// Top edge.
+    pub y0: f32,
+    /// Right edge.
+    pub x1: f32,
+    /// Bottom edge.
+    pub y1: f32,
+}
+
+impl From<parley::BoundingBox> for TextRect {
+    fn from(b: parley::BoundingBox) -> TextRect {
+        TextRect {
+            x0: b.x0 as f32,
+            y0: b.y0 as f32,
+            x1: b.x1 as f32,
+            y1: b.y1 as f32,
+        }
+    }
+}
+
+/// The width of a caret.
+pub const CARET_WIDTH: f32 = 1.5;
 
 /// A shaped run of text and its line breaks.
 ///
@@ -242,6 +269,47 @@ impl TextLayout {
     /// last line; past a line's end is that line's end.
     pub fn hit(&self, x: f32, y: f32) -> usize {
         Cursor::from_point(&self.inner, x, y).index()
+    }
+
+    fn cursor(&self, offset: usize) -> Cursor {
+        let offset = offset.min(self.text.len());
+        let affinity = if offset == self.text.len() {
+            Affinity::Upstream
+        } else {
+            Affinity::Downstream
+        };
+        Cursor::from_byte_index(&self.inner, offset, affinity)
+    }
+
+    /// The caret before the byte `offset` of [`TextLayout::text`], [`CARET_WIDTH`] wide.
+    pub fn caret_rect(&self, offset: usize) -> TextRect {
+        self.cursor(offset)
+            .geometry(&self.inner, CARET_WIDTH)
+            .into()
+    }
+
+    /// The boxes behind a selection of these bytes of [`TextLayout::text`].
+    pub fn selection_rects(&self, range: Range<usize>) -> Vec<TextRect> {
+        if range.is_empty() {
+            return Vec::new();
+        }
+        Selection::new(self.cursor(range.start), self.cursor(range.end))
+            .geometry(&self.inner)
+            .into_iter()
+            .map(|(rect, _)| rect.into())
+            .collect()
+    }
+
+    /// How far a one-line field `width` wide has to move this text left so that the
+    /// caret at `offset` shows. `last` is where it was: it moves no further than needed,
+    /// and never leaves a gap after the end of the text.
+    pub fn scroll_for(&self, last: f32, offset: usize, width: f32) -> f32 {
+        let caret = self.caret_rect(offset);
+        let end = self.caret_rect(self.text.len()).x1;
+        let last = if last.is_finite() { last } else { 0.0 };
+        let most = (end - width).max(0.0);
+        // Not `clamp`: with a field narrower than the caret the bounds cross.
+        last.max(caret.x1 - width).min(caret.x0).min(most).max(0.0)
     }
 
     /// The glyphs of the drawn lines, one run per font change per line.

@@ -133,21 +133,33 @@ impl FontSet {
     }
 
     pub(crate) fn shape(&mut self, text: &str, style: &TextStyle) -> parley::Layout<()> {
-        let stack = self.stack(&style.family);
+        let properties = self.properties(style);
         let mut b = self.lcx.ranged_builder(&mut self.fcx, text, 1.0, true);
-        b.push_default(StyleProperty::FontFamily(FontFamily::List(Cow::Owned(
-            stack,
-        ))));
-        b.push_default(StyleProperty::FontSize(style.size));
-        b.push_default(StyleProperty::FontWeight(FontWeight::new(style.weight)));
-        b.push_default(StyleProperty::FontWidth(FontWidth::from_percentage(
-            style.width,
-        )));
-        b.push_default(StyleProperty::LetterSpacing(style.tracking * style.size));
-        if let Some(lh) = style.line_height {
-            b.push_default(StyleProperty::LineHeight(LineHeight::FontSizeRelative(lh)));
+        for property in properties {
+            b.push_default(property);
         }
         b.build(text)
+    }
+
+    /// What `style` means to parley. Drawn text and an [`EditBuffer`](crate::EditBuffer)
+    /// shape with the same list, so a caret lands between the drawn glyphs.
+    pub(crate) fn properties(&self, style: &TextStyle) -> Vec<StyleProperty<'static, ()>> {
+        let mut out = vec![
+            StyleProperty::FontFamily(FontFamily::List(Cow::Owned(self.stack(&style.family)))),
+            StyleProperty::FontSize(style.size),
+            StyleProperty::FontWeight(FontWeight::new(style.weight)),
+            StyleProperty::FontWidth(FontWidth::from_percentage(style.width)),
+            StyleProperty::LetterSpacing(style.tracking * style.size),
+        ];
+        if let Some(lh) = style.line_height {
+            out.push(StyleProperty::LineHeight(LineHeight::FontSizeRelative(lh)));
+        }
+        out
+    }
+
+    /// parley's two contexts, for an editor to shape with.
+    pub(crate) fn contexts(&mut self) -> (&mut FontContext, &mut LayoutContext<()>) {
+        (&mut self.fcx, &mut self.lcx)
     }
 }
 

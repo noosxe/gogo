@@ -180,6 +180,9 @@ pub struct Node {
     pub action: Option<ActionRef>,
     /// Who drew the node. Default [`DrawnBy::Skin`].
     pub drawn_by: DrawnBy,
+    /// For the text run of a field being edited: its caret and selection. `None`: plain
+    /// text.
+    pub marks: Option<Box<crate::TextMarks>>,
     /// For a bar's fill: the fraction done, 0 to 1, as a share of its track. A live
     /// update finds the node by this and changes the value without a re-bind (design 27
     /// §5.6). `None`: not a progress fill.
@@ -199,6 +202,7 @@ impl Node {
             action: None,
             drawn_by: DrawnBy::Skin,
             progress: None,
+            marks: None,
         }
     }
 
