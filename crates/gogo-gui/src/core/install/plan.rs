@@ -35,6 +35,10 @@ pub(super) struct Computed {
     pub phases: Vec<Phase>,
     /// A build, with what it was asked for; `None` for a set-up.
     pub build: Option<(Asked, Build)>,
+    /// A build replaces a game that is there.
+    pub rebuild: bool,
+    /// The game's folder.
+    pub dir: PathBuf,
 }
 
 /// The arguments of a `game.build`.
@@ -74,6 +78,8 @@ impl Computed {
             _ => false,
         };
         build
+            && self.rebuild == agreed.rebuild
+            && self.dir == agreed.dir
             && self.tools.umu == agreed.tools.umu
             && self.tools.runtime == agreed.tools.runtime
             && self.tools.galaxy == agreed.tools.galaxy
@@ -118,7 +124,7 @@ fn core_answer(answer: &PromptAnswer) -> Option<CoreAnswer> {
 
 /// A failure while planning, in the app's own phrases: the core's text holds paths
 /// and parser output, and goes to the log only.
-fn refused(error: &MacAppError) -> ErrorView {
+fn refused(title: &str, error: &MacAppError) -> ErrorView {
     tracing::warn!("planning failed: {}", errors::path(&error.to_string()));
     let (class, message, hint) = match error {
         MacAppError::CatalogUnreachable { .. } | MacAppError::RuntimeDownloadFailed { .. } => (
@@ -155,23 +161,28 @@ fn refused(error: &MacAppError) -> ErrorView {
             "",
         ),
     };
-    ErrorView::new(class, "Set-up can't be planned", message, hint, "7")
+    ErrorView::new(class, title, message, hint, "7")
 }
 
-fn cannot_answer() -> ErrorView {
-    ErrorView::failed("Set-up can't be planned", "an answer fits no question")
+/// The titles of plans that can't be made.
+const NO_SETUP: &str = "Set-up can't be planned";
+const NO_INSTALL: &str = "Install can't be planned";
+
+fn cannot_answer(title: &str) -> ErrorView {
+    ErrorView::failed(title, "an answer fits no question")
 }
 
 /// Preview until there is no question left, taking `given` in the order asked.
 /// `answers` holds the ones already known.
 fn answered<T>(
+    title: &str,
     mut answers: Answers,
     given: &[PromptAnswer],
     preview: impl Fn(&Answers) -> Result<Preview<T>, MacAppError>,
 ) -> Result<Result<(Answers, T), PromptSpec>, ErrorView> {
     let mut given = given.iter();
     loop {
-        match preview(&answers).map_err(|e| refused(&e))? {
+        match preview(&answers).map_err(|e| refused(title, &e))? {
             Preview::Ready(ready) => return Ok(Ok((answers, ready))),
             Preview::Ask(q) => {
                 let Some(answer) = given.next() else {
@@ -179,7 +190,7 @@ fn answered<T>(
                 };
                 let taken = core_answer(answer).is_some_and(|a| answers.answer(&q, &a));
                 if !taken {
-                    return Err(cannot_answer());
+                    return Err(cannot_answer(title));
                 }
             }
         }
@@ -341,7 +352,9 @@ pub(super) fn setup(
     known: Answers,
     given: &[PromptAnswer],
 ) -> Result<Planning, ErrorView> {
-    let previewed = answered(known, given, |a| pipelines.preview_setup(gogid, a))?;
+    let previewed = answered(NO_SETUP, known, given, |a| {
+        pipelines.preview_setup(gogid, a)
+    })?;
     let (answers, preview) = match previewed {
         Ok(ready) => ready,
         Err(question) => return Ok(Planning::Ask(question)),
@@ -365,19 +378,33 @@ pub(super) fn setup(
         tools: preview.tools,
         phases,
         build: None,
+        rebuild: false,
+        dir: preview.dirs.root,
     })))
 }
 
+/// Why there is no source for a build, in the app's own phrases.
 fn no_build(error: &DepotError) -> ErrorView {
-    let message = match error {
-        DepotError::NoBuilds(_) => {
+    tracing::warn!("planning failed: {}", errors::path(&error.to_string()));
+    let (class, message) = match error {
+        DepotError::NoBuilds(_) => (
+            "Error",
             "It has no depot build and no downloaded installer. Download its installer \
-             first."
-                .to_string()
-        }
-        e => errors::path(&e.to_string()),
+             first.",
+        ),
+        DepotError::Dlc(_) => ("Error", "The DLC asked for don't fit the game's build."),
+        DepotError::Language(_) => ("Error", "The build doesn't have that language."),
+        DepotError::Pick(_) => ("Error", "No one build matches the one asked for."),
+        DepotError::NoCacheDir => ("Error", "There is no cache folder for the game files."),
+        DepotError::Library(_) => ("Network", "GOG's builds could not be read."),
+        DepotError::Filter(_) => (
+            "Error",
+            "The downloaded files hold more than the build takes, and can't be told \
+             apart.",
+        ),
+        DepotError::Io(_) => ("Error", "A file could not be read."),
     };
-    ErrorView::new("Error", "Install can't be planned", message, "", "1")
+    ErrorView::new(class, NO_INSTALL, message, "", "1")
 }
 
 /// The renderer, runtime and DLC lines of a build's card.
@@ -584,7 +611,9 @@ pub(super) fn build(
         renderer: asked.renderer,
         library: asked.library.as_deref(),
     };
-    let previewed = answered(known, given, |a| pipelines.preview_build(&request, a))?;
+    let previewed = answered(NO_INSTALL, known, given, |a| {
+        pipelines.preview_build(&request, a)
+    })?;
     let (answers, preview) = match previewed {
         Ok(ready) => ready,
         Err(question) => return Ok(Planning::Ask(question)),
@@ -628,6 +657,8 @@ pub(super) fn build(
         tools: preview.tools,
         phases,
         build: Some((asked, build)),
+        rebuild: preview.rebuild,
+        dir: preview.dirs.root,
     })))
 }
 
@@ -667,7 +698,21 @@ mod tests {
             MacAppError::Io(std::io::Error::other(said)),
             MacAppError::Recipe(said.into()),
         ] {
-            plain(&refused(&error), &["somewhere", said]);
+            plain(&refused(NO_SETUP, &error), &["somewhere", said]);
+        }
+    }
+
+    #[test]
+    fn a_missing_source_is_in_the_apps_own_words() {
+        let said = "GET somewhere/builds failed: expected `=`";
+        for error in [
+            DepotError::NoBuilds(10),
+            DepotError::NoCacheDir,
+            DepotError::Library(said.into()),
+            DepotError::Filter(said.into()),
+            DepotError::Io(std::io::Error::other(said)),
+        ] {
+            plain(&no_build(&error), &["somewhere", said]);
         }
     }
 }

@@ -50,6 +50,9 @@ struct Fake {
     ends: Mutex<mpsc::Receiver<End>>,
     /// Bytes of the GE-Proton download.
     bytes: Mutex<u64>,
+    /// What a build preview finds: a game to replace, or another folder.
+    rebuild: AtomicBool,
+    moved: AtomicBool,
     /// The `gogo` CLI found.
     cli: Mutex<Option<PathBuf>>,
     /// The products whose files were asked for, and whether the downloads may end.
@@ -196,9 +199,14 @@ impl Pipelines for Fake {
         if let Some(question) = self.question(answers) {
             return Ok(Preview::Ask(question));
         }
-        let dirs = GameDirs::at(self.root.join("games").join(request.gogid));
+        let base = if self.moved.load(Ordering::Acquire) {
+            "library"
+        } else {
+            "games"
+        };
+        let dirs = GameDirs::at(self.root.join(base).join(request.gogid));
         Ok(Preview::Ready(BuildPreview {
-            rebuild: false,
+            rebuild: self.rebuild.load(Ordering::Acquire),
             prefix_exists: false,
             tree_bytes: None,
             renderer: None,
@@ -284,6 +292,8 @@ impl Scratch {
             cli: Mutex::new(Some(PathBuf::from("/opt/gogo/bin/gogo"))),
             fetches: Mutex::default(),
             fetched: AtomicBool::new(false),
+            rebuild: AtomicBool::new(false),
+            moved: AtomicBool::new(false),
         });
         Scratch { root, fake, end }
     }
@@ -817,6 +827,75 @@ fn the_gogo_command_is_the_one_beside_the_app_else_on_the_path() {
     assert_eq!(find_gogo(Some(app.clone()), path.clone()), Some(on_path));
     let beside = exe("app/gogo");
     assert_eq!(find_gogo(Some(app), path), Some(beside));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resume_that_would_replace_a_game_or_write_elsewhere_asks_again() {
+    for (moved, line) in [(false, "Replaces the game files"), (true, "library")] {
+        let (mut rig, _server) = build_rig().await;
+        rig.ask_build();
+        rig.card().await;
+        rig.confirm();
+        rig.job_is(0, JobState::Running).await;
+        assert_eq!(rig.job("job.pause", 0), Outcome::Accepted);
+        rig.job_is(0, JobState::Paused).await;
+
+        // Meanwhile the game was built, or the library moved.
+        let fake = &rig.scratch.fake;
+        let change = if moved { &fake.moved } else { &fake.rebuild };
+        change.store(true, Ordering::Release);
+        assert_eq!(rig.job("job.resume", 0), Outcome::Accepted);
+        rig.shows("card").await;
+        let card = format!("{:?}", rig.model.modal());
+        assert!(card.contains(line), "{line} missing from {card}");
+        let ticket = rig.model.modal().expect("the card").ticket();
+        rig.model.cancel(ticket);
+        rig.job_is(0, JobState::Paused).await;
+        assert!(rig.scratch.fake.ran().is_empty());
+        assert_eq!(rig.scratch.fake.fetches.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_skin_cannot_name_a_runtime_by_its_folder() {
+    for runtime in ["path:/some/proton", "/some/proton", "ge-proton/../x"] {
+        let (mut rig, _server) = build_rig().await;
+        let spec = actions::action("game.build").expect("an action");
+        let invocation = Invocation::new(spec)
+            .arg("id", Value::str("10"))
+            .arg("platform", Value::str("linux"))
+            .arg("runtime", Value::str(runtime));
+        rig.invoke(&invocation);
+        rig.shows("error").await;
+        let shown = format!("{:?}", rig.model.modal());
+        assert!(shown.contains("not one from gogo's catalog"), "{shown}");
+        assert!(!shown.contains("/some"), "{shown}");
+        assert!(rig.ids().is_empty());
+    }
+}
+
+#[test]
+fn a_gogo_that_is_this_app_is_passed_over() {
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    let dir = scratch();
+    let path = |rel: &str| {
+        let path = dir.path().join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        path
+    };
+    let exe = |rel: &str| {
+        let path = path(rel);
+        std::fs::write(&path, b"").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    };
+    let app = exe("app/gogo-gui");
+    symlink(&app, path("app/gogo")).unwrap();
+    symlink(&app, path("one/gogo")).unwrap();
+    let dirs = |names: &[&str]| std::env::join_paths(names.iter().map(|n| dir.path().join(n))).ok();
+    assert_eq!(find_gogo(Some(app.clone()), dirs(&["one"])), None);
+    let real = exe("two/gogo");
+    assert_eq!(find_gogo(Some(app), dirs(&["one", "two"])), Some(real));
 }
 
 /// A rig whose server also serves one slow download of product 10.

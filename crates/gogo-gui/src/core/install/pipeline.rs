@@ -119,15 +119,21 @@ pub(crate) struct Core {
     pub free_space: Arc<dyn FreeSpace>,
 }
 
-/// `gogo` beside this program, else the first on `PATH`.
+/// `gogo` beside this program, else the first on `PATH`. One that is this program
+/// under another name is passed over: a launcher would start the app.
 pub(super) fn find_gogo(current_exe: Option<PathBuf>, path: Option<OsString>) -> Option<PathBuf> {
+    let this = current_exe.as_ref().and_then(|exe| exe.canonicalize().ok());
     let beside = current_exe.and_then(|exe| Some(exe.parent()?.join("gogo")));
     let on_path = path
         .iter()
         .flat_map(std::env::split_paths)
         .filter(|dir| dir.is_absolute())
         .map(|dir| dir.join("gogo"));
-    beside.into_iter().chain(on_path).find(|p| is_executable(p))
+    beside.into_iter().chain(on_path).find(|p| {
+        is_executable(p)
+            && p.canonicalize()
+                .is_ok_and(|real| Some(&real) != this.as_ref())
+    })
 }
 
 #[cfg(unix)]

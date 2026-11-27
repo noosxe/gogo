@@ -473,12 +473,15 @@ As built (PR F4, install flows, `core/install/`):
   `linuxapp::source` resolves it and writes nothing.
 - **Build: DLC and defaults.** An omitted `dlc` takes every owned DLC of the build; a
   rebuild keeps the recorded set, and refuses a build that lacks one. An omitted runtime,
-  renderer, language or build id takes the CLI's default. There is no picker. From an
+  renderer, language or build id takes the CLI's default. There is no picker. A given
+  `runtime` must be a catalog id: `path:` is refused. From an
   offline installer no DLC installers are run, and the card says which are left out.
 - **Build: the launcher's `gogo`.** The `gogo` beside the app, else the first on `PATH`,
   else the plan is refused. The card shows the path: the game's launcher calls it.
 - **Build: job.** The game files download first, in a cancellable step; a cancel leaves
-  the resumable cache. From there the job is not stoppable. Answers are stored after the
+  the resumable cache. That download takes none of the two download slots, so it can be a
+  third download running, and it has a rate limiter of its own at the queue's limit
+  (#656). From there the job is not stoppable. Answers are stored after the
   download, just before the pipeline runs.
 - **Not done.** Setup's warnings and notes have nowhere to show, and there is no skin
   button for a rebuild.
