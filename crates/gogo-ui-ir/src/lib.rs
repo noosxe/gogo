@@ -11,6 +11,8 @@
 //! - [`Paint`] and [`Effect`]: fills, borders, shadows and the fixed effect list of
 //!   design 27 §6, drawn as design 28 §1 and §2 describe;
 //! - [`TextStyle`]: one resolved text run;
+//! - [`TextMarks`]: an edited run's caret, selection and preedit;
+//! - [`Motion`] and [`Gesture`]: how a caret is moved;
 //! - [`A11y`] and [`Role`]: what assistive technology is told;
 //! - [`ActionRef`]: an opaque id for "activating this does something". The engine hands
 //!   it back and never looks inside; the binder maps it to a resolved action;
@@ -59,7 +61,7 @@ mod tests;
 pub use a11y::{A11y, Role};
 pub use layout::{Align, Dim, Direction, Display, Justify, LayoutStyle, Position, Sides, Track};
 pub use paint::{Color, Effect, Fill, GlowLayer, GradientStop, Paint, Shape, Stroke};
-pub use text::{Bloom, TextAlign, TextStyle};
+pub use text::{Bloom, Gesture, Motion, TextAlign, TextMarks, TextStyle};
 pub use tree::{
     ActionRef, AppPart, DrawnBy, Fit, ImageSource, Kind, Node, NodeId, PartId, Tree, TreeError,
     WidgetId,

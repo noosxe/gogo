@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use gogo_ui_ir::{
     Bloom, Color, Dim, Effect, Fill, Fit, GlowLayer, GradientStop, ImageSource, Kind, LayoutStyle,
-    Node, NodeId, Paint, Shape as IrShape, Stroke, TextStyle, Tree,
+    Node, NodeId, Paint, Shape as IrShape, Stroke, TextMarks, TextStyle, Tree,
 };
 use gogo_ui_layout::{Scroll, Viewport, layout};
 use gogo_ui_scene::{
@@ -1126,4 +1126,73 @@ fn open_layers_and_prefix_describe_what_a_backdrop_sits_in() {
     assert_eq!(l.prefix(999).len(), l.ops.len());
     assert!(l.open_layers(0).is_empty());
     assert!(l.open_layers(l.ops.len()).is_empty());
+}
+
+#[test]
+fn an_edited_run_is_clipped_and_draws_its_selection_preedit_and_caret() {
+    const CARET: Color = Color([1, 2, 3, 255]);
+    const BEHIND: Color = Color([4, 5, 6, 255]);
+    let marks = |caret, selection, preedit| TextMarks {
+        caret,
+        selection,
+        preedit,
+        scroll: 0.0,
+        caret_color: CARET,
+        selection_color: BEHIND,
+    };
+    let list = |text: &str, marks: TextMarks| {
+        let mut node = Node::text(text).with_layout(sized(80.0, 20.0));
+        node.marks = Some(Box::new(marks));
+        let mut tree = Tree::new("root", boxed(200.0, 100.0, Paint::default()));
+        add_root(&mut tree, "text", node);
+        scene_with(&tree, &Scroll::none(), &SceneState::new()).ops
+    };
+    // What is filled in a colour, left to right.
+    let filled = |ops: &[Op], color: Color| -> Vec<(f64, f64)> {
+        let want = format!(
+            "{:?}",
+            Brush::Solid(peniko::Color::from_rgba8(
+                color.0[0], color.0[1], color.0[2], color.0[3],
+            ))
+        );
+        ops.iter()
+            .filter_map(|op| match op {
+                Op::Fill {
+                    shape: Shape::Rect(r),
+                    brush,
+                } if format!("{brush:?}") == want => Some((r.x0, r.x1)),
+                _ => None,
+            })
+            .collect()
+    };
+    let glyph_x = |ops: &[Op]| {
+        ops.iter()
+            .find_map(|op| match op {
+                Op::Glyphs { origin, .. } => Some(origin.x),
+                _ => None,
+            })
+            .expect("glyphs")
+    };
+
+    let ops = list("abcdef", marks(Some(3), 1..3, Some(4..6)));
+    assert!(matches!(ops.first(), Some(Op::PushClip { .. })), "{ops:?}");
+    assert!(matches!(ops.last(), Some(Op::Pop)), "{ops:?}");
+    let selection = filled(&ops, BEHIND);
+    let [under, caret] = filled(&ops, CARET)[..] else {
+        panic!("an underline and a caret: {ops:?}");
+    };
+    assert_eq!(selection.len(), 1);
+    assert!(
+        (selection[0].1 - caret.0).abs() < 1.0,
+        "{selection:?} {caret:?}"
+    );
+    assert!(under.0 > caret.0 && caret.1 - caret.0 < 2.0);
+    assert_eq!(glyph_x(&ops), 0.0, "short text does not move");
+
+    let long = "m".repeat(40);
+    let ops = list(&long, marks(Some(long.len()), 0..0, None));
+    assert!(glyph_x(&ops) < 0.0, "it moves to show the caret");
+    let caret = filled(&ops, CARET)[0];
+    assert!(caret.1 <= 80.01 && caret.0 > 70.0, "{caret:?}");
+    assert!(filled(&list("abc", marks(None, 0..0, None)), CARET).is_empty());
 }
