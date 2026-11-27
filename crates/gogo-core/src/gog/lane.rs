@@ -1,11 +1,11 @@
-//! `gogo mac-app` input lanes (#73, design 15 §1): which source a build
-//! starts from. Pure decisions only — main.rs gathers the facts (library,
-//! depot cache, builds, state.json) and acts on the outcome.
+//! A build's input lanes (#73, design 15 §1): which source it starts from.
+//! Pure decisions only: the frontend gathers the facts (library, depot cache,
+//! builds, state.json) and acts on the outcome.
 
 use std::path::{Path, PathBuf};
 
-use gogo::gog::depot::CacheCheck;
-use gogo::state::records::InstallRecord;
+use crate::gog::depot::CacheCheck;
+use crate::state::records::InstallRecord;
 
 /// What the user pointed `mac-app` at, before any lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,7 +58,7 @@ pub fn check_build(input: &Input) -> Result<(), String> {
     match input {
         Input::Installer(_) => Err(format!(
             "--build picks a depot build: {}",
-            gogo::gog::builds::INSTALLER_NEWEST_ONLY
+            crate::gog::builds::INSTALLER_NEWEST_ONLY
         )),
         Input::Tree(_) => Err(
             "--build picks a depot build of a game; a game tree you point at is taken as it is"
@@ -74,7 +74,7 @@ pub struct GameFacts {
     /// The depot cache already holds its tree.
     pub cached_tree: Option<PathBuf>,
     /// The cached tree's check against its download record
-    /// ([`gogo::gog::depot::check_cache`]); `None` when it's complete.
+    /// ([`crate::gog::depot::check_cache`]); `None` when it's complete.
     pub cache_gap: Option<CacheCheck>,
     /// GOG publishes a public Windows depot build for it.
     pub has_depot_build: bool,

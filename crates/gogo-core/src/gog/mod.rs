@@ -19,6 +19,7 @@ pub mod dlc_filter;
 pub mod downlink;
 pub mod endpoints;
 pub mod error;
+pub mod lane;
 pub mod language;
 pub mod lay;
 pub mod library;
