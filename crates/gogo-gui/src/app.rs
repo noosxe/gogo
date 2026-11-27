@@ -324,7 +324,11 @@ impl App {
     /// Binds, lays out and builds the next frame for a window of `size` logical px.
     fn draw(&mut self, size: (f32, f32)) {
         let mut loading = false;
-        let failure = match self.page.screen(&mut self.data, SHELL_ROUTE, size) {
+        let scrolled = Some(&self.interaction);
+        let failure = match self
+            .page
+            .screen(&mut self.data, SHELL_ROUTE, size, scrolled)
+        {
             Ok(screen) => {
                 self.pending.screen = Some(Rc::new(screen));
                 None

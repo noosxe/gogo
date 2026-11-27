@@ -6,7 +6,7 @@ route "game" {
     text "Library  ›  {g.title}" style="crumb" id="crumb"
 
     row gap=@space.6 align="start" {
-        art "{g.art.cover}" w=132 h=176 fit="cover" style="cover" label="{g.title} cover" id="cover"
+        art "{g.art.cover}" w=132 h=176 shrink=0 fit="cover" style="cover" label="{g.title} cover" id="cover"
         column gap=@space.3 grow=1 {
             text "{g.title}" style="h1" id="title"
             text "{g.genre}{g.year > 0 and g.genre ? ' · ' : ''}{g.year > 0 ? g.year : ''}{g.playtime != null and named ? ' · ' : ''}{fmt.hours(g.playtime)}{g.playtime != null ? ' played' : ''}{g.last_played != null and played ? ' · ' : ''}{g.last_played != null ? 'last played ' : ''}{fmt.ago(g.last_played)}{g.size_on_disk != null and seen ? ' · ' : ''}{fmt.bytes(g.size_on_disk)}" style="meta" id="meta" when="{seen or g.size_on_disk != null}"

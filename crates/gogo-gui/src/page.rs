@@ -8,7 +8,7 @@ use gogo_skin::{
     ActionTable, BindError, Binding, Bound, DefaultSkin, FallbackWhy, Mode, SkinPackage, UiState,
     UiStateError, Value,
 };
-use gogo_ui_interact::{Layer, LayerId, LayerKind};
+use gogo_ui_interact::{Interaction, Layer, LayerId, LayerKind};
 use gogo_ui_ir::{NodeId, Tree};
 use gogo_ui_layout::{Laid, LayoutError, Scroll, Viewport, layout};
 use gogo_ui_scene::{DisplayList, SceneState, build};
@@ -223,33 +223,41 @@ impl Page {
         route: &str,
         size: (f32, f32),
     ) -> Result<DisplayList, DrawError> {
-        Ok(self.screen(data, route, size)?.list(None))
+        Ok(self.screen(data, route, size, None)?.list(None))
     }
 
-    /// `route` bound and laid out for a window of `size` logical px.
+    /// `route` bound and laid out for a window of `size` logical px, scrolled as `input`
+    /// has it (at the top without one).
     pub(crate) fn screen(
         &mut self,
         data: &mut Data,
         route: &str,
         (width, height): (f32, f32),
+        input: Option<&Interaction>,
     ) -> Result<Screen, DrawError> {
         let bound = match self.bind(data, route) {
             (_, true) => return Err(DrawError::Loading),
             (bound, false) => bound?,
         };
+        let location = data.location();
+        let id = LayerId(hash(&format!("{} {:?}", location.route, location.params)));
+        let mut scroll = Scroll::none();
+        for (key, y) in input.into_iter().flat_map(|input| input.offsets(id)) {
+            if let Some(node) = bound.tree.by_key(key) {
+                scroll.set(node, 0.0, y);
+            }
+        }
         let laid = layout(
             &bound.tree,
             &mut self.fonts,
             Viewport::new(width, height),
-            &Scroll::none(),
+            &scroll,
         )?;
         let identity = bound
             .actions
             .iter()
             .map(|(_, call)| hash(&format!("{} {:?}", call.spec.name, call.args)))
             .collect();
-        let location = data.location();
-        let id = LayerId(hash(&format!("{} {:?}", location.route, location.params)));
         Ok(Screen {
             tree: bound.tree,
             laid,

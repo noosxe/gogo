@@ -44,8 +44,13 @@
 //! - **Input methods.** Composition and its result go to the focused field only. While
 //!   composing, keys do nothing here. A pointer press, a focus move or an edit by
 //!   assistive technology drops the composition.
-//! - **Not here yet:** opening a select or menu, and scrolling. A select
-//!   takes focus but does not activate: the tree does not carry its options.
+//! - **Scrolling:** the offsets of scroll containers live here
+//!   ([`Interaction::offsets`]). The wheel, the scrollbar, the page and arrow keys, a focus
+//!   move and assistive technology change them; none is a press. A scroll cancels what was
+//!   being pressed inside, and a control scrolled out of sight is brought back rather than
+//!   activated.
+//! - **Not here yet:** opening a select or menu. A select takes focus but does not
+//!   activate: the tree does not carry its options.
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -56,6 +61,7 @@ mod input;
 mod intent;
 mod interaction;
 mod keys;
+mod scroll;
 
 pub use focus::FocusOrder;
 pub use frame::{Frame, Identity, Layer, LayerId, LayerKind, Target, activatable};
@@ -63,3 +69,4 @@ pub use gogo_ui_ir::{Gesture, Motion};
 pub use input::{ImeInput, Input, Key, Modifiers, PointerButton, Request, RequestKind};
 pub use intent::{ControlInput, InputEvent, InputProvenance, Intent, Response, TextEdit};
 pub use interaction::{ARM_EXPIRES, Config, HOLD_ARM, Interaction, Primary};
+pub use scroll::SCROLL_LINE;

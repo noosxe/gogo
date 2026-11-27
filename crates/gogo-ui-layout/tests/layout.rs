@@ -724,6 +724,17 @@ fn a_scroll_offset_is_clamped_to_the_content() {
 }
 
 #[test]
+fn what_a_column_scrolls_is_not_squeezed_to_fit() {
+    let (mut t, list, rows) = scrolling(10, ScrollSpec::default());
+    for &row in &rows {
+        t.node_mut(row).expect("a row").layout.shrink = 1.0;
+    }
+    let l = lay(&t, 200.0, 140.0);
+    assert_eq!(rect(&l, rows[9]).3, 30.0);
+    assert_eq!(l.scroll_box(list).expect("a box").max, 200.0);
+}
+
+#[test]
 fn content_that_fits_does_not_scroll() {
     let (t, list, _) = scrolling(2, ScrollSpec::default());
     let sc = Scroll::none().with(list, 0.0, 40.0);

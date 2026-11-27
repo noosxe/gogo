@@ -26,9 +26,10 @@
 #
 # input [options] -- GOGO_GUI
 #   the input check: starts GOGO_GUI on fictional data, clicks a tab and a
-#   navigation entry with a virtual pointer, goes back with Esc and moves focus
-#   with Tab, then answers a dialog by typing into it and confirms the plan card
-#   that follows with Enter. A screenshot of each (1-start, 2-tab, 3-route,
+#   navigation entry with a virtual pointer, scrolls that page with the wheel and
+#   back, goes back with Esc and moves focus with Tab, then answers a dialog by
+#   typing into it and confirms the plan card that follows with Enter. A
+#   screenshot of each (1-start, 2-tab, 3-route, 3-scrolled, 3-top,
 #   4-back, 5-focus, 6-snapshots, 7-prompt, 8-typed, 9-card, 10-done). Takes
 #   run's options; the click points assume the default size.
 #
@@ -231,8 +232,10 @@ scenario_reload() {
 }
 
 # A pointer for the seat: a headless sway has no input devices, and sway's own
-# `cursor` commands reach nobody without one. Lasts until the sandbox ends.
+# `cursor` commands reach nobody without one. Lasts until the sandbox ends. sway has
+# no wheel command, so the holder also sends the notches written to its pipe.
 start_pointer() {
+    mkfifo "$RUNTIME_DIR/wheel"
     python3 -I -c '
 import importlib.util, sys, time
 spec = importlib.util.spec_from_file_location("helper", sys.argv[1])
@@ -240,8 +243,12 @@ helper = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(helper)
 device = helper.virtual_pointer(sys.argv[2])
 print("ready", flush=True)
-time.sleep(3600)
-' "$HELPER" "$RUNTIME_DIR/$WAYLAND_DISPLAY" >"$OUT/pointer.log" 2>&1 &
+while True:
+    with open(sys.argv[3]) as wheel:
+        for line in wheel:
+            msec = int(time.monotonic() * 1000)
+            device.sendall(helper.pointer_scroll(int(line), msec))
+' "$HELPER" "$RUNTIME_DIR/$WAYLAND_DISPLAY" "$RUNTIME_DIR/wheel" >"$OUT/pointer.log" 2>&1 &
     for _ in $(seq 100); do
         grep -q ready "$OUT/pointer.log" && return 0
         sleep 0.1
@@ -256,6 +263,12 @@ click() { # x y
     swaymsg -q seat - cursor press button1
     sleep 0.1
     swaymsg -q seat - cursor release button1
+}
+
+# Wheel notches where the pointer is, positive down.
+scroll() { # notches
+    # Without a reader the write would block.
+    timeout 5 tee "$RUNTIME_DIR/wheel" <<<"$1" >/dev/null
 }
 
 # The same for keys: `wtype` takes its keyboard away when it ends, so one that only
@@ -279,6 +292,13 @@ scenario_input() {
     click 60 141 # Library, in the navigation
     wait_log "gui: route library" || return 1
     shot_changed 3-route 2-tab || return 1
+
+    swaymsg -q seat - cursor set 700 500 # over the library, longer than the window
+    sleep 0.2
+    scroll 3
+    shot_changed 3-scrolled 3-route || return 1
+    scroll -3
+    shot_changed 3-top 3-scrolled || return 1
 
     key Escape
     wait_log "gui: route game" || return 1

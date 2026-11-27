@@ -11,7 +11,7 @@
 //! - [`widgets`]: the app-owned widgets with their depth, parts and variants (§5).
 //! - [`tokens`], [`routes`]: semantic tokens and routes (§6).
 //! - [`value`]: the dynamic [`Value`] an expression computes with (§2, design 27 §7).
-//! - [`invariants`]: the safety invariants S1–S21 (§7).
+//! - [`invariants`]: the safety invariants S1–S22 (§7).
 //!
 //! Lookups by name (`action`, `source`, `widget_spec`, …) scan their tables. The
 //! validator resolves every name once at load to a `&'static` spec (S16), so binding a

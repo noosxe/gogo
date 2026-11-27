@@ -1,4 +1,4 @@
-//! The safety invariants S1–S21 (design 26 §7). Numbered so tests can name them; where
+//! The safety invariants S1–S22 (design 26 §7). Numbered so tests can name them; where
 //! each is enforced is design 25 §4.
 
 /// A safety invariant, by number.
@@ -26,6 +26,7 @@ pub enum Invariant {
     S19,
     S20,
     S21,
+    S22,
 }
 
 impl Invariant {
@@ -51,9 +52,10 @@ impl Invariant {
         Self::S19,
         Self::S20,
         Self::S21,
+        Self::S22,
     ];
 
-    /// `"S1"` … `"S21"`.
+    /// `"S1"` … `"S22"`.
     pub const fn id(self) -> &'static str {
         self.entry().0
     }
@@ -93,6 +95,7 @@ impl Invariant {
             Self::S19 => ("S19", "Global keys are the app's"),
             Self::S20 => ("S20", "Skins don't run code"),
             Self::S21 => ("S21", "Skins can't weaken the safety flow through settings"),
+            Self::S22 => ("S22", "Input reaches only what is seen"),
         }
     }
 }
@@ -107,6 +110,6 @@ mod tests {
             assert_eq!(inv.id(), format!("S{}", i + 1));
             assert_eq!(Invariant::from_id(inv.id()), Some(*inv));
         }
-        assert_eq!(Invariant::from_id("S22"), None);
+        assert_eq!(Invariant::from_id("S23"), None);
     }
 }

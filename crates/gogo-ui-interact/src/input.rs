@@ -40,6 +40,10 @@ pub enum Key {
     Backspace,
     /// Delete, forward.
     Delete,
+    /// Page up.
+    PageUp,
+    /// Page down.
+    PageDown,
     /// Home.
     Home,
     /// End.
@@ -122,6 +126,15 @@ pub enum Input {
         /// Which.
         key: Key,
     },
+    /// The wheel or a touchpad scrolled at a point.
+    Wheel {
+        /// From the left edge.
+        x: f64,
+        /// From the top edge.
+        y: f64,
+        /// How far, in logical px: positive is toward the end of the content.
+        dy: f64,
+    },
     /// What a key press typed, with its case: the platform's text for the key,
     /// composed dead keys included. Sent after the press's [`Input::KeyDown`], and
     /// not while Ctrl or Meta is held. Only a focused text field takes it.
@@ -199,6 +212,17 @@ pub enum RequestKind {
     },
     /// Put this text in place of a text field's selection.
     ReplaceSelected(String),
+    /// Scroll it into view.
+    Reveal,
+    /// Scroll a container.
+    ScrollBy {
+        /// By pages, else by lines.
+        pages: bool,
+        /// Toward the start, else toward the end.
+        back: bool,
+    },
+    /// Scroll a container to this offset, in logical px.
+    ScrollTo(u32),
 }
 
 /// Never what was typed: it may be a password, and ends up in logs and test output.
@@ -216,6 +240,7 @@ impl fmt::Debug for Input {
                 write!(f, "KeyDown({:?}, {mods:?}, repeat: {repeat})", hidden(*key))
             }
             Input::KeyUp { key } => write!(f, "KeyUp({:?})", hidden(*key)),
+            Input::Wheel { x, y, dy } => write!(f, "Wheel({x}, {y}, {dy})"),
             Input::Text(text) => write!(f, "Text({} bytes)", text.len()),
             Input::Ime(ime) => write!(f, "Ime({ime:?})"),
             Input::Modifiers(mods) => write!(f, "Modifiers({mods:?})"),
@@ -244,6 +269,11 @@ impl fmt::Debug for RequestKind {
             RequestKind::ReplaceSelected(text) => {
                 write!(f, "ReplaceSelected({} bytes)", text.len())
             }
+            RequestKind::Reveal => f.write_str("Reveal"),
+            RequestKind::ScrollBy { pages, back } => {
+                write!(f, "ScrollBy(pages: {pages}, back: {back})")
+            }
+            RequestKind::ScrollTo(y) => write!(f, "ScrollTo({y})"),
         }
     }
 }

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use accesskit::{
     Action, ActionData, ActionRequest, Affine, HasPopup, Live, Node, NodeId, Rect, Role,
-    TextDirection, TextPosition, TextSelection, Toggled, TreeId, TreeInfo, TreeUpdate,
+    ScrollUnit, TextDirection, TextPosition, TextSelection, Toggled, TreeId, TreeInfo, TreeUpdate,
 };
 use gogo_ui_interact::{
     Frame, Identity, Interaction, Layer, LayerId, LayerKind, Request, RequestKind, Target,
@@ -218,7 +218,8 @@ impl Build<'_> {
 
     /// Adds the nodes at and under `at`; returns those that become children of the
     /// caller.
-    fn walk(&mut self, layer: &Layer<'_>, at: IrId) -> Vec<NodeId> {
+    /// `scrolled` is whether a scroll container is above `at`.
+    fn walk(&mut self, layer: &Layer<'_>, at: IrId, scrolled: bool) -> Vec<NodeId> {
         let (Some(node), Some(target)) = (layer.tree.get(at), layer.target(at)) else {
             return Vec::new();
         };
@@ -230,9 +231,12 @@ impl Build<'_> {
             } else {
                 Role::Dialog
             })
+        } else if node.scroll.is_some() {
+            Some(Role::ScrollView)
         } else {
             role_of(node).or(is_root.then_some(Role::Group))
         };
+        let inside = scrolled || node.scroll.is_some();
         let own_text = match &node.kind {
             Kind::Text { text, .. } => Some(text.clone()),
             _ => None,
@@ -260,7 +264,7 @@ impl Build<'_> {
                 .tree
                 .children(at)
                 .iter()
-                .flat_map(|&child| self.walk(layer, child))
+                .flat_map(|&child| self.walk(layer, child, inside))
                 .collect()
         };
         let Some(role) = role else {
@@ -317,6 +321,20 @@ impl Build<'_> {
         }
         if modal {
             out.set_modal();
+        }
+        if let Some(shown) = layer.laid.scroll_box(at) {
+            out.set_clips_children();
+            out.set_scroll_y(shown.offset);
+            out.set_scroll_y_min(0.0);
+            out.set_scroll_y_max(shown.max);
+            if shown.max > 0.0 {
+                out.add_action(Action::ScrollUp);
+                out.add_action(Action::ScrollDown);
+                out.add_action(Action::SetScrollOffset);
+            }
+        }
+        if scrolled {
+            out.add_action(Action::ScrollIntoView);
         }
         if !node.a11y.disabled {
             if node.a11y.focusable {
@@ -384,7 +402,7 @@ impl A11yTree {
         };
         let mut children = Vec::new();
         for layer in frame.interactive() {
-            children.extend(build.walk(layer, layer.tree.root()));
+            children.extend(build.walk(layer, layer.tree.root(), false));
         }
 
         let mut window = Node::new(Role::Window);
@@ -446,6 +464,15 @@ impl A11yTree {
         let kind = match (request.action, &request.data) {
             (Action::Click, _) => RequestKind::Activate,
             (Action::Focus, _) => RequestKind::Focus,
+            (Action::ScrollIntoView, _) => RequestKind::Reveal,
+            (Action::ScrollUp | Action::ScrollDown, data) => RequestKind::ScrollBy {
+                pages: matches!(data, Some(ActionData::ScrollUnit(ScrollUnit::Page))),
+                back: request.action == Action::ScrollUp,
+            },
+            (Action::SetScrollOffset, Some(ActionData::SetScrollOffset(to))) => {
+                // `as` saturates, and a NaN is the top.
+                RequestKind::ScrollTo(to.y.max(0.0).round() as u32)
+            }
             (Action::SetValue, Some(ActionData::Value(value))) => {
                 RequestKind::SetValue(value.to_string())
             }

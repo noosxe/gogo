@@ -543,6 +543,12 @@ Where each is enforced is in design 25 §4.
   takes only keys on the contract's skin-settable list (§4.9). An app-only setting (one
   that gates an action or weakens a confirmation, such as cloud writes) can't be bound by a
   skin; the validator rejects the skin's route.
+- **S22. Input reaches only what is seen.** A pointer press never lands on what a scroll
+  container clips, a scroll cancels the press inside it, and a key or a shortcut doesn't
+  activate a control scrolled out of sight; it is brought back first. An app-drawn control
+  counts as seen only when all of it is. A screen reader may activate what it read, which
+  brings it into view, but a hold is confirmed only on what is seen. Tests are
+  interaction tests over scrolled frames (design 25 §4).
 
 ## 8. Versioning and fallback
 

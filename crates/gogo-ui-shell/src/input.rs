@@ -2,9 +2,9 @@
 //! here: what a press means is the interaction layer's business.
 
 use crate::ime;
-use gogo_ui_interact::{Input, Key, Modifiers, PointerButton};
+use gogo_ui_interact::{Input, Key, Modifiers, PointerButton, SCROLL_LINE};
 use winit::dpi::PhysicalPosition;
-use winit::event::{ElementState, MouseButton, WindowEvent};
+use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::keyboard::{Key as WinitKey, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 
 /// What translating needs to remember between events.
@@ -32,6 +32,7 @@ impl Translator {
             }
             WindowEvent::MouseInput { state, button, .. } => self.button(*state, *button),
             WindowEvent::Ime(event) => ime::input(event),
+            WindowEvent::MouseWheel { delta, .. } => self.wheel(*delta, scale),
             WindowEvent::KeyboardInput {
                 event,
                 is_synthetic,
@@ -51,6 +52,17 @@ impl Translator {
             }
             _ => None,
         }
+    }
+
+    /// The vertical scroll, where the pointer is. winit counts the content moving down
+    /// as positive; here positive is toward the end.
+    fn wheel(&self, delta: MouseScrollDelta, scale: f64) -> Option<Input> {
+        let (x, y) = self.pointer?;
+        let down = match delta {
+            MouseScrollDelta::LineDelta(_, lines) => f64::from(lines) * SCROLL_LINE,
+            MouseScrollDelta::PixelDelta(px) => px.y / scale,
+        };
+        (down != 0.0).then_some(Input::Wheel { x, y, dy: -down })
     }
 
     /// What a key press in `event` typed, to be sent after its
@@ -187,6 +199,8 @@ fn map_key(key: &WinitKey) -> Key {
             NamedKey::ArrowRight => Key::ArrowRight,
             NamedKey::ArrowUp => Key::ArrowUp,
             NamedKey::ArrowDown => Key::ArrowDown,
+            NamedKey::PageUp => Key::PageUp,
+            NamedKey::PageDown => Key::PageDown,
             _ => Key::Other,
         },
         WinitKey::Character(text) => {
@@ -257,6 +271,40 @@ mod tests {
             click(&mut t, ElementState::Released, MouseButton::Left),
             None
         );
+    }
+
+    #[test]
+    fn the_wheel_scrolls_where_the_pointer_is() {
+        use winit::event::TouchPhase;
+
+        let mut t = Translator::default();
+        let wheel = |t: &mut Translator, delta| {
+            t.translate(
+                &WindowEvent::MouseWheel {
+                    device_id: DeviceId::dummy(),
+                    delta,
+                    phase: TouchPhase::Moved,
+                },
+                2.0,
+            )
+        };
+        let down = MouseScrollDelta::LineDelta(0.0, -2.0);
+        assert_eq!(wheel(&mut t, down), None, "no pointer, nowhere to scroll");
+        moved(&mut t, 200.0, 50.0, 2.0);
+        let at = |dy| {
+            Some(Input::Wheel {
+                x: 100.0,
+                y: 25.0,
+                dy,
+            })
+        };
+        assert_eq!(wheel(&mut t, down), at(2.0 * SCROLL_LINE));
+        let touchpad = MouseScrollDelta::PixelDelta(PhysicalPosition::new(3.0, 30.0));
+        assert_eq!(wheel(&mut t, touchpad), at(-15.0));
+        let sideways = MouseScrollDelta::LineDelta(1.0, 0.0);
+        assert_eq!(wheel(&mut t, sideways), None);
+        assert_eq!(map_key(&WinitKey::Named(NamedKey::PageDown)), Key::PageDown);
+        assert_eq!(map_key(&WinitKey::Named(NamedKey::Home)), Key::Home);
     }
 
     #[test]

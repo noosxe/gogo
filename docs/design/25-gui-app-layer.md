@@ -198,6 +198,7 @@ stateDiagram-v2
 | S19 global keys | `gogo-ui-interact` routes the palette key, Esc and the plan card's Enter before any skin shortcut; the model's `dismiss` and `enter` consult no skin | interact test; model test |
 | S21 settings can't weaken the flow | `Call::check` refuses a key that isn't skin-settable; gates are read from the backend at invoke, after planning, at confirm, and on resume and retry | model tests |
 | S1, S2, S5, S14, S21 again at bind | the binder (`gogo-skin`): a masked value is never an action argument and reads as its mask, a part that can't be hidden isn't, every control has a non-empty accessible name once its text is known, a `settings.set` key is on the skin-settable list | binding tests over the fixture scope, with the invariant named |
+| S22 input reaches only what is seen | `gogo-ui-interact`: hit-testing the clipped frame, the seen rule for keys and shortcuts, a scroll cancelling presses | interaction tests over scrolled frames |
 | S1–S3 nothing secret or path-like in sources or args | `CoreBackend` builds sources from typed views; action params have no path/URL/shell types | S1 test over a fixture account with known secret strings |
 
 ### Input (`gogo-ui-interact`)
@@ -240,6 +241,27 @@ app control is told apart by its `DrawnBy::App` part and tree key.
   starts the 1 s hold, which completes unless it is cancelled (Esc, a focus move including
   to Cancel, any other key or button, the window losing input, the control or the dialog
   changing). The second activation is the press the model checks.
+- **Scrolling.** Interaction owns the offset of each scroll container; the app lays the
+  next frame out with them, and layout clamps them. Input is tested against the frame on
+  the display, so an offset counts for input only once it is seen.
+  - The **wheel** moves the innermost container under the pointer that can still move
+    that way. A **scrollbar** thumb drags, and a press beside it turns a page.
+  - **PageUp, PageDown, Home, End, Up and Down** move the containers of the focused
+    control, else the page's largest one. A focused text field keeps them.
+  - A **focus move** by key or screen reader brings the control into view; a pointer
+    press scrolls nothing.
+  - None of these is a press: they take no input number and run no action. Under a
+    dialog or alert the page doesn't move.
+  - **Input reaches only what is seen** (design 26 §7 S22). What is scrolled out of sight
+    is clipped, so the pointer can't hit it. A scroll cancels a pending press, hold or
+    arm inside the container, even when the control stays under the pointer. A control is
+    *seen* when its centre is in view, and an app-drawn one only when all of it is.
+    Enter or Space on a focused control that isn't seen brings it back and does nothing
+    else; a running hold ends; a `key=` shortcut doesn't fire.
+  - A **screen reader** can activate what it read even out of sight, which brings it into
+    view; a hold control it first only brings into view, and arms once seen.
+  - Offsets last for the session, per route and parameters for what holds the `outlet`
+    or sits in it.
 - **Setting a text field** through AccessKit (its value, its selection or the selected
   text) is not a press and answers nothing.
 - **Text fields** the app draws take input only while focused, as edit intents: the
@@ -262,7 +284,9 @@ app control is told apart by its `DrawnBy::App` part and tree key.
 - **Screen readers (`gogo-ui-a11y`).** The AccessKit tree comes from the same layers.
   Click, focus, set-value and text-selection requests become interact input, so they are
   numbered and checked like any press. Under a dialog only the dialog is exposed, as a
-  modal dialog or alert named by its root, which also has focus while no control does. A
+  modal dialog or alert named by its root, which also has focus while no control does. A scroll container is a scroll view that clips its
+  children and says where it is; it takes scroll up, down and to an offset, and everything
+  inside it takes scroll into view. A
   node's id covers what its action does, so a late request for a control that has since
   changed reaches nothing, even before the next tree update. A hold control's description
   says how to confirm.

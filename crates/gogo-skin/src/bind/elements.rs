@@ -764,14 +764,23 @@ impl<'a> Binder<'a> {
     fn scroll(&mut self, n: &'a AstNode, parent: NodeId, key: &str, cx: &Cx) -> R<NodeId> {
         let c = self.compute("scroll", Some(n), &[], cx, |_| {})?;
         let mut node = Self::node_of(&c);
-        node.scroll = Some(self.scroll_spec(cx)?);
+        let mut spec = self.scroll_spec(cx)?;
+        spec.per_route = self.in_outlet;
+        node.scroll = Some(spec);
         node.a11y.name = self.prop_text(n, "label")?;
         let id = self.add(parent, key, node, n.span)?;
         let cx2 = Cx {
             text: c.text,
             field: cx.field.clone(),
         };
+        let outlets = self.outlets;
         self.children(&n.children, id, key, &cx2)?;
+        // One that holds the outlet moves with the route too.
+        if self.outlets != outlets
+            && let Some(spec) = self.tree.node_mut(id).and_then(|n| n.scroll.as_mut())
+        {
+            spec.per_route = true;
+        }
         Ok(id)
     }
 
@@ -1311,7 +1320,10 @@ impl<'a> Binder<'a> {
             text: c.text,
             field: None,
         };
+        let inside = std::mem::replace(&mut self.in_outlet, true);
         let r = self.children(&r.children, id, key, &cx2);
+        self.in_outlet = inside;
+        self.outlets += 1;
         self.restore_route(saved);
         r?;
         Ok(id)
