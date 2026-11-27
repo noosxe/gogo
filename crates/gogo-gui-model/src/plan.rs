@@ -54,6 +54,9 @@ pub struct Plan {
     pub download: Option<u64>,
     /// Change in disk use, in bytes.
     pub disk_delta: Option<i64>,
+    /// Free space where the plan writes, in bytes. It moves on its own, so a plan that
+    /// differs only here is still the plan the user saw.
+    pub free: Option<u64>,
     /// What the user should know first.
     pub warnings: Vec<String>,
     /// Whether it can be undone.

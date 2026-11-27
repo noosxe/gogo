@@ -1274,3 +1274,92 @@ fn s21_a_closed_gate_blocks_retry_and_resume() {
         assert!(app.fake().controls.lock().unwrap().is_empty(), "{control}");
     }
 }
+
+#[test]
+fn s5_a_plan_that_differs_only_in_free_space_is_still_the_plan() {
+    let mut app = App::new();
+    app.invoke(&call("game.update"));
+    app.draw();
+    let mut plan = FakePlan::default();
+    plan.plan.free = Some(7);
+    app.fake().set_plan("game.update", plan);
+    assert_eq!(app.confirm(), Outcome::Accepted);
+    assert_eq!(app.runs(), 1);
+}
+
+/// The job of [`with_job`] pauses, is resumed and asks to have `plan` agreed to.
+fn resumed_with_a_new_plan(app: &mut App, id: &str, answers: &Answers) {
+    app.fake().sink(0).report(status(JobState::Paused));
+    app.model.pump();
+    assert_eq!(app.invoke(&job_call("job.resume", id)), Outcome::Accepted);
+    let answers = Arc::clone(answers);
+    app.fake().sink(0).ask(
+        PromptSpec::Plan(Box::new(FakePlan::default().plan)),
+        PromptReply::new(move |a| answers.lock().unwrap().push(a)),
+    );
+    app.model.pump();
+}
+
+#[test]
+fn s5_a_job_with_a_new_plan_waits_for_the_plan_card() {
+    let (mut app, id) = with_job();
+    let answers = Answers::default();
+    resumed_with_a_new_plan(&mut app, &id, &answers);
+    assert!(app.model.take_effects().contains(&Effect::PlanChanged {
+        action: "game.verify"
+    }));
+    let Some(Modal::PlanCard { ticket, action, .. }) = app.model.modal() else {
+        panic!("a plan card");
+    };
+    assert_eq!(action, "game.verify");
+
+    // Not yet seen, and not answerable as a question.
+    let early = app.press();
+    assert_eq!(app.model.confirm(ticket, early), Outcome::Ignored);
+    app.show(ticket);
+    let press = app.press();
+    assert_eq!(
+        app.model.answer(ticket, PromptAnswer::Yes, press),
+        Outcome::Ignored
+    );
+    assert!(answers.lock().unwrap().is_empty());
+
+    assert_eq!(app.confirm(), Outcome::Accepted);
+    assert_eq!(*answers.lock().unwrap(), [Some(PromptAnswer::Yes)]);
+    assert_eq!(app.screen(), "none");
+    assert_eq!(app.runs(), 1, "the job carries on; nothing runs anew");
+}
+
+#[test]
+fn s8_cancelling_pausing_or_stopping_a_job_answers_its_plan_card_with_a_cancel() {
+    for stop in ["dismiss", "job.pause", "job.cancel"] {
+        let (mut app, id) = with_job();
+        let answers = Answers::default();
+        resumed_with_a_new_plan(&mut app, &id, &answers);
+        assert_eq!(app.screen(), "card");
+        if stop == "dismiss" {
+            app.model.dismiss();
+        } else {
+            assert_eq!(app.invoke(&job_call(stop, &id)), Outcome::Accepted);
+        }
+        assert_eq!(app.screen(), "none", "{stop}");
+        assert_eq!(*answers.lock().unwrap(), [None], "{stop}");
+    }
+}
+
+#[test]
+fn s21_a_closed_gate_blocks_the_confirm_of_a_jobs_plan_card() {
+    let mut app = App::new();
+    app.invoke(&call("saves.push"));
+    app.confirm();
+    app.fake().sink(0).report(status(JobState::Running));
+    app.model.pump();
+    let id = app.model.jobs().ids().next().unwrap().as_str().to_owned();
+    let answers = Answers::default();
+    resumed_with_a_new_plan(&mut app, &id, &answers);
+    assert_eq!(app.screen(), "card");
+    app.fake().gates.cloud_writes = false;
+    assert!(matches!(app.confirm(), Outcome::Refused(_)));
+    assert_eq!(*answers.lock().unwrap(), [None]);
+    assert_eq!(app.screen(), "error");
+}
