@@ -11,7 +11,6 @@ mod dlc_cmd;
 mod galaxy_cmd;
 #[cfg(target_os = "linux")]
 mod installer_dlc;
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod log_file;
 #[cfg(target_os = "macos")]
 mod menus;
