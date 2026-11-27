@@ -7,8 +7,8 @@ use std::ops::Range;
 use std::path::Path;
 
 use gogo_skin::{
-    ActionTable, BindError, Binding, Bound, DefaultSkin, FallbackWhy, Lists, Mode, SkinPackage,
-    UiState, UiStateError, Value,
+    ActionTable, BindError, Binding, Bound, DefaultSkin, FallbackWhy, Lists, Mode, PopupSlot,
+    SkinPackage, UiState, UiStateError, Value,
 };
 use gogo_ui_interact::{Interaction, Layer, LayerId, LayerKind};
 use gogo_ui_ir::{NodeId, Tree};
@@ -61,6 +61,8 @@ pub(crate) struct Screen {
     pub(crate) tree: Tree,
     pub(crate) laid: Laid,
     pub(crate) actions: ActionTable,
+    /// What the screen's menus and selects open.
+    pub(crate) popups: Vec<PopupSlot>,
     /// A hash of each action's call, so that a press on a control that came to do
     /// something else is dropped.
     identity: Vec<u64>,
@@ -311,6 +313,7 @@ impl Page {
             tree: bound.tree,
             laid,
             actions: bound.actions,
+            popups: bound.popups,
             identity,
             id,
         })

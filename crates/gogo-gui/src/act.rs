@@ -14,22 +14,18 @@ pub(crate) fn number(event: EngineEvent) -> InputEvent {
     InputEvent(event.get() + FIXTURE_EVENT)
 }
 
-/// The call of a skin control, with the arguments that wait for the user's input worked
+/// The call of a skin control or a popup's entry, with the arguments that wait for the user's input worked
 /// out from it.
 pub(crate) fn invocation(
     call: &ActionCall,
     data: &dyn Scope,
-    on: Option<bool>,
+    input: &Input,
 ) -> Result<Invocation, PendingError> {
-    let input = Input {
-        on,
-        ..Input::default()
-    };
     let mut invocation = Invocation::new(call.spec);
     for arg in &call.args {
         let value = match &arg.value {
             ArgValue::Value(value) => value.clone(),
-            ArgValue::OnInput(pending) => pending.eval(data, &input)?,
+            ArgValue::OnInput(pending) => pending.eval(data, input)?,
         };
         if value == gogo_contract::Value::Null && arg.param.optional {
             continue;
