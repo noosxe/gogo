@@ -58,6 +58,7 @@ pub fn build(tree: &Tree, laid: &Laid, state: &SceneState) -> DisplayList {
         ops: Vec::new(),
         images: Vec::new(),
         image_ids: HashMap::new(),
+        areas: Vec::new(),
     };
     b.walk(root);
     DisplayList {
@@ -78,8 +79,19 @@ enum Work {
 /// What a node still owes after its children.
 struct Exit {
     clip: bool,
+    /// Whether leaving the clip leaves a culling area too.
+    area: bool,
+    /// The gutter and thumb of a scroll container, drawn over nothing of its content.
+    bar: Option<Box<Bar>>,
     ring: Option<(Rect, RoundedRectRadii, ir::Stroke)>,
     opacity: bool,
+}
+
+/// A scrollbar to draw.
+struct Bar {
+    track: Rect,
+    thumb: Rect,
+    spec: ir::ScrollSpec,
 }
 
 struct Builder<'a> {
@@ -89,6 +101,8 @@ struct Builder<'a> {
     ops: Vec<Op>,
     images: Vec<ImageKey>,
     image_ids: HashMap<ImageKey, ImageId>,
+    /// What each open scroll clip shows, innermost last: nodes outside it are not drawn.
+    areas: Vec<Rect>,
 }
 
 impl Builder<'_> {
@@ -136,12 +150,18 @@ impl Builder<'_> {
         // its children still get their turn.
         let draws = rect.width() > 0.0 && rect.height() > 0.0 && paint_is_finite(paint);
         let opacity = draws && paint.opacity < 1.0;
+        // Out of a scroll container's sight: its own ops are left out, so the list does
+        // not grow with what is scrolled away. Its children get their turn all the same.
+        let culled = self
+            .areas
+            .last()
+            .is_some_and(|area| !touches(rect, reach(paint), *area));
         if opacity {
             self.ops.push(Op::PushOpacity {
                 alpha: paint.opacity.clamp(0.0, 1.0),
             });
         }
-        if draws {
+        if draws && !culled {
             self.outer_effects(paint, &geo);
             self.body(node, paint, placed, &geo, offset);
             self.border(paint, &geo);
@@ -149,18 +169,36 @@ impl Builder<'_> {
         }
 
         let clip = placed.clips;
+        let mut area = false;
         if clip {
+            let c = placed.clip;
+            let seen = to_rect(c.x0, c.y0, c.x1, c.y1) + offset;
             self.ops.push(Op::PushClip {
-                shape: Shape::Rect(rect),
+                shape: Shape::Rect(seen),
             });
+            if placed.scroll.is_some() {
+                let outer = self.areas.last().copied();
+                self.areas.push(outer.map_or(seen, |o| o.intersect(seen)));
+                area = true;
+            }
         }
-        let ring = if focused && draws {
+        let bar = match (&node.scroll, &placed.scroll) {
+            (Some(spec), Some(s)) if draws && !culled && s.max > 0.0 => Some(Box::new(Bar {
+                track: to_rect(s.track.x0, s.track.y0, s.track.x1, s.track.y1) + offset,
+                thumb: to_rect(s.thumb.x0, s.thumb.y0, s.thumb.x1, s.thumb.y1) + offset,
+                spec: spec.clone(),
+            })),
+            _ => None,
+        };
+        let ring = if focused && draws && !culled {
             paint.ring.map(|r| (rect, geo.radii, r))
         } else {
             None
         };
         stack.push(Work::Exit(Exit {
             clip,
+            area,
+            bar,
             ring,
             opacity,
         }));
@@ -172,6 +210,12 @@ impl Builder<'_> {
     fn exit(&mut self, x: Exit) {
         if x.clip {
             self.ops.push(Op::Pop);
+        }
+        if x.area {
+            self.areas.pop();
+        }
+        if let Some(bar) = x.bar {
+            self.scrollbar(&bar);
         }
         if let Some((rect, radii, ring)) = x.ring {
             // Outside the box, 2 px away, so it never covers the node's own border.
@@ -191,6 +235,31 @@ impl Builder<'_> {
         }
         if x.opacity {
             self.ops.push(Op::Pop);
+        }
+    }
+
+    fn scrollbar(&mut self, bar: &Bar) {
+        if let Some(brush) = bar
+            .spec
+            .track
+            .as_ref()
+            .and_then(|f| fill_brush(f, bar.track))
+        {
+            self.ops.push(Op::Fill {
+                shape: Shape::Rect(bar.track),
+                brush,
+            });
+        }
+        if bar.thumb.width() <= 0.0 || bar.thumb.height() <= 0.0 {
+            return;
+        }
+        let half = bar.thumb.width().min(bar.thumb.height()) / 2.0;
+        let radius = f64::from(bar.spec.radius).clamp(0.0, half);
+        if let Some(brush) = fill_brush(&bar.spec.thumb, bar.thumb) {
+            self.ops.push(Op::Fill {
+                shape: Shape::RoundedRect(RoundedRect::from_rect(bar.thumb, radius)),
+                brush,
+            });
         }
     }
 
@@ -548,6 +617,33 @@ impl Builder<'_> {
 }
 
 /// A node's outline: a rounded box or an ellipse, at its place after offsets.
+/// How far outside its box a node can paint: shadows, glow and the focus ring.
+fn reach(paint: &Paint) -> f64 {
+    let ring = paint.ring.map_or(0.0, |r| f64::from(r.width) + 2.0);
+    paint.effects.iter().fold(ring, |most, e| {
+        let out = match e {
+            Effect::Shadow {
+                dx,
+                dy,
+                blur,
+                spread,
+                ..
+            } => f64::from(dx.abs().max(dy.abs()) + spread.max(0.0) + blur.max(0.0) * 1.5),
+            Effect::Glow { layers } => layers
+                .iter()
+                .fold(0.0, |m, l| f64::max(m, f64::from(l.radius) * 1.5)),
+            _ => 0.0,
+        };
+        most.max(out)
+    })
+}
+
+/// Whether anything within `reach` of `rect` can show in `area`.
+fn touches(rect: Rect, reach: f64, area: Rect) -> bool {
+    let r = rect.inflate(reach, reach);
+    r.x0 < area.x1 && r.x1 > area.x0 && r.y0 < area.y1 && r.y1 > area.y0
+}
+
 struct Geo {
     rect: Rect,
     /// Corner radii, each between 0 and half the short side. For an ellipse they are the

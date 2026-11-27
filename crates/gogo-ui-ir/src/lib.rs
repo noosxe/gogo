@@ -63,6 +63,6 @@ pub use layout::{Align, Dim, Direction, Display, Justify, LayoutStyle, Position,
 pub use paint::{Color, Effect, Fill, GlowLayer, GradientStop, Paint, Shape, Stroke};
 pub use text::{Bloom, Gesture, Motion, TextAlign, TextMarks, TextStyle};
 pub use tree::{
-    ActionRef, AppPart, DrawnBy, Fit, ImageSource, Kind, Node, NodeId, PartId, Tree, TreeError,
-    WidgetId,
+    ActionRef, AppPart, DrawnBy, Fit, ImageSource, Kind, Node, NodeId, PartId, SCROLLBAR_WIDTH,
+    ScrollSpec, Tree, TreeError, WidgetId,
 };

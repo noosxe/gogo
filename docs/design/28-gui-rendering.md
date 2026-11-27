@@ -51,7 +51,10 @@ list. `Renderer::render(&DisplayList, &dyn ImageStore, scale, &mut Surface)` dra
 12. focus ring.
 
 The effects of one node are drawn in this fixed order, not in the order the skin wrote them.
-A scroll container's children are drawn inside a `PushClip` of its box. A node with
+A scroll container's children are drawn inside a `PushClip` of its viewport (inside the
+border, left of the scrollbar gutter), and its scrollbar after that clip is popped. A node
+that lies wholly outside the viewport, with its shadows, glow and ring, adds no ops of its
+own. A node with
 `opacity` below 1 is one `PushOpacity` layer with its children, and `Paint::offset` moves the
 node and its descendants without touching layout.
 

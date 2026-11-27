@@ -3,10 +3,10 @@
 use std::sync::Arc;
 
 use gogo_ui_ir::{
-    Align, Color, Dim, Kind, LayoutStyle, Node, NodeId, Paint, Position, Sides, Stroke, TextAlign,
-    TextStyle, Track, Tree,
+    Align, Color, Dim, Kind, LayoutStyle, Node, NodeId, Paint, Position, ScrollSpec, Sides, Stroke,
+    TextAlign, TextStyle, Track, Tree,
 };
-use gogo_ui_layout::{LayoutError, Rect, Scroll, Viewport, layout};
+use gogo_ui_layout::{LayoutError, MIN_THUMB, Rect, Scroll, Viewport, layout};
 use gogo_ui_text::FontSet;
 
 fn lay(tree: &Tree, w: f32, h: f32) -> gogo_ui_layout::Laid {
@@ -657,4 +657,107 @@ fn many_text_leaves_in_nested_rows_lay_out() {
     }
     let l = lay(&t, 400.0, 600.0);
     assert_eq!(l.order().len(), 901);
+}
+
+/// A column of `n` rows 30 px high in a scroll container that gets what the root has left
+/// under a 40 px header.
+fn scrolling(n: usize, spec: ScrollSpec) -> (Tree, NodeId, Vec<NodeId>) {
+    let mut t = Tree::new("root", boxed(LayoutStyle::default()));
+    add_root(
+        &mut t,
+        "head",
+        boxed(ls(px(100.0, 40.0), |s| s.shrink = 0.0)),
+    );
+    let mut list = boxed(ls(LayoutStyle::default(), |s| s.grow = 1.0));
+    list.scroll = Some(spec);
+    let list = add_root(&mut t, "list", list);
+    let rows = (0..n)
+        .map(|i| {
+            let row = ls(LayoutStyle::default(), |s| {
+                s.height = Dim::Px(30.0);
+                s.shrink = 0.0;
+            });
+            add(&mut t, list, &format!("row{i}"), boxed(row))
+        })
+        .collect();
+    (t, list, rows)
+}
+
+#[test]
+fn a_scroll_container_keeps_its_room_and_reports_its_content() {
+    let (t, list, rows) = scrolling(10, ScrollSpec::default());
+    let l = lay(&t, 200.0, 140.0);
+    assert_eq!(rect(&l, list), (0.0, 40.0, 200.0, 100.0));
+    let b = *l.scroll_box(list).expect("a scroll box");
+    assert_eq!((b.offset, b.max), (0.0, 200.0));
+    // The gutter is on the right, and the content is laid out and seen beside it.
+    assert_eq!(b.viewport, Rect::new(0.0, 40.0, 192.0, 140.0));
+    assert_eq!(b.track, Rect::new(192.0, 40.0, 200.0, 140.0));
+    assert_eq!(rect(&l, rows[0]), (0.0, 40.0, 192.0, 30.0));
+    // A third of the content shows, so the thumb is a third of the track.
+    assert_eq!(b.thumb.y0, 40.0);
+    assert!((b.thumb.height() - 100.0 / 3.0).abs() < 0.01);
+    // The gutter belongs to the container, never to what scrolls under it.
+    assert_eq!(l.hit(196.0, 60.0), Some(list));
+}
+
+#[test]
+fn a_scroll_offset_is_clamped_to_the_content() {
+    let (t, list, rows) = scrolling(10, ScrollSpec::default());
+    let mut fonts = FontSet::bundled();
+    let mut at = |y: f32| {
+        let sc = Scroll::none().with(list, 30.0, y);
+        layout(&t, &mut fonts, Viewport::new(200.0, 140.0), &sc).expect("layout")
+    };
+    let end = at(10_000.0);
+    let b = *end.scroll_box(list).expect("a scroll box");
+    assert_eq!(b.offset, 200.0);
+    assert_eq!(b.thumb.y1, b.track.y1);
+    assert_eq!(
+        rect(&end, rows[9]),
+        (0.0, 110.0, 192.0, 30.0),
+        "x is ignored"
+    );
+    assert_eq!(at(-50.0).scroll_box(list).expect("a box").offset, 0.0);
+    // A row scrolled out above the container is not seen under the header.
+    assert_eq!(end.get(rows[0]).expect("placed").visible.height(), 0.0);
+}
+
+#[test]
+fn content_that_fits_does_not_scroll() {
+    let (t, list, _) = scrolling(2, ScrollSpec::default());
+    let sc = Scroll::none().with(list, 0.0, 40.0);
+    let l = layout(
+        &t,
+        &mut FontSet::bundled(),
+        Viewport::new(200.0, 140.0),
+        &sc,
+    )
+    .expect("layout");
+    let b = *l.scroll_box(list).expect("a scroll box");
+    assert_eq!((b.offset, b.max), (0.0, 0.0));
+    assert_eq!(b.thumb.height(), 0.0);
+}
+
+#[test]
+fn a_long_list_has_a_thumb_of_the_smallest_length() {
+    let (t, list, _) = scrolling(1000, ScrollSpec::default());
+    let l = lay(&t, 200.0, 140.0);
+    assert_eq!(l.scroll_box(list).expect("a box").thumb.height(), MIN_THUMB);
+}
+
+#[test]
+fn a_scroll_container_clips_inside_its_border() {
+    let (mut t, list, rows) = scrolling(10, ScrollSpec::default());
+    let line = Some(Stroke {
+        color: Color::rgb(1, 1, 1),
+        width: 2.0,
+    });
+    t.node_mut(list).expect("the list").paint.border = [line; 4];
+    let l = lay(&t, 200.0, 140.0);
+    let b = *l.scroll_box(list).expect("a scroll box");
+    assert_eq!(b.viewport, Rect::new(2.0, 42.0, 190.0, 138.0));
+    assert_eq!(b.max, 204.0);
+    assert_eq!(l.get(rows[0]).expect("placed").visible.y0, 42.0);
+    assert_eq!(l.hit(10.0, 41.0), Some(list), "the border is not a row");
 }

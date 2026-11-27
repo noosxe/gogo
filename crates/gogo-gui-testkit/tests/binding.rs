@@ -280,6 +280,40 @@ fn a_switch_without_a_match_or_an_else_draws_nothing() {
 }
 
 #[test]
+fn a_scroll_element_makes_a_scroll_container() {
+    let mut f = base();
+    game_insert(
+        &mut f,
+        "scroll id=\"long\" label=\"Notes\" { text \"one\" }",
+    );
+    append(
+        &mut f,
+        "styles.kdl",
+        "\nstyle \"scrollbar\" { w 12; fill \"#101010\" }\nstyle \"scrollbar-thumb\" { fill \"#202020\"; radius 3 }",
+    );
+    let pkg = skin("default", f);
+    let b = bind(&pkg, "game", &FixtureScope::new());
+    let node = b
+        .tree
+        .iter()
+        .filter_map(|id| b.tree.get(id))
+        .find(|n| n.name.as_deref() == Some("long"))
+        .expect("the scroll node");
+    let spec = node.scroll.as_ref().expect("a spec");
+    assert_eq!((spec.width, spec.radius), (12.0, 3.0));
+    assert_eq!(
+        spec.track,
+        Some(Fill::Solid(gogo_skin::ir::Color([16, 16, 16, 255])))
+    );
+    assert_eq!(
+        spec.thumb,
+        Fill::Solid(gogo_skin::ir::Color([32, 32, 32, 255]))
+    );
+    assert_eq!(node.a11y.name.as_deref(), Some("Notes"));
+    b.tree.validate().expect("a valid tree");
+}
+
+#[test]
 fn a_list_is_cut_at_a_thousand_silently() {
     let mut f = base();
     game_insert(

@@ -78,6 +78,7 @@ static ELEMENTS: &[Spec] = &[
     el("row", Args::None, &[], Kids::Any),
     el("grid", Args::None, &[], Kids::Any),
     el("layer", Args::None, &[], Kids::Any),
+    el("scroll", Args::None, &[], Kids::Any),
     el("outlet", Args::None, &[], Kids::None),
     el("spacer", Args::None, &[], Kids::None),
     el("divider", Args::None, &[], Kids::None),
@@ -175,7 +176,7 @@ const WIDGET_PROPS: &[&str] = &["for", "args", "placement", "game", "title"];
 fn element_names() -> Vec<&'static str> {
     let mut v: Vec<&str> = ELEMENTS.iter().map(|s| s.name).collect();
     v.extend([
-        "let", "each", "switch", "case", "else", "use", "part", "scroll", "item", "col",
+        "let", "each", "switch", "case", "else", "use", "part", "item", "col",
     ]);
     v.extend(
         WIDGETS
@@ -270,15 +271,6 @@ impl Walk<'_, '_> {
             "case" | "else" => self.case(n, me),
             "use" => self.use_(n),
             "part" => self.part(n, parent),
-            "scroll" => {
-                self.col
-                    .error(
-                        Code::PlannedElement,
-                        n.name_span,
-                        "`scroll` is planned and not available yet (#545)",
-                    )
-                    .help("scrolling arrives with its own PR; until then, size the content");
-            }
             "item" => self.element(&ITEM, n, me),
             "col" => self.element(&COL, n, me),
             name => {
