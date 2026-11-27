@@ -46,6 +46,14 @@ pub enum Role {
     List,
     /// One of them.
     ListItem,
+    /// The list of actions a menu button opens.
+    Menu,
+    /// One action of a menu.
+    MenuItem,
+    /// A list of options one of which is chosen.
+    ListBox,
+    /// One option of a list; see [`A11y::selected`].
+    ListOption,
 }
 
 /// A node's accessibility facts. [`Default`] is a plain, unnamed, non-focusable generic

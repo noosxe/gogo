@@ -34,6 +34,11 @@
 //! - **Focus order is document order** (S13), over the layers that take input. The
 //!   topmost dialog traps focus and pointer: only it takes input, not what is below it
 //!   nor what is drawn over it.
+//! - **Popups** ([`LayerKind::Popup`]) trap input the same way while no dialog is up; a
+//!   dialog anywhere in the stack wins over them. A press outside one is
+//!   [`Intent::Dismiss`] and presses nothing else. Up and Down walk menu items and list
+//!   options. [`PopupStack`] keeps the app's open popups and [`place`] puts one by the
+//!   control that opened it.
 //! - **Focus-visible.** The focus ring shows after the keyboard or a screen reader moved
 //!   focus, not after a click.
 //! - **Text fields** (the app's own) get the editing keys and pointer gestures while
@@ -49,8 +54,8 @@
 //!   move and assistive technology change them; none is a press. A scroll cancels what was
 //!   being pressed inside, and a control scrolled out of sight is brought back rather than
 //!   activated.
-//! - **Not here yet:** opening a select or menu. A select takes focus but does not
-//!   activate: the tree does not carry its options.
+//! - **Menus and selects** give [`Intent::Open`], never an action: the app draws what
+//!   they open.
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -61,12 +66,14 @@ mod input;
 mod intent;
 mod interaction;
 mod keys;
+mod popup;
 mod scroll;
 
 pub use focus::FocusOrder;
 pub use frame::{Frame, Identity, Layer, LayerId, LayerKind, Target, activatable};
 pub use gogo_ui_ir::{Gesture, Motion};
 pub use input::{ImeInput, Input, Key, Modifiers, PointerButton, Request, RequestKind};
-pub use intent::{ControlInput, InputEvent, InputProvenance, Intent, Response, TextEdit};
+pub use intent::{ControlInput, InputEvent, InputProvenance, Intent, Response, Step, TextEdit};
 pub use interaction::{ARM_EXPIRES, Config, HOLD_ARM, Interaction, Primary};
+pub use popup::{Placement, PopupStack, place};
 pub use scroll::SCROLL_LINE;

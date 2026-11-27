@@ -247,6 +247,8 @@ pub fn names(intents: &[Intent]) -> Vec<String> {
             Intent::HoldEnd { target } => format!("end {}", target.key),
             Intent::HoldArmed { target } => format!("armed {}", target.key),
             Intent::SetValue { target, value } => format!("set {} {value}", target.key),
+            Intent::Open { target, .. } => format!("open {}", target.key),
+            Intent::Move { target, step } => format!("move {} {step:?}", target.key),
             Intent::Dismiss { .. } => "dismiss".to_owned(),
             Intent::Enter { .. } => "enter".to_owned(),
             Intent::Palette { .. } => "palette".to_owned(),

@@ -515,3 +515,100 @@ fn a_screen_reader_replaces_the_selected_text() {
     };
     assert_eq!(*edit, TextEdit::Replace("x".into()));
 }
+
+// ---- popups ----
+
+const POPUP: LayerId = LayerId(3);
+
+/// A transparent root holding the popup's box.
+fn popup(name: Option<&str>, role: IrRole, nodes: Vec<(&str, Node)>) -> Screen {
+    let mut tree = IrTree::new("root", Node::container().with_layout(sized(800.0, 600.0)));
+    let root = tree.root();
+    let mut column = sized(300.0, 300.0);
+    column.direction = Direction::Column;
+    let mut list = Node::container().with_layout(column);
+    list.a11y.role = role;
+    list.a11y.name = name.map(str::to_owned);
+    let list = tree.add_child(root, "list", list).expect("add");
+    for (key, node) in nodes {
+        tree.add_child(list, key, node).expect("add");
+    }
+    let laid = layout(
+        &tree,
+        &mut FontSet::bundled(),
+        Viewport::new(800.0, 600.0),
+        &Scroll::none(),
+    )
+    .expect("layout");
+    Screen { tree, laid }
+}
+
+/// Every role and name a screen reader finds.
+fn read(update: accesskit::TreeUpdate) -> Vec<(Role, String)> {
+    update
+        .nodes
+        .iter()
+        .map(|(_, n)| (n.role(), n.label().unwrap_or_default().to_owned()))
+        .collect()
+}
+
+#[test]
+fn a_menu_is_read_alone_with_its_items() {
+    let page = Screen::new("Page", vec![("play", app(IrRole::Button, "Play", 1))]);
+    let menu = popup(
+        Some("More"),
+        IrRole::Menu,
+        vec![("one", app(IrRole::MenuItem, "Open folder", 2))],
+    );
+    let layers = [
+        page.layer(PAGE, LayerKind::Page),
+        menu.layer(POPUP, LayerKind::Popup).initial_focus("one"),
+    ];
+    let frame = Frame { layers: &layers };
+    let mut ix = Interaction::new(Config::default());
+    ix.sync(&frame);
+    let mut a11y = A11yTree::new("gogo");
+    let found = read(a11y.update(&frame, &ix, 1.0));
+    assert!(
+        found.contains(&(Role::Menu, "More".to_owned())),
+        "{found:?}"
+    );
+    assert!(
+        found.contains(&(Role::MenuItem, "Open folder".to_owned())),
+        "{found:?}"
+    );
+    assert!(!found.iter().any(|(_, name)| name == "Play"), "{found:?}");
+    assert!(!found.iter().any(|(role, _)| *role == Role::Dialog));
+}
+
+#[test]
+fn a_palette_is_a_modal_dialog_whose_field_points_at_the_highlighted_row() {
+    let list = popup(
+        Some("Commands"),
+        IrRole::ListBox,
+        vec![
+            ("field", app(IrRole::TextInput, "Search", 1)),
+            ("one", app(IrRole::ListOption, "Library", 2)),
+        ],
+    );
+    let layers = [list
+        .layer(POPUP, LayerKind::Popup)
+        .initial_focus("field")
+        .submit("one")];
+    let frame = Frame { layers: &layers };
+    let mut ix = Interaction::new(Config::default());
+    ix.sync(&frame);
+    let update = A11yTree::new("gogo").update(&frame, &ix, 1.0);
+    let field = update
+        .nodes
+        .iter()
+        .find(|(id, _)| *id == update.focus)
+        .map(|(_, n)| n.clone())
+        .expect("focused");
+    assert_eq!(field.role(), Role::TextInput);
+    let row = field.active_descendant().expect("points at a row");
+    let row = update.nodes.iter().find(|(id, _)| *id == row).expect("row");
+    assert_eq!(row.1.role(), Role::ListBoxOption);
+    let dialog = update.nodes.iter().find(|(_, n)| n.role() == Role::Dialog);
+    assert!(dialog.expect("a dialog").1.is_modal());
+}

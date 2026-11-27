@@ -196,26 +196,40 @@ fn s4_a_switch_passes_its_state_and_a_flip_drops_the_press() {
 }
 
 #[test]
-fn s4_disabled_unnamed_by_an_action_and_selects_do_not_activate() {
+fn s4_a_disabled_control_does_not_activate() {
     let mut disabled = button("Off", 0);
     disabled.a11y.disabled = true;
+    let s = Screen::new(vec![("off", disabled)]);
+    let layers = [s.layer(PAGE, LayerKind::Page)];
+    let frame = Frame { layers: &layers };
+    let mut d = Driver::new();
+    assert!(d.click(&frame, s.center("off")).is_empty());
+    assert!(
+        d.assist(&frame, PAGE, "off", RequestKind::Activate)
+            .is_empty()
+    );
+}
+
+#[test]
+fn s4_a_menu_button_and_a_select_open_and_run_nothing() {
     let mut menu = Node::container();
     menu.a11y = A11y::control(Role::MenuButton, "More");
     menu.layout = button("x", 0).layout;
     let select = button("", 1).with_a11y(A11y::control(Role::ComboBox, "Renderer"));
-    let s = Screen::new(vec![("off", disabled), ("menu", menu), ("select", select)]);
+    let s = Screen::new(vec![("menu", menu), ("select", select)]);
     let layers = [s.layer(PAGE, LayerKind::Page)];
     let frame = Frame { layers: &layers };
     let mut d = Driver::new();
-    for key in ["off", "menu", "select"] {
-        assert!(d.click(&frame, s.center(key)).is_empty(), "{key}");
-        assert!(
-            d.assist(&frame, PAGE, key, RequestKind::Activate)
-                .is_empty()
+    for key in ["menu", "select"] {
+        let opened = [format!("open {key}")];
+        assert_eq!(names(&d.click(&frame, s.center(key))), opened);
+        assert_eq!(names(&d.tap(&frame, Key::Enter)), opened);
+        assert_eq!(names(&d.tap(&frame, Key::Space)), opened);
+        assert_eq!(
+            names(&d.assist(&frame, PAGE, key, RequestKind::Activate)),
+            opened
         );
     }
-    assert_eq!(d.focused(), "select");
-    assert!(d.tap(&frame, Key::Enter).is_empty());
 }
 
 #[test]

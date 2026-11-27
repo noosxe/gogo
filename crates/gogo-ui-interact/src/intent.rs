@@ -133,6 +133,15 @@ impl std::fmt::Debug for TextEdit {
     }
 }
 
+/// A step along a list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    /// Towards the start.
+    Prev,
+    /// Towards the end.
+    Next,
+}
+
 /// Something the user asked for.
 #[derive(PartialEq)]
 #[non_exhaustive]
@@ -156,6 +165,22 @@ pub enum Intent {
         part: AppPart,
         /// The press.
         provenance: InputProvenance,
+    },
+    /// A skin `menu` button or `select` was activated: the app opens its popup. No
+    /// action runs.
+    Open {
+        /// The control.
+        target: Target,
+        /// The press.
+        provenance: InputProvenance,
+    },
+    /// Up or Down in the text field of a layer with [`Layer::submit`](crate::Layer::submit):
+    /// move the highlight. Not a press: it answers nothing.
+    Move {
+        /// The field.
+        target: Target,
+        /// Which way.
+        step: Step,
     },
     /// A hold control is being held.
     HoldStart {
@@ -191,7 +216,7 @@ pub enum Intent {
         /// What to do to its text.
         edit: TextEdit,
     },
-    /// Esc: close, cancel or go back.
+    /// Esc: close, cancel or go back. Also a press outside a popup.
     Dismiss {
         /// The press.
         provenance: InputProvenance,
@@ -259,6 +284,16 @@ impl std::fmt::Debug for Intent {
                 .field("target", target)
                 .field("part", part)
                 .field("provenance", provenance)
+                .finish(),
+            Intent::Open { target, provenance } => f
+                .debug_struct("Open")
+                .field("target", target)
+                .field("provenance", provenance)
+                .finish(),
+            Intent::Move { target, step } => f
+                .debug_struct("Move")
+                .field("target", target)
+                .field("step", step)
                 .finish(),
             Intent::HoldEnd { target } => {
                 f.debug_struct("HoldEnd").field("target", target).finish()

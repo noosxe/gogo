@@ -9,7 +9,7 @@ use crate::editing::Click;
 use crate::focus::FocusOrder;
 use crate::frame::{Frame, Identity, Layer, LayerId, LayerKind, Target, activatable, control};
 use crate::input::{Input, Key, Modifiers, PointerButton, Request, RequestKind};
-use crate::intent::{ControlInput, InputEvent, InputProvenance, Intent, Response, TextEdit};
+use crate::intent::{ControlInput, InputEvent, InputProvenance, Intent, Response, Step, TextEdit};
 use crate::keys;
 use crate::scroll::{self, ScrollState};
 
@@ -188,6 +188,18 @@ fn control_at(frame: &Frame<'_>, x: f64, y: f64) -> Option<Target> {
     None
 }
 
+/// Whether the point is outside the popup that takes input: on nothing, or on the empty
+/// area of its root.
+fn outside_popup(frame: &Frame<'_>, x: f64, y: f64) -> bool {
+    frame.modal().is_some_and(|popup| {
+        popup.kind == LayerKind::Popup
+            && popup
+                .laid
+                .hit(x, y)
+                .is_none_or(|node| node == popup.tree.root())
+    })
+}
+
 fn is_hold(layer: &Layer<'_>, target: &Target) -> bool {
     layer.hold.contains(&target.key.as_str())
 }
@@ -203,6 +215,9 @@ fn activation(layer: &Layer<'_>, target: Target, provenance: InputProvenance) ->
             part,
             provenance,
         }),
+        _ if matches!(node.a11y.role, Role::MenuButton | Role::ComboBox) => {
+            Some(Intent::Open { target, provenance })
+        }
         _ => Some(Intent::Invoke {
             action: node.action?,
             input: ControlInput {
@@ -448,8 +463,11 @@ impl Interaction {
                 .and_then(|key| dialog.tree.by_key(key))
                 .and_then(|node| dialog.target(node))
                 .and_then(|t| current(&t));
-            // A dialog's starting point is always shown.
-            self.visible = initial.is_some();
+            // A dialog's starting point is always shown. A popup shows it after the
+            // keyboard opened it, not after a click.
+            if dialog.kind != LayerKind::Popup {
+                self.visible = initial.is_some();
+            }
             self.set_focus(initial, out);
         } else if (self.modal != modal && self.modal.is_some()) || (lost && focus.is_none()) {
             let back = focus.or_else(|| self.remembered(frame));
@@ -563,6 +581,13 @@ impl Interaction {
         let event = self.number();
         self.visible = false;
         self.hovered = control_at(frame, x, y);
+        if outside_popup(frame, x, y) {
+            out.consumed = true;
+            out.intents.push(Intent::Dismiss {
+                provenance: InputProvenance { event, at },
+            });
+            return;
+        }
         let Some(target) = self.hovered.clone() else {
             return;
         };
@@ -749,6 +774,17 @@ impl Interaction {
                     self.set_focus(Some(next), out);
                 }
             }
+            Key::ArrowUp | Key::ArrowDown
+                if plain && frame.modal().is_some_and(|l| l.kind == LayerKind::Popup) =>
+            {
+                out.consumed = true;
+                let step = if key == Key::ArrowUp {
+                    Step::Prev
+                } else {
+                    Step::Next
+                };
+                self.along_list(step, frame, out);
+            }
             Key::Enter | Key::Space if plain => {
                 out.consumed = self.focus.is_some() || frame.modal().is_some();
                 if !repeat {
@@ -816,6 +852,56 @@ impl Interaction {
         layer.target(tabs[next])
     }
 
+    /// Up or Down in a popup: from a field over a list the app moves its highlight;
+    /// otherwise focus walks the items beside the focused one, stopping at the ends.
+    fn along_list(&mut self, step: Step, frame: &Frame<'_>, out: &mut Response) {
+        if let Some(target) = self.field(frame)
+            && frame
+                .layer(target.layer)
+                .is_some_and(|l| l.submit.is_some())
+        {
+            out.intents.push(Intent::Move { target, step });
+            return;
+        }
+        let Some(layer) = frame.modal() else { return };
+        let is_item = |&n: &NodeId| {
+            layer.tree.get(n).is_some_and(|n| {
+                matches!(n.a11y.role, Role::MenuItem | Role::ListOption)
+                    && n.a11y.focusable
+                    && !n.a11y.disabled
+            })
+        };
+        let focused = self
+            .focus
+            .as_ref()
+            .and_then(|f| find(frame, f.layer, &f.key))
+            .map(|(_, node)| node)
+            .filter(is_item);
+        let next = match focused.and_then(|node| Some((node, layer.tree.parent(node)?))) {
+            Some((node, parent)) => {
+                let items: Vec<NodeId> = layer
+                    .tree
+                    .children(parent)
+                    .iter()
+                    .copied()
+                    .filter(is_item)
+                    .collect();
+                let at = items.iter().position(|&i| i == node);
+                at.and_then(|i| match step {
+                    Step::Prev => i.checked_sub(1),
+                    Step::Next => Some(i + 1),
+                })
+                .and_then(|i| items.get(i).copied())
+            }
+            // On nothing yet: the first item.
+            None => layer.tree.focus_order().into_iter().find(is_item),
+        };
+        if let Some(target) = next.and_then(|n| layer.target(n)) {
+            self.visible = true;
+            self.set_focus(Some(target), out);
+        }
+    }
+
     /// Enter or Space went down.
     fn activate_focus(&mut self, key: Key, at: Duration, frame: &Frame<'_>, out: &mut Response) {
         self.cancel_presses(out);
@@ -826,9 +912,18 @@ impl Interaction {
             }
             return;
         };
-        let Some((layer, node)) = find(frame, target.layer, &target.key) else {
+        let Some((layer, mut node)) = find(frame, target.layer, &target.key) else {
             return;
         };
+        let mut target = target;
+        // Enter in a field over a list activates the row the app highlighted.
+        if key == Key::Enter
+            && self.field(frame).is_some()
+            && let Some(row) = layer.submit.and_then(|k| layer.tree.by_key(k))
+            && let Some(row_target) = layer.target(row)
+        {
+            (node, target) = (row, row_target);
+        }
         // What was scrolled away is brought back for the next press, not activated.
         if !scroll::seen(layer, node) {
             self.visible = true;
