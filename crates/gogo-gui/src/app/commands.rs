@@ -288,19 +288,6 @@ fn chord(app: &mut App, key: Key, mods: Modifiers, ms: u64) {
     frame(app);
 }
 
-fn primary() -> Modifiers {
-    match PRIMARY {
-        Primary::Meta => Modifiers {
-            meta: true,
-            ..Modifiers::default()
-        },
-        _ => Modifiers {
-            ctrl: true,
-            ..Modifiers::default()
-        },
-    }
-}
-
 #[test]
 fn an_input_method_composes_and_commits_into_the_search() {
     let mut app = app();
@@ -367,27 +354,45 @@ fn assistive_technology_sets_the_search() {
 
 #[test]
 fn the_search_is_edited_like_any_field() {
-    let mut app = app();
-    ctrl_k(&mut app, 10);
-    text(&mut app, "go to queue", 20);
-    // A word at a time, then everything, then back.
-    chord(&mut app, Key::Backspace, primary(), 30);
-    assert_eq!(query(&mut app), "go to ");
-    chord(&mut app, Key::Char('a'), primary(), 40);
-    chord(&mut app, Key::Char('c'), primary(), 50);
-    assert_eq!(app.copied().as_deref().map(String::as_str), Some("go to "));
-    chord(&mut app, Key::Char('x'), primary(), 60);
-    assert_eq!(query(&mut app), "");
-    chord(&mut app, Key::Char('z'), primary(), 70);
-    assert_eq!(query(&mut app), "go to ");
-    key(&mut app, Key::Home, 80);
-    key(&mut app, Key::Delete, 90);
-    assert_eq!(query(&mut app), "o to ");
-    chord(&mut app, Key::Char('v'), primary(), 100);
-    assert!(app.wants_paste());
-    app.pasted(Some(Zeroizing::new("G".to_owned())));
-    frame(&mut app);
-    assert_eq!(query(&mut app), "Go to ");
+    // With each platform's keys: the shortcuts are Cmd and a word is Option on macOS,
+    // and both are Ctrl elsewhere.
+    for primary in [Primary::Ctrl, Primary::Meta] {
+        let none = Modifiers::default();
+        let (shortcut, word) = match primary {
+            Primary::Meta => (
+                Modifiers { meta: true, ..none },
+                Modifiers { alt: true, ..none },
+            ),
+            _ => {
+                let ctrl = Modifiers { ctrl: true, ..none };
+                (ctrl, ctrl)
+            }
+        };
+        let mut app = app();
+        app.interaction = Interaction::new(Config::new(primary));
+        frame(&mut app);
+        chord(&mut app, Key::Char('k'), shortcut, 10);
+        frame(&mut app);
+        text(&mut app, "go to queue", 20);
+        // A word at a time, then everything, then back.
+        chord(&mut app, Key::Backspace, word, 30);
+        assert_eq!(query(&mut app), "go to ", "{primary:?}");
+        chord(&mut app, Key::Char('a'), shortcut, 40);
+        chord(&mut app, Key::Char('c'), shortcut, 50);
+        assert_eq!(app.copied().as_deref().map(String::as_str), Some("go to "));
+        chord(&mut app, Key::Char('x'), shortcut, 60);
+        assert_eq!(query(&mut app), "", "{primary:?}");
+        chord(&mut app, Key::Char('z'), shortcut, 70);
+        assert_eq!(query(&mut app), "go to ", "{primary:?}");
+        key(&mut app, Key::Home, 80);
+        key(&mut app, Key::Delete, 90);
+        assert_eq!(query(&mut app), "o to ", "{primary:?}");
+        chord(&mut app, Key::Char('v'), shortcut, 100);
+        assert!(app.wants_paste());
+        app.pasted(Some(Zeroizing::new("G".to_owned())));
+        frame(&mut app);
+        assert_eq!(query(&mut app), "Go to ", "{primary:?}");
+    }
 }
 
 #[test]
