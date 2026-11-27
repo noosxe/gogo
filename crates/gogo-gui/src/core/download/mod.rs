@@ -6,7 +6,7 @@ mod plan;
 mod progress;
 mod schedule;
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};

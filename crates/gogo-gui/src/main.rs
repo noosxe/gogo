@@ -205,10 +205,7 @@ fn window(cli: &Cli, choice: RendererChoice) -> Result<(), Failure> {
         .map_err(Failure::from)
         .and_then(|app| shell.run(app, choice).map_err(Failure::from));
     // Stopped by their tokens, so that what is on disk can be resumed.
-    runtime.block_on(async {
-        downloads.shutdown().await;
-        installs.shutdown().await;
-    });
+    runtime.block_on(core::shutdown(&downloads, &installs));
     // A keychain nobody answers parks its thread: do not wait for it.
     runtime.shutdown_background();
     ran
