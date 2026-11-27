@@ -145,6 +145,12 @@ fn content(modal: &Modal<'_>, entry: &Entry, changed: bool, hold: Hold) -> Conte
             PromptSpec::Confirm { label } => Content::YesNo {
                 label: label.clone(),
             },
+            // The model shows this one as a plan card.
+            PromptSpec::Plan(plan) => Content::Plan {
+                plan: (**plan).clone(),
+                changed: true,
+                ask: Ask::Confirm,
+            },
             PromptSpec::Conflicts { files } => Content::Conflicts {
                 files: files.clone(),
                 picks: entry.picks.clone(),

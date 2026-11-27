@@ -5,6 +5,8 @@ use std::fmt;
 
 use zeroize::Zeroizing;
 
+use crate::plan::Plan;
+
 /// A question.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PromptSpec {
@@ -32,6 +34,10 @@ pub enum PromptSpec {
         /// The question.
         label: String,
     },
+    /// A running job's plan has changed since it was confirmed: shown on the plan card,
+    /// whose confirm answers [`PromptAnswer::Yes`]. Only a job asks this, and only for
+    /// a plan that removes nothing.
+    Plan(Box<Plan>),
     /// One decision per cloud-save conflict; nothing applies until all are decided.
     Conflicts {
         /// The conflicting files.
@@ -107,6 +113,7 @@ impl PromptSpec {
             (Self::Secret { .. }, A::Secret(_)) => true,
             (Self::Choice { options, .. }, A::Choice(i)) => *i < options.len(),
             (Self::Confirm { .. }, A::Yes | A::No) => true,
+            (Self::Plan(_), A::Yes) => true,
             (Self::Conflicts { files }, A::Sides(sides)) => sides.len() == files.len(),
             _ => false,
         }

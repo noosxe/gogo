@@ -344,6 +344,15 @@ struct Shown {
     tier: Tier,
 }
 
+impl Shown {
+    /// Whether `now` is what the user saw: everything but the free space.
+    fn still(&self, now: &Shown) -> bool {
+        let mut now = now.clone();
+        now.plan.free = self.plan.free;
+        *self == now
+    }
+}
+
 /// A call on its way through.
 #[derive(Debug)]
 struct Request {
@@ -496,6 +505,15 @@ impl SafetyFlow {
         };
         let ticket = d.ticket;
         Some(match &d.stage {
+            Stage::Prompt {
+                spec: PromptSpec::Plan(plan),
+                asking: Asking::Job { job, .. },
+            } => Modal::PlanCard {
+                ticket,
+                action: self.origins.get(job).map_or("", |o| o.action.name),
+                plan,
+                tier: Tier::Confirm,
+            },
             Stage::Prompt { spec, asking } => Modal::Prompt {
                 ticket,
                 spec,
@@ -588,6 +606,17 @@ impl SafetyFlow {
             && self.errors.is_empty()
             && let Some((job, spec, reply)) = self.questions.pop_front()
         {
+            if matches!(spec, PromptSpec::Plan(_)) {
+                // A plan card is no strong confirmation, and a job nothing is known
+                // about gets none: dropping the reply answers with a cancel.
+                match self.origins.get(&job) {
+                    Some(o) if !o.destructive => {
+                        let action = o.action.name;
+                        self.effects.push(Effect::PlanChanged { action });
+                    }
+                    _ => return self.advance(),
+                }
+            }
             self.show(Stage::Prompt {
                 spec,
                 asking: Asking::Job { job, reply },
@@ -698,9 +727,17 @@ impl SafetyFlow {
                 format!("there is no job `{}` can act on", call.name()),
             ));
         }
-        if call.name() == "job.cancel" {
-            self.forget_questions(&id);
-            self.advance();
+        match call.name() {
+            "job.cancel" => {
+                self.forget_questions(&id);
+                self.advance();
+            }
+            // A held job is not waiting for its plan to be agreed to.
+            "job.pause" => {
+                self.forget_plans(&id);
+                self.advance();
+            }
+            _ => {}
         }
         Outcome::Accepted
     }
@@ -710,6 +747,21 @@ impl SafetyFlow {
         if engine.jobs.cancel(id) {
             self.forget_questions(id);
             self.advance();
+        }
+    }
+
+    /// Drop the plans a job waits to have agreed to.
+    fn forget_plans(&mut self, id: &JobId) {
+        self.questions
+            .retain(|(job, spec, _)| job != id || !matches!(spec, PromptSpec::Plan(_)));
+        let on_screen = matches!(
+            &self.dialog,
+            Some(Dialog { stage: Stage::Prompt { spec: PromptSpec::Plan(_), asking: Asking::Job { job, .. } }, .. })
+                if job == id
+        );
+        if on_screen {
+            self.dialog = None;
+            self.signal.raise();
         }
     }
 
@@ -826,6 +878,31 @@ impl SafetyFlow {
                 stage: Stage::Card { request, shown },
                 ..
             }) => self.agreed(engine, request, shown),
+            // The job holds the plan it showed, so there is nothing to plan again.
+            Some(Dialog {
+                stage:
+                    Stage::Prompt {
+                        spec: PromptSpec::Plan(_),
+                        asking: Asking::Job { job, reply },
+                    },
+                ..
+            }) => {
+                // The setting may have been turned off while the card was up.
+                let gate = self
+                    .origins
+                    .get(&job)
+                    .and_then(|o| closed_gate(o.action, engine.backend.gates()));
+                if let Some(gate) = gate {
+                    // Dropping the reply answers with a cancel.
+                    drop(reply);
+                    let outcome = self.refuse(gate_error(gate));
+                    self.advance();
+                    return outcome;
+                }
+                reply.answer(PromptAnswer::Yes);
+                self.advance();
+                Outcome::Accepted
+            }
             Some(other) => {
                 // Strong confirmation and prompts are not answered by a plain confirm.
                 self.dialog = Some(other);
@@ -1004,29 +1081,34 @@ impl SafetyFlow {
             return Outcome::Ignored;
         };
         match dialog.stage {
-            Stage::Prompt { spec, asking } if spec.accepts(&answer) => match asking {
-                Asking::Job { reply, .. } => {
-                    reply.answer(answer);
-                    self.advance();
-                    Outcome::Accepted
-                }
-                // "No" to an action's own question is a cancel.
-                Asking::Action(_) if answer == PromptAnswer::No => {
-                    self.advance();
-                    Outcome::Accepted
-                }
-                Asking::Action(call) => {
-                    if let Some(gate) = closed_gate(call.spec(), engine.backend.gates()) {
-                        return self.refuse(gate_error(gate));
+            // A job's plan card is answered by its confirm control, not here.
+            Stage::Prompt { spec, asking }
+                if !matches!(spec, PromptSpec::Plan(_)) && spec.accepts(&answer) =>
+            {
+                match asking {
+                    Asking::Job { reply, .. } => {
+                        reply.answer(answer);
+                        self.advance();
+                        Outcome::Accepted
                     }
-                    let request = Request {
-                        call,
-                        answer: Some(answer),
-                    };
-                    self.plan(engine, request, None);
-                    Outcome::Accepted
+                    // "No" to an action's own question is a cancel.
+                    Asking::Action(_) if answer == PromptAnswer::No => {
+                        self.advance();
+                        Outcome::Accepted
+                    }
+                    Asking::Action(call) => {
+                        if let Some(gate) = closed_gate(call.spec(), engine.backend.gates()) {
+                            return self.refuse(gate_error(gate));
+                        }
+                        let request = Request {
+                            call,
+                            answer: Some(answer),
+                        };
+                        self.plan(engine, request, None);
+                        Outcome::Accepted
+                    }
                 }
-            },
+            }
             stage => {
                 self.dialog = Some(Dialog { stage, ..dialog });
                 Outcome::Ignored
@@ -1206,7 +1288,7 @@ impl SafetyFlow {
         let (kind, tier) = (shown.kind, shown.tier);
         match confirmed {
             // Confirmed, and still what the user saw: run the new plan.
-            Some(seen) if seen == shown => {
+            Some(seen) if seen.still(&shown) => {
                 if let Err(e) = self.run(engine, request, Some(handle), kind, tier) {
                     self.fail(e);
                 }

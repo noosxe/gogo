@@ -309,6 +309,7 @@ impl Backend for CoreBackend {
                 steps: Vec::new(),
                 download: None,
                 disk_delta: None,
+                free: None,
                 warnings: Vec::new(),
                 reversible: true,
             },

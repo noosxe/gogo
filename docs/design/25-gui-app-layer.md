@@ -302,6 +302,17 @@ app control is told apart by its `DrawnBy::App` part and tree key.
   depth-A app widgets. The value goes straight to the core and never enters a source or the
   binding scope (S1, S2).
 
+- **The free space is not part of the comparison.** A plan can show how much room there is
+  (`Plan.free`). It moves on its own, so a plan that differs only there is still the plan
+  the user saw.
+- **A job whose plan changed asks on the plan card.** A resumed or retried job plans again
+  itself; if the new plan holds anything the confirmed one didn't, the job asks with
+  `PromptSpec::Plan`. The model shows it as a plan card with the same present, dwell and
+  fresh-press rules, and answers the job's reply from its confirm control or Enter. The job
+  holds the plan it showed, so nothing is planned again. Esc, Cancel, `job.cancel` and
+  `job.pause` answer with a cancel. The action's gate is checked again at that confirm.
+  Jobs that remove data get no such card.
+
 ### As built: the safety screens (#614)
 
 Every screen of the safety flow is the app's own modal layer, one per ticket, and the app

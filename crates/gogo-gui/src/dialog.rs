@@ -288,7 +288,8 @@ fn totals(plan: &Plan) -> Option<String> {
         let sign = if d < 0 { "-" } else { "+" };
         format!("Disk use: {sign}{}", size_words(d.unsigned_abs()))
     });
-    let parts: Vec<String> = download.into_iter().chain(disk).collect();
+    let free = plan.free.map(|b| format!("Free space: {}", size_words(b)));
+    let parts: Vec<String> = download.into_iter().chain(disk).chain(free).collect();
     (!parts.is_empty()).then(|| parts.join(". "))
 }
 
