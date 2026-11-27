@@ -592,3 +592,62 @@ fn tab_enters_a_list_at_either_end() {
     let p = page(&d, &tree);
     assert_eq!(on(&p, |f| d.back_tab(f)), "i99");
 }
+
+// ---- under a popup ----
+
+#[test]
+fn under_a_popup_neither_the_wheel_nor_the_scroll_keys_move_the_page() {
+    const POPUP: LayerId = LayerId(10);
+    let tree = tree_of(plain);
+    let mut field = app_button("Search", 0);
+    field.a11y.role = Role::TextInput;
+    let mut row = app_button("One", 1);
+    row.a11y.role = Role::ListOption;
+    let item = |name: &str, part: u32| {
+        let mut node = app_button(name, part);
+        node.a11y.role = Role::MenuItem;
+        node
+    };
+    // A palette (a field over a list) and a menu.
+    let palette = common::Screen::new(vec![("field", field), ("row", row)]);
+    let menu = common::Screen::new(vec![("one", item("One", 1)), ("two", item("Two", 2))]);
+    let mut d = Driver::new();
+    let p = page(&d, &tree);
+    for (popup, start, submit) in [(&palette, "field", Some("row")), (&menu, "one", None)] {
+        let mut over = popup.layer(POPUP, LayerKind::Popup).initial_focus(start);
+        if let Some(key) = submit {
+            over = over.submit(key);
+        }
+        let layers = [p.layer(), over];
+        let frame = Frame { layers: &layers };
+        d.ix.sync(&frame);
+        // Over the page's list, where the popup has nothing.
+        d.send(&frame, Input::PointerMoved { x: 100.0, y: 90.0 });
+        d.send(
+            &frame,
+            Input::Wheel {
+                x: 100.0,
+                y: 90.0,
+                dy: 60.0,
+            },
+        );
+        for key in [
+            Key::PageDown,
+            Key::End,
+            Key::ArrowDown,
+            Key::ArrowDown,
+            Key::PageUp,
+            Key::Home,
+        ] {
+            let out = d.down(&frame, key, NONE);
+            d.up(&frame, key);
+            if submit.is_some() && key == Key::ArrowDown {
+                assert_eq!(names(&out), ["move field Next"]);
+            }
+        }
+        assert!(d.ix.offsets(PAGE).all(|(_, y)| y == 0.0), "{start}");
+        d.ix.sync(&Frame {
+            layers: &[p.layer()],
+        });
+    }
+}

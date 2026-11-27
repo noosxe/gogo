@@ -81,6 +81,10 @@ fn role_of(node: &gogo_ui_ir::Node) -> Option<Role> {
         IrRole::TextInput => Role::TextInput,
         IrRole::List => Role::List,
         IrRole::ListItem => Role::ListItem,
+        IrRole::Menu => Role::Menu,
+        IrRole::MenuItem => Role::MenuItem,
+        IrRole::ListBox => Role::ListBox,
+        IrRole::ListOption => Role::ListBoxOption,
         // A generic node matters when it can be operated or was named.
         _ if node.a11y.focusable || activatable(node) => Role::Button,
         _ if matches!(node.kind, Kind::Text { .. }) => Role::Label,
@@ -103,6 +107,8 @@ fn whole(role: Role) -> bool {
             | Role::Status
             | Role::ProgressIndicator
             | Role::TextInput
+            | Role::MenuItem
+            | Role::ListBoxOption
     )
 }
 
@@ -226,7 +232,10 @@ impl Build<'_> {
             return Vec::new();
         };
         let is_root = at == layer.tree.root();
-        let modal = is_root && layer.kind.is_modal();
+        // A popup that takes text is read as a modal dialog; a menu or list popup is
+        // read as just that.
+        let popup_dialog = layer.kind == LayerKind::Popup && layer.submit.is_some();
+        let modal = is_root && (layer.kind.is_modal() || popup_dialog);
         let role = if modal {
             Some(if layer.kind == LayerKind::Alert {
                 Role::AlertDialog
@@ -236,7 +245,8 @@ impl Build<'_> {
         } else if node.scroll.is_some() {
             Some(Role::ScrollView)
         } else {
-            role_of(node).or(is_root.then_some(Role::Group))
+            let group = is_root && layer.kind != LayerKind::Popup;
+            role_of(node).or(group.then_some(Role::Group))
         };
         let inside = scrolled || node.scroll.is_some();
         let own_text = match &node.kind {
@@ -310,8 +320,10 @@ impl Build<'_> {
         if let Some(key) = &node.a11y.key {
             out.set_keyboard_shortcut(key.clone());
         }
-        if node.a11y.role == IrRole::MenuButton {
-            out.set_has_popup(HasPopup::Menu);
+        match node.a11y.role {
+            IrRole::MenuButton => out.set_has_popup(HasPopup::Menu),
+            IrRole::ComboBox => out.set_has_popup(HasPopup::Listbox),
+            _ => {}
         }
         if let Some(progress) = node.progress.filter(|_| role == Role::ProgressIndicator) {
             out.set_numeric_value(f64::from(progress) * 100.0);
@@ -466,6 +478,19 @@ impl A11yTree {
                 of(dialog.id, dialog.tree.key(dialog.tree.root())?)
             })
             .unwrap_or(ROOT);
+        // A field over a list points at the row Enter would activate.
+        let highlighted = frame.modal().and_then(|layer| {
+            let focused = input.focus().filter(|t| t.layer == layer.id)?;
+            let node = layer.tree.get(layer.tree.by_key(&focused.key)?)?;
+            (node.a11y.role == IrRole::TextInput)
+                .then(|| of(layer.id, layer.submit?))
+                .flatten()
+        });
+        if let Some(row) = highlighted
+            && let Some((_, field)) = nodes.iter_mut().find(|(id, _)| *id == focus)
+        {
+            field.set_active_descendant(row);
+        }
         nodes.push((ROOT, window));
         TreeUpdate {
             nodes,

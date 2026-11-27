@@ -35,10 +35,15 @@ pub enum LayerKind {
     /// A modal dialog about an error or a destructive step: as [`LayerKind::Dialog`],
     /// and announced as an alert.
     Alert,
+    /// A menu, a select's list or the palette. While it is the topmost one and no dialog
+    /// is up, nothing else takes input, and a press on its root's empty area, or outside
+    /// the root, dismisses it. A [`LayerKind::Dialog`] or [`LayerKind::Alert`] anywhere
+    /// in the stack wins over it.
+    Popup,
 }
 
 impl LayerKind {
-    /// Whether the layer blocks the layers below it.
+    /// Whether the layer is a dialog, which blocks everything below it and every popup.
     pub fn is_modal(self) -> bool {
         matches!(self, LayerKind::Dialog | LayerKind::Alert)
     }
@@ -65,8 +70,12 @@ pub struct Layer<'a> {
     pub identity: &'a [u64],
     /// Keys of the press-and-hold controls.
     pub hold: &'a [&'a str],
-    /// The key of the control a dialog starts on; `None` starts on nothing.
+    /// The key of the control a dialog or popup starts on; `None` starts on nothing.
     pub initial_focus: Option<&'a str>,
+    /// The key of what Enter in the layer's text field activates, for a field over a list
+    /// whose highlighted row the app draws. With it, Up and Down in the field give
+    /// [`Intent::Move`](crate::Intent::Move).
+    pub submit: Option<&'a str>,
 }
 
 impl<'a> Layer<'a> {
@@ -80,6 +89,7 @@ impl<'a> Layer<'a> {
             identity: &[],
             hold: &[],
             initial_focus: None,
+            submit: None,
         }
     }
 
@@ -98,6 +108,12 @@ impl<'a> Layer<'a> {
     /// Sets [`Layer::initial_focus`].
     pub fn initial_focus(mut self, key: &'a str) -> Self {
         self.initial_focus = Some(key);
+        self
+    }
+
+    /// Sets [`Layer::submit`].
+    pub fn submit(mut self, key: &'a str) -> Self {
+        self.submit = Some(key);
         self
     }
 
@@ -137,26 +153,35 @@ pub struct Frame<'a> {
 }
 
 impl<'a> Frame<'a> {
-    /// The layers that take input: the topmost modal one alone, or all of them when
-    /// there is none. What is drawn over a dialog takes none.
+    /// Where the layer that takes input alone is: the topmost dialog, or with no dialog
+    /// the topmost popup.
+    fn exclusive(&self) -> Option<usize> {
+        self.layers
+            .iter()
+            .rposition(|l| l.kind.is_modal())
+            .or_else(|| self.layers.iter().rposition(|l| l.kind == LayerKind::Popup))
+    }
+
+    /// The layers that take input: the topmost dialog or popup alone, or all of them when
+    /// there is neither. What is drawn over it takes none.
     pub fn interactive(&self) -> &'a [Layer<'a>] {
-        match self.layers.iter().rposition(|l| l.kind.is_modal()) {
+        match self.exclusive() {
             Some(i) => &self.layers[i..=i],
             None => self.layers,
         }
     }
 
-    /// The layers drawn over the topmost modal one.
+    /// The layers drawn over the one that takes input alone.
     pub(crate) fn over_modal(&self) -> &'a [Layer<'a>] {
-        match self.layers.iter().rposition(|l| l.kind.is_modal()) {
+        match self.exclusive() {
             Some(i) => &self.layers[i + 1..],
             None => &[],
         }
     }
 
-    /// The topmost modal layer.
+    /// The layer that takes input alone: a dialog, or with none a popup.
     pub fn modal(&self) -> Option<&'a Layer<'a>> {
-        self.layers.iter().rev().find(|l| l.kind.is_modal())
+        self.exclusive().map(|i| &self.layers[i])
     }
 
     /// The interactive layer with this id.
@@ -184,14 +209,14 @@ impl Target {
 }
 
 /// Whether activating the node does something. A skin node needs an action; an app node
-/// (a control the app drew) needs to be focusable. A disabled node, a select and a text
-/// field never.
+/// (a control the app drew) needs to be focusable. A skin menu button needs no action:
+/// activating it opens its menu. A disabled node and a text field never.
 pub fn activatable(node: &Node) -> bool {
-    if node.a11y.disabled || matches!(node.a11y.role, Role::ComboBox | Role::TextInput) {
+    if node.a11y.disabled || node.a11y.role == Role::TextInput {
         return false;
     }
     match node.drawn_by {
-        DrawnBy::Skin => node.action.is_some(),
+        DrawnBy::Skin => node.action.is_some() || node.a11y.role == Role::MenuButton,
         DrawnBy::App(_) => node.a11y.focusable,
         _ => false,
     }

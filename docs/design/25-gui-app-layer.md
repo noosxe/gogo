@@ -235,6 +235,15 @@ app control is told apart by its `DrawnBy::App` part and tree key.
   activating; there is no other arrow navigation. The ring shows after the keyboard or a
   screen reader moved focus, not after a click. A route starts on nothing; a rebuild keeps
   focus by key, else the nearest earlier control; closing a dialog gives focus back.
+- **Popups.** A menu, a select's list and the palette are popup layers. While one is up
+  and no dialog is, only the top one takes input and is exposed to assistive technology; a
+  dialog anywhere in the stack wins over it. A press outside it, on nothing or on its
+  root's empty area, is a dismiss intent and presses nothing else. Esc is the same intent.
+  Up and Down walk menu items and list options, stopping at the ends; in a text field over
+  a list they move the app's highlight, and Enter activates the highlighted row, checked
+  like any press. Focus returns to the opener when a popup closes.
+- **Menus and selects.** Activating a skin `menu` button or `select` asks the app to open
+  its popup; it runs no action.
 - **Holds.** A hold control is held while the key is down, or the pointer is down and on
   it (also when the control moves or is covered), and never activates. A screen reader has only a discrete activation, so it takes two: the first
   arms the control, which says so; a second one at least 500 ms and at most 10 s later
