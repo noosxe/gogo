@@ -100,7 +100,7 @@ pub struct Job {
     pub bitmap: Vec<u8>,
     pub workers: u32,
     pub limiter: Arc<GlobalLimiter>,
-    /// Per-file child token; the caller cancels it on batch-level Ctrl-C.
+    /// Cancels this file. Never cancelled from inside the download.
     pub cancel: CancellationToken,
     pub events: tokio::sync::broadcast::Sender<ProgressEvent>,
     pub file_id: Uuid,
@@ -164,7 +164,9 @@ pub async fn download_file(job: Job) -> Result<(), DownloadError> {
         dest: job.dest.clone(),
         url: job.url,
         limiter: job.limiter,
-        cancel: job.cancel,
+        // A child: a failing chunk stops its siblings and leaves the caller's token
+        // alone, so a retry with a fresh link can run.
+        cancel: job.cancel.child_token(),
         events: job.events,
         file_id: job.file_id,
         retries: job.retries,
@@ -211,7 +213,11 @@ pub async fn download_file(job: Job) -> Result<(), DownloadError> {
         match handle.await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
-                first_err.get_or_insert(e);
+                // Report what stopped the file: a sibling's `Aborted` follows
+                // from another worker's error, which the caller may act on.
+                if matches!(first_err, None | Some(DownloadError::Aborted)) {
+                    first_err = Some(e);
+                }
             }
             Err(join) => {
                 first_err.get_or_insert(DownloadError::RetriesExhausted(format!(
@@ -263,6 +269,7 @@ async fn run_chunk(
                         persist_chunk(shared, file, chunk, bytes)?;
                         return Ok(());
                     }
+                    Ok(ChunkOutcome::Aborted) => return Err(DownloadError::Aborted),
                     Ok(ChunkOutcome::Corrupt) => {
                         md5_attempts += 1;
                         if md5_attempts >= 3 {
@@ -288,8 +295,12 @@ async fn run_chunk(
 }
 
 enum ChunkOutcome {
-    Verified { bytes: u64 },
+    Verified {
+        bytes: u64,
+    },
     Corrupt,
+    /// Cancelled mid-body: not a failure to retry.
+    Aborted,
 }
 struct Retryable(String);
 
@@ -315,7 +326,7 @@ async fn stream_chunk(
             // Bitmap reflects only fully-verified chunks — partial writes are simply
             // overwritten by the retry. Nothing to flush here (04 §4: flush at
             // boundaries = per-chunk bitmap saves already done).
-            return Err(Retryable("aborted".into()));
+            return Ok(ChunkOutcome::Aborted);
         }
         file.write_all_at(&buf, pos)
             .map_err(|e| Retryable(format!("write: {e}")))?;
