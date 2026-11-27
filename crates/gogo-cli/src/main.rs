@@ -2726,7 +2726,7 @@ async fn resolve_game_source(
         gogo::gog::dlc::DlcSet::Ids(ids) => ids.iter().map(u64::to_string).collect(),
         _ => Vec::new(),
     };
-    let cached_tree = find_game_tree(&root);
+    let cached_tree = lane::find_game_tree(&root);
     if dlc.is_some() && cached_tree.is_some() {
         act.spin_async(
             "checking the depot cache",
@@ -2964,7 +2964,7 @@ async fn resolve_game_source(
     let act = depot_progress::Activity::new(mode);
     let result = depot_progress::drive(runner, &mut rx, &act).await;
     result.map_err(AppError::Depot)?;
-    let tree = find_game_tree(&root).ok_or_else(|| {
+    let tree = lane::find_game_tree(&root).ok_or_else(|| {
         eprintln!(
             "gogo: depot download finished but no game tree found under {}",
             root.display()
@@ -3421,23 +3421,6 @@ async fn upgrade_cache_record(
     for line in cache_upgrade::bring_up_to_date(root, title, language, &rec.build_id, fetched) {
         act.say(&format!("gogo: {line}"), &|l| eprintln!("{l}"));
     }
-}
-
-/// The install tree inside a depot cache root: a single child directory, or
-/// the child carrying a `goggame-*.info` (DLC-capable roots may hold more).
-fn find_game_tree(root: &std::path::Path) -> Option<std::path::PathBuf> {
-    let mut dirs: Vec<std::path::PathBuf> = std::fs::read_dir(root)
-        .ok()?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-        .map(|e| e.path())
-        .filter(|p| !p.file_name().is_some_and(|n| n == "gog-support"))
-        .collect();
-    if dirs.len() == 1 {
-        return dirs.pop();
-    }
-    dirs.into_iter()
-        .find(|d| !gogo::macapp::info::gog_game_ids(d).is_empty())
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]

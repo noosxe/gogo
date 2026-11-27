@@ -5,11 +5,17 @@
 use std::time::Instant;
 
 use gogo::engine::events::{ProgressEvent, step};
+use gogo::gog::depot::DepotEvent;
 use gogo_gui_model::{JobStatus, Step, StepState};
 
 /// A part of an install.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Phase {
+    Files,
+    Copy,
+    Installer,
+    Support,
+    Move,
     Umu,
     Proton,
     Snapshot,
@@ -22,6 +28,11 @@ pub(super) enum Phase {
 impl Phase {
     fn name(self) -> &'static str {
         match self {
+            Phase::Files => "Download the game files",
+            Phase::Copy => "Copy the game files",
+            Phase::Installer => "Run GOG's installer",
+            Phase::Support => "Run GOG's support setup",
+            Phase::Move => "Move the game into place",
             Phase::Umu => "Download umu-launcher",
             Phase::Proton => "Download GE-Proton",
             Phase::Snapshot => "Snapshot",
@@ -115,6 +126,14 @@ impl Steps {
     fn phase_of(&self, name: &str) -> Option<Phase> {
         if name == step::PREFIX {
             Some(Phase::Prefix)
+        } else if name == step::GAME_FILES || name == step::REMOVING_GAME {
+            Some(Phase::Copy)
+        } else if name == step::INSTALLER || name == step::DLC_INSTALLER {
+            Some(Phase::Installer)
+        } else if name == step::SUPPORT {
+            Some(Phase::Support)
+        } else if name == step::MOVING_GAME || name == step::MOVING_PREFIX {
+            Some(Phase::Move)
         } else if name.starts_with("winetricks ") {
             Some(Phase::Verbs)
         } else if ["downloading ", "checking ", "unpacking "]
@@ -164,9 +183,35 @@ impl Steps {
             }
             // A download's check and unpacking are steps of it, not its end.
             ProgressEvent::WorkDone { step } => match self.phase_of(step) {
-                Some(phase @ (Phase::Prefix | Phase::Verbs)) => self.leave(phase, now),
+                Some(
+                    phase @ (Phase::Prefix | Phase::Verbs | Phase::Installer | Phase::Support),
+                ) => self.leave(phase, now),
                 _ => false,
             },
+            ProgressEvent::PrefixStaged => self.enter(Phase::Prefix, now),
+            ProgressEvent::GameFilesStarted { .. } => self.enter(Phase::Copy, now),
+            ProgressEvent::InstallStarted => self.enter(Phase::Installer, now),
+            _ => false,
+        }
+    }
+
+    /// Take in one event of the depot download.
+    pub(super) fn download(&mut self, event: &DepotEvent, now: Instant) -> bool {
+        match event {
+            DepotEvent::Preparing
+            | DepotEvent::Allocating { .. }
+            | DepotEvent::Verifying { .. } => self.enter(Phase::Files, now),
+            DepotEvent::Downloading {
+                downloaded,
+                total_download,
+                ..
+            } => {
+                let news = self.enter(Phase::Files, now);
+                self.bytes = *downloaded;
+                self.total = Some(*total_download);
+                news
+            }
+            DepotEvent::Finished { .. } => self.leave(Phase::Files, now),
             _ => false,
         }
     }

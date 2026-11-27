@@ -3,17 +3,23 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
+use gogo::auth::TokenProvider;
 use gogo::config::{Config, ProtonDir};
 use gogo::engine::FreeSpace;
 use gogo::engine::events::{ProgressEvent, step};
+use gogo::gog::content::DlcRef;
+use gogo::gog::depot::{DepotError, DepotEvent, DepotOptions};
 use gogo::gog::endpoints::Endpoints;
 use gogo::linuxapp::preview::{
-    Answers, Ask, Download, Item, Preview, Question, SetupPreview, Tools,
+    Answers, Ask, BuildPreview, BuildRequest, Download, Item, Preview, Question, SetupPreview,
+    Tools,
 };
 use gogo::linuxapp::proton::{self, SteamKind, SteamRoot};
+use gogo::linuxapp::source::{self, Files, Source};
 use gogo::linuxapp::{comet, galaxy_switch, umu};
 use gogo::macapp::MacAppError;
 use gogo::macapp::catalog;
@@ -23,9 +29,11 @@ use gogo_gui_model::{
     DWELL, InputEvent, Invocation, JobId, JobState, JobStatus, Modal, Model, Outcome, Press,
     PromptAnswer, StepState,
 };
+use tokio_util::sync::CancellationToken;
 
 use super::super::tests::{NoBrowser, SignedIn, scratch};
 use super::super::{CoreBackend, Engine, Parts};
+use super::pipeline::{Build, find_gogo};
 use super::{Failed, Installs, Pipelines};
 
 const SOON: Duration = Duration::from_secs(20);
@@ -42,6 +50,11 @@ struct Fake {
     ends: Mutex<mpsc::Receiver<End>>,
     /// Bytes of the GE-Proton download.
     bytes: Mutex<u64>,
+    /// The `gogo` CLI found.
+    cli: Mutex<Option<PathBuf>>,
+    /// The products whose files were asked for, and whether the downloads may end.
+    fetches: Mutex<Vec<u64>>,
+    fetched: AtomicBool,
 }
 
 impl Fake {
@@ -52,6 +65,21 @@ impl Fake {
             .iter()
             .map(|r| r.0.clone())
             .collect()
+    }
+
+    fn tools(&self, answers: &Answers) -> Tools {
+        Tools {
+            umu: answers.umu.expect("answered"),
+            runtime: "ge-proton/1".to_string(),
+            downloads: vec![Download {
+                item: Item::Proton,
+                version: "1".to_string(),
+                bytes: *self.bytes.lock().unwrap(),
+                into: None,
+            }],
+            galaxy: true,
+            install_comet: answers.install_comet == Some(true),
+        }
     }
 
     fn question(&self, answers: &Answers) -> Option<Question> {
@@ -104,18 +132,7 @@ impl Pipelines for Fake {
             dirs: GameDirs::at(self.root.join("games").join(gogid)),
             prefix_exists: false,
             runtime_change: None,
-            tools: Tools {
-                umu: answers.umu.expect("answered"),
-                runtime: "ge-proton/1".to_string(),
-                downloads: vec![Download {
-                    item: Item::Proton,
-                    version: "1".to_string(),
-                    bytes: *self.bytes.lock().unwrap(),
-                    into: None,
-                }],
-                galaxy: true,
-                install_comet: answers.install_comet == Some(true),
-            },
+            tools: self.tools(answers),
         }))
     }
 
@@ -135,6 +152,96 @@ impl Pipelines for Fake {
             .push((gogid.to_string(), answers.clone()));
         let end = self.ends.lock().unwrap().recv_timeout(SOON);
         end.expect("the test ends the run")
+    }
+
+    fn gogo_cli(&self) -> Option<PathBuf> {
+        self.cli.lock().unwrap().clone()
+    }
+
+    fn source(
+        &self,
+        _: Arc<dyn TokenProvider>,
+        request: &source::Request,
+    ) -> Result<Source, DepotError> {
+        let tree = self.root.join(format!("cache/{}/Game", request.product_id));
+        let files = if tree.is_dir() {
+            Files::Cached(tree)
+        } else {
+            Files::Fetch { repair: false }
+        };
+        Ok(Source {
+            files,
+            root: self.root.join(format!("cache/{}", request.product_id)),
+            options: DepotOptions::default(),
+            build: Some(("b1".to_string(), Some("1.5".to_string()))),
+            sizes: Some((3_000_000_000, 7_000_000_000)),
+            dlcs: request
+                .owned
+                .iter()
+                .filter(|&&id| id != request.product_id)
+                .map(|&id| DlcRef {
+                    id,
+                    title: format!("DLC {id}"),
+                })
+                .collect(),
+            dlcs_not_taken: Vec::new(),
+        })
+    }
+
+    fn preview_build(
+        &self,
+        request: &BuildRequest<'_>,
+        answers: &Answers,
+    ) -> Result<Preview<BuildPreview>, MacAppError> {
+        if let Some(question) = self.question(answers) {
+            return Ok(Preview::Ask(question));
+        }
+        let dirs = GameDirs::at(self.root.join("games").join(request.gogid));
+        Ok(Preview::Ready(BuildPreview {
+            rebuild: false,
+            prefix_exists: false,
+            tree_bytes: None,
+            renderer: None,
+            verbs: Vec::new(),
+            tools: self.tools(answers),
+            dirs,
+        }))
+    }
+
+    fn fetch(
+        &self,
+        _: Arc<dyn TokenProvider>,
+        build: &Build,
+        _: Option<u64>,
+        cancel: &CancellationToken,
+        progress: &mut dyn FnMut(&DepotEvent),
+    ) -> Result<(), DepotError> {
+        progress(&DepotEvent::Downloading {
+            downloaded: 1,
+            written: 1,
+            total_download: 4,
+            total_size: 4,
+        });
+        self.fetches.lock().unwrap().push(build.product);
+        let started = Instant::now();
+        while !self.fetched.load(Ordering::Acquire) {
+            if cancel.is_cancelled() {
+                return Err(DepotError::Library("operation was cancelled".into()));
+            }
+            assert!(started.elapsed() < SOON, "the test ends the download");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Ok(())
+    }
+
+    fn build(
+        &self,
+        _: Arc<dyn TokenProvider>,
+        build: &Build,
+        answers: &Answers,
+        emit: &mut dyn FnMut(&ProgressEvent),
+    ) -> Result<(), Failed> {
+        self.setup(&build.product.to_string(), answers, emit)
     }
 
     fn data_root(&self) -> PathBuf {
@@ -174,6 +281,9 @@ impl Scratch {
             runs: Mutex::default(),
             ends: Mutex::new(ends),
             bytes: Mutex::new(500_000_000),
+            cli: Mutex::new(Some(PathBuf::from("/opt/gogo/bin/gogo"))),
+            fetches: Mutex::default(),
+            fetched: AtomicBool::new(false),
         });
         Scratch { root, fake, end }
     }
@@ -579,6 +689,136 @@ async fn too_little_space_is_refused_before_the_card() {
     assert!(rig.scratch.fake.ran().is_empty());
 }
 
+/// The account the build tests have: product 10 and its DLC 12 are owned.
+async fn build_rig() -> (Rig, wiremock::MockServer) {
+    let server = super::super::tests::gog().await;
+    let scratch = Scratch::new();
+    let backend = scratch.backend(Endpoints::at(&server.uri()), u64::MAX);
+    let installs = backend.installs();
+    let rig = Rig {
+        model: Model::new(backend, || {}),
+        installs,
+        scratch,
+        input: 0,
+        now: Duration::ZERO,
+    };
+    (rig, server)
+}
+
+impl Rig {
+    fn ask_build(&mut self) -> Outcome {
+        let spec = actions::action("game.build").expect("an action");
+        let invocation = Invocation::new(spec)
+            .arg("id", Value::str("10"))
+            .arg("platform", Value::str("linux"));
+        self.invoke(&invocation)
+    }
+
+    async fn card(&mut self) -> String {
+        self.answer_questions(4).await;
+        self.shows("card").await;
+        let Some(Modal::PlanCard { plan, .. }) = self.model.modal() else {
+            unreachable!()
+        };
+        format!("{plan:?}")
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_install_shows_what_it_takes_and_does_nothing_before_the_confirm() {
+    let (mut rig, _server) = build_rig().await;
+    let before = rig.scratch.tree();
+    rig.ask_build();
+    let card = rig.card().await;
+    for line in [
+        "Install Made Up?",
+        "Game files, build 1.5 (en-US)",
+        "With DLC: DLC 12",
+        "The game's launcher will run /opt/gogo/bin/gogo",
+        "Renderer: picked once",
+        "Saves your choices",
+        "that part can be cancelled",
+    ] {
+        assert!(card.contains(line), "{line} missing from {card}");
+    }
+    assert!(card.contains("download: Some(3500000000)"), "{card}");
+    let ticket = rig.model.modal().expect("the card").ticket();
+    rig.model.cancel(ticket);
+    rig.model.pump();
+    assert!(rig.scratch.fake.fetches.lock().unwrap().is_empty());
+    assert!(rig.scratch.fake.ran().is_empty());
+    assert_eq!(rig.scratch.tree(), before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_download_can_be_cancelled_and_the_build_cannot() {
+    let (mut rig, _server) = build_rig().await;
+    rig.ask_build();
+    rig.card().await;
+    rig.confirm();
+    rig.until("downloading", |r| {
+        r.statuses()
+            .first()
+            .is_some_and(|s| s.state == JobState::Running && s.bytes == 1 && s.stoppable)
+    })
+    .await;
+    assert!(!rig.model.refuse_close(), "a download may be left");
+    assert_eq!(rig.job("job.cancel", 0), Outcome::Accepted);
+    rig.job_is(0, JobState::Cancelled).await;
+    assert!(rig.scratch.fake.ran().is_empty(), "nothing was built");
+
+    // Resumed with the same files to fetch, it carries on without a card.
+    rig.scratch.fake.fetched.store(true, Ordering::Release);
+    assert_eq!(rig.job("job.resume", 0), Outcome::Accepted);
+    rig.running(1).await;
+    rig.until("building", |r| !r.statuses()[0].stoppable).await;
+    assert_eq!(rig.screen(), "none");
+    assert!(matches!(rig.job("job.cancel", 0), Outcome::Refused(_)));
+    let ticket = rig.model.modal().expect("why").ticket();
+    rig.model.cancel(ticket);
+    assert!(rig.model.refuse_close());
+    let ticket = rig.model.modal().expect("why").ticket();
+    rig.model.cancel(ticket);
+    rig.scratch.end.send(Ok(())).unwrap();
+    rig.job_is(0, JobState::Done).await;
+    let names: Vec<String> = rig.statuses()[0]
+        .steps
+        .iter()
+        .map(|s| s.name.clone())
+        .collect();
+    assert_eq!(names[0], "Download the game files", "{names:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn without_the_gogo_command_there_is_no_plan() {
+    let (mut rig, _server) = build_rig().await;
+    *rig.scratch.fake.cli.lock().unwrap() = None;
+    rig.ask_build();
+    rig.shows("error").await;
+    let shown = format!("{:?}", rig.model.modal());
+    assert!(shown.contains("gogo command"), "{shown}");
+}
+
+#[test]
+fn the_gogo_command_is_the_one_beside_the_app_else_on_the_path() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = scratch();
+    let exe = |rel: &str| {
+        let path = dir.path().join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    };
+    let app = dir.path().join("app/gogo-gui");
+    let path = Some(dir.path().join("bin").into_os_string());
+    assert_eq!(find_gogo(Some(app.clone()), path.clone()), None);
+    let on_path = exe("bin/gogo");
+    assert_eq!(find_gogo(Some(app.clone()), path.clone()), Some(on_path));
+    let beside = exe("app/gogo");
+    assert_eq!(find_gogo(Some(app), path), Some(beside));
+}
+
 /// A rig whose server also serves one slow download of product 10.
 async fn downloading_rig() -> (Rig, wiremock::MockServer) {
     use super::super::download::tests::{NEVER, product, serve};
@@ -683,7 +923,7 @@ async fn a_download_and_a_set_up_of_different_games_run_together() {
     rig.job_is(1, JobState::Done).await;
 }
 
-/// Drawn, through the Default skin's Linux set-up tab.
+/// Drawn, through the Default skin, whose install controls show on Linux only.
 #[cfg(target_os = "linux")]
 mod drawn {
     use super::*;
@@ -769,5 +1009,48 @@ mod drawn {
             .unwrap_or_else(|| panic!("no button {label}"))
             .to_string();
         driven.press(&full);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_game_page_installs_only_through_the_drawn_card() {
+        let server = super::super::super::tests::gog().await;
+        let scratch = Scratch::new();
+        scratch.fake.fetched.store(true, Ordering::Release);
+        let backend = scratch.backend(Endpoints::at(&server.uri()), u64::MAX);
+        let data = Data::core(backend, None, || {});
+        let mut driven = Driven {
+            app: App::new(None, data).expect("the app"),
+            now: Duration::ZERO,
+            seen: String::new(),
+        };
+        driven.until("Made Up").await;
+        driven.press("Details of Made Up");
+        driven.until("Install").await;
+        let before = scratch.tree();
+        driven.press("Install");
+        for option in [
+            "zipapp: download",
+            "store: gogo's store",
+            "on: start Comet",
+            "Yes",
+        ] {
+            driven.until(option).await;
+            press_starting(&mut driven, option);
+        }
+        driven.until("Nothing changes until you confirm").await;
+        assert!(scratch.fake.fetches.lock().unwrap().is_empty());
+        assert!(scratch.fake.ran().is_empty());
+        assert_eq!(scratch.tree(), before);
+
+        scratch.end.send(Ok(())).unwrap();
+        driven.press("Install");
+        let started = Instant::now();
+        while scratch.fake.ran().is_empty() {
+            driven.step();
+            assert!(started.elapsed() < SOON, "never built");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(scratch.fake.ran(), ["10"]);
+        assert_eq!(*scratch.fake.fetches.lock().unwrap(), [10]);
     }
 }

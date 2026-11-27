@@ -12,8 +12,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
+use gogo::gog::depot::DepotError;
+use gogo::gog::dlc::Want;
 use gogo::linuxapp::preview::Answers;
-use gogo::macapp::MacAppError;
+use gogo::linuxapp::source;
+use gogo::macapp::renderer::RendererRef;
+use gogo::macapp::{MacAppError, RendererChoice, compat};
+use gogo_contract::Value;
 use gogo_gui_model::{
     Call, ErrorView, JobControl, JobKind, JobSink, JobState, JobStatus, Jobs, PlanHandle,
     PlanReply, Planned, PromptAnswer, PromptReply, PromptSpec, Run,
@@ -25,7 +30,7 @@ use tokio_util::sync::CancellationToken;
 #[cfg(test)]
 pub(crate) use self::pipeline::NoPipelines;
 pub(crate) use self::pipeline::{Core, Failed, Pipelines};
-use self::plan::{Computed, Planning};
+use self::plan::{Asked, Computed, Planning};
 use self::steps::Steps;
 use super::download::{Downloads, Schedule};
 use super::engine::Engine;
@@ -75,6 +80,17 @@ impl Job {
         state.report();
     }
 
+    /// Change and report the status, unless the run of `cancel` has been stopped:
+    /// what the user did since is what the job shows.
+    fn progress(&self, cancel: &CancellationToken, change: impl FnOnce(&mut JobStatus)) {
+        let mut state = lock(&self.state);
+        if cancel.is_cancelled() {
+            return;
+        }
+        change(&mut state.status);
+        state.report();
+    }
+
     fn fail(&self, error: ErrorView) {
         self.update(|s| {
             s.state = JobState::Failed;
@@ -113,6 +129,56 @@ pub(crate) struct Installs {
     ended: Box<dyn Fn(u64) + Send + Sync>,
 }
 
+/// What a `game.build` asks for.
+struct BuildCall {
+    runtime: Option<String>,
+    renderer: RendererChoice,
+    lang: Option<String>,
+    build: Option<String>,
+    dlc: Option<Want>,
+}
+
+impl BuildCall {
+    fn of(call: &Call) -> Result<BuildCall, ErrorView> {
+        let bad = |what: &str| ErrorView::usage("This install can't be planned", what);
+        if call.text("platform") != Some("linux") {
+            return Err(errors::unavailable());
+        }
+        let renderer = match call.text("renderer") {
+            None | Some("auto") => RendererChoice::Auto,
+            Some(id) => {
+                let r = RendererRef::parse_on(id, compat::Os::Linux)
+                    .map_err(|_| bad("the renderer is unknown"))?;
+                RendererChoice::Force(r.renderer)
+            }
+        };
+        let dlc = match call.arg("dlc") {
+            None | Some(Value::Null) => None,
+            Some(Value::Str(all)) if all == "all" => Some(Want::All),
+            Some(Value::List(ids)) => {
+                let ids: Option<Vec<u64>> = ids
+                    .iter()
+                    .map(|id| id.as_str().and_then(|s| s.parse().ok()))
+                    .collect();
+                let ids = ids.ok_or_else(|| bad("a DLC is unknown"))?;
+                Some(if ids.is_empty() {
+                    Want::NoDlc
+                } else {
+                    Want::Ids(ids)
+                })
+            }
+            _ => return Err(bad("the DLC selection is unknown")),
+        };
+        Ok(BuildCall {
+            runtime: call.text("runtime").map(str::to_string),
+            renderer,
+            lang: call.text("lang").map(str::to_string),
+            build: call.text("build").map(str::to_string),
+            dlc,
+        })
+    }
+}
+
 /// The `id` argument as a product and the name core knows it by.
 fn product(call: &Call) -> Result<(u64, String), ErrorView> {
     call.text("id")
@@ -126,6 +192,15 @@ fn already(title: &str) -> ErrorView {
         "Already in the queue",
         format!("{title} is being set up; see the queue."),
     )
+}
+
+/// The title of a plan that can't be made.
+const CANT_PLAN: &str = "Install can't be planned";
+
+/// What to plan.
+enum What {
+    Setup,
+    Build(Box<Asked>),
 }
 
 impl Installs {
@@ -160,29 +235,99 @@ impl Installs {
             .any(|j| j.product == product && !lock(&j.state).status.state.is_terminal())
     }
 
-    /// Preview off the runtime's workers: it reads the disk and asks GitHub.
+    /// Preview off the runtime's workers: it reads the disk and asks GOG and GitHub.
     async fn preview(
         self: &Arc<Self>,
         gogid: String,
+        what: What,
         known: Answers,
         given: Vec<PromptAnswer>,
     ) -> Result<Planning, ErrorView> {
+        let session = match &what {
+            What::Setup => None,
+            // Refreshes under the engine's lock before core talks to GOG itself.
+            What::Build(_) => {
+                self.engine
+                    .access_token()
+                    .await
+                    .map_err(|e| errors::view(CANT_PLAN, &e))?;
+                let session = self
+                    .engine
+                    .session()
+                    .await
+                    .map_err(|e| errors::view(CANT_PLAN, &e))?;
+                Some(session.ok_or_else(errors::signed_out)?)
+            }
+        };
         let engine = Arc::clone(&self.engine);
         tokio::task::spawn_blocking(move || {
-            plan::setup(
-                engine.pipelines().as_ref(),
-                engine.free_space().as_ref(),
-                engine.config().snapshots.auto,
-                &gogid,
-                known,
-                &given,
-            )
+            let pipelines = engine.pipelines();
+            let space = engine.free_space();
+            match (what, session) {
+                (What::Build(asked), Some(session)) => plan::build(
+                    pipelines.as_ref(),
+                    space.as_ref(),
+                    session,
+                    *asked,
+                    known,
+                    &given,
+                ),
+                _ => plan::setup(
+                    pipelines.as_ref(),
+                    space.as_ref(),
+                    engine.config().snapshots.auto,
+                    &gogid,
+                    known,
+                    &given,
+                ),
+            }
         })
         .await
-        .unwrap_or_else(|_| Err(ErrorView::failed("Set-up can't be planned", "it stopped")))
+        .unwrap_or_else(|_| Err(ErrorView::failed(CANT_PLAN, "it stopped")))
     }
 
-    /// `Backend::plan` for `game.setup`: returns at once.
+    /// Read what a build starts from: the game's page, what is owned and what is
+    /// downloaded.
+    async fn asked(&self, product: u64, call: BuildCall) -> Result<Asked, ErrorView> {
+        let view = |e| errors::view(CANT_PLAN, &e);
+        let Some(page) = self.engine.detail(product).await.map_err(view)? else {
+            return Err(errors::signed_out());
+        };
+        let owned = self.engine.owned_ids().await.map_err(view)?;
+        let download_dir = self.engine.download_dir().to_path_buf();
+        let installer = tokio::task::spawn_blocking(move || {
+            let state = gogo::state::State::load().unwrap_or_default();
+            gogo::gog::lane::downloaded_installer(&state.installs, product, &download_dir)
+        })
+        .await
+        .ok()
+        .flatten();
+        let title = page.title.clone().unwrap_or_else(|| product.to_string());
+        Ok(Asked {
+            product,
+            request: source::Request {
+                product_id: product,
+                title: super::text::line(&title),
+                lang: call.lang,
+                build: call.build,
+                dlc: call.dlc,
+                owned,
+                catalog_dlcs: page.expanded_dlcs.clone(),
+                installer,
+            },
+            runtime: call.runtime,
+            renderer: call.renderer,
+            library: self
+                .engine
+                .config()
+                .library
+                .dir
+                .as_ref()
+                .map(|d| gogo::macapp::launch::absolute(std::path::Path::new(d))),
+        })
+    }
+
+    /// `Backend::plan` for `game.setup` and `game.build`: returns at once.
     pub(crate) fn plan(self: &Arc<Self>, call: &Call, reply: PlanReply) {
         if !self.engine.pipelines().supported() {
             return reply.send(Err(errors::unavailable()));
@@ -194,10 +339,28 @@ impl Installs {
         if self.live(id) {
             return reply.send(Err(already("This game")));
         }
+        let build = match call.name() {
+            "game.build" => match BuildCall::of(call) {
+                Ok(build) => Some(build),
+                Err(e) => return reply.send(Err(e)),
+            },
+            _ => None,
+        };
         let this = Arc::clone(self);
         let given = reply.answers().to_vec();
         self.runtime.spawn(async move {
-            let planned = this.preview(gogid, Answers::default(), given).await;
+            let what = match build {
+                Some(build) => this
+                    .asked(id, build)
+                    .await
+                    .map(|a| What::Build(Box::new(a))),
+                None => Ok(What::Setup),
+            };
+            let planned = match what {
+                Ok(what) => this.preview(gogid, what, Answers::default(), given).await,
+                Err(e) => Err(e),
+            };
+            this.engine.persist().await;
             if reply.is_abandoned() {
                 return;
             }
@@ -214,7 +377,7 @@ impl Installs {
         });
     }
 
-    /// `Backend::run` for `game.setup`: queue what was confirmed.
+    /// `Backend::run`: queue what was confirmed.
     pub(crate) fn run(self: &Arc<Self>, run: Run, jobs: &mut Jobs<'_>) -> Result<(), ErrorView> {
         let (id, _) = product(run.call())?;
         let Some(planned) = run.into_plan().and_then(PlanHandle::take::<Computed>) else {
@@ -296,8 +459,17 @@ impl Installs {
         before: JobState,
     ) -> bool {
         let agreed = lock(&job.state).agreed.clone();
+        let what = match &agreed.build {
+            Some((asked, _)) => What::Build(Box::new(asked.clone())),
+            None => What::Setup,
+        };
         let fresh = self
-            .preview(agreed.gogid.clone(), agreed.answers.clone(), Vec::new())
+            .preview(
+                agreed.gogid.clone(),
+                what,
+                agreed.answers.clone(),
+                Vec::new(),
+            )
             .await;
         if cancel.is_cancelled() {
             return false;
@@ -343,7 +515,93 @@ impl Installs {
         true
     }
 
+    /// Download the game files a build lacks: the one part that can be cancelled.
+    /// `false` when the run is over.
+    async fn fetch(
+        &self,
+        job: &Arc<Job>,
+        cancel: &CancellationToken,
+        steps: &Arc<Mutex<Steps>>,
+    ) -> bool {
+        let agreed = lock(&job.state).agreed.clone();
+        let Some((_, build)) = agreed.build else {
+            return true;
+        };
+        if !matches!(build.source.files, source::Files::Fetch { .. }) {
+            return true;
+        }
+        if cancel.is_cancelled() || self.closing.load(Ordering::Acquire) {
+            return false;
+        }
+        job.progress(cancel, |s| s.state = JobState::Running);
+        let session = match self.session().await {
+            Ok(session) => session,
+            Err(e) => {
+                job.fail(e);
+                return false;
+            }
+        };
+        let engine = Arc::clone(&self.engine);
+        let limit = self.downloads.rate_limit();
+        let (running, token, listed) = (Arc::clone(job), cancel.clone(), Arc::clone(steps));
+        // The token stops it; the future is never dropped.
+        let done = tokio::task::spawn_blocking(move || {
+            let mut reported = Instant::now();
+            engine
+                .pipelines()
+                .fetch(session, &build, limit, &token, &mut |event| {
+                    let now = Instant::now();
+                    let mut steps = lock(&listed);
+                    if steps.download(event, now) || now.duration_since(reported) >= PACE {
+                        reported = now;
+                        running.progress(&token, |s| steps.report(s));
+                    }
+                })
+        })
+        .await;
+        self.engine.persist().await;
+        if cancel.is_cancelled() {
+            return false;
+        }
+        match done {
+            Ok(Ok(())) => true,
+            Ok(Err(e)) => {
+                lock(steps).end(false, Instant::now());
+                job.progress(cancel, |s| lock(steps).report(s));
+                job.fail(failure("Install failed", &Failed::Files(e)));
+                false
+            }
+            Err(_) => {
+                job.fail(ErrorView::failed(
+                    "Install failed",
+                    "it stopped unexpectedly",
+                ));
+                false
+            }
+        }
+    }
+
+    async fn session(&self) -> Result<Arc<dyn gogo::auth::TokenProvider>, ErrorView> {
+        let view = |e| errors::view("Install failed", &e);
+        self.engine.access_token().await.map_err(view)?;
+        let session = self.engine.session().await.map_err(view)?;
+        session.ok_or_else(errors::signed_out)
+    }
+
     async fn execute(&self, job: &Arc<Job>, cancel: &CancellationToken) {
+        let steps = Arc::new(Mutex::new(Steps::new(&lock(&job.state).agreed.phases)));
+        if !self.fetch(job, cancel, &steps).await {
+            return;
+        }
+        let builds = lock(&job.state).agreed.build.is_some();
+        let session = if builds {
+            match self.session().await {
+                Ok(session) => Some(session),
+                Err(e) => return job.fail(e),
+            }
+        } else {
+            None
+        };
         let agreed = {
             let mut state = lock(&job.state);
             // The last moment a cancel or a closing app is heeded.
@@ -355,22 +613,31 @@ impl Installs {
             state.report();
             state.agreed.clone()
         };
+        let title = match agreed.build {
+            Some(_) => "Install failed",
+            None => "Set-up failed",
+        };
         let engine = Arc::clone(&self.engine);
         let running = Arc::clone(job);
         let done = tokio::task::spawn_blocking(move || {
-            let mut steps = Steps::new(&agreed.phases);
             let mut reported = Instant::now();
             let mut emit = |event: &gogo::engine::events::ProgressEvent| {
                 let now = Instant::now();
+                let mut steps = lock(&steps);
                 let news = steps.apply(event, now);
                 if news || now.duration_since(reported) >= PACE {
                     reported = now;
                     running.update(|s| steps.report(s));
                 }
             };
-            let done = engine
-                .pipelines()
-                .setup(&agreed.gogid, &agreed.answers, &mut emit);
+            let pipelines = engine.pipelines();
+            let done = match (&agreed.build, session) {
+                (Some((_, build)), Some(session)) => {
+                    pipelines.build(session, build, &agreed.answers, &mut emit)
+                }
+                _ => pipelines.setup(&agreed.gogid, &agreed.answers, &mut emit),
+            };
+            let mut steps = lock(&steps);
             if done.is_ok() {
                 steps.end(true, Instant::now());
             } else {
@@ -381,17 +648,15 @@ impl Installs {
             done
         })
         .await;
+        self.engine.persist().await;
         match done {
             Ok(Ok(())) => job.update(|s| {
                 s.state = JobState::Done;
                 s.stoppable = true;
                 s.fraction = Some(1.0);
             }),
-            Ok(Err(failed)) => job.fail(failure(&failed)),
-            Err(_) => job.fail(ErrorView::failed(
-                "Set-up failed",
-                "it stopped unexpectedly",
-            )),
+            Ok(Err(failed)) => job.fail(failure(title, &failed)),
+            Err(_) => job.fail(ErrorView::failed(title, "it stopped unexpectedly")),
         }
     }
 
@@ -427,27 +692,41 @@ impl Installs {
 
 /// A failed run's error, in the app's own phrases: the core's text holds paths and log
 /// lines, and goes to the log only.
-fn failure(failed: &Failed) -> ErrorView {
-    let (Failed::Pipeline(e) | Failed::Comet(e)) = failed;
-    tracing::warn!("set-up failed: {}", errors::path(&e.to_string()));
-    let (class, message) = match (failed, e) {
-        (Failed::Comet(_), _) => ("Error", "The game is set up, but Comet was not installed."),
-        (_, MacAppError::CatalogUnreachable { .. })
-        | (_, MacAppError::RuntimeDownloadFailed { .. }) => ("Network", "A download failed."),
-        (_, MacAppError::RuntimeChecksumMismatch { .. }) => {
-            ("CORRUPT", "A download did not match its checksum.")
-        }
-        (_, MacAppError::Umu(_)) => ("Error", "umu could not be run."),
-        (_, MacAppError::Proton(_)) => ("Error", "The GE-Proton build could not be used."),
-        (_, MacAppError::Io(io)) if io.kind() == std::io::ErrorKind::StorageFull => {
-            ("Disk", "There is not enough free space.")
-        }
-        (_, MacAppError::Io(_)) => ("Error", "A file could not be read or written."),
-        _ => ("Error", "Setting up the game did not finish."),
+fn failure(title: &str, failed: &Failed) -> ErrorView {
+    let text = match failed {
+        Failed::Pipeline(e) | Failed::Comet(e) => e.to_string(),
+        Failed::Files(e) => e.to_string(),
+    };
+    tracing::warn!("{title}: {}", errors::path(&text));
+    let full = |io: &std::io::Error| io.kind() == std::io::ErrorKind::StorageFull;
+    let disk = ("Disk", "There is not enough free space.");
+    let (class, message) = match failed {
+        Failed::Comet(_) => ("Error", "The game is set up, but Comet was not installed."),
+        Failed::Files(DepotError::Io(io)) if full(io) => disk,
+        Failed::Files(DepotError::Filter(_)) => (
+            "Error",
+            "The downloaded files hold more than the build takes, and can't be told \
+             apart.",
+        ),
+        Failed::Files(_) => ("Network", "The game files could not be downloaded."),
+        Failed::Pipeline(e) => match e {
+            MacAppError::CatalogUnreachable { .. } | MacAppError::RuntimeDownloadFailed { .. } => {
+                ("Network", "A download failed.")
+            }
+            MacAppError::RuntimeChecksumMismatch { .. } => {
+                ("CORRUPT", "A download did not match its checksum.")
+            }
+            MacAppError::InstallerFailed { .. } => ("Error", "GOG's installer failed."),
+            MacAppError::Umu(_) => ("Error", "umu could not be run."),
+            MacAppError::Proton(_) => ("Error", "The GE-Proton build could not be used."),
+            MacAppError::Io(io) if full(io) => disk,
+            MacAppError::Io(_) => ("Error", "A file could not be read or written."),
+            _ => ("Error", "Setting up the game did not finish."),
+        },
     };
     ErrorView::new(
         class,
-        "Set-up failed",
+        title,
         message,
         "Retry. The game's install folder holds the logs.",
         "7",

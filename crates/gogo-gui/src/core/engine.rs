@@ -112,6 +112,15 @@ impl Engine {
         Arc::clone(&self.parts.free_space)
     }
 
+    /// The signed-in session.
+    pub(super) async fn session(&self) -> Result<Option<Arc<dyn TokenProvider>>, AuthError> {
+        self.parts.account.session().await
+    }
+
+    pub(super) fn download_dir(&self) -> &std::path::Path {
+        &self.parts.download_dir
+    }
+
     pub(super) fn pipelines(&self) -> Arc<dyn Pipelines> {
         Arc::clone(&self.parts.pipelines)
     }

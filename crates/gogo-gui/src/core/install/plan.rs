@@ -1,22 +1,28 @@
-//! What a set-up would do: the questions first, then the plan card. Nothing is written
-//! or stored here.
+//! What a build or a set-up would do: the questions first, then the plan card. Nothing
+//! is written or stored here.
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use gogo::auth::TokenProvider;
 use gogo::config::UmuMode;
 use gogo::engine::FreeSpace;
-use gogo::linuxapp::preview::{Answers, Download, Item, Preview, SetupPreview, Tools};
+use gogo::gog::depot::DepotError;
+use gogo::linuxapp::preview::{
+    Answers, BuildPreview, BuildRequest, Download, Item, Preview, SetupPreview, Tools,
+};
+use gogo::linuxapp::source::{self, Files, Source};
 use gogo::macapp::MacAppError;
 use gogo::macapp::prompt::{PromptAnswer as CoreAnswer, PromptKind, PromptSpec as CoreSpec};
 use gogo_contract::PlanFacts;
 use gogo_gui_model::{ErrorView, Plan, PlanStep, PromptAnswer, PromptSpec, StepKind};
 
 use super::super::errors;
-use super::pipeline::Pipelines;
+use super::pipeline::{Build, Pipelines};
 use super::steps::Phase;
 
-/// A set-up the user can agree to.
+/// A build or set-up the user can agree to.
 #[derive(Debug, Clone)]
 pub(super) struct Computed {
     pub gogid: String,
@@ -27,6 +33,32 @@ pub(super) struct Computed {
     pub downloads: Vec<Download>,
     pub tools: Tools,
     pub phases: Vec<Phase>,
+    /// A build, with what it was asked for; `None` for a set-up.
+    pub build: Option<(Asked, Build)>,
+}
+
+/// The arguments of a `game.build`.
+#[derive(Debug, Clone)]
+pub(super) struct Asked {
+    pub product: u64,
+    pub request: source::Request,
+    pub runtime: Option<String>,
+    pub renderer: gogo::macapp::RendererChoice,
+    /// `library.dir`.
+    pub library: Option<PathBuf>,
+}
+
+/// Whether `now` builds nothing `agreed` didn't show.
+fn same_build(now: &Build, agreed: &Build) -> bool {
+    let (a, b) = (&now.source, &agreed.source);
+    // Files that arrived since need no download any more.
+    let files = a.files == b.files
+        || (matches!(a.files, Files::Cached(_)) && matches!(b.files, Files::Fetch { .. }));
+    files
+        && a.build == b.build
+        && a.options.language == b.options.language
+        && a.dlcs == b.dlcs
+        && now.gogo == agreed.gogo
 }
 
 impl Computed {
@@ -36,7 +68,13 @@ impl Computed {
 
     /// Whether this does nothing `agreed` didn't.
     pub(super) fn within(&self, agreed: &Computed) -> bool {
-        self.tools.umu == agreed.tools.umu
+        let build = match (&self.build, &agreed.build) {
+            (Some((_, now)), Some((_, agreed))) => same_build(now, agreed),
+            (None, None) => true,
+            _ => false,
+        };
+        build
+            && self.tools.umu == agreed.tools.umu
             && self.tools.runtime == agreed.tools.runtime
             && self.tools.galaxy == agreed.tools.galaxy
             && self.answers == agreed.answers
@@ -189,6 +227,11 @@ fn tool_steps(tools: &Tools, answers: &Answers, steps: &mut Vec<PlanStep>) {
     if tools.galaxy {
         steps.push(step(StepKind::Info, "Comet runs beside the game", None));
     }
+    steps.extend(saved(answers));
+}
+
+/// The line about the choices the run will store.
+fn saved(answers: &Answers) -> Option<PlanStep> {
     let mut saved = Vec::new();
     if let Some(mode) = answers.umu {
         saved.push(format!("umu = {}", mode.as_str()));
@@ -199,13 +242,10 @@ fn tool_steps(tools: &Tools, answers: &Answers, steps: &mut Vec<PlanStep>) {
     if let Some(mode) = answers.galaxy {
         saved.push(format!("Comet {} for this game", mode.key()));
     }
-    if !saved.is_empty() {
-        steps.push(step(
-            StepKind::Info,
-            format!("Saves your choices: {}", saved.join(", ")),
-            None,
-        ));
-    }
+    (!saved.is_empty()).then(|| {
+        let text = format!("Saves your choices: {}", saved.join(", "));
+        step(StepKind::Info, text, None)
+    })
 }
 
 fn free_at(space: &dyn FreeSpace, dir: &Path) -> Option<u64> {
@@ -313,13 +353,7 @@ pub(super) fn setup(
     if let (Some(need), Some(free)) = (plan.download, plan.free)
         && need > free
     {
-        return Err(ErrorView::new(
-            "Disk",
-            "Not enough free space",
-            "The downloads are larger than the space left.",
-            "Free some space, then try again.",
-            "6",
-        ));
+        return Err(too_little());
     }
     Ok(Planning::Ready(Box::new(Computed {
         gogid: gogid.to_string(),
@@ -330,6 +364,270 @@ pub(super) fn setup(
         downloads: preview.tools.downloads.clone(),
         tools: preview.tools,
         phases,
+        build: None,
+    })))
+}
+
+fn no_build(error: &DepotError) -> ErrorView {
+    let message = match error {
+        DepotError::NoBuilds(_) => {
+            "It has no depot build and no downloaded installer. Download its installer \
+             first."
+                .to_string()
+        }
+        e => errors::path(&e.to_string()),
+    };
+    ErrorView::new("Error", "Install can't be planned", message, "", "1")
+}
+
+/// The renderer, runtime and DLC lines of a build's card.
+fn build_card(asked: &Asked, preview: &BuildPreview, build: &Build) -> (Plan, Vec<Phase>) {
+    let tools = &preview.tools;
+    let source = &build.source;
+    let title = errors::path(&asked.request.title);
+    let verb = if preview.rebuild {
+        "Rebuild"
+    } else {
+        "Install"
+    };
+    let mut steps = Vec::new();
+    let mut phases = Vec::new();
+    let version = source
+        .build
+        .as_ref()
+        .map(|(id, version)| version.clone().unwrap_or_else(|| id.clone()))
+        .unwrap_or_default();
+    let language = &source.options.language;
+    let fetch = match &source.files {
+        Files::Fetch { repair } => {
+            let text = if *repair {
+                format!(
+                    "Checks the downloaded game files and fetches what is missing: build \
+                     {version} ({language}), up to its full size"
+                )
+            } else {
+                format!("Game files, build {version} ({language})")
+            };
+            steps.push(step(StepKind::Download, text, source.sizes.map(|s| s.0)));
+            phases.push(Phase::Files);
+            source.sizes.map_or(0, |s| s.0)
+        }
+        Files::Cached(_) => {
+            steps.push(step(
+                StepKind::Info,
+                format!("Uses the downloaded game files: build {version} ({language})"),
+                None,
+            ));
+            0
+        }
+        Files::Installer(exe) => {
+            let name = exe.file_name().map(|n| n.to_string_lossy().into_owned());
+            steps.push(step(
+                StepKind::Info,
+                format!(
+                    "Runs the downloaded offline installer {} silently",
+                    name.unwrap_or_default()
+                ),
+                None,
+            ));
+            0
+        }
+    };
+    for d in &tools.downloads {
+        phases.push(match d.item {
+            Item::Umu => Phase::Umu,
+            Item::Proton => Phase::Proton,
+            Item::Comet => continue,
+        });
+    }
+    let named = |dlcs: &[gogo::gog::content::DlcRef]| {
+        dlcs.iter()
+            .map(|d| errors::path(&d.title))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    if !source.dlcs.is_empty() {
+        let text = format!("With DLC: {}", named(&source.dlcs));
+        steps.push(step(StepKind::Info, text, None));
+    } else if !source.dlcs_not_taken.is_empty() {
+        let text = format!(
+            "Without DLC: an installer's DLC can't be added here ({})",
+            named(&source.dlcs_not_taken)
+        );
+        steps.push(step(StepKind::Info, text, None));
+    } else {
+        steps.push(step(StepKind::Info, "No DLC", None));
+    }
+    let dir = errors::path(&preview.dirs.root.display().to_string());
+    if preview.rebuild {
+        steps.push(step(
+            StepKind::Replace,
+            format!("Replaces the game files in {dir}"),
+            None,
+        ));
+        steps.push(step(
+            StepKind::Snapshot,
+            "A snapshot first, where the game's folder allows it and snapshots are on",
+            None,
+        ));
+    } else {
+        steps.push(step(StepKind::Info, format!("Into {dir}"), None));
+    }
+    tool_steps(tools, &Answers::default(), &mut steps);
+    let renderer = preview
+        .renderer
+        .clone()
+        .unwrap_or_else(|| "picked once the game's files are here".to_string());
+    steps.push(step(StepKind::Info, format!("Renderer: {renderer}"), None));
+    if !preview.verbs.is_empty() {
+        let text = format!("winetricks verbs: {}", preview.verbs.join(", "));
+        steps.push(step(StepKind::Info, text, None));
+    }
+    if preview.prefix_exists {
+        steps.push(step(
+            StepKind::Info,
+            "Keeps the game's Wine prefix, with its saves",
+            None,
+        ));
+    } else {
+        steps.push(step(
+            StepKind::Info,
+            "Creates the Wine prefix; umu downloads the Steam Linux Runtime on its first \
+             run, if it isn't there",
+            None,
+        ));
+    }
+    steps.push(step(
+        StepKind::Info,
+        format!(
+            "The game's launcher will run {}",
+            errors::path(&build.gogo.display().to_string())
+        ),
+        None,
+    ));
+    match source.files {
+        Files::Installer(_) => phases.extend([Phase::Prefix, Phase::Installer, Phase::Move]),
+        _ => phases.extend([Phase::Copy, Phase::Prefix]),
+    }
+    phases.push(Phase::Finish);
+    if tools.install_comet {
+        phases.push(Phase::Comet);
+    }
+    let download: u64 = fetch + tools.downloads.iter().map(|d| d.bytes).sum::<u64>();
+    let mut warnings = vec![
+        "Once building starts it can't be stopped, and the window stays open until it \
+         ends."
+            .to_string(),
+    ];
+    if fetch > 0 {
+        warnings.push("The game files download first; that part can be cancelled.".to_string());
+    }
+    let plan = Plan {
+        verb: verb.to_string(),
+        title: format!("{verb} {title}?"),
+        subject: title,
+        steps,
+        download: (download > 0).then_some(download),
+        disk_delta: source
+            .sizes
+            .filter(|_| matches!(source.files, Files::Fetch { .. }))
+            .and_then(|s| i64::try_from(s.1).ok()),
+        free: None,
+        warnings,
+        reversible: false,
+    };
+    (plan, phases)
+}
+
+fn too_little() -> ErrorView {
+    ErrorView::new(
+        "Disk",
+        "Not enough free space",
+        "The downloads are larger than the space left.",
+        "Free some space, then try again.",
+        "6",
+    )
+}
+
+/// What building would do, once `given` answers every question that isn't in `known`
+/// already.
+pub(super) fn build(
+    pipelines: &dyn Pipelines,
+    space: &dyn FreeSpace,
+    session: Arc<dyn TokenProvider>,
+    asked: Asked,
+    known: Answers,
+    given: &[PromptAnswer],
+) -> Result<Planning, ErrorView> {
+    let Some(gogo) = pipelines.gogo_cli() else {
+        return Err(ErrorView::new(
+            "Usage",
+            "Install can't be planned",
+            "A built game's launcher runs the gogo command, and none was found beside \
+             this app or on PATH.",
+            "Install the gogo command line tool.",
+            "2",
+        ));
+    };
+    let source: Source = pipelines
+        .source(session, &asked.request)
+        .map_err(|e| no_build(&e))?;
+    let gogid = asked.product.to_string();
+    let tree = match &source.files {
+        Files::Cached(tree) => Some(tree.clone()),
+        _ => None,
+    };
+    let request = BuildRequest {
+        gogid: &gogid,
+        tree: tree.as_deref(),
+        runtime: asked.runtime.as_deref(),
+        renderer: asked.renderer,
+        library: asked.library.as_deref(),
+    };
+    let previewed = answered(known, given, |a| pipelines.preview_build(&request, a))?;
+    let (answers, preview) = match previewed {
+        Ok(ready) => ready,
+        Err(question) => return Ok(Planning::Ask(question)),
+    };
+    let build = Build {
+        product: asked.product,
+        source,
+        runtime: asked.runtime.clone(),
+        renderer: asked.renderer,
+        gogo,
+    };
+    let (mut plan, phases) = build_card(&asked, &preview, &build);
+    // The card leaves the answers to be saved to the tool lines.
+    if let Some(saved) = saved(&answers) {
+        plan.steps.push(saved);
+    }
+    let inputs = digest(&(
+        &plan,
+        &build.source,
+        &preview.tools,
+        &preview.rebuild,
+        &answers,
+    ));
+    let fetched = match build.source.files {
+        Files::Fetch { .. } => build.source.sizes.map_or(0, |s| s.1),
+        _ => 0,
+    };
+    let tools: u64 = preview.tools.downloads.iter().map(|d| d.bytes).sum();
+    let cache_free = free_at(space, &build.source.root);
+    plan.free = free_at(space, &preview.dirs.root);
+    if cache_free.is_some_and(|free| fetched > free) || plan.free.is_some_and(|f| tools > f) {
+        return Err(too_little());
+    }
+    Ok(Planning::Ready(Box::new(Computed {
+        gogid,
+        title: asked.request.title.clone(),
+        answers,
+        plan,
+        inputs,
+        downloads: preview.tools.downloads.clone(),
+        tools: preview.tools,
+        phases,
+        build: Some((asked, build)),
     })))
 }
 

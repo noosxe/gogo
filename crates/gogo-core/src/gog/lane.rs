@@ -122,6 +122,23 @@ pub fn pick(facts: GameFacts, explicit: bool) -> Lane {
     }
 }
 
+/// The game's own tree under depot cache root `root`: its one dir besides
+/// `gog-support`, else the one holding a `goggame-*.info`.
+pub fn find_game_tree(root: &Path) -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(root)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .map(|e| e.path())
+        .filter(|p| !p.file_name().is_some_and(|n| n == "gog-support"))
+        .collect();
+    if dirs.len() == 1 {
+        return dirs.pop();
+    }
+    dirs.into_iter()
+        .find(|d| !crate::macapp::info::gog_game_ids(d).is_empty())
+}
+
 /// The downloaded base-game Windows installer for `product_id` in
 /// state.json (the newest when several were saved), as an absolute path
 /// under the download `root`. Only files that still exist count.

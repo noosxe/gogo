@@ -16,6 +16,7 @@ route "game" {
                 chip "Update {g.update?.to} available" icon="dot" tone="warn" when="{g.update}"
             }
             row gap=@space.3 margin="6 0 0 0" {
+                button "Install" style="primary" action="game.build" args="{$id} linux" id="install" when="{g.status == not_installed and app.os == linux}"
                 button "Play" icon="play" key="P" style="primary" action="game.play" args="{$id}" id="play"
                 button "Verify files" action="game.verify" args="{$id}" id="verify"
                 button "Download files" action="nav.go" args="game {$id} files" id="files"
