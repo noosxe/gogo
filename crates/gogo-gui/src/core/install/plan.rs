@@ -78,21 +78,46 @@ fn core_answer(answer: &PromptAnswer) -> Option<CoreAnswer> {
     }
 }
 
-/// A failure while planning, in the core's own words, scrubbed.
+/// A failure while planning, in the app's own phrases: the core's text holds paths
+/// and parser output, and goes to the log only.
 fn refused(error: &MacAppError) -> ErrorView {
-    let class = match error {
-        MacAppError::CatalogUnreachable { .. } | MacAppError::RuntimeDownloadFailed { .. } => {
-            "Network"
-        }
-        _ => "Error",
+    tracing::warn!("planning failed: {}", errors::path(&error.to_string()));
+    let (class, message, hint) = match error {
+        MacAppError::CatalogUnreachable { .. } | MacAppError::RuntimeDownloadFailed { .. } => (
+            "Network",
+            "The size of a download could not be read from GitHub.",
+            "Check the connection, then try again.",
+        ),
+        MacAppError::Apps(_) => ("Error", "The game is running.", "Quit it, then try again."),
+        MacAppError::Compat { .. } => (
+            "Error",
+            "A settings file for this game could not be read.",
+            "`gogo linux-app doctor` says which.",
+        ),
+        MacAppError::Library { .. } => (
+            "Error",
+            "The game's folder or the library can't be used.",
+            "Check that its drive is there.",
+        ),
+        MacAppError::Umu(_) => (
+            "Error",
+            "umu can't be run as it is set up.",
+            "`gogo linux-app doctor` says why.",
+        ),
+        MacAppError::Proton(_) => (
+            "Error",
+            "The game's GE-Proton build can't be used.",
+            "`gogo linux-app doctor` says why.",
+        ),
+        MacAppError::Comet(_) => ("Error", "Comet can't be used as it is set up.", ""),
+        MacAppError::Io(_) => ("Error", "A file could not be read.", ""),
+        _ => (
+            "Error",
+            "What the run would do could not be worked out.",
+            "",
+        ),
     };
-    ErrorView::new(
-        class,
-        "Set-up can't be planned",
-        errors::path(&error.to_string()),
-        "",
-        "7",
-    )
+    ErrorView::new(class, "Set-up can't be planned", message, hint, "7")
 }
 
 fn cannot_answer() -> ErrorView {
@@ -306,4 +331,45 @@ pub(super) fn setup(
         tools: preview.tools,
         phases,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// No path and none of the core's own words.
+    fn plain(view: &ErrorView, raw: &[&str]) {
+        let shown = format!("{} {} {}", view.title, view.message, view.hint);
+        assert!(!shown.contains('/'), "{shown}");
+        for raw in raw {
+            assert!(!shown.contains(raw), "{shown}");
+        }
+    }
+
+    #[test]
+    fn a_planning_error_is_in_the_apps_own_words() {
+        let path = || PathBuf::from("/somewhere/compat/10.toml");
+        let said = "expected `=` at line 3";
+        for error in [
+            MacAppError::Compat {
+                path: path(),
+                reason: said.into(),
+            },
+            MacAppError::Library {
+                path: path(),
+                reason: said.into(),
+            },
+            MacAppError::Apps(said.into()),
+            MacAppError::Umu(said.into()),
+            MacAppError::Proton(said.into()),
+            MacAppError::Comet(said.into()),
+            MacAppError::CatalogUnreachable {
+                detail: said.into(),
+            },
+            MacAppError::Io(std::io::Error::other(said)),
+            MacAppError::Recipe(said.into()),
+        ] {
+            plain(&refused(&error), &["somewhere", said]);
+        }
+    }
 }
