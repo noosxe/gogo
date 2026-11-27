@@ -240,6 +240,10 @@ app control is told apart by its `DrawnBy::App` part and tree key.
   to Cancel, any other key or button, the window losing input, the control or the dialog
   changing). The second activation is the press the model checks.
 - **Setting a text field** through AccessKit is not a press and answers nothing.
+- **Text fields** the app draws take typing only while focused: the platform's text for the key
+  (case kept, dead keys composed, nothing under Ctrl or Meta), Backspace, and the paste
+  shortcut, as edit intents. None is a press. Enter and Space never activate a field. There
+  is no caret, selection or IME yet (#544).
 - **Screen readers (`gogo-ui-a11y`).** The AccessKit tree comes from the same layers.
   Click, focus and set-value requests become interact input, so they are numbered and
   checked like any press. Under a dialog only the dialog is exposed, as a modal dialog or

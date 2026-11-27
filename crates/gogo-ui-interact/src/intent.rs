@@ -57,6 +57,16 @@ pub struct ControlInput {
     pub on: Option<bool>,
 }
 
+/// One change to a text field's text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TextEdit {
+    /// Add this at the end. Has no control characters.
+    Insert(String),
+    /// Take the last character away.
+    Backspace,
+}
+
 /// Something the user asked for.
 #[derive(Debug, PartialEq)]
 #[non_exhaustive]
@@ -107,6 +117,13 @@ pub enum Intent {
         /// The new text.
         value: String,
     },
+    /// Typing in the focused text field. Not a press: it answers nothing.
+    Edit {
+        /// The field.
+        target: Target,
+        /// What to do to its text.
+        edit: TextEdit,
+    },
     /// Esc: close, cancel or go back.
     Dismiss {
         /// The press.
@@ -117,7 +134,8 @@ pub enum Intent {
         /// The press.
         provenance: InputProvenance,
     },
-    /// The paste shortcut under a dialog: its widget may take the clipboard.
+    /// The paste shortcut under a dialog, or in its text field: the widget may take
+    /// the clipboard.
     Paste {
         /// The press.
         provenance: InputProvenance,

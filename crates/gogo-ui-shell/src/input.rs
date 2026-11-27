@@ -42,6 +42,24 @@ impl Translator {
         }
     }
 
+    /// What a key press in `event` typed, to be sent after its
+    /// [`Translator::translate`] input.
+    pub(crate) fn text(&self, event: &WindowEvent) -> Option<Input> {
+        match event {
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic,
+                ..
+            } => typed(
+                event.text.as_deref(),
+                event.state,
+                *is_synthetic,
+                self.modifiers,
+            ),
+            _ => None,
+        }
+    }
+
     fn moved(&mut self, position: PhysicalPosition<f64>, scale: f64) -> Input {
         let (x, y) = (position.x / scale, position.y / scale);
         self.pointer = Some((x, y));
@@ -91,6 +109,19 @@ fn key_input(key: Key, state: ElementState, repeat: bool, held: ModifiersState) 
     }
 }
 
+/// The text of a real press. Ctrl and Super chords type nothing; Alt may (Option on
+/// macOS).
+fn typed(
+    text: Option<&str>,
+    state: ElementState,
+    synthetic: bool,
+    held: ModifiersState,
+) -> Option<Input> {
+    let chord = held.control_key() || held.super_key();
+    let text = text.filter(|t| !t.chars().all(char::is_control))?;
+    (state == ElementState::Pressed && !synthetic && !chord).then(|| Input::Text(text.to_owned()))
+}
+
 /// A key by meaning. A bare modifier, or anything else without one here, is
 /// [`Key::Other`].
 fn map_key(key: &WinitKey) -> Key {
@@ -99,6 +130,7 @@ fn map_key(key: &WinitKey) -> Key {
             NamedKey::Enter => Key::Enter,
             NamedKey::Space => Key::Space,
             NamedKey::Escape => Key::Escape,
+            NamedKey::Backspace => Key::Backspace,
             NamedKey::Tab => Key::Tab,
             NamedKey::ArrowLeft => Key::ArrowLeft,
             NamedKey::ArrowRight => Key::ArrowRight,
@@ -173,6 +205,27 @@ mod tests {
         assert_eq!(
             click(&mut t, ElementState::Released, MouseButton::Left),
             None
+        );
+    }
+
+    #[test]
+    fn typed_text_keeps_its_case_and_chords_type_nothing() {
+        let down = |text, held| typed(Some(text), ElementState::Pressed, false, held);
+        let none = ModifiersState::empty();
+        assert_eq!(down("É", none), Some(Input::Text("É".into())));
+        assert_eq!(down(" ", none), Some(Input::Text(" ".into())));
+        assert_eq!(
+            down("@", ModifiersState::ALT),
+            Some(Input::Text("@".into()))
+        );
+        assert_eq!(down("v", ModifiersState::CONTROL), None);
+        assert_eq!(down("v", ModifiersState::SUPER), None);
+        assert_eq!(down("\r", none), None);
+        assert_eq!(typed(Some("a"), ElementState::Released, false, none), None);
+        assert_eq!(typed(Some("a"), ElementState::Pressed, true, none), None);
+        assert_eq!(
+            map_key(&WinitKey::Named(NamedKey::Backspace)),
+            Key::Backspace
         );
     }
 

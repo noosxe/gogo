@@ -51,5 +51,5 @@ mod keys;
 pub use focus::FocusOrder;
 pub use frame::{Frame, Identity, Layer, LayerId, LayerKind, Target, activatable};
 pub use input::{Input, Key, Modifiers, PointerButton, Request, RequestKind};
-pub use intent::{ControlInput, InputEvent, InputProvenance, Intent, Response};
+pub use intent::{ControlInput, InputEvent, InputProvenance, Intent, Response, TextEdit};
 pub use interaction::{ARM_EXPIRES, Config, HOLD_ARM, Interaction, Primary};

@@ -184,9 +184,10 @@ impl Target {
 }
 
 /// Whether activating the node does something. A skin node needs an action; an app node
-/// (a control the app drew) needs to be focusable. A disabled node and a select never.
+/// (a control the app drew) needs to be focusable. A disabled node, a select and a text
+/// field never.
 pub fn activatable(node: &Node) -> bool {
-    if node.a11y.disabled || node.a11y.role == Role::ComboBox {
+    if node.a11y.disabled || matches!(node.a11y.role, Role::ComboBox | Role::TextInput) {
         return false;
     }
     match node.drawn_by {
