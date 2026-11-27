@@ -3,6 +3,9 @@
 
 pub mod chunk;
 pub mod events;
+pub mod job;
+#[cfg(test)]
+mod job_tests;
 pub mod limiter;
 pub mod select;
 pub mod sidecar;
@@ -19,6 +22,7 @@ use tokio::sync::Semaphore;
 use crate::app::AppContext;
 
 use crate::engine::events::ProgressEvent;
+use crate::engine::job::{JobScope, unless_cancelled};
 use crate::engine::select::Filters;
 use crate::engine::sidecar::PlanDoc;
 use crate::engine::task::{FileTask, Kind, Status};
@@ -225,8 +229,16 @@ fn download_root(ctx: &Arc<AppContext>) -> PathBuf {
 
 /// Run the pipeline for the planned tasks: `parallel_files` files at once, N chunk
 /// workers each, per-chunk md5, sidecar updates, atomic rename, `InstallRecord` write
-/// (`docs/design/04` §4–§7).
+/// (`docs/design/04` §4–§7). The app token cancels it and its events go to
+/// `ctx.events`; [`execute_job`] runs it as one job among several.
 pub async fn execute(ctx: &Arc<AppContext>, tasks: Vec<FileTask>) -> Summary {
+    execute_job(ctx, &JobScope::command(ctx), tasks).await
+}
+
+/// [`execute`] with `scope`'s own token and events (design 25 §5). A cancel leaves
+/// the sidecars for a resume; the files it stopped count as failed (class 130).
+/// Stop it by its token: dropping this future leaves the file tasks running.
+pub async fn execute_job(ctx: &Arc<AppContext>, scope: &JobScope, tasks: Vec<FileTask>) -> Summary {
     // D4: disk preflight — exit 6, nothing written.
     if ctx.disk_check {
         let needed: u64 = tasks
@@ -239,7 +251,7 @@ pub async fn execute(ctx: &Arc<AppContext>, tasks: Vec<FileTask>) -> Summary {
             let _ = std::fs::create_dir_all(&root);
             match ctx.free_space.available_bytes(&root) {
                 Ok(have) if needed > have => {
-                    let _ = ctx.events.send(ProgressEvent::Warn {
+                    let _ = scope.events().send(ProgressEvent::Warn {
                         message: crate::redact::scrub_text(&format!(
                             "insufficient disk space: need {}, have {}",
                             crate::fmt::human_size(needed),
@@ -264,7 +276,7 @@ pub async fn execute(ctx: &Arc<AppContext>, tasks: Vec<FileTask>) -> Summary {
     let mut handles = Vec::with_capacity(tasks.len());
     for task in tasks {
         if matches!(task.status, Status::Present) {
-            let _ = ctx.events.send(ProgressEvent::FileSkipped {
+            let _ = scope.events().send(ProgressEvent::FileSkipped {
                 id: task.id,
                 reason: "already present".into(),
             });
@@ -272,10 +284,11 @@ pub async fn execute(ctx: &Arc<AppContext>, tasks: Vec<FileTask>) -> Summary {
             continue;
         }
         let ctx = Arc::clone(ctx);
+        let scope = scope.clone();
         let permit = sem.clone().acquire_owned().await.expect("semaphore");
         handles.push(tokio::spawn(async move {
             let _permit = permit;
-            download_one(ctx, task).await
+            download_one(ctx, scope, task).await
         }));
     }
 
@@ -283,7 +296,7 @@ pub async fn execute(ctx: &Arc<AppContext>, tasks: Vec<FileTask>) -> Summary {
         let outcome = match handle.await {
             Ok((id, outcome)) => {
                 if let Outcome::Skipped(reason) = &outcome {
-                    let _ = ctx.events.send(ProgressEvent::FileSkipped {
+                    let _ = scope.events().send(ProgressEvent::FileSkipped {
                         id,
                         reason: reason.clone(),
                     });
@@ -309,7 +322,7 @@ pub async fn execute(ctx: &Arc<AppContext>, tasks: Vec<FileTask>) -> Summary {
         }
     }
 
-    let _ = ctx.events.send(ProgressEvent::Done {
+    let _ = scope.events().send(ProgressEvent::Done {
         ok: summary.ok,
         failed: summary.failed,
         skipped: summary.skipped,
@@ -317,12 +330,16 @@ pub async fn execute(ctx: &Arc<AppContext>, tasks: Vec<FileTask>) -> Summary {
     summary
 }
 
-async fn download_one(ctx: Arc<AppContext>, mut task: FileTask) -> (uuid::Uuid, Outcome) {
-    match download_one_inner(&ctx, &mut task).await {
+async fn download_one(
+    ctx: Arc<AppContext>,
+    scope: JobScope,
+    mut task: FileTask,
+) -> (uuid::Uuid, Outcome) {
+    match download_one_inner(&ctx, &scope, &mut task).await {
         Ok(outcome) => (task.id, outcome),
         Err(e) => {
             // Construction-time redaction is the rule; this is the net (07 §4).
-            let _ = ctx.events.send(ProgressEvent::FileFailed {
+            let _ = scope.events().send(ProgressEvent::FileFailed {
                 id: task.id,
                 error: crate::redact::scrub_text(&e.to_string()),
             });
@@ -333,18 +350,31 @@ async fn download_one(ctx: Arc<AppContext>, mut task: FileTask) -> (uuid::Uuid, 
 
 async fn download_one_inner(
     ctx: &Arc<AppContext>,
+    scope: &JobScope,
     task: &mut FileTask,
 ) -> Result<Outcome, DownloadError> {
+    // A file the cancel found still waiting leaves nothing behind.
+    if scope.cancel().is_cancelled() {
+        return Err(DownloadError::Aborted);
+    }
     let Some(session) = ctx.session.as_ref() else {
         return Err(DownloadError::Auth("no session — run gogo login".into()));
     };
+    // Not raced against the cancel: dropping a token refresh halfway could lose
+    // the rotated refresh token.
     let bearer = session
         .bearer()
         .await
         .map_err(|e| DownloadError::Auth(e.to_string()))?;
+    let resolve = || async {
+        let resolving = crate::gog::downlink::resolve(&ctx.http, &bearer, &task.file.downlink);
+        unless_cancelled(scope.cancel(), resolving)
+            .await
+            .ok_or(DownloadError::Aborted)
+    };
 
     // — resolve (per file, every run; URLs are never persisted) —
-    let dl = match crate::gog::downlink::resolve(&ctx.http, &bearer, &task.file.downlink).await {
+    let dl = match resolve().await? {
         Ok(dl) => dl,
         Err(e) if matches!(e, crate::gog::error::ApiError::Forbidden(_)) => {
             return bundled_skip(task, &format!("downlink 403: {e}"));
@@ -354,7 +384,11 @@ async fn download_one_inner(
         }
     };
 
-    let raw = match crate::gog::checksum::fetch_raw(&ctx.http, &dl.checksum).await {
+    let fetching = crate::gog::checksum::fetch_raw(&ctx.http, &dl.checksum);
+    let raw = match unless_cancelled(scope.cancel(), fetching)
+        .await
+        .ok_or(DownloadError::Aborted)?
+    {
         Ok(raw) => raw,
         Err(e) if matches!(e, crate::gog::error::ApiError::Forbidden(_)) => {
             return bundled_skip(task, &format!("checksum 403: {e}"));
@@ -368,7 +402,7 @@ async fn download_one_inner(
     let doc = crate::gog::checksum::parse(&raw)
         .map_err(|e| DownloadError::RetriesExhausted(format!("checksum parse: {e}")))?;
     for warning in &doc.warnings {
-        let _ = ctx.events.send(ProgressEvent::Warn {
+        let _ = scope.events().send(ProgressEvent::Warn {
             message: crate::redact::scrub_text(&format!("{}: {warning}", task.file.id)),
         });
     }
@@ -379,7 +413,7 @@ async fn download_one_inner(
             .notavailablemsg
             .clone()
             .unwrap_or_else(|| "not available".into());
-        let _ = ctx.events.send(ProgressEvent::Warn {
+        let _ = scope.events().send(ProgressEvent::Warn {
             message: crate::redact::scrub_text(&format!("{}: {message}", task.file.id)),
         });
         return Ok(Outcome::Skipped(format!("unavailable: {message}")));
@@ -395,7 +429,7 @@ async fn download_one_inner(
             ),
             task.file.id
         );
-        let _ = ctx.events.send(ProgressEvent::Warn {
+        let _ = scope.events().send(ProgressEvent::Warn {
             message: crate::redact::scrub_text(&format!(
                 "{}: no checksum name — using `{fallback}`",
                 task.file.id
@@ -435,7 +469,7 @@ async fn download_one_inner(
         return Ok(Outcome::Skipped("adopted existing verified file".into()));
     }
     if dest.is_file() && record_of(ctx, task).is_none() {
-        let _ = ctx.events.send(ProgressEvent::Warn {
+        let _ = scope.events().send(ProgressEvent::Warn {
             message: crate::redact::scrub_text(&format!(
                 "{save_name}: unrecorded file failed verification — redownloading over it"
             )),
@@ -447,7 +481,7 @@ async fn download_one_inner(
     match sidecar::load_plan(&dest) {
         Some(plan) if plan.layout_matches(&doc) => {}
         Some(_) => {
-            let _ = ctx.events.send(ProgressEvent::Warn {
+            let _ = scope.events().send(ProgressEvent::Warn {
                 message: crate::redact::scrub_text(&format!(
                     "{save_name}: remote layout changed — restarting"
                 )),
@@ -465,7 +499,7 @@ async fn download_one_inner(
         }
     }
 
-    let _ = ctx.events.send(ProgressEvent::FileStart {
+    let _ = scope.events().send(ProgressEvent::FileStart {
         id: task.id,
         name: save_name.clone(),
         total_bytes: doc.total_size,
@@ -476,7 +510,6 @@ async fn download_one_inner(
     let mut budget = ctx.cfg.network.retries;
     let mut gone_tried = false;
     let mut url = dl.downlink;
-    let child = ctx.cancel.child_token();
     loop {
         let job = Job {
             http: ctx.http.clone(),
@@ -487,8 +520,8 @@ async fn download_one_inner(
             bitmap: sidecar::load_bitmap(&dest, chunks.len()),
             workers: ctx.cfg.download.workers,
             limiter: Arc::clone(&ctx.limiter),
-            cancel: child.clone(),
-            events: ctx.events.clone(),
+            cancel: scope.cancel().clone(),
+            events: scope.events().clone(),
             file_id: task.id,
             display_name: save_name.clone(),
             retries: ctx.cfg.network.retries,
@@ -497,7 +530,7 @@ async fn download_one_inner(
             Ok(()) => break,
             Err(DownloadError::UrlExpired) if budget > 0 => {
                 budget -= 1;
-                match crate::gog::downlink::resolve(&ctx.http, &bearer, &task.file.downlink).await {
+                match resolve().await? {
                     Ok(fresh) => url = fresh.downlink,
                     Err(e) => {
                         return Err(DownloadError::RetriesExhausted(format!("re-resolve: {e}")));
@@ -506,7 +539,7 @@ async fn download_one_inner(
             }
             Err(DownloadError::LinkGone) if !gone_tried => {
                 gone_tried = true;
-                match crate::gog::downlink::resolve(&ctx.http, &bearer, &task.file.downlink).await {
+                match resolve().await? {
                     Ok(fresh) => url = fresh.downlink,
                     Err(e) => {
                         return Err(DownloadError::RetriesExhausted(format!("re-resolve: {e}")));
@@ -524,7 +557,7 @@ async fn download_one_inner(
     sidecar::remove(&dest)?;
     append_record(ctx, task, &doc, &dest);
 
-    let _ = ctx.events.send(ProgressEvent::FileDone {
+    let _ = scope.events().send(ProgressEvent::FileDone {
         id: task.id,
         path: dest,
     });

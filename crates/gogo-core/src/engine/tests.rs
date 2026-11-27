@@ -12,7 +12,7 @@ use crate::engine::task::{FileTask, Kind, Status};
 use crate::engine::{FreeSpace, execute};
 use crate::gog::error::AuthError;
 
-struct StaticToken;
+pub(super) struct StaticToken;
 #[async_trait::async_trait]
 impl TokenProvider for StaticToken {
     async fn bearer(&self) -> Result<String, AuthError> {
@@ -23,19 +23,19 @@ impl TokenProvider for StaticToken {
     }
 }
 
-struct TinySpace(u64);
+pub(super) struct TinySpace(u64);
 impl FreeSpace for TinySpace {
     fn available_bytes(&self, _path: &std::path::Path) -> std::io::Result<u64> {
         Ok(self.0)
     }
 }
 
-fn md5_hex(data: &[u8]) -> String {
+pub(super) fn md5_hex(data: &[u8]) -> String {
     use md5::Digest;
     crate::fmt::md5_hex(md5::Md5::new_with_prefix(data))
 }
 
-async fn test_ctx(root: &std::path::Path) -> Arc<AppContext> {
+pub(super) async fn test_ctx(root: &std::path::Path) -> Arc<AppContext> {
     let mut cfg = Config::default();
     cfg.download.dir = Some(root.to_string_lossy().into_owned());
     cfg.download.workers = 2;
@@ -53,7 +53,7 @@ async fn test_ctx(root: &std::path::Path) -> Arc<AppContext> {
     })
 }
 
-fn task_for(downlink_url: String, size: u64) -> FileTask {
+pub(super) fn task_for(downlink_url: String, size: u64) -> FileTask {
     let entry_json = format!(
         r#"{{"id":"en1installer0","os":"windows","language":"en","name":"N",
             "version":"1.0","total_size":{size},
@@ -78,7 +78,7 @@ fn task_for(downlink_url: String, size: u64) -> FileTask {
     }
 }
 
-fn checksum_xml(name: &str, chunks: &[(&str, u64, u64)]) -> String {
+pub(super) fn checksum_xml(name: &str, chunks: &[(&str, u64, u64)]) -> String {
     let body = chunks
         .iter()
         .map(|(md5, from, to)| {
@@ -100,13 +100,13 @@ fn checksum_xml(name: &str, chunks: &[(&str, u64, u64)]) -> String {
 
 /// Isolates GOGO_HOME per test (state.json, caches) under the shared env mutex —
 /// engine tests must never touch the user's real state/cache dirs.
-struct TestEnv {
+pub(super) struct TestEnv {
     _guard: std::sync::MutexGuard<'static, ()>,
     _dir: tempfile::TempDir,
 }
 
 impl TestEnv {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let guard = crate::test_util::env_lock();
         let dir = tempfile::tempdir().unwrap();
         // SAFETY: env mutation under the shared env mutex (see test_util).

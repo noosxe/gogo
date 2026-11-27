@@ -147,6 +147,15 @@ impl DepotError {
     }
 }
 
+/// A cancel seen between the steps gog-warp can't be stopped in, with the words
+/// of its own cancelled error.
+fn stop_if_cancelled(cancel: &CancellationToken) -> Result<(), DepotError> {
+    if cancel.is_cancelled() {
+        return Err(DepotError::Library("operation was cancelled".into()));
+    }
+    Ok(())
+}
+
 /// What [`run`] needs to name and check DLC (design 19 §2): the account's owned
 /// ids and the game's catalog DLC (titles).
 #[derive(Clone, Default)]
@@ -516,6 +525,7 @@ pub async fn run(
     cancel: &CancellationToken,
     free_space: &(dyn crate::engine::FreeSpace + Send + Sync),
 ) -> Result<PathBuf, DepotError> {
+    stop_if_cancelled(cancel)?;
     let cache_base = dirs::cache_dir();
     let (install_root, support_root, deps_root) =
         cache_roots(cache_base.as_deref(), product_id, opts.dir.as_deref())
@@ -665,6 +675,9 @@ pub async fn run(
             .expect_err("an unowned DLC is refused")
             .into());
     }
+
+    // Stopped this far, the cache is as it was: no mark.
+    stop_if_cancelled(cancel)?;
 
     // The files of another build are about to be overwritten: until the record of
     // the finished download replaces this one, the tree may mix both builds, so the
@@ -869,6 +882,7 @@ pub async fn fetch_into(
     cancel: &CancellationToken,
     free_space: &(dyn crate::engine::FreeSpace + Send + Sync),
 ) -> Result<(u64, u64), DepotError> {
+    stop_if_cancelled(cancel)?;
     // The preflight (and the downloader) expect the install root to exist;
     // nothing creates it before this point (live finding 2026-10-20: the
     // free-space probe on a missing path is ENOENT, not 0 free).
@@ -906,15 +920,21 @@ pub async fn fetch_into(
             }
         });
     }
+    // The forwarder ends with this call: a job's token may never be cancelled.
+    let ended = CancellationToken::new();
+    let _end = ended.clone().drop_guard();
     {
         let dl_cancel = downloader.get_cancellation();
         let ours = cancel.clone();
         tokio::spawn(async move {
-            ours.cancelled().await;
-            dl_cancel.cancel();
+            tokio::select! {
+                () = ours.cancelled() => dl_cancel.cancel(),
+                () = ended.cancelled() => {}
+            }
         });
     }
 
+    stop_if_cancelled(cancel)?;
     downloader.prepare().await.map_err(DepotError::library)?;
 
     if spec.disk_check {
@@ -933,6 +953,7 @@ pub async fn fetch_into(
         }
     }
 
+    stop_if_cancelled(cancel)?;
     let before = Snapshot::take(spec.install_root);
     downloader.download().await.map_err(DepotError::library)?;
     Ok(Snapshot::take(spec.install_root).fetched_since(&before))
