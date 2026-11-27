@@ -3,7 +3,8 @@
 //!
 //! Every [`Backend`] method returns at once: it spawns on the runtime, and what comes
 //! back is written to the source's slot, which wakes the UI. What it changes: downloads
-//! ([`download`]) and Linux set-up ([`install`]); the rest comes with later PRs.
+//! ([`download`]), and Linux builds and set-up ([`install`]); the rest comes with later
+//! PRs.
 
 pub(crate) mod account;
 pub(crate) mod art;
@@ -81,6 +82,9 @@ pub(crate) fn parts() -> Result<Parts, SetupError> {
     let pipelines = Arc::new(install::Core {
         snapshots: cfg.snapshots.auto,
         keep_auto: cfg.snapshots.keep_auto,
+        library: cfg.library.dir.clone().map(PathBuf::from),
+        download_dir: download_dir.clone(),
+        free_space: Arc::new(gogo::engine::Fs4FreeSpace),
     });
     Ok(Parts {
         pipelines,
@@ -357,7 +361,7 @@ impl Backend for CoreBackend {
     fn plan(&mut self, call: &Call, _answer: Option<&PromptAnswer>, reply: PlanReply) {
         match call.name() {
             "game.download" => return self.downloads.plan(call, reply),
-            "game.setup" => return self.installs.plan(call, reply),
+            "game.setup" | "game.build" => return self.installs.plan(call, reply),
             "account.sign_in" => {}
             _ => return reply.send(Err(errors::unavailable())),
         }
@@ -397,7 +401,7 @@ impl Backend for CoreBackend {
     fn run(&mut self, run: Run, jobs: &mut Jobs<'_>) -> Result<(), ErrorView> {
         match run.call().name() {
             "game.download" => self.downloads.run(run, jobs),
-            "game.setup" => self.installs.run(run, jobs),
+            "game.setup" | "game.build" => self.installs.run(run, jobs),
             "queue.set_rate_limit" => {
                 self.downloads
                     .set_rate_limit(download::rate_arg(run.call()));

@@ -32,6 +32,7 @@ pub mod relocate;
 pub mod rollback;
 pub mod setup;
 pub mod snapshots;
+pub mod source;
 pub mod umu;
 pub mod umu_id;
 pub mod update;
