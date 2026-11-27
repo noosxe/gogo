@@ -274,6 +274,20 @@ pub fn ask_spec(gogid: &str, sdk: bool, recommended: bool) -> PromptSpec {
     }
 }
 
+/// [`ask_spec`] for a game whose files aren't here yet, so whether it ships the
+/// Galaxy SDK isn't known. A frontend that asks before a build uses it; setup
+/// asks [`ask_spec`] once it can tell, and the same items answer it.
+pub fn unknown_spec(gogid: &str) -> PromptSpec {
+    PromptSpec {
+        title: format!(
+            "Game {gogid}: if it ships the Galaxy SDK, run Comet (a GOG Galaxy service \
+             stand-in) beside it? Comet gives the game's Galaxy SDK your signed-in user, \
+             achievements and cross-progression saves; it needs your gogo login."
+        ),
+        ..ask_spec(gogid, true, false)
+    }
+}
+
 /// Ask `prompt` and store the answer in the game's override file. `None`:
 /// there was no answer (no terminal, or the prompt gave none).
 pub fn ask_and_store(

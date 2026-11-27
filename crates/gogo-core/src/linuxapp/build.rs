@@ -240,7 +240,7 @@ fn tree_bytes(p: &Path) -> u64 {
 }
 
 /// [`tree_bytes`] of what a build takes of the cache tree `tree`.
-fn kept_bytes(tree: &Path, content: Option<&DepotContent>) -> u64 {
+pub(super) fn kept_bytes(tree: &Path, content: Option<&DepotContent>) -> u64 {
     let Some(c) = content.filter(|c| c.filter.is_some()) else {
         return tree_bytes(tree);
     };
@@ -394,7 +394,7 @@ fn plan_proton(
 }
 
 /// L3 and L4 for Linux (what the plan shows before the confirmation).
-fn compat_for(gogid: &str, emit: &mut dyn FnMut(&ProgressEvent)) -> Effective {
+pub(super) fn compat_for(gogid: &str, emit: &mut dyn FnMut(&ProgressEvent)) -> Effective {
     let db = compat::db_entry_for(gogid, Os::Linux);
     for w in &db.warnings {
         emit(&ProgressEvent::Warn {
@@ -421,7 +421,7 @@ fn compat_for(gogid: &str, emit: &mut dyn FnMut(&ProgressEvent)) -> Effective {
 }
 
 /// The renderer for a scanned tree (design 18 §3), reported.
-fn select_renderer(
+pub(super) fn select_renderer(
     gogid: Option<&str>,
     scan: &Result<pe::PeScan, pe::ScanError>,
     choice: RendererChoice,
