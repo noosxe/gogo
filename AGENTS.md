@@ -57,7 +57,7 @@ tools, or binaries from the host system — no exceptions.**
   Real GPU, HiDPI, IME, clipboard and screen-reader checks are a host pass by @noosxe;
   agents put the steps in the PR. For a host-pass window on fictional data, the steps use
   `nix run .#gogo-gui-fixture` (Linux, always `--fixture`); agents don't run it outside
-  the headless compositor either.
+  the headless compositor either. Both GUI packages are untested on aarch64-linux.
 
 ## Canonical checks (run inside the shell)
 
