@@ -20,6 +20,9 @@
 //!   [`WidgetSlot`] with the skin's variants and per-part styles. The app builds the
 //!   widget's content (design 25 §4).
 //!
+//! - **Menus and selects** are one node each, and a [`PopupSlot`] with the items or
+//!   options the app's popup lists.
+//!
 //! # Fallback
 //!
 //! A route a skin doesn't cover, one that failed to load, or one whose binding fails, is
@@ -40,6 +43,7 @@ mod actions;
 mod elements;
 mod error;
 mod list;
+mod popups;
 mod state;
 mod style;
 mod tokens;
@@ -62,6 +66,7 @@ use crate::tokens::TokenSet;
 
 pub use actions::{ActionCall, ActionTable, ArgValue, CallArg, Input, PendingArg, PendingError};
 pub use error::{BindError, BindErrorKind};
+pub use popups::{MenuEntry, PopupContent, PopupSlot, SelectOption};
 pub use state::{UiState, UiStateError};
 pub use widgets::{PartStyle, WidgetSlot};
 
@@ -112,6 +117,8 @@ pub struct Bound {
     pub actions: ActionTable,
     /// The app widgets in the tree, by [`WidgetId`](gogo_ui_ir::WidgetId) index.
     pub widgets: Vec<WidgetSlot>,
+    /// What each `menu` and `select` in the tree opens.
+    pub popups: Vec<PopupSlot>,
     /// The routes of this page the default skin drew instead (design 26 §8).
     pub fallbacks: Vec<Fallback>,
 }
@@ -259,6 +266,7 @@ fn run<'a>(
         tree: bn.tree,
         actions: bn.actions,
         widgets: bn.widgets,
+        popups: bn.popups,
         fallbacks: bn.notes,
     })
 }
@@ -343,6 +351,7 @@ pub(crate) struct Binder<'a> {
     pub(crate) tree: Tree,
     pub(crate) actions: ActionTable,
     pub(crate) widgets: Vec<WidgetSlot>,
+    pub(crate) popups: Vec<PopupSlot>,
     notes: Vec<Fallback>,
     nodes: usize,
     steps: usize,
@@ -452,6 +461,7 @@ impl<'a> Binder<'a> {
             tree: Tree::new("root", root),
             actions: ActionTable::default(),
             widgets: Vec::new(),
+            popups: Vec::new(),
             notes: Vec::new(),
             nodes: 1,
             steps: 0,

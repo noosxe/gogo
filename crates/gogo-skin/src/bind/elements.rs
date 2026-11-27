@@ -11,6 +11,7 @@ use gogo_ui_ir::{
 
 use super::actions::{ActionCall, BoundTerm, PendingArg, TermVal, assign, capture};
 use super::list::Picked;
+use super::popups::{MenuEntry, PopupContent, PopupSlot, select_options};
 use super::style::{Computed, TextCtx, apply};
 use super::{BindErrorKind, Binder, Cx, R, Var, term};
 
@@ -1031,6 +1032,7 @@ impl<'a> Binder<'a> {
             _ => Vec::new(),
         };
         let shown = select_shown(&raw, &options);
+        let choices = select_options(&raw, &options[..options.len().min(MAX_ROWS)]);
         let id = self.add(parent, key, Self::node_of(&c), n.span)?;
         let t = self.text_child(id, &format!("{key}/value"), &shown, &c.text, n.span)?;
         if let Some(node) = self.tree.node_mut(t) {
@@ -1053,6 +1055,10 @@ impl<'a> Binder<'a> {
             node.action = action;
             node.focus_paint = focus;
         }
+        self.popups.push(PopupSlot {
+            node: id,
+            content: PopupContent::Select(choices),
+        });
         Ok(id)
     }
 
@@ -1173,19 +1179,47 @@ impl<'a> Binder<'a> {
             &c.text,
             n.span,
         )?;
-        // The items open in a popup, which the tree has no place for yet: their calls are
-        // made so a bad argument still fails the route, and then dropped.
+        // The items open in a popup, which the tree has no place for.
+        let mut entries = Vec::new();
         for item in n.children.iter().filter(|i| i.name == "item") {
-            let before = self.actions.len();
-            if self.call(item, "action", "args")?.is_some() {
-                let own = self.arg_text(item)?;
-                if self.name_of(item, Some(&own), cx)?.is_none() {
-                    return Err(self.fail(BindErrorKind::NoName("`item`"), Some(item.span)));
-                }
+            self.step(item.span)?;
+            if let Some(w) = item.prop("when")
+                && !self.truthy(&w.arg.val, w.arg.span)?
+            {
+                continue;
             }
-            self.actions.truncate(before);
+            entries.push(self.menu_entry(item, cx)?);
         }
+        self.popups.push(PopupSlot {
+            node: id,
+            content: PopupContent::Menu(entries),
+        });
         Ok(id)
+    }
+
+    fn menu_entry(&mut self, item: &'a AstNode, cx: &Cx) -> R<MenuEntry> {
+        let label = self.arg_text(item)?;
+        let action = self.call(item, "action", "args")?;
+        let name = self.name_of(item, Some(&label), cx)?;
+        if action.is_some() && name.is_none() {
+            return Err(self.fail(BindErrorKind::NoName("`item`"), Some(item.span)));
+        }
+        let icon = self.prop_text(item, "icon")?;
+        if let Some(icon) = &icon
+            && !crate::icons::is_icon(icon)
+        {
+            return Err(self.fail(
+                BindErrorKind::Missing(format!("there is no icon `{icon}`")),
+                Some(item.span),
+            ));
+        }
+        Ok(MenuEntry {
+            name: name.unwrap_or_else(|| label.clone()),
+            label,
+            icon,
+            key: self.prop_text(item, "key")?,
+            action,
+        })
     }
 
     fn card(&mut self, n: &'a AstNode, parent: NodeId, key: &str, cx: &Cx) -> R<NodeId> {

@@ -316,6 +316,12 @@ going back returns to it; one outside, such as a sidebar, keeps one position eve
   An action named by a component's parameter is checked at every `use`: the name that
   `use` gave the parameter, and the term `{param}` as the text it gave, so a key can't be
   smuggled to `settings.set` through a parameter.
+- **Popups.** A `menu` and a `select` are one control each on the page; the app draws what
+  they open. Binding keeps each item and option for it. An `item` takes `when`, `icon`, and
+  `key`, a hint shown beside it that is not a shortcut. An item whose `when` is false is left
+  out; one without an `action` is shown and does nothing. A select's options are a list or
+  words: an option with an `id` gives that as `value` and shows its `name`. The option the
+  select shows is marked current, whatever case it is shown in.
 - **Inputs.** `value` belongs to `select` and `on` to `toggle` (and `dot`, `led`). Only
   `toggle` and `select` may use `value` and `on` in `args`; any other element that does is a
   load error.
