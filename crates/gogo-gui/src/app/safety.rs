@@ -9,7 +9,7 @@ use gogo_gui_model::{
     ConflictFile, ErrorView, Invocation, Modal, Plan, PlanStep, PromptAnswer, PromptReply,
     PromptSpec, Side, StepKind,
 };
-use gogo_ui_interact::{Key, Modifiers, PointerButton};
+use gogo_ui_interact::{ImeInput, Key, Modifiers, PointerButton};
 use gogo_ui_shell::accesskit::{Action, ActionData, ActionRequest, Role, Toggled, TreeId};
 
 use super::tests::{SIZE, app, at, bounds};
@@ -1139,4 +1139,96 @@ fn nothing_can_be_typed_edited_or_copied_on_the_secret_screen() {
             "sesame"
         )))]
     );
+}
+
+fn compose(app: &mut App, text: &str, ms: u64) {
+    app.input(
+        Input::Ime(ImeInput::Preedit {
+            text: text.to_owned(),
+            cursor: Some((text.len(), text.len())),
+        }),
+        at(ms),
+    );
+    see(app, ms + 1);
+}
+
+/// What winit sends for a result: the composition cleared, then the text.
+fn commit(app: &mut App, text: &str, ms: u64) {
+    compose(app, "", ms);
+    app.input(Input::Ime(ImeInput::Commit(text.to_owned())), at(ms + 2));
+    see(app, ms + 3);
+}
+
+#[test]
+fn an_input_method_composes_in_the_field_and_only_its_result_counts() {
+    let mut app = app();
+    script(&mut app, "game.remove", destructive("Remove"));
+    start(&mut app, "game.remove", &[], 1000);
+    click(&mut app, "Remove", 1600);
+    see(&mut app, 2300);
+    assert_eq!(app.ime_area(), None, "no field has focus");
+    let field = "Type the title: Example Game";
+    click_field(&mut app, field, 2400);
+    let first = app.ime_area().expect("the input method is wanted");
+    assert!(first.height > 10.0 && first.x > 0.0, "{first:?}");
+
+    compose(&mut app, "Example Game", 2410);
+    assert!(disabled(&mut app, "Remove"), "not typed until committed");
+    assert_eq!(field_text(&app), "");
+    // The keys are the input method's: neither the dialog nor the field takes them.
+    tap(&mut app, Key::Escape, 2420);
+    tap(&mut app, Key::Backspace, 2430);
+    assert_eq!(screen(&app), "strong");
+    commit(&mut app, "Example Game", 2440);
+    assert_eq!(field_text(&app), "Example Game");
+    assert!(!disabled(&mut app, "Remove"));
+    let after = app.ime_area().expect("still");
+    assert!(after.x > first.x, "it follows the caret: {after:?}");
+    assert_eq!(runs(&mut app), 0, "a commit answers nothing");
+
+    // Tab is the input method's too; a press elsewhere gives the composition up.
+    compose(&mut app, "zz", 2450);
+    tap(&mut app, Key::Tab, 2460);
+    assert_eq!(focused(&mut app).as_deref(), Some(dialog::FIELD));
+    click(&mut app, "Cancel", 2900);
+    assert_eq!(screen(&app), "none");
+    assert_eq!(app.ime_area(), None);
+}
+
+#[test]
+fn assistive_technology_selects_in_a_field_and_replaces() {
+    let (mut app, _) = app_with_text_prompt();
+    see(&mut app, 1000);
+    let value = ActionData::Value("x".into());
+    assist(
+        &mut app,
+        Role::TextInput,
+        "Name",
+        Action::ReplaceSelectedText,
+        Some(value),
+        1100,
+    );
+    assert_eq!(field_text(&app), "beforex", "at the caret, the end");
+}
+
+#[test]
+fn the_secret_screen_never_asks_for_an_input_method() {
+    let mut app = app();
+    let _answered = job_asks(
+        &mut app,
+        PromptSpec::Secret {
+            label: "The key".to_owned(),
+        },
+    );
+    app.wake();
+    see(&mut app, 1000);
+    for (i, ms) in [1100, 1200, 1300, 1400].into_iter().enumerate() {
+        assert_eq!(app.ime_area(), None, "after {i} tabs");
+        tap(&mut app, Key::Tab, ms);
+    }
+    compose(&mut app, "typed", 1500);
+    commit(&mut app, "typed", 1510);
+    assert!(app.entry.buffer.is_none());
+    assert_eq!(app.entry.code, None);
+    assert!(!app.dump().contains("typed"));
 }

@@ -55,6 +55,9 @@ pub struct A11y {
     pub name: Option<String>,
     /// The current value as text (a select's choice, a progress percentage).
     pub value: Option<String>,
+    /// A text field's selection, as bytes of [`A11y::value`]: the end that stays, then
+    /// the caret.
+    pub text_selection: Option<(usize, usize)>,
     /// Reachable with the keyboard, in document order.
     pub focusable: bool,
     /// An on/off state. `None`: the node has none.

@@ -3,10 +3,10 @@
 
 use std::time::Duration;
 
-use gogo_ui_ir::{DrawnBy, Gesture, Motion, Role};
+use gogo_ui_ir::{DrawnBy, Gesture, Motion, Node, Role};
 
 use crate::frame::{Frame, Target};
-use crate::input::{Key, Modifiers};
+use crate::input::{ImeInput, Key, Modifiers};
 use crate::intent::{Intent, Response, TextEdit};
 use crate::interaction::{Interaction, Primary, find};
 
@@ -78,6 +78,65 @@ impl Interaction {
     /// The text field that has focus: where typing goes.
     pub fn text_focus(&self, frame: &Frame<'_>) -> Option<Target> {
         self.field(frame)
+    }
+
+    /// What an input method sent. Only a focused text field takes it, and none of it
+    /// is a press.
+    pub(crate) fn ime(&mut self, ime: ImeInput, frame: &Frame<'_>, out: &mut Response) {
+        let edit = match ime {
+            ImeInput::Preedit { text, cursor } => {
+                self.composing = !text.is_empty() && self.field(frame).is_some();
+                TextEdit::Preedit { text, cursor }
+            }
+            ImeInput::Commit(text) => {
+                self.composing = false;
+                let text: String = text.chars().filter(|c| !c.is_control()).collect();
+                TextEdit::Commit(text)
+            }
+            ImeInput::Disabled => {
+                self.composing = false;
+                TextEdit::Preedit {
+                    text: String::new(),
+                    cursor: None,
+                }
+            }
+        };
+        self.edit(edit, frame, out);
+    }
+
+    /// Focus is leaving, or the pointer went down: the field drops its composition.
+    pub(crate) fn end_composition(&mut self, out: &mut Response) {
+        if !std::mem::take(&mut self.composing) {
+            return;
+        }
+        // Focus has not moved yet.
+        if let Some(target) = self.focus().cloned() {
+            out.intents.push(Intent::Edit {
+                target,
+                edit: TextEdit::Preedit {
+                    text: String::new(),
+                    cursor: None,
+                },
+            });
+        }
+    }
+
+    /// An edit assistive technology asked of the field `node`.
+    pub(crate) fn assistive_edit(
+        &mut self,
+        node: &Node,
+        target: Target,
+        edit: TextEdit,
+        out: &mut Response,
+    ) {
+        if node.a11y.role != Role::TextInput || !matches!(node.drawn_by, DrawnBy::App(_)) {
+            return;
+        }
+        out.consumed = true;
+        // The edit replaces the composition: the keys are the app's again.
+        self.end_composition(out);
+        self.focus_by_assistive(target.clone(), out);
+        out.intents.push(Intent::Edit { target, edit });
     }
 
     /// A key down while a text field has focus. Returns whether it was an editing key.

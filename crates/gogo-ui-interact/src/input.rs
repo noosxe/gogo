@@ -126,6 +126,8 @@ pub enum Input {
     /// composed dead keys included. Sent after the press's [`Input::KeyDown`], and
     /// not while Ctrl or Meta is held. Only a focused text field takes it.
     Text(String),
+    /// The input method did something. Only a focused text field takes it.
+    Ime(ImeInput),
     /// The modifier keys held changed. A pointer press has no other way to tell
     /// whether Shift was down.
     Modifiers(Modifiers),
@@ -133,6 +135,34 @@ pub enum Input {
     FocusLost,
     /// Assistive technology asked for something.
     Accessibility(Request),
+}
+
+/// What an input method sends.
+#[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ImeInput {
+    /// What is being composed; empty when there is no longer a composition.
+    Preedit {
+        /// The text so far.
+        text: String,
+        /// The input method's selection in it, in bytes; `None` hides the caret.
+        cursor: Option<(usize, usize)>,
+    },
+    /// Text to put in.
+    Commit(String),
+    /// The input method is off.
+    Disabled,
+}
+
+/// Never what was composed.
+impl fmt::Debug for ImeInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ImeInput::Preedit { text, .. } => write!(f, "Preedit({} bytes)", text.len()),
+            ImeInput::Commit(text) => write!(f, "Commit({} bytes)", text.len()),
+            ImeInput::Disabled => f.write_str("Disabled"),
+        }
+    }
 }
 
 /// A request from assistive technology (`gogo-ui-a11y` maps AccessKit's to this).
@@ -160,6 +190,15 @@ pub enum RequestKind {
     Focus,
     /// Put this text in a text field.
     SetValue(String),
+    /// Select in a text field, in bytes of its value.
+    SetSelection {
+        /// The end that stays.
+        anchor: usize,
+        /// The caret.
+        focus: usize,
+    },
+    /// Put this text in place of a text field's selection.
+    ReplaceSelected(String),
 }
 
 /// Never what was typed: it may be a password, and ends up in logs and test output.
@@ -178,6 +217,7 @@ impl fmt::Debug for Input {
             }
             Input::KeyUp { key } => write!(f, "KeyUp({:?})", hidden(*key)),
             Input::Text(text) => write!(f, "Text({} bytes)", text.len()),
+            Input::Ime(ime) => write!(f, "Ime({ime:?})"),
             Input::Modifiers(mods) => write!(f, "Modifiers({mods:?})"),
             Input::FocusLost => f.write_str("FocusLost"),
             Input::Accessibility(request) => write!(f, "Accessibility({request:?})"),
@@ -198,6 +238,12 @@ impl fmt::Debug for RequestKind {
             RequestKind::Activate => f.write_str("Activate"),
             RequestKind::Focus => f.write_str("Focus"),
             RequestKind::SetValue(value) => write!(f, "SetValue({} bytes)", value.len()),
+            RequestKind::SetSelection { anchor, focus } => {
+                write!(f, "SetSelection({anchor}, {focus})")
+            }
+            RequestKind::ReplaceSelected(text) => {
+                write!(f, "ReplaceSelected({} bytes)", text.len())
+            }
         }
     }
 }

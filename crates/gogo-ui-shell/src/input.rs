@@ -1,6 +1,7 @@
 //! winit's events as `gogo-ui-interact`'s [`Input`] (design 25 §4). Nothing is decided
 //! here: what a press means is the interaction layer's business.
 
+use crate::ime;
 use gogo_ui_interact::{Input, Key, Modifiers, PointerButton};
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, MouseButton, WindowEvent};
@@ -30,6 +31,7 @@ impl Translator {
                 Some(Input::PointerLeft)
             }
             WindowEvent::MouseInput { state, button, .. } => self.button(*state, *button),
+            WindowEvent::Ime(event) => ime::input(event),
             WindowEvent::KeyboardInput {
                 event,
                 is_synthetic,

@@ -23,7 +23,7 @@ use gogo_ui_ir::{
 };
 use gogo_ui_layout::{Laid, Placed, Scroll, Viewport, layout};
 use gogo_ui_scene::{DisplayList, SceneState, build};
-use gogo_ui_text::{FontSet, TextLayout};
+use gogo_ui_text::{FontSet, TextLayout, TextRect};
 
 use crate::panel::PanelError;
 
@@ -135,6 +135,9 @@ pub(crate) struct FieldView {
     pub(crate) shown: String,
     /// The selected bytes of `shown`.
     pub(crate) selection: Range<usize>,
+    /// The selection as assistive technology is told it, in bytes of `text`: the end
+    /// that stays, then the caret.
+    pub(crate) ends: (usize, usize),
     /// Where the caret is, while the field has focus.
     pub(crate) caret: Option<usize>,
     /// The IME's composition.
@@ -528,6 +531,7 @@ impl Builder {
         node.focus_paint = Some(paint);
         node.a11y = A11y::control(Role::TextInput, name);
         node.a11y.value = Some(field.text.clone());
+        node.a11y.text_selection = Some(field.ends);
         self.control(&mut node, FIELD);
         let id = self.add(parent, FIELD, node)?;
         let empty = field.shown.is_empty();
@@ -1103,6 +1107,27 @@ impl Dialog {
     /// How far the field's text is moved left, to carry on from in the next frame.
     pub(crate) fn field_scroll(&self) -> Option<f32> {
         self.field_text().map(|(.., scroll)| scroll)
+    }
+
+    /// Where the field's caret is in the window, for an input method.
+    pub(crate) fn field_caret(&self) -> Option<TextRect> {
+        let (placed, layout, scroll) = self.field_text()?;
+        let marks = self
+            .tree
+            .get(self.tree.by_key(FIELD_TEXT)?)?
+            .marks
+            .as_deref()?;
+        let at = layout.caret_rect(marks.preedit.as_ref().map_or_else(
+            || marks.caret.unwrap_or(marks.selection.end),
+            |preedit| preedit.start,
+        ));
+        let (x, y) = (placed.content.x0 as f32 - scroll, placed.content.y0 as f32);
+        Some(TextRect {
+            x0: x + at.x0,
+            y0: y + at.y0,
+            x1: x + at.x1,
+            y1: y + at.y1,
+        })
     }
 
     /// A point from the corner of the field's box as one in its text.

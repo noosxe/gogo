@@ -10,7 +10,8 @@ use gogo_gui_model::{DWELL, HOLD, InputEvent, Invocation, Modal, Model, Outcome,
 use gogo_ui_a11y::accesskit::{Action, ActionData, ActionRequest, NodeId, Role, TreeId};
 use gogo_ui_a11y::{A11yTree, HOLD_ARMED_HINT, HOLD_HINT, HOLDING_HINT};
 use gogo_ui_interact::{
-    Config, Frame, HOLD_ARM, Input, InputProvenance, Intent, Interaction, Layer, LayerId, LayerKind,
+    Config, Frame, HOLD_ARM, Input, InputProvenance, Intent, Interaction, Layer, LayerId,
+    LayerKind, RequestKind, TextEdit,
 };
 use gogo_ui_ir::{
     A11y, ActionRef, AppPart, Dim, Direction, DrawnBy, LayoutStyle, Node, PartId, Role as IrRole,
@@ -439,4 +440,78 @@ fn what_is_drawn_over_a_dialog_is_not_read_or_clicked() {
         "{read:?}"
     );
     assert!(r.request(&with, Action::Click, undo, None).is_empty());
+}
+
+fn typed_field(value: &str, selection: (usize, usize)) -> Screen {
+    let mut field = app(IrRole::TextInput, "Game title", 0).with_action(ActionRef::new(0));
+    field.a11y.value = Some(value.to_owned());
+    field.a11y.text_selection = Some(selection);
+    Screen::new("Name it", vec![("title", field)])
+}
+
+#[test]
+fn a_field_is_read_as_text_with_its_selection() {
+    for (value, selection, selected) in [
+        ("héllo wörld".to_owned(), (0, 6), "héllo"),
+        (String::new(), (0, 0), ""),
+        // Longer than one run can count, selected across the seam.
+        ("ab ".repeat(200), (254, 257), " ab"),
+        ("x".repeat(255), (255, 255), ""),
+    ] {
+        let screen = typed_field(&value, selection);
+        let layers = [screen.layer(DIALOG, LayerKind::Alert)];
+        let frame = Frame { layers: &layers };
+        let mut r = Reader::new();
+        let tree = r.read(&frame);
+        let id = r.find(&frame, "Game title");
+        let node = walk(tree.state().root())
+            .into_iter()
+            .find(|n| n.locate().0 == id)
+            .expect("the field");
+        assert!(node.is_text_input());
+        assert!(node.supports_text_ranges());
+        assert_eq!(node.value().as_deref(), Some(value.as_str()));
+        assert_eq!(node.document_range().text(), value);
+        let range = node.text_selection().expect("a selection");
+        assert_eq!(range.text(), selected, "{selection:?}");
+        let focus = node.text_selection_focus().expect("a caret");
+        assert_eq!(
+            focus.to_global_usv_index(),
+            value[..selection.1].chars().count()
+        );
+
+        // What it sends back is the same selection in bytes.
+        let data = Some(ActionData::SetTextSelection(
+            *node.data().text_selection().expect("raw"),
+        ));
+        let request = ActionRequest {
+            action: Action::SetTextSelection,
+            target_tree: TreeId::ROOT,
+            target_node: id,
+            data,
+        };
+        let mapped = r.a11y.map_request(&request).expect("a request");
+        assert_eq!(
+            mapped.kind,
+            RequestKind::SetSelection {
+                anchor: selection.0,
+                focus: selection.1
+            }
+        );
+    }
+}
+
+#[test]
+fn a_screen_reader_replaces_the_selected_text() {
+    let screen = typed_field("abc", (0, 1));
+    let layers = [screen.layer(DIALOG, LayerKind::Alert)];
+    let frame = Frame { layers: &layers };
+    let mut r = Reader::new();
+    let field = r.find(&frame, "Game title");
+    let data = Some(ActionData::Value("x".into()));
+    let out = r.request(&frame, Action::ReplaceSelectedText, field, data);
+    let [Intent::Edit { edit, .. }] = &out[..] else {
+        panic!("{out:?}");
+    };
+    assert_eq!(*edit, TextEdit::Replace("x".into()));
 }

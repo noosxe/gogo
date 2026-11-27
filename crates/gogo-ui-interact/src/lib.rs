@@ -41,7 +41,10 @@
 //!   select, delete, select all, undo, redo, and click, double click, triple click and
 //!   drag. Copy and cut are presses ([`Intent::Copy`]); paste is [`Intent::Paste`].
 //!   Up and Down are left alone.
-//! - **Not here yet:** opening a select or menu, IME composition and scrolling. A select
+//! - **Input methods.** Composition and its result go to the focused field only. While
+//!   composing, keys do nothing here. A pointer press, a focus move or an edit by
+//!   assistive technology drops the composition.
+//! - **Not here yet:** opening a select or menu, and scrolling. A select
 //!   takes focus but does not activate: the tree does not carry its options.
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
@@ -57,6 +60,6 @@ mod keys;
 pub use focus::FocusOrder;
 pub use frame::{Frame, Identity, Layer, LayerId, LayerKind, Target, activatable};
 pub use gogo_ui_ir::{Gesture, Motion};
-pub use input::{Input, Key, Modifiers, PointerButton, Request, RequestKind};
+pub use input::{ImeInput, Input, Key, Modifiers, PointerButton, Request, RequestKind};
 pub use intent::{ControlInput, InputEvent, InputProvenance, Intent, Response, TextEdit};
 pub use interaction::{ARM_EXPIRES, Config, HOLD_ARM, Interaction, Primary};

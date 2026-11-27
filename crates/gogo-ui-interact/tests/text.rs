@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use common::*;
 use gogo_ui_interact::{
-    Config, Frame, Gesture, Input, Intent, Interaction, Key, LayerKind, Modifiers, Motion, Primary,
-    TextEdit,
+    Config, Frame, Gesture, ImeInput, Input, Intent, Interaction, Key, LayerKind, Modifiers,
+    Motion, Primary, RequestKind, TextEdit,
 };
 use gogo_ui_ir::{A11y, Role};
 
@@ -293,7 +293,7 @@ fn what_is_typed_is_never_printed() {
             repeat: false
         },
         TextEdit::Insert("hush".into()),
-        gogo_ui_interact::RequestKind::SetValue("hush".into()),
+        RequestKind::SetValue("hush".into()),
     );
     assert!(
         !printed.contains("hush") && !printed.contains("'h'"),
@@ -322,4 +322,138 @@ fn a_value_assistive_technology_sets_is_not_printed() {
         printed.contains("bytes: 4") && !printed.contains("hush"),
         "{printed}"
     );
+}
+
+fn preedit(text: &str) -> Input {
+    Input::Ime(ImeInput::Preedit {
+        text: text.to_owned(),
+        cursor: Some((text.len(), text.len())),
+    })
+}
+
+fn send(d: &mut Driver, frame: &Frame<'_>, input: Input) -> Vec<Intent> {
+    d.ix.handle(input, Duration::ZERO, frame).intents
+}
+
+#[test]
+fn a_composition_goes_to_the_field_and_takes_the_keys() {
+    let screen = dialog();
+    let layers = [screen
+        .layer(DIALOG, LayerKind::Alert)
+        .initial_focus("cancel")];
+    let frame = Frame { layers: &layers };
+    let mut d = Driver::new();
+    d.ix.sync(&frame);
+    assert!(send(&mut d, &frame, preedit("a")).is_empty(), "no field");
+    assert!(send(&mut d, &frame, Input::Ime(ImeInput::Commit("a".into()))).is_empty());
+    // With no field there is no composition to hold the keys back.
+    assert_eq!(names(&d.down(&frame, Key::Escape, NONE)), ["dismiss"]);
+    d.up(&frame, Key::Escape);
+
+    focused(&mut d, &frame);
+    let before = d.ix.latest();
+    assert_eq!(edits(&send(&mut d, &frame, preedit("ni"))).len(), 1);
+    for key in [
+        Key::Enter,
+        Key::Escape,
+        Key::Tab,
+        Key::Backspace,
+        Key::Space,
+    ] {
+        assert!(press(&mut d, &frame, key, NONE).is_empty(), "{key:?}");
+    }
+    assert!(press(&mut d, &frame, Key::Char('v'), CTRL).is_empty());
+    assert_eq!(d.focused(), "field");
+    send(&mut d, &frame, preedit(""));
+    let commit = Input::Ime(ImeInput::Commit("n\n".into()));
+    assert_eq!(
+        edits(&send(&mut d, &frame, commit)),
+        [TextEdit::Commit("n".into())]
+    );
+    assert_eq!(d.ix.latest().get(), before.get(), "none of it is a press");
+    assert_eq!(
+        names(&press(&mut d, &frame, Key::Escape, NONE)),
+        ["dismiss"]
+    );
+}
+
+#[test]
+fn a_press_elsewhere_drops_the_composition() {
+    let screen = dialog();
+    let layers = [screen
+        .layer(DIALOG, LayerKind::Alert)
+        .initial_focus("cancel")];
+    let frame = Frame { layers: &layers };
+    let mut d = Driver::new();
+    focused(&mut d, &frame);
+    send(&mut d, &frame, preedit("ni"));
+    let got = d.press_at(&frame, screen.center("cancel"));
+    let ended = TextEdit::Preedit {
+        text: String::new(),
+        cursor: None,
+    };
+    assert_eq!(edits(&got), [ended]);
+    assert_eq!(d.focused(), "cancel");
+}
+
+#[test]
+fn assistive_technology_selects_and_replaces_in_a_field() {
+    let screen = dialog();
+    let layers = [screen
+        .layer(DIALOG, LayerKind::Alert)
+        .initial_focus("cancel")];
+    let frame = Frame { layers: &layers };
+    let mut d = Driver::new();
+    d.ix.sync(&frame);
+    let select = RequestKind::SetSelection {
+        anchor: 0,
+        focus: 2,
+    };
+    assert!(
+        d.assist(&frame, DIALOG, "cancel", select.clone())
+            .is_empty()
+    );
+    let got = d.assist(&frame, DIALOG, "field", select);
+    assert_eq!(
+        edits(&got),
+        [TextEdit::Select {
+            anchor: 0,
+            focus: 2
+        }]
+    );
+    assert_eq!(d.focused(), "field");
+    let replace = RequestKind::ReplaceSelected("new".into());
+    let got = d.assist(&frame, DIALOG, "field", replace);
+    assert_eq!(edits(&got), [TextEdit::Replace("new".into())]);
+}
+
+#[test]
+fn an_assistive_edit_ends_the_composition() {
+    let screen = dialog();
+    let layers = [screen
+        .layer(DIALOG, LayerKind::Alert)
+        .initial_focus("cancel")];
+    let frame = Frame { layers: &layers };
+    for kind in [
+        RequestKind::SetSelection {
+            anchor: 0,
+            focus: 0,
+        },
+        RequestKind::ReplaceSelected("x".into()),
+        RequestKind::SetValue("x".into()),
+    ] {
+        let mut d = Driver::new();
+        focused(&mut d, &frame);
+        send(&mut d, &frame, preedit("ni"));
+        let got = d.assist(&frame, DIALOG, "field", kind.clone());
+        let ended = TextEdit::Preedit {
+            text: String::new(),
+            cursor: None,
+        };
+        assert_eq!(edits(&got[..1]), [ended], "first: {kind:?}");
+        assert_eq!(got.len(), 2, "{kind:?}");
+        // The keys are the field's again.
+        let typed = press(&mut d, &frame, Key::Backspace, NONE);
+        assert_eq!(edits(&typed), [deletes(false, false)], "{kind:?}");
+    }
 }
