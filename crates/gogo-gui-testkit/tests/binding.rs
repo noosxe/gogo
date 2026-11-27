@@ -8,7 +8,7 @@ use gogo_skin::expr::Scope;
 use gogo_skin::ir::{DrawnBy, Fill, Kind, NodeId, Tree};
 use gogo_skin::{
     ArgValue, BindErrorKind, Binding, Bound, Code, DefaultSkin, FallbackWhy, Input, Mode,
-    PendingError, SkinPackage, UiState, Value,
+    PendingError, PopupContent, SkinPackage, UiState, Value,
 };
 
 type Files = Vec<(String, Vec<u8>)>;
@@ -1515,4 +1515,133 @@ fn a_state_beats_the_base_of_every_style_on_the_element() {
             0x22, 0x22, 0x22, 255
         )))
     );
+}
+
+// ---- popups ----
+
+/// The popup behind the node named `name`.
+fn popup_of<'a>(b: &'a Bound, name: &str) -> &'a PopupContent {
+    let slot = b
+        .popups
+        .iter()
+        .find(|p| {
+            b.tree
+                .get(p.node)
+                .is_some_and(|n| n.a11y.name.as_deref() == Some(name))
+        })
+        .unwrap_or_else(|| panic!("no popup behind `{name}`"));
+    &slot.content
+}
+
+#[test]
+fn the_default_menu_keeps_its_item_and_its_call() {
+    let pkg = default_skin();
+    let b = bind(&pkg, "game", &FixtureScope::new());
+    let PopupContent::Menu(items) = popup_of(&b, "More") else {
+        panic!("not a menu")
+    };
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].label, "Open game folder");
+    assert_eq!(items[0].name, "Open game folder");
+    let call = b.actions.get(items[0].action.unwrap()).unwrap();
+    assert_eq!(call.spec.name, "game.open_folder");
+    assert!(matches!(&call.args[1].value, ArgValue::Value(v) if v.display() == "game"));
+}
+
+#[test]
+fn a_menu_item_obeys_when_and_keeps_its_icon_and_hint() {
+    let mut f = base();
+    game_insert(
+        &mut f,
+        "menu \"Extra\" { \
+         item \"Hidden\" action=\"nav.back\" when=#false; \
+         item \"Back\" action=\"nav.back\" icon=\"dot\" key=\"B\" label=\"Go back\"; \
+         item \"Nothing\" }",
+    );
+    let pkg = skin("default", f);
+    let b = bind(&pkg, "game", &FixtureScope::new());
+    let PopupContent::Menu(items) = popup_of(&b, "Extra") else {
+        panic!("not a menu")
+    };
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    assert_eq!(labels, ["Back", "Nothing"]);
+    assert_eq!(items[0].name, "Go back");
+    assert_eq!(items[0].icon.as_deref(), Some("dot"));
+    assert_eq!(items[0].key.as_deref(), Some("B"));
+    assert!(items[0].action.is_some());
+    assert!(items[1].action.is_none());
+}
+
+#[test]
+fn the_default_selects_keep_their_options() {
+    let pkg = default_skin();
+    let b = bind(&pkg, "game", &FixtureScope::new());
+    for (name, action) in [
+        ("Renderer", "runner.set_renderer"),
+        ("Runtime", "runner.set_runtime"),
+        ("Display mode", "runner.set_display"),
+    ] {
+        let PopupContent::Select(options) = popup_of(&b, name) else {
+            panic!("{name} is not a select")
+        };
+        assert!(!options.is_empty(), "{name}");
+        // The one the select shows is marked, whatever case it shows it in.
+        assert_eq!(
+            options.iter().filter(|o| o.current).count(),
+            1,
+            "{name}: {options:?}"
+        );
+        // Choosing an option gives the select's own call its `{value}`.
+        let slot = b.popups.iter().find(|p| {
+            b.tree
+                .get(p.node)
+                .is_some_and(|n| n.a11y.name.as_deref() == Some(name))
+        });
+        let node = b.tree.get(slot.unwrap().node).unwrap();
+        let call = b.actions.get(node.action.unwrap()).unwrap();
+        assert_eq!(call.spec.name, action);
+        let ArgValue::OnInput(pending) = &call.args.last().unwrap().value else {
+            panic!("{name} does not wait for the input")
+        };
+        for option in options {
+            let input = Input {
+                on: None,
+                value: Some(option.value.clone()),
+            };
+            assert_eq!(
+                pending.eval(&FixtureScope::new(), &input).unwrap(),
+                option.value,
+                "{name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_menu_item_reads_when_as_any_element_does() {
+    // The same conditions on an item and on a text beside it: both stay or both go.
+    let cases = [
+        ("{g.title == 'Example Quest'}", true),
+        ("{g.runs_via == linux}", false),
+        ("{game.builds($id)}", true),
+        ("{g.update}", true),
+        ("{false}", false),
+    ];
+    for (condition, shown) in cases {
+        let mut f = base();
+        game_insert(
+            &mut f,
+            &format!(
+                "text \"beside\" when=\"{condition}\" id=\"beside\"\n    \
+                 menu \"Extra\" {{ item \"Back\" action=\"nav.back\" when=\"{condition}\" }}"
+            ),
+        );
+        let pkg = skin("default", f);
+        let b = bind(&pkg, "game", &FixtureScope::new());
+        assert_eq!(b.tree.by_name("beside").is_some(), shown, "{condition}");
+        let PopupContent::Menu(items) = popup_of(&b, "Extra") else {
+            panic!("not a menu")
+        };
+        assert_eq!(!items.is_empty(), shown, "{condition}");
+    }
 }

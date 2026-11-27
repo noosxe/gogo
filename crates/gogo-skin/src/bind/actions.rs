@@ -51,10 +51,6 @@ impl ActionTable {
         })
     }
 
-    pub(crate) fn truncate(&mut self, len: usize) {
-        self.calls.truncate(len);
-    }
-
     pub(crate) fn push(&mut self, call: ActionCall) -> Option<ActionRef> {
         let i = u32::try_from(self.calls.len()).ok()?;
         self.calls.push(call);
