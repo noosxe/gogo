@@ -2,7 +2,10 @@
 //! routes of the Default skin on fixture data. Both go through layout and the scene
 //! builder, so lowering is exercised too. Fonts are the bundled set only.
 
-use gogo_skin::{Binding, Mode, SkinPackage, UiState};
+use std::time::{Duration, Instant};
+
+use gogo_gui_model::fixture::Fixture;
+use gogo_skin::{Binding, Lists, Mode, SkinPackage, UiState, Value};
 use gogo_ui_ir::{
     Bloom, Color, Dim, Effect, Fill, Fit, GlowLayer, GradientStop, ImageSource, Kind, LayoutStyle,
     Node, NodeId, Paint, Position, Shape, Sides, Stroke, TextStyle, Tree,
@@ -522,4 +525,115 @@ pub fn effects_sheet() -> Result<Scene, SceneError> {
     )?;
     let state = SceneState::new().with_focus(ringed);
     Ok(scene("effects", build(&s.tree, &laid, &state)))
+}
+
+/// The Default shell on its `library` route, bound the way the app binds a long list.
+#[derive(Debug)]
+pub struct LibraryFrame {
+    /// The bound tree.
+    pub tree: Tree,
+    /// Its layout.
+    pub laid: gogo_ui_layout::Laid,
+    /// Time spent binding, in every pass.
+    pub bind: std::time::Duration,
+    /// Time spent in layout, in every pass.
+    pub layout: std::time::Duration,
+}
+
+/// The library with `games` games in the `view` (`grid` or `list`), its route scrolled by
+/// `offset` px, in a window of `size` logical px. As the app does, it binds the rows a
+/// first guess says are seen, lays them out, and binds again if the guess was wrong.
+///
+/// # Errors
+/// [`SceneError`].
+pub fn library(
+    games: usize,
+    view: &str,
+    offset: f32,
+    size: (f32, f32),
+) -> Result<LibraryFrame, SceneError> {
+    let d = gogo_skins::default();
+    let package = SkinPackage::from_files(d.name, d.to_files())
+        .map_err(|r| SceneError::Skin(r.to_string()))?;
+    let mut scope = FixtureScope::new();
+    scope.set_route("library", None);
+    let list = Fixture::new().with_library(games);
+    for name in ["library", "library.stats"] {
+        if let Some(value) = list.var(name) {
+            scope.set_var(name, value.clone());
+        }
+    }
+    let mut ui = UiState::defaults(&package.manifest);
+    ui.set(&package.manifest, "view", Value::str(view))
+        .map_err(|e| SceneError::Skin(e.to_string()))?;
+    let binding = Binding {
+        scope: &scope,
+        ui: &ui,
+        mode: Mode::Dark,
+        default: None,
+    };
+    let mut fonts = FontSet::bundled();
+    let mut lists = Lists {
+        height: size.1,
+        ..Lists::default()
+    };
+    let (mut binding_time, mut layout_time) = (Duration::ZERO, Duration::ZERO);
+    let mut passes = 0;
+    loop {
+        let start = Instant::now();
+        let bound = package
+            .bind_windowed("shell", &binding, &lists)
+            .map_err(|e| SceneError::Skin(e.to_string()))?;
+        binding_time += start.elapsed();
+        let mut scroll = Scroll::none();
+        for id in bound.tree.iter() {
+            if bound.tree.get(id).and_then(|n| n.name.as_deref()) == Some("main") {
+                scroll.set(id, 0.0, offset);
+            }
+        }
+        let start = Instant::now();
+        let laid = layout(
+            &bound.tree,
+            &mut fonts,
+            Viewport::new(size.0, size.1),
+            &scroll,
+        )?;
+        layout_time += start.elapsed();
+        let mut stale = false;
+        for id in bound.tree.iter() {
+            let (Some(list), Some(key), Some(need)) = (
+                bound.tree.get(id).and_then(|n| n.list.as_ref()),
+                bound.tree.key(id),
+                laid.rows_needed(&bound.tree, id),
+            ) else {
+                continue;
+            };
+            stale |=
+                !need.is_empty() && (need.start < list.window.start || need.end > list.window.end);
+            lists.shown.insert(key.to_owned(), need);
+        }
+        passes += 1;
+        if !stale || passes == 3 {
+            return Ok(LibraryFrame {
+                tree: bound.tree,
+                laid,
+                bind: binding_time,
+                layout: layout_time,
+            });
+        }
+    }
+}
+
+/// [`library`] drawn at [`ROUTE_SIZE`].
+///
+/// # Errors
+/// [`SceneError`].
+pub fn library_scene(
+    name: &'static str,
+    games: usize,
+    view: &str,
+    offset: f32,
+) -> Result<Scene, SceneError> {
+    let f = library(games, view, offset, ROUTE_SIZE)?;
+    Ok(scene(name, build(&f.tree, &f.laid, &SceneState::new())))
 }

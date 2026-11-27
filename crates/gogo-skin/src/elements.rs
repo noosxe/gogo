@@ -79,6 +79,10 @@ static ELEMENTS: &[Spec] = &[
     el("grid", Args::None, &[], Kids::Any),
     el("layer", Args::None, &[], Kids::Any),
     el("scroll", Args::None, &[], Kids::Any),
+    req(
+        el("list", Args::One, &["in", "item-h"], Kids::Any),
+        &["in", "item-h"],
+    ),
     el("outlet", Args::None, &[], Kids::None),
     el("spacer", Args::None, &[], Kids::None),
     el("divider", Args::None, &[], Kids::None),
@@ -359,6 +363,7 @@ impl Walk<'_, '_> {
                 );
             }
             "col" => self.col_shape(n),
+            "list" => self.list(n),
             _ => {}
         }
         if n.name == "icon"
@@ -917,6 +922,29 @@ impl Walk<'_, '_> {
         }
         for c in &n.children {
             self.node(c, me);
+        }
+    }
+
+    /// A `list` names its item like `each`, and loops over a list an expression computes.
+    fn list(&mut self, n: &Node) {
+        if !n.plain_arg(0).is_some_and(is_ident) {
+            self.col.error(
+                Code::ElementArguments,
+                n.span,
+                "`list` takes one variable name: `list \"g\" in=\"{list}\" item-h=40 { … }`",
+            );
+        }
+        if let Some(p) = n.prop("in")
+            && !matches!(p.arg.val, Val::Invalid)
+            && !p.arg.val.is_expr()
+        {
+            self.col
+                .error(
+                    Code::EachSource,
+                    p.arg.span,
+                    "`list` loops over one `{expression}`, nothing else (S20)",
+                )
+                .help("write `in=\"{list}\"`");
         }
     }
 

@@ -56,7 +56,7 @@ flowchart LR
 | `RichText` | a game's description as paragraphs, with links and HTML removed | shown whole, as text; never parsed by a skin |
 | `ActionRef` | an action and its arguments, chosen by the app (a doctor check's fix) | opaque in skins: only tested for null in contract 1.0 |
 | `Masked<T>` | a value, or `•••` with `secret: true`; the clear value is never in the binding scope | |
-| `List<T>` | ordered, virtualised | `where`, `sort`, `take`, `len`, `first` in expressions |
+| `List<T>` | ordered; a `list` or `data-table` virtualises it (design 27 §5.4) | `where`, `sort`, `take`, `len`, `first` in expressions |
 | `Option<T>` | may be null | `?.` and `else` in expressions |
 
 Sizes, times and counts arrive as numbers, never pre-formatted strings. A skin can then
@@ -515,6 +515,8 @@ Where each is enforced is in design 25 §4.
   order is the depth-first order of the bound tree** (document order), which for rows and
   columns is reading order. An app widget placed inline stays where the skin put it;
   dialogs and overlays come after the page, and modal ones trap focus until closed. The
+  items of a virtualised list count in the order whether drawn or not: Tab goes through
+  them one after another. The
   focus indicator is ≥ 2 px and ≥ 3:1, or the app's ring is drawn (the app's ring is not
   built yet, #600). Tests compare Tab order with the tree order and check every actionable
   node is in it.

@@ -256,7 +256,10 @@ pub fn layout(
         } else if let Some((sx, sy)) = given {
             shift[id.index()] = (f64::from(sx), f64::from(sy));
         }
-        let clips = spec.is_some() || given.is_some();
+        // An item of a virtualised list has a fixed height: what overflows it is cut, so
+        // it never lies over the next one.
+        let cut = tree.get(id).is_some_and(|n| n.item.is_some()) && l.scroll_height() > 0.5;
+        let clips = spec.is_some() || given.is_some() || cut;
         child_clip[id.index()] = if clips {
             clip.intersect(&inherited)
         } else {

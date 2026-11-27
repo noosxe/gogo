@@ -1,7 +1,7 @@
 //! The offsets of the scroll containers, and what a scrolled frame lets input see
 //! (design 25 §4).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use gogo_ui_ir::{DrawnBy, NodeId};
 use gogo_ui_layout::ScrollBox;
@@ -123,6 +123,82 @@ pub(crate) fn seen(layer: &Layer<'_>, node: NodeId) -> bool {
     } else {
         v.contains((r.x0 + r.x1) / 2.0, (r.y0 + r.y1) / 2.0)
     }
+}
+
+/// The virtualised list `node` is in, and the index of the item it is part of.
+fn item_of(layer: &Layer<'_>, node: NodeId) -> Option<(NodeId, u32)> {
+    let mut found = None;
+    for n in chain(layer, node) {
+        let Some(at) = layer.tree.get(n) else {
+            break;
+        };
+        match (found, at.list.is_some()) {
+            (Some(index), true) => return Some((n, index)),
+            _ => found = found.or(at.item),
+        }
+    }
+    None
+}
+
+/// The items of the list at `list` that are in the tree: its rows, or the cells in them.
+fn bound_items(layer: &Layer<'_>, list: NodeId) -> HashSet<u32> {
+    let kids = |n: &NodeId| layer.tree.children(*n).iter().copied();
+    layer
+        .tree
+        .children(list)
+        .iter()
+        .flat_map(|row| std::iter::once(*row).chain(kids(row)))
+        .filter_map(|n| layer.tree.get(n)?.item)
+        .collect()
+}
+
+/// Whether Tab from `from` to `to` would pass over items of a virtualised list that
+/// aren't bound yet. If so, the last item before them, to bring into view: the next frame
+/// binds further.
+pub(crate) fn passed_over(
+    layer: &Layer<'_>,
+    from: Option<NodeId>,
+    to: NodeId,
+    back: bool,
+) -> Option<NodeId> {
+    let from = from.and_then(|n| item_of(layer, n));
+    let to = item_of(layer, to);
+    for list in [from, to].into_iter().flatten().map(|(list, _)| list) {
+        let count = layer.tree.get(list)?.list.as_ref()?.count;
+        let index =
+            |end: Option<(NodeId, u32)>| end.filter(|e| e.0 == list).map(|e| i64::from(e.1));
+        let (from, to) = (index(from), index(to));
+        let last = i64::from(count);
+        // The items strictly between the two, in the way Tab goes. Coming back round
+        // within one list is leaving it.
+        let (mut at, end, step) = if back {
+            let start = from.unwrap_or(last);
+            (start, to.filter(|&t| t <= start).unwrap_or(-1), -1)
+        } else {
+            let start = from.unwrap_or(-1);
+            (start, to.filter(|&t| t >= start).unwrap_or(last), 1)
+        };
+        let bound = bound_items(layer, list);
+        let mut near = None;
+        at += step;
+        while at != end && (0..last).contains(&at) {
+            // `at` is within the count, which is a u32.
+            if !bound.contains(&(at as u32)) {
+                let before = near.or_else(|| u32::try_from(at - step).ok())?;
+                return item_node(layer, list, before);
+            }
+            near = Some(at as u32);
+            at += step;
+        }
+    }
+    None
+}
+
+fn item_node(layer: &Layer<'_>, list: NodeId, index: u32) -> Option<NodeId> {
+    let kids = |n: NodeId| layer.tree.children(n).iter().copied();
+    kids(list)
+        .flat_map(|row| std::iter::once(row).chain(kids(row)))
+        .find(|&n| layer.tree.get(n).is_some_and(|n| n.item == Some(index)))
 }
 
 /// The offsets that bring `node` into view, innermost container first. Reckoned from

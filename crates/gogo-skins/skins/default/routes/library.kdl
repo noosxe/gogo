@@ -31,8 +31,8 @@ route "library" {
             }
         }
         else {
-            grid columns=4 gap=@space.3 align="start" id="grid" {
-                each "g" in="{games}" { use "game-card" game="{g}" }
+            list "g" in="{games}" columns=4 item-h=326 gap=@space.3 label="Games" id="grid" {
+                use "game-card" game="{g}"
             }
         }
     }

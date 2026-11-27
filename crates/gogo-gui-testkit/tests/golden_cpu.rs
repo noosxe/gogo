@@ -41,6 +41,22 @@ fn the_default_shell_route_matches() {
 }
 
 #[test]
+fn the_default_library_matches() {
+    check(
+        scenes::library_scene("default-library", 200, "grid", 0.0)
+            .unwrap_or_else(|e| panic!("{e}")),
+    );
+}
+
+#[test]
+fn the_default_library_scrolled_matches() {
+    check(
+        scenes::library_scene("default-library-scrolled", 200, "grid", 5000.0)
+            .unwrap_or_else(|e| panic!("{e}")),
+    );
+}
+
+#[test]
 fn a_second_frame_of_one_renderer_is_the_same_as_the_first() {
     let scene = scenes::effects_sheet().unwrap_or_else(|e| panic!("{e}"));
     let mut renderer = CpuRenderer::new();

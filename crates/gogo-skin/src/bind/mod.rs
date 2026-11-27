@@ -39,6 +39,7 @@
 mod actions;
 mod elements;
 mod error;
+mod list;
 mod state;
 mod style;
 mod tokens;
@@ -101,6 +102,8 @@ pub struct DefaultSkin<'a> {
     pub ui: &'a UiState,
 }
 
+pub use list::{Lists, MAX_ITEMS, OVERSCAN};
+
 /// A route, bound.
 #[derive(Debug, Clone)]
 pub struct Bound {
@@ -154,7 +157,7 @@ impl SkinPackage {
     /// # Errors
     /// A [`BindError`] with the file and line of the skin text that failed.
     pub fn bind(&self, route: &str, b: &Binding<'_>) -> Result<Bound, BindError> {
-        run(self, route, b, &BTreeSet::new(), false)
+        run(self, route, b, &BTreeSet::new(), false, None)
     }
 
     /// Like [`bind`](Self::bind), with per-route fallback to the default skin (design 26
@@ -167,10 +170,33 @@ impl SkinPackage {
     /// A [`BindError`] when the default skin's own route fails too, or there is no
     /// default skin to fall back to.
     pub fn bind_with_fallback(&self, route: &str, b: &Binding<'_>) -> Result<Bound, BindError> {
+        self.fall_back(route, b, None)
+    }
+
+    /// As [`bind_with_fallback`](Self::bind_with_fallback), drawing of each virtualised
+    /// list only the rows `lists` asks for (design 27 §5.4).
+    ///
+    /// # Errors
+    /// As [`bind_with_fallback`](Self::bind_with_fallback).
+    pub fn bind_windowed(
+        &self,
+        route: &str,
+        b: &Binding<'_>,
+        lists: &Lists,
+    ) -> Result<Bound, BindError> {
+        self.fall_back(route, b, Some(lists))
+    }
+
+    fn fall_back(
+        &self,
+        route: &str,
+        b: &Binding<'_>,
+        lists: Option<&Lists>,
+    ) -> Result<Bound, BindError> {
         let mut overrides: BTreeSet<String> = BTreeSet::new();
         let mut notes: Vec<Fallback> = Vec::new();
         loop {
-            match run(self, route, b, &overrides, true) {
+            match run(self, route, b, &overrides, true, lists) {
                 Ok(mut bound) => {
                     notes.append(&mut bound.fallbacks);
                     bound.fallbacks = notes;
@@ -192,14 +218,16 @@ impl SkinPackage {
     }
 }
 
-fn run(
-    active: &SkinPackage,
+fn run<'a>(
+    active: &'a SkinPackage,
     route: &str,
-    b: &Binding<'_>,
-    overrides: &BTreeSet<String>,
+    b: &'a Binding<'a>,
+    overrides: &'a BTreeSet<String>,
     fallback: bool,
+    lists: Option<&'a Lists>,
 ) -> Result<Bound, BindError> {
     let mut bn = Binder::new(active, b, overrides, fallback, route)?;
+    bn.lists = lists;
     let Some(code) = bn.source_of(route)? else {
         return Err(bn.fail(
             BindErrorKind::Missing(format!("the skin has no `{route}` route")),
@@ -257,6 +285,9 @@ pub(crate) struct SavedRoute<'a> {
 pub(crate) struct Var {
     pub name: String,
     pub value: Value,
+    /// The variable is another name for this one of the app's data, and `value` is
+    /// unused.
+    pub alias: Option<String>,
     /// For a component parameter given an `args`: the terms, which a bare `{name}` in an
     /// action's `args` stands for (design 27 §5.7).
     pub terms: Option<Vec<BoundTerm>>,
@@ -272,8 +303,19 @@ impl Var {
         Var {
             name: name.into(),
             value,
+            alias: None,
             terms: None,
             spec: None,
+        }
+    }
+}
+
+impl Var {
+    /// Another name for `source`, which the app's data has.
+    pub(crate) fn alias(name: impl Into<String>, source: String) -> Self {
+        Var {
+            alias: Some(source),
+            ..Var::plain(name, Value::Null)
         }
     }
 }
@@ -305,6 +347,12 @@ pub(crate) struct Binder<'a> {
     nodes: usize,
     steps: usize,
     depth: usize,
+    /// Which rows of virtualised lists to bind; `None` binds lists whole.
+    lists: Option<&'a Lists>,
+    /// How many `scroll` elements are around what is being bound.
+    pub(crate) scrolls: usize,
+    /// How many items of a virtualised list are around what is being bound.
+    pub(crate) in_item: usize,
     /// Whether what is being bound is inside the `outlet`.
     pub(crate) in_outlet: bool,
     /// How many outlets have been bound.
@@ -337,7 +385,10 @@ pub(crate) fn absent_param(params: &[SourceParam], name: &str) -> Option<&'stati
 impl Scope for EnvScope<'_> {
     fn var(&self, name: &str) -> Option<&Value> {
         if let Some(v) = self.vars.iter().rev().find(|v| v.name == name) {
-            return Some(&v.value);
+            return match &v.alias {
+                Some(source) => self.data.var(source),
+                None => Some(&v.value),
+            };
         }
         if name == "ui" {
             return Some(self.ui);
@@ -405,6 +456,9 @@ impl<'a> Binder<'a> {
             nodes: 1,
             steps: 0,
             depth: 0,
+            lists: None,
+            scrolls: 0,
+            in_item: 0,
             in_outlet: false,
             outlets: 0,
             checked: BTreeSet::new(),

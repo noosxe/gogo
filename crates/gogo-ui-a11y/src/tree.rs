@@ -79,6 +79,8 @@ fn role_of(node: &gogo_ui_ir::Node) -> Option<Role> {
         IrRole::Status => Role::Status,
         IrRole::ProgressBar => Role::ProgressIndicator,
         IrRole::TextInput => Role::TextInput,
+        IrRole::List => Role::List,
+        IrRole::ListItem => Role::ListItem,
         // A generic node matters when it can be operated or was named.
         _ if node.a11y.focusable || activatable(node) => Role::Button,
         _ if matches!(node.kind, Kind::Text { .. }) => Role::Label,
@@ -331,6 +333,25 @@ impl Build<'_> {
                 out.add_action(Action::ScrollUp);
                 out.add_action(Action::ScrollDown);
                 out.add_action(Action::SetScrollOffset);
+            }
+        }
+        // A virtualised list says how long it is, though only a part of it is here. A
+        // table's rows are in a body of their own.
+        let list = node.list.as_ref().or_else(|| {
+            let kids = layer.tree.children(at).iter();
+            kids.filter_map(|&c| layer.tree.get(c)?.list.as_ref())
+                .next()
+        });
+        if let Some(list) = list.filter(|_| matches!(role, Role::List | Role::Table)) {
+            out.set_size_of_set(list.count as usize);
+            if role == Role::Table {
+                out.set_row_count(list.count as usize);
+            }
+        }
+        if let Some(item) = node.item {
+            out.set_position_in_set(item as usize);
+            if role == Role::Row {
+                out.set_row_index(item as usize);
             }
         }
         if scrolled {

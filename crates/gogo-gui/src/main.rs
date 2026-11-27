@@ -56,6 +56,10 @@ struct Cli {
     #[arg(long)]
     fixture: bool,
 
+    /// Give the fictional library this many games.
+    #[arg(long, value_name = "COUNT", value_parser = clap::value_parser!(u32).range(..=100_000))]
+    fixture_games: Option<u32>,
+
     /// Draw the skin in this folder and reload it when it changes.
     #[arg(long, value_name = "DIR", conflicts_with_all = ["render_png", "check_skin"])]
     dev: Option<PathBuf>,
@@ -158,8 +162,13 @@ fn renderer_choice() -> Result<RendererChoice, gogo_ui_shell::UnknownRenderer> {
 type Failure = Box<dyn std::error::Error>;
 
 #[cfg(feature = "fixture")]
+fn games(cli: &Cli) -> Option<usize> {
+    cli.fixture_games.map(|n| n as usize)
+}
+
+#[cfg(feature = "fixture")]
 fn render_png(out: &Path, cli: &Cli) -> Result<(), Failure> {
-    let mut data = data::Data::fixture(|| {})?;
+    let mut data = data::Data::fixture_with(|| {}, games(cli))?;
     let mut page = page::Page::new()?;
     if let Some(dir) = &cli.skin {
         page.load(dir).map_err(|lines| lines.join("\n"))?;
@@ -192,7 +201,7 @@ fn window(cli: &Cli, choice: RendererChoice) -> Result<(), Failure> {
     #[cfg(feature = "fixture")]
     if cli.fixture {
         let waker = shell.waker();
-        let data = data::Data::fixture(move || waker.wake())?;
+        let data = data::Data::fixture_with(move || waker.wake(), games(cli))?;
         shell.run(app::App::new(cli.dev.as_deref(), data)?, choice)?;
         return Ok(());
     }

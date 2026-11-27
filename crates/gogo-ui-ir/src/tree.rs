@@ -193,6 +193,27 @@ impl Default for ScrollSpec {
     }
 }
 
+/// A list of equal-height items of which only some are in the tree (design 27 §5.4).
+///
+/// The node holds rows `item_h` high, `gap` apart, with empty boxes in the place of the
+/// rows left out, so it is as long as the whole list. Each item that is there carries its
+/// index ([`Node::item`]).
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct VirtualList {
+    /// How many items the whole list has.
+    pub count: u32,
+    /// Items per row, at least 1.
+    pub columns: u32,
+    /// The height of a row, in logical px.
+    pub item_h: f32,
+    /// The space between rows.
+    pub gap: f32,
+    /// The rows bound around what is in view; the first, the last and those by the
+    /// focused item may be there besides.
+    pub window: std::ops::Range<u32>,
+}
+
 /// One resolved element. The tree owns the node's key, parent and children; see [`Tree`].
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -213,6 +234,11 @@ pub struct Node {
     pub a11y: A11y,
     /// The node is a scroll container. Only a [`Kind::Box`] may be one. `None`: it isn't.
     pub scroll: Option<ScrollSpec>,
+    /// The node holds a virtualised list. `None`: it doesn't.
+    pub list: Option<VirtualList>,
+    /// The node is this item (from 0) of the virtualised list above it. `None`: it
+    /// isn't one.
+    pub item: Option<u32>,
     /// What activating the node does. `None`: nothing.
     pub action: Option<ActionRef>,
     /// Who drew the node. Default [`DrawnBy::Skin`].
@@ -237,6 +263,8 @@ impl Node {
             focus_paint: None,
             a11y: A11y::default(),
             scroll: None,
+            list: None,
+            item: None,
             action: None,
             drawn_by: DrawnBy::Skin,
             progress: None,
@@ -576,6 +604,12 @@ fn check_node(n: &Node) -> Result<(), &'static str> {
             if let Fill::Linear { stops, .. } | Fill::Radial { stops } = f {
                 check_stops(stops)?;
             }
+        }
+    }
+    if let Some(l) = &n.list {
+        let sizes = l.item_h.is_finite() && l.item_h > 0.0 && l.gap.is_finite() && l.gap >= 0.0;
+        if l.columns < 1 || !sizes {
+            return Err("list columns, item height or gap");
         }
     }
     if n.layout.col_span < 1 {

@@ -416,8 +416,21 @@ mod fictional {
 
     impl Data {
         /// Fictional data, showing the fixture's game. `wake` is the model's.
+        #[cfg(test)]
         pub(crate) fn fixture(wake: impl Fn() + Send + Sync + 'static) -> Result<Data, DataError> {
-            let fake = Engine::Fixture(Box::new(FakeBackend::with_fixture()));
+            Data::fixture_with(wake, None)
+        }
+
+        /// As [`Data::fixture`], with a library of `games` games.
+        pub(crate) fn fixture_with(
+            wake: impl Fn() + Send + Sync + 'static,
+            games: Option<usize>,
+        ) -> Result<Data, DataError> {
+            let mut backend = FakeBackend::with_fixture();
+            if let Some(games) = games {
+                backend.fixture = backend.fixture.map(|f| f.with_library(games));
+            }
+            let fake = Engine::Fixture(Box::new(backend));
             let mut model = Model::new(fake, wake);
             let go = actions::action("nav.go")
                 .map(|spec| {

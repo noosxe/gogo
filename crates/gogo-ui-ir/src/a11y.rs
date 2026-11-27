@@ -42,6 +42,10 @@ pub enum Role {
     ProgressBar,
     /// An editable text field.
     TextInput,
+    /// A list of items.
+    List,
+    /// One of them.
+    ListItem,
 }
 
 /// A node's accessibility facts. [`Default`] is a plain, unnamed, non-focusable generic

@@ -404,6 +404,31 @@ impl Fixture {
     }
 
     /// Set a source that takes no argument.
+    /// The library with `count` games: the fixture's own, then made-up ones.
+    pub fn with_library(mut self, count: usize) -> Self {
+        let Some(Value::List(games)) = self.vars.get("library").cloned() else {
+            return self;
+        };
+        let mut games = games;
+        // A game that is simply not installed, to copy.
+        let Some(Value::Map(filler)) = games.get(6).cloned() else {
+            return self;
+        };
+        games.truncate(count);
+        for i in games.len()..count {
+            let mut game = filler.clone();
+            game.insert("id".to_owned(), Value::str(format!("filler-{i}")));
+            game.insert("title".to_owned(), Value::str(format!("Filler Game {i}")));
+            games.push(Value::Map(game));
+        }
+        if let Some(Value::Map(stats)) = self.vars.get_mut("library.stats") {
+            stats.insert("count".to_owned(), Value::Num(games.len() as f64));
+        }
+        self.set_var("library", Value::List(games));
+        self
+    }
+
+    /// Set a source without arguments.
     pub fn set_var(&mut self, name: &str, v: Value) {
         self.vars.insert(name.to_owned(), v);
     }

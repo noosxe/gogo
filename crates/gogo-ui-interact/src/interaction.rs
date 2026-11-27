@@ -738,9 +738,7 @@ impl Interaction {
                 out.consumed = true;
                 let order = FocusOrder::of(frame);
                 if let Some(next) = order.step(self.focus.as_ref(), mods.shift).cloned() {
-                    self.visible = true;
-                    self.reveal_target(frame, &next, out);
-                    self.set_focus(Some(next), out);
+                    self.tab_to(frame, next, mods.shift, out);
                 }
             }
             Key::ArrowLeft | Key::ArrowRight if plain => {

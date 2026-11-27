@@ -330,6 +330,7 @@ impl<'a> Checker<'a> {
         match n.name.as_str() {
             "let" => self.let_(n),
             "each" => self.each(n),
+            "list" => self.list(n),
             "switch" => self.switch(n),
             "case" | "else" => self.nodes(&mut n.children, Parent::default()),
             "use" => self.use_(n),
@@ -430,6 +431,11 @@ impl<'a> Checker<'a> {
             // Bound for the rest of the block: `nodes` drops it with the block.
             self.env.push((name, ty));
         }
+    }
+
+    fn list(&mut self, n: &mut Node) {
+        self.props_except(n, "in");
+        self.each(n);
     }
 
     fn each(&mut self, n: &mut Node) {

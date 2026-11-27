@@ -8,6 +8,7 @@ use gogo_ui_a11y::accesskit::{
 use gogo_ui_interact::{Config, Frame, Interaction, Layer, LayerId, LayerKind, RequestKind};
 use gogo_ui_ir::{
     A11y, ActionRef, Dim, LayoutStyle, Node, Role as IrRole, ScrollSpec, Tree as IrTree,
+    VirtualList,
 };
 use gogo_ui_layout::{Laid, Scroll, Viewport, layout};
 use gogo_ui_text::FontSet;
@@ -118,5 +119,53 @@ fn a_scroll_container_says_where_it_is_and_takes_scroll_requests() {
     assert_eq!(
         kind(list, Action::SetScrollOffset, Some(to)),
         Some(RequestKind::ScrollTo(120))
+    );
+}
+
+#[test]
+fn a_virtualised_list_says_how_long_it_is_and_where_its_items_are() {
+    let mut tree = IrTree::new("root", Node::container().with_layout(sized(800.0, 600.0)));
+    let mut list = Node::container().with_a11y(A11y {
+        role: IrRole::List,
+        name: Some("All games".to_owned()),
+        ..A11y::default()
+    });
+    list.list = Some(VirtualList {
+        count: 500,
+        columns: 1,
+        item_h: 40.0,
+        gap: 0.0,
+        window: 0..2,
+    });
+    let root = tree.root();
+    let list = tree.add_child(root, "all", list).expect("add");
+    let mut item = Node::container()
+        .with_layout(sized(200.0, 40.0))
+        .with_a11y(A11y {
+            role: IrRole::ListItem,
+            name: Some("The last".to_owned()),
+            ..A11y::default()
+        });
+    item.item = Some(499);
+    tree.add_child(list, "i#499", item).expect("add");
+    let laid = layout(
+        &tree,
+        &mut FontSet::bundled(),
+        Viewport::new(800.0, 600.0),
+        &Scroll::none(),
+    )
+    .expect("layout");
+    let layers = [Layer::new(LayerId(1), LayerKind::Page, &tree, &laid)];
+    let update = A11yTree::new("gogo").update(
+        &Frame { layers: &layers },
+        &Interaction::new(Config::default()),
+        1.0,
+    );
+    let (_, node) = named(&update, "All games");
+    assert_eq!((node.role(), node.size_of_set()), (Role::List, Some(500)));
+    let (_, node) = named(&update, "The last");
+    assert_eq!(
+        (node.role(), node.position_in_set()),
+        (Role::ListItem, Some(499))
     );
 }
