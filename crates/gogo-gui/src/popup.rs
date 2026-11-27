@@ -246,34 +246,71 @@ fn row(fill: Color) -> Node {
     node
 }
 
-/// How wide the box is, how many entries it shows and where the first of them is, for a
-/// list of `total` by `anchor`. `focused` is the entry the window keeps in sight, with
-/// one more beside it where there is one, so Up and Down always have somewhere to go.
-fn window_of(
-    open: &Open,
-    total: usize,
-    anchor: Rect,
-    focused: Option<usize>,
-) -> (f64, usize, usize) {
+/// What a list shows of itself.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Shown {
+    /// The box's width.
+    width: f64,
+    /// How many entries, from which one.
+    rows: usize,
+    first: usize,
+    /// How tall each is.
+    row: f32,
+    /// Whether there are buttons at the ends that have more.
+    buttons: bool,
+}
+
+/// The fewest entries a long list shows, so that one is beside the focused one on either
+/// side.
+const FEWEST: usize = 3;
+/// How short a row may get in a window too small for [`FEWEST`] full ones (S7's least
+/// target).
+const SHORTEST: f32 = 24.0;
+
+/// What a list of `total` entries by `anchor` shows. `focused` is the entry the window
+/// of rows keeps in sight, with one more beside it where there is one, so Up and Down
+/// always have somewhere to go.
+///
+/// It stays beside the control while that holds [`FEWEST`] entries and the two buttons;
+/// otherwise it may cover the control and use the window's height, and in a window too
+/// small even for that it drops the buttons and shortens its rows.
+fn window_of(open: &Open, total: usize, anchor: Rect, focused: Option<usize>) -> Shown {
     let (window_width, window_height) = (f64::from(open.size.0), f64::from(open.size.1));
     let width = (anchor.x1 - anchor.x0).clamp(NARROWEST, WIDEST);
-    let tall = |rows: usize| (rows as f32 * ROW + 2.0 * PADDING) as f64;
-    let room = place(
+    let padding = 2.0 * f64::from(PADDING);
+    let fit = |room: f64, row: f32| ((room - padding) / f64::from(row)).floor().max(0.0) as usize;
+    let beside = place(
         anchor,
-        (width, tall(total)),
+        (width, total as f64 * f64::from(ROW) + padding),
         (window_width, window_height),
         GAP,
         MARGIN,
     )
     .max_height;
-    let fit = (((room - 2.0 * f64::from(PADDING)) / f64::from(ROW))
-        .floor()
-        .max(0.0)) as usize;
-    if fit >= total {
-        return (width, total, 0);
+    let whole = (window_height - 2.0 * MARGIN).max(0.0);
+    let mut shown = Shown {
+        width,
+        rows: total,
+        first: 0,
+        row: ROW,
+        buttons: false,
+    };
+    let mut slots = fit(beside, ROW);
+    if slots < total && slots < FEWEST + 2 {
+        slots = fit(whole, ROW);
     }
-    // Two rows go to the buttons at the ends.
-    let rows = fit.saturating_sub(2).max(1);
+    if slots >= total {
+        return shown;
+    }
+    if slots >= FEWEST + 2 {
+        // Two rows go to the buttons at the ends.
+        (shown.rows, shown.buttons) = (slots - 2, true);
+    } else {
+        let each = ((whole - padding) / FEWEST as f64).floor() as f32;
+        shown.row = each.clamp(SHORTEST, ROW);
+        shown.rows = fit(whole, shown.row).clamp(1, total);
+    }
+    let rows = shown.rows;
     let mut first = open.first.min(total - rows);
     if let Some(at) = focused {
         let margin = usize::from(rows > 2);
@@ -282,7 +319,16 @@ fn window_of(
             .max((at + margin + 1).saturating_sub(rows))
             .min(total - rows);
     }
-    (width, rows, first)
+    shown.first = first;
+    shown
+}
+
+/// Where the box of `size` goes: by `anchor`, and wholly in the window.
+fn corner(anchor: Rect, (width, height): (f64, f64), window: (f32, f32)) -> (f64, f64) {
+    let window = (f64::from(window.0), f64::from(window.1));
+    let at = place(anchor, (width, height), window, GAP, MARGIN);
+    let lowest = (window.1 - MARGIN - height).max(0.0);
+    (at.x, at.y.min(lowest).max(MARGIN.min(lowest)))
 }
 
 /// The key of the focused entry, as its index.
@@ -323,7 +369,10 @@ impl Drawn {
             // The first build shows the select's value.
             open.listed.is_none().then_some(current).flatten()
         });
-        let (width, rows, first) = window_of(open, entries.len(), anchor, focus_at);
+        let shown = window_of(open, entries.len(), anchor, focus_at);
+        let Shown {
+            width, rows, first, ..
+        } = shown;
         open.listed = Some(listed);
         open.first = first;
         open.rows = rows;
@@ -344,23 +393,17 @@ impl Drawn {
             id,
         };
 
-        let earlier = first > 0;
-        let later = first + rows < entries.len();
-        let count = rows + usize::from(earlier) + usize::from(later);
-        let height = count as f32 * ROW + 2.0 * PADDING;
-        let at = place(
-            anchor,
-            (width, f64::from(height)),
-            (f64::from(open.size.0), f64::from(open.size.1)),
-            GAP,
-            MARGIN,
-        );
+        let earlier = shown.buttons && first > 0;
+        let later = shown.buttons && first + rows < entries.len();
+        let ends = usize::from(earlier) + usize::from(later);
+        let height = rows as f32 * shown.row + ends as f32 * ROW + 2.0 * PADDING;
+        let (x, y) = corner(anchor, (width, f64::from(height)), open.size);
 
         let mut card = Node::new(Kind::Box);
         card.layout.position = Position::Absolute;
         card.layout.inset = Sides {
-            top: Dim::Px(at.y as f32),
-            left: Dim::Px(at.x as f32),
+            top: Dim::Px(y as f32),
+            left: Dim::Px(x as f32),
             right: Dim::Auto,
             bottom: Dim::Auto,
         };
@@ -399,6 +442,7 @@ impl Drawn {
             let key = format!("{ITEM}{i}");
             let chosen = entry.current == Some(true);
             let mut node = row(if chosen { CHOSEN } else { CARD });
+            node.layout.height = Dim::Px(shown.row);
             let role = if select {
                 Role::ListOption
             } else {
@@ -497,15 +541,15 @@ mod tests {
     #[test]
     fn a_long_list_shows_a_window_that_follows_focus() {
         let mut open = Open::new(LayerId(1), "more".to_owned(), (800.0, 400.0));
-        let (width, rows, first) = window_of(&open, 3, anchor(40.0), None);
-        assert_eq!((width, rows, first), (NARROWEST, 3, 0));
-        let (_, rows, first) = window_of(&open, 40, anchor(40.0), None);
+        let few = window_of(&open, 3, anchor(40.0), None);
+        assert_eq!((few.width, few.rows, few.first), (NARROWEST, 3, 0));
+        let Shown { rows, first, .. } = window_of(&open, 40, anchor(40.0), None);
         assert!(rows > 2 && rows < 40);
         assert_eq!(first, 0);
         // The last row but one in sight brings the next one in.
-        let (_, _, moved) = window_of(&open, 40, anchor(40.0), Some(rows - 1));
+        let moved = window_of(&open, 40, anchor(40.0), Some(rows - 1)).first;
         assert_eq!(moved, 1);
-        let (_, _, end) = window_of(&open, 40, anchor(40.0), Some(39));
+        let end = window_of(&open, 40, anchor(40.0), Some(39)).first;
         assert_eq!(end, 40 - rows);
         open.first = moved;
         open.rows = rows;
@@ -514,5 +558,26 @@ mod tests {
         open.turn(EARLIER);
         open.turn(EARLIER);
         assert_eq!(open.first, 0);
+    }
+
+    #[test]
+    fn a_small_window_keeps_the_popup_inside_it() {
+        // No room by the control for even one row and the two buttons.
+        for height in [100.0, 160.0, 240.0] {
+            let open = Open::new(LayerId(1), "more".to_owned(), (800.0, height));
+            let shown = window_of(&open, 40, anchor(20.0), Some(5));
+            // One entry on either side of the focused one, for Up and Down.
+            assert!(shown.rows >= FEWEST, "{height}: {shown:?}");
+            assert!((shown.first + 1..shown.first + shown.rows - 1).contains(&5));
+            assert!(shown.row >= SHORTEST);
+            let ends = if shown.buttons { 2.0 } else { 0.0 };
+            let tall = shown.rows as f32 * shown.row + ends * ROW + 2.0 * PADDING;
+            let (_, y) = corner(anchor(20.0), (shown.width, f64::from(tall)), open.size);
+            assert!(y >= 0.0, "{height}: {y}");
+            assert!(
+                y + f64::from(tall) <= f64::from(height),
+                "{height}: {y} {tall}"
+            );
+        }
     }
 }
