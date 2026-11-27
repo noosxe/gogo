@@ -24,7 +24,10 @@
 //!   else gets a new id, and a request carries what its control did, so a late one
 //!   reaches nothing even before the next [`A11yTree::update`].
 //! - **Hold controls** say how to confirm, and say so again once armed.
-//! - **Requests** honoured: click, focus, and setting a text field's value.
+//! - **Text fields** with a value and a selection carry their text as runs of at most
+//!   255 characters, with the selection in them. A composition is not part of it.
+//! - **Requests** honoured: click, focus, and, on a text field, setting its value, its
+//!   selection or the selected text.
 //! - **Bounds** are layout boxes in logical px under a root transform by the scale.
 #![deny(unsafe_code)]
 #![warn(missing_docs)]

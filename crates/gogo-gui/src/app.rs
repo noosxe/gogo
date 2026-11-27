@@ -30,12 +30,12 @@ use gogo_ui_interact::{Config, Frame as Layers, Intent, Interaction, Layer, Prim
 use gogo_ui_scene::DisplayList;
 use gogo_ui_shell::accesskit::{ActionRequest, TreeUpdate};
 use gogo_ui_shell::{
-    Frame, Input, PixelRenderer, RenderError, ShellApp, WindowOptions, WindowRenderer,
+    Frame, ImeArea, Input, PixelRenderer, RenderError, ShellApp, WindowOptions, WindowRenderer,
     WindowTarget, Zeroizing,
 };
 
 use crate::data::{Data, Images};
-use crate::dialog::Dialog;
+use crate::dialog::{self, Dialog};
 use crate::page::{DrawError, Page, Screen};
 use crate::panel::Panel;
 use crate::{act, render};
@@ -483,6 +483,21 @@ impl ShellApp for App {
 
     fn wants_paste(&mut self) -> bool {
         self.paste.is_some()
+    }
+
+    fn ime_area(&self) -> Option<ImeArea> {
+        let dialog = self.shown.dialog.as_ref()?;
+        let focus = self.interaction.focus()?;
+        if focus.key != dialog::FIELD || focus.layer != dialog.layer().id {
+            return None;
+        }
+        let caret = dialog.field_caret()?;
+        Some(ImeArea {
+            x: caret.x0.into(),
+            y: caret.y0.into(),
+            width: (caret.x1 - caret.x0).into(),
+            height: (caret.y1 - caret.y0).into(),
+        })
     }
 
     fn copied(&mut self) -> Option<Zeroizing<String>> {

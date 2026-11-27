@@ -240,7 +240,8 @@ app control is told apart by its `DrawnBy::App` part and tree key.
   starts the 1 s hold, which completes unless it is cancelled (Esc, a focus move including
   to Cancel, any other key or button, the window losing input, the control or the dialog
   changing). The second activation is the press the model checks.
-- **Setting a text field** through AccessKit is not a press and answers nothing.
+- **Setting a text field** through AccessKit (its value, its selection or the selected
+  text) is not a press and answers nothing.
 - **Text fields** the app draws take input only while focused, as edit intents: the
   platform's text for the key (case kept, dead keys composed, nothing under Ctrl or Meta),
   motion by character, word and line end with Shift to select, Backspace and Delete (a
@@ -249,17 +250,22 @@ app control is told apart by its `DrawnBy::App` part and tree key.
   on macOS. None is a press. **Copy and cut are presses** (only a real, non-repeating key
   writes the clipboard; no dwell); paste keeps its dwell rule. Up and Down are left alone.
   Enter and Space never activate a field. On a layout whose letters are not Latin, the
-  A, C, V, X, Y and Z keys are read by their place while Ctrl or Meta is held. There is no
-  IME composition yet (#544).
+  A, C, V, X, Y and Z keys are read by their place while Ctrl or Meta is held.
+- **Input methods.** One is allowed only while a field has focus, and its candidate window
+  is placed at the caret. A composition is shown underlined and is not part of the text:
+  a confirmation sees only what was committed. While composing, keys do nothing in the
+  app (Esc and Enter included); a pointer press, a focus move or an edit by assistive
+  technology drops the composition. A commit is not a press.
 - **The field itself** is one line with a solid caret, which moves its text left as far as
   needed. Undo is per screen, up to 100 steps, typing a word at a time. A secret never
   goes into a field: the sign-in dialog stays paste only, with nothing to copy or undo.
 - **Screen readers (`gogo-ui-a11y`).** The AccessKit tree comes from the same layers.
-  Click, focus and set-value requests become interact input, so they are numbered and
-  checked like any press. Under a dialog only the dialog is exposed, as a modal dialog or
-  alert named by its root, which also has focus while no control does. A node's id covers
-  what its action does, so a late request for a control that has since changed reaches
-  nothing, even before the next tree update. A hold control's description says how to confirm.
+  Click, focus, set-value and text-selection requests become interact input, so they are
+  numbered and checked like any press. Under a dialog only the dialog is exposed, as a
+  modal dialog or alert named by its root, which also has focus while no control does. A
+  node's id covers what its action does, so a late request for a control that has since
+  changed reaches nothing, even before the next tree update. A hold control's description
+  says how to confirm.
 
 ### Answers
 

@@ -83,6 +83,24 @@ pub enum TextEdit {
     Undo,
     /// Make it again.
     Redo,
+    /// An input method's composition: shown, not yet part of the text. Empty ends it.
+    Preedit {
+        /// The text so far.
+        text: String,
+        /// The input method's selection in it, in bytes; `None` hides the caret.
+        cursor: Option<(usize, usize)>,
+    },
+    /// An input method's result.
+    Commit(String),
+    /// Assistive technology selects, in bytes of the field's value.
+    Select {
+        /// The end that stays.
+        anchor: usize,
+        /// The caret.
+        focus: usize,
+    },
+    /// Assistive technology puts text in place of the selection.
+    Replace(String),
     /// A press or a drag in the field.
     Point {
         /// From the left edge of the field's box.
@@ -106,6 +124,10 @@ impl std::fmt::Debug for TextEdit {
             TextEdit::SelectAll => f.write_str("SelectAll"),
             TextEdit::Undo => f.write_str("Undo"),
             TextEdit::Redo => f.write_str("Redo"),
+            TextEdit::Preedit { text, .. } => write!(f, "Preedit({} bytes)", text.len()),
+            TextEdit::Commit(text) => write!(f, "Commit({} bytes)", text.len()),
+            TextEdit::Select { anchor, focus } => write!(f, "Select({anchor}, {focus})"),
+            TextEdit::Replace(text) => write!(f, "Replace({} bytes)", text.len()),
             TextEdit::Point { x, y, gesture } => write!(f, "Point({x}, {y}, {gesture:?})"),
         }
     }

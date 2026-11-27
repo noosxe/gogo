@@ -26,13 +26,15 @@
 //! is told too. Key events the platform makes up on focus changes are left out. The
 //! application's accessibility tree goes to the platform's adapter after every frame, and
 //! requests from assistive technology come back through
-//! [`ShellApp::accessibility_action`].
+//! [`ShellApp::accessibility_action`]. The input method is allowed only while
+//! [`ShellApp::ime_area`] says where text goes.
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
 mod a11y;
 mod clipboard;
 mod cpu;
+mod ime;
 mod input;
 mod output;
 mod run;
@@ -50,6 +52,7 @@ use winit::raw_window_handle::{
 };
 
 pub use clipboard::CLIPBOARD_MAX;
+pub use ime::ImeArea;
 pub use run::{Shell, Waker};
 pub use zeroize::Zeroizing;
 
@@ -276,6 +279,12 @@ pub trait ShellApp {
     /// Text to put on the clipboard: what a copy or cut press took. Asked as
     /// [`ShellApp::wants_paste`] is. `None` writes nothing.
     fn copied(&mut self) -> Option<Zeroizing<String>> {
+        None
+    }
+
+    /// Where text is being typed, while a text field has focus; `None` turns the input
+    /// method off. Asked after each input and frame.
+    fn ime_area(&self) -> Option<ImeArea> {
         None
     }
 

@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 use accesskit::{
-    Action, ActionData, ActionRequest, Affine, HasPopup, Live, Node, NodeId, Rect, Role, Toggled,
-    TreeId, TreeInfo, TreeUpdate,
+    Action, ActionData, ActionRequest, Affine, HasPopup, Live, Node, NodeId, Rect, Role,
+    TextDirection, TextPosition, TextSelection, Toggled, TreeId, TreeInfo, TreeUpdate,
 };
 use gogo_ui_interact::{
     Frame, Identity, Interaction, Layer, LayerId, LayerKind, Request, RequestKind, Target,
@@ -35,7 +35,20 @@ pub struct A11yTree {
     window: String,
     ids: HashMap<Name, NodeId>,
     names: HashMap<NodeId, Name>,
+    runs: HashMap<NodeId, Run>,
     last: u64,
+}
+
+/// The most characters in one text run: AccessKit counts them in a byte.
+const RUN: usize = 255;
+
+/// A stretch of a text field's value.
+#[derive(Debug)]
+struct Run {
+    /// The field.
+    field: NodeId,
+    /// The byte offset in the value before each character, and after the last.
+    offsets: Vec<usize>,
 }
 
 /// One pass over a frame.
@@ -43,6 +56,7 @@ struct Build<'a> {
     old: &'a HashMap<Name, NodeId>,
     ids: HashMap<Name, NodeId>,
     nodes: Vec<(NodeId, Node)>,
+    runs: HashMap<NodeId, Run>,
     last: u64,
     input: &'a Interaction,
 }
@@ -129,6 +143,77 @@ impl Build<'_> {
         });
         self.ids.insert(name, id);
         id
+    }
+
+    /// The text runs of a field's value, and its selection in them. Returns the runs'
+    /// ids.
+    fn text_runs(
+        &mut self,
+        layer: &Layer<'_>,
+        key: &str,
+        field: (NodeId, &mut Node),
+        value: &str,
+        (anchor, focus): (usize, usize),
+    ) -> Vec<NodeId> {
+        let (field, out) = field;
+        let chars: Vec<(usize, char)> = value.char_indices().collect();
+        // An empty value still has a run, for the caret to be in.
+        let count = chars.len().div_ceil(RUN).max(1);
+        let mut runs = Vec::with_capacity(count);
+        let mut space = true;
+        for n in 0..count {
+            let part = &chars[(n * RUN).min(chars.len())..((n + 1) * RUN).min(chars.len())];
+            let start = part.first().map_or(value.len(), |&(at, _)| at);
+            let end = part.last().map_or(start, |&(at, c)| at + c.len_utf8());
+            let mut node = Node::new(Role::TextRun);
+            node.set_value(value.get(start..end).unwrap_or_default());
+            node.set_character_lengths(
+                part.iter()
+                    .map(|&(_, c)| c.len_utf8() as u8)
+                    .collect::<Vec<_>>(),
+            );
+            let mut words = Vec::new();
+            for (i, &(_, c)) in part.iter().enumerate() {
+                if space && !c.is_whitespace() {
+                    words.push(i as u8);
+                }
+                space = c.is_whitespace();
+            }
+            node.set_word_starts(words);
+            node.set_text_direction(TextDirection::LeftToRight);
+            if let Some(bounds) = out.bounds() {
+                node.set_bounds(bounds);
+            }
+            // A tree key holds no NUL, so this can't be one.
+            let id = self.id(Name {
+                layer: layer.id,
+                key: format!("{key}\0{n}"),
+                identity: None,
+            });
+            let offsets = part.iter().map(|&(at, _)| at).chain([end]).collect();
+            self.runs.insert(id, Run { field, offsets });
+            self.nodes.push((id, node));
+            runs.push(id);
+        }
+        let position = |at: usize| {
+            // At a seam the later run has it; at the very end, the last.
+            let found = runs.iter().rev().find_map(|id| {
+                let offsets = &self.runs.get(id)?.offsets;
+                (*offsets.first()? <= at).then(|| TextPosition {
+                    node: *id,
+                    character_index: offsets.partition_point(|&o| o < at).min(offsets.len() - 1),
+                })
+            });
+            found.unwrap_or(TextPosition {
+                node: runs[0],
+                character_index: 0,
+            })
+        };
+        out.set_text_selection(TextSelection {
+            anchor: position(anchor),
+            focus: position(focus),
+        });
+        runs
     }
 
     /// Adds the nodes at and under `at`; returns those that become children of the
@@ -257,6 +342,16 @@ impl Build<'_> {
             // The change of hint is announced.
             out.set_live(Live::Assertive);
         }
+        let mut children = children;
+        if let (IrRole::TextInput, Some(value), Some(selection)) =
+            (node.a11y.role, &node.a11y.value, node.a11y.text_selection)
+        {
+            children = self.text_runs(layer, &target.key, (id, &mut out), value, selection);
+            if !node.a11y.disabled {
+                out.add_action(Action::SetTextSelection);
+                out.add_action(Action::ReplaceSelectedText);
+            }
+        }
         out.set_children(children);
         self.nodes.push((id, out));
         vec![id]
@@ -270,6 +365,7 @@ impl A11yTree {
             window: window.into(),
             ids: HashMap::new(),
             names: HashMap::new(),
+            runs: HashMap::new(),
             last: ROOT.0,
         }
     }
@@ -282,6 +378,7 @@ impl A11yTree {
             old: &self.ids,
             ids: HashMap::new(),
             nodes: Vec::new(),
+            runs: HashMap::new(),
             last: self.last,
             input,
         };
@@ -307,11 +404,13 @@ impl A11yTree {
         let Build {
             ids,
             mut nodes,
+            runs,
             last,
             ..
         } = build;
         self.names = ids.iter().map(|(name, &id)| (id, name.clone())).collect();
         self.ids = ids;
+        self.runs = runs;
         self.last = last;
 
         let of = |layer: LayerId, key: &str| {
@@ -349,6 +448,20 @@ impl A11yTree {
             (Action::Focus, _) => RequestKind::Focus,
             (Action::SetValue, Some(ActionData::Value(value))) => {
                 RequestKind::SetValue(value.to_string())
+            }
+            (Action::ReplaceSelectedText, Some(ActionData::Value(value))) => {
+                RequestKind::ReplaceSelected(value.to_string())
+            }
+            (Action::SetTextSelection, Some(ActionData::SetTextSelection(selection))) => {
+                let byte = |position: TextPosition| {
+                    let run = self.runs.get(&position.node)?;
+                    (run.field == request.target_node)
+                        .then(|| run.offsets.get(position.character_index).copied())?
+                };
+                RequestKind::SetSelection {
+                    anchor: byte(selection.anchor)?,
+                    focus: byte(selection.focus)?,
+                }
             }
             _ => return None,
         };

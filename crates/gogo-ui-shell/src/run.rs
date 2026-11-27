@@ -13,6 +13,7 @@ use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::clipboard::Clipboard;
 use crate::cpu::CpuWindow;
+use crate::ime::Wanted;
 use crate::input::Translator;
 use crate::output::{self, Output, Recovery};
 use crate::watch::{self, Watch};
@@ -115,6 +116,8 @@ struct Open {
     output: Option<AnyOutput>,
     accessibility: accesskit_winit::Adapter,
     window: Arc<Window>,
+    /// What the input method was last told.
+    ime: Wanted,
     /// The GPU renderer was made again and has not presented since.
     remade: bool,
     /// Cached images are out of date and no frame has been presented since.
@@ -199,6 +202,9 @@ impl<A: ShellApp> Runner<A> {
 
     /// What the application may want after an input: the clipboard written or read.
     fn after_input(&mut self) {
+        if let Some(open) = &mut self.open {
+            open.ime.tell(&open.window, self.app.ime_area());
+        }
         let copied = self.app.copied();
         let paste = self.app.wants_paste();
         if copied.is_none() && !paste {
@@ -245,6 +251,7 @@ impl<A: ShellApp> Runner<A> {
             output: Some(output),
             accessibility,
             window,
+            ime: Wanted::default(),
             remade: false,
             images_stale: false,
             cpu_retried: false,
@@ -299,6 +306,8 @@ impl<A: ShellApp> Runner<A> {
         let again = report_shown(&mut self.app, &drawn, self.started.elapsed(), name);
         match drawn {
             Ok(Presented::Shown) => {
+                // The frame may have moved the caret, or brought a field or took it.
+                open.ime.tell(&open.window, self.app.ime_area());
                 open.remade = false;
                 open.cpu_retried = false;
                 open.images_stale = false;

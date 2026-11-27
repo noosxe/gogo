@@ -184,7 +184,7 @@ them under "GUI".
 | Layer | Crate | Version | Note |
 |---|---|---|---|
 | Layout | taffy | 0.16.0 | Flex, grid, block, absolute insets and measure callbacks. Pitfalls: since 0.15 insets are ignored unless `position` is set explicitly; `add_child` doesn't detach (it panics later); `remove` is quadratic |
-| Text | parley + fontique | 0.13.0 | HarfRust shaping, skrifa fonts, variable axes, OS fallback (off in `gogo-ui-text`'s default features; its `system-fonts` feature turns it on). `PlainEditor` gives selection, motion and IME composition; undo, clipboard and AccessKit wiring are ours |
+| Text | parley + fontique | 0.13.0 | HarfRust shaping, skrifa fonts, variable axes, OS fallback (off in `gogo-ui-text`'s default features; its `system-fonts` feature turns it on). `PlainEditor` gives selection, motion and IME composition; undo, clipboard and AccessKit wiring are ours (parley 0.13 has no AccessKit support) |
 | GPU render | vello_gpu (+ vello_common) on wgpu | 0.4.0 / 30.0.2 | No compute shaders; native blur and drop-shadow filters. Beta caveats are in design 28 §5 |
 | Glyphs (GPU) | glifo | 0.5.0 | vello_gpu's glyph builder takes its glyph type without re-exporting it |
 | CPU render | vello_cpu | 0.4.0 | Single-threaded: filters panic in its multithreading mode today |

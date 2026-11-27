@@ -94,6 +94,8 @@ pub struct Interaction {
     /// The text field a pointer drag is selecting in.
     pub(crate) drag: Option<Target>,
     pub(crate) last_click: Option<Click>,
+    /// An input method is composing in the focused field.
+    pub(crate) composing: bool,
     latest: InputEvent,
     focus: Option<Target>,
     visible: bool,
@@ -306,6 +308,7 @@ impl Interaction {
                     self.edit(TextEdit::Insert(text), frame, &mut out);
                 }
             }
+            Input::Ime(ime) => self.ime(ime, frame, &mut out),
             Input::Modifiers(mods) => self.mods = mods,
             Input::FocusLost => {
                 self.mods = Modifiers::default();
@@ -376,6 +379,7 @@ impl Interaction {
         if self.space.as_ref().is_some_and(|p| !stays(&p.target)) {
             self.space = None;
         }
+        self.end_composition(out);
         if let Some(t) = &target {
             self.memory.insert(t.layer, t.key.clone());
         }
@@ -533,6 +537,7 @@ impl Interaction {
     ) {
         self.pointer_at = Some((x, y));
         self.cancel_presses(out);
+        self.end_composition(out);
         let event = self.number();
         self.visible = false;
         self.hovered = control_at(frame, x, y);
@@ -647,6 +652,11 @@ impl Interaction {
             self.end_hold_by(HoldBy::Key(key), out);
         }
         let repeat = repeat || again;
+        // The keys are the input method's: none of them types, activates or dismisses.
+        if self.composing {
+            out.consumed = true;
+            return;
+        }
         if !repeat && key != Key::Other {
             self.cancel_assistive(out);
         }
@@ -865,6 +875,11 @@ impl Interaction {
         }
     }
 
+    pub(crate) fn focus_by_assistive(&mut self, target: Target, out: &mut Response) {
+        self.visible = true;
+        self.set_focus(Some(target), out);
+    }
+
     fn assistive(&mut self, request: Request, at: Duration, frame: &Frame<'_>, out: &mut Response) {
         let Some((layer, node)) = find(frame, request.layer, &request.key) else {
             return;
@@ -888,10 +903,18 @@ impl Interaction {
             RequestKind::SetValue(value) => {
                 if n.a11y.role == Role::TextInput {
                     out.consumed = true;
+                    self.end_composition(out);
                     self.visible = true;
                     self.set_focus(Some(target.clone()), out);
                     out.intents.push(Intent::SetValue { target, value });
                 }
+            }
+            RequestKind::SetSelection { anchor, focus } => {
+                let edit = TextEdit::Select { anchor, focus };
+                self.assistive_edit(n, target, edit, out);
+            }
+            RequestKind::ReplaceSelected(text) => {
+                self.assistive_edit(n, target, TextEdit::Replace(text), out);
             }
             RequestKind::Activate => {
                 if !activatable(n) {
