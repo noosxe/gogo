@@ -113,9 +113,14 @@ pub(crate) struct App {
     now: Option<Duration>,
     /// The screen that shows a plan because the one confirmed changed.
     changed: Option<Ticket>,
+    /// The layer of last resort, built while building still works.
+    fallback: Rc<Panel>,
     /// Makes building a dialog fail.
     #[cfg(test)]
     break_dialogs: bool,
+    /// Makes building the panel that says so fail.
+    #[cfg(test)]
+    break_panels: bool,
     /// The skin folder being watched.
     dev: Option<PathBuf>,
     /// Why the skin on screen is not the one in the folder, one line each.
@@ -126,8 +131,14 @@ pub(crate) struct App {
 
 impl App {
     pub(crate) fn new(dev: Option<&Path>, data: Data) -> Result<App, DrawError> {
+        let mut page = Page::new()?;
+        let fallback = Panel::bare(
+            &mut page.fonts,
+            "A question could not be shown. Press Escape to cancel it.",
+        )?;
         let mut app = App {
-            page: Page::new()?,
+            fallback: Rc::new(fallback),
+            page,
             images: data.images(),
             data,
             list: DisplayList::blank(0.0, 0.0),
@@ -143,6 +154,8 @@ impl App {
             changed: None,
             #[cfg(test)]
             break_dialogs: false,
+            #[cfg(test)]
+            break_panels: false,
             dev: dev.map(Path::to_owned),
             problems: Vec::new(),
             images_changed: false,
@@ -377,6 +390,13 @@ impl App {
 
     /// The pending frame is on the screen, since `at`. Returns whether to draw again.
     fn show(&mut self, at: Duration) -> bool {
+        let redraw = self.take_over();
+        let again = self.shown_screen(at);
+        redraw || again || self.stale()
+    }
+
+    /// The pending frame becomes the one input acts on. Returns whether focus moved.
+    fn take_over(&mut self) -> bool {
         self.shown = self.pending.clone();
         let shown = self.shown.clone();
         let layers = shown.layers();
@@ -385,8 +405,7 @@ impl App {
         for intent in response.intents {
             self.act(intent);
         }
-        let again = self.shown_screen(at);
-        response.redraw || again || self.stale()
+        response.redraw
     }
 
     /// Whether the safety flow has another screen on top than the one last built.
@@ -596,6 +615,7 @@ pub(super) mod tests {
             ticket,
             at: at(1000),
             after: 5,
+            complete: true,
         };
         let seen = at(1000) + DWELL;
         assert!(shown.takes(ticket, 6, seen, false));

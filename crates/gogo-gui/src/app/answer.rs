@@ -6,6 +6,8 @@
 //!   on the display;
 //! - an answer comes only from the screen that is on the display, with its ticket: a
 //!   screen the model has that is not there yet takes nothing, Esc included;
+//! - an error alert is closed only by a press that could answer a screen: it can appear
+//!   between the two halves of a double Enter or Esc, and must be readable (S9);
 //! - a hold counts only while interaction says it is down, up to a frame that was on the
 //!   display.
 
@@ -16,6 +18,7 @@ use gogo_gui_model::{
     DWELL, HOLD, Modal, Outcome, Press, PromptAnswer, PromptSpec, Secret, Side, Strength, Ticket,
 };
 use gogo_ui_interact::{InputProvenance, Intent, TextEdit};
+use gogo_ui_scene::DisplayList;
 use gogo_ui_shell::Zeroizing;
 
 use super::{App, say};
@@ -47,6 +50,9 @@ pub(super) struct Shown {
     pub(super) at: Duration,
     /// The last input there had been.
     pub(super) after: u64,
+    /// Whether all of it was there. An error too large for the window starts its wait
+    /// all the same, so that it can be closed, and again once it all fits.
+    pub(super) complete: bool,
 }
 
 impl Shown {
@@ -238,14 +244,25 @@ impl App {
                 self.pending.stuck = Some(ticket);
                 let lines = ["Press Esc to cancel it.".to_owned()];
                 let heading = "A question could not be shown";
-                match Panel::new(&mut self.page.fonts, size, heading, &lines) {
+                let panel = Panel::new(&mut self.page.fonts, size, heading, &lines);
+                #[cfg(test)]
+                let panel = if self.break_panels {
+                    Err(crate::panel::PanelError::broken())
+                } else {
+                    panel
+                };
+                match panel {
                     Ok(panel) => {
                         panel.draw(&mut self.list);
                         self.pending.panel = Some(Rc::new(panel));
                     }
+                    // A blank window with one layer, built at startup, so that there is
+                    // still something for Esc to reach.
                     Err(e) => {
-                        tracing::error!("the error panel could not be drawn: {e}");
+                        tracing::error!("the panel for it could not be drawn either: {e}");
                         self.pending.screen = None;
+                        self.pending.panel = Some(Rc::clone(&self.fallback));
+                        self.list = DisplayList::blank(f64::from(size.0), f64::from(size.1));
                     }
                 }
             }
@@ -262,16 +279,23 @@ impl App {
             return false;
         };
         let ticket = drawn.ticket();
-        if drawn.answerable() && self.since.is_none_or(|shown| shown.ticket != ticket) {
+        let complete = drawn.answerable();
+        let new = self
+            .since
+            .is_none_or(|shown| shown.ticket != ticket || (complete && !shown.complete));
+        if new && (complete || drawn.is_error()) {
             let latest = self.interaction.latest();
             self.since = Some(Shown {
                 ticket,
                 at,
                 after: latest.get(),
+                complete,
             });
-            self.data.presented(ticket, act::number(latest), at);
-            if let Some(modal) = self.data.modal() {
-                say(format_args!("gui: dialog {}", kind(&modal)));
+            if complete {
+                self.data.presented(ticket, act::number(latest), at);
+                if let Some(modal) = self.data.modal() {
+                    say(format_args!("gui: dialog {}", kind(&modal)));
+                }
             }
         }
         let Some(held) = self.holding else {
@@ -328,7 +352,7 @@ impl App {
                     self.data.enter(press(&provenance));
                 }
             }
-            Intent::Dismiss { .. } => self.close(ticket),
+            Intent::Dismiss { provenance } => self.leave(drawn, &provenance),
             Intent::Paste { provenance } if drawn.answerable() => {
                 self.ask_to_paste(ticket, &provenance);
             }
@@ -368,9 +392,10 @@ impl App {
     /// A button of the dialog `drawn`.
     fn activate(&mut self, drawn: &Dialog, key: &str, provenance: &InputProvenance) {
         let ticket = drawn.ticket();
-        // Cancelling and turning pages answer nothing, and need no wait (S8).
+        // Cancelling and turning pages answer nothing, and need no wait (S8); closing an
+        // error does ([`App::leave`]).
         match key {
-            dialog::CANCEL | dialog::CLOSE => return self.close(ticket),
+            dialog::CANCEL | dialog::CLOSE => return self.leave(drawn, provenance),
             dialog::PREVIOUS | dialog::NEXT if self.entry.ticket == Some(ticket) => {
                 let (page, pages) = drawn.page();
                 self.entry.page = if key == dialog::NEXT {
@@ -444,6 +469,20 @@ impl App {
     fn pick(&mut self, file: usize, side: Side) {
         if let Some(pick) = self.entry.picks.get_mut(file) {
             *pick = Some(side);
+        }
+    }
+
+    /// Esc, Cancel or Close on the dialog `drawn`. Cancelling is instant, but an error
+    /// is dismissed only by a press that [`Shown::takes`] (S9).
+    fn leave(&mut self, drawn: &Dialog, press: &InputProvenance) {
+        let ticket = drawn.ticket();
+        let read = || {
+            self.since.is_some_and(|shown| {
+                shown.takes(ticket, press.event().get(), press.at(), press.repeat())
+            })
+        };
+        if !drawn.is_error() || read() {
+            self.close(ticket);
         }
     }
 

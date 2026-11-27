@@ -860,7 +860,119 @@ fn esc_dismisses_an_error_once_it_is_on_the_display() {
     assert_eq!(screen(&app), "error");
     see(&mut app, 1000);
     escape(&mut app, 1001);
+    assert_eq!(screen(&app), "error", "not read yet");
+    escape(&mut app, 1600);
     assert_eq!(screen(&app), "none");
+}
+
+#[test]
+fn a_double_enter_does_not_close_the_error_it_brought_up() {
+    let mut app = app();
+    start(&mut app, "game.update", &[], 1000);
+    // What was fine when the card was made is refused at the confirmation.
+    app.data.backend_mut().plans.insert(
+        "game.update",
+        Err(ErrorView::failed("Refused", "writing is off now")),
+    );
+    tap(&mut app, Key::Enter, 1600);
+    assert_eq!(screen(&app), "error");
+    assert_eq!(focused(&mut app).as_deref(), Some(dialog::CLOSE));
+    tap(&mut app, Key::Enter, 1700);
+    assert_eq!(screen(&app), "error");
+    assert!(heard(&mut app, "writing is off now"));
+    click(&mut app, "Close", 1800);
+    assert_eq!(screen(&app), "error", "a click is no faster");
+    assist(&mut app, Role::Button, "Close", Action::Click, None, 1900);
+    assert_eq!(screen(&app), "error", "nor is a screen reader's");
+    tap(&mut app, Key::Enter, 2200);
+    assert_eq!(screen(&app), "none");
+    assert_eq!(runs(&mut app), 0);
+}
+
+#[test]
+fn a_double_esc_does_not_close_the_error_queued_behind_a_dialog() {
+    let mut app = app();
+    start(&mut app, "game.update", &[], 1000);
+    app.data
+        .failures()
+        .report(ErrorView::failed("It broke", "no"));
+    app.wake();
+    see(&mut app, 1100);
+    escape(&mut app, 1600);
+    assert_eq!(screen(&app), "error");
+    escape(&mut app, 1700);
+    assert_eq!(screen(&app), "error");
+    escape(&mut app, 2200);
+    assert_eq!(screen(&app), "none");
+}
+
+#[test]
+fn an_error_too_large_for_the_window_can_still_be_closed_after_the_wait() {
+    let mut app = app();
+    app.data
+        .failures()
+        .report(ErrorView::failed("It broke", "very long ".repeat(500)));
+    app.wake();
+    see_at(&mut app, SMALL, 1000);
+    assert!(heard(&mut app, "Make the window larger"));
+    let esc = |app: &mut App, ms| {
+        escape_without_a_frame(app, ms);
+        see_at(app, SMALL, ms + 2);
+    };
+    esc(&mut app, 1100);
+    assert_eq!(screen(&app), "error");
+    esc(&mut app, 1600);
+    assert_eq!(screen(&app), "none");
+}
+
+#[test]
+fn a_hold_that_interaction_ends_with_a_new_frame_is_stopped_at_once() {
+    let mut app = hold_screen();
+    let button = bounds(&mut app, Role::Button, HOLD_LABEL);
+    down(&mut app, button, 2300);
+    see(&mut app, 2310);
+    assert!(app.holding.is_some());
+    app.draw((900.0, 600.0));
+    // Taking the frame over alone, before anything else looks at the hold.
+    app.take_over();
+    assert!(app.holding.is_none());
+    app.data.tick(at(5000));
+    assert_eq!(runs(&mut app), 0, "the model's hold is stopped too");
+}
+
+#[test]
+fn a_hold_interaction_no_longer_has_is_not_ticked() {
+    let mut app = hold_screen();
+    let button = bounds(&mut app, Role::Button, HOLD_LABEL);
+    down(&mut app, button, 2300);
+    see(&mut app, 2310);
+    // Interaction lets go and the intent saying so is lost.
+    let shown = app.shown.clone();
+    let layers = shown.layers();
+    let frame = Layers { layers: &layers };
+    app.interaction.handle(Input::FocusLost, at(2320), &frame);
+    assert!(app.holding.is_some());
+    frames(&mut app, 2350, 4000);
+    assert!(app.holding.is_none());
+    assert_eq!(runs(&mut app), 0);
+}
+
+#[test]
+fn esc_cancels_even_when_nothing_about_a_dialog_can_be_built() {
+    let mut app = app();
+    app.break_dialogs = true;
+    app.break_panels = true;
+    let answered = job_asks(&mut app, confirm_question());
+    app.wake();
+    see(&mut app, 1000);
+    assert_eq!(screen(&app), "prompt");
+    assert!(answers(&answered).is_empty());
+    assert!(heard(&mut app, "A question could not be shown"));
+    assert!(!heard(&mut app, "Verify files"));
+    tap(&mut app, Key::Enter, 1100);
+    assert!(answers(&answered).is_empty());
+    escape(&mut app, 1200);
+    assert_eq!(answers(&answered), [None]);
 }
 
 #[test]

@@ -73,6 +73,22 @@ impl Panel {
         Panel::styled(fonts, size, (heading, TEXT), QUIET, &[])
     }
 
+    /// A layer that draws nothing and holds no text to lay out, for when no panel can
+    /// be built: it only takes the input, and tells assistive technology `heading`.
+    pub(crate) fn bare(fonts: &mut FontSet, heading: &str) -> Result<Panel, PanelError> {
+        let mut root = Node::new(Kind::Box);
+        root.a11y.name = Some(heading.to_owned());
+        let tree = Tree::new("panel", root);
+        let laid = layout(&tree, fonts, Viewport::new(1.0, 1.0), &Scroll::none())?;
+        let mut hasher = DefaultHasher::new();
+        ("bare panel", heading).hash(&mut hasher);
+        Ok(Panel {
+            tree,
+            laid,
+            id: LayerId(hasher.finish()),
+        })
+    }
+
     fn styled(
         fonts: &mut FontSet,
         (width, height): (f32, f32),

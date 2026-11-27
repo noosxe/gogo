@@ -30,6 +30,8 @@ pub(crate) enum DrawError {
     Bind(#[from] BindError),
     #[error(transparent)]
     Layout(#[from] LayoutError),
+    #[error("the app's fallback layer could not be built: {0}")]
+    Fallback(#[from] crate::panel::PanelError),
     /// A source the route reads has no value yet.
     #[error("waiting for data")]
     Loading,
