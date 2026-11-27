@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 use crate::engine::chunk::ChunkSpec;
 use crate::engine::events::ProgressEvent;
+use crate::engine::job::unless_cancelled;
 use crate::engine::limiter::GlobalLimiter;
 use crate::engine::sidecar;
 
@@ -243,12 +244,14 @@ async fn run_chunk(
         if shared.cancel.is_cancelled() {
             return Err(DownloadError::Aborted);
         }
-        let resp = shared
+        let request = shared
             .http
             .get(&shared.url)
             .header(reqwest::header::RANGE, range_header(&chunk.spec))
-            .send()
-            .await;
+            .send();
+        let resp = unless_cancelled(&shared.cancel, request)
+            .await
+            .ok_or(DownloadError::Aborted)?;
 
         let resp = match resp {
             Ok(r) => r,
@@ -316,13 +319,20 @@ async fn stream_chunk(
     let mut pos = chunk.spec.start;
     let mut bytes: u64 = 0;
     let mut stream = resp.bytes_stream();
-    while let Some(item) = stream.next().await {
+    loop {
+        // Raced: a stalled stream must not outlive a cancel.
+        let Some(item) = unless_cancelled(&shared.cancel, stream.next()).await else {
+            return Ok(ChunkOutcome::Aborted);
+        };
+        let Some(item) = item else { break };
         let buf =
             item.map_err(|e| Retryable(format!("stream: {}", crate::redact::describe_error(&e))))?;
-        for slice in split_reads(buf.len() as u64) {
-            shared.limiter.acquire(slice).await;
-        }
-        if shared.cancel.is_cancelled() {
+        let budget = async {
+            for slice in split_reads(buf.len() as u64) {
+                shared.limiter.acquire(slice).await;
+            }
+        };
+        if unless_cancelled(&shared.cancel, budget).await.is_none() {
             // Bitmap reflects only fully-verified chunks — partial writes are simply
             // overwritten by the retry. Nothing to flush here (04 §4: flush at
             // boundaries = per-chunk bitmap saves already done).
@@ -391,7 +401,10 @@ async fn backoff(shared: &Shared, attempts: &mut u32, reason: String) -> Result<
         return Err(DownloadError::RetriesExhausted(reason));
     }
     let delay_ms = (500u64 << (*attempts - 1).min(7)).min(60_000);
-    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+    let sleep = tokio::time::sleep(std::time::Duration::from_millis(delay_ms));
+    unless_cancelled(&shared.cancel, sleep)
+        .await
+        .ok_or(DownloadError::Aborted)?;
     let idle = shared.retry_idle_ms.fetch_add(delay_ms, Ordering::SeqCst) + delay_ms;
     if idle >= NO_PROGRESS_BUDGET_MS {
         return Err(DownloadError::RetriesExhausted(
@@ -419,4 +432,36 @@ fn split_reads(len: u64) -> Vec<u64> {
         remaining -= take;
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_cancel_ends_a_backoff_sleep() {
+        let cancel = CancellationToken::new();
+        let shared = Shared {
+            http: reqwest::Client::new(),
+            dest: PathBuf::new(),
+            url: String::new(),
+            limiter: Arc::new(GlobalLimiter::unlimited()),
+            cancel: cancel.clone(),
+            events: crate::engine::events::channel().0,
+            file_id: Uuid::nil(),
+            retries: 100,
+            bitmap: Mutex::new(Vec::new()),
+            file_bytes: AtomicU64::new(0),
+            retry_idle_ms: AtomicU64::new(0),
+        };
+        // The tenth attempt sleeps for the 60 s cap.
+        let mut attempts = 9;
+        let mut sleeping = std::pin::pin!(backoff(&shared, &mut attempts, "down".into()));
+        assert!(futures::poll!(&mut sleeping).is_pending());
+        cancel.cancel();
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(10), sleeping)
+            .await
+            .expect("the sleep ends");
+        assert!(matches!(ended, Err(DownloadError::Aborted)), "{ended:?}");
+    }
 }

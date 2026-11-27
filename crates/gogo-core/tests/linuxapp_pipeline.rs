@@ -8646,6 +8646,100 @@ mod dlc_add {
         no_leftovers(&w);
     }
 
+    /// One add run as a job (design 25 §5): the fetch and `stop` both follow the
+    /// job's token, as a frontend binds them. `on` sees each event and may cancel.
+    fn run_job(
+        g: &mut Game,
+        plan: &dlc::AddPlan,
+        job: &tokio_util::sync::CancellationToken,
+        on: &mut dyn FnMut(&serde_json::Value),
+        cancel_in_fetch: bool,
+    ) -> Result<AddOutcome, AddError> {
+        let token = job.clone();
+        let fetch = async move |_: DownloadInputs, root: PathBuf| {
+            dlc_files(&root);
+            if cancel_in_fetch {
+                token.cancel();
+            }
+            if token.is_cancelled() {
+                return Err(DepotError::Library("operation was cancelled".into()));
+            }
+            Ok::<(), DepotError>(())
+        };
+        let stop = || job.is_cancelled();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let opts = AddOptions {
+            run_setup: false,
+            ..Default::default()
+        };
+        rt.block_on(dlc::add(
+            g,
+            plan,
+            fetch,
+            &opts,
+            &mut |e| on(&serde_json::to_value(e).unwrap()),
+            &stop,
+        ))
+    }
+
+    /// A job cancelled in the download leaves the game untouched; the app token and
+    /// a sibling job stay live.
+    #[test]
+    fn a_job_cancel_during_the_download_leaves_the_game_untouched() {
+        let w = built("dlc-add-job-dl");
+        let before = tree(&w.game().join("game"));
+        let app = tokio_util::sync::CancellationToken::new();
+        let (job, other) = (app.child_token(), app.child_token());
+        let mut g = game(&w);
+        let p = plan_for(&g, &[DLC]);
+        let result = run_job(&mut g, &p, &job, &mut |_| {}, true);
+        assert!(
+            matches!(result, Err(AddError::Interrupted("download", _))),
+            "{:?}",
+            result.err()
+        );
+        assert!(!app.is_cancelled() && !other.is_cancelled());
+        assert_eq!(tree(&w.game().join("game")), before);
+        assert!(!w.game().join(lay::JOURNAL).exists());
+        assert!(dlc::download_pending(&w.game()), "a rerun resumes");
+    }
+
+    /// A job cancelled mid-lay stops at the next boundary with its journal; when
+    /// the files to finish with are gone, recovery rolls the game back.
+    #[test]
+    fn a_job_cancel_during_the_lay_can_be_rolled_back() {
+        let w = built("dlc-add-job-lay");
+        let before = tree(&w.game().join("game"));
+        let job = tokio_util::sync::CancellationToken::new();
+        let mut g = game(&w);
+        let p = plan_for(&g, &[DLC]);
+        let canceller = job.clone();
+        let mut cancel_on_first_file = move |e: &serde_json::Value| {
+            if e.get("WorkProgress").is_some() {
+                canceller.cancel();
+            }
+        };
+        let result = run_job(&mut g, &p, &job, &mut cancel_on_first_file, false);
+        assert!(
+            matches!(result, Err(AddError::Interrupted("lay", _))),
+            "{:?}",
+            result.err()
+        );
+        assert!(dlc::journal_exists(&w.game()));
+        // The lay stopped with the DLC's new file beside its place; without it
+        // recovery can't go forward.
+        std::fs::remove_file(w.game().join("game/dlc/ep1/a.archive.gogo-new")).unwrap();
+        let mut g = game(&w);
+        let back =
+            dlc::recover(&mut g, gogo::gog::materialize::Reflink::Never, &mut |_| {}).unwrap();
+        assert_eq!(back, Some(lay::Direction::Back));
+        assert_eq!(tree(&w.game().join("game")), before);
+        assert!(content::load(&w.game()).unwrap().unwrap().dlc.is_empty());
+    }
+
     /// One DLC held, one not: only the other is downloaded; the diff counts the held
     /// one as there.
     #[test]

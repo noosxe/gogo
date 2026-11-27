@@ -36,15 +36,26 @@ pub fn split_ask(ask: u64, burst: u64) -> Vec<u64> {
 pub struct GlobalLimiter {
     inner: Option<Arc<Direct>>,
     burst: u64,
+    /// Callers inside [`GlobalLimiter::acquire`] on a limited rate, so a test can
+    /// tell that one is waiting for budget.
+    #[cfg(test)]
+    waiting: std::sync::atomic::AtomicUsize,
 }
 
 impl GlobalLimiter {
+    #[cfg(test)]
+    pub(crate) fn waiting(&self) -> usize {
+        self.waiting.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// `bytes_per_second == 0` → unlimited.
     pub fn new(bytes_per_second: u64) -> Self {
         if bytes_per_second == 0 {
             return Self {
                 inner: None,
                 burst: 0,
+                #[cfg(test)]
+                waiting: Default::default(),
             };
         }
         let rate = u32::try_from(bytes_per_second.min(u32::MAX as u64)).expect("clamped to u32");
@@ -54,6 +65,8 @@ impl GlobalLimiter {
         Self {
             inner: Some(Arc::new(RateLimiter::direct(quota))),
             burst,
+            #[cfg(test)]
+            waiting: Default::default(),
         }
     }
 
@@ -67,11 +80,32 @@ impl GlobalLimiter {
         let Some(limiter) = &self.inner else {
             return;
         };
+        #[cfg(test)]
+        let _waiting = Waiting::enter(&self.waiting);
         for take in split_ask(ask, self.burst) {
             let cells = u32::try_from(take).expect("≤ burst ≤ 1 MiB");
             let cells = std::num::NonZero::new(cells).expect("split yields ≥ 1");
             let _ = limiter.until_n_ready(cells).await;
         }
+    }
+}
+
+/// Counts a caller until it leaves, also when its future is dropped.
+#[cfg(test)]
+struct Waiting<'a>(&'a std::sync::atomic::AtomicUsize);
+
+#[cfg(test)]
+impl<'a> Waiting<'a> {
+    fn enter(count: &'a std::sync::atomic::AtomicUsize) -> Self {
+        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self(count)
+    }
+}
+
+#[cfg(test)]
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 

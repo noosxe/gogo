@@ -1,7 +1,8 @@
 # 25 — Desktop GUI: the app layer (#520)
 
 Status: **accepted** (2026-11-25). The model (`gogo-gui-model`, PR D1 in design 24 §8) is
-built; the core adapter, the shell wiring and per-job cancellation in core (PR D2) are not.
+built, and so is per-job cancellation in core (PR D2, §5). The core adapter is built in part
+(§7, "As built").
 This doc covers how the GUI talks to `gogo-core`: threads, the `Backend` seam, how live
 data reaches a skin without flooding it, the safety flow, and long-running jobs. The crates are in design 24 §2. The
 contract the model implements (sources, actions, kinds, tiers, invariants) is
@@ -313,13 +314,31 @@ app control is told apart by its `DrawnBy::App` part and tree key.
   events. These map onto `Job.steps`, drawn by the stock `step-list` component or by a
   skin's own rebuild.
 - **Toasts** fire on start, finish and failure only.
-- **Per-job cancellation needs a core change (PR D2, #532).** `AppContext.cancel` is one
-  `CancellationToken`, which suits a CLI process running one command. Cancelling one GUI job
-  must not stop the others.
-  - **The change:** the download and pipeline entry points take a token, and the GUI passes
-    `ctx.cancel.child_token()` per job. The CLI keeps passing `ctx.cancel` itself, so its
-    behaviour is unchanged.
-  - **Until it lands,** the GUI runs one download job at a time, and cancel stops it.
+- **Per-job cancellation (PR D2, #532).** `ctx.job()` makes a `JobScope`: a child of
+  `AppContext.cancel` and an event channel of its own. Cancelling the child stops that job
+  alone; cancelling the app token still stops them all.
+  - **Installer downloads** run with `engine::execute_job(ctx, &scope, tasks)`. `Done` and
+    `Warn` carry no job id, which is why each job has its own channel. `engine::plan` still
+    reports on `ctx.events`.
+  - **Depot downloads** pass `scope.cancel_token()` to `depot::run`.
+  - **DLC add, remove and update** bind it to their `stop` closure, and their fetch closure
+    passes it to `depot::fetch_into`.
+  - A cancel interrupts network waits, the rate limiter and backoff sleeps, and files not
+    yet started leave nothing behind.
+  - Builds, setup, rollback, move, runtime installs and cloud saves take no token yet (#652).
+  - The CLI calls `execute`, which uses `ctx.cancel` and `ctx.events` as before.
+- **What `CoreBackend` must do (PR F3).**
+  - Build one `AppContext` and share it: two would each save their own copy of the install
+    records over the other's.
+  - Give it the core's own client (`gog::http()`). A client with a total request timeout
+    cuts long downloads off.
+  - Always stop a job by its token, never by dropping or aborting its future: file tasks
+    and chunk workers are spawned on their own and would write on after the file lock is
+    released.
+  - A token stays cancelled: resume and retry take a new job and plan again.
+  - Run jobs that write the same files (one product's depot cache, a runtime install) one
+    at a time; nothing in core locks them against each other (#653). The depot rate
+    limit is per download, not shared (#656).
 - **Cancel leaves resumable state**, as Ctrl C does in the CLI: sidecars stay (04 §4), and
   the job shows `cancelled` with a resume action.
 
