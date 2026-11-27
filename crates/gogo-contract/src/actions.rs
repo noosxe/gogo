@@ -531,7 +531,7 @@ pub const ACTIONS: &[ActionSpec] = &[
         PlanThenJob,
         Confirm,
     ),
-    act("game.setup", ID, Job, Safe),
+    act("game.setup", ID, PlanThenJob, Confirm),
     esc(
         "game.move",
         &[

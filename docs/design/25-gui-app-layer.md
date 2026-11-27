@@ -302,6 +302,13 @@ app control is told apart by its `DrawnBy::App` part and tree key.
     store each answer as soon as they get it, so the GUI doesn't ask through them:
     `linuxapp::preview` asks the same questions in the same order and writes nothing. The
     answers stay in memory until the user confirms, then go to the pipeline.
+- **Planning can ask.** A backend that can't plan without an answer replies with a
+  question instead of a plan (`PlanReply::ask`). The app asks it, then plans the same call
+  again with every answer so far; the check after a confirmation reuses them. Cancel drops
+  the request, so nothing may be written or stored before the confirm.
+- **Jobs that can't be stopped.** A job can report that it can't be stopped now. The app
+  then refuses `job.cancel` and `job.pause` for it, and refuses to close its window with
+  its own notice until the step ends.
 - **Secret input** (the sign-in code, revealing or editing an env value) stays inside
   depth-A app widgets. The value goes straight to the core and never enters a source or the
   binding scope (S1, S2).

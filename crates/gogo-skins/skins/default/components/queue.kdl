@@ -36,11 +36,11 @@ component "queue-job" params="job" {
             text "{job.error?.hint}" style="tile-sub"
         }
         row gap=6 {
-            button "Pause" style="small" action="job.pause" args="{job.id}" label="Pause {name}" when="{job.state == running or job.state == queued}"
+            button "Pause" style="small" action="job.pause" args="{job.id}" label="Pause {name}" when="{job.stoppable and (job.state == running or job.state == queued)}"
             button "Resume" style="small" action="job.resume" args="{job.id}" label="Resume {name}" when="{job.state == paused or job.state == cancelled}"
             button "Retry" style="small" action="job.retry" args="{job.id}" label="Retry {name}" when="{job.state == failed}"
             button "Repair" style="small" action="game.verify_fix" args="{job.game?.id}" label="Repair {name}" when="{job.state == failed and job.kind == verify and job.error?.class == 'CORRUPT' and job.game}"
-            button "Cancel" style="small ghost" action="job.cancel" args="{job.id}" label="Cancel {name}" when="{job.state == running or job.state == queued or job.state == paused}"
+            button "Cancel" style="small ghost" action="job.cancel" args="{job.id}" label="Cancel {name}" when="{job.stoppable and (job.state == running or job.state == queued or job.state == paused)}"
         }
     }
 }

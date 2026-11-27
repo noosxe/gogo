@@ -154,6 +154,9 @@ pub struct JobStatus {
     pub files: Vec<FileProgress>,
     /// Why it failed.
     pub error: Option<ErrorView>,
+    /// Whether it can be cancelled or paused now. While it can't, the app refuses
+    /// both and refuses to close its window.
+    pub stoppable: bool,
 }
 
 impl JobStatus {
@@ -171,6 +174,7 @@ impl JobStatus {
             fraction: None,
             files: Vec::new(),
             error: None,
+            stoppable: true,
         }
     }
 
@@ -208,6 +212,7 @@ impl JobStatus {
             ("fraction", opt(self.fraction.map(Value::Num))),
             ("files", Value::List(files.collect())),
             ("error", opt(self.error.as_ref().map(ErrorView::to_value))),
+            ("stoppable", Value::Bool(self.stoppable)),
         ])
     }
 }
@@ -316,6 +321,14 @@ impl fmt::Debug for Entry {
     }
 }
 
+impl Entry {
+    /// The job's latest report says it is running and can't be stopped.
+    fn busy(&self) -> bool {
+        let latest = lock(&self.latest);
+        !latest.status.stoppable && !latest.status.state.is_terminal()
+    }
+}
+
 /// A job whose state moved between two drains. States passed through in between are not
 /// reported; a terminal state always is.
 #[derive(Debug, Clone, PartialEq)]
@@ -398,9 +411,26 @@ impl JobTable {
         self.entries.iter_mut().find(|e| e.id == *id)
     }
 
-    /// Cancel one job. A job that has already ended is left alone. `false` if there is no
-    /// such job.
+    /// `false` while job `id` is running something that must not be stopped. A job
+    /// that ended, or that there is none of, has nothing to protect.
+    pub fn stoppable(&self, id: &JobId) -> bool {
+        self.entries
+            .iter()
+            .find(|e| e.id == *id)
+            .is_none_or(|e| !Entry::busy(e))
+    }
+
+    /// Whether any job is running something that must not be stopped.
+    pub fn unstoppable(&self) -> bool {
+        self.entries.iter().any(Entry::busy)
+    }
+
+    /// Cancel one job. A job that has already ended is left alone, and so is one that
+    /// can't be stopped now. `false` if there is no such job or it can't be stopped.
     pub fn cancel(&mut self, id: &JobId) -> bool {
+        if !self.stoppable(id) {
+            return false;
+        }
         let Some(e) = self.find(id) else {
             return false;
         };
@@ -433,8 +463,11 @@ impl JobTable {
         let Some(e) = self.find(id) else {
             return false;
         };
-        let state = lock(&e.latest).status.state;
-        let ok = matches!(state, JobState::Queued | JobState::Running);
+        let (state, stoppable) = {
+            let latest = lock(&e.latest);
+            (latest.status.state, latest.status.stoppable)
+        };
+        let ok = stoppable && matches!(state, JobState::Queued | JobState::Running);
         if ok {
             e.control.pause();
         }

@@ -654,6 +654,7 @@ pub static JOB: Shape = shape(
         f("fraction", T::Option(&T::Fraction)),
         f("files", T::List(&T::Record(&FILE_PROGRESS))),
         f("error", T::Option(&T::Record(&ERROR_VIEW))),
+        f("stoppable", T::Bool),
     ],
 );
 static JOB_T: T = T::Record(&JOB);
