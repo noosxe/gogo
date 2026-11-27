@@ -126,6 +126,8 @@ all chunks done → finalize
   capacity (governor rejects larger asks with `InsufficientCapacity` — review A4): a read
   buffer is consumed in ≤ burst-sized slices, so the configured rate holds exactly, even at
   the 32 KiB/s floor (05 §3).
+  A long-running frontend can change the rate while files download (`set_rate`); an ask
+  already waiting finishes at the old rate.
 - Progress accounting happens on **written** bytes (not requested), which keeps bars/ETA honest
   under limiting.
 - Progress (done-bits) persists after every chunk completion to `{dest}.part.bitmap`
@@ -161,6 +163,7 @@ only persisted progress.
   "os": "windows",
   "language": "en",
   "version": "2.2.2",
+  "listed_size": 723517440,
   "build": 85647,
   "dest_name": "setup_hot_brass_2.2.2_(85647).exe",
   "total_size": 724243232,
@@ -171,6 +174,11 @@ only persisted progress.
   ]
 }
 ```
+
+`version` and `listed_size` are the catalog's, as listed when the sidecar was written. GOG
+keeps file ids across versions, so a local read (the disk preflight, a frontend's plan)
+counts a `.part` only when both still match; a sidecar without them counts only when its
+`total_size` equals the listed size.
 
 Orphaned `.part` files (no sidecar, or sidecar for a different product) are reported by
 `gogo verify` and removed with `--fix`.
@@ -213,7 +221,9 @@ Orphaned `.part` files (no sidecar, or sidecar for a different product) are repo
 
 Before executing: `fs4::available_space(dest volume)` vs Σ(remaining bytes of planned tasks +
 100 MiB margin). Insufficient → list shortfall, exit 6, download nothing. `--no-disk-check`
-skips (for exotic filesystems where the call lies).
+skips (for exotic filesystems where the call lies). For a resumed file, only the chunks its
+bitmap records as done are subtracted (the `.part` is sparse, so its length says nothing),
+and only when the sidecar was written for the version and size the catalog lists now (§5).
 
 The `available_space` call sits behind a small `FreeSpace` trait (fs4 impl in production,
 mock impl in tests — review D4).

@@ -8,10 +8,33 @@ pub mod cache;
 pub mod local;
 pub mod records;
 
+/// `GOGO_HOME`, or the directory a test put in its place.
+pub(crate) fn gogo_home() -> Option<std::ffi::OsString> {
+    #[cfg(feature = "test-util")]
+    if let Some(home) = TEST_HOME.get() {
+        return Some(home.clone().into_os_string());
+    }
+    std::env::var_os("GOGO_HOME")
+}
+
+#[cfg(feature = "test-util")]
+static TEST_HOME: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Keep this process's state, cache and data files under `dir`, for the tests of
+/// crates that cannot set `GOGO_HOME` without `unsafe`.
+///
+/// The first call wins for the whole process, and returns the directory in effect.
+/// Tests that need a directory of their own rely on nextest running each test in its
+/// own process; under `cargo test` they would share the first one.
+#[cfg(feature = "test-util")]
+pub fn set_test_home(dir: std::path::PathBuf) -> std::path::PathBuf {
+    TEST_HOME.get_or_init(|| dir).clone()
+}
+
 /// Base dir for machine state (`docs/design/06` §1): `$XDG_STATE_HOME/gogo` on Linux,
 /// `~/Library/Application Support/gogo` on macOS; `GOGO_HOME` collapses everything.
 pub fn state_dir() -> std::path::PathBuf {
-    if let Some(home) = std::env::var_os("GOGO_HOME") {
+    if let Some(home) = gogo_home() {
         return std::path::PathBuf::from(home);
     }
     if let Some(dir) = dirs::state_dir() {
@@ -28,7 +51,7 @@ pub fn state_dir() -> std::path::PathBuf {
 /// `~/Library/Application Support/gogo` on macOS, where it is the same dir
 /// as [`state_dir`]. `GOGO_HOME` collapses everything.
 pub fn data_root() -> std::path::PathBuf {
-    data_root_from(std::env::var_os("GOGO_HOME"), dirs::data_dir())
+    data_root_from(gogo_home(), dirs::data_dir())
 }
 
 fn data_root_from(
@@ -102,10 +125,30 @@ impl State {
     /// Atomic save: temp + fsync + rename, under the advisory state lock (B5: held
     /// only for the short write window).
     pub fn save(&self) -> anyhow::Result<()> {
+        let _lock = StateLock::exclusive()?;
+        self.write()
+    }
+
+    /// Change the state on disk: re-read it, apply `change` and save, all under
+    /// the exclusive lock, so records another process wrote meanwhile survive.
+    /// `self` ends up holding what was saved. A file that cannot be read keeps
+    /// `self` as the base.
+    pub fn update(&mut self, change: impl FnOnce(&mut Self)) -> anyhow::Result<()> {
+        let _lock = StateLock::exclusive()?;
+        if let Ok(raw) = std::fs::read_to_string(Self::path())
+            && let Ok(on_disk) = serde_json::from_str(&raw)
+        {
+            *self = on_disk;
+        }
+        change(self);
+        self.write()
+    }
+
+    /// The write itself; the caller holds the exclusive lock.
+    fn write(&self) -> anyhow::Result<()> {
         use std::io::Write;
 
         let path = Self::path();
-        let _lock = StateLock::exclusive()?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }

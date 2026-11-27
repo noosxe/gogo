@@ -130,7 +130,7 @@ stream the CLI renders:
 ```rust
 pub enum ProgressEvent {
     PlanReady  { files: u32, total_bytes: u64, skipped_bytes: u64 },
-    FileStart  { id: Uuid, name: String, total_bytes: u64 },
+    FileStart  { id: Uuid, name: String, total_bytes: u64, done_bytes: u64 }, // done: left by an earlier run
     ChunkDone  { id: Uuid, chunk: u32, bytes: u32, file_bytes: u64, md5_ok: bool }, // file_bytes cumulative (lag self-heal — D2)
     FileDone   { id: Uuid, path: PathBuf },
     FileFailed { id: Uuid, error: String },

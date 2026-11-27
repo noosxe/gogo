@@ -14,8 +14,9 @@ use crate::engine::events::ProgressEvent;
 use crate::engine::job::JobScope;
 use crate::engine::limiter::GlobalLimiter;
 use crate::engine::task::FileTask;
-use crate::engine::tests::{TestEnv, checksum_xml, md5_hex, task_for, test_ctx};
-use crate::engine::{Summary, execute_job, sidecar};
+use crate::engine::tests::{TestEnv, TinySpace, checksum_xml, md5_hex, task_for, test_ctx};
+use crate::engine::{Partial, Summary, execute_job, partial, sidecar};
+use crate::state::State;
 
 /// Far longer than any test waits: a request that only a cancel ends.
 const NEVER: Duration = Duration::from_secs(60);
@@ -348,4 +349,78 @@ async fn a_cancel_ends_a_stalled_stream() {
     job.cancel_token().cancel();
     assert_cancelled(finished(run).await);
     assert_resumable(&root.path().join("x.bin"));
+}
+
+#[tokio::test]
+async fn a_resume_counts_what_the_cancelled_run_left() {
+    let _env = TestEnv::new();
+    let server = MockServer::start().await;
+    mount_file(&server, "a", [Duration::ZERO, NEVER, NEVER]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = test_ctx(dir.path()).await;
+    let file = task(&server, "a", dir.path());
+    assert_eq!(partial(&file), None);
+
+    let job = ctx.job();
+    let mut events = job.subscribe();
+    let run = start(&ctx, &job, file.clone());
+    verified(&mut events, 1).await;
+    job.cancel_token().cancel();
+    assert_cancelled(finished(run).await);
+    assert_eq!(
+        partial(&file),
+        Some(Partial {
+            name: "a.bin".into(),
+            done: 5,
+            total: 15,
+        })
+    );
+
+    // The same file id listed with a new size or version has nothing on disk.
+    let mut bigger = file.clone();
+    bigger.total_size = 30;
+    assert_eq!(partial(&bigger), None);
+    let mut newer = file.clone();
+    newer.entry.version = Some("2.0".into());
+    assert_eq!(partial(&newer), None);
+
+    // Room for the ten bytes that are left is enough.
+    let mut ctx = Arc::into_inner(ctx).expect("the run is over");
+    ctx.disk_check = true;
+    ctx.free_space = Arc::new(TinySpace(10));
+    server.reset().await;
+    mount_file(&server, "a", [Duration::ZERO; 3]).await;
+    let ctx = Arc::new(ctx);
+
+    let job = ctx.job();
+    let mut events = job.subscribe();
+    let summary = finished(start(&ctx, &job, file)).await;
+    assert_eq!((summary.ok, summary.failed), (1, 0), "{summary:?}");
+    let ProgressEvent::FileStart { done_bytes, .. } = events.recv().await.unwrap() else {
+        panic!("the file starts first");
+    };
+    assert_eq!(done_bytes, 5);
+}
+
+#[tokio::test]
+async fn a_finished_file_keeps_the_records_written_meanwhile() {
+    let _env = TestEnv::new();
+    let server = MockServer::start().await;
+    mount_file(&server, "a", [Duration::ZERO; 3]).await;
+    mount_file(&server, "b", [Duration::ZERO; 3]).await;
+    let dir = tempfile::tempdir().unwrap();
+    // Two contexts, as a long-lived app and a command run beside it have.
+    let app = test_ctx(dir.path()).await;
+    let command = test_ctx(dir.path()).await;
+
+    let first = start(&command, &command.job(), task(&server, "a", dir.path()));
+    assert_eq!(finished(first).await.ok, 1);
+    let second = start(&app, &app.job(), task(&server, "b", dir.path()));
+    assert_eq!(finished(second).await.ok, 1);
+
+    let saved = State::load().unwrap().installs;
+    let mut files: Vec<&str> = saved.iter().map(|r| r.file_id.as_str()).collect();
+    files.sort_unstable();
+    assert_eq!(files, ["a", "b"]);
+    assert_eq!(app.state.lock().unwrap().installs.len(), 2);
 }
