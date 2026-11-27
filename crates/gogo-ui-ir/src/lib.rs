@@ -64,5 +64,5 @@ pub use paint::{Color, Effect, Fill, GlowLayer, GradientStop, Paint, Shape, Stro
 pub use text::{Bloom, Gesture, Motion, TextAlign, TextMarks, TextStyle};
 pub use tree::{
     ActionRef, AppPart, DrawnBy, Fit, ImageSource, Kind, Node, NodeId, PartId, SCROLLBAR_WIDTH,
-    ScrollSpec, Tree, TreeError, WidgetId,
+    ScrollSpec, Tree, TreeError, VirtualList, WidgetId,
 };

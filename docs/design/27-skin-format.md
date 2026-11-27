@@ -232,6 +232,7 @@ Only the elements below exist. Anything else is a load error.
 | `grid` | CSS grid: `columns="1fr 420"` or `columns=3` |
 | `layer` | children stacked on top of each other: a one-cell grid (`1fr × 1fr`), every child in the same cell; `inset` children are placed absolutely |
 | `scroll` | a vertical scroll container: a column, unless a style says otherwise, whose content is clipped to the inside of its border. It needs a bounded height to scroll (`grow`, `h`, or a parent that gives it one) and keeps a gutter at its right edge for the scrollbar, styled by `scrollbar` and `scrollbar-thumb` (§5.1) |
+| `list` | a long list of items of one height, drawn as far as it is seen (§5.4) |
 | `outlet` | Only in the `shell` route: where the current route is drawn |
 | `spacer`, `divider` | flexible space; a rule |
 
@@ -346,6 +347,33 @@ data-table label="Builds" rows="{game.builds($id) | take 4}" highlight="{row.thi
 - It holds only `col` children, at least one, and `use "data-table"` is an error.
 - A `col` has a title and either a cell template or a body, not both; `w=` and `mono=` are
   its properties.
+- **Virtualised** when it is inside a `scroll` and the `table-row` style has a fixed height
+  (`h` in px): only the rows around what is in view are drawn (below). Its rows then sit
+  flush, and each keeps that height.
+
+**`list`.** A long list of items of one height:
+
+```kdl
+list "g" in="{games}" columns=4 item-h=326 gap=@space.3 label="Games" {
+    use "game-card" game="{g}"
+}
+```
+
+- The item is bound to the name, as in `each`. `in=` is one expression.
+- `item-h` is the height of a row in px (1 to 10000), and is required. `columns` (default
+  1) items sit side by side in a row, in equal widths; `gap` spaces rows and columns.
+- Each item's content sits in a box that height; what is taller is clipped.
+- A `list` can't be inside another list's item, and a `data-table` there is not
+  virtualised.
+
+**Virtualised lists.** Inside a `scroll`, a `list` (and a table as above) draws the rows
+in view, three more on each side, the first and the last row, and the focused item with
+its neighbours; empty space stands for the rest, so the scrollbar covers the whole list.
+The cost of a frame follows the window's size, not the list's length. It holds up to
+**100 000** items. Keys are by an item's place in the whole list, so focus stays on it as
+the list scrolls. Tab never skips items that aren't drawn yet, and a `key=` shortcut works
+only on what is drawn and seen. Outside a `scroll`, a list is drawn whole, up to the cap
+of §8.
 
 ### 5.5 App widgets
 
@@ -683,10 +711,11 @@ three nested `each`es over lists of 1 000 whose bodies draw nothing, fails to bi
 falls back) instead of running for as long as the data allows. The node and depth limits of
 §9.1 apply as well.
 
-**The row cap is data-dependent, so it truncates instead.** One `each` or `data-table`
-draws at most **1 000** items. A longer list is cut at 1 000, silently, at bind time: data
-can't make a valid skin fail to load. Virtualised lists, which draw only what is visible
-and lift the cap, are planned with scrolling (#545).
+**The row cap is data-dependent, so it truncates instead.** One `each`, and one
+`data-table` or `list` that is not virtualised, draws at most **1 000** items. A longer
+list is cut at 1 000, silently, at bind time: data can't make a valid skin fail to load.
+Virtualised lists (§5.4) draw only what is in view and hold up to 100 000. `take` in an
+expression is still capped at 1 000.
 
 ## 9. Loading and validation
 

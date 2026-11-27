@@ -262,6 +262,9 @@ app control is told apart by its `DrawnBy::App` part and tree key.
     view; a hold control it first only brings into view, and arms once seen.
   - Offsets last for the session, per route and parameters for what holds the `outlet`
     or sits in it.
+  - **Virtualised lists** (design 27 §5.4): the app binds each with the rows the last
+    layout showed, checks them against the new one and binds again after a jump. Tab
+    stops before items that aren't bound and scrolls on; the next press goes further.
 - **Setting a text field** through AccessKit (its value, its selection or the selected
   text) is not a press and answers nothing.
 - **Text fields** the app draws take input only while focused, as edit intents: the

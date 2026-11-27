@@ -339,6 +339,131 @@ fn a_scroll_element_makes_a_scroll_container() {
     b.tree.validate().expect("a valid tree");
 }
 
+/// The game route with `node` in a scroll container, bound with `lists`.
+fn windowed(node: &str, n: usize, lists: &gogo_skin::Lists) -> Bound {
+    let mut f = base();
+    game_insert(&mut f, &format!("scroll {{\n{node}\n}}"));
+    let pkg = skin("default", f);
+    let mut scope = FixtureScope::new();
+    scope.set_call("game.builds", GAME_ID, builds(n));
+    let ui = UiState::defaults(&pkg.manifest);
+    pkg.bind_windowed(
+        "game",
+        &Binding {
+            scope: &scope,
+            ui: &ui,
+            mode: Mode::Dark,
+            default: None,
+        },
+        lists,
+    )
+    .unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// The indices of the bound items of the list whose key holds `of`.
+fn items_of(t: &Tree, of: &str) -> Vec<u32> {
+    t.iter()
+        .filter(|&id| t.key(id).is_some_and(|k| k.contains(of)))
+        .filter_map(|id| t.get(id)?.item)
+        .collect()
+}
+
+const LIST: &str = "list \"b\" in=\"{game.builds($id)}\" columns=2 item-h=50 gap=10 label=\"All\" {\n\
+     button \"Get {b.version}\" action=\"library.refresh\" id=\"get\"\n}";
+
+#[test]
+fn a_list_binds_the_rows_in_view_the_ends_and_those_by_the_focus() {
+    let lists = gogo_skin::Lists {
+        height: 100.0,
+        ..gogo_skin::Lists::default()
+    };
+    let b = windowed(LIST, 5_000, &lists);
+    let list = b
+        .tree
+        .iter()
+        .find(|&id| b.tree.get(id).is_some_and(|n| n.list.is_some()))
+        .expect("the list");
+    let key = b.tree.key(list).expect("a key").to_owned();
+    let meta = b.tree.get(list).and_then(|n| n.list.clone()).expect("meta");
+    assert_eq!((meta.count, meta.columns, meta.gap), (5_000, 2, 10.0));
+    // Rows 0 and 1 seen, three more, and the last row.
+    assert_eq!(meta.window, 0..5);
+    let mut want: Vec<u32> = (0..10).collect();
+    want.extend([4_998, 4_999]);
+    assert_eq!(items_of(&b.tree, &key), want);
+
+    // Elsewhere, with the focus on an item far away.
+    let there = gogo_skin::Lists {
+        height: 100.0,
+        shown: [(key.clone(), 100..102)].into(),
+        focus: Some(format!("{key}/i#1001/button.0")),
+    };
+    let b = windowed(LIST, 5_000, &there);
+    let mut want = vec![0, 1];
+    want.extend(194..210);
+    // Row 500 holds item 1001: it and its neighbours.
+    want.extend(998..1_004);
+    want.extend([4_998, 4_999]);
+    want.sort_unstable();
+    assert_eq!(items_of(&b.tree, &key), want);
+    // Keys are by the item's place in the whole list.
+    assert!(b.tree.by_key(&format!("{key}/i#194/button.0")).is_some());
+    b.tree.validate().expect("a valid tree");
+}
+
+#[test]
+fn a_table_with_rows_of_one_height_is_virtualised_in_a_scroll_container() {
+    let table =
+        "data-table label=\"All\" rows=\"{game.builds($id)}\" { col \"V\" \"{row.version}\" }";
+    let lists = gogo_skin::Lists {
+        height: 88.0,
+        ..gogo_skin::Lists::default()
+    };
+    let b = windowed(table, 3_000, &lists);
+    let body = b
+        .tree
+        .iter()
+        .find(|&id| b.tree.get(id).is_some_and(|n| n.list.is_some()))
+        .expect("the body");
+    let key = b.tree.key(body).expect("a key").to_owned();
+    assert!(key.ends_with("/body"), "{key}");
+    let rows = items_of(&b.tree, key.trim_end_matches("/body"));
+    assert_eq!(rows, [0, 1, 2, 3, 4, 2_999]);
+    assert!(b.tree.len() < 400, "{}", b.tree.len());
+}
+
+#[test]
+fn outside_a_scroll_container_a_list_is_whole_up_to_the_cap() {
+    let mut f = base();
+    game_insert(&mut f, LIST);
+    let pkg = skin("default", f);
+    let mut scope = FixtureScope::new();
+    scope.set_call("game.builds", GAME_ID, builds(1_500));
+    let ui = UiState::defaults(&pkg.manifest);
+    let b = pkg
+        .bind_windowed(
+            "game",
+            &Binding {
+                scope: &scope,
+                ui: &ui,
+                mode: Mode::Dark,
+                default: None,
+            },
+            &gogo_skin::Lists::default(),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert!(
+        b.tree
+            .iter()
+            .all(|id| b.tree.get(id).is_some_and(|n| n.list.is_none()))
+    );
+    let buttons = keys(&b.tree)
+        .iter()
+        .filter(|k| k.contains("/i#") && k.ends_with("button.0"))
+        .count();
+    assert_eq!(buttons, 1_000);
+}
+
 #[test]
 fn a_list_is_cut_at_a_thousand_silently() {
     let mut f = base();

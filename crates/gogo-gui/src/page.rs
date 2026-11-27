@@ -1,12 +1,14 @@
 //! From a skin and the model's data to a screen: bind, lay out, build (design 24 §2,
 //! design 25 §5), and which skin is on screen.
 
+use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
+use std::ops::Range;
 use std::path::Path;
 
 use gogo_skin::{
-    ActionTable, BindError, Binding, Bound, DefaultSkin, FallbackWhy, Mode, SkinPackage, UiState,
-    UiStateError, Value,
+    ActionTable, BindError, Binding, Bound, DefaultSkin, FallbackWhy, Lists, Mode, SkinPackage,
+    UiState, UiStateError, Value,
 };
 use gogo_ui_interact::{Interaction, Layer, LayerId, LayerKind};
 use gogo_ui_ir::{NodeId, Tree};
@@ -20,6 +22,10 @@ use crate::data::Data;
 /// A bound on binding again for sources seen for the first time. A bind stops at the first
 /// value it is missing, so a route's first frame takes one pass per source it reads.
 const PASSES: usize = 256;
+
+/// How often a frame is bound to find the rows its lists show: once is enough unless
+/// a list jumped, twice then.
+const WINDOW_PASSES: usize = 3;
 
 /// Why there is no frame.
 #[derive(Debug, thiserror::Error)]
@@ -90,6 +96,8 @@ pub(crate) struct Page {
     /// The skin asked for; `None` draws the built-in one.
     active: Option<Skin>,
     pub(crate) fonts: FontSet,
+    /// The rows of each virtualised list the last layout showed, by the list's key.
+    rows: HashMap<String, Range<u32>>,
 }
 
 impl Page {
@@ -100,6 +108,7 @@ impl Page {
             .map_err(|r| DrawError::BuiltIn(error_lines(&r).join("; ")))?;
         Ok(Page {
             default: Skin::new(package),
+            rows: HashMap::new(),
             active: None,
             fonts: FontSet::bundled(),
         })
@@ -158,7 +167,7 @@ impl Page {
             ui: s.ui.clone(),
         });
         let result = self.load(dir).and_then(|()| {
-            let bound = match self.bind(data, route) {
+            let bound = match self.bind(data, route, &Lists::default()) {
                 (Ok(bound), _) => bound,
                 // What fails while data is on the way says nothing about the skin.
                 (Err(_), true) => return Ok(()),
@@ -188,7 +197,12 @@ impl Page {
 
     /// Binds `route`, watching every source the skin reads along the way. The flag
     /// says that one of them has no value yet.
-    fn bind(&self, data: &mut Data, route: &str) -> (Result<Bound, BindError>, bool) {
+    fn bind(
+        &self,
+        data: &mut Data,
+        route: &str,
+        lists: &Lists,
+    ) -> (Result<Bound, BindError>, bool) {
         let skin = self.active.as_ref().unwrap_or(&self.default);
         let default = DefaultSkin {
             skin: &self.default.package,
@@ -197,7 +211,7 @@ impl Page {
         let mut passes = 0;
         loop {
             let scope = data.scope();
-            let bound = skin.package.bind_with_fallback(
+            let bound = skin.package.bind_windowed(
                 route,
                 &Binding {
                     scope: &scope,
@@ -205,6 +219,7 @@ impl Page {
                     mode: Mode::Dark,
                     default: Some(default),
                 },
+                lists,
             );
             let asked = scope.asked();
             passes += 1;
@@ -235,24 +250,58 @@ impl Page {
         (width, height): (f32, f32),
         input: Option<&Interaction>,
     ) -> Result<Screen, DrawError> {
-        let bound = match self.bind(data, route) {
-            (_, true) => return Err(DrawError::Loading),
-            (bound, false) => bound?,
+        // Which rows of a long list to bind follows from where the last frame had them,
+        // and is checked once the new one is laid out: a jump binds again.
+        let mut lists = Lists {
+            height,
+            shown: self.rows.clone(),
+            focus: None,
         };
-        let location = data.location();
-        let id = LayerId(hash(&format!("{} {:?}", location.route, location.params)));
-        let mut scroll = Scroll::none();
-        for (key, y) in input.into_iter().flat_map(|input| input.offsets(id)) {
-            if let Some(node) = bound.tree.by_key(key) {
-                scroll.set(node, 0.0, y);
+        let mut passes = 0;
+        let (bound, laid, id) = loop {
+            let location = data.location();
+            let id = LayerId(hash(&format!("{} {:?}", location.route, location.params)));
+            lists.focus = input
+                .and_then(Interaction::focus)
+                .filter(|t| t.layer == id)
+                .map(|t| t.key.clone());
+            let bound = match self.bind(data, route, &lists) {
+                (_, true) => return Err(DrawError::Loading),
+                (bound, false) => bound?,
+            };
+            let mut scroll = Scroll::none();
+            for (key, y) in input.into_iter().flat_map(|input| input.offsets(id)) {
+                if let Some(node) = bound.tree.by_key(key) {
+                    scroll.set(node, 0.0, y);
+                }
             }
-        }
-        let laid = layout(
-            &bound.tree,
-            &mut self.fonts,
-            Viewport::new(width, height),
-            &scroll,
-        )?;
+            let laid = layout(
+                &bound.tree,
+                &mut self.fonts,
+                Viewport::new(width, height),
+                &scroll,
+            )?;
+            let mut stale = false;
+            lists.shown.clear();
+            for node in bound.tree.iter() {
+                let Some(list) = bound.tree.get(node).and_then(|n| n.list.as_ref()) else {
+                    continue;
+                };
+                let (Some(key), Some(need)) =
+                    (bound.tree.key(node), laid.rows_needed(&bound.tree, node))
+                else {
+                    continue;
+                };
+                stale |= !need.is_empty()
+                    && (need.start < list.window.start || need.end > list.window.end);
+                lists.shown.insert(key.to_owned(), need);
+            }
+            passes += 1;
+            if !stale || passes == WINDOW_PASSES {
+                break (bound, laid, id);
+            }
+        };
+        self.rows = lists.shown;
         let identity = bound
             .actions
             .iter()
@@ -284,6 +333,63 @@ mod tests {
             fs::write(path, data).expect("a write");
         }
         root
+    }
+
+    #[test]
+    fn a_long_library_is_bound_where_the_route_is_scrolled() {
+        use gogo_ui_interact::{Config, Frame, Input, Key, Modifiers};
+
+        let mut data = Data::fixture_with(|| {}, Some(5_000)).expect("fixture data");
+        let mut page = Page::new().expect("the built-in skin");
+        let go = gogo_contract::actions::action("nav.go")
+            .map(|spec| gogo_gui_model::Invocation::new(spec).arg("route", Value::str("library")))
+            .expect("nav.go");
+        data.invoke(&go, gogo_gui_model::InputEvent(100));
+        let size = (1280.0, 800.0);
+        let mut input = Interaction::new(Config::default());
+        let titles = |screen: &Screen| {
+            screen
+                .tree
+                .iter()
+                .filter_map(|id| match &screen.tree.get(id)?.kind {
+                    gogo_ui_ir::Kind::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let top = page
+            .screen(&mut data, "shell", size, Some(&input))
+            .expect("draws");
+        assert!(titles(&top).iter().any(|t| t == "Example Quest"));
+        // The last row is bound besides what is seen, and little else.
+        assert!(titles(&top).iter().any(|t| t == "Filler Game 4999"));
+        assert!(!titles(&top).iter().any(|t| t == "Filler Game 100"));
+
+        // End: the last games are bound and in sight in one frame.
+        let layers = [top.layer()];
+        input.handle(
+            Input::KeyDown {
+                key: Key::End,
+                mods: Modifiers::default(),
+                repeat: false,
+            },
+            std::time::Duration::from_secs(1),
+            &Frame { layers: &layers },
+        );
+        let end = page
+            .screen(&mut data, "shell", size, Some(&input))
+            .expect("draws");
+        let last = end
+            .tree
+            .iter()
+            .find(|&id| {
+                matches!(&end.tree.get(id).expect("a node").kind,
+                    gogo_ui_ir::Kind::Text { text, .. } if text == "Filler Game 4999")
+            })
+            .expect("the last game is bound");
+        let seen = end.laid.get(last).expect("placed").visible;
+        assert!(seen.height() > 0.0);
+        assert!(end.tree.len() < 2_000, "{}", end.tree.len());
     }
 
     #[test]

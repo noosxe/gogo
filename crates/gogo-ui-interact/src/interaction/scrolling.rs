@@ -69,6 +69,34 @@ impl Interaction {
         }
     }
 
+    /// Tab on its way to `next`. Where it would pass over items of a virtualised list
+    /// that aren't there yet, focus stays and the list scrolls on; the next press goes
+    /// further.
+    pub(super) fn tab_to(
+        &mut self,
+        frame: &Frame<'_>,
+        next: Target,
+        back: bool,
+        out: &mut Response,
+    ) {
+        let Some((layer, to)) = super::find(frame, next.layer, &next.key) else {
+            return;
+        };
+        let from = self
+            .focus
+            .as_ref()
+            .filter(|f| f.layer == layer.id)
+            .and_then(|f| layer.tree.by_key(&f.key));
+        self.visible = true;
+        match scroll::passed_over(layer, from, to, back) {
+            Some(item) => self.reveal(layer, item, out),
+            None => {
+                self.reveal(layer, to, out);
+                self.set_focus(Some(next), out);
+            }
+        }
+    }
+
     pub(super) fn wheel(&mut self, at: (f64, f64), dy: f64, frame: &Frame<'_>, out: &mut Response) {
         if !dy.is_finite() || dy == 0.0 {
             return;

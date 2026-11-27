@@ -7,7 +7,7 @@ use gogo_ui_interact::{
     Frame, Identity, Input, Intent, Key, Layer, LayerId, LayerKind, Motion, PointerButton, Request,
     RequestKind, SCROLL_LINE, TextEdit,
 };
-use gogo_ui_ir::{A11y, Dim, Direction, LayoutStyle, Node, Role, ScrollSpec, Tree};
+use gogo_ui_ir::{A11y, Dim, Direction, LayoutStyle, Node, Role, ScrollSpec, Tree, VirtualList};
 use gogo_ui_layout::{Laid, Scroll, ScrollBox, Viewport, layout};
 use gogo_ui_text::FontSet;
 
@@ -514,4 +514,81 @@ fn a_focus_move_brings_a_control_into_view_through_both_containers() {
     assert_eq!(inner, 120.0);
     assert!(outer > 0.0 && outer <= 60.0, "{outer}");
     assert_eq!(p.seen("b4"), 40.0, "wholly in view");
+}
+
+/// A virtualised list of 100 items 40 px high, of which `bound` are there, in a
+/// container 100 px high between two buttons.
+fn virtual_tree(bound: &[u32]) -> Tree {
+    let mut style = LayoutStyle::default();
+    style.width = Dim::Px(800.0);
+    style.height = Dim::Px(600.0);
+    style.direction = Direction::Column;
+    let mut tree = Tree::new("root", Node::container().with_layout(style));
+    let root = tree.root();
+    tree.add_child(root, "top", button("top", 20)).expect("add");
+    let mut scroller = Node::container();
+    scroller.layout.width = Dim::Px(200.0);
+    scroller.layout.height = Dim::Px(100.0);
+    scroller.layout.shrink = 0.0;
+    scroller.scroll = Some(ScrollSpec::default());
+    let scroller = tree.add_child(root, "list", scroller).expect("add");
+    let mut list = Node::container();
+    list.layout.direction = Direction::Column;
+    list.layout.shrink = 0.0;
+    list.list = Some(VirtualList {
+        count: 100,
+        columns: 1,
+        item_h: 40.0,
+        gap: 0.0,
+        window: 0..3,
+    });
+    let list = tree.add_child(scroller, "items", list).expect("add");
+    let mut next = 0;
+    for &i in bound {
+        if i > next {
+            let mut gap = Node::container();
+            gap.layout.height = Dim::Px((i - next) as f32 * 40.0);
+            gap.layout.shrink = 0.0;
+            tree.add_child(list, format!("gap{next}"), gap)
+                .expect("add");
+        }
+        next = i + 1;
+        let mut item = button(&format!("i{i}"), i % 20);
+        item.item = Some(i);
+        tree.add_child(list, format!("i{i}"), item).expect("add");
+    }
+    tree
+}
+
+#[test]
+fn tab_does_not_pass_over_items_that_are_not_there_yet() {
+    let tree = virtual_tree(&[0, 1, 2, 99]);
+    let mut d = Driver::new();
+    let p = page(&d, &tree);
+    for want in ["top", "i0", "i1", "i2"] {
+        assert_eq!(on(&p, |f| d.tab(f)), want);
+    }
+    // Items 3 to 98 come before i99: focus waits, and the list moves on.
+    let p = page(&d, &tree);
+    assert_eq!(on(&p, |f| d.tab(f)), "i2");
+    assert!(page(&d, &tree).offset() > 0.0);
+    // With the next ones bound, it goes on.
+    let more = virtual_tree(&[0, 1, 2, 3, 4, 99]);
+    let p = page(&d, &more);
+    assert_eq!(on(&p, |f| d.tab(f)), "i3");
+}
+
+#[test]
+fn tab_enters_a_list_at_either_end() {
+    let tree = virtual_tree(&[0, 50, 51, 99]);
+    let mut d = Driver::new();
+    let p = page(&d, &tree);
+    assert_eq!(on(&p, |f| d.tab(f)), "top");
+    assert_eq!(on(&p, |f| d.tab(f)), "i0");
+    let mut d = Driver::new();
+    let p = page(&d, &tree);
+    assert_eq!(on(&p, |f| d.back_tab(f)), "i99");
+    // Not from i99 back over what is missing.
+    let p = page(&d, &tree);
+    assert_eq!(on(&p, |f| d.back_tab(f)), "i99");
 }

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use gogo_ui_ir::{
     Align, Color, Dim, Kind, LayoutStyle, Node, NodeId, Paint, Position, ScrollSpec, Sides, Stroke,
-    TextAlign, TextStyle, Track, Tree,
+    TextAlign, TextStyle, Track, Tree, VirtualList,
 };
 use gogo_ui_layout::{LayoutError, MIN_THUMB, Rect, Scroll, Viewport, layout};
 use gogo_ui_text::FontSet;
@@ -732,6 +732,36 @@ fn what_a_column_scrolls_is_not_squeezed_to_fit() {
     let l = lay(&t, 200.0, 140.0);
     assert_eq!(rect(&l, rows[9]).3, 30.0);
     assert_eq!(l.scroll_box(list).expect("a box").max, 200.0);
+}
+
+#[test]
+fn a_list_says_which_rows_are_seen() {
+    // 100 rows of 30 px, then a list of 200 items in two columns: rows of 20 px, 10
+    // apart.
+    let (mut t, scroller, _) = scrolling(100, ScrollSpec::default());
+    let mut body = boxed(ls(LayoutStyle::default(), |s| {
+        s.height = Dim::Px(3_000.0);
+        s.shrink = 0.0;
+    }));
+    body.list = Some(VirtualList {
+        count: 200,
+        columns: 2,
+        item_h: 20.0,
+        gap: 10.0,
+        window: 0..4,
+    });
+    let body = add(&mut t, scroller, "body", body);
+    let mut fonts = FontSet::bundled();
+    let mut need = |y: f32| {
+        let sc = Scroll::none().with(scroller, 0.0, y);
+        let l = layout(&t, &mut fonts, Viewport::new(200.0, 140.0), &sc).expect("layout");
+        l.rows_needed(&t, body).expect("a list")
+    };
+    // The list starts 3000 px down.
+    assert!(need(0.0).is_empty(), "out of sight");
+    assert_eq!(need(3_000.0), 0..4);
+    assert_eq!(need(3_045.0), 1..5);
+    assert_eq!(need(10_000.0), 96..100, "clamped to the end");
 }
 
 #[test]

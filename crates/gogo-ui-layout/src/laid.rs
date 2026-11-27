@@ -1,8 +1,9 @@
 //! The result of a layout pass: boxes, text and hit-testing.
 
 use std::collections::HashMap;
+use std::ops::Range;
 
-use gogo_ui_ir::NodeId;
+use gogo_ui_ir::{NodeId, Tree};
 use gogo_ui_text::TextLayout;
 
 /// An axis-aligned rectangle in logical px: `x0, y0` is the top-left corner, `x1, y1` the
@@ -189,6 +190,27 @@ impl Laid {
     /// The scroll container's box; `None` for a node that isn't one.
     pub fn scroll_box(&self, id: NodeId) -> Option<&ScrollBox> {
         self.get(id).and_then(|p| p.scroll.as_ref())
+    }
+
+    /// The rows of the virtualised list at `id` that are in view: what has to be bound
+    /// for the frame to be whole. `None` for a node that holds no list. Empty for a
+    /// list out of sight.
+    pub fn rows_needed(&self, tree: &Tree, id: NodeId) -> Option<Range<u32>> {
+        let list = tree.get(id)?.list.as_ref()?;
+        let placed = self.get(id)?;
+        let rows = list.count.div_ceil(list.columns.max(1));
+        let pitch = f64::from(list.item_h) + f64::from(list.gap);
+        // The window too: a list that no container bounds is still seen only that far.
+        let top = placed.visible.y0.max(0.0) - placed.rect.y0;
+        let bottom = placed.visible.y1.min(f64::from(self.height)) - placed.rect.y0;
+        let wide = placed.visible.x1 > placed.visible.x0;
+        if bottom <= top || !wide || pitch <= 0.0 {
+            return Some(0..0);
+        }
+        // `as` saturates.
+        let start = ((top.max(0.0) / pitch).floor() as u32).min(rows);
+        let end = ((bottom / pitch).ceil() as u32).min(rows);
+        Some(start..end.max(start))
     }
 
     /// The node's border box.

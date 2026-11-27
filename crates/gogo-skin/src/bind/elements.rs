@@ -6,10 +6,11 @@ use std::sync::Arc;
 use gogo_contract::Value;
 use gogo_ui_ir::{
     A11y, Align, Dim, Direction, Display, Fill, ImageSource, Justify, Kind, Node, NodeId, Role,
-    ScrollSpec, Shape, Track,
+    ScrollSpec, Shape, Track, VirtualList,
 };
 
 use super::actions::{ActionCall, BoundTerm, PendingArg, TermVal, assign, capture};
+use super::list::Picked;
 use super::style::{Computed, TextCtx, apply};
 use super::{BindErrorKind, Binder, Cx, R, Var, term};
 
@@ -51,8 +52,8 @@ impl<'a> Binder<'a> {
         if n.name == "let" {
             return self.let_(n);
         }
-        if let Some(w) = self.prop(n, "when")?
-            && !w.truthy()
+        if let Some(w) = n.prop("when")
+            && !self.truthy(&w.arg.val, w.arg.span)?
         {
             return Ok(());
         }
@@ -109,8 +110,12 @@ impl<'a> Binder<'a> {
 
     fn let_(&mut self, n: &'a AstNode) -> R<()> {
         for p in &n.props {
-            let value = self.val(&p.arg.val, p.arg.span)?;
-            self.vars.push(Var::plain(p.name.clone(), value));
+            // A name for the app's data is not a copy of it: a library is long.
+            let var = match self.data_name(&p.arg.val) {
+                Some(source) => Var::alias(p.name.clone(), source),
+                None => Var::plain(p.name.clone(), self.val(&p.arg.val, p.arg.span)?),
+            };
+            self.vars.push(var);
         }
         Ok(())
     }
@@ -135,7 +140,7 @@ impl<'a> Binder<'a> {
 
     /// The first [`MAX_ROWS`] items of the list `v` evaluates to (a null is no items). Only
     /// those are copied out of the data (design 27 §8).
-    fn items(&self, v: &Val, at: Span, what: &'static str) -> R<Vec<Value>> {
+    pub(super) fn items(&self, v: &Val, at: Span, what: &'static str) -> R<Vec<Value>> {
         let not_a_list = |got: &Value| {
             self.fail(
                 BindErrorKind::NotAList {
@@ -225,18 +230,14 @@ impl<'a> Binder<'a> {
                 Some(p) => match &p.arg.val {
                     Val::Terms(ts) => {
                         let terms = self.terms(ts, true)?;
-                        Var {
-                            name: pname.clone(),
-                            value: terms_value(&terms),
-                            terms: Some(terms),
-                            spec: None,
-                        }
+                        let mut var = Var::plain(pname.clone(), terms_value(&terms));
+                        var.terms = Some(terms);
+                        var
                     }
                     v => Var {
-                        name: pname.clone(),
                         value: self.val(v, p.arg.span)?,
-                        terms: None,
                         spec: self.action_given(n, pname, v),
+                        ..Var::plain(pname.clone(), Value::Null)
                     },
                 },
             };
@@ -345,7 +346,7 @@ impl<'a> Binder<'a> {
                         .iter()
                         .rev()
                         .find(|v| v.name == n)
-                        .map(|v| &v.value)
+                        .and_then(|v| self.var_value(v))
                 });
                 let params = self.scope().route_params;
                 TermVal::Pending(PendingArg::new(t.value.clone(), captured).on_route(params))
@@ -544,7 +545,7 @@ impl<'a> Binder<'a> {
 
     // ---- node helpers ----
 
-    fn node_of(c: &Computed) -> Node {
+    pub(super) fn node_of(c: &Computed) -> Node {
         let mut n = Node::container();
         n.layout = c.layout.clone();
         n.paint = c.paint.clone();
@@ -663,6 +664,7 @@ impl<'a> Binder<'a> {
                 self.container(n, parent, key, cx, c, A11y::default())
             }
             "scroll" => self.scroll(n, parent, key, cx),
+            "list" => self.list(n, parent, key, cx),
             "layer" => {
                 let mut c = self.compute("layer", Some(n), &[], cx, |c| {
                     c.layout.display = Display::Grid;
@@ -774,7 +776,10 @@ impl<'a> Binder<'a> {
             field: cx.field.clone(),
         };
         let outlets = self.outlets;
-        self.children(&n.children, id, key, &cx2)?;
+        self.scrolls += 1;
+        let r = self.children(&n.children, id, key, &cx2);
+        self.scrolls -= 1;
+        r?;
         // One that holds the outlet moves with the route too.
         if self.outlets != outlets
             && let Some(spec) = self.tree.node_mut(id).and_then(|n| n.scroll.as_mut())
@@ -1335,15 +1340,31 @@ impl<'a> Binder<'a> {
         let at = n.span;
         let layers = self.layers("table", Some(n), &[])?;
         let c = self.compute_with(&layers, Some(n), false, &[], &cx.text, |_| {})?;
+        // Rows of one fixed height inside a scroll container are virtualised.
+        let row_h = self.row_height(&c.text)?;
+        let virtual_h = row_h.filter(|_| self.virtualises());
         let rows = match n.prop("rows") {
-            Some(p) => self.items(&p.arg.val, p.arg.span, "rows")?,
-            None => Vec::new(),
+            Some(p) => match virtual_h {
+                Some(h) => {
+                    let body = format!("{key}/row#");
+                    // Known by the box that holds the rows.
+                    let pick = self.window(&format!("{key}/body"), &body, 1, h, 0.0);
+                    self.picked(&p.arg.val, p.arg.span, "rows", pick)?
+                }
+                None => Picked::all(self.items(&p.arg.val, p.arg.span, "rows")?),
+            },
+            None => Picked::all(Vec::new()),
         };
         let cols: Vec<&'a AstNode> = n.children.iter().filter(|c| c.name == "col").collect();
         let mut node = Self::node_of(&c);
         node.a11y.role = Role::Table;
         node.a11y.name = self.prop_text(n, "label")?;
         let id = self.add(parent, key, node, at)?;
+        if virtual_h.is_some()
+            && let Some(node) = self.tree.node_mut(id)
+        {
+            node.layout.row_gap = 0.0;
+        }
 
         let head_layers = self.layers("table-head", None, &[])?;
         let hc = self.compute_with(&head_layers, None, false, &[], &c.text, |c| {
@@ -1365,25 +1386,59 @@ impl<'a> Binder<'a> {
             self.text_child(cid, &format!("{ckey}/text"), &title, &cc.text, col.span)?;
         }
 
-        for (i, row) in rows.into_iter().enumerate() {
+        let body = match (virtual_h, rows.window.clone()) {
+            (Some(item_h), Some(window)) => {
+                let mut body = Node::container();
+                body.layout.direction = Direction::Column;
+                body.layout.shrink = 0.0;
+                body.list = Some(VirtualList {
+                    count: rows.count,
+                    columns: 1,
+                    item_h,
+                    gap: 0.0,
+                    window,
+                });
+                Some((self.add(id, &format!("{key}/body"), body, at)?, item_h))
+            }
+            _ => None,
+        };
+        let mut next = 0;
+        for (i, row) in rows.items {
             self.step(at)?;
+            if let Some((body, h)) = body
+                && i > next
+            {
+                let skipped = format!("{key}/body/s#{next}");
+                self.spacer(body, &skipped, (i - next) as f32 * h, at)?;
+            }
+            next = i + 1;
             let mark = self.vars.len();
             self.vars.push(Var::plain("row", row));
-            let r = self.table_row(n, &cols, id, key, i, &c.text);
+            let r = match body {
+                Some((body, h)) => {
+                    self.in_item += 1;
+                    let r = self.table_row(n, &cols, body, key, i, &c.text, Some(h));
+                    self.in_item -= 1;
+                    r
+                }
+                None => self.table_row(n, &cols, id, key, i, &c.text, None),
+            };
             self.vars.truncate(mark);
             r?;
         }
         Ok(id)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn table_row(
         &mut self,
         n: &'a AstNode,
         cols: &[&'a AstNode],
         table: NodeId,
         key: &str,
-        i: usize,
+        i: u32,
         text: &TextCtx,
+        virtual_h: Option<f32>,
     ) -> R<()> {
         let at = n.span;
         let hl = self.prop(n, "highlight")?.is_some_and(|v| v.truthy());
@@ -1397,6 +1452,11 @@ impl<'a> Binder<'a> {
         let mut rn = Self::node_of(&rc);
         rn.a11y.role = Role::Row;
         rn.a11y.selected = hl.then_some(true);
+        if let Some(h) = virtual_h {
+            rn.item = Some(i);
+            rn.layout.height = Dim::Px(h);
+            rn.layout.shrink = 0.0;
+        }
         let rid = self.add(table, &rkey, rn, at)?;
         for (j, col) in cols.iter().enumerate() {
             let mono = self.prop(col, "mono")?.is_some_and(|v| v.truthy());
