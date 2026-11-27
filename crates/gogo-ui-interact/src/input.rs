@@ -34,6 +34,8 @@ pub enum Key {
     ArrowUp,
     /// Down arrow.
     ArrowDown,
+    /// Backspace.
+    Backspace,
     /// A key that types a character: what it types without Ctrl, Alt or Meta.
     Char(char),
     /// Any other key.
@@ -112,6 +114,10 @@ pub enum Input {
         /// Which.
         key: Key,
     },
+    /// What a key press typed, with its case: the platform's text for the key,
+    /// composed dead keys included. Sent after the press's [`Input::KeyDown`], and
+    /// not while Ctrl or Meta is held. Only a focused text field takes it.
+    Text(String),
     /// The window stopped receiving input: presses and holds are cancelled.
     FocusLost,
     /// Assistive technology asked for something.

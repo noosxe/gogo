@@ -8,7 +8,7 @@ use gogo_ui_ir::{AppPart, DrawnBy, NodeId, Role};
 use crate::focus::FocusOrder;
 use crate::frame::{Frame, Identity, Layer, LayerId, LayerKind, Target, activatable, control};
 use crate::input::{Input, Key, Modifiers, PointerButton, Request, RequestKind};
-use crate::intent::{ControlInput, InputEvent, InputProvenance, Intent, Response};
+use crate::intent::{ControlInput, InputEvent, InputProvenance, Intent, Response, TextEdit};
 use crate::keys;
 
 /// The least time between the two screen-reader activations that start a hold.
@@ -290,6 +290,12 @@ impl Interaction {
                 self.key_down(key.normal(), mods, repeat, at, frame, &mut out);
             }
             Input::KeyUp { key } => self.key_up(key.normal(), frame, &mut out),
+            Input::Text(text) => {
+                let text: String = text.chars().filter(|c| !c.is_control()).collect();
+                if !text.is_empty() {
+                    self.edit(TextEdit::Insert(text), frame, &mut out);
+                }
+            }
             Input::FocusLost => {
                 self.down.clear();
                 self.cancel_presses(&mut out);
@@ -636,7 +642,8 @@ impl Interaction {
                 Primary::Ctrl => mods.ctrl && !mods.meta,
                 Primary::Meta => mods.meta && !mods.ctrl,
             };
-        // Only under a dialog, where no skin control can be reached by it.
+        // Only under a dialog, where no skin control can be reached by it, and only
+        // where something takes text: a dialog that asks, or a focused field.
         let paste = matches!(key, Key::Char('v' | 'V'))
             && !mods.alt
             && !mods.shift
@@ -644,9 +651,9 @@ impl Interaction {
                 Primary::Ctrl => mods.ctrl && !mods.meta,
                 Primary::Meta => mods.meta && !mods.ctrl,
             }
-            && frame
-                .modal()
-                .is_some_and(|layer| layer.kind == LayerKind::Dialog);
+            && frame.modal().is_some_and(|layer| {
+                layer.kind == LayerKind::Dialog || self.field(frame).is_some()
+            });
         match key {
             _ if paste => {
                 out.consumed = true;
@@ -693,8 +700,31 @@ impl Interaction {
                     self.activate_focus(key, at, frame, out);
                 }
             }
+            // Repeats: holding it clears the field.
+            Key::Backspace if !(mods.ctrl || mods.alt || mods.meta) => {
+                self.edit(TextEdit::Backspace, frame, out);
+            }
             Key::Char(_) if !repeat => self.shortcut(key, mods, at, frame, out),
             _ => {}
+        }
+    }
+
+    /// The focused control, when it is a text field the app drew.
+    fn field(&self, frame: &Frame<'_>) -> Option<Target> {
+        let focus = self.focus.as_ref()?;
+        let (layer, node) = find(frame, focus.layer, &focus.key)?;
+        let n = layer.tree.get(node)?;
+        (n.a11y.role == Role::TextInput
+            && !n.a11y.disabled
+            && matches!(n.drawn_by, DrawnBy::App(_)))
+        .then(|| layer.target(node))?
+    }
+
+    fn edit(&mut self, edit: TextEdit, frame: &Frame<'_>, out: &mut Response) {
+        if let Some(target) = self.field(frame) {
+            out.consumed = true;
+            self.visible = true;
+            out.intents.push(Intent::Edit { target, edit });
         }
     }
 

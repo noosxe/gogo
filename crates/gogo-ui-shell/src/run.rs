@@ -351,7 +351,13 @@ impl<A: ShellApp> ApplicationHandler<UserEvent> for Runner<A> {
         }
         open.accessibility.process_event(&open.window, &event);
         if let Some(input) = self.input.translate(&event, open.window.scale_factor()) {
-            if self.app.input(input, self.started.elapsed()) {
+            let at = self.started.elapsed();
+            let typed = self.input.text(&event);
+            let mut redraw = self.app.input(input, at);
+            if let Some(typed) = typed {
+                redraw |= self.app.input(typed, at);
+            }
+            if redraw {
                 open.window.request_redraw();
             }
             self.paste_if_asked();
