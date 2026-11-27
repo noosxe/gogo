@@ -136,6 +136,28 @@ fn up_and_down_walk_the_items_and_stop_at_the_ends() {
 }
 
 #[test]
+fn from_a_button_at_an_end_of_the_list_up_and_down_go_to_the_row_beside_it() {
+    let list = Screen::new(vec![
+        ("above", app_button("More above", 0)),
+        ("one", item("One", Role::MenuItem, 1)),
+        ("two", item("Two", Role::MenuItem, 2)),
+        ("three", item("Three", Role::MenuItem, 3)),
+        ("below", app_button("More below", 4)),
+    ]);
+    for (button, beside) in [("above", "one"), ("below", "three")] {
+        for key in [Key::ArrowUp, Key::ArrowDown] {
+            let layers = [list.layer(POPUP, LayerKind::Popup).initial_focus(button)];
+            let frame = Frame { layers: &layers };
+            let mut d = Driver::new();
+            d.ix.sync(&frame);
+            assert_eq!(d.focused(), button);
+            d.tap(&frame, key);
+            assert_eq!(d.focused(), beside, "{key:?} from {button}");
+        }
+    }
+}
+
+#[test]
 fn a_field_over_a_list_moves_the_highlight_and_enter_activates_it() {
     let palette = palette();
     let layers = [palette
