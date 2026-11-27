@@ -43,7 +43,8 @@ one, never both:** `gogo-linux-app` already contains gogo, and both ship
 error (`nix build --dry-run` doesn't catch it).
 
 `gogo-gui` (Linux; `pkgs.gogo-gui` with the overlay) is the desktop GUI, still
-early: library and game pages, sign-in, downloads and Linux install. It installs
+early: library and game pages, sign-in, downloads and Linux install. It is built
+and run on x86_64 only; aarch64-linux is untested. It installs
 beside either package above. It uses the system's GPU drivers where NixOS puts
 them (`/run/opengl-driver`); on other distributions the GPU renderer is untested
 and may need a wrapper such as nixGL, with the CPU renderer as the fallback.
