@@ -1,5 +1,6 @@
-//! The menus and select lists a skin's controls open (design 25 §4), drawn by the app
-//! from the binder's [`PopupSlot`]s as a popup layer by the control.
+//! The app's popups (design 25 §4): the menus and select lists a skin's controls open,
+//! drawn from the binder's [`PopupSlot`]s as a popup layer by the control, and the
+//! parts the command palette ([`crate::palette`]) is drawn with.
 //!
 //! A popup is built again for every frame from the screen under it, and what it holds is
 //! what was shown: choosing an entry runs that call, through the same
@@ -12,6 +13,7 @@
 
 use std::hash::{DefaultHasher, Hasher as _};
 
+use gogo_gui_model::Invocation;
 use gogo_skin::{ActionCall, PopupContent, PopupSlot, Value};
 use gogo_ui_interact::{Layer, LayerId, LayerKind, place};
 use gogo_ui_ir::{
@@ -22,11 +24,13 @@ use gogo_ui_layout::{Laid, Rect, Scroll, Viewport, layout};
 use gogo_ui_scene::{DisplayList, SceneState, build};
 use gogo_ui_text::FontSet;
 
+use crate::dialog::FieldAt;
 use crate::page::Screen;
+use crate::palette;
 use crate::panel::PanelError;
 
 /// Followed by an entry's index in the whole list.
-const ITEM: &str = "popup/item/";
+pub(crate) const ITEM: &str = "popup/item/";
 /// Shows the entries before the first shown.
 pub(crate) const EARLIER: &str = "popup/earlier";
 /// Shows the entries after the last shown.
@@ -35,8 +39,8 @@ pub(crate) const LATER: &str = "popup/later";
 /// The widget id of these controls: not a skin's, and not the dialogs'.
 const WIDGET: WidgetId = WidgetId::new(u32::MAX - 1);
 
-const ROW: f32 = 36.0;
-const PADDING: f32 = 6.0;
+pub(crate) const ROW: f32 = 36.0;
+pub(crate) const PADDING: f32 = 6.0;
 const NARROWEST: f64 = 220.0;
 const WIDEST: f64 = 360.0;
 /// Between the control and its popup.
@@ -44,12 +48,12 @@ const GAP: f64 = 4.0;
 /// Left free at the window's edges.
 const MARGIN: f64 = 8.0;
 
-const CARD: Color = Color([0x1c, 0x1f, 0x26, 0xff]);
-const EDGE: Color = Color([0x8a, 0x92, 0xa6, 0xff]);
-const CHOSEN: Color = Color([0x2b, 0x50, 0xa8, 0xff]);
-const RING: Color = Color([0x9d, 0xba, 0xff, 0xff]);
-const TEXT: Color = Color([0xf5, 0xf5, 0xf5, 0xff]);
-const DIM: Color = Color([0xa6, 0xad, 0xbd, 0xff]);
+pub(crate) const CARD: Color = Color([0x1c, 0x1f, 0x26, 0xff]);
+pub(crate) const EDGE: Color = Color([0x8a, 0x92, 0xa6, 0xff]);
+pub(crate) const CHOSEN: Color = Color([0x2b, 0x50, 0xa8, 0xff]);
+pub(crate) const RING: Color = Color([0x9d, 0xba, 0xff, 0xff]);
+pub(crate) const TEXT: Color = Color([0xf5, 0xf5, 0xf5, 0xff]);
+pub(crate) const DIM: Color = Color([0xa6, 0xad, 0xbd, 0xff]);
 
 /// A popup that is open: which control of which screen it hangs from.
 #[derive(Debug, Clone)]
@@ -94,10 +98,15 @@ impl Open {
 
 /// What choosing a row does.
 #[derive(Debug, Clone)]
-pub(crate) struct Choice {
-    pub(crate) call: ActionCall,
-    /// `{value}`, for a select.
-    pub(crate) value: Option<Value>,
+pub(crate) enum Choice {
+    /// A skin's call, of a menu item or a select.
+    Call {
+        call: Box<ActionCall>,
+        /// `{value}`, for a select.
+        value: Option<Value>,
+    },
+    /// One of the app's own, from the palette.
+    Command(Invocation),
 }
 
 /// One entry of the list.
@@ -123,7 +132,10 @@ fn entries(screen: &Screen, slot: &PopupSlot) -> Vec<Entry> {
                 icon: item.icon.clone(),
                 hint: item.key.clone(),
                 current: None,
-                choice: call(item.action).map(|call| Choice { call, value: None }),
+                choice: call(item.action).map(|call| Choice::Call {
+                    call: Box::new(call),
+                    value: None,
+                }),
             })
             .collect(),
         PopupContent::Select(options) => {
@@ -137,8 +149,8 @@ fn entries(screen: &Screen, slot: &PopupSlot) -> Vec<Entry> {
                     icon: None,
                     hint: None,
                     current: Some(option.current),
-                    choice: own.clone().map(|call| Choice {
-                        call,
+                    choice: own.clone().map(|call| Choice::Call {
+                        call: Box::new(call),
                         value: Some(option.value.clone()),
                     }),
                 })
@@ -148,7 +160,7 @@ fn entries(screen: &Screen, slot: &PopupSlot) -> Vec<Entry> {
     }
 }
 
-fn hash(value: impl std::hash::Hash) -> u64 {
+pub(crate) fn hash(value: impl std::hash::Hash) -> u64 {
     let mut hasher = DefaultHasher::new();
     value.hash(&mut hasher);
     hasher.finish()
@@ -156,10 +168,12 @@ fn hash(value: impl std::hash::Hash) -> u64 {
 
 /// What a row does, as a value that changes when it would do something else.
 fn identity(entry: &Entry) -> u64 {
-    let does = entry
-        .choice
-        .as_ref()
-        .map(|c| format!("{} {:?} {:?}", c.call.spec.name, c.call.args, c.value));
+    let does = entry.choice.as_ref().map(|c| match c {
+        Choice::Call { call, value } => {
+            format!("{} {:?} {value:?}", call.spec.name, call.args)
+        }
+        Choice::Command(invocation) => format!("{invocation:?}"),
+    });
     hash((&entry.name, does))
 }
 
@@ -170,20 +184,76 @@ pub(crate) struct Drawn {
     pub(crate) id: LayerId,
     identity: Vec<u64>,
     initial: Option<String>,
+    /// What Enter in the palette's field activates.
+    submit: Option<String>,
     /// What each row of the list does, by its index.
     choices: Vec<Option<Choice>>,
+    /// The palette's [`revision`](crate::palette::Open::revision) it shows; 0 for the
+    /// others.
+    pub(crate) revision: u64,
 }
 
 /// The box being filled.
-struct Builder {
+pub(crate) struct Builder {
     tree: Tree,
     identity: Vec<u64>,
     id: LayerId,
 }
 
 impl Builder {
+    /// A popup under the id `id`, in a window of `size`.
+    pub(crate) fn new(id: LayerId, size: (f32, f32), mut root: Node) -> Builder {
+        root.layout.width = Dim::Px(size.0);
+        root.layout.height = Dim::Px(size.1);
+        Builder {
+            tree: Tree::new("popup", root),
+            identity: Vec::new(),
+            id,
+        }
+    }
+
+    pub(crate) fn root(&self) -> NodeId {
+        self.tree.root()
+    }
+
+    /// Lays it out.
+    pub(crate) fn finish(
+        self,
+        fonts: &mut FontSet,
+        (width, height): (f32, f32),
+        (initial, submit): (Option<String>, Option<String>),
+        choices: Vec<Option<Choice>>,
+        revision: u64,
+    ) -> Result<Drawn, PanelError> {
+        let laid = layout(
+            &self.tree,
+            fonts,
+            Viewport::new(width, height),
+            &Scroll::none(),
+        )?;
+        Ok(Drawn {
+            tree: self.tree,
+            laid,
+            id: self.id,
+            identity: self.identity,
+            initial,
+            submit,
+            choices,
+            revision,
+        })
+    }
+
+    /// A button at an end of a window of rows.
+    pub(crate) fn end(&mut self, parent: NodeId, key: &str, label: &str) -> Result<(), PanelError> {
+        let mut node = row(CARD);
+        node.a11y = A11y::control(Role::Button, label);
+        self.control(&mut node, hash(key));
+        let id = self.add(parent, key, node)?;
+        self.text(id, &format!("{key}/text"), label, DIM, 1.0)
+    }
+
     /// Makes `node` a control the app drew, which does `what`.
-    fn control(&mut self, node: &mut Node, what: u64) {
+    pub(crate) fn control(&mut self, node: &mut Node, what: u64) {
         let index = u32::try_from(self.identity.len()).unwrap_or(u32::MAX);
         self.identity.push(hash((self.id.0, what)));
         node.action = Some(ActionRef::new(index));
@@ -193,11 +263,16 @@ impl Builder {
         });
     }
 
-    fn add(&mut self, parent: NodeId, key: &str, node: Node) -> Result<NodeId, PanelError> {
+    pub(crate) fn add(
+        &mut self,
+        parent: NodeId,
+        key: &str,
+        node: Node,
+    ) -> Result<NodeId, PanelError> {
         Ok(self.tree.add_child(parent, key, node)?)
     }
 
-    fn text(
+    pub(crate) fn text(
         &mut self,
         parent: NodeId,
         key: &str,
@@ -222,7 +297,7 @@ impl Builder {
 }
 
 /// A row's box: also how a focused one looks.
-fn row(fill: Color) -> Node {
+pub(crate) fn row(fill: Color) -> Node {
     let mut node = Node::new(Kind::Box);
     node.layout.direction = Direction::Row;
     node.layout.align_items = Some(Align::Center);
@@ -384,14 +459,7 @@ impl Drawn {
             .unwrap_or_default();
         let select = matches!(slot.content, PopupContent::Select(_));
 
-        let mut root = Node::new(Kind::Box);
-        root.layout.width = Dim::Px(open.size.0);
-        root.layout.height = Dim::Px(open.size.1);
-        let mut b = Builder {
-            tree: Tree::new("popup", root),
-            identity: Vec::new(),
-            id,
-        };
+        let mut b = Builder::new(id, open.size, Node::new(Kind::Box));
 
         let earlier = shown.buttons && first > 0;
         let later = shown.buttons && first + rows < entries.len();
@@ -423,18 +491,11 @@ impl Drawn {
         }); 4];
         card.a11y.role = if select { Role::ListBox } else { Role::Menu };
         card.a11y.name = Some(name);
-        let top = b.tree.root();
+        let top = b.root();
         let card = b.add(top, "popup/box", card)?;
 
-        let end = |b: &mut Builder, key: &str, label: &str| -> Result<(), PanelError> {
-            let mut node = row(CARD);
-            node.a11y = A11y::control(Role::Button, label);
-            b.control(&mut node, hash(key));
-            let id = b.add(card, key, node)?;
-            b.text(id, &format!("{key}/text"), label, DIM, 1.0)
-        };
         if earlier {
-            end(&mut b, EARLIER, "More above")?;
+            b.end(card, EARLIER, "More above")?;
         }
         let mut initial = None;
         let mut fallback = None;
@@ -475,30 +536,23 @@ impl Drawn {
             }
         }
         if later {
-            end(&mut b, LATER, "More below")?;
+            b.end(card, LATER, "More below")?;
         }
 
-        let laid = layout(
-            &b.tree,
-            fonts,
-            Viewport::new(open.size.0, open.size.1),
-            &Scroll::none(),
-        )?;
-        Ok(Some(Drawn {
-            tree: b.tree,
-            laid,
-            id,
-            identity: b.identity,
-            initial: initial.or(fallback),
-            choices: entries.into_iter().map(|e| e.choice).collect(),
-        }))
+        let choices = entries.into_iter().map(|e| e.choice).collect();
+        let focus = (initial.or(fallback), None);
+        b.finish(fonts, open.size, focus, choices, 0).map(Some)
     }
 
     pub(crate) fn layer(&self) -> Layer<'_> {
         let layer =
             Layer::new(self.id, LayerKind::Popup, &self.tree, &self.laid).identity(&self.identity);
-        match &self.initial {
+        let layer = match &self.initial {
             Some(key) => layer.initial_focus(key),
+            None => layer,
+        };
+        match &self.submit {
+            Some(key) => layer.submit(key),
             None => layer,
         }
     }
@@ -506,6 +560,16 @@ impl Drawn {
     /// What the row with this key does.
     pub(crate) fn choice(&self, key: &str) -> Option<&Choice> {
         self.choices.get(index_of(key)?)?.as_ref()
+    }
+
+    /// The palette's field, as laid out.
+    pub(crate) fn field(&self) -> FieldAt<'_> {
+        FieldAt {
+            tree: &self.tree,
+            laid: &self.laid,
+            field: palette::FIELD,
+            text: palette::FIELD_TEXT,
+        }
     }
 
     /// Adds the popup's drawing to `list`, with the ring on the control `focus` names.

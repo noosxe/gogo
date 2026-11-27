@@ -26,6 +26,7 @@ mod core;
 mod data;
 mod dialog;
 mod page;
+mod palette;
 mod panel;
 mod popup;
 mod render;
