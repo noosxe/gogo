@@ -518,7 +518,7 @@ async fn every_route_of_the_default_skin_draws_over_the_engine() {
                     }
                 }
                 data.pump();
-                if data.screen_to_draw().is_some() {
+                if data.modal_ticket().is_some() {
                     failures.push(format!("{who} {name} {word}: an error screen"));
                     break;
                 }

@@ -1,20 +1,24 @@
-//! The app's own dialogs (design 26 §5, depth A): the sign-in code dialog and the error
-//! screen (S9). The app builds them itself; nothing of the skin is in them, and no skin
-//! can read them (S1).
+//! The app's own dialogs (design 26 §5): every screen of the safety flow, as an app
+//! widget in a modal layer. The app builds them itself; nothing of the skin is in them,
+//! and no skin can read them (S1).
 //!
-//! The sign-in dialog takes the code by pasting only. It says whether a code is there and
-//! never shows it: no characters, no dots and no length, on screen or to assistive
-//! technology.
+//! A secret is taken by pasting only. The dialog says whether one is there and never
+//! shows it: no characters, no dots and no length, on screen or to assistive technology.
 //!
-//! Fixed colours for now; styling them with a skin's tokens is a follow-up.
+//! Nothing scrolls. A list that does not fit (a plan's steps, a question's options, the
+//! conflicting files) is split into pages; everything else, the warnings, totals and
+//! buttons among it, is always on the card. When even that does not fit the window, the
+//! dialog says so and can only be cancelled ([`Dialog::answerable`]).
+//!
+//! Fixed colours for now; styling them with a skin's tokens is a follow-up (#640).
 
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 
-use gogo_gui_model::Ticket;
+use gogo_gui_model::{ConflictFile, ErrorView, Plan, PlanStep, Side, StepKind, Ticket};
 use gogo_ui_interact::{Layer, LayerId, LayerKind};
 use gogo_ui_ir::{
-    A11y, Align, AppPart, Color, Dim, Direction, DrawnBy, Justify, Kind, Node, NodeId, Paint, Role,
-    Sides, Stroke, TextStyle, Tree, WidgetId,
+    A11y, ActionRef, Align, AppPart, Color, Dim, Direction, DrawnBy, Justify, Kind, Node, NodeId,
+    Paint, Role, Sides, Stroke, TextStyle, Tree, WidgetId,
 };
 use gogo_ui_layout::{Laid, Scroll, Viewport, layout};
 use gogo_ui_scene::{DisplayList, SceneState, build};
@@ -26,24 +30,61 @@ use crate::panel::PanelError;
 pub(crate) const PASTE: &str = "dialog/paste";
 pub(crate) const CLEAR: &str = "dialog/clear";
 pub(crate) const OPEN: &str = "dialog/open";
+/// Sends a pasted secret.
 pub(crate) const SUBMIT: &str = "dialog/submit";
+/// Cancels; also the only way out of a dialog that does not fit.
 pub(crate) const CANCEL: &str = "dialog/cancel";
+/// Dismisses an error.
 pub(crate) const CLOSE: &str = "dialog/close";
+/// The plan card's confirm.
+pub(crate) const CONFIRM: &str = "dialog/confirm";
+/// Submits the typed title.
+pub(crate) const TYPED: &str = "dialog/typed";
+/// The press-and-hold confirmation.
+pub(crate) const HOLD_BUTTON: &str = "dialog/hold";
+/// The text field.
+pub(crate) const FIELD: &str = "dialog/field";
+pub(crate) const OK: &str = "dialog/ok";
+pub(crate) const YES: &str = "dialog/yes";
+pub(crate) const NO: &str = "dialog/no";
+pub(crate) const APPLY: &str = "dialog/apply";
+pub(crate) const PREVIOUS: &str = "dialog/previous";
+pub(crate) const NEXT: &str = "dialog/next";
+/// Followed by an option's index.
+pub(crate) const OPTION: &str = "dialog/option/";
+/// Followed by a conflicting file's index.
+pub(crate) const LOCAL: &str = "dialog/local/";
+/// Followed by a conflicting file's index.
+pub(crate) const CLOUD: &str = "dialog/cloud/";
+
+const HOLDS: &[&str] = &[HOLD_BUTTON];
 
 /// The widget id of these controls. The binder numbers a skin's widgets from 0, and
 /// these are in a layer of their own.
 const WIDGET: WidgetId = WidgetId::new(u32::MAX);
+
+/// Left free above and below the card, together.
+const MARGIN: f32 = 16.0;
+const PADDING: f32 = 20.0;
+const GAP: f32 = 8.0;
+const CARD_WIDTH: f32 = 560.0;
+/// A run of this many characters without a space may be broken anywhere after them.
+const UNBROKEN: usize = 32;
 
 const SCRIM: Color = Color([0x00, 0x00, 0x00, 0xb0]);
 const CARD: Color = Color([0x1c, 0x1f, 0x26, 0xff]);
 const EDGE: Color = Color([0x8a, 0x92, 0xa6, 0xff]);
 const BUTTON: Color = Color([0x2c, 0x31, 0x3d, 0xff]);
 const PRIMARY: Color = Color([0x2b, 0x50, 0xa8, 0xff]);
+const DANGER: Color = Color([0x8e, 0x2f, 0x2a, 0xff]);
+const FIELD_FILL: Color = Color([0x10, 0x12, 0x17, 0xff]);
 const RING: Color = Color([0x9d, 0xba, 0xff, 0xff]);
 const TEXT: Color = Color([0xf5, 0xf5, 0xf5, 0xff]);
+const DIM: Color = Color([0xa6, 0xad, 0xbd, 0xff]);
+const WARN: Color = Color([0xff, 0xcf, 0x70, 0xff]);
 const BAD: Color = Color([0xff, 0xa5, 0x9d, 0xff]);
 
-/// What the sign-in dialog's field holds, in words.
+/// What the secret dialog's field holds, in words.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum Field {
     #[default]
@@ -56,27 +97,80 @@ pub(crate) enum Field {
 }
 
 impl Field {
-    pub(crate) fn words(self) -> &'static str {
+    /// For the sign-in code, or any other secret.
+    pub(crate) fn words(self, sign_in: bool) -> &'static str {
         match self {
-            Field::Empty => "No code pasted yet.",
-            Field::Pasted => "A code is pasted.",
-            Field::Rejected => "That was not a GOG sign-in address or code.",
+            Field::Empty if sign_in => "No code pasted yet.",
+            Field::Pasted if sign_in => "A code is pasted.",
+            Field::Rejected if sign_in => "That was not a GOG sign-in address or code.",
+            Field::Empty => "Nothing pasted yet.",
+            Field::Pasted => "Something is pasted.",
+            Field::Rejected => "That could not be used.",
             Field::NothingToPaste => "There was no text to paste.",
         }
     }
 }
 
-/// What a dialog shows.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Content {
-    /// `label` says what to paste; it holds no secret.
-    SignIn { label: String, field: Field },
-    Error {
-        class: String,
-        title: String,
-        message: String,
-        hint: String,
+/// Where a hold confirmation is.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub(crate) enum Hold {
+    #[default]
+    Idle,
+    /// A screen reader activated it once.
+    Armed,
+    /// How much of the hold has passed, 0 to 1.
+    Holding(f32),
+}
+
+/// What a plan's dialog asks for.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Ask {
+    /// The plan card.
+    Confirm,
+    /// Type `want`.
+    Typed {
+        want: String,
+        typed: String,
     },
+    Hold(Hold),
+}
+
+/// What a dialog shows.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Content {
+    /// Waiting for a plan.
+    Planning {
+        confirming: bool,
+    },
+    Plan {
+        plan: Plan,
+        /// The plan that was confirmed is no longer the plan.
+        changed: bool,
+        ask: Ask,
+    },
+    /// `label` says what to paste; it holds no secret.
+    Secret {
+        label: String,
+        field: Field,
+        /// The GOG sign-in code, whose page can be opened again.
+        sign_in: bool,
+    },
+    Text {
+        label: String,
+        value: String,
+    },
+    Choice {
+        label: String,
+        options: Vec<String>,
+    },
+    YesNo {
+        label: String,
+    },
+    Conflicts {
+        files: Vec<ConflictFile>,
+        picks: Vec<Option<Side>>,
+    },
+    Error(ErrorView),
 }
 
 /// A dialog laid out over a window: while it is up only it takes input.
@@ -85,7 +179,13 @@ pub(crate) struct Dialog {
     laid: Laid,
     ticket: Ticket,
     kind: LayerKind,
-    initial: &'static str,
+    initial: Option<&'static str>,
+    /// What each control does, by its action number.
+    identity: Vec<u64>,
+    /// Everything there is to read is on the card or on one of its pages.
+    complete: bool,
+    page: usize,
+    pages: usize,
 }
 
 fn sides(v: f32) -> Sides<f32> {
@@ -97,140 +197,729 @@ fn sides(v: f32) -> Sides<f32> {
     }
 }
 
+/// `text` with places to wrap a long run in: only whole words wrap, and what does not
+/// wrap would be cut off.
+fn breakable(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut run = 0;
+    for c in text.chars() {
+        run = if c.is_whitespace() { 0 } else { run + 1 };
+        out.push(c);
+        if run >= UNBROKEN {
+            out.push('\u{200b}');
+            run = 0;
+        }
+    }
+    out
+}
+
 fn words(text: &str, size: f32, color: Color) -> Node {
     let style = TextStyle {
         size,
         color,
         wrap: true,
-        max_lines: 8,
         ..TextStyle::default()
     };
-    Node::new(Kind::Text {
-        text: text.to_owned(),
+    let shown = breakable(text);
+    let mut node = Node::new(Kind::Text {
+        text: shown.clone(),
         style,
-    })
+    });
+    // Read as written.
+    if shown != text {
+        node.a11y.name = Some(text.to_owned());
+    }
+    node
 }
 
-fn button(
-    tree: &mut Tree,
-    row: NodeId,
-    key: &str,
-    label: &str,
-    fill: Color,
-) -> Result<(), PanelError> {
+fn column(gap: f32) -> Node {
     let mut node = Node::new(Kind::Box);
-    node.layout.padding = sides(10.0);
-    node.layout.min_height = Dim::Px(40.0);
-    node.layout.align_items = Some(Align::Center);
-    node.layout.justify = Some(Justify::Center);
-    let mut paint = Paint::solid(fill);
-    paint.radius = [6.0; 4];
-    node.paint = paint.clone();
-    paint.ring = Some(Stroke {
-        width: 2.0,
-        color: RING,
-    });
-    node.focus_paint = Some(paint);
-    node.a11y = A11y::control(Role::Button, label);
-    node.drawn_by = DrawnBy::App(AppPart {
-        widget: WIDGET,
-        part: None,
-    });
-    let id = tree.add_child(row, key, node)?;
-    tree.add_child(id, format!("{key}/text"), words(label, 14.0, TEXT))?;
-    Ok(())
+    node.layout.direction = Direction::Column;
+    node.layout.row_gap = gap;
+    node
 }
 
-impl Dialog {
-    pub(crate) fn new(
-        fonts: &mut FontSet,
-        (width, height): (f32, f32),
-        ticket: Ticket,
-        content: &Content,
-    ) -> Result<Dialog, PanelError> {
-        let (heading, kind, initial) = match content {
-            Content::SignIn { .. } => ("Sign in to GOG", LayerKind::Dialog, CANCEL),
-            Content::Error { title, .. } => (title.as_str(), LayerKind::Alert, CLOSE),
-        };
-        let mut root = Node::new(Kind::Box);
-        root.layout.width = Dim::Px(width);
-        root.layout.height = Dim::Px(height);
-        root.layout.direction = Direction::Column;
-        root.layout.align_items = Some(Align::Center);
-        root.layout.justify = Some(Justify::Center);
-        root.paint = Paint::solid(SCRIM);
-        root.a11y.name = Some(heading.to_owned());
-        let mut tree = Tree::new("dialog", root);
-        let root = tree.root();
+fn row(justify: Justify) -> Node {
+    let mut node = Node::new(Kind::Box);
+    node.layout.direction = Direction::Row;
+    node.layout.wrap = true;
+    node.layout.column_gap = GAP;
+    node.layout.row_gap = GAP;
+    node.layout.justify = Some(justify);
+    node.layout.align_items = Some(Align::Center);
+    node
+}
 
-        let mut card = Node::new(Kind::Box);
-        card.layout.direction = Direction::Column;
-        card.layout.width = Dim::Px((width - 32.0).clamp(0.0, 560.0));
-        card.layout.row_gap = 12.0;
-        card.layout.padding = sides(20.0);
-        card.paint = Paint::solid(CARD);
-        card.paint.radius = [10.0; 4];
-        card.paint.border = [Some(Stroke {
+fn size_words(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
+    if bytes < 1000 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64 / 1000.0;
+    let mut unit = 0;
+    while value >= 999.95 && unit + 1 < UNITS.len() {
+        value /= 1000.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
+}
+
+fn step_words(step: &PlanStep) -> String {
+    let kind = match step.kind {
+        StepKind::Download => "Download",
+        StepKind::Replace => "Replace",
+        StepKind::Delete => "Delete",
+        StepKind::Snapshot => "Snapshot",
+        StepKind::Move => "Move",
+        StepKind::Info => "Note",
+    };
+    match step.bytes {
+        Some(bytes) => format!("{kind}: {} ({})", step.text, size_words(bytes)),
+        None => format!("{kind}: {}", step.text),
+    }
+}
+
+fn totals(plan: &Plan) -> Option<String> {
+    let download = plan
+        .download
+        .map(|b| format!("To download: {}", size_words(b)));
+    let disk = plan.disk_delta.map(|d| {
+        let sign = if d < 0 { "-" } else { "+" };
+        format!("Disk use: {sign}{}", size_words(d.unsigned_abs()))
+    });
+    let parts: Vec<String> = download.into_iter().chain(disk).collect();
+    (!parts.is_empty()).then(|| parts.join(". "))
+}
+
+/// The verb for a button.
+fn verb(plan: &Plan) -> &str {
+    if plan.verb.is_empty() {
+        "Confirm"
+    } else {
+        &plan.verb
+    }
+}
+
+/// How a button looks and whether it can be pressed.
+#[derive(Clone, Copy)]
+struct Look {
+    fill: Color,
+    enabled: bool,
+    checked: Option<bool>,
+}
+
+const PLAIN: Look = Look {
+    fill: BUTTON,
+    enabled: true,
+    checked: None,
+};
+const MAIN: Look = Look {
+    fill: PRIMARY,
+    ..PLAIN
+};
+const GRAVE: Look = Look {
+    fill: DANGER,
+    ..PLAIN
+};
+
+fn enabled_if(enabled: bool, look: Look) -> Look {
+    Look { enabled, ..look }
+}
+
+/// The card being built.
+struct Builder {
+    tree: Tree,
+    ticket: Ticket,
+    identity: Vec<u64>,
+}
+
+impl Builder {
+    /// A control the app drew, with its own action number so that a press or a screen
+    /// reader's request holds only for the same control of the same screen.
+    fn control(&mut self, node: &mut Node, key: &str) {
+        let mut hasher = DefaultHasher::new();
+        (self.ticket, key).hash(&mut hasher);
+        let index = u32::try_from(self.identity.len()).unwrap_or(u32::MAX);
+        self.identity.push(hasher.finish());
+        node.action = Some(ActionRef::new(index));
+        node.drawn_by = DrawnBy::App(AppPart {
+            widget: WIDGET,
+            part: None,
+        });
+    }
+
+    fn add(&mut self, parent: NodeId, key: &str, node: Node) -> Result<NodeId, PanelError> {
+        Ok(self.tree.add_child(parent, key, node)?)
+    }
+
+    fn text(
+        &mut self,
+        parent: NodeId,
+        key: &str,
+        text: &str,
+        color: Color,
+    ) -> Result<(), PanelError> {
+        self.add(parent, key, words(text, 14.0, color))?;
+        Ok(())
+    }
+
+    fn status(&mut self, parent: NodeId, text: &str, color: Color) -> Result<(), PanelError> {
+        let mut node = words(text, 14.0, color);
+        node.a11y.role = Role::Status;
+        self.add(parent, "dialog/status", node)?;
+        Ok(())
+    }
+
+    fn button(
+        &mut self,
+        parent: NodeId,
+        key: &str,
+        label: &str,
+        look: Look,
+    ) -> Result<(), PanelError> {
+        let mut node = Node::new(Kind::Box);
+        node.layout.padding = sides(10.0);
+        node.layout.min_height = Dim::Px(40.0);
+        node.layout.align_items = Some(Align::Center);
+        node.layout.justify = Some(Justify::Center);
+        let fill = if look.enabled { look.fill } else { CARD };
+        let mut paint = Paint::solid(fill);
+        paint.radius = [6.0; 4];
+        if !look.enabled {
+            paint.border = [Some(Stroke {
+                width: 1.0,
+                color: BUTTON,
+            }); 4];
+        }
+        if look.checked == Some(true) {
+            paint.border = [Some(Stroke {
+                width: 2.0,
+                color: TEXT,
+            }); 4];
+        }
+        node.paint = paint.clone();
+        paint.ring = Some(Stroke {
+            width: 2.0,
+            color: RING,
+        });
+        node.focus_paint = Some(paint);
+        node.a11y = A11y::control(Role::Button, label);
+        node.a11y.disabled = !look.enabled;
+        node.a11y.checked = look.checked;
+        self.control(&mut node, key);
+        let id = self.add(parent, key, node)?;
+        let colour = if look.enabled { TEXT } else { DIM };
+        self.text(id, &format!("{key}/text"), label, colour)
+    }
+
+    /// A one-line field. It has no caret: typing adds at the end.
+    fn field(&mut self, parent: NodeId, name: &str, value: &str) -> Result<(), PanelError> {
+        let mut node = Node::new(Kind::Box);
+        node.layout.padding = sides(10.0);
+        node.layout.min_height = Dim::Px(40.0);
+        let mut paint = Paint::solid(FIELD_FILL);
+        paint.radius = [6.0; 4];
+        paint.border = [Some(Stroke {
             width: 1.0,
             color: EDGE,
         }); 4];
-        let card = tree.add_child(root, "dialog/card", card)?;
+        node.paint = paint.clone();
+        paint.ring = Some(Stroke {
+            width: 2.0,
+            color: RING,
+        });
+        node.focus_paint = Some(paint);
+        node.a11y = A11y::control(Role::TextInput, name);
+        node.a11y.value = Some(value.to_owned());
+        self.control(&mut node, FIELD);
+        let id = self.add(parent, FIELD, node)?;
+        let (shown, colour) = if value.is_empty() {
+            ("Type here", DIM)
+        } else {
+            (value, TEXT)
+        };
+        self.text(id, "dialog/field/text", shown, colour)
+    }
+}
 
-        let mut head = words(heading, 18.0, TEXT);
-        head.a11y.role = Role::Heading;
-        tree.add_child(card, "dialog/heading", head)?;
-
-        let mut row = Node::new(Kind::Box);
-        row.layout.direction = Direction::Row;
-        row.layout.wrap = true;
-        row.layout.column_gap = 8.0;
-        row.layout.row_gap = 8.0;
-        row.layout.justify = Some(Justify::End);
-
-        match content {
-            Content::SignIn { label, field } => {
-                tree.add_child(card, "dialog/label", words(label, 14.0, TEXT))?;
-                let colour = match field {
-                    Field::Rejected | Field::NothingToPaste => BAD,
-                    Field::Empty | Field::Pasted => TEXT,
-                };
-                let mut status = words(field.words(), 14.0, colour);
-                status.a11y.role = Role::Status;
-                tree.add_child(card, "dialog/status", status)?;
-                let row = tree.add_child(card, "dialog/buttons", row)?;
-                button(&mut tree, row, CANCEL, "Cancel", BUTTON)?;
-                button(&mut tree, row, OPEN, "Open the page again", BUTTON)?;
-                if *field == Field::Pasted {
-                    button(&mut tree, row, CLEAR, "Clear", BUTTON)?;
-                }
-                button(&mut tree, row, PASTE, "Paste", BUTTON)?;
-                if *field == Field::Pasted {
-                    button(&mut tree, row, SUBMIT, "Sign in", PRIMARY)?;
-                }
-            }
-            Content::Error {
-                class,
-                message,
-                hint,
-                ..
-            } => {
-                let first = format!("{class}: {message}");
-                tree.add_child(card, "dialog/message", words(&first, 14.0, TEXT))?;
-                if !hint.is_empty() {
-                    tree.add_child(card, "dialog/hint", words(hint, 14.0, TEXT))?;
-                }
-                let row = tree.add_child(card, "dialog/buttons", row)?;
-                button(&mut tree, row, CLOSE, "Close", PRIMARY)?;
+/// What the dialog is called, and how it takes input.
+fn heading(content: &Content) -> (String, LayerKind, Option<&'static str>) {
+    match content {
+        Content::Planning { confirming } => {
+            let words = if *confirming {
+                "Checking the plan again…"
+            } else {
+                "Working out what to do…"
+            };
+            (words.to_owned(), LayerKind::Dialog, None)
+        }
+        Content::Plan { plan, ask, .. } => {
+            let title = if plan.title.is_empty() {
+                verb(plan).to_owned()
+            } else {
+                plan.title.clone()
+            };
+            match ask {
+                // On nothing: Enter is the card's confirm.
+                Ask::Confirm => (title, LayerKind::Dialog, None),
+                // The default answer is no.
+                Ask::Typed { .. } | Ask::Hold(_) => (title, LayerKind::Alert, Some(CANCEL)),
             }
         }
+        Content::Secret { sign_in, .. } => {
+            let title = if *sign_in {
+                "Sign in to GOG"
+            } else {
+                "A secret is needed"
+            };
+            (title.to_owned(), LayerKind::Dialog, Some(CANCEL))
+        }
+        Content::Text { .. } => (
+            "A value is needed".to_owned(),
+            LayerKind::Dialog,
+            Some(CANCEL),
+        ),
+        Content::Choice { .. } => ("Choose one".to_owned(), LayerKind::Dialog, Some(CANCEL)),
+        Content::YesNo { .. } => ("A question".to_owned(), LayerKind::Dialog, Some(CANCEL)),
+        Content::Conflicts { .. } => (
+            "Saves changed on both sides".to_owned(),
+            LayerKind::Dialog,
+            Some(CANCEL),
+        ),
+        Content::Error(error) => (error.title.clone(), LayerKind::Alert, Some(CLOSE)),
+    }
+}
 
-        let laid = layout(&tree, fonts, Viewport::new(width, height), &Scroll::none())?;
+/// How many entries of `content` can be split over pages.
+fn items(content: &Content) -> usize {
+    match content {
+        Content::Plan { plan, .. } => plan.steps.len(),
+        Content::Choice { options, .. } => options.len(),
+        Content::Conflicts { files, .. } => files.len(),
+        Content::Error(error) => 1 + usize::from(!error.hint.is_empty()),
+        _ => 0,
+    }
+}
+
+/// What is above the list.
+fn above(b: &mut Builder, card: NodeId, content: &Content) -> Result<(), PanelError> {
+    match content {
+        Content::Plan { plan, changed, .. } => {
+            if !plan.subject.is_empty() {
+                b.text(card, "dialog/subject", &plan.subject, DIM)?;
+            }
+            if *changed {
+                b.status(card, "The plan changed. Check it again.", WARN)?;
+            }
+        }
+        Content::Secret { label, .. }
+        | Content::Text { label, .. }
+        | Content::Choice { label, .. }
+        | Content::YesNo { label } => b.text(card, "dialog/label", label, TEXT)?,
+        Content::Conflicts { .. } => b.text(
+            card,
+            "dialog/label",
+            "Pick which copy of each file to keep. Nothing changes until all are picked.",
+            TEXT,
+        )?,
+        Content::Planning { .. } | Content::Error(_) => {}
+    }
+    Ok(())
+}
+
+/// Entry `i` of the list.
+fn item(b: &mut Builder, list: NodeId, content: &Content, i: usize) -> Result<(), PanelError> {
+    let key = format!("dialog/item/{i}");
+    match content {
+        Content::Plan { plan, .. } => {
+            if let Some(step) = plan.steps.get(i) {
+                b.text(list, &key, &step_words(step), TEXT)?;
+            }
+        }
+        Content::Choice { options, .. } => {
+            if let Some(option) = options.get(i) {
+                let at = b.add(list, &key, column(0.0))?;
+                b.button(at, &format!("{OPTION}{i}"), option, PLAIN)?;
+            }
+        }
+        Content::Conflicts { files, picks } => {
+            if let Some(file) = files.get(i) {
+                let at = b.add(list, &key, column(4.0))?;
+                b.text(at, &format!("{key}/name"), &file.name, TEXT)?;
+                let both = format!("This computer: {}. Cloud: {}.", file.local, file.cloud);
+                b.text(at, &format!("{key}/copies"), &both, DIM)?;
+                let buttons = b.add(at, &format!("{key}/buttons"), row(Justify::Start))?;
+                let pick = picks.get(i).copied().flatten();
+                for (prefix, side, label) in [
+                    (LOCAL, Side::Local, "Keep this computer's"),
+                    (CLOUD, Side::Cloud, "Keep the cloud's"),
+                ] {
+                    let look = Look {
+                        checked: Some(pick == Some(side)),
+                        ..PLAIN
+                    };
+                    let label = format!("{label} {}", file.name);
+                    b.button(buttons, &format!("{prefix}{i}"), &label, look)?;
+                }
+            }
+        }
+        Content::Error(error) => {
+            if i == 0 {
+                // The class word is always shown.
+                let first = format!("{}: {}", error.class, error.message);
+                b.text(list, &key, &first, TEXT)?;
+            } else {
+                b.text(list, &key, &error.hint, TEXT)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// What is below the list, down to the buttons.
+fn below(b: &mut Builder, card: NodeId, content: &Content) -> Result<(), PanelError> {
+    match content {
+        Content::Plan { plan, ask, .. } => {
+            if let Some(totals) = totals(plan) {
+                b.text(card, "dialog/totals", &totals, TEXT)?;
+            }
+            for (i, warning) in plan.warnings.iter().enumerate() {
+                let line = format!("Warning: {warning}");
+                b.text(card, &format!("dialog/warning/{i}"), &line, WARN)?;
+            }
+            let undo = if plan.reversible {
+                "This can be undone."
+            } else {
+                "This can't be undone."
+            };
+            b.text(card, "dialog/reversible", undo, TEXT)?;
+            b.text(
+                card,
+                "dialog/footnote",
+                "Nothing changes until you confirm.",
+                DIM,
+            )?;
+            match ask {
+                Ask::Confirm => {}
+                Ask::Typed { want, typed } => {
+                    let ask = format!("Type \u{201c}{want}\u{201d} to confirm.");
+                    b.text(card, "dialog/ask", &ask, TEXT)?;
+                    b.field(card, &format!("Type the title: {want}"), typed)?;
+                }
+                Ask::Hold(hold) => {
+                    b.text(
+                        card,
+                        "dialog/ask",
+                        "Press and hold the button for one second to confirm.",
+                        TEXT,
+                    )?;
+                    // Always there, so that nothing moves while the button is held.
+                    let mut track = Node::new(Kind::Box);
+                    track.layout.height = Dim::Px(6.0);
+                    track.paint = Paint::solid(FIELD_FILL);
+                    let track = b.add(card, "dialog/track", track)?;
+                    let part = match hold {
+                        Hold::Holding(part) => part.clamp(0.0, 1.0),
+                        Hold::Idle | Hold::Armed => 0.0,
+                    };
+                    let mut done = Node::new(Kind::Box);
+                    done.layout.height = Dim::Px(6.0);
+                    done.layout.width = Dim::Pct(part * 100.0);
+                    done.paint = Paint::solid(RING);
+                    b.add(track, "dialog/done", done)?;
+                    let state = match hold {
+                        Hold::Idle => "Not held.",
+                        Hold::Armed => "Activate again to start holding.",
+                        Hold::Holding(_) => "Holding…",
+                    };
+                    b.status(card, state, DIM)?;
+                }
+            }
+        }
+        Content::Secret { field, sign_in, .. } => {
+            let colour = match field {
+                Field::Rejected | Field::NothingToPaste => BAD,
+                Field::Empty | Field::Pasted => TEXT,
+            };
+            b.status(card, field.words(*sign_in), colour)?;
+        }
+        Content::Text { label, value } => b.field(card, label, value)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn buttons(
+    b: &mut Builder,
+    at: NodeId,
+    content: &Content,
+    complete: bool,
+) -> Result<(), PanelError> {
+    if let Content::Error(_) = content {
+        return b.button(at, CLOSE, "Close", MAIN);
+    }
+    b.button(at, CANCEL, "Cancel", PLAIN)?;
+    match content {
+        Content::Plan { plan, ask, .. } => match ask {
+            Ask::Confirm => b.button(at, CONFIRM, verb(plan), enabled_if(complete, MAIN))?,
+            Ask::Typed { want, typed } => {
+                let matches = complete && typed.trim() == want;
+                b.button(at, TYPED, verb(plan), enabled_if(matches, GRAVE))?;
+            }
+            Ask::Hold(_) => {
+                let label = format!("Hold to {}", verb(plan));
+                b.button(at, HOLD_BUTTON, &label, enabled_if(complete, GRAVE))?;
+            }
+        },
+        // The rest only offer what can be read.
+        _ if !complete => {}
+        Content::Secret { field, sign_in, .. } => {
+            if *sign_in {
+                b.button(at, OPEN, "Open the page again", PLAIN)?;
+            }
+            if *field == Field::Pasted {
+                b.button(at, CLEAR, "Clear", PLAIN)?;
+            }
+            b.button(at, PASTE, "Paste", PLAIN)?;
+            if *field == Field::Pasted {
+                let send = if *sign_in { "Sign in" } else { "Send" };
+                b.button(at, SUBMIT, send, MAIN)?;
+            }
+        }
+        Content::Text { .. } => b.button(at, OK, "OK", MAIN)?,
+        Content::YesNo { .. } => {
+            b.button(at, NO, "No", PLAIN)?;
+            b.button(at, YES, "Yes", MAIN)?;
+        }
+        Content::Conflicts { files, picks } => {
+            let all = picks.len() == files.len() && picks.iter().all(Option::is_some);
+            b.button(at, APPLY, "Apply", enabled_if(all, MAIN))?;
+        }
+        Content::Planning { .. } | Content::Choice { .. } | Content::Error(_) => {}
+    }
+    Ok(())
+}
+
+/// What to build: some of the list, or only what says the window is too small.
+struct Pick {
+    from: usize,
+    to: usize,
+    /// The page and how many there are, when there is more than one.
+    pager: Option<(usize, usize)>,
+    fits: bool,
+}
+
+struct Built {
+    tree: Tree,
+    laid: Laid,
+    identity: Vec<u64>,
+}
+
+impl Built {
+    /// Whether anything would be cut off: the card past the window, or something past
+    /// the card's sides.
+    fn cut_off(&self, room: f32) -> bool {
+        let Some(card) = self
+            .tree
+            .by_key("dialog/card")
+            .and_then(|id| Some((id, self.laid.rect(id)?)))
+        else {
+            return true;
+        };
+        let (id, card) = card;
+        let past_a_side = self.tree.iter().any(|node| {
+            let mut above = self.tree.parent(node);
+            while let Some(parent) = above.filter(|&p| p != id) {
+                above = self.tree.parent(parent);
+            }
+            above.is_some()
+                && self
+                    .laid
+                    .rect(node)
+                    .is_some_and(|r| r.x0 < card.x0 - 0.5 || r.x1 > card.x1 + 0.5)
+        });
+        past_a_side || (card.y1 - card.y0) as f32 > room
+    }
+
+    fn height(&self, key: &str) -> Option<f32> {
+        let rect = self.laid.rect(self.tree.by_key(key)?)?;
+        Some((rect.y1 - rect.y0) as f32)
+    }
+}
+
+fn assemble(
+    fonts: &mut FontSet,
+    (width, height): (f32, f32),
+    ticket: Ticket,
+    content: &Content,
+    what: &Pick,
+) -> Result<Built, PanelError> {
+    let (title, ..) = heading(content);
+    let mut root = Node::new(Kind::Box);
+    root.layout.width = Dim::Px(width);
+    root.layout.height = Dim::Px(height);
+    root.layout.direction = Direction::Column;
+    root.layout.align_items = Some(Align::Center);
+    root.layout.justify = Some(Justify::Center);
+    root.paint = Paint::solid(SCRIM);
+    root.a11y.name = Some(title.clone());
+    let mut b = Builder {
+        tree: Tree::new("dialog", root),
+        ticket,
+        identity: Vec::new(),
+    };
+    let root = b.tree.root();
+
+    let mut card = column(GAP);
+    card.layout.width = Dim::Px((width - 32.0).clamp(0.0, CARD_WIDTH));
+    card.layout.padding = sides(PADDING);
+    // Its height is what its content takes, so that too much of it can be seen.
+    card.layout.shrink = 0.0;
+    card.paint = Paint::solid(CARD);
+    card.paint.radius = [10.0; 4];
+    card.paint.border = [Some(Stroke {
+        width: 1.0,
+        color: EDGE,
+    }); 4];
+    let card = b.add(root, "dialog/card", card)?;
+
+    let mut head = words(&title, 18.0, TEXT);
+    head.a11y.role = Role::Heading;
+    b.add(card, "dialog/heading", head)?;
+
+    if what.fits {
+        above(&mut b, card, content)?;
+        if what.from < what.to {
+            let list = b.add(card, "dialog/list", column(GAP))?;
+            for i in what.from..what.to {
+                item(&mut b, list, content, i)?;
+            }
+        }
+        if let Some((page, pages)) = what.pager {
+            let pager = b.add(card, "dialog/pager", row(Justify::Center))?;
+            b.button(pager, PREVIOUS, "Previous", enabled_if(page > 0, PLAIN))?;
+            let of = format!("Page {} of {pages}", page + 1);
+            let mut status = words(&of, 14.0, DIM);
+            status.a11y.role = Role::Status;
+            b.add(pager, "dialog/page", status)?;
+            b.button(pager, NEXT, "Next", enabled_if(page + 1 < pages, PLAIN))?;
+        }
+        below(&mut b, card, content)?;
+    } else {
+        b.status(card, "Make the window larger to see all of this.", WARN)?;
+    }
+    let at = b.add(card, "dialog/buttons", row(Justify::End))?;
+    buttons(&mut b, at, content, what.fits)?;
+
+    let laid = layout(
+        &b.tree,
+        fonts,
+        Viewport::new(width, height),
+        &Scroll::none(),
+    )?;
+    Ok(Built {
+        tree: b.tree,
+        laid,
+        identity: b.identity,
+    })
+}
+
+/// Splits entries of these heights into pages of at most `room`; `None` when one alone
+/// is taller.
+fn paginate(heights: &[f32], room: f32) -> Option<Vec<(usize, usize)>> {
+    let mut pages = Vec::new();
+    let (mut from, mut used) = (0, 0.0);
+    for (i, &h) in heights.iter().enumerate() {
+        if h > room {
+            return None;
+        }
+        if i > from && used + GAP + h > room {
+            pages.push((from, i));
+            (from, used) = (i, h);
+        } else {
+            used += if i > from { GAP + h } else { h };
+        }
+    }
+    pages.push((from, heights.len()));
+    Some(pages)
+}
+
+impl Dialog {
+    /// `page` is which page of a long list to show; one past the last shows the last.
+    pub(crate) fn new(
+        fonts: &mut FontSet,
+        size: (f32, f32),
+        ticket: Ticket,
+        content: &Content,
+        page: usize,
+    ) -> Result<Dialog, PanelError> {
+        let count = items(content);
+        let room = size.1 - MARGIN;
+
+        let all = Pick {
+            from: 0,
+            to: count,
+            pager: None,
+            fits: true,
+        };
+        let mut built = assemble(fonts, size, ticket, content, &all)?;
+        let (mut page_at, mut pages, mut complete) = (0, 1, true);
+        if built.cut_off(room) {
+            complete = false;
+            if count > 1 {
+                // With the pager, to see how much room the rest leaves for the list.
+                let paged = Pick {
+                    pager: Some((1, 3)),
+                    ..all
+                };
+                let whole = assemble(fonts, size, ticket, content, &paged)?;
+                let heights: Vec<f32> = (0..count)
+                    .map(|i| {
+                        whole
+                            .height(&format!("dialog/item/{i}"))
+                            .unwrap_or(f32::MAX)
+                    })
+                    .collect();
+                let card = whole.height("dialog/card").unwrap_or(f32::MAX);
+                let list = whole.height("dialog/list").unwrap_or(0.0);
+                if let Some(split) = paginate(&heights, room - (card - list)) {
+                    let at = page.min(split.len() - 1);
+                    let (from, to) = split[at];
+                    let what = Pick {
+                        from,
+                        to,
+                        pager: Some((at, split.len())),
+                        fits: true,
+                    };
+                    let one = assemble(fonts, size, ticket, content, &what)?;
+                    if !one.cut_off(room) {
+                        built = one;
+                        (page_at, pages, complete) = (at, split.len(), true);
+                    }
+                }
+            }
+            if !complete {
+                let nothing = Pick {
+                    from: 0,
+                    to: 0,
+                    pager: None,
+                    fits: false,
+                };
+                built = assemble(fonts, size, ticket, content, &nothing)?;
+            }
+        }
+        let (_, kind, initial) = heading(content);
         Ok(Dialog {
-            tree,
-            laid,
+            tree: built.tree,
+            laid: built.laid,
             ticket,
             kind,
             initial,
+            identity: built.identity,
+            complete,
+            page: page_at,
+            pages,
         })
     }
 
@@ -238,13 +927,30 @@ impl Dialog {
         self.ticket
     }
 
-    /// One screen of the safety flow is one layer: what is pasted does not make it
-    /// another.
+    /// Whether all of it could be shown. If not, nothing may answer it, and the model
+    /// is not told it was presented.
+    pub(crate) fn answerable(&self) -> bool {
+        self.complete
+    }
+
+    /// The page on screen, and how many there are.
+    pub(crate) fn page(&self) -> (usize, usize) {
+        (self.page, self.pages)
+    }
+
+    /// One screen of the safety flow is one layer: what is typed, pasted or turned to
+    /// does not make it another.
     pub(crate) fn layer(&self) -> Layer<'_> {
         let mut hasher = DefaultHasher::new();
         ("dialog", self.ticket).hash(&mut hasher);
         let id = LayerId(hasher.finish());
-        Layer::new(id, self.kind, &self.tree, &self.laid).initial_focus(self.initial)
+        let layer = Layer::new(id, self.kind, &self.tree, &self.laid)
+            .identity(&self.identity)
+            .hold(HOLDS);
+        match self.initial {
+            Some(initial) => layer.initial_focus(initial),
+            None => layer,
+        }
     }
 
     /// Adds the dialog's drawing to `list`, with the ring on the control `focus` names.
@@ -261,5 +967,31 @@ impl Dialog {
     #[cfg(test)]
     pub(crate) fn tree(&self) -> &Tree {
         &self.tree
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pages_fill_the_room_and_no_entry_is_lost() {
+        let heights = [20.0; 10];
+        let pages = paginate(&heights, 80.0).expect("fits");
+        assert_eq!(pages, [(0, 3), (3, 6), (6, 9), (9, 10)]);
+        assert_eq!(paginate(&heights, 1000.0), Some(vec![(0, 10)]));
+        assert_eq!(paginate(&[20.0, 90.0], 80.0), None);
+        assert_eq!(paginate(&heights, -1.0), None);
+    }
+
+    #[test]
+    fn sizes_and_long_runs() {
+        assert_eq!(size_words(999), "999 B");
+        assert_eq!(size_words(1_500), "1.5 KB");
+        assert_eq!(size_words(1_999_999), "2.0 MB");
+        assert_eq!(size_words(52_300_000_000), "52.3 GB");
+        let path = "a".repeat(70);
+        assert_eq!(breakable(&path).matches('\u{200b}').count(), 2);
+        assert_eq!(breakable("short words only"), "short words only");
     }
 }

@@ -8,8 +8,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use gogo_contract::{Gates, Value};
 use gogo_gui_model::{
     Backend, Call, Effect, ErrorView, Failures, InputEvent, Invocation, Jobs, Location, Modal,
-    Model, Outcome, PlanReply, Press, PromptAnswer, PromptSpec, Run, Secret, Slot, SourceKey,
-    Subscription, Ticket,
+    Model, Outcome, PlanReply, Press, PromptAnswer, PromptSpec, Run, Slot, SourceKey, Subscription,
+    Ticket,
 };
 use gogo_skin::expr::{CallError, Scope};
 use gogo_ui_scene::{Image, ImageKey, ImageStore, MemoryStore};
@@ -157,37 +157,13 @@ impl Data {
         outcome
     }
 
-    /// Esc.
-    pub(crate) fn dismiss(&mut self) -> Outcome {
-        let outcome = self.model.dismiss();
-        self.model.pump();
-        outcome
+    /// The screen the safety flow wants up.
+    pub(crate) fn modal(&self) -> Option<Modal<'_>> {
+        self.model.modal()
     }
 
-    /// The safety screen on top, if it is one the app draws.
-    pub(crate) fn screen_to_draw(&self) -> Option<(Ticket, Drawn)> {
-        match self.model.modal()? {
-            // A job's questions come with the jobs (#536).
-            Modal::Prompt {
-                ticket,
-                spec: PromptSpec::Secret { label },
-                job: None,
-            } => Some((ticket, Drawn::SignIn(label.clone()))),
-            Modal::Error { ticket, error } => Some((ticket, Drawn::Error(error.clone()))),
-            _ => None,
-        }
-    }
-
-    /// Whether the screen on top is one that passes by itself: planning the sign-in
-    /// that was just asked for.
-    pub(crate) fn passing(&self) -> bool {
-        matches!(
-            self.model.modal(),
-            Some(Modal::Planning {
-                action: "account.sign_in",
-                ..
-            })
-        )
+    pub(crate) fn modal_ticket(&self) -> Option<Ticket> {
+        self.model.modal().map(|m| m.ticket())
     }
 
     /// The screen with `ticket` is on the display.
@@ -195,14 +171,45 @@ impl Data {
         self.model.presented(ticket, latest, at);
     }
 
-    /// Answer the question on screen with a secret.
-    pub(crate) fn answer(&mut self, ticket: Ticket, secret: Secret, press: Press) -> Outcome {
-        let outcome = self
-            .model
-            .answer(ticket, PromptAnswer::Secret(secret), press);
-        // The plan of a sign-in is there at once.
+    // What the app's own widgets answer. Each pumps, so that what comes next (a new
+    // screen, a job) is there for the next frame.
+
+    fn pumped<T>(&mut self, did: impl FnOnce(&mut Model<Engine>) -> T) -> T {
+        let outcome = did(&mut self.model);
         self.model.pump();
         outcome
+    }
+
+    /// The plan card's confirm.
+    pub(crate) fn confirm(&mut self, ticket: Ticket, press: Press) -> Outcome {
+        self.pumped(|m| m.confirm(ticket, press))
+    }
+
+    /// Enter with nothing focused.
+    pub(crate) fn enter(&mut self, press: Press) -> Outcome {
+        self.pumped(|m| m.enter(press))
+    }
+
+    pub(crate) fn type_name(&mut self, ticket: Ticket, typed: &str, press: Press) -> Outcome {
+        self.pumped(|m| m.type_name(ticket, typed, press))
+    }
+
+    pub(crate) fn hold_start(&mut self, ticket: Ticket, press: Press) -> Outcome {
+        self.pumped(|m| m.hold_start(ticket, press))
+    }
+
+    pub(crate) fn hold_stop(&mut self, ticket: Ticket) {
+        self.pumped(|m| m.hold_stop(ticket));
+    }
+
+    /// Call while a hold is down.
+    pub(crate) fn tick(&mut self, now: Duration) {
+        self.pumped(|m| m.tick(now));
+    }
+
+    /// Answer the question on screen.
+    pub(crate) fn answer(&mut self, ticket: Ticket, answer: PromptAnswer, press: Press) -> Outcome {
+        self.pumped(|m| m.answer(ticket, answer, press))
     }
 
     pub(crate) fn cancel(&mut self, ticket: Ticket) {
@@ -223,19 +230,22 @@ impl Data {
         }
     }
 
-    /// What the safety flow wants on screen, by kind: never its content, which can hold
-    /// the user's data.
-    pub(crate) fn modal_kind(&self) -> Option<&'static str> {
-        Some(match self.model.modal()? {
-            Modal::Prompt { .. } => "a prompt",
-            Modal::Planning { .. } => "a planning screen",
-            Modal::PlanCard { .. } => "a plan card",
-            Modal::Strong { .. } => "a destructive confirmation",
-            Modal::Error { .. } => "an error",
-        })
+    /// Where a failure with no call waiting for it is reported.
+    #[cfg(test)]
+    pub(crate) fn failures(&self) -> Failures {
+        self.model.failures()
     }
 
-    /// The fake, to script it and see what ran.
+    /// The fake, to script it.
+    #[cfg(test)]
+    pub(crate) fn backend_mut(&mut self) -> &mut gogo_gui_model::fake::FakeBackend {
+        match self.model.backend_mut() {
+            Engine::Fixture(fake) => fake,
+            Engine::Core(_) => panic!("not on fictional data"),
+        }
+    }
+
+    /// The fake, to see what ran.
     #[cfg(test)]
     pub(crate) fn backend(&self) -> &gogo_gui_model::fake::FakeBackend {
         match self.model.backend() {
@@ -274,13 +284,6 @@ impl Data {
         let _ = name;
         false
     }
-}
-
-/// A safety screen the app draws.
-pub(crate) enum Drawn {
-    /// The sign-in dialog, with what it says.
-    SignIn(String),
-    Error(ErrorView),
 }
 
 /// The sources the model answers from the job table.
