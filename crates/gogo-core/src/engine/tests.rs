@@ -322,6 +322,111 @@ async fn corrupt_chunk_retries_then_succeeds() {
     assert_eq!(std::fs::read(root.path().join("x.bin")).unwrap(), b"hello");
 }
 
+/// B3/C5: a CDN link that stops working mid-file (403 expired, 404 revoked) is
+/// re-resolved, and the download goes on from the fresh link.
+///
+/// With one worker, chunk 0 is done before chunk 1 meets the dead link. With two,
+/// chunk 0 is still in flight then, so its worker is stopped by the failing one.
+async fn link_dies_mid_file_then_reresolves(status: u16, workers: u32) {
+    let _env = TestEnv::new();
+    let root = tempfile::tempdir().unwrap();
+    let mut ctx = test_ctx(root.path()).await;
+    Arc::get_mut(&mut ctx).unwrap().cfg.download.workers = workers;
+    let server = MockServer::start().await;
+    let xml = checksum_xml(
+        "x.bin",
+        &[
+            (md5_hex(b"hello").as_str(), 0, 4),
+            (md5_hex(b"world").as_str(), 5, 9),
+        ],
+    );
+
+    // First resolve → the link that will die; every later one → a fresh link.
+    for (cdn, times) in [("old", 1), ("new", u64::MAX)] {
+        Mock::given(method("GET"))
+            .and(path("/downlink"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "downlink": format!("{}/{cdn}", server.uri()),
+                "checksum": format!("{}/checksum.xml", server.uri()),
+            })))
+            .up_to_n_times(times)
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path("/checksum.xml"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(xml))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/old"))
+        .and(header("Range", "bytes=0-4"))
+        .respond_with(
+            ResponseTemplate::new(206)
+                .set_body_bytes(b"hello".to_vec())
+                // Two workers: still unanswered when the other chunk fails, on a
+                // slow runner too.
+                .set_delay(std::time::Duration::from_secs(if workers > 1 {
+                    2
+                } else {
+                    0
+                })),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/old"))
+        .and(header("Range", "bytes=5-9"))
+        .respond_with(ResponseTemplate::new(status))
+        .mount(&server)
+        .await;
+    // Only asked for when the dead link stopped chunk 0 before it was done.
+    Mock::given(method("GET"))
+        .and(path("/new"))
+        .and(header("Range", "bytes=0-4"))
+        .respond_with(ResponseTemplate::new(206).set_body_bytes(b"hello".to_vec()))
+        .expect(u64::from(workers > 1))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/new"))
+        .and(header("Range", "bytes=5-9"))
+        .respond_with(ResponseTemplate::new(206).set_body_bytes(b"world".to_vec()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut task = task_for(format!("{}/downlink", server.uri()), 10);
+    task.dir = root.path().to_path_buf();
+    let summary = execute(&ctx, vec![task]).await;
+
+    assert_eq!((summary.ok, summary.failed), (1, 0), "{summary:?}");
+    assert_eq!(
+        std::fs::read(root.path().join("x.bin")).unwrap(),
+        b"helloworld"
+    );
+}
+
+#[tokio::test]
+async fn expired_link_mid_file_reresolves_and_finishes() {
+    link_dies_mid_file_then_reresolves(403, 1).await;
+}
+
+#[tokio::test]
+async fn gone_link_mid_file_reresolves_and_finishes() {
+    link_dies_mid_file_then_reresolves(404, 1).await;
+}
+
+#[tokio::test]
+async fn expired_link_with_a_sibling_chunk_in_flight_reresolves() {
+    link_dies_mid_file_then_reresolves(403, 2).await;
+}
+
+#[tokio::test]
+async fn gone_link_with_a_sibling_chunk_in_flight_reresolves() {
+    link_dies_mid_file_then_reresolves(404, 2).await;
+}
+
 #[tokio::test]
 async fn persistent_corruption_fails_class_5_and_keeps_sidecars() {
     let _env = TestEnv::new();
