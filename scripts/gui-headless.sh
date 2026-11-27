@@ -300,6 +300,15 @@ scenario_input() {
     wtype -s 200 "Before Act 2" -s 200 # typed text, with its case
     shot_changed 8-typed 7-prompt || return 1
 
+    wtype -M ctrl -k a -m ctrl -s 200 # all of it selected
+    shot_changed 8a-selected 8-typed || return 1
+    # Copied, then pasted twice over: the clipboard goes there and back.
+    wtype -M ctrl -k c -m ctrl -s 200 -k End -s 200
+    shot_changed 8b-end 8a-selected || return 1
+    wtype -M ctrl -k v -m ctrl -s 200
+    shot_changed 8c-pasted 8b-end || return 1
+    wtype -M ctrl -k z -m ctrl -s 200 # and taken back
+
     key Tab
     key Tab # past Cancel to OK
     key Return

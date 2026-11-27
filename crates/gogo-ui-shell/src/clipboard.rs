@@ -1,8 +1,8 @@
-//! Reading the system clipboard's text, when the application asks (design 24 §3):
-//! smithay-clipboard on Wayland (`wl_data_device`, which every compositor has), arboard
-//! on X11 and macOS. Nothing is ever written to it.
+//! The system clipboard's text (design 24 §3): smithay-clipboard on Wayland
+//! (`wl_data_device`, which every compositor has), arboard on X11 and macOS. It is read
+//! and written only when the application asks.
 //!
-//! What this does not do, since the text can be a sign-in code:
+//! What reading does not do, since the text can be a sign-in code:
 //!
 //! - [`CLIPBOARD_MAX`] is applied **after** the library has read the whole clipboard
 //!   into memory: it bounds what the application gets, not what is allocated.
@@ -10,6 +10,10 @@
 //!   and X11 buffers, conversions) are not.
 //! - The clipboard is **not cleared** after a paste, on purpose: it is the user's, may
 //!   have changed since, and clearing it would also surprise them.
+//!
+//! Writing leaves a copy with the library for as long as it serves it, which can't be
+//! wiped: a secret must never be written. On X11 and Wayland the text goes with the
+//! window unless a clipboard manager has taken it.
 
 use winit::raw_window_handle::{HasDisplayHandle as _, RawDisplayHandle};
 use winit::window::Window;
@@ -34,6 +38,19 @@ impl Clipboard {
         }
         let _: RawDisplayHandle = display;
         arboard::Clipboard::new().ok().map(Clipboard::Other)
+    }
+
+    /// Puts `text` on the clipboard. A failure is only logged: without the text.
+    pub(crate) fn set_text(&mut self, text: &str) {
+        match self {
+            #[cfg(target_os = "linux")]
+            Clipboard::Wayland(clipboard) => clipboard.store(text),
+            Clipboard::Other(clipboard) => {
+                if let Err(e) = clipboard.set_text(text) {
+                    tracing::warn!("the clipboard could not be written: {e}");
+                }
+            }
+        }
     }
 
     /// The text on the clipboard; `None` when there is none, or more than

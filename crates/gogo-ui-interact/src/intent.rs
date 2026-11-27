@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use gogo_ui_ir::{ActionRef, AppPart};
+use gogo_ui_ir::{ActionRef, AppPart, Gesture, Motion};
 
 use crate::frame::Target;
 
@@ -57,18 +57,62 @@ pub struct ControlInput {
     pub on: Option<bool>,
 }
 
-/// One change to a text field's text.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One change to a text field: its text, caret or selection.
+#[derive(Clone, PartialEq)]
 #[non_exhaustive]
 pub enum TextEdit {
-    /// Add this at the end. Has no control characters.
+    /// Type this where the caret is. Has no control characters.
     Insert(String),
-    /// Take the last character away.
-    Backspace,
+    /// Delete the selection, else a character or a word beside the caret.
+    Delete {
+        /// After the caret, not before it.
+        forward: bool,
+        /// A word.
+        word: bool,
+    },
+    /// Move the caret.
+    Move {
+        /// Where.
+        motion: Motion,
+        /// The selection reaches there.
+        extend: bool,
+    },
+    /// Select everything.
+    SelectAll,
+    /// Take the last change back.
+    Undo,
+    /// Make it again.
+    Redo,
+    /// A press or a drag in the field.
+    Point {
+        /// From the left edge of the field's box.
+        x: f64,
+        /// From its top.
+        y: f64,
+        /// What it does.
+        gesture: Gesture,
+    },
+}
+
+/// Never the text that was typed.
+impl std::fmt::Debug for TextEdit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TextEdit::Insert(text) => write!(f, "Insert({} bytes)", text.len()),
+            TextEdit::Delete { forward, word } => {
+                write!(f, "Delete(forward: {forward}, word: {word})")
+            }
+            TextEdit::Move { motion, extend } => write!(f, "Move({motion:?}, {extend})"),
+            TextEdit::SelectAll => f.write_str("SelectAll"),
+            TextEdit::Undo => f.write_str("Undo"),
+            TextEdit::Redo => f.write_str("Redo"),
+            TextEdit::Point { x, y, gesture } => write!(f, "Point({x}, {y}, {gesture:?})"),
+        }
+    }
 }
 
 /// Something the user asked for.
-#[derive(Debug, PartialEq)]
+#[derive(PartialEq)]
 #[non_exhaustive]
 pub enum Intent {
     /// A skin control was activated.
@@ -117,7 +161,8 @@ pub enum Intent {
         /// The new text.
         value: String,
     },
-    /// Typing in the focused text field. Not a press: it answers nothing.
+    /// Typing, caret motion or selection in a text field. Not a press: it answers
+    /// nothing.
     Edit {
         /// The field.
         target: Target,
@@ -140,11 +185,103 @@ pub enum Intent {
         /// The press.
         provenance: InputProvenance,
     },
+    /// Copy or cut was pressed in a focused text field: the field may put its
+    /// selection on the clipboard.
+    Copy {
+        /// The field.
+        target: Target,
+        /// Take the selection out of the field too.
+        cut: bool,
+        /// The press.
+        provenance: InputProvenance,
+    },
     /// Open the command palette.
     Palette {
         /// The press.
         provenance: InputProvenance,
     },
+}
+
+/// As derived, but for the text assistive technology sets: only its length.
+impl std::fmt::Debug for Intent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Intent::Invoke {
+                target,
+                action,
+                input,
+                provenance,
+            } => f
+                .debug_struct("Invoke")
+                .field("target", target)
+                .field("action", action)
+                .field("input", input)
+                .field("provenance", provenance)
+                .finish(),
+            Intent::App {
+                target,
+                part,
+                provenance,
+            } => f
+                .debug_struct("App")
+                .field("target", target)
+                .field("part", part)
+                .field("provenance", provenance)
+                .finish(),
+            Intent::HoldStart {
+                target,
+                part,
+                provenance,
+            } => f
+                .debug_struct("HoldStart")
+                .field("target", target)
+                .field("part", part)
+                .field("provenance", provenance)
+                .finish(),
+            Intent::HoldEnd { target } => {
+                f.debug_struct("HoldEnd").field("target", target).finish()
+            }
+            Intent::HoldArmed { target } => {
+                f.debug_struct("HoldArmed").field("target", target).finish()
+            }
+            Intent::SetValue { target, value } => f
+                .debug_struct("SetValue")
+                .field("target", target)
+                .field("bytes", &value.len())
+                .finish(),
+            Intent::Edit { target, edit } => f
+                .debug_struct("Edit")
+                .field("target", target)
+                .field("edit", edit)
+                .finish(),
+            Intent::Dismiss { provenance } => f
+                .debug_struct("Dismiss")
+                .field("provenance", provenance)
+                .finish(),
+            Intent::Enter { provenance } => f
+                .debug_struct("Enter")
+                .field("provenance", provenance)
+                .finish(),
+            Intent::Paste { provenance } => f
+                .debug_struct("Paste")
+                .field("provenance", provenance)
+                .finish(),
+            Intent::Copy {
+                target,
+                cut,
+                provenance,
+            } => f
+                .debug_struct("Copy")
+                .field("target", target)
+                .field("cut", cut)
+                .field("provenance", provenance)
+                .finish(),
+            Intent::Palette { provenance } => f
+                .debug_struct("Palette")
+                .field("provenance", provenance)
+                .finish(),
+        }
+    }
 }
 
 /// What one call did.

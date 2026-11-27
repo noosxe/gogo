@@ -20,10 +20,11 @@ use gogo_gui_model::{
 use gogo_ui_interact::{InputProvenance, Intent, TextEdit};
 use gogo_ui_scene::DisplayList;
 use gogo_ui_shell::Zeroizing;
+use gogo_ui_text::{EditBuffer, EditOp};
 
 use super::{App, say};
 use crate::act;
-use crate::dialog::{self, Ask, Content, Dialog, Field, Hold};
+use crate::dialog::{self, Ask, Content, Dialog, Field, FieldView, Hold};
 use crate::panel::Panel;
 
 /// The longest title or one-line value the field takes.
@@ -36,8 +37,11 @@ pub(super) struct Entry {
     pub(super) ticket: Option<Ticket>,
     pub(super) code: Option<Secret>,
     pub(super) field: Field,
-    /// What is in the text field.
-    text: String,
+    /// The text field of the screens that have one. A secret never goes in: the buffer
+    /// keeps copies it can't wipe, and has an undo history.
+    pub(super) buffer: Option<EditBuffer>,
+    /// How far the field's text is moved left.
+    pub(super) scroll: f32,
     page: usize,
     /// One per conflicting file.
     picks: Vec<Option<Side>>,
@@ -82,14 +86,28 @@ fn press(provenance: &InputProvenance) -> Press {
     }
 }
 
-/// One line of text, without what a field can't hold.
-fn one_line(text: &str, room: usize) -> impl Iterator<Item = char> {
-    text.lines()
-        .next()
-        .unwrap_or_default()
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(room)
+impl Entry {
+    /// What the field holds, without a composition.
+    fn text(&self) -> String {
+        self.buffer
+            .as_ref()
+            .map(EditBuffer::text)
+            .unwrap_or_default()
+    }
+
+    fn field_view(&self, focused: bool) -> FieldView {
+        let Some(buffer) = &self.buffer else {
+            return FieldView::default();
+        };
+        FieldView {
+            text: buffer.text(),
+            shown: buffer.shown().to_owned(),
+            selection: buffer.selected_range(),
+            caret: buffer.caret().filter(|_| focused),
+            preedit: buffer.preedit(),
+            scroll: self.scroll,
+        }
+    }
 }
 
 /// The kind of a screen, for the run's output: never its content, which can hold the
@@ -105,7 +123,7 @@ fn kind(modal: &Modal<'_>) -> &'static str {
 }
 
 /// What the screen of `modal` shows, with what the user has put into it.
-fn content(modal: &Modal<'_>, entry: &Entry, changed: bool, hold: Hold) -> Content {
+fn content(modal: &Modal<'_>, entry: &Entry, changed: bool, hold: Hold, focused: bool) -> Content {
     match modal {
         Modal::Planning { confirming, .. } => Content::Planning {
             confirming: *confirming,
@@ -121,7 +139,7 @@ fn content(modal: &Modal<'_>, entry: &Entry, changed: bool, hold: Hold) -> Conte
             ask: match strength {
                 Strength::Typed(want) => Ask::Typed {
                     want: want.clone(),
-                    typed: entry.text.clone(),
+                    typed: entry.field_view(focused),
                 },
                 Strength::Hold => Ask::Hold(hold),
             },
@@ -131,7 +149,7 @@ fn content(modal: &Modal<'_>, entry: &Entry, changed: bool, hold: Hold) -> Conte
         } => match spec {
             PromptSpec::Text { label, .. } => Content::Text {
                 label: label.clone(),
-                value: entry.text.clone(),
+                value: entry.field_view(focused),
             },
             PromptSpec::Secret { label } => Content::Secret {
                 label: label.clone(),
@@ -174,16 +192,38 @@ impl App {
             ticket: Some(ticket),
             ..Entry::default()
         };
-        if let Some(Modal::Prompt { spec, .. }) = self.data.modal() {
-            match spec {
-                PromptSpec::Text { default, .. } => {
-                    entry.text = one_line(default, MAX_TEXT).collect();
-                }
-                PromptSpec::Conflicts { files } => entry.picks = vec![None; files.len()],
-                _ => {}
-            }
+        if let Some(Modal::Prompt {
+            spec: PromptSpec::Conflicts { files },
+            ..
+        }) = self.data.modal()
+        {
+            entry.picks = vec![None; files.len()];
         }
         self.entry = entry;
+    }
+
+    /// Makes the field's buffer, when the screen on top has a field and none yet.
+    fn make_field(&mut self) {
+        if self.entry.buffer.is_some() {
+            return;
+        }
+        let first = match self.data.modal() {
+            Some(Modal::Prompt {
+                spec: PromptSpec::Text { default, .. },
+                ..
+            }) => default.clone(),
+            Some(Modal::Strong {
+                strength: Strength::Typed(_),
+                ..
+            }) => String::new(),
+            _ => return,
+        };
+        self.entry.buffer = Some(EditBuffer::new(
+            &mut self.page.fonts,
+            &dialog::field_style(dialog::FIELD_TEXT_COLOR),
+            &first,
+            MAX_TEXT,
+        ));
     }
 
     /// Where the hold on the screen of `ticket` is, as of the last frame on the display.
@@ -207,12 +247,18 @@ impl App {
             return;
         };
         self.enter_screen(ticket);
+        self.make_field();
         let hold = self.hold_state(ticket);
         let changed = self.changed == Some(ticket);
+        // The caret shows however the field got focus.
+        let focused = self
+            .interaction
+            .focus()
+            .is_some_and(|t| t.key == dialog::FIELD);
         let Some(content) = self
             .data
             .modal()
-            .map(|modal| content(&modal, &self.entry, changed, hold))
+            .map(|modal| content(&modal, &self.entry, changed, hold, focused))
         else {
             return;
         };
@@ -232,6 +278,9 @@ impl App {
         match built {
             Ok(drawn) => {
                 self.entry.page = drawn.page().0;
+                if let Some(scroll) = drawn.field_scroll() {
+                    self.entry.scroll = scroll;
+                }
                 let id = drawn.layer().id;
                 // A text field shows where typing goes however it got focus.
                 let focus = self
@@ -365,19 +414,17 @@ impl App {
             Intent::Edit { target, edit }
                 if target.key == dialog::FIELD && self.entry.ticket == Some(ticket) =>
             {
-                match edit {
-                    TextEdit::Insert(text) => self.insert(&text),
-                    TextEdit::Backspace => {
-                        self.entry.text.pop();
-                    }
-                    _ => {}
-                }
+                self.edit_field(drawn, &edit);
+            }
+            Intent::Copy { target, cut, .. }
+                if target.key == dialog::FIELD && self.entry.ticket == Some(ticket) =>
+            {
+                self.copy_field(cut);
             }
             Intent::SetValue { target, value }
                 if target.key == dialog::FIELD && self.entry.ticket == Some(ticket) =>
             {
-                self.entry.text.clear();
-                self.insert(&value);
+                self.change_field(EditOp::Set(&value));
             }
             _ => {}
         }
@@ -390,9 +437,44 @@ impl App {
         }
     }
 
-    fn insert(&mut self, text: &str) {
-        let room = MAX_TEXT.saturating_sub(self.entry.text.chars().count());
-        self.entry.text.extend(one_line(text, room));
+    fn change_field(&mut self, op: EditOp<'_>) {
+        if let Some(buffer) = &mut self.entry.buffer {
+            buffer.apply(&mut self.page.fonts, op);
+        }
+    }
+
+    /// An edit made in the field of the dialog `drawn`.
+    fn edit_field(&mut self, drawn: &Dialog, edit: &TextEdit) {
+        let op = match *edit {
+            TextEdit::Insert(ref text) => EditOp::Type(text),
+            TextEdit::Delete { forward, word } => EditOp::Delete { forward, word },
+            TextEdit::Move { motion, extend } => EditOp::Move { motion, extend },
+            TextEdit::SelectAll => EditOp::SelectAll,
+            TextEdit::Undo => EditOp::Undo,
+            TextEdit::Redo => EditOp::Redo,
+            TextEdit::Point { x, y, gesture } => {
+                let Some((x, y)) = drawn.field_point(x, y) else {
+                    return;
+                };
+                EditOp::Point { x, y, gesture }
+            }
+            _ => return,
+        };
+        self.change_field(op);
+    }
+
+    /// Takes the field's selection for the clipboard.
+    fn copy_field(&mut self, cut: bool) {
+        let Some(text) = self.entry.buffer.as_ref().and_then(EditBuffer::selected) else {
+            return;
+        };
+        self.copied = Some(Zeroizing::new(text.to_owned()));
+        if cut {
+            self.change_field(EditOp::Delete {
+                forward: false,
+                word: false,
+            });
+        }
     }
 
     /// A button of the dialog `drawn`.
@@ -427,7 +509,7 @@ impl App {
                 self.data.confirm(ticket, press);
             }
             dialog::TYPED => {
-                let typed = self.entry.text.clone();
+                let typed = self.entry.text();
                 self.data.type_name(ticket, &typed, press);
             }
             dialog::PASTE => self.ask_to_paste(ticket, provenance),
@@ -445,7 +527,7 @@ impl App {
                 }
             }
             dialog::OK => {
-                let text = self.entry.text.clone();
+                let text = self.entry.text();
                 answer(self, PromptAnswer::Text(text));
             }
             dialog::YES => {
@@ -547,7 +629,7 @@ impl App {
         };
         let Some(sign_in) = secret_for else {
             if let Some(text) = text.as_deref() {
-                self.insert(text);
+                self.change_field(EditOp::Paste(text));
             }
             return true;
         };

@@ -107,6 +107,8 @@ pub(crate) struct App {
     since: Option<Shown>,
     /// A press asked to paste into the dialog of this ticket.
     paste: Option<Ticket>,
+    /// What a press copied from a field, for the clipboard.
+    copied: Option<Zeroizing<String>>,
     /// The hold the model has accepted, while it is down.
     holding: Option<Holding>,
     /// When the last frame reached the display.
@@ -149,6 +151,7 @@ impl App {
             entry: Entry::default(),
             since: None,
             paste: None,
+            copied: None,
             holding: None,
             now: None,
             changed: None,
@@ -480,6 +483,10 @@ impl ShellApp for App {
 
     fn wants_paste(&mut self) -> bool {
         self.paste.is_some()
+    }
+
+    fn copied(&mut self) -> Option<Zeroizing<String>> {
+        self.copied.take()
     }
 
     fn pasted(&mut self, text: Option<Zeroizing<String>>) -> bool {

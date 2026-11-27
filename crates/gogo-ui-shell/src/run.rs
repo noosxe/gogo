@@ -108,7 +108,8 @@ type AnyOutput = Output<Box<dyn WindowRenderer>, CpuWindow>;
 
 /// The open window.
 struct Open {
-    // Dropped before the window. Opened on the first paste.
+    // Dropped before the window. Opened with it: the Wayland one has to see the seat's
+    // input before it may write.
     clipboard: Option<Clipboard>,
     // Dropped before the window.
     output: Option<AnyOutput>,
@@ -196,14 +197,24 @@ impl<A: ShellApp> Runner<A> {
         event_loop.exit();
     }
 
-    /// Reads the clipboard for the application, if it asked.
-    fn paste_if_asked(&mut self) {
-        if !self.app.wants_paste() {
+    /// What the application may want after an input: the clipboard written or read.
+    fn after_input(&mut self) {
+        let copied = self.app.copied();
+        let paste = self.app.wants_paste();
+        if copied.is_none() && !paste {
             return;
         }
         let Some(open) = &mut self.open else { return };
         if open.clipboard.is_none() {
             open.clipboard = Clipboard::open(&open.window);
+        }
+        match (&mut open.clipboard, copied) {
+            (Some(clipboard), Some(text)) => clipboard.set_text(&text),
+            (None, Some(_)) => tracing::warn!("no clipboard: what was copied is lost"),
+            (_, None) => {}
+        }
+        if !paste {
+            return;
         }
         let text = open.clipboard.as_mut().and_then(Clipboard::text);
         if self.app.pasted(text) {
@@ -225,11 +236,12 @@ impl<A: ShellApp> Runner<A> {
             self.proxy.clone(),
         );
         window.set_visible(true);
+        let clipboard = Clipboard::open(&window);
         let output =
             make_output(&mut self.app, &window, self.choice).map_err(ShellError::Renderer)?;
         window.request_redraw();
         self.open = Some(Open {
-            clipboard: None,
+            clipboard,
             output: Some(output),
             accessibility,
             window,
@@ -360,7 +372,7 @@ impl<A: ShellApp> ApplicationHandler<UserEvent> for Runner<A> {
             if redraw {
                 open.window.request_redraw();
             }
-            self.paste_if_asked();
+            self.after_input();
             return;
         }
         match event {
@@ -400,7 +412,7 @@ impl<A: ShellApp> ApplicationHandler<UserEvent> for Runner<A> {
                     let redraw = self
                         .app
                         .accessibility_action(request, self.started.elapsed());
-                    self.paste_if_asked();
+                    self.after_input();
                     redraw
                 }
                 accesskit_winit::WindowEvent::AccessibilityDeactivated => false,
