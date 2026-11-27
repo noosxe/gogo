@@ -145,6 +145,20 @@ impl Panel {
 }
 
 #[cfg(test)]
+impl PanelError {
+    /// Any failure to build, for the test that needs one.
+    pub(crate) fn broken() -> PanelError {
+        let mut tree = Tree::new("broken", Node::new(Kind::Box));
+        let root = tree.root();
+        let _ = tree.add_child(root, "twice", Node::new(Kind::Box));
+        match tree.add_child(root, "twice", Node::new(Kind::Box)) {
+            Err(e) => e.into(),
+            Ok(_) => panic!("a repeated key was taken"),
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

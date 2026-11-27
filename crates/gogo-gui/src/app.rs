@@ -10,10 +10,12 @@
 //! While a source the route reads has no value yet, the app's own "Loading" panel is
 //! over the last screen.
 //!
-//! Of the safety flow's screens the app draws the sign-in dialog and the error screen
-//! ([`crate::dialog`]). The others are not drawn yet (#536, #614): whatever raises one
-//! is cancelled at once, which answers a question with a cancel, and the model is never
-//! told that it was shown.
+//! Every screen of the safety flow is the app's own modal dialog ([`crate::dialog`]),
+//! wired in [`answer`]. None is cancelled except by the user.
+
+mod answer;
+#[cfg(test)]
+mod safety;
 
 use std::borrow::Cow;
 use std::io::Write as _;
@@ -22,11 +24,9 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gogo_contract::{Value, actions};
-use gogo_gui_model::{DWELL, Effect, InputEvent, Invocation, Outcome, Press, Secret, Ticket};
+use gogo_gui_model::{Effect, InputEvent, Invocation, Outcome, Ticket};
 use gogo_ui_a11y::A11yTree;
-use gogo_ui_interact::{
-    Config, Frame as Layers, InputProvenance, Intent, Interaction, Layer, Primary,
-};
+use gogo_ui_interact::{Config, Frame as Layers, Intent, Interaction, Layer, Primary};
 use gogo_ui_scene::DisplayList;
 use gogo_ui_shell::accesskit::{ActionRequest, TreeUpdate};
 use gogo_ui_shell::{
@@ -34,8 +34,8 @@ use gogo_ui_shell::{
     WindowTarget, Zeroizing,
 };
 
-use crate::data::{Data, Drawn, Images};
-use crate::dialog::{self, Content, Dialog, Field};
+use crate::data::{Data, Images};
+use crate::dialog::Dialog;
 use crate::page::{DrawError, Page, Screen};
 use crate::panel::Panel;
 use crate::{act, render};
@@ -44,9 +44,6 @@ use crate::{act, render};
 const SHELL_ROUTE: &str = "shell";
 
 const TITLE: &str = "gogo";
-
-/// A bound on cancelling one screen of the safety flow after another.
-const MODALS: usize = 64;
 
 #[cfg(target_os = "macos")]
 const PRIMARY: Primary = Primary::Meta;
@@ -76,6 +73,8 @@ struct View {
     panel: Option<Rc<Panel>>,
     /// The app's own dialog, over everything.
     dialog: Option<Rc<Dialog>>,
+    /// The screen whose dialog could not be built: the panel stands for it.
+    stuck: Option<Ticket>,
     scale: f64,
 }
 
@@ -90,35 +89,7 @@ impl View {
     }
 }
 
-/// What the sign-in dialog holds. The code stays here, in the app's own memory, until
-/// it is sent or dropped (S1).
-#[derive(Default)]
-struct Entry {
-    ticket: Option<Ticket>,
-    code: Option<Secret>,
-    field: Field,
-}
-
-/// When the dialog on the display got there.
-#[derive(Debug, Clone, Copy)]
-struct Shown {
-    ticket: Ticket,
-    at: Duration,
-    /// The last input there had been.
-    after: u64,
-}
-
-impl Shown {
-    /// Whether a press may act on the dialog, by the rule the model has for an answer:
-    /// it went down after the dialog was up, not as a key repeating, and not before the
-    /// dialog had been there long enough to be seen.
-    fn takes(self, ticket: Ticket, press: u64, at: Duration, repeat: bool) -> bool {
-        self.ticket == ticket
-            && !repeat
-            && press > self.after
-            && at.checked_sub(self.at).is_some_and(|up| up >= DWELL)
-    }
-}
+use answer::{Entry, Holding, Shown};
 
 pub(crate) struct App {
     page: Page,
@@ -136,9 +107,15 @@ pub(crate) struct App {
     since: Option<Shown>,
     /// A press asked to paste into the dialog of this ticket.
     paste: Option<Ticket>,
-    /// The kinds of the safety screens cancelled so far.
+    /// The hold the model has accepted, while it is down.
+    holding: Option<Holding>,
+    /// When the last frame reached the display.
+    now: Option<Duration>,
+    /// The screen that shows a plan because the one confirmed changed.
+    changed: Option<Ticket>,
+    /// Makes building a dialog fail.
     #[cfg(test)]
-    cancelled: Vec<&'static str>,
+    break_dialogs: bool,
     /// The skin folder being watched.
     dev: Option<PathBuf>,
     /// Why the skin on screen is not the one in the folder, one line each.
@@ -161,8 +138,11 @@ impl App {
             entry: Entry::default(),
             since: None,
             paste: None,
+            holding: None,
+            now: None,
+            changed: None,
             #[cfg(test)]
-            cancelled: Vec::new(),
+            break_dialogs: false,
             dev: dev.map(Path::to_owned),
             problems: Vec::new(),
             images_changed: false,
@@ -216,9 +196,23 @@ impl App {
 
     /// Does what one intent asks.
     fn act(&mut self, intent: Intent) {
+        // A hold ends whatever is on the display by now.
+        if let Intent::HoldEnd { .. } = intent {
+            self.stop_hold();
+            return;
+        }
         if let Some(dialog) = self.shown.dialog.clone() {
-            self.act_on_dialog(dialog.ticket(), intent);
+            self.act_on_dialog(&dialog, intent);
             self.effects();
+            return;
+        }
+        // A screen of the safety flow that is not on the display yet takes nothing, Esc
+        // included: it would cancel what the user has not seen. One that could not be
+        // built is cancelled by Esc on the panel that says so.
+        if let Some(ticket) = self.data.modal_ticket() {
+            if self.shown.stuck == Some(ticket) && matches!(intent, Intent::Dismiss { .. }) {
+                self.close(ticket);
+            }
             return;
         }
         // Under the error panel only Esc does anything.
@@ -243,80 +237,17 @@ impl App {
                 }
             }
             Intent::Dismiss { provenance } => {
-                if self.data.dismiss() == Outcome::Ignored {
-                    self.invoke_named("nav.back", act::number(provenance.event()));
-                }
+                self.invoke_named("nav.back", act::number(provenance.event()));
             }
             Intent::Palette { provenance } => {
                 self.invoke_named("palette.open", act::number(provenance.event()));
             }
-            // Enter, holds and the rest belong to screens that are not drawn yet; no
-            // skin has a text field yet.
+            // Enter, holds and text belong to dialogs; no skin has a text field yet.
             _ => {}
         }
         self.effects();
         if self.data.location().route != route {
             say(format_args!("gui: route {}", self.data.location().route));
-        }
-    }
-
-    /// Does what one intent asks while the dialog of `ticket` is on the display.
-    /// Nothing under it can be reached.
-    fn act_on_dialog(&mut self, ticket: Ticket, intent: Intent) {
-        match intent {
-            Intent::App {
-                target, provenance, ..
-            } => match target.key.as_str() {
-                dialog::PASTE => self.ask_to_paste(ticket, &provenance),
-                dialog::CLEAR => {
-                    self.entry.code = None;
-                    self.entry.field = Field::Empty;
-                }
-                dialog::OPEN => self.data.open_sign_in_page(),
-                dialog::SUBMIT => {
-                    let press = Press {
-                        event: act::number(provenance.event()),
-                        at: provenance.at(),
-                        repeat: provenance.repeat(),
-                    };
-                    let code = self
-                        .entry
-                        .code
-                        .clone()
-                        .filter(|_| self.entry.ticket == Some(ticket));
-                    // Too soon after the dialog appeared, it is ignored and the code
-                    // stays.
-                    if let Some(code) = code
-                        && self.data.answer(ticket, code, press) != Outcome::Ignored
-                    {
-                        self.entry = Entry::default();
-                    }
-                }
-                dialog::CANCEL | dialog::CLOSE => self.close(ticket),
-                _ => {}
-            },
-            Intent::Paste { provenance } => self.ask_to_paste(ticket, &provenance),
-            Intent::Dismiss { .. } => self.close(ticket),
-            _ => {}
-        }
-    }
-
-    /// Cancels the screen of `ticket` and forgets what was pasted for it.
-    fn close(&mut self, ticket: Ticket) {
-        self.data.cancel(ticket);
-        if self.entry.ticket == Some(ticket) {
-            self.entry = Entry::default();
-        }
-    }
-
-    /// The clipboard is read only for a press that could answer the dialog
-    /// ([`Shown::takes`]).
-    fn ask_to_paste(&mut self, ticket: Ticket, press: &InputProvenance) {
-        let fresh = self.since.is_some_and(|shown| {
-            shown.takes(ticket, press.event().get(), press.at(), press.repeat())
-        });
-        if fresh && self.entry.ticket == Some(ticket) {
-            self.paste = Some(ticket);
         }
     }
 
@@ -331,30 +262,6 @@ impl App {
         if let Outcome::Refused(error) = self.data.invoke(invocation, event) {
             tracing::warn!("{name} was refused: {error:?}");
         }
-        self.cancel_modals();
-    }
-
-    /// Cancels every screen the safety flow wants up, as none is drawn yet (#536, #614).
-    /// Returns whether there was one.
-    fn cancel_modals(&mut self) -> bool {
-        let mut any = false;
-        for _ in 0..MODALS {
-            // The app draws these; a planning screen on its way to run is left alone.
-            if self.data.screen_to_draw().is_some() || self.data.passing() {
-                break;
-            }
-            let Some(kind) = self.data.modal_kind() else {
-                break;
-            };
-            say(format_args!("gui: {kind} is not drawn yet: cancelled"));
-            #[cfg(test)]
-            self.cancelled.push(kind);
-            any = true;
-            if self.data.dismiss() != Outcome::Accepted {
-                break;
-            }
-        }
-        any
     }
 
     fn effects(&mut self) {
@@ -367,6 +274,8 @@ impl App {
                 }
                 Effect::AccountMenu => say(format_args!("gui: the account menu is not built yet")),
                 Effect::Copy(_) => say(format_args!("gui: the clipboard is not wired in yet")),
+                // The new card is on top.
+                Effect::PlanChanged { .. } => self.changed = self.data.modal_ticket(),
                 _ => {}
             }
         }
@@ -413,7 +322,7 @@ impl App {
             Err(e) => Some(e.to_string()),
         };
         // Binding takes what the sources sent, which can raise a safety screen.
-        self.cancel_modals();
+        self.effects();
         let mut problems = Cow::Borrowed(self.problems.as_slice());
         if let Some(failure) = failure {
             problems.to_mut().push(failure);
@@ -452,7 +361,7 @@ impl App {
                     .focus_visible()
                     .filter(|t| {
                         self.pending.panel.is_none()
-                            && self.data.screen_to_draw().is_none()
+                            && self.data.modal_ticket().is_none()
                             && t.layer == screen.layer().id
                     })
                     .and_then(|t| screen.tree.by_key(&t.key));
@@ -466,71 +375,29 @@ impl App {
         self.draw_dialog(size);
     }
 
-    /// Adds the safety screen on top, if the app draws it.
-    fn draw_dialog(&mut self, size: (f32, f32)) {
-        self.pending.dialog = None;
-        let Some((ticket, drawn)) = self.data.screen_to_draw() else {
-            return;
-        };
-        let content = match drawn {
-            Drawn::SignIn(label) => {
-                if self.entry.ticket != Some(ticket) {
-                    self.entry = Entry {
-                        ticket: Some(ticket),
-                        ..Entry::default()
-                    };
-                }
-                Content::SignIn {
-                    label,
-                    field: self.entry.field,
-                }
-            }
-            Drawn::Error(error) => Content::Error {
-                class: error.class,
-                title: error.title,
-                message: error.message,
-                hint: error.hint,
-            },
-        };
-        match Dialog::new(&mut self.page.fonts, size, ticket, &content) {
-            Ok(drawn) => {
-                let focus = self
-                    .interaction
-                    .focus_visible()
-                    .filter(|t| t.layer == drawn.layer().id)
-                    .map(|t| t.key.as_str());
-                drawn.draw(&mut self.list, focus);
-                self.pending.dialog = Some(Rc::new(drawn));
-            }
-            Err(e) => {
-                tracing::error!("a dialog could not be drawn: {e}");
-                // Nothing can be answered that was not seen.
-                self.close(ticket);
-                self.pending.screen = None;
-            }
-        }
-    }
-
-    /// The pending frame is on the screen, since `at`. Returns whether focus moved with
-    /// it, so that it has to be drawn again.
+    /// The pending frame is on the screen, since `at`. Returns whether to draw again.
     fn show(&mut self, at: Duration) -> bool {
         self.shown = self.pending.clone();
-        let layers = self.shown.layers();
-        let redraw = self.interaction.sync(&Layers { layers: &layers }).redraw;
-        match self.shown.dialog.as_ref().map(|d| d.ticket()) {
-            Some(ticket) if self.since.is_none_or(|shown| shown.ticket != ticket) => {
-                let latest = self.interaction.latest();
-                self.since = Some(Shown {
-                    ticket,
-                    at,
-                    after: latest.get(),
-                });
-                self.data.presented(ticket, act::number(latest), at);
-            }
-            Some(_) => {}
-            None => self.since = None,
+        let shown = self.shown.clone();
+        let layers = shown.layers();
+        let response = self.interaction.sync(&Layers { layers: &layers });
+        // A hold ends when its control moved or changed with this frame.
+        for intent in response.intents {
+            self.act(intent);
         }
-        redraw
+        let again = self.shown_screen(at);
+        response.redraw || again || self.stale()
+    }
+
+    /// Whether the safety flow has another screen on top than the one last built.
+    fn stale(&self) -> bool {
+        let built = self
+            .pending
+            .dialog
+            .as_ref()
+            .map(|d| d.ticket())
+            .or(self.pending.stuck);
+        self.data.modal_ticket() != built
     }
 }
 
@@ -569,9 +436,9 @@ impl ShellApp for App {
 
     fn wake(&mut self) -> bool {
         let changed = self.data.pump();
-        let cancelled = self.cancel_modals();
         self.effects();
-        changed || cancelled
+        // A question or an error that arrived by itself changes no source.
+        changed || self.stale()
     }
 
     fn watch(&self) -> Option<PathBuf> {
@@ -593,25 +460,7 @@ impl ShellApp for App {
     }
 
     fn pasted(&mut self, text: Option<Zeroizing<String>>) -> bool {
-        let Some(ticket) = self.paste.take() else {
-            return false;
-        };
-        // For the dialog that asked, and no other.
-        if self.entry.ticket != Some(ticket)
-            || self.data.screen_to_draw().map(|(t, _)| t) != Some(ticket)
-        {
-            return false;
-        }
-        let code = text
-            .as_deref()
-            .and_then(|text| gogo::auth::browser::code_from_input(text));
-        self.entry.field = match (&text, &code) {
-            (None, _) => Field::NothingToPaste,
-            (Some(_), None) => Field::Rejected,
-            (Some(_), Some(_)) => Field::Pasted,
-        };
-        self.entry.code = code.map(|code| Secret::new(code.as_str()));
-        true
+        self.take_paste(text)
     }
 
     fn input(&mut self, input: Input, at: Duration) -> bool {
@@ -636,15 +485,17 @@ impl ShellApp for App {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use gogo_ui_interact::{Key, Modifiers, PointerButton};
     use gogo_ui_shell::accesskit::{Action, Role, TreeId};
 
+    use gogo_gui_model::DWELL;
+
     use super::*;
 
-    const SIZE: (f32, f32) = (1280.0, 800.0);
+    pub(super) const SIZE: (f32, f32) = (1280.0, 800.0);
 
-    fn app() -> App {
+    pub(super) fn app() -> App {
         let data = Data::fixture(|| {}).expect("fixture data");
         let mut app = App::new(None, data).expect("the built-in skin");
         app.pending.scale = 1.0;
@@ -653,24 +504,24 @@ mod tests {
     }
 
     /// A frame built and presented.
-    fn frame(app: &mut App) {
+    pub(super) fn frame(app: &mut App) {
         app.draw(SIZE);
         app.show(Duration::ZERO);
     }
 
     /// The middle of the node the skin calls `name`.
-    fn middle(app: &App, name: &str) -> (f64, f64) {
+    pub(super) fn middle(app: &App, name: &str) -> (f64, f64) {
         let screen = app.shown.screen.as_ref().expect("a screen");
         let node = screen.tree.by_name(name).expect(name);
         let rect = screen.laid.rect(node).expect("laid out");
         ((rect.x0 + rect.x1) / 2.0, (rect.y0 + rect.y1) / 2.0)
     }
 
-    fn at(ms: u64) -> Duration {
+    pub(super) fn at(ms: u64) -> Duration {
         Duration::from_millis(ms)
     }
 
-    fn click(app: &mut App, name: &str, ms: u64) {
+    pub(super) fn click(app: &mut App, name: &str, ms: u64) {
         let (x, y) = middle(app, name);
         let button = PointerButton::Primary;
         app.input(Input::PointerMoved { x, y }, at(ms));
@@ -680,7 +531,7 @@ mod tests {
     }
 
     /// Where assistive technology sees the control called `label` with `role`.
-    fn bounds(app: &mut App, role: Role, label: &str) -> (f64, f64) {
+    pub(super) fn bounds(app: &mut App, role: Role, label: &str) -> (f64, f64) {
         let tree = app.accessibility_tree();
         let rect = tree
             .nodes
@@ -692,14 +543,14 @@ mod tests {
     }
 
     /// A pointer click at a point, without building a frame.
-    fn click_at(app: &mut App, (x, y): (f64, f64), ms: u64) {
+    pub(super) fn click_at(app: &mut App, (x, y): (f64, f64), ms: u64) {
         let button = PointerButton::Primary;
         app.input(Input::PointerMoved { x, y }, at(ms));
         app.input(Input::PointerDown { button, x, y }, at(ms + 1));
         app.input(Input::PointerUp { button, x, y }, at(ms + 2));
     }
 
-    fn key(app: &mut App, key: Key, ms: u64) {
+    pub(super) fn key(app: &mut App, key: Key, ms: u64) {
         let mods = Modifiers::default();
         app.input(
             Input::KeyDown {
@@ -768,7 +619,7 @@ mod tests {
     }
 
     /// Presses the control assistive technology sees as `label` with `role`.
-    fn press(app: &mut App, role: Role, label: &str, ms: u64) {
+    pub(super) fn press(app: &mut App, role: Role, label: &str, ms: u64) {
         let tree = app.accessibility_tree();
         let (id, _) = tree
             .nodes
@@ -802,48 +653,6 @@ mod tests {
         assert!(app.problems.is_empty());
         assert_ne!(app.list, before);
         assert_eq!(app.data.location().route, "game");
-    }
-
-    #[test]
-    fn a_jobs_question_is_cancelled_when_it_arrives() {
-        use std::sync::{Arc, Mutex};
-
-        use gogo_gui_model::{PromptReply, PromptSpec};
-
-        let mut app = app();
-        press(&mut app, Role::Button, "Verify files", 10);
-        assert_eq!(app.data.backend().runs.len(), 1);
-        let answers = Arc::new(Mutex::new(Vec::new()));
-        let heard = Arc::clone(&answers);
-        app.data.backend().sink(0).ask(
-            PromptSpec::Confirm {
-                label: "Replace the files?".to_owned(),
-            },
-            PromptReply::new(move |answer| heard.lock().expect("not poisoned").push(answer)),
-        );
-        assert!(app.wake());
-        assert_eq!(app.cancelled, ["a prompt"]);
-        // No answer is a cancel.
-        assert!(matches!(answers.lock().expect("not poisoned")[..], [None]));
-        assert_eq!(app.data.modal_kind(), None);
-        frame(&mut app);
-        // The next click does what it says, and nothing else ran.
-        let tab = bounds(&mut app, Role::Tab, "Builds");
-        click_at(&mut app, tab, 20);
-        assert_eq!(app.page.ui("tab"), Some(&Value::str("builds")));
-        assert_eq!(app.data.backend().runs.len(), 1);
-        assert_eq!(app.cancelled, ["a prompt"]);
-    }
-
-    #[test]
-    fn an_action_that_needs_a_dialog_runs_nothing() {
-        let mut app = app();
-        press(&mut app, Role::Tab, "Snapshots", 10);
-        let create = bounds(&mut app, Role::Button, "Create snapshot");
-        click_at(&mut app, create, 20);
-        assert_eq!(app.cancelled, ["a prompt"]);
-        assert_eq!(app.data.modal_kind(), None);
-        assert!(app.data.backend().runs.is_empty());
     }
 
     /// The built-in skin with a `library` route that loads and never binds: `$nope` is no

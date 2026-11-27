@@ -298,6 +298,43 @@ app control is told apart by its `DrawnBy::App` part and tree key.
   depth-A app widgets. The value goes straight to the core and never enters a source or the
   binding scope (S1, S2).
 
+### As built: the safety screens (#614)
+
+Every screen of the safety flow is the app's own modal layer, one per ticket, and the app
+cancels none of them: only the user does. Fixed colours (#640).
+
+| Screen | Layer | Shows | Starts on |
+|---|---|---|---|
+| Planning | dialog | "Working out what to do…", Cancel | nothing |
+| Plan card | dialog | title, subject, steps, totals, warnings, whether it can be undone, "Nothing changes until you confirm.", Cancel and the plan's verb; says when the plan changed | nothing |
+| Typed confirmation | alert | the plan, the title to type, a one-line field; the verb is disabled until the trimmed text is the title | Cancel |
+| Hold confirmation | alert | the plan, a hold button, how far the hold is and its state | Cancel |
+| Prompt | dialog | yes or no (No, Yes); one button per choice; a field and OK; the paste-only secret form; per conflicting file the two copies, and Apply once all are decided | Cancel |
+| Error | alert | the class word, title, message, hint, Close | Close |
+
+- **Presented.** `Model::presented` is called from the shell's presented report, so only for
+  a frame that reached the display (GPU or CPU), and only for a dialog that shows all of
+  itself.
+- **Only what is on the display takes input.** A screen the model has that is not presented
+  yet takes nothing, Esc included. A wake or a pump that brings up another screen asks for
+  a frame even when no source changed.
+- **Holds.** Interaction ending a hold on its own (its control moved, was covered or
+  changed with a new frame) stops the model's hold. A hold completes only up to the time
+  of the frame before the one just presented, so that a release that came during a slow
+  frame is heard first.
+- **Nothing scrolls.** A long list (steps, options, conflicting files) is paged; warnings,
+  totals, the footnote and the buttons are on every page. Confirming does not ask for
+  every page to have been turned to. When the rest alone does not fit the window, the
+  dialog says to enlarge it, its confirm is disabled and the model is not told it was
+  presented.
+- **A dialog that can't be built** stays pending: a panel says so, nothing can answer it,
+  and Esc cancels it.
+- **The typed title** can be typed, pasted (first line) or set through AccessKit. A title
+  holding characters the user's keyboard can't type needs one of the last two, or can't
+  be confirmed.
+- **Not drawn yet:** inline `plan-card` previews, so a skin's slot for one stays empty;
+  toasts, so a confirmed plan that turned out empty closes without a word.
+
 ## 5. Jobs, progress and cancellation
 
 - **A strong confirmation covers one run.** `job.retry` and `job.resume` of a failed or
@@ -373,7 +410,7 @@ As built (PR F2, sign-in):
   not keep the result refuses before the browser opens. The plan has nothing to show, so
   the answer runs it at once; the exchange runs on the runtime under an app-owned
   "Signing in…" layer, and a failure comes back through `Failures`. Success reads every
-  source again. Sign-out waits for the plan card (#536).
+  source again.
 - **The dialog** is the app's own layer: Paste, Clear, Open the page again, Sign in,
   Cancel (initial focus). Paste only (also the primary modifier and V). The clipboard is
   read only for a press made after the dialog had been up for the dwell time; the shell
@@ -383,8 +420,8 @@ As built (PR F2, sign-in):
   for any answer. The app keeps the parsed code, never the
   pasted text, and the screen and assistive technology are told only whether a code is
   there. Fixed colours: skin tokens are a follow-up.
-- **Error screens** (S9) are drawn the same way, with Close. Plan cards, destructive
-  confirmations and job questions are still cancelled (#614).
+- **Error screens** (S9) are drawn the same way, with Close. The other safety screens
+  came with #614 (§4).
 - **Secrets in memory.** The model's `Secret` and the copies the app makes are wiped on
   drop; gogo-core and gog-warp take the code as an ordinary string.
 
@@ -420,13 +457,12 @@ As built (input and AccessKit wiring):
 - `ui.set` writes the skin's value; a reload keeps it where the new skin still has it.
 - A frame is built as pending and becomes the one input and assistive technology act on
   only when the shell reports it presented; a skipped or failed frame changes nothing.
-- The safety flow's screens are not drawn yet (#536, #614), except the two of PR F2
-  below. Whatever raises another (a control, a job's question) it is cancelled at once,
-  and the model is never told that it was presented.
+- The safety flow's screens are drawn as §4 "As built" says (#614).
 - The error panel is an alert layer: while it is up only Esc does anything, nothing under
   it can be pressed, and assistive technology reads its lines. A route that no skin draws
   leaves the last screen in sight under it.
-- Touch, the palette, the account menu and the clipboard are not wired in.
+- Touch, the palette and the account menu are not wired in; the clipboard is only read, by
+  a dialog.
 
 ## 9. Where things are stored
 

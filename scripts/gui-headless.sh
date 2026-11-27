@@ -27,8 +27,10 @@
 # input [options] -- GOGO_GUI
 #   the input check: starts GOGO_GUI on fictional data, clicks a tab and a
 #   navigation entry with a virtual pointer, goes back with Esc and moves focus
-#   with Tab, with a screenshot of each (1-start, 2-tab, 3-route, 4-back,
-#   5-focus). Takes run's options; the click points assume the default size.
+#   with Tab, then answers a dialog by typing into it and confirms the plan card
+#   that follows with Enter. A screenshot of each (1-start, 2-tab, 3-route,
+#   4-back, 5-focus, 6-snapshots, 7-prompt, 8-typed, 9-card, 10-done). Takes
+#   run's options; the click points assume the default size.
 #
 # self-test
 #   checks the sandbox, the screenshot and the teardown with a small Wayland
@@ -284,6 +286,29 @@ scenario_input() {
 
     key Tab
     shot_changed 5-focus 4-back || return 1
+
+    click 636 276 # the Snapshots tab
+    shot_changed 6-snapshots 5-focus || return 1
+
+    # A dialog: it asks for a name, starting on Cancel.
+    click 1173 379 # Create snapshot
+    wait_log "gui: dialog prompt" || return 1
+    shot_changed 7-prompt 6-snapshots || return 1
+
+    sleep 0.7                          # a press counts once the dialog has been up
+    wtype -M shift -k Tab -m shift     # to the field
+    wtype -s 200 "Before Act 2" -s 200 # typed text, with its case
+    shot_changed 8-typed 7-prompt || return 1
+
+    key Tab
+    key Tab # past Cancel to OK
+    key Return
+    wait_log "gui: dialog plan card" || return 1
+    shot_changed 9-card 8-typed || return 1
+
+    sleep 0.7
+    key Return # nothing is focused: the card's confirm
+    shot_changed 10-done 9-card || return 1
     stop_app
     grep -F "gui: route" "$OUT/app.log" >&2
 }

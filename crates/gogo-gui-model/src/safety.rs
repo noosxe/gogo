@@ -101,6 +101,8 @@ pub enum Modal<'a> {
         ticket: Ticket,
         /// What is asked.
         spec: &'a PromptSpec,
+        /// The action asking, when no job is.
+        action: Option<&'static str>,
         /// Set when a running job asks.
         job: Option<&'a JobId>,
     },
@@ -497,6 +499,10 @@ impl SafetyFlow {
             Stage::Prompt { spec, asking } => Modal::Prompt {
                 ticket,
                 spec,
+                action: match asking {
+                    Asking::Action(call) => Some(call.name()),
+                    Asking::Job { .. } => None,
+                },
                 job: match asking {
                     Asking::Job { job, .. } => Some(job),
                     Asking::Action(_) => None,
