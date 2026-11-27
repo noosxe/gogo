@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use gogo::gog::depot::DepotError;
 use gogo::gog::dlc::Want;
 use gogo::linuxapp::preview::Answers;
+use gogo::linuxapp::proton::ProtonRef;
 use gogo::linuxapp::source;
 use gogo::macapp::renderer::RendererRef;
 use gogo::macapp::{MacAppError, RendererChoice, compat};
@@ -169,8 +170,21 @@ impl BuildCall {
             }
             _ => return Err(bad("the DLC selection is unknown")),
         };
+        let runtime = match call.text("runtime") {
+            None => None,
+            // A `path:` runtime runs whatever is in that folder: the CLI's to take,
+            // never a skin's to name.
+            Some(id) => match ProtonRef::parse(id) {
+                Ok(ProtonRef::Catalog { version, .. })
+                    if version.as_ref().is_none_or(|v| !v.contains('/')) =>
+                {
+                    Some(id.trim().to_string())
+                }
+                _ => return Err(bad("the runtime is not one from gogo's catalog")),
+            },
+        };
         Ok(BuildCall {
-            runtime: call.text("runtime").map(str::to_string),
+            runtime,
             renderer,
             lang: call.text("lang").map(str::to_string),
             build: call.text("build").map(str::to_string),

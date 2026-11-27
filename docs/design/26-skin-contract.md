@@ -273,7 +273,7 @@ on any other element.
 
 | Action | Params | Kind / tier | Notes |
 |---|---|---|---|
-| `game.build` | `id, platform, runtime?, renderer?, dlc?, lang?, build?` | plan → job / confirm | An omitted `runtime`, `renderer`, `lang` or `build` takes `linux-app`'s default, shown on the card (no picker yet). An omitted `dlc` takes every owned DLC of the build; a rebuild keeps its recorded set. D3DMetal consent, Galaxy `ask` and the other asked-once choices are app prompts, all asked before the plan card |
+| `game.build` | `id, platform, runtime?, renderer?, dlc?, lang?, build?` | plan → job / confirm | An omitted `runtime`, `renderer`, `lang` or `build` takes `linux-app`'s default, shown on the card (no picker yet). `runtime` takes a catalog id only: a `path:` runtime is refused and stays a CLI feature. An omitted `dlc` takes every owned DLC of the build; a rebuild keeps its recorded set. D3DMetal consent, Galaxy `ask` and the other asked-once choices are app prompts, all asked before the plan card |
 | `game.setup` | `id` | plan → job / confirm | It can download a runtime and create a prefix. Its questions are asked before the plan card |
 | `game.move` | `id, target: default\|chosen` | plan → job / confirm; **destructive** across filesystems (snapshots are deleted) | The folder is chosen in the app's native dialog |
 | `game.remove` | `id, keep_override` | plan / **destructive** | Deletes prefix and saves; refused while running |
