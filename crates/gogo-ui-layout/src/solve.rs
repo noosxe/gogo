@@ -1,6 +1,6 @@
 //! IR → taffy → boxes (design 24 §2).
 
-use gogo_ui_ir::{Kind, NodeId, Tree};
+use gogo_ui_ir::{Direction, Display, Kind, NodeId, Tree};
 use gogo_ui_text::{FontSet, TextLayout};
 use taffy::prelude::{AvailableSpace, Size, TaffyTree};
 use taffy::{Layout as TaffyLayout, NodeId as TaffyId};
@@ -131,6 +131,15 @@ pub fn layout(
             };
             st.margin = taffy::Rect::zero();
             st.position = taffy::Position::Relative;
+        }
+        // What a column scrolls keeps its height: squeezing it to fit would leave
+        // nothing to scroll to.
+        if tree.parent(id).and_then(|p| tree.get(p)).is_some_and(|p| {
+            p.scroll.is_some()
+                && p.layout.display == Display::Flex
+                && p.layout.direction == Direction::Column
+        }) {
+            st.flex_shrink = 0.0;
         }
         let made = if texts[id.index()].is_some() {
             solver.new_leaf_with_context(st, id.index())?

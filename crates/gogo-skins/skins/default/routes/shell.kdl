@@ -1,6 +1,6 @@
 route "shell" {
     row style="frame" {
-        column style="sidebar" id="nav" {
+        scroll style="sidebar" id="nav" label="Navigation" {
             row style="brand" { text "go"; text "go" color=@accent }
             button "Search…" style="search" key="Ctrl K" action="palette.open" label="Search and commands" id="search"
             button "Library" icon="square" style="nav" action="nav.go" args="library" on="{route.current == library}" id="nav-library" {
@@ -46,6 +46,8 @@ route "shell" {
             }
             button "Sign in" style="nav" action="nav.go" args="sign-in" on="{route.current == 'sign-in'}" when="{not account.signed_in}"
         }
-        outlet
+        scroll grow=1 id="main" {
+            outlet
+        }
     }
 }

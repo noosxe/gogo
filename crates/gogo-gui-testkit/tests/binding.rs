@@ -286,10 +286,17 @@ fn a_scroll_element_makes_a_scroll_container() {
         &mut f,
         "scroll id=\"long\" label=\"Notes\" { text \"one\" }",
     );
-    append(
+    rep(
         &mut f,
         "styles.kdl",
-        "\nstyle \"scrollbar\" { w 12; fill \"#101010\" }\nstyle \"scrollbar-thumb\" { fill \"#202020\"; radius 3 }",
+        "style \"scrollbar\" { w 8 }",
+        "style \"scrollbar\" { w 12; fill \"#101010\" }",
+    );
+    rep(
+        &mut f,
+        "styles.kdl",
+        "fill @outline; radius 4 }",
+        "fill \"#202020\"; radius 3 }",
     );
     let pkg = skin("default", f);
     let b = bind(&pkg, "game", &FixtureScope::new());
@@ -310,6 +317,25 @@ fn a_scroll_element_makes_a_scroll_container() {
         Fill::Solid(gogo_skin::ir::Color([32, 32, 32, 255]))
     );
     assert_eq!(node.a11y.name.as_deref(), Some("Notes"));
+    // Inside the outlet, or holding it: its own offset per route. This one is bound
+    // with no shell around it.
+    let containers: Vec<_> = b
+        .tree
+        .iter()
+        .filter_map(|id| b.tree.get(id)?.scroll.as_ref().map(|s| s.per_route))
+        .collect();
+    assert_eq!(containers, [false]);
+    let shell = bind(&pkg, "shell", &FixtureScope::new());
+    let containers: Vec<_> = shell
+        .tree
+        .iter()
+        .filter_map(|id| {
+            let node = shell.tree.get(id)?;
+            Some((node.name.clone()?, node.scroll.as_ref()?.per_route))
+        })
+        .collect();
+    let containers: Vec<_> = containers.iter().map(|(n, p)| (&**n, *p)).collect();
+    assert_eq!(containers, [("nav", false), ("main", true), ("long", true)]);
     b.tree.validate().expect("a valid tree");
 }
 

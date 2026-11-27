@@ -236,10 +236,13 @@ Only the elements below exist. Anything else is a load error.
 | `spacer`, `divider` | flexible space; a rule |
 
 **Scrolling.** A `scroll` takes the room it is given however long its content is, so
-long content moves inside it instead of being cut off. Scroll containers may nest. The
-scrollbar is the engine's: its gutter is always reserved, so it never covers anything,
-and the thumb is drawn only when there is something to scroll. Two styles set its look,
-for the whole skin:
+long content moves inside it instead of being cut off. Its direct children keep their own
+height (they don't shrink). As in CSS, a flex container grows to fit its content unless
+told otherwise, so every flex container between a `scroll` and the box that bounds it
+needs `min-h 0` (the default skin sets it on its frame row), or nothing scrolls. Scroll
+containers may nest. The scrollbar is the engine's: its gutter is always reserved, so it
+never covers anything, and the thumb is drawn only when there is something to scroll. Two
+styles set its look, for the whole skin:
 
 ```kdl
 style "scrollbar" { w 8; fill @bg1 }           // gutter width (0 to 64) and track
@@ -247,8 +250,12 @@ style "scrollbar-thumb" { fill @outline; radius 4 }
 ```
 
 Without them the gutter is 8 px, the track is not drawn and the thumb is a translucent
-grey. Moving the content with the wheel, the keys or the scrollbar is not wired in yet
-(#545).
+grey.
+
+The wheel, the scrollbar, PageUp, PageDown, Home, End and the up and down arrows move the
+content, and moving focus brings the control into view (design 25 §4). A container that
+holds the `outlet`, or sits inside it, keeps its position per route and parameters, so
+going back returns to it; one outside, such as a sidebar, keeps one position everywhere.
 
 ### 5.2 Content
 

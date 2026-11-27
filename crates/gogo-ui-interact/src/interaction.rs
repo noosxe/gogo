@@ -11,6 +11,7 @@ use crate::frame::{Frame, Identity, Layer, LayerId, LayerKind, Target, activatab
 use crate::input::{Input, Key, Modifiers, PointerButton, Request, RequestKind};
 use crate::intent::{ControlInput, InputEvent, InputProvenance, Intent, Response, TextEdit};
 use crate::keys;
+use crate::scroll::{self, ScrollState};
 
 /// The least time between the two screen-reader activations that start a hold.
 pub const HOLD_ARM: Duration = Duration::from_millis(500);
@@ -42,6 +43,8 @@ impl Config {
         Config { primary }
     }
 }
+
+mod scrolling;
 
 /// How many character keys are tracked as held; more only means releases were lost.
 const MAX_HELD_CHARS: usize = 32;
@@ -112,6 +115,7 @@ pub struct Interaction {
     hold: Option<Hold>,
     armed: Option<Armed>,
     down: HashSet<Key>,
+    scroll: ScrollState,
 }
 
 fn signature(layer: &Layer<'_>, node: NodeId) -> Option<Signature> {
@@ -165,6 +169,10 @@ fn control_at(frame: &Frame<'_>, x: f64, y: f64) -> Option<Target> {
         };
         if layer.kind == LayerKind::Overlay && node == layer.tree.root() {
             continue;
+        }
+        // A scrollbar is not a part of whatever holds its container.
+        if scroll::in_bar(layer, node, x, y) {
+            return None;
         }
         loop {
             let n = layer.tree.get(node)?;
@@ -310,8 +318,10 @@ impl Interaction {
             }
             Input::Ime(ime) => self.ime(ime, frame, &mut out),
             Input::Modifiers(mods) => self.mods = mods,
+            Input::Wheel { x, y, dy } => self.wheel((x, y), dy, frame, &mut out),
             Input::FocusLost => {
                 self.mods = Modifiers::default();
+                self.scroll.drag = None;
                 self.down.clear();
                 self.cancel_presses(&mut out);
             }
@@ -321,14 +331,16 @@ impl Interaction {
         out
     }
 
-    fn shown(&self) -> [Option<Target>; 5] {
-        [
+    /// What a frame shows of this state: a change asks for another.
+    fn shown(&self) -> (u64, [Option<Target>; 5]) {
+        let targets = [
             self.focus().cloned(),
             self.focus_visible().cloned(),
             self.hovered().cloned(),
             self.pressed().cloned(),
             self.armed().cloned(),
-        ]
+        ];
+        (self.scroll.revision, targets)
     }
 
     fn number(&mut self) -> InputEvent {
@@ -449,6 +461,7 @@ impl Interaction {
         self.memory
             .retain(|id, _| frame.layers.iter().any(|l| l.id == *id));
         self.order = order;
+        self.scroll.trim(frame);
 
         if self
             .pointer
@@ -471,11 +484,11 @@ impl Interaction {
         {
             self.armed = None;
         }
-        if self
-            .hold
-            .as_ref()
-            .is_some_and(|h| !unchanged(frame, &h.target, &h.signature))
-        {
+        if self.hold.as_ref().is_some_and(|h| {
+            !unchanged(frame, &h.target, &h.signature)
+                || find(frame, h.target.layer, &h.target.key)
+                    .is_some_and(|(l, n)| !scroll::seen(l, n))
+        }) {
             self.end_hold(out);
         }
         // The same key may have a new node id in a rebuilt tree.
@@ -497,7 +510,10 @@ impl Interaction {
             renumber(&mut a.target);
         }
         // The control may have moved, or something may now cover it.
-        self.hovered = self.pointer_at.and_then(|(x, y)| control_at(frame, x, y));
+        self.hovered = self
+            .pointer_at
+            .filter(|_| self.scroll.drag.is_none())
+            .and_then(|(x, y)| control_at(frame, x, y));
         self.follow_pointer(out);
     }
 
@@ -522,6 +538,9 @@ impl Interaction {
 
     fn pointer_moved(&mut self, x: f64, y: f64, frame: &Frame<'_>, out: &mut Response) {
         self.pointer_at = Some((x, y));
+        if self.bar_drag(y, frame, out) {
+            return;
+        }
         self.hovered = control_at(frame, x, y);
         self.follow_pointer(out);
         self.field_drag(x, y, frame, out);
@@ -536,6 +555,9 @@ impl Interaction {
         out: &mut Response,
     ) {
         self.pointer_at = Some((x, y));
+        if self.bar_down(x, y, frame, out) {
+            return;
+        }
         self.cancel_presses(out);
         self.end_composition(out);
         let event = self.number();
@@ -572,6 +594,10 @@ impl Interaction {
         self.drag = None;
         self.pointer_at = Some((x, y));
         self.hovered = control_at(frame, x, y);
+        if self.scroll.drag.take().is_some() {
+            out.consumed = true;
+            return;
+        }
         self.end_hold_by(HoldBy::Pointer, out);
         let Some(press) = self.pointer.take() else {
             return;
@@ -713,6 +739,7 @@ impl Interaction {
                 let order = FocusOrder::of(frame);
                 if let Some(next) = order.step(self.focus.as_ref(), mods.shift).cloned() {
                     self.visible = true;
+                    self.reveal_target(frame, &next, out);
                     self.set_focus(Some(next), out);
                 }
             }
@@ -720,6 +747,7 @@ impl Interaction {
                 if let Some(next) = self.neighbour_tab(key == Key::ArrowLeft, frame) {
                     out.consumed = true;
                     self.visible = true;
+                    self.reveal_target(frame, &next, out);
                     self.set_focus(Some(next), out);
                 }
             }
@@ -730,6 +758,11 @@ impl Interaction {
                 }
             }
             Key::Char(_) if !repeat => self.shortcut(key, mods, at, frame, out),
+            Key::PageUp | Key::PageDown | Key::Home | Key::End | Key::ArrowUp | Key::ArrowDown
+                if plain =>
+            {
+                self.scroll_key(key, frame, out);
+            }
             _ => {}
         }
     }
@@ -798,6 +831,12 @@ impl Interaction {
         let Some((layer, node)) = find(frame, target.layer, &target.key) else {
             return;
         };
+        // What was scrolled away is brought back for the next press, not activated.
+        if !scroll::seen(layer, node) {
+            self.visible = true;
+            self.reveal(layer, node, out);
+            return;
+        }
         let Some(signature) = signature(layer, node) else {
             return;
         };
@@ -858,6 +897,7 @@ impl Interaction {
                     layer.tree.get(id).is_some_and(|n| {
                         n.drawn_by == DrawnBy::Skin
                             && activatable(n)
+                            && scroll::seen(layer, id)
                             && n.a11y
                                 .key
                                 .as_deref()
@@ -887,6 +927,9 @@ impl Interaction {
         let (Some(n), Some(target)) = (layer.tree.get(node), layer.target(node)) else {
             return;
         };
+        if self.assist_scroll(layer, node, &request.kind, out) {
+            return;
+        }
         // Requests arrive late: the control must still do what it did when it was read.
         if !control(n) || request.identity != layer.action_identity(node) {
             return;
@@ -897,6 +940,7 @@ impl Interaction {
                 if focusable {
                     out.consumed = true;
                     self.visible = true;
+                    self.reveal(layer, node, out);
                     self.set_focus(Some(target), out);
                 }
             }
@@ -905,6 +949,7 @@ impl Interaction {
                     out.consumed = true;
                     self.end_composition(out);
                     self.visible = true;
+                    self.reveal(layer, node, out);
                     self.set_focus(Some(target.clone()), out);
                     out.intents.push(Intent::SetValue { target, value });
                 }
@@ -927,6 +972,16 @@ impl Interaction {
                 self.pointer = None;
                 self.space = None;
                 self.visible = true;
+                // A hold is confirmed only on what is in sight; anything else is
+                // brought into view and activated.
+                if !is_hold(layer, &target) {
+                    self.reveal(layer, node, out);
+                } else if !scroll::seen(layer, node) {
+                    self.armed = None;
+                    self.end_hold(out);
+                    self.reveal(layer, node, out);
+                    return;
+                }
                 if focusable {
                     self.set_focus(Some(target.clone()), out);
                 }
@@ -970,6 +1025,7 @@ impl Interaction {
                     }
                 }
             }
+            RequestKind::Reveal | RequestKind::ScrollBy { .. } | RequestKind::ScrollTo(_) => {}
         }
     }
 }

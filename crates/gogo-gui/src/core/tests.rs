@@ -505,7 +505,7 @@ async fn every_route_of_the_default_skin_draws_over_the_engine() {
                 let started = Instant::now();
                 loop {
                     data.pump();
-                    match page.screen(&mut data, "shell", (1280.0, 800.0)) {
+                    match page.screen(&mut data, "shell", (1280.0, 800.0), None) {
                         Ok(_) => break,
                         Err(DrawError::Loading) => {
                             assert!(

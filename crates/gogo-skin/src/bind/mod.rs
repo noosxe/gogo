@@ -305,6 +305,10 @@ pub(crate) struct Binder<'a> {
     nodes: usize,
     steps: usize,
     depth: usize,
+    /// Whether what is being bound is inside the `outlet`.
+    pub(crate) in_outlet: bool,
+    /// How many outlets have been bound.
+    pub(crate) outlets: usize,
     /// Borrowed fragments already checked against this skin's manifest in this bind.
     checked: BTreeSet<String>,
 }
@@ -401,6 +405,8 @@ impl<'a> Binder<'a> {
             nodes: 1,
             steps: 0,
             depth: 0,
+            in_outlet: false,
+            outlets: 0,
             checked: BTreeSet::new(),
         })
     }

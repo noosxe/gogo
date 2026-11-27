@@ -176,6 +176,9 @@ pub struct ScrollSpec {
     pub thumb: Fill,
     /// The thumb's corner radius.
     pub radius: f32,
+    /// The container holds a route or is part of one, so it keeps an offset per route.
+    /// Otherwise every route shares it. Default `false`.
+    pub per_route: bool,
 }
 
 impl Default for ScrollSpec {
@@ -185,6 +188,7 @@ impl Default for ScrollSpec {
             track: None,
             thumb: Fill::Solid(Color([128, 128, 128, 140])),
             radius: SCROLLBAR_WIDTH / 2.0,
+            per_route: false,
         }
     }
 }

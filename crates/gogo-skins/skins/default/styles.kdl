@@ -1,7 +1,9 @@
 // ---- frame and sidebar
 style "page" { fill @bg0 }
-style "frame" { grow 1; align "stretch" }
-style "sidebar" { w 224; fill @bg1; border-right 1 @border; padding 20 12; gap 2 }
+style "frame" { grow 1; min-h 0; align "stretch" }
+style "scrollbar" { w 8 }
+style "scrollbar-thumb" { fill @outline; radius 4 }
+style "sidebar" { shrink 0; w 224; fill @bg1; border-right 1 @border; padding 20 12; gap 2 }
 style "brand" { font-size 22; weight 800; tracking -0.02; padding 0 10 18 10 }
 style "search" { h 36; border 1 @outline; radius 8; padding 0 10; color @text-lo; font-size 13; weight 400; justify "between"; margin 0 0 16 0; fill "transparent" }
 style "kbd" { family "JetBrains Mono"; font-size 11; weight 600; border 1 @outline; radius 4; padding 0 5; color @text-md }
