@@ -139,6 +139,15 @@ pub(crate) fn style(key: &str, n: &Node) -> Result<Style, LayoutError> {
         box_sizing: taffy::BoxSizing::BorderBox,
         ..Style::default()
     };
+    if let Some(scroll) = &n.scroll {
+        // Overflow makes the automatic minimum size zero, so the container takes the room
+        // it is given and its content overflows it, and reserves the gutter on the right.
+        s.overflow = taffy::Point {
+            x: taffy::Overflow::Hidden,
+            y: taffy::Overflow::Scroll,
+        };
+        s.scrollbar_width = finite(key, "scrollbar width", scroll.width)?;
+    }
     if l.position == Position::Absolute {
         s.position = taffy::Position::Absolute;
         s.inset = taffy::Rect {

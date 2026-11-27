@@ -231,9 +231,24 @@ Only the elements below exist. Anything else is a load error.
 | `row` | horizontal flex container, items centred |
 | `grid` | CSS grid: `columns="1fr 420"` or `columns=3` |
 | `layer` | children stacked on top of each other: a one-cell grid (`1fr × 1fr`), every child in the same cell; `inset` children are placed absolutely |
-| `scroll` | a clipping, scrolling container. **Planned:** not validated yet; it arrives with scrolling (#545) |
+| `scroll` | a vertical scroll container: a column, unless a style says otherwise, whose content is clipped to the inside of its border. It needs a bounded height to scroll (`grow`, `h`, or a parent that gives it one) and keeps a gutter at its right edge for the scrollbar, styled by `scrollbar` and `scrollbar-thumb` (§5.1) |
 | `outlet` | Only in the `shell` route: where the current route is drawn |
 | `spacer`, `divider` | flexible space; a rule |
+
+**Scrolling.** A `scroll` takes the room it is given however long its content is, so
+long content moves inside it instead of being cut off. Scroll containers may nest. The
+scrollbar is the engine's: its gutter is always reserved, so it never covers anything,
+and the thumb is drawn only when there is something to scroll. Two styles set its look,
+for the whole skin:
+
+```kdl
+style "scrollbar" { w 8; fill @bg1 }           // gutter width (0 to 64) and track
+style "scrollbar-thumb" { fill @outline; radius 4 }
+```
+
+Without them the gutter is 8 px, the track is not drawn and the thumb is a translucent
+grey. Moving the content with the wheel, the keys or the scrollbar is not wired in yet
+(#545).
 
 ### 5.2 Content
 

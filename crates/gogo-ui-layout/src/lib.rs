@@ -25,10 +25,10 @@
 //!   content: the longest word; max content: no limit), rounded up to whole px, then
 //!   broken again at the final content width (design 24 §3 on text). A node whose text
 //!   style has `max_lines` ends its last line in an ellipsis.
-//! - **Scroll offsets are an input** ([`Scroll`]): a node with an entry is a scroll
-//!   container. Its descendants move by minus the offset and are only hit inside the
-//!   container's box. The IR has no overflow property yet, so layout does not clamp or
-//!   measure scrollable content; the interaction crate owns the scroll state.
+//! - **Scroll offsets are an input** ([`Scroll`]). A node with a scroll spec is a scroll
+//!   container: it takes the room it is given however long its content is, layout
+//!   clamps its offset and reports the extent ([`ScrollBox`]). The offsets themselves
+//!   live with whoever turns input into them.
 //! - **`Paint::offset` is not layout.** A visual offset never moves a box or a hit area.
 //! - **Depth is capped** at [`MAX_DEPTH`] (128) levels: taffy recurses once per level and a
 //!   tree about a thousand levels deep overflows the stack. A deeper tree is
@@ -44,5 +44,5 @@ mod laid;
 mod solve;
 mod style;
 
-pub use laid::{Laid, Placed, Rect, Scroll};
+pub use laid::{Laid, MIN_THUMB, Placed, Rect, Scroll, ScrollBox};
 pub use solve::{LayoutError, MAX_DEPTH, Viewport, layout};

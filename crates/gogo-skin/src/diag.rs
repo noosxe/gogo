@@ -135,8 +135,6 @@ codes! {
     // Elements.
     /// An element the format doesn't have.
     UnknownElement = "unknown_element",
-    /// `scroll`, which is planned (#545).
-    PlannedElement = "planned_element",
     /// An element where its parent doesn't allow it.
     ElementPlacement = "element_placement",
     /// Children an element can't have, or children it needs.

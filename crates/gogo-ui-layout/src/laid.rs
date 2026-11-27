@@ -61,9 +61,10 @@ impl Rect {
 
 /// Scroll offsets by node: the input that moves a scroll container's content.
 ///
-/// A node with an entry is a scroll container; `(x, y)` is how far its content is
-/// scrolled, so `(0, 30)` moves its descendants 30 px up. The interaction crate owns the
-/// values and clamps them; layout applies what it is given.
+/// `(x, y)` is how far the content is scrolled, so `(0, 30)` moves the descendants 30 px
+/// up. For a node with a [`ScrollSpec`](gogo_ui_ir::ScrollSpec) only `y` counts, and
+/// layout clamps it to the content ([`ScrollBox`]); without an entry it is at the top. A
+/// node without a spec that has an entry is clipped and moved exactly as given.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Scroll {
     offsets: HashMap<NodeId, (f32, f32)>,
@@ -94,6 +95,51 @@ impl Scroll {
     }
 }
 
+/// The shortest a scrollbar thumb gets, in logical px, where the track allows it.
+pub const MIN_THUMB: f64 = 24.0;
+
+/// A scroll container as placed, in logical px.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct ScrollBox {
+    /// How far the content is scrolled, from 0 to [`ScrollBox::max`].
+    pub offset: f64,
+    /// The largest offset: 0 when the content fits.
+    pub max: f64,
+    /// The box the content is seen through: inside the border, left of the gutter. Not
+    /// cut by the containers above.
+    pub viewport: Rect,
+    /// The gutter.
+    pub track: Rect,
+    /// The scrollbar thumb inside [`ScrollBox::track`]; empty when the content fits.
+    pub thumb: Rect,
+}
+
+impl ScrollBox {
+    pub(crate) fn new(offset: f64, max: f64, viewport: Rect, gutter: f64) -> ScrollBox {
+        let max = max.max(0.0);
+        let offset = offset.clamp(0.0, max);
+        let track = Rect::new(viewport.x1, viewport.y0, viewport.x1 + gutter, viewport.y1);
+        let height = track.height();
+        let thumb = if max > 0.0 && height > 0.0 && gutter > 0.0 {
+            let length = (height * viewport.height() / (viewport.height() + max))
+                .max(MIN_THUMB)
+                .min(height);
+            let top = track.y0 + (height - length) * offset / max;
+            Rect::new(track.x0, top, track.x1, top + length)
+        } else {
+            Rect::new(track.x0, track.y0, track.x0, track.y0)
+        };
+        ScrollBox {
+            offset,
+            max,
+            viewport,
+            track,
+            thumb,
+        }
+    }
+}
+
 /// One node as placed.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -105,10 +151,15 @@ pub struct Placed {
     /// The part of the border box that can be seen and hit: [`Placed::rect`] cut by every
     /// scroll container above.
     pub visible: Rect,
+    /// What the node's descendants are clipped to when [`Placed::clips`], before the
+    /// containers above cut it.
+    pub clip: Rect,
+    /// A node with a [`ScrollSpec`](gogo_ui_ir::ScrollSpec); `None` for any other.
+    pub scroll: Option<ScrollBox>,
     /// A text node's shaped text, broken at the content width.
     pub text: Option<TextLayout>,
     /// Whether the node is a scroll container: its descendants are drawn and hit only
-    /// inside [`Placed::visible`] of the container.
+    /// inside [`Placed::clip`].
     pub clips: bool,
     /// The parent, `None` for the root.
     pub parent: Option<NodeId>,
@@ -133,6 +184,11 @@ impl Laid {
     /// The placement of a node; `None` for an id from another tree.
     pub fn get(&self, id: NodeId) -> Option<&Placed> {
         self.placed.get(id.index())
+    }
+
+    /// The scroll container's box; `None` for a node that isn't one.
+    pub fn scroll_box(&self, id: NodeId) -> Option<&ScrollBox> {
+        self.get(id).and_then(|p| p.scroll.as_ref())
     }
 
     /// The node's border box.

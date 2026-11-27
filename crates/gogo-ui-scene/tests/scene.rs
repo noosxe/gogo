@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use gogo_ui_ir::{
     Bloom, Color, Dim, Effect, Fill, Fit, GlowLayer, GradientStop, ImageSource, Kind, LayoutStyle,
-    Node, NodeId, Paint, Shape as IrShape, Stroke, TextMarks, TextStyle, Tree,
+    Node, NodeId, Paint, ScrollSpec, Shape as IrShape, Stroke, TextMarks, TextStyle, Tree,
 };
 use gogo_ui_layout::{Scroll, Viewport, layout};
 use gogo_ui_scene::{
@@ -806,6 +806,55 @@ fn the_focused_node_draws_its_focus_paint_and_a_ring_after_its_children() {
             ..
         }
     ));
+}
+
+#[test]
+fn a_scrollbar_is_drawn_over_nothing_and_what_is_out_of_sight_is_left_out() {
+    let mut t = Tree::new("root", Node::container());
+    let mut list = boxed(100.0, 50.0, Paint::default());
+    list.scroll = Some(ScrollSpec::default());
+    let list = add_root(&mut t, "list", list);
+    for i in 0..100 {
+        let mut row = boxed(80.0, 30.0, Paint::solid(red()));
+        row.layout.shrink = 0.0;
+        add(&mut t, list, &format!("r{i}"), row);
+    }
+    let l = scene(&t);
+    // Two rows show, then the clip ends and the thumb is drawn. No track by default.
+    assert_eq!(kinds(&l), ["PushClip", "Fill", "Fill", "Pop", "Fill"]);
+    assert!(balanced(&l));
+    let Op::PushClip {
+        shape: Shape::Rect(clip),
+    } = &l.ops[0]
+    else {
+        panic!()
+    };
+    assert_eq!((clip.x0, clip.x1, clip.y1), (0.0, 92.0, 50.0));
+    let Op::Fill {
+        shape: Shape::RoundedRect(thumb),
+        ..
+    } = &l.ops[4]
+    else {
+        panic!()
+    };
+    assert_eq!((thumb.rect().x0, thumb.rect().x1), (92.0, 100.0));
+    // Far down, as many ops as at the top.
+    let far = scene_with(
+        &t,
+        &Scroll::none().with(list, 0.0, 1500.0),
+        &SceneState::new(),
+    );
+    assert_eq!(kinds(&far), kinds(&l));
+}
+
+#[test]
+fn content_that_fits_has_no_scrollbar() {
+    let mut t = Tree::new("root", Node::container());
+    let mut list = boxed(100.0, 50.0, Paint::default());
+    list.scroll = Some(ScrollSpec::default());
+    let list = add_root(&mut t, "list", list);
+    add(&mut t, list, "row", boxed(80.0, 30.0, Paint::solid(red())));
+    assert_eq!(kinds(&scene(&t)), ["PushClip", "Fill", "Pop"]);
 }
 
 #[test]

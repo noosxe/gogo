@@ -1070,21 +1070,6 @@ fn cases() -> Vec<Case> {
         ),
         case(
             "§5.1",
-            "scroll",
-            |f| {
-                rep(
-                    f,
-                    SHELL,
-                    "        outlet",
-                    "        scroll { }\n        outlet",
-                )
-            },
-            PlannedElement,
-            Route("shell"),
-            Some("scroll"),
-        ),
-        case(
-            "§5.1",
             "outlet outside the shell",
             |f| rep(f, GAME, "    tabs ", "    outlet\n    tabs "),
             ElementPlacement,

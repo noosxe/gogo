@@ -130,7 +130,8 @@ impl<T: Copy> Sides<T> {
 /// Everything layout needs to know about one node. Other crates build it from
 /// [`LayoutStyle::default`], [`row`](LayoutStyle::row), [`column`](LayoutStyle::column)
 /// or [`grid`](LayoutStyle::grid) and set the public fields; the struct is
-/// `#[non_exhaustive]` because scroll and overflow arrive later. [`Default`] is a vertical flex
+/// `#[non_exhaustive]` because more may be added. Scrolling is not here: it is
+/// [`ScrollSpec`](crate::ScrollSpec) on the node. [`Default`] is a vertical flex
 /// container with no sizes, gaps or spacing, as CSS defines an initial flex item
 /// (`shrink` is 1).
 #[derive(Debug, Clone, PartialEq)]

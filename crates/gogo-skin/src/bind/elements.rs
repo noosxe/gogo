@@ -6,7 +6,7 @@ use std::sync::Arc;
 use gogo_contract::Value;
 use gogo_ui_ir::{
     A11y, Align, Dim, Direction, Display, Fill, ImageSource, Justify, Kind, Node, NodeId, Role,
-    Shape, Track,
+    ScrollSpec, Shape, Track,
 };
 
 use super::actions::{ActionCall, BoundTerm, PendingArg, TermVal, assign, capture};
@@ -662,6 +662,7 @@ impl<'a> Binder<'a> {
                 })?;
                 self.container(n, parent, key, cx, c, A11y::default())
             }
+            "scroll" => self.scroll(n, parent, key, cx),
             "layer" => {
                 let mut c = self.compute("layer", Some(n), &[], cx, |c| {
                     c.layout.display = Display::Grid;
@@ -756,6 +757,43 @@ impl<'a> Binder<'a> {
         };
         self.children(&n.children, id, key, &cx2)?;
         Ok(id)
+    }
+
+    /// A scroll container: a column unless a style says otherwise, with the scrollbar
+    /// the `scrollbar` and `scrollbar-thumb` styles give it.
+    fn scroll(&mut self, n: &'a AstNode, parent: NodeId, key: &str, cx: &Cx) -> R<NodeId> {
+        let c = self.compute("scroll", Some(n), &[], cx, |_| {})?;
+        let mut node = Self::node_of(&c);
+        node.scroll = Some(self.scroll_spec(cx)?);
+        node.a11y.name = self.prop_text(n, "label")?;
+        let id = self.add(parent, key, node, n.span)?;
+        let cx2 = Cx {
+            text: c.text,
+            field: cx.field.clone(),
+        };
+        self.children(&n.children, id, key, &cx2)?;
+        Ok(id)
+    }
+
+    fn scroll_spec(&self, cx: &Cx) -> R<ScrollSpec> {
+        let mut spec = ScrollSpec::default();
+        let part = |this: &Self, name: &str| {
+            this.compute_with(&[name.to_owned()], None, false, &[], &cx.text, |_| {})
+        };
+        let bar = part(self, "scrollbar")?;
+        if let Dim::Px(w) = bar.layout.width {
+            spec.width = w.clamp(0.0, 64.0);
+            spec.radius = spec.width / 2.0;
+        }
+        spec.track = bar.paint.fill;
+        let thumb = part(self, "scrollbar-thumb")?;
+        if let Some(fill) = thumb.paint.fill {
+            spec.thumb = fill;
+        }
+        if thumb.paint.radius[0] > 0.0 {
+            spec.radius = thumb.paint.radius[0];
+        }
+        Ok(spec)
     }
 
     fn text_el(&mut self, n: &'a AstNode, parent: NodeId, key: &str, cx: &Cx) -> R<NodeId> {

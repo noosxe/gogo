@@ -5,7 +5,7 @@ use gogo_ui_text::{FontSet, TextLayout};
 use taffy::prelude::{AvailableSpace, Size, TaffyTree};
 use taffy::{Layout as TaffyLayout, NodeId as TaffyId};
 
-use crate::laid::{Laid, Placed, Rect, Scroll};
+use crate::laid::{Laid, Placed, Rect, Scroll, ScrollBox};
 use crate::style::style;
 
 /// The window's size in logical px. Build it with [`Viewport::new`]: more fields (a safe
@@ -218,15 +218,41 @@ pub fn layout(
             (rect.x1 - f64::from(l.padding.right + l.border.right)).max(rect.x0),
             (rect.y1 - f64::from(l.padding.bottom + l.border.bottom)).max(rect.y0),
         );
-        // A scroll container clips its descendants to its own visible box.
+        // A scroll container clips its descendants to the part of itself that is seen.
         let inherited = parent.map_or(EVERYWHERE, |p| child_clip[p.index()]);
         let visible = rect.intersect(&inherited);
-        if let Some((sx, sy)) = scroll.get(id) {
+        let spec = tree.get(id).and_then(|n| n.scroll.as_ref());
+        let given = scroll.get(id);
+        let mut clip = rect;
+        let mut scroll_box = None;
+        if let Some(spec) = spec {
+            let gutter = f64::from(l.scrollbar_size.width);
+            let x0 = rect.x0 + f64::from(l.border.left);
+            let y0 = rect.y0 + f64::from(l.border.top);
+            let viewport = Rect::new(
+                x0,
+                y0,
+                (rect.x1 - f64::from(l.border.right) - gutter).max(x0),
+                (rect.y1 - f64::from(l.border.bottom)).max(y0),
+            );
+            let made = ScrollBox::new(
+                given.map_or(0.0, |(_, y)| f64::from(y)),
+                f64::from(l.scroll_height()),
+                viewport,
+                gutter.min(f64::from(spec.width)),
+            );
+            shift[id.index()] = (0.0, made.offset);
+            clip = viewport;
+            scroll_box = Some(made);
+        } else if let Some((sx, sy)) = given {
             shift[id.index()] = (f64::from(sx), f64::from(sy));
-            child_clip[id.index()] = visible;
-        } else {
-            child_clip[id.index()] = inherited;
         }
+        let clips = spec.is_some() || given.is_some();
+        child_clip[id.index()] = if clips {
+            clip.intersect(&inherited)
+        } else {
+            inherited
+        };
         let text = texts[id.index()].take().map(|mut t| {
             t.ellipsize(fonts, Some(content.width() as f32 + SLACK));
             t
@@ -236,7 +262,9 @@ pub fn layout(
             content,
             visible,
             text,
-            clips: scroll.get(id).is_some(),
+            clip,
+            scroll: scroll_box,
+            clips,
             parent,
         });
     }

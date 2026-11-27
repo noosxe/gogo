@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::{A11y, Effect, Fill, GradientStop, LayoutStyle, Paint, TextStyle, Track};
+use crate::{A11y, Color, Effect, Fill, GradientStop, LayoutStyle, Paint, TextStyle, Track};
 
 /// An opaque id for "activating this node does something".
 ///
@@ -158,6 +158,37 @@ impl Kind {
     }
 }
 
+/// The width of a scrollbar, in logical px, when nothing says otherwise.
+pub const SCROLLBAR_WIDTH: f32 = 8.0;
+
+/// What makes a box a vertical scroll container (design 27 §5.1): its content is clipped
+/// to the inside of its border, moves by an offset that lives outside the IR, and has a
+/// gutter at the right edge, always reserved, where the scrollbar is drawn.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[non_exhaustive]
+pub struct ScrollSpec {
+    /// The gutter's width, 0 to 64. At 0 no scrollbar is drawn.
+    pub width: f32,
+    /// What the whole gutter is filled with. `None`: nothing.
+    pub track: Option<Fill>,
+    /// What the thumb is filled with.
+    pub thumb: Fill,
+    /// The thumb's corner radius.
+    pub radius: f32,
+}
+
+impl Default for ScrollSpec {
+    fn default() -> Self {
+        ScrollSpec {
+            width: SCROLLBAR_WIDTH,
+            track: None,
+            thumb: Fill::Solid(Color([128, 128, 128, 140])),
+            radius: SCROLLBAR_WIDTH / 2.0,
+        }
+    }
+}
+
 /// One resolved element. The tree owns the node's key, parent and children; see [`Tree`].
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -176,6 +207,8 @@ pub struct Node {
     pub focus_paint: Option<Paint>,
     /// What assistive technology is told.
     pub a11y: A11y,
+    /// The node is a scroll container. Only a [`Kind::Box`] may be one. `None`: it isn't.
+    pub scroll: Option<ScrollSpec>,
     /// What activating the node does. `None`: nothing.
     pub action: Option<ActionRef>,
     /// Who drew the node. Default [`DrawnBy::Skin`].
@@ -199,6 +232,7 @@ impl Node {
             paint: Paint::default(),
             focus_paint: None,
             a11y: A11y::default(),
+            scroll: None,
             action: None,
             drawn_by: DrawnBy::Skin,
             progress: None,
@@ -526,6 +560,19 @@ fn check_node(n: &Node) -> Result<(), &'static str> {
     }
     if n.progress.is_some_and(|p| !unit(p)) {
         return Err("progress");
+    }
+    if let Some(s) = &n.scroll {
+        if !n.kind.is_container() {
+            return Err("scroll on a leaf");
+        }
+        if !(0.0..=64.0).contains(&s.width) || !(s.radius.is_finite() && s.radius >= 0.0) {
+            return Err("scrollbar width or radius");
+        }
+        for f in s.track.iter().chain([&s.thumb]) {
+            if let Fill::Linear { stops, .. } | Fill::Radial { stops } = f {
+                check_stops(stops)?;
+            }
+        }
     }
     if n.layout.col_span < 1 {
         return Err("column span");
