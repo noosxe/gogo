@@ -200,12 +200,15 @@ fn window(cli: &Cli, choice: RendererChoice) -> Result<(), Failure> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let (data, downloads) = engine_data(&shell, runtime.handle())?;
+    let (data, downloads, installs) = engine_data(&shell, runtime.handle())?;
     let ran = app::App::new(cli.dev.as_deref(), data)
         .map_err(Failure::from)
         .and_then(|app| shell.run(app, choice).map_err(Failure::from));
     // Stopped by their tokens, so that what is on disk can be resumed.
-    runtime.block_on(downloads.shutdown());
+    runtime.block_on(async {
+        downloads.shutdown().await;
+        installs.shutdown().await;
+    });
     // A keychain nobody answers parks its thread: do not wait for it.
     runtime.shutdown_background();
     ran
@@ -214,7 +217,7 @@ fn window(cli: &Cli, choice: RendererChoice) -> Result<(), Failure> {
 fn engine_data(
     shell: &Shell,
     runtime: &tokio::runtime::Handle,
-) -> Result<(data::Data, Arc<core::Downloads>), Failure> {
+) -> Result<(data::Data, Arc<core::Downloads>, Arc<core::Installs>), Failure> {
     let engine = Arc::new(core::Engine::new(core::parts()?));
     let arrived = shell.waker();
     let art = core::art::ArtStore::new(
@@ -227,8 +230,9 @@ fn engine_data(
     let backend = core::CoreBackend::new(engine, runtime.clone(), Some(art.clone()));
     let waker = shell.waker();
     let downloads = backend.downloads();
+    let installs = backend.installs();
     let data = data::Data::core(backend, Some(art), move || waker.wake());
-    Ok((data, downloads))
+    Ok((data, downloads, installs))
 }
 
 #[cfg(test)]

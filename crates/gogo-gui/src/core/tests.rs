@@ -184,6 +184,7 @@ pub(crate) fn rig(server: &MockServer, account: Arc<dyn Account>) -> Rig {
         download_dir: PathBuf::from(dir.path()),
         browser: Arc::new(NoBrowser),
         config: gogo::config::Config::default(),
+        pipelines: Arc::new(super::install::NoPipelines),
         free_space: Arc::new(gogo::engine::Fs4FreeSpace),
     }));
     let backend = CoreBackend::new(Arc::clone(&engine), tokio::runtime::Handle::current(), None);

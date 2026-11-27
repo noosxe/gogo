@@ -223,6 +223,12 @@ pub trait ShellApp {
     /// Makes the CPU renderer.
     fn cpu(&mut self) -> Box<dyn PixelRenderer>;
 
+    /// The window was asked to close. `false` keeps it open; the application says why
+    /// in its next frame.
+    fn close_requested(&mut self) -> bool {
+        true
+    }
+
     /// [`Waker::wake`] was called. Returns whether anything on screen changed.
     fn wake(&mut self) -> bool {
         false

@@ -364,7 +364,13 @@ impl<A: ShellApp> ApplicationHandler<UserEvent> for Runner<A> {
             return;
         }
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                if self.app.close_requested() {
+                    event_loop.exit();
+                } else if let Some(open) = &self.open {
+                    open.window.request_redraw();
+                }
+            }
             WindowEvent::Resized(_)
             | WindowEvent::ScaleFactorChanged { .. }
             | WindowEvent::Occluded(false) => open.window.request_redraw(),

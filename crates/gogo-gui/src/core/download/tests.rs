@@ -181,6 +181,7 @@ impl Scratch {
             download_dir: self.downloads(),
             browser: Arc::new(NoBrowser),
             config,
+            pipelines: Arc::new(super::super::install::NoPipelines),
             free_space: Arc::new(Space(free)),
         }
     }
