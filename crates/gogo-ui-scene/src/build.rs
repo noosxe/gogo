@@ -616,7 +616,6 @@ impl Builder<'_> {
     }
 }
 
-/// A node's outline: a rounded box or an ellipse, at its place after offsets.
 /// How far outside its box a node can paint: shadows, glow and the focus ring.
 fn reach(paint: &Paint) -> f64 {
     let ring = paint.ring.map_or(0.0, |r| f64::from(r.width) + 2.0);
@@ -644,6 +643,7 @@ fn touches(rect: Rect, reach: f64, area: Rect) -> bool {
     r.x0 < area.x1 && r.x1 > area.x0 && r.y0 < area.y1 && r.y1 > area.y0
 }
 
+/// A node's outline: a rounded box or an ellipse, at its place after offsets.
 struct Geo {
     rect: Rect,
     /// Corner radii, each between 0 and half the short side. For an ellipse they are the
