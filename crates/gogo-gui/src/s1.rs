@@ -302,15 +302,15 @@ fn skin(dir: &Path) -> PathBuf {
 }
 
 /// The app, driven as the shell drives it.
-struct Driven {
-    app: App,
-    now: Duration,
+pub(crate) struct Driven {
+    pub(crate) app: App,
+    pub(crate) now: Duration,
     /// Everything that was on screen or told to assistive technology.
-    seen: String,
+    pub(crate) seen: String,
 }
 
 impl Driven {
-    fn step(&mut self) -> TreeUpdate {
+    pub(crate) fn step(&mut self) -> TreeUpdate {
         self.now += Duration::from_millis(20);
         self.app.wake();
         let frame = self.app.frame(1280.0, 800.0, 1.0);
@@ -326,7 +326,7 @@ impl Driven {
         tree
     }
 
-    fn has(tree: &TreeUpdate, text: &str) -> bool {
+    pub(crate) fn has(tree: &TreeUpdate, text: &str) -> bool {
         tree.nodes.iter().any(|(_, n)| {
             n.label().is_some_and(|l| l.contains(text))
                 || n.value().is_some_and(|v| v.contains(text))
@@ -334,7 +334,7 @@ impl Driven {
     }
 
     /// Steps until `text` is on the screen.
-    async fn until(&mut self, text: &str) {
+    pub(crate) async fn until(&mut self, text: &str) {
         let started = Instant::now();
         loop {
             let tree = self.step();
@@ -352,7 +352,7 @@ impl Driven {
 
     /// A screen reader presses the button called `label`, after the screen has been up
     /// long enough to have been read.
-    fn press(&mut self, label: &str) {
+    pub(crate) fn press(&mut self, label: &str) {
         self.step();
         self.now += Duration::from_millis(700);
         let tree = self.app.accessibility_tree();
@@ -360,7 +360,9 @@ impl Driven {
             .nodes
             .iter()
             // The last one: a page's button comes after the shell's of the same name.
-            .rfind(|(_, n)| n.role() == Role::Button && n.label() == Some(label))
+            .rfind(|(_, n)| {
+                matches!(n.role(), Role::Button | Role::Tab) && n.label() == Some(label)
+            })
             .unwrap_or_else(|| panic!("no button {label}: {:?}", words(&tree)));
         let request = ActionRequest {
             action: Action::Click,
@@ -430,6 +432,8 @@ async fn the_default_skins_sign_in_route_opens_the_dialog() {
         language: "en".to_string(),
         download_dir: dir.path().join("downloads"),
         browser: browser.clone(),
+        config: gogo::config::Config::default(),
+        free_space: Arc::new(gogo::engine::Fs4FreeSpace),
     }));
     let backend = CoreBackend::new(engine, tokio::runtime::Handle::current(), None);
     let data = Data::core(backend, None, || {});
@@ -471,6 +475,8 @@ async fn a_press_begun_before_the_dialog_cannot_paste() {
         language: "en".to_string(),
         download_dir: dir.path().join("downloads"),
         browser: Arc::new(NoBrowser),
+        config: gogo::config::Config::default(),
+        free_space: Arc::new(gogo::engine::Fs4FreeSpace),
     }));
     let backend = CoreBackend::new(engine, tokio::runtime::Handle::current(), None);
     let data = Data::core(backend, None, || {});
@@ -532,6 +538,8 @@ async fn s1_no_credential_reaches_anything() {
         language: "en".to_string(),
         download_dir: dir.path().join("downloads"),
         browser: Arc::new(NoBrowser) as Arc<dyn Browser>,
+        config: gogo::config::Config::default(),
+        free_space: Arc::new(gogo::engine::Fs4FreeSpace),
     };
     let engine = Arc::new(Engine::new(parts(account.clone())));
     let origin = server.uri();

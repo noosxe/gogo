@@ -46,6 +46,75 @@ impl Classed for gogo::gog::depot::DepotError {
     }
 }
 
+/// A folder as the app shows it (design 26 §3.7).
+pub(crate) fn path(path: &str) -> String {
+    clean(path)
+}
+
+/// Nobody is signed in.
+pub(crate) fn signed_out() -> ErrorView {
+    ErrorView::new(
+        "Auth",
+        "Not signed in",
+        "Sign in to download.",
+        "Sign in again.",
+        "3",
+    )
+}
+
+/// The error of a download that ended with `exit_class` (design 07 §2), in the app's
+/// own phrases; `file` is the first that failed.
+pub(crate) fn download(exit_class: u8, file: Option<&str>) -> ErrorView {
+    let (class, exit, message, hint) = match exit_class {
+        3 => (
+            "Auth",
+            "3",
+            "The sign-in was refused.",
+            "Sign in again, then retry.",
+        ),
+        4 => (
+            "Network",
+            "4",
+            "The server could not be reached or stopped answering.",
+            "Check the connection, then retry.",
+        ),
+        5 => (
+            "CORRUPT",
+            "5",
+            "The downloaded data did not match its checksum.",
+            "Retry to download the damaged parts again.",
+        ),
+        6 => (
+            "Disk",
+            "6",
+            "There is not enough free space.",
+            "Free some space, then retry.",
+        ),
+        _ => (
+            "Error",
+            "1",
+            "A file could not be written or downloaded.",
+            "Retry.",
+        ),
+    };
+    let message = match file {
+        Some(file) => format!("{file}: {message}"),
+        None => message.to_string(),
+    };
+    ErrorView::new(class, "Download failed", clean(&message), hint, exit)
+}
+
+/// Another run of gogo holds a file of this download.
+pub(crate) fn locked() -> ErrorView {
+    ErrorView::new(
+        "Error",
+        "Download failed",
+        "Another gogo is downloading these files.",
+        "Retry when it has finished.",
+        "1",
+    )
+}
+
 /// `text` safe to show.
 fn clean(text: &str) -> String {
     let mut out = gogo::redact::scrub_text(text);

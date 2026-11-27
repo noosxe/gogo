@@ -7,11 +7,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use gogo::auth::TokenProvider;
+use gogo::config::Config;
+use gogo::engine::FreeSpace;
 use gogo::engine::select::{self, Filters};
 use gogo::engine::task::Kind;
 use gogo::gog::catalog::{Os, Product};
 use gogo::gog::endpoints::Endpoints;
-use gogo::gog::error::ApiError;
+use gogo::gog::error::{ApiError, AuthError};
 use gogo::gog::library::LibraryProduct;
 use gogo::gog::overview::Overview;
 use gogo_contract::Value;
@@ -37,6 +39,9 @@ pub(crate) struct Parts {
     pub language: String,
     pub download_dir: PathBuf,
     pub browser: Arc<dyn Browser>,
+    /// The configuration downloads run with; `download.dir` is [`Parts::download_dir`].
+    pub config: Config,
+    pub free_space: Arc<dyn FreeSpace>,
 }
 
 /// The owned games and what is set up of them.
@@ -93,6 +98,50 @@ impl Engine {
             signed_in: AtomicBool::new(false),
             cannot_sign_in: Mutex::new(None),
         }
+    }
+
+    /// The configuration of the download context.
+    pub(super) fn config(&self) -> &Config {
+        &self.parts.config
+    }
+
+    pub(super) fn free_space(&self) -> Arc<dyn FreeSpace> {
+        Arc::clone(&self.parts.free_space)
+    }
+
+    /// A current access token of whoever is signed in.
+    pub(super) async fn access_token(&self) -> Result<String, AuthError> {
+        let Some(session) = self.parts.account.session().await? else {
+            return Err(AuthError::Unauthorized);
+        };
+        let _one = self.refresh.lock().await;
+        session.bearer().await
+    }
+
+    /// The owned product ids; none when signed out.
+    pub(super) async fn owned_ids(&self) -> Result<Vec<u64>, ApiError> {
+        let Some(session) = self.parts.account.session().await? else {
+            return Ok(Vec::new());
+        };
+        let bearer = self.bearer(session.as_ref()).await?;
+        self.parts
+            .endpoints
+            .owned_ids(&self.parts.http, &bearer)
+            .await
+    }
+
+    /// The `GameSummary` a job about `id` shows, from what was last read.
+    pub(super) fn job_game(&self, id: u64, title: &str) -> Value {
+        let cell = Arc::clone(&lock(&self.snapshot));
+        let none = Machine::default();
+        let machine = cell.get().map_or(&none, |s| &s.library.machine);
+        let mut fields = summary(id, title, machine);
+        for (name, value) in &mut fields {
+            if *name == "status" {
+                *value = str("downloading");
+            }
+        }
+        record(fields)
     }
 
     pub(crate) fn signed_in(&self) -> bool {
@@ -229,7 +278,7 @@ impl Engine {
             .unwrap_or_default()
     }
 
-    async fn detail(&self, id: u64) -> Result<Option<Product>, ApiError> {
+    pub(super) async fn detail(&self, id: u64) -> Result<Option<Product>, ApiError> {
         let Some(session) = self.parts.account.session().await? else {
             return Ok(None);
         };
@@ -344,17 +393,8 @@ impl Engine {
         if product.expanded_dlcs.is_empty() {
             return Ok(Value::List(Vec::new()));
         }
-        let owned = async {
-            let Some(session) = self.parts.account.session().await? else {
-                return Ok(Vec::new());
-            };
-            let bearer = self.bearer(session.as_ref()).await?;
-            self.parts
-                .endpoints
-                .owned_ids(&self.parts.http, &bearer)
-                .await
-        };
-        let owned: Vec<u64> = owned.await.map_err(|e: ApiError| errors::view(title, &e))?;
+        let owned = self.owned_ids().await;
+        let owned = owned.map_err(|e| errors::view(title, &e))?;
         let machine = self.machine(vec![id]).await;
         let installed = machine.built.get(&id).map(|b| b.dlcs.clone());
         let infos =

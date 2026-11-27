@@ -41,7 +41,7 @@ impl TokenProvider for Token {
     }
 }
 
-struct SignedIn(bool);
+pub(crate) struct SignedIn(pub(crate) bool);
 
 #[async_trait]
 impl Account for SignedIn {
@@ -183,6 +183,8 @@ pub(crate) fn rig(server: &MockServer, account: Arc<dyn Account>) -> Rig {
         language: "en".to_string(),
         download_dir: PathBuf::from(dir.path()),
         browser: Arc::new(NoBrowser),
+        config: gogo::config::Config::default(),
+        free_space: Arc::new(gogo::engine::Fs4FreeSpace),
     }));
     let backend = CoreBackend::new(Arc::clone(&engine), tokio::runtime::Handle::current(), None);
     Rig {
