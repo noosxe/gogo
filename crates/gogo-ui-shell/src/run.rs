@@ -183,6 +183,17 @@ fn make_output<A: ShellApp>(
     )
 }
 
+/// Whether a window event by itself asks for a frame. Input is translated and handled
+/// before this, and the application says whether that changed anything.
+fn asks_for_frame(event: &WindowEvent) -> bool {
+    matches!(
+        event,
+        WindowEvent::Resized(_)
+            | WindowEvent::ScaleFactorChanged { .. }
+            | WindowEvent::Occluded(false)
+    )
+}
+
 /// Tells the application about a frame only when it is on its way to the screen. Returns
 /// whether it wants another.
 fn report_shown(
@@ -392,9 +403,7 @@ impl<A: ShellApp> ApplicationHandler<UserEvent> for Runner<A> {
                     open.window.request_redraw();
                 }
             }
-            WindowEvent::Resized(_)
-            | WindowEvent::ScaleFactorChanged { .. }
-            | WindowEvent::Occluded(false) => open.window.request_redraw(),
+            ref e if asks_for_frame(e) => open.window.request_redraw(),
             WindowEvent::RedrawRequested => self.draw(event_loop),
             _ => {}
         }
@@ -441,6 +450,8 @@ impl<A: ShellApp> ApplicationHandler<UserEvent> for Runner<A> {
 #[cfg(test)]
 mod tests {
     use gogo_ui_scene::{DisplayList, MemoryStore};
+    use winit::dpi::PhysicalPosition;
+    use winit::window::Theme;
 
     use super::*;
     use crate::{Frame, PixelRenderer};
@@ -485,6 +496,26 @@ mod tests {
         fn presented(&mut self, _at: Duration, _renderer: &'static str) -> bool {
             self.presented += 1;
             true
+        }
+    }
+
+    #[test]
+    fn only_a_change_of_the_window_asks_for_a_frame() {
+        for event in [
+            WindowEvent::Resized(PhysicalSize::new(800, 600)),
+            WindowEvent::Occluded(false),
+        ] {
+            assert!(asks_for_frame(&event), "{event:?}");
+        }
+        for event in [
+            WindowEvent::Occluded(true),
+            WindowEvent::Focused(true),
+            WindowEvent::Focused(false),
+            WindowEvent::Moved(PhysicalPosition::new(1, 1)),
+            WindowEvent::ThemeChanged(Theme::Dark),
+            WindowEvent::HoveredFileCancelled,
+        ] {
+            assert!(!asks_for_frame(&event), "{event:?}");
         }
     }
 

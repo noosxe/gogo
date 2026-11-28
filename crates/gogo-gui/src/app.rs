@@ -21,6 +21,8 @@ mod answer;
 #[cfg(test)]
 mod commands;
 #[cfg(test)]
+mod idle;
+#[cfg(test)]
 mod menus;
 #[cfg(test)]
 mod safety;
@@ -76,6 +78,15 @@ fn say(line: std::fmt::Arguments<'_>) {
     let _ = writeln!(std::io::stdout(), "{line}");
 }
 
+/// What the pending frame was built from, besides the safety screen.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct Built {
+    /// [`Data::revision`] as its bind read it.
+    revision: u64,
+    /// Whether it says "Signing in…", which no source tells.
+    signing_in: bool,
+}
+
 /// What is open over the page.
 enum Over {
     /// A menu or a select's list, by its control.
@@ -124,6 +135,7 @@ pub(crate) struct App {
     shown: View,
     /// What `list` draws, not yet presented.
     pending: View,
+    built: Built,
     interaction: Interaction,
     /// What is open over the page.
     popups: PopupStack<Over>,
@@ -174,6 +186,7 @@ impl App {
             list: DisplayList::blank(0.0, 0.0),
             shown: View::default(),
             pending: View::default(),
+            built: Built::default(),
             interaction: Interaction::new(Config::new(PRIMARY)),
             popups: PopupStack::default(),
             a11y: A11yTree::new(TITLE),
@@ -494,7 +507,7 @@ impl App {
         for intent in response.intents {
             self.act(intent);
         }
-        response.redraw || acted
+        response.redraw || acted || self.stale()
     }
 
     /// Binds, lays out and builds the next frame for a window of `size` logical px.
@@ -517,6 +530,12 @@ impl App {
             // The last screen stays in sight, under the panel; Esc goes back.
             Err(e) => Some(e.to_string()),
         };
+        // Read before anything else looks at the data: what changes from here on is not in
+        // this frame.
+        self.built = Built {
+            revision: self.data.read_at(),
+            signing_in: self.data.signing_in(),
+        };
         // Binding takes what the sources sent, which can raise a safety screen.
         self.effects();
         let mut problems = Cow::Borrowed(self.problems.as_slice());
@@ -524,7 +543,7 @@ impl App {
             problems.to_mut().push(failure);
         }
         self.pending.panel = None;
-        let waiting = if self.data.signing_in() {
+        let waiting = if self.built.signing_in {
             Some("Signing in…")
         } else {
             loading.then_some("Loading…")
@@ -655,15 +674,20 @@ impl App {
         response.redraw
     }
 
-    /// Whether the safety flow has another screen on top than the one last built.
+    /// Whether what the last frame was built from has changed: the data, a sign-in, or
+    /// the safety flow's screen on top.
     fn stale(&self) -> bool {
-        let built = self
+        let dialog = self
             .pending
             .dialog
             .as_ref()
             .map(|d| d.ticket())
             .or(self.pending.stuck);
-        self.data.modal_ticket() != built
+        let now = Built {
+            revision: self.data.revision(),
+            signing_in: self.data.signing_in(),
+        };
+        self.built != now || self.data.modal_ticket() != dialog
     }
 }
 
@@ -705,10 +729,10 @@ impl ShellApp for App {
     }
 
     fn wake(&mut self) -> bool {
-        let changed = self.data.pump();
+        self.data.pump();
         self.effects();
         // A question or an error that arrived by itself changes no source.
-        changed || self.stale()
+        self.stale()
     }
 
     fn watch(&self) -> Option<PathBuf> {
