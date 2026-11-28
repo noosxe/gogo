@@ -522,6 +522,15 @@ jobs:
           trap 'sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1' EXIT
           nix develop .#lavapipe -c scripts/gui-headless.sh input \
             --name input -- target/debug/gogo-gui
+      - name: Idle draws nothing, on the GPU and CPU paths
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          trap 'sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1' EXIT
+          for renderer in gpu cpu; do
+            nix develop .#lavapipe -c scripts/gui-headless.sh idle \
+              --renderer "$renderer" --name "idle-$renderer" -- target/debug/gogo-gui
+            grep -F "renderer=$renderer" target/gui-headless/idle-"$renderer".*/app.log
+          done
       - name: Fallback without a Vulkan driver
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0

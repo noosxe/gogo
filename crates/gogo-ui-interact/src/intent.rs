@@ -349,6 +349,7 @@ pub struct Response {
     pub intents: Vec<Intent>,
     /// The input was used here.
     pub consumed: bool,
-    /// Focus, hover or the pressed control changed.
+    /// Something a frame draws changed: focus, an armed hold or a scroll offset. Hover
+    /// and the pressed control are not drawn yet.
     pub redraw: bool,
 }

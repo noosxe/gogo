@@ -143,11 +143,30 @@ process.
 
 ## 6. Damage and frame scheduling
 
-- A frame is drawn only when a source slot changed, an input arrived, an animation is
-  running, or the window was resized or rescaled (design 25 §3).
+**An idle window does no rendering work:** no bind, layout, scene build or present while
+nothing changes. Nothing is drawn on a timer. A frame is asked for only when something a
+frame draws has changed:
+
+| Cause | When it asks |
+|---|---|
+| The window | resized, rescaled, no longer occluded, a redraw the window system asks for, a renderer made again, a reloaded skin |
+| Input and accessibility | an action or edit came of it, or focus, the focus ring, an armed hold or a scroll offset changed |
+| Data | a source's value or a picture changed, a sign-in started or ended, or another safety screen is due |
+| A running hold | after each presented frame, until it ends |
+
+- **Hover and press ask for nothing**, because nothing draws them yet. `:hover` and
+  `:pressed` styles must add them back.
+- **A value written again is no change** (design 25 §3).
+- **No change is lost.** Every pump of the model counts what it changed, and a frame
+  records the count its bind read. A change taken by a pump in the middle of another call
+  is still followed by a frame.
+- **A frame that was skipped or failed** is asked for again by the next input.
+- **Time alone draws nothing.** The 500 ms dwell is judged from the press's own time. A
+  hold is paced by the frames it presents. Relative times ("5 min ago") are as of the
+  last frame. Something that must change with time alone needs a one-off wake at its
+  deadline, never a repeating timer.
 - Progress-only changes are capped at 10 frames a second.
-- Partial redraws, which repaint only the dirty regions, come with damage tracking (#547).
-  Until then a frame redraws the whole window.
+- A frame redraws the whole window. Repainting only dirty regions is not built.
 
 ## 7. Testing
 

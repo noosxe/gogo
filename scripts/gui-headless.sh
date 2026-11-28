@@ -36,6 +36,12 @@
 #   14-again, 15-closed). Takes run's options; the click points assume the
 #   default size.
 #
+# idle [options] -- GOGO_GUI
+#   the idle check: starts GOGO_GUI on fictional data and counts the frames it
+#   presents while nothing changes (left alone, the pointer moving over controls,
+#   the command palette open): there must be none. A click and Ctrl K show that
+#   the count does move. Takes run's options; the points assume the default size.
+#
 # self-test
 #   checks the sandbox, the screenshot and the teardown with a small Wayland
 #   client, so it needs no build.
@@ -362,6 +368,67 @@ scenario_input() {
     grep -F "gui: route" "$OUT/app.log" >&2
 }
 
+presented() { grep -cF -- "gui: frame presented" "$OUT/app.log" || true; }
+
+# Waits until no frame has been presented for a second.
+quiet() {
+    local last=-1 now
+    for _ in $(seq 20); do
+        now="$(presented)"
+        [ "$now" = "$last" ] && return 0
+        last="$now"
+        sleep 1
+    done
+    log "idle check failed: frames never stop"
+    return 1
+}
+
+no_frames_since() { # count what
+    local now
+    sleep 0.5
+    now="$(presented)"
+    [ "$now" = "$1" ] || { log "idle check failed: $((now - $1)) frames $2"; return 1; }
+}
+
+scenario_idle() {
+    start_pointer || return 1
+    start_keyboard
+    start_app "$@" --fixture
+    wait_log "gui: frame presented" || return 1
+    wait_shown 1-start || return 1
+    swaymsg -q seat - cursor set 700 700 # over nothing
+    quiet || return 1
+
+    local frames
+    frames="$(presented)"
+    sleep 5
+    no_frames_since "$frames" "while left alone" || return 1
+
+    for _ in 1 2 3 4 5; do
+        swaymsg -q seat - cursor set 378 276 # onto the Builds tab
+        sleep 0.1
+        swaymsg -q seat - cursor set 60 141 # onto Library
+        sleep 0.1
+        swaymsg -q seat - cursor set 700 700
+        sleep 0.1
+    done
+    no_frames_since "$frames" "as the pointer moved" || return 1
+
+    click 60 141 # Library
+    wait_log "gui: route library" || return 1
+    quiet || return 1
+    [ "$(presented)" -gt "$frames" ] || { log "idle check failed: a click drew nothing"; return 1; }
+
+    ctrl_k
+    wait_log "gui: palette opened" || return 1
+    quiet || return 1
+    frames="$(presented)"
+    sleep 3
+    no_frames_since "$frames" "with the palette open" || return 1
+    shot 2-end
+    stop_app
+}
+
 inside() {
     OUT="$1" SIZE="$2" RENDERER="$3" READY="$4" SCENARIO="$5"
     shift 5
@@ -610,7 +677,7 @@ target" ] || st_fail "more of the repository than scripts/ is visible"
 cmd="$1"
 shift
 case "$cmd" in
-run | reload | input) cmd_run "$cmd" "$@" ;;
+run | reload | input | idle) cmd_run "$cmd" "$@" ;;
 self-test) cmd_self_test "$@" ;;
 __inside) inside "$@" ;;
 -h | --help | help) usage ;;

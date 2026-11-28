@@ -297,9 +297,11 @@ wgpu's GL backend needs a loadable `libEGL.so.1` on the library path.
     (`.#lavapipe`: the dev shell with Mesa's software Vulkan as the only Vulkan driver). It
     runs for the same changes as `gui`, and for the shell's own files.
   - A `gui-headless` job runs `scripts/gui-headless.sh self-test`, then `gogo-gui` in the
-    headless compositor: hot reload on the GPU path (lavapipe) and the CPU path, and the
-    fallback without a Vulkan driver. It runs for the same changes as `gui-lavapipe`, and
-    for the script, its tools and the helpers it borrows from the e2e harness.
+    headless compositor: hot reload on the GPU path (lavapipe) and the CPU path, the
+    pointer and keyboard check, the idle check on both paths (it fails if a frame is
+    presented while nothing changes), and the fallback without a Vulkan driver. It runs
+    for the same changes as `gui-lavapipe`, and for the script, its tools and the helpers
+    it borrows from the e2e harness.
   - All of it is wired into `CI result` (`ci-jobs.yml` names the three places).
   - The same job checks the dependency rules in §2.1 with `scripts/gui-deps-check.py`
     (`cargo metadata`, direct edges only), whose own tests run first.

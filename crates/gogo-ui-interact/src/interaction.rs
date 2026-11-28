@@ -347,12 +347,14 @@ impl Interaction {
     }
 
     /// What a frame shows of this state: a change asks for another.
-    fn shown(&self) -> (u64, [Option<Target>; 5]) {
+    ///
+    /// [`hovered`](Self::hovered) and [`pressed`](Self::pressed) are not here because
+    /// nothing draws them yet (`:hover` and `:pressed` styles are not in the IR), so a
+    /// frame for them would be the one already on screen. Add them when something does.
+    fn shown(&self) -> (u64, [Option<Target>; 3]) {
         let targets = [
             self.focus().cloned(),
             self.focus_visible().cloned(),
-            self.hovered().cloned(),
-            self.pressed().cloned(),
             self.armed().cloned(),
         ];
         (self.scroll.revision, targets)

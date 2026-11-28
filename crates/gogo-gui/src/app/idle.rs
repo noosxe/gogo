@@ -11,7 +11,7 @@ use gogo_ui_interact::{Key, Modifiers, PointerButton};
 use gogo_ui_shell::accesskit::{Role, TreeUpdate};
 
 use super::safety::{HOLD_LABEL, hold_screen};
-use super::tests::{SIZE, app, at, bounds};
+use super::tests::{SIZE, app, at, bounds, with_an_unbindable_library};
 use super::*;
 
 /// The most frames one thing may take to settle.
@@ -121,8 +121,21 @@ impl Shell {
     /// Everything that happens to a window nobody changes anything in: no frame may
     /// follow.
     fn stays_idle(&mut self, what: &str) {
+        let controls: Vec<(f64, f64)> = self
+            .app
+            .accessibility_tree()
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.role() == Role::Button || n.role() == Role::Tab)
+            .filter_map(|(_, n)| n.bounds())
+            .map(|r| ((r.x0 + r.x1) / 2.0, (r.y0 + r.y1) / 2.0))
+            .collect();
+        assert!(!controls.is_empty(), "{what}: nothing to hover");
         // Wherever the pointer was, it is over nothing from here on.
         self.pointer(NOTHING);
+        // The first press on a control moves focus to it, which is drawn.
+        self.press(controls[0]);
+        self.release(NOTHING);
         self.settle();
         let before = self.counts();
         for _ in 0..3 {
@@ -130,6 +143,14 @@ impl Shell {
             for dx in 0..40 {
                 self.pointer((NOTHING.0 + f64::from(dx), NOTHING.1));
             }
+            // Onto every control and off again.
+            for &point in &controls {
+                self.pointer(point);
+                self.pointer(NOTHING);
+            }
+            // A press that ends elsewhere does nothing.
+            self.press(controls[0]);
+            self.release(NOTHING);
             self.key(Key::Char('q'), Modifiers::default());
             self.input(Input::Modifiers(Modifiers::default()));
             self.input(Input::FocusLost);
@@ -206,6 +227,50 @@ fn an_idle_dialog_draws_nothing_and_the_dwell_needs_no_frame() {
     assert!(shell.app.data.modal().is_none(), "the dwell had passed");
     assert!(shell.settle() > 0);
     assert!(shell.app.shown.dialog.is_none());
+}
+
+#[test]
+fn an_idle_error_panel_draws_nothing() {
+    let mut broken = app();
+    broken.page.replace_built_in(with_an_unbindable_library());
+    let mut shell = Shell::new(broken);
+    shell.click(Role::Button, "Library");
+    shell.settle();
+    assert!(shell.app.shown.panel.is_some());
+    // The panel takes the input: there is nothing else to hover.
+    let before = shell.frames;
+    shell.wake();
+    shell.pointer(NOTHING);
+    shell.key(Key::Char('q'), Modifiers::default());
+    shell.settle();
+    assert_eq!(shell.frames, before);
+}
+
+#[test]
+fn a_value_written_again_draws_nothing() {
+    let mut shell = Shell::new(app());
+    let (name, value) = shell.changed_value();
+    shell.write(name, value.clone());
+    shell.wake();
+    shell.settle();
+    shell.write(name, value);
+    shell.wake();
+    assert_eq!(shell.settle(), 0);
+}
+
+#[test]
+fn input_asks_again_for_a_frame_that_never_reached_the_display() {
+    let mut shell = Shell::new(app());
+    let (name, value) = shell.changed_value();
+    shell.write(name, value);
+    shell.wake();
+    // Built, then skipped or failed.
+    shell.build();
+    shell.pointer(NOTHING);
+    assert!(shell.asked);
+    shell.settle();
+    shell.pointer((NOTHING.0 + 1.0, NOTHING.1));
+    assert!(!shell.asked);
 }
 
 #[test]

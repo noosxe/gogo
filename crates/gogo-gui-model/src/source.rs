@@ -167,16 +167,19 @@ impl SourceStore {
         }
     }
 
-    /// Take the newest value of every slot written since the last call, and name them.
-    /// The caller takes the [`Signal`] first.
+    /// Take the newest value of every slot written since the last call, and name those
+    /// whose value is not the one they had: a producer that writes the same again has
+    /// changed nothing. The caller takes the [`Signal`] first.
     pub fn drain(&mut self) -> Vec<SourceKey> {
         let mut changed = Vec::new();
         for (key, entry) in &mut self.entries {
             let cell = lock(&entry.cell);
             if cell.generation != entry.seen {
                 entry.seen = cell.generation;
-                entry.current.clone_from(&cell.value);
-                changed.push(key.clone());
+                if entry.current != cell.value {
+                    entry.current.clone_from(&cell.value);
+                    changed.push(key.clone());
+                }
             }
         }
         changed.sort();

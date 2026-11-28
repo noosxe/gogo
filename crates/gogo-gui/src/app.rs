@@ -136,6 +136,8 @@ pub(crate) struct App {
     /// What `list` draws, not yet presented.
     pending: View,
     built: Built,
+    /// A frame was built and has not reached the display: it was skipped or failed.
+    unpresented: bool,
     interaction: Interaction,
     /// What is open over the page.
     popups: PopupStack<Over>,
@@ -187,6 +189,7 @@ impl App {
             shown: View::default(),
             pending: View::default(),
             built: Built::default(),
+            unpresented: false,
             interaction: Interaction::new(Config::new(PRIMARY)),
             popups: PopupStack::default(),
             a11y: A11yTree::new(TITLE),
@@ -507,7 +510,8 @@ impl App {
         for intent in response.intents {
             self.act(intent);
         }
-        response.redraw || acted || self.stale()
+        // Any input tries again for a frame that never reached the display.
+        response.redraw || acted || self.unpresented || self.stale()
     }
 
     /// Binds, lays out and builds the next frame for a window of `size` logical px.
@@ -605,6 +609,7 @@ impl App {
             panel.draw(&mut self.list);
         }
         self.draw_dialog(size);
+        self.unpresented = true;
     }
 
     /// The open popup over the screen about to be shown. One that can't be drawn over
@@ -656,6 +661,7 @@ impl App {
 
     /// The pending frame is on the screen, since `at`. Returns whether to draw again.
     fn show(&mut self, at: Duration) -> bool {
+        self.unpresented = false;
         let redraw = self.take_over();
         let again = self.shown_screen(at);
         redraw || again || self.stale()
@@ -1008,7 +1014,7 @@ pub(super) mod tests {
 
     /// The built-in skin with a `library` route that loads and never binds: `$nope` is no
     /// parameter of it.
-    fn with_an_unbindable_library() -> Vec<(String, Vec<u8>)> {
+    pub(super) fn with_an_unbindable_library() -> Vec<(String, Vec<u8>)> {
         let mut files = gogo_skins::default().to_files();
         files.retain(|(path, _)| path != "routes/library.kdl");
         files.push((
