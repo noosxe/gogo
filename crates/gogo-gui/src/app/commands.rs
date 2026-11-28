@@ -10,7 +10,7 @@ use super::tests::{app, at, bounds, click_at, frame, key};
 use super::*;
 
 /// Ctrl K (Cmd K), then the frames that show what it did.
-fn ctrl_k(app: &mut App, ms: u64) {
+pub(super) fn ctrl_k(app: &mut App, ms: u64) {
     let mods = match PRIMARY {
         Primary::Meta => Modifiers {
             meta: true,

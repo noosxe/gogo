@@ -21,6 +21,8 @@
 
 mod answer;
 #[cfg(test)]
+mod choosing;
+#[cfg(test)]
 mod commands;
 #[cfg(test)]
 mod dev;
@@ -38,7 +40,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gogo_contract::{Value, actions};
-use gogo_gui_model::{Effect, InputEvent, Invocation, Outcome, Ticket};
+use gogo_gui_model::{Effect, ErrorView, InputEvent, Invocation, Outcome, Ticket};
 use gogo_skin::ActionCall;
 use gogo_ui_a11y::A11yTree;
 use gogo_ui_interact::{Config, Frame as Layers, Intent, Interaction, Layer, PopupStack, Primary};
@@ -51,13 +53,14 @@ use gogo_ui_shell::{
 use gogo_ui_text::EditOp;
 
 use crate::check;
-use crate::data::{Data, Images};
+use crate::data::{Data, Images, SkinSetting};
 use crate::dialog::{self, Dialog};
 use crate::inspector::{self, Inspector};
 use crate::page::{DrawError, Page, Screen};
 use crate::palette;
 use crate::panel::Panel;
 use crate::popup;
+use crate::skins::{self, DEFAULT, Skins};
 use crate::{act, render};
 
 /// The route the window shows: it draws the model's route in its outlet.
@@ -182,6 +185,10 @@ pub(crate) struct App {
     problems: Vec<String>,
     /// A reload may have changed what an image key names.
     images_changed: bool,
+    /// The installed skins, when there is a place for them.
+    skins: Option<Skins>,
+    /// The name of the skin drawn, outside dev mode.
+    on_screen: String,
 }
 
 impl App {
@@ -220,11 +227,104 @@ impl App {
             inspector: None,
             problems: Vec::new(),
             images_changed: false,
+            skins: None,
+            on_screen: DEFAULT.to_owned(),
         };
         if app.dev.is_some() {
             app.reload("loaded");
         }
         Ok(app)
+    }
+
+    /// Takes the skin folder and draws a skin from it: `once` for this run only, else
+    /// the one chosen before. A dev run keeps to its folder.
+    pub(crate) fn with_skins(mut self, skins: Option<Skins>, once: Option<&str>) -> App {
+        self.skins = skins;
+        if self.dev.is_some() {
+            return self;
+        }
+        let name = once
+            .map(str::to_owned)
+            .or_else(|| self.skins.as_ref().and_then(Skins::chosen))
+            .unwrap_or_else(|| DEFAULT.to_owned());
+        // The choice stays, so that a mended skin comes back.
+        if name != DEFAULT
+            && let Err(why) = self.show_skin(&name)
+        {
+            self.skin_failed(&format!("{why}. The Default skin is drawn."));
+        }
+        self.offer_skins();
+        self
+    }
+
+    /// Draws with the skin called `name`. What is on screen stays if it can't.
+    fn show_skin(&mut self, name: &str) -> Result<(), String> {
+        if name == DEFAULT {
+            self.page.use_default();
+        } else {
+            // Only a name finds a folder, whatever a skin asked for (S3).
+            let dir = self
+                .skins
+                .as_ref()
+                .and_then(|s| s.folder.path(name))
+                .ok_or_else(|| match skins::named(name) {
+                    true => format!("The skin {name} is not installed"),
+                    false => "There is no such skin".to_owned(),
+                })?;
+            self.page.choose(&dir).map_err(|lines| {
+                let first = lines.first().map(String::as_str).unwrap_or_default();
+                format!("The skin {name} does not load: {first}")
+            })?;
+        }
+        self.on_screen = name.to_owned();
+        // It hung from a control of the old skin.
+        self.popups.clear();
+        self.images_changed = true;
+        say(format_args!("gui: skin chosen {name}"));
+        Ok(())
+    }
+
+    /// `settings.set gui.skin`: draws with `name` and keeps the choice.
+    fn set_skin(&mut self, name: &str) {
+        if self.dev.is_some() {
+            self.skin_failed("Dev mode draws the folder it was started with.");
+            return;
+        }
+        match self.show_skin(name) {
+            Ok(()) => {
+                if let Some(skins) = &self.skins
+                    && let Err(e) = skins.choose(name)
+                {
+                    self.skin_failed(&format!("The choice could not be saved: {e}"));
+                }
+            }
+            Err(why) => self.skin_failed(&why),
+        }
+        self.offer_skins();
+    }
+
+    fn skin_failed(&mut self, why: &str) {
+        let title = "The skin can't be used";
+        self.data.failures().report(ErrorView::failed(title, why));
+        // Taken now, for the next frame to show.
+        self.data.pump();
+    }
+
+    /// Tells the `settings` source which skin is drawn and which there are.
+    fn offer_skins(&mut self) {
+        if self.dev.is_some() {
+            return;
+        }
+        let choices = self
+            .skins
+            .as_ref()
+            .map_or_else(|| vec![DEFAULT.to_owned()], Skins::choices);
+        let stored = self.skins.as_ref().and_then(Skins::chosen).is_some();
+        self.data.offer_skin(SkinSetting {
+            value: self.on_screen.clone(),
+            choices,
+            stored,
+        });
     }
 
     /// Loads the watched folder again, saying how it went.
@@ -591,6 +691,7 @@ impl App {
         for effect in self.data.take_effects() {
             match effect {
                 Effect::SetUi { var, value } => self.set_ui(&var, value),
+                Effect::SetSkin(name) => self.set_skin(&name),
                 // Named only: an effect can carry the user's data.
                 // The scope is not used: the palette lists everything.
                 Effect::OpenPalette { .. } => {

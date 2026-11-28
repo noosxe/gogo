@@ -652,7 +652,7 @@ As built (PR F2, sign-in):
 - **Data.** Dev mode runs on `CoreBackend`, or on fixture data with `--fixture`.
 - **`gogo-gui --check-skin <dir>`** validates without a window, for skin authors and CI.
   Exit 0: no errors (warnings allowed); 1: a skin or route error; 2: bad usage.
-- **`gogo-gui --render-png <out> [--route R] [--scale N] [--skin <dir>]`** draws a route on
+- **`gogo-gui --render-png <out> [--route R] [--scale N] [--skin <dir|name>]`** draws a route on
   fixture data without a window, on vello_cpu, at 960×600 logical px (the golden images).
 
 As built (PR E4):
@@ -735,6 +735,24 @@ and `$GOGO_HOME/gui-cache/` (cache), so state and cache stay apart.
 
 - Built-in skins are not in the skin folder: they are embedded (`gogo-skins`, design 24 §2)
   and load through the same loader. The Default skin is `crates/gogo-skins/skins/default/`.
+- **The active skin** is its name, in `active-skin` in the GUI's state folder.
+
+### Choosing a skin
+
+- The choices are `default` and the installed skins. The window says which is drawn and
+  which there are in the `gui.skin` row of the `settings` source, which it adds itself.
+- `settings.set gui.skin` takes one of those names and nothing else: a name finds a folder
+  in the skin folder, never a path (S3). It is the window's own, not the engine's. The skin
+  is drawn at once and the choice saved.
+- **The way out** is the command palette's "Use the default skin", listed while another
+  skin is drawn. The app builds the palette and Ctrl K is the app's (S19), so no skin can
+  take it away. `gogo-gui --skin default` does the same for one run.
+- **At start,** a chosen skin that is gone or does not load leaves Default on screen with
+  an error that says why. The choice is kept.
+- **`--skin <name>`** draws an installed skin for one run without saving it. `--dev` draws
+  its folder and takes no part in any of this.
+- **Fictional data** (`--fixture`, `--render-png`) uses the skin folder and the choice only
+  when `GOGO_HOME` is set.
 - Every file is written atomically (tmp, fsync, rename) like `state.json`.
 - An unreadable cache is ignored.
 - Unreadable UI state falls back to the skin's declared defaults.

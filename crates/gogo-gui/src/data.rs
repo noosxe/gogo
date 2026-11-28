@@ -87,6 +87,61 @@ pub(crate) struct Data {
     read: Cell<u64>,
     art: Option<ArtStore>,
     sign_in: Option<SignIn>,
+    /// The app's row of the `settings` source: which skin is drawn.
+    skin: Option<SkinSetting>,
+    /// The `settings` source with that row in it.
+    settings: Option<Value>,
+}
+
+/// The `gui.skin` setting as the window has it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SkinSetting {
+    /// The skin on screen.
+    pub(crate) value: String,
+    /// The skins there are to choose.
+    pub(crate) choices: Vec<String>,
+    /// Whether the choice is kept in a file.
+    pub(crate) stored: bool,
+}
+
+impl SkinSetting {
+    /// The row, as design 26 has the `settings` source.
+    fn row(&self) -> Value {
+        let text = |s: &str| Value::str(s);
+        Value::Map(
+            [
+                ("key", text("gui.skin")),
+                ("type", text("text")),
+                ("value", text(&self.value)),
+                ("default", text(crate::skins::DEFAULT)),
+                ("source", text(if self.stored { "file" } else { "default" })),
+                ("description", text("The skin the app draws with")),
+                (
+                    "choices",
+                    Value::List(self.choices.iter().map(|c| text(c)).collect()),
+                ),
+            ]
+            .map(|(k, v)| (k.to_owned(), v))
+            .into(),
+        )
+    }
+}
+
+/// `rows` of the `settings` source with the app's `gui.skin` row in place of any other.
+fn with_row(rows: &Value, skin: &SkinSetting) -> Value {
+    let mut rows = match rows {
+        Value::List(rows) => rows.clone(),
+        _ => Vec::new(),
+    };
+    let key = Value::str("gui.skin");
+    let at = rows
+        .iter()
+        .position(|row| matches!(row, Value::Map(m) if m.get("key") == Some(&key)));
+    match at {
+        Some(at) => rows[at] = skin.row(),
+        None => rows.insert(0, skin.row()),
+    }
+    Value::List(rows)
 }
 
 impl Data {
@@ -106,6 +161,8 @@ impl Data {
             revision: 0,
             read: Cell::default(),
             art,
+            skin: None,
+            settings: None,
         }
     }
 
@@ -149,6 +206,28 @@ impl Data {
         if !self.model.pump().is_empty() {
             self.revision += 1;
         }
+        self.merge_settings();
+    }
+
+    fn merge_settings(&mut self) {
+        self.settings = self.skin.as_ref().and_then(|skin| {
+            let rows = self.model.value(&SourceKey::new("settings", &[])?)?;
+            Some(with_row(rows, skin))
+        });
+    }
+
+    /// Says which skin is drawn and which there are, for the `settings` source.
+    pub(crate) fn offer_skin(&mut self, skin: SkinSetting) {
+        if self.skin.as_ref() != Some(&skin) {
+            self.skin = Some(skin);
+            self.revision += 1;
+            self.merge_settings();
+        }
+    }
+
+    /// The skin the window said it draws.
+    pub(crate) fn skin(&self) -> Option<&str> {
+        self.skin.as_ref().map(|s| s.value.as_str())
     }
 
     /// Moves on whenever a source's value or a picture changed.
@@ -264,7 +343,6 @@ impl Data {
     }
 
     /// Where a failure with no call waiting for it is reported.
-    #[cfg(test)]
     pub(crate) fn failures(&self) -> Failures {
         self.model.failures()
     }
@@ -354,7 +432,10 @@ impl Scope for ModelScope<'_> {
         if value.is_none() {
             self.ask(key);
         }
-        value
+        match &self.data.settings {
+            Some(settings) if name == "settings" => Some(settings),
+            _ => value,
+        }
     }
 
     fn param(&self, name: &str) -> Option<&Value> {
@@ -481,6 +562,8 @@ mod fictional {
                 read: Cell::default(),
                 art: None,
                 sign_in: None,
+                skin: None,
+                settings: None,
             })
         }
     }

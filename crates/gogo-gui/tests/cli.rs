@@ -9,6 +9,8 @@ use gogo_gui_testkit::golden::{self, GOLDEN_TOLERANCE};
 fn gui(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_gogo-gui"))
         .args(args)
+        // The tests' own run has no skin folder.
+        .env_remove("GOGO_HOME")
         .output()
         .expect("gogo-gui runs")
 }
@@ -82,6 +84,20 @@ fn render_png_takes_a_skin_folder() {
 }
 
 #[test]
+fn render_png_takes_a_skin_name() {
+    let dir = tempfile::tempdir().expect("a temporary folder");
+    let png = dir.path().join("out.png");
+    let run = gui(&["--render-png", text(&png), "--skin", "default"]);
+    assert!(run.status.success(), "{run:?}");
+
+    // A name is never taken for a folder, and a fictional run without GOGO_HOME has
+    // none installed.
+    let run = gui(&["--render-png", text(&png), "--skin", "missing"]);
+    assert_eq!(run.status.code(), Some(1), "{run:?}");
+    assert!(String::from_utf8_lossy(&run.stderr).contains("no skin `missing`"));
+}
+
+#[test]
 fn check_skin_exit_codes() {
     let dir = tempfile::tempdir().expect("a temporary folder");
     let good = skin(&dir.path().join("good"), None);
@@ -109,6 +125,7 @@ fn usage_errors_exit_2() {
         &["--render-png", "a.png", "--scale", "9"],
         &["--check-skin", "a", "--render-png", "b"],
         &["--unknown"],
+        &["--skin", "a", "--dev", "b"],
     ] {
         let run = gui(args);
         assert_eq!(run.status.code(), Some(2), "{args:?}: {run:?}");
