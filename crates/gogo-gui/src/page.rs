@@ -7,8 +7,8 @@ use std::ops::Range;
 use std::path::Path;
 
 use gogo_skin::{
-    ActionTable, BindError, Binding, Bound, DefaultSkin, FallbackWhy, Lists, Mode, PopupSlot,
-    Provenance, SkinPackage, UiState, UiStateError, Value,
+    ActionTable, BindError, Binding, Bound, DefaultSkin, Fallback, FallbackWhy, Lists, Mode,
+    PopupSlot, Provenance, Report, SkinPackage, UiState, UiStateError, Value,
 };
 use gogo_ui_interact::{Interaction, Layer, LayerId, LayerKind};
 use gogo_ui_ir::{NodeId, Tree};
@@ -65,6 +65,8 @@ pub(crate) struct Screen {
     pub(crate) popups: Vec<PopupSlot>,
     /// Where the nodes came from, while the inspector is open.
     pub(crate) provenance: Option<Provenance>,
+    /// The routes of this page the default skin drew.
+    pub(crate) fallbacks: Vec<Fallback>,
     /// A hash of each action's call, so that a press on a control that came to do
     /// something else is dropped.
     identity: Vec<u64>,
@@ -102,6 +104,9 @@ pub(crate) struct Page {
     pub(crate) fonts: FontSet,
     /// Bind with provenance, for the inspector.
     pub(crate) traced: bool,
+    /// What the loader found in the dev mode's folder the last time it was read, taken
+    /// or not.
+    pub(crate) report: Option<Report>,
     /// The rows of each virtualised list the last layout showed, by the list's key.
     rows: HashMap<String, Range<u32>>,
 }
@@ -118,15 +123,25 @@ impl Page {
             active: None,
             fonts: FontSet::bundled(),
             traced: false,
+            report: None,
         })
     }
 
     /// Takes the skin in `dir`, if it loads without errors. Otherwise the skin on screen
     /// stays, and the errors come back, one line each.
     pub(crate) fn load(&mut self, dir: &Path) -> Result<(), Vec<String>> {
-        let package = SkinPackage::load(dir).map_err(|r| error_lines(&r))?;
-        if package.report().error_total() > 0 {
-            return Err(error_lines(package.report()));
+        self.take(dir).0
+    }
+
+    /// [`load`](Self::load), with what the loader found, errors and warnings.
+    fn take(&mut self, dir: &Path) -> (Result<(), Vec<String>>, Report) {
+        let package = match SkinPackage::load(dir) {
+            Ok(package) => package,
+            Err(report) => return (Err(error_lines(&report)), report),
+        };
+        let report = package.report().clone();
+        if report.error_total() > 0 {
+            return (Err(error_lines(&report)), report);
         }
         let mut skin = Skin::new(package);
         // A reload keeps the tab the user was on, where the skin still has it.
@@ -137,7 +152,7 @@ impl Page {
             );
         }
         self.active = Some(skin);
-        Ok(())
+        (Ok(()), report)
     }
 
     /// Puts a scratch skin where the built-in one is, so a test can have a route with
@@ -160,7 +175,8 @@ impl Page {
         skin.ui.set(&skin.package.manifest, var, value)
     }
 
-    /// Like [`load`](Self::load), for a reload: the new skin must also bind `route`.
+    /// Like [`load`](Self::load), for a reload of the dev mode's folder: the new skin must
+    /// also bind `route`, and the loader's report is kept for the inspector.
     pub(crate) fn reload(
         &mut self,
         dir: &Path,
@@ -173,7 +189,9 @@ impl Page {
             package: s.package.clone(),
             ui: s.ui.clone(),
         });
-        let result = self.load(dir).and_then(|()| {
+        let (loaded, report) = self.take(dir);
+        self.report = Some(report);
+        let result = loaded.and_then(|()| {
             let bound = match self.bind(data, route, &Lists::default()) {
                 (Ok(bound), _) => bound,
                 // What fails while data is on the way says nothing about the skin.
@@ -321,6 +339,7 @@ impl Page {
             actions: bound.actions,
             popups: bound.popups,
             provenance: bound.provenance,
+            fallbacks: bound.fallbacks,
             identity,
             id,
         })

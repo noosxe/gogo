@@ -5,11 +5,21 @@ use std::path::Path;
 
 use gogo_skin::{Finding, Report, SkinPackage};
 
-/// One line per error: where, the code and the message.
+/// Where, the code and the message.
+fn line(f: &Finding) -> String {
+    format!("{}: {} ({})", f.location, f.message, f.code)
+}
+
+/// One line per error.
 pub(crate) fn error_lines(report: &Report) -> Vec<String> {
+    report.errors().map(line).collect()
+}
+
+/// One line per warning, saying that it is one.
+pub(crate) fn warning_lines(report: &Report) -> Vec<String> {
     report
-        .errors()
-        .map(|f| format!("{}: {} ({})", f.location, f.message, f.code))
+        .warnings()
+        .map(|f| format!("warning: {}", line(f)))
         .collect()
 }
 

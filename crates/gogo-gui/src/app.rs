@@ -50,6 +50,7 @@ use gogo_ui_shell::{
 };
 use gogo_ui_text::EditOp;
 
+use crate::check;
 use crate::data::{Data, Images};
 use crate::dialog::{self, Dialog};
 use crate::inspector::{self, Inspector};
@@ -232,6 +233,16 @@ impl App {
         let start = Instant::now();
         let result = self.page.reload(dir, &mut self.data, SHELL_ROUTE);
         let ms = start.elapsed().as_secs_f64() * 1000.0;
+        // The window lists them in the inspector.
+        for line in self
+            .page
+            .report
+            .as_ref()
+            .map(check::warning_lines)
+            .unwrap_or_default()
+        {
+            let _ = writeln!(std::io::stderr(), "{line}");
+        }
         match result {
             Ok(()) => {
                 self.problems.clear();
@@ -755,7 +766,8 @@ impl App {
     fn build_inspector(&mut self, size: (f32, f32)) -> Option<Rc<inspector::Drawn>> {
         let inspector = self.inspector.as_mut()?;
         let screen = self.pending.screen.as_deref();
-        match inspector.draw(&mut self.page.fonts, size, screen) {
+        let findings = inspector::Findings::of(self.page.report.as_ref(), &self.problems, screen);
+        match inspector.draw(&mut self.page.fonts, size, screen, &findings) {
             Ok(drawn) => Some(Rc::new(drawn)),
             Err(e) => {
                 tracing::error!("the inspector could not be drawn: {e}");

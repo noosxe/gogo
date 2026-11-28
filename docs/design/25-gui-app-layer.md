@@ -682,7 +682,7 @@ As built (input and AccessKit wiring):
 - Touch and the account menu are not wired in; the clipboard is read only by a paste (in a
   dialog or the palette's field) and written only by copy or cut in a text field.
 
-As built: the inspector (G5, #548):
+As built: the inspector and the problems list (G5, #548):
 
 - **Gating.** F12 opens and closes it, only with `--dev`; it starts closed. Without
   `--dev` it opens nothing and no bind records anything. In every run `Interaction` takes
@@ -703,6 +703,17 @@ As built: the inspector (G5, #548):
   stops. Scroll something into view before picking it. A popup, the error panel or a
   safety screen ends picking. Outside picking, the selected node is outlined. A frame is
   asked for only when the node under the pointer changes.
+- **Problems.** The second button lists what is wrong or may be: the loader's findings of
+  the last read, warnings included, with code, file and line and help; the routes of the
+  page the default skin draws, and why; and why the folder's skin was not taken when no
+  finding says so. Warnings also go to stderr at each reload. The error panel is as
+  before: a broken edit blocks input until it is mended.
+- **Within a second.** The watcher waits 100 ms of quiet (1 s at most) before a reload.
+  The headless `reload` check times each write until the screen changes, prints it and
+  fails over 3 s: debug builds with software rendering on CI are slow. The second itself is a
+  host pass check.
+- **Not built.** Skin menus and selects can't be inspected, the values of the data paths
+  inside an expression aren't listed, and there is no export.
 - **Safety.** It reads the page's bind only: no dialog, no typed text, no app widget's
   content. It is below the popup, the error panel and the safety screens, and takes no
   input while any of them is up. Its presses are numbered by `Interaction` like any
