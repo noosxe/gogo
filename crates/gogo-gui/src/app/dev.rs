@@ -4,7 +4,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use gogo_ui_interact::{Key, PointerButton};
+use gogo_ui_interact::{Key, Modifiers, PointerButton};
 use gogo_ui_shell::accesskit::Role;
 use tempfile::TempDir;
 
@@ -261,4 +261,135 @@ fn a_press_on_the_panel_reaches_nothing_of_the_page() {
     );
     assert_eq!(app.data.location().route, location.route);
     assert_eq!(SAID.lock().expect("not poisoned").len(), said);
+}
+
+fn said() -> Vec<String> {
+    SAID.lock().expect("not poisoned").clone()
+}
+
+fn move_to(app: &mut App, (x, y): (f64, f64), ms: u64) -> bool {
+    app.input(Input::PointerMoved { x, y }, at(ms))
+}
+
+/// The inspector open and picking.
+fn picking_app() -> (TempDir, App) {
+    let (dir, _skin, mut app) = dev_app();
+    key(&mut app, Key::F12, 10);
+    let button = bounds(&mut app, Role::Button, "Pick a node");
+    click_at(&mut app, button, 100);
+    frame(&mut app);
+    assert!(app.shown.inspector.as_ref().expect("drawn").picking);
+    (dir, app)
+}
+
+fn selected(app: &App) -> String {
+    app.inspector.as_ref().expect("open").selected().to_owned()
+}
+
+#[test]
+fn picking_a_button_selects_it_and_runs_nothing() {
+    let (_dir, mut app) = picking_app();
+    let play = middle(&app, "play");
+    let before = said().len();
+    let route = app.data.location().route.clone();
+    assert!(move_to(&mut app, play, 200), "the outline moves: a frame");
+    let unmarked = app.list.ops.len();
+    frame(&mut app);
+    assert!(app.list.ops.len() > unmarked, "an outline is drawn");
+    assert!(
+        !move_to(&mut app, (play.0 + 1.0, play.1), 210),
+        "same node: no frame"
+    );
+    click_at(&mut app, play, 300);
+    frame(&mut app);
+    assert!(!app.shown.inspector.as_ref().expect("drawn").picking);
+    let screen = app.shown.screen.clone().expect("a screen");
+    let node = screen.tree.by_name("play").expect("play");
+    assert_eq!(Some(selected(&app).as_str()), screen.tree.key(node));
+    assert_eq!(app.data.location().route, route);
+    assert!(app.data.backend().runs.is_empty());
+    assert!(app.data.modal_ticket().is_none(), "no plan card");
+    let after = said().split_off(before);
+    assert!(
+        after
+            .iter()
+            .any(|l| l.starts_with("gui: inspector selected root/")),
+        "{after:?}"
+    );
+    // Outside picking, the pointer asks for no frame.
+    assert!(!move_to(&mut app, (play.0 + 2.0, play.1), 400));
+}
+
+#[test]
+fn while_picking_keys_and_screen_readers_reach_nothing_of_the_page() {
+    let (_dir, mut app) = picking_app();
+    let route = app.data.location().route.clone();
+    // The skin's own shortcut for Play, and the palette.
+    key(&mut app, Key::Char('p'), 200);
+    let ctrl = Modifiers {
+        ctrl: PRIMARY == Primary::Ctrl,
+        meta: PRIMARY == Primary::Meta,
+        ..Modifiers::default()
+    };
+    app.input(
+        Input::KeyDown {
+            key: Key::Char('k'),
+            mods: ctrl,
+            repeat: false,
+        },
+        at(210),
+    );
+    frame(&mut app);
+    assert!(app.popups.top().is_none());
+    for step in 0..30 {
+        key(&mut app, Key::Tab, 300 + step * 10);
+        if let Some(focus) = app.interaction.focus() {
+            assert_eq!(focus.layer, app.shown.inspector.as_ref().expect("drawn").id);
+        }
+    }
+    let tree = app.accessibility_tree();
+    assert!(!tree.nodes.iter().any(|(_, n)| n.label() == Some("Play")));
+    assert!(app.data.backend().runs.is_empty());
+    // Esc stops picking and goes nowhere.
+    key(&mut app, Key::Escape, 900);
+    assert!(!app.shown.inspector.as_ref().expect("drawn").picking);
+    assert_eq!(app.data.location().route, route);
+    assert_eq!(selected(&app), "root");
+    // The same shortcut does run once picking is over.
+    assert!(app.data.backend().runs.is_empty());
+    key(&mut app, Key::Char('p'), 1000);
+    assert!(!app.data.backend().runs.is_empty() || app.data.modal_ticket().is_some());
+}
+
+#[test]
+fn the_page_gets_nothing_before_the_picking_frame_is_up() {
+    let (_dir, _skin, mut app) = dev_app();
+    key(&mut app, Key::F12, 10);
+    let button = bounds(&mut app, Role::Button, "Pick a node");
+    click_at(&mut app, button, 100);
+    // No frame yet: input still lands on the one where the page is live.
+    assert!(!app.shown.inspector.as_ref().expect("drawn").picking);
+    let play = middle(&app, "play");
+    click_at(&mut app, play, 200);
+    assert!(app.data.backend().runs.is_empty());
+    assert!(app.data.modal_ticket().is_none());
+}
+
+#[test]
+fn a_safety_screen_ends_picking() {
+    let (_dir, skin) = copy_of_default();
+    let mut app = hold_screen();
+    app.dev = Some(skin);
+    app.inspector = Some(Inspector::new());
+    app.draw(SIZE);
+    app.show(at(6000));
+    let drawn = app.shown.inspector.clone().expect("drawn");
+    let inspector = app.inspector.as_mut().expect("open");
+    // As if the press that starts picking came just before the dialog.
+    inspector.press(&drawn, "inspector-picking");
+    assert!(inspector.picking());
+    app.draw(SIZE);
+    app.show(at(6002));
+    assert!(!app.shown.inspector.as_ref().expect("drawn").picking);
+    assert!(!move_to(&mut app, (100.0, 100.0), 6100));
 }

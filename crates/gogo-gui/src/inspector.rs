@@ -6,13 +6,16 @@
 //! the panel covers nothing of it. It reads the page's own traced bind and nothing else:
 //! not the app's dialogs, not what was typed. What it shows goes to the display and to
 //! assistive technology, never to stdout, the log or a file.
+//!
+//! While picking, the panel is a layer that takes all input: the page under it gets no
+//! press, key or shortcut, so choosing a node can't run what it does.
 
 use gogo_skin::{Origin, Provenance};
 use gogo_ui_interact::{Layer, LayerId, LayerKind};
 use gogo_ui_ir::{
-    A11y, Color, Dim, Direction, Kind, Node, NodeId, Position, Role, Sides, TextStyle, Tree,
+    A11y, Color, Dim, Direction, Kind, Node, NodeId, Position, Role, Sides, Stroke, TextStyle, Tree,
 };
-use gogo_ui_layout::{Laid, Scroll, Viewport, layout};
+use gogo_ui_layout::{Laid, Rect, Scroll, Viewport, layout};
 use gogo_ui_scene::{DisplayList, SceneState, build};
 use gogo_ui_text::FontSet;
 
@@ -35,6 +38,11 @@ const HEAD: Color = Color([0x9d, 0xba, 0xff, 0xff]);
 const EARLIER: &str = "inspector-earlier";
 const LATER: &str = "inspector-later";
 const ITEM: &str = "inspector-pick:";
+const PICKING: &str = "inspector-picking";
+/// The control over the page while picking.
+const CATCH: &str = "inspector-catch";
+
+const OUTLINE: Color = Color([0xff, 0xb3, 0x47, 0xff]);
 
 /// The inspector while it is open.
 pub(crate) struct Inspector {
@@ -46,6 +54,10 @@ pub(crate) struct Inspector {
     first: usize,
     /// How many the last build showed.
     shown: usize,
+    /// A node is being chosen with the pointer.
+    picking: bool,
+    /// The node under the pointer while picking.
+    hover: Option<String>,
 }
 
 /// One item of the panel's list.
@@ -78,6 +90,10 @@ pub(crate) struct Drawn {
     identity: Vec<u64>,
     /// What each pick button selects, by the number in its key.
     picks: Vec<String>,
+    /// It takes all input.
+    pub(crate) picking: bool,
+    /// A frame around the node pointed at or selected: drawn only, never hit.
+    outline: Option<(Tree, Laid)>,
 }
 
 /// How wide the panel is in a window `window` px wide.
@@ -96,7 +112,34 @@ impl Inspector {
             on: None,
             first: 0,
             shown: 0,
+            picking: false,
+            hover: None,
         }
+    }
+
+    pub(crate) fn picking(&self) -> bool {
+        self.picking
+    }
+
+    pub(crate) fn stop_picking(&mut self) {
+        self.picking = false;
+        self.hover = None;
+    }
+
+    /// The pointer is at `point` of the page, or off it. Returns whether the outline
+    /// moves with it: a frame is wanted only then.
+    pub(crate) fn point(&mut self, screen: &Screen, point: Option<(f64, f64)>) -> bool {
+        if !self.picking {
+            return false;
+        }
+        let hover = point
+            .and_then(|(x, y)| screen.laid.hit(x, y))
+            .map(|node| element(screen, node))
+            .and_then(|node| screen.tree.key(node))
+            .map(str::to_owned);
+        let moved = hover != self.hover;
+        self.hover = hover;
+        moved
     }
 
     /// The tree key of the selected node.
@@ -113,6 +156,14 @@ impl Inspector {
     pub(crate) fn press(&mut self, drawn: &Drawn, key: &str) -> Option<&str> {
         let step = self.shown.max(1);
         match key {
+            PICKING if self.picking => self.stop_picking(),
+            PICKING => self.picking = true,
+            CATCH => {
+                let hover = self.hover.take();
+                self.picking = false;
+                self.select(hover?);
+                return Some(&self.selected);
+            }
             EARLIER => self.first = self.first.saturating_sub(step),
             LATER => self.first += step,
             _ => {
@@ -164,8 +215,8 @@ impl Inspector {
             None => vec![Item::Dim("no screen yet".to_owned())],
         };
 
-        // The title and the two buttons take their rows; the rest is the list's.
-        let room = window_height - 2.0 * PADDING - LINE - 2.0 * PICK;
+        // The title and the three buttons take their rows; the rest is the list's.
+        let room = window_height - 2.0 * PADDING - LINE - 3.0 * PICK;
         self.first = self.first.min(items.len().saturating_sub(1));
         let mut used = 0.0;
         let count = items[self.first..]
@@ -181,6 +232,22 @@ impl Inspector {
         let mut root = Node::new(Kind::Box);
         root.a11y.name = Some("Inspector".to_owned());
         let mut builder = Builder::new(id(), (window_width, window_height), root);
+        let at = builder.root();
+        if self.picking {
+            // Under the panel: all that is left of it is the page.
+            let mut catch = Node::new(Kind::Box);
+            catch.layout.position = Position::Absolute;
+            catch.layout.inset = Sides {
+                top: Dim::Px(0.0),
+                right: Dim::Auto,
+                bottom: Dim::Px(0.0),
+                left: Dim::Px(0.0),
+            };
+            catch.layout.width = Dim::Px(window_width - wide);
+            catch.a11y = A11y::control(Role::Button, "Pick the node under the pointer");
+            builder.control(&mut catch, hash(CATCH));
+            builder.add(at, CATCH, catch)?;
+        }
         let mut side = Node::new(Kind::Box);
         side.layout.position = Position::Absolute;
         side.layout.inset = Sides {
@@ -202,16 +269,26 @@ impl Inspector {
             None,
             None,
             None,
-            Some(gogo_ui_ir::Stroke {
+            Some(Stroke {
                 width: 1.0,
                 color: EDGE,
             }),
         ];
         side.a11y.role = Role::Region;
         side.a11y.name = Some("Inspector".to_owned());
-        let at = builder.root();
         let side = builder.add(at, "side", side)?;
-        line(&mut builder, side, "title", "Inspector · F12 closes", DIM)?;
+        let (title, toggle) = if self.picking {
+            ("Picking · Esc stops", "Stop picking")
+        } else {
+            ("Inspector · F12 closes", "Pick a node")
+        };
+        line(&mut builder, side, "title", title, DIM)?;
+        let mut node = row(CARD);
+        node.layout.height = Dim::Px(PICK);
+        node.a11y = A11y::control(Role::Button, toggle);
+        builder.control(&mut node, hash(PICKING));
+        let button = builder.add(side, PICKING, node)?;
+        line(&mut builder, button, "toggle-text", toggle, HEAD)?;
 
         let more_before = self.first > 0;
         let more_after = self.first + count < items.len();
@@ -254,24 +331,51 @@ impl Inspector {
             Viewport::new(window_width, window_height),
             &Scroll::none(),
         )?;
+        let outlined = if self.picking {
+            self.hover.as_deref()
+        } else {
+            // The root is the whole page: a frame around it says nothing.
+            Some(self.selected.as_str()).filter(|&k| k != "root")
+        };
+        let outline = match screen.and_then(|screen| {
+            let node = screen.tree.by_key(outlined?)?;
+            Some(screen.laid.get(node)?.visible)
+        }) {
+            Some(r) if r.x1 > r.x0 && r.y1 > r.y0 => {
+                Some(frame_of(fonts, (window_width, window_height), r)?)
+            }
+            _ => None,
+        };
         Ok(Drawn {
             tree,
             laid,
             id: id(),
             identity,
             picks,
+            picking: self.picking,
+            outline,
         })
     }
 }
 
 impl Drawn {
-    /// Drawn beside the page; a press on it never reaches the page.
+    /// Drawn beside the page; a press on it never reaches the page. While picking it
+    /// takes all input, as a popup does.
     pub(crate) fn layer(&self) -> Layer<'_> {
-        Layer::new(self.id, LayerKind::Overlay, &self.tree, &self.laid).identity(&self.identity)
+        let kind = if self.picking {
+            LayerKind::Popup
+        } else {
+            LayerKind::Overlay
+        };
+        Layer::new(self.id, kind, &self.tree, &self.laid).identity(&self.identity)
     }
 
-    /// Draws it over `list`, with the focus ring on `focus`.
-    pub(crate) fn draw(&self, list: &mut DisplayList, focus: Option<&str>) {
+    /// Draws it over `list`, with the focus ring on `focus` and, if nothing is over the
+    /// page, the outline.
+    pub(crate) fn draw(&self, list: &mut DisplayList, focus: Option<&str>, outline: bool) {
+        if let Some((tree, laid)) = self.outline.as_ref().filter(|_| outline) {
+            list.ops.extend(build(tree, laid, &SceneState::new()).ops);
+        }
         let state = match focus.and_then(|key| self.tree.by_key(key)) {
             Some(node) => SceneState::new().with_focus(node),
             None => SceneState::new(),
@@ -300,6 +404,50 @@ impl Drawn {
         let r = self.laid.rect(node)?;
         Some(((r.x0 + r.x1) / 2.0, (r.y0 + r.y1) / 2.0))
     }
+}
+
+/// A tree that draws a border along `r` and nothing else.
+fn frame_of(
+    fonts: &mut FontSet,
+    (width, height): (f32, f32),
+    r: Rect,
+) -> Result<(Tree, Laid), PanelError> {
+    let mut root = Node::new(Kind::Box);
+    root.layout.width = Dim::Px(width);
+    root.layout.height = Dim::Px(height);
+    let mut tree = Tree::new("outline", root);
+    let mut node = Node::new(Kind::Box);
+    node.layout.position = Position::Absolute;
+    node.layout.inset = Sides {
+        top: Dim::Px(r.y0 as f32),
+        right: Dim::Auto,
+        bottom: Dim::Auto,
+        left: Dim::Px(r.x0 as f32),
+    };
+    node.layout.width = Dim::Px((r.x1 - r.x0) as f32);
+    node.layout.height = Dim::Px((r.y1 - r.y0) as f32);
+    node.paint.border = [Some(Stroke {
+        width: 2.0,
+        color: OUTLINE,
+    }); 4];
+    tree.add_child(tree.root(), "frame", node)?;
+    let laid = layout(&tree, fonts, Viewport::new(width, height), &Scroll::none())?;
+    Ok((tree, laid))
+}
+
+/// The nearest node at or around `node` that an element of the skin made.
+fn element(screen: &Screen, node: NodeId) -> NodeId {
+    let Some(provenance) = &screen.provenance else {
+        return node;
+    };
+    let mut at = node;
+    while provenance.get(at).is_none() {
+        let Some(parent) = screen.tree.parent(at) else {
+            break;
+        };
+        at = parent;
+    }
+    at
 }
 
 fn line(

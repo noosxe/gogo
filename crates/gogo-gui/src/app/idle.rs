@@ -198,6 +198,35 @@ fn an_idle_inspector_draws_nothing() {
     shell.settle();
     assert!(shell.app.shown.inspector.is_some());
     shell.stays_idle("the inspector open");
+
+    // Picking: a frame when the node under the pointer changes, none while it doesn't.
+    shell.click(Role::Button, "Pick a node");
+    shell.settle();
+    let rect = |shell: &Shell, name: &str| {
+        let screen = shell.app.shown.screen.as_ref().expect("a screen");
+        let node = screen.tree.by_name(name).expect(name);
+        screen.laid.rect(node).expect("laid out")
+    };
+    let title = rect(&shell, "title");
+    let y = (title.y0 + title.y1) / 2.0;
+    shell.pointer((title.x0 + 1.0, y));
+    shell.settle();
+    let before = shell.counts();
+    // Forty other pixels of the same node.
+    assert!(title.x1 - title.x0 > 42.0, "{title:?}");
+    for dx in 2..42 {
+        shell.pointer((title.x0 + f64::from(dx), y));
+        assert!(!shell.asked, "{dx} px into the title");
+    }
+    shell.wake();
+    assert!(!shell.asked);
+    shell.settle();
+    assert_eq!(shell.counts(), before);
+
+    // Onto another node: one frame is wanted.
+    let cover = rect(&shell, "cover");
+    shell.pointer(((cover.x0 + cover.x1) / 2.0, (cover.y0 + cover.y1) / 2.0));
+    assert!(shell.asked, "the outline moves");
 }
 
 #[test]
