@@ -370,12 +370,18 @@ scenario_input() {
 
 presented() { grep -cF -- "gui: frame presented" "$OUT/app.log" || true; }
 
-# Waits until no frame has been presented for a second.
-quiet() {
-    local last=-1 now
-    for _ in $(seq 20); do
+# Waits for more than COUNT frames, then until none has followed for 3 s: a slow
+# machine can take over a second to draw one.
+quiet_after() { # count
+    local last=-1 now still=0
+    until [ "$(presented)" -gt "$1" ]; do
+        app_alive || { log "the application ended (see app.log)"; return 1; }
+        sleep 0.1
+    done
+    for _ in $(seq 30); do
         now="$(presented)"
-        [ "$now" = "$last" ] && return 0
+        if [ "$now" = "$last" ]; then still=$((still + 1)); else still=0; fi
+        [ "$still" -ge 3 ] && return 0
         last="$now"
         sleep 1
     done
@@ -397,7 +403,7 @@ scenario_idle() {
     wait_log "gui: frame presented" || return 1
     wait_shown 1-start || return 1
     swaymsg -q seat - cursor set 700 700 # over nothing
-    quiet || return 1
+    quiet_after 0 || return 1
 
     local frames
     frames="$(presented)"
@@ -414,14 +420,14 @@ scenario_idle() {
     done
     no_frames_since "$frames" "as the pointer moved" || return 1
 
-    click 60 141 # Library
+    click 60 141 # Library: the count has to move, or it proves nothing
     wait_log "gui: route library" || return 1
-    quiet || return 1
-    [ "$(presented)" -gt "$frames" ] || { log "idle check failed: a click drew nothing"; return 1; }
+    quiet_after "$frames" || return 1
 
+    frames="$(presented)"
     ctrl_k
     wait_log "gui: palette opened" || return 1
-    quiet || return 1
+    quiet_after "$frames" || return 1
     frames="$(presented)"
     sleep 3
     no_frames_since "$frames" "with the palette open" || return 1
