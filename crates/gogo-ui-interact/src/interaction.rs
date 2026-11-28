@@ -761,6 +761,13 @@ impl Interaction {
                     out.intents.push(Intent::Palette { provenance });
                 }
             }
+            Key::F12 if plain => {
+                out.consumed = true;
+                if !repeat {
+                    self.cancel_presses(out);
+                    out.intents.push(Intent::Inspect);
+                }
+            }
             Key::Tab if !(mods.ctrl || mods.alt || mods.meta) => {
                 out.consumed = true;
                 let order = FocusOrder::of(frame);

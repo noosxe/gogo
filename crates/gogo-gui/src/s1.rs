@@ -569,6 +569,24 @@ async fn s1_no_credential_reaches_anything() {
 
     // Signed out. A first try fails.
     ui.until("Connect account").await;
+    // The inspector stays open from here on: what it shows is looked through too. A key
+    // counts only once a frame has been presented.
+    ui.app.input(
+        Input::KeyDown {
+            key: gogo_ui_interact::Key::F12,
+            mods: gogo_ui_interact::Modifiers::default(),
+            repeat: false,
+        },
+        ui.now,
+    );
+    ui.app.input(
+        Input::KeyUp {
+            key: gogo_ui_interact::Key::F12,
+        },
+        ui.now,
+    );
+    ui.step();
+    assert!(ui.app.inspecting(), "open and traced");
     ui.press("Connect account");
     ui.until("Sign in to GOG").await;
     // Too soon to have been seen: the clipboard is not asked for.
@@ -605,6 +623,8 @@ async fn s1_no_credential_reaches_anything() {
     ui.until("The library could not be read").await;
     ui.press("Close");
     ui.until("made_up_player").await;
+    // The sign-in dialog is gone, and the inspector is still there.
+    assert!(ui.app.inspecting(), "open and traced");
     ui.press("Read again");
     ui.until("Made Up not_installed").await;
 

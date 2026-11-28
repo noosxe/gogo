@@ -191,6 +191,16 @@ fn an_idle_page_draws_nothing() {
 }
 
 #[test]
+fn an_idle_inspector_draws_nothing() {
+    let (_dir, _skin, app) = super::dev::dev_app();
+    let mut shell = Shell::new(app);
+    shell.key(Key::F12, Modifiers::default());
+    shell.settle();
+    assert!(shell.app.shown.inspector.is_some());
+    shell.stays_idle("the inspector open");
+}
+
+#[test]
 fn an_idle_palette_draws_nothing() {
     let mut shell = Shell::new(app());
     let ctrl = Modifiers {

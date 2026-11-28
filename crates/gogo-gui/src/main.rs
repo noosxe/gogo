@@ -25,6 +25,7 @@ mod check;
 mod core;
 mod data;
 mod dialog;
+mod inspector;
 mod page;
 mod palette;
 mod panel;

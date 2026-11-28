@@ -228,6 +228,8 @@ app control is told apart by its `DrawnBy::App` part and tree key.
   cancels; with nothing focused, Enter is the plan card's confirm. The app starts a plan
   card on nothing, and a destructive confirmation or a prompt on Cancel (the default
   answer is no).
+  F12 is the skin dev mode's inspector (§8): in every run it is the app's, and like Esc
+  it cancels a press under way; outside dev mode nothing else comes of it.
 - **Skin shortcuts** (`key=`) work on the page only, never under a dialog, in a text field
   or on repeat. Esc, Enter, Space, Tab and the palette key are never a skin's. The first in
   document order wins.
@@ -659,8 +661,8 @@ As built (PR E4):
   build leaves off with all the fictional data. Without `--fixture` the window runs on
   `CoreBackend` (PR F1).
 - A reload takes the new skin only if it loads with no errors and its routes bind.
-  Otherwise the last good skin stays, and the errors are listed over it. The inspector
-  and app-widget content are not built yet.
+  Otherwise the last good skin stays, and the errors are listed over it. App-widget
+  content is not built yet.
 - In fixture mode the queue a skin shows is the fixture's: the model's job table is empty
   without an engine.
 - A skin's own asset files are not decoded yet.
@@ -679,6 +681,28 @@ As built (input and AccessKit wiring):
   leaves the last screen in sight under it.
 - Touch and the account menu are not wired in; the clipboard is read only by a paste (in a
   dialog or the palette's field) and written only by copy or cut in a text field.
+
+As built: the inspector (G5, #548):
+
+- **Gating.** F12 opens and closes it, only with `--dev`; it starts closed. Without
+  `--dev` it opens nothing and no bind records anything. In every run `Interaction` takes
+  the key as the app's and cancels a press under way, as it does for Esc and the palette
+  key; one press toggles once, whatever it repeats. A skin's `key=` names single
+  characters only, so no skin can take F12.
+- **Placement.** An app-drawn layer docked on the right, 360 px wide and never more than
+  half the window. The page is laid out in the width that is left, so the panel covers no
+  control and S22 needs no rule of its own. Fixed colours; a skin can't style, hide or
+  open it.
+- **Content.** The selected node's key and box; what a traced bind recorded of it
+  (design 27 §9.1): file and line, what is around it, `style=`, each expression with its
+  current value, the names in scope, the action with its arguments, and the children left
+  out; then its parents and children as buttons that select them.
+- **Safety.** It reads the page's bind only: no dialog, no typed text, no app widget's
+  content. It is below the popup, the error panel and the safety screens, and takes no
+  input while any of them is up. Its presses are numbered by `Interaction` like any
+  other, and run no action. What it shows is never written to stdout, the log or a file;
+  stdout says the selected node's key and file and line. With real data, the screen can
+  show what the skin can: the account's name and paths, say, in a screenshot.
 
 ## 9. Where things are stored
 

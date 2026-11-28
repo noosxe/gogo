@@ -13,6 +13,8 @@
 //! Every screen of the safety flow is the app's own modal dialog ([`crate::dialog`]),
 //! wired in [`answer`]. None is cancelled except by the user.
 //!
+//! With `--dev`, F12 opens the inspector ([`crate::inspector`]) beside the page.
+//!
 //! A skin's menus and selects open the app's popup ([`crate::popup`]) over the page, and
 //! Ctrl K the app's command palette ([`crate::palette`]). A safety screen or a panel
 //! always wins: it closes the popup, which does not come back.
@@ -20,6 +22,8 @@
 mod answer;
 #[cfg(test)]
 mod commands;
+#[cfg(test)]
+mod dev;
 #[cfg(test)]
 mod idle;
 #[cfg(test)]
@@ -48,6 +52,7 @@ use gogo_ui_text::EditOp;
 
 use crate::data::{Data, Images};
 use crate::dialog::{self, Dialog};
+use crate::inspector::{self, Inspector};
 use crate::page::{DrawError, Page, Screen};
 use crate::palette;
 use crate::panel::Panel;
@@ -99,6 +104,8 @@ enum Over {
 struct View {
     /// The last screen that bound.
     screen: Option<Rc<Screen>>,
+    /// The inspector, beside it.
+    inspector: Option<Rc<inspector::Drawn>>,
     /// A menu, a select's list or the palette, over it.
     popup: Option<Rc<popup::Drawn>>,
     /// What is wrong, over them.
@@ -117,6 +124,7 @@ impl View {
     fn layers(&self) -> Vec<Layer<'_>> {
         let screen = self.screen.iter().map(|s| s.layer());
         screen
+            .chain(self.inspector.iter().map(|i| i.layer()))
             .chain(self.popup.iter().map(|p| p.layer()))
             .chain(self.panel.iter().map(|p| p.layer()))
             .chain(self.dialog.iter().map(|d| d.layer()))
@@ -167,6 +175,8 @@ pub(crate) struct App {
     break_panels: bool,
     /// The skin folder being watched.
     dev: Option<PathBuf>,
+    /// The inspector, while it is open. Only a dev run has one.
+    inspector: Option<Inspector>,
     /// Why the skin on screen is not the one in the folder, one line each.
     problems: Vec<String>,
     /// A reload may have changed what an image key names.
@@ -206,6 +216,7 @@ impl App {
             #[cfg(test)]
             break_panels: false,
             dev: dev.map(Path::to_owned),
+            inspector: None,
             problems: Vec::new(),
             images_changed: false,
         };
@@ -242,12 +253,22 @@ impl App {
         }
     }
 
+    /// Whether the inspector is on the display, over a traced page.
+    #[cfg(test)]
+    pub(crate) fn inspecting(&self) -> bool {
+        let screen = self.shown.screen.as_ref();
+        self.shown.inspector.is_some() && screen.is_some_and(|s| s.provenance.is_some())
+    }
+
     /// The text of everything on the display, for the test that looks for secrets.
     #[cfg(test)]
     pub(crate) fn dump(&self) -> String {
         let mut out = format!("{:?}", self.problems);
         if let Some(screen) = &self.shown.screen {
             out += &format!("{:?}", screen.tree);
+        }
+        if let Some(inspector) = &self.shown.inspector {
+            out += &format!("{:?}", inspector.tree());
         }
         if let Some(popup) = &self.shown.popup {
             out += &format!("{:?}", popup.tree());
@@ -286,6 +307,9 @@ impl App {
         if self.shown.panel.is_some() && !matches!(intent, Intent::Dismiss { .. }) {
             return;
         }
+        if self.act_on_inspector(&intent) {
+            return;
+        }
         let route = self.data.location().route.clone();
         let open = self.popups.top().map(|(id, _)| id);
         match (open, self.shown.popup.clone()) {
@@ -303,6 +327,57 @@ impl App {
         if self.data.location().route != route {
             say(format_args!("gui: route {}", self.data.location().route));
         }
+    }
+
+    /// What an intent asks of the inspector: whether it was for it. Nothing here runs an
+    /// action. Under a popup the popup takes it all.
+    fn act_on_inspector(&mut self, intent: &Intent) -> bool {
+        if self.dev.is_none() || self.shown.popup.is_some() || self.popups.top().is_some() {
+            return false;
+        }
+        match intent {
+            Intent::Inspect => {
+                self.inspector = match self.inspector {
+                    Some(_) => None,
+                    None => Some(Inspector::new()),
+                };
+                let now = if self.inspector.is_some() {
+                    "opened"
+                } else {
+                    "closed"
+                };
+                say(format_args!("gui: inspector {now}"));
+                true
+            }
+            Intent::App { target, .. } => {
+                let (Some(inspector), Some(drawn)) = (&mut self.inspector, &self.shown.inspector)
+                else {
+                    return false;
+                };
+                if target.layer != drawn.id {
+                    return false;
+                }
+                if inspector.press(drawn, &target.key).is_some() {
+                    self.say_selected();
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Names the selected node: its key and where the skin has it, never what it shows.
+    fn say_selected(&self) {
+        let Some(inspector) = &self.inspector else {
+            return;
+        };
+        let key = inspector.selected();
+        let location = self.shown.screen.as_ref().and_then(|screen| {
+            let node = screen.tree.by_key(key)?;
+            Some(&screen.provenance.as_ref()?.get(node)?.location)
+        });
+        let location = location.map_or("-", String::as_str);
+        say(format_args!("gui: inspector selected {key} {location}"));
     }
 
     /// What an intent asks of the page.
@@ -518,9 +593,17 @@ impl App {
     fn draw(&mut self, size: (f32, f32)) {
         let mut loading = false;
         let scrolled = Some(&self.interaction);
+        // The inspector takes its width from the page rather than covering it.
+        self.page.traced = self.inspector.is_some();
+        let beside = if self.page.traced {
+            inspector::width(size.0)
+        } else {
+            0.0
+        };
+        let page = (size.0 - beside, size.1);
         let failure = match self
             .page
-            .screen(&mut self.data, SHELL_ROUTE, size, scrolled)
+            .screen(&mut self.data, SHELL_ROUTE, page, scrolled)
         {
             Ok(screen) => {
                 self.pending.screen = Some(Rc::new(screen));
@@ -576,6 +659,7 @@ impl App {
             self.popups.clear();
         }
         self.pending.size = size;
+        self.pending.inspector = self.build_inspector(size);
         self.pending.popup = self.build_popup(size);
         self.list = match &self.pending.screen {
             Some(screen) => {
@@ -595,6 +679,21 @@ impl App {
             }
             None => DisplayList::blank(f64::from(size.0), f64::from(size.1)),
         };
+        if let Some(inspector) = &self.pending.inspector {
+            // The page was laid out narrower than the frame.
+            (self.list.width, self.list.height) = (f64::from(size.0), f64::from(size.1));
+            let focus = self
+                .interaction
+                .focus_visible()
+                .filter(|t| {
+                    t.layer == inspector.id
+                        && self.pending.panel.is_none()
+                        && self.pending.popup.is_none()
+                        && self.data.modal_ticket().is_none()
+                })
+                .map(|t| t.key.as_str());
+            inspector.draw(&mut self.list, focus);
+        }
         if let Some(popup) = &self.pending.popup {
             // A text field shows where typing goes however it got focus.
             let focus = self
@@ -610,6 +709,19 @@ impl App {
         }
         self.draw_dialog(size);
         self.unpresented = true;
+    }
+
+    /// The inspector beside the screen about to be shown, while it is open.
+    fn build_inspector(&mut self, size: (f32, f32)) -> Option<Rc<inspector::Drawn>> {
+        let inspector = self.inspector.as_mut()?;
+        let screen = self.pending.screen.as_deref();
+        match inspector.draw(&mut self.page.fonts, size, screen) {
+            Ok(drawn) => Some(Rc::new(drawn)),
+            Err(e) => {
+                tracing::error!("the inspector could not be drawn: {e}");
+                None
+            }
+        }
     }
 
     /// The open popup over the screen about to be shown. One that can't be drawn over

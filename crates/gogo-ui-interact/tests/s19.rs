@@ -105,6 +105,23 @@ fn s19_skin_shortcuts_act_once_on_the_page() {
     assert!(d.down(&frame, Key::Char('p'), CTRL).is_empty());
 }
 
+#[test]
+fn s19_f12_is_the_inspectors_once_a_press() {
+    // A skin that asks for it gets nothing.
+    let s = Screen::new(vec![("f12", keyed("Mine", 0, "F12"))]);
+    let layers = [s.layer(PAGE, LayerKind::Page)];
+    let frame = Frame { layers: &layers };
+    let mut d = Driver::new();
+    assert_eq!(names(&d.down(&frame, Key::F12, NONE)), ["Inspect"]);
+    // Held, it toggles once: repeats and a second down without a release are nothing.
+    assert!(d.repeat(&frame, Key::F12).is_empty());
+    assert!(d.down(&frame, Key::F12, NONE).is_empty());
+    d.up(&frame, Key::F12);
+    assert!(d.down(&frame, Key::F12, CTRL).is_empty());
+    d.up(&frame, Key::F12);
+    assert_eq!(names(&d.down(&frame, Key::F12, NONE)), ["Inspect"]);
+}
+
 // --- holds ---
 
 fn hold_frame<'a>(s: &'a Screen) -> [gogo_ui_interact::Layer<'a>; 1] {

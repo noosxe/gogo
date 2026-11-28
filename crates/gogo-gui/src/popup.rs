@@ -216,6 +216,11 @@ impl Builder {
         self.tree.root()
     }
 
+    /// The tree and what each of its controls does, for a layer that is not a popup.
+    pub(crate) fn into_parts(self) -> (Tree, Vec<u64>) {
+        (self.tree, self.identity)
+    }
+
     /// Lays it out.
     pub(crate) fn finish(
         self,

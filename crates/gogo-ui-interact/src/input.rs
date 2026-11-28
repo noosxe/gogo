@@ -48,6 +48,8 @@ pub enum Key {
     Home,
     /// End.
     End,
+    /// F12: the app's own, for the skin dev mode.
+    F12,
     /// A key that types a character: what it types without Ctrl, Alt or Meta.
     Char(char),
     /// Any other key.

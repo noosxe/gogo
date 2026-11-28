@@ -69,5 +69,7 @@ mod tests {
             assert!(!matches(spec, key, NONE), "{spec}");
         }
         assert!(!matches(" ", Key::Space, NONE));
+        // The inspector's key: a skin's `key=` can't name it.
+        assert!(!matches("F12", Key::F12, NONE));
     }
 }
