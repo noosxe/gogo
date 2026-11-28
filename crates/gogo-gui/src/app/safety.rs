@@ -498,7 +498,7 @@ fn the_title_can_be_pasted_or_set_by_assistive_technology() {
 }
 
 /// A destructive confirmation that takes a hold, presented at 1600.
-fn hold_screen() -> App {
+pub(super) fn hold_screen() -> App {
     let mut app = app();
     script(&mut app, "account.sign_out", destructive("Sign out"));
     start(
@@ -512,7 +512,7 @@ fn hold_screen() -> App {
     app
 }
 
-const HOLD_LABEL: &str = "Hold to Sign out";
+pub(super) const HOLD_LABEL: &str = "Hold to Sign out";
 
 /// Frames from `from` to `to`, as the app asks for them while a hold is down.
 fn frames(app: &mut App, from: u64, to: u64) {

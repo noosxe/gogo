@@ -1,7 +1,7 @@
 //! The app model as a skin reads it (design 25 §3, §5): over [`CoreBackend`], or, in a
 //! build with the `fixture` feature, over fictional data.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -80,6 +80,11 @@ pub(crate) struct Data {
     #[cfg(feature = "fixture")]
     fixture: Option<FixtureData>,
     watched: HashSet<SourceKey>,
+    /// Counts the pumps that changed something: a frame built before the latest one is
+    /// out of date.
+    revision: u64,
+    /// The revision the last [`scope`](Self::scope) read at.
+    read: Cell<u64>,
     art: Option<ArtStore>,
     sign_in: Option<SignIn>,
 }
@@ -98,12 +103,15 @@ impl Data {
             #[cfg(feature = "fixture")]
             fixture: None,
             watched: HashSet::new(),
+            revision: 0,
+            read: Cell::default(),
             art,
         }
     }
 
     /// What one bind reads from.
     pub(crate) fn scope(&self) -> ModelScope<'_> {
+        self.read.set(self.revision);
         ModelScope {
             data: self,
             asked: RefCell::default(),
@@ -121,16 +129,36 @@ impl Data {
             }
         }
         if new {
-            self.model.pump();
+            self.take();
         }
         new
     }
 
-    /// Takes what arrived. Returns whether anything changed.
-    pub(crate) fn pump(&mut self) -> bool {
-        let sources = !self.model.pump().is_empty();
-        let pictures = self.art.as_ref().is_some_and(ArtStore::take_arrived);
-        sources || pictures
+    /// Takes what arrived. Whether it changed anything shows in
+    /// [`revision`](Self::revision).
+    pub(crate) fn pump(&mut self) {
+        self.take();
+        if self.art.as_ref().is_some_and(ArtStore::take_arrived) {
+            self.revision += 1;
+        }
+    }
+
+    /// Every pump of the model goes through here, so that no change is taken without
+    /// being counted, whoever asked for it.
+    fn take(&mut self) {
+        if !self.model.pump().is_empty() {
+            self.revision += 1;
+        }
+    }
+
+    /// Moves on whenever a source's value or a picture changed.
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// The revision as of the last [`scope`](Self::scope): what a bind has seen.
+    pub(crate) fn read_at(&self) -> u64 {
+        self.read.get()
     }
 
     /// Whether a source with no value is still on its way. Over fictional data every
@@ -153,7 +181,7 @@ impl Data {
         let outcome = self.model.invoke(invocation, event);
         // What the model answers itself (the route on screen, the jobs) is only current
         // after a pump, and the next bind must not wait for the wake.
-        self.model.pump();
+        self.take();
         outcome
     }
 
@@ -181,7 +209,7 @@ impl Data {
 
     fn pumped<T>(&mut self, did: impl FnOnce(&mut Model<Engine>) -> T) -> T {
         let outcome = did(&mut self.model);
-        self.model.pump();
+        self.take();
         outcome
     }
 
@@ -219,7 +247,7 @@ impl Data {
 
     pub(crate) fn cancel(&mut self, ticket: Ticket) {
         self.model.cancel(ticket);
-        self.model.pump();
+        self.take();
     }
 
     pub(crate) fn signing_in(&self) -> bool {
@@ -449,6 +477,8 @@ mod fictional {
                     queue: Fixture::new(),
                 }),
                 watched: HashSet::new(),
+                revision: 0,
+                read: Cell::default(),
                 art: None,
                 sign_in: None,
             })
