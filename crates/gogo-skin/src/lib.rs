@@ -16,6 +16,8 @@
 //!   its `&'static` contract spec, every field path is checked against the contract's
 //!   shapes, and the types an element needs are checked (design 27 §7).
 //!
+//! - [`import`]: installing a folder or a zip into the skin folder (design 27 §10).
+//!
 //! - [`bind`] (PR B4b): [`SkinPackage::bind`] evaluates a route against the app's data and
 //!   the skin's `ui` state into the IR tree and the tables behind its ids, with per-route
 //!   fallback to the default skin (design 26 §8).
@@ -28,6 +30,7 @@ pub mod diag;
 pub mod expr;
 pub mod fonts;
 pub mod icons;
+pub mod import;
 pub mod limits;
 pub mod manifest;
 pub mod package;
@@ -55,6 +58,7 @@ pub use diag::{Code, Finding, Level, Report};
 pub use gogo_contract::Value;
 /// The IR the binder builds (design 24 §2), for code that only depends on this crate.
 pub use gogo_ui_ir as ir;
+pub use import::{Candidate, ImportError, Installed, SkinFolder};
 pub use manifest::{Manifest, Mode, SkinVersion, UiDefault, UiType, UiVar};
 pub use package::{Component, Route, SkinPackage};
 pub use source::{SourceFile, Sources, Span};

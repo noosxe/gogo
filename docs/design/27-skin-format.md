@@ -697,7 +697,15 @@ default skin is used (S12).
   `<style>` text, so a name can't be spelled in a way the check does not see.
 - **Zip import.** The loader sees only the files it is given and their sizes. A caller of
   `SkinPackage::from_files` that unpacks a zip must bound the decompression itself (total
-  size, entry count and ratio) before it hands the bytes over.
+  size, entry count and ratio) before it hands the bytes over. The importer (§10) does,
+  with these limits besides the ones above:
+
+| An archive | Limit |
+|---|---|
+| Its own size | 32 MiB |
+| Entries, folders counted | 2 048 |
+| Folders a file sits in | 8 |
+| Growth of an entry larger than 64 KiB when unpacked | 200 times its packed size |
 
 The asset sizes are the ones the loader checks. A PNG up to 4 MiB holds a full-screen
 background, an SVG up to 512 KiB a detailed illustration, and a font up to 8 MiB a full CJK
@@ -849,9 +857,39 @@ with the skin's variants and part styles.
   Until it covers every route (#576), binding a route it has no file for returns a bind
   error, as there is no other skin to fall back to.
 - **Third-party skins** live in the skin folder (design 25 §9).
-- **Installing** means importing a folder or a zip:
-  - the app validates it;
-  - rejects path escapes, symlinks and oversized files;
-  - copies it into the skin folder.
+- **Installing** means importing a folder or a zip (`gogo_skin::import`):
+  - the app reads it into memory under the limits and validates it with the loader;
+  - it writes exactly those bytes into the skin folder, or nothing at all.
 - There is no online gallery and no auto-update.
+
+What an import takes and refuses:
+
+- **The skin's name** is the one `skin.kdl` gives. The source folder or file can be
+  called anything. `default`, `instrument` and `slab` are refused: they are the built-in
+  skins' names.
+- **A zip** holds the skin at its root, or inside one top folder, as most tools pack a
+  folder.
+- **Refused in a zip:** an entry whose path breaks §1's rules (nothing is normalised); a
+  symlink or other special file; an encrypted entry, or one neither stored nor deflated;
+  two entries with one name, or with names differing only in ASCII case; a name that is
+  both a file and a folder; an entry whose packed bytes run past the archive or are also
+  another entry's; and everything over a limit (§8). Unpacked sizes are counted as they
+  come out, never taken from the archive, and the entry count is checked before the
+  archive's index is read.
+- **Messages** show names from a source with control, invisible and text-reordering
+  characters replaced.
+- **A folder** is walked as `SkinPackage::load` walks it, and can't be one inside the
+  skin folder.
+- **System files.** `__MACOSX` and `.DS_Store` are passed over and not installed.
+  Anything else a skin can't hold (§1) refuses the import, a `README.md` or a `.git`
+  included.
+- **Errors refuse it,** route errors too. Warnings don't.
+- **A `dark` mode is required** while the app draws only dark (#639).
+- **Nothing partial.** The files are written to a staging folder (`.import`) under a lock,
+  loaded once more from there, and renamed into place. A refused or failed import leaves
+  the skin folder as it was. Files are written as new, without execute bits, and nothing
+  of a skin is run.
+- **Replacing** an installed name has to be asked for. The old skin is kept as
+  `.old-<name>` until the new one is in place, and an import cut off between the two is
+  put right by the next one.
 - **Dev mode** (design 25 §8) watches a folder and re-loads it on every save.
