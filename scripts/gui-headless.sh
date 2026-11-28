@@ -53,6 +53,14 @@
 #   5-selected, 6-closed, 7-open, 8-edited). Takes run's options; the points assume
 #   the default size.
 #
+# import [options] -- GOGO_GUI
+#   the skin import check: starts GOGO_GUI on fictional data with a scratch
+#   GOGO_HOME, imports a zip that tries to leave the skin folder (refused, nothing
+#   installed) and then a good one through the command palette, uses it, restarts
+#   (the choice is kept) and goes back to the default skin from the palette. A
+#   screenshot of each (1-start, 3-refused, 4-card, 5-installed, 6-used,
+#   7-restarted, 8-default). Takes run's options.
+#
 # self-test
 #   checks the sandbox, the screenshot and the teardown with a small Wayland
 #   client, so it needs no build.
@@ -63,8 +71,8 @@
 #
 # The sandbox has no network, no host sockets, no home folder and no host
 # graphics driver. Besides /nix it sees only the output folder and, read-only,
-# the repository's scripts/ and COMMAND itself (and for reload the built-in
-# skin): nothing else of the repository.
+# the repository's scripts/ and COMMAND itself (and, for reload, inspect and
+# import, the built-in skin): nothing else of the repository.
 # COMMAND must therefore be in the repository or /nix.
 set -euo pipefail
 
@@ -545,6 +553,98 @@ scenario_inspect() {
     grep -F "gui: inspector" "$OUT/app.log" >&2
 }
 
+# Whether two screenshots differ at all.
+differ() { # a b
+    [ "$(helper diff "$OUT/$1.png" "$OUT/$2.png")" != '{"changed_pct": 0.0}' ]
+}
+
+# Writes $OUT/good.zip, the built-in skin as `headless` with another accent, and
+# $OUT/bad.zip, the same with a file that would land outside the skin folder.
+make_skin_zips() {
+    python3 -I -c '
+import pathlib, sys, zipfile
+skin, out = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+files = {p.relative_to(skin).as_posix(): p.read_bytes() for p in skin.rglob("*") if p.is_file()}
+def edit(name, old, new):
+    assert old in files[name], (name, old)
+    files[name] = files[name].replace(old, new)
+edit("skin.kdl", b"skin \"default\"", b"skin \"headless\"")
+edit("tokens.kdl", b"accent \"#7aa2ff\"", b"accent \"#ff7a45\"")
+edit("tokens.kdl", b"bg0 \"#121314\"", b"bg0 \"#1c1210\"")
+for name, extra in (("good.zip", {}), ("bad.zip", {"../escaped.txt": b"x"})):
+    with zipfile.ZipFile(out / name, "w", zipfile.ZIP_DEFLATED) as z:
+        for path, data in sorted({**files, **extra}.items()):
+            z.writestr(path, data)
+' "$REPO/crates/gogo-skins/skins/default" "$OUT"
+}
+
+# "Import skin…" from the palette, with PATH typed into its dialog and OK pressed.
+# `n` counts the dialogs that have asked something so far, this one included.
+import_path() { # path n
+    ctrl_k
+    wtype -s 200 "import skin" -s 200
+    key Return
+    wait_log "gui: dialog prompt" "$2" || return 1
+    sleep 0.7                          # a press counts once the dialog has been up
+    wtype -M shift -k Tab -m shift     # to the field
+    wtype -s 200 "$1" -s 200
+    key Tab
+    key Tab # past Cancel to OK
+    key Return
+}
+
+scenario_import() {
+    export GOGO_HOME="$OUT/home/gogo"
+    make_skin_zips || return 1
+    start_pointer || return 1
+    start_keyboard
+    start_app "$@" --fixture
+    wait_log "gui: frame presented" || return 1
+    wait_shown 1-start || return 1
+
+    import_path "$OUT/bad.zip" 1 || return 1
+    wait_log "gui: skin import refused" || return 1
+    wait_log "gui: dialog error" || return 1
+    shot_changed 3-refused 1-start || return 1
+    check "the refused import installed something" test ! -e "$GOGO_HOME/skins" || return 1
+    check "the refused import wrote outside" test ! -e "$GOGO_HOME/escaped.txt" || return 1
+    sleep 0.7
+    key Escape
+
+    import_path "$OUT/good.zip" 2 || return 1
+    wait_log "gui: dialog prompt" 3 || return 1 # what is in it
+    shot_changed 4-card 3-refused || return 1
+    check "installed before it was confirmed" test ! -e "$GOGO_HOME/skins/headless" || return 1
+    sleep 0.7
+    key Tab # past Cancel to Install
+    key Return
+    wait_log "gui: skin imported headless" || return 1
+    wait_log "gui: dialog prompt" 4 || return 1 # use it now?
+    shot_changed 5-installed 4-card || return 1
+    check "the skin is not in the skin folder" test -f "$GOGO_HOME/skins/headless/skin.kdl" || return 1
+    sleep 0.7
+    key Tab
+    key Tab # past Cancel and No to Yes
+    key Return
+    wait_log "gui: skin chosen headless" || return 1
+    shot_changed 6-used 1-start || return 1
+    stop_app
+
+    start_app "$@" --fixture
+    wait_log "gui: skin chosen headless" || return 1
+    wait_log "gui: frame presented" || return 1
+    wait_shown 7-restarted || return 1
+    check "the choice was not kept" differ 1-start 7-restarted || return 1
+
+    ctrl_k
+    wtype -s 200 "default skin" -s 200
+    key Return
+    wait_log "gui: skin chosen default" || return 1
+    shot_changed 8-default 7-restarted || return 1
+    stop_app
+    grep -F "gui: skin" "$OUT/app.log" >&2
+}
+
 inside() {
     OUT="$1" SIZE="$2" RENDERER="$3" READY="$4" SCENARIO="$5"
     shift 5
@@ -656,7 +756,7 @@ cmd_run() { # scenario [options] -- command…
     "$REPO"/*) sandbox+=(--ro-bind "$command" "$command") ;;
     esac
     # These checks copy the built-in skin into their output folder.
-    if [ "$scenario" = reload ] || [ "$scenario" = inspect ]; then
+    if [ "$scenario" = reload ] || [ "$scenario" = inspect ] || [ "$scenario" = import ]; then
         local builtin="$REPO/crates/gogo-skins/skins/default"
         sandbox+=(--ro-bind "$builtin" "$builtin")
     fi
@@ -793,7 +893,7 @@ target" ] || st_fail "more of the repository than scripts/ is visible"
 cmd="$1"
 shift
 case "$cmd" in
-run | reload | input | idle | inspect) cmd_run "$cmd" "$@" ;;
+run | reload | input | idle | inspect | import) cmd_run "$cmd" "$@" ;;
 self-test) cmd_self_test "$@" ;;
 __inside) inside "$@" ;;
 -h | --help | help) usage ;;

@@ -107,6 +107,8 @@ pub(crate) enum Choice {
     },
     /// One of the app's own, from the palette.
     Command(Invocation),
+    /// The app's own: import a skin. No action of the contract does it.
+    ImportSkin,
 }
 
 /// One entry of the list.
@@ -173,6 +175,7 @@ fn identity(entry: &Entry) -> u64 {
             format!("{} {:?} {value:?}", call.spec.name, call.args)
         }
         Choice::Command(invocation) => format!("{invocation:?}"),
+        Choice::ImportSkin => "import a skin".to_owned(),
     });
     hash((&entry.name, does))
 }

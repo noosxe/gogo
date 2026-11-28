@@ -34,6 +34,13 @@ pub enum PromptSpec {
         /// The question.
         label: String,
     },
+    /// Something the app offers to do: cancel, or the one control called `yes`.
+    Offer {
+        /// What would be done.
+        label: String,
+        /// What the control that does it says.
+        yes: &'static str,
+    },
     /// A running job's plan has changed since it was confirmed: shown on the plan card,
     /// whose confirm answers [`PromptAnswer::Yes`]. Only a job asks this, and only for
     /// a plan that removes nothing.
@@ -113,7 +120,7 @@ impl PromptSpec {
             (Self::Secret { .. }, A::Secret(_)) => true,
             (Self::Choice { options, .. }, A::Choice(i)) => *i < options.len(),
             (Self::Confirm { .. }, A::Yes | A::No) => true,
-            (Self::Plan(_), A::Yes) => true,
+            (Self::Plan(_) | Self::Offer { .. }, A::Yes) => true,
             (Self::Conflicts { files }, A::Sides(sides)) => sides.len() == files.len(),
             _ => false,
         }

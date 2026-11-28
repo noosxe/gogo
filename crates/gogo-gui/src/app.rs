@@ -28,6 +28,9 @@ mod commands;
 mod dev;
 #[cfg(test)]
 mod idle;
+mod import;
+#[cfg(test)]
+mod importing;
 #[cfg(test)]
 mod menus;
 #[cfg(test)]
@@ -189,6 +192,8 @@ pub(crate) struct App {
     skins: Option<Skins>,
     /// The name of the skin drawn, outside dev mode.
     on_screen: String,
+    /// Where a skin import is, and the question it waits on.
+    importing: Option<(Ticket, import::Step)>,
 }
 
 impl App {
@@ -229,6 +234,7 @@ impl App {
             images_changed: false,
             skins: None,
             on_screen: DEFAULT.to_owned(),
+            importing: None,
         };
         if app.dev.is_some() {
             app.reload("loaded");
@@ -324,6 +330,7 @@ impl App {
             value: self.on_screen.clone(),
             choices,
             stored,
+            importable: self.skins.is_some(),
         });
     }
 
@@ -663,6 +670,7 @@ impl App {
                 self.invoke_call(&call, &input, event);
             }
             popup::Choice::Command(invocation) => self.invoke(&invocation, event),
+            popup::Choice::ImportSkin => self.start_import(),
         }
     }
 
@@ -692,6 +700,7 @@ impl App {
             match effect {
                 Effect::SetUi { var, value } => self.set_ui(&var, value),
                 Effect::SetSkin(name) => self.set_skin(&name),
+                Effect::Answered { ticket, answer } => self.import_answered(ticket, answer),
                 // Named only: an effect can carry the user's data.
                 // The scope is not used: the palette lists everything.
                 Effect::OpenPalette { .. } => {

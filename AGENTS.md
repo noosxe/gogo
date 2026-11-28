@@ -53,7 +53,8 @@ tools, or binaries from the host system — no exceptions.**
   .#lavapipe -c scripts/gui-headless.sh run -- target/debug/gogo-gui --fixture`, or
   `reload -- target/debug/gogo-gui` for hot reload, `input -- target/debug/gogo-gui` for
   pointer and keys, `idle -- target/debug/gogo-gui` for no frames while nothing changes,
-  `inspect -- target/debug/gogo-gui` for the skin dev mode's inspector),
+  `inspect -- target/debug/gogo-gui` for the skin dev mode's inspector,
+  `import -- target/debug/gogo-gui` for skin import),
   or `scripts/vm-test.sh` with the GUI's
   `.app` (macOS).
   Real GPU, HiDPI, IME, clipboard and screen-reader checks are a host pass by @noosxe;

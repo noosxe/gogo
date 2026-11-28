@@ -753,6 +753,27 @@ and `$GOGO_HOME/gui-cache/` (cache), so state and cache stay apart.
   its folder and takes no part in any of this.
 - **Fictional data** (`--fixture`, `--render-png`) uses the skin folder and the choice only
   when `GOGO_HOME` is set.
+
+### Importing a skin
+
+Design 27 §10 says what a source may hold. In the window:
+
+1. The command palette's "Import skin…". The app builds the entry; no contract action
+   imports, so a skin can't (design 26 §4.10).
+2. A dialog asks for the folder or `.zip` file, typed or pasted. Surrounding spaces and
+   quotes are dropped and `~/` is expanded.
+3. A refused source shows the app's error screen with the first findings.
+4. Else a card shows the skin's name, title, version and warnings, with Install, or Replace
+   and the installed version. Its default is Cancel.
+5. Once installed, "Use it now?". A replaced skin that is on screen is drawn again at once.
+
+These questions are the app's own (`Model::ask`), under the safety screens' rules (§4): one
+screen at a time, seen before a press counts, Cancel and Esc free. The source is read and
+installed on the UI thread; it is at most 32 MiB.
+
+Without a window, `gogo-gui --import-skin <path> [--replace]` installs (exit 0 installed,
+1 refused with the reasons on stderr, 2 usage) and `gogo-gui --list-skins` lists name,
+version and title. Removing a skin is deleting its folder.
 - Every file is written atomically (tmp, fsync, rename) like `state.json`.
 - An unreadable cache is ignored.
 - Unreadable UI state falls back to the skin's declared defaults.
