@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -389,6 +389,63 @@ async fn refresh_reads_again() {
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_picture_that_arrives_after_failures_are_forgotten_still_gets_a_frame() {
+    let server = gog().await;
+    let rig = rig(&server, Arc::new(SignedIn(true)));
+    let origin = server.uri();
+    let wakes = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&wakes);
+    let art = ArtStore::new(
+        Arc::clone(&rig.engine),
+        tokio::runtime::Handle::current(),
+        Arc::new(move |url: &reqwest::Url| url.as_str().starts_with(&origin)),
+        Some(rig.dir.path().join("covers")),
+        move || {
+            count.fetch_add(1, Ordering::SeqCst);
+        },
+    )
+    .expect("a store");
+    let woken = || wakes.load(Ordering::SeqCst);
+
+    // The background redirects elsewhere, so it fails. Until it has, there is nothing
+    // to forget.
+    let background = ImageKey::Handle("art:10:background".into());
+    assert!(art.get(&background).is_none());
+    let started = Instant::now();
+    while woken() == 0 {
+        assert!(started.elapsed() < Duration::from_secs(20), "no wake");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        art.forget_failures();
+    }
+    assert_eq!(woken(), 1, "forgetting wakes the window");
+    art.forget_failures();
+    assert_eq!(woken(), 1, "nothing left to forget");
+
+    // A frame that input asked for requests pictures before the wake is taken. What
+    // arrives then rides on that wake.
+    let cover = ImageKey::Handle("art:10:cover".into());
+    assert!(art.get(&cover).is_none(), "not yet");
+    let started = Instant::now();
+    while art.get(&cover).is_none() {
+        assert!(started.elapsed() < Duration::from_secs(20), "no cover");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(woken(), 1, "one wake is pending");
+    assert!(art.take_arrived(), "and its frame draws the picture");
+
+    // Taken, the next arrival wakes again.
+    let other = ImageKey::Handle("art:10:background".into());
+    assert!(art.get(&other).is_none());
+    let started = Instant::now();
+    while woken() == 1 {
+        assert!(started.elapsed() < Duration::from_secs(20), "no wake");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        art.forget_failures();
+    }
+    assert!(art.take_arrived());
 }
 
 #[tokio::test(flavor = "multi_thread")]

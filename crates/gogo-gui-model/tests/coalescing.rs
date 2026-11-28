@@ -92,3 +92,22 @@ fn a_closed_slot_takes_writes_into_nothing() {
     assert_eq!(store.get(&key), None);
     assert!(!store.is_open(&key));
 }
+
+#[test]
+fn a_value_written_again_is_no_change() {
+    let (signal, wakes) = counting_signal();
+    let mut store = SourceStore::new(Arc::clone(&signal));
+    let key = SourceKey::new("apps", &[]).unwrap();
+    let slot = store.slot(&key);
+
+    slot.set(Value::Num(1.0));
+    signal.take();
+    assert_eq!(store.drain(), std::slice::from_ref(&key), "the first value");
+    slot.set(Value::Num(1.0));
+    assert_eq!(wakes.load(Ordering::SeqCst), 2, "it still wakes");
+    signal.take();
+    assert!(store.drain().is_empty());
+    assert_eq!(store.get(&key), Some(&Value::Num(1.0)));
+    slot.set(Value::Num(2.0));
+    assert_eq!(store.drain(), std::slice::from_ref(&key));
+}

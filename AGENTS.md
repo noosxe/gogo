@@ -52,7 +52,8 @@ tools, or binaries from the host system — no exceptions.**
   window only in the headless compositor of `scripts/gui-headless.sh` (Linux; `nix develop
   .#lavapipe -c scripts/gui-headless.sh run -- target/debug/gogo-gui --fixture`, or
   `reload -- target/debug/gogo-gui` for hot reload, `input -- target/debug/gogo-gui` for
-  pointer and keys), or `scripts/vm-test.sh` with the GUI's
+  pointer and keys, `idle -- target/debug/gogo-gui` for no frames while nothing changes),
+  or `scripts/vm-test.sh` with the GUI's
   `.app` (macOS).
   Real GPU, HiDPI, IME, clipboard and screen-reader checks are a host pass by @noosxe;
   agents put the steps in the PR. For a host-pass window on fictional data, the steps use

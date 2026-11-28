@@ -105,6 +105,8 @@ seconds behind a 10 Hz progress feed because every update queued a frame (design
   the false → true edge calls `EventLoopProxy::send_event(Wake)`. The main thread clears the
   flag, reads every slot whose generation moved, re-binds the affected routes and draws
   once.
+- **Only a changed value counts.** A slot written with the value it already had wakes the
+  main thread, which then draws nothing (design 28 §6).
 - **Frame pacing is the shell's.** Changes that only touch progress are drawn at most
   10 times a second per source (design 26 §3.4). Input-driven changes are drawn at once.
 - **Download progress** comes from one adapter task per job. The two download lanes

@@ -273,8 +273,18 @@ impl ArtStore {
         self.shared.arrived.swap(false, Ordering::AcqRel)
     }
 
+    /// Lets the pictures that could not be had be asked for again. Only a frame asks, so
+    /// this counts as an arrival.
     pub(crate) fn forget_failures(&self) {
-        lock(&self.shared.inner).failed.clear();
+        let forgot = {
+            let mut inner = lock(&self.shared.inner);
+            let any = !inner.failed.is_empty();
+            inner.failed.clear();
+            any
+        };
+        if forgot {
+            self.shared.arrive();
+        }
     }
 
     fn request(&self, key: Key) {
@@ -296,9 +306,7 @@ impl ArtStore {
                 Ok(image) => {
                     inner.insert(key, image);
                     drop(inner);
-                    if !shared.arrived.swap(true, Ordering::AcqRel) {
-                        (shared.wake)();
-                    }
+                    shared.arrive();
                 }
                 Err(e) => {
                     inner.failed.insert(key);
@@ -329,6 +337,14 @@ impl ImageStore for ArtStore {
 }
 
 impl Shared {
+    /// There is something for a frame to draw. The only place `arrived` is set: while
+    /// it is, a wake is on its way, so whoever sets it first sends one.
+    fn arrive(&self) {
+        if !self.arrived.swap(true, Ordering::AcqRel) {
+            (self.wake)();
+        }
+    }
+
     async fn load(&self, key: Key) -> Result<Image, ArtError> {
         let _slot = self.gate.acquire().await.map_err(|_| ArtError::Fetch)?;
         let (id, kind) = key;
