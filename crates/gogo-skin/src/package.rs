@@ -20,8 +20,8 @@ use crate::ast::{self, Node};
 use crate::diag::{Code, Collector, Finding, LoadScope, Report};
 use crate::elements::{Place, Sig, Walk, World};
 use crate::limits::{
-    MAX_DEPTH, MAX_FILES, MAX_KDL_FILE_BYTES, MAX_LICENCE_BYTES, MAX_NODES, MAX_PATH_BYTES,
-    MAX_SKIN_BYTES,
+    MAX_DEPTH, MAX_DIR_DEPTH, MAX_FILES, MAX_KDL_FILE_BYTES, MAX_LICENCE_BYTES, MAX_NODES,
+    MAX_PATH_BYTES, MAX_SKIN_BYTES,
 };
 use crate::manifest::{self, Manifest, Mode};
 use crate::names::{is_ident, is_style_name, suggest};
@@ -290,6 +290,57 @@ fn classify(path: &str) -> Result<Slot, String> {
     }
 }
 
+/// Whether `name` is a folder the layout has at the root of a skin.
+pub(crate) fn is_layout_dir(name: &str) -> bool {
+    matches!(name, "components" | "routes" | "assets")
+}
+
+/// How large the file at `path` may be, or why a skin can't hold it at all.
+pub(crate) fn file_limit(path: &str) -> Result<usize, String> {
+    classify(path).map(|slot| slot.max_bytes())
+}
+
+/// What an operating system adds to folders and archives: never part of a skin, and passed
+/// over by an import (design 27 §10).
+pub(crate) fn is_junk(name: &str) -> bool {
+    matches!(name, "__MACOSX" | ".DS_Store")
+}
+
+/// The files of the skin folder `dir` as [`SkinPackage::load`] admits them, for an import,
+/// which also passes over [`is_junk`]. `Err` when any file or folder is refused.
+pub(crate) fn read_folder(dir: &Path) -> Result<Vec<(String, Vec<u8>)>, Report> {
+    let mut intake = Intake {
+        skip_junk: true,
+        ..Intake::default()
+    };
+    read_dir(&mut intake, dir, "", 0);
+    if intake.col.report.error_total() > 0 {
+        return Err(intake.col.report);
+    }
+    Ok(intake
+        .files
+        .into_iter()
+        .map(|(path, _, data)| (path, data))
+        .collect())
+}
+
+/// The name `skin.kdl` gives, unchecked: what to load the package as when no folder names
+/// it. `None` when there is none to find; loading then says what is wrong.
+pub(crate) fn declared_name(skin_kdl: &[u8]) -> Option<String> {
+    if skin_kdl.len() > MAX_KDL_FILE_BYTES {
+        return None;
+    }
+    let text = std::str::from_utf8(skin_kdl).ok()?;
+    let mut col = Collector::default();
+    let file = col.sources.add("skin.kdl", text);
+    let nodes = crate::raw::parse_file(&mut col, file, &mut Counter::default())?;
+    let skin = nodes.iter().find(|n| n.name == "skin")?;
+    match &skin.args.first()?.lit {
+        Lit::Str(name) => Some(name.clone()),
+        _ => None,
+    }
+}
+
 // ---- intake ----
 
 #[derive(Default)]
@@ -301,6 +352,8 @@ struct Intake {
     stopped: bool,
     /// Paths refused or unreadable, already reported: not reported again as missing.
     refused: HashSet<String>,
+    /// Pass over what an operating system leaves in folders ([`is_junk`]): an import does.
+    skip_junk: bool,
 }
 
 impl Intake {
@@ -438,6 +491,9 @@ fn read_dir(intake: &mut Intake, root: &Path, rel: &str, depth: usize) {
         } else {
             format!("{rel}/{name}")
         };
+        if intake.skip_junk && is_junk(&name) {
+            continue;
+        }
         let full = dir.join(&os);
         let Ok(meta) = std::fs::symlink_metadata(&full) else {
             intake
@@ -456,8 +512,8 @@ fn read_dir(intake: &mut Intake, root: &Path, rel: &str, depth: usize) {
                 )
                 .help("copy the file into the skin instead of linking it");
         } else if ft.is_dir() {
-            let top = depth == 0 && matches!(name.as_str(), "components" | "routes" | "assets");
-            let inside = depth > 0 && depth < 8;
+            let top = depth == 0 && is_layout_dir(&name);
+            let inside = depth > 0 && depth < MAX_DIR_DEPTH;
             if top || inside {
                 read_dir(intake, root, &path, depth + 1);
             } else {

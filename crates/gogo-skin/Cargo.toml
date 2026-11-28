@@ -12,6 +12,8 @@ gogo-ui-ir.workspace = true
 thiserror.workspace = true
 miette.workspace = true
 kdl.workspace = true
+# Skin archives (design 27 §10): the workspace's deflate-only build.
+zip.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

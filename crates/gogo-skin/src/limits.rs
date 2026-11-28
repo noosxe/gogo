@@ -21,6 +21,17 @@ pub const MAX_SKIN_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_FILES: usize = 1024;
 /// A relative path inside the package, in bytes.
 pub const MAX_PATH_BYTES: usize = 200;
+/// Folders a file may sit in, one inside the other.
+pub const MAX_DIR_DEPTH: usize = 8;
+
+/// A skin archive as it is on disk (design 27 §8).
+pub const MAX_ARCHIVE_BYTES: usize = MAX_SKIN_BYTES;
+/// Entries of a skin archive, folders counted.
+pub const MAX_ARCHIVE_ENTRIES: usize = 2 * MAX_FILES;
+/// The most an archive entry may grow when unpacked, past [`RATIO_FREE_BYTES`].
+pub const MAX_ARCHIVE_RATIO: u64 = 200;
+/// An entry no larger than this unpacked is not held to [`MAX_ARCHIVE_RATIO`].
+pub const RATIO_FREE_BYTES: u64 = 64 * 1024;
 
 /// The longest the loader trusts the naive brace nesting of a KDL file before handing it to
 /// the parser: the real depth limit is [`MAX_DEPTH`], this only keeps a hostile file from
