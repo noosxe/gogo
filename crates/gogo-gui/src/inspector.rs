@@ -1,6 +1,7 @@
 //! The skin dev mode's inspector (design 25 §8): the app's own panel beside the page,
 //! saying where the selected node comes from, what its expressions gave, and what is
-//! around it.
+//! around it; or listing the skin's problems: the loader's warnings, which routes the
+//! default skin draws, and why the skin in the folder was not taken.
 //!
 //! It exists only with `--dev`. The page is laid out in the width the panel leaves, so
 //! the panel covers nothing of it. It reads the page's own traced bind and nothing else:
@@ -10,7 +11,7 @@
 //! While picking, the panel is a layer that takes all input: the page under it gets no
 //! press, key or shortcut, so choosing a node can't run what it does.
 
-use gogo_skin::{Origin, Provenance};
+use gogo_skin::{FallbackWhy, Origin, Provenance, Report};
 use gogo_ui_interact::{Layer, LayerId, LayerKind};
 use gogo_ui_ir::{
     A11y, Color, Dim, Direction, Kind, Node, NodeId, Position, Role, Sides, Stroke, TextStyle, Tree,
@@ -39,6 +40,7 @@ const EARLIER: &str = "inspector-earlier";
 const LATER: &str = "inspector-later";
 const ITEM: &str = "inspector-pick:";
 const PICKING: &str = "inspector-picking";
+const PROBLEMS: &str = "inspector-problems";
 /// The control over the page while picking.
 const CATCH: &str = "inspector-catch";
 
@@ -58,6 +60,8 @@ pub(crate) struct Inspector {
     picking: bool,
     /// The node under the pointer while picking.
     hover: Option<String>,
+    /// The list is of the skin's problems, not of the node.
+    problems: bool,
 }
 
 /// One item of the panel's list.
@@ -114,6 +118,7 @@ impl Inspector {
             shown: 0,
             picking: false,
             hover: None,
+            problems: false,
         }
     }
 
@@ -150,6 +155,7 @@ impl Inspector {
     fn select(&mut self, key: String) {
         self.selected = key;
         self.first = 0;
+        self.problems = false;
     }
 
     /// A button of `drawn` was activated. The key it selected, if it did.
@@ -158,6 +164,10 @@ impl Inspector {
         match key {
             PICKING if self.picking => self.stop_picking(),
             PICKING => self.picking = true,
+            PROBLEMS => {
+                self.problems = !self.problems;
+                self.first = 0;
+            }
             CATCH => {
                 let hover = self.hover.take();
                 self.picking = false;
@@ -204,19 +214,20 @@ impl Inspector {
         fonts: &mut FontSet,
         (window_width, window_height): (f32, f32),
         screen: Option<&Screen>,
+        findings: &Findings<'_>,
     ) -> Result<Drawn, PanelError> {
         let wide = width(window_width);
         let columns = ((wide - 2.0 * PADDING) / ADVANCE).floor().max(8.0) as usize;
-        let items = match screen {
-            Some(screen) => {
-                let node = self.node(screen);
-                items(screen, node, columns)
-            }
+        // Kept up to date while the problems are listed.
+        let node = screen.map(|screen| (screen, self.node(screen)));
+        let items = match node {
+            _ if self.problems => findings.items(columns),
+            Some((screen, node)) => items(screen, node, columns),
             None => vec![Item::Dim("no screen yet".to_owned())],
         };
 
-        // The title and the three buttons take their rows; the rest is the list's.
-        let room = window_height - 2.0 * PADDING - LINE - 3.0 * PICK;
+        // The title and the four buttons take their rows; the rest is the list's.
+        let room = window_height - 2.0 * PADDING - LINE - 4.0 * PICK;
         self.first = self.first.min(items.len().saturating_sub(1));
         let mut used = 0.0;
         let count = items[self.first..]
@@ -283,12 +294,13 @@ impl Inspector {
             ("Inspector · F12 closes", "Pick a node")
         };
         line(&mut builder, side, "title", title, DIM)?;
-        let mut node = row(CARD);
-        node.layout.height = Dim::Px(PICK);
-        node.a11y = A11y::control(Role::Button, toggle);
-        builder.control(&mut node, hash(PICKING));
-        let button = builder.add(side, PICKING, node)?;
-        line(&mut builder, button, "toggle-text", toggle, HEAD)?;
+        head_button(&mut builder, side, PICKING, toggle)?;
+        let view = if self.problems {
+            "Back to the node".to_owned()
+        } else {
+            format!("Problems ({})", findings.count())
+        };
+        head_button(&mut builder, side, PROBLEMS, &view)?;
 
         let more_before = self.first > 0;
         let more_after = self.first + count < items.len();
@@ -403,6 +415,117 @@ impl Drawn {
         let node = self.tree.by_key(&format!("{ITEM}{at}"))?;
         let r = self.laid.rect(node)?;
         Some(((r.x0 + r.x1) / 2.0, (r.y0 + r.y1) / 2.0))
+    }
+}
+
+/// One of the buttons above the list.
+fn head_button(
+    builder: &mut Builder,
+    parent: NodeId,
+    key: &str,
+    label: &str,
+) -> Result<(), PanelError> {
+    let mut node = row(CARD);
+    node.layout.height = Dim::Px(PICK);
+    node.a11y = A11y::control(Role::Button, label);
+    builder.control(&mut node, hash(key));
+    let button = builder.add(parent, key, node)?;
+    line(builder, button, &format!("{key}/text"), label, HEAD)
+}
+
+/// What is wrong, or may be, with the skin in the folder.
+pub(crate) struct Findings<'a> {
+    /// The loader's, of the last time the folder was read.
+    report: Option<&'a Report>,
+    /// Why the folder's skin was not taken, when the report has no error that says so.
+    failures: &'a [String],
+    /// The routes of this page the default skin drew, and why.
+    fallbacks: Vec<(String, String)>,
+}
+
+impl<'a> Findings<'a> {
+    pub(crate) fn of(
+        report: Option<&'a Report>,
+        failures: &'a [String],
+        screen: Option<&Screen>,
+    ) -> Findings<'a> {
+        let reported = report.is_some_and(|r| r.error_total() > 0);
+        let fallbacks = screen
+            .map_or(&[][..], |s| &s.fallbacks)
+            .iter()
+            .map(|f| {
+                let why = match &f.why {
+                    FallbackWhy::NotCovered => "the skin doesn't cover it".to_owned(),
+                    FallbackWhy::FailedToLoad => "it failed to load".to_owned(),
+                    FallbackWhy::Bind(e) => format!("{}: {e}", e.location()),
+                };
+                (f.route.clone(), why)
+            })
+            .collect();
+        Findings {
+            report,
+            failures: if reported { &[] } else { failures },
+            fallbacks,
+        }
+    }
+
+    fn count(&self) -> usize {
+        let found = self
+            .report
+            .map_or(0, |r| r.error_total() + r.warning_total());
+        found + self.failures.len() + self.fallbacks.len()
+    }
+
+    fn items(&self, columns: usize) -> Vec<Item> {
+        let mut out = Vec::new();
+        if self.count() == 0 {
+            out.push(Item::Dim("none".to_owned()));
+        }
+        if !self.failures.is_empty() {
+            out.push(Item::Head("NOT TAKEN".to_owned()));
+        }
+        for failure in self.failures {
+            wrap(&mut out, failure, columns, Item::Line);
+        }
+        if let Some(report) = self.report.filter(|r| !r.is_clean()) {
+            let head = format!(
+                "LOADER: {} errors, {} warnings",
+                report.error_total(),
+                report.warning_total()
+            );
+            wrap(&mut out, &head, columns, Item::Head);
+            for finding in report.findings() {
+                let kind = if finding.is_error() {
+                    "error"
+                } else {
+                    "warning"
+                };
+                let head = format!("{kind} {}", finding.code);
+                wrap(&mut out, &head, columns, Item::Line);
+                wrap(&mut out, &finding.location, columns, Item::Dim);
+                wrap(
+                    &mut out,
+                    &format!("  {}", finding.message),
+                    columns,
+                    Item::Line,
+                );
+                if let Some(help) = &finding.help {
+                    wrap(&mut out, &format!("  help: {help}"), columns, Item::Dim);
+                }
+            }
+            if report.suppressed() > 0 {
+                let more = format!("{} more are not listed", report.suppressed());
+                wrap(&mut out, &more, columns, Item::Dim);
+            }
+        }
+        if !self.fallbacks.is_empty() {
+            out.push(Item::Head("FROM THE DEFAULT SKIN".to_owned()));
+        }
+        for (route, why) in &self.fallbacks {
+            wrap(&mut out, &format!("route {route}"), columns, Item::Line);
+            wrap(&mut out, &format!("  {why}"), columns, Item::Dim);
+        }
+        out
     }
 }
 

@@ -22,7 +22,9 @@
 # reload [options] -- GOGO_GUI
 #   the hot-reload check: starts GOGO_GUI on fictional data over a copy of the
 #   built-in skin, edits the copy, breaks it and mends it, with a screenshot of
-#   each (1-start, 2-edited, 3-broken, 4-mended). Takes run's options.
+#   each (1-start, 2-edited, 3-broken, 4-mended). The change and the error must each
+#   be on screen soon after the file is written (RELOAD_MS); the times are printed.
+#   Takes run's options.
 #
 # input [options] -- GOGO_GUI
 #   the input check: starts GOGO_GUI on fictional data, clicks a tab and a
@@ -71,6 +73,9 @@ SELF="$REPO/scripts/gui-headless.sh"
 HELPER="$REPO/scripts/linux-e2e-helper.py"
 ROOT="$REPO/target/gui-headless"
 RUNTIME_DIR=/run/gui
+# From writing a skin file to the screen that shows it, at most. The aim is a second
+# (#548); debug builds with software rendering on a shared runner need the room.
+RELOAD_MS=3000
 # A screen that differs from the empty compositor by this much shows a window.
 SHOWN_PCT=2
 
@@ -215,6 +220,38 @@ check() { # what command…
     "$@" || { log "reload check failed: $what"; return 1; }
 }
 
+# The pixels on screen, as one line to compare.
+screen_sum() {
+    grim -t ppm "$OUT/.now.ppm" 2>>"$OUT/sway.log" || die "grim failed (see sway.log)"
+    sha256sum <"$OUT/.now.ppm"
+}
+
+# Runs COMMAND, which writes a skin file, and times it until the screen shows something
+# else: nothing else changes it here. Gives up 2 s past the limit.
+shown_within() { # what command…
+    local what="$1" before now start ms=0
+    shift
+    before="$(screen_sum)"
+    start="$(date +%s%N)"
+    "$@" || return 1
+    while true; do
+        now="$(screen_sum)"
+        ms=$((($(date +%s%N) - start) / 1000000))
+        [ "$now" = "$before" ] || break
+        app_alive || { log "the application ended (see app.log)"; return 1; }
+        if [ "$ms" -gt $((RELOAD_MS + 2000)) ]; then
+            log "reload check failed: $what: nothing new on screen after $ms ms"
+            return 1
+        fi
+        sleep 0.02
+    done
+    rm -f "$OUT/.now.ppm"
+    log "$what: on screen after $ms ms"
+    [ "$ms" -le "$RELOAD_MS" ] || { log "reload check failed: $what took over $RELOAD_MS ms"; return 1; }
+}
+
+break_route() { printf '\nnonsense {\n' >>"$1"; }
+
 scenario_reload() {
     local skin="$OUT/skin/default" route
     mkdir -p "$OUT/skin"
@@ -228,12 +265,13 @@ scenario_reload() {
     wait_shown 1-start || return 1
 
     # A colour edit shows.
-    sed -i 's/accent "#7aa2ff"/accent "#ff7a45"/' "$skin/tokens.kdl"
+    shown_within "an edit" sed -i 's/accent "#7aa2ff"/accent "#ff7a45"/' "$skin/tokens.kdl" ||
+        return 1
     wait_log "gui: skin reloaded" || return 1
     shot_changed 2-edited 1-start || return 1
 
     # A broken edit keeps the last good skin, with the error over it.
-    printf '\nnonsense {\n' >>"$route"
+    shown_within "an error" break_route "$route" || return 1
     wait_log "gui: skin reload failed" || return 1
     shot_changed 3-broken 2-edited || return 1
     check "the broken edit changed the skin on screen" same_top 2-edited 3-broken || return 1

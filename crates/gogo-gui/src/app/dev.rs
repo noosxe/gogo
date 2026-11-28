@@ -393,3 +393,46 @@ fn a_safety_screen_ends_picking() {
     assert!(!app.shown.inspector.as_ref().expect("drawn").picking);
     assert!(!move_to(&mut app, (100.0, 100.0), 6100));
 }
+
+#[test]
+fn warnings_and_fallbacks_are_listed() {
+    let (_dir, skin, mut app) = dev_app();
+    key(&mut app, Key::F12, 10);
+    let button = bounds(&mut app, Role::Button, "Problems (0)");
+    click_at(&mut app, button, 100);
+    frame(&mut app);
+    assert!(lines(&app).iter().any(|l| l == "none"), "{:?}", lines(&app));
+
+    // A property set twice is a warning; a route the skin leaves out is the default's.
+    edit(&skin, "style=\"crumb\"", "style=\"crumb\" style=\"crumb\"");
+    let manifest = skin.join("skin.kdl");
+    let text = fs::read_to_string(&manifest).expect("the manifest");
+    fs::write(
+        &manifest,
+        text.replacen("\"shell\" \"game\" ", "\"shell\" ", 1),
+    )
+    .expect("a write");
+    fs::remove_file(skin.join("routes/game.kdl")).expect("removed");
+    fs::write(
+        skin.join("routes/library.kdl"),
+        format!(
+            "{}\n",
+            fs::read_to_string(skin.join("routes/library.kdl"))
+                .expect("the route")
+                .replacen(
+                    "route \"library\" {",
+                    "route \"library\" {\n    text \"a\" w=1 w=2",
+                    1
+                )
+        ),
+    )
+    .expect("a write");
+    app.files_changed();
+    frame(&mut app);
+    assert!(app.shown.panel.is_none(), "{:?}", app.problems);
+    let said = all_lines(&mut app);
+    assert!(said.contains("warning gogo_skin::"), "{said}");
+    assert!(said.contains("routes/library.kdl:"), "{said}");
+    assert!(said.contains("route game"), "{said}");
+    assert!(said.contains("doesn't cover it"), "{said}");
+}
