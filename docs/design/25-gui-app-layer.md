@@ -697,6 +697,12 @@ As built: the inspector (G5, #548):
   (design 27 §9.1): file and line, what is around it, `style=`, each expression with its
   current value, the names in scope, the action with its arguments, and the children left
   out; then its parents and children as buttons that select them.
+- **Picking.** "Pick a node" makes the panel take all input, as a popup does: the page
+  gets no press, key, shortcut, wheel or screen reader action, so a pick can't run what
+  it picks. An outline follows the pointer, a click selects the element under it, and Esc
+  stops. Scroll something into view before picking it. A popup, the error panel or a
+  safety screen ends picking. Outside picking, the selected node is outlined. A frame is
+  asked for only when the node under the pointer changes.
 - **Safety.** It reads the page's bind only: no dialog, no typed text, no app widget's
   content. It is below the popup, the error panel and the safety screens, and takes no
   input while any of them is up. Its presses are numbered by `Interaction` like any

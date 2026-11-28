@@ -42,6 +42,15 @@
 #   the command palette open): there must be none. A click and Ctrl K show that
 #   the count does move. Takes run's options; the points assume the default size.
 #
+# inspect [options] -- GOGO_GUI
+#   the inspector check: starts GOGO_GUI on fictional data with --dev on a copy of
+#   the built-in skin, opens the inspector with F12, picks the game's title with the
+#   virtual pointer, closes it (the page is as it was), opens it again and edits the
+#   skin. No frames while nothing changes or the pointer stays on one node; a pick
+#   goes nowhere. A screenshot of each (1-start, 2-open, 3-picking, 4-hover,
+#   5-selected, 6-closed, 7-open, 8-edited). Takes run's options; the points assume
+#   the default size.
+#
 # self-test
 #   checks the sandbox, the screenshot and the teardown with a small Wayland
 #   client, so it needs no build.
@@ -435,6 +444,69 @@ scenario_idle() {
     stop_app
 }
 
+scenario_inspect() {
+    local skin="$OUT/skin/default" routes
+    mkdir -p "$OUT/skin"
+    cp -r --no-preserve=mode "$REPO/crates/gogo-skins/skins/default" "$skin"
+
+    start_pointer || return 1
+    start_keyboard
+    start_app "$@" --fixture --dev "$skin"
+    wait_log "gui: skin loaded" || return 1
+    wait_log "gui: frame presented" || return 1
+    wait_shown 1-start || return 1
+    swaymsg -q seat - cursor set 700 760 # over nothing
+
+    key F12
+    wait_log "gui: inspector opened" || return 1
+    shot_changed 2-open 1-start || return 1
+
+    routes="$(grep -cF -- "gui: route" "$OUT/app.log" || true)"
+    click 1100 42 # "Pick a node"
+    wait_log "gui: inspector picking" || return 1
+    shot_changed 3-picking 2-open || return 1
+    swaymsg -q seat - cursor set 480 83 # onto the game's title
+    shot_changed 4-hover 3-picking || return 1
+
+    local frames
+    frames="$(presented)"
+    for _ in 1 2 3 4 5; do
+        swaymsg -q seat - cursor set 482 83
+        sleep 0.1
+        swaymsg -q seat - cursor set 480 83
+        sleep 0.1
+    done
+    no_frames_since "$frames" "as the pointer stayed on one node" || return 1
+
+    click 480 83
+    wait_log "gui: inspector selected" || return 1
+    shot_changed 5-selected 4-hover || return 1
+    check "the pick does not name a file of the skin" \
+        grep -qE "gui: inspector selected root/[^ ]+ routes/game.kdl:[0-9]+:[0-9]+" "$OUT/app.log" || return 1
+    check "picking went somewhere" \
+        test "$(grep -cF -- "gui: route" "$OUT/app.log" || true)" = "$routes" || return 1
+
+    swaymsg -q seat - cursor set 700 760
+    frames="$(presented)"
+    sleep 3
+    no_frames_since "$frames" "with the inspector open" || return 1
+
+    key F12
+    wait_log "gui: inspector closed" || return 1
+    shot_changed 6-closed 5-selected || return 1
+    check "closing did not give the page back as it was" \
+        test "$(changed "$OUT/1-start.png" "$OUT/6-closed.png")" = 0 || return 1
+
+    key F12
+    wait_log "gui: inspector opened" 2 || return 1
+    shot_changed 7-open 6-closed || return 1
+    sed -i 's/accent "#7aa2ff"/accent "#ff7a45"/' "$skin/tokens.kdl"
+    wait_log "gui: skin reloaded" || return 1
+    shot_changed 8-edited 7-open || return 1
+    stop_app
+    grep -F "gui: inspector" "$OUT/app.log" >&2
+}
+
 inside() {
     OUT="$1" SIZE="$2" RENDERER="$3" READY="$4" SCENARIO="$5"
     shift 5
@@ -545,8 +617,8 @@ cmd_run() { # scenario [options] -- command…
     case "$command" in
     "$REPO"/*) sandbox+=(--ro-bind "$command" "$command") ;;
     esac
-    # The reload check copies the built-in skin into its output folder.
-    if [ "$scenario" = reload ]; then
+    # These checks copy the built-in skin into their output folder.
+    if [ "$scenario" = reload ] || [ "$scenario" = inspect ]; then
         local builtin="$REPO/crates/gogo-skins/skins/default"
         sandbox+=(--ro-bind "$builtin" "$builtin")
     fi
@@ -683,7 +755,7 @@ target" ] || st_fail "more of the repository than scripts/ is visible"
 cmd="$1"
 shift
 case "$cmd" in
-run | reload | input | idle) cmd_run "$cmd" "$@" ;;
+run | reload | input | idle | inspect) cmd_run "$cmd" "$@" ;;
 self-test) cmd_self_test "$@" ;;
 __inside) inside "$@" ;;
 -h | --help | help) usage ;;

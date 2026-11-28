@@ -335,7 +335,16 @@ impl App {
         if self.dev.is_none() || self.shown.popup.is_some() || self.popups.top().is_some() {
             return false;
         }
+        // While picking, or while the frame that says so is up, the page gets nothing.
+        let picking = self.inspector.as_ref().is_some_and(Inspector::picking)
+            || self.shown.inspector.as_ref().is_some_and(|d| d.picking);
         match intent {
+            Intent::Dismiss { .. } if picking => {
+                if let Some(inspector) = &mut self.inspector {
+                    inspector.stop_picking();
+                }
+                true
+            }
             Intent::Inspect => {
                 self.inspector = match self.inspector {
                     Some(_) => None,
@@ -352,18 +361,42 @@ impl App {
             Intent::App { target, .. } => {
                 let (Some(inspector), Some(drawn)) = (&mut self.inspector, &self.shown.inspector)
                 else {
-                    return false;
+                    return picking;
                 };
+                // A press elsewhere: the page's, which gets nothing while picking.
                 if target.layer != drawn.id {
-                    return false;
+                    return picking;
                 }
                 if inspector.press(drawn, &target.key).is_some() {
                     self.say_selected();
+                } else if inspector.picking() {
+                    say(format_args!("gui: inspector picking"));
                 }
                 true
             }
-            _ => false,
+            _ => picking,
         }
+    }
+
+    /// Follows the pointer while picking. Returns whether the outline moved.
+    fn point_inspector(&mut self, input: &Input) -> bool {
+        let point = match *input {
+            Input::PointerMoved { x, y } | Input::PointerDown { x, y, .. } => Some((x, y)),
+            Input::PointerLeft => None,
+            _ => return false,
+        };
+        // Only what the presented frame shows as picking, with nothing over it.
+        if !self.shown.inspector.as_ref().is_some_and(|d| d.picking)
+            || self.shown.panel.is_some()
+            || self.shown.dialog.is_some()
+        {
+            return false;
+        }
+        let (Some(inspector), Some(screen)) = (&mut self.inspector, &self.shown.screen) else {
+            return false;
+        };
+        let page = f64::from(self.shown.size.0 - inspector::width(self.shown.size.0));
+        inspector.point(screen, point.filter(|&(x, _)| x < page))
     }
 
     /// Names the selected node: its key and where the skin has it, never what it shows.
@@ -578,6 +611,7 @@ impl App {
         if layers.is_empty() {
             return false;
         }
+        let pointed = self.point_inspector(&input);
         let response = self
             .interaction
             .handle(input, at, &Layers { layers: &layers });
@@ -586,7 +620,7 @@ impl App {
             self.act(intent);
         }
         // Any input tries again for a frame that never reached the display.
-        response.redraw || acted || self.unpresented || self.stale()
+        response.redraw || acted || pointed || self.unpresented || self.stale()
     }
 
     /// Binds, lays out and builds the next frame for a window of `size` logical px.
@@ -657,6 +691,9 @@ impl App {
         // A safety screen or a panel wins over a popup, for good.
         if self.data.modal_ticket().is_some() || self.pending.panel.is_some() {
             self.popups.clear();
+            if let Some(inspector) = &mut self.inspector {
+                inspector.stop_picking();
+            }
         }
         self.pending.size = size;
         self.pending.inspector = self.build_inspector(size);
@@ -692,7 +729,10 @@ impl App {
                         && self.data.modal_ticket().is_none()
                 })
                 .map(|t| t.key.as_str());
-            inspector.draw(&mut self.list, focus);
+            let outline = self.pending.panel.is_none()
+                && self.pending.popup.is_none()
+                && self.data.modal_ticket().is_none();
+            inspector.draw(&mut self.list, focus, outline);
         }
         if let Some(popup) = &self.pending.popup {
             // A text field shows where typing goes however it got focus.

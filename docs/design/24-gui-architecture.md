@@ -299,7 +299,8 @@ wgpu's GL backend needs a loadable `libEGL.so.1` on the library path.
   - A `gui-headless` job runs `scripts/gui-headless.sh self-test`, then `gogo-gui` in the
     headless compositor: hot reload on the GPU path (lavapipe) and the CPU path, the
     pointer and keyboard check, the idle check on both paths (it fails if a frame is
-    presented while nothing changes), and the fallback without a Vulkan driver. It runs
+    presented while nothing changes), the dev mode inspector on both paths (open, pick a
+    node, close, reload; design 25 §8), and the fallback without a Vulkan driver. It runs
     for the same changes as `gui-lavapipe`, and for the script, its tools and the helpers
     it borrows from the e2e harness.
   - All of it is wired into `CI result` (`ci-jobs.yml` names the three places).
