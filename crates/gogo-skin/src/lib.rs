@@ -45,10 +45,10 @@ mod typing;
 pub use assets::{Asset, AssetKind};
 pub use ast::{Arg, Node, Operand, Prop, Term, Val};
 pub use bind::{
-    ActionCall, ActionTable, ArgValue, BindError, BindErrorKind, Binding, Bound, CallArg,
-    DefaultSkin, Fallback, FallbackWhy, Input, Lists, MAX_ITEMS, MenuEntry, OVERSCAN, PartStyle,
-    PendingArg, PendingError, PopupContent, PopupSlot, SelectOption, UiState, UiStateError,
-    WidgetSlot,
+    ActionCall, ActionOrigin, ActionTable, ArgValue, BindError, BindErrorKind, Binding, Bound,
+    BoundValue, CallArg, DefaultSkin, Fallback, FallbackWhy, Input, LeftOut, Lists, MAX_ITEMS,
+    MAX_SHOWN, MAX_TRACED, MenuEntry, OVERSCAN, Origin, PartStyle, PendingArg, PendingError,
+    PopupContent, PopupSlot, Provenance, SelectOption, UiState, UiStateError, WidgetSlot,
 };
 pub use diag::{Code, Finding, Level, Report};
 /// The dynamic value expressions compute with: what a source answers and a scope lends.

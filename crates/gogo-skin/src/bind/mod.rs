@@ -44,6 +44,7 @@ mod elements;
 mod error;
 mod list;
 mod popups;
+mod provenance;
 mod state;
 mod style;
 mod tokens;
@@ -67,6 +68,9 @@ use crate::tokens::TokenSet;
 pub use actions::{ActionCall, ActionTable, ArgValue, CallArg, Input, PendingArg, PendingError};
 pub use error::{BindError, BindErrorKind};
 pub use popups::{MenuEntry, PopupContent, PopupSlot, SelectOption};
+pub use provenance::{
+    ActionOrigin, BoundValue, LeftOut, MAX_SHOWN, MAX_TRACED, Origin, Provenance,
+};
 pub use state::{UiState, UiStateError};
 pub use widgets::{PartStyle, WidgetSlot};
 
@@ -121,6 +125,8 @@ pub struct Bound {
     pub popups: Vec<PopupSlot>,
     /// The routes of this page the default skin drew instead (design 26 §8).
     pub fallbacks: Vec<Fallback>,
+    /// Where the nodes came from, from [`SkinPackage::bind_traced`] only.
+    pub provenance: Option<Provenance>,
 }
 
 /// A route the default skin drew, and why.
@@ -164,7 +170,7 @@ impl SkinPackage {
     /// # Errors
     /// A [`BindError`] with the file and line of the skin text that failed.
     pub fn bind(&self, route: &str, b: &Binding<'_>) -> Result<Bound, BindError> {
-        run(self, route, b, &BTreeSet::new(), false, None)
+        run(self, route, b, &BTreeSet::new(), false, None, false)
     }
 
     /// Like [`bind`](Self::bind), with per-route fallback to the default skin (design 26
@@ -177,7 +183,7 @@ impl SkinPackage {
     /// A [`BindError`] when the default skin's own route fails too, or there is no
     /// default skin to fall back to.
     pub fn bind_with_fallback(&self, route: &str, b: &Binding<'_>) -> Result<Bound, BindError> {
-        self.fall_back(route, b, None)
+        self.fall_back(route, b, None, false)
     }
 
     /// As [`bind_with_fallback`](Self::bind_with_fallback), drawing of each virtualised
@@ -191,7 +197,22 @@ impl SkinPackage {
         b: &Binding<'_>,
         lists: &Lists,
     ) -> Result<Bound, BindError> {
-        self.fall_back(route, b, Some(lists))
+        self.fall_back(route, b, Some(lists), false)
+    }
+
+    /// As [`bind_windowed`](Self::bind_windowed), also recording in
+    /// [`Bound::provenance`] where each node came from and what its expressions gave, for
+    /// the skin dev mode's inspector (design 25 §8). The tree is the same.
+    ///
+    /// # Errors
+    /// As [`bind_with_fallback`](Self::bind_with_fallback).
+    pub fn bind_traced(
+        &self,
+        route: &str,
+        b: &Binding<'_>,
+        lists: &Lists,
+    ) -> Result<Bound, BindError> {
+        self.fall_back(route, b, Some(lists), true)
     }
 
     fn fall_back(
@@ -199,11 +220,12 @@ impl SkinPackage {
         route: &str,
         b: &Binding<'_>,
         lists: Option<&Lists>,
+        traced: bool,
     ) -> Result<Bound, BindError> {
         let mut overrides: BTreeSet<String> = BTreeSet::new();
         let mut notes: Vec<Fallback> = Vec::new();
         loop {
-            match run(self, route, b, &overrides, true, lists) {
+            match run(self, route, b, &overrides, true, lists, traced) {
                 Ok(mut bound) => {
                     notes.append(&mut bound.fallbacks);
                     bound.fallbacks = notes;
@@ -232,9 +254,11 @@ fn run<'a>(
     overrides: &'a BTreeSet<String>,
     fallback: bool,
     lists: Option<&'a Lists>,
+    traced: bool,
 ) -> Result<Bound, BindError> {
     let mut bn = Binder::new(active, b, overrides, fallback, route)?;
     bn.lists = lists;
+    bn.trace = traced.then(Box::default);
     let Some(code) = bn.source_of(route)? else {
         return Err(bn.fail(
             BindErrorKind::Missing(format!("the skin has no `{route}` route")),
@@ -268,6 +292,7 @@ fn run<'a>(
         widgets: bn.widgets,
         popups: bn.popups,
         fallbacks: bn.notes,
+        provenance: bn.trace.map(|t| t.out),
     })
 }
 
@@ -368,6 +393,8 @@ pub(crate) struct Binder<'a> {
     pub(crate) outlets: usize,
     /// Borrowed fragments already checked against this skin's manifest in this bind.
     checked: BTreeSet<String>,
+    /// Set for a traced bind.
+    pub(crate) trace: Option<Box<provenance::Trace>>,
 }
 
 /// The scope expressions are evaluated in: the binder's variables, the `ui` source and the
@@ -472,6 +499,7 @@ impl<'a> Binder<'a> {
             in_outlet: false,
             outlets: 0,
             checked: BTreeSet::new(),
+            trace: None,
         })
     }
 
