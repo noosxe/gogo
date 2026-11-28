@@ -195,6 +195,7 @@ fn map_key(key: &WinitKey) -> Key {
             NamedKey::Home => Key::Home,
             NamedKey::End => Key::End,
             NamedKey::Tab => Key::Tab,
+            NamedKey::F12 => Key::F12,
             NamedKey::ArrowLeft => Key::ArrowLeft,
             NamedKey::ArrowRight => Key::ArrowRight,
             NamedKey::ArrowUp => Key::ArrowUp,

@@ -8,7 +8,7 @@ use std::path::Path;
 
 use gogo_skin::{
     ActionTable, BindError, Binding, Bound, DefaultSkin, FallbackWhy, Lists, Mode, PopupSlot,
-    SkinPackage, UiState, UiStateError, Value,
+    Provenance, SkinPackage, UiState, UiStateError, Value,
 };
 use gogo_ui_interact::{Interaction, Layer, LayerId, LayerKind};
 use gogo_ui_ir::{NodeId, Tree};
@@ -63,6 +63,8 @@ pub(crate) struct Screen {
     pub(crate) actions: ActionTable,
     /// What the screen's menus and selects open.
     pub(crate) popups: Vec<PopupSlot>,
+    /// Where the nodes came from, while the inspector is open.
+    pub(crate) provenance: Option<Provenance>,
     /// A hash of each action's call, so that a press on a control that came to do
     /// something else is dropped.
     identity: Vec<u64>,
@@ -98,6 +100,8 @@ pub(crate) struct Page {
     /// The skin asked for; `None` draws the built-in one.
     active: Option<Skin>,
     pub(crate) fonts: FontSet,
+    /// Bind with provenance, for the inspector.
+    pub(crate) traced: bool,
     /// The rows of each virtualised list the last layout showed, by the list's key.
     rows: HashMap<String, Range<u32>>,
 }
@@ -113,6 +117,7 @@ impl Page {
             rows: HashMap::new(),
             active: None,
             fonts: FontSet::bundled(),
+            traced: false,
         })
     }
 
@@ -213,16 +218,17 @@ impl Page {
         let mut passes = 0;
         loop {
             let scope = data.scope();
-            let bound = skin.package.bind_windowed(
-                route,
-                &Binding {
-                    scope: &scope,
-                    ui: &skin.ui,
-                    mode: Mode::Dark,
-                    default: Some(default),
-                },
-                lists,
-            );
+            let binding = Binding {
+                scope: &scope,
+                ui: &skin.ui,
+                mode: Mode::Dark,
+                default: Some(default),
+            };
+            let bound = if self.traced {
+                skin.package.bind_traced(route, &binding, lists)
+            } else {
+                skin.package.bind_windowed(route, &binding, lists)
+            };
             let asked = scope.asked();
             passes += 1;
             let missing = data.arrives_later() && !asked.is_empty();
@@ -314,6 +320,7 @@ impl Page {
             laid,
             actions: bound.actions,
             popups: bound.popups,
+            provenance: bound.provenance,
             identity,
             id,
         })

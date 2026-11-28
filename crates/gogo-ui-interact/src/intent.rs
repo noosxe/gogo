@@ -247,6 +247,9 @@ pub enum Intent {
         /// The press.
         provenance: InputProvenance,
     },
+    /// F12: open or close the skin dev mode's inspector. It runs nothing, so it answers
+    /// nothing.
+    Inspect,
 }
 
 /// As derived, but for the text assistive technology sets: only its length.
@@ -337,6 +340,7 @@ impl std::fmt::Debug for Intent {
                 .debug_struct("Palette")
                 .field("provenance", provenance)
                 .finish(),
+            Intent::Inspect => f.write_str("Inspect"),
         }
     }
 }
