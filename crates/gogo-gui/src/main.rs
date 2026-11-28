@@ -6,6 +6,8 @@
 //!
 //! - `gogo-gui [--dev <skin dir>]` opens the window. With `--dev` the folder is
 //!   watched and reloaded; a broken edit keeps the last good skin and shows why.
+//! - `gogo-gui --skin <name>` opens it with an installed skin, for this run only.
+//!   `--skin default` is the way out of an unusable one.
 //! - `gogo-gui --render-png <out>` draws a route without a window, on vello_cpu.
 //! - `gogo-gui --check-skin <dir>` prints what the loader finds.
 //!
@@ -16,7 +18,8 @@
 //! `fixture` feature.
 //!
 //! Agents never run the window on the host display: `scripts/gui-headless.sh`, and only
-//! with `--fixture`: without it the window reads the real account.
+//! with `--fixture`: without it the window reads the real account. A fictional run has
+//! installed skins only under `GOGO_HOME`.
 #![deny(unsafe_code)]
 
 mod act;
@@ -33,6 +36,7 @@ mod popup;
 mod render;
 #[cfg(test)]
 mod s1;
+mod skins;
 
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
@@ -80,9 +84,10 @@ struct Cli {
           value_parser = clap::value_parser!(u8).range(1..=4))]
     scale: u8,
 
-    /// The skin `--render-png` draws instead of the built-in one.
-    #[arg(long, value_name = "DIR", requires = "render_png")]
-    skin: Option<PathBuf>,
+    /// An installed skin's name: the window uses it for this run, `--render-png` draws
+    /// it. `--render-png` also takes a skin's folder, written with a `/`.
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["dev", "check_skin"])]
+    skin: Option<String>,
 
     /// Load the skin in this folder and print what is wrong with it.
     #[arg(long, value_name = "DIR")]
@@ -136,6 +141,10 @@ fn main() -> ExitCode {
         eprintln!("gogo-gui was built without fictional data (the `fixture` feature)");
         return ExitCode::from(USAGE);
     }
+    if cli.render_png.is_none() && cli.skin.as_deref().is_some_and(|s| s.contains('/')) {
+        eprintln!("--skin takes an installed skin's name; --dev draws a folder");
+        return ExitCode::from(USAGE);
+    }
     let done = match &cli.render_png {
         Some(out) => render_png(out, &cli),
         None => match renderer_choice() {
@@ -173,8 +182,18 @@ fn games(cli: &Cli) -> Option<usize> {
 fn render_png(out: &Path, cli: &Cli) -> Result<(), Failure> {
     let mut data = data::Data::fixture_with(|| {}, games(cli))?;
     let mut page = page::Page::new()?;
-    if let Some(dir) = &cli.skin {
-        page.load(dir).map_err(|lines| lines.join("\n"))?;
+    if let Some(skin) = &cli.skin {
+        let dir = if skin.contains('/') {
+            Some(PathBuf::from(skin))
+        } else if skin == skins::DEFAULT {
+            None
+        } else {
+            let installed = skins::Skins::resolve(true).and_then(|s| s.folder.path(skin));
+            Some(installed.ok_or_else(|| format!("no skin `{skin}` is installed"))?)
+        };
+        if let Some(dir) = dir {
+            page.load(&dir).map_err(|lines| lines.join("\n"))?;
+        }
     }
     let list = page.draw(&mut data, &cli.route, PNG_SIZE)?;
     let image = gogo_render_cpu::CpuRenderer::new().render_to_rgba(
@@ -205,7 +224,9 @@ fn window(cli: &Cli, choice: RendererChoice) -> Result<(), Failure> {
     if cli.fixture {
         let waker = shell.waker();
         let data = data::Data::fixture_with(move || waker.wake(), games(cli))?;
-        shell.run(app::App::new(cli.dev.as_deref(), data)?, choice)?;
+        let app = app::App::new(cli.dev.as_deref(), data)?
+            .with_skins(skins::Skins::resolve(true), cli.skin.as_deref());
+        shell.run(app, choice)?;
         return Ok(());
     }
     // The engine's work runs here; the UI thread only reads what arrives.
@@ -214,6 +235,7 @@ fn window(cli: &Cli, choice: RendererChoice) -> Result<(), Failure> {
         .build()?;
     let (data, downloads, installs) = engine_data(&shell, runtime.handle())?;
     let ran = app::App::new(cli.dev.as_deref(), data)
+        .map(|app| app.with_skins(skins::Skins::resolve(false), cli.skin.as_deref()))
         .map_err(Failure::from)
         .and_then(|app| shell.run(app, choice).map_err(Failure::from));
     // Stopped by their tokens, so that what is on disk can be resumed.

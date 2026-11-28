@@ -22,6 +22,7 @@ use crate::popup::{
     Builder, CARD, CHOSEN, Choice, DIM, Drawn, EARLIER, EDGE, ITEM, LATER, PADDING, RING, ROW,
     TEXT, hash, row,
 };
+use crate::skins::DEFAULT;
 
 /// The text field's key.
 pub(crate) const FIELD: &str = "palette/field";
@@ -136,6 +137,14 @@ fn read(data: &Data) -> (Vec<Command>, Vec<SourceKey>) {
     }
 
     out.extend(command("Refresh library", "library.refresh", &[]));
+    // Always here, whatever the skin on screen draws: the way out of one that is unusable.
+    if data.skin().is_some_and(|skin| skin != DEFAULT) {
+        out.extend(command(
+            "Use the default skin",
+            "settings.set",
+            &[("key", "gui.skin"), ("value", DEFAULT)],
+        ));
+    }
     if signed_out {
         out.extend(command("Sign in", "account.sign_in", &[]));
     }

@@ -155,6 +155,28 @@ impl Page {
         (Ok(()), report)
     }
 
+    /// The built-in skin again.
+    pub(crate) fn use_default(&mut self) {
+        self.active = None;
+        self.rows.clear();
+    }
+
+    /// Takes the skin in `dir` in place of the one on screen, with its own `ui` values.
+    /// As [`load`](Self::load), a skin that does not load changes nothing.
+    pub(crate) fn choose(&mut self, dir: &Path) -> Result<(), Vec<String>> {
+        let before = self.active.take();
+        match self.load(dir) {
+            Ok(()) => {
+                self.rows.clear();
+                Ok(())
+            }
+            Err(e) => {
+                self.active = before;
+                Err(e)
+            }
+        }
+    }
+
     /// Puts a scratch skin where the built-in one is, so a test can have a route with
     /// nothing to fall back to.
     #[cfg(test)]

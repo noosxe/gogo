@@ -181,6 +181,8 @@ pub enum Preview<'a> {
 /// Something the shell has to do.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
+    /// Draw with another skin: the name `settings.set gui.skin` gave, unchecked.
+    SetSkin(String),
     /// Open the command palette.
     OpenPalette {
         /// What it is limited to.

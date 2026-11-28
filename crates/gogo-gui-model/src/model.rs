@@ -197,7 +197,9 @@ impl<B: Backend> Model<B> {
             Ok(call) => call,
             Err(outcome) => return outcome,
         };
-        if route(call.spec()) == Route::Shell {
+        // Which skin is drawn is the window's business, not the engine's.
+        let skin = call.name() == "settings.set" && call.text("key") == Some("gui.skin");
+        if skin || route(call.spec()) == Route::Shell {
             self.shell(&call);
             return Outcome::Accepted;
         }
@@ -227,6 +229,12 @@ impl<B: Backend> Model<B> {
                 scope: text("scope"),
             }),
             "account.menu" => self.flow.push_effect(Effect::AccountMenu),
+            // Only `gui.skin` comes here.
+            "settings.set" => {
+                if let Some(value) = call.arg("value") {
+                    self.flow.push_effect(Effect::SetSkin(value.display()));
+                }
+            }
             "ui.set" => {
                 if let (Some(var), Some(value)) = (text("var"), call.arg("value")) {
                     self.flow.push_effect(Effect::SetUi {
