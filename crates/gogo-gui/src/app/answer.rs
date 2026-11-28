@@ -182,6 +182,10 @@ fn content(modal: &Modal<'_>, entry: &Entry, changed: bool, hold: Hold, focused:
             PromptSpec::Confirm { label } => Content::YesNo {
                 label: label.clone(),
             },
+            PromptSpec::Offer { label, yes } => Content::Offer {
+                label: label.clone(),
+                yes,
+            },
             // The model shows this one as a plan card.
             PromptSpec::Plan(plan) => Content::Plan {
                 plan: (**plan).clone(),

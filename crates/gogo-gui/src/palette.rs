@@ -61,7 +61,8 @@ const PLACES: &[(&str, &str)] = &[
 #[derive(Debug, Clone)]
 pub(crate) struct Command {
     pub(crate) label: String,
-    pub(crate) invocation: Invocation,
+    /// An action of the contract, or one of the app's own.
+    pub(crate) choice: Choice,
 }
 
 /// An action by its name in the contract, with its arguments.
@@ -72,7 +73,7 @@ fn command(label: impl Into<String>, name: &str, args: &[(&str, &str)]) -> Optio
     }
     Some(Command {
         label: label.into(),
-        invocation,
+        choice: Choice::Command(invocation),
     })
 }
 
@@ -137,6 +138,13 @@ fn read(data: &Data) -> (Vec<Command>, Vec<SourceKey>) {
     }
 
     out.extend(command("Refresh library", "library.refresh", &[]));
+    // The app's own: no skin has an action for it.
+    if data.imports_skins() {
+        out.push(Command {
+            label: "Import skin\u{2026}".to_owned(),
+            choice: Choice::ImportSkin,
+        });
+    }
     // Always here, whatever the skin on screen draws: the way out of one that is unusable.
     if data.skin().is_some_and(|skin| skin != DEFAULT) {
         out.extend(command(
@@ -161,7 +169,9 @@ fn read(data: &Data) -> (Vec<Command>, Vec<SourceKey>) {
             }
             let go = command(format!("Go to {title}"), "nav.go", &[("route", "game")]);
             out.extend(go.map(|mut c| {
-                c.invocation = c.invocation.route_arg("id", Value::str(id));
+                if let Choice::Command(invocation) = &mut c.choice {
+                    *invocation = invocation.clone().route_arg("id", Value::str(id));
+                }
                 c
             }));
         }
@@ -366,7 +376,7 @@ impl Open {
             node.a11y.selected = Some(highlighted);
             b.control(
                 &mut node,
-                hash((&command.label, format!("{:?}", command.invocation))),
+                hash((&command.label, format!("{:?}", command.choice))),
             );
             let id = b.add(list, &key, node)?;
             b.text(id, &format!("{key}/text"), &command.label, TEXT, 1.0)?;
@@ -387,10 +397,7 @@ impl Open {
         } else {
             format!("{ITEM}{}", self.highlight)
         };
-        let choices = found
-            .into_iter()
-            .map(|c| Some(Choice::Command(c.invocation)))
-            .collect();
+        let choices = found.into_iter().map(|c| Some(c.choice)).collect();
         let focus = (Some(FIELD.to_owned()), Some(submit));
         b.finish(fonts, size, focus, choices, self.revision)
             .map(Some)
@@ -422,10 +429,20 @@ mod tests {
         let mut data = Data::fixture(|| {}).expect("fixture data");
         assert_eq!(data.location().route, "game");
         let listed = commands(&mut data);
-        let names: Vec<&str> = listed.iter().map(|c| c.invocation.spec.name).collect();
-        assert!(names.contains(&"game.download"), "{names:?}");
-        for command in &listed {
-            let spec = command.invocation.spec;
+        let specs: Vec<_> = listed
+            .iter()
+            .filter_map(|c| match &c.choice {
+                Choice::Command(invocation) => Some(invocation.spec),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            specs.len(),
+            listed.len(),
+            "the app's own wait for a skin folder"
+        );
+        assert!(specs.iter().any(|s| s.name == "game.download"));
+        for spec in specs {
             assert!(spec.tier < Tier::Gated, "{}", spec.name);
             assert!(spec.binding != Binding::AppOnly, "{}", spec.name);
             assert!(

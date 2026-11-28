@@ -102,6 +102,8 @@ pub(crate) struct SkinSetting {
     pub(crate) choices: Vec<String>,
     /// Whether the choice is kept in a file.
     pub(crate) stored: bool,
+    /// Whether there is a skin folder to import into.
+    pub(crate) importable: bool,
 }
 
 impl SkinSetting {
@@ -225,6 +227,11 @@ impl Data {
         }
     }
 
+    /// Whether the window can import a skin.
+    pub(crate) fn imports_skins(&self) -> bool {
+        self.skin.as_ref().is_some_and(|s| s.importable)
+    }
+
     /// The skin the window said it draws.
     pub(crate) fn skin(&self) -> Option<&str> {
         self.skin.as_ref().map(|s| s.value.as_str())
@@ -322,6 +329,11 @@ impl Data {
     /// Answer the question on screen.
     pub(crate) fn answer(&mut self, ticket: Ticket, answer: PromptAnswer, press: Press) -> Outcome {
         self.pumped(|m| m.answer(ticket, answer, press))
+    }
+
+    /// A question of the app's own.
+    pub(crate) fn ask(&mut self, spec: PromptSpec) -> Option<Ticket> {
+        self.pumped(|m| m.ask(spec))
     }
 
     pub(crate) fn cancel(&mut self, ticket: Ticket) {

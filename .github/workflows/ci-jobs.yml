@@ -540,6 +540,11 @@ jobs:
               --renderer "$renderer" --name "inspect-$renderer" -- target/debug/gogo-gui
             grep -F "renderer=$renderer" target/gui-headless/inspect-"$renderer".*/app.log
           done
+      - name: Skin import, choice and restart
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          trap 'sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1' EXIT
+          nix develop .#lavapipe -c scripts/gui-headless.sh import -- target/debug/gogo-gui
       - name: Fallback without a Vulkan driver
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0

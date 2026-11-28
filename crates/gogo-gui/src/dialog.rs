@@ -210,6 +210,11 @@ pub(crate) enum Content {
     YesNo {
         label: String,
     },
+    /// Something the app offers to do, with the one control that does it.
+    Offer {
+        label: String,
+        yes: &'static str,
+    },
     Conflicts {
         files: Vec<ConflictFile>,
         picks: Vec<Option<Side>>,
@@ -280,6 +285,11 @@ impl std::fmt::Debug for Content {
             Content::YesNo { label } => f
                 .debug_struct("YesNo")
                 .field("label_bytes", &label.len())
+                .finish(),
+            Content::Offer { label, yes } => f
+                .debug_struct("Offer")
+                .field("label_bytes", &label.len())
+                .field("yes", yes)
                 .finish(),
             Content::Conflicts { files, picks } => f
                 .debug_struct("Conflicts")
@@ -698,6 +708,11 @@ fn heading(content: &Content) -> (String, LayerKind, Option<&'static str>) {
         ),
         Content::Choice { .. } => ("Choose one".to_owned(), LayerKind::Dialog, Some(CANCEL)),
         Content::YesNo { .. } => ("A question".to_owned(), LayerKind::Dialog, Some(CANCEL)),
+        Content::Offer { .. } => (
+            "Check before you go on".to_owned(),
+            LayerKind::Dialog,
+            Some(CANCEL),
+        ),
         Content::Conflicts { .. } => (
             "Saves changed on both sides".to_owned(),
             LayerKind::Dialog,
@@ -732,7 +747,8 @@ fn above(b: &mut Builder, card: NodeId, content: &Content) -> Result<(), PanelEr
         Content::Secret { label, .. }
         | Content::Text { label, .. }
         | Content::Choice { label, .. }
-        | Content::YesNo { label } => b.text(card, "dialog/label", label, TEXT)?,
+        | Content::YesNo { label }
+        | Content::Offer { label, .. } => b.text(card, "dialog/label", label, TEXT)?,
         Content::Conflicts { .. } => b.text(
             card,
             "dialog/label",
@@ -905,6 +921,7 @@ fn buttons(
             }
         }
         Content::Text { .. } => b.button(at, OK, "OK", MAIN)?,
+        Content::Offer { yes, .. } => b.button(at, YES, yes, MAIN)?,
         Content::YesNo { .. } => {
             b.button(at, NO, "No", PLAIN)?;
             b.button(at, YES, "Yes", MAIN)?;

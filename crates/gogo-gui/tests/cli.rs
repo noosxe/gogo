@@ -98,6 +98,68 @@ fn render_png_takes_a_skin_name() {
 }
 
 #[test]
+fn skins_are_imported_and_listed_without_a_window() {
+    let dir = tempfile::tempdir().expect("a temporary folder");
+    let home = dir.path().join("home");
+    let at_home = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_gogo-gui"))
+            .args(args)
+            .env("GOGO_HOME", &home)
+            .output()
+            .expect("gogo-gui runs")
+    };
+    let source = skin(&dir.path().join("source"), None);
+    let manifest = source.join("skin.kdl");
+    let renamed = std::fs::read_to_string(&manifest)
+        .expect("the manifest")
+        .replace("skin \"default\"", "skin \"mine\"");
+    std::fs::write(&manifest, renamed).expect("a write");
+
+    let run = at_home(&["--import-skin", text(&source)]);
+    assert_eq!(run.status.code(), Some(0), "{run:?}");
+    assert!(String::from_utf8_lossy(&run.stdout).contains("installed mine 0.1.0"));
+    assert!(home.join("skins/mine/skin.kdl").is_file());
+
+    let run = at_home(&["--import-skin", text(&source)]);
+    assert_eq!(run.status.code(), Some(1), "{run:?}");
+    assert!(String::from_utf8_lossy(&run.stderr).contains("--replace"));
+    let run = at_home(&["--import-skin", text(&source), "--replace"]);
+    assert_eq!(run.status.code(), Some(0), "{run:?}");
+
+    let run = at_home(&["--list-skins"]);
+    let listed = String::from_utf8_lossy(&run.stdout).into_owned();
+    assert_eq!(listed, "mine\t0.1.0\tDefault\n", "{run:?}");
+
+    let run = at_home(&[
+        "--render-png",
+        text(&dir.path().join("out.png")),
+        "--skin",
+        "mine",
+    ]);
+    assert!(run.status.success(), "{run:?}");
+
+    // A title can't reorder or hide the listing's text.
+    let titled = std::fs::read_to_string(&manifest)
+        .expect("the manifest")
+        .replace("\"Default\"", "\"Good\\u{202e}skin\"");
+    std::fs::write(&manifest, titled).expect("a write");
+    let run = at_home(&["--import-skin", text(&source), "--replace"]);
+    assert_eq!(run.status.code(), Some(0), "{run:?}");
+    let run = at_home(&["--list-skins"]);
+    let listed = String::from_utf8_lossy(&run.stdout).into_owned();
+    assert_eq!(listed, "mine\t0.1.0\tGood skin\n", "{run:?}");
+
+    std::fs::write(source.join("README.md"), "hello").expect("a write");
+    let run = at_home(&["--import-skin", text(&source), "--replace"]);
+    assert_eq!(run.status.code(), Some(1), "{run:?}");
+    assert!(String::from_utf8_lossy(&run.stderr).contains("README.md"));
+
+    // Fictional data has no skin folder of its own.
+    let run = gui(&["--fixture", "--list-skins"]);
+    assert_eq!(run.status.code(), Some(2), "{run:?}");
+}
+
+#[test]
 fn check_skin_exit_codes() {
     let dir = tempfile::tempdir().expect("a temporary folder");
     let good = skin(&dir.path().join("good"), None);
@@ -126,6 +188,8 @@ fn usage_errors_exit_2() {
         &["--check-skin", "a", "--render-png", "b"],
         &["--unknown"],
         &["--skin", "a", "--dev", "b"],
+        &["--replace"],
+        &["--import-skin", "a", "--list-skins"],
     ] {
         let run = gui(args);
         assert_eq!(run.status.code(), Some(2), "{args:?}: {run:?}");

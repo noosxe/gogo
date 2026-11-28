@@ -181,6 +181,13 @@ pub enum Preview<'a> {
 /// Something the shell has to do.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
+    /// The answer to a question the app asked with [`Model::ask`](crate::Model::ask).
+    Answered {
+        /// The ticket `ask` gave.
+        ticket: Ticket,
+        /// What was answered. Cancelling sends nothing.
+        answer: PromptAnswer,
+    },
     /// Draw with another skin: the name `settings.set gui.skin` gave, unchecked.
     SetSkin(String),
     /// Open the command palette.
@@ -381,6 +388,8 @@ enum Asking {
     Planning(Request),
     /// A running job asks.
     Job { job: JobId, reply: PromptReply },
+    /// The app asks for itself: the answer comes back as [`Effect::Answered`].
+    App,
 }
 
 #[derive(Debug)]
@@ -535,11 +544,11 @@ impl SafetyFlow {
                 action: match asking {
                     Asking::Action(call) => Some(call.name()),
                     Asking::Planning(request) => Some(request.call.name()),
-                    Asking::Job { .. } => None,
+                    Asking::Job { .. } | Asking::App => None,
                 },
                 job: match asking {
                     Asking::Job { job, .. } => Some(job),
-                    Asking::Action(_) | Asking::Planning(_) => None,
+                    Asking::Action(_) | Asking::Planning(_) | Asking::App => None,
                 },
             },
             Stage::Planning {
@@ -1115,6 +1124,11 @@ impl SafetyFlow {
                         self.plan(engine, request, None);
                         Outcome::Accepted
                     }
+                    Asking::App => {
+                        self.advance();
+                        self.effects.push(Effect::Answered { ticket, answer });
+                        Outcome::Accepted
+                    }
                     Asking::Job { reply, .. } => {
                         reply.answer(answer);
                         self.advance();
@@ -1163,6 +1177,21 @@ impl SafetyFlow {
             }
             None => Outcome::Ignored,
         }
+    }
+
+    /// Put a question of the app's own on screen, under the same rules as any other:
+    /// one screen at a time, seen before it takes a press, Cancel and Esc free. `None`
+    /// while another screen is up.
+    pub(crate) fn ask(&mut self, spec: PromptSpec) -> Option<Ticket> {
+        if self.modal().is_some() || matches!(spec, PromptSpec::Plan(_)) {
+            return None;
+        }
+        self.show(Stage::Prompt {
+            spec,
+            asking: Asking::App,
+        });
+        self.signal.raise();
+        self.dialog.as_ref().map(|d| d.ticket)
     }
 
     // --- previews ---

@@ -8,6 +8,8 @@
 //!   watched and reloaded; a broken edit keeps the last good skin and shows why.
 //! - `gogo-gui --skin <name>` opens it with an installed skin, for this run only.
 //!   `--skin default` is the way out of an unusable one.
+//! - `gogo-gui --import-skin <folder or zip> [--replace]` installs a skin without a
+//!   window, and `gogo-gui --list-skins` lists the installed ones.
 //! - `gogo-gui --render-png <out>` draws a route without a window, on vello_cpu.
 //! - `gogo-gui --check-skin <dir>` prints what the loader finds.
 //!
@@ -89,6 +91,19 @@ struct Cli {
     #[arg(long, value_name = "NAME", conflicts_with_all = ["dev", "check_skin"])]
     skin: Option<String>,
 
+    /// Install the skin in this folder or zip, without a window.
+    #[arg(long, value_name = "PATH",
+          conflicts_with_all = ["dev", "check_skin", "render_png", "skin", "list_skins"])]
+    import_skin: Option<PathBuf>,
+
+    /// Let `--import-skin` replace an installed skin of the same name.
+    #[arg(long, requires = "import_skin")]
+    replace: bool,
+
+    /// List the installed skins.
+    #[arg(long, conflicts_with_all = ["dev", "check_skin", "render_png", "skin"])]
+    list_skins: bool,
+
     /// Load the skin in this folder and print what is wrong with it.
     #[arg(long, value_name = "DIR")]
     check_skin: Option<PathBuf>,
@@ -141,6 +156,16 @@ fn main() -> ExitCode {
         eprintln!("gogo-gui was built without fictional data (the `fixture` feature)");
         return ExitCode::from(USAGE);
     }
+    if cli.import_skin.is_some() || cli.list_skins {
+        let Some(skins) = skins::Skins::resolve(cli.fixture) else {
+            eprintln!("--fixture has a skin folder only under GOGO_HOME");
+            return ExitCode::from(USAGE);
+        };
+        return match &cli.import_skin {
+            Some(source) => import_skin(&skins, source, cli.replace),
+            None => list_skins(&skins),
+        };
+    }
     if cli.render_png.is_none() && cli.skin.as_deref().is_some_and(|s| s.contains('/')) {
         eprintln!("--skin takes an installed skin's name; --dev draws a folder");
         return ExitCode::from(USAGE);
@@ -162,6 +187,52 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// `--import-skin`: what the window's "Import skin…" does, for a script or a terminal.
+fn import_skin(skins: &skins::Skins, source: &Path, replace: bool) -> ExitCode {
+    let installed = skins.folder.read(source).and_then(|candidate| {
+        let unsynced = skins.folder.install(&candidate, replace)?;
+        Ok((candidate, unsynced))
+    });
+    match installed {
+        Ok((candidate, unsynced)) => {
+            if let Some(e) = unsynced {
+                eprintln!("warning: installed, but the skin folder was not synced: {e}");
+            }
+            for warning in &candidate.warnings {
+                eprintln!("warning: {warning}");
+            }
+            let version = &candidate.manifest.version;
+            println!("installed {} {version}", candidate.name());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            for line in e.lines() {
+                eprintln!("{line}");
+            }
+            if matches!(e, gogo_skin::ImportError::Exists { .. }) {
+                eprintln!("--replace replaces it");
+            }
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `--list-skins`.
+fn list_skins(skins: &skins::Skins) -> ExitCode {
+    for name in skins.folder.names() {
+        match skins.folder.describe(&name).about {
+            // A title is the skin author's: one line, with nothing that hides or
+            // reorders text.
+            Some((title, version)) => {
+                let title = title.replace(gogo_skin::import::is_hidden, " ");
+                println!("{name}\t{version}\t{title}");
+            }
+            None => println!("{name}\t-\t(does not load)"),
+        }
+    }
+    ExitCode::SUCCESS
 }
 
 fn renderer_choice() -> Result<RendererChoice, gogo_ui_shell::UnknownRenderer> {

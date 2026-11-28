@@ -12,7 +12,7 @@ use crate::call::{Call, Invocation};
 use crate::error::ErrorView;
 use crate::failures::Failures;
 use crate::jobs::{JobId, JobTable};
-use crate::prompt::PromptAnswer;
+use crate::prompt::{PromptAnswer, PromptSpec};
 use crate::safety::{
     Effect, Engine, InputEvent, Modal, Outcome, Press, Preview, Route, SafetyFlow, Ticket, route,
 };
@@ -330,6 +330,13 @@ impl<B: Backend> Model<B> {
     pub fn answer(&mut self, ticket: Ticket, answer: PromptAnswer, press: Press) -> Outcome {
         let (flow, mut engine) = self.split();
         flow.answer(&mut engine, ticket, answer, press)
+    }
+
+    /// Ask a question of the app's own, such as which file to read. No skin can call
+    /// this. Its answer arrives as [`Effect::Answered`] with the ticket given here;
+    /// `None` while another screen is up.
+    pub fn ask(&mut self, spec: PromptSpec) -> Option<Ticket> {
+        self.flow.ask(spec)
     }
 
     /// Cancel a screen or preview, or dismiss an error (S8).
