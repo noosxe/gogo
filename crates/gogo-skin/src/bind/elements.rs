@@ -56,6 +56,7 @@ impl<'a> Binder<'a> {
         if let Some(w) = n.prop("when")
             && !self.truthy(&w.arg.val, w.arg.span)?
         {
+            self.trace_left_out(n, parent, &w.arg.val, w.arg.span);
             return Ok(());
         }
         self.step(n.span)?;
@@ -66,9 +67,11 @@ impl<'a> Binder<'a> {
             "each" => self.each(n, parent, &key, cx),
             "switch" => self.switch(n, parent, &key, cx),
             "use" => self.use_(n, parent, &key, cx),
-            _ => self
-                .build(n, parent, &key, cx)
-                .and_then(|id| self.finish(n, id)),
+            _ => self.build(n, parent, &key, cx).and_then(|id| {
+                self.finish(n, id)?;
+                self.trace_node(n, id);
+                Ok(())
+            }),
         };
         self.leave();
         r
@@ -127,12 +130,18 @@ impl<'a> Binder<'a> {
         };
         // Data can't fail a valid skin, so a long list is cut, silently (design 27 §8).
         let list = self.items(&p.arg.val, p.arg.span, "each")?;
+        if list.is_empty() {
+            self.trace_left_out(n, parent, &p.arg.val, p.arg.span);
+        }
+        let count = list.len();
         for (k, item) in list.into_iter().enumerate() {
             self.step(n.span)?;
             let mark = self.vars.len();
             self.vars.push(Var::plain(var, item));
             let path = format!("{key}#{k}");
+            self.trace_within(n, || format!("each {var}, item {} of {count}", k + 1));
             let r = self.children(&n.children, parent, &path, cx);
+            self.trace_leave();
             self.vars.truncate(mark);
             r?;
         }
@@ -186,8 +195,19 @@ impl<'a> Binder<'a> {
             .find(|c| c.name == "case" && c.plain_arg(0) == Some(v.as_str()))
             .or_else(|| n.children.iter().find(|c| c.name == "else"));
         match hit {
-            Some(c) => self.children(&c.children, parent, key, cx),
-            None => Ok(()),
+            Some(c) => {
+                self.trace_within(c, || match c.plain_arg(0) {
+                    Some(word) => format!("case \"{word}\""),
+                    None => "else".to_owned(),
+                });
+                let r = self.children(&c.children, parent, key, cx);
+                self.trace_leave();
+                r
+            }
+            None => {
+                self.trace_left_out(n, parent, &a.val, a.span);
+                Ok(())
+            }
         }
     }
 
@@ -244,6 +264,7 @@ impl<'a> Binder<'a> {
             };
             params.push(var);
         }
+        self.trace_within(n, || format!("use \"{name}\""));
         // The body sees its parameters and the app's data, not the caller's variables.
         let saved_vars = std::mem::replace(&mut self.vars, params);
         let saved_code = std::mem::replace(&mut self.code, code);
@@ -253,6 +274,7 @@ impl<'a> Binder<'a> {
         let r = self.children(&comp.body, parent, key, cx);
         self.code = saved_code;
         self.vars = saved_vars;
+        self.trace_leave();
         r?;
         if let Some(name) = self.prop_text(n, "id")?
             && let Some(&first) = self.tree.children(parent).get(before)
@@ -1360,7 +1382,9 @@ impl<'a> Binder<'a> {
             field: None,
         };
         let inside = std::mem::replace(&mut self.in_outlet, true);
+        self.trace_within(n, || format!("outlet, route \"{current}\""));
         let r = self.children(&r.children, id, key, &cx2);
+        self.trace_leave();
         self.in_outlet = inside;
         self.outlets += 1;
         self.restore_route(saved);
@@ -1492,6 +1516,8 @@ impl<'a> Binder<'a> {
             rn.layout.shrink = 0.0;
         }
         let rid = self.add(table, &rkey, rn, at)?;
+        // For the inspector, a row is the table's and a cell its column's.
+        self.trace_node(n, rid);
         for (j, col) in cols.iter().enumerate() {
             let mono = self.prop(col, "mono")?.is_some_and(|v| v.truthy());
             let cl = self.layers("table-cell", None, &[])?;
@@ -1518,6 +1544,7 @@ impl<'a> Binder<'a> {
                 field: None,
             };
             self.children(&col.children, cid, &ckey, &cx)?;
+            self.trace_node(col, cid);
         }
         Ok(())
     }

@@ -776,6 +776,14 @@ Binding evaluates; it parses nothing (§7). A bound route is an IR tree (design 
 the tables behind its ids: each action of the tree with its arguments, and each app widget
 with the skin's variants and part styles.
 
+- **Provenance.** A traced bind (`bind_traced`, the dev mode's inspector, design 25 §8)
+  also records, for each node an element made (a table's rows and cells included): the element, its file and line, whether the
+  text is the default skin's, the repeats, components and cases around it, `style=`, each
+  expression with what it gave, the skin's names in scope and the action with its
+  arguments; and, on the parent, the children a `when`, an empty `each` or a `switch` left
+  out. Values are short text for display: a list shows its length, a record its field
+  names, a masked value its mask. The tree is the same as an ordinary bind's, and an
+  ordinary bind records nothing.
 - **Keys.** Each node has a stable path id: `root/row.0/button.2`, with the element's
   index among its siblings, `each.1#3` for the fourth item of a repeat, and `use.4` for a
   component. The same skin and the same data give the same keys, and a `when` that is
